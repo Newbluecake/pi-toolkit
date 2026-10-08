@@ -144,6 +144,13 @@ export interface AgentCard {
    * never a security boundary, §7.1 layer 3). */
   runTranscript?: boolean;
   runTranscriptLan?: boolean;
+  /** web-hub-steer-recall plan §2.3 S3: the agent currently advertises `hold.v1` (derived from
+   *  its hello caps, same pattern as `control`) — busy web steer/followUp may be held agent-side
+   *  and are recallable through `POST /api/cmd {op:"recall"}`. Absent ⇒ the agent never holds
+   *  (feature off / pre-feature build): the UI hides every recall affordance and renders the
+   *  queue exactly as before. The hub re-checks the live caps on every recall request anyway
+   *  (requiredCaps("recall") = [cmd.v1, hold.v1]) — this field is UX gating, not admission. */
+  hold?: true;
 }
 
 export interface HistoryPayload {

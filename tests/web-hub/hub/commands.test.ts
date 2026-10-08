@@ -262,6 +262,126 @@ describe("commands router: audit (U7 \u2014 no body content)", () => {
   });
 });
 
+function recallFrame(over: Partial<CmdFrame> = {}): CmdFrame {
+  return {
+    t: "cmd",
+    rid: "",
+    id: "r".repeat(16),
+    deadlineMs: 5_000,
+    origin: origin(),
+    cmd: { op: "recall", target: "t".repeat(16) },
+    ...over,
+  };
+}
+
+// web-hub-steer-recall plan §2.3 S4 / §5.8: the recall op's hub-side contract — cap admission
+// (cmd.v1 + hold.v1), the exact forwarded frame shape, and the typed-result boundary
+// (RecallResultDataSchema + 48 KiB byte cap) on the execution, LRU-replay and queryOnly paths.
+describe("commands router: recall op (steer-recall §2.3 S4)", () => {
+  it("missing hold.v1 ⇒ E_UNSUPPORTED, no frame sent, no LRU entry", async () => {
+    const h = harness(["ev.v1", "cmd.v1"]); // has cmd.v1, lacks hold.v1
+    const result = await h.router.request(recallFrame(), h.agentKey);
+    expect(result).toMatchObject({ ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "none" });
+    expect(h.conn.sent.filter((f) => (f as { t: string }).t === "cmd")).toHaveLength(0);
+    // a retry with the same id reaches the agent fresh once the agent re-hellos WITH the cap
+    h.registry.register(hello({ caps: ["ev.v1", "cmd.v1", "hold.v1"] }), h.conn);
+    const p2 = h.router.request(recallFrame(), h.agentKey);
+    const sent = h.conn.sent.filter((f) => (f as { t: string }).t === "cmd").at(-1) as { rid: string };
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: sent.rid,
+      id: recallFrame().id,
+      ok: true,
+      data: { op: "recall", outcome: "too_late" },
+    } as never);
+    await expect(p2).resolves.toMatchObject({ ok: true, data: { outcome: "too_late" } });
+  });
+
+  it("with hold.v1: forwards EXACTLY {op:'recall', target}; a valid result passes through and caches", async () => {
+    const h = harness(["ev.v1", "cmd.v1", "hold.v1"]);
+    const frame = recallFrame();
+    const p = h.router.request(frame, h.agentKey);
+    const sent = h.conn.sent.filter((f) => (f as { t: string }).t === "cmd").at(-1) as CmdFrame;
+    expect(sent.cmd).toEqual({ op: "recall", target: "t".repeat(16) });
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: sent.rid,
+      id: frame.id,
+      ok: true,
+      data: { op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "full body" },
+    } as never);
+    await expect(p).resolves.toMatchObject({
+      ok: true,
+      data: { op: "recall", outcome: "recalled", from: "held", text: "full body" },
+    });
+    // same id + same payload ⇒ LRU dup replays the SAME typed result, no re-send
+    const retry = await h.router.request(frame, h.agentKey);
+    expect(retry).toMatchObject({ ok: true, dup: true, data: { outcome: "recalled", text: "full body" } });
+    expect(h.conn.sent.filter((f) => (f as { t: string }).t === "cmd")).toHaveLength(1);
+  });
+
+  it("a result failing RecallResultDataSchema is rewritten to E_UNSUPPORTED effect:'unknown' and cached that way", async () => {
+    const h = harness(["ev.v1", "cmd.v1", "hold.v1"]);
+    const frame = recallFrame();
+    const p = h.router.request(frame, h.agentKey);
+    const sent = h.conn.sent.filter((f) => (f as { t: string }).t === "cmd").at(-1) as CmdFrame;
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: sent.rid,
+      id: frame.id,
+      ok: true,
+      data: { op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "x", extra: 1 },
+    } as never);
+    const result = await p;
+    expect(result).toMatchObject({ ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "unknown" });
+    // non-retryable ⇒ cached as done; a retry replays the REWRITTEN failure
+    const retry = await h.router.request(frame, h.agentKey);
+    expect(retry).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "unknown" });
+    expect(h.conn.sent.filter((f) => (f as { t: string }).t === "cmd")).toHaveLength(1);
+  });
+
+  it("a recalled text over the 48 KiB byte cap is rewritten the same way (boundary included, one byte over rejected)", async () => {
+    const h = harness(["ev.v1", "cmd.v1", "hold.v1"]);
+    const oversized = "x".repeat(48 * 1024 + 1);
+    const frame = recallFrame();
+    const p = h.router.request(frame, h.agentKey);
+    const sent = h.conn.sent.filter((f) => (f as { t: string }).t === "cmd").at(-1) as CmdFrame;
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: sent.rid,
+      id: frame.id,
+      ok: true,
+      data: { op: "recall", outcome: "recalled", from: "held", deliver: "followUp", text: oversized },
+    } as never);
+    await expect(p).resolves.toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "unknown" });
+  });
+
+  it("queryOnly: an embedded recall result is validated too — a bad one is rewritten inside the query body", async () => {
+    const h = harness(["ev.v1", "cmd.v1", "hold.v1"]);
+    const frame = recallFrame({ queryOnly: true });
+    const p = h.router.request(frame, h.agentKey);
+    const sent = h.conn.sent.filter((f) => (f as { t: string }).t === "cmd").at(-1) as CmdFrame;
+    expect(sent.queryOnly).toBe(true);
+    h.registry.onFrame(h.agentKey, {
+      t: "cmd_result",
+      rid: sent.rid,
+      id: frame.id,
+      ok: true,
+      data: {
+        op: "query",
+        state: "ok",
+        result: { ok: true, data: { op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "" } },
+      },
+    } as never);
+    // text:"" fails the schema's minLength — the embedded result is rewritten, the query envelope stays
+    const result = await p;
+    expect(result).toMatchObject({
+      ok: true,
+      data: { op: "query", state: "ok", result: { ok: false, code: "E_UNSUPPORTED", effect: "unknown" } },
+    });
+  });
+});
+
 describe("commands router: output byte budget (v2.1 \u00a74.9)", () => {
   it("truncates an oversized CommandOutputWire before caching/returning it", async () => {
     const h = harness();

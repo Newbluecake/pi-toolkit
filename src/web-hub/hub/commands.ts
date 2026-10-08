@@ -21,6 +21,7 @@
  * `agentKey` to send it to.
  */
 import { createHash } from "node:crypto";
+import { Value } from "@sinclair/typebox/value";
 import type {
   CmdArgs,
   CmdData,
@@ -31,6 +32,7 @@ import type {
   CmdResultBody,
   CmdResultFrame,
 } from "../protocol/messages.js";
+import { RECALL_TEXT_MAX_BYTES, RecallResultDataSchema } from "../protocol/messages.js";
 import { auditControl, type ControlAuditRecord } from "./audit.js";
 import type { CommandRouter } from "./ports.js";
 import type { HubLog } from "./ports.js";
@@ -86,7 +88,9 @@ function principalOf(origin: CmdOrigin): string {
 }
 
 /** §3.1 compat matrix: every op needs `cmd.v1`; `dialog_answer`/`dialog_cancel` additionally need
- * `dialog.v1`; `command` additionally needs `command.v1`. */
+ * `dialog.v1`; `command` additionally needs `command.v1`; steer-recall plan §2.3 S4: `recall`
+ * additionally needs `hold.v1` (an agent that never holds has nothing to recall — the op is
+ * answered locally, `E_UNSUPPORTED`, and NO frame is ever sent). */
 function requiredCaps(op: CmdOp): readonly string[] {
   switch (op) {
     case "dialog_answer":
@@ -94,6 +98,8 @@ function requiredCaps(op: CmdOp): readonly string[] {
       return ["cmd.v1", "dialog.v1"];
     case "command":
       return ["cmd.v1", "command.v1"];
+    case "recall":
+      return ["cmd.v1", "hold.v1"];
     default:
       return ["cmd.v1"];
   }
@@ -203,6 +209,45 @@ function cmdFields(
   }
 }
 
+/** steer-recall plan §2.3 S4 / §5.8: the recall typed-result boundary. A `recall` op's success
+ * payload must satisfy `RecallResultDataSchema` AND its `text` (the full recalled body) must stay
+ * within RECALL_TEXT_MAX_BYTES — a misbehaving/future agent that answers anything else gets its
+ * result rewritten to a non-retryable `E_UNSUPPORTED` with `effect:"unknown"` (the recall may in
+ * fact have happened — never claim `none`) BEFORE it is cached in the LRU or returned. Applied on
+ * the execution path (forward), the queryOnly embedded result, and the late-result handler (a
+ * late reply lands in the same LRU entries a retry replays from — same boundary). */
+function badRecallResult(): CmdResultBody {
+  return { ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "unknown", message: "bad recall result" };
+}
+
+function recallDataOk(data: unknown): boolean {
+  if (!Value.Check(RecallResultDataSchema, data)) return false;
+  const text = (data as { text?: unknown }).text;
+  return typeof text !== "string" || Buffer.byteLength(text, "utf8") <= RECALL_TEXT_MAX_BYTES;
+}
+
+function sanitizeRecallBody(frame: CmdFrame, body: CmdResultBody): CmdResultBody {
+  if (frame.cmd.op !== "recall" || !body.ok) return body;
+  return recallDataOk(body.data) ? body : badRecallResult();
+}
+
+function sanitizeRecallEmbedded(frame: CmdFrame, body: CmdResultBody): CmdResultBody {
+  if (frame.cmd.op !== "recall" || !body.ok) return body;
+  if (body.data.op === "query") {
+    const result = body.data.result;
+    if (result === undefined || !result.ok) return body;
+    return recallDataOk(result.data)
+      ? body
+      : {
+          ...body,
+          data: { ...body.data, result: badRecallResult() },
+        };
+  }
+  // a non-envelope ok answer to a queryOnly recall (agent contract says the query envelope, but
+  // the boundary holds either way) — same check as the execution path
+  return recallDataOk(body.data) ? body : badRecallResult();
+}
+
 export function createCommandRouter(deps: { registry: Registry; log: HubLog; now: () => number }): CommandRouter {
   const { registry, log, now } = deps;
   const lru = new Map<string, LruEntry>();
@@ -236,10 +281,12 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
             effect: frame.effect,
             ...(frame.message === undefined ? {} : { message: frame.message }),
           };
+      // steer-recall §5.8: a late recall reply lands in the same "unknown" entry a retry will
+      // replay from — apply the identical typed-result boundary before caching it.
       entry.state = "done";
-      entry.result = body;
+      entry.result = entry.op === "recall" && body.ok && !recallDataOk(body.data) ? badRecallResult() : body;
       entry.updatedAt = now();
-      flushWaiters(entry, body, undefined);
+      flushWaiters(entry, entry.result, undefined);
     }
   });
 
@@ -304,7 +351,7 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
     let body: CmdResultBody;
     try {
       const reply = await registry.request<CmdResultFrame>(agentKey, { ...outFrame, t: "cmd" }, waitMs);
-      body = capOutputBudget(toBody(reply));
+      body = sanitizeRecallBody(frame, capOutputBudget(toBody(reply)));
     } catch (err) {
       decInflight();
       entry.state = "unknown";
@@ -401,7 +448,7 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
       });
       throw err;
     }
-    const body = toBody(reply);
+    const body = sanitizeRecallEmbedded(frame, toBody(reply));
     if (body.ok && body.data.op === "query") {
       if ((body.data.state === "ok" || body.data.state === "failed") && body.data.result !== undefined) {
         lru.set(key, {

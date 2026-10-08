@@ -21,6 +21,7 @@ import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import { previewProcFdAvailable } from "../../../src/web-hub/hub/preview/fs.js";
 import {
   DIALOG_BG_HUB_CAPS,
+  HOLD_HUB_CAPS,
   P2_HUB_CAPS,
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
@@ -44,7 +45,7 @@ afterEach(async () => {
  * no `lan.v1`), then the frozen cap groups. fleet-drawer F3b appended RUNTX_HUB_CAPS after
  * DIALOG_BG, ahead of any preview tail — the baseline tracks the current composition. */
 function baselineCaps(): string[] {
-  return ["ctl.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...RUNTX_HUB_CAPS];
+  return ["ctl.v1", ...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...HOLD_HUB_CAPS, ...RUNTX_HUB_CAPS];
 }
 
 interface FakeFrontend extends FrontendFactory {

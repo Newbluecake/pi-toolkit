@@ -6,6 +6,7 @@ import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/ag
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
 import {
   DIALOG_BG_HUB_CAPS,
+  HOLD_HUB_CAPS,
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
   UPLOAD_HUB_CAPS,
@@ -112,7 +113,7 @@ describe("agent-server handshake", () => {
       pingMs: TIMING.pingMs,
       leaseMs: TIMING.staleMs,
       http: { port: 7878 },
-      caps: [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...RUNTX_HUB_CAPS],
+      caps: [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...HOLD_HUB_CAPS, ...RUNTX_HUB_CAPS],
     });
     expect(registry.list()).toHaveLength(1);
     expect(agentServer.connectionCount()).toBe(1);

@@ -118,6 +118,14 @@ export const PREVIEW_ABS_HUB_CAP = "preview.abs.v1";
 export const RUNTX_AGENT_CAPS = ["runtx.v1", "runtx.lan.v1"] as const;
 export const RUNTX_HUB_CAPS = ["runtx.v1"] as const;
 
+/** web-hub-steer-recall plan §2.3 S1. Agent advertises iff holdWired(settings) (hold.ts); the hub
+ *  advertises on BOTH cap surfaces (HubInfo.caps / hello_ack.caps), same rule as DIALOG_BG_HUB_CAPS.
+ *  The agent only ever HOLDS while `holdCap()` — link live ∧ hello_ack.caps ∋ hold.v1 — is true at
+ *  that instant (pure read, no binding); it never needs the cap to DELIVER what it already holds. */
+export const HOLD_CAP = "hold.v1";
+export const HOLD_AGENT_CAPS = ["hold.v1"] as const;
+export const HOLD_HUB_CAPS = ["hold.v1"] as const;
+
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {
   dialogs: "dialog.v1",

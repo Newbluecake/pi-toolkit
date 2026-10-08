@@ -31,6 +31,7 @@ import {
 } from "../../../src/web-hub/protocol/rotate-intent.js";
 import {
   DIALOG_BG_HUB_CAPS,
+  HOLD_HUB_CAPS,
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
   UPLOAD_HUB_CAPS,
@@ -158,6 +159,7 @@ describe("startHub + defaultLanAssembly (plan \u00a71.4, \u00a78) \u2014 config.
       ...P2_HUB_CAPS,
       ...UPLOAD_HUB_CAPS,
       ...DIALOG_BG_HUB_CAPS,
+      ...HOLD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
     ]);
 
@@ -336,6 +338,7 @@ skipIfNoSqlite(
         ...P2_HUB_CAPS,
         ...UPLOAD_HUB_CAPS,
         ...DIALOG_BG_HUB_CAPS,
+        ...HOLD_HUB_CAPS,
         ...RUNTX_HUB_CAPS,
       ]);
 

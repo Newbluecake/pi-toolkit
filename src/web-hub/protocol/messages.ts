@@ -287,6 +287,29 @@ export interface QuotaWire {
   providers: QuotaProviderWire[];
 }
 
+/**
+ * web-hub-steer-recall plan §2.3 S2: why a held web steer/followUp is sitting in the agent-side
+ * buffer instead of having been handed to pi (recallable — `POST /api/cmd {op:"recall"}` returns
+ * the full text). `text` is the projection clip (≤ HELD_CLIP_CHARS UTF-16 units, clipped on a
+ * code-point boundary); the full text only ever comes back through a recall result. `sessionId`
+ * scopes the row: held rows are always the CURRENT session's; returned rows may carry an older
+ * session's id (the projection spans every returned item of the process) — the UI's Y2 merge
+ * scope is `{agentKey, sessionId, heldEpoch}`.
+ */
+export type HeldReturnReason = "aborted" | "session" | "reload" | "stale";
+export const HELD_WIRE_MAX_ITEMS = 32;
+export const HELD_CLIP_CHARS = 200;
+export const RECALL_TEXT_MAX_BYTES = 48 * 1024;
+export interface HeldItemWire {
+  cmdId: string;
+  text: string; // ≤ HELD_CLIP_CHARS UTF-16 units, clipped on a code-point boundary
+  deliver: "steer" | "followUp";
+  state: "held" | "returned";
+  reason?: HeldReturnReason; // present iff state === "returned"
+  sessionId: string;
+  at: number;
+}
+
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -315,6 +338,21 @@ export interface StatusInfo {
    *  `bashJobs`. Absent = no credentials / quota feature off / `webHub.quota` off / not yet
    *  sampled (byte-equal to the pre-feature shape). Decode side stays open-ended (same as `todo`). */
   quota?: QuotaWire;
+  /** web-hub-steer-recall plan §2.3 S2: held (recallable) + returned web steer/followUp rows
+   *  (≤ HELD_WIRE_MAX_ITEMS), riding the same status slot lifecycle as `todo`/`worktrees`. Absent
+   *  ⇔ empty / steerRecall off / holdWired false — byte-equal to the pre-feature shape. Deliberately
+   *  NOT gated on holdCap() (plan D3): the StatusInfoSchema is open-ended, so an old hub passes the
+   *  frame through untouched and the browser keeps its `unavailable` snapshot across disconnects. */
+  held?: HeldItemWire[];
+  /** Monotonic per agent process (bumps on every buffer mutation); present iff `held` present.
+   *  Only comparable inside one merge scope — see `heldEpoch`. */
+  heldRev?: number;
+  /** steer-recall R-C/Y2 merge scope: MODULE_INSTANCE of the publishing activate() (same value as
+   *  CtlFrame.epoch and the hello epoch on the AgentCard). The UI only accepts a `status.held`
+   *  snapshot whose `heldEpoch` equals the CURRENT AgentCard.epoch (and whose rows match the current
+   *  sessionId); a mismatched scope is dropped without comparing revs (epochs are random, not
+   *  ordered). Present iff `held` present. */
+  heldEpoch?: string;
 }
 
 export interface FleetRowWire {
@@ -398,7 +436,7 @@ export interface SnapshotReplyBody {
 // P2 control-plane frames (§3.2). These are additive to the P1 wire surface.
 // ---------------------------------------------------------------------------
 export type CmdOp =
-  "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "dialog_answer" | "dialog_cancel" | "command";
+  "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "dialog_answer" | "dialog_cancel" | "command" | "recall";
 
 export interface CmdOrigin {
   listener: "loopback" | "lan";
@@ -432,7 +470,8 @@ export type CmdArgs =
   | { op: "abort_subagent"; runId: string }
   | { op: "dialog_answer"; dialogId: string; epoch: string; answers: DialogAnswerWire[] }
   | { op: "dialog_cancel"; dialogId: string; epoch: string }
-  | { op: "command"; name: string; args: string; confirm?: true; deliver?: "steer" | "followUp"; expect?: CmdExpect };
+  | { op: "command"; name: string; args: string; confirm?: true; deliver?: "steer" | "followUp"; expect?: CmdExpect }
+  | { op: "recall"; target: string };
 export interface CommandOutputEntry {
   kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
   level?: "info" | "warning" | "error";
@@ -446,7 +485,15 @@ export interface CommandOutputWire {
   truncated?: { droppedEntries: number; droppedBytes: number };
   needsTerminal?: true;
 }
-export type PromptDelivery = "observed" | "unobserved";
+export type PromptDelivery = "observed" | "unobserved" | "held";
+/** web-hub-steer-recall plan §2.3 S2 / §5.8: the typed result of a `recall` op. `text` is the
+ *  FULL recalled message body (≤ RECALL_TEXT_MAX_BYTES, hub-validated) — the only channel that
+ *  ever returns the untruncated text. `too_late` never distinguishes WHY (already handed to pi /
+ *  recalled by another tab — ruling Q5); `from` tells the UI whether the row was still `held` or
+ *  already `returned` when the recall landed. */
+export type RecallResultData =
+  | { op: "recall"; outcome: "recalled"; from: "held" | "returned"; deliver: "steer" | "followUp"; text: string }
+  | { op: "recall"; outcome: "too_late" };
 export type CmdData =
   | { op: "prompt"; delivery: PromptDelivery; behavior?: "idle" | "steer" | "followUp" }
   | { op: "abort"; wasBusy: boolean }
@@ -460,7 +507,8 @@ export type CmdData =
       captured?: boolean;
       output?: CommandOutputWire;
     }
-  | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody };
+  | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody }
+  | RecallResultData;
 export type CmdErrorCode =
   | "E_UNSUPPORTED"
   | "E_STALE_CTX"
@@ -539,9 +587,12 @@ export interface CtlItemWire {
     | "ok"
     | "failed"
     | "late_ok"
-    | "late_failed";
+    | "late_failed"
+    | "held"
+    | "recalled"
+    | "returned";
   behavior?: "idle" | "steer" | "followUp";
-  reason?: "unobserved" | "not-started" | "not-delivered" | "session" | "timeout";
+  reason?: "unobserved" | "not-started" | "not-delivered" | "session" | "timeout" | "aborted" | "reload" | "stale";
   code?: CmdErrorCode;
   at: number;
   updatedAt: number;
@@ -927,6 +978,26 @@ export const QuotaWireSchema = Type.Object(
   },
   { additionalProperties: true },
 );
+// web-hub-steer-recall plan §2.3 S2': the held-row body rides the open StatusFrameSchema (same
+// posture as todo/worktrees/bashJobs/quota — an older hub must pass the newer frame through), but
+// the nested row itself is pinned (additionalProperties:false, same as QueueItemSchema/TodoTask):
+// the row set is small, frozen by the plan, and a typo'd key means a broken projection, not a
+// forward-compat evolution. maxItems 32 = HELD_WIRE_MAX_ITEMS; text maxLength 200 counts UTF-16
+// units, matching the projection's HELD_CLIP_CHARS clip.
+const HeldItemSchema = Type.Object(
+  {
+    cmdId: Type.String({ pattern: "^[A-Za-z0-9_-]{16,64}$" }),
+    text: Type.String({ maxLength: 200 }),
+    deliver: Type.Union([Type.Literal("steer"), Type.Literal("followUp")]),
+    state: Type.Union([Type.Literal("held"), Type.Literal("returned")]),
+    reason: Type.Optional(
+      Type.Union([Type.Literal("aborted"), Type.Literal("session"), Type.Literal("reload"), Type.Literal("stale")]),
+    ),
+    sessionId: Type.String(),
+    at: Type.Number(),
+  },
+  { additionalProperties: false },
+);
 const StatusInfoSchema = Type.Object({
   leafId: Type.Union([Type.String(), Type.Null()]),
   busy: Type.Boolean(),
@@ -942,6 +1013,10 @@ const StatusInfoSchema = Type.Object({
   worktrees: Type.Optional(WorktreesWireSchema),
   bashJobs: Type.Optional(BashJobsWireSchema),
   quota: Type.Optional(QuotaWireSchema),
+  // web-hub-steer-recall plan §2.3 S2'
+  held: Type.Optional(Type.Array(HeldItemSchema, { maxItems: 32 })),
+  heldRev: Type.Optional(Type.Integer({ minimum: 0 })),
+  heldEpoch: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
 });
 
 const FleetRowSchema = Type.Object({
@@ -1216,6 +1291,13 @@ const CommandArgsSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+// web-hub-steer-recall plan §2.3 S2': recall joins the CLOSED CmdSchema union — the target is a
+// cmdId (same pattern as the frame id), and NOTHING else may ride the op (no expect, no text:
+// recall identifies by id only; the full text comes back in the typed result).
+const RecallArgsSchema = Type.Object(
+  { op: Type.Literal("recall"), target: Type.String({ pattern: "^[A-Za-z0-9_-]{16,64}$" }) },
+  { additionalProperties: false },
+);
 const CmdSchema = Type.Object(
   {
     t: Type.Literal("cmd"),
@@ -1233,11 +1315,30 @@ const CmdSchema = Type.Object(
       DialogAnswerArgsSchema,
       DialogCancelArgsSchema,
       CommandArgsSchema,
+      RecallArgsSchema,
     ]),
   },
   { additionalProperties: false },
 );
 const CmdDataSchema = Type.Unknown();
+// web-hub-steer-recall plan §2.3 S2' / §5.8: recall is the one op whose success payload the HUB
+// re-validates (hub/commands.ts, S4) — `CmdDataSchema` stays `Type.Unknown()` (cmd_result remains
+// generic), this schema is the typed boundary applied on the recall execution/queryOnly paths.
+// `text` carries the FULL recalled body; the hub additionally enforces the 48 KiB byte cap
+// (RECALL_TEXT_MAX_BYTES) before trusting it.
+export const RecallResultDataSchema = Type.Union([
+  Type.Object(
+    {
+      op: Type.Literal("recall"),
+      outcome: Type.Literal("recalled"),
+      from: Type.Union([Type.Literal("held"), Type.Literal("returned")]),
+      deliver: Type.Union([Type.Literal("steer"), Type.Literal("followUp")]),
+      text: Type.String({ minLength: 1 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ op: Type.Literal("recall"), outcome: Type.Literal("too_late") }, { additionalProperties: false }),
+]);
 const CmdResultSchema = Type.Union([
   Type.Object(
     {
@@ -1355,6 +1456,7 @@ const CtlItemSchema = Type.Object(
       Type.Literal("dialog_answer"),
       Type.Literal("dialog_cancel"),
       Type.Literal("command"),
+      Type.Literal("recall"),
     ]),
     state: Type.Union([
       Type.Literal("dispatched"),
@@ -1369,6 +1471,9 @@ const CtlItemSchema = Type.Object(
       Type.Literal("failed"),
       Type.Literal("late_ok"),
       Type.Literal("late_failed"),
+      Type.Literal("held"),
+      Type.Literal("recalled"),
+      Type.Literal("returned"),
     ]),
     behavior: Type.Optional(Type.Union([Type.Literal("idle"), Type.Literal("steer"), Type.Literal("followUp")])),
     reason: Type.Optional(
@@ -1378,6 +1483,9 @@ const CtlItemSchema = Type.Object(
         Type.Literal("not-delivered"),
         Type.Literal("session"),
         Type.Literal("timeout"),
+        Type.Literal("aborted"),
+        Type.Literal("reload"),
+        Type.Literal("stale"),
       ]),
     ),
     code: Type.Optional(Type.String()),

@@ -656,6 +656,85 @@ describe("registry: run-transcript frames (fleet-drawer §5.3, F3b)", () => {
 });
 
 // web-hub-delete-session plan v2 §2.3/§7.1: `remove()`'s four branches.
+// web-hub-steer-recall plan §4.1 (§2.3 S4) + v4.3 Y7.2: AgentCard.hold derivation and the
+// claiming-reconnect epoch refresh. Y7.2's wire contract (decided with the architect): an
+// epoch-changing reclaim of a NON-stale (claiming/live) record publishes `agent_up` (the existing
+// full-card event, carrying the NEW epoch) BEFORE the `gap` — matching the stale path's
+// card-then-gap order so the UI holds the new epoch before it re-snapshots; gated on the agent's
+// NEW hello caps advertising hold.v1, so agents with the feature off keep the gap-only wire
+// byte-for-byte. The stale branch still publishes its single agent_up unchanged (never a double).
+describe("registry: steer-recall card.hold + claiming-reconnect epoch refresh (Y7.2)", () => {
+  const HOLD_CAPS = ["ev.v1", "cmd.v1", "hold.v1"] as const;
+
+  it("card.hold is true iff hello caps include hold.v1; a re-hello dropping the cap removes the field (S4)", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello({ caps: [...HOLD_CAPS] }), conn);
+    expect(h.reg.get(agentKey)!.hold).toBe(true);
+    // re-hello without hold.v1 (steerRecall turned off + /reload): the card must not carry hold
+    h.reg.register(hello({ caps: ["ev.v1", "cmd.v1"] }), conn);
+    expect("hold" in h.reg.get(agentKey)!).toBe(false);
+    expect("hold" in h.reg.list().find((v) => v.agentKey === agentKey)!).toBe(false);
+  });
+
+  it("Y7.2: claiming reconnect + changed epoch + hold.v1 ⇒ agent_up carries the NEW epoch, published before gap", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-old" }), conn);
+    h.reg.onClose(agentKey, false); // socket dropped, no bye ⇒ claiming window
+    h.events.length = 0;
+    h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-new" }), fakeConn());
+    expect(types(h.events)).toEqual(["agent_up", "gap"]); // card FIRST, then the resnapshot signal
+    const up = h.events[0]!;
+    expect(up.type === "agent_up" && up.agent.epoch).toBe("e-new"); // the refresh event carries the new epoch
+    expect(h.reg.get(agentKey)!.epoch).toBe("e-new");
+  });
+
+  it("Y7.2 control: without hold.v1 a claiming epoch-change reclaim publishes ONLY gap (pre-feature wire, unchanged)", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello({ caps: ["ev.v1", "cmd.v1"], epoch: "e-old" }), conn);
+    h.reg.onClose(agentKey, false);
+    h.events.length = 0;
+    h.reg.register(hello({ caps: ["ev.v1", "cmd.v1"], epoch: "e-new" }), fakeConn());
+    expect(types(h.events)).toEqual(["gap"]);
+  });
+
+  it("Y7.2: stale reconnect + changed epoch (even with hold.v1) ⇒ exactly ONE agent_up, then gap", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-old" }), conn);
+    h.reg.onClose(agentKey, false);
+    h.clock.t += TIMING.detachGraceMs + 1;
+    h.reg.tick(h.clock.t); // ⇒ stale
+    h.events.length = 0;
+    h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-new" }), fakeConn());
+    expect(types(h.events)).toEqual(["agent_up", "gap"]);
+    expect(h.events.filter((e) => e.type === "agent_up")).toHaveLength(1); // never a double
+  });
+
+  it("Y7.2: a claiming reconnect with the SAME epoch stays silent (no agent_up, no gap)", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-same" }), conn);
+    h.reg.onClose(agentKey, false);
+    h.events.length = 0;
+    h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-same" }), fakeConn());
+    expect(types(h.events)).toEqual([]); // ordinary silent rebind
+  });
+
+  it("Y7.2: a LIVE reclaim (old socket replaced) with a changed epoch also refreshes the card when hold.v1 is advertised", () => {
+    const h = harness();
+    const conn = fakeConn();
+    h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-old" }), conn);
+    h.events.length = 0;
+    // same agentId, different socket, new epoch while still live (e.g. a fast /reload handover)
+    h.reg.register(hello({ caps: [...HOLD_CAPS], epoch: "e-new" }), fakeConn());
+    expect(types(h.events)).toEqual(["agent_up", "gap"]);
+    expect(conn.closedWith).toContain("reclaimed");
+  });
+});
+
 describe("registry.remove (web-hub-delete-session plan v2 §2.3)", () => {
   it("live, allowConnected:false ⇒ 'online', record untouched, no agent_removed", () => {
     const h = harness();

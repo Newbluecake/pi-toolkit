@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   DIALOG_BG_HUB_CAPS,
+  HOLD_AGENT_CAPS,
+  HOLD_CAP,
+  HOLD_HUB_CAPS,
   P1_CAPS,
   PROTO,
   RESERVED_FRAME_TYPES,
@@ -80,5 +83,11 @@ describe("constants", () => {
     // model/model-rejected record vocabulary. A browser without it MUST NOT send `model`
     // (old hubs' additionalProperties:false ⇒ 400); an old browser ignores the unknown cap.
     expect(SPAWN_MODEL_HUB_CAP).toBe("spawn.model.v1");
+  });
+
+  it("HOLD caps are stable (web-hub-steer-recall plan §2.3 S1)", () => {
+    expect(HOLD_CAP).toBe("hold.v1");
+    expect([...HOLD_AGENT_CAPS]).toEqual(["hold.v1"]);
+    expect([...HOLD_HUB_CAPS]).toEqual(["hold.v1"]);
   });
 });

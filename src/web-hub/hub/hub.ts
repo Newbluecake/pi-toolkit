@@ -35,6 +35,7 @@ import {
   P2_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
+  HOLD_HUB_CAPS,
   RUNTX_HUB_CAPS,
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
@@ -393,11 +394,14 @@ export async function startHub(
       // UPLOAD/DIALOG_BG before it.
       // fleet-drawer plan §5.3 (F3b): RUNTX_HUB_CAPS joins the same two surfaces the same way
       // (§8.4's caps-coexist test pins the set equality).
+      // web-hub-steer-recall plan §2.3 S4: HOLD_HUB_CAPS rides the same two surfaces (inserted
+      // right after DIALOG_BG_HUB_CAPS in both files, so the lists stay byte-identical).
       caps: [
         ...admin.caps(),
         ...P2_HUB_CAPS,
         ...UPLOAD_HUB_CAPS,
         ...DIALOG_BG_HUB_CAPS,
+        ...HOLD_HUB_CAPS,
         ...RUNTX_HUB_CAPS,
         ...extraHubCaps,
       ],

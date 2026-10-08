@@ -28,7 +28,7 @@ import {
   type SessionInfo,
   type StatusInfo,
 } from "../protocol/messages.js";
-import { compareVersions } from "../protocol/version.js";
+import { compareVersions, HOLD_CAP } from "../protocol/version.js";
 import type { AgentView, HubBus, HubEvent, HubLog, RegistryView } from "./ports.js";
 import { pidAlive as defaultPidAlive } from "./singleton.js";
 
@@ -202,6 +202,10 @@ export function createRegistry(deps: {
       runTranscript: r.caps.includes("runtx.v1"),
       runTranscriptLan: r.caps.includes("runtx.lan.v1"),
     };
+    // web-hub-steer-recall plan §2.3 S4: `hold` is written ONLY when the agent's live hello caps
+    // include hold.v1 (so a re-hello that drops the cap drops the field — "hold" in card ===
+    // false), same derived-boolean pattern as control/upload above.
+    if (r.caps.includes(HOLD_CAP)) c.hold = true;
     if (r.session !== undefined) c.session = r.session;
     if (r.status !== undefined) c.status = r.status;
     if (r.dialogs !== undefined) c.dialogs = { ...r.dialogs };
@@ -353,7 +357,17 @@ export function createRegistry(deps: {
         existing.linkGen++;
         if (epochChanged) existing.seq = 0;
         log.info("agent reclaimed", { agentKey: existing.agentKey, from: prevPhase, epochChanged });
-        if (prevPhase === "stale") publish({ type: "agent_up", agent: card(existing) });
+        // steer-recall plan v4.3 Y7.2: a reclaim whose epoch CHANGED previously published only
+        // `gap` unless the record had gone stale — so a UI holding the old card epoch would keep
+        // it forever and (Y2) drop every status.held snapshot of the new scope. For agents that
+        // advertise hold.v1, an epoch-changing reclaim therefore also publishes `agent_up` (the
+        // existing full-card event; P-ui's reducer already upserts the card from it, refreshing
+        // the epoch) BEFORE the gap, matching the stale path's card-then-gap order — the UI holds
+        // the new epoch before it re-snapshots. Gated on the NEW hello caps so agents with the
+        // feature off keep today's gap-only wire byte-for-byte; the stale branch below still
+        // publishes its single agent_up unchanged (never a double).
+        const epochRefresh = epochChanged && prevPhase !== "stale" && existing.caps.includes(HOLD_CAP);
+        if (prevPhase === "stale" || epochRefresh) publish({ type: "agent_up", agent: card(existing) });
         if (epochChanged) publish({ type: "gap", agentKey: existing.agentKey, fromSeq: 0 });
         // fleet-drawer plan §5.3 (F3b): a caps-set change on re-hello — the run-transcript
         // service re-validates its held subscriptions against the NEW caps (§5.2 "回收不再合格的

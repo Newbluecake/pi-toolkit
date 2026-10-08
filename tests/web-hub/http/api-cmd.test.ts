@@ -4,7 +4,7 @@ import { createCommandRouter } from "../../../src/web-hub/hub/commands.js";
 import { createRegistry } from "../../../src/web-hub/hub/registry.js";
 import type { CommandRouter } from "../../../src/web-hub/hub/ports.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
-import type { CmdFrame, CmdResultFrame } from "../../../src/web-hub/protocol/messages.js";
+import type { CmdFrame, CmdOrigin, CmdResultFrame } from "../../../src/web-hub/protocol/messages.js";
 import { fakeConn, hello, memLog, waitFor } from "../hub/helpers.js";
 import { fakeDeps, login, makeAgent, makeTmp, postJson, rawRequest, type FakeDeps } from "./helpers.js";
 
@@ -63,6 +63,18 @@ function cmdHeaders(over: Record<string, string> = {}): Record<string, string> {
 
 function abortBody(id = "a".repeat(16)): Record<string, unknown> {
   return { agentKey: "a1", id, op: "abort" };
+}
+
+function recallFrame(over: Partial<CmdFrame> = {}): CmdFrame {
+  return {
+    t: "cmd",
+    rid: "",
+    id: "r".repeat(16),
+    deadlineMs: 5_000,
+    origin: { listener: "loopback", ip: "127.0.0.1", reqId: "r".repeat(16) },
+    cmd: { op: "recall", target: "t".repeat(16) },
+    ...over,
+  };
 }
 
 describe("POST /api/cmd — loopback gate order (plan §6.3)", () => {
@@ -204,6 +216,73 @@ describe("POST /api/cmd — loopback gate order (plan §6.3)", () => {
       cmdHeaders(),
     );
     expect(router.calls[0]!.cmd).toMatchObject({ op: "dialog_cancel" });
+  });
+});
+
+describe("POST /api/cmd — recall op (web-hub-steer-recall §2.3 S4)", () => {
+  const target = "t".repeat(16);
+
+  it("missing / short / non-string target ⇒ 400 E_BAD_REQUEST ('target required'), router never called", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    for (const body of [
+      { agentKey: "a1", id: "a".repeat(16), op: "recall" },
+      { agentKey: "a1", id: "a".repeat(16), op: "recall", target: "short" },
+      { agentKey: "a1", id: "a".repeat(16), op: "recall", target: "bad chars!!" },
+      { agentKey: "a1", id: "a".repeat(16), op: "recall", target: 42 },
+    ]) {
+      const res = await postJson(port, "/api/cmd", body, cmdHeaders());
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(JSON.parse(res.body)).toMatchObject({ error: "E_BAD_REQUEST", message: "target required" });
+    }
+    expect(router.calls).toHaveLength(0);
+  });
+
+  it("body `expect`/junk never reach the forwarded frame — cmd is EXACTLY {op:'recall', target}", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    const res = await postJson(
+      port,
+      "/api/cmd",
+      { agentKey: "a1", id: "b".repeat(16), op: "recall", target, expect: { sessionId: "s9" }, junk: 1 },
+      cmdHeaders(),
+    );
+    expect(res.status).toBe(200);
+    expect(router.calls).toHaveLength(1);
+    expect(router.calls[0]!.cmd).toEqual({ op: "recall", target });
+  });
+
+  it("listener parity: the forwarded loopback frame carries origin.listener 'loopback', and a lan-shaped origin admits identically through the REAL router (recall admission is origin-blind)", async () => {
+    // The /api/cmd dispatch (parse + rate-limit category + forward) is one shared code path for
+    // both listeners — only the pre-parse gates (host/CSRF/auth) differ. Pin the loopback side
+    // end-to-end here, and the router side with a lan-shaped origin (listener/user) against the
+    // real createCommandRouter + registry, exactly as the LAN listener would dispatch it.
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    await postJson(port, "/api/cmd", { agentKey: "a1", id: "c".repeat(16), op: "recall", target }, cmdHeaders());
+    expect(router.calls[0]).toMatchObject({
+      t: "cmd",
+      origin: { listener: "loopback", ip: "127.0.0.1" },
+      cmd: { op: "recall", target },
+    });
+
+    const clock = { t: 1_000_000 };
+    const registry = createRegistry({ now: () => clock.t, log: memLog(), pidAlive: () => true });
+    const conn = fakeConn();
+    const { agentKey } = registry.register(hello({ caps: ["ev.v1", "cmd.v1", "hold.v1"] }), conn);
+    const real = createCommandRouter({ registry, log: memLog(), now: () => clock.t });
+    const lanOrigin: CmdOrigin = { listener: "lan", ip: "192.168.1.9", user: "u1", reqId: "r".repeat(16) };
+    const p = real.request({ ...recallFrame(), origin: lanOrigin }, agentKey);
+    const sent = conn.sent.filter((f) => (f as { t: string }).t === "cmd").at(-1) as { rid: string };
+    registry.onFrame(agentKey, {
+      t: "cmd_result",
+      rid: sent.rid,
+      id: "r".repeat(16),
+      ok: true,
+      data: { op: "recall", outcome: "recalled", from: "held", deliver: "steer", text: "lan body" },
+    } as never);
+    await expect(p).resolves.toMatchObject({ ok: true, data: { outcome: "recalled", text: "lan body" } });
+    expect((conn.sent.at(-1) as CmdFrame).origin).toMatchObject({ listener: "lan", user: "u1" });
   });
 });
 

@@ -14,6 +14,7 @@ import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/ag
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
 import {
   DIALOG_BG_HUB_CAPS,
+  HOLD_HUB_CAPS,
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
   UPLOAD_HUB_CAPS,
@@ -78,7 +79,13 @@ describe("agent-server + admin wiring (plan §8)", () => {
     const c = await client();
     c.send(hello());
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
-    expect(ack["caps"]).toEqual([...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...RUNTX_HUB_CAPS]);
+    expect(ack["caps"]).toEqual([
+      ...P2_HUB_CAPS,
+      ...UPLOAD_HUB_CAPS,
+      ...DIALOG_BG_HUB_CAPS,
+      ...HOLD_HUB_CAPS,
+      ...RUNTX_HUB_CAPS,
+    ]);
   });
 
   it("deps.admin present ⇒ hello_ack.caps is admin.caps() plus P2_HUB_CAPS + UPLOAD_HUB_CAPS + DIALOG_BG_HUB_CAPS (C3, plan §3.1)", async () => {
@@ -93,6 +100,7 @@ describe("agent-server + admin wiring (plan §8)", () => {
       ...P2_HUB_CAPS,
       ...UPLOAD_HUB_CAPS,
       ...DIALOG_BG_HUB_CAPS,
+      ...HOLD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
     ]);
   });
@@ -110,6 +118,7 @@ describe("agent-server + admin wiring (plan §8)", () => {
       ...P2_HUB_CAPS,
       ...UPLOAD_HUB_CAPS,
       ...DIALOG_BG_HUB_CAPS,
+      ...HOLD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
       "spawn.v1",
     ]);

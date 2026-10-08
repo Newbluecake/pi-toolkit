@@ -29,6 +29,10 @@ import {
   PROTO,
   UPLOAD_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
+  // web-hub-steer-recall plan §2.3 S4: same two-surface rule as DIALOG_BG_HUB_CAPS — inserted in
+  // the SAME position as hub.ts's HubInfo.caps fold so the two lists stay byte-identical
+  // (caps-coexist pins the set equality).
+  HOLD_HUB_CAPS,
   RUNTX_HUB_CAPS,
   protoCompatible,
 } from "../protocol/version.js";
@@ -172,6 +176,9 @@ export function createAgentServer(
             // ask-user-async plan §7.2 (P3): same surface rule as UPLOAD_HUB_CAPS — must stay
             // byte-identical with hub.ts's browser-facing HubInfo.caps.
             ...DIALOG_BG_HUB_CAPS,
+            // web-hub-steer-recall plan §2.3 S4: HOLD_HUB_CAPS rides both surfaces (inserted
+            // right after DIALOG_BG_HUB_CAPS, mirroring hub.ts).
+            ...HOLD_HUB_CAPS,
             // fleet-drawer plan §5.3 (F3b): same two-surface rule — inserted in the SAME
             // position as hub.ts's HubInfo.caps fold so the two lists stay byte-identical
             // (§8.4's caps-coexist test pins the set equality).

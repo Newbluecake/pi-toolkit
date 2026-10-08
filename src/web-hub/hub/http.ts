@@ -401,6 +401,9 @@ function toCard(v: AgentView): AgentCard {
   // always sets them (false for a pre-F2 agent), so the copy is unconditional-in-practice.
   if (v.runTranscript !== undefined) card.runTranscript = v.runTranscript;
   if (v.runTranscriptLan !== undefined) card.runTranscriptLan = v.runTranscriptLan;
+  // web-hub-steer-recall plan §2.3 S4: same whitelist rule — registry's card() only ever sets
+  // `hold` to `true` (never false), so the copy keeps the "absent = feature off" wire shape.
+  if (v.hold !== undefined) card.hold = v.hold;
   return card;
 }
 
@@ -1747,6 +1750,21 @@ function parseCmdBody(body: unknown): ParseOutcome {
           ...(deliver === undefined ? {} : { deliver }),
           ...(expect === undefined ? {} : { expect }),
         },
+      };
+    }
+    case "recall": {
+      // steer-recall plan §2.3 S4: recall identifies by cmdId only — `target` must pass CMD_ID_RE
+      // (400 "target required" otherwise) and the forwarded frame carries EXACTLY
+      // {op:"recall", target}: every other body field (expect, junk, …) is dropped here.
+      const target = field(body, "target");
+      if (typeof target !== "string" || !CMD_ID_RE.test(target)) {
+        return { error: "E_BAD_REQUEST", message: "target required" };
+      }
+      return {
+        agentKey,
+        id,
+        ...(queryOnlyFlag ? { queryOnly: true as const } : {}),
+        cmd: { op: "recall", target },
       };
     }
     default:

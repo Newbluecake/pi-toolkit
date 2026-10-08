@@ -5,6 +5,7 @@ import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import type { HubEvent } from "../../../src/web-hub/hub/ports.js";
 import {
   DIALOG_BG_HUB_CAPS,
+  HOLD_HUB_CAPS,
   P2_HUB_CAPS,
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_HUB_CAP,
@@ -93,7 +94,7 @@ function launcherFixture(root: string): void {
 }
 
 describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runtx)", () => {
-  it("default config: HubInfo.caps ≡ hello_ack.caps (set-equal), both ⊇ P2 ∪ UPLOAD ∪ RUNTX ∪ DIALOG_BG, no spawn/preview", async () => {
+  it("default config: HubInfo.caps ≡ hello_ack.caps (set-equal), both ⊇ P2 ∪ UPLOAD ∪ RUNTX ∪ DIALOG_BG ∪ HOLD, no spawn/preview", async () => {
     const home = tmp.make("wh-coexist-");
     const fe = fakeFrontend();
     const hub = await start(fe.factory, home);
@@ -106,7 +107,13 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     c.sock.destroy();
 
     expect(browserCaps).toEqual(agentCaps); // the two surfaces never drift (§3.1 invariant)
-    for (const cap of [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...RUNTX_HUB_CAPS, ...DIALOG_BG_HUB_CAPS]) {
+    for (const cap of [
+      ...P2_HUB_CAPS,
+      ...UPLOAD_HUB_CAPS,
+      ...RUNTX_HUB_CAPS,
+      ...DIALOG_BG_HUB_CAPS,
+      ...HOLD_HUB_CAPS,
+    ]) {
       expect(browserCaps).toContain(cap);
     }
     expect(browserCaps).not.toContain(SPAWN_HUB_CAP);
@@ -212,6 +219,31 @@ describe("§8.4 registry card — upload/uploadLan/runTranscript/runTranscriptLa
       uploadLan: false,
     });
     await waitFor(() => true); // no async work; just exercising the sync path under async test
+  });
+
+  // web-hub-steer-recall plan §4.1 (§2.3 S3/S4): AgentCard.hold — the field exists on the card
+  // ONLY while the agent's live hello caps include hold.v1; absent (never false) otherwise, on
+  // every card surface (get()/list()/agent_up).
+  it('hold.v1 ⇒ card.hold === true; without it "hold" in card === false, across get()/list()/agent_up', () => {
+    const clock = { t: 1_000_000 };
+    const reg = createRegistry({ now: () => clock.t, log: memLog(), pidAlive: () => true });
+    const events: HubEvent[] = recordBus(reg);
+
+    const withHold = reg.register(
+      hello({ agentId: { pid: 4242, nonce: "holdcapAAAAAAAAAAA" }, caps: ["ev.v1", "cmd.v1", "hold.v1"] }),
+      fakeConn(),
+    );
+    expect(reg.get(withHold.agentKey)!.hold).toBe(true);
+    expect(reg.list().find((v) => v.agentKey === withHold.agentKey)!.hold).toBe(true);
+    const up = events.findLast((e) => e.type === "agent_up");
+    expect(up?.type === "agent_up" && up.agent.hold).toBe(true);
+
+    const noHold = reg.register(
+      hello({ agentId: { pid: 4242, nonce: "noholdcapAAAAAAAAAA" }, caps: ["ev.v1", "cmd.v1"] }),
+      fakeConn(),
+    );
+    expect("hold" in reg.get(noHold.agentKey)!).toBe(false);
+    expect("hold" in reg.list().find((v) => v.agentKey === noHold.agentKey)!).toBe(false);
   });
 });
 
