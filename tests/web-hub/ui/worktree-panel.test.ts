@@ -373,25 +373,54 @@ describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
     expect(wrapper.findAll(".wtd-toggle")).toHaveLength(0);
   });
 
-  it("a diffable row renders button[aria-expanded] with the toggle affordance", async () => {
+  it("a diffable row renders button[aria-expanded] with the toggle affordance (auto-expanded)", async () => {
     const { wrapper } = mountScoped(dirtyWire());
-    await wrapper.find(".wt-sum").trigger("click");
     const btn = wrapper.find(".wtd-toggle");
     expect(btn.element.tagName).toBe("BUTTON");
-    expect(btn.attributes("aria-expanded")).toBe("false");
+    expect(btn.attributes("aria-expanded")).toBe("true");
     expect(btn.attributes("data-kind")).toBe("dirty");
     expect(btn.attributes("title")).toBe("Show changed files");
     expect(btn.text()).toBe("*3");
     expect(btn.find(".wtd-chev").exists()).toBe(true);
   });
 
-  it("expanding pulls the list once; collapsing keeps the data and never re-pulls", async () => {
+  it("diff shown by default: panel opens and the dirty row auto-expands (one pull) on mount", async () => {
     const { wrapper, transport } = mountScoped(dirtyWire());
-    await wrapper.find(".wt-sum").trigger("click");
-    const btn = wrapper.find(".wtd-toggle");
+    expect(wrapper.find(".wt-sum").attributes("aria-expanded")).toBe("true");
+    expect(transport.files).toHaveBeenCalledTimes(1);
+    await flushPromises();
+    expect(wrapper.findAll(".wtd-file").length).toBe(2);
+  });
 
-    await btn.trigger("click");
-    expect(transport.files).toHaveBeenCalledTimes(1); // 展开拉一次
+  it("a manual collapse (row or panel) is never undone by later status frames", async () => {
+    const { wrapper, transport } = mountScoped(dirtyWire());
+    await flushPromises();
+    await wrapper.find(".wtd-toggle").trigger("click"); // collapse the row
+    await wrapper.setProps({ worktrees: dirtyWire() }); // a fresh frame, same rows
+    expect(wrapper.find(".wtd-toggle").attributes("aria-expanded")).toBe("false");
+    await wrapper.find(".wt-sum").trigger("click"); // collapse the panel
+    const changed = dirtyWire();
+    (changed.rows[0] as { dirty: number }).dirty = 9;
+    await wrapper.setProps({ worktrees: changed });
+    expect(wrapper.find(".wt-sum").attributes("aria-expanded")).toBe("false");
+    expect(transport.files).toHaveBeenCalledTimes(1);
+  });
+
+  it("a scoped panel with only clean rows stays collapsed by default", () => {
+    const w = wire({
+      rows: [{ label: "~/clean", path: "/home/dev/clean", branch: "y", head: "2222222", dirty: 0 }],
+      total: 1,
+      dirtyCount: 0,
+    });
+    const { wrapper, transport } = mountScoped(w);
+    expect(wrapper.find(".wt-sum").attributes("aria-expanded")).toBe("false");
+    expect(transport.files).not.toHaveBeenCalled();
+  });
+
+  it("collapsing keeps the data and never re-pulls", async () => {
+    const { wrapper, transport } = mountScoped(dirtyWire());
+    const btn = wrapper.find(".wtd-toggle");
+    expect(transport.files).toHaveBeenCalledTimes(1); // auto-expanded: 展开拉一次
     expect(btn.attributes("aria-expanded")).toBe("true");
     expect(wrapper.find(".wt-files-slot").exists()).toBe(true);
     await flushPromises();
@@ -410,8 +439,6 @@ describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
   it("a row sig change re-pulls the expanded list after the 3 s debounce (not before)", async () => {
     vi.useFakeTimers();
     const { wrapper, transport } = mountScoped(dirtyWire());
-    await wrapper.find(".wt-sum").trigger("click");
-    await wrapper.find(".wtd-toggle").trigger("click");
     await vi.advanceTimersByTimeAsync(0);
     expect(transport.files).toHaveBeenCalledTimes(1);
 
@@ -426,8 +453,6 @@ describe("WorktreePanel.vue — worktree-diff D5 (§4.1)", () => {
 
   it("clicking a file entry opens the teleported diff dialog", async () => {
     const { wrapper, transport } = mountScoped(dirtyWire());
-    await wrapper.find(".wt-sum").trigger("click");
-    await wrapper.find(".wtd-toggle").trigger("click");
     await flushPromises();
     await wrapper.find(".wtd-file").trigger("click");
     await flushPromises();

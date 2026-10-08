@@ -175,6 +175,42 @@ describe("useWorktreeDiff — abort rules (§4.5)", () => {
   });
 });
 
+describe("useWorktreeDiff — scope invalidation is by value, not identity", () => {
+  it("an equal-but-new scope object (every status/session frame) keeps lists, expansion and the dialog", async () => {
+    const scope = scopeRef();
+    const files = vi.fn(async (): Promise<Outcome<WtDiffFileList>> => ({ ok: true, value: list() }));
+    const file = vi.fn(async (): Promise<Outcome<WtDiffFilePayload>> => ({ ok: true, value: payload() }));
+    const h = useWorktreeDiff({ transport: { files, file } as unknown as WorktreeDiffTransport, scope });
+
+    h.toggleRow(row());
+    await flush();
+    h.openFile("/wt/main", { path: "src/a.ts", status: "M" });
+    await flush();
+
+    scope.value = { agentKey: "a1", sessionId: "s1" };
+    await flush();
+    expect(h.expanded.has("/wt/main")).toBe(true);
+    expect(h.lists.get("/wt/main")?.phase).toBe("ok");
+    expect(h.dialog.value.phase).not.toBe("closed");
+    expect(files).toHaveBeenCalledTimes(1);
+    h.dispose();
+  });
+
+  it("a real session switch (same agentKey, new sessionId) still clears everything", async () => {
+    const scope = scopeRef();
+    const files = vi.fn(async (): Promise<Outcome<WtDiffFileList>> => ({ ok: true, value: list() }));
+    const h = useWorktreeDiff({ transport: { files, file: vi.fn() } as unknown as WorktreeDiffTransport, scope });
+
+    h.toggleRow(row());
+    await flush();
+    scope.value = { agentKey: "a1", sessionId: "s2" };
+    await flush();
+    expect(h.expanded.size).toBe(0);
+    expect(h.lists.size).toBe(0);
+    h.dispose();
+  });
+});
+
 describe("useWorktreeDiff — 409 E_STALE_CTX (§4.5, 恰好一次)", () => {
   it("base 409 ⇒ auto re-pull the list ⇒ entry still there ⇒ retry once with the new base", async () => {
     const files = vi.fn(async (): Promise<Outcome<WtDiffFileList>> => ({ ok: true, value: list() }));

@@ -119,9 +119,13 @@ describe("WorktreeFileList — entries, badges, chips, stats (§4.2)", () => {
 describe("WorktreeFileList — standing footnote + degrade notes (D14/D20, §4.2)", () => {
   it("the static footnote renders in the entries, loading AND error states alike", () => {
     const withEntries = mountList(okState([{ path: "a.ts", status: "M" }]));
-    expect(withEntries.find(".wtd-foot").text()).toBe(
-      "Protected entries are never listed; submodule changes are not shown.",
-    );
+    const foot = withEntries.find(".wtd-foot");
+    const text = "Protected entries are never listed; submodule changes are not shown.";
+    // quiet ⓘ in the refresh row: text rides title/aria-label, revealed inline only on click
+    expect(foot.attributes("title")).toBe(text);
+    expect(foot.attributes("aria-label")).toBe(text);
+    expect(withEntries.find(".wtd-foot-text").exists()).toBe(false);
+    expect(foot.element.parentElement?.classList.contains("wtd-files-actions")).toBe(true);
 
     const loading = mountList({ phase: "loading", sig: "" });
     expect(loading.find(".wtd-foot").exists()).toBe(true);
@@ -133,6 +137,17 @@ describe("WorktreeFileList — standing footnote + degrade notes (D14/D20, §4.2
       error: { code: "E_WTDIFF_UNSUPPORTED", reason: "git-too-old", retryable: true },
     });
     expect(error.find(".wtd-foot").exists()).toBe(true);
+  });
+
+  it("clicking the ⓘ reveals the footnote text inline (touch) and toggles it back", async () => {
+    const w = mountList(okState([]));
+    await w.find(".wtd-foot").trigger("click");
+    expect(w.find(".wtd-foot").attributes("aria-expanded")).toBe("true");
+    expect(w.find(".wtd-foot-text").text()).toBe(
+      "Protected entries are never listed; submodule changes are not shown.",
+    );
+    await w.find(".wtd-foot").trigger("click");
+    expect(w.find(".wtd-foot-text").exists()).toBe(false);
   });
 
   it("truncated / untrackedSkipped / numstatPartial / attrPartial each render their own note", () => {

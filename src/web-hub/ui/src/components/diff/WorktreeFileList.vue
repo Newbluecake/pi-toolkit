@@ -16,7 +16,8 @@
   Everything is plain-text interpolation; styles live in `styles/diff.css`.
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import AppIcon from "../../icons/AppIcon.vue";
 import { displayPath, formatStat, statusBadge } from "@logic/wtdiff.js";
 import { isWtRequestableEntry, type WtDiffFileEntry } from "@protocol/worktree-diff.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -26,6 +27,8 @@ import "../../styles/diff.css";
 const props = defineProps<{ readonly state: ListState }>();
 const emit = defineEmits<{ (e: "open", entry: WtDiffFileEntry): void; (e: "refresh"): void }>();
 const { t } = useI18n();
+/** The ⓘ footnote's inline reveal (touch has no hover title). Purely local, never data-driven. */
+const footOpen = ref(false);
 
 const entries = computed(() => (props.state.phase === "ok" ? (props.state.data?.entries ?? []) : []));
 
@@ -113,9 +116,21 @@ const notes = computed(() => {
     </template>
 
     <!-- D14/D20: the standing footnote — rendered in EVERY state (0 entries / entries / error),
-         never a data-conditioned signal. -->
-    <p class="wtd-foot">{{ t("diff.footnote") }}</p>
+         never a data-conditioned signal. Presented as an always-present ⓘ (hover/aria carries
+         the text; click/tap reveals it inline for touch) sharing the refresh row, not a row of
+         its own. -->
     <div class="wtd-files-actions">
+      <button
+        class="btn btn-ghost btn-xs btn-icon wtd-foot"
+        type="button"
+        :title="t('diff.footnote')"
+        :aria-label="t('diff.footnote')"
+        :aria-expanded="footOpen ? 'true' : 'false'"
+        @click="footOpen = !footOpen"
+      >
+        <AppIcon name="info" class="icon-sm" aria-hidden="true" />
+      </button>
+      <span v-if="footOpen" class="wtd-foot-text">{{ t("diff.footnote") }}</span>
       <button
         class="btn btn-ghost btn-xs wtd-refresh"
         type="button"

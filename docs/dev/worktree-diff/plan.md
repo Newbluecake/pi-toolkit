@@ -802,6 +802,9 @@ for file in parsed.files:
 - 每条原生 `<button class="wtd-file">`：状态徽章（`M/A/D/R/C/T/U/?`）、路径（`<bdi dir="ltr">`、`translate="no"`、控制字符以 `␊ ␍ ␉` 可见替换，仅显示层）、`+a −d`；R/C 显示 `orig → path`；`binary`/`U` 小 chip。
 - **禁用规则（#7）**：`!isWtRequestableEntry(entry)` 的条目一律 `disabled`（覆盖 CR/LF/超长/非法段/U+FFFD/filtered，不只 lossy），`title` 按原因区分（「文件名含特殊字符，无法请求 diff」/「由 Git 过滤器管理」）。
 - 列表底部**常显**静态脚注「受保护条目不显示；子模块变化不在此列出」（D14 / D20，不随数据条件显示——避免成为 oracle）。
+  （2026-10-08 用户裁定：呈现改为与「刷新」同行的常显安静 ⓘ——文案经 title/aria-label 恒在，点击内联展开供触屏；
+  不变量不变：任何状态都渲染、从不随数据条件显示。同日：有 scope 时可 diff 的行默认自动展开、面板自动打开，
+  用户手动收起后不再被后续帧翻回。）
 - 状态：loading / ok / error（code+reason 映射 + 重试）/ empty（「没有可显示的变更」）。`truncated`、`untrackedSkipped`、`numstatPartial`、`attrPartial` 各有提示；刷新按钮；>200 条时容器限高滚动。
 
 ### 4.3 对话框（`components/diff/WorktreeDiffDialog.vue` + `DiffRows.vue` + `diffModal.ts`）

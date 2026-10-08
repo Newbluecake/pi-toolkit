@@ -120,6 +120,45 @@ function rowKey(row: WorktreeRowWire): string {
   return typeof row.path === "string" ? row.path : "";
 }
 
+// Diff shown by default: a diffable (dirty) row's file list auto-expands ONCE per scope and
+// dirty episode, and the panel itself auto-opens while any row is diffable — until the user
+// toggles the panel. A manually collapsed row stays collapsed; a row that turns clean forgets
+// its auto-expansion so its next dirty episode expands again.
+const openTouched = ref(false);
+const autoSeen = new Set<string>();
+let autoScopeKey = "";
+
+function onSummaryClick(): void {
+  openTouched.value = true;
+  open.value = !open.value;
+}
+
+watch(
+  () => [scope.value, props.worktrees.rows] as const,
+  ([sc, rows]) => {
+    const key = sc === null ? "" : `${sc.agentKey}\u0000${sc.sessionId}`;
+    if (key !== autoScopeKey) {
+      autoSeen.clear();
+      autoScopeKey = key;
+    }
+    if (sc === null) return;
+    let anyDiffable = false;
+    for (const row of rows) {
+      const wt = rowKey(row);
+      if (!rowDiffable(sc, row)) {
+        autoSeen.delete(wt);
+        continue;
+      }
+      anyDiffable = true;
+      if (autoSeen.has(wt)) continue;
+      autoSeen.add(wt);
+      if (!isExpanded(wt)) toggleRow(row);
+    }
+    if (anyDiffable && !openTouched.value) open.value = true;
+  },
+  { immediate: true },
+);
+
 function listStateOf(row: WorktreeRowWire): ListState {
   return lists.get(rowKey(row)) ?? { phase: "idle", sig: "" };
 }
@@ -231,7 +270,7 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
       type="button"
       :aria-expanded="open"
       :aria-label="t('detail.worktreesToggleAria')"
-      @click="open = !open"
+      @click="onSummaryClick"
     >
       <AppIcon name="branch" class="icon-sm" />
       <span class="wt-sum-text">{{ summary }}</span>

@@ -179,19 +179,31 @@
   font-size: var(--fs-2xs);
 }
 
+/* D14/D20 standing footnote: an always-present, deliberately quiet ⓘ in the refresh row. */
 .wtd-foot {
-  margin: 0;
-  padding: var(--sp-1) var(--sp-2);
-  border-top: 1px solid var(--c-border);
+  color: var(--c-text-3);
+  opacity: 0.6;
+}
+.wtd-foot:hover,
+.wtd-foot:focus-visible,
+.wtd-foot[aria-expanded="true"] {
+  opacity: 1;
+}
+.wtd-foot-text {
+  min-width: 0;
   color: var(--c-text-3);
   font-size: var(--fs-2xs);
 }
 
 .wtd-files-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: var(--sp-1);
   padding: var(--sp-1) var(--sp-2);
   border-top: 1px solid var(--c-border);
+}
+.wtd-files-actions .wtd-refresh {
+  margin-left: auto;
 }
 
 /* the `wtd-toggle` button that replaced the dirty row's span lives in worktrees.css */

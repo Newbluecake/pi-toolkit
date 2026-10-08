@@ -96,6 +96,11 @@ export interface UseWorktreeDiffHandle {
   dispose(): void;
 }
 
+/** Value identity of a scope (`null` ⇒ ""): what the invalidation watch compares. */
+function scopeKeyOf(scope: WtDiffScope | null): string {
+  return scope === null ? "" : `${scope.agentKey}\u0000${scope.sessionId}`;
+}
+
 /** `E_SESSION_CHANGED` closes the dialog outright (the panel is about to re-render anyway). */
 function isSessionChanged(outcome: Extract<WtDiffOutcome<unknown>, { ok: false }>): boolean {
   return outcome.error === "E_SESSION_CHANGED";
@@ -444,8 +449,11 @@ export function useWorktreeDiff(deps: UseWorktreeDiffDeps): UseWorktreeDiffHandl
 
   // Scope invalidation (§4.5「scope 变 null 全清」, and — preview's same posture — ANY scope
   // change: a session switch invalidates every list base even though a scope still exists).
+  // Keyed by VALUE, not identity: the panel's `scope` is a computed that builds a fresh
+  // `{ agentKey, sessionId }` object on every recompute (each status/session frame — e.g. just
+  // sending a message), and an identity watch wiped every expanded list on each of them.
   const stopScopeWatch = watch(
-    () => deps.scope.value,
+    () => scopeKeyOf(deps.scope.value),
     (next, prev) => {
       if (next === prev) return;
       for (const ctl of listCtl.values()) ctl.abort();
