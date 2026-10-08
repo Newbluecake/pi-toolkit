@@ -16,6 +16,10 @@
   cursor: pointer;
   border-radius: var(--r-xs);
   overflow-wrap: anywhere;
+  /* A path is one long token: with only `overflow-wrap` Chrome breaks at its last hyphen (never
+   * after `/`), leaving most of the line empty mid-UUID. Break at any character instead so a
+   * wrapped path fills each line. */
+  word-break: break-all;
 }
 
 .path-ref:hover {
