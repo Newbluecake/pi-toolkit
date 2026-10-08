@@ -495,3 +495,17 @@ web 上没有别处展示 git 分支/dirty/↑↓，RPC 托管会话尤其需要
 
 Q1 下发绝对路径（预算紧时第一个被削）；Q2 只有 1 个 worktree 也显示；Q3 不加 `webHub.worktrees` 开关；
 Q4 嵌套 schema 开放；Q5 web 侧不 fetch；Q6 HUD 迁共享模块放后续 W6。——全部采纳推荐。
+
+---
+
+## 修订注记 · worktree-diff（2026-10-08，D6 落地）
+
+本面板（W1–W4 的只读 worktree 摘要）后来成为 worktree-diff 功能的入口面：行内 `*N` dirty token
+升级为可展开按钮（`rowDiffable` + wtdiff scope），点击经 `/api/worktree-diff/{files,file}` 拉取并
+渲染文件清单与单文件 diff。**D15 条件接受已闭合**：hub 执行 git 由主会话裁定「条件接受，H1–H5 为
+D3 合入闸门」——H1（驱动中和三层）/H2（环境 allowlist）/H3（三 fd 钉住）/H4（无 index 写入）/H5
+（预算总账）已全部落地并绿；端点层的驱动场景复跑、任意历史读取、hub close 残留探测见
+`tests/integration/web-hub-worktree-diff.test.ts`。新增资产类别按附录 A1 拍板：**LAN（`mode:"on"`）
+与 loopback 同宽**——LAN 上额外流出的只有「当前变更集中已修改文件在本请求解析的 HEAD 里的版本
+（±3 行上下文）」与「已删除文件在该 HEAD 的全文」，任何更早历史、任何不在变更集中的路径、任何
+denylist 命中项都不可达。设计全文与决策日志：`docs/dev/worktree-diff/plan.md`（含 §9.3 修订记录）。

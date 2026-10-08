@@ -388,6 +388,31 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   stats only — never a path or entry name). `mode:"loopback"` keeps the endpoint LAN-absent (404, byte-
   identical to `off` on LAN) while loopback keeps previewing. Design + real-device acceptance:
   `docs/dev/web-hub-preview/{plan,dir-plan,acceptance}.md`.
+  **Worktree diff (worktree-diff plan v3.1, D0–D6)**: per-file diff viewing for the session repo's
+  worktrees, riding the SAME `webHub.preview` gate (mode `on`/`loopback`; no separate setting) plus
+  a `/proc/self/fd` probe (Linux-only, fail-closed — no `wtdiff.v1` cap and no routes without it).
+  Two GET endpoints (`/api/worktree-diff/files`, `/api/worktree-diff/file`, both `X-PWH: 1`): the
+  hub runs git itself — pinned through THREE fds (worktree, gitdir, commondir; `-C
+/proc/self/fd/3 --git-dir=/proc/self/fd/4 --work-tree=/proc/self/fd/3` + `GIT_COMMON_DIR=`,
+  membership-checked against a bounded `worktree list --porcelain`), with `envPolicy:"minimal"`
+  (PATH pinned to `/usr/bin:/bin`) and plumbing **`diff-index`** — never porcelain `diff`, which
+  2.53 measured to WRITE the index and fire `post-index-change` even under `--no-optional-locks`.
+  External-driver neutralization is three-layered (L1 `--attr-source=<empty tree>` kills committed/
+  working-tree `.gitattributes` sources; L2 unconditionally blanks every `filter.*`/`diff.*` driver
+  name found in config ∪ `$GIT_COMMON_DIR/info/attributes`, macros included; L3 post-hoc re-scan ⇒
+  503 `attr-changed` + discard) plus `--no-textconv --no-ext-diff`, `hooksPath=/dev/null`,
+  `--ignore-submodules=all`. Anti-arbitrary-history: `base` must equal THIS request's C0 HEAD
+  resolution (409 `base`), `(path, orig)` must be a requestable entry of the ≤5 s TTL single-flight
+  changeset (409 `entry`, zero oracle) — the residual exposure is exactly appendix A1 (a): LAN is
+  as wide as loopback, pinned to the current HEAD, changesets computed server-side per request,
+  denylist hits hidden everywhere (list, total, file asks — D14). **Driver-scan regex maintenance
+  rule**: `WTDIFF_DRIVER_NAME_RE` + the Cc `config --get-regexp` pattern enumerate the executable
+  config surface — when a NEW git version adds an executing config key family (R11), extend both
+  (and `driverNamesFromAttributes`' superset regex) in the same PR and re-run the H1 suite
+  (`tests/integration/{git-wtdiff,web-hub-worktree-diff}.test.ts`); new ASSET classes (things the
+  endpoint exposes) follow A1: LAN same-width, current-HEAD-pinned, server-computed, denylist-
+  blocked. Design: `docs/dev/worktree-diff/plan.md` (§9.3 revision log); real-device checklist:
+  `docs/dev/worktree-diff/acceptance.md`; endpoint integration: `tests/integration/web-hub-worktree-diff.test.ts`.
   **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
   the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
   planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product

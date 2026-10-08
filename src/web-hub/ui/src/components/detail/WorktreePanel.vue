@@ -16,8 +16,8 @@
   per-row CopyButton). Rows without a scope / without `path` / clean rows keep today's exact
   `<span class="wt-status">` (I8 — the no-cap DOM is byte-identical, pinned by
   `worktree-panel.test.ts`). Expansion state lives in `useWorktreeDiff` (not persisted); the
-  diff dialog (`WorktreeDiffDialog`) is teleported to `<body>` from here, mounted only when a
-  scope exists.
+  diff dialog (`WorktreeDiffDialog`) is mounted here as a fragment sibling (its own internal
+  Teleport carries it to `<body>`), mounted only when a scope exists.
 
   V1 rulings (plan §10 / 用户拍板): strictly read-only — no write path, no preview link,
   `aria-readonly` on the section; shown even for a single worktree (Q2); no settings toggle
@@ -291,18 +291,16 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
   </section>
   <!-- worktree-diff D5: the diff dialog mounts as a SECOND root (a fragment sibling of the
        section, so the panel's own DOM stays byte-identical when no scope exists — I8), only
-       when a scope does; it teleports to <body> and renders nothing while closed. -->
-  <template v-if="scope !== null">
-    <Teleport to="body">
-      <WorktreeDiffDialog
-        :state="dialog"
-        :mode="viewMode"
-        :mobile="mobile"
-        :plaintext="plaintext"
-        @close="closeDialog"
-        @refresh="refreshDialog"
-        @set-mode="setMode"
-      />
-    </Teleport>
-  </template>
+       when a scope does; the dialog's own internal Teleport carries it to <body> (D6: the
+       outer Teleport here was redundant nesting and was removed). -->
+  <WorktreeDiffDialog
+    v-if="scope !== null"
+    :state="dialog"
+    :mode="viewMode"
+    :mobile="mobile"
+    :plaintext="plaintext"
+    @close="closeDialog"
+    @refresh="refreshDialog"
+    @set-mode="setMode"
+  />
 </template>
