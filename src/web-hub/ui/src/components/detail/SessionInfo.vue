@@ -17,6 +17,7 @@ import { useI18n } from "../../composables/useI18n.js";
 import { formatUsd } from "../../format.js";
 import type { SessionInfoProps } from "../../contracts.js";
 import CopyButton from "./CopyButton.vue";
+import PathText from "../preview/PathText.vue";
 
 const props = defineProps<SessionInfoProps>();
 const { t } = useI18n();
@@ -75,7 +76,9 @@ const subCostText = computed(() => {
     <dl class="kv">
       <div>
         <dt>{{ t("detail.kvCwd") }}</dt>
-        <dd translate="no">{{ cwdFull }}</dd>
+        <!-- 2026-10-08 user ruling: the cwd opens the directory preview (PathText: probe-confirmed
+             abs path ⇒ clickable; no preview scope ⇒ the same bare text as before). -->
+        <dd translate="no"><PathText :text="cwdFull" /></dd>
         <CopyButton :value="cwdFull" :label="t('detail.copyCwd')" />
       </div>
       <div v-if="session?.sessionId">
