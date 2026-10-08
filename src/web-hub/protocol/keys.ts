@@ -120,6 +120,34 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
     }
     case "custom": {
       if (typeof r.customType !== "string") return undefined;
+      // message_agent → root 的 display 面（progress/finding 等，progressChannel:"display"）：
+      // TUI 靠 fabric-entry-renderer 渲染 record，web 端若走默认墓碑投影则正文永不可见
+      // （2026-10-07 用户报告：@mention 后收不到 subagent 的 message_agent 回复）。
+      // 终态 delivered 且带正文的记录投影为可渲染 custom_message（header 与 TUI 一致）；
+      // outbox 每迁移一次状态就追加一条，非 delivered 状态维持墓碑投影，避免重复显示。
+      if (r.customType === "subagent:fabric") {
+        const d = r.data as { state?: unknown; kind?: unknown; from?: unknown; payload?: unknown } | null | undefined;
+        const payload = d !== null && typeof d === "object" ? d.payload : undefined;
+        const text =
+          payload !== null && typeof payload === "object" && !Array.isArray(payload)
+            ? (payload as Record<string, unknown>).text
+            : undefined;
+        if (d?.state === "delivered" && typeof text === "string" && text.trim() !== "") {
+          const kind = typeof d.kind === "string" ? d.kind : "message";
+          const from = typeof d.from === "string" && d.from !== "" && d.from !== "root" ? ` ${d.from}` : "";
+          return finish(
+            {
+              id: r.id,
+              parentId,
+              type: "custom_message",
+              timestamp: r.timestamp,
+              customType: r.customType,
+              content: truncateDeep(`[fabric ${kind}${from}]\n${text}`, flag),
+            },
+            flag,
+          );
+        }
+      }
       return {
         id: r.id,
         parentId,

@@ -75,6 +75,76 @@ describe("customKey", () => {
     // 不同 type 不同键
     expect(entryKey(customMessageEntry!)).not.toBe(customKey("other:custom", payload));
   });
+
+  it("subagent:fabric delivered records project as renderable custom_message (message_agent → root visibility)", () => {
+    // 2026-10-07: the default custom(data) tombstone projection made fabric root replies
+    // invisible in the web UI (TUI renders them via fabric-entry-renderer).
+    const delivered = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: {
+        key: "k1",
+        from: "r_ABC12345",
+        to: "root",
+        kind: "progress",
+        state: "delivered",
+        payload: { text: "@你的回复正文" },
+      },
+      id: "f1",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:00.000Z",
+    });
+    expect(delivered).toBeDefined();
+    expect(delivered!.type).toBe("custom_message");
+    expect(delivered!.customType).toBe("subagent:fabric");
+    expect(delivered!.content).toBe("[fabric progress r_ABC12345]\n@你的回复正文");
+    expect(delivered!.display).toBeUndefined(); // unset ≠ false ⇒ rendered
+
+    // Non-delivered outbox transitions stay tombstones (no duplicate display).
+    const pending = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: { key: "k1", from: "r_ABC12345", to: "root", kind: "progress", state: "pending", payload: { text: "x" } },
+      id: "f2",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:01.000Z",
+    });
+    expect(pending!.type).toBe("custom");
+    expect(pending!.display).toBe(false);
+    expect(pending!.content).toBeUndefined();
+
+    // Delivered but empty-text / malformed records fall back to the tombstone too.
+    const empty = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: { state: "delivered", payload: { text: "   " } },
+      id: "f3",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:02.000Z",
+    });
+    expect(empty!.type).toBe("custom");
+    const noText = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data: { state: "delivered" },
+      id: "f4",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:03.000Z",
+    });
+    expect(noText!.type).toBe("custom");
+
+    // Every other customType keeps the data-not-served tombstone rule.
+    const other = projectSessionEntry({
+      type: "custom",
+      customType: "subagent:run",
+      data: { state: "delivered", payload: { text: "must not leak" } },
+      id: "f5",
+      parentId: null,
+      timestamp: "2026-10-07T00:00:04.000Z",
+    });
+    expect(other!.type).toBe("custom");
+    expect(other!.content).toBeUndefined();
+  });
 });
 
 describe("projectSessionEntry over the fixture", () => {
