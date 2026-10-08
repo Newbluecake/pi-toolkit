@@ -62,8 +62,11 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // (~460 lines, mostly duplicated boilerplate that gzips well) lands at 194,621 B gz,
 // 61 B over the old budget; the ~13 KiB of slack on top absorbs D5 (diff dialog components
 // + wtdiff.js logic becoming reachable) landing without another immediate bump.
+// bumped to 232 KiB by steer-recall P-ui + session-history P-ui (2026-10-09) — held queue rows,
+// recall/re-edit and the epoch-scoped merge reducer, plus the history dialog/list logic; the
+// release gate measured 225,926 B gz with both landed, ~11 KiB slack on top.
 // Precise per-build numbers drift with in-flight packages — re-measure before the next bump.
-const JS_BUDGET_GZIP_BYTES = 208 * 1024;
+const JS_BUDGET_GZIP_BYTES = 232 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}
