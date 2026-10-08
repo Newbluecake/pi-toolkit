@@ -150,6 +150,10 @@ function realExpertSession(label: string): { file: string; cwd: string } {
   const cwd = tempDir();
   const srcDir = join(cwd, "sessions");
   const mgr = SessionManager.create(cwd, srcDir);
+  // Real experts are persisted child sessions: since H0 (session-history plan §4.3) the driver's
+  // create() writes the `subagent:child` marker right after the header — mirror that here so the
+  // consult path is exercised on a realistically marked source.
+  mgr.appendCustomEntry("subagent:child", { v: 1 });
   mgr.appendMessage({ role: "user", content: [{ type: "text", text: `expert task ${label}` }] });
   mgr.appendMessage({ role: "assistant", content: [{ type: "text", text: `expert investigated ${label}` }] });
   const file = mgr.getSessionFile();
@@ -276,6 +280,16 @@ describe("consult integration: end-to-end (§9 T-13)", () => {
     expect(calls.filter((c) => c.kind === "create")).toHaveLength(1); // only the dispatcher; the expert copy is `resume`d, never freshly `create`d
 
     expect(sha256(expert.file)).toBe(beforeHash); // F2: source byte-for-byte unchanged
+
+    // H0 (session-history plan §4.3 M3, dispatcher ruling 2026-10-09): the consult path ADDS no
+    // `subagent:child` marker — forks go through the driver's resume() path, which never marks
+    // (pinned by tests/runtime/session-driver-child-marker.test.ts). The byte-for-byte tail copy
+    // does carry the expert's own marker over, which is correct (the copy IS a child session) and
+    // harmless: consult forks live under cache/consult-sessions, outside the history scan root.
+    const markerLines = (text: string): number =>
+      text.split("\n").filter((l) => l.includes('"customType":"subagent:child"')).length;
+    expect(markerLines(readFileSync(expert.file, "utf8"))).toBe(1);
+    expect(markerLines(readFileSync(resumeCall!.file!, "utf8"))).toBe(1);
 
     // Runner reap → onReaped → wireConsult.onReaped → removeForkFile.
     await waitUntil(() => !existsSync(resumeCall!.file!));

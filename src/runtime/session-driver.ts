@@ -37,6 +37,33 @@ export function isConsultForkSpec(spec: SessionSpec): boolean {
   return typeof (spec as { forkSessionFrom?: unknown }).forkSessionFrom === "string";
 }
 /**
+ * web-hub session-history plan §4.3 (H0, PD2): customType of the marker entry written into every
+ * persisted child (subagent) session so the history list can recognize a session as a child even
+ * when this package's child-session extension never activated for it (todo #27's `-e` parent —
+ * one of the two ways a child file can exist). Written by the DRIVER (not the extension) for
+ * exactly that reason; consumed later by the history scanner's head parser (`sub-marker`).
+ */
+export const SUBAGENT_CHILD_CUSTOM_TYPE = "subagent:child";
+/**
+ * H0 (PD2): append the `subagent:child` marker to a freshly created child session, as the very
+ * FIRST entry after the header (pi persists lazily — the file appears only once a user/assistant
+ * message exists, and the marker then sits fixed on line 2). No-op unless `persist &&
+ * !isConsultForkSpec(spec)` and `sm.appendCustomEntry` is a function; any throw is swallowed —
+ * the marker is best-effort bookkeeping and must never fail or delay a run. `resume()` never
+ * calls this (a resumed session's provenance is already on disk; a consult fork stays unmarked —
+ * its read-only run is not a dispatchable child session).
+ */
+export function markChildSession(sm: unknown, spec: SessionSpec, persist: boolean): void {
+  try {
+    if (!persist || isConsultForkSpec(spec)) return;
+    const appendCustomEntry = (sm as { appendCustomEntry?: unknown } | null | undefined)?.appendCustomEntry;
+    if (typeof appendCustomEntry !== "function") return;
+    appendCustomEntry.call(sm, SUBAGENT_CHILD_CUSTOM_TYPE, { v: 1 });
+  } catch {
+    /* best-effort marker — never affects the run */
+  }
+}
+/**
  * todo #27: the actual create()/resume() decision — `true` (missing) iff this is NOT a
  * consult fork AND the process-wide activation counter (src/child/activation-signal.ts)
  * never advanced during the `[activationBefore, now]` window.
@@ -715,6 +742,11 @@ export class PiSessionDriver implements SessionDriver {
     const cwd = resolved.cwd ?? process.cwd();
     const persist = resolved.persist ?? this.rememberAgents;
     const sessionManager = persist ? SessionManager.create(cwd) : SessionManager.inMemory(cwd);
+    // H0 (session-history plan §4.3, PD2): mark every persisted child session as a child BEFORE
+    // anything else can append — the marker is then the first entry (file line 2 once pi lazily
+    // flushes). Driver-side on purpose: it fires even when the child extension never activated
+    // (todo #27). `resume()` above never marks.
+    markChildSession(sessionManager, resolved, persist);
     // todo #27: snapshot BEFORE the awaited resourceLoader.reload()/activate() window — see
     // src/child/activation-signal.ts for why "did the counter advance at all" (not "by exactly
     // one") is the correct check here.
