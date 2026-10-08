@@ -55,7 +55,8 @@
   display: inline-flex;
   flex: 0 1 auto; /* may shrink: at large --fs-scale values the label truncates instead of
                      pushing the bar's controls (theme / font-size) off the right edge */
-  min-width: 0;
+  min-width: 26px; /* = .brand-mark width: the label may truncate to nothing, but the box never
+                      shrinks below the mark (otherwise the connection pill paints over it) */
   white-space: nowrap;
   align-items: center;
   gap: var(--sp-2);
