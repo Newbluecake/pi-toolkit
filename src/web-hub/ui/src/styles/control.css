@@ -248,6 +248,31 @@
   pointer-events: none;
 }
 
+/* 2026-10-08 (user request): on desktop (≥1025px — the shell's wide band) the chips row never
+ * collapses while typing; the hide-while-typing space saver stays a phones/mid-band behavior.
+ * Mirrors the expanded tier above, minus the `:not(.has-text)` condition. */
+@media (min-width: 1025px) {
+  .composer-input:has(.model-switcher) .composer-bottom {
+    max-height: 24px;
+  }
+
+  .composer-input:has(.model-switcher) .composer-bottom .ctx-ring {
+    position: relative;
+    top: auto;
+    right: auto;
+    bottom: auto;
+    flex: none;
+    margin-block: -10px;
+  }
+
+  .composer-chips.chips-off {
+    opacity: 1;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+  }
+}
+
 /* Make room for the ring only when it actually rendered (no DETAIL_METRICS provider ⇒ no ring,
  * no padding). `:has` keeps the component itself free of any padding logic. CONSTANT in both
  * ring placements (bottom row when the row is expanded, mid-right overlay otherwise): the
