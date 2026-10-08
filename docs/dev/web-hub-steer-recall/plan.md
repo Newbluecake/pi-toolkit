@@ -1066,3 +1066,9 @@ TUI 与 managed rpc 各跑一遍，模型执行长工具（`sleep 20`）：
 3. **按文本查找带 scope/owner，且不误伤其他来源**：`findDispatchedByText` / `dequeueByText` 显式接收 scope 与 owner，多个候选返回「不唯一」；E2 没有唯一确认时不 dequeue 任何项，绝不移除 TUI 或其他扩展的条目；`unconfirmed` 保留全文直到 `consumed`/`dropped`；覆盖 reload、跨 session、迟到事件测试。
 
 **评审结论：v4.3 有条件通过（r_QTTM6FGS，2026-10-09）。**
+
+### Y8 — P-core 复验（r_KRNMK1YR）后的调度方裁定（2026-10-09）
+
+1. **陈旧 B1 降级为原生投递（活性）**：若 B1 的在途项属于**已结束的 run**（该 run 的 `agent_end` 已过且仍未拿到 E2——例如被第三方 input handler 吞掉），之后的 run 里新到的网页消息**不再暂存**，直接走原生 `sendUserMessage` 路径（ledger/UI 显示为普通已发送、不可撤回），直到 E2 到达、session 边界或 dispose 解除 B1，再恢复暂存。最坏情况等同于没有本功能时的行为；绝不由计时器解除 B1、绝不重发陈旧项。同一 run 内的阻塞规则（Y1/Y7.1：剩余暂存项在本 run 的 `agent_end` 退回）不变。
+2. **R11（新增已接受残余）**：同进程另一扩展恰好发出与某条网页消息**完全相同的文本**、且该网页消息仍卡在慢 input handler 里尚未入队时，该扩展消息的 `message_start` 可能被归因为我方 E2，B1 提前解除，下一条网页消息可能先于上一条入队。触发条件需三者同时成立，不为此新增机制；若上一条已在 pi 队列中，FIFO 不受影响。
+3. **`dispose()` 清除 `inflight`**，并补测试。
