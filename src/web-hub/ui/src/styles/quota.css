@@ -267,10 +267,18 @@
     color: var(--c-text-3);
   }
 
+  /* 2026-10-09 现场「订阅详情的展示存在很大的问题」: `left/right: 8px` resolved against
+   * `.q-anchor` (position:relative, only as wide as the pill), squeezing the card to ~130px —
+   * every line wrapped and the bars collapsed. Pin it to the VIEWPORT instead, just below the
+   * top bar (no transformed/filtered ancestor, so `fixed` really is viewport-relative). */
   .q-card {
+    position: fixed;
+    top: calc(var(--topbar-h) + 4px);
     left: 8px;
     right: 8px;
     width: auto;
     max-width: none;
+    max-height: calc(100dvh - var(--topbar-h) - 16px);
+    overflow-y: auto;
   }
 }
