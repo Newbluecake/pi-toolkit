@@ -16,8 +16,10 @@
   padding-left: max(var(--sp-3), env(safe-area-inset-left));
   padding-right: max(var(--sp-3), env(safe-area-inset-right));
   padding-bottom: max(var(--sp-1), env(safe-area-inset-bottom));
-  background: var(--c-surface);
-  border-top: 1px solid var(--c-border);
+  /* 2026-10-08 user request: the control dock blends into the transcript canvas (was
+   * var(--c-surface) + a border-top divider — a visible white band under the history).
+   * The composer CARD keeps its own --c-surface background for contrast against it. */
+  background: var(--c-bg);
   color: var(--c-text-3);
   font-size: var(--fs-xs);
 }
