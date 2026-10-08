@@ -77,4 +77,72 @@ describe("ThinkingBlock.vue", () => {
     expect(wrapper.get(".thinking-text").element.textContent).toBe("first line\nsecond line");
     expect(wrapper.get("summary").text()).toContain("2");
   });
+
+  /* --- streaming follow (2026-10-08): live blocks pin the capped panel to the newest line;
+   * a USER scroll away from the bottom stops the follow, scrolling back resumes it, and the
+   * follow's own scrollTop write must not count as a user gesture (one-shot suppress token).
+   * happy-dom does not do layout, so scrollHeight/clientHeight are stubbed per element. */
+  function stubBox(el: Element, box: { scrollHeight: number; clientHeight: number; scrollTop: number }): void {
+    Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => box.scrollHeight });
+    Object.defineProperty(el, "clientHeight", { configurable: true, get: () => box.clientHeight });
+    Object.defineProperty(el, "scrollTop", {
+      configurable: true,
+      get: () => box.scrollTop,
+      set: (v: number) => {
+        box.scrollTop = v;
+      },
+    });
+  }
+
+  it("follows the newest line while live and near the bottom", async () => {
+    const wrapper = mount(ThinkingBlock, { props: { text: SHORT_TEXT, live: true } });
+    const el = wrapper.get(".thinking-text").element;
+    const box = { scrollHeight: 1000, clientHeight: 320, scrollTop: 0 };
+    stubBox(el, box);
+    await wrapper.setProps({ text: SHORT_TEXT + "\nnew line" });
+    expect(box.scrollTop).toBe(1000); // pinned to the bottom
+  });
+
+  it("the follow write's own scroll event does not unregister as a user scroll", async () => {
+    const wrapper = mount(ThinkingBlock, { props: { text: SHORT_TEXT, live: true } });
+    const el = wrapper.get(".thinking-text").element;
+    const box = { scrollHeight: 1000, clientHeight: 320, scrollTop: 0 };
+    stubBox(el, box);
+    await wrapper.setProps({ text: SHORT_TEXT + "\nline" }); // follow writes scrollTop
+    el.dispatchEvent(new Event("scroll")); // the write's own event: consumed by the suppress token
+    await wrapper.setProps({ text: SHORT_TEXT + "\nline\nmore" });
+    expect(box.scrollTop).toBe(1000); // still following
+  });
+
+  it("stops following after the user scrolls up, resumes when scrolled back to the bottom", async () => {
+    const wrapper = mount(ThinkingBlock, { props: { text: SHORT_TEXT, live: true } });
+    const el = wrapper.get(".thinking-text").element;
+    const box = { scrollHeight: 1000, clientHeight: 320, scrollTop: 0 };
+    stubBox(el, box);
+    await wrapper.setProps({ text: SHORT_TEXT + "\nline" });
+    el.dispatchEvent(new Event("scroll")); // consume the follow write's event
+    // user scrolls up (distance from bottom 400 > threshold)
+    box.scrollTop = 280;
+    el.dispatchEvent(new Event("scroll"));
+    box.scrollHeight = 1400;
+    await wrapper.setProps({ text: SHORT_TEXT + "\nline\nmore\nmore" });
+    expect(box.scrollTop).toBe(280); // untouched — the user's reading position wins
+    // user scrolls back to the bottom → follow resumes
+    box.scrollTop = 1400 - 320;
+    el.dispatchEvent(new Event("scroll"));
+    box.scrollHeight = 1800;
+    await wrapper.setProps({ text: SHORT_TEXT + "\nline\nmore\nmore\nagain" });
+    expect(box.scrollTop).toBe(1800);
+  });
+
+  it("never follows once the block is no longer live", async () => {
+    const wrapper = mount(ThinkingBlock, { props: { text: SHORT_TEXT, live: true } });
+    const el = wrapper.get(".thinking-text").element;
+    const box = { scrollHeight: 1000, clientHeight: 320, scrollTop: 0 };
+    stubBox(el, box);
+    await wrapper.setProps({ live: false });
+    box.scrollTop = 0;
+    await wrapper.setProps({ text: SHORT_TEXT + "\nlate" });
+    expect(box.scrollTop).toBe(0);
+  });
 });

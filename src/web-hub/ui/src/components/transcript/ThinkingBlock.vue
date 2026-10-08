@@ -14,7 +14,7 @@
   user already made.
 -->
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 
 /** Thresholds above which a finished thinking block auto-collapses instead of staying open. */
@@ -50,6 +50,41 @@ function onSummaryClick(e: MouseEvent): void {
   e.preventDefault();
   manualOverride.value = !isOpen.value;
 }
+
+/* --- streaming follow (2026-10-08 user request) -------------------------------------------
+ * While the block is live, keep the scroll-capped `.thinking-text` panel pinned to the latest
+ * line. Any USER scroll inside the panel flips `sticky` by position: scrolled up ⇒ stop
+ * following (the model can't fight the reader); scrolled back to the bottom ⇒ resume — the
+ * same near-bottom semantics as the transcript's own follow scroll (`useFollowScroll.ts`).
+ * Our own scrollTop write would fire a `scroll` event indistinguishable from a user drag, so
+ * it carries a one-shot `suppressScroll` token the handler consumes (mirrors Transcript.vue's
+ * restore-token pattern). */
+const FOLLOW_THRESHOLD_PX = 24;
+const body = ref<HTMLElement | null>(null);
+const sticky = ref(true);
+let suppressScroll = false;
+
+function onBodyScroll(): void {
+  const el = body.value;
+  if (!el) return;
+  if (suppressScroll) {
+    suppressScroll = false;
+    return;
+  }
+  sticky.value = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD_PX;
+}
+
+watch(
+  () => [props.text, isOpen.value] as const,
+  () => {
+    if (props.live !== true || !sticky.value || !isOpen.value) return;
+    const el = body.value;
+    if (!el) return;
+    suppressScroll = true;
+    el.scrollTop = el.scrollHeight;
+  },
+  { immediate: true, flush: "post" },
+);
 </script>
 
 <template>
@@ -57,6 +92,6 @@ function onSummaryClick(e: MouseEvent): void {
     <summary @click="onSummaryClick">
       <span>{{ t("transcript.thinking", { n: lineCount }) }}</span>
     </summary>
-    <div class="thinking-text">{{ shown }}</div>
+    <div ref="body" class="thinking-text" @scroll.passive="onBodyScroll">{{ shown }}</div>
   </details>
 </template>
