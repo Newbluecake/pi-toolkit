@@ -358,9 +358,10 @@ export const RESUMED_MARKER = "resumed · draft restored";
 /** §6.2 renderResult line for an interrupted/deferred result. */
 export const INTERRUPTED_RENDER_TEXT = "⏸ paused · bg done · will re-ask";
 
-/** §4.4 status-bar text (English inline token). */
+/** §4.4 status-bar text (English inline token). `⏸` is a wide-risk glyph (counted 1 column, many
+ *  terminals draw it 2 wide) — it must be followed by a space or the count gets covered. */
 export function parkedStatusText(count: number): string {
-  return `ask⏸${count}`;
+  return `ask⏸ ${count}`;
 }
 
 /** §4.4 agent_settled notify (Chinese prose; lists the parked question headers). */

@@ -158,7 +158,7 @@ describe("parked persistence wiring", () => {
     expect(data.items[0]!.question).toBe("Q");
     expect(data.items[0]!.interrupts).toBe(1);
     expect(data.items[0]!.runSeq).toBe(1);
-    expect(statuses).toContainEqual(["ask-user", "ask⏸1"]);
+    expect(statuses).toContainEqual(["ask-user", "ask⏸ 1"]);
   });
 
   function parkedBranch(items: ParkedEntry[]): unknown[] {
@@ -206,7 +206,7 @@ describe("parked persistence wiring", () => {
       },
     });
     h.trigger("session_start", {}, fakeCtx(parkedBranch([restored]), { statuses }));
-    expect(statuses).toContainEqual(["ask-user", "ask⏸1"]);
+    expect(statuses).toContainEqual(["ask-user", "ask⏸ 1"]);
     // The restored entry makes the next identical call a re-ask (resumed marker).
     const c = tuiContext();
     const pending = h.tool.execute("id", PARAMS, undefined, undefined, c.ctx);
@@ -342,7 +342,7 @@ async function until<T>(fn: () => T | undefined, what: string): Promise<T> {
 }
 
 describe("integration: interrupt on a real session, scripted model does not re-ask", () => {
-  it("persists ask-user:parked, sets ask⏸1, notifies once, and starts no extra run", async () => {
+  it("persists ask-user:parked, sets ask⏸ 1, notifies once, and starts no extra run", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "ask-user-parked-"));
     integrationDirs.push(cwd);
     const model = fakeModel();
@@ -413,7 +413,7 @@ describe("integration: interrupt on a real session, scripted model does not re-a
       expect(parkedEntry!.data!.items![0]!.question).toBe("Which DB?");
       expect(parkedEntry!.data!.items![0]!.interrupts).toBe(1);
       // Status bar + exactly one settle notify mentioning the question.
-      expect(statuses).toContainEqual(["ask-user", "ask⏸1"]);
+      expect(statuses).toContainEqual(["ask-user", "ask⏸ 1"]);
       expect(notifies).toHaveLength(1);
       expect(notifies[0]).toContain("Which DB?");
     } finally {

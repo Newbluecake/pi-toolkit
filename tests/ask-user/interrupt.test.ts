@@ -472,3 +472,20 @@ describe("RPC opt-in (backgroundInterrupt.rpc = true)", () => {
     expect(h.session!.closed).toEqual(["background", "aborted"]);
   });
 });
+
+describe("ask_user inline status texts keep wide-risk glyphs clear (emoji-terminal overlap)", () => {
+  it("every ⏸-bearing marker is followed by a space or ends the line", async () => {
+    const { findGlyphCollisions } = await import("../../src/ui/fleet-widget.js");
+    const mod = await import("../../src/ask-user/interrupt.js");
+    for (const text of [
+      mod.parkedStatusText(1),
+      mod.parkedStatusText(12),
+      mod.pauseNoticeText(3),
+      mod.exhaustedNoticeText(3),
+      mod.INTERRUPTED_RENDER_TEXT,
+    ]) {
+      expect(findGlyphCollisions(text), text).toEqual([]);
+    }
+    expect(mod.parkedStatusText(1)).toBe("ask⏸ 1");
+  });
+});
