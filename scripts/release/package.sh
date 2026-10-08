@@ -16,8 +16,12 @@ ZIP="$OUT_DIR/pi-toolkit-${VERSION}.zip"
 # Keep the source entrypoint and pi skills in the release: pi loads index.ts via
 # jiti, while dist remains available to plain Node consumers.
 echo "📦 packaging pi-toolkit v${VERSION}"
-npm run build
-npm run build:web
+# Build steps must not inherit the caller's NODE_ENV (e.g. vitest runs this script with
+# NODE_ENV=test, which makes @vue/compiler-sfc KEEP template comments and the UI bundle
+# grows ~4 KB gz past the check:web budget — field report 2026-10-08, tests/release/
+# package-zip.test.ts failing deterministically). Pin production explicitly.
+NODE_ENV=production npm run build
+NODE_ENV=production npm run build:web
 npm run check:web
 
 rm -rf "$OUT_DIR/stage"
