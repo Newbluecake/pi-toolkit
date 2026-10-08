@@ -197,15 +197,18 @@ export function webHubUploadsDir(home: string): string {
  * SP5) and `<stateDir>/spawn/` (the 0700 stderr-log dir, one file per spawn). The
  * default-model plan (§2/D1/§3.1) adds `<stateDir>/spawn-prefs.json` — the 0600 single-value
  * 「新建会话默认模型」 preference (`{"v":1,"defaultModel":string|null}`) owned by H2's
- * `hub/spawn/prefs.ts`. Takes the SAME `stateDir` the callers already resolved via
- * `webHubStateDir(home)` so it never re-derives the prefix — additive, does not touch the
- * frozen `HubPaths` shape.
+ * `hub/spawn/prefs.ts`. The session-history plan (§3.4, PD12) adds
+ * `<stateDir>/spawn/fork-src/` — the hub-owned 0700 directory holding ONLY fork snapshots
+ * (`snap-<rand>.jsonl`, complete lines, 0600; the hub snapshots the pinned source file there
+ * before `pi --fork <snap>`, so the source file is never handed to pi directly) — additive,
+ * does not touch the frozen `HubPaths` shape either.
  */
 export function webHubSpawnFiles(stateDir: string): {
   spawnsJson: string;
   logDir: string;
   prefsJson: string;
   restoreVeto: string;
+  forkSrcDir: string;
 } {
   return {
     spawnsJson: `${stateDir}/spawns.json`,
@@ -214,6 +217,9 @@ export function webHubSpawnFiles(stateDir: string): {
     // web-hub-spawn-restore plan D13/§10.5: one-shot veto `/webhub stop` writes and the next hub
     // boot consumes (never restore after a stop, even when the stop fell back to SIGTERM).
     restoreVeto: `${stateDir}/spawn/restore.veto`,
+    // web-hub session-history plan §3.4: hub-owned 0700 dir for fork snapshots ONLY — never
+    // inside sessionsRoot (PD12); never a session pi itself resolves.
+    forkSrcDir: `${stateDir}/spawn/fork-src`,
   };
 }
 

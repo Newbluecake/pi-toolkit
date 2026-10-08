@@ -19,6 +19,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { isValidModelId, isValidProvider } from "./models.js";
+import { isValidSessionKey, SESSION_KEY_MAX_BYTES, type SessionRefWire } from "./session-history.js";
 
 // ---------------------------------------------------------------------------
 // states & enums (arch §8.1, verbatim)
@@ -169,6 +170,11 @@ export interface SpawnRecordPublic {
   /** web-hub-spawn-restore plan §9.2: present while a restore is in flight, failed, or inside
    * its 2-minute stability window. Never carries `sessionId`/`sessionFile`. */
   restore?: SpawnRestoreWire;
+  /** session-history plan §3.3: how this record came to exist from the history surface —
+   * `"history"` for the resume branch, `"fork"` when the user chose (or was forced to)
+   * fork. Memory/projection only, never persisted (v3.4 X1: no history-origin/provenance
+   * field exists anywhere); `SpawnRow` hides the plain retry while set (PD15). */
+  from?: "history" | "fork";
 }
 
 export interface SpawnRecordOwner extends SpawnRecordPublic {
@@ -216,6 +222,13 @@ export interface SpawnRequestBody {
    * the preference — that is the point of the tri-state. */
   model?: string;
   firstPrompt?: { text: string; deliver?: "steer" | "followUp" }; // text ≤48 KiB, UTF-8
+  /** session-history plan §3.3: resume/fork a listed past session instead of forking a fresh
+   * one. Only sent when the hub advertises `SPAWN_HISTORY_HUB_CAP` (PD14 — an old hub's
+   * schema is `additionalProperties:false`, so a client that cannot see the cap must fail
+   * locally rather than silently drop the field); `mode` absent ⇒ the hub decides (fork
+   * when occupancy is detected / `"maybe"`). Parsed ONLY under
+   * `parseSpawnRequestBody(raw, { session: true })` — see {@link SessionRefSchema}. */
+  session?: SessionRefWire;
 }
 
 export interface SpawnAccepted {
@@ -229,6 +242,11 @@ export interface SpawnAccepted {
   model?: string;
   dup?: true;
   firstPrompt?: "accepted";
+  /** session-history plan §3.3: present iff the request carried a `session` ref. `mode` is
+   * what the hub ACTUALLY did (occupancy may override a `"resume"` request with `"fork"`),
+   * `id` is the session id involved — for a fork, the NEW id; a `dup:true` replay returns
+   * the ORIGINAL record's value (same rule as `model`). */
+  session?: { mode: "resume" | "fork"; id: string };
 }
 
 /**
@@ -259,6 +277,11 @@ export interface HubSpawnConfig {
   /** web-hub-spawn-restore plan D18: restore managed sessions across hub restarts. Absent ⇒
    * false hub-side (an older pi launching a newer hub never restores on its own). */
   restore?: boolean;
+  /** session-history plan §3.7: the history session list + resume/fork surface. Absent ⇒
+   * false hub-side (same wire-level-off pattern as `restore`); `SPAWN_HISTORY_HUB_CAP` rides
+   * exactly this key. Non-boolean ⇒ the whole spawn block is rejected (P-cfg, same rule as
+   * `restore`). */
+  history?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,15 +394,64 @@ export const SpawnRequestSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export type SpawnBodyError = "not-an-object" | "schema" | "cwd-too-long" | "model-invalid" | "first-prompt-too-long";
+/**
+ * session-history plan §3.3: the `session` ref on `POST /api/headless`. `key` is
+ * `<dir>/<file>` under the hub's sessionsRoot — the schema's `maxLength` is the usual
+ * UTF-16-unit PREFILTER only; the exact shape (`exactly one /`, segments, `.jsonl`,
+ * byte cap) is enforced by {@link isValidSessionKey} inside `parseSpawnRequestBody`.
+ * `id` must match {@link RESTORE_SESSION_ID_RE} (the header id the hub verifies the file
+ * against); `mode` absent ⇒ the hub decides.
+ */
+export const SessionRefSchema = Type.Object(
+  {
+    key: Type.String({ minLength: 3, maxLength: SESSION_KEY_MAX_BYTES }),
+    id: Type.String({ pattern: RESTORE_SESSION_ID_RE.source }),
+    mode: Type.Optional(Type.Union([Type.Literal("resume"), Type.Literal("fork")])),
+  },
+  { additionalProperties: false },
+);
 
-/** Validate + parse an arbitrary JSON value into a `SpawnRequestBody`. Never throws. */
+/**
+ * session-history plan §3.3: the POST body schema WITH the optional `session` ref —
+ * `SpawnRequestSchema`'s fields plus `session`. Selected ONLY by
+ * `parseSpawnRequestBody(raw, { session: true })` (the hub has the feature on); every other
+ * caller keeps {@link SpawnRequestSchema}, where a `session` key is an
+ * `additionalProperties:false` violation, so a body with `session` behaves byte-identically
+ * to the pre-feature hub.
+ */
+export const SpawnRequestSchemaWithSession = Type.Object(
+  { ...SpawnRequestSchema.properties, session: Type.Optional(SessionRefSchema) },
+  { additionalProperties: false },
+);
+
+export type SpawnBodyError =
+  | "not-an-object"
+  | "schema"
+  | "cwd-too-long"
+  | "model-invalid"
+  | "first-prompt-too-long"
+  | "session-ref"
+  | "model-with-session";
+
+/** Validate + parse an arbitrary JSON value into a `SpawnRequestBody`. Never throws.
+ *
+ * session-history plan §3.3: `opts` absent / `opts.session !== true` ⇒ the EXACT pre-feature
+ * path (`SpawnRequestSchema` — a body carrying `session` fails with `"schema"`).
+ * `opts.session === true` ⇒ {@link SpawnRequestSchemaWithSession}, then after the existing
+ * checks: `session` present with a key failing `isValidSessionKey` ⇒ `"session-ref"`;
+ * `session` present ∧ `model !== undefined` (ANY value incl. `""` — PD13) ⇒
+ * `"model-with-session"`. */
 export function parseSpawnRequestBody(
   raw: unknown,
+  opts?: { session?: boolean },
 ): { ok: true; body: SpawnRequestBody } | { ok: false; error: SpawnBodyError } {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "not-an-object" };
-  if (!Value.Check(SpawnRequestSchema, raw)) return { ok: false, error: "schema" };
-  const body: SpawnRequestBody = Value.Decode(SpawnRequestSchema, raw);
+  const withSession = opts?.session === true;
+  const schema = withSession ? SpawnRequestSchemaWithSession : SpawnRequestSchema;
+  if (!Value.Check(schema, raw)) return { ok: false, error: "schema" };
+  const body: SpawnRequestBody = withSession
+    ? Value.Decode(SpawnRequestSchemaWithSession, raw)
+    : Value.Decode(SpawnRequestSchema, raw);
   if (byteLength(body.cwd) > SPAWN_CWD_MAX_BYTES) return { ok: false, error: "cwd-too-long" };
   // SP9 (SP1 acceptance leftover P3①): `expectCwd` gets the same exact UTF-8 byte re-check as
   // `cwd` — the typebox `maxLength` above is only a UTF-16-unit prefilter, so e.g. 2048 astral
@@ -394,6 +466,12 @@ export function parseSpawnRequestBody(
   }
   if (body.firstPrompt !== undefined && byteLength(body.firstPrompt.text) > PROMPT_TEXT_MAX_BYTES) {
     return { ok: false, error: "first-prompt-too-long" };
+  }
+  // session-history plan §3.3 (after the existing checks — `model-invalid` keeps precedence):
+  // an invalid `key` is the more specific rejection, so it outranks `model-with-session`.
+  if (withSession && body.session !== undefined) {
+    if (!isValidSessionKey(body.session.key)) return { ok: false, error: "session-ref" };
+    if (body.model !== undefined) return { ok: false, error: "model-with-session" };
   }
   return { ok: true, body };
 }
@@ -537,3 +615,13 @@ type _SpawnPrefsStaticMatches =
     : never;
 const _spawnPrefsStaticMatches: _SpawnPrefsStaticMatches = true;
 void _spawnPrefsStaticMatches;
+
+/** Fails to compile if the with-session schema and `SpawnRequestBody` ever drift apart (session-history plan §3.3). */
+type _SpawnRequestWithSessionStaticMatches =
+  Static<typeof SpawnRequestSchemaWithSession> extends SpawnRequestBody
+    ? SpawnRequestBody extends Static<typeof SpawnRequestSchemaWithSession>
+      ? true
+      : never
+    : never;
+const _spawnRequestWithSessionStaticMatches: _SpawnRequestWithSessionStaticMatches = true;
+void _spawnRequestWithSessionStaticMatches;

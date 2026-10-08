@@ -28,9 +28,19 @@ describe("webHubSpawnFiles", () => {
       prefsJson: "/home/u/.pi/agent/web-hub/spawn-prefs.json",
       // web-hub-spawn-restore plan D13: the one-shot stop veto lives next to the stderr logs
       restoreVeto: "/home/u/.pi/agent/web-hub/spawn/restore.veto",
+      // session-history plan §3.4 (PD12): hub-owned 0700 fork-snapshot dir
+      forkSrcDir: "/home/u/.pi/agent/web-hub/spawn/fork-src",
     });
     // the prefs file sits in the SAME stateDir webHubStateDir resolves — never re-derived
     expect(webHubSpawnFiles(webHubStateDir("/home/u")).prefsJson).toBe("/home/u/.pi/agent/web-hub/spawn-prefs.json");
+  });
+
+  it("session-history plan §3.4: forkSrcDir is <stateDir>/spawn/fork-src (hub-owned, sibling of logDir)", () => {
+    const stateDir = webHubStateDir("/home/u");
+    const files = webHubSpawnFiles(stateDir);
+    expect(files.forkSrcDir).toBe(`${stateDir}/spawn/fork-src`);
+    // PD12: hub-owned dir for fork snapshots ONLY — under <stateDir>/spawn, never inside a sessionsRoot
+    expect(files.forkSrcDir.startsWith(`${files.logDir}/`)).toBe(true);
   });
 });
 

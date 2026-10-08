@@ -46,6 +46,8 @@ import {
   REAPER_GRACE_MS,
   SPAWN_EVENT_MS,
   SpawnRequestSchema,
+  SpawnRequestSchemaWithSession,
+  SessionRefSchema,
   parseSpawnModelRef,
   parseSpawnPrefsRequest,
   parseSpawnRequestBody,
@@ -407,5 +409,113 @@ describe("web-hub-spawn-restore plan §10.1: restore constants + session coordin
     expect(ok(`/${"a".repeat(1018)}.jsonl`)).toBe(false); // 1025
     expect(ok(`/${"é".repeat(508)}.jsonl`)).toBe(true); // UTF-8 bytes: 1 + 1016 + 6 = 1023
     expect(ok(`/${"é".repeat(509)}.jsonl`)).toBe(false); // 1 + 1018 + 6 = 1025
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub session-history plan §3.3/§4.2: the `session` ref on POST /api/headless
+// ---------------------------------------------------------------------------
+
+describe("session-history plan §3.3: `session` ref on the POST body (parseSpawnRequestBody opts)", () => {
+  const SID = "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b"; // matches RESTORE_SESSION_ID_RE
+  const session = { key: "d1/019a2b3c.jsonl", id: SID };
+
+  it("no opts ⇒ EXACT pre-feature path: a `session` key is a schema violation, never parsed", () => {
+    const raw = { ...body(), session };
+    expect(Value.Check(SpawnRequestSchema, raw)).toBe(false);
+    expect(Value.Check(SpawnRequestSchemaWithSession, raw)).toBe(true); // the new schema admits it
+    expect(parseSpawnRequestBody(raw)).toEqual({ ok: false, error: "schema" });
+    // opts.session !== true behaves the same as absent
+    expect(parseSpawnRequestBody(raw, {})).toEqual({ ok: false, error: "schema" });
+    expect(parseSpawnRequestBody(raw, { session: false })).toEqual({ ok: false, error: "schema" });
+  });
+
+  it("opts.session === true + valid ref ⇒ ok, decoded verbatim (mode optional, round-trips)", () => {
+    const withMode = { ...body(), session: { ...session, mode: "resume" as const } };
+    expect(parseSpawnRequestBody(withMode, { session: true })).toEqual({ ok: true, body: withMode });
+    expect(parseSpawnRequestBody({ ...body(), session }, { session: true })).toEqual({
+      ok: true,
+      body: { ...body(), session },
+    });
+  });
+
+  it("opts.session === true + NO session ⇒ ok and body.session stays undefined; model tri-state intact", () => {
+    const r = parseSpawnRequestBody(body(), { session: true });
+    expect(r.ok && r.body.session).toBeUndefined();
+    // "" is still the explicit pi default (no session ⇒ no model-with-session conflict)
+    expect(parseSpawnRequestBody(body({ model: "" }), { session: true })).toMatchObject({ ok: true });
+    // a garbage model is still model-invalid (existing checks run before the session checks)
+    expect(parseSpawnRequestBody(body({ model: "garbage" }), { session: true })).toEqual({
+      ok: false,
+      error: "model-invalid",
+    });
+  });
+
+  it("session-ref: schema-valid key that fails isValidSessionKey", () => {
+    for (const key of ["d1/bad", "a/b/c.jsonl", ".jsonl", "d1/.jsonl", "../x.jsonl", `${"d".repeat(256)}/x.jsonl`]) {
+      expect(parseSpawnRequestBody({ ...body(), session: { ...session, key } }, { session: true })).toEqual({
+        ok: false,
+        error: "session-ref",
+      });
+    }
+  });
+
+  it('model-with-session: ANY model value incl. "" conflicts with a session (PD13)', () => {
+    expect(parseSpawnRequestBody({ ...body(), session, model: "" }, { session: true })).toEqual({
+      ok: false,
+      error: "model-with-session",
+    });
+    expect(
+      parseSpawnRequestBody({ ...body(), session, model: "anthropic/claude-sonnet-4" }, { session: true }),
+    ).toEqual({ ok: false, error: "model-with-session" });
+  });
+
+  it("priority: session-ref outranks model-with-session (checked first)", () => {
+    expect(
+      parseSpawnRequestBody({ ...body(), session: { ...session, key: "d1/bad" }, model: "" }, { session: true }),
+    ).toEqual({ ok: false, error: "session-ref" });
+  });
+
+  it("SessionRefSchema is strict: extra fields / bad id / bad mode / too-short key ⇒ schema", () => {
+    const extra = { ...session, extra: 1 };
+    expect(parseSpawnRequestBody({ ...body(), session: extra }, { session: true })).toEqual({
+      ok: false,
+      error: "schema",
+    });
+    expect(parseSpawnRequestBody({ ...body(), session: { ...session, id: "bad id!" } }, { session: true })).toEqual({
+      ok: false,
+      error: "schema",
+    });
+    expect(parseSpawnRequestBody({ ...body(), session: { ...session, mode: "clone" } }, { session: true })).toEqual({
+      ok: false,
+      error: "schema",
+    });
+    // minLength 3 prefilter (the exact shape is isValidSessionKey's job, reached as session-ref)
+    expect(parseSpawnRequestBody({ ...body(), session: { ...session, key: "ab" } }, { session: true })).toEqual({
+      ok: false,
+      error: "schema",
+    });
+    expect(Value.Check(SessionRefSchema, session)).toBe(true);
+  });
+
+  it("SpawnRequestSchemaWithSession accepts every pre-feature body shape (superset, byte-identical otherwise)", () => {
+    const minimal = body();
+    const full = body({
+      id: ID_64,
+      confirm: true,
+      expectCwd: "/home/u/proj",
+      model: "",
+      firstPrompt: { text: "first!", deliver: "followUp" },
+    });
+    expect(Value.Check(SpawnRequestSchemaWithSession, minimal)).toBe(true);
+    expect(Value.Check(SpawnRequestSchemaWithSession, full)).toBe(true);
+    expect(parseSpawnRequestBody(full, { session: true })).toEqual({ ok: true, body: full });
+    // unknown fields still rejected at both levels
+    expect(Value.Check(SpawnRequestSchemaWithSession, { ...full, force: true })).toBe(false);
+  });
+
+  it('SPAWN_HISTORY_HUB_CAP is "spawn.history.v1" (session-history plan PD1 — advertised only when config.spawn?.history === true)', async () => {
+    const { SPAWN_HISTORY_HUB_CAP } = await import("../../../src/web-hub/protocol/version.js");
+    expect(SPAWN_HISTORY_HUB_CAP).toBe("spawn.history.v1");
   });
 });

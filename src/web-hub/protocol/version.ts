@@ -63,6 +63,21 @@ export const SPAWN_HUB_CAP = "spawn.v1";
 export const SPAWN_MODEL_HUB_CAP = "spawn.model.v1";
 
 /**
+ * web-hub session-history plan PD1 (§3.2): the hub cap advertising the history session list
+ * + resume/fork surface — `GET /api/headless/history` and the `session` ref on
+ * `POST /api/headless`. Advertised ONLY when `config.spawn?.history === true` (P-cfg threads
+ * the `webHub.spawn.history` setting into `HubSpawnConfig.history`; the key's absence is the
+ * wire-level off, same pattern as `restore`) on both hub cap surfaces, exactly like
+ * `SPAWN_MODEL_HUB_CAP`. A browser that does NOT see it MUST NOT send `session` anywhere
+ * (PD14: the pre-feature request schema is `additionalProperties:false`, so an old hub would
+ * 400 the body — dropping the field silently would fork a brand-new session) and hides the
+ * history entry; an old browser just ignores the unknown cap string. Like every cap above it
+ * adds no agent↔hub frames and no SSE event, so no PROTO bump (same §2.3 rule; the 1.1 →
+ * 1.2 minor bump is fleet F0's alone, see PROTO above).
+ */
+export const SPAWN_HISTORY_HUB_CAP = "spawn.history.v1"; // only when config.spawn?.history === true; no PROTO bump
+
+/**
  * web-hub-preview plan v3 §4.1 (PV1): the two hub caps advertising the read-only content-preview
  * endpoint (`GET /api/preview`). `PREVIEW_HUB_CAP` is declared whenever the feature is on
  * (`webHub.preview` = `"loopback"` or `"on"`); `PREVIEW_LAN_HUB_CAP` only when the mode is
