@@ -84,6 +84,7 @@ import type {
   LanFrontendDeps,
 } from "./ports.js";
 import type { FsDeps } from "../protocol/paths.js";
+import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
@@ -1293,10 +1294,29 @@ async function identityFields(): Promise<Pick<HubRecord, "procStartTicks" | "arg
     const raw = afterComm[19];
     const procStartTicks = raw === undefined ? NaN : Number(raw);
     if (!Number.isFinite(procStartTicks)) return {};
-    return { procStartTicks, argv: process.argv.slice() };
+    let cmdline: string | undefined;
+    try {
+      cmdline = await readFile("/proc/self/cmdline", "utf8");
+    } catch {
+      cmdline = undefined;
+    }
+    return { procStartTicks, argv: identityArgv(cmdline, process.argv) };
   } catch {
     return {};
   }
+}
+
+/**
+ * The argv recorded in hub.json must be the *kernel's* view (`/proc/self/cmdline`), because that is
+ * exactly what `verifyProcIdentity` later compares against. `process.argv` is NOT that: pi's bundled
+ * `jiti-cli.mjs` does `process.argv.splice(2, 1)` and overwrites `argv[1]` with the resolved script, so
+ * the hub sees `[node, main.ts]` while `/proc` shows `[node, jiti-cli.mjs, main.ts]` — recording
+ * `process.argv` made every restart fallback fail with `argv-shape`. `process.argv` is only a fallback
+ * for an unreadable/empty cmdline.
+ */
+export function identityArgv(cmdline: string | undefined, fallback: readonly string[]): string[] {
+  const parts = cmdline === undefined ? [] : parseCmdline(cmdline);
+  return parts.length > 0 ? parts : fallback.slice();
 }
 
 function bounded(p: Promise<void>): Promise<void> {
