@@ -27,6 +27,7 @@ import {
   type RestoreFailure,
 } from "../../protocol/spawn.js";
 import type { SpawnRestoreWire } from "../../protocol/spawn.js";
+import { checkSessionHeader } from "./history/head.js";
 import type { StoredRecord, StoredRestore } from "./store.js";
 
 /** §9.2: the wire slice — every field explicit (no spread), all principals may see it. */
@@ -123,10 +124,6 @@ function errCodeOf(err: unknown): string | undefined {
   return undefined;
 }
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
 /**
  * D7: file known & present & valid ⇒ `["--session", file]` (absolute path — pi's id form can
  * prompt on stdio, F21); file absent and NEVER observed ⇒ `["--session-id", id]` (pi creates the
@@ -161,17 +158,7 @@ export function planSessionArgv(rec: RestoreSessionInput, fs: RestoreSessionFs, 
   } catch (err) {
     return { ok: false, failure: "session-invalid", detail: `header unreadable: ${errCodeOf(err) ?? "unknown"}` };
   }
-  const nl = head.indexOf("\n");
-  const firstLine = nl < 0 ? head : head.slice(0, nl);
-  let header: unknown;
-  try {
-    header = JSON.parse(firstLine);
-  } catch {
-    return { ok: false, failure: "session-invalid", detail: "header is not JSON" };
-  }
-  if (!isPlainObject(header)) return { ok: false, failure: "session-invalid", detail: "header is not an object" };
-  if (header["type"] !== "session") return { ok: false, failure: "session-invalid", detail: "header type mismatch" };
-  if (header["id"] !== sessionId) return { ok: false, failure: "session-invalid", detail: "header id mismatch" };
-  if (header["cwd"] !== rec.cwd) return { ok: false, failure: "session-invalid", detail: "header cwd mismatch" };
+  const checked = checkSessionHeader(head, { id: sessionId, cwd: rec.cwd });
+  if (!checked.ok) return { ok: false, failure: "session-invalid", detail: checked.detail };
   return { ok: true, tail: ["--session", file] };
 }

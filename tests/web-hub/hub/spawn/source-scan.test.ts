@@ -262,4 +262,24 @@ describe("hub/spawn zero-`as` source scan (plan §SP7, arch §4.1 #3)", () => {
     }
     expect(violations.join("\n")).toBe("");
   });
+
+  // session-history plan §4.5 (P-scan): `hub/spawn/history/` is a dedicated zero-`as`
+  // subdirectory of the same contract. The original scan above is deliberately non-recursive
+  // (readdirSync without withFileTypes/recursive), so this extends coverage explicitly instead
+  // of changing that scan's shape — a future subdirectory should get the same treatment.
+  it("every hub/spawn/history source file is free of `as` (except `as const`)", () => {
+    const historyDir = join(SPAWN_DIR, "history");
+    const files = readdirSync(historyDir)
+      .filter((f) => f.endsWith(".ts"))
+      .sort();
+    expect(files.length).toBeGreaterThanOrEqual(10); // budget..service, head/title/pin/generation/index/cwd/proc/occupancy/snapshot, ports
+    const violations: string[] = [];
+    for (const f of files) {
+      const src = readFileSync(join(historyDir, f), "utf8");
+      for (const hit of findBannedAs(stripNoise(src))) {
+        violations.push(`history/${f}:${String(hit.line)}:${String(hit.col)}: ${hit.ctx}`);
+      }
+    }
+    expect(violations.join("\n")).toBe("");
+  });
 });
