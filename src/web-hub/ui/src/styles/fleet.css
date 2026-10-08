@@ -173,6 +173,9 @@ details[open] > summary.run .chev {
   background: none;
   color: inherit;
   font: inherit;
+  /* UA 对 button 默认 text-align:center,会继承给 <b> —— 短 run 名在宽 name 列里被居中
+   * (2026-10-08 现场反馈);与 .fleet-summary-bar 同样显式左对齐。 */
+  text-align: left;
   cursor: pointer;
 }
 
