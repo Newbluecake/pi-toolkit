@@ -71,6 +71,7 @@
 
 .brand-mark {
   display: grid;
+  flex: none; /* never squeezed when the brand shrinks on narrow screens */
   place-items: center;
   width: 26px;
   height: 26px;
