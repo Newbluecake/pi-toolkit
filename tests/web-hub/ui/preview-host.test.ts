@@ -115,6 +115,31 @@ describe("PreviewHost.vue — phases", () => {
     expect(document.querySelector(".preview-truncated")).not.toBeNull();
   });
 
+  it("md: switching to another path RESETS the mode to rendered (dir-plan §4.1 B4, :key)", async () => {
+    const { handle, view } = makeHandle();
+    mountHost({ handle, plaintext: false });
+    view.value = { phase: "text", path: "/p/a.md", text: "# one", truncated: false, size: 6 };
+    await tick();
+    expect(document.querySelector(".preview-md")).not.toBeNull(); // default = rendered
+    // switch to source
+    const buttons = document.querySelectorAll(".preview-toggle-btn");
+    (buttons[1] as HTMLElement).click();
+    await tick();
+    expect(document.querySelector(".preview-md")).toBeNull();
+    expect(document.querySelector(".preview-text-body")).not.toBeNull();
+    // same path, new content (retry shape) ⇒ selection KEPT (source)
+    view.value = { phase: "text", path: "/p/a.md", text: "# one again", truncated: false, size: 11 };
+    await tick();
+    expect(document.querySelector(".preview-text-body")).not.toBeNull();
+    // a DIFFERENT path ⇒ remount ⇒ back to rendered
+    view.value = { phase: "text", path: "/p/b.md", text: "# two", truncated: false, size: 6 };
+    await tick();
+    expect(document.querySelector(".preview-md")).not.toBeNull();
+    expect(document.querySelector(".preview-text-body")).toBeNull();
+    view.value = { phase: "closed" };
+    await tick();
+  });
+
   it("unsupported: reason copy + file size", async () => {
     const { handle, view } = makeHandle();
     mountHost({ handle, plaintext: false });

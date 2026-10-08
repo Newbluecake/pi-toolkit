@@ -627,3 +627,78 @@ export function classifyPreviewError(status, body) {
   if (typeof b.retryAfterS === "number" && b.retryAfterS >= 0) out.retryAfterS = b.retryAfterS;
   return out;
 }
+
+/* -------------------------------------------------------------------------
+ * Markdown preview (dir-plan v3.1 §4.1/§4.3, PM package — appended ONLY; every line above
+ * this section is byte-frozen for this package). Client-side, protocol/hub-untouched: the
+ * file is still fetched as `kind:"text"`; whether it renders as markdown is decided here
+ * from the path alone (B1), and the render budget/降级 (B7/§4.3) bounds the DOM size.
+ * ---------------------------------------------------------------------- */
+
+/** B1: known markdown extensions, case-insensitive, on the LAST dot segment (no `.mdx`). */
+const MD_PATH_RE = /\.(?:md|markdown)$/i;
+
+/**
+ * B1: does this (display) path refer to a markdown file? Client-side extension check on the
+ * last segment — `.md` / `.markdown`, case-insensitive; `.mdx` deliberately NOT included
+ * (the whitelist parser has no JSX escapes, so a `.mdx` would render misleadingly).
+ * Everything else — plain text, JSON, source code — is untouched by the md features.
+ * @param {unknown} path
+ * @returns {boolean}
+ */
+export function isMarkdownPath(path) {
+  return typeof path === "string" && path !== "" && MD_PATH_RE.test(path);
+}
+
+/**
+ * B5/§4.1: a truncated body's last line may be cut MID-construct (half a fence, half an
+ * emphasis span, half a multibyte char's rendering contract). Rendering still defaults to
+ * rendered markdown — but the incomplete final line is dropped first: everything after the
+ * last `\n` is removed. A body with NO `\n` at all is the one incomplete line itself and is
+ * returned as-is (there is nothing complete to fall back to; the truncated note covers it).
+ * Non-truncated bodies pass through byte-identical.
+ * @param {unknown} text
+ * @param {unknown} truncated
+ * @returns {string}
+ */
+export function prepareMarkdownPreview(text, truncated) {
+  if (typeof text !== "string") return "";
+  if (truncated !== true) return text;
+  const cut = text.lastIndexOf("\n");
+  return cut === -1 ? text : text.slice(0, cut);
+}
+
+/** §4.3/B7: AST-node budget — roughly ≤ 2 DOM nodes per AST node ⇒ ≤ ~40k DOM nodes. */
+export const PREVIEW_MD_NODE_MAX = 20_000;
+
+/**
+ * §4.3/B7: count the AST objects reachable from `parseMarkdown` output through array-valued
+ * fields (`children`/`items`/`header`/`rows` — block and inline nodes alike; strings such as
+ * `text`/`href`/`lang` are not nodes). Walks an explicit stack (no recursion — the budget
+ * exists precisely for adversarial 256 KiB inputs) and stops EARLY once `cap` is reached, so
+ * the answer is exact up to and including `cap` and "≥ cap" beyond it. The default cap is
+ * `PREVIEW_MD_NODE_MAX + 1`, i.e. the boolean `countMdNodes(nodes) > PREVIEW_MD_NODE_MAX`
+ * stays exact while a pathological document never finishes the walk.
+ * @param {unknown} nodes @param {number} [cap]
+ * @returns {number}
+ */
+export function countMdNodes(nodes, cap = PREVIEW_MD_NODE_MAX + 1) {
+  if (!Array.isArray(nodes) || !(cap > 0)) return 0;
+  let count = 0;
+  const stack = [nodes];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (Array.isArray(cur)) {
+      for (const child of cur) stack.push(child);
+      continue;
+    }
+    if (cur === null || typeof cur !== "object") continue;
+    count++;
+    if (count >= cap) return count;
+    for (const key in cur) {
+      const v = /** @type {Record<string, unknown>} */ (cur)[key];
+      if (Array.isArray(v)) stack.push(v);
+    }
+  }
+  return count;
+}

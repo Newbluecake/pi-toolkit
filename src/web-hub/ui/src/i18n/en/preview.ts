@@ -16,6 +16,7 @@ const preview = {
   copyPath: "Copy path",
   truncatedBadge: "Truncated",
   truncatedNote: "Showing the first {size} — copy only takes what is shown.",
+  truncatedRenderNote: "Showing the first {size} — the ending may be incomplete.",
   unsupportedTitle: "No preview available",
   unsupportedBody: "This file cannot be previewed ({reason}).",
   reasonBinary: "binary file",
@@ -27,6 +28,10 @@ const preview = {
   tooLargePixels: "The image is {w} × {h}, over the browser preview budget.",
   tooLargeBytes: "The file is {size}, over the {max} preview limit.",
   tooLargeGeneric: "This file exceeds the preview limit.",
+  viewRendered: "Rendered",
+  viewSource: "Source",
+  viewToggleLabel: "Markdown view mode",
+  mdTooComplex: "This file is too complex to render — showing the source instead.",
   errorTitle: "Preview failed",
 } satisfies Record<string, string>;
 

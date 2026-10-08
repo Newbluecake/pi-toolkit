@@ -1,14 +1,19 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { parseMarkdown } from "../../../src/web-hub/ui/src/logic/markdown.js";
 import {
   checkPreviewHeaders,
   classifyPreviewError,
   clientImageBudget,
+  countMdNodes,
   findPathRefs,
+  isMarkdownPath,
   parsePreviewDims,
   pathRefOfCode,
+  prepareMarkdownPreview,
   previewOutcomeFromResponse,
   PREVIEW_MAX_REFS_PER_NODE,
+  PREVIEW_MD_NODE_MAX,
   previewScopeOf,
   scopeKeyOf,
 } from "../../../src/web-hub/ui/src/logic/preview.js";
@@ -788,5 +793,83 @@ describe("logic/preview.js classifyPreviewError (§3.2 phase taxonomy)", () => {
     expect(classifyPreviewError(401, undefined)).toMatchObject({ kind: "error", error: "E_AUTH", retryable: false });
     expect(classifyPreviewError(500, null)).toMatchObject({ error: "HTTP 500", retryable: true });
     expect(classifyPreviewError(0, null)).toMatchObject({ error: "E_NETWORK", retryable: true });
+  });
+});
+
+describe("logic/preview.js markdown pure functions (dir-plan §4.1/§4.3, PM package)", () => {
+  describe("isMarkdownPath (B1: extension check, client-side)", () => {
+    it.each([
+      ["/home/u/proj/README.md", true],
+      ["/home/u/proj/notes.MARKDOWN", true], // case-insensitive
+      ["a.md", true], // bare basename works too (path or basename)
+      ["dir/x.markdown", true],
+      ["dir/x.mdx", false], // .mdx deliberately excluded
+      ["dir/x.md.txt", false],
+      ["dir/x.markdown/", false], // a trailing slash is not an md file
+      ["dir/markdown", false],
+      ["dir/.md", true], // dotfile whose whole name is the extension
+      ["", false],
+      [null, false],
+      [42, false],
+      [undefined, false],
+    ])("%j ⇒ %s", (path, expected) => {
+      expect(isMarkdownPath(path as unknown)).toBe(expected);
+    });
+  });
+
+  describe("prepareMarkdownPreview (B5: drop the truncated tail's incomplete last line)", () => {
+    it("non-truncated bodies pass through byte-identical", () => {
+      expect(prepareMarkdownPreview("# Hi\nhalf", false)).toBe("# Hi\nhalf");
+      expect(prepareMarkdownPreview("# Hi\nhalf", undefined)).toBe("# Hi\nhalf");
+    });
+    it("truncated: everything after the LAST newline is dropped (the possibly-half line)", () => {
+      expect(prepareMarkdownPreview("a\nb\nchopped li", true)).toBe("a\nb");
+      expect(prepareMarkdownPreview("a\nb\n", true)).toBe("a\nb");
+      expect(prepareMarkdownPreview("\nonly-half", true)).toBe("");
+    });
+    it("truncated with NO newline returns the input as-is (it IS the one incomplete line)", () => {
+      expect(prepareMarkdownPreview("chopped heading", true)).toBe("chopped heading");
+    });
+    it('non-string inputs degrade to "" instead of throwing', () => {
+      expect(prepareMarkdownPreview(undefined, true)).toBe("");
+      expect(prepareMarkdownPreview(7, true)).toBe("");
+    });
+  });
+
+  describe("countMdNodes (§4.3/B7: AST budget count with early stop)", () => {
+    it("counts every block and inline node exactly", () => {
+      // paragraph + em + text = 3
+      expect(countMdNodes(parseMarkdown("*a*"))).toBe(3);
+      // code_block = 1; heading + text = 2; list + item-inline(text) = 2
+      expect(countMdNodes(parseMarkdown("```\nx```"))).toBe(1);
+      expect(countMdNodes(parseMarkdown("# h"))).toBe(2);
+      expect(countMdNodes(parseMarkdown("- a\n- b"))).toBe(3);
+      // table: table + one inline per header cell (2) + one per row cell (2) = 5
+      expect(countMdNodes(parseMarkdown("| a | b |\n|---|---|\n| 1 | 2 |"))).toBe(5);
+    });
+
+    it("early-stops exactly at cap (exact up to cap, ≥ cap beyond)", () => {
+      const nodes = parseMarkdown("*a*"); // 3 nodes total
+      expect(countMdNodes(nodes, 1)).toBe(1);
+      expect(countMdNodes(nodes, 2)).toBe(2);
+      expect(countMdNodes(nodes, 3)).toBe(3);
+      expect(countMdNodes(nodes, 99)).toBe(3);
+    });
+
+    it("the budget boolean `count > PREVIEW_MD_NODE_MAX` is exact at the boundary", () => {
+      expect(PREVIEW_MD_NODE_MAX).toBe(20_000);
+      const small = parseMarkdown("*a* ".repeat(3000)); // 3000 × (em + text) = 6000 ≤ 20000
+      expect(countMdNodes(small) > PREVIEW_MD_NODE_MAX).toBe(false);
+      const big = parseMarkdown("*a* ".repeat(30000)); // 60000 > 20000
+      expect(countMdNodes(big) > PREVIEW_MD_NODE_MAX).toBe(true);
+      // and the early stop means the pathological walk never finishes: it returns ≤ MAX + 1
+      expect(countMdNodes(big)).toBeLessThanOrEqual(PREVIEW_MD_NODE_MAX + 1);
+    });
+
+    it("non-array input degrades to 0 (never throws)", () => {
+      expect(countMdNodes(undefined)).toBe(0);
+      expect(countMdNodes(null)).toBe(0);
+      expect(countMdNodes([{ type: "paragraph", children: [] }], 0)).toBe(0); // cap ≤ 0 ⇒ 0
+    });
   });
 });

@@ -1,4 +1,16 @@
 /**
+ * FROZEN REFERENCE COPY of `src/web-hub/ui/src/logic/markdown.js` as of the
+ * dir-plan v3.1 §4.2 PM package (pre-linearization). The live module's `parseInline` gained
+ * failed-search memos (output-identical by construction — the memo only short-circuits calls
+ * whose full scan provably returns -1); `tests/web-hub/ui/logic-markdown-perf.test.ts` diffs
+ * the live `parseMarkdown` against THIS copy on a fixed-seed random corpus plus every
+ * pathological benchmark input, so any output drift (not just timing) fails the suite.
+ *
+ * NEVER edit this file to "fix" a differential failure — a red diff means the live parser
+ * changed behavior; re-freeze only by copying the exact released implementation again.
+ *
+ * Original header follows.
+ * ---
  * Whitelisted markdown parser (vue-plan.md v2.1 §3.1/§3.10, §5.2 — P5b cleanup): fenced code
  * blocks, inline code, bold/italic, lists, links (http/https only), headings, paragraphs.
  * Extended subset (markdown-whitelist-extension): GFM pipe tables (alignment colons included),
@@ -313,19 +325,6 @@ function parseInline(src, depth) {
   /** @type {Inline[]} */
   const out = [];
   let buf = "";
-  // dir-plan v3.1 §4.2 failed-search memos (amortized-linear inline parsing, output
-  // IDENTICAL to the pre-change parser by construction): a closing search that found no
-  // valid delimiter from position `from` can never find one from any later start — a
-  // candidate's validity depends only on the characters around the candidate itself plus
-  // `at > from`, so "nothing valid ≥ from" implies "nothing valid ≥ from' > from". Both
-  // maps are LOCAL to this call (recursion slices are disjoint; depth ≤ MAX_DEPTH ⇒ every
-  // character is processed O(7) times), and they only ever short-circuit a scan whose full
-  // execution provably returns -1, so the emitted AST is byte-for-byte unchanged (pinned by
-  // the fixed-seed differential test against fixtures/markdown-ref.js).
-  /** @type {Map<string, number>} mark → earliest `from` whose findClose returned -1 */
-  const noClose = new Map();
-  /** @type {Map<number, number>} fence length → earliest `from` whose indexOf returned -1 */
-  const noFence = new Map();
   const flush = () => {
     if (buf !== "") out.push({ type: "text", text: buf });
     buf = "";
@@ -342,17 +341,7 @@ function parseInline(src, depth) {
       let n = 1;
       while (src[i + n] === "`") n++;
       const fence = "`".repeat(n);
-      // §4.2: `indexOf(fence)` matches any position containing ≥ n consecutive backticks —
-      // "no such position ≥ from" is likewise monotone in `from`, so memoize per fence
-      // length (a shorter run later in the string can still close, hence the length key).
-      const fenceFailFrom = noFence.get(n);
-      let end;
-      if (fenceFailFrom !== undefined && fenceFailFrom <= i + n) {
-        end = -1;
-      } else {
-        end = src.indexOf(fence, i + n);
-        if (end === -1) noFence.set(n, i + n); // fenceFailFrom > i + n here ⇒ i + n is the new min
-      }
+      const end = src.indexOf(fence, i + n);
       if (end !== -1) {
         flush();
         out.push({ type: "code", text: src.slice(i + n, end) });
@@ -366,7 +355,7 @@ function parseInline(src, depth) {
     if (c === "~" && src[i + 1] === "~" && depth < MAX_DEPTH) {
       const next = src[i + 2] ?? "";
       if (next !== "" && !/\s/.test(next)) {
-        const end = findClose(src, i + 2, "~~", noClose);
+        const end = findClose(src, i + 2, "~~");
         if (end > i + 2) {
           flush();
           out.push({ type: "del", children: parseInline(src.slice(i + 2, end), depth + 1) });
@@ -385,7 +374,7 @@ function parseInline(src, depth) {
       const intraword = c === "_" && /[A-Za-z0-9]/.test(prev);
       const next = src[i + mark.length] ?? "";
       if (!intraword && next !== "" && !/\s/.test(next)) {
-        const end = findClose(src, i + mark.length, mark, noClose);
+        const end = findClose(src, i + mark.length, mark);
         if (end > i + mark.length) {
           flush();
           const children = parseInline(src.slice(i + mark.length, end), depth + 1);
@@ -421,18 +410,9 @@ function parseInline(src, depth) {
 
 /**
  * Closing delimiter: same mark, preceded by non-space, not glued to a longer run.
- * §4.2: `noClose` is the caller's per-`parseInline`-call failure memo (mark → earliest
- * `from` whose search returned -1). A memo hit (`failFrom <= from`) returns -1 directly —
- * exactly what the full scan would return, since any valid close at `at > from ≥ failFrom`
- * would have been found by the earlier failed scan too. On failure the earliest `from` is
- * recorded (`failFrom > from` holds on this path — smaller values returned early), so a
- * run of unclosed openers like `"*a ".repeat(n)` costs ONE full scan instead of one per
- * `*` (the O(n²) the linearization exists to kill).
- * @param {string} src @param {number} from @param {string} mark @param {Map<string, number>} noClose
+ * @param {string} src @param {number} from @param {string} mark
  */
-function findClose(src, from, mark, noClose) {
-  const failFrom = noClose.get(mark);
-  if (failFrom !== undefined && failFrom <= from) return -1;
+function findClose(src, from, mark) {
   let at = src.indexOf(mark, from);
   while (at !== -1) {
     const before = src[at - 1] ?? "";
@@ -442,6 +422,5 @@ function findClose(src, from, mark, noClose) {
     if (at > from && !/\s/.test(before) && !glued && !intraword) return at;
     at = src.indexOf(mark, at + (glued ? 2 : 1));
   }
-  noClose.set(mark, from);
   return -1;
 }

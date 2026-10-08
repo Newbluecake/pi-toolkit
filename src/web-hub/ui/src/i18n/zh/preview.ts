@@ -19,6 +19,7 @@ const preview = {
   copyPath: "复制路径",
   truncatedBadge: "已截断",
   truncatedNote: "仅显示前 {size}——复制只取已显示部分。",
+  truncatedRenderNote: "仅显示前 {size}——结尾可能不完整。",
   unsupportedTitle: "无法预览",
   unsupportedBody: "此文件不能预览（{reason}）。",
   reasonBinary: "二进制文件",
@@ -30,6 +31,10 @@ const preview = {
   tooLargePixels: "图片为 {w} × {h}，超出浏览器预览预算。",
   tooLargeBytes: "文件大小 {size}，超出 {max} 的预览上限。",
   tooLargeGeneric: "此文件超出预览上限。",
+  viewRendered: "渲染",
+  viewSource: "源码",
+  viewToggleLabel: "Markdown 显示方式",
+  mdTooComplex: "此文件结构过于复杂，无法渲染——已改以源码显示。",
   errorTitle: "预览失败",
 } satisfies Messages<typeof en>;
 

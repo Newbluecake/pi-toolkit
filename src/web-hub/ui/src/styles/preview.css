@@ -333,5 +333,78 @@ code.md-code.path-ref {
 
 .preview-text-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+}
+
+/* ------------------------------------------------------------ markdown (dir-plan v3.1 §4.1, PM) */
+/* Rendered-md body: same scroll container contract as .preview-text-body, but normal prose
+ * typography — the `md` companion class (see PreviewText.vue) pulls the shared transcript
+ * markdown styles (.md p/h3…/ul/code/quote/table) from transcript.css. */
+.preview-md {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: var(--sp-3);
+  overflow: auto;
+  background: var(--c-sunken);
+  border-radius: var(--r-md);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.preview-md:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+/* B7 degraded-mode note (AST over PREVIEW_MD_NODE_MAX ⇒ forced source). */
+.preview-md-note {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* Rendered/source segmented control; `margin-right: auto` pushes the copy button right so a
+ * non-md file (no toggle) keeps the pre-change right-aligned actions row. */
+.preview-toggle {
+  display: inline-flex;
+  margin-right: auto;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.preview-toggle-btn {
+  padding: 3px var(--sp-2);
+  background: var(--c-surface);
+  border: 0;
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.preview-toggle-btn + .preview-toggle-btn {
+  border-left: 1px solid var(--c-border);
+}
+
+.preview-toggle-btn[aria-pressed="true"] {
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+  font-weight: 600;
+}
+
+.preview-toggle-btn:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.preview-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

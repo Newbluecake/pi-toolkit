@@ -181,12 +181,16 @@ function onKeydown(ev: KeyboardEvent): void {
             :size-label="formatBytes(view.size)"
             :alt="basename"
           />
+          <!-- PM (dir-plan §4.1 B4): `:key` remounts PreviewText on every path change — the
+               rendered/source mode resets per freshly opened file; a same-path retry keeps it. -->
           <PreviewText
             v-else-if="view.phase === 'text'"
+            :key="view.path"
             :text="view.text"
             :truncated="view.truncated"
             :size-label="formatBytes(view.size)"
             :filename="basename"
+            :path="path"
           />
           <div v-else-if="view.phase === 'unsupported'" class="preview-note">
             <AppIcon name="ban" class="preview-note-icon" />
