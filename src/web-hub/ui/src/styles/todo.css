@@ -36,6 +36,12 @@
   background: var(--c-surface-2);
 }
 
+/* 2026-10-08 user request: the tasks row leads with a check icon now (same grammar as
+ * .wt-sum's branch / .bj-sum's terminal) — never let it shrink under the text. */
+.todo-sum .icon-sm:first-child {
+  flex: none;
+}
+
 .todo-sum-text {
   min-width: 0;
   overflow: hidden;

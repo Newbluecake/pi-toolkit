@@ -74,6 +74,7 @@ function blockedLabel(task: TodoTaskWire): string {
       :aria-label="t('detail.todoToggleAria')"
       @click="open = !open"
     >
+      <AppIcon name="check" class="icon-sm" />
       <span class="todo-sum-text">{{ summary }}</span>
       <span v-if="todo.counts.blocked > 0" class="todo-sum-blocked">
         <AppIcon name="alert" class="icon-sm" />{{ todo.counts.blocked }}
