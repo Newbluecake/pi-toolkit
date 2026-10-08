@@ -464,7 +464,7 @@ membership(cwd, wtReq, A, signal):           // 全部步骤在准入 deadline A
 
 ### 2.4 相对路径校验与「可展示但不可请求」（#7）
 
-`validateWtRelPath`：非空；不以 `/` 开头；UTF-8 ≤ 4096；无 NUL / CR / LF；每段非空、非 `.`、非 `..`、非 `.git`；`W + "/" + rel` 再过 `validatePreviewPath`。git `-z` 输出里可能出现含 CR / LF / TAB / 非 UTF-8 字节（解码为 U+FFFD）的文件名：它们**进入清单（可展示）**，但 `isWtRequestableEntry` 为假 ⇒ hub 不放进可请求集（`file` 请求答 409 entry）、UI 禁用。以 `-` 开头的文件名（`-rf`）是合法可请求路径，只出现在 `--` 之后。
+`validateWtRelPath`：非空；不以 `/` 开头；UTF-8 ≤ 4096；无 NUL / CR / LF；每段非空、非 `.`、非 `..`、非 `.git`；`W + "/" + rel` 再过 `validatePreviewPath`。git `-z` 输出里可能出现含 CR / LF / 非 UTF-8 字节（解码为 U+FFFD）的文件名：它们**进入清单（可展示）**，但 `isWtRequestableEntry` 为假 ⇒ hub 不放进可请求集（`file` 请求答 409 entry）、UI 禁用。含 TAB 的文件名**可请求**（协议层 JSON 编码无损、行格式无歧义），由 UI 的 `displayPath` 可见化渲染（v3.1 勘误：本段与 §4.2 曾把 TAB 与 CR/LF 并列写成不可请求，以 §1.3 冻结公式为准——D0 验收 r_FX096FBZ 裁定）。以 `-` 开头的文件名（`-rf`）是合法可请求路径，只出现在 `--` 之后。
 
 ### 2.5 denylist 应用点
 
@@ -746,7 +746,8 @@ export interface GitRunOptions {
 | 依赖已提交 `eol` / `working-tree-encoding` / `ident` 属性的文件 | 可能出现（stat 失配时按原始字节比较）                                                   | C4 显示原始字节差异                | 已知限制（§2.6.2 副作用），脚注不单列              |
 | 仅模式变化                                                      | `M`/`T`，+0 −0                                                                          | 零 hunk                            | 「仅权限变化」                                     |
 | 子模块                                                          | **不出现**（D20）                                                                       | —                                  | 脚注解释 `*N` 差异                                 |
-| CR/LF/TAB/非 UTF-8 文件名                                       | 正常列出（控制字符以可见符号渲染）                                                      | 不可请求                           | 禁用 + title                                       |
+| CR/LF/非 UTF-8 文件名（U+FFFD）                                 | 正常列出（控制字符以可见符号渲染）                                                      | 不可请求                           | 禁用 + title                                       |
+| 含 TAB 文件名（v3.1 勘误：可请求）                              | 正常列出（TAB 可见化）                                                                  | 可请求                             | 正常可点                                           |
 | denylist 命中                                                   | **不出现**                                                                              | 403（字面）/ 409 entry             | 静态脚注                                           |
 | HEAD 未诞生                                                     | 415 unborn                                                                              | —                                  | 「仓库尚无提交」                                   |
 | `?` 目录                                                        | 不出现：`all` 模式下 git 不产生目录条目；解析器对以 `/` 结尾的 `?` 记录（防御）直接丢弃 | —                                  | —                                                  |

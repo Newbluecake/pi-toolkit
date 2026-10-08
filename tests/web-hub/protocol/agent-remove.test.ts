@@ -44,8 +44,16 @@ describe("protocol/http-contract — SSE_EVENTS (§4.3①: agent_removed slots i
 });
 
 describe("protocol/http-contract — API_ERRORS (§4.3②: E_AGENT_ONLINE tail-appended)", () => {
-  it("is the last entry in the array", () => {
-    expect(API_ERRORS.at(-1)).toBe("E_AGENT_ONLINE");
+  // worktree-diff plan v3 §1.4 (D0) tail-appended its two E_WTDIFF_* codes right after
+  // E_AGENT_ONLINE (same append-only rule this suite polices) — E_AGENT_ONLINE is no longer
+  // the literal last entry; the tail is now ...E_AGENT_ONLINE, E_WTDIFF_DENIED,
+  // E_WTDIFF_UNSUPPORTED (pinned in tests/web-hub/protocol/worktree-diff.test.ts).
+  it("stays immediately before the (only) later feature's tail", () => {
+    const agentOnline = API_ERRORS.indexOf("E_AGENT_ONLINE");
+    expect(agentOnline).toBeGreaterThan(-1);
+    expect(API_ERRORS[agentOnline + 1]).toBe("E_WTDIFF_DENIED");
+    expect(API_ERRORS[agentOnline + 2]).toBe("E_WTDIFF_UNSUPPORTED");
+    expect(API_ERRORS.at(-1)).not.toBe("E_AGENT_ONLINE");
   });
 
   it("appears exactly once", () => {

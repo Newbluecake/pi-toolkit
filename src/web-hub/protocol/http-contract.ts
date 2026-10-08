@@ -14,6 +14,7 @@ import type {
   WireEntry,
   WireMessage,
 } from "./messages.js";
+import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "./worktree-diff.js";
 
 export const SSE_EVENTS = [
   "hello",
@@ -101,6 +102,11 @@ export const API_ERRORS = [
   // web-hub-delete-session plan v2 §2.4/§4.1/§4.3: the process may still be alive — refusal,
   // record/卡片 untouched (body carries reason: AgentRemoveErrorReason, "online" | "exit-unconfirmed").
   "E_AGENT_ONLINE",
+  // worktree-diff plan v3 §1.4 (D0): worktree-diff endpoint error codes (tail-append after
+  // delete-session's E_AGENT_ONLINE, same append-only / never-reorder rule). `E_STALE_CTX`
+  // (409) is REUSED — only its body reason is new (`WtDiffStaleReason`, protocol/worktree-diff.ts).
+  "E_WTDIFF_DENIED", // 403 — membership / denylist / virtual-fs refusal (body carries reason: WtDiffDenyReason)
+  "E_WTDIFF_UNSUPPORTED", // 415 — unborn / symlink / filter-config; 503 — git-too-old / git-unavailable
 ] as const;
 
 /** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */
@@ -196,3 +202,22 @@ export type AgentRemoveErrorReason = "online" | "exit-unconfirmed" | "lan-off";
 export interface AgentRemovedPayload {
   agentKey: string;
 }
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan v3 §1.2/§1.4 (D0 — frozen endpoint SHAPE only; the paths, caps, envelope
+// types, validators and parsers live in `protocol/worktree-diff.ts`; this block pins the HTTP
+// face the hub's dispatcher (D3) and the UI transports (D4) code against).
+// ---------------------------------------------------------------------------
+
+/**
+ * The two worktree-diff endpoints (§1.2): `GET`-only, both require the `X-PWH: 1` header
+ * (same header discipline as `GET /api/preview`) and answer
+ * `Cache-Control: no-store` + `Cross-Origin-Resource-Policy: same-origin`. Loopback is always
+ * dispatched; LAN only when the preview mode is `"on"` (D6). 200 bodies are `WtDiffFileList` /
+ * `WtDiffFilePayload`; refusals carry the `E_WTDIFF_*` codes above (plus reused `E_STALE_CTX`,
+ * `E_RATE`, `E_BUSY`, `E_DEADLINE`, …) with a `reason` from `protocol/worktree-diff.ts`.
+ */
+export const WTDIFF_ENDPOINTS = [
+  { method: "GET", path: WTDIFF_FILES_PATH },
+  { method: "GET", path: WTDIFF_FILE_PATH },
+] as const;

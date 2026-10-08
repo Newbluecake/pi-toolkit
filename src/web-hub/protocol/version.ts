@@ -114,6 +114,17 @@ export const SLOT_REQUIRED_CAP = {
 export const RESERVED_FRAME_TYPES = ["dialog_open", "dialog_closed", "dialog_answer"] as const;
 
 /**
+ * worktree-diff plan §1.4 (D0): the hub cap advertising the worktree file-diff feature set
+ * (`GET /api/worktree-diff/*`, `protocol/worktree-diff.ts`). Declared whenever `config.preview`
+ * exists **and** `/proc/self/fd` is usable at hub start (D21) — it is NOT an independent
+ * switch; LAN availability rides `PREVIEW_LAN_HUB_CAP` (D6, same width as preview per the
+ * 2026-10-08 A1 (a) ruling). A browser that doesn't see it keeps the worktree panel
+ * byte-identical to today (I8). Like every cap above it adds no agent↔hub frames, so no PROTO
+ * bump (same §2.3 rule as preview; the 1.1 → 1.2 bump is fleet F0's alone, see PROTO above).
+ */
+export const WTDIFF_HUB_CAP = "wtdiff.v1";
+
+/**
  * Compare two semver strings by their core three segments (major.minor.patch).
  * Invalid strings are treated as `0.0.0`. Prerelease/build suffixes (e.g.
  * `1.2.3-beta.1`, `1.2.3+build`) are ignored; a leading `v` is tolerated.
