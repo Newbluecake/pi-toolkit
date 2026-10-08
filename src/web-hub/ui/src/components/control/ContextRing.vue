@@ -43,10 +43,11 @@ import { DETAIL_METRICS } from "./controlContext.js";
 
 const props = withDefaults(defineProps<ContextRingProps>(), { busy: false, queueCount: 0 });
 const emit = defineEmits<ContextRingEmits>();
-const { t, lang } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 const metrics = inject(DETAIL_METRICS, null);
 
-const locale = computed(() => localeFor(lang));
+const locale = computed(() => localeFor(i18n.lang));
 const usage = computed(() => metrics?.contextUsage.value);
 const hasRing = computed(() => metrics !== null && usage.value !== undefined);
 const percent = computed(() => usage.value?.percent ?? null);

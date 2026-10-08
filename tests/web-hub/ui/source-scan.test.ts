@@ -68,8 +68,10 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
  * `ControlNotice.vue`'s per-variant dismiss memory (user decision: "全部可关", §7.6 revision),
  * `AgentList.vue`'s desktop sidebar collapse state, and — fleet-drawer plan v2 §6.2/§8.3 (F6) —
  * `drawer/FleetDrawer.vue`'s docked-mode open state (`webhub.fleetDrawer.open`, 默认 "1";
- * overlay/fullscreen 不持久化). */
-const LOCALSTORAGE_ALLOWED = /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue/i;
+ * overlay/fullscreen 不持久化). 2026-10-08: + `composables/useI18n.ts` for the manual language
+ * override (`pwh_lang`, TopBar 中/EN toggle — mirrors useTheme.ts's `pwh_theme` discipline). */
+const LOCALSTORAGE_ALLOWED =
+  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {

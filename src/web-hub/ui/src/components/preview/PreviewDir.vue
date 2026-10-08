@@ -37,7 +37,8 @@ const props = defineProps<{
   readonly listing: PreviewDirListing;
 }>();
 const emit = defineEmits<{ (e: "navigate", entry: PreviewDirEntry): void }>();
-const { t, lang } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 
 function typeLabel(type: PreviewDirEntryType): string {
   switch (type) {
@@ -71,14 +72,14 @@ const rows = computed<RowView[]>(() =>
     icon: entry.type === "dir" ? "folder" : "file",
     typeLabel: typeLabel(entry.type),
     sizeLabel: entry.type === "file" ? formatPreviewBytes(entry.size) : "",
-    mtimeLabel: formatDateTime(entry.mtimeMs ?? null, localeFor(lang)),
+    mtimeLabel: formatDateTime(entry.mtimeMs ?? null, localeFor(i18n.lang)),
   })),
 );
 
 /** §3.2: `complete:false` ⇒ the scanned prefix is a lower bound — 「≥ total」. */
 const countLabel = computed(() => {
   const L = props.listing;
-  const n = formatNumber(L.total, localeFor(lang));
+  const n = formatNumber(L.total, localeFor(i18n.lang));
   return L.complete ? t("preview.dirCount", { n }) : t("preview.dirCountAtLeast", { n });
 });
 
@@ -86,17 +87,18 @@ const countLabel = computed(() => {
 const notices = computed<string[]>(() => {
   const L = props.listing;
   const out: string[] = [];
-  if (L.limits.scan) out.push(t("preview.dirLimitScan", { n: formatNumber(PREVIEW_DIR_SCAN_MAX, localeFor(lang)) }));
+  if (L.limits.scan)
+    out.push(t("preview.dirLimitScan", { n: formatNumber(PREVIEW_DIR_SCAN_MAX, localeFor(i18n.lang)) }));
   if (L.limits.entries)
     out.push(
       t("preview.dirLimitEntries", {
-        shown: formatNumber(L.entries.length, localeFor(lang)),
-        total: formatNumber(L.total, localeFor(lang)),
+        shown: formatNumber(L.entries.length, localeFor(i18n.lang)),
+        total: formatNumber(L.total, localeFor(i18n.lang)),
       }),
     );
-  if (L.limits.bytes) out.push(t("preview.dirLimitBytes", { n: formatNumber(L.entries.length, localeFor(lang)) }));
-  if (L.dropped > 0) out.push(t("preview.dirDropped", { n: formatNumber(L.dropped, localeFor(lang)) }));
-  if (L.vanished > 0) out.push(t("preview.dirVanished", { n: formatNumber(L.vanished, localeFor(lang)) }));
+  if (L.limits.bytes) out.push(t("preview.dirLimitBytes", { n: formatNumber(L.entries.length, localeFor(i18n.lang)) }));
+  if (L.dropped > 0) out.push(t("preview.dirDropped", { n: formatNumber(L.dropped, localeFor(i18n.lang)) }));
+  if (L.vanished > 0) out.push(t("preview.dirVanished", { n: formatNumber(L.vanished, localeFor(i18n.lang)) }));
   if (L.statPartial === true) out.push(t("preview.dirStatPartial"));
   return out;
 });

@@ -23,12 +23,13 @@ import ToolCard from "./ToolCard.vue";
 import TxError from "./TxError.vue";
 
 const props = defineProps<{ readonly assistant: AssistantView; readonly truncated: boolean }>();
-const { lang, t } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 
 const timeLabel = computed(() =>
   props.assistant.timestamp === undefined
     ? ""
-    : formatDateTime(props.assistant.timestamp, lang === "zh" ? "zh-CN" : "en-US"),
+    : formatDateTime(props.assistant.timestamp, i18n.lang === "zh" ? "zh-CN" : "en-US"),
 );
 const costLabel = computed(() => (props.assistant.costUsd === undefined ? "" : formatUsd(props.assistant.costUsd)));
 

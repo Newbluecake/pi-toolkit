@@ -22,9 +22,10 @@ const props = defineProps<{
   readonly truncated: boolean;
   readonly timestamp: number | undefined;
 }>();
-const { lang, t } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 const timeLabel = computed(() =>
-  props.timestamp === undefined ? "" : formatDateTime(props.timestamp, lang === "zh" ? "zh-CN" : "en-US"),
+  props.timestamp === undefined ? "" : formatDateTime(props.timestamp, i18n.lang === "zh" ? "zh-CN" : "en-US"),
 );
 
 const view = inject(CONTROL_VIEW, null);

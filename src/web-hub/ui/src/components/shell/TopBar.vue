@@ -26,7 +26,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
-import { useI18n } from "../../composables/useI18n.js";
+import { setLangOverride, useI18n } from "../../composables/useI18n.js";
 import { UI_BUILD } from "../../build-info.js";
 import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
@@ -36,7 +36,17 @@ import SettingsOverlay from "./SettingsOverlay.vue";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
-const { t } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
+
+/* 2026-10-08 user request: manual language switch in the top bar (supersedes vue-plan §0.2's
+ * "no manual switcher"). The label is the TARGET language's own name (中 ⇄ EN); the choice
+ * persists via setLangOverride's `pwh_lang` localStorage key and every no-arg useI18n() handle
+ * re-renders reactively. */
+const langToggleLabel = computed(() => (i18n.lang === "zh" ? "EN" : "中文"));
+function toggleLang(): void {
+  setLangOverride(i18n.lang === "zh" ? "en" : "zh");
+}
 
 const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
@@ -122,6 +132,16 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
     <span v-else class="chip readonly-chip"><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span>
 
     <span class="topbar-spacer"></span>
+
+    <button
+      type="button"
+      class="btn btn-ghost lang-toggle"
+      :aria-label="t('shell.langToggle')"
+      :title="t('shell.langToggle')"
+      @click="toggleLang"
+    >
+      {{ langToggleLabel }}
+    </button>
 
     <span class="settings-anchor">
       <button

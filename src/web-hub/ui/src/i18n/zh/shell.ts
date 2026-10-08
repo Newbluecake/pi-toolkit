@@ -11,6 +11,7 @@ const shell = {
   hubVersion: "hub {v}",
   uiBuild: "ui {v}",
   signOut: "退出",
+  langToggle: "切换语言",
   "conn.connecting": "连接中…",
   "conn.open": "在线",
   "conn.reconnecting": "重新连接中…",

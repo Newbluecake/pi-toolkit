@@ -125,6 +125,17 @@
   margin-right: calc(-1 * var(--sp-3));
 }
 
+/* 2026-10-08: the language toggle is a two-glyph text button (中/EN) — keep it compact but
+ * wider than the square icon buttons, and keep it OUT of the gear⇄logout glyph-clustering
+ * rule above (that rule targets `.settings-anchor + .btn`, i.e. the sign-out button). */
+.topbar .lang-toggle {
+  min-width: 44px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
 .topbar .settings-anchor + .btn {
   justify-content: flex-start;
 }

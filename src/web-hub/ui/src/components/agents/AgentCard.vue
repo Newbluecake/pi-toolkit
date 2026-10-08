@@ -14,7 +14,8 @@ import type { AgentCardProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
 
 const props = defineProps<AgentCardProps>();
-const { t, lang } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 
 // §7.4 (C5): an open ask_user dialog adds a "Needs answer" badge (the visual state pill keeps
 // showing `waiting`). The frozen `AgentCardView` has no dialogs field, so the card looks its
@@ -100,7 +101,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
           :value="card.contextPercent"
           :aria-label="t('detail.contextAria')"
         ></meter
-        ><span class="num">{{ formatPercent(card.contextPercent, lang === "zh" ? "zh-CN" : "en-US") }}</span>
+        ><span class="num">{{ formatPercent(card.contextPercent, i18n.lang === "zh" ? "zh-CN" : "en-US") }}</span>
       </span>
       <template v-if="card.runningSubCount > 0">
         <span v-if="card.modelShort || card.contextPercent !== null" class="sep" aria-hidden="true">·</span>

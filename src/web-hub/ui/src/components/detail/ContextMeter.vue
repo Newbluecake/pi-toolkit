@@ -13,9 +13,10 @@ import { formatNumber, formatPercent, localeFor } from "../../format.js";
 import type { ContextMeterProps } from "../../contracts.js";
 
 const props = defineProps<ContextMeterProps>();
-const { t, lang } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 
-const locale = computed(() => localeFor(lang));
+const locale = computed(() => localeFor(i18n.lang));
 const hasAside = computed(() => !props.compact && typeof props.tokens === "number" && typeof props.window === "number");
 </script>
 
