@@ -16,3 +16,6 @@ tests/fixtures/memory/current-5-migrated/
 
 # local preview scratchpad (untracked; never part of the format gate)
 .preview-scratch/
+
+# golden fixtures are byte-exact pins — prettier must never reformat them
+tests/fixtures/quota/
