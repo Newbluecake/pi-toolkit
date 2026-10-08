@@ -251,6 +251,11 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "web-hub browser UI via a local hub process (default off ⇒ zero wiring/network/disk)",
   ),
   "webHub.autoStart": bool("webHub.autoStart", "web-hub: auto-spawn the hub process when no hub is running"),
+  // web-hub-steer-recall plan §4.2 (arch §11 Q1): default on; non-live like the rest of webHub.*.
+  "webHub.steerRecall": bool(
+    "webHub.steerRecall",
+    "web-hub: hold busy web steer/follow-up until pi's next queue drain so they can be recalled (default on)",
+  ),
   "webHub.port": {
     kind: "number",
     path: "webHub.port",

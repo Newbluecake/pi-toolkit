@@ -37,7 +37,7 @@ import {
 } from "../protocol/messages.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
-import { UPLOAD_AGENT_CAPS, RUNTX_AGENT_CAPS } from "../protocol/version.js";
+import { UPLOAD_AGENT_CAPS, RUNTX_AGENT_CAPS, HOLD_AGENT_CAPS, HOLD_CAP } from "../protocol/version.js";
 import type { LanStatus } from "../protocol/lan.js";
 import {
   acquireConnection,
@@ -75,6 +75,8 @@ import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
 import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
+import { createHoldBuffer, holdWired } from "./hold.js";
+import { createHoldDriver, type HoldDriver, type TurnEndLike } from "./hold-driver.js";
 import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool-timing.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
 import { classifyCommand, listSlashCommands } from "./slash.js";
@@ -138,6 +140,12 @@ export interface WebHubSettings {
    * `settings.quota.enabled` (the underlying `QuotaService` itself): with no verdicts the field
    * is already absent, this flag is purely the web-hub-side kill switch. */
   quota?: boolean;
+  /** web-hub-steer-recall plan §2/§4.7 (A6) / arch §11 Q1: hold busy web steer/followUp in the
+   *  agent-side buffer until pi's next queue drain so the browser can recall/re-edit them.
+   *  Default `true`; `false` (or `control:false`) ⇒ no driver, no hold handlers, no `hold.v1`
+   *  cap, no `status.held` — byte-identical to the pre-feature agent (W1/W2). Non-live like the
+   *  rest of webHub.* (captured at activate; change → /reload). */
+  steerRecall?: boolean;
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
   /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，
@@ -401,6 +409,26 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const compactionState = createCompactionState(pi);
   const originEntry = createOriginEntry(pi);
 
+  // ── web-hub-steer-recall plan §4.7 (A6): hold wiring ──────────────────────────────────────
+  // `holdOn` is the ONE gate (plan §8.1): it decides cap advertisement, handler registration and
+  // the `status.held` projection together. `false` (⇐ `steerRecall:false` or `control:false`)
+  // ⇒ no driver, no hold handlers, no cap, no held rows — the agent is byte-identical to the
+  // pre-feature agent on the wire (W1/W2). The buffer is the process-level `Symbol.for` bag
+  // (plain data, survives /reload — P-core's `hold.ts`); creating it here even when off is
+  // allocation-only and invisible on the wire.
+  const holdOn = holdWired(settings);
+  const holdBuffer = createHoldBuffer();
+  /** PURE read of the current link (plan C1 / §4.7 step 2): same shape as `isLiveWithCap` — read
+   *  at hold-decision time and at every tick, never cached, never bound to a link generation. */
+  const holdCap = (): boolean => conn?.status().state === "live" && (conn?.caps.includes(HOLD_CAP) ?? false);
+  /** `true` ⇔ the link is live AND the hub demonstrably lacks `hold.v1` — the ONLY case where
+   *  the ctl projection filters the hold vocabulary (§4.7 step 11): a hub without the cap has a
+   *  CLOSED CtlItemSchema that would drop the whole frame on a `state:"held"` row. While
+   *  disconnected nothing is filtered — the slot keeps the full projection and replays
+   *  correctly to whatever hub comes next (D3). */
+  const capKnownAbsent = (): boolean =>
+    holdOn && conn?.status().state === "live" && !(conn?.caps.includes(HOLD_CAP) ?? false);
+
   // fleet-drawer §4.4 (F2): the run-transcript service. Enabled only while the live link's
   // hello_ack.caps carries runtx.v1 AND webHub.subagentTranscript ≠ "off" (§3.2 compat:
   // anything else is silently ignored); reads go through the F1 QueryService passthroughs.
@@ -490,6 +518,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     }
   };
 
+  /** §4.7 step 14 (A6) + arch §11.1: the `held N` line is rendered from the driver's CURRENT
+   *  held count; the exact marker is the literal `web held N` (see `statusLineText`). Called from
+   *  the driver's publish callback (every buffer mutation) and the connection-state path so the
+   *  count on screen can never drift from `status.held`. No-op in non-TUI modes / not attached
+   *  (setStatusLine's own guards) and a no-op while hold is off (`held: 0` ⇒ plain marker). */
+  const refreshStatusLine = (): void => {
+    const v = conn?.status() ?? { state: "off" as const, attached: false };
+    setStatusLine(statusLineText(v, readStatusTheme(ctx), { held: holdDriver?.heldCount() ?? 0 }));
+  };
+
   const publishStatus = (): void => {
     const c = conn;
     const x = ctx;
@@ -503,6 +541,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       () => wtSampler.current(),
       deps.bashJobs !== undefined ? bashJobsProjection : undefined,
       deps.quota !== undefined ? quotaProjection : undefined,
+      // §4.7 step 10 (A6): held rows ride the OPEN status slot — gated ONLY on holdWired, never
+      // on holdCap() (D3): a disconnect keeps the full projection in the slot, and an old hub's
+      // open StatusInfoSchema ignores the unknown fields instead of dropping the frame.
+      holdOn
+        ? () => {
+            const sid = safe(() => ctx?.sessionManager.getSessionId() ?? "", "");
+            return { items: holdBuffer.project(sid, now()), rev: holdBuffer.rev(), epoch: MODULE_INSTANCE };
+          }
+        : undefined,
     );
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
@@ -632,13 +679,20 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     if (bashSampler.tick(now())) publishStatus();
     modelsTick += 1;
     if (modelsTick % 5 === 0) refreshModelsIfChanged();
+    // §4.7 step 8 (A6): the hold driver's 1Hz housekeeping — HOLD_MAX_MS expiry, the 15 s
+    // cap-unavailable grace, buffer sweep. Never touches the phase machine (P-core §5.6).
+    holdDriver?.onTick(x);
   };
 
   const publishCtl = (): void => {
     const c = conn;
     if (c === undefined) return;
     const sessionId = safe(() => ctx?.sessionManager.getSessionId() ?? "", "");
-    c.setSlot("ctl", { ...commandLedger.frame(sessionId, MODULE_INSTANCE, now()) });
+    // §4.7 step 11 (A6): filter the hold vocabulary ONLY while the link is live against a hub
+    // that demonstrably lacks hold.v1 (its closed CtlItemSchema would drop the whole frame);
+    // while disconnected the full projection stays in the slot (D3). With hold off this is
+    // always `{filterHeld:false}` — byte-identical output to the no-opts call.
+    c.setSlot("ctl", { ...commandLedger.frame(sessionId, MODULE_INSTANCE, now(), { filterHeld: capKnownAbsent() }) });
   };
 
   const commandHandler = createCommandHandler({
@@ -656,6 +710,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     onChanged: () => {
       publishStatus();
       publishCtl();
+      // commands.ts's own hold-buffer mutations (prompt held 0→1, recall 1→0, dispatch/return)
+      // bypass the driver's publish callback, so the `web held N` marker refreshes here too —
+      // setStatusLine's text dedupe makes this a no-op for every unrelated ledger mutation.
+      refreshStatusLine();
     },
     setTimer: (ms, fn) => {
       const t = setTimeout(fn, ms);
@@ -663,8 +721,47 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       return { cancel: () => clearTimeout(t) };
     },
     ...(deps.query !== undefined ? { query: deps.query } : {}),
+    // web-hub-steer-recall §4.7 step 3 (A6): the hold driver, looked up lazily so the driver can
+    // be constructed after the handler it dispatches through (no temporal-dead-zone cycle).
+    // `owner` (Y4/Y7.3) scopes every ledger lookup this handler makes to THIS module instance.
+    ...(holdOn ? { hold: () => holdDriver, owner: MODULE_INSTANCE } : {}),
   });
   bridgeLate.current = (frame, result) => commandHandler.handleBridgeLate(frame, result);
+
+  // §4.7 step 4 (A6): the hold driver — `undefined` while `holdWired(settings)` is false (no
+  // handlers registered below, no cap advertised, prompts take the native path unconditionally).
+  // `setRefTimer` is REF'd (v4.3 Y3 / T-REF): the driver uses it exclusively inside its ≤200 ms
+  // bounded confirm phase — a wait pi is actually awaiting — while every other timer this wiring
+  // owns (commands' 30s/3s display timers, the 1Hz tick) stays unref'd so `pi -p` never wedges.
+  const holdDriver: HoldDriver | undefined = holdOn
+    ? createHoldDriver({
+        buffer: holdBuffer,
+        owner: MODULE_INSTANCE,
+        getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+        holdCap,
+        dispatchToPi: (item) => commandHandler.dispatchHeld(item),
+        onReturned: (items) => {
+          for (const it of items) {
+            commandLedger.updatePrompt(
+              it.cmdId,
+              { promptState: "returned", ...(it.reason !== undefined ? { reason: it.reason } : {}) },
+              now(),
+            );
+          }
+        },
+        publish: () => {
+          publishStatus();
+          publishCtl();
+          refreshStatusLine();
+        },
+        now,
+        setRefTimer: (ms, fn) => {
+          const t = setTimeout(fn, ms);
+          return { cancel: () => clearTimeout(t) };
+        },
+        nextMacrotask: () => new Promise<void>((r) => setImmediate(r)),
+      })
+    : undefined;
 
   /** §3.2 commands slot: the web's slash palette (policy + §4.9 output badge), refreshed on
    * (re)connect and `resources_discover` (extensions loaded mid-session change the list). */
@@ -771,7 +868,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     onStateChange: (v) => {
       runTx.onLink(v.state === "live"); // §3.3 #3: link-up retries gaps / pending ends
-      if (attached) setStatusLine(statusLineText(v, readStatusTheme(ctx)));
+      if (attached) setStatusLine(statusLineText(v, readStatusTheme(ctx), { held: holdDriver?.heldCount() ?? 0 }));
+      // web-hub-steer-recall §4.7 step 9 (A6): a fresh live link immediately gets the CURRENT
+      // status/ctl projections (slot replay happened before notify() in connection.ts, so this
+      // re-setSlot lands after it) — filtered per `capKnownAbsent()` so a no-cap hub still gets
+      // a parseable ctl. Non-live states never republish here (W11).
+      if (attached && v.state === "live") {
+        publishStatus();
+        publishCtl();
+      }
     },
   };
 
@@ -868,6 +973,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const uploads = settings.uploads ?? "on";
     if (uploads === "on") caps.push(...UPLOAD_AGENT_CAPS);
     else if (uploads === "loopback") caps.push("upload.v1");
+    // web-hub-steer-recall §4.7 step 13 (A6): the hold cap rides the agent surface only while the
+    // feature is wired (`holdWired`: control ∧ steerRecall) — the hub mirrors it on BOTH of its
+    // cap surfaces, and an agent advertising hold.v1 is the ONLY thing that makes the hub accept
+    // `recall` forwards (S4). Unreachable while control is false (early return above), which is
+    // exactly holdWired's own truth table row.
+    if (holdWired(settings)) caps.push(...HOLD_AGENT_CAPS);
     return caps;
   };
 
@@ -904,7 +1015,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     onTick();
     wtSampler.kick(); // worktree-web plan §4.4: a (re)connect is worth a fresh sample promptly.
     bashSampler.kick(); // bash-jobs-panel plan §3.7: reconnect replays the slot and re-samples.
-    setStatusLine(statusLineText(c.status(), readStatusTheme(x)));
+    setStatusLine(statusLineText(c.status(), readStatusTheme(x), { held: holdDriver?.heldCount() ?? 0 }));
   };
 
   const startTick = (): void => {
@@ -935,6 +1046,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lastModelsKey = undefined;
     modelsTick = 0;
     tap.resetForSession(Number.NaN);
+    // web-hub-steer-recall §4.7 step 7 (A6): BEFORE `commandHandler.onSessionBoundary()` — the
+    // driver's `adopt` moves any process-bag leftovers of previous owners/sessions to
+    // `returned` (W5) and resets its own phase/abort/cap-grace state for the new session.
+    holdDriver?.onSessionStart(c);
     commandHandler.onSessionBoundary();
     wtSampler.start(safe(() => c.cwd, "")); // worktree-web plan §4.4: first sample attempt
     // happens immediately (subject to isLive()); same-cwd /new・/resume・/fork keeps the cache.
@@ -967,6 +1082,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     stopTick();
     wtSampler.stop(); // worktree-web plan §4.4: abort any in-flight scan, no leaked process/thread.
     bashSampler.stop(); // bash-jobs-panel plan §3.7: discard in-flight results by generation.
+    // web-hub-steer-recall §4.7 step 7 (A6): BEFORE `commandHandler.onSessionBoundary()` — every
+    // held item of this session becomes `returned{reload|session}` (Q6: /reload mid-turn ⇒
+    // returned; the NEXT activation's `onSessionStart`/`adopt` is the defensive backstop).
+    holdDriver?.onSessionShutdown(reasonOf(event));
     commandHandler.onSessionBoundary();
     dialogBridge.detachAll();
     tap.dispose();
@@ -1001,7 +1120,17 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       // emits it from the loop right after executeToolCalls), so it is the flush point.
       if (type === "turn_end") flushToolTimings();
       if (type === "input") commandHandler.onInputEvent(event as InputEventLike);
-      if (type === "message_start") commandHandler.onMessageStart(event as MessageStartLike);
+      if (type === "message_start") {
+        commandHandler.onMessageStart(event as MessageStartLike);
+        // §4.7 step 6 (A6): assistant message_start arms the hold phase as the context-event
+        // fallback (P-core §5.1) — user message_start (consumption) is NOT an arm signal.
+        if (holdDriver !== undefined) {
+          const cx = ctx;
+          if (cx !== undefined && (event as MessageStartLike).message?.role === "assistant") {
+            holdDriver.onAssistantMessageStart(cx);
+          }
+        }
+      }
       if ((type === "session_compact" || type === "session_compact_failed") && reasonOf(event) === "manual") {
         // D26 (spike K13, todo #32 finding 1): pi emits `session_compact` before clearing
         // `_compactionAbortController` — re-sampling the queue mirror right here, synchronously,
@@ -1021,6 +1150,53 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (STATUS_EVENTS.has(type)) publishStatus();
       if (WT_KICK_EVENTS.has(type)) wtSampler.kick();
       if (SESSION_EVENTS.has(type)) publishSession(sessionOverride(type, event));
+    });
+  }
+
+  // web-hub-steer-recall §4.7 step 5 (A6): the hold driver's OWN handlers, registered exactly
+  // once per activate() — this wiring is their single owner (W5: /new・/resume・/fork re-enter
+  // session_start inside the same activation and re-register nothing). They sit AFTER the
+  // FORWARDED loop above so the tap/publish bookkeeping for the same event runs first; the
+  // `turn_end`/`agent_end` handlers may return a Promise (pi awaits them — the bounded confirm
+  // phase) and NEVER return `entries`/`continue` (the loop's own turn_end handler owns those
+  // semantics). Every handler detaches on its first line while not attached (child sessions,
+  // print mode). Registered ONLY while `holdOn` (W1: zero new handlers with steerRecall off).
+  if (holdDriver !== undefined) {
+    const drv = holdDriver;
+    // Plan §4.7 step 5's handler preamble, verbatim order: detach FIRST, then adopt the event's
+    // ctx — an unattached event (child session / post-shutdown) writes nothing at all.
+    const guard = (c: ExtensionContext | undefined): ExtensionContext | undefined => {
+      if (!attached) return undefined;
+      if (c !== undefined) ctx = c;
+      return ctx;
+    };
+    on("context", (_event, c) => {
+      const x = guard(c);
+      if (x === undefined) return undefined;
+      drv.onContext(x); // ARM (P-core §5.1): the only phase a new prompt can be held in
+      return undefined;
+    });
+    on("turn_start", (_event, c) => {
+      const x = guard(c);
+      if (x === undefined) return undefined;
+      drv.onTurnStart(x); // best-effort skip-detect (C4/A-SKIP): phase still armed ⇒ last turn_end never ran
+      return undefined;
+    });
+    on("turn_end", (event, c) => {
+      const x = guard(c);
+      if (x === undefined) return undefined;
+      return drv.onTurnEnd(event as TurnEndLike, x); // Promise ⇔ exactly one item was handed to pi
+    });
+    on("agent_end", (_event, c) => {
+      const x = guard(c);
+      if (x === undefined) return undefined;
+      return drv.onAgentEnd(x); // run ending: B1-blocked leftovers return to the browser (R-A)
+    });
+    on("agent_settled", (_event, c) => {
+      const x = guard(c);
+      if (x === undefined) return undefined;
+      drv.onAgentSettled(x); // NEVER dispatches (I-EMPTY / C3); defensive leftovers ⇒ returned{stale}
+      return undefined;
     });
   }
 
@@ -1303,10 +1479,23 @@ export interface WebHubStatusTheme {
 /**
  * HUD status token. Plain text without a theme; with one, the label is dim and
  * the marker carries the state colour (live ● green, connecting ○ dim, ✗ red).
+ *
+ * web-hub-steer-recall §4.7 step 14 (A6) + arch §11.1: while `extra.held > 0` the marker is the
+ * LITERAL `web held N` — the held count REPLACES the state glyph (explicitly NOT the
+ * `web ● held N` variant the plan body once described). Without `extra` (or with `held <= 0`)
+ * the output is byte-identical to the pre-feature rendering (W4).
  */
-export function statusLineText(v: WebHubStatusView, theme?: WebHubStatusTheme): string | undefined {
-  const paint = (color: string, marker: string): string =>
-    theme === undefined ? `web ${marker}` : `${theme.fg("dim", "web")} ${theme.fg(color, marker)}`;
+export function statusLineText(
+  v: WebHubStatusView,
+  theme?: WebHubStatusTheme,
+  extra?: { held?: number },
+): string | undefined {
+  const heldN = extra?.held ?? 0;
+  const heldText = heldN > 0 ? `held ${heldN}` : undefined;
+  const paint = (color: string, marker: string): string => {
+    const m = heldText ?? marker;
+    return theme === undefined ? `web ${m}` : `${theme.fg("dim", "web")} ${theme.fg(color, m)}`;
+  };
   if (v.stopMarker === "stopped")
     return theme === undefined ? "web stopped" : `${theme.fg("dim", "web")} ${theme.fg("error", "stopped")}`;
   if (v.stopMarker === "unknown")

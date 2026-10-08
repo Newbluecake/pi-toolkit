@@ -321,17 +321,19 @@ describe("leaf probe + slots (wiring, fake timers)", () => {
     expect(s.types()).toEqual(["hello"]);
     s.hub(ackFrame());
     const afterAck = s.frames();
-    expect(afterAck.map((f) => f.t)).toEqual(["hello", "session", "status", "fleet"]);
+    // web-hub-steer-recall §4.7 step 9: the live transition itself republishes the status slot
+    // (after the slot replay), so the handshake burst ends with a second `status` frame.
+    expect(afterAck.map((f) => f.t)).toEqual(["hello", "session", "status", "fleet", "status"]);
     expect(afterAck[2]).toMatchObject({ leafId: "B" });
     expect((afterAck[3]!.runs as unknown[]).length).toBe(1);
 
     const count = (t: string) => s.types().filter((x) => x === t).length;
     await vi.advanceTimersByTimeAsync(3_000); // leaf unchanged, fleet only jitters
-    expect(count("status")).toBe(1);
+    expect(count("status")).toBe(2);
     expect(count("fleet")).toBe(1);
     state.leaf = "C"; // idle custom_message appended ⇒ leaf moves without any extension event
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(count("status")).toBe(2);
+    expect(count("status")).toBe(3);
     expect(
       s
         .frames()

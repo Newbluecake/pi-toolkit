@@ -25,7 +25,7 @@ const lanDefaults = defaults.lan!;
 const spawnDefaults = defaults.spawn!;
 
 describe("web-hub settings", () => {
-  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {}; web-hub-spawn §SP2: 补 spawn 九键默认值（session-history §3.7 P-cfg +history）)", () => {
+  it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {}; web-hub-spawn §SP2: 补 spawn 九键默认值（session-history §3.7 P-cfg +history）; web-hub-steer-recall §4.2: steerRecall default true（arch §11 Q1）)", () => {
     expect(defaults).toEqual({
       enabled: false,
       autoStart: true,
@@ -36,6 +36,7 @@ describe("web-hub settings", () => {
       remoteAskUser: true,
       webCommands: true,
       webCommandPolicy: {},
+      steerRecall: true,
       uploads: "on",
       preview: "on",
       subagentTranscript: "all",
@@ -113,6 +114,7 @@ describe("web-hub settings", () => {
       remoteAskUser: true,
       webCommands: true,
       webCommandPolicy: {},
+      steerRecall: true,
       uploads: "on",
       preview: "on",
       subagentTranscript: "all",
@@ -431,6 +433,39 @@ describe("web-hub control-plane settings (plan §8)", () => {
     expect(s.webHub.webCommandPolicy).toEqual({ compact: "deny" });
     expect(s.webHub.remoteAskUser).toBe(true);
     expect(s.webHub.webCommands).toBe(true);
+  });
+});
+
+// web-hub-steer-recall plan §2/§4.2 + arch §11 Q1: webHub.steerRecall — default true (user
+// ruling), boolean-only parse with fallback to true, non-live spec key after webHub.autoStart.
+describe("webHub.steerRecall (web-hub-steer-recall §4.2, arch §11 Q1)", () => {
+  it("defaults to true and keeps an explicit false (W1/W2's rollback switch)", () => {
+    expect(defaults.steerRecall).toBe(true);
+    expect(parseWebHubSettings({}).steerRecall).toBe(true);
+    expect(parseWebHubSettings(undefined).steerRecall).toBe(true);
+    expect(parseWebHubSettings({ steerRecall: false }).steerRecall).toBe(false);
+    expect(parseWebHubSettings({ steerRecall: true }).steerRecall).toBe(true);
+  });
+
+  it("falls back to true for any non-boolean value, never throwing; wired into loadSettings", () => {
+    for (const garbage of ["yes", "off", 0, 1, null, [], {}, "true"]) {
+      expect(parseWebHubSettings({ steerRecall: garbage }).steerRecall, JSON.stringify(garbage)).toBe(true);
+    }
+    expect(loadSettings({ webHub: { steerRecall: false } }).webHub.steerRecall).toBe(false);
+    expect(loadSettings({ webHub: { steerRecall: "nope" } }).webHub.steerRecall).toBe(true);
+  });
+
+  it("exposes webHub.steerRecall in SETTING_SPECS as a non-live boolean placed after webHub.autoStart", () => {
+    expect(isKnownSettingKey("webHub.steerRecall")).toBe(true);
+    const spec = SETTING_SPECS["webHub.steerRecall"]!;
+    expect(spec.live).toBeUndefined();
+    expect(spec.time).toBeUndefined();
+    expect(spec).toMatchObject({ kind: "boolean", path: "webHub.steerRecall" });
+    expect(defaultOf(spec)).toBe(true);
+    expect(currentOf(DEFAULT_SETTINGS, spec)).toBe(true);
+    // plan §4.2: placed right after webHub.autoStart in the spec table (editor order)
+    const keys = Object.keys(SETTING_SPECS);
+    expect(keys.indexOf("webHub.steerRecall")).toBe(keys.indexOf("webHub.autoStart") + 1);
   });
 });
 

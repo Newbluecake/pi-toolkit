@@ -14,6 +14,7 @@ import type {
   BashJobsWire,
   FleetOmitted,
   FleetRowWire,
+  HeldItemWire,
   QuotaWire,
   StatusInfo,
   WorktreesWire,
@@ -36,6 +37,7 @@ export function readStatus(
   worktrees?: () => WorktreesWire | undefined,
   bashJobs?: () => BashJobsWire | undefined,
   quota?: () => QuotaWire | undefined,
+  held?: () => { items: HeldItemWire[]; rev: number; epoch: string } | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -91,6 +93,21 @@ export function readStatus(
   if (quota !== undefined) {
     const wire = quota();
     if (wire !== undefined) status.quota = wire;
+  }
+  // web-hub-steer-recall plan §4.6 (A5): held web steer/followUp rows riding the same open
+  // StatusInfoSchema slot pattern as todo/worktrees/bashJobs/quota. Gated ONLY on the wiring
+  // (`webHub.steerRecall`, i.e. `holdWired`) — deliberately NOT on `holdCap()` (plan D3: an
+  // open schema never drops the frame, and the full projection stored in the slot during a
+  // disconnect replays correctly to whatever hub comes next). Non-empty items ⇒ all three
+  // fields (`held`/`heldRev`/`heldEpoch` = MODULE_INSTANCE of the publishing activate(), R-C/Y2
+  // merge scope); empty ⇒ all three absent, byte-equal to the pre-feature shape.
+  if (held !== undefined) {
+    const h = held();
+    if (h !== undefined && h.items.length > 0) {
+      status.held = h.items;
+      status.heldRev = h.rev;
+      status.heldEpoch = h.epoch;
+    }
   }
   return status;
 }

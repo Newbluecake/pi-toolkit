@@ -900,6 +900,10 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     remoteAskUser: true,
     webCommands: true,
     webCommandPolicy: {},
+    // web-hub-steer-recall plan §2/§4.2 / arch §11 Q1: hold busy web steer/followUp until pi's
+    // next queue drain so the browser can recall/re-edit them; default ON (user ruling Q1),
+    // `false` ⇒ byte-identical rollback (W1/W2).
+    steerRecall: true,
     uploads: "on",
     preview: "on",
     subagentTranscript: "all",
@@ -1676,6 +1680,9 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     remoteAskUser: typeof record.remoteAskUser === "boolean" ? record.remoteAskUser : (defaults.remoteAskUser ?? true),
     webCommands: typeof record.webCommands === "boolean" ? record.webCommands : (defaults.webCommands ?? true),
     webCommandPolicy: policy,
+    // web-hub-steer-recall plan §4.2: boolean only, anything else falls back to the default
+    // `true` (arch §11 Q1) — never throws.
+    steerRecall: typeof record.steerRecall === "boolean" ? record.steerRecall : (defaults.steerRecall ?? true),
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
     subagentTranscript: parseSubagentTranscriptSetting(record.subagentTranscript, defaults.subagentTranscript),

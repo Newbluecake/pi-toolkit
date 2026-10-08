@@ -469,6 +469,10 @@ describe("wireWebHub — runtx caps matrix (§8.4 #2: control × uploads × suba
       expected.push("cmd.v1", "dialog.v1", "command.v1");
       if (uploads === "on") expected.push("upload.v1", "upload.lan.v1");
       else if (uploads === "loopback") expected.push("upload.v1");
+      // web-hub-steer-recall §4.7 step 13: hold.v1 rides the agent surface whenever holdWired()
+      // holds — in this matrix steerRecall is always unset ⇒ default true, so it tracks `control`
+      // exactly (holdWired = control ∧ steerRecall, and control=false returned early above).
+      expected.push("hold.v1");
     }
     expect([...hello.caps].sort()).toEqual([...expected].sort());
     await hub.close();

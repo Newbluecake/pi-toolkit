@@ -321,8 +321,11 @@ describe("todo slot + 1Hz fingerprint gate (todo-web T3)", () => {
       .filter((f) => f.t === "status")
       .at(-1)!;
     expect("todo" in status).toBe(false);
+    // web-hub-steer-recall §4.7 step 9: going live now also republishes status/ctl (onStateChange),
+    // so count from whatever the live transition produced — the assertion is that TICKS add none.
+    const afterLive = s.frames().filter((f) => f.t === "status").length;
     await vi.advanceTimersByTimeAsync(3_000);
-    expect(s.frames().filter((f) => f.t === "status")).toHaveLength(1); // gate also inert without a getter
+    expect(s.frames().filter((f) => f.t === "status")).toHaveLength(afterLive); // gate also inert without a getter
   });
 
   it("/new (session_start) resets the gate: emptied state publishes a todo-less status frame", async () => {
