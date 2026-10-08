@@ -7,7 +7,7 @@
  * `worktrees N+` when listCapped, `stale Nm`), fold/unfold with `aria-expanded`, expanded rows
  * (current marker + sr-only text, label with the absolute path on `title` + a per-row copy
  * button, branch/detached chip, dirty tokens `*N` / `*N+` / `*N~` / `clean` / `?` with their
- * tooltips, flag chips), the `omitted` tail and the `last sample` footer, the read-only ruling,
+ * tooltips, flag chips), the `omitted` tail and the summary's sample-time tooltip, the read-only ruling,
  * and forward compat: unknown future row/body fields never reach the DOM and an unknown
  * `unprobed` reason renders as `?` with the generic error tooltip.
  */
@@ -228,14 +228,16 @@ describe("WorktreePanel.vue — expanded rows (plan §5)", () => {
     expect(items[1]?.findAll(".wt-flag").map((f) => f.text())).toEqual(["locked", "prunable"]);
   });
 
-  it("omitted tail line and the muted `last sample` footer (agent clock)", async () => {
+  it("omitted tail line; the sample time lives only in the summary tooltip (agent clock)", async () => {
     const w = wire({ omitted: 21, staleMin: 3 });
     const wrapper = mountPanel(w);
+    // 2026-10-09 user ruling: no visible `last sample` footer — hover the summary instead.
+    expect(wrapper.find(".wt-sum").attributes("title")).toBe(
+      `Last sampled ${formatSampleTime(w.sampledAt)} (agent's clock)`,
+    );
     await wrapper.find(".wt-sum").trigger("click");
     expect(wrapper.find(".wt-more").text()).toBe("(+21 more)");
-    const foot = wrapper.find(".wt-foot");
-    expect(foot.text()).toBe(`last sample ${formatSampleTime(w.sampledAt)}`);
-    expect(foot.attributes("title")).toContain("agent");
+    expect(wrapper.find(".wt-foot").exists()).toBe(false);
   });
 
   it("no omitted tail when nothing was dropped", async () => {

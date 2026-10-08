@@ -269,6 +269,7 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
       type="button"
       :aria-expanded="open"
       :aria-label="t('detail.worktreesToggleAria')"
+      :title="t('detail.worktreesLastSample', { time: sampleTime })"
       @click="open = !open"
     >
       <AppIcon name="branch" class="icon-sm" />
@@ -346,9 +347,6 @@ const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
       </li>
       <li v-if="worktrees.omitted !== undefined && worktrees.omitted > 0" class="wt-more">
         {{ t("detail.worktreesMore", { n: worktrees.omitted }) }}
-      </li>
-      <li class="wt-foot" :title="t('detail.worktreesLastSampleHint')">
-        {{ t("detail.worktreesLastSample", { time: sampleTime }) }}
       </li>
     </ul>
   </section>

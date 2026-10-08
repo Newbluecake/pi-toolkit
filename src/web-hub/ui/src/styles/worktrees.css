@@ -171,12 +171,6 @@
   font-size: var(--fs-xs);
 }
 
-.wt-foot {
-  padding: 3px 0 3px calc(14px + var(--sp-2));
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-}
-
 /* ≤480px (plan §5): rows reflow to two lines — line 1 carries marker + branch/status/ahead/
  * flag chips, line 2 the label in smaller muted type, allowed to wrap so a long absolute path
  * never overflows. No JS media query; the DOM order stays untouched (the label is simply
