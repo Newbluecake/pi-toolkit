@@ -408,3 +408,135 @@ code.md-code.path-ref {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ---------------------------------------- in-dialog navigation (dir-plan v3.1 §0.2 A3, P3) */
+/* Header nav group: 返回 / 上级 — native buttons, part of the panel's Tab cycle; `disabled`
+ * carries the A3 boundary semantics (返回 at the history bottom, 上级 at one-segment paths). */
+.preview-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- dir phase (P3) */
+.preview-dir {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 100%;
+}
+
+.preview-dir-meta {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.preview-dir-note {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  color: var(--c-warning-text);
+  font-size: var(--fs-xs);
+}
+
+.preview-dir-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: var(--sp-1);
+  list-style: none;
+  overflow: auto;
+  background: var(--c-sunken);
+  border-radius: var(--r-md);
+}
+
+.preview-dir-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) max-content max-content;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+button.preview-dir-row:hover {
+  background: var(--c-primary-soft);
+}
+
+button.preview-dir-row:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.preview-dir-row-icon {
+  flex: none;
+  color: var(--c-text-3);
+}
+
+.preview-dir-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-dir-size {
+  color: var(--c-text-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-dir-mtime {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A1: dotfiles render but grey out (they stay clickable — visibility, not access). */
+.preview-dir-list li.is-dot .preview-dir-name {
+  color: var(--c-text-3);
+}
+
+/* A3: FIFO/socket/device rows and lossy names — inert text, never a dead button. */
+.preview-dir-row.is-inert {
+  cursor: default;
+}
+
+.preview-dir-row.is-inert .preview-dir-name,
+.preview-dir-row.is-inert .preview-dir-row-icon {
+  opacity: 0.55;
+}
+
+.preview-dir-empty {
+  margin: 0;
+  padding: var(--sp-8) var(--sp-4);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+/* §2.8/A1: static, count-free footnote — denylist hits are neither listed nor counted. */
+.preview-dir-footnote {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* Coarse pointers: rows keep a comfortable hit height (the grid grows the row, not the
+ * line box — no negative-margin tricks needed inside a list). */
+@media (pointer: coarse) {
+  .preview-dir-row {
+    min-height: 44px;
+  }
+}

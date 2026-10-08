@@ -320,3 +320,260 @@ describe("preview i18n namespace — en/zh parity (explicit, alongside i18n-pari
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 §0.2 A3/§5 P3 — dir phase, 返回/上级, subtree provide override
+// ---------------------------------------------------------------------------
+
+import { usePreview } from "../../../src/web-hub/ui/src/composables/usePreview.js";
+import type { PreviewDirListing } from "../../../src/web-hub/protocol/preview.js";
+import type { HubState } from "../../../src/web-hub/ui/src/types.js";
+import type { PreviewDirOutcome, PreviewTransport } from "../../../src/web-hub/ui/src/transport/types.js";
+
+/** The REAL composable over a deferred stub transport — the true P3 host ↔ handle pair. */
+function rigDir() {
+  const agents = new Map<string, unknown>([
+    [
+      "A",
+      {
+        key: "A",
+        card: { session: { sessionId: "s1", sessionFile: "/p/s.jsonl", cwd: "/p" } },
+        session: { sessionId: "s1", sessionFile: "/p/s.jsonl", cwd: "/p" },
+        down: false,
+        prompts: [],
+        fleet: [],
+        items: [],
+        uid: 0,
+        lastSeq: -1,
+        streaming: null,
+        tools: [],
+        history: "none",
+        hasMore: false,
+        needsResync: false,
+        sub: null,
+      },
+    ],
+  ]);
+  const state = ref({
+    clientId: "c1",
+    hub: { caps: ["preview.v1", "preview.dir.v1"] },
+    conn: "open",
+    selected: "A",
+    agents,
+    order: ["A"],
+  } as unknown as HubState);
+  const calls: Array<{ req: { path: string; dir?: true }; opts: { signal: AbortSignal; maxPixels: number } }> = [];
+  const waits: Array<{ resolve: (o: PreviewDirOutcome) => void }> = [];
+  const transport: PreviewTransport = {
+    fetch: (req, opts) => {
+      calls.push({ req, opts });
+      return new Promise<PreviewDirOutcome>((resolve) => waits.push({ resolve }));
+    },
+  };
+  const handle = usePreview({ preview: transport, mode: "token", state, coarse: ref(false) });
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const wrapper = mount(PreviewHost, {
+    attachTo: host,
+    global: { provide: { [PREVIEW_CTX as symbol]: { handle, plaintext: false } satisfies PreviewContext } },
+  });
+  const text = (path: string, body: string): void => {
+    const w = waits.shift();
+    w?.resolve({ ok: true, kind: "text", size: body.length, truncated: false, text: body });
+  };
+  const dir = (path: string, entries: PreviewDirListing["entries"]): void => {
+    const w = waits.shift();
+    w?.resolve({
+      ok: true,
+      kind: "dir",
+      listing: {
+        entries,
+        total: entries.length,
+        scanned: entries.length,
+        complete: true,
+        truncated: false,
+        limits: { scan: false, entries: false, bytes: false },
+        vanished: 0,
+        dropped: 0,
+      },
+    });
+  };
+  return { handle, calls, waits, wrapper, text, dir };
+}
+
+describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () => {
+  it("a dir listing renders PreviewDir; 返回 disabled at the bottom, 上级 enabled mid-tree", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    await tick();
+    r.dir("/p/src", [
+      { name: "sub", type: "dir", mtimeMs: 1 },
+      { name: "a.ts", type: "file", size: 12, mtimeMs: 1 },
+      { name: "pipe", type: "other", mtimeMs: 1 },
+      { name: ".hiddendir", type: "dir", mtimeMs: 1 },
+    ]);
+    await tick();
+    expect(document.querySelectorAll(".preview-dir-list button.preview-dir-row")).toHaveLength(3);
+    expect(document.querySelector(".preview-dir-row.is-inert")).not.toBeNull();
+    const navBtns = document.querySelectorAll<HTMLButtonElement>(".preview-nav-btn");
+    expect(navBtns).toHaveLength(2); // 返回 + 上级 (dir phase)
+    expect(navBtns[0]!.disabled).toBe(true); // 返回: empty history
+    expect(navBtns[1]!.disabled).toBe(false); // 上级: /p exists
+    expect(document.querySelector(".preview-header-icon use")!.getAttribute("href")).toBe("#i-folder");
+    r.handle.close();
+    await tick();
+  });
+
+  it("row click navigates (dir:true for a dir row); 返回 restores the previous listing with no refetch", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await tick();
+    (document.querySelectorAll(".preview-dir-list button")[0] as HTMLElement).click();
+    await tick();
+    expect(r.calls[1]!.req).toMatchObject({ path: "/p/src/sub", dir: true });
+    expect((document.querySelector(".preview-nav-btn") as HTMLButtonElement).disabled).toBe(false);
+    r.dir("/p/src/sub", [{ name: "deep.ts", type: "file", size: 1, mtimeMs: 1 }]);
+    await tick();
+    const callsBefore = r.calls.length;
+    (document.querySelector(".preview-nav-btn") as HTMLElement).click(); // 返回
+    await tick();
+    expect(r.calls.length).toBe(callsBefore); // snapshot restore — zero requests
+    expect(document.querySelector(".preview-dir-list")!.textContent).toContain("sub");
+    // focus never falls out of the dialog (§4.6 trap contract survives navigation)
+    expect(panel()!.contains(document.activeElement)).toBe(true);
+    r.handle.close();
+    await tick();
+  });
+
+  it("上级 fetches the parent listing with dir:true and greys out at one segment", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    r.dir("/p/src", []);
+    await tick();
+    const up = document.querySelectorAll<HTMLButtonElement>(".preview-nav-btn")[1]!;
+    up.click();
+    await tick();
+    expect(r.calls[1]!.req).toMatchObject({ path: "/p", dir: true });
+    r.dir("/p", [{ name: "src", type: "dir", mtimeMs: 1 }]);
+    await tick();
+    expect((document.querySelectorAll(".preview-nav-btn")[1] as HTMLButtonElement).disabled).toBe(true); // / has no parent
+    r.handle.close();
+    await tick();
+  });
+
+  it("a file row navigates without the dir flag (the admission chain decides)", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    r.dir("/p/src", [{ name: "a.ts", type: "file", size: 3, mtimeMs: 1 }]);
+    await tick();
+    (document.querySelectorAll(".preview-dir-list button")[0] as HTMLElement).click();
+    await tick();
+    expect(r.calls[1]!.req).toMatchObject({ path: "/p/src/a.ts" });
+    expect(r.calls[1]!.req.dir).toBeUndefined();
+    r.text("/p/src/a.ts", "abc");
+    await tick();
+    expect(document.querySelector(".preview-text-body")).not.toBeNull();
+    // 返回 still returns to the listing (D3: 下钻 → 打开文件 → 返回)
+    (document.querySelector(".preview-nav-btn") as HTMLElement).click();
+    await tick();
+    expect(document.querySelector(".preview-dir-list")).not.toBeNull();
+    r.handle.close();
+    await tick();
+  });
+
+  it("B6/M2: a path ref inside a rendered md NAVIGATES in-dialog; 返回 returns to the rendered view", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/readme.md" });
+    r.text("/p/readme.md", "see `src/deep/x.ts` for details");
+    await tick();
+    expect(document.querySelector(".preview-md")).not.toBeNull(); // rendered mode
+    const ref = document.querySelector(".preview-md .path-ref") as HTMLElement;
+    expect(ref).not.toBeNull(); // relative code candidate — resolved against cwd /p
+    ref.click();
+    await tick();
+    expect(r.calls[1]!.req).toMatchObject({ path: "/p/src/deep/x.ts" }); // navigate, not a fresh visit
+    expect(r.calls[1]!.req.dir).toBeUndefined();
+    r.text("/p/src/deep/x.ts", "export {}");
+    await tick();
+    expect(document.querySelector(".preview-text-body")).not.toBeNull();
+    (document.querySelector(".preview-nav-btn") as HTMLElement).click(); // 返回
+    await tick();
+    // back to the SAME rendered md view — rendered (not source), same content, zero refetch
+    expect(document.querySelector(".preview-md")).not.toBeNull();
+    expect(r.calls).toHaveLength(2);
+    r.handle.close();
+    await tick();
+  });
+
+  it("Esc still closes (and clears the history) with the P3 handle wired", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await tick();
+    (document.querySelectorAll(".preview-dir-list button")[0] as HTMLElement).click();
+    await tick();
+    const ev = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    overlay()!.dispatchEvent(ev);
+    await tick();
+    expect(overlay()).toBeNull();
+    expect(r.calls[1]!.opts.signal.aborted).toBe(true); // the in-flight listing fetch was aborted
+    r.handle.dispose();
+  });
+
+  it("a handle WITHOUT the navigation face degrades to open-only (frozen fakes stay valid)", async () => {
+    const open = vi.fn();
+    const view = ref<PreviewView>({
+      phase: "text",
+      path: "/p/a.md",
+      text: "see /p/b.ts",
+      truncated: false,
+      size: 11,
+    }) as Ref<PreviewView>;
+    const handle: PreviewHandle = {
+      view,
+      scope: ref({ agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true }) as Ref<never>,
+      open,
+      close: vi.fn(() => {
+        view.value = { phase: "closed" };
+      }),
+      retry: vi.fn(),
+      dispose: vi.fn(),
+    };
+    mountHost({ handle, plaintext: false });
+    await tick();
+    expect(document.querySelector(".preview-nav")).toBeNull(); // no 返回/上级 at all
+    // a (type-illegal for the frozen face, hence the cast) dir phase simply renders nothing
+    (view as Ref<PreviewView>).value = {
+      phase: "dir",
+      path: "/p/src",
+      listing: {
+        entries: [],
+        total: 0,
+        scanned: 0,
+        complete: true,
+        truncated: false,
+        limits: { scan: false, entries: false, bytes: false },
+        vanished: 0,
+        dropped: 0,
+      },
+    } as unknown as PreviewView;
+    await tick();
+    expect(document.querySelector(".preview-dir")).toBeNull();
+    // an in-dialog ref click falls back to plain open — never a crash
+    (view as Ref<PreviewView>).value = {
+      phase: "text",
+      path: "/p/a.md",
+      text: "see /p/b.ts",
+      truncated: false,
+      size: 11,
+    };
+    await tick();
+    const refEl = document.querySelector(".preview-md .path-ref") as HTMLElement;
+    refEl.click();
+    await tick();
+    expect(open).toHaveBeenCalledWith({ path: "/p/b.ts" });
+    view.value = { phase: "closed" };
+    await tick();
+  });
+});

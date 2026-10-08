@@ -1,15 +1,31 @@
 // @vitest-environment node
 import { nextTick, ref, type Ref } from "vue";
 import { describe, expect, it } from "vitest";
-import { usePreview, type FileReaderLike } from "../../../src/web-hub/ui/src/composables/usePreview.js";
+import {
+  asDirHandle,
+  PREVIEW_NAV_STACK_MAX,
+  usePreview,
+  type FileReaderLike,
+  type PreviewHandleDir,
+} from "../../../src/web-hub/ui/src/composables/usePreview.js";
+import type { PreviewDirListing, PreviewProbeKind } from "../../../src/web-hub/protocol/preview.js";
 import type { HubState, PreviewView } from "../../../src/web-hub/ui/src/types.js";
-import type { PreviewOutcome, PreviewTransport } from "../../../src/web-hub/ui/src/transport/types.js";
+import type {
+  PreviewDirOutcome,
+  PreviewOutcome,
+  PreviewTransport,
+} from "../../../src/web-hub/ui/src/transport/types.js";
 
 /**
  * web-hub-preview plan v3 §3.2 (package PV4): the usePreview state machine — every phase
  * transition, the seq-guarded interrupts (new open / close / 作用域失效), the scope truth
  * table at the composable level (incl. 默认 on ⇒ password 模式能拿到作用域), the image
  * data-URL conversion with its prefix check, and retry.
+ *
+ * dir-plan v3.1 §0.2 A3/§5 P3 (appended): the dir phase + in-dialog navigation — open 清栈,
+ * navigate push / back pop (snapshot restore, cap 64 FIFO), up's parentPreviewPath boundary,
+ * the probe-kind `dir` hint, the one-shot 415 not-regular ⇒ dir=1 fallback, and retry/作用域
+ * 失效 keeping the stack honest.
  */
 
 const flush = async (n = 20): Promise<void> => {
@@ -87,28 +103,49 @@ interface Harness {
   readonly state: Ref<HubState>;
   readonly coarse: Ref<boolean>;
   readonly calls: Array<{
-    req: { agentKey: string; sessionId: string; path: string };
+    req: { agentKey: string; sessionId: string; path: string; dir?: true };
     opts: { signal: AbortSignal; maxPixels: number };
   }>;
-  readonly waits: Array<ReturnType<typeof deferred<PreviewOutcome>>>;
+  readonly waits: Array<ReturnType<typeof deferred<PreviewDirOutcome>>>;
   readonly handle: ReturnType<typeof usePreview>;
+  /** The P3 navigation face — `usePreview` always provides it; `asDirHandle` recovers it. */
+  readonly nav: PreviewHandleDir;
+  /** Settled probe calls (present only when the harness transport carries a probe fn). */
+  readonly probeCalls: Array<{ paths: string[]; dirs?: true }>;
 }
 
 function makeHarness(
   stateOpts: Parameters<typeof makeState>[0] = {},
-  opts: { mode?: "token" | "password"; noTransport?: boolean; createFileReader?: () => FileReaderLike } = {},
+  opts: {
+    mode?: "token" | "password";
+    noTransport?: boolean;
+    createFileReader?: () => FileReaderLike;
+    probeKinds?: (path: string) => PreviewProbeKind;
+  } = {},
 ): Harness {
   const state = makeState(stateOpts);
   const coarse = ref(false);
   const calls: Harness["calls"] = [];
   const waits: Harness["waits"] = [];
+  const probeCalls: Harness["probeCalls"] = [];
   const transport: PreviewTransport = {
     fetch: (req, fetchOpts) => {
       calls.push({ req, opts: fetchOpts });
-      const d = deferred<PreviewOutcome>();
+      const d = deferred<PreviewDirOutcome>();
       waits.push(d);
       return d.promise;
     },
+    ...(opts.probeKinds !== undefined
+      ? {
+          probe: (req: { paths: readonly string[]; dirs?: true }) => {
+            probeCalls.push({ paths: [...req.paths], ...(req.dirs === true ? { dirs: true } : {}) });
+            return Promise.resolve({
+              ok: true as const,
+              results: req.paths.map((p) => opts.probeKinds!(p)),
+            });
+          },
+        }
+      : {}),
   };
   const handle = usePreview({
     preview: opts.noTransport === true ? undefined : transport,
@@ -117,7 +154,9 @@ function makeHarness(
     coarse,
     createFileReader: opts.createFileReader ?? realFileReader,
   });
-  return { state, coarse, calls, waits, handle };
+  const nav = asDirHandle(handle);
+  if (nav === null) throw new Error("usePreview must provide the P3 navigation face");
+  return { state, coarse, calls, waits, handle, nav, probeCalls };
 }
 
 const TEXT_OK: PreviewOutcome = { ok: true, kind: "text", size: 5, truncated: false, text: "hello" };
@@ -388,5 +427,308 @@ describe("usePreview: interrupts (§3.2 — abort + seq drop)", () => {
     h.handle.dispose();
     h.handle.dispose();
     expect(h.calls[0]!.opts.signal.aborted).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 §0.2 A3/§5 P3 — dir phase + in-dialog navigation
+// ---------------------------------------------------------------------------
+
+function makeListing(names: string[], opts: Partial<PreviewDirListing> = {}): PreviewDirListing {
+  const entries = names.map((name) => ({
+    name,
+    type: name.endsWith("/") ? ("dir" as const) : ("file" as const),
+    size: name.endsWith("/") ? undefined : 1,
+    mtimeMs: 1_700_000_000_000,
+  }));
+  return {
+    entries: entries.map((e) => (e.type === "dir" ? { ...e, name: e.name.slice(0, -1) } : e)),
+    total: entries.length,
+    scanned: entries.length,
+    complete: true,
+    truncated: false,
+    limits: { scan: false, entries: false, bytes: false },
+    vanished: 0,
+    dropped: 0,
+    ...opts,
+  };
+}
+
+const DIR_OK = (names: string[]): PreviewDirOutcome => ({ ok: true, kind: "dir", listing: makeListing(names) });
+
+const flushMacro = async (): Promise<void> => {
+  // the probe pipeline flushes on a setTimeout(0) macrotask; then settle the microtasks
+  await new Promise((r) => setTimeout(r, 0));
+  await flush();
+};
+
+describe("usePreview: dir phase + navigation (dir-plan §0.2 A3, P3)", () => {
+  it("a dir:true request resolves the dir phase (exhaustive narrowing of PreviewDirOutcome)", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/src", dir: true });
+    expect(h.calls[0]!.req.dir).toBe(true);
+    h.waits[0]!.resolve(DIR_OK(["a.ts", "b/"]));
+    await flush();
+    expect(h.nav.view.value).toEqual({ phase: "dir", path: "/p/src", listing: makeListing(["a.ts", "b/"]) });
+  });
+
+  it("navigate pushes the current content view; back() restores the snapshot with NO refetch", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[0]!.resolve(TEXT_OK);
+    await flush();
+    expect(h.nav.view.value.phase).toBe("text");
+    expect(h.nav.stackDepth.value).toBe(0);
+
+    h.nav.navigate({ path: "/p/b.ts" });
+    expect(h.nav.stackDepth.value).toBe(1);
+    expect(h.nav.view.value).toEqual({ phase: "loading", path: "/p/b.ts" });
+    h.waits[1]!.resolve({ ok: true, kind: "text", size: 2, truncated: false, text: "bb" });
+    await flush();
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/b.ts" });
+
+    const callsBefore = h.calls.length;
+    h.nav.back();
+    expect(h.nav.stackDepth.value).toBe(0);
+    // the snapshot is restored verbatim — byte-identical view object, zero new requests
+    expect(h.nav.view.value).toEqual({ phase: "text", path: "/p/a.ts", text: "hello", truncated: false, size: 5 });
+    expect(h.calls.length).toBe(callsBefore);
+    h.nav.back(); // bottom — no-op
+    expect(h.nav.view.value.phase).toBe("text");
+    expect(h.calls.length).toBe(callsBefore);
+  });
+
+  it("下钻 → 文件 → 返回 → 返回 (D3): every hop is one back away", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/src", dir: true });
+    h.waits[0]!.resolve(DIR_OK(["sub/"]));
+    await flush();
+    h.nav.navigate({ path: "/p/src/sub", dir: true }); // 下钻
+    h.waits[1]!.resolve(DIR_OK(["f.ts"]));
+    await flush();
+    h.nav.navigate({ path: "/p/src/sub/f.ts" }); // 打开文件
+    h.waits[2]!.resolve({ ok: true, kind: "text", size: 1, truncated: false, text: "f" });
+    await flush();
+    expect(h.nav.stackDepth.value).toBe(2);
+    h.nav.back(); // → sub listing
+    expect(h.nav.view.value).toMatchObject({ phase: "dir", path: "/p/src/sub" });
+    h.nav.back(); // → src listing
+    expect(h.nav.view.value).toMatchObject({ phase: "dir", path: "/p/src" });
+    expect(h.nav.stackDepth.value).toBe(0);
+  });
+
+  it("open() clears the history stack (a transcript click starts a fresh visit)", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[0]!.resolve(TEXT_OK);
+    await flush();
+    h.nav.navigate({ path: "/p/b.ts" });
+    expect(h.nav.stackDepth.value).toBe(1);
+    h.nav.open({ path: "/p/c.ts" });
+    expect(h.nav.stackDepth.value).toBe(0);
+    h.nav.back();
+    expect(h.nav.view.value).toEqual({ phase: "loading", path: "/p/c.ts" }); // nothing to pop
+  });
+
+  it("close() and 作用域失效 clear the stack too", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[0]!.resolve(TEXT_OK);
+    await flush();
+    h.nav.navigate({ path: "/p/b.ts" });
+    h.nav.close();
+    expect(h.nav.stackDepth.value).toBe(0);
+    expect(h.nav.view.value).toEqual({ phase: "closed" });
+
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[1]!.resolve(TEXT_OK);
+    await flush();
+    h.nav.navigate({ path: "/p/b.ts" });
+    const agents = new Map(h.state.value.agents);
+    const a = agents.get("A") as Record<string, unknown>;
+    const session = { ...(a.session as Record<string, unknown>), sessionId: "s2" };
+    agents.set("A", { ...a, session, card: { session } });
+    h.state.value = { ...h.state.value, agents } as unknown as HubState;
+    await nextTick();
+    expect(h.nav.stackDepth.value).toBe(0);
+    expect(h.nav.view.value).toEqual({ phase: "closed" });
+  });
+
+  it("the stack is capped at 64 — the oldest snapshot falls out (FIFO)", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/v0" });
+    h.waits[0]!.resolve(TEXT_OK);
+    await flush();
+    for (let i = 1; i <= PREVIEW_NAV_STACK_MAX + 1; i++) {
+      h.nav.navigate({ path: `/p/v${i}` });
+      h.waits[i]!.resolve({ ok: true, kind: "text", size: 1, truncated: false, text: `v${i}` });
+      await flush();
+    }
+    expect(h.nav.stackDepth.value).toBe(PREVIEW_NAV_STACK_MAX);
+    for (let i = 0; i < PREVIEW_NAV_STACK_MAX; i++) h.nav.back();
+    // v0 fell out: the deepest restorable snapshot is v1
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/v1" });
+    expect(h.nav.stackDepth.value).toBe(0);
+    h.nav.back(); // bottom — no-op
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/v1" });
+  });
+
+  it("back() during loading aborts the in-flight fetch and drops its late outcome", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[0]!.resolve(TEXT_OK);
+    await flush();
+    h.nav.navigate({ path: "/p/b.ts" }); // stays loading (deferred parked)
+    expect(h.nav.view.value.phase).toBe("loading");
+    h.nav.back();
+    expect(h.calls[1]!.opts.signal.aborted).toBe(true);
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/a.ts" });
+    h.waits[1]!.resolve(TEXT_OK); // late — dropped
+    await flush();
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/a.ts" });
+  });
+
+  it("retry() re-loads the same path WITHOUT touching the history stack", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[0]!.resolve(TEXT_OK);
+    await flush();
+    h.nav.navigate({ path: "/p/b.ts" });
+    h.waits[1]!.resolve({ ok: false, status: 0, error: "E_NETWORK" });
+    await flush();
+    expect(h.nav.view.value.phase).toBe("error");
+    expect(h.nav.stackDepth.value).toBe(1);
+    h.handle.retry();
+    expect(h.calls[2]!.req.path).toBe("/p/b.ts");
+    expect(h.nav.stackDepth.value).toBe(1); // untouched
+    h.waits[2]!.resolve(TEXT_OK);
+    await flush();
+    h.nav.back();
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/a.ts" });
+  });
+
+  it("up() navigates to parentPreviewPath with dir:true; a one-segment path greys out (no-op)", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/home/u/proj", dir: true });
+    h.waits[0]!.resolve(DIR_OK([]));
+    await flush();
+    h.nav.up();
+    expect(h.nav.stackDepth.value).toBe(1); // up is a navigation — the listing is 返回-able
+    expect(h.calls[1]!.req).toMatchObject({ path: "/home/u", dir: true });
+    h.waits[1]!.resolve(DIR_OK([]));
+    await flush();
+    h.nav.up();
+    h.waits[2]!.resolve(DIR_OK([]));
+    await flush();
+    expect(h.calls[2]!.req).toMatchObject({ path: "/home", dir: true });
+    h.nav.up(); // parent of /home is / — not listable: no-op
+    expect(h.calls).toHaveLength(3);
+    h.nav.back();
+    h.nav.back();
+    h.nav.back();
+    expect(h.nav.view.value).toMatchObject({ phase: "dir", path: "/home/u/proj" });
+  });
+
+  it("up() from a closed view is a no-op; navigate without a scope never pushes", async () => {
+    const h = makeHarness();
+    h.nav.up();
+    expect(h.calls).toHaveLength(0);
+    h.state.value = { ...h.state.value, selected: null } as unknown as HubState;
+    await nextTick();
+    h.nav.navigate({ path: "/p/x" });
+    expect(h.nav.stackDepth.value).toBe(0);
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it("a navigate from a transient phase (error) pushes nothing — nothing to return to", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[0]!.resolve({ ok: false, status: 403, error: "E_PREVIEW_DENIED" });
+    await flush();
+    expect(h.nav.view.value.phase).toBe("error");
+    h.nav.navigate({ path: "/p/b.ts" }); // defensive: error bodies render no refs
+    expect(h.nav.stackDepth.value).toBe(0);
+    h.waits[1]!.resolve(TEXT_OK);
+    await flush();
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/b.ts" });
+  });
+
+  it('probe kind "dir" sets the dir=1 opt-in directly (no discovery round trip)', async () => {
+    const h = makeHarness(
+      { caps: ["preview.v1", "preview.dir.v1"] },
+      { probeKinds: (p) => (p === "/p/src" ? "dir" : "text") },
+    );
+    // settle the probe pipeline first (flush is on a macrotask)
+    h.handle.probe!.ensure(["/p/src"]);
+    await flushMacro();
+    expect(h.probeCalls[0]!.dirs).toBe(true); // dirs passthrough (§5 P3)
+    h.nav.open({ path: "/p/src" }); // no explicit dir flag — the hint decides
+    expect(h.calls[0]!.req.dir).toBe(true);
+    h.waits[0]!.resolve(DIR_OK(["x.ts"]));
+    await flush();
+    expect(h.nav.view.value).toMatchObject({ phase: "dir", path: "/p/src" });
+  });
+
+  it("a non-dir kind never sets dir; an unknown kind falls back to a plain fetch", async () => {
+    const h = makeHarness({ caps: ["preview.v1", "preview.dir.v1"] }, { probeKinds: () => "text" });
+    h.handle.probe!.ensure(["/p/a.ts"]);
+    await flushMacro();
+    h.nav.open({ path: "/p/a.ts" });
+    expect(h.calls[0]!.req.dir).toBeUndefined();
+    h.waits[0]!.resolve(TEXT_OK);
+    await flush();
+    expect(h.nav.view.value.phase).toBe("text");
+  });
+
+  it("415 not-regular + dirs scope ⇒ ONE re-fetch with dir=1 ⇒ dir phase (the fallback)", async () => {
+    const h = makeHarness({ caps: ["preview.v1", "preview.dir.v1"] });
+    h.nav.open({ path: "/p/src" });
+    expect(h.calls[0]!.req.dir).toBeUndefined();
+    h.waits[0]!.resolve({ ok: false, status: 415, error: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
+    await flush();
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1]!.req).toMatchObject({ path: "/p/src", dir: true });
+    h.waits[1]!.resolve(DIR_OK(["a.ts"]));
+    await flush();
+    expect(h.nav.view.value).toMatchObject({ phase: "dir", path: "/p/src" });
+    expect(h.nav.stackDepth.value).toBe(0); // the fallback is internal — no history entry
+  });
+
+  it("a REAL non-regular file 415s again — the error phase surfaces, exactly one retry", async () => {
+    const h = makeHarness({ caps: ["preview.v1", "preview.dir.v1"] });
+    h.nav.open({ path: "/dev/pipe0" });
+    h.waits[0]!.resolve({ ok: false, status: 415, error: "E_PREVIEW_UNSUPPORTED", reason: "not-regular", size: 0 });
+    await flush();
+    h.waits[1]!.resolve({ ok: false, status: 415, error: "E_PREVIEW_UNSUPPORTED", reason: "not-regular", size: 0 });
+    await flush();
+    expect(h.calls).toHaveLength(2); // never a third
+    expect(h.nav.view.value).toEqual({ phase: "unsupported", path: "/dev/pipe0", reason: "not-regular", size: 0 });
+  });
+
+  it("no dirs cap ⇒ no fallback: the 415 surfaces directly; an explicit dir fetch never re-falls-back", async () => {
+    const h1 = makeHarness(); // default caps: no preview.dir.v1
+    h1.nav.open({ path: "/p/src" });
+    h1.waits[0]!.resolve({ ok: false, status: 415, error: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
+    await flush();
+    expect(h1.calls).toHaveLength(1);
+    expect(h1.nav.view.value).toMatchObject({ phase: "unsupported" });
+
+    const h2 = makeHarness({ caps: ["preview.v1", "preview.dir.v1"] });
+    h2.nav.open({ path: "/p/src", dir: true });
+    h2.waits[0]!.resolve({ ok: false, status: 415, error: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" });
+    await flush();
+    expect(h2.calls).toHaveLength(1); // wantDir — the fallback is one-shot only
+    expect(h2.nav.view.value).toMatchObject({ phase: "unsupported" });
+  });
+
+  it("dispose() clears the stack and is idempotent", () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/a.ts" });
+    h.waits[0]!.resolve(TEXT_OK);
+    h.nav.navigate({ path: "/p/b.ts" });
+    h.nav.dispose();
+    h.nav.dispose();
+    expect(h.nav.stackDepth.value).toBe(0);
+    expect(h.calls[1]!.opts.signal.aborted).toBe(true);
   });
 });

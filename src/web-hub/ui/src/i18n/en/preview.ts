@@ -33,6 +33,23 @@ const preview = {
   viewToggleLabel: "Markdown view mode",
   mdTooComplex: "This file is too complex to render — showing the source instead.",
   errorTitle: "Preview failed",
+  dirNavLabel: "Preview navigation",
+  dirBack: "Back",
+  dirUp: "Parent directory",
+  dirCount: "{n} entries",
+  dirCountAtLeast: "≥ {n} entries",
+  dirEmpty: "Empty directory.",
+  dirLimitScan: "Directory too large — only the first {n} entries were read.",
+  dirLimitEntries: "Showing only the first {shown} of {total} entries.",
+  dirLimitBytes: "Some names are too long — showing only the first {n} entries.",
+  dirDropped: "{n} entries with overly long names are not listed.",
+  dirVanished: "{n} entries vanished while listing.",
+  dirStatPartial: "Size or modification time is unknown for some entries.",
+  dirProtected: "Protected entries are not shown.",
+  dirTypeDir: "directory",
+  dirTypeFile: "file",
+  dirTypeSymlink: "symbolic link",
+  dirTypeOther: "special file",
 } satisfies Record<string, string>;
 
 export default preview;

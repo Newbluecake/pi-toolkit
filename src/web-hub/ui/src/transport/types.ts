@@ -354,15 +354,14 @@ export interface UploadTransport {
  * (`E_PREVIEW_TOO_LARGE` from `checkPreviewHeaders` keeps the server's 413 code with
  * `status: 0` — the request was aborted before the body ever left the server).
  *
- * dir-plan §5 P2: `PreviewDirOutcome` adds the `dir` success variant — a `dir=1` response's
- * capped-and-parsed listing (`PreviewDirListing`, the protocol's own type — never a hand
- * mirror). `PreviewOutcome` itself stays the file-only union for now: its only consumer
- * (`composables/usePreview.ts`, frozen for P2) narrows `kind !== "text" ⇒ image` and cannot
- * see a dir variant yet, so `fetch` keeps its pre-dir-plan return type and P3 — which
- * rewrites `usePreview` to pass `dir` and render the listing — merges the alias into
- * `PreviewOutcome` in the same package. An un-opt-in-ed fetch never sees the variant at all:
- * `Kind: dir` without `req.dir` is `E_BAD_RESPONSE` in `checkPreviewHeaders` (§1.3's fetch
- * path).
+ * dir-plan §5 P2→P3 (the P1 conditional item, closed): `PreviewDirOutcome` is now `fetch`'s
+ * DECLARED return — the logic clients have resolved `kind:"dir"` outcomes at runtime since
+ * P2, and P3's rewritten consumer (`composables/usePreview.ts`) narrows the union
+ * exhaustively (text / image / dir). `PreviewOutcome` keeps its file-only shape as the
+ * frozen face the contract test pins (`Extract<PreviewOutcome, {ok:true}>["kind"]` ≡
+ * image|text) and as the type every pre-dir-plan fake/outcome literal still satisfies. An
+ * un-opt-in-ed fetch never sees the dir variant at all: `Kind: dir` without `req.dir` is
+ * `E_BAD_RESPONSE` in `checkPreviewHeaders` (§1.3's fetch path).
  */
 export type PreviewOutcome =
   | {
@@ -392,9 +391,10 @@ export type PreviewOutcome =
     };
 
 /**
- * dir-plan §5 P2: the FULL outcome union (`PreviewOutcome` plus the `dir` variant). The
- * logic clients already RETURN dir outcomes for `dir: true` fetches at runtime; this alias
- * is the typed transition point P3 consumes when it widens `fetch`'s declared return.
+ * dir-plan §5 P2: the FULL outcome union (`PreviewOutcome` plus the `dir` variant). Since P3
+ * this IS `fetch`'s declared return; the alias is kept (rather than inlining the union into
+ * `fetch`) because the contract test pins both halves separately — `PreviewOutcome`'s
+ * success kinds ≡ image|text (the file-only face) and this union's ≡ image|text|dir.
  */
 export type PreviewDirOutcome =
   | PreviewOutcome
@@ -418,14 +418,15 @@ export interface PreviewTransport {
       readonly agentKey: string;
       readonly sessionId: string;
       readonly path: string;
-      /** dir-plan §5 P2: appends `&dir=1` (opt-in directory listing, A4) — absent keeps the
-       * request byte-identical to pre-dir-plan. The declared return stays the file-only
-       * `PreviewOutcome` until P3 rewrites its consumer (see `PreviewDirOutcome`); the logic
-       * clients already resolve `kind: "dir"` outcomes at runtime. */
+      /** dir-plan §5 P2 (request) / P3 (return): appends `&dir=1` (opt-in directory
+       * listing, A4) — absent keeps the request byte-identical to pre-dir-plan. The declared
+       * return is the full `PreviewDirOutcome` union: a `dir:true` request resolves the
+       * `kind:"dir"` variant (`listing`), everything else stays image/text — and P3's
+       * `usePreview` narrows all three exhaustively. */
       readonly dir?: true;
     },
     opts: { readonly signal: AbortSignal; readonly maxPixels: number },
-  ): Promise<PreviewOutcome>;
+  ): Promise<PreviewDirOutcome>;
   /** 2026-10-07 修订「先探测后标记」: `POST /api/preview/probe` — batch existence probe, same
    * auth/CSRF surface as `fetch` (cookie credentials + `X-PWH: 1`), ONE request for a whole
    * message's candidates. Optional per the frozen-types convention — an older/foreign

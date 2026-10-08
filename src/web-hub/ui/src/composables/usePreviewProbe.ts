@@ -30,7 +30,8 @@
  */
 import { onScopeDispose, ref, type Ref } from "vue";
 import { scopeKeyOf } from "@logic/preview.js";
-import { planProbeBatches, PreviewProbeStore } from "@logic/previewProbe.js";
+import { planProbeBatches, PreviewProbeStore, PROBE_LRU_CAP } from "@logic/previewProbe.js";
+import type { PreviewProbeKind } from "@protocol/preview.js";
 import type { PreviewPathScope } from "../types.js";
 import type { PreviewProbeOutcome } from "../transport/types.js";
 
@@ -42,7 +43,21 @@ export type PreviewProbeState = "pending" | "confirmed" | "missing" | "failed";
 /** Probe transport fn — `PreviewTransport["probe"]`, non-optional here (checked by usePreview). */
 export type PreviewProbeFn = NonNullable<import("../transport/types.js").PreviewTransport["probe"]>;
 
-export interface PreviewProbeHandle {
+/** dir-plan §5 P3: additive handle surface (kept in its own base so pre-P3 fakes typing
+ * `PreviewProbeHandle` stay valid when they omit `kindOf`). */
+export interface PreviewProbeHandleExtra {
+  /**
+   * dir-plan §5 P3 (dirs 透传 + kind 记录): the confirmed KIND of `path` under the current
+   * scope (`"dir"` ⇒ `usePreview.open/navigate` sets the `dir=1` opt-in directly, no probe
+   * re-request and no 415 round trip); `undefined` for anything unknown/failed — the caller
+   * then falls back to a plain fetch (and, on 415 `not-regular`, the one-shot dir re-fetch).
+   * Reactive (settles bump the same version `stateOf` reads). Optional per the frozen-types
+   * convention: pre-P3 fakes omit it and the composable's `dir` hint degrades cleanly.
+   */
+  kindOf?(path: string): PreviewProbeKind | undefined;
+}
+
+export interface PreviewProbeHandle extends PreviewProbeHandleExtra {
   /**
    * Current state of `path` under the CURRENT scope; `undefined` = not yet staged (the
    * caller renders plain text and — in `PathText` — queues it via `ensure`). Reactive.
@@ -68,6 +83,12 @@ interface QueueItem {
 export function usePreviewProbe(opts: UsePreviewProbeOptions): PreviewProbeHandle {
   const store = new PreviewProbeStore();
   const version = ref(0);
+  // dir-plan §5 P3: the last confirmed KIND per (scopeKey, path) — `usePreview` consults it
+  // ("dir" ⇒ the `dir=1` opt-in) instead of paying a discovery round trip per click. Bounded
+  // FIFO at the store's own LRU cap (`PROBE_LRU_CAP`): kinds age out alongside states, and a
+  // stale kind is never dangerous (hub `dir=1` on a file answers the file normally; the
+  // 415 fallback covers the dir-after-file direction).
+  const kinds = new Map<string, PreviewProbeKind>();
   let queue: QueueItem[] = [];
   let cancelScheduled: (() => void) | null = null;
   let disposed = false;
@@ -98,16 +119,41 @@ export function usePreviewProbe(opts: UsePreviewProbeOptions): PreviewProbeHandl
     version.value++; // pending marks are visible state (renders the same plain text, but stay honest)
   }
 
+  function kindKey(scopeKey: string, path: string): string {
+    return `${scopeKey}\u0000${path}`; // scopeKeys carry no NUL; probe paths are NUL-free (validatePreviewPath)
+  }
+
+  function recordKinds(scopeKey: string, batch: string[], results: ReadonlyArray<PreviewProbeKind>): void {
+    for (let i = 0; i < batch.length && i < results.length; i++) {
+      kinds.set(kindKey(scopeKey, batch[i]!), results[i]!);
+    }
+    while (kinds.size > PROBE_LRU_CAP) {
+      const oldest = kinds.keys().next();
+      if (oldest.done === true) break;
+      kinds.delete(oldest.value);
+    }
+  }
+
   async function request(scopeKey: string, scope: PreviewPathScope, batch: string[]): Promise<void> {
     let out: PreviewProbeOutcome;
+    // dir-plan §5 P3 (dirs 透传): a `dirs` scope asks directories to answer "dir" (A5/A4) —
+    // without the flag the request body stays byte-identical to pre-dir-plan.
+    const req: { agentKey: string; sessionId: string; paths: readonly string[]; dirs?: true } = {
+      agentKey: scope.agentKey,
+      sessionId: scope.sessionId,
+      paths: batch,
+    };
+    if (scope.dirs === true) req.dirs = true;
     try {
-      out = await opts.probe({ agentKey: scope.agentKey, sessionId: scope.sessionId, paths: batch });
+      out = await opts.probe(req);
     } catch {
       out = { ok: false, status: 0, error: "E_NETWORK" };
     }
     if (disposed) return;
-    if (out.ok && out.results.length === batch.length) store.settle(scopeKey, batch, out.results);
-    else store.fail(scopeKey, batch);
+    if (out.ok && out.results.length === batch.length) {
+      store.settle(scopeKey, batch, out.results);
+      recordKinds(scopeKey, batch, out.results);
+    } else store.fail(scopeKey, batch);
     version.value++;
   }
 
@@ -128,6 +174,12 @@ export function usePreviewProbe(opts: UsePreviewProbeOptions): PreviewProbeHandl
       const sc = opts.scope.value;
       if (sc === null) return undefined;
       return store.get(scopeKeyOf(sc), path);
+    },
+    kindOf(path) {
+      void version.value; // same reactivity contract as stateOf
+      const sc = opts.scope.value;
+      if (sc === null) return undefined;
+      return kinds.get(kindKey(scopeKeyOf(sc), path));
     },
     ensure(paths) {
       if (disposed || paths.length === 0) return;

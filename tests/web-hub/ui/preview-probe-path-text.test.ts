@@ -21,13 +21,13 @@ import type { HubHandle, PreviewHandle, PreviewPathScope, PreviewView } from "..
 
 const SCOPE: PreviewPathScope = { agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true };
 
-type ProbeCall = { agentKey: string; sessionId: string; paths: string[] };
+type ProbeCall = { agentKey: string; sessionId: string; paths: string[]; dirs?: true };
 
 interface ProbeRig {
   handle: PreviewHandle;
   probeHandle: PreviewProbeHandle;
   calls: ProbeCall[];
-  answer: (kinds: Array<"text" | "image" | "missing">) => void;
+  answer: (kinds: Array<"text" | "image" | "dir" | "missing">) => void;
   failRequest: (err: string) => void;
   flush(): void;
   pending(): boolean;
@@ -182,6 +182,47 @@ describe("PathText × probe (2026-10-07 修订「先探测后标记」)", () => 
     const el = w.get(".path-ref"); // clickable immediately — no probe pipeline at all
     await el.trigger("click");
     expect(open).toHaveBeenCalledWith({ path: "/p/src/a.ts" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 §5 P3 — dirs 透传 × PathText (a "dir" answer confirms the candidate)
+// ---------------------------------------------------------------------------
+
+describe("PathText × probe — dirs scope (dir-plan A5/P3)", () => {
+  it("a dirs scope sends dirs:true; a dir-kind answer confirms the candidate (clickable)", async () => {
+    const r = rig(ref<PreviewPathScope | null>({ ...SCOPE, dirs: true }));
+    const w = mountPathText(r, { text: "browse /p/src/ when done" }); // trailing-slash candidate (rule a)
+    r.flush();
+    await settleTick();
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]!.dirs).toBe(true); // P3 dirs passthrough
+    expect(r.calls[0]!.paths).toEqual(["/p/src"]); // trailing / stripped in the resolved path
+    r.answer(["dir"]);
+    await settleTick();
+    expect(w.find(".path-ref").exists()).toBe(true); // a directory ref is clickable — it opens a listing
+    expect(r.probeHandle.kindOf?.("/p/src")).toBe("dir"); // the composable's kind hint
+    r.stop();
+  });
+
+  it("a dirs-LESS scope never sends dirs and never confirms a directory (§1.3 fold ⇒ missing)", async () => {
+    const r = rig(); // SCOPE without dirs
+    // the trailing-slash dir candidate is not even recognized without the dirs scope —
+    // a plain file candidate is, and its request must stay dirs-less (byte-identical body)
+    const wSlash = mountPathText(r, { text: "browse /p/src/ when done" });
+    expect(wSlash.find(".path-ref").exists()).toBe(false);
+    expect(r.pending()).toBe(false); // nothing queued
+    const w = mountPathText(r, { text: "see /p/a.ts now" });
+    r.flush();
+    await settleTick();
+    expect(r.calls[0]!.dirs).toBeUndefined();
+    // a misbehaving hub answering "dir" to a dirs-less request is folded to missing by the
+    // transport's single fold point (§1.3) — simulated here by answering the folded form
+    r.answer(["missing"]);
+    await settleTick();
+    expect(w.find(".path-ref").exists()).toBe(false);
+    expect(r.probeHandle.kindOf?.("/p/a.ts")).toBe("missing");
+    r.stop();
   });
 });
 

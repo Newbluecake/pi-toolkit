@@ -1,9 +1,9 @@
 <!--
-  Preview overlay host (web-hub-preview plan v3 §4.6, package PV5). Teleports to `<body>` and
-  renders PV4's `usePreview` state machine (`PREVIEW_CTX` — provided by PV6's App wiring;
-  absent ⇒ nothing renders): loading / image / text / unsupported / tooLarge / error, with the
-  header's basename + full path + close button and the §5.2 plaintext-transport standing
-  warning.
+  Preview overlay host (web-hub-preview plan v3 §4.6, package PV5; dir-plan v3.1 §0.2 A3/§5
+  P3): Teleports to `<body>` and renders `usePreview`'s state machine (`PREVIEW_CTX` — provided
+  by PV6's App wiring; absent ⇒ nothing renders): loading / image / text / dir / unsupported /
+  tooLarge / error, with the header's basename + full path + close button and the §5.2
+  plaintext-transport standing warning.
 
   Interaction contract (§4.6):
   - scrim click closes (`@click.self` — clicks INSIDE the panel never reach it);
@@ -12,14 +12,27 @@
   - focus ENTERS the panel on open, Tab/Shift+Tab CYCLE inside it, and focus RETURNS to the
     previously focused element on close;
   - body scroll is locked while open and ALWAYS restored (close path AND unmount path).
+
+  dir-plan §0.2 A3 (P3): when the injected handle carries the navigation face
+  (`asDirHandle` — `usePreview`'s P3 return), the header grows 返回 (pop the in-dialog history
+  stack; disabled at its bottom) and, in the dir phase, 上级 (`parentPreviewPath`; disabled at
+  one-segment paths — `/` is not listable). The whole host subtree gets `PREVIEW_CTX`
+  re-provided with `open` mapped to `navigate`, so path refs rendered INSIDE the open dialog
+  (B6: a rendered md's PathText segments) drill down — push + 返回-able — instead of
+  restarting the visit. A handle without the face (pre-P3 fakes) keeps open-only navigation:
+  no nav buttons, no dir branch, byte-identical to pre-P3 DOM.
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onUnmounted, provide, ref, watch } from "vue";
+import { childPreviewPath, parentPreviewPath } from "@logic/preview.js";
+import type { PreviewDirEntry } from "@protocol/preview.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { asDirHandle, type PreviewHandleDir, type PreviewViewDir } from "../../composables/usePreview.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { PreviewView } from "../../types.js";
 import CopyButton from "../detail/CopyButton.vue";
+import PreviewDir from "./PreviewDir.vue";
 import PreviewImage from "./PreviewImage.vue";
 import PreviewText from "./PreviewText.vue";
 import { PREVIEW_CTX } from "./previewContext.js";
@@ -27,7 +40,12 @@ import { PREVIEW_CTX } from "./previewContext.js";
 const ctx = inject(PREVIEW_CTX, null);
 const { t } = useI18n();
 
-const view = computed<PreviewView>(() => ctx?.handle.view.value ?? { phase: "closed" });
+/** A3/P3: the navigation face — `null` for a pre-P3 handle/fake (open-only degradation). */
+const nav = computed<PreviewHandleDir | null>(() => (ctx === null ? null : asDirHandle(ctx.handle)));
+
+const view = computed<PreviewViewDir>(() =>
+  nav.value !== null ? nav.value.view.value : ((ctx?.handle.view.value ?? { phase: "closed" }) as PreviewView),
+);
 const isOpen = computed(() => view.value.phase !== "closed");
 const path = computed(() => ("path" in view.value ? view.value.path : ""));
 const basename = computed(() => {
@@ -35,6 +53,50 @@ const basename = computed(() => {
   const slash = p.lastIndexOf("/");
   return slash >= 0 && slash < p.length - 1 ? p.slice(slash + 1) : p;
 });
+const isDirPhase = computed(() => view.value.phase === "dir");
+const backDisabled = computed(() => nav.value === null || nav.value.stackDepth.value === 0);
+const upDisabled = computed(() => parentPreviewPath(path.value) === null);
+
+// §4.1/P3 (B6): the dialog's subtree re-provides PREVIEW_CTX with `open` mapped to
+// `navigate` — an in-dialog path ref click drills down (history push) instead of restarting
+// the visit. The injected `ctx` itself stays untouched for anything above this host; the
+// override only exists when the parent wiring provided a context at all.
+if (ctx !== null) {
+  const outer = ctx;
+  provide(PREVIEW_CTX, {
+    plaintext: outer.plaintext,
+    handle: {
+      ...outer.handle,
+      open(ref: { readonly path: string }) {
+        const d = nav.value;
+        if (d !== null) d.navigate(ref);
+        else outer.handle.open(ref);
+      },
+    },
+  });
+}
+
+function back(): void {
+  nav.value?.back();
+}
+
+function up(): void {
+  nav.value?.up();
+}
+
+/** A3 “点子项”: join the row's name onto the listed dir; the join's legality
+ * (`childPreviewPath`) is re-checked here — a bad row never fires a request. A `dir` row
+ * requests the listing directly (`dir:true`); a symlink row leaves the decision to the
+ * admission chain (the 415 fallback upgrades it to a listing if it is a directory). */
+function onDirEntry(entry: PreviewDirEntry): void {
+  const d = nav.value;
+  if (d === null || view.value.phase !== "dir") return;
+  const child = childPreviewPath(view.value.path, entry.name);
+  if (child === null) return;
+  const ref: { readonly path: string; readonly dir?: true } =
+    entry.type === "dir" ? { path: child, dir: true } : { path: child };
+  d.navigate(ref);
+}
 
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "";
@@ -147,7 +209,34 @@ function onKeydown(ev: KeyboardEvent): void {
         tabindex="-1"
       >
         <header class="preview-header">
-          <AppIcon name="file" class="icon-sm preview-header-icon" />
+          <!-- A3/P3: 返回 (history pop, disabled at the bottom) — present whenever the handle
+               carries the navigation face; 上级 joins only in the dir phase, disabled at
+               one-segment paths (`/` is not listable). Native buttons: keyboard-reachable,
+               part of the panel's Tab cycle. -->
+          <nav v-if="nav !== null" class="preview-nav" :aria-label="t('preview.dirNavLabel')">
+            <button
+              class="btn btn-ghost btn-icon preview-nav-btn"
+              type="button"
+              :disabled="backDisabled"
+              :aria-label="t('preview.dirBack')"
+              :title="t('preview.dirBack')"
+              @click="back"
+            >
+              <AppIcon name="chev-left" />
+            </button>
+            <button
+              v-if="isDirPhase"
+              class="btn btn-ghost btn-icon preview-nav-btn"
+              type="button"
+              :disabled="upDisabled"
+              :aria-label="t('preview.dirUp')"
+              :title="t('preview.dirUp')"
+              @click="up"
+            >
+              <AppIcon name="arrow-up" />
+            </button>
+          </nav>
+          <AppIcon :name="isDirPhase ? 'folder' : 'file'" class="icon-sm preview-header-icon" />
           <span class="preview-title" translate="no">{{ basename }}</span>
           <!-- `<bdi dir="ltr">` isolates the path from `.preview-path`'s `direction: rtl`
                front-ellipsis trick: without it the Unicode bidi algorithm reorders the
@@ -191,6 +280,15 @@ function onKeydown(ev: KeyboardEvent): void {
             :size-label="formatBytes(view.size)"
             :filename="basename"
             :path="path"
+          />
+          <!-- A3/P3: the listing — rendered only with the navigation face (a frozen fake can
+               never produce a dir phase; the guard keeps the branch total anyway). -->
+          <PreviewDir
+            v-else-if="view.phase === 'dir' && nav !== null"
+            :key="view.path"
+            :path="view.path"
+            :listing="view.listing"
+            @navigate="onDirEntry"
           />
           <div v-else-if="view.phase === 'unsupported'" class="preview-note">
             <AppIcon name="ban" class="preview-note-icon" />

@@ -36,6 +36,23 @@ const preview = {
   viewToggleLabel: "Markdown 显示方式",
   mdTooComplex: "此文件结构过于复杂，无法渲染——已改以源码显示。",
   errorTitle: "预览失败",
+  dirNavLabel: "预览导航",
+  dirBack: "返回",
+  dirUp: "上级目录",
+  dirCount: "{n} 项",
+  dirCountAtLeast: "≥ {n} 项",
+  dirEmpty: "空目录。",
+  dirLimitScan: "目录过大，只读取了前 {n} 项。",
+  dirLimitEntries: "只显示前 {shown} 项（共 {total} 项）。",
+  dirLimitBytes: "名字过长，只显示前 {n} 项。",
+  dirDropped: "{n} 个名字过长的条目未列出。",
+  dirVanished: "{n} 个条目在列举期间消失。",
+  dirStatPartial: "部分条目的大小或修改时间未知。",
+  dirProtected: "受保护条目不显示。",
+  dirTypeDir: "目录",
+  dirTypeFile: "文件",
+  dirTypeSymlink: "符号链接",
+  dirTypeOther: "特殊文件",
 } satisfies Messages<typeof en>;
 
 export default preview;

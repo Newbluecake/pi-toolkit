@@ -12,7 +12,7 @@ import { usePreviewProbe, type PreviewProbeHandle } from "../../../src/web-hub/u
 import type { PreviewProbeOutcome } from "../../../src/web-hub/ui/src/transport/types.js";
 import type { PreviewPathScope } from "../../../src/web-hub/ui/src/types.js";
 
-type ProbeCall = { agentKey: string; sessionId: string; paths: string[] };
+type ProbeCall = { agentKey: string; sessionId: string; paths: string[]; dirs?: true };
 
 const SCOPE: PreviewPathScope = { agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true };
 
@@ -194,5 +194,85 @@ describe("usePreviewProbe — state machine (2026-10-07 修订)", () => {
     // …but the late transport answer is dropped: the entry stays pending, never confirmed
     expect(t.calls).toHaveLength(0);
     expect(handle.stateOf("/p/a.ts")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dir-plan v3.1 §5 P3 — dirs 透传 + kind 记录 (kindOf)
+// ---------------------------------------------------------------------------
+
+describe("usePreviewProbe — dirs passthrough + kindOf (dir-plan P3)", () => {
+  it("a dirs scope adds dirs:true to the probe body; a plain scope stays byte-identical", async () => {
+    const scope = ref<PreviewPathScope | null>({ ...SCOPE, dirs: true });
+    const t = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "dir" as const) }));
+    const { handle, sched } = setup(scope, t);
+    handle.ensure(["/p/src"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(t.calls[0]!.dirs).toBe(true);
+
+    const plain = ref<PreviewPathScope | null>(SCOPE);
+    const t2 = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "text" as const) }));
+    const r2 = setup(plain, t2);
+    r2.handle.ensure(["/p/a.ts"]);
+    r2.sched.flush();
+    await flushMicrotasks();
+    expect(t2.calls[0]!.dirs).toBeUndefined(); // no dirs key at all — byte-identical body
+  });
+
+  it("kindOf returns the confirmed kind; unknown/failed paths stay undefined", async () => {
+    const scope = ref<PreviewPathScope | null>({ ...SCOPE, dirs: true });
+    const t = makeProbe((c) => ({
+      ok: true,
+      results: c.paths.map((p) => (p === "/p/src" ? "dir" : p === "/p/img.png" ? "image" : "missing")),
+    }));
+    const { handle, sched } = setup(scope, t);
+    expect(handle.kindOf?.("/p/src")).toBeUndefined(); // nothing settled yet
+    handle.ensure(["/p/src", "/p/img.png", "/p/gone.ts"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.kindOf?.("/p/src")).toBe("dir");
+    expect(handle.kindOf?.("/p/img.png")).toBe("image");
+    expect(handle.kindOf?.("/p/gone.ts")).toBe("missing");
+    expect(handle.kindOf?.("/p/never.ts")).toBeUndefined();
+  });
+
+  it("a failed batch records no kinds (the caller falls back to the 415 path)", async () => {
+    const scope = ref<PreviewPathScope | null>({ ...SCOPE, dirs: true });
+    const t = makeProbe(() => ({ ok: false as const, status: 503, error: "E_BUSY" }));
+    const { handle, sched } = setup(scope, t);
+    handle.ensure(["/p/src"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.stateOf("/p/src")).toBe("failed");
+    expect(handle.kindOf?.("/p/src")).toBeUndefined();
+  });
+
+  it("kindOf partitions by scopeKey like stateOf — a session switch reads a fresh slate", async () => {
+    const scope = ref<PreviewPathScope | null>({ ...SCOPE, dirs: true });
+    const t = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "dir" as const) }));
+    const { handle, sched } = setup(scope, t);
+    handle.ensure(["/p/src"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.kindOf?.("/p/src")).toBe("dir");
+    scope.value = { ...SCOPE, sessionId: "s2" };
+    expect(handle.kindOf?.("/p/src")).toBeUndefined();
+  });
+
+  it("the kinds map is bounded (PROBE_LRU_CAP): the oldest entry ages out", async () => {
+    const scope = ref<PreviewPathScope | null>({ ...SCOPE, dirs: true });
+    const t = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "dir" as const) }));
+    const { handle, sched } = setup(scope, t);
+    handle.ensure(["/p/first"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.kindOf?.("/p/first")).toBe("dir");
+    // 300 more paths (in wire batches of ≤100) push the map past its 256 cap
+    handle.ensure(Array.from({ length: 300 }, (_, i) => `/p/x${i}`));
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.kindOf?.("/p/first")).toBeUndefined(); // aged out, FIFO
+    expect(handle.kindOf?.("/p/x299")).toBe("dir");
   });
 });
