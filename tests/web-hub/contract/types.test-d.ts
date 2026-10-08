@@ -191,7 +191,14 @@ describe("types.test-d.ts (plan §11 typecheck contract)", () => {
 describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
   it("CmdArgs is a discriminated union keyed by op, one variant per CmdOp", () => {
     expectTypeOf<CmdArgs["op"]>().toEqualTypeOf<
-      "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "dialog_answer" | "dialog_cancel" | "command"
+      | "prompt"
+      | "abort"
+      | "steer_subagent"
+      | "abort_subagent"
+      | "dialog_answer"
+      | "dialog_cancel"
+      | "command"
+      | "recall" // steer-recall plan §2.3 S2 (hold.v1)
     >();
   });
 
