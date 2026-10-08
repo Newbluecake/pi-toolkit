@@ -45,8 +45,11 @@
 
 /* Everything inside the control dock (queue, command result/confirm, composer row) rides the
  * transcript column: same `--transcript-max` cap and the same `sp-3` side padding as
- * `.tx-inner`, so the composer card's edges line up with the message/tool-card edges above. */
-.dock-ctl > * {
+ * `.tx-inner`, so the composer card's edges line up with the message/tool-card edges above.
+ * `.dock.dock-ctl` (0,2,0) outranks the children components' own `margin:0`/`padding:0`
+ * resets (e.g. `.queue-list`, 0,1,0) regardless of bundle order — 2026-10-08 field report:
+ * the queue rows lost the centering to that tie and hugged the dock's left edge. */
+.dock.dock-ctl > * {
   width: 100%;
   max-width: var(--transcript-max);
   margin-inline: auto;
