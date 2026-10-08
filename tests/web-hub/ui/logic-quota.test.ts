@@ -6,6 +6,9 @@ import {
   etaDurationKey,
   fmtResetAt,
   freshestQuota,
+  glmMergeable,
+  pillDisplay,
+  pillGroups,
   pillView,
   scopeLabel,
 } from "../../../src/web-hub/ui/src/logic/quota.js";
@@ -192,6 +195,296 @@ describe("pillView — D6 reset-time annex rule", () => {
     const v = pillView(q);
     expect(v.resetScope).toBe("week");
     expect(v.resetAt).toBe(2_000);
+  });
+});
+
+describe("glmMergeable — the GLM equality rule (2026-10: merge GLM/GLM 国际 while equal)", () => {
+  const pair = (cnWindows, intlWindows) => [provider("zai-coding-cn", cnWindows), provider("zai", intlWindows)];
+
+  it.each([
+    [
+      "same scopes + levels + rounded pcts",
+      pair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42.2, 0), window("week", 40.8, 0)]),
+      true,
+    ],
+    ["raw pct inside the same rounding bucket", pair([window("5h", 41.4, 1)], [window("5h", 41.49, 1)]), true],
+    ["both windowless (empty scope sets)", pair([], []), true],
+    ["differing level per scope", pair([window("5h", 42, 0)], [window("5h", 42, 1)]), false],
+    ["differing rounded pct", pair([window("5h", 41.4, 0)], [window("5h", 41.6, 0)]), false],
+    [
+      "differing scope sets (cn has week, intl does not)",
+      pair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42, 0)]),
+      false,
+    ],
+    ["one windowless, one not", pair([], [window("5h", 42, 0)]), false],
+  ] as const)("%s ⇒ %s", (_name, provs, expected) => {
+    expect(glmMergeable(provs[0], provs[1])).toBe(expected);
+  });
+
+  it("non-finite usedPct never compares equal (NaN !== NaN ⇒ never merges)", () => {
+    expect(
+      glmMergeable(
+        provider("zai-coding-cn", [window("5h", Number.NaN, 0)]),
+        provider("zai", [window("5h", Number.NaN, 0)]),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("pillGroups — one group per provider (headline, ordering, availability)", () => {
+  it("undefined / no providers / windowless providers ⇒ []", () => {
+    expect(pillGroups(undefined)).toEqual([]);
+    expect(pillGroups(quota([]))).toEqual([]);
+    expect(pillGroups(quota([provider("zai", [])]))).toEqual([]);
+  });
+
+  it("one group per provider in snapshot order; headline = that provider's worst window; windows 5h-first", () => {
+    const q = quota([
+      provider("kimi-coding", [window("week", 91, 2), window("5h", 10, 0)]),
+      provider("zai-coding-cn", [window("5h", 62, 0)]),
+    ]);
+    expect(pillGroups(q)).toEqual([
+      {
+        ids: ["kimi-coding"],
+        labelId: "kimi-coding",
+        level: 2,
+        scope: "week",
+        usedPct: 91,
+        windows: [
+          { scope: "5h", level: 0, usedPct: 10 },
+          { scope: "week", level: 2, usedPct: 91 },
+        ],
+        weekResetAt: undefined, // week window exists but carries no resetAt
+        resetScope: "week", // triggered week ⇒ week annex (its resetAt itself is unknown here)
+        resetAt: undefined,
+        available: true,
+      },
+      {
+        ids: ["zai-coding-cn"],
+        labelId: "zai-coding-cn",
+        level: 0,
+        scope: "5h",
+        usedPct: 62,
+        windows: [{ scope: "5h", level: 0, usedPct: 62 }],
+        weekResetAt: undefined, // no week window, headline has no resetAt either
+        resetScope: undefined,
+        resetAt: undefined,
+        available: true,
+      },
+    ]);
+  });
+
+  it("usedPct is rounded; level 3 ⇒ available:false (spawn gate fast-fails that provider)", () => {
+    const q = quota([provider("kimi-coding", [window("week", 97.6, 3)])]);
+    const g = pillGroups(q)[0];
+    expect(g.usedPct).toBe(98);
+    expect(g.available).toBe(false);
+  });
+});
+
+describe("pillGroups — GLM merge", () => {
+  const glmPair = (cnWindows, intlWindows) => [provider("zai-coding-cn", cnWindows), provider("zai", intlWindows)];
+
+  it("equal pair collapses into ONE group at the first one's position, labelId cn (label 'GLM')", () => {
+    const q = quota([
+      ...glmPair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42, 0), window("week", 41, 0)]),
+      provider("kimi-coding", [window("week", 98, 3, { resetAt: 9_999 })]),
+    ]);
+    const groups = pillGroups(q);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({ ids: ["zai-coding-cn", "zai"], labelId: "zai-coding-cn", level: 0 });
+    expect(groups[1]).toMatchObject({ ids: ["kimi-coding"], labelId: "kimi-coding", level: 3 });
+  });
+
+  it.each([
+    ["differing level", glmPair([window("5h", 42, 0)], [window("5h", 42, 1)])],
+    ["differing rounded pct", glmPair([window("5h", 41.4, 0)], [window("5h", 41.6, 0)])],
+    ["differing scope sets", glmPair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42, 0)])],
+  ] as const)("%s ⇒ two separate groups", (_name, provs) => {
+    const groups = pillGroups(quota(provs));
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.labelId)).toEqual(["zai-coding-cn", "zai"]);
+    expect(groups.every((g) => g.ids.length === 1)).toBe(true);
+  });
+
+  it("only one GLM side present ⇒ plain single group, no merge machinery", () => {
+    expect(pillGroups(quota([provider("zai-coding-cn", [window("5h", 42, 0)])]))).toMatchObject([
+      { ids: ["zai-coding-cn"], labelId: "zai-coding-cn" },
+    ]);
+    expect(pillGroups(quota([provider("zai", [window("5h", 42, 0)])]))).toMatchObject([
+      { ids: ["zai"], labelId: "zai" },
+    ]);
+  });
+
+  it("reversed snapshot order (zai first) still merges at the FIRST position with the cn label", () => {
+    const q = quota([
+      provider("kimi-coding", [window("5h", 8, 0)]),
+      provider("zai", [window("5h", 42, 0)]),
+      provider("zai-coding-cn", [window("5h", 42, 0)]),
+    ]);
+    const groups = pillGroups(q);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({ ids: ["kimi-coding"], labelId: "kimi-coding" });
+    expect(groups[1]).toMatchObject({ ids: ["zai-coding-cn", "zai"], labelId: "zai-coding-cn", usedPct: 42 });
+  });
+});
+
+describe("pillGroups — D6 reset annex per provider + the unavailable fallback", () => {
+  it("week triggered (any level>=1) ⇒ that group carries the week reset", () => {
+    const g = pillGroups(quota([provider("kimi-coding", [window("week", 91, 2, { resetAt: 54_321 })])]))[0];
+    expect(g.resetScope).toBe("week");
+    expect(g.resetAt).toBe(54_321);
+  });
+
+  it("5h triggered with usedPct>70 ⇒ that group carries the 5h reset", () => {
+    const g = pillGroups(quota([provider("zai", [window("5h", 76, 1, { resetAt: 12_345 })])]))[0];
+    expect(g.resetScope).toBe("5h");
+    expect(g.resetAt).toBe(12_345);
+  });
+
+  it("5h triggered but usedPct<=70 ⇒ no reset annex", () => {
+    const g = pillGroups(quota([provider("zai", [window("5h", 70, 1, { resetAt: 999 })])]))[0];
+    expect(g.resetScope).toBeUndefined();
+    expect(g.resetAt).toBeUndefined();
+  });
+
+  it("both windows triggered (5h headline) ⇒ week reset wins for that group", () => {
+    const g = pillGroups(
+      quota([
+        provider("zai-coding-cn", [window("5h", 84, 2, { resetAt: 1_000 }), window("week", 55, 1, { resetAt: 2_000 })]),
+      ]),
+    )[0];
+    expect(g.scope).toBe("5h"); // headline stays 5h
+    expect(g.resetScope).toBe("week"); // annex prefers 7d
+    expect(g.resetAt).toBe(2_000);
+  });
+
+  it("reset decisions are independent per provider (one provider's triggers never leak into another's annex)", () => {
+    const q = quota([
+      provider("zai-coding-cn", [window("5h", 84, 1, { resetAt: 1_000 })]), // 5h>70 ⇒ annex
+      provider("kimi-coding", [window("week", 10, 0, { resetAt: 2_000 })]), // nothing triggered
+    ]);
+    expect(pillGroups(q)[0].resetAt).toBe(1_000);
+    expect(pillGroups(q)[1].resetAt).toBeUndefined();
+  });
+
+  it("level-3 group always carries its headline window's resetAt when known (5h 65% would otherwise show none)", () => {
+    const g = pillGroups(quota([provider("kimi-coding", [window("5h", 65, 3, { resetAt: 7_777 })])]))[0];
+    expect(g.available).toBe(false);
+    expect(g.resetScope).toBe("5h");
+    expect(g.resetAt).toBe(7_777);
+  });
+
+  it("level-3 group with no resetAt anywhere stays annex-free", () => {
+    const g = pillGroups(quota([provider("kimi-coding", [window("week", 65, 3)])]))[0];
+    expect(g.resetScope).toBe("week"); // triggered week decided the scope…
+    expect(g.resetAt).toBeUndefined(); // …but there is no timestamp to show
+  });
+
+  it("level-3 group keeps a D6-decided week reset (the headline's own is NOT substituted in)", () => {
+    const g = pillGroups(
+      quota([
+        provider("kimi-coding", [window("5h", 95, 3, { resetAt: 1_000 }), window("week", 30, 1, { resetAt: 2_000 })]),
+      ]),
+    )[0];
+    expect(g.resetScope).toBe("week");
+    expect(g.resetAt).toBe(2_000);
+  });
+});
+
+describe("pillDisplay — 2026-10-08 ruling: available-only / all-exhausted week-resets", () => {
+  it("nothing to show ⇒ null", () => {
+    expect(pillDisplay(undefined)).toBeNull();
+    expect(pillDisplay(quota([]))).toBeNull();
+    expect(pillDisplay(quota([provider("zai", [])]))).toBeNull();
+  });
+
+  it("single available provider ⇒ mode available, that one group", () => {
+    const d = pillDisplay(quota([provider("zai-coding-cn", [window("5h", 42, 0)])]));
+    expect(d?.mode).toBe("available");
+    expect(d?.groups).toHaveLength(1);
+    expect(d?.groups[0]).toMatchObject({ labelId: "zai-coding-cn", available: true });
+  });
+
+  it("mixed available + exhausted ⇒ mode available, ONLY the available groups shown", () => {
+    const d = pillDisplay(
+      quota([
+        provider("zai-coding-cn", [window("5h", 17, 0), window("week", 43, 0)]),
+        provider("kimi-coding", [window("week", 98, 3, { resetAt: 9_999 })]),
+      ]),
+    );
+    expect(d?.mode).toBe("available");
+    expect(d?.groups.map((g) => g.labelId)).toEqual(["zai-coding-cn"]);
+    // the group carries BOTH windows (5h first) so the pill can render `GLM 5h 17% · 7d 43%`
+    expect(d?.groups[0]?.windows).toEqual([
+      { scope: "5h", level: 0, usedPct: 17 },
+      { scope: "week", level: 0, usedPct: 43 },
+    ]);
+  });
+
+  it("all exhausted ⇒ mode exhausted, every group kept with its WEEK resetAt", () => {
+    const d = pillDisplay(
+      quota([
+        provider("zai-coding-cn", [window("5h", 95, 3), window("week", 98, 3, { resetAt: 5_000 })]),
+        provider("kimi-coding", [window("week", 97, 3, { resetAt: 6_000 })]),
+      ]),
+    );
+    expect(d?.mode).toBe("exhausted");
+    expect(d?.groups.map((g) => g.labelId)).toEqual(["zai-coding-cn", "kimi-coding"]);
+    expect(d?.groups[0]?.weekResetAt).toBe(5_000);
+    expect(d?.groups[1]?.weekResetAt).toBe(6_000);
+  });
+
+  it("no week window ⇒ weekResetAt falls back to the headline window's resetAt", () => {
+    const d = pillDisplay(quota([provider("kimi-coding", [window("5h", 95, 3, { resetAt: 7_777 })])]));
+    expect(d?.mode).toBe("exhausted");
+    expect(d?.groups[0]?.weekResetAt).toBe(7_777);
+  });
+
+  it("week window present but without resetAt ⇒ weekResetAt undefined (clock omitted)", () => {
+    const d = pillDisplay(quota([provider("kimi-coding", [window("week", 95, 3)])]));
+    expect(d?.mode).toBe("exhausted");
+    expect(d?.groups[0]?.weekResetAt).toBeUndefined();
+  });
+
+  it("merged GLM pair stays merged when exhausted together (one group in exhausted mode)", () => {
+    const d = pillDisplay(
+      quota([
+        provider("zai-coding-cn", [window("week", 99, 3, { resetAt: 5_000 })]),
+        provider("zai", [window("week", 99, 3, { resetAt: 8_000 })]),
+      ]),
+    );
+    expect(d?.mode).toBe("exhausted");
+    expect(d?.groups).toHaveLength(1);
+    expect(d?.groups[0]).toMatchObject({
+      ids: ["zai-coding-cn", "zai"],
+      labelId: "zai-coding-cn",
+      weekResetAt: 5_000, // the cn side's — merge values always come from zai-coding-cn
+    });
+  });
+});
+
+describe("pillGroups/pillDisplay — defensive wire policy (verifier 2026-10: never throw, never NaN)", () => {
+  it("an unknown future provider id renders under its raw id (labelId = id)", () => {
+    const groups = pillGroups(quota([provider("moonshot-coding", [window("5h", 40, 0)])]));
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ ids: ["moonshot-coding"], labelId: "moonshot-coding", usedPct: 40 });
+    const d = pillDisplay(quota([provider("moonshot-coding", [window("5h", 40, 0)])]));
+    expect(d?.mode).toBe("available");
+    expect(d?.groups[0]?.labelId).toBe("moonshot-coding");
+  });
+
+  it("a non-finite usedPct reads as 0% everywhere it is shown — never NaN", () => {
+    const q = quota([provider("zai-coding-cn", [window("5h", Number.NaN, 0), window("week", 41, 0)])]);
+    const g = pillGroups(q)[0]!;
+    expect(g.usedPct).toBe(41); // headline = the finite week window
+    expect(g.windows).toEqual([
+      { scope: "5h", level: 0, usedPct: 0 }, // NaN window still listed, pct clamped to 0
+      { scope: "week", level: 0, usedPct: 41 },
+    ]);
+    const allNan = pillGroups(quota([provider("kimi-coding", [window("5h", Number.NaN, 0)])]))[0]!;
+    expect(allNan.usedPct).toBe(0);
+    expect(allNan.windows[0]?.usedPct).toBe(0);
   });
 });
 

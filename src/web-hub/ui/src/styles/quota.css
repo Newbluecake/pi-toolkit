@@ -9,13 +9,24 @@
  * exactly. `--c-orange`/`--c-orange-soft`/`--c-orange-border`/`--c-orange-text` live in
  * `styles/tokens.css` (added alongside this change, light+dark, same shape as the existing
  * warning/danger families) so L2 is never visually confused with L1 or L3 by color alone.
+ *
+ * Multi-group pill (2026-10): one `.q-seg` per subscription group, each with its own dot and
+ * text color — available (L0-L2) groups stay muted, only an unavailable L3 group escalates to
+ * danger + semibold (⚠ prefixes the label; the label itself is never replaced). The pill's own
+ * `data-level` keeps the MAX level, so the whole-pill border/background ladder is unchanged.
  */
 
 .q-pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  flex: none;
+  /* 2026-10 verifier #3: was `flex: none` — three alerting groups with reset annexes could grow
+   * past the viewport and push the top bar's right-hand controls out from under `.app`'s
+   * `overflow:hidden`. Bound + let it shrink like `.brand` (shell.css: flex 0 1 auto); the text
+   * container ellipsizes, aria/title still carry the full text. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(60vw, 640px);
   padding: 3px 9px;
   border: 1px solid var(--c-border);
   border-radius: var(--r-pill);
@@ -30,6 +41,22 @@
   background: var(--c-surface-2);
 }
 
+/* Whole-pill border/background by MAX level (text color lives per segment below). */
+.q-pill[data-level="1"] {
+  background: var(--c-warning-soft);
+  border-color: var(--c-warning-border);
+}
+.q-pill[data-level="2"] {
+  background: var(--c-orange-soft);
+  border-color: var(--c-orange-border);
+}
+.q-pill[data-level="3"] {
+  background: var(--c-danger-soft);
+  border-color: var(--c-danger-border);
+}
+
+/* One group = one segment: own dot (four-tier ladder) + text. Available groups stay muted
+ * (--c-text-2); only an unavailable L3 group gets danger + semibold text. */
 .q-dot {
   width: 7px;
   height: 7px;
@@ -38,39 +65,48 @@
   background: var(--c-text-3);
 }
 
-.q-pill[data-level="0"] .q-dot {
+.q-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.q-seg[data-level="0"] .q-dot {
   background: var(--c-success);
 }
-
-.q-pill[data-level="1"] {
-  color: var(--c-warning-text);
-  background: var(--c-warning-soft);
-  border-color: var(--c-warning-border);
-}
-.q-pill[data-level="1"] .q-dot {
+.q-seg[data-level="1"] .q-dot {
   background: var(--c-warning);
 }
-
-.q-pill[data-level="2"] {
-  color: var(--c-orange-text);
-  background: var(--c-orange-soft);
-  border-color: var(--c-orange-border);
-}
-.q-pill[data-level="2"] .q-dot {
+.q-seg[data-level="2"] .q-dot {
   background: var(--c-orange);
 }
-
-.q-pill[data-level="3"] {
-  color: var(--c-danger);
-  background: var(--c-danger-soft);
-  border-color: var(--c-danger-border);
-  font-weight: var(--fw-semibold);
-}
-.q-pill[data-level="3"] .q-dot {
+.q-seg[data-level="3"] .q-dot {
   background: var(--c-danger);
 }
 
+.q-seg-text {
+  color: var(--c-text-2);
+}
+
+.q-seg[data-level="3"] .q-seg-text {
+  color: var(--c-danger);
+  font-weight: var(--fw-semibold);
+}
+
+/* Thin separator between groups. The "·" glyph is the mobile separator; desktop clips the
+ * 1px-wide box down to a bare rule so the separator never reads like a reset annex's " · ". */
+.q-sep {
+  display: inline-block;
+  width: 1px;
+  height: 11px;
+  margin: 0 6px;
+  overflow: hidden;
+  vertical-align: middle;
+  background: var(--c-border);
+}
+
 .q-pill-text {
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -221,6 +257,16 @@
 /* ---------------------------------------------------------------- mobile (≤767px) */
 
 @media (max-width: 767px) {
+  /* The separator becomes its "·" glyph form (compact `GLM 42% · Kimi ⚠98%`). */
+  .q-sep {
+    width: auto;
+    height: auto;
+    margin: 0 2px;
+    overflow: visible;
+    background: none;
+    color: var(--c-text-3);
+  }
+
   .q-card {
     left: 8px;
     right: 8px;

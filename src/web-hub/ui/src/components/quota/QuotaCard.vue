@@ -1,6 +1,8 @@
 <!--
-  Subscription-quota popover card (quota-web plan §3/D2): three-provider-row detail behind
-  `QuotaPill.vue`'s trigger. Esc / outside-pointerdown close + focus-return mirror
+  Subscription-quota popover card (quota-web plan §3/D2): per-provider-row detail behind
+  `QuotaPill.vue`'s trigger — with the 2026-10 GLM merge (`cardRows`: equal `zai-coding-cn`/`zai`
+  collapse into one "GLM" row, split otherwise; same `glmMergeable` rule as the pill). Esc /
+  outside-pointerdown close + focus-return mirror
   `shell/SettingsOverlay.vue`'s desktop popover exactly (non-modal `role="dialog"`, no Tab trap,
   `preventDefault()` on Esc so `DashboardView.vue`'s own global Escape handler — which checks
   `event.defaultPrevented` — never double-handles the same keypress).
@@ -11,15 +13,90 @@
   own reset (`etaMs` defined AND, when `resetAt` is also known, `now + etaMs < resetAt`).
 -->
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { etaDurationKey, fmtResetAt } from "@logic/quota.js";
+import { etaDurationKey, fmtResetAt, glmPair } from "@logic/quota.js";
 import type { QuotaProviderWire, QuotaWindowWire, QuotaWire } from "@protocol/messages.js";
 import "../../styles/quota.css";
 
 const props = defineProps<{ quota: QuotaWire; now: number; anchorEl: HTMLElement | null }>();
 const emit = defineEmits<{ close: [] }>();
 const { t } = useI18n();
+
+/** Mirrors `glmPair`'s JSDoc return shape (`logic/quota.js` — the ONE shared GLM-pair rule
+ *  this card reuses instead of re-implementing; never constructed locally). */
+interface GlmPair {
+  skip: QuotaProviderWire;
+  source: QuotaProviderWire;
+  members: QuotaProviderWire[];
+}
+
+/** One head badge of a provider row. */
+type CardBadge = { kind: "demoted"; until: number } | { kind: "stale"; provider: QuotaProviderWire };
+
+/** One rendered provider row. GLM merge (2026-10, `glmPair` — same rule as the pill): when the
+ *  pair merges, ONE row labeled "GLM" (`labelId` = the cn side's id, regardless of snapshot
+ *  order) sits at the FIRST member's position, its window rows are the cn side's, and its
+ *  badges aggregate BOTH members: distinct plans each get their own badge, demotion shows the
+ *  EARLIEST resumption, and every stale member keeps its own stale badge with its age — a
+ *  merged row never loses a member's flags to the other's. Non-merged rows render exactly as
+ *  pre-merge (demoted XOR stale, single plan). */
+interface CardRow {
+  key: string;
+  labelId: string;
+  windows: QuotaWindowWire[];
+  plans: string[];
+  badges: CardBadge[];
+}
+
+function finiteDemoted(provs: QuotaProviderWire[]): number | undefined {
+  return provs
+    .map((x) => x.demotedUntil)
+    .filter((x): x is number => x !== undefined && Number.isFinite(x))
+    .sort((a, b) => a - b)[0];
+}
+
+function cardRows(providers: QuotaProviderWire[]): CardRow[] {
+  const pair = glmPair(providers) as GlmPair | undefined;
+  const rows: CardRow[] = [];
+  for (const p of providers) {
+    if (pair !== undefined && pair.members.includes(p)) {
+      if (p === pair.skip) continue;
+      const members = pair.members;
+      const badges: CardBadge[] = [];
+      const demoted = finiteDemoted(members);
+      if (demoted !== undefined) badges.push({ kind: "demoted", until: demoted });
+      for (const m of members) {
+        if (m.stale) badges.push({ kind: "stale", provider: m });
+      }
+      rows.push({
+        key: `${pair.source.id}+${pair.skip.id}`,
+        labelId: pair.source.id, // always zai-coding-cn ⇒ label "GLM"
+        windows: pair.source.windows,
+        plans: [...new Set(members.map((x) => x.plan).filter((x): x is string => x !== undefined))],
+        badges,
+      });
+      continue;
+    }
+    // Non-merged row — exactly the pre-merge badge behavior (demoted XOR stale, one plan).
+    const badges: CardBadge[] = [];
+    if (p.demotedUntil !== undefined && Number.isFinite(p.demotedUntil)) {
+      badges.push({ kind: "demoted", until: p.demotedUntil });
+    } else if (p.stale) {
+      badges.push({ kind: "stale", provider: p });
+    }
+    rows.push({
+      key: p.id,
+      labelId: p.id,
+      windows: p.windows,
+      plans: p.plan === undefined ? [] : [p.plan],
+      badges,
+    });
+  }
+  return rows;
+}
+
+const rows = computed<CardRow[]>(() => cardRows(props.quota.providers));
 
 const panelEl = ref<HTMLElement | null>(null);
 
@@ -55,7 +132,24 @@ onUnmounted(() => {
 });
 
 function providerLabel(id: string): string {
-  return t(`quota.provider.${id}`);
+  const key = `quota.provider.${id}`;
+  const label = t(key);
+  // Unknown provider id (a future wire peer): t() falls back to the raw key — degrade to the
+  // bare id instead, never "quota.provider.xxx" (verifier 2026-10).
+  return label === key ? id : label;
+}
+
+/** Badge text: demoted ⇒ "⤓ demoted · resumes {clock}"; stale ⇒ its own age (or bare stale). */
+function badgeText(b: CardBadge): string {
+  if (b.kind === "demoted") {
+    const clock = fmtResetAt(b.until, props.now) ?? "";
+    return t("quota.demotedBadgeUntil", { clock });
+  }
+  return staleBadgeText(b.provider);
+}
+
+function badgeKey(b: CardBadge): string {
+  return b.kind === "demoted" ? "demoted" : `stale-${b.provider.id}`;
 }
 
 function scopeText(scope: QuotaWindowWire["scope"]): string {
@@ -67,8 +161,10 @@ function barWidth(usedPct: number): string {
   return `${pct}%`;
 }
 
-function demotedClock(p: QuotaProviderWire): string | undefined {
-  return p.demotedUntil === undefined ? undefined : fmtResetAt(p.demotedUntil, props.now);
+/** Rounded pct text; non-finite reads as 0% — the same defensive wire policy as the pill
+ *  (never `NaN%`; verifier 2026-10). */
+function pctText(usedPct: number): string {
+  return `${Number.isFinite(usedPct) ? Math.round(usedPct) : 0}%`;
 }
 
 /** verification r_WV2Y9VQZ #2: the stale badge carries an age ("stale N min") whenever the
@@ -105,19 +201,22 @@ function resetText(w: QuotaWindowWire): string | undefined {
 <template>
   <div id="quota-panel" ref="panelEl" class="q-card" role="dialog" :aria-label="t('quota.title')" tabindex="-1">
     <h2 class="q-card-title">{{ t("quota.title") }}</h2>
-    <div v-for="p in quota.providers" :key="p.id" class="q-prov">
+    <div v-for="row in rows" :key="row.key" class="q-prov">
       <div class="q-head">
-        <span class="q-name">{{ providerLabel(p.id) }}</span>
-        <span v-if="p.plan" class="q-plan">{{ p.plan }}</span>
-        <span v-if="demotedClock(p)" class="q-badge q-demoted">{{
-          t("quota.demotedBadgeUntil", { clock: demotedClock(p)! })
-        }}</span>
-        <span v-else-if="p.stale" class="q-badge q-stale">{{ staleBadgeText(p) }}</span>
+        <span class="q-name">{{ providerLabel(row.labelId) }}</span>
+        <span v-for="plan in row.plans" :key="plan" class="q-pill q-plan">{{ plan }}</span>
+        <span
+          v-for="b in row.badges"
+          :key="badgeKey(b)"
+          class="q-badge"
+          :class="b.kind === 'demoted' ? 'q-demoted' : 'q-stale'"
+          >{{ badgeText(b) }}</span
+        >
       </div>
-      <div v-for="w in p.windows" :key="w.scope" class="q-row">
+      <div v-for="w in row.windows" :key="w.scope" class="q-row">
         <span class="q-scope">{{ scopeText(w.scope) }}</span>
         <span class="q-bar" :data-lv="w.level"><i :style="{ width: barWidth(w.usedPct) }"></i></span>
-        <span class="q-val">{{ Math.round(w.usedPct) }}%</span>
+        <span class="q-val">{{ pctText(w.usedPct) }}</span>
         <span v-if="etaWarn(w) || resetText(w)" class="q-sub" :class="{ 'q-warn': etaWarn(w) }">
           <template v-if="etaWarn(w)">{{ etaWarnText(w) }}<template v-if="resetText(w)"> · </template></template
           >{{ resetText(w) }}

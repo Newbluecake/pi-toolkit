@@ -55,6 +55,22 @@ export function etaDurationKey(etaMs) {
 }
 
 /**
+ * Worst window of a list: level desc, then usedPct desc; ties keep the first encountered
+ * (every caller relies on the arrays' fixed upstream order — never randomized). Non-finite
+ * `usedPct` compares as 0 (see `normPct`) — same defensive wire policy end-to-end.
+ * @param {QuotaWindowWire[]} windows
+ */
+function worstWindow(windows) {
+  let best;
+  for (const w of windows) {
+    if (best === undefined || w.level > best.level || (w.level === best.level && normPct(w) > normPct(best))) {
+      best = w;
+    }
+  }
+  return best;
+}
+
+/**
  * Picks the single worst `{ provider, window }` pair: level desc, then usedPct desc. Ties beyond
  * that (identical level AND usedPct) keep the first one encountered (snapshot provider/window
  * order), which is deterministic given `QuotaWire.providers`/`.windows` arrays are themselves
@@ -65,15 +81,14 @@ export function etaDurationKey(etaMs) {
 function worstOf(quota, scopeFilter) {
   let best;
   for (const p of quota.providers) {
-    for (const w of p.windows) {
-      if (scopeFilter !== undefined && w.scope !== scopeFilter) continue;
-      if (
-        best === undefined ||
-        w.level > best.window.level ||
-        (w.level === best.window.level && w.usedPct > best.window.usedPct)
-      ) {
-        best = { provider: p, window: w };
-      }
+    const w = worstWindow(scopeFilter === undefined ? p.windows : p.windows.filter((x) => x.scope === scopeFilter));
+    if (w === undefined) continue;
+    if (
+      best === undefined ||
+      w.level > best.window.level ||
+      (w.level === best.window.level && w.usedPct > best.window.usedPct)
+    ) {
+      best = { provider: p, window: w };
     }
   }
   return best;
@@ -127,6 +142,216 @@ export function pillView(quota) {
     resetScope,
     resetAt,
   };
+}
+
+/** GLM merge pair ids, in snapshot-emit order (label comes from the first). */
+const GLM_CN_ID = "zai-coding-cn";
+const GLM_INTL_ID = "zai";
+
+/** Defensive pct read: a non-finite `usedPct` behaves as 0% everywhere — comparisons AND
+ *  display — so a degenerate window never throws, never leaks `NaN%`, and never beats a
+ *  finite sibling on the tie-break (verifier 2026-10 wire policy).
+ * @param {QuotaWindowWire} w */
+function normPct(w) {
+  return Number.isFinite(w.usedPct) ? w.usedPct : 0;
+}
+
+/**
+ * True when two providers carry indistinguishable headline values — the same set of window
+ * scopes, and per scope the same `level` and the same ROUNDED `usedPct` — so the pill/card may
+ * collapse them into ONE row. Currently applied to the `zai-coding-cn`/`zai` (GLM / GLM 国际)
+ * pair only, but the comparison itself is provider-agnostic. Windows are reduced per scope with
+ * the same worst-window comparison as everywhere else (defensive: scopes are unique in
+ * practice). Non-finite usedPct never compares equal (NaN !== NaN).
+ * @param {QuotaProviderWire} a
+ * @param {QuotaProviderWire} b
+ */
+export function glmMergeable(a, b) {
+  const worstByScope = (windows) => {
+    const m = new Map();
+    for (const w of windows) {
+      const cur = m.get(w.scope);
+      if (cur === undefined || w.level > cur.level || (w.level === cur.level && w.usedPct > cur.usedPct)) {
+        m.set(w.scope, w);
+      }
+    }
+    return m;
+  };
+  const ma = worstByScope(a.windows);
+  const mb = worstByScope(b.windows);
+  if (ma.size !== mb.size) return false;
+  for (const [scope, wa] of ma) {
+    const wb = mb.get(scope);
+    if (wb === undefined) return false;
+    if (wa.level !== wb.level) return false;
+    if (Math.round(wa.usedPct) !== Math.round(wb.usedPct)) return false;
+  }
+  return true;
+}
+
+/**
+ * Per-provider pill view-models (2026-10 multi-group requirement: the top bar shows EVERY
+ * subscription's availability, not just the single worst one — and an exhausted L3 group keeps
+ * its label, ⚠ is only ever a prefix). One group per provider in snapshot order (providers with
+ * no windows are skipped — nothing to show for them), each carrying:
+ *  - its own headline window = that provider's worst window (level desc, then usedPct desc —
+    the same comparison `worstOf` uses snapshot-wide);
+ *  - the D6 reset-annex decision scoped to that provider ALONE (triggered week ⇒ week reset;
+    triggered 5h with usedPct>70 ⇒ 5h reset; both triggered ⇒ week reset), plus the
+    unavailable fallback: a level-3 group always carries its headline window's resetAt when
+    known ("不可用" with a recovery time);
+ *  - `available: level < 3` (level 3 = exhausted/near-exhausted ⇒ the spawn gate fast-fails
+    new runs on that provider, i.e. "unavailable" to the dispatcher).
+ *
+ * GLM merge: when BOTH `zai-coding-cn` and `zai` are present and `glmMergeable` holds, they
+ * collapse into ONE group emitted at the FIRST one's snapshot position (the other contributes
+ * no group of its own), with `ids:[both]` and `labelId:"zai-coding-cn"` (label "GLM") — values
+ * and reset annex come from the `zai-coding-cn` side (identical by the merge rule, modulo
+ * resetAt/etaMs the pill/card read only from the first). The pair decision itself lives in
+ * `glmPair` below — the ONE shared rule the card reuses, never re-implemented locally.
+ *
+ * Defensive wire policy (verifier 2026-10): a provider id the UI does not know (a future wire
+ * peer) simply renders under its raw id — `labelId` is the id and the component's label lookup
+ * falls back to it; a non-finite `usedPct` reads as 0% — the group is still shown, never
+ * `NaN%`. Neither ever throws.
+ * @param {QuotaWire | undefined} quota
+ * @returns {{
+ *   ids: string[],
+ *   labelId: string,
+ *   level: 0|1|2|3,
+ *   scope: "5h"|"week",
+ *   usedPct: number,
+ *   windows: {scope: "5h"|"week", level: 0|1|2|3, usedPct: number}[],
+ *   weekResetAt: number|undefined,
+ *   resetScope: "5h"|"week"|undefined,
+ *   resetAt: number|undefined,
+ *   available: boolean,
+ * }[]}
+ */
+export function pillGroups(quota) {
+  if (quota === undefined || !Array.isArray(quota.providers)) return [];
+  const providers = quota.providers.filter((p) => Array.isArray(p.windows) && p.windows.length > 0);
+  const pair = glmPair(providers);
+
+  /** Both windows of one provider, 5h first then week (user 2026-10-08: an available group
+   *  shows BOTH quotas, not just the worst window), worst-window per scope defensively, each
+   *  with its own rounded pct (non-finite ⇒ 0, same defensive policy as the group headline). */
+  const windowsOf = (p) => {
+    const worst = new Map();
+    for (const w of p.windows) {
+      const cur = worst.get(w.scope);
+      if (cur === undefined || w.level > cur.level || (w.level === cur.level && w.usedPct > cur.usedPct)) {
+        worst.set(w.scope, w);
+      }
+    }
+    const order = { "5h": 0, week: 1 };
+    return [...worst.values()]
+      .filter((w) => w.scope === "5h" || w.scope === "week")
+      .sort((a, b) => order[a.scope] - order[b.scope])
+      .map((w) => ({
+        scope: w.scope,
+        level: w.level,
+        usedPct: Math.round(normPct(w)),
+      }));
+  };
+
+  /** One group off a single provider's windows (headline = worst window; D6 annex scoped to
+   *  that provider alone; level-3 groups always advertise a recovery time when one is known). */
+  const groupOf = (p, ids, labelId) => {
+    const headline = worstWindow(p.windows);
+    // D6 reset annex, scoped to this provider alone (a provider's windows have one entry per
+    // scope in practice; worstWindow makes duplicate scopes deterministic anyway).
+    const week = worstWindow(p.windows.filter((w) => w.scope === "week"));
+    const five = worstWindow(p.windows.filter((w) => w.scope === "5h"));
+    let resetScope;
+    let resetAt;
+    if (week !== undefined && week.level >= 1) {
+      resetScope = "week";
+      resetAt = week.resetAt;
+    } else if (five !== undefined && five.level >= 1 && five.usedPct > 70) {
+      resetScope = "5h";
+      resetAt = five.resetAt;
+    }
+    if (headline.level >= 3 && resetAt === undefined && headline.resetAt !== undefined) {
+      // Unavailable groups always advertise a recovery time when one is known.
+      resetScope = headline.scope;
+      resetAt = headline.resetAt;
+    }
+    return {
+      ids,
+      labelId,
+      level: headline.level,
+      scope: headline.scope,
+      // Non-finite usedPct reads as 0% via normPct — the group still renders, never `NaN%`
+      // (defensive wire policy, see the function header).
+      usedPct: Math.round(normPct(headline)),
+      windows: windowsOf(p),
+      // Exhausted-display clock source: the WEEK window's resetAt, or the headline window's
+      // when the provider has no week window at all (unknown ⇒ omit the clock).
+      weekResetAt: week !== undefined ? week.resetAt : headline.resetAt,
+      resetScope,
+      resetAt,
+      available: headline.level < 3,
+    };
+  };
+
+  const groups = [];
+  for (const p of providers) {
+    if (pair !== undefined && pair.members.includes(p)) {
+      if (p === pair.skip) continue;
+      groups.push(groupOf(pair.source, [GLM_CN_ID, GLM_INTL_ID], GLM_CN_ID));
+      continue;
+    }
+    groups.push(groupOf(p, [p.id], p.id));
+  }
+  return groups;
+}
+
+/**
+ * The GLM merge PAIR decision — the ONE shared rule both the pill (`pillGroups`) and the card
+ * (`QuotaCard.vue`'s `cardRows`) consume (never re-implemented locally): when BOTH
+ * `zai-coding-cn` and `zai` are present and `glmMergeable` holds, the pair collapses into ONE
+ * group/row.
+ * @param {QuotaProviderWire[]} providers snapshot order
+ * @returns {{
+ *   skip: QuotaProviderWire,
+ *   source: QuotaProviderWire,
+ *   members: QuotaProviderWire[],
+ * } | undefined} `undefined` ⇒ no merge. `skip` = the member that must NOT emit its own
+ * group/row (the SECOND of the two in snapshot order); `source` = always the `zai-coding-cn`
+ * side — its windows/values are what the merged group/row shows; `members` = `[cn, intl]`
+ * regardless of snapshot order, for flag aggregation (plans / demoted / stale badges).
+ */
+export function glmPair(providers) {
+  const cn = providers.find((p) => p.id === GLM_CN_ID);
+  const intl = providers.find((p) => p.id === GLM_INTL_ID);
+  if (cn === undefined || intl === undefined) return undefined;
+  if (!glmMergeable(cn, intl)) return undefined;
+  const cnFirst = providers.indexOf(cn) < providers.indexOf(intl);
+  return { skip: cnFirst ? intl : cn, source: cn, members: [cn, intl] };
+}
+
+/**
+ * Pill DISPLAY selection — 2026-10-08 user ruling (supersedes the plain "one segment per
+ * provider" rendering): 「如果有可用订阅，只展示可用订阅；如果都耗尽了，展示 7d 重置时间」.
+ *  - ≥1 available (level<3) group ⇒ `mode:"available"`, groups = ONLY the available ones
+ *    (each renders BOTH its windows — `windows[]` on the group — plus its D6 reset annex);
+ *    exhausted groups are hidden from the pill's face but stay in aria/title (the component
+ *    reads `pillGroups` directly for that — never loses them for screen readers/hover).
+ *  - ALL groups exhausted ⇒ `mode:"exhausted"`, groups = all of them, each rendered in its
+ *    week-reset form: `⚠ Label · 7d {clock}` with the clock from `weekResetAt` (the week
+ *    window's resetAt, or the headline window's when there is no week window; omitted when
+ *    unknown).
+ * `null` when there is nothing to show (no windowed providers) — caller renders no pill.
+ * @param {QuotaWire | undefined} quota
+ * @returns {{ mode: "available"|"exhausted", groups: ReturnType<typeof pillGroups> } | null}
+ */
+export function pillDisplay(quota) {
+  const groups = pillGroups(quota);
+  if (groups.length === 0) return null;
+  const available = groups.filter((g) => g.available);
+  if (available.length > 0) return { mode: "available", groups: available };
+  return { mode: "exhausted", groups };
 }
 
 /**

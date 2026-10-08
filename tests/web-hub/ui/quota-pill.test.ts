@@ -197,16 +197,16 @@ describe("QuotaPill.vue — rendering and the four-level color ladder", () => {
     expect(wrapper.get(".q-pill-text").text()).toBe("GLM 5h 76% · 18:20 reset");
   });
 
-  it("L3: provider name is replaced by the ⚠ prefix", () => {
+  it("all-exhausted single provider: `⚠ Kimi · 7d` — label kept, clock omitted when unknown (2026-10-08 ruling)", () => {
     const q = quota([
       { id: "kimi-coding", level: 3, stale: false, windows: [{ scope: "week", usedPct: 95, level: 3 }] },
     ]);
     const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
-    expect(wrapper.get(".q-pill-text").text()).toBe("⚠ 7d 95%");
+    expect(wrapper.get(".q-pill-text").text()).toBe("⚠ Kimi · 7d");
     expect(wrapper.get(".q-pill").attributes("aria-label")).toContain("Kimi");
   });
 
-  it("mobile (≤767px): shrinks to the shortest form", () => {
+  it("mobile (≤767px): exhausted compact form is `⚠ Label {clock}` (no scope, no reset prose)", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: true,
       media: query,
@@ -217,13 +217,232 @@ describe("QuotaPill.vue — rendering and the four-level color ladder", () => {
       { id: "kimi-coding", level: 3, stale: false, windows: [{ scope: "week", usedPct: 95, level: 3 }] },
     ]);
     const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
-    expect(wrapper.get(".q-pill-text").text()).toBe("⚠ 95%");
+    expect(wrapper.get(".q-pill-text").text()).toBe("⚠ Kimi");
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: false,
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},
     }));
+  });
+});
+
+describe("QuotaPill.vue — multi-group rendering (2026-10-08 rulings: available-only + both windows + GLM merge)", () => {
+  /** GLM L0 pair (mergeable) + Kimi L3 with a cross-day reset — the canonical mixed scenario. */
+  function glmAndKimiQuota(kimiResetAt: number): QuotaWire {
+    return quota([
+      {
+        id: "zai-coding-cn",
+        level: 0,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 42, level: 0 },
+          { scope: "week", usedPct: 41, level: 0 },
+        ],
+      },
+      {
+        id: "zai",
+        level: 0,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 42, level: 0 },
+          { scope: "week", usedPct: 41, level: 0 },
+        ],
+      },
+      {
+        id: "kimi-coding",
+        level: 3,
+        stale: false,
+        windows: [{ scope: "week", usedPct: 98, level: 3, resetAt: kimiResetAt }],
+      },
+    ]);
+  }
+
+  it("mixed ⇒ available mode: ONLY the available group renders, with BOTH its windows (5h first, then 7d)", () => {
+    vi.setSystemTime(new Date(2026, 9, 10, 20, 0));
+    const wrapper = m(mount(QuotaPill, { props: { quota: glmAndKimiQuota(new Date(2026, 9, 12, 9, 6).getTime()) } }));
+    const segs = wrapper.findAll(".q-seg-text");
+    expect(segs).toHaveLength(1); // exhausted Kimi is HIDDEN from the face
+    expect(segs[0]!.text()).toBe("GLM 5h 42% · 7d 41%"); // both windows, no annex (nothing triggered)
+    expect(wrapper.get(".q-pill").attributes("data-level")).toBe("0"); // max among SHOWN groups
+    expect(wrapper.get(".q-pill-text").text()).not.toContain("Kimi");
+    expect(wrapper.findAll(".q-sep")).toHaveLength(0);
+  });
+
+  it("…but the hidden exhausted group stays in aria/title (discoverable via hover/screen reader)", () => {
+    vi.setSystemTime(new Date(2026, 9, 10, 20, 0));
+    const wrapper = m(mount(QuotaPill, { props: { quota: glmAndKimiQuota(new Date(2026, 9, 12, 9, 6).getTime()) } }));
+    const aria = wrapper.get(".q-pill").attributes("aria-label");
+    expect(aria).toBe("Subscription quota: GLM 5h 42%; Subscription quota: Kimi 7d 98%, resets 10/12 09:06");
+    expect(wrapper.get(".q-pill").attributes("title")).toBe(aria);
+  });
+
+  it("available group with a triggered week window carries the D6 reset annex after BOTH windows", () => {
+    const resetAt = new Date(2026, 9, 8, 18, 20).getTime();
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 1,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 17, level: 0 },
+          { scope: "week", usedPct: 43, level: 1, resetAt },
+        ],
+      },
+    ]);
+    vi.setSystemTime(new Date(2026, 9, 8, 16, 0));
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.get(".q-pill-text").text()).toBe("GLM 5h 17% · 7d 43% · 18:20 reset");
+  });
+
+  it("two available groups: one .q-seg each with its own data-level, separated by .q-sep; no merge when values differ", () => {
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 0,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 17, level: 0 },
+          { scope: "week", usedPct: 43, level: 0 },
+        ],
+      },
+      {
+        id: "zai",
+        level: 1,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 20, level: 1 },
+          { scope: "week", usedPct: 30, level: 0 },
+        ],
+      },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    const segs = wrapper.findAll(".q-seg");
+    expect(segs).toHaveLength(2);
+    expect(segs[0]!.attributes("data-level")).toBe("0");
+    expect(segs[1]!.attributes("data-level")).toBe("1");
+    expect(wrapper.get(".q-pill").attributes("data-level")).toBe("1");
+    expect(wrapper.findAll(".q-sep")).toHaveLength(1);
+    const texts = wrapper.findAll(".q-seg-text").map((s) => s.text());
+    expect(texts).toEqual(["GLM 5h 17% · 7d 43%", "GLM Intl 5h 20% · 7d 30%"]);
+  });
+
+  it("mobile (≤767px): available compact form is `Label p5/p7` — `GLM 17%/43% · GLM Intl 20%/30%`", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: true,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 0,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 17, level: 0 },
+          { scope: "week", usedPct: 43, level: 0 },
+        ],
+      },
+      {
+        id: "kimi-coding",
+        level: 1,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 20, level: 1 },
+          { scope: "week", usedPct: 30, level: 0 },
+        ],
+      },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.get(".q-pill-text").text()).toBe("GLM 17%/43% · Kimi 20%/30%");
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  });
+
+  it("all exhausted ⇒ every group in week-reset form, merged GLM included; data-level 3", () => {
+    vi.setSystemTime(new Date(2026, 9, 10, 20, 0));
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 3,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 95, level: 3 },
+          { scope: "week", usedPct: 98, level: 3, resetAt: new Date(2026, 9, 14, 15, 48).getTime() },
+        ],
+      },
+      {
+        id: "zai",
+        level: 3,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 95, level: 3 },
+          { scope: "week", usedPct: 98, level: 3, resetAt: new Date(2026, 9, 15, 1, 0).getTime() },
+        ],
+      },
+      {
+        id: "kimi-coding",
+        level: 3,
+        stale: false,
+        windows: [{ scope: "week", usedPct: 97, level: 3, resetAt: new Date(2026, 9, 12, 9, 6).getTime() }],
+      },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    const segs = wrapper.findAll(".q-seg-text");
+    expect(segs).toHaveLength(2); // GLM pair merged; clock from the cn side (10/14, not intl's 10/15)
+    expect(segs[0]!.text()).toBe("⚠ GLM · 7d 10/14 15:48 reset");
+    expect(segs[1]!.text()).toBe("⚠ Kimi · 7d 10/12 09:06 reset");
+    expect(wrapper.get(".q-pill").attributes("data-level")).toBe("3");
+  });
+
+  it("mobile all-exhausted: `⚠ Label {clock}` only — `⚠ GLM 10/14 15:48 · ⚠ Kimi 10/12 09:06`", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: true,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    vi.setSystemTime(new Date(2026, 9, 10, 20, 0));
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 3,
+        stale: false,
+        windows: [{ scope: "week", usedPct: 98, level: 3, resetAt: new Date(2026, 9, 14, 15, 48).getTime() }],
+      },
+      {
+        id: "kimi-coding",
+        level: 3,
+        stale: false,
+        windows: [{ scope: "week", usedPct: 97, level: 3, resetAt: new Date(2026, 9, 12, 9, 6).getTime() }],
+      },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.get(".q-pill-text").text()).toBe("⚠ GLM 10/14 15:48 · ⚠ Kimi 10/12 09:06");
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  });
+
+  it("defensive wire policy: unknown provider id renders under its raw id; non-finite pct shows 0%", () => {
+    const q = quota([
+      { id: "moonshot-coding", level: 0, stale: false, windows: [{ scope: "5h", usedPct: 40, level: 0 }] },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.get(".q-pill-text").text()).toBe("moonshot-coding 5h 40%");
+    const nan = quota([
+      { id: "zai-coding-cn", level: 0, stale: false, windows: [{ scope: "5h", usedPct: Number.NaN, level: 0 }] },
+    ]);
+    const wrapper2 = m(mount(QuotaPill, { props: { quota: nan } }));
+    expect(wrapper2.get(".q-pill-text").text()).toBe("GLM 5h 0%");
   });
 });
 
@@ -352,15 +571,35 @@ describe("quota.css / tokens.css — four-tier color ladder (verification r_WV2Y
     return m[1]!;
   }
 
-  it("L0 uses --c-success, L1 uses --c-warning, L2 uses --c-orange, L3 uses --c-danger — never color-only (L3 also gets font-weight)", () => {
-    expect(ruleBody(quotaCss, '.q-pill[data-level="0"] .q-dot')).toContain("--c-success");
+  it("per-segment dots: L0 uses --c-success, L1 --c-warning, L2 --c-orange, L3 --c-danger — and only L3 text escalates (danger + font-weight, available segments stay muted)", () => {
+    expect(ruleBody(quotaCss, '.q-seg[data-level="0"] .q-dot')).toContain("--c-success");
+    expect(ruleBody(quotaCss, '.q-seg[data-level="1"] .q-dot')).toContain("--c-warning");
+    expect(ruleBody(quotaCss, '.q-seg[data-level="2"] .q-dot')).toContain("--c-orange");
+    expect(ruleBody(quotaCss, '.q-seg[data-level="2"] .q-dot')).not.toContain("--c-danger");
+    expect(ruleBody(quotaCss, '.q-seg[data-level="3"] .q-dot')).toContain("--c-danger");
+    expect(ruleBody(quotaCss, '.q-seg[data-level="3"] .q-dot')).not.toContain("--c-orange");
+    expect(ruleBody(quotaCss, '.q-seg[data-level="3"] .q-seg-text')).toContain("--c-danger");
+    expect(ruleBody(quotaCss, '.q-seg[data-level="3"] .q-seg-text')).toContain("--fw-semibold");
+    expect(ruleBody(quotaCss, ".q-seg-text")).not.toContain("--c-danger");
+    expect(ruleBody(quotaCss, ".q-seg-text")).not.toContain("--fw-semibold");
+  });
+
+  it("pill width is bounded and the text may shrink/ellipsis — 3 alerting groups must never push the bar's controls off-viewport (verifier #3)", () => {
+    const pill = ruleBody(quotaCss, ".q-pill");
+    expect(pill).toContain("max-width");
+    expect(pill).toContain("min-width: 0");
+    expect(pill).toContain("flex: 0 1 auto"); // shrinks like `.brand`, no longer `flex: none`
+    expect(ruleBody(quotaCss, ".q-pill-text")).toContain("text-overflow: ellipsis");
+    expect(ruleBody(quotaCss, ".q-pill-text")).toContain("min-width: 0");
+  });
+
+  it("pill-level ladder keeps the whole-pill border/background semantics by MAX level (never color-only confusion)", () => {
     expect(ruleBody(quotaCss, '.q-pill[data-level="1"]')).toContain("--c-warning");
     expect(ruleBody(quotaCss, '.q-pill[data-level="2"]')).toContain("--c-orange");
     expect(ruleBody(quotaCss, '.q-pill[data-level="2"]')).not.toContain("--c-danger");
     expect(ruleBody(quotaCss, '.q-pill[data-level="2"]')).not.toContain("--fw-semibold");
     expect(ruleBody(quotaCss, '.q-pill[data-level="3"]')).toContain("--c-danger");
     expect(ruleBody(quotaCss, '.q-pill[data-level="3"]')).not.toContain("--c-orange");
-    expect(ruleBody(quotaCss, '.q-pill[data-level="3"]')).toContain("--fw-semibold");
   });
 
   it("the card's progress bar fill follows the same four-tier mapping (L2 orange, distinct from L3 danger)", () => {
@@ -377,6 +616,115 @@ describe("quota.css / tokens.css — four-tier color ladder (verification r_WV2Y
     for (const v of ORANGE_VARS) {
       expect(occurrences(v), `${v} should be defined exactly 3 times (light + prefers-dark + .theme-dark)`).toBe(3);
     }
+  });
+});
+
+describe("QuotaCard.vue — GLM merge (2026-10, same glmMergeable rule as the pill)", () => {
+  function glmQuota(cnWindows: QuotaWire["providers"][number]["windows"], intlWindows: typeof cnWindows): QuotaWire {
+    return quota([
+      { id: "zai-coding-cn", level: 0, stale: false, plan: "pro", windows: cnWindows },
+      { id: "zai", level: 0, stale: false, plan: "max", windows: intlWindows },
+      { id: "kimi-coding", level: 0, stale: false, windows: [{ scope: "week", usedPct: 20, level: 0 }] },
+    ]);
+  }
+
+  const equalW = [
+    { scope: "5h" as const, usedPct: 42, level: 0 as const, resetAt: 1_000 },
+    { scope: "week" as const, usedPct: 41, level: 0 as const, resetAt: 2_000 },
+  ];
+
+  it("equal pair renders ONE 'GLM' row (cn side's windows) + Kimi — never a second GLM Intl row", async () => {
+    const wrapper = m(mount(QuotaPill, { props: { quota: glmQuota(equalW, equalW) }, attachTo: document.body }));
+    await wrapper.get(".q-pill").trigger("click");
+    const provRows = wrapper.findAll(".q-prov");
+    expect(provRows).toHaveLength(2);
+    expect(provRows[0]!.find(".q-name").text()).toBe("GLM");
+    expect(provRows[0]!.findAll(".q-row")).toHaveLength(2); // 5h + week from the cn side
+    expect(provRows[1]!.find(".q-name").text()).toBe("Kimi");
+    expect(wrapper.text()).not.toContain("GLM Intl");
+  });
+
+  it("merged row aggregates badges: one badge per distinct plan", async () => {
+    const wrapper = m(mount(QuotaPill, { props: { quota: glmQuota(equalW, equalW) }, attachTo: document.body }));
+    await wrapper.get(".q-pill").trigger("click");
+    const plans = wrapper.findAll(".q-plan").map((p) => p.text());
+    expect(plans).toEqual(["pro", "max"]);
+  });
+
+  it("differing pair keeps two rows: GLM (cn) and GLM Intl (intl)", async () => {
+    const differing: typeof equalW = [{ scope: "5h", usedPct: 71, level: 1, resetAt: 1_000 }];
+    const wrapper = m(
+      mount(QuotaPill, {
+        props: { quota: glmQuota(differing, [{ scope: "5h", usedPct: 42, level: 0 }]) },
+        attachTo: document.body,
+      }),
+    );
+    await wrapper.get(".q-pill").trigger("click");
+    const names = wrapper.findAll(".q-prov").map((r) => r.find(".q-name").text());
+    expect(names).toEqual(["GLM", "GLM Intl", "Kimi"]);
+  });
+
+  it("reversed snapshot order (zai BEFORE zai-coding-cn) still labels the merged row 'GLM' and takes values from the cn side (verifier #1)", async () => {
+    vi.setSystemTime(new Date(2026, 9, 8, 16, 0));
+    // Same values (mergeable) but DIFFERENT resetAts: the merged row must show the CN side's
+    // 18:20, never the intl side's 10/9 04:00 — proving `source` is always zai-coding-cn.
+    const cnW = [
+      { scope: "5h" as const, usedPct: 42, level: 0 as const, resetAt: new Date(2026, 9, 8, 18, 20).getTime() },
+    ];
+    const intlW = [
+      { scope: "5h" as const, usedPct: 42, level: 0 as const, resetAt: new Date(2026, 9, 9, 4, 0).getTime() },
+    ];
+    const q = quota([
+      { id: "kimi-coding", level: 0, stale: false, windows: [{ scope: "week", usedPct: 20, level: 0 }] },
+      { id: "zai", level: 0, stale: false, plan: "max", windows: intlW },
+      { id: "zai-coding-cn", level: 0, stale: false, plan: "pro", windows: cnW },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q }, attachTo: document.body }));
+    await wrapper.get(".q-pill").trigger("click");
+    const provRows = wrapper.findAll(".q-prov");
+    expect(provRows).toHaveLength(2); // merged at zai's (first-of-pair) slot, cn's own slot gone
+    expect(provRows[0]!.find(".q-name").text()).toBe("Kimi");
+    expect(provRows[1]!.find(".q-name").text()).toBe("GLM"); // NOT "GLM Intl"
+    expect(provRows[1]!.find(".q-sub").text()).toContain("18:20 reset"); // cn's clock
+    expect(provRows[1]!.find(".q-sub").text()).not.toContain("10/9");
+    const plans = provRows[1]!.findAll(".q-plan").map((p) => p.text());
+    expect(plans).toEqual(["pro", "max"]); // BOTH members' plans survive the merge
+  });
+
+  it("merged row never loses a member's flags: demoted + stale show BOTH badges (verifier #2)", async () => {
+    vi.setSystemTime(new Date(2026, 9, 8, 16, 0));
+    const fetchedAt = Date.now() - 12 * 60_000;
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 0,
+        stale: false,
+        demotedUntil: new Date(2026, 9, 8, 20, 0).getTime(),
+        windows: equalW,
+      },
+      { id: "zai", level: 0, stale: true, fetchedAt, windows: equalW },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q }, attachTo: document.body }));
+    await wrapper.get(".q-pill").trigger("click");
+    const head = wrapper.findAll(".q-prov")[0]!;
+    const demoted = head.find(".q-badge.q-demoted");
+    const stale = head.find(".q-badge.q-stale");
+    expect(demoted.exists()).toBe(true);
+    expect(demoted.text()).toContain("20:00");
+    expect(stale.exists()).toBe(true);
+    expect(stale.text()).toBe("stale 12 min");
+  });
+
+  it("both members stale with different ages ⇒ one stale badge each, own age", async () => {
+    vi.setSystemTime(new Date(2026, 9, 8, 16, 0));
+    const q = quota([
+      { id: "zai-coding-cn", level: 0, stale: true, fetchedAt: Date.now() - 31 * 60_000, windows: equalW },
+      { id: "zai", level: 0, stale: true, fetchedAt: Date.now() - 12 * 60_000, windows: equalW },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q }, attachTo: document.body }));
+    await wrapper.get(".q-pill").trigger("click");
+    const badges = wrapper.findAll(".q-prov")[0]!.findAll(".q-badge.q-stale");
+    expect(badges.map((b) => b.text())).toEqual(["stale 31 min", "stale 12 min"]);
   });
 });
 

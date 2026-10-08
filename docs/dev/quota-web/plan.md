@@ -77,3 +77,39 @@ export interface QuotaWire {
 ## 6. 排期
 
 与 D3（hub/**）、D5（diff 组件/DetailHeader/WorktreePanel）文件域零交集，可立即并行。D6（worktree-diff 集成）不收口于本包。
+
+## 7. 2026-10-08 用户裁决：多组 pill 与 GLM 合并（修订 §3 的单一最差窗口规则）
+
+用户裁决（两连发，原文）：
+
+> 顶部状态栏展示什么订阅可用、什么不可用；GLM 与 GLM 国际值相同时只显示 GLM，不同时分别展示。
+> 如果有可用订阅，只展示可用订阅；如果都耗尽了，展示 7d 重置时间。
+> （展示可用订阅时 5h 额度也要展示，不只展示最差窗口。）
+
+### 7.1 逻辑层（`ui/src/logic/quota.js`）
+
+- `pillGroups(quota)`：每 provider 一组（快照序；无窗 provider 跳过）。组字段：headline（该 provider 最差窗：level 降序、usedPct 降序）、`windows[]`（**双窗**，5h 在前 week 在后，各窗各自取整 pct）、`weekResetAt`（week 窗 resetAt；无 week 窗则 headline 窗的 resetAt）、D6 重置后缀（按该 provider 单独判定：week 触界⇒week 重置；5h 触界且 >70%⇒5h 重置；双触界⇒week）、L3 组恒带已知恢复时间（D6 无解时回退 headline 的 resetAt）、`available: level<3`（L3 = spawn 闸门快败 = 不可用）。`pillView`（旧单选视图）保留导出、行为不变，仅测试在用。
+- `glmMergeable(a,b)`：相等定义 = window scope 集合相同，且每 scope 的 `level` 相同、`Math.round(usedPct)` 相同（原始 pct 在同一取整桶内仍算相等；NaN 永不相等）。只对 `zai-coding-cn`/`zai` 生效。
+- `glmPair(providers)`：**唯一**的合并判定实现，pill（`pillGroups`）与卡片（`QuotaCard.cardRows`）共用，绝不各写一份。返回 `{skip, source, members}`：`skip` = 快照序靠后的成员（不再独立成组/行）；`source` = 恒为 cn 侧（合并组的窗口/数值来源）；`members` = `[cn, intl]`（与快照序无关，供徽章聚合）。合并组位置 = 两成员中**先出现**的那个的槽位，标签恒 `labelId:"zai-coding-cn"`（"GLM"）。
+- `pillDisplay(quota)`：pill 展示选择（§7.2 两模式）；无组 ⇒ `null`（不渲染 pill）。
+- 防御性 wire 策略（verifier 2026-10）：未知 provider id（未来 wire 对端）直接以裸 id 作标签（组件层 `t()` 回退到 key 时降级为 id）；非有限 `usedPct` 一律按 0% 处理——`normPct` 让比较与显示一致（NaN 窗不抛错、不漏 `NaN%`、不会在并列时挤掉有限窗）。均不抛错。
+
+### 7.2 pill 两模式（`QuotaPill.vue`）
+
+- **available**（≥1 组 level<3）：只渲染可用组；每组一段 `.q-seg`：自身色点 + `Label 5h p% · 7d p%`（**双窗**，5h 在前；单窗 provider 只显示那一窗）+ 该组 D6 重置后缀（`· {clock} 重置`，规则不变）。耗尽组不出现在 pill 面（弹卡仍是全量列表）。
+- **exhausted**（全部 level=3）：每组渲染 `⚠ Label · 7d {clock} 重置`——clock 取 `weekResetAt`（week 窗优先，无 week 窗回退 headline 窗；未知则省略 clock，只剩 `⚠ Label · 7d`）。标签永不替换，⚠ 只是前缀。
+- aria/title 恒覆盖**全部**组（含被隐藏的耗尽组，`; ` 连接各组既有 aria 句式）——屏幕阅读器/悬停仍可发现隐藏组。
+- 移动（≤767px）：available ⇒ `Label p5/p7`（如 `GLM 17%/43%`）；exhausted ⇒ `⚠ Label {clock}`（如 `⚠ GLM 10/14 15:48 · ⚠ Kimi 10/12 09:06`），无 clock 则 `⚠ Label`。
+- 组间分隔：桌面 1px 细分隔线（`.q-sep` 内嵌 `·` 被 CSS 裁掉），移动端显示 `·` 字符——与重置后缀自身的 `·` 不混淆。
+- pill 自身 `data-level` = **展示组**的最大 level（边框/背景四级色阶不变）；段落级 `.q-seg[data-level=N]` 各自点色（success/warning/orange/danger），仅 L3 段落文字升级 danger+semibold，可用组保持 muted。
+- 宽度约束（verifier #3）：`.q-pill { flex: 0 1 auto; min-width: 0; max-width: min(60vw, 640px) }` + `.q-pill-text` ellipsis——多个告警组不把顶栏右侧控件挤出视口；完整文本在 aria/title。
+
+### 7.3 弹出卡（`QuotaCard.vue`）
+
+- 仍是全量 provider 列表（含耗尽的）；同样的 `glmPair` 合并：相等 ⇒ 一行 "GLM"（位置=先出现成员槽位，窗口行取 cn 侧），不等 ⇒ 两行 GLM / GLM 国际。
+- 合并行徽章聚合（verifier #2，绝不丢成员标志）：plan 去重各一枚；demoted 取**最早**恢复时间；每个 stale 成员各保留一枚带自身年龄的 stale 徽章（demoted 与 stale 可并存）。未合并行保持合并前的行为（demoted XOR stale、单 plan）。
+
+### 7.4 测试锚点
+
+- `tests/web-hub/ui/logic-quota.test.ts`：`glmMergeable` 表、`pillGroups`（排序/headline/双窗/weekResetAt/合并/拆分/单侧/倒序/重置后缀矩阵/防御性 NaN+未知 id）、`pillDisplay`（mixed ⇒ 只可用；全耗尽 ⇒ week 重置；单 provider；GLM 同耗尽仍合并；无 week 窗回退）。
+- `tests/web-hub/ui/quota-pill.test.ts`：两模式渲染端到端（含 aria 覆盖隐藏组、移动形态、`⚠` 前缀永不替换标签）、卡片倒序回归 + 徽章聚合、CSS 锚点（分段色阶、pill 宽度约束）。
