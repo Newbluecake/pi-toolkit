@@ -28,6 +28,7 @@ import {
   SSE_EVENTS as PROTOCOL_SSE_EVENTS,
 } from "@protocol/http-contract.ts";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
+import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "@protocol/worktree-diff.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 
 /** SSE `event:` names pushed by the hub (order irrelevant, set must match) — same array as
@@ -75,6 +76,12 @@ export const API = Object.freeze({
   preview: PREVIEW_PATH,
   // web-hub-preview 2026-10-07 修订: the batch existence-probe endpoint — same anti-drift rule.
   previewProbe: PREVIEW_PROBE_PATH,
+  // worktree-diff plan v3.1 §1.2/§4.6 (package D4): the two file-diff endpoints, imported from
+  // `protocol/worktree-diff.ts` — same anti-drift rule as the preview paths above (the hub's
+  // D3 routes and this object can never disagree). `tests/web-hub/ui/logic-contract.test.ts`
+  // pins both against the protocol constants.
+  wtdiffFiles: WTDIFF_FILES_PATH,
+  wtdiffFile: WTDIFF_FILE_PATH,
   // @文件补全 (file-mention): the composer's file-search endpoint. Hand-written literal, NOT
   // imported from `hub/file-search.ts` — that module is hub-side (imports `node:fs*`) and must
   // never reach the browser bundle; `tests/web-hub/ui/logic-file-mention.test.ts` pins this

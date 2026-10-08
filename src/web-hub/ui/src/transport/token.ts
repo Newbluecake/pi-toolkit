@@ -38,7 +38,10 @@ import type {
   UploadCommitOk,
   UploadOutcome,
   UploadTransport,
+  WorktreeDiffTransport,
+  WtDiffOutcome,
 } from "./types.js";
+import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
 
 export type TokenTransportDeps = Parameters<typeof createClient>[0];
 
@@ -176,5 +179,16 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // replay-safe).
       probe: (req, opts) => withAuthNotice(deps, () => client.preview.probe(req, opts) as Promise<PreviewProbeOutcome>),
     } satisfies PreviewTransport,
+    worktreeDiff: {
+      // worktree-diff plan v3.1 §4.6 (D4): thin casts over the logic client's wtdiff
+      // namespace. The client already replayed once through `withRelogin` on a 401 (GET ⇒
+      // side-effect free), so a final `E_AUTH` means the stored token is dead — same
+      // `withAuthNotice` rule as preview/upload/spawn. 409 `E_STALE_CTX` never gets retried
+      // at this layer (§4.5: the UI owns the one-shot list re-pull).
+      files: (req, opts) =>
+        withAuthNotice(deps, () => client.worktreeDiff.files(req, opts) as Promise<WtDiffOutcome<WtDiffFileList>>),
+      file: (req, opts) =>
+        withAuthNotice(deps, () => client.worktreeDiff.file(req, opts) as Promise<WtDiffOutcome<WtDiffFilePayload>>),
+    } satisfies WorktreeDiffTransport,
   } satisfies HubTransport;
 }

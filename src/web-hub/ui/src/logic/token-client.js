@@ -29,6 +29,13 @@ import {
   PREVIEW_PROBE_CLIENT_TIMEOUT_MS,
 } from "@protocol/preview.ts";
 import { parsePreviewDirListing } from "@protocol/preview.ts";
+import {
+  parseWtDiffFile,
+  parseWtDiffFileList,
+  WTDIFF_CLIENT_TIMEOUT_MS,
+  WTDIFF_FILE_BODY_MAX_BYTES,
+  WTDIFF_LIST_BODY_MAX_BYTES,
+} from "@protocol/worktree-diff.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 
@@ -969,6 +976,173 @@ export function createClient(deps) {
 
   const preview = { fetch: previewFetch, probe: probePost };
 
+  // -------------------------------------------------------------------------
+  // worktree-diff endpoints (worktree-diff plan v3.1 §1.2/§4.6, package D4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The shared capped-JSON GET behind `GET /api/worktree-diff/{files,file}` — the same flow
+   * as `previewFetch`'s dir branch: ONE `WTDIFF_CLIENT_TIMEOUT_MS` deadline spans headers AND
+   * body, merged with the caller's `signal` exactly like `request()` does; a 401 rides
+   * `withRelogin` (silent re-login + same-URL replay — GET ⇒ side-effect free); the FINAL 401
+   * surfaces as `E_AUTH` and `transport/token.ts`'s `withAuthNotice` flips the login view.
+   * The 200 body is a capped JSON envelope (the cap judges DECODED bytes — gzip included,
+   * never Content-Length): over `maxBytes` ⇒ abort the fetch so the server stops sending +
+   * local `E_BAD_RESPONSE` (status 0). `JSON.parse` then the protocol parser
+   * (`parseWtDiffFileList` / `parseWtDiffFile`) is the contract gate — `null` ⇒ local
+   * `E_BAD_RESPONSE`. Non-200 bodies `{error, reason}` ride verbatim through
+   * `previewOutcomeFromResponse` (stripped to §4.6's error half, the probePost precedent) —
+   * including 409 `E_STALE_CTX{reason:"base"|"entry"}`, which this layer NEVER retries on its
+   * own: the UI (§4.5, D5) owns the one-shot list re-pull.
+   * @param {string} url @param {number} maxBytes @param {(raw: any, byteLength: number) => any} parse
+   * @param {any} signal @returns {Promise<any>}
+   */
+  async function wtdiffGet(url, maxBytes, parse, signal) {
+    const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
+    const ac = AC ? new AC() : undefined;
+    let expired = false;
+    /** @type {any} */
+    let deadlineTimer = null;
+    /** @type {Promise<never>} */
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = timer(() => {
+        expired = true;
+        ac?.abort();
+        reject(new Error("E_DEADLINE"));
+      }, WTDIFF_CLIENT_TIMEOUT_MS);
+    });
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onExternalAbort = () => ac?.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    /** Fetch-level failure ⇒ local code (status 0): the caller's abort, our own deadline, or network. @param {unknown} e */
+    const fromError = (e) => {
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+        return { ok: false, status: 0, error: "E_DEADLINE" };
+      return { ok: false, status: 0, error: "E_NETWORK" };
+    };
+    try {
+      const send = () =>
+        deps.fetch(url, {
+          credentials: "same-origin",
+          method: "GET",
+          headers: { "X-PWH": "1" },
+          ...(ac ? { signal: ac.signal } : {}),
+        });
+      /** @type {any} */
+      let r;
+      try {
+        r = await Promise.race([withRelogin(send), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (!r.ok) {
+        const o = await previewOutcomeFromResponse(r);
+        /** @type {any} */
+        const out = { ok: false, status: o.status, error: o.error };
+        if (typeof o.reason === "string") out.reason = o.reason;
+        if (typeof o.retryAfterS === "number") out.retryAfterS = o.retryAfterS;
+        return out;
+      }
+      // A capped JSON body, never a length-oracled byte stream: read under the SAME deadline,
+      // never beyond `maxBytes` DECODED bytes (gzip included: the cap judges decoded bytes,
+      // never Content-Length). With a streaming body use the reader and count as the chunks
+      // arrive (aborting the fetch the moment the cap trips); without one read the whole
+      // ArrayBuffer first and check its byteLength after.
+      /** @type {any} */
+      let parsed;
+      let byteLength = 0;
+      try {
+        const body = r.body;
+        if (body && typeof body.getReader === "function") {
+          const reader = body.getReader();
+          /** @type {Uint8Array[]} */
+          const chunks = [];
+          for (;;) {
+            const step = await Promise.race([reader.read(), deadline]);
+            if (step.done === true) break;
+            const chunk = step.value;
+            const len = chunk && typeof chunk.byteLength === "number" ? chunk.byteLength : 0;
+            byteLength += len;
+            if (byteLength > maxBytes) {
+              ac?.abort(); // stop the server sending any more of an over-budget body
+              return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+            }
+            chunks.push(chunk);
+          }
+          const merged = new Uint8Array(byteLength);
+          let off = 0;
+          for (const c of chunks) {
+            merged.set(c, off);
+            off += c.byteLength;
+          }
+          parsed = JSON.parse(new TextDecoder().decode(merged));
+        } else {
+          const buf = await Promise.race([r.arrayBuffer(), deadline]);
+          byteLength = buf && typeof buf.byteLength === "number" ? buf.byteLength : 0;
+          if (byteLength > maxBytes) return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+          parsed = JSON.parse(new TextDecoder().decode(buf));
+        }
+      } catch (e) {
+        if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+        if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+          return { ok: false, status: 0, error: "E_DEADLINE" };
+        return { ok: false, status: 0, error: "E_BAD_RESPONSE" }; // undecodable / non-JSON body
+      }
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      const value = parse(parsed, byteLength);
+      if (value === null) return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+      return { ok: true, value };
+    } finally {
+      deps.clearTimeout(deadlineTimer);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
+    }
+  }
+
+  /**
+   * `GET /api/worktree-diff/files` (§1.2) — the expanded row's file list. §1.10's envelope
+   * semantics: the body cap is `WTDIFF_LIST_BODY_MAX_BYTES` decoded bytes and the parsed
+   * `WtDiffFileList` is the parser's own product (unknown fields ignored, every off-contract
+   * member ⇒ `E_BAD_RESPONSE`). `untracked:"no"` is the degraded list mode (§3.3) and rides
+   * the query only when set.
+   * @param {{ agentKey: string, sessionId: string, wt: string, untracked?: "no" }} req
+   * @param {{ signal?: any }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function wtdiffFiles(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.wtdiffFiles}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&wt=${encodeURIComponent(req.wt)}${req.untracked === "no" ? "&untracked=no" : ""}`;
+    return await wtdiffGet(url, WTDIFF_LIST_BODY_MAX_BYTES, parseWtDiffFileList, signal);
+  }
+
+  /**
+   * `GET /api/worktree-diff/file` (§1.2) — one file's diff payload. `base` is the list's HEAD
+   * oid (a mismatch answers 409 `E_STALE_CTX{reason:"base"}` — surfaced, never retried here);
+   * `untracked` must match the list request that produced the entry (it joins the hub's
+   * changeset key, §1.2 — omitting it stale-fails a still-present file).
+   * @param {{ agentKey: string, sessionId: string, wt: string, base: string, path: string, orig?: string, untracked?: "no" }} req
+   * @param {{ signal?: any }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function wtdiffFile(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.wtdiffFile}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&wt=${encodeURIComponent(req.wt)}&base=${encodeURIComponent(req.base)}&path=${encodeURIComponent(req.path)}${req.orig !== undefined ? `&orig=${encodeURIComponent(req.orig)}` : ""}${req.untracked === "no" ? "&untracked=no" : ""}`;
+    return await wtdiffGet(url, WTDIFF_FILE_BODY_MAX_BYTES, parseWtDiffFile, signal);
+  }
+
+  const worktreeDiff = { files: wtdiffFiles, file: wtdiffFile };
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -1070,6 +1244,7 @@ export function createClient(deps) {
     spawn,
     removeAgent,
     preview,
+    worktreeDiff,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

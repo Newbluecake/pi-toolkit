@@ -31,7 +31,10 @@ import type {
   UploadCommitOk,
   UploadOutcome,
   UploadTransport,
+  WorktreeDiffTransport,
+  WtDiffOutcome,
 } from "./types.js";
+import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
 
 export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
 
@@ -78,12 +81,20 @@ function isRestAuthEndpoint(url: string): boolean {
   // `url.startsWith(API.headless)` covers `headless`, `headlessDirs` and `<id>/stop`.
   // PV4 (web-hub-preview plan v3 §4.6): `/api/preview` is the same class — the client's
   // preview namespace never fires onConn itself, this wrapper is the single reporter.
+  //
+  // worktree-diff plan v3.1 §4.6 (D4): both `GET /api/worktree-diff/*` endpoints join the same
+  // class — one-shot GETs whose params live in the QUERY STRING, so they ride the prefix rule
+  // like history/preview (an exact-match REST_AUTH_PATHS entry would never hit
+  // `/api/worktree-diff/files?agentKey=…`). `API.wtdiffFile` alone would cover both paths
+  // (`…/files` starts with `…/file`); both are spelled out for readability.
   return (
     REST_AUTH_PATHS.has(url) ||
     url.startsWith(API.history) ||
     url.startsWith(API.headless) ||
     url.startsWith(API.preview) ||
-    url.startsWith(API.runHistory)
+    url.startsWith(API.runHistory) ||
+    url.startsWith(API.wtdiffFiles) ||
+    url.startsWith(API.wtdiffFile)
   );
 }
 
@@ -153,5 +164,12 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // path too).
       probe: (req, opts) => client.preview.probe(req, opts) as Promise<PreviewProbeOutcome>,
     } satisfies PreviewTransport,
+    worktreeDiff: {
+      // worktree-diff plan v3.1 §4.6 (D4): thin casts over the logic client's wtdiff namespace.
+      // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has
+      // exact-match entries for both paths) — never inside the client, so nothing double-fires.
+      files: (req, opts) => client.worktreeDiff.files(req, opts) as Promise<WtDiffOutcome<WtDiffFileList>>,
+      file: (req, opts) => client.worktreeDiff.file(req, opts) as Promise<WtDiffOutcome<WtDiffFilePayload>>,
+    } satisfies WorktreeDiffTransport,
   } satisfies PasswordTransport;
 }

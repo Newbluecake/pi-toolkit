@@ -8,6 +8,7 @@
  * 78dd76b was: password client missing `subscribe`/`page`).
  */
 import type { PreviewDims, PreviewDirListing, PreviewImageMime, PreviewProbeKind } from "@protocol/preview.js";
+import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type {
@@ -111,6 +112,11 @@ export interface HubTransport {
    * `upload`/`spawn` — `usePreview`'s scope derivation (`previewScopeOf`) yields `null`
    * without it and every path renders as plain text. Both real adapters always provide it. */
   readonly preview?: PreviewTransport;
+  /** worktree-diff plan v3.1 §4.6 (package D4): the two `GET /api/worktree-diff/*` endpoints.
+   * Optional per the frozen-transport convention (test fakes / future transports may omit it) —
+   * `useWorktreeDiff`'s scope derivation (D5) yields `null` without it and the panel stays
+   * byte-identical to today (I8). Both real adapters always provide it. */
+  readonly worktreeDiff?: WorktreeDiffTransport;
 }
 
 /** `@logic/password-client.js`'s `login()` return shape (JSDoc-documented there; mirrored here). */
@@ -460,3 +466,59 @@ export interface PreviewTransport {
 export type PreviewProbeOutcome =
   | { readonly ok: true; readonly results: ReadonlyArray<PreviewProbeKind> }
   | { readonly ok: false; readonly status: number; readonly error: string; readonly retryAfterS?: number };
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan v3.1 §4.6 (package D4) — the `GET /api/worktree-diff/*` transport surface
+// ---------------------------------------------------------------------------
+
+/** §4.6's frozen request scope — the session identity every wtdiff request carries (the same
+ * agentKey/sessionId pair `GET /api/preview` requires; a mismatch answers 409 E_SESSION_CHANGED
+ * hub-side). */
+export interface WtDiffScope {
+  readonly agentKey: string;
+  readonly sessionId: string;
+}
+
+/**
+ * §4.6's frozen outcome union, shared by both endpoints. The success half carries the protocol
+ * parser's own product (`WtDiffFileList` / `WtDiffFilePayload` — never a hand mirror); the error
+ * half keeps the wire body's `reason` verbatim so a 409 `E_STALE_CTX{reason:"base"|"entry"}` —
+ * or a 403 `E_WTDIFF_DENIED{reason}` / 415 `E_WTDIFF_UNSUPPORTED{reason}` — reaches the UI
+ * unchanged for its stale-retry (§4.5) / copy-mapping decisions. `status` is 0 for client-local
+ * codes (`E_ABORT` / `E_DEADLINE` / `E_NETWORK` / `E_BAD_RESPONSE`); `retryAfterS` folds the
+ * 429 `Retry-After` header exactly like every other namespace. */
+export type WtDiffOutcome<T> =
+  | { readonly ok: true; readonly value: T }
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly error: string;
+      readonly reason?: string;
+      readonly retryAfterS?: number;
+    };
+
+/**
+ * §4.6's `WorktreeDiffTransport` — the two §1.2 endpoints, same shape on both adapters (the
+ * shared suite in `tests/web-hub/ui/transport-contract.test.ts` pins parity, preview/spawn
+ * precedent). Requests carry `X-PWH: 1`; `signal` is `useWorktreeDiff`'s per-call controller
+ * (a new pull / row collapse / scope invalidation aborts the in-flight fetch). `untracked:"no"`
+ * is the degraded list mode (§3.3) and — per §1.2 — must ride the `file` request too when the
+ * entry came from such a list: it participates in the hub's changeset key, so omitting it
+ * would answer 409 `E_STALE_CTX{entry}` for a still-present file. The client never retries a
+ * 409 on its own; the UI owns the one-shot re-pull (§4.5). */
+export interface WorktreeDiffTransport {
+  files(
+    req: WtDiffScope & { readonly wt: string; readonly untracked?: "no" },
+    opts?: { readonly signal?: AbortSignal },
+  ): Promise<WtDiffOutcome<WtDiffFileList>>;
+  file(
+    req: WtDiffScope & {
+      readonly wt: string;
+      readonly base: string;
+      readonly path: string;
+      readonly orig?: string;
+      readonly untracked?: "no";
+    },
+    opts?: { readonly signal?: AbortSignal },
+  ): Promise<WtDiffOutcome<WtDiffFilePayload>>;
+}

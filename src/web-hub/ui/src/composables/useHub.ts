@@ -36,6 +36,7 @@ import type {
   RemoveTarget,
   SpawnListOutcome,
   TransportHooks,
+  WorktreeDiffTransport,
 } from "../transport/types.js";
 import { createControl } from "./useControl.js";
 import { createSpawn } from "./useSpawn.js";
@@ -107,6 +108,11 @@ export interface UseHubHandle extends HubHandle {
    * the live closure map; this is the read-only mirror the randomized model test asserts
    * against (ledger size ≤ K; quiescent ledger keys == the fake hub's subscription set). */
   mainSubLedger(): ReadonlyArray<{ key: string; clientId: string }>;
+  /** worktree-diff plan v3.1 §4.5/§4.6 (package D4): the `GET /api/worktree-diff/*` call
+   * surface, passed through from the transport iff it offers it — `useWorktreeDiff` (D5)
+   * treats its absence as "no scope" (no expandable rows, the panel stays byte-identical,
+   * I8). Same optional-passthrough discipline as `preview` above. */
+  readonly worktreeDiff?: WorktreeDiffTransport;
   start(): Promise<void>;
   dispose(): void;
 }
@@ -769,6 +775,9 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // transport offers it — `usePreview`'s scope derivation treats its absence as "nothing
     // is clickable" (`previewScopeOf`'s `hasTransport`).
     ...(transport.preview === undefined ? {} : { preview: transport.preview }),
+    // worktree-diff plan v3.1 §4.6 (D4): same passthrough rule as `preview` — the surface rides
+    // the handle iff the transport offers it (a test fake without it keeps "no scope").
+    ...(transport.worktreeDiff === undefined ? {} : { worktreeDiff: transport.worktreeDiff }),
     dispatch,
     transport,
     loadOlder,

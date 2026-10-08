@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as proto from "../../../src/web-hub/protocol/http-contract.js";
 import * as previewProto from "../../../src/web-hub/protocol/preview.js";
 import * as uploadProto from "../../../src/web-hub/protocol/upload.js";
+import * as wtdProto from "../../../src/web-hub/protocol/worktree-diff.js";
 import * as web from "../../../src/web-hub/ui/src/logic/contract.js";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import { createClient } from "../../../src/web-hub/ui/src/logic/token-client.js";
@@ -181,5 +182,26 @@ describe("web/contract.js run-transcript surface (fleet-drawer F0)", () => {
 describe("web/contract.js API.headlessPrefs (default-model plan F1)", () => {
   it("points at POST /api/headless/prefs", () => {
     expect(web.API.headlessPrefs).toBe("/api/headless/prefs");
+  });
+});
+
+// worktree-diff plan v3.1 §1.2/§4.6 (package D4): the two file-diff endpoints are imported
+// from `protocol/worktree-diff.ts` — same anti-drift rule as the preview/upload paths above
+// (same reference target, never a hand copy). `protocol/http-contract.ts`'s WTDIFF_ENDPOINTS
+// imports the very same constants, so hub routes and this mirror cannot disagree either.
+describe("web/contract.js API wtdiff endpoints (worktree-diff plan v3.1 §1.2/§4.6, D4)", () => {
+  it("are the protocol module's frozen paths (same reference, not a copy)", () => {
+    expect(web.API.wtdiffFiles).toBe(wtdProto.WTDIFF_FILES_PATH);
+    expect(web.API.wtdiffFile).toBe(wtdProto.WTDIFF_FILE_PATH);
+    expect(web.API.wtdiffFiles).toBe("/api/worktree-diff/files");
+    expect(web.API.wtdiffFile).toBe("/api/worktree-diff/file");
+  });
+
+  it("the protocol paths are what http-contract's WTDIFF_ENDPOINTS pins (hub ⇄ UI one source)", () => {
+    for (const e of proto.WTDIFF_ENDPOINTS) {
+      expect(e.method).toBe("GET");
+      expect([wtdProto.WTDIFF_FILES_PATH, wtdProto.WTDIFF_FILE_PATH]).toContain(e.path);
+    }
+    expect(proto.WTDIFF_ENDPOINTS).toHaveLength(2);
   });
 });

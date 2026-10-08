@@ -1,6 +1,13 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { PREVIEW_DIR_BODY_MAX_BYTES } from "@protocol/preview.ts";
+import {
+  parseWtDiffFile,
+  parseWtDiffFileList,
+  WTDIFF_CLIENT_TIMEOUT_MS,
+  WTDIFF_FILE_BODY_MAX_BYTES,
+  WTDIFF_LIST_BODY_MAX_BYTES,
+} from "@protocol/worktree-diff.ts";
 import { createTokenTransport, TOKEN_KEY } from "../../../src/web-hub/ui/src/transport/token.js";
 import { createPasswordTransport } from "../../../src/web-hub/ui/src/transport/password.js";
 import { HISTORY_LIMIT_MAX } from "../../../src/web-hub/ui/src/logic/contract.js";
@@ -1759,5 +1766,361 @@ describe.each([
     // and the body carries NO dirs key for a dirs-less request
     const call = h.fetchCalls.find((c) => c.url.startsWith(PROBE_URL));
     expect(JSON.parse(String(call!.init.body))).toEqual({ paths: ["/d1", "/a.ts", "/d2"] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// worktree-diff plan v3.1 §1.2/§1.10/§4.6 (package D4): the two `GET /api/worktree-diff/*`
+// endpoints — the SAME suite on both adapters (the two logic clients' wtdiff namespaces are
+// verbatim symmetric by construction, the preview dir branch's discipline; this matrix is the
+// behavioral pin). §1.10's envelope semantics: a capped JSON body (the cap judges DECODED
+// bytes — gzip included, never Content-Length) → JSON.parse → the protocol parser
+// (`parseWtDiffFileList` / `parseWtDiffFile`); ANY deviation ⇒ local E_BAD_RESPONSE (status 0),
+// an over-cap body additionally ABORTS the fetch. Error bodies {error, reason} ride verbatim —
+// a 409 E_STALE_CTX{reason:"base"|"entry"} reaches the caller untouched (the UI, D5, owns the
+// one-shot re-pull; this layer never retries).
+// ---------------------------------------------------------------------------
+
+const OID = "0123456789abcdef0123456789abcdef01234567"; // 40-hex (WTDIFF_BASE_RE)
+const WTD_HEADERS = { "Content-Type": "application/json" };
+const FILES_BODY = {
+  base: OID,
+  entries: [
+    { path: "src/a.ts", status: "M", add: 3, del: 1 },
+    { path: "new.ts", orig: "old.ts", status: "R" },
+    { path: "bin.dat", status: "M", binary: true },
+    { path: "lfs.bin", status: "M", filtered: true },
+    { path: "cr\rname.ts", status: "?" }, // displayable, never requestable (#7) — parser accepts
+  ],
+  total: 5,
+  truncated: false,
+  limits: { status: false, files: false, bytes: false },
+};
+const WT_PATCH = "@@ -1 +1,2 @@\n-a\n+b\n";
+const FILE_BODY = {
+  base: OID,
+  path: "src/a b.ts",
+  kind: "patch",
+  patch: WT_PATCH,
+  bytes: new TextEncoder().encode(WT_PATCH).length,
+  truncated: false,
+};
+const wtdBytes = (body: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(body));
+const FILES_REQ = { agentKey: "A", sessionId: "s1", wt: "/home/u/wt main" };
+const FILE_REQ = {
+  agentKey: "A",
+  sessionId: "s1",
+  wt: "/home/u/wt main",
+  base: OID,
+  path: "src/a b.ts",
+  orig: "src/old.ts",
+};
+const WTD_FILES_URL = `/api/worktree-diff/files?agentKey=A&sessionId=s1&wt=${encodeURIComponent("/home/u/wt main")}`;
+const WTD_FILE_URL = `/api/worktree-diff/file?agentKey=A&sessionId=s1&wt=${encodeURIComponent("/home/u/wt main")}&base=${OID}&path=${encodeURIComponent("src/a b.ts")}&orig=${encodeURIComponent("src/old.ts")}`;
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: worktreeDiff (worktree-diff plan v3.1 §4.6, D4 — identical behavior both modes)", (_mode, make) => {
+  it("implements the WorktreeDiffTransport surface on every adapter", () => {
+    const wd = make().transport.worktreeDiff;
+    expect(typeof wd?.files).toBe("function");
+    expect(typeof wd?.file).toBe("function");
+  });
+
+  it("the fixtures are parser-valid (guards the fixtures themselves against silent drift)", () => {
+    const listBytes = wtdBytes(FILES_BODY).byteLength;
+    expect(parseWtDiffFileList(FILES_BODY, listBytes)).not.toBeNull();
+    expect(parseWtDiffFile(FILE_BODY, wtdBytes(FILE_BODY).byteLength)).not.toBeNull();
+  });
+
+  it('files(): GET /api/worktree-diff/files?agentKey&sessionId&wt (encoded) with X-PWH:"1"; streamed 200 ⇒ ok value', async () => {
+    const h = make(async () => respStream(200, [wtdBytes(FILES_BODY)], WTD_HEADERS));
+    const out = await h.transport.worktreeDiff!.files(FILES_REQ);
+    expect(out).toEqual({ ok: true, value: parseWtDiffFileList(FILES_BODY, wtdBytes(FILES_BODY).byteLength) });
+    const call = h.fetchCalls.find((c) => c.url === WTD_FILES_URL);
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("GET");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it('files({untracked:"no"}) appends &untracked=no (the degraded list mode, §3.3)', async () => {
+    const h = make(async () => respStream(200, [wtdBytes(FILES_BODY)], WTD_HEADERS));
+    await h.transport.worktreeDiff!.files({ ...FILES_REQ, untracked: "no" });
+    expect(h.fetchCalls.find((c) => c.url === `${WTD_FILES_URL}&untracked=no`)).toBeDefined();
+  });
+
+  it('file(): GET /api/worktree-diff/file?agentKey&sessionId&wt&base&path&orig with X-PWH:"1"; a 200 without a streaming body falls back to arrayBuffer()', async () => {
+    const h = make(async () =>
+      respBytes(200, wtdBytes(FILE_BODY), { ...WTD_HEADERS, "Content-Length": String(wtdBytes(FILE_BODY).byteLength) }),
+    );
+    const out = await h.transport.worktreeDiff!.file(FILE_REQ);
+    expect(out).toEqual({ ok: true, value: parseWtDiffFile(FILE_BODY, wtdBytes(FILE_BODY).byteLength) });
+    const call = h.fetchCalls.find((c) => c.url === WTD_FILE_URL);
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("GET");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it("file({untracked:\"no\"}) carries the list's mode (it joins the hub's changeset key, §1.2)", async () => {
+    const h = make(async () => respStream(200, [wtdBytes(FILE_BODY)], WTD_HEADERS));
+    await h.transport.worktreeDiff!.file({ ...FILE_REQ, untracked: "no" });
+    expect(h.fetchCalls.find((c) => c.url === `${WTD_FILE_URL}&untracked=no`)).toBeDefined();
+  });
+
+  it("URL encoding is byte-identical across BOTH clients (space / # / % / Chinese / leading -)", async () => {
+    const req = {
+      agentKey: "A",
+      sessionId: "s1",
+      wt: "/home/u/我的 wt #1",
+      base: OID,
+      path: "-rf --output=x.ts",
+      orig: "100%.ts",
+      untracked: "no" as const,
+    };
+    const h1 = makeToken(async () => respStream(200, [wtdBytes(FILES_BODY)], WTD_HEADERS));
+    await h1.transport.worktreeDiff!.files(req);
+    const h2 = makePassword(async () => respStream(200, [wtdBytes(FILES_BODY)], WTD_HEADERS));
+    await h2.transport.worktreeDiff!.files(req);
+    expect(h1.fetchCalls[0]!.url).toBe(h2.fetchCalls[0]!.url);
+    const url = h1.fetchCalls[0]!.url;
+    // the tricky characters, spelled out (encodeURIComponent semantics pinned, not assumed)
+    expect(url).toContain(encodeURIComponent("/home/u/我的 wt #1")); // space ⇒ %20, # ⇒ %23
+    // and the same holds for the file endpoint, whose params add path/orig
+    const h3 = makeToken(async () => respStream(200, [wtdBytes(FILE_BODY)], WTD_HEADERS));
+    const h4 = makePassword(async () => respStream(200, [wtdBytes(FILE_BODY)], WTD_HEADERS));
+    await h3.transport.worktreeDiff!.file(req);
+    await h4.transport.worktreeDiff!.file(req);
+    expect(h3.fetchCalls[0]!.url).toBe(h4.fetchCalls[0]!.url);
+    const fileUrl = h3.fetchCalls[0]!.url;
+    expect(fileUrl).toContain("100%25.ts"); // % ⇒ %25 (orig)
+    expect(fileUrl).toContain("-rf%20--output%3Dx.ts"); // leading - stays literal, = ⇒ %3D (path)
+    expect(fileUrl).toContain(`base=${OID}`);
+  });
+
+  it("decoded bytes over WTDIFF_LIST_BODY_MAX_BYTES ⇒ abort + E_BAD_RESPONSE (streaming reader)", async () => {
+    const chunk = new Uint8Array(300 * 1024); // two of these = 600 KiB > 256 KiB
+    let sawAbort = false;
+    const h = make(async (_url, init) => {
+      init?.signal?.addEventListener?.("abort", () => {
+        sawAbort = true;
+      });
+      return respStream(200, [chunk, chunk, chunk], WTD_HEADERS);
+    });
+    const out = await h.transport.worktreeDiff!.files(FILES_REQ);
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    expect(sawAbort).toBe(true); // the fetch was aborted so the server stops sending
+  });
+
+  it("decoded bytes over WTDIFF_FILE_BODY_MAX_BYTES ⇒ abort + E_BAD_RESPONSE (file endpoint, 1 MiB cap)", async () => {
+    const chunk = new Uint8Array(600 * 1024); // 1.2 MiB total > 1 MiB
+    let sawAbort = false;
+    const h = make(async (_url, init) => {
+      init?.signal?.addEventListener?.("abort", () => {
+        sawAbort = true;
+      });
+      return respStream(200, [chunk, chunk], WTD_HEADERS);
+    });
+    expect(await h.transport.worktreeDiff!.file(FILE_REQ)).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    expect(sawAbort).toBe(true);
+  });
+
+  it("the arrayBuffer fallback also refuses a body over the cap (byteLength checked after the read)", async () => {
+    const hFiles = make(async () => respBytes(200, new Uint8Array(WTDIFF_LIST_BODY_MAX_BYTES + 1), WTD_HEADERS));
+    expect(await hFiles.transport.worktreeDiff!.files(FILES_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+    const hFile = make(async () => respBytes(200, new Uint8Array(WTDIFF_FILE_BODY_MAX_BYTES + 1), WTD_HEADERS));
+    expect(await hFile.transport.worktreeDiff!.file(FILE_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("gzip: the cap judges DECODED bytes, never Content-Length (small compressed length, larger decoded body)", async () => {
+    const h = make(async () =>
+      respStream(200, [wtdBytes(FILES_BODY)], { ...WTD_HEADERS, "Content-Encoding": "gzip", "Content-Length": "42" }),
+    );
+    const out = await h.transport.worktreeDiff!.files(FILES_REQ);
+    expect(out).toMatchObject({ ok: true });
+    if (out.ok) expect(out.value.base).toBe(OID);
+  });
+
+  it("a non-JSON body ⇒ E_BAD_RESPONSE (undecodable, status 0)", async () => {
+    const h = make(async () => respStream(200, [new Uint8Array([0x89, 0x50, 0x4e, 0x47])], WTD_HEADERS));
+    expect(await h.transport.worktreeDiff!.files(FILES_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("valid JSON but an off-schema envelope ⇒ E_BAD_RESPONSE (the protocol parser is the gate)", async () => {
+    const badList = { ...FILES_BODY, truncated: true }; // violates truncated === (entries<total || limits.status)
+    const h1 = make(async () => respStream(200, [wtdBytes(badList)], WTD_HEADERS));
+    expect(await h1.transport.worktreeDiff!.files(FILES_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+    const badPayload = { ...FILE_BODY, kind: "binary", patch: "x" }; // kind!=="patch" ⇒ patch must be ""
+    const h2 = make(async () => respStream(200, [wtdBytes(badPayload)], WTD_HEADERS));
+    expect(await h2.transport.worktreeDiff!.file(FILE_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("409 E_STALE_CTX{base} / {entry} rides the {error, reason} body verbatim — never retried here (§4.5)", async () => {
+    const hBase = make(async (url) =>
+      url.startsWith("/api/worktree-diff/file") ? resp(409, { error: "E_STALE_CTX", reason: "base" }) : resp(200),
+    );
+    expect(await hBase.transport.worktreeDiff!.file(FILE_REQ)).toEqual({
+      ok: false,
+      status: 409,
+      error: "E_STALE_CTX",
+      reason: "base",
+    });
+    expect(hBase.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-diff"))).toHaveLength(1); // no auto-retry
+    const hEntry = make(async (url) =>
+      url.startsWith("/api/worktree-diff/file") ? resp(409, { error: "E_STALE_CTX", reason: "entry" }) : resp(200),
+    );
+    expect(await hEntry.transport.worktreeDiff!.file(FILE_REQ)).toEqual({
+      ok: false,
+      status: 409,
+      error: "E_STALE_CTX",
+      reason: "entry",
+    });
+  });
+
+  it("403 E_WTDIFF_DENIED{reason} and 415 E_WTDIFF_UNSUPPORTED{reason} ride verbatim too (§1.5 matrix)", async () => {
+    const h403 = make(async (url) =>
+      url.startsWith("/api/worktree-diff/files")
+        ? resp(403, { error: "E_WTDIFF_DENIED", reason: "not-worktree" })
+        : resp(200),
+    );
+    expect(await h403.transport.worktreeDiff!.files(FILES_REQ)).toEqual({
+      ok: false,
+      status: 403,
+      error: "E_WTDIFF_DENIED",
+      reason: "not-worktree",
+    });
+    const h415 = make(async (url) =>
+      url.startsWith("/api/worktree-diff/files")
+        ? resp(415, { error: "E_WTDIFF_UNSUPPORTED", reason: "unborn" })
+        : resp(200),
+    );
+    expect(await h415.transport.worktreeDiff!.files(FILES_REQ)).toEqual({
+      ok: false,
+      status: 415,
+      error: "E_WTDIFF_UNSUPPORTED",
+      reason: "unborn",
+    });
+  });
+
+  it("429 folds Retry-After into retryAfterS", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/worktree-diff/files") ? resp(429, { error: "E_RATE" }, { "Retry-After": "3" }) : resp(200),
+    );
+    expect(await h.transport.worktreeDiff!.files(FILES_REQ)).toEqual({
+      ok: false,
+      status: 429,
+      error: "E_RATE",
+      retryAfterS: 3,
+    });
+  });
+
+  it("client timeout (WTDIFF_CLIENT_TIMEOUT_MS = 35s, §1.9) ⇒ E_DEADLINE status 0, exactly one attempt", async () => {
+    const h = make(async () => new Promise<never>(() => {}));
+    const p1 = h.transport.worktreeDiff!.files(FILES_REQ);
+    h.clock.advance(WTDIFF_CLIENT_TIMEOUT_MS);
+    expect(await p1).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
+    const p2 = h.transport.worktreeDiff!.file(FILE_REQ);
+    h.clock.advance(WTDIFF_CLIENT_TIMEOUT_MS);
+    expect(await p2).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-diff"))).toHaveLength(2);
+  });
+
+  it("a PRE-aborted signal never issues the request at all", async () => {
+    const h = make(async () => respStream(200, [wtdBytes(FILES_BODY)], WTD_HEADERS));
+    const ac = new AbortController();
+    ac.abort();
+    expect(await h.transport.worktreeDiff!.files(FILES_REQ, { signal: ac.signal })).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_ABORT",
+    });
+    expect(await h.transport.worktreeDiff!.file(FILE_REQ, { signal: ac.signal })).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_ABORT",
+    });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-diff"))).toHaveLength(0);
+  });
+
+  it("an external abort mid-flight ⇒ E_ABORT (the fetch's own abort rejection surfaces)", async () => {
+    const h = make(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          (init as { signal?: AbortSignal } | undefined)?.signal?.addEventListener("abort", () =>
+            reject(new Error("AbortError")),
+          );
+        }) as never,
+    );
+    const ac = new AbortController();
+    const p = h.transport.worktreeDiff!.file(FILE_REQ, { signal: ac.signal });
+    ac.abort();
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_ABORT" });
+  });
+});
+
+describe("token transport: worktreeDiff() 401 recovery (withRelogin — GET replay is side-effect free)", () => {
+  it("a 401 with a stored token silently re-logs in and replays the SAME GET (no login-view flash)", async () => {
+    const h = makeToken(async (url) => {
+      if (url === "/api/login") return resp(200);
+      if (url.startsWith("/api/worktree-diff/files")) {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn ? respStream(200, [wtdBytes(FILES_BODY)], WTD_HEADERS) : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const out = await h.transport.worktreeDiff!.files(FILES_REQ);
+    expect(out).toMatchObject({ ok: true });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-diff/files"))).toHaveLength(2);
+    expect(h.onConnCalls).not.toContain("auth");
+  });
+
+  it("a FINAL 401 (no stored token) surfaces E_AUTH and reports onConn('auth') exactly once", async () => {
+    const h = makeToken(async (url) =>
+      url.startsWith("/api/worktree-diff") ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const out = await h.transport.worktreeDiff!.file(FILE_REQ);
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+describe("password transport: worktreeDiff() 401 (one-shot — the cookie session is gone)", () => {
+  it("a 401 surfaces E_AUTH and reports onConn('auth') exactly once (fetch wrapper, never double-fired)", async () => {
+    const h = makePassword(async (url) =>
+      url.startsWith("/api/worktree-diff") ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const out = await h.transport.worktreeDiff!.files(FILES_REQ);
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+
+  it("a 401 on the file endpoint reports onConn('auth') once too (same lost-session signal)", async () => {
+    const h = makePassword(async (url) =>
+      url.startsWith("/api/worktree-diff/file") ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const out = await h.transport.worktreeDiff!.file(FILE_REQ);
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
   });
 });

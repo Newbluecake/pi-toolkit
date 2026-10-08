@@ -50,11 +50,16 @@ import {
   type PreviewResponseKind,
 } from "../../../src/web-hub/protocol/preview.js";
 import { PREVIEW_ABS_HUB_CAP, PREVIEW_DIR_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import type { WtDiffFileList, WtDiffFilePayload } from "../../../src/web-hub/protocol/worktree-diff.js";
 import type {
+  HubTransport,
   PreviewDirOutcome,
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
+  WorktreeDiffTransport,
+  WtDiffOutcome,
+  WtDiffScope,
 } from "../../../src/web-hub/ui/src/transport/types.js";
 import type {
   AgentFrame,
@@ -597,5 +602,64 @@ describe("types.test-d.ts (web-hub-preview dir-plan P2 transport surface)", () =
     type ProbeReqNoDirs = Omit<ProbeReq, "dirs">;
     expectTypeOf<FetchReqNoDir>().toMatchTypeOf<FetchReq>();
     expectTypeOf<ProbeReqNoDirs>().toMatchTypeOf<ProbeReq>();
+  });
+});
+
+// worktree-diff plan v3.1 §4.6 (package D4): the frozen UI transport surface for the two
+// `GET /api/worktree-diff/*` endpoints. The success halves' value types ARE the protocol
+// parser's own products (`WtDiffFileList` / `WtDiffFilePayload`, imported from the frozen
+// protocol module — never a hand mirror, the same anti-drift rule as PreviewProbeKind); the
+// error half keeps the wire `reason` verbatim so a 409 `E_STALE_CTX{reason:"base"|"entry"}`
+// reaches the UI (D5) untouched for its one-shot re-pull decision (§4.5).
+describe("types.test-d.ts (worktree-diff plan v3.1 §4.6 D4 transport surface)", () => {
+  it("WtDiffOutcome's halves are exactly §4.6's frozen shapes", () => {
+    expectTypeOf<WtDiffOutcome<WtDiffFileList>>().toEqualTypeOf<
+      | { readonly ok: true; readonly value: WtDiffFileList }
+      | {
+          readonly ok: false;
+          readonly status: number;
+          readonly error: string;
+          readonly reason?: string;
+          readonly retryAfterS?: number;
+        }
+    >();
+  });
+
+  it("files/file success values are the protocol parser's own products (no local mirror)", () => {
+    type FilesValue = Extract<Awaited<ReturnType<WorktreeDiffTransport["files"]>>, { ok: true }>["value"];
+    expectTypeOf<FilesValue>().toEqualTypeOf<WtDiffFileList>();
+    type FileValue = Extract<Awaited<ReturnType<WorktreeDiffTransport["file"]>>, { ok: true }>["value"];
+    expectTypeOf<FileValue>().toEqualTypeOf<WtDiffFilePayload>();
+  });
+
+  it("request shapes: the shared scope plus each endpoint's own params; untracked/orig optional", () => {
+    type FilesReq = Parameters<WorktreeDiffTransport["files"]>[0];
+    expectTypeOf<FilesReq>().toEqualTypeOf<WtDiffScope & { readonly wt: string; readonly untracked?: "no" }>();
+    type FileReq = Parameters<WorktreeDiffTransport["file"]>[0];
+    expectTypeOf<FileReq>().toEqualTypeOf<
+      WtDiffScope & {
+        readonly wt: string;
+        readonly base: string;
+        readonly path: string;
+        readonly orig?: string;
+        readonly untracked?: "no";
+      }
+    >();
+    // pre-D4 call shapes (scope members only) stay assignable
+    expectTypeOf<Omit<FileReq, "orig" | "untracked">>().toMatchTypeOf<FileReq>();
+  });
+
+  it("HubTransport.worktreeDiff is optional (frozen-transport convention; fakes may omit it)", () => {
+    expectTypeOf<HubTransport["worktreeDiff"]>().toEqualTypeOf<WorktreeDiffTransport | undefined>();
+    expectTypeOf<Omit<HubTransport, "worktreeDiff">>().toMatchTypeOf<HubTransport>();
+  });
+
+  it("both opts bags are optional and carry only signal (a missing opts stays legal)", () => {
+    expectTypeOf<Parameters<WorktreeDiffTransport["files"]>[1]>().toEqualTypeOf<
+      { readonly signal?: AbortSignal } | undefined
+    >();
+    expectTypeOf<Parameters<WorktreeDiffTransport["file"]>[1]>().toEqualTypeOf<
+      { readonly signal?: AbortSignal } | undefined
+    >();
   });
 });
