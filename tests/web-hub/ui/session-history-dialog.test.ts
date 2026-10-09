@@ -197,6 +197,48 @@ describe("SessionHistoryDialog: list basics", () => {
     expect(qa(".history-badge").map((b) => b.textContent?.trim())).toEqual(["live", "forked"]);
   });
 
+  it("compact row structure: title + time on line 1, cwd + actions on line 2", async () => {
+    const h = harness({
+      history: [
+        {
+          ok: true,
+          page: historyPage({ items: [mainItem({ live: { state: "open", by: "card" } })] }),
+        },
+      ],
+    });
+    mountDialog(h);
+    await flushPromises();
+    const line1 = q<HTMLElement>(".history-row-line1");
+    expect(line1.querySelector(".history-row-title")?.textContent).toContain("Fix the parser");
+    expect(line1.querySelector(".history-row-time")?.textContent?.trim()).toBe("5m ago");
+    expect(line1.querySelector(".history-row-cwd")).toBeNull();
+    expect(line1.querySelector(".history-row-actions")).toBeNull();
+    const line2 = q<HTMLElement>(".history-row-line2");
+    expect(line2.querySelector(".history-row-cwd")?.textContent?.trim()).toBe("proj");
+    // the resume/goto/⋯ actions live at the END of line 2 (order: primary, goto link, ⋯)
+    const actions = line2.querySelector(".history-row-actions");
+    expect(actions).not.toBeNull();
+    const labels = [...(actions?.querySelectorAll("button, a") ?? [])].map((b) => b.textContent?.trim());
+    expect(labels).toEqual(["Resume", "⋯"]);
+  });
+
+  it("header layout: title + close on row 1, full-width search + kind filter on row 2", async () => {
+    const h = harness({ history: [{ ok: true, page: historyPage() }] });
+    mountDialog(h);
+    await flushPromises();
+    const headrow = q<HTMLElement>(".history-headrow");
+    expect(headrow.querySelector(".history-title")?.textContent?.trim()).toBe("History sessions");
+    expect(headrow.querySelector("button[aria-label='Close']")).not.toBeNull();
+    expect(headrow.querySelector(".history-search input")).toBeNull(); // search moved to row 2
+    const searchrow = q<HTMLElement>(".history-searchrow");
+    const input = searchrow.querySelector<HTMLInputElement>(".history-search input");
+    expect(input).not.toBeNull();
+    expect(input?.name).toBe("history-search");
+    const kind = searchrow.querySelector<HTMLInputElement>(".history-kind input");
+    expect(kind).not.toBeNull(); // the 「包含子代理」 filter sits at the search row's right end
+    expect(document.activeElement).toBe(input); // autofocus kept
+  });
+
   it("listbox semantics: role=listbox/option, aria-selected tracks the keyboard selection", async () => {
     const h = harness({
       history: [
@@ -343,7 +385,7 @@ describe("SessionHistoryDialog: paging, auto-continue, cursor-expired, busy", ()
     });
     mountDialog(h);
     await flushPromises();
-    const more = q<HTMLButtonElement>(".history-foot-actions button");
+    const more = q<HTMLButtonElement>(".history-foot-more");
     expect(more.textContent?.trim()).toBe("Load more");
     await click(more);
     expect(h.historyCalls[1]?.cursor).toBe("v1.aaaaaaaaaaa.1");
@@ -376,7 +418,7 @@ describe("SessionHistoryDialog: paging, auto-continue, cursor-expired, busy", ()
     expect(h.historyCalls).toHaveLength(2); // the auto round fired on its own
     expect(h.historyCalls[1]?.cursor).toBe("v1.bbbbbbbbbbb.1");
     expect(qa(".history-row")).toHaveLength(2); // deduped, not 3
-    expect(qa(".history-foot-actions button")).toHaveLength(0); // no next cursor left
+    expect(qa(".history-foot-more")).toHaveLength(0); // no next cursor left
   });
 
   it("zombie partial: NO auto round — the load-more button stays", async () => {
@@ -386,7 +428,54 @@ describe("SessionHistoryDialog: paging, auto-continue, cursor-expired, busy", ()
     mountDialog(h);
     await flushPromises();
     expect(h.historyCalls).toHaveLength(1);
-    expect(q<HTMLButtonElement>(".history-foot-actions button").textContent?.trim()).toBe("Load more");
+    expect(q<HTMLButtonElement>(".history-foot-more").textContent?.trim()).toBe("Load more");
+  });
+
+  it("auto-continue in flight: 「Scanning more…」 shows and 「加载更多」 is ABSENT; it returns only if a cursor remains", async () => {
+    let release!: (v: SpawnHistoryOutcome) => void;
+    const gate = new Promise<SpawnHistoryOutcome>((res) => (release = res));
+    const h = harness({
+      history: [
+        {
+          ok: true,
+          page: historyPage({ items: [mainItem()], next: "v1.hhhhhhhhhhh.1", partial: { reason: "budget" } }),
+        },
+        () => gate, // the auto round's answer, held pending
+      ],
+    });
+    mountDialog(h);
+    await flushPromises();
+    expect(h.historyCalls).toHaveLength(2); // the auto round fired and is in flight
+    expect(q(".history-foot-status").textContent).toContain("Scanning more");
+    expect(qa(".history-foot-more")).toHaveLength(0); // the button is GONE while the round is pending (canMore alone must not render it)
+    // settle WITH another cursor (zombie partial ⇒ no further auto) ⇒ the button comes back
+    release({
+      ok: true,
+      page: historyPage({
+        items: [mainItem({ key: "d/b.jsonl", id: "i2" })],
+        next: "v1.hhhhhhhhhhh.2",
+        partial: { reason: "zombie" },
+      }),
+    });
+    await flushPromises();
+    expect(q<HTMLButtonElement>(".history-foot-more").textContent?.trim()).toBe("Load more");
+  });
+
+  it("auto-continue settling WITHOUT a cursor ⇒ the button stays absent", async () => {
+    let release!: (v: SpawnHistoryOutcome) => void;
+    const gate = new Promise<SpawnHistoryOutcome>((res) => (release = res));
+    const h = harness({
+      history: [
+        { ok: true, page: historyPage({ items: [mainItem()], next: "v1.iiiiiiiiiii.1", partial: { reason: "enum" } }) },
+        () => gate,
+      ],
+    });
+    mountDialog(h);
+    await flushPromises();
+    expect(qa(".history-foot-more")).toHaveLength(0); // still scanning
+    release({ ok: true, page: historyPage({ items: [mainItem({ key: "d/c.jsonl", id: "i3" })] }) });
+    await flushPromises();
+    expect(qa(".history-foot-more")).toHaveLength(0); // no cursor left ⇒ canMore false
   });
 
   it("cursor-expired reloads the same query from scratch once; a second expiry becomes an error", async () => {
@@ -404,10 +493,10 @@ describe("SessionHistoryDialog: paging, auto-continue, cursor-expired, busy", ()
     mountDialog(h);
     await flushPromises();
     // load more → expired → auto restart from the beginning (no cursor on call 2)
-    await click(q<HTMLButtonElement>(".history-foot-actions button"));
+    await click(q<HTMLButtonElement>(".history-foot-more"));
     expect(h.historyCalls[2]?.cursor).toBeUndefined();
     expect(h.historyCalls[2]?.q).toBe("");
-    await click(q<HTMLButtonElement>(".history-foot-actions button"));
+    await click(q<HTMLButtonElement>(".history-foot-more"));
     expect(q(".history-session-error").textContent).toContain("The list changed on the hub");
     // and the retry button re-issues the query — a MANUAL retry is a NEW query, so it gets
     // its own one auto-restart (call 4's 409 restarts once more via call 5 before erroring)
@@ -524,15 +613,22 @@ describe("SessionHistoryDialog: banners + hints", () => {
     expect(q(".history-empty").textContent).toContain("No sessions match");
   });
 
-  it("the W1–W7 best-effort note ALWAYS renders, W5 and W7 verbatim (en)", async () => {
+  it("the W1–W7 disclosure ALWAYS renders (collapsed by default), W5 and W7 verbatim (en)", async () => {
     const h = harness({ history: [{ ok: true, page: historyPage() }] });
     mountDialog(h);
     await flushPromises();
-    const note = q(".history-besteffort");
-    expect(note.textContent).toContain("pid is reused by a new process");
-    expect(note.textContent).toContain("swapped out and swapped back");
-    expect(note.textContent).toContain("(W5)");
-    expect(note.textContent).toContain("(W7)");
+    const det = q<HTMLDetailsElement>("details.history-besteffort");
+    expect(det.tagName).toBe("DETAILS");
+    expect(det.open).toBe(false); // collapsed by default — the copy is present but hidden
+    expect(det.querySelector("summary")?.textContent).toContain("occupancy detection");
+    // textContent reaches the collapsed copy — §14.1 keeps it in the DOM unconditionally
+    expect(det.textContent).toContain("pid is reused by a new process");
+    expect(det.textContent).toContain("swapped out and swapped back");
+    expect(det.textContent).toContain("(W5)");
+    expect(det.textContent).toContain("(W7)");
+    // the native toggle opens it (no custom JS, no <Transition>)
+    det.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(det.open).toBe(true);
   });
 
   it("zh copy: bestEffortNote contains 「pid 被新进程复用」 and 「替换又换回」 (§4.7.2 copy pin)", () => {

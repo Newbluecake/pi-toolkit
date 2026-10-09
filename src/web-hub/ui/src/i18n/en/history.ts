@@ -10,8 +10,9 @@
  * 「替换又换回」 (W5/W7), en their English counterparts.
  */
 const history = {
-  // --- NewSessionMenu / AgentList EmptyState entry ---
-  menuItem: "History sessions…",
+  // --- AgentList sidebar footer + EmptyState entry (2026-10: the footer entry replaced the
+  // --- old NewSessionMenu dropdown item — one persistent entry point, same gating) ---
+  sidebarEntry: "History sessions",
   emptyStateItem: "History sessions",
 
   // --- SessionHistoryDialog shell ---
@@ -96,7 +97,9 @@ const history = {
   gapProcPartial: "the process scan did not complete",
   gapNewProcess: "a new pi/node process started during the check",
 
-  // --- §14.1 residual windows W1–W7 (always rendered at the dialog's bottom; copy-pinned) ---
+  // --- §14.1 residual windows W1–W7 (always present at the dialog's bottom — since the
+  // --- 2026-10 layout pass collapsed behind the bestEffortSummary toggle; copy-pinned) ---
+  bestEffortSummary: "About occupancy detection",
   bestEffortNote:
     "Occupancy detection is best-effort: processes run as root, inside containers, or started by non-pi launchers cannot be detected (W3/W4); so can a process that opens the session only after the check completes (W1/W2), and the instant a just-exited pi's pid is reused by a new process (W5); auto-restore after a hub restart does not re-check (W6); a session file swapped out and swapped back during startup cannot be detected (W7). Opening the same session twice only forks the session tree — no data is lost or corrupted.",
 

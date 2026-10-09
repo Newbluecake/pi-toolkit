@@ -1121,17 +1121,18 @@ describe("AgentCard.vue restore badges (spawn-restore plan §9.1)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// session-history plan §4.7.2: the 「历史会话…」 entries — the NewSessionMenu item, the
-// EmptyState entry, and the mounted SessionHistoryDialog (with a scripted history call).
+// session-history plan §4.7.2 (2026-10 relocation): the 「历史会话」 entries — the pinned
+// sidebar FOOTER button (moved out of the NewSessionMenu dropdown to avoid duplication),
+// the EmptyState entry, and the mounted SessionHistoryDialog (with a scripted history call).
 // ---------------------------------------------------------------------------
 
 describe("AgentList.vue — history entries (session-history plan §4.7.2)", () => {
   const HIST = "spawn.history.v1";
 
-  function hubWithHistory(opts: { caps?: readonly string[]; history?: () => Promise<unknown> } = {}) {
+  function hubWithHistory(opts: { caps?: readonly string[]; list?: () => Promise<SpawnListOutcome> } = {}) {
     return hubWithSpawn({
       caps: opts.caps ?? ["spawn.v1", HIST],
-      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+      ...(opts.list ? { list: opts.list } : {}),
     }) as HubHandle & {
       spawn: HubSpawnHandle & {
         history?: (q: unknown) => Promise<unknown>;
@@ -1140,8 +1141,10 @@ describe("AgentList.vue — history entries (session-history plan §4.7.2)", () 
     };
   }
 
-  it("cap + policy allowed ⇒ 「History sessions…」 in the dropdown; picking it mounts the dialog", async () => {
-    const hub = hubWithHistory();
+  it("cap + policy allowed ⇒ the footer entry is pinned below the list, NOT in the dropdown; clicking opens the dialog", async () => {
+    const hub = hubWithHistory({
+      list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+    });
     (hub.spawn as { history?: unknown }).history = async () => ({
       ok: true,
       page: { items: [], stats: { files: 0, indexed: 0, enum: { complete: true, dirsDone: 0, dirsTotal: 0 } } },
@@ -1151,29 +1154,60 @@ describe("AgentList.vue — history entries (session-history plan §4.7.2)", () 
       global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
     });
     await flushPromises();
+    const foot = wrapper.get(".sidebar-foot");
+    const btn = foot.get(".sidebar-history-btn");
+    expect(btn.text()).toContain("History sessions");
+    expect(btn.attributes("aria-label")).toBe("History sessions"); // named in every state (collapsed rail included)
+    expect(btn.attributes("disabled")).toBeUndefined();
+    expect(wrapper.find("#sidebar-history-reason").exists()).toBe(false); // nothing to describe while enabled
+    // the footer is the LAST child of the sidebar nav — pinned below the scrollable list
+    expect(wrapper.get("nav.sidebar").element.lastElementChild?.classList.contains("sidebar-foot")).toBe(true);
+    // the menu item is gone (no duplication)
     await wrapper.get(".nsmenu-toggle").trigger("click");
-    const item = wrapper.findAll(".nsmenu-item").find((b) => b.text().includes("History sessions"));
-    expect(item).toBeDefined();
-    await item!.trigger("click");
+    expect(wrapper.findAll(".nsmenu-item").some((b) => b.text().includes("History sessions"))).toBe(false);
+    await btn.trigger("click");
     await flushPromises();
     // the Teleport'd dialog landed on <body> with its aria label
     expect(document.body.querySelector('.history-dialog[role="dialog"]')).not.toBeNull();
     wrapper.unmount();
   });
 
-  it("no history cap ⇒ no menu item, and the EmptyState shows no history entry", async () => {
+  it("no history cap ⇒ no footer entry, no menu item, and the EmptyState shows no history entry", async () => {
     const hub = hubWithSpawn({
       caps: ["spawn.v1"],
       list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
     });
     const wrapper = mount(AgentList, {
-      props: { cards: [], selectedKey: null, filter: "" },
+      props: { cards: [card()], selectedKey: null, filter: "" },
       global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
     });
     await flushPromises();
+    expect(wrapper.find(".sidebar-foot").exists()).toBe(false);
     await wrapper.get(".nsmenu-toggle").trigger("click");
     expect(wrapper.findAll(".nsmenu-item").some((b) => b.text().includes("History sessions"))).toBe(false);
     expect(wrapper.findAll(".spawn-empty-pick").some((b) => b.text().includes("History sessions"))).toBe(false);
+  });
+
+  it("cap + denied policy ⇒ the footer entry is disabled with its reason (aria-describedby + visible hint)", async () => {
+    const hub = hubWithHistory({
+      list: async () => ({ ok: true, policy: { ...spawnPolicy, allowed: false, reason: "cooldown" }, items: [] }),
+    });
+    const wrapper = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    await flushPromises();
+    const btn = wrapper.get(".sidebar-history-btn");
+    expect(btn.attributes("disabled")).toBeDefined();
+    // the accessible name is the aria-label (the collapsed rail hides the label span and the
+    // icon is aria-hidden — the name must not depend on the visible text)
+    expect(btn.attributes("aria-label")).toBe("History sessions");
+    // aria-describedby must resolve to a REAL, in-DOM element (in the collapsed rail the reason
+    // goes visually-hidden, never display:none — so the description survives every state)
+    expect(btn.attributes("aria-describedby")).toBe("sidebar-history-reason");
+    const reason = wrapper.get("#sidebar-history-reason");
+    expect(reason.text()).toContain("Cooling down"); // the same spawn.denied* copy the menu used
+    expect(reason.attributes("style")).toBeUndefined(); // no inline hiding — CSS class only
   });
 
   it("cap + allowed + 0 agents ⇒ the EmptyState carries BOTH entries (pick-dir + history)", async () => {
@@ -1189,6 +1223,8 @@ describe("AgentList.vue — history entries (session-history plan §4.7.2)", () 
     const labels = wrapper.findAll(".spawn-empty-pick").map((b) => b.text().trim());
     expect(labels).toContain("Choose a directory…");
     expect(labels).toContain("History sessions");
+    // the empty list does not unpin the footer — it stays the sidebar's last child
+    expect(wrapper.get("nav.sidebar").element.lastElementChild?.classList.contains("sidebar-foot")).toBe(true);
     // and the history button mounts the dialog too
     await wrapper.findAll(".spawn-empty-pick")[1]!.trigger("click");
     await flushPromises();

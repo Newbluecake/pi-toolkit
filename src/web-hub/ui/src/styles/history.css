@@ -4,6 +4,13 @@
  * primitives.css (+ spawn.css's `.spawn-scrim`/`.spawn-confirm` shell, which the dialog
  * reuses — only the history-specific layout lives here). All colours/sizes come from
  * tokens.css; the scrim/z-index contract is spawn.css's, unchanged.
+ *
+ * 2026-10 layout pass: two-row header (title + close / full-width search with the kind
+ * filter at its right end), compact two-line rows (~56–64px on fine pointers: title +
+ * badges + relative time / cwd + the row actions) separated by hairlines instead of padded
+ * cards, a one-line footer (status texts left, 「加载更多」 right) and the W1–W7 small print
+ * collapsed behind a native `<details>` (HistoryForkConfirm keeps the always-visible `<p>`
+ * form — there the warning IS the rationale, not a footnote).
  */
 
 .history-dialog {
@@ -19,40 +26,57 @@
   box-shadow: var(--shadow-3);
 }
 
+/* ---------------------------------------------------------------- header (two rows) */
+
 .history-head {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.history-headrow {
+  display: flex;
   align-items: center;
   gap: var(--sp-2);
 }
 
 .history-title {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: var(--fs-md);
   font-weight: 600;
 }
 
-.history-kind {
-  display: inline-flex;
+.history-searchrow {
+  display: flex;
   align-items: center;
-  gap: var(--sp-1);
-  font-size: var(--fs-xs);
-  color: var(--c-text-3);
-  cursor: pointer;
-  user-select: none;
+  gap: var(--sp-2);
 }
 
 .history-search {
   display: flex;
-  flex: 1 1 220px;
+  flex: 1 1 auto;
   align-items: center;
   gap: var(--sp-1);
-  min-width: 180px;
+  min-width: 0;
 }
 
 .history-search .input {
   flex: 1;
   min-width: 0;
+}
+
+.history-kind {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
 }
 
 /* ---------------------------------------------------------------- rows (listbox) */
@@ -61,11 +85,9 @@
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
   min-height: 120px;
   max-height: 52vh;
   overflow-y: auto;
-  padding: var(--sp-1);
   border: 1px solid var(--c-border);
   border-radius: var(--r-md);
 }
@@ -73,14 +95,31 @@
 .history-row {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--sp-2);
-  border-radius: var(--r-sm);
+  gap: 3px;
+  padding: 7px var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
   cursor: pointer;
+}
+
+.history-row:first-child {
+  border-top-left-radius: var(--r-md);
+  border-top-right-radius: var(--r-md);
+}
+
+.history-row:last-child {
+  border-bottom: 0;
+  border-bottom-left-radius: var(--r-md);
+  border-bottom-right-radius: var(--r-md);
 }
 
 .history-row[aria-selected="true"] {
   background: var(--c-surface-2);
+}
+
+@media (hover: hover) {
+  .history-row:hover:not(.is-greyed) {
+    background: var(--c-surface-2);
+  }
 }
 
 .history-row.is-greyed {
@@ -88,7 +127,8 @@
   cursor: default;
 }
 
-.history-row-main {
+/* line 1 — title (flex 1, single-line ellipsis) + badges + relative time on the right */
+.history-row-line1 {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -100,6 +140,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--fs-sm);
   font-weight: 500;
 }
 
@@ -121,13 +162,19 @@
   opacity: 0.7;
 }
 
-.history-row-sub {
+.history-row-time {
+  flex: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* line 2 — cwd (muted, smaller, ellipsis) + the row actions at the right end */
+.history-row-line2 {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--sp-2);
   min-width: 0;
-  font-size: var(--fs-xs);
-  color: var(--c-text-3);
 }
 
 .history-row-cwd {
@@ -135,11 +182,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.history-row-time {
-  flex: none;
-  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
 }
 
 .history-row-blocked {
@@ -151,12 +195,41 @@
 .history-row-actions {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
-  margin-left: auto;
+  flex: none;
+  gap: 2px;
+}
+
+/* finer than `.btn-xs`'s 32px floor so the two-line row stays in the ~56–64px band; coarse
+   pointers bump back up below (control.css's coarse `.btn-xs` rule is specificity-WEAKER
+   than this one, so the coarse floor must be restated here, not inherited). */
+.history-row-actions .btn {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 var(--sp-2);
 }
 
 .history-row-actions a.btn {
   text-decoration: none;
+}
+
+/* hover-capable pointers: actions stay discoverable but subdued until the row is engaged */
+@media (hover: hover) {
+  .history-row-actions {
+    opacity: 0.55;
+    transition: opacity var(--dur-fast) var(--ease-out);
+  }
+
+  .history-row:hover .history-row-actions,
+  .history-row:focus-within .history-row-actions {
+    opacity: 1;
+  }
+}
+
+@media (pointer: coarse) {
+  .history-row-actions .btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
 }
 
 .history-overflow {
@@ -233,17 +306,31 @@
   text-align: center;
 }
 
+/* one compact line: status texts on the left, 「加载更多」 pinned right */
 .history-foot {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
 }
 
-.history-foot-actions {
+.history-foot-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--sp-2);
-  min-height: 26px;
+  min-height: 28px;
+}
+
+.history-foot-status {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.history-foot-more {
+  flex: none;
+  margin-left: auto;
 }
 
 .history-note {
@@ -252,12 +339,12 @@
   color: var(--c-text-3);
 }
 
-.history-banner {
-  padding: var(--sp-1) var(--sp-2);
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-sm);
-}
+/* `history-banner` (the incompleteNotice lines) is a semantic marker for the tests/template
+ * — the 2026-10 compact footer renders every notice as a plain muted line, no box. */
 
+/* The W1–W7 small print — user ruling §14.1 keeps the copy mandatory; the list view collapses
+ * it behind the summary toggle (always in the DOM, `textContent`-reachable either way). The
+ * base look is shared with HistoryForkConfirm's always-visible `<p class="history-besteffort">`. */
 .history-besteffort {
   margin: 0;
   padding-top: var(--sp-1);
@@ -265,6 +352,28 @@
   font-size: var(--fs-2xs);
   color: var(--c-text-3);
   opacity: 0.9;
+}
+
+.history-besteffort-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.history-besteffort-summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-besteffort-summary:hover {
+  color: var(--c-text-2);
+}
+
+.history-besteffort-text {
+  margin: var(--sp-1) 0 0;
+  line-height: 1.55;
 }
 
 @media (max-width: 640px) {

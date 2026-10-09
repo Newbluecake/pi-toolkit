@@ -149,6 +149,64 @@
   letter-spacing: 0.06em;
 }
 
+/* ---------------------------------------------------------------- sidebar footer
+ * 「历史会话」 entry (session-history plan §4.7.2, 2026-10 relocation from the NewSessionMenu
+ * dropdown): a low-emphasis, full-width footer button pinned at the sidebar's bottom —
+ * `margin-top: auto` keeps it below the scrollable list regardless of how short the list is,
+ * so it never scrolls away in any layout (split / drawer / tablet grid / phone list). */
+.sidebar-foot {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--c-border);
+}
+
+.sidebar-history-btn {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.sidebar-history-btn:hover:not(:disabled),
+.sidebar-history-btn:focus-visible {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.sidebar-history-btn:disabled {
+  color: var(--c-text-3);
+  cursor: not-allowed;
+}
+
+.sidebar-history-reason {
+  margin: 0;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+}
+
+@media (pointer: coarse) {
+  .sidebar-history-btn {
+    min-height: 44px;
+  }
+}
+
 .agent-card {
   position: relative;
   display: grid;
@@ -399,6 +457,40 @@
 
   .sidebar.is-collapsed .sidebar-headrow {
     justify-content: center;
+  }
+
+  /* The footer entry stays reachable in the rail: icon-only, centered (same treatment as the
+   * collapse toggle — the label would overflow the 56px column). */
+  .sidebar.is-collapsed .sidebar-foot {
+    justify-content: center;
+    padding: var(--sp-2);
+  }
+
+  .sidebar.is-collapsed .sidebar-history-btn {
+    justify-content: center;
+    width: auto;
+    padding: 0;
+  }
+
+  .sidebar.is-collapsed .sidebar-history-btn span {
+    display: none;
+  }
+
+  /* The label span is display:none above and AppIcon is aria-hidden ⇒ the button's name comes
+   * from its aria-label alone. The disabled reason stays in the ACCESSIBLE tree (visually
+   * hidden, NOT display:none) so the button's aria-describedby keeps resolving to real text
+   * in the collapsed rail too. */
+  .sidebar.is-collapsed .sidebar-history-reason {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
   }
 
   .agent-list {

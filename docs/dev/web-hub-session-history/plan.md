@@ -836,6 +836,16 @@ finally pin.release()
 
 #### 4.7.2 组件
 
+> **2026-10-09 修订**（UI 布局改版，不改变本节契约）：入口从 `NewSessionMenu` 下拉项迁到
+> `AgentList` 侧边栏底部的常驻 footer 按钮（`sidebar-foot`，`margin-top:auto` 钉底、不随列表
+> 滚动，折叠 rail 下 icon-only）；菜单项已移除，EmptyState 入口保留。门控不变（无
+> `spawn.history.v1` cap / list 未成功 ⇒ footer 整体隐藏；策略拒绝 ⇒ 禁用 + 原因，
+> `aria-label` + `aria-describedby`→可视隐藏的原因元素）。弹窗改为紧凑布局：头部两行（标题+
+> 关闭 / 全宽搜索+kind 开关）、两行列表项（行1 标题+徽标+相对时间，行2 cwd+行内操作，hairline
+> 分隔）、单行页脚（左状态栈、右「加载更多」，自动续扫期间按钮让位给「继续扫描中…」且
+> `onLoadMore` 在请求在途时为 no-op）；W1–W7 小字收进原生 `<details>`（默认折叠，文案始终在
+> DOM，HistoryForkConfirm 内仍常显）。
+
 - `NewSessionMenu` 加入「历史会话…」；`AgentList` 在菜单项和 EmptyState 两处都提供入口，并挂载弹窗。
 - `SessionHistoryDialog`：搜索防抖 250ms、kind 开关（持久化到 `localStorage["pwh_history_kind"]`）、listbox 语义、只用 textContent 渲染、置灰行、主动作、溢出菜单里的「复制为新会话」、`gotoKey` 用链接实现。flow 渲染：`confirming` 且 reason 为 `session-open` 时显示 `HistoryForkConfirm`，其他 reason 显示 `SpawnConfirm`；`failed{kind:"session"}` 时在行内显示文案并刷新列表；进入 `awaiting` 后关闭弹窗。底部依次是：加载更多 / 自动续扫；`partial` 时「已索引 X / Y…」（`io` 时加「部分文件读取失败，正在重试」）；**`stats.enum.complete===false` 时「正在枚举会话目录（dirsDone/dirsTotal），排序在枚举完成前为近似」**；**`stats.skipped>0` 时常驻横幅「N 个会话文件读取失败，未包含在结果中；刷新列表后重试」**；`liveness` 提示；`files===0` 时 sessionDir 提示；**`stats.enum.dirsSkipped>0 / stats.changed>0 / truncated` 时同一横幅追加「N 个目录无法读取」「N 个会话所在目录已被更改」「列表已达上限」**；**最底部一行常驻小字（§14.1，逐条对应 W1–W7）**：「占用检测为尽力而为：无法检测 root / 容器内 / 非 pi 启动器的进程（W3/W4），检测完成后才打开该会话的进程（W1/W2），**刚退出的 pi 其 pid 被新进程复用的瞬间（W5）**；hub 重启后的自动恢复不重新检测（W6）；**启动期间会话文件被替换又换回无法察觉（W7）**。双开只会使会话树分叉，不会丢失或损坏数据。」——i18n key `history.bestEffortNote`，文案测试断言其中包含 `W5`/`W7` 对应短语（「pid 被新进程复用」「替换又换回」）。
 - `HistoryForkConfirm`：文案覆盖 `open/card`、`open/managed`、`maybe/proc`、`subagent`、`manual`、`unverified`：「无法确认此会话当前没有被其他 pi 进程打开（{gapText}）。为避免两个进程同时写入，将复制一份新会话继续，原会话不受影响。」。`gapText` 按 `proofGap` 映射：`kind`「无法判定这是主会话」；`unconnected-pi`「有未连接到 hub 的 pi 进程 (pid N)」；`card-unproven`「有尚未上报会话的 pi 进程 (pid N)」；`proc-partial`「进程扫描未完成」；`new-process`「检测期间有新的 pi/node 进程启动」。确认框底部复用上面的尽力检测小字。plaintext 时附加明文警告。

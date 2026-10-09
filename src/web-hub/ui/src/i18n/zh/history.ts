@@ -6,8 +6,9 @@
 import type en from "../en/history.js";
 
 const history = {
-  // --- NewSessionMenu / AgentList EmptyState 入口 ---
-  menuItem: "历史会话…",
+  // --- AgentList 侧边栏底部入口 + EmptyState 入口（2026-10：底部常驻入口取代了原
+  // --- NewSessionMenu 下拉项——唯一持久入口，同一套门控） ---
+  sidebarEntry: "历史会话",
   emptyStateItem: "历史会话",
 
   // --- SessionHistoryDialog 外壳 ---
@@ -86,7 +87,9 @@ const history = {
   gapProcPartial: "进程扫描未完成",
   gapNewProcess: "检测期间有新的 pi/node 进程启动",
 
-  // --- §14.1 残余窗口 W1–W7（常驻于弹窗最底部；文案被测试钉住） ---
+  // --- §14.1 残余窗口 W1–W7（常驻于弹窗最底部——2026-10 布局改版后收进 bestEffortSummary
+  // --- 开关之后；文案被测试钉住） ---
+  bestEffortSummary: "占用检测说明",
   bestEffortNote:
     "占用检测为尽力而为：无法检测 root / 容器内 / 非 pi 启动器的进程（W3/W4），检测完成后才打开该会话的进程（W1/W2），刚退出的 pi 其 pid 被新进程复用的瞬间（W5）；hub 重启后的自动恢复不重新检测（W6）；启动期间会话文件被替换又换回无法察觉（W7）。双开只会使会话树分叉，不会丢失或损坏数据。",
 

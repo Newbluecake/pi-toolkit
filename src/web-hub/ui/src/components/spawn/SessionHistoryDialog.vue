@@ -19,8 +19,14 @@
   Keyboard: ↑/↓ move the listbox selection, Enter runs the selected row's primary action,
   Enter in the search commits immediately, first Esc clears the search, the next closes.
   The kind preference persists under `localStorage["pwh_history_kind"]` (pure UI preference,
-  the source-scan allow-list carries this file). The W1–W7 best-effort small print is
-  ALWAYS the dialog's bottom line.
+  the source-scan allow-list carries this file).
+
+  2026-10 layout pass: two-row header (title + close / full-width search with the kind filter
+  at its right end), compact two-line rows (line 1 = title + badges + relative time, line 2 =
+  cwd + the row actions, subdued until hover on hover-capable pointers, ≥44px on coarse ones)
+  separated by hairlines, and a one-line footer (status texts left, 「加载更多」 right). The
+  W1–W7 best-effort small print stays the dialog's bottom line — collapsed behind a native
+  <details> toggle (user ruling §14.1 keeps the copy mandatory, not its expansion).
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
@@ -90,55 +96,65 @@ function knownCards(): ReadonlySet<string> {
 // --- fetch engine (single-flight by seq; stale responses are dropped) ---
 let seq = 0;
 let unmounted = false;
+/** Open `runReq` calls (incl. auto-continue rounds). `onLoadMore` no-ops while > 0 — the
+ * reducer's phase alone cannot express the in-flight AUTO round (state stays `ready` with a
+ * cursor while the next page is being fetched; a manual more-click there would fire a second
+ * concurrent request on the same cursor). */
+let activeReqs = 0;
 
 async function runReq(q: HistoryQueryWire, auto: boolean): Promise<void> {
   const spawn = hub?.spawn;
   const mySeq = ++seq;
-  if (spawn === undefined) {
-    state.value = historyListReducer(state.value, { type: "error", status: 0, error: "E_UNSUPPORTED" });
-    return;
-  }
-  let r: SpawnHistoryOutcome;
+  activeReqs++;
   try {
-    const history = spawn.history;
-    if (history === undefined) {
+    if (spawn === undefined) {
       state.value = historyListReducer(state.value, { type: "error", status: 0, error: "E_UNSUPPORTED" });
       return;
     }
-    r = await history(q);
-  } catch {
-    r = { ok: false, error: "E_NETWORK", status: 0 };
-  }
-  if (unmounted || mySeq !== seq) return;
-  if (r.ok) {
+    let r: SpawnHistoryOutcome;
+    try {
+      const history = spawn.history;
+      if (history === undefined) {
+        state.value = historyListReducer(state.value, { type: "error", status: 0, error: "E_UNSUPPORTED" });
+        return;
+      }
+      r = await history(q);
+    } catch {
+      r = { ok: false, error: "E_NETWORK", status: 0 };
+    }
+    if (unmounted || mySeq !== seq) return;
+    if (r.ok) {
+      state.value = historyListReducer(state.value, {
+        type: "page",
+        page: r.page,
+        now: Date.now(),
+        knownCards: knownCards(),
+        ...(auto ? { auto: true } : {}),
+      });
+      const nxt = nextRequest(state.value);
+      if (nxt !== null && nxt.auto) {
+        void runReq({ q: nxt.q, kind: nxt.kind, ...(nxt.cursor !== undefined ? { cursor: nxt.cursor } : {}) }, true);
+      }
+      return;
+    }
+    if (r.status === 409 && r.reason === "cursor-expired") {
+      // F16: hub restart / gen expiry — restart the SAME query from the beginning (the reducer
+      // allows exactly one auto-restart; a second expiry inside one query becomes an error).
+      state.value = historyListReducer(state.value, { type: "expired" });
+      if (state.value.phase === "loading") {
+        void runReq({ q: state.value.q, kind: state.value.kind }, false);
+      }
+      return;
+    }
     state.value = historyListReducer(state.value, {
-      type: "page",
-      page: r.page,
-      now: Date.now(),
-      knownCards: knownCards(),
-      ...(auto ? { auto: true } : {}),
+      type: "error",
+      status: r.status,
+      error: r.error,
+      ...(r.reason !== undefined ? { reason: r.reason } : {}),
     });
-    const nxt = nextRequest(state.value);
-    if (nxt !== null && nxt.auto) {
-      void runReq({ q: nxt.q, kind: nxt.kind, ...(nxt.cursor !== undefined ? { cursor: nxt.cursor } : {}) }, true);
-    }
-    return;
+  } finally {
+    activeReqs--;
   }
-  if (r.status === 409 && r.reason === "cursor-expired") {
-    // F16: hub restart / gen expiry — restart the SAME query from the beginning (the reducer
-    // allows exactly one auto-restart; a second expiry inside one query becomes an error).
-    state.value = historyListReducer(state.value, { type: "expired" });
-    if (state.value.phase === "loading") {
-      void runReq({ q: state.value.q, kind: state.value.kind }, false);
-    }
-    return;
-  }
-  state.value = historyListReducer(state.value, {
-    type: "error",
-    status: r.status,
-    error: r.error,
-    ...(r.reason !== undefined ? { reason: r.reason } : {}),
-  });
 }
 
 function commitQuery(q: string): void {
@@ -186,6 +202,9 @@ function onKindToggle(): void {
 function onLoadMore(): void {
   const cur = state.value;
   if (cur.phase !== "ready" || cur.cursor === undefined) return;
+  // One page request at a time: no manual round while an auto-continue is pending (the footer
+  // shows 「Scanning more…」 then) or any other request is still in flight.
+  if (autoScanning.value || activeReqs > 0) return;
   state.value = historyListReducer(state.value, { type: "more" });
   void runReq({ q: cur.q, kind: cur.kind, cursor: cur.cursor }, false);
 }
@@ -460,36 +479,40 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
 
         <template v-else>
           <header class="history-head">
-            <h3 class="history-title">{{ t("history.dialogTitle") }}</h3>
-            <label class="history-kind">
-              <input type="checkbox" :checked="kind === 'all'" :disabled="flowBusy" @change="onKindToggle" />
-              <span>{{ t("history.kindAll") }}</span>
-            </label>
-            <div class="history-search">
-              <AppIcon name="search" />
-              <input
-                ref="searchInput"
-                class="input"
-                type="search"
-                name="history-search"
-                :placeholder="t('history.searchPlaceholder')"
-                :aria-label="t('history.searchLabel')"
-                :maxlength="HISTORY_Q_MAX_CHARS"
-                autocomplete="off"
-                spellcheck="false"
-                :value="searchRaw"
-                @input="onSearchInput"
-                @keydown="onSearchKeydown"
-              />
+            <div class="history-headrow">
+              <h3 class="history-title">{{ t("history.dialogTitle") }}</h3>
+              <button
+                class="btn btn-ghost btn-icon"
+                type="button"
+                :aria-label="t('history.close')"
+                @click="onCancelOrClose"
+              >
+                <AppIcon name="x" class="icon-sm" />
+              </button>
             </div>
-            <button
-              class="btn btn-ghost btn-icon"
-              type="button"
-              :aria-label="t('history.close')"
-              @click="onCancelOrClose"
-            >
-              <AppIcon name="x" class="icon-sm" />
-            </button>
+            <div class="history-searchrow">
+              <div class="history-search">
+                <AppIcon name="search" />
+                <input
+                  ref="searchInput"
+                  class="input"
+                  type="search"
+                  name="history-search"
+                  :placeholder="t('history.searchPlaceholder')"
+                  :aria-label="t('history.searchLabel')"
+                  :maxlength="HISTORY_Q_MAX_CHARS"
+                  autocomplete="off"
+                  spellcheck="false"
+                  :value="searchRaw"
+                  @input="onSearchInput"
+                  @keydown="onSearchKeydown"
+                />
+              </div>
+              <label class="history-kind">
+                <input type="checkbox" :checked="kind === 'all'" :disabled="flowBusy" @change="onKindToggle" />
+                <span>{{ t("history.kindAll") }}</span>
+              </label>
+            </div>
           </header>
 
           <p v-if="flow.phase === 'submitting'" class="history-status" role="status">
@@ -529,7 +552,7 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
               :aria-disabled="!row.startable"
               @click="selIdx = i"
             >
-              <div class="history-row-main">
+              <div class="history-row-line1">
                 <span class="history-row-title" :title="row.titleIsFallback ? row.id : row.title">{{
                   rowTitle(row)
                 }}</span>
@@ -541,88 +564,95 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
                   translate="no"
                   >{{ b }}</span
                 >
-              </div>
-              <div class="history-row-sub">
-                <span class="history-row-cwd" :title="row.cwd" translate="no">{{ row.cwdLabel }}</span>
                 <span class="history-row-time" translate="no">{{ row.relTime }}</span>
               </div>
-              <p v-if="row.blockedKey" class="history-row-blocked">{{ t(row.blockedKey) }}</p>
-              <span v-if="row.startable" class="history-row-actions">
-                <button
-                  class="btn btn-ghost btn-xs"
-                  type="button"
-                  :disabled="flowBusy"
-                  :aria-label="row.forkOnly === undefined ? t('history.resume') : t('history.forkAction')"
-                  @click.stop="onPrimary(row)"
-                >
-                  {{ row.forkOnly === undefined ? t("history.resume") : t("history.forkAction") }}
-                </button>
-                <a
-                  v-if="row.gotoAgentKey"
-                  class="btn btn-ghost btn-xs"
-                  :href="`#/agent/${row.gotoAgentKey}`"
-                  @click="onGoto"
-                >
-                  {{ t("history.goto") }}
-                </a>
-                <span class="history-overflow">
+              <div class="history-row-line2">
+                <span class="history-row-cwd" :title="row.cwd" translate="no">{{ row.cwdLabel }}</span>
+                <span v-if="row.startable" class="history-row-actions">
                   <button
                     class="btn btn-ghost btn-xs"
                     type="button"
-                    :aria-label="t('history.overflowAria')"
-                    :aria-expanded="overflowKey === row.key"
                     :disabled="flowBusy"
-                    @click.stop="toggleOverflow(row.key)"
+                    :aria-label="row.forkOnly === undefined ? t('history.resume') : t('history.forkAction')"
+                    @click.stop="onPrimary(row)"
                   >
-                    <span class="history-overflow-dots" translate="no">⋯</span>
+                    {{ row.forkOnly === undefined ? t("history.resume") : t("history.forkAction") }}
                   </button>
-                  <div v-if="overflowKey === row.key" class="history-overflow-menu" role="menu">
+                  <a
+                    v-if="row.gotoAgentKey"
+                    class="btn btn-ghost btn-xs"
+                    :href="`#/agent/${row.gotoAgentKey}`"
+                    @click="onGoto"
+                  >
+                    {{ t("history.goto") }}
+                  </a>
+                  <span class="history-overflow">
                     <button
-                      class="history-overflow-item"
+                      class="btn btn-ghost btn-xs"
                       type="button"
-                      role="menuitem"
-                      @click.stop="onOverflowFork(row)"
+                      :aria-label="t('history.overflowAria')"
+                      :aria-expanded="overflowKey === row.key"
+                      :disabled="flowBusy"
+                      @click.stop="toggleOverflow(row.key)"
                     >
-                      {{ t("history.forkAction") }}
+                      <span class="history-overflow-dots" translate="no">⋯</span>
                     </button>
-                  </div>
+                    <div v-if="overflowKey === row.key" class="history-overflow-menu" role="menu">
+                      <button
+                        class="history-overflow-item"
+                        type="button"
+                        role="menuitem"
+                        @click.stop="onOverflowFork(row)"
+                      >
+                        {{ t("history.forkAction") }}
+                      </button>
+                    </div>
+                  </span>
                 </span>
-              </span>
+              </div>
+              <p v-if="row.blockedKey" class="history-row-blocked">{{ t(row.blockedKey) }}</p>
             </div>
           </div>
           <p v-if="emptyHint" class="history-empty">{{ emptyHint }}</p>
 
           <footer class="history-foot">
-            <div class="history-foot-actions">
-              <p v-if="state.phase === 'loading' && rows.length > 0" class="history-status" role="status">
-                <AppIcon name="loader" class="icon-sm spin" />{{ t("history.scanningMore") }}
-              </p>
-              <p v-else-if="autoScanning" class="history-status" role="status">
-                <AppIcon name="loader" class="icon-sm spin" />{{ t("history.scanningMore") }}
-              </p>
+            <div class="history-foot-row">
+              <div class="history-foot-status">
+                <p v-if="state.phase === 'loading' && rows.length > 0" class="history-status" role="status">
+                  <AppIcon name="loader" class="icon-sm spin" />{{ t("history.scanningMore") }}
+                </p>
+                <p v-else-if="autoScanning" class="history-status" role="status">
+                  <AppIcon name="loader" class="icon-sm spin" />{{ t("history.scanningMore") }}
+                </p>
+                <p v-if="partialLine" class="history-note" role="status">
+                  {{ partialLine }}
+                  <span v-if="state.partial?.reason === 'io'">{{ t("history.indexedIo") }}</span>
+                </p>
+                <p
+                  v-for="(n, i) in notices"
+                  :key="`notice-${n.key}-${i}`"
+                  class="history-note history-banner"
+                  role="status"
+                >
+                  {{ t(n.key, { n: n.n ?? 0, done: n.dirsDone ?? 0, total: n.dirsTotal ?? 0 }) }}
+                </p>
+                <p v-if="state.liveness" class="history-note">{{ t("history.livenessNote") }}</p>
+              </div>
               <button
-                v-else-if="canMore && state.phase === 'ready'"
-                class="btn btn-ghost btn-xs"
+                v-if="canMore && state.phase === 'ready' && !autoScanning"
+                class="btn btn-ghost btn-xs history-foot-more"
                 type="button"
                 @click="onLoadMore"
               >
                 {{ t("history.loadMore") }}
               </button>
             </div>
-            <p v-if="partialLine" class="history-note" role="status">
-              {{ partialLine }}
-              <span v-if="state.partial?.reason === 'io'">{{ t("history.indexedIo") }}</span>
-            </p>
-            <p
-              v-for="(n, i) in notices"
-              :key="`notice-${n.key}-${i}`"
-              class="history-note history-banner"
-              role="status"
-            >
-              {{ t(n.key, { n: n.n ?? 0, done: n.dirsDone ?? 0, total: n.dirsTotal ?? 0 }) }}
-            </p>
-            <p v-if="state.liveness" class="history-note">{{ t("history.livenessNote") }}</p>
-            <p class="history-besteffort" role="note">{{ t("history.bestEffortNote") }}</p>
+            <details class="history-besteffort">
+              <summary class="history-besteffort-summary">
+                <span aria-hidden="true">ⓘ</span> {{ t("history.bestEffortSummary") }}
+              </summary>
+              <p class="history-besteffort-text" role="note">{{ t("history.bestEffortNote") }}</p>
+            </details>
           </footer>
         </template>
       </section>

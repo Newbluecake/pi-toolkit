@@ -175,9 +175,30 @@ const sessionActions = computed<readonly NewSessionAction[]>(() =>
   }),
 );
 const pickDirEnabled = computed(() => sessionActions.value.some((a) => a.kind === "pick-dir" && a.enabled));
-/** session-history plan §4.7.2 / arch §7.1: the EmptyState 「历史会话」 entry — the menu's
- * `history` action must be present AND enabled (a denied policy keeps it menu-only-disabled). */
+/** session-history plan §4.7.2 / arch §7.1: the EmptyState 「历史会话」 entry — the `history`
+ * action must be present AND enabled (a denied policy keeps it footer-only-disabled). */
 const historyEnabled = computed(() => sessionActions.value.some((a) => a.kind === "history" && a.enabled));
+/** The sidebar-footer 「历史会话」 entry (2026-10 relocation from the NewSessionMenu dropdown —
+ * reachable in every layout that renders this sidebar: the ≥1025 split, the 481–1024 overlay
+ * drawer, the tablet card grid and the phone list, so a second menu copy would be pure
+ * duplication). Same gating as the old menu item: the action is absent ⇒ footer hidden
+ * (no `spawn.history.v1` cap, or the `GET /api/headless` never succeeded), a denied policy ⇒
+ * disabled with its reason spelled out (aria-describedby + the visible hint line). */
+const historyAction = computed(() => sessionActions.value.find((a) => a.kind === "history") ?? null);
+const historyReason = computed(() => {
+  const a = historyAction.value;
+  if (a === null || a.kind !== "history" || a.enabled || a.reason === undefined) return null;
+  return t(spawnDeniedKey(a.reason));
+});
+
+function onHistoryEntry(): void {
+  const a = historyAction.value;
+  if (a === null) return;
+  // Disabled entries keep the old menu-item behavior: the click shows the inline policy hint.
+  if (!a.enabled) return showSpawnHint();
+  pickerOpen.value = false; // one overlay at a time
+  historyOpen.value = true;
+}
 
 const newSessionNote = ref<{ kind: "ok" | "err" | "hint"; text: string } | null>(null);
 const newSessionBusy = ref(false);
@@ -269,13 +290,6 @@ function onMenuSelect(action: NewSessionAction): void {
   if (action.kind === "pick-dir") {
     if (!action.enabled) return showSpawnHint();
     openPicker(false);
-    return;
-  }
-  if (action.kind === "history") {
-    // 「历史会话…」 (session-history plan §4.7.2) — disabled entries show the policy hint.
-    if (!action.enabled) return showSpawnHint();
-    pickerOpen.value = false; // one overlay at a time
-    historyOpen.value = true;
     return;
   }
   if (action.kind === "spawn-cwd") {
@@ -491,5 +505,27 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
         />
       </li>
     </ul>
+
+    <!-- 「历史会话」 footer entry (session-history plan §4.7.2): pinned at the sidebar's
+         bottom — `margin-top: auto` keeps it below the scrollable list even when the list is
+         short/empty, so it never scrolls away (any layout). -->
+    <div v-if="historyAction" class="sidebar-foot">
+      <button
+        class="sidebar-history-btn"
+        type="button"
+        :disabled="!historyAction.enabled"
+        :aria-label="t('history.sidebarEntry')"
+        :aria-describedby="historyReason !== null ? 'sidebar-history-reason' : undefined"
+        @click="onHistoryEntry"
+      >
+        <AppIcon name="clock" class="icon-sm" />
+        <span>{{ t("history.sidebarEntry") }}</span>
+      </button>
+      <!-- sr-ONLY in the collapsed rail (agents.css) — never display:none, so the disabled
+           reason the aria-describedby above points at stays exposed to AT in every state. -->
+      <p v-if="historyReason !== null" id="sidebar-history-reason" class="sidebar-history-reason">
+        {{ historyReason }}
+      </p>
+    </div>
   </nav>
 </template>
