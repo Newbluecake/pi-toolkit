@@ -105,6 +105,7 @@ const control = {
   cmdBadge: "cmd",
   sendAsText: "Send as text",
   paletteAria: "Command completions",
+  paletteHint: "Tab completes · ↑↓ select · Esc close",
   policyAllow: "allow",
   policyConfirm: "confirm",
   policyDeny: "deny",

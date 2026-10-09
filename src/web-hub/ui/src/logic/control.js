@@ -193,6 +193,52 @@ export function composerKeyAction(event, { busy = false } = {}) {
 }
 
 /**
+ * Slash-palette rows — the ONE matcher `CommandPalette.vue` (render) and `Composer.vue`
+ * (keyboard model: Tab completes the highlighted row, aria-activedescendant) share, so the
+ * highlighted row can never drift from the rendered list. Tiered match + sort
+ * (case-insensitive), the web-hub analogue of the TUI's own slash-command matcher: ①name
+ * prefix ②name substring ③description substring, in that priority order; anything matching
+ * none of the three is dropped. `Array#sort` is spec-stable, so rows keep their original
+ * `commands`-slot relative order within the same tier. `busy` folds each row's policy
+ * (`policyBusy` override, `commandPolicyFor`). Capped at 50 rows — the commands slot is ≤400
+ * entries, the palette never scrolls forever.
+ * @param {unknown[]} [commands] @param {unknown} query @param {boolean} [busy]
+ * @returns {{ name: string, description: string, policy: "allow" | "confirm" | "deny", output: "captured" | "terminal" | null }[]}
+ */
+export function matchCommandRows(commands = [], query, busy = false) {
+  const q = typeof query === "string" ? query.toLowerCase() : "";
+  const scored = [];
+  for (const raw of Array.isArray(commands) ? commands : []) {
+    const c = raw;
+    if (c === null || typeof c !== "object") continue;
+    const name = c.name;
+    if (typeof name !== "string" || name === "") continue;
+    const description = typeof c.description === "string" ? c.description : "";
+    const rank = commandMatchRank(name.toLowerCase(), description.toLowerCase(), q);
+    if (rank === -1) continue;
+    scored.push({
+      rank,
+      row: {
+        name,
+        description,
+        policy: commandPolicyFor(commands, name, busy),
+        output: c.output === "captured" ? "captured" : c.output === "terminal" ? "terminal" : null,
+      },
+    });
+  }
+  scored.sort((a, b) => a.rank - b.rank);
+  return scored.slice(0, 50).map((s) => s.row);
+}
+
+/** @param {string} name @param {string} description @param {string} q */
+function commandMatchRank(name, description, q) {
+  if (q === "" || name.startsWith(q)) return 0;
+  if (name.includes(q)) return 1;
+  if (description.includes(q)) return 2;
+  return -1;
+}
+
+/**
  * Effective policy of a command from the `commands` slot (§4.6/§7.7): `policyBusy` overrides
  * `policy` while the agent is busy (e.g. /compact); an unknown name is `deny` (composer shows
  * the reason instead of sending — the agent would answer E_UNKNOWN_COMMAND anyway).

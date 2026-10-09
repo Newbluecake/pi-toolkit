@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mount } from "@vue/test-utils";
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Composer from "../../../src/web-hub/ui/src/components/control/Composer.vue";
 import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
@@ -229,6 +229,218 @@ describe("Composer.vue command mode (§7.7)", () => {
     await w.find("textarea").setValue("/s");
     await w.find(".command-item").trigger("click");
     expect((w.find("textarea").element as HTMLTextAreaElement).value).toBe("/session ");
+  });
+});
+
+describe("Composer.vue — command palette keyboard (2026-10: Tab 补全, TUI-like combobox)", () => {
+  /** "s" prefix ⇒ [session, status] (descriptions empty — no description-tier hits);
+   * "ses" ⇒ single match; "quit" ⇒ single DENY row; "compact" ⇒ policyBusy flips to confirm. */
+  const COMMANDS = [
+    { name: "session", kind: "builtin", description: "", policy: "allow", output: "captured" },
+    { name: "status", kind: "builtin", description: "", policy: "allow" },
+    { name: "compact", kind: "builtin", description: "", policy: "allow", policyBusy: "confirm" },
+    { name: "quit", kind: "builtin", description: "", policy: "deny" },
+  ];
+
+  function mountCmd() {
+    const control = fakeControl();
+    const view = controlView({ commands: computed(() => COMMANDS), commandsEnabled: computed(() => true) });
+    const wrapper = mount(Composer, {
+      props: { enabled: true, busy: false },
+      attachTo: document.body, // focus assertions need a real document position
+      global: {
+        provide: {
+          [CONTROL_VIEW as symbol]: view,
+          [CONTROL_CTX as symbol]: { agentKey: "agent-a", control, enabled: true },
+        },
+      },
+    });
+    mounted.push(wrapper);
+    wrapper.find("textarea").element.focus();
+    return wrapper;
+  }
+
+  async function type(wrapper: ReturnType<typeof mount>, value: string): Promise<void> {
+    const ta = wrapper.find("textarea");
+    await ta.setValue(value);
+    // happy-dom does not move the caret on setValue — pin it at the end like a real typist.
+    (ta.element as HTMLTextAreaElement).setSelectionRange(value.length, value.length);
+    await ta.trigger("input");
+  }
+
+  /** Raw dispatch so preventDefault is observable (test-utils `trigger` hides the event). */
+  async function press(wrapper: ReturnType<typeof mount>, init: KeyboardEventInit): Promise<{ prevented: boolean }> {
+    const el = wrapper.find("textarea").element as HTMLTextAreaElement;
+    const ev = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true, ...init });
+    const spy = vi.spyOn(ev, "preventDefault");
+    el.dispatchEvent(ev);
+    await nextTick();
+    await nextTick();
+    return { prevented: spy.mock.calls.length > 0 };
+  }
+
+  const ta = (w: ReturnType<typeof mount>) => w.find("textarea");
+  const value = (w: ReturnType<typeof mount>) => (ta(w).element as HTMLTextAreaElement).value;
+  const palette = (w: ReturnType<typeof mount>) => w.find(".command-palette");
+  /** aria-activedescendant of the textarea — the highlighted option id. */
+  const activeDesc = (w: ReturnType<typeof mount>) => ta(w).attributes("aria-activedescendant");
+
+  it("typing after / filters live; the highlight starts at the best match (row 0)", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    expect(palette(w).exists()).toBe(true);
+    expect(w.findAll(".command-item").map((r) => r.find(".command-name").text())).toEqual(["/session", "/status"]);
+    const sel = w.findAll(".command-item").map((r) => r.attributes("aria-selected"));
+    expect(sel).toEqual(["true", "false"]);
+    await type(w, "/sta");
+    expect(w.findAll(".command-name").map((n) => n.text())).toEqual(["/status"]);
+  });
+
+  it("arrows move the highlight (wrapping both ways); aria-activedescendant follows the option id", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    const lb = palette(w).attributes("id");
+    expect(lb).toBeDefined();
+    expect(activeDesc(w)).toBe(`${lb}-opt-0`);
+    await ta(w).trigger("keydown", { key: "ArrowDown" });
+    expect(activeDesc(w)).toBe(`${lb}-opt-1`);
+    await ta(w).trigger("keydown", { key: "ArrowDown" }); // wraps to the top
+    expect(activeDesc(w)).toBe(`${lb}-opt-0`);
+    await ta(w).trigger("keydown", { key: "ArrowUp" }); // wraps back to the bottom
+    expect(activeDesc(w)).toBe(`${lb}-opt-1`);
+    expect(document.activeElement).toBe(ta(w).element); // focus NEVER leaves the textarea
+  });
+
+  it("the highlight resets to the best match on every query change", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    await ta(w).trigger("keydown", { key: "ArrowDown" });
+    expect(activeDesc(w)).toBe(`${palette(w).attributes("id")}-opt-1`); // moved off row 0
+    await type(w, "/sta"); // filter narrows to one row
+    expect(activeDesc(w)).toBe(`${palette(w).attributes("id")}-opt-0`);
+    expect(w.findAll(".command-item")[0]!.classes()).toContain("active");
+  });
+
+  it("Tab completes the highlighted row: `/name `, palette hides, focus + draft stay", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    await ta(w).trigger("keydown", { key: "ArrowDown" }); // highlight /status
+    const r = await press(w, { key: "Tab" });
+    expect(r.prevented).toBe(true);
+    expect(value(w)).toBe("/status ");
+    expect(palette(w).exists()).toBe(false); // hidden — args come next
+    expect(document.activeElement).toBe(ta(w).element); // Tab never moved focus out
+    const caretNow = (ta(w).element as HTMLTextAreaElement).selectionStart;
+    expect(caretNow).toBe("/status ".length); // caret after the trailing space
+  });
+
+  it("Shift+Tab moves the highlight UP (wrap); Tab then completes that row", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    const r = await press(w, { key: "Tab", shiftKey: true });
+    expect(r.prevented).toBe(true);
+    expect(activeDesc(w)).toBe(`${palette(w).attributes("id")}-opt-1`); // wrapped to the last row
+    await press(w, { key: "Tab" });
+    expect(value(w)).toBe("/status ");
+  });
+
+  it("a single match completes on Tab", async () => {
+    const w = mountCmd();
+    await type(w, "/ses");
+    expect(w.findAll(".command-item")).toHaveLength(1);
+    await press(w, { key: "Tab" });
+    expect(value(w)).toBe("/session ");
+  });
+
+  it("Tab on a denied row completes nothing but still never leaves the composer", async () => {
+    const w = mountCmd();
+    await type(w, "/quit");
+    const r = await press(w, { key: "Tab" });
+    expect(r.prevented).toBe(true);
+    expect(value(w)).toBe("/quit"); // deny rows are not completable (same rule as click)
+    expect(palette(w).exists()).toBe(true);
+    expect(document.activeElement).toBe(ta(w).element);
+  });
+
+  it("Tab with the palette CLOSED is not prevented (native focus move, no trap)", async () => {
+    const w = mountCmd();
+    await type(w, "plain prompt");
+    const closed = await press(w, { key: "Tab" });
+    expect(closed.prevented).toBe(false);
+    await type(w, "/s");
+    await press(w, { key: "Escape" }); // close the palette without clearing
+    const escaped = await press(w, { key: "Tab" });
+    expect(escaped.prevented).toBe(false);
+  });
+
+  it("Escape hides the palette but keeps the text; name edits reopen, arg typing does not", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    const r = await press(w, { key: "Escape" });
+    expect(r.prevented).toBe(true);
+    expect(palette(w).exists()).toBe(false);
+    expect(value(w)).toBe("/s"); // Esc never clears
+    await type(w, "/sta"); // name token changed ⇒ reopens
+    expect(palette(w).exists()).toBe(true);
+  });
+
+  it("after a Tab completion, typing args keeps the palette hidden; editing the name reopens it", async () => {
+    const w = mountCmd();
+    await type(w, "/ses");
+    await press(w, { key: "Tab" });
+    expect(value(w)).toBe("/session ");
+    await type(w, "/session --json"); // args after the completed `/name ` token
+    expect(palette(w).exists()).toBe(false);
+    await type(w, "/sessio"); // backspaced into the name token
+    expect(palette(w).exists()).toBe(true);
+    expect(activeDesc(w)).toBe(`${palette(w).attributes("id")}-opt-0`); // fresh highlight
+  });
+
+  it("IME composition never triggers completion/navigation (isComposing / keyCode 229)", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    await press(w, { key: "Tab", isComposing: true });
+    expect(value(w)).toBe("/s"); // not completed — the key belongs to the IME candidate window
+    expect(palette(w).exists()).toBe(true);
+    await ta(w).trigger("keydown", { key: "ArrowDown", keyCode: 229 });
+    expect(activeDesc(w)).toBe(`${palette(w).attributes("id")}-opt-0`); // highlight unmoved
+    await ta(w).trigger("keydown", { key: "Enter", keyCode: 229 });
+    expect(w.emitted("send")).toBeUndefined();
+  });
+
+  it("Enter keeps the current behaviour: executes the typed command (not the highlight)", async () => {
+    const w = mountCmd();
+    await type(w, "/session"); // fully typed; palette open with one row
+    await ta(w).trigger("keydown", { key: "ArrowDown" }); // harmless wrap to the same row
+    await ta(w).trigger("keydown", { key: "Enter" });
+    expect(w.emitted("send")).toEqual([["/session", "steer"]]);
+  });
+
+  it("textarea carries the combobox aria wiring only while the palette is visible", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    const attrs = ta(w).attributes();
+    expect(attrs["role"]).toBe("combobox");
+    expect(attrs["aria-expanded"]).toBe("true");
+    expect(attrs["aria-controls"]).toBe(palette(w).attributes("id"));
+    expect(attrs["aria-activedescendant"]).toBe(activeDesc(w));
+    await press(w, { key: "Escape" });
+    const closed = ta(w).attributes();
+    expect(closed["role"]).toBeUndefined();
+    expect(closed["aria-expanded"]).toBeUndefined();
+    expect(closed["aria-controls"]).toBeUndefined();
+    expect(closed["aria-activedescendant"]).toBeUndefined();
+  });
+
+  it("click still completes through the same path (and hides the palette); hover moves the highlight", async () => {
+    const w = mountCmd();
+    await type(w, "/s");
+    await w.findAll(".command-item")[1]!.trigger("mousemove");
+    expect(activeDesc(w)).toBe(`${palette(w).attributes("id")}-opt-1`); // mouse + keyboard share one highlight
+    await w.findAll(".command-item")[1]!.trigger("click");
+    expect(value(w)).toBe("/status ");
+    expect(palette(w).exists()).toBe(false);
+    expect(document.activeElement).toBe(ta(w).element); // pick refocuses the textarea
   });
 });
 

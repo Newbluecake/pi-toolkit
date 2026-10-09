@@ -854,13 +854,18 @@
   border-bottom: 0;
 }
 
-.command-item:hover {
+.command-item:hover,
+.command-item.active {
   background: var(--c-surface-2);
 }
 
 .command-item.denied {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.command-item.active {
+  box-shadow: inset 2px 0 0 var(--c-focus);
 }
 
 .command-name {
@@ -909,6 +914,17 @@
   padding: var(--sp-2) var(--sp-3);
   color: var(--c-text-3);
   font-size: var(--fs-xs);
+}
+
+/* Keyboard-model hint footer (Tab completes / arrows select / Esc closes) — rendered only
+ * while rows exist, so the empty state keeps its own message alone. */
+.command-hint {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border-top: 1px solid var(--c-border);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  user-select: none;
 }
 
 /* --- @mention completion (task #11) — mirrors the command palette's shape; it renders before

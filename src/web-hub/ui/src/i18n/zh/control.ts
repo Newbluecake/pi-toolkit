@@ -96,6 +96,7 @@ const control = {
   cmdBadge: "cmd",
   sendAsText: "作为文本发送",
   paletteAria: "命令补全",
+  paletteHint: "Tab 补全 · ↑↓ 选择 · Esc 关闭",
   policyAllow: "allow",
   policyConfirm: "confirm",
   policyDeny: "deny",

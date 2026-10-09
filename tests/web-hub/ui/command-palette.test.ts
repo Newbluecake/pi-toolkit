@@ -105,3 +105,61 @@ describe("CommandPalette.vue — tiered match + sort (name prefix > name substri
     expect(names).toEqual(["/zz-routing", "/dev-flow"]);
   });
 });
+
+/**
+ * Keyboard-model half (2026-10 user request 「Tab 选择」): the palette is the LISTBOX of a
+ * combobox — focus never enters it; the composer drives the highlight through the `active`
+ * prop (aria-selected / .active) and mirrors the option ids (`<listboxId>-opt-<i>`) for the
+ * textarea's aria-activedescendant. `hover` reports pointer hovers so the keyboard highlight
+ * and the mouse highlight are one state.
+ */
+describe("CommandPalette.vue — combobox listbox half (active/listboxId/hover)", () => {
+  const MANY = [
+    { name: "session", kind: "builtin", policy: "allow" },
+    { name: "status", kind: "builtin", policy: "allow" },
+    { name: "stop", kind: "builtin", policy: "allow" },
+  ];
+
+  it("active highlights exactly that row (aria-selected + .active); default is the best match (0)", () => {
+    const w = mountPalette({ commands: MANY, query: "s" });
+    const sel = w.findAll(".command-item").map((r) => r.attributes("aria-selected"));
+    expect(sel).toEqual(["true", "false", "false"]);
+    expect(w.findAll(".command-item")[0]!.classes()).toContain("active");
+
+    const moved = mountPalette({ commands: MANY, query: "s", active: 1 });
+    expect(moved.findAll(".command-item")[1]!.classes()).toContain("active");
+    expect(moved.findAll(".command-item")[1]!.attributes("aria-selected")).toBe("true");
+    expect(moved.findAll(".command-item")[0]!.attributes("aria-selected")).toBe("false");
+  });
+
+  it("listboxId names the listbox root and every option (`<id>-opt-<index>`, Composer-mirrored)", () => {
+    const w = mountPalette({ commands: MANY, query: "s", listboxId: "cmd-lb" });
+    expect(w.find(".command-palette").attributes("id")).toBe("cmd-lb");
+    expect(w.findAll(".command-item").map((r) => r.attributes("id"))).toEqual([
+      "cmd-lb-opt-0",
+      "cmd-lb-opt-1",
+      "cmd-lb-opt-2",
+    ]);
+  });
+
+  it("without listboxId no ids render (standalone mounts stay id-less)", () => {
+    const w = mountPalette({ commands: MANY, query: "s" });
+    expect(w.find(".command-palette").attributes("id")).toBeUndefined();
+    expect(w.findAll(".command-item")[0]!.attributes("id")).toBeUndefined();
+  });
+
+  it("mousemove emits hover with the row index (mouse and keyboard share one highlight)", async () => {
+    const w = mountPalette({ commands: MANY, query: "s" });
+    await w.findAll(".command-item")[2]!.trigger("mousemove");
+    expect(w.emitted("hover")).toEqual([[2]]);
+  });
+
+  it("shows the keyboard-hint footer only when rows exist (empty state keeps its own message)", () => {
+    const w = mountPalette({ commands: MANY, query: "s" });
+    expect(w.find(".command-hint").exists()).toBe(true);
+    expect(w.find(".command-hint").text()).toBe("Tab completes · ↑↓ select · Esc close");
+    const empty = mountPalette({ commands: MANY, query: "zzz" });
+    expect(empty.find(".command-hint").exists()).toBe(false);
+    expect(empty.find(".command-empty").exists()).toBe(true);
+  });
+});

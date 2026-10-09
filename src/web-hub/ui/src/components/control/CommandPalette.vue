@@ -5,86 +5,61 @@
   (`captured` ⇒ "output here", `terminal`/absent ⇒ "output in terminal", §4.9 第 10 条). Deny
   rows are greyed with their reason and are not pickable (the agent would answer
   E_COMMAND_DENIED anyway — §4.6's "绝不回落为文本" starts here in the UI).
+
+  Keyboard model (2026-10 user request 「/ 开头激活选项后，支持 Tab 选择并继续输入过滤」): this is
+  the LISTBOX half of a combobox — focus NEVER enters the list (buttons are pointer-only), the
+  composer's textarea owns the highlight via aria-activedescendant and drives it with
+  ArrowUp/ArrowDown/Shift+Tab (wrap), Tab completes the highlighted row, Esc closes. `active`
+  is the highlighted index (default 0 = best match); `hover` reports pointer hovers so the
+  composer's highlight (and aria) follows the mouse like the @mention panel's does. Rows come
+  from the SHARED pure matcher `matchCommandRows` (`@logic/control.js`) so the composer's
+  keyboard model and this render can never drift — same query, same order, same 50-row cap.
+  Option ids are `<listboxId>-opt-<index>`; the composer mirrors the format for
+  aria-activedescendant.
 -->
 <script setup lang="ts">
 import { computed } from "vue";
-import { commandPolicyFor } from "@logic/control.js";
+import { matchCommandRows } from "@logic/control.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 
-interface CommandItem {
-  readonly name?: unknown;
-  readonly kind?: unknown;
-  readonly description?: unknown;
-  readonly output?: unknown;
-}
-
-const props = defineProps<{
-  readonly commands: readonly unknown[];
-  readonly query: string;
-  readonly busy?: boolean;
-}>();
-const emit = defineEmits<{ pick: [name: string] }>();
+const props = withDefaults(
+  defineProps<{
+    readonly commands: readonly unknown[];
+    readonly query: string;
+    readonly busy?: boolean;
+    /** Highlighted row index (combobox aria-activedescendant model — the composer owns it). */
+    readonly active?: number;
+    /** id of the listbox root; option ids are `<listboxId>-opt-<index>` (mirrored by Composer). */
+    readonly listboxId?: string;
+  }>(),
+  { active: 0 },
+);
+const emit = defineEmits<{ pick: [name: string]; hover: [index: number] }>();
 const { t } = useI18n();
 
-interface Row {
-  readonly name: string;
-  readonly description: string;
-  readonly policy: "allow" | "confirm" | "deny";
-  readonly output: "captured" | "terminal" | null;
-}
+const rows = computed(() => matchCommandRows([...props.commands], props.query, props.busy === true));
+const rowId = (i: number): string | undefined =>
+  props.listboxId === undefined ? undefined : `${props.listboxId}-opt-${i}`;
 
-// Tiered match + sort (case-insensitive), so a skill reachable only through its description (the
-// TUI's own matching already does this; the web palette used to be name-prefix-only and simply
-// couldn't find it): ①name prefix ②name substring ③description substring, in that priority
-// order; anything matching none of the three is dropped. `Array#sort` is spec-stable, so rows
-// keep their original `commands`-slot relative order within the same tier.
-function matchRank(name: string, description: string, q: string): 0 | 1 | 2 | -1 {
-  if (q === "" || name.startsWith(q)) return 0;
-  if (name.includes(q)) return 1;
-  if (description.includes(q)) return 2;
-  return -1;
-}
-
-const rows = computed<readonly Row[]>(() => {
-  const q = props.query.toLowerCase();
-  const scored: Array<{ readonly rank: 0 | 1 | 2; readonly row: Row }> = [];
-  for (const raw of props.commands) {
-    const c = raw as CommandItem;
-    if (typeof c.name !== "string" || c.name === "") continue;
-    const description = typeof c.description === "string" ? c.description : "";
-    const rank = matchRank(c.name.toLowerCase(), description.toLowerCase(), q);
-    if (rank === -1) continue;
-    scored.push({
-      rank,
-      row: {
-        name: c.name,
-        description,
-        policy: commandPolicyFor([...props.commands], c.name, props.busy === true),
-        output: c.output === "captured" ? "captured" : c.output === "terminal" ? "terminal" : null,
-      },
-    });
-  }
-  scored.sort((a, b) => a.rank - b.rank);
-  return scored.slice(0, 50).map((s) => s.row); // commands slot is ≤400 entries; palette never scrolls forever
-});
-
-const policyLabel = (p: Row["policy"]): string =>
+const policyLabel = (p: "allow" | "confirm" | "deny"): string =>
   p === "allow" ? t("control.policyAllow") : p === "confirm" ? t("control.policyConfirm") : t("control.policyDeny");
 </script>
 
 <template>
-  <div class="command-palette" role="listbox" :aria-label="t('control.paletteAria')">
+  <div :id="listboxId" class="command-palette" role="listbox" :aria-label="t('control.paletteAria')">
     <button
-      v-for="row in rows"
+      v-for="(row, i) in rows"
       :key="row.name"
+      :id="rowId(i)"
       type="button"
       role="option"
       class="command-item"
-      :class="{ denied: row.policy === 'deny' }"
-      :aria-selected="false"
+      :class="{ denied: row.policy === 'deny', active: i === active }"
+      :aria-selected="i === active"
       :aria-disabled="row.policy === 'deny' ? true : undefined"
       @click="row.policy !== 'deny' && emit('pick', row.name)"
+      @mousemove="emit('hover', i)"
     >
       <span class="command-name" translate="no">/{{ row.name }}</span>
       <span v-if="row.description" class="command-desc">{{ row.description }}</span>
@@ -98,5 +73,6 @@ const policyLabel = (p: Row["policy"]): string =>
     <p v-if="rows.length === 0" class="command-empty">
       <AppIcon name="ban" class="icon-sm" />{{ t("control.cmdDeniedUnknown") }}
     </p>
+    <p v-else class="command-hint">{{ t("control.paletteHint") }}</p>
   </div>
 </template>

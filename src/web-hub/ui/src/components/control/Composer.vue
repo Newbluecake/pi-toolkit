@@ -22,6 +22,23 @@
   `send(text, deliver)` as for prompts; the dock (which owns the `ControlHandle` calls) decides
   prompt vs `runCommand` — the frozen `ComposerEmits` has no command event.
 
+  Palette keyboard model (2026-10 user request 「/ 开头激活选项后，支持通过 Tab 选择，并且支持
+  继续输入，过滤可用选项」, TUI-like — mirrors the @mention panel's layer, generalized to a full
+  combobox): focus ALWAYS stays in the textarea; the palette is a listbox driven through
+  aria-activedescendant. Continuing to type after `/` filters live (`matchCommandRows`, same
+  shared matcher the palette renders); the highlight resets to the best match on every query
+  change; Backspace keeps filtering; deleting the `/` exits command mode. ArrowUp/ArrowDown
+  move the highlight (wrapping, `moveMentionActive` — the shared wrap-move helper), Shift+Tab
+  moves up, Tab completes the highlighted option into `/name ` and HIDES the palette (the user
+  types arguments next; editing the name token reopens it — the suppression latch resets on
+  name change, so typing args after a completion never re-pops the list). Enter keeps the
+  normal key map (executes the typed command per the dock's routing); Escape closes the
+  palette WITHOUT clearing the text. Tab is consumed (preventDefault — never moves browser
+  focus out of the composer) ONLY while the palette is visible; with it closed Tab behaves
+  natively (no focus trap). IME composition (`composing` latch + the event's own
+  isComposing/keyCode 229) never triggers completion/navigation — those keys belong to the IME
+  candidate window. Mobile keeps tap-to-select (click → same completion path).
+
   Drafts: on every input the text is pushed to `control.setDraft(agentKey, …)` (§7.1's
   in-memory per-agent drafts — no localStorage), restored on mount, cleared after a send.
 
@@ -68,8 +85,14 @@
   which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { commandPolicyFor, composerKeyAction, mergeRecalledDraft, parseSlash } from "@logic/control.js";
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
+import {
+  commandPolicyFor,
+  composerKeyAction,
+  matchCommandRows,
+  mergeRecalledDraft,
+  parseSlash,
+} from "@logic/control.js";
 import {
   applyMentionPick,
   filterMentionTargets,
@@ -327,6 +350,111 @@ const policy = computed(() =>
 );
 const paletteOpen = computed(() => commandMode.value && slash.value !== undefined);
 
+// --- command-palette keyboard model (2026-10 user request, see file header) ----------------
+
+/** Rows the palette WOULD render — same shared matcher (`matchCommandRows`), so Tab completes
+ * exactly the highlighted row and aria-activedescendant points at a real option id. */
+const paletteRows = computed(() =>
+  commandMode.value && slash.value ? matchCommandRows([...commands.value], slash.value.name, busy.value) : [],
+);
+const paletteId = useId(); // listbox root id; option ids are `<paletteId>-opt-<index>` (CommandPalette mirrors)
+/** Highlight index (raw state; `paletteActiveIndex` is the clamped view of it). */
+const paletteActive = ref(0);
+/** Esc/completion latch: palette hidden while the NAME TOKEN is unchanged (typing args after a
+ * completion never re-pops it); editing the name (`watch` below) reopens with a fresh highlight. */
+const paletteSuppressed = ref(false);
+/** The name a completion is currently writing — lets the name watcher distinguish "changed
+ * because Tab/click just completed it" (keep suppressed) from "the user edited it" (reopen). */
+let completingName: string | null = null;
+const paletteVisible = computed(() => paletteOpen.value && !paletteSuppressed.value);
+/** The row aria-activedescendant / Tab act on — clamped so a shrinking list can never leave the
+ * highlight pointing past the end (mirror of the mention panel's clamp). */
+const paletteActiveIndex = computed(() =>
+  paletteRows.value.length === 0 ? 0 : Math.min(paletteActive.value, paletteRows.value.length - 1),
+);
+const paletteActiveRowId = computed(() =>
+  paletteVisible.value && paletteRows.value.length > 0 ? `${paletteId}-opt-${paletteActiveIndex.value}` : undefined,
+);
+
+// Query change ⇒ fresh highlight (resets to the best match) + reopen (a completion's OWN name
+// change is exempt: `completingName` — the palette must STAY hidden right after `/name ` lands).
+watch(
+  () => slash.value?.name ?? null,
+  (name) => {
+    const fromCompletion = completingName !== null && name === completingName;
+    completingName = null;
+    paletteSuppressed.value = fromCompletion;
+    paletteActive.value = 0;
+  },
+);
+// A wire refresh can shrink the list under a stationary query — clamp in place (verifier P3,
+// same ruling as the mention panel: a fleet refresh must not yank the user's selection).
+watch(paletteRows, (rows) => {
+  if (paletteActive.value > rows.length - 1) paletteActive.value = Math.max(0, rows.length - 1);
+});
+// Keep the highlighted option in view when the palette scrolls (≤50 rows vs 240px max-height).
+watch(paletteActiveIndex, () => {
+  if (!paletteVisible.value) return;
+  const id = paletteActiveRowId.value;
+  if (id === undefined) return;
+  void nextTick(() => {
+    const el = document.getElementById(id);
+    if (el !== null && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "nearest" });
+  });
+});
+
+/** Palette key layer, called from `onKeydown` while the palette is visible. Returns true when
+ * the event was consumed (never reaches `composerKeyAction`). Focus NEVER leaves the textarea:
+ * Tab is consumed even when it completes nothing (deny row / zero rows) — while the palette is
+ * CLOSED Tab falls through untouched (no focus trap). IME keys are never taken (isComposing /
+ * keyCode 229 — they belong to the candidate window, not the palette). Enter is deliberately
+ * NOT consumed: it keeps the normal key map and executes the typed command (current behaviour). */
+function paletteKeydown(ev: KeyboardEvent): boolean {
+  if (!paletteVisible.value) return false;
+  if (ev.isComposing || ev.keyCode === 229) return false;
+  const rows = paletteRows.value;
+  if (ev.key === "Escape") {
+    paletteSuppressed.value = true; // close without clearing the text; name edit reopens
+    return true;
+  }
+  if (ev.key === "ArrowDown") {
+    paletteActive.value = moveMentionActive(paletteActive.value, 1, rows.length);
+    return true;
+  }
+  if (ev.key === "ArrowUp" || (ev.key === "Tab" && ev.shiftKey)) {
+    paletteActive.value = moveMentionActive(paletteActive.value, -1, rows.length);
+    return true;
+  }
+  if (ev.key === "Tab") {
+    const row = rows[paletteActiveIndex.value];
+    if (row !== undefined && row.policy !== "deny") completeCommand(row.name);
+    return true; // deny row / zero rows: no completion, but Tab still never leaves the composer
+  }
+  return false;
+}
+
+/** Tab/click completion: `/name ` (trailing space — args come next), palette hidden, caret at
+ * the end, focus back in the textarea. The one insert path both the keyboard and pointer pick
+ * funnel through, so they can never diverge. */
+function completeCommand(name: string): void {
+  completingName = name; // the name watcher keeps the palette suppressed across this change
+  text.value = `/${name} `;
+  paletteSuppressed.value = true; // also covers completing to the SAME name (watcher won't fire)
+  paletteActive.value = 0;
+  persistDraft();
+  void nextTick(() => {
+    completingName = null; // stale guard: a later MANUAL re-type of the same name must reopen
+    grow();
+    const el = textareaEl.value;
+    if (el) {
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+      caret.value = end;
+    }
+  });
+}
+
 /** §7.6 placeholders: idle announces "starts a new turn" (D4). Busy follows the STORED
  * delivery default (acceptance P2: a fixed "steer" placeholder lied when the settings page
  * default was followUp — Enter actually queues then). */
@@ -578,6 +706,10 @@ function doSend(mode: "steer" | "followUp"): void {
 
 function onKeydown(ev: KeyboardEvent): void {
   if (composing.value) return; // inside an IME session: no key ever sends
+  if (paletteKeydown(ev)) {
+    ev.preventDefault();
+    return;
+  }
   if (mentionKeydown(ev)) {
     ev.preventDefault();
     return;
@@ -599,15 +731,6 @@ function onSendClick(): void {
 function onStopInline(): void {
   if (view === null || view.control === null) return;
   void view.control.abort(view.agentKey).catch(() => {});
-}
-
-function onPalettePick(name: string): void {
-  text.value = `/${name} `;
-  persistDraft();
-  void nextTick(() => {
-    grow();
-    textareaEl.value?.focus();
-  });
 }
 
 /** The 44px touch-target floor lives on the CARD (control.css, 2026-10-07 symmetric-gap
@@ -665,11 +788,14 @@ watch(
     @drop="onDrop"
   >
     <CommandPalette
-      v-if="paletteOpen && slash"
+      v-if="paletteVisible && slash"
       :commands="commands"
       :query="slash.name"
       :busy="busy"
-      @pick="onPalettePick"
+      :active="paletteActiveIndex"
+      :listbox-id="paletteId"
+      @pick="completeCommand"
+      @hover="paletteActive = $event"
     />
     <!-- @mention completion (task #11 + file-mention): rendered before the input row so it
          opens UPWARD from the bottom-pinned composer. TWO zones — the session's running
@@ -743,6 +869,12 @@ watch(
           :aria-label="placeholder"
           rows="1"
           enterkeyhint="send"
+          :role="paletteVisible ? 'combobox' : undefined"
+          :aria-multiline="paletteVisible ? 'true' : undefined"
+          :aria-expanded="paletteVisible ? 'true' : undefined"
+          :aria-controls="paletteVisible ? paletteId : undefined"
+          :aria-autocomplete="paletteVisible ? 'list' : undefined"
+          :aria-activedescendant="paletteActiveRowId"
           @input="onInput"
           @keydown="onKeydown"
           @keyup="syncCaret"
