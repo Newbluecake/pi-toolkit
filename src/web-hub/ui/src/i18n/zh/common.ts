@@ -28,7 +28,7 @@ const common = {
   "status.stale": "过期 · 无最近心跳",
   "status.offline": "离线 · 进程已退出",
   "status.aborted": "已中止",
-  "status.outdated": "插件版本高于 hub",
+  "status.outdated": "插件旧于 hub，需 /reload",
 } satisfies Messages<typeof en>;
 
 export default common;
