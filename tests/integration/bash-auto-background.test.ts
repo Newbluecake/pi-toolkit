@@ -160,6 +160,17 @@ function buildHarness(autoBackgroundMs: number, overrides: Partial<AgentSettings
 
 type AnyTool = ToolDefinition<never, never>;
 
+/** `structuredContent.wall_time_seconds` is a measured duration (0.1 s granularity): two runs of
+ *  the same command can legitimately differ by one tick under load, so golden comparisons drop it
+ *  and pin everything else field-for-field. */
+function withoutWallTime(r: unknown): unknown {
+  if (r === null || typeof r !== "object") return r;
+  const sc = (r as { structuredContent?: unknown }).structuredContent;
+  if (sc === null || typeof sc !== "object" || !("wall_time_seconds" in sc)) return r;
+  const { wall_time_seconds: _ignored, ...rest } = sc as Record<string, unknown>;
+  return { ...(r as object), structuredContent: rest };
+}
+
 async function run(
   tool: { execute: AnyTool["execute"] },
   params: Record<string, unknown>,
@@ -489,7 +500,7 @@ describe("I5 short-command golden equivalence (real processes)", () => {
 
       const overridden = await run(bash, { command: "echo hi" });
       const expected = await run(builtin as unknown as { execute: AnyTool["execute"] }, { command: "echo hi" });
-      expect(overridden).toEqual(expected);
+      expect(withoutWallTime(overridden)).toEqual(withoutWallTime(expected));
       expect(textOf(overridden)).toBe("hi");
 
       // …including the failing path. pi 1.0 changed the built-in contract
@@ -506,7 +517,7 @@ describe("I5 short-command golden equivalence (real processes)", () => {
       expect(overrideOutcome.ok).toBe(builtinOutcome.ok);
       if (builtinOutcome.ok) {
         // pi 1.0.2 semantics: resolved `isError` result carrying the code.
-        expect(overrideOutcome.value).toEqual(builtinOutcome.value);
+        expect(withoutWallTime(overrideOutcome.value)).toEqual(withoutWallTime(builtinOutcome.value));
         const result = overrideOutcome.value as FailingBashResult;
         expect(result.isError).toBe(true);
         expect(result.structuredContent?.exit_code).toBe(3);
