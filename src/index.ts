@@ -92,6 +92,8 @@ import type { DeferredReloadController } from "./reload/defer.js";
 import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
 import type { AskUserRemotePort } from "./ask-user/remote.js";
 import type { WorkflowQueryPort } from "./tools/workflow-target.js";
+import { wireTopicSwitch } from "./topic-switch/wire.js";
+import type { PromptGatePort } from "./web-hub/agent/prompt-gate.js";
 
 /**
  * M2 Wave 1 (architecture §7.1): the single merge point for the four
@@ -297,7 +299,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       interrupt: () => settings.askUser.backgroundInterrupt,
     });
 
-  wireCacheTtl(pi, settings, {
+  const cacheTtl = wireCacheTtl(pi, settings, {
     keepalive: () => holder.current?.keepalive,
     adaptive: () => holder.current?.adaptive,
   });
@@ -895,6 +897,12 @@ export default function activate(rawPi: ExtensionAPI): void {
   // whatever session-nav installed (registration order = wrapping order).
   reloadRef.current = wireDeferredReload(pi, { settings, activeRunCount: activeSubagentRunCount });
 
+  // topic-switch plan.md D2 flip point: a late-bound ref handed into `wireWebHub`'s `promptGate`
+  // dep BEFORE the web-hub block runs, assigned to a real `PromptGatePort` only at the very end of
+  // `activate()` (after `wireTopicSwitch` below) — web-hub always reads `promptGateRef.current` at
+  // CALL time (never a stale snapshot), so the assignment order here only matters for readability.
+  const promptGateRef: { current?: PromptGatePort } = {};
+
   // web-hub (plan 包 I): post-guard (child sessions stay inert), default off.
   // MUST be wired after wireDeferredReload so web-hub's session_start handler
   // runs after the stack rebuild and its fleet port can read holder.current.
@@ -941,6 +949,9 @@ export default function activate(rawPi: ExtensionAPI): void {
       // absent `deps.quota` as "feature off", so the sampler never runs and the wire field never
       // appears — byte-equal to the pre-feature shape).
       ...(settings.webHub.quota !== false ? { quota: () => holder.current?.quota?.verdicts() ?? [] } : {}),
+      // topic-switch plan.md §P3b.1 D2 flip point: removing this one line is the whole kill-switch
+      // for web prompts ever being judged — web-hub then always takes its native dispatch path.
+      promptGate: () => promptGateRef.current,
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;
@@ -953,6 +964,31 @@ export default function activate(rawPi: ExtensionAPI): void {
       "webhub",
       createWebHubCommand({ control: () => webHubRef.current, lanSettingsWarnings: () => lanSettingsWarnings }),
     );
+  }
+
+  // topic-switch (docs/dev/topic-switch/plan.md): registered LAST in activate() — later than
+  // mention/feishu/session-nav/web-hub's own `input` registration — so none of those handlers ever
+  // see a message we ourselves re-injected as already "handled" by someone else first (arch §10's
+  // registration-order table). `settings.topicSwitch.enabled:false` ⇒ `wireTopicSwitch` is never
+  // called at all: zero handler registration, zero `/topic-switch` command, zero D2 assignment —
+  // `promptGateRef.current` stays undefined and web-hub's native/hold dispatch path runs unchanged.
+  if (settings.topicSwitch.enabled) {
+    const topicSwitch = wireTopicSwitch(pi, {
+      settings: () => settings.topicSwitch,
+      titleModel: settings.title.model,
+      warmth: cacheTtl.warmth,
+      stack: () => {
+        const stack = holder.current;
+        if (!stack) return undefined;
+        return {
+          activeRuns: () => activeSubagentRunCount(),
+          backgroundBash: () => stack.bashJobs?.backgroundJobCount() ?? 0,
+          goalBusy: () => stack.goal.record?.state === "active" || stack.goal.record?.state === "paused",
+        };
+      },
+      remote: () => askUserRemoteRef.current?.(),
+    });
+    promptGateRef.current = topicSwitch.webGate; // D2 flip point
   }
 }
 

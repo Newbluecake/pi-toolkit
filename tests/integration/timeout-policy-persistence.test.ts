@@ -342,12 +342,24 @@ describe("timeoutPolicy persistence across resume paths (R1-R6)", () => {
     expect(mentionResume.budget.maxTotalFactor).toBe(1); // ⇒ H === D0 for the new run
 
     // (c) the same fixed original with an explicit timeout_s ⇒ ① wins.
-    await host.call("Agent", {
-      description: "fixed-rescue",
-      prompt: "widen it back",
-      subagent_type: "worker",
-      resume: fixedId,
-      timeout_s: 20,
+    // The mention dispatches fire-and-forget: `captured` flips at admission, but the resume lock
+    // is only released once that run settles, so a resume issued right away can legitimately be
+    // refused ("already has a resume in progress") — retry until the mention's run has settled
+    // (a dispatch-time readiness signal raced the lock whenever input-handler scheduling shifted).
+    await until(async () => {
+      try {
+        await host.call("Agent", {
+          description: "fixed-rescue",
+          prompt: "widen it back",
+          subagent_type: "worker",
+          resume: fixedId,
+          timeout_s: 20,
+        });
+        return true;
+      } catch (e) {
+        if (/already has a resume in progress/.test(String(e))) return false;
+        throw e;
+      }
     });
     await until(() => captureOf(captured, "fixed-rescue") !== undefined);
     expect(captureOf(captured, "fixed-rescue")!.req.timeoutPolicy).toBe("extendable");

@@ -63,14 +63,18 @@ function writeSettings(raw: unknown): void {
 
 describe("web-hub's input observer registers last (plan §4.1)", () => {
   it("exactly one new 'input' handler appears when webHub.enabled flips on, at the tail of the array", () => {
-    writeSettings({ webHub: { enabled: false } });
+    // topic-switch (docs/dev/topic-switch/plan.md) deliberately registers its OWN `input` handler
+    // even later than web-hub's (src/index.ts wires it absolutely last in activate()) — disabled
+    // here so this test keeps checking exactly what it always checked: web-hub's own ordering
+    // relative to mention/feishu/session-nav, unaffected by a later, unrelated feature.
+    writeSettings({ webHub: { enabled: false }, topicSwitch: { enabled: false } });
     const baseline = fakePi();
     activate(baseline.pi);
     const baselineInput = (baseline.handlers.get("input") ?? []).map((f) => f.toString());
     expect(baselineInput.length).toBeGreaterThan(0); // installMentionInput's own handler
 
     releaseGuards();
-    writeSettings({ webHub: { enabled: true, autoStart: false } });
+    writeSettings({ webHub: { enabled: true, autoStart: false }, topicSwitch: { enabled: false } });
     const enabled = fakePi();
     activate(enabled.pi);
     const enabledInput = (enabled.handlers.get("input") ?? []).map((f) => f.toString());

@@ -207,7 +207,12 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   outgoing payload); limits 11/window · 24/run · 4 concurrent · $1.5/run · $10/24h process-rolling
   (`ping-ledger.ts`), no price info ⇒ no ping (`usd-unpriced`); ping cost folds into the child run's
   own `usage.costUsd` (fleet/HUD visible); disposed on `agent_settled` and defensively via the
-  registry's `onReaped`.
+  registry's `onReaped`. **`warmth.ts`** (topic-switch plan P2): a pi-free, never-throwing
+  `CacheWarmthPort` (`wireCacheTtl`'s return value, `CacheTtlWiring.warmth`) that judges whether
+  the NEXT Anthropic request would read a warm prompt cache from evidence alone (adaptive
+  `coversPrefix(0)` or a proven recent touch) — `mode`/`lastSent`/1h-write traces only raise the
+  bar for PROVING cold (Anthropic's 1h max TTL) and pick `nextWriteTtl`; anything unprovable is
+  `unknown` (topic-switch's gate 3a treats that as "don't ask", same I6 fail-open direction).
 - `src/child/` — child-session assembly entry point (`wire.ts`'s `wireChildSession`, called from
   `src/index.ts` pre-guard when `isChildSession`, alongside `wireMemory`/`wireChildBashJobs`): composes
   `wireChildContextSwitch` + `wireChildKeepalive`, wiring their one cross-cutting signal (a committed
@@ -444,7 +449,37 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   `tests/web-hub/hub/hub-history-assembly.test.ts`). Gates: HC1–HC7 conformance (real pi argv/header facts), HH1–HH14
   integration (real hub × fake pi + starvation), RH1–RH4 conformance (real pi + real hub restore). Off ⇒ the hub stays
   byte-identical (no cap, no service, routes 404, restore carries no path pin). Design:
-  `docs/dev/web-hub-session-history/plan.md`.
+  `docs/dev/web-hub-session-history/plan.md`. **`prompt-gate.ts`** (topic-switch plan P4, D2):
+  `PromptGatePort`/`WebPromptRelease`, a late-bound port (`WebHubDeps.promptGate`, assigned by
+  `src/index.ts`'s `promptGateRef.current = …` — the sole D2 flip point) that `commands.ts`'s
+  `handlePrompt` consults synchronously, idle-only, before its native dispatch; claiming replies
+  immediately (no dispatch) and hands ownership to `release.current()`/`release.elsewhere()`.
+- `src/topic-switch/` — new-request relevance judge → suggest a clean new session
+  (`docs/dev/topic-switch/{requirements,arch,plan}.md`). Post-guard, main-session only, settings-
+  gated (`topicSwitch.enabled`, default on). Layered like the rest of the repo: pi-free decision
+  core (`types/settings/filters/economics/gate/judge/state/records.ts`, P1) → `confirm.ts` (TUI
+  ⟂ web dialog race, P3a) → pi-facing assembly (`wire/hold/release/recovery/command.ts`, P3b).
+  Invariants I1–I6: the `input` handler only ever holds `interactive`/`rpc` sources (never its own
+  `extension`-sourced re-injections — structurally impossible to double-hold); every held request
+  gets exactly one decision (current session via the release queue, or the new session via PONR);
+  a crash/`/reload` window auto-redelivers AT MOST once (`pending→delivering→resolved` CAS, never
+  retried); unprovable inputs (cold/cost/judge) always fail open (`continue`). PONR = the instant
+  `ctx.newSession` is called from the `/topic-switch __go <nonce>` command trampoline (never
+  reachable through the `input` event, S3); before it everything rolls back to the current
+  session, after it only `withSession`/the transfer's own CAS (`pending→delivering→resolved`,
+  bypass `→cancelled|manual`) ever delivers — recoverable via `/topic-switch last [--send]`. Four
+  translation-flip points (each defined exactly once): D1 non-Anthropic routes stay `unknown`
+  (`cache-ttl/warmth.ts`'s `WARMTH_SUPPORTED_APIS`), D2 web prompts judged too
+  (`promptGateRef.current = …` above), D3 judge-model fallback to the session model
+  (`judge.ts`'s `JUDGE_SESSION_MODEL_FALLBACK`), D4 a confirm timeout counts as declining
+  (`state.ts`'s `COOLDOWN_OUTCOMES`). The process-global transfer map
+  (`Symbol.for("pi-subagent:topic-switch-transfer")`, cap 4/TTL 10min/FIFO, worktree-origin
+  precedent) survives a `/reload` ONLY (it is in-process memory, wiped by a real crash/restart);
+  crash recovery instead relies on the persisted `pending` session-entry record `persistPending`
+  writes to disk alongside the transfer (`planRecovery`'s rule 4 in `records.ts`). A B1-class fix
+  (mid-switch marker on the same global, excluded from recovery until the switch resolves) keeps a
+  brand-new activation's `session_start` — which real pi always re-runs on session replacement, not
+  just `/reload` — from racing a PONR hop still in flight.
 - `src/git/` — pi-free bounded git executor (`run.ts`: hard deadline, process-group kill, stdout/stderr caps,
   unref'd timers) + `git worktree list --porcelain` parse/scan (`worktrees.ts`) + `~` path labels (`path-label.ts`).
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.

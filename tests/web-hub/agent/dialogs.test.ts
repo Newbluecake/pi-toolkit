@@ -103,6 +103,44 @@ describe("dialog bridge", () => {
     const staleMarker = bridge.attributePrompt({ type: "ui_prompt_start", kind: "select", title: ASK_USER_MARKER });
     expect(staleMarker.title).toBe("ask_user");
   });
+
+  it("attributes a native select whose title matches open()'s attributionTitle (topic-switch plan P3a finding a)", () => {
+    const { bridge } = make();
+    bridge.open({
+      toolCallId: "ts-1",
+      questions: [question],
+      allowCancel: true,
+      attributionTitle: "switch to a new session?",
+    });
+    const attributed = bridge.attributePrompt({
+      type: "ui_prompt_start",
+      kind: "select",
+      title: "switch to a new session?",
+    });
+    expect(attributed).toMatchObject({ dialogId: "ask:ts-1", kind: "select", title: "switch to a new session?" });
+    // Title is NOT rewritten to "ask_user" (that sanitization is exclusive to the ASK_USER_MARKER path).
+    expect(attributed.title).toBe("switch to a new session?");
+    // Attribution is once-only, same as the custom/marker paths: a second identical event finds
+    // no unattributed open record and passes through unchanged.
+    const second = bridge.attributePrompt({
+      type: "ui_prompt_start",
+      kind: "select",
+      title: "switch to a new session?",
+    });
+    expect(second).not.toHaveProperty("dialogId");
+  });
+
+  it("a native select with a DIFFERENT title, or without attributionTitle set, is never attributed (ask_user behavior byte-identical)", () => {
+    const { bridge } = make();
+    bridge.open({ toolCallId: "ask-1", questions: [question], allowCancel: true }); // no attributionTitle, like ask_user
+    const mismatched = bridge.attributePrompt({ type: "ui_prompt_start", kind: "select", title: "some other prompt" });
+    expect(mismatched).not.toHaveProperty("dialogId");
+
+    const { bridge: bridge2 } = make();
+    bridge2.open({ toolCallId: "ts-2", questions: [question], allowCancel: true, attributionTitle: "expected title" });
+    const otherTitle = bridge2.attributePrompt({ type: "ui_prompt_start", kind: "select", title: "unexpected title" });
+    expect(otherTitle).not.toHaveProperty("dialogId");
+  });
 });
 
 describe("dialog bridge — background close passthrough / old-hub downgrade (ask-user-async §7.2, P3)", () => {

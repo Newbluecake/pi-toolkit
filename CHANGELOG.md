@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **topic-switch**（新请求相关性识别 → 建议切换新会话，默认开）— 新请求到达时，若判定与当前会话历史不相关、且本会话 prompt cache 已过期导致下一次请求很贵（默认阈值 $0.5，可配），会在 TUI 与 web-hub 两端同时弹出确认（先答者生效）：切到一个干净的新会话继续处理这条请求（原样带过去，含图片），或留在当前会话（并进入冷却，避免反复打扰）。判定用便宜模型做相关性评估（配置模型 → 标题模型 → 会话模型兜底），短超时、出错/超时一律放行（fail-open）；非 Anthropic 路由因缓存寿命未知，v1 一律跳过。隐私：会把新请求与一段近期对话摘要发给判定模型，设置项里已注明，关闭 `topicSwitch.enabled` 即可停用。崩溃或 `/reload` 窗口内的截留请求至多自动投递一次，可用 `/topic-switch last [--send]` 随时查看/重发。
+
 ## [0.4.0] - 2026-10-09
 
 两天的 web-hub 冲刺（110 commits）：历史会话列表与恢复、steer 撤回/重新编辑、worktree diff、目录与任意路径预览、订阅额度展示，以及一大批界面打磨与流式渲染修复。

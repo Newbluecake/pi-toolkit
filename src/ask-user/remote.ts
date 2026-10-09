@@ -28,6 +28,16 @@ export interface AskUserRemotePort {
     toolCallId: string;
     questions: AskUserQuestion[];
     allowCancel: boolean;
+    /**
+     * topic-switch plan P3a finding (a): the exact title a NATIVE (non-marker) `ctx.ui.select`
+     * prompt will carry for this same dialog. `src/web-hub/agent/dialogs.ts`'s `attributePrompt`
+     * matches a `ui_prompt_start{kind:"select"}` event whose title equals this against the open
+     * record, the same way it already matches `kind==="custom"` and the ask_user RPC marker — so
+     * the web UI shows one attributed dialog card instead of an attributed card plus a second,
+     * unattributed "blocked on dialog (select, …)" banner for the same local prompt. Absent (the
+     * ask_user caller never sets it) ⇒ byte-identical to pre-fix behavior.
+     */
+    attributionTitle?: string;
   }): AskUserRemoteSession | undefined;
 }
 

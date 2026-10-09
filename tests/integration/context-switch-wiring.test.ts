@@ -87,6 +87,10 @@ function compactEvent() {
 
 describe("context-switch wiring", () => {
   it("host session: switch_context replaces compact_context by default and installs the compaction hook", () => {
+    // topic-switch (docs/dev/topic-switch/plan.md) registers its OWN session_before_compact
+    // handler too (to track an in-progress compaction) — disabled here so this test keeps
+    // counting exactly what it always counted: context-switch's own hook registration.
+    writeSettings({ topicSwitch: { enabled: false } });
     const { pi, tools, handlers } = fakePi();
     activate(pi);
     expect(tools.has("switch_context")).toBe(true);
@@ -96,7 +100,7 @@ describe("context-switch wiring", () => {
   });
 
   it("keepCompactTool keeps both tools; switchTool=false restores the legacy surface", () => {
-    writeSettings({ compact: { keepCompactTool: true } });
+    writeSettings({ compact: { keepCompactTool: true }, topicSwitch: { enabled: false } });
     const both = fakePi();
     activate(both.pi);
     expect(both.tools.has("switch_context")).toBe(true);
@@ -104,7 +108,7 @@ describe("context-switch wiring", () => {
 
     delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
     delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-    writeSettings({ compact: { switchTool: false } });
+    writeSettings({ compact: { switchTool: false }, topicSwitch: { enabled: false } });
     const legacy = fakePi();
     activate(legacy.pi);
     expect(legacy.tools.has("switch_context")).toBe(false);

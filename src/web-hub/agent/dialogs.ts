@@ -27,6 +27,10 @@ type DialogRecord = {
   state: DialogState;
   attributed: boolean;
   onRemote?: (outcome: RemoteOutcome) => boolean;
+  /** topic-switch plan P3a finding (a) / `AskUserRemotePort.open`'s `attributionTitle`: the exact
+   *  title a native `ctx.ui.select` prompt for this same dialog will carry. Undefined for ask_user
+   *  (which never sets it) — `attributePrompt` falls back to its existing `custom` / RPC-marker match. */
+  attributionTitle?: string;
 };
 
 export interface DialogBridgeOptions {
@@ -272,6 +276,7 @@ export function createDialogBridge(options?: DialogBridgeOptions): DialogBridge 
     toolCallId: string;
     questions: AskUserQuestion[];
     allowCancel: boolean;
+    attributionTitle?: string;
   }): AskUserRemoteSession | undefined => {
     if (disposed || !enabled) return undefined;
     try {
@@ -303,6 +308,7 @@ export function createDialogBridge(options?: DialogBridgeOptions): DialogBridge 
       },
       state: "open",
       attributed: false,
+      ...(request.attributionTitle !== undefined ? { attributionTitle: request.attributionTitle } : {}),
     };
     records.set(id, record);
     publish();
@@ -339,8 +345,17 @@ export function createDialogBridge(options?: DialogBridgeOptions): DialogBridge 
     const kind = event.kind;
     const title = event.title;
     const isRpcMarker = kind === "select" && title === ASK_USER_MARKER;
+    // topic-switch plan P3a finding (a): a native select whose title equals a record's own
+    // `attributionTitle` (confirm.ts passes its confirm-dialog title) is attributed the same way
+    // `custom` and the ask_user RPC marker are — without it the web UI shows the attributed dialog
+    // card AND an unattributed "blocked on dialog (select, …)" banner for the same local prompt.
     const candidate = [...records.values()].find(
-      (record) => record.state === "open" && !record.attributed && (kind === "custom" || isRpcMarker),
+      (record) =>
+        record.state === "open" &&
+        !record.attributed &&
+        (kind === "custom" ||
+          isRpcMarker ||
+          (kind === "select" && record.attributionTitle !== undefined && title === record.attributionTitle)),
     );
     if (candidate === undefined) {
       return isRpcMarker ? { ...event, title: "ask_user" } : event;

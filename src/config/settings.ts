@@ -25,6 +25,14 @@ import { canonicalOrigin, classifyHostToken, parseOrigin, type InvalidHostToken 
 // quota (阶梯阈值按窗口区分): WindowScope is a zero-pi-import type from src/quota/types.ts
 // (plan 分层纪律) —— type-only import, no runtime dependency on the quota module graph.
 import type { WindowScope } from "../quota/types.js";
+// topic-switch plan.md P1 "settings.ts": config/settings.ts imports ONLY this module for the
+// `topicSwitch` block — it owns the interface, the frozen defaults and the never-throws parser.
+import {
+  DEFAULT_TOPIC_SWITCH_SETTINGS,
+  parseTopicSwitchSettings,
+  type TopicSwitchSettings,
+} from "../topic-switch/settings.js";
+export type { TopicSwitchSettings };
 
 /**
  * CC3 (workflow design §3.2/§8.2): forward-declared budget shape for the
@@ -613,6 +621,10 @@ export interface AgentSettings {
   systemPrompt: SystemPromptSettings;
   /** 会话标题模型生成（任务 #12）。Main-session only（post-guard 装配）。 */
   title: TitleSettings;
+  /** topic-switch（docs/dev/topic-switch/plan.md）：新请求相关性识别 + 建议切新会话。Main-session
+   *  only（post-guard 装配）。类型/默认值/解析器归 `src/topic-switch/settings.ts`（P1），这里只接入
+   *  `*S ⇄ *Ms` 边界（见 TIME_SETTING_MS_PATHS）。 */
+  topicSwitch: TopicSwitchSettings;
 }
 
 /** Simple on/off settings group shared by the merged plugins (webSearch / todo). */
@@ -964,6 +976,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     refreshAfterMinutes: 15,
     maxRefreshes: 5,
   },
+  topicSwitch: { ...DEFAULT_TOPIC_SWITCH_SETTINGS },
 };
 /** Parse the optional `agent` settings block (L1). Field-by-field fallback to defaults, never throws. */
 export function parseAgentDispatchSettings(input: unknown): AgentDispatchSettings {
@@ -1044,6 +1057,13 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "askUser.backgroundInterrupt.quietMs",
   "askUser.backgroundInterrupt.maxDeferMs",
   "askUser.backgroundInterrupt.reaskDwellMs",
+  "topicSwitch.judgeTimeoutMs",
+  "topicSwitch.confirmTimeoutMs",
+  "topicSwitch.expirySlackMs",
+  // JSON-only live-acceptance seam (plan.md P1 settings.ts): stored as `debugAssumedTtlS` in the
+  // file, NOT listed in SETTING_SPECS (no /agent settings UI surface) — still needs the *S⇄*Ms
+  // boundary so a hand-edited settings file round-trips.
+  "topicSwitch.debugAssumedTtlMs",
 ];
 
 const TIME_SETTING_SECONDS_PATHS: ReadonlySet<string> = new Set(TIME_SETTING_MS_PATHS.map(secondsKeyOf));
@@ -1173,6 +1193,7 @@ export function loadSettings(source: unknown): AgentSettings {
     reload: parseReloadSettings(value.reload),
     systemPrompt: parseSystemPromptSettings(value.systemPrompt),
     title: parseTitleSettings(value.title),
+    topicSwitch: parseTopicSwitchSettings(value.topicSwitch),
   });
 }
 

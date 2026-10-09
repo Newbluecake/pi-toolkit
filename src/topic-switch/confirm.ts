@@ -54,6 +54,21 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+/**
+ * P3a finding (b): `clock.now()` is called twice inside the Promise executor (the start
+ * timestamp and the timeout-vs-cancel classification). A throw there, unguarded, would make the
+ * `new Promise` executor itself throw — which turns into a REJECTED promise (the one thing
+ * `confirmSwitch` must never do, per its own doc comment). `Date.now()` never throws, so it is a
+ * safe fallback that keeps the classification merely less precise, never broken.
+ */
+function safeNow(clock: Clock): number {
+  try {
+    return clock.now();
+  } catch {
+    return Date.now();
+  }
+}
+
 /** Chinese confirm copy (arch.md §7). `confidence` 0–1, `estUsd` the priced lower-bound estimate. */
 export function buildConfirmText(i: {
   confidence: number;
@@ -121,6 +136,11 @@ export function confirmSwitch(
           },
         ],
         allowCancel: true,
+        // P3a finding (a): the local `ctx.ui.select` below is opened with this exact title — passing
+        // it lets `src/web-hub/agent/dialogs.ts`'s `attributePrompt` fold the native select's
+        // `ui_prompt_start` event into this same dialog record instead of surfacing a second,
+        // unattributed "blocked on dialog" banner for it.
+        attributionTitle: text.title + "\n\n" + text.preview,
       });
     } catch {
       session = undefined;
@@ -131,7 +151,7 @@ export function confirmSwitch(
   return new Promise<ConfirmOutcome>((resolve) => {
     const race = createDialogRace();
     const localAbort = new AbortController();
-    const startedAt = o.clock.now();
+    const startedAt = safeNow(o.clock);
     let settled = false;
     let sessionClosed = false;
     let timer: TimerHandle | undefined;
@@ -151,7 +171,11 @@ export function confirmSwitch(
       if (settled) return;
       settled = true;
       if (timer !== undefined) {
-        o.clock.clearTimer(timer);
+        try {
+          o.clock.clearTimer(timer);
+        } catch {
+          /* best-effort: never break settlement */
+        }
         timer = undefined;
       }
       try {
@@ -195,7 +219,7 @@ export function confirmSwitch(
       }
       // Dismissed without an answer: external abort, web win and our own timeout have all
       // settled above; what is left is the select's auto-timeout versus a user Esc.
-      if (o.clock.now() - startedAt >= o.timeoutMs - TIMEOUT_CLASSIFY_SLACK_MS) {
+      if (safeNow(o.clock) - startedAt >= o.timeoutMs - TIMEOUT_CLASSIFY_SLACK_MS) {
         race.claim("abort");
         closeSession("abort", "aborted");
         settle({ kind: "timeout" });
@@ -253,7 +277,18 @@ export function confirmSwitch(
       /* a signal that cannot take listeners cannot abort; the timeout still bounds us */
     }
 
-    timer = o.clock.setTimer(o.timeoutMs, onTimeout);
+    // P3a finding (b): an unguarded throw here is the same "executor throws ⇒ rejected promise"
+    // hazard as `clock.now()` above. Without a timer we cannot bound this dialog at all, so the
+    // safe (never-hang, never-reject) move is to settle immediately as `error` (ui-unavailable,
+    // no cooldown, same fail-open family as every other confirm-channel failure) rather than
+    // leave either channel waiting with no deadline.
+    try {
+      timer = o.clock.setTimer(o.timeoutMs, onTimeout);
+    } catch {
+      closeSession("error", "aborted");
+      settle({ kind: "error" });
+      return;
+    }
 
     if (useTui) {
       try {

@@ -161,6 +161,7 @@ describe("confirmSwitch — tui channel", () => {
           },
         ],
         allowCancel: true,
+        attributionTitle: text.title + "\n\n" + text.preview,
       },
     ]);
     expect(ui.calls).toHaveLength(1);
