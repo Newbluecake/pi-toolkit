@@ -42,6 +42,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveJitiCli, spawnHub, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
+import { looksLikeHubArgv } from "../../src/web-hub/agent/proc-identity.js";
+import { parseCmdline } from "../../src/web-hub/protocol/proc-identity.js";
 
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
@@ -396,6 +398,37 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     await waitPidGone(childPid, 14_000, "H2 orphan gone ≤14s (5s grace + TERM + 3s + KILL + slack)");
     await waitPidGone(reaperPid, 11_000, "H2 reaper itself exits ≤11s (10s hard cap + slack)");
   }, 45_000);
+
+  // hub/comm.ts contract on real processes: the hub daemon and its reaper watchdog carry named
+  // kernel comms (pi-webhub / pi-webhub-reap) while /proc/<pid>/cmdline stays byte-untouched —
+  // `looksLikeHubArgv` (the agent-side restart fallback's stored-argv shape check) still accepts
+  // the hub's cmdline, and the reaper is still locatable by its inline-script cmdline literal.
+  it("H10: process naming — named kernel comm, cmdline deliberately untouched", async () => {
+    sandbox = sandboxHome();
+    const hub = await bootHub(sandbox.home);
+
+    const hubComm = readFileSync(`/proc/${hub.pid}/comm`, "utf8").trimEnd();
+    expect(hubComm).toBe("pi-webhub");
+    const hubArgv = parseCmdline(readFileSync(`/proc/${hub.pid}/cmdline`, "utf8"));
+    expect(hubArgv[0]).toContain("node");
+    expect(looksLikeHubArgv(hubArgv)).toBe(true);
+
+    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper child visible in /proc");
+    const reaperPid = findReaperPid(hub.pid)!;
+    const reaperComm = readFileSync(`/proc/${reaperPid}/comm`, "utf8").trimEnd();
+    expect(reaperComm).toBe("pi-webhub-reap");
+    const reaperArgv = parseCmdline(readFileSync(`/proc/${reaperPid}/cmdline`, "utf8"));
+    expect(reaperArgv[0]).toContain("node");
+    expect(reaperArgv[1]).toBe("--disable-warning=ExperimentalWarning");
+    expect(reaperArgv[2]).toBe("-e");
+    expect(reaperArgv[3]).toContain("web-hub spawn reaper");
+    // history occupancy scan safety: none of the names is comm "pi" or node* (proc.ts classifies
+    // all three as "other")
+    for (const comm of [hubComm, reaperComm]) {
+      expect(comm).not.toBe("pi");
+      expect(comm.startsWith("node")).toBe(false);
+    }
+  }, 40_000);
 
   it("H6 (flood/RSS cells): 50 MiB stderr flood ⇒ sink file capped, real hub process RSS growth <32 MiB", async () => {
     sandbox = sandboxHome();

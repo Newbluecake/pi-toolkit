@@ -291,7 +291,10 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   pi), `agent/` (pi-side client `wireWebHub`: process-level connection on a `Symbol.for` global, reused across
   /new·/resume·/fork, handed over on /reload), `ui/` (the Vue 3 SFC frontend source, built by `npm run
 build:web` into `dist/web-hub-ui/` — not checked in; `ui/src/logic/` holds the pure, DOM-free logic ported
-  from the pre-Vue frontend, imported through the `@logic` alias). Wired at the end of `src/index.ts` after
+  from the pre-Vue frontend, imported through the `@logic` alias). The hub's own long-lived processes set
+  ONLY their kernel comm (`hub/comm.ts` — hub `pi-webhub`, auth/session DB child `pi-webhub-auth`, spawn
+  reaper `pi-webhub-reap`; never `process.title`): `/proc/<pid>/cmdline` is deliberately untouched — the
+  agent-side hub identity check and reaper-by-cmdline test location depend on it. Wired at the end of `src/index.ts` after
   `wireDeferredReload`. P1 is read-only; **P2 (control-plane, #32, `docs/dev/web-hub/control-plan.md`)** layers a write
   path on top — a single `cmd`/`cmd_result`/`cmd_late` channel (`op: prompt|abort|steer_subagent|abort_subagent|
 command|switch_session`, idempotent by cmdId, a process-level command ledger in `src/web-hub/agent/index.ts`

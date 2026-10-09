@@ -20,6 +20,7 @@
  */
 import { resolveHubPaths } from "../protocol/paths.js";
 import { normalizeHubPreviewMode } from "../protocol/preview.js";
+import { HUB_COMM, setProcessComm } from "./comm.js";
 import { installProcessHandlers, startHub, type StartHubDeps } from "./hub.js";
 import { createHttpFrontend } from "./http.js";
 import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
@@ -39,6 +40,9 @@ function fail(message: string, code: number): never {
 }
 
 async function main(): Promise<void> {
+  // Kernel comm only (see hub/comm.ts): cmdline — which hub.json's identity argv and the
+  // agent-side restart check depend on — is deliberately left untouched.
+  setProcessComm(HUB_COMM);
   const raw = process.env.PI_WEBHUB_CONFIG;
   if (raw === undefined || raw.trim() === "") fail("PI_WEBHUB_CONFIG is not set", 2);
   let config: HubConfig;

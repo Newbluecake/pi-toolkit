@@ -34,6 +34,8 @@ export function dbTestModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean
 
 const COMMON_PRELUDE = `
 'use strict';
+// Kernel comm naming only (hub/comm.ts contract): cmdline is deliberately untouched.
+try { require('node:fs').writeFileSync('/proc/self/comm', 'pi-webhub-auth'); } catch (err) {}
 let DatabaseSync;
 let __sqliteErr;
 try {

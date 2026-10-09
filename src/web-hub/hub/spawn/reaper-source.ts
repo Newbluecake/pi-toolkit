@@ -76,6 +76,9 @@ export function buildReaperSource(opts: { timings?: Partial<ReaperSourceTimings>
     ...opts.timings,
   };
   return `'use strict';
+// Kernel comm naming only (hub/comm.ts contract): /proc/self/comm is a procfs write, not a
+// disk write, and cmdline is deliberately untouched — tests locate this child by cmdline literal.
+try { require('node:fs').writeFileSync('/proc/self/comm', 'pi-webhub-reap'); } catch (err) {}
 // web-hub spawn reaper (arch §7.3): independent watchdog, detached from the hub's process group.
 // NDJSON protocol — up: {op:"track",spawnId,pid,startTicks,bootId,uid} / {op:"untrack",pid};
 // down: {ok:"ready"} at boot, then diagnostics only. Never writes disk.

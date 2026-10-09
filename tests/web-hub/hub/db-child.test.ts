@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { execFile, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -26,6 +26,17 @@ describe("dbTestModeEnabled", () => {
     expect(dbTestModeEnabled({ PI_WEBHUB_DB_TEST: "1" })).toBe(true);
     expect(dbTestModeEnabled({ PI_WEBHUB_DB_TEST: "true" })).toBe(false);
     expect(dbTestModeEnabled({})).toBe(false);
+  });
+});
+
+describe("kernel comm naming (hub/comm.ts contract)", () => {
+  const commLine = "try { require('node:fs').writeFileSync('/proc/self/comm', 'pi-webhub-auth'); } catch (err) {}";
+
+  it("both scripts set comm pi-webhub-auth and never touch process.title/cmdline", () => {
+    for (const script of [buildQueryScript({ test: false }), buildMaintScript()]) {
+      expect(script).toContain(commLine);
+      expect(script).not.toContain("process.title");
+    }
   });
 });
 
@@ -182,6 +193,30 @@ skipIfNoSqlite("query script run directly (bypassing db-client.ts)", () => {
       q.send(2, "getUser", { username: "admin" });
       const r2 = await q.waitFor(2);
       expect(r2.ok).toBe(true);
+    } finally {
+      q.child.kill("SIGKILL");
+      t.cleanup();
+    }
+  });
+
+  // hub/comm.ts contract, proven on a real child: the kernel comm is pi-webhub-auth while
+  // /proc/<pid>/cmdline keeps the exact `node --disable-warning=ExperimentalWarning -e <script>`
+  // shape (comm naming must never disturb argv-based process location).
+  (process.platform === "linux" ? it : it.skip)("real child: comm pi-webhub-auth, cmdline untouched", async () => {
+    const t = tmp();
+    await migrate(t.dbFile);
+    const q = spawnQuery(t.dbFile);
+    try {
+      q.send(1, "getUser", { username: "admin" });
+      const r = await q.waitFor(1);
+      expect(r.ok).toBe(true);
+      const comm = readFileSync(`/proc/${q.child.pid}/comm`, "utf8").trimEnd();
+      expect(comm).toBe("pi-webhub-auth");
+      const argv = readFileSync(`/proc/${q.child.pid}/cmdline`, "utf8").split("\0");
+      expect(argv[0]).toContain("node");
+      expect(argv[1]).toBe("--disable-warning=ExperimentalWarning");
+      expect(argv[2]).toBe("-e");
+      expect(argv[3]).toContain("DatabaseSync");
     } finally {
       q.child.kill("SIGKILL");
       t.cleanup();
