@@ -150,8 +150,12 @@
 
 /* The redacted command is the row's main content: mono, single-line, end-ellipsis; the full
  * redacted text rides `title` (D4). Long commands reflow under ≤480px (below). */
+/* 2026-10-09 现场「bash 命令的展示效果还可以再优化」: basis 0 (was `auto`), so a long command
+ * shrinks and ellipsizes inside its own row instead of wrapping onto a line of its own (which
+ * then pushed status/exit/elapsed/bytes onto a THIRD line while short commands stayed one-line).
+ * The full redacted command shows in the expanded block (`.bj-cmd-full`) and in `title`. */
 .bj-cmd {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -207,6 +211,9 @@
 .bj-elapsed,
 .bj-bytes {
   flex: none;
+  /* fixed-width, right-aligned meta columns so rows line up like a table */
+  min-width: 6ch;
+  text-align: right;
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   color: var(--c-text-3);
@@ -222,6 +229,16 @@
 .bj-fresh[data-kind="stale"],
 .bj-fresh[data-kind="unavailable"] {
   color: var(--c-warning-text);
+}
+
+/* Expanded row: the full redacted command, wrapped (touch screens have no `title` tooltip). */
+.bj-cmd-full {
+  margin: 2px 0 2px calc(16px + var(--sp-2)); /* aligns under the id column (icon + gap) */
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Plain-text tail (D4): pre-wrap so long lines never overflow horizontally, capped and
@@ -254,6 +271,11 @@
  * in smaller muted type so a long redacted command never overflows the panel; DOM order
  * stays untouched (the cmd is simply ordered last and given a full flex-basis). */
 @media (max-width: 480px) {
+  /* the row's own command line already wraps in full here — no duplicate in the expansion */
+  .bj-cmd-full {
+    display: none;
+  }
+
   .bj-cmd {
     order: 10;
     flex-basis: 100%;

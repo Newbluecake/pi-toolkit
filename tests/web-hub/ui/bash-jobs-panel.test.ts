@@ -167,9 +167,14 @@ describe("BashJobsPanel.vue — expanded rows (D4)", () => {
     expect(pre.exists()).toBe(true);
     expect(pre.text()).toBe("line1\nline2");
     expect(rows[0]?.attributes("aria-expanded")).toBe("true");
+    // the expansion also carries the full (ellipsized-in-row) command as plain text
+    const full = wrapper.find(".bj-cmd-full");
+    expect(full.exists()).toBe(true);
+    expect(full.text()).toBe(wrapper.find(".bj-cmd").text());
 
     await rows[0]?.trigger("click");
     expect(wrapper.find(".bj-tail").exists()).toBe(false);
+    expect(wrapper.find(".bj-cmd-full").exists()).toBe(false);
     expect(rows[0]?.attributes("aria-expanded")).toBe("false");
   });
 

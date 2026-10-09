@@ -206,6 +206,10 @@ function toggleRow(row: BashJobRowWire): void {
             freshnessText(row)
           }}</span>
         </button>
+        <!-- full redacted command (plain text) — the row itself ellipsizes it -->
+        <div v-if="expandedId === row.id && row.tail !== undefined" class="bj-cmd-full" translate="no">
+          {{ row.cmd }}
+        </div>
         <!-- plain-text tail: arbitrary process output, never v-html / never markdown -->
         <pre v-if="expandedId === row.id && row.tail !== undefined" class="bj-tail">{{ row.tail }}</pre>
       </li>
