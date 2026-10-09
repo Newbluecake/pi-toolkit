@@ -1,6 +1,6 @@
 {
   "name": "pi-toolkit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Toolbox extension for pi — anti-hang subagents (Agent / get_subagent_result / steer_subagent), HUD footer, web_search failover, task tools, ask_user, bash auto-background, scheduler, message fabric, /goal loop",
   "license": "MIT",
   "repository": {

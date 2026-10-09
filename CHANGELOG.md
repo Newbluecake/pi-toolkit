@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
+两天的 web-hub 冲刺（110 commits）：历史会话列表与恢复、steer 撤回/重新编辑、worktree diff、目录与任意路径预览、订阅额度展示，以及一大批界面打磨与流式渲染修复。
+
+### Added
+
+- **历史会话列表 + 恢复（`webHub.spawn.history`，默认开）** — 网页上浏览本机全部过往 pi 会话（分页、搜索、近似按修改时间排序），一键经 managed spawn 原地恢复（`--session`）；会话正被在线卡片/托管记录/本机 pi 进程占用时自动改为副本打开（hub 自建快照，原文件不动）。占用检测为尽力而为（W1–W7 已在界面与文档披露）；fd 锚定遍历、有界 IO、恢复重开同样核验会话文件身份。需启动 hub 的 pi 已 `/reload` 后再 `/webhub restart` 才会声明 `spawn.history.v1`。
+- **steer 撤回 / 重新编辑（`webHub.steerRecall`，默认开）** — 网页发出的插话/后续消息先暂存在 agent 侧，逐条交给 pi（仅凭归属到的消费证据放行下一条，绝不靠计时器）；交出前可在队列里撤回或拿回输入框改完再发，已交付则显示「已交付」只可复制。TUI 状态栏 `web held N`。关闭时与旧行为逐字节一致；上一轮遗留未确认项时新消息退回原生发送（不可撤回）以保活性。
+- **worktree diff** — 会话仓库各 worktree 的逐文件 diff（split/unified），hub 侧经三 fd 钉住的 `diff-index` 计算，外部驱动三层中和，只读、按当前 HEAD 钉死、拒绝名单隐藏；随 `webHub.preview` 门控。
+- **预览扩展** — 任意绝对路径（凭据拒绝名单兜底）与相对路径（read/write/edit 工具卡）可预览；目录浏览（下钻/返回、三重上限）；Markdown 默认渲染并可切源码；候选路径先探测存在再可点；会话 cwd 一键打开目录预览。
+- **订阅额度展示** — 顶栏额度药丸 + 详情卡片：每个订阅的 5h/7d 可用性、降级与重置时间、耗尽预测；GLM 与 GLM 国际始终合并为一个「GLM」（逐窗口取更紧的一侧）。
+- **界面与设置** — 工具卡显示执行耗时；语言改为下拉菜单（按钮显示当前语言）；设置新增「隐藏明文 HTTP 警告」「动态效果（跟随系统/始终开启/始终关闭）」；默认模型改为与输入框切换按钮同款的只选不输选择器；会话订阅保活（切回不再重拉）与按会话记忆滚动位置；动态/静态资源 gzip 协商；思考面板随最新行滚动；PWA 图标与名称更新为 π 品牌。
+- **hub 进程可识别** — hub / 登录数据库子进程 / reaper 的进程名分别为 `pi-webhub` / `pi-webhub-auth` / `pi-webhub-reap`（只写 `/proc/self/comm`，命令行不变，身份核验不受影响）。
+- **显式 `timeout_s` 也享有宽限 + 延长** — `Agent` 与 `SubagentWorkflow` 显式超时进入宽限窗口并可 `extend_subagent_timeout`，`timeoutPolicy` 随 run 持久化与 resume 继承。
+- 子会话写入 `subagent:child` 标记条目，历史列表据此区分主会话与子代理会话。
+
+### Fixed
+
+- 流式思考/正文首个片段偶发重复（「AllAll」）：assistant `message_start` 不再携带 pi 仍在改写的共享 content，快照的 inflight 改由已发出的增量重建。
+- 历史分页：每读一个会话头泄漏一个 fd 预留（约 28 个文件后永久失效）；续翻时页内未按修改时间排序；fd 预留恰好释放一次。
+- 网页 `message_agent` 回复根会话在 transcript 中不可见；控制操作在切换会话后仍指向首个打开的会话。
+- 超过 `setTimeout` 2³¹−1 ms 的延时改为分段重排；终态 run 的耗时冻结在 settle 时刻。
+- 一批布局问题：顶栏图标被挤压/被连接状态遮挡、语言与设置按钮间距、手机额度卡片过窄、fleet 树空箭头列、bash 任务行长命令换行错乱、composer 在短会话中悬空、思考/工具/diff/代码区滚动卡死、长路径换行、worktree 面板与 diff 列表状态保持等。
+- 会话列表称谓由「代理」改为「会话」；git `--untracked-files` 绑定方式导致 worktree 探测漏报改动；hub 从 `/proc/self/cmdline` 记录 argv。
+
+### Changed
+
+- 网页 UI JS gzip 预算提升到 232 KiB（steer 撤回 + 历史会话 UI）。
+- worktree 采样时间移入摘要提示；worktree 面板默认折叠。
+
 ## [0.3.0] - 2026-10-07
 
 一个月的主线累积（652 commits）：web-hub 浏览器端从零到全功能、consult 专家请教、系统提示词冻结快照、cache-ttl 自适应、workflow 编排体系、subagent 崩溃恢复，以及一批移动端体验打磨。
@@ -207,6 +237,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-subagent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-subagent/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.2.1...v0.3.0
 [0.2.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Newbluecake/pi-subagent/releases/tag/v0.1.0
