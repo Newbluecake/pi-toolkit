@@ -11,6 +11,7 @@ export type IconName =
   | "arrow-up"
   | "send-plane"
   | "ban"
+  | "bot"
   | "branch"
   | "check"
   | "chev-left"
@@ -57,6 +58,7 @@ export const ICON_NAMES: readonly IconName[] = [
   "arrow-up",
   "send-plane",
   "ban",
+  "bot",
   "branch",
   "check",
   "chev-left",

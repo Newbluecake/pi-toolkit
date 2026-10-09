@@ -63,15 +63,13 @@
 }
 
 .fleet-summary-bar[aria-expanded="true"] .chev {
-  transform: rotate(90deg);
+  transform: rotate(180deg);
 }
 
-/* 竖排面板名:writing-mode: vertical-rl —— CJK 直立、拉丁侧转,中英都只占一列宽。 */
-.fleet-summary-bar .panel-title {
-  writing-mode: vertical-rl;
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  letter-spacing: 0.05em;
+/* 2026-10-09: the sideways "子 Agent" label read oddly — a bot glyph stands in for it
+ * (the name lives in the button's aria-label). */
+.fleet-summary-bar .fab-icon {
+  color: var(--c-text-2);
 }
 
 /* 计数徽标:复用 `.pill`/`[data-st]` 语义(primitives.css)—— running>0 时 running 色

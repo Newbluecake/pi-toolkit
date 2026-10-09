@@ -99,6 +99,16 @@
   cursor: pointer;
 }
 
+/* 2026-10-09 「文字和下面的图标不是特别对齐」: when the title leads the bar (no back / drawer
+ * button before it) pull the h2 6px into the gutter so the toggle's inline padding lands
+ * there and the title's first glyph sits on the same x as the row icons below. The offset
+ * goes on the h2, NOT the toggle: a negative margin on the toggle shrank the h2's
+ * max-content by 6px while the toggle's `max-width: 100%` clamped against it — the title
+ * ellipsized again with free space after it (measured live: text 294px in a 288px box). */
+.detail-titlebar > .detail-title:first-child {
+  margin-left: -6px;
+}
+
 .detail-title-toggle:hover {
   background: var(--c-surface-2);
 }

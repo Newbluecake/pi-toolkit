@@ -55,6 +55,13 @@
       <rect x="9" y="9" width="11" height="11" rx="2" />
       <path d="M5.5 15V6a2 2 0 0 1 2-2H15" />
     </symbol>
+    <!-- robot/"bot" (2026-10-09, fleet floating tab — replaces the sideways 「子 Agent」 label;
+         `layers` already means the agents-list drawer toggle). Same stroke family. -->
+    <symbol id="i-bot" viewBox="0 0 24 24">
+      <rect x="4" y="8" width="16" height="12" rx="2" />
+      <path d="M12 4.5V8M9 13v1.5M15 13v1.5M2 13v3M22 13v3" />
+      <circle cx="12" cy="3.5" r="1" />
+    </symbol>
     <symbol id="i-cpu" viewBox="0 0 24 24">
       <rect x="7" y="7" width="10" height="10" rx="2" />
       <path d="M10 3.5V7M14 3.5V7M10 17v3.5M14 17v3.5M3.5 10H7M3.5 14H7M17 10h3.5M17 14h3.5" />

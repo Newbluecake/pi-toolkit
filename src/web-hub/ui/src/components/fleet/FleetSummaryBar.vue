@@ -12,7 +12,9 @@
   (沿用 ui-design.md §9「不占位」)。浮层机制(原 FleetPanel 的 document 监听 +
   `.tree-scroll` 绝对定位)已随 FleetPanel 一起删除;Esc/外点关闭契约移交给 FleetDrawer(§6.4)。
 
-  竖排 tab 的可见内容只有「图标 + 面板名 + 计数徽标」;聚合计数(running/总数/成本)全部
+  2026-10-09 「这个单词竖过来感觉很怪」: 竖排面板名去掉,改为「‹ + bot 图标 + 计数徽标」——
+  ‹ 指向抽屉滑出的方向(右侧),面板名只留在 aria-label 里。
+  竖排 tab 的可见内容只有「图标 + 计数徽标」;聚合计数(running/总数/成本)全部
   收进 `aria-label`(不给 `title` —— ui-design §6.3「不依赖 hover」,visual 的
   shell-no-title-tooltips 在触屏档位断言全页无 [title])。
 -->
@@ -51,8 +53,8 @@ const ariaLabel = computed(() => {
     :aria-label="ariaLabel"
     @click="emit('toggle')"
   >
-    <AppIcon name="chev-right" class="icon icon-sm chev" />
-    <span class="panel-title">{{ t("fleet.panelTitle") }}</span>
+    <AppIcon name="chev-left" class="icon icon-sm chev" />
+    <AppIcon name="bot" class="icon fab-icon" />
     <span class="pill fab-count" :data-st="summary.running > 0 ? 'running' : undefined">
       <span v-if="summary.running > 0" class="dot"></span>
       <span class="num">{{ summary.total }}</span>

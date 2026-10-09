@@ -73,9 +73,10 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
     const bar = wrapper.find(".fleet-summary-bar");
     expect(bar.exists()).toBe(true);
-    // 2026-10 悬浮化:可见面只剩面板名 + 计数徽标(行名在抽屉里的树上 —— fleet-tree.test.ts
-    // 的职责);聚合计数(running/成本)进 aria-label,不再是可见文本
-    expect(bar.text()).toContain("Subagents");
+    // 2026-10 悬浮化:可见面只剩图标 + 计数徽标(2026-10-09 竖排面板名改为 bot 图标;行名
+    // 在抽屉里的树上 —— fleet-tree.test.ts 的职责);面板名与聚合计数进 aria-label
+    expect(bar.text()).not.toContain("Subagents");
+    expect(bar.attributes("aria-label")).toContain("Subagents");
     expect(bar.get(".fab-count").text()).toBe("1");
     expect(bar.attributes("aria-controls")).toBe("fleet-drawer");
     expect(bar.attributes("aria-label")).toContain("1 running");

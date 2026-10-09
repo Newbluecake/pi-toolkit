@@ -325,12 +325,15 @@ describe("fleet/summary.ts 纯函数", () => {
 });
 
 describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘竖排 tab)", () => {
-  it("竖排 tab:可见面 = 图标/面板名/计数徽标,聚合计数全进 aria-label;点击发 toggle", async () => {
+  it("竖排 tab:可见面 = 图标/计数徽标,聚合计数全进 aria-label;点击发 toggle", async () => {
     const wrapper = mount(FleetSummaryBar, { props: { rows: DASHBOARD_ROWS, open: false } });
     const btn = wrapper.get(".fleet-summary-bar");
     expect(btn.attributes("aria-controls")).toBe("fleet-drawer");
     expect(btn.attributes("aria-expanded")).toBe("false");
-    expect(btn.get(".panel-title").text()).toBe("Subagents");
+    // 2026-10-09 「这个单词竖过来感觉很怪」: 竖排面板名改为 bot 图标,名字只在 aria-label
+    expect(btn.find(".panel-title").exists()).toBe(false);
+    expect(btn.get(".fab-icon use").attributes("href")).toBe("#i-bot");
+    expect(btn.text()).not.toContain("Subagents");
     // 徽标只露总数;running 状态由呼吸点(data-st="running")表达
     expect(btn.get(".fab-count").text()).toBe("6");
     expect(btn.get(".fab-count").attributes("data-st")).toBe("running");
