@@ -396,8 +396,10 @@ describe("DetailHeader.vue — worktree panel mount (worktree-web W4)", () => {
     const panel = wrapper.find(".wt-panel");
     expect(panel.exists()).toBe(true);
     expect(wrapper.find(".wt-sum-text").text()).toBe("master@0123456 · worktrees 1");
-    // mounted after the metrics block — the header's bottom
-    const kids = wrapper.find(".detail-head").element.children;
+    // mounted at the info block's bottom — the last row of `.detail-head-info` (2026-10
+    // 「红框收起」: the four info rows now live inside the collapsible block, itself the
+    // header's last child)
+    const kids = wrapper.find(".detail-head-info").element.children;
     expect(kids[kids.length - 1]).toBe(panel.element);
   });
 
@@ -441,8 +443,9 @@ describe("DetailHeader.vue — bash-jobs panel mount (bash-jobs-panel 包 B)", (
     const panel = wrapper.find(".bj-panel");
     expect(panel.exists()).toBe(true);
     expect(wrapper.find(".bj-sum-text").text()).toBe("bash 1 running");
-    // mounted at the header's bottom, after the (absent here) worktree slot
-    const kids = wrapper.find(".detail-head").element.children;
+    // mounted at the info block's bottom (`.detail-head-info`), after the (absent here)
+    // worktree slot — 2026-10 「红框收起」 moved the info rows into the collapsible block
+    const kids = wrapper.find(".detail-head-info").element.children;
     expect(kids[kids.length - 1]).toBe(panel.element);
   });
 
@@ -461,7 +464,7 @@ describe("DetailHeader.vue — bash-jobs panel mount (bash-jobs-panel 包 B)", (
         narrow: false,
       },
     });
-    const kids = [...wrapper.find(".detail-head").element.children];
+    const kids = [...wrapper.find(".detail-head-info").element.children];
     const wtIdx = kids.findIndex((el) => el.classList.contains("wt-panel"));
     const bjIdx = kids.findIndex((el) => el.classList.contains("bj-panel"));
     expect(wtIdx).toBeGreaterThanOrEqual(0);

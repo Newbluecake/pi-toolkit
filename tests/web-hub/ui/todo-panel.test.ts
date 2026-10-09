@@ -123,8 +123,9 @@ describe("DetailHeader todo mount (todo-web plan §4, T4)", () => {
     const panel = wrapper.find(".todo-panel");
     expect(panel.exists()).toBe(true);
     expect(wrapper.find(".todo-sum-text").text()).toBe("Tasks 8 · 3 done · 2 active");
-    // mounted after the metrics block — the header's bottom
-    const kids = wrapper.find(".detail-head").element.children;
+    // mounted at the info block's bottom (2026-10 「红框收起」: the info rows live inside
+    // `.detail-head-info`, itself the header's last child)
+    const kids = wrapper.find(".detail-head-info").element.children;
     expect(kids[kids.length - 1]).toBe(panel.element);
   });
 

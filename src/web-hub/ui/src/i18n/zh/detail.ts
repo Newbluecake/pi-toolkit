@@ -11,6 +11,9 @@ const detail = {
   notConnectedTitle: "该会话未连接",
   notConnectedBody: "它可能已退出，或链接已过期。",
   sessionDetailsAria: "会话详情",
+  // 2026-10 「红框部分支持收起，点击标题展开」：标题行的展开/收起开关（aria-label，展开+收起
+  // 合一描述，同 todoToggleAria 语法；状态由 aria-expanded 承载）。
+  headToggleAria: "展开/收起会话信息",
   kvCwd: "cwd",
   kvSession: "会话",
   kvModel: "模型",

@@ -66,15 +66,71 @@
 
 .detail-title {
   min-width: 0;
+  display: flex;
+  align-items: center;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  letter-spacing: -0.01em;
+}
+
+/* 2026-10 (user request 「红框部分支持收起，点击标题展开」): the title doubles as the disclosure
+ * toggle for the info block below (`.detail-head-info`). The button carries the clamp +
+ * ellipsis so the old two-line/one-line title truncation survives verbatim; the leading
+ * chevron uses the same rotate-on-open grammar as `.session-sum`/`.todo-sum`/`.wt-sum`
+ * (chev-right → 90° = expanded). The h2 keeps `id="detail-title"` (the detail region's
+ * aria-labelledby target) — see DetailHeader.vue. */
+.detail-title-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 1px 6px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.detail-title-toggle:hover {
+  background: var(--c-surface-2);
+}
+
+.detail-title-toggle .chev {
+  flex: none;
+  color: var(--c-text-3);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.detail-title-toggle[aria-expanded="true"] .chev {
+  transform: rotate(90deg);
+}
+
+.detail-title-text {
+  min-width: 0;
   overflow: hidden;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2; /* phones: two lines, then ellipsis */
   line-clamp: 2;
   overflow-wrap: anywhere;
-  font-size: var(--fs-lg);
-  font-weight: var(--fw-semibold);
-  letter-spacing: -0.01em;
+}
+
+/* the collapsible block under the titlebar: mirrors `.detail-head`'s own row grammar (single
+ * minmax column, the 2026-10-06 ×1/4 row gap — zeroed under `pointer: coarse` below) so the
+ * wrapped rows lay out exactly as they did as direct `.detail-head` children. Not rendered
+ * at all while collapsed (v-if in DetailHeader.vue). */
+.detail-head-info {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  min-width: 0;
 }
 
 /* session info: one-line summary, tap to expand full values (no hover tooltips) */
@@ -244,7 +300,7 @@
 }
 
 @media (min-width: 768px) {
-  .detail-title {
+  .detail-title-text {
     -webkit-line-clamp: 1;
     line-clamp: 1;
   }
@@ -276,7 +332,7 @@
     display: none;
   }
 
-  .detail-title {
+  .detail-title-text {
     -webkit-line-clamp: 1;
     line-clamp: 1;
   }
@@ -285,7 +341,7 @@
 @media (pointer: coarse) {
   /* 2026-10-06 field reports ("顶部的垂直间隔比较大" ×3): rows 28px, stack gap gone, bottom
    * padding minimal — the header should read as one tight info strip on touch, not a stack of
-   * airy cards. */
+   * airy cards. The info block mirrors its parent: internal gap zeroed with `.detail-head`'s. */
   .session-sum {
     min-height: 16px; /* ×1/4 pitch (2026-10-06: "会话详情间隔缩小为四分之一") */
     line-height: 1.2;
@@ -294,5 +350,17 @@
   .detail-head {
     gap: 0;
     padding-bottom: var(--sp-1);
+  }
+
+  .detail-head-info {
+    gap: 0;
+  }
+
+  /* ≥44px hit box for the title toggle on touch (§6.3 `shell-touch-targets-44px` — the
+   * harness measures every button's own rect; desktop fine pointers keep the compact bar). */
+  .detail-title-toggle {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 6px;
   }
 }

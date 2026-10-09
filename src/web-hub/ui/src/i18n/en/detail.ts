@@ -8,6 +8,9 @@ const detail = {
   notConnectedTitle: "This session is not connected",
   notConnectedBody: "It may have exited, or the link is stale.",
   sessionDetailsAria: "Session details",
+  // 2026-10 「红框部分支持收起，点击标题展开」: the detail-title disclosure toggle (aria-label —
+  // combined expand/collapse wording, same grammar as todoToggleAria; state rides aria-expanded).
+  headToggleAria: "Expand or collapse session info",
   kvCwd: "cwd",
   kvSession: "session",
   kvModel: "model",

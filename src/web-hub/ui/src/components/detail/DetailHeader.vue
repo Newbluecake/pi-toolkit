@@ -23,12 +23,22 @@
   header altogether — `SessionInfo`'s summary line carries a `$…` chip and its expanded kv
   panel carries the cost row (incl. the sub-agent aside). The `metricsCollapsed` fold state,
   the `.metrics-summary` toggle and `detail.metricsToggleAria` went with it.
+
+  2026-10 (user request 「红框部分支持收起，点击标题展开」): the info block under the titlebar
+  (SessionInfo / TodoPanel / WorktreePanel / BashJobsPanel) collapses behind the title itself —
+  the title text is wrapped in a disclosure <button> (h2 keeps `id="detail-title"`), the state
+  is the browser-local `pwh_detail_head_collapsed` pref (global, fail-open to EXPANDED; see
+  `composables/useDetailHeadCollapse.ts`), and the transient `<p>` notices stay outside the
+  block. Styles: `.detail-title-toggle` / `.detail-title-text` / `.detail-head-info` in
+  detail.css.
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { useDetailHeadCollapse } from "../../composables/useDetailHeadCollapse.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import { managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { DetailHeaderEmits, DetailHeaderProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
@@ -151,6 +161,26 @@ const fpNotice = computed(() => {
 });
 const fpDismissedId = ref<string | null>(null);
 const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value.id !== fpDismissedId.value);
+
+// ---------------------------------------------------------------------------
+// 2026-10 (user request 「红框部分支持收起，点击标题展开」): the whole info block under the
+// titlebar — SessionInfo / TodoPanel / WorktreePanel / BashJobsPanel — collapses behind the
+// title itself. The preference is browser-local (`pwh_detail_head_collapsed`, "1" = collapsed),
+// global (not per session) and fails open to EXPANDED, so the header stays byte-identical for
+// anyone who never toggles. The transient `<p>` notices above the block (stop error, first-
+// prompt refill) are NOT part of the collapsible block — an alert must never be hidden by a
+// layout preference.
+// ---------------------------------------------------------------------------
+const headCollapse = useDetailHeadCollapse({ storage: browserLocalStorage() });
+const headCollapsed = headCollapse.collapsed; // top-level ref → template auto-unwrap
+
+/** Drag-select guard: a click that ends an in-title text selection must read as a selection,
+ * not as a toggle (desktop copy path — see the 2026-10 dispatcher ruling). */
+function onToggleHeadInfo(): void {
+  const sel = typeof window === "undefined" ? null : (window.getSelection?.() ?? null);
+  if (sel !== null && sel.toString() !== "") return;
+  headCollapse.toggle();
+}
 </script>
 
 <template>
@@ -174,7 +204,22 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
       >
         <AppIcon name="chev-left" class="icon-lg" />
       </button>
-      <h2 class="detail-title" id="detail-title">{{ title }}</h2>
+      <!-- 2026-10 「红框部分支持收起」: the title is the disclosure toggle for the info block
+           below (button inside the h2 keeps `id="detail-title"` — the detail region's
+           aria-labelledby target — while gaining native keyboard/AT toggle semantics). -->
+      <h2 class="detail-title" id="detail-title">
+        <button
+          class="detail-title-toggle"
+          type="button"
+          :aria-expanded="headCollapsed ? 'false' : 'true'"
+          aria-controls="detail-head-info"
+          :aria-label="t('detail.headToggleAria')"
+          @click="onToggleHeadInfo"
+        >
+          <AppIcon name="chev-right" class="icon-sm chev" />
+          <span class="detail-title-text">{{ title }}</span>
+        </button>
+      </h2>
       <StatusPill :state="visual" :label="statusLabel" />
       <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
         t("spawn.badgeRestoring")
@@ -210,25 +255,30 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
       </button>
     </p>
 
-    <SessionInfo
-      :session="session"
-      :card="card"
-      :cost-usd="status?.costUsd"
-      :subagent-cost-usd="status?.subagentCostUsd"
-    />
+    <!-- 2026-10 「红框部分支持收起」: the collapsible block. `v-if` (not `hidden`) so the inner
+         panels' own `<details>` expanded state cannot leak through a collapsed header — the
+         rows are simply not rendered. -->
+    <div v-if="!headCollapsed" id="detail-head-info" class="detail-head-info">
+      <SessionInfo
+        :session="session"
+        :card="card"
+        :cost-usd="status?.costUsd"
+        :subagent-cost-usd="status?.subagentCostUsd"
+      />
 
-    <!-- todo-web T4: the main session's task list, mirrored onto `agent.todo` by the status
-         reducer; the panel renders nothing when the wire is absent or empty. -->
-    <TodoPanel v-if="agent.todo" :todo="agent.todo" />
+      <!-- todo-web T4: the main session's task list, mirrored onto `agent.todo` by the status
+           reducer; the panel renders nothing when the wire is absent or empty. -->
+      <TodoPanel v-if="agent.todo" :todo="agent.todo" />
 
-    <!-- worktree-web W4: git worktrees of the session cwd's repo, straight from
-         `status.worktrees`; renders nothing when the wire is absent or has zero rows.
-         worktree-diff D5 (§4.1): `agentKey`/`session` are the wtdiff scope inputs — absent
-         (old mounts) or a missing hub cap keeps the panel byte-identical (I8). -->
-    <WorktreePanel v-if="worktrees" :worktrees="worktrees" :agent-key="agent.key" :session="session" />
+      <!-- worktree-web W4: git worktrees of the session cwd's repo, straight from
+           `status.worktrees`; renders nothing when the wire is absent or has zero rows.
+           worktree-diff D5 (§4.1): `agentKey`/`session` are the wtdiff scope inputs — absent
+           (old mounts) or a missing hub cap keeps the panel byte-identical (I8). -->
+      <WorktreePanel v-if="worktrees" :worktrees="worktrees" :agent-key="agent.key" :session="session" />
 
-    <!-- bash-jobs-panel 包 B (D4): the session's own background bash jobs, straight from
-         `status.bashJobs`; renders nothing when the wire is absent or has zero rows. -->
-    <BashJobsPanel v-if="bashJobs" :jobs="bashJobs" />
+      <!-- bash-jobs-panel 包 B (D4): the session's own background bash jobs, straight from
+           `status.bashJobs`; renders nothing when the wire is absent or has zero rows. -->
+      <BashJobsPanel v-if="bashJobs" :jobs="bashJobs" />
+    </div>
   </header>
 </template>
