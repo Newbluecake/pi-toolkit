@@ -17,7 +17,8 @@ import {
   type FingerprintContextInput,
   type PrefixEstimate,
 } from "./keepalive-state.js";
-import { prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
+import { anyLongWriteSince, prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
+import { assessWarmth, MAX_TTL_MS, type CacheWarmth, type WarmthEvidence } from "./warmth.js";
 import type { AdaptiveDecision } from "./adaptive.js";
 import type { CacheAdaptiveService } from "../service/cache-adaptive.js";
 import type { CacheKeepaliveService, KeepalivePort } from "../service/cache-keepalive.js";
@@ -42,6 +43,117 @@ export interface CacheTtlDeps {
    * (passthrough; I-A1), so the extension still works before the stack wiring lands.
    */
   adaptive?: () => CacheAdaptiveService | undefined;
+}
+
+/**
+ * topic-switch plan.md P2 (#12): the read-only cache-warmth judgement surfaced by `wireCacheTtl`'s
+ * return value. `assess` never throws — any failure while gathering evidence (a stale/degraded
+ * `ctx`, a `sessionManager` that throws, etc.) degrades to `{state:"unknown", reason:"read-error"}`.
+ */
+export interface CacheWarmthPort {
+  assess(ctx: ExtensionContext, now: number, opts: { slackMs: number; ttlOverrideMs?: number }): CacheWarmth;
+}
+
+/** `wireCacheTtl`'s return value (plan.md P2 #12; was `void`, line 321 pre-change). */
+export interface CacheTtlWiring {
+  readonly warmth: CacheWarmthPort;
+}
+
+/**
+ * The last payload shape this module itself sent on the current session, written at the end of
+ * `before_provider_request` (plan.md P2): `ttl1h` is true when we forced 1h or the payload already
+ * carried it; `cached` reflects whether the payload had any ephemeral cache_control breakpoint at
+ * all. Reset to `undefined` on every `session_start` (new session / resume never inherits a prior
+ * session's lastSent) and filtered by `sessionId` on read (never trusted across sessions).
+ */
+interface LastSent {
+  at: number;
+  sessionId: string;
+  provider: string;
+  modelId: string;
+  ttl1h: boolean;
+  cached: boolean;
+}
+
+/**
+ * Builds the `CacheWarmthPort` from the live closures `wireCacheTtl` owns (mode, lastSent,
+ * keepalive/adaptive holder read-throughs — re-fetched on every `assess` call so a stack rebuild
+ * after this port was handed out is picked up automatically, plan.md P2).
+ */
+function createWarmthPort(
+  deps: CacheTtlDeps,
+  getAdaptive: () => CacheAdaptiveService | undefined,
+  getMode: () => CacheTtlMode,
+  getLastSent: () => LastSent | undefined,
+): CacheWarmthPort {
+  return {
+    assess(ctx, now, opts) {
+      try {
+        const model = ctx?.model as { api?: string; provider?: string; id?: string } | undefined;
+        const route = { api: model?.api ?? "", provider: model?.provider ?? "", modelId: model?.id ?? "" };
+        const sessionId = readSessionId(ctx);
+
+        const ledgerUsage = readLatestAssistantUsage(ctx);
+        const ledger: WarmthEvidence["ledger"] =
+          ledgerUsage.source === "usage"
+            ? {
+                ...(ledgerUsage.at !== undefined ? { at: ledgerUsage.at } : {}),
+                ...(ledgerUsage.providerId !== undefined ? { provider: ledgerUsage.providerId } : {}),
+                modelId: ledgerUsage.modelId,
+                cacheRead: ledgerUsage.cacheRead,
+                cacheWrite: ledgerUsage.cacheWrite,
+                ...(ledgerUsage.cacheWrite1h !== undefined ? { cacheWrite1h: ledgerUsage.cacheWrite1h } : {}),
+              }
+            : undefined;
+
+        const sent = getLastSent();
+        const lastSentEvidence: WarmthEvidence["lastSent"] =
+          sent && sent.sessionId === sessionId
+            ? { at: sent.at, provider: sent.provider, modelId: sent.modelId, ttl1h: sent.ttl1h, cached: sent.cached }
+            : undefined;
+
+        const port = deps.keepalive?.();
+        const report = port?.report();
+        const provenReadAt = port?.provenCacheReadAt();
+        const keepalive: NonNullable<WarmthEvidence["keepalive"]> = {
+          ...(provenReadAt !== undefined ? { provenReadAt } : {}),
+          ...(report?.window.lastReadStartedAt !== undefined
+            ? { lastReadStartedAt: report.window.lastReadStartedAt }
+            : {}),
+          ...(report?.window.pingStartedAt !== undefined ? { pingStartedAt: report.window.pingStartedAt } : {}),
+          pingInFlight: report?.window.pingInFlight ?? false,
+          pingScheduled: (report?.armed ?? false) && report?.window.nextPingAt !== undefined,
+        };
+
+        const adaptiveSvc = getAdaptive();
+        const adaptiveSnapshot = adaptiveSvc?.snapshot();
+        const adaptive: NonNullable<WarmthEvidence["adaptive"]> = {
+          covers: adaptiveSvc?.coversPrefix(0) ?? false,
+          any1hWrites: adaptiveSnapshot
+            ? adaptiveSnapshot.confirmed1hWrites + adaptiveSnapshot.unconfirmed1hWrites > 0
+            : false,
+        };
+
+        const recent1hWrite = anyLongWriteSince(ctx, now - MAX_TTL_MS);
+
+        const evidence: WarmthEvidence = {
+          now,
+          route,
+          ledger,
+          ...(lastSentEvidence !== undefined ? { lastSent: lastSentEvidence } : {}),
+          keepalive,
+          adaptive,
+          recent1hWrite,
+          mode: getMode(),
+          slackMs: opts.slackMs,
+          ...(opts.ttlOverrideMs !== undefined ? { ttlOverrideMs: opts.ttlOverrideMs } : {}),
+        };
+        return assessWarmth(evidence);
+      } catch {
+        return { state: "unknown", reason: "read-error" };
+      }
+    },
+  };
 }
 
 const MODE_LABEL: Record<CacheTtlMode, string> = {
@@ -318,7 +430,7 @@ function wireCacheEvents(
   pi.on("session_info_changed", (_event, ctx) => invalidateBoth("session-changed", ctx));
 }
 
-export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: CacheTtlDeps = {}): void {
+export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: CacheTtlDeps = {}): CacheTtlWiring {
   let mode = settings.cacheTtl.mode;
   let persisted = mode;
   let dirty = false;
@@ -329,6 +441,11 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   let capturePort: KeepalivePort | undefined;
   let capture: RequestCapture | undefined;
 
+  // topic-switch plan.md P2: the last payload shape this module itself sent on the current
+  // session (see `LastSent`'s doc comment). `undefined` on a fresh activation and reset on every
+  // `session_start` — a new session or resume never inherits a prior session's lastSent.
+  let lastSent: LastSent | undefined;
+
   // adaptive plan.md §7.1 (default-on revision): the single `adaptiveEnabled`
   // flag gates every adaptive consultation. Flag off ⇒ adaptive mode degrades
   // to passthrough and today's auto/on/off behaviour is byte-for-byte unchanged.
@@ -337,7 +454,10 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
 
   wireCacheEvents(pi, deps, getAdaptive);
 
-  pi.on("session_start", async (_event, ctx) => updateStatus(ctx, mode, dirty, deps, getAdaptive));
+  pi.on("session_start", async (_event, ctx) => {
+    lastSent = undefined;
+    updateStatus(ctx, mode, dirty, deps, getAdaptive);
+  });
   pi.on("before_provider_request", (event, ctx) => {
     const port = deps.keepalive?.();
     port?.syncModeState(mode, dirty);
@@ -361,12 +481,18 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     // adaptive plan.md §3.1 step 5: one ledger read, two consumers (the
     // adaptive decision below and the keepalive capture's prefix estimate).
     const ledger = readLatestAssistantUsage(ctx);
+    // topic-switch plan.md P2: computed once, reused by the adaptive decision below AND the
+    // `lastSent` write further down ("shape 只算一次，adaptive 复用") — a read-only walk of the
+    // pre-rewrite payload. `rewrite()` only ever edits an EXISTING `cache_control.ttl` in place,
+    // never adds a new breakpoint, so this pre-rewrite shape's `ephemeralBreakpoints`/`ttl1h`
+    // accurately describe the payload actually sent regardless of which `action` runs below.
+    const shape = inspectPayload(event.payload);
 
     // §3.1 step 6: adaptive per-request decision. I-A9: mutually exclusive with
     // the §6.3 consumeUpgrade below — `mode` is never both "adaptive" and "auto".
     const adaptiveSvc = mode === "adaptive" ? getAdaptive() : undefined;
     const decision: AdaptiveDecision | undefined = adaptiveSvc?.decide(sessionId, adaptiveSvc.instanceId, {
-      shape: inspectPayload(event.payload), // read-only walk of the pre-rewrite payload
+      shape, // read-only walk of the pre-rewrite payload
       ledger,
       lineageKey: payloadLineageKey(event.payload), // review R4: prefix lineage identity
       streaming: (event.payload as { stream?: unknown }).stream === true, // review R7: can keepalive replay it?
@@ -385,6 +511,20 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           ? "strip-ttl"
           : "passthrough";
     if (mode === "adaptive") updateStatus(ctx, mode, dirty, deps, getAdaptive); // refresh the ttl-now segment
+
+    // topic-switch plan.md P2: write lastSent once the payload shape check has passed and `action`
+    // is known — every return below this point (passthrough, clone-failed, rewritten) carries it.
+    {
+      const model = ctx?.model as { provider?: string; id?: string } | undefined;
+      lastSent = {
+        at: Date.now(),
+        sessionId,
+        provider: model?.provider ?? "",
+        modelId: model?.id ?? "",
+        ttl1h: action === "force-1h" || shape.ttl1h,
+        cached: shape.ephemeralBreakpoints > 0,
+      };
+    }
 
     if (action === "passthrough") {
       // auto / adaptive-declined: never rewrite the payload — but still capture
@@ -522,4 +662,13 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
       }
     },
   });
+
+  return {
+    warmth: createWarmthPort(
+      deps,
+      getAdaptive,
+      () => mode,
+      () => lastSent,
+    ),
+  };
 }

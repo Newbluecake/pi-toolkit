@@ -41,6 +41,9 @@ export interface LedgerUsage {
   /** Review round 2 (R9): `entry.message.provider` — with `modelId` it identifies the ROUTE whose 1h
    *  lifetime the adaptive survival evidence describes. Optional (older entries / test fixtures). */
   providerId?: string;
+  /** topic-switch plan.md P2: `entry.message.timestamp` (pi-ai's own wall-clock stamp), when finite. Absent on
+   *  older entries / test fixtures — never guessed. Feeds `warmth.ts`'s proven-touch and elapsed-time checks. */
+  at?: number;
 }
 
 const UNKNOWN_LEDGER: LedgerUsage = {
@@ -57,7 +60,14 @@ const UNKNOWN_LEDGER: LedgerUsage = {
 
 interface LedgerEntryLike {
   type?: string;
-  message?: { role?: string; model?: string; provider?: string; usage?: Record<string, unknown> };
+  message?: {
+    role?: string;
+    model?: string;
+    provider?: string;
+    usage?: Record<string, unknown>;
+    /** topic-switch plan.md P2: pi-ai's wall-clock stamp on the message, when present. */
+    timestamp?: unknown;
+  };
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -83,6 +93,7 @@ export function readLatestAssistantUsage(ctx: LedgerCtxLike | undefined): Ledger
         const usage = entry.message.usage;
         const finite = (v: unknown): number | undefined =>
           typeof v === "number" && Number.isFinite(v) ? v : undefined;
+        const at = finite(entry.message.timestamp);
         return {
           source: "usage",
           cacheRead: finite(usage.cacheRead) ?? 0,
@@ -94,6 +105,7 @@ export function readLatestAssistantUsage(ctx: LedgerCtxLike | undefined): Ledger
           entriesLength: entries.length,
           modelId: typeof entry.message.model === "string" ? entry.message.model : "",
           ...(typeof entry.message.provider === "string" ? { providerId: entry.message.provider } : {}),
+          ...(at !== undefined ? { at } : {}),
         };
       }
     }
@@ -116,4 +128,39 @@ export function prefixFromLedger(ledger: LedgerUsage): PrefixEstimate {
 /** Keepalive-facing narrow view; behavior identical to the pre-extraction version in cache-ttl.ts. */
 export function readLatestAssistantCacheTokens(ctx: LedgerCtxLike | undefined): PrefixEstimate {
   return prefixFromLedger(readLatestAssistantUsage(ctx));
+}
+
+/**
+ * topic-switch plan.md P2: a longer-range "has there been a 1h write" signal than
+ * `readLatestAssistantUsage(ctx).cacheWrite1h` alone (which only reflects the single most recent
+ * assistant entry). Scans assistant-usage entries newest-to-oldest: a `cacheWrite1h > 0` entry
+ * proves `true`; a timestamped entry older than `sinceMs` proves `false` (nothing newer carried
+ * the evidence, so none exists in range); exhausting the `maxEntries` traversal budget (bounding
+ * the scan for zero-hang, regardless of how many entries are assistant-usage ones) or an
+ * unreadable ledger degrades to `"unknown"` — never a guess either way.
+ */
+export function anyLongWriteSince(
+  ctx: LedgerCtxLike | undefined,
+  sinceMs: number,
+  maxEntries = 400,
+): boolean | "unknown" {
+  try {
+    const raw = ctx?.sessionManager?.getEntries?.();
+    if (!Array.isArray(raw)) return "unknown";
+    const entries = raw as LedgerEntryLike[];
+    const floor = Math.max(-1, entries.length - 1 - maxEntries);
+    for (let i = entries.length - 1; i > floor; i -= 1) {
+      const entry = entries[i];
+      if (entry?.type !== "message" || entry.message?.role !== "assistant" || !entry.message.usage) continue;
+      const usage = entry.message.usage;
+      const cacheWrite1h =
+        typeof usage.cacheWrite1h === "number" && Number.isFinite(usage.cacheWrite1h) ? usage.cacheWrite1h : 0;
+      if (cacheWrite1h > 0) return true;
+      const ts = entry.message.timestamp;
+      if (typeof ts === "number" && Number.isFinite(ts) && ts < sinceMs) return false;
+    }
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
 }
