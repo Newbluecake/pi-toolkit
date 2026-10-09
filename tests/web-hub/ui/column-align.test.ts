@@ -37,3 +37,48 @@ describe("transcript ↔ control dock column alignment", () => {
     expect(read("main.ts")).toMatch(/setProperty\("--sb-w"/);
   });
 });
+
+describe("ask_user card rides the composer column (2026-10-09 「ask user 宽度和输入框+发送按钮的整体宽度保持一致」)", () => {
+  const control = read("styles/control.css");
+  const dialog = read("styles/dialog.css");
+  const agentDetail = read("components/detail/AgentDetail.vue");
+
+  it("the form shares ONE geometry rule with the dock's bordered children (control.css, single source)", () => {
+    // One rule covers command-result, command-confirm AND the slot-mounted ask_user form —
+    // extending the existing selector list, not re-declaring the calc anywhere else.
+    const shared =
+      /\.dock\.dock-ctl > \.command-result,\s*\.dock\.dock-ctl > \.command-confirm,\s*\.detail-main > \.ask-user-slot > \.ask-user-form\s*\{[^}]*\}/.exec(
+        control,
+      )?.[0] ?? "";
+    expect(shared).not.toBe("");
+    expect(shared).toMatch(
+      /width:\s*calc\(\s*100% - max\(var\(--col-gutter\), env\(safe-area-inset-left\)\) - max\(var\(--col-gutter\), env\(safe-area-inset-right\)\)\s*\)/,
+    );
+    expect(shared).toMatch(/max-width:\s*calc\(var\(--transcript-max\) - 2 \* var\(--col-gutter\)\)/);
+    // the form is NOT a dock child, so the centring must live in the shared rule itself
+    expect(shared).toMatch(/margin-inline:\s*auto/);
+  });
+
+  it("the slot (above the dock, outside `.dock-ctl`) mirrors the dock's `--sb-w` compensation", () => {
+    // AgentDetail mounts the slot BEFORE DetailDock as a `.detail-main` sibling — that is why
+    // the box is reproduced (slot padding + shared rule) instead of inherited from `> *`.
+    const slotIdx = agentDetail.indexOf('class="ask-user-slot"');
+    const dockIdx = agentDetail.indexOf("<DetailDock");
+    expect(slotIdx).toBeGreaterThan(-1);
+    expect(dockIdx).toBeGreaterThan(slotIdx);
+    expect(rule(dialog, ".ask-user-slot")).toMatch(/padding-right:\s*var\(--sb-w, 0px\)/);
+  });
+
+  it("dialog.css never declares the form's width — no second geometry source can drift", () => {
+    const formRule = rule(dialog, ".ask-user-form");
+    expect(formRule).toMatch(/overflow-y:\s*auto/); // still the form's own scrollport
+    expect(formRule).not.toMatch(/(^|\s)(width|max-width):/);
+  });
+
+  it("2026-10-09: on desktop the attach button stays in the expanded chips row while typing (no jump)", () => {
+    const upload = read("styles/upload.css");
+    expect(upload).toMatch(
+      /@media \(min-width: 1025px\)\s*\{\s*\.composer-input:has\(\.model-switcher\) \.composer-attach\s*\{[^}]*position:\s*relative/,
+    );
+  });
+});

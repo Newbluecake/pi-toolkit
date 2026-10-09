@@ -55,6 +55,21 @@
   margin-block: -10px;
 }
 
+/* 2026-10-09 BUG 「输入一段内容之后，附件按钮的位置会发生变化」: on desktop (≥1025px) the
+ * bottom row never collapses while typing (control.css's 2026-10-08 wide-band rule keeps the
+ * ring in flow), but this button still fell back to its absolute full-height placement on
+ * `.has-text` — jumping ~14px up next to the in-flow ring. Mirror the expanded tier here. */
+@media (min-width: 1025px) {
+  .composer-input:has(.model-switcher) .composer-attach {
+    position: relative;
+    top: auto;
+    right: auto;
+    bottom: auto;
+    min-height: 44px;
+    margin-block: -10px;
+  }
+}
+
 /* fs-scale: the paperclip grows like every icon-sm, but CAPPED at 20px — the 24px slot is
  * fixed px, and an uncapped glyph (28px at fs=2, 42px at fs=3) would overlap the neighbouring
  * ring (same runaway class `.stop-btn .icon` got capped for, control.css). */

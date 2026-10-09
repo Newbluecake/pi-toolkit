@@ -64,13 +64,24 @@
  * PADDING — invisible for the borderless rows, but a bordered card (command result / confirm)
  * then drew its border at the full padded width, 12px wider than the composer row on each
  * side (and lost its own padding). Bordered children shrink by the gutter instead, so their
- * border lines up with the composer's left edge and the send button's right edge. */
+ * border lines up with the composer's left edge and the send button's right edge.
+ *
+ * 2026-10-09 「ask user 宽度和输入框+发送按钮的整体宽度保持一致」: the ask_user form rides the
+ * SAME box. It is NOT a dock child — AgentDetail mounts `.ask-user-slot` above DetailDock, so
+ * the `> *` rule above never reaches it — and the structural selector here reproduces the
+ * geometry instead (`.ask-user-slot` mirrors the dock's `--sb-w` right padding in dialog.css so
+ * both centre on the transcript line; the gutter calc below then does the rest). If the form
+ * is ever moved INSIDE the dock, drop this selector and add it to the dock-child list above.
+ * `margin-inline: auto` is redundant for the dock children (the `> *` rule already sets it)
+ * and does the centring for the slot-mounted form. */
 .dock.dock-ctl > .command-result,
-.dock.dock-ctl > .command-confirm {
+.dock.dock-ctl > .command-confirm,
+.detail-main > .ask-user-slot > .ask-user-form {
   width: calc(
     100% - max(var(--col-gutter), env(safe-area-inset-left)) - max(var(--col-gutter), env(safe-area-inset-right))
   );
   max-width: calc(var(--transcript-max) - 2 * var(--col-gutter));
+  margin-inline: auto;
 }
 
 .dock.dock-ctl > .command-result {
