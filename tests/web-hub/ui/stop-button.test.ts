@@ -179,6 +179,11 @@ describe("control.css 的 stop 图标/ring 在 --fs-scale 放大时不得压住 
     const armedIdx = css.indexOf(".ctx-ring-stop-btn.armed .ctx-ring-bar");
     expect(toneIdx).toBeGreaterThanOrEqual(0);
     expect(armedIdx).toBeGreaterThan(toneIdx);
+    // 2026-10-09: armed 不再给整个命中区画方形内框,改为贴住圆环的圆形 danger-soft 光晕
+    expect(rule(".ctx-ring-stop-btn.armed")).not.toMatch(/box-shadow/);
+    const halo = rule(".ctx-ring-stop-btn.armed .ctx-ring-svg");
+    expect(halo).toMatch(/border-radius:\s*50%/);
+    expect(halo).toMatch(/var\(--c-danger-soft\)/);
     // 命中区宽度继承 .ctx-ring-btn 的 32px(2026-10-07 间隔减半), min-height 44px
     expect(rule(".ctx-ring-btn")).toMatch(/min-height:\s*44px/);
   });

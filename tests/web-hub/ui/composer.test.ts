@@ -200,6 +200,14 @@ describe("Composer.vue command mode (§7.7)", () => {
     expect(w.text()).toContain("/session");
   });
 
+  it("2026-10-09: the cmd badge sits at the head of the sub row, never before the input card (no width jitter)", async () => {
+    const w = mountComposer({ view: cmdView() });
+    await w.find("textarea").setValue("/se");
+    expect(w.find(".composer-row .cmd-badge").exists()).toBe(false);
+    const sub = w.get(".composer-sub");
+    expect(sub.element.firstElementChild?.classList.contains("cmd-badge")).toBe(true);
+  });
+
   it("a denied command never emits (palette shows the reason instead)", async () => {
     const w = mountComposer({ view: cmdView() });
     await w.find("textarea").setValue("/quit");

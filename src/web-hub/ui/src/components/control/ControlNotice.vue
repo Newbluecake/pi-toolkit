@@ -17,9 +17,10 @@
   password over plaintext HTTP ⇒ plainHttp; password behind an HTTPS-terminating proxy ⇒ https.
   The expanded state is shared (`CONTROL_ENV.noticeExpanded`) so the TopBar Control chip opens
   the same notice (§7.4) — dismissal is independent of that shared expanded flag: the TopBar
-  chip's own click handler only flips `noticeExpanded`, so it keeps working unchanged even once
-  the notice has been dismissed, it is just dismissing (this component) that hides the whole
-  `<details>`, chip-driven expansion included.
+  chip's own click handler only flips `noticeExpanded`. 2026-10-09 (「我不想经常看到这个提示」/
+  「作为终端图标的点击效果」): a dismissed notice comes BACK, expanded, while the chip holds
+  `noticeExpanded` true (× closes it again, dismissal kept) — the chip is the way to re-read it;
+  and with the plaintext opt-out pref set, the plainHttp dismissal persists in localStorage.
 -->
 <script setup lang="ts">
 import { computed, getCurrentInstance, inject, ref, watch } from "vue";
@@ -78,10 +79,12 @@ function dismissKey(v: string): string {
 }
 
 /** `plainHttp` is the one variant that only remembers the dismissal for this browser session
- * (anyone sniffing plaintext HTTP traffic is the highest-risk scenario this notice covers). */
+ * (anyone sniffing plaintext HTTP traffic is the highest-risk scenario this notice covers) —
+ * UNLESS the user explicitly opted out of plaintext warnings (`pwh_hide_plaintext_warn`,
+ * 2026-10-09 「我不想经常看到这个提示」): then it remembers the dismissal like the others. */
 function storageFor(v: string): Storage | null {
   try {
-    return v === "plainHttp" ? window.sessionStorage : window.localStorage;
+    return v === "plainHttp" && !warn.hidden.value ? window.sessionStorage : window.localStorage;
   } catch {
     return null; // storage can throw in locked-down/private-mode browsers — fail open (show it)
   }
@@ -92,11 +95,17 @@ function readDismissed(v: string): boolean {
 }
 
 const dismissed = ref(readDismissed(variant.value));
-watch(variant, (v) => {
+watch([variant, () => warn.hidden.value], ([v]) => {
   dismissed.value = readDismissed(v);
 });
 
+/** 2026-10-09 「控制已开启这个提示可以作为终端图标的点击效果」: once dismissed, the TopBar
+ * terminal chip (which flips the shared `noticeExpanded`) brings the notice back, expanded —
+ * the chip is the way to read it again; × closes it again without forgetting the dismissal. */
+const visible = computed(() => !dismissed.value || open.value);
+
 function onDismiss(): void {
+  open.value = false;
   dismissed.value = true;
   try {
     storageFor(variant.value)?.setItem(dismissKey(variant.value), "1");
@@ -107,7 +116,7 @@ function onDismiss(): void {
 </script>
 
 <template>
-  <details v-if="!dismissed" class="control-notice" :open="open" @toggle="onToggle">
+  <details v-if="visible" class="control-notice" :open="open" @toggle="onToggle">
     <summary>
       <AppIcon name="alert" class="icon-sm" />
       <span class="notice-title">{{ t("control.noticeTitle") }}</span>

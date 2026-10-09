@@ -83,6 +83,32 @@ describe("ControlNotice.vue (§7.6)", () => {
     expect(w3.find(".control-notice").exists()).toBe(true);
   });
 
+  it("2026-10-09: once dismissed, the TopBar chip (noticeExpanded) brings it back expanded; × closes it again", async () => {
+    const env = fakeEnv();
+    const w = mountNotice({ mode: "token" }, env);
+    await w.find(".notice-dismiss").trigger("click");
+    expect(w.find(".control-notice").exists()).toBe(false);
+    env.noticeExpanded.value = true; // chip click
+    await w.vm.$nextTick();
+    expect(w.find(".control-notice").exists()).toBe(true);
+    expect(w.find(".control-notice").attributes("open")).toBeDefined();
+    await w.find(".notice-dismiss").trigger("click");
+    expect(w.find(".control-notice").exists()).toBe(false);
+    expect(env.noticeExpanded.value).toBe(false);
+    expect(localStorage.getItem("webhub.controlNotice.dismissed.local")).toBe("1");
+  });
+
+  it("2026-10-09: with the plaintext-warning opt-out pref, plainHttp dismissal persists in localStorage", async () => {
+    localStorage.setItem("pwh_hide_plaintext_warn", "1");
+    const w1 = mountNotice({ mode: "password", plaintext: true });
+    await w1.find(".notice-dismiss").trigger("click");
+    expect(localStorage.getItem("webhub.controlNotice.dismissed.plainHttp")).toBe("1");
+    sessionStorage.clear(); // a fresh browser session
+    const w2 = mountNotice({ mode: "password", plaintext: true });
+    expect(w2.find(".control-notice").exists()).toBe(false);
+    localStorage.removeItem("pwh_hide_plaintext_warn");
+  });
+
   it("plainHttp dismissal only persists in sessionStorage, not localStorage", async () => {
     const w1 = mountNotice({ mode: "password", plaintext: true });
     await w1.find(".notice-dismiss").trigger("click");

@@ -1056,6 +1056,12 @@ export interface ControlHandle {
 
 ControlNotice 选择：`authMode==="password" && plaintext` ⇒ plainHttp；`password` 且经 https 代理 ⇒ https；token ⇒ local。`plaintext` 来源沿用现有 LAN 明文提示的判定（`/healthz.plaintext`）。
 
+> 2026-10-09 现场修订（追加，不改上文）：ControlNotice 已是「全部可关」——三种变体都有 ×；`local`/`https`
+> 的关闭记在 `localStorage`，`plainHttp` 默认只记在 `sessionStorage`（新会话重新出现），但用户在设置里打开
+> 「隐藏明文 HTTP 警告」（`pwh_hide_plaintext_warn`）后同样记在 `localStorage`。关闭后不再自动出现，顶栏终端
+> 图标（`noticeExpanded`）把它**重新展开显示**，× 再次收起且保留关闭记忆（用户原话「不想经常看到这个提示，
+> 作为终端图标的点击效果」）。命令模式的 `cmd` 徽标同日从输入框左侧移到下方提示行行首（防止输入框宽度抖动）。
+
 ### 7.7 v2 追加（命令、台账、代际、hub 状态）
 
 - **传输层**（`transport/types.ts` 冻结面追加，只加不改）：`CmdRequest` 加 `op:"command"`、`name?`、`args?`、`confirm?`、`expect?: {sessionId?}`、`queryOnly?`；`DialogRequest` 加 `epoch`、`queryOnly?`；`CmdOutcome` 失败分支加 `effect?: "none" | "unknown"`。fetch 超时改 **16s**（§3.3），超时 ⇒ `{ok:false, error:"E_DEADLINE", retryable:true, effect:"unknown"}`。前端发送 prompt / abort / command 时恒带 `expect.sessionId = agent.session.sessionId`（D21）。

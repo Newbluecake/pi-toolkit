@@ -843,7 +843,6 @@ watch(
     />
     <div v-if="dropActive" class="drop-overlay">{{ t("upload.dropHint") }}</div>
     <div class="composer-row">
-      <span v-if="commandMode" class="chip cmd-badge" translate="no">{{ t("control.cmdBadge") }}</span>
       <input
         ref="fileInputEl"
         class="file-input sr-only"
@@ -934,7 +933,11 @@ watch(
     </div>
     <div v-if="hint" class="composer-hint is-transient" role="status">{{ hint }}</div>
     <div v-else-if="gateHint" class="composer-hint" role="note">{{ gateHint }}</div>
+    <!-- 2026-10-09 「cmd 标记导致输入框抖动」(user picked option 2): the badge lives at the head
+         of the command-mode sub row instead of before the input card, so entering / never
+         changes the input's width. -->
     <div v-if="commandMode" class="composer-sub">
+      <span class="chip cmd-badge" translate="no">{{ t("control.cmdBadge") }}</span>
       <label class="send-as-text"
         ><input v-model="sendAsText" type="checkbox" name="send-as-text" />{{ t("control.sendAsText") }}</label
       >

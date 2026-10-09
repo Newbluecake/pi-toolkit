@@ -57,6 +57,27 @@
   padding-right: max(var(--sp-3), env(safe-area-inset-right));
 }
 
+/* 2026-10-09 「红色方框处的宽度超过了输入框的宽度」: the rule above insets each dock child by
+ * PADDING — invisible for the borderless rows, but a bordered card (command result / confirm)
+ * then drew its border at the full padded width, 12px wider than the composer row on each
+ * side (and lost its own padding). Bordered children shrink by the gutter instead, so their
+ * border lines up with the composer's left edge and the send button's right edge. */
+.dock.dock-ctl > .command-result,
+.dock.dock-ctl > .command-confirm {
+  width: calc(100% - max(var(--sp-3), env(safe-area-inset-left)) - max(var(--sp-3), env(safe-area-inset-right)));
+  max-width: calc(var(--transcript-max) - 2 * var(--sp-3));
+}
+
+.dock.dock-ctl > .command-result {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.dock.dock-ctl > .command-confirm {
+  padding-left: var(--sp-2);
+  padding-right: var(--sp-2);
+}
+
 /* 2026-10-06 field report ("输入框底部边距" too big on phones): halve the dock's bottom air. */
 @media (max-width: 767px) {
   .dock-ctl {
@@ -441,10 +462,14 @@
 /* Armed (two-step confirm), per the existing `.armed` conventions MINUS the filled danger
  * background (`.stop-btn.armed`) that would swallow the ring graphic: the icon stays danger,
  * the arc is forced to danger regardless of the usage tone (this rule must come AFTER the
- * `[data-tone]` rules above — equal specificity, source order wins), and a danger inset frame
- * marks the whole zone. */
-.ctx-ring-stop-btn.armed {
-  box-shadow: inset 0 0 0 2px var(--c-danger);
+ * `[data-tone]` rules above — equal specificity, source order wins).
+ * 2026-10-09 「点击终止的时候有一个奇怪的红色方框」: the old inset 2px frame drew a rounded
+ * SQUARE around the whole 32×44 hit zone. The armed mark now hugs the ring itself — a round
+ * danger-soft halo behind the 20px graphic — so the circle simply "lights up" red. */
+.ctx-ring-stop-btn.armed .ctx-ring-svg {
+  border-radius: 50%;
+  background: var(--c-danger-soft);
+  box-shadow: 0 0 0 3px var(--c-danger-soft);
 }
 
 .ctx-ring-stop-btn.armed .ctx-ring-bar {
@@ -537,8 +562,6 @@
 
 .cmd-badge {
   flex: none;
-  align-self: flex-start;
-  margin-top: 10px;
   background: var(--c-accent-soft);
   color: var(--c-accent);
 }
