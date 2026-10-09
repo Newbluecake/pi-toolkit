@@ -40,11 +40,14 @@
    * to its children so each child can ride the transcript column (below). The surface
    * background stays full-bleed. */
   padding-left: 0;
-  padding-right: 0;
+  /* 2026-10-09 「边缘两侧没有对齐」: mirror the transcript's reserved scrollbar gutter so the
+   * dock's children centre on the same line as `.tx-inner` (`--sb-w`: main.ts, 0 for overlay
+   * scrollbars). */
+  padding-right: var(--sb-w, 0px);
 }
 
 /* Everything inside the control dock (queue, command result/confirm, composer row) rides the
- * transcript column: same `--transcript-max` cap and the same `sp-3` side padding as
+ * transcript column: same `--transcript-max` cap and the same `--col-gutter` side padding as
  * `.tx-inner`, so the composer card's edges line up with the message/tool-card edges above.
  * `.dock.dock-ctl` (0,2,0) outranks the children components' own `margin:0`/`padding:0`
  * resets (e.g. `.queue-list`, 0,1,0) regardless of bundle order — 2026-10-08 field report:
@@ -53,8 +56,8 @@
   width: 100%;
   max-width: var(--transcript-max);
   margin-inline: auto;
-  padding-left: max(var(--sp-3), env(safe-area-inset-left));
-  padding-right: max(var(--sp-3), env(safe-area-inset-right));
+  padding-left: max(var(--col-gutter), env(safe-area-inset-left));
+  padding-right: max(var(--col-gutter), env(safe-area-inset-right));
 }
 
 /* 2026-10-09 「红色方框处的宽度超过了输入框的宽度」: the rule above insets each dock child by
@@ -64,8 +67,10 @@
  * border lines up with the composer's left edge and the send button's right edge. */
 .dock.dock-ctl > .command-result,
 .dock.dock-ctl > .command-confirm {
-  width: calc(100% - max(var(--sp-3), env(safe-area-inset-left)) - max(var(--sp-3), env(safe-area-inset-right)));
-  max-width: calc(var(--transcript-max) - 2 * var(--sp-3));
+  width: calc(
+    100% - max(var(--col-gutter), env(safe-area-inset-left)) - max(var(--col-gutter), env(safe-area-inset-right))
+  );
+  max-width: calc(var(--transcript-max) - 2 * var(--col-gutter));
 }
 
 .dock.dock-ctl > .command-result {

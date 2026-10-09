@@ -130,6 +130,9 @@
   --topbar-h: 48px;
   --sidebar-w: 320px;
   --transcript-max: 880px;
+  /* side gutter of the transcript column — shared by `.tx-inner` and the control dock's
+   * children so the composer's edges line up with the messages above (2026-10-09) */
+  --col-gutter: var(--sp-3);
 
   /* ---------------------------------------------------------------- motion */
   --dur-fast: 120ms; /* hover, press */
@@ -272,5 +275,13 @@
     --dur-fast: 0ms;
     --dur-base: 0ms;
     --dur-slow: 0ms;
+  }
+}
+
+/* 2026-10-09 「边缘两侧没有对齐」: tablet+ widens the shared column gutter (was hard-coded
+ * as `.tx-inner`'s sp-6 while the dock kept sp-3). */
+@media (min-width: 481px) {
+  :root {
+    --col-gutter: var(--sp-6);
   }
 }

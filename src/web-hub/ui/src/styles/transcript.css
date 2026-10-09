@@ -19,6 +19,10 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scroll-padding-top: var(--sp-4);
+  /* 2026-10-09: reserve the classic scrollbar's gutter at all times so the column's centre
+   * never moves when content starts overflowing; the dock below mirrors it via `--sb-w`
+   * (measured once in main.ts) so both columns share the same centre line. */
+  scrollbar-gutter: stable;
 }
 
 .tx-inner {
@@ -27,7 +31,7 @@
   gap: var(--sp-3);
   max-width: var(--transcript-max);
   margin: 0 auto;
-  padding: var(--sp-3) var(--sp-3) var(--sp-6);
+  padding: var(--sp-3) var(--col-gutter) var(--sp-6);
 }
 
 /* off-screen history items skip layout/paint (cheap on phones) */
@@ -911,7 +915,7 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 @media (min-width: 481px) {
   .tx-inner {
     gap: var(--sp-4);
-    padding: var(--sp-4) var(--sp-6) var(--sp-8);
+    padding: var(--sp-4) var(--col-gutter) var(--sp-8);
   }
 
   /* 2026-10-09: user avatar column mirrors the assistant's (bubble | 28px avatar); the
