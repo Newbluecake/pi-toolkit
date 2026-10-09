@@ -34,7 +34,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
-import { holdAvailable, heldRowMode, mergeQueue, newCmdId } from "@logic/control.js";
+import { holdAvailable, heldRowMode, isWebSentMessage, mergeQueue, newCmdId } from "@logic/control.js";
 import { restoringKeys } from "../../logic/spawn.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
@@ -186,18 +186,9 @@ watch(
   { flush: "sync" },
 );
 
-/** §7.7 transcript web badge: a user message counts as web-sent when a ctl ledger entry in a
- * post-dispatch state (`started`/`consumed`) sits within [at, at+120s] of its timestamp. */
-const WEB_BADGE_WINDOW_MS = 120_000;
+/** §7.7 transcript web badge — pure matcher in `@logic/control.js` (`isWebSentMessage`). */
 function isWebMessage(timestamp: number | undefined): boolean {
-  if (timestamp === undefined || !Array.isArray(props.agent.ctl)) return false;
-  for (const raw of props.agent.ctl) {
-    const e = raw as { state?: unknown; at?: unknown };
-    if (e.state !== "started" && e.state !== "consumed") continue;
-    if (typeof e.at !== "number") continue;
-    if (timestamp >= e.at && timestamp - e.at <= WEB_BADGE_WINDOW_MS) return true;
-  }
-  return false;
+  return isWebSentMessage(props.agent.ctl, timestamp);
 }
 
 const controlView: ControlView = {

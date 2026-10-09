@@ -11,6 +11,7 @@
   no ctx/scope the rendered DOM is byte-identical to the bare text node it replaces.
   2026-10-09 「输入框输入的内容也需要像 pi 一样增加一个头像」: a decorative user avatar mirrors
   the assistant's — right column, same 28px chip, only ≥481px (same breakpoint as `.avatar`).
+  Same day 「web 和时间放在同一行」: badges + time share one `.msg-foot` row under the bubble.
 -->
 <script setup lang="ts">
 import { computed, inject } from "vue";
@@ -39,8 +40,10 @@ const fromWeb = computed(() => view?.isWebMessage(props.timestamp) === true);
   <div class="msg-user tx-item">
     <div class="bubble"><PathText :text="text" /></div>
     <span class="avatar avatar-user" aria-hidden="true"><AppIcon name="user" class="icon" /></span>
-    <span v-if="fromWeb" class="badge badge-web" translate="no">{{ t("control.badgeWeb") }}</span>
-    <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>
-    <span v-if="timeLabel" class="msg-time" translate="no">{{ timeLabel }}</span>
+    <span v-if="fromWeb || truncated || timeLabel" class="msg-foot">
+      <span v-if="fromWeb" class="badge badge-web" translate="no">{{ t("control.badgeWeb") }}</span>
+      <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>
+      <span v-if="timeLabel" class="msg-time" translate="no">{{ timeLabel }}</span>
+    </span>
   </div>
 </template>

@@ -857,3 +857,30 @@ describe("sanitizeRenameInput (web-hub-rename plan)", () => {
     expect(sanitizeRenameInput(42, "old")).toBeNull();
   });
 });
+
+import { isWebSentMessage } from "../../../src/web-hub/ui/src/logic/control.js";
+
+describe("isWebSentMessage (§7.7 transcript web badge)", () => {
+  const at = 1_000_000;
+  it("started/consumed within [at, at+120s] ⇒ web", () => {
+    expect(isWebSentMessage([{ state: "started", at }], at + 500)).toBe(true);
+    expect(isWebSentMessage([{ state: "consumed", at, updatedAt: at + 10 }], at + 119_000)).toBe(true);
+  });
+  it("other states, before `at`, missing data ⇒ not web", () => {
+    expect(isWebSentMessage([{ state: "queued", at }], at + 10)).toBe(false);
+    expect(isWebSentMessage([{ state: "started", at }], at - 1)).toBe(false);
+    expect(isWebSentMessage([{ state: "started" }], at)).toBe(false);
+    expect(isWebSentMessage(undefined, at)).toBe(false);
+    expect(isWebSentMessage([{ state: "started", at }], undefined)).toBe(false);
+    expect(isWebSentMessage([null, 3], at)).toBe(false);
+  });
+  it("2026-10-09: a prompt queued while busy and dequeued minutes later matches via updatedAt", () => {
+    const deq = at + 600_000; // consumed 10 min after dispatch
+    const ctl = [{ state: "consumed", at, updatedAt: deq }];
+    expect(isWebSentMessage(ctl, deq + 2_000)).toBe(true);
+    expect(isWebSentMessage(ctl, deq - 2_000)).toBe(true);
+    expect(isWebSentMessage(ctl, deq + 60_000)).toBe(false); // far from both windows
+    // a still-`started` entry gets no updatedAt slack (only the dequeue stamps it)
+    expect(isWebSentMessage([{ state: "started", at, updatedAt: deq }], deq)).toBe(false);
+  });
+});

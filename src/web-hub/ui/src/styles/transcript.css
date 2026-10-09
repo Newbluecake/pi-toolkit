@@ -120,6 +120,15 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   overflow-wrap: anywhere;
 }
 
+/* badges (web / truncated) and the timestamp share one row under the bubble */
+.msg-foot {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .msg-time {
   color: var(--c-text-3);
   font-size: var(--fs-xs);
@@ -423,7 +432,13 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 .tool[data-st="running"] {
   --pill-fg: var(--st-tool);
   --pill-bg: var(--st-tool-soft);
-  border-color: color-mix(in srgb, var(--st-tool) 35%, var(--c-border));
+  --tool-ring-base: color-mix(in srgb, var(--st-tool) 35%, var(--c-border));
+  border-color: var(--tool-ring-base);
+}
+
+/* the sweeping ring (`.tool-progress`) replaces the border line while it is rendered */
+.tool[data-st="running"]:has(> .tool-head > .tool-progress) {
+  border-color: transparent;
 }
 
 .tool[data-st="failed"] {
@@ -664,38 +679,45 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   font-size: var(--fs-2xs);
 }
 
-/* 2026-10-09 「进度展示的动画效果看起来不是特别贴合」: the bar used to run edge to edge
- * under the card's rounded top corners — `.tool`'s overflow:hidden + radius clipped the
- * sweeping segment into a curved hook at each corner. It is now inset by the corner radius
- * with rounded ends, so it reads as a straight track along the flat part of the top edge. */
+/* 2026-10-09 「进度条希望和 bash 胶囊贴合得更好，不要独立的一条线出现在上边缘下方」: the
+ * running indicator IS the card's border now. `.tool[data-st="running"]` hides its own
+ * border colour and this overlay paints a 1px ring exactly over the padding-box edge
+ * (`.tool`'s overflow:hidden clips to the padding box, so the ring sits where the border
+ * line used to be, following the rounded corners), filled with a gradient whose bright band
+ * sweeps across — top and bottom edges shimmer, no separate line anywhere. The ring is cut
+ * out with the standard two-layer mask (content-box XOR border-box). */
 .tool-progress {
   position: absolute;
-  left: var(--r-md);
-  right: var(--r-md);
-  top: 0;
-  height: 2px;
-  overflow: hidden;
-  border-radius: 0 0 2px 2px;
-  background: var(--st-tool-soft);
+  inset: 0;
+  z-index: 1;
+  padding: 1px;
+  border-radius: calc(var(--r-md) - 1px);
+  pointer-events: none;
+  background: linear-gradient(
+      90deg,
+      var(--tool-ring-base) 0%,
+      var(--tool-ring-base) 35%,
+      var(--st-tool) 50%,
+      var(--tool-ring-base) 65%,
+      var(--tool-ring-base) 100%
+    )
+    0 0 / 300% 100%;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  animation: transcript-ring-sweep 1.6s linear infinite;
 }
 
-.tool-progress::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 30%;
-  border-radius: inherit;
-  background: var(--st-tool);
-  animation: transcript-indeterminate 1.4s var(--ease-out) infinite;
-}
-
-@keyframes transcript-indeterminate {
+@keyframes transcript-ring-sweep {
   from {
-    transform: translateX(-100%);
+    background-position: 100% 0;
   }
   to {
-    transform: translateX(340%);
+    background-position: 0% 0;
   }
 }
 
@@ -712,13 +734,13 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 
 @media (prefers-reduced-motion: reduce) {
   .spin,
-  .tool-progress::after {
+  .tool-progress {
     animation: none;
   }
 
-  .tool-progress::after {
-    width: 100%;
-    opacity: 0.5;
+  /* static ring: the running border tint, no sweep */
+  .tool-progress {
+    background: var(--tool-ring-base);
   }
 
   .caret {

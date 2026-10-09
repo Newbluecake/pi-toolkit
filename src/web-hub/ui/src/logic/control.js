@@ -847,3 +847,33 @@ export function sanitizeRenameInput(draft, current) {
   const trimmed = (typeof draft === "string" ? draft : "").trim().slice(0, RENAME_MAX_CHARS);
   return trimmed === "" || trimmed === current ? null : trimmed;
 }
+
+/** §7.7 transcript web badge: a user message counts as web-sent when a ctl ledger entry in a
+ * post-dispatch state (`started`/`consumed`) sits within [at, at+120s] of its timestamp.
+ * 2026-10-09 (「web 标志给丢了」): a prompt sent while the agent was busy is queued and only
+ * lands in the session when pi dequeues it — possibly minutes after `at` — so a `consumed`
+ * entry also matches when the message timestamp sits next to its `updatedAt` (the dequeue
+ * moment the agent stamps on the consumed transition). Best-effort; any doubt ⇒ false.
+ * @param {unknown} ctl the card's ctl ledger items
+ * @param {number | undefined} timestamp the user message's timestamp
+ * @returns {boolean}
+ */
+export const WEB_BADGE_WINDOW_MS = 120_000;
+export const WEB_BADGE_CONSUMED_SLACK_MS = 15_000;
+export function isWebSentMessage(ctl, timestamp) {
+  if (typeof timestamp !== "number" || !Array.isArray(ctl)) return false;
+  for (const raw of ctl) {
+    if (raw === null || typeof raw !== "object") continue;
+    const e = /** @type {{ state?: unknown; at?: unknown; updatedAt?: unknown }} */ (raw);
+    if (e.state !== "started" && e.state !== "consumed") continue;
+    if (typeof e.at !== "number" || timestamp < e.at) continue;
+    if (timestamp - e.at <= WEB_BADGE_WINDOW_MS) return true;
+    if (
+      e.state === "consumed" &&
+      typeof e.updatedAt === "number" &&
+      Math.abs(timestamp - e.updatedAt) <= WEB_BADGE_CONSUMED_SLACK_MS
+    )
+      return true;
+  }
+  return false;
+}
