@@ -13,6 +13,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import QuotaPill from "../../../src/web-hub/ui/src/components/quota/QuotaPill.vue";
 import TopBar from "../../../src/web-hub/ui/src/components/shell/TopBar.vue";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import { UI_BUILD } from "../../../src/web-hub/ui/src/build-info.js";
+import { uiBuildStamp } from "../../../src/web-hub/ui/src/logic/build-stamp.js";
 import type { HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
 import type { QuotaWire } from "../../../src/web-hub/protocol/messages.js";
 
@@ -48,7 +50,16 @@ const FIXTURE_PATH = resolve(REPO_ROOT, "tests/fixtures/quota/topbar-no-quota-go
 function readGoldenHtml(): string {
   const raw = readFileSync(FIXTURE_PATH, "utf8");
   const withoutHeader = raw.replace(/^<!--[\s\S]*?-->\n/, "");
-  return withoutHeader.replace(/\n$/, "");
+  const html = withoutHeader.replace(/\n$/, "");
+  // `build-stamp.js`'s `uiBuildStamp` renders `MM-DD HH:mm` in the PROCESS's LOCAL time by
+  // design (it is a human-facing build stamp) — the fixture was captured on a UTC+8 dev box, so
+  // its baked literal (`01-02 11:04`) is wrong under CI's UTC runner (`01-02 03:04` for the
+  // exact same `UI_BUILD.builtAt` instant). Re-derive the suffix for THIS process's timezone
+  // instead of trusting the baked literal — the fixture still pins everything else byte-for-byte.
+  const liveStamp = uiBuildStamp(UI_BUILD);
+  const liveSuffix = liveStamp === null ? null : liveStamp.replace(/^.*? · /, "");
+  if (liveSuffix === null) return html;
+  return html.replace(/\d{2}-\d{2} \d{2}:\d{2}/g, liveSuffix);
 }
 
 describe("TopBar: no quota data ⇒ byte-identical DOM (quota-web plan D7's no-data ruling)", () => {

@@ -568,9 +568,22 @@ describe("POST /api/upload/* — gates (plan §5.1/§5.2/§2.4)", () => {
         if (!done) req.end();
       })().catch(() => undefined);
     });
-    expect(res.status).toBe(413);
-    expect(JSON.parse(res.body)).toMatchObject({ error: "E_UPLOAD_TOO_LARGE" });
-    expect(res.headers["connection"]).toBe("close");
+    // The production contract (http.ts: `res.once("finish", () => req.destroy())`) writes the
+    // 413 response THEN destroys the still-reading request — the client's own write loop is still
+    // pushing megabytes past that point, so the OS frequently has unread bytes sitting in the
+    // socket's receive queue at destroy time and answers with an RST instead of a clean FIN. On a
+    // loaded runner the client can see that RST (ECONNRESET/EPIPE, `status: 0`) before it ever
+    // gets to read the response that was, in fact, already written — this is inherent to closing a
+    // socket with unread input, not a product bug. Only assert the HTTP response shape when the
+    // client actually got to read one; either way, the upload store's own `guarded()` wrapper
+    // (uploads.ts) recorded the rejection before the HTTP layer tried to respond at all, so
+    // `rejectsByCode` is the race-proof signal that the server really did answer 413.
+    expect([0, 413]).toContain(res.status);
+    if (res.status === 413) {
+      expect(JSON.parse(res.body)).toMatchObject({ error: "E_UPLOAD_TOO_LARGE" });
+      expect(res.headers["connection"]).toBe("close");
+    }
+    expect(h.metrics.snapshot().rejectsByCode["E_UPLOAD_TOO_LARGE"]).toBeGreaterThanOrEqual(1);
   });
 
   it("the per-principal upload token bucket (64) 429s with Retry-After once exhausted", async () => {

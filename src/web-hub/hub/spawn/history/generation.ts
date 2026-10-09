@@ -54,8 +54,9 @@
 import { randomBytes } from "node:crypto";
 import type { ReqDeadline } from "../../req-deadline.js";
 import { errCodeOf, fdPath, HISTORY_DIR_OPEN_FLAGS, type HistoryFs, type HistoryHandle } from "./fs.js";
-import { boundedClose, boundedFdOpen, historyStep, type HistoryIoGate } from "./budget.js";
+import { boundedClose, boundedFdOpen, historyStep, isHistoryDeadlineLoss, type HistoryIoGate } from "./budget.js";
 import {
+  HISTORY_DEADLINE_RETRY_MAX,
   HISTORY_DIR_LIMIT,
   HISTORY_ENUM_BUDGET_MS,
   HISTORY_ENUM_MIN_FILES,
@@ -145,6 +146,17 @@ interface Gen {
   filesTruncated: boolean;
   complete: boolean;
   enumRetry: Map<string, number>;
+  /** Finding (gpt-6-astra P1-a): a SEPARATE bounded-retry counter for `boundedFdOpen`/
+   * `historyStep` calls that raced out on THIS call's own per-call budget
+   * (`isHistoryDeadlineLoss`) — never shares strikes with `enumRetry` (genuine I/O errors).
+   * Keyed the SAME way as `enumRetry` (dirName for the dir-open/dir-stat/readdir blocking
+   * points, `"${dir}/${file}"` for the per-file lstat one) so a mixed run of e.g. 2 genuine I/O
+   * failures + budget-timeout losses on the SAME key never trips either counter prematurely.
+   * Without this, a key that deterministically loses the deadline race on EVERY call (a truly
+   * hung fs path) would retry forever — `busy` never advances `cursorDir`/`pendingNext`, so the
+   * generation can never reach `complete` (plan §3.1: every blocking point must be bounded).
+   * Reset (deleted) the moment the SAME key succeeds, exactly like `enumRetry`. */
+  deadlineRetry: Map<string, number>;
   ioFailures: Map<string, number>;
   dirsSkipped: number;
   filesSkipped: number;
@@ -350,6 +362,7 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
       filesTruncated: false,
       complete: dirs.length === 0,
       enumRetry: new Map(),
+      deadlineRetry: new Map(),
       ioFailures: new Map(),
       dirsSkipped: 0,
       filesSkipped: 0,
@@ -400,11 +413,14 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
     return result.value;
   }
 
-  /** `true` ⇒ consumed by 3rd consecutive failure (caller should advance past it); `false` ⇒
-   * the count was recorded but has not yet reached the threshold (caller must NOT advance). */
-  function recordRecoverable(map: Map<string, number>, key: string): boolean {
+  /** `true` ⇒ consumed by the `max`th consecutive failure (caller should advance past it);
+   * `false` ⇒ the count was recorded but has not yet reached the threshold (caller must NOT
+   * advance). Default `max` is `HISTORY_IO_RETRY_MAX` (genuine I/O errors); deadline/abort
+   * losses pass `HISTORY_DEADLINE_RETRY_MAX` into their OWN separate map instead — the two
+   * never share strikes (gpt-6-astra P1-a). */
+  function recordRecoverable(map: Map<string, number>, key: string, max: number = HISTORY_IO_RETRY_MAX): boolean {
     const n = (map.get(key) ?? 0) + 1;
-    if (n >= HISTORY_IO_RETRY_MAX) {
+    if (n >= max) {
       map.delete(key);
       return true;
     }
@@ -443,6 +459,7 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
     let filesSkipped = gen.filesSkipped;
     const newFiles: FileStat[] = [];
     const enumRetry = new Map(gen.enumRetry);
+    const deadlineRetry = new Map(gen.deadlineRetry);
     // A value-copy of `gen.pending` — `next` is tracked as its OWN local var so advancing it
     // never mutates a pre-existing, not-yet-committed `gen.pending` object in place. v3.4 X3.1:
     // the staged fd is the OWNER RECORD itself (never a bare handle) — every close of it goes
@@ -458,6 +475,10 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
     const overBudget = (): boolean => deps.now() >= deadlineAt || deadline.expired();
 
     const recordRecoverableStaged = (key: string): boolean => recordRecoverable(enumRetry, key);
+    // gpt-6-astra P1-a: a deadline/abort loss gets its OWN bounded counter, never sharing
+    // strikes with `recordRecoverableStaged` — see `HISTORY_DEADLINE_RETRY_MAX`'s doc comment.
+    const recordDeadlineStaged = (key: string): boolean =>
+      recordRecoverable(deadlineRetry, key, HISTORY_DEADLINE_RETRY_MAX);
 
     // Pre-existing `gen.rootOwner`/`gen.pending` (inherited, never reassigned by THIS call
     // unless committed) is dispose()'s job — never touched here. Only a FRESH dir fd this call
@@ -495,6 +516,7 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
       gen.filesSkipped = filesSkipped;
       if (newFiles.length > 0) gen.files.push(...newFiles);
       gen.enumRetry = enumRetry;
+      gen.deadlineRetry = deadlineRetry;
       gen.pending =
         pendingOwner === undefined || pendingRef === undefined || pendingNames === undefined
           ? undefined
@@ -525,22 +547,39 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
         }
         if (!openRes.ok) {
           if (openRes.reason === "busy") return commit({ partial: { reason: "busy" } });
+          // A "deadline" loss is THIS call's own per-call budget racing out before the real
+          // `open()` settled — the underlying call is still in flight (tracked via the gate's
+          // lateFd counter) and is weaker evidence than a genuine errno. Bounded-retry it
+          // through its OWN counter (never `enumRetry`'s strikes, gpt-6-astra P1-a) so an
+          // unlucky-but-healthy race loses a FEW times without being skipped, while a
+          // deterministically-hung open() still gets bounded and counted after
+          // `HISTORY_DEADLINE_RETRY_MAX` consecutive losses — exactly like IO exhaustion below.
+          if (openRes.reason === "deadline") {
+            if (recordDeadlineStaged(dirName)) {
+              enumRetry.delete(dirName); // the OTHER counter never got to consume this key
+              cursorDir += 1;
+              dirsSkipped += 1;
+              dirsDone += 1;
+              continue;
+            }
+            return commit({ partial: { reason: "busy" } });
+          }
           const code = openRes.reason === "error" ? errCodeOf(openRes.err) : undefined;
           if (code === "ENOENT") {
+            deadlineRetry.delete(dirName);
             cursorDir += 1;
             dirsDone += 1;
             continue;
           }
           if (code === "ENOTDIR" || code === "ELOOP") {
+            deadlineRetry.delete(dirName);
             cursorDir += 1;
             changed += 1;
             dirsDone += 1;
             continue;
           }
-          // `reason === "deadline"` (boundedFdOpen's own race timed out) is treated the same as
-          // any other unrecognized transient error — the same consecutive-retry-then-consume
-          // semantics apply (unchanged from the previous pass).
           if (recordRecoverableStaged(dirName)) {
+            deadlineRetry.delete(dirName); // the OTHER counter never got to consume this key
             cursorDir += 1;
             dirsSkipped += 1;
             dirsDone += 1;
@@ -569,19 +608,36 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
         } catch (err) {
           await closeOwned(owner);
           if (!isValid(gen)) return abandon();
+          // See `isHistoryDeadlineLoss`'s doc comment (budget.ts) + `HISTORY_DEADLINE_RETRY_MAX`:
+          // this call's own per-call budget racing out gets its OWN bounded counter (never
+          // `enumRetry`'s strikes) so it is retried a FEW more times before being counted
+          // skipped — never retried unboundedly (gpt-6-astra P1-a).
+          if (isHistoryDeadlineLoss(err)) {
+            if (recordDeadlineStaged(dirName)) {
+              enumRetry.delete(dirName);
+              cursorDir += 1;
+              dirsSkipped += 1;
+              dirsDone += 1;
+              continue;
+            }
+            return commit({ partial: { reason: "busy" } });
+          }
           const code = errCodeOf(err);
           if (code === "ENOENT") {
+            deadlineRetry.delete(dirName);
             cursorDir += 1;
             dirsDone += 1;
             continue;
           }
           if (code === "ENOTDIR" || code === "ELOOP") {
+            deadlineRetry.delete(dirName);
             cursorDir += 1;
             changed += 1;
             dirsDone += 1;
             continue;
           }
           if (recordRecoverableStaged(dirName)) {
+            deadlineRetry.delete(dirName);
             cursorDir += 1;
             dirsSkipped += 1;
             dirsDone += 1;
@@ -594,6 +650,12 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
           await closeOwned(owner);
           return abandon();
         }
+        // Success: this dirName's blocking points are resolved — reset BOTH retry counters so a
+        // later unrelated failure on the same key (impossible within one gen's fixed `dirs` list,
+        // but kept for defense-in-depth/parity with the file-level cleanup below) never inherits
+        // a stale count.
+        enumRetry.delete(dirName);
+        deadlineRetry.delete(dirName);
         pendingRef = ref;
         pendingOwner = owner;
         pendingNames = names;
@@ -627,19 +689,36 @@ export function createGenStore(deps: GenStoreDeps): GenStore {
             newFiles.push({ key, dir: dirRef, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs });
           }
           enumRetry.delete(key);
+          deadlineRetry.delete(key);
           pendingNext += 1;
           filesDone += 1;
         } catch (err) {
           if (!isValid(gen)) return abandon();
+          // See `isHistoryDeadlineLoss`'s doc comment (budget.ts) + `HISTORY_DEADLINE_RETRY_MAX`:
+          // a self-induced budget timeout on THIS file's lstat gets its OWN bounded counter
+          // (never `enumRetry`'s strikes) — retried a FEW more times before being counted
+          // skipped, never retried unboundedly (gpt-6-astra P1-a).
+          if (isHistoryDeadlineLoss(err)) {
+            if (recordDeadlineStaged(key)) {
+              enumRetry.delete(key);
+              filesSkipped += 1;
+              pendingNext += 1;
+              filesDone += 1;
+              continue;
+            }
+            return commit({ partial: { reason: "busy" } });
+          }
           const code = errCodeOf(err);
           if (code === "ENOENT") {
             vanished += 1;
             enumRetry.delete(key);
+            deadlineRetry.delete(key);
             pendingNext += 1;
             filesDone += 1;
             continue;
           }
           if (recordRecoverableStaged(key)) {
+            deadlineRetry.delete(key);
             filesSkipped += 1;
             pendingNext += 1;
             filesDone += 1;

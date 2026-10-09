@@ -43,6 +43,20 @@ export const HISTORY_GEN_MAX_AGE_MS = 300_000;
 /** Consecutive-failure threshold shared by `enumRetry` (enumeration) and `ioFailures` (paging). */
 export const HISTORY_IO_RETRY_MAX = 3;
 
+/**
+ * gpt-6-astra P1-a: a SEPARATE, LARGER consecutive-retry threshold for `isHistoryDeadlineLoss`
+ * (a call that raced out on its own per-call budget, never a genuine I/O error) — generation.ts's
+ * `deadlineRetry` map. Deliberately higher than `HISTORY_IO_RETRY_MAX`: a budget-timeout loss is
+ * weaker evidence of a real problem than an actual errno (an unlucky run of tiny per-call budgets
+ * under load can lose a few races against a perfectly healthy fs call), so it earns more chances
+ * before giving up — but it MUST still be finite: plan §3.1 requires every enumeration blocking
+ * point (dir open, dir stat/readdir, file lstat) to be dragged at most a bounded number of
+ * requests before it is counted `dirsSkipped`/`filesSkipped` and the cursor advances, even for a
+ * path that deterministically never finishes within budget (a truly hung mount) — otherwise the
+ * generation can never reach `complete`.
+ */
+export const HISTORY_DEADLINE_RETRY_MAX = 6;
+
 export const HISTORY_HEADER_LINE_MAX = 4 * 1024;
 export const HISTORY_HEAD_MAX_BYTES = 256 * 1024;
 export const HISTORY_HEAD_BLOCK_BYTES = 32 * 1024;
@@ -102,6 +116,24 @@ export class HistoryBusyError extends Error {
 
 export function isHistoryBusyError(err: unknown): boolean {
   return err instanceof HistoryBusyError || (err instanceof PreviewIoError && err.ioFail === "busy");
+}
+
+/**
+ * A `historyStep`/`boundedFdOpen` call that raced out on ITS OWN per-call budget (or an
+ * aborted signal) before the underlying fs call settled — never evidence that the directory or
+ * file is actually unreachable: `racePreviewIo`'s underlying promise is still running in the
+ * background (tracked via the gate's zombie/lateFd counters) and, for a healthy path, will go
+ * on to settle successfully moments later. `runAdvance` must NOT fold this into the SAME
+ * `enumRetry`/HISTORY_IO_RETRY_MAX consecutive-failure counter real I/O errors use (busy
+ * already gets this exact carve-out below) — doing so lets an unlucky string of tiny per-call
+ * budgets (e.g. a loaded CI runner) consume an injected transient fault's own "succeeds on the
+ * 3rd attempt" slot with an unrelated timeout, silently dropping a directory's files even
+ * though the real open()/stat()/lstat() it raced against was never going to fail at all —
+ * violating the documented "transient errors never cause skipped" invariant (session-history
+ * plan §3.1 F31, generation.test.ts's scale-run property).
+ */
+export function isHistoryDeadlineLoss(err: unknown): boolean {
+  return isPreviewIoError(err) && (err.ioFail === "deadline" || err.ioFail === "abort");
 }
 
 export interface HistoryIoGate {

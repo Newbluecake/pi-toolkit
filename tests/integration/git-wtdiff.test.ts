@@ -61,7 +61,24 @@ if (hasGit && !gitInFixedPath) {
 }
 
 const tempRoots = new Set<string>();
-const runner = createGitRunner();
+/**
+ * CI runners commonly have git-lfs installed with `filter.lfs.*` registered in the SYSTEM
+ * gitconfig (/etc/gitconfig) — the driver scan (`config --get-regexp`) legitimately sees that
+ * (production must neutralize it too), which makes this suite's "clean repo" assertions
+ * environment-dependent (local boxes have no such system config). Isolate the SYSTEM config
+ * for every PINNED call this suite makes, mirroring production's own `GIT_ATTR_NOSYSTEM=1`
+ * (buildMinimalEnv in src/git/run.ts already disables system *attributes*; this test-only
+ * wrapper disables system *config* the same way, through the existing `spawnImpl` seam —
+ * production's envPolicy:"minimal" itself is untouched and keeps scanning system config for
+ * real repos). The plain `git()` setup helper below does NOT go through this runner, so repo
+ * setup still sees the real environment (needed by T5, which deliberately configures its own
+ * repo-level `filter.lfs.*` on top of whatever the system provides).
+ */
+const isolatedSpawn: typeof spawn = ((command: string, args: readonly string[], options?: Record<string, unknown>) => {
+  const env = { ...((options?.["env"] as NodeJS.ProcessEnv | undefined) ?? {}), GIT_CONFIG_NOSYSTEM: "1" };
+  return spawn(command, args as string[], { ...(options ?? {}), env });
+}) as typeof spawn;
+const runner = createGitRunner({ spawnImpl: isolatedSpawn });
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", ...(env !== undefined ? { env } : {}) });

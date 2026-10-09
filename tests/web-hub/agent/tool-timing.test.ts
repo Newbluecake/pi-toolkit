@@ -155,8 +155,13 @@ describe("wiring — turn_end flush (one bounded entry per turn; none without to
     );
     fire("turn_end", { type: "turn_end", turnIndex: 0, messageEntryId: "e1", toolResultEntryIds: ["r1"] }, ctx);
 
-    // live frames carry the agent-clock timing fields through the hub
-    await waitUntil(() => hub!.all().some((f) => f.t === "ev" && f.e.type === "turn_end"), 3_000, "turn_end ev");
+    // live frames carry the agent-clock timing fields through the hub. This waits on real
+    // socket I/O for THREE already-queued frames (tool_execution_start/end + turn_end) to be
+    // written, delivered and decoded by the fake hub — under a loaded/slow CI runner that can
+    // take longer than the repo's usual single-frame 3_000ms budget (see helpers.ts's
+    // `waitUntil`), so this one wait gets a larger, still-bounded budget rather than a timeout
+    // tuned for a quiet box.
+    await waitUntil(() => hub!.all().some((f) => f.t === "ev" && f.e.type === "turn_end"), 15_000, "turn_end ev");
     const evs = hub!.all().filter((f): f is Extract<{ t: string; e: any }, { t: "ev" }> => f.t === "ev");
     expect(evs.find((f) => f.e.type === "tool_execution_start")!.e.startedAt).toBe(10_000);
     expect(evs.find((f) => f.e.type === "tool_execution_end")!.e.durationMs).toBe(1_500);

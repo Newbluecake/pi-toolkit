@@ -37,6 +37,19 @@ import type {
 import type { UploadStore } from "../../../src/web-hub/hub/uploads.js";
 import { testHubPaths } from "../helpers/paths.js";
 import { captureLog, makeAgent, type LogLine } from "./helpers.js";
+
+/** Bounded poll: the preview route's audit line is written in its request `finally` (routes.ts
+ *  ① answer → ② fd close → ③/④ bookkeeping → ⑤ audit), AFTER `entry.done` (the response) has
+ *  already been sent — so a client that just finished reading its response can race ahead of the
+ *  server's own cleanup and audit write. Poll instead of reading the captured log immediately. */
+async function waitUntil(pred: () => boolean, timeoutMs = 4_000, stepMs = 10): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (pred()) return;
+    if (Date.now() > deadline) throw new Error("waitUntil: timed out");
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+}
 import { lanPostJson, lanRequest, seedLanUser, type RawResponse } from "./lan-helpers.js";
 
 const AGENT = "a4242-nonce12";
@@ -339,6 +352,7 @@ describe("LAN /api/preview — U3 session-visible sharing", () => {
     expect(b.status).toBe(200);
     expect(b.body.length).toBe(bytes.length);
 
+    await waitUntil(() => h.previewLines().filter((l) => l["cls"] === "upload").length >= 2, 4_000, "both audit lines");
     const lines = h.previewLines().filter((l) => l["cls"] === "upload");
     const bobLine = lines.find((l) => l["user"] === "u2");
     expect(bobLine).toMatchObject({ ok: true, shared: true, listener: "lan" });

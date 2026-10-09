@@ -8,7 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
-import { createHistoryIoGate } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
+import {
+  createHistoryIoGate,
+  HISTORY_DEADLINE_RETRY_MAX,
+} from "../../../../../src/web-hub/hub/spawn/history/budget.js";
+import { PreviewIoError } from "../../../../../src/web-hub/hub/preview/fs.js";
 import { createFdLedger, type FdLedger } from "../../../../../src/web-hub/hub/spawn/history/fd-ledger.js";
 import { createGenStore } from "../../../../../src/web-hub/hub/spawn/history/generation.js";
 import { defaultHistoryFs, type HistoryFs } from "../../../../../src/web-hub/hub/spawn/history/fs.js";
@@ -274,6 +278,151 @@ describe("createGenStore — continuable enumeration under a tiny per-call budge
     expect(seen).toEqual(expected);
     await store.dispose();
   }, 30_000);
+
+  it(
+    "REGRESSION (found via the scale run above under real CPU contention, seed 521273224; made " +
+      "deterministic per gpt-6-astra P1-b — the fake fs rejects with a `PreviewIoError` directly " +
+      'instead of racing a real timer): a dir-open "deadline" loss on what would otherwise be a ' +
+      "genuine eventual SUCCESS must not consume the same consecutive-failure strike a real I/O " +
+      "error does — doing so can fold an unrelated budget timeout into a transient fault's own " +
+      '"succeeds by the 3rd attempt" slot and silently drop the whole directory (session-history ' +
+      'plan §3.1 F31: "瞬时错误永不导致 skipped")',
+    async () => {
+      const expected = seedTree(1, 3); // d0/f0.jsonl, f1.jsonl, f2.jsonl
+      let attempt = 0;
+      const real = defaultHistoryFs();
+      const fs: HistoryFs = {
+        ...real,
+        open: (p, flags, mode) => {
+          const last = p.slice(p.lastIndexOf("/") + 1);
+          if (last !== "d0") return real.open(p, flags, mode);
+          attempt += 1;
+          if (attempt <= 2) {
+            // genuine transient I/O errors — exactly what HISTORY_IO_RETRY_MAX is FOR.
+            return Promise.reject(Object.assign(new Error("EIO"), { code: "EIO" }));
+          }
+          if (attempt === 3) {
+            // a GENUINE eventual success — this round's `boundedFdOpen` call just happens to
+            // race out on ITS OWN per-call budget (deterministic: the fake fs itself rejects
+            // with the exact error `racePreviewIo` would produce on a real timeout, so
+            // `boundedFdOpen` takes the identical `reason:"deadline"` branch with zero real
+            // wall-clock dependence — no setTimeout, no tiny-budget race to get unlucky on).
+            return Promise.reject(new PreviewIoError("deadline", "test-injected"));
+          }
+          return real.open(p, flags, mode); // attempt 4+: real success
+        },
+      };
+      const ledger = createFdLedger(32);
+      const store = createGenStore(baseDeps(fs, ledger));
+      const creationDeadline = createReqDeadline(() => Date.now(), 5000);
+      const acq = await store.acquire(undefined, creationDeadline);
+      if (acq.kind !== "gen") throw new Error(`unexpected acquire result: ${acq.kind}`);
+      let snap = acq.handle.snapshot();
+      for (let i = 0; i < 20 && !snap.enum.complete; i++) {
+        const stepDeadline = createReqDeadline(() => Date.now(), 2_000); // generous, uniform —
+        // the deadline loss above is injected directly, never raced for real.
+        await acq.handle.advance(stepDeadline);
+        snap = acq.handle.snapshot();
+      }
+      acq.handle.release();
+      expect(snap.enum.complete).toBe(true);
+      expect(attempt).toBe(4); // EIO, EIO, deadline-loss, real success — deterministic now
+      expect(snap.enum.dirsSkipped).toBe(0); // the whole point: never consumed as a strike
+      const seen = new Set(snap.files.map((f) => f.key));
+      expect(seen).toEqual(expected);
+      await store.dispose();
+    },
+    10_000,
+  );
+
+  it(
+    "REGRESSION (gpt-6-astra P1-a, livelock): a directory whose open() deterministically hits " +
+      "the per-call deadline on EVERY attempt is bounded by HISTORY_DEADLINE_RETRY_MAX, then " +
+      "counted dirsSkipped and the cursor advances — never retried forever; the other directories " +
+      "converge normally",
+    async () => {
+      const expected = seedTree(3, 2); // d0 (hung), d1, d2 — 2 files each
+      const hungDirFiles = new Set(["d0/f0.jsonl", "d0/f1.jsonl"]);
+      let hungAttempts = 0;
+      const real = defaultHistoryFs();
+      const fs: HistoryFs = {
+        ...real,
+        open: (p, flags, mode) => {
+          const last = p.slice(p.lastIndexOf("/") + 1);
+          if (last !== "d0") return real.open(p, flags, mode);
+          hungAttempts += 1;
+          // ALWAYS a deadline loss — a stand-in for a mount/path that never answers in time,
+          // no matter how many times it is retried.
+          return Promise.reject(new PreviewIoError("deadline", "test-injected: permanently hung"));
+        },
+      };
+      const ledger = createFdLedger(32);
+      const store = createGenStore(baseDeps(fs, ledger));
+      const creationDeadline = createReqDeadline(() => Date.now(), 5000);
+      const acq = await store.acquire(undefined, creationDeadline);
+      if (acq.kind !== "gen") throw new Error(`unexpected acquire result: ${acq.kind}`);
+      let snap = acq.handle.snapshot();
+      let calls = 0;
+      // bounded loop — a livelock (the pre-fix `return commit({partial:{reason:"busy"}})` for
+      // EVERY deadline loss, forever) would spin this to the cap without ever completing.
+      for (; calls < 50 && !snap.enum.complete; calls++) {
+        const stepDeadline = createReqDeadline(() => Date.now(), 2_000);
+        await acq.handle.advance(stepDeadline);
+        snap = acq.handle.snapshot();
+      }
+      acq.handle.release();
+      expect(snap.enum.complete).toBe(true); // terminates — never livelocks
+      expect(hungAttempts).toBe(HISTORY_DEADLINE_RETRY_MAX); // bounded: exactly this many tries
+      expect(snap.enum.dirsSkipped).toBe(1); // d0 counted skipped, not silently dropped
+      const seen = new Set(snap.files.map((f) => f.key));
+      const expectedMinusHung = new Set([...expected].filter((k) => !hungDirFiles.has(k)));
+      expect(seen).toEqual(expectedMinusHung); // d1/d2 fully present, exactly once
+      expect(snap.files.length).toBe(expectedMinusHung.size); // no duplicates (a Set would hide them)
+      await store.dispose();
+    },
+    10_000,
+  );
+
+  it(
+    "REGRESSION (gpt-6-astra P1-a, livelock, file path): a file whose lstat() deterministically " +
+      "hits the per-call deadline on EVERY attempt is bounded by HISTORY_DEADLINE_RETRY_MAX, then " +
+      "counted (filesSkipped) and the cursor advances — the dir still completes, siblings present",
+    async () => {
+      const expected = seedTree(1, 3); // d0/f0.jsonl, f1.jsonl, f2.jsonl
+      let hungAttempts = 0;
+      const real = defaultHistoryFs();
+      const fs: HistoryFs = {
+        ...real,
+        lstat: (p) => {
+          const last = p.slice(p.lastIndexOf("/") + 1);
+          if (last !== "f1.jsonl") return real.lstat(p);
+          hungAttempts += 1;
+          return Promise.reject(new PreviewIoError("deadline", "test-injected: permanently hung"));
+        },
+      };
+      const ledger = createFdLedger(32);
+      const store = createGenStore(baseDeps(fs, ledger));
+      const creationDeadline = createReqDeadline(() => Date.now(), 5000);
+      const acq = await store.acquire(undefined, creationDeadline);
+      if (acq.kind !== "gen") throw new Error(`unexpected acquire result: ${acq.kind}`);
+      let snap = acq.handle.snapshot();
+      for (let calls = 0; calls < 50 && !snap.enum.complete; calls++) {
+        const stepDeadline = createReqDeadline(() => Date.now(), 2_000);
+        await acq.handle.advance(stepDeadline);
+        snap = acq.handle.snapshot();
+      }
+      acq.handle.release();
+      expect(snap.enum.complete).toBe(true);
+      expect(hungAttempts).toBe(HISTORY_DEADLINE_RETRY_MAX);
+      expect(snap.skipped).toBe(1); // f1.jsonl counted skipped, not silently dropped
+      const seen = new Set(snap.files.map((f) => f.key));
+      const expectedMinusHung = new Set([...expected].filter((k) => k !== "d0/f1.jsonl"));
+      expect(seen).toEqual(expectedMinusHung); // f0/f2 present, exactly once
+      expect(snap.files.length).toBe(expectedMinusHung.size); // no duplicates (a Set would hide them)
+      await store.dispose();
+    },
+    10_000,
+  );
 });
 
 describe("createGenStore — true mid-generation directory swap (Finding 4)", () => {
