@@ -1076,6 +1076,98 @@ describe("logic/preview.js findPathRefs — §2.5.3 backticks (extended start se
   });
 });
 
+describe("logic/preview.js findPathRefs — full-width/CJK punctuation terminators (2026-10-09 fix)", () => {
+  /** The user report: `预览图：/tmp/cmdprev/cmd-badge-options.png（点开）` used to absorb `（点开`
+   * into the ref because `（` sat only in START_CHARS. Now EVERY full-width/CJK punctuation
+   * char in the §4.6 rule-2 set terminates the candidate in BOTH directions — openers too,
+   * exactly like the ASCII `(`/`)` pair — while non-punctuation CJK (中文目录名) never
+   * terminates, so CJK dir names stay clickable. */
+  const P = "/home/u/proj/a.ts";
+  it.each([
+    [
+      "（ opener absorbs following prose — the exact report shape",
+      "预览图：/tmp/cmdprev/cmd-badge-options.png（点开）",
+      "/tmp/cmdprev/cmd-badge-options.png",
+    ],
+    ["（", `${P}（点开）`, P],
+    ["【", `${P}【注】`, P],
+    ["「", `${P}「注」`, P],
+    ["『", `${P}『注』`, P],
+    ["《", `${P}《书》`, P],
+    ["〈", `${P}〈注〉`, P],
+    ["〉 (space-started path — 〉 is a pure closer, not an opener)", `see ${P}〉好`, P],
+    ["…", `${P}…`, P],
+  ])("ends at full-width opener/punct %s", (_label, text, expected) => {
+    const segs = findPathRefs(text, ABS_SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs).map((r) => r.path)).toEqual([expected]);
+    expect(refs(segs).map((r) => r.text)).toEqual([expected]);
+  });
+
+  it.each([
+    ["，", `${P}，好`],
+    ["。", `${P}。`],
+    ["、", `${P}、好`],
+    ["；", `${P}；好`],
+    ["：", `${P}：好`],
+    ["！", `${P}！好`],
+    ["？", `${P}？好`],
+    ["）", `（${P}）`],
+    ["】", `【${P}】`],
+    ["」", `「${P}」`],
+    ["』", `『${P}』`],
+    ["》", `《${P}》`],
+  ])("already-terminator full-width punct %s keeps terminating (cwd scope)", (_label, text) => {
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs).map((r) => r.path)).toEqual([P]);
+  });
+
+  it.each([
+    ["（…）", `看（${P}）好`],
+    ["「…」", `看「${P}」好`],
+    ["『…』", `看『${P}』好`],
+    ["【…】", `看【${P}】好`],
+    ["《…》", `看《${P}》好`],
+  ])("a path wrapped in full-width brackets %s stays a single clean ref", (_label, text) => {
+    const segs = findPathRefs(text, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(text);
+    expect(refs(segs).map((r) => r.path)).toEqual([P]);
+    expect(refs(segs).map((r) => r.text)).toEqual([P]);
+  });
+
+  it("the new openers still OPEN a candidate (dual role, like ASCII `(`): mid-text after CJK prose", () => {
+    // `（` right after prose used to be start-only; it now ALSO ends the previous run —
+    // the path after it must still start cleanly.
+    for (const opener of ["（", "【", "「", "『", "《"]) {
+      const segs = findPathRefs(`看这${opener}${P}）好`, SCOPE) as Seg[];
+      expect(concat(segs)).toBe(`看这${opener}${P}）好`);
+      expect(refs(segs).map((r) => r.path)).toEqual([P]);
+    }
+  });
+
+  it("non-punctuation CJK inside a path does NOT terminate (中文目录名 stays clickable)", () => {
+    const cjk = "/home/u/proj/中文目录/图.png";
+    const segs = findPathRefs(`图在 ${cjk}（点开）`, SCOPE) as Seg[];
+    expect(concat(segs)).toBe(`图在 ${cjk}（点开）`);
+    expect(refs(segs)).toEqual([{ kind: "ref", text: cjk, path: cjk }]);
+    const absCjk = findPathRefs(`预览图：/tmp/cmdprev/中文图.png（点开）`, ABS_SCOPE) as Seg[];
+    expect(refs(absCjk).map((r) => r.path)).toEqual(["/tmp/cmdprev/中文图.png"]);
+  });
+
+  it("a relative candidate with CJK segments ends at full-width punctuation too", () => {
+    const segs = findPathRefs('"src/中文/foo.ts"，好', SCOPE) as Seg[];
+    expect(concat(segs)).toBe('"src/中文/foo.ts"，好');
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "src/中文/foo.ts", path: "/home/u/proj/src/中文/foo.ts" }]);
+  });
+
+  it("pathRefOfCode keeps rejecting code spans with the new terminators (verbatim code content)", () => {
+    expect(pathRefOfCode(`${P}（点开）`, SCOPE)).toBeNull();
+    expect(pathRefOfCode(`${P}…`, SCOPE)).toBeNull();
+    expect(pathRefOfCode(`${P}〈注〉`, SCOPE)).toBeNull();
+  });
+});
+
 describe("logic/preview.js previewScopeOf / scopeKeyOf — §2.5.1 abs/dirs caps", () => {
   const session = { sessionId: "s1", cwd: "/home/u/proj" };
   const base = { mode: "token" as const, hubCaps: ["preview.v1"], hasTransport: true, agentKey: "A", session };
@@ -1231,11 +1323,19 @@ const O_TERMINATORS = new Set([
   "！",
   "？",
   "、",
-  "）",
-  "」",
-  "』",
+  "（", // 2026-10-09 fix: full-width/CJK punctuation terminates BOTH directions — kept in
+  "）", // lockstep with the live TERMINATOR_CHARS and the re-frozen reference fixture.
+  "【",
   "】",
+  "「",
+  "」",
+  "『",
+  "』",
+  "《",
   "》",
+  "〈",
+  "〉",
+  "…",
 ]);
 const O_WS = /\s/;
 const O_START = new Set(["(", "[", "{", "<", '"', "'", "=", "（", "「", "『", "【", "《", "："]);
@@ -1400,8 +1500,11 @@ function oracleFindPathRefs(text: string, scope: typeof SCOPE & { abs?: true; di
 }
 
 describe("logic/preview.js findPathRefs — §2.5.2 differential correctness gates", () => {
-  /** dir-plan's fuzz alphabet (length 0–200), fixed seed, 2 000 cases. */
-  const ALPHABET = ["/", ".", "a", "1", ":", "=", " ", '"', "'", "`", "é", "😀", "\0"];
+  /** dir-plan's fuzz alphabet (length 0–200), fixed seed, 2 000 cases. 2026-10-09: the
+   * full-width opener `（`, bracket `「`, ellipsis `…` and a CJK ideograph `中` join so the
+   * differential gates actually exercise the new terminator rule (and pin that
+   * non-punctuation CJK still never terminates) — same fixed seed, still deterministic. */
+  const ALPHABET = ["/", ".", "a", "1", ":", "=", " ", '"', "'", "`", "é", "😀", "\0", "（", "「", "…", "中"];
   const fuzzCases = (seed: number, count: number): string[] => {
     const rand = rng(seed);
     const out: string[] = [];
@@ -1472,6 +1575,22 @@ describe("logic/preview.js findPathRefs — §2.5.2 differential correctness gat
     `{"path": "/home/u/proj/a.ts"}`,
     "/etc=/home/u/proj/a.ts",
     "/x=/home/u/proj/a.ts:7.",
+    // 2026-10-09 full-width/CJK punctuation terminator fix (the user-report shape + the new
+    // terminator adjacency cases + non-punctuation CJK paths). Added WITH the lockstep
+    // re-freeze of fixtures/preview-findpathrefs-ref.js and the O_TERMINATORS oracle above,
+    // so both differential gates pin the NEW rule instead of the old bug.
+    "预览图：/tmp/cmdprev/cmd-badge-options.png（点开）",
+    "/home/u/proj/a.ts（点开）",
+    "/home/u/proj/a.ts【注】",
+    "/home/u/proj/a.ts「注」",
+    "/home/u/proj/a.ts『注』",
+    "/home/u/proj/a.ts《书》",
+    "/home/u/proj/a.ts〈注〉",
+    "/home/u/proj/a.ts…",
+    "看这（/home/u/proj/a.ts）好",
+    "「/home/u/proj/a.ts」",
+    "/home/u/proj/中文目录/图.png（好）",
+    '"src/中文/foo.ts"，好',
   ];
 
   const LEGACY_SCOPES: Array<[string, typeof SCOPE]> = [

@@ -20,8 +20,17 @@
  *
  * Failure policy (修订 spec: probe 请求失败 ⇒ 全部按纯文本，不阻塞渲染): ANY transport
  * error — network, the 5s deadline, a non-200, a malformed body, even a length-mismatched
- * 200 — fails the whole batch to `"failed"`; the composable never retries on its own (a
- * failed entry is terminal, only a scope change probes again).
+ * 200 — fails the whole batch to `"failed"`; the composable never retries on its own.
+ * 2026-10-09 negative-TTL fix: `"missing"`/`"failed"` are no longer terminal forever — the
+ * store re-stages them after `PROBE_MISSING_TTL_MS` (10 s) / `PROBE_FAILED_TTL_MS` (30 s)
+ * when a later `ensure()` mentions the path again (a NEW message, a re-render with changed
+ * candidates — already-rendered PathTexts never re-ensure on their own, which stays true).
+ * There is still no retry timer here: expiry is pull-driven by `ensure`, gated per flush by
+ * `store.markPending`, so a failed batch cannot be retried more often than its TTL and the
+ * one-request-per-tick batching is unchanged. `stateOf` keeps reporting the old negative
+ * state while a re-probe is in flight (no flicker); the store's `probing` mark prevents any
+ * double submit. The clock is injectable (`opts.now`, default `Date.now`) — tests drive a
+ * fake clock; the composable itself still owns no timers beyond the flush scheduler.
  *
  * Reactivity: the store is plain data; every mutation bumps a `version` ref and every
  * `stateOf()` read depends on it, so all `PathText` computeds re-evaluate on settle. A
@@ -72,6 +81,8 @@ export interface UsePreviewProbeOptions {
   readonly scope: Readonly<Ref<PreviewPathScope | null>>;
   /** Flush scheduler (default `setTimeout(…, 0)`); returns a cancel fn. Injectable for tests. */
   readonly schedule?: ((fn: () => void) => () => void) | undefined;
+  /** Injectable clock for the negative-result TTLs (default `Date.now`; 2026-10-09 fix). */
+  readonly now?: (() => number) | undefined;
 }
 
 interface QueueItem {
@@ -81,7 +92,7 @@ interface QueueItem {
 }
 
 export function usePreviewProbe(opts: UsePreviewProbeOptions): PreviewProbeHandle {
-  const store = new PreviewProbeStore();
+  const store = new PreviewProbeStore(PROBE_LRU_CAP, opts.now !== undefined ? { now: opts.now } : undefined);
   const version = ref(0);
   // dir-plan §5 P3: the last confirmed KIND per (scopeKey, path) — `usePreview` consults it
   // ("dir" ⇒ the `dir=1` opt-in) instead of paying a discovery round trip per click. Bounded

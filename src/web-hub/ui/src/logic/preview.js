@@ -101,7 +101,17 @@ const START_CHARS = new Set(["(", "[", "{", "<", '"', "'", "=", "（", "「", "�
  * is what actually requires the pair to close. */
 const START_CHARS_EXT = new Set([...START_CHARS, "`"]);
 
-/** §4.6 rule 2: a candidate ends at the first of these (besides any whitespace). */
+/** §4.6 rule 2: a candidate ends at the first of these (besides any whitespace).
+ * 2026-10-09 fix (user report 「预览图：/tmp/x.png（点开）」): FULL-WIDTH/CJK punctuation
+ * terminates BOTH directions — the opener twins `（` `【` `「` `『` `《` used to sit only in
+ * START_CHARS, so a path immediately followed by one absorbed the following prose into the
+ * ref (`…png（点开` instead of `…png`). They now terminate too, exactly like the ASCII pair
+ * `(`/`)`, which is already in BOTH sets (an opener ends the PREVIOUS run and may open the
+ * next candidate). `〈` `〉` `…` join as pure terminators. Only PUNCTUATION terminates —
+ * non-punctuation CJK (e.g. 中文目录名 inside a path) never does, so CJK dir names stay
+ * clickable refs. These chars are hard terminators, NOT trailing-trim material: the trim
+ * (`TRAILING_PUNCT_RE`) only strips chars that can sit INSIDE a run (`.:!?`); full-width
+ * closers/commas end the run and are never stripped — the treatment `）`/`，` already had. */
 const TERMINATOR_CHARS = new Set([
   '"',
   "'",
@@ -124,11 +134,19 @@ const TERMINATOR_CHARS = new Set([
   "！",
   "？",
   "、",
+  "（",
   "）",
-  "」",
-  "』",
+  "【",
   "】",
+  "「",
+  "」",
+  "『",
+  "』",
+  "《",
   "》",
+  "〈",
+  "〉",
+  "…",
 ]);
 
 const WS_RE = /\s/;

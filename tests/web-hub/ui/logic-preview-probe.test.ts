@@ -11,7 +11,9 @@ import {
   planProbeBatches,
   PreviewProbeStore,
   PROBE_BATCH_BYTES,
+  PROBE_FAILED_TTL_MS,
   PROBE_LRU_CAP,
+  PROBE_MISSING_TTL_MS,
 } from "../../../src/web-hub/ui/src/logic/previewProbe.js";
 import { PREVIEW_PROBE_KINDS, PREVIEW_PROBE_MAX_PATHS } from "@protocol/preview.ts";
 
@@ -73,6 +75,97 @@ describe("PreviewProbeStore — LRU", () => {
     expect(s.size).toBe(256);
     expect(s.get("k", "/p/0.ts")).toBeUndefined(); // oldest evicted
     expect(s.get("k", "/p/299.ts")).toBe("pending");
+  });
+});
+
+describe("PreviewProbeStore — negative-result TTL (2026-10-09 fix, fake clock)", () => {
+  /** Injectable fake clock — no real timers anywhere (the store owns none either). */
+  function ttlStore(cap?: number): { s: PreviewProbeStore; t: { v: number } } {
+    const t = { v: 1_000 };
+    const s = new PreviewProbeStore(cap ?? PROBE_LRU_CAP, { now: () => t.v });
+    return { s, t };
+  }
+
+  it("the TTL constants are the spec's 10 s / 30 s", () => {
+    expect(PROBE_MISSING_TTL_MS).toBe(10_000);
+    expect(PROBE_FAILED_TTL_MS).toBe(30_000);
+  });
+
+  it("missing re-probes exactly at the TTL (not before): the file-created-mid-session flow", () => {
+    const { s, t } = ttlStore();
+    expect(s.markPending("k", ["/p/a.png"])).toEqual(["/p/a.png"]);
+    s.settle("k", ["/p/a.png"], ["missing"]);
+    t.v += PROBE_MISSING_TTL_MS - 1; // 9 999 ms — in-window ⇒ skipped
+    expect(s.markPending("k", ["/p/a.png"])).toEqual([]);
+    t.v += 1; // exactly at the TTL ⇒ expired (>=)
+    expect(s.markPending("k", ["/p/a.png"])).toEqual(["/p/a.png"]);
+    // no flicker: the OLD negative state stays visible during the re-probe…
+    expect(s.get("k", "/p/a.png")).toBe("missing");
+    // …and the fresh answer wins (the tool call created the file in the meantime)
+    s.settle("k", ["/p/a.png"], ["image"]);
+    expect(s.get("k", "/p/a.png")).toBe("confirmed");
+  });
+
+  it("failed re-probes after the (longer) failed TTL", () => {
+    const { s, t } = ttlStore();
+    s.markPending("k", ["/p/a.ts"]);
+    s.fail("k", ["/p/a.ts"]);
+    t.v += PROBE_FAILED_TTL_MS - 1;
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual([]);
+    t.v += 1;
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual(["/p/a.ts"]);
+    expect(s.get("k", "/p/a.ts")).toBe("failed"); // no flicker during the re-probe
+  });
+
+  it("a re-probed missing that settles missing again restarts the TTL clock from THAT answer", () => {
+    const { s, t } = ttlStore();
+    s.markPending("k", ["/p/a.ts"]);
+    s.settle("k", ["/p/a.ts"], ["missing"]); // settled at t=1000
+    t.v = 11_000; // expired, re-probe…
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual(["/p/a.ts"]);
+    s.settle("k", ["/p/a.ts"], ["missing"]); // fresh answer at t=11000
+    t.v = 20_999; // 9 999 ms after the SECOND answer — still in-window
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual([]);
+    t.v = 21_000;
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual(["/p/a.ts"]);
+  });
+
+  it("no double-submit: an expired negative already being re-probed is not re-staged", () => {
+    const { s, t } = ttlStore();
+    s.markPending("k", ["/p/a.ts", "/p/b.ts"]);
+    s.settle("k", ["/p/a.ts", "/p/b.ts"], ["missing", "missing"]);
+    t.v += PROBE_MISSING_TTL_MS + 5;
+    expect(s.markPending("k", ["/p/a.ts", "/p/a.ts", "/p/b.ts"])).toEqual(["/p/a.ts", "/p/b.ts"]); // in-call dedup too
+    // a second flush while the re-probe is in flight: nothing fresh
+    expect(s.markPending("k", ["/p/a.ts", "/p/b.ts"])).toEqual([]);
+  });
+
+  it("confirmed is sticky: no TTL, only LRU eviction removes it", () => {
+    const { s, t } = ttlStore();
+    s.markPending("k", ["/p/a.ts"]);
+    s.settle("k", ["/p/a.ts"], ["text"]);
+    t.v += 3_600_000; // an hour later
+    expect(s.get("k", "/p/a.ts")).toBe("confirmed");
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual([]);
+  });
+
+  it("pending (first probe, in flight) is never re-staged — unchanged pre-fix semantics", () => {
+    const { s, t } = ttlStore();
+    s.markPending("k", ["/p/a.ts"]);
+    t.v += 3_600_000; // pending has no TTL — the transport's own deadline governs it
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual([]);
+  });
+
+  it("LRU behaviour is unchanged: a TTL re-stage refreshes recency like any touch", () => {
+    const { s, t } = ttlStore(2);
+    s.markPending("k", ["/p/a.ts", "/p/b.ts"]);
+    s.settle("k", ["/p/a.ts", "/p/b.ts"], ["missing", "text"]); // a=missing, b=confirmed
+    t.v += PROBE_MISSING_TTL_MS;
+    expect(s.markPending("k", ["/p/a.ts"])).toEqual(["/p/a.ts"]); // re-stage touches a
+    s.markPending("k", ["/p/c.ts"]); // evicts b (oldest), not a
+    expect(s.size).toBe(2);
+    expect(s.get("k", "/p/a.ts")).toBe("missing");
+    expect(s.get("k", "/p/b.ts")).toBeUndefined();
   });
 });
 

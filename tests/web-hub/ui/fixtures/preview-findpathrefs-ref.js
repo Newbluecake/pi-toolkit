@@ -12,7 +12,10 @@
  *
  * NEVER edit this file to "fix" a differential failure — a red diff means the live
  * implementation changed legacy behavior; re-freeze only by copying the exact released
- * implementation again.
+ * implementation again. (One such intentional re-freeze happened 2026-10-09: the live
+ * module's full-width/CJK punctuation terminator fix — see TERMINATOR_CHARS below — was
+ * folded in here identically; it is the ONLY divergence from the original byte-for-byte
+ * copy, and the live module carries the same change.)
  *
  * Original code follows, byte-for-byte (only the export of `findPathRefs` and the module
  * header above were added; the old header comments are kept inline).
@@ -29,7 +32,13 @@ const PREVIEW_MAX_REFS_PER_NODE = 100;
 /** §4.6 rule 1: a candidate `/` may immediately follow one of these (besides line start / whitespace). */
 const START_CHARS = new Set(["(", "[", "{", "<", '"', "'", "=", "（", "「", "『", "【", "《", "："]);
 
-/** §4.6 rule 2: a candidate ends at the first of these (besides any whitespace). */
+/** §4.6 rule 2: a candidate ends at the first of these (besides any whitespace).
+ * 2026-10-09 RE-FREEZE (intentional rule change, not a differential "fix"): the live
+ * module's full-width-punctuation terminator fix (user report 「预览图：/tmp/x.png（点开）」)
+ * is folded in here identically — `（` `【` `「` `『` `《` (former start-only chars), `〈` `〉`
+ * `…` (new) all terminate a candidate. Without this lockstep update the legacy differential
+ * gate would pin the BUG (an opener absorbing following prose into the ref) once the fuzz
+ * alphabet grew these chars. Non-punctuation CJK still never terminates. */
 const TERMINATOR_CHARS = new Set([
   '"',
   "'",
@@ -52,11 +61,19 @@ const TERMINATOR_CHARS = new Set([
   "！",
   "？",
   "、",
+  "（",
   "）",
-  "」",
-  "』",
+  "【",
   "】",
+  "「",
+  "」",
+  "『",
+  "』",
+  "《",
   "》",
+  "〈",
+  "〉",
+  "…",
 ]);
 
 const WS_RE = /\s/;

@@ -52,12 +52,14 @@ function makeProbe(outcome: (call: ProbeCall) => PreviewProbeOutcome | Promise<P
 function setup(
   scope: Ref<PreviewPathScope | null>,
   transport: ReturnType<typeof makeProbe>,
+  now?: () => number,
 ): { handle: PreviewProbeHandle; sched: ReturnType<typeof manualSchedule> } {
   const sched = manualSchedule();
   const handle = usePreviewProbe({
     probe: (req, opts) => transport.fn(req as ProbeCall),
     scope,
     schedule: sched.schedule,
+    ...(now !== undefined ? { now } : {}),
   });
   return { handle, sched };
 }
@@ -194,6 +196,143 @@ describe("usePreviewProbe — state machine (2026-10-07 修订)", () => {
     // …but the late transport answer is dropped: the entry stays pending, never confirmed
     expect(t.calls).toHaveLength(0);
     expect(handle.stateOf("/p/a.ts")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-09 negative-result TTL — a later mention of a missing/failed path re-probes
+// once its TTL has passed (the "file created by the tool call that first mentioned it"
+// flow). Fake clock + manual scheduler: no real timers; one-request-per-tick preserved.
+// ---------------------------------------------------------------------------
+
+describe("usePreviewProbe — negative-result TTL (2026-10-09 fix)", () => {
+  it("missing re-probes after 10 s (not before); the fresh answer flips stateOf", async () => {
+    const scope = ref<PreviewPathScope | null>(SCOPE);
+    const t = { v: 0 };
+    const probe = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "missing" as const) }));
+    const { handle, sched } = setup(scope, probe, () => t.v);
+    handle.ensure(["/p/a.png"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.stateOf("/p/a.png")).toBe("missing");
+
+    t.v = 9_999; // in-window: a NEW message mentioning the path still stays plain
+    handle.ensure(["/p/a.png"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(probe.calls).toHaveLength(1);
+
+    t.v = 10_000; // expired: the next message's ensure re-probes exactly once
+    handle.ensure(["/p/a.png"]);
+    expect(handle.stateOf("/p/a.png")).toBe("missing"); // old negative until the fresh settle
+    sched.flush();
+    expect(probe.calls).toHaveLength(2);
+    await flushMicrotasks();
+    expect(handle.stateOf("/p/a.png")).toBe("missing"); // still nothing there
+
+    t.v = 20_000; // another TTL later, the next mention re-probes again
+    handle.ensure(["/p/a.png"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(probe.calls).toHaveLength(3); // re-probed again at the next TTL boundary
+  });
+
+  it("the fresh answer flips a stale missing to confirmed (clickable)", async () => {
+    const scope = ref<PreviewPathScope | null>(SCOPE);
+    const t = { v: 0 };
+    let answer: "missing" | "image" = "missing";
+    const probe = makeProbe((c) => ({ ok: true, results: c.paths.map(() => answer) }));
+    const { handle, sched } = setup(scope, probe, () => t.v);
+    handle.ensure(["/p/a.png"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.stateOf("/p/a.png")).toBe("missing");
+    t.v = 10_000;
+    answer = "image";
+    handle.ensure(["/p/a.png"]); // a NEW message mentions it after the file appeared
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.stateOf("/p/a.png")).toBe("confirmed");
+    // …and confirmed is sticky: no further requests ever
+    t.v = 600_000;
+    handle.ensure(["/p/a.png"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(probe.calls).toHaveLength(2);
+  });
+
+  it("failed re-probes after 30 s (anti-retry-storm floor)", async () => {
+    const scope = ref<PreviewPathScope | null>(SCOPE);
+    const t = { v: 0 };
+    const probe = makeProbe(() => ({ ok: false as const, status: 503, error: "E_BUSY" }));
+    const { handle, sched } = setup(scope, probe, () => t.v);
+    handle.ensure(["/p/a.ts"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.stateOf("/p/a.ts")).toBe("failed");
+    t.v = 29_999;
+    handle.ensure(["/p/a.ts"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(probe.calls).toHaveLength(1);
+    t.v = 30_000;
+    handle.ensure(["/p/a.ts"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(probe.calls).toHaveLength(2);
+  });
+
+  it("no double-submit while a re-probe is pending; stateOf keeps the old negative until settle", async () => {
+    const scope = ref<PreviewPathScope | null>(SCOPE);
+    const t = { v: 0 };
+    const waiting: Array<(o: PreviewProbeOutcome) => void> = [];
+    const calls: ProbeCall[] = [];
+    const probe = {
+      calls,
+      fn: (req: ProbeCall) =>
+        new Promise<PreviewProbeOutcome>((resolve) => {
+          calls.push(req);
+          waiting.push(resolve);
+        }),
+    };
+    const { handle, sched } = setup(scope, probe, () => t.v);
+    handle.ensure(["/p/a.png"]);
+    sched.flush();
+    await flushMicrotasks();
+    waiting.shift()!({ ok: true, results: ["missing"] });
+    await flushMicrotasks();
+    t.v = 10_000;
+    handle.ensure(["/p/a.png"]); // expired — re-probe leaves on the wire…
+    sched.flush();
+    expect(calls).toHaveLength(2);
+    expect(handle.stateOf("/p/a.png")).toBe("missing"); // …but stays visible as missing
+    // a third message while that re-probe is in flight must NOT submit again
+    t.v = 10_500;
+    handle.ensure(["/p/a.png"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(calls).toHaveLength(2);
+    waiting.shift()!({ ok: true, results: ["image"] });
+    await flushMicrotasks();
+    expect(handle.stateOf("/p/a.png")).toBe("confirmed");
+  });
+
+  it("batching is preserved: expired negatives + a new path leave in ONE request", async () => {
+    const scope = ref<PreviewPathScope | null>(SCOPE);
+    const t = { v: 0 };
+    const probe = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "missing" as const) }));
+    const { handle, sched } = setup(scope, probe, () => t.v);
+    handle.ensure(["/p/a.ts", "/p/b.ts"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(probe.calls).toHaveLength(1);
+    t.v = 10_000;
+    // one message later: both stale negatives plus one brand-new candidate
+    handle.ensure(["/p/a.ts", "/p/b.ts", "/p/c.ts"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(probe.calls).toHaveLength(2);
+    expect(probe.calls[1]!.paths).toEqual(["/p/a.ts", "/p/b.ts", "/p/c.ts"]);
   });
 });
 
