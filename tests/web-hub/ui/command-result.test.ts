@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CommandResult from "../../../src/web-hub/ui/src/components/control/CommandResult.vue";
 import type { CommandOutputWire } from "../../../src/web-hub/protocol/messages.js";
 
@@ -74,5 +74,132 @@ describe("CommandResult.vue (§4.9)", () => {
     expect(failed.find(".command-error").text()).toContain("compacting");
     const waiting = mountResult({ waitingTerminal: true, captured: false });
     expect(waiting.find(".command-waiting-terminal").text()).toContain("waiting for interaction in the terminal");
+  });
+});
+
+/** Auto-dismiss (2026-10 user request): ONLY informational, content-less results (terminal-only
+ * note, bare "ran fine" success card) close on their own after 6 s; real output, actionable
+ * banners and errors stay. Hover/focus pause the countdown (resume keeps the remaining time);
+ * a prop swap (DetailDock replaces the cmdResult object per dispatch) restarts the full window;
+ * unmount clears the timer. */
+describe("CommandResult.vue auto-dismiss", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("terminal-only note disappears after 6 s — not before", async () => {
+    const w = mountResult({ captured: false, output: null });
+    expect(w.find(".command-terminal-only").exists()).toBe(true);
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(w.emitted("dismiss")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(w.emitted("dismiss")).toHaveLength(1);
+  });
+
+  it("content-less captured success (ran fine, nothing to show) auto-dismisses too", async () => {
+    const w = mountResult({ captured: true, output: { entries: [] } });
+    expect(w.find(".command-terminal-only").exists()).toBe(false); // bare header card, no note
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(w.emitted("dismiss")).toHaveLength(1);
+  });
+
+  it("captured output with real text never auto-dismisses", async () => {
+    const w = mountResult({ output: FULL_OUTPUT, captured: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
+    expect(w.findAll(".command-output pre").length).toBeGreaterThan(0);
+  });
+
+  it("error results never auto-dismiss", async () => {
+    const w = mountResult({ state: "failed", error: "E_BUSY_COMPACTING", message: "compacting" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
+  });
+
+  it("terminal-only with an interactive-steps line stays (content to read)", async () => {
+    const w = mountResult({ captured: false, output: { entries: [{ kind: "interactive", text: "confirm" }] } });
+    expect(w.find(".command-needs-terminal").exists()).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
+  });
+
+  it("waiting-in-terminal banner never auto-dismisses (actionable)", async () => {
+    const w = mountResult({ captured: false, output: null, waitingTerminal: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
+  });
+
+  it("hover pauses and resumes with the remaining window", async () => {
+    const w = mountResult({ captured: false, output: null });
+    await vi.advanceTimersByTimeAsync(3_000); // 3 s left
+    await w.find(".command-result").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(30_000); // paused — nothing fires
+    expect(w.emitted("dismiss")).toBeUndefined();
+    await w.find(".command-result").trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(2_999); // resumes with the 3 s that were left
+    expect(w.emitted("dismiss")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(w.emitted("dismiss")).toHaveLength(1);
+  });
+
+  it("keyboard focus pauses; focus hopping inside the card keeps it paused", async () => {
+    const w = mountResult({ captured: false, output: null });
+    const card = w.find(".command-result");
+    await card.trigger("focusin");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
+    // focusout whose relatedTarget is still inside the card must NOT resume the countdown
+    card.element.dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: w.find(".command-result-dismiss").element }),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
+    // focus actually leaving the card resumes with the full window still to go
+    await card.trigger("focusout");
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(w.emitted("dismiss")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(w.emitted("dismiss")).toHaveLength(1);
+  });
+
+  it("close button still dismisses manually and cancels the countdown", async () => {
+    const w = mountResult({ captured: false, output: null });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await w.find(".command-result-dismiss").trigger("click");
+    expect(w.emitted("dismiss")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(w.emitted("dismiss")).toHaveLength(1); // no second (timer) emit after the manual close
+  });
+
+  it("a new result (prop swap) restarts the full window", async () => {
+    const w = mountResult({ captured: false, output: null });
+    await vi.advanceTimersByTimeAsync(4_000); // 2 s left on the first window
+    await w.setProps({ name: "other" }); // DetailDock replaces the cmdResult object per dispatch
+    await vi.advanceTimersByTimeAsync(4_000); // the old window would have fired 2 s in
+    expect(w.emitted("dismiss")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(2_000); // exactly 6 s since the restart
+    expect(w.emitted("dismiss")).toHaveLength(1);
+  });
+
+  it("running → done arms the countdown on completion, not before", async () => {
+    const w = mountResult({ state: "running" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
+    await w.setProps({ state: "done", captured: false });
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(w.emitted("dismiss")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(w.emitted("dismiss")).toHaveLength(1);
+  });
+
+  it("unmount clears the timer — nothing fires afterwards", async () => {
+    const w = mount(CommandResult, { props: { name: "session", state: "done", captured: false, output: null } });
+    await vi.advanceTimersByTimeAsync(1_000);
+    w.unmount();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(w.emitted("dismiss")).toBeUndefined();
   });
 });
