@@ -178,6 +178,11 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   font-variant-numeric: tabular-nums;
 }
 
+.avatar-user {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+}
+
 .msg-assistant.is-streaming .avatar {
   background: var(--c-primary);
   color: var(--c-on-primary);
@@ -659,13 +664,18 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   font-size: var(--fs-2xs);
 }
 
+/* 2026-10-09 「进度展示的动画效果看起来不是特别贴合」: the bar used to run edge to edge
+ * under the card's rounded top corners — `.tool`'s overflow:hidden + radius clipped the
+ * sweeping segment into a curved hook at each corner. It is now inset by the corner radius
+ * with rounded ends, so it reads as a straight track along the flat part of the top edge. */
 .tool-progress {
   position: absolute;
-  left: 0;
-  right: 0;
+  left: var(--r-md);
+  right: var(--r-md);
   top: 0;
   height: 2px;
   overflow: hidden;
+  border-radius: 0 0 2px 2px;
   background: var(--st-tool-soft);
 }
 
@@ -675,6 +685,7 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   top: 0;
   bottom: 0;
   width: 30%;
+  border-radius: inherit;
   background: var(--st-tool);
   animation: transcript-indeterminate 1.4s var(--ease-out) infinite;
 }
@@ -881,8 +892,22 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
     padding: var(--sp-4) var(--sp-6) var(--sp-8);
   }
 
+  /* 2026-10-09: user avatar column mirrors the assistant's (bubble | 28px avatar); the
+   * extra 28px + gap is added on top of the old bubble cap so the bubble keeps its width. */
   .msg-user {
-    max-width: min(78%, 640px);
+    max-width: calc(min(78%, 640px) + 28px + var(--sp-3));
+    grid-template-columns: minmax(0, auto) 28px;
+    column-gap: var(--sp-3);
+  }
+
+  .msg-user > * {
+    grid-column: 1;
+  }
+
+  .msg-user > .avatar-user {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
   }
 
   .msg-assistant,
