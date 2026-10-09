@@ -38,6 +38,12 @@ import { createForkSrcDirState, snapshotFork } from "./snapshot.js";
 export interface HistorySeams {
   fs?: Partial<HistoryFs>;
   procFs?: Partial<ProcFs>;
+  /** Verifier P2 (P-int flake round): the SYNC re-prove's /proc view — same seam discipline as
+   *  `procFs` (programmatic only, merged over the real readers). Without it the sync re-stat
+   *  always walks the whole real /proc, and on a saturated machine either its own 50 ms
+   *  budget trips (`proc-partial`) or a foreign same-uid pi/node pid born mid-scan reads as
+   *  `new-process` — both environmental 409s no retry can reliably absorb. */
+  procSyncFs?: Partial<ProcSyncFs>;
   gate?: HistoryIoGate;
 }
 
@@ -53,7 +59,7 @@ export function createHistoryService(deps: HistoryServiceDeps, seams?: HistorySe
   const procFsSource: "default" | "seam" = seams?.procFs === undefined ? "default" : "seam";
   const fs = mergeFs(seams?.fs);
   const procFs = mergeProcFs(seams?.procFs);
-  const procSyncFs: ProcSyncFs = defaultProcSyncFs();
+  const procSyncFs: ProcSyncFs = { ...defaultProcSyncFs(), ...seams?.procSyncFs };
   const syncFs: HistorySyncFs = defaultHistorySyncFs();
   const cwdFs: CwdFs = defaultCwdFs();
   const gate: HistoryIoGate = seams?.gate ?? createHistoryIoGate();

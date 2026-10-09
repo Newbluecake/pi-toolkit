@@ -30,12 +30,28 @@
  *
  * web-hub-spawn-restore plan RS8: the restore fork's argv TAIL is a session coordinate, honored too:
  *   - `--session <abs file>`: read the file's header line (`{type:"session", id, cwd}`), report
- *     `sessionId = header.id` + `sessionFile = <file>` (a missing/garbage file ⇒ a fresh id, like
- *     pi's F22 "opens an empty session at that path").
+ *     `sessionId = header.id` + `sessionFile = <file>` VERBATIM — the argv string, byte-exact
+ *     (HC1 proves real pi does exactly this; the hub's post-live session-swapped check leans on
+ *     it). hello's `cwd` is the HEADER cwd when one was read (HC1/E10), else the process cwd.
+ *     A missing/garbage file still means a fresh id (pi's F22 "opens an empty session there").
  *   - `--session-id <id>`: report that id (no sessionFile — pi creates it lazily).
  *   - `--write-session` (switch): report `sessionFile = $HOME/.pi/agent/sessions/fake/<id>.jsonl`,
  *     write its header right after going live, then emit `status{busy:true}` → `status{busy:false}`
  *     (one completed "turn" — the hub's sessionPersisted evidence path).
+ *
+ * session-history plan §4.8 step 2 (HH/RH fixtures):
+ *   - `--fork <src> --session-id <id>`: src MUST live under `<HOME>/.pi/agent/web-hub/spawn/fork-src/`
+ *     (the hub's PD12 snapshot dir) — anything else logs `FAKE-PI fork-src-outside-forkdir` and
+ *     exits 3 (F26: the design promise that a direct fork from a live source never happens).
+ *     The new session file is written BEFORE the session frame (HC2 ordering), pi's format,
+ *     `parentSession = <src>`, header `cwd` = the process cwd (E2: realpath of the workdir).
+ *   - `--delay-open <ms>`: wait BEFORE reading the session file (HH10: the test swaps the file
+ *     under the child first). `--delay-session <ms>`: wait AFTER the open/touch, BEFORE the
+ *     session frame (HH10b: the swap-back window). After a successful open the fake appends one
+ *     `{"type":"custom","customType":"fake-pi:touch"}` line to the file it actually opened —
+ *     inode-level evidence so HH10/HH10b can tell WHICH file the fake wrote to.
+ *   - `--title-only`: ONLY `process.title = "pi"` + stay alive — never touches the socket, never
+ *     reads stdin (HH9/RH4's unconnected-pi sample: a live comm=pi process on the same uid).
  *   Argv is still dumped to `FAKE_ARGV_OUT` (default-model H9) and, per process, appended as one
  *   JSON line (`{pid, argv}`) to `<cwd>/.fake-pi-argv.log` (restore tests read every fork's argv).
  *
@@ -54,6 +70,10 @@
  *                          (protocol error ⇒ supervisor stops the child)
  *   --flood N              write N MiB of junk lines to stdout
  *   --stderr-flood N       write N MiB to stderr (stderr sink bounds, H6)
+ *   --fork <src>           (needs --session-id) fork from the hub's fork-src snapshot; exit 3 outside it
+ *   --delay-open <ms>      wait before reading the --session file (HH10)
+ *   --delay-session <ms>   wait after opening it, before the session frame (HH10b)
+ *   --title-only           comm=pi sample that never connects (HH9/RH4)
  *
  * Everything the tests assert on rides STDERR (which the hub tees into
  * `<stateDir>/spawn/<spawnId>.stderr.log`) or the socket. Startup line:
@@ -76,10 +96,15 @@ try {
   const fs = await import("node:fs");
   const switchFile = `${process.cwd()}/.fake-pi-switches`;
   if (fs.existsSync(switchFile)) {
+    let loaded = 0;
     for (const line of fs.readFileSync(switchFile, "utf8").split("\n")) {
       const s = line.trim();
-      if (s !== "" && !argv.includes(s)) argv.push(s);
+      if (s !== "" && !argv.includes(s)) {
+        argv.push(s);
+        loaded += 1;
+      }
     }
+    if (loaded > 0) process.stderr.write(`FAKE-PI switches=${loaded}\n`);
   }
 } catch {
   /* unreadable switch file — run with argv switches only */
@@ -132,24 +157,75 @@ const log = (line) => {
 
 const now = () => Date.now();
 const nonce = `fp${process.pid.toString(36).padStart(8, "0").slice(-8)}nonceAAAAAAAA`;
-// web-hub-spawn-restore RS8: session coordinates from the restore argv tail (see header).
+// web-hub-spawn-restore RS8 + session-history §4.8: session coordinates from the argv tail.
+// Resolution is deferred into resolveSessionStartup() so --delay-open/--delay-session can widen
+// the exact windows HH10/HH10b need; `headerCwd` (the source header's cwd) becomes hello's cwd
+// per HC1/E10 — real pi reports the SESSION cwd there, not the process cwd.
 let sessionId = `sess-fake-${process.pid.toString(36)}`;
 let sessionFile;
-{
+let headerCwd;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const forkSrcDir = `${process.env.HOME ?? "/nonexistent"}/.pi/agent/web-hub/spawn/fork-src`;
+
+async function resolveSessionStartup() {
   const fs4 = await import("node:fs");
   const file = valueOf("--session", "");
+  const forkSrc = valueOf("--fork", "");
   const byId = valueOf("--session-id", "");
   if (file !== "") {
-    sessionFile = file;
+    sessionFile = file; // VERBATIM argv string (HC1): byte-exact session-swapped checking
+    const delayOpen = Number(valueOf("--delay-open", "0"));
+    if (delayOpen > 0) await sleep(delayOpen);
     try {
-      const header = JSON.parse(fs4.readFileSync(file, "utf8").split("\n")[0]);
+      const raw = fs4.readFileSync(file, "utf8");
+      // inode evidence: touch whichever file we actually opened — ONE bounded custom line
+      fs4.appendFileSync(file, `${JSON.stringify({ type: "custom", customType: "fake-pi:touch" })}\n`);
+      const header = JSON.parse(raw.split("\n")[0]);
       if (header && header.type === "session" && typeof header.id === "string") sessionId = header.id;
+      if (header && typeof header.cwd === "string") headerCwd = header.cwd;
     } catch {
       /* missing/garbage file: pi opens an empty session at that path (F22) — fresh id */
     }
-  } else if (byId !== "") {
-    sessionId = byId;
-  } else if (has("--write-session")) {
+    const delaySession = Number(valueOf("--delay-session", "0"));
+    if (delaySession > 0) await sleep(delaySession);
+    return;
+  }
+  if (forkSrc !== "") {
+    // F26/HC7: the hub only ever forks from its own snapshot; a --fork source outside
+    // forkSrcDir is a contract violation — refuse loudly instead of touching a live file.
+    if (!forkSrc.startsWith(`${forkSrcDir}/`)) {
+      log("FAKE-PI fork-src-outside-forkdir");
+      process.exit(3);
+    }
+    let srcHeader;
+    try {
+      srcHeader = JSON.parse(fs4.readFileSync(forkSrc, "utf8").split("\n")[0]);
+    } catch {
+      srcHeader = undefined;
+    }
+    if (srcHeader && typeof srcHeader.cwd === "string") headerCwd = srcHeader.cwd;
+    sessionId = byId !== "" ? byId : sessionId;
+    sessionFile = `${process.env.HOME ?? "/nonexistent"}/.pi/agent/sessions/fake/${sessionId}.jsonl`;
+    // HC2 ordering: the new file exists BEFORE the session frame goes out; pi's format, with
+    // parentSession dangling at the snapshot (PD12: the hub never patches it, cleans the snap).
+    const dir = sessionFile.slice(0, sessionFile.lastIndexOf("/"));
+    fs4.mkdirSync(dir, { recursive: true });
+    fs4.writeFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        type: "session",
+        version: 3,
+        id: sessionId,
+        timestamp: new Date().toISOString(),
+        cwd: process.cwd(),
+        parentSession: forkSrc,
+      })}\n`,
+    );
+    log(`FORK-FILE-WRITTEN ${sessionFile}`);
+    return;
+  }
+  if (byId !== "") sessionId = byId;
+  else if (has("--write-session")) {
     sessionFile = `${process.env.HOME ?? "/nonexistent"}/.pi/agent/sessions/fake/${sessionId}.jsonl`;
   }
 }
@@ -260,7 +336,7 @@ function connectAndHello() {
       epoch,
       kind: "rpc",
       launcher: [process.execPath, process.argv[1] ?? ""],
-      cwd: process.cwd(),
+      cwd: headerCwd ?? process.cwd(), // HC1/E10: the SESSION cwd when a header was read
       caps: ["cmd.v1", "dialog.v1"],
     })}\n`,
   );
@@ -350,43 +426,47 @@ function floodStderr(miB) {
 // ---------------------------------------------------------------------------
 
 let stdinBuf = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  stdinBuf += chunk;
-  for (;;) {
-    const nl = stdinBuf.indexOf("\n");
-    if (nl < 0) break;
-    const line = stdinBuf.slice(0, nl);
-    stdinBuf = stdinBuf.slice(nl + 1);
-    if (line.length === 0) continue;
-    let frame;
-    try {
-      frame = JSON.parse(line);
-    } catch {
-      continue;
+if (!has("--title-only")) {
+  // --title-only never reads stdin: the sample must survive an ignored/closed stdin (an EOF
+  // here would kill it before the test's occupancy window closed — HH9/RH4).
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    stdinBuf += chunk;
+    for (;;) {
+      const nl = stdinBuf.indexOf("\n");
+      if (nl < 0) break;
+      const line = stdinBuf.slice(0, nl);
+      stdinBuf = stdinBuf.slice(nl + 1);
+      if (line.length === 0) continue;
+      let frame;
+      try {
+        frame = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (frame.type === "extension_ui_response") {
+        const sent = sentAt.get(frame.id);
+        log(`UI-RESP ${frame.id} cancelled=${frame.cancelled === true} ${now()} ${sent ?? "-"}`);
+        continue;
+      }
+      // cmd frames ride the socket (answered there); superseded likewise. stdin beyond the
+      // ui_response channel is nothing the hub ever sends — anything else is ignored.
     }
-    if (frame.type === "extension_ui_response") {
-      const sent = sentAt.get(frame.id);
-      log(`UI-RESP ${frame.id} cancelled=${frame.cancelled === true} ${now()} ${sent ?? "-"}`);
-      continue;
+  });
+  process.stdin.on("end", () => {
+    diag("STDIN-EOF");
+    if (has("--ignore-eof")) {
+      log("EOF-IGNORED");
+      return;
     }
-    // cmd frames ride the socket (answered there); superseded likewise. stdin beyond the
-    // ui_response channel is nothing the hub ever sends — anything else is ignored.
-  }
-});
-process.stdin.on("end", () => {
-  diag("STDIN-EOF");
-  if (has("--ignore-eof")) {
-    log("EOF-IGNORED");
-    return;
-  }
-  log("EXIT eof");
-  process.exit(0);
-});
-process.stdin.on("error", () => {
-  log("EXIT stdin-error");
-  process.exit(0);
-});
+    log("EXIT eof");
+    process.exit(0);
+  });
+  process.stdin.on("error", () => {
+    log("EXIT stdin-error");
+    process.exit(0);
+  });
+}
 
 const diagFile = `${process.cwd()}/.fake-pi-diag`;
 const diag = (line) => {
@@ -457,7 +537,18 @@ function afterLive() {
   if (flood > 0) floodStdout(flood);
 }
 
-if (!has("--no-hello")) connectAndHello();
+if (has("--title-only")) {
+  // HH9/RH4's unconnected-pi sample: comm=pi (the title setter at the top), alive, NEVER a
+  // socket frame — the occupancy scan sees it, no card/record ever matches it. The REF'd
+  // interval is the whole point; only the test's kill clears the occupancy.
+  const hold = setInterval(() => {}, 1 << 30);
+  if (typeof hold.unref === "function") {
+    // deliberately NOT unref'd — this handle IS the sample
+  }
+} else {
+  await resolveSessionStartup();
+  if (!has("--no-hello")) connectAndHello();
+}
 
 // --ignore-eof keep-alive: once the hub dies, stdin (EOF seen), the agent socket and both
 // stdio pipes are gone — without a ref'd handle Node would drain the event loop and exit 0,

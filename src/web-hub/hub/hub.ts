@@ -44,6 +44,7 @@ import {
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
   WTDIFF_HUB_CAP,
+  SPAWN_HISTORY_HUB_CAP,
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
@@ -73,7 +74,20 @@ import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyConte
 import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createSpawnStore } from "./spawn/store.js";
-import { createSpawnSupervisor, type SpawnSupervisor, type SpawnSupervisorDeps } from "./spawn/supervisor.js";
+import {
+  createSpawnSupervisor,
+  type InternalRecord,
+  type SpawnSupervisor,
+  type SpawnSupervisorDeps,
+} from "./spawn/supervisor.js";
+// session-history plan §4.8 (P-int): the spawn-history assembly — P-scan's service, P-route's
+// ports; hub.ts is the only place they meet (PD5). Aliased so the unrelated fleet-history
+// service (`./history.js`, browser transcript replay) keeps its plain name below.
+import { createHistoryService as createSpawnHistoryService } from "./spawn/history/service.js";
+import type { HistoryService as SpawnHistoryService, ManagedSessionView } from "./spawn/history/ports.js";
+import type { ProcFs, ProcSyncFs } from "./spawn/history/proc.js";
+import { defaultHistorySyncFs } from "./spawn/history/fs.js";
+import { makeCaptureSessionPathPin, makeVerifySessionPathPin } from "./spawn/history/pin.js";
 import { createUploadStore, type UploadStore } from "./uploads.js";
 import type {
   FrontendFactory,
@@ -129,6 +143,11 @@ export const HUB_START_DEADLINE_MS = 20_000;
 export const HUB_CLOSE_DEADLINE_MS = 10_000;
 /** Per-step bound for cleanup/close steps; kept separate from the crash-only hard exit in `installProcessHandlers`. */
 const STEP_DEADLINE_MS = 3_000;
+/** session-history plan v3.3 W3: the hub-side cap on `HistoryService.dispose()` — dispose's own
+ * internal budget (HISTORY_DISPOSE_MS, P-scan) is 2s; the extra half second covers the force-close
+ * epsilon. The service resolves by its own deadline regardless, so this is a belt-and-suspenders
+ * bound, not the primary one. */
+const HISTORY_SERVICE_DISPOSE_MS = 2_500;
 /**
  * web-hub-spawn-restore plan D2/§10.4: the `close(reason)` reasons whose spawn shutdown runs in
  * `restore` mode (only when `config.spawn.restore === true`). `stop` / `signal` / `fence` / `idle`
@@ -171,6 +190,18 @@ export interface StartHubDeps {
     wrapFirstPrompt?: (fwd: FirstPromptForwarder) => FirstPromptForwarder;
     /** web-hub-spawn-restore plan HR1 test hook: the restore stability window. */
     restoreStableMs?: number;
+    /** session-history plan PD22 (§4.8 step 1): programmatic-only seams for the spawn-history
+     * service. `historyProcFs` overrides the occupancy scan's async /proc reads (tests expose
+     * only the pids they spawned — a dev machine's live pi processes would otherwise force
+     * every resume test into a fork); `wrapHistory` observes the constructed service (the
+     * assembly tests read `diag().procFsSource` through it). `main.ts` sets NEITHER, and no env
+     * or HubConfig key can reach them — pinned by tests/web-hub/hub/hub-history-assembly.test.ts. */
+    historyProcFs?: Partial<ProcFs>;
+    /** Verifier P2 (P-int flake round): the SYNC re-prove's /proc view, same programmatic-only
+     *  seam discipline as `historyProcFs` — tests scope the synchronous re-stat to the pids
+     *  they own so a saturated machine's /proc churn can never surface as a 409. */
+    historyProcSyncFs?: Partial<ProcSyncFs>;
+    wrapHistory?: (svc: SpawnHistoryService) => SpawnHistoryService;
   };
   /** dir-plan v3.1 §2.9 (P1a): the uid the preview root-warning checks — `0` ⇒ the one-shot
    * `preview.root_uid` WARN after the preview routes are built. Default: `process.getuid?.()`;
@@ -248,8 +279,22 @@ export async function startHub(
     // dir-plan §3.5/§3.6 (P1b): `PREVIEW_DIR_HUB_CAP` rides the same gate AND the /proc probe —
     // the listing itself is `/proc/self/fd`-bound, so a platform without /proc never declares
     // it (the UI then never sends `dir=1` / `dirs:true`, and directories stay 415 fail-closed).
+    //
+    // session-history plan §4.8 (P-int): `SPAWN_HISTORY_HUB_CAP` rides the SAME conditional tail
+    // as `spawn.v1`/`spawn.model.v1`, but demands more — `config.spawn.history === true` AND the
+    // platform probe passing. The probe is hoisted HERE (before the caps array) because the
+    // spawn assembly further down used to run it itself; both read the one `spawnPlatform`
+    // value now, so the cap and the fail-closed supervisor can never disagree. Absent/off ⇒
+    // caps stay byte-identical to pre-feature (§5).
+    const spawnPlatform = config.spawn === undefined ? undefined : probePlatform(deps.spawnSeams?.probe);
     const extraHubCaps: readonly string[] = [
-      ...(config.spawn === undefined ? [] : [SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP]),
+      ...(config.spawn === undefined
+        ? []
+        : [
+            SPAWN_HUB_CAP,
+            SPAWN_MODEL_HUB_CAP,
+            ...(config.spawn.history === true && spawnPlatform?.ok === true ? [SPAWN_HISTORY_HUB_CAP] : []),
+          ]),
       ...(config.preview === undefined
         ? []
         : [
@@ -271,6 +316,14 @@ export async function startHub(
     let spawnSup: SpawnSupervisor | undefined;
     let spawnRoutes: SpawnFrontendPort | undefined;
     let firstPromptFwd: FirstPromptForwarder | undefined;
+    // session-history plan §4.8 (P-int): P-scan's history service, constructed inside the spawn
+    // assembly only when `config.spawn.history === true` AND the platform probe passes; disposed
+    // on BOTH shutdown paths (v3.3 W3 — see the close()/cleanup pushes below).
+    let spawnHistory: SpawnHistoryService | undefined;
+    /** Verifier r2 P1: the ONE idempotent, bounded supervisor shutdown both rollback entries
+     * share (assigned inside the spawn assembly; `SpawnSupervisor.shutdown` itself is
+     * first-call-wins, so a second entry's call resolves through the same promise). */
+    let spawnShutdownOnce: (() => Promise<void>) | undefined;
     let recoverRotateOnHello: (() => void) | undefined;
     const registry = createRegistry({
       now,
@@ -531,7 +584,16 @@ export async function startHub(
       // by POST /api/headless/prefs. `close()` is a no-op by design (no pending writes), so it
       // needs no cleanup entry.
       const spawnPrefs = createSpawnPrefs({ file: spawnFiles.prefsJson, log });
-      const platform = probePlatform(deps.spawnSeams?.probe);
+      const platform = spawnPlatform ?? probePlatform(deps.spawnSeams?.probe);
+      // session-history plan §4.8 step 1: the effective history switch — the config flag AND the
+      // platform probe. Everything history-related below (service, sessionPathPin, forkSrcDir,
+      // routes dep, the SPAWN_HISTORY_HUB_CAP tail above) keys off this one value, so `history`
+      // off ⇒ the whole hub stays byte-identical (§5): no service, no cap, routes 404 as P-route
+      // already guarantees, restore never captures a path pin.
+      const historyOn = spawnCfg.history === true && platform.ok;
+      // One shared sync-fs for the capture/verify pair (§4.5.6): pure object factory, no fd, no
+      // timer — harmless to build even on the (platform-failed) off path, read only when on.
+      const historySyncFs = defaultHistorySyncFs();
       if (!platform.ok) {
         // §7.1 fail closed: caps still carry spawn.v1 (so the UI can explain), but supervisor
         // init() is a no-op past this point — no reaper, no spawns.json write, no fork.
@@ -591,6 +653,18 @@ export async function startHub(
         audit: (r) => auditSpawn(log, r),
         pluginVersion: config.pluginVersion,
         stderrDir: spawnFiles.logDir,
+        // session-history plan §4.6.3/§4.8 (v3.4 X1): the restore re-fork's path-pin pair —
+        // injected ONLY when history is on; absent ⇒ restore keeps its exact pre-history
+        // behavior (no capture, no goLive verify, §5). Same `HistorySyncFs` for both halves.
+        ...(historyOn
+          ? {
+              sessionPathPin: {
+                capture: makeCaptureSessionPathPin(historySyncFs),
+                verify: makeVerifySessionPathPin(historySyncFs),
+              },
+              forkSrcDir: spawnFiles.forkSrcDir,
+            }
+          : {}),
         onLive: (rec) => {
           if (rec.agentKey !== undefined && rec.sessionId !== undefined) {
             firstPromptFwd?.onLive(rec.spawnId, rec.agentKey, rec.sessionId, rec.control === true);
@@ -618,6 +692,63 @@ export async function startHub(
       });
       spawnSup =
         deps.spawnSeams?.wrapSupervisor === undefined ? rawSupervisor : deps.spawnSeams.wrapSupervisor(rawSupervisor);
+      // session-history plan §4.8 step 1: the history service — built only when `historyOn`, with
+      // the P0-frozen dep shape. `managed`/`deathOf` read the supervisor LAZILLY per call (the
+      // closures resolve `spawnSup` at call time, long after this assignment). The PD22 seams
+      // (procFs / wrapHistory) arrive exclusively through `deps.spawnSeams` — never env/config.
+      if (historyOn) {
+        let historySvc = createSpawnHistoryService(
+          {
+            agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent`,
+            forkSrcDir: spawnFiles.forkSrcDir,
+            registry,
+            managed: () => (spawnSup?.records() ?? []).map(toManagedView),
+            deathOf: (id) => spawnSup?.deathOf(id),
+            uid: deps.uid ?? process.getuid?.() ?? -1,
+            hubPid: process.pid,
+            now,
+            log,
+          },
+          deps.spawnSeams?.historyProcFs === undefined && deps.spawnSeams?.historyProcSyncFs === undefined
+            ? undefined
+            : {
+                ...(deps.spawnSeams?.historyProcFs === undefined ? {} : { procFs: deps.spawnSeams.historyProcFs }),
+                ...(deps.spawnSeams?.historyProcSyncFs === undefined
+                  ? {}
+                  : { procSyncFs: deps.spawnSeams.historyProcSyncFs }),
+              },
+        );
+        if (deps.spawnSeams?.wrapHistory !== undefined) historySvc = deps.spawnSeams.wrapHistory(historySvc);
+        spawnHistory = historySvc;
+        // v3.3 W3 / X3.4 #4 + verifier P1-a: the rollback dispose is registered HERE, at the
+        // assignment — a failure in `spawnSup.init()`, `createSpawnRoutes()` or ANY later
+        // assembly step must still unwind the service's fds/gens (previously the push lived
+        // further down, past init/routes/frontend assembly, and leaked on those failures).
+        // Idempotent (dispose shares one underlying promise) and bounded (the rollback's own
+        // `bounded()` wrapper + dispose's internal HISTORY_DISPOSE_MS); the runtime close()
+        // path awaits the SAME promise and never runs this cleanup array, so the two can never
+        // double-run. Ordering: the spawn shutdown entry is pushed LATER (after the frontend's
+        // own entries, keeping §SP13's domain-first unwind), so the reverse-order rollback
+        // still runs supervisor shutdown BEFORE this dispose — the runtime close() order.
+        cleanup.push(() => spawnHistory!.dispose());
+      }
+      // Verifier r2 P1: an EARLY idempotent supervisor-shutdown entry, registered immediately
+      // after the history dispose entry above — a startup failure anywhere between here
+      // (init/routes/uploads/frontend CONSTRUCTION — before the §SP13 entry further down)
+      // used to roll back the history service with NO supervisor shutdown. Reverse order
+      // still runs this shutdown BEFORE the history dispose, the runtime close() order.
+      // Bounded (`STEP_DEADLINE_MS`) and never throws out of rollback; `shutdown` on a
+      // supervisor whose init() rejected is safe (first-call-wins promise; the catch keeps a
+      // rejection from aborting the unwind — the rollback's own `bounded()` also swallows).
+      const supForRollback = spawnSup;
+      let shutdownPromise: Promise<void> | undefined;
+      spawnShutdownOnce = (): Promise<void> => {
+        if (shutdownPromise === undefined) {
+          shutdownPromise = supForRollback.shutdown(createReqDeadline(now, STEP_DEADLINE_MS)).catch(() => undefined);
+        }
+        return shutdownPromise;
+      };
+      cleanup.push(() => spawnShutdownOnce!());
       // Bounded init (plan §SP10: store load + orphan recovery + launcher check ≤1s + reaper
       // ready ≤2s — 4s total budget); `withSignal` folds a startup abort into the same await.
       await withSignal(spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)), startup.signal);
@@ -631,6 +762,9 @@ export async function startHub(
         rejectAudit429: new Map(),
         log,
         now,
+        // session-history plan §4.8: `historyOn` already required it — absent keeps the route
+        // surface byte-identical to history-off (P-route's §5 gate reads `deps.history`).
+        ...(spawnHistory === undefined ? {} : { history: spawnHistory }),
       });
       // SP13 (SP10 acceptance leftover P3): the shutdown entry itself is pushed AFTER the
       // frontend's own cleanup entry further below — reverse-order release then runs it BEFORE
@@ -798,8 +932,12 @@ export async function startHub(
     // call inside `close`): pushed right after the frontend's entry so reverse-order release
     // runs the spawn shutdown BEFORE `fe.close()` (arch §7.6's domain-first order; see the
     // comment at the spawn assembly above for why the push had to live here, SP13 P3).
-    if (spawnSup !== undefined) {
-      cleanup.push(() => spawnSup.shutdown(createReqDeadline(now, STEP_DEADLINE_MS)));
+    // Verifier r2 P1: this LATER entry shares the SAME idempotent once-promise as the early
+    // entry inside the spawn assembly — on failures past this point it runs FIRST (SP13
+    // order preserved); on earlier failures the early entry already ran it and this call is
+    // the same settled promise (exactly-once either way).
+    if (spawnShutdownOnce !== undefined) {
+      cleanup.push(() => spawnShutdownOnce!());
     }
     // §2.2.4: the startup scan never blocks listen(); `begin` answers 503 E_BUSY until it lands.
     if (uploads !== undefined) {
@@ -1186,6 +1324,16 @@ export async function startHub(
           const mode = config.spawn?.restore === true && RESTORE_REASONS.has(reason) ? "restore" : "terminate";
           await spawnSup.shutdown(deadline, { mode });
         }
+        // session-history plan v3.3 W3 / X3.4 #4: history dispose — AFTER the spawn supervisor
+        // shut down, BEFORE the HTTP face stops accepting. Awaited and bounded at 2.5s: dispose
+        // retires every gen, force-releases pins and the fd ledger's remaining kinds, and every
+        // in-flight request settles `busy` inside its own HISTORY_DISPOSE_MS budget — no leaked
+        // fds and no never-settling promise can outlive the hub. Idempotent: the startup-failure
+        // cleanup array holds the same underlying promise. (The fleet-history dispose above used
+        // to run un-awaited only after the HTTP frontend had already closed — moved up into this
+        // same window so both history services tear down domain-first.)
+        if (spawnHistory !== undefined) await bounded(spawnHistory.dispose(), HISTORY_SERVICE_DISPOSE_MS);
+        history.dispose();
         // web-hub-preview plan v3 §4.5.1 (PV3): preview dispose — after the spawn domain shuts
         // down, BEFORE the HTTP face stops accepting. Bounded (≤1s inside dispose itself:
         // verifier tasks aborted, every active request aborted "hub-close", head-sent streams
@@ -1201,7 +1349,6 @@ export async function startHub(
         // are retained) before the rest of the teardown. The crash path may not reach this —
         // those orphans are the next startup's sweep("startup") job (§2.2.4).
         if (uploads !== undefined) await bounded(uploads.close());
-        history.dispose();
         // fleet-drawer plan §5.3 (F3b): explicit runtime-path dispose (the cleanup array is
         // startup-failure-only, upload plan #13) — service first (drops the bus subscription
         // and held watches), then the reader (fails in-flight scans as `busy`).
@@ -1323,9 +1470,9 @@ export function identityArgv(cmdline: string | undefined, fallback: readonly str
   return parts.length > 0 ? parts : fallback.slice();
 }
 
-function bounded(p: Promise<void>): Promise<void> {
+function bounded(p: Promise<void>, ms: number = STEP_DEADLINE_MS): Promise<void> {
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, STEP_DEADLINE_MS);
+    const timer = setTimeout(resolve, ms);
     timer.unref();
     p.then(
       () => {
@@ -1338,4 +1485,20 @@ function bounded(p: Promise<void>): Promise<void> {
       },
     );
   });
+}
+
+/** session-history plan §4.8 step 1: the supervisor's `InternalRecord` → the P0-frozen
+ * `ManagedSessionView` the history service's occupancy checks consume — a FIELD-BY-FIELD copy
+ * (including `procStartTicks`, C2's pid+starttime pairing) so the service can never reach a
+ * mutable record through it. Terminal states keep their exact strings; `sessionTarget` rides
+ * along so a restore re-fork's record still counts as occupying its target session. */
+function toManagedView(r: InternalRecord): ManagedSessionView {
+  const view: ManagedSessionView = { spawnId: r.spawnId, state: r.state };
+  if (r.agentKey !== undefined) view.agentKey = r.agentKey;
+  if (r.pid !== undefined) view.pid = r.pid;
+  if (r.procStartTicks !== undefined) view.procStartTicks = r.procStartTicks;
+  if (r.sessionId !== undefined) view.sessionId = r.sessionId;
+  if (r.sessionFile !== undefined) view.sessionFile = r.sessionFile;
+  if (r.sessionTarget !== undefined) view.sessionTarget = { ...r.sessionTarget };
+  return view;
 }

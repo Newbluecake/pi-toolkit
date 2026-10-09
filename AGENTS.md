@@ -421,6 +421,27 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   snapshots with the optional `HistoryPayload.sessionId` (agent backfills `snapshot_reply.sessionId`; missing on either
   side passes through — compat window), and remembers per-agentKey transcript scroll position on switch. Design:
   `docs/dev/web-hub-session-switch/plan.md`.
+  **Session history (`webHub.spawn.history`, default on; cap `spawn.history.v1` only when config.spawn exists AND the
+  flag is true AND the platform probe passes; `hub/hub.ts` is the sole assembly point — session-history plan P-int)**:
+  `GET /api/headless/history` lists every past session under the agent dir (continuable fd-anchored enumeration — a
+  swapped/symlinked dir is never followed, HH14), and a POST with a `session` ref resumes it in place
+  (`--session <abs>`, never `--model`) or forks it through a hub-made snapshot in `<stateDir>/spawn/fork-src/` (the
+  source file is never touched; the new header's `parentSession` dangles at the deleted snapshot by design). In-place
+  resume requires kind positively `main` AND a best-effort occupancy check (live card / managed record / full same-uid
+  `/proc` scan + a synchronous re-stat for pid reuse); anything detected or unclear forces a fork with an explanatory
+  `proofGap`. **The check is best-effort by user ruling (§14.1)** — residual windows W1–W7 are disclosed in the UI
+  footer, incl. that pid reuse right after a pi exits (W5) and swap-and-restore during startup (W7) are undetectable,
+  and that **restore re-forks deliberately skip the occupancy proof** (W6 product exception — RH4 pins it as a
+  documented limitation). Paths are fd-anchored (three-level `O_NOFOLLOW` + dev/ino + nlink + realpath re-checks before
+  spawn and again at goLive — a swapped file stops the child with `session-swapped` and its coordinates are never
+  adopted); restore re-forks get the same capture/verify when history is on (v3.4 X1: every `--session` restore, no
+  origin distinction). History's local IO is budgeted (≤2 concurrent fs ops via its IO gate + fd ledger, no background
+  timers; the starvation suite pins that preview/uploads/scrypt stay live). The `historyProcFs` test seam is
+  programmable ONLY through `HubDeps.spawnSeams` (`main.ts` never sets it; env/config cannot reach it — pinned by
+  `tests/web-hub/hub/hub-history-assembly.test.ts`). Gates: HC1–HC7 conformance (real pi argv/header facts), HH1–HH14
+  integration (real hub × fake pi + starvation), RH1–RH4 conformance (real pi + real hub restore). Off ⇒ the hub stays
+  byte-identical (no cap, no service, routes 404, restore carries no path pin). Design:
+  `docs/dev/web-hub-session-history/plan.md`.
 - `src/git/` — pi-free bounded git executor (`run.ts`: hard deadline, process-group kill, stdout/stderr caps,
   unref'd timers) + `git worktree list --porcelain` parse/scan (`worktrees.ts`) + `~` path labels (`path-label.ts`).
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.

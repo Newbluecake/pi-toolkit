@@ -172,6 +172,31 @@
 | R6  | 失败路径抽查：恢复前手动移走某会话文件后 `/webhub restart`      | 该记录显示 `failed` + 「会话文件已不存在，无法恢复」；其它会话照常恢复                                                                                                       |
 | R7  | `webHub.spawn.restore: false` → `/reload` → `/webhub restart`   | 行为与恢复功能上线前一致：受管会话随旧 hub 结束（`exited{hub}`），`spawns.json` 中不出现 `sessionId`/`restore` 等新字段                                                      |
 
+## H：history（历史会话浏览与恢复）
+
+设计：`docs/dev/web-hub-session-history/plan.md`（§7.3）。前置：沿用 §1 的 tmux 会话与临时 `$HOME`，
+`webHub.spawn.history` 保持默认 `true`（如需验证关闭行为：改设置后 `/reload` + `/webhub restart`）。
+自动化闸门（无需真机）：HC1–HC7（`tests/conformance/rpc-spawn.test.ts`，真 pi argv/header 事实）、
+HH1–HH12 + HH7（`tests/integration/web-hub-history*.test.ts` + `web-hub-headless.test.ts`，真 hub × fake
+pi、饿死、字节一致）、RH1–RH4（`tests/conformance/history-restore.test.ts`，真 pi + 真 hub restore 链路，
+RH4 是记录限制断言）。真机清单（HH13/HH14 的规模化/对抗项需 §1 隔离 HOME 里有 5000+ 会话时另跑）：
+
+| #   | 步骤                                                                                                                   | 预期                                                                                                                                                                                           |
+| --- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H1  | 本机 5000+ 个会话：打开「历史会话…」弹窗；记录首屏耗时与 `stats.enum.complete` 是否首请求即为 true；搜索三个月前的会话 | 首屏 ≤3s；warm 下 `complete` 首请求即 true（E7 预期），否则 partial 收敛（点「加载更多」后完整）；旧会话能搜到                                                                                 |
+| H2  | TUI 正在打开会话 X 时，在网页上对 X 点「继续」                                                                         | fork 警告（`open/card`，带 pid）；确认后得到新卡片，原会话字节不变（`sha256sum` 前后一致）                                                                                                     |
+| H3  | 开一个 `webHub.enabled:false` 的 pi（未连接）⇒ 对任意会话点「继续」                                                    | 只能 fork，提示「有未连接到 hub 的 pi 进程 (pid N)」；关掉它之后，main 会话可原地恢复                                                                                                          |
+| H4  | 点「继续」的同时（≤1s 内）在另一个终端启动任意 `node` 进程                                                             | 大概率得到「检测期间有新的 pi/node 进程启动」（new-process）的 fork 警告——预期的保守行为，不是 bug                                                                                             |
+| H5  | 删除或 symlink 化某会话的 cwd                                                                                          | 列表置灰 `gone` / `moved`；POST 返回 not-found / moved                                                                                                                                         |
+| H6  | 子会话（第 2 行是 `subagent:child` 标记）与无 main 标记的旧会话                                                        | 默认隐藏、只能 fork；无标记者提示 unverified（kind）只能 fork                                                                                                                                  |
+| H7  | LAN 下浏览列表并 resume；再把 `webHub.spawn.lan` 设为 `"off"` 重启                                                     | LAN 下列表全量可见、resume 有明文确认；`lan:"off"` 下入口消失、接口 404                                                                                                                        |
+| H8  | `grep -R "audit" ~/.pi/agent/web-hub/logs \| tail`（或 hub.log）抽查 history 相关行                                    | 不出现 id、key、标题、搜索词、游标、快照路径、sessionFile；`session` 字段只有 `resume\|fork`                                                                                                   |
+| H9  | fork 一个会话后 `ls ~/.pi/agent/web-hub/spawn/fork-src/`；在 pi 的 `/resume` 里看 fork 结果                            | fork-src 为空（快照用后即删）；fork 出的会话可见、不嵌套在原会话下（PD12）                                                                                                                     |
+| H10 | restore 打开：resume 后 `/webhub restart`；restore 关闭：再 resume 一个再 restart                                      | 打开 ⇒ 同一张卡片恢复、无 `session-swapped`；关闭 ⇒ 记录变 `exited{hub}`。**W6 手工复现**：restart 期间在 TUI 里 `/resume` 同一会话 ⇒ 重启后仍原地 `--session`，两边同时写（已披露的预期行为） |
+| H11 | 关闭 `webHub.spawn.history` 后 `/reload` + `/webhub restart`                                                           | 入口消失；SSE `hub` 帧的 caps 无 `spawn.history.v1`；`GET /api/headless/history` 404（与未知路径逐字节一致）                                                                                   |
+| H12 | 弹窗底部与 fork 确认框的小字                                                                                           | 两处都有「尽力检测」说明（含 W5「pid 被新进程复用」与 W7「替换又换回」短语）                                                                                                                   |
+| H13 | （对抗，可选）把某尚未枚举完的目录换成指向外部的 symlink 后继续翻页                                                    | 列表绝不出现外部目录内容；`stats.changed` ≥1、`incomplete:true`（HH14 的真机对照）                                                                                                             |
+
 ## 4. S2 验收（不阻塞 S1）
 
 | #   | 项目                       | 预期                                                                          |

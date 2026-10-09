@@ -241,7 +241,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
   const hubPids = new Set<number>();
   const extraPids = new Set<number>();
 
-  function childSpawnCfg(home: string): HubSpawnConfig {
+  function childSpawnCfg(home: string, over: Partial<HubSpawnConfig> = {}): HubSpawnConfig {
     return {
       roots: [home],
       maxProcesses: 4,
@@ -250,19 +250,24 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
       maxLifetimeMinutes: 720,
       registerTimeoutS: 30,
       lan: "off",
+      ...over,
     };
   }
 
   /** `excludePid`: a hub.json naming a hub we just SIGKILL'd is STALE — a re-boot on the same
    * home must wait for a pid that is different AND alive, never the dead incumbent's. */
-  async function bootHub(home: string, excludePid?: number): Promise<ChildHub> {
+  async function bootHub(
+    home: string,
+    excludePid?: number,
+    spawnOver: Partial<HubSpawnConfig> = {},
+  ): Promise<ChildHub> {
     const cfg = hubConfig({
       home,
       port: 0,
       idleExitMinutes: 10,
       pluginVersion: "1.2.3",
       launcher: fakeLauncher(home),
-      spawn: childSpawnCfg(home),
+      spawn: childSpawnCfg(home, spawnOver),
     });
     spawnHub(PLAN!, HUB_MAIN, cfg);
     await waitUntil(
@@ -313,6 +318,56 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     cleanupHome(sandbox);
     sandbox = undefined;
   });
+
+  it("HH7: history off (real main.ts hub) ⇒ caps/route/schema byte-identical to pre-feature; a history:true re-boot carries the cap and answers the list", async () => {
+    sandbox = sandboxHome();
+    let hub = await bootHub(sandbox.home);
+    const origin = `http://127.0.0.1:${hub.port}`;
+    const hdrs = { Cookie: hub.cookie, Origin: origin, "X-PWH": "1" };
+
+    // caps: spawn.v1 present, spawn.history.v1 absent (the conditional tail's off shape)
+    const sse = await openSse(hub.port, { cookie: hub.cookie });
+    const hubEv = await sse.waitFor((e) => e.event === "hub", 15_000, "SSE hub frame");
+    const caps = (hubEv.data as { caps?: string[] }).caps ?? [];
+    expect(caps).toContain("spawn.v1");
+    expect(caps).not.toContain("spawn.history.v1");
+    sse.close();
+
+    // route: GET /api/headless/history is BYTE-IDENTICAL to an unknown path (same status, body)
+    const histOff = await rawRequest(hub.port, { path: "/api/headless/history", headers: hdrs });
+    const unknown = await rawRequest(hub.port, { path: "/api/headless/zzz", headers: hdrs });
+    expect(histOff.status).toBe(unknown.status);
+    expect(histOff.body).toBe(unknown.body);
+
+    // schema: a `session` field is rejected exactly like any unknown field (parse without opts)
+    const cwd = projDir(sandbox.home, "hh7");
+    const withSession = await postJson(
+      hub.port,
+      "/api/headless",
+      { id: spawnReqId(), cwd, session: { key: "d/x.jsonl", id: "x", mode: "resume" } },
+      hdrs,
+    );
+    const withBogus = await postJson(hub.port, "/api/headless", { id: spawnReqId(), cwd, bogus: 1 }, hdrs);
+    expect(withSession.status).toBe(withBogus.status);
+    expect(withSession.body).toBe(withBogus.body);
+    expect(withSession.status).toBe(400);
+
+    // re-boot with history:true — main.ts's strict parse accepts it; cap declared; list answers
+    kill9(hub.pid);
+    hubPids.delete(hub.pid);
+    await waitUntil(() => !pidAlive(hub.pid), 5_000, "off hub dead");
+    hub = await bootHub(sandbox.home, hub.pid, { history: true });
+    const hdrs2 = { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}`, "X-PWH": "1" };
+    const sse2 = await openSse(hub.port, { cookie: hub.cookie });
+    const hubEv2 = await sse2.waitFor((e) => e.event === "hub", 15_000, "SSE hub frame (history on)");
+    const caps2 = (hubEv2.data as { caps?: string[] }).caps ?? [];
+    expect(caps2).toContain("spawn.history.v1");
+    sse2.close();
+    const list = await rawRequest(hub.port, { path: "/api/headless/history?kind=all", headers: hdrs2 });
+    expect(list.status).toBe(200);
+    const page = JSON.parse(list.body) as { items?: unknown[]; stats?: { enum?: { complete?: unknown } } };
+    expect(Array.isArray(page.items)).toBe(true);
+  }, 90_000);
 
   it("H1: hub SIGKILL ⇒ stdin-EOF-answering child exits ≤4s (the orderly shutdown lever)", async () => {
     sandbox = sandboxHome();
