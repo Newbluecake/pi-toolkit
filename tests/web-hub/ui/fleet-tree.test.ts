@@ -136,6 +136,23 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(wrapper.text()).not.toContain("Show 2 Finished Runs");
   });
 
+  it("a level with no expandable row renders flat (no chevron column); one branch keeps it for all siblings", () => {
+    const flatTree = mount(FleetTree, {
+      props: { nodes: buildFleetTree([row({ runId: "a" }), row({ runId: "b" })]), now: 0 },
+    });
+    expect(flatTree.get("ul.tree").classes()).toContain("tree-flat");
+
+    const branchy = mount(FleetTree, {
+      props: {
+        nodes: buildFleetTree([row({ runId: "p" }), row({ runId: "leaf" }), row({ runId: "kid", parentRunId: "p" })]),
+        now: 0,
+      },
+    });
+    const levels = branchy.findAll("ul.tree");
+    expect(levels[0]!.classes()).not.toContain("tree-flat"); // p has a child ⇒ siblings keep the column
+    expect(levels[1]!.classes()).toContain("tree-flat"); // the nested level holds only a leaf
+  });
+
   it("ticks elapsed time locally for non-terminal rows between frames, freezes terminal rows", async () => {
     const rows: FleetRowWire[] = [
       row({ runId: "live", terminal: false, elapsedMs: 5000 }),

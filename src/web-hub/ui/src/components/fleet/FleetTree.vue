@@ -54,6 +54,12 @@ const visible = computed<readonly FleetTreeNode[]>(() => {
   });
 });
 
+// 2026-10-09 现场「左侧的空白有点太宽」: the 18px chevron column only ever holds a glyph on rows with
+// children. When NO row of this level can expand, the level renders flat (`.tree-flat`, fleet.css)
+// without that column; as soon as one sibling has children every sibling keeps it, so a level's
+// rows always stay aligned with each other.
+const flat = computed<boolean>(() => !visible.value.some((n) => n.children.length > 0));
+
 // ---------------------------------------------------------------------------
 // per-row elapsed 走时(baseline Map,见文件头注释)
 // ---------------------------------------------------------------------------
@@ -133,7 +139,7 @@ function toggleActions(runId: string): void {
 </script>
 
 <template>
-  <ul class="tree" :aria-label="depth === 0 ? t('fleet.treeLabel') : undefined">
+  <ul class="tree" :class="{ 'tree-flat': flat }" :aria-label="depth === 0 ? t('fleet.treeLabel') : undefined">
     <li v-for="node in visible" :key="String(rowOf(node).runId)">
       <details v-if="node.children.length > 0" :open="depth < 3">
         <summary class="run" :data-st="fleetRowVisualState(rowOf(node))" :data-hl="highlightOf(rowOf(node))">

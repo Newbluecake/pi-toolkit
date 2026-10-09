@@ -426,3 +426,48 @@ details[open] > summary.run .chev {
     max-width: 72px;
   }
 }
+
+/* ================================================================ flat level (no expandable row)
+ * 2026-10-09 现场「agent list 左侧的空白有点太宽」: every row reserved an 18px chevron column
+ * (≥481px viewports and every container ≤599px) even when no sibling had children, leaving a
+ * blank strip before the status icon on phones AND desktop. FleetTree marks such a level
+ * `.tree-flat`; its rows drop the chevron column at every breakpoint. Selectors are
+ * `.tree-flat > li > .run` (higher specificity than the plain `.run` tiers above) and keep the
+ * same viewport → container order, so the container tiers still win on narrow drawers. Leaf rows
+ * only (`> li > .run`): an expandable row is never inside a flat level by definition. */
+.tree-flat > li > .run {
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "icon name nums toggle"
+    ". activity activity .";
+}
+
+.tree-flat > li > .run .chev {
+  display: none;
+}
+
+@media (min-width: 1025px) {
+  .tree-flat > li > .run {
+    grid-template-columns: 20px minmax(220px, 1.5fr) minmax(0, 1fr) auto auto;
+    grid-template-areas: "icon name activity nums toggle";
+  }
+}
+
+@container (max-width: 599px) {
+  .tree-flat > li > .run {
+    grid-template-columns: 20px minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "icon name nums toggle"
+      ". activity activity .";
+  }
+}
+
+@container (max-width: 479px) {
+  .tree-flat > li > .run {
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "icon name toggle"
+      ". nums nums"
+      ". activity activity";
+  }
+}
