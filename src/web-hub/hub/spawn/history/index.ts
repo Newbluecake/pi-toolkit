@@ -333,11 +333,20 @@ export async function pageHistory(
           continue;
         }
         const fileH = fileOpenRes.handle;
+        // The successful `boundedFdOpen` hands its "temp" reservation to us: every exit path
+        // closes the file AND releases that reservation exactly once (plan v3.4 X3.1).
+        let fileClosed = false;
+        const closeFile = async (): Promise<void> => {
+          if (fileClosed) return;
+          fileClosed = true;
+          await boundedClose(() => fileH.close(), closeDeps);
+          deps.ledger.release(1, "temp");
+        };
         let head: HeadResult;
         try {
           const st = await historyStep(deps.gate, () => fileH.stat(), deadline.at, deps.now);
           if (!st.isFile()) {
-            await boundedClose(() => fileH.close(), closeDeps);
+            await closeFile();
             const cc = await handle.commitPaging(deadline.remaining(), () => handle.recordInvalid());
             if (!cc.ok) {
               pagePartial = { reason: "io" };
@@ -353,7 +362,7 @@ export async function pageHistory(
           // and paging is never read; it is counted as `changed` (no headerIndex entry, so the
           // next page() re-checks fresh) instead of silently reading the new content.
           if (st.dev !== file.dev || st.ino !== file.ino || st.uid !== deps.uid || st.nlink !== 1) {
-            await boundedClose(() => fileH.close(), closeDeps);
+            await closeFile();
             const cc = await handle.commitPaging(deadline.remaining(), () => handle.recordChanged());
             if (!cc.ok) {
               pagePartial = { reason: "io" };
@@ -367,9 +376,9 @@ export async function pageHistory(
             now: deps.now,
             deadlineAt: Math.min(deadline.at, deps.now() + HISTORY_HEAD_FILE_MS),
           });
-          await boundedClose(() => fileH.close(), closeDeps);
+          await closeFile();
         } catch {
-          await boundedClose(() => fileH.close(), closeDeps);
+          await closeFile();
           const cc = await handle.commitPaging(deadline.remaining(), () => handle.recordPagingFailure(file.key));
           if (!cc.ok) {
             pagePartial = { reason: "io" };
@@ -453,6 +462,14 @@ export async function pageHistory(
       }
     }
 
+    // session-history plan PD23 (dispatcher ruling): every page's OWN items are sorted by
+    // (mtimeMs desc, key asc) — the whole-files[] sort in `trySortIfFreshComplete` only fires
+    // when the gen completes during an advance BEFORE this gen's first emission, so a
+    // continuable walk (enum still incomplete on page 1 ⇒ `everPaged` set) would otherwise
+    // ship pages in raw enumeration order. Sorting here never touches files[]/pos semantics.
+    matched.sort((a, b) =>
+      a.mtimeMs !== b.mtimeMs ? b.mtimeMs - a.mtimeMs : a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
+    );
     items.push(...matched);
     const finalPartial =
       pagePartial ??

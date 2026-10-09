@@ -7,7 +7,7 @@
  * targets `index.ts`'s own dir-open classification rather than `generation.ts`'s already-tested
  * enumeration-time classification, which reuses the identical literal open() path shape).
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -15,6 +15,8 @@ import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.j
 import { createHistoryService } from "../../../../../src/web-hub/hub/spawn/history/service.js";
 import type { HistoryServiceDeps } from "../../../../../src/web-hub/hub/spawn/history/ports.js";
 import { defaultHistoryFs, type HistoryFs } from "../../../../../src/web-hub/hub/spawn/history/fs.js";
+import { HISTORY_ENUM_BUDGET_MS } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
+import { decodeHistoryCursor } from "../../../../../src/web-hub/protocol/session-history.js";
 
 let root: string;
 let sessionsDir: string;
@@ -405,5 +407,80 @@ describe("pageHistory — per-file fstat TOCTOU check (Finding 3b)", () => {
     expect(result.page.items.some((i) => i.id === "sess-aaaa1")).toBe(true);
     expect(result.page.stats.changed).toBe(0);
     await service.dispose();
+  });
+});
+
+describe("pageHistory — PD23 per-page item sort (regression: pages were raw enumeration order)", () => {
+  /** The shape that exposes it: the gen is still INCOMPLETE when page 1 emits (a slow first
+   * lstat burns the enum budget ⇒ `everPaged` is set before completion), so generation.ts's
+   * one-time whole-files[] `trySortIfFreshComplete` never fires — only the per-page sort can
+   * put that page's items in (mtimeMs desc, key asc) order. File mtimes are anti-correlated
+   * with their names so an unsorted page is guaranteed to carry an inversion. */
+  it("every page's items are mtimeMs-desc (ties: key asc) even when the gen completes only after the first page", async () => {
+    // d1/a < d1/b > d1/c: names ascend, mtimes 1000 < 3000 > 2000 — any 2-item window taken in
+    // name order that spans (a,b) or (b,c)... (b,c) is already desc; (a,b) is the inversion.
+    const files: Array<[string, string, number]> = [
+      ["d1", "a.jsonl", 1_000],
+      ["d1", "b.jsonl", 3_000],
+      ["d1", "c.jsonl", 2_000],
+      ["d2", "d.jsonl", 900],
+      ["d2", "e.jsonl", 800],
+    ];
+    let n = 0;
+    for (const [dir, name, mtime] of files) {
+      n += 1;
+      writeFileSync(join(sessionsDir, dir, name), header(`sess-pd23-${String(n).padStart(2, "0")}`, realCwd));
+      const t = new Date(mtime);
+      utimesSync(join(sessionsDir, dir, name), t, t);
+    }
+    // the FIRST lstat of the enumeration sleeps past HISTORY_ENUM_BUDGET_MS: the gen is created
+    // but stays incomplete after page 1 (which emits nothing and marks the gen ever-paged).
+    let lstatCalls = 0;
+    const real = defaultHistoryFs();
+    const slowFirstLstat: HistoryFs = {
+      ...real,
+      lstat: (p: string) => {
+        lstatCalls += 1;
+        if (lstatCalls === 1)
+          return new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("E_TIMEOUT")), HISTORY_ENUM_BUDGET_MS + 300),
+          );
+        return real.lstat(p);
+      },
+    };
+    const service = createHistoryService(baseDeps(), { fs: slowFirstLstat });
+    try {
+      const keys: string[] = [];
+      const pages: Array<Array<{ key: string; mtimeMs: number }>> = [];
+      let cursor: { genId: string; pos: number } | undefined = undefined;
+      for (;;) {
+        const result = await service.page(
+          { kind: "all", limit: 2, ...(cursor === undefined ? {} : { cursor }) },
+          createReqDeadline(() => Date.now(), 5000),
+        );
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        pages.push(result.page.items.map((i) => ({ key: i.key, mtimeMs: i.mtimeMs })));
+        keys.push(...result.page.items.map((i) => i.key));
+        if (result.page.next === undefined) break;
+        const decoded = decodeHistoryCursor(result.page.next);
+        expect(decoded).not.toBeNull();
+        cursor = decoded!;
+      }
+      // the walk covered every file exactly once, and the enumeration DID finish late
+      expect(new Set(keys).size).toBe(files.length);
+      expect(keys.length).toBe(files.length);
+      // PD23: each page's own items are mtime-desc, ties broken by key ascending
+      for (const page of pages) {
+        for (let i = 1; i < page.length; i += 1) {
+          const a = page[i - 1]!;
+          const b = page[i]!;
+          expect(a.mtimeMs).toBeGreaterThanOrEqual(b.mtimeMs);
+          if (a.mtimeMs === b.mtimeMs) expect(a.key <= b.key).toBe(true);
+        }
+      }
+    } finally {
+      await service.dispose();
+    }
   });
 });
