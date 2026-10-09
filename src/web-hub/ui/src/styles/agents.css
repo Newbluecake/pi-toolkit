@@ -551,19 +551,30 @@
 
 /* ---------------------------------------------------------------- rename entry (web-hub-
  * rename plan): `RenameButton.vue` rendered as a sibling of `AgentCard` (same "a button can't
- * nest inside AgentCard's `<a>`" rule as `.remove-wrap` above) — placed at the opposite
- * (bottom-left) corner so a card that is BOTH renamable and removable (a live, web-managed
- * session) never overlaps the two affordances. `.renamable` reserves room exactly like
- * `.removable` does, mirrored to the left edge. */
-.renamable > .agent-card {
-  padding-left: calc(60px * var(--fs-scale, 1));
-}
-
+ * nest inside AgentCard's `<a>`" rule as `.remove-wrap` above).
+ * 2026-10-09 「左侧多出来一部分空白区域」: no room is reserved any more (the old 60px left
+ * padding on every renamable card squeezed titles and left a blank column). The pencil
+ * overlays the card's bottom-right corner — the context-bar row rarely reaches it — and on
+ * hover-capable pointers stays invisible until the card is hovered/focused. A card that is
+ * also removable puts it just left of the delete button. */
 .agent-item .rename-wrap {
   position: absolute;
-  left: var(--sp-2);
+  right: var(--sp-2);
   bottom: 8px;
   z-index: 2;
+}
+
+.agent-item.removable .rename-wrap {
+  right: calc(var(--sp-2) + 44px);
+}
+
+/* Touch (no hover ⇒ the pencil is always visible): keep the card's LAST row (meta / fleet /
+ * badge — whichever ends the card) clear of it. Only that row gives up the room, so titles
+ * keep their full width; `.removable` cards already reserve the right edge card-wide. */
+@media (hover: none) {
+  .renamable:not(.removable) > .agent-card > :last-child {
+    padding-right: calc(52px * var(--fs-scale, 1));
+  }
 }
 
 .rename-btn {

@@ -334,8 +334,8 @@ describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘
     expect(btn.find(".panel-title").exists()).toBe(false);
     expect(btn.get(".fab-icon use").attributes("href")).toBe("#i-bot");
     expect(btn.text()).not.toContain("Subagents");
-    // 徽标只露总数;running 状态由呼吸点(data-st="running")表达
-    expect(btn.get(".fab-count").text()).toBe("6");
+    // 2026-10-09: 徽标只数进行中的(3 running / 6 total ⇒ "3"),已结束的不计
+    expect(btn.get(".fab-count").text()).toBe("3");
     expect(btn.get(".fab-count").attributes("data-st")).toBe("running");
     expect(btn.find(".fab-count .dot").exists()).toBe(true);
     // 原摘要行的聚合计数(running/总数/成本)不丢 —— 全量收进 aria-label
@@ -350,16 +350,16 @@ describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘
     expect(wrapper.emitted("toggle")).toEqual([[]]);
   });
 
-  it("零 running:徽标退 idle(无点无 data-st),aria-label 不含 running 段", () => {
+  it("零 running:不显示徽标(只剩图标),aria-label 仍有总数、不含 running 段", () => {
     const done = [
       row({ runId: "d1", status: "completed", phaseLabel: "done", terminal: true, costUsd: 0.1 }),
       row({ runId: "d2", status: "failed", phaseLabel: "error", terminal: true }),
     ];
     const wrapper = mount(FleetSummaryBar, { props: { rows: done, open: true } });
     const btn = wrapper.get(".fleet-summary-bar");
-    expect(btn.get(".fab-count").text()).toBe("2");
-    expect(btn.get(".fab-count").attributes("data-st")).toBeUndefined();
-    expect(btn.find(".fab-count .dot").exists()).toBe(false);
+    expect(btn.find(".fab-count").exists()).toBe(false);
+    expect(btn.get(".fab-icon use").attributes("href")).toBe("#i-bot");
+    expect(btn.attributes("aria-label")).toContain("2 total");
     expect(btn.attributes("aria-label")).not.toContain("running");
     expect(btn.attributes("aria-expanded")).toBe("true");
   });

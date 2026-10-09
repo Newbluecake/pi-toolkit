@@ -14,6 +14,8 @@
 
   2026-10-09 「这个单词竖过来感觉很怪」: 竖排面板名去掉,改为「‹ + bot 图标 + 计数徽标」——
   ‹ 指向抽屉滑出的方向(右侧),面板名只留在 aria-label 里。
+  2026-10-09 「数字应该是进行中的 agent，不需要展示已经结束了的」: 徽标只数 running,没有
+  进行中的子 agent 时不显示徽标(总数/成本仍在 aria-label 与抽屉里)。
   竖排 tab 的可见内容只有「图标 + 计数徽标」;聚合计数(running/总数/成本)全部
   收进 `aria-label`(不给 `title` —— ui-design §6.3「不依赖 hover」,visual 的
   shell-no-title-tooltips 在触屏档位断言全页无 [title])。
@@ -55,9 +57,9 @@ const ariaLabel = computed(() => {
   >
     <AppIcon name="chev-left" class="icon icon-sm chev" />
     <AppIcon name="bot" class="icon fab-icon" />
-    <span class="pill fab-count" :data-st="summary.running > 0 ? 'running' : undefined">
-      <span v-if="summary.running > 0" class="dot"></span>
-      <span class="num">{{ summary.total }}</span>
+    <span v-if="summary.running > 0" class="pill fab-count" data-st="running">
+      <span class="dot"></span>
+      <span class="num">{{ summary.running }}</span>
     </span>
   </button>
 </template>
