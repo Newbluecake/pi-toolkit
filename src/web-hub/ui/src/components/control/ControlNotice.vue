@@ -8,7 +8,12 @@
   traffic can hijack the session — only remembers the dismissal for the current browser
   session (`sessionStorage`, same key prefix): a NEW session re-shows it, which is the one
   piece of the old "never closable" contract this build deliberately keeps as a last-resort
-  reminder for the most dangerous access mode. Copy variant (§7.6): token mode ⇒ local;
+  reminder for the most dangerous access mode. 2026-10 explicit user opt-out: the browser pref
+  `pwh_hide_plaintext_warn` (`composables/usePlaintextWarning.ts` — the sole LAN user accepts
+  the plaintext risk) drops ONLY the plaintext sentence from the plainHttp body
+  (`control.noticePlainHttpMasked` keeps the control-risk remainder); the notice itself — title,
+  expand, dismissal, risk-scaled storage memory — keeps rendering.
+  Copy variant (§7.6): token mode ⇒ local;
   password over plaintext HTTP ⇒ plainHttp; password behind an HTTPS-terminating proxy ⇒ https.
   The expanded state is shared (`CONTROL_ENV.noticeExpanded`) so the TopBar Control chip opens
   the same notice (§7.4) — dismissal is independent of that shared expanded flag: the TopBar
@@ -19,8 +24,10 @@
 <script setup lang="ts">
 import { computed, getCurrentInstance, inject, ref, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
 import type { ControlNoticeProps } from "../../contracts.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import { CONTROL_ENV } from "./controlContext.js";
 
 const props = defineProps<ControlNoticeProps>();
@@ -40,12 +47,17 @@ const variant = computed<"plainHttp" | "https" | "local">(() => {
   return "local";
 });
 
-const bodyKey = computed(
-  () =>
-    ({ plainHttp: "control.noticePlainHttp", https: "control.noticeHttps", local: "control.noticeLocal" })[
-      variant.value
-    ],
-);
+// The explicit browser opt-out (`pwh_hide_plaintext_warn`): when the pref hides plaintext
+// warnings, the plainHttp body swaps to the masked copy — the control-risk remainder ("this
+// page can send messages to your agents and stop them") stays visible.
+const warn = usePlaintextWarning({ storage: browserLocalStorage() });
+
+const bodyKey = computed(() => {
+  if (variant.value === "plainHttp" && warn.hidden.value) return "control.noticePlainHttpMasked";
+  return { plainHttp: "control.noticePlainHttp", https: "control.noticeHttps", local: "control.noticeLocal" }[
+    variant.value
+  ];
+});
 
 const localOpen = ref(false);
 const open = computed({

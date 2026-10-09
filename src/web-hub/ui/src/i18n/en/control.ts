@@ -10,6 +10,10 @@ const control = {
   // --- persistent risk notice (§7.6 table, verbatim) ---
   noticePlainHttp:
     "Control is on. This page can send messages to your agents and stop them. Over plain HTTP, anyone who can see this network's traffic can hijack your session and run arbitrary commands as you.",
+  // The plainHttp body minus its plaintext sentence — used ONLY when the browser pref
+  // `pwh_hide_plaintext_warn` (explicit user opt-out, 2026-10) hides plaintext warnings: the
+  // control-risk remainder stays visible.
+  noticePlainHttpMasked: "Control is on. This page can send messages to your agents and stop them.",
   noticeLocal: "Control is on. Messages you send run with this computer's full permissions.",
   noticeHttps: "Control is on. Messages you send run with the host machine's full permissions.",
   noticeTitle: "Control is on",

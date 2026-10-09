@@ -8,13 +8,20 @@
 import { computed, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
 import type { LoginViewEmits, LoginViewProps } from "../../contracts.js";
 import type { Notice } from "../../types.js";
 import NoticeBanner from "./NoticeBanner.vue";
+import { browserLocalStorage } from "./themeStorage.js";
 
 const props = defineProps<LoginViewProps>();
 const emit = defineEmits<LoginViewEmits>();
 const { t } = useI18n();
+
+// `pwh_hide_plaintext_warn` (explicit browser opt-out, set from the authenticated settings
+// panel — localStorage survives the sign-out) gates the plaintext-HTTP sign-in banner.
+const warn = usePlaintextWarning({ storage: browserLocalStorage() });
+const showPlainNotice = computed(() => warn.warnVisible(props.plaintext));
 
 const username = ref("");
 const password = ref("");
@@ -61,8 +68,8 @@ function onSubmit(): void {
         <p>{{ t("login.subtitle") }}</p>
       </div>
 
-      <div v-if="plaintext || initialPasswordHint" class="login-notices">
-        <NoticeBanner v-if="plaintext" :notice="plaintextNotice" />
+      <div v-if="showPlainNotice || initialPasswordHint" class="login-notices">
+        <NoticeBanner v-if="showPlainNotice" :notice="plaintextNotice" />
         <NoticeBanner v-if="initialPasswordHint" :notice="initialPasswordNotice" />
       </div>
 

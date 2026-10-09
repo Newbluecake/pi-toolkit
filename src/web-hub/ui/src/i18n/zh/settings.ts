@@ -24,6 +24,13 @@ const settings = {
   keepAliveOff: "关闭（每次切换重新加载）",
   keepAlive3: "3 个（默认）",
   keepAlive5: "5 个",
+  // 2026-10 明文警告开关——「明文 HTTP 警告」卡片。仅在确实以明文提供的页面（密码模式 + http:，
+  // 与各警告组件的判定一致——CONTROL_ENV.plaintext）渲染；https / 回环 token 页面不显示警告，
+  // 开关也无从谈起。隐藏只影响警告文案的可见性——传输仍是未加密的（提示语即此意）。
+  plainWarnSection: "明文 HTTP 警告",
+  plainWarnHint: "隐藏警告不会改变传输方式——本网段流量仍以未加密形式传输、可被他人读取。",
+  plainWarnShow: "显示警告（默认）",
+  plainWarnHide: "隐藏警告",
   // default-model plan F1 —「新建会话默认模型」卡片。
   defaultModelSection: "新建会话默认模型",
   defaultModelHint:

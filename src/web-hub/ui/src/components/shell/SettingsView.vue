@@ -14,6 +14,12 @@
     3. Default delivery — steer/followUp radio rows driving `useDeliverDefault` (`pwh_deliver`);
        the composer reads the same key for busy sends (Alt+Enter still flips per message).
 
+  Plus two conditional cards: 「会话缓存」 (the `pwh_keepalive` radio group, web-hub-session-switch
+  D2) and — only on pages actually served as plaintext (CONTROL_ENV.plaintext: password mode
+  over http:) — 「明文 HTTP 警告」 (the `pwh_hide_plaintext_warn` radio group,
+  `composables/usePlaintextWarning.ts`, 2026-10 user opt-out: hides every plaintext-HTTP
+  warning in the UI; warning-text visibility only, never any security behavior).
+
   Self-wired (`browserLocalStorage()` + `document`), exactly like the retired toggles — no new
   props, so the frozen `contracts.ts` surface stays untouched. The header's × button only emits
   `close` — there is no "back" destination to return to any more (the panel floats over
@@ -37,6 +43,8 @@ import {
 import { useDeliverDefault, type DeliverDefault } from "../../composables/useDeliverDefault.js";
 import { KEEPALIVE_CHOICES, loadKeepAlive, setKeepAlivePref } from "@logic/sessionKeepAlive.js";
 import { browserLocalStorage } from "./themeStorage.js";
+import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
+import { CONTROL_ENV } from "../control/controlContext.js";
 import { isSpawnModelRef, knownModelRefs, readModelCache, writeModelCache } from "../../logic/models.js";
 import { spawnModelSupported } from "../../logic/spawn.js";
 import { SPAWN_HUB_CAP } from "@protocol/version.js";
@@ -68,6 +76,19 @@ function setKeepAlive(v: number): void {
   keepAlive.value = v;
   setKeepAlivePref(keepAliveStorage, v);
 }
+
+// 2026-10 明文警告开关（用户显式选择「http 警告支持通过设置关闭」）：`pwh_hide_plaintext_warn`
+// 浏览器级偏好（与 pwh_keepalive 同族），控制全部 7 处明文 HTTP 警告的可见性。卡片仅在
+// 确实以明文提供的页面渲染——判定复用警告组件自己的谓词 CONTROL_ENV.plaintext（App 提供：
+// 密码模式 ∧ http:）；https / 回环 token 页面根本没有明文警告，开关无从谈起。只影响警告文案
+// 可见性，不改变任何安全行为。
+const controlEnv = inject(CONTROL_ENV, null);
+const plainHttpPage = controlEnv?.plaintext === true;
+const plainWarn = usePlaintextWarning({ storage: browserLocalStorage() });
+const PLAINWARN_OPTIONS: readonly { value: boolean; labelKey: string }[] = [
+  { value: false, labelKey: "settings.plainWarnShow" },
+  { value: true, labelKey: "settings.plainWarnHide" },
+];
 
 const THEME_OPTIONS: readonly { value: ThemePref; icon: IconName; labelKey: string }[] = [
   { value: "system", icon: "monitor", labelKey: "shell.theme.system" },
@@ -277,6 +298,29 @@ function onModelUsePi(): void {
             >
               <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
               <AppIcon v-if="keepAlive === opt.value" name="check" class="icon-sm settings-option-check" />
+            </button>
+          </div>
+        </section>
+
+        <section
+          v-if="plainHttpPage"
+          class="settings-card settings-card-wide"
+          :aria-label="t('settings.plainWarnSection')"
+        >
+          <h2 class="settings-h">{{ t("settings.plainWarnSection") }}</h2>
+          <p class="settings-note">{{ t("settings.plainWarnHint") }}</p>
+          <div class="settings-options" role="radiogroup" :aria-label="t('settings.plainWarnSection')">
+            <button
+              v-for="opt in PLAINWARN_OPTIONS"
+              :key="String(opt.value)"
+              type="button"
+              role="radio"
+              :aria-checked="plainWarn.hidden.value === opt.value"
+              class="settings-option"
+              @click="plainWarn.setHidden(opt.value)"
+            >
+              <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
+              <AppIcon v-if="plainWarn.hidden.value === opt.value" name="check" class="icon-sm settings-option-check" />
             </button>
           </div>
         </section>

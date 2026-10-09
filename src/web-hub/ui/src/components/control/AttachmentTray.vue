@@ -15,23 +15,32 @@
     contract without touching App.vue, §4.2's 播报 requirement).
   - §4.2 plaintext warning: when `plaintext` (LAN password mode over http:), a permanent,
     NON-dismissible warning line sits at the tray bottom (distinct from ControlNotice's
-    dismissible banner — this component has no close button for it).
+    dismissible banner — this component has no close button for it). Hideable ONLY via the
+    explicit browser-wide opt-out `pwh_hide_plaintext_warn` (`composables/usePlaintextWarning.ts`,
+    2026-10 user ruling: the sole LAN user accepts the plaintext risk) — never dismissible
+    in-page.
 
   Thumbnails: deliberately NOT rendered — `UploadsHandle` never exposes the source `File`
   (U4b keeps it closure-private for retry), and `createObjectURL` is banned by source-scan.
   A mime-based icon (`image` vs `file`) takes the thumbnail's place (U4b-dev consult, U5).
 -->
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { formatAttachmentSize } from "@protocol/upload.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { IconName } from "../../icons/names.js";
 import type { Attachment } from "../../types.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 
 const props = defineProps<{ items: readonly Attachment[]; plaintext: boolean }>();
 const emit = defineEmits<{ remove: [id: string]; retry: [id: string] }>();
 const { t } = useI18n();
+
+// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the §4.2 warning line.
+const warn = usePlaintextWarning({ storage: browserLocalStorage() });
+const showPlainWarning = computed(() => warn.warnVisible(props.plaintext));
 
 function iconFor(item: Attachment): IconName {
   if (item.state === "failed") return "alert";
@@ -176,7 +185,7 @@ watch(
       </button>
     </div>
 
-    <div v-if="plaintext && items.length > 0" class="tray-plain-warning" role="note">
+    <div v-if="showPlainWarning && items.length > 0" class="tray-plain-warning" role="note">
       <AppIcon name="alert" class="icon-sm" />
       <span>{{ t("upload.plaintextWarning") }}</span>
     </div>

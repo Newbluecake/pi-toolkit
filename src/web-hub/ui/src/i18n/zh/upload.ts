@@ -39,7 +39,8 @@ const upload = {
   gateTooLarge: "正文与附件块合计超过 48 KiB 上限",
   gateBlocked: "当前状态下附件无法发送",
 
-  // --- 明文警告（§4.2——托盘非空时常驻，不可关闭） ---
+  // --- 明文警告（§4.2——托盘非空时常驻，页内不可关闭；仅可通过 pwh_hide_plaintext_warn
+  // 浏览器显式开关隐藏，2026-10 用户裁定） ---
   plaintextWarning: "明文 HTTP：附件内容在局域网内未加密传输，可被同网段窃听或篡改。",
 
   // --- upload.err.*（§4.2 错误映射；Attachment.error 的错误码索引到这里） ---

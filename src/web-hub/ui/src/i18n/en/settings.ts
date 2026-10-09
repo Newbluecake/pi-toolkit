@@ -26,6 +26,16 @@ const settings = {
   keepAliveOff: "Off (reload on every switch)",
   keepAlive3: "3 sessions (default)",
   keepAlive5: "5 sessions",
+  // 2026-10 plaintext-warning opt-out — the 「明文 HTTP 警告」 card. Rendered ONLY on pages
+  // actually served as plaintext (password mode over http:, the same predicate every warning
+  // component uses — CONTROL_ENV.plaintext); https / loopback-token pages never show the
+  // warnings, so the setting would be dead weight there. Hiding is warning-text visibility
+  // only — the transport stays unencrypted (the hint says exactly that).
+  plainWarnSection: "Plaintext HTTP warnings",
+  plainWarnHint:
+    "Hiding the warnings changes nothing about the transport — traffic on this network stays unencrypted and readable by others.",
+  plainWarnShow: "Show warnings (default)",
+  plainWarnHide: "Hide warnings",
   // default-model plan F1 — the 「新建会话默认模型」 card. The model ref itself
   // (`provider/id`) is an English token in both languages; prose blocks translate.
   defaultModelSection: "Default model for new sessions",

@@ -3,7 +3,8 @@
   P3): Teleports to `<body>` and renders `usePreview`'s state machine (`PREVIEW_CTX` — provided
   by PV6's App wiring; absent ⇒ nothing renders): loading / image / text / dir / unsupported /
   tooLarge / error, with the header's basename + full path + close button and the §5.2
-  plaintext-transport standing warning.
+  plaintext-transport standing warning (hideable via the explicit `pwh_hide_plaintext_warn`
+  browser opt-out, like every plaintext warning).
 
   Interaction contract (§4.6):
   - scrim click closes (`@click.self` — clicks INSIDE the panel never reach it);
@@ -28,6 +29,7 @@ import { childPreviewPath, parentPreviewPath } from "@logic/preview.js";
 import type { PreviewDirEntry } from "@protocol/preview.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
 import { asDirHandle, type PreviewHandleDir, type PreviewViewDir } from "../../composables/usePreview.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { PreviewView } from "../../types.js";
@@ -35,10 +37,15 @@ import CopyButton from "../detail/CopyButton.vue";
 import PreviewDir from "./PreviewDir.vue";
 import PreviewImage from "./PreviewImage.vue";
 import PreviewText from "./PreviewText.vue";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import { PREVIEW_CTX } from "./previewContext.js";
 
 const ctx = inject(PREVIEW_CTX, null);
 const { t } = useI18n();
+
+// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the §5.2 standing warning.
+const warn = usePlaintextWarning({ storage: browserLocalStorage() });
+const showPlainWarning = computed(() => warn.warnVisible(ctx?.plaintext === true));
 
 /** A3/P3: the navigation face — `null` for a pre-P3 handle/fake (open-only degradation). */
 const nav = computed<PreviewHandleDir | null>(() => (ctx === null ? null : asDirHandle(ctx.handle)));
@@ -268,7 +275,7 @@ function onKeydown(ev: KeyboardEvent): void {
             <AppIcon name="x" />
           </button>
         </header>
-        <p v-if="ctx?.plaintext === true" class="preview-plaintext" role="note">
+        <p v-if="showPlainWarning" class="preview-plaintext" role="note">
           <AppIcon name="unlock" class="icon-sm" />
           <span>{{ t("preview.plaintextWarning") }}</span>
         </p>

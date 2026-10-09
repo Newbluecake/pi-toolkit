@@ -3,12 +3,15 @@
   arch §6.3, §9.1). Shows the hub-admitted `resolvedCwd` (plain interpolation ⇒ textContent,
   never HTML — the same string is echoed back as `expectCwd` by `useNewSession.confirm()`),
   the reason (`unknown-dir` / `lan`), and — on plaintext LAN (`plaintext` prop, mirrors
-  AttachmentTray's warning rule) — the unencrypted-traffic warning. Pure presentation: the
-  confirm/cancel semantics live in `useNewSession` (SP11), this component only forwards clicks.
+  AttachmentTray's warning rule) — the unencrypted-traffic warning (hideable via the explicit
+  `pwh_hide_plaintext_warn` browser opt-out, like every plaintext warning). Pure presentation:
+  the confirm/cancel semantics live in `useNewSession` (SP11), this component only forwards clicks.
 -->
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import "../../styles/spawn.css";
 
 const props = defineProps<{
@@ -23,6 +26,10 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ confirm: []; cancel: [] }>();
 const { t } = useI18n();
+
+// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the warning line.
+const warn = usePlaintextWarning({ storage: browserLocalStorage() });
+const showPlainWarning = computed(() => warn.warnVisible(props.plaintext));
 
 const reasonLabel = computed(() => {
   const r = props.reason;
@@ -39,7 +46,7 @@ const reasonLabel = computed(() => {
     <p class="spawn-confirm-body">{{ t("spawn.confirmBody") }}</p>
     <code class="spawn-confirm-cwd" translate="no">{{ resolvedCwd }}</code>
     <p v-if="reasonLabel" class="spawn-confirm-reason">{{ reasonLabel }}</p>
-    <p v-if="plaintext" class="spawn-plain-warning" role="note">{{ t("spawn.confirmPlaintext") }}</p>
+    <p v-if="showPlainWarning" class="spawn-plain-warning" role="note">{{ t("spawn.confirmPlaintext") }}</p>
     <div class="spawn-confirm-actions">
       <button class="btn btn-ghost" type="button" :disabled="busy === true" @click="emit('cancel')">
         {{ t("dialog.cancel") }}

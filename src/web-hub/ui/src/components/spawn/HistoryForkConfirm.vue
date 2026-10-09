@@ -15,13 +15,16 @@
   `{gap}` placeholder of the unverified body from `historyGapKey(gap)` (`@logic/
   sessionHistory.ts`); every string renders through interpolation ⇒ textContent, never HTML.
   The bottom re-renders the SAME W1–W7 best-effort small print the dialog shows
-  (`history.bestEffortNote`), plus the LAN plaintext warning when `plaintext`.
+  (`history.bestEffortNote`), plus the LAN plaintext warning when `plaintext` (hideable via the
+  explicit `pwh_hide_plaintext_warn` browser opt-out, like every plaintext warning).
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
 import { forkConfirmKey, historyGapKey } from "../../logic/sessionHistory.js";
+import { browserLocalStorage } from "../shell/themeStorage.js";
 import "../../styles/history.css";
 
 const props = defineProps<{
@@ -39,6 +42,10 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ confirm: []; cancel: [] }>();
 const { t } = useI18n();
+
+// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the warning line.
+const warn = usePlaintextWarning({ storage: browserLocalStorage() });
+const showPlainWarning = computed(() => warn.warnVisible(props.plaintext));
 
 const pidText = computed(() => (typeof props.pid === "number" ? String(props.pid) : "?"));
 
@@ -65,7 +72,7 @@ onMounted(() => {
   <div class="spawn-confirm" role="group" :aria-label="t('history.forkTitle')">
     <h3 class="spawn-confirm-title">{{ t("history.forkTitle") }}</h3>
     <p class="spawn-confirm-body">{{ bodyText }}</p>
-    <p v-if="plaintext" class="spawn-plain-warning" role="note">{{ t("spawn.confirmPlaintext") }}</p>
+    <p v-if="showPlainWarning" class="spawn-plain-warning" role="note">{{ t("spawn.confirmPlaintext") }}</p>
     <p class="history-besteffort" role="note">{{ t("history.bestEffortNote") }}</p>
     <div class="spawn-confirm-actions">
       <button class="btn btn-ghost" type="button" :disabled="busy === true" @click="emit('cancel')">

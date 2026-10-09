@@ -10,6 +10,9 @@ type Messages<T> = { [K in keyof T]: string };
 const control = {
   noticePlainHttp:
     "控制已开启：本页可以向 agent 发送消息、中止任务。当前经明文 HTTP 访问，同一网络中能截获流量的人可以冒用你的登录、以你的身份执行任意命令。",
+  // 同上的英文句被 `pwh_hide_plaintext_warn`（2026-10 用户显式选择隐藏明文警告）遮掉后的
+  // 剩余部分——控制风险提示仍然可见。
+  noticePlainHttpMasked: "控制已开启：本页可以向 agent 发送消息、中止任务。",
   noticeLocal: "控制已开启：你发送的消息将以本机用户的完整权限执行。",
   noticeHttps: "控制已开启：你发送的消息将以宿主机用户的完整权限执行。",
   noticeTitle: "控制已开启",
