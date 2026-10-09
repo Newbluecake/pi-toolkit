@@ -23,6 +23,12 @@ const upload = {
   announceReady: "{name} 已添加为附件",
   announceFailed: "{name} 上传失败",
 
+  // --- 附件预览（2026-10：发送前图片预览 + 放大） ---
+  previewAria: "预览 {name}",
+  previewDialogLabel: "附件预览",
+  previewUnavailableTitle: "无法预览",
+  previewUnavailableBody: "当前无法预览这张图片。",
+
   // --- 入口（粘贴 / 拖入 / 附件按钮） ---
   attachAria: "添加附件",
   dropHint: "松开以添加附件",

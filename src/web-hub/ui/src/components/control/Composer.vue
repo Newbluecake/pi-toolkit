@@ -630,6 +630,14 @@ function onTrayRetry(id: string): void {
   uploadsHandle.retry(key, id);
 }
 
+/** attachment-preview: read-only source access for the tray's pre-send thumbnails/viewer —
+ * never the upload loop's own path (that stays closure-private inside `useUploads`). */
+function traySourceOf(id: string): unknown {
+  const key = agentKey.value;
+  if (uploadsHandle === undefined || key === null) return undefined;
+  return uploadsHandle.source === undefined ? undefined : uploadsHandle.source(key, id);
+}
+
 /** §3.2's ONE gate — button `:disabled`, `doSend`'s first line, and the keyboard path all see
  * this exact answer. `commandRouted` mirrors DetailDock.onSend's routing (`parseSlash` +
  * `commandsEnabled`, deliberately NOT `sendAsText`) so a gated-ok send can never be re-routed
@@ -838,6 +846,7 @@ watch(
       v-if="trayItems.length > 0"
       :items="trayItems"
       :plaintext="plaintext"
+      :source-of="traySourceOf"
       @remove="onTrayRemove"
       @retry="onTrayRetry"
     />

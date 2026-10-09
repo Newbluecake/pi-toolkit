@@ -20,23 +20,54 @@
     2026-10 user ruling: the sole LAN user accepts the plaintext risk) — never dismissible
     in-page.
 
-  Thumbnails: deliberately NOT rendered — `UploadsHandle` never exposes the source `File`
-  (U4b keeps it closure-private for retry), and `createObjectURL` is banned by source-scan.
-  A mime-based icon (`image` vs `file`) takes the thumbnail's place (U4b-dev consult, U5).
+  Thumbnails (2026-10 attachment-preview feature, revising the earlier U5 ruling that
+  deliberately skipped them): image items now show a small downscaled thumbnail
+  (canvas → `data:image/webp`, a few KB — see `useAttachmentPreview.ts`) and BOTH the
+  thumbnail and the file name open the zoomable pre-send viewer (`AttachmentImagePreview.vue`,
+  which reuses the preview dialog's zoomable `PreviewImage.vue`). Pixels come from the
+  read-only `UploadsHandle.source` accessor passed down by Composer as `sourceOf` — the
+  upload loop's closure-private file handling is unchanged, and NO `blob:` URL is ever
+  created (source-scan bans `createObjectURL`; CSP `img-src 'self' data:` stays as-is).
+  Non-image attachments keep the mime-based icon row, byte-identical to before.
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { formatAttachmentSize } from "@protocol/upload.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
+import { isImageAttachment, useAttachmentPreview } from "../../composables/useAttachmentPreview.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { IconName } from "../../icons/names.js";
 import type { Attachment } from "../../types.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
+import AttachmentImagePreview from "./AttachmentImagePreview.vue";
 
-const props = defineProps<{ items: readonly Attachment[]; plaintext: boolean }>();
+const props = defineProps<{
+  items: readonly Attachment[];
+  plaintext: boolean;
+  /** attachment-preview: `(id) => File | undefined` — Composer's binding of
+   * `UploadsHandle.source` for the current agent; absent ⇒ no thumbnails, icon rows only. */
+  sourceOf?: (id: string) => unknown;
+}>();
 const emit = defineEmits<{ remove: [id: string]; retry: [id: string] }>();
 const { t } = useI18n();
+
+// attachment-preview: thumbnails + pre-send zoomable viewer (local pixels only — see
+// `useAttachmentPreview.ts`). Viewer state is ephemeral view state, not tray state: it never
+// flows through `attachmentReduce` and dies with this component.
+const attachPreview = useAttachmentPreview({
+  items: () => props.items,
+  sourceOf: (id) => (props.sourceOf === undefined ? undefined : props.sourceOf(id)),
+});
+const attachViewer = attachPreview.viewer;
+
+function thumbOf(item: Attachment): string | undefined {
+  return isImageAttachment(item) ? attachPreview.thumbOf(item.id) : undefined;
+}
+
+function onPreview(item: Attachment): void {
+  attachPreview.openPreview(item);
+}
 
 // `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the §4.2 warning line.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
@@ -141,8 +172,27 @@ watch(
       role="listitem"
       :aria-label="t('upload.itemAria', { name: item.name, size: sizeLabel(item), state: stateLabel(item) })"
     >
-      <AppIcon :name="iconFor(item)" class="icon-sm tray-icon" />
-      <span class="tray-name" :title="item.name">{{ item.name }}</span>
+      <button
+        v-if="thumbOf(item) !== undefined"
+        type="button"
+        class="tray-thumb"
+        :aria-label="t('upload.previewAria', { name: item.name })"
+        :title="t('upload.previewAria', { name: item.name })"
+        @click="onPreview(item)"
+      >
+        <img class="tray-thumb-img" :src="thumbOf(item)" alt="" draggable="false" />
+      </button>
+      <AppIcon v-else :name="iconFor(item)" class="icon-sm tray-icon" />
+      <button
+        v-if="isImageAttachment(item)"
+        type="button"
+        class="tray-name-btn"
+        :title="t('upload.previewAria', { name: item.name })"
+        @click="onPreview(item)"
+      >
+        {{ item.name }}
+      </button>
+      <span v-else class="tray-name" :title="item.name">{{ item.name }}</span>
       <span class="tray-size">{{ sizeLabel(item) }}</span>
 
       <span v-if="item.state === 'queued' || item.state === 'removing'" class="chip tray-state">{{
@@ -189,6 +239,9 @@ watch(
       <AppIcon name="alert" class="icon-sm" />
       <span>{{ t("upload.plaintextWarning") }}</span>
     </div>
+
+    <!-- attachment-preview: the zoomable pre-send viewer (mount-on-open). -->
+    <AttachmentImagePreview v-if="attachViewer !== null" :viewer="attachViewer" @close="attachPreview.closePreview()" />
 
     <p class="sr-only" role="status" aria-live="polite">{{ announced }}</p>
   </div>

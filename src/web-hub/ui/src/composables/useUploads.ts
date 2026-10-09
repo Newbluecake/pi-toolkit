@@ -315,6 +315,13 @@ export function createUploads(opts: UploadsOptions): UploadsHandle {
   return {
     tray: (agentKey) => trayOf(agentKey).tray,
 
+    /** 2026-10 attachment-preview: read-only source access. The map is the same one `retry`
+    re-keys and `remove`/`discard`/`dispose` clear, so a hit is always the CURRENT item's
+    live source — never a stale File for an id that left the tray. */
+    source(agentKey, id) {
+      return agents.get(agentKey)?.files.get(id);
+    },
+
     add(agentKey, files) {
       const a = trayOf(agentKey);
       const rejected: Array<{ file: unknown; reason: AddRejectReason }> = [];

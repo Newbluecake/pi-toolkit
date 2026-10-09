@@ -16,6 +16,8 @@ const preview = {
   plaintextWarning: "当前为明文连接——你预览的内容可能被网络中的他人看到。",
   fit: "适应窗口",
   actualSize: "原始尺寸",
+  zoomIn: "放大",
+  zoomOut: "缩小",
   copyPath: "复制路径",
   truncatedBadge: "已截断",
   truncatedNote: "仅显示前 {size}——复制只取已显示部分。",

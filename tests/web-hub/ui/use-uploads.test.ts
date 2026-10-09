@@ -556,3 +556,46 @@ describe("useUploads: discard (§3.2 post-send tray clear — U5 patch, NEVER th
     expect(h.uploads.tray("A").value.map((x) => x.id)).toEqual([keep]);
   });
 });
+
+describe("useUploads: source() (2026-10 attachment-preview — read-only pixel access)", () => {
+  it("returns the live source while the item exists, undefined after remove/discard/dispose", async () => {
+    const h = harness();
+    const file = fakeFile("a.png", 4, { type: "image/png" });
+    const r = h.uploads.add("A", [file]);
+    await flush();
+    const id = r.added[0]!;
+    expect(h.uploads.source?.("A", id)).toBe(file); // the very object add() took
+    expect(h.uploads.source?.("B", id)).toBeUndefined(); // per-agent
+    expect(h.uploads.source?.("A", "nope")).toBeUndefined();
+    h.uploads.remove("A", id);
+    await flush();
+    expect(h.uploads.source?.("A", id)).toBeUndefined();
+
+    const r2 = h.uploads.add("A", [file]);
+    await flush();
+    h.uploads.discard?.("A");
+    await flush();
+    expect(h.uploads.source?.("A", r2.added[0]!)).toBeUndefined();
+
+    const r3 = h.uploads.add("A", [file]);
+    await flush();
+    h.uploads.dispose();
+    expect(h.uploads.source?.("A", r3.added[0]!)).toBeUndefined();
+  });
+
+  it("retry re-keys the map: the fresh id carries the source, the old one does not", async () => {
+    const h = harness({ chunk: () => ({ ok: false, error: "E_NOT_FOUND", retryable: false }) });
+    const file = fakeFile("a.png", 4, { type: "image/png" });
+    const r = h.uploads.add("A", [file]);
+    await flush();
+    const id1 = r.added[0]!;
+    expect(h.uploads.tray("A").value[0]!.state).toBe("failed");
+    expect(h.uploads.source?.("A", id1)).toBe(file);
+    h.uploads.retry("A", id1);
+    await flush();
+    const id2 = h.uploads.tray("A").value[0]!.id;
+    expect(id2).not.toBe(id1);
+    expect(h.uploads.source?.("A", id1)).toBeUndefined(); // stale id never resolves
+    expect(h.uploads.source?.("A", id2)).toBe(file); // the CURRENT item always has pixels
+  });
+});

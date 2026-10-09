@@ -22,6 +22,12 @@ const upload = {
   announceReady: "{name} attached",
   announceFailed: "{name} failed to upload",
 
+  // --- attachment-preview (2026-10: pre-send image preview + zoom) ---
+  previewAria: "Preview {name}",
+  previewDialogLabel: "Attachment preview",
+  previewUnavailableTitle: "Preview unavailable",
+  previewUnavailableBody: "This image cannot be previewed right now.",
+
   // --- entries (paste / drop / attach button) ---
   attachAria: "Attach files",
   dropHint: "Drop files to attach them",

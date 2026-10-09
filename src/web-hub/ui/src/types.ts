@@ -311,6 +311,12 @@ export interface UploadsHandle {
    * 10-min idle voiding. Omitting `ids` clears the agent's whole tray. Optional per the
    * frozen-types convention (additive members only); `createUploads` always provides it. */
   discard?(agentKey: string, ids?: readonly string[]): void;
+  /** 2026-10 attachment-preview: read-only access to an item's upload source (the browser
+   * `File` this driver keeps for `retry`) — `undefined` once the item is gone (removed /
+   * discarded / disposed / re-keyed by retry). Feeds the tray's pre-send thumbnail + preview
+   * viewer ONLY; the upload loop's closure-private access is unchanged. Optional per the
+   * frozen-types convention (additive members only); `createUploads` always provides it. */
+  source?(agentKey: string, id: string): unknown;
   /** Abort everything and drop all per-agent state (unmount / teardown). */
   dispose(): void;
 }

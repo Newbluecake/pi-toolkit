@@ -13,6 +13,8 @@ const preview = {
   plaintextWarning: "Plaintext connection — anything you preview can be seen by the network.",
   fit: "Fit to window",
   actualSize: "Actual size",
+  zoomIn: "Zoom in",
+  zoomOut: "Zoom out",
   copyPath: "Copy path",
   truncatedBadge: "Truncated",
   truncatedNote: "Showing the first {size} — copy only takes what is shown.",

@@ -65,12 +65,14 @@ function readyAttachment(over: Partial<Attachment> = {}): Attachment {
 /** Controllable fake of U4b's `UploadsHandle` — tray refs the test can flip directly. */
 function fakeUploads() {
   const trays = new Map<string, Ref<Attachment[]>>();
+  const sources = new Map<string, unknown>();
   let seq = 0;
   const calls = {
     add: [] as Array<{ key: string; files: unknown[] }>,
     remove: [] as Array<{ key: string; id: string }>,
     retry: [] as Array<{ key: string; id: string }>,
     discard: [] as Array<{ key: string; ids: readonly string[] | undefined }>,
+    source: [] as Array<{ key: string; id: string }>,
   };
   function trayRef(key: string): Ref<Attachment[]> {
     let r = trays.get(key);
@@ -112,6 +114,10 @@ function fakeUploads() {
       r.value = ids === undefined ? [] : r.value.filter((x) => !ids.includes(x.id));
     },
     failGone() {},
+    source(key, id) {
+      calls.source.push({ key, id });
+      return sources.get(id);
+    },
     dispose() {},
   };
   return {
@@ -119,6 +125,9 @@ function fakeUploads() {
     calls,
     setTray(key: string, items: Attachment[]): void {
       trayRef(key).value = items;
+    },
+    setSource(id: string, src: unknown): void {
+      sources.set(id, src);
     },
   };
 }
@@ -158,11 +167,14 @@ interface MountOpts {
   hubCaps?: readonly string[];
   card?: Record<string, unknown>;
   withUploads?: boolean;
+  /** attachment-preview: id → source object fed through the fake's `source` accessor. */
+  sources?: Record<string, unknown>;
 }
 
 function mountComposer(opts: MountOpts = {}) {
   const uploads = fakeUploads();
   if (opts.tray !== undefined) uploads.setTray(AGENT, opts.tray);
+  for (const [id, src] of Object.entries(opts.sources ?? {})) uploads.setSource(id, src);
   const control = fakeControl(uploads.handle);
   const view: ControlView = {
     agentKey: AGENT,
@@ -598,5 +610,23 @@ describe("AttachmentTray (§4.2)", () => {
     const item = w.find("[role=listitem]");
     expect(item.attributes("aria-label")).toContain("shot.png");
     expect(item.attributes("aria-label")).toContain("ready");
+  });
+});
+
+describe("attachment-preview wiring (2026-10: pre-send tray image preview)", () => {
+  it("Composer threads UploadsHandle.source into the tray (agent-scoped) and the name opens the viewer", async () => {
+    const { w, uploads } = mountComposer({
+      tray: [readyAttachment()],
+      sources: { "att-1": { slice: () => {} } },
+    });
+    await nextTick();
+    // the tray's thumbnail pipeline asked the source accessor for the CURRENT agent + id
+    expect(uploads.calls.source.some((c) => c.key === AGENT && c.id === "att-1")).toBe(true);
+    // no createImageBitmap in this env ⇒ icon fallback row, but the name stays a preview button
+    expect(w.find(".tray-thumb").exists()).toBe(false);
+    expect(w.get(".tray-name-btn").text()).toBe("shot.png");
+    await w.get(".tray-name-btn").trigger("click");
+    await nextTick();
+    expect(document.querySelector(".preview-overlay")).not.toBeNull(); // viewer dialog mounted
   });
 });

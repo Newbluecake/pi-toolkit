@@ -267,6 +267,30 @@ code.md-code.path-ref {
   gap: var(--sp-2);
 }
 
+/* attachment-preview (2026-10) zoom controls: [−][125%][+] plus the fit⇄actual toggle.
+ * Text glyphs (+/−) — no sprite additions needed. */
+.preview-image-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.preview-zoom-btn {
+  min-width: 26px;
+  min-height: 24px;
+  padding: 0 var(--sp-1);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+}
+
+.preview-zoom-pct {
+  min-width: 3.5em;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
 .preview-image-body {
   flex: 1;
   min-height: 0;
@@ -284,13 +308,26 @@ code.md-code.path-ref {
   object-fit: contain;
 }
 
+/* Actual mode (2026-10 zoom): the image renders at natural×scale, stays centered, and is
+ * panned by drag/arrow keys (transform) instead of scrollbars — `overflow: hidden` keeps
+ * the browser's scroll out of the pan's way. `touch-action: none` makes touch drags pan
+ * (not page-scroll); tap still toggles (the <5px click rule lives in PreviewImage.vue). */
 .preview-image-body.actual {
-  align-items: flex-start;
-  justify-content: flex-start;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .preview-image-body.actual img {
   max-width: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+
+.preview-image-body.actual img.is-dragging {
+  cursor: grabbing;
 }
 
 /* ---------------------------------------------------------------- text phase */
