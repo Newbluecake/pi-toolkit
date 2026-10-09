@@ -18,7 +18,10 @@ const quota = {
   pillAriaBase: "Subscription quota: {provider} {scope} {pct}%",
   pillAriaReset: "Subscription quota: {provider} {scope} {pct}%, resets {clock}",
   "provider.zai-coding-cn": "GLM",
-  "provider.zai": "GLM Intl",
+  // 2026-10-14 ruling 「glm和glm国际在web上不用区分展示了」: the web never shows a separate
+  // international label — an intl-only snapshot reads "GLM" too (when both are present,
+  // `logic/quota.js`'s `glmPair` ALWAYS merges them into one worst-of group).
+  "provider.zai": "GLM",
   "provider.kimi-coding": "Kimi",
   planBadgeAria: "Plan: {plan}",
   demotedBadge: "⤓ demoted",

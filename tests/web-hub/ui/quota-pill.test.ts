@@ -295,7 +295,7 @@ describe("QuotaPill.vue — multi-group rendering (2026-10-08 rulings: available
     expect(wrapper.get(".q-pill-text").text()).toBe("GLM 5h 17% · 7d 43% · 18:20 reset");
   });
 
-  it("two available groups: one .q-seg each with its own data-level, separated by .q-sep; no merge when values differ", () => {
+  it("two available groups (merged GLM + Kimi): one .q-seg each with its own data-level, separated by .q-sep; the GLM pair merges even though values differ (2026-10-14)", () => {
     const q = quota([
       {
         id: "zai-coding-cn",
@@ -315,19 +315,31 @@ describe("QuotaPill.vue — multi-group rendering (2026-10-08 rulings: available
           { scope: "week", usedPct: 30, level: 0 },
         ],
       },
+      {
+        id: "kimi-coding",
+        level: 0,
+        stale: false,
+        windows: [
+          { scope: "5h", usedPct: 10, level: 0 },
+          { scope: "week", usedPct: 9, level: 0 },
+        ],
+      },
     ]);
     const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
     const segs = wrapper.findAll(".q-seg");
     expect(segs).toHaveLength(2);
-    expect(segs[0]!.attributes("data-level")).toBe("0");
-    expect(segs[1]!.attributes("data-level")).toBe("1");
+    // GLM values are per-scope worst-of: 5h from the intl side (L1 20% beats L0 17%), week
+    // from the cn side (43% > 30%) — one segment, never "GLM Intl", never a second GLM row.
+    expect(segs[0]!.attributes("data-level")).toBe("1");
+    expect(segs[1]!.attributes("data-level")).toBe("0");
     expect(wrapper.get(".q-pill").attributes("data-level")).toBe("1");
     expect(wrapper.findAll(".q-sep")).toHaveLength(1);
     const texts = wrapper.findAll(".q-seg-text").map((s) => s.text());
-    expect(texts).toEqual(["GLM 5h 17% · 7d 43%", "GLM Intl 5h 20% · 7d 30%"]);
+    expect(texts).toEqual(["GLM 5h 20% · 7d 43%", "Kimi 5h 10% · 7d 9%"]);
+    expect(wrapper.text()).not.toContain("GLM Intl");
   });
 
-  it("mobile (≤767px): available compact form is `Label p5/p7` — `GLM 17%/43% · GLM Intl 20%/30%`", () => {
+  it("mobile (≤767px): available compact form is `Label p5/p7` — `GLM 17%/43% · Kimi 20%/30%`", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: true,
       media: query,
@@ -394,10 +406,41 @@ describe("QuotaPill.vue — multi-group rendering (2026-10-08 rulings: available
     ]);
     const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
     const segs = wrapper.findAll(".q-seg-text");
-    expect(segs).toHaveLength(2); // GLM pair merged; clock from the cn side (10/14, not intl's 10/15)
+    expect(segs).toHaveLength(2); // GLM pair merged; equal values ⇒ tie keeps the cn side's clock (10/14, not intl's 10/15)
     expect(segs[0]!.text()).toBe("⚠ GLM · 7d 10/14 15:48 reset");
     expect(segs[1]!.text()).toBe("⚠ Kimi · 7d 10/12 09:06 reset");
     expect(wrapper.get(".q-pill").attributes("data-level")).toBe("3");
+  });
+
+  it("all-exhausted merged pair with a WORSE intl week ⇒ the week clock comes from the intl side (worst-of)", () => {
+    vi.setSystemTime(new Date(2026, 9, 10, 20, 0));
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 3,
+        stale: false,
+        windows: [{ scope: "week", usedPct: 97, level: 3, resetAt: new Date(2026, 9, 14, 15, 48).getTime() }],
+      },
+      {
+        id: "zai",
+        level: 3,
+        stale: false,
+        windows: [{ scope: "week", usedPct: 99, level: 3, resetAt: new Date(2026, 9, 15, 1, 0).getTime() }],
+      },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    const segs = wrapper.findAll(".q-seg-text");
+    expect(segs).toHaveLength(1);
+    expect(segs[0]!.text()).toBe("⚠ GLM · 7d 10/15 01:00 reset"); // 99% > 97% ⇒ intl's window carries its own clock
+  });
+
+  it("intl-only snapshot labels 'GLM' too — the web never shows 'GLM Intl' (2026-10-14)", () => {
+    const q = quota([{ id: "zai", level: 0, stale: false, windows: [{ scope: "5h", usedPct: 41, level: 0 }] }]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.get(".q-pill-text").text()).toBe("GLM 5h 41%");
+    expect(wrapper.get(".q-pill").attributes("aria-label")).toBe("Subscription quota: GLM 5h 41%");
+    expect(wrapper.get(".q-pill").attributes("title")).toBe("Subscription quota: GLM 5h 41%");
+    expect(wrapper.text()).not.toContain("GLM Intl");
   });
 
   it("mobile all-exhausted: `⚠ Label {clock}` only — `⚠ GLM 10/14 15:48 · ⚠ Kimi 10/12 09:06`", () => {
@@ -487,23 +530,24 @@ describe("QuotaPill.vue — popover open/close, a11y, card content", () => {
     expect(wrapper.find("#quota-panel").attributes("role")).toBe("dialog");
   });
 
-  it("renders all three provider rows with name/plan/demoted/stale badges", async () => {
+  it("renders ONE merged GLM row + Kimi with name/plan/stale/demoted badges (the pair always merges)", async () => {
     const wrapper = m(mount(QuotaPill, { props: { quota: threeProviderQuota() }, attachTo: document.body }));
     await wrapper.get(".q-pill").trigger("click");
     const provRows = wrapper.findAll(".q-prov");
-    expect(provRows).toHaveLength(3);
+    expect(provRows).toHaveLength(2); // GLM pair merged — never a second "GLM Intl" row
     expect(provRows[0]!.find(".q-name").text()).toBe("GLM");
     expect(provRows[0]!.find(".q-plan").text()).toBe("pro");
+    expect(provRows[0]!.find(".q-badge.q-stale").exists()).toBe(true); // the intl side's stale flag survives the merge
+    expect(provRows[1]!.find(".q-name").text()).toBe("Kimi");
     expect(provRows[1]!.find(".q-badge.q-demoted").exists()).toBe(true);
-    expect(provRows[2]!.find(".q-badge.q-stale").exists()).toBe(true);
-    expect(provRows[2]!.find(".q-name").text()).toBe("GLM Intl");
+    expect(wrapper.text()).not.toContain("GLM Intl");
   });
 
   it("each window row shows a level-colored bar, the percent, and the reset time (always, D2)", async () => {
     const wrapper = m(mount(QuotaPill, { props: { quota: threeProviderQuota() }, attachTo: document.body }));
     await wrapper.get(".q-pill").trigger("click");
     const rows = wrapper.findAll(".q-row");
-    expect(rows.length).toBe(4); // 2 + 1 + 1 windows
+    expect(rows.length).toBe(3); // 2 (merged GLM worst-of: cn's L1 5h + week) + 1 (Kimi week) windows
     const firstBar = rows[0]!.find(".q-bar");
     expect(firstBar.attributes("data-lv")).toBe("1");
     expect(rows[0]!.find(".q-val").text()).toBe("84%");
@@ -619,7 +663,7 @@ describe("quota.css / tokens.css — four-tier color ladder (verification r_WV2Y
   });
 });
 
-describe("QuotaCard.vue — GLM merge (2026-10, same glmMergeable rule as the pill)", () => {
+describe("QuotaCard.vue — GLM merge (2026-10-14: ALWAYS one row, per-scope worst-of windows; same `glmPair` rule as the pill)", () => {
   function glmQuota(cnWindows: QuotaWire["providers"][number]["windows"], intlWindows: typeof cnWindows): QuotaWire {
     return quota([
       { id: "zai-coding-cn", level: 0, stale: false, plan: "pro", windows: cnWindows },
@@ -633,7 +677,7 @@ describe("QuotaCard.vue — GLM merge (2026-10, same glmMergeable rule as the pi
     { scope: "week" as const, usedPct: 41, level: 0 as const, resetAt: 2_000 },
   ];
 
-  it("equal pair renders ONE 'GLM' row (cn side's windows) + Kimi — never a second GLM Intl row", async () => {
+  it("equal pair renders ONE 'GLM' row (worst-of = identical windows here) + Kimi — never a second GLM Intl row", async () => {
     const wrapper = m(mount(QuotaPill, { props: { quota: glmQuota(equalW, equalW) }, attachTo: document.body }));
     await wrapper.get(".q-pill").trigger("click");
     const provRows = wrapper.findAll(".q-prov");
@@ -651,23 +695,65 @@ describe("QuotaCard.vue — GLM merge (2026-10, same glmMergeable rule as the pi
     expect(plans).toEqual(["pro", "max"]);
   });
 
-  it("differing pair keeps two rows: GLM (cn) and GLM Intl (intl)", async () => {
-    const differing: typeof equalW = [{ scope: "5h", usedPct: 71, level: 1, resetAt: 1_000 }];
+  it("differing pair STILL renders ONE merged row — its windows are the per-scope worst-of", async () => {
     const wrapper = m(
       mount(QuotaPill, {
-        props: { quota: glmQuota(differing, [{ scope: "5h", usedPct: 42, level: 0 }]) },
+        props: {
+          quota: glmQuota(
+            [{ scope: "5h", usedPct: 42, level: 0, resetAt: 1_000 }],
+            [{ scope: "5h", usedPct: 71, level: 1, resetAt: 9_000 }],
+          ),
+        },
         attachTo: document.body,
       }),
     );
     await wrapper.get(".q-pill").trigger("click");
-    const names = wrapper.findAll(".q-prov").map((r) => r.find(".q-name").text());
-    expect(names).toEqual(["GLM", "GLM Intl", "Kimi"]);
+    const provRows = wrapper.findAll(".q-prov");
+    expect(provRows).toHaveLength(2); // merged GLM + Kimi — never a split "GLM Intl" row
+    expect(provRows[0]!.find(".q-name").text()).toBe("GLM");
+    expect(provRows[0]!.find(".q-val").text()).toBe("71%"); // the intl side's worse 5h window (L1 beats L0)
+    expect(provRows[1]!.find(".q-name").text()).toBe("Kimi");
+    expect(wrapper.text()).not.toContain("GLM Intl");
   });
 
-  it("reversed snapshot order (zai BEFORE zai-coding-cn) still labels the merged row 'GLM' and takes values from the cn side (verifier #1)", async () => {
+  it("merged window keeps ITS OWN reset/eta from the side that supplied it (internally consistent row)", async () => {
     vi.setSystemTime(new Date(2026, 9, 8, 16, 0));
-    // Same values (mergeable) but DIFFERENT resetAts: the merged row must show the CN side's
-    // 18:20, never the intl side's 10/9 04:00 — proving `source` is always zai-coding-cn.
+    const q = quota([
+      {
+        id: "zai-coding-cn",
+        level: 0,
+        stale: false,
+        windows: [{ scope: "5h", usedPct: 42, level: 0, resetAt: new Date(2026, 9, 8, 18, 0).getTime() }],
+      },
+      {
+        id: "zai",
+        level: 1,
+        stale: false,
+        windows: [
+          {
+            scope: "5h",
+            usedPct: 80,
+            level: 1,
+            resetAt: new Date(2026, 9, 8, 20, 0).getTime(),
+            etaMs: 30 * 60_000,
+          },
+        ],
+      },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q }, attachTo: document.body }));
+    await wrapper.get(".q-pill").trigger("click");
+    const sub = wrapper.get(".q-sub");
+    expect(sub.classes()).toContain("q-warn");
+    expect(sub.text()).toContain("30 min"); // the intl side's eta rides its own (worse) window…
+    expect(sub.text()).toContain("20:00 reset"); // …and so does its reset clock
+    expect(sub.text()).not.toContain("18:00"); // never the cn side's clock on the intl side's numbers
+  });
+
+  it("reversed snapshot order (zai BEFORE zai-coding-cn) still labels the merged row 'GLM' at the pair's first slot; equal values tie ⇒ the cn side's clock", async () => {
+    vi.setSystemTime(new Date(2026, 9, 8, 16, 0));
+    // Same values (exact tie) but DIFFERENT resetAts: the merged window keeps the CN side's
+    // 18:20, never the intl side's 10/9 04:00 — ties keep the cn side's window (cn compared
+    // first in the worst-of concat).
     const cnW = [
       { scope: "5h" as const, usedPct: 42, level: 0 as const, resetAt: new Date(2026, 9, 8, 18, 20).getTime() },
     ];
@@ -685,7 +771,7 @@ describe("QuotaCard.vue — GLM merge (2026-10, same glmMergeable rule as the pi
     expect(provRows).toHaveLength(2); // merged at zai's (first-of-pair) slot, cn's own slot gone
     expect(provRows[0]!.find(".q-name").text()).toBe("Kimi");
     expect(provRows[1]!.find(".q-name").text()).toBe("GLM"); // NOT "GLM Intl"
-    expect(provRows[1]!.find(".q-sub").text()).toContain("18:20 reset"); // cn's clock
+    expect(provRows[1]!.find(".q-sub").text()).toContain("18:20 reset"); // the cn side's clock (tie)
     expect(provRows[1]!.find(".q-sub").text()).not.toContain("10/9");
     const plans = provRows[1]!.findAll(".q-plan").map((p) => p.text());
     expect(plans).toEqual(["pro", "max"]); // BOTH members' plans survive the merge

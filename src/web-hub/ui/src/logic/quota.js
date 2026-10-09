@@ -157,36 +157,25 @@ function normPct(w) {
 }
 
 /**
- * True when two providers carry indistinguishable headline values — the same set of window
- * scopes, and per scope the same `level` and the same ROUNDED `usedPct` — so the pill/card may
- * collapse them into ONE row. Currently applied to the `zai-coding-cn`/`zai` (GLM / GLM 国际)
- * pair only, but the comparison itself is provider-agnostic. Windows are reduced per scope with
- * the same worst-window comparison as everywhere else (defensive: scopes are unique in
- * practice). Non-finite usedPct never compares equal (NaN !== NaN).
- * @param {QuotaProviderWire} a
- * @param {QuotaProviderWire} b
+ * Per-scope WORST-of synthesis for the GLM pair (2026-10-14 user ruling: 「glm和glm国际在web上
+ * 不用区分展示了，只展示glm就行」 — the web NEVER distinguishes the two, so the pair merges
+ * unconditionally and the merged row shows the worse reading per scope): for each of `5h`/`week`,
+ * the worse of the two members' windows — level desc, then usedPct desc, the same comparison
+ * `worstWindow` uses everywhere else; a scope only one side has is taken as-is; exact ties
+ * keep the CN side's window (CN windows are compared first). Each merged window is the chosen
+ * side's window OBJECT, so its `resetAt`/`etaMs` always come from the side that supplied the
+ * percentages — a merged row never mixes one side's numbers with the other's clocks.
+ * @param {QuotaProviderWire} cn
+ * @param {QuotaProviderWire} intl
  */
-export function glmMergeable(a, b) {
-  const worstByScope = (windows) => {
-    const m = new Map();
-    for (const w of windows) {
-      const cur = m.get(w.scope);
-      if (cur === undefined || w.level > cur.level || (w.level === cur.level && w.usedPct > cur.usedPct)) {
-        m.set(w.scope, w);
-      }
-    }
-    return m;
-  };
-  const ma = worstByScope(a.windows);
-  const mb = worstByScope(b.windows);
-  if (ma.size !== mb.size) return false;
-  for (const [scope, wa] of ma) {
-    const wb = mb.get(scope);
-    if (wb === undefined) return false;
-    if (wa.level !== wb.level) return false;
-    if (Math.round(wa.usedPct) !== Math.round(wb.usedPct)) return false;
+function mergedGlmWindows(cn, intl) {
+  const all = [...cn.windows, ...intl.windows];
+  const merged = [];
+  for (const scope of ["5h", "week"]) {
+    const w = worstWindow(all.filter((x) => x.scope === scope));
+    if (w !== undefined) merged.push(w);
   }
-  return true;
+  return merged;
 }
 
 /**
@@ -203,12 +192,15 @@ export function glmMergeable(a, b) {
  *  - `available: level < 3` (level 3 = exhausted/near-exhausted ⇒ the spawn gate fast-fails
     new runs on that provider, i.e. "unavailable" to the dispatcher).
  *
- * GLM merge: when BOTH `zai-coding-cn` and `zai` are present and `glmMergeable` holds, they
- * collapse into ONE group emitted at the FIRST one's snapshot position (the other contributes
- * no group of its own), with `ids:[both]` and `labelId:"zai-coding-cn"` (label "GLM") — values
- * and reset annex come from the `zai-coding-cn` side (identical by the merge rule, modulo
- * resetAt/etaMs the pill/card read only from the first). The pair decision itself lives in
- * `glmPair` below — the ONE shared rule the card reuses, never re-implemented locally.
+ * GLM merge (2026-10-14 user ruling — the old equality precondition is GONE): when BOTH
+ * `zai-coding-cn` and `zai` are present they ALWAYS collapse into ONE group emitted at the
+ * FIRST one's snapshot position (the other contributes no group of its own), with `ids:[both]`
+ * and `labelId:"zai-coding-cn"` (label "GLM"; an intl-only snapshot labels "GLM" too — the
+ * i18n never says "GLM Intl" on the web anymore). Values are per-scope WORST-of the two
+ * members, and each merged window keeps the resetAt/etaMs of the side that supplied it, so the
+ * group's headline, window list and D6 reset annex are always internally consistent (see
+ * `glmPair`/`mergedGlmWindows` below — the ONE shared rule the card reuses, never
+ * re-implemented locally).
  *
  * Defensive wire policy (verifier 2026-10): a provider id the UI does not know (a future wire
  * peer) simply renders under its raw id — `labelId` is the id and the component's label lookup
@@ -310,25 +302,43 @@ export function pillGroups(quota) {
 /**
  * The GLM merge PAIR decision — the ONE shared rule both the pill (`pillGroups`) and the card
  * (`QuotaCard.vue`'s `cardRows`) consume (never re-implemented locally): when BOTH
- * `zai-coding-cn` and `zai` are present and `glmMergeable` holds, the pair collapses into ONE
- * group/row.
+ * `zai-coding-cn` and `zai` are present they ALWAYS collapse into ONE group/row (2026-10-14
+ * user ruling — no equality precondition anymore; a pair that differs is merged with
+ * worst-of values, not split back into two rows).
  * @param {QuotaProviderWire[]} providers snapshot order
  * @returns {{
  *   skip: QuotaProviderWire,
  *   source: QuotaProviderWire,
  *   members: QuotaProviderWire[],
- * } | undefined} `undefined` ⇒ no merge. `skip` = the member that must NOT emit its own
- * group/row (the SECOND of the two in snapshot order); `source` = always the `zai-coding-cn`
- * side — its windows/values are what the merged group/row shows; `members` = `[cn, intl]`
- * regardless of snapshot order, for flag aggregation (plans / demoted / stale badges).
+ * } | undefined} `undefined` ⇒ no merge (one or both ids absent — a lone side renders
+ * unchanged as its own single group). `skip` = the member that must NOT emit its own group/row
+ * (the SECOND of the two in snapshot order); `source` = a SYNTHETIC provider with
+ * `id:"zai-coding-cn"` (⇒ label "GLM") whose `windows` are the per-scope worst-of synthesis of
+ * `mergedGlmWindows` (each window object keeps its own side's resetAt/etaMs), `level` = max over
+ * those windows (the wire's own "provider 级 = 窗口 max" invariant, recomputed so a drifting
+ * peer field can never win) and `stale` = the union of both members' flags — nothing renders
+ * `source`'s flags directly, but they follow the same "something is wrong" union policy the
+ * card applies to `members`; `members` = the two REAL providers `[cn, intl]` regardless of
+ * snapshot order, for the card's badge aggregation (distinct plans; demotion while EITHER is
+ * demoted — the EARLIEST resumption, per the pinned pre-existing rule; one stale badge per
+ * stale member with its own age).
  */
 export function glmPair(providers) {
   const cn = providers.find((p) => p.id === GLM_CN_ID);
   const intl = providers.find((p) => p.id === GLM_INTL_ID);
   if (cn === undefined || intl === undefined) return undefined;
-  if (!glmMergeable(cn, intl)) return undefined;
+  const windows = mergedGlmWindows(cn, intl);
   const cnFirst = providers.indexOf(cn) < providers.indexOf(intl);
-  return { skip: cnFirst ? intl : cn, source: cn, members: [cn, intl] };
+  return {
+    skip: cnFirst ? intl : cn,
+    source: {
+      id: GLM_CN_ID,
+      level: Math.max(0, ...windows.map((w) => w.level)),
+      stale: cn.stale || intl.stale,
+      windows,
+    },
+    members: [cn, intl],
+  };
 }
 
 /**

@@ -6,7 +6,6 @@ import {
   etaDurationKey,
   fmtResetAt,
   freshestQuota,
-  glmMergeable,
   pillDisplay,
   pillGroups,
   pillView,
@@ -198,39 +197,6 @@ describe("pillView — D6 reset-time annex rule", () => {
   });
 });
 
-describe("glmMergeable — the GLM equality rule (2026-10: merge GLM/GLM 国际 while equal)", () => {
-  const pair = (cnWindows, intlWindows) => [provider("zai-coding-cn", cnWindows), provider("zai", intlWindows)];
-
-  it.each([
-    [
-      "same scopes + levels + rounded pcts",
-      pair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42.2, 0), window("week", 40.8, 0)]),
-      true,
-    ],
-    ["raw pct inside the same rounding bucket", pair([window("5h", 41.4, 1)], [window("5h", 41.49, 1)]), true],
-    ["both windowless (empty scope sets)", pair([], []), true],
-    ["differing level per scope", pair([window("5h", 42, 0)], [window("5h", 42, 1)]), false],
-    ["differing rounded pct", pair([window("5h", 41.4, 0)], [window("5h", 41.6, 0)]), false],
-    [
-      "differing scope sets (cn has week, intl does not)",
-      pair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42, 0)]),
-      false,
-    ],
-    ["one windowless, one not", pair([], [window("5h", 42, 0)]), false],
-  ] as const)("%s ⇒ %s", (_name, provs, expected) => {
-    expect(glmMergeable(provs[0], provs[1])).toBe(expected);
-  });
-
-  it("non-finite usedPct never compares equal (NaN !== NaN ⇒ never merges)", () => {
-    expect(
-      glmMergeable(
-        provider("zai-coding-cn", [window("5h", Number.NaN, 0)]),
-        provider("zai", [window("5h", Number.NaN, 0)]),
-      ),
-    ).toBe(false);
-  });
-});
-
 describe("pillGroups — one group per provider (headline, ordering, availability)", () => {
   it("undefined / no providers / windowless providers ⇒ []", () => {
     expect(pillGroups(undefined)).toEqual([]);
@@ -282,10 +248,10 @@ describe("pillGroups — one group per provider (headline, ordering, availabilit
   });
 });
 
-describe("pillGroups — GLM merge", () => {
+describe("pillGroups — GLM merge (2026-10-14 ruling: ALWAYS one GLM group, worst-of values)", () => {
   const glmPair = (cnWindows, intlWindows) => [provider("zai-coding-cn", cnWindows), provider("zai", intlWindows)];
 
-  it("equal pair collapses into ONE group at the first one's position, labelId cn (label 'GLM')", () => {
+  it("equal pair collapses into ONE group at the first one's position, labelId cn (label 'GLM') — unchanged from the equality era", () => {
     const q = quota([
       ...glmPair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42, 0), window("week", 41, 0)]),
       provider("kimi-coding", [window("week", 98, 3, { resetAt: 9_999 })]),
@@ -296,21 +262,68 @@ describe("pillGroups — GLM merge", () => {
     expect(groups[1]).toMatchObject({ ids: ["kimi-coding"], labelId: "kimi-coding", level: 3 });
   });
 
-  it.each([
-    ["differing level", glmPair([window("5h", 42, 0)], [window("5h", 42, 1)])],
-    ["differing rounded pct", glmPair([window("5h", 41.4, 0)], [window("5h", 41.6, 0)])],
-    ["differing scope sets", glmPair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42, 0)])],
-  ] as const)("%s ⇒ two separate groups", (_name, provs) => {
-    const groups = pillGroups(quota(provs));
-    expect(groups).toHaveLength(2);
-    expect(groups.map((g) => g.labelId)).toEqual(["zai-coding-cn", "zai"]);
-    expect(groups.every((g) => g.ids.length === 1)).toBe(true);
+  it("differing level per scope still merges — the merged window is the WORSE side's", () => {
+    const groups = pillGroups(quota(glmPair([window("5h", 42, 0)], [window("5h", 42, 1)])));
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ ids: ["zai-coding-cn", "zai"], labelId: "zai-coding-cn", level: 1 });
+    expect(groups[0].windows).toEqual([{ scope: "5h", level: 1, usedPct: 42 }]); // intl's L1 beats cn's L0
+  });
+
+  it("same level, differing pct still merges — the higher pct wins (level first, then usedPct)", () => {
+    const groups = pillGroups(quota(glmPair([window("5h", 41.4, 0)], [window("5h", 41.6, 0)])));
+    expect(groups).toHaveLength(1);
+    expect(groups[0].windows).toEqual([{ scope: "5h", level: 0, usedPct: 42 }]); // intl's 41.6 ⇒ rounds to 42
+  });
+
+  it("differing scope sets still merge — a scope only one side has is taken as-is; exact ties keep the cn side's window", () => {
+    const groups = pillGroups(quota(glmPair([window("5h", 42, 0), window("week", 41, 0)], [window("5h", 42, 0)])));
+    expect(groups).toHaveLength(1);
+    expect(groups[0].windows).toEqual([
+      { scope: "5h", level: 0, usedPct: 42 }, // tie ⇒ the cn side's window (cn compared first)
+      { scope: "week", level: 0, usedPct: 41 }, // cn-only scope carried over unchanged
+    ]);
+  });
+
+  it("worst-of is PER SCOPE (5h from one side, week from the other); the D6 annex reads the merged windows — never a mixed pair", () => {
+    const groups = pillGroups(
+      quota(
+        glmPair(
+          [window("5h", 80, 2, { resetAt: 1_000 }), window("week", 91, 1, { resetAt: 2_000 })],
+          [window("5h", 60, 3, { resetAt: 3_000 }), window("week", 55, 1, { resetAt: 4_000 })],
+        ),
+      ),
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0].windows).toEqual([
+      { scope: "5h", level: 3, usedPct: 60 }, // intl's L3 beats cn's L2 despite the lower pct
+      { scope: "week", level: 1, usedPct: 91 }, // cn's 91 beats intl's 55
+    ]);
+    // Headline = the merged 5h window (L3); the annex's triggered week window is the CN side's
+    // (91%), so the week reset shown (2_000) comes from the SAME side that supplied the week
+    // percentages — internally consistent, never one side's numbers under the other's clock.
+    expect(groups[0]).toMatchObject({ level: 3, scope: "5h", resetScope: "week", resetAt: 2_000 });
+  });
+
+  it("level-3 merged headline with no week window ⇒ the unavailable fallback's resetAt comes from the headline window's OWN side", () => {
+    const groups = pillGroups(
+      quota(glmPair([window("5h", 80, 2, { resetAt: 1_000 })], [window("5h", 60, 3, { resetAt: 3_000 })])),
+    );
+    expect(groups[0]).toMatchObject({
+      ids: ["zai-coding-cn", "zai"],
+      level: 3,
+      scope: "5h",
+      resetScope: "5h",
+      resetAt: 3_000, // the intl side supplied the headline window ⇒ its clock, not cn's 1_000
+      available: false,
+    });
   });
 
   it("only one GLM side present ⇒ plain single group, no merge machinery", () => {
     expect(pillGroups(quota([provider("zai-coding-cn", [window("5h", 42, 0)])]))).toMatchObject([
       { ids: ["zai-coding-cn"], labelId: "zai-coding-cn" },
     ]);
+    // intl-only: ids/labelId stay "zai" — the i18n labels it "GLM" too (2026-10-14: the web
+    // never shows "GLM Intl").
     expect(pillGroups(quota([provider("zai", [window("5h", 42, 0)])]))).toMatchObject([
       { ids: ["zai"], labelId: "zai" },
     ]);
@@ -459,8 +472,20 @@ describe("pillDisplay — 2026-10-08 ruling: available-only / all-exhausted week
     expect(d?.groups[0]).toMatchObject({
       ids: ["zai-coding-cn", "zai"],
       labelId: "zai-coding-cn",
-      weekResetAt: 5_000, // the cn side's — merge values always come from zai-coding-cn
+      weekResetAt: 5_000, // equal values ⇒ tie keeps the cn side's week window (cn compared first)
     });
+  });
+
+  it("exhausted merged pair with a WORSE intl week ⇒ weekResetAt from the intl side (worst-of)", () => {
+    const d = pillDisplay(
+      quota([
+        provider("zai-coding-cn", [window("week", 97, 3, { resetAt: 5_000 })]),
+        provider("zai", [window("week", 99, 3, { resetAt: 8_000 })]),
+      ]),
+    );
+    expect(d?.mode).toBe("exhausted");
+    expect(d?.groups).toHaveLength(1);
+    expect(d?.groups[0]).toMatchObject({ labelId: "zai-coding-cn", weekResetAt: 8_000 }); // intl's window/clock
   });
 });
 

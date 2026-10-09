@@ -17,7 +17,9 @@ const quota = {
   pillAriaBase: "订阅额度：{provider} {scope} {pct}%",
   pillAriaReset: "订阅额度：{provider} {scope} {pct}%，{clock} 重置",
   "provider.zai-coding-cn": "GLM",
-  "provider.zai": "GLM 国际",
+  // 2026-10-14 用户裁定「glm和glm国际在web上不用区分展示了」：web 端不再区分国际版——只剩
+  // `zai` 一侧时也标 "GLM"（两侧都在时 `logic/quota.js` 的 `glmPair` 总是合并成一组 worst-of 展示）。
+  "provider.zai": "GLM",
   "provider.kimi-coding": "Kimi",
   planBadgeAria: "档位：{plan}",
   demotedBadge: "⤓ 已降位",

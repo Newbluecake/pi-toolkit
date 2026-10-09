@@ -1,7 +1,8 @@
 <!--
   Subscription-quota popover card (quota-web plan §3/D2): per-provider-row detail behind
-  `QuotaPill.vue`'s trigger — with the 2026-10 GLM merge (`cardRows`: equal `zai-coding-cn`/`zai`
-  collapse into one "GLM" row, split otherwise; same `glmMergeable` rule as the pill). Esc /
+  `QuotaPill.vue`'s trigger — with the 2026-10 GLM merge (`cardRows`: `zai-coding-cn`+`zai`
+  ALWAYS collapse into ONE "GLM" row when both are present, values per scope = worst-of the
+  two sides; same `glmPair` rule as the pill). Esc /
   outside-pointerdown close + focus-return mirror
   `shell/SettingsOverlay.vue`'s desktop popover exactly (non-modal `role="dialog"`, no Tab trap,
   `preventDefault()` on Esc so `DashboardView.vue`'s own global Escape handler — which checks
@@ -24,7 +25,9 @@ const emit = defineEmits<{ close: [] }>();
 const { t } = useI18n();
 
 /** Mirrors `glmPair`'s JSDoc return shape (`logic/quota.js` — the ONE shared GLM-pair rule
- *  this card reuses instead of re-implementing; never constructed locally). */
+ *  this card reuses instead of re-implementing; never constructed locally). `source` is
+ *  glmPair's SYNTHETIC merged provider (id `zai-coding-cn` ⇒ label "GLM"; windows = per-scope
+ *  worst-of, each keeping its own side's resetAt/etaMs). */
 interface GlmPair {
   skip: QuotaProviderWire;
   source: QuotaProviderWire;
@@ -34,13 +37,15 @@ interface GlmPair {
 /** One head badge of a provider row. */
 type CardBadge = { kind: "demoted"; until: number } | { kind: "stale"; provider: QuotaProviderWire };
 
-/** One rendered provider row. GLM merge (2026-10, `glmPair` — same rule as the pill): when the
- *  pair merges, ONE row labeled "GLM" (`labelId` = the cn side's id, regardless of snapshot
- *  order) sits at the FIRST member's position, its window rows are the cn side's, and its
- *  badges aggregate BOTH members: distinct plans each get their own badge, demotion shows the
- *  EARLIEST resumption, and every stale member keeps its own stale badge with its age — a
- *  merged row never loses a member's flags to the other's. Non-merged rows render exactly as
- *  pre-merge (demoted XOR stale, single plan). */
+/** One rendered provider row. GLM merge (2026-10-14 user ruling, `glmPair` — same rule as
+ * the pill): when both GLM ids are present they ALWAYS merge into ONE row labeled "GLM"
+ * (`labelId` = the cn side's id, regardless of snapshot order) at the FIRST member's position,
+ * with per-scope worst-of window rows (each window keeps the resetAt/etaMs of the side that
+ * supplied it — never one side's percentages under the other's clocks). Its badges aggregate
+ * BOTH members under the "something is wrong" union policy — never hidden by a merge:
+ * distinct plans each get their own badge, demotion shows while EITHER is demoted (the EARLIEST
+ * resumption — the pinned pre-existing rule), and every stale member keeps its own stale badge
+ * with its age. Non-GLM rows render exactly as before (demoted XOR stale, single plan). */
 interface CardRow {
   key: string;
   labelId: string;

@@ -14,7 +14,9 @@
   - exhausted (ALL groups level 3): every group renders as `⚠ Label · 7d {clock} 重置` (clock
     from the group's weekResetAt; omitted when unknown) — "什么订阅可用" collapsed into "什么时候
     恢复".
-  The GLM pair (`zai-coding-cn`+`zai`) merges into one "GLM" group while equal (`glmPair`); an
+  The GLM pair (`zai-coding-cn`+`zai`) ALWAYS merges into one "GLM" group when both are present
+  (`glmPair`, 2026-10-14 ruling — values per scope = worst-of the two sides; an intl-only
+  snapshot labels "GLM" too); an
   exhausted group never loses its label — ⚠ is only ever a prefix. The pill's own `data-level`
   is the max level among the SHOWN groups (border/background semantics).
 
