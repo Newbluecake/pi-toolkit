@@ -160,6 +160,14 @@ async function handleGo(nonce: string, ctx: ExtensionCommandContext, deps: Topic
   }
 }
 
+const TRANSFER_STATE_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  pending: "待投递",
+  delivering: "已发出",
+  resolved: "已送达",
+  cancelled: "已取消",
+  manual: "待手动取回",
+});
+
 async function handleLast(rest: string, ctx: ExtensionCommandContext, deps: TopicSwitchCommandDeps): Promise<void> {
   const send = rest.trim() === "--send";
   const transfer = deps.pickTransfer(ctx.sessionManager.getSessionId());
@@ -175,7 +183,10 @@ async function handleLast(rest: string, ctx: ExtensionCommandContext, deps: Topi
         : "";
   if (!send) {
     const preview = Array.from(transfer.payload.text).slice(0, 200).join("");
-    notify(ctx, `[${transfer.state}] ${preview}${imageNote}`);
+    // Live acceptance 2026-10-10: a successful switch leaves the in-process state at "delivering"
+    // (there is no separate delivered state), which read as "still in flight" — show user labels.
+    const label = TRANSFER_STATE_LABELS[transfer.state] ?? transfer.state;
+    notify(ctx, `[${label}] ${preview}${imageNote}`);
     return;
   }
   if (!deps.casTransfer(transfer.holdId, ["pending", "manual"], "delivering")) {
