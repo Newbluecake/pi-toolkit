@@ -26,6 +26,15 @@ const settings = {
   keepAliveOff: "Off (reload on every switch)",
   keepAlive3: "3 sessions (default)",
   keepAlive5: "5 sessions",
+  // 2026-10 motion switch (pwh_motion) — the 「动态效果」 card. The user's desktop Edge reports
+  // prefers-reduced-motion: reduce (Windows animation effects off), which silently disabled
+  // every animation; this pref overrides the OS per browser. Labels translate; the stored
+  // tokens stay system/on/off.
+  motionSection: "Motion",
+  motionHint: "Follow system honors the operating system's reduce-animation setting.",
+  motionSystem: "Follow system (default)",
+  motionOn: "Always animate",
+  motionOff: "Always reduce",
   // 2026-10 plaintext-warning opt-out — the 「明文 HTTP 警告」 card. Rendered ONLY on pages
   // actually served as plaintext (password mode over http:, the same predicate every warning
   // component uses — CONTROL_ENV.plaintext); https / loopback-token pages never show the

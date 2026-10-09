@@ -50,6 +50,7 @@ import { useHub } from "./composables/useHub.js";
 import { loadKeepAlive } from "@logic/sessionKeepAlive.js";
 import { useI18n } from "./composables/useI18n.js";
 import { useMedia } from "./composables/useMedia.js";
+import { useMotionPref } from "./composables/useMotionPref.js";
 import { usePasswordAuth } from "./composables/usePasswordAuth.js";
 import { usePreview } from "./composables/usePreview.js";
 import { useTheme } from "./composables/useTheme.js";
@@ -76,6 +77,14 @@ useTheme({
   doc: document,
   metaThemeColor: document.querySelector('meta[name="theme-color"]'),
 });
+
+// Boot-time motion assert (`public/theme-init.js` already applied the persisted
+// `<html data-motion>` attribute pre-paint; this re-asserts it and — because App.vue never
+// unmounts — owns the page-lifetime cross-tab `storage` listener, so another tab flipping
+// `pwh_motion` re-applies the attribute here even with the settings panel closed. Runtime
+// CHANGES live on the settings page (`shell/SettingsView.vue` owns its own instance), the
+// same split as the theme block above.
+useMotionPref({ storage: browserLocalStorage() });
 
 const announcerEl = ref<HTMLElement | null>(null);
 const announcer = createAnnouncer({

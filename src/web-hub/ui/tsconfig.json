@@ -29,6 +29,7 @@
     "env.d.ts",
     "vite.config.ts",
     "aliases.ts",
-    "build-info-plugin.ts"
+    "build-info-plugin.ts",
+    "motion-css.ts"
   ]
 }

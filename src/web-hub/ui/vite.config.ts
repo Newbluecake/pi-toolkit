@@ -26,6 +26,7 @@ import vue from "@vitejs/plugin-vue";
 import { defineConfig, type UserConfig } from "vite";
 import { uiAliases } from "./aliases.js";
 import { buildInfoPlugin, builtAtNow, readPackageVersion, resolveCommit } from "./build-info-plugin.js";
+import { motionPrefCssPlugin } from "./motion-css.js";
 import { PROTO } from "../protocol/version.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
@@ -47,6 +48,11 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
     publicDir: cspProbe ? false : "public",
     plugins: [vue(), ...(cspProbe ? [] : [buildInfoPlugin({ builtAt })])],
     resolve: { alias: uiAliases },
+    // Motion preference (2026-10, `pwh_motion`): rewrite every
+    // `@media (prefers-reduced-motion: reduce)` so the browser-side `data-motion` switch can
+    // override the OS setting — see `./motion-css.ts`'s header for the full contract. Runs in
+    // BOTH build modes (the csp-probe tests the same CSS pipeline the shipped bundle uses).
+    css: { postcss: { plugins: [motionPrefCssPlugin()] } },
     // syntax-highlight (2026-10): prismjs's MIT banner (`https://prismjs.com`, kept by
     // esbuild's default legal-comments handling) would trip check-ui-dist.ts's external-URL
     // allowlist — strip legal comments from the bundle instead of widening the allowlist.

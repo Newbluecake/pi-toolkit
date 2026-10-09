@@ -18,6 +18,13 @@
 // Deliberately tiny and wrapped in try/catch: this must never throw and
 // never block rendering, even with localStorage disabled/unavailable
 // (private browsing, storage quota, etc.).
+//
+// 2026-10 motion preference (pwh_motion): "on"/"off" set data-motion on <html> before
+// first paint so the rewritten reduce rules (vite.config.ts's motion-css.ts PostCSS pass)
+// never flash an animated first frame under "off" (or a frozen one under "on").
+// "system" — and anything invalid — sets NOTHING: the reduce media queries then follow
+// the OS exactly like before the feature existed. composables/useMotionPref.ts is the
+// runtime counterpart (same key, same attribute), exactly like useTheme.ts is for themes.
 (function () {
   try {
     var pref = window.localStorage.getItem("pwh_theme");
@@ -28,7 +35,11 @@
     if (window.isFinite(scale) && scale >= 0.8 && scale <= 3.0) {
       document.documentElement.style.setProperty("--fs-scale", String(scale));
     }
+    var motion = window.localStorage.getItem("pwh_motion");
+    if (motion === "on" || motion === "off") {
+      document.documentElement.setAttribute("data-motion", motion);
+    }
   } catch (e) {
-    /* localStorage unavailable — fall back to prefers-color-scheme / 100% font scale only */
+    /* localStorage unavailable — fall back to prefers-color-scheme / 100% font scale / OS motion only */
   }
 })();

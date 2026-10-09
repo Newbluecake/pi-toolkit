@@ -41,6 +41,7 @@ import {
   useFontScale,
 } from "../../composables/useFontScale.js";
 import { useDeliverDefault, type DeliverDefault } from "../../composables/useDeliverDefault.js";
+import { useMotionPref, type MotionPref } from "../../composables/useMotionPref.js";
 import { KEEPALIVE_CHOICES, loadKeepAlive, setKeepAlivePref } from "@logic/sessionKeepAlive.js";
 import { browserLocalStorage } from "./themeStorage.js";
 import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
@@ -63,6 +64,18 @@ const theme = useTheme({
 });
 const fontScale = useFontScale({ storage: browserLocalStorage(), doc: document });
 const deliverDefault = useDeliverDefault({ storage: browserLocalStorage() });
+
+// 2026-10 动态效果开关（pwh_motion）：跟随系统 / 始终开启 / 始终关闭。OS 层面的
+// prefers-reduced-motion（如 Windows 关闭动画效果）曾无差别杀死全部动画；此开关在
+// 浏览器层面覆盖它——on ⇒ <html data-motion="on">（reduce 规则永不生效），off ⇒
+// data-motion="off"（reduce 规则永远生效），system ⇒ 不设属性（跟 OS 走，与旧行为一致）。
+// CSS 侧由 vite 构建时的 motion-css.ts 重写承载，无需改任何样式表。卡片永远可见。
+const motion = useMotionPref({ storage: browserLocalStorage(), doc: document });
+const MOTION_OPTIONS: readonly { value: MotionPref; labelKey: string }[] = [
+  { value: "system", labelKey: "settings.motionSystem" },
+  { value: "on", labelKey: "settings.motionOn" },
+  { value: "off", labelKey: "settings.motionOff" },
+];
 
 // D2（web-hub-session-switch plan §1.2 D2-5 / §2.2 步骤 6）：「会话缓存」单选组。偏好读在挂载
 // 时一次、写在点击时持久化（useHub 每次切换时重读 pwh_keepalive，改小在下一次切换时生效）。
@@ -273,6 +286,25 @@ function onModelSelect(value: string): void {
             >
               <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
               <AppIcon v-if="keepAlive === opt.value" name="check" class="icon-sm settings-option-check" />
+            </button>
+          </div>
+        </section>
+
+        <section class="settings-card settings-card-wide" :aria-label="t('settings.motionSection')">
+          <h2 class="settings-h">{{ t("settings.motionSection") }}</h2>
+          <p class="settings-note">{{ t("settings.motionHint") }}</p>
+          <div class="settings-options" role="radiogroup" :aria-label="t('settings.motionSection')">
+            <button
+              v-for="opt in MOTION_OPTIONS"
+              :key="opt.value"
+              type="button"
+              role="radio"
+              :aria-checked="motion.pref.value === opt.value"
+              class="settings-option"
+              @click="motion.setPref(opt.value)"
+            >
+              <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
+              <AppIcon v-if="motion.pref.value === opt.value" name="check" class="icon-sm settings-option-check" />
             </button>
           </div>
         </section>

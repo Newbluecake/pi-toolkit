@@ -24,6 +24,13 @@ const settings = {
   keepAliveOff: "关闭（每次切换重新加载）",
   keepAlive3: "3 个（默认）",
   keepAlive5: "5 个",
+  // 2026-10 动态效果开关（pwh_motion）——OS 层关闭动画效果（prefers-reduced-motion: reduce）
+  // 曾无差别杀死全部动画，此开关在浏览器层面覆盖；文案翻译，存储 token 仍为 system/on/off。
+  motionSection: "动态效果",
+  motionHint: "跟随系统时遵循操作系统的「减少动画」设置",
+  motionSystem: "跟随系统（默认）",
+  motionOn: "始终开启",
+  motionOff: "始终关闭",
   // 2026-10 明文警告开关——「明文 HTTP 警告」卡片。仅在确实以明文提供的页面（密码模式 + http:，
   // 与各警告组件的判定一致——CONTROL_ENV.plaintext）渲染；https / 回环 token 页面不显示警告，
   // 开关也无从谈起。隐藏只影响警告文案的可见性——传输仍是未加密的（提示语即此意）。

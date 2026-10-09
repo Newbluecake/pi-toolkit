@@ -184,6 +184,16 @@ async function main(): Promise<void> {
     } else if (ext === ".css") {
       const source = await readFile(abs, "utf8");
       if (/<style[\s>]/i.test(source)) fail(`${rel}: contains a <style> tag literal (unexpected in CSS)`);
+      // Motion pref (2026-10, `pwh_motion`): the reduce rules must have been rewritten.
+      // `[data-motion=…]` selectors appear in built CSS ONLY through vite.config.ts's
+      // motion-css.ts PostCSS pass, so a reduce query without them means that pass did not
+      // run for this build (plugin unwired / bypassed) — the browser-side switch would be dead.
+      // Quote-agnostic: the minifier strips attribute-value quotes (`[data-motion=off]`).
+      if (/prefers-reduced-motion/i.test(source) && !/\[data-motion=(["']?)off\1\]/.test(source)) {
+        fail(
+          `${rel}: prefers-reduced-motion rules present but the pwh_motion rewrite left no [data-motion="off"] copies — is motionPrefCssPlugin wired in src/web-hub/ui/vite.config.ts?`,
+        );
+      }
       cssGzipTotal += gzipSync(await readFile(abs)).length;
     }
   }
