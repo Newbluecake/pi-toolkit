@@ -77,6 +77,7 @@ import { createCompactionState } from "./compaction-state.js";
 import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
 import { createHoldBuffer, holdWired } from "./hold.js";
 import { createHoldDriver, type HoldDriver, type TurnEndLike } from "./hold-driver.js";
+import type { PromptGatePort } from "./prompt-gate.js";
 import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool-timing.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
 import { classifyCommand, listSlashCommands } from "./slash.js";
@@ -198,6 +199,13 @@ export interface WebHubDeps {
    *  `() => holder.current?.quota?.verdicts() ?? []`). Unset (webHub.quota=false, or the quota
    *  feature itself produces no verdicts) ⇒ the `StatusInfo.quota` field is never set. */
   quota?: () => readonly ProviderVerdict[];
+  /** topic-switch plan P4 (D2, #5) / arch §15 r2 row 1: optional, late-bound web-prompt claim
+   *  port — same `() => T | undefined` late-bound-closure precedent as `query`/`todo`/`quota`
+   *  above. `src/index.ts` (package P3b, outside this file's domain) threads a ref getter
+   *  (`promptGate: () => promptGateRef.current`); `src/topic-switch/wire.ts` is what ever
+   *  assigns the ref. Unset (topic-switch off, or not wired yet) ⇒ `commands.ts` never calls
+   *  `tryClaim` at all — byte-identical to the pre-feature native/hold dispatch path. */
+  promptGate?: () => PromptGatePort | undefined;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -721,6 +729,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       return { cancel: () => clearTimeout(t) };
     },
     ...(deps.query !== undefined ? { query: deps.query } : {}),
+    // topic-switch plan P4 (D2, #5): the optional web-prompt claim port, threaded straight
+    // through unchanged — `undefined` (the common case until topic-switch is wired) keeps
+    // `handlePrompt` byte-identical to its pre-feature form.
+    ...(deps.promptGate !== undefined ? { promptGate: deps.promptGate } : {}),
     // web-hub-steer-recall §4.7 step 3 (A6): the hold driver, looked up lazily so the driver can
     // be constructed after the handler it dispatches through (no temporal-dead-zone cycle).
     // `owner` (Y4/Y7.3) scopes every ledger lookup this handler makes to THIS module instance.

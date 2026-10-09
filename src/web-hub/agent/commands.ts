@@ -30,7 +30,16 @@ import type { OriginEntryPort } from "./origin-entry.js";
 import type { QueryControlPort, StopResult } from "./index.js";
 import type { HoldItem } from "./hold.js";
 import type { DispatchOutcome, HoldDriver } from "./hold-driver.js";
-import type { CmdData, CmdErrorCode, CmdFrame, CmdLateFrame, CmdOp, CmdResultFrame } from "../protocol/messages.js";
+import type { PromptGatePort, WebPromptRelease } from "./prompt-gate.js";
+import type {
+  CmdData,
+  CmdErrorCode,
+  CmdFrame,
+  CmdLateFrame,
+  CmdOp,
+  CmdOrigin,
+  CmdResultFrame,
+} from "../protocol/messages.js";
 
 export interface Timer {
   cancel(): void;
@@ -62,6 +71,12 @@ export interface CommandHandlerDeps {
    * never be mistaken for a current one even when `sessionId` happens to match. Optional so a
    * caller that hasn't wired hold-recall yet (no `hold` dep either) still compiles unchanged. */
   owner?: string;
+  /** topic-switch plan P4 (D2, #5): optional, late-bound web-prompt claim port — looked up lazily
+   * (not captured once) for the same reason `hold` is: the real port may not exist yet when this
+   * handler is constructed, and the module instance that eventually registers one is free to swap
+   * it out from under us (e.g. a settings change). `undefined` ⇒ `tryClaim` is never called —
+   * byte-identical to the pre-feature native/hold dispatch path. */
+  promptGate?: () => PromptGatePort | undefined;
 }
 
 export interface InputEventLike {
@@ -229,6 +244,33 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     if (deps.compactionState.manualCompacting) {
       return settleAndReply(frame, errResult("E_BUSY_COMPACTING", true, "none"));
     }
+    // topic-switch plan P4 (D2, #5; arch §15 r2 row 1): the gate is optional/late-bound and only
+    // ever consulted while idle — a running turn can't be judged (topic-switch's hold window is
+    // for a fresh idle prompt, never a mid-turn steer/followUp). `tryClaim` throwing (or `isIdle()`
+    // itself, or the getter, throwing) is fail-open: the native/hold path below runs exactly as if nothing claimed
+    // the request.
+    let gate: PromptGatePort | undefined;
+    try {
+      gate = deps.promptGate?.();
+    } catch {
+      gate = undefined; // a throwing getter is fail-open too — native/hold path below
+    }
+    if (gate !== undefined) {
+      let claimed = false;
+      try {
+        if (ctx.isIdle()) {
+          const release = createPromptRelease(frame.id, cmd.text, frame.origin, deps.getSessionId());
+          claimed = gate.tryClaim({ cmdId: frame.id, text: cmd.text }, ctx, release);
+        }
+      } catch {
+        claimed = false;
+      }
+      if (claimed) {
+        deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: "idle" }, deps.now());
+        deps.onChanged();
+        return settleAndReply(frame, okResult({ op: "prompt", delivery: "observed", behavior: "idle" }));
+      }
+    }
     // web-hub-steer-recall plan §4.4 A3 point 2: try the hold branch BEFORE the native dispatch—
     // the ledger is written first (`held`), then the buffer; a `hold()` capacity-race failure
     // falls through to the native path below (which re-asserts `text` since "held" doesn't retain
@@ -301,11 +343,20 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     return entry;
   }
 
-  /** web-hub-steer-recall plan §5.3 P2-P5, synchronous, no `await`. Precondition check → ledger
-   * write (dispatched + text restored) → origin entry (self-swallowing, P4) → the actual
-   * `sendUserMessage` call. Never touches the hold buffer, never calls `onReturned` — the driver
-   * (caller) owns P1/P6/P7 (D5). */
-  function dispatchHeld(item: HoldItem): DispatchOutcome {
+  /** web-hub-steer-recall plan §5.3 P2-P5 / topic-switch plan P4's `release.current()`,
+   * synchronous, no `await`. Precondition check → ledger write (dispatched + text restored) →
+   * origin entry (self-swallowing, P4) → the actual `sendUserMessage` call. Never touches the
+   * hold buffer, never calls `onReturned` — the caller (the hold driver, or topic-switch's own
+   * release closure) owns P1/P6/P7 (D5). Takes only the fields it actually needs (a structural
+   * subset of `HoldItem`) so `release.current()` can call it without a hold-buffer item ever
+   * existing. */
+  function dispatchItem(item: {
+    cmdId: string;
+    sessionId: string;
+    text: string;
+    deliver: "steer" | "followUp";
+    origin: CmdOrigin;
+  }): DispatchOutcome {
     try {
       const ctx = deps.getCtx();
       if (ctx === undefined) return "refused";
@@ -340,6 +391,36 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       /* side-effect-then-throw: still reported as "sent" above/below — see comment. */
     }
     return "sent";
+  }
+
+  function dispatchHeld(item: HoldItem): DispatchOutcome {
+    return dispatchItem(item);
+  }
+
+  /** topic-switch plan P4 (D2, #5): the `release` callback handed to `PromptGatePort.tryClaim`.
+   * Captures the claimed request's identity (cmdId/text/origin) and the session it was claimed
+   * under; `current()`/`elsewhere()` read `deps.getCtx()`/`deps.getSessionId()` FRESH at CALL
+   * time (never at claim time) via `dispatchItem`'s own precondition set, so a release that lands
+   * after the session moved on (new session, `/reload`, a dead connection generation) is refused
+   * rather than dispatching into a stale session. Settles at most once total across
+   * `current()`/`elsewhere()` combined (either method, in either order) — every later call is a
+   * no-op, matching `WebPromptRelease`'s own doc contract. */
+  function createPromptRelease(cmdId: string, text: string, origin: CmdOrigin, sessionId: string): WebPromptRelease {
+    let settled = false;
+    return {
+      current() {
+        if (settled) return "refused";
+        settled = true;
+        const outcome = dispatchItem({ cmdId, sessionId, text, deliver: "followUp", origin });
+        return outcome === "sent" ? "dispatched" : "refused";
+      },
+      elsewhere() {
+        if (settled) return;
+        settled = true;
+        deps.ledger.updatePrompt(cmdId, { promptState: "consumed" }, deps.now());
+        deps.onChanged();
+      },
+    };
   }
 
   function scheduleIdleStartedTimeout(cmdId: string, text: string): void {
