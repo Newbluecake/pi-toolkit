@@ -7,7 +7,7 @@
  */
 const common = {
   back: "Back",
-  backToAgents: "Back to Agents",
+  backToAgents: "Back to Sessions",
   copy: "Copy",
   copied: "Copied",
   selectedPressCopy: "Selected — press Copy",

@@ -3,9 +3,9 @@
  * info, metrics, agent-level notices and the bottom dock.
  */
 const detail = {
-  selectAgentTitle: "Select an agent",
+  selectAgentTitle: "Select a session",
   selectAgentBody: "Pick a session on the left to see its conversation, tool calls and subagents.",
-  notConnectedTitle: "This agent is not connected",
+  notConnectedTitle: "This session is not connected",
   notConnectedBody: "It may have exited, or the link is stale.",
   sessionDetailsAria: "Session details",
   kvCwd: "cwd",

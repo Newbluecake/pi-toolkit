@@ -6,9 +6,9 @@ import en from "../en/detail.js";
 type Messages<T> = { [K in keyof T]: string };
 
 const detail = {
-  selectAgentTitle: "选择一个代理",
+  selectAgentTitle: "选择一个会话",
   selectAgentBody: "在左侧选择一个会话，查看它的对话、工具调用与子代理。",
-  notConnectedTitle: "该代理未连接",
+  notConnectedTitle: "该会话未连接",
   notConnectedBody: "它可能已退出，或链接已过期。",
   sessionDetailsAria: "会话详情",
   kvCwd: "cwd",

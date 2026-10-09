@@ -4,9 +4,9 @@
  * `common`'s shared `status.*` vocabulary.
  */
 const agents = {
-  title: "Agents",
+  title: "Sessions",
   filterPlaceholder: "Filter by path or session…",
-  filterAria: "Filter agents",
+  filterAria: "Filter sessions",
   staleOffline: "Stale & Offline",
   stopped: "Stopped",
   emptyTitle: "No pi sessions connected",
@@ -16,7 +16,7 @@ const agents = {
   noSessionName: "(no session name)",
   collapseSidebar: "Collapse sidebar",
   expandSidebar: "Expand sidebar",
-  openDrawer: "Show agents list",
+  openDrawer: "Show sessions list",
   newSession: "New session",
   newSessionAria: "Start a new session in the selected session's directory; pick a directory when none is selected",
   newSessionOk: "New session started",

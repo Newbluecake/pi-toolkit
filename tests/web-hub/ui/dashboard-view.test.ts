@@ -12,7 +12,7 @@ import type { HubHandle, HubState, Route } from "../../../src/web-hub/ui/src/typ
  * regression coverage for #26 P6 findings 1 and 2.
  *
  * 1. A deep link to an agent key the reducer has never seen (`selectedAgent === undefined`) must
- *    render the "This agent is not connected" empty state — not the generic "Select an agent"
+ *    render the "This session is not connected" empty state — not the generic "Select a session"
  *    one — in BOTH layout branches (the narrow single-view `v-else-if="route.name === 'agent'"`
  *    branch already had this; the split `!narrow` branch fell through to the generic copy).
  * 2. Below the 768px split breakpoint, pressing Escape while a detail view is showing calls the
@@ -98,14 +98,14 @@ describe("DashboardView.vue — split view (!narrow) deep link to a missing agen
     stubMatchMedia(false); // (min-width: 768px) split view
     const hub = hubWithOneAgent();
     const wrapper = mountDashboard({ name: "list" }, hub);
-    expect(wrapper.find(".empty h2").text()).toBe("Select an agent");
+    expect(wrapper.find(".empty h2").text()).toBe("Select a session");
   });
 
   it("renders the not-connected empty state (with a back link) for a deep link to an unknown agent key", () => {
     stubMatchMedia(false);
     const hub = hubWithOneAgent();
     const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hub);
-    expect(wrapper.find(".empty h2").text()).toBe("This agent is not connected");
+    expect(wrapper.find(".empty h2").text()).toBe("This session is not connected");
     expect(wrapper.find('a[href="#/"]').exists()).toBe(true);
   });
 
@@ -217,7 +217,7 @@ describe("DashboardView.vue — removed empty state (web-hub-delete-session v2 �
     expect(wrapper.find(".empty h2").text()).toBe("Session removed from the list");
     expect(wrapper.text()).toContain("resume it from a terminal with pi");
     expect(wrapper.find('a[href="#/"]').exists()).toBe(true);
-    expect(wrapper.find(".empty h2").text()).not.toBe("This agent is not connected");
+    expect(wrapper.find(".empty h2").text()).not.toBe("This session is not connected");
   });
 
   it("narrow (<768px) single view: same removed empty state", () => {
@@ -231,7 +231,7 @@ describe("DashboardView.vue — removed empty state (web-hub-delete-session v2 �
     stubMatchMedia(false);
     const hub = hubWithOneAgent();
     const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hub);
-    expect(wrapper.find(".empty h2").text()).toBe("This agent is not connected");
+    expect(wrapper.find(".empty h2").text()).toBe("This session is not connected");
   });
 
   it("a removed key never auto-navigates back to the list (stays on the agent route)", () => {
@@ -246,7 +246,7 @@ describe("DashboardView.vue — removed empty state (web-hub-delete-session v2 �
 /**
  * Deep-link refresh flicker fix: before the hub's first `agents` snapshot lands
  * (`state.synced === false`), an agent-route deep link renders a loading state instead of
- * flashing 「This agent is not connected」. `synced` survives reconnects, so a reconnect never
+ * flashing 「This session is not connected」. `synced` survives reconnects, so a reconnect never
  * falls back into the loading state; everything past the first snapshot is unchanged.
  */
 describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refresh flicker fix)", () => {
@@ -261,7 +261,7 @@ describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refr
     // scope to the detail pane — the sidebar's own empty state also uses `.empty` (no HUB_CTX
     // provide in this mount defaults the list to its synced behavior, same as production).
     expect(wrapper.find(".detail .empty h2").text()).toBe("Connecting…");
-    expect(wrapper.find(".detail .empty h2").text()).not.toBe("This agent is not connected");
+    expect(wrapper.find(".detail .empty h2").text()).not.toBe("This session is not connected");
   });
 
   it("narrow view: same loading state before the first snapshot", () => {
@@ -273,7 +273,7 @@ describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refr
   it("a synced snapshot without the key ⇒ not-connected (unchanged)", () => {
     stubMatchMedia(false);
     const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hubWithOneAgent());
-    expect(wrapper.find(".empty h2").text()).toBe("This agent is not connected");
+    expect(wrapper.find(".empty h2").text()).toBe("This session is not connected");
   });
 
   it("a synced snapshot WITH the key ⇒ the real detail view (unchanged)", () => {
@@ -293,7 +293,7 @@ describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refr
     ]);
     const hub: HubHandle = { state: ref(s as unknown as HubState), dispatch: () => {} };
     const wrapper = mountDashboard({ name: "agent", key: "does-not-exist" }, hub);
-    expect(wrapper.find(".empty h2").text()).toBe("This agent is not connected");
+    expect(wrapper.find(".empty h2").text()).toBe("This session is not connected");
   });
 
   it("never synced + transport reconnecting (hub unreachable) ⇒ not-connected, not an endless loading state", () => {
@@ -304,7 +304,7 @@ describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refr
     ]);
     const hub: HubHandle = { state: ref(s as unknown as HubState), dispatch: () => {} };
     const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hub);
-    expect(wrapper.find(".detail .empty h2").text()).toBe("This agent is not connected");
+    expect(wrapper.find(".detail .empty h2").text()).toBe("This session is not connected");
   });
 
   it("never synced + a removed key ⇒ the removed state still wins over loading", () => {
@@ -316,7 +316,7 @@ describe("DashboardView.vue — pre-first-snapshot loading state (deep-link refr
     const hub: HubHandle = { state: ref(s as unknown as HubState), dispatch: () => {} };
     const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hub);
     expect(wrapper.find(".detail .empty h2").text()).not.toBe("Connecting…");
-    expect(wrapper.find(".detail .empty h2").text()).not.toBe("This agent is not connected");
+    expect(wrapper.find(".detail .empty h2").text()).not.toBe("This session is not connected");
   });
 });
 

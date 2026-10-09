@@ -10,7 +10,7 @@ type Messages<T> = { [K in keyof T]: string };
 
 const common = {
   back: "返回",
-  backToAgents: "返回代理列表",
+  backToAgents: "返回会话列表",
   copy: "复制",
   copied: "已复制",
   selectedPressCopy: "已选中 — 请按复制",
