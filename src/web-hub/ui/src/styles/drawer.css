@@ -26,7 +26,10 @@
   display: none;
 }
 
-/* docked 且已打开时,摘要行按钮由 CSS 隐藏(§6.3:抽屉本身就是常驻的) */
+/* docked 且已打开时,悬浮 tab 按钮由 CSS 隐藏(§6.3:抽屉本身就是常驻视图;2026-10
+ * 悬浮化后沿用同一裁决 —— 宽屏 docked 打开时不让悬浮按钮贴在抽屉左缘与常驻树并排,
+ * × 按钮就是关闭入口;关闭后 tab 回到主栏右缘)。按钮仍在 DOM 里(display:none),
+ * checkFleetDrawerOpen 的 aria-expanded 一致性断言不受影响。 */
 .detail[data-drawer="docked"][data-drawer-open] .fleet-summary-bar {
   display: none;
 }

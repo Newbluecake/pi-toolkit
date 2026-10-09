@@ -324,18 +324,41 @@ describe("fleet/summary.ts 纯函数", () => {
   });
 });
 
-describe("FleetSummaryBar.vue(§6.3 摘要行)", () => {
-  it("汇总 running/total/cost,button 带 aria-controls/aria-expanded,点击发 toggle", async () => {
+describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘竖排 tab)", () => {
+  it("竖排 tab:可见面 = 图标/面板名/计数徽标,聚合计数全进 aria-label;点击发 toggle", async () => {
     const wrapper = mount(FleetSummaryBar, { props: { rows: DASHBOARD_ROWS, open: false } });
     const btn = wrapper.get(".fleet-summary-bar");
     expect(btn.attributes("aria-controls")).toBe("fleet-drawer");
     expect(btn.attributes("aria-expanded")).toBe("false");
     expect(btn.get(".panel-title").text()).toBe("Subagents");
-    expect(btn.get(".panel-stats .pill").text()).toContain("3 running");
-    expect(btn.get(".panel-stats .num").text()).toContain("6 total");
-    expect(btn.get(".panel-stats .num").text()).toContain("$0.5600");
+    // 徽标只露总数;running 状态由呼吸点(data-st="running")表达
+    expect(btn.get(".fab-count").text()).toBe("6");
+    expect(btn.get(".fab-count").attributes("data-st")).toBe("running");
+    expect(btn.find(".fab-count .dot").exists()).toBe(true);
+    // 原摘要行的聚合计数(running/总数/成本)不丢 —— 全量收进 aria-label
+    const label = btn.attributes("aria-label") ?? "";
+    expect(label).toContain("Subagents");
+    expect(label).toContain("3 running");
+    expect(label).toContain("6 total");
+    expect(label).toContain("$0.5600");
+    // 无 title 悬浮提示(ui-design §6.3「不依赖 hover」;visual 触屏档断言全页无 [title])
+    expect(btn.attributes("title")).toBeUndefined();
     await btn.trigger("click");
     expect(wrapper.emitted("toggle")).toEqual([[]]);
+  });
+
+  it("零 running:徽标退 idle(无点无 data-st),aria-label 不含 running 段", () => {
+    const done = [
+      row({ runId: "d1", status: "completed", phaseLabel: "done", terminal: true, costUsd: 0.1 }),
+      row({ runId: "d2", status: "failed", phaseLabel: "error", terminal: true }),
+    ];
+    const wrapper = mount(FleetSummaryBar, { props: { rows: done, open: true } });
+    const btn = wrapper.get(".fleet-summary-bar");
+    expect(btn.get(".fab-count").text()).toBe("2");
+    expect(btn.get(".fab-count").attributes("data-st")).toBeUndefined();
+    expect(btn.find(".fab-count .dot").exists()).toBe(false);
+    expect(btn.attributes("aria-label")).not.toContain("running");
+    expect(btn.attributes("aria-expanded")).toBe("true");
   });
 
   it("没有行时不渲染(不占位,沿用 ui-design §9)", () => {

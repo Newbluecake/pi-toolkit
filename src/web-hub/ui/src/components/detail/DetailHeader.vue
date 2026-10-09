@@ -29,8 +29,10 @@
   the title text is wrapped in a disclosure <button> (h2 keeps `id="detail-title"`), the state
   is the browser-local `pwh_detail_head_collapsed` pref (global, fail-open to EXPANDED; see
   `composables/useDetailHeadCollapse.ts`), and the transient `<p>` notices stay outside the
-  block. Styles: `.detail-title-toggle` / `.detail-title-text` / `.detail-head-info` in
-  detail.css.
+  block. 2026-10 (user request 「标题那个箭头我感觉可以去掉」): the leading chevron glyph is
+  removed — the toggle is text-only (hover background + aria-expanded/aria-controls carry the
+  disclosure affordance). Styles: `.detail-title-toggle` / `.detail-title-text` /
+  `.detail-head-info` in detail.css.
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref } from "vue";
@@ -206,7 +208,9 @@ function onToggleHeadInfo(): void {
       </button>
       <!-- 2026-10 「红框部分支持收起」: the title is the disclosure toggle for the info block
            below (button inside the h2 keeps `id="detail-title"` — the detail region's
-           aria-labelledby target — while gaining native keyboard/AT toggle semantics). -->
+           aria-labelledby target — while gaining native keyboard/AT toggle semantics).
+           2026-10 「标题那个箭头去掉」: text-only toggle — no chevron glyph, the hover
+           background + aria state carry the affordance. -->
       <h2 class="detail-title" id="detail-title">
         <button
           class="detail-title-toggle"
@@ -216,7 +220,6 @@ function onToggleHeadInfo(): void {
           :aria-label="t('detail.headToggleAria')"
           @click="onToggleHeadInfo"
         >
-          <AppIcon name="chev-right" class="icon-sm chev" />
           <span class="detail-title-text">{{ title }}</span>
         </button>
       </h2>

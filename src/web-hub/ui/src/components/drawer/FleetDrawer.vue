@@ -94,9 +94,11 @@ export function useFleetDrawerOpen(mode: Readonly<Ref<FleetDrawerMode>>): FleetD
  *    DashboardView 的 defaultPrevented 守卫是双保险。
  * 3. Esc 规则链:非 Escape / isComposing / defaultPrevented / 目标是 input|textarea|select
  *    ⇒ 不处理(与 DashboardView.vue 的判定一致)。
- * 4. pointerdown(仅 overlay):落在抽屉内部或 `[aria-controls="fleet-drawer"]`(摘要行按钮)
- *    上 ⇒ 忽略,避免「先关闭再被重新打开」;否则关闭。fullscreen 占满全屏,没有「外部」。
- * 5. 焦点:非 docked 打开时移到抽屉的关闭按钮;关闭时还给摘要行按钮,不在 DOM 则还给主区
+ * 4. pointerdown(仅 overlay):落在抽屉内部或 `[aria-controls="fleet-drawer"]`(悬浮开合
+ *    按钮,2026-10 起为右缘竖排 tab —— 虽然打开时被抽屉盖住,防御性保留这条豁免)上 ⇒ 忽略,
+ *    避免「先关闭再被重新打开」;否则关闭。fullscreen 占满全屏,没有「外部」。
+ * 5. 焦点:非 docked 打开时移到抽屉的关闭按钮;关闭时还给开合按钮(悬浮 tab),不在 DOM
+ *    则还给主区
  *    `#transcript`。docked 开合不动焦点。
  *
  * 内容区:选中 run 时是 RunHeader + RunTranscript(各模式都只显示其一,fullscreen 的

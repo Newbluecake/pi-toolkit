@@ -75,9 +75,10 @@
 
 /* 2026-10 (user request 「红框部分支持收起，点击标题展开」): the title doubles as the disclosure
  * toggle for the info block below (`.detail-head-info`). The button carries the clamp +
- * ellipsis so the old two-line/one-line title truncation survives verbatim; the leading
- * chevron uses the same rotate-on-open grammar as `.session-sum`/`.todo-sum`/`.wt-sum`
- * (chev-right → 90° = expanded). The h2 keeps `id="detail-title"` (the detail region's
+ * ellipsis so the old two-line/one-line title truncation survives verbatim. 2026-10 (user
+ * request 「标题那个箭头我感觉可以去掉」): the leading chevron glyph and its rotate-on-open
+ * rules are GONE — the toggle is text-only; the hover background + aria-expanded carry the
+ * disclosure affordance. The h2 keeps `id="detail-title"` (the detail region's
  * aria-labelledby target) — see DetailHeader.vue. */
 .detail-title-toggle {
   display: inline-flex;
@@ -100,16 +101,6 @@
 
 .detail-title-toggle:hover {
   background: var(--c-surface-2);
-}
-
-.detail-title-toggle .chev {
-  flex: none;
-  color: var(--c-text-3);
-  transition: transform var(--dur-base) var(--ease-out);
-}
-
-.detail-title-toggle[aria-expanded="true"] .chev {
-  transform: rotate(90deg);
 }
 
 .detail-title-text {
@@ -300,9 +291,18 @@
 }
 
 @media (min-width: 768px) {
+  /* 2026-10 (user request 「标题应该尽量展示完整」, 1699px 现场实测): 单行档彻底放弃
+   * -webkit-box clamp —— 被 clamp 的 -webkit-box 在 `flex: 0 1 auto` 链里 intrinsic
+   * (max-content) 宽度塌缩(1352px 的 titlebar 里标题只量出 320px,状态 pill 右侧大片
+   * 空白却在省略)。改用普通一行省略:block + nowrap + ellipsis 让标题先吃满自身文本宽,
+   * bar 真正满了才收缩 —— pill/chip 是 nowrap 且未设 min-width:0,自动最小尺寸(自身
+   * 文本宽)保住不下限,标题先让位。手机(<768px)保留下方的两行 clamp。 */
   .detail-title-text {
-    -webkit-line-clamp: 1;
-    line-clamp: 1;
+    display: block;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
   }
 
   .detail-head {
@@ -333,8 +333,13 @@
   }
 
   .detail-title-text {
-    -webkit-line-clamp: 1;
-    line-clamp: 1;
+    /* 单行档(横屏矮带)同 ≥768px 的普通一行省略 —— 同样不吃 -webkit-box 的 intrinsic
+     * 塌缩亏(见上方 ≥768px 块的注释)。 */
+    display: block;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
   }
 }
 

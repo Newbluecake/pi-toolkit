@@ -331,6 +331,48 @@ describe("summary-row touch target parity (verify:detail-header-cost-merge P1 �
   });
 });
 
+// 2026-10 (user request 「标题应该尽量展示完整」, 1699px 现场实测): `.detail-title-text` 的
+// 单行档必须用普通一行省略,而不是 -webkit-box line clamp —— 被 clamp 的 -webkit-box 在
+// titlebar 的 flex 链里 intrinsic(max-content)宽度塌缩(1352px 的 bar 里标题只量出
+// 320px,状态 pill 右侧大片空白却在省略)。组件挂载看不到 CSS —— 与上方 summary-row
+// parity 套件同样直接从真样式表断言。
+describe("title truncation — single-line tiers use plain ellipsis (2026-10 「标题应该尽量展示完整」)", () => {
+  const css = readFileSync(
+    resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/detail.css"),
+    "utf8",
+  );
+  const rule = (scoped: string, selector: string): string => {
+    const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`).exec(scoped);
+    return m?.[0] ?? "";
+  };
+  const mediaFrom = (atRule: string): string => {
+    const start = css.indexOf(atRule);
+    return start < 0 ? "" : css.slice(start);
+  };
+
+  it("base (phones) keeps the 2-line -webkit-box clamp", () => {
+    const r = rule(css, ".detail-title-text");
+    expect(r).toMatch(/display:\s*-webkit-box/);
+    expect(r).toMatch(/-webkit-line-clamp:\s*2/);
+  });
+
+  it("≥768px: block + nowrap + ellipsis with the clamp unset — the title takes its full text width and yields only when the bar is actually full", () => {
+    const r = rule(mediaFrom("@media (min-width: 768px)"), ".detail-title-text");
+    expect(r).toMatch(/display:\s*block/);
+    expect(r).toMatch(/white-space:\s*nowrap/);
+    expect(r).toMatch(/text-overflow:\s*ellipsis/);
+    expect(r).toMatch(/-webkit-line-clamp:\s*unset/);
+    expect(r).not.toMatch(/line-clamp:\s*1\b/);
+  });
+
+  it("the landscape (≤500px height) single-line tier also drops the clamp", () => {
+    const r = rule(mediaFrom("@media (orientation: landscape) and (max-height: 500px)"), ".detail-title-text");
+    expect(r).toMatch(/white-space:\s*nowrap/);
+    expect(r).toMatch(/text-overflow:\s*ellipsis/);
+    expect(r).not.toMatch(/line-clamp:\s*1\b/);
+  });
+});
+
 import { computed } from "vue";
 import { SIDEBAR_DRAWER } from "../../../src/web-hub/ui/src/components/shell/sidebarDrawer.js";
 

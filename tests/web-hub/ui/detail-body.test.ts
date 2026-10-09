@@ -54,7 +54,7 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     expect(wrapper.findComponent({ name: "Transcript" }).exists()).toBe(true);
   });
 
-  it("renders the fleet summary bar when the agent has subagent rows", async () => {
+  it("renders the floating fleet toggle when the agent has subagent rows", async () => {
     const agent = agentWith(
       [],
       [
@@ -73,12 +73,15 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
     const bar = wrapper.find(".fleet-summary-bar");
     expect(bar.exists()).toBe(true);
-    // 摘要行只有聚合计数(行名在抽屉里的树上 —— fleet-tree.test.ts 的职责)
-    expect(bar.text()).toContain("1 running");
+    // 2026-10 悬浮化:可见面只剩面板名 + 计数徽标(行名在抽屉里的树上 —— fleet-tree.test.ts
+    // 的职责);聚合计数(running/成本)进 aria-label,不再是可见文本
+    expect(bar.text()).toContain("Subagents");
+    expect(bar.get(".fab-count").text()).toBe("1");
     expect(bar.attributes("aria-controls")).toBe("fleet-drawer");
+    expect(bar.attributes("aria-label")).toContain("1 running");
   });
 
-  it("renders no fleet summary bar when there are no subagent rows", async () => {
+  it("renders no fleet toggle when there are no subagent rows", async () => {
     const agent = agentWith([]);
     const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(false);

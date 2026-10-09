@@ -2,30 +2,55 @@
  * fleet 树 + 摘要行样式(ui-design.md §5.3, §6.4/§6.6;fleet-drawer plan v2 §6.3 — F6)。
  * `.tree`/`.run` 行样式从 `docs/dev/web-hub/ui-mockups/app.css` 原样移植(FleetTree.vue 渲染
  * 同样的标记)。F6 起浮层机制删除:`.fleet` 面板和 `.tree-scroll` 的 absolute 浮层规则随
- * FleetPanel.vue 一起移除 —— 摘要行是常驻文档流的 `.fleet-summary-bar` 按钮,树本体在
- * 右侧抽屉里(`.tree-scroll` 改为抽屉内的静态滚动容器,规则在 drawer.css)。本文件由
- * FleetTree.vue / FleetSummaryBar.vue 引入。
+ * FleetPanel.vue 一起移除 —— 入口是悬浮竖排的 `.fleet-summary-bar` 按钮(2026-10 用户现场
+ * 要求,见下),树本体在右侧抽屉里(`.tree-scroll` 是抽屉内的静态滚动容器,规则在
+ * drawer.css)。本文件由 FleetTree.vue / FleetSummaryBar.vue 引入。
  *
  * `.run[data-st="…"]` 状态色规则保持在本文件(见下),与 P3 的 primitives.css 互不依赖。
  */
 
-/* §6.3: 摘要行 —— 常驻文档流的一行按钮(原 `.fleet > summary.panel-head`)。 */
+/* §6.3(2026-10 修订,用户现场要求「整个子 Agent 按钮放到右侧居中作为悬浮展开按钮」):
+ * 摘要入口从常驻文档流的全宽行改为悬浮竖排 tab —— absolute 钉在 `.detail-body`
+ * (detail.css 已 `position:relative`,即主会话 transcript 列)右缘、垂直居中,彻底退出
+ * 文档流(transcript 吃回原来那一行高度)。
+ *
+ * 定位决策(逐档,与 drawer.css 的三模式对齐):
+ *  - 锚点选 `.detail-body` 而不是 `.detail`/`.detail-split`:按钮永远留在主栏列内,
+ *    不可能盖到左侧 agents 侧栏;composer(`.dock`)是 `.detail-body` 下一档的兄弟节点,
+ *    top:50% 只在 transcript 区内取中,纵向够不到 composer。
+ *  - docked(≥1280)且抽屉打开:drawer.css 沿用 F6 规则把按钮整条隐藏(抽屉本身就是
+ *    常驻视图,× 关闭)—— 悬浮按钮不与常驻抽屉并排抢位。关闭时按钮贴主栏右缘,
+ *    指向即将展开的抽屉。
+ *  - overlay(768–1279)/fullscreen(≤767)打开时:抽屉 z-index 30/40 直接盖住按钮
+ *    (本按钮 z-index 5),抽屉自带 ×/Esc/外点关闭,按钮无需也不应可见。
+ *  - 横向让出滚动条水槽:coarse 档(触屏,overlay 滚动条 0 宽)贴边 8px;fine 档让
+ *    20px,清空经典滚动条(≤~17px),不遮 transcript 的滚动条。
+ *  - z-index 5:高于 transcript 内容(z-auto),低于抽屉 overlay(30)/fullscreen(40)。 */
 .fleet-summary-bar {
-  flex: none;
+  position: absolute;
+  top: 50%;
+  right: var(--sp-2);
+  z-index: 5;
+  transform: translateY(-50%);
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: var(--sp-2);
-  width: 100%;
   min-height: 44px;
-  padding: 0 var(--sp-4);
-  border: 0;
-  border-bottom: 1px solid var(--c-border);
+  padding: var(--sp-3) 5px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
   background: var(--c-surface);
+  box-shadow: var(--shadow-2);
   color: var(--c-text);
-  font-size: var(--fs-sm);
   cursor: pointer;
   user-select: none;
-  text-align: left;
+}
+
+@media (pointer: fine) {
+  .fleet-summary-bar {
+    right: calc(var(--sp-3) + var(--sp-2));
+  }
 }
 
 .fleet-summary-bar:hover {
@@ -41,16 +66,20 @@
   transform: rotate(90deg);
 }
 
-.panel-title {
+/* 竖排面板名:writing-mode: vertical-rl —— CJK 直立、拉丁侧转,中英都只占一列宽。 */
+.fleet-summary-bar .panel-title {
+  writing-mode: vertical-rl;
+  font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
+  letter-spacing: 0.05em;
 }
 
-.panel-stats {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  color: var(--c-text-3);
-  font-size: var(--fs-xs);
+/* 计数徽标:复用 `.pill`/`[data-st]` 语义(primitives.css)—— running>0 时 running 色
+ * 软底 + 呼吸点(`.dot` 的脉冲在 prefers-reduced-motion 下由构建期 motion 改写关掉),
+ * 否则 idle 软底纯计数。聚合计数(running/总数/成本)全量在按钮 aria-label 里。 */
+.fleet-summary-bar .fab-count {
+  gap: 4px;
+  padding: 1px 6px;
 }
 
 .tree,
@@ -174,7 +203,7 @@ details[open] > summary.run .chev {
   color: inherit;
   font: inherit;
   /* UA 对 button 默认 text-align:center,会继承给 <b> —— 短 run 名在宽 name 列里被居中
-   * (2026-10-08 现场反馈);与 .fleet-summary-bar 同样显式左对齐。 */
+   * (2026-10-08 现场反馈);显式左对齐。 */
   text-align: left;
   cursor: pointer;
 }
@@ -334,7 +363,10 @@ details[open] > summary.run .chev {
 }
 
 @media (pointer: coarse) {
+  /* 悬浮 tab 自身的 44×44 命中盒(shell-touch-targets-44px 量的是按钮自身 rect;
+   * fine 档保持窄 tab,粗指针档补足 44px 宽)。 */
   .fleet-summary-bar {
+    min-width: 44px;
     min-height: 44px;
   }
 }

@@ -8,6 +8,8 @@
  *  - pref absent/invalid ⇒ EXPANDED, byte-identical rows (the pre-feature default, fail-open);
  *  - the title button toggles: click collapses (rows not rendered) + persists "1"; click again
  *    expands + persists "0"; aria-expanded/aria-controls follow;
+ *  - 2026-10 (user request 「标题那个箭头我感觉可以去掉」): the toggle is TEXT-ONLY — no
+ *    chevron glyph (no svg at all) inside `.detail-title-toggle`;
  *  - pref "1" at mount ⇒ collapsed without any interaction;
  *  - other titlebar controls (back button, drawer toggle, managed stop button) never toggle;
  *  - a drag-select over the title (non-empty window selection) reads as a selection, not a toggle;
@@ -191,6 +193,10 @@ describe("DetailHeader.vue — title-toggle collapse (2026-10 「红框部分支
     const h2 = wrapper.get("h2#detail-title");
     expect(h2.text()).toBe("web-hub Vue rewrite");
     expect(btn.find(".detail-title-text").text()).toBe("web-hub Vue rewrite");
+    // 2026-10 「标题那个箭头去掉」: the disclosure affordance is hover background + aria
+    // state only — no chevron glyph (no svg at all) inside the toggle.
+    expect(btn.find(".chev").exists()).toBe(false);
+    expect(btn.find("svg").exists()).toBe(false);
   });
 
   it("invalid stored values fail open to expanded", () => {
