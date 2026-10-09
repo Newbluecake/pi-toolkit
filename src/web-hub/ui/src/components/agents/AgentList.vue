@@ -28,14 +28,23 @@
   `spawns` slot render as `SpawnRow` placeholders above the list (also with 0 agents); a local,
   memory-only dismissed set powers their 「关闭」. No dedicated result UI for `/new`: one inline
   ok/err line (same convention as `FleetActions.vue`'s `note`), not a toast.
+
+  Rename entry (web-hub-rename plan): `RenameButton.vue`, a sibling of `AgentCard` exactly like
+  `RemoveButton` below — `toRow`'s `rename` field precomputes `@logic/control.js`'s
+  `renameEnabled()` gate (hub `cmd.v1` AND agent card `control` AND agent live AND not mid-
+  restore AND the agent's `commands` slot present) plus the current raw session name off the
+  injected hub state (the frozen `AgentCardView.sessionLabel` is a localized placeholder-or-name
+  string, not usable as an edit prefill).
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { renameEnabled } from "../../logic/control.js";
 import {
   newSessionActions,
   pendingRows,
+  restoringKeys,
   spawnAvailability,
   spawnDeniedKey,
   type NewSessionAction,
@@ -52,6 +61,7 @@ import SessionHistoryDialog from "../spawn/SessionHistoryDialog.vue";
 import SpawnRow from "../spawn/SpawnRow.vue";
 import AgentCard from "./AgentCard.vue";
 import RemoveButton from "./RemoveButton.vue";
+import RenameButton from "./RenameButton.vue";
 
 const props = defineProps<AgentListProps>();
 const emit = defineEmits<AgentListEmits>();
@@ -310,11 +320,40 @@ const spawnRows = computed(() =>
 interface AgentRow {
   readonly card: AgentCardView;
   readonly target: ReturnType<typeof removalTargetForAgent>;
+  readonly rename: { readonly enabled: boolean; readonly name: string };
 }
+
+/** web-hub-rename plan: same enable formula as `AgentDetail.vue`'s `controlEnabled` +
+ *  `commandsEnabled` (duplicated, not imported — that file is outside this package's exclusive
+ *  `components/agents/**` scope), evaluated against the raw `AgentState` this list already
+ *  injects for `removalTargetForAgent`/`managedFor`. */
+function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string } {
+  const agent = hub?.state.value.agents.get(c.key) as
+    | {
+        down?: unknown;
+        card?: { control?: unknown; state?: unknown };
+        session?: { name?: unknown };
+        commands?: unknown;
+      }
+    | undefined;
+  const cardRaw = agent?.card ?? {};
+  const enabled = renameEnabled({
+    hubControl: hub?.state.value.control === true,
+    controlPresent: hub?.control !== undefined,
+    cardControl: cardRaw.control === true,
+    agentLive: agent !== undefined && agent.down !== true && cardRaw.state !== "stale",
+    restoring: restoringKeys(hub?.state.value.spawns ?? null).has(c.key),
+    hasCommandsSlot: Array.isArray(agent?.commands),
+  });
+  const rawName = agent?.session?.name;
+  return { enabled, name: typeof rawName === "string" ? rawName : "" };
+}
+
 function toRow(c: AgentCardView): AgentRow {
   return {
     card: c,
     target: removalTargetForAgent(hub?.state.value.agents.get(c.key), hub?.state.value.spawns ?? null),
+    rename: renameInfoFor(c),
   };
 }
 const liveRows = computed<AgentRow[]>(() => live.value.map(toRow));
@@ -420,8 +459,14 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
       </template>
     </EmptyState>
     <ul v-else class="agent-list">
-      <li v-for="row in liveRows" :key="row.card.key" class="agent-item" :class="{ removable: !!row.target }">
+      <li
+        v-for="row in liveRows"
+        :key="row.card.key"
+        class="agent-item"
+        :class="{ removable: !!row.target, renamable: row.rename.enabled }"
+      >
         <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
+        <RenameButton v-if="row.rename.enabled" :agent-key="row.card.key" :name="row.rename.name" />
         <RemoveButton
           v-if="row.target"
           :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"
@@ -430,8 +475,14 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
         />
       </li>
       <li v-if="staleOrDown.length > 0" class="agent-group">{{ t("agents.staleOffline") }}</li>
-      <li v-for="row in staleRows" :key="row.card.key" class="agent-item" :class="{ removable: !!row.target }">
+      <li
+        v-for="row in staleRows"
+        :key="row.card.key"
+        class="agent-item"
+        :class="{ removable: !!row.target, renamable: row.rename.enabled }"
+      >
         <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
+        <RenameButton v-if="row.rename.enabled" :agent-key="row.card.key" :name="row.rename.name" />
         <RemoveButton
           v-if="row.target"
           :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"

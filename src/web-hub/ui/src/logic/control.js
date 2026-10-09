@@ -804,3 +804,46 @@ export function validRecallText(text) {
   }
   return bytes <= RECALL_TEXT_MAX_BYTES;
 }
+
+/**
+ * web-hub-rename plan: session-rename reuses the EXISTING `command` op (`runCommand(agentKey,
+ * "name", newName)`) — the agent's `BUILTIN_BRIDGE_NAMES` already ships a `/name` row
+ * (`builtin-bridge.ts`'s `case "name"`, policy `allow` whenever args are non-empty) that calls
+ * `pi.setSessionName` and lets pi's own `session_info_changed` event refresh every tab's
+ * `session` frame — no protocol change, no new cap. This gate mirrors `AgentDetail.vue`'s
+ * `controlEnabled` (hub cap ∧ card cap ∧ agent live ∧ not mid-restore) PLUS the `commands` slot
+ * check `commandsEnabled` adds (§7.7: command mode needs `command.v1`, not just `cmd.v1`) —
+ * duplicated here (rather than imported from a shared helper) because `AgentDetail.vue` is a
+ * `components/detail/**` file outside this package's exclusive scope.
+ * @param {{ hubControl: boolean, controlPresent: boolean, cardControl: boolean,
+ *   agentLive: boolean, restoring: boolean, hasCommandsSlot: boolean }} input
+ * @returns {boolean}
+ */
+export function renameEnabled(input) {
+  return (
+    input.controlPresent &&
+    input.hubControl &&
+    input.cardControl &&
+    input.agentLive &&
+    !input.restoring &&
+    input.hasCommandsSlot
+  );
+}
+
+/** Wire/UI-agreed cap (arbitrary but generous — pi itself imposes no session-name length limit;
+ *  this only keeps the sidebar/tab chrome from being blown out by a pathological name). */
+export const RENAME_MAX_CHARS = 120;
+
+/**
+ * Trim + length-cap a draft rename (UTF-16 code-unit slice — good enough for a display name;
+ * the 120 cap is generous enough that mid-codepoint truncation is not a realistic concern).
+ * Returns `null` when the result is empty OR unchanged from `current` — either way the caller
+ * must not send a `command` op (`/name` with empty args is `E_BAD_REQUEST`; resending the
+ * unchanged name is just wasted round-trip, not a hard error, but still pointless UX).
+ * @param {unknown} draft @param {string} current
+ * @returns {string | null}
+ */
+export function sanitizeRenameInput(draft, current) {
+  const trimmed = (typeof draft === "string" ? draft : "").trim().slice(0, RENAME_MAX_CHARS);
+  return trimmed === "" || trimmed === current ? null : trimmed;
+}

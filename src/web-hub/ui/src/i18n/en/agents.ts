@@ -35,6 +35,12 @@ const agents = {
   "removeErr.network": "network error",
   // Deep-link refresh flicker fix: pre-first-`agents`-snapshot loading state (AgentList).
   loadingTitle: "Connecting…",
+  // --- web-hub-rename plan: AgentCard's inline rename (reuses the existing `command` op) ---
+  renameAria: "Rename this session",
+  renameInputAria: "New session name",
+  renameSaveAria: "Save name",
+  renameCancelAria: "Cancel rename",
+  renameFailed: "Rename failed: {reason}",
 } satisfies Record<string, string>;
 
 export default agents;

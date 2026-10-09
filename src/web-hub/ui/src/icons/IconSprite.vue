@@ -59,6 +59,11 @@
       <rect x="7" y="7" width="10" height="10" rx="2" />
       <path d="M10 3.5V7M14 3.5V7M10 17v3.5M14 17v3.5M3.5 10H7M3.5 14H7M17 10h3.5M17 14h3.5" />
     </symbol>
+    <!-- pencil/"edit" (web-hub-rename plan): same feather-style stroke glyph family as the
+         surrounding symbols, no fill. -->
+    <symbol id="i-edit" viewBox="0 0 24 24">
+      <path d="M17 3a2.1 2.1 0 0 1 3 3L8.5 17.5 4 19l1.5-4.5L17 3z" />
+    </symbol>
     <symbol id="i-eye" viewBox="0 0 24 24">
       <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
       <circle cx="12" cy="12" r="2.8" />

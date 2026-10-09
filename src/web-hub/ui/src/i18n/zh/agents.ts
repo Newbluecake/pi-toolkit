@@ -35,6 +35,11 @@ const agents = {
   "removeErr.unsupported": "hub 版本不支持，请刷新页面",
   "removeErr.network": "网络错误",
   loadingTitle: "正在连接…",
+  renameAria: "重命名此会话",
+  renameInputAria: "新的会话名称",
+  renameSaveAria: "保存名称",
+  renameCancelAria: "取消重命名",
+  renameFailed: "重命名失败：{reason}",
 } satisfies Messages<typeof en>;
 
 export default agents;

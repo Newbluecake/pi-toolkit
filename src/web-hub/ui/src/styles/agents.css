@@ -548,3 +548,112 @@
   background: var(--c-warning-soft);
   color: var(--c-warning-text);
 }
+
+/* ---------------------------------------------------------------- rename entry (web-hub-
+ * rename plan): `RenameButton.vue` rendered as a sibling of `AgentCard` (same "a button can't
+ * nest inside AgentCard's `<a>`" rule as `.remove-wrap` above) — placed at the opposite
+ * (bottom-left) corner so a card that is BOTH renamable and removable (a live, web-managed
+ * session) never overlaps the two affordances. `.renamable` reserves room exactly like
+ * `.removable` does, mirrored to the left edge. */
+.renamable > .agent-card {
+  padding-left: calc(60px * var(--fs-scale, 1));
+}
+
+.agent-item .rename-wrap {
+  position: absolute;
+  left: var(--sp-2);
+  bottom: 8px;
+  z-index: 2;
+}
+
+.rename-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  color: var(--c-text-3);
+  opacity: 1;
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+/* AgentList context, hover-capable pointers: hidden until the card (or the button itself, for
+ * keyboard focus) is interacted with — same visibility contract as `.remove-btn`. Once editing
+ * (`.is-editing`, the form is rendered instead of the bare button) the wrap is always visible,
+ * regardless of hover — it never hides itself out from under an active edit. */
+@media (hover: hover) {
+  .agent-item .rename-wrap:not(.is-editing) .rename-btn {
+    opacity: 0;
+  }
+
+  .agent-item:hover .rename-wrap .rename-btn,
+  .agent-item:focus-within .rename-wrap .rename-btn,
+  .rename-btn:focus-visible {
+    opacity: 1;
+  }
+}
+
+@media (hover: none) {
+  .rename-btn {
+    opacity: 1;
+  }
+}
+
+@media (pointer: coarse) {
+  .rename-btn {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.rename-form {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-pill);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+}
+
+.rename-input {
+  width: 180px;
+  max-width: 44vw;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 var(--sp-2);
+  border: none;
+  background: transparent;
+  font-size: var(--fs-sm);
+}
+
+.rename-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.rename-note {
+  margin: 0;
+  max-width: 220px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-xs);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+  color: var(--c-danger);
+  font-size: var(--fs-2xs);
+  overflow-wrap: anywhere;
+}
+
+@media (pointer: coarse) {
+  .rename-input {
+    min-height: 44px;
+    height: 44px;
+  }
+}

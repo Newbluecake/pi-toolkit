@@ -1196,3 +1196,266 @@ describe("AgentList.vue — history entries (session-history plan §4.7.2)", () 
     wrapper.unmount();
   });
 });
+
+/**
+ * web-hub-rename plan: `RenameButton.vue`'s pencil (sibling of `AgentCard`, same "a button
+ * can't nest inside AgentCard's `<a>`" rule `RemoveButton` already established). The agent-side
+ * half of this feature is ALREADY shipped (`builtin-bridge.ts`'s `/name` row over the existing
+ * `command` op) — these tests only cover the new UI: visibility gating
+ * (`@logic/control.js`'s `renameEnabled`), the inline edit flow, and that a successful save
+ * calls `runCommand(agentKey, "name", trimmed)` exactly like `ModelSwitcher`/`NewSessionMenu`
+ * already call `runCommand(agentKey, "model"/"new", ...)`.
+ */
+describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
+  function renamableAgent(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      key: "a1",
+      down: false,
+      card: { control: true, state: "live", cwd: "/home/u/proj" },
+      commands: [], // presence alone ⇒ command.v1 (hasCommandsSlot)
+      session: { name: "old name" },
+      ...over,
+    };
+  }
+
+  function mountWithAgent(
+    agentOver: Record<string, unknown> = {},
+    opts: { hubControl?: boolean; control?: ControlHandle; spawns?: SpawnsPayload | null } = {},
+  ) {
+    const agents = new Map([["a1", renamableAgent(agentOver)]]);
+    const hub: HubHandle = {
+      state: ref({
+        control: opts.hubControl ?? true,
+        agents,
+        spawns: opts.spawns ?? null,
+      } as unknown as HubState),
+      dispatch: () => {},
+      ...(opts.control ? { control: opts.control } : {}),
+    };
+    const wrapper = mount(AgentList, {
+      props: { cards: [card({ key: "a1" })], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    return { wrapper, hub };
+  }
+
+  it("fully capable agent ⇒ the pencil button renders", () => {
+    const { wrapper } = mountWithAgent({}, { control: fakeControlHandle() });
+    expect(wrapper.find(".rename-btn").exists()).toBe(true);
+  });
+
+  it("no hub.control (cmd.v1 never negotiated) ⇒ hidden", () => {
+    const { wrapper } = mountWithAgent();
+    expect(wrapper.find(".rename-btn").exists()).toBe(false);
+  });
+
+  it("hub.state.control === false ⇒ hidden even with a control handle present", () => {
+    const { wrapper } = mountWithAgent({}, { control: fakeControlHandle(), hubControl: false });
+    expect(wrapper.find(".rename-btn").exists()).toBe(false);
+  });
+
+  it("card.control !== true (agent-side control off) ⇒ hidden", () => {
+    const { wrapper } = mountWithAgent({ card: { control: false, state: "live" } }, { control: fakeControlHandle() });
+    expect(wrapper.find(".rename-btn").exists()).toBe(false);
+  });
+
+  it("no `commands` slot (agent lacks command.v1) ⇒ hidden", () => {
+    const { wrapper } = mountWithAgent({ commands: undefined }, { control: fakeControlHandle() });
+    expect(wrapper.find(".rename-btn").exists()).toBe(false);
+  });
+
+  it("down / stale agent ⇒ hidden (offline sessions are out of scope — resume first)", () => {
+    const down = mountWithAgent({ down: true }, { control: fakeControlHandle() });
+    expect(down.wrapper.find(".rename-btn").exists()).toBe(false);
+    const stale = mountWithAgent({ card: { control: true, state: "stale" } }, { control: fakeControlHandle() });
+    expect(stale.wrapper.find(".rename-btn").exists()).toBe(false);
+  });
+
+  it("old key of an in-flight restore ⇒ hidden (mirrors AgentDetail.vue's controlEnabled)", () => {
+    const spawns: SpawnsPayload = {
+      items: [
+        {
+          spawnId: "s",
+          state: "starting",
+          createdAt: 1,
+          updatedAt: 2,
+          cwdLabel: "p",
+          restore: { phase: "forking", attempt: 1, prevAgentKey: "a1" },
+        } as unknown as SpawnRecordPublic,
+      ],
+      active: 1,
+      max: 4,
+    };
+    const { wrapper } = mountWithAgent({}, { control: fakeControlHandle(), spawns });
+    expect(wrapper.find(".rename-btn").exists()).toBe(false);
+  });
+
+  it("the button is never nested inside the card's <a>", () => {
+    const { wrapper } = mountWithAgent({}, { control: fakeControlHandle() });
+    expect(wrapper.find("a.agent-card .rename-btn").exists()).toBe(false);
+    expect(wrapper.find("li.agent-item > .rename-wrap > .rename-btn").exists()).toBe(true);
+  });
+
+  it("click opens inline edit prefilled with the CURRENT raw name, input focused+selected", async () => {
+    const { wrapper } = mountWithAgent({}, { control: fakeControlHandle() });
+    await wrapper.get(".rename-btn").trigger("click");
+    const input = wrapper.get<HTMLInputElement>(".rename-input");
+    expect(input.element.value).toBe("old name");
+    expect(wrapper.find(".rename-btn").exists()).toBe(false); // pencil replaced by the editor
+  });
+
+  it("no session name yet ⇒ edit opens with an EMPTY input, not the card's localized placeholder text", async () => {
+    const { wrapper } = mountWithAgent({ session: {} }, { control: fakeControlHandle() });
+    await wrapper.get(".rename-btn").trigger("click");
+    expect(wrapper.get<HTMLInputElement>(".rename-input").element.value).toBe("");
+  });
+
+  it("Enter saves: calls runCommand(agentKey, 'name', trimmed) and closes the editor on success", async () => {
+    let captured: [string, string, string, unknown] | undefined;
+    const control = fakeControlHandle({
+      runCommand: async (agentKey, name, args, opts) => {
+        captured = [agentKey, name, args, opts];
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("  new name  ");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(captured).toEqual(["a1", "name", "new name", undefined]);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+    expect(wrapper.find(".rename-btn").exists()).toBe(true); // back to the idle pencil
+  });
+
+  it("clicking the Save (check) button also saves, even though the input never lost focus", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("new name");
+    await wrapper.get(".rename-save").trigger("click");
+    await flushPromises();
+    expect(called).toBe(1);
+  });
+
+  it("Esc cancels without sending anything", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("ignored");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Escape" });
+    expect(called).toBe(0);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+    expect(wrapper.find(".rename-btn").exists()).toBe(true);
+  });
+
+  it("blur (focus leaving the whole editor) cancels without sending — clicking Cancel never fires a real blur first", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("ignored");
+    await wrapper.get(".rename-input").trigger("blur");
+    expect(called).toBe(0);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+  });
+
+  it("the Cancel (x) button cancels without sending", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("ignored");
+    await wrapper.get(".rename-cancel").trigger("click");
+    expect(called).toBe(0);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+  });
+
+  it("empty input on Enter ⇒ local no-op cancel, no wire call (pi's own /name rejects empty args)", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("   ");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Enter" });
+    expect(called).toBe(0);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+  });
+
+  it("unchanged input on Enter ⇒ local no-op cancel, no wire call", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Enter" }); // draft === current name
+    expect(called).toBe(0);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+  });
+
+  it("a failed rename shows an inline error and keeps the editor open for retry", async () => {
+    const control = fakeControlHandle({
+      runCommand: async () => ({ ok: false, error: "E_COMMAND_DENIED", message: "denied by policy" }),
+    });
+    const { wrapper } = mountWithAgent({}, { control });
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("new name");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(wrapper.get(".rename-note").text()).toBe("Rename failed: denied by policy");
+    expect(wrapper.find(".rename-input").exists()).toBe(true); // stays open for retry
+  });
+
+  it("a live, web-managed card can show BOTH rename and remove buttons without overlap/conflict", () => {
+    const spawns: SpawnsPayload = {
+      items: [
+        {
+          spawnId: "sp1",
+          state: "live",
+          agentKey: "a1",
+          createdAt: 1,
+          updatedAt: 2,
+          cwdLabel: "p",
+        } as unknown as SpawnRecordPublic,
+      ],
+      active: 1,
+      max: 4,
+    };
+    const { wrapper } = mountWithAgent({}, { control: fakeControlHandle(), spawns });
+    expect(wrapper.find(".rename-btn").exists()).toBe(true);
+    expect(wrapper.find(".remove-btn").exists()).toBe(true);
+    expect(wrapper.find("li.agent-item").classes()).toContain("renamable");
+    expect(wrapper.find("li.agent-item").classes()).toContain("removable");
+  });
+});

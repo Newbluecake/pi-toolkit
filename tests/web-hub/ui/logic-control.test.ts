@@ -792,3 +792,68 @@ describe("outcomeFromHttp / outcomeFromResponse / outcomeFromError (§6.2)", () 
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-rename plan: `renameEnabled` (the AgentCard pencil's visibility gate) and
+// `sanitizeRenameInput` (trim/cap/no-op detection before a `command` op is ever sent).
+// ---------------------------------------------------------------------------
+
+import { renameEnabled, sanitizeRenameInput, RENAME_MAX_CHARS } from "../../../src/web-hub/ui/src/logic/control.js";
+
+describe("renameEnabled (web-hub-rename plan)", () => {
+  const allOn = {
+    hubControl: true,
+    controlPresent: true,
+    cardControl: true,
+    agentLive: true,
+    restoring: false,
+    hasCommandsSlot: true,
+  };
+
+  it("true only when every gate passes", () => {
+    expect(renameEnabled(allOn)).toBe(true);
+  });
+
+  it.each([
+    ["hubControl", { ...allOn, hubControl: false }],
+    ["controlPresent", { ...allOn, controlPresent: false }],
+    ["cardControl", { ...allOn, cardControl: false }],
+    ["agentLive", { ...allOn, agentLive: false }],
+    ["hasCommandsSlot (no command.v1)", { ...allOn, hasCommandsSlot: false }],
+  ])("false when %s is unmet", (_label, input) => {
+    expect(renameEnabled(input)).toBe(false);
+  });
+
+  it("false while mid-restore even if every other gate is true", () => {
+    expect(renameEnabled({ ...allOn, restoring: true })).toBe(false);
+  });
+});
+
+describe("sanitizeRenameInput (web-hub-rename plan)", () => {
+  it("trims whitespace", () => {
+    expect(sanitizeRenameInput("  hello world  ", "")).toBe("hello world");
+  });
+
+  it("empty or whitespace-only ⇒ null (no wire call — pi's own /name rejects empty args)", () => {
+    expect(sanitizeRenameInput("", "old")).toBeNull();
+    expect(sanitizeRenameInput("   ", "old")).toBeNull();
+  });
+
+  it("unchanged (after trim) ⇒ null (no pointless round trip)", () => {
+    expect(sanitizeRenameInput("same name", "same name")).toBeNull();
+    expect(sanitizeRenameInput("  same name  ", "same name")).toBeNull();
+  });
+
+  it(`caps at RENAME_MAX_CHARS (${RENAME_MAX_CHARS})`, () => {
+    const long = "x".repeat(RENAME_MAX_CHARS + 50);
+    const got = sanitizeRenameInput(long, "");
+    expect(got).toHaveLength(RENAME_MAX_CHARS);
+    expect(got).toBe("x".repeat(RENAME_MAX_CHARS));
+  });
+
+  it("non-string draft (defensive) ⇒ null", () => {
+    expect(sanitizeRenameInput(undefined, "old")).toBeNull();
+    expect(sanitizeRenameInput(null, "old")).toBeNull();
+    expect(sanitizeRenameInput(42, "old")).toBeNull();
+  });
+});

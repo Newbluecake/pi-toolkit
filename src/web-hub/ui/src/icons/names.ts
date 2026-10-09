@@ -20,6 +20,7 @@ export type IconName =
   | "clock"
   | "copy"
   | "cpu"
+  | "edit"
   | "eye"
   | "file"
   | "folder"
@@ -65,6 +66,7 @@ export const ICON_NAMES: readonly IconName[] = [
   "clock",
   "copy",
   "cpu",
+  "edit",
   "eye",
   "file",
   "folder",
