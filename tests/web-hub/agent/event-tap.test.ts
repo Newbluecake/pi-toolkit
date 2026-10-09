@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ASK_USER_MARKER } from "../../../src/ask-user/channel-handler.js";
 import { createEventTap } from "../../../src/web-hub/agent/event-tap.js";
 import { LIMITS, type WireEvent } from "../../../src/web-hub/protocol/messages.js";
+import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 
 function harness() {
   const out: Array<{ e: WireEvent; droppable: boolean }> = [];
@@ -92,6 +93,183 @@ describe("event tap — message_update", () => {
     });
     fire(LIMITS.deltaCoalesceMs);
     expect(gets).toBe(0);
+  });
+});
+
+// ------------------------------------------------- exactly-once streaming content
+// pi-agent-core emits assistant `message_start` as a shallow copy of the live partial
+// (agent-loop.js "start" case: `emit({ type: "message_start", message: { ...partialMessage } })`)
+// whose `content` array pi-ai keeps mutating ahead of pi's awaited dispatch; the browser seeds
+// its streaming clone from the wire message_start and then applies every delta again. These
+// tests pin the fix: assistant message_start carries `content: []`, and the snapshot's
+// inflight message is accumulated from emitted payloads only.
+
+/** Minimal UI-reducer harness (same shape as tests/web-hub/ui/logic-state.test.ts). */
+function uiLoaded(historyExtra: Record<string, unknown> = {}) {
+  const card = {
+    agentKey: "A",
+    kind: "tui",
+    pid: 1,
+    cwd: "/tmp/p",
+    state: "live",
+    pluginVersion: "1.0.0",
+    outdated: false,
+    session: {
+      sessionId: "s1",
+      sessionFile: "/tmp/s1.jsonl",
+      cwd: "/tmp/p",
+      reason: "startup",
+      leafId: null,
+      mode: "tui",
+    },
+    prompts: [],
+  };
+  const frames: Array<{ event: string; data: any }> = [
+    { event: "hello", data: { clientId: "c1" } },
+    { event: "agents", data: [card] },
+    { event: "subscribing", data: { agentKey: "A", clientId: "c1" } },
+    { event: "subscribed", data: { agentKey: "A" } },
+    {
+      event: "history",
+      data: {
+        agentKey: "A",
+        entries: [],
+        tailMessages: [],
+        fromSeq: 0, // wire evs below start at seq 1
+        hasMore: false,
+        source: "file",
+        ...historyExtra,
+      },
+    },
+  ];
+  return frames.reduce((acc: any, m: any) => reduce(acc, m), initialState());
+}
+
+const uiAgent = (s: any): any => s.agents.get("A");
+
+/** Replay captured wire events (in order, seq 1..n) through the real UI reducer. */
+function replayWire(wire: Array<{ e: WireEvent }>, s = uiLoaded()): any {
+  return wire.reduce(
+    (acc: any, o: any, i: number) => reduce(acc, { event: "ev", data: { agentKey: "A", seq: i + 1, e: o.e } }),
+    s,
+  );
+}
+
+describe("event tap — exactly-once streaming (agent-loop shared-array race)", () => {
+  it("(a) content mutated into message_start is stripped on the wire; UI replay shows the delta once", () => {
+    const { tap, out, fire } = harness();
+    const live: { role: string; timestamp: number; content: Array<unknown> } = {
+      role: "assistant",
+      timestamp: 5,
+      content: [],
+    };
+    tap.handle({ type: "message_start", message: live });
+    // pi-ai's push stream already appended the first thinking chunk to the shared
+    // array by the time pi's awaited dispatch reaches our message_start observer.
+    live.content.push({ type: "thinking", thinking: "All" });
+    tap.handle({
+      type: "message_update",
+      message: live,
+      assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "All" },
+    });
+    tap.handle({
+      type: "message_update",
+      message: live,
+      assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: " nil-safe." },
+    });
+    fire(LIMITS.deltaCoalesceMs);
+    expect(out[0]!.e.type).toBe("message_start");
+    expect(out[0]!.e.message).toMatchObject({ role: "assistant", timestamp: 5 });
+    expect((out[0]!.e.message as { content: unknown[] }).content).toEqual([]);
+    // Replay the wire through the real reducer: "All" appears exactly once.
+    const streaming = uiAgent(replayWire(out)).streaming;
+    expect(streaming.content).toEqual([{ type: "thinking", thinking: "All nil-safe." }]);
+  });
+
+  it("(b) post-message_start mutations of the shared content array never reach the snapshot", () => {
+    const { tap, fire } = harness();
+    const live: { role: string; timestamp: number; content: Array<unknown> } = {
+      role: "assistant",
+      timestamp: 1,
+      content: [],
+    };
+    tap.handle({ type: "message_start", message: live });
+    tap.handle(delta("text_delta", 0, "Hel"));
+    fire(LIMITS.deltaCoalesceMs); // emitted
+    // pi mutates the shared array ahead of emission (deltas still in pi's queue)
+    live.content.push({ type: "text", text: "Hello world" });
+    tap.flush();
+    expect(tap.inflight()?.message?.content).toEqual([{ type: "text", text: "Hel" }]);
+  });
+
+  it("(b) snapshot mid-stream + later deltas reconstruct the text exactly once (UI reducer)", () => {
+    const { tap, out, fire } = harness();
+    tap.handle({ type: "message_start", message: { role: "assistant", timestamp: 1, content: [] } });
+    tap.handle(delta("text_delta", 0, "Hel"));
+    fire(LIMITS.deltaCoalesceMs); // snapshot point: flush → inflight (what snapshot_reply carries)
+    const snap = uiLoaded({ inflight: { tools: [], message: tap.inflight()!.message! } });
+    const consumed = out.length;
+    tap.handle(delta("text_delta", 0, "lo world"));
+    fire(LIMITS.deltaCoalesceMs);
+    tap.handle({
+      type: "message_update",
+      message: {},
+      assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "Hello world" },
+    });
+    const streaming = uiAgent(replayWire(out.slice(consumed), snap)).streaming;
+    expect(streaming.content).toEqual([{ type: "text", text: "Hello world" }]);
+  });
+
+  it("(c) end events replace the accumulated blocks (text_end content, toolcall_end toolCall)", () => {
+    const { tap, fire } = harness();
+    tap.handle({ type: "message_start", message: { role: "assistant", timestamp: 1, content: [] } });
+    tap.handle(delta("text_delta", 0, "draf"));
+    tap.handle(delta("toolcall_delta", 1, '{"a"'));
+    fire(LIMITS.deltaCoalesceMs);
+    tap.handle({
+      type: "message_update",
+      message: {},
+      assistantMessageEvent: {
+        type: "toolcall_end",
+        contentIndex: 1,
+        toolCall: { id: "c1", name: "bash", arguments: { a: 1 } },
+      },
+    });
+    tap.handle({
+      type: "message_update",
+      message: {},
+      assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "final text" },
+    });
+    expect(tap.inflight()?.message?.content).toEqual([
+      { type: "text", text: "final text" },
+      { type: "toolCall", id: "c1", name: "bash", arguments: { a: 1 } },
+    ]);
+    // agent_end drops the half-accumulated message entirely
+    tap.handle({ type: "agent_end" });
+    expect(tap.inflight()).toBeUndefined();
+  });
+
+  it("(d) non-assistant message_start keeps its content and never seeds the accumulator", () => {
+    const { tap, out } = harness();
+    tap.handle({ type: "message_start", message: { role: "user", timestamp: 3, content: "hi" } });
+    expect(out[0]!.e.message).toEqual({ role: "user", timestamp: 3, content: "hi" });
+    expect(tap.inflight()).toBeUndefined();
+    tap.handle({ type: "message_start", message: { role: "toolResult", timestamp: 4, toolCallId: "c" } });
+    expect((out[1]!.e.message as { role: string }).role).toBe("toolResult");
+    expect(tap.inflight()).toBeUndefined();
+  });
+
+  it("(e) accumulated blocks are capped at textTruncateBytes and flagged truncated", () => {
+    const { tap, fire } = harness();
+    tap.handle({ type: "message_start", message: { role: "assistant", timestamp: 1, content: [] } });
+    const chunk = "y".repeat(1024);
+    for (let i = 0; i < 40; i++) tap.handle(delta("text_delta", 0, chunk)); // 40 KiB
+    fire(LIMITS.deltaCoalesceMs);
+    for (let i = 0; i < 40; i++) tap.handle(delta("text_delta", 0, chunk)); // +40 KiB > 64 KiB
+    fire(LIMITS.deltaCoalesceMs);
+    const block = tap.inflight()?.message?.content?.[0] as { text: string; truncated?: boolean };
+    expect(Buffer.byteLength(block.text)).toBe(LIMITS.textTruncateBytes);
+    expect(block.truncated).toBe(true);
   });
 });
 
@@ -196,10 +374,12 @@ describe("event tap — recent / inflight / prompts / cost", () => {
   });
 
   it("inflight carries the streaming assistant message and clears on its message_end; cost accrues", () => {
-    const { tap } = harness();
+    const { tap, fire } = harness();
     tap.resetForSession(Number.NaN);
     expect(Number.isNaN(tap.costUsd())).toBe(true);
     tap.setBaseCost(1);
+    // NOTE: `content` here mimics pi's live partial whose shared array pi-ai already
+    // mutated ahead of the dispatch — the tap must NOT count it (see the race suite below).
     const streaming = { role: "assistant", timestamp: 5, content: [{ type: "text", text: "par" }] };
     tap.handle({ type: "message_start", message: streaming });
     tap.handle({
@@ -207,7 +387,10 @@ describe("event tap — recent / inflight / prompts / cost", () => {
       message: streaming,
       assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "t" },
     });
+    fire(LIMITS.deltaCoalesceMs);
     expect(tap.inflight()?.message).toMatchObject({ role: "assistant", timestamp: 5 });
+    // only the EMITTED delta — the pre-populated "par" never leaks into the snapshot
+    expect(tap.inflight()?.message?.content).toEqual([{ type: "text", text: "t" }]);
     tap.handle({ type: "message_end", message: { ...streaming, usage: { cost: { total: 0.5 } } } });
     expect(tap.inflight()).toBeUndefined();
     expect(tap.costUsd()).toBe(1.5);

@@ -7,6 +7,14 @@
  *    `partial`/`message`/`error` snapshots inside `assistantMessageEvent`: only
  *    the delta itself is forwarded (delta-only), and consecutive deltas of the
  *    same kind/contentIndex are coalesced for `LIMITS.deltaCoalesceMs` (50ms);
+ *  - assistant `message_start` goes out with `content: []`: pi-agent-core emits
+ *    it as a shallow copy of the live partial (agent-loop.js "start" case) whose
+ *    content array pi-ai keeps mutating ahead of pi's awaited dispatch, so any
+ *    content seen at projection time may not have had its delta emitted yet —
+ *    deltas (and the authoritative `message_end`) stay the ONLY content sources;
+ *  - the snapshot's `inflight().message` is reconstructed by the accumulator
+ *    (`inflight-accumulator.ts`) from exactly what this tap has emitted — never
+ *    from pi's live partial message reference;
  *  - `tool_execution_update` is latest-wins per toolCallId, flushed every
  *    `LIMITS.toolUpdateMs` (250ms) — the (growing) partial result is projected
  *    once per flush, not once per update;
@@ -19,6 +27,7 @@ import { LIMITS, type FORWARDED_EVENTS, type InflightState, type SnapshotReplyBo
 import type { WireEvent, WireMessage } from "../protocol/messages.js";
 import { truncateText } from "../protocol/keys.js";
 import { ASK_USER_MARKER } from "../../ask-user/channel-handler.js";
+import { createInflightAccumulator } from "./inflight-accumulator.js";
 
 export interface EventTap {
   handle(event: { type: string } & Record<string, unknown>): void;
@@ -72,7 +81,9 @@ export function createEventTap(
   const currentSeq = opts.currentSeq ?? (() => 0);
   const attributePrompt = opts.attributePrompt ?? ((event) => event);
   let recentRing: Array<{ seq: number; message: WireMessage }> = [];
-  let inflightMessage: unknown;
+  // Streaming-message reconstruction fed ONLY with the payloads emitted on the wire
+  // (see inflight-accumulator.ts for why pi's live partial can never be used).
+  const inflightAcc = createInflightAccumulator();
   const tools = new Map<string, InflightTool>();
   let promptStack: Array<{ kind: string; title?: string; since: number; dialogId?: string }> = [];
   let baseCost = 0;
@@ -102,6 +113,8 @@ export function createEventTap(
     pendingDeltas = [];
     for (const d of batch) {
       const t = truncateText(d.delta, LIMITS.textTruncateBytes);
+      // Accumulate exactly what goes on the wire ("about to emit at flush").
+      inflightAcc.apply({ type: d.type, contentIndex: d.contentIndex, delta: t.text });
       const ame: Record<string, unknown> = { type: d.type, contentIndex: d.contentIndex, delta: t.text };
       if (t.truncated) ame.truncated = true;
       emit({ type: "message_update", assistantMessageEvent: ame }, true);
@@ -159,6 +172,14 @@ export function createEventTap(
       if (typeof a.reason === "string") out.reason = a.reason;
     }
     if (flag.truncated) out.truncated = true;
+    // Accumulate exactly what goes on the wire (deltas were flushed above, so the
+    // order the accumulator sees matches the wire order).
+    inflightAcc.apply({
+      type,
+      contentIndex: contentIndex >= 0 ? contentIndex : undefined,
+      content: out.content,
+      toolCall: out.toolCall,
+    });
     emit({ type: "message_update", assistantMessageEvent: out }, false);
   };
 
@@ -166,8 +187,6 @@ export function createEventTap(
     try {
       const type = event.type;
       if (type === "message_update") {
-        // Keep a reference only (no property reads): the snapshot projects it lazily.
-        inflightMessage = event.message;
         onMessageUpdate(event);
         return;
       }
@@ -202,6 +221,8 @@ export function createEventTap(
       case "agent_start":
       case "agent_end":
       case "agent_settled":
+        // A finished agent loop never streams again — drop any half-accumulated message.
+        if (type === "agent_end") inflightAcc.reset();
         e = { type: type as ForwardedType };
         break;
       case "turn_start":
@@ -211,8 +232,20 @@ export function createEventTap(
         e = pick(type, event, ["turnIndex", "messageEntryId", "toolResultEntryIds"]);
         break;
       case "message_start": {
-        const message = projectMessage(event.message, flag);
-        if (message?.role === "assistant") inflightMessage = event.message;
+        // pi's assistant `message_start` is a shallow copy of the LIVE partial: its
+        // `content` array is the same array pi-ai keeps mutating ahead of this
+        // dispatch, so content seen here may not have had its delta emitted yet
+        // (streaming first-word doubling). Strip it — deltas + message_end remain
+        // the only content sources. Non-assistant starts carry final content and
+        // stay unchanged.
+        const raw = event.message;
+        const assistant =
+          raw !== null &&
+          typeof raw === "object" &&
+          !Array.isArray(raw) &&
+          (raw as Record<string, unknown>).role === "assistant";
+        const message = projectMessage(assistant ? { ...(raw as Record<string, unknown>), content: [] } : raw, flag);
+        if (assistant && message !== undefined) inflightAcc.start(message);
         e = { type: "message_start", message };
         break;
       }
@@ -225,7 +258,7 @@ export function createEventTap(
           recentRing.push({ seq: currentSeq(), message });
           if (recentRing.length > LIMITS.recentMessages) recentRing = recentRing.slice(-LIMITS.recentMessages);
           if (message.role === "assistant") {
-            inflightMessage = undefined;
+            inflightAcc.reset();
             addedCost += assistantCost(message);
           }
         }
@@ -362,7 +395,7 @@ export function createEventTap(
     pendingDeltas = [];
     pendingToolUpdates.clear();
     recentRing = [];
-    inflightMessage = undefined;
+    inflightAcc.reset();
     tools.clear();
     promptStack = [];
     completedTimings.clear();
@@ -372,7 +405,7 @@ export function createEventTap(
     handle,
     recent: () => recentRing.slice(),
     inflight: () => {
-      const message = inflightMessage === undefined ? undefined : projectMessage(inflightMessage, { truncated: false });
+      const message = inflightAcc.message();
       if (message === undefined && tools.size === 0) return undefined;
       const state: InflightState = {
         tools: [...tools.values()].map((t) => {
