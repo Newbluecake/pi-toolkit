@@ -182,12 +182,15 @@ describe("web-hub disabled ⇒ zero side effects (plan §6, §9 #7)", () => {
     // of `FORWARDED_EVENTS` — it never forwards to the wire, it only tracks the manual-compaction
     // window for the `prompt` op's `E_BUSY_COMPACTING` precheck). #32 C11 wiring also subscribes
     // `resources_discover` (has a result contract, so it can't join FORWARDED_EVENTS) to refresh
-    // the commands slot when extensions load mid-session.
+    // the commands slot when extensions load mid-session. Steer recall (webHub.steerRecall, default
+    // on — plan docs/dev/web-hub-steer-recall §4.7 A6) adds a `context` handler for the hold driver;
+    // its other hooks (turn_start/turn_end/agent_end/agent_settled) are already forwarded events.
     const expected = new Set([
       "session_start",
       "session_shutdown",
       "session_before_compact",
       "resources_discover",
+      "context",
       ...FORWARDED_EVENTS,
     ]);
     expect(changed.length).toBeGreaterThan(0);
