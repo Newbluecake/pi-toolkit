@@ -169,37 +169,15 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* default-model card (web-hub-spawn default-model plan F1): free-typed input + datalist +
- * 「使用 pi 默认」/保存. The input takes the remaining width and a long `provider/id` wraps
- * instead of overflowing (A1: no horizontal scroll at any acceptance viewport). */
-.settings-model-row {
+/* default-model card (web-hub-spawn default-model plan F1; 2026-10 select-only rework): the
+ * switcher-styled chip trigger + Teleport'd panel/sheet live in models.css
+ * (`shell/SettingsModelPicker.vue` imports it); this wrapper only spaces the trigger off the
+ * notes above and carries the card's coarse-pointer ≥44px target rule (models.css's coarse
+ * block is switcher-pinned). A long provider/id can never overflow — the chip label is
+ * ellipsis-bounded (models.css) and the full ref rides the title. */
+.settings-model-picker {
   display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-}
-
-.settings-model-input {
-  flex: 1;
-  min-width: 0;
-  min-height: 36px;
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-sm);
-  background: var(--c-surface);
-  color: var(--c-text);
-  font-size: var(--fs-sm);
-  font-family: var(--font-mono);
-  overflow-wrap: anywhere;
-}
-
-.settings-model-input:focus-visible {
-  outline: 2px solid var(--c-primary);
-  outline-offset: 1px;
-}
-
-.settings-model-input:disabled {
-  opacity: 0.6;
+  margin-top: var(--sp-2);
 }
 
 .settings-model-warn {
@@ -213,13 +191,10 @@
 }
 
 @media (pointer: coarse) {
-  .settings-model-input,
-  .settings-model-row .btn {
+  .settings-model-picker .model-chip {
     min-height: 44px;
   }
-}
 
-@media (pointer: coarse) {
   .settings-option,
   .settings-font input[type="range"],
   .settings-font .btn,

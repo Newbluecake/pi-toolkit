@@ -21,7 +21,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mount, flushPromises } from "@vue/test-utils";
 import { ref, shallowRef } from "vue";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsView from "../../../src/web-hub/ui/src/components/shell/SettingsView.vue";
 import TopBar from "../../../src/web-hub/ui/src/components/shell/TopBar.vue";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
@@ -251,10 +251,14 @@ describe("TopBar settings entry (floating panel, revised 2026-10)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// default-model plan F1 — the 「新建会话默认模型」 card
+// ---------------------------------------------------------------------------
+// default-model plan F1 — the 「新建会话默认模型」 card (2026-10 select-only rework: the
+// free-text input + datalist + 「使用 pi 默认」/保存 buttons are gone, replaced by
+// shell/SettingsModelPicker.vue — a switcher-styled chip trigger with a Teleport'd listbox;
+// 「跟随 pi 默认」 is the always-present first row; the saved value can ONLY be a listed item).
 // ---------------------------------------------------------------------------
 
-describe("SettingsView.vue — default model card (default-model plan F1)", () => {
+describe("SettingsView.vue — default model card (select-only picker, 2026-10 rework)", () => {
   const CAP = "spawn.v1";
   const MODEL_CAP = "spawn.model.v1";
 
@@ -323,109 +327,338 @@ describe("SettingsView.vue — default model card (default-model plan F1)", () =
     return wrapper;
   }
 
+  function triggerOf(w: ReturnType<typeof mount>) {
+    return w.find(".settings-model-picker button.model-chip");
+  }
+
+  /** The desktop panel Teleports to <body> — VTU's wrapper tree never sees it. */
+  function desktopPanel(): HTMLElement | null {
+    return document.body.querySelector<HTMLElement>(".model-panel--fixed");
+  }
+
+  function panelRows(scope: ParentNode = document.body): HTMLElement[] {
+    return [...scope.querySelectorAll<HTMLElement>(".model-panel--fixed .model-row, .picker-sheet .model-row")];
+  }
+
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+
+  async function openPicker(w: ReturnType<typeof mount>): Promise<HTMLElement | null> {
+    await triggerOf(w).trigger("click");
+    await flush();
+    return desktopPanel();
+  }
+
   it("no spawn.v1 cap ⇒ the card is not rendered at all", () => {
     const w = mountWithHub(fakeHub({ caps: [] }));
-    expect(w.find(".settings-model-input").exists()).toBe(false);
+    expect(w.find(".settings-model-picker").exists()).toBe(false);
     expect(w.text()).not.toContain("Default model for new sessions");
   });
 
   it("no hub injected (standalone mount) ⇒ the card is not rendered", () => {
     const w = mountSettings();
-    expect(w.find(".settings-model-input").exists()).toBe(false);
+    expect(w.find(".settings-model-picker").exists()).toBe(false);
   });
 
-  it("spawn.v1 WITHOUT spawn.model.v1 (old hub) ⇒ disabled with the upgrade hint; nothing hits the wire", async () => {
+  it("spawn.v1 WITHOUT spawn.model.v1 (old hub) ⇒ disabled trigger + upgrade hint; nothing hits the wire", async () => {
     const f = fakeHub({ caps: [CAP], prefs: { defaultModel: null } });
     const w = mountWithHub(f);
     await flushPromises();
-    const input = w.find(".settings-model-input");
-    expect(input.exists()).toBe(true);
-    expect(input.attributes("disabled")).toBeDefined();
+    const trigger = triggerOf(w);
+    expect(trigger.exists()).toBe(true);
+    expect(trigger.attributes("disabled")).toBeDefined();
     expect(w.text()).toContain("/webhub restart"); // defaultModelUnsupported
     expect(f.calls.refresh).toBe(0); // refreshPrefs gated on the model cap
-    const buttons = w.findAll(".settings-model-row button");
-    expect(buttons.every((b) => b.attributes("disabled") !== undefined)).toBe(true);
-  });
-
-  it("spawn.model.v1 ⇒ refreshPrefs on mount; the input initializes from the arriving prefs exactly once", async () => {
-    const f = fakeHub({ caps: [CAP, MODEL_CAP], listPrefs: { defaultModel: "anthropic/claude-opus-4-5" } });
-    const w = mountWithHub(f);
-    await flushPromises();
-    expect(f.calls.refresh).toBe(1);
-    const input = w.find(".settings-model-input").element as HTMLInputElement;
-    expect(input.value).toBe("anthropic/claude-opus-4-5");
-    // a later prefs change must not clobber an in-progress edit
-    await w.find(".settings-model-input").setValue("openai/gpt-5");
-    f.prefs.value = { defaultModel: "zai/glm-5" };
-    await flushPromises();
-    expect((w.find(".settings-model-input").element as HTMLInputElement).value).toBe("openai/gpt-5");
-  });
-
-  it("local validation: an invalid ref shows the invalid note, disables save, and never calls setPrefs", async () => {
-    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
-    const w = mountWithHub(f);
-    await flushPromises();
-    await w.find(".settings-model-input").setValue("bad ref");
-    expect(w.text()).toContain("Not a valid provider/id");
-    const save = w.findAll(".settings-model-row button").at(-1)!;
-    expect(save.attributes("disabled")).toBeDefined();
-    await save.trigger("click");
+    await trigger.trigger("click");
+    await trigger.trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(desktopPanel()).toBeNull();
+    expect(document.body.querySelector(".picker-sheet")).toBeNull();
     expect(f.calls.set).toEqual([]);
   });
 
-  it("save success: setPrefs receives the trimmed ref; the status line reads Saved (role=status)", async () => {
+  it("spawn.model.v1 ⇒ refreshPrefs on mount; unset pref ⇒ trigger reads Follow pi default", async () => {
     const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
     const w = mountWithHub(f);
     await flushPromises();
-    await w.find(".settings-model-input").setValue(" openai/gpt-5 ");
-    const save = w.findAll(".settings-model-row button").at(-1)!;
-    await save.trigger("click");
+    expect(f.calls.refresh).toBe(1);
+    const trigger = triggerOf(w);
+    expect(trigger.text()).toContain("Follow pi default");
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    expect(trigger.attributes("aria-haspopup")).toBe("listbox");
+    expect(trigger.attributes("aria-label")).toBe("Default model for new sessions");
+  });
+
+  it("saved pref ⇒ trigger shows the short label with the full ref title; a prefs echo updates it live", async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "anthropic", id: "claude-opus-4-5-20250929" }])]]);
+    const f = fakeHub({
+      caps: [CAP, MODEL_CAP],
+      agents,
+      listPrefs: { defaultModel: "anthropic/claude-opus-4-5-20250929" },
+    });
+    const w = mountWithHub(f);
+    await flushPromises();
+    const trigger = triggerOf(w);
+    expect(trigger.text()).toContain("claude-opus-4-5"); // shortModelLabel strips -YYYYMMDD
+    expect(trigger.text()).not.toContain("20250929");
+    expect(trigger.attributes("title")).toBe("anthropic/claude-opus-4-5-20250929"); // listed ⇒ no marker
+    expect(trigger.find("use").attributes("href")).toBe("#i-cpu");
+    // select-only: no free-text surface anywhere in the card
+    expect(w.find("input[type='text']").exists()).toBe(false);
+    // a later prefs arrival (another tab's save) moves the trigger — no edit latch any more
+    f.prefs.value = { defaultModel: "openai/gpt-5" };
+    await flushPromises();
+    expect(triggerOf(w).text()).toContain("gpt-5");
+  });
+
+  it("open panel: Teleport'd to <body>, 「跟随 pi 默认」 first, provider groups, current row checked", async () => {
+    const agents = new Map([
+      ["A", agentWithModels([{ provider: "openai", id: "gpt-5", name: "GPT-5" }])],
+      ["B", agentWithModels([{ provider: "zai", id: "glm-5" }])],
+    ]);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: "zai/glm-5" } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    const trigger = triggerOf(w);
+    await trigger.trigger("click");
+    await flush();
+    const panel = desktopPanel();
+    expect(panel).not.toBeNull();
+    expect(panel!.closest(".settings-card")).toBeNull(); // Teleport'd OUT of the settings panel
+    expect(panel!.getAttribute("role")).toBe("dialog");
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    expect(trigger.attributes("aria-controls")).toBe(panel!.id);
+    const list = panel!.querySelector("ul.model-list");
+    expect(list?.getAttribute("role")).toBe("listbox");
+    const groups = [...panel!.querySelectorAll(".model-group")].map((g) => g.textContent);
+    expect(groups).toEqual(["openai", "zai"]); // groupByProvider, first-seen order
+    const rows = panelRows();
+    expect(rows).toHaveLength(3); // follow-pi + 2 models
+    expect(rows[0]!.textContent).toContain("Follow pi default");
+    expect(rows.map((r) => r.getAttribute("aria-selected"))).toEqual(["false", "false", "true"]);
+    expect(rows[2]!.textContent).toContain("glm-5");
+    expect(rows[1]!.textContent).toContain("GPT-5"); // display name rides along
+    // the current choice is pre-highlighted (aria-activedescendant on the search input)
+    const search = panel!.querySelector<HTMLInputElement>(".model-search");
+    expect(search?.getAttribute("aria-activedescendant")).toBe(rows[2]!.id);
+  });
+
+  it("select a row ⇒ setDefaultModel(provider/id) once, panel closes, focus returns, status Saved.", async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    const trigger = triggerOf(w);
+    await trigger.trigger("click");
+    await flush();
+    const row = panelRows()[1]!; // gpt-5 (0 = follow pi)
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushPromises();
     expect(f.calls.set).toEqual(["openai/gpt-5"]);
+    expect(desktopPanel()).toBeNull(); // closed immediately
+    expect(document.activeElement).toBe(trigger.element); // focus back on the trigger
     const status = w.find(".settings-model-status");
     expect(status.attributes("role")).toBe("status");
     expect(status.text()).toBe("Saved.");
-    // editing again resets the status line
-    await w.find(".settings-model-input").setValue("openai/gpt-5-turbo");
-    expect(w.find(".settings-model-status").exists()).toBe(false);
+    expect(triggerOf(w).text()).toContain("gpt-5"); // prefs echo moved the trigger
   });
 
-  it("save failure surfaces the failed status", async () => {
+  it('the 「跟随 pi 默认」 row saves the "" tri-state (retired onModelUsePi semantics)', async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: "openai/gpt-5" } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await openPicker(w);
+    const pi = panelRows()[0]!;
+    expect(pi.getAttribute("aria-selected")).toBe("false");
+    pi.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(f.calls.set).toEqual([""]);
+    expect(f.prefs.value).toEqual({ defaultModel: null });
+    expect(triggerOf(w).text()).toContain("Follow pi default");
+  });
+
+  it("picking the CURRENT row just closes — no redundant save", async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: "openai/gpt-5" } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await openPicker(w);
+    const current = panelRows()[1]!;
+    expect(current.getAttribute("aria-selected")).toBe("true");
+    current.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(f.calls.set).toEqual([]);
+    expect(desktopPanel()).toBeNull();
+  });
+
+  it("saved value NOT in the list ⇒ trigger keeps it with the muted marker; no row checked; a pick replaces it", async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: "ghost/model-9" } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    const trigger = triggerOf(w);
+    expect(trigger.text()).toContain("model-9"); // never silently cleared
+    expect(trigger.find(".model-chip-marker").text()).toBe("not in list");
+    expect(trigger.attributes("title")).toContain("ghost/model-9");
+    await openPicker(w);
+    expect(panelRows().map((r) => r.getAttribute("aria-selected"))).toEqual(["false", "false"]);
+    panelRows()[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(f.calls.set).toEqual(["openai/gpt-5"]);
+    expect(triggerOf(w).find(".model-chip-marker").exists()).toBe(false); // marker gone after replace
+  });
+
+  it("no options at all ⇒ explanatory empty state; a stray saved value still yields to 「跟随 pi 默认」", async () => {
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: "ghost/model-9" } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await openPicker(w);
+    const empty = desktopPanel()!.querySelector(".model-empty");
+    expect(empty?.textContent).toContain("No model list yet");
+    const rows = panelRows();
+    expect(rows).toHaveLength(1); // the follow-pi row survives the empty list
+    rows[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(f.calls.set).toEqual([""]);
+  });
+
+  it("search filters rows (provider/id/name) and is NEVER a save path — bare Enter does nothing", async () => {
+    const agents = new Map([
+      ["A", agentWithModels([{ provider: "openai", id: "gpt-5", name: "GPT-5" }])],
+      ["B", agentWithModels([{ provider: "zai", id: "glm-5" }])],
+    ]);
     const f = fakeHub({
       caps: [CAP, MODEL_CAP],
-      prefs: { defaultModel: null },
+      agents,
+      prefs: { defaultModel: "ghost/model-9" }, // not in list ⇒ nothing highlighted on open
+    });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await openPicker(w);
+    const panel = desktopPanel()!;
+    const search = panel.querySelector<HTMLInputElement>(".model-search")!;
+    search.value = "gpt";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    expect(panelRows().map((r) => r.querySelector(".row-id, .row-label")?.textContent ?? "")).toEqual([
+      "Follow pi default",
+      "gpt-5",
+    ]); // filtered to one
+    // nothing highlighted + Enter ⇒ a strict no-op (Enter must never clear the default)
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flushPromises();
+    expect(f.calls.set).toEqual([]);
+    expect(desktopPanel()).not.toBeNull();
+    // typing junk matches nothing ⇒ the no-match note (switcher's key), still no save
+    search.value = "nothing-matches";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    expect(desktopPanel()!.querySelector(".model-empty")?.textContent).toBe("No matching model");
+    expect(f.calls.set).toEqual([]);
+  });
+
+  it("save failure ⇒ failed status; the trigger keeps the previous value (prefs unchanged)", async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
+    const f = fakeHub({
+      caps: [CAP, MODEL_CAP],
+      agents,
+      prefs: { defaultModel: "openai/gpt-5" },
       saveImpl: async () => ({ ok: false as const, error: "E_LAUNCHER" }),
     });
     const w = mountWithHub(f);
     await flushPromises();
-    await w.find(".settings-model-input").setValue("p/m");
-    await w.findAll(".settings-model-row button").at(-1)!.trigger("click");
+    await openPicker(w);
+    panelRows()[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true })); // follow pi
     await flushPromises();
     expect(w.find(".settings-model-status").text()).toContain("Save failed");
+    expect(triggerOf(w).text()).toContain("gpt-5"); // prefs never moved
   });
 
-  it('「使用 pi 默认」 clears the input and saves the "" tri-state', async () => {
-    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: "p/m" } });
+  it("saving state ⇒ the trigger shows the loader and rows are inert", async () => {
+    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
+    let release: (() => void) | undefined;
+    const f = fakeHub({
+      caps: [CAP, MODEL_CAP],
+      agents,
+      prefs: { defaultModel: "openai/gpt-5" },
+      saveImpl: () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ok: true as const, prefs: { defaultModel: null } });
+        }),
+    });
     const w = mountWithHub(f);
     await flushPromises();
-    const usePi = w.findAll(".settings-model-row button")[0]!;
-    expect(usePi.text()).toBe("Use pi default");
-    await usePi.trigger("click");
+    await openPicker(w);
+    panelRows()[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(triggerOf(w).find(".model-spin").exists()).toBe(true); // loader replaces the chevron
+    // reopen mid-save: every row is aria-disabled and clicks are inert
+    await openPicker(w);
+    const rows = panelRows();
+    expect(rows.every((r) => r.getAttribute("aria-disabled") === "true")).toBe(true);
+    rows[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushPromises();
     expect(f.calls.set).toEqual([""]);
-    expect((w.find(".settings-model-input").element as HTMLInputElement).value).toBe("");
-    expect(f.prefs.value).toEqual({ defaultModel: null });
+    release!();
+    await flushPromises();
+    expect(w.find(".settings-model-status").text()).toBe("Saved.");
   });
 
-  it("datalist unions online agents' models (deduped) and refreshes the localStorage cache", async () => {
+  it("keyboard: Enter opens (focus → search), ↓ moves aria-activedescendant, Enter picks, Esc refocuses the trigger", async () => {
     const agents = new Map([
-      [
-        "A",
-        agentWithModels([
-          { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" },
-          { provider: "openai", id: "gpt-5" },
-        ]),
-      ],
+      ["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])],
+      ["B", agentWithModels([{ provider: "zai", id: "glm-5" }])],
+    ]);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    const trigger = triggerOf(w);
+    (trigger.element as HTMLButtonElement).focus();
+    await trigger.trigger("keydown", { key: "Enter" });
+    await flush();
+    const panel = desktopPanel();
+    expect(panel).not.toBeNull();
+    const search = panel!.querySelector<HTMLInputElement>(".model-search")!;
+    expect(document.activeElement).toBe(search); // focus moved INTO the panel
+    // open (value "") pre-highlights the follow-pi row; ↓ lands on gpt-5
+    expect(search.getAttribute("aria-activedescendant")).toBe(panelRows()[0]!.id);
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await flushPromises();
+    const gpt = panelRows()[1]!;
+    expect(search.getAttribute("aria-activedescendant")).toBe(gpt.id);
+    expect(gpt.classList.contains("active")).toBe(true);
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flushPromises();
+    expect(f.calls.set).toEqual(["openai/gpt-5"]);
+    expect(desktopPanel()).toBeNull();
+    // reopen, then Esc from the search box closes and returns focus to the trigger
+    await trigger.trigger("click");
+    await flush();
+    desktopPanel()!
+      .querySelector<HTMLInputElement>(".model-search")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(desktopPanel()).toBeNull();
+    expect(document.activeElement).toBe(trigger.element);
+  });
+
+  it("outside click closes the desktop panel without touching the wire", async () => {
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
+    await flushPromises();
+    await openPicker(w);
+    expect(desktopPanel()).not.toBeNull();
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(desktopPanel()).toBeNull();
+    expect(f.calls.set).toEqual([]);
+  });
+
+  it("datalist-era D7 cache: online agents write pwh_spawn_models_cache; a later no-agent mount falls back to it", async () => {
+    const agents = new Map([
+      ["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])],
       [
         "B",
         agentWithModels([
@@ -434,45 +667,190 @@ describe("SettingsView.vue — default model card (default-model plan F1)", () =
         ]),
       ],
     ]);
-    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } }));
+    const first = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } }));
     await flushPromises();
-    const values = w.findAll("#settings-model-options option").map((o) => o.attributes("value"));
-    expect(values).toEqual(["anthropic/claude-opus-4-5", "openai/gpt-5", "zai/glm-5"]);
     const cache = window.localStorage.getItem("pwh_spawn_models_cache");
     expect(cache).not.toBeNull();
     expect(JSON.parse(cache!)).toEqual([
-      { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" },
       { provider: "openai", id: "gpt-5" },
       { provider: "zai", id: "glm-5" },
+    ]); // deduped union
+    first.unmount();
+
+    const second = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } }));
+    await flushPromises();
+    await openPicker(second);
+    expect(panelRows().map((r) => r.querySelector(".row-id, .row-label")?.textContent ?? "")).toEqual([
+      "Follow pi default",
+      "gpt-5",
+      "glm-5",
     ]);
   });
 
-  it("no online agent ⇒ the datalist falls back to the last cached list (D7)", async () => {
-    window.localStorage.setItem(
-      "pwh_spawn_models_cache",
-      JSON.stringify([{ provider: "cached", id: "model-1", name: "Cached" }]),
-    );
-    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } }));
-    await flushPromises();
-    const values = w.findAll("#settings-model-options option").map((o) => o.attributes("value"));
-    expect(values).toEqual(["cached/model-1"]);
+  // --- form factor: ≤640px PickerSheet vs >640px Teleport'd fixed panel (switcher parity) ----
+
+  let origMatchMedia: typeof window.matchMedia | undefined;
+  afterEach(() => {
+    if (origMatchMedia !== undefined) {
+      window.matchMedia = origMatchMedia;
+      origMatchMedia = undefined;
+    }
   });
 
-  it("no list at all ⇒ the no-list note shows instead of a warning", async () => {
-    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } }));
+  function stubNarrow(matches: boolean): void {
+    if (origMatchMedia === undefined) origMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  it("≤640px: opens as a Teleport'd PickerSheet — search NOT autofocused, listbox is; scrim click closes", async () => {
+    stubNarrow(true);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
     await flushPromises();
-    expect(w.text()).toContain("No online session");
+    const trigger = triggerOf(w);
+    (trigger.element as HTMLButtonElement).focus();
+    await trigger.trigger("click");
+    await flush();
+    const sheet = document.body.querySelector<HTMLElement>(".picker-sheet");
+    expect(sheet).not.toBeNull(); // nested Teleport lands in <body> alongside PickerSheet's own
+    expect(desktopPanel()).toBeNull(); // no desktop popover
+    const search = sheet!.querySelector<HTMLInputElement>(".model-search");
+    expect(document.activeElement).not.toBe(search); // keyboard stays down
+    expect(document.activeElement).toBe(sheet!.querySelector("ul.model-list")); // [data-autofocus]
+    // `data-subpanel` rides PickerSheet's $attrs onto its SCRIM (inheritAttrs: false) — the
+    // marker SettingsOverlay's outside-click/Esc guards look for
+    expect(document.body.querySelector(".picker-scrim[data-subpanel]")).not.toBeNull();
+    document.body
+      .querySelector<HTMLElement>(".picker-scrim")!
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+    expect(document.body.querySelector(".picker-sheet")).toBeNull();
+    expect(document.activeElement).toBe(trigger.element);
   });
 
-  it("a valid ref outside the known list gets the soft warning; a listed one does not", async () => {
-    const agents = new Map([["A", agentWithModels([{ provider: "openai", id: "gpt-5" }])]]);
-    const w = mountWithHub(fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } }));
+  it("≤640px: picking a row inside the sheet still saves", async () => {
+    stubNarrow(true);
+    const agents = new Map([["A", agentWithModels([{ provider: "zai", id: "glm-5" }])]]);
+    const f = fakeHub({ caps: [CAP, MODEL_CAP], agents, prefs: { defaultModel: null } });
+    const w = mountWithHub(f);
     await flushPromises();
-    await w.find(".settings-model-input").setValue("anthropic/claude-opus-4-5");
-    expect(w.text()).toContain("Not in the known model list");
-    // ...but the save button stays enabled (soft warning, not a blocker)
-    expect(w.findAll(".settings-model-row button").at(-1)!.attributes("disabled")).toBeUndefined();
-    await w.find(".settings-model-input").setValue("openai/gpt-5");
-    expect(w.text()).not.toContain("Not in the known model list");
+    await triggerOf(w).trigger("click");
+    await flush();
+    const rows = panelRows();
+    expect(rows).toHaveLength(2);
+    rows[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(f.calls.set).toEqual(["zai/glm-5"]);
+    expect(document.body.querySelector(".picker-sheet")).toBeNull();
+  });
+
+  // --- desktop fixed-panel anchoring (Teleport'd + fixed — the switcher's clamp math, ported) -
+
+  function rectOf(left: number, top: number, right: number, bottom: number): DOMRect {
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: right - left,
+      height: bottom - top,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect;
+  }
+
+  it("desktop panel anchors above the trigger, clamped into the viewport; flips below near the top", async () => {
+    vi.stubGlobal("innerWidth", 1200);
+    vi.stubGlobal("innerHeight", 800);
+    let chipR = rectOf(100, 500, 260, 528);
+    let panelR = rectOf(100, 20, 660, 500); // 560×480
+    const spy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList.contains("model-chip")) return chipR;
+      if (this.classList.contains("model-panel")) return panelR;
+      return rectOf(0, 0, 0, 0);
+    });
+    try {
+      const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
+      const w = mountWithHub(f);
+      await flushPromises();
+      // chip low on screen: fits above (486 ≥ 480) ⇒ anchored above, left aligned to the chip
+      await openPicker(w);
+      const panel = desktopPanel()!;
+      expect(panel.style.bottom).toBe("306px"); // 800 - 500 + 6
+      expect(panel.style.top).toBe("");
+      expect(panel.style.left).toBe("100px");
+      expect(panel.style.maxHeight).toBe("480px");
+      // near the top of a short page: above (46) < below (698) ⇒ flips below the chip
+      await triggerOf(w).trigger("click"); // close
+      await flush();
+      chipR = rectOf(100, 60, 260, 88);
+      panelR = rectOf(100, 94, 660, 574);
+      await openPicker(w);
+      expect(desktopPanel()!.style.top).toBe("94px"); // 88 + 6
+      expect(desktopPanel()!.style.bottom).toBe("");
+      await triggerOf(w).trigger("click"); // close
+      await flush();
+      // chip near the right edge: shifted back inside [margin, innerWidth - margin]
+      chipR = rectOf(900, 500, 1060, 528);
+      await openPicker(w);
+      expect(desktopPanel()!.style.left).toBe("632px"); // 1200 - 8 - 560
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("crossing the 640px boundary while open swaps sheet ⇄ fixed panel (switcher parity)", async () => {
+    const mqListeners: Array<() => void> = [];
+    const mq = {
+      matches: false,
+      media: "(max-width: 640px)",
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: (_t: string, fn: () => void) => {
+        mqListeners.push(fn);
+      },
+      removeEventListener: (_t: string, fn: () => void) => {
+        const i = mqListeners.indexOf(fn);
+        if (i >= 0) mqListeners.splice(i, 1);
+      },
+      dispatchEvent: () => false,
+    };
+    const origMq = window.matchMedia;
+    window.matchMedia = (() => mq) as unknown as typeof window.matchMedia;
+    try {
+      const f = fakeHub({ caps: [CAP, MODEL_CAP], prefs: { defaultModel: null } });
+      const w = mountWithHub(f);
+      await flushPromises();
+      await openPicker(w);
+      expect(desktopPanel()).not.toBeNull();
+
+      mq.matches = true;
+      for (const fn of [...mqListeners]) fn();
+      await flush();
+      expect(desktopPanel()).toBeNull();
+      expect(document.body.querySelector(".picker-sheet")).not.toBeNull();
+
+      mq.matches = false;
+      for (const fn of [...mqListeners]) fn();
+      await flush();
+      expect(desktopPanel()).not.toBeNull();
+      expect(document.body.querySelector(".picker-sheet")).toBeNull();
+    } finally {
+      window.matchMedia = origMq;
+    }
   });
 });

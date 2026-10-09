@@ -49,6 +49,7 @@ import { isSpawnModelRef, knownModelRefs, readModelCache, writeModelCache } from
 import { spawnModelSupported } from "../../logic/spawn.js";
 import { SPAWN_HUB_CAP } from "@protocol/version.js";
 import { HUB_CTX } from "../control/controlContext.js";
+import SettingsModelPicker from "./SettingsModelPicker.vue";
 import type { ThemePref } from "../../types.js";
 import "../../styles/settings.css";
 
@@ -116,10 +117,13 @@ function onRangeChange(ev: Event): void {
 }
 
 // ---------------------------------------------------------------------------
-// default-model card (web-hub-spawn default-model plan F1, D1/D2/D4/D7): the hub-wide
-// 「新建会话默认模型」. Rendered only when the hub advertises `spawn.v1` at all; without
-// `spawn.model.v1` (an old hub) the card stays visible but DISABLED with an upgrade hint —
-// and the UI never sends `model`/`POST /api/headless/prefs` to such a hub (D4).
+// default-model card (web-hub-spawn default-model plan F1, D1/D2/D4/D7; 2026-10 select-only
+// rework): the hub-wide 「新建会话默认模型」. Rendered only when the hub advertises `spawn.v1`
+// at all; without `spawn.model.v1` (an old hub) the card stays visible but DISABLED with an
+// upgrade hint — and the UI never sends `model`/`POST /api/headless/prefs` to such a hub
+// (D4). The picker itself lives in `shell/SettingsModelPicker.vue` (switcher-styled chip +
+// listbox, select-ONLY — no free-text save path); this card owns the prefs, the D7 option
+// list and the save wire call.
 // ---------------------------------------------------------------------------
 const hub = inject(HUB_CTX, null);
 const spawn = hub?.spawn;
@@ -133,7 +137,6 @@ const spawnCap = computed(() => Array.isArray(hubCaps.value) && hubCaps.value.in
 /** No `spawn.model.v1` ⇒ disabled + upgrade hint; nothing model-shaped ever hits the wire. */
 const modelCap = computed(() => spawnModelSupported(hubCaps.value));
 
-const modelInput = ref("");
 type ModelSaveState = "idle" | "saving" | "saved" | "failed";
 const modelSaveState = ref<ModelSaveState>("idle");
 
@@ -150,55 +153,27 @@ watch(
 );
 const modelOptions = computed(() => (knownRefs.value.length > 0 ? knownRefs.value : readModelCache(storage)));
 
-const modelTrimmed = computed(() => modelInput.value.trim());
-/** Live local validation (the hub's own `parseSpawnModelRef`, via `@logic/models.js`). */
-const modelInvalid = computed(() => modelTrimmed.value !== "" && !isSpawnModelRef(modelTrimmed.value));
-/** D7/R1 soft warning: a valid ref that no known list entry offers (typo-prone free input). */
-const modelNotInList = computed(
-  () =>
-    modelTrimmed.value !== "" &&
-    !modelInvalid.value &&
-    modelOptions.value.length > 0 &&
-    !modelOptions.value.some((m) => `${m.provider}/${m.id}` === modelTrimmed.value),
-);
-
-// Initialize the input from the hub preference once it is known (a later re-arrival must not
-// clobber an in-progress edit — after the first fill, only a successful save re-syncs).
-let modelInitialized = false;
-watch(
-  () => spawn?.prefs.value,
-  (p) => {
-    if (modelInitialized || p === null || p === undefined) return;
-    modelInitialized = true;
-    modelInput.value = p.defaultModel ?? "";
-  },
-  { immediate: true },
-);
+/** The picker's saved value: `""` = 跟随 pi 默认. Live off the prefs ref — select-only means
+ * there is no in-progress edit to protect any more; a save's 200 echo (or another tab's
+ * save) legitimately updates the trigger immediately. */
+const defaultModelValue = computed(() => spawn?.prefs.value?.defaultModel ?? "");
 
 onMounted(() => {
   if (modelCap.value && spawn !== undefined) void spawn.refreshPrefs();
 });
 
-watch(modelInput, () => {
-  if (modelSaveState.value !== "saving") modelSaveState.value = "idle";
-});
-
 async function saveDefaultModel(value: string): Promise<void> {
   if (spawn === undefined || !modelCap.value || modelSaveState.value === "saving") return;
-  if (value !== "" && !isSpawnModelRef(value)) return; // the live invalid note already shows
+  if (value !== "" && !isSpawnModelRef(value)) return; // picker items are pre-validated; belt
   modelSaveState.value = "saving";
   const r = await spawn.setDefaultModel(value);
   modelSaveState.value = r.ok ? "saved" : "failed";
 }
 
-function onModelSave(): void {
-  void saveDefaultModel(modelTrimmed.value);
-}
-
-/** 「使用 pi 默认」: clear the preference (the POST's `""` tri-state) and persist immediately. */
-function onModelUsePi(): void {
-  modelInput.value = "";
-  void saveDefaultModel("");
+/** The picker spoke: a listed `provider/id` or the `""` follow-pi tri-state (the retired
+ * 「使用 pi 默认」 button's semantics, now a list row). Saves immediately. */
+function onModelSelect(value: string): void {
+  void saveDefaultModel(value);
 }
 </script>
 
@@ -334,47 +309,15 @@ function onModelUsePi(): void {
           <p class="settings-note">{{ t("settings.defaultModelHint") }}</p>
           <p class="settings-note">{{ t("settings.defaultModelShared") }}</p>
           <p v-if="!modelCap" class="settings-note settings-model-warn">{{ t("settings.defaultModelUnsupported") }}</p>
-          <div class="settings-model-row">
-            <input
-              v-model="modelInput"
-              type="text"
-              class="settings-model-input"
-              list="settings-model-options"
-              :placeholder="t('settings.defaultModelPlaceholder')"
-              :aria-label="t('settings.defaultModelSection')"
-              :disabled="!modelCap || modelSaveState === 'saving'"
-              autocapitalize="off"
-              autocorrect="off"
-              spellcheck="false"
-              translate="no"
-            />
-            <datalist id="settings-model-options">
-              <option v-for="m in modelOptions" :key="`${m.provider}/${m.id}`" :value="`${m.provider}/${m.id}`">
-                {{ m.name ?? `${m.provider}/${m.id}` }}
-              </option>
-            </datalist>
-            <button
-              type="button"
-              class="btn btn-ghost"
-              :disabled="!modelCap || modelSaveState === 'saving'"
-              @click="onModelUsePi"
-            >
-              {{ t("settings.defaultModelUsePi") }}
-            </button>
-            <button
-              type="button"
-              class="btn btn-primary"
-              :disabled="!modelCap || modelSaveState === 'saving' || modelInvalid"
-              @click="onModelSave"
-            >
-              {{ t("settings.defaultModelSave") }}
-            </button>
-          </div>
-          <p v-if="modelInvalid" class="settings-note settings-model-warn">{{ t("settings.defaultModelInvalid") }}</p>
-          <p v-else-if="modelNotInList" class="settings-note settings-model-warn">
-            {{ t("settings.defaultModelNotInList") }}
-          </p>
-          <p v-else-if="modelOptions.length === 0" class="settings-note">{{ t("settings.defaultModelNoList") }}</p>
+          <!-- select-ONLY picker (2026-10 rework): chip trigger + listbox, options from the D7
+               union/cache, 「跟随 pi 默认」 as a list row — no free-text save path remains -->
+          <SettingsModelPicker
+            :value="defaultModelValue"
+            :options="modelOptions"
+            :disabled="!modelCap"
+            :saving="modelSaveState === 'saving'"
+            @select="onModelSelect"
+          />
           <p v-if="modelSaveState !== 'idle'" class="settings-model-status" role="status">
             {{
               modelSaveState === "saving"

@@ -21,7 +21,6 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import { newCmdId } from "@logic/control.js";
 import {
   currentModelOf,
-  ctxBadge,
   filterModels,
   groupByProvider,
   modelsOf,
@@ -35,6 +34,7 @@ import { modelCommandArg } from "@protocol/models.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { usePopoverClamp } from "../../composables/usePopoverClamp.js";
+import ModelOptionRow from "./ModelOptionRow.vue";
 import PickerSheet from "./PickerSheet.vue";
 import ThinkingChip from "./ThinkingChip.vue";
 import { CONTROL_VIEW } from "./controlContext.js";
@@ -529,47 +529,29 @@ onBeforeUnmount(() => {
           <template v-if="useTabs && tab === 'all'">
             <template v-for="g in groups" :key="g.provider">
               <li class="model-group" role="presentation">{{ g.provider }}</li>
-              <li
+              <ModelOptionRow
                 v-for="m in g.items"
                 :key="`${m.provider}/${m.id}`"
-                :id="optionId(m)"
-                class="model-row"
-                :class="{ active: selectable[activeIdx] === m }"
-                role="option"
-                :aria-selected="isCurrent(m)"
-                :aria-disabled="switching"
-                @click="pick(m)"
-              >
-                <AppIcon name="check" class="icon-sm row-check" />
-                <span class="row-id" translate="no">{{ m.id }}</span>
-                <span v-if="m.name" class="row-name">{{ m.name }}</span>
-                <span class="row-badges">
-                  <span v-if="ctxBadge(m.ctx)" class="model-badge">{{ ctxBadge(m.ctx) }}</span>
-                  <span v-if="m.reasoning === true" class="model-badge model-badge-reasoning">R</span>
-                </span>
-              </li>
+                :option-id="optionId(m)"
+                :item="m"
+                :selected="isCurrent(m)"
+                :active="selectable[activeIdx] === m"
+                :disabled="switching"
+                @pick="pick(m)"
+              />
             </template>
           </template>
           <template v-else>
-            <li
+            <ModelOptionRow
               v-for="m in selectable"
               :key="`${m.provider}/${m.id}`"
-              :id="optionId(m)"
-              class="model-row"
-              :class="{ active: selectable[activeIdx] === m }"
-              role="option"
-              :aria-selected="isCurrent(m)"
-              :aria-disabled="switching"
-              @click="pick(m)"
-            >
-              <AppIcon name="check" class="icon-sm row-check" />
-              <span class="row-id" translate="no">{{ m.id }}</span>
-              <span v-if="m.name" class="row-name">{{ m.name }}</span>
-              <span class="row-badges">
-                <span v-if="ctxBadge(m.ctx)" class="model-badge">{{ ctxBadge(m.ctx) }}</span>
-                <span v-if="m.reasoning === true" class="model-badge model-badge-reasoning">R</span>
-              </span>
-            </li>
+              :option-id="optionId(m)"
+              :item="m"
+              :selected="isCurrent(m)"
+              :active="selectable[activeIdx] === m"
+              :disabled="switching"
+              @pick="pick(m)"
+            />
           </template>
           <li v-if="selectable.length === 0" class="model-empty">{{ emptyText }}</li>
         </ul>

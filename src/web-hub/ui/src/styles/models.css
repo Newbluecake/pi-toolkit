@@ -445,3 +445,55 @@
     padding: 4px 12px;
   }
 }
+
+/* --- settings default-model picker (2026-10 select-only rework) ---------------------------
+ * The settings card reuses the switcher's building blocks (`shell/SettingsModelPicker.vue`):
+ * the slim chip as a wider standalone card trigger, the panel/row shells above, and ≤640px
+ * PickerSheet. Coarse-pointer sizing for the CARD trigger lives in settings.css (this file's
+ * coarse block is pinned by model-switcher.test.ts and stays switcher-only). */
+
+.model-chip--card {
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.model-chip--card .model-chip-label {
+  max-width: 40ch;
+}
+
+/* The unset trigger (「跟随 pi 默认」) reads as a state, not a model id — slightly dimmer. */
+.model-chip-label--unset {
+  color: var(--c-text-2);
+}
+
+/* Muted suffix marker when the saved value isn't in the known list (English token in BOTH
+ * languages per the AGENTS.md UI-text split; the prose explanation rides the chip title). */
+.model-chip-marker {
+  color: var(--c-text-3);
+  font-style: italic;
+  font-weight: var(--fw-normal);
+}
+
+/* Desktop panel: Teleport'd to <body> + FIXED against the trigger's viewport rect — the
+ * trigger sits inside the settings panel's scroll container, which would clip the switcher's
+ * in-flow absolute popover. SettingsModelPicker sets inline top/left/bottom/max-height; the
+ * same shell (border/shadow/head/list) comes from `.model-panel` above. z-index 45: above the
+ * settings panel (40), below the preview overlay (60). */
+.model-panel--fixed {
+  position: fixed;
+  left: auto;
+  bottom: auto;
+  z-index: 45;
+  width: min(560px, calc(100vw - 2 * var(--sp-4)));
+  max-height: min(70vh, 480px);
+}
+
+/* The non-model 「跟随 pi 默认」 choice row (prose label instead of a mono id). */
+.model-row .row-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text);
+  font-weight: var(--fw-semibold);
+}

@@ -114,6 +114,39 @@ describe("SettingsOverlay.vue — desktop popover", () => {
     wrapper.unmount();
   });
 
+  // 2026-10 select-only default-model rework: the picker's Teleport'd panel/sheet is OUTSIDE
+  // the settings panel's DOM but INSIDE the dialog logically — its `[data-subpanel]` marker is
+  // the bail-out signal for both of this overlay's document-capture dismiss handlers.
+  it("a pointerdown inside an open `[data-subpanel]` overlay (the model picker) does NOT emit close", () => {
+    const anchorEl = document.createElement("button");
+    document.body.appendChild(anchorEl);
+    const sub = document.createElement("div");
+    sub.setAttribute("data-subpanel", "");
+    const row = document.createElement("li");
+    sub.appendChild(row);
+    document.body.appendChild(sub);
+    const wrapper = mount(SettingsOverlay, { props: { anchorEl }, attachTo: document.body });
+    row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    expect(wrapper.emitted("close")).toBeUndefined();
+    sub.remove();
+    wrapper.unmount();
+    anchorEl.remove();
+  });
+
+  it("Escape while a `[data-subpanel]` overlay is open does NOT close the settings panel (the picker owns that Esc)", () => {
+    const anchorEl = document.createElement("button");
+    const sub = document.createElement("div");
+    sub.setAttribute("data-subpanel", "");
+    document.body.appendChild(sub);
+    const wrapper = mount(SettingsOverlay, { props: { anchorEl }, attachTo: document.body });
+    const ev = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false); // not ours to swallow
+    expect(wrapper.emitted("close")).toBeUndefined();
+    sub.remove();
+    wrapper.unmount();
+  });
+
   it("restores focus to anchorEl on unmount (close)", async () => {
     const anchorEl = document.createElement("button");
     document.body.appendChild(anchorEl);
@@ -184,7 +217,15 @@ describe("SettingsOverlay desktop panel width (default-model plan F1 A1)", () =>
     expect(grid).not.toBeNull();
     expect(grid![1]).toMatch(/grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(300px,\s*1fr\)\)/);
     expect(css).toMatch(/\.settings-card-wide\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
-    // the model row's long provider/id must never overflow horizontally (A1)
-    expect(css).toMatch(/\.settings-model-input\s*\{[^}]*overflow-wrap:\s*anywhere/);
+    // A1 overflow guard moved with the 2026-10 select-only rework: the free-text input (and
+    // its overflow-wrap pin) is gone — the picker trigger chip is the bounded surface now.
+    expect(css).not.toMatch(/\.settings-model-input/);
+    const modelsCss = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../../../src/web-hub/ui/src/styles/models.css"),
+      "utf8",
+    );
+    expect(modelsCss).toMatch(/\.model-chip--card\s*\{/);
+    expect(modelsCss).toMatch(/\.model-chip-label\s*\{[^}]*text-overflow:\s*ellipsis/);
+    expect(modelsCss).toMatch(/\.model-panel--fixed\s*\{[^}]*position:\s*fixed/);
   });
 });

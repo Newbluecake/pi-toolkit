@@ -36,23 +36,29 @@ const settings = {
     "Hiding the warnings changes nothing about the transport — traffic on this network stays unencrypted and readable by others.",
   plainWarnShow: "Show warnings (default)",
   plainWarnHide: "Hide warnings",
-  // default-model plan F1 — the 「新建会话默认模型」 card. The model ref itself
-  // (`provider/id`) is an English token in both languages; prose blocks translate.
+  // default-model plan F1 — the 「新建会话默认模型」 card (2026-10 select-only rework: the
+  // free-text input/datalist is gone; a switcher-styled picker chip + listbox selects from
+  // the known list, with 「跟随 pi 默认」 as a list row). `defaultModelPlaceholder` /
+  // `defaultModelInvalid` stay — SpawnModelField (the spawn dialog's per-session field) still
+  // uses them. The model ref (`provider/id`) and the chip's `not in list` marker are English
+  // tokens in both languages; prose blocks translate.
   defaultModelSection: "Default model for new sessions",
   defaultModelHint:
     "Used when a session is started from this hub (the web pick-dir/new-session entries). It never touches ~/.pi/agent/settings.json and never changes an already-running session.",
   defaultModelShared: "One value shared by every signed-in device of this hub.",
   defaultModelPlaceholder: "provider/id — empty means pi's own default",
-  defaultModelUsePi: "Use pi default",
-  defaultModelSave: "Save",
+  defaultModelFollowPi: "Follow pi default",
+  defaultModelFollowPiHint: "new sessions use pi's own default",
+  defaultModelListAria: "Default model picker",
   defaultModelSaving: "Saving…",
   defaultModelSaved: "Saved.",
   defaultModelInvalid: "Not a valid provider/id — e.g. anthropic/claude-opus-4-5",
   defaultModelUnsupported:
     "This hub is too old for the default-model preference — run /webhub restart after upgrading.",
   defaultModelSaveFailed: "Save failed — the hub rejected or could not persist it; retry.",
-  defaultModelNoList: "No online session to take the model list from — you can still type a provider/id.",
-  defaultModelNotInList: "Not in the known model list — double-check the spelling before saving.",
+  defaultModelNoList: "No model list yet — models appear here once a session is online.",
+  defaultModelNotInList: "not in list",
+  defaultModelNotInListTitle: "Not in the known model list — pick a model from the list to replace it.",
 } satisfies Record<string, string>;
 
 export default settings;

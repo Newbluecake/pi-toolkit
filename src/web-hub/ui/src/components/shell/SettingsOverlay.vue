@@ -42,6 +42,10 @@ const panelEl = ref<HTMLElement | null>(null);
 
 function onKeydown(ev: KeyboardEvent): void {
   if (ev.key !== "Escape") return;
+  // An open sub-overlay (the default-model picker's Teleport'd panel/sheet, marked
+  // `[data-subpanel]`) owns this Esc: it closes itself via its own window-capture guard —
+  // the settings panel around it stays open. Belt-and-braces alongside that guard.
+  if (document.querySelector("[data-subpanel]") !== null) return;
   ev.preventDefault();
   emit("close");
 }
@@ -51,6 +55,10 @@ function onPointerDown(ev: PointerEvent): void {
   const panel = panelEl.value;
   if (panel !== null && panel.contains(ev.target)) return;
   if (props.anchorEl !== null && props.anchorEl.contains(ev.target)) return;
+  // Clicks inside an open sub-overlay (the default-model picker's Teleport'd panel/sheet)
+  // are INSIDE this dialog logically but outside its DOM — the sub-overlay manages its own
+  // dismissal; without this bail a pick inside it would tear down the whole settings panel.
+  if (ev.target instanceof Element && ev.target.closest("[data-subpanel]") !== null) return;
   // P1 fix (verifier 2026-10): outside pointerdown's own default action is "move focus to
   // whatever was clicked, or blur to <body> if nothing focusable was hit" — a REAL browser
   // applies that default synchronously as part of dispatching this very pointerdown (not as a
