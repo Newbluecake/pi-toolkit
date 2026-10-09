@@ -3,13 +3,19 @@
   "TopBar DOM byte-identical to pre-feature when there is no quota data" pin). DO NOT hand-edit.
 
   What this is: the exact `outerHTML` produced by mounting the PRE-quota-web `TopBar.vue` (i.e.
-  the file as it stood at the HEAD commit below, before this feature's working-tree edit to that
-  file) with `@vue/test-utils` under `happy-dom`, using
+  the file as it stood at the capture source below, before the quota pill) with
+  `@vue/test-utils` under `happy-dom`, using
     props = { conn: "open", hubVersion: null, canSignOut: false }
   — the same `baseProps` `tests/web-hub/ui/topbar-settings-toggle.test.ts` already used.
 
-  Captured from:  git show HEAD:src/web-hub/ui/src/components/shell/TopBar.vue
-  HEAD commit at capture time: fca7493d3ea6cb8b9131298dc75d930d763ad16e
+  Captured from: WORKING TREE src/web-hub/ui/src/components/shell/TopBar.vue — 2026-10-10
+  language-menu rework (the two-state lang toggle became `shell/LangMenu.vue`'s dropdown; the
+  trigger now shows the CURRENT language + chevron). The change was UNCOMMITTED at capture
+  time, so the scripted `git show HEAD:` regen below (which only sees HEAD) could not be used;
+  the exact same mount-and-capture procedure was instead run against the working-tree file by a
+  one-shot temp test — never hand-typed. Prior scripted capture: git show HEAD:<path> at
+  fca7493d3ea6cb8b9131298dc75d930d763ad16e. Once the TopBar.vue change is committed, the
+  regen below sees the post-change file and its scripted audit trail resumes normally.
 
   Regenerate (only meaningful against a HEAD that still predates the quota-web pill — i.e.
   before this feature's TopBar.vue edit itself is committed; regenerating afterwards would just
@@ -23,4 +29,4 @@
   programmatically, and overwrites this file including this header.
 -->
 <header class="topbar"><span class="brand" title="pi web-hub · ui 0.0.0-test@0123456 · 01-02 11:04"><span class="brand-mark" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-logo"></use></svg></span><span translate="no">pi web-hub</span></span><span class="pill conn" data-conn="open" role="status"><span class="dot dot-live"></span> Live</span><!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
-         the brand's title tooltip. --><span class="topbar-meta" translate="no">ui 0.0.0-test@0123456 · 01-02 11:04</span><span class="chip readonly-chip"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye"></use></svg>Read-only</span><span class="topbar-spacer"></span><button type="button" class="btn btn-ghost lang-toggle" aria-label="Switch language" title="Switch language">中文</button><span class="settings-anchor"><button type="button" class="btn btn-ghost btn-icon settings-link" aria-label="Settings" title="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings-panel"><svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg></button><!--v-if--></span><!--v-if--></header>
+         the brand's title tooltip. --><span class="topbar-meta" translate="no">ui 0.0.0-test@0123456 · 01-02 11:04</span><span class="chip readonly-chip"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye"></use></svg>Read-only</span><span class="topbar-spacer"></span><span class="lang-anchor"><button type="button" class="btn btn-ghost lang-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="lang-menu" aria-label="Language: English" title="Language: English"><span class="lang-toggle-cur" translate="no">EN</span><svg class="icon icon-sm" aria-hidden="true"><use href="#i-chev-down"></use></svg></button><!--v-if--></span><span class="settings-anchor"><button type="button" class="btn btn-ghost btn-icon settings-link" aria-label="Settings" title="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings-panel"><svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg></button><!--v-if--></span><!--v-if--></header>

@@ -12,8 +12,10 @@ import {
 import TopBar from "../../../src/web-hub/ui/src/components/shell/TopBar.vue";
 
 /**
- * 2026-10-08: manual language switch (TopBar 中/EN toggle, `pwh_lang` override).
- * Module-level shared source ⇒ every test resets it (resetLangForTests) and localStorage.
+ * 2026-10-08: manual language switch (`pwh_lang` override). 2026-10-10: the two-state toggle
+ * (which showed the TARGET language — the reported bug) became the LangMenu dropdown; the
+ * focused menu interaction tests live in `tests/web-hub/ui/lang-menu.test.ts`. Module-level
+ * shared source ⇒ every test resets it (resetLangForTests) and localStorage.
  */
 
 function fakeStorage(initial: Record<string, string> = {}) {
@@ -77,31 +79,33 @@ describe("useI18n manual override", () => {
   });
 });
 
-describe("TopBar language toggle", () => {
+describe("TopBar language menu (LangMenu)", () => {
   function mountBar() {
     return mount(TopBar, {
-      props: { brandTitle: "t", conn: "open", hubVersion: "v", controlOn: false, uiStamp: "x", canSignOut: true },
-      global: { stubs: { SettingsOverlay: true, AppIcon: true } },
+      props: { conn: "open", hubVersion: "v", canSignOut: true },
+      global: { stubs: { SettingsOverlay: true } },
     });
   }
 
-  it("renders the target language's own name and flips on click", async () => {
+  it("the trigger shows the CURRENT language; picking the other one flips and persists it", async () => {
     const wrapper = mountBar();
-    const btn = wrapper.get(".lang-toggle");
-    const before = btn.text();
-    expect(["中文", "EN"]).toContain(before);
-    await btn.trigger("click");
-    const after = wrapper.get(".lang-toggle").text();
-    expect(after).not.toBe(before);
-    expect(["中文", "EN"]).toContain(after);
-    // the whole shared i18n source flipped with it
+    const trigger = wrapper.get(".lang-toggle");
+    // default en ⇒ the trigger says EN. (The retired toggle said 中文 here — the reported bug.)
+    expect(trigger.text()).toBe("EN");
+    await trigger.trigger("click");
+    await wrapper.get('.lang-menu-item[data-lang="zh"]').trigger("click");
+    expect(wrapper.get(".lang-toggle").text()).toBe("中");
+    // the whole shared i18n source flipped with it, and the choice persisted
     const i18n = useI18n();
-    expect(i18n.lang).toBe(localStorage.getItem(LANG_STORAGE_KEY));
+    expect(i18n.lang).toBe("zh");
+    expect(localStorage.getItem(LANG_STORAGE_KEY)).toBe("zh");
+    wrapper.unmount();
   });
 
-  it("carries a translated aria-label", () => {
+  it("carries a translated aria-label naming the current language", () => {
     const wrapper = mountBar();
     const label = wrapper.get(".lang-toggle").attributes("aria-label");
-    expect(label === "切换语言" || label === "Switch language").toBe(true);
+    expect(label === "语言：中文" || label === "Language: English").toBe(true);
+    wrapper.unmount();
   });
 });

@@ -10,7 +10,13 @@ const shell = {
   hubVersion: "hub {v}",
   uiBuild: "ui {v}",
   signOut: "Sign out",
-  langToggle: "Switch language",
+  /* 2026-10-10: the two-state `langToggle` became the LangMenu dropdown — the label names the
+   * CURRENT language ({lang} is its own-script name), the menu aria is short, and the two
+   * language names are identical across dictionaries (never translated). */
+  langMenuLabel: "Language: {lang}",
+  langMenuAria: "Language",
+  langZh: "中文",
+  langEn: "English",
   "conn.connecting": "Connecting…",
   "conn.open": "Live",
   "conn.reconnecting": "Reconnecting…",

@@ -136,21 +136,78 @@
   margin-right: calc(-1 * var(--sp-3));
 }
 
-/* 2026-10-08: the language toggle is a two-glyph text button (中/EN) — keep it compact but
- * wider than the square icon buttons, and keep it OUT of the gear⇄logout glyph-clustering
- * rule above (that rule targets `.settings-anchor + .btn`, i.e. the sign-out button). */
+/* 2026-10-10 user report (the toggle showed the TARGET language — EN while the UI was
+ * Chinese): the two-state toggle is now `shell/LangMenu.vue`'s dropdown. `.lang-anchor` wraps
+ * trigger + menu exactly like `.settings-anchor` wraps the gear (plain-CSS popover anchoring,
+ * no geometry math). The 2026-10-09 gear-clustering contract is preserved verbatim, just moved
+ * onto the anchor: the anchor eats the flex gap toward the gear (margin-right -sp-3, mirroring
+ * `.settings-anchor`) and the trigger's right padding (sp-3, 0 on phones below) keeps the
+ * glyph→gear distance equal to the sign-out button's gear→logout left padding, while the 44px
+ * coarse hit box stays (primitives.css raises every `.btn` to 44×44 under `pointer: coarse`). */
+.topbar .lang-anchor {
+  position: relative;
+  display: inline-flex;
+  margin-right: calc(-1 * var(--sp-3));
+}
+
 .topbar .lang-toggle {
   min-width: 44px;
-  /* 2026-10-09 「语言切换与设置的间距应参考设置与退出登录」: mirror the gear⇄logout clustering —
-   * kill the flex gap after the toggle and push its label toward the gear, with the toggle's
-   * right padding equal to the sign-out button's left padding (sp-3, 0 on phones below), so
-   * label→gear and gear→logout glyph gaps match while the 44px hit box stays. */
-  margin-right: calc(-1 * var(--sp-3));
+  gap: 2px; /* 中 glyph → chevron, tighter than .btn's sp-2 */
   justify-content: flex-end;
   padding: 0 var(--sp-3) 0 var(--sp-2);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   white-space: nowrap;
+}
+
+/* The dropdown itself — `.nsmenu-menu`'s grammar (spawn.css) with the popover-tier z-index of
+ * `.settings-panel` (40, above the page). Right-anchored under the trigger, so the ≤200px menu
+ * grows leftward and can never run off a 360px phone's right edge;
+ * composables/usePopoverClamp.ts (wired in LangMenu.vue) is the belt-and-braces viewport
+ * guard for exotic --fs-scale values. `top` uses the literal 6px POPOVER_PANEL_GAP so a
+ * vertical flip by the clamp keeps the same gap. */
+.lang-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 2px;
+  min-width: 160px;
+  padding: var(--sp-1);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+}
+
+.lang-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.lang-menu-item:hover,
+.lang-menu-item:focus-visible {
+  background: var(--c-surface-2);
+}
+
+/* Fixed-width check column so both labels align whether or not the check glyph shows
+ * (18px = icon-sm's 14px + optical margin, mirroring the model picker's `.row-check`). */
+.lang-item-check {
+  display: inline-flex;
+  width: 18px;
+  color: var(--c-primary);
 }
 
 .topbar .settings-anchor + .btn {

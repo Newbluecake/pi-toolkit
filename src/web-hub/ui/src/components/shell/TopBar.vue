@@ -26,7 +26,8 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
-import { setLangOverride, useI18n } from "../../composables/useI18n.js";
+import { useI18n } from "../../composables/useI18n.js";
+import LangMenu from "./LangMenu.vue";
 import { UI_BUILD } from "../../build-info.js";
 import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
@@ -40,15 +41,10 @@ const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
 const i18n = useI18n();
 const { t } = i18n;
-
 /* 2026-10-08 user request: manual language switch in the top bar (supersedes vue-plan §0.2's
- * "no manual switcher"). The label is the TARGET language's own name (中 ⇄ EN); the choice
- * persists via setLangOverride's `pwh_lang` localStorage key and every no-arg useI18n() handle
- * re-renders reactively. */
-const langToggleLabel = computed(() => (i18n.lang === "zh" ? "EN" : "中文"));
-function toggleLang(): void {
-  setLangOverride(i18n.lang === "zh" ? "en" : "zh");
-}
+ * "no manual switcher"); 2026-10-10 user report replaced the two-state toggle (it showed the
+ * TARGET language — EN while the UI was Chinese) with the LangMenu dropdown. The choice still
+ * persists via setLangOverride's `pwh_lang` localStorage key. */
 
 const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
@@ -154,15 +150,7 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 
     <span class="topbar-spacer"></span>
 
-    <button
-      type="button"
-      class="btn btn-ghost lang-toggle"
-      :aria-label="t('shell.langToggle')"
-      :title="t('shell.langToggle')"
-      @click="toggleLang"
-    >
-      {{ langToggleLabel }}
-    </button>
+    <LangMenu />
 
     <span class="settings-anchor">
       <button
