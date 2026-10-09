@@ -98,6 +98,34 @@ async function drain(rounds = 8): Promise<void> {
   for (let i = 0; i < rounds; i++) await vi.advanceTimersByTimeAsync(0);
 }
 
+/**
+ * Step fake time forward in small increments until `connection.ts` itself has created at least
+ * `minCount` sockets, then return immediately (zero further time advanced) — never a single big
+ * jump. A reconnect attempt sits in `FakeSocket`'s "created but not yet `connect`-emitted" state
+ * until a test drives it; `connection.ts`'s own `connectTimer` (1s) will time THAT OUT and start a
+ * later, bigger-backoff cycle if a test instead waits in one large `advanceTimersByTimeAsync`
+ * jump that overshoots the moment the socket first appears — the test would then hand `.emit(
+ * "connect")` to a socket `connection.ts` has already superseded (silently dropped, `this.socket
+ * !== sock` in both the `connect` handler and `onRaw`), which is exactly the under-load flake this
+ * guards against. Small steps mean we always react within `stepMs` of the socket's creation, well
+ * inside its 1s grace window.
+ */
+async function waitForSocketCount(
+  n: ReturnType<typeof fakeNet>,
+  minCount: number,
+  { stepMs = 25, maxMs = 3_000 }: { stepMs?: number; maxMs?: number } = {},
+): Promise<Socket> {
+  let elapsed = 0;
+  while (n.sockets.length < minCount && elapsed < maxMs) {
+    await vi.advanceTimersByTimeAsync(stepMs);
+    elapsed += stepMs;
+  }
+  if (n.sockets.length < minCount) {
+    throw new Error(`waitForSocketCount: only ${n.sockets.length}/${minCount} socket(s) after ${maxMs}ms`);
+  }
+  return n.sockets.at(-1)!;
+}
+
 const statusFrames = (s: Socket) => s.frames().filter((f) => f.t === "status");
 const ctlFrames = (s: Socket) => s.frames().filter((f) => f.t === "ctl");
 const resultFrames = (s: Socket, id: string) =>
@@ -424,12 +452,13 @@ describe("W9 — prompts during a link outage take the native path, never the bu
     fire("context", { type: "context" }, c.ctx);
     s.fail("ECONNRESET"); // link down BEFORE the frame — the connection drops it
     s.hub(promptCmd("w9-prompt-00000010", "arrives during the outage"));
-    await vi.advanceTimersByTimeAsync(2_000);
+    // Step (rather than jump) through connection.ts's own backoff so we catch its reconnect
+    // attempt the instant it creates a new socket — see waitForSocketCount's doc comment for why
+    // a single large advance can hand this test a socket connection.ts has already superseded.
+    const s2 = await waitForSocketCount(n, 2, { stepMs: 25, maxMs: 2_000 });
     expect(sentUserMessages).toHaveLength(0);
     expect(holdBagItems().size).toBe(0); // neither held nor anything else
 
-    await vi.advanceTimersByTimeAsync(700);
-    const s2 = n.sockets.at(-1)!;
     s2.emit("connect");
     await vi.advanceTimersByTimeAsync(0);
     s2.hub(ackFrame("a1-holdaaa", 4242, ["cmd.v1"])); // still no cap while shaken

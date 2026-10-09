@@ -266,18 +266,30 @@ export function createJobStore(options: JobStoreOptions): JobStore {
   }
 
   async function writeAtomic(record: JobRecord): Promise<void> {
-    await mkdir(dir, { recursive: true, mode: dirMode });
     const target = recordPath(record.jobId);
     const temp = `${target}.${process.pid}.${clock.now()}.${tmpSeq++}.tmp`;
-    try {
+    const attempt = async (): Promise<void> => {
+      await mkdir(dir, { recursive: true, mode: dirMode });
       await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      await rename(temp, target);
+    };
+    try {
       try {
-        await rename(temp, target);
+        await attempt();
       } catch (error) {
         if (errorCode(error) !== "ENOENT") throw error;
-        await mkdir(dir, { recursive: true, mode: dirMode });
-        await rename(temp, target);
+        // The directory (or the tmp file inside it) can vanish out from under us mid-write —
+        // e.g. a test harness `rm -rf`ing its temp dir while a background persist is still in
+        // flight. Retry the whole sequence once from scratch (fresh mkdir, fresh write).
+        await attempt();
       }
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+      // Still gone after a fresh mkdir: there is nowhere left to write to, not a transient/racy
+      // miss. Every other disk-persistence failure in this module is best-effort (logged and
+      // dropped, see the "…persistence error (ignored)" call sites in manager.ts) — a vanished
+      // directory during teardown must never surface as an unhandled rejection either.
+      warn(`bash job ${record.jobId} persistence error (ignored): directory vanished during write: ${String(error)}`);
     } finally {
       // After a successful rename the tmp path is already gone; this only
       // cleans up the failure case.

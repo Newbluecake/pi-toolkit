@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   chainStats,
   createJobStore,
@@ -14,9 +14,30 @@ import {
 import { createJobRecord, transitionJob, type JobRecord } from "../../src/bash/types.js";
 import { FakeClock } from "../../src/core/clock.js";
 
+// CI fix (unhandled-rejection repro): deterministically force `rename` to fail with ENOENT so
+// job-store.ts's "directory vanished mid-write" retry/drop path (writeAtomic) is exercised
+// without racing real filesystem timing. `vi.mock` is hoisted above these imports by vitest's
+// transform regardless of this literal placement. Only `rename` is overridden — every other
+// fs/promises export (including the ones this file itself imports above) stays real.
+let forceRenameEnoentCount = 0;
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (forceRenameEnoentCount > 0) {
+        forceRenameEnoentCount--;
+        throw Object.assign(new Error("ENOENT: simulated vanished directory"), { code: "ENOENT" });
+      }
+      return actual.rename(...args);
+    },
+  };
+});
+
 let dirs: string[] = [];
 afterEach(() => {
   dirs = [];
+  forceRenameEnoentCount = 0;
 });
 
 interface Harness {
@@ -118,6 +139,30 @@ describe("bash job store persistence", () => {
     const base = record("b_3F7K2M9P", store);
     await Promise.all([1, 2, 3, 4, 5].map((logBytes) => store.save({ ...base, logBytes })));
     expect((await store.load("b_3F7K2M9P"))?.logBytes).toBe(5);
+  });
+
+  it("a single ENOENT on rename retries once (fresh mkdir) and still lands the write", async () => {
+    const { store } = await harness();
+    const base = record("b_3F7K2M9P", store);
+    forceRenameEnoentCount = 1; // the retried rename succeeds
+    await expect(store.save(base)).resolves.toBeUndefined();
+    forceRenameEnoentCount = 0;
+    expect((await store.load("b_3F7K2M9P"))?.jobId).toBe("b_3F7K2M9P");
+  });
+
+  it("a directory that never comes back (two ENOENTs) never rejects — it warns and drops the write", async () => {
+    const { store, warnings } = await harness();
+    const base = record("b_3F7K2M9P", store);
+    // Reproduces a test harness (or a user) `rm -rf`ing the job-store root while a background
+    // persist is mid-write: the retry's own fresh mkdir+rename ALSO lands on a vanished directory
+    // (e.g. the whole tree keeps getting removed concurrently) — this must settle, not reject.
+    forceRenameEnoentCount = 2;
+    await expect(store.save(base)).resolves.toBeUndefined();
+    forceRenameEnoentCount = 0;
+    expect(warnings.some((w) => w.includes("persistence error (ignored)") && w.includes("vanished"))).toBe(true);
+    // No half-written debris left behind.
+    const leftover = await readdir(store.dir).catch(() => []);
+    expect(leftover.every((f) => !f.endsWith(".tmp"))).toBe(true);
   });
 });
 
