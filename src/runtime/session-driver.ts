@@ -12,6 +12,7 @@ import type {
 } from "../core/types.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
 import { classifyConsultToolEnd } from "../core/consult-summary.js";
+import { installPrefixProbe } from "../consult/prefix-probe.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
 
@@ -465,6 +466,7 @@ class PiSessionHandle implements SessionHandle {
   constructor(
     public readonly session: AgentSession,
     readonly childExtensionMissing: boolean = false,
+    private readonly disposePrefixProbe: () => void = () => undefined,
   ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
@@ -510,6 +512,11 @@ class PiSessionHandle implements SessionHandle {
     return Promise.resolve();
   }
   dispose(): DisposeReport {
+    try {
+      this.disposePrefixProbe();
+    } catch {
+      // Probe cleanup is diagnostic-only and must never change disposal semantics.
+    }
     try {
       this.session.dispose();
       return { returned: true, killed: 0, unkillable: [] };
@@ -789,10 +796,14 @@ export class PiSessionDriver implements SessionDriver {
           ...(persist ? {} : { persist: false }),
         } as Parameters<typeof createAgentSession>[0]),
       )
-      .then(
-        ({ session }) =>
-          new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec))),
-      );
+      .then(({ session }) => {
+        const disposePrefixProbe = installPrefixProbe(session, resolved);
+        return new PiSessionHandle(
+          session,
+          computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
+          disposePrefixProbe,
+        );
+      });
   }
   resume(sessionFile: string, spec: SessionSpec) {
     const resolved = this.withResolvedModel(spec);
@@ -808,10 +819,14 @@ export class PiSessionDriver implements SessionDriver {
         .then((options) =>
           createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]),
         )
-        .then(
-          ({ session }) =>
-            new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec))),
-        );
+        .then(({ session }) => {
+          const disposePrefixProbe = installPrefixProbe(session, resolved);
+          return new PiSessionHandle(
+            session,
+            computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
+            disposePrefixProbe,
+          );
+        });
     }
 
     // Consult C2 must fail closed after createAgentSession has allocated an AgentSession,
@@ -819,10 +834,16 @@ export class PiSessionDriver implements SessionDriver {
     // runner's late-arrival hook only sees successfully resolved handles.
     const { consultGuard: _consultGuard, ...piSpec } = resolved;
     let created: AgentSession | undefined;
+    let disposePrefixProbe: (() => void) | undefined;
     let disposed = false;
     const disposeOnce = () => {
       if (disposed || !created) return;
       disposed = true;
+      try {
+        disposePrefixProbe?.();
+      } catch {
+        // Probe cleanup is diagnostic-only and must not replace the guard error.
+      }
       try {
         created.dispose();
       } catch {
@@ -833,6 +854,7 @@ export class PiSessionDriver implements SessionDriver {
       .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
       .then(({ session }) => {
         created = session;
+        disposePrefixProbe = installPrefixProbe(session, resolved);
         let verdict: ReturnType<typeof guard.preflight> | undefined;
         try {
           verdict = guard.preflight(session);
@@ -858,7 +880,11 @@ export class PiSessionDriver implements SessionDriver {
           if (detail.startsWith("[consult-preserve:")) throw error;
           throw new Error(`[consult-preserve:guard_unavailable:install-failed] ${detail}`);
         }
-        return new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)));
+        return new PiSessionHandle(
+          session,
+          computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
+          disposePrefixProbe,
+        );
       })
       .catch((error: unknown) => {
         disposeOnce();
