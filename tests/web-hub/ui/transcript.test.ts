@@ -586,6 +586,7 @@ describe("TxCustom.vue — markdown rendering", () => {
     });
     expect(wrapper.get(".kind-chip").text()).toBe("notification");
     expect(wrapper.get(".kind-chip").attributes("title")).toBe("subagent:notification");
+    expect(wrapper.find('.avatar-notice use[href="#i-bot"]').exists()).toBe(true);
     expect(wrapper.get(".msg-head .who").text()).toBe("subagent");
     expect(wrapper.find(".md").exists()).toBe(true); // MarkdownView.vue's own root class
     expect(wrapper.get("strong").text()).toBe("Run finished");
@@ -598,6 +599,7 @@ describe("TxCustom.vue — markdown rendering", () => {
     expect(tick.get(".kind-chip").text()).toBe("usage");
     expect(tick.get(".kind-chip").attributes("title")).toBe("subagent:usage-tick");
     expect(tick.get(".msg-head .who").text()).toBe("notice");
+    expect(tick.find('.avatar-notice use[href="#i-info"]').exists()).toBe(true);
     const hint = mount(TxCustom, { props: { customType: "subagent:compact-hint", text: "x", truncated: false } });
     expect(hint.get(".kind-chip").text()).toBe("compact-hint");
     expect(hint.get(".msg-head .who").text()).toBe("notice");

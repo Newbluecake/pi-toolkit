@@ -48,7 +48,7 @@ const chipText = computed(() => (namespaced.value ? (KIND_ALIASES[kind.value] ??
 
 <template>
   <article class="msg-custom tx-item">
-    <span class="avatar avatar-notice"><AppIcon name="branch" class="icon" /></span>
+    <span class="avatar avatar-notice"><AppIcon :name="isSubagentNotice ? 'bot' : 'info'" class="icon" /></span>
     <div class="msg-main">
       <div class="msg-head">
         <span class="who">{{ isSubagentNotice ? t("transcript.whoSubagent") : t("transcript.whoNotice") }}</span>
