@@ -12,6 +12,11 @@ import {
   DEFAULT_HINT_THRESHOLD_PERCENT,
   DEFAULT_USAGE_TICK_STEP_PERCENT,
 } from "../compact-hint/threshold.js";
+import {
+  DEFAULT_TIDY_BATCH_SETTINGS,
+  resolveTidyBatchSettings,
+  type TidyBatchSettings,
+} from "../memory/tidy/batch-settings.js";
 // web-hub (plan 包 I): the settings type is owned by package D; `import type`
 // only, so this pre-guard module never loads the web-hub runtime graph.
 import type { WebHubLanSettings, WebHubSettings, WebHubSpawnSettings } from "../web-hub/agent/index.js";
@@ -178,6 +183,8 @@ export interface MemoryTidySettings {
   /** Turn-boundary cap; a tidy run is aborted (zero writes) once it would
    *  start turn `maxTurns + 1`. Default 4. */
   maxTurns: number;
+  /** Batch tidy controls (§11); parsed by the frozen pi-free batch settings resolver. */
+  batch: TidyBatchSettings;
 }
 
 export type RunawayPolicy = "diagnose_only" | "terminate_on_stall";
@@ -1062,6 +1069,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
       maxOutputBytes: 65_536,
       maxCostUsd: 2.0,
       maxTurns: 4,
+      batch: { ...DEFAULT_TIDY_BATCH_SETTINGS },
     },
   },
   reload: { defer: true },
@@ -1141,6 +1149,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "goal.deliveryWatchdogMs",
   "consult.timeoutMs",
   "memory.tidy.timeoutMs",
+  "memory.tidy.batch.totalTimeoutMs",
   "cacheTtl.keepaliveIntervalMs",
   "cacheTtl.adaptiveColdCooldownMs",
   "cacheTtl.adaptiveColdMinHorizonMs",
@@ -1832,6 +1841,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
   const tidyRaw = value.tidy;
   const tidyObj: Record<string, unknown> =
     tidyRaw && typeof tidyRaw === "object" && !Array.isArray(tidyRaw) ? (tidyRaw as Record<string, unknown>) : {};
+  const maxInputBytes = num(tidyObj.maxInputBytes, defaults.tidy.maxInputBytes, 8192, 262_144);
   const tidy: MemoryTidySettings = {
     agentType:
       typeof tidyObj.agentType === "string" && tidyObj.agentType.trim() !== ""
@@ -1839,10 +1849,11 @@ export function parseMemorySettings(input: unknown): MemorySettings {
         : defaults.tidy.agentType,
     model: typeof tidyObj.model === "string" ? tidyObj.model : defaults.tidy.model,
     timeoutMs: num(tidyObj.timeoutMs, defaults.tidy.timeoutMs, 30_000, 1_800_000),
-    maxInputBytes: num(tidyObj.maxInputBytes, defaults.tidy.maxInputBytes, 8192, 262_144),
+    maxInputBytes,
     maxOutputBytes: num(tidyObj.maxOutputBytes, defaults.tidy.maxOutputBytes, 4096, 262_144),
     maxCostUsd: numFloat(tidyObj.maxCostUsd, defaults.tidy.maxCostUsd, 0.05, 50),
     maxTurns: num(tidyObj.maxTurns, defaults.tidy.maxTurns, 1, 20),
+    batch: resolveTidyBatchSettings(tidyObj.batch, maxInputBytes),
   };
 
   return {

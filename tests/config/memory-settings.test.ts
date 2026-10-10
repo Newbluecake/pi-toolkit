@@ -3,8 +3,14 @@
 // explicit legacy remains the byte-compatible opt-out.
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, loadSettings, parseMemorySettings } from "../../src/config/settings.js";
-import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../src/config/setting-specs.js";
+import {
+  DEFAULT_SETTINGS,
+  loadSettings,
+  parseMemorySettings,
+  TIME_SETTING_MS_PATHS,
+} from "../../src/config/settings.js";
+import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS, settingKeys } from "../../src/config/setting-specs.js";
+import { DEFAULT_TIDY_BATCH_SETTINGS } from "../../src/memory/tidy/batch-settings.js";
 
 const defaults = DEFAULT_SETTINGS.memory;
 
@@ -36,6 +42,7 @@ describe("memory settings", () => {
         maxOutputBytes: 65_536,
         maxCostUsd: 2.0,
         maxTurns: 4,
+        batch: { ...DEFAULT_TIDY_BATCH_SETTINGS },
       },
     });
   });
@@ -230,6 +237,7 @@ describe("memory settings", () => {
       maxOutputBytes: 10_000,
       maxCostUsd: 1.5,
       maxTurns: 2,
+      batch: { ...DEFAULT_TIDY_BATCH_SETTINGS, targetBytes: 20_000 },
     });
     // model accepts a free-form (non-strict-provider/id) value too — §7.1
     // resolves/WARNs about that at DISPATCH time (P4), not at settings-parse time.
@@ -250,6 +258,99 @@ describe("memory settings", () => {
 
   it("timeoutMs round-trips through the file's timeoutS seconds key (TIME_SETTING_MS_PATHS)", () => {
     expect(loadSettings({ memory: { tidy: { timeoutS: 60 } } }).memory.tidy.timeoutMs).toBe(60_000);
+  });
+
+  it("parses the frozen batch settings with per-field tolerance and every boundary", () => {
+    const batch = {
+      enabled: false,
+      targetBytes: 8192,
+      maxModelRuns: 1,
+      maxTotalCostUsd: 0.1,
+      totalTimeoutS: 300,
+      outputTokPerSec: 5,
+    };
+    expect(loadSettings({ memory: { tidy: { maxInputBytes: 8192, batch } } }).memory.tidy.batch).toEqual({
+      enabled: false,
+      targetBytes: 8192,
+      maxModelRuns: 1,
+      maxTotalCostUsd: 0.1,
+      totalTimeoutMs: 300_000,
+      outputTokPerSec: 5,
+    });
+    expect(
+      loadSettings({
+        memory: {
+          tidy: {
+            maxInputBytes: 262_144,
+            batch: {
+              targetBytes: 262_144,
+              maxModelRuns: 20,
+              maxTotalCostUsd: 100,
+              totalTimeoutS: 7200,
+              outputTokPerSec: 500,
+            },
+          },
+        },
+      }).memory.tidy.batch,
+    ).toEqual({
+      enabled: true,
+      targetBytes: 262_144,
+      maxModelRuns: 20,
+      maxTotalCostUsd: 100,
+      totalTimeoutMs: 7_200_000,
+      outputTokPerSec: 500,
+    });
+    expect(
+      parseMemorySettings({
+        tidy: {
+          batch: {
+            enabled: "yes",
+            targetBytes: 999_999,
+            maxModelRuns: 0,
+            maxTotalCostUsd: 0,
+            totalTimeoutMs: 1,
+            outputTokPerSec: 501,
+          },
+        },
+      }).tidy.batch,
+    ).toEqual(DEFAULT_TIDY_BATCH_SETTINGS);
+  });
+
+  it("uses maxInputBytes as the batch target ceiling", () => {
+    expect(
+      parseMemorySettings({ tidy: { maxInputBytes: 16_384, batch: { targetBytes: 32_768 } } }).tidy.batch.targetBytes,
+    ).toBe(16_384);
+  });
+
+  it("registers the batch duration path and keeps specs/parser/editor listing in parity", () => {
+    expect(TIME_SETTING_MS_PATHS).toContain("memory.tidy.batch.totalTimeoutMs");
+    const keys = [
+      "memory.tidy.batch.enabled",
+      "memory.tidy.batch.targetBytes",
+      "memory.tidy.batch.maxModelRuns",
+      "memory.tidy.batch.maxTotalCostUsd",
+      "memory.tidy.batch.totalTimeoutS",
+      "memory.tidy.batch.outputTokPerSec",
+    ];
+    expect(keys.every((key) => settingKeys().includes(key))).toBe(true);
+    expect(Object.keys(SETTING_SPECS).filter((key) => key.startsWith("memory.tidy.batch."))).toEqual(keys);
+    for (const key of keys) {
+      const spec = SETTING_SPECS[key]!;
+      expect(isKnownSettingKey(key), key).toBe(true);
+      expect(spec.live, key).toBeUndefined();
+      expect(defaultOf(spec), key).not.toBeUndefined();
+      expect(currentOf(DEFAULT_SETTINGS, spec), key).not.toBe("(unset)");
+    }
+    expect(SETTING_SPECS["memory.tidy.batch.totalTimeoutS"]).toMatchObject({
+      path: "memory.tidy.batch.totalTimeoutMs",
+      time: true,
+      min: 300,
+      max: 7200,
+    });
+    expect(SETTING_SPECS["memory.tidy.batch.targetBytes"]).toMatchObject({ min: 8192, max: 262_144, integer: true });
+    expect(SETTING_SPECS["memory.tidy.batch.maxModelRuns"]).toMatchObject({ min: 1, max: 20, integer: true });
+    expect(SETTING_SPECS["memory.tidy.batch.maxTotalCostUsd"]).toMatchObject({ min: 0.1, max: 100 });
+    expect(SETTING_SPECS["memory.tidy.batch.outputTokPerSec"]).toMatchObject({ min: 5, max: 500 });
   });
 
   it("exposes the new §9 knobs in SETTING_SPECS, all non-live", () => {

@@ -613,6 +613,35 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ...count("memory.tidy.maxTurns", 1, "Turn-boundary cap for a tidy run"),
     max: 20,
   } as SettingSpec,
+  "memory.tidy.batch.enabled": bool("memory.tidy.batch.enabled", "Enable batched tidy planning and application"),
+  "memory.tidy.batch.targetBytes": {
+    ...count("memory.tidy.batch.targetBytes", 8192, "Target bytes per batch; capped by memory.tidy.maxInputBytes"),
+    max: 262_144,
+  } as SettingSpec,
+  "memory.tidy.batch.maxModelRuns": {
+    ...count("memory.tidy.batch.maxModelRuns", 1, "Maximum model runs for one batched tidy"),
+    max: 20,
+  } as SettingSpec,
+  "memory.tidy.batch.maxTotalCostUsd": {
+    kind: "number",
+    path: "memory.tidy.batch.maxTotalCostUsd",
+    min: 0.1,
+    max: 100,
+    description: "Cumulative cost cap for one batched tidy run, USD",
+  },
+  "memory.tidy.batch.totalTimeoutS": seconds("memory.tidy.batch.totalTimeoutMs", {
+    min: 300,
+    max: 7200,
+    hint: "hard total budget for a batched tidy run",
+    description: "Batched tidy run timeout",
+  }),
+  "memory.tidy.batch.outputTokPerSec": {
+    kind: "number",
+    path: "memory.tidy.batch.outputTokPerSec",
+    min: 5,
+    max: 500,
+    description: "Expected model output rate for batched tidy budgeting, tokens per second",
+  },
   "extend.notify": choice(
     "extend.notify",
     ["background", "always", "off"],
