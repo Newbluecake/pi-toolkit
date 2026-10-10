@@ -142,6 +142,30 @@
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --pulse: 1.6s; /* running dot halo */
   --blink: 1.05s; /* streaming caret */
+
+  /* ------------------------------------------------- worktree-graph lanes/chips
+   * (worktree-graph plan v2 §4.3, package P5 — APPEND-only addition, all three theme blocks).
+   * Lane line colors: ≥3:1 against --c-surface (graph-tokens-contrast.test.ts pins it). The
+   * first four reuse the mockup's family pairings (primary/info/accent/orange), the rest
+   * spread the remaining semantic hues; light values are darkened variants of the base tokens
+   * (the base hues themselves sit under 3:1 on white). */
+  --gg-lane-0: #075e56; /* teal — primary family */
+  --gg-lane-1: #174bad; /* blue — info family */
+  --gg-lane-2: #5b34b5; /* violet — accent family */
+  --gg-lane-3: #8a3908; /* amber — orange family */
+  --gg-lane-4: #0f6a34; /* green — success family */
+  --gg-lane-5: #7c1a20; /* red — danger family */
+  --gg-lane-6: #5f4711; /* gold — stale family */
+  --gg-lane-7: #4a5a62; /* slate — idle family */
+  /* chip pairs: text ≥4.5:1 against its own chip background (soft backgrounds) */
+  --gg-chip-fg-head: var(--c-on-primary-soft);
+  --gg-chip-bg-head: var(--c-primary-soft);
+  --gg-chip-fg-branch: #0a5f58;
+  --gg-chip-bg-branch: #e3f4f1;
+  --gg-chip-fg-remote: #43535c;
+  --gg-chip-bg-remote: #eef3f3;
+  --gg-chip-fg-tag: #6b3fa0;
+  --gg-chip-bg-tag: #f0ebfd;
 }
 
 /* dark: system preference (unless the user pinned light) … */
@@ -205,6 +229,25 @@
     --shadow-1: none;
     --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.02);
     --shadow-3: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+
+    /* worktree-graph (P5): dark lane/chip set — lighter hues on the dark surface, same
+     * contrast gates (lanes ≥3:1 on #141c20, chip text ≥4.5:1 on its soft background). */
+    --gg-lane-0: #3ccbb9;
+    --gg-lane-1: #72a7f5;
+    --gg-lane-2: #a98bf5;
+    --gg-lane-3: #f2914a;
+    --gg-lane-4: #4cc77e;
+    --gg-lane-5: #f2767a;
+    --gg-lane-6: #d6a84e;
+    --gg-lane-7: #9db0b8;
+    --gg-chip-fg-head: var(--c-on-primary-soft);
+    --gg-chip-bg-head: var(--c-primary-soft);
+    --gg-chip-fg-branch: #8ae6d9;
+    --gg-chip-bg-branch: #12302d;
+    --gg-chip-fg-remote: #c2ced4;
+    --gg-chip-bg-remote: #1b2428;
+    --gg-chip-fg-tag: #cabaf9;
+    --gg-chip-bg-tag: #231c3a;
   }
 }
 
@@ -268,6 +311,24 @@
   --shadow-1: none;
   --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.02);
   --shadow-3: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+
+  /* worktree-graph (P5): forced-dark lane/chip set — identical to the system-dark block. */
+  --gg-lane-0: #3ccbb9;
+  --gg-lane-1: #72a7f5;
+  --gg-lane-2: #a98bf5;
+  --gg-lane-3: #f2914a;
+  --gg-lane-4: #4cc77e;
+  --gg-lane-5: #f2767a;
+  --gg-lane-6: #d6a84e;
+  --gg-lane-7: #9db0b8;
+  --gg-chip-fg-head: var(--c-on-primary-soft);
+  --gg-chip-bg-head: var(--c-primary-soft);
+  --gg-chip-fg-branch: #8ae6d9;
+  --gg-chip-bg-branch: #12302d;
+  --gg-chip-fg-remote: #c2ced4;
+  --gg-chip-bg-remote: #1b2428;
+  --gg-chip-fg-tag: #cabaf9;
+  --gg-chip-bg-tag: #231c3a;
 }
 
 @media (prefers-reduced-motion: reduce) {

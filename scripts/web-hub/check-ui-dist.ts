@@ -66,7 +66,18 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // recall/re-edit and the epoch-scoped merge reducer, plus the history dialog/list logic; the
 // release gate measured 225,926 B gz with both landed, ~11 KiB slack on top.
 // Precise per-build numbers drift with in-flight packages — re-measure before the next bump.
-const JS_BUDGET_GZIP_BYTES = 232 * 1024;
+// bumped to 245 KiB by worktree-graph P5 (2026-10-10). Independent pre-P5/P5
+// measurement: main 216,146 B -> 218,760 B gz (+2,614 B), comprising approximately
+// 1,334 B of en/zh graph dictionaries (the eager import.meta.glob architecture) and
+// 1,280 B of panel wiring. Layout code stays in lazy assets/WorktreeGraph-*.js (~6.8 KB gz).
+// Plan §5's <=1.5 KB main-increment gate is exceeded by an explicit main-session exception
+// accepted 2026-10-10; this is NOT evidence of layout code leaking into main.
+// Remeasured after the P5 rejection fixes (2026-10-10, current tree including concurrent
+// packages): main 219,241 B gz; WorktreeGraph lazy chunk 6,840 B gz; total JS 248,175 B gz
+// (including theme-init.js). The accepted 245 KiB budget remains unchanged, with 2,705 B
+// of current-tree headroom. The independent delta above isolates P5; the current-tree
+// main size must not be compared as an isolated P5 delta.
+const JS_BUDGET_GZIP_BYTES = 245 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}

@@ -1,0 +1,424 @@
+/*
+ * Commit-graph styles (worktree-graph plan v2 §4.3, package P5) — `gg-` prefix, imported by
+ * `components/graph/WorktreeGraph.vue` (the LAZY chunk), so this file rides that chunk's CSS
+ * split too. Token-only (no literals beyond geometry); `--gg-lane-0..7` and
+ * `--gg-chip-fg-k`/`--gg-chip-bg-k` live in tokens.css (all three theme blocks — the contrast
+ * test parses them there).
+ *
+ * Layout rulings pinned here (§4.3):
+ * - `.gg-viewport` — the independent bounded scroll viewport, `max-height: min(32vh, 12 rows)`
+ *   (`--gg-row` math below); NO `overscroll-behavior: contain` (the `.wt-list` ruling — the
+ *   scroll chain must pass through once the edge is hit).
+ * - `--gg-row` — `max(22px × fs-scale, --gg-row-min)` with `--gg-row-min: 32px` under coarse
+ *   pointers: the row pitch scales with the user font size, and touch keeps a ≥32px row (the
+ *   hash cell's hit box — §4.3: the CELL is the copy button, no 32px CopyButton).
+ * - table `table-layout: fixed`: subject/chip column `min-width: 0` + ellipsis, so ≤480px
+ *   never overflows horizontally (Q3's three columns only).
+ * - merge rows DIMMED (§0.2 user ruling — the OPPOSITE of the mockup's bold): `.is-merge`
+ *   subject color `--c-text-3` + a hollow dot (the SVG dot is stroked, not filled).
+ * - the current row (`data-current`) gets a background tint + the SVG outer ring; other
+ *   worktree HEADs get a dashed ring + badge (all in the SVG geometry, colors here).
+ */
+
+.gg {
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-1);
+  border-top: 1px dashed var(--c-border);
+}
+
+/* §4.3 row pitch: scales with --fs-scale; coarse pointers raise the floor to 32px. */
+.gg {
+  --gg-row-min: 0px;
+}
+@media (pointer: coarse) {
+  .gg {
+    --gg-row-min: 32px;
+  }
+}
+.gg-viewport {
+  --gg-row: max(calc(22px * var(--fs-scale, 1)), var(--gg-row-min));
+  max-height: min(32vh, calc(var(--gg-row) * 12));
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.gg-table {
+  table-layout: fixed;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.gg-table tr {
+  height: var(--gg-row, 22px);
+}
+
+.gg-cell {
+  padding: 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+  vertical-align: middle;
+}
+
+/* lane column: sized by --gg-w (the component's measured lane-span width) */
+.gg-lanes {
+  width: var(--gg-w, 64px);
+  padding: 0;
+  position: relative;
+}
+
+.gg-svg {
+  display: block;
+}
+
+.gg-route path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.gg-route path {
+  stroke-opacity: 0.85;
+}
+
+/* §4.1 stub: short fade, dashed (mockup `1 4`), 50% opacity */
+.gg-stub {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-dasharray: 1 4;
+  stroke-linecap: round;
+  stroke-opacity: 0.5;
+}
+
+/* #6 fold-boundary stub: shorter, thinner — a marker, never a connection */
+.gg-foldstub {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-opacity: 0.6;
+}
+
+.gg-dot {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* The SVG spans every row, so merge styling belongs to each node. */
+.gg-dot.is-merge {
+  fill: var(--c-surface);
+  stroke: currentColor;
+  stroke-width: 2;
+  opacity: 0.6;
+}
+
+/* folded node: hollow diamond (#6) */
+.gg-fold-node {
+  fill: none;
+  stroke-width: 1.5;
+  transform-box: fill-box;
+  transform: rotate(45deg);
+}
+
+/* the fold column's ⋮ marks */
+.gg-fold-mark {
+  fill: var(--c-text-3);
+  font-size: 10px;
+  text-anchor: middle;
+  opacity: 0.7;
+}
+
+/* ---- merge rows DIMMED (§0.2 ruling — opposite of the mockup's bold) ---- */
+tr.is-merge .gg-sub {
+  color: var(--c-text-3);
+}
+
+/* ---- current checkout highlight (§4.3) ---- */
+.gg-table tr[data-current="true"] {
+  background: var(--c-sunken);
+}
+
+/* ---- subject + chips column ---- */
+.gg-subject {
+  min-width: 0;
+}
+
+.gg-refs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.gg-ref {
+  display: inline-flex;
+  align-items: center;
+  min-height: calc(17px * var(--fs-scale, 1));
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 22ch;
+}
+
+/* chip colors: per-kind tokens (all three theme blocks in tokens.css; contrast-tested) */
+.gg-ref.k-head {
+  background: var(--gg-chip-bg-head);
+  color: var(--gg-chip-fg-head);
+}
+.gg-ref.k-branch {
+  background: var(--gg-chip-bg-branch);
+  color: var(--gg-chip-fg-branch);
+}
+.gg-ref.k-remote {
+  background: var(--gg-chip-bg-remote);
+  color: var(--gg-chip-fg-remote);
+  border: 1px solid var(--c-border-strong);
+  font-weight: 400;
+}
+.gg-ref.k-tag {
+  background: var(--gg-chip-bg-tag);
+  color: var(--gg-chip-fg-tag);
+}
+
+/* `origin/HEAD`-style symref: a smaller, muted chip */
+.gg-ref.is-sym {
+  font-size: calc(10px * var(--fs-scale, 1));
+  padding: 0 4px;
+  color: var(--c-text-3);
+  border: 1px dashed var(--c-border-strong);
+  background: none;
+}
+
+.gg-ref-overflow {
+  background: none;
+  border: 1px dashed var(--c-border-strong);
+  color: var(--c-text-3);
+  font-weight: 400;
+}
+
+/* worktree-HEAD badge (§4.2/#14): dashed outline + dot, label from the StatusInfo row */
+.gg-wtbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: calc(17px * var(--fs-scale, 1));
+  padding: 0 6px;
+  border: 1px dashed var(--c-border-strong);
+  border-radius: var(--r-sm);
+  font-family: var(--font-sans);
+  font-size: calc(10px * var(--fs-scale, 1));
+  font-weight: 600;
+  color: var(--c-text-3);
+  white-space: nowrap;
+}
+
+.gg-wtbadge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--c-text-3);
+}
+
+.gg-sub {
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+/* ---- right columns: date / author / hash (absolute date, §4.2) ---- */
+.gg-date,
+.gg-author {
+  width: 12ch;
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-2xs);
+}
+
+.gg-author {
+  font-size: var(--fs-2xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gg-hashcell {
+  width: 7ch;
+  text-align: right;
+}
+
+/* §4.3: the hash CELL is the copy button — full row height, no `.btn` (a 32px CopyButton
+ * would break the row); coarse pointers get theirs from --gg-row-min (≥32px). */
+.gg-hash {
+  display: inline-block;
+  width: 100%;
+  min-height: var(--gg-row, 22px);
+  margin: 0;
+  padding: 0 2px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+  cursor: pointer;
+}
+
+.gg-hash:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+/* ---- states (§4.3) ---- */
+.gg-state {
+  margin: var(--sp-1) 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.gg-error {
+  margin-top: var(--sp-1);
+}
+
+.gg-error-title {
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+}
+
+.gg-error-text {
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+}
+
+.gg-retry {
+  min-height: 24px;
+  margin-top: var(--sp-1);
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
+.gg-degrade {
+  margin-top: var(--sp-1);
+  padding: 2px 6px;
+  border-left: 2px solid var(--c-warning);
+}
+
+.gg-degrade-title {
+  color: var(--c-warning-text);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+}
+
+.gg-degrade-note {
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.gg-foot {
+  margin-top: 2px;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- ≤480px (§0.2 Q3): lanes(≤4) + subject (HEAD chip only) + hash ---- */
+@media (max-width: 480px) {
+  .gg-table.is-mobile .gg-date,
+  .gg-table.is-mobile .gg-author {
+    display: none;
+  }
+
+  .gg-table.is-mobile .gg-subject {
+    /* subject takes the remaining width; the hash keeps its fixed 7ch */
+    width: auto;
+  }
+
+  .gg-ref {
+    max-width: 16ch;
+  }
+}
+
+/* coarse pointers: ≥44px hit boxes for the interactive controls (the hash cell inherits the
+ * ≥32px row; the button itself spans the full cell) */
+@media (pointer: coarse) {
+  .gg-hash {
+    min-height: var(--gg-row, 32px);
+  }
+}
+
+/* ---- the section's summary row (the panel's second-level toggle, §4.3) ---- */
+.gg-section {
+  margin-top: var(--sp-1);
+}
+
+.gg-sum {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 20px; /* summary-row family compaction (see worktrees.css) */
+  margin: 0 -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  text-align: left;
+}
+
+.gg-sum:hover {
+  background: var(--c-surface-2);
+}
+
+.gg-sum .icon-sm:first-child {
+  flex: none;
+}
+
+.gg-sum-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.gg-sum .chev {
+  margin-left: auto;
+  flex: none;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.gg-section[data-open="true"] .gg-sum .chev,
+.gg-sum[aria-expanded="true"] .chev {
+  transform: rotate(90deg);
+}
+
+/* the graph body sits INSIDE the summary row's section wrapper, not a sibling table row */
+.gg > .gg-viewport,
+.gg-viewport {
+  margin-top: 2px;
+}
+
+@media (pointer: coarse) {
+  .gg-sum {
+    min-height: 44px; /* primary touch target (ui-design §3.12) */
+  }
+}
+
+/* the graph section's list-item wrapper (P5 §4.3): hosts the section inside the worktree
+ * list (see WorktreePanel.vue's I8 note); plain container, no list styling of its own. */
+.gg-wrap {
+  display: block;
+  width: 100%;
+  padding: 0;
+}
