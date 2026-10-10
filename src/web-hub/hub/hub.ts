@@ -135,6 +135,13 @@ export interface RunningHub {
   readonly closed: Promise<string>;
 }
 
+export interface ClosedHub {
+  /** Preserve legacy callers' `"exists" in result` non-running-result guard. */
+  exists: false;
+  closed: true;
+  reason: string;
+}
+
 export const REGISTRY_TICK_MS = 5_000;
 /** \u00a76.7.1 (C8) "hub \u8fd0\u884c\u671f": "\u6bcf 10s\uff08unref\uff09\u4e0e\u6bcf\u6b21 agent hello \u65f6" \u2014 the hello-triggered half
  * lives in `agent-server.ts` (C3's file, out of this package's W3 list); this constant only
@@ -220,7 +227,7 @@ export async function startHub(
   config: HubConfig,
   frontend: FrontendFactory,
   deps: StartHubDeps = {},
-): Promise<RunningHub | { exists: true }> {
+): Promise<RunningHub | { exists: true } | ClosedHub> {
   if (config.lan !== undefined && deps.lanConfigError !== undefined) {
     throw new Error("web-hub: startHub received both config.lan and deps.lanConfigError");
   }
@@ -244,13 +251,41 @@ export async function startHub(
   };
   const rootScope: Scope = createScope({ log, now }); // ③ hub-lifetime scope
   const cleanup: Array<() => Promise<void>> = []; // executed in reverse on failure, each bounded
+  let closing: Promise<void> | undefined = undefined;
+  let resolveClosed: (reason: string) => void = () => {};
+  const closed = new Promise<string>((resolve) => {
+    resolveClosed = resolve;
+  });
+  // Resource-producing steps own a late result even if cancellation wins the race.
+  async function startupStep<T>(pending: Promise<T>, disposeLate?: (value: T) => Promise<void> | void): Promise<T> {
+    const guarded = pending.then(async (value) => {
+      if (startup.signal.aborted) {
+        if (disposeLate !== undefined) await bounded(Promise.resolve(disposeLate(value)));
+        throw startup.signal.reason;
+      }
+      return value;
+    });
+    const value = await withSignal(guarded, startup.signal);
+    if (startup.signal.aborted) {
+      if (disposeLate !== undefined) await bounded(Promise.resolve(disposeLate(value)));
+      throw startup.signal.reason;
+    }
+    return value;
+  }
+
+  async function closedResult(): Promise<ClosedHub> {
+    await closing;
+    return { exists: false, closed: true, reason: await closed };
+  }
 
   try {
     await withSignal(ensurePrivateDir(paths.stateDir, paths.policies.stateDir, fsWithWarn), startup.signal); // ②
 
-    const single = await withSignal(
+    const single = await startupStep(
       acquireSingleton(paths, { now, fs: fsWithWarn, signal: startup.signal }), // ④
-      startup.signal,
+      async (late) => {
+        if (late.kind !== "exists" && late.kind !== "failed") await late.release();
+      },
     );
     if (single.kind === "exists") {
       clearTimeout(startTimer);
@@ -262,6 +297,7 @@ export async function startHub(
     if (single.kind === "failed") throw new Error(`web-hub: ${single.error}`);
     const owner = single; // narrow once here; closures defined below (e.g. `close`) don't retain flow narrowing
     cleanup.push(() => owner.release());
+    startup.signal.throwIfAborted();
     // web-hub-spawn plan §SP10 (arch §7.1): `spawn.v1` rides BOTH cap surfaces whenever
     // `config.spawn` exists — even when the platform probe or launcher check failed (the UI
     // needs the cap to explain WHY spawn is unavailable, `GET /api/headless` carries the
@@ -317,22 +353,48 @@ export async function startHub(
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
     ];
 
-    let supersede: SupersedeController | undefined;
+    let supersede: SupersedeController | undefined = undefined;
     // web-hub-spawn plan §SP10: the spawn assembly handles, declared early (same lazy-closure
     // pattern as `supersede`) — the registry's `onVersion` below reads `spawnSup` long before
     // the assembly itself is constructed further down (after `commandRouter`).
-    let spawnSup: SpawnSupervisor | undefined;
-    let spawnRoutes: SpawnFrontendPort | undefined;
-    let firstPromptFwd: FirstPromptForwarder | undefined;
+    let spawnSup: SpawnSupervisor | undefined = undefined;
+    let spawnRoutes: SpawnFrontendPort | undefined = undefined;
+    let firstPromptFwd: FirstPromptForwarder | undefined = undefined;
     // session-history plan §4.8 (P-int): P-scan's history service, constructed inside the spawn
     // assembly only when `config.spawn.history === true` AND the platform probe passes; disposed
     // on BOTH shutdown paths (v3.3 W3 — see the close()/cleanup pushes below).
-    let spawnHistory: SpawnHistoryService | undefined;
+    let spawnHistory: SpawnHistoryService | undefined = undefined;
     /** Verifier r2 P1: the ONE idempotent, bounded supervisor shutdown both rollback entries
      * share (assigned inside the spawn assembly; `SpawnSupervisor.shutdown` itself is
      * first-call-wins, so a second entry's call resolves through the same promise). */
     let spawnShutdownOnce: (() => Promise<void>) | undefined;
     let recoverRotateOnHello: (() => void) | undefined;
+    // Initialize every late teardown binding before exposing admin shutdown on the socket.
+    const supersedeWaitCancels = new Set<() => void>();
+    let supersedeTimer: ReturnType<typeof setInterval> | undefined = undefined;
+    let unsubscribeSupersedeOnDialogs = (): void => {};
+    let stopFence = (): void => {};
+    let idle: Pick<ReturnType<typeof createIdleMonitor>, "stop"> = { stop() {} };
+    let tick: ReturnType<typeof setInterval> | undefined = undefined;
+    let rotateScan: ReturnType<typeof setInterval> | undefined = undefined;
+    let uploadInflightTick: ReturnType<typeof setInterval> | undefined = undefined;
+    let uploadSweepTick: ReturnType<typeof setInterval> | undefined = undefined;
+    let uploads: UploadStore | undefined = undefined;
+    let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined = undefined;
+    let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined = undefined;
+    let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined = undefined;
+    let lanDeps: LanFrontendDeps | undefined = undefined;
+    let agentServer: ReturnType<typeof createAgentServer> | undefined = undefined;
+    let fe: HttpFrontend = {
+      listen: async () => ({ port: 0 }),
+      close: async () => {},
+      clientCount: () => 0,
+      ui: {
+        serve: async () => false,
+        refresh: async () => ({ state: "unbuilt", candidates: [] }),
+        status: () => ({ state: "unbuilt", candidates: [] }),
+      },
+    };
     const registry = createRegistry({
       now,
       log,
@@ -367,13 +429,8 @@ export async function startHub(
       runFileReader.dispose();
     });
     let httpPort = 0;
-    // Admin control plane (plan §8, S1-W3 LD): constructed once, ahead of `lanDeps`/`fe`/`close`
-    // (all still `undefined`/not-yet-declared at this point) — every getter below is a closure
-    // over this function's own `let`/`const` bindings, read lazily whenever an actual `lan_req`/
-    // `hub_ctl` frame arrives (always well after every one of them has settled; `close` is a
-    // hoisted function declaration in this same scope, so referencing it here before its textual
-    // definition is safe). This is what lets `hello_ack.caps` include `"ctl.v1"` unconditionally
-    // and `"lan.v1"` once `config.lan` is set, regardless of whether LAN assembly ever succeeds.
+    // Admin getters and close() dependencies are initialized before socket exposure.
+    // Keeping ctl.v1 available does not depend on LAN assembly succeeding.
     const admin = createAdminHandler({
       log,
       hasLan: () => config.lan !== undefined,
@@ -383,6 +440,10 @@ export async function startHub(
       lan: () => fe.lan,
       lanStatus: () => hubJson.current()?.lan,
       shutdown: (reason) => {
+        if (closing !== undefined) return;
+        if (reason === "restart") {
+          registry.broadcast({ t: "superseded", nextVersion: config.pluginVersion, yieldMs: SUPERSEDE_YIELD_MS });
+        }
         // acc32-B6: only the NEW `reason:"stop"` protocol value maps to the dedicated "hub 已由
         // 终端停止" banner — `info.state` used to only ever get set by the supersede path
         // (`restart` below), so the stop path left it `undefined` and never broadcast anything,
@@ -397,10 +458,7 @@ export async function startHub(
         void close(reason);
       },
       now,
-      // §6.7.1 (C8): same lazy-closure pattern as the getters above — `fe`/`lanDeps` aren't
-      // declared until further down this same function body, but these closures are only ever
-      // invoked later (once an actual `hub_ctl{rotate_token}` frame arrives, always well after
-      // startup finishes).
+      // Token rotation is only supported once the frontend has supplied its auth port.
       auth: () => (fe as HttpFrontendExt).auth!,
       rotateIntentFile: paths.rotateIntentFile ?? `${paths.stateDir}/rotate.intent`,
       revokeLanSessions: async () => {
@@ -411,26 +469,7 @@ export async function startHub(
       revokeLanSse: () => (fe.lan as LanFacadeExt | undefined)?.revokeAll?.() ?? 0,
       bumpLanRevokeGen: () => (fe as HttpFrontendExt).bumpLanRevokeGen?.(),
     });
-    const agentServer = createAgentServer(owner.server, {
-      registry,
-      config,
-      log,
-      now,
-      httpPort: () => httpPort,
-      admin,
-      // web-hub-spawn plan §SP10 (arch §7.1): the SAME source array feeds both this
-      // agent-facing `hello_ack.caps` and the browser-facing `HubInfo.caps` below — the two
-      // consumers each spread it (同源数组展开，集合/顺序一致，非同一实例), so the two surfaces are
-      // frozen-protocol twins (§3.1 compat matrix) and can never drift.
-      extraHubCaps,
-      // C10/C8: every hello is also a rotate-intent recovery opportunity. The
-      // callback is assigned before the first listener can accept a connection.
-      onHello: () => recoverRotateOnHello?.(),
-      // spawn-restore §9.3: restart acks carry the restore-candidate count for the TUI hint.
-      restoreCount: () => spawnSup?.restoreCandidateCount() ?? 0,
-    });
-    cleanup.push(() => agentServer.close());
-
+    // Install the listener only after every admin getter and teardown dependency exists.
     const info: HubInfo = {
       version: config.pluginVersion,
       buildId: config.buildId,
@@ -468,6 +507,18 @@ export async function startHub(
       ],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
+    agentServer = createAgentServer(owner.server, {
+      registry,
+      config,
+      log,
+      now,
+      httpPort: () => httpPort,
+      admin,
+      extraHubCaps,
+      onHello: () => recoverRotateOnHello?.(),
+      restoreCount: () => spawnSup?.restoreCandidateCount() ?? 0,
+    });
+    cleanup.push(() => agentServer!.close());
     // web-hub-spawn plan §SP10 (arch §7.8 "/webhub stop、restart 在 TUI 提示中显示 hub.json 的
     // spawn.count"): the hub.json `spawn` summary — supervisor `liveCount` plus the policy
     // `reason` whenever the loopback view of the policy is currently refusing spawns. Seeded
@@ -488,7 +539,6 @@ export async function startHub(
       hubJson.patchSpawn(next);
     }
 
-    let lanDeps: LanFrontendDeps | undefined;
     // §4.1's recognized db-open failures degrade to loopback-only (never fail the whole hub) —
     // `LanAssemblyOffError` is `defaultLanAssembly`'s (LD's own file) way of saying exactly that;
     // any other rejection (a real bug, an injected test double's `E_NOT_IMPLEMENTED:LD`, …) still
@@ -497,17 +547,29 @@ export async function startHub(
     let kdfInFlight = 0;
     if (config.lan !== undefined) {
       try {
-        lanDeps = await withSignal(
+        const scope = rootScope.child();
+        // A slow assembly may register its store cleanup after root disposal completed.
+        const assemblyScope: Scope = {
+          ...scope,
+          defer: (fn) => {
+            if (scope.signal.aborted) void bounded(Promise.resolve().then(fn));
+            else scope.defer(fn);
+          },
+        };
+        lanDeps = await startupStep(
           (deps.lanAssembly ?? defaultLanAssembly).build({
             cfg: config.lan,
             paths,
             log,
             now,
-            scope: rootScope.child(),
-            onStatus: (s) => hubJson.patchLan(s),
+            scope: assemblyScope,
+            onStatus: (s) => {
+              if (!startup.signal.aborted) hubJson.patchLan(s);
+            },
           }), // ⑤
-          startup.signal,
+          (late) => late.scope.dispose(),
         );
+        startup.signal.throwIfAborted();
       } catch (err) {
         if (err instanceof LanAssemblyOffError) {
           log.warn("web-hub: LAN assembly reported an off status, starting loopback-only", {
@@ -555,7 +617,7 @@ export async function startHub(
             return (await store.revokeAllSessions?.()) ?? 0;
           }
         : undefined;
-    const rotateRecovery: RotateRecoveryOutcome = await withSignal(
+    const rotateRecovery: RotateRecoveryOutcome = await startupStep(
       recoverRotateIntent({
         paths: {
           tokenFile: paths.tokenFile,
@@ -567,8 +629,8 @@ export async function startHub(
         now,
         audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
       }),
-      startup.signal,
     );
+    startup.signal.throwIfAborted();
     let lanBlockedByRotate = rotateRecovery.lanBlocked === true;
     /** Set when the runtime scan had to close an already-open LAN listener (permanent) — the
      * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
@@ -610,7 +672,17 @@ export async function startHub(
         });
       }
       const spawnStore = createSpawnStore({ file: spawnFiles.spawnsJson, log, now });
-      const spawnReaper: Reaper = deps.spawnSeams?.reaper ?? createReaper({ log, now });
+      const rawReaper: Reaper = deps.spawnSeams?.reaper ?? createReaper({ log, now });
+      const spawnReaper: Reaper = {
+        ...rawReaper,
+        get available() {
+          return rawReaper.available;
+        },
+        start: (deadline) => {
+          if (startup.signal.aborted) return Promise.reject(startup.signal.reason);
+          return startupStep(rawReaper.start(deadline), () => rawReaper.close());
+        },
+      };
       const spawnDirs = createDirService({
         home: config.home,
         // SP3: `process.env.PI_CODING_AGENT_DIR ?? `${home}/.pi/agent`` — source ② of known dirs.
@@ -759,7 +831,8 @@ export async function startHub(
       cleanup.push(() => spawnShutdownOnce!());
       // Bounded init (plan §SP10: store load + orphan recovery + launcher check ≤1s + reaper
       // ready ≤2s — 4s total budget); `withSignal` folds a startup abort into the same await.
-      await withSignal(spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)), startup.signal);
+      await startupStep(spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)));
+      startup.signal.throwIfAborted();
       spawnRoutes = createSpawnRoutes({
         supervisor: spawnSup,
         dirs: spawnDirs,
@@ -789,7 +862,6 @@ export async function startHub(
     // never throws for an unusable root (the store disables itself and `begin` answers
     // `E_UPLOAD_DISABLED`); a synchronous throw (a bug, not a fs state) degrades uploads to 501
     // while the rest of the hub starts normally (plan §6 U3: "根校验失败 ⇒ 不传 store").
-    let uploads: UploadStore | undefined;
     try {
       uploads = createUploadStore({
         root: webHubUploadsDir(config.home),
@@ -825,11 +897,8 @@ export async function startHub(
     // table), bounded at 2 s, and NEVER fails the hub — a degraded member keeps its literal
     // form + a path-free WARN, backstopped by the §2.3 global twins. agentDir shares the
     // spawn assembly's exact source (L512's SP3): `PI_CODING_AGENT_DIR ?? ${home}/.pi/agent`.
-    let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined;
-    let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined;
-    let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined;
     if (config.preview !== undefined) {
-      const denyCtx = await withSignal(
+      const denyCtx = await startupStep(
         resolvePreviewDenyContext(
           { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
           {
@@ -839,8 +908,8 @@ export async function startHub(
             signal: startup.signal,
           },
         ),
-        startup.signal,
       );
+      startup.signal.throwIfAborted();
       previewRoutes = createPreviewRoutes({
         mode: config.preview,
         denyCtx,
@@ -908,7 +977,7 @@ export async function startHub(
       log,
       now,
     });
-    const fe = frontend({
+    fe = frontend({
       config,
       paths,
       registry,
@@ -979,11 +1048,10 @@ export async function startHub(
     // in the startup path; this still matters once the periodic scan reuses the same helper).
     (fe as HttpFrontendExt).auth?.reload();
 
-    // C10: assemble version replacement only after the command router and
-    // frontend exist; agents cannot hello before listen() below completes.
+    // C10: assemble version replacement after the command router and frontend exist.
+    // The socket can already accept hello; tests hold ui.refresh below to exercise early close.
     // Cancel handles for in-flight acc32-B9 dialogs-handshake waits — drained on close/dispose
     // so a pending one-shot bus subscription never outlives the hub.
-    const supersedeWaitCancels = new Set<() => void>();
     supersede = createSupersede({
       hubVersion: config.pluginVersion,
       now,
@@ -1085,21 +1153,22 @@ export async function startHub(
         await close("superseded");
       },
     });
-    const supersedeTimer = setInterval(() => supersede?.tick(), 250);
+    supersedeTimer = setInterval(() => supersede?.tick(), 250);
     supersedeTimer.unref();
     // acc32-B9 defense in depth: re-check quiet immediately whenever a `dialogs` slot changes
     // (a dialog opening OR closing), rather than relying solely on the 250ms periodic tick —
     // this is on top of (not instead of) `observe()`'s own deferred first check above.
-    const unsubscribeSupersedeOnDialogs = registry.bus.subscribe((e) => {
+    unsubscribeSupersedeOnDialogs = registry.bus.subscribe((e) => {
       if (e.type === "dialogs") supersede?.tick();
     });
     cleanup.push(async () => {
       unsubscribeSupersedeOnDialogs();
-      clearInterval(supersedeTimer);
+      if (supersedeTimer !== undefined) clearInterval(supersedeTimer);
       for (const cancel of [...supersedeWaitCancels]) cancel();
       supersede?.dispose();
     });
     const scanRotateIntent = async (): Promise<void> => {
+      if (closing !== undefined) return;
       const revokeLan =
         lanDeps === undefined
           ? undefined
@@ -1119,7 +1188,7 @@ export async function startHub(
         now,
         audit: (fields) => log.info("web-hub admin op", { audit: "admin", op: "rotate_token", ...fields }),
       });
-      if (!outcome.recovered) return;
+      if (closing !== undefined || !outcome.recovered) return;
       (fe as HttpFrontendExt).auth?.reload();
       (fe as HttpFrontendExt).revokeAllSse?.();
       if (outcome.lanBlocked === true) {
@@ -1159,7 +1228,8 @@ export async function startHub(
       );
     };
 
-    httpPort = (await withSignal(fe.listen({ signal: startup.signal }), startup.signal)).port; // ⑥
+    httpPort = (await startupStep(fe.listen({ signal: startup.signal }), () => fe.close())).port; // ⑥
+    startup.signal.throwIfAborted();
 
     // vue-plan.md v2.1 §2.1（P5b）："启动：hub 在写 hub.json 前 await ui.refresh()（≤3s，超时按未构建
     // 上报、后台继续）" — `refresh()` itself is single-flight and bounded by `UI_ROOT_RESOLVE_TIMEOUT_MS`
@@ -1167,7 +1237,8 @@ export async function startHub(
     // first `refresh()` call is also what fires `onUiStatus` for the initial status (wired above), so
     // `hubJson`'s `pendingUi` picks it up before `write()` below even runs (same queue-before-first-
     // write race `lan`'s `onStatus` already relies on, §2.1's "诊断" bullet).
-    const initialUi = await withSignal(fe.ui.refresh(), startup.signal);
+    const initialUi = await startupStep(fe.ui.refresh());
+    startup.signal.throwIfAborted();
 
     const initialLan: LanStatus | undefined =
       deps.lanConfigError !== undefined
@@ -1200,6 +1271,10 @@ export async function startHub(
       initialSpawn = spawnStatusOf(spawnSup);
       lastSpawnStatus = initialSpawn;
     }
+    const identity = await startupStep(identityFields());
+    // No await separates this gate from hub.json and the running log publication.
+    if (closing !== undefined) return await closedResult();
+    startup.signal.throwIfAborted();
     hubJson.write({
       pid: process.pid,
       nonce: randomBytes(12).toString("base64url"),
@@ -1209,7 +1284,7 @@ export async function startHub(
       socket: paths.socketPath,
       port: httpPort,
       startedAt: info.startedAt,
-      ...(await withSignal(identityFields(), startup.signal)),
+      ...identity,
       ...(initialLan === undefined ? {} : { lan: initialLan }),
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ui: initialUi,
@@ -1237,13 +1312,7 @@ export async function startHub(
 
     log.info("hub started", { pid: process.pid, port: httpPort, socket: paths.socketPath, version: info.version });
 
-    let resolveClosed!: (reason: string) => void;
-    const closed = new Promise<string>((resolve) => {
-      resolveClosed = resolve;
-    });
-    let closing: Promise<void> | undefined;
-
-    const tick = setInterval(() => {
+    tick = setInterval(() => {
       try {
         registry.tick(now());
       } catch (err) {
@@ -1261,7 +1330,7 @@ export async function startHub(
     // previously-`lanBlocked` revoke once the LAN store is healthy again. NOTE (delivery report):
     // The same recovery helper is also invoked by agent-server.ts on every
     // successful hello; this timer covers offline rotations and quiet periods.
-    const rotateScan = setInterval(() => {
+    rotateScan = setInterval(() => {
       void scanRotateIntent().catch((err: unknown) =>
         log.error("web-hub: periodic rotate-intent scan failed", { error: String(err) }),
       );
@@ -1273,7 +1342,7 @@ export async function startHub(
     // (sweep() always flushes dirty references first); the 30-min tick additionally writes the
     // §5.4 `upload stats` aggregate row. `sweep("tick")`'s committed-file TTL eviction is
     // exact-time based, so running it at both cadences changes nothing semantically.
-    const uploadInflightTick =
+    uploadInflightTick =
       uploads === undefined
         ? undefined
         : setInterval(() => {
@@ -1282,7 +1351,7 @@ export async function startHub(
               .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
           }, UPLOAD_INFLIGHT_TICK_MS);
     uploadInflightTick?.unref();
-    const uploadSweepTick =
+    uploadSweepTick =
       uploads === undefined
         ? undefined
         : setInterval(() => {
@@ -1291,21 +1360,21 @@ export async function startHub(
               .then(() => {
                 log.info("upload stats", {
                   audit: "upload-stats",
-                  ...uploadStatsFields(uploads.stats(), uploadMetrics.snapshot()),
+                  ...uploadStatsFields(uploads!.stats(), uploadMetrics.snapshot()),
                 });
               })
               .catch((err: unknown) => log.error("web-hub: upload sweep tick failed", { error: String(err) }));
           }, UPLOAD_SWEEP_TICK_MS);
     uploadSweepTick?.unref();
 
-    const stopFence = startFence(paths.socketPath, owner.identity, (why) => {
+    stopFence = startFence(paths.socketPath, owner.identity, (why) => {
       log.warn("socket fence lost: another hub owns the socket path", { why });
       void close("fence");
     });
 
-    const idle = createIdleMonitor({
+    idle = createIdleMonitor({
       counts: () => ({
-        agents: Math.max(agentServer.connectionCount(), registry.list().length),
+        agents: Math.max(agentServer?.connectionCount() ?? 0, registry.list().length),
         sse: fe.clientCount(),
         // web-hub-spawn plan §SP10 (arch §7.8 "idle 自退"): a live managed child keeps the
         // hub alive — the absolute lifetime deadline (§6.5 maxLifetimeMinutes) is the backstop.
@@ -1326,16 +1395,17 @@ export async function startHub(
       // 2.5s one so the spawn subsystem degrades to "wait 0, SIGTERM now, persist once" before
       // the 3s hard exit. Individual steps below still carry their own `bounded()` STEP caps.
       const deadline: ReqDeadline = opts?.deadline ?? createReqDeadline(now, HUB_CLOSE_DEADLINE_MS);
-      const inner = (async (): Promise<void> => {
+      // Publish the once-promise before any abort listener can re-enter close().
+      const inner = Promise.resolve().then(async (): Promise<void> => {
         log.info("hub closing", { reason });
         unsubscribeSupersedeOnDialogs();
         for (const cancel of [...supersedeWaitCancels]) cancel();
         supersede?.dispose();
-        clearInterval(supersedeTimer);
+        if (supersedeTimer !== undefined) clearInterval(supersedeTimer);
         stopFence();
         idle.stop();
-        clearInterval(tick);
-        clearInterval(rotateScan);
+        if (tick !== undefined) clearInterval(tick);
+        if (rotateScan !== undefined) clearInterval(rotateScan);
         if (uploadInflightTick !== undefined) clearInterval(uploadInflightTick);
         if (uploadSweepTick !== undefined) clearInterval(uploadSweepTick);
         // web-hub-spawn plan §SP10 (arch §7.6): the spawn domain shuts down BEFORE the HTTP
@@ -1384,18 +1454,20 @@ export async function startHub(
         // and held watches), then the reader (fails in-flight scans as `busy`).
         runTx.dispose();
         runFileReader.dispose();
-        await bounded(agentServer.close());
+        if (agentServer !== undefined) await bounded(agentServer.close());
         await bounded(rootScope.dispose());
         await bounded(owner.release());
         hubJson.removeIfOurs();
         log.info("hub closed", { reason });
         log.close();
         resolveClosed(reason);
-      })();
+      });
       closing = withDeadline(inner, HUB_CLOSE_DEADLINE_MS).catch((err: unknown) => {
         log.error("web-hub: hub close exceeded deadline", { error: String(err) });
         process.exit(1);
       });
+      clearTimeout(startTimer);
+      startup.abort(new Error(`web-hub: closing (${reason})`));
       return closing;
     }
 
@@ -1411,6 +1483,8 @@ export async function startHub(
     };
   } catch (err) {
     clearTimeout(startTimer);
+    if (closing !== undefined) return await closedResult();
+    startup.abort(err);
     for (const step of cleanup.reverse()) await bounded(step()); // ⑧ reverse-order release of created resources
     await bounded(rootScope.dispose());
     log.close();

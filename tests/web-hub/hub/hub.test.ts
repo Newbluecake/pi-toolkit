@@ -8,6 +8,7 @@ import {
   RUNTX_HUB_CAPS,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
+import { SUPERSEDE_YIELD_MS } from "../../../src/web-hub/hub/supersede.js";
 import { config, connectClient, hello, memLog, tmpDirs, waitFor } from "./helpers.js";
 
 const tmp = tmpDirs();
@@ -243,8 +244,13 @@ describe('startHub — hub_ctl{reason:"stop"} sets info.state and broadcasts (ac
     const client = await connectClient(hub.paths.socketPath);
     client.send(hello());
     await client.waitFrame((f) => f["t"] === "hello_ack");
+    const broadcast = vi.spyOn(feDeps.registry, "broadcast");
     client.send({ t: "hub_ctl", rid: "rid-restart", op: "shutdown", reason: "restart" });
     await client.waitFrame((f) => f["t"] === "hub_ctl_ack");
+    const frame = await client.waitFrame((f) => f["t"] === "superseded");
+    expect(frame).toEqual({ t: "superseded", nextVersion: hub.info.version, yieldMs: SUPERSEDE_YIELD_MS });
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(broadcast).toHaveBeenCalledWith(frame);
 
     expect(feDeps.info().state).toBeUndefined();
     expect(events).not.toContain("hub");

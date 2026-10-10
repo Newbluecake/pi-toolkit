@@ -18,6 +18,7 @@ import {
   type CmdFrame,
   type SessionInfo,
 } from "../../../src/web-hub/protocol/messages.js";
+import { SUPERSEDE_YIELD_MS } from "../../../src/web-hub/hub/supersede.js";
 import { writeStopMarkerSync } from "../../../src/web-hub/protocol/stop-marker.js";
 import { MAX_FRAME_BYTES } from "../../../src/web-hub/protocol/ndjson.js";
 import {
@@ -643,6 +644,41 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
     t.value += 10_000;
     vi.advanceTimersByTime(500);
     n.sockets[n.sockets.length - 1]!.fail("ENOENT");
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("admin restart's own-version superseded frame suppresses a lower agent's maybeSpawn throughout yieldUntil", () => {
+    vi.useFakeTimers();
+    const spawn = vi.fn();
+    const n = fakeNet();
+    const t = { value: 1_000 };
+    const conn = acquireConnection(
+      opts({
+        pluginVersion: "0.3.0",
+        netConnect: n.netConnect,
+        spawn,
+        now: () => t.value,
+        settings: { ...SETTINGS, autoStart: true },
+        launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+      }),
+    );
+    const first = n.sockets[0]!;
+    first.emit("connect");
+    first.hub(ackFrame());
+    first.hub({ t: "superseded", nextVersion: "0.4.0", yieldMs: SUPERSEDE_YIELD_MS });
+    expect(conn.status().state).toBe("backoff");
+    // Direct observation locks the field as well as its externally observable admission effect.
+    expect((conn as unknown as { yieldUntil: number }).yieldUntil).toBe(1_000 + SUPERSEDE_YIELD_MS);
+    vi.advanceTimersByTime(0);
+    n.sockets.at(-1)!.fail("ENOENT");
+    expect(spawn).not.toHaveBeenCalled();
+    t.value += SUPERSEDE_YIELD_MS - 1;
+    vi.advanceTimersByTime(500);
+    n.sockets.at(-1)!.fail("ENOENT");
+    expect(spawn).not.toHaveBeenCalled();
+    t.value++;
+    vi.advanceTimersByTime(1000);
+    n.sockets.at(-1)!.fail("ENOENT");
     expect(spawn).toHaveBeenCalledTimes(1);
   });
 

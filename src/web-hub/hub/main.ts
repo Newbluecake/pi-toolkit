@@ -135,6 +135,11 @@ async function main(): Promise<void> {
     log.close();
     process.exit(1);
   }
+  if ("exists" in hub && hub.exists === false) {
+    log.info("hub closed during startup, exiting", { reason: hub.reason });
+    log.close();
+    process.exit(0);
+  }
   if ("exists" in hub) {
     // Singleton race lost: the incumbent hub owns the state dir — exit 0.
     log.info("hub already running, exiting", {});

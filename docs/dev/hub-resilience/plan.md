@@ -93,13 +93,13 @@ v2：响应评审 `review:hub-resilience-plan`（run `r_344T7BME`）的打回意
 
 ### 证据（订正，评审 #14）
 
-`hub.log.1`：pid 779625 于 03:51:34.279 `hub process starting`（不是"started"）；03:51:34.377 `web-hub http listening`；`supersede restart failed`（TDZ `ReferenceError`）共 **7** 次，时间戳 .388/.395/.396/.398/.402/.405/.407（原计划误记为 8 次，且误将 .279 当成完成态）；03:51:34.411 才是真正的 `hub started`；紧接着（仍在同一轮，.414）第 8 次 supersede 尝试**成功**、`hub closing {reason:"superseded"}`。**7 次失败窗口本身只跨越约 19ms（.388→.407）**，close 在 .414 完成——这约 20ms 的重试代价与两轮乒乓之间观测到的 ~34s 间隔（03:51:34→03:52:08）**没有因果关系**；那 34s 由 agent 侧重连/退避节奏（`backoffDelay()`、`spawnThrottleMs`）决定，**不是** TDZ 重试的代价，v1"修复后缩短数十秒"的说法不成立，予以撤回。
+`hub.log.1`：pid 779625 于 03:51:34.279 `hub process starting`（不是"started"）；03:51:34.377 `web-hub http listening`；第二轮核对（§9）确认 `supersede restart failed`（TDZ `ReferenceError`）共 **8** 次。第一轮仅列出了 .388/.395/.396/.398/.402/.405/.407 七条，不能据此认定第 8 次成功；03:51:34.411 的 `hub started` 才是启动成功发布；.414 的 `hub closing {reason:"superseded"}` 是**开始关闭**，不是关闭完成（完成须看独立的 `hub closed` 日志）。已列失败窗口约 19ms（.388→.407），这约 20ms 的重试噪音与两轮乒乓之间观测到的 ~34s 间隔（03:51:34→03:52:08）**没有因果关系**；那 34s 由 agent 侧重连/退避节奏（`backoffDelay()`、`spawnThrottleMs`）决定，**不是** TDZ 重试的代价，v1"修复后缩短数十秒"的说法不成立，予以撤回。
 `hub.ts:985`（`createSupersede(...)` 构造）早于 `hub.ts:1242`（`let closing`）；`restart()` 回调（`:1049-1083`）经 `close()` 读取 `closing`——只要某次 hello 触发的 `observe()→begin()→restart()` 发生在源码顺序执行到 `:1242` 之前（即 `fe.listen()`/agent-server 接受连接之后、到 "hub started" 日志语句之间的某个尚未 await 完的窗口）就会 TDZ。
 `hub.ts:1076`：`registry.broadcast({t:"superseded", nextVersion, yieldMs: SUPERSEDE_YIELD_MS, ...})` **只存在于版本 supersede 的 `restart()` 回调里**；`admin.ts:244-246`（`handleShutdown`→`deps.shutdown(reason)`）的 `/webhub restart` 管理指令**完全没有**广播这个帧——这是"admin restart 之后新旧版本 agent 无协调地同时抢 spawn"的直接代码级证据。
 
 ### 根因
 
-1. TDZ 是单一声明顺序问题，8（订正：7）次失败是同一个 bug 的重复表现。
+1. TDZ 是声明/初始化顺序问题，8 次失败是同一个 bug 的重复表现。
 2. v1 的修复（只把 `let closing` 挪到函数顶部）**不完整**（评审 #2）：`close()` 函数体里还无条件引用了 `stopFence()`、`idle.stop()`、`clearInterval(tick)`、`clearInterval(rotateScan)` 这四个在源码顺序上声明/赋值更晚的绑定（其余如 `uploadInflightTick`/`previewRoutes`/`worktreeDiffRoutes`/`spawnSup` 等现状已经是 `!== undefined` 判空调用，本身是安全的）；只要早触发的 `close()` 跑到这四行中的任意一行，仍然会抛同类错误（TDZ 或"读 undefined 的方法"），且**启动流程本身不检查自己是否已经被要求关闭**——即便 `close()` 自己没抛错、跑完了整个 teardown，外层 `startHub` 仍可能继续往下执行到 `log.info("hub started")`/写 `hub.json`，对外发布一个"已关闭"的 hub 为"运行中"。
 3. 版本乒乓是结构性的（旧 0.3.0 内存代码不可变），但"admin restart 无协调广播"这个口子是新侧可以补的：乒乓的"谁先抢到"目前是纯随机的,因为唯一的协调信号（`superseded` 帧 + `yieldUntil`）只在版本 supersede 场景触发,admin 重启场景完全没有触发它的机会。
 
@@ -195,7 +195,7 @@ v2：响应评审 `review:hub-resilience-plan`（run `r_344T7BME`）的打回意
 | 11  | 严重   | D-B2 既不能证明"hub 真的死了"，也给不出承诺的 30s 硬上界，且会在 hub 活着但慢时误触发 spawn                                                   | 采纳，整项移除               | §2：不做任何改变 `noHub`/`maybeSpawn` 判定窗口的改动                                     |
 | 12  | 严重   | 验收计划遗漏跨域危险场景（fence 牵动 spawn 子系统的 L1–L6、supersede 测试用不存在的"更高版本"字段伪造而非真实更高版本 agent）                 | 采纳                         | §3 末尾"跨域验收矩阵"七项 + 真实更高版本 agent 的早关集成测试                            |
 | 13  | 严重   | 包"相互独立"的前提不成立：P-A 必须动 `http.ts`，且另一功能 P2 已在改 `hub/{ports,http,hub,audit}.ts`                                          | 采纳，重新规划               | §4（完全串行：P2 → P-C → P-A → P-B → P-Int，显式文件归属表）                             |
-| 14  | 一般   | Bug C 的日志引用/时间戳有误（.279 不是完成态；实际 7 次失败而非 8 次；30s 乒乓间隔与 TDZ 重试代价无因果关系）                                 | 采纳，更正                   | §3 证据段重写，删除"修复后缩短数十秒"的结论                                              |
+| 14  | 一般   | Bug C 的03:51:34.279 不是完成态；第二轮核对确认 8 次失败；closing 不等于 closed；30s 乒乓间隔与 TDZ 重试代价无因果关系                        | 采纳，更正                   | §3 证据段重写，删除"修复后缩短数十秒"的结论                                              |
 | 15  | 建议   | D-A1 的"自适应"缺算法、与"写死常量"的用户裁定冲突，双计数器/磁盘阻尼收益未经测量                                                              | 采纳                         | D-A1（单一更大的实测固定 deadline，不做自适应/不新增设置项，对齐 §7 裁定 2）             |
 
 ## 9. 第二轮评审分诊与用户裁定（2026-10-10，主会话收敛规则）
