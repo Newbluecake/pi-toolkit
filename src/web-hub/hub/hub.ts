@@ -75,6 +75,7 @@ import { createPreviewRoutes } from "./preview/routes.js";
 import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
 import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
 import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
+import { hubLoadProbe, LOAD_HUB_CAP, normalizeHubLoadConfig } from "./load.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createSpawnStore } from "./spawn/store.js";
 import {
@@ -351,6 +352,12 @@ export async function startHub(
             ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
           ]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
+      // sysload P3: the hub-side sampler is available only after the bounded Linux
+      // startup probe.  Feature-off (absent config.load) keeps every cap surface
+      // byte-identical.
+      ...(config.load !== undefined && normalizeHubLoadConfig(config.load) !== undefined && hubLoadProbe()
+        ? [LOAD_HUB_CAP]
+        : []),
     ];
 
     let supersede: SupersedeController | undefined = undefined;

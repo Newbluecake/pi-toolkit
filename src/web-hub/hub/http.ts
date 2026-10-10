@@ -52,7 +52,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { randomBytes } from "node:crypto";
-import { API_ERRORS, AGENT_REMOVE_PATH, type AgentCard, type HistoryPayload } from "../protocol/http-contract.js";
+import {
+  API_ERRORS,
+  AGENT_REMOVE_PATH,
+  LOAD_TOP_PATH,
+  type AgentCard,
+  type HistoryPayload,
+} from "../protocol/http-contract.js";
 import { canonicalHostKey, canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
 import type {
   CmdArgs,
@@ -85,6 +91,7 @@ import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
 import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
 import { WTGRAPH_PATH } from "../protocol/worktree-graph.js";
+import { createHubLoad, loadTopErrorCode, LOAD_TOP_DEADLINE_MS, type HubLoadService } from "./load.js";
 import type {
   AgentView,
   CommandRouter,
@@ -689,6 +696,8 @@ function createRouteSet(
     /** F4: the run-transcript service (F3b). Absent ⇒ `/api/run/*` answers 404 and no run SSE
      * event is ever sent — byte-identical to a hub without the channel. */
     runTx?: RunTranscriptService;
+    /** sysload P3: latest host snapshot, sent after the spawns snapshot and never replayed. */
+    load?: () => import("../protocol/messages.js").LoadWire | undefined;
   },
 ): RouteSet {
   const pending = new Map<string, Map<string, PendingSub>>();
@@ -828,6 +837,10 @@ function createRouteSet(
           // changes.
           sse.publish("hub", { ...routeDeps.info(), port: routeDeps.port() });
           break;
+        case "load":
+          // Host load is direct-send: no id and no replay-ring entry.
+          for (const client of sse.list()) client.send("load", e.wire);
+          break;
       }
     } catch (err) {
       routeDeps.log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });
@@ -871,6 +884,10 @@ function createRouteSet(
     // (re)connecting browser gets the full fleet + spawn-board picture in one connect burst.
     const sp = routeDeps.spawns?.();
     if (sp !== undefined) client.send("spawns", sp);
+    // sysload P3: the latest frame is a connect-time snapshot, after spawns. It
+    // deliberately bypasses the replay ring and carries no SSE id.
+    const load = routeDeps.load?.();
+    if (load !== undefined) client.send("load", load);
     for (const [agentKey, runs] of fleetCache) client.send("fleet", { agentKey, runs });
     res.once("close", () => {
       pending.delete(client.id);
@@ -1010,6 +1027,48 @@ export interface LanRuntime {
    * instance as the loopback listener's. Absent ⇒ `POST /api/agents/remove` on LAN keeps its
    * original 404, byte-identical to not-enabled. */
   agentRemove?: AgentRemoveFrontendPort | undefined;
+  /** sysload P3: shared hub activation for the LAN-equal-width top endpoint. */
+  load?: HubLoadService;
+}
+
+async function serveLoadTop(
+  load: HubLoadService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  bucket: string,
+  limiter: CmdLimit,
+): Promise<void> {
+  const admitted = limiter.admit(bucket, 3, 1_000);
+  if (!admitted.ok) {
+    sendJson(res, 429, { error: "E_RATE" }, { "Retry-After": String(Math.ceil(admitted.retryAfterMs / 1000)) });
+    return;
+  }
+  let closed = false;
+  let onClose: (() => void) | undefined;
+  const disconnected = new Promise<never>((_, reject) => {
+    onClose = () => {
+      closed = true;
+      reject(new Error("E_CLIENT_CLOSED"));
+    };
+    req.once("aborted", onClose);
+    req.once("close", onClose);
+    res.once("close", onClose);
+  });
+  try {
+    const result = await Promise.race([withDeadline(load.top(), LOAD_TOP_DEADLINE_MS), disconnected]);
+    if (!closed) sendJson(res, 200, result);
+  } catch (error) {
+    if (closed || (error instanceof Error && error.message === "E_CLIENT_CLOSED")) return;
+    const code = loadTopErrorCode(error);
+    const status = code === "E_BUSY" ? 503 : code === "E_DEADLINE" ? 504 : 500;
+    sendError(res, status, code);
+  } finally {
+    if (onClose !== undefined) {
+      req.off("aborted", onClose);
+      req.off("close", onClose);
+      res.off("close", onClose);
+    }
+  }
 }
 
 function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
@@ -1321,6 +1380,15 @@ async function handleLanRequestInner(
   // byte-identical to not-enabled — D12). `authorize` mirrors the cmd/dialog branch's LAN
   // segment, but with preview's own §3.1 ② reserve (`PREVIEW_AUTH_RESERVE_MS`: after auth at
   // least 4s of the 8s admission budget must remain for the fs phases).
+  if (rt.load !== undefined && method === "GET" && path === LOAD_TOP_PATH) {
+    if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
+    const authDeadlineMs = deriveBudget(LOAD_TOP_DEADLINE_MS, LAN_AUTH_CAP_MS, 500);
+    const authFailure: { code?: string } = {};
+    const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+    if (session === undefined) return;
+    return serveLoadTop(rt.load, req, res, `lan:u${session.userId}:load-top`, rt.cmdLimit ?? createCmdLimit(rt.now));
+  }
+
   if (rt.preview !== undefined && rt.preview.mode === "on" && method === "GET" && path === PREVIEW_PATH) {
     return rt.preview.handle(req, res, query, {
       listener: "lan",
@@ -2352,6 +2420,21 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // default-constructed — the routes need the preview deny context + the shared git runner,
   // both hub.ts-owned). Absent ⇒ `GET /api/worktree-graph` keeps its legacy replies.
   const worktreeGraphRoutes: WorktreeGraphRoutes | undefined = deps.worktreeGraph;
+  // sysload P3: one activation per hub process, shared by loopback and LAN.  The
+  // callback is bound to both route sets below; no sampler is constructed when
+  // config.load is absent or the bounded Linux probe fails.
+  let loadRouteSets: RouteSet[] = [];
+  const load: HubLoadService | undefined =
+    config.load === undefined
+      ? undefined
+      : createHubLoad(config.load, {
+          home: config.home,
+          now,
+          onWire: (wire) => {
+            for (const route of loadRouteSets) route.onHubEvent({ type: "load", wire });
+          },
+          log,
+        });
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -2378,7 +2461,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     listener: "loopback",
     now,
     ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
+    ...(load === undefined ? {} : { load: () => load.latest() }),
   });
+  loadRouteSets.push(routes);
 
   // ---- LAN facade (§2.5/§6/§7) ------------------------------------------
 
@@ -2409,7 +2494,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       listener: "lan",
       now,
       ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
+      ...(load === undefined ? {} : { load: () => load.latest() }),
     });
+    loadRouteSets.push(lanRoutes);
     lanRunSink = lanRoutes.runSink;
     let lanClosed = false;
     const unsubscribeLanBus = bus.subscribe(lanRoutes.onHubEvent);
@@ -2445,6 +2532,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       worktreeGraph: deps.worktreeGraph,
       /** web-hub-delete-session plan v2 §2.9: same instance as the loopback listener's. */
       agentRemove: deps.agentRemove,
+      ...(load === undefined ? {} : { load }),
       markKdfInvalid: () => {
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
@@ -2679,6 +2767,13 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         sendError,
         HttpError,
       });
+    }
+    // sysload P3: auth and CSRF hygiene happen before the shared on-demand scan.
+    if (load !== undefined && method === "GET" && path === LOAD_TOP_PATH) {
+      if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
+      if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
+      const principal = readCookie(req.headers.cookie, SESSION_COOKIE) ?? normalizePeerIp(req.socket.remoteAddress);
+      return serveLoadTop(load, req, res, `loopback:${principal}:load-top`, cmdLimit);
     }
     // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — same insertion point as the
     // spawn branch above (after headless, before the method branches). Absent ⇒ falls through
@@ -3000,6 +3095,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
+    await load?.dispose();
     await lanFacade?.close();
     unsubscribeBus?.();
     unsubscribeBus = undefined;

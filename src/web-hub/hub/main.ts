@@ -25,6 +25,7 @@ import { installProcessHandlers, startHub, type StartHubDeps } from "./hub.js";
 import { createHttpFrontend } from "./http.js";
 import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
 import { parseHubSpawnConfig } from "./spawn/config.js";
+import { normalizeHubLoadConfig } from "./load.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
 
@@ -112,6 +113,25 @@ async function main(): Promise<void> {
       }
     } else {
       config = { ...config, preview };
+    }
+  }
+
+  // sysload P3: config.load is a startup snapshot.  Reject the complete key on
+  // malformed values rather than partially clamping it; this keeps the hub's
+  // cap, sampler, SSE and REST surfaces as one feature gate.
+  if (config.load !== undefined) {
+    const rawLoad = config.load;
+    const load = normalizeHubLoadConfig(rawLoad);
+    if (load === undefined) {
+      const { load: _drop, ...rest } = config;
+      config = rest;
+      try {
+        process.stderr.write(`web-hub main: dropping config.load: ${JSON.stringify(rawLoad)}\n`);
+      } catch {
+        /* stderr may be ignored */
+      }
+    } else {
+      config = { ...config, load };
     }
   }
   startDeps.childUmask = inheritedUmask;

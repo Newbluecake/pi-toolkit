@@ -24,6 +24,20 @@ const PROTOCOL_HUB = ["src/web-hub/protocol", "src/web-hub/hub"].map((d) => reso
 
 /** The ONLY src/git files hub code may import (worktree-diff plan §1.1 / §5 D1 #12). */
 const GIT_FILE_ALLOWLIST = ["run", "worktrees", "diff", "graph"].map((n) => resolve(ROOT, `src/git/${n}.ts`));
+/** P3 sysload hub imports the pi-free sampler closure directly; keep this explicit rather than
+ * allowing arbitrary imports outside the hub/protocol boundary. */
+const SYSLOAD_FILE_ALLOWLIST = [
+  "src/core/clock.ts",
+  "src/config/settings.ts",
+  "src/sysload/io-ledger.ts",
+  "src/sysload/mounts.ts",
+  "src/sysload/procfs.ts",
+  "src/sysload/sampler.ts",
+  "src/sysload/top.ts",
+  "src/sysload/tracker.ts",
+  "src/sysload/types.ts",
+  "src/sysload/wire.ts",
+].map((p) => resolve(ROOT, p));
 
 /**
  * Closure constant table (worktree-diff plan §5 D1 #12): the exact import surface of the
@@ -104,8 +118,10 @@ function hubImportAllowed(file: string, spec: string): boolean {
     spec.startsWith("@sinclair/typebox/") ||
     (spec.startsWith(".") &&
       (insideProtocolHub(resolveImport(file, spec)) ||
-        // hub files escaping {protocol,hub} must land on the exact git allowlist
-        (inHub && GIT_FILE_ALLOWLIST.includes(resolveImport(file, spec)))))
+        // hub files escaping {protocol,hub} must land on an exact, reviewed allowlist
+        (inHub &&
+          (GIT_FILE_ALLOWLIST.includes(resolveImport(file, spec)) ||
+            SYSLOAD_FILE_ALLOWLIST.includes(resolveImport(file, spec))))))
   );
 }
 
