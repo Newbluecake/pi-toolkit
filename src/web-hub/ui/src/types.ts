@@ -668,6 +668,8 @@ export interface AgentCardView {
   readonly runningSubCount: number;
   /** Pre-formatted `own [+ sub $x]` cost label (tabular-nums display string). */
   readonly costLabel: string;
+  /** Hover breakdown (own + subagents) when subagents cost anything; the label itself is the total only. */
+  readonly costTitle?: string;
   readonly visualState: RunVisualState;
   /** Status pill text; `null` when idle and nothing worth flagging. */
   readonly statusLabel: string | null;

@@ -274,7 +274,8 @@
 }
 
 .agent-title {
-  min-width: 0;
+  /* keep a few characters of the cwd visible next to the chips + cost (2026-10-10 overflow bug) */
+  min-width: min(6ch, 100%);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

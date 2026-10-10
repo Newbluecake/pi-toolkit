@@ -77,7 +77,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       <span v-if="managed?.removing" class="chip chip-removing" translate="no">
         {{ t("agents.removing") }}
       </span>
-      <span class="agent-cost num">{{ card.costLabel }}</span>
+      <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
     </span>
 
     <span class="agent-session" :class="{ mono: card.sessionLabel === t('agents.noSessionName') }" translate="no">{{

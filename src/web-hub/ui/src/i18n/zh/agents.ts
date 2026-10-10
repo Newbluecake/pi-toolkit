@@ -11,6 +11,7 @@ const agents = {
   filterAria: "筛选会话",
   staleOffline: "过期与离线",
   stopped: "已停止",
+  costTitle: "本会话 {own} + 子 agent {sub}",
   emptyTitle: "没有已连接的 pi 会话",
   emptyBodyLead: "在此机器上启用",
   emptyBodyTail: "并启动 pi；会话会在一秒内出现在这里。",

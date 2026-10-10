@@ -9,6 +9,7 @@ const agents = {
   filterAria: "Filter sessions",
   staleOffline: "Stale & Offline",
   stopped: "Stopped",
+  costTitle: "This session {own} + subagents {sub}",
   emptyTitle: "No pi sessions connected",
   emptyBodyLead: "Start pi on this machine with",
   emptyBodyTail: "on; sessions appear here within a second.",

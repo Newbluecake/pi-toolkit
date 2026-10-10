@@ -46,14 +46,24 @@ function modelShortOf(agent: AgentState): string {
   return typeof id === "string" ? id : "";
 }
 
-/** Own + subagent cost, mirrors `@logic/render/agents.js`'s `costLabel`. */
+/** Own + subagent TOTAL (2026-10-10: the old `total (sub)` label overflowed the card row and
+ * squeezed the cwd title to nothing — the breakdown now lives in `agentCostTitle`'s tooltip). */
 export function agentCostLabel(agent: AgentState): string {
   const status = record(agent.status);
   const own = status["costUsd"];
   if (typeof own !== "number") return "—";
   const subRaw = status["subagentCostUsd"];
   const sub = typeof subRaw === "number" && subRaw > 0 ? subRaw : 0;
-  return sub > 0 ? `${formatUsd(own + sub)} (${formatUsd(sub)})` : formatUsd(own);
+  return formatUsd(own + sub);
+}
+
+/** Tooltip breakdown, only when subagents cost anything. */
+export function agentCostTitle(agent: AgentState, t: I18nHandle["t"]): string | undefined {
+  const status = record(agent.status);
+  const own = status["costUsd"];
+  const subRaw = status["subagentCostUsd"];
+  if (typeof own !== "number" || typeof subRaw !== "number" || subRaw <= 0) return undefined;
+  return t("agents.costTitle", { own: formatUsd(own), sub: formatUsd(subRaw) });
 }
 
 function contextPercentOf(agent: AgentState): number | null {
@@ -84,6 +94,11 @@ function statusLabelOf(agent: AgentState, visual: RunVisualState, t: I18nHandle[
   return null;
 }
 
+function costTitleOf(agent: AgentState, t: I18nHandle["t"]): { costTitle: string } | undefined {
+  const title = agentCostTitle(agent, t);
+  return title === undefined ? undefined : { costTitle: title };
+}
+
 export function toAgentCardView(agent: AgentState, t: I18nHandle["t"]): AgentCardView {
   const card = record(agent.card);
   const visual = agentVisualState(agent);
@@ -96,6 +111,7 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"]): AgentCar
     contextPercent: contextPercentOf(agent),
     runningSubCount: runningSubCountOf(agent),
     costLabel: agentCostLabel(agent),
+    ...(costTitleOf(agent, t) ?? {}),
     visualState: visual,
     statusLabel: statusLabelOf(agent, visual, t),
     stale: visual === "stale",
