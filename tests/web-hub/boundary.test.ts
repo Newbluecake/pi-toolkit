@@ -54,6 +54,42 @@ const GIT_FILE_CLOSURE: Record<string, Array<{ spec: string; typeOnly: boolean }
   "src/git/graph.ts": [{ spec: "./diff.js", typeOnly: false }],
 };
 
+/**
+ * P3 sysload closure (hub-boundary pin, verifier r_5YF8V2G1 finding 2): the EXACT set of
+ * VALUE (non-`import type`) specifiers each allowlisted sysload/config file may carry.
+ * Unlike `GIT_FILE_CLOSURE` this table deliberately omits `import type` lines —
+ * `src/config/settings.ts` already has `import type` lines reaching pi-facing modules
+ * (`../web-hub/agent/index.js`, `../commands/webhub.js`) that are erased at runtime and
+ * would churn this table on unrelated feature work. What MUST stay frozen is the value
+ * import surface: a new runtime import anywhere in this closure (e.g. a pi import such as
+ * `@earendil-works/*` or `../web-hub/agent/index.js`) turns the boundary red until a
+ * conscious table update — that is the whole point.
+ */
+const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
+  "src/core/clock.ts": [],
+  "src/config/settings.ts": [
+    "node:fs",
+    "node:os",
+    "node:path",
+    "../cache-ttl/keepalive-state.js",
+    "../compact-hint/threshold.js",
+    "../core/deadline.js",
+    "../extensions/worktree-link-paths.js",
+    "../sysload/types.js",
+    "../topic-switch/settings.js",
+    "../web-hub/protocol/lan.js",
+    "./time-units.js",
+  ],
+  "src/sysload/io-ledger.ts": [],
+  "src/sysload/mounts.ts": ["./procfs.js"],
+  "src/sysload/procfs.ts": [],
+  "src/sysload/sampler.ts": ["node:fs", "node:os", "./io-ledger.js", "./mounts.js", "./procfs.js"],
+  "src/sysload/top.ts": ["node:fs", "./io-ledger.js", "./procfs.js"],
+  "src/sysload/tracker.ts": ["./types.js"],
+  "src/sysload/types.ts": [],
+  "src/sysload/wire.ts": ["./top.js"],
+};
+
 interface ImportRef {
   file: string;
   spec: string;
@@ -193,6 +229,18 @@ describe("web-hub boundary", () => {
         .sort((a, b) => a.spec.localeCompare(b.spec));
       const wanted = [...expected].sort((a, b) => a.spec.localeCompare(b.spec));
       expect(actual, `${relPath} must import exactly ${JSON.stringify(wanted)}`).toEqual(wanted);
+    }
+  });
+
+  it("the sysload allowlist files import EXACTLY the pinned value-import closure (a future pi value import fails)", () => {
+    for (const [relPath, expected] of Object.entries(SYSLOAD_FILE_CLOSURE)) {
+      const file = resolve(ROOT, relPath);
+      const actual = scanImports(file)
+        .filter((ref) => !ref.typeOnly)
+        .map((ref) => ref.spec)
+        .sort((a, b) => a.localeCompare(b));
+      const wanted = [...expected].sort((a, b) => a.localeCompare(b));
+      expect(actual, `${relPath} must import exactly ${JSON.stringify(wanted)} (value imports only)`).toEqual(wanted);
     }
   });
 
