@@ -24,6 +24,7 @@ import {
 import { CONSULT_READONLY_TOOLS } from "../../src/runtime/tool-scope.js";
 import { CONSULT_MAIN_AGENT_TYPE, CONSULT_MAIN_EXPERT_ID } from "../../src/core/types.js";
 import type { MainSessionFacts } from "../../src/consult/main-facts.js";
+import { CONSULT_NOT_IN_WHITELIST_MARK, CONSULT_OUTCOMES } from "../../src/core/consult-summary.js";
 
 /**
  * T-2/T-3/T-4/T-5 (consult plan §9): the consult tool's gate/nack surface,
@@ -306,6 +307,50 @@ describe("consult tool: caller mistakes throw (T-2)", () => {
     await expect(exec(h, "stranger")).rejects.toThrow(/not in this run's expert whitelist.*explorer.*r_EXPERT1/);
     expect(h.port.spawnCalls).toHaveLength(0);
     expect(h.fork.calls).toHaveLength(0);
+  });
+
+  // consult A/B instrumentation plan (§5 P1b): the throw text now references
+  // core's CONSULT_NOT_IN_WHITELIST_MARK — this locks the FULL message
+  // byte-for-byte against the pre-P1b literal so `classifyConsultToolEnd`'s
+  // bad_ref substring detection can never drift from what the tool throws.
+  it("whitelist-mismatch throw is byte-identical and carries the classifier's mark", async () => {
+    const h = harness();
+    const err = await exec(h, "stranger").then(
+      () => undefined,
+      (e: Error) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toContain(CONSULT_NOT_IN_WHITELIST_MARK);
+    expect(err!.message).toBe(
+      'consult: expert "stranger" is not in this run\'s expert whitelist (allowed: explorer (r_EXPERT1)). ' +
+        "Ask your dispatcher to add it, or answer from your own context.",
+    );
+    expect(err!.message).toBe(
+      'consult: expert "stranger" ' +
+        CONSULT_NOT_IN_WHITELIST_MARK +
+        " (allowed: explorer (r_EXPERT1)). " +
+        "Ask your dispatcher to add it, or answer from your own context.",
+    );
+  });
+
+  // §5 P1b: ConsultOutcome is derived from core's frozen CONSULT_OUTCOMES —
+  // lock the values so the tool's details.outcome vocabulary and the
+  // diag-side classifier share one source (the type equality itself is
+  // compile-time, inside src/consult/tool.ts).
+  it("the tool's outcome vocabulary equals core's frozen CONSULT_OUTCOMES", () => {
+    expect([...CONSULT_OUTCOMES]).toEqual([
+      "completed",
+      "unavailable",
+      "still_running",
+      "busy",
+      "context_too_large",
+      "cost_too_high",
+      "timeout",
+      "turn_cap",
+      "cost_cap",
+      "failed",
+      "aborted",
+    ]);
   });
 
   it("empty question throws before anything else", async () => {

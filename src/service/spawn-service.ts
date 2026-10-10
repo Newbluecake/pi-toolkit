@@ -429,6 +429,18 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       ...(req.label !== undefined ? { label: req.label } : {}),
       agentType: displayAgentType(req.type),
       taskPrompt: req.prompt.slice(0, TASK_PROMPT_CAP),
+      // consult A/B instrumentation plan (§5 P1b): mirror the two write-once
+      // display fields the runtime adapter will fold into diag at enqueue
+      // time (identical values — pure req passthrough) so the provisional row
+      // stays consistent with the real snapshot that replaces it.
+      // `experts` is deliberately NOT mirrored: `granted` is only knowable
+      // after the adapter's injection decision (deps.consult present and
+      // returned a tool), and a guessed value here would put a wrong
+      // "granted" into a diag analysis treats as authoritative. The
+      // provisional snapshot is never journaled/persisted, so nothing that
+      // reads persisted entries ever sees this gap.
+      ...(req.dispatchMeta === undefined ? {} : { dispatchMeta: req.dispatchMeta }),
+      ...(req.schemaPreset === undefined ? {} : { schemaPreset: req.schemaPreset }),
     };
     return {
       runId: initial.runId,
@@ -719,6 +731,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // §2.2 解析式第 ② 项（R-inherit）：resume 目标已持久化的策略；旧条目缺字段
       // 保持 undefined（落第 ③ 项按请求形状推导）。非 resume 请求恒 undefined。
       let resumeTimeoutPolicy: SpawnRequest["timeoutPolicy"] = undefined;
+      // consult A/B instrumentation plan (§5 P1b, D3 recommendation):
+      // `dispatchMeta = req.dispatchMeta ?? resume.dispatchMeta` — a rework
+      // resume naturally belongs to the same package, so inheriting keeps
+      // the enrollment without the main session re-stating it every time.
+      // Source is the terminal snapshot's diag ONLY (resolve-target does not
+      // read tombstones for this field). `schemaPreset`/`experts` are NOT
+      // inherited — they are per-dispatch fields.
+      let resumeDispatchMeta: SpawnRequest["dispatchMeta"] = undefined;
       const runId = newRunId(
         (id) => records.has(id) || running.has(id) || tombstones.has(id) || deps.runIdTaken?.(id) === true,
       );
@@ -834,7 +854,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         resumeLocks.add(targetId);
         resumeLocks.add(resume.sessionFile);
         resumeTimeoutPolicy = resume.timeoutPolicy;
-        resolvedReq = { ...req, resumeFrom: resume.sessionFile };
+        resumeDispatchMeta = resume.dispatchMeta;
+        resolvedReq = {
+          ...req,
+          resumeFrom: resume.sessionFile,
+          ...(req.dispatchMeta === undefined && resumeDispatchMeta !== undefined
+            ? { dispatchMeta: resumeDispatchMeta }
+            : {}),
+        };
         lockKeys = [targetId, resume.sessionFile];
       }
       // §2.2 解析式：新请求显式策略 > resume 继承（R-inherit）> 按请求形状推导

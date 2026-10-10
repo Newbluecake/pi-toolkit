@@ -1,4 +1,5 @@
 import { existsSync, statSync } from "node:fs";
+import type { DispatchMeta } from "../core/dispatch-meta.js";
 import type { RunId, RunSnapshot, RunStatus, TimeoutPolicy } from "../core/types.js";
 import type { Tombstone, TombstoneStore } from "./tombstone.js";
 
@@ -36,6 +37,14 @@ export type ResolveResumeResult =
        * `resolveResumeTarget` fills it in P1.
        */
       readonly timeoutPolicy?: TimeoutPolicy;
+      /**
+       * consult A/B instrumentation plan (§5 P1b, D3 recommendation): the
+       * resumed run's `diag.dispatchMeta` — unlike `timeoutPolicy`, sourced
+       * from a terminal snapshot ONLY (never the tombstone: tombstones are a
+       * TTL-bounded last-resort view and are deliberately not extended with
+       * analytics fields). Absent for old entries lacking the field.
+       */
+      readonly dispatchMeta?: DispatchMeta;
     }
   | { readonly ok: false; readonly error: string; readonly candidates: readonly ResumeCandidate[] };
 
@@ -198,11 +207,15 @@ export function resolveResumeTarget(handle: string, deps: ResolveTargetDeps): Re
   // 被逐出后靠 tombstone；旧条目缺字段 ⇒ undefined，解析式落第 ③ 项（按请求形状）。
   const timeoutPolicy =
     snapshotWithSessionFile(deps, runId)?.diag.timeoutPolicy ?? deps.tombstones.get(runId)?.timeoutPolicy;
+  // consult A/B 计划（§5 P1b，D3 推荐）：dispatchMeta 的继承源只取终态快照的
+  // diag（tombstone 不扩展 —— 它是 TTL 兜底视图，不带分析字段）。
+  const dispatchMeta = snapshotWithSessionFile(deps, runId)?.diag.dispatchMeta;
   return {
     ok: true,
     runId,
     sessionFile,
     ...(timeoutPolicy === undefined ? {} : { timeoutPolicy }),
+    ...(dispatchMeta === undefined ? {} : { dispatchMeta }),
   };
 }
 function statIsFile(path: string): boolean {

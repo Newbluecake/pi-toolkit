@@ -10,6 +10,7 @@ import type {
   RunDiagnostics,
   RunEffect,
   RunExitFacts,
+  RunExpertRecord,
   RunId,
   RunOutcome,
   RunSnapshot,
@@ -19,7 +20,8 @@ import type {
   WorktreeDisposal,
   Millis,
 } from "../core/types.js";
-import { displayAgentType } from "../core/types.js";
+import { capExpertRefs, displayAgentType } from "../core/types.js";
+import { renderStructuredForHost } from "../core/verdict-schema.js";
 import { deliveryKey } from "../core/delivery-key.js";
 import type { Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
@@ -218,6 +220,25 @@ export function deadlineNoticeHandler(
  * must surface its *real* message (used for G4 diagnosability), which
  * guard()'s generic "cancelled" reason would otherwise erase.
  */
+/**
+ * consult A/B instrumentation plan (§2/§5 P1b): slim a dispatch-time resolved
+ * expert whitelist (`ConsultExpertRef`) down to the display-only
+ * `RunExpertRecord` diag shape (drops fork-admission fields that never
+ * belong in a persisted diag), capped at `EXPERTS_REFS_CAP` — the same cap
+ * the reducer and journal projection defensively re-apply.
+ */
+function toExpertRecords(refs: readonly ConsultExpertRef[]): RunExpertRecord[] {
+  return capExpertRefs(
+    refs.map((ref) => ({
+      runId: ref.runId,
+      ...(ref.label === undefined ? {} : { label: ref.label }),
+      agentType: ref.agentType,
+      ...(ref.kind === "main" ? { kind: "main" as const } : {}),
+      ...(ref.pending === true ? { pending: true as const } : {}),
+    })),
+  );
+}
+
 function withStartupTimeout<T>(
   p: Promise<T>,
   ms: number,
@@ -973,6 +994,26 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             // expert index excludes them structurally by session-file location).
             agentType: displayAgentType(spec.type.name),
             taskPrompt: spec.request.prompt.slice(0, TASK_PROMPT_CAP),
+            // consult A/B instrumentation plan (§5 P1b ①/②): write-once
+            // display meta folded into diag by the `enqueued` reducer branch
+            // exactly once. `experts` is written whenever a resolved whitelist
+            // reached a NON-readonly run — `granted` records whether the
+            // consult tool was actually injected at that point (injection at
+            // line ~732 runs strictly before this construction), so
+            // `consult.enabled=false` lands as granted:false and analysis can
+            // drop such runs from the experts arm. Readonly-domain runs and
+            // consult forks never carry consultExperts in practice, and are
+            // structurally excluded here on top (plan P1b ①).
+            ...(!readonlyDomain && spec.request.consultExperts?.length
+              ? {
+                  experts: {
+                    refs: toExpertRecords(spec.request.consultExperts),
+                    granted: grantedReserved.includes("consult"),
+                  },
+                }
+              : {}),
+            ...(spec.request.dispatchMeta === undefined ? {} : { dispatchMeta: spec.request.dispatchMeta }),
+            ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
             // X1 (agent tree): `⎇ wt` on the row while the run is in flight;
             // keyed off the request's declared intent. H2 failure paths
             // (disabled/uncreatable worktree) never fold displayMeta, so a
@@ -1048,7 +1089,13 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                   textPreview:
                     settled.structuredResult === undefined
                       ? (settled.text ?? "")
-                      : JSON.stringify(settled.structuredResult),
+                      : // consult A/B instrumentation plan (§5 P1b ③): the
+                        // notification preview renders through the preset's
+                        // host renderer (verdict/v1 ⇒ report + one verdict
+                        // line) instead of a JSON blob; `structuredPreview`
+                        // below stays the raw JSON.stringify, and
+                        // `details.structuredResult` is never touched.
+                        renderStructuredForHost(settled.structuredResult, spec.request.schemaPreset),
                   ...(settled.structuredResult === undefined
                     ? {}
                     : { structuredPreview: JSON.stringify(settled.structuredResult) }),

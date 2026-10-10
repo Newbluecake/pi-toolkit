@@ -142,6 +142,81 @@ describe("session-driver context usage mapping", () => {
   });
 });
 
+describe("session-driver mapEvent: consult tool_end classification (consult A/B plan §5 P1b)", () => {
+  it("attaches a consult fact only when toolName is consult; other tools keep the plain tool_end shape", () => {
+    const other = mapEvent({
+      type: "tool_execution_end",
+      toolCallId: "tc1",
+      toolName: "read",
+      isError: false,
+      result: { content: [{ type: "text", text: "ok" }] },
+    });
+    expect(other).toEqual({ t: "tool_end", toolCallId: "tc1", toolName: "read", isError: false });
+  });
+
+  it("classifies a successful consult tool_end from details.outcome", () => {
+    const ev = mapEvent({
+      type: "tool_execution_end",
+      toolCallId: "tc2",
+      toolName: "consult",
+      isError: false,
+      result: {
+        content: [{ type: "text", text: "answer" }],
+        details: { outcome: "completed", expertRunId: "r_EXPERT1", costUsd: 0.02, truncated: true },
+      },
+    });
+    expect(ev).toMatchObject({
+      t: "tool_end",
+      toolName: "consult",
+      isError: false,
+      consult: { result: "completed", expertRunId: "r_EXPERT1", costUsd: 0.02, truncated: true },
+    });
+  });
+
+  it("classifies pi's throw shape (isError + content[0].text=message + details:{}) — whitelist mark ⇒ bad_ref, other throws ⇒ invalid", () => {
+    const badRef = mapEvent({
+      type: "tool_execution_end",
+      toolCallId: "tc3",
+      toolName: "consult",
+      isError: true,
+      // pi-agent-core agent-loop.js:634: a thrown tool error arrives as
+      // isError + content[0].text = message + details:{}.
+      result: {
+        content: [
+          {
+            type: "text",
+            text:
+              'consult: expert "stranger" is not in this run\'s expert whitelist (allowed: explorer (r_EXPERT1)). ' +
+              "Ask your dispatcher to add it, or answer from your own context.",
+          },
+        ],
+        details: {},
+      },
+    });
+    expect(badRef).toMatchObject({ isError: true, consult: { result: "bad_ref" } });
+
+    const invalid = mapEvent({
+      type: "tool_execution_end",
+      toolCallId: "tc4",
+      toolName: "consult",
+      isError: true,
+      result: { content: [{ type: "text", text: "consult: question must not be empty." }], details: {} },
+    });
+    expect(invalid).toMatchObject({ isError: true, consult: { result: "invalid" } });
+  });
+
+  it("maps a non-error consult tool_end without a known details.outcome to unknown (defensive)", () => {
+    const ev = mapEvent({
+      type: "tool_execution_end",
+      toolCallId: "tc5",
+      toolName: "consult",
+      isError: false,
+      result: { content: [{ type: "text", text: "…" }], details: { outcome: "brand_new_outcome_v2" } },
+    });
+    expect(ev).toMatchObject({ consult: { result: "unknown" } });
+  });
+});
+
 describe("session-driver mapEvent: message_update streaming (assistantMessageEvent)", () => {
   it("maps thinking_delta to a thinking_delta driver event", () => {
     const ev = mapEvent({

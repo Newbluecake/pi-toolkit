@@ -173,3 +173,55 @@ describe("resolveResumeTarget timeoutPolicy (R-inherit source, §2.7)", () => {
     expect(result).not.toHaveProperty("timeoutPolicy");
   });
 });
+
+/**
+ * consult A/B instrumentation plan (§5 P1b, D3 recommendation): the resume
+ * inherit source for `dispatchMeta` — the terminal snapshot's diag ONLY.
+ * Unlike timeoutPolicy there is deliberately NO tombstone fallback
+ * (tombstones are a TTL-bounded last-resort view and are not extended with
+ * analytics fields), so once every snapshot view is gone the meta is not
+ * inherited (the resume lands as unenrolled — accepted trade-off).
+ */
+describe("resolveResumeTarget dispatchMeta (consult A/B plan P1b)", () => {
+  const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a", abArm: "experts" as const };
+  function metaSnapshot(runId: string): RunSnapshot {
+    return { ...snapshot(runId), diag: { ...snapshot(runId).diag, dispatchMeta: META } };
+  }
+
+  it("returns dispatchMeta from a terminal snapshot (live wins over records)", () => {
+    const d: ResolveTargetDeps = {
+      labels: new Map(),
+      liveSnapshots: [metaSnapshot("r_DMETA001")],
+      records: [metaSnapshot("r_DMETA001")],
+      tombstones: new TombstoneStore(),
+      now: () => 60_000,
+    };
+    expect(resolveResumeTarget("r_DMETA001", d)).toEqual({
+      ok: true,
+      runId: "r_DMETA001",
+      sessionFile,
+      dispatchMeta: META,
+    });
+  });
+
+  it("falls back to the durable record when no live snapshot exists", () => {
+    const result = resolveResumeTarget("r_DMETA002", deps([metaSnapshot("r_DMETA002")]));
+    expect(result.ok && result.dispatchMeta).toEqual(META);
+  });
+
+  it("does NOT fall back to the tombstone once every snapshot view is gone", () => {
+    const tombstones = new TombstoneStore();
+    const registered = metaSnapshot("r_DMETA003");
+    tombstones.register(registered);
+    const d: ResolveTargetDeps = { labels: new Map(), liveSnapshots: [], records: [], tombstones, now: () => 60_000 };
+    const result = resolveResumeTarget("r_DMETA003", d);
+    expect(result).toEqual({ ok: true, runId: "r_DMETA003", sessionFile });
+    expect(result).not.toHaveProperty("dispatchMeta");
+  });
+
+  it("old entries without the field resolve fine and carry no dispatchMeta key", () => {
+    const result = resolveResumeTarget("r_DMETA004", deps([snapshot("r_DMETA004")]));
+    expect(result).toEqual({ ok: true, runId: "r_DMETA004", sessionFile });
+    expect(result).not.toHaveProperty("dispatchMeta");
+  });
+});

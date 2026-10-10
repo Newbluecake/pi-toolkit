@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSpawnService } from "../../src/service/spawn-service.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTypeConfig, RunOutcome, RunSnapshot } from "../../src/core/types.js";
+import type { AgentTypeConfig, RunOutcome, RunSnapshot, SpawnRequest } from "../../src/core/types.js";
 import type { Runner, SlotPool } from "../../src/service/ports.js";
 
 const type: AgentTypeConfig = { name: "worker", description: "worker", systemPrompt: "", promptMode: "append" };
@@ -159,6 +159,98 @@ describe("SpawnService", () => {
     // 未注入 durableRecords ⇒ 回退进程内 records（旧行为）：同样的 id 不可见。
     const legacy = createSpawnService(deps(runner));
     expect(legacy.resolveResume("r_OLDTERM").ok).toBe(false);
+  });
+
+  // consult A/B instrumentation plan (§5 P1b, D3 recommendation):
+  // `dispatchMeta = req.dispatchMeta ?? resume.dispatchMeta` — inherited from
+  // the terminal snapshot's diag only; explicit request value wins;
+  // schemaPreset/experts are per-dispatch and never inherited.
+  it("resume inherits dispatchMeta from the terminal snapshot; an explicit request value overrides", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-dmeta-"));
+    const file = join(dir, "sess.jsonl");
+    writeFileSync(file, "");
+    const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a", abArm: "experts" as const };
+    const seeded: RunSnapshot = {
+      runId: "r_DMETA01",
+      generation: 1,
+      status: "completed",
+      phase: "settled",
+      deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+      diag: {
+        ...outcome.diag,
+        sessionFile: file,
+        dispatchMeta: META,
+        schemaPreset: "verdict/v1",
+      },
+      outcome: { ...outcome, runId: "r_DMETA01" },
+      updatedAt: 1,
+    };
+    const seen: Array<Partial<SpawnRequest> | undefined> = [];
+    const runner: Runner = {
+      run: async (spec) => {
+        seen.push(spec.request);
+        return { ...outcome, runId: spec.runId, diag: { ...outcome.diag, sessionFile: file } };
+      },
+      abort: async () => ({ ok: false, escalatedTo: "L4" }),
+    };
+    const service = createSpawnService({ ...deps(runner), durableRecords: () => [seeded] });
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    // ① no meta on the request ⇒ inherited from the seeded terminal diag.
+    const resumed = await service.spawn({ type: "worker", prompt: "rework", resumeFrom: "r_DMETA01" });
+    if ("error" in resumed) throw new Error(resumed.error.message);
+    await tick();
+    expect(seen[0]?.dispatchMeta).toEqual(META);
+
+    // ② explicit meta on the request ⇒ wins over the inherited value.
+    const explicit = { lane: "L3" as const, packageId: "pkg-other" };
+    const overridden = await service.spawn({
+      type: "worker",
+      prompt: "rework 2",
+      resumeFrom: "r_DMETA01",
+      dispatchMeta: explicit,
+    });
+    if ("error" in overridden) throw new Error(overridden.error.message);
+    await tick();
+    expect(seen.at(-1)?.dispatchMeta).toEqual(explicit);
+
+    // ③ schemaPreset on the seeded diag is NEVER inherited (per-dispatch field).
+    expect(seen.at(-1)?.schemaPreset).toBeUndefined();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("resume's provisional snapshot mirrors the inherited dispatchMeta before the runner settles", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-dmeta2-"));
+    const file = join(dir, "sess.jsonl");
+    writeFileSync(file, "");
+    const META = { lane: "L2" as const, packageId: "pkg-2026-10-08-a", abArm: "control" as const };
+    const seeded: RunSnapshot = {
+      runId: "r_DMETA02",
+      generation: 1,
+      status: "completed",
+      phase: "settled",
+      deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+      diag: { ...outcome.diag, sessionFile: file, dispatchMeta: META },
+      outcome: { ...outcome, runId: "r_DMETA02" },
+      updatedAt: 1,
+    };
+    let seenDispatchMeta: Partial<SpawnRequest>["dispatchMeta"];
+    const runner: Runner = {
+      run: (spec) => {
+        seenDispatchMeta = spec.request.dispatchMeta;
+        return new Promise<RunOutcome>(() => undefined); // never settles: provisional snapshot stays put
+      },
+      abort: async () => ({ ok: false, escalatedTo: "L4" }),
+    };
+    const service = createSpawnService({ ...deps(runner), durableRecords: () => [seeded] });
+    const resumed = await service.spawn({ type: "worker", prompt: "rework", resumeFrom: "r_DMETA02" });
+    if ("error" in resumed) throw new Error(resumed.error.message);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Provisional row (admission-time) and the request the runner received
+    // both carry the inherited meta — consistent with what the adapter folds.
+    expect(service.snapshots().find((s) => s.runId === resumed.runId)?.diag.dispatchMeta).toEqual(META);
+    expect(seenDispatchMeta).toEqual(META);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("retries when runIdTaken rejects the first generated id", async () => {

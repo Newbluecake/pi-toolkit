@@ -11,6 +11,7 @@ import type {
   UsageDelta,
 } from "../core/types.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
+import { classifyConsultToolEnd } from "../core/consult-summary.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
 
@@ -376,13 +377,21 @@ function mapEvent(e: any): DriverEvent | undefined {
       ...(argsPreview === undefined ? {} : { argsPreview }),
     };
   }
-  if (t === "tool_execution_end")
+  if (t === "tool_execution_end") {
+    const toolName = String(e.toolName);
     return {
       t: "tool_end",
       toolCallId: String(e.toolCallId),
-      toolName: String(e.toolName),
+      toolName,
       isError: Boolean(e.isError),
+      // consult A/B instrumentation plan (§5 P1b): only a consult tool_end
+      // carries a classification fact (of pi's raw `result`, including the
+      // throw shape `isError` + `content[0].text=message` + `details:{}` the
+      // reducer folds into diag.consults); every other tool's tool_end keeps
+      // its exact pre-P1b shape.
+      ...(toolName === "consult" ? { consult: classifyConsultToolEnd(Boolean(e.isError), e.result) } : {}),
     };
+  }
   if (t === "tool_execution_update") return { t: "tool_update", toolCallId: String(e.toolCallId) };
   if (t === "auto_retry_start")
     return {

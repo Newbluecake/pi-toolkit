@@ -11,6 +11,7 @@ import type {
   SpawnRequest,
 } from "../core/types.js";
 import type { ConsultSettings } from "../config/settings.js";
+import { CONSULT_NOT_IN_WHITELIST_MARK, CONSULT_OUTCOMES } from "../core/consult-summary.js";
 import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
 import { toPiToolUsage } from "../tools/usage.js";
@@ -245,7 +246,20 @@ export interface ConsultDeps {
 }
 
 /** `details.outcome` vocabulary of the consult tool result (§4.1 error table). */
-export type ConsultOutcome =
+/**
+ * consult A/B instrumentation plan (§5 P1b): derived from core's frozen
+ * `CONSULT_OUTCOMES` so the tool's own outcome vocabulary and the diag-side
+ * classifier (`classifyConsultToolEnd`) can never drift apart. The
+ * type-equality assertion below locks the derived union to the exact
+ * eleven-value union this tool has always reported (freeze-surface). It
+ * stays a plain string union — every `details.outcome` written before P1b
+ * is one of these literals.
+ */
+export type ConsultOutcome = (typeof CONSULT_OUTCOMES)[number];
+/** Compile-time lock: the derived union is exactly the historical literal union (both directions). */
+type SameUnion<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const _consultOutcomeUnchanged: SameUnion<
+  ConsultOutcome,
   | "completed"
   | "unavailable"
   | "still_running"
@@ -256,7 +270,9 @@ export type ConsultOutcome =
   | "turn_cap"
   | "cost_cap"
   | "failed"
-  | "aborted";
+  | "aborted"
+> = true;
+void _consultOutcomeUnchanged;
 
 export interface ConsultToolDetails {
   expertRunId?: string;
@@ -370,7 +386,11 @@ export function matchExpertRef(handle: string, whitelist: readonly ConsultExpert
     if (byParenLabel) return byParenLabel;
   }
   throw new Error(
-    `consult: expert "${handle}" is not in this run's expert whitelist (allowed: ${describeWhitelist(whitelist)}). ` +
+    // consult A/B instrumentation plan (§5 P1b): the message references
+    // core's CONSULT_NOT_IN_WHITELIST_MARK so `classifyConsultToolEnd`'s
+    // bad_ref detection (substring match on the thrown text) and this throw
+    // can never drift. Byte-identical to the pre-P1b literal.
+    `consult: expert "${handle}" ${CONSULT_NOT_IN_WHITELIST_MARK} (allowed: ${describeWhitelist(whitelist)}). ` +
       "Ask your dispatcher to add it, or answer from your own context.",
   );
 }
