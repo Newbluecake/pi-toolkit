@@ -59,16 +59,16 @@ metadata:
 
 ## 模型 ID 速查表
 
-| 别名          | 精确 ID（按优先级）                                                                                                                                           |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| sonnet        | `cr-anthropic/claude-sonnet-5`                                                                                                                                |
-| kimi-k3       | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                                                  |
-| glm-5.3       | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）                                                         |
-| opus-5.5      | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                   |
-| fable         | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                  |
-| gpt-6.1-sol   | `cr-response/gpt-6.1-sol` ⇄ `zhipu-pool/gpt-6.1-sol`（两线互为备份，传输中断时换线续跑）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5× |
-| gpt-5.6-terra | `cr-response/gpt-5.6-terra`                                                                                                                                   |
-| gpt-6-astra   | `cr-response/gpt-6-astra` ⇄ `zhipu-pool/gpt-6-astra`                                                                                                          |
+| 别名          | 精确 ID（按优先级）                                                                                                                                                                                                                                                     |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sonnet        | `cr-anthropic/claude-sonnet-5`                                                                                                                                                                                                                                          |
+| kimi-k3       | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                                                                                                                                                            |
+| glm-5.3       | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）→ `cr-glm/glm-5.3`（**API 按量计费备线**：两条订阅线报错/429/额度耗尽时换它续跑，不参与订阅优先升首选；走 openai-completions，单价暂按智谱官方 $1.4/$4.4，待核实） |
+| opus-5.5      | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                             |
+| fable         | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                            |
+| gpt-6.1-sol   | `cr-response/gpt-6.1-sol` ⇄ `zhipu-pool/gpt-6.1-sol`（两线互为备份，传输中断时换线续跑）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5×                                                                                                           |
+| gpt-5.6-terra | `cr-response/gpt-5.6-terra`                                                                                                                                                                                                                                             |
+| gpt-6-astra   | `cr-response/gpt-6-astra` ⇄ `zhipu-pool/gpt-6-astra`                                                                                                                                                                                                                    |
 
 ### 疑难升级阶梯（fable 闸门）
 
@@ -156,7 +156,7 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 
 开发双首选（2026-09）：sonnet 与 gpt-6.1-sol 并列，多个开发包并行时按包分摊（gpt-6.1-sol 更便宜、上下文 1.05M）；**gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）**，不派任何 GPT 系。
 
-路由现状（2026-10）：zai 订阅有余量时 GLM 按上方「GLM 订阅优先」规则升为候选阶段首选；kimi-coding / zai 订阅常耗尽，额度耗尽或 L3 预警时回退到按量线（cr-anthropic / cr-response / zhipu-pool）的默认顺序。
+路由现状（2026-10）：zai 订阅有余量时 GLM 按上方「GLM 订阅优先」规则升为候选阶段首选；kimi-coding / zai 订阅常耗尽，额度耗尽或 L3 预警时回退到按量线（cr-anthropic / cr-response / zhipu-pool）的默认顺序；GLM 仍在候选内的阶段可改派 `cr-glm/glm-5.3`（同模型、API 按量计费，按表中常规位次用，不升首选），GLM 的异源约束照旧。
 
 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier /
 general / Explore），自带角色 prompt 与工具约束；调用时传 `subagent_type` 并按本表传 `model`。
