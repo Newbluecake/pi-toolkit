@@ -14,29 +14,26 @@
 
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 import { MemoryError } from "./paths.js";
-import { lockBreak, lockCreate, lockRead, lockRelease, type LockPayload } from "./safe-fs.js";
+import {
+  isProcessAlive,
+  lockBreak,
+  lockCreate,
+  lockRead,
+  lockRelease,
+  readProcIdentity,
+  type LockPayload,
+} from "./safe-fs.js";
 
-/** A lock file older than this (by mtime) is presumed abandoned. Comfortably
- *  above the slow-body WARN threshold so a merely-slow body never trips it. */
-const STALE_MS = 30_000;
+/** M-T4: age is never proof of death. Only a same-host owner whose
+ * pid+starttime (or legacy pid alone) is provably dead may be reclaimed;
+ * cross-host and unprovable owners require explicit --break-lock. */
 const RETRY_MS = 25;
 const DEFAULT_TIMEOUT_MS = 2_000;
 /** `body` running longer than this WARNs (not an error — the lock is still
- *  released normally); set well under STALE_MS so a warned run never
- *  self-triggers another caller's stale-break. */
+ * released normally); a warning never grants permission to break a live lock. */
 const SLOW_BODY_WARN_MS = 5_000;
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // ESRCH = no such process ⇒ dead; any other errno (e.g. EPERM, a live
-    // process owned by another user) means "can't tell, assume alive".
-    return (err as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -55,24 +52,54 @@ export interface MemoryLockOpts {
  * Run `body` (which MUST be synchronous — no `await` inside it, so a
  * concurrent `before_agent_start` read can never observe a half-applied
  * change) with the canonical memory directory `dir` locked. Retries every
- * `RETRY_MS` until `timeoutMs` elapses; a lock whose file is stale (mtime
- * older than `STALE_MS`, or owned by a same-host dead pid) is broken and
- * re-raced immediately.
+ * `RETRY_MS` until `timeoutMs` elapses; only a same-host owner whose
+ * process identity is provably dead is broken and re-raced immediately.
  */
 export async function withMemoryDirLock<T>(dir: string, body: () => T, opts: MemoryLockOpts = {}): Promise<T> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const log = opts.log ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
   const token = randomBytes(8).toString("hex");
-  const payload: LockPayload = { pid: process.pid, host: hostname(), token, at: Date.now() };
+  const owner = readProcIdentity(process.pid);
+  const payload: LockPayload = {
+    pid: process.pid,
+    host: hostname(),
+    token,
+    at: Date.now(),
+    ...(owner?.startTicks === undefined ? {} : { startTicks: owner.startTicks }),
+    ...(owner?.bootId === undefined ? {} : { bootId: owner.bootId }),
+  };
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (lockCreate(dir, payload)) break;
     const current = lockRead(dir);
-    if (current) {
-      const staleByAge = Date.now() - current.mtimeMs > STALE_MS;
-      const staleByDeadPid =
-        current.payload !== undefined && current.payload.host === payload.host && !isProcessAlive(current.payload.pid);
-      if (staleByAge || staleByDeadPid) {
+    if (current?.payload !== undefined) {
+      const holder = current.payload;
+      let dead = false;
+      let verified = false;
+      if (holder.host === payload.host) {
+        const actual = readProcIdentity(holder.pid);
+        if (holder.startTicks !== undefined) {
+          // A missing /proc record is only proof of death when kill(0) also
+          // returns ESRCH; permission failures remain unprovable.
+          if (actual === undefined) {
+            verified = !isProcessAlive(holder.pid);
+            dead = verified;
+          } else {
+            verified = true;
+            dead =
+              String(actual.startTicks) !== String(holder.startTicks) ||
+              (holder.bootId !== undefined && actual.bootId !== undefined && actual.bootId !== holder.bootId);
+          }
+        } else {
+          verified = true;
+          dead = !isProcessAlive(holder.pid);
+        }
+      } else {
+        // Cross-host identity is never provable from this process. M-T4
+        // requires refusal regardless of age or the local pid table.
+        dead = false;
+      }
+      if (dead && verified) {
         lockBreak(dir);
         continue; // re-race for the lock immediately, no sleep
       }
@@ -80,7 +107,10 @@ export async function withMemoryDirLock<T>(dir: string, body: () => T, opts: Mem
     if (Date.now() >= deadline) {
       const holder = current?.payload;
       const since = holder ? new Date(holder.at).toISOString() : "unknown";
-      throw new MemoryError(`memory dir busy (lock held by pid ${holder?.pid ?? "?"} since ${since}); retry`);
+      const ownerText = holder === undefined ? "unknown owner" : `pid ${holder.pid} on ${holder.host}`;
+      throw new MemoryError(
+        `memory dir busy: lock ${resolvePath(dir, ".lock")} is held by ${ownerText} since ${since} (owner cannot be verified) — if no pi process holds it, run /mem tidy --break-lock`,
+      );
     }
     await sleep(RETRY_MS);
   }

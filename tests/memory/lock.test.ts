@@ -59,12 +59,34 @@ describe("withMemoryDirLock", () => {
     await expect(withMemoryDirLock(dir, () => "never", { timeoutMs: 80 })).rejects.toThrow(/busy/);
   });
 
-  it("breaks a lock that is stale by age and proceeds", async () => {
+  it("refuses a stale cross-host lock with an actionable break-lock instruction", async () => {
     const dir = tmp();
     lockCreate(dir, { pid: 999_999_999, host: "some-other-host", token: "stale", at: Date.now() - 60_000 });
     utimesSync(join(dir, ".lock"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
-    const result = await withMemoryDirLock(dir, () => "recovered", { timeoutMs: 500 });
-    expect(result).toBe("recovered");
+    await expect(withMemoryDirLock(dir, () => "never", { timeoutMs: 80 })).rejects.toThrow(
+      new RegExp(`${join(dir, ".lock")}.*\\/mem tidy --break-lock`),
+    );
+  });
+
+  it("never age-breaks a same-host live owner", async () => {
+    const dir = tmp();
+    const { hostname } = await import("node:os");
+    lockCreate(dir, { pid: process.pid, host: hostname(), token: "live-owner", at: Date.now() - 60_000 });
+    utimesSync(join(dir, ".lock"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    await expect(withMemoryDirLock(dir, () => "never", { timeoutMs: 80 })).rejects.toThrow(/owner cannot be verified/);
+  });
+
+  it("reclaims a same-host lock when pid starttime is provably stale", async () => {
+    const dir = tmp();
+    const { hostname } = await import("node:os");
+    lockCreate(dir, {
+      pid: process.pid,
+      host: hostname(),
+      token: "pid-reused",
+      at: Date.now(),
+      startTicks: "definitely-not-this-process",
+    });
+    await expect(withMemoryDirLock(dir, () => "recovered", { timeoutMs: 500 })).resolves.toBe("recovered");
   });
 
   it("breaks a lock held by a dead pid on the SAME host, even if fresh", async () => {
