@@ -29,7 +29,6 @@
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref, watch } from "vue";
 import { commandPolicyFor, parseSlash, validRecallText } from "@logic/control.js";
-import { mentionSendRoute } from "@logic/mention.js";
 import { clientImageBudget, previewScopeOf } from "@logic/preview.js";
 import {
   expandPromptWithFiles,
@@ -78,6 +77,10 @@ interface CmdResultState {
 const pendingConfirm = ref<{ name: string; args: string; message?: string } | null>(null);
 const cmdResult = ref<CmdResultState | null>(null);
 const cmdWaitingTerminal = ref(false);
+const mentionResult = ref<{ kind: "ok" | "error"; label: string; action?: "steer" | "resume"; error?: string } | null>(
+  null,
+);
+let mentionResultTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** pendingCtl id of the in-flight async command we're tracking (found by kind+name after the
  * optimistic item lands in the reducer). */
@@ -221,17 +224,9 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
     void runCommand(slash.name, slash.args, false);
     return;
   }
-  // @mention routing (task #11): a leading `@label msg` resolving to a RUNNING fleet row
-  // steers that sub-agent instead of opening a new turn (steer works in both busy and idle —
-  // interjecting IS the steer semantics). Terminal/unknown labels stay plain text, exactly
-  // like the terminal's own mention interceptor, so web and TUI never diverge. Failures ride
-  // the standard pendingCtl path (QueueList's "steer sub" item with retry), same as
-  // FleetActions' inline steer.
-  const mention = mentionSendRoute(text, view?.agent.value.fleet ?? []);
-  if (mention.kind === "steer") {
-    void c.steerSub(key, mention.runId, mention.message).catch(() => {});
-    return;
-  }
+  // @mention routing belongs to the agent's live registry. Even a label omitted by the
+  // capped browser fleet must be sent as the raw prompt so terminal-parity resume/steer can
+  // still resolve it. The optional mention result comes back on the normal prompt response.
   // @文件补全 send expansion (file-mention): every `@<absolute path>` token under the
   // session cwd gets its TEXT fetched through the preview endpoint and appended as an
   // attachment-style block (≤ the shared 48 KiB prompt cap). Never blocks the send: no
@@ -239,9 +234,32 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
   // leaves the token as plain text — the path itself is model-readable — with a console note.
   // steer-recall §7 (「onSend 传原文」): the RAW composer text rides as the cached original so
   // recall/copy always give back what the user typed, never the inlined file dump.
-  void expandFileRefs(text).then((expanded) => {
-    c.sendPrompt(key, expanded, deliver, text).catch(() => {});
-  });
+  void expandFileRefs(text)
+    .then((expanded) => c.sendPrompt(key, expanded, deliver, text))
+    .then((outcome) => {
+      const data = (outcome.data ?? {}) as {
+        mention?: { action?: "steer" | "resume" | "error"; label?: string; error?: string };
+      };
+      const mention = data.mention;
+      if (!mention || typeof mention.label !== "string" || mention.label === "") return;
+      if (mentionResultTimer !== undefined) clearTimeout(mentionResultTimer);
+      if (mention.action === "error") {
+        mentionResult.value = {
+          kind: "error",
+          label: mention.label,
+          error: mention.error ?? "unable to route mention",
+        };
+      } else if (mention.action === "steer" || mention.action === "resume") {
+        mentionResult.value = { kind: "ok", label: mention.label, action: mention.action };
+      } else {
+        return;
+      }
+      mentionResultTimer = setTimeout(() => {
+        mentionResult.value = null;
+        mentionResultTimer = undefined;
+      }, 6_000);
+    })
+    .catch(() => {});
 }
 
 /** Per-file fetch deadline — the preview transport's own 40s budget is for human-scale
@@ -434,6 +452,7 @@ async function onQueueCopyHeld(id: string): Promise<void> {
 
 onUnmounted(() => {
   if (waitPromptTimer !== undefined) clearTimeout(waitPromptTimer);
+  if (mentionResultTimer !== undefined) clearTimeout(mentionResultTimer);
 });
 </script>
 
@@ -453,6 +472,22 @@ onUnmounted(() => {
       @discard-held="onQueueDiscardHeld"
       @copy-held="onQueueCopyHeld"
     />
+    <p
+      v-if="mentionResult"
+      class="fleet-actions-note"
+      :data-kind="mentionResult.kind === 'error' ? 'err' : undefined"
+      role="status"
+    >
+      <template v-if="mentionResult.kind === 'error'">
+        {{ t("control.mentionError", { label: mentionResult.label, error: mentionResult.error ?? "" }) }}
+      </template>
+      <template v-else-if="mentionResult.action === 'resume'">
+        {{ t("control.mentionResumed", { label: mentionResult.label }) }}
+      </template>
+      <template v-else>
+        {{ t("control.mentionSteered", { label: mentionResult.label }) }}
+      </template>
+    </p>
     <CommandResult
       v-if="cmdResult"
       :name="cmdResult.name"

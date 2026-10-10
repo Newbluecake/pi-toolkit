@@ -5,6 +5,7 @@ import {
   filterMentionTargets,
   mentionCompletion,
   mentionSendRoute,
+  mentionTargets,
   moveMentionActive,
   parseMentionText,
   resolveMentionTarget,
@@ -15,8 +16,8 @@ import {
  * Pure @mention helpers (web-hub task #11 — composer `@label` completion + send routing).
  * Semantics mirror the TUI's `src/mention/mention.ts` `parseMention` (leading `@label message`
  * only), minus the registry: the web side resolves against the session's LIVE fleet rows, and
- * only `status === "running"` rows are steerable (the agent answers anything else with
- * E_NOT_RUNNING, so offering it would be a guaranteed failure).
+ * all root-direct rows are offered with a running/settled/other status hint; the
+ * agent-side registry performs the actual steer/resume decision.
  */
 
 const run = (label, runId, extra = {}) => ({ runId, label, status: "running", terminal: false, ...extra });
@@ -44,7 +45,7 @@ describe("parseMentionText (leading `@label message`, same shape as TUI parseMen
   });
 });
 
-describe("runningMentionTargets (fleet rows → steerable targets)", () => {
+describe("mentionTargets (fleet rows → root-direct targets)", () => {
   it("keeps only status==='running' rows with a non-empty label and runId", () => {
     const rows = [
       run("alpha", "r1"),
@@ -57,12 +58,21 @@ describe("runningMentionTargets (fleet rows → steerable targets)", () => {
       null,
       "garbage",
     ];
-    expect(runningMentionTargets(rows)).toEqual([{ label: "alpha", runId: "r1", status: "running" }]);
+    expect(runningMentionTargets(rows)).toEqual([
+      { label: "alpha", runId: "r1", status: "running" },
+      { label: "done", runId: "r2", status: "settled" },
+      { label: "queued", runId: "r3", status: "other" },
+      { label: "timed", runId: "r4", status: "settled" },
+    ]);
   });
 
-  it("duplicate labels: first row wins (mirrors the TUI registry's first-registration-wins)", () => {
-    const rows = [run("bot", "r1"), run("bot", "r2")];
-    expect(runningMentionTargets(rows).map((t) => t.runId)).toEqual(["r1"]);
+  it("duplicate labels prefer the newest non-terminal row and exclude child rows", () => {
+    const rows = [
+      run("bot", "old", { elapsedMs: 100, terminal: true, status: "completed" }),
+      run("bot", "new", { elapsedMs: 10 }),
+      run("child", "r3", { parentRunId: "parent" }),
+    ];
+    expect(mentionTargets(rows)).toEqual([{ label: "bot", runId: "new", status: "running" }]);
   });
 
   it("input order is preserved; non-array input degrades to []", () => {
@@ -93,7 +103,7 @@ describe("resolveMentionTarget (send-time resolution)", () => {
     const rows = [run("bot", "r1"), run("done", "r2", { status: "completed", terminal: true })];
     expect(resolveMentionTarget(rows, "bot")).toEqual({ label: "bot", runId: "r1", status: "running" });
     expect(resolveMentionTarget(rows, "Bot")).toBeUndefined();
-    expect(resolveMentionTarget(rows, "done")).toBeUndefined(); // terminal ⇒ not resolvable
+    expect(resolveMentionTarget(rows, "done")).toEqual({ label: "done", runId: "r2", status: "settled" });
     expect(resolveMentionTarget(rows, "ghost")).toBeUndefined();
   });
 });
@@ -141,13 +151,8 @@ describe("moveMentionActive (arrow-key navigation, wraps)", () => {
 describe("mentionSendRoute (DetailDock send fork)", () => {
   const rows = [run("bot", "r1"), run("old", "r2", { status: "failed", terminal: true })];
 
-  it("`@running-label msg` ⇒ steer with the STRIPPED message (label never reaches the child)", () => {
-    expect(mentionSendRoute("@bot please rebase", rows)).toEqual({
-      kind: "steer",
-      runId: "r1",
-      label: "bot",
-      message: "please rebase",
-    });
+  it("always uses the normal prompt route; the agent owns steer/resume resolution", () => {
+    expect(mentionSendRoute("@bot please rebase", rows)).toEqual({ kind: "prompt" });
   });
 
   it("terminal label / unknown label / no message ⇒ plain prompt, raw text untouched", () => {

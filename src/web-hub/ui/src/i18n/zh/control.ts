@@ -125,6 +125,12 @@ const control = {
   mentionZone: "子 agent",
   fileZone: "文件",
   mentionEmpty: "无匹配的子 agent 或文件",
+  mentionRunning: "running",
+  mentionSettled: "settled · @ resumes",
+  mentionUnavailable: "unavailable",
+  mentionSteered: "已向 @{label} 插话",
+  mentionResumed: "已恢复 @{label}",
+  mentionError: "@{label}：{error}",
 
   badgeWeb: "web",
 

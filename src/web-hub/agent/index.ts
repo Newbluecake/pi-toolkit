@@ -86,6 +86,7 @@ import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js
 import { createDialogBridge } from "./dialogs.js";
 import { clearRestoreVetoSync, createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
+import type { MentionRouteDeps } from "../../mention/mention.js";
 
 export interface WebHubLanSettings {
   enabled: boolean;
@@ -181,6 +182,8 @@ export interface WebHubDeps {
   settings: WebHubSettings;
   fleet: () => readonly RunSnapshot[];
   query?: () => QueryControlPort | undefined; // I: () => holder.current?.query.list() ?? []
+  /** Shared TUI mention router dependencies, late-bound across session rebuilds. */
+  mention?: () => MentionRouteDeps | undefined;
   fleetTypeOf?: (runId: string) => string | undefined;
   /** D14/§3.1: whether `askUser.enabled` in the host settings — gates `dialog.v1` broadcast
    * alongside `settings.remoteAskUser`. Unset ⇒ treated as enabled (D10 default-on posture). */
@@ -736,6 +739,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       return { cancel: () => clearTimeout(t) };
     },
     ...(deps.query !== undefined ? { query: deps.query } : {}),
+    ...(deps.mention !== undefined ? { mention: deps.mention } : {}),
     // topic-switch plan P4 (D2, #5): the optional web-prompt claim port, threaded straight
     // through unchanged — `undefined` (the common case until topic-switch is wired) keeps
     // `handlePrompt` byte-identical to its pre-feature form.

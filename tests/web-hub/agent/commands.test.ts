@@ -6,6 +6,7 @@ import { createCommandHandler, type CommandHandlerDeps } from "../../../src/web-
 import { createCommandLedger } from "../../../src/web-hub/agent/ledger.js";
 import { createQueueMirror } from "../../../src/web-hub/agent/queue-mirror.js";
 import type { BuiltinBridge } from "../../../src/web-hub/agent/builtin-bridge.js";
+import { createMentionRegistry } from "../../../src/mention/registry.js";
 import type { OriginEntryPort } from "../../../src/web-hub/agent/origin-entry.js";
 import type { QueryControlPort } from "../../../src/web-hub/agent/index.js";
 import type { CmdFrame, CmdOrigin, CmdResultFrame, CmdLateFrame } from "../../../src/web-hub/protocol/messages.js";
@@ -34,7 +35,16 @@ interface Harness {
   originEntry: OriginEntryPort & { appendOrigin: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> };
 }
 
-function makeHarness(over: { control?: boolean; query?: QueryControlPort; now?: () => number } = {}): Harness {
+function makeHarness(
+  over: {
+    control?: boolean;
+    query?: QueryControlPort;
+    now?: () => number;
+    mention?: CommandHandlerDeps["mention"];
+    promptGate?: CommandHandlerDeps["promptGate"];
+    hold?: CommandHandlerDeps["hold"];
+  } = {},
+): Harness {
   const { pi } = fakePi();
   const { ctx, state } = fakeCtx({ mode: "tui" });
   const sent: Array<CmdResultFrame | CmdLateFrame> = [];
@@ -70,6 +80,9 @@ function makeHarness(over: { control?: boolean; query?: QueryControlPort; now?: 
     onChanged,
     setTimer: timers.setTimer,
     ...(query !== undefined ? { query: () => query } : {}),
+    ...(over.mention !== undefined ? { mention: over.mention } : {}),
+    ...(over.promptGate !== undefined ? { promptGate: over.promptGate } : {}),
+    ...(over.hold !== undefined ? { hold: over.hold } : {}),
   };
   const handler = createCommandHandler(deps);
   return { handler, deps, sent, onChanged, timers, ctxState: state, compaction, query, builtinBridge, originEntry };
@@ -87,6 +100,123 @@ describe("createCommandHandler — control disabled", () => {
 });
 
 describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
+  it("routes a registered running mention before topic-switch/hold and settles exactly once", async () => {
+    const registry = createMentionRegistry();
+    registry.register("bot", { runId: "run-old", type: "general", parent: "root" });
+    const steer = vi.fn(async () => ({ ok: true as const }));
+    const gate = vi.fn(() => ({
+      tryClaim: vi.fn(() => true),
+      isIdle: vi.fn(() => true),
+    }));
+    const canHold = vi.fn(() => true);
+    const hold = vi.fn(() => true);
+    const h = makeHarness({
+      mention: () => ({
+        registry,
+        query: { get: () => ({ status: "running", diag: { lastEventAt: 1 } }), steer },
+        spawn: { spawn: vi.fn() as never },
+        fabricEnabled: () => true,
+      }),
+      promptGate: gate,
+      hold: () => ({ canHold, hold }) as never,
+    });
+    const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+
+    h.handler.handle(frame("c1", { op: "prompt", text: "@bot please rebase", deliver: "steer" }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(steer).toHaveBeenCalledWith("run-old", expect.stringContaining("用户消息：\nplease rebase"));
+    expect(send).not.toHaveBeenCalled();
+    expect(gate).not.toHaveBeenCalled();
+    expect(canHold).not.toHaveBeenCalled();
+    expect(h.sent).toEqual([
+      {
+        t: "cmd_result",
+        rid: "r-c1",
+        id: "c1",
+        ok: true,
+        data: {
+          op: "prompt",
+          delivery: "observed",
+          behavior: "steer",
+          mention: { action: "steer", label: "bot", runId: "run-old" },
+        },
+      },
+    ]);
+    expect(h.deps.ledger.get("c1")).toMatchObject({ state: "ok" });
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("resumes a registered terminal mention with the same label", async () => {
+    const registry = createMentionRegistry();
+    registry.register("bot", { runId: "run-done", type: "general", parent: "root" });
+    const spawn = vi.fn(async () => ({ runId: "run-new" }));
+    const h = makeHarness({
+      mention: () => ({
+        registry,
+        query: { get: () => ({ status: "completed" }), steer: vi.fn() },
+        spawn: { spawn: spawn as never },
+      }),
+    });
+
+    h.handler.handle(frame("c1", { op: "prompt", text: "@bot continue", deliver: "followUp" }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ label: "bot", resumeFrom: "run-done", prompt: "continue" }),
+    );
+    expect(h.sent[0]).toMatchObject({
+      ok: true,
+      data: { mention: { action: "resume", label: "bot", runId: "run-new" } },
+    });
+  });
+
+  it("leaves an unknown label on the legacy prompt path", () => {
+    const registry = createMentionRegistry();
+    const h = makeHarness({
+      mention: () => ({
+        registry,
+        query: { get: () => undefined, steer: vi.fn() },
+        spawn: { spawn: vi.fn() as never },
+      }),
+    });
+    const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+
+    h.handler.handle(frame("c1", { op: "prompt", text: "@ghost hi", deliver: "steer" }));
+
+    expect(send).toHaveBeenCalledWith("@ghost hi", { deliverAs: "steer", expandPromptTemplates: false });
+  });
+
+  it("reports a mention routing error while treating the input as handled", async () => {
+    const registry = createMentionRegistry();
+    registry.register("bot", { runId: "run-old", type: "general", parent: "root" });
+    const reportError = vi.fn();
+    const h = makeHarness({
+      mention: () => ({
+        registry,
+        query: {
+          get: () => ({ status: "running" }),
+          steer: vi.fn(async () => ({ ok: false as const, reason: "busy", detail: "too late" })),
+        },
+        spawn: { spawn: vi.fn() as never },
+        reportError,
+      }),
+    });
+
+    h.handler.handle(frame("c1", { op: "prompt", text: "@bot stop", deliver: "steer" }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(reportError).toHaveBeenCalledWith("cannot steer @bot: too late");
+    expect(h.sent[0]).toMatchObject({
+      ok: true,
+      data: { mention: { action: "error", label: "bot", error: "cannot steer @bot: too late" } },
+    });
+    expect(h.sent).toHaveLength(1);
+  });
+
   it("always passes deliverAs + expandPromptTemplates:false to sendUserMessage (D4)", () => {
     const h = makeHarness();
     const spy = vi.spyOn(h.deps.pi, "sendUserMessage");

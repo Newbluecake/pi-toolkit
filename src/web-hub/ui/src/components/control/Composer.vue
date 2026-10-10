@@ -98,7 +98,7 @@ import {
   filterMentionTargets,
   mentionCompletion,
   moveMentionActive,
-  runningMentionTargets,
+  mentionTargets,
 } from "@logic/mention.js";
 import { canSendWithAttachments, classifyPaste, collectDrop, pastedName, uploadAvailability } from "@logic/upload.js";
 import { buildFileSearchUrl, parseFileSearchResults } from "@logic/file-mention.js";
@@ -160,16 +160,11 @@ const commandMode = computed(() => slash.value !== undefined && commandsEnabled.
 // ---------------------------------------------------------------------------
 // @mention completion (web-hub task #11) + @文件补全 (file-mention)
 // ---------------------------------------------------------------------------
-// A line-initial `@partial` token opens a TWO-ZONE panel: the session's RUNNING sub-agents
-// (the CONTROL_VIEW agent's fleet rows, `status === "running"` only — anything else would
-// steer into a guaranteed E_NOT_RUNNING agent-side) and, once ≥1 character is typed, FILES
-// under the session cwd (debounced ~200ms `GET /api/files/search`; relative path shown,
-// picking inserts `@<absolute path> `). Keyboard navigation is CONTINUOUS across the two
-// zones (one flat index); the panel never pops while BOTH zones are empty (the task-#11
-// rule, generalized: runningTargets > 0 OR the file search has ever returned hits for this
-// token), and any file-search failure (network/401/…) silently degrades to the sub-agent
-// zone only. The actual send routing lives in DetailDock (`mentionSendRoute` + file-mention
-// expansion); this component only completes text.
+// A line-initial `@partial` token opens a TWO-ZONE panel: root-direct sub-agents from the
+// live fleet (running, settled/resumable, and other/unavailable rows) plus files under the
+// session cwd (debounced ~200ms search). The agent remains authoritative for send routing;
+// the browser sends the raw leading @mention as a normal prompt. Keyboard navigation is
+// continuous across both zones.
 const rootEl = ref<HTMLElement | null>(null);
 const caret = ref(text.value.length);
 const mentionDismissed = ref(false); // Esc / outside-pointerdown latch, reset on any input
@@ -180,9 +175,16 @@ function syncCaret(): void {
 }
 
 const mentionState = computed(() => mentionCompletion(text.value, caret.value));
-const runningTargets = computed(() => runningMentionTargets([...(view?.agent.value.fleet ?? [])]));
-const mentionRows = computed(() =>
-  mentionState.value.open ? filterMentionTargets(runningTargets.value, mentionState.value.query) : [],
+type MentionPanelTarget = {
+  readonly label: string;
+  readonly runId: string;
+  readonly status: "running" | "settled" | "other";
+};
+const mentionTargetsForFleet = computed<readonly MentionPanelTarget[]>(
+  () => mentionTargets([...(view?.agent.value.fleet ?? [])]) as MentionPanelTarget[],
+);
+const mentionRows = computed<readonly MentionPanelTarget[]>(() =>
+  mentionState.value.open ? filterMentionTargets(mentionTargetsForFleet.value, mentionState.value.query) : [],
 );
 
 // --- file zone (debounced search; silent degrade on any failure) -------------------------
@@ -192,7 +194,14 @@ interface FilePanelRow {
   readonly path: string;
   readonly rel: string;
 }
-type PanelRow = { readonly kind: "agent"; readonly label: string; readonly runId: string } | FilePanelRow;
+type PanelRow =
+  | {
+      readonly kind: "agent";
+      readonly label: string;
+      readonly runId: string;
+      readonly status: "running" | "settled" | "other";
+    }
+  | FilePanelRow;
 
 const FILE_SEARCH_DEBOUNCE_MS = 200;
 const FILE_SEARCH_LIMIT = 20;
@@ -261,7 +270,7 @@ watch(
       fileArmed.value = false;
       return;
     }
-    if (q.length < 1) return; // bare "@": files need ≥1 character (sub-agents still list)
+    if (typeof q !== "string" || q.length < 1) return; // bare "@": files need ≥1 character (sub-agents still list)
     const seq = fileSeq;
     const key = view?.agentKey ?? ctx?.agentKey ?? null;
     if (key === null) return;
@@ -274,7 +283,7 @@ watch(
 );
 
 const panelRows = computed<readonly PanelRow[]>(() => [
-  ...mentionRows.value.map((r) => ({ kind: "agent" as const, label: r.label, runId: r.runId })),
+  ...mentionRows.value.map((r) => ({ kind: "agent" as const, label: r.label, runId: r.runId, status: r.status })),
   ...fileRows.value,
 ]);
 const mentionOpen = computed(
@@ -282,7 +291,7 @@ const mentionOpen = computed(
     mentionState.value.open &&
     !mentionDismissed.value &&
     !commandMode.value &&
-    (runningTargets.value.length > 0 || fileArmed.value),
+    (mentionTargetsForFleet.value.length > 0 || fileArmed.value),
 );
 // Reset the highlight only when the QUERY (or open) changes; a fleet wire refresh (~1Hz)
 // rebuilds the rows array with identical content — resetting on that would yank the user's
@@ -820,11 +829,17 @@ watch(
         class="mention-item"
         :class="{ active: i === mentionActive }"
         :aria-selected="i === mentionActive"
-        @click="pickPanelRow({ kind: 'agent', label: row.label, runId: row.runId })"
+        @click="pickPanelRow({ kind: 'agent', ...row })"
         @mousemove="mentionActive = i"
       >
         <span class="mention-label" translate="no">@{{ row.label }}</span>
-        <span class="chip chip-muted mention-status">{{ t("control.stateRunning") }}</span>
+        <span class="chip chip-muted mention-status">{{
+          row.status === "running"
+            ? t("control.mentionRunning")
+            : row.status === "settled"
+              ? t("control.mentionSettled")
+              : t("control.mentionUnavailable")
+        }}</span>
       </button>
       <p v-if="fileRows.length > 0" class="mention-zone">{{ t("control.fileZone") }}</p>
       <button

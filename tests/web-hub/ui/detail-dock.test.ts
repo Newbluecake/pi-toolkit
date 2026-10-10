@@ -255,22 +255,24 @@ describe("DetailDock.vue — @mention send routing (task #11)", () => {
     { runId: "r2", label: "old", status: "completed", terminal: true },
   ];
 
-  it("`@running-label msg` ⇒ steerSub with the STRIPPED message (never sendPrompt)", async () => {
+  it("`@label msg` uses the normal prompt command so the agent can steer", async () => {
     const { control, calls } = fakeControl();
     const w = mountDock(control, { fleet, busy: true });
     await w.find(".composer textarea").setValue("@bot please rebase");
     await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
     await flush();
-    expect(calls).toEqual([{ method: "steerSub", args: ["agent-a", "r1", "please rebase"] }]);
+    expect(calls).toEqual([
+      { method: "sendPrompt", args: ["agent-a", "@bot please rebase", "steer", "@bot please rebase"] },
+    ]);
   });
 
-  it("idle (not busy) still steers — interjecting IS the steer semantics", async () => {
+  it("idle (not busy) also sends the raw prompt for agent-side routing", async () => {
     const { control, calls } = fakeControl();
     const w = mountDock(control, { fleet, busy: false });
     await w.find(".composer textarea").setValue("@bot ping");
     await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
     await flush();
-    expect(calls.map((c) => c.method)).toEqual(["steerSub"]);
+    expect(calls.map((c) => c.method)).toEqual(["sendPrompt"]);
   });
 
   it("terminal label / unknown label ⇒ plain sendPrompt with the raw text", async () => {
@@ -320,18 +322,17 @@ describe("DetailDock.vue — @mention send routing (task #11)", () => {
     expect(calls.map((c) => c.method)).toEqual(["runCommand"]);
   });
 
-  it("steerSub failure stays on the standard path: no crash, no sendPrompt fallback", async () => {
+  it("renders an agent mention error returned on the normal prompt result", async () => {
     const { control, calls } = fakeControl(() => ({
-      ok: false,
-      error: "E_NOT_RUNNING",
-      retryable: false,
-      effect: "none" as const,
+      ok: true,
+      data: { op: "prompt", delivery: "observed", mention: { action: "error", label: "bot", error: "cannot steer" } },
     }));
     const w = mountDock(control, { fleet, busy: true });
     await w.find(".composer textarea").setValue("@bot too late");
     await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
     await flush();
-    expect(calls).toEqual([{ method: "steerSub", args: ["agent-a", "r1", "too late"] }]);
+    expect(calls).toEqual([{ method: "sendPrompt", args: ["agent-a", "@bot too late", "steer", "@bot too late"] }]);
+    expect(w.text()).toContain("@bot: cannot steer");
   });
 });
 

@@ -139,6 +139,12 @@ const control = {
   mentionZone: "Sub-agents",
   fileZone: "Files",
   mentionEmpty: "No matching sub-agent or file",
+  mentionRunning: "running",
+  mentionSettled: "settled · @ resumes",
+  mentionUnavailable: "unavailable",
+  mentionSteered: "steered @{label}",
+  mentionResumed: "resumed @{label}",
+  mentionError: "@{label}: {error}",
 
   // --- transcript web badge (§7.7, best-effort) ---
   badgeWeb: "web",

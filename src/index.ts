@@ -30,7 +30,7 @@ import {
   readBashJobTail,
   type Stack,
 } from "./stack.js";
-import { installMentionInput } from "./mention/mention.js";
+import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { worktreeRoot } from "./extensions/worktree-orphans.js";
@@ -735,7 +735,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   // X6: @handle mentions. Registered once; resolves through the current
   // session's stack like the tools above. Conservative by contract: unknown
   // labels and @file/paths fall through to pi untouched.
-  installMentionInput(pi, {
+  const mentionRouteDeps = createMentionRouteDeps({
     registry: {
       register: () => false, // registrations flow from spawn labels inside the stack
       resolve: (label) => holder.current?.mention.resolve(label),
@@ -749,6 +749,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     // X6b: surface the user's raw @ message in the fleet widget under the target run
     noteMention: (runId, message, pendingSince) => holder.current?.mentionNotes.set(runId, message, pendingSince),
   });
+  installMentionInput(pi, mentionRouteDeps);
 
   pi.on("session_start", async (_event, ctx) => {
     notifyCapabilityCtx.current = ctx;
@@ -933,6 +934,17 @@ export default function activate(rawPi: ExtensionAPI): void {
       settings: settings.webHub,
       fleet: () => holder.current?.query.list() ?? [],
       query: () => holder.current?.query,
+      mention: () =>
+        createMentionRouteDeps({
+          ...mentionRouteDeps,
+          reportError: (message) =>
+            pi.sendMessage({
+              customType: "subagent:mention-error",
+              content: message,
+              display: true,
+              details: { source: "mention" },
+            }),
+        }),
       askUserEnabled: () => settings.askUser.enabled,
       ownedCommandNames,
       // todo-web plan §3.3 (T3): live todo closure for StatusInfo.todo (both gates

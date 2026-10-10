@@ -617,6 +617,10 @@ export interface CommandOutputWire {
   needsTerminal?: true;
 }
 export type PromptDelivery = "observed" | "unobserved" | "held";
+/** Result of agent-side @mention routing. This is additive to the prompt result so older
+ * hubs/UIs continue to accept and ignore it. */
+export type MentionResultData =
+  { action: "steer" | "resume"; label: string; runId: string } | { action: "error"; label: string; error: string };
 /** web-hub-steer-recall plan §2.3 S2 / §5.8: the typed result of a `recall` op. `text` is the
  *  FULL recalled message body (≤ RECALL_TEXT_MAX_BYTES, hub-validated) — the only channel that
  *  ever returns the untruncated text. `too_late` never distinguishes WHY (already handed to pi /
@@ -626,7 +630,7 @@ export type RecallResultData =
   | { op: "recall"; outcome: "recalled"; from: "held" | "returned"; deliver: "steer" | "followUp"; text: string }
   | { op: "recall"; outcome: "too_late" };
 export type CmdData =
-  | { op: "prompt"; delivery: PromptDelivery; behavior?: "idle" | "steer" | "followUp" }
+  | { op: "prompt"; delivery: PromptDelivery; behavior?: "idle" | "steer" | "followUp"; mention?: MentionResultData }
   | { op: "abort"; wasBusy: boolean }
   | { op: "steer_subagent" }
   | { op: "abort_subagent"; escalatedTo?: "L2" | "L3" | "L4"; alreadyTerminal?: boolean }

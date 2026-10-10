@@ -31,6 +31,8 @@ import type { QueryControlPort, StopResult } from "./index.js";
 import type { HoldItem } from "./hold.js";
 import type { DispatchOutcome, HoldDriver } from "./hold-driver.js";
 import type { PromptGatePort, WebPromptRelease } from "./prompt-gate.js";
+import { parseMention, routeMention, type MentionRouteDeps } from "../../mention/mention.js";
+import type { MentionResultData } from "../protocol/messages.js";
 import type {
   CmdData,
   CmdErrorCode,
@@ -77,6 +79,8 @@ export interface CommandHandlerDeps {
    * it out from under us (e.g. a settings change). `undefined` ⇒ `tryClaim` is never called —
    * byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** Late-bound shared TUI/web mention router. Absent preserves legacy prompt handling. */
+  mention?: () => MentionRouteDeps | undefined;
 }
 
 export interface InputEventLike {
@@ -243,6 +247,50 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     if (deps.compactionState.manualCompacting) {
       return settleAndReply(frame, errResult("E_BUSY_COMPACTING", true, "none"));
+    }
+    // Mention routing deliberately precedes topic-switch and steer-recall hold. The input is
+    // already admitted above, and routeMention uses the same registry/steer/resume/fabric/note
+    // semantics as the TUI interceptor. Non-matches fall through byte-for-byte to the native path.
+    let mentionDeps: MentionRouteDeps | undefined;
+    try {
+      mentionDeps = deps.mention?.();
+    } catch {
+      mentionDeps = undefined;
+    }
+    if (mentionDeps !== undefined) {
+      const parsed = parseMention(cmd.text, mentionDeps.registry);
+      if (parsed !== undefined) {
+        // Do not make the native prompt path async: only a confirmed mention starts the
+        // promise, preserving existing synchronous send/observation behavior for all other text.
+        void routeMention(cmd.text, mentionDeps)
+          .then((routed) => {
+            if (!routed.handled) return;
+            const mention: MentionResultData =
+              routed.action === "error"
+                ? { action: "error", label: parsed.label, error: routed.error }
+                : { action: routed.action, label: parsed.label, runId: routed.runId };
+            deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
+            settleAndReply(frame, {
+              ok: true,
+              data: { op: "prompt", delivery: "observed", behavior: cmd.deliver, mention },
+            });
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            mentionDeps?.reportError?.(`cannot route @${parsed.label}: ${message}`);
+            deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
+            settleAndReply(frame, {
+              ok: true,
+              data: {
+                op: "prompt",
+                delivery: "observed",
+                behavior: cmd.deliver,
+                mention: { action: "error", label: parsed.label, error: message },
+              },
+            });
+          });
+        return;
+      }
     }
     // topic-switch plan P4 (D2, #5; arch §15 r2 row 1): the gate is optional/late-bound and only
     // ever consulted while idle — a running turn can't be judged (topic-switch's hold window is

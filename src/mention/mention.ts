@@ -25,6 +25,22 @@ export function parseMention(text: string, registry: MentionRegistry): ParsedMen
   return { label, message };
 }
 
+export interface MentionRouteDeps {
+  registry: MentionRegistry;
+  query: Pick<QueryService, "get" | "steer">;
+  spawn: Pick<SpawnService, "spawn">;
+  /** When true, wrap the user message with the message_agent reply hint (fabric on ⇒ targets own the tool). */
+  fabricEnabled?: () => boolean;
+  /** Optional sink recording the user's RAW @ message per target run, so the fleet widget can show it under the run. */
+  noteMention?: (runId: string, message: string, pendingSince?: Millis) => void;
+  reportError?: (message: string) => void;
+}
+
+/** Build the one mention-routing dependency shape shared by TUI and web input paths. */
+export function createMentionRouteDeps(deps: MentionRouteDeps): MentionRouteDeps {
+  return deps;
+}
+
 export type MentionRouteResult =
   | { handled: false }
   | { handled: true; action: "steer" | "resume"; runId: string }
@@ -44,19 +60,7 @@ export function frameUserMentionReply(label: string, message: string): string {
   );
 }
 
-export async function routeMention(
-  text: string,
-  deps: {
-    registry: MentionRegistry;
-    query: Pick<QueryService, "get" | "steer">;
-    spawn: Pick<SpawnService, "spawn">;
-    /** When true, wrap the user message with the message_agent reply hint (fabric on ⇒ targets own the tool). */
-    fabricEnabled?: () => boolean;
-    /** Optional sink recording the user's RAW @ message per target run, so the fleet widget can show it under the run. */
-    noteMention?: (runId: string, message: string, pendingSince?: Millis) => void;
-    reportError?: (message: string) => void;
-  },
-): Promise<MentionRouteResult> {
+export async function routeMention(text: string, deps: MentionRouteDeps): Promise<MentionRouteResult> {
   const parsed = parseMention(text, deps.registry);
   if (!parsed) return { handled: false };
   const target = deps.registry.resolve(parsed.label);
@@ -103,7 +107,7 @@ export async function routeMention(
 /** Install the direct-mode input interceptor. The host remains responsible for calling this. */
 export function installMentionInput(
   pi: Pick<ExtensionAPI, "on" | "sendMessage">,
-  deps: Omit<Parameters<typeof routeMention>[1], "reportError">,
+  deps: Omit<MentionRouteDeps, "reportError">,
 ): void {
   pi.on("input", async (event: InputEvent): Promise<InputEventResult> => {
     const result = await routeMention(event.text, {

@@ -116,18 +116,19 @@ async function type(wrapper: ReturnType<typeof mount>, value: string): Promise<v
 const PANEL = ".mention-panel";
 
 describe("Composer @mention panel (task #11)", () => {
-  it("line-initial `@` opens the panel listing RUNNING sub-agents only", async () => {
+  it("line-initial `@` opens the panel listing root-direct sub-agents of every status", async () => {
     const { wrapper } = mountComposer();
     expect(wrapper.find(PANEL).exists()).toBe(false);
     await type(wrapper, "@");
     const items = wrapper.findAll(".mention-item");
-    expect(items.map((i) => i.find(".mention-label").text())).toEqual(["@bot", "@builder"]); // no "old", no label-less
+    expect(items.map((i) => i.find(".mention-label").text())).toEqual(["@bot", "@builder", "@old"]); // no label-less
   });
 
-  it("no running sub-agents ⇒ `@` never pops the panel", async () => {
+  it("settled sub-agents still pop the panel and advertise resume", async () => {
     const { wrapper } = mountComposer([{ runId: "r9", label: "done", status: "completed", terminal: true }]);
     await type(wrapper, "@");
-    expect(wrapper.find(PANEL).exists()).toBe(false);
+    expect(wrapper.find(PANEL).exists()).toBe(true);
+    expect(wrapper.find(".mention-status").text()).toContain("settled");
   });
 
   it("no fleet data at all ⇒ `@` never pops the panel", async () => {
@@ -160,7 +161,7 @@ describe("Composer @mention panel (task #11)", () => {
     await type(wrapper, "@");
     await wrapper.find("textarea").trigger("keydown", { key: "ArrowUp" }); // wraps to the last row
     await wrapper.find("textarea").trigger("keydown", { key: "Enter" });
-    expect((wrapper.find("textarea").element as HTMLTextAreaElement).value).toBe("@builder ");
+    expect((wrapper.find("textarea").element as HTMLTextAreaElement).value).toBe("@old ");
   });
 
   it("click picks that row", async () => {
