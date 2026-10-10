@@ -6,13 +6,14 @@
  * contending with interactive traffic). Also owns the resident subprocess's
  * lifecycle: spawn, NDJSON framing (reusing `protocol/ndjson.ts`'s decoder so
  * the 64 KiB single-line cap and framing rules match the agent↔hub channel),
- * a 2s per-request deadline that SIGKILLs the child and fails every in-flight
+ * an 8s per-request deadline that SIGKILLs the child and fails every in-flight
  * request with `E_DB` on expiry, and exit-driven restart with 1s→5s→30s
  * backoff (a crash rejects every in-flight *and* still-queued request
  * immediately with `E_DB` — nothing rides out to the next child, so a
- * restart is fail-closed rather than a delayed success) — the 4th failure
- * inside a rolling 10-minute window gives up and reports `db-unavailable`
- * instead of respawning again (fail-closed).
+ * restart is fail-closed rather than a delayed success). A single closed/open
+ * breaker counts both deadline and child-exit failures. Once the rolling-window
+ * threshold is reached, admission fails fast, the child is not respawned, and
+ * one unref'd cooldown timer asks the hub to use its normal admin restart path.
  *
  * This module never imports `node:sqlite` — it only ever talks to the
  * subprocess whose script text `db-child.ts` builds.
@@ -25,11 +26,16 @@ import type { HubLog } from "./ports.js";
 export const MAX_LINE_BYTES = 64 * 1024;
 export const DEFAULT_INTERACTIVE_SLOTS = 64;
 export const DEFAULT_QUEUE_SLOTS = 128;
-export const DEFAULT_DEADLINE_MS = 2_000;
+/** Fixed under load; deliberately not a user setting or adaptive value. */
+export const DEFAULT_DEADLINE_MS = 8_000;
 export const DEFAULT_DEDUP_MAX_WAITERS = 8;
 export const DEFAULT_BACKOFF_MS = [1_000, 5_000, 30_000];
 export const DEFAULT_RESTART_WINDOW_MS = 10 * 60 * 1000;
 export const DEFAULT_MAX_RESTARTS_IN_WINDOW = 4;
+/** A bounded reserved queue prevents the maintenance lane becoming unbounded. */
+export const DEFAULT_RESERVED_QUEUE_SLOTS = 8;
+/** After the breaker opens, let the existing hub restart path drain/reconnect. */
+export const DEFAULT_RESTART_COOLDOWN_MS = 60_000;
 
 export type DbClientErrorCode = "E_BUSY" | "E_DB" | "E_RATE";
 
@@ -65,6 +71,9 @@ export interface DbClientDeps {
   backoffMs?: number[];
   restartWindowMs?: number;
   maxRestartsInWindow?: number;
+  /** Test seam for the fixed breaker cooldown; production uses the constant. */
+  restartCooldownMs?: number;
+  reservedQueueSlots?: number;
   /** Forces script test-hook compilation regardless of `process.env.PI_WEBHUB_DB_TEST`
    * — test convenience, never read by production code paths. */
   test?: boolean;
@@ -74,10 +83,11 @@ export interface DbClientDeps {
 
 export interface DbClient {
   call<T = unknown>(op: string, args: Record<string, unknown>, opts?: DbCallOptions): Promise<T>;
-  /** Fires (at most once) when the client gives up permanently after the 4th
-   * restart failure inside the rolling window. Returns an unsubscribe fn. */
+  /** Fires once when the breaker opens. Returns an unsubscribe fn. */
   onUnavailable(cb: (reason: "db-unavailable") => void): () => void;
-  /** True once `onUnavailable` has fired. */
+  /** Fires once after the open cooldown so the hub can use admin restart. */
+  onRestartNeeded(cb: () => void): () => void;
+  /** True while the breaker is open (or after close). */
   readonly unavailable: boolean;
   /** Kills the current child (if any), cancels the pending respawn timer, and
    * rejects everything outstanding. Idempotent. */
@@ -111,15 +121,25 @@ export function createDbClient(deps: DbClientDeps): DbClient {
   const backoffMs = deps.backoffMs ?? DEFAULT_BACKOFF_MS;
   const restartWindowMs = deps.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
   const maxRestartsInWindow = deps.maxRestartsInWindow ?? DEFAULT_MAX_RESTARTS_IN_WINDOW;
+  const restartCooldownMs = deps.restartCooldownMs ?? DEFAULT_RESTART_COOLDOWN_MS;
+  const reservedQueueSlots = deps.reservedQueueSlots ?? DEFAULT_RESERVED_QUEUE_SLOTS;
   const spawnFn = deps.spawnFn ?? defaultSpawn;
 
+  type BreakerState = "closed" | "open";
+  let state: BreakerState = "closed";
   let child: ChildProcessWithoutNullStreams | undefined;
+  let awaitingExit: ChildProcessWithoutNullStreams | undefined;
+  /** A deadline already counted this child; its exit only clears the gate. */
+  let failureCountedForExit: ChildProcessWithoutNullStreams | undefined;
   let nextId = 1;
   let closed = false;
   let unavailable = false;
-  let respawnTimer: ReturnType<typeof setTimeout> | undefined;
+  /** One timer for either backoff respawn or the open cooldown. */
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let restartNotified = false;
   const restartFailureTimestamps: number[] = [];
   const unavailableListeners = new Set<(reason: "db-unavailable") => void>();
+  const restartListeners = new Set<() => void>();
 
   const interactiveQueue: PendingCall[] = [];
   const reservedQueue: PendingCall[] = [];
@@ -130,6 +150,7 @@ export function createDbClient(deps: DbClientDeps): DbClient {
 
   function notifyUnavailable(): void {
     if (unavailable) return;
+    state = "open";
     unavailable = true;
     for (const cb of unavailableListeners) {
       try {
@@ -138,65 +159,91 @@ export function createDbClient(deps: DbClientDeps): DbClient {
         log.error("web-hub db-client: onUnavailable listener threw", { error: String(err) });
       }
     }
+    scheduleRetry(restartCooldownMs, () => {
+      if (closed || restartNotified) return;
+      restartNotified = true;
+      log.warn("web-hub db-client: breaker cooldown elapsed; requesting hub restart", {
+        cooldownMs: restartCooldownMs,
+      });
+      for (const cb of restartListeners) {
+        try {
+          cb();
+        } catch (err) {
+          log.error("web-hub db-client: onRestartNeeded listener threw", { error: String(err) });
+        }
+      }
+    });
   }
 
-  function scheduleRespawn(delayMs: number): void {
-    if (closed || unavailable) return;
-    respawnTimer = setTimeout(() => {
-      respawnTimer = undefined;
-      spawnChild();
+  function scheduleRetry(delayMs: number, action: () => void): void {
+    if (closed || retryTimer !== undefined) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      action();
     }, delayMs);
-    respawnTimer.unref?.();
+    retryTimer.unref?.();
   }
 
-  function onChildDown(): void {
-    child = undefined;
-    // §4.2: subprocess exit ⇒ reject every in-flight AND queued request immediately.
-    // A queued-but-never-dispatched call must not be left to ride out on the next
-    // (respawned) child: that would let a request submitted before the crash silently
-    // execute against a fresh process minutes later, once backoff finishes — exactly the
-    // "hang / execute across a restart" the plan forbids ("重启期间 LAN 请求一律 503，
-    // 从不挂起"). Restart is fail-closed: every caller gets E_DB now, and any later admit
-    // starts a clean queue against whichever child eventually comes up.
-    const err = new DbClientError("E_DB", "web-hub db: query subprocess exited");
-    for (const [, pc] of dispatched) {
-      settleReject(pc, err);
-    }
-    dispatched.clear();
-    for (const pc of interactiveQueue.splice(0)) {
-      settleReject(pc, err);
-    }
-    for (const pc of reservedQueue.splice(0)) {
-      settleReject(pc, err);
-    }
-    interactiveInFlight = 0;
-    reservedInFlight = 0;
-
-    if (closed) return;
+  function recordFailure(schedule: boolean): void {
+    if (closed || state === "open") return;
     const t = now();
     while (restartFailureTimestamps.length > 0 && t - restartFailureTimestamps[0]! >= restartWindowMs) {
       restartFailureTimestamps.shift();
     }
     restartFailureTimestamps.push(t);
     if (restartFailureTimestamps.length >= maxRestartsInWindow) {
-      log.error("web-hub db-client: giving up after repeated crashes", {
+      log.error("web-hub db-client: breaker opened after repeated failures", {
         failures: restartFailureTimestamps.length,
         windowMs: restartWindowMs,
       });
       notifyUnavailable();
       return;
     }
-    const idx = Math.min(restartFailureTimestamps.length - 1, backoffMs.length - 1);
-    scheduleRespawn(backoffMs[idx]!);
+    if (schedule) {
+      const idx = Math.min(restartFailureTimestamps.length - 1, backoffMs.length - 1);
+      scheduleRetry(backoffMs[idx]!, spawnChild);
+    }
+  }
+
+  function onChildDown(exited: ChildProcessWithoutNullStreams): void {
+    if (child !== exited && awaitingExit !== exited) return;
+    const failureAlreadyCounted = failureCountedForExit === exited;
+    failureCountedForExit = undefined;
+    if (child === exited) child = undefined;
+    if (awaitingExit === exited) awaitingExit = undefined;
+    // §4.2: subprocess exit ⇒ reject every in-flight AND queued request immediately.
+    // A queued-but-never-dispatched call must not ride out on a replacement child.
+    const err = new DbClientError("E_DB", "web-hub db: query subprocess exited");
+    for (const [, pc] of dispatched) settleReject(pc, err);
+    dispatched.clear();
+    for (const pc of interactiveQueue.splice(0)) settleReject(pc, err);
+    for (const pc of reservedQueue.splice(0)) settleReject(pc, err);
+    interactiveInFlight = 0;
+    reservedInFlight = 0;
+
+    if (closed || state === "open") return;
+    if (!failureAlreadyCounted) recordFailure(false);
+    if (state === "closed") {
+      const idx = Math.min(restartFailureTimestamps.length - 1, backoffMs.length - 1);
+      scheduleRetry(backoffMs[idx]!, spawnChild);
+    }
   }
 
   function spawnChild(): void {
-    if (closed || unavailable) return;
+    if (closed || state === "open" || child !== undefined || awaitingExit !== undefined) return;
     const script = buildQueryScript(deps.test === undefined ? {} : { test: deps.test });
-    const c = spawnFn(process.execPath, ["--disable-warning=ExperimentalWarning", "-e", script], {
-      env: { ...process.env, PI_WEBHUB_DB_PATH: deps.dbFile },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    let c: ChildProcessWithoutNullStreams;
+    try {
+      c = spawnFn(process.execPath, ["--disable-warning=ExperimentalWarning", "-e", script], {
+        env: { ...process.env, PI_WEBHUB_DB_PATH: deps.dbFile },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (err) {
+      log.error("web-hub db-client: spawn threw", { error: String(err) });
+      // A synchronous spawn failure has no child whose exit event can gate us.
+      recordFailure(true);
+      return;
+    }
     child = c;
     const dec = new NdjsonDecoder({
       maxFrameBytes: MAX_LINE_BYTES,
@@ -210,11 +257,10 @@ export function createDbClient(deps: DbClientDeps): DbClient {
     c.on("error", (err) => log.error("web-hub db-client: spawn error", { error: String(err) }));
     c.on("exit", (code, signal) => {
       log.info("web-hub db-client: query subprocess exited", { code, signal });
-      onChildDown();
+      onChildDown(c);
     });
     c.stdin.on("error", () => {});
     c.stdout.on("error", () => {});
-    // A freshly (re)spawned child may have room; drain whatever is queued.
     pump();
   }
 
@@ -297,14 +343,19 @@ export function createDbClient(deps: DbClientDeps): DbClient {
 
   function onDeadline(pc: PendingCall): void {
     if (dispatched.has(pc.id)) {
-      // In-flight timeout: the subprocess looks stuck. §4.2: SIGKILL it and fail
-      // every currently in-flight request with E_DB (queued-but-undispatched
-      // calls are untouched — they ride out on the next child).
+      // A deadline is one breaker failure. Keep the exit listener installed and
+      // gate the next spawn on that exit event: SIGKILL is asynchronous and a
+      // replacement child must never overlap the dying resident child.
       log.warn("web-hub db-client: query op deadline exceeded, killing subprocess", { op: pc.op });
       const dying = child;
-      child = undefined;
       if (dying !== undefined) {
-        dying.removeAllListeners("exit");
+        child = undefined;
+        awaitingExit = dying;
+        failureCountedForExit = dying;
+        // Count the deadline now, while retaining the exit gate. If this was
+        // the threshold failure, open admission immediately; otherwise the
+        // exit handler schedules the already-accounted-for retry.
+        recordFailure(false);
         dying.kill("SIGKILL");
       }
       for (const [, p] of dispatched) {
@@ -313,7 +364,8 @@ export function createDbClient(deps: DbClientDeps): DbClient {
       dispatched.clear();
       interactiveInFlight = 0;
       reservedInFlight = 0;
-      onChildDown();
+      // onChildDown() runs from the child's real `exit` event and records this
+      // failure exactly once. Queued calls are rejected there as well.
       return;
     }
     // Still queued after its full budget: overloaded, not stuck.
@@ -328,7 +380,9 @@ export function createDbClient(deps: DbClientDeps): DbClient {
         reject(toAbortError(opts.signal));
         return;
       }
-      if (unavailable) {
+      if (state === "open" || unavailable) {
+        // Open admission is a fast rejection, not a queue slot or a pending
+        // timer. This applies equally to both channels.
         reject(new DbClientError("E_DB", "web-hub db: unavailable"));
         return;
       }
@@ -349,7 +403,9 @@ export function createDbClient(deps: DbClientDeps): DbClient {
         opts.signal.addEventListener("abort", pc.onAbort, { once: true });
       }
       const queue = reserved ? reservedQueue : interactiveQueue;
-      if (!reserved && interactiveInFlight >= interactiveSlots && queue.length >= queueSlots) {
+      const queueLimit = reserved ? reservedQueueSlots : queueSlots;
+      const atConcurrencyLimit = reserved ? reservedInFlight >= 1 : interactiveInFlight >= interactiveSlots;
+      if (atConcurrencyLimit && queue.length >= queueLimit) {
         clearTimeout(pc.timer);
         reject(new DbClientError("E_BUSY", "web-hub db: admission queue full"));
         return;
@@ -401,19 +457,21 @@ export function createDbClient(deps: DbClientDeps): DbClient {
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
-    if (respawnTimer !== undefined) {
-      clearTimeout(respawnTimer);
-      respawnTimer = undefined;
+    state = "open";
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
     }
     const err = new DbClientError("E_DB", "web-hub db: client closed");
     for (const [, pc] of dispatched) settleReject(pc, err);
     dispatched.clear();
     for (const pc of interactiveQueue.splice(0)) settleReject(pc, err);
     for (const pc of reservedQueue.splice(0)) settleReject(pc, err);
-    const c = child;
+    const c = child ?? awaitingExit;
     child = undefined;
+    awaitingExit = undefined;
+    failureCountedForExit = undefined;
     if (c !== undefined) {
-      c.removeAllListeners("exit");
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, 1_000);
         t.unref?.();
@@ -436,6 +494,10 @@ export function createDbClient(deps: DbClientDeps): DbClient {
     onUnavailable(cb) {
       unavailableListeners.add(cb);
       return () => unavailableListeners.delete(cb);
+    },
+    onRestartNeeded(cb) {
+      restartListeners.add(cb);
+      return () => restartListeners.delete(cb);
     },
     get unavailable() {
       return unavailable;

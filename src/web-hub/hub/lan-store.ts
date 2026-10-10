@@ -60,9 +60,10 @@ export interface LanStore extends LanStorePort {
   revokeAllSessions(opts?: PortOptions): Promise<number>;
   /** §4.2 reserved-channel `touchSession` for the SSE tick — see file header. */
   touchSessionReserved(sidHash: string, now: number, opts?: PortOptions): Promise<LanSessionRecord | undefined>;
-  /** Fires (at most once) when the underlying `db-client` gives up after
-   * repeated crashes inside its restart-backoff window. */
+  /** Fires once when the underlying breaker opens after repeated failures. */
   onUnavailable(cb: (reason: "db-unavailable") => void): () => void;
+  /** Fires once after the breaker cooldown; the hub owns the restart decision. */
+  onRestartNeeded(cb: () => void): () => void;
   /** Stops the checkpoint-passive tick, runs a final checkpoint-truncate
    * (best effort, bounded), and closes the resident subprocess. Idempotent. */
   close(): Promise<void>;
@@ -87,6 +88,8 @@ export interface CreateLanStoreDeps {
       | "backoffMs"
       | "restartWindowMs"
       | "maxRestartsInWindow"
+      | "restartCooldownMs"
+      | "reservedQueueSlots"
       | "spawnFn"
     >
   >;
@@ -235,6 +238,10 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
 
     onUnavailable(cb) {
       return dbClient.onUnavailable(cb);
+    },
+
+    onRestartNeeded(cb) {
+      return dbClient.onRestartNeeded(cb);
     },
 
     close,

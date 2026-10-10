@@ -58,6 +58,7 @@ import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from ".
 import { createHistoryService } from "./history.js";
 import { createHubJsonWriter, type HubJsonWriter, type HubRecord } from "./hub-json.js";
 import { createIdleMonitor } from "./idle.js";
+import { createSelfRestartStore, type SelfRestartDecision } from "./self-restart.js";
 import { withDeadline, withSignal, createScope, type Scope } from "./lifecycle.js";
 import { createHubLog } from "./log.js";
 import { defaultLanAssembly, LanAssemblyOffError } from "./lan-assembly.js";
@@ -436,6 +437,27 @@ export async function startHub(
       runFileReader.dispose();
     });
     let httpPort = 0;
+    // One restart entry point for both admin `/webhub restart` and the DB
+    // breaker. Keeping this as one function is important: self-restart must
+    // publish the same superseded frame and stop banner semantics as admin.
+    function requestAdminShutdown(reason: "restart" | "stop"): void {
+      if (closing !== undefined) return;
+      if (reason === "restart") {
+        registry.broadcast({ t: "superseded", nextVersion: config.pluginVersion, yieldMs: SUPERSEDE_YIELD_MS });
+      }
+      // acc32-B6: only the NEW `reason:"stop"` protocol value maps to the dedicated "hub 已由
+      // 终端停止" banner — `info.state` used to only ever get set by the supersede path
+      // (`restart` below), so the stop path left it `undefined` and never broadcast anything,
+      // meaning a still-connected browser only ever saw the SSE connection drop (the generic
+      // "reconnecting" copy) with no way to distinguish an intentional stop from a network
+      // blip. `reason:"restart"` (old-agent `ctl.v1` fallback, or a real `/webhub restart`) is
+      // deliberately left alone — it is expected to bounce right back up.
+      if (reason === "stop") {
+        info.state = "stopping";
+        registry.publish({ type: "hub" });
+      }
+      void close(reason);
+    }
     // Admin getters and close() dependencies are initialized before socket exposure.
     // Keeping ctl.v1 available does not depend on LAN assembly succeeding.
     const admin = createAdminHandler({
@@ -446,24 +468,7 @@ export async function startHub(
       limiter: () => lanDeps?.limiter,
       lan: () => fe.lan,
       lanStatus: () => hubJson.current()?.lan,
-      shutdown: (reason) => {
-        if (closing !== undefined) return;
-        if (reason === "restart") {
-          registry.broadcast({ t: "superseded", nextVersion: config.pluginVersion, yieldMs: SUPERSEDE_YIELD_MS });
-        }
-        // acc32-B6: only the NEW `reason:"stop"` protocol value maps to the dedicated "hub 已由
-        // 终端停止" banner — `info.state` used to only ever get set by the supersede path
-        // (`restart` below), so the stop path left it `undefined` and never broadcast anything,
-        // meaning a still-connected browser only ever saw the SSE connection drop (the generic
-        // "reconnecting" copy) with no way to distinguish an intentional stop from a network
-        // blip. `reason:"restart"` (old-agent `ctl.v1` fallback, or a real `/webhub restart`) is
-        // deliberately left alone — it is expected to bounce right back up.
-        if (reason === "stop") {
-          info.state = "stopping";
-          registry.publish({ type: "hub" });
-        }
-        void close(reason);
-      },
+      shutdown: requestAdminShutdown,
       now,
       // Token rotation is only supported once the frontend has supplied its auth port.
       auth: () => (fe as HttpFrontendExt).auth!,
@@ -514,6 +519,30 @@ export async function startHub(
       ],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
+    const selfRestart = createSelfRestartStore(`${paths.stateDir}/self-restart.json`);
+    let unsubscribeDbRestart = (): void => {};
+    function requestDbSelfRestart(): void {
+      if (closing !== undefined) return;
+      const decision: SelfRestartDecision = selfRestart.tryAcquire(now());
+      if (!decision.allowed) {
+        // Keep the existing LAN-off vocabulary so old clients remain compatible,
+        // but expose why the automatic restart was suppressed in status detail and
+        // in the hub log. Structural DB failures never create a store, so they
+        // cannot reach this callback.
+        const detail = `self-restart-${decision.reason}`;
+        log.error("web-hub db-client: self-restart suppressed", { reason: decision.reason });
+        hubJson.patchLan({ state: "off", reason: "db-unavailable", detail });
+        return;
+      }
+      log.warn("web-hub db-client: requesting self-restart through admin restart path", {
+        reason: "db-unavailable",
+        restartCount: decision.timestamps.length,
+      });
+      // Route through the exact same admin shutdown entry as `/webhub restart`:
+      // it publishes superseded and uses the existing lifecycle semantics. No
+      // replacement DB is created here.
+      requestAdminShutdown("restart");
+    }
     agentServer = createAgentServer(owner.server, {
       registry,
       config,
@@ -590,6 +619,11 @@ export async function startHub(
       }
     }
     if (lanDeps !== undefined) {
+      const dbRestartStore = lanDeps.store as Partial<LanStore>;
+      if (typeof dbRestartStore.onRestartNeeded === "function") {
+        unsubscribeDbRestart = dbRestartStore.onRestartNeeded(requestDbSelfRestart);
+        cleanup.push(async () => unsubscribeDbRestart());
+      }
       // KDF work is not part of the command router's in-flight counter, but it
       // must keep the quiet replacement path from cutting across a login.
       const originalKdfRun = lanDeps.kdf.run;
@@ -1406,6 +1440,7 @@ export async function startHub(
       const inner = Promise.resolve().then(async (): Promise<void> => {
         log.info("hub closing", { reason });
         unsubscribeSupersedeOnDialogs();
+        unsubscribeDbRestart();
         for (const cancel of [...supersedeWaitCancels]) cancel();
         supersede?.dispose();
         if (supersedeTimer !== undefined) clearInterval(supersedeTimer);

@@ -1,7 +1,7 @@
 /**
  * plan §4.2/§4.3: `db-client.ts`'s dual-channel admission (interactive 64 +
  * queue 128, reserved channel 1), same-key dedup (≤8 waiters), AbortSignal
- * queue eviction, the 2s in-flight deadline (SIGKILL + reject-all-in-flight),
+ * queue eviction, the fixed 8s in-flight deadline (SIGKILL + reject-all-in-flight),
  * and exit-driven restart backoff (1s→5s→30s, 4th failure in a rolling
  * window ⇒ permanently unavailable). All timings are overridden to
  * millisecond-scale via `DbClientDeps` so the whole file runs fast while
@@ -13,7 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { execFile as execFileCb } from "node:child_process";
-import { createDbClient, DbClientError, type DbClient } from "../../../src/web-hub/hub/db-client.js";
+import {
+  createDbClient,
+  DbClientError,
+  DEFAULT_DEADLINE_MS,
+  type DbClient,
+} from "../../../src/web-hub/hub/db-client.js";
 import { buildMaintScript } from "../../../src/web-hub/hub/db-child.js";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { memLog } from "./helpers.js";
@@ -65,6 +70,20 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
     }
   });
 
+  it("uses the fixed 8s deadline selected from slow-child evidence", async () => {
+    expect(DEFAULT_DEADLINE_MS).toBe(8_000);
+    const t = tmp();
+    await migrate(t.dbFile);
+    try {
+      const c = make(t.dbFile, { backoffMs: [5, 5, 5] });
+      // The real child blocks for three seconds. The previous 2s budget would
+      // kill this operation; the calibrated fixed budget lets it complete.
+      await expect(c.call("__block", { ms: 3_000 })).resolves.toEqual({ blocked: true });
+    } finally {
+      t.cleanup();
+    }
+  }, 10_000);
+
   it("interactive admission: over-capacity calls get E_BUSY immediately, in-capacity calls all resolve", async () => {
     const t = tmp();
     await migrate(t.dbFile);
@@ -77,6 +96,23 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
       for (let i = 0; i < 4; i++) expect((results[i] as { username: string }).username).toBe("admin");
       expect(results[4]).toBeInstanceOf(DbClientError);
       expect((results[4] as DbClientError).code).toBe("E_BUSY");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("reserved admission has its own bounded queue", async () => {
+    const t = tmp();
+    await migrate(t.dbFile);
+    try {
+      const c = make(t.dbFile, { reservedQueueSlots: 1, deadlineMs: 2_000 });
+      const holder = c.call("__block", { ms: 300 }, { reserved: true }).catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const queued = c.call("__block", { ms: 20 }, { reserved: true });
+      const rejected = c.call("__block", { ms: 20 }, { reserved: true }).catch((e: unknown) => e);
+      expect(await rejected).toMatchObject({ code: "E_BUSY" });
+      await queued;
+      await holder;
     } finally {
       t.cleanup();
     }
@@ -296,6 +332,7 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
       const realSpawn = (await import("node:child_process")).spawn;
       const c = make(t.dbFile, {
         backoffMs: [5, 5, 5],
+        restartCooldownMs: 10,
         restartWindowMs: 60_000,
         maxRestartsInWindow: 4,
         spawnFn: ((...args: Parameters<typeof realSpawn>) => {
@@ -309,12 +346,18 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
         }) as typeof realSpawn,
       });
       let unavailableReason: string | undefined;
+      let restartRequests = 0;
       c.onUnavailable((reason) => {
         unavailableReason = reason;
+      });
+      c.onRestartNeeded(() => {
+        restartRequests++;
       });
       await new Promise((resolve) => setTimeout(resolve, 1000));
       expect(unavailableReason).toBe("db-unavailable");
       expect(c.unavailable).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(restartRequests).toBe(1);
       await expect(c.call("getUser", { username: "admin" })).rejects.toBeInstanceOf(DbClientError);
     } finally {
       t.cleanup();
