@@ -3,10 +3,22 @@
 
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { canonicalDir, readRegular, renameNoClobber, statRegularIfExists } from "../safe-fs.js";
+import {
+  canonicalDir,
+  createExclusive,
+  observeLoc,
+  openRunDirs,
+  probeHardlinks,
+  readRegular,
+  renameNoClobber,
+  resolveLoc,
+  statRegularIfExists,
+  writeTempRegular,
+  type RunDirs,
+} from "../safe-fs.js";
 import { memoryDirFor, MemoryError, type MemoryPaths } from "../paths.js";
 import { withMemoryDirLock } from "../lock.js";
-import type { TidyManifest, TidyManifestEntry } from "../contracts.js";
+import type { Ident, Loc, OpSpec, TidyManifest, TidyManifestEntry } from "../contracts.js";
 import { sha256Hex } from "./snapshot.js";
 import {
   backupLiveFile,
@@ -16,8 +28,11 @@ import {
   readManifest,
   recreateFromBackup,
   vacateLiveFile,
+  readManifestV2,
   writeManifest,
 } from "./manifest.js";
+import { runStep, type TxnOperation } from "./txn.js";
+import { leaseCreate, leaseRelease, makeLeasePayload } from "./lease.js";
 
 export interface RestorePlanEntry {
   name: string;
@@ -114,6 +129,276 @@ function restoreOne(dir: string, vacateId: string, originalId: string, e: TidyMa
   recreateFromBackup(dir, originalId, backupSrc, e.name);
 }
 
+function locKey(loc: Loc): string {
+  return loc.area === "tmp" ? `tmp:${loc.within}:${loc.name}` : `${loc.area}:${loc.name}`;
+}
+function restoreBackupName(seq: number, name: string): string {
+  return `s${seq}-${seq}-live--${name}`;
+}
+function restoreTmp(nonce: string, seq: number, kind: "b" | "c"): Loc {
+  return { area: "tmp", within: kind === "b" ? "backup" : "live", name: `.pt-${nonce}-${seq}-${kind}.tmp` };
+}
+function sourceBackupBytes(source: RunDirs, loc: Loc): Buffer {
+  const r = resolveLoc(source, loc);
+  return Buffer.from(readRegular(r.dir.path, r.name).text, "utf8");
+}
+
+/** Reverse a v2 journal into a new, independently journaled restore run. */
+function applyLegacyRestoreTxn(
+  dir: string,
+  source: RunDirs,
+  manifest: TidyManifest,
+  decisions: ReadonlyMap<string, RestoreDecision>,
+): RestoreResult {
+  const now = new Date();
+  const restoreId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
+  const dest = openRunDirs(dir, restoreId, { createArchive: true, createBackup: true });
+  const nonce = restoreId.slice(-6).padStart(8, "0").slice(0, 8);
+  const contents = new Map<string, Buffer | string>();
+  const ops: TxnOperation[] = [];
+  const names: string[] = [];
+  let seq = 1;
+  for (const entry of manifest.entries) {
+    const decision = decisions.get(entry.name) ?? "skip";
+    if (decision !== "restore" && decision !== "overwrite") continue;
+    const targetName = touchedLocationOf(entry);
+    const target: Loc = { area: "live", name: targetName };
+    const current = observeLoc(dest, target);
+    const desiredName = entry.backupFile ?? entry.name;
+    let desired: Buffer;
+    try {
+      desired = Buffer.from(readRegular(source.backup.path, desiredName).text, "utf8");
+    } catch {
+      continue;
+    }
+    const tmp: Loc = { area: "tmp", within: "live", name: `.pt-${nonce}-${seq}-c.tmp` };
+    contents.set(locKey(tmp), desired);
+    const backup: Loc = { area: "backup", name: `s${seq}-${seq}-live--${entry.name}` };
+    if (entry.op === "rename" && entry.newName) {
+      const restoredTarget: Loc = { area: "live", name: entry.name };
+      ops.push({
+        op: { prim: "CREATE", target: restoredTarget, afterSha: sha256Hex(desired.toString("utf8")), tmpContent: tmp },
+        seq,
+        group: seq,
+        phase: "restore",
+      });
+      if (current.kind === "file")
+        ops.push({
+          op: {
+            prim: "MOVE",
+            src: target,
+            dst: backup,
+            obj: { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size },
+          },
+          seq: seq + 1,
+          group: seq,
+          phase: "restore",
+        });
+      names.push(entry.name);
+      seq += 2;
+      continue;
+    }
+    if (entry.op === "create") {
+      if (current.kind === "file")
+        ops.push({
+          op: {
+            prim: "MOVE",
+            src: target,
+            dst: backup,
+            obj: { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size },
+          },
+          seq,
+          phase: "restore",
+        });
+      names.push(entry.name);
+      seq++;
+      continue;
+    }
+    if (current.kind === "file") {
+      const before: Ident = { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size };
+      ops.push({
+        op: {
+          prim: "REPLACE",
+          target,
+          before,
+          afterSha: sha256Hex(desired.toString("utf8")),
+          backup,
+          tmpBackup: { area: "tmp", within: "backup", name: `.pt-${nonce}-${seq}-b.tmp` },
+          tmpContent: tmp,
+        },
+        seq,
+        phase: "restore",
+      });
+    } else
+      ops.push({
+        op: { prim: "CREATE", target, afterSha: sha256Hex(desired.toString("utf8")), tmpContent: tmp },
+        seq,
+        phase: "restore",
+      });
+    names.push(entry.name);
+    seq++;
+  }
+  if (ops.length === 0)
+    return {
+      restored: [],
+      skipped: [...decisions]
+        .filter(([, value]) => value === "skip")
+        .map(([name]) => ({ name, reason: "skipped by user" })),
+      failed: [],
+    };
+  probeHardlinks(dest);
+  const deadline = Date.now() + 30_000;
+  let result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
+  while (result.state === "applying" && result.results.length < ops.length && Date.now() < deadline)
+    result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
+  const restored = names.filter((_, index) => result.results[index]?.state === "done");
+  const failed = names
+    .filter((_, index) => result.results[index]?.state !== "done")
+    .map((name) => ({ name, reason: "legacy restore transaction conflict" }));
+  return {
+    restored,
+    skipped: [...decisions]
+      .filter(([, value]) => value === "skip")
+      .map(([name]) => ({ name, reason: "skipped by user" })),
+    failed,
+    preRestoreBackupId: restoreId,
+  };
+}
+
+function applyRestoreV2(
+  dir: string,
+  source: RunDirs,
+  original: NonNullable<ReturnType<typeof readManifestV2>>,
+  decisions: ReadonlyMap<string, RestoreDecision>,
+): RestoreResult {
+  const now = new Date();
+  const restoreId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
+  const dest = openRunDirs(dir, restoreId, { createArchive: true, createBackup: true });
+  const nonce = restoreId.slice(-6).padStart(8, "0").slice(0, 8);
+  const contents = new Map<string, Buffer | string>();
+  const ops: TxnOperation[] = [];
+  const names: string[] = [];
+  let seq = 1;
+  const intents = original.events.filter(
+    (e): e is Extract<import("../contracts.js").JournalEvent, { ev: "intent" }> => e.ev === "intent",
+  );
+  const results = new Set(
+    original.events
+      .filter(
+        (e): e is Extract<import("../contracts.js").JournalEvent, { ev: "result" }> =>
+          e.ev === "result" && e.state === "done",
+      )
+      .map((e) => e.opId),
+  );
+  const handled = new Set<string>();
+  for (const intent of intents) {
+    if (!results.has(intent.opId) || handled.has(intent.opId)) continue;
+    const op = intent.op;
+    if (op.prim === "CREATE" && op.target.area === "live") {
+      const mate =
+        intent.group === undefined
+          ? undefined
+          : intents.find(
+              (candidate) =>
+                candidate.group === intent.group && candidate.op.prim === "MOVE" && candidate.op.src.area === "live",
+            );
+      const name = mate && mate.op.prim === "MOVE" ? mate.op.src.name : op.target.name;
+      const decision = decisions.get(name) ?? "skip";
+      if (decision === "restore" || decision === "overwrite") {
+        const current = observeLoc(dest, op.target);
+        const currentIdent =
+          current.kind === "file"
+            ? { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size }
+            : undefined;
+        if (currentIdent) {
+          const backup: Loc = { area: "backup", name: restoreBackupName(seq, name) };
+          ops.push({ op: { prim: "MOVE", src: op.target, dst: backup, obj: currentIdent }, seq, phase: "restore" });
+          names.push(name);
+          seq++;
+        }
+        if (mate && mate.op.prim === "MOVE") {
+          const oldTarget: Loc = { area: "live", name: name };
+          const tmp = restoreTmp(nonce, seq, "c");
+          const bytes = sourceBackupBytes(source, mate.op.dst);
+          contents.set(locKey(tmp), bytes);
+          ops.push({
+            op: { prim: "CREATE", target: oldTarget, afterSha: mate.op.obj.sha, tmpContent: tmp },
+            seq,
+            phase: "restore",
+          });
+          seq++;
+          handled.add(mate.opId);
+        }
+      }
+      continue;
+    }
+    if (op.prim === "MOVE" && op.src.area === "live" && op.dst.area === "backup") {
+      if (handled.has(intent.opId)) continue;
+      const decision = decisions.get(op.src.name) ?? "skip";
+      if (decision === "restore" || decision === "overwrite") {
+        const target: Loc = { area: "live", name: op.src.name };
+        const tmp = restoreTmp(nonce, seq, "c");
+        const bytes = sourceBackupBytes(source, op.dst);
+        contents.set(locKey(tmp), bytes);
+        ops.push({ op: { prim: "CREATE", target, afterSha: op.obj.sha, tmpContent: tmp }, seq, phase: "restore" });
+        names.push(op.src.name);
+        seq++;
+      }
+      continue;
+    }
+    if (op.prim === "REPLACE" && op.target.area === "live") {
+      const decision = decisions.get(op.target.name) ?? "skip";
+      if (decision !== "restore" && decision !== "overwrite") continue;
+      const current = observeLoc(dest, op.target);
+      if (current.kind !== "file") continue;
+      const before: Ident = { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size };
+      const tmp = restoreTmp(nonce, seq, "c");
+      const backup: Loc = { area: "backup", name: restoreBackupName(seq, op.target.name) };
+      const bytes = sourceBackupBytes(source, op.backup);
+      contents.set(locKey(tmp), bytes);
+      ops.push({
+        op: {
+          prim: "REPLACE",
+          target: op.target,
+          before,
+          afterSha: op.before.sha,
+          backup,
+          tmpBackup: restoreTmp(nonce, seq, "b"),
+          tmpContent: tmp,
+        },
+        seq,
+        phase: "restore",
+      });
+      names.push(op.target.name);
+      seq++;
+    }
+  }
+  if (ops.length === 0)
+    return {
+      restored: [],
+      skipped: [...decisions].filter(([, d]) => d === "skip").map(([name]) => ({ name, reason: "skipped by user" })),
+      failed: [],
+    };
+  probeHardlinks(dest);
+  const deadline = Date.now() + 30_000;
+  let result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
+  while (result.state === "applying" && result.results.length < ops.length && Date.now() < deadline)
+    result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
+  const restored = names.filter((name, index) => result.results[index]?.state === "done");
+  const failed = names
+    .filter((name, index) => result.results[index]?.state !== "done")
+    .map((name) => ({
+      name,
+      reason: result.state === "applying" ? "transaction deadline exceeded" : "restore transaction conflict",
+    }));
+  return {
+    restored,
+    skipped: [...decisions].filter(([, d]) => d === "skip").map(([name]) => ({ name, reason: "skipped by user" })),
+    failed,
+    preRestoreBackupId: restoreId,
+  };
+}
+
 /**
  * `/mem restore <id>` steps 2–4: back up every currently-live touched file
  * FIRST (a pure copy per file — §7.5's "该备份失败 ⇒ 整个 restore 中止、零写
@@ -127,6 +412,7 @@ export async function applyRestore(
   id: string,
   decisions: ReadonlyMap<string, RestoreDecision>,
   paths?: MemoryPaths,
+  options: { legacy?: boolean } = {},
 ): Promise<RestoreResult> {
   const display = memoryDirFor(cwd, paths);
   const canon = canonicalDir(display);
@@ -136,57 +422,69 @@ export async function applyRestore(
   if (!manifest) throw new MemoryError(`no backup ${id}`);
 
   return withMemoryDirLock(dir, () => {
-    const now = new Date();
-    const vacateId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
+    const sourceDirs = openRunDirs(dir, id, { createArchive: false, createBackup: false });
+    const lease = makeLeasePayload(0, [id]);
+    if (!leaseCreate(dir, lease)) throw new MemoryError("memory directory already has an active tidy run");
+    try {
+      const v2 = readManifestV2(sourceDirs, id);
+      if (v2) return applyRestoreV2(dir, sourceDirs, v2, decisions);
+      if (!options.legacy && manifest.v === 1)
+        throw new MemoryError("legacy v1 manifest is read-only — restore requires --legacy");
+      if (manifest.v === 1) return applyLegacyRestoreTxn(dir, sourceDirs, manifest, decisions);
+      const now = new Date();
+      const vacateId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
 
-    const touched = manifest.entries.filter((e) => {
-      const d = decisions.get(e.name);
-      return d === "restore" || d === "overwrite";
-    });
-
-    // Step A (must fully succeed before ANY live mutation, §7.5 step 3).
-    const preRestoreEntries: TidyManifestEntry[] = [];
-    for (const e of touched) {
-      const loc = touchedLocationOf(e);
-      const st = statRegularIfExists(dir, loc);
-      if (st === undefined) continue;
-      const { text } = readRegular(dir, loc);
-      copyLiveFileToBackup(dir, vacateId, loc); // throws -> aborts before any Step B mutation
-      preRestoreEntries.push({ name: loc, op: "rewrite", beforeSha256: sha256Hex(text), backupFile: loc });
-    }
-    if (preRestoreEntries.length > 0) {
-      writeManifest(dir, {
-        v: 1,
-        id: vacateId,
-        kind: "restore",
-        createdAt: now.toISOString(),
-        entries: preRestoreEntries,
+      const touched = manifest.entries.filter((e) => {
+        const d = decisions.get(e.name);
+        return d === "restore" || d === "overwrite";
       });
-    }
 
-    // Step B: independent per-entry restore.
-    const restored: string[] = [];
-    const skipped: { name: string; reason: string }[] = [];
-    const failed: { name: string; reason: string }[] = [];
-    for (const e of manifest.entries) {
-      const d = decisions.get(e.name) ?? "skip";
-      if (d === "skip") {
-        skipped.push({ name: e.name, reason: "skipped by user" });
-        continue;
+      // Step A (must fully succeed before ANY live mutation, §7.5 step 3).
+      const preRestoreEntries: TidyManifestEntry[] = [];
+      for (const e of touched) {
+        const loc = touchedLocationOf(e);
+        const st = statRegularIfExists(dir, loc);
+        if (st === undefined) continue;
+        const { text } = readRegular(dir, loc);
+        copyLiveFileToBackup(dir, vacateId, loc); // throws -> aborts before any Step B mutation
+        preRestoreEntries.push({ name: loc, op: "rewrite", beforeSha256: sha256Hex(text), backupFile: loc });
       }
-      try {
-        restoreOne(dir, vacateId, id, e);
-        restored.push(e.name);
-      } catch (err) {
-        failed.push({ name: e.name, reason: (err as Error).message });
+      if (preRestoreEntries.length > 0) {
+        writeManifest(dir, {
+          v: 1,
+          id: vacateId,
+          kind: "restore",
+          createdAt: now.toISOString(),
+          entries: preRestoreEntries,
+        });
       }
+
+      // Step B: independent per-entry restore.
+      const restored: string[] = [];
+      const skipped: { name: string; reason: string }[] = [];
+      const failed: { name: string; reason: string }[] = [];
+      for (const e of manifest.entries) {
+        const d = decisions.get(e.name) ?? "skip";
+        if (d === "skip") {
+          skipped.push({ name: e.name, reason: "skipped by user" });
+          continue;
+        }
+        try {
+          restoreOne(dir, vacateId, id, e);
+          restored.push(e.name);
+        } catch (err) {
+          failed.push({ name: e.name, reason: (err as Error).message });
+        }
+      }
+      return {
+        restored,
+        skipped,
+        failed,
+        ...(preRestoreEntries.length > 0 ? { preRestoreBackupId: vacateId } : {}),
+      };
+    } finally {
+      leaseRelease(dir, lease.token);
     }
-    return {
-      restored,
-      skipped,
-      failed,
-      ...(preRestoreEntries.length > 0 ? { preRestoreBackupId: vacateId } : {}),
-    };
   });
 }
 
@@ -219,21 +517,52 @@ export async function restoreFromTrash(
     const entry = listTrashEntries(dir).find((e) => e.id === id);
     if (!entry) throw new MemoryError(`no trash entry ${id}`);
     const existing = statRegularIfExists(dir, entry.name);
-    let backupId: string | undefined;
+    if (existing !== undefined && decision === "skip")
+      return { restored: false, reason: `${entry.name} already exists` };
+    const now = new Date();
+    const runId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
+    const dirs = openRunDirs(dir, runId, { createArchive: true, createBackup: true });
+    const source: Loc = { area: "trash", name: entry.fileName };
+    const target: Loc = { area: "live", name: entry.name };
+    const ops: TxnOperation[] = [];
     if (existing !== undefined) {
-      if (decision === "skip") return { restored: false, reason: `${entry.name} already exists` };
-      const now = new Date();
-      backupId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
-      backupLiveFile(dir, backupId, entry.name);
-      writeManifest(dir, {
-        v: 1,
-        id: backupId,
-        kind: "restore",
-        createdAt: now.toISOString(),
-        entries: [{ name: entry.name, op: "rewrite", backupFile: entry.name }],
+      const current = observeLoc(dirs, target);
+      if (current.kind !== "file") return { restored: false, reason: `${entry.name} is not a regular file` };
+      const before: Ident = { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size };
+      ops.push({
+        op: { prim: "MOVE", src: target, dst: { area: "backup", name: `s1-1-live--${entry.name}` }, obj: before },
+        seq: 1,
+        phase: "restore",
       });
     }
-    renameNoClobber(dir, join(".trash", entry.fileName), entry.name);
-    return { restored: true, ...(backupId !== undefined ? { backupId } : {}) };
+    const trashObs = observeLoc(dirs, source);
+    if (trashObs.kind !== "file") throw new MemoryError(`trash entry ${entry.fileName} is missing or unreadable`);
+    ops.push({
+      op: {
+        prim: "MOVE",
+        src: source,
+        dst: target,
+        obj: { dev: trashObs.dev, ino: trashObs.ino, sha: trashObs.sha, size: trashObs.size },
+      },
+      seq: ops.length + 1,
+      phase: "restore",
+    });
+    probeHardlinks(dirs);
+    const outcome = runStep({ dirs, id: runId, kind: "restore", phase: "restore", ops, probe: false });
+    const ok = outcome.results.length === ops.length && outcome.results.every((result) => result.state === "done");
+    if (ok && existing !== undefined) {
+      try {
+        const canonical = readRegular(dirs.backup.path, `s1-1-live--${entry.name}`).text;
+        const tmp = writeTempRegular(dirs.backup.path, entry.name, Buffer.from(canonical, "utf8"), 0o600);
+        createExclusive(dirs.backup.path, tmp, entry.name);
+      } catch {
+        // The canonical journal backup remains authoritative.
+      }
+    }
+    return {
+      restored: ok,
+      ...(ok && existing !== undefined ? { backupId: runId } : {}),
+      ...(ok ? {} : { reason: "restore transaction did not complete" }),
+    };
   });
 }

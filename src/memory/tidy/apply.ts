@@ -1,44 +1,47 @@
-// §7.3 step 7 apply (backup + atomic write + manifest) — todo #22 P4. Runs
-// entirely inside `withMemoryDirLock` (the lock body MUST stay synchronous,
-// `../lock.js`'s contract) and only ever touches files through
-// `../safe-fs.js` primitives, same as every other memory write path.
-
+// Transactional tidy/frontmatter apply (P2b).  The returned `manifest` is
+// still the v1 projection used by the pre-batch command API; the on-disk
+// manifest is v2 and is recoverable through `readManifestV2`.
 import { randomBytes } from "node:crypto";
 import {
   canonicalDir,
   createExclusive,
+  observeLoc,
+  openRunDirs,
+  probeHardlinks,
   readRegular,
+  resolveLoc,
   statRegularIfExists,
   writeTempRegular,
-  type RegularRead,
+  type RunDirs,
 } from "../safe-fs.js";
 import { memoryDirFor, MemoryError, type MemoryPaths } from "../paths.js";
 import { withMemoryDirLock } from "../lock.js";
 import { upsertFrontmatterFields } from "../frontmatter.js";
-import type { TidyFileAction, TidyManifest, TidyManifestEntry, TidyProposal, TidyProposalFile } from "../contracts.js";
+import type {
+  Ident,
+  Loc,
+  TidyFileAction,
+  TidyManifest,
+  TidyManifestEntry,
+  TidyProposal,
+  TidyProposalFile,
+} from "../contracts.js";
 import { sha256Hex } from "./snapshot.js";
-import { backupLiveFile, newTidyId, pruneBackups, recreateFromBackup, writeManifest } from "./manifest.js";
+import { newTidyId, pruneBackups, readManifestV2 } from "./manifest.js";
+import { runStep, type TxnOperation } from "./txn.js";
+import { leaseCreate, leaseRelease, makeLeasePayload } from "./lease.js";
 
 export interface ApplyTidyInput {
   cwd: string;
   proposal: TidyProposal;
-  /** Per-file user decision; only "apply" entries with a non-"keep" action
-   *  are actually applied — everything else (skip / not present / "keep"
-   *  action) is left untouched. */
   decisions: ReadonlyMap<string, "apply" | "skip">;
-  /** name -> sha256 recorded at snapshot time (§7.3 step 1) — the pre-apply
-   *  freshness recheck (step 7's "逐文件复查 sha256"). Required for every
-   *  rewrite/delete/rename target; a missing entry is treated as a
-   *  conflict (fail closed) rather than skipping the check. */
   originalSha: ReadonlyMap<string, string>;
   paths?: MemoryPaths;
   kind: "tidy" | "frontmatter";
-  /** Test determinism hooks; default to the real clock/pid/random. */
   nowIso?: string;
   pid?: number;
   rand6?: string;
 }
-
 export interface AppliedFileResult {
   name: string;
   op: TidyManifestEntry["op"];
@@ -47,154 +50,266 @@ export interface SkippedFileResult {
   name: string;
   reason: string;
 }
-
 export interface ApplyTidyResult {
   manifest: TidyManifest;
   applied: readonly AppliedFileResult[];
   skipped: readonly SkippedFileResult[];
-  /** Canonical (realpath'd) directory the operation ran in — for the
-   *  caller's report / backup-path display. */
   dir: string;
 }
 
-function opOf(action: TidyFileAction): TidyManifestEntry["op"] {
-  if (action === "keep") throw new MemoryError("unreachable: keep actions are filtered out before applyOne");
+const locKey = (loc: Loc): string => (loc.area === "tmp" ? `tmp:${loc.within}:${loc.name}` : `${loc.area}:${loc.name}`);
+function contentSha(value: string | Buffer): string {
+  return sha256Hex(typeof value === "string" ? value : value.toString("utf8"));
+}
+const ident = (obs: ReturnType<typeof observeLoc>): Ident | undefined =>
+  obs.kind === "file" ? { dev: obs.dev, ino: obs.ino, sha: obs.sha, size: obs.size } : undefined;
+function backupName(seq: number, name: string): string {
+  return `s${seq}-${seq}-live--${name}`;
+}
+function tmpName(nonce: string, seq: number, kind: "b" | "c"): string {
+  return `.pt-${nonce}-${seq}-${kind}.tmp`;
+}
+function actionOp(action: TidyFileAction): TidyManifestEntry["op"] {
+  if (action === "keep") throw new Error("keep is not applied");
   return action;
 }
 
-function applyOne(
-  dir: string,
+interface Built {
+  operations: readonly TxnOperation[];
+  entry: TidyManifestEntry;
+  content: Map<string, Buffer | string>;
+}
+function buildOne(
+  dirs: RunDirs,
   id: string,
-  f: TidyProposalFile,
+  file: TidyProposalFile,
+  seq: number,
   originalSha: ReadonlyMap<string, string>,
   nowIso: string,
-): TidyManifestEntry {
-  if (f.action === "create") {
-    const existing = statRegularIfExists(dir, f.name);
-    if (existing !== undefined) throw new MemoryError(`${f.name} already exists`);
-    const finalContent = upsertFrontmatterFields(f.content ?? "", { source: "agent", updated: nowIso });
-    const tmp = writeTempRegular(dir, f.name, Buffer.from(finalContent, "utf8"), 0o600);
-    createExclusive(dir, tmp, f.name);
-    return { name: f.name, op: "create", afterSha256: sha256Hex(finalContent) };
+): Built {
+  const src: Loc = { area: "live", name: file.name };
+  const before = observeLoc(dirs, src);
+  const beforeIdent = ident(before);
+  if (file.action !== "create") {
+    if (!beforeIdent || beforeIdent.sha !== originalSha.get(file.name))
+      throw new MemoryError(`${file.name} changed on disk since the proposal was drafted`);
   }
-
-  // rewrite / delete / rename all touch a file that must still be exactly
-  // what the snapshot recorded.
-  const expected = originalSha.get(f.name);
-  if (expected === undefined) throw new MemoryError(`${f.name} has no recorded snapshot hash — refusing (fail-closed)`);
-  let current: RegularRead;
-  try {
-    current = readRegular(dir, f.name);
-  } catch (err) {
-    throw new MemoryError(`${f.name} is missing or unreadable: ${(err as Error).message}`);
-  }
-  const currentSha = sha256Hex(current.text);
-  if (currentSha !== expected) {
-    throw new MemoryError(`${f.name} changed on disk since the proposal was drafted`);
-  }
-
-  backupLiveFile(dir, id, f.name); // f.name is now gone from the live dir; content lives at .backup/<id>/<name>
-  try {
-    if (f.action === "delete") {
-      return { name: f.name, op: "delete", beforeSha256: currentSha, backupFile: f.name };
-    }
-    if (f.action === "rewrite") {
-      const finalContent = upsertFrontmatterFields(f.content ?? "", { source: "agent", updated: nowIso });
-      const tmp = writeTempRegular(dir, f.name, Buffer.from(finalContent, "utf8"), 0o600);
-      createExclusive(dir, tmp, f.name);
-      return {
-        name: f.name,
-        op: "rewrite",
-        beforeSha256: currentSha,
-        afterSha256: sha256Hex(finalContent),
-        backupFile: f.name,
-      };
-    }
-    // rename
-    const newName = f.newName;
-    if (!newName) throw new MemoryError(`${f.name}: rename requires newName`);
-    if (f.content !== undefined) {
-      const finalContent = upsertFrontmatterFields(f.content, { source: "agent", updated: nowIso });
-      const tmp = writeTempRegular(dir, newName, Buffer.from(finalContent, "utf8"), 0o600);
-      createExclusive(dir, tmp, newName);
-      return {
-        name: f.name,
-        op: "rename",
-        newName,
-        beforeSha256: currentSha,
-        afterSha256: sha256Hex(finalContent),
-        backupFile: f.name,
-      };
-    }
-    recreateFromBackup(dir, id, f.name, newName);
+  const nonce = id.slice(-6).padStart(8, "0").slice(0, 8);
+  if (file.action === "create") {
+    if (before.kind !== "absent") throw new MemoryError(`${file.name} already exists`);
+    const content = upsertFrontmatterFields(file.content ?? "", { source: "agent", updated: nowIso });
+    const tmp: Loc = { area: "tmp", within: "live", name: tmpName(nonce, seq, "c") };
     return {
-      name: f.name,
-      op: "rename",
-      newName,
-      beforeSha256: currentSha,
-      afterSha256: currentSha,
-      backupFile: f.name,
+      operations: [
+        {
+          op: { prim: "CREATE", target: src, afterSha: sha256Hex(content), tmpContent: tmp },
+          seq,
+          phase: "frontmatter",
+        },
+      ],
+      entry: { name: file.name, op: "create", afterSha256: sha256Hex(content) },
+      content: new Map([[locKey(tmp), content]]),
     };
-  } catch (err) {
-    // Best-effort recovery: put the original content back at its original
-    // name so a mid-operation failure never leaves the live directory
-    // missing a file it started with (the backup copy is the source of
-    // truth either way — this is purely to avoid an unnecessary outage).
-    try {
-      recreateFromBackup(dir, id, f.name, f.name);
-    } catch {
-      // best effort — the backup copy still exists for manual recovery
-    }
-    throw err;
   }
+  if (!beforeIdent) throw new MemoryError(`${file.name} is missing or unreadable`);
+  const backup: Loc = { area: "backup", name: backupName(seq, file.name) };
+  if (file.action === "delete")
+    return {
+      operations: [{ op: { prim: "MOVE", src, dst: backup, obj: beforeIdent }, seq, phase: "normalize" }],
+      entry: { name: file.name, op: "delete", beforeSha256: beforeIdent.sha, backupFile: backup.name },
+      content: new Map(),
+    };
+  if (file.action === "rewrite" || file.action === "rename") {
+    const destinationName = file.action === "rename" ? file.newName : file.name;
+    if (!destinationName) throw new MemoryError(`${file.name}: rename requires newName`);
+    const destination: Loc = { area: "live", name: destinationName };
+    const output =
+      file.content === undefined
+        ? readBytes(dirs, src)
+        : upsertFrontmatterFields(file.content, { source: "agent", updated: nowIso });
+    const contentTmp: Loc = { area: "tmp", within: "live", name: tmpName(nonce, seq, "c") };
+    const backupTmp: Loc = { area: "tmp", within: "backup", name: tmpName(nonce, seq, "b") };
+    const replace: OpSpecLike = {
+      prim: "REPLACE",
+      target: destination,
+      before: beforeIdent,
+      afterSha: contentSha(output),
+      backup,
+      tmpBackup: backupTmp,
+      tmpContent: contentTmp,
+    };
+    // A rename with a distinct destination is represented by the prescribed
+    // CREATE+MOVE group, not by a single replacement of the old name.
+    if (destinationName !== file.name) {
+      const create: TxnOperation = {
+        op: { prim: "CREATE", target: destination, afterSha: contentSha(output), tmpContent: contentTmp },
+        seq,
+        group: seq,
+        phase: "normalize",
+      };
+      const move: TxnOperation = {
+        op: { prim: "MOVE", src, dst: backup, obj: beforeIdent },
+        seq: seq + 1,
+        group: seq,
+        phase: "normalize",
+      };
+      return {
+        operations: [create, move],
+        entry: {
+          name: file.name,
+          op: "rename",
+          newName: destinationName,
+          beforeSha256: beforeIdent.sha,
+          afterSha256: contentSha(output),
+          backupFile: backup.name,
+        },
+        content: new Map([
+          [locKey(contentTmp), output],
+          [locKey(backupTmp), readBytes(dirs, src)],
+        ]),
+      };
+    }
+    return {
+      operations: [{ op: replace, seq, phase: "normalize" }],
+      entry: {
+        name: file.name,
+        op: "rewrite",
+        beforeSha256: beforeIdent.sha,
+        afterSha256: contentSha(output),
+        backupFile: backup.name,
+      },
+      content: new Map([[locKey(contentTmp), output]]),
+    };
+  }
+  throw new MemoryError(`unsupported action ${file.action}`);
+}
+// Structural alias avoids repeating the large discriminated union in the
+// builder's local branch above.
+type OpSpecLike = Extract<import("../contracts.js").OpSpec, { prim: "REPLACE" }>;
+function readBytes(dirs: RunDirs, loc: Loc): Buffer {
+  const resolved = resolveLoc(dirs, loc);
+  return Buffer.from(readRegular(resolved.dir.path, resolved.name).text, "utf8");
 }
 
-/**
- * §7.3 step 7: one synchronous pass inside `withMemoryDirLock` — backup
- * every touched file, apply the decided ("apply") entries, write the
- * manifest exactly once. A per-file failure (sha mismatch, missing file,
- * fs error) is recorded in `skipped` and does NOT abort the rest of the
- * batch (§10 K9). `onAfterWrite` (the memory-block re-render hook) is the
- * CALLER's responsibility — this function only touches the filesystem.
- */
+/** Apply each selected proposal through one v2 journal.  Failed candidates
+ * are isolated before the transaction starts; once an op is journaled, its
+ * result is authoritative and recovery can safely finish it. */
 export async function applyTidy(input: ApplyTidyInput): Promise<ApplyTidyResult> {
   const display = memoryDirFor(input.cwd, input.paths);
   const canon = canonicalDir(display);
   if (!canon) throw new MemoryError(`memory directory for ${input.cwd} is not accessible`);
   const dir = canon.real;
-
+  const now = new Date(input.nowIso ?? new Date().toISOString());
+  const id = newTidyId(now, input.pid ?? process.pid, input.rand6 ?? randomBytes(3).toString("hex"));
   return withMemoryDirLock(dir, () => {
-    const now = new Date(input.nowIso ?? new Date().toISOString());
-    const id = newTidyId(now, input.pid ?? process.pid, input.rand6 ?? randomBytes(3).toString("hex"));
-    const nowIso = now.toISOString();
-    const entries: TidyManifestEntry[] = [];
-    const applied: AppliedFileResult[] = [];
+    const selected = input.proposal.files.filter(
+      (file) => file.action !== "keep" && input.decisions.get(file.name) === "apply",
+    );
     const skipped: SkippedFileResult[] = [];
-
-    const targets = input.proposal.files.filter((f) => f.action !== "keep" && input.decisions.get(f.name) === "apply");
-    for (const f of targets) {
-      try {
-        const entry = applyOne(dir, id, f, input.originalSha, nowIso);
-        entries.push(entry);
-        applied.push({ name: f.name, op: opOf(f.action) });
-      } catch (err) {
-        skipped.push({ name: f.name, reason: (err as Error).message });
+    const built: Built[] = [];
+    if (selected.length === 0)
+      return {
+        manifest: { v: 1, id, kind: input.kind, createdAt: now.toISOString(), entries: [] },
+        applied: [],
+        skipped,
+        dir,
+      };
+    const dirs = openRunDirs(dir, id, { createArchive: true, createBackup: true });
+    const lease = makeLeasePayload(0, [id]);
+    if (!leaseCreate(dir, lease)) throw new MemoryError("memory directory already has an active tidy run");
+    try {
+      let nextSeq = 1;
+      for (const file of selected) {
+        try {
+          const item = buildOne(dirs, id, file, nextSeq, input.originalSha, now.toISOString());
+          built.push(item);
+          nextSeq += item.operations.length;
+        } catch (err) {
+          skipped.push({ name: file.name, reason: (err as Error).message });
+        }
       }
-    }
-
-    const manifest: TidyManifest = { v: 1, id, kind: input.kind, createdAt: nowIso, entries };
-    if (entries.length > 0) {
-      writeManifest(dir, manifest);
+      if (built.length === 0)
+        return {
+          manifest: { v: 1, id, kind: input.kind, createdAt: now.toISOString(), entries: [] },
+          applied: [],
+          skipped,
+          dir,
+        };
+      probeHardlinks(dirs);
+      const contents = new Map<string, Buffer | string>();
+      for (const b of built) for (const [k, v] of b.content) contents.set(k, v);
+      const operations: TxnOperation[] = built.flatMap((b) => b.operations);
+      const deadline = Date.now() + 30_000;
+      let outcome = runStep({
+        dirs,
+        id,
+        kind: input.kind,
+        phase: input.kind === "frontmatter" ? "frontmatter" : "normalize",
+        ops: operations,
+        contents,
+        probe: false,
+      });
+      while (outcome.state === "applying" && outcome.results.length < operations.length && Date.now() < deadline) {
+        outcome = runStep({
+          dirs,
+          id,
+          kind: input.kind,
+          phase: input.kind === "frontmatter" ? "frontmatter" : "normalize",
+          ops: operations,
+          contents,
+          probe: false,
+        });
+      }
+      const byId = new Map(outcome.results.map((r) => [r.opId, r]));
+      const applied: AppliedFileResult[] = [];
+      let opCursor = 0;
+      for (const b of built) {
+        const groupResults = b.operations.map((operation) => byId.get(`${id}-op-${operation.seq ?? ++opCursor}`));
+        opCursor += b.operations.length;
+        if (groupResults.length > 0 && groupResults.every((result) => result?.state === "done"))
+          applied.push({ name: b.entry.name, op: b.entry.op });
+        else
+          skipped.push({
+            name: b.entry.name,
+            reason:
+              groupResults.find((result) => result?.reason)?.reason ??
+              (outcome.state === "applying" ? "transaction deadline exceeded" : "transaction conflict"),
+          });
+      }
+      // Keep the old flat backup names as compatibility aliases for the
+      // pre-batch restore/listing API. The journal's canonical names remain
+      // collision-safe `s<step>-<seq>-...` locations.
+      for (const b of built) {
+        const backupFile = b.entry.backupFile;
+        if (!backupFile) continue;
+        try {
+          const source = readRegular(dirs.backup.path, backupFile).text;
+          if (statRegularIfExists(dirs.backup.path, b.entry.name) === undefined) {
+            const tmp = writeTempRegular(dirs.backup.path, b.entry.name, Buffer.from(source, "utf8"), 0o600);
+            createExclusive(dirs.backup.path, tmp, b.entry.name);
+          }
+        } catch {
+          /* canonical journal backup is still authoritative */
+        }
+      }
       try {
-        // §7.3 step 7 / §10 K6 — best-effort retention pruning; a failure
-        // here (defense in depth on top of pruneBackups's own internal
-        // per-id catch) must never invalidate an apply that already
-        // succeeded. Retried on the next apply.
         pruneBackups(dir);
       } catch {
-        // swallow
+        /* retention is best effort */
       }
+      // Return the compatibility projection. The v2 journal remains on disk.
+      const legacy: TidyManifest = {
+        v: 1,
+        id,
+        kind: input.kind,
+        createdAt: now.toISOString(),
+        entries: applied
+          .map((a) => built.find((b) => b.entry.name === a.name)?.entry)
+          .filter((e): e is TidyManifestEntry => e !== undefined),
+      };
+      return { manifest: legacy, applied, skipped, dir };
+    } finally {
+      leaseRelease(dir, lease.token);
     }
-    return { manifest, applied, skipped, dir };
   });
 }
