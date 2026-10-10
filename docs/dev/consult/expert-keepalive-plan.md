@@ -398,6 +398,7 @@ interface ConsultCacheProbe {
 ## 10. 需用户确认
 
 - **Q1（main，发布前必须裁决）**：main 保留现有只读形态作为 R1 唯一例外，还是 fail closed（`main-unsupported`，等于停用 `experts:["main"]`）？未裁决不发布（§3.7）。
+  - **已裁决（用户，2026-10-10）**：main **保留现有只读工具表形态**，作为 R1 唯一的有记录例外；`experts:["main"]` 继续可用，不切换到 `main-unsupported`。验收标准、发布说明与 `tests/consult/consult-tool.test.ts` 的 main 用例按此写。
 - **Q3（终止阈值）**：连续第 2 个全被拦批次终止，是否合适？
 - **Q4（成本预检）**：暂按冷写估算，等数据再改？
 - **Q5（`agent.sessionId`）**：让 OpenAI 路由复用专家的 `prompt_cache_key`？
