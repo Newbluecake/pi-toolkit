@@ -8,8 +8,10 @@ import {
   hardDeadlineAtFor,
 } from "./deadline.js";
 import { deliveryKey } from "./delivery-key.js";
+import { foldConsultCall } from "./consult-summary.js";
 import { journalSnapshotFromState } from "./run-journal.js";
 import { isTerminalStatus } from "./status.js";
+import { capExpertRefs } from "./types.js";
 import type {
   CompactionFailureRecord,
   ContextSwitchDiag,
@@ -153,7 +155,7 @@ function streamPatch(diag: RunDiagnostics, e: { t: "text_delta" | "thinking_delt
  * below count them in pendingTools and stay in tool_exec until the last one
  * settles, while this patch keeps the per-call trail complete).
  */
-function toolTrailPatch(
+export function toolTrailPatch(
   diag: RunDiagnostics,
   e: Extract<RunInput, { kind: "session_event" }>["event"],
   at: number,
@@ -171,16 +173,33 @@ function toolTrailPatch(
     return { toolHistory: history, toolCounts: counts };
   }
   if (e.t === "tool_end") {
+    // consult A/B instrumentation plan (§2/§5 P1a, review §8 #2): the consult
+    // fold must run BEFORE both of toolHistory's own early returns below (no
+    // toolHistory at all, or the matching record already evicted by
+    // TOOL_HISTORY_CAP) and merge into every return path — a consult call is
+    // counted even when its toolHistory trace is gone. Latency resolution
+    // order per §5: the in-flight toolHistory record's startedAt, else
+    // diag.currentTool's startedAt (same toolCallId), else undefined (counted
+    // in ConsultSummary.latencyUnknown instead).
+    let consultPatch: Partial<RunDiagnostics> = {};
+    if (e.consult !== undefined) {
+      const inHistory = (diag.toolHistory ?? []).find((r) => r.toolCallId === e.toolCallId && r.endedAt === undefined);
+      const startedAt =
+        inHistory?.startedAt ??
+        (diag.currentTool?.toolCallId === e.toolCallId ? diag.currentTool.startedAt : undefined);
+      const latencyMs = startedAt === undefined ? undefined : at - startedAt;
+      consultPatch = { consults: foldConsultCall(diag.consults, e.consult, latencyMs) };
+    }
     const history = diag.toolHistory;
-    if (!history) return {};
+    if (!history) return consultPatch;
     for (let i = history.length - 1; i >= 0; i--) {
       if (history[i]!.toolCallId === e.toolCallId && history[i]!.endedAt === undefined) {
         const next = [...history];
         next[i] = { ...next[i]!, endedAt: at, isError: e.isError };
-        return { toolHistory: next };
+        return { toolHistory: next, ...consultPatch };
       }
     }
-    return {}; // record evicted by the ring cap — counts still hold the truth
+    return consultPatch; // record evicted by the ring cap — counts still hold the truth
   }
   return {};
 }
@@ -724,6 +743,13 @@ export function reduce(
         ...(input.meta?.agentType === undefined ? {} : { agentType: input.meta.agentType }),
         ...(input.meta?.taskPrompt === undefined ? {} : { taskPrompt: input.meta.taskPrompt }),
         ...(input.meta?.worktree === undefined ? {} : { worktree: input.meta.worktree }),
+        // consult A/B instrumentation plan (§2/§3/§4, P1a): same write-once
+        // display metadata pattern as the M-A fields above.
+        ...(input.meta?.experts === undefined
+          ? {}
+          : { experts: { ...input.meta.experts, refs: capExpertRefs(input.meta.experts.refs) } }),
+        ...(input.meta?.dispatchMeta === undefined ? {} : { dispatchMeta: input.meta.dispatchMeta }),
+        ...(input.meta?.schemaPreset === undefined ? {} : { schemaPreset: input.meta.schemaPreset }),
         // §2.7：策略是 run 的持久事实，enqueued 写一次，此后永不改写；缺席
         // （旧入口/直接构造的 RunInput）不写字段，读侧走中性文案。
         ...(input.timeoutPolicy === undefined ? {} : { timeoutPolicy: input.timeoutPolicy }),
@@ -913,7 +939,23 @@ export function reduce(
       const knownInFlight =
         state.diag.currentTool?.toolCallId === e.toolCallId ||
         (state.diag.toolHistory ?? []).some((r) => r.toolCallId === e.toolCallId && r.endedAt === undefined);
-      if (!knownInFlight) return illegal(state, input);
+      if (!knownInFlight) {
+        // consult A/B instrumentation plan (§2/§5 P1a, main-session ruling M1):
+        // the illegal-event judgement and every state transition stay exactly
+        // as before (lastWarn set, phase/status/pendingTools untouched) — but
+        // this is precisely the "toolHistory record missing/evicted" case
+        // §5 wants counted, so `base.consults` (already computed above by
+        // toolTrailPatch, independently of knownInFlight) must still reach
+        // diag. Diag-only merge on top of whatever `illegal()` returned
+        // (including its same-warning dedup short-circuit, which reuses the
+        // original state/diag object) — no other field is touched.
+        const result = illegal(state, input);
+        if (base.consults === undefined) return result;
+        return {
+          state: { ...result.state, diag: { ...result.state.diag, consults: base.consults } },
+          effects: result.effects,
+        };
+      }
       const remaining = Math.max(0, state.diag.pendingTools - 1);
       const nextDiag = { ...state.diag, ...base, pendingTools: remaining };
       if (remaining > 0) {

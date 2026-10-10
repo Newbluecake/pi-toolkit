@@ -5,6 +5,9 @@ export type Generation = number;
 export type TimerId = string;
 
 import type { CanMessage } from "./message.js";
+import type { ConsultCallFact, ConsultSummary } from "./consult-summary.js";
+import type { DispatchMeta } from "./dispatch-meta.js";
+import type { SchemaPresetId } from "./verdict-schema.js";
 
 export type RunPhase =
   | "queue_wait"
@@ -187,6 +190,40 @@ export interface ConsultExpertRef {
 }
 
 /**
+ * consult A/B instrumentation plan (§2, frozen): display-only per-expert
+ * record folded into `RunDisplayMeta.experts.refs` / `RunDiagnostics.experts.refs`
+ * at enqueue time (write once, read-only afterwards). Deliberately slimmer
+ * than `ConsultExpertRef` — it drops the fork-admission fields
+ * (`sessionFile`/`contextPercent`/`contextTokens`/`task`) that only matter
+ * before the whitelist is resolved and never belong in a persisted diag.
+ */
+export interface RunExpertRecord {
+  runId: RunId;
+  label?: string;
+  agentType: string;
+  kind?: "main";
+  pending?: true;
+}
+
+/**
+ * consult A/B instrumentation plan (§2, review §8 ⚠️ item): the frozen 16-ref
+ * cap on `RunDisplayMeta.experts.refs` / `RunDiagnostics.experts.refs`. The
+ * real producer (P1b's runtime adapter, building this list from the
+ * dispatch-time resolved `SpawnRequest.consultExperts` whitelist) is outside
+ * `src/core/` by design — this is a defensive, pure re-application of the
+ * same cap at every point core itself builds or copies an `experts` value
+ * (the `enqueued` reducer branch in `state-machine.ts`, and the journal
+ * projection in `run-journal.ts`), so an uncapped list handed in from
+ * anywhere can never make it into a persisted diag/journal entry.
+ */
+export const EXPERTS_REFS_CAP = 16;
+
+/** Pure cap helper (review §8 ⚠️ item): truncates to `EXPERTS_REFS_CAP`, keeping the first entries; always returns a fresh array. */
+export function capExpertRefs<T>(refs: readonly T[]): T[] {
+  return refs.length > EXPERTS_REFS_CAP ? refs.slice(0, EXPERTS_REFS_CAP) : [...refs];
+}
+
+/**
  * consult (plan §16 "consult the main session via the reserved expert id
  * 'main'"): reserved expert handle that ALWAYS names the host main session,
  * never a spawned run — it takes priority over any label a real run happens
@@ -332,6 +369,27 @@ export interface SpawnRequest {
    */
   consultExperts?: ConsultExpertRef[];
   /**
+   * consult A/B instrumentation plan (§3): optional analytics-only metadata
+   * set by the Agent tool's `meta` param (top-level only, never nested — see
+   * §3). `NOT_THREADED` by request-threading.ts; the runtime adapter copies it
+   * verbatim into `RunDisplayMeta.dispatchMeta`, and the `enqueued` reducer
+   * branch mirrors it into `diag.dispatchMeta` exactly once (write-once,
+   * never revised). `buildPrompt` never reads it — it is never visible to the
+   * subagent. Never threaded into resume's `ResolvedSpawnRequest` by this
+   * field alone; resume inheritance (D3) is a P1b/service-layer concern.
+   */
+  dispatchMeta?: DispatchMeta;
+  /**
+   * consult A/B instrumentation plan (§4): resolved preset id when the
+   * Agent tool's `schema` param named a known preset (e.g. `"verdict/v1"`)
+   * instead of a literal JSON Schema object. Write-once at dispatch,
+   * mirrored into `RunDisplayMeta.schemaPreset`/`diag.schemaPreset`; used at
+   * settle time to pick `renderStructuredForHost`'s report-plus-verdict
+   * rendering over a raw `JSON.stringify`. Independent of `schema` itself,
+   * which still carries the resolved JSON Schema object for validation.
+   */
+  schemaPreset?: SchemaPresetId;
+  /**
    * consult-only (plan §4.3/§4.4): absolute path of the forked copy of an
    * expert's session file. Produced exclusively inside the consult tool (by
    * fork-store, right before the spawn) and mutually exclusive with
@@ -411,6 +469,40 @@ export interface RunDisplayMeta {
    * display-only and user-visible, so prefixes are not a reliable signal).
    */
   consultOf?: { askerRunId?: RunId };
+  /**
+   * consult A/B instrumentation plan (§2/§3, review §8 minor — fixed existence
+   * condition): present iff the run was DISPATCHED with a non-empty expert
+   * whitelist (`SpawnRequest.consultExperts` resolved non-empty at admission)
+   * — not "iff the tool was actually injected", which would make `granted:
+   * false` an impossible state instead of the real one it documents. `refs`
+   * mirrors that resolved whitelist (slimmed to `RunExpertRecord`, capped at
+   * `EXPERTS_REFS_CAP` — see `capExpertRefs`); `granted` is `true` iff the
+   * runtime adapter actually injected the `consult` tool (a non-readonly-
+   * domain, non-consult-fork run) and `false` when it was dispatched with
+   * experts but the tool was withheld (e.g. `consult.enabled=false`, or a
+   * readonly tool domain) — analysis must exclude `granted:false` runs from
+   * the "experts" arm (§2). Written exactly once at enqueue, never revised
+   * afterwards; absent on every run dispatched without an expert whitelist,
+   * and on any run persisted before this plan shipped (old entries may lack
+   * the field entirely — treat absence as "no experts", never as `granted:
+   * false`).
+   */
+  experts?: { refs: RunExpertRecord[]; granted: boolean };
+  /**
+   * consult A/B instrumentation plan (§3): mirrors `SpawnRequest.dispatchMeta`
+   * verbatim, written exactly once at enqueue and never revised afterwards.
+   * Read-only from here on. Absent when the dispatcher passed no `meta`, and
+   * on every run persisted before this plan shipped (old entries may lack it).
+   */
+  dispatchMeta?: DispatchMeta;
+  /**
+   * consult A/B instrumentation plan (§4): mirrors `SpawnRequest.schemaPreset`
+   * verbatim, written exactly once at enqueue and never revised afterwards.
+   * Read-only from here on. Absent when the dispatcher's `schema` did not
+   * name a known preset, and on every run persisted before this plan shipped
+   * (old entries may lack it).
+   */
+  schemaPreset?: SchemaPresetId;
 }
 
 /**
@@ -468,7 +560,19 @@ export type DriverEvent =
     }
   | { t: "context_usage"; usage: ContextUsageInfo }
   | { t: "tool_start"; toolCallId: string; toolName: string; argsPreview?: string }
-  | { t: "tool_end"; toolCallId: string; toolName: string; isError: boolean }
+  | {
+      t: "tool_end";
+      toolCallId: string;
+      toolName: string;
+      isError: boolean;
+      /**
+       * consult A/B instrumentation plan (§2/§5 P1b): present iff `toolName
+       * === "consult"` — the session driver's classification of this specific
+       * call (`classifyConsultToolEnd`, src/core/consult-summary.ts) of the
+       * raw pi tool result. Every other tool's `tool_end` never sets this.
+       */
+      consult?: ConsultCallFact;
+    }
   | { t: "tool_update"; toolCallId: string }
   | { t: "retry_start"; attempt: number; maxAttempts: number; delayMs: Millis }
   | { t: "retry_end"; success: boolean }
@@ -864,6 +968,49 @@ export interface RunDiagnostics {
   worktree?: WorktreeDisposition;
   /** M-A: lifetime per-tool-name counters — unaffected by toolHistory ring eviction. */
   toolCounts?: Record<string, number>;
+  /**
+   * consult A/B instrumentation plan (§2/§3): mirrors `RunDisplayMeta.experts`
+   * (write-once at enqueue, read-only afterwards). Absent for every run
+   * dispatched without an expert whitelist, and on any run persisted before
+   * this plan shipped (old entries may lack the field entirely); see
+   * `RunDisplayMeta.experts`'s JSDoc for `granted`'s semantics and the
+   * `EXPERTS_REFS_CAP` cap on `refs`. Carried through the journal whitelist
+   * (`run-journal.ts`) so a restart-interrupted run and its resume both keep it.
+   */
+  experts?: { refs: RunExpertRecord[]; granted: boolean };
+  /**
+   * consult A/B instrumentation plan (§3): mirrors `SpawnRequest.dispatchMeta`
+   * verbatim (write-once at enqueue, read-only afterwards). Absent when the
+   * dispatcher passed no `meta`, and on any run persisted before this plan
+   * shipped (old entries may lack it). Carried through the journal whitelist
+   * (D3) so a resume of an interrupted run can inherit it.
+   */
+  dispatchMeta?: DispatchMeta;
+  /**
+   * consult A/B instrumentation plan (§4): mirrors `SpawnRequest.schemaPreset`
+   * verbatim (write-once at enqueue, read-only afterwards). Absent when the
+   * dispatcher's `schema` did not name a known preset, and on any run
+   * persisted before this plan shipped (old entries may lack it). Carried
+   * through the journal whitelist.
+   */
+  schemaPreset?: SchemaPresetId;
+  /**
+   * consult A/B instrumentation plan (§5 P1a §2): per-run rollup of every
+   * `consult` tool call observed via `tool_end`'s `consult` fact (folded by
+   * `foldConsultCall`, computed strictly before `toolTrailPatch`'s
+   * `!toolHistory` early return so it is never skipped by ring eviction or a
+   * missing toolHistory — M1: even a `tool_end` the reducer otherwise treats
+   * as illegal still folds this diag-only patch). Absent when this run never
+   * called `consult` — the key itself must not appear (fields-absent-when-
+   * no-events is part of the "zero change when unused" contract), and on any
+   * run persisted before this plan shipped (old entries may lack it even if
+   * they did call consult — it is reconstructed from events, not backfilled).
+   * Mutated incrementally thereafter (NOT write-once, unlike the three fields
+   * above); read-only once the run reaches a terminal status. Invariant:
+   * `consults.calls <= (toolCounts.consult ?? 0)`. Carried through the
+   * journal whitelist.
+   */
+  consults?: ConsultSummary;
   stopRequestedAt?: Millis;
   stopCause?: StopCause;
   timeoutReason?: TimeoutReason;

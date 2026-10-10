@@ -1,3 +1,4 @@
+import { capExpertRefs } from "./types.js";
 import type {
   ErrorInfo,
   Millis,
@@ -20,6 +21,14 @@ import type {
  * - `interruptedFromJournal` — the seed-side mapping of such an entry to a
  *   TERMINAL `aborted` snapshot (J1: the in-memory store only ever holds
  *   terminal snapshots).
+ *
+ * consult A/B instrumentation plan (§5 P1a, review §8 #1): `experts`,
+ * `dispatchMeta`, `schemaPreset` and `consults` are whitelisted below so a
+ * crash-interrupted run's journal entry — and the terminal `aborted`
+ * snapshot `interruptedFromJournal` seeds from it — both keep them. Leaving
+ * `dispatchMeta` out would otherwise silently drop D3's resume-inherited
+ * lane/packageId/abArm the moment a run restarts mid-flight, making the
+ * analysis script misclassify real rework as `unenrolled`.
  */
 
 /** D3: journal entries cap the dispatch prompt harder than terminal entries (TASK_PROMPT_CAP = 4096). */
@@ -65,6 +74,10 @@ const JOURNAL_DIAG_FIELDS = [
   "staleInputs",
   "sessionFile",
   "childExtensionMissing",
+  "experts",
+  "dispatchMeta",
+  "schemaPreset",
+  "consults",
 ] as const satisfies readonly (keyof RunDiagnostics)[];
 
 function projectDiag(diag: RunDiagnostics): RunDiagnostics {
@@ -75,6 +88,13 @@ function projectDiag(diag: RunDiagnostics): RunDiagnostics {
   }
   if (typeof diag.taskPrompt === "string" && diag.taskPrompt.length > JOURNAL_TASK_PROMPT_CAP)
     out["taskPrompt"] = diag.taskPrompt.slice(0, JOURNAL_TASK_PROMPT_CAP);
+  // consult A/B instrumentation plan (review §8 ⚠️ item): re-apply the
+  // `experts.refs` cap defensively here too — the real producer
+  // (P1b's runtime adapter) lives outside core, so this is the journal's own
+  // last-line guarantee that a persisted entry never carries more than
+  // `EXPERTS_REFS_CAP` refs, independent of whatever `state-machine.ts`'s
+  // `enqueued` branch already enforced on the live diag.
+  if (diag.experts !== undefined) out["experts"] = { ...diag.experts, refs: capExpertRefs(diag.experts.refs) };
   out["escalation"] = [];
   out["degraded"] = [];
   out["unkillable"] = [];

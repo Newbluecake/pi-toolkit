@@ -6,6 +6,7 @@ import {
   restartInterruptedMessage,
 } from "../../src/core/run-journal.js";
 import { createInitialState } from "../../src/core/state-machine.js";
+import { EXPERTS_REFS_CAP } from "../../src/core/types.js";
 import type { RunDiagnostics, RunSnapshot, RunState } from "../../src/core/types.js";
 
 /** A live (non-terminal) state whose diag carries EVERY field — retained and dropped alike. */
@@ -64,6 +65,21 @@ function richState(over: Partial<RunDiagnostics> = {}): RunState {
     compactionFailures: [],
     lastCompactionOkAt: 1_039,
     childExtensionMissing: true,
+    experts: { refs: [{ runId: "r_e1", label: "plan", agentType: "architect" }], granted: true },
+    dispatchMeta: { lane: "L2", packageId: "pkg-1", feature: "auth", abArm: "experts" },
+    schemaPreset: "verdict/v1",
+    consults: {
+      calls: 2,
+      byResult: { completed: 1, bad_ref: 1 },
+      truncated: 1,
+      partial: 0,
+      costUsd: 0.05,
+      unpricedCalls: 0,
+      latencyMs: 500,
+      maxLatencyMs: 300,
+      latencyUnknown: 1,
+      byExpert: { r_e1: 2 },
+    },
     ...over,
   };
   return { ...base, status: "running", phase: "model_turn", diag };
@@ -101,6 +117,10 @@ const RETAINED = [
   "staleInputs",
   "sessionFile",
   "childExtensionMissing",
+  "experts",
+  "dispatchMeta",
+  "schemaPreset",
+  "consults",
   "escalation",
   "degraded",
   "unkillable",
@@ -174,10 +194,19 @@ describe("journalSnapshotFromState (run-persistence plan D3)", () => {
     expect(short.diag.taskPrompt).toBe("do it");
   });
 
-  it("stays under the 6 KiB size budget with every retained field at its upper bound", () => {
+  it("stays under the 10 KiB size budget with every retained field (incl. experts/dispatchMeta/schemaPreset/consults) at its upper bound", () => {
     // 1024 CJK chars (3 UTF-8 bytes each) is the worst-case prompt; the other
     // variable-length retained fields get generous upper-bound values.
     const tools = Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`tool_name_number_${i}`, 99_999]));
+    const experts = {
+      refs: Array.from({ length: 16 }, (_, i) => ({
+        runId: `r_${"e".repeat(40)}${i}`,
+        label: "l".repeat(32),
+        agentType: "a".repeat(32),
+      })),
+      granted: true,
+    };
+    const byExpert = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`r_${"e".repeat(40)}${i}`, 999]));
     const state = richState({
       taskPrompt: "测".repeat(4096),
       label: "l".repeat(64),
@@ -203,6 +232,21 @@ describe("journalSnapshotFromState (run-persistence plan D3)", () => {
       },
       worktree: { state: "kept", branch: `pi-agent-${"b".repeat(40)}`, path: `/tmp/${"w".repeat(120)}` },
       error: undefined,
+      experts,
+      dispatchMeta: { lane: "L3", packageId: "p".repeat(64), feature: "f".repeat(64), abArm: "control" },
+      schemaPreset: "verdict/v1",
+      consults: {
+        calls: 999,
+        byResult: { completed: 500, bad_ref: 100, invalid: 50, unknown: 50, failed: 100, timeout: 99, aborted: 100 },
+        truncated: 99,
+        partial: 99,
+        costUsd: 999.123456,
+        unpricedCalls: 99,
+        latencyMs: 999_999,
+        maxLatencyMs: 99_999,
+        latencyUnknown: 99,
+        byExpert,
+      },
     } as Partial<RunDiagnostics>);
     const snap = journalSnapshotFromState(state, 1_759_000_000_000, {
       kind: "shutdown_flush",
@@ -210,7 +254,59 @@ describe("journalSnapshotFromState (run-persistence plan D3)", () => {
     });
     const bytes = Buffer.byteLength(JSON.stringify(snap), "utf8");
     expect(bytes).toBeGreaterThan(3 * 1024); // the CJK prompt alone is 3 KiB — the fixture really is large
-    expect(bytes).toBeLessThan(6 * 1024);
+    // consult A/B instrumentation plan (§2): adding experts (cap 16 refs) /
+    // dispatchMeta / schemaPreset / consults (cap 16 byExpert keys) pushed the
+    // realistic worst case past the pre-existing 6 KiB line; 10 KiB keeps the
+    // same "persist_snapshot stays cheap" intent with headroom for the new caps.
+    expect(bytes).toBeLessThan(10 * 1024);
+  });
+});
+
+describe("journalSnapshotFromState: consult A/B instrumentation fields (plan §5 P1a, review §8 #1)", () => {
+  it("projects experts/dispatchMeta/schemaPreset/consults verbatim when present", () => {
+    const state = richState();
+    const snap = journalSnapshotFromState(state, 2_000, { kind: "session_created" });
+    expect(snap.diag.experts).toEqual(state.diag.experts);
+    expect(snap.diag.dispatchMeta).toEqual(state.diag.dispatchMeta);
+    expect(snap.diag.schemaPreset).toBe("verdict/v1");
+    expect(snap.diag.consults).toEqual(state.diag.consults);
+  });
+
+  it("drops each field (no key at all) when the live diag never set it", () => {
+    const bare = richState({
+      experts: undefined,
+      dispatchMeta: undefined,
+      schemaPreset: undefined,
+      consults: undefined,
+    });
+    const snap = journalSnapshotFromState(bare, 2_000, { kind: "session_created" });
+    expect(snap.diag).not.toHaveProperty("experts");
+    expect(snap.diag).not.toHaveProperty("dispatchMeta");
+    expect(snap.diag).not.toHaveProperty("schemaPreset");
+    expect(snap.diag).not.toHaveProperty("consults");
+  });
+
+  it("interruptedFromJournal carries dispatchMeta (and the other three) through to the seeded terminal snapshot — a resume from it can inherit dispatchMeta", () => {
+    const snap = journalSnapshotFromState(richState(), 2_000, { kind: "session_created" });
+    const out = interruptedFromJournal(snap);
+    expect(out.diag.dispatchMeta).toEqual({ lane: "L2", packageId: "pkg-1", feature: "auth", abArm: "experts" });
+    expect(out.diag.experts).toEqual(snap.diag.experts);
+    expect(out.diag.schemaPreset).toBe("verdict/v1");
+    expect(out.diag.consults).toEqual(snap.diag.consults);
+    // Also reachable through outcome.diag — the surface a resume's D3 inheritance reads.
+    expect(out.outcome!.diag.dispatchMeta).toEqual(out.diag.dispatchMeta);
+  });
+
+  it("caps experts.refs at EXPERTS_REFS_CAP defensively, independent of whatever the live diag already carried (review §8 ⚠️ item)", () => {
+    const refs = Array.from({ length: EXPERTS_REFS_CAP + 1 }, (_, i) => ({ runId: `r_e${i}`, agentType: "architect" }));
+    const state = richState({ experts: { refs, granted: true } });
+    const snap = journalSnapshotFromState(state, 2_000, { kind: "session_created" });
+    expect(snap.diag.experts?.refs).toHaveLength(EXPERTS_REFS_CAP);
+    expect(snap.diag.experts?.refs[0]!.runId).toBe("r_e0");
+    expect(snap.diag.experts?.granted).toBe(true);
+    // Carried through interruptedFromJournal too — still capped, never re-expanded.
+    const out = interruptedFromJournal(snap);
+    expect(out.diag.experts?.refs).toHaveLength(EXPERTS_REFS_CAP);
   });
 });
 

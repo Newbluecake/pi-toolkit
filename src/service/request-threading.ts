@@ -56,6 +56,12 @@ const NOT_THREADED = [
   "schema", // consumed by the adapter to inject the StructuredOutput tool
   "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)
   "poolFullPolicy", // consumed entirely by spawn() admission (L1) — decided and resolved before start()/RunnerSpec ever exist
+  // consult A/B instrumentation plan (§3/§5 P1b): analytics-only, mirrored into
+  // RunDisplayMeta.dispatchMeta by the runtime adapter, never part of the runner's own execution spec.
+  "dispatchMeta",
+  // consult A/B instrumentation plan (§4/§5 P1b): consumed by the adapter to pick renderStructuredForHost's
+  // preset at settle time; the resolved `schema` field (already classified above) still carries the real JSON Schema.
+  "schemaPreset",
   // P0-r (todo #22 optimize-plan §7.0 point 5): consumed by the runtime adapter to decide
   // readonlyDomain (tool set / policy / provenance / customTools narrowing); the runner never
   // sees this field verbatim — it only ever executes the toolScope the adapter already built.

@@ -1965,6 +1965,115 @@ describe("seeded property invariants", () => {
 });
 
 /* -------------------------------------------------------------------------
+ * consult A/B instrumentation plan (§2/§5 P1a, review §8 item 2/§6 item 10):
+ * property invariants over random tool_start/tool_end sequences (including
+ * consult calls) — state-machine 矩阵/property 测试 updated per the plan's
+ * explicit instruction. Pure `reduce()` driving, no pi imports.
+ * ------------------------------------------------------------------------- */
+describe("consult fold property invariants (consult A/B instrumentation plan §2/§5 P1a)", () => {
+  function mulberry32(seed: number): () => number {
+    return () => {
+      seed |= 0;
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const CONSULT_RESULTS = ["completed", "bad_ref", "invalid", "unknown", "failed", "timeout"] as const;
+
+  /** Drive a fresh run into model_turn so tool events are legal (same shape as presentation-diag.test.ts's helper). */
+  function runningState(): RunState {
+    let s = createInitialState("r", 1, 0);
+    s = reduce(s, { generation: 1, input: { kind: "enqueued", at: 0, budget } }, budget).state;
+    s = reduce(s, { generation: s.generation, input: { kind: "slot_acquired", at: 1 } }, budget).state;
+    s = reduce(
+      s,
+      { generation: s.generation, input: { kind: "phase_entered", at: 2, phase: "session_create" } },
+      budget,
+    ).state;
+    s = reduce(
+      s,
+      { generation: s.generation, input: { kind: "session_created", at: 3, sessionId: "s1" } },
+      budget,
+    ).state;
+    s = reduce(
+      s,
+      { generation: s.generation, input: { kind: "phase_entered", at: 4, phase: "extension_bind" } },
+      budget,
+    ).state;
+    s = reduce(
+      s,
+      { generation: s.generation, input: { kind: "phase_entered", at: 5, phase: "prompt_dispatch" } },
+      budget,
+    ).state;
+    s = reduce(
+      s,
+      { generation: s.generation, input: { kind: "session_event", at: 6, event: { t: "turn_start" } } },
+      budget,
+    ).state;
+    return s;
+  }
+
+  it("consults.calls never exceeds toolCounts.consult, and diag.consults is absent until the first consult tool_end settles", () => {
+    for (let seed = 1; seed <= 300; seed++) {
+      const random = mulberry32(seed);
+      let s = runningState();
+      let sawConsultEnd = false;
+      const open: Array<{ id: string; name: string }> = [];
+      let nextId = 0;
+      for (let step = 0; step < 40; step++) {
+        const at = 10 + step * 10;
+        const startNew = open.length === 0 || random() < 0.6;
+        if (startNew) {
+          const name = random() < 0.5 ? "consult" : "bash";
+          const id = `c${nextId++}`;
+          s = reduce(
+            s,
+            {
+              generation: s.generation,
+              input: { kind: "session_event", at, event: { t: "tool_start", toolCallId: id, toolName: name } },
+            },
+            budget,
+          ).state;
+          open.push({ id, name });
+        } else {
+          const idx = Math.floor(random() * open.length);
+          const { id, name } = open.splice(idx, 1)[0]!;
+          const isConsult = name === "consult";
+          const isError = isConsult && random() < 0.2;
+          const consult = isConsult
+            ? { result: CONSULT_RESULTS[Math.floor(random() * CONSULT_RESULTS.length)]! }
+            : undefined;
+          s = reduce(
+            s,
+            {
+              generation: s.generation,
+              input: {
+                kind: "session_event",
+                at,
+                event: { t: "tool_end", toolCallId: id, toolName: name, isError, ...(consult ? { consult } : {}) },
+              },
+            },
+            budget,
+          ).state;
+          if (isConsult) sawConsultEnd = true;
+        }
+        // Invariant (§6 item 8/review item 2): no `consults` key until a consult
+        // tool_end has actually been folded in — a run that never called
+        // consult must never carry an empty/zero-valued consults object.
+        if (!sawConsultEnd) expect(s.diag).not.toHaveProperty("consults");
+        // Invariant (§6 item 10): consults.calls <= toolCounts.consult always.
+        if (s.diag.consults !== undefined) {
+          const consultToolCount = s.diag.toolCounts?.consult ?? 0;
+          expect(s.diag.consults.calls).toBeLessThanOrEqual(consultToolCount);
+        }
+      }
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------
  * CC4 (workflow design §4.4.1 F4 / §4.4.1 CP3 / WP12): the `enqueued`
  * reducer branch takes `min(rawDeadline, deadlineCapAt)`, and treats an
  * already-expired cap as an immediate `failed(config)` — strictly before any
