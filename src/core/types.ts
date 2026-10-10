@@ -290,6 +290,41 @@ export interface DispatchMeasure {
   payloadTokens?: number;
 }
 
+/** A pi tool declaration captured from an expert's last provider request. */
+export type ToolDeclaration = Record<string, unknown>;
+
+/** The immutable expert request facts used to construct a C2 consult session. */
+export interface ExpertRequestSnapshot {
+  tools: ToolDeclaration[];
+  systemSections: Record<string, string>;
+  model?: { provider: string; id: string };
+  thinkingLevel?: string;
+  sourceSessionId: string;
+  lastRequestUsage?: { input: number; cacheRead: number; cacheWrite: number };
+}
+
+/**
+ * Narrow, per-session consult guard. It deliberately consists of methods and
+ * is therefore not serializable; it is carried only on SessionSpec, never on
+ * SpawnRequest or any persisted/journaled shape.
+ */
+export type ConsultGuardPreflight = { ok: true } | { ok: false; code: string; detail?: string };
+
+export interface ConsultGuardCounters {
+  readonly calls: number;
+  readonly batches: number;
+  readonly terminated: boolean;
+  readonly identity: number;
+  readonly nested: number;
+  readonly costAfterUsd: number;
+}
+
+export interface ConsultGuard {
+  preflight(session: unknown): ConsultGuardPreflight;
+  install(session: unknown): void;
+  counters(): ConsultGuardCounters;
+}
+
 export interface SpawnRequest {
   /** Dispatch-time input budget; the runtime measures both its coarse preflight and final provider payload. */
   inputBudget?: InputBudget;
@@ -379,6 +414,8 @@ export interface SpawnRequest {
    *      (see ResolvedSpawnRequest.parentRunId below).
    */
   deadlineAt?: Millis;
+  /** C2 consult: immutable snapshot of the expert request used to build the consult session. */
+  consultSnapshot?: ExpertRequestSnapshot;
   /**
    * F7 (consult plan §4.3): expert whitelist already resolved at dispatch
    * time by the Agent tool. The runtime adapter injects the `consult` tool
@@ -1352,6 +1389,8 @@ export interface RunState {
  * the original SpawnRequest and the DeadlineBudget.
  */
 export interface SessionSpec {
+  /** C2 consult guard; intentionally non-serializable and never threaded as a SpawnRequest field. */
+  consultGuard?: ConsultGuard;
   cwd?: string;
   agentDir?: string;
   model?: unknown;

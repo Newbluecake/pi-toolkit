@@ -250,13 +250,12 @@ export interface ConsultDeps {
  * consult A/B instrumentation plan (§5 P1b): derived from core's frozen
  * `CONSULT_OUTCOMES` so the tool's own outcome vocabulary and the diag-side
  * classifier (`classifyConsultToolEnd`) can never drift apart. The
- * type-equality assertion below locks the derived union to the exact
- * eleven-value union this tool has always reported (freeze-surface). It
- * stays a plain string union — every `details.outcome` written before P1b
- * is one of these literals.
+ * type-equality assertion below locks the derived union to the exact frozen
+ * vocabulary (including the C2 failure outcomes). It stays a plain string
+ * union — every `details.outcome` written by the tool is one of these literals.
  */
 export type ConsultOutcome = (typeof CONSULT_OUTCOMES)[number];
-/** Compile-time lock: the derived union is exactly the historical literal union (both directions). */
+/** Compile-time lock: the derived union is exactly the frozen literal union (both directions). */
 type SameUnion<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const _consultOutcomeUnchanged: SameUnion<
   ConsultOutcome,
@@ -271,6 +270,9 @@ const _consultOutcomeUnchanged: SameUnion<
   | "cost_cap"
   | "failed"
   | "aborted"
+  | "identity_mismatch"
+  | "guard_unavailable"
+  | "blocked_cap"
 > = true;
 void _consultOutcomeUnchanged;
 

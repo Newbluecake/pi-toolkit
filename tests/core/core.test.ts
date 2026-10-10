@@ -2035,7 +2035,17 @@ describe("consult fold property invariants (consult A/B instrumentation plan §2
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
-  const CONSULT_RESULTS = ["completed", "bad_ref", "invalid", "unknown", "failed", "timeout"] as const;
+  const CONSULT_RESULTS = [
+    "completed",
+    "bad_ref",
+    "invalid",
+    "unknown",
+    "failed",
+    "timeout",
+    "identity_mismatch",
+    "guard_unavailable",
+    "blocked_cap",
+  ] as const;
 
   /** Drive a fresh run into model_turn so tool events are legal (same shape as presentation-diag.test.ts's helper). */
   function runningState(): RunState {

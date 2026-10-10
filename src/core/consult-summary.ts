@@ -18,6 +18,9 @@ export const CONSULT_OUTCOMES = [
   "cost_cap",
   "failed",
   "aborted",
+  "identity_mismatch",
+  "guard_unavailable",
+  "blocked_cap",
 ] as const;
 
 /**
@@ -48,9 +51,73 @@ export interface ConsultCallFact {
   partial?: true;
 }
 
+/** A single consult request's cache/identity observation (consult C2, §4.1). */
+export interface ConsultCacheProbe {
+  expertRunId: string;
+  outcome: ConsultCallResult;
+  identity: {
+    preflight: "pass" | `fail:${string}`;
+    predicted?: {
+      system: boolean;
+      model: boolean;
+      thinking: boolean;
+      cwd: boolean;
+      forcedPrompt: boolean;
+    };
+    wire?: { system: boolean; tools: boolean; model: boolean; thinking: boolean };
+    expertTools: number;
+  };
+  api?: string;
+  provider?: string;
+  model?: string;
+  gapSettleMs?: number;
+  gapLastRequestMs?: number;
+  expertPrefixTokens?: number;
+  prefixSource?: "snapshot-usage" | "context-tokens";
+  requests?: Array<{
+    input: number;
+    cacheRead: number;
+    cacheWrite: number;
+    output: number;
+    costUsd: number;
+    toolsDrift?: true;
+  }>;
+  keepalivePingUsd?: number;
+  hitRatio?: number | null;
+  blocked?: {
+    calls: number;
+    batches: number;
+    terminated: boolean;
+    identity: number;
+    nested: number;
+    costAfterUsd: number;
+  };
+  disallowedInvalidCalls?: number;
+  unknownToolCalls?: number;
+}
+
+/** The persisted FIFO ring used for consult cache probes. */
+export type ConsultCacheProbeRing = ConsultCacheProbe[];
+export const CONSULT_CACHE_PROBES_CAP = 8;
+
+/** Append a probe without mutating the previous summary/ring; oldest probes age out first. */
+export function appendConsultCacheProbe(
+  prev: ConsultCacheProbeRing | undefined,
+  probe: ConsultCacheProbe,
+): ConsultCacheProbeRing {
+  const next = [...(prev ?? []), probe];
+  return next.length > CONSULT_CACHE_PROBES_CAP ? next.slice(-CONSULT_CACHE_PROBES_CAP) : next;
+}
+
 export interface ConsultSummary {
   calls: number;
   byResult: Partial<Record<ConsultCallResult, number>>;
+  /** Recent consult cache probes, retained as a bounded FIFO (maximum 8). */
+  cacheProbes?: ConsultCacheProbeRing;
+  /** Total calls rejected by the consult guard (diagnostic rollup). */
+  blockedCalls?: number;
+  /** Identity failure codes folded by code (diagnostic rollup). */
+  identityFailures?: Record<string, number>;
   truncated: number;
   partial: number;
   /**
@@ -90,6 +157,7 @@ const POST_SPAWN_RESULTS: ReadonlySet<ConsultCallResult> = new Set([
   "turn_cap",
   "cost_cap",
   "aborted",
+  "blocked_cap",
 ]);
 
 function isConsultOutcome(value: unknown): value is (typeof CONSULT_OUTCOMES)[number] {
@@ -203,8 +271,39 @@ export function foldConsultCall(
     latencyMs: base.latencyMs + latencyAdd,
     maxLatencyMs: hasLatency ? Math.max(base.maxLatencyMs, latencyMs) : base.maxLatencyMs,
     latencyUnknown: base.latencyUnknown + (hasLatency ? 0 : 1),
+    ...(base.cacheProbes === undefined ? {} : { cacheProbes: [...base.cacheProbes] }),
+    ...(base.blockedCalls === undefined ? {} : { blockedCalls: base.blockedCalls }),
+    ...(base.identityFailures === undefined ? {} : { identityFailures: { ...base.identityFailures } }),
   };
-  const byExpert = foldByExpert(base.byExpert, f.expertRunId);
+  return withByExpert(summary, base, f.expertRunId);
+}
+
+function withByExpert(summary: ConsultSummary, base: ConsultSummary, expertRunId: string | undefined): ConsultSummary {
+  const byExpert = foldByExpert(base.byExpert, expertRunId);
   if (byExpert !== undefined) summary.byExpert = byExpert;
   return summary;
+}
+
+/**
+ * Fold the diagnostic probe for a consult call into a summary. This is kept
+ * separate from `foldConsultCall` so the state-machine's existing event fold
+ * and signature remain byte-compatible; callers may apply both folds in either
+ * order without losing probe data.
+ */
+export function foldConsultCacheProbe(prev: ConsultSummary | undefined, probe: ConsultCacheProbe): ConsultSummary {
+  const base = prev ?? emptySummary();
+  const cacheProbes = appendConsultCacheProbe(base.cacheProbes, probe);
+  const blockedCalls = (base.blockedCalls ?? 0) + (probe.blocked?.calls ?? 0);
+  const identityFailures = base.identityFailures === undefined ? {} : { ...base.identityFailures };
+  if (probe.identity.preflight.startsWith("fail:")) {
+    const code = probe.identity.preflight.slice("fail:".length);
+    identityFailures[code] = (identityFailures[code] ?? 0) + 1;
+  }
+  const hasIdentityFailures = Object.keys(identityFailures).length > 0;
+  return {
+    ...base,
+    cacheProbes,
+    ...(blockedCalls === 0 && base.blockedCalls === undefined ? {} : { blockedCalls }),
+    ...(hasIdentityFailures ? { identityFailures } : {}),
+  };
 }

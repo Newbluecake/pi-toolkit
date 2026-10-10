@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendConsultCacheProbe,
   classifyConsultToolEnd,
+  CONSULT_CACHE_PROBES_CAP,
   CONSULT_NOT_IN_WHITELIST_MARK,
   CONSULT_OUTCOMES,
+  foldConsultCacheProbe,
   foldConsultCall,
   type ConsultCallFact,
   type ConsultSummary,
@@ -172,5 +175,35 @@ describe("foldConsultCall (consult A/B instrumentation plan §2/§5 P1a)", () =>
     s = foldConsultCall(s, fact(), 1);
     s = foldConsultCall(s, fact(), 1);
     expect(s.byExpert).toBeUndefined();
+  });
+});
+
+describe("ConsultCacheProbe bounded FIFO ring (consult C2 §4.1)", () => {
+  function probe(i: number): Parameters<typeof appendConsultCacheProbe>[1] {
+    return {
+      expertRunId: `r_${i}`,
+      outcome: "completed",
+      identity: { preflight: "pass", expertTools: i },
+    };
+  }
+
+  it("keeps only the newest eight probes and does not mutate the input ring", () => {
+    let ring = [probe(-1)];
+    for (let i = 0; i < CONSULT_CACHE_PROBES_CAP + 3; i++) ring = appendConsultCacheProbe(ring, probe(i));
+    expect(ring).toHaveLength(CONSULT_CACHE_PROBES_CAP);
+    expect(ring.map((p) => p.expertRunId)).toEqual(["r_3", "r_4", "r_5", "r_6", "r_7", "r_8", "r_9", "r_10"]);
+    expect(appendConsultCacheProbe(undefined, probe(1))).toEqual([probe(1)]);
+  });
+
+  it("folds probe diagnostics without changing the existing call counters", () => {
+    const first = foldConsultCacheProbe(undefined, {
+      ...probe(1),
+      identity: { preflight: "fail:tool-definition:read", expertTools: 1 },
+      blocked: { calls: 2, batches: 1, terminated: true, identity: 1, nested: 0, costAfterUsd: 0.2 },
+    });
+    expect(first.calls).toBe(0);
+    expect(first.cacheProbes).toHaveLength(1);
+    expect(first.blockedCalls).toBe(2);
+    expect(first.identityFailures).toEqual({ "tool-definition:read": 1 });
   });
 });

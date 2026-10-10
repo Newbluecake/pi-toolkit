@@ -57,12 +57,19 @@ describe("threadThroughRequestFields", () => {
       parentRunId: "r_ASKER01",
       forkSessionFrom: "/tmp/consult/fork-1.jsonl",
       consultExperts: [{ runId: "r_EXPERT01", sessionFile: "/tmp/expert.jsonl", agentType: "explorer" }],
+      consultSnapshot: {
+        tools: [],
+        systemSections: {},
+        sourceSessionId: "s-expert",
+      },
     };
     const out = threadThroughRequestFields(req);
     expect(out).toEqual({ parentRunId: "r_ASKER01", forkSessionFrom: "/tmp/consult/fork-1.jsonl" });
     // consultExperts is adapter-only (injection decision); it must never reach
     // the execution layer verbatim.
     expect(Object.prototype.hasOwnProperty.call(out, "consultExperts")).toBe(false);
+    // The C2 snapshot is adapter-only too; it must never cross the runner hop.
+    expect(Object.prototype.hasOwnProperty.call(out, "consultSnapshot")).toBe(false);
     // Gate C is what makes the threaded field actually land on the runner's
     // request type — assert the round-trip target accepts it (T-10).
     const resolved: Pick<ResolvedSpawnRequest, "forkSessionFrom"> = { forkSessionFrom: out.forkSessionFrom };

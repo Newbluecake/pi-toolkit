@@ -350,6 +350,9 @@ describe("consult tool: caller mistakes throw (T-2)", () => {
       "cost_cap",
       "failed",
       "aborted",
+      "identity_mismatch",
+      "guard_unavailable",
+      "blocked_cap",
     ]);
   });
 
