@@ -39,6 +39,19 @@
   flex: none;
 }
 
+/* GraphPanel shares the worktree summary grammar but owns its sibling panel. */
+.gg-section {
+  margin-top: var(--sp-1);
+}
+
+.graph-panel .gg-sum-icon {
+  color: var(--st-running);
+}
+
+.graph-panel[data-open="true"] .wt-sum .chev {
+  transform: rotate(90deg);
+}
+
 .wt-sum-text {
   min-width: 0;
   overflow: hidden;

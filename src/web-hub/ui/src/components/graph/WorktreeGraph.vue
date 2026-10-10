@@ -49,7 +49,6 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useWorktreeGraph } from "../../composables/useWorktreeGraph.js";
 import type { WorktreeGraphTransport } from "../../transport/types.js";
 import GraphLanes from "./GraphLanes.vue";
-import AppIcon from "../../icons/AppIcon.vue";
 import "../../styles/graph.css";
 
 const { t, lang } = useI18n();
@@ -65,6 +64,8 @@ const props = defineProps<{
   readonly rows: readonly WorktreeRowWire[];
   /** §4.3/§0.2 Q3: the ≤480px verdict from the panel's injected `useMedia`. */
   readonly mobile: boolean;
+  /** Parent-owned disclosure state; the graph keeps its data while collapsed. */
+  readonly expanded?: boolean;
   /** Test seam (#8): when set, these centers are used verbatim and no measurement runs. */
   readonly injectedCenters?: readonly number[];
 }>();
@@ -74,12 +75,21 @@ const state = useWorktreeGraph({
   scope: computed(() => props.scope),
   wt: computed(() => props.wt),
 });
+defineExpose({ state, toggle: state.toggle, expanded: state.expanded });
 
 // D13's graph twin: every status frame re-samples the rows — an expanded graph re-pulls
 // (debounced in the composable) when `graphSigOf` moves.
 watch(
   () => props.rows,
   (next) => state.onRowsChanged(next),
+);
+watch(
+  () => props.expanded,
+  (isExpanded) => {
+    if (isExpanded === true && !state.expanded.value) state.toggle();
+    if (isExpanded === false && state.expanded.value) state.toggle();
+  },
+  { immediate: true },
 );
 
 const payload = computed(() => (state.state.value.phase === "ok" ? state.state.value.data : undefined));
@@ -292,153 +302,140 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="gg-section">
-    <button
-      class="gg-sum"
-      type="button"
-      :aria-expanded="state.expanded.value ? 'true' : 'false'"
-      :aria-label="t('graph.toggleAria')"
-      @click="state.toggle()"
-    >
-      <AppIcon name="branch" class="icon-sm gg-sum-icon" />
-      <span class="gg-sum-text">{{ t("graph.headLabel", { n: state.state.value.data?.n ?? 200 }) }}</span>
-      <span class="chev" aria-hidden="true">›</span>
-    </button>
-    <section
-      v-if="state.expanded.value"
-      class="gg"
-      :data-phase="phase"
-      :aria-busy="state.state.value.refreshing === true ? 'true' : undefined"
-    >
-      <!-- §4.3 five states: loading / error first (no data to keep), then the data states -->
-      <p v-if="phase === 'loading'" class="gg-state" role="status">{{ t("graph.loading") }}</p>
+  <section
+    v-if="state.expanded.value"
+    class="gg"
+    :data-phase="phase"
+    :aria-busy="state.state.value.refreshing === true ? 'true' : undefined"
+  >
+    <!-- §4.3 five states: loading / error first (no data to keep), then the data states -->
+    <p v-if="phase === 'loading'" class="gg-state" role="status">{{ t("graph.loading") }}</p>
 
-      <div v-else-if="phase === 'error'" class="gg-error" role="alert">
-        <p class="gg-error-title">{{ t("graph.errorTitle") }}</p>
-        <p class="gg-error-text">{{ errorText }}</p>
-        <button class="btn gg-retry" type="button" @click="state.refresh()">{{ t("graph.retry") }}</button>
-      </div>
+    <div v-else-if="phase === 'error'" class="gg-error" role="alert">
+      <p class="gg-error-title">{{ t("graph.errorTitle") }}</p>
+      <p class="gg-error-text">{{ errorText }}</p>
+      <button class="btn gg-retry" type="button" @click="state.refresh()">{{ t("graph.retry") }}</button>
+    </div>
+
+    <template v-else>
+      <p v-if="phase === 'empty'" class="gg-state">{{ t("graph.empty") }}</p>
 
       <template v-else>
-        <p v-if="phase === 'empty'" class="gg-state">{{ t("graph.empty") }}</p>
-
-        <template v-else>
-          <!-- degraded (§4.3): every §2.5 marker its own footnote line; zero-commits-but-
+        <!-- degraded (§4.3): every §2.5 marker its own footnote line; zero-commits-but-
              incomplete shows「已降级」here — never「暂无提交」(the empty verdict above requires
              empty && complete) -->
-          <div v-if="phase === 'degraded'" class="gg-degrade" role="status">
-            <p class="gg-degrade-title">{{ t("graph.degradedTitle") }}</p>
-            <p v-for="(note, i) in degradeNotes" :key="i" class="gg-degrade-note">{{ note }}</p>
-          </div>
+        <div v-if="phase === 'degraded'" class="gg-degrade" role="status">
+          <p class="gg-degrade-title">{{ t("graph.degradedTitle") }}</p>
+          <p v-for="(note, i) in degradeNotes" :key="i" class="gg-degrade-note">{{ note }}</p>
+        </div>
 
-          <div v-if="commits.length > 0" class="gg-viewport" :style="laneStyle">
-            <table class="gg-table" :class="{ 'is-mobile': mobile }">
-              <caption class="sr-only">
-                {{
-                  t("graph.caption")
-                }}
-              </caption>
-              <colgroup>
-                <col class="gg-col-lanes" />
-                <col />
-                <col v-if="!mobile" class="gg-col-date" />
-                <col v-if="!mobile" class="gg-col-author" />
-                <col class="gg-col-hash" />
-              </colgroup>
-              <tbody ref="tbodyEl">
-                <tr
-                  v-for="(c, i) in commits"
-                  :key="c.h"
-                  data-row
-                  :class="{ 'is-merge': isMerge(i) }"
-                  :data-current="isCurrent(c.h) === true ? 'true' : undefined"
-                >
-                  <td v-if="i === 0 && fold !== null" class="gg-lanes" :rowspan="commits.length" aria-hidden="true">
-                    <GraphLanes
-                      :fold="fold"
-                      :centers="effCenters"
-                      :merges="commits.map((_, index) => isMerge(index))"
-                      :lane-x="laneX"
-                      :pitch="pitch"
-                      :fold-x="foldX"
-                      :width="svgW"
-                      :height="svgH"
-                    />
-                  </td>
-                  <td class="gg-cell gg-subject" :title="c.s">
-                    <span class="gg-refs">
-                      <span
-                        v-for="chip in chipsOf(c.h)"
-                        :key="chip.text"
-                        class="gg-ref"
-                        :class="[`k-${chip.kind}`, { 'is-sym': chip.sym === true }]"
-                        translate="no"
-                        >{{ chip.text }}</span
-                      >
-                      <span v-if="chipOverflow(c.h) > 0" class="gg-ref gg-ref-overflow" :title="chipTitle(c.h)"
-                        >+{{ chipOverflow(c.h) }}</span
-                      >
-                      <span
-                        v-for="ring in ringsOf(c.h)"
-                        :key="`wt-${ring.path}`"
-                        class="gg-wtbadge"
-                        :class="{ 'is-self': ring.self }"
-                        :title="t('graph.srRing', { label: ring.label })"
-                        ><span class="dot" aria-hidden="true"></span>{{ ring.label }}</span
-                      >
-                    </span>
-                    <span class="gg-sub" translate="no">{{ c.s }}</span>
-                    <!-- sr-only topology (#14): merge parents / current checkout / worktree
-                       ring / folded lane / out-of-set parent — readable without the SVG -->
-                    <span class="sr-only">
-                      <template v-if="isMerge(i)"
-                        >{{ t("graph.srMerge", { parents: c.p.map((p) => p.slice(0, 7)).join(", ") }) }}
-                      </template>
-                      <template v-if="isCurrent(c.h)">{{ t("graph.srCurrent") }} </template>
-                      <template v-for="ring in ringsOf(c.h)" :key="`sr-${ring.path}`"
-                        >{{ t("graph.srRing", { label: ring.label }) }}
-                      </template>
-                      <template v-if="fold !== null && (fold.nodes[i]?.folded ?? false)"
-                        >{{ t("graph.srFold") }}
-                      </template>
-                      <template v-if="stubRows.has(i)">{{ t("graph.srOutOfSet") }}</template>
-                    </span>
-                  </td>
-                  <td v-if="!mobile" class="gg-cell gg-date" translate="no">{{ dateOf(c.t) }}</td>
-                  <td v-if="!mobile" class="gg-cell gg-author" translate="no">{{ c.a }}</td>
-                  <td class="gg-cell gg-hashcell">
-                    <button
-                      class="gg-hash"
-                      type="button"
-                      :aria-label="t('graph.copyHash', { hash: c.h })"
-                      :title="t('graph.copyHash', { hash: c.h })"
+        <div v-if="commits.length > 0" class="gg-viewport" :style="laneStyle">
+          <table class="gg-table" :class="{ 'is-mobile': mobile }">
+            <caption class="sr-only">
+              {{
+                t("graph.caption")
+              }}
+            </caption>
+            <colgroup>
+              <col class="gg-col-lanes" />
+              <col />
+              <col v-if="!mobile" class="gg-col-date" />
+              <col v-if="!mobile" class="gg-col-author" />
+              <col class="gg-col-hash" />
+            </colgroup>
+            <tbody ref="tbodyEl">
+              <tr
+                v-for="(c, i) in commits"
+                :key="c.h"
+                data-row
+                :class="{ 'is-merge': isMerge(i) }"
+                :data-current="isCurrent(c.h) === true ? 'true' : undefined"
+              >
+                <td v-if="i === 0 && fold !== null" class="gg-lanes" :rowspan="commits.length" aria-hidden="true">
+                  <GraphLanes
+                    :fold="fold"
+                    :centers="effCenters"
+                    :merges="commits.map((_, index) => isMerge(index))"
+                    :lane-x="laneX"
+                    :pitch="pitch"
+                    :fold-x="foldX"
+                    :width="svgW"
+                    :height="svgH"
+                  />
+                </td>
+                <td class="gg-cell gg-subject" :title="c.s">
+                  <span class="gg-refs">
+                    <span
+                      v-for="chip in chipsOf(c.h)"
+                      :key="chip.text"
+                      class="gg-ref"
+                      :class="[`k-${chip.kind}`, { 'is-sym': chip.sym === true }]"
                       translate="no"
-                      @click="copyHash(i, c.h)"
+                      >{{ chip.text }}</span
                     >
-                      {{ c.h.slice(0, 7) }}
-                    </button>
-                    <span class="sr-only" role="status">{{
-                      copyFeedback[i] === "copied"
-                        ? t("graph.copiedHash")
-                        : copyFeedback[i] === "selected"
-                          ? t("graph.selectedHash")
-                          : ""
-                    }}</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </template>
-
-        <!-- §4.3 standing footnote (compact marker tokens, English-only per the UI rule) -->
-        <p class="gg-foot">
-          {{ t("graph.footNote", { n: state.state.value.data?.n ?? 200 })
-          }}<template v-if="state.state.value.data?.degrade.more === true">
-            · {{ t("graph.footMore", { n: state.state.value.data.n }) }}</template
-          >
-        </p>
+                    <span v-if="chipOverflow(c.h) > 0" class="gg-ref gg-ref-overflow" :title="chipTitle(c.h)"
+                      >+{{ chipOverflow(c.h) }}</span
+                    >
+                    <span
+                      v-for="ring in ringsOf(c.h)"
+                      :key="`wt-${ring.path}`"
+                      class="gg-wtbadge"
+                      :class="{ 'is-self': ring.self }"
+                      :title="t('graph.srRing', { label: ring.label })"
+                      ><span class="dot" aria-hidden="true"></span>{{ ring.label }}</span
+                    >
+                  </span>
+                  <span class="gg-sub" translate="no">{{ c.s }}</span>
+                  <!-- sr-only topology (#14): merge parents / current checkout / worktree
+                       ring / folded lane / out-of-set parent — readable without the SVG -->
+                  <span class="sr-only">
+                    <template v-if="isMerge(i)"
+                      >{{ t("graph.srMerge", { parents: c.p.map((p) => p.slice(0, 7)).join(", ") }) }}
+                    </template>
+                    <template v-if="isCurrent(c.h)">{{ t("graph.srCurrent") }} </template>
+                    <template v-for="ring in ringsOf(c.h)" :key="`sr-${ring.path}`"
+                      >{{ t("graph.srRing", { label: ring.label }) }}
+                    </template>
+                    <template v-if="fold !== null && (fold.nodes[i]?.folded ?? false)"
+                      >{{ t("graph.srFold") }}
+                    </template>
+                    <template v-if="stubRows.has(i)">{{ t("graph.srOutOfSet") }}</template>
+                  </span>
+                </td>
+                <td v-if="!mobile" class="gg-cell gg-date" translate="no">{{ dateOf(c.t) }}</td>
+                <td v-if="!mobile" class="gg-cell gg-author" translate="no">{{ c.a }}</td>
+                <td class="gg-cell gg-hashcell">
+                  <button
+                    class="gg-hash"
+                    type="button"
+                    :aria-label="t('graph.copyHash', { hash: c.h })"
+                    :title="t('graph.copyHash', { hash: c.h })"
+                    translate="no"
+                    @click="copyHash(i, c.h)"
+                  >
+                    {{ c.h.slice(0, 7) }}
+                  </button>
+                  <span class="sr-only" role="status">{{
+                    copyFeedback[i] === "copied"
+                      ? t("graph.copiedHash")
+                      : copyFeedback[i] === "selected"
+                        ? t("graph.selectedHash")
+                        : ""
+                  }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </template>
-    </section>
-  </div>
+
+      <!-- §4.3 standing footnote (compact marker tokens, English-only per the UI rule) -->
+      <p class="gg-foot">
+        {{ t("graph.footNote", { n: state.state.value.data?.n ?? 200 })
+        }}<template v-if="state.state.value.data?.degrade.more === true">
+          · {{ t("graph.footMore", { n: state.state.value.data.n }) }}</template
+        >
+      </p>
+    </template>
+  </section>
 </template>

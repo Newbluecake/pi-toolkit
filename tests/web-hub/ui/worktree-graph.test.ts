@@ -86,17 +86,6 @@ describe("graph layout regressions", () => {
       globalThis.ResizeObserver = ro;
     }
   });
-  it("summary icon uses the existing branch glyph and renamed labels", () => {
-    const { transport } = transportOf();
-    const w = mount(WorktreeGraph, {
-      props: { scope: { agentKey: "a", sessionId: "s" }, wt: "/p", transport, rows, mobile: false },
-    });
-    expect(w.get(".gg-sum .icon-sm use").attributes("href")).toBe("#i-branch");
-    expect(css).toContain("color: var(--st-running)");
-    expect(useI18n(["en"]).t("graph.headLabel", { n: 200 })).toBe("git graph · last 200 commits");
-    expect(useI18n(["zh"]).t("graph.headLabel", { n: 200 })).toBe("git graph · 最近 200 条提交");
-    w.unmount();
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -175,7 +164,7 @@ async function mountExpanded(
       ...props,
     },
   });
-  await w.find(".gg-sum").trigger("click");
+  (w.vm as unknown as { toggle: () => void }).toggle();
   await flushPromises();
   return w;
 }
@@ -191,7 +180,7 @@ describe("WorktreeGraph.vue — §4.3 five states + degraded", () => {
     const w = mount(WorktreeGraph, {
       props: { scope: { agentKey: "a-1", sessionId: "s-1" }, wt: "/home/dev/repo", transport, rows, mobile: false },
     });
-    expect(w.find(".gg-sum").attributes("aria-expanded")).toBe("false");
+    expect((w.vm as unknown as { expanded: boolean }).expanded).toBe(false);
     expect(w.find(".gg").exists()).toBe(false);
     expect(transport.graph).not.toHaveBeenCalled();
   });
@@ -320,9 +309,6 @@ describe("WorktreeGraph.vue — §4.3 five states + degraded", () => {
     } as unknown as WorktreeGraphTransport;
     const w = await mountExpanded(transport, { injectedCenters: [11, 33, 55, 77] });
     expect(w.findAll("tr[data-row]")).toHaveLength(4);
-    // the manual refresh path keeps the old rows visible while the re-pull is in flight
-    const refreshBtn = w.find(".gg-sum");
-    void refreshBtn;
     // drive a re-pull through the component's own retry path (the error state's button) —
     // here instead: a wt flip re-pulls immediately (no debounce), which is the observable
     // refreshing path on this component
@@ -490,9 +476,11 @@ describe("WorktreeGraph.vue — geometry + columns (#8, Q3)", () => {
     const { transport } = transportOf();
     const w = await mountExpanded(transport, { injectedCenters: [11, 33, 55, 77] });
     expect(transport.graph).toHaveBeenCalledTimes(1);
-    await w.find(".gg-sum").trigger("click"); // collapse
+    (w.vm as unknown as { toggle: () => void }).toggle(); // collapse
+    await nextTick();
     expect(w.find("tr[data-row]").exists()).toBe(false);
-    await w.find(".gg-sum").trigger("click"); // re-expand: kept data, no new request
+    (w.vm as unknown as { toggle: () => void }).toggle(); // re-expand: kept data, no new request
+    await nextTick();
     expect(transport.graph).toHaveBeenCalledTimes(1);
     expect(w.findAll("tr[data-row]")).toHaveLength(4);
     // a wt flip re-pulls immediately (the graph would answer a different worktree)
@@ -508,7 +496,7 @@ describe("WorktreeGraph.vue — geometry + columns (#8, Q3)", () => {
     const w = mount(WorktreeGraph, {
       props: { scope: { agentKey: "a-1", sessionId: "s-1" }, wt: "/home/dev/repo", transport, rows, mobile: false },
     });
-    await w.find(".gg-sum").trigger("click");
+    (w.vm as unknown as { toggle: () => void }).toggle();
     await vi.advanceTimersByTimeAsync(0);
     expect(transport.graph).toHaveBeenCalledTimes(1);
 

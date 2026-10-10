@@ -36,29 +36,20 @@
   Everything is plain-text interpolation (`translate="no"` on paths/refs, no `v-html`, never
   routed through `markdown.js` / `PathText.vue`); unknown future wire fields (Q4 open schema)
   are never read, so a newer agent can't break an older UI.
-  worktree-graph plan v2 §4.3 (package P5): a second-level collapsible commit-graph section
-  BELOW the worktree list. Scope derivation ("wtgraphScopeOf" from `@logic/gitGraphScope.ts`
-  — the ONLY graph import this main-chunk component makes; `@logic/gitGraph.ts` stays in the
-  lazy chunk, §4.3/#13) + `pickGraphWt` (current row's path → main row → null ⇒ section
-  hidden) + `useWorktreeGraph` (expand/collapse, once-per-expand pull, 3 s debounced re-pull
-  on `graphSigOf` change while expanded). The graph body itself loads through a retryable
-  `loadGraph()` + `defineAsyncComponent` (a failed dynamic import clears the cached promise
-  so the retry re-imports, §4.3/K2) and mounts only when expanded with scope+wt. Default
-  collapsed, never remembered (Q4). No cap (or no picked wt) ⇒ the graph section renders
-  nothing at all — the panel DOM stays byte-identical to pre-P5 (I8).
+  The sibling `GraphPanel.vue` owns the optional git graph. This component intentionally
+  contains no graph scope, transport, or lazy graph imports so its no-cap DOM remains the
+  pre-graph shape (I8).
 -->
 <script setup lang="ts">
-import { computed, defineAsyncComponent, inject, reactive, ref, watch } from "vue";
+import { computed, inject, reactive, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
 import { useWorktreeDiff, type ListState } from "../../composables/useWorktreeDiff.js";
-import { pickGraphWt, wtgraphScopeOf } from "@logic/gitGraphScope.js";
 import type { WorktreeRowWire, WorktreesWire, SessionInfo } from "@protocol/messages.js";
 import { rowDiffable, wtdiffScopeOf } from "@logic/wtdiff.js";
 import type { WtDiffFileEntry } from "@protocol/worktree-diff.js";
-import type { WtDiffScope, WorktreeGraphTransport } from "../../transport/types.js";
-import type { HubHandle as HubHandleLike } from "../../types.js";
+import type { WtDiffScope } from "../../transport/types.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import CopyButton from "./CopyButton.vue";
 import WorktreeDiffDialog from "../diff/WorktreeDiffDialog.vue";
@@ -74,8 +65,6 @@ const props = defineProps<{
   readonly worktrees: WorktreesWire;
   readonly agentKey?: string;
   readonly session?: SessionInfo | undefined;
-  /** Optional loader seam for controlled chunk-failure tests. */
-  readonly graphLoader?: () => Promise<typeof import("../graph/WorktreeGraph.vue")>;
 }>();
 const { t } = useI18n();
 
@@ -274,54 +263,6 @@ function flagChips(row: WorktreeRowWire): string[] {
 }
 
 const sampleTime = computed(() => formatSampleTime(props.worktrees.sampledAt));
-
-// ---------------------------------------------------------------------------
-// worktree-graph plan v2 §4.3 (package P5): the commit-graph section. `@logic/gitGraph.ts`
-// is NOT imported here (worktree-panel.test.ts pins it statically) — the lazy component
-// below is the only thing that may pull it into the bundle.
-// ---------------------------------------------------------------------------
-
-/** §4.3's retryable lazy loader: a failed import clears the cached promise so the next
- *  expand re-imports (K2's retry). One shared promise across re-mounts. */
-let graphComponentPromise: Promise<typeof import("../graph/WorktreeGraph.vue")> | null = null;
-function loadGraph(): Promise<typeof import("../graph/WorktreeGraph.vue")> {
-  graphComponentPromise ??= (props.graphLoader?.() ?? import("../graph/WorktreeGraph.vue")).catch((err: unknown) => {
-    graphComponentPromise = null; // §4.3: 失败时清空缓存的 promise ⇒ 可重试
-    throw err;
-  });
-  return graphComponentPromise;
-}
-const WorktreeGraph = defineAsyncComponent({ loader: loadGraph });
-
-/** The graph scope — same inject-only surface as wtdiff's (a missing hub/cap ⇒ null ⇒ the
- *  graph section renders nothing, I8). `types.ts` is frozen for P5 (no `worktreeGraph` member
- *  on `HubHandle` yet), so the optional passthrough is read through the same local structural
- *  surface the wtdiff D4 wiring used before its types.ts landing — additive, never a cast of
- *  the whole handle. */
-interface GraphHubSurface {
-  readonly worktreeGraph?: WorktreeGraphTransport;
-}
-const graphTransport = computed<WorktreeGraphTransport | undefined>(() => {
-  const h = hub as (HubHandleLike & GraphHubSurface) | null;
-  return h === null ? undefined : h.worktreeGraph;
-});
-
-const graphScope = computed(() =>
-  wtgraphScopeOf({
-    mode: env?.authMode,
-    hubCaps: hubCaps(),
-    hasTransport: graphTransport.value !== undefined,
-    agentKey: props.agentKey,
-    session: props.session,
-  }),
-);
-
-/** §4.3 `pickGraphWt`: current row → main row → null (section hidden). */
-const graphWt = computed(() => pickGraphWt(props.worktrees.rows));
-
-/** §0.2 Q3's ≤480px verdict — the panel's injected `useMedia` (tests drive it via a stubbed
- *  window). Feeds the lazy graph component's `mobile` prop (≤4 lanes, HEAD chip only, hash). */
-const graphMobile = useMedia(window, "(max-width: 480px)");
 </script>
 
 <template>
@@ -334,7 +275,7 @@ const graphMobile = useMedia(window, "(max-width: 480px)");
       :title="t('detail.worktreesLastSample', { time: sampleTime })"
       @click="open = !open"
     >
-      <AppIcon name="branch" class="icon-sm" />
+      <AppIcon name="layers" class="icon-sm" />
       <span class="wt-sum-text">{{ summary }}</span>
       <AppIcon name="chev-right" class="icon-sm chev" />
     </button>
@@ -409,24 +350,6 @@ const graphMobile = useMedia(window, "(max-width: 480px)");
       </li>
       <li v-if="worktrees.omitted !== undefined && worktrees.omitted > 0" class="wt-more">
         {{ t("detail.worktreesMore", { n: worktrees.omitted }) }}
-      </li>
-      <!-- P5 §4.3: the commit-graph section, mounted as the list's LAST item so the no-cap
-           DOM stays byte-identical (an empty v-if sibling AFTER the list would emit a
-           placeholder comment between the closing list/section tags and break the I8 pin;
-           inside the list the placeholder is confined to the ul's own innerHTML, which no
-           pin covers). The li is valid flow content hosting a section; visually it sits
-           right below the list (same slot as plan §4.3's 「after .wt-list」). Rendered only
-           when the panel is open AND a graph scope AND a picked wt exist — default
-           collapsed (Q4), the async body mounts only when expanded (no request / no
-           lazy-chunk load until opened). -->
-      <li v-if="open && graphScope !== null && graphWt !== null" class="gg-wrap" role="presentation">
-        <WorktreeGraph
-          :scope="graphScope"
-          :wt="graphWt"
-          :transport="graphTransport"
-          :rows="worktrees.rows"
-          :mobile="graphMobile.matches.value"
-        />
       </li>
     </ul>
   </section>

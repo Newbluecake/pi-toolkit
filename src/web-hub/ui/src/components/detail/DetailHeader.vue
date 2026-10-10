@@ -53,6 +53,7 @@ import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
 import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
+import GraphPanel from "./GraphPanel.vue";
 import BashJobsPanel from "./BashJobsPanel.vue";
 import { bashJobsOf } from "./bashJobsView.js";
 import { worktreesOf } from "./worktreesView.js";
@@ -350,6 +351,7 @@ function onToggleHeadInfo(): void {
            worktree-diff D5 (§4.1): `agentKey`/`session` are the wtdiff scope inputs — absent
            (old mounts) or a missing hub cap keeps the panel byte-identical (I8). -->
       <WorktreePanel v-if="worktrees" :worktrees="worktrees" :agent-key="agent.key" :session="session" />
+      <GraphPanel v-if="worktrees" :worktrees="worktrees" :agent-key="agent.key" :session="session" />
 
       <!-- bash-jobs-panel 包 B (D4): the session's own background bash jobs, straight from
            `status.bashJobs`; renders nothing when the wire is absent or has zero rows. -->
