@@ -59,7 +59,14 @@ export type MembershipFailure =
   | { kind: "busy" }
   | { kind: "abort" };
 
-export type MembershipResult = { ok: true; W: string; pinSet: PinSet } | ({ ok: false } & MembershipFailure);
+/** worktree-graph plan v2 §2.6 (P2 append): `rows` is the SAME filtered (`!bare && !prunable`)
+ * porcelain row set membership already parsed from C1 (never re-fetched), and `selfIndex` is
+ * this request's OWN matched row's index into it — the hub's only path to "this worktree's
+ * porcelain HEAD/branch" and "every other worktree's detached HEAD" without an extra git call
+ * (worktree-graph plan §2.2: "HEAD 取自 membership 的 porcelain 自身行"). */
+export type MembershipResult =
+  | { ok: true; W: string; pinSet: PinSet; rows: readonly PorcelainWorktree[]; selfIndex: number }
+  | ({ ok: false } & MembershipFailure);
 
 export interface MembershipDeps {
   run: GitRunner;
@@ -180,6 +187,7 @@ export function createMembership(deps: MembershipDeps): (args: MembershipArgs) =
       }
       let main = false;
       let matched = false;
+      let selfIndex = -1;
       for (const row of cand) {
         let st;
         try {
@@ -190,7 +198,8 @@ export function createMembership(deps: MembershipDeps): (args: MembershipArgs) =
         }
         if (st.dev === wtSt.dev && st.ino === wtSt.ino) {
           matched = true;
-          main = rows.indexOf(row) === 0; // porcelain's first row is always the main worktree
+          selfIndex = rows.indexOf(row);
+          main = selfIndex === 0; // porcelain's first row is always the main worktree
           break;
         }
       }
@@ -253,7 +262,7 @@ export function createMembership(deps: MembershipDeps): (args: MembershipArgs) =
         },
         { now: deps.now, tracker: deps.tracker, log: deps.log },
       );
-      return { ok: true, W, pinSet };
+      return { ok: true, W, pinSet, rows, selfIndex };
     } catch (err) {
       if (isPreviewIoError(err)) {
         if (err.ioFail === "abort") return { ok: false, kind: "abort" };

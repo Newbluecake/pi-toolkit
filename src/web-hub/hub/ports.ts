@@ -628,6 +628,12 @@ export interface FrontendDeps {
    * and pre-D3 assemblies keep compiling — when absent, `/api/worktree-diff/*` answers exactly
    * as today (loopback 401/404, LAN 404) and `wtdiff.v1` is never declared. */
   worktreeDiff?: WorktreeDiffRoutes;
+  /** worktree-graph plan v2 §2.6 (P2): the worktree-graph route frontend
+   * (`hub/worktree-graph/routes.ts`'s `createWorktreeGraphRoutes`), constructed by hub.ts under
+   * the SAME gate as `worktreeDiff` (`config.preview` exists AND `/proc/self/fd` is usable).
+   * Optional so test doubles keep compiling — when absent, `GET /api/worktree-graph` answers
+   * exactly as today (loopback 401/404, LAN 404) and `wtgraph.v1` is never declared. */
+  worktreeGraph?: WorktreeGraphRoutes;
   /** fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service. Optional so test doubles
    * and pre-F4 assemblies keep compiling — when absent there is no `/api/run/*` wiring (F4
    * builds `createRunRoutes` off this) and everything else is byte-identical. */
@@ -735,5 +741,21 @@ export interface WorktreeDiffRoutes {
   /** `GET /api/worktree-diff/file` — the single-file patch envelope (§1.2). */
   handleFile(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
   /** Idempotent; aborts every active request and single-flight execution ("hub-close"), ≤1 s. */
+  dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// worktree-graph plan v2 §2.6 (P2): the worktree commit-graph route frontend's frozen surface —
+// same declaration rationale as `WorktreeDiffRoutes` above (`FrontendDeps.worktreeGraph` needs
+// the type before `hub/worktree-graph/routes.ts` exists from ports.ts's perspective). The io
+// shape is REUSED from preview/wtdiff (`PreviewRouteIo`); `dispose` is the bounded (≤1 s),
+// idempotent teardown `hub.close()` awaits right after wtdiff's, and the startup-failure
+// cleanup runs before `fe.close()` — the same three-exit-path contract.
+// ---------------------------------------------------------------------------
+export interface WorktreeGraphRoutes {
+  readonly mode: "on" | "loopback";
+  /** `GET /api/worktree-graph` — the one endpoint (§3; `X-PWH: 1` required). */
+  handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** Idempotent; aborts every active request and single-flight Gl execution ("hub-close"), ≤1 s. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
 }

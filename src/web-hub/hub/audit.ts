@@ -512,3 +512,67 @@ export function auditWorktreeDiff(log: { info(msg: string, data?: object): void 
   }
   log.info("wtdiff", out);
 }
+
+// ---------------------------------------------------------------------------
+// worktree-graph plan v2 §2.6 (P2): the wtgraph audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * worktree-graph audit record (plan §2.6, verbatim field set: "phase, listener, ip, user,
+ * agentKey, ok, code, reason, commits, refs, tips, complete, bytes, ms, joined, wtTag"). Same
+ * discipline as `WtDiffAuditRecord` above — NEVER carries `wt` verbatim, any ref/branch name,
+ * oid, subject, author or patch text: `wtTag` is an HMAC-12 tag under the routes instance's
+ * per-process key, `commits`/`refs`/`tips` are only COUNTS. One line per request, written in
+ * the route's finally; 429 is throttled to one line per `wtgraph:${principal}` per 60 s.
+ */
+export interface WtGraphAuditRecord {
+  phase: "graph";
+  listener?: "loopback" | "lan";
+  ip?: string;
+  user?: string;
+  agentKey?: string;
+  ok: boolean;
+  code?: string;
+  reason?: string;
+  commits?: number;
+  refs?: number;
+  tips?: number;
+  complete?: boolean;
+  bytes?: number;
+  ms?: number;
+  /** true when this request joined another request's single-flight Gl execution (§2.5). */
+  joined?: boolean;
+  /** HMAC-12(W) under the routes instance's random key — never the worktree path itself. */
+  wtTag?: string;
+}
+
+/** Runtime whitelist for `auditWorktreeGraph` — anything not listed here is dropped. */
+export const WTGRAPH_AUDIT_KEYS = [
+  "phase",
+  "listener",
+  "ip",
+  "user",
+  "agentKey",
+  "ok",
+  "code",
+  "reason",
+  "commits",
+  "refs",
+  "tips",
+  "complete",
+  "bytes",
+  "ms",
+  "joined",
+  "wtTag",
+] as const;
+
+/** `log.info("wtgraph", { audit: "wtgraph", ...pick(record, WTGRAPH_AUDIT_KEYS) })` (§2.6). */
+export function auditWorktreeGraph(log: { info(msg: string, data?: object): void }, record: WtGraphAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "wtgraph" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of WTGRAPH_AUDIT_KEYS) {
+    const v = raw[key];
+    if (v !== undefined) out[key] = v;
+  }
+  log.info("wtgraph", out);
+}

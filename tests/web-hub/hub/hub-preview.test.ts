@@ -30,6 +30,7 @@ import {
   RUNTX_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   WTDIFF_HUB_CAP,
+  WTGRAPH_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, tmpDirs } from "./helpers.js";
 
@@ -170,6 +171,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       PREVIEW_ABS_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
     ]);
     c.sock.destroy();
   });
@@ -190,6 +192,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       PREVIEW_ABS_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
       PREVIEW_LAN_HUB_CAP,
     ]);
     c.sock.destroy();

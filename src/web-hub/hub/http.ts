@@ -84,6 +84,7 @@ import type { SpawnFrontendPort } from "./spawn/ports.js";
 import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
 import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
+import { WTGRAPH_PATH } from "../protocol/worktree-graph.js";
 import type {
   AgentView,
   CommandRouter,
@@ -110,6 +111,7 @@ import type {
   PreviewAuthHandled,
   PreviewAuthResult,
   WorktreeDiffRoutes,
+  WorktreeGraphRoutes,
   RegistryView,
   RequestContext,
   RunSink,
@@ -1000,6 +1002,10 @@ export interface LanRuntime {
    * loopback listener's; same §4.7-style LAN gate as preview/file-search above (`mode === "on"`
    * only — `mode:"loopback"` keeps the LAN 404 byte-identical to not-enabled, D6). */
   worktreeDiff?: WorktreeDiffRoutes | undefined;
+  /** worktree-graph plan v2 §2.6 (P2): the worktree-graph route frontend, same instance as the
+   * loopback listener's; same §4.7-style LAN gate as wtdiff above (`mode === "on"` only —
+   * `mode:"loopback"` keeps the LAN 404 byte-identical to not-enabled). */
+  worktreeGraph?: WorktreeGraphRoutes | undefined;
   /** web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend, same
    * instance as the loopback listener's. Absent ⇒ `POST /api/agents/remove` on LAN keeps its
    * original 404, byte-identical to not-enabled. */
@@ -1401,6 +1407,26 @@ async function handleLanRequestInner(
     return path === WTDIFF_FILES_PATH
       ? routes.handleFiles(req, res, query, io)
       : routes.handleFile(req, res, query, io);
+  }
+
+  // worktree-graph plan v2 §2.6: the one worktree-graph GET — dispatched right after the wtdiff
+  // branch above, same insertion-point class and the same LAN gate (`mode === "on"`;
+  // `mode:"loopback"` falls through to the original 404 below, byte-identical to not-enabled).
+  // The LAN authorize segment reuses wtdiff's own §1.7 ② reserve (same §2.4 admission budget).
+  if (rt.worktreeGraph !== undefined && rt.worktreeGraph.mode === "on" && method === "GET" && path === WTGRAPH_PATH) {
+    return rt.worktreeGraph.handle(req, res, query, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      authorize: async (deadline: ReqDeadline): Promise<PreviewAuthResult | PreviewAuthHandled> => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, WTDIFF_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      sendJson,
+    });
   }
 
   // web-hub-delete-session plan v2 §2.9/§4.1: `POST /api/agents/remove` — same insertion point
@@ -2322,6 +2348,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // need the preview deny context + the git runner, both hub.ts-owned). Absent ⇒ the endpoints
   // keep their legacy replies, byte-identical.
   const worktreeDiffRoutes: WorktreeDiffRoutes | undefined = deps.worktreeDiff;
+  // worktree-graph plan v2 §2.6 (P2): same injection discipline as worktree-diff above (never
+  // default-constructed — the routes need the preview deny context + the shared git runner,
+  // both hub.ts-owned). Absent ⇒ `GET /api/worktree-graph` keeps its legacy replies.
+  const worktreeGraphRoutes: WorktreeGraphRoutes | undefined = deps.worktreeGraph;
   const ui: UiServer =
     deps.ui ??
     createUiServer({
@@ -2411,6 +2441,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       /** worktree-diff plan §1.6 (D3): same instance as the loopback listener's (or undefined
        * when preview is off / /proc is unavailable — the LAN 404 stays byte-identical). */
       worktreeDiff: deps.worktreeDiff,
+      /** worktree-graph plan v2 §2.6 (P2): same instance as the loopback listener's. */
+      worktreeGraph: deps.worktreeGraph,
       /** web-hub-delete-session plan v2 §2.9: same instance as the loopback listener's. */
       agentRemove: deps.agentRemove,
       markKdfInvalid: () => {
@@ -2729,6 +2761,25 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       return path === WTDIFF_FILES_PATH
         ? worktreeDiffRoutes.handleFiles(req, res, query, io)
         : worktreeDiffRoutes.handleFile(req, res, query, io);
+    }
+    // worktree-graph plan v2 §2.6 (P2): the one worktree-graph GET — same insertion point as the
+    // wtdiff branch above; absent ⇒ falls through to the original paths (unauth GET ⇒ 401,
+    // authed ⇒ 404, byte-identical). The loopback authorize segment is the same sync cookie
+    // lookup every other loopback branch uses.
+    if (worktreeGraphRoutes !== undefined && method === "GET" && path === WTGRAPH_PATH) {
+      return worktreeGraphRoutes.handle(req, res, query, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        authorize: async (): Promise<PreviewAuthResult | PreviewAuthHandled> => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        sendJson,
+      });
     }
     // web-hub-delete-session plan v2 §2.9/§4.1: `POST /api/agents/remove` — same insertion point
     // class as headless/preview/file-search above, before the generic `POST` branch. authorize

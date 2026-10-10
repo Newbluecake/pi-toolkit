@@ -122,11 +122,14 @@ export class PinSet {
 // run outcome classification (§1.5 rows for git)
 // ---------------------------------------------------------------------------
 
-/** The command id every `log.warn("wtdiff git failed")` line carries (§2.9 — never a path). */
-export type WtGitCmd = "C1a" | "C1" | "C0" | "Cc" | "C2" | "Ca" | "C3" | "C4";
+/** The command id every `log.warn("wtdiff git failed")` line carries (§2.9 — never a path).
+ * worktree-graph plan v2 §2.6 (P2 append): `"Gr" | "Gl"` are the two graph commands — they
+ * never reach `warnGitFailed`/`auditWorktreeDiff` (graph has its own audit channel), but they
+ * share the pinned executor and its closed command-id union. */
+export type WtGitCmd = "C1a" | "C1" | "C0" | "Cc" | "C2" | "Ca" | "C3" | "C4" | "Gr" | "Gl";
 
 export type PinnedGitOutcome =
-  | { ok: true; code: number; stdout: string; capped: boolean; stderrBytes: number }
+  | { ok: true; code: number; stdout: string; capped: boolean; stderrBytes: number; stderr?: string }
   | { ok: false; kind: "abort" }
   | { ok: false; kind: "deadline" }
   | { ok: false; kind: "busy" }
@@ -144,12 +147,27 @@ export function warnGitFailed(log: HubLog, cmd: WtGitCmd, fields: { exit?: numbe
   });
 }
 
-function classify(signal: AbortSignal | undefined, res: GitRunResult, log: HubLog, cmd: WtGitCmd): PinnedGitOutcome {
+function classify(
+  signal: AbortSignal | undefined,
+  res: GitRunResult,
+  log: HubLog,
+  cmd: WtGitCmd,
+  captureStderr = false,
+): PinnedGitOutcome {
   if (signal?.aborted || res.killed === "abort") return { ok: false, kind: "abort" };
   if (res.killed === "timeout") return { ok: false, kind: "deadline" };
   if (res.spawnError !== undefined) {
     warnGitFailed(log, cmd, { error: res.spawnError });
     return { ok: false, kind: "git-unavailable", error: res.spawnError };
+  }
+  // Opt-in classification only; never pass this text to logs or audits. Bound injected
+  // runners too, including the UTF-8 replacement at a split multibyte boundary.
+  let stderr: string | undefined;
+  if (captureStderr) {
+    stderr = Buffer.from(res.stderr, "utf8")
+      .subarray(0, 8 * 1024)
+      .toString("utf8");
+    while (Buffer.byteLength(stderr, "utf8") > 8 * 1024) stderr = stderr.slice(0, -1);
   }
   return {
     ok: true,
@@ -157,6 +175,7 @@ function classify(signal: AbortSignal | undefined, res: GitRunResult, log: HubLo
     stdout: res.stdout,
     capped: res.killed === "overflow",
     stderrBytes: Buffer.byteLength(res.stderr, "utf8"),
+    ...(stderr === undefined ? {} : { stderr }),
   };
 }
 
@@ -218,6 +237,8 @@ export interface PinnedRunOpts {
   signal: AbortSignal | undefined;
   capMs: number;
   maxStdoutBytes: number;
+  /** Bounded (8 KiB) text for exit classification only. Default retains no stderr text. */
+  captureStderr?: true;
 }
 
 export interface PinnedGit {
@@ -268,7 +289,7 @@ export function createPinnedGit(deps: PinnedGitDeps): PinnedGit {
         pathOverride: WTDIFF_GIT_PATH,
         pins: { wt: pinSet.pins.wt.fd, git: pinSet.pins.git.fd, common: pinSet.pins.common.fd },
       });
-      return classify(opts.signal, res, deps.log, cmd);
+      return classify(opts.signal, res, deps.log, cmd, opts.captureStderr);
     },
   };
 }

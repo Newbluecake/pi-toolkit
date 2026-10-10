@@ -44,6 +44,7 @@ import {
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
   WTDIFF_HUB_CAP,
+  WTGRAPH_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
@@ -72,6 +73,7 @@ import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
 import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
 import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
+import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createSpawnStore } from "./spawn/store.js";
 import {
@@ -305,6 +307,10 @@ export async function startHub(
             // the three-fd pin is /proc-bound, so a platform without it never declares the cap
             // (and hub.ts below never builds the routes at all).
             ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
+            // worktree-graph plan v2 §3/§2.6: `wtgraph.v1` rides the SAME gate as `wtdiff.v1`
+            // (「与 wtdiff 同门」— same `config.preview` existence AND /proc probe); LAN availability
+            // rides `PREVIEW_LAN_HUB_CAP` below, same width as preview/wtdiff (§0.2 Q1).
+            ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
           ]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
     ];
@@ -819,6 +825,7 @@ export async function startHub(
     // spawn assembly's exact source (L512's SP3): `PI_CODING_AGENT_DIR ?? ${home}/.pi/agent`.
     let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined;
     let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined;
+    let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined;
     if (config.preview !== undefined) {
       const denyCtx = await withSignal(
         resolvePreviewDenyContext(
@@ -865,11 +872,23 @@ export async function startHub(
       // SAME denyCtx object preview just resolved (§2.5) and takes the hub-side git runner
       // (D15). Pure closure building — nothing here can fail.
       if (previewProcFdAvailable()) {
+        const graphGitRunner = deps.gitRunner ?? createGitRunner();
         worktreeDiffRoutes = createWorktreeDiffRoutes({
           mode: config.preview,
           denyCtx,
           registry,
-          run: deps.gitRunner ?? createGitRunner(),
+          run: graphGitRunner,
+          log,
+          now,
+        });
+        // worktree-graph plan v2 §2.6 (P2): the commit-graph route frontend — the SAME feature
+        // gate as wtdiff above (「与 wtdiff 同门」, §3), the SAME denyCtx AND the SAME hub-side git
+        // runner (D15 precedent — one runner, two route frontends).
+        worktreeGraphRoutes = createWorktreeGraphRoutes({
+          mode: config.preview,
+          denyCtx,
+          registry,
+          run: graphGitRunner,
           log,
           now,
         });
@@ -909,6 +928,7 @@ export async function startHub(
       ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
       ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
       ...(worktreeDiffRoutes === undefined ? {} : { worktreeDiff: worktreeDiffRoutes }),
+      ...(worktreeGraphRoutes === undefined ? {} : { worktreeGraph: worktreeGraphRoutes }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
       // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
       // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
@@ -927,6 +947,11 @@ export async function startHub(
     // disposes wtdiff AFTER preview and BEFORE `fe.close()`, mirroring the runtime order below.
     if (worktreeDiffRoutes !== undefined) {
       cleanup.push(() => worktreeDiffRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    }
+    // worktree-graph plan v2 §2.6 (P2): right after wtdiff's push — the startup-failure unwind
+    // disposes wtgraph AFTER wtdiff and BEFORE `fe.close()`, mirroring the runtime order below.
+    if (worktreeGraphRoutes !== undefined) {
+      cleanup.push(() => worktreeGraphRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
     }
     // web-hub-spawn §SP10 (startup-failure path only — the runtime close() path wires its own
     // call inside `close`): pushed right after the frontend's entry so reverse-order release
@@ -1343,6 +1368,9 @@ export async function startHub(
         // accepting — aborts every in-flight request and single-flight git execution, waits
         // ≤1 s, idempotent (shares the startup-failure promise).
         if (worktreeDiffRoutes !== undefined) await bounded(worktreeDiffRoutes.dispose("close", deadline));
+        // worktree-graph plan v2 §2.6 (P2): after wtdiff dispose, still BEFORE the HTTP face
+        // stops accepting — same bounded/idempotent contract.
+        if (worktreeGraphRoutes !== undefined) await bounded(worktreeGraphRoutes.dispose("close", deadline));
         await bounded(fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files

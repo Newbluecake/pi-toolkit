@@ -230,8 +230,10 @@ function raceSignal<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<
 }
 
 /** §3.1 ① CSRF — preview's exact rule (X-PWH mandatory; Sec-Fetch-Site same-origin when
- * present; Origin must equal the listener's expected origin when present). */
-function wtCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
+ * present; Origin must equal the listener's expected origin when present). worktree-graph plan
+ * v2 §2.6 (P2 append): exported so `hub/worktree-graph/routes.ts` can reuse the EXACT same rule
+ * instead of forking a second copy. */
+export function wtCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
   if (req.headers["x-pwh"] !== "1") return false;
   const sfs = req.headers["sec-fetch-site"];
   if (typeof sfs === "string" && sfs.toLowerCase() !== "same-origin") return false;
