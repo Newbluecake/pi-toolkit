@@ -19,8 +19,31 @@ import MarkdownView from "./MarkdownView.vue";
 const props = defineProps<{ readonly customType: string; readonly text: string; readonly truncated: boolean }>();
 const { t } = useI18n();
 
-/** Subagent delivery notifications get a friendly who label; every other customType keeps its raw name. */
-const isSubagentNotice = computed(() => props.customType.startsWith("subagent:"));
+/** `subagent:` is the toolkit's legacy NAMESPACE (renamed pi-subagent → pi-toolkit; runtime ids keep
+ *  it on purpose), not a statement that the message comes from a subagent — usage ticks, compact
+ *  hints, quota or cache notices all share it. Only the run/workflow delivery kinds below get the
+ *  「子代理」 who label; every other kind is a plain notice. The chip shows the kind without the
+ *  namespace (2026-10-10 user report: `subagent:usage-tick` read as a subagent message). */
+const NAMESPACE = "subagent:";
+const SUBAGENT_KINDS = new Set([
+  "notification",
+  "workflow-notification",
+  "workflow-notice",
+  "timeout",
+  "worktree-disposition",
+  "fabric",
+  "started",
+  "completed",
+  "failed",
+  "task-started",
+  "child",
+]);
+/** Short display aliases for namespaced kinds whose raw name is an implementation detail. */
+const KIND_ALIASES: Readonly<Record<string, string>> = { "usage-tick": "usage" };
+const namespaced = computed(() => props.customType.startsWith(NAMESPACE));
+const kind = computed(() => (namespaced.value ? props.customType.slice(NAMESPACE.length) : props.customType));
+const isSubagentNotice = computed(() => namespaced.value && SUBAGENT_KINDS.has(kind.value));
+const chipText = computed(() => (namespaced.value ? (KIND_ALIASES[kind.value] ?? kind.value) : props.customType));
 </script>
 
 <template>
@@ -29,7 +52,7 @@ const isSubagentNotice = computed(() => props.customType.startsWith("subagent:")
     <div class="msg-main">
       <div class="msg-head">
         <span class="who">{{ isSubagentNotice ? t("transcript.whoSubagent") : t("transcript.whoNotice") }}</span>
-        <span class="kind-chip" translate="no">{{ customType }}</span>
+        <span class="kind-chip" translate="no" :title="customType">{{ chipText }}</span>
       </div>
       <MarkdownView :text="text" />
       <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>

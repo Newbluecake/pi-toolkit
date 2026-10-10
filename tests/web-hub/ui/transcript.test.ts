@@ -154,7 +154,7 @@ describe("Transcript.vue — item rendering", () => {
         parentId: null,
         type: "custom_message",
         timestamp: new Date(5000).toISOString(),
-        customType: "subagent:notice",
+        customType: "subagent:notification",
         content: "run finished",
       },
       {
@@ -173,7 +173,7 @@ describe("Transcript.vue — item rendering", () => {
     expect(wrapper.text()).toContain("cr-anthropic/claude-sonnet-5");
     // 2026-10-05: custom messages got the pi-style identity row (avatar + who + type chip)
     const custom = wrapper.get(".msg-custom");
-    expect(custom.get(".kind-chip").text()).toContain("subagent:notice");
+    expect(custom.get(".kind-chip").text()).toBe("notification");
     expect(custom.get(".msg-head .who").text()).toBe("subagent");
     expect(custom.get(".avatar-notice").exists()).toBe(true);
     expect(wrapper.get(".msg-tool .tool-name").text()).toBe("bash");
@@ -579,17 +579,36 @@ describe("TxCustom.vue — markdown rendering", () => {
   it("renders **bold**/lists through MarkdownView, not as raw asterisk/dash characters", () => {
     const wrapper = mount(TxCustom, {
       props: {
-        customType: "subagent:notice",
+        customType: "subagent:notification",
         text: "**Run finished** —\n\n- step one\n- step two",
         truncated: false,
       },
     });
-    expect(wrapper.get(".kind-chip").text()).toContain("subagent:notice");
+    expect(wrapper.get(".kind-chip").text()).toBe("notification");
+    expect(wrapper.get(".kind-chip").attributes("title")).toBe("subagent:notification");
     expect(wrapper.get(".msg-head .who").text()).toBe("subagent");
     expect(wrapper.find(".md").exists()).toBe(true); // MarkdownView.vue's own root class
     expect(wrapper.get("strong").text()).toBe("Run finished");
     expect(wrapper.findAll("li")).toHaveLength(2);
     expect(wrapper.html()).not.toContain("**Run finished**");
+  });
+
+  it("the subagent: namespace alone does not make a message a subagent notice", () => {
+    const tick = mount(TxCustom, { props: { customType: "subagent:usage-tick", text: "ctx 40%", truncated: false } });
+    expect(tick.get(".kind-chip").text()).toBe("usage");
+    expect(tick.get(".kind-chip").attributes("title")).toBe("subagent:usage-tick");
+    expect(tick.get(".msg-head .who").text()).toBe("notice");
+    const hint = mount(TxCustom, { props: { customType: "subagent:compact-hint", text: "x", truncated: false } });
+    expect(hint.get(".kind-chip").text()).toBe("compact-hint");
+    expect(hint.get(".msg-head .who").text()).toBe("notice");
+    for (const k of ["workflow-notice", "timeout", "fabric"]) {
+      const w = mount(TxCustom, { props: { customType: `subagent:${k}`, text: "x", truncated: false } });
+      expect(w.get(".msg-head .who").text()).toBe("subagent");
+      expect(w.get(".kind-chip").text()).toBe(k);
+    }
+    const foreign = mount(TxCustom, { props: { customType: "other-ext:thing", text: "x", truncated: false } });
+    expect(foreign.get(".kind-chip").text()).toBe("other-ext:thing");
+    expect(foreign.get(".msg-head .who").text()).toBe("notice");
   });
 
   it("shows the truncated badge and never uses v-html", () => {
