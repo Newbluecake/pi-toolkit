@@ -37,6 +37,7 @@ import type {
   SpawnListOutcome,
   TransportHooks,
   WorktreeDiffTransport,
+  WorktreeGraphTransport,
 } from "../transport/types.js";
 import { createControl } from "./useControl.js";
 import { createSpawn } from "./useSpawn.js";
@@ -113,6 +114,11 @@ export interface UseHubHandle extends HubHandle {
    * treats its absence as "no scope" (no expandable rows, the panel stays byte-identical,
    * I8). Same optional-passthrough discipline as `preview` above. */
   readonly worktreeDiff?: WorktreeDiffTransport;
+  /** worktree-graph plan v2 §4.4 (package P4): the `GET /api/worktree-graph` call surface,
+   * passed through from the transport iff it offers it — P5's `useWorktreeGraph` treats its
+   * absence as "no scope" (the graph section never renders, the panel DOM stays
+   * byte-identical, I8). Same optional-passthrough discipline as `worktreeDiff` above. */
+  readonly worktreeGraph?: WorktreeGraphTransport;
   start(): Promise<void>;
   dispose(): void;
 }
@@ -789,6 +795,9 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // worktree-diff plan v3.1 §4.6 (D4): same passthrough rule as `preview` — the surface rides
     // the handle iff the transport offers it (a test fake without it keeps "no scope").
     ...(transport.worktreeDiff === undefined ? {} : { worktreeDiff: transport.worktreeDiff }),
+    // worktree-graph plan v2 §4.4 (P4): same passthrough rule as `worktreeDiff` — the surface
+    // rides the handle iff the transport offers it (a test fake without it keeps "no scope").
+    ...(transport.worktreeGraph === undefined ? {} : { worktreeGraph: transport.worktreeGraph }),
     dispatch,
     transport,
     loadOlder,

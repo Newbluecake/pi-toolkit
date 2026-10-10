@@ -40,9 +40,11 @@ import type {
   UploadOutcome,
   UploadTransport,
   WorktreeDiffTransport,
+  WorktreeGraphTransport,
   WtDiffOutcome,
 } from "./types.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
+import type { WtGraphPayload } from "@protocol/worktree-graph.js";
 
 export type TokenTransportDeps = Parameters<typeof createClient>[0];
 
@@ -194,5 +196,16 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       file: (req, opts) =>
         withAuthNotice(deps, () => client.worktreeDiff.file(req, opts) as Promise<WtDiffOutcome<WtDiffFilePayload>>),
     } satisfies WorktreeDiffTransport,
+    worktreeGraph: {
+      // worktree-graph plan v2 §4.4 (P4): thin cast over the logic client's wtgraph
+      // namespace (`wtgraphGet` reuses `wtdiffGet`'s capped-JSON GET flow with the wtgraph
+      // cap/deadline/parser). The client already replayed once through `withRelogin` on a
+      // 401 (GET ⇒ side-effect free), so a final `E_AUTH` means the stored token is dead —
+      // same `withAuthNotice` rule as preview/worktreeDiff. Error bodies (504
+      // `E_DEADLINE{reason:"log-timeout"}` etc.) ride verbatim; this layer never retries on
+      // its own (the UI owns the retry, §4.3).
+      graph: (req, opts) =>
+        withAuthNotice(deps, () => client.worktreeGraph.graph(req, opts) as Promise<WtDiffOutcome<WtGraphPayload>>),
+    } satisfies WorktreeGraphTransport,
   } satisfies HubTransport;
 }

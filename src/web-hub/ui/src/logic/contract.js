@@ -29,6 +29,7 @@ import {
 } from "@protocol/http-contract.ts";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
 import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "@protocol/worktree-diff.ts";
+import { WTGRAPH_PATH } from "@protocol/worktree-graph.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 
 /** SSE `event:` names pushed by the hub (order irrelevant, set must match) — same array as
@@ -82,6 +83,11 @@ export const API = Object.freeze({
   // pins both against the protocol constants.
   wtdiffFiles: WTDIFF_FILES_PATH,
   wtdiffFile: WTDIFF_FILE_PATH,
+  // worktree-graph plan v2 §3/§4.4 (package P4): the commit-graph endpoint, imported from
+  // `protocol/worktree-graph.ts` — same anti-drift rule as the wtdiff paths above (P2's hub
+  // routes and this object can never disagree). `tests/web-hub/ui/logic-contract.test.ts`
+  // pins it against the protocol constant.
+  wtgraph: WTGRAPH_PATH,
   // @文件补全 (file-mention): the composer's file-search endpoint. Hand-written literal, NOT
   // imported from `hub/file-search.ts` — that module is hub-side (imports `node:fs*`) and must
   // never reach the browser bundle; `tests/web-hub/ui/logic-file-mention.test.ts` pins this

@@ -33,9 +33,11 @@ import type {
   UploadOutcome,
   UploadTransport,
   WorktreeDiffTransport,
+  WorktreeGraphTransport,
   WtDiffOutcome,
 } from "./types.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
+import type { WtGraphPayload } from "@protocol/worktree-graph.js";
 
 export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
 
@@ -88,6 +90,10 @@ function isRestAuthEndpoint(url: string): boolean {
   // like history/preview (an exact-match REST_AUTH_PATHS entry would never hit
   // `/api/worktree-diff/files?agentKey=…`). `API.wtdiffFile` alone would cover both paths
   // (`…/files` starts with `…/file`); both are spelled out for readability.
+  //
+  // worktree-graph plan v2 §4.4 (P4): `GET /api/worktree-graph` joins the same query-string
+  // class — the prefix rule covers `/api/worktree-graph?agentKey=…` (and cannot collide with
+  // the wtdiff paths: neither prefix is a prefix of the other).
   return (
     REST_AUTH_PATHS.has(url) ||
     url.startsWith(API.history) ||
@@ -95,7 +101,8 @@ function isRestAuthEndpoint(url: string): boolean {
     url.startsWith(API.preview) ||
     url.startsWith(API.runHistory) ||
     url.startsWith(API.wtdiffFiles) ||
-    url.startsWith(API.wtdiffFile)
+    url.startsWith(API.wtdiffFile) ||
+    url.startsWith(API.wtgraph)
   );
 }
 
@@ -176,5 +183,13 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       files: (req, opts) => client.worktreeDiff.files(req, opts) as Promise<WtDiffOutcome<WtDiffFileList>>,
       file: (req, opts) => client.worktreeDiff.file(req, opts) as Promise<WtDiffOutcome<WtDiffFilePayload>>,
     } satisfies WorktreeDiffTransport,
+    worktreeGraph: {
+      // worktree-graph plan v2 §4.4 (P4): thin cast over the logic client's wtgraph namespace
+      // (`wtgraphGet` reuses `wtdiffGet`'s capped-JSON GET flow with the wtgraph
+      // cap/deadline/parser). 401 ⇒ onConn("auth") is reported by the fetch wrapper above
+      // (`isRestAuthEndpoint` covers `/api/worktree-graph` by prefix) — never inside the
+      // client, so nothing double-fires.
+      graph: (req, opts) => client.worktreeGraph.graph(req, opts) as Promise<WtDiffOutcome<WtGraphPayload>>,
+    } satisfies WorktreeGraphTransport,
   } satisfies PasswordTransport;
 }

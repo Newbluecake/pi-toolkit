@@ -9,6 +9,7 @@
  */
 import type { PreviewDims, PreviewDirListing, PreviewImageMime, PreviewProbeKind } from "@protocol/preview.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
+import type { WtGraphPayload } from "@protocol/worktree-graph.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type {
@@ -127,6 +128,12 @@ export interface HubTransport {
    * `useWorktreeDiff`'s scope derivation (D5) yields `null` without it and the panel stays
    * byte-identical to today (I8). Both real adapters always provide it. */
   readonly worktreeDiff?: WorktreeDiffTransport;
+  /** worktree-graph plan v2 §4.4 (package P4): `GET /api/worktree-graph`. Optional per the
+   * frozen-transport convention (test fakes / future transports may omit it) — P5's scope
+   * derivation (`wtgraphScopeOf`) yields `null` without it and the panel's graph section
+   * never renders (I8: without the cap the panel DOM stays byte-identical to today). Both
+   * real adapters always provide it. */
+  readonly worktreeGraph?: WorktreeGraphTransport;
 }
 
 /** `@logic/password-client.js`'s `login()` return shape (JSDoc-documented there; mirrored here). */
@@ -551,4 +558,27 @@ export interface WorktreeDiffTransport {
     },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<WtDiffOutcome<WtDiffFilePayload>>;
+}
+
+// ---------------------------------------------------------------------------
+// worktree-graph plan v2 §4.4 (package P4) — the `GET /api/worktree-graph` transport surface
+// ---------------------------------------------------------------------------
+
+/**
+ * §4.4's `WorktreeGraphTransport` — one endpoint, same shape on both adapters (the shared
+ * suite in `tests/web-hub/ui/transport-contract.test.ts` pins parity, the wtdiff
+ * precedent). The request carries `X-PWH: 1`; `signal` is P5's per-open controller (a
+ * collapse / scope or wt change / unmount aborts the in-flight fetch). The success value is
+ * the protocol parser's own product (`WtGraphPayload` — never a hand mirror); the error
+ * half reuses `WtDiffOutcome`'s shape so the REUSED error codes' `reason` vocabulary
+ * (`WtGraphErrorReason`: "log-timeout" | "missing-object" | "git-too-old" | "git-failed")
+ * reaches the UI verbatim. The client cap is `WTGRAPH_BODY_MAX_BYTES` and its deadline
+ * `WTGRAPH_CLIENT_TIMEOUT_MS` (both from the frozen P0 protocol module); this layer never
+ * retries on its own — the UI owns the retry (§4.3).
+ */
+export interface WorktreeGraphTransport {
+  graph(
+    req: WtDiffScope & { readonly wt: string },
+    opts?: { readonly signal?: AbortSignal },
+  ): Promise<WtDiffOutcome<WtGraphPayload>>;
 }

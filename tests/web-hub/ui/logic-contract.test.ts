@@ -3,6 +3,7 @@ import * as proto from "../../../src/web-hub/protocol/http-contract.js";
 import * as previewProto from "../../../src/web-hub/protocol/preview.js";
 import * as uploadProto from "../../../src/web-hub/protocol/upload.js";
 import * as wtdProto from "../../../src/web-hub/protocol/worktree-diff.js";
+import * as wtgProto from "../../../src/web-hub/protocol/worktree-graph.js";
 import * as web from "../../../src/web-hub/ui/src/logic/contract.js";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import { createClient } from "../../../src/web-hub/ui/src/logic/token-client.js";
@@ -203,5 +204,17 @@ describe("web/contract.js API wtdiff endpoints (worktree-diff plan v3.1 §1.2/§
       expect([wtdProto.WTDIFF_FILES_PATH, wtdProto.WTDIFF_FILE_PATH]).toContain(e.path);
     }
     expect(proto.WTDIFF_ENDPOINTS).toHaveLength(2);
+  });
+});
+
+// worktree-graph plan v2 §3/§4.4 (package P4): the commit-graph endpoint is imported from
+// `protocol/worktree-graph.ts` — same anti-drift rule as the wtdiff paths above (same
+// reference target, never a hand copy). `protocol/http-contract.ts` carries no graph
+// endpoint registry (the hub routes are P2's domain), so the pin is against the frozen
+// protocol constant itself.
+describe("web/contract.js API.wtgraph (worktree-graph plan v2 §4.4, P4)", () => {
+  it("is the protocol module's frozen WTGRAPH_PATH (same reference, not a copy)", () => {
+    expect(web.API.wtgraph).toBe(wtgProto.WTGRAPH_PATH);
+    expect(web.API.wtgraph).toBe("/api/worktree-graph");
   });
 });

@@ -51,6 +51,7 @@ import {
 } from "../../../src/web-hub/protocol/preview.js";
 import { PREVIEW_ABS_HUB_CAP, PREVIEW_DIR_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "../../../src/web-hub/protocol/worktree-diff.js";
+import type { WtGraphPayload } from "../../../src/web-hub/protocol/worktree-graph.js";
 import type {
   HubTransport,
   PreviewDirOutcome,
@@ -58,6 +59,7 @@ import type {
   PreviewProbeOutcome,
   PreviewTransport,
   WorktreeDiffTransport,
+  WorktreeGraphTransport,
   WtDiffOutcome,
   WtDiffScope,
 } from "../../../src/web-hub/ui/src/transport/types.js";
@@ -668,5 +670,45 @@ describe("types.test-d.ts (worktree-diff plan v3.1 §4.6 D4 transport surface)",
     expectTypeOf<Parameters<WorktreeDiffTransport["file"]>[1]>().toEqualTypeOf<
       { readonly signal?: AbortSignal } | undefined
     >();
+  });
+});
+
+// worktree-graph plan v2 §4.4 (package P4): the frozen UI transport surface for
+// `GET /api/worktree-graph`. The success value IS the protocol parser's own product
+// (`WtGraphPayload`, imported from the frozen protocol module — never a hand mirror, the same
+// anti-drift rule as the wtdiff surface above); the error half reuses `WtDiffOutcome`'s shape
+// so the REUSED error codes' `reason` vocabulary (`WtGraphErrorReason`) reaches P5's UI
+// verbatim for its per-reason copy/mapping decisions (§4.3).
+describe("types.test-d.ts (worktree-graph plan v2 §4.4 P4 transport surface)", () => {
+  it("graph()'s outcome halves are exactly the §4.6-frozen WtDiffOutcome shapes over WtGraphPayload", () => {
+    expectTypeOf<WtDiffOutcome<WtGraphPayload>>().toEqualTypeOf<
+      | { readonly ok: true; readonly value: WtGraphPayload }
+      | {
+          readonly ok: false;
+          readonly status: number;
+          readonly error: string;
+          readonly reason?: string;
+          readonly retryAfterS?: number;
+        }
+    >();
+  });
+
+  it("the graph success value is the protocol parser's own product (no local mirror)", () => {
+    type GraphValue = Extract<Awaited<ReturnType<WorktreeGraphTransport["graph"]>>, { ok: true }>["value"];
+    expectTypeOf<GraphValue>().toEqualTypeOf<WtGraphPayload>();
+  });
+
+  it("request shape: the shared WtDiffScope plus wt; opts optional and carries only signal", () => {
+    expectTypeOf<Parameters<WorktreeGraphTransport["graph"]>[0]>().toEqualTypeOf<
+      WtDiffScope & { readonly wt: string }
+    >();
+    expectTypeOf<Parameters<WorktreeGraphTransport["graph"]>[1]>().toEqualTypeOf<
+      { readonly signal?: AbortSignal } | undefined
+    >();
+  });
+
+  it("HubTransport.worktreeGraph is optional (frozen-transport convention; fakes may omit it)", () => {
+    expectTypeOf<HubTransport["worktreeGraph"]>().toEqualTypeOf<WorktreeGraphTransport | undefined>();
+    expectTypeOf<Omit<HubTransport, "worktreeGraph">>().toMatchTypeOf<HubTransport>();
   });
 });

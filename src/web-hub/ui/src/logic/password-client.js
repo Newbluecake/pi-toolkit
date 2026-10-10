@@ -53,6 +53,7 @@ import {
   WTDIFF_FILE_BODY_MAX_BYTES,
   WTDIFF_LIST_BODY_MAX_BYTES,
 } from "@protocol/worktree-diff.ts";
+import { parseWtGraphPayload, WTGRAPH_BODY_MAX_BYTES, WTGRAPH_CLIENT_TIMEOUT_MS } from "@protocol/worktree-graph.ts";
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 import { historyOutcomeFromResponse } from "./sessionHistory.ts";
@@ -1276,9 +1277,12 @@ export function createPasswordClient(deps) {
    * including 409 `E_STALE_CTX{reason:"base"|"entry"}`, which this layer NEVER retries on its
    * own: the UI (§4.5, D5) owns the one-shot list re-pull.
    * @param {string} url @param {number} maxBytes @param {(raw: any, byteLength: number) => any} parse
-   * @param {any} signal @returns {Promise<any>}
+   * @param {any} signal @param {number} [timeoutMs] worktree-graph plan v2 §4.4 (P4): the graph
+   * endpoint reuses this flow with `WTGRAPH_CLIENT_TIMEOUT_MS` (its §2.4 wall-clock differs from
+   * wtdiff's budget) — absent keeps `WTDIFF_CLIENT_TIMEOUT_MS` (byte-identical wtdiff behavior).
+   * @returns {Promise<any>}
    */
-  async function wtdiffGet(url, maxBytes, parse, signal) {
+  async function wtdiffGet(url, maxBytes, parse, signal, timeoutMs = WTDIFF_CLIENT_TIMEOUT_MS) {
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
     let expired = false;
@@ -1290,7 +1294,7 @@ export function createPasswordClient(deps) {
         expired = true;
         ac?.abort();
         reject(new Error("E_DEADLINE"));
-      }, WTDIFF_CLIENT_TIMEOUT_MS);
+      }, timeoutMs);
     });
     /** @type {(() => void) | null} */
     let onExternalAbort = null;
@@ -1425,6 +1429,51 @@ export function createPasswordClient(deps) {
 
   const worktreeDiff = { files: wtdiffFiles, file: wtdiffFile };
 
+  // -------------------------------------------------------------------------
+  // worktree-graph endpoint (worktree-graph plan v2 §4.4, package P4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * `GET /api/worktree-graph` — the worktree commit-graph payload, same capped-JSON GET flow
+   * as the token client's, minus the relogin dance (password mode has none; a 401 means the
+   * cookie session is gone and is reported by `transport/password.ts`'s fetch wrapper via
+   * `isRestAuthEndpoint`, which covers `/api/worktree-graph` by prefix — its params ride the
+   * query string). The three graph knobs all come from the frozen P0 protocol module: the
+   * `WTGRAPH_BODY_MAX_BYTES` 512 KiB body cap (§2.5's three-stage trim keeps the hub under
+   * it), the `WTGRAPH_CLIENT_TIMEOUT_MS` 35 s deadline (§2.4's 23 s server wall-clock +
+   * transfer reserve), and `parseWtGraphPayload` as the contract gate — a STRICT
+   * key-whitelist parser, so any off-contract member anywhere ⇒ `null` ⇒ local
+   * `E_BAD_RESPONSE` (status 0), never silently ignored. Error reasons ride the REUSED codes
+   * verbatim: 504 `E_DEADLINE{reason:"log-timeout"}`, 503 `E_WTDIFF_UNSUPPORTED{reason:
+   * "missing-object"|"git-too-old"}`, 500 `E_INTERNAL{reason:"git-failed"}` — this layer
+   * never retries on its own (the UI owns the retry, §4.3).
+   * @param {string} url @param {any} signal
+   * @returns {Promise<any>}
+   */
+  async function wtgraphGet(url, signal) {
+    return await wtdiffGet(url, WTGRAPH_BODY_MAX_BYTES, parseWtGraphPayload, signal, WTGRAPH_CLIENT_TIMEOUT_MS);
+  }
+
+  /**
+   * `GET /api/worktree-graph?agentKey&sessionId&wt` (§3) — one graph pull for the panel's
+   * graph section. `wt` is the `WorktreeRowWire.path` input (the same request input wtdiff
+   * uses, never derived from the session); a 409 `E_SESSION_CHANGED` (hub-side
+   * registry/sessionId mismatch) rides verbatim, never retried here.
+   * @param {{ agentKey: string, sessionId: string, wt: string }} req
+   * @param {{ signal?: any }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function wtgraph(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.wtgraph}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&wt=${encodeURIComponent(req.wt)}`;
+    return await wtgraphGet(url, signal);
+  }
+
+  const worktreeGraph = { graph: wtgraph };
+
   return {
     /** Clear a stray `#t=` (never read/sent in password mode), fetch session info, then open the stream. */
     async start() {
@@ -1450,6 +1499,7 @@ export function createPasswordClient(deps) {
     removeAgent,
     preview,
     worktreeDiff,
+    worktreeGraph,
     close() {
       closed = true;
       closeStream();

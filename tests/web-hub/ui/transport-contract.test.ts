@@ -8,6 +8,7 @@ import {
   WTDIFF_FILE_BODY_MAX_BYTES,
   WTDIFF_LIST_BODY_MAX_BYTES,
 } from "@protocol/worktree-diff.ts";
+import { parseWtGraphPayload, WTGRAPH_BODY_MAX_BYTES, WTGRAPH_CLIENT_TIMEOUT_MS } from "@protocol/worktree-graph.ts";
 import { createTokenTransport, TOKEN_KEY } from "../../../src/web-hub/ui/src/transport/token.js";
 import { createPasswordTransport } from "../../../src/web-hub/ui/src/transport/password.js";
 import { HISTORY_LIMIT_MAX } from "../../../src/web-hub/ui/src/logic/contract.js";
@@ -2235,5 +2236,273 @@ describe.each([
     });
     const r = await h.transport.spawn!.history!({});
     expect(r).toEqual({ ok: false, error: "E_AUTH", status: 401 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// worktree-graph plan v2 §4.4 (package P4): `GET /api/worktree-graph` — the SAME suite on
+// both adapters, the wtdiff matrix's discipline (the two logic clients' `wtgraphGet` reuses
+// `wtdiffGet` verbatim — only the three knobs differ, all from the frozen P0 protocol
+// module: the `WTGRAPH_BODY_MAX_BYTES` 512 KiB decoded-byte cap, the
+// `WTGRAPH_CLIENT_TIMEOUT_MS` 35 s deadline and the STRICT `parseWtGraphPayload` gate — any
+// off-contract member anywhere ⇒ null ⇒ local E_BAD_RESPONSE (status 0)). Error bodies
+// {error, reason} ride verbatim — the REUSED codes' §3 reason vocabulary (504
+// E_DEADLINE{log-timeout}, 503 E_WTDIFF_UNSUPPORTED{missing-object|git-too-old}, 500
+// E_INTERNAL{git-failed}) reaches the UI untouched; this layer never retries on its own.
+// ---------------------------------------------------------------------------
+
+const G_OID = "0123456789abcdef0123456789abcdef01234567"; // 40-hex (sha1)
+const G_OID2 = "89abcdef01234567fedcba9876543210fedcba98"; // another 40-hex
+const GRAPH_HEADERS = { "Content-Type": "application/json" };
+/** A complete, non-empty `WtGraphPayload`: two commits (a parent edge), all three ref kinds
+ *  (branch+up / remote / symref / tag), both worktree heads (self + other) and a branch
+ *  HEAD — every optional shape the parser knows, in one fixture. */
+const GRAPH_BODY = {
+  v: 1,
+  n: 200,
+  format: "sha1",
+  head: { h: G_OID, b: "main" },
+  commits: [
+    { h: G_OID, p: [G_OID2], a: "Ada", t: 1_758_616_500, s: "Fix the thing" },
+    { h: G_OID2, p: [], a: "Bo", t: 1_758_530_100, s: "Initial" },
+  ],
+  refs: [
+    { k: "branch", n: "main", h: G_OID, up: "origin/main" },
+    { k: "remote", n: "origin/main", h: G_OID },
+    { k: "remote", n: "origin/HEAD", h: G_OID, sym: true },
+    { k: "tag", n: "v1.0", h: G_OID2 },
+  ],
+  wtHeads: [
+    { h: G_OID, path: "/home/u/wt main", b: "main", self: true },
+    { h: G_OID2, path: "/home/u/proj", b: "main" },
+  ],
+  degrade: {},
+  complete: true,
+};
+const wtgBytes = (body: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(body));
+const GRAPH_REQ = { agentKey: "A", sessionId: "s1", wt: "/home/u/wt main" };
+const GRAPH_URL = `/api/worktree-graph?agentKey=A&sessionId=s1&wt=${encodeURIComponent("/home/u/wt main")}`;
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: worktreeGraph (worktree-graph plan v2 §4.4, P4 — identical behavior both modes)", (_mode, make) => {
+  it("implements the WorktreeGraphTransport surface on every adapter", () => {
+    expect(typeof make().transport.worktreeGraph?.graph).toBe("function");
+  });
+
+  it("the fixture is parser-valid (guards the fixture itself against silent drift)", () => {
+    expect(parseWtGraphPayload(GRAPH_BODY)).not.toBeNull();
+  });
+
+  it('graph(): GET /api/worktree-graph?agentKey&sessionId&wt (encoded) with X-PWH:"1"; streamed 200 ⇒ ok value', async () => {
+    const h = make(async () => respStream(200, [wtgBytes(GRAPH_BODY)], GRAPH_HEADERS));
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(out).toEqual({ ok: true, value: parseWtGraphPayload(GRAPH_BODY) });
+    const call = h.fetchCalls.find((c) => c.url === GRAPH_URL);
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("GET");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it("a 200 without a streaming body falls back to arrayBuffer()", async () => {
+    const h = make(async () =>
+      respBytes(200, wtgBytes(GRAPH_BODY), {
+        ...GRAPH_HEADERS,
+        "Content-Length": String(wtgBytes(GRAPH_BODY).byteLength),
+      }),
+    );
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(out).toEqual({ ok: true, value: parseWtGraphPayload(GRAPH_BODY) });
+    expect(h.fetchCalls.find((c) => c.url === GRAPH_URL)).toBeDefined();
+  });
+
+  it("URL encoding is byte-identical across BOTH clients (space / # / Chinese)", async () => {
+    const req = { agentKey: "A", sessionId: "s1", wt: "/home/u/我的 wt #1" };
+    const h1 = makeToken(async () => respStream(200, [wtgBytes(GRAPH_BODY)], GRAPH_HEADERS));
+    await h1.transport.worktreeGraph!.graph(req);
+    const h2 = makePassword(async () => respStream(200, [wtgBytes(GRAPH_BODY)], GRAPH_HEADERS));
+    await h2.transport.worktreeGraph!.graph(req);
+    expect(h1.fetchCalls[0]!.url).toBe(h2.fetchCalls[0]!.url);
+    // the tricky characters, spelled out (encodeURIComponent semantics pinned, not assumed)
+    expect(h1.fetchCalls[0]!.url).toContain(encodeURIComponent("/home/u/我的 wt #1")); // space ⇒ %20, # ⇒ %23
+  });
+
+  it("decoded bytes over WTGRAPH_BODY_MAX_BYTES ⇒ abort + E_BAD_RESPONSE (streaming reader)", async () => {
+    const chunk = new Uint8Array(300 * 1024); // two of these = 600 KiB > 512 KiB
+    let sawAbort = false;
+    const h = make(async (_url, init) => {
+      init?.signal?.addEventListener?.("abort", () => {
+        sawAbort = true;
+      });
+      return respStream(200, [chunk, chunk], GRAPH_HEADERS);
+    });
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    expect(sawAbort).toBe(true); // the fetch was aborted so the server stops sending
+  });
+
+  it("the arrayBuffer fallback also refuses a body over the cap (byteLength checked after the read)", async () => {
+    const h = make(async () => respBytes(200, new Uint8Array(WTGRAPH_BODY_MAX_BYTES + 1), GRAPH_HEADERS));
+    expect(await h.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("gzip: the cap judges DECODED bytes, never Content-Length (small compressed length, larger decoded body)", async () => {
+    const h = make(async () =>
+      respStream(200, [wtgBytes(GRAPH_BODY)], { ...GRAPH_HEADERS, "Content-Encoding": "gzip", "Content-Length": "42" }),
+    );
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(out).toMatchObject({ ok: true });
+    if (out.ok) expect(out.value.commits).toHaveLength(2);
+  });
+
+  it("a non-JSON body ⇒ E_BAD_RESPONSE (undecodable, status 0)", async () => {
+    const h = make(async () => respStream(200, [new Uint8Array([0x89, 0x50, 0x4e, 0x47])], GRAPH_HEADERS));
+    expect(await h.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("valid JSON but an off-schema envelope ⇒ E_BAD_RESPONSE (the STRICT protocol parser is the gate)", async () => {
+    // an unknown top-level key — rejected outright (single producer, key whitelist)
+    const h1 = make(async () => respStream(200, [wtgBytes({ ...GRAPH_BODY, extra: 1 })], GRAPH_HEADERS));
+    expect(await h1.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+    // v1's n is pinned to 200 (G3: fixed, no pagination)
+    const h2 = make(async () => respStream(200, [wtgBytes({ ...GRAPH_BODY, n: 100 })], GRAPH_HEADERS));
+    expect(await h2.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+    // complete:true with a real degrade marker is a contradiction
+    const h3 = make(async () =>
+      respStream(200, [wtgBytes({ ...GRAPH_BODY, degrade: { logCapped: true } })], GRAPH_HEADERS),
+    );
+    expect(await h3.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+    // zero commits without `empty` needs a degrade reason (the degraded zero-commits rule)
+    const h4 = make(async () => respStream(200, [wtgBytes({ ...GRAPH_BODY, commits: [] })], GRAPH_HEADERS));
+    expect(await h4.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("the §3 reason vocabulary rides the REUSED error codes verbatim — never retried here", async () => {
+    const cases: ReadonlyArray<{ status: number; body: unknown }> = [
+      { status: 403, body: { error: "E_WTDIFF_DENIED", reason: "not-worktree" } },
+      { status: 504, body: { error: "E_DEADLINE", reason: "log-timeout" } },
+      { status: 503, body: { error: "E_WTDIFF_UNSUPPORTED", reason: "missing-object" } },
+      { status: 503, body: { error: "E_WTDIFF_UNSUPPORTED", reason: "git-too-old" } },
+      { status: 500, body: { error: "E_INTERNAL", reason: "git-failed" } },
+    ];
+    for (const c of cases) {
+      const h = make(async (url) => (url.startsWith("/api/worktree-graph") ? resp(c.status, c.body) : resp(200)));
+      expect(await h.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+        ok: false,
+        status: c.status,
+        ...(c.body as { error: string; reason?: string }),
+      });
+      expect(h.fetchCalls.filter((x) => x.url.startsWith("/api/worktree-graph"))).toHaveLength(1); // no auto-retry
+    }
+  });
+
+  it("429 folds Retry-After into retryAfterS", async () => {
+    const h = make(async (url) =>
+      url.startsWith("/api/worktree-graph") ? resp(429, { error: "E_RATE" }, { "Retry-After": "3" }) : resp(200),
+    );
+    expect(await h.transport.worktreeGraph!.graph(GRAPH_REQ)).toEqual({
+      ok: false,
+      status: 429,
+      error: "E_RATE",
+      retryAfterS: 3,
+    });
+  });
+
+  it("client timeout (WTGRAPH_CLIENT_TIMEOUT_MS, §2.4/§3) ⇒ E_DEADLINE status 0, exactly one attempt", async () => {
+    const h = make(async () => new Promise<never>(() => {}));
+    const p = h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    h.clock.advance(WTGRAPH_CLIENT_TIMEOUT_MS);
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-graph"))).toHaveLength(1);
+  });
+
+  it("a PRE-aborted signal never issues the request at all", async () => {
+    const h = make(async () => respStream(200, [wtgBytes(GRAPH_BODY)], GRAPH_HEADERS));
+    const ac = new AbortController();
+    ac.abort();
+    expect(await h.transport.worktreeGraph!.graph(GRAPH_REQ, { signal: ac.signal })).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_ABORT",
+    });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-graph"))).toHaveLength(0);
+  });
+
+  it("an external abort mid-flight ⇒ E_ABORT (the fetch's own abort rejection surfaces)", async () => {
+    const h = make(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          (init as { signal?: AbortSignal } | undefined)?.signal?.addEventListener("abort", () =>
+            reject(new Error("AbortError")),
+          );
+        }) as never,
+    );
+    const ac = new AbortController();
+    const p = h.transport.worktreeGraph!.graph(GRAPH_REQ, { signal: ac.signal });
+    ac.abort();
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_ABORT" });
+  });
+});
+
+describe("token transport: worktreeGraph() 401 recovery (withRelogin — GET replay is side-effect free)", () => {
+  it("a 401 with a stored token silently re-logs in and replays the SAME GET (no login-view flash)", async () => {
+    const h = makeToken(async (url) => {
+      if (url === "/api/login") return resp(200);
+      if (url.startsWith("/api/worktree-graph")) {
+        const loggedIn = h.fetchCalls.some((c) => c.url === "/api/login");
+        return loggedIn ? respStream(200, [wtgBytes(GRAPH_BODY)], GRAPH_HEADERS) : resp(401, { error: "E_AUTH" });
+      }
+      return resp(200);
+    });
+    h.storage!.set(TOKEN_KEY, "stored-token");
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(out).toMatchObject({ ok: true });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/worktree-graph"))).toHaveLength(2);
+    expect(h.onConnCalls).not.toContain("auth");
+  });
+
+  it("a FINAL 401 (no stored token) surfaces E_AUTH and reports onConn('auth') exactly once", async () => {
+    const h = makeToken(async (url) =>
+      url.startsWith("/api/worktree-graph") ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+describe("password transport: worktreeGraph() 401 (one-shot — the cookie session is gone)", () => {
+  it("a 401 surfaces E_AUTH and reports onConn('auth') exactly once (fetch wrapper, never double-fired)", async () => {
+    const h = makePassword(async (url) =>
+      url.startsWith("/api/worktree-graph") ? resp(401, { error: "E_AUTH" }) : resp(200),
+    );
+    const out = await h.transport.worktreeGraph!.graph(GRAPH_REQ);
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
   });
 });
