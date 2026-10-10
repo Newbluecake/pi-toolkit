@@ -175,7 +175,12 @@ const SESSION = { tag: "session" } as const;
 const REF: TitleModelRef = { provider: "zai-coding-cn", id: "glm-5.3-flash" };
 
 /** 默认关闭刷新（等价 v1：只首标）；单测按需覆盖。 */
-const V1_ONLY: TitleTriggerOptions = { refreshEveryInputs: 0, refreshAfterMinutes: 0, maxRefreshes: 5 };
+const V1_ONLY: TitleTriggerOptions = {
+  refreshEveryInputs: 0,
+  refreshAfterMinutes: 0,
+  refreshWindowMinutes: 0,
+  maxRefreshes: 5,
+};
 
 interface Harness {
   trigger: TitleTrigger<unknown>;
@@ -194,6 +199,8 @@ interface Harness {
   recordOwnTitle: ReturnType<typeof vi.fn>;
   session: { key: string };
   latestOwn: { name?: string; count: number };
+  /** 满额窗口统计用的「刷新」时间戳数组（不含首标），和核心收到的实际数据同步。 */
+  refreshTimestamps: number[];
 }
 
 function makeHarness(
@@ -207,7 +214,7 @@ function makeHarness(
     recordThrows?: boolean;
     userInputs?: string[];
     assistantExcerpt?: string;
-    initialOwnRecord?: { name?: string; count: number };
+    initialOwnRecord?: { name?: string; count: number; refreshTimestamps?: number[] };
   } = {},
 ): Harness {
   const state: { name?: string; clock: number } = { name: init.initialName, clock: 0 };
@@ -220,6 +227,10 @@ function makeHarness(
   const sleepCalls: number[] = [];
   const found = "found" in init ? init.found : FLASH;
   const latestOwn: { name?: string; count: number } = init.initialOwnRecord ?? { name: undefined, count: 0 };
+  // 预种的窗口历史时间戳（模拟测试开始前已发生的刷新）+ 测试运行中新产生的刷新时间戳。
+  const refreshTimestamps: number[] = init.initialOwnRecord?.refreshTimestamps
+    ? [...init.initialOwnRecord.refreshTimestamps]
+    : [];
   let attempt = 0;
   const complete = vi.fn((model: unknown, req: TitleCompletionRequest) => {
     void model;
@@ -232,8 +243,10 @@ function makeHarness(
     callLog.push("appendEntry");
     if (init.recordThrows) throw new Error("appendEntry failed");
     records.push({ name });
+    const wasFirst = latestOwn.count === 0; // 第一条记录是首标，不计入窗口统计
     latestOwn.name = name;
     latestOwn.count += 1;
+    if (!wasFirst) refreshTimestamps.push(state.clock);
   });
   const ports: TitlePorts = {
     getSessionName: () => state.name,
@@ -250,7 +263,11 @@ function makeHarness(
     now: () => state.clock,
     readUserInputs: () => init.userInputs ?? [],
     readAssistantExcerpt: () => init.assistantExcerpt,
-    titleRecords: () => ({ latestName: latestOwn.name, count: latestOwn.count }),
+    titleRecords: () => ({
+      latestName: latestOwn.name,
+      count: latestOwn.count,
+      refreshTimestamps: [...refreshTimestamps],
+    }),
     recordOwnTitle,
   };
   const deps: TitleGenerationDeps<unknown> = {
@@ -282,6 +299,7 @@ function makeHarness(
     recordOwnTitle,
     session,
     latestOwn,
+    refreshTimestamps,
   };
 }
 
@@ -796,5 +814,168 @@ describe("createTitleTrigger — refresh milestones (agent_settled)", () => {
     h.trigger.onAgentSettled(h.deps);
     await flush();
     expect(h.complete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createTitleTrigger — rolling refresh window (refreshWindowMinutes)", () => {
+  /** 一轮 settled：onBeforeAgentStart + onAgentEnd(true) + onAgentSettled。 */
+  const settleCycle = (h: Harness, prompt: string) => {
+    h.trigger.onBeforeAgentStart(prompt, h.deps);
+    h.trigger.onAgentEnd(true);
+    h.trigger.onAgentSettled(h.deps);
+  };
+
+  it("5 refreshes within the 60-minute window block the 6th; once the window rolls past, refreshing resumes", async () => {
+    const h = makeHarness({
+      initialName: "旧标题",
+      // 已有 5 次刷新，都在过去 60 分钟内（t=0,10,20,30,40 分钟，现在 t=50 分钟）。
+      initialOwnRecord: {
+        name: "旧标题",
+        count: 6,
+        refreshTimestamps: [0, 10, 20, 30, 40].map((m) => m * 60_000),
+      },
+      options: { refreshEveryInputs: 1, refreshAfterMinutes: 0, refreshWindowMinutes: 60, maxRefreshes: 5 },
+      completeImpl: () => "窗口内的第六次",
+    });
+    h.state.clock = 50 * 60_000; // 早期 5 次都在过去 60 分钟内（最早一次也只过去 50 分钟）
+    settleCycle(h, "输入1");
+    await flush();
+    expect(h.complete).not.toHaveBeenCalled(); // 满额，第 6 次被拦
+
+    // 推进到 t=61 分钟：最早那次（t=0）已超出 60 分钟窗口，但其余 4 次（10/20/30/40）仍在窗口内
+    // （21/31/41 分钟前）——inWindow=4 < maxRefreshes=5，应该允许。
+    h.state.clock = 61 * 60_000;
+    settleCycle(h, "输入2");
+    await flush();
+    expect(h.complete).toHaveBeenCalledTimes(1);
+    expect(h.names).toEqual(["窗口内的第六次"]);
+  });
+
+  it("refreshWindowMinutes: 0 is byte-identical to the legacy lifetime cap (count - 1 >= maxRefreshes)", async () => {
+    const h = makeHarness({
+      initialName: "旧标题",
+      // 生命周期内已用完 5 次刷新额度（count=6=1首标+5刷新）。
+      initialOwnRecord: { name: "旧标题", count: 6, refreshTimestamps: [0, 10, 20, 30, 40] },
+      options: { refreshEveryInputs: 1, refreshAfterMinutes: 0, refreshWindowMinutes: 0, maxRefreshes: 5 },
+      completeImpl: () => "不应该写入的标题",
+    });
+    // 即使时间过了很久（legacy 模式下时间没有滑动窗口概念），仍然被拦。
+    h.state.clock = 999 * 60_000;
+    settleCycle(h, "输入1");
+    await flush();
+    expect(h.complete).not.toHaveBeenCalled();
+  });
+
+  it("window mode ignores timestamp-less (legacy-format) history entirely — the window starts fresh", async () => {
+    const h = makeHarness({
+      initialName: "旧标题",
+      // 没有传 refreshTimestamps（模拟读到的全部是缺 at 的旧格式记录），但 count 已经耗尽 legacy 额度。
+      initialOwnRecord: { name: "旧标题", count: 6 },
+      options: { refreshEveryInputs: 1, refreshAfterMinutes: 0, refreshWindowMinutes: 60, maxRefreshes: 5 },
+      completeImpl: () => "窗口模式下的全新开始",
+    });
+    h.state.clock = 0;
+    settleCycle(h, "输入1");
+    await flush();
+    // 窗口模式下没有时间戳的历史不计入统计，inWindow=0 < maxRefreshes=5 ——允许刷新。
+    expect(h.complete).toHaveBeenCalledTimes(1);
+    expect(h.names).toEqual(["窗口模式下的全新开始"]);
+  });
+});
+
+describe("createTitleTrigger — onSessionCompact one-shot bypass", () => {
+  const settleCycle = (h: Harness, prompt: string) => {
+    h.trigger.onBeforeAgentStart(prompt, h.deps);
+    h.trigger.onAgentEnd(true);
+    h.trigger.onAgentSettled(h.deps);
+  };
+
+  it("bypasses the quota (window-full) gate exactly once after a compaction, then reverts to blocked", async () => {
+    const h = makeHarness({
+      initialName: "旧标题",
+      initialOwnRecord: { name: "旧标题", count: 6, refreshTimestamps: [0, 0, 0, 0, 0] },
+      options: { refreshEveryInputs: 1, refreshAfterMinutes: 0, refreshWindowMinutes: 60, maxRefreshes: 5 },
+      completeImpl: () => "压缩后的标题",
+    });
+    // 没有压缩：满额，正常被拦。
+    settleCycle(h, "输入1");
+    await flush();
+    expect(h.complete).not.toHaveBeenCalled();
+
+    h.trigger.onSessionCompact();
+    settleCycle(h, "输入2");
+    await flush();
+    expect(h.complete).toHaveBeenCalledTimes(1);
+    expect(h.names).toEqual(["压缩后的标题"]);
+
+    // 绕过已消耗：下一轮没有再次 onSessionCompact，恢复正常拦截。
+    settleCycle(h, "输入3");
+    await flush();
+    expect(h.complete).toHaveBeenCalledTimes(1); // 没有第二次
+  });
+
+  it("bypasses refreshEveryInputs/refreshAfterMinutes thresholds too, not just the quota", async () => {
+    const h = makeHarness({
+      initialName: "旧标题",
+      initialOwnRecord: { name: "旧标题", count: 1 },
+      // 极高的阈值，正常永远不会达到。
+      options: { refreshEveryInputs: 1000, refreshAfterMinutes: 1000, refreshWindowMinutes: 60, maxRefreshes: 5 },
+      completeImpl: () => "压缩绕过了阈值",
+    });
+    h.trigger.onSessionCompact();
+    settleCycle(h, "仅 1 条输入");
+    await flush();
+    expect(h.complete).toHaveBeenCalledTimes(1);
+    expect(h.names).toEqual(["压缩绕过了阈值"]);
+  });
+
+  it("still respects hard safety: an in-flight generation blocks the bypassed attempt too, and the bypass stays armed for the next opportunity", async () => {
+    let resolveFirst!: (value: string) => void;
+    const h = makeHarness({
+      initialName: "旧标题",
+      initialOwnRecord: { name: "旧标题", count: 1 },
+      options: { refreshEveryInputs: 1, refreshAfterMinutes: 0, refreshWindowMinutes: 60, maxRefreshes: 5 },
+      completeImpl: () => new Promise<string>((resolve) => (resolveFirst = resolve)),
+    });
+    // 先打一个在途生成（不用 bypass）。
+    settleCycle(h, "输入1");
+    await flush();
+    expect(h.complete).toHaveBeenCalledTimes(1);
+
+    // 压缩到达，但此刻已有在途生成——下一轮 settled 必须被互斥拦下，绕过不消耗。
+    h.trigger.onSessionCompact();
+    h.trigger.onAgentEnd(true);
+    h.trigger.onAgentSettled(h.deps);
+    await flush();
+    expect(h.complete).toHaveBeenCalledTimes(1); // 没有第二次请求（互斥拦下）
+
+    // 第一次完成（失败/成功都行，这里让它成功），释放互斥；绕过仍未消耗，下一轮应该能生效。
+    resolveFirst("第一次的标题");
+    await flush();
+    expect(h.names).toEqual(["第一次的标题"]);
+
+    // 没有新输入也没有再次 onSessionCompact——但 bypass 仍在（之前被互斥拦下时没消耗），下一次 settled
+    // 应该能绕过「无新输入」阈值再次触发。
+    h.trigger.onAgentEnd(true);
+    h.trigger.onAgentSettled(h.deps);
+    await flush();
+    expect(h.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("session_start clears a pending bypass (new session carries no stale compaction flag)", async () => {
+    const h = makeHarness({
+      initialName: "旧标题",
+      initialOwnRecord: { name: "旧标题", count: 1 },
+      options: { refreshEveryInputs: 1000, refreshAfterMinutes: 0, refreshWindowMinutes: 60, maxRefreshes: 5 },
+    });
+    h.trigger.onSessionCompact();
+    h.trigger.onSessionStart();
+    // 新会话后这个名字不再被视为已命名（onSessionStart 不重置 state.name，但我们关心的是 bypass被清除）：
+    h.trigger.onBeforeAgentStart("新会话第一条（实际不会触发首标——已有名字）", h.deps);
+    h.trigger.onAgentEnd(true);
+    h.trigger.onAgentSettled(h.deps);
+    await flush();
+    // refreshEveryInputs=1000 远未达到，若 bypass 没被 session_start 清除就会误触发——这里应该什么都不发生。
+    expect(h.complete).not.toHaveBeenCalled();
   });
 });

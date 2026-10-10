@@ -549,7 +549,16 @@ export interface TitleSettings {
   refreshEveryInputs: number;
   /** 新增用户输入 ≥1 且累计运行时长（分钟）达到此值即可刷新；0 = 关闭此条件。默认 15。 */
   refreshAfterMinutes: number;
-  /** 每会话刷新上限（不含首标）；0 = 只首标不刷新。默认 5。 */
+  /**
+   * `maxRefreshes` 的滚动统计窗口（分钟）：只统计这个窗口内的刷新次数，超出窗口的旧刷新
+   * 不再计入额度（窗口滑走后又可以刷新，长会话的标题不会永久冻结）。`0` = legacy 口径，
+   * `maxRefreshes` 退化为整个会话生命周期的上限（与引入本字段前逐字节相同）。默认 60。
+   */
+  refreshWindowMinutes: number;
+  /**
+   * 每 `refreshWindowMinutes` 窗口（或整个会话生命周期，当窗口=0）内的刷新上限（不含首标）；
+   * 0 = 只首标不刷新。默认 5。
+   */
   maxRefreshes: number;
 }
 
@@ -974,6 +983,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     model: "zai-coding-cn/glm-5.3-flash",
     refreshEveryInputs: 4,
     refreshAfterMinutes: 15,
+    refreshWindowMinutes: 60,
     maxRefreshes: 5,
   },
   topicSwitch: { ...DEFAULT_TOPIC_SWITCH_SETTINGS },
@@ -1906,7 +1916,7 @@ export function parseSystemPromptSettings(input: unknown): SystemPromptSettings 
   };
 }
 
-/** Parse the optional `title` settings block（任务 #12 + v2）：逐字段回退默认，never throws；model 串只 trim 不校验——strict 校验在运行时 parseStrictModelRef，解析失败自行回落会话模型。三个新计数键（r1 #12）：`Number.isSafeInteger(x) && x >= 0` 否则回默认；字符串数字（如 "4"）不接受。 */
+/** Parse the optional `title` settings block（任务 #12 + v2 + rolling-window plan）：逐字段回退默认，never throws；model 串只 trim 不校验——strict 校验在运行时 parseStrictModelRef，解析失败自行回落会话模型。四个计数键（refreshEveryInputs/refreshAfterMinutes/refreshWindowMinutes/maxRefreshes）：`Number.isSafeInteger(x) && x >= 0` 否则回默认；字符串数字（如 "4"）不接受。 */
 export function parseTitleSettings(input: unknown): TitleSettings {
   const defaults = DEFAULT_SETTINGS.title;
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
@@ -1920,6 +1930,7 @@ export function parseTitleSettings(input: unknown): TitleSettings {
     model: typeof value.model === "string" ? value.model.trim() : defaults.model,
     refreshEveryInputs: nonNegativeInt(value.refreshEveryInputs, defaults.refreshEveryInputs),
     refreshAfterMinutes: nonNegativeInt(value.refreshAfterMinutes, defaults.refreshAfterMinutes),
+    refreshWindowMinutes: nonNegativeInt(value.refreshWindowMinutes, defaults.refreshWindowMinutes),
     maxRefreshes: nonNegativeInt(value.maxRefreshes, defaults.maxRefreshes),
   };
 }

@@ -906,6 +906,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       model: settings.title.model,
       refreshEveryInputs: settings.title.refreshEveryInputs,
       refreshAfterMinutes: settings.title.refreshAfterMinutes,
+      refreshWindowMinutes: settings.title.refreshWindowMinutes,
       maxRefreshes: settings.title.maxRefreshes,
     });
   // Deferred /reload: main-session only (post-guard). MUST be wired after

@@ -83,6 +83,7 @@ const DEPS = {
   model: "zai-coding-cn/glm-5.3-flash",
   refreshEveryInputs: 4,
   refreshAfterMinutes: 15,
+  refreshWindowMinutes: 60,
   maxRefreshes: 5,
 };
 
@@ -94,7 +95,7 @@ describe("wireTitle — registration", () => {
     expect(pi.on).not.toHaveBeenCalled();
   });
 
-  it("wires before_agent_start + agent_end + agent_settled + session_start + session_shutdown", () => {
+  it("wires before_agent_start + agent_end + agent_settled + session_compact + session_start + session_shutdown", () => {
     const { pi, handlers } = makePi();
     const wiring = wireTitle(pi as never, DEPS);
     expect(wiring).toBeDefined();
@@ -102,6 +103,7 @@ describe("wireTitle — registration", () => {
       "before_agent_start",
       "agent_end",
       "agent_settled",
+      "session_compact",
       "session_start",
       "session_shutdown",
     ]);
@@ -385,5 +387,87 @@ describe("wireTitle — refresh via agent_end/agent_settled", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("loads an old persisted record missing `at` (backward compat): still counts toward ownership/count, but not toward the rolling window", async () => {
+    const { pi, handlers } = makePi();
+    pi.getSessionName.mockReturnValue("旧标题");
+    // 旧格式记录（没有 at 字段）+ 一条带 at 的新格式记录；旧记录是首标（count 的第一条），
+    // 不进入 refreshTimestamps；新记录带 at，但它是第 2 条，才算一次「刷新」，应计入窗口。
+    const entries = [
+      {
+        type: "custom",
+        id: "a",
+        parentId: null,
+        timestamp: "",
+        customType: "subagent:title",
+        data: { v: 1, name: "首标（旧格式）" },
+      },
+      customTitleEntry("b", { v: 1, name: "旧标题", at: 1000 }),
+    ];
+    const { ctx, complete } = makeCtx({ entries, completeImpl: () => "刷新成功" });
+    wireTitle(pi as never, {
+      ...DEPS,
+      refreshEveryInputs: 1,
+      refreshAfterMinutes: 0,
+      refreshWindowMinutes: 0,
+      maxRefreshes: 5,
+    });
+    const before = handlers.find((h) => h.event === "before_agent_start")!;
+    const end = handlers.find((h) => h.event === "agent_end")!;
+    const settled = handlers.find((h) => h.event === "agent_settled")!;
+    before.handler({ prompt: "输入" } as never, ctx);
+    end.handler({ messages: [assistant("ok")] } as never, ctx);
+    settled.handler({} as never, ctx);
+    await flush();
+    // 不抛异常、不判为用户所有（count=2, latestName 对得上）：照常刷新。
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(pi.setSessionName).toHaveBeenCalledWith("刷新成功");
+  });
+
+  it("session_compact wires onSessionCompact: a quota-exhausted session gets one bypassed refresh, then reverts to blocked", async () => {
+    const { pi, handlers } = makePi();
+    pi.getSessionName.mockReturnValue("旧标题");
+    // count=6（1 首标 + 5 次刷新）已达 maxRefreshes=5 的生命周期上限（refreshWindowMinutes=0：legacy）。
+    const priorRefreshes = Array.from({ length: 5 }, (_, i) =>
+      customTitleEntry(`r${i}`, { v: 1, name: "旧标题", at: i }),
+    );
+    const entries = [customTitleEntry("first", { v: 1, name: "旧标题", at: 0 }), ...priorRefreshes];
+    const { ctx, complete } = makeCtx({ entries, completeImpl: () => "压缩后刷新" });
+    wireTitle(pi as never, {
+      ...DEPS,
+      refreshEveryInputs: 1,
+      refreshAfterMinutes: 0,
+      refreshWindowMinutes: 0,
+      maxRefreshes: 5,
+    });
+    const before = handlers.find((h) => h.event === "before_agent_start")!;
+    const end = handlers.find((h) => h.event === "agent_end")!;
+    const settled = handlers.find((h) => h.event === "agent_settled")!;
+    const compact = handlers.find((h) => h.event === "session_compact")!;
+
+    // 没有压缩：配额已耗尽，照常被拦。
+    before.handler({ prompt: "输入1" } as never, ctx);
+    end.handler({ messages: [assistant("ok")] } as never, ctx);
+    settled.handler({} as never, ctx);
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+
+    // 压缩发生：下一次 settled 绕过配额门检一次。
+    compact.handler(undefined as never, ctx);
+    before.handler({ prompt: "输入2" } as never, ctx);
+    end.handler({ messages: [assistant("ok")] } as never, ctx);
+    settled.handler({} as never, ctx);
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(pi.setSessionName).toHaveBeenCalledWith("压缩后刷新");
+
+    // 绕过已消耗：紧接着再来一轮，恢复正常拦截（配额仍然耗尽——appendEntry 是 mock，latestOwn 没有真正增长，
+    // 这里只验证「不会无限绕过」，不依赖 appendEntry 的真实持久化）。
+    before.handler({ prompt: "输入3" } as never, ctx);
+    end.handler({ messages: [assistant("ok")] } as never, ctx);
+    settled.handler({} as never, ctx);
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1); // 没有第二次生成
   });
 });

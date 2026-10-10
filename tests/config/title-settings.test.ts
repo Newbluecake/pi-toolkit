@@ -11,6 +11,7 @@ describe("title settings", () => {
       model: "zai-coding-cn/glm-5.3-flash",
       refreshEveryInputs: 4,
       refreshAfterMinutes: 15,
+      refreshWindowMinutes: 60,
       maxRefreshes: 5,
     });
   });
@@ -40,6 +41,7 @@ describe("title settings", () => {
       model: "",
       refreshEveryInputs: defaults.refreshEveryInputs,
       refreshAfterMinutes: defaults.refreshAfterMinutes,
+      refreshWindowMinutes: defaults.refreshWindowMinutes,
       maxRefreshes: defaults.maxRefreshes,
     });
   });
@@ -50,6 +52,7 @@ describe("title settings", () => {
       "title.model",
       "title.refreshEveryInputs",
       "title.refreshAfterMinutes",
+      "title.refreshWindowMinutes",
       "title.maxRefreshes",
     ]) {
       expect(isKnownSettingKey(key), key).toBe(true);
@@ -60,10 +63,11 @@ describe("title settings", () => {
     expect(defaultOf(SETTING_SPECS["title.model"]!)).toBe("zai-coding-cn/glm-5.3-flash");
     expect(defaultOf(SETTING_SPECS["title.refreshEveryInputs"]!)).toBe(4);
     expect(defaultOf(SETTING_SPECS["title.refreshAfterMinutes"]!)).toBe(15);
+    expect(defaultOf(SETTING_SPECS["title.refreshWindowMinutes"]!)).toBe(60);
     expect(defaultOf(SETTING_SPECS["title.maxRefreshes"]!)).toBe(5);
   });
 
-  describe("refreshEveryInputs / refreshAfterMinutes / maxRefreshes 边界（r1 #12：Number.isSafeInteger && >=0，否则回默认）", () => {
+  describe("refreshEveryInputs / refreshAfterMinutes / refreshWindowMinutes / maxRefreshes 边界（r1 #12：Number.isSafeInteger && >=0，否则回默认）", () => {
     const cases: Array<[unknown, string]> = [
       [NaN, "NaN"],
       [Infinity, "Infinity"],
@@ -76,7 +80,7 @@ describe("title settings", () => {
       [true, "true"],
       [Number.MAX_SAFE_INTEGER + 1, "> MAX_SAFE_INTEGER"],
     ];
-    for (const key of ["refreshEveryInputs", "refreshAfterMinutes", "maxRefreshes"] as const) {
+    for (const key of ["refreshEveryInputs", "refreshAfterMinutes", "refreshWindowMinutes", "maxRefreshes"] as const) {
       it(`${key}: falls back to the default for each garbage case`, () => {
         for (const [value, label] of cases) {
           expect(parseTitleSettings({ [key]: value })[key], `${key}=${label}`).toBe(defaults[key]);

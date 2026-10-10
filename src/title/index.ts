@@ -44,6 +44,11 @@ export interface WireTitleDeps {
   refreshEveryInputs: number;
   /** settings.title.refreshAfterMinutes：新增输入≥1 且累计运行时长达到此分钟数即可刷新；0 = 关闭此条件。 */
   refreshAfterMinutes: number;
+  /**
+   * settings.title.refreshWindowMinutes：`maxRefreshes` 的统计窗口（分钟）；0 = legacy
+   * 口径（全会话生命周期上限，与改动前逐字节相同）。
+   */
+  refreshWindowMinutes: number;
   /** settings.title.maxRefreshes：每会话刷新上限（不含首标）；0 = 只首标不刷新。 */
   maxRefreshes: number;
 }
@@ -112,30 +117,47 @@ function extractAssistantExcerpt(branch: readonly SessionEntry[]): string | unde
   return undefined;
 }
 
-/** 自有标题记录的落盘形状（r1 #14：`{v:1,name,at}`，name 非空字符串，at 数值）。 */
+/**
+ * 自有标题记录的落盘形状（r1 #14：`{v:1,name,at}`，name 非空字符串，at 数值）。`at` 标为可选
+ * 是向前兼容：窗口刷新（title.refreshWindowMinutes）落地前写入的记录没有时间戳，仍要能正常
+ * 加载为「存在但无时间戳」的历史——窗口口径下这类记录不计入统计（见 readTitleRecords）。
+ */
 interface TitleRecordData {
   v: 1;
   name: string;
-  at: number;
+  at?: number;
 }
 
 function isValidTitleRecordData(data: unknown): data is TitleRecordData {
   if (!data || typeof data !== "object") return false;
   const d = data as Record<string, unknown>;
-  return d.v === 1 && typeof d.name === "string" && d.name.length > 0 && typeof d.at === "number";
+  if (d.v !== 1 || typeof d.name !== "string" || d.name.length === 0) return false;
+  return d.at === undefined || typeof d.at === "number";
 }
 
-/** 会话级（全部 fileEntries）扫描自有标题记录：最近一条有效记录的名字 + 有效记录总数。非法记录跳过。 */
-function readTitleRecords(entries: readonly SessionEntry[]): { latestName?: string | undefined; count: number } {
+/**
+ * 会话级（全部 fileEntries）扫描自有标题记录：最近一条有效记录的名字 + 有效记录总数（legacy
+ * lifetime 口径，含首标）+ 「刷新」记录的时间戳数组（升序，供 refreshWindowMinutes 的滚动窗口
+ * 统计用）。第一条有效记录是首标，不计入 refreshTimestamps；没有 `at` 的旧格式记录同样不计入
+ * （窗口口径下视为无历史——不是 bug，是 r1 拍板的安全退化：宁可多刷新，不乱猜旧记录的时间）。
+ * 非法记录整体跳过。
+ */
+function readTitleRecords(entries: readonly SessionEntry[]): {
+  latestName?: string | undefined;
+  count: number;
+  refreshTimestamps: number[];
+} {
   let latestName: string | undefined;
   let count = 0;
+  const refreshTimestamps: number[] = [];
   for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== TITLE_RECORD_CUSTOM_TYPE) continue;
     if (!isValidTitleRecordData(entry.data)) continue;
     count++;
     latestName = entry.data.name; // entries 是 chronological ascending，最后一次赋值即最新
+    if (count > 1 && typeof entry.data.at === "number") refreshTimestamps.push(entry.data.at);
   }
-  return { latestName, count };
+  return { latestName, count, refreshTimestamps };
 }
 
 export interface TitleWiring {
@@ -205,6 +227,7 @@ export function wireTitle(pi: ExtensionAPI, deps: WireTitleDeps): TitleWiring | 
     ...(modelRef ? { modelRef } : {}),
     refreshEveryInputs: deps.refreshEveryInputs,
     refreshAfterMinutes: deps.refreshAfterMinutes,
+    refreshWindowMinutes: deps.refreshWindowMinutes,
     maxRefreshes: deps.maxRefreshes,
   });
 
@@ -231,6 +254,11 @@ export function wireTitle(pi: ExtensionAPI, deps: WireTitleDeps): TitleWiring | 
   pi.on("agent_settled", (_event, ctx) => {
     ctxRef.current = ctx;
     trigger.onAgentSettled(buildDeps(ctx));
+  });
+  pi.on("session_compact", () => {
+    // 压缩边界 one-shot 绕过（用户拍板）：下一次 agent_settled 刷新门检时忽略阈值一次，
+    // 仍然遵守硬安全线（见 title.ts 的 onSessionCompact 注释）。
+    trigger.onSessionCompact();
   });
   pi.on("session_start", () => {
     trigger.onSessionStart();

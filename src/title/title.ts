@@ -116,8 +116,12 @@ export interface TitlePorts {
    * 的同步段被调用一次。
    */
   readAssistantExcerpt(): string | undefined;
-  /** 会话级（全部 fileEntries）最近一条有效自有标题记录的名字 + 有效记录总数。 */
-  titleRecords(): { latestName?: string | undefined; count: number };
+  /**
+   * 会话级（全部 fileEntries）最近一条有效自有标题记录的名字 + 有效记录总数（legacy
+   * lifetime 口径，含首标那条） + 「刷新」记录的时间戳（升序，墙钟毫秒，不含最早那条
+   * 首标记录；缺 `at` 的旧格式记录不计入该数组——window 口径下视为无历史）。
+   */
+  titleRecords(): { latestName?: string | undefined; count: number; refreshTimestamps?: number[] | undefined };
   /** 写一条自有标题记录（pi 侧 appendEntry("subagent:title", {v:1,name,at})）。 */
   recordOwnTitle(name: string): void;
 }
@@ -158,7 +162,12 @@ export interface TitleTriggerOptions {
   refreshEveryInputs: number;
   /** 新增用户输入 ≥1 且累计运行时长达到此分钟数即可刷新；0 = 关闭此条件。 */
   refreshAfterMinutes: number;
-  /** 每会话刷新上限（不含首标）；0 = 只首标不刷新。 */
+  /**
+   * 满额的统计窗口（分钟）：`maxRefreshes` 只统计这个滚动窗口内的刷新次数（超出窗口的旧刷新不再计入）；
+   * `0` = legacy 口径，回到「全会话生命周期上限」（与改动前逐字节相同）。
+   */
+  refreshWindowMinutes: number;
+  /** 每会话刷新上限（不含首标）；0 = 只首标不刷新。窗口模式下是「满额窗口内」的上限，不是终身上限。 */
   maxRefreshes: number;
 }
 
@@ -274,6 +283,14 @@ export interface TitleTrigger<M> {
   onSessionStart(): void;
   /** session_shutdown handler：abort 在途生成，epoch+1。 */
   onSessionShutdown(): void;
+  /**
+   * session_compact handler（压缩边界 one-shot 绕过，用户拍板）：下一次 agent_settled 刷新
+   * 门检时，忽略 refreshEveryInputs/refreshAfterMinutes/maxRefreshes（含窗口）阈值一次——
+   * 仍然遵守硬安全线（所有权/已命名/在途互斥/模型可用）。一旦真正发起一次 generate()（无论
+   * 成功失败、哪怕最终发现无模型），该次机会即消耗；若硬安全线直接拦住（未命名/在途/用户
+   * 所有），不消耗，留给下一次 agent_settled。
+   */
+  onSessionCompact(): void;
 }
 
 interface GenerateContext<M> {
@@ -296,6 +313,10 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
   let runStartedAt: number | undefined;
   let lastRunOk = true;
   let inFlight: AbortController | undefined;
+  // 压缩边界 one-shot 绕过（用户拍板）：session_compact 到来时置位；下一次 onAgentSettled
+  // 若真正发起 generate()（过了所有硬安全门检）就消耗；被硬安全门检拦住（未命名/在途/用户所有/
+  // aborted 运行）则不消耗，留待下一次。
+  let pendingCompactBypass = false;
 
   const resetBaseline = (): void => {
     inputsSinceGen = 0;
@@ -459,13 +480,8 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
         runStartedAt = undefined;
       }
 
-      if (inFlight) return; // 在途互斥
-      if (!lastRunOk) return; // aborted/error 的 run 不触发刷新
-
-      const byCount = options.refreshEveryInputs > 0 && inputsSinceGen >= options.refreshEveryInputs;
-      const byTime =
-        inputsSinceGen >= 1 && options.refreshAfterMinutes > 0 && busyMs >= options.refreshAfterMinutes * 60_000;
-      if (!byCount && !byTime) return; // 新输入 0 时不会触发（两个条件都要求 inputsSinceGen>=1）
+      if (inFlight) return; // 在途互斥（硬安全，绕过标志不消耗）
+      if (!lastRunOk) return; // aborted/error 的 run 不触发刷新（硬安全，绕过标志不消耗）
 
       let currentName: string | undefined;
       try {
@@ -473,16 +489,38 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
       } catch {
         currentName = undefined;
       }
-      if (!currentName) return; // 首标尚未完成（理论上少见），交给下一次 before_agent_start
+      if (!currentName) return; // 首标尚未完成（硬安全，绕过标志不消耗）
 
-      let records: { latestName?: string | undefined; count: number };
+      let records: { latestName?: string | undefined; count: number; refreshTimestamps?: number[] | undefined };
       try {
         records = ports.titleRecords();
       } catch {
         records = { count: 0 };
       }
-      if (records.latestName === undefined || records.latestName !== currentName) return; // 用户所有，永久不刷新
-      if (records.count - 1 >= options.maxRefreshes) return; // 刷新额度耗尽
+      if (records.latestName === undefined || records.latestName !== currentName) return; // 用户所有，永久不刷新（硬安全，绕过标志不消耗）
+
+      const bypass = pendingCompactBypass;
+      if (!bypass) {
+        const byCount = options.refreshEveryInputs > 0 && inputsSinceGen >= options.refreshEveryInputs;
+        const byTime =
+          inputsSinceGen >= 1 && options.refreshAfterMinutes > 0 && busyMs >= options.refreshAfterMinutes * 60_000;
+        if (!byCount && !byTime) return; // 新输入 0 时不会触发（两个条件都要求 inputsSinceGen>=1）
+
+        if (options.refreshWindowMinutes > 0) {
+          // 窗口口径：只统计满额窗口内的刷新次数（没有时间戳的旧格式记录不计入，按 r1
+          // 口径在窗口模式下视为无历史）。
+          const windowMs = options.refreshWindowMinutes * 60_000;
+          const nowTs = ports.now();
+          const timestamps = records.refreshTimestamps ?? [];
+          const inWindow = timestamps.filter((at) => nowTs - at < windowMs).length;
+          if (inWindow >= options.maxRefreshes) return; // 满额窗口内刷新额度耗尽
+        } else {
+          if (records.count - 1 >= options.maxRefreshes) return; // legacy 口径：终身刷新额度耗尽
+        }
+      }
+      // bypass 在这里被消耗（无论成功失败/最终发现无模型，都算「那一次刷新」已尝试过）：
+      // 已通过全部硬安全门检（在途/未命名/用户所有/aborted），接下来一定会发起 generate()。
+      pendingCompactBypass = false;
 
       const epochAtTrigger = epoch;
       const inputSeqAtTrigger = inputSeq;
@@ -535,6 +573,7 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
       inputsSinceGen = 0;
       busyMs = 0;
       inFlight = undefined;
+      pendingCompactBypass = false; // 新会话/重载：旧会话的压缩拍板不跳转到新会话
     },
 
     onSessionShutdown(): void {
@@ -546,6 +585,12 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
         }
       }
       epoch++;
+    },
+
+    onSessionCompact(): void {
+      // 纯置位，不校验任何其他不变量：下一次 onAgentSettled 统一决定是否能走到生成
+      // （未命名/在途/用户所有/aborted 仍然拦住，标志保留到下一次机会）。
+      pendingCompactBypass = true;
     },
   };
 }

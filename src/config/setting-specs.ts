@@ -486,10 +486,15 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     0,
     "Refresh the title once >=1 new input and this many cumulative agent-run minutes have passed; 0 disables this trigger",
   ),
+  "title.refreshWindowMinutes": count(
+    "title.refreshWindowMinutes",
+    0,
+    "Rolling window (minutes) that maxRefreshes counts refreshes within; 0 = legacy lifetime cap for the whole session",
+  ),
   "title.maxRefreshes": count(
     "title.maxRefreshes",
     0,
-    "Max refreshes per session (not counting the first title); 0 = first title only, never refresh",
+    "Max refreshes per refreshWindowMinutes window (or per session when the window is 0); 0 = first title only, never refresh",
   ),
   // Merged armory-memory (memory-plan §3.3): all nine keys are non-live
   // (captured at activate; change → /reload). byteCap needs a max that
