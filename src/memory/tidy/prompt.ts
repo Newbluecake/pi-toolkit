@@ -14,6 +14,8 @@ export interface TidyPromptFile {
 export interface TidyPromptInput {
   cwd: string;
   files: readonly TidyPromptFile[];
+  /** Optional batch metadata shown to the model; absent preserves legacy prompt bytes. */
+  batch?: { index: number; total: number; otherNames?: readonly string[] };
   /** §8: no `core.md` in the directory ⇒ migration-mode instructions
    *  (produce one, split oversized mixed files, backfill frontmatter). */
   migrationMode: boolean;
@@ -42,6 +44,11 @@ export function buildTidyPrompt(input: TidyPromptInput): string {
       "Propose a cleanup: merge/trim redundant content, keep each file focused, and improve frontmatter " +
       "(description/read_when/topic/status) where it's missing or wrong.",
   );
+  if (input.batch) {
+    lines.push(`Batch ${String(input.batch.index)} of ${String(input.batch.total)}.`);
+    if (input.batch.otherNames && input.batch.otherNames.length > 0)
+      lines.push(`Other files in this directory (do not rewrite them): ${input.batch.otherNames.join(", ")}`);
+  }
   lines.push("");
   lines.push("Rules:");
   for (const r of RULES) lines.push(`- ${r}`);

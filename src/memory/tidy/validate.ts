@@ -43,6 +43,8 @@ export interface TidyValidateContext {
   coreBytes: number;
   topicMaxBytes: number;
   maxOutputBytes: number;
+  /** Names currently present on disk; used to reject rename/create collisions. */
+  existingNames?: ReadonlySet<string>;
 }
 
 export const SCHEMA_LIMITS = {
@@ -172,8 +174,10 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
       if (!f.newName) issues.push({ file: f.name, message: "rename requires newName" });
       else if (!isV2Name(f.newName))
         issues.push({ file: f.name, message: `invalid newName ${JSON.stringify(f.newName)}` });
+      else if (ctx.existingNames?.has(f.newName) && f.newName !== f.name)
+        issues.push({ file: f.name, message: `rename target ${f.newName} already exists` });
     }
-    if (f.action === "create" && ctx.original.has(f.name)) {
+    if (f.action === "create" && (ctx.original.has(f.name) || ctx.existingNames?.has(f.name))) {
       issues.push({ file: f.name, message: `create target ${f.name} already exists` });
     }
     if ((f.action === "rewrite" || f.action === "rename") && !ctx.original.has(f.name)) {

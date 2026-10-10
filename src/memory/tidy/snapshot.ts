@@ -55,6 +55,8 @@ export interface SnapshotOptions {
   /** Explicit file list from the command line; undefined = all non-archived
    *  addressable (v2 name rule) files. */
   names?: readonly string[];
+  /** Batch archive planning can include archived top-level files as signals. */
+  includeArchived?: boolean;
   paths?: MemoryPaths;
 }
 
@@ -103,7 +105,7 @@ export function snapshotMemoryDir(cwd: string, opts: SnapshotOptions = {}): Tidy
   for (const name of selectedNames) {
     const parsed = bodyByName.get(name);
     if (!parsed) continue;
-    if (!explicit && parsed.meta.status === "archived") continue; // default selection skips archived
+    if (!explicit && !opts.includeArchived && parsed.meta.status === "archived") continue; // default selection skips archived
     files.push({
       name,
       body: parsed.body,
