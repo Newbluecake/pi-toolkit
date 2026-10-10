@@ -75,9 +75,9 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 下表的角色→模型映射**同样适用于 workflow**：`agent()` 的 `opts.model` / `opts.thinking` 与 `Agent` 的同名参数同规则
 （完整 `provider/id` 优先；同 prompt 换模型不会命中 journal 旧结果），也可以继续写进 agent 类型 frontmatter 的 `model:`。
 
-Explore=`cr-anthropic/claude-sonnet-5`，Plan=`cr-anthropic/claude-opus-5-5`，
+Explore=`cr-anthropic/claude-sonnet-5-5`，Plan=`cr-anthropic/claude-opus-5-5`，
 reviewer / verifier = gpt-6.1-sol（`cr-response/gpt-6.1-sol` ⇄ `zhipu-pool/gpt-6.1-sol`），
-dev=`cr-anthropic/claude-sonnet-5` ⇄ gpt-6.1-sol（`cr-response` ⇄ `zhipu-pool`；并列首选、按包分摊；gpt-6.1-sol 开发的包 verifier 改派 Claude 系）；有订阅额度时 kimi-k3 / glm-5.3 可替换同阶段首选；
+dev=`cr-anthropic/claude-sonnet-5-5` ⇄ gpt-6.1-sol（`cr-response` ⇄ `zhipu-pool`；并列首选、按包分摊；gpt-6.1-sol 开发的包 verifier 改派 Claude 系）；有订阅额度时 kimi-k3 / glm-5.3 可替换同阶段首选；
 gpt-5.6-terra / gpt-6-astra 只作兜底。以 SKILL.md「各阶段模型分工」表为准。
 
 `agent()` 返回 `null` 不区分「用户跳过」与「模型失败」；严格按序回退由主会话根据失败通知重派，
@@ -114,7 +114,7 @@ const results = await pipeline(
       label: `verify:${t.id}`,
       phase: "Verify",
       agentType: "verifier",
-      model: "cr-anthropic/claude-sonnet-5", // 与 dev 一级不同模型，才满足验收独立性
+      model: "cr-anthropic/claude-sonnet-5-5", // 与 dev 一级不同模型，才满足验收独立性
       // 验收可以挂上同一 pipeline 里已经 completed 的 dev 调用作为专家（按它声明的 label 匹配到本 workflow
       // 自己那次调用，不会漏解到外面同名的旧 run）——前提是 dev 那次调用必须先 completed（pipeline 本身已保证），
       // 且挂了 experts 之后本次及后续提交不走 journal 回放。
