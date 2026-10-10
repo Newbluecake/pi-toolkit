@@ -279,7 +279,7 @@ describe("DetailHeader.vue — title-toggle collapse (2026-10 「红框部分支
 
     const stop = wrapper.get(".spawn-stop-btn");
     await stop.trigger("click"); // arm only — never a toggle
-    expect(stop.text()).toContain("Click again");
+    expect(wrapper.get(".spawn-stop-armed").text()).toContain("Stop this session?");
     expect(wrapper.find(".detail-head-info").exists()).toBe(true);
     expect(wrapper.get(".detail-title-toggle").attributes("aria-expanded")).toBe("true");
   });

@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import DetailHeader from "../../../src/web-hub/ui/src/components/detail/DetailHeader.vue";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
 
@@ -118,6 +118,9 @@ describe("DetailHeader.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
  * 「停止会话」 two-step-arm button (wired to `useSpawn.stop`); a terminal failed/expired first
  * prompt whose body went back into the draft (useNewSession `refilled:"draft"`) shows a
  * one-time dismissible note. Inject-only — the frozen DetailHeaderProps are untouched.
+ * 2026-10 variant-A redesign: idle is an icon-only ghost button (title + aria-label, no text);
+ * the armed state is an inline red confirm pill (text + ✓ confirm / ✕ cancel); stopping is a
+ * spinner pill (`.spawn-stop-busy`, role=status — no button to disable).
  */
 import { ref } from "vue";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
@@ -178,7 +181,7 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
     expect(terminal.find(".spawn-stop-btn").exists()).toBe(false);
   });
 
-  it("managed live record ⇒ two-step arm, second click calls stop(spawnId)", async () => {
+  it("managed live record ⇒ idle button is icon-only with title + aria-label, two-step arm, ✓ confirms and calls stop(spawnId)", async () => {
     const stopped: string[] = [];
     const hub = hubWithSpawn({
       spawns: { items: [spawnRec()], active: 1, max: 4 },
@@ -192,16 +195,127 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
     const btn = wrapper.get(".spawn-stop-btn");
-    expect(btn.text()).toContain("Stop session");
+    // icon-only idle: the SVG carries no text, the affordance is title + aria-label
+    expect(btn.attributes("aria-label")).toBe("Stop this web-started session");
+    expect(btn.attributes("title")).toBe("Stop session");
+    expect(btn.text()).toBe("");
     await btn.trigger("click"); // arm
-    expect(btn.text()).toContain("Click again");
+    const armed = wrapper.get(".spawn-stop-armed");
+    expect(armed.attributes("role")).toBe("group");
+    expect(armed.text()).toContain("Stop this session?");
     expect(stopped).toHaveLength(0);
-    await btn.trigger("click"); // confirm
+    await wrapper.get(".spawn-stop-armed-ok").trigger("click"); // ✓ confirms
     await wrapper.vm.$nextTick();
     expect(stopped).toEqual(["sp9"]);
   });
 
-  it("a failed stop surfaces the error code inline", async () => {
+  it("a second click on the pill's text part confirms too", async () => {
+    const stopped: string[] = [];
+    const hub = hubWithSpawn({
+      spawns: { items: [spawnRec()], active: 1, max: 4 },
+      stop: async (spawnId) => {
+        stopped.push(spawnId);
+        return { ok: true, state: "stopping" };
+      },
+    });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+    await wrapper.get(".spawn-stop-armed-confirm").trigger("click"); // pill text = second click
+    await wrapper.vm.$nextTick();
+    expect(stopped).toEqual(["sp9"]);
+  });
+
+  it("✕ cancels the armed pill without stopping; Esc disarms too", async () => {
+    const stopped: string[] = [];
+    const hub = hubWithSpawn({
+      spawns: { items: [spawnRec()], active: 1, max: 4 },
+      stop: async (spawnId) => {
+        stopped.push(spawnId);
+        return { ok: true, state: "stopping" };
+      },
+    });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+    await wrapper.get(".spawn-stop-armed-no").trigger("click"); // ✕ cancel
+    expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
+    expect(wrapper.find(".spawn-stop-btn").exists()).toBe(true); // back to idle
+
+    await wrapper.get(".spawn-stop-btn").trigger("click"); // arm again
+    await wrapper.get(".spawn-stop-armed").trigger("keydown", { key: "Escape" });
+    expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
+    expect(stopped).toHaveLength(0); // nothing was stopped along the way
+  });
+
+  it("auto-disarms after the 4s arm window (fake timers)", async () => {
+    vi.useFakeTimers();
+    try {
+      const hub = hubWithSpawn({ spawns: { items: [spawnRec()], active: 1, max: 4 } });
+      const wrapper = mount(DetailHeader, {
+        props: { agent: agent(), narrow: false },
+        global: { provide: { [HUB_CTX as symbol]: hub } },
+      });
+      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+      expect(wrapper.find(".spawn-stop-armed").exists()).toBe(true);
+      vi.advanceTimersByTime(4000);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
+      expect(wrapper.find(".spawn-stop-btn").exists()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("arming moves focus to the ✓ control; ✕ returns it to the idle button", async () => {
+    const hub = hubWithSpawn({ spawns: { items: [spawnRec()], active: 1, max: 4 } });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+      attachTo: document.body,
+    });
+    try {
+      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm
+      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-armed-ok").element);
+      await wrapper.get(".spawn-stop-armed-no").trigger("click"); // ✕ cancel
+      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-btn").element);
+      // Esc returns focus too (verifier 2026-10: it used to drop to <body>)
+      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm again
+      await wrapper.get(".spawn-stop-armed").trigger("keydown", { key: "Escape" });
+      await wrapper.vm.$nextTick();
+      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-btn").element);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("auto-disarm hands focus back to the idle button when it was inside the pill", async () => {
+    vi.useFakeTimers();
+    const hub = hubWithSpawn({ spawns: { items: [spawnRec()], active: 1, max: 4 } });
+    const wrapper = mount(DetailHeader, {
+      props: { agent: agent(), narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+      attachTo: document.body,
+    });
+    try {
+      await wrapper.get(".spawn-stop-btn").trigger("click"); // arm → focus on ✓
+      await wrapper.vm.$nextTick();
+      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-armed-ok").element);
+      vi.advanceTimersByTime(4000);
+      await wrapper.vm.$nextTick();
+      await wrapper.vm.$nextTick();
+      expect(document.activeElement).toBe(wrapper.get(".spawn-stop-btn").element);
+    } finally {
+      wrapper.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a failed stop surfaces the error code inline and returns to the idle icon button", async () => {
     const hub = hubWithSpawn({
       spawns: { items: [spawnRec()], active: 1, max: 4 },
       stop: async () => ({ ok: false, error: "E_GONE" }),
@@ -211,20 +325,25 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
     await wrapper.get(".spawn-stop-btn").trigger("click");
-    await wrapper.get(".spawn-stop-btn").trigger("click");
+    await wrapper.get(".spawn-stop-armed-ok").trigger("click");
     await flushPromises();
     expect(wrapper.get(".spawn-stop-note").text()).toContain("E_GONE");
+    expect(wrapper.find(".spawn-stop-btn").exists()).toBe(true);
+    expect(wrapper.find(".spawn-stop-busy").exists()).toBe(false);
   });
 
-  it("stopping record ⇒ the button is disabled with the stopping label", () => {
+  it("stopping record ⇒ the spinner pill with the stopping label (no interactive control)", () => {
     const hub = hubWithSpawn({ spawns: { items: [spawnRec({ state: "stopping" })], active: 1, max: 4 } });
     const wrapper = mount(DetailHeader, {
       props: { agent: agent(), narrow: false },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    const btn = wrapper.get(".spawn-stop-btn");
-    expect(btn.attributes("disabled")).toBeDefined();
-    expect(btn.text()).toContain("stopping");
+    const busy = wrapper.get(".spawn-stop-busy");
+    expect(busy.attributes("role")).toBe("status");
+    expect(busy.text()).toContain("stopping…");
+    expect(wrapper.find(".spawn-stop-btn").exists()).toBe(false);
+    expect(wrapper.find(".spawn-stop-armed").exists()).toBe(false);
+    expect(wrapper.find(".spawn-stop-busy button").exists()).toBe(false);
   });
 });
 

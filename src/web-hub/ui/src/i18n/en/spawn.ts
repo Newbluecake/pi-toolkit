@@ -112,10 +112,13 @@ const spawn = {
   badgeWeb: "web",
   badgeWebTitle: "Started from the web — managed by this hub",
 
-  // --- DetailHeader (managed session) ---
+  // --- DetailHeader (managed session; 2026-10 variant-A stop redesign) ---
   stopSession: "Stop session",
-  stopSessionConfirm: "Click again to stop",
+  stopSessionConfirm: "Stop this session?",
   stopSessionAria: "Stop this web-started session",
+  stopSessionGroupAria: "Confirm stopping this session",
+  stopSessionConfirmAria: "Stop this session now",
+  stopSessionCancelAria: "Cancel (Esc)",
   stopSessionStopping: "stopping…",
   stopSessionFailed: "Stop failed ({code})",
   fpRefilled: "The first message was not delivered ({state}) — its text is back in the draft.",

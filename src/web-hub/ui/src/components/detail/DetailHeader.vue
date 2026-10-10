@@ -7,7 +7,9 @@
   web-hub-spawn SP12 adds, via `HUB_CTX` inject
   only (frozen props untouched, kept deliberately local so the pending mobile-collapse line can
   still reflow this header freely): the managed session's 「停止会话」 button and the
-  first-prompt refill notice (arch §9.1).
+  first-prompt refill notice (arch §9.1). 2026-10 variant-A redesign (user-picked mockup
+  pwh-stopbtn/v-a): idle is an icon-only ghost button; the armed state is an inline confirm
+  pill (✓/✕) instead of a relabelled text button — see the template block below.
 
   Mobile-adaptation package (todo #7), inject/local-only like SP12:
   `SIDEBAR_DRAWER` (DashboardView-provided): while the 481–1024px mid band shows a detail
@@ -35,7 +37,7 @@
   `.detail-head-info` in detail.css.
 -->
 <script setup lang="ts">
-import { computed, inject, onUnmounted, ref } from "vue";
+import { computed, inject, nextTick, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -105,6 +107,14 @@ const stopBusy = ref(false);
 const stopError = ref<string | null>(null);
 let stopArmTimer: ReturnType<typeof setTimeout> | undefined;
 const STOP_ARM_MS = 4000;
+// 2026-10 variant-A redesign: the idle icon button / armed pill / stopping pill are separate
+// elements, so the two ends of the arm↔disarm round trip need their own focus targets.
+const stopIdleBtn = ref<HTMLButtonElement | null>(null);
+const stopOkBtn = ref<HTMLButtonElement | null>(null);
+const stopPill = ref<HTMLElement | null>(null);
+
+/** stopping = the record already stopping OR our own stop RPC still in flight (busy). */
+const stopStopping = computed(() => stopBusy.value || managed.value?.state === "stopping");
 
 function disarmStop(): void {
   stopArmed.value = false;
@@ -114,13 +124,36 @@ function disarmStop(): void {
   }
 }
 
+/** Arm in place: expand the confirm pill and hand focus to its ✓ control (the idle button
+ * that received the click is about to unmount). */
+function armStop(): void {
+  stopArmed.value = true;
+  stopArmTimer = setTimeout(autoDisarmStop, STOP_ARM_MS);
+  void nextTick(() => stopOkBtn.value?.focus());
+}
+
+/** ✕ — explicit cancel: disarm and give focus back to the idle icon button. */
+function cancelStop(): void {
+  disarmStop();
+  void nextTick(() => stopIdleBtn.value?.focus());
+}
+
+/** 4s window elapsed: disarm, and if keyboard focus was inside the pill (which is about to
+ * unmount) hand it back to the idle button instead of dropping it to <body>. */
+function autoDisarmStop(): void {
+  stopArmTimer = undefined;
+  const active = typeof document === "undefined" ? null : document.activeElement;
+  const hadFocus = active !== null && stopPill.value?.contains(active) === true;
+  disarmStop();
+  if (hadFocus) void nextTick(() => stopIdleBtn.value?.focus());
+}
+
 async function onStopSession(): Promise<void> {
   const rec = managed.value;
   const spawn = hub?.spawn;
   if (rec === undefined || spawn === undefined || stopBusy.value || rec.state === "stopping") return;
   if (!stopArmed.value) {
-    stopArmed.value = true;
-    stopArmTimer = setTimeout(disarmStop, STOP_ARM_MS);
+    armStop();
     return;
   }
   disarmStop();
@@ -137,7 +170,7 @@ async function onStopSession(): Promise<void> {
 function onStopKeydown(ev: KeyboardEvent): void {
   if (ev.key === "Escape" && stopArmed.value) {
     ev.stopPropagation();
-    disarmStop();
+    cancelStop();
   }
 }
 
@@ -227,25 +260,64 @@ function onToggleHeadInfo(): void {
       <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
         t("spawn.badgeRestoring")
       }}</span>
-      <button
-        v-if="managed"
-        class="btn spawn-stop-btn"
-        :class="{ armed: stopArmed }"
-        type="button"
-        :disabled="stopBusy || managed.state === 'stopping'"
-        :aria-label="t('spawn.stopSessionAria')"
-        @click="onStopSession"
-        @keydown="onStopKeydown"
-      >
-        <AppIcon name="ban" class="icon-sm" />
-        {{
-          managed.state === "stopping"
-            ? t("spawn.stopSessionStopping")
-            : stopArmed
-              ? t("spawn.stopSessionConfirm")
-              : t("spawn.stopSession")
-        }}
-      </button>
+      <!-- web-hub-spawn SP12 (arch §9.1) — 2026-10 variant-A redesign (user-picked mockup
+           pwh-stopbtn/v-a): idle = 32px icon-only ghost button (title + aria-label, danger tint
+           on hover/focus-visible); first click expands IN PLACE into the red confirm pill
+           (✓ or a second click on the pill confirms, ✕ / Esc / the STOP_ARM_MS timer cancels,
+           focus moves to ✓ on arm); stopping = spinner + label, no interactive control. -->
+      <template v-if="managed">
+        <button
+          v-if="!stopArmed && !stopStopping"
+          ref="stopIdleBtn"
+          class="spawn-stop-btn"
+          type="button"
+          :title="t('spawn.stopSession')"
+          :aria-label="t('spawn.stopSessionAria')"
+          @click="onStopSession"
+          @keydown="onStopKeydown"
+        >
+          <AppIcon name="stop" class="icon" />
+        </button>
+        <span
+          v-else-if="stopStopping"
+          class="spawn-stop-busy"
+          role="status"
+          :aria-label="t('spawn.stopSessionStopping')"
+        >
+          <AppIcon name="loader" class="icon-sm spin" />
+          {{ t("spawn.stopSessionStopping") }}
+        </span>
+        <span
+          v-else
+          ref="stopPill"
+          class="spawn-stop-armed"
+          role="group"
+          :aria-label="t('spawn.stopSessionGroupAria')"
+          @keydown="onStopKeydown"
+        >
+          <button class="spawn-stop-armed-confirm" type="button" @click="onStopSession">
+            {{ t("spawn.stopSessionConfirm") }}
+          </button>
+          <span class="spawn-stop-armed-sep" aria-hidden="true"></span>
+          <button
+            ref="stopOkBtn"
+            class="spawn-stop-armed-ok"
+            type="button"
+            :aria-label="t('spawn.stopSessionConfirmAria')"
+            @click="onStopSession"
+          >
+            <AppIcon name="check" class="icon-sm" />
+          </button>
+          <button
+            class="spawn-stop-armed-no"
+            type="button"
+            :aria-label="t('spawn.stopSessionCancelAria')"
+            @click="cancelStop"
+          >
+            <AppIcon name="x" class="icon-sm" />
+          </button>
+        </span>
+      </template>
     </div>
 
     <p v-if="stopError" class="spawn-stop-note" role="alert">

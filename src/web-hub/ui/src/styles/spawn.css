@@ -404,11 +404,110 @@
   color: var(--c-info);
 }
 
-/* ---------------------------------------------------------------- DetailHeader (managed session) */
-.spawn-stop-btn.armed {
-  border-color: var(--c-danger);
+/* ---------------------------------------------------------------- DetailHeader (managed session)
+ * 2026-10 variant-A redesign (user-picked mockup pwh-stopbtn/v-a + dark-a): idle is a 32px
+ * icon-only ghost button (muted colour, danger tint on hover/focus-visible); the armed state
+ * is a red inline confirm pill (the text part itself confirms — a second click on the pill —
+ * plus ✓ confirm / ✕ cancel); stopping is a spinner pill. Standalone selectors — NOT on
+ * `.btn` — so the danger tint never fights primitives.css' hover rules. */
+.spawn-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-3);
+  flex: none;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.spawn-stop-btn:hover,
+.spawn-stop-btn:focus-visible {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+/* armed pill — `--c-on-primary` keeps the glyphs readable on the danger fill in both themes
+ * (mockup dark-a: near-black on the light-red danger token) */
+.spawn-stop-armed {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 var(--sp-1) 0 var(--sp-3);
+  border-radius: var(--r-sm);
   background: var(--c-danger);
   color: var(--c-on-primary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  flex: none;
+}
+
+.spawn-stop-armed-confirm {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.spawn-stop-armed-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--sp-1);
+  background: color-mix(in srgb, var(--c-on-primary) 30%, transparent);
+  flex: none;
+}
+
+.spawn-stop-armed-ok,
+.spawn-stop-armed-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.spawn-stop-armed-ok:hover,
+.spawn-stop-armed-no:hover {
+  background: color-mix(in srgb, var(--c-on-primary) 18%, transparent);
+}
+
+/* stopping pill — informational (role="status"), no interactive control to disable */
+.spawn-stop-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  flex: none;
+}
+
+.spawn-stop-busy .icon {
+  color: var(--c-danger);
 }
 
 .spawn-stop-note {
@@ -465,6 +564,14 @@
  * `btn-xs` it is the most-tapped yet smallest control on the page, and a desktop-mode
  * phone scales the whole layout down, shrinking it further (2026-10-06 field report). --- */
 @media (pointer: coarse) {
+  /* house rule: every new interactive target ≥44px on coarse pointers (2026-10 stop button A) */
+  .spawn-stop-btn,
+  .spawn-stop-armed-ok,
+  .spawn-stop-armed-no {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   .nsmenu-toggle,
   .nsmenu .new-session-btn {
     min-height: 48px;
