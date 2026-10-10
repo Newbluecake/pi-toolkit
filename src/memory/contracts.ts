@@ -400,6 +400,8 @@ export interface TidySpawnRequest {
   /** Maps to `SpawnRequest.budgetOverride.totalMs`. */
   totalMs?: number;
   schema?: JsonSchema;
+  /** Dispatch-time provider payload budget (two bytes per estimated token). */
+  inputBudget?: { maxInputTokens: number; bytesPerToken: 2 };
   /** §7.0: always `"readonly"` — never widened, never optional. */
   toolDomain: "readonly";
   /** The command owns the result; no completion message may reach the model. */

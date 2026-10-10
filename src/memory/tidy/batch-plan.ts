@@ -30,7 +30,11 @@ export interface BatchPlan<T extends BatchCandidate = BatchCandidate> {
   maxFiles: number;
 }
 
-export const OVERHEAD_FLOOR_BYTES = 0;
+// Conservative planning floor: the P-RT G-overhead conformance probe measured
+// 49,608 B for a minimal read-only child payload on pi 1.0.2 (2026-10-10).
+// Keep a 16 KiB floor so batching does not assume zero dispatch overhead while
+// retaining ample margin below the observed minimum.
+export const OVERHEAD_FLOOR_BYTES = 16_384;
 export const TIDY_SCHEMA_BYTES = Buffer.byteLength(JSON.stringify(TIDY_SCHEMA), "utf8");
 export const overheadFloorBytes = OVERHEAD_FLOOR_BYTES + TIDY_SCHEMA_BYTES;
 

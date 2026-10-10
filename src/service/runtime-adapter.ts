@@ -983,6 +983,8 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           // instruction of the expert's type) is already in the fork's
           // history; replace-mode systemPrompt above survives untouched.
           prompt: isConsultRun ? spec.request.prompt : appendPromptNotes(buildPrompt(spec), promptNotes),
+          // F3/F4: includes inputBudget as a runtime-only field; it is
+          // consumed by RuntimeRunner and never copied into SessionSpec/pi.
           ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
           toolScope,
           // M-A: display-only metadata for the presentation layer (diag.model/

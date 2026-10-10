@@ -13,12 +13,12 @@ import type { RunState, StampedInput } from "../../src/core/types.js";
  * child-context-switch plan P0 (§2.3.1/§2.4, T-A/T-F4): the three new
  * best-effort diagnostic session_event kinds (`context_switch` /
  * `compaction_failed` / `switch_selfcheck_failed`) plus `switch_capability`
- * (§3.1 point 4) are handled in the exact same unconditional reduce() branch
+ * (§3.1 point 4) and P-RT's `dispatch_measure` are handled in the exact same unconditional reduce() branch
  * as `context_usage` (see tests/core/usage.test.ts's "context usage
  * diagnostics" suite for the sibling coverage of that event): accepted in
  * EVERY RunState (including every terminal status and a stale generation),
  * pure diag patch, no effect, `lastEventAt`/`lastEventType`/phase/status
- * never touched, `staleInputs` never bumped for these four kinds specifically
+ * never touched, `staleInputs` never bumped for these five kinds specifically
  * (they bypass the generation check entirely, unlike a real stale input).
  */
 const budget = { ...DEFAULT_BUDGET, totalMs: 10_000, queueWaitMs: 1_000, startupMs: 1_000, bindMs: 1_000 };
@@ -63,6 +63,17 @@ describe("child-context-switch plan P0 (T-A/T-F4): best-effort diagnostic sessio
     { t: "switch_capability" as const, reason: "l1-event-shape" },
     { t: "context_switch_rejected" as const, reason: "unpersisted" },
     { t: "child_extension_missing" as const },
+    {
+      t: "dispatch_measure" as const,
+      measure: {
+        maxInputTokens: 100,
+        bytesPerToken: 2,
+        preBytes: 20,
+        preTokens: 10,
+        payloadBytes: 40,
+        payloadTokens: 20,
+      },
+    },
   ];
 
   for (const event of events) {
@@ -112,7 +123,7 @@ describe("child-context-switch plan P0 (T-A/T-F4): best-effort diagnostic sessio
     });
   }
 
-  it("terminal isolation is identical for all five: settling first, then delivering the event, leaves status/phase/effects untouched", () => {
+  it("terminal isolation is identical for all six: settling first, then delivering the event, leaves status/phase/effects untouched", () => {
     for (const event of events) {
       let s = runningState();
       s = apply(s, { kind: "prompt_settled", text: "done" } as never, 9);
@@ -127,7 +138,44 @@ describe("child-context-switch plan P0 (T-A/T-F4): best-effort diagnostic sessio
   });
 });
 
-describe("child-context-switch plan P0 (T-A): diag.contextSwitches / diag.compactionFailures content", () => {
+describe("child-context-switch/P-RT plan: diag content", () => {
+  it("dispatch_measure folds every measurement field without changing lifecycle state", () => {
+    const before = runningState();
+    const result = reduce(
+      before,
+      {
+        generation: before.generation,
+        input: {
+          kind: "session_event",
+          at: 12,
+          event: {
+            t: "dispatch_measure",
+            measure: {
+              maxInputTokens: 99,
+              bytesPerToken: 2,
+              preBytes: 21,
+              preTokens: 11,
+              payloadBytes: 55,
+              payloadTokens: 28,
+            },
+          },
+        },
+      },
+      budget,
+    );
+    expect(result.effects).toEqual([]);
+    expect(result.state.diag.dispatchMeasure).toEqual({
+      maxInputTokens: 99,
+      bytesPerToken: 2,
+      preBytes: 21,
+      preTokens: 11,
+      payloadBytes: 55,
+      payloadTokens: 28,
+    });
+    expect(result.state.status).toBe(before.status);
+    expect(result.state.phase).toBe(before.phase);
+    expect(result.state.diag.lastEventType).toBe(before.diag.lastEventType);
+  });
   it("context_switch increments count and records `last` verbatim (seq/keepRecent/at/dropped)", () => {
     let s = runningState();
     s = apply(

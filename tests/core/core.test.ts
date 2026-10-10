@@ -1311,6 +1311,45 @@ describe("executable transition matrix (§4.4.1)", () => {
     for (const phase of RUN_PHASES) expect(Object.keys(MATRIX[phase])).toHaveLength(14);
   });
 
+  it("covers P-RT dispatch_measure as a diag-only transition in every phase", () => {
+    for (const phase of RUN_PHASES) {
+      const before = fixture(phase);
+      const result = reduce(
+        before,
+        {
+          generation: 1,
+          input: {
+            kind: "session_event",
+            at: 0,
+            event: {
+              t: "dispatch_measure",
+              measure: {
+                maxInputTokens: 10,
+                bytesPerToken: 2,
+                preBytes: 8,
+                preTokens: 4,
+                payloadBytes: 12,
+                payloadTokens: 6,
+              },
+            },
+          },
+        },
+        budget,
+      );
+      expect(result.effects).toEqual([]);
+      expect(result.state.status).toBe(before.status);
+      expect(result.state.phase).toBe(before.phase);
+      expect(result.state.diag.dispatchMeasure).toEqual({
+        maxInputTokens: 10,
+        bytesPerToken: 2,
+        preBytes: 8,
+        preTokens: 4,
+        payloadBytes: 12,
+        payloadTokens: 6,
+      });
+    }
+  });
+
   it.each(FLAT_MATRIX.map((c) => [`${c.phase}/${c.kind}`, c] as const))(
     "enforces %s",
     (_label, { phase, kind, cell }) => {
@@ -1384,6 +1423,22 @@ describe("P1-P14 property invariants", () => {
       return { kind: "deadline_extended", at, extendMs, source: "tool" };
     }
     if (next() < 0.2) return { kind: "stop_requested", at, cause: causes[Math.floor(next() * causes.length)] };
+    if (next() < 0.2)
+      return {
+        kind: "session_event",
+        at,
+        event: {
+          t: "dispatch_measure",
+          measure: {
+            maxInputTokens: 1 + Math.floor(next() * 100),
+            bytesPerToken: 2,
+            preBytes: Math.floor(next() * 1000),
+            preTokens: Math.floor(next() * 500),
+            payloadBytes: Math.floor(next() * 1000),
+            payloadTokens: Math.floor(next() * 500),
+          },
+        },
+      };
     if (next() < 0.2)
       return {
         kind: "effect_failed",

@@ -575,6 +575,8 @@ export function reduce(
   // emitting a persistence effect.
   if (input.kind === "session_event" && input.event.t === "context_usage")
     return { state: { ...state, diag: { ...state.diag, contextUsage: input.event.usage } }, effects: [] };
+  if (input.kind === "session_event" && input.event.t === "dispatch_measure")
+    return { state: { ...state, diag: { ...state.diag, dispatchMeasure: input.event.measure } }, effects: [] };
   // child-context-switch plan P0 (§2.3.1/§2.4): three more best-effort
   // diagnostics snapshots, kept in the exact same unconditional position as
   // context_usage above (before the generation check, before the terminal

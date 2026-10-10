@@ -1121,6 +1121,7 @@ function mapTidySpawnRequest(req: TidySpawnRequest): SpawnRequest {
     ...(req.thinkingOverride === undefined ? {} : { thinkingOverride: req.thinkingOverride }),
     ...(req.totalMs === undefined ? {} : { budgetOverride: { totalMs: req.totalMs } }),
     ...(req.schema === undefined ? {} : { schema: req.schema }),
+    ...(req.inputBudget === undefined ? {} : { inputBudget: req.inputBudget }),
     toolDomain: req.toolDomain,
     expectAck: req.expectAck,
     suppressDelivery: req.suppressDelivery,

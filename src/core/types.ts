@@ -276,7 +276,23 @@ export function displayAgentType(type: string | undefined): string | undefined {
  */
 export type ForkExpertSessionResult = { ok: true; path: string } | { ok: false; reason: string };
 
+export interface InputBudget {
+  maxInputTokens: number;
+  bytesPerToken: 2;
+}
+
+export interface DispatchMeasure {
+  maxInputTokens: number;
+  bytesPerToken: 2;
+  preBytes: number;
+  preTokens: number;
+  payloadBytes?: number;
+  payloadTokens?: number;
+}
+
 export interface SpawnRequest {
+  /** Dispatch-time input budget; the runtime measures both its coarse preflight and final provider payload. */
+  inputBudget?: InputBudget;
   /** Assigned run identifier, used by lifecycle extensions for resource names. */
   runId?: RunId;
   type: AgentTypeName;
@@ -707,7 +723,11 @@ export type DriverEvent =
    * state (see state-machine.ts's reduce()), no effect, `lastEventAt`/
    * `lastEventType` untouched.
    */
-  | { t: "child_extension_missing" };
+  | { t: "child_extension_missing" }
+  | {
+      t: "dispatch_measure";
+      measure: DispatchMeasure;
+    };
 
 /**
  * bash-timeout-grace plan §3.1 (P0b, frozen): one child-session bash job as
@@ -988,6 +1008,8 @@ export interface RunDiagnostics {
   toolHistory?: ToolCallRecord[];
   /** X1: worktree isolation marker state (display only; see WorktreeDisposition). */
   worktree?: WorktreeDisposition;
+  /** Dispatch-time input-budget observations. */
+  dispatchMeasure?: DispatchMeasure;
   /** M-A: lifetime per-tool-name counters — unaffected by toolHistory ring eviction. */
   toolCounts?: Record<string, number>;
   /**

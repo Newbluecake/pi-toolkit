@@ -90,6 +90,8 @@ export interface SessionHandle {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   prompt(text: string): Promise<void>;
+  /** Stage-1 input-budget preflight using pi's current effective prompt/tool definitions. */
+  measureInputBudget?(prompt: string): { preBytes: number; preTokens: number };
   steer(text: string): Promise<void>;
   requestAbort(): Promise<void>;
   dispose(): DisposeReport;
@@ -466,6 +468,25 @@ class PiSessionHandle implements SessionHandle {
   ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
+  }
+  measureInputBudget(prompt: string): { preBytes: number; preTokens: number } {
+    const byteLength = (value: string) => Buffer.byteLength(value, "utf8");
+    const active = new Set(this.session.getActiveToolNames());
+    const toolDefs = this.session.getAllTools().filter((tool) => active.has(tool.name));
+    const systemPrompt = this.session.systemPrompt;
+    const toolBytes = byteLength(JSON.stringify(toolDefs) ?? "[]");
+    // Conservative by design: StructuredOutput's schema is present in the
+    // active tool definition and counted again as the standalone schema term.
+    const schemaBytes = byteLength(
+      JSON.stringify(
+        toolDefs
+          .filter((tool) => tool.name === "StructuredOutput")
+          .map((tool) => tool.parameters)
+          .at(0) ?? null,
+      ) ?? "null",
+    );
+    const preBytes = byteLength(systemPrompt) + toolBytes + schemaBytes + byteLength(prompt);
+    return { preBytes, preTokens: Math.ceil(preBytes / 2) };
   }
   prompt(text: string) {
     return this.session.prompt(text).catch((e: unknown) => {

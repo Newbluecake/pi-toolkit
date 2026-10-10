@@ -41,6 +41,7 @@ import type { SlotPool, SlotTicket } from "./slot-pool.js";
 import type { ToolScopeEnforcer, ToolScopePolicy } from "./tool-scope.js";
 import type { Watchdog } from "./watchdog.js";
 import type { Reaper, ReapInput } from "./reaper.js";
+import { getInputBudgetRegistry, inputTokensForBytes } from "./input-budget-registry.js";
 
 export interface ResolvedSpawnRequest extends SessionSpec {
   runId: string;
@@ -88,6 +89,8 @@ export interface ResolvedSpawnRequest extends SessionSpec {
   forkSessionFrom?: string;
   /** M-A: display-only spawn metadata (model/label/agent type) folded into diag at enqueue time for the presentation layer (fleet tree / Agent tool card). */
   displayMeta?: RunDisplayMeta;
+  /** Dispatch-time input budget (consumed by the runner; never sent to pi). */
+  inputBudget?: import("../core/types.js").InputBudget;
   /** X11: per-run tool-scope policy + a fresh (per-run) enforcer instance; undefined = no dynamic re-enforcement (legacy behavior). */
   toolScope?: { policy: ToolScopePolicy; enforcer: ToolScopeEnforcer };
 }
@@ -734,6 +737,8 @@ export class RuntimeRunner implements Runner {
     // (released once the run is physically reaped — see notifyReaped).
     let liveSessionFile: string | undefined;
     let createP: Promise<SessionHandle> | undefined;
+    let inputBudgetRegistration: { unregister: () => void } | undefined;
+    let inputBudgetFailure: string | undefined;
     // child-context-switch plan P0 (§2.3.1 point 3): the FIRST
     // switch_selfcheck_failed reason observed for this (runId, generation),
     // latched here rather than read back out of `state.diag` at settlement
@@ -943,6 +948,100 @@ export class RuntimeRunner implements Runner {
         });
         return state.outcome!;
       }
+      if (req.inputBudget !== undefined) {
+        if (handle.childExtensionMissing) {
+          const missing = "input-budget: child extension missing — measurement unavailable";
+          inputBudgetFailure = missing;
+          this.sealBeforeTerminal(req.runId, gen);
+          dispatch({
+            kind: "startup_failed",
+            at: this.d.clock.now(),
+            phase: "extension_bind",
+            error: error(missing, "config"),
+          });
+          return state.outcome!;
+        }
+        const preflight = handle.measureInputBudget?.(req.prompt) ?? {
+          preBytes:
+            Buffer.byteLength(req.systemPrompt ?? "", "utf8") +
+            Buffer.byteLength(JSON.stringify(handle.getActiveTools()) ?? "[]", "utf8") +
+            Buffer.byteLength(req.prompt, "utf8"),
+          preTokens: 0,
+        };
+        const preTokens = preflight.preTokens || inputTokensForBytes(preflight.preBytes);
+        dispatch({
+          kind: "session_event",
+          at: this.d.clock.now(),
+          event: {
+            t: "dispatch_measure",
+            measure: {
+              maxInputTokens: req.inputBudget.maxInputTokens,
+              bytesPerToken: 2,
+              preBytes: preflight.preBytes,
+              preTokens,
+            },
+          },
+        });
+        if (preTokens > req.inputBudget.maxInputTokens) {
+          const message = `input-budget: preflight ${preTokens} tokens > ${req.inputBudget.maxInputTokens}`;
+          inputBudgetFailure = message;
+          this.sealBeforeTerminal(req.runId, gen);
+          dispatch({
+            kind: "startup_failed",
+            at: this.d.clock.now(),
+            phase: "extension_bind",
+            error: error(message, "config"),
+          });
+          return state.outcome!;
+        }
+        const registration = getInputBudgetRegistry().register(handle.sessionId, {
+          maxInputTokens: req.inputBudget.maxInputTokens,
+          bytesPerToken: 2,
+          onMeasure: (payloadBytes) => {
+            const payloadTokens = inputTokensForBytes(payloadBytes);
+            dispatch({
+              kind: "session_event",
+              at: this.d.clock.now(),
+              event: {
+                t: "dispatch_measure",
+                measure: {
+                  maxInputTokens: req.inputBudget!.maxInputTokens,
+                  bytesPerToken: 2,
+                  preBytes: preflight.preBytes,
+                  preTokens,
+                  payloadBytes,
+                  payloadTokens,
+                },
+              },
+            });
+          },
+          abort: (reason) => {
+            inputBudgetFailure = reason;
+            // Abort pi's own provider signal synchronously; requestAbort() is
+            // intentionally sync-before-await at the driver boundary. The
+            // runner cancellation then releases its prompt guard.
+            try {
+              void handle?.requestAbort();
+            } catch {
+              /* the prompt guard still receives the cancellation below */
+            }
+            cancel.cancel(reason);
+          },
+        });
+        if (!registration) {
+          const message = "input-budget: measurement registry full";
+          inputBudgetFailure = message;
+          this.sealBeforeTerminal(req.runId, gen);
+          dispatch({
+            kind: "startup_failed",
+            at: this.d.clock.now(),
+            phase: "extension_bind",
+            error: error(message, "config"),
+          });
+          return state.outcome!;
+        }
+        inputBudgetRegistration = registration;
+      }
       // X11: first application, right after bind and before prompt dispatch
       // (architecture §7.5 onBind). Guarded the same way as onTurnBoundary.
       if (req.toolScope && !isTerminalStatus(state.status)) req.toolScope.enforcer.onBind(handle, req.toolScope.policy);
@@ -974,6 +1073,7 @@ export class RuntimeRunner implements Runner {
       // crash looks like "completed with empty text".
       const turnError = prompted.ok ? handle.getTurnError?.() : undefined;
       const promptError = ((): ErrorInfo | undefined => {
+        if (inputBudgetFailure !== undefined) return error(inputBudgetFailure, "config");
         if (prompted.ok) {
           // child-context-switch plan P0 (§2.3.1 point 3): self-check failure
           // takes priority over turnError — the run must never settle
@@ -1032,6 +1132,7 @@ export class RuntimeRunner implements Runner {
     } finally {
       this.sealBeforeTerminal(req.runId, gen);
       cancel.detach();
+      inputBudgetRegistration?.unregister();
       this.d.watchdog.disarm(req.runId, gen);
       ticket?.release();
       if (createP) {
