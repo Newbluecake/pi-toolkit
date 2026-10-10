@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createAgentTool, type NestedSpawnPort } from "../../src/tools/agent-tool.js";
 import { createResultTool } from "../../src/tools/result-tool.js";
 import { createSteerTool } from "../../src/tools/steer-tool.js";
@@ -281,5 +283,43 @@ describe("bash deadline strings (bash-timeout-grace T17)", () => {
     expect(descriptions).toContain("max 200 chars");
     expect(descriptions).not.toContain("applyJobExtension");
     expect(descriptions).not.toContain("hardAt");
+  });
+});
+
+/**
+ * consult A/B instrumentation plan P2: the nested Agent tool's surface is
+ * FROZEN — its params JSON and description stay byte-for-byte identical to
+ * the pre-P2 golden (child sessions must not see the new analytics
+ * parameter, and the preset is not a promised nested capability). The
+ * top-level surface alone gains `meta` and the verdict/v1 preset hint.
+ */
+describe("consult A/B instrumentation (P2): Agent surface split", () => {
+  const golden = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../fixtures/tools/agent-nested-surface-golden.json", import.meta.url)), "utf8"),
+  ) as { allowedTypes: string[]; parameters: string; description: string };
+
+  it("nested params JSON and description are byte-for-byte unchanged (golden)", () => {
+    const nested = createAgentTool({ spawn: {} as NestedSpawnPort, allowedTypes: golden.allowedTypes });
+    expect(JSON.stringify(nested.parameters)).toBe(golden.parameters);
+    expect(nested.description).toBe(golden.description);
+  });
+
+  it("top-level alone gains meta (strict, analytics-only) and the verdict/v1 preset hint", () => {
+    const agent = tools().find((tool) => tool.name === "Agent")!;
+    const params = JSON.stringify(agent.parameters);
+    expect(params).toContain('"meta"');
+    expect(params).toContain("Analytics only — never shown to the subagent");
+    expect(params).not.toContain('"run_in_background"');
+    // the preset hint rides the top-level schema field's description (raw
+    // text, not the JSON-escaped form the serialized params would show)
+    const schemaProp = (agent.parameters as { properties: { schema?: { description?: string } } }).properties.schema;
+    expect(schemaProp?.description).toContain('Or pass the preset name "verdict/v1" for verifier/reviewer verdicts.');
+    // the meta sub-schema is strict: additionalProperties false
+    const meta = (agent.parameters as { properties: { meta?: { additionalProperties?: boolean } } }).properties.meta;
+    expect(meta?.additionalProperties).toBe(false);
+    // and the frozen nested surface mentions neither
+    expect(golden.parameters).not.toContain('"meta"');
+    expect(golden.parameters).not.toContain("verdict/v1");
+    expect(golden.description).not.toContain("verdict/v1");
   });
 });

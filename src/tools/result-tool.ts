@@ -5,6 +5,7 @@ import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
 import { deliveryKey, type Notifier } from "../delivery/notifier.js";
 import type { RunOutcome } from "../core/types.js";
+import { renderStructuredForHost, type SchemaPresetId } from "../core/verdict-schema.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { buildProgressLines, formatOutcomeSummary } from "./agent-tool.js";
 import {
@@ -513,6 +514,7 @@ function formatOutcome(
       contextSwitches?: ContextSwitchDiag;
       compactionFailures?: CompactionFailureRecord[];
       childExtensionMissing?: true;
+      schemaPreset?: SchemaPresetId;
     };
   },
   maxChars = 0,
@@ -539,9 +541,13 @@ function formatOutcome(
     .map((line) => `\n\n${line}`)
     .join("");
   if (outcome.status === "completed") {
+    // consult A/B instrumentation plan P2 (§4): a verdict/v1 run renders its
+    // structured result as the report plus a one-line verdict summary (host
+    // side only — `details.structuredResult` keeps the raw object); any
+    // non-preset schema keeps the raw JSON.stringify body.
     const body =
       outcome.structuredResult !== undefined
-        ? JSON.stringify(outcome.structuredResult)
+        ? renderStructuredForHost(outcome.structuredResult, outcome.diag?.schemaPreset)
         : truncateResultText(
             outcome.text ?? "(subagent completed with no text output)",
             maxChars,

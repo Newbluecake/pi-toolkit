@@ -418,6 +418,78 @@ describe("structured result + progress", () => {
   });
 });
 
+/**
+ * consult A/B instrumentation plan P2 (§4): a verdict/v1 run's structured
+ * result renders as the report plus a one-line verdict summary in the tool
+ * TEXT body (get and wait paths alike); `details.structuredResult` keeps
+ * the raw object, and a non-preset schema keeps the raw JSON body.
+ */
+describe("verdict/v1 host-side rendering (consult A/B plan P2)", () => {
+  const verdict = {
+    verdict: "conditional_pass",
+    blockers: 1,
+    findings: [
+      { severity: "blocker", summary: "gate failed" },
+      { severity: "minor", summary: "typo", location: "src/a.ts:1" },
+    ],
+    report: "## Acceptance report\n2 findings, 1 blocking.",
+  };
+  const expectedBody =
+    "## Acceptance report\n2 findings, 1 blocking.\n\nverdict: conditional_pass · blockers 1 · findings 2";
+
+  const verdictSnapshot = (): RunSnapshot => {
+    const snap = completedSnapshot();
+    snap.outcome = {
+      ...snap.outcome!,
+      text: undefined,
+      structuredResult: verdict,
+      diag: { ...snap.outcome!.diag, schemaPreset: "verdict/v1" },
+    };
+    return snap;
+  };
+
+  it("renders report + one-line verdict on the get path; details keep the raw object", async () => {
+    const tool = createResultTool({ query: queryForSnapshot(verdictSnapshot()) });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.startsWith(expectedBody)).toBe(true);
+    expect(text).not.toContain(JSON.stringify(verdict));
+    expect(text).toContain("cost:$0.0055"); // usage trailer preserved
+    expect((result.details as { structuredResult?: unknown }).structuredResult).toEqual(verdict);
+  });
+
+  it("renders the same body on the wait path", async () => {
+    const tool = createResultTool({ query: queryForSnapshot(verdictSnapshot()) });
+    const result = await tool.execute("tc1", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.startsWith(expectedBody)).toBe(true);
+    expect((result.details as { structuredResult?: unknown }).structuredResult).toEqual(verdict);
+  });
+
+  it("a non-preset schema (or no preset recorded) still renders as raw JSON", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, text: undefined, structuredResult: { ok: true } };
+    const tool = createResultTool({ query: queryForSnapshot(snap) });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.startsWith(JSON.stringify({ ok: true }))).toBe(true);
+  });
+
+  it("a verdict preset whose payload fails revalidation falls back to JSON", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = {
+      ...snap.outcome!,
+      text: undefined,
+      structuredResult: { verdict: "pass", blockers: 0 }, // missing report/findings
+      diag: { ...snap.outcome!.diag, schemaPreset: "verdict/v1" },
+    };
+    const tool = createResultTool({ query: queryForSnapshot(snap) });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.startsWith(JSON.stringify({ verdict: "pass", blockers: 0 }))).toBe(true);
+  });
+});
+
 describe("pi usage accounting: tool-result usage attach + first-terminal dedupe", () => {
   const query = (): QueryService => ({
     get: () => completedSnapshot(),

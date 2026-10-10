@@ -5,6 +5,8 @@ import type { ErrorInfo, JsonSchema, RunId, RunOutcome, RunSnapshot, SpawnReques
 import { displayAgentType } from "../core/types.js";
 import type { ResolveExpertsResult } from "../consult/index.js";
 import { normalizeSchemaInput } from "../core/json-schema.js";
+import { parseDispatchMeta } from "../core/dispatch-meta.js";
+import { renderStructuredForHost, resolveSchemaPreset, type SchemaPresetId } from "../core/verdict-schema.js";
 import { formatSlots, type SlotsInfo } from "../core/format.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
@@ -201,16 +203,13 @@ const leadingFields = {
     }),
   ),
 };
+const SCHEMA_FIELD_DESCRIPTION =
+  "Optional JSON Schema object. When set, the subagent must submit its final result through an injected " +
+  "StructuredOutput tool matching this schema; the host independently re-validates the submitted payload " +
+  "before the run is considered completed (validated twice — by the injected tool at submission and independently by the host before completion). If the run ends " +
+  "without a schema-valid submission it is reported as failed, not completed with free text.";
 const trailingFields = {
-  schema: Type.Optional(
-    Type.Unknown({
-      description:
-        "Optional JSON Schema object. When set, the subagent must submit its final result through an injected " +
-        "StructuredOutput tool matching this schema; the host independently re-validates the submitted payload " +
-        "before the run is considered completed (validated twice — by the injected tool at submission and independently by the host before completion). If the run ends " +
-        "without a schema-valid submission it is reported as failed, not completed with free text.",
-    }),
-  ),
+  schema: Type.Optional(Type.Unknown({ description: SCHEMA_FIELD_DESCRIPTION })),
   experts: Type.Optional(
     Type.Array(Type.String(), {
       description:
@@ -230,8 +229,54 @@ const trailingFields = {
   ),
 };
 
+/**
+ * Top-level-only trailing fields (consult A/B instrumentation plan P2). The
+ * `schema` copy appends the preset-name sentence; `experts` is shared by
+ * reference with the nested surface (byte-identical). The nested surface
+ * keeps the original `trailingFields` verbatim — its params JSON and
+ * descriptions are frozen byte-for-byte (tests/tools/model-facing-strings).
+ */
+const topLevelTrailingFields = {
+  schema: Type.Optional(
+    Type.Unknown({
+      description: SCHEMA_FIELD_DESCRIPTION + ' Or pass the preset name "verdict/v1" for verifier/reviewer verdicts.',
+    }),
+  ),
+  experts: trailingFields.experts,
+  meta: Type.Optional(
+    Type.Object(
+      {
+        lane: Type.Optional(
+          Type.Union([Type.Literal("L0"), Type.Literal("L1"), Type.Literal("L2"), Type.Literal("L3")], {
+            description: "Dev-flow lane of this dispatch (L0 direct edit .. L3 complex).",
+          }),
+        ),
+        packageId: Type.Optional(
+          Type.String({
+            description:
+              "Id of the work package this dispatch belongs to. Use the SAME id for every dispatch of a package (initial work, rework, re-dispatch); required when abArm is set.",
+          }),
+        ),
+        feature: Type.Optional(Type.String({ description: "Optional feature id this dispatch belongs to." })),
+        abArm: Type.Optional(
+          Type.Union([Type.Literal("experts"), Type.Literal("control")], {
+            description:
+              'A/B arm drawn for this package. Must match experts: "control" means dispatch WITHOUT the experts parameter, "experts" means a non-empty experts list.',
+          }),
+        ),
+      },
+      {
+        additionalProperties: false,
+        description:
+          "Optional dispatch metadata for analytics: lane, package id, feature, A/B arm. " +
+          "Analytics only — never shown to the subagent, never added to its prompt, and it does not change how the run executes.",
+      },
+    ),
+  ),
+};
+
 /** Top-level (main-session) Agent tool parameters — always background, no `run_in_background`. */
-export const AgentToolParams = Type.Object({ ...leadingFields, ...trailingFields });
+export const AgentToolParams = Type.Object({ ...leadingFields, ...topLevelTrailingFields });
 export type AgentToolParams = Static<typeof AgentToolParams>;
 
 /** Nested delegation Agent tool parameters — blocking by default, opt-in `run_in_background`. */
@@ -368,11 +413,48 @@ function prepareSpawn(
   // Normalize before anything is admitted: a string/non-object schema would
   // otherwise crash pi's typebox at session construction with an opaque
   // "Object.defineProperty called on non-object" (see normalizeSchemaInput).
+  // consult A/B instrumentation plan P2: a preset NAME ("verdict/v1")
+  // resolves to the frozen schema and tags the request with `schemaPreset`
+  // (used later for host-side verdict rendering). The nested surface accepts
+  // the preset too — a side effect of sharing prepareSpawn, not a promised
+  // capability (its description does not mention it, no test locks it).
   let schema: JsonSchema | undefined;
+  let schemaPreset: SchemaPresetId | undefined;
   if (params.schema !== undefined) {
-    const normalized = normalizeSchemaInput(params.schema);
-    if (!normalized.ok) throw new Error(normalized.error);
-    schema = normalized.schema;
+    const preset = resolveSchemaPreset(params.schema);
+    if (preset !== undefined) {
+      schema = preset.schema;
+      schemaPreset = preset.id;
+    } else {
+      const normalized = normalizeSchemaInput(params.schema);
+      if (!normalized.ok) throw new Error(normalized.error);
+      schema = normalized.schema;
+    }
+  }
+  // consult A/B instrumentation plan (§3/P2): strict `meta` validation — a
+  // failed parse throws verbatim so the model can fix its own call (the
+  // message names the allowed keys); `{}`/absent leaves NO dispatchMeta
+  // field downstream. buildPrompt never reads it, so it can never reach the
+  // child prompt. Only own fields, plain objects only (parseDispatchMeta).
+  // The nested Agent shares prepareSpawn, so a stray `meta` arg there is
+  // validated the same way — a side effect, not a capability promise (the
+  // nested schema does not declare `meta`; same footing as the preset above).
+  const parsedMeta = parseDispatchMeta(params.meta);
+  if (!parsedMeta.ok) throw new Error(parsedMeta.error);
+  const dispatchMeta = parsedMeta.meta;
+  // A/B arm must be consistent with the experts whitelist (same plan P2):
+  // the control arm dispatches WITHOUT experts, the experts arm WITH them.
+  // Checked against the raw param (before expert resolution) so the model
+  // gets the consistency error first, self-correcting in one round trip.
+  if (dispatchMeta?.abArm === "control" && params.experts !== undefined && params.experts.length > 0) {
+    throw new Error(
+      'meta.abArm "control" is inconsistent with a non-empty experts list: drop experts for this arm, or pass abArm "experts"',
+    );
+  }
+  if (dispatchMeta?.abArm === "experts" && (params.experts === undefined || params.experts.length === 0)) {
+    throw new Error(
+      'meta.abArm "experts" requires a non-empty experts list: pass experts for this arm, or pass abArm "control"',
+    );
   }
   const modelOverride = parseModel(params.model);
   // consult §4.2: `experts` must be resolvable in THIS context — an
@@ -412,6 +494,8 @@ function prepareSpawn(
       : {}),
     ...(params.isolation ? { isolation: params.isolation } : {}),
     ...(schema !== undefined ? { schema } : {}),
+    ...(schemaPreset !== undefined ? { schemaPreset } : {}),
+    ...(dispatchMeta !== undefined ? { dispatchMeta } : {}),
     ...(experts !== undefined && experts.refs.length > 0 ? { consultExperts: experts.refs } : {}),
     // L1 (agent-tool pool-full plan §1/§2): both the top-level and nested
     // Agent tool set this — it is a no-op for nested calls in practice
@@ -511,9 +595,12 @@ async function spawnAndCollect(
     throw new Error(parts.join(" "));
   }
   const effectiveLabel = outcome.diag.label ?? params.description;
+  // consult A/B instrumentation plan P2 (§4): a verdict/v1 run's structured
+  // result renders as the report plus a one-line verdict summary (host side
+  // only); any non-preset schema keeps the raw JSON.stringify body.
   const resultText =
     outcome.structuredResult !== undefined
-      ? JSON.stringify(outcome.structuredResult)
+      ? renderStructuredForHost(outcome.structuredResult, outcome.diag.schemaPreset)
       : truncateResultText(
           outcome.text ?? "(subagent completed with no text output)",
           deps.resultMaxChars?.() ?? 0,

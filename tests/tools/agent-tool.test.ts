@@ -9,6 +9,7 @@ import {
   type NestedSpawnPort,
 } from "../../src/tools/agent-tool.js";
 import { CappedBody } from "../../src/ui/capped-body.js";
+import { VERDICT_SCHEMA_V1 } from "../../src/core/verdict-schema.js";
 import type { RunDiagnostics, RunOutcome, SpawnRequest } from "../../src/core/types.js";
 
 function outcome(
@@ -68,9 +69,17 @@ describe("tools/agent-tool: top-level Agent is background-only", () => {
     expect(Object.keys(NestedAgentToolParams.properties)).toContain("run_in_background");
     expect(createAgentTool({ spawn: fakePort() }).parameters).toBe(AgentToolParams);
     expect(nestedTool(fakePort()).parameters).toBe(NestedAgentToolParams);
-    // Everything else is shared verbatim between the two surfaces.
+    // Everything else is shared verbatim between the two surfaces, except the
+    // P2 additions: the top-level `schema` copy (preset hint appended) and the
+    // top-level-only `meta` (analytics dispatch metadata).
     const { run_in_background: _dropped, ...nestedRest } = NestedAgentToolParams.properties;
-    expect(Object.keys(AgentToolParams.properties)).toEqual(Object.keys(nestedRest));
+    const { meta: _meta, ...topRest } = AgentToolParams.properties;
+    expect(Object.keys(topRest)).toEqual(Object.keys(nestedRest));
+    expect(Object.keys(AgentToolParams.properties)).toEqual([...Object.keys(nestedRest), "meta"]);
+    // `experts` (and every leading field) is still the very same schema object;
+    // only `schema` is a separate top-level copy (description gains the hint).
+    expect(topRest.experts).toBe(nestedRest.experts);
+    expect(topRest.schema).not.toBe(nestedRest.schema);
   });
 
   it("a plain call returns a run_id immediately through spawn(), never spawnAndWait()", async () => {
@@ -689,5 +698,199 @@ describe("tools/agent-tool: renderResult (markdown body)", () => {
     expect(rendered).not.toContain("✓ "); // no stats summary line for a background start
     const second = tool.renderResult!(result, options, theme as never, ctx(first) as never);
     expect(second).toBe(first); // lastComponent reuse preserved
+  });
+});
+
+/**
+ * consult A/B instrumentation plan P2: the top-level Agent tool's `meta`
+ * parameter (strict, analytics-only, never in the child prompt) and the
+ * "verdict/v1" schema preset (request tagging + host-side rendering).
+ */
+describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 preset)", () => {
+  it("threads valid meta onto the spawn request as dispatchMeta; absent or {} leaves no field", async () => {
+    const port = fakePort();
+    const tool = createAgentTool({ spawn: port });
+    await tool.execute(
+      "tc",
+      {
+        description: "d",
+        prompt: "do the work",
+        subagent_type: "worker",
+        meta: { lane: "L2", packageId: "ab-pkg-42", feature: "consult-ab", abArm: "control" },
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen?.dispatchMeta).toEqual({
+      lane: "L2",
+      packageId: "ab-pkg-42",
+      feature: "consult-ab",
+      abArm: "control",
+    });
+    // Analytics only — never shown to the subagent: the child prompt is the
+    // caller's prompt verbatim (buildPrompt never reads dispatchMeta).
+    expect(port.seen?.prompt).toBe("do the work");
+    expect(port.seen?.prompt).not.toContain("ab-pkg-42");
+
+    for (const args of [
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      { description: "d", prompt: "p", subagent_type: "worker", meta: {} },
+    ]) {
+      const bare = fakePort();
+      await createAgentTool({ spawn: bare }).execute("tc", args as AgentToolParams, undefined, undefined, {} as never);
+      expect(bare.seen).not.toHaveProperty("dispatchMeta");
+    }
+  });
+
+  it.each([
+    ["unknown key", { lane: "L1", oops: 1 }, /unknown key\(s\): oops.*Allowed keys: lane, packageId, feature, abArm/],
+    ["non-plain object", "L2", /meta must be a plain object with keys/],
+    ["invalid lane", { lane: "L9" }, /meta\.lane must be one of: L0, L1, L2, L3/],
+    ["invalid packageId", { packageId: "-nope" }, /meta\.packageId must be a non-empty id matching/],
+    ["abArm without packageId", { abArm: "control" }, /meta\.abArm requires meta\.packageId/],
+  ])("rejects meta with %s, listing what is allowed, and never spawns", async (_label, meta, message) => {
+    const port = fakePort();
+    await expect(
+      createAgentTool({ spawn: port }).execute(
+        "tc",
+        { description: "d", prompt: "p", subagent_type: "worker", meta } as AgentToolParams,
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(message);
+    expect(port.seen).toBeUndefined();
+  });
+
+  it("arm/experts consistency: control + non-empty experts throws; experts arm without experts throws", async () => {
+    const port = fakePort();
+    const tool = createAgentTool({ spawn: port });
+    await expect(
+      tool.execute(
+        "tc",
+        {
+          description: "d",
+          prompt: "p",
+          subagent_type: "worker",
+          meta: { packageId: "pkg", abArm: "control" },
+          experts: ["main"],
+        },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/abArm "control" is inconsistent with a non-empty experts list/);
+    await expect(
+      tool.execute(
+        "tc",
+        { description: "d", prompt: "p", subagent_type: "worker", meta: { packageId: "pkg", abArm: "experts" } },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/abArm "experts" requires a non-empty experts list/);
+    await expect(
+      tool.execute(
+        "tc",
+        {
+          description: "d",
+          prompt: "p",
+          subagent_type: "worker",
+          meta: { packageId: "pkg", abArm: "experts" },
+          experts: [],
+        },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/requires a non-empty experts list/);
+    expect(port.seen).toBeUndefined();
+    // control + an EMPTY experts list is consistent (no experts attached).
+    await tool.execute(
+      "tc",
+      {
+        description: "d",
+        prompt: "p",
+        subagent_type: "worker",
+        meta: { packageId: "pkg", abArm: "control" },
+        experts: [],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen?.consultExperts).toBeUndefined();
+    expect(port.seen?.dispatchMeta?.abArm).toBe("control");
+  });
+
+  it('resolves the "verdict/v1" preset to the frozen schema and tags schemaPreset; other schemas stay untagged', async () => {
+    const port = fakePort();
+    await createAgentTool({ spawn: port }).execute(
+      "tc",
+      { description: "d", prompt: "p", subagent_type: "verifier", schema: "verdict/v1" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen?.schema).toEqual(VERDICT_SCHEMA_V1);
+    expect(port.seen?.schemaPreset).toBe("verdict/v1");
+
+    const jsonPort = fakePort();
+    const schema = { type: "object", properties: { ok: { type: "boolean" } } };
+    await createAgentTool({ spawn: jsonPort }).execute(
+      "tc",
+      { description: "d", prompt: "p", subagent_type: "worker", schema: JSON.stringify(schema) },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(jsonPort.seen?.schema).toEqual(schema);
+    expect(jsonPort.seen).not.toHaveProperty("schemaPreset");
+  });
+
+  it("blocking path renders a verdict/v1 structured result as report + verdict line; non-preset stays JSON", async () => {
+    const verdict = {
+      verdict: "pass",
+      blockers: 0,
+      findings: [{ severity: "nit", summary: "typo" }],
+      report: "## Acceptance\nAll gates green.",
+    } as const;
+    const verdictPort: NestedSpawnPort = {
+      async spawn() {
+        throw new Error("not used");
+      },
+      async spawnAndWait() {
+        return outcome("child-1", { structuredResult: verdict }, { schemaPreset: "verdict/v1", label: "d" });
+      },
+    };
+    const rendered = await nestedTool(verdictPort).execute(
+      "tc",
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    const text = (rendered.content[0] as { text: string }).text;
+    expect(text).toBe("## Acceptance\nAll gates green.\n\nverdict: pass · blockers 0 · findings 1");
+    // details keep the RAW object (the plan freezes details.structuredResult).
+    expect((rendered.details as { structuredResult?: unknown }).structuredResult).toEqual(verdict);
+
+    const plainPort: NestedSpawnPort = {
+      async spawn() {
+        throw new Error("not used");
+      },
+      async spawnAndWait() {
+        return outcome("child-1", { structuredResult: { ok: true } }, { label: "d" });
+      },
+    };
+    const plain = await nestedTool(plainPort).execute(
+      "tc",
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect((plain.content[0] as { text: string }).text).toBe(JSON.stringify({ ok: true }));
   });
 });
