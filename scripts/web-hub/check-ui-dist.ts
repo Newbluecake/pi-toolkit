@@ -77,7 +77,11 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // (including theme-init.js). The accepted 245 KiB budget remains unchanged, with 2,705 B
 // of current-tree headroom. The independent delta above isolates P5; the current-tree
 // main size must not be compared as an isolated P5 delta.
-const JS_BUDGET_GZIP_BYTES = 245 * 1024;
+// sysload P5 (2026-10-11, docs/dev/sysload/plan.md §10 "仅实测超标时"): after sysload P4 (load
+// pill / card / drawer banner + en/zh load dictionaries) and the @mention parity UI, total JS
+// measured 255,430 B gz on a clean committed tree ⇒ budget raised to 255 KiB (261,120 B,
+// ~5.6 KB headroom).
+const JS_BUDGET_GZIP_BYTES = 255 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}

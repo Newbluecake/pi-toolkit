@@ -328,3 +328,10 @@ totalBytes, level, skipped?}; loadavg?}`；`LoadTopWire{at; partial?; byCpu[≤5
 | 8   | Minor | 接受，归 P1（invalid 统一口径 + 异常关系拒绝）                                                                                | §8 I1、§10 包注                 |
 | 9   | Minor | 接受，归 P0（`sinceAgoMs` + 收帧锚）                                                                                          | §10 包注                        |
 | 10  | Minor | 接受，拆 P3（cmd-limit bucket）与 P4（logic clients 入域）                                                                    | §7.3、§10                       |
+
+## 16. 实施记录（P5 收口，2026-10-11）
+
+- 提交：P0 `1a93950`、P4 `bb6db5c`、P1 `e9c09c8`、P2b `65ea6b3`、P3 `326794d` + 测试 `2aea630`、P2a `f2a5fa5`、修复包 `7436b1c`。
+- 实施期裁定（主会话）：`LoadTopRowWire.cpuPct/rssBytes` 改为可选（缺失 ⇔ n/a，取代 NaN 哨兵）；`MetricState.levelSinceMono` / `LoadVerdict.gatingSinceMono` 追加为可选字段（稳态闸门时长）；`parseLoadSettings` 越界值钳到边界（§6.1 「逐字段容错」的实现口径）。
+- 与本文不一致处（按冻结类型实现）：磁盘只采两条路径（无 cwd 第三路径）；MEM PSI 未采集（wire 无字段）；hub Card 不显示 PSI-mem/Swap/MEM 绝对 GiB（wire 无字段）。
+- UI JS gzip 预算按实测上调为 255 KiB（`scripts/web-hub/check-ui-dist.ts`）；CSS 25,273 B / 25 KiB，余量约 330 B。
