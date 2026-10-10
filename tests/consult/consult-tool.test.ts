@@ -321,6 +321,30 @@ describe("consult tool: caller mistakes throw (T-2)", () => {
       expect((result.details as { expertRunId?: string }).expertRunId).toBe("r_EXPERT1");
     }
   });
+
+  it("accepts the whitelist description's own `label (r_xxx)` display format (eval-2026-10.md \u00a74 tool-friction)", async () => {
+    for (const handle of [
+      "explorer (r_EXPERT1)",
+      "  explorer (r_EXPERT1)  ",
+      "explorer(r_EXPERT1)",
+      "mislabeled (r_EXPERT1)", // run id inside parens wins over a wrong label part
+    ]) {
+      const h = harness();
+      const result = (await exec(h, handle)) as ToolResult;
+      expect((result.details as { expertRunId?: string }).expertRunId).toBe("r_EXPERT1");
+    }
+  });
+
+  it("a `label (id)` form whose id is unknown falls back to the (matching) label part", async () => {
+    const h = harness();
+    const result = (await exec(h, "explorer (r_NOPE)")) as ToolResult;
+    expect((result.details as { expertRunId?: string }).expertRunId).toBe("r_EXPERT1");
+  });
+
+  it("a `label (id)` form whose id AND label are both unknown throws with the allowed list", async () => {
+    const h = harness();
+    await expect(exec(h, "stranger (r_NOPE)")).rejects.toThrow(/not in this run's expert whitelist/);
+  });
 });
 
 describe("consult tool: nack surface (T-2)", () => {
@@ -479,7 +503,8 @@ describe("consult tool: success surface (T-3)", () => {
     expect(result.content[0]!.text).toContain("chars omitted");
     expect(result.content[0]!.text).not.toContain("full session transcript");
     expect(result.content[0]!.text.startsWith("A".repeat(100))).toBe(true); // head 70%
-    expect(result.content[0]!.text.endsWith("A".repeat(20))).toBe(true); // tail
+    expect(result.content[0]!.text).toContain("A".repeat(20) + "\n\n\u26a0 answer truncated"); // tail, then note
+    expect(result.content[0]!.text).toContain("ask a narrower follow-up");
     expect((result.usage as { cost: { total: number } }).cost.total).toBe(0.42);
     expect(result.details).toMatchObject({
       expertRunId: "r_EXPERT1",
@@ -616,6 +641,14 @@ describe("consult tool: failure surface (T-4)", () => {
     }
   });
 
+  it("timed_out states the real elapsed wall-clock time, not the configured timeout budget", async () => {
+    const h = harness();
+    h.port.outcome = outcome("timed_out"); // durationMs 12_345 ≈ 12s
+    const result = (await exec(h)) as ToolResult;
+    expect(result.content[0]!.text).toContain("wall-clock timeout after 12s");
+    expect(result.content[0]!.text).not.toContain(`${Math.round(DEFAULT_SETTINGS.consult.timeoutMs / 1000)}s`);
+  });
+
   it("non-completed WITH text returns a partial answer", async () => {
     const h = harness();
     h.port.outcome = outcome("failed", "the answer is 42, though I got cut off");
@@ -676,6 +709,11 @@ describe("consult tool: failure surface (T-4)", () => {
     expect(result.details.outcome).toBe("turn_cap");
     expect(result.details.partial).toBe(true);
     expect(h.fork.removed).toHaveLength(0);
+    // eval-2026-10.md §4: the message must state the real cause (turn cap) and
+    // the real elapsed time (outcome().durationMs = 12_345ms ≈ 12s), never the
+    // unrelated configured timeout budget (DEFAULT_SETTINGS.consult.timeoutMs).
+    expect(result.content[0]!.text).toContain("turn cap reached (3 turns) after 12s");
+    expect(result.content[0]!.text).not.toContain(`${Math.round(DEFAULT_SETTINGS.consult.timeoutMs / 1000)}s`);
   });
 
   it("abort is scheduled via queueMicrotask, never on the snapshot's synchronous stack", async () => {

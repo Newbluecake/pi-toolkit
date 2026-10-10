@@ -331,19 +331,44 @@ function describeWhitelist(whitelist: readonly ConsultExpertRef[]): string {
     .join(", ");
 }
 
+/** `label (r_xxx)` suffix, the exact display format `describeWhitelist`/`renderExpertRoster` show the model. */
+const PAREN_SUFFIX_RE = /^(.*\S)\s*\(([^()]+)\)\s*$/;
+
+/** Exact runId → exact label (unique) → unique runId prefix. `undefined` when `candidate` matches nothing. */
+function resolveExpertRef(candidate: string, whitelist: readonly ConsultExpertRef[]): ConsultExpertRef | undefined {
+  if (candidate.length === 0) return undefined;
+  const byExactId = whitelist.find((ref) => ref.runId === candidate);
+  if (byExactId) return byExactId;
+  const byLabel = whitelist.filter((ref) => ref.label === candidate);
+  if (byLabel.length === 1 && byLabel[0]) return byLabel[0];
+  const byPrefix = whitelist.filter((ref) => ref.runId.startsWith(candidate));
+  if (byPrefix.length === 1 && byPrefix[0]) return byPrefix[0];
+  return undefined;
+}
+
 /**
  * Match `expert` against the run's whitelist: exact runId → exact label →
- * unique runId prefix (§4.1 ①). Anything else is the asker's own mistake →
- * throw, same precedent as Agent's allowedTypes check.
+ * unique runId prefix (§4.1 ①). Also accepts the `label (r_xxx)` display
+ * format the tool's own whitelist description (`describeWhitelist`/
+ * `renderExpertRoster`) shows the model — observed in production, the model
+ * copies that string verbatim (eval-2026-10.md §4 tool-friction). When the
+ * handle has that shape, the run id inside the parentheses is preferred;
+ * the label before it is a fallback only (defensive — should always agree).
+ * Anything else is the asker's own mistake → throw, same precedent as
+ * Agent's allowedTypes check.
  */
 export function matchExpertRef(handle: string, whitelist: readonly ConsultExpertRef[]): ConsultExpertRef {
   const trimmed = handle.trim();
-  const byExactId = whitelist.find((ref) => ref.runId === trimmed);
-  if (byExactId) return byExactId;
-  const byLabel = whitelist.filter((ref) => ref.label === trimmed);
-  if (byLabel.length === 1 && byLabel[0]) return byLabel[0];
-  const byPrefix = whitelist.filter((ref) => trimmed.length > 0 && ref.runId.startsWith(trimmed));
-  if (byPrefix.length === 1 && byPrefix[0]) return byPrefix[0];
+  const direct = resolveExpertRef(trimmed, whitelist);
+  if (direct) return direct;
+  const paren = PAREN_SUFFIX_RE.exec(trimmed);
+  if (paren) {
+    const [, labelPart, idPart] = paren;
+    const byParenId = resolveExpertRef(idPart!.trim(), whitelist);
+    if (byParenId) return byParenId;
+    const byParenLabel = resolveExpertRef(labelPart!.trim(), whitelist);
+    if (byParenLabel) return byParenLabel;
+  }
   throw new Error(
     `consult: expert "${handle}" is not in this run's expert whitelist (allowed: ${describeWhitelist(whitelist)}). ` +
       "Ask your dispatcher to add it, or answer from your own context.",
@@ -356,16 +381,28 @@ function outcomeLabel(outcome: RunOutcome, capReason: ConsultCapReason | undefin
   return outcome.status; // completed | failed | aborted
 }
 
-function humanReason(outcome: RunOutcome, capReason: ConsultCapReason | undefined, timeoutMs: number): string {
+/**
+ * State the real cause and the real elapsed time (eval-2026-10.md §4
+ * tool-friction: a turn-cap cutoff at ~20s was reported as "did not answer
+ * within 150s", citing the configured budget instead of what actually
+ * happened). `outcome.durationMs` is the run's real wall-clock duration —
+ * never the configured timeout/cap, which may never have been reached.
+ */
+function humanReason(
+  outcome: RunOutcome,
+  capReason: ConsultCapReason | undefined,
+  caps: Pick<ConsultSettings, "maxTurns" | "maxCostUsd">,
+): string {
+  const elapsedS = Math.round(outcome.durationMs / 1000);
   switch (outcome.status) {
     case "timed_out":
-      return `timed out after ${Math.round(timeoutMs / 1000)}s`;
+      return `wall-clock timeout after ${elapsedS}s`;
     case "aborted":
-      if (capReason === "turn_cap") return "cut off at the turn cap";
-      if (capReason === "cost_cap") return "cut off at the cost cap";
-      return "aborted";
+      if (capReason === "turn_cap") return `turn cap reached (${caps.maxTurns} turns) after ${elapsedS}s`;
+      if (capReason === "cost_cap") return `cost cap reached ($${caps.maxCostUsd}) after ${elapsedS}s`;
+      return `aborted after ${elapsedS}s`;
     default:
-      return `failed: ${outcome.error?.message ?? outcome.status}`;
+      return `failed after ${elapsedS}s: ${outcome.error?.message ?? outcome.status}`;
   }
 }
 
@@ -769,8 +806,16 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
               ? outcome.text
               : "(the expert completed without any text output)";
           const truncated = truncateResultText(raw, s.maxAnswerChars);
+          // eval-2026-10.md §4: 20% of completed answers hit the cap, causing
+          // 12 follow-up consults — the model was never told it got a partial
+          // answer or how to get the rest. Keep the cap itself (plan §4.1);
+          // just say so explicitly.
+          const text = truncated.truncated
+            ? `${truncated.text}\n\n⚠ answer truncated at ${s.maxAnswerChars} chars; ask a narrower follow-up ` +
+              `(reference a specific item or range) instead of re-asking the whole question.`
+            : truncated.text;
           return {
-            content: [{ type: "text" as const, text: truncated.text }],
+            content: [{ type: "text" as const, text }],
             ...usage,
             details: {
               ...baseDetails,
@@ -787,8 +832,8 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
               {
                 type: "text" as const,
                 text:
-                  `Expert "${expertName(ref)}" did not answer within ${Math.round(s.timeoutMs / 1000)}s ` +
-                  `(consult run ${outcome.runId}, reason: ${humanReason(outcome, capReason, s.timeoutMs)}). ` +
+                  `Expert "${expertName(ref)}" did not answer (consult run ${outcome.runId}: ` +
+                  `${humanReason(outcome, capReason, s)}). ` +
                   "Fall back to your own investigation.",
               },
             ],
@@ -797,11 +842,14 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           };
         }
         const truncated = truncateResultText(outcome.text!, s.maxAnswerChars);
+        const truncationNote = truncated.truncated
+          ? ` answer truncated at ${s.maxAnswerChars} chars; ask a narrower follow-up.`
+          : "";
         return {
           content: [
             {
               type: "text" as const,
-              text: `${truncated.text}\n\n⚠ partial answer — consult ended early (${humanReason(outcome, capReason, s.timeoutMs)}).`,
+              text: `${truncated.text}\n\n⚠ partial answer — consult ended early (${humanReason(outcome, capReason, s)}).${truncationNote}`,
             },
           ],
           ...usage,
