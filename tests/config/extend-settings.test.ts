@@ -35,6 +35,14 @@ describe("config/extend-settings: new budget keys (arch §7.1)", () => {
     expect(loadSettings({ budget: { maxTotalFactor: 1.5 } }).budget.maxTotalFactor).toBe(1.5);
     expect(loadSettings({ budget: { maxExtensions: 5 } }).budget.maxExtensions).toBe(5);
   });
+  it("converts budget.extendStepS seconds to internal milliseconds (0 = legacy)", () => {
+    expect(loadSettings({ budget: { extendStepS: 1800 } }).budget.extendStepMs).toBe(1_800_000);
+    expect(loadSettings({ budget: { extendStepS: 0 } }).budget.extendStepMs).toBe(0);
+    expect(loadSettings({}).budget.extendStepMs).toBe(3_600_000);
+    // 非法（非数字/负数）⇒ 回退默认，不抷例外
+    expect(loadSettings({ budget: { extendStepS: -5 } }).budget.extendStepMs).toBe(3_600_000);
+    expect(loadSettings({ budget: { extendStepS: "x" } }).budget.extendStepMs).toBe(3_600_000);
+  });
   it("budget.totalS: 0 is illegal and falls back to the default (D-11)", () => {
     expect(loadSettings({ budget: { totalS: 0 } }).budget.totalMs).toBe(1_800_000);
     expect(loadSettings({ budget: { totalS: -3 } }).budget.totalMs).toBe(1_800_000);
@@ -70,6 +78,14 @@ describe("config/extend-settings: SETTING_SPECS surface", () => {
       min: 1,
     });
     expect(SETTING_SPECS["budget.maxTotalFactor"]?.time).toBeUndefined();
+    // extendStepMs is a duration leaf: exposed as budget.extendStepS
+    expect(SETTING_SPECS["budget.extendStepS"]).toMatchObject({
+      kind: "number",
+      path: "budget.extendStepMs",
+      time: true,
+      min: 0,
+    });
+    expect(SETTING_SPECS["budget.extendStepS"]?.description).toContain("extend_subagent_timeout");
   });
 });
 

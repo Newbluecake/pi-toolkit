@@ -131,7 +131,7 @@ function writeSettings(home: string, extra: Record<string, unknown> = {}) {
     settingsPath,
     JSON.stringify(
       {
-        budget: { totalGraceS: 1, maxExtensions: 2, abortGraceS: 0.05, reapS: 0.05 }, // factor stays the DEFAULT 2 (X1's 120s arithmetic)
+        budget: { totalGraceS: 1, maxExtensions: 2, extendStepS: 0, abortGraceS: 0.05, reapS: 0.05 }, // factor stays the DEFAULT 2 (X1's 120s arithmetic); extendStepS 0 = legacy ceiling (factor-only)
         fleetWidget: false,
         quota: { enabled: false },
         ...extra,

@@ -4,6 +4,7 @@ import {
   describeTimeout,
   dueAtFor,
   extendability,
+  extensionGrantCapMs,
   graceWindow,
   hardDeadlineAtFor,
 } from "./deadline.js";
@@ -1050,7 +1051,10 @@ export function reduce(
     // Base on max(now, prev): inside a grace window prev is already in the
     // past, so "+60s" measured from prev could be a zero net gain.
     const base = Math.max(input.at, prev);
-    const requested = Math.max(0, input.extendMs);
+    // 「每次延长最多 1h」（extensionGrantCapMs）：grant 钳位的第一口径，
+    // headroom 的 min(base+ms, H) 紧随其后——工具层（runner.extendDeadline）
+    // 调同一个 helper，不许各写各的。
+    const requested = extensionGrantCapMs(budget, input.extendMs);
     const nextDeadline = Math.min(base + requested, hard);
     if (nextDeadline <= prev && nextDeadline <= input.at) return illegal(state, input); // zero net gain
     const granted = nextDeadline - base;

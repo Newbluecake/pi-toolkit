@@ -6,6 +6,8 @@ import {
   describeTimeout,
   effectiveDeadlineAt,
   extendability,
+  extendableSpanMs,
+  extensionGrantCapMs,
   graceWindow,
   hardDeadlineAtFor,
   MAX_DEADLINE_SPAN_MS,
@@ -66,18 +68,94 @@ describe("core/status: terminal status single source (D-15)", () => {
   });
 });
 
+describe("core/deadline: extendableSpanMs", () => {
+  const base = { totalMs: 100, maxTotalFactor: 2, maxExtensions: 3, extendStepMs: 500 };
+
+  it.each([
+    [{}, 1_600],
+    [{ totalMs: 2_000 }, 4_000],
+    [{ totalMs: 101, maxTotalFactor: 1.5, extendStepMs: 0 }, 152],
+    [{ maxTotalFactor: 1 }, 100],
+    [{ maxTotalFactor: -2 }, 100],
+    [{ maxTotalFactor: NaN }, 100],
+    [{ maxTotalFactor: Infinity }, 100],
+    [{ maxExtensions: 0 }, 200],
+    [{ maxExtensions: -1 }, 200],
+    [{ maxExtensions: NaN }, 200],
+    [{ maxExtensions: Infinity }, 200],
+    [{ maxExtensions: 1.9 }, 600],
+    [{ extendStepMs: 0 }, 200],
+    [{ extendStepMs: -1 }, 200],
+    [{ extendStepMs: NaN }, 200],
+    [{ extendStepMs: Infinity }, 200],
+    [{ totalMs: 0 }, undefined],
+    [{ totalMs: -1 }, undefined],
+    [{ totalMs: NaN }, undefined],
+    [{ totalMs: -Infinity }, undefined],
+    [{ totalMs: Infinity }, MAX_DEADLINE_SPAN_MS],
+    [{ maxTotalFactor: 1e308 }, MAX_DEADLINE_SPAN_MS],
+    [{ extendStepMs: 1e308 }, MAX_DEADLINE_SPAN_MS],
+    [{ totalMs: MAX_DEADLINE_SPAN_MS + 1 }, MAX_DEADLINE_SPAN_MS],
+  ])("clamps/normalizes %j to %s", (overrides, expected) => {
+    expect(extendableSpanMs({ ...base, ...overrides })).toBe(expected);
+  });
+});
+
 describe("core/deadline: hardDeadlineAtFor", () => {
-  it("is enqueuedAt + ceil(totalMs * factor) without a cap", () => {
-    expect(hardDeadlineAtFor(1_000, { ...budget, totalMs: 100, maxTotalFactor: 2 }, undefined)).toBe(1_200);
+  it("is enqueuedAt + ceil(totalMs * factor) without a cap (legacy extendStepMs: 0)", () => {
+    expect(hardDeadlineAtFor(1_000, { ...budget, totalMs: 100, maxTotalFactor: 2, extendStepMs: 0 }, undefined)).toBe(
+      1_200,
+    );
+  });
+  it("extendStepMs widens the ceiling to T + maxExtensions·step for extendable runs (user ruling: ≤1h per grant)", () => {
+    // 短 run：step 项占优 —— 25min + 3×1h（每份延长都拿满 1h 也要容得下）
+    expect(
+      hardDeadlineAtFor(
+        1_000,
+        { ...budget, totalMs: 25 * 60_000, maxTotalFactor: 2, extendStepMs: 3_600_000 },
+        undefined,
+      ),
+    ).toBe(1_000 + 25 * 60_000 + 3 * 3_600_000);
+    // 非 1h 的 step 同样生效
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 2, extendStepMs: 500 }, undefined)).toBe(
+      100 + 3 * 500,
+    );
+  });
+  it("factor dominates for long runs (T = 4h: ceil(T·f) > T + N·step)", () => {
+    expect(
+      hardDeadlineAtFor(
+        0,
+        { ...budget, totalMs: 4 * 3_600_000, maxTotalFactor: 2, extendStepMs: 3_600_000 },
+        undefined,
+      ),
+    ).toBe(8 * 3_600_000);
+  });
+  it("fixed-deadline shape (factor 1) is unchanged (span = T); maxExtensions=0 keeps the legacy factor-only span", () => {
+    // factor 1（fixed-deadline）⇒ span = T，无 step 项 —— 逐字节保持旧公式
+    expect(
+      hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 1, extendStepMs: 3_600_000 }, undefined),
+    ).toBe(100);
+    // maxExtensions=0：无延长 ⇒ 无 step 项，factor 项照旧（2×100）
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 2, maxExtensions: 0 }, undefined)).toBe(200);
+  });
+  it("step span is clamped by MAX_DEADLINE_SPAN_MS and never loosens beyond it", () => {
+    const huge = hardDeadlineAtFor(
+      1_000,
+      { ...budget, totalMs: MAX_DEADLINE_SPAN_MS, maxTotalFactor: 1, maxExtensions: 5, extendStepMs: 3_600_000 },
+      undefined,
+    );
+    expect(huge).toBe(1_000 + MAX_DEADLINE_SPAN_MS);
   });
   it("treats factor < 1 as 1", () => {
-    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 0.5 }, undefined)).toBe(100);
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 0.5, extendStepMs: 0 }, undefined)).toBe(
+      100,
+    );
   });
   it("a tighter SpawnRequest.deadlineAt cap wins", () => {
-    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 3 }, 150)).toBe(150);
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 3, extendStepMs: 0 }, 150)).toBe(150);
   });
-  it("a looser cap does not loosen the factor ceiling", () => {
-    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 2 }, 999_999)).toBe(200);
+  it("a looser cap does not loosen the factor ceiling (legacy extendStepMs: 0)", () => {
+    expect(hardDeadlineAtFor(0, { ...budget, totalMs: 100, maxTotalFactor: 2, extendStepMs: 0 }, 999_999)).toBe(200);
   });
   it("totalMs <= 0 is a defensive undefined (config layer forbids it, D-11)", () => {
     expect(hardDeadlineAtFor(0, { ...budget, totalMs: 0 }, undefined)).toBeUndefined();
@@ -115,6 +193,19 @@ describe("core/deadline: hardDeadlineAtFor", () => {
     expect(clampSpanMs(MAX_DEADLINE_SPAN_MS + 1)).toBe(MAX_DEADLINE_SPAN_MS);
     expect(clampSpanMs(1e308)).toBe(MAX_DEADLINE_SPAN_MS);
     expect(clampSpanMs(Infinity)).toBe(MAX_DEADLINE_SPAN_MS);
+  });
+});
+
+describe("core/deadline: extensionGrantCapMs (每次延长最多 1h)", () => {
+  it("caps a single grant at extendStepMs; 0 = legacy no per-grant cap", () => {
+    expect(extensionGrantCapMs({ ...budget, extendStepMs: 3_600_000 }, 7_200_000)).toBe(3_600_000);
+    expect(extensionGrantCapMs({ ...budget, extendStepMs: 3_600_000 }, 1_800_000)).toBe(1_800_000);
+    expect(extensionGrantCapMs({ ...budget, extendStepMs: 0 }, 7_200_000)).toBe(7_200_000);
+  });
+  it("non-finite extendMs degrades to 0, non-finite step to legacy", () => {
+    expect(extensionGrantCapMs({ ...budget, extendStepMs: 3_600_000 }, Number.NaN)).toBe(0);
+    expect(extensionGrantCapMs({ ...budget, extendStepMs: Number.NaN }, 1_000)).toBe(1_000);
+    expect(extensionGrantCapMs({ ...budget, extendStepMs: Number.POSITIVE_INFINITY }, 1_000)).toBe(1_000);
   });
 });
 

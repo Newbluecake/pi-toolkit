@@ -7,6 +7,7 @@ import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import type { BackgroundWorkflowUsage, BackgroundWorkflowView, BackgroundWorkflows } from "../workflow/background.js";
 import type { WorkflowChildSummary, WorkflowOutcome, WorkflowRunBudget } from "../workflow/types.js";
 import type { RunSnapshot, UsageDelta } from "../core/types.js";
+import { extendableSpanMs } from "../core/deadline.js";
 import { buildProgressLines } from "./agent-tool.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
@@ -128,7 +129,9 @@ export const WorkflowToolParams = Type.Object({
       description:
         "Total wall-clock budget for the whole workflow run, in seconds (1–604800; overrides the default). " +
         "Same rules as the default budget: grace window + notice at expiry, extendable with " +
-        "extend_subagent_timeout up to the hard ceiling (2× by default, budget.maxTotalFactor).",
+        "extend_subagent_timeout up to the hard ceiling: max(ceil(T × budget.maxTotalFactor), " +
+        "T + budget.maxExtensions × budget.extendStepS) seconds (default factor 2, 3 extensions, step 3600s). " +
+        "The step term applies only with factor > 1, extensions > 0 and step > 0; step 0 keeps the factor-only ceiling.",
     }),
   ),
 });
@@ -138,7 +141,7 @@ export type WorkflowToolParams = Static<typeof WorkflowToolParams>;
  * Exported for tests. `timeoutMs <= 0` (or non-finite) falls back to the base budget — BW10 (a 0 = unbounded workflow
  * cap) is unsupported, same rule as the settings layer. An explicit `timeout_s` keeps the base budget's factor and
  * grace/extension knobs (agent-explicit-timeout-extend §2.6/E6, §5.2): the workflow is grace-able and extendable up
- * to `ceil(timeout_s × maxTotalFactor)` exactly like a default-budget run. Workflow *children* stay fixed-deadline
+ * to the shared `extendableSpanMs` ceiling exactly like a default-budget run. Workflow *children* stay fixed-deadline
  * (program-derived `budgetOverride.totalMs`, pinned to `W.hardAt`) — that is host.ts's job, not this merge.
  */
 export function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): WorkflowRunBudget {
@@ -153,7 +156,14 @@ export function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): Workfl
 function extendableSuffix(budget: WorkflowRunBudget): string {
   const factor = budget.maxTotalFactor ?? 1;
   if (!(factor > 1) || !((budget.maxExtensions ?? 0) > 0)) return "";
-  return ` (extendable up to ${formatDuration(Math.ceil(budget.workflowTotalMs * factor))})`;
+  const span = extendableSpanMs({
+    totalMs: budget.workflowTotalMs,
+    maxTotalFactor: factor,
+    maxExtensions: budget.maxExtensions ?? 0,
+    extendStepMs: budget.extendStepMs ?? 0,
+  });
+  if (span === undefined || span <= budget.workflowTotalMs) return "";
+  return ` (extendable up to ${formatDuration(span)})`;
 }
 
 export function scriptDisplayName(script: string): string {

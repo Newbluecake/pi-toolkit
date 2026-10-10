@@ -16,7 +16,14 @@ import {
  */
 
 const T0 = 1_000;
-const DEFAULT: WorkflowDeadlinePolicy = { totalMs: 60_000, totalGraceMs: 10_000, maxExtensions: 2, maxTotalFactor: 2 };
+// extendStepMs: 0（legacy）——本文件既有算术锁 factor 项硬顶；step 项/单笔上限另有专组。
+const DEFAULT: WorkflowDeadlinePolicy = {
+  totalMs: 60_000,
+  totalGraceMs: 10_000,
+  maxExtensions: 2,
+  maxTotalFactor: 2,
+  extendStepMs: 0,
+};
 
 function make(policy: Partial<WorkflowDeadlinePolicy> = {}): WorkflowDeadlineController {
   return createWorkflowDeadlineController("wf_t", T0, { ...DEFAULT, ...policy });
@@ -353,5 +360,54 @@ describe("workflow deadline controller: G3/G4 span & non-finite guards (agent-ex
     expect(c.extend(T0, Number.NaN)).toEqual({ ok: false, reason: "no_headroom" });
     c.close();
     expect(c.extend(T0, Number.NaN)).toEqual({ ok: false, reason: "no_headroom" });
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * 「每次延长最多 1h」（用户拍板）：extendStepMs 参与硬顶跨度 + 单笔 grant 钳位。
+ * 与 core hardDeadlineAtFor / extensionGrantCapMs 同一口径；workflow 无自己的
+ * settings 叶子（run-budget.ts 复用 settings.budget.extendStepMs）。
+ * ------------------------------------------------------------------------- */
+describe("workflow deadline controller: extendStepMs (per-grant cap + widened ceiling)", () => {
+  it("hardAt = start + max(ceil(T·factor), T + maxExtensions·step) for extendable configs", () => {
+    // step 项占优：60s + 2×1h ≫ 120s
+    const step = make({ extendStepMs: 3_600_000 });
+    expect(step.state().hardAt).toBe(T0 + 60_000 + 2 * 3_600_000);
+    expect(step.state().softAt).toBe(T0 + 60_000);
+    // factor 占优：长 T（4h×2 = 8h > 4h + 2×1h = 6h）
+    const factorDominates = make({ totalMs: 4 * 3_600_000, extendStepMs: 3_600_000 });
+    expect(factorDominates.state().hardAt).toBe(T0 + 8 * 3_600_000);
+  });
+  it("fixed configs stay legacy: factor 1 or maxExtensions 0 ⇒ no step term", () => {
+    expect(make({ maxTotalFactor: 1, extendStepMs: 3_600_000 }).state().hardAt).toBe(T0 + 60_000);
+    expect(make({ maxExtensions: 0, extendStepMs: 3_600_000 }).state().hardAt).toBe(T0 + 120_000);
+    // extendStepMs: 0 = legacy（factor-only），含默认缺席语义
+    expect(make({ extendStepMs: 0 }).state().hardAt).toBe(T0 + 120_000);
+  });
+  it("a huge step span stays clamped by MAX_DEADLINE_SPAN_MS (G3)", () => {
+    const c = make({ totalMs: MAX_DEADLINE_SPAN_MS, maxTotalFactor: 1, extendStepMs: 3_600_000 });
+    expect(c.state().hardAt - T0).toBe(MAX_DEADLINE_SPAN_MS);
+  });
+  it("a single grant is capped at extendStepMs (request 2h ⇒ 1h), then by headroom; requestedMs still reports the ask", () => {
+    const c = make({ extendStepMs: 60_000 }); // hardAt = T0 + 60_000 + 2×60_000 = T0+180_000
+    expect(c.state().hardAt).toBe(T0 + 180_000);
+    // 请求 120s（>> step 60s）⇒ 单笔只给 60s：softAt 60k → 120k
+    const r1 = c.extend(T0 + 10_000, 120_000);
+    expect(r1).toMatchObject({
+      ok: true,
+      deadlineAt: T0 + 120_000,
+      requestedMs: 120_000,
+      grantedMs: 60_000,
+      clamped: true,
+    });
+    // 第二次：step 60s 但 headroom 只剩 60s ⇒ 恰到硬顶
+    const r2 = c.extend(T0 + 20_000, 120_000);
+    expect(r2).toMatchObject({ ok: true, deadlineAt: T0 + 180_000, grantedMs: 60_000, clamped: true });
+    expect(c.extend(T0 + 30_000, 1_000)).toEqual({ ok: false, reason: "limit_reached" });
+  });
+  it("extendStepMs: 0 keeps an oversized single grant — only the hard ceiling clamps it (legacy)", () => {
+    const c = make(); // extendStepMs: 0
+    const r = c.extend(T0, 10 * 60_000);
+    expect(r).toMatchObject({ ok: true, grantedMs: 60_000, clamped: true }); // ceiling 120s−60s = 60s in one grant
   });
 });

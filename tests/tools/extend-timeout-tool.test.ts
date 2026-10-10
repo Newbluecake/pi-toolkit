@@ -425,7 +425,8 @@ describe("tools/extend-timeout-tool: SubagentWorkflow targets", () => {
     expect(text).toBe(
       `Extended workflow ${WF} by 10m00s (requested 15m00s, clamped by its hard ceiling). New deadline in 11m00s. ` +
         "2 of 3 extensions left; at most 10m00s more available. " +
-        "The workflow was inside its timeout grace window and is now back to normal execution.",
+        "The workflow was inside its timeout grace window and is now back to normal execution. " +
+        "The request was clamped (per-call cap budget.extendStepS and the workflow's hard ceiling); ask again if you still need more time.",
     );
     expect(result.details).toMatchObject({ ok: true, workflowId: WF, rescuedFromGrace: true });
   });

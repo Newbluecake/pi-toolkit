@@ -194,8 +194,9 @@ const leadingFields = {
         "It follows the same grace and extension rules as the default budget: if it runs out while the run is working, " +
         "the run gets a grace window (the budget.totalGraceS setting, in seconds; default 90) and the main session is " +
         "notified; extend it with extend_subagent_timeout (a limited number of extensions) or let it stop when the " +
-        "grace window ends. The run never lives past 2× timeout_s by default (the budget.maxTotalFactor setting), " +
-        "nor past an absolute deadline imposed by whoever dispatched it — whichever is earlier. With extensions " +
+        "grace window ends. The run never lives past max(2× timeout_s, timeout_s + 3h) by default (the budget.maxTotalFactor " +
+        "and budget.extendStepS settings), nor past an absolute deadline imposed by whoever dispatched it — whichever is " +
+        "earlier, and each extension adds at most budget.extendStepS (default 3600s). With extensions " +
         "disabled (extend.enabled=false) the timeout is a hard cap and the run stops right at it. Inside a subagent " +
         "the grace window is silent: nobody is notified and there is no extension tool there. Runs the system starts " +
         "with a fixed deadline (consult, /goal verifier, RPC, workflow children) are not affected. To stop a run right " +

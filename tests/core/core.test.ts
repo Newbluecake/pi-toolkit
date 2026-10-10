@@ -2316,6 +2316,9 @@ describe("timeout grace", () => {
     totalGraceMs: 500,
     maxExtensions: 3,
     maxTotalFactor: 2,
+    // extendStepMs: 0（legacy）——本组用例锁的是 factor 项（hardDeadlineAt = 2000）
+    // 与 grant/headroom 钳位的既有算术；step 项/单次上限另有专组（deadline-grace）。
+    extendStepMs: 0,
   };
   function gEnqueue(b: DeadlineBudget): RunState {
     return reduce(createInitialState("r", 1, 0), { generation: 1, input: { kind: "enqueued", at: 0, budget: b } }, b)
@@ -2619,6 +2622,34 @@ describe("timeout grace", () => {
     expect(r.state.diag.lastWarn).toBe("illegal:deadline_extended");
     expect(r.state.diag.overtime?.extensions).toBe(1);
     expect(r.state.deadlines.deadlineAt).toBe(2_000);
+  });
+
+  // 「每次延长最多 1h」：单笔 grant 钗位（extendStepMs）与 headroom 钗位的先后叠加。
+  it("caps a single grant at extendStepMs (request 2h ⇒ 1h granted), then by headroom", () => {
+    // extendStepMs 生效的预算：hard 顶被 step 项抬高（T=1000 + 3×500 = 2500）
+    const stepBudget: DeadlineBudget = { ...graceBudget, extendStepMs: 500 };
+    let s = graceFixture("model_turn", stepBudget);
+    expect(s.deadlines.hardDeadlineAt).toBe(2_500); // step 项占优（factor 项只给 2000）
+    // 请求 2000（>>step 500）⇒ 单笔只给 500
+    s = gApply(s, { kind: "deadline_extended", at: 500, extendMs: 2_000, source: "tool" }, stepBudget).state;
+    expect(s.deadlines.deadlineAt).toBe(1_500);
+    expect(s.diag.overtime?.grantedMs).toBe(500);
+    // 再一次：请求超出剩余 headroom（2500−1500 = 1000）但 step 仍 500 ⇒ 给 500
+    s = gApply(s, { kind: "deadline_extended", at: 600, extendMs: 2_000, source: "tool" }, stepBudget).state;
+    expect(s.deadlines.deadlineAt).toBe(2_000);
+    // 顶到 headroom 附近：base=2000，step 500 但 headroom 只剩 500 ⇒ 给 500 到硬顶 2500
+    s = gApply(s, { kind: "deadline_extended", at: 2_000, extendMs: 2_000, source: "tool" }, stepBudget).state;
+    expect(s.deadlines.deadlineAt).toBe(2_500);
+    expect(s.diag.overtime?.extensions).toBe(3);
+    expect(s.diag.overtime?.grantedMs).toBe(1_500);
+  });
+
+  it("extendStepMs: 0 (legacy) keeps an oversized single grant — only headroom clamps it", () => {
+    let s = graceFixture("model_turn");
+    s = gApply(s, { kind: "deadline_extended", at: 500, extendMs: 1_500, source: "tool" }).state;
+    // base = max(now, prev) = 1000；无单笔上限 ⇒ 一步拿到全部 headroom（2000−1000）
+    expect(s.deadlines.deadlineAt).toBe(2_000);
+    expect(s.diag.overtime?.grantedMs).toBe(1_000);
   });
 
   it("N=3 worst-case sequence produces exactly 3 grace + 3 extended notices, then kills (BL-3)", () => {

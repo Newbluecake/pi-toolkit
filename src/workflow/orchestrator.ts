@@ -459,6 +459,7 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
             totalGraceMs: req.budget.totalGraceMs ?? 0,
             maxExtensions: req.budget.maxExtensions ?? 0,
             maxTotalFactor: req.budget.maxTotalFactor ?? 1,
+            extendStepMs: req.budget.extendStepMs ?? 0,
           })
         : undefined;
     /** Set while WT8 is live (inside the resolution executor); cleared by `cleanup()`. */

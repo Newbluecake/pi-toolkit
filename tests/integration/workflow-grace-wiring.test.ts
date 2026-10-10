@@ -20,7 +20,9 @@ import { TIMEOUT_NOTICE_TYPE } from "../../src/delivery/deadline-notice.js";
  * notification, exactly once.
  *
  * Real worker thread, real orchestrator, real (short) timers: workflowTotalS 1,
- * totalGraceS 2, maxExtensions 1, maxTotalFactor 10. The script parks on a
+ * totalGraceS 2, maxExtensions 1, maxTotalFactor 10, default extendStepS 3600.
+ * The step term dominates: max(10s, 1s + 3600s) = 3601s (rendered as 1h00m).
+ * The script parks on a
  * never-settling promise (not `gate()`: an in-flight gate is bounded by the
  * `killAt` of its own call time, which an extension does not lengthen).
  */
@@ -144,7 +146,7 @@ describe("workflow grace + extension wiring (activate → stack)", () => {
     await host.emit("session_start", { reason: "startup" });
     const started = await host.call("SubagentWorkflow", { script: HELD_SCRIPT });
     const id = started.details.workflowId as string;
-    expect(started.content[0]!.text).toContain("budget: 1s (extendable up to 10s)");
+    expect(started.content[0]!.text).toContain("budget: 1s (extendable up to 1h00m)");
 
     // ~1s: soft deadline → grace window (2s) + notice.
     await until(() => timeoutNotices(host.sent).length > 0);
@@ -268,9 +270,9 @@ describe("workflow grace + extension wiring (activate → stack)", () => {
         'export const meta = { name: "explicit-flow", description: "t" };\nphase("work");\nconst r = await agent("child that never finishes");\nreturn r;';
       const started = await host.call("SubagentWorkflow", { script, timeout_s: 1 });
       const id = started.details.workflowId as string;
-      // The base factor survives the explicit timeout (10 × 1s), so the start
-      // text advertises extendability instead of a bare budget.
-      expect(started.content[0]!.text).toContain("budget: 1s (extendable up to 10s)");
+      // The base knobs survive the explicit timeout; the default 1h step,
+      // not the 10 × 1s factor term, determines the advertised hard ceiling.
+      expect(started.content[0]!.text).toContain("budget: 1s (extendable up to 1h00m)");
 
       // ~1s: the explicit soft deadline opens a grace window + notice.
       await until(() => timeoutNotices(host.sent).length > 0);
@@ -296,7 +298,7 @@ describe("workflow grace + extension wiring (activate → stack)", () => {
       // the workflow's stop — the stopOwned abort carries the workflow's
       // `timeout` cause, which lands the child as timed_out/aborted (owner
       // stop), never left running past its owner. The timing assertion
-      // separates this from the child's own ~9.7s deadline (W.hardAt − now):
+      // separates this from the child's own ~1h deadline (W.hardAt − now):
       // it must already be terminal within seconds of the workflow settling.
       const read = await host.call("get_subagent_result", { run_id: id });
       expect(read.details).toMatchObject({ workflowId: id, status: "timed_out" });

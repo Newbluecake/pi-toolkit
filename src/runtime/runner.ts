@@ -2,6 +2,7 @@ import {
   describeTimeout,
   effectiveDeadlineAt,
   extendability,
+  extensionGrantCapMs,
   remainingFor,
   withDeadline,
   SET_MODEL_TIMEOUT_MS,
@@ -409,13 +410,17 @@ export class RuntimeRunner implements Runner {
     const now = this.d.clock.now();
     const verdict = extendability(state, entry.budget, now);
     if (!verdict.ok) return { ok: false, reason: verdict.reason };
+    // 「每次延长最多 1h」：与 reducer 同一钳位口径（一份逻辑两处消费）；
+    // headroom 收紧由 reducer 的 min(base+ms, H) 完成，这里的数字仅用于回读。
+    const cappedExtendMs = extensionGrantCapMs(entry.budget, extendMs);
+    if (cappedExtendMs <= 0) return { ok: false, reason: "no_headroom" };
     const prev = state.deadlines.deadlineAt!; // extendability ok ⇒ defined
     const hard = state.deadlines.hardDeadlineAt!;
     const wasInGrace = state.deadlines.graceUntil !== undefined;
     entry.fn({
       kind: "deadline_extended",
       at: now,
-      extendMs,
+      extendMs: cappedExtendMs,
       source: opts.source,
       ...(opts.reason === undefined ? {} : { reason: opts.reason }),
     });

@@ -21,6 +21,7 @@ export const DEFAULT_BUDGET: DeadlineBudget = {
   totalGraceMs: 90_000,
   maxExtensions: 3,
   maxTotalFactor: 2,
+  extendStepMs: 3_600_000,
 };
 /**
  * set_model 的固定上界：切换只等 pi 的一次 auth 校验 + 状态写入，与 run 预算无关
@@ -117,20 +118,37 @@ export function applyBudgetPolicy(
   return out;
 }
 
-/**
- * enqueue 时算一次（§3.3 G1）。totalMs 非法（≤0/NaN，只可能来自绕过 mergeBudget 的
- * 直接输入，测试）⇒ 防御性返回 undefined（D-11）；超大跨度经 clampSpanMs 钳到
- * MAX_DEADLINE_SPAN_MS（365 天）——非有限 factor 降级为 1（更紧），保证 raw 有限。
- */
+/** Shared hard-ceiling span for runs, workflow deadlines, driver bounds and tool receipts. */
+export function extendableSpanMs(
+  budget: Pick<DeadlineBudget, "totalMs" | "maxTotalFactor" | "maxExtensions" | "extendStepMs">,
+): Millis | undefined {
+  const total = clampSpanMs(budget.totalMs);
+  if (total === undefined) return undefined;
+  const factor = Number.isFinite(budget.maxTotalFactor) ? Math.max(1, budget.maxTotalFactor) : 1;
+  const factorSpan = clampSpanMs(Math.ceil(total * factor)) ?? total;
+  // 用户拍板「每次延长最多 1h」：extendable run（factor > 1 且 maxExtensions > 0）
+  // 的硬顶必须容得下每一次允许的延长都拿满 extendStepMs ——
+  //   span = max(ceil(T·factor), T + maxExtensions·extendStepMs)
+  // factor 占优（长 run）或 step 占优（短 run，如 25min run + 3×1h）都取更大者；
+  // extendStepMs = 0（legacy）/ factor 1（fixed-deadline）/ maxExtensions 0 一律
+  // 不加 step 项，行为与旧公式逐字节一致。仍然经 clampSpanMs 钳位 + capAt 收紧。
+  const stepMs = Number.isFinite(budget.extendStepMs) ? Math.max(0, budget.extendStepMs) : 0;
+  const maxExtensions = Number.isFinite(budget.maxExtensions) ? Math.max(0, Math.floor(budget.maxExtensions)) : 0;
+  const stepSpan =
+    factor > 1 && maxExtensions > 0 && stepMs > 0
+      ? (clampSpanMs(total + maxExtensions * stepMs) ?? factorSpan)
+      : undefined;
+  return Math.max(total, factorSpan, stepSpan ?? 0);
+}
+
+/** Enqueue-time ceiling; invalid totals are uncapped, and capAt can only tighten it. */
 export function hardDeadlineAtFor(
   enqueuedAt: Millis,
   budget: DeadlineBudget,
   capAt: Millis | undefined,
 ): Millis | undefined {
-  const total = clampSpanMs(budget.totalMs);
-  if (total === undefined) return undefined;
-  const factor = Number.isFinite(budget.maxTotalFactor) ? Math.max(1, budget.maxTotalFactor) : 1;
-  const span = Math.max(total, clampSpanMs(Math.ceil(total * factor)) ?? total);
+  const span = extendableSpanMs(budget);
+  if (span === undefined) return undefined;
   const raw = enqueuedAt + span;
   return capAt === undefined ? raw : Math.min(raw, capAt);
 }
@@ -158,6 +176,20 @@ export function extendability(
   const headroom = hardDeadlineAt - Math.max(now, deadlineAt);
   if (headroom <= 0) return { ok: false, reason: "no_headroom" }; // 含 fixed-deadline run（timeoutPolicy "fixed" ⇒ factor 1 ⇒ H = deadlineAt）
   return { ok: true, headroomMs: headroom };
+}
+
+/**
+ * 单次延长额度的上界（用户拍板「每次延长最多 1h」）：extendStepMs（0 = legacy，
+ * 不设单次上限）。这是 grant 钳位的唯一口径——reducer（deadline_extended）与
+ * runner.extendDeadline（工具层提前返回同一数字）都调它，与 extendability
+ * 同一份逻辑两处消费的约定一致；实际 grant 还要被剩余 headroom 二次收紧
+ * （reducer 的 min(base+ms, H) 不变）。
+ */
+export function extensionGrantCapMs(budget: Pick<DeadlineBudget, "extendStepMs">, extendMs: number): Millis {
+  const requested = Number.isFinite(extendMs) ? Math.max(0, extendMs) : 0;
+  const step = Number.isFinite(budget.extendStepMs) ? Math.max(0, budget.extendStepMs) : 0;
+  if (step <= 0) return requested;
+  return Math.min(requested, step);
 }
 
 /** 宽限窗口：夹在硬天花板之内（D-7）。返回 undefined = 没有可用宽限。 */

@@ -50,6 +50,9 @@ function graceBudget(overrides: Partial<DeadlineBudget> = {}): DeadlineBudget {
     totalGraceMs: 1_000,
     maxExtensions: 1,
     maxTotalFactor: 2,
+    // 「每次延长最多 1h」前的时代公式：本文件锁 factor 项硬顶（H = 2·T）的既有算术；
+    // step 项/单笔钳位由 core/runtime/workflow 单测覆盖。
+    extendStepMs: 0,
     abortGraceMs: 20,
     steerMs: 10,
     reapMs: 20,

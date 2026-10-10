@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Clock, TimerHandle } from "../core/clock.js";
+import { clampSpanMs, extendableSpanMs } from "../core/deadline.js";
 import type { Millis } from "../core/types.js";
 import type { WorkflowActivityRegistry } from "./activity.js";
 import { scanPlannedPhases } from "./phase-scan.js";
@@ -174,20 +175,19 @@ export interface BackgroundWorkflows {
 /**
  * The blocking tool's §4.3.1 `toolCallMs` minus the settle grace — how long
  * `run()` itself may take. Stage B (workflow-agent-queue §4.3): measured from
- * the static hard ceiling `ceil(workflowTotalMs × max(1, maxTotalFactor))` —
+ * the shared static hard ceiling (`extendableSpanMs`) —
  * grace windows and extensions never move WT8 past it, so the driver race
  * stays statically bounded.
  */
 export function runBoundMs(budget: WorkflowRunBudget): Millis {
-  const factor =
-    budget.maxTotalFactor !== undefined && Number.isFinite(budget.maxTotalFactor) ? budget.maxTotalFactor : 1;
-  return (
-    Math.ceil(budget.workflowTotalMs * Math.max(1, factor)) +
-    TICK_MS +
-    (budget.abortGraceMs ?? 10_000) +
-    budget.terminateConfirmMs +
-    (budget.reconcileMs ?? 1_000)
-  );
+  const span = extendableSpanMs({
+    // Match the controller's fail-tight 1ms fallback for invalid totals.
+    totalMs: clampSpanMs(budget.workflowTotalMs) ?? 1,
+    maxTotalFactor: budget.maxTotalFactor ?? 1,
+    maxExtensions: budget.maxExtensions ?? 0,
+    extendStepMs: budget.extendStepMs ?? 0,
+  })!;
+  return span + TICK_MS + (budget.abortGraceMs ?? 10_000) + budget.terminateConfirmMs + (budget.reconcileMs ?? 1_000);
 }
 
 /** Settle window after an explicit stop request: the orchestrator's own WL1–WL4 windows plus the grace. */

@@ -473,8 +473,8 @@ export interface WorkflowRunBudget {
   /**
    * workflow-agent-queue §4.1 (stage B): the workflow's timeout grace window
    * and extension budget — the subagent `settings.budget.{totalGraceMs,
-   * maxExtensions, maxTotalFactor}` reused as-is (run-budget.ts; no
-   * workflow-specific keys). All optional: absent ⇒ no grace, no extension,
+   * maxExtensions, maxTotalFactor, extendStepMs}` reused as-is (run-budget.ts;
+   * no workflow-specific keys). All optional: absent ⇒ no grace, no extension,
    * `hardAt === softAt` (the pre-stage-B hard WT8 deadline). An explicit
    * `timeout_s` keeps these knobs as-is (same grace/extension rights as the
    * default budget — agent-explicit-timeout-extend §2.6/E6); `extend.enabled
@@ -483,6 +483,14 @@ export interface WorkflowRunBudget {
   readonly totalGraceMs?: Millis;
   readonly maxExtensions?: number;
   readonly maxTotalFactor?: number;
+  /**
+   * 「每次延长最多 1h」：单笔 extend 额度上限，同时参与 extendable workflow 的硬顶
+   * （max(ceil(T·factor), T + maxExtensions·step)）。无 workflow 专属 settings 叶子 ——
+   * run-budget.ts 复用 subagent 的 `settings.budget.extendStepMs`（同 totalGraceMs/
+   * maxExtensions/maxTotalFactor 的 §4.1 约定）。`0`/undefined = legacy：无单笔上限、
+   * 硬顶只看 factor 项。
+   */
+  readonly extendStepMs?: Millis;
   /**
    * workflow-worktree plan D5: the host's own fallback upper bound for the
    * settle-horizon worktree wait (`min(remainingWorkflowMs(), this)`),

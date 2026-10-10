@@ -55,6 +55,9 @@ export function buildWorkflowRunBudget(settings: AgentSettings): WorkflowRunBudg
     totalGraceMs: settings.budget.totalGraceMs,
     maxExtensions: settings.extend.enabled ? settings.budget.maxExtensions : 0,
     maxTotalFactor: settings.budget.maxTotalFactor,
+    // 「每次延长最多 1h」：无 workflow 专属叶子 —— 复用 subagent 的
+    // settings.budget.extendStepMs（与上面三个旋钮同一约定，types.ts 文档化）。
+    extendStepMs: settings.budget.extendStepMs,
     // workflow-worktree plan D5: the host's own settle-horizon fallback
     // upper bound, derived from the *effective* settings.budget.reapMs —
     // an agent-type-specific reapMs override can only make the real wait

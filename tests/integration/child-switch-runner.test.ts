@@ -470,6 +470,9 @@ describe("T-S8: switching near the total budget does not extend the deadline", (
       toolMs: 20_000,
       // The ORIGINAL total budget the switch must NOT extend.
       totalMs: 1500,
+      // 「每次延长最多 1h」前的时代公式：本用例要在秒级内自然超时，
+      // 不吃默认 extendStepMs（否则 H 被抬到 T+3×1h，tick 预算内杀不掉）。
+      extendStepMs: 0,
       abortGraceMs: 50,
       steerMs: 50,
       reapMs: 50,

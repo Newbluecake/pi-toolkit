@@ -75,8 +75,10 @@ export interface DeadlineBudget {
   totalGraceMs: Millis;
   /** 单个 run 允许的 deadline 延长次数上限；0 = 禁止延长（同时也禁用宽限：graceWindow 经 extendability 判额度）。 */
   maxExtensions: number;
-  /** 硬天花板倍数：hardDeadlineAt = enqueuedAt + ceil(totalMs * maxTotalFactor)（≥ 1）。被 applyBudgetPolicy({ fixedDeadline: true }) 钳为 1（fixed-deadline run：H = D0，无宽限无延长；agent-explicit-timeout-extend plan §2.2）。 */
+  /** 硬天花板倍数：hardDeadlineAt = enqueuedAt + max(ceil(totalMs * maxTotalFactor), totalMs + maxExtensions*extendStepMs)（≥ 1，step 项仅当 factor>1 且 maxExtensions>0 且 extendStepMs>0）。被 applyBudgetPolicy({ fixedDeadline: true }) 钳为 1（fixed-deadline run：H = D0，无宽限无延长；agent-explicit-timeout-extend plan §2.2）。 */
   maxTotalFactor: number;
+  /** 单次延长额度上限（用户拍板「每次延长最多 1h」；default 3_600_000）；同时参与 extendable run 的硬顶跨度（T + maxExtensions·extendStepMs）。0 = legacy：不设单次上限、不加 step 硬顶项。 */
+  extendStepMs: Millis;
 }
 export interface RunDeadlines {
   readonly enqueuedAt: Millis;

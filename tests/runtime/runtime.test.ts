@@ -518,7 +518,7 @@ describe("CC4: ResolvedSpawnRequest.deadlineAt threads through to the enqueued d
  * entries are driven via runner.fireDeadline() (the watchdog's entry point).
  * ------------------------------------------------------------------------- */
 describe("timeout grace & extendDeadline (runner)", () => {
-  const graceBudget = { ...budget, totalGraceMs: 20, maxExtensions: 2, maxTotalFactor: 3 };
+  const graceBudget = { ...budget, totalGraceMs: 20, maxExtensions: 2, maxTotalFactor: 3, extendStepMs: 0 };
 
   /** Starts a run whose prompt hangs forever, parked at prompt_dispatch. */
   async function startHanging(
@@ -677,6 +677,30 @@ describe("timeout grace & extendDeadline (runner)", () => {
     // And once at the ceiling there is no headroom left.
     expect(runner.extendDeadline("r-clamp", 10, { source: "tool" })).toEqual({ ok: false, reason: "no_headroom" });
     await settle(runPromise, clock, 91);
+  });
+
+  // 「每次延长最多 1h」：单笔 grant 被 extendStepMs 钗位（与 reducer 同一口径）
+  it("caps a single grant at extendStepMs: request 2h ⇒ 1h granted, then headroom clamps", async () => {
+    const stepBudget = { ...graceBudget, extendStepMs: 40 }; // ceiling: max(90, 30+2×40)=110
+    const { clock, runner, runPromise } = await startHanging("r-step", stepBudget);
+    expect(runner.getRunState("r-step")?.deadlines.hardDeadlineAt).toBe(110);
+    // 请求 120（>> step 40）⇒ 单笔只给 40：30 → 70
+    expect(runner.extendDeadline("r-step", 120, { source: "tool" })).toMatchObject({
+      ok: true,
+      deadlineAt: 70,
+      requestedMs: 120,
+      grantedMs: 40,
+      clamped: true,
+    });
+    // 再请求 120：step 40，headroom 110−70=40 ⇒ 恰到硬顶
+    expect(runner.extendDeadline("r-step", 120, { source: "tool" })).toMatchObject({
+      ok: true,
+      deadlineAt: 110,
+      grantedMs: 40,
+      clamped: true,
+    });
+    expect(runner.extendDeadline("r-step", 10, { source: "tool" })).toEqual({ ok: false, reason: "limit_reached" });
+    await settle(runPromise, clock, 111);
   });
 
   it("fireDeadline entering grace does NOT cancel the run, and the guard kills it at graceUntil", async () => {

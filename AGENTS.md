@@ -78,7 +78,13 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   guards: `deadline.ts`'s `MAX_DEADLINE_SPAN_MS` (365d) + `clampSpanMs()` clamp every computed span
   (non-finite/≤0 ⇒ undefined) so no NaN/Infinity deadline can ever reach a timer; `clock.ts`'s
   `createSegmentedClock` re-arms delays beyond Node's 2³¹−1 ms `setTimeout` limit in segments
-  (no 1ms busy-loop), and `systemClock` is built on it (unref semantics preserved).
+  (no 1ms busy-loop), and `systemClock` is built on it (unref semantics preserved). Per-grant
+  extension cap (user ruling 「每次延长最多 1h」): `budget.extendStepMs` (`budget.extendStepS`,
+  default 3600s, `0` = legacy) bounds each extend_subagent_timeout grant
+  (`extensionGrantCapMs`, one logic consumed by both reducer and runner) and widens the extendable
+  run's hard ceiling to `max(ceil(T·maxTotalFactor), T + maxExtensions·extendStepMs)`
+  (`hardDeadlineAtFor`; factor-1/fixed and maxExtensions=0 runs keep the legacy span unchanged);
+  workflows reuse the same value via `run-budget.ts` (no own settings leaf).
 - `src/runtime/` — runner, session driver, watchdog, reaper, slot pool (concurrency), dynamic
   tool scoping. **Child-extension-missing diagnostic (todo #27)**: `session-driver.ts` rediscovers
   extensions for every spawned child session purely from settings.json (the same `SettingsManager`/
@@ -526,7 +532,9 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   ids — full/prefix/script name — and refuses a workflow's children, which are pinned to the workflow `hardAt`;
   an
   explicit `timeout_s` follows the same grace/extension rules as the default budget — `hardAt = start +
-ceil(f·workflowTotalMs)` with the base `maxTotalFactor` preserved — while the workflow's children stay
+max(ceil(f·workflowTotalMs), workflowTotalMs + maxExtensions·extendStepMs)` with the base `maxTotalFactor` preserved
+  (`extendStepMs` reused from `settings.budget`, same 「每次延长最多 1h」 ruling; per-grant cap applies to `extend()` too)
+  — while the workflow's children stay
   fixed-deadline). `agent(prompt, opts?)` opts are strictly validated (`agent-opts.ts`: only
   `label`/`agentType`/`phase`/`fullResult`/`model`/`thinking`/`isolation`/`experts` — any other key, a non-plain-object
   `opts`, an accessor/Proxy/function-valued known key, or a malformed `experts` array reject with the full allowed-key

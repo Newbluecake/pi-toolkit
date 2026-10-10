@@ -1,4 +1,4 @@
-import { MAX_DEADLINE_SPAN_MS, clampSpanMs } from "../core/deadline.js";
+import { MAX_DEADLINE_SPAN_MS, clampSpanMs, extendableSpanMs, extensionGrantCapMs } from "../core/deadline.js";
 import type { Millis } from "../core/types.js";
 import type { WorkflowId } from "./types.js";
 
@@ -13,7 +13,7 @@ import type { WorkflowId } from "./types.js";
  *
  * Semantics (mirrors the subagent run, D-6/D-7/D-10):
  *  - `softAt` starts at `startedAt + totalMs`; `hardAt = startedAt +
- *    ceil(totalMs × max(1, maxTotalFactor))` and never moves.
+ *    extendableSpanMs(policy)` and never moves.
  *  - The WT8 timer fires at `nextTimerAt()` (= `graceUntil ?? softAt`). At the
  *    soft deadline a workflow with extension budget left (`extendability` ok)
  *    and `totalGraceMs > 0` enters a grace window `graceUntil = min(now +
@@ -44,6 +44,15 @@ export interface WorkflowDeadlinePolicy {
   readonly maxExtensions: number;
   /** Hard ceiling factor (`≥ 1`; values below 1 are treated as 1). `1` = no headroom above the deadline. */
   readonly maxTotalFactor: number;
+  /**
+   * 「每次延长最多 1h」（用户拍板）：单笔 extend 的额度上限，同时参与硬顶跨度
+   * （hardAt = start + max(ceil(T·factor), T + maxExtensions·extendStepMs)，仅当
+   * factor > 1 且 maxExtensions > 0 且 extendStepMs > 0）。`0` = legacy（无单笔上限、
+   * 硬顶只看 factor 项）。workflow 无自己的 settings 叶子 —— run-budget.ts 复用
+   * subagent 的 `settings.budget.extendStepMs`（与 totalGraceMs/maxExtensions/
+   * maxTotalFactor 同一约定，workflow-agent-queue §4.1）。
+   */
+  readonly extendStepMs: Millis;
 }
 
 export interface WorkflowDeadlineState {
@@ -178,10 +187,18 @@ export function createWorkflowDeadlineController(
   // factor → 1) instead of poisoning the deadlines with NaN/Infinity.
   const totalMs = boundedSpan(policy.totalMs) ?? 1;
   const factor = Number.isFinite(policy.maxTotalFactor) ? Math.max(1, policy.maxTotalFactor) : 1;
-  const maxExtensions = Math.max(0, Math.floor(policy.maxExtensions));
+  const maxExtensions = Number.isFinite(policy.maxExtensions) ? Math.max(0, Math.floor(policy.maxExtensions)) : 0;
   const totalGraceMs = Math.max(0, policy.totalGraceMs);
-  const normalized: WorkflowDeadlinePolicy = { totalMs, totalGraceMs, maxExtensions, maxTotalFactor: factor };
-  const hardAt = startedAt + Math.max(totalMs, boundedSpan(Math.ceil(totalMs * factor)) ?? totalMs);
+  // 「每次延长最多 1h」：非有限 step 降级 0（legacy），不钗例外
+  const extendStepMs = Number.isFinite(policy.extendStepMs) ? Math.max(0, policy.extendStepMs) : 0;
+  const normalized: WorkflowDeadlinePolicy = {
+    totalMs,
+    totalGraceMs,
+    maxExtensions,
+    maxTotalFactor: factor,
+    extendStepMs,
+  };
+  const hardAt = startedAt + (extendableSpanMs(normalized) ?? totalMs);
   let softAt = startedAt + totalMs;
   let graceUntil: Millis | undefined;
   let extensions = 0;
@@ -252,8 +269,11 @@ export function createWorkflowDeadlineController(
       // Base on max(now, prev): inside a grace window prev is already in the
       // past, so "+60s" measured from prev could be a zero net gain.
       const base = Math.max(now, prev);
+      // 「每次延长最多 1h」：与 core 同一语义（单笔 step 上限，0 = legacy）；
+      // headroom 的 min(base+ms, hardAt) 紧随其后。requestedMs 仍报原始请求。
       const requested = extendMs;
-      const next = Math.min(base + requested, hardAt);
+      const grant = extensionGrantCapMs(normalized, extendMs);
+      const next = Math.min(base + grant, hardAt);
       if (next <= prev && next <= now) return { ok: false, reason: "no_headroom" }; // zero net gain
       const granted = next - base;
       const rescuedFromGrace = graceUntil !== undefined;

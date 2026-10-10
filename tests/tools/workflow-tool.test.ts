@@ -805,6 +805,15 @@ describe("SubagentWorkflow tool: grace & extension (workflow-agent-queue §4.1, 
     expect(Value.Check(WorkflowToolParams, { script, timeout_s: 604_801 })).toBe(false);
   });
 
+  it("default and explicit budgets advertise the step-dominated ceiling", async () => {
+    const { runs } = recordingRuns();
+    const tool = createWorkflowTool({ defaultBudget: { ...EXTENDABLE, extendStepMs: 3_600_000 }, runs });
+    expect(text(await tool.execute("c", { script }, undefined))).toContain("budget: 20s (extendable up to 3h00m)");
+    expect(text(await tool.execute("c", { script, timeout_s: 30 }, undefined))).toContain(
+      "budget: 30s (extendable up to 3h00m)",
+    );
+  });
+
   it("the description tells the model about the grace notice, extend_subagent_timeout and the explicit timeout_s rules", () => {
     const tool = createWorkflowTool({ defaultBudget: EXTENDABLE, runs: recordingRuns().runs });
     expect(tool.description).toContain("extend_subagent_timeout(run_id: <workflow id>, extend_s)");
@@ -814,5 +823,7 @@ describe("SubagentWorkflow tool: grace & extension (workflow-agent-queue §4.1, 
     const timeoutSpec = WorkflowToolParams.properties["timeout_s"] as { description?: string };
     expect(timeoutSpec.description).toContain("1–604800");
     expect(timeoutSpec.description).toContain("Same rules as the default budget");
+    expect(timeoutSpec.description).toContain("budget.extendStepS");
+    expect(timeoutSpec.description).not.toContain("2× by default");
   });
 });

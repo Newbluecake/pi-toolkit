@@ -127,7 +127,9 @@ function writeSettings(home: string, extra: Record<string, unknown> = {}) {
         // Plan §7 fallback timing: G=1s (N tests widen to 2s), extensions 2,
         // factor 3, fast abort/reap. totalGraceS/maxExtensions/maxTotalFactor
         // shape both the explicit-timeout and default-budget paths.
-        budget: { totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 3, abortGraceS: 0.05, reapS: 0.05 },
+        // extendStepS: 0（legacy）——本文件的 E1 算术锁 factor 项硬顶（H = 3·T）
+        // 与旧式单笔全额 grant；step 项/单笔钳位由 core/runtime/workflow 单测覆盖。
+        budget: { totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 3, extendStepS: 0, abortGraceS: 0.05, reapS: 0.05 },
         fleetWidget: false,
         quota: { enabled: false },
         ...extra,

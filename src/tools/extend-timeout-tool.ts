@@ -11,9 +11,11 @@ import { resolveToolTarget, WORKFLOW_ID_PREFIX, type WorkflowQueryPort } from ".
 
 /**
  * timeout-notify (arch §4) + agent-explicit-timeout-extend (§3.5/§5.2): extend
- * a running subagent's soft deadline by a number of SECONDS. The grant is
- * clamped by the run's hard ceiling (maxTotalFactor × totalMs, frozen at
- * enqueue), so the model may get less than it asked for — the result text
+ * a running subagent's soft deadline by a number of SECONDS. Each grant is
+ * capped per-call by budget.extendStepMs (「每次延长最多 1h」，default 1h; 0 =
+ * legacy no cap) and then clamped by the run's hard ceiling (max(ceil(totalMs ×
+ * maxTotalFactor), totalMs + maxExtensions×extendStepMs), frozen at enqueue),
+ * so the model may get less than it asked for — the result text
  * always says exactly how much was granted. Default-budget runs AND runs
  * dispatched with an explicit Agent timeout_s are both extendable (same
  * rules); only fixed-deadline runs — consult, /goal verifier, RPC, and
@@ -40,7 +42,7 @@ export const ExtendTimeoutParams = Type.Object({
     minimum: 1,
     maximum: 604_800,
     description:
-      "Extra wall-clock seconds to add on top of the run's current deadline. The grant is capped by the run's hard ceiling, so you may get less than you ask for — the result says exactly how much was granted.",
+      "Extra wall-clock seconds to add on top of the run's current deadline. Each call grants at most budget.extendStepS (default 3600s) and never past the run's hard ceiling, so you may get less than you ask for — the result says exactly how much was granted; ask again for more.",
   }),
   reason: Type.Optional(
     Type.String({
@@ -265,6 +267,9 @@ export function createExtendTimeoutTool(deps: {
           `at most ${formatDuration(Math.max(0, result.hardDeadlineAt - result.deadlineAt))} more available.`;
         if (result.rescuedFromGrace)
           text += " The workflow was inside its timeout grace window and is now back to normal execution.";
+        if (result.clamped)
+          text +=
+            " The request was clamped (per-call cap budget.extendStepS and the workflow's hard ceiling); ask again if you still need more time.";
         return { content: [{ type: "text" as const, text }], details: result };
       }
       const runId = target.runId;
@@ -297,6 +302,9 @@ export function createExtendTimeoutTool(deps: {
         `at most ${formatDuration(Math.max(0, result.hardDeadlineAt - result.deadlineAt))} more available.`;
       if (result.rescuedFromGrace)
         text += " The run was inside its timeout grace window and is now back to normal execution.";
+      if (result.clamped)
+        text +=
+          " The request was clamped (per-call cap budget.extendStepS and the run's hard ceiling); ask again if you still need more time.";
       // Defensive: extendability rejects queue_wait with not_started, so this
       // is unreachable through the real runner — keep the truthful note for
       // any custom Runner implementation that lets a queued run through.

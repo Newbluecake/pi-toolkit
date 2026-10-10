@@ -37,6 +37,7 @@ function fastBudget(totalMs: number) {
     toolMs: 2_000,
     totalMs,
     totalGraceMs: 0, // S21 基线预置：关闭宽限，保持既有超时语义
+    extendStepMs: 0, // 「每次延长最多 1h」前的时代公式：硬顶只看 factor 项（D-10/X0 的 H=2·T 算术）
     abortGraceMs: 20,
     steerMs: 10,
     reapMs: 30,

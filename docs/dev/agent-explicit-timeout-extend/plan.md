@@ -292,6 +292,15 @@ fixedDeadline = resolvedPolicy === "fixed"
   - 其余（含字段缺席）：既有 ceiling 变体，不变。
 - **workflow `no_headroom`**（`hardDeadlineAt === deadlineAt && extensions === 0`，陈述配置事实、不推断策略——workflow 无策略概念）：`"${name} has no headroom above its deadline (budget.maxTotalFactor is 1); it stops at its deadline (in X) and cannot be extended. …"`
 
+**2026-10-10 update**：上文 §3.3 G1/G3 的 factor-only 公式及 §5.2 的「2× by default」工具文案为历史口径。
+现统一由 `core/deadline.ts` 的 `extendableSpanMs` 计算：`t = clampSpanMs(totalMs)`，非法 total 仍返回
+`undefined`（workflow 先降级为 1ms）；`f` 非有限或小于 1 时降级为 1；当 `f > 1 && maxExtensions > 0 && extendStepMs > 0`
+时，`span = max(clampSpanMs(ceil(t * f)) ?? t, clampSpanMs(t + maxExtensions * extendStepMs) ?? t)`，否则保留 factor-only。
+非有限/负的 step 或 extension count 降级为 legacy；count 向下取整。单次 grant 复用 `extensionGrantCapMs`，
+默认 step 为 1h，`0` 为 legacy。`hardDeadlineAtFor`、workflow controller、后台 `runBoundMs` 和启动文案共用此 span；
+绝对 `capAt` 仍只能收紧。工具文案现说明 `max(ceil(T * budget.maxTotalFactor), T + budget.maxExtensions * budget.extendStepS)`
+（秒），不再承诺默认上界恒为 `2 * T`。
+
 ### 5.3 文档同步清单
 
 | 文件                                              | 位置                                                                                                                                                                                                                                                                                                                                                       | 改动                                                                                                                                                                                                                                                                                             |

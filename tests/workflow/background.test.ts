@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock, systemClock } from "../../src/core/clock.js";
 import { createWorkflowActivityRegistry } from "../../src/workflow/activity.js";
+import { createWorkflowDeadlineController } from "../../src/workflow/deadline.js";
 import {
   createBackgroundWorkflows,
   runBoundMs,
@@ -495,7 +496,7 @@ describe("background workflows: deadline extension (workflow-agent-queue §4.3, 
     await runs2.stop(v2.workflowId, "user_stop");
   });
 
-  it("runBoundMs is measured from the static hard ceiling ceil(total × max(1, factor))", () => {
+  it("runBoundMs keeps the factor-only ceiling for legacy budgets", () => {
     const base = runBoundMs(LONG_BUDGET);
     expect(runBoundMs({ ...LONG_BUDGET, maxTotalFactor: 1 })).toBe(base);
     expect(runBoundMs({ ...LONG_BUDGET, maxTotalFactor: 0.5 })).toBe(base);
@@ -503,5 +504,69 @@ describe("background workflows: deadline extension (workflow-agent-queue §4.3, 
     expect(runBoundMs({ ...LONG_BUDGET, workflowTotalMs: 1_001, maxTotalFactor: 1.5 })).toBe(
       base - 60_000 + Math.ceil(1_001 * 1.5),
     );
+  });
+
+  it("runBoundMs covers the real hard ceiling when the step term dominates (default 1h workflow -> 4h)", () => {
+    const hour = 3_600_000;
+    const budget = {
+      ...LONG_BUDGET,
+      workflowTotalMs: hour,
+      maxTotalFactor: 2,
+      maxExtensions: 3,
+      extendStepMs: hour,
+    };
+    const startedAt = 123_000;
+    const deadline = createWorkflowDeadlineController("wf_bound", startedAt, {
+      ...budget,
+      totalMs: budget.workflowTotalMs,
+      totalGraceMs: 90_000,
+    });
+    const span = deadline.state().hardAt - startedAt;
+    expect(span).toBe(4 * hour);
+    expect(runBoundMs(budget)).toBeGreaterThanOrEqual(span);
+    expect(runBoundMs(budget)).toBe(span + 250 + 10 + 10 + 10);
+  });
+
+  it("drive does not stop a legally extended workflow at the old factor-only bound", async () => {
+    const hour = 3_600_000;
+    const clock = new FakeClock(1_000);
+    const budget = {
+      ...LONG_BUDGET,
+      workflowTotalMs: hour,
+      maxTotalFactor: 2,
+      maxExtensions: 3,
+      extendStepMs: hour,
+    };
+    const deadline = createWorkflowDeadlineController("wf_test1", clock.now(), {
+      ...budget,
+      totalMs: budget.workflowTotalMs,
+      totalGraceMs: 90_000,
+    });
+    const c = controllable({ settleOnStop: true });
+    const { runs, settled } = registry(
+      () => ({
+        ...c.orch,
+        deadline: () => deadline.state(),
+        extend: (_id, ms) => deadline.extend(clock.now(), ms),
+      }),
+      { clock },
+    );
+    const view = start(runs, budget);
+    expect(runs.extend(view.workflowId, hour)).toMatchObject({ ok: true, grantedMs: hour });
+    expect(runs.extend(view.workflowId, hour)).toMatchObject({ ok: true, grantedMs: hour });
+    // Beyond the previous 2h + overhead bound, but still before the extended 3h soft deadline.
+    clock.advance(2 * hour + 1_000);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(clock.now()).toBeLessThan(deadline.state().softAt);
+    expect(c.stops).toEqual([]);
+    expect(runs.get(view.workflowId)?.status).toBe("running");
+    expect(settled).toHaveLength(0);
+    c.release(outcome({ result: "completed in the extended window" }));
+    const done = await runs.wait(view.workflowId, { waitMs: 1_000 });
+    expect(done.ok && done.view.outcome.result).toBe("completed in the extended window");
+    expect(runs.get(view.workflowId)?.status).toBe("completed");
+    expect(c.stops).toEqual([]);
+    expect(settled).toHaveLength(1);
+    expect(clock.pendingTimers).toBe(0);
   });
 });
