@@ -73,7 +73,11 @@
 .gg-col-lanes {
   width: var(--gg-w, 64px);
 }
-.gg-col-date,
+/* date: the longest formatted value is 17 chars (en "23 Sep 2026 09:55"; zh is 16) plus the
+   cell's 2×4px padding — 12ch truncated it to "2026-10-10 23:…" (2026-10-10 field report) */
+.gg-col-date {
+  width: calc(17ch + 8px);
+}
 .gg-col-author {
   width: 12ch;
 }
@@ -251,7 +255,6 @@ tr.is-merge .gg-sub {
 /* ---- right columns: date / author / hash (absolute date, §4.2) ---- */
 .gg-date,
 .gg-author {
-  width: 12ch;
   color: var(--c-text-3);
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-2xs);
