@@ -237,7 +237,11 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   one retry (`forkMainSessionSnapshot`) because that file, unlike a finished expert's, can be
   concurrently appended to or rewritten. `consult.enabled=false` leaves the wiring inert (both
   forms). Wired in `src/stack.ts` through a late-bound ref. Design + test anchors:
-  `docs/dev/consult/plan.md`.
+  `docs/dev/consult/plan.md`. **A/B instrumentation** (`docs/dev/consult/ab-instrumentation-plan.md`): runs carry
+  `diag.experts` (`refs` + `granted`), `diag.consults` (per-run consult outcome/cost/latency fold from the
+  consult tool_end), `diag.dispatchMeta` (the Agent tool's analytics-only `meta`, inherited on resume) and
+  `diag.schemaPreset` (`schema:"verdict/v1"`); all write-once, absent on runs that never set them, and
+  analyzed offline by `scripts/exp/consult-ab-analyze.mjs` (protocol: `skills/dev-flow/references/consult-ab.md`).
 - `src/hud/` — merged pi-hud: full footer takeover (git/worktrees, token & cost stats incl.
   live subagent cost, LLM timing/speed, own `toolkit v<ver>@<commit>[*] <commit time>` at the end of the cwd/git line with the model right-aligned on it — read once per activate by `plugin-info.ts`, git fields only when the package root is itself the git toplevel) + status key `pi-hud` + `/pi-hud-refresh` + settings-gated
   periodic `git fetch` (`hud.autoFetchMinutes`, default 5, 0 = off — the ↑/↓ counts compare against
