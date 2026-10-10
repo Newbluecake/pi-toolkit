@@ -122,7 +122,7 @@ export function readStatus(
     if (port !== undefined) {
       const verdict = port.verdict();
       if (verdict.level !== "unknown") {
-        const since = verdict.metrics.cpu.windowStartMono ?? verdict.metrics.mem.windowStartMono;
+        const since = verdict.gatingSinceMono;
         status.loadGate = projectLoadGate(verdict, since === undefined ? undefined : Math.max(0, verdict.mono - since));
       }
     }

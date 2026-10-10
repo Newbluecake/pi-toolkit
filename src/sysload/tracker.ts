@@ -21,7 +21,9 @@ export interface LoadTracker {
 interface InternalMetric {
   level: LoadLevel;
   windowStart: number | undefined;
+  levelSince: number | undefined;
   lastValid: number | undefined;
+  value: unknown;
   previousValid: number | undefined;
   direction: "up" | "down" | undefined;
   windowTarget: LoadLevel | undefined;
@@ -34,8 +36,22 @@ const levelOfRank = (value: number): LoadLevel => (value >= 2 ? "crit" : value >
 const knownState = (metric: InternalMetric): MetricState => ({
   level: metric.level,
   ...(metric.windowStart === undefined ? {} : { windowStartMono: metric.windowStart }),
+  ...(metric.levelSince === undefined ? {} : { levelSinceMono: metric.levelSince }),
   ...(metric.lastValid === undefined ? {} : { lastValidMono: metric.lastValid }),
+  ...(metric.value && typeof metric.value === "object" ? metricValueFields(metric.value) : {}),
 });
+
+function metricValueFields(value: object): Partial<MetricState> {
+  const v = value as Record<string, unknown>;
+  return {
+    ...(typeof v.busyPct === "number" ? { busyPct: v.busyPct } : {}),
+    ...(typeof v.psiPct === "number" ? { psiPct: v.psiPct } : {}),
+    ...(typeof v.availPct === "number" ? { availPct: v.availPct } : {}),
+    ...(typeof v.freePct === "number" ? { freePct: v.freePct } : {}),
+    ...(typeof v.freeBytes === "number" ? { freeBytes: v.freeBytes } : {}),
+    ...(typeof v.mountPath === "string" ? { mountPath: v.mountPath } : {}),
+  };
+}
 const validFinite = (value: number): boolean => Number.isFinite(value);
 const effectiveGate = (settings: LoadSettings, level: LoadLevel): boolean =>
   settings.enabled && settings.gate && level !== "unknown" && rank(level) >= rank(settings.gateLevel);
@@ -167,6 +183,7 @@ function advanceMetric(
   metric.broken = false;
   metric.previousValid = metric.lastValid;
   metric.lastValid = mono;
+  metric.value = value;
 
   const currentRank = rank(metric.level);
   const rawRank = rank(raw);
@@ -195,6 +212,7 @@ function advanceMetric(
   const duration = direction === "up" ? settings.sustainMs : settings.recoverMs;
   if (elapsed >= duration || duration === 0) {
     metric.level = target;
+    metric.levelSince = mono;
     metric.windowStart = undefined;
     metric.direction = undefined;
     metric.windowTarget = undefined;
@@ -224,7 +242,9 @@ export function createLoadTracker(
   const cpu: InternalMetric = {
     level: "unknown",
     windowStart: undefined,
+    levelSince: undefined,
     lastValid: undefined,
+    value: undefined,
     previousValid: undefined,
     direction: undefined,
     windowTarget: undefined,
@@ -234,7 +254,9 @@ export function createLoadTracker(
   const mem: InternalMetric = {
     level: "unknown",
     windowStart: undefined,
+    levelSince: undefined,
     lastValid: undefined,
+    value: undefined,
     previousValid: undefined,
     direction: undefined,
     windowTarget: undefined,
@@ -244,6 +266,9 @@ export function createLoadTracker(
   const disks = new Map<string, InternalMetric>();
   let lastGating = false;
   let lastOverall: LoadLevel = "unknown";
+  let gatingSinceMono: number | undefined;
+  let latestLoadavg: readonly [number, number, number] | undefined;
+  let latestCores: number | undefined;
 
   const verdict = (now = mono(), at = wall()): LoadVerdict => {
     const cpuLevel = staleLevel(cpu, now, settings.sampleIntervalMs);
@@ -264,12 +289,17 @@ export function createLoadTracker(
       },
       mono: now,
       at,
+      ...(gatingSinceMono === undefined ? {} : { gatingSinceMono }),
+      ...(latestLoadavg === undefined ? {} : { loadavg: latestLoadavg }),
+      ...(latestCores === undefined ? {} : { cores: latestCores }),
     };
   };
 
   return {
     observe(sample: LoadSample): LoadTransition {
       const before = verdict(sample.mono, sample.at);
+      if (sample.loadavg !== undefined) latestLoadavg = sample.loadavg;
+      if (sample.cpu.kind === "ok") latestCores = sample.cpu.value.cores;
       const cpuResult =
         sample.cpu.kind === "ok"
           ? advanceMetric(
@@ -299,7 +329,9 @@ export function createLoadTracker(
         const metric = disks.get(path.label) ?? {
           level: "unknown" as LoadLevel,
           windowStart: undefined,
+          levelSince: undefined,
           lastValid: undefined,
+          value: undefined,
           previousValid: undefined,
           direction: undefined,
           windowTarget: undefined,
@@ -334,6 +366,8 @@ export function createLoadTracker(
       }
       const after = verdict(sample.mono, sample.at);
       const gateCleared = before.gating && !after.gating;
+      if (!before.gating && after.gating) gatingSinceMono = sample.mono;
+      else if (!after.gating) gatingSinceMono = undefined;
       const provenRecovered =
         (cpuResult.recovered || memResult.recovered || diskRecovered) &&
         rank(after.level) < rank(settings.gateLevel) &&
@@ -352,19 +386,26 @@ export function createLoadTracker(
     reset(): void {
       cpu.level = "unknown";
       cpu.windowStart = undefined;
+      cpu.levelSince = undefined;
       cpu.lastValid = undefined;
+      cpu.value = undefined;
       cpu.previousValid = undefined;
       cpu.direction = undefined;
       cpu.windowTarget = undefined;
       cpu.broken = false;
       mem.level = "unknown";
       mem.windowStart = undefined;
+      mem.levelSince = undefined;
       mem.lastValid = undefined;
+      mem.value = undefined;
       mem.previousValid = undefined;
       mem.direction = undefined;
       mem.windowTarget = undefined;
       mem.broken = false;
       disks.clear();
+      gatingSinceMono = undefined;
+      latestLoadavg = undefined;
+      latestCores = undefined;
     },
   };
 }

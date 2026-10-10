@@ -1570,7 +1570,7 @@ export function buildSessionStack(
         });
         if (decision.blocked && decision.message !== undefined) {
           if (!nested && loadHintState !== undefined) loadHintState.rejectedSinceRecovery = true;
-          if (!nested) loadPort.refreshTop();
+          loadPort.refreshTop();
           return { message: decision.message };
         }
         return undefined;

@@ -94,6 +94,16 @@ describe("renderExtensionStatusLines", () => {
     expect(lines).toEqual(["5h"]);
   });
 
+  it("load 与 quota 放得下时同行，放不下时 load 在 quota 前", () => {
+    const plain = { fg: (_color: string, text: string) => text };
+    const entries: [string, string][] = [
+      ["quota", "kimi 62%"],
+      ["load", "load crit"],
+    ];
+    expect(renderExtensionStatusLines(entries, plain, 20)).toEqual(["kimi 62% │ load crit"]);
+    expect(renderExtensionStatusLines(entries, plain, 16)).toEqual(["load crit", "kimi 62%"]);
+  });
+
   it("quota 与其余条目并存：status 行在前、quota 行在后", () => {
     const lines = renderExtensionStatusLines(
       [

@@ -76,7 +76,10 @@ export function createLoadActivation(deps: LoadActivationDeps): LoadActivation {
           mountinfoText = result.mountinfoText;
           mountinfoAt = result.sample.mono;
         }
+        const beforeGating = tracker.verdict(result.sample.mono, result.sample.at).gating;
         tracker.observe(result.sample);
+        const afterGating = tracker.verdict(result.sample.mono, result.sample.at).gating;
+        if (!beforeGating && afterGating) port.refreshTop();
       })
       .catch(() => undefined)
       .finally(() => {

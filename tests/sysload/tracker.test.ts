@@ -32,6 +32,8 @@ describe("sysload tracker", () => {
     tracker.observe(sample(10_000, 95));
     expect(tracker.verdict(10_000).level).toBe("crit");
     expect(tracker.verdict(10_000).gating).toBe(true);
+    expect(tracker.verdict(15_000).gatingSinceMono).toBe(10_000);
+    expect(tracker.verdict(15_000).metrics.cpu.levelSinceMono).toBe(10_000);
   });
 
   it("recovers with hysteresis and reports gate clearing, but not unknown as recovery", () => {
@@ -45,6 +47,7 @@ describe("sysload tracker", () => {
     expect(transition.gateCleared).toBe(true);
     expect(transition.provenRecovered).toBe(true);
     expect(tracker.verdict(7_000).level).toBe("warn");
+    expect(tracker.verdict(7_000).gatingSinceMono).toBeUndefined();
   });
 
   it("requires both non-default disk recovery margins", () => {

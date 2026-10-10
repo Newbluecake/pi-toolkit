@@ -21,13 +21,40 @@ const topText = (rows: readonly LoadTopRow[], unitsAvailable = true): string =>
       ? rows.map((row) => `${row.comm}×${row.count} n/a`).join(" · ")
       : rows.map((row) => `${row.comm}×${row.count} ${Math.round(row.cpuPct)}%`).join(" · ");
 
+const pct = (value: number | undefined): string => (value === undefined ? "—" : `${Math.round(value)}%`);
+const bytes = (value: number | undefined): string =>
+  value === undefined ? "—" : `${(value / 2 ** 30).toFixed(value >= 2 ** 30 ? 1 : 2).replace(/\.0$/, "")}G`;
+
+function loadDetail(verdict: LoadVerdict): string {
+  const cpu = verdict.metrics.cpu;
+  const mem = verdict.metrics.mem;
+  const disk = verdict.metrics.disk[0]?.state;
+  const cpuText = `CPU ${pct(cpu.busyPct)}${cpu.psiPct === undefined ? "" : ` (PSI ${pct(cpu.psiPct)})`}`;
+  const memText = `MEM ${pct(mem.availPct)} avail`;
+  const diskText = disk === undefined ? "DISK —" : `DISK ${disk.mountPath ?? "/"} ${bytes(disk.freeBytes)} free`;
+  const avg =
+    verdict.loadavg === undefined
+      ? ""
+      : `\nloadavg ${verdict.loadavg.map((n) => n.toFixed(1)).join(" / ")}${verdict.cores === undefined ? "" : ` (${verdict.cores} cores)`}`;
+  const since = verdict.gatingSinceMono === undefined ? "" : ` · since ${formatSince(verdict)}`;
+  return `[load] ${verdict.level} · ${cpuText} · ${memText} · ${diskText}${since}${avg}`;
+}
+
+function formatSince(verdict: LoadVerdict): string {
+  const elapsed = Math.max(0, verdict.mono - (verdict.gatingSinceMono ?? verdict.mono));
+  const minutes = Math.floor(elapsed / 60_000);
+  const seconds = Math.floor(elapsed / 1_000) % 60;
+  const clock = new Date(verdict.at - elapsed).toISOString().slice(11, 16);
+  return `${clock} (${minutes > 0 ? `${minutes}m` : `${seconds}s`})`;
+}
+
 export function evaluateLoadGate(
   verdict: LoadVerdict,
   settings: LoadSettings,
   request: LoadGateRequest = {},
 ): LoadGateDecision {
   if (!settings.enabled || !settings.gate || verdict.level === "unknown" || !verdict.gating) return { blocked: false };
-  const detail = `[load] ${verdict.level} · load gate active`;
+  const detail = loadDetail(verdict);
   const top = request.top;
   const topBlock =
     top === undefined

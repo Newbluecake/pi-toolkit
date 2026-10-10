@@ -207,19 +207,26 @@ export function renderExtensionStatusLines(
   const web = own(WEB_HUB_STATUS_KEY);
   const quota = own("quota");
   const load = own("load");
-  // web-hub is short (`web ●`): ride on the quota line when both fit in one
-  // row; otherwise (or without a width) each keeps a line of its own.
+  // Load rides with quota when it fits; otherwise it owns the line immediately
+  // before quota (§7.4). Web-hub keeps its older quota-sharing rule, but never
+  // displaces the load line when both are present.
   const sep = theme.fg("dim", " │ ");
-  if (web !== undefined && quota !== undefined && width !== undefined) {
+  if (quota !== undefined && load !== undefined && width !== undefined) {
+    if (visibleWidth(quota) + visibleWidth(sep) + visibleWidth(load) <= width) {
+      lines.push(quota + sep + load);
+      if (web !== undefined) lines.push(web);
+      return lines;
+    }
+  }
+  if (web !== undefined && quota !== undefined && width !== undefined && load === undefined) {
     if (visibleWidth(quota) + visibleWidth(sep) + visibleWidth(web) <= width) {
       lines.push(quota + sep + web);
-      if (load !== undefined) lines.push(load);
       return lines;
     }
   }
   if (web !== undefined) lines.push(web);
-  if (quota !== undefined) lines.push(quota);
   if (load !== undefined) lines.push(load);
+  if (quota !== undefined) lines.push(quota);
   return lines;
 }
 

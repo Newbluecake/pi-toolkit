@@ -80,7 +80,7 @@ export function projectLoadWire(
 }
 
 export function projectLoadGate(verdict: LoadVerdict, sinceAgoMs?: number, at = Date.now()): LoadGateWire {
-  const elapsed = finiteElapsed(sinceAgoMs ?? 0);
+  const elapsed = sinceAgoMs === undefined ? undefined : finiteElapsed(sinceAgoMs);
   return {
     gating: verdict.gating,
     level: verdict.level,

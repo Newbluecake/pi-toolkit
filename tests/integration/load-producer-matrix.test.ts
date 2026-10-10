@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createSpawnService } from "../../src/service/spawn-service.js";
 import type { AgentTypeConfig, RunOutcome } from "../../src/core/types.js";
 import type { Runner, SlotPool } from "../../src/service/ports.js";
+import { createTaskCommand } from "../../src/commands/task.js";
+import { routeMention } from "../../src/mention/mention.js";
 
 const type: AgentTypeConfig = { name: "worker", description: "worker", systemPrompt: "", promptMode: "append" };
 const outcome = {
@@ -49,5 +51,34 @@ describe("load producer matrix", () => {
       const admitted = await service.spawn(producer);
       expect("error" in admitted).toBe(false);
     }
+  });
+
+  it("real task and mention request builders stay exempt (no loadPolicy field)", async () => {
+    const requests: unknown[] = [];
+    const task = createTaskCommand({
+      spawn: async (request) => {
+        requests.push(request);
+        return { runId: "task" };
+      },
+      sendMessage: () => undefined,
+    });
+    await task.handler("user task", { ui: { notify: () => undefined } } as never);
+    await routeMention("@worker resume me", {
+      registry: {
+        resolve: () => ({ runId: "r1", type: "worker" }),
+        labels: () => [],
+        register: () => false,
+        reassign: () => undefined,
+      } as never,
+      query: { get: () => ({ status: "completed" }), steer: async () => ({ ok: true }) } as never,
+      spawn: {
+        spawn: async (request) => {
+          requests.push(request);
+          return { runId: "mention" };
+        },
+      },
+    });
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect((request as { loadPolicy?: unknown }).loadPolicy).toBeUndefined();
   });
 });

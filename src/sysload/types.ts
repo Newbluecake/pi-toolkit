@@ -185,6 +185,15 @@ export interface MetricState {
    * 清空" — the window a pending upgrade/recovery is being proven against). `undefined` while
    * no migration is in progress (level stable, no open window). */
   readonly windowStartMono?: number;
+  /** mono() when this metric's current level was most recently confirmed. */
+  readonly levelSinceMono?: number;
+  /** Last confirmed sample values, used for the human-readable gate diagnostic. */
+  readonly busyPct?: number;
+  readonly psiPct?: number;
+  readonly availPct?: number;
+  readonly freePct?: number;
+  readonly freeBytes?: number;
+  readonly mountPath?: string;
   /** mono() of the most recent valid (non-invalid, non-skipped, non-unresolved) sample folded
    * into this metric — the basis for §5.2's staleness/continuity checks. `undefined` if no
    * valid sample has ever been seen. */
@@ -216,6 +225,11 @@ export interface LoadVerdict {
   readonly mono: number;
   /** `Date.now()` this verdict was computed at (display only). */
   readonly at: number;
+  /** mono() when the effective gate most recently became true. */
+  readonly gatingSinceMono?: number;
+  /** Display-only CPU load averages and core count from the latest sample. */
+  readonly loadavg?: readonly [number, number, number];
+  readonly cores?: number;
 }
 
 /** §5.3: the two migration signals a consumer may react to (computed by the tracker/port on
