@@ -25,6 +25,7 @@
 import {
   AGENT_REMOVE_PATH,
   API_ERRORS as PROTOCOL_API_ERRORS,
+  LOAD_TOP_PATH,
   SSE_EVENTS as PROTOCOL_SSE_EVENTS,
 } from "@protocol/http-contract.ts";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
@@ -88,6 +89,9 @@ export const API = Object.freeze({
   // routes and this object can never disagree). `tests/web-hub/ui/logic-contract.test.ts`
   // pins it against the protocol constant.
   wtgraph: WTGRAPH_PATH,
+  // sysload plan §7.1/§7.3 (package P4): the on-demand top-process endpoint, imported from
+  // `protocol/http-contract.ts` — same anti-drift rule as the wtgraph/wtdiff paths above.
+  loadTop: LOAD_TOP_PATH,
   // @文件补全 (file-mention): the composer's file-search endpoint. Hand-written literal, NOT
   // imported from `hub/file-search.ts` — that module is hub-side (imports `node:fs*`) and must
   // never reach the browser bundle; `tests/web-hub/ui/logic-file-mention.test.ts` pins this

@@ -37,6 +37,7 @@ import type {
   StatusInfo,
   WireEntry,
   WireEvent,
+  LoadWire,
 } from "../protocol/messages.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { AgentRemoveFrontendPort } from "./agent-remove.js";
@@ -383,6 +384,30 @@ export interface HubConfig {
    * `"off"` is the key's ABSENCE (same wire-level off pattern as `spawn`); `hub/main.ts`
    * re-validates via `normalizeHubPreviewMode` and drops the whole key on anything else. */
   preview?: "on" | "loopback";
+  /** sysload plan (docs/dev/sysload/plan.md) §7.2/§11: the hub's OWN sampler policy, written by
+   * the pi process that launched it, ONLY when `load.enabled ∧ webHub.load` are both true
+   * (`buildHubConfig`, P2a) — same wire-level "feature off IS key absence" pattern as `spawn`/
+   * `preview` above. A singleton: kept as-is for the hub's whole lifetime even if the launching
+   * pi's settings change later (§3/§7.2 — "singleton 保留到 restart"); `hub/main.ts`'s
+   * `normalizeHubLoadConfig` (P3) re-validates and drops the whole key on anything malformed. */
+  load?: HubLoadConfig;
+}
+
+/**
+ * sysload plan §6.1/§7.2: the hub-side mirror of `LoadSettings`'s non-gating fields — the hub has
+ * no `gate`/`gateLevel`/`hint` concept at all (§3/§7.2: "hub 不承载 gate 概念，Pill/Card 只显示
+ * 等级"), so only the sampling cadence and the threshold numbers used to CLASSIFY a reading
+ * into a level cross this boundary.
+ */
+export interface HubLoadConfig {
+  sampleIntervalMs: number;
+  sustainMs: number;
+  recoverMs: number;
+  thresholds: {
+    cpu: { warnPercent: number; critPercent: number; psiWarnPercent: number; psiCritPercent: number };
+    mem: { warnAvailPercent: number; critAvailPercent: number };
+    disk: { warnFreePercent: number; critFreePercent: number; critFreeGiB: number };
+  };
 }
 
 export interface HubLog {
@@ -444,6 +469,11 @@ export type HubEvent =
    * forwards this as the SAME "hub" SSE event name `openEvents`' connect-time send already uses
    * (`logic/state.js`'s `case "hub"` already merges repeated frames of that name). */
   | { type: "hub" }
+  /** sysload plan §7.1/§7.2: the hub's own direct-send `load` SSE event (no `agentKey`, never
+   * `id:`, never replayed from the ring — §7.2's "直发"). `http.ts`'s `onHubEvent` forwards this
+   * as the `load` SSE event and (like `spawns`) snapshots the latest wire on connect, sent right
+   * AFTER `spawns` (§7.2). */
+  | { type: "load"; wire: LoadWire }
   /** web-hub-spawn plan §SP1 (arch §6.4): the `spawns` SSE broadcast — carries the Public
    * projection ONLY (`SpawnsPayload`); owner detail never rides the bus. `http.ts` (SP9)
    * forwards it as the `spawns` SSE event and snapshots it on connect. */

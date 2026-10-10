@@ -141,6 +141,13 @@ export interface WebHubSettings {
    * `settings.quota.enabled` (the underlying `QuotaService` itself): with no verdicts the field
    * is already absent, this flag is purely the web-hub-side kill switch. */
   quota?: boolean;
+  /** sysload plan §6.1/§7.2/§10 (P0 pre-approved cross-domain field — planning gap, see plan
+   * §10's package table: the type lives here even though P0 doesn't otherwise touch this file,
+   * because `config/settings.ts`'s `parseWebHubSettings`/`DEFAULT_SETTINGS.webHub` — both
+   * exclusively P0's — need somewhere to put the parsed value). Hub-side on/off for ITS OWN
+   * load sampler: `buildHubConfig` (P2a, this file) writes `config.load` only when this AND
+   * `settings.load.enabled` are both true (§7.2's "任一为 false ⇒整键省略"). Default `true`. */
+  load?: boolean;
   /** web-hub-steer-recall plan §2/§4.7 (A6) / arch §11 Q1: hold busy web steer/followUp in the
    *  agent-side buffer until pi's next queue drain so the browser can recall/re-edit them.
    *  Default `true`; `false` (or `control:false`) ⇒ no driver, no hold handlers, no `hold.v1`

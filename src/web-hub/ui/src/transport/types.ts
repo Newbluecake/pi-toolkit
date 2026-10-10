@@ -12,6 +12,7 @@ import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.
 import type { WtGraphPayload } from "@protocol/worktree-graph.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
+import type { LoadTopWire } from "@protocol/messages.js";
 import type {
   ForkReason,
   HistoryLiveWire,
@@ -134,7 +135,22 @@ export interface HubTransport {
    * never renders (I8: without the cap the panel DOM stays byte-identical to today). Both
    * real adapters always provide it. */
   readonly worktreeGraph?: WorktreeGraphTransport;
+  /** sysload plan §7.1/§7.3/§10 (package P4): `GET /api/load/top`. Optional per the
+   * frozen-transport convention (test fakes / future transports may omit it) — `LoadCard`'s
+   * top-process section degrades to its "不可用" copy without it, same posture as `preview`/
+   * `worktreeDiff`/`worktreeGraph` above. Both real adapters always provide it (implemented by
+   * P4's `transport/{token,password}.ts`, not this P0 declaration). */
+  loadTop?(signal?: AbortSignal): Promise<LoadTopOutcome>;
 }
+
+/**
+ * sysload plan §7.1/§10 (package P0 → P4): `GET /api/load/top`'s outcome — same two-half shape
+ * as `SpawnDirsOutcome`/`PreviewProbeOutcome` above (`status` 0 for client-local codes:
+ * `E_NETWORK`/`E_DEADLINE`/`E_UNSUPPORTED`).
+ */
+export type LoadTopOutcome =
+  | { readonly ok: true; readonly data: LoadTopWire }
+  | { readonly ok: false; readonly error: string; readonly status?: number };
 
 /** `@logic/password-client.js`'s `login()` return shape (JSDoc-documented there; mirrored here). */
 export type LoginResult =

@@ -41,6 +41,7 @@ describe("web-hub settings", () => {
       preview: "on",
       subagentTranscript: "all",
       quota: true,
+      load: true,
       lan: { enabled: false, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
       spawn: {
         enabled: false,
@@ -119,6 +120,7 @@ describe("web-hub settings", () => {
       preview: "on",
       subagentTranscript: "all",
       quota: true,
+      load: true,
       lan: lanDefaults,
       spawn: spawnDefaults,
     });

@@ -45,6 +45,12 @@ export const SSE_EVENTS = [
   "run_history",
   "run_ev",
   "run_end",
+  // sysload plan §7.1: the hub's direct-send host-load snapshot (§7.2). Must stay BEFORE
+  // "spawns" for the same reason run_history/run_ev/run_end do — this file's own
+  // `.at(-1) === "spawns"` pin (see `spawn.test.ts:225`) must keep holding. Slotted in BEFORE
+  // "agent_removed" (rather than after) so `agent-remove.test.ts`'s existing "agent_removed
+  // sits immediately before spawns" adjacency pin keeps holding untouched.
+  "load",
   // web-hub-delete-session plan v2 §2.3/§4.3: card removal (agent or managed-session) broadcast.
   // Must stay BEFORE "spawns" for the same reason run_history/run_ev/run_end do — this file's
   // own `.at(-1) === "spawns"` pin (see `spawn.test.ts:225`) must keep holding.
@@ -228,3 +234,18 @@ export const WTDIFF_ENDPOINTS = [
   { method: "GET", path: WTDIFF_FILES_PATH },
   { method: "GET", path: WTDIFF_FILE_PATH },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// sysload plan (docs/dev/sysload/plan.md) §7.1/§7.3 (frozen protocol face): the single
+// `GET /api/load/top` endpoint. `LoadWire`/`LoadTopWire` themselves live in `protocol/
+// messages.ts` (same convention as every other wire DTO in that file); this block only pins the
+// path — the request has no body and the response envelope is just `LoadTopWire` itself.
+// ---------------------------------------------------------------------------
+
+/**
+ * `GET /api/load/top` path (§7.3): on-demand top-process refresh/read, same auth-before-IO,
+ * single-flight + 2s cache, per-principal rate limit (1 req/s burst 3) and ≤8-waiter /
+ * 1.5s-deadline discipline as the rest of the LAN-equal-width endpoints (Q5). Requires the same
+ * `X-PWH: 1` CSRF-hygiene header as `GET /api/preview`/the worktree-diff endpoints.
+ */
+export const LOAD_TOP_PATH = "/api/load/top";

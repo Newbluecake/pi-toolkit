@@ -56,6 +56,10 @@ const NOT_THREADED = [
   "schema", // consumed by the adapter to inject the StructuredOutput tool
   "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)
   "poolFullPolicy", // consumed entirely by spawn() admission (L1) — decided and resolved before start()/RunnerSpec ever exist
+  // sysload plan §6.2: consumed entirely by spawn() admission (same point/reason as
+  // poolFullPolicy above) — the load gate either rejects admission outright or lets the
+  // request through; the runner never sees this field.
+  "loadPolicy",
   // consult A/B instrumentation plan (§3/§5 P1b): analytics-only, mirrored into
   // RunDisplayMeta.dispatchMeta by the runtime adapter, never part of the runner's own execution spec.
   "dispatchMeta",

@@ -17,10 +17,10 @@
  */
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
-import type { FleetRowWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
+import type { FleetRowWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
 import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
-import type { ConnState, PreviewTransport, WorktreeDiffTransport } from "./transport/types.js";
+import type { ConnState, LoadTopOutcome, PreviewTransport, WorktreeDiffTransport } from "./transport/types.js";
 import type {
   RemoveAgentOutcome,
   RemoveTarget,
@@ -38,6 +38,8 @@ export type { ConnState };
 // second, possibly-drifting import path for the same type (same rule as `HistoryPayload` in
 // `contracts.ts`).
 export type { RemoveAgentOutcome, RemoveTarget, SpawnDirsOutcome, SpawnListOutcome, SpawnOutcome, SpawnStopOutcome };
+// sysload plan §7.1/§10: same no-second-import-path rule as above.
+export type { LoadTopOutcome };
 // default-model plan F1: the prefs outcome/wire shapes (SpawnRow/SettingsView consume them
 // through this single re-export, same no-second-import-path rule as above).
 export type { SpawnPrefsOutcome, SpawnPrefsWire };
@@ -238,6 +240,18 @@ export interface HubState {
    * hub's first `agents` frame lands, stays `true` across reconnects (the old cards are kept).
    * DashboardView/AgentList render a loading state instead of their empty states while falsy. */
   readonly synced?: boolean;
+  /** sysload plan §7.1/§7.4/§10 (P0 frozen, "HubState.load?: LoadWire"): the latest `load` SSE
+   * frame (the hub's own host-wide CPU/MEM/DISK snapshot) — a hub-global slot, NOT per-agent
+   * (§3: one machine, one reading, independent of which session is selected). `undefined` until
+   * the first frame arrives, or whenever `hello`/a later hub frame's caps drop `load.v1`
+   * (§7.4 “hello 与 hub 帧 caps 无 load.v1 时清空”). Staleness is judged by the BROWSER from the
+   * instant it RECEIVES a frame (>4×`intervalMs`, §7.4) — never from `load.at` directly. */
+  readonly load?: LoadWire;
+  /** sysload plan §7.1/§10 (P0 frozen, "`loadTop` 状态"): the on-demand `GET /api/load/top`
+   * fetch state backing `LoadCard`'s top-process section. `data` is the last successful
+   * payload (kept across a subsequent error so the card never blanks on a transient failure);
+   * `error` is the last fetch's failure (if any); both are independent of `loading`. */
+  readonly loadTop?: { readonly loading: boolean; readonly data?: LoadTopWire; readonly error?: string };
 }
 
 /**

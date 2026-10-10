@@ -37,6 +37,7 @@ import type {
 import type { SseEventName } from "../../../src/web-hub/hub/sse.js";
 import type { FenceLoss, SingletonResult } from "../../../src/web-hub/hub/singleton.js";
 import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
+import type { TopSnapshot } from "../../../src/sysload/types.js";
 import {
   parsePreviewDirListing,
   PREVIEW_PROBE_KINDS,
@@ -75,6 +76,7 @@ import type {
   FleetOmitted,
   HubCtlFrame,
   HubFrame,
+  LoadWire,
   StatusInfo,
   WireEntry,
   WireEvent,
@@ -103,6 +105,14 @@ import type {
 } from "../../../src/web-hub/protocol/spawn.js";
 
 describe("types.test-d.ts (plan §11 typecheck contract)", () => {
+  it("sysload P0 freezes TopSnapshot and LoadWire's receive-anchored elapsed field", () => {
+    expectTypeOf<TopSnapshot>().toHaveProperty("byCpu");
+    expectTypeOf<LoadWire>().toHaveProperty("at");
+    expectTypeOf<LoadWire["sinceAgoMs"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<LoadWire>().not.toHaveProperty("since");
+    expectTypeOf<LoadWire>().not.toHaveProperty("mono");
+  });
+
   it("P1-shaped FrontendDeps (no `lan`) is still assignable to FrontendDeps", () => {
     type P1FrontendDeps = Omit<FrontendDeps, "lan">;
     expectTypeOf<P1FrontendDeps>().toMatchTypeOf<FrontendDeps>();
@@ -275,6 +285,8 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "cmd_late"
       | "hub"
       | "spawns"
+      // sysload plan §7.1/§7.2: the hub's direct-send host-load snapshot.
+      | "load"
       // web-hub-delete-session plan v2 §2.3: card-removal broadcast (hub-facing bus event; wire
       // payload is `AgentRemovedPayload` in protocol/http-contract.ts).
       | "agent_removed"

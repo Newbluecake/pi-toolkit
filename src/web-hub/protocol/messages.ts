@@ -288,6 +288,128 @@ export interface QuotaWire {
 }
 
 /**
+ * sysload plan (docs/dev/sysload/plan.md) §7.1: the hub's own host-wide CPU/MEM/DISK snapshot,
+ * pushed as the direct-send `load` SSE event (never per-agentKey, never through the replay ring
+ * — §7.2/§7.4). Self-contained, same posture as `QuotaWire`/`BashJobsWire` above: no cross-
+ * feature import — `src/sysload/types.ts` (the pi-free domain module) freezes the SAME
+ * level/threshold shape independently, never imported here. `scope` is always `"host"` (the hub
+ * samples HOME's filesystem + `/`, never a session cwd — §3); the literal rides the wire so a
+ * hypothetical future per-session variant could be added without a shape change. `thresholds`
+ * lets the card disclose "阈值取自 hub 启动配置" (§3) instead of assuming the browser's own
+ * session agrees. `at`/`intervalMs` are the hub-clock instant/period this snapshot was taken at
+ * (sysload plan §10 包注 P0·M9: stale-ness is computed by the BROWSER from the instant it
+ * RECEIVES the frame, never from `at` directly — §7.4).
+ */
+export type LoadLevelWire = "ok" | "warn" | "crit" | "unknown";
+
+export interface LoadThresholdsWire {
+  cpu: { warnPercent: number; critPercent: number; psiWarnPercent: number; psiCritPercent: number };
+  mem: { warnAvailPercent: number; critAvailPercent: number };
+  disk: { warnFreePercent: number; critFreePercent: number; critFreeGiB: number };
+}
+
+export interface LoadCpuWire {
+  busyPct: number;
+  /** PSI cpu `some avg10`; absent when `/proc/pressure/cpu` is missing on the hub host. */
+  psiPct?: number;
+  level: LoadLevelWire;
+  cores: number;
+}
+
+export interface LoadMemWire {
+  usedPct: number;
+  availPct: number;
+  level: LoadLevelWire;
+}
+
+/** PSI io `some avg10` — display-only (§5.1: IO pressure never gates anything in v1). */
+export interface LoadIoWire {
+  psiPct?: number;
+}
+
+/**
+ * One of the ≤2 fixed display paths (§5.4: `~` = HOME's filesystem, `/` = root — no
+ * `extraPaths` in v1, §1/§6.1). `skipped` carries WHY the path isn't participating in the level
+ * (§5.4): `"remote"` — fstype outside the whitelist (nfs*, cifs, fuse.*, …); `"unresolved"` — a
+ * symlinked HOME/cwd whose realpath wasn't proven within its deadline/cache/ledger budget
+ * (never lexically guessed). Absent `skipped` with `level:"unknown"` means stale/no-sample yet.
+ */
+export interface LoadDiskWire {
+  label: "~" | "/";
+  path: string;
+  usedPct: number;
+  freeBytes: number;
+  totalBytes: number;
+  level: LoadLevelWire;
+  skipped?: "remote" | "unresolved";
+}
+
+export interface LoadWire {
+  v: 1;
+  at: number;
+  /** Projection-time elapsed; the browser anchors at receive time. P1 projects, P4 renders. */
+  sinceAgoMs?: number;
+  intervalMs: number;
+  scope: "host";
+  level: LoadLevelWire;
+  thresholds: LoadThresholdsWire;
+  cpu?: LoadCpuWire;
+  mem?: LoadMemWire;
+  io?: LoadIoWire;
+  /** ≤2, per §5.4/§7.1. */
+  disks?: LoadDiskWire[];
+  loadavg?: [number, number, number];
+}
+
+/**
+ * sysload plan §7.1/§5.5: `GET /api/load/top`'s body — the SAME `comm`-aggregated row shape
+ * feeds both `byCpu` and `byRss` (sorted differently), matching §5.5's single-shape output.
+ */
+export interface LoadTopPidWire {
+  pid: number;
+  cpuPct: number;
+  rssBytes: number;
+}
+
+export interface LoadTopRowWire {
+  comm: string;
+  count: number;
+  cpuPct: number;
+  rssBytes: number;
+  /** Set when `cpuPct` is a lifetime average (no matching previous-tick sample, §5.5). */
+  avg?: true;
+  /** ≤8, per §5.5. */
+  pids: LoadTopPidWire[];
+}
+
+export interface LoadTopWire {
+  at: number;
+  /** Set when the §5.5 time/pid-count deadline cut the enumeration short. */
+  partial?: true;
+  /** Fixed top-5 (§5.5), sorted by `cpuPct` desc. */
+  byCpu: LoadTopRowWire[];
+  /** Fixed top-5 (§5.5), sorted by `rssBytes` desc. */
+  byRss: LoadTopRowWire[];
+}
+
+/**
+ * sysload plan §10 包注 P0·M9: session load-gate truth, riding the same `StatusInfo` slot
+ * lifecycle as `todo`/`worktrees`/`bashJobs`/`quota` above — this is the SESSION's own gating
+ * verdict (§5.3's effective gate for THIS pi process), distinct from the hub-wide `LoadWire`
+ * (which carries no gating concept at all, §7.2). `sinceAgoMs` is elapsed time since the
+ * CURRENT level was reached, computed at the agent's own `at` instant — never a raw mono
+ * `since` (M9's whole point: the browser re-anchors it to wall clock at the moment the frame is
+ * RECEIVED, §7.4, never assuming agent/browser clocks agree). Absent ⇒ load feature off / not
+ * sampled yet (print/json sessions, pre-activation) — byte-equal to the pre-feature shape.
+ */
+export interface LoadGateWire {
+  gating: boolean;
+  level: LoadLevelWire;
+  sinceAgoMs?: number;
+  at: number;
+}
+
+/**
  * web-hub-steer-recall plan §2.3 S2: why a held web steer/followUp is sitting in the agent-side
  * buffer instead of having been handed to pi (recallable — `POST /api/cmd {op:"recall"}` returns
  * the full text). `text` is the projection clip (≤ HELD_CLIP_CHARS UTF-16 units, clipped on a
@@ -338,6 +460,10 @@ export interface StatusInfo {
    *  `bashJobs`. Absent = no credentials / quota feature off / `webHub.quota` off / not yet
    *  sampled (byte-equal to the pre-feature shape). Decode side stays open-ended (same as `todo`). */
   quota?: QuotaWire;
+  /** sysload plan §6.2/§10 包注 P0·M9: this SESSION's own §5.3 effective load-gate verdict,
+   *  riding the same status slot lifecycle as `todo`/`worktrees`/`bashJobs`/`quota`. Absent = load
+   *  feature off / not sampled yet / print-json session (byte-equal to the pre-feature shape). */
+  loadGate?: LoadGateWire;
   /** web-hub-steer-recall plan §2.3 S2: held (recallable) + returned web steer/followUp rows
    *  (≤ HELD_WIRE_MAX_ITEMS), riding the same status slot lifecycle as `todo`/`worktrees`. Absent
    *  ⇔ empty / steerRecall off / holdWired false — byte-equal to the pre-feature shape. Deliberately
@@ -983,6 +1109,23 @@ export const QuotaWireSchema = Type.Object(
   },
   { additionalProperties: true },
 );
+// sysload plan §6.2/§10 包注 P0·M9: same open posture as QuotaWireSchema above — a `decodeWith`
+// failure drops the whole status frame.
+const LoadLevelWireSchema = Type.Union([
+  Type.Literal("ok"),
+  Type.Literal("warn"),
+  Type.Literal("crit"),
+  Type.Literal("unknown"),
+]);
+export const LoadGateWireSchema = Type.Object(
+  {
+    gating: Type.Boolean(),
+    level: LoadLevelWireSchema,
+    sinceAgoMs: Type.Optional(Type.Number({ minimum: 0 })),
+    at: Type.Number({ minimum: 0 }),
+  },
+  { additionalProperties: true },
+);
 // web-hub-steer-recall plan §2.3 S2': the held-row body rides the open StatusFrameSchema (same
 // posture as todo/worktrees/bashJobs/quota — an older hub must pass the newer frame through), but
 // the nested row itself is pinned (additionalProperties:false, same as QueueItemSchema/TodoTask):
@@ -1018,6 +1161,7 @@ const StatusInfoSchema = Type.Object({
   worktrees: Type.Optional(WorktreesWireSchema),
   bashJobs: Type.Optional(BashJobsWireSchema),
   quota: Type.Optional(QuotaWireSchema),
+  loadGate: Type.Optional(LoadGateWireSchema),
   // web-hub-steer-recall plan §2.3 S2'
   held: Type.Optional(Type.Array(HeldItemSchema, { maxItems: 32 })),
   heldRev: Type.Optional(Type.Integer({ minimum: 0 })),

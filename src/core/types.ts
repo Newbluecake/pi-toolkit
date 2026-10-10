@@ -418,6 +418,18 @@ export interface SpawnRequest {
    */
   poolFullPolicy?: "reject" | "queue";
   /**
+   * sysload plan (docs/dev/sysload/plan.md §6.2/§6.3): admission-time load gate for a
+   * non-slotless top-level/nested Agent-tool dispatch. `"reject"` — fail admission immediately
+   * (no run, no label, no worktree) with a self-explanatory config error when the effective load
+   * gate (§5.3) is active; absent — never load-gated at admission (every caller except the
+   * top-level/nested Agent tool: workflow children, consult forks, `/task`, `@mention`, RPC
+   * spawn, cron, resume — §6.3's entry matrix). Written ONLY by `createAgentTool`'s
+   * `prepareSpawn` when `deps.loadGate?.()` is true; checked by `spawn-service.ts` AFTER the
+   * quota gate and BEFORE nesting/runId/label (§6.2). Mutually independent of `poolFullPolicy`
+   * (pool-full is checked first — §6.2 "pool-full（已有）先于 load").
+   */
+  loadPolicy?: "reject";
+  /**
    * P0-r (todo #22 memory optimize-plan §7.0/§7.0.0): request the runtime's
    * forced read-only tool domain for this run — same enforcement point as a
    * consult run (`forkSessionFrom`), reused so `/mem tidy`'s proposal-drafting
