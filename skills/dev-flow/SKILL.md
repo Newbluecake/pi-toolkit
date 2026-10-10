@@ -29,8 +29,10 @@ metadata:
 1. **精确 ID**：`Agent` 的 `model` 必须用速查表里的完整 `provider/modelId`；模糊别名会被
    `subagent-model-hints` 扩展 block。
 2. **按序回退**：首选报错（过载/429/超时/额度耗尽）就换下一个，不在同一模型上反复重试。
-   例外：**gpt-6.1-sol 是评审/验收首选**（与 Claude 系的方案/开发模型天然异源，保证评审独立）；
-   gpt-5.6-terra / gpt-6-astra 仍只作兜底。
+   例外：**gpt-6.1-sol 是评审/验收首选**（与 Claude 系的方案/开发模型天然异源，保证评审独立；实测评审质量好、
+   两条线互为备份）；gpt-5.6-terra / gpt-6-astra 仍只作兜底。**系统提示的可用模型列表里没有 gpt-6.1-sol 时
+   （会话启动后才注册的模型要 `/reload` 才进列表）不得静默换成 gpt-6-astra**——先提示用户 `/reload`，
+   或按回退链明说降级原因（2026-10-10 教训：用 gpt-6-astra 顶替，单日传输失败 4 次）。
 3. **fable / gpt-6-astra（≠ gpt-6.1-sol）只用于复杂任务**（L3），常规任务禁止动用。
 4. **能并行必并行**：判定可并行的任务必须在**同一条消息**中发出多个 `Agent` 调用，或在
    `SubagentWorkflow` 里用 `parallel()`/`pipeline()`；顺序派发不算并行。
@@ -147,7 +149,7 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 | **前端开发**           | glm-5.3（zai 订阅有余量时首选）→ sonnet               | opus-5.5（视觉设计/疑难）→ kimi-k3（订阅有余量时）          | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                           |
 | **复杂任务方案**       | opus-5.5                                              | gpt-6-astra（兜底）                                         | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                        |
 | **疑难攻坚**           | opus-5.5                                              | gpt-6-astra（兜底）                                         | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                   |
-| **方案评审**           | gpt-6.1-sol                                           | kimi-k3                                                     | `subagent_type=reviewer`；必须与方案模型异源                                                                                     |
+| **方案评审**           | gpt-6.1-sol（两线互备）                               | glm-5.3（订阅有余量时）→ kimi-k3                            | `subagent_type=reviewer`；必须与方案模型异源                                                                                     |
 | **开发实施**           | glm-5.3（zai 订阅有余量时首选）→ sonnet ⇄ gpt-6.1-sol | kimi-k3（订阅有余量时）→ opus-5.5                           | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                      |
 | **任务验收**           | gpt-6.1-sol                                           | glm-5.3（订阅有余量时提前；开发用了 GLM 的包禁派）→ kimi-k3 | `subagent_type=verifier`；必须与开发模型异源（gpt-6.1-sol 做开发时验收改派 Claude 系或 kimi）；打回后复验优先 resume 原 verifier |
 
@@ -216,7 +218,7 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
    —— 可与 Explore 同消息并行
 3. Plan 升级 opus-5.5，prompt 给出 arch.md 与 Explore 产物路径
    —— 方案被 reviewer 判 Blocker 且 opus-5.5 二次仍不过，才 ask_user 批准后升 fable
-4‖5. 评审（gpt-6.1-sol → kimi-k3，须与方案模型 opus 档不同）∥ 用户确认（HARD GATE）
+4‖5. 评审（gpt-6.1-sol → glm-5.3 → kimi-k3，须与方案模型 opus 档不同）∥ 用户确认（HARD GATE）
 6. 冲突预检 → 按文件域拆 ≥2 个写包同消息派 dev；跨包共享文件进冻结面；
    每个写包挂 `experts: [architect, Plan]`（L3 方案取舍多，默认必挂）
 7. 每包 dev 返回即派对应 verifier 验收（不等全部完成），主会话后台跑全量测试
