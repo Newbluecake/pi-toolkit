@@ -1,4 +1,5 @@
 import type { StopCause } from "../core/types.js";
+import type { LoadAdmission } from "../sysload/types.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import type { ChildOutcome, ChildSpawnError, ChildSpawnResult, ChildSpawner } from "./host.js";
 import type { ChildWorktreeInfo } from "./types.js";
@@ -42,6 +43,8 @@ function toCoreStopCause(cause?: string): StopCause | undefined {
 }
 
 export interface WorkflowChildSpawnerOptions {
+  /** Optional sysload workflow FIFO gate; late-bound and absent by default. */
+  loadAdmission?: LoadAdmission;
   /**
    * workflow-experts §4.8: the workflow-facing seam onto `consult`'s
    * `resolveExperts(refs, opts?)` (package C's frozen-face signature).
@@ -151,6 +154,7 @@ export function createWorkflowChildSpawner(
     configHashOf(type) {
       return types.configHashOf(type);
     },
+    ...(opts?.loadAdmission !== undefined ? { loadAdmission: opts.loadAdmission } : {}),
     ...(opts?.worktreeAvailable ? { worktreeAvailable: opts.worktreeAvailable } : {}),
     ...(opts?.isolationReplayMode ? { isolationReplayMode: opts.isolationReplayMode } : {}),
     ...(opts?.isolationCwd ? { isolationCwd: opts.isolationCwd } : {}),

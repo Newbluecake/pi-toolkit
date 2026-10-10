@@ -1,6 +1,7 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
 import type { ConsultExpertRef, Millis, RunId, ThinkingLevel, UsageDelta } from "../core/types.js";
+import type { LoadAdmission } from "../sysload/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { deriveChildBudget } from "./budget.js";
 import { snapshotAgentOpts, validateAgentOpts, type OptsDefect } from "./agent-opts.js";
@@ -58,6 +59,8 @@ export interface ChildOutcome {
   readonly usage?: UsageDelta;
 }
 export interface ChildSpawner {
+  /** Optional sysload gate for workflow FIFO admission. Absent preserves legacy behavior. */
+  readonly loadAdmission?: LoadAdmission;
   spawn(req: {
     type: string;
     prompt: string;
@@ -244,8 +247,8 @@ export interface WorkflowChildEvent {
   readonly queueWaitMs?: Millis;
   /** "rejected" only. */
   readonly stage?: "admission" | "dispatch";
-  /** "rejected" only. */
-  readonly reason?: WorkflowChildRejectReason;
+  /** "rejected" only; queued calls additionally use "load"/"maxParallel". */
+  readonly reason?: WorkflowChildRejectReason | "load" | "maxParallel";
   /** "rejected" only — the failure message, capped at 200 chars. */
   readonly message?: string;
   readonly at: Millis;
@@ -540,6 +543,33 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   /** D5: the per-dispatch spawn-timeout timer of each in-flight queued dispatch (cleared by whoever settles the call). */
   const spawnTimers = new Map<CallId, TimerHandle>();
   let pumping = false;
+
+  // sysload P2b: load admission is an optional second predicate on the same
+  // FIFO. Reads are deliberately fail-open: a broken/late optional port must
+  // never turn workflow agent() into an unbounded or permanently blocked call.
+  let loadAdmission: LoadAdmission | undefined = deps.spawner.loadAdmission;
+  function loadBlocked(): boolean {
+    if (loadAdmission === undefined) return false;
+    try {
+      return loadAdmission.blocked() === true;
+    } catch {
+      return false;
+    }
+  }
+  let loadGateUnsubscribe: (() => void) | undefined;
+  let loadGateUnsubscribed = false;
+  function unsubscribeLoadGate(): void {
+    if (loadGateUnsubscribed) return;
+    loadGateUnsubscribed = true;
+    const unsubscribe = loadGateUnsubscribe;
+    loadGateUnsubscribe = undefined;
+    if (unsubscribe === undefined) return;
+    try {
+      unsubscribe();
+    } catch {
+      // Optional cleanup is best-effort and must not affect terminal settling.
+    }
+  }
 
   function clearSpawnTimerOf(callId: CallId): void {
     const timer = spawnTimers.get(callId);
@@ -1250,13 +1280,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     if (label !== undefined) labelOf.set(callId, label);
     agentTypeOf.set(callId, agentType);
 
-    // D2 ④: all maxParallel slots busy — or calls already waiting, so a
-    // newcomer never jumps the FIFO — ack now, dispatch later (option C: the
-    // same ack-first shape as a replay hit). The ack's `deadlineAt` bounds
-    // the worker's `waitForSettle` (BW10 is gone, so it is always finite in
-    // production); the host guarantees a settle before then because WT8's
-    // `finish` → `stopOwned` withholds every still-queued call.
-    if (waitQueue.length > 0 || activeCount() >= budget.maxParallel) {
+    // D2 ④: all maxParallel slots busy, calls already waiting, or the
+    // optional sysload gate is closed — ack now, dispatch later. Load waits
+    // use this same FIFO; they never hold a parallel slot or add a timer.
+    const blockedByLoad = loadBlocked();
+    const blockedByMaxParallel = waitQueue.length > 0 || activeCount() >= budget.maxParallel;
+    if (blockedByMaxParallel || blockedByLoad) {
       const at = deps.clock.now();
       expertScope.noteSubmitted(callId, label);
       registry.submit(callId, at, { queued: true });
@@ -1268,6 +1297,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         ...(label !== undefined ? { label } : {}),
         agentType,
         ...(phaseId !== undefined ? { phaseId } : {}),
+        ...(loadAdmission !== undefined
+          ? { reason: blockedByMaxParallel ? ("maxParallel" as const) : ("load" as const) }
+          : {}),
         at,
       });
       return {
@@ -1687,13 +1719,29 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     if (pumping) return;
     pumping = true;
     try {
-      while (!terminated && waitQueue.length > 0 && activeCount() < budget.maxParallel) {
+      while (!terminated && waitQueue.length > 0 && activeCount() < budget.maxParallel && !loadBlocked()) {
         const next = waitQueue.shift()!;
         if (!registry.admit(next.callId)) continue; // withheld while waiting — already recorded.
         dispatchQueued(next);
       }
     } finally {
       pumping = false;
+    }
+  }
+
+  // Subscribe once, after pump exists. The admission port owns the transition
+  // detector; the host only wakes its existing FIFO and never polls.
+  if (loadAdmission !== undefined) {
+    try {
+      const unsubscribe = loadAdmission.onGateCleared(() => pump());
+      if (typeof unsubscribe !== "function") throw new TypeError("invalid load admission unsubscribe");
+      loadGateUnsubscribe = unsubscribe;
+    } catch {
+      // A malformed optional port is treated as absent (fail-open). Keeping a
+      // blocking predicate without a reliable wake subscription could strand
+      // the FIFO until the workflow deadline.
+      loadAdmission = undefined;
+      loadGateUnsubscribe = undefined;
     }
   }
 
@@ -1816,6 +1864,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   deps.workerHost.events.onTerminating((reason) => {
     if (terminated) return; // WL3 after WL1/WL2 already ran via stopOwned() — everything is settled, avoid double-recording.
     terminated = true;
+    unsubscribeLoadGate();
     clearAllPhaseTimers(); // WR4-equivalent: no armed timer may survive the workflow's own terminal decision.
     const cancelled = registry.cancelAll(reason);
     waitQueue.length = 0; // D9: every queued call was just withheld by cancelAll.
@@ -1879,6 +1928,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // agent()/gate() admission can land after this point (onHostCall checks
       // the same `terminated` flag).
       terminated = true;
+      unsubscribeLoadGate();
       clearAllPhaseTimers(); // same WR4-equivalent hygiene as onTerminating above.
       // WL2: cascade-cancel every still-active call (CallRegistry's bounded
       // retry loop +, if the caller supplied one, the core's own owner-stop
