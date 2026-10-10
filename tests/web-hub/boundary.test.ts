@@ -23,7 +23,7 @@ const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const PROTOCOL_HUB = ["src/web-hub/protocol", "src/web-hub/hub"].map((d) => resolve(ROOT, d));
 
 /** The ONLY src/git files hub code may import (worktree-diff plan §1.1 / §5 D1 #12). */
-const GIT_FILE_ALLOWLIST = ["run", "worktrees", "diff"].map((n) => resolve(ROOT, `src/git/${n}.ts`));
+const GIT_FILE_ALLOWLIST = ["run", "worktrees", "diff", "graph"].map((n) => resolve(ROOT, `src/git/${n}.ts`));
 
 /**
  * Closure constant table (worktree-diff plan §5 D1 #12): the exact import surface of the
@@ -37,6 +37,7 @@ const GIT_FILE_CLOSURE: Record<string, Array<{ spec: string; typeOnly: boolean }
     { spec: "./run.js", typeOnly: true },
   ],
   "src/git/diff.ts": [],
+  "src/git/graph.ts": [{ spec: "./diff.js", typeOnly: false }],
 };
 
 interface ImportRef {
