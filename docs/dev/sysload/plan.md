@@ -1,267 +1,330 @@
-# Load-aware dispatch（`src/sysload/`）施工方案 v1
+# Load-aware dispatch（`src/sysload/`）施工方案 v2.1
 
-> 状态：方案（未实装）。最近先例：`docs/dev/quota/`（适配器 + TTL 缓存、turn_end 阶梯、spawn 快速失败闸门、HUD 行）
-> 与 `docs/dev/quota-web/plan.md`（QuotaPill/QuotaCard）。本文行号均为「附近」，施工前以 HEAD 为准。
+> 状态：方案 v2.1（v1 = 9b11bd6 打回 16 条 → §14；v2 复审 conditional_pass，Major 1–6 修入正文、Minor 7–10 记入包注 → §15）。先例：`docs/dev/quota/`、`docs/dev/quota-web/plan.md`、
+> `docs/dev/web-hub-session-history/plan.md`（libuv 饥饿门）。行号均为「附近」，施工前以 HEAD 为准。视觉稿已获批（`/home/bluecake/snap/chromium/common/pwh-sysload/*.png`：
+> topbar-light-1280 / loadcard-{light,dark}-760 / fleet-crit-light-760 / mobile-390），附 §2 第二轮三处微调。
 
 ## 1. 目标与非目标
 
-- 监控本机 CPU / 内存 / 磁盘，在 web hub（TopBar `LoadPill` + `LoadCard`）与 TUI HUD 展示。
-- 负载过高时**只拦新派发**：主会话 `Agent` 在 crit 立即拒绝（零 run/label/worktree）；workflow `agent()` 排队等回落。
-- 通过 turn_end 阶梯注入 + 恢复通知告诉主 agent，让它在「排查负载」与「等待回落」之间选择。
-- 非目标：cgroup 配额感知（v1 读宿主 `/proc`，见 §13 Q4）、macOS/Windows 采样（非 Linux ⇒ `unknown`）、
-  自动 kill 进程、对已在跑的 run 降速/暂停、跨进程共享采样结果。
+- 监控本机 CPU / 内存 / 磁盘，展示于 web hub（`LoadPill`+`LoadCard`，**主机全局视角**）与 TUI HUD（**会话视角**）。
+- 负载过高只拦**新派发**：`Agent`（主会话 + 嵌套）在 crit 立即拒绝、零副作用；workflow `agent()` 在 host FIFO 排队；turn_end 阶梯告知主 agent
+  （升 warn / 升 crit / 一次恢复提示），由它选择排查或等待。
+- 非目标（v1）：cgroup v2、非 Linux、远程/未知文件系统、自动唤醒、已在跑 run 的限速、跨进程共享样本、计数聚合（rejected/queued 次数）、可配置 top 数与额外路径。
 
-## 2. 用户裁决（2026-10-10，本方案不得偏离）
+## 2. 用户裁决（不得偏离）
 
-| #   | 裁决                                                                                                                                                                                                                                                                                                                                                                       |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| U1  | workflow `agent()` 在 crit 时**排队**（受 workflow 自身预算/排队超时语义约束）；主会话 `Agent` **立即拒绝**（同 quota L3 fast-fail），消息带负载明细 + top 进程 + 两个选项（排查/等待）。系统内部 run 逐项判定豁免（§6.3）。                                                                                                                                               |
-| U2  | 默认阈值（持续 ≥60 s 才升级，迟滞降级）：CPU busy ≥85% 或 PSI cpu some avg10 ≥40% ⇒ warn；≥95% 或 ≥70% ⇒ crit。MEM available ≤15% ⇒ warn，≤8% ⇒ crit。DISK free ≤10% ⇒ warn，≤5% 或 ≤5 GB ⇒ crit（挂载点：`$HOME`、session cwd、`/` 所在文件系统）。全部 `load.*` 可调，`load.enabled` 总开关。                                                                            |
-| U3  | Web：TopBar `LoadPill` 紧挨 QuotaPill（`CPU 72% · MEM 81% · DISK 64%`，英文紧凑 token，warn/crit 着色；≤480px 只显示最差项），点击 ⇒ `LoadCard` popover（各指标条、loadavg、PSI、分挂载磁盘、top-5 by CPU / by RSS、sampled-at）；crit 时 fleet drawer 顶部横幅「负载过高，已暂停派发新子 agent」；TUI HUD 在 quota 行旁加 load 行。视觉稿另行产出，本方案只定结构与数据。 |
-| U4  | 数据流：pi-free 采样模块被 (a) pi 侧（闸门 + 阶梯 + HUD，web hub 关闭也必须可用）与 (b) hub 进程（自采样，经新 SSE 事件推浏览器）共用。非 Linux/不可读 ⇒ `unknown` ⇒ 永不拦（fail-open）。阈值硬编码默认、settings 暴露。                                                                                                                                                  |
-| U5  | 主 agent 通知：turn_end 阶梯注入（升 warn / 升 crit / 恢复），中文散文块，紧凑标记纯英文；被拒派发后负载回落时补一条恢复通知，零额外定时器（只用采样节拍，全部 unref）。                                                                                                                                                                                                   |
+| #      | 裁决                                                                                                                                                                                                                                  |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| U1     | workflow `agent()` crit 时**排队**；`Agent` **立即拒绝**（同 quota L3 fast-fail），消息含负载明细 + top 进程 + 排查/等待两选项；系统内部 run 逐项豁免（§6.3）。                                                                       |
+| U2     | 默认阈值，持续 ≥60 s 升级、迟滞降级：CPU busy ≥85% 或 PSI cpu some avg10 ≥40% ⇒ warn，≥95% 或 ≥70% ⇒ crit；MEM available ≤15% ⇒ warn，≤8% ⇒ crit；DISK free ≤10% ⇒ warn，≤5% 或 ≤5 GiB ⇒ crit。`load.*` 可调，`load.enabled` 总开关。 |
+| U3     | TopBar `LoadPill` 紧挨 QuotaPill（`CPU 72% · MEM 81% · DISK 64%`，≤480px 只显示最差项）→ `LoadCard`；crit 时 fleet drawer 横幅「负载过高，已暂停派发新子 agent」；HUD 在 quota 行旁加 load 行。                                       |
+| U4     | pi-free 采样模块被 pi 侧（闸门/阶梯/HUD，hub 关闭也工作）与 hub 进程（自采样，新 SSE 事件）共用；非 Linux/不可读 ⇒ `unknown` ⇒ 永不拦。                                                                                               |
+| U5→Q1  | **v1 不做恢复唤醒**：恢复只在下一次 turn_end 注入提示（`triggerTurn:false`）；全程零新增定时器（仅采样节拍，unref）。                                                                                                                 |
+| Q2     | 嵌套 `Agent` crit 时也拒绝（文案：不委派，自己完成或交回上层）。                                                                                                                                                                      |
+| Q5     | LAN 与 loopback 同宽（top 进程、磁盘挂载路径均展示，同 bash-jobs 面板 U1 口径）；仍须正常鉴权与限流（§7.3）。                                                                                                                         |
+| 视觉稿 | 获批 + 三处微调：① top 两列按进程名（comm）聚合，展开看 pid；② 磁盘行百分比旁显示剩余（`58% · 112G free`）；③ fleet 横幅持续时长并入同一行小字。                                                                                      |
+| 代决   | Q3 RPC/cron v1 豁免；Q4 cgroup v2 延后；Q6 磁盘同为 60 s sustain；Q7 `/agent status` 附一行 load 摘要（归 P2a）。                                                                                                                     |
 
 ## 3. 架构与数据流
 
 ```
-            ┌──────────── src/sysload/ (pi-free: procfs/reader/top/levels/wire) ────────────┐
-            │                                                                              │
- pi 主会话 (post-guard)                                               hub 进程 (src/web-hub/hub/load.ts)
- LoadService: 5s unref 节拍 → readSample → LoadTracker → verdict       同一 reader+tracker，阈值来自 HubConfig.load
-   ├─ spawn-service 准入闸门（同步读 verdict，loadPolicy:"reject"）     ├─ bus HubEvent{type:"load"} → http.ts 直推 SSE `load`
-   ├─ workflow host 排队（ChildSpawner.loadAdmission）                  │   （不进 replay ring；连接时补发最新快照）
-   ├─ turn_end 阶梯 hook（sendMessage triggerTurn:false）               └─ GET /api/load/top（按需、单飞、2s 缓存）
-   ├─ 恢复唤醒（仅曾拒绝过；consume-once）
-   ├─ HUD status key "load"
-   └─ StatusInfo.loadGate（经 web-hub agent，可选）→ drawer 横幅
+src/sysload/（pi-free）：procfs 解析 · mountinfo 过滤 · IO 账本 · 采样器 · 等级追踪器 · top 扫描 · wire 投影
+ ├─ pi 主会话（post-guard，仅 interactive / rpc 模式启动）：LoadActivation（activate() 闭包持有）
+ │    5 s 节拍 → sample → tracker → verdict（HOME、session cwd、/ 三路径）
+ │    ├─ spawn-service 准入闸门（同步读 verdict；Agent 顶层 + 嵌套经 runtime-adapter）
+ │    ├─ workflow host FIFO 排队（ChildSpawner.loadAdmission，gateCleared 时 pump）
+ │    ├─ turn_end 阶梯 hook（triggerTurn:false，单槽恢复提示）· HUD status key "load" · `/agent status` 摘要行
+ │    └─ StatusInfo.loadGate{gating,level,sinceAgoMs}（web-hub agent）→ drawer 横幅（会话闸门真相）
+ └─ hub 进程（src/web-hub/hub/load.ts，cwd=HOME）：主机全局视角，路径仅 HOME 所在 FS + /
+      HubConfig.load（hub 启动时由拉起它的 pi 写入，singleton 保留到 restart）
+      → SSE `load`（直发、无 id、不进 ring；连接时在 spawns 之后补发）· GET /api/load/top（按需）
 ```
 
-- **两处独立采样是刻意的**：闸门必须在 hub 关闭时工作，且不能引入跨进程故障面；hub 侧只负责展示。两边阈值同源
-  （`buildHubConfig` 把 `load.*` 塞进 `HubConfig.load`），边界时刻可能短暂不一致：Pill 显示 hub 视角，drawer 横幅显示
-  **该会话真实闸门状态**（`StatusInfo.loadGate`），以后者为准。
-- 多个 pi 进程各自采样：每节拍 ≈6 个小 procfs 读 + ≤3 次 `statfs`，10 个会话也可忽略；子 agent 会话（post-guard）不采样。
-- 采样只在主会话 stack 存在时运行；`ctx.mode` 为 print/json 时 hook 不注入，但 service 仍可为闸门服务（RPC 主进程场景）。
+- pi 与 hub 各自采样、阈值各自来自本进程配置：**不承诺两边一致**。Pill/Card 标注「主机 · hub 视角」并在 Card 底部披露阈值来源
+  （「阈值取自 hub 启动配置 · v<pluginVersion>」，`thresholds` 随 wire 下发）；drawer 横幅只读 `StatusInfo.loadGate`，是该会话闸门真相。
+- print/json 模式**不启动**采样（闸门惰性放行）：实测（`tests/integration/web-hub-history-starvation.test.ts` 头注）一个挂起的线程池
+  操作会阻塞 `process.exit`，print 模式不能冒此险。子 agent 会话（post-guard）不采样。多 pi 进程各自采样，单进程每拍 ≈5 次同步 procfs 小读 + ≤3 次 statfs。
 
-## 4. 模块布局（新增 `src/sysload/`，除 hook.ts 外零 pi import）
+## 4. 模块布局（`src/sysload/`，除 `hook.ts` 外零 pi import）
 
-| 文件         | 职责                                                                                                                                                                                                                                                                                                              |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `types.ts`   | **P0 冻结面**：`LoadLevel = "ok"\|"warn"\|"crit"\|"unknown"`、`LoadSample`、`MetricVerdict`、`LoadVerdict`、`TopProc`、`LoadTop`、`LoadThresholds`、`LoadService` 接口、`LoadAdmission`（workflow 用）。                                                                                                          |
-| `procfs.ts`  | 纯解析：`parseProcStat`（cpu 行 → total/idle/iowait ticks、核数）、`parseMeminfo`（MemTotal/MemAvailable）、`parseLoadavg`、`parsePressure`（some/full avg10）、`parsePidStat`（comm/utime/stime/starttime，comm 含括号/空格的健壮切分）、`parsePidStatm`。                                                       |
-| `reader.ts`  | 有界 IO：`readSample(io, opts)`，`fs.promises` + `withDeadline(tickDeadlineMs=1000)`；挂载解析：对 `$HOME`/cwd/`/` 做 `stat().dev` 去重、60 s 缓存；每挂载 `statfs` 单飞（在途未回不再发起，防 NFS 卡死积压 libuv 线程，同 worktree-sampler zombie 护栏）。CPU% 来自相邻两次 `/proc/stat` 差分，首拍 `cpu` 缺省。 |
-| `top.ts`     | `scanTop(io, prev, opts)`：枚举 `/proc/[0-9]*`，上限 `maxPids=4096`、并发 16、deadline 300 ms，超限返回 `partial:true`；CPU% 用与上次扫描的 tick 差分，无上次 ⇒ 生命周期平均并标 `cpuAvg:true`；RSS = statm resident × pagesize。只读 `comm`（≤16 字节、去控制字符），**绝不读 cmdline/environ**。                |
-| `levels.ts`  | `classify(sample, thresholds)` 逐指标原始等级；`createLoadTracker({sustainMs, recoverMs, intervalMs})` 状态机（§6.1）。                                                                                                                                                                                           |
-| `wire.ts`    | `projectLoadWire(verdict)` / `projectTopWire(top)` / `loadFingerprint`——hub 与 web-hub agent 共用，pi-free。                                                                                                                                                                                                      |
-| `render.ts`  | `renderLoadStatus`（HUD）、`buildLoadHintText`、`buildLoadRecoveryText`、`buildLoadGateMessage`、`formatBytes`。                                                                                                                                                                                                  |
-| `gate.ts`    | `evaluateLoadGate(verdict, {gateLevel, top, ownRuns, now})` → `{message}`\|undefined，零 IO 零 await。                                                                                                                                                                                                            |
-| `hook.ts`    | `createLoadHintHook(deps)`（turn_end，照抄 `src/quota/hook.ts` 结构）+ `LoadHintState`。                                                                                                                                                                                                                          |
-| `service.ts` | `createLoadService({clock, settings, io, cwd, home, setStatus?, onTransition?})`：单飞节拍、`verdict()`、`top()`、`onChange(fn)→unsub`、`noteRejected()`、`dispose()`（幂等，setStatus(undefined) 恰一次）。                                                                                                      |
-| `index.ts`   | `createLoadStack(input)` barrel（`load.enabled=false` ⇒ undefined，全特性缺席）。                                                                                                                                                                                                                                 |
+| 文件                                | 职责                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `types.ts`                          | **P0 冻结**：`LoadLevel`、`LoadSample`、`MetricState`、`LoadVerdict{level, gating, metrics, mono, at}`、`LoadTransition{gateCleared, provenRecovered, escalatedTo?}`、`TopSnapshot`、`LoadThresholds`、`LoadPort`（stack/runtime-adapter/web-hub 只见此接口）、`LoadAdmission{blocked(), onGateCleared(fn)→unsub}`。 |
+| `procfs.ts`                         | 纯解析：`parseProcStat`、`parseMeminfo`、`parseLoadavg`、`parsePressure`、`parsePidStat`（comm 取首 `(` 与末 `)` 之间）、`parsePidStatm`、`parseMountinfo`（`\040` 等八进制解码）。                                                                                                                                  |
+| `mounts.ts`                         | `resolveMounts(paths, mountinfoText)`：字符串最长前缀匹配（**不 realpath**，避免触发远程 FS），fstype 白名单过滤（§5.4）。                                                                                                                                                                                           |
+| `io-ledger.ts`                      | 未完成 IO 账本：`Symbol.for("pi-subagent:sysload-io")` 进程全局（唯一状态例外，§8 I6），每 key ≤1、全局 ≤2；满则跳过不排队。                                                                                                                                                                                         |
+| `sampler.ts`                        | `sampleOnce(io, plan, ledger, gen)`：系统 procfs 用**同步**有界读（≤64 KiB，内核全局文件不走线程池）；statfs 走异步 + 账本 + 1 s 响应期限。                                                                                                                                                                          |
+| `tracker.ts`                        | 每指标/每挂载等级状态机（§5.2），单调时钟驱动；输出 verdict + transition。                                                                                                                                                                                                                                           |
+| `top.ts`                            | 按需 top 扫描（§5.5）。                                                                                                                                                                                                                                                                                              |
+| `wire.ts` / `render.ts` / `gate.ts` | wire 投影 + 指纹；HUD/提示/拒绝文案；`evaluateLoadGate(verdict, req, ctx)` 零 IO。                                                                                                                                                                                                                                   |
+| `activation.ts`                     | `createLoadActivation(deps)`：`start(ctx)`/`stop()`/`port()`/`dispose()`，generation 计数，迟到结果丢弃。                                                                                                                                                                                                            |
+| `hook.ts`                           | `createLoadHintHook(deps)`（照抄 `src/quota/hook.ts` 回滚纪律）。                                                                                                                                                                                                                                                    |
 
-## 5. 协议新增（全部 additive，不升 proto）
+## 5. 公式、阈值与状态机（冻结）
 
-- `src/web-hub/protocol/messages.ts`：
-  - `LoadWire { v:1; at; level; since?; cpu?{busyPct,psiSome10?,cores,level}; mem?{usedPct,availBytes,totalBytes,psiSome10?,level};
-io?{psiSome10?}; disks?{path,label,usedPct,freeBytes,totalBytes,level}[≤4]; loadavg?[3] }`，开放 schema（同 `QuotaWireSchema` 姿态）。
-  - `LoadTopWire { at; partial?; byCpu: TopProcWire[≤5]; byRss: TopProcWire[≤5] }`，`TopProcWire { pid; comm; cpuPct?; cpuAvg?; rssBytes }`。
-  - `StatusInfo.loadGate?: LoadGateWire { level; gating: boolean; since?; rejected?: number; queued?: number }`（会话闸门真相，
-    缺席 = load 关/webHub.load 关/unknown——与 pre-feature 逐字节相同）。
-- `src/web-hub/protocol/http-contract.ts`：`SSE_EVENTS` 在 `"spawns"` **之前**插入 `"load"`（保住 `.at(-1)==="spawns"` 钉）；
-  `LOAD_TOP_PATH = "/api/load/top"`；无新错误码（复用 `E_RATE`/`E_BUSY`/`E_DEADLINE`/`E_NOT_FOUND`）。
-- `src/web-hub/hub/ports.ts`：`HubEvent | {type:"load"; payload: LoadWire}`；`HubConfig.load?: HubLoadConfig`（阈值 + 节拍；键缺席即 off）。
-- hub cap `load.v1`：`config.load` 存在且启动探针读通 `/proc/stat` 时声明；`ui/src/logic/contract.js` 同步镜像 SSE 名。
+### 5.1 公式与单位
 
-## 6. 阈值、状态机与闸门语义
+- CPU：`/proc/stat` `cpu` 行 `user nice system idle iowait irq softirq steal guest guest_nice`；user/nice 已含 guest/guest_nice ⇒
+  `total = user+nice+system+idle+iowait+irq+softirq+steal`（**不加** guest*）；`idleAll = idle+iowait`（iowait 视为空闲，IO 压力只经 PSI io 展示）；
+  `busyPct = 100×(Δtotal−ΔidleAll)/Δtotal`。任一 Δ<0、Δtotal=0、非有限 ⇒ 该拍 CPU `invalid` 并重置基线。`cores` = `cpuN` 行数。
+- PSI：`/proc/pressure/cpu` `some avg10`（百分比）；缺文件 ⇒ 仅用 busy。memory/io PSI 只展示。
+- MEM：`MemTotal`/`MemAvailable` 单位 KiB ×1024；无 `MemAvailable` ⇒ unknown；`availPct = 100×avail/total`，展示 `usedPct = 100−availPct`。
+- DISK：`statfs(mountPoint, {bigint:true})`；`freeBytes = bavail×bsize`，`totalBytes = blocks×bsize`，
+  `freePct = 100×bavail/(blocks−bfree+bavail)`（df 语义，排除保留块）；全文 GiB = 2³⁰，UI 后缀 `G` 即 GiB。
+- 设置改名：`critFreeGb` ⇒ `critFreeGiB`。
 
-### 6.1 状态机（每指标独立，总体 = 已知指标最高级；全部 unknown ⇒ unknown）
+### 5.2 状态机（每指标；DISK 每挂载各一份；总体 = 已知指标最高级，全部 unknown ⇒ unknown）
 
-- 采样节拍 `load.sampleIntervalMs=5000`；环形窗口长度 `ceil(max(sustainMs,recoverMs)/interval)+1`（默认 13 条，几十字节）。
-- **升级**：窗口覆盖满 `sustainMs=60000` 且其中每个样本原始等级 ≥ L ⇒ 进入 L（warn→crit 同理，可直接 ok→crit）。
-- **降级（迟滞）**：最近 `recoverMs=30000` 内每个样本都低于「L 阈值 − 迟滞量」⇒ 降一级（crit→warn→ok 逐级）。迟滞量：
-  CPU/PSI 5 点、MEM 3 点、DISK 1 点或 1 GB。
-- **断档**：两样本间隔 > 2×interval（休眠/卡顿）⇒ 清空窗口重新计 sustain，已处等级保持直到 recover 判定或 stale。
-- **stale**：最新样本早于 3×interval，或连续 3 拍读失败/超时 ⇒ 该指标 unknown ⇒ 闸门放行（R-fail-open）。
-- CPU 原始等级 = max(busy 判定, PSI 判定)；无 `/proc/pressure`（旧内核/容器）只用 busy。DISK 等级 = 各挂载最差，crit 条件
-  `freePct ≤5 || freeBytes ≤ 5 GiB`（小盘上 5 GB 规则可能常驻 crit，见 §12 R5）。
-- `since` = 当前等级进入时刻；`onChange(prev,next)` 只在总体等级变化时同步回调（try/catch 每个监听器）。
+- 时间：窗口/stale/since 全用注入的 `mono()`（`performance.now()`）；**定时器同样单调**：`createSegmentedClock({ now: mono, set: unref setTimeout })`
+  （`src/core/clock.ts` 已支持注入 now），不用 Date.now 版 `systemClock`；`Date.now()` 只作展示 `at`。
+- 符号绑定**本进程有效 settings**（parse 钳制后）：`B_L`=`load.cpu.{warn,crit}Percent`、`P_L`=`load.cpu.psi{Warn,Crit}Percent`、`A_L`=`load.mem.{warn,crit}AvailPercent`、
+  `F_L`=`load.disk.{warn,crit}FreePercent`、`G_crit`=`load.disk.critFreeGiB×2³⁰`；裕量常量 `mCPU=5`、`mMEM=3`、`mDISK%=1`、`mDISKB=1 GiB`；默认即 U2。
+- 原始等级（含等号）：CPU `crit ⇔ busy≥B_crit ∨ psi≥P_crit`，`warn ⇔ busy≥B_warn ∨ psi≥P_warn`；MEM `crit ⇔ avail≤A_crit`，`warn ⇔ avail≤A_warn`；
+  DISK `crit ⇔ freePct≤F_crit ∨ freeBytes≤G_crit`，`warn ⇔ freePct≤F_warn`。
+- 升级到 L：自上次迁移起一段**不间断**的有效样本序列，每个原始等级 ≥ L，且 `last.mono − first.mono ≥ sustainMs`（样本数不作证明）；
+  `sustainMs=0` ⇒ 首个有效合格样本立即升级。可直接 ok→crit。
+- 恢复谓词 `clear(L)`（严格不等，带裕量）：CPU `busy < B_L−mCPU ∧ (无 PSI ∨ psi < P_L−mCPU)`；MEM `avail > A_L+mMEM`；
+  DISK `freePct > F_L+mDISK% ∧ (L≠crit ∨ freeBytes > G_crit+mDISKB)`。不间断有效样本序列全满足 `clear(L)` 且 `last.mono − first.mono ≥ recoverMs`
+  ⇒ 降一级（crit→warn→ok 逐级）；序列中任一样本不满足 ⇒ 序列重开。
+- **每次迁移后窗口清空**：下一次升/降只统计迁移之后的样本（新恢复窗口）。
+- 连续性：两有效样本间隔（mono）> 2×interval，或 `invalid` 样本，或挂载身份（mountinfo mount ID + 主次设备号）变化 ⇒ 打断序列、保持当前等级；
+  距最后有效样本 > 3×interval ⇒ 该指标 `unknown`。**新鲜度在读取时强制**：`port.verdict()` / `loadAdmission.blocked()` / 拒绝判定每次用当前
+  `mono()` 重算 stale，绝不信任上一拍缓存的等级（节拍停摆也不会残留 crit）。从 unknown 恢复：空序列起算，满足 recoverMs 的 `clear(warn)` 序列确立 `ok`，
+  满足 sustainMs 的 ≥L 序列确立 L；确立前保持 unknown（fail-open）。
+- 上限：`sampleIntervalMs ∈ [2000,60000]`（默认 5000）、`sustainMs ∈ [0, 120×interval]`、`recoverMs ∈ [interval, 120×interval]`；
+  环最多 128 槽；parse 越界即钳并 warn；warn/crit 单调钳制（CPU warn≤crit，MEM/DISK warn≥crit）。
 
-### 6.2 Settings（`src/config/settings.ts` `LoadSettings` + `parseLoadSettings` 逐字段容错；`setting-specs.ts`）
+### 5.3 迁移信号（取代 v1 的单一 onChange）
 
-`load.enabled`(true) · `load.gate`(true) · `load.gateLevel`("crit"|"warn"，默认 crit) · `load.sampleIntervalMs`(5000，min 1000) ·
-`load.sustainMs`(60000) · `load.recoverMs`(30000) · `load.cpu.{warnPercent 85, critPercent 95, psiWarnPercent 40, psiCritPercent 70}` ·
-`load.mem.{warnAvailPercent 15, critAvailPercent 8}` · `load.disk.{warnFreePercent 10, critFreePercent 5, critFreeGb 5, extraPaths ""}` ·
-`load.hint.{enabled true, display true, repeatMs 600000, minIntervalMs 120000}` · `load.wakeOnRecovery`(true，见 Q1) · `load.hud`(true) ·
-`load.topCount`(5) · `webHub.load`(true)。时长键进 `TIME_SETTING_MS_PATHS`；parse 钳制 warn/crit 单调（CPU warn≤crit、MEM/DISK warn≥crit）。
-**非 live**：同 quota，session_start 捕获，改后 `/reload`；hub 侧阈值经 `HubConfig.load`，改后需 `/webhub restart`（spec 描述里写明）。
+- **有效闸门** `gating = load.enabled ∧ load.gate ∧ 总体已知等级 ≥ gateLevel`（unknown ⇒ false），在 port 内单点计算；Agent / 嵌套 Agent /
+  workflow `blocked()` / 迁移信号 / `StatusInfo.loadGate` / drawer 横幅 / 全部文案只读它，不各自重组。`load.gate=false` ⇒ 恒 false：不拒绝、
+  不排队、无横幅，阶梯文案改用「仅提示（闸门已关闭，派发不受限）」句式，绝不出现「已暂停派发」。
+- `gateCleared`：gating true→false（含 →unknown）。只用于唤起 workflow `pump()` —— fail-open。
+- `provenRecovered`：某指标由 ≥gateLevel 经 §5.2 恢复谓词确立到**已知**低于 gateLevel，且总体随之 <gateLevel（按等级判定，与 gate 开关无关；
+  gate 关时恢复文案不写「可以继续派发」）。只有它产生恢复提示。
 
-### 6.3 闸门：谁被拦、谁排队、谁豁免
+### 5.4 挂载发现与 IO 纪律（Blocker #1）
 
-| 入口                               | 行为                                | 理由                                                                                         |
-| ---------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------- |
-| 主会话 `Agent`（含 `resume` 参数） | **reject**（`loadPolicy:"reject"`） | U1；resume 同样新建 run 会话、产生负载                                                       |
-| 嵌套 `Agent`（子会话内）           | **reject**（同字段，嵌套版文案）    | 嵌套派发同样是新负载；子会话收不到恢复通知，文案改为「先不委派、自己做完或带说明交回」（Q2） |
-| workflow `agent()`                 | **queue**（host 层，§6.5）          | U1；spawn 请求不带 `loadPolicy`，杜绝「host 判放行、service 判拒绝」竞态                     |
-| consult fork                       | 豁免                                | 运行中 run 的同步工具调用，只读、短、已有成本/轮次上限；拒绝等于打断正在跑的 run             |
-| `/goal` verifier                   | 豁免                                | 系统闭环的一环，只读短跑；拒绝会让 goal 误判为验证失败                                       |
-| `/mem tidy`、`/task`、`@mention`   | 豁免                                | 用户显式意图，用户本人能看到 Pill；拒绝属越权（可在 TUI `notify` 一句 warn，非阻断）         |
-| RPC spawn（`src/rpc/server.ts`）   | 豁免                                | 外部程序自有调度，同 timeoutPolicy「程序派生 run」家族（Q3）                                 |
-| cron（`src/schedule/`）            | v1 豁免                             | 改动面在 scheduler；v2 候选「crit 时跳过本次并记日志」（Q3）                                 |
+- 发现：同步读 `/proc/self/mountinfo`（≤1 MiB、≤10 000 行，超限 ⇒ 磁盘 unknown），mono 60 s 刷新；最长前缀匹配按**路径分量边界**（`/home` 不匹配 `/homework`）。
+- symlink 保守策略：HOME / cwd 先做有界 `fs.promises.realpath`（计入账本 key `rp:<path>`、1 s 响应期限、结果 mono 60 s 缓存），再对 realpath 结果匹配；
+  未解析（超期/出错/账本满）⇒ 该路径磁盘 `unknown`（`unresolved`），不参与等级、UI 显示「—」，**绝不**以词法匹配结果冒充已验证。`/` 免解析。
+- fstype 白名单：`ext2 ext3 ext4 xfs btrfs f2fs zfs bcachefs overlay tmpfs vfat exfat ntfs3`；其余（nfs*、cifs/smb3、`fuse.*`、9p、ceph、
+  glusterfs、autofs、davfs…）⇒ 该路径 `skipped:"remote"`，不 statfs、不参与等级。
+- 账本：任一 sysload 异步 fs 操作（realpath / statfs / top 枚举与读）每 key ≤1 在途、全局 ≤2（默认线程池 4，至少留 2 线程给 pi）；
+  在途未回 ⇒ 该挂载本拍沿用连续性规则，不叠发。
+- 轮转准入（三挂载公平）：每拍把待探测项（去重挂载 statfs + 到期 realpath）排成环、起点每拍 +1，空槽按环序准入、结算即补位，至全部完成或 1 s 拍期限；
+  健康时每拍全覆盖，1 槽卡死时其余健康挂载仍每拍被探测，2 槽都卡死 ⇒ 不发新探测，磁盘随 stale 变 unknown。
+- **响应期限 ≠ 取消**：1 s 期限只结束等待（该拍记 invalid）；底层 statfs 无法取消，仍占账本直到真正返回；返回时若 generation 已变或已超期 ⇒ 丢弃。
+  账本为进程全局，跨 stop/start/`/reload` 存活，防止反复重建叠加卡死线程。
 
-- `SpawnRequest.loadPolicy?: "reject"`（`src/core/types.ts`，紧挨 `poolFullPolicy`）；`request-threading.ts` 排除表登记
-  「admission 消费，不下沉 RunnerSpec」。只有 `src/tools/agent-tool.ts` 的 `prepareSpawn` 写它（`deps.loadGate?.() ? "reject" : undefined`，
-  `load.gate=false` ⇒ 字段缺席 ⇒ 逐字节同今天）。
-- 挂点：`src/service/spawn-service.ts` 的零副作用准入区，**quota 闸门之后**（≈L685）、nesting/runId/label 之前；
-  `deps.loadGate?: () => LoadGateVerdict | undefined` 同步只读。顺序含义：pool-full（已有，retryable）先于 load——两者并存时主 agent
-  反正要等完成通知；类型/模型/额度错误优先暴露，避免「等负载回落后再撞配置错」。
-- 拒绝形态：`{ kind:"config", message, retryable: true }`；同时 `loadService.noteRejected()` 计数（供恢复通知与 `loadGate.rejected`）。
-- **不死锁**：闸门从不阻塞已在跑的 run，回落不依赖任何新派发；若负载正是自己的子 agent，拒绝文案列出本会话在跑 run 数与
-  label（取自 SpawnService 快照，≤8 个），主 agent 可 `abort_subagent` 自救。workflow 排队受 workflow deadline 兜底（§6.5）。
+### 5.5 top 进程（按需，Major #4）
 
-### 6.4 通知（`customType: "subagent:load"`）
+- 只在两处触发：hub `GET /api/load/top`；pi 侧「gating 变 true」与「每次拒绝且缓存 >30 s」时 fire-and-forget 刷新。拒绝文案用缓存
+  （≤120 s），否则写「top 快照不可用，可用 bash 跑 `ps -eo pid,comm,%cpu,rss --sort=-%cpu | head`」并触发刷新。
+- 枚举全程计账直到真正结算：`opendir("/proc")` 本身、每次 `dir.read()`、`dir.close()`、每个 per-pid `open/read/close` 都是账本操作；
+  top 扫描同一时刻最多占 1 槽（另 1 槽留给 statfs），单飞 key `top` 放在进程全局账本里——扫描在所有已发操作结算前不释放，重建/`/reload` 不会并发第二次扫描。
+- per-file 读取有界：`open` 后单次 `read` 进固定 4 KiB 缓冲，不用 `readFile`。期限 300 ms / 2048 pid 到点**停止发起新操作**（挂起的只等结算、结果丢弃），
+  返回 `partial:true`；`opendir` 在期限或 generation 变更后才返回 ⇒ 立即 `close()`（计账）不再 read。
+- 身份与单位：前次表只保留本次扫到的 pid（≤2048），以 `(pid,starttime)` 匹配；`USER_HZ`/页大小的权威获取见 §10 包注 Minor 7。
+- CPU% = 单核百分比（可 >100%，同 top）：`Δ(utime+stime)/HZ/Δmono(s)×100`；无匹配前次 ⇒ 生命周期平均、标 `avg`。
+- 输出：按 `comm` 聚合，byCpu / byRss 各**固定 top-5**：`{comm, count, cpuPct, rssBytes, pids[≤8]{pid,cpuPct,rssBytes}}`；只读 `comm`，绝不读 cmdline/environ。
 
-- **阶梯**（turn_end，`sendMessage(..., {triggerTurn:false})`，print/json 跳过）：先读后不刷（verdict 由节拍维护）；闩锁 =
-  上次播报等级；升 warn / 升 crit 各播一次；crit 每 `repeatMs` 复读一次；降到 < gateLevel 且曾播 ≥warn ⇒ 恢复块；
-  全局 `minIntervalMs` 地板（crit 与恢复绕过）；send 失败闩锁回滚（照抄 quota Minor 1/2）。
-- **恢复唤醒**：节拍里 `onChange` 观测到总体等级跌破 gateLevel 且 `rejectedSinceRecovery>0` ⇒ 一次性
-  `pi.sendMessage(恢复块, { triggerTurn: true })`（先例：workflow grace 通知 / `src/adapters/workflow-notice.ts`），并清零计数、
-  同步更新 hook 闩锁避免下一个 turn_end 重复播。无拒绝 ⇒ 只走阶梯（triggerTurn:false）。不新增任何定时器。
-- 文案（紧凑首行纯英文 token，后接中文散文）：
+## 6. 闸门与通知
 
-```
-[load] crit · CPU 97% (PSI 74%) · MEM 6% avail · DISK / 3.1G free · since 14:02 (2m)
-系统负载过高，已暂停派发新的子 agent：Agent 调用会被直接拒绝，workflow 的 agent() 会排队等待回落。
-```
+### 6.1 settings（`LoadSettings`，`parseLoadSettings` 逐字段容错，非 live：session_start 捕获，改后 `/reload`；hub 侧改后 `/webhub restart`）
+
+`load.enabled` true · `load.gate` true · `load.gateLevel` "crit"|"warn"(crit) · `load.sampleIntervalMs` 5000 · `load.sustainMs` 60000 ·
+`load.recoverMs` 30000 · `load.cpu.{warnPercent 85, critPercent 95, psiWarnPercent 40, psiCritPercent 70}` · `load.mem.{warnAvailPercent 15, critAvailPercent 8}` ·
+`load.disk.{warnFreePercent 10, critFreePercent 5, critFreeGiB 5}` · `load.hint.{enabled true, display true, repeatMs 600000, minIntervalMs 120000}` ·
+`load.hud` true · `webHub.load` true。时长键进 `TIME_SETTING_MS_PATHS`。v1 删除 `extraPaths`/`topCount`/`wakeOnRecovery`。
+
+### 6.2 准入挂点
+
+- `SpawnRequest.loadPolicy?: "reject"`（`core/types.ts`，紧挨 `poolFullPolicy`；`request-threading.ts` 排除表登记）。只有 `createAgentTool` 的
+  `prepareSpawn` 写入（`deps.loadGate?.()` 为真时）。
+- 顶层：`index.ts` 的 agent-tool deps 传 `loadGate`；**嵌套**：`service/runtime-adapter.ts:≈732` 的 nested `createAgentTool({...})` 另行构造，
+  须新增 `RuntimeAdapterDeps.loadGate?: () => boolean` 并由 `stack.ts` 的 `createRuntimeRunnerAdapter` 注入（v1 遗漏，Major #6）。
+- `spawn-service.ts` 零副作用准入区，quota 闸门之后（≈L685）、nesting/runId/label 之前：`deps.loadGate?: (ctx:{nested:boolean}) => {message}|undefined`；
+  `nested = req.parentRunId !== undefined && nesting.has(req.parentRunId)`，渲染嵌套版文案；判定只读 §5.3 有效闸门（读时强制新鲜度）。拒绝 `{kind:"config", message, retryable:true}`；
+  仅**主会话**拒绝置 `rejectedSinceRecovery=true`（嵌套拒绝不武装恢复提示）。pool-full（已有）先于 load。
+
+### 6.3 入口矩阵
+
+| 入口                                               | 行为                    | 理由                                      |
+| -------------------------------------------------- | ----------------------- | ----------------------------------------- |
+| 主会话 `Agent`（含 `resume`）                      | reject                  | U1；resume 新建 run 会话                  |
+| 嵌套 `Agent`（含名为 verifier 的普通 agent type）  | reject（嵌套文案）      | Q2；按入口而非 type 名判定                |
+| workflow `agent()`                                 | host FIFO queue（§6.5） | U1；子请求不带 `loadPolicy`，无竞态       |
+| consult fork / `/goal` 内部 verifier / `/mem tidy` | 豁免                    | 运行中 run 的同步调用或系统闭环，只读短跑 |
+| `/task`、`@mention`                                | 豁免                    | 用户显式意图                              |
+| RPC spawn、cron                                    | 豁免（代决 Q3）         | 程序派生 run 家族                         |
+
+### 6.4 通知（`customType:"subagent:load"`，全部 `triggerTurn:false`）
+
+- 阶梯：闩锁=上次播报等级；升 warn / 升 crit 各一次；crit 每 `repeatMs` 复读；`minIntervalMs` 地板（crit 与恢复绕过）；send 失败闩锁回滚。
+- 恢复提示**单槽**：`provenRecovered` 且（曾播 ≥gateLevel ∨ `rejectedSinceRecovery`）⇒ 置 `pendingRecovery`；turn_end `sendMessage` **成功后**才消费并清
+  `rejectedSinceRecovery`；失败保留下轮重试（槽只有一个，天然有界）；再次升到 gateLevel ⇒ 槽作废；`stop/dispose` ⇒ 清空；print/json 不启动；
+  `load.hint.enabled=false` ⇒ 不置槽，拒绝文案也不承诺提示。
+- 文案（首行英文紧凑 token）：
 
 ```
 load gate: 系统负载过高（crit），本次派发已拒绝，未创建任何 run / label / worktree。
 [load] crit · CPU 97% (PSI 74%) · MEM 6% avail · DISK / 3.1G free · since 14:02 (2m)
-loadavg 18.2 / 15.1 / 9.8 (16 cores) · own runs 3 (fix-auth, review-x, …)
-top cpu: node#4123 380% · cc1plus#9911 95% · … ｜ top rss: java#2210 9.8G · …
-你可以二选一：① 排查负载来源（上列进程；可用 bash 跑 `ps`/`top -bn1`，若是自己派出的 run 可 abort_subagent）；
-② 等待回落——直接结束本轮即可，负载回落后会收到一条 [load] 恢复通知并被唤醒，届时再派发。
-（在 settings 文件里把 load.gate 设为 false 可关闭本闸门。）
+loadavg 18.2 / 15.1 / 9.8 (16 cores) · own runs: fix-auth, review-x (+1)
+top cpu: node×3 380% · cc1plus×8 95% … ｜ top rss: java 9.8G · node×3 4.1G …
+可二选一：① 排查负载来源（上列进程；bash `ps`/`top -bn1`；若是自己派出的 run 可 abort_subagent）；
+② 等待回落——v1 不会自动唤醒，可先做不需派发的工作或结束本轮，回落后下一轮开头会收到 [load] 恢复提示再派发。
+（settings 文件里把 load.gate 设为 false 可关闭本闸门。）
 ```
 
-```
-[load] ok · CPU 41% · MEM 38% avail · DISK / 12G free
-负载已回落（此前拒绝了 2 次派发），可以继续派发子 agent。
-```
+嵌套版第二段替换为「请不要再委派：自己完成剩余工作，或带着现状说明交回上层」。升级块：`[load] crit · … — 已暂停派发新子 agent：Agent 调用会被拒绝，
+workflow 的 agent() 会排队。`；恢复块：`[load] ok · CPU 41% · MEM 38% avail · DISK / 12G free — 负载已回落，可以继续派发。`
 
-### 6.5 workflow 排队（`src/workflow/host.ts` + `spawner-adapter.ts`）
+### 6.5 workflow 等待（Major #9，如实表述）
 
-- `ChildSpawner.loadAdmission?: { blocked(): boolean; onClear(fn): () => void }`（可选；缺席 ⇒ 逐字节同今天）。
-  `spawner-adapter.ts` 从 `WorkflowChildSpawnerOptions.loadAdmission` 透传，stack.ts 绑定到 LoadService（blocked ⇔ 等级 ≥ gateLevel 且非 unknown）。
-- `handleAgent` 排队条件扩为 `waitQueue.length>0 || activeCount()>=maxParallel || loadBlocked()`；`pump()` 循环条件加 `&& !loadBlocked()`；
-  host 创建时 `onClear(() => pump())`，`terminate`/`stopOwned` 时退订。`queued` 子事件加可选 `reason:"load"|"maxParallel"`，fleet 可见。
-- 上界：沿用既有语义——排队中耗尽 workflow 预算 ⇒ withheld → `null`（`dispatchQueued` 的 `budget_exhausted` 分支、WT8
-  `stopOwned`）；`extend_subagent_timeout wf_…` 可延长。replay 命中不受闸门影响（不产生新 run）。
+- `ChildSpawner.loadAdmission?`（可选，缺席逐字节同今天；`blocked()` ≡ §5.3 有效闸门、读时强制新鲜度，`load.gate=false` ⇒ 恒 false 不排队）；`handleAgent` 排队条件加 `|| loadBlocked()`，`pump()` 循环加 `&& !loadBlocked()`；
+  `onGateCleared(() => pump())`，`terminate`/`stopOwned` 退订；`queued` 子事件加可选 `reason:"load"|"maxParallel"`。
+- 三层等待各自有界、互不替代：① host FIFO（含 load 等待）**没有单次超时**，只受 workflow `killAt`（可经 `extend_subagent_timeout wf_…` 延长）
+  与不可延长的 `hardAt` 约束，到点 `stopOwned` ⇒ withheld `null`；② 派发后 core SlotPool 的 `queueWaitMs` 只从 spawn 起算；③ 子 run 自身 deadline。
+- 结论：这是**有界饥饿，不是无死锁**——脚本 `await` 一个被 load 挡住的 `agent()` 时整条 workflow 停滞至负载回落或 `hardAt`；运行中 child 若依赖排队
+  child 的产出（脚本层编排），同样停滞到截止。v1 **不加** load-wait 上限：裁决 U1 要求排队；上限到点也只能 withheld `null`，与 `killAt` 同结局、
+  只是更早；`hardAt` 已保证终止。可见性：既有 `queueWaitMs` 记录等待时长，fleet 显示 `queued(load)`。
 
-## 7. UI 规格
+## 7. 协议、hub 与 UI
 
-- `ui/src/logic/load.js`：`reduceLoad`、`worstMetric(wire)`、`formatLoadTokens`、`levelClass`；`logic/state.js` 加 `case "load"`
-  （覆盖语义，非法 payload 整体丢弃，同 `spawns`）；`useHub` 透传 `load.v1` cap。
-- `components/load/LoadPill.vue`：TopBar 中 QuotaPill 之后；无 `load` 数据或 cap 缺席 ⇒ 零 DOM（沿用 TopBar 0/1 项 `v-for` 技巧）。
-  文本 `CPU 72% · MEM 81% · DISK 64%`（MEM/DISK 显示 used%，DISK 取最差挂载）；`unknown` 指标省略；≤480px 只显示最差项；
-  warn/crit 用既有 token 色；`aria-label` 走 i18n。
-- `components/load/LoadCard.vue`：popover（复用 QuotaCard 的 clamp/flip），每指标一条 bar + 阈值刻度；loadavg、PSI cpu/mem/io；
-  分挂载磁盘（label `~`/cwd/`/`，free/total）；打开时 `GET /api/load/top`（X-PWH:1，失败显示「unavailable」不重试风暴）列 top-5 by CPU / by RSS；
-  底部 `sampled HH:MM:SS`（>15 s 标 stale）。
-- fleet drawer（`components/drawer/FleetDrawer.vue`）：当前会话 `status.loadGate.gating===true` ⇒ 顶部横幅
-  `i18n load.banner`（zh「负载过高，已暂停派发新子 agent」/ en「Load critical — new subagent dispatch paused」），附 rejected/queued 计数。
-- i18n：新命名空间 `i18n/{en,zh}/load.ts`（glob 收录，parity 测试自动覆盖）；样式 `styles/load.css`（`ld-` 前缀、token-only）。
-- TUI HUD：status key `"load"`，`src/hud/footer.ts` 把 `"load"` 加入 `OWN_LINE_STATUS_KEYS`；能放下时与 quota 同行
-  （`load … │ quota …`），否则 load 独占一行排在 quota 前；文本 `load CPU 72% · MEM 81% · DISK 64%`，warn/crit 着色，unknown ⇒ 不设。
-- gzip 预算：Pill+Card+logic 估 +3~4 KiB gz；合入时由主会话在干净 worktree 实测，必要时把 `scripts/web-hub/check-ui-dist.ts`
-  的 `JS_BUDGET_GZIP_BYTES` 从 232 KiB 提到 236 KiB 并按惯例补「Budget history」注释。
+### 7.1 协议（additive，不升 proto）
+
+- `messages.ts`：`LoadWire{v:1; at; intervalMs; scope:"host"; level; thresholds; cpu?; mem?; io?; disks?[≤2]{label:"~"|"/", path, usedPct, freeBytes,
+totalBytes, level, skipped?}; loadavg?}`；`LoadTopWire{at; partial?; byCpu[≤5]; byRss[≤5]}`；`StatusInfo.loadGate?{gating:boolean; level; sinceAgoMs?}`（M9）。
+- `http-contract.ts`：`SSE_EVENTS` 在 `"spawns"` 前插 `"load"`；`LOAD_TOP_PATH`；`ports.ts`：`HubEvent{type:"load"}`、`HubConfig.load?`；cap `load.v1`。
+
+### 7.2 hub 侧（`src/web-hub/hub/load.ts`）
+
+- `buildHubConfig` 仅在 `load.enabled ∧ webHub.load` 时写 `config.load`（任一为 false ⇒ 整键省略 ⇒ 无 sampler/cap/帧/路由）；hub 不承载 gate 概念，
+  Pill/Card 只显示等级，绝不写「已暂停派发」。hub sampler 同样用单调 timer clock 与读时新鲜度。
+- `main.ts` 用 `normalizeHubLoadConfig` 校验 `config.load`（越界/类型错 ⇒ 丢整键并 stderr，同 preview 先例）；启动探针同步读 `/proc/stat`（失败 ⇒ 无 cap）。
+- 路径仅 HOME 所在 FS 与 `/`（同一 FS 去重）；不看任何会话 cwd。sampler 生命周期跟随 hub start/close，定时器 unref、不计入 idle（`hub.ts:≈1304` 的
+  counts 不变）。直发：遍历 `sse.list()` 调 `client.send("load")`（`sse.ts:≈199`，无 id、不进 ring）；`openEvents` 在 `spawns` 后补发最新快照；
+  数据丢失时发显式 `level:"unknown"` 替换帧；指纹去重，心跳 = 3×interval。
+
+### 7.3 `/api/load/top`（LAN 同宽，Q5）
+
+- 先走该 listener 的正常鉴权（token / LAN 会话），**鉴权通过前零 IO**；`X-PWH: 1` 只是 CSRF 卫生不是鉴权。两 listener 共享单飞 + 2 s 缓存；
+  每主体限频（1 req/s，突发 3，复用 `hub/cmd-limit.ts` 的 token bucket——`ratelimit.ts` 是登录退避，不适用）；等待者 ≤8，超出 `E_BUSY`；整体期限 1.5 s（`E_DEADLINE`）；客户端断开即退出等待（扫描本身单飞继续）。
+
+### 7.4 前端
+
+- 冻结面（P0 写声明）：`ui/src/types.ts` `HubState.load?: LoadWire`、`loadTop` 状态；`transport/types.ts` `loadTop(signal?): Promise<LoadTopOutcome>`。
+- `logic/state.js`：`case "load"` 覆盖写；`hello` 与 hub 帧 caps 无 `load.v1` 时清空。stale 以客户端**收帧时刻**计：>4×`intervalMs` 标 stale。
+- `LoadPill.vue`（QuotaPill 后，无数据零 DOM，`title`/aria 标「Host load」）、`LoadCard.vue`（bars + 阈值刻度、loadavg、PSI、两行磁盘 `58% · 112G free`、
+  top 按 comm 聚合可展开 pid、`sampled` 时间、阈值来源披露）、`FleetDrawer.vue` 横幅（读 `status.loadGate.gating`，时长并入同行小字）。
+- i18n `i18n/{en,zh}/load.ts`、`styles/load.css`（`ld-` 前缀）。HUD：`hud/footer.ts` `OWN_LINE_STATUS_KEYS` 加 `"load"`，放得下与 quota 同行，否则独占一行在前。
+- gzip：合入时干净 worktree 实测，超预算才提议提额（不预先承诺数字）。
 
 ## 8. 不变量
 
-- I1 fail-open：unknown/stale/读失败/非 Linux ⇒ 不拦、不排队、不注入告警。
-- I2 只拦新派发：已在跑的 run 永不受影响；回落不依赖任何派发。
-- I3 拒绝零副作用：load 闸门在准入区，先于 runId/label/resumeLocks/nesting/worktree 任何写入。
-- I4 零新增定时器：pi 侧唯一节拍为 LoadService 的 unref'd 周期定时器（经 `systemClock.setTimer`）；hub 侧一个，同样 unref，且不计入 idle 活动。
-- I5 硬 deadline：每拍 IO ≤1 s、top 扫描 ≤300 ms、`statfs` 单飞；在途未回不叠发；`/api/load/top` 受 req-deadline。
-- I6 无模块级可变状态：service/tracker/hint state 全挂 Stack，`/reload` 经 session_shutdown dispose；`previousLoad` 交接同 quota。
-- I7 注入通道：阶梯 `triggerTurn:false`；仅「曾拒绝后的恢复」一次性 `triggerTurn:true`；绝不写 systemPrompt。
-- I8 `load.enabled=false` / `webHub.load=false` / `config.load` 缺席 ⇒ 对应面逐字节同 pre-feature（无 cap、无 SSE 帧、无 status 字段、无 HUD 键）。
-- I9 hub 导入图 pi-free：hub 只 import `sysload/{procfs,reader,top,levels,wire,types}`，由 `tests/web-hub/boundary.test.ts` 钉住。
-- I10 隐私：只暴露 `comm` 与 pid，绝不读 cmdline/environ；磁盘 path 在 LAN 可见（U1 单 LAN 用户裁决同口径，Q5）。
+- I1 fail-open：unknown / stale / 未解析或跳过的挂载 / 非 Linux / print·json / `load.gate=false` ⇒ 不拦、不排队；invalid 样本按 §5.2 只打断序列、
+  等级至多保持到 stale（3×interval），gate 与 hint 同一口径。
+- I2 只拦新派发，回落不依赖派发；I3 拒绝零副作用（准入区，先于 runId/label/resumeLocks/nesting/worktree）。
+- I4 零新增定时器：pi、hub 各一个 unref 节拍；恢复提示只随 turn_end。I5 IO 有界：同步 procfs ≤64 KiB；statfs/per-pid 走账本（全局 ≤2）+ 响应期限。
+- I6 无新增模块级可变状态：LoadActivation 由 `activate()` 闭包持有（不学 `stack.ts:≈216` 的 `previousQuota`），stop/dispose 递增 generation 丢迟到结果；
+  **唯一例外**是进程全局 IO 账本（卡死 syscall 跨 activation 存活，同 worktree-origin `Symbol.for` 先例，容量有界）。
+- I7 绝不写 systemPrompt、绝不 `triggerTurn:true`。I8 关闭面逐字节同 pre-feature（无 cap / 帧 / status 字段 / HUD 键 / spawn 字段）。
+- I9 hub 导入图 pi-free（boundary 测试钉住）。I10 只暴露 comm/pid 与两类挂载路径；不读 cmdline/environ。
 
-## 9. 测试计划
+## 9. 测试与集成闸门
 
-- `tests/sysload/procfs.test.ts`：fixture 文本（含 comm 带 `) (` 的进程、缺 pressure、截断行）。
-- `tests/sysload/levels.test.ts`：sustain 未满不升、整窗才升、迟滞降级逐级、断档清窗、stale→unknown；seeded property：
-  任意序列下等级只在窗口条件满足时变化、unknown 永不升 crit。
-- `tests/sysload/reader.test.ts` / `top.test.ts`：假 io（挂起的 statfs ⇒ deadline + 单飞不叠发；4096 上限 ⇒ partial；cpuAvg 回退）。
-- `tests/sysload/gate.test.ts`、`render.test.ts`：文案快照（紧凑行无中文）、own runs 截断。
-- `tests/sysload/hook.test.ts` + `tests/integration/load-turn-end-wiring.test.ts`：照抄 quota 的 fakePi/ctx/holder；升级/复读/恢复/回滚/print 跳过；
-  恢复唤醒仅在 rejected>0 时 `triggerTurn:true` 且只一次。
-- `tests/config/load-settings.test.ts`：逐字段容错、单调钳制、TIME 路径。
-- `tests/service/load-gate.test.ts`：reject 不产生 run/label/worktree；`loadPolicy` 缺席放行；unknown 放行；与 pool-full、quota 顺序；
-  同 tick 多次 spawn 一致。`tests/tools/agent-tool` 金样（含 nested surface golden）若受字段影响需同步。
-- `tests/workflow/load-queue.test.ts`：blocked ⇒ queued(reason load)；onClear ⇒ pump FIFO；deadline ⇒ withheld null；退订无泄漏；无 loadAdmission 逐字节同。
-- `tests/hud/footer` 增补：load+quota 同行/分行。
-- hub：`tests/web-hub/hub/load.test.ts`（无 config.load ⇒ 无 cap/无帧；有 ⇒ 连接补发 + 直推不进 ring；top 端点 X-PWH、单飞、2 s 缓存、LAN 同宽）。
-- UI：`tests/web-hub/ui/logic-load.test.ts`、`load-pill.test.ts`（零数据零 DOM、窄屏最差项、着色）、drawer 横幅、`logic-contract`/`i18n-parity` 自动覆盖。
-- 全量：`npm run format:check && npm run typecheck && npm test && npm run build`；UI 包另加 `build:web && check:web`（干净 worktree）。
+- 单元：`tests/sysload/{procfs,mounts,tracker,sampler,top,gate,render,hook,activation}.test.ts`——guest 不重计、计数回绕 invalid、等号边界、
+  恢复谓词（DISK 字节+百分比双恢复，含非默认 `critFreeGiB`/百分比阈值）、真实时间戳下 12×5 s 样本（跨 55 s）不升级、`sustainMs=0` 首样本升级、迁移后清窗、
+  wall 回拨且无新样本 ⇒ 读时 stale 放行、unknown 重入、128 槽上限、`gate=false` ⇒ blocked/横幅/文案全关、symlink HOME/cwd 未解析 ⇒ unknown、
+  分量边界匹配、三挂载 1 槽卡死仍公平覆盖、枚举计账（opendir 迟到 close、期限后不再发起、单飞跨重建）、pid 复用 starttime 不匹配。
+- `tests/config/load-settings.test.ts`；`tests/service/load-gate.test.ts`（零 run/label/worktree、nested 文案、仅主会话武装、与 pool-full/quota 顺序）。
+- `tests/workflow/load-queue.test.ts`：queued(load)、gateCleared pump FIFO、killAt 延长后继续等、hardAt withheld null、取消时退订、与 pool 饱和叠加、无 loadAdmission 逐字节同。
+- **集成闸门（真实进程/真实接线）**：
+  - `tests/integration/load-threadpool-starvation.test.ts`：照 `web-hub-history-starvation` 模式，子进程 `UV_THREADPOOL_SIZE=4` + 真 FIFO 冒充挂死 statfs，
+    20 拍后断言账本 ≤2 卡死线程、同进程无关 `fs.promises.readFile` 200 ms 内完成、generation 迟到结果被丢弃；另一例让 FIFO 冒充挂死的 top 枚举读，断言扫描单飞不叠发。
+  - `tests/integration/load-print-mode.test.ts`：print/json 模式不启动采样、进程按时退出。
+  - `tests/integration/load-nested-agent.test.ts`：经真实 runtime-adapter 注入的嵌套 Agent 被拒且文案为嵌套版。
+  - `tests/integration/load-producer-matrix.test.ts`：§6.3 每个入口（含普通 verifier type vs `/goal` 内部 verifier）reject/queue/admit 矩阵。
+  - `tests/integration/load-turn-end-wiring.test.ts`：阶梯、单槽恢复、send 失败重试、unknown 不出恢复文案。
+  - `tests/integration/web-hub-load.test.ts`（真 hub 子进程）：cap 矩阵、`load` 帧无 `id:`、Last-Event-ID 重连回放不含 load 且快照随后、
+    `load.enabled=false` / `webHub.load=false` 各自 ⇒ 无 `config.load`、非法 `config.load` 被丢、鉴权前零 IO、限频/等待者上限、stop 后无残留定时器、idle 自退不被采样拖住。
+- UI：`tests/web-hub/ui/{logic-load,load-pill,load-card,load-banner}.test.ts`（含 `sinceAgoMs` 收帧锚）；contract / i18n-parity 自动覆盖。全量：format:check → typecheck → test → build；UI 包另跑 build:web + check:web（干净 worktree）。
 
 ## 10. 包切分与独占文件域
 
-热点共享文件（任何并行包不得并发改，按下表独占或串行）：`src/config/settings.ts`、`src/config/setting-specs.ts`、
-`src/core/types.ts`、`src/service/request-threading.ts`、`src/web-hub/protocol/{messages,http-contract}.ts`、`src/web-hub/hub/ports.ts`、
-`ui/src/logic/contract.js`、`src/stack.ts`、`src/index.ts`、`src/tools/agent-tool.ts`、`src/hud/footer.ts`、`src/web-hub/hub/{hub,http,main}.ts`、
-`src/web-hub/agent/{index,status}.ts`、`scripts/web-hub/check-ui-dist.ts`、`AGENTS.md`。
-**前置**：当前工作树对 `setting-specs.ts`、`core/types.ts`、`agent-tool.ts`、`hub.ts`、`http.ts` 等有未提交的在飞改动——P0 必须等其落地（或在其 commit 之上开工）。
+**基线屏障**：开工前以下当前脏/未跟踪文件必须已提交（记录基线 commit），否则 P0 不得开工：`AGENTS.md`、`docs/dev/hub-resilience/plan.md`、
+`src/config/setting-specs.ts`、`src/core/{deadline,state-machine,types}.ts`、`src/runtime/runner.ts`、`src/tools/{agent-tool,extend-timeout-tool}.ts`、
+`src/web-hub/hub/{audit,http,hub,ports}.ts`、`src/web-hub/hub/worktree-diff/{git,membership,routes}.ts`、`src/web-hub/hub/worktree-graph/`、
+`src/web-hub/ui/src/{components/detail/WorktreePanel.vue,components/graph/,composables/useWorktreeGraph.ts,i18n/en/graph.ts,styles/tokens.css}`、
+`src/workflow/{deadline,orchestrator,run-budget,types}.ts` 及对应 `tests/**` 改动。
 
-| 包                                   | 文件域（独占）                                                                                                                                                                                                                                                                          | 允许新建                         | 冻结面                                                          | 依赖 |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------- | ---- |
-| **P0 冻结面**（串行，先行）          | `src/sysload/types.ts`；`settings.ts`/`setting-specs.ts` 的 load 段；`core/types.ts` 加 `loadPolicy`；`request-threading.ts` 排除表一行；`protocol/messages.ts`、`http-contract.ts`、`hub/ports.ts` 的 load 类型；`ui/src/logic/contract.js` 镜像；`tests/config/load-settings.test.ts` | `src/sysload/types.ts`、上述测试 | 其余全部                                                        | 无   |
-| **P1 sysload 核心**                  | `src/sysload/**`（types.ts 除外）、`tests/sysload/**`                                                                                                                                                                                                                                   | 仅这两处                         | P0 全部产物                                                     | P0   |
-| **P4 Web UI**（与 P1 并行）          | `ui/src/components/load/**`、`ui/src/logic/load.js`、`ui/src/styles/load.css`、`ui/src/i18n/{en,zh}/load.ts`、`TopBar.vue`、`drawer/FleetDrawer.vue`、`logic/state.js`（仅 `case "load"`）、`tests/web-hub/ui/{logic-load,load-pill,load-banner}.test.ts`                               | 仅上述目录                       | protocol/**、hub/**、其余 i18n、check-ui-dist                   | P0   |
-| **P2a pi 接线**                      | `spawn-service.ts`、`agent-tool.ts`、`stack.ts`、`index.ts`、`hud/footer.ts`、`web-hub/agent/{index,status}.ts`（loadGate 字段 + `buildHubConfig` 的 `load`）、`tests/service/load-gate.test.ts`、`tests/integration/load-turn-end-wiring.test.ts`、footer/agent-tool 相关测试          | 测试文件                         | `src/sysload/**`（只 import）、`src/workflow/**`                | P1   |
-| **P2b workflow 排队**（与 P2a 并行） | `src/workflow/{host,spawner-adapter}.ts`（含 `ChildSpawner`/`WorkflowChildSpawnerOptions` 新可选字段）、`tests/workflow/load-queue.test.ts`                                                                                                                                             | 该测试                           | stack.ts（由 P2a 接 `loadAdmission`，P2b 只定义字段并上报签名） | P1   |
-| **P3 hub 侧**（与 P2a/P2b 并行）     | `src/web-hub/hub/load.ts`（新）、`hub/{hub,http,main}.ts`、`tests/web-hub/hub/load.test.ts`、`tests/web-hub/boundary.test.ts`（若需扩白名单）                                                                                                                                           | `hub/load.ts`、测试              | protocol/**、agent/**、`src/sysload/**`                         | P1   |
-| **P5 收口**（主会话）                | `AGENTS.md`（新增 `src/sysload/` 条目 + web-hub load 段）、`check-ui-dist.ts` 预算、本文修订记录                                                                                                                                                                                        | —                                | —                                                               | 全部 |
+| 包                    | 独占文件域                                                                                                                                                                                                                                                                                                                                                                                                                                           | 依赖 / 并行            |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| **P0 冻结面**         | `src/sysload/types.ts`；`config/{settings,setting-specs}.ts` load 段；`core/types.ts` `loadPolicy`；`service/request-threading.ts` 一行；`protocol/{messages,http-contract}.ts`、`hub/ports.ts` load 类型；`ui/src/logic/contract.js`；`ui/src/types.ts`、`ui/src/transport/types.ts` 声明；`tests/config/load-settings.test.ts`                                                                                                                     | 基线后串行先行         |
+| **P1 核心**           | `src/sysload/**`（除 types.ts）、`tests/sysload/**`、`tests/integration/{load-threadpool-starvation,load-print-mode}.test.ts`（+ fixtures 子目录 `fixtures/sysload/`）                                                                                                                                                                                                                                                                               | P0 后，与 P4 并行      |
+| **P4 前端**           | `ui/src/components/load/**`、`ui/src/logic/load.js`、`ui/src/transport/{token,password}.ts`（`loadTop` 实现）、`ui/src/logic/{token-client,password-client}.js`（实际鉴权 fetch）、`ui/src/composables/useHub.ts`（透传）、`ui/src/types.ts` 与 `transport/types.ts`（P0 之后唯一后续改动方）、`TopBar.vue`、`drawer/FleetDrawer.vue`、`logic/state.js`（仅 load 分支）、`styles/load.css`、`i18n/{en,zh}/load.ts`、`tests/web-hub/ui/load*.test.ts` | P0 后                  |
+| **P2b workflow**      | `src/workflow/{host,spawner-adapter}.ts`、`tests/workflow/load-queue.test.ts`                                                                                                                                                                                                                                                                                                                                                                        | P1 后；先于 P2a 合入   |
+| **P2a pi 接线**       | `service/{spawn-service,runtime-adapter}.ts`、`tools/agent-tool.ts`、`stack.ts`、`index.ts`、`hud/footer.ts`、`commands/status.ts`（`/agent status` 摘要行）、`web-hub/agent/{index,status}.ts`、`tests/service/load-gate.test.ts`、`tests/integration/{load-nested-agent,load-producer-matrix,load-turn-end-wiring}.test.ts`                                                                                                                        | P1 + P2b 后            |
+| **P3 hub**            | `web-hub/hub/load.ts`（新）、`hub/{hub,http,main}.ts`、`tests/web-hub/hub/load*.test.ts`、`tests/integration/web-hub-load.test.ts`、`tests/web-hub/boundary.test.ts`                                                                                                                                                                                                                                                                                 | P1 后，与 P2a/P2b 并行 |
+| **P5 收口**（主会话） | `AGENTS.md`、`scripts/web-hub/check-ui-dist.ts`（仅实测超标时）、本文修订记录                                                                                                                                                                                                                                                                                                                                                                        | 全部后                 |
 
-- P2a 与 P2b 的唯一耦合是 `WorkflowChildSpawnerOptions.loadAdmission` 签名：P0 已在 `types.ts` 冻结 `LoadAdmission`，P2b 引用它；
-  P2a 在 stack.ts 构造 `createWorkflowChildSpawner(..., { loadAdmission })`。该可选字段由 P2b 新增，P2a 传它需 P2b 已在树上，故**合并顺序 P2b → P2a**（P2a 开发期可先写好调用、合入前 rebase 到 P2b 之上再跑 typecheck）。
-- 派单前跑 `conflict-check.mjs`；各包自提交精确路径、commit 前缀 `[sysload:Pn]`；验收模型 ≠ 开发模型（dev-flow）。
-- 车道：L3（跨 pi/hub/UI 三面、新协议、改准入），走完整闸门；P0 评审通过再放 P1/P4。
+- 包注（v2 复审 Minor，不扩大 v1 范围）：
+  - **P1·M7**：`USER_HZ`/页大小一次性有界读 `/proc/self/auxv` 的 `AT_CLKTCK`/`AT_PAGESZ`；读不到 ⇒ 省略 `cpuPct`/`rssBytes`（n/a）不猜；生命周期平均 elapsed = `uptime − starttime/HZ`；聚合行保留 `avg`。
+  - **P1·M8**：invalid 统一按 §8 I1；分类前拒绝非有限值、零分母（`MemTotal=0`、`blocks=0`、`blocks−bfree+bavail≤0`）与不可能关系（`avail>total`、`bavail>blocks`、`bfree<bavail`）。
+  - **P0·M9**：wire 不下发 mono `since`，`LoadWire`/`StatusInfo.loadGate` 改 `sinceAgoMs`（投影时 elapsed）+ `at`；浏览器以收帧时刻为锚累加（P1 投影、P4 渲染）。
+  - **P3·M10a**：`/api/load/top` 限频用 `cmd-limit.ts` bucket（键 `${listener}:${principal}:load-top`）；**P4·M10b**：logic clients 已入 P4 域。
+- 热点规则：上表外的共享文件（barrel、其余 i18n、其余 workflow/hub 文件）一律冻结，越界必须停下上报；派单前跑 `conflict-check.mjs`；commit 前缀 `[sysload:Pn]`，精确路径提交。
+- 车道 L3：P0 评审通过才放行 P1/P4；每包验收模型 ≠ 开发模型。
 
-## 11. 关键接线细节（P2a/P3 速查）
+## 11. 关键接线速查
 
-- stack.ts：顶部 `let previousLoad`、build 顶部 dispose；`loadRef` 晚绑定（spawn-service 构造早于 load stack，同 `quotaRef`）；
-  `createSpawnService({... loadGate: settings.load.gate ? () => evaluateLoadGate(loadRef.current?.service.verdict(), …) : undefined })`；
-  `Stack.load?`/`loadHint?`；HUD `ctx.ui.setStatus("load", …)`（`hasUI` + try/catch）。`index.ts`：guard 之后注册 `pi.on("turn_end", createLoadHintHook(...))`，
-  session_shutdown 里 `holder.current.load?.dispose()`；`agentToolDeps.loadGate = () => settings.load.enabled && settings.load.gate`。
-- hub：`hub.ts` 在 `config.load` 存在时构造 `createHubLoadSampler({clock, config.load, publish: e => registry.publish(e)})`，
-  stop 时 dispose；`http.ts` `onHubEvent` 加 `case "load"`：遍历 `sse.list()` 直发（不进 ring，避免 5 s 一帧冲掉 8192 环）；
-  `openEvents` 在 `spawns` 之后补发最新快照；新路由 `GET /api/load/top`（两 listener 同宽，`webHub.load=false` ⇒ 404）。
-- hub 采样只在 hub 存活期间运行（hub 本身无 agent 即 idle-exit），推送按 `loadFingerprint`（整数百分比 + 等级）去重，最慢 15 s 心跳一帧。
+- `index.ts` activate()：`const load = createLoadActivation({mono, clock: createSegmentedClock({now: mono, set: unrefSetTimeout}), settings: settings.load})`；session_start（非 print/json）`load.start(ctx)`，
+  session_shutdown `load.dispose()`；`pi.on("turn_end", createLoadHintHook({ port: () => load.port(), ... }))`；buildSessionStack 新增可选参数 `ports.load`。
+- `stack.ts`：`createSpawnService({loadGate})`、`createRuntimeRunnerAdapter({loadGate})`、`createWorkflowChildSpawner(..., {loadAdmission})`、HUD `setStatus("load")` 均读 `ports.load`；
+  不新增 `let previousLoad`。`web-hub/agent`：`status.loadGate` getter + `buildHubConfig` 写 `load`（`load.enabled=false` 或 `webHub.load=false` ⇒ 不写）。
 
 ## 12. 风险
 
-- R1 PSI/`/proc/meminfo` 在容器内反映宿主而非 cgroup ⇒ 误判（Q4）；MemAvailable 缺失（<3.14 内核）⇒ mem unknown。
-- R2 CPU busy 被自身编译/测试短时打满：60 s sustain + 30 s 恢复窗吸收；长构建确实会拦派发——这正是设计意图，文案引导排查。
-- R3 `triggerTurn:true` 恢复唤醒打断用户空闲态（Q1）；有 rejected 门槛 + consume-once，频率受等级迟滞约束。
-- R4 statfs 卡在网络盘：单飞 + deadline，最坏是该挂载 unknown；被卡住的 libuv 线程最多 1 个/挂载。
-- R5 小盘（<100 GB）上 `≤5 GB` crit 规则可能常驻 crit ⇒ 永久拒派发；缓解：文案指明是 DISK 触发 + `load.disk.critFreeGb` 可调（Q6）。
-- R6 hub 与 pi 视角短暂不一致（§3）；R7 在飞未提交改动与热点文件冲突（§10 前置）；R8 gzip 预算余量不足需提额。
+- R1 容器内 `/proc` 反映宿主（cgroup 延后）；R2 长构建持续打满会真实拦派发（设计意图）；R3 白名单外本地 FS / 未解析 symlink ⇒ 磁盘 unknown；R4 卡死的 fs 线程不可回收（≤2，账本保证不增长）；
+- R5 小盘 `≤ critFreeGiB` 常驻 crit ⇒ 文案点明 DISK 触发、可调；R6 hub 与会话阈值/路径不同 ⇒ Pill 与横幅可能长期不一致（已标注视角与来源）；R7 基线屏障拖延开工；R8 gzip 余量。
 
-## 13. 待决问题
+## 13. 待决问题与裁定记录
 
-- Q1 恢复唤醒是否默认开（`load.wakeOnRecovery=true`，`triggerTurn:true`）？推荐开，仅曾拒绝后、每次回落至多一条。
-- Q2 嵌套 `Agent` 是否也拒绝（本方案：是，文案改为「不委派、自己完成或交回」），还是豁免？
-- Q3 RPC spawn 与 cron 是否也应受闸门（推荐 v1 豁免，v2 cron 改「crit 跳过本次 + 日志」）？
-- Q4 是否读 cgroup v2（`memory.max`/`cpu.max`/`cpu.pressure`）以适配容器？推荐 v2。
-- Q5 LAN 上是否暴露 top 进程与磁盘路径（推荐暴露，同 bash-jobs 面板 U1 口径；可加 `webHub.load:"loopback"`）。
-- Q6 DISK 是否单独使用更短 sustain（磁盘变化缓慢、无抖动，可 0 s 立即升级）？当前按 U2 统一 60 s。
-- Q7 `/agent status` 是否附一行 load 摘要（低成本，推荐顺手做，归 P2a）。
+- 无阻塞项（v2 观察：cgroup v2；cron「crit 跳过 + 日志」；白名单设置项）。裁定：2026-10-10 第一轮：U1–U5（§2）。第二轮：Q1 不唤醒、Q2 嵌套拒绝、Q5 LAN 同宽、视觉稿三微调、Q3/Q4/Q6/Q7 主会话代决（§2）。
 
-## 14. 用户裁定（第二轮，2026-10-10）
+## 14. 评审处置表（r_CTJP0TPV，16 条）
 
-- Q1 恢复**不唤醒**：`load.wakeOnRecovery` 默认 false / v1 不做唤醒，只在下一次 turn_end 注入恢复提示（`triggerTurn:false`）。
-- Q2 嵌套 `Agent` 在 crit **也拒绝**（文案：不委派，自己完成或交回上层）。
-- Q5 LAN 与 loopback 同宽，展示 top 进程与磁盘挂载路径（同 bash-jobs 面板 U1 口径）。
-- 视觉稿确认，附三处微调：① top 进程两列都按进程名聚合（展开看 pid）；② 磁盘行在百分比旁显示剩余容量（如 `58% · 112G free`）；③ fleet 横幅的持续时长并入同一行小字。
-- 主会话代决（按方案推荐）：Q3 RPC/cron v1 豁免；Q4 cgroup v2 支持留到 v2；Q6 磁盘与其它指标统一 60 s sustain；Q7 `/agent status` 附一行 load 摘要（归 P2a）。
+| #   | 级别    | 问题摘要                                                                | 处置                          | 落点                                                                                      |
+| --- | ------- | ----------------------------------------------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------- |
+| 1   | blocker | withDeadline 不取消 IO、statfs 挂死占线程池、发现无界、账本随重建丢失   | 接受                          | §5.4（白名单跳过远程、mountinfo 有界、进程全局账本、期限≠取消、迟到丢弃）、§9 饥饿门      |
+| 2   | blocker | 迟滞方向对 available/free 错误；磁盘 OR 触发恢复不完整                  | 接受                          | §5.2 逐指标升/恢复谓词、等号语义、迁移后新窗口                                            |
+| 3   | major   | CPU guest/iowait/回绕、内存单位、bfree/bavail、GB/GiB 未冻结            | 接受                          | §5.1；`critFreeGiB` 改名                                                                  |
+| 4   | major   | 拒绝路径需 top 但无刷新定义；枚举无界；HZ/页大小/pid 复用               | 接受                          | §5.5（按需触发 + 过期回退、增量枚举、`(pid,starttime)`、动态单位、单核语义）              |
+| 5   | major   | Date.now 跳变；设置可致巨环；unknown/换挂载连续性不明                   | 接受                          | §5.2 单调时钟、范围与 128 槽上限、连续性规则                                              |
+| 6   | major   | 嵌套 Agent 在 runtime-adapter 另行构造，漏接；文案无 request            | 接受                          | §6.2（`RuntimeAdapterDeps.loadGate`、`nested` ctx、仅主会话武装）；归 P2a                 |
+| 7   | major   | crit→unknown 被当恢复                                                   | 接受（因 Q1 简化）            | §5.3 `gateCleared` vs `provenRecovered`                                                   |
+| 8   | major   | 发送失败丢计数、模式/开关与承诺不一致                                   | 接受（因 Q1 简化）            | §6.4 单槽、发送成功才消费、dispose 清空、print/json 不启动、hint 关则不承诺               |
+| 9   | major   | host FIFO 无单次超时、queueWaitMs 派发后才起算、killAt 可延长、依赖停滞 | 接受，**不加** load-wait 上限 | §6.5 三层等待如实表述，「有界饥饿非无死锁」+ 理由                                         |
+| 10  | major   | hub cwd=HOME、singleton 保留首启配置 ⇒ 磁盘/阈值长期不一致              | 接受                          | §3/§7.2 主机全局（HOME FS + /）、UI 标注视角、披露配置来源，不承诺一致                    |
+| 11  | major   | 包域漏 HubState/transport/useHub；脏文件未设屏障                        | 接受                          | §7.4 冻结面、§10 P4 独占 + 基线屏障清单；P2b→P2a 合并顺序保留                             |
+| 12  | major   | LAN 暴露未决、X-PWH 非鉴权、限频与 config 校验缺失                      | 接受（Q5 已裁同宽）           | §7.3 鉴权先于 IO、单飞/缓存/限频/等待者/断开期限；§7.2 `normalizeHubLoadConfig`、有界探针 |
+| 13  | minor   | hello 后旧数据残留；wire 缺阈值；固定 15 s 新鲜度                       | 接受                          | §7.4 hello/无 cap 清空、显式 unknown 帧、wire 带 `thresholds`/`intervalMs`、新鲜度随节拍  |
+| 14  | minor   | `previousLoad` 模块级状态违背 I6                                        | 接受                          | §8 I6、§11：activation 闭包持有；唯一例外 IO 账本（理由已写）                             |
+| 15  | major   | 只有假 IO 测试，缺真实集成门                                            | 接受                          | §9 六个集成闸门（饥饿、print、嵌套注入、入口矩阵、Last-Event-ID、singleton/idle）         |
+| 16  | minor   | extraPaths/topCount/计数/预提额扩大契约                                 | 接受                          | §1/§6.1/§7.4：固定 top-5、三路径、单恢复槽、gating 布尔、实测后再议预算                   |
+
+## 15. v2.1 处置（r_CTJP0TPV 复审，conditional_pass）
+
+| #   | 级别  | 处置                                                                                                                          | 落点                            |
+| --- | ----- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| 1   | Major | 接受：时长以 `last.mono−first.mono` 证明 + 不间断合格序列；`sustainMs=0` 首样本                                               | §5.2、§9                        |
+| 2   | Major | 接受：磁盘恢复用 `G_crit+mDISKB`，全部符号绑定有效 settings                                                                   | §5.2、§9                        |
+| 3   | Major | 接受：有效闸门 `enabled ∧ gate ∧ known≥gateLevel` 单点计算全链路共用；hub 配置在 `load.enabled`/`webHub.load` 任一关闭时省略  | §5.3、§6.2、§6.5、§7.2、§8、§11 |
+| 4   | Major | 接受：单调 timer clock 调度采样与期限；`verdict()`/`blocked()` 读时强制新鲜度                                                 | §5.2、§7.2、§11、§9             |
+| 5   | Major | 接受：HOME/cwd 有界 realpath，未解析 ⇒ unknown 不冒充已验证；分量边界匹配；轮转准入保三挂载公平                               | §5.4、§9                        |
+| 6   | Major | 接受：枚举 opendir/read/close 与 per-pid 读全部计账至结算，迟到 open 即 close，单次 4 KiB 读，期限后停发，单飞 key 在全局账本 | §5.5、§9                        |
+| 7   | Minor | 接受，归 P1（auxv 权威单位，读不到省略）                                                                                      | §10 包注                        |
+| 8   | Minor | 接受，归 P1（invalid 统一口径 + 异常关系拒绝）                                                                                | §8 I1、§10 包注                 |
+| 9   | Minor | 接受，归 P0（`sinceAgoMs` + 收帧锚）                                                                                          | §10 包注                        |
+| 10  | Minor | 接受，拆 P3（cmd-limit bucket）与 P4（logic clients 入域）                                                                    | §7.3、§10                       |
