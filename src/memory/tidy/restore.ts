@@ -21,15 +21,12 @@ import { withMemoryDirLock } from "../lock.js";
 import type { Ident, Loc, OpSpec, TidyManifest, TidyManifestEntry } from "../contracts.js";
 import { sha256Hex } from "./snapshot.js";
 import {
-  backupLiveFile,
-  copyLiveFileToBackup,
   listTrashEntries,
   newTidyId,
   readManifest,
   recreateFromBackup,
   vacateLiveFile,
   readManifestV2,
-  writeManifest,
 } from "./manifest.js";
 import { runStep, type TxnOperation } from "./txn.js";
 import { leaseCreate, leaseRelease, makeLeasePayload } from "./lease.js";
@@ -249,6 +246,9 @@ function applyLegacyRestoreTxn(
   probeHardlinks(dest);
   const deadline = Date.now() + 30_000;
   let result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
+  // Keep the lock across continuation blocks: releasing between journal
+  // blocks would let a legacy writer invalidate the next CAS. The lease and
+  // epoch model already bound this synchronous critical section.
   while (result.state === "applying" && result.results.length < ops.length && Date.now() < deadline)
     result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
   const restored = names.filter((_, index) => result.results[index]?.state === "done");
@@ -382,6 +382,8 @@ function applyRestoreV2(
   probeHardlinks(dest);
   const deadline = Date.now() + 30_000;
   let result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
+  // Same critical-section decision as the legacy restore loop above; the next
+  // CAS must not run after an interleaving writer has acquired the lock.
   while (result.state === "applying" && result.results.length < ops.length && Date.now() < deadline)
     result = runStep({ dirs: dest, id: restoreId, kind: "restore", phase: "restore", ops, contents, probe: false });
   const restored = names.filter((name, index) => result.results[index]?.state === "done");
@@ -431,57 +433,10 @@ export async function applyRestore(
       if (!options.legacy && manifest.v === 1)
         throw new MemoryError("legacy v1 manifest is read-only — restore requires --legacy");
       if (manifest.v === 1) return applyLegacyRestoreTxn(dir, sourceDirs, manifest, decisions);
-      const now = new Date();
-      const vacateId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
-
-      const touched = manifest.entries.filter((e) => {
-        const d = decisions.get(e.name);
-        return d === "restore" || d === "overwrite";
-      });
-
-      // Step A (must fully succeed before ANY live mutation, §7.5 step 3).
-      const preRestoreEntries: TidyManifestEntry[] = [];
-      for (const e of touched) {
-        const loc = touchedLocationOf(e);
-        const st = statRegularIfExists(dir, loc);
-        if (st === undefined) continue;
-        const { text } = readRegular(dir, loc);
-        copyLiveFileToBackup(dir, vacateId, loc); // throws -> aborts before any Step B mutation
-        preRestoreEntries.push({ name: loc, op: "rewrite", beforeSha256: sha256Hex(text), backupFile: loc });
-      }
-      if (preRestoreEntries.length > 0) {
-        writeManifest(dir, {
-          v: 1,
-          id: vacateId,
-          kind: "restore",
-          createdAt: now.toISOString(),
-          entries: preRestoreEntries,
-        });
-      }
-
-      // Step B: independent per-entry restore.
-      const restored: string[] = [];
-      const skipped: { name: string; reason: string }[] = [];
-      const failed: { name: string; reason: string }[] = [];
-      for (const e of manifest.entries) {
-        const d = decisions.get(e.name) ?? "skip";
-        if (d === "skip") {
-          skipped.push({ name: e.name, reason: "skipped by user" });
-          continue;
-        }
-        try {
-          restoreOne(dir, vacateId, id, e);
-          restored.push(e.name);
-        } catch (err) {
-          failed.push({ name: e.name, reason: (err as Error).message });
-        }
-      }
-      return {
-        restored,
-        skipped,
-        failed,
-        ...(preRestoreEntries.length > 0 ? { preRestoreBackupId: vacateId } : {}),
-      };
+      // `readManifest` projects v2 manifests to the v1 compatibility shape;
+      // the only non-legacy branch above is therefore unreachable. Keeping
+      // this explicit guard makes a future manifest kind fail closed.
+      throw new MemoryError("unsupported restore manifest version");
     } finally {
       leaseRelease(dir, lease.token);
     }
@@ -514,55 +469,61 @@ export async function restoreFromTrash(
   const dir = canon.real;
 
   return withMemoryDirLock(dir, () => {
-    const entry = listTrashEntries(dir).find((e) => e.id === id);
-    if (!entry) throw new MemoryError(`no trash entry ${id}`);
-    const existing = statRegularIfExists(dir, entry.name);
-    if (existing !== undefined && decision === "skip")
-      return { restored: false, reason: `${entry.name} already exists` };
     const now = new Date();
     const runId = newTidyId(now, process.pid, randomBytes(3).toString("hex"));
-    const dirs = openRunDirs(dir, runId, { createArchive: true, createBackup: true });
-    const source: Loc = { area: "trash", name: entry.fileName };
-    const target: Loc = { area: "live", name: entry.name };
-    const ops: TxnOperation[] = [];
-    if (existing !== undefined) {
-      const current = observeLoc(dirs, target);
-      if (current.kind !== "file") return { restored: false, reason: `${entry.name} is not a regular file` };
-      const before: Ident = { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size };
+    const lease = makeLeasePayload(0, [runId]);
+    if (!leaseCreate(dir, lease)) throw new MemoryError("memory directory already has an active tidy run");
+    try {
+      const entry = listTrashEntries(dir).find((e) => e.id === id);
+      if (!entry) throw new MemoryError(`no trash entry ${id}`);
+      const existing = statRegularIfExists(dir, entry.name);
+      if (existing !== undefined && decision === "skip")
+        return { restored: false, reason: `${entry.name} already exists` };
+      const dirs = openRunDirs(dir, runId, { createArchive: true, createBackup: true });
+      const source: Loc = { area: "trash", name: entry.fileName };
+      const target: Loc = { area: "live", name: entry.name };
+      const ops: TxnOperation[] = [];
+      if (existing !== undefined) {
+        const current = observeLoc(dirs, target);
+        if (current.kind !== "file") return { restored: false, reason: `${entry.name} is not a regular file` };
+        const before: Ident = { dev: current.dev, ino: current.ino, sha: current.sha, size: current.size };
+        ops.push({
+          op: { prim: "MOVE", src: target, dst: { area: "backup", name: `s1-1-live--${entry.name}` }, obj: before },
+          seq: 1,
+          phase: "restore",
+        });
+      }
+      const trashObs = observeLoc(dirs, source);
+      if (trashObs.kind !== "file") throw new MemoryError(`trash entry ${entry.fileName} is missing or unreadable`);
       ops.push({
-        op: { prim: "MOVE", src: target, dst: { area: "backup", name: `s1-1-live--${entry.name}` }, obj: before },
-        seq: 1,
+        op: {
+          prim: "MOVE",
+          src: source,
+          dst: target,
+          obj: { dev: trashObs.dev, ino: trashObs.ino, sha: trashObs.sha, size: trashObs.size },
+        },
+        seq: ops.length + 1,
         phase: "restore",
       });
-    }
-    const trashObs = observeLoc(dirs, source);
-    if (trashObs.kind !== "file") throw new MemoryError(`trash entry ${entry.fileName} is missing or unreadable`);
-    ops.push({
-      op: {
-        prim: "MOVE",
-        src: source,
-        dst: target,
-        obj: { dev: trashObs.dev, ino: trashObs.ino, sha: trashObs.sha, size: trashObs.size },
-      },
-      seq: ops.length + 1,
-      phase: "restore",
-    });
-    probeHardlinks(dirs);
-    const outcome = runStep({ dirs, id: runId, kind: "restore", phase: "restore", ops, probe: false });
-    const ok = outcome.results.length === ops.length && outcome.results.every((result) => result.state === "done");
-    if (ok && existing !== undefined) {
-      try {
-        const canonical = readRegular(dirs.backup.path, `s1-1-live--${entry.name}`).text;
-        const tmp = writeTempRegular(dirs.backup.path, entry.name, Buffer.from(canonical, "utf8"), 0o600);
-        createExclusive(dirs.backup.path, tmp, entry.name);
-      } catch {
-        // The canonical journal backup remains authoritative.
+      probeHardlinks(dirs);
+      const outcome = runStep({ dirs, id: runId, kind: "restore", phase: "restore", ops, probe: false });
+      const ok = outcome.results.length === ops.length && outcome.results.every((result) => result.state === "done");
+      if (ok && existing !== undefined) {
+        try {
+          const canonical = readRegular(dirs.backup.path, `s1-1-live--${entry.name}`).text;
+          const tmp = writeTempRegular(dirs.backup.path, entry.name, Buffer.from(canonical, "utf8"), 0o600);
+          createExclusive(dirs.backup.path, tmp, entry.name);
+        } catch {
+          // The canonical journal backup remains authoritative.
+        }
       }
+      return {
+        restored: ok,
+        ...(ok && existing !== undefined ? { backupId: runId } : {}),
+        ...(ok ? {} : { reason: "restore transaction did not complete" }),
+      };
+    } finally {
+      leaseRelease(dir, lease.token);
     }
-    return {
-      restored: ok,
-      ...(ok && existing !== undefined ? { backupId: runId } : {}),
-      ...(ok ? {} : { reason: "restore transaction did not complete" }),
-    };
   });
 }

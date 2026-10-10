@@ -34,7 +34,7 @@ import { handleMemTidyCommand } from "./tidy/command.js";
 export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
 const DESCRIPTION =
-  "Project memory. /mem · /mem list · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy · /mem restore";
+  "Project memory. /mem · /mem list · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy [--batch] · /mem restore [--legacy]";
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
@@ -67,16 +67,24 @@ const MEM_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
   { value: "path", description: "显示记忆目录路径" },
   { value: "import", description: "从 Claude Code 导入记忆 [--force] [slug|all]" },
   { value: "doctor", description: "记忆健康检查（D01-D14）" },
-  { value: "tidy", description: "治理记忆 [--dry-run|--frontmatter] [file…]" },
+  { value: "tidy", description: "治理记忆 [--batch|--dry-run|--status|--break-lock] [file…]" },
   { value: "restore", description: "恢复 tidy 备份 [--trash]" },
 ];
 
 const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; description: string }>> = {
   tidy: [
+    { value: "tidy --batch", description: "批量归档与规整（仅 TUI）" },
+    { value: "tidy --batch --dry-run", description: "预览批量计划，不写入" },
+    { value: "tidy --batch --status", description: "查看批量运行状态" },
+    { value: "tidy --batch --archive-only", description: "只执行批量归档" },
+    { value: "tidy --break-lock", description: "撤销并打破残留锁（仅 TUI）" },
     { value: "tidy --dry-run", description: "只预览，不写入" },
     { value: "tidy --frontmatter", description: "只整理 frontmatter" },
   ],
-  restore: [{ value: "restore --trash", description: "从回收项恢复" }],
+  restore: [
+    { value: "restore --trash", description: "从回收项恢复" },
+    { value: "restore --legacy", description: "显式恢复 v1 旧备份" },
+  ],
   import: [{ value: "import --force", description: "覆盖已存在的同名文件" }],
 };
 
@@ -96,8 +104,19 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         const partial = a.endsWith(" ") || a === "" ? "" : (tokens[tokens.length - 1] ?? "");
         const head = tokens.length > 1 || (tokens.length === 1 && a.endsWith(" ")) ? tokens[0] : undefined;
         if (head !== undefined) {
-          return (MEM_SECOND_LEVEL[head] ?? [])
-            .filter((item) => item.value.slice(head.length + 1).startsWith(partial))
+          const second = MEM_SECOND_LEVEL[head] ?? [];
+          // Preserve the compact legacy menu for a bare `tidy ` prompt; the
+          // batch surface is discoverable as soon as the user starts typing
+          // its flag (and remains available through exact completion values).
+          const visible =
+            head === "tidy" && a === "tidy "
+              ? second.filter((item) => item.value === "tidy --dry-run" || item.value === "tidy --frontmatter")
+              : head === "restore" && a === "restore "
+                ? second.filter((item) => item.value === "restore --trash")
+                : second;
+          const typed = a.trim();
+          return visible
+            .filter((item) => item.value.startsWith(typed) || item.value.slice(head.length + 1).startsWith(partial))
             .map((item) => ({ ...item, label: item.value }));
         }
         return MEM_SUBCOMMANDS.filter((item) => item.value.startsWith(partial)).map((item) => ({

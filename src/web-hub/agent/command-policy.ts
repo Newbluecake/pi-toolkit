@@ -123,6 +123,15 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   mem(tokens) {
     const sub = tokens[0];
     if (sub === undefined || sub === "list" || sub === "path" || sub === "doctor") return { policy: "allow" };
+    // Batch's read-only surfaces are safe to invoke from the web hub. The
+    // interactive archive/normalize and lock-break flows remain confirmed.
+    if (
+      sub === "tidy" &&
+      tokens[1] === "--batch" &&
+      (tokens[2] === "--dry-run" || tokens[2] === "--status") &&
+      tokens.length === 3
+    )
+      return { policy: "allow" };
     return { policy: "confirm" };
   },
   // /cache-ttl [status] → read-only. Every mode switch / keepalive toggle / save mutates process

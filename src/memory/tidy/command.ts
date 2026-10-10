@@ -7,6 +7,7 @@
 // (§7.5).
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { resolveWorktreeOrigin } from "../../core/worktree-origin.js";
 import { DEFAULT_SETTINGS, type MemorySettings } from "../../config/settings.js";
 import { createCapWatcher, type ConsultCapReason } from "../../consult/watcher.js";
@@ -39,6 +40,7 @@ import {
   type RestoreResult,
 } from "./restore.js";
 import { listBackups, listTrashEntries } from "./manifest.js";
+import { handleBatchTidyCommand, parseTidyBatchArgs, recoverInterruptedRuns } from "./batch-command.js";
 
 export interface TidyCommandDeps {
   paths?: MemoryPaths;
@@ -68,11 +70,12 @@ function parseTidyArgs(args: string): { dryRun: boolean; frontmatter: boolean; f
   };
 }
 
-function parseRestoreArgs(args: string): { trash: boolean; id: string | undefined } {
+function parseRestoreArgs(args: string): { trash: boolean; legacy: boolean; id: string | undefined } {
   const tokens = args.split(/\s+/).filter((t) => t.length > 0);
   const trash = tokens.includes("--trash");
-  const rest = tokens.filter((t) => t !== "--trash");
-  return { trash, id: rest[0] };
+  const legacy = tokens.includes("--legacy");
+  const rest = tokens.filter((t) => t !== "--trash" && t !== "--legacy");
+  return { trash, legacy, id: rest[0] };
 }
 
 function kb(bytes: number): string {
@@ -94,17 +97,53 @@ export async function handleMemTidyCommand(
     if (ctx.hasUI) ctx.ui.notify(`/mem ${kind} is only available in the main session`, "warning");
     return;
   }
+  const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
+  const settings = (deps.settings ?? (() => DEFAULT_SETTINGS.memory))();
+  const batchArgs = kind === "tidy" ? parseTidyBatchArgs(args) : undefined;
+  // Batch read-only surfaces (--status/--dry-run) do not need a spawn port;
+  // mutating batch work is rejected by the batch handler when it is absent.
+  if (kind === "tidy" && (batchArgs?.batch || batchArgs?.breakLock)) {
+    const port = deps.getTidyPort();
+    if (!port && !batchArgs.dryRun && !batchArgs.status && !batchArgs.breakLock) {
+      ctx.ui.notify("tidy unavailable in this session", "warning");
+      return;
+    }
+    await handleBatchTidyCommand(args, ctx, {
+      ...(port ? { port } : {}),
+      settings,
+      ...(deps.paths ? { paths: deps.paths } : {}),
+      ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
+    });
+    return;
+  }
   const port = deps.getTidyPort();
   if (!port) {
     ctx.ui.notify("tidy unavailable in this session", "warning");
     return;
   }
-  const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
-  const settings = (deps.settings ?? (() => DEFAULT_SETTINGS.memory))();
 
   if (kind === "restore") {
-    await handleRestoreCommand(args, ctx, { cwd, ...(deps.paths ? { paths: deps.paths } : {}) });
+    // Recovery is part of the mutating restore entry, never of the
+    // read-only listing form. It runs before planning or acquiring a restore
+    // lease.
+    const restoreHasTarget = args
+      .split(/\s+/u)
+      .filter(Boolean)
+      .some((token) => !token.startsWith("--"));
+    if (restoreHasTarget) {
+      const restoreDir = canonicalDir(memoryDirFor(cwd, deps.paths));
+      if (restoreDir) await recoverInterruptedRuns(restoreDir.real);
+    }
+    await handleRestoreCommand(args, ctx, {
+      cwd,
+      ...(deps.paths ? { paths: deps.paths } : {}),
+      onAfterWrite: deps.onAfterWrite ?? (() => undefined),
+    });
     return;
+  }
+  if (!args.split(/\s+/u).includes("--dry-run")) {
+    const tidyDir = canonicalDir(memoryDirFor(cwd, deps.paths));
+    if (tidyDir) await recoverInterruptedRuns(tidyDir.real);
   }
   await handleTidyCommand(args, ctx, {
     cwd,
@@ -546,9 +585,9 @@ async function runFrontmatterMode(
 async function handleRestoreCommand(
   args: string,
   ctx: ExtensionCommandContext,
-  o: { cwd: string; paths?: MemoryPaths },
+  o: { cwd: string; paths?: MemoryPaths; onAfterWrite: (cwd: string) => void },
 ): Promise<void> {
-  const { trash, id } = parseRestoreArgs(args);
+  const { trash, legacy, id } = parseRestoreArgs(args);
   const canon = canonicalDir(memoryDirFor(o.cwd, o.paths));
   if (!canon) {
     ctx.ui.notify(`no memory directory for ${o.cwd}`, "warning");
@@ -582,6 +621,7 @@ async function handleRestoreCommand(
       ctx.ui.notify(`restore --trash: ${result.reason ?? "not restored"}`, "warning");
       return;
     }
+    if (result.restored) o.onAfterWrite(o.cwd);
     ctx.ui.notify(
       `restore --trash: restored ${entry.name}${result.backupId ? `; pre-restore backup .backup/${result.backupId}` : ""}`,
       "info",
@@ -597,7 +637,18 @@ async function handleRestoreCommand(
       return;
     }
     const lines = [
-      ...backups.map((b) => `  ${b.id} — ${b.kind} · ${String(b.fileCount)} file(s) · ${b.createdAt}`),
+      ...backups.map((b) => {
+        let legacy = false;
+        try {
+          const raw = JSON.parse(readRegular(join(canon.real, ".backup", b.id), "manifest.json").text) as {
+            v?: unknown;
+          };
+          legacy = raw.v === 1;
+        } catch {
+          /* invalid manifests are reported by status/recovery */
+        }
+        return `  ${b.id} — ${b.kind} · ${String(b.fileCount)} file(s) · ${b.createdAt}${legacy ? " · legacy (no sha) — restore requires --legacy" : ""}`;
+      }),
       ...trashEntries.map((t) => `  (trash) ${t.id} — ${t.name}`),
     ];
     ctx.ui.notify(lines.join("\n"), "info");
@@ -617,7 +668,10 @@ async function handleRestoreCommand(
       (e) => `  ${e.name}${e.newName ? ` -> ${e.newName}` : ""} (${e.op})${e.conflict ? ` ⚠ ${e.reason ?? ""}` : ""}`,
     )
     .join("\n");
-  const ok = await ctx.ui.confirm(`restore ${id}`, `Restore ${String(plan.entries.length)} file(s)?\n${listText}`);
+  const restoreMessage = legacy
+    ? `Legacy backup has no content hashes; every overwritten target will be backed up first. Continue?\n${listText}`
+    : `Restore ${String(plan.entries.length)} file(s)?\n${listText}`;
+  const ok = await ctx.ui.confirm(`restore ${id}`, restoreMessage);
   if (!ok) return;
 
   const decisions = new Map<string, RestoreDecision>();
@@ -635,7 +689,7 @@ async function handleRestoreCommand(
 
   let result: RestoreResult;
   try {
-    result = await applyRestore(o.cwd, id, decisions, o.paths);
+    result = await applyRestore(o.cwd, id, decisions, o.paths, { legacy });
   } catch (err) {
     ctx.ui.notify(`restore: pre-restore backup failed, aborted — zero writes (${(err as Error).message})`, "warning");
     return;
@@ -646,6 +700,7 @@ async function handleRestoreCommand(
       ? `; failed ${String(result.failed.length)}: ${result.failed.map((f) => `${f.name} (${f.reason})`).join(", ")}`
       : "";
   const preBackupText = result.preRestoreBackupId ? `; pre-restore backup .backup/${result.preRestoreBackupId}` : "";
+  if (result.restored.length > 0) o.onAfterWrite(o.cwd);
   ctx.ui.notify(
     `restore: restored ${String(result.restored.length)}, skipped ${String(result.skipped.length)} (conflict)${failedText}${preBackupText}`,
     "info",

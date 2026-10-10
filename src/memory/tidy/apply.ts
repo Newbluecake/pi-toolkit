@@ -29,7 +29,7 @@ import type {
 import { sha256Hex } from "./snapshot.js";
 import { newTidyId, pruneBackups, readManifestV2 } from "./manifest.js";
 import { runStep, type TxnOperation } from "./txn.js";
-import { leaseCreate, leaseRelease, makeLeasePayload } from "./lease.js";
+import { leaseCreate, leaseRelease, makeLeasePayload, type LeasePayload } from "./lease.js";
 
 export interface ApplyTidyInput {
   cwd: string;
@@ -41,6 +41,8 @@ export interface ApplyTidyInput {
   nowIso?: string;
   pid?: number;
   rand6?: string;
+  /** Batch orchestration owns the lease for the entire command. */
+  lease?: LeasePayload;
 }
 export interface AppliedFileResult {
   name: string;
@@ -215,8 +217,9 @@ export async function applyTidy(input: ApplyTidyInput): Promise<ApplyTidyResult>
         dir,
       };
     const dirs = openRunDirs(dir, id, { createArchive: true, createBackup: true });
-    const lease = makeLeasePayload(0, [id]);
-    if (!leaseCreate(dir, lease)) throw new MemoryError("memory directory already has an active tidy run");
+    const lease = input.lease ?? makeLeasePayload(0, [id]);
+    const ownsLease = input.lease === undefined;
+    if (ownsLease && !leaseCreate(dir, lease)) throw new MemoryError("memory directory already has an active tidy run");
     try {
       let nextSeq = 1;
       for (const file of selected) {
@@ -235,7 +238,7 @@ export async function applyTidy(input: ApplyTidyInput): Promise<ApplyTidyResult>
           skipped,
           dir,
         };
-      probeHardlinks(dirs);
+      probeHardlinks(dirs, { epoch: lease.epoch });
       const contents = new Map<string, Buffer | string>();
       for (const b of built) for (const [k, v] of b.content) contents.set(k, v);
       const operations: TxnOperation[] = built.flatMap((b) => b.operations);
@@ -248,7 +251,21 @@ export async function applyTidy(input: ApplyTidyInput): Promise<ApplyTidyResult>
         ops: operations,
         contents,
         probe: false,
+        epoch: lease.epoch,
+        owner: {
+          pid: lease.pid,
+          host: lease.host,
+          token: lease.token,
+          at: lease.at,
+          ...(lease.startTicks === undefined ? {} : { startTicks: String(lease.startTicks) }),
+          ...(lease.bootId === undefined ? {} : { bootId: lease.bootId }),
+        },
       });
+      // Deliberately keep the directory lock across continuation blocks. The
+      // executor's 2s/20-op boundary is a journal boundary, not an async
+      // yield: releasing here would let a legacy writer change a location
+      // between CAS and the next block. M-T4 epoch checks protect revocation,
+      // while the lease prevents another tidy/restore owner from entering.
       while (outcome.state === "applying" && outcome.results.length < operations.length && Date.now() < deadline) {
         outcome = runStep({
           dirs,
@@ -258,6 +275,15 @@ export async function applyTidy(input: ApplyTidyInput): Promise<ApplyTidyResult>
           ops: operations,
           contents,
           probe: false,
+          epoch: lease.epoch,
+          owner: {
+            pid: lease.pid,
+            host: lease.host,
+            token: lease.token,
+            at: lease.at,
+            ...(lease.startTicks === undefined ? {} : { startTicks: String(lease.startTicks) }),
+            ...(lease.bootId === undefined ? {} : { bootId: lease.bootId }),
+          },
         });
       }
       const byId = new Map(outcome.results.map((r) => [r.opId, r]));
@@ -309,7 +335,7 @@ export async function applyTidy(input: ApplyTidyInput): Promise<ApplyTidyResult>
       };
       return { manifest: legacy, applied, skipped, dir };
     } finally {
-      leaseRelease(dir, lease.token);
+      if (ownsLease) leaseRelease(dir, lease.token);
     }
   });
 }
