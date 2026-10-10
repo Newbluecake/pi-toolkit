@@ -584,6 +584,7 @@ ID 保持 v1 编号不重排；D10 合并进 D09，D12（近似重复）、D15�
 | `/mem tidy --dry-run [file…]`                         | **零**     | 只做步骤 1–3 的计算并展示：目标文件与字节、体检摘要、模型、提示词字节、估价 vs 上限；**不 spawn、不写任何文件（含备份）** |
 | `/mem tidy --frontmatter [file…]`                     | **零**     | 确定性补元数据模式（决策 12 附加条件，§7.4）                                                                              |
 | `/mem restore [<id>]` / `/mem restore --trash [<id>]` | 零         | 恢复 tidy/frontmatter 备份或软删除文件（§7.5）                                                                            |
+| `/mem tidy --batch` / `--status` / `--break-lock`     | 多次子 run | 超大记忆目录的分批整理（归档 + 分批重写）与事务化 tidy/restore，见 `docs/dev/memory/tidy-batch-plan.md` v3.2（已实施）    |
 
 仅主会话且 `ctx.hasUI`；子会话/无 UI ⇒ notify 说明并返回。spawn 端口由 `src/index.ts` 在 post-guard 通过 `wireMemory` 返回的 `attachTidy(port)` 注入，`port` 经 holder 读当前 stack：`{ spawn, waitOutcome, abort, snapshot(runId) }`（`snapshot` = `query.get`）；未注入 ⇒ `tidy unavailable in this session`。提案 run 带 `expectAck:true` 和 `suppressDelivery:true`，由命令领取结果；adapter 不入完成通知 outbox（包括失败路径），只有 UI 确认后的程序化 apply 可以写盘并备份。
 

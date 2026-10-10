@@ -1008,3 +1008,16 @@ v3.1 的性质 1–5 继续有效，另外新增：
   - 不采用 fd 锚定。
 
   落点：§1、§9.3。
+
+## 19. 实施记录（P5 收口，2026-10-11）
+
+- 提交：P0 `8a0ac1f`、P1 `24103a2`、P2a `7e4873e`、P2b `c577d49`、P-RT `5442a91`、P4 `c9b7046`、P3a `6ea35e3`。P3b（triage）按用户「v1 = 归档 + 分批重写」的范围裁定未实施，`--triage` 明确提示不可用。
+- 实施期主会话裁定：
+  - P2b：`run` 事件在首个 intent 之前记录完整计划 op 列表；计划内未开始的 op 视为 pending，run 保持可续，只有全部计划 op 有 result（或按 M-T3 放弃）才终态化。
+  - P2b 遗留项并入 P3a：`recoverRun` 接入生产入口（新工作开始前先恢复/报告）、`restoreFromTrash` 获取 run lease、删除不可达的旧 vacate/copy 分支。
+  - P3a：续跑块之间**不**释放目录锁（释放后旧版写入方可能在下一块 CAS 之前插入修改；lease 挡其他 tidy/restore owner，epoch 处理 `--break-lock` 撤销），理由写在 `apply.ts`/`restore.ts` 注释里。
+  - P3a 首验打回后：整条 `--batch` 命令只获取一次 run lease 并持有到结束（子步骤复用 token），活动时钟扣除对话框时间，`UI_TOTAL_MS` 跨 Phase 2/3 共享，batch 的归档/索引/规范化写入都调用 `onAfterWrite`。
+  - P-RT：每个子会话最多一个 `before_provider_request` 测量处理器；`OVERHEAD_FLOOR_BYTES` = 16 KiB（真机实测最小只读子会话 payload 49,608 B，pi 1.0.2）；粗筛里 schema 字节重复计入一次，接受（只会更保守）。
+  - P4：`targetBytes` 的设置表上限是静态 262,144，运行期再按 `memory.tidy.maxInputBytes` 封顶，接受。
+- 不兼容（写进发布说明）：tidy 现在写 v2 manifest，旧版本读不了；v1 备份只能用 `--legacy` 恢复。
+- 真机验收（§13「真机」）：待用户 `/reload` 后按 `live-acceptance-tmux` 做法执行（`kill -9` 落在 REPLACE 的 `staged` 与 `rename` 之间、`--break-lock` 人工演练）。
