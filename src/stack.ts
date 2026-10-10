@@ -160,6 +160,10 @@ import { createWorkerHost } from "./workflow/lifecycle.js";
 import { createOrchestrator, type Orchestrator } from "./workflow/orchestrator.js";
 import { buildWorkflowRunBudget } from "./workflow/run-budget.js";
 import { createWorkflowChildSpawner } from "./workflow/spawner-adapter.js";
+import { createLoadActivation, type LoadActivation } from "./sysload/activation.js";
+import { evaluateLoadGate, loadBlocked } from "./sysload/gate.js";
+import type { LoadHintState } from "./sysload/hook.js";
+import type { LoadAdmission, LoadPort } from "./sysload/types.js";
 import { parseForEachRef } from "./workflow/isolation-verify.js";
 import { createBackgroundWorkflows, type BackgroundWorkflows } from "./workflow/background.js";
 import { createWorkflowNoticeSink, redeliverPendingWorkflowNotices } from "./adapters/workflow-notice.js";
@@ -958,6 +962,12 @@ export interface Stack {
   quota?: QuotaService;
   /** turn_end 注入的会话级闩锁状态；与 quota 同生共死（M3：dispose 的唯一所有者是 QuotaService）。 */
   quotaHint?: QuotaHintState;
+  /** sysload activation and admission surface; absent when load.enabled is false. */
+  load?: LoadActivation;
+  loadAdmission?: LoadAdmission;
+  loadTransition?(): { gateCleared: boolean; provenRecovered: boolean; escalatedTo?: "warn" | "crit" } | undefined;
+  refreshLoadStatus(): void;
+  loadHintState?: LoadHintState;
   /** /goal 目标驱动持续运行的 session 级运行态（goal-plan v4）。无持久 timer，纯数据。 */
   goal: GoalSession;
   /** consult (plan §6 D-14/D-16): always constructed (even with consult.enabled=false — the
@@ -1435,6 +1445,20 @@ function safeSetQuotaStatus(ctx: ExtensionContext, text: string | undefined): vo
   }
 }
 
+function rankLoadLevel(level: string): number {
+  return level === "crit" ? 2 : level === "warn" ? 1 : level === "ok" ? 0 : -1;
+}
+
+function safeSetLoadStatus(ctx: ExtensionContext, port: LoadPort | undefined, enabled: boolean): void {
+  try {
+    if (!enabled || !port || !ctx.ui || typeof ctx.ui.setStatus !== "function") return;
+    const verdict = port.verdict();
+    ctx.ui.setStatus("load", `load ${verdict.level}${verdict.gating ? " · gated" : " · open"}`);
+  } catch {
+    // stale/headless UI is deliberately inert.
+  }
+}
+
 export function buildSessionStack(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -1443,6 +1467,7 @@ export function buildSessionStack(
   mergedExtensions: readonly SubagentExtensionPoints[],
   /** /goal 读回口径（v4 条件 8）需要 session_start 的 reason；默认 "reload"（静默读回）。 */
   sessionReason: GoalSessionStartReason = "reload",
+  loadHintState?: LoadHintState,
 ): Stack {
   // ask-user-async plan §3.3 (P2): FIRST disposal of the rebuild — the old
   // hub must stop broadcasting before the old coalescer/bash manager below
@@ -1484,6 +1509,73 @@ export function buildSessionStack(
   previousWorktreeOrphansStartup = undefined;
   previousHostBashViewCapabilityRelease?.();
   previousHostBashViewCapabilityRelease = undefined;
+
+  if (loadHintState !== undefined) {
+    loadHintState.latches.clear();
+    loadHintState.lastSentAt = 0;
+    loadHintState.hasSent = false;
+    loadHintState.recoveryPending = false;
+    loadHintState.rejectedSinceRecovery = false;
+  }
+  const load = settings.load.enabled ? createLoadActivation({ settings: settings.load }) : undefined;
+  load?.start({ mode: ctx.mode, ...(process.env.HOME === undefined ? {} : { home: process.env.HOME }), cwd: ctx.cwd });
+  const loadPort = load?.port();
+  const loadListeners = new Set<() => void>();
+  let lastLoadGating = loadPort?.verdict().gating ?? false;
+  let lastLoadLevel = loadPort?.verdict().level ?? "unknown";
+  const loadTransition = loadPort
+    ? () => {
+        const verdict = loadPort.verdict();
+        const gateCleared = lastLoadGating && !verdict.gating;
+        const provenRecovered =
+          lastLoadGating && !verdict.gating && verdict.level !== "unknown" && verdict.level !== settings.load.gateLevel;
+        const escalatedTo =
+          verdict.level === "warn" || verdict.level === "crit"
+            ? rankLoadLevel(verdict.level) > rankLoadLevel(lastLoadLevel)
+              ? verdict.level
+              : undefined
+            : undefined;
+        lastLoadGating = verdict.gating;
+        lastLoadLevel = verdict.level;
+        if (gateCleared) for (const listener of loadListeners) listener();
+        return { gateCleared, provenRecovered, ...(escalatedTo === undefined ? {} : { escalatedTo }) };
+      }
+    : undefined;
+  const loadAdmission: LoadAdmission | undefined = loadPort
+    ? {
+        blocked: () => {
+          const gating = loadBlocked(loadPort);
+          if (lastLoadGating && !gating) for (const listener of loadListeners) listener();
+          lastLoadGating = gating;
+          return gating;
+        },
+        onGateCleared: (fn) => {
+          loadListeners.add(fn);
+          return () => loadListeners.delete(fn);
+        },
+      }
+    : undefined;
+  const loadGate = loadPort
+    ? ({ nested }: { nested: boolean }): { message: string } | undefined => {
+        const verdict = loadPort.verdict();
+        const top = loadPort.top();
+        const ownRuns = query
+          ?.list()
+          .filter((s) => s.status === "running")
+          .map((s) => s.diag.label ?? s.runId);
+        const decision = evaluateLoadGate(verdict, settings.load, {
+          nested,
+          ...(top === undefined ? {} : { top }),
+          ...(ownRuns === undefined ? {} : { ownRuns }),
+        });
+        if (decision.blocked && decision.message !== undefined) {
+          if (!nested && loadHintState !== undefined) loadHintState.rejectedSinceRecovery = true;
+          if (!nested) loadPort.refreshTop();
+          return { message: decision.message };
+        }
+        return undefined;
+      }
+    : undefined;
 
   // ask-user-async plan §3.2/§3.3 (P2): the background-completion hub. Built
   // unconditionally — when askUser.backgroundInterrupt.enabled=false the port
@@ -1941,6 +2033,7 @@ export function buildSessionStack(
     // a process-wide capability disablement (src/context-switch/capability.ts) mid-session stops
     // future grants immediately, without needing a new stack build.
     childSwitchContextGrant: () => resolveChildSwitchContextGrant(settings),
+    ...(loadGate ? { loadGate: () => loadPort?.verdict().gating === true } : {}),
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const spawn = createSpawnService({
@@ -1973,6 +2066,7 @@ export function buildSessionStack(
       }
       return registryModelExists(registry, m);
     },
+    ...(loadGate ? { loadGate } : {}),
     // quota-plan §4.1/§6：额度闸门注入（同步、只读缓存、零 IO、零 await——
     // QuotaGateDeps 的类型就杜绝了 spawn 路径发请求）。enabled=false ⇒
     // quotaRef.current 为空 ⇒ 恒放行（R11）；gate=false ⇒ 整个不注入。
@@ -2520,6 +2614,7 @@ export function buildSessionStack(
   // `consultResolveExperts` above (package C, `src/consult/index.ts`, already
   // exposes `resolveExperts(refs, opts?: { completedOnly?: boolean })`).
   const workflowChildSpawner = createWorkflowChildSpawner(spawn, types, {
+    ...(loadAdmission ? { loadAdmission } : {}),
     resolveExperts: (refs, o) => {
       if (!consultRef.current) throw new Error("consult is not wired yet");
       return consultRef.current.resolveExperts(refs, o);
@@ -2646,6 +2741,14 @@ export function buildSessionStack(
   return {
     compactHint,
     ...(dynamic ? { dynamic } : {}),
+    ...(load ? { load } : {}),
+    ...(loadAdmission ? { loadAdmission } : {}),
+    ...(loadHintState ? { loadHintState } : {}),
+    ...(loadTransition ? { loadTransition } : {}),
+    refreshLoadStatus: () => {
+      loadTransition?.();
+      safeSetLoadStatus(ctx, loadPort, settings.load.hud);
+    },
     models,
     spawn,
     query,

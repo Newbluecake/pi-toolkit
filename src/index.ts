@@ -94,6 +94,7 @@ import type { AskUserRemotePort } from "./ask-user/remote.js";
 import type { WorkflowQueryPort } from "./tools/workflow-target.js";
 import { wireTopicSwitch } from "./topic-switch/wire.js";
 import type { PromptGatePort } from "./web-hub/agent/prompt-gate.js";
+import { createLoadHintHook, createLoadHintState } from "./sysload/hook.js";
 
 /**
  * M2 Wave 1 (architecture §7.1): the single merge point for the four
@@ -339,6 +340,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   // context-switch（docs/dev/context-switch/context-switch-plan.md）：工具与
   // session_before_compact 钩子之间的交接槽。每次 activate() 新建（/reload 后必须干净）。
   const handoffStore = new PendingHandoffStore();
+  const loadHintState = createLoadHintState();
   pi.on(
     "turn_end",
     createCompactHintHook(holder, {
@@ -369,6 +371,26 @@ export default function activate(rawPi: ExtensionAPI): void {
   // 经 holder 读当前会话——/reload 存活）。alternatives 由 gate.ts 的
   // pickAlternatives 供给（Pack D 偏差 1：hook deps 的可选注入）。
   const isQuotaSubscription = parseSubscriptionProviders(settings.quota.subscriptionProviders);
+  if (settings.load.enabled) {
+    pi.on(
+      "turn_end",
+      createLoadHintHook({
+        settings: settings.load,
+        port: () => holder.current?.load?.port(),
+        transition: () => holder.current?.loadTransition?.(),
+        state: () => loadHintState,
+        sendMessage: (message, options) => pi.sendMessage(message, options),
+        context: () => {
+          const ownRuns = holder.current?.query
+            .list()
+            .filter((s) => s.status === "running")
+            .map((s) => s.diag.label ?? s.runId);
+          return ownRuns === undefined ? {} : { ownRuns };
+        },
+      }),
+    );
+    pi.on("turn_end", () => holder.current?.refreshLoadStatus());
+  }
   pi.on(
     "turn_end",
     createQuotaHintHook({
@@ -450,6 +472,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       // live `/agent settings` edit (or /reload) takes effect immediately,
       // same convention as worktreeAvailable/resolveExperts above.
       queueWhenFull: () => settings.agent.queueWhenFull,
+      loadGate: () => holder.current?.load?.port().verdict().gating === true,
     }),
   );
   pi.registerTool(
@@ -670,6 +693,12 @@ export default function activate(rawPi: ExtensionAPI): void {
       // at the same default root the worktree extension itself uses.
       worktreeOrphans: () =>
         holder.current?.worktreeOrphans() ?? { root: worktreeRoot(), count: 0, capped: false, entries: [] },
+      load: () => {
+        const port = holder.current?.load?.port();
+        if (!port) return undefined;
+        const verdict = port.verdict();
+        return verdict.level === "unknown" ? undefined : { level: verdict.level, gating: verdict.gating };
+      },
       // compact-hint 动态阈值（§10.3，P1-11）：经 holder 读当前会话（/reload 后自然指向新 stack）。
       // facts() 只读快照 compactHint 的 force/reserve 配置；窗口由命令时点的 ctx.getContextUsage 给。
       dynamic: {
@@ -766,13 +795,22 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.adaptive?.dispose();
       holder.current.quota?.dispose();
       holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
+      holder.current.load?.dispose();
       holder.current.scheduler.stop();
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
       holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
     }
     await types.reload();
-    const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)], _event.reason);
+    const stack = buildSessionStack(
+      pi,
+      ctx,
+      settings,
+      types,
+      [mergeExtensionPoints(extensionPoints)],
+      _event.reason,
+      loadHintState,
+    );
     holder.current = stack;
     if (ctx.hasUI && typeof ctx.ui.addAutocompleteProvider === "function") {
       ctx.ui.addAutocompleteProvider((current) =>
@@ -809,6 +847,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     stack.adaptive?.dispose();
     stack.quota?.dispose();
     stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
+    stack.load?.dispose();
     stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
     // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever recovery/
@@ -979,6 +1018,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       // absent `deps.quota` as "feature off", so the sampler never runs and the wire field never
       // appears — byte-equal to the pre-feature shape).
       ...(settings.webHub.quota !== false ? { quota: () => holder.current?.quota?.verdicts() ?? [] } : {}),
+      ...(settings.load.enabled ? { load: { port: () => holder.current?.load?.port(), settings: settings.load } } : {}),
       // topic-switch plan.md §P3b.1 D2 flip point: removing this one line is the whole kill-switch
       // for web prompts ever being judged — web-hub then always takes its native dispatch path.
       promptGate: () => promptGateRef.current,

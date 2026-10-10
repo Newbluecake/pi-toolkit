@@ -332,6 +332,8 @@ interface AgentToolCommonDeps {
    * `true` — restore the pre-L1 queue-and-wait behavior.
    */
   queueWhenFull?: () => boolean;
+  /** sysload §6.2: true means this Agent dispatch carries the admission reject policy. */
+  loadGate?: () => boolean;
 }
 
 /**
@@ -513,6 +515,7 @@ function prepareSpawn(
     // it uniformly keeps the "same rule for nested" invariant true even if a
     // future nested caller is ever admitted without forceSlotless.
     poolFullPolicy: deps.queueWhenFull?.() ? "queue" : "reject",
+    ...(deps.loadGate?.() === true ? { loadPolicy: "reject" as const } : {}),
   };
   return { baseRequest, expertEcho };
 }

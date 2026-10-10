@@ -101,6 +101,8 @@ export interface StatusCommandDeps {
    * registry-only count (tests/minimal hosts).
    */
   admittedRunIds?: () => readonly string[];
+  /** sysload §2/Q7: live session gate summary, omitted when the feature is off. */
+  load?: () => { level: string; gating: boolean } | undefined;
 }
 
 /**
@@ -612,6 +614,8 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.worktreeOrphans) lines.push(...renderWorktreeOrphansSection(deps.worktreeOrphans));
   if (deps.dynamic) lines.push(...renderDynamicThresholdSection(deps.dynamic, contextWindow));
   if (deps.childSwitch) lines.push(renderChildSwitchLine(deps.childSwitch()));
+  const load = deps.load?.();
+  if (load !== undefined) lines.push(`Load: ${load.level}${load.gating ? " · gated" : " · open"}`);
   return lines.join("\n");
 }
 

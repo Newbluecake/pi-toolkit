@@ -100,6 +100,8 @@ export interface RuntimeAdapterDeps {
    * for nested" true if that ever changes.
    */
   queueWhenFull?: () => boolean;
+  /** sysload §6.2: live effective gate for nested Agent dispatches. */
+  loadGate?: () => boolean;
   /** X3: forwarded to RunnerDeps.onChildAbort (see runtime/runner.ts) — called whenever this run's cancellation is triggered, so the caller can cascade-abort its children. */
   onChildAbort?: (runId: RunId, cause: StopCause) => void;
   /** set_model: fuzzy model-hint resolver (same instance spawn admission uses — stack.ts Stack.models). */
@@ -737,6 +739,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 forceSlotless: true,
                 ...(deps.resultMaxChars ? { resultMaxChars: deps.resultMaxChars } : {}),
                 ...(deps.queueWhenFull ? { queueWhenFull: deps.queueWhenFull } : {}),
+                ...(deps.loadGate ? { loadGate: deps.loadGate } : {}),
                 // consult §4.2: nested dispatchers resolve `experts` with the
                 // same dispatch-time resolver as the top-level Agent tool
                 // (same trust level as `resume`, plan §5.2); agent-tool

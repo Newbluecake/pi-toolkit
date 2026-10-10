@@ -217,6 +217,8 @@ export interface SpawnServiceDeps {
    * 未注入时行为与今天完全一致（全特性可一键回退，plan R11）。
    */
   quotaGate?: (model: { provider: string; id: string }) => QuotaGateVerdict | undefined;
+  /** sysload §6.2: synchronous, side-effect-free evaluator used only by Agent-tool requests carrying loadPolicy. */
+  loadGate?: (ctx: { nested: boolean }) => { message: string } | undefined;
   /** unknown-hint 错误里给候选模型附额度标记（quota-plan §4.3）。缺省时错误文案逐字节不变。 */
   quotaAnnotate?: (candidate: ModelCandidate) => string | undefined;
   /**
@@ -685,6 +687,13 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       if (admittedModel && deps.quotaGate) {
         const gate = deps.quotaGate(admittedModel);
         if (gate) return { error: { kind: "config", message: gate.message, retryable: false } };
+      }
+      // sysload §6.2: Agent (top-level and nested) is the only producer that
+      // carries loadPolicy. Keep this in the zero-side-effect admission zone,
+      // after quota and before nesting/run/label/worktree state is touched.
+      if (req.loadPolicy === "reject" && deps.loadGate) {
+        const gate = deps.loadGate({ nested: req.parentRunId !== undefined && nesting.has(req.parentRunId) });
+        if (gate !== undefined) return { error: { kind: "config", message: gate.message, retryable: true } };
       }
       // X3: nesting depth + canSpawn whitelist. Authoritative for real
       // nested chains produced by the injected nested Agent tool, whose

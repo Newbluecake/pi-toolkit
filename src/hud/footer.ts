@@ -167,7 +167,7 @@ const TIME_LINE_STATUS_KEYS = ["feishu-notify", "pi-hud"] as const;
  * quota line when both fit. `quota` always comes last.
  */
 const WEB_HUB_STATUS_KEY = "pi-subagent:web-hub";
-const OWN_LINE_STATUS_KEYS = [WEB_HUB_STATUS_KEY, "quota"] as const;
+const OWN_LINE_STATUS_KEYS = [WEB_HUB_STATUS_KEY, "quota", "load"] as const;
 
 export function renderTimeLineStatusParts(
   entries: readonly [string, string][],
@@ -206,17 +206,20 @@ export function renderExtensionStatusLines(
   };
   const web = own(WEB_HUB_STATUS_KEY);
   const quota = own("quota");
+  const load = own("load");
   // web-hub is short (`web ●`): ride on the quota line when both fit in one
   // row; otherwise (or without a width) each keeps a line of its own.
   const sep = theme.fg("dim", " │ ");
   if (web !== undefined && quota !== undefined && width !== undefined) {
     if (visibleWidth(quota) + visibleWidth(sep) + visibleWidth(web) <= width) {
       lines.push(quota + sep + web);
+      if (load !== undefined) lines.push(load);
       return lines;
     }
   }
   if (web !== undefined) lines.push(web);
   if (quota !== undefined) lines.push(quota);
+  if (load !== undefined) lines.push(load);
   return lines;
 }
 

@@ -23,6 +23,8 @@ import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
 import { projectTodo } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
+import { projectLoadGate } from "../../sysload/wire.js";
+import type { LoadPort } from "../../sysload/types.js";
 
 /** Max length of a fleet row's thinking-level token (pi levels are short enum words). */
 export const FLEET_THINKING_MAX = 32;
@@ -41,6 +43,7 @@ export function readStatus(
   bashJobs?: () => BashJobsWire | undefined,
   quota?: () => QuotaWire | undefined,
   held?: () => { items: HeldItemWire[]; rev: number; epoch: string } | undefined,
+  load?: () => LoadPort | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -110,6 +113,18 @@ export function readStatus(
       status.held = h.items;
       status.heldRev = h.rev;
       status.heldEpoch = h.epoch;
+    }
+  }
+  // sysload: project the session gate only after a known sample exists; unknown/stale is fail-open
+  // and stays absent so the pre-feature status shape remains byte-identical before sampling.
+  if (load !== undefined) {
+    const port = load();
+    if (port !== undefined) {
+      const verdict = port.verdict();
+      if (verdict.level !== "unknown") {
+        const since = verdict.metrics.cpu.windowStartMono ?? verdict.metrics.mem.windowStartMono;
+        status.loadGate = projectLoadGate(verdict, since === undefined ? undefined : Math.max(0, verdict.mono - since));
+      }
     }
   }
   return status;

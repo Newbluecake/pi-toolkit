@@ -22,6 +22,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { LoadPort } from "../../sysload/types.js";
+import type { LoadSettings } from "../../config/settings.js";
 import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } from "../../core/types.js";
 import { isTerminalStatus } from "../../core/status.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
@@ -209,6 +211,8 @@ export interface WebHubDeps {
    *  `() => holder.current?.quota?.verdicts() ?? []`). Unset (webHub.quota=false, or the quota
    *  feature itself produces no verdicts) ⇒ the `StatusInfo.quota` field is never set. */
   quota?: () => readonly ProviderVerdict[];
+  /** sysload session gate projection and hub config source. */
+  load?: { port: () => LoadPort | undefined; settings: LoadSettings };
   /** topic-switch plan P4 (D2, #5) / arch §15 r2 row 1: optional, late-bound web-prompt claim
    *  port — same `() => T | undefined` late-bound-closure precedent as `query`/`todo`/`quota`
    *  above. `src/index.ts` (package P3b, outside this file's domain) threads a ref getter
@@ -568,6 +572,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             return { items: holdBuffer.project(sid, now()), rev: holdBuffer.rev(), epoch: MODULE_INSTANCE };
           }
         : undefined,
+      deps.load?.port,
     );
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
@@ -872,6 +877,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             () => wtSampler.current(),
             deps.bashJobs !== undefined ? bashJobsProjection : undefined,
             deps.quota !== undefined ? quotaProjection : undefined,
+            undefined,
+            deps.load?.port,
           ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
@@ -940,6 +947,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       buildId: info.buildId,
     };
     if (argv1 !== undefined) config.launcher = [process.execPath, argv1];
+    if (deps.load?.settings.enabled && settings.load !== false) {
+      const load = deps.load.settings;
+      config.load = {
+        sampleIntervalMs: load.sampleIntervalMs,
+        sustainMs: load.sustainMs,
+        recoverMs: load.recoverMs,
+        thresholds: { cpu: load.cpu, mem: load.mem, disk: load.disk },
+      };
+    }
     if (settings.lan?.enabled === true) {
       const lan: HubLanConfig = {
         port: settings.lan.port,
