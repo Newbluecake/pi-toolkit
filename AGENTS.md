@@ -625,7 +625,21 @@ update the matrix/property tests in lockstep. Integration tests live in `tests/i
 
 ## Releasing
 
-Versions follow semver; releases are cut from `master` with annotated tags whose message is
-the version's CHANGELOG section, then `scripts/release/package.sh <version>` produces the
-zip assets and `gh release create` publishes them. Do not hand-edit released CHANGELOG
-sections.
+Releases are cut from `master` by `scripts/release/release.sh <version>` (adapted from
+`~/ai/claude2api`'s release flow), and only when the user explicitly asks for one:
+
+- **Version bump rule**: default **patch** — fix/refactor/perf/chore/docs/test/ci are always patch;
+  **minor** only after at least 50 `feat` commits accumulated since the latest existing `vX.Y.0` tag
+  (patch tags don't reset the count); **major** only on `BREAKING CHANGE` (`!:` subject or footer).
+  The script prints its suggestion and WARNs on a mismatch. When unsure, choose patch.
+- **CHANGELOG is generated, never hand-edited**: feature/fix commits do not touch `CHANGELOG.md`;
+  the release script builds the version section from the Conventional Commits since the last tag
+  (anything already under `[Unreleased]` is merged in) and updates the compare links. Commit
+  subjects/bodies therefore ARE the changelog — write them for users. Do not hand-edit released
+  sections either; to change the output, change the script.
+- **Flow**: on `master`, clean tree, up to date with `origin/master` ⇒ sync `package.json` /
+  `package-lock.json` ⇒ generate CHANGELOG ⇒ `format:check` → `typecheck` → `test` → `build` →
+  `build:web` + `check:web` (any failure aborts before commit/tag) ⇒ commit
+  `chore(release): bump version to vX.Y.Z` ⇒ annotated tag carrying the section ⇒ push ⇒
+  `scripts/release/package.sh` (zips + sha256 + notes) ⇒ `gh release create`. Flags: `--dry-run`,
+  `--changelog`, `--skip-tests` (emergency only), `--skip-push`, `--skip-publish`.
