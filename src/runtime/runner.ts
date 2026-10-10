@@ -501,12 +501,16 @@ export class RuntimeRunner implements Runner {
       }
     }
     const effective = handle.getModelRef?.() ?? model;
+    const level = handle.getThinkingLevel?.();
     this.dispatchExternal(runId, gen, {
       kind: "session_event",
       at: this.d.clock.now(),
-      event: { t: "model_changed", model: effective },
+      event: {
+        t: "model_changed",
+        model: effective,
+        ...(level === undefined || level === "" ? {} : { thinking: level }),
+      },
     });
-    const level = handle.getThinkingLevel?.();
     return { ok: true, model: effective, ...(level === undefined ? {} : { thinking: level }) };
   }
   /**
@@ -858,6 +862,12 @@ export class RuntimeRunner implements Runner {
       // M-B2: the session's actual model — authoritative over spawn-time
       // displayMeta (covers pi-default-model runs and resume).
       const modelRef = handle.getModelRef?.();
+      // M-B2 (thinking-level visibility): the session's *effective* thinking
+      // level after pi clamped the requested one. Only ever sent as a non-empty
+      // string — an empty/undefined read-back leaves the field off the wire so
+      // old journals and diag consumers stay shape-identical.
+      const thinkingLevel = handle.getThinkingLevel?.();
+      const thinking = thinkingLevel === "" ? undefined : thinkingLevel;
       // run-persistence plan D8: mark the child session file live BEFORE the
       // session_created dispatch journals it as resumable — a same-process
       // resume of it is refused at admission until this run is reaped.
@@ -871,6 +881,7 @@ export class RuntimeRunner implements Runner {
         sessionId: handle.sessionId,
         ...(handle.sessionFile === undefined ? {} : { sessionFile: handle.sessionFile }),
         ...(modelRef === undefined ? {} : { model: modelRef }),
+        ...(thinking === undefined ? {} : { thinking }),
       });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
       const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);

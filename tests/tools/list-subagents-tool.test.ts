@@ -134,6 +134,35 @@ describe("list_subagents", () => {
     ]);
   });
 
+  it("M-B2: shows the effective thinking level after the model when known, nothing when unknown", async () => {
+    const run = baseSnapshot({
+      runId: "r_th",
+      diag: { ...baseSnapshot({ runId: "x" }).diag, thinkingLevel: "high" },
+    });
+    const tool = createListSubagentsTool({
+      query: queryOf([run]),
+      spawn: spawnOf({ limit: 5, inUse: 1, free: 4 }),
+      now: () => NOW,
+    });
+    const result = await tool.execute("tc", {}, undefined, () => undefined, {} as never);
+    const text = result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+    expect(text).toContain("acme/big (thinking high)");
+    const details = detailsOf(result);
+    expect(details.runs[0]).toMatchObject({ runId: "r_th", thinkingLevel: "high" });
+
+    // unknown level → the plain model token, byte-identical to before
+    const plain = baseSnapshot({ runId: "r_plain" });
+    const plainTool = createListSubagentsTool({
+      query: queryOf([plain]),
+      spawn: spawnOf({ limit: 5, inUse: 1, free: 4 }),
+      now: () => NOW,
+    });
+    const plainResult = await plainTool.execute("tc", {}, undefined, () => undefined, {} as never);
+    const plainText = plainResult.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+    expect(plainText).toContain("acme/big ");
+    expect(plainText).not.toContain("thinking");
+  });
+
   it("shows a queued run's queue_wait duration instead of status/phase", async () => {
     const run = baseSnapshot({
       runId: "r_q",

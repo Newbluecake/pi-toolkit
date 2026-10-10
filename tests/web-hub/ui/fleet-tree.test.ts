@@ -194,6 +194,20 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(critRow.classes()).toContain("is-terminal");
     expect(critRow.attributes("data-st")).toBe("failed");
   });
+
+  it("M-B2: a known thinking level renders as a muted `·<level>` token next to the model; unknown renders nothing", () => {
+    const wrapper = mountTree([
+      row({ runId: "leveled", model: "zai/glm-5.3", thinking: "high" }),
+      row({ runId: "plain", model: "zai/glm-5.3" }),
+    ]);
+    const leveled = wrapper.findAll(".run").find((r) => r.text().includes("leveled"))!;
+    const plain = wrapper.findAll(".run").find((r) => r.text().includes("plain"))!;
+    expect(leveled.get(".run-nums .model").text()).toBe("glm-5.3");
+    expect(leveled.get(".run-nums .model-thinking").text()).toBe("·high");
+    // unknown level → the token node is absent entirely (no dangling `·`)
+    expect(plain.find(".run-nums .model-thinking").exists()).toBe(false);
+    expect(plain.get(".run-nums .model").text()).toBe("glm-5.3");
+  });
 });
 
 describe("FleetTree.vue — run-open 按钮(§6.3 FLEET_SELECT)", () => {

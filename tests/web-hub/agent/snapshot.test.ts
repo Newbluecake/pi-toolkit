@@ -194,6 +194,22 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     });
   });
 
+  it("M-B2: projects diag.thinkingLevel onto the wire as `thinking`; absent stays absent", () => {
+    const leveled = snap({ diag: diag({ ...snap().diag, thinkingLevel: "high" }) });
+    const rows = projectFleet([leveled], 5_000);
+    expect(rows[0]!.thinking).toBe("high");
+    // unknown → the key itself is absent (byte-equal to the pre-feature shape)
+    const plain = projectFleet([snap()], 5_000);
+    expect("thinking" in plain[0]!).toBe(false);
+    // an empty-string level never reaches the wire
+    const empty = projectFleet([snap({ diag: diag({ ...snap().diag, thinkingLevel: "" }) })], 5_000);
+    expect("thinking" in empty[0]!).toBe(false);
+    // oversized ⇒ only the field is dropped; the row itself still projects
+    const long = projectFleet([snap({ diag: diag({ ...snap().diag, thinkingLevel: "x".repeat(33) }) })], 5_000);
+    expect(long).toHaveLength(1);
+    expect("thinking" in long[0]!).toBe(false);
+  });
+
   it("per-second jitter (elapsed/phase ages, live tool duration, thinking frame) does not change the fingerprint", () => {
     const thinking = snap({ phase: "model_turn", diag: { ...snap().diag, phase: "model_turn" } });
     const a = fleetFingerprint(projectFleet([snap(), thinking], 5_000));

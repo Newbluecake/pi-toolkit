@@ -360,6 +360,11 @@ export interface FleetRowWire {
   label?: string;
   type?: string;
   model?: string;
+  /** M-B2 (thinking-level visibility): the run's effective thinking level
+   *  ("off" | "low" | …). Append-only optional field — no proto bump; absent
+   *  ⇔ unknown, and old hubs/UIs ignore it. Rendered next to the model as a
+   *  small muted `·<level>` token. */
+  thinking?: string;
   status: string;
   phaseLabel: string;
   parentRunId?: string;
@@ -1024,6 +1029,11 @@ const FleetRowSchema = Type.Object({
   label: Type.Optional(Type.String()),
   type: Type.Optional(Type.String()),
   model: Type.Optional(Type.String()),
+  // M-B2 (thinking-level visibility): display-only token, same lenient posture as
+  // `model` above — never length-bounded here, because one odd value must not make
+  // the whole fleet frame / snapshot_reply fail to decode. The agent-side projection
+  // (agent/status.ts) drops empty or oversized values instead.
+  thinking: Type.Optional(Type.String()),
   status: Type.String(),
   phaseLabel: Type.String(),
   parentRunId: Type.Optional(Type.String()),

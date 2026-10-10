@@ -265,6 +265,15 @@ details[open] > summary.run .chev {
   font-family: var(--font-mono);
 }
 
+/* M-B2(思考级别可见性):紧随模型名的 `·high` 小令牌 —— 永不截断(短枚举词),不参与
+ * 模型名的收缩;未知级别时模板压根不渲染本节点。淡色令牌与 time/cost 同族,而非 model
+ * 的截断省略族。 */
+.run-nums .model-thinking {
+  flex: none;
+  color: var(--c-text-3);
+  font-family: var(--font-mono);
+}
+
 .run-nums .time {
   flex: none;
 }

@@ -31,6 +31,10 @@ export interface ListSubagentsRunRow {
   label?: string;
   agentType?: string;
   model?: { provider: string; id: string };
+  /** M-B2 (thinking-level visibility): the run's effective thinking level after
+   *  pi's clamping; absent when unknown. Rendered after the model as
+   *  `model: provider/id (thinking <level>)`. */
+  thinkingLevel?: string;
   status: string;
   phase: string;
   /** Only set while status is "queued" (phase "queue_wait"). */
@@ -86,6 +90,7 @@ function runRow(s: RunSnapshot, now: number, depth: number): ListSubagentsRunRow
     ...(d.label !== undefined ? { label: d.label } : {}),
     ...(d.agentType !== undefined ? { agentType: displayAgentType(d.agentType) } : {}),
     ...(d.model !== undefined ? { model: d.model } : {}),
+    ...(d.thinkingLevel !== undefined && d.thinkingLevel !== "" ? { thinkingLevel: d.thinkingLevel } : {}),
     status: s.status,
     phase: s.phase,
     ...(s.status === "queued" && d.enqueuedAt !== undefined ? { queueWaitMs: Math.max(0, now - d.enqueuedAt) } : {}),
@@ -102,7 +107,13 @@ function formatRunLine(row: ListSubagentsRunRow): string {
   const marker = row.depth > 0 ? "└─ " : "";
   const label = row.label !== undefined ? `"${row.label}"` : "·";
   const type = row.agentType ?? "·";
-  const model = formatModelRef(row.model) ?? "·";
+  const modelRef = formatModelRef(row.model);
+  const model =
+    modelRef === undefined
+      ? "·"
+      : row.thinkingLevel === undefined
+        ? modelRef
+        : `${modelRef} (thinking ${row.thinkingLevel})`;
   const phaseInfo =
     row.queueWaitMs !== undefined ? `queue_wait ${formatDuration(row.queueWaitMs)}` : `${row.status}/${row.phase}`;
   const cost = row.costUsd !== undefined ? `$${row.costUsd.toFixed(4)}` : "$0.0000";

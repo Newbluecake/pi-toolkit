@@ -592,8 +592,10 @@ export type DriverEvent =
   | { t: "settled" }
   | { t: "text_delta"; delta: string }
   | { t: "thinking_delta"; delta: string }
-  /** set_model: the live session's model was switched mid-run (display-only diag patch; see state-machine.ts reduce's early-return branch). */
-  | { t: "model_changed"; model: { provider: string; id: string } }
+  /** set_model: the live session's model was switched mid-run (display-only diag patch; see state-machine.ts reduce's early-return branch).
+   *  `thinking` carries the post-switch effective thinking level (read back from the session,
+   *  so it reflects pi's clamping) when the handle exposes one — absent keeps the previous level. */
+  | { t: "model_changed"; model: { provider: string; id: string }; thinking?: string }
   /**
    * child-context-switch plan P0 (§2.3.1/§2.4): three best-effort diagnostic
    * events, all handled in the SAME reduce() branch as `context_usage` above
@@ -958,6 +960,12 @@ export interface RunDiagnostics {
   contextUsage?: ContextUsageInfo;
   /** M-A: display-only spawn metadata (model/label/type), set once at enqueue. */
   model?: { provider: string; id: string };
+  /** M-B2 (thinking-level visibility): the child session's effective thinking level
+   *  ("off" | "low" | "medium" | "high" | …) after pi's clamping — written by
+   *  `session_created` (from `handle.getThinkingLevel?.()`) and updated by
+   *  `model_changed` after a set_model switch. Display-only; absent when the
+   *  driver exposes no level and on runs persisted before this field shipped. */
+  thinkingLevel?: string;
   label?: string;
   agentType?: string;
   /** Truncated dispatch prompt for agent-tree pending-row previews and /agent status. */
@@ -1223,6 +1231,11 @@ export type RunInput =
       sessionId: string;
       sessionFile?: string;
       model?: { provider: string; id: string };
+      /** M-B2 (thinking-level visibility): the child session's *effective* thinking
+       *  level after pi clamped it (read back via `handle.getThinkingLevel?.()` at
+       *  session_created time). Absent when the driver exposes none — old journals
+       *  and runs without the field keep loading unchanged. */
+      thinking?: string;
     }
   | {
       kind: "startup_failed";

@@ -48,6 +48,10 @@ export interface FleetRow {
   label: string | undefined;
   /** M-C: model id from diag.model (display only; undefined = session default). */
   model: string | undefined;
+  /** M-B2 (thinking-level visibility): the run's effective thinking level
+   *  ("off" | "low" | …) from diag.thinkingLevel; undefined = unknown → nothing
+   *  is rendered. Renderers append it to the model as a compact `·<level>` token. */
+  thinking: string | undefined;
   /** M-C: compact recent-tool trail from diag.toolHistory, e.g. "✓ bash ×3 | ✗ read | ▸edit · 3s" — each completed call collapses into a `✓ name ×k` segment (✗ for failures), segments join on " | ", and the in-flight ▸ segment carries its live duration when the view is built with `now`. */
   toolTrail: string | undefined;
   /** Live one-line stream of the model's in-progress thinking (last non-empty
@@ -397,6 +401,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     type: displayAgentType(opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType),
     label: snapshot.diag.label,
     model: formatModelRef(snapshot.diag.model),
+    thinking: snapshot.diag.thinkingLevel === "" ? undefined : snapshot.diag.thinkingLevel,
     // Terminal rows freeze the trail (no live duration): a run killed mid-tool
     // would otherwise show an ever-growing ▸ duration.
     toolTrail: toolTrailOf(snapshot.diag, 4, terminal ? undefined : opts.now),

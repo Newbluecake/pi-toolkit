@@ -56,6 +56,7 @@ const JOURNAL_DIAG_FIELDS = [
   "usage",
   "contextUsage",
   "model",
+  "thinkingLevel",
   "label",
   "agentType",
   "taskPrompt",

@@ -147,6 +147,42 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[1]).toBe("  重构用户模块 architect copilot-completion/kimi-k3 🤔 1s Σ1s");
   });
 
+  it("M-B2: a known thinking level rides the model token as `·<level>`; unknown renders nothing", () => {
+    const run = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        label: "重构用户模块",
+        agentType: "architect",
+        model: { provider: "zai", id: "glm-5.3" },
+        thinkingLevel: "high",
+      }),
+    });
+    const model = buildFleetViewModel([run], OPTS);
+    expect(model.rows[0]!.thinking).toBe("high");
+    const lines = buildFleetWidgetLines(model)!;
+    expect(lines[1]).toBe("  重构用户模块 architect zai/glm-5.3·high 🤔 1s Σ1s");
+    // the shortened (basename) tier keeps the suffix too — at width 40 the
+    // `zai/` provider prefix is dropped but `·high` stays on the basename.
+    // (toContain("zai/glm-5.3") would be vacuous here: `glm-5.3·high` contains
+    // neither, so the negative form asserts the provider was really dropped.)
+    const medium = buildFleetWidgetLines(model, { width: 40 })![1]!;
+    expect(medium).toContain("glm-5.3·high");
+    expect(medium.split(/\s+/)).not.toContain("zai/glm-5.3·high");
+    // unknown level → byte-identical to the pre-feature row (no dangling `·`)
+    const plain = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        label: "重构用户模块",
+        agentType: "architect",
+        model: { provider: "zai", id: "glm-5.3" },
+      }),
+    });
+    const plainLines = buildFleetWidgetLines(buildFleetViewModel([plain], OPTS))!;
+    expect(plainLines[1]).toBe("  重构用户模块 architect zai/glm-5.3 🤔 1s Σ1s");
+  });
+
   it("consult §16.5: a main-session consult run's row shows `main`, never the sentinel type", () => {
     const mainRun = snapshot({
       diag: diag({

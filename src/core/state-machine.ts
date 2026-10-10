@@ -646,7 +646,21 @@ export function reduce(
   if (input.kind === "session_event" && input.event.t === "model_changed")
     return terminal(state.status)
       ? { state, effects: [] }
-      : { state: { ...state, diag: { ...state.diag, model: input.event.model } }, effects: [] };
+      : {
+          state: {
+            ...state,
+            diag: {
+              ...state.diag,
+              model: input.event.model,
+              // set_model requirement 2: a successful switch also refreshes the
+              // stored level (read back post-clamp). Absent keeps the previous
+              // value — an old driver/handle without getThinkingLevel never
+              // clears a level it once reported.
+              ...(input.event.thinking === undefined ? {} : { thinkingLevel: input.event.thinking }),
+            },
+          },
+          effects: [],
+        };
   if (stamped.generation !== state.generation)
     return { state: { ...state, diag: { ...state.diag, staleInputs: state.diag.staleInputs + 1 } }, effects: [] };
   // bash-timeout-grace plan §3.8 (P0b, frozen position): exit_facts is a
@@ -816,6 +830,9 @@ export function reduce(
         // M-B2: the live session's actual model overrides spawn-time display
         // metadata (ground truth; also fills pi-default-model runs).
         ...(input.model === undefined ? {} : { model: input.model }),
+        // M-B2 (thinking-level visibility): same ground-truth treatment for the
+        // effective thinking level — only ever set when the handle reported one.
+        ...(input.thinking === undefined ? {} : { thinkingLevel: input.thinking }),
       },
     };
     // run-persistence plan D1/D2: the first time a sessionFile becomes known,

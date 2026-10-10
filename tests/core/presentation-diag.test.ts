@@ -85,6 +85,31 @@ describe("M-A: display meta at enqueue", () => {
     u = apply(u, { kind: "session_created", at: 3, sessionId: "s3" });
     expect(u.diag.model).toEqual({ provider: "cfg", id: "configured" });
   });
+
+  it("M-B2: session_created carries the effective thinking level — set when present, kept absent otherwise", () => {
+    // present → folded into diag next to the model
+    let s = createInitialState("r", 1, 0);
+    s = apply(s, { kind: "enqueued", at: 0, budget });
+    s = apply(s, { kind: "slot_acquired", at: 1 });
+    s = apply(s, { kind: "phase_entered", at: 2, phase: "session_create" });
+    s = apply(s, {
+      kind: "session_created",
+      at: 3,
+      sessionId: "s1",
+      model: { provider: "zai", id: "glm-5.3" },
+      thinking: "high",
+    });
+    expect(s.diag.thinkingLevel).toBe("high");
+    expect(s.diag.model).toEqual({ provider: "zai", id: "glm-5.3" });
+    // absent → the field stays absent (old journals / no-capability handles)
+    let u = createInitialState("r2", 1, 0);
+    u = apply(u, { kind: "enqueued", at: 0, budget });
+    u = apply(u, { kind: "slot_acquired", at: 1 });
+    u = apply(u, { kind: "phase_entered", at: 2, phase: "session_create" });
+    u = apply(u, { kind: "session_created", at: 3, sessionId: "s2" });
+    expect(u.diag.thinkingLevel).toBeUndefined();
+    expect("thinkingLevel" in u.diag).toBe(false);
+  });
 });
 
 describe("M-A: tool trail (toolHistory / toolCounts)", () => {
@@ -402,6 +427,19 @@ describe("set_model: model_changed diag patch", () => {
     let s = runningWithModel();
     expect(s.diag.model).toEqual({ provider: "pi", id: "old" });
     s = sessionEvent(s, { t: "model_changed", model: switched }, 8);
+    expect(s.diag.model).toEqual(switched);
+  });
+
+  it("M-B2: a model_changed carrying thinking updates diag.thinkingLevel; absent keeps the previous level", () => {
+    let s = runningWithModel();
+    // establish a level (as session_created would have written it)
+    s = { ...s, diag: { ...s.diag, thinkingLevel: "high" } };
+    s = sessionEvent(s, { t: "model_changed", model: switched, thinking: "low" }, 8);
+    expect(s.diag.thinkingLevel).toBe("low");
+    expect(s.diag.model).toEqual(switched);
+    // a switch event without the field keeps the previously stored level
+    s = sessionEvent(s, { t: "model_changed", model: switched }, 9);
+    expect(s.diag.thinkingLevel).toBe("low");
     expect(s.diag.model).toEqual(switched);
   });
 

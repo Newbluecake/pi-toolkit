@@ -226,6 +226,21 @@ describe("decodeAgentFrame", () => {
     expect(decodeAgentFrame({ t: "fleet", runs: [] })).toMatchObject({ t: "fleet", runs: [] });
   });
 
+  it("M-B2: fleet rows carry an optional bounded thinking level (append-only, no proto bump)", () => {
+    // present + within bounds → accepted, round-tripped verbatim
+    expect(decodeAgentFrame({ t: "fleet", runs: [{ ...fleetRow, thinking: "high" }] })).toMatchObject({
+      t: "fleet",
+      runs: [{ runId: "run_1", thinking: "high" }],
+    });
+    // absent → still valid (old agent shape)
+    expect(decodeAgentFrame({ t: "fleet", runs: [fleetRow] })).toBeDefined();
+    // empty / over-length → the whole frame is rejected like any other malformed row
+    // An odd value must never make the whole frame undecodable (it would hide every run
+    // and, via SnapshotReplySchema.fleet, the whole snapshot); the projection drops it.
+    expect(decodeAgentFrame({ t: "fleet", runs: [{ ...fleetRow, thinking: "" }] })).toBeDefined();
+    expect(decodeAgentFrame({ t: "fleet", runs: [{ ...fleetRow, thinking: "x".repeat(33) }] })).toBeDefined();
+  });
+
   it("accepts snapshot_reply with recent/inflight/prompts and rejects malformed nested parts", () => {
     const reply = {
       t: "snapshot_reply",

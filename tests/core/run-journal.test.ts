@@ -32,6 +32,7 @@ function richState(over: Partial<RunDiagnostics> = {}): RunState {
     absorbedRunIds: ["r_x"],
     contextUsage: { tokens: 100, contextWindow: 1000, percent: 10 },
     model: { provider: "anthropic", id: "claude" },
+    thinkingLevel: "high",
     label: "worker",
     agentType: "general",
     taskPrompt: "p".repeat(4096),
@@ -99,6 +100,7 @@ const RETAINED = [
   "usage",
   "contextUsage",
   "model",
+  "thinkingLevel",
   "label",
   "agentType",
   "taskPrompt",
@@ -270,6 +272,16 @@ describe("journalSnapshotFromState: consult A/B instrumentation fields (plan §5
     expect(snap.diag.dispatchMeta).toEqual(state.diag.dispatchMeta);
     expect(snap.diag.schemaPreset).toBe("verdict/v1");
     expect(snap.diag.consults).toEqual(state.diag.consults);
+    // M-B2 (thinking-level visibility): same verbatim passthrough as `model` —
+    // the level survives the journal so a restart/reload keeps rendering it.
+    expect(snap.diag.thinkingLevel).toBe("high");
+  });
+
+  it("M-B2: drops thinkingLevel when the live diag never set it (old-run shape, no backfill)", () => {
+    const snap = journalSnapshotFromState(richState({ thinkingLevel: undefined }), 2_000, {
+      kind: "session_created",
+    });
+    expect(snap.diag).not.toHaveProperty("thinkingLevel");
   });
 
   it("drops each field (no key at all) when the live diag never set it", () => {

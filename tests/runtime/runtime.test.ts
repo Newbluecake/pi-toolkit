@@ -335,6 +335,77 @@ describe("set_model: RuntimeRunner.setModelForRun", () => {
     expect(outcome).toEqual({ ok: true, model: target, thinking: "low" });
     await settle(runPromise, clock, 31);
   });
+
+  it("M-B2: a successful switch's model_changed event carries the effective level and patches diag.thinkingLevel", async () => {
+    let level: string | undefined = "high";
+    const { clock, runner, runPromise } = await start(
+      {
+        setModel: async () => {
+          level = "medium";
+        },
+        getThinkingLevel: () => level,
+        setThinkingLevel: (l) => {
+          level = l;
+        },
+        getModelRef: () => target,
+      },
+      { resolveModelRef: (p, id) => ({ p, id }) },
+    );
+    const outcome = await runner.setModelForRun("r-sm", target, { thinking: "low" });
+    // The dispatched model_changed carries the read-back (post-clamp) level …
+    expect(outcome).toEqual({ ok: true, model: target, thinking: "low" });
+    // … and the reducer folded it into diag next to the model.
+    expect(runner.getRunState("r-sm")?.diag.thinkingLevel).toBe("low");
+    expect(runner.getRunState("r-sm")?.diag.model).toEqual(target);
+    await settle(runPromise, clock, 31);
+  });
+});
+
+describe("M-B2: session_created carries the effective thinking level", () => {
+  async function startWithHandle(overrides: Partial<SessionHandle>, driverExtra: Partial<SessionDriver> = {}) {
+    const clock = new FakeClock();
+    const h = handle({ prompt: () => never(), ...overrides });
+    const driver: SessionDriver = {
+      create: async () => h,
+      bind: async () => undefined,
+      onLateArrival() {},
+      ...driverExtra,
+    };
+    const d = deps(clock, driver);
+    const runner = new RuntimeRunner(d);
+    const runPromise = runner.run({ ...request, runId: "r-th" }, budget);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    return { clock, runner, runPromise };
+  }
+
+  it("folds a non-empty level into diag.thinkingLevel next to the model", async () => {
+    const { clock, runner, runPromise } = await startWithHandle({
+      getModelRef: () => ({ provider: "zai", id: "glm-5.3" }),
+      getThinkingLevel: () => "high",
+    });
+    const s = runner.getRunState("r-th");
+    expect(s?.diag.model).toEqual({ provider: "zai", id: "glm-5.3" });
+    expect(s?.diag.thinkingLevel).toBe("high");
+    await settle(runPromise, clock, 31);
+  });
+
+  it("omits the field when the handle reports none (old driver shape stays diag-identical)", async () => {
+    const { clock, runner, runPromise } = await startWithHandle({
+      getModelRef: () => ({ provider: "zai", id: "glm-5.3" }),
+    });
+    const s = runner.getRunState("r-th");
+    expect(s?.diag.model).toEqual({ provider: "zai", id: "glm-5.3" });
+    expect(s?.diag.thinkingLevel).toBeUndefined();
+    await settle(runPromise, clock, 31);
+  });
+
+  it("treats an empty-string read-back as unknown (never stores an empty level)", async () => {
+    const { clock, runner, runPromise } = await startWithHandle({
+      getThinkingLevel: () => "",
+    });
+    expect(runner.getRunState("r-th")?.diag.thinkingLevel).toBeUndefined();
+    await settle(runPromise, clock, 31);
+  });
 });
 
 describe("final assistant text", () => {

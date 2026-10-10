@@ -116,6 +116,13 @@ function modelShortOf(row: FleetRowWire): string {
   const slash = m.lastIndexOf("/");
   return slash >= 0 ? m.slice(slash + 1) : m;
 }
+/** M-B2 (thinking-level visibility): the row's effective thinking level as a
+ * small muted `·<level>` token next to the model. Empty string = unknown →
+ * renders nothing (no dangling `·`). English token only (compact marker rule). */
+function thinkingTokenOf(row: FleetRowWire): string {
+  const t = row.thinking;
+  return typeof t === "string" && t !== "" ? `·${t}` : "";
+}
 function costLabelOf(row: FleetRowWire): string {
   return typeof row.costUsd === "number" ? formatUsd(row.costUsd) : "—";
 }
@@ -175,6 +182,9 @@ function toggleActions(runId: string): void {
               :title="String(rowOf(node).model ?? '')"
               >{{ modelShortOf(rowOf(node)) }}</span
             >
+            <span v-if="thinkingTokenOf(rowOf(node))" class="model-thinking" translate="no">{{
+              thinkingTokenOf(rowOf(node))
+            }}</span>
             <span class="time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
             <span class="cost">{{ costLabelOf(rowOf(node)) }}</span>
           </span>
@@ -236,6 +246,9 @@ function toggleActions(runId: string): void {
             :title="String(rowOf(node).model ?? '')"
             >{{ modelShortOf(rowOf(node)) }}</span
           >
+          <span v-if="thinkingTokenOf(rowOf(node))" class="model-thinking" translate="no">{{
+            thinkingTokenOf(rowOf(node))
+          }}</span>
           <span class="time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
           <span class="cost">{{ costLabelOf(rowOf(node)) }}</span>
         </span>

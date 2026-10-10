@@ -294,6 +294,14 @@ function widgetRowMain(
 ): string {
   const modelFull = row.model;
   const modelBase = modelFull?.slice(modelFull.lastIndexOf("/") + 1);
+  // M-B2 (thinking-level visibility): the effective thinking level rides the
+  // model token as a compact `·<level>` suffix (e.g. `glm-5.3·high`) — English
+  // tokens only per the UI text split rule. The suffix joins the full form AND
+  // the shortened base form, so the tiered drop logic below needs no changes; a
+  // completely unknown level renders nothing (no dangling `·`).
+  const levelSuffix = row.thinking === undefined ? "" : `·${row.thinking}`;
+  const modelWithLevel = modelFull === undefined ? undefined : `${modelFull}${levelSuffix}`;
+  const modelBaseWithLevel = modelBase === undefined ? undefined : `${modelBase}${levelSuffix}`;
   const fixed = `${compactPhaseLabel(row.phaseLabel)} ${formatDuration(row.phaseMs)}`;
   const label = row.label ?? row.shortRunId;
   // X1: worktree isolation marker (⎇ wt / ⎇ branch / ⎇ kept / ⎇ clean) —
@@ -302,7 +310,7 @@ function widgetRowMain(
   const fields: Array<{ name: string; value: string }> = [
     { name: "type", value: row.type ?? "·" },
     ...(wt === undefined ? [] : [{ name: "wt", value: wt }]),
-    ...(modelFull ? [{ name: "model", value: modelFull }] : []),
+    ...(modelWithLevel !== undefined ? [{ name: "model", value: modelWithLevel }] : []),
     { name: "phase", value: fixed },
     // deadline sits with phase ("is this run healthy?"), ahead of the resource
     // stats (context/cost/total).
@@ -317,14 +325,15 @@ function widgetRowMain(
   const fits = () => visibleWidth(compose(label)) <= width;
   const drop = (name: string) => shown.delete(name);
   const modelField = fields.find((field) => field.name === "model");
-  const modelCanShorten = modelField !== undefined && modelBase !== undefined && modelField.value !== modelBase;
+  const modelCanShorten =
+    modelField !== undefined && modelBaseWithLevel !== undefined && modelField.value !== modelBaseWithLevel;
 
   // Try the complete row first. Only after each field tier is exhausted may
   // the label be shortened; label and phase are the final identity signal.
   if (!fits()) {
     drop("type");
     if (!fits() && modelField) {
-      if (modelCanShorten) shown.set("model", modelBase!);
+      if (modelCanShorten) shown.set("model", modelBaseWithLevel!);
       if (!fits()) drop("model");
     }
     if (!fits()) drop("context");
@@ -381,10 +390,13 @@ function widgetTerminalDetail(row: FleetRow, width: number): string {
   const wt = worktreeMarker(row.worktree);
   const model = row.model;
   const modelBase = model?.slice(model.lastIndexOf("/") + 1);
+  const levelSuffix = row.thinking === undefined ? "" : `·${row.thinking}`;
+  const modelWithLevel = model === undefined ? undefined : `${model}${levelSuffix}`;
+  const modelBaseWithLevel = modelBase === undefined ? undefined : `${modelBase}${levelSuffix}`;
   const suffix = [row.status, formatDuration(row.elapsedMs)];
   if (row.contextUsage) suffix.push(formatContextUsage(row.contextUsage));
   if (row.usage) suffix.push(formatWidgetCost(row.usage.costUsd));
-  const candidates = [model, modelBase, undefined];
+  const candidates = [modelWithLevel, modelBaseWithLevel, undefined];
   const fits = (candidate: string | undefined, labelText: string) =>
     visibleWidth([labelText, type, wt, candidate, ...suffix].filter(Boolean).join(" ")) <= width;
   const chosen = candidates.find((candidate) => fits(candidate, label));

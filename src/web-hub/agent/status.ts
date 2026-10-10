@@ -24,6 +24,9 @@ import type { QueueMirror } from "./queue-mirror.js";
 import { projectTodo } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
 
+/** Max length of a fleet row's thinking-level token (pi levels are short enum words). */
+export const FLEET_THINKING_MAX = 32;
+
 /** Web rows: more than the TUI widget, still bounded. */
 const WEB_MAX_ACTIVE_ROWS = 64;
 const WEB_RECENT_TERMINAL = 8;
@@ -139,6 +142,12 @@ export function projectFleet(
     if (r.label !== undefined) row.label = r.label;
     if (r.type !== undefined) row.type = r.type;
     if (r.model !== undefined) row.model = r.model;
+    // M-B2 (thinking-level visibility): rides the same append-only slot style as
+    // `model`. Empty or oversized (> FLEET_THINKING_MAX chars) values are dropped
+    // field-only here, so a weird level can never hide the run row itself.
+    if (r.thinking !== undefined && r.thinking !== "" && r.thinking.length <= FLEET_THINKING_MAX) {
+      row.thinking = r.thinking;
+    }
     if (r.parentRunId !== undefined) row.parentRunId = r.parentRunId;
     if (r.usage !== undefined) row.costUsd = r.usage.costUsd;
     if (r.toolTrail !== undefined) row.toolTrail = r.toolTrail;
