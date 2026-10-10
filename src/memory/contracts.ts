@@ -153,6 +153,151 @@ export interface DoctorFinding {
 
 // ───────────────────────────── §7 tidy ─────────────────────────────
 
+/** M-T7: one frozen file-count limit shared by the output schema, validator,
+ * and future batch planner. */
+export const TIDY_MAX_FILES = 24;
+
+/** The batch planner leaves four slots below the model-output ceiling for
+ * non-file bookkeeping. Kept here with the other frozen tidy contracts so
+ * every package consumes the same value. */
+export const BATCH_MAX_FILES = TIDY_MAX_FILES - 4;
+
+export type Sha = string;
+export type Area = "live" | "archive" | "backup" | "trash";
+
+/** A location in the memory transaction namespace. `tmp` names are resolved
+ * by `tmp-names.ts` and are never derived from a memory filename. */
+export type Loc = { area: Area; name: string } | { area: "tmp"; within: Area | "root"; name: string };
+
+/** Stable identity used for compare-and-swap and recovery decisions. */
+export interface Ident {
+  dev: number;
+  ino: number;
+  sha: Sha;
+  size: number;
+}
+
+export type Obs =
+  | { kind: "absent" }
+  | ({ kind: "file" } & Ident)
+  | { kind: "other"; reason: "symlink" | "not-file" | "unreadable" | "racing" | "too-large" };
+
+export type TidyRunState = "applying" | "complete" | "aborted" | "interrupted" | "recovered" | "conflict-reported";
+export type TidyPhase = "archive" | "normalize" | "restore" | "frontmatter";
+
+/** Process identity recorded in a v2 journal. The optional Linux identity
+ * fields allow the owner to be checked without making the contract
+ * platform-specific. */
+export interface TidyOwner {
+  pid: number;
+  host: string;
+  token: string;
+  at: number;
+  startTicks?: string;
+  bootId?: string;
+}
+
+export type Owner = TidyOwner;
+export type Phase = TidyPhase;
+
+export type OpSpec =
+  | { prim: "MOVE"; src: Loc; dst: Loc; obj: Ident }
+  | { prim: "CREATE"; target: Loc; afterSha: Sha; tmpContent: Loc }
+  | {
+      prim: "REPLACE";
+      target: Loc;
+      before: Ident;
+      afterSha: Sha;
+      backup: Loc;
+      tmpBackup: Loc;
+      tmpContent: Loc;
+    };
+
+export type JournalEvent =
+  | { ev: "run"; state: TidyRunState; owner?: Owner; epoch: number; recoveryOwner?: Owner }
+  | { ev: "intent"; opId: string; seq: number; step: number; group?: number; phase: Phase; op: OpSpec }
+  | { ev: "staged"; opId: string; which: "backup" | "content"; tmp: Loc; ident: Ident }
+  | { ev: "attempt"; opId: string; by: "owner" | "recovery"; n: 1 }
+  | {
+      ev: "result";
+      opId: string;
+      state: "done" | "rolled-back" | "skipped" | "conflict";
+      reason?: string;
+      final: readonly { loc: Loc; obs: Obs }[];
+      leftovers?: readonly { loc: Loc; obs: Obs }[];
+    };
+
+export type TidyManifestKind = "tidy" | "frontmatter" | "restore" | "batch";
+
+/** Append-only v2 journal manifest. The v1 `TidyManifest` below remains
+ * separate because v1 manifests are intentionally read-only for restore. */
+export interface TidyManifestV2 {
+  v: 2;
+  id: string;
+  kind: TidyManifestKind;
+  createdAt: string;
+  events: readonly JournalEvent[];
+}
+
+export type ManifestV2 = TidyManifestV2;
+export interface TidyManifestHeaderV2 {
+  v: 2;
+  id: string;
+  kind: TidyManifestKind;
+  createdAt: string;
+}
+
+/** Pure ledger contracts used by the future batch planner. Reservations are
+ * kept separate from settled spend so an in-flight run cannot be dispatched
+ * twice against the same cap. */
+export interface TidyLedgerReservation {
+  runId: string;
+  amountUsd: number;
+}
+
+export interface TidyLedgerSettlement {
+  runId: string;
+  costUsd: number;
+  estimatedUsd: number;
+}
+
+export interface TidyLedgerState {
+  capUsd: number;
+  spentUsd: number;
+  reservations: readonly TidyLedgerReservation[];
+}
+
+export type LedgerReservation = TidyLedgerReservation;
+export type LedgerSettlement = TidyLedgerSettlement;
+export type RunLedgerState = TidyLedgerState;
+
+/** Optional triage output is deliberately bounded by the same frozen file
+ * limit. Triage only supplies a suggestion; deterministic signals remain
+ * authoritative in the batch command. */
+export const TRIAGE_SCHEMA: JsonSchema = {
+  type: "object",
+  properties: {
+    files: {
+      type: "array",
+      maxItems: TIDY_MAX_FILES,
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string", maxLength: 128 },
+          include: { type: "boolean" },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+          reason: { type: "string", maxLength: 200 },
+        },
+        required: ["name", "include", "confidence", "reason"],
+        additionalProperties: false,
+      },
+    },
+    notes: { type: "string", maxLength: 1000 },
+  },
+  required: ["files"],
+  additionalProperties: false,
+};
+
 export type TidyFileAction = "keep" | "rewrite" | "create" | "delete" | "rename";
 
 export interface TidyProposalFile {
@@ -202,7 +347,7 @@ export const TIDY_SCHEMA: JsonSchema = {
   properties: {
     files: {
       type: "array",
-      maxItems: 24,
+      maxItems: TIDY_MAX_FILES,
       items: {
         type: "object",
         properties: {

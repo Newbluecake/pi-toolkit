@@ -8,6 +8,7 @@
 import { isV2Name } from "../safe-fs.js";
 import { parseMemoryMeta } from "../meta.js";
 import { stripFrontmatter } from "../frontmatter.js";
+import { TIDY_MAX_FILES } from "../contracts.js";
 import type { TidyProposal, TidyProposalFile } from "../contracts.js";
 import type { TidySnapshotFile } from "./snapshot.js";
 
@@ -44,8 +45,8 @@ export interface TidyValidateContext {
   maxOutputBytes: number;
 }
 
-const SCHEMA_LIMITS = {
-  maxFiles: 24,
+export const SCHEMA_LIMITS = {
+  maxFiles: TIDY_MAX_FILES,
   maxDropped: 200,
   nameMax: 128,
   reasonMax: 200,
