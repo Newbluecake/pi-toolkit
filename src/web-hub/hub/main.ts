@@ -147,22 +147,32 @@ async function main(): Promise<void> {
   const log = createHubLog(paths.logFile);
   log.info("hub process starting", { port: config.port, idleExitMinutes: config.idleExitMinutes });
 
+  // Every exit from main() is an explicit process.exit(). A close() (startup-time supersede, or a
+  // later fence/idle/admin/self-restart close) shuts the listening sockets first and then awaits
+  // bounded teardown steps whose deadline timers are unref'd; with no ref'd handle left Node would
+  // exit naturally with status 0 mid-teardown — dropping owner release, hub.json removal and the
+  // final `hub closed` log. This ref'd keepalive lives for the whole entry process and is only
+  // ended by the explicit exits below (the close() deadline itself bounds how long it can hold).
+  const keepAlive = setInterval(() => {}, 1_000);
   let hub: Awaited<ReturnType<typeof startHub>>;
   try {
     hub = await startHub(config, createHttpFrontend, startDeps);
   } catch (err) {
+    clearInterval(keepAlive);
     log.error("hub startup failed", { error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
     log.close();
     process.exit(1);
   }
   if ("exists" in hub && hub.exists === false) {
     log.info("hub closed during startup, exiting", { reason: hub.reason });
+    clearInterval(keepAlive);
     log.close();
     process.exit(0);
   }
   if ("exists" in hub) {
     // Singleton race lost: the incumbent hub owns the state dir — exit 0.
     log.info("hub already running, exiting", {});
+    clearInterval(keepAlive);
     log.close();
     process.exit(0);
   }
@@ -170,6 +180,7 @@ async function main(): Promise<void> {
   installProcessHandlers(hub, log);
   const reason = await hub.closed;
   log.info("hub process exiting", { reason });
+  clearInterval(keepAlive);
   log.close();
   process.exit(0);
 }
