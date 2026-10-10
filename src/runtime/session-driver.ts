@@ -802,12 +802,68 @@ export class PiSessionDriver implements SessionDriver {
     // cache-ttl keepalive) irrelevant — skip the check so a consult call never false-positives
     // (isConsultForkSpec/computeChildExtensionMissing below).
     const activationBefore = childActivationSnapshot();
-    return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
+    const guard = resolved.consultGuard;
+    if (!guard) {
+      return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
+        .then((options) =>
+          createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]),
+        )
+        .then(
+          ({ session }) =>
+            new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec))),
+        );
+    }
+
+    // Consult C2 must fail closed after createAgentSession has allocated an AgentSession,
+    // but before bind() or the first prompt. The driver owns this cleanup window because the
+    // runner's late-arrival hook only sees successfully resolved handles.
+    const { consultGuard: _consultGuard, ...piSpec } = resolved;
+    let created: AgentSession | undefined;
+    let disposed = false;
+    const disposeOnce = () => {
+      if (disposed || !created) return;
+      disposed = true;
+      try {
+        created.dispose();
+      } catch {
+        // Cleanup must not replace the preflight/install failure.
+      }
+    };
+    return toCreateOptions(piSpec, piSpec.cwd ?? sessionManager.getCwd())
       .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
-      .then(
-        ({ session }) =>
-          new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec))),
-      );
+      .then(({ session }) => {
+        created = session;
+        let verdict: ReturnType<typeof guard.preflight> | undefined;
+        try {
+          verdict = guard.preflight(session);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`[consult-preserve:guard_unavailable:agent-hooks] ${detail}`);
+        }
+        if (!verdict || typeof verdict !== "object") {
+          throw new Error("[consult-preserve:guard_unavailable:agent-hooks] invalid preflight result");
+        }
+        if (verdict.ok === false) {
+          if (typeof verdict.code !== "string")
+            throw new Error("[consult-preserve:guard_unavailable:agent-hooks] invalid preflight result");
+          throw new Error(`[consult-preserve:${verdict.code}] ${verdict.detail ?? verdict.code}`);
+        }
+        if (verdict.ok !== true) {
+          throw new Error("[consult-preserve:guard_unavailable:agent-hooks] invalid preflight result");
+        }
+        try {
+          guard.install(session);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          if (detail.startsWith("[consult-preserve:")) throw error;
+          throw new Error(`[consult-preserve:guard_unavailable:install-failed] ${detail}`);
+        }
+        return new PiSessionHandle(session, computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)));
+      })
+      .catch((error: unknown) => {
+        disposeOnce();
+        throw error;
+      });
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];

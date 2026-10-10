@@ -181,6 +181,76 @@ describe("runtime-adapter: consult run read-only domain (T-12)", () => {
     expect(consultFactory).not.toHaveBeenCalled();
   });
 
+  it("builds a C2 session from the expert loadout and shadows declared adapter tools", async () => {
+    const clock = new FakeClock();
+    const captured: {
+      spec?: SessionSpec & {
+        toolScope?: { policy?: { allow?: Set<string>; deny?: Set<string>; reportBlockedOnBind?: boolean } };
+      };
+    } = {};
+    const driver = captureDriver(captured);
+    const runner = buildAdapter(clock, {
+      driver,
+      extensions: [
+        {
+          resolveSessionSpec: async (s) => ({
+            ...s,
+            tools: ["bash"],
+            customTools: [...(s.customTools ?? []), { name: "foreign", execute: async () => ({ content: [] }) }],
+          }),
+        },
+      ],
+    });
+    const parameters = { type: "object", properties: { model: { type: "string" } } };
+    const p = runner.run(
+      spec(expertType(), {
+        ...consultRequest,
+        consultSnapshot: {
+          tools: [
+            { name: "read", description: "recorded read", parameters },
+            {
+              name: "set_model",
+              description: "recorded set model",
+              parameters,
+              constrainedSampling: { type: "json_schema", strict: "prefer" },
+            },
+            { name: "foreign", description: "recorded foreign", parameters },
+          ],
+          systemSections: {},
+          model: { provider: "snapshot-provider", id: "snapshot-model" },
+          thinkingLevel: "high",
+          sourceSessionId: "expert-session",
+        },
+      }),
+    );
+    await drain(clock, 12);
+    await p;
+
+    expect(captured.spec!.tools).toEqual(["read", "set_model", "foreign"]);
+    expect(captured.spec!.model).toEqual({ provider: "snapshot-provider", id: "snapshot-model" });
+    expect(captured.spec!.thinkingLevel).toBe("high");
+    expect(captured.spec!.consultGuard).toBeDefined();
+    expect(toolNames(captured.spec!)).toEqual(["set_model"]);
+    const shadow = captured.spec!.customTools?.[0] as {
+      description: string;
+      parameters: unknown;
+      constrainedSampling?: unknown;
+      prepareArguments?: unknown;
+      execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: unknown }>;
+    };
+    expect(shadow.description).toBe("recorded set model");
+    expect(shadow.parameters).toBe(parameters);
+    expect(shadow.constrainedSampling).toEqual({ type: "json_schema", strict: "prefer" });
+    expect(shadow.prepareArguments).toBeUndefined();
+    expect(Object.isFrozen(shadow)).toBe(true);
+    expect((await shadow.execute("call", {}, undefined, undefined, undefined)).isError).toBe(true);
+    const policy = captured.spec!.toolScope!.policy!;
+    expect([...policy.allow!].sort()).toEqual(["foreign", "read", "set_model"]);
+    expect(policy.deny.has("set_model")).toBe(false);
+    expect(policy.deny.has("Agent")).toBe(true);
+    expect(policy.reportBlockedOnBind).toBe(true);
+  });
+
   it("builds the toolScope policy from the same constant with no grants", async () => {
     const clock = new FakeClock();
     const captured: { spec?: SessionSpec & { toolScope?: { policy?: { allow?: Set<string>; deny?: Set<string> } } } } =

@@ -43,12 +43,21 @@ import {
   buildToolScopePolicy,
   bashJobGrant,
   CONSULT_READONLY_TOOLS,
+  RESERVED_TOOL_NAMES,
   createToolScopeEnforcer,
 } from "../runtime/tool-scope.js";
 import type { Watchdog } from "../runtime/watchdog.js";
 import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import type { ResolveExpertsResult } from "../consult/index.js";
+import { createConsultGuard } from "../consult/preserve-guard.js";
+import {
+  CONSULT_ADAPTER_TOOL_NAMES,
+  consultAdapterDeclarations,
+  createConsultShadowTool,
+  isConsultAdapterToolName,
+  type ShadowPromptSource,
+} from "../consult/shadow-tools.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import { createSetModelTool } from "../tools/set-model-tool.js";
@@ -647,7 +656,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // Per-spawn thinkingOverride (Agent tool `thinking` param) wins over
         // the agent type's configured thinkingLevel; neither set => leave the
         // session to pi's global defaultThinkingLevel.
-        const thinkingLevel = spec.request.thinkingOverride ?? spec.type.thinkingLevel;
+        const consultSnapshot = isConsultRun ? spec.request.consultSnapshot : undefined;
+        const consultC2 = consultSnapshot !== undefined;
+        const thinkingLevel = consultC2
+          ? consultSnapshot.thinkingLevel
+          : (spec.request.thinkingOverride ?? spec.type.thinkingLevel);
         // D10 consult cwd (workflow-worktree plan §2 D10): a cell read by the
         // consult tool's getter. The consult factory below is called BEFORE
         // H2 runs, but the tool it returns only ever executes later (once the
@@ -660,8 +673,22 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         let askerCwd: { cwd: string; isolated: boolean } = { cwd: preH2Cwd, isolated: false };
         let sessionSpec: SessionSpec = {
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
-          ...(spec.model === undefined ? {} : { model: spec.model }),
-          ...(spec.type.tools === undefined ? {} : { tools: spec.type.tools }),
+          ...(consultC2
+            ? consultSnapshot.model === undefined && spec.model === undefined
+              ? {}
+              : { model: consultSnapshot.model ?? spec.model }
+            : spec.model === undefined
+              ? {}
+              : { model: spec.model }),
+          ...(consultC2
+            ? {
+                tools: consultSnapshot.tools
+                  .map((tool) => tool.name)
+                  .filter((name): name is string => typeof name === "string"),
+              }
+            : spec.type.tools === undefined
+              ? {}
+              : { tools: spec.type.tools }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
           ...(spec.type.promptMode === "replace" && spec.type.systemPrompt
             ? { systemPrompt: spec.type.systemPrompt }
@@ -672,6 +699,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // further extend — the full customTools list).
         const grantedReserved: string[] = [];
         const customTools: unknown[] = [];
+        const shadowPromptSources = new Map<string, ShadowPromptSource>();
         // consult §5.4 B-1: a consulted expert copy gets NONE of the injected
         // tools (message_agent / set_model / nested Agent / StructuredOutput /
         // consult) — every injection branch below is explicitly
@@ -790,6 +818,71 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           customTools.push(structuredOutputTool);
           grantedReserved.push("StructuredOutput");
         }
+        // C2: preserve the expert's adapter-owned declarations as inert shadows.
+        // Build presentation metadata with the same factories used by ordinary runs,
+        // but retain only the shadow objects (never their execute implementations).
+        if (consultC2) {
+          const declared = new Set(consultAdapterDeclarations(consultSnapshot.tools).map((tool) => tool.name));
+          const addSource = (name: string, source: ShadowPromptSource | undefined) => {
+            if (declared.has(name) && source !== undefined) shadowPromptSources.set(name, source);
+          };
+          addSource(
+            "set_model",
+            createSetModelTool({
+              selfRunId: spec.runId,
+              runs: { setModel: (runId, model, opts) => runtime.setModelForRun(runId, model, opts ?? {}) },
+              ...(deps.resolveModelHint ? { resolveHint: deps.resolveModelHint } : {}),
+              ...(deps.availableModels ? { available: deps.availableModels } : {}),
+            }),
+          );
+          if (deps.fabric) {
+            addSource(
+              "message_agent",
+              createMessageAgentTool({
+                router: deps.fabric.router,
+                from: spec.runId,
+                generation: () => runtime.getRunState(spec.runId)?.generation,
+                ...(spec.type.canMessage === undefined ? {} : { canMessage: spec.type.canMessage }),
+              }),
+            );
+          }
+          if (spec.type.canSpawn?.length && deps.nestedSpawn) {
+            const port = deps.nestedSpawn();
+            if (port) {
+              addSource(
+                "Agent",
+                createAgentTool({
+                  spawn: port,
+                  parentRunId: spec.runId,
+                  allowedTypes: spec.type.canSpawn,
+                  forceSlotless: true,
+                  ...(deps.resultMaxChars ? { resultMaxChars: deps.resultMaxChars } : {}),
+                  ...(deps.queueWhenFull ? { queueWhenFull: deps.queueWhenFull } : {}),
+                  ...(deps.loadGate ? { loadGate: deps.loadGate } : {}),
+                  ...(deps.consultResolveExperts ? { resolveExperts: deps.consultResolveExperts } : {}),
+                }),
+              );
+            }
+          }
+          if (deps.consult) {
+            addSource(
+              "consult",
+              deps.consult(spec.runId, () => askerCwd, spec.request.consultExperts ?? []),
+            );
+          }
+          if (declared.has("StructuredOutput")) {
+            addSource(
+              "StructuredOutput",
+              createStructuredOutputTool({ schema: { type: "object" }, onSubmit: () => ({ ok: true, errors: [] }) }),
+            );
+          }
+          for (const declaration of consultAdapterDeclarations(consultSnapshot.tools)) {
+            const name = declaration.name;
+            if (typeof name !== "string" || !isConsultAdapterToolName(name)) continue;
+            customTools.push(createConsultShadowTool(declaration, shadowPromptSources.get(name)));
+            if ((CONSULT_ADAPTER_TOOL_NAMES as readonly string[]).includes(name)) grantedReserved.push(name);
+          }
+        }
         // bash-timeout-grace plan §3.10 (P5): no customTools injection — `bash`/
         // `bash_job` are registered by the CHILD session's own pre-guard
         // `activate()` (src/bash/child.ts, src/index.ts), not injected here.
@@ -886,7 +979,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         if (readonlyDomain) {
           sessionSpec = {
             ...sessionSpec,
-            tools: [...CONSULT_READONLY_TOOLS, ...(readonlyHasSchema ? ["StructuredOutput"] : [])],
+            tools: consultC2
+              ? consultSnapshot.tools
+                  .map((tool) => tool.name)
+                  .filter((name): name is string => typeof name === "string")
+              : [...CONSULT_READONLY_TOOLS, ...(readonlyHasSchema ? ["StructuredOutput"] : [])],
+            ...(consultC2 ? { consultGuard: createConsultGuard(consultSnapshot) } : {}),
           };
           // §7.0 point 6a: narrow customTools down to ONLY the tool instance(s)
           // THIS adapter call itself created (object identity, not name) —
@@ -922,21 +1020,37 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // each surviving name's actual tool-implementation source (§7.0.0
         // defense-in-depth — fail-closed against a same-named custom tool
         // shadowing a builtin one, §1 "pi 同名覆盖").
-        const readonlyProvenance = readonlyDomain
-          ? new Map<string, string>([
-              ["read", "builtin"],
-              ["grep", "builtin"],
-              ["find", "builtin"],
-              ["ls", "builtin"],
-              ...(readonlyHasSchema ? ([["StructuredOutput", "sdk"]] as [string, string][]) : []),
-            ])
-          : undefined;
+        const readonlyProvenance =
+          readonlyDomain && !consultC2
+            ? new Map<string, string>([
+                ["read", "builtin"],
+                ["grep", "builtin"],
+                ["find", "builtin"],
+                ["ls", "builtin"],
+                ...(readonlyHasSchema ? ([["StructuredOutput", "sdk"]] as [string, string][]) : []),
+              ])
+            : undefined;
+        const consultGranted = consultC2
+          ? [
+              ...new Set(
+                consultSnapshot.tools
+                  .map((tool) => tool.name)
+                  .filter((name): name is string => typeof name === "string")
+                  .filter((name) => RESERVED_TOOL_NAMES.includes(name)),
+              ),
+            ]
+          : [];
         const toolScope = {
           policy: readonlyDomain
             ? buildToolScopePolicy({
-                tools: CONSULT_READONLY_TOOLS,
-                granted: readonlyHasSchema ? ["StructuredOutput"] : [],
+                tools: consultC2
+                  ? consultSnapshot.tools
+                      .map((tool) => tool.name)
+                      .filter((name): name is string => typeof name === "string")
+                  : CONSULT_READONLY_TOOLS,
+                granted: consultC2 ? consultGranted : readonlyHasSchema ? ["StructuredOutput"] : [],
                 ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
+                ...(consultC2 ? { reportBlockedOnBind: true } : {}),
               })
             : buildToolScopePolicy({
                 ...(spec.type.tools ? { tools: spec.type.tools } : {}),
@@ -947,10 +1061,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             // is only half-met here — the enforcer is built before the run's
             // dispatch channel exists, so blocked/failed enforcement lands in
             // the log but not in diag.degraded (documented gap, P3).
-            onBlocked: (names) =>
+            onBlocked: (names) => {
               console.warn(
                 `[pi-subagent] tool scope: blocked late-registered/reserved tool(s) not in run ${spec.runId}'s whitelist: ${names.join(", ")}`,
-              ),
+              );
+              if (consultC2) {
+                console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip (${names.join(", ")})`);
+                void runtime.abortRun(spec.runId, "user_stop");
+              }
+            },
             onError: (error) =>
               console.warn(
                 `[pi-subagent] tool scope: setActiveTools failed for run ${spec.runId} (retried at next turn boundary): ${error instanceof Error ? error.message : String(error)}`,
@@ -964,6 +1083,10 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 console.warn(
                   `[pi-subagent] readonly domain: removed shadowed tool ${e.name} (source: ${e.actual ?? "unknown"}, expected ${e.expected}) from run ${spec.runId}`,
                 );
+              }
+              if (consultC2) {
+                console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip`);
+                void runtime.abortRun(spec.runId, "user_stop");
               }
             },
           }),

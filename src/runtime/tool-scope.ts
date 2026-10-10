@@ -90,6 +90,8 @@ export interface ToolScopePolicy {
    * no-op (byte-identical to pre-P0-r behavior, \u00a77.0.0 defense-in-depth only).
    */
   readonly provenance?: ReadonlyMap<string, string>;
+  /** C2: report allow/deny strips at bind as well as later boundaries. */
+  readonly reportBlockedOnBind?: boolean;
 }
 export interface ScopeDecision {
   /** The tool names actually left active after this recompute, sorted. */
@@ -160,6 +162,8 @@ export function buildToolScopePolicy(opts: {
   granted?: readonly string[];
   /** P0-r (\u00a77.0 point 6b): attached to the returned policy verbatim (see ToolScopePolicy.provenance). */
   provenance?: ReadonlyMap<string, string>;
+  /** C2: report allow/deny strips at bind as well as later boundaries. */
+  reportBlockedOnBind?: boolean;
 }): ToolScopePolicy {
   const grantedSet = new Set(opts.granted ?? []);
   const deny = new Set(RESERVED_TOOL_NAMES.filter((n) => !grantedSet.has(n)));
@@ -167,6 +171,7 @@ export function buildToolScopePolicy(opts: {
     ...(opts.tools ? { allow: new Set([...opts.tools, ...grantedSet]) } : {}),
     deny,
     ...(opts.provenance ? { provenance: opts.provenance } : {}),
+    ...(opts.reportBlockedOnBind === true ? { reportBlockedOnBind: true } : {}),
   };
 }
 
@@ -273,9 +278,10 @@ export function createToolScopeEnforcer(
     // first bind, or because nothing new registered since the previous turn
     // — never gets a redundant setActiveTools call.
     const changed = applied.length !== currentSorted.length || applied.some((n, i) => n !== currentSorted[i]);
-    if (report) {
+    if (report || (policy.reportBlockedOnBind === true && baseline === undefined)) {
       // Fail-safe: if onBind never ran (no baseline), every blocked name is
-      // treated as a newcomer rather than going unreported.
+      // treated as a newcomer rather than going unreported. C2 also opts into
+      // this path at bind because a stripped snapshot name is an identity loss.
       const trulyNew = blockedNewcomers.filter((n) => (baseline === undefined || !baseline.has(n)) && !warned.has(n));
       if (trulyNew.length) {
         trulyNew.forEach((n) => warned.add(n));
