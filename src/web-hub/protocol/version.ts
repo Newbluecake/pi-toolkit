@@ -176,3 +176,16 @@ function parseCore(v: string): [number, number, number] {
   if (m === null) return [0, 0, 0];
   return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
+
+/**
+ * worktree-graph plan v2 §3 (P0): the hub cap advertising the worktree commit-graph endpoint
+ * (`GET /api/worktree-graph`, `protocol/worktree-graph.ts`). Declared under exactly the same
+ * conditions as `WTDIFF_HUB_CAP` (「与 wtdiff 同门」): whenever `config.preview` exists **and**
+ * `/proc/self/fd` is usable at hub start — no `/proc` ⇒ the routes are never constructed, so
+ * the cap is never declared. LAN availability likewise rides `PREVIEW_LAN_HUB_CAP` (§0.2 Q1:
+ * LAN has the same access as loopback, gated by the existing `webHub.preview`; `"loopback"`
+ * turns it off for LAN). A browser that doesn't see it keeps the worktree panel byte-identical
+ * (I8). Like every cap above it adds no agent↔hub frames and no SSE event, so no PROTO bump
+ * (the 1.1 → 1.2 minor bump is fleet F0's alone, see PROTO above).
+ */
+export const WTGRAPH_HUB_CAP = "wtgraph.v1";
