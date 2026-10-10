@@ -25,7 +25,7 @@
  *   remotes, `sym` small chips, tags, `HEAD → …`, detached HEAD, multi-remote merge, full
  *   deterministic ordering), `wtRingsOf` (FULL-oid matching — the 7-char `StatusInfo` head
  *   never matches; label by exact `path` row, else basename), `formatCommitDate` (absolute,
- *   `TZ=UTC` — the run command pins it), `pathD`/`stubPathD` geometry.
+ *   any TZ — instants are built from local wall-clock parts), `pathD`/`stubPathD` geometry.
  * - Scope truth table: `wtgraphScopeOf` (wtgraph.v1, LAN rides preview.lan.v1), `pickGraphWt`
  *   (current → main → null), `graphSigOf` (change detection).
  * - Seeded (#6): fixed-seed (mulberry32, never `Math.random`) 1000-case random DAG property
@@ -982,24 +982,25 @@ describe("logic/gitGraph wtRingsOf", () => {
 });
 
 // ---------------------------------------------------------------------------
-// dates (§4.2/#14 — TZ=UTC pinned by the run command)
+// dates (§4.2/#14 — timezone-independent: instants are built from LOCAL wall-clock parts, so the
+// local-time formatter must echo them back under any TZ)
 // ---------------------------------------------------------------------------
 
-describe("logic/gitGraph formatCommitDate / commitDateParts (TZ=UTC)", () => {
+describe("logic/gitGraph formatCommitDate / commitDateParts (any TZ)", () => {
   it("en: `23 Sep 2026 09:55` — day unpadded, fixed month table, 24h clock", () => {
-    const t = Date.UTC(2026, 8, 23, 9, 55) / 1000;
+    const t = new Date(2026, 8, 23, 9, 55).getTime() / 1000;
     expect(formatCommitDate(t, "en")).toBe("23 Sep 2026 09:55");
   });
   it("zh: `2026-09-23 09:55`", () => {
-    const t = Date.UTC(2026, 8, 23, 9, 55) / 1000;
+    const t = new Date(2026, 8, 23, 9, 55).getTime() / 1000;
     expect(formatCommitDate(t, "zh")).toBe("2026-09-23 09:55");
   });
   it("padding: single-digit day/hour keep the clock strict", () => {
-    expect(formatCommitDate(Date.UTC(2026, 0, 1, 0, 5) / 1000, "en")).toBe("1 Jan 2026 00:05");
-    expect(formatCommitDate(Date.UTC(2026, 10, 9, 23, 0) / 1000, "en")).toBe("9 Nov 2026 23:00");
+    expect(formatCommitDate(new Date(2026, 0, 1, 0, 5).getTime() / 1000, "en")).toBe("1 Jan 2026 00:05");
+    expect(formatCommitDate(new Date(2026, 10, 9, 23, 0).getTime() / 1000, "en")).toBe("9 Nov 2026 23:00");
   });
-  it("commitDateParts reads the LOCAL timezone parts (UTC under the pinned TZ)", () => {
-    expect(commitDateParts(new Date(Date.UTC(2026, 8, 23, 9, 55)))).toEqual({ y: 2026, mo: 9, d: 23, h: 9, mi: 55 });
+  it("commitDateParts reads the LOCAL timezone parts", () => {
+    expect(commitDateParts(new Date(2026, 8, 23, 9, 55))).toEqual({ y: 2026, mo: 9, d: 23, h: 9, mi: 55 });
   });
   it("injectable parts extractor is honored", () => {
     const fixed = () => ({ y: 2026, mo: 9, d: 23, h: 9, mi: 55 });

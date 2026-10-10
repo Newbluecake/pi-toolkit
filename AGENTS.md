@@ -431,6 +431,25 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   endpoint exposes) follow A1: LAN same-width, current-HEAD-pinned, server-computed, denylist-
   blocked. Design: `docs/dev/worktree-diff/plan.md` (§9.3 revision log); real-device checklist:
   `docs/dev/worktree-diff/acceptance.md`; endpoint integration: `tests/integration/web-hub-worktree-diff.test.ts`.
+  **Worktree graph**: `GET /api/worktree-graph` (`X-PWH: 1`), cap `wtgraph.v1`, shares wtdiff's
+  `webHub.preview` on/loopback gate + `/proc/self/fd` probe (Linux-only, fail-closed). The hub's
+  single runner serves both route frontends through membership + three-fd pins + minimal env;
+  frozen `src/git/graph.ts` `wtGraphArgs` (byte-pinned tests) runs Gr `for-each-ref` then Gl
+  `log --date-order` over validated explicit snapshot tips, with `--no-lazy-fetch`, no replace
+  objects, pager, hooks, signatures, mailmap or notes. The exec/read surface matrix in plan
+  §2.3 covers transport/ssh/helpers, gpg, mailmap, replace/notes, drivers/attributes/worktree
+  reads, hooks/fsmonitor/pager, object/ref/index writes and the accepted trace2 residual;
+  graph never reads file contents or collects dedicated email fields (free text may contain
+  secrets; sole-user LAN exposure is accepted). **R11-style upgrade gate**: new git versions
+  adding executing config/argv behaviour, or any Gr/Gl argv change, require re-checking argv
+  and `git help config`, updating the matrix with paired unhardened/hardened tests, and running
+  `tests/integration/{git-graph,web-hub-worktree-graph}.test.ts` in the same PR; do NOT widen
+  `WTDIFF_DRIVER_NAME_RE` or the Cc driver regex for graph. Budget ledger §2.4: admission 8s +
+  git 14s (four 2s steps + Gl 6s) + close 1s = 23s; transfer 10s fits the 35s client deadline;
+  response ≤512 KiB. The WorktreePanel's default-collapsed, lazy-loaded graph shows ≤200
+  commits, merge rows dimmed, full-oid worktree HEAD rings and ≤4 lanes at mobile width.
+  Design: `docs/dev/worktree-graph/plan.md`; device checklist:
+  `docs/dev/worktree-graph/acceptance.md`.
   **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
   the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
   planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product

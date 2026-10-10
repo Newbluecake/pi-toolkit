@@ -509,3 +509,19 @@ D3 合入闸门」——H1（驱动中和三层）/H2（环境 allowlist）/H3�
 与 loopback 同宽**——LAN 上额外流出的只有「当前变更集中已修改文件在本请求解析的 HEAD 里的版本
 （±3 行上下文）」与「已删除文件在该 HEAD 的全文」，任何更早历史、任何不在变更集中的路径、任何
 denylist 命中项都不可达。设计全文与决策日志：`docs/dev/worktree-diff/plan.md`（含 §9.3 修订记录）。
+
+## 修订注记 · worktree-graph（2026-10-10，P6 / D15）
+
+D15 的 hub git 执行面扩到 Gr（`for-each-ref`）/Gl（`log --date-order`）：**一个 runner、两个
+route frontends**（worktree-diff 与 worktree-graph），复用 membership、三 fd 钉住与
+`envPolicy:"minimal"`，不是另建执行器或 agent 命令通道。Graph argv 只来自冻结的
+`src/git/graph.ts` `wtGraphArgs`；Gr 快照与 porcelain 的校验 hex tips 显式传给 Gl，不解析
+请求派生的 ref，不读取工作区文件正文，不执行 lazy fetch / transport / gpg / hook / pager，
+不写对象、refs 或 index。执行/读取面矩阵与 git 升级门禁见 graph plan §2.2/§2.3；不得借 graph
+放宽 wtdiff 驱动正则。预算按 §2.4：准入 8s + git 14s + close 1s，含传输预留后不超过客户端
+35s；响应上限 512 KiB、固定 200 提交。LAN 与 loopback 同宽，沿用 `webHub.preview` 门；
+自由文本可能带秘密的残余由 sole-LAN-user 裁定接受，不采集专用 email 字段。
+
+设计：`docs/dev/worktree-graph/plan.md`；真机：`docs/dev/worktree-graph/acceptance.md`；
+真实端点交叉校验、部分克隆 no-lazy-fetch 与关机 pin/进程回收闸门：
+`tests/integration/web-hub-worktree-graph.test.ts`。
