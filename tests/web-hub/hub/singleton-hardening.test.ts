@@ -173,6 +173,34 @@ describe("bind-time socket verification (§1.3.5): the freshly-bound socket itse
   });
 });
 
+describe("startFence diagnostics (D-B-diag)", () => {
+  it("records the concrete error class, elapsed check duration, and in-flight count for every strike", async () => {
+    const p = paths();
+    const o = track(await acquireSingleton(p, { probeMs: 50, guardName: null }));
+    if (o.kind !== "owner") throw new Error("expected owner");
+    const diagnostics: Array<{ errorClass: string; durationMs: number; inFlight: number; strike: number }> = [];
+    let lost = 0;
+    const failingLstat = (() =>
+      Promise.reject(Object.assign(new Error("permission denied"), { code: "EACCES" }))) as typeof lstat;
+    const stop = startFence(
+      p.socketPath,
+      o.identity,
+      () => {
+        lost++;
+      },
+      20,
+      1,
+      { lstat: failingLstat, checkDeadlineMs: 100, ioStrikes: 2, onDiagnostic: (d) => diagnostics.push(d) },
+    );
+    await waitFor(() => lost === 1, 1_000);
+    stop();
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics.map((d) => d.errorClass)).toEqual(["EACCES", "EACCES"]);
+    expect(diagnostics.every((d) => d.durationMs >= 0 && d.inFlight === 1)).toBe(true);
+    expect(diagnostics.map((d) => d.strike)).toEqual([1, 2]);
+  });
+});
+
 describe("startFence: real (not mocked) directory-identity and socket-identity drift", () => {
   it("the socket directory being replaced (same-path socket preserved, new dir inode) ⇒ onLost('dir-replaced')", async () => {
     const p = paths();

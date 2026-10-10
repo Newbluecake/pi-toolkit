@@ -18,6 +18,7 @@ export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts", "tests/**/*.test-d.ts"],
     environment: "node",
+    setupFiles: ["./tests/setup/sandbox-home.ts"],
     testTimeout: 10_000,
   },
 });

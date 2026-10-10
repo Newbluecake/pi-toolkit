@@ -235,6 +235,8 @@ export interface WebHubDeps {
    * deterministically wait out under load. */
   gitRealpath?: (p: string) => Promise<string>;
   paths?: HubPaths;
+  /** Explicit home for the launched hub. Never inferred from an injected `paths` object. */
+  launchHome?: string;
   buildInfo?: () => Promise<{ pluginVersion: string; buildId: string }>;
   argv1?: string;
 }
@@ -307,7 +309,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const now = deps.now ?? Date.now;
   const settings = deps.settings;
   const modelsEnabled = settings.control !== false && settings.webCommands !== false;
-  const home = env.HOME !== undefined && env.HOME !== "" ? env.HOME : homedir();
+  // launchHome is an explicit test/sandbox seam. When omitted, preserve the historical
+  // HOME/homedir resolution byte-for-byte; in particular, never reverse-engineer a home from
+  // an injected HubPaths value (the XDG/TMP socket fallback is not mathematically invertible).
+  const home = deps.launchHome ?? (env.HOME !== undefined && env.HOME !== "" ? env.HOME : homedir());
   const paths =
     deps.paths ??
     resolveHubPaths({

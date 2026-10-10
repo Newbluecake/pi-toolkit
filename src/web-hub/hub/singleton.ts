@@ -379,6 +379,17 @@ async function bindIdentityAndOwn(
 // fence
 // ---------------------------------------------------------------------------
 
+export interface FenceDiagnostic {
+  /** Specific filesystem failure class (PrivateDirError.reason, errno, or Error.name). */
+  errorClass: string;
+  /** Wall-clock duration of this complete verifyBoundSocket/withDeadline check. */
+  durationMs: number;
+  /** Number of fence checks currently in flight when the strike was recorded. */
+  inFlight: number;
+  strike: number;
+  threshold: number;
+}
+
 export type FenceLoss =
   | "socket-missing" // lstat ENOENT
   | "socket-replaced" // socket.{dev,ino} 与 identity 不同
@@ -423,12 +434,16 @@ export function startFence(
   onLost: (why: FenceLoss) => void,
   intervalMs: number = DEFAULT_FENCE_MS,
   firstMs: number = Math.min(DEFAULT_FENCE_FIRST_MS, intervalMs),
-  deps?: Partial<FsDeps> & { checkDeadlineMs?: number; ioStrikes?: number },
+  deps?: Partial<FsDeps> & {
+    checkDeadlineMs?: number;
+    ioStrikes?: number;
+    onDiagnostic?: (diagnostic: FenceDiagnostic) => void;
+  },
 ): () => void {
   const checkDeadlineMs = deps?.checkDeadlineMs ?? DEFAULT_FENCE_CHECK_DEADLINE_MS;
   const ioStrikes = deps?.ioStrikes ?? DEFAULT_FENCE_IO_STRIKES;
   let stopped = false;
-  let inFlight = false;
+  let inFlight = 0;
   let ioStrikeCount = 0;
 
   function lost(why: FenceLoss): void {
@@ -436,8 +451,28 @@ export function startFence(
     onLost(why);
   }
 
-  function noteIoStrike(): void {
+  function noteIoStrike(err: unknown, durationMs: number): void {
     ioStrikeCount++;
+    const diagnostic: FenceDiagnostic = {
+      errorClass: fenceErrorClass(err),
+      durationMs,
+      inFlight,
+      strike: ioStrikeCount,
+      threshold: ioStrikes,
+    };
+    // singleton.ts deliberately has no dependency on the hub logger. Keep this diagnostic
+    // best-effort and side-effect free for the fence state machine itself; the callback is a
+    // test/embedding seam, while the console line is the production diagnostic sink.
+    try {
+      console.warn("web-hub socket fence check strike", diagnostic);
+    } catch {
+      // A diagnostic sink must never change fence-loss behavior.
+    }
+    try {
+      deps?.onDiagnostic?.(diagnostic);
+    } catch {
+      // Test/embedding sinks are observational only.
+    }
     if (ioStrikeCount >= ioStrikes) {
       ioStrikeCount = 0;
       lost("io");
@@ -445,8 +480,9 @@ export function startFence(
   }
 
   async function checkAsync(): Promise<void> {
-    if (stopped || inFlight) return;
-    inFlight = true;
+    if (stopped || inFlight > 0) return;
+    inFlight++;
+    const startedAt = Date.now();
     try {
       // Bind and fence share one verification function (§1.3.2); review fix #7: the socket-lstat
       // and dir-lstat verifyBoundSocket performs internally share this single checkDeadlineMs
@@ -463,7 +499,7 @@ export function startFence(
       if (err !== undefined) {
         const why = fenceLossOf(err, identity, undefined);
         if (why === "io") {
-          noteIoStrike();
+          noteIoStrike(err, Math.max(0, Date.now() - startedAt));
         } else {
           ioStrikeCount = 0;
           lost(why);
@@ -479,7 +515,7 @@ export function startFence(
       }
       ioStrikeCount = 0;
     } finally {
-      inFlight = false;
+      inFlight--;
     }
   }
 
@@ -820,6 +856,16 @@ function closeServer(server: net.Server): Promise<void> {
 /** Bounded, ref'd on purpose (see probeAlive). */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fenceErrorClass(err: unknown): string {
+  if (err instanceof PrivateDirError) return err.reason;
+  const code = errCode(err);
+  if (code !== undefined) return code;
+  // withDeadline uses a plain Error for compatibility, but its stable message still carries
+  // the useful diagnostic class rather than the unhelpful generic `Error` name.
+  if (err instanceof Error && err.message.startsWith("E_DEADLINE:")) return "E_DEADLINE";
+  return err instanceof Error && err.name !== "" ? err.name : "unknown";
 }
 
 function errCode(err: unknown): string | undefined {
