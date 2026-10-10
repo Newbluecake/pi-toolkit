@@ -235,10 +235,12 @@ describe("S7 stack wiring: BashJobManager construction", () => {
       expect(content).toContain("Bash job b_TEST0001 ($ npm test) finished: exit 1 after");
       expect(content).toContain("--- output tail ---");
       expect(content).toContain("failing assertion");
-      // Change A: the notice names the log file once and authorises reading it.
-      expect(content).toContain(`Full log: ${record.logPath}`);
-      expect(content).toMatch(/read tool.*tail\/grep\/awk/);
-      expect(content.split(record.logPath).length - 1).toBe(1);
+      // Whole-log rule: the tail above IS the entire log (3 lines, well
+      // under both caps), so the notice must NOT spend a line naming the
+      // log file — the model already has every byte of output.
+      expect(content).not.toContain("Full log:");
+      expect(content).not.toMatch(/read tool.*tail\/grep\/awk/);
+      expect(content).not.toContain(record.logPath);
       // Distinguishable from the subagent channel (delivery/format.ts).
       expect(content.startsWith("Subagent")).toBe(false);
       expect(delivery!.message.details).toMatchObject({
@@ -272,6 +274,34 @@ describe("S7 stack wiring: BashJobManager construction", () => {
       rebuilt.bashJobs?.dispose();
     },
   );
+
+  it.runIf(posix)("keeps the log-path line when the notice tail is only a slice of the log", async () => {
+    const dir = join(tmpRoot, "jobs-partial");
+    const record = seedRecord(dir, {
+      jobId: "b_TEST0002",
+      command: "npm run big",
+      status: "failed",
+      exitCode: 3,
+      spawnedAt: Date.now() - 452_000,
+      endedAt: Date.now(),
+      finalText: "Command exited with code 3",
+    });
+    // A log far past BASH_JOB_TAIL_BYTES: the tail read must start mid-file,
+    // so the notice cannot claim the whole output is already in the message.
+    writeFileSync(record.logPath, `early line that will NOT be in the tail\n${"x".repeat(1_500)}\n`, "utf8");
+
+    const host = fakePi();
+    const stack = buildSessionStack(host.pi, ctx, settingsWith(dir), types, []);
+    await vi.waitFor(() => expect(host.sent.length).toBe(1), { timeout: 8_000, interval: 50 });
+
+    const content = host.sent[0]!.message.content as string;
+    expect(content).toContain("Bash job b_TEST0002 ($ npm run big) finished: exit 3 after");
+    expect(content).toContain("--- output tail ---");
+    expect(content).not.toContain("early line that will NOT be in the tail");
+    expect(content).toContain(`Full log: ${record.logPath}`);
+    expect(content).toMatch(/read tool.*tail\/grep\/awk/);
+    stack.bashJobs?.dispose();
+  });
 });
 
 describe("S7 tail reader contract", () => {
@@ -296,7 +326,11 @@ describe("S7 tail reader contract", () => {
         };
       },
     } as unknown as BashJobManager;
-    expect((await readBashJobTail(manager, record))?.text).toBe("real tail");
+    const tail = await readBashJobTail(manager, record);
+    expect(tail?.text).toBe("real tail");
+    // The mock's read never reaches its own reported EOF (nextOffset 0 <
+    // logBytes 500), so the tail cannot be the whole log.
+    expect(tail?.coversWholeLog).toBe(false);
     expect(calls).toEqual([
       { offset: 0, advanceCursor: false, maxBytes: 1024 },
       { offset: 0, advanceCursor: false, maxBytes: 1024 },
@@ -307,6 +341,60 @@ describe("S7 tail reader contract", () => {
     hinted = true;
     expect((await readBashJobTail(manager, { ...record, logBytes: 500 }, 500))?.text).toBe("real tail");
     expect(calls).toHaveLength(1);
+  });
+
+  it.runIf(posix)("marks a tail whole-log only when the read spans byte 0 to EOF with no trim", async () => {
+    const record = seedRecord(join(tmpRoot, "tail-covered"), { jobId: "b_TAIL0002", logBytes: 0, readCursor: 0 });
+    const whole = "all\nof\nit\n";
+    const readOutput = async () => ({
+      jobId: record.jobId,
+      content: whole,
+      startOffset: 0,
+      nextOffset: whole.length,
+      logBytes: whole.length,
+      state: record.status,
+      exitCode: 0,
+      logTruncated: false,
+      record,
+    });
+    const manager = { readOutput } as unknown as BashJobManager;
+    expect(await readBashJobTail(manager, record)).toMatchObject({
+      text: "all\nof\nit",
+      logBytes: whole.length,
+      coversWholeLog: true,
+    });
+
+    // More than BASH_JOB_TAIL_LINES lines: the read still spans the whole
+    // file, but lastLines() drops earlier lines, so it is NOT whole-log.
+    const long = `${Array.from({ length: 12 }, (_, i) => `l${i}`).join("\n")}\n`;
+    const trimmed = await readBashJobTail(
+      {
+        readOutput: async () => ({
+          ...record,
+          content: long,
+          startOffset: 0,
+          nextOffset: long.length,
+          logBytes: long.length,
+        }),
+      } as unknown as BashJobManager,
+      record,
+    );
+    expect(trimmed?.coversWholeLog).toBe(false);
+
+    // A capped record is never whole-log even when the read spans the file.
+    const capped = await readBashJobTail(
+      {
+        readOutput: async () => ({
+          ...record,
+          content: whole,
+          startOffset: 0,
+          nextOffset: whole.length,
+          logBytes: whole.length,
+        }),
+      } as unknown as BashJobManager,
+      { ...record, outputTruncated: true },
+    );
+    expect(capped?.coversWholeLog).toBe(false);
   });
 });
 
@@ -346,6 +434,29 @@ describe("S7 notification text", () => {
     expect(formatBashJobNotification({ ...base, outputTruncated: true }, "tail", 0)).toContain(
       "the job's log hit its size cap",
     );
+  });
+
+  it("drops the Full log line when the terminal job's whole log is already the tail", () => {
+    const out = formatBashJobNotification(base, "done\nok", 0, true);
+    expect(out).toContain("--- output tail ---");
+    expect(out).toContain("done\nok");
+    expect(out).not.toContain("Full log:");
+    expect(out).not.toContain(base.logPath);
+    expect(out).not.toMatch(/read tool.*tail\/grep\/awk/);
+  });
+
+  it("keeps the Full log line for running jobs, capped logs, and plain tails", () => {
+    // Running job: the log can still grow, path stays even if the flag is set.
+    expect(formatBashJobNotification({ ...base, status: "running", endedAt: undefined }, "x", 0, true)).toContain(
+      `Full log: ${base.logPath}`,
+    );
+    // Size-capped log: some output was dropped, the path is how to reach it.
+    expect(formatBashJobNotification({ ...base, outputTruncated: true }, "x", 0, true)).toContain(
+      `Full log: ${base.logPath}`,
+    );
+    // Flag unset: unchanged pre-feature behaviour.
+    expect(formatBashJobNotification(base, "x", 0)).toContain(`Full log: ${base.logPath}`);
+    expect(formatBashJobNotification(base, "x", 0, false)).toContain(`Full log: ${base.logPath}`);
   });
 });
 

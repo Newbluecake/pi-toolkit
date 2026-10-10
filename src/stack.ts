@@ -36,7 +36,7 @@ import {
   sweepHandoffRemnants,
 } from "./bash/session-dirs.js";
 import { createProcessPort } from "./bash/process.js";
-import { previewCommand, type JobRecord } from "./bash/types.js";
+import { isTerminalJobStatus, previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
 import { getChildBashRegistry, declareHostBashViewCapability, type HostRunView } from "./bash/child-registry.js";
 import { resolveChildSwitchContextGrant } from "./context-switch/capability.js";
@@ -321,8 +321,19 @@ function bashJobOutcomePhrase(record: JobRecord): string {
  * §5 completion notice. Deliberately prefixed "Bash job" (vs. the
  * "Subagent …" wording of `delivery/format.ts`) so a downstream hook, the
  * user and the model can all tell the two notification channels apart.
+ *
+ * The `Full log:` line is dropped only when the message already shows the
+ * ENTIRE log: terminal job, no size cap, and `tailCoversWholeLog` (the tail
+ * text is byte-for-byte the whole current file — derived from the read
+ * offsets in `readBashJobTail`, never guessed from text length). Otherwise
+ * the model still needs the path to read what was left out.
  */
-export function formatBashJobNotification(record: JobRecord, tail?: string, now: number = Date.now()): string {
+export function formatBashJobNotification(
+  record: JobRecord,
+  tail?: string,
+  now: number = Date.now(),
+  tailCoversWholeLog = false,
+): string {
   const head =
     `Bash job ${record.jobId} ($ ${previewCommand(record.command, 60)}) finished: ` +
     `${bashJobOutcomePhrase(record)} after ${formatDuration(bashJobElapsedMs(record, now))}.`;
@@ -330,8 +341,12 @@ export function formatBashJobNotification(record: JobRecord, tail?: string, now:
   return [
     head,
     ...body,
-    `Full log: ${record.logPath} — a plain file: read it directly with the read tool, or with tail/grep/awk ` +
-      `(grep a large log rather than reading it whole). Its last line records this outcome.`,
+    ...(isTerminalJobStatus(record.status) && !record.outputTruncated && tailCoversWholeLog
+      ? []
+      : [
+          `Full log: ${record.logPath} — a plain file: read it directly with the read tool, or with tail/grep/awk ` +
+            `(grep a large log rather than reading it whole). Its last line records this outcome.`,
+        ]),
     ...(record.outputTruncated ? ["(the job's log hit its size cap; some output was dropped)"] : []),
   ].join("\n");
 }
@@ -402,6 +417,8 @@ function tailOffset(size: number): number {
 export interface BashJobTail {
   readonly text: string | undefined;
   readonly logBytes: number;
+  /** True when `text` IS the entire current log (read from byte 0 through EOF, no cap, no line trim). */
+  readonly coversWholeLog: boolean;
 }
 
 function lastLines(content: string, max: number): string | undefined {
@@ -433,7 +450,18 @@ export async function readBashJobTail(
     if (read.logBytes > hintedSize) {
       read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(read.logBytes) });
     }
-    return { text: lastLines(read.content, BASH_JOB_TAIL_LINES), logBytes: read.logBytes };
+    const text = lastLines(read.content, BASH_JOB_TAIL_LINES);
+    // Coverage is derived from the read result itself (start offset 0, next
+    // offset at the current EOF, no size cap) plus one text equality that
+    // catches the BASH_JOB_TAIL_LINES trim dropping earlier lines — never
+    // guessed from text length (bytes vs chars).
+    const coversWholeLog =
+      text !== undefined &&
+      !record.outputTruncated &&
+      read.startOffset === 0 &&
+      read.nextOffset >= read.logBytes &&
+      text === read.content.replace(/\n+$/, "");
+    return { text, logBytes: read.logBytes, coversWholeLog };
   } catch {
     return undefined;
   }
@@ -684,7 +712,7 @@ function buildBashJobManager(
       sendCompletionNotice(
         {
           customType: BASH_JOB_NOTIFICATION_TYPE,
-          content: formatBashJobNotification(record, tail?.text),
+          content: formatBashJobNotification(record, tail?.text, systemClock.now(), tail?.coversWholeLog),
           display: true,
           details: {
             kind: "bash-job",

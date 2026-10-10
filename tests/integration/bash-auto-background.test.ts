@@ -275,12 +275,17 @@ describe("I1 auto-background full chain", () => {
       expect(record.readCursor).toBe(0);
 
       // Change C: `status` carries the tail; the log file itself is the full
-      // record, and its own last line states the outcome (change B).
+      // record, and its own last line states the outcome (change B). The
+      // whole ~2-line log fits in the tail (terminal job, no size cap, read
+      // from byte 0 through EOF), so the message no longer spends a line
+      // naming the log file — every byte is already above it.
       const status = await run(jobs, { action: "status", job_id: jobId });
       const statusText = textOf(status);
       expect(statusText).toContain("done");
       expect(statusText).toContain("completed (exit 0)");
-      expect(statusText).toContain(`Full log: ${record.logPath}`);
+      expect(statusText).toContain(`[pi-subagent] job ${jobId} completed (exit 0) after`);
+      expect(statusText).not.toContain("Full log:");
+      expect(statusText).not.toContain(record.logPath);
       const rawLog = readFileSync(record.logPath, "utf8");
       expect(rawLog).toContain("done");
       expect(rawLog.trimEnd().endsWith(`[pi-subagent] job ${jobId} completed (exit 0) after 0ms`)).toBe(false);
@@ -475,12 +480,14 @@ describe("I4 exited_unknown recovery", () => {
       expect(content).toContain("last line before the crash");
       expect(notices(host)[0]!.message.details).toMatchObject({ status: "exited_unknown", exitCode: null });
 
-      // The log survives the loss of the exit code — status still shows it,
-      // and points at the plain file for the rest.
+      // The log survives the loss of the exit code — status still shows it.
+      // The whole 2-line log fits in the status tail (terminal job, no cap,
+      // byte 0 → EOF), so the message must NOT name the log file.
       const status = await run(jobs, { action: "status", job_id: "b_TEST04" });
       expect(textOf(status)).toContain("partial output");
       expect(textOf(status)).toContain("exit code lost");
-      expect(textOf(status)).toMatch(/Full log: .*b_TEST0400\.log/);
+      expect(textOf(status)).not.toMatch(/Full log: /);
+      expect(textOf(status)).not.toContain("b_TEST0400.log");
 
       await sleep(QUIET_WINDOW_MS);
       expect(notices(host).length).toBe(1);

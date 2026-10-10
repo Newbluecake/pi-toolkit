@@ -228,7 +228,7 @@ describe("bash_job — T10 status wording per state", () => {
     expect(response.content[0]!.text).toContain("$ npm test");
   });
 
-  it("carries a structured details payload and points at the log file", async () => {
+  it("carries a structured details payload (whole log shown ⇒ no log-path line)", async () => {
     const manager = fakeManager();
     manager.put(
       makeRecord({ jobId: "b_AAAA1111", status: "failed", exitCode: 2, endedAt: NOW, pid: 77, logBytes: 12 }),
@@ -236,8 +236,11 @@ describe("bash_job — T10 status wording per state", () => {
     );
     const response = await run(manager, { action: "status", job_id: "b_AAAA1111" });
     const out = response.content[0]!.text;
-    expect(out).toContain("Full log: /tmp/b_AAAA1111.log");
-    expect(out).toMatch(/read tool.*tail\/grep\/awk/);
+    // Terminal job, no size cap, and the tail above IS the entire log — so the
+    // message must not spend a line naming the log file.
+    expect(out).toContain("boom");
+    expect(out).not.toContain("Full log:");
+    expect(out).not.toMatch(/read tool.*tail\/grep\/awk/);
     expect(out).not.toContain('action: "output"');
     expect(response.details).toMatchObject({
       jobId: "b_AAAA1111",
@@ -346,6 +349,101 @@ describe("bash_job — T11/T12 status log tail", () => {
       BashJobToolParams as { properties: { action: { anyOf: { const: string }[] } } }
     ).properties.action.anyOf.map((entry) => entry.const);
     expect(actions).toEqual(["status", "wait", "kill", "list"]);
+  });
+});
+
+describe("bash_job — log-path line only when the whole log is not already shown", () => {
+  it("(a) terminal job whose entire log fits in the tail ⇒ no Full log line", async () => {
+    const manager = fakeManager();
+    const log = "step one\nstep two\ndone\n";
+    manager.put(
+      makeRecord({ jobId: "b_AAAA1111", status: "completed", exitCode: 0, endedAt: NOW, logBytes: log.length }),
+      log,
+    );
+    const out = (await run(manager, { action: "status", job_id: "b_AAAA1111" })).content[0]!.text;
+    expect(out).toContain("--- log tail (last 20 lines, 23B total) ---");
+    expect(out).toContain("step one");
+    expect(out).not.toContain("Full log:");
+    expect(out).not.toContain("/tmp/b_AAAA1111.log");
+  });
+
+  it("(b1) terminal job, tail starts mid-file (log > STATUS_TAIL_BYTES) ⇒ line kept", async () => {
+    const manager = fakeManager();
+    const log = `${"x".repeat(STATUS_TAIL_BYTES + 500)}\n`;
+    manager.put(
+      makeRecord({ jobId: "b_BBBB2222", status: "completed", exitCode: 0, endedAt: NOW, logBytes: log.length }),
+      log,
+    );
+    const out = (await run(manager, { action: "status", job_id: "b_BBBB2222" })).content[0]!.text;
+    expect(out).toContain("Full log: /tmp/b_BBBB2222.log");
+    expect(out).toMatch(/read tool.*tail\/grep\/awk/);
+  });
+
+  it("(b2) terminal job, whole file read but the line trim dropped earlier lines ⇒ line kept", async () => {
+    const manager = fakeManager();
+    // 30 short lines: the bounded read covers every byte, but lastLines()
+    // keeps only the final STATUS_TAIL_LINES (20) — the message does NOT
+    // contain the whole output, so the path must stay.
+    const log = `${Array.from({ length: STATUS_TAIL_LINES + 10 }, (_, i) => `l${i}`).join("\n")}\n`;
+    manager.put(
+      makeRecord({ jobId: "b_BBBB2222", status: "failed", exitCode: 1, endedAt: NOW, logBytes: log.length }),
+      log,
+    );
+    const out = (await run(manager, { action: "status", job_id: "b_BBBB2222" })).content[0]!.text;
+    expect(out).toContain("l29");
+    expect(out).not.toContain("l0\n");
+    expect(out).toContain("Full log: /tmp/b_BBBB2222.log");
+  });
+
+  it("(c) running job (log will still grow) ⇒ line kept even though the read covers the file", async () => {
+    const manager = fakeManager();
+    const log = "hello\n";
+    manager.put(makeRecord({ jobId: "b_CCCC3333", pid: 42, logBytes: log.length }), log);
+    const out = (await run(manager, { action: "status", job_id: "b_CCCC3333" })).content[0]!.text;
+    expect(out).toContain("hello");
+    expect(out).toContain("Full log: /tmp/b_CCCC3333.log");
+  });
+
+  it("(d) size-capped log ⇒ line kept even when the tail is the whole readable remainder", async () => {
+    const manager = fakeManager();
+    const log = "partial\n";
+    manager.put(
+      makeRecord({
+        jobId: "b_CCCC3333",
+        status: "killed",
+        endedAt: NOW,
+        outputTruncated: true,
+        logBytes: log.length,
+      }),
+      log,
+    );
+    const out = (await run(manager, { action: "status", job_id: "b_CCCC3333" })).content[0]!.text;
+    expect(out).toContain("(the job's log hit its size cap; some output was dropped)");
+    expect(out).toContain("Full log: /tmp/b_CCCC3333.log");
+  });
+
+  it("(e) no tail in the message at all ⇒ line kept (empty log; read error)", async () => {
+    const manager = fakeManager();
+    manager.put(makeRecord({ jobId: "b_DDDD4444", status: "completed", exitCode: 0, endedAt: NOW }), "");
+    const empty = (await run(manager, { action: "status", job_id: "b_DDDD4444" })).content[0]!.text;
+    expect(empty).toContain("(the log is empty so far)");
+    expect(empty).toContain("Full log: /tmp/b_DDDD4444.log");
+
+    manager.put(makeRecord({ jobId: "b_DDDD4444", status: "completed", exitCode: 0, endedAt: NOW }), "x\n");
+    manager.failReads = true;
+    const unreadable = (await run(manager, { action: "status", job_id: "b_DDDD4444" })).content[0]!.text;
+    expect(unreadable).toContain("Full log: /tmp/b_DDDD4444.log");
+  });
+
+  it("wait/kill/extend receipts carry no tail, so they always keep the line", async () => {
+    const manager = fakeManager();
+    manager.put(
+      makeRecord({ jobId: "b_EEEE5555", status: "completed", exitCode: 0, endedAt: NOW, logBytes: 3 }),
+      "ok\n",
+    );
+    const waited = (await run(manager, { action: "wait", job_id: "b_EEEE5555", wait_ms: 5 })).content[0]!.text;
+    expect(waited).toContain("completed (exit 0)");
+    expect(waited).toContain("Full log: /tmp/b_EEEE5555.log");
   });
 });
 

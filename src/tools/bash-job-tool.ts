@@ -292,15 +292,30 @@ function formatStatus(record: JobRecord, read: JobOutputRead | undefined, at: Mi
   const grace = formatGraceLine(record, at);
   if (grace !== undefined) lines.push(grace);
   const raw = read ? lastLines(read.content, STATUS_TAIL_LINES) : "";
-  if (raw.length > 0) {
+  // The `Full log:` line is dropped only when this very message already
+  // shows the ENTIRE log: terminal job, no size cap, the read started at
+  // byte 0 and reached the current EOF (derived from the read result, never
+  // guessed from text length), the line trim kept every line and
+  // truncateTail cut nothing. Every other case keeps the path so the model
+  // can read what was left out.
+  let wholeLogShown = false;
+  if (raw.length > 0 && read !== undefined) {
     // truncateTail is pi's own context guard: even 20 lines can be huge.
-    lines.push(`--- log tail (last ${STATUS_TAIL_LINES} lines, ${formatSize(read!.logBytes)} total) ---`);
-    lines.push(truncateTail(raw).content, "---");
+    const shown = truncateTail(raw);
+    lines.push(`--- log tail (last ${STATUS_TAIL_LINES} lines, ${formatSize(read.logBytes)} total) ---`);
+    lines.push(shown.content, "---");
+    wholeLogShown =
+      isTerminalJobStatus(record.status) &&
+      !record.outputTruncated &&
+      read.startOffset === 0 &&
+      read.nextOffset >= read.logBytes &&
+      raw === read.content.replace(/\n+$/, "") &&
+      !shown.truncated;
   } else {
     lines.push(read && read.logBytes > 0 ? "(no readable log tail)" : "(the log is empty so far)");
   }
   if (record.outputTruncated) lines.push("(the job's log hit its size cap; some output was dropped)");
-  lines.push(formatLogFileHint(record.logPath));
+  if (!wholeLogShown) lines.push(formatLogFileHint(record.logPath));
   return lines.join("\n");
 }
 
