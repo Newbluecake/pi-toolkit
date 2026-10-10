@@ -10,6 +10,7 @@ import {
   dedupeRuns,
   parseSessionText,
   roleOf,
+  renderReport,
 } from "../../scripts/exp/consult-ab-lib.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -114,6 +115,7 @@ describe("consult-ab-analyze: fixtures analysis (no salt)", () => {
       unenrolledRuns: 6, // r_old_1, r_old_2, r_old_dup, r_cons_1, r_p1r, r_cfgfail
       packages: 16,
       excludedPackages: 5,
+      unenrolledPackages: 0,
       analyzedPackages: 11,
     });
     expect(analysis.scan).toMatchObject({ files: 3, runEntries: 45, malformedEntries: 1, uniqueRuns: 40 });
@@ -407,8 +409,9 @@ describe("consult-ab-analyze: unit rules on synthetic runs", () => {
     expect(analysis.arms.experts.firstPass.rate).toBeNull();
   });
 
-  it("treats verifier as the verify role even when listed in --work-types (hard rule)", () => {
+  it("treats verifier/reviewer as the verify role even when listed in --work-types (hard rule)", () => {
     expect(roleOf("verifier")).toBe("verify");
+    expect(roleOf("reviewer")).toBe("verify");
     expect(roleOf("verifier", ["verifier", "general"])).toBe("verify");
     expect(roleOf("general")).toBe("work");
     expect(roleOf("frontend-dev")).toBe("work");
@@ -416,6 +419,32 @@ describe("consult-ab-analyze: unit rules on synthetic runs", () => {
     expect(roleOf("Plan")).toBe("other");
     expect(roleOf(undefined)).toBe("other");
     expect(DEFAULT_WORK_TYPES).toEqual(["general", "frontend-dev"]);
+  });
+
+  it("classifies a package with no declared arm as unenrolled, not excluded", () => {
+    const analysis = analyze([
+      run("r_unenrolled", {
+        diag: {
+          agentType: "general",
+          createdAt: t0,
+          dispatchMeta: { lane: "L2", packageId: "pkg-unenrolled" },
+          usage: { costUsd: 0.1 },
+        },
+      }),
+      run("r_unenrolled_verifier", {
+        diag: {
+          agentType: "verifier",
+          createdAt: t0 + 100,
+          dispatchMeta: { lane: "L2", packageId: "pkg-unenrolled" },
+          schemaPreset: "verdict/v1",
+        },
+      }),
+    ]);
+    expect(analysis.excluded).toEqual([]);
+    expect(analysis.unenrolledPackages).toEqual(["pkg-unenrolled"]);
+    expect(analysis.totals.unenrolledPackages).toBe(1);
+    expect(analysis.totals.excludedPackages).toBe(0);
+    expect(renderReport(analysis)).toContain("unenrolled packages (1):");
   });
 
   it("honors --work-types overrides (cost-only for non-work types)", () => {

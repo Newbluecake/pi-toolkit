@@ -23,7 +23,7 @@
 2. 入组包的**每一次**派发（dev、frontend-dev、verifier、reviewer，含返工 resume 和不走 resume 的重派）都带
    `meta: { lane, packageId, feature, abArm }`。resume 不写 `meta` 时自动继承上一轮的 `dispatchMeta`；显式写则覆盖。
 3. verifier 一律传 `schema: "verdict/v1"`，产出结构化结论（report 原文 + verdict + blockers + findings）。
-4. `abArm: "experts"` 的 dev 包必须挂 `experts`（通常是 Plan）；`abArm: "control"` 的 dev 包**不得**挂 `experts`。工具层会校验一致性，不一致直接报错。
+4. `abArm: "experts"` 的 dev/frontend-dev 包必须挂 `experts`（通常是 Plan）；verifier/reviewer 派发带同样的 `abArm`，但协议规定不挂 `experts`，工具层允许这两个角色省略它。`abArm: "control"` 对所有角色都**不得**挂非空 `experts`。工具层会校验一致性，不一致直接报错。
 
 ## 两臂规则
 
@@ -47,5 +47,5 @@ node scripts/exp/consult-ab-analyze.mjs --since 2026-10-10 --salt consult-ab-v1 
 node scripts/exp/consult-ab-analyze.mjs --since 2026-10-10 --salt consult-ab-v1 --json # 机读
 ```
 
-脚本会列出排除清单（`mixed-arm`、`hash-mismatch`、`partial-unenrolled`、三类协议违例）和警告（`absorbed-cap-hit`、
-`verdict-missing`）。排除率高说明协议执行有漏洞，先修协议再看指标。
+脚本会单独列出未入组包（没有任何 run 声明 `meta.abArm`），它们不计入排除或协议违例；排除清单包含 `mixed-arm`、`hash-mismatch`、`partial-unenrolled`、三类协议违例，警告包含 `absorbed-cap-hit`、
+`verdict-missing`。排除率高说明协议执行有漏洞，先修协议再看指标。

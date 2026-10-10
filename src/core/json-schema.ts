@@ -160,7 +160,12 @@ function walk(path: string, schema: unknown, data: unknown, errors: string[]): v
  * when it is `"completed"`: a run that already failed/timed_out/aborted for
  * an unrelated reason keeps that status and error untouched.
  */
-export function applyStructuredOutputPolicy(outcome: RunOutcome, schema: JsonSchema, captured: unknown): RunOutcome {
+export function applyStructuredOutputPolicy(
+  outcome: RunOutcome,
+  schema: JsonSchema,
+  captured: unknown,
+  semanticValidator?: (value: unknown) => ValidationResult,
+): RunOutcome {
   if (outcome.status !== "completed") return outcome;
   if (captured === undefined) {
     return {
@@ -181,6 +186,18 @@ export function applyStructuredOutputPolicy(outcome: RunOutcome, schema: JsonSch
       error: {
         kind: "schema",
         message: `structured output failed host-side re-validation: ${revalidated.errors.join("; ")}`,
+        retryable: false,
+      },
+    };
+  }
+  const semantic = semanticValidator?.(captured);
+  if (semantic !== undefined && !semantic.ok) {
+    return {
+      ...outcome,
+      status: "failed",
+      error: {
+        kind: "schema",
+        message: `structured output failed host-side semantic validation: ${semantic.errors.join("; ")}`,
         retryable: false,
       },
     };

@@ -8,7 +8,7 @@
  *
  * 递归读取 *.jsonl 里的 `subagent:run` 条目，按 §5 P3 的规则去重、分角色、
  * 分包、分臂，输出首验通过率（Wilson 95%）、两比例 z 检验、返工轮数、成本、
- * 墙钟、consult 汇总、排除清单与功效提示。`--json` 输出机器可读的完整分析对象
+ * 墙钟、consult 汇总、排除清单、单独的未入组包清单与功效提示。`--json` 输出机器可读的完整分析对象
  * （确定性输出：不含时间戳，可直接做快照）。
  *
  * 时间窗按 diag.createdAt 过滤：--since 含当天 UTC 零点，--until 不含（UTC 零点为上界）。
@@ -34,7 +34,7 @@ const USAGE = `usage: node scripts/exp/consult-ab-analyze.mjs [options]
   --salt <salt>         verify each package's declared arm against the hash
                         (default: no verification; the arm script defaults to ${DEFAULT_SALT})
   --work-types a,b,c    agent types counted as work runs (default: ${DEFAULT_WORK_TYPES.join(",")};
-                        "verifier" is always the verify role and cannot be overridden)
+                        "verifier" and "reviewer" are always the verify role and cannot be overridden)
   --json                print the full analysis object as JSON (deterministic)
 `;
 
@@ -78,8 +78,10 @@ for (let i = 0; i < args.length; i++) {
         .split(",")
         .map((t) => t.trim())
         .filter((t) => t !== "");
-      if (types.length === 0 || types.some((t) => t === "verifier")) {
-        fail(`--work-types expects a comma list without "verifier", got ${JSON.stringify(next)}`);
+      if (types.length === 0 || types.some((t) => t === "verifier" || t === "reviewer")) {
+        fail(
+          `--work-types expects a comma list without the verify types "verifier"/"reviewer", got ${JSON.stringify(next)}`,
+        );
       }
       opts.workTypes = types;
     }

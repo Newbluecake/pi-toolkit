@@ -5,6 +5,7 @@ import {
   validateAgainstSchema,
 } from "../../src/core/json-schema.js";
 import type { RunOutcome } from "../../src/core/types.js";
+import { validateVerdictV1Semantics } from "../../src/core/verdict-schema.js";
 
 const objSchema = {
   type: "object",
@@ -117,6 +118,24 @@ describe("core/json-schema: applyStructuredOutputPolicy (X10 host-side / second 
     expect(result.error?.kind).toBe("schema");
     expect(result.error?.message).toMatch(/host-side re-validation/);
     expect(result.structuredResult).toBeUndefined();
+  });
+
+  it("applies the verdict/v1 semantic validator independently on the host", () => {
+    const outcome = completedOutcome();
+    const schema = {
+      type: "object",
+      properties: { blockers: { type: "integer" }, findings: { type: "array" } },
+      required: ["blockers", "findings"],
+    };
+    const result = applyStructuredOutputPolicy(
+      outcome,
+      schema,
+      { blockers: 2, findings: [{ severity: "blocker" }] },
+      validateVerdictV1Semantics,
+    );
+    expect(result.status).toBe("failed");
+    expect(result.error?.message).toMatch(/semantic validation/);
+    expect(result.error?.message).toMatch(/fix the blockers count/);
   });
 });
 

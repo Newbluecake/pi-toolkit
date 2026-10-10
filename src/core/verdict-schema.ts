@@ -54,6 +54,33 @@ export const SCHEMA_PRESETS: Readonly<Record<SchemaPresetId, JsonSchema>> = {
   "verdict/v1": VERDICT_SCHEMA_V1,
 };
 
+/**
+ * Validate the cross-field invariant that JSON Schema cannot express for the
+ * verdict/v1 preset. This stays separate from the shape validator so both the
+ * injected tool and the host-side re-validation can apply the exact same rule.
+ */
+export function validateVerdictV1Semantics(value: unknown): { ok: boolean; errors: string[] } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: true, errors: [] };
+  }
+  const payload = value as { blockers?: unknown; findings?: unknown };
+  const blockerFindings = Array.isArray(payload.findings)
+    ? payload.findings.filter(
+        (finding) =>
+          finding !== null && typeof finding === "object" && (finding as { severity?: unknown }).severity === "blocker",
+      ).length
+    : 0;
+  if (payload.blockers !== blockerFindings) {
+    return {
+      ok: false,
+      errors: [
+        `$.blockers must equal the number of findings with severity "blocker" (got ${String(payload.blockers)}, expected ${blockerFindings}); fix the blockers count`,
+      ],
+    };
+  }
+  return { ok: true, errors: [] };
+}
+
 /** Resolve a raw (model-supplied) `schema` value to a known preset, when it names one exactly. Anything else (a literal JSON Schema object, an unknown string, non-string) -> `undefined`. */
 export function resolveSchemaPreset(raw: unknown): { id: SchemaPresetId; schema: JsonSchema } | undefined {
   if (typeof raw !== "string") return undefined;
@@ -78,7 +105,11 @@ interface VerdictV1Shape {
  * `details.structuredResult` itself is never touched by this function.
  */
 export function renderStructuredForHost(structured: unknown, preset: SchemaPresetId | undefined): string {
-  if (preset === "verdict/v1" && validateAgainstSchema(VERDICT_SCHEMA_V1, structured).ok) {
+  if (
+    preset === "verdict/v1" &&
+    validateAgainstSchema(VERDICT_SCHEMA_V1, structured).ok &&
+    validateVerdictV1Semantics(structured).ok
+  ) {
     const v = structured as VerdictV1Shape;
     const findingsCount = Array.isArray(v.findings) ? v.findings.length : 0;
     return `${v.report}\n\nverdict: ${v.verdict} · blockers ${v.blockers} · findings ${findingsCount}`;

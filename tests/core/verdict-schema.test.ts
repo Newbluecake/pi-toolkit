@@ -5,6 +5,7 @@ import {
   resolveSchemaPreset,
   SCHEMA_PRESETS,
   VERDICT_SCHEMA_V1,
+  validateVerdictV1Semantics,
 } from "../../src/core/verdict-schema.js";
 
 function validPayload(over: Record<string, unknown> = {}) {
@@ -81,6 +82,32 @@ describe("VERDICT_SCHEMA_V1 shape (§4) — validated through the shared validat
   it("rejects more than 50 findings", () => {
     const findings = Array.from({ length: 51 }, () => ({ severity: "nit" as const, summary: "x" }));
     expect(validateAgainstSchema(VERDICT_SCHEMA_V1, validPayload({ findings })).ok).toBe(false);
+  });
+
+  it("rejects a blockers count that disagrees with blocker findings", () => {
+    const payload = validPayload({
+      blockers: 2,
+      findings: [{ severity: "blocker", summary: "one blocker" }],
+    });
+    expect(validateAgainstSchema(VERDICT_SCHEMA_V1, payload).ok).toBe(true);
+    expect(validateVerdictV1Semantics(payload)).toEqual({
+      ok: false,
+      errors: [expect.stringContaining('$.blockers must equal the number of findings with severity "blocker"')],
+    });
+  });
+
+  it("accepts a semantically consistent blockers count", () => {
+    expect(
+      validateVerdictV1Semantics(
+        validPayload({
+          blockers: 2,
+          findings: [
+            { severity: "blocker", summary: "a" },
+            { severity: "blocker", summary: "b" },
+          ],
+        }),
+      ).ok,
+    ).toBe(true);
   });
 
   it("keeps every enum/description string in the schema English-only (model-visible surface, CJK-free per model-facing-strings.test.ts)", () => {

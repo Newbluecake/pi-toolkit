@@ -763,7 +763,7 @@ describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 prese
     expect(port.seen).toBeUndefined();
   });
 
-  it("arm/experts consistency: control + non-empty experts throws; experts arm without experts throws", async () => {
+  it("arm/experts consistency: control + non-empty experts throws; dev/work experts arm requires experts", async () => {
     const port = fakePort();
     const tool = createAgentTool({ spawn: port });
     await expect(
@@ -822,6 +822,24 @@ describe("tools/agent-tool: consult A/B instrumentation (meta + verdict/v1 prese
     );
     expect(port.seen?.consultExperts).toBeUndefined();
     expect(port.seen?.dispatchMeta?.abArm).toBe("control");
+
+    for (const subagent_type of ["verifier", "reviewer"]) {
+      const rolePort = fakePort();
+      await createAgentTool({ spawn: rolePort }).execute(
+        "tc",
+        {
+          description: "d",
+          prompt: "p",
+          subagent_type,
+          meta: { packageId: "pkg", abArm: "experts" },
+        } as AgentToolParams,
+        undefined,
+        undefined,
+        {} as never,
+      );
+      expect(rolePort.seen?.dispatchMeta?.abArm).toBe("experts");
+      expect(rolePort.seen?.consultExperts).toBeUndefined();
+    }
   });
 
   it('resolves the "verdict/v1" preset to the frozen schema and tags schemaPreset; other schemas stay untagged', async () => {

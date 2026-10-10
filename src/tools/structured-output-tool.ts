@@ -1,4 +1,6 @@
 import { Type } from "@sinclair/typebox";
+import { validateVerdictV1Semantics } from "../core/verdict-schema.js";
+import type { SchemaPresetId } from "../core/verdict-schema.js";
 import type { JsonSchema, ValidationResult } from "../core/json-schema.js";
 
 /**
@@ -11,6 +13,7 @@ import type { JsonSchema, ValidationResult } from "../core/json-schema.js";
  */
 export function createStructuredOutputTool(deps: {
   schema: JsonSchema;
+  schemaPreset?: SchemaPresetId;
   onSubmit: (value: unknown) => ValidationResult;
 }) {
   // Defensive: every entry point should have normalized already (see
@@ -35,7 +38,9 @@ export function createStructuredOutputTool(deps: {
     promptSnippet: "StructuredOutput(<schema-shaped payload>) - submit the final structured result",
     parameters: Type.Unsafe<unknown>(deps.schema),
     async execute(_toolCallId: string, params: unknown) {
-      const result = deps.onSubmit(params);
+      const semantic =
+        deps.schemaPreset === "verdict/v1" ? validateVerdictV1Semantics(params) : { ok: true, errors: [] };
+      const result = semantic.ok ? deps.onSubmit(params) : semantic;
       if (!result.ok) {
         return {
           content: [

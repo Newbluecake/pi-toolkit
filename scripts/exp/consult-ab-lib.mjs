@@ -9,8 +9,9 @@
  *  - 臂 = sha256(salt + "\0" + packageId) 首字节最低位，1 ⇒ experts；
  *  - runId 全局去重：有终态条目时只在终态里选，然后 updatedAt 最大者胜，
  *    相等时后扫到的胜出（复刻 seed 的 `>=` 语义；文件按路径排序、文件内按行序）；
- *  - 角色：diag.agentType ∈ work-types ⇒ work，"verifier" ⇒ verify，其余 other；
+ *  - 角色：diag.agentType ∈ work-types ⇒ work，"verifier"/"reviewer" ⇒ verify，其余 other；
  *  - 三类协议违例：no-granted-experts / control-has-experts / verifier-has-experts；
+ *  - 包内没有任何 meta.abArm 的 package 是 unenrolled，单独报告，不计入 exclusions；
  *  - partial-unenrolled：缺 packageId 的 work/verify run 与包内同角色 run 共享
  *    diag.sessionFile ⇒ 整包排除（阈值 1）；
  *  - absorbedRunIds FIFO cap 100：只打 absorbed-cap-hit 警告，不排除。
@@ -24,6 +25,8 @@ export const TERMINAL_STATUSES = new Set(["completed", "failed", "timed_out", "a
 export const ABSORBED_RUN_IDS_CAP = 100;
 export const VERDICT_PRESET = "verdict/v1";
 export const VERIFY_AGENT_TYPE = "verifier";
+/** Keep this role mapping aligned with src/tools/agent-tool.ts. */
+export const VERIFY_AGENT_TYPES = ["verifier", "reviewer"];
 export const DEFAULT_WORK_TYPES = ["general", "frontend-dev"];
 /** eval-2026-10 §6.3：检测 15pp 首验通过率差异约需每臂 150 个包。 */
 export const POWER_MIN_PER_ARM = 150;
@@ -176,9 +179,9 @@ export function mean(values) {
 
 /* ----------------------------------------------------------------- roles --- */
 
-/** §5 P3 2a（硬规则）：verifier 恒为 verify，work-types 命中为 work，其余 other。 */
+/** §5 P3 2a（硬规则）：verifier/reviewer 恒为 verify，work-types 命中为 work，其余 other。 */
 export function roleOf(agentType, workTypes = DEFAULT_WORK_TYPES) {
-  if (agentType === VERIFY_AGENT_TYPE) return "verify";
+  if (VERIFY_AGENT_TYPES.includes(agentType)) return "verify";
   if (typeof agentType === "string" && workTypes.includes(agentType)) return "work";
   return "other";
 }
@@ -273,11 +276,14 @@ export function analyzeRuns(chosen, opts = {}) {
 
   const packages = [];
   const excluded = [];
+  const unenrolledPackages = [];
   const warnings = [];
   for (const pkg of byPackage.values()) {
     const recordsSorted = [...pkg.records].sort(compareRecords);
     const detail = evaluatePackage(pkg.packageId, recordsSorted, unenrolledBySessionFile, absorbed, salt);
-    if (detail.excluded) {
+    if (detail.unenrolled) {
+      unenrolledPackages.push(pkg.packageId);
+    } else if (detail.excluded) {
       excluded.push({
         packageId: pkg.packageId,
         reasons: detail.reasons,
@@ -291,6 +297,7 @@ export function analyzeRuns(chosen, opts = {}) {
   }
   packages.sort((a, b) => (a.packageId < b.packageId ? -1 : a.packageId > b.packageId ? 1 : 0));
   excluded.sort((a, b) => (a.packageId < b.packageId ? -1 : a.packageId > b.packageId ? 1 : 0));
+  unenrolledPackages.sort();
 
   // 6. 分臂聚合 + 车道分层
   const armStats = {};
@@ -342,12 +349,14 @@ export function analyzeRuns(chosen, opts = {}) {
       unenrolledRuns: unenrolled.length,
       packages: byPackage.size,
       excludedPackages: excluded.length,
+      unenrolledPackages: unenrolledPackages.length,
       analyzedPackages: packages.length,
     },
     arms: armStats,
     comparison,
     packages,
     excluded,
+    unenrolledPackages,
     warnings,
     coverage,
     powerHint,
@@ -370,6 +379,13 @@ function evaluatePackage(packageId, records, unenrolledBySessionFile, absorbed, 
   const warnings = [];
   let exclusionDetail = null;
 
+  // 臂：包内 run 的 abArm 必须唯一且可知；没有声明臂的包是 unenrolled。
+  const armValues = new Set(
+    records.map((r) => r.snapshot.diag?.dispatchMeta?.abArm).filter((v) => v === "experts" || v === "control"),
+  );
+  const unenrolled = armValues.size === 0;
+  const arm = armValues.size === 1 ? [...armValues][0] : null;
+
   // partial-unenrolled（阈值 1）：缺 meta 的同角色 run 与包内 run 共享 sessionFile
   const linkedRunIds = new Set();
   for (const role of ["work", "verify"]) {
@@ -384,7 +400,7 @@ function evaluatePackage(packageId, records, unenrolledBySessionFile, absorbed, 
       for (const item of items) if (item.role === role) linkedRunIds.add(item.runId);
     }
   }
-  if (linkedRunIds.size > 0) {
+  if (linkedRunIds.size > 0 && !unenrolled) {
     reasons.push("partial-unenrolled");
     for (const runId of linkedRunIds) offending.add(runId);
     exclusionDetail =
@@ -392,17 +408,10 @@ function evaluatePackage(packageId, records, unenrolledBySessionFile, absorbed, 
       `with this package's same-role run(s) (threshold 1)`;
   }
 
-  // 臂：包内 run 的 abArm 必须唯一且可知，否则 mixed-arm
-  const armValues = new Set(
-    records.map((r) => r.snapshot.diag?.dispatchMeta?.abArm).filter((v) => v === "experts" || v === "control"),
-  );
-  const arm = armValues.size === 1 ? [...armValues][0] : null;
-  if (arm === null) {
+  // 多臂声明才是 mixed-arm 排除；零声明由上面的 unenrolled 分支单独报告。
+  if (!unenrolled && arm === null) {
     reasons.push("mixed-arm");
-    exclusionDetail =
-      armValues.size === 0
-        ? "no run in this package declares meta.abArm"
-        : `runs declare both arms: ${[...armValues].sort().join(" + ")}`;
+    exclusionDetail = `runs declare both arms: ${[...armValues].sort().join(" + ")}`;
     for (const r of records) {
       const declared = r.snapshot.diag?.dispatchMeta?.abArm;
       if (declared === "experts" || declared === "control") offending.add(r.snapshot.runId);
@@ -554,7 +563,7 @@ function evaluatePackage(packageId, records, unenrolledBySessionFile, absorbed, 
     wallMs,
     consult: { calls, costUsd: consultCostUsd, failed: consultFailed },
   };
-  return { summary, excluded: reasons.length > 0, reasons, offending, exclusionDetail, warnings };
+  return { summary, excluded: reasons.length > 0, unenrolled, reasons, offending, exclusionDetail, warnings };
 }
 
 function summarizeArm(pkgs) {
@@ -679,11 +688,11 @@ export function renderReport(analysis) {
   lines.push(
     `  salt: ${analysis.salt === null ? "not verified (pass --salt to check declared arms)" : `${analysis.salt} (declared arms verified against hash)`}`,
   );
-  lines.push(`  work types: ${analysis.workTypes.join(",")} · verify type: ${VERIFY_AGENT_TYPE}`);
+  lines.push(`  work types: ${analysis.workTypes.join(",")} · verify types: ${VERIFY_AGENT_TYPES.join(",")}`);
   lines.push(
     `  runs: ${analysis.totals.runs} (${analysis.totals.enrolledRuns} enrolled, ` +
-      `${analysis.totals.unenrolledRuns} unenrolled) · packages: ${analysis.totals.analyzedPackages} analyzed, ` +
-      `${analysis.totals.excludedPackages} excluded`,
+      `${analysis.totals.unenrolledRuns} unenrolled runs) · packages: ${analysis.totals.analyzedPackages} analyzed, ` +
+      `${analysis.totals.excludedPackages} excluded, ${analysis.totals.unenrolledPackages} unenrolled`,
   );
   lines.push("");
 
@@ -742,6 +751,14 @@ export function renderReport(analysis) {
         `more than ${ABSORBED_RUN_IDS_CAP} ids evicts the oldest, and the evicted runs' cost is double-counted ` +
         `(flagged as absorbed-cap-hit, never excluded).`,
     );
+  }
+  lines.push("");
+
+  lines.push(`unenrolled packages (${analysis.unenrolledPackages.length}):`);
+  if (analysis.unenrolledPackages.length === 0) {
+    lines.push("  (none)");
+  } else {
+    for (const packageId of analysis.unenrolledPackages) lines.push(`  ${packageId}`);
   }
   lines.push("");
 

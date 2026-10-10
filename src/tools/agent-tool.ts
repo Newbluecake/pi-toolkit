@@ -15,6 +15,9 @@ import { toPiToolUsage } from "./usage.js";
 import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
 import { truncateResultText } from "./result-text.js";
 
+/** A/B verifier/reviewer roles submit verdicts without consulting experts. Keep aligned with consult-ab-lib.mjs. */
+const AB_ARM_EXPERTS_OPTIONAL_AGENT_TYPES = new Set(["verifier", "reviewer"]);
+
 /**
  * Narrow port the Agent tool needs from SpawnService (X3: also the shape the
  * *nested* Agent tool injected into a child session is given — it never
@@ -262,7 +265,7 @@ const topLevelTrailingFields = {
         abArm: Type.Optional(
           Type.Union([Type.Literal("experts"), Type.Literal("control")], {
             description:
-              'A/B arm drawn for this package. Must match experts: "control" means dispatch WITHOUT the experts parameter, "experts" means a non-empty experts list.',
+              'A/B arm drawn for this package. "control" always dispatches WITHOUT experts. "experts" requires a non-empty experts list for dev/work roles; verifier/reviewer dispatches may omit experts.',
           }),
         ),
       },
@@ -452,9 +455,14 @@ function prepareSpawn(
       'meta.abArm "control" is inconsistent with a non-empty experts list: drop experts for this arm, or pass abArm "experts"',
     );
   }
-  if (dispatchMeta?.abArm === "experts" && (params.experts === undefined || params.experts.length === 0)) {
+  if (
+    dispatchMeta?.abArm === "experts" &&
+    (params.experts === undefined || params.experts.length === 0) &&
+    !AB_ARM_EXPERTS_OPTIONAL_AGENT_TYPES.has(params.subagent_type)
+  ) {
     throw new Error(
-      'meta.abArm "experts" requires a non-empty experts list: pass experts for this arm, or pass abArm "control"',
+      `meta.abArm "experts" requires a non-empty experts list for ${params.subagent_type} dispatches; ` +
+        'verifier/reviewer dispatches may omit experts, or pass abArm "control"',
     );
   }
   const modelOverride = parseModel(params.model);

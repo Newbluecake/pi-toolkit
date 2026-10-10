@@ -1,6 +1,7 @@
 import type { Clock } from "../core/clock.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { applyStructuredOutputPolicy, validateAgainstSchema } from "../core/json-schema.js";
+import { validateVerdictV1Semantics } from "../core/verdict-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
   ConsultExpertRef,
@@ -775,6 +776,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           const schema = spec.request.schema;
           const structuredOutputTool = createStructuredOutputTool({
             schema,
+            ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
             onSubmit: (value) => {
               const result = validateAgainstSchema(schema, value);
               if (result.ok) structured.value = value;
@@ -1034,7 +1036,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         let outcome = await runtime.run(req, spec.budget);
         // X10 host-side re-validation (second of the two mandatory checks).
         if (spec.request.schema !== undefined) {
-          outcome = applyStructuredOutputPolicy(outcome, spec.request.schema, structured.value);
+          outcome = applyStructuredOutputPolicy(
+            outcome,
+            spec.request.schema,
+            structured.value,
+            spec.request.schemaPreset === "verdict/v1" ? validateVerdictV1Semantics : undefined,
+          );
           settled = outcome;
           try {
             const snapshot = deps.store.get(spec.runId);

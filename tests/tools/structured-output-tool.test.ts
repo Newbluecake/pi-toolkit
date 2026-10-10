@@ -29,4 +29,25 @@ describe("tools/structured-output-tool: schema shape guard", () => {
   ])("rejects a %s schema with a readable error", (_label, bad, message) => {
     expect(() => createStructuredOutputTool({ schema: bad as never, onSubmit })).toThrow(message);
   });
+
+  it("rejects an inconsistent verdict/v1 blockers count before invoking submission", async () => {
+    let submissions = 0;
+    const tool = createStructuredOutputTool({
+      schema: { type: "object" },
+      schemaPreset: "verdict/v1",
+      onSubmit: () => {
+        submissions++;
+        return { ok: true, errors: [] };
+      },
+    });
+    const result = await tool.execute("tc", {
+      verdict: "reject",
+      blockers: 2,
+      findings: [{ severity: "blocker", summary: "one" }],
+      report: "report",
+    });
+    expect(result.details).toMatchObject({ ok: false });
+    expect((result.content[0] as { text: string }).text).toContain("fix the blockers count");
+    expect(submissions).toBe(0);
+  });
 });

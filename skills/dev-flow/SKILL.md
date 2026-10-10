@@ -324,7 +324,7 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 - verifier 一律传 `schema: "verdict/v1"`：结果显示为报告原文加一行 verdict，结论同时结构化落盘，供分析脚本统计首验通过率。
 - 场景矩阵里标「可选」的 L2 写包（以及事先声明的 L3 批次）入组 A/B：开工前跑
   `node scripts/exp/consult-ab-arm.mjs <packageId>` 抽签，`meta.abArm` 写抽到的臂，按 `references/consult-ab.md` 执行
-  （control 臂不挂专家、打回时推报告原文不挂；两臂 verifier 都不挂专家）。
+  （control 臂不挂专家、打回时推报告原文不挂；verifier/reviewer 也带 abArm 但不挂专家）。
 - 分析：`node scripts/exp/consult-ab-analyze.mjs --since 2026-10-10 --salt consult-ab-v1`；每臂不足 150 个包不下结论。
 
 证据与机制细节见 `agent-handoff` skill「可选：让下游能向掌握知识的 agent 请教」；生产实测
