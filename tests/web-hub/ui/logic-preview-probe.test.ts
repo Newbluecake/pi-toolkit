@@ -193,7 +193,7 @@ describe("planProbeBatches — wire caps", () => {
     expect(batches.length).toBeGreaterThan(1);
     for (const b of batches) {
       expect(b.length).toBeGreaterThan(0);
-      const bytes = b.reduce((n, p) => n + Buffer.byteLength(p) + 4, 0);
+      const bytes = b.reduce((n, p) => n + Buffer.byteLength(JSON.stringify(p)) + 1, 0);
       expect(bytes).toBeLessThanOrEqual(2048);
     }
   });

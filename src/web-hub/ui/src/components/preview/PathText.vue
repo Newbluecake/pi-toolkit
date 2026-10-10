@@ -67,12 +67,32 @@ const candidates = computed<string[]>(() => {
   const list: string[] = [];
   if (props.code === true) {
     const cr = codeRef.value;
-    if (cr !== null) list.push(cr.path);
+    if (cr !== null) {
+      list.push(cr.path);
+      if (cr.alt !== undefined) list.push(cr.alt.path);
+    }
     return list;
   }
   const segs = segments.value;
-  if (segs !== null) for (const seg of segs) if (seg.kind === "ref") list.push(seg.path);
+  if (segs !== null)
+    for (const seg of segs)
+      if (seg.kind === "ref") {
+        list.push(seg.path);
+        if (seg.alt !== undefined) list.push(seg.alt.path);
+      }
   return list;
+});
+
+const renderedSegments = computed<Segments>(() => {
+  const source: Segments =
+    props.code === true ? (codeRef.value === null ? [] : [{ kind: "ref", ...codeRef.value }]) : (segments.value ?? []);
+  return source.flatMap((seg): Segments => {
+    if (seg.kind !== "ref" || clickable(seg.path) || seg.alt === undefined || !clickable(seg.alt.path)) return [seg];
+    return [
+      { kind: "ref", text: seg.alt.text, path: seg.alt.path },
+      { kind: "text", text: seg.text.slice(seg.alt.text.length) },
+    ];
+  });
 });
 
 watch(
@@ -106,10 +126,22 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
     @keydown="onRefKeydown($event, codeRef.path)"
     >{{ text }}</code
   >
-  <code v-else-if="code === true" class="md-code">{{ text }}</code>
+  <code v-else-if="code === true" class="md-code"
+    ><template v-for="(seg, i) in renderedSegments" :key="i"
+      ><span
+        v-if="seg.kind === 'ref' && clickable(seg.path)"
+        class="path-ref"
+        role="button"
+        tabindex="0"
+        @click="openPath(seg.path)"
+        @keydown="onRefKeydown($event, seg.path)"
+        >{{ seg.text }}</span
+      ><template v-else>{{ seg.text }}</template></template
+    ><template v-if="renderedSegments.length === 0">{{ text }}</template></code
+  >
   <template v-else-if="plain || segments === null">{{ text }}</template>
   <template v-else>
-    <template v-for="(seg, i) in segments" :key="i">
+    <template v-for="(seg, i) in renderedSegments" :key="i">
       <span
         v-if="seg.kind === 'ref' && clickable(seg.path)"
         class="path-ref"

@@ -12,7 +12,7 @@ type Messages<T> = { [K in keyof T]: string };
 const graph = {
   // ---- 分区头（§4.3）----
   toggleAria: "展开/收起提交图",
-  headLabel: "graph · {n}",
+  headLabel: "git graph · 最近 {n} 条提交",
   footNote: "{n} commits · date-order · local refs, no fetch",
   footMore: "仅显示最近 {n} 条提交",
   // ---- 状态（§4.3 五态）----

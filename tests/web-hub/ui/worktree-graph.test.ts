@@ -22,13 +22,82 @@
  *   exactly one; collapse keeps data; debounced re-pull on rows change; wt change re-pulls.
  */
 import { flushPromises, mount } from "@vue/test-utils";
-import { ref } from "vue";
+import { ref, nextTick } from "vue";
+import { readFileSync } from "node:fs";
+import GraphLanes from "../../../src/web-hub/ui/src/components/graph/GraphLanes.vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WorktreeGraph from "../../../src/web-hub/ui/src/components/graph/WorktreeGraph.vue";
 import { useI18n, resetLangForTests } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import type { WorktreeGraphTransport, WtDiffOutcome } from "../../../src/web-hub/ui/src/transport/types.js";
 import { parseWtGraphPayload, type WtGraphPayload } from "../../../src/web-hub/protocol/worktree-graph.js";
 import type { WorktreeRowWire } from "../../../src/web-hub/protocol/messages.js";
+
+describe("graph layout regressions", () => {
+  const css = readFileSync("src/web-hub/ui/src/styles/graph.css", "utf8");
+  it("lane SVG is out of flow and column widths do not share surplus space", () => {
+    const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`)).split("}")[0]!;
+    expect(rule(".gg-svg")).toContain("position: absolute");
+    expect(rule(".gg-svg")).toContain("top: 0");
+    expect(rule(".gg-svg")).toContain("left: 0");
+    expect(rule(".gg-lanes")).toContain("position: relative");
+    expect(rule(".gg-lanes")).toContain("background: transparent");
+    expect(rule(".gg-col-lanes")).toContain("width: var(--gg-w");
+    expect(css).toContain('tr[data-current="true"] > .gg-cell');
+  });
+  it("repeated measure cycles converge without changing centers or SVG height", async () => {
+    let callback: (() => void) | undefined;
+    const ro = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(cb: () => void) {
+        callback = cb;
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    } as unknown as typeof ResizeObserver;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      const index = this.matches("tr[data-row]") ? Array.from(this.parentElement!.children).indexOf(this) : 0;
+      return { top: index * 22, height: this.matches("tr[data-row]") ? 22 : 88 } as DOMRect;
+    });
+    try {
+      const { transport } = transportOf();
+      const w = await mountExpanded(transport);
+      await nextTick();
+      callback?.();
+      await nextTick();
+      const lanes = w.findComponent(GraphLanes);
+      const centers = lanes.props("centers");
+      const height = w.get(".gg-svg").attributes("height");
+      expect(centers).toEqual([11, 33, 55, 77]);
+      for (let i = 0; i < 20; i++) {
+        callback?.();
+        await nextTick();
+      }
+      expect(lanes.props("centers")).toBe(centers);
+      expect(w.get(".gg-svg").attributes("height")).toBe(height);
+      expect(w.findAll("col")).toHaveLength(5);
+      await w.setProps({ mobile: true });
+      expect(w.findAll("col")).toHaveLength(3);
+      w.unmount();
+    } finally {
+      rect.mockRestore();
+      globalThis.ResizeObserver = ro;
+    }
+  });
+  it("summary icon uses the existing branch glyph and renamed labels", () => {
+    const { transport } = transportOf();
+    const w = mount(WorktreeGraph, {
+      props: { scope: { agentKey: "a", sessionId: "s" }, wt: "/p", transport, rows, mobile: false },
+    });
+    expect(w.get(".gg-sum .icon-sm use").attributes("href")).toBe("#i-branch");
+    expect(css).toContain("color: var(--st-running)");
+    expect(useI18n(["en"]).t("graph.headLabel", { n: 200 })).toBe("git graph · last 200 commits");
+    expect(useI18n(["zh"]).t("graph.headLabel", { n: 200 })).toBe("git graph · 最近 200 条提交");
+    w.unmount();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // fixtures — every payload through the frozen parser (P0), never hand-trusted

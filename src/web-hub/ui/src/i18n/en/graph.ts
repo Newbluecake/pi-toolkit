@@ -10,7 +10,7 @@ const graph = {
   // ---- section header (§4.3) ----
   toggleAria: "Toggle the commit graph",
   /** `graph · {n}` — the header count row (compact marker, English-only per the UI rule). */
-  headLabel: "graph · {n}",
+  headLabel: "git graph · last {n} commits",
   /** §4.3's standing footnote: `{n} commits · date-order · local refs, no fetch`. */
   footNote: "{n} commits · date-order · local refs, no fetch",
   footMore: "only the newest {n} commits are shown",

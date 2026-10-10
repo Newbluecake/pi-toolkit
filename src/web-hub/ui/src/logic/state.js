@@ -1,7 +1,6 @@
 /**
- * Browser-side state reducer (plan §包 E). Pure functions, no DOM, no I/O —
- * `reduce(state, msg)` never mutates its input and returns a new state (or the
- * same object when nothing changed). Runs unchanged under vitest (node).
+ * Browser-side state reducer (plan §包 E). Input state is never mutated. Sticky sidebar order
+ * is the sole best-effort browser I/O exception; unavailable storage keeps in-memory stability.
  *
  * `msg` is either an SSE frame (`event` ∈ SSE_EVENTS, `data` = parsed JSON,
  * `id` = SSE id) or a local UI/transport event (`event` ∈ LOCAL_EVENTS).
@@ -92,6 +91,7 @@
  * @typedef {{
  *   clientId: string | null, hub: any, conn: string, lastEventId?: number,
  *   selected: string | null, agents: Map<string, AgentState>, order: string[],
+ *   stickyOrder: string[], orderStorage: Pick<Storage, "getItem" | "setItem"> | null,
  *   routed: boolean, wanted: string | null,
  *   control: boolean, hubState?: "running" | "stopping" | "restarting" | undefined,
  *   nextVersion?: string | undefined, supersedePending: boolean,
@@ -160,8 +160,72 @@ export const LOCAL_EVENTS = Object.freeze([
   "run_page_failed", // {agentKey, runId, error, reason?}
 ]);
 
-/** @returns {State} */
-export function initialState() {
+export const AGENT_ORDER_STORAGE_KEY = "pwh_agent_order";
+const ORDER_CAP = 200;
+
+function browserOrderStorage() {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** @param {unknown} value @returns {string[]} */
+function cleanStickyOrder(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.filter((x) => typeof x === "string" && x.length <= 512))].slice(-ORDER_CAP)
+    : [];
+}
+
+/** @param {any} card @returns {string} */
+function orderIdentity(card) {
+  const id = card.session?.sessionId;
+  return typeof id === "string" && id !== "" ? `session:${id}` : `agent:${card.agentKey}`;
+}
+
+/** Keep live keys in order; persisted identities rank reconnects with new keys. */
+function stableAgentOrder(s, agents, incoming) {
+  const known = s.order.filter((k) => agents.has(k));
+  const seen = new Set(known);
+  const ranks = new Map(s.stickyOrder.map((id, i) => [id, i]));
+  const fresh = incoming.filter((k) => !seen.has(k));
+  // Snapshot order is only a fallback: persisted identities restore the order of cards
+  // whose agentKey changed across a hub restart, while ties retain the hub's order.
+  fresh.sort((a, b) => {
+    const ar = ranks.get(orderIdentity(agents.get(a).card));
+    const br = ranks.get(orderIdentity(agents.get(b).card));
+    if (ar === undefined && br === undefined) return 0;
+    if (ar === undefined) return 1;
+    if (br === undefined) return -1;
+    return ar - br;
+  });
+  const order = [...known, ...fresh];
+  let stickyOrder = [...s.stickyOrder];
+  for (const k of order) {
+    const id = orderIdentity(agents.get(k).card);
+    const fallback = `agent:${k}`;
+    const old = stickyOrder.indexOf(fallback);
+    if (old >= 0 && id !== fallback) stickyOrder[old] = id;
+    if (!stickyOrder.includes(id)) stickyOrder.push(id);
+  }
+  stickyOrder = cleanStickyOrder(stickyOrder);
+  try {
+    s.orderStorage?.setItem(AGENT_ORDER_STORAGE_KEY, JSON.stringify(stickyOrder));
+  } catch {
+    /* private mode / quota */
+  }
+  return { ...s, agents, order, stickyOrder };
+}
+
+/** @param {Pick<Storage, "getItem" | "setItem"> | null} [storage] @returns {State} */
+export function initialState(storage = browserOrderStorage()) {
+  let stickyOrder = [];
+  try {
+    stickyOrder = cleanStickyOrder(JSON.parse(storage?.getItem(AGENT_ORDER_STORAGE_KEY) ?? "null"));
+  } catch {
+    /* malformed / unavailable */
+  }
   return {
     clientId: null,
     hub: null,
@@ -169,6 +233,8 @@ export function initialState() {
     selected: null,
     agents: new Map(),
     order: [],
+    stickyOrder,
+    orderStorage: storage,
     routed: false,
     wanted: null,
     control: false,
@@ -464,7 +530,7 @@ function reduceInner(s, event, d, at) {
       // web-hub-delete-session plan v2 §5.1: a fresh snapshot carrying a previously-removed key
       // (§3: the same pi process re-„hello“s) clears it from `removed` — the card is genuinely back.
       const removed = clearRemoved(s.removed, agents.keys());
-      return withSelection({ ...s, agents, order, removed, synced: true });
+      return withSelection({ ...stableAgentOrder(s, agents, order), removed, synced: true });
     }
     case "agent_up": {
       const card = d.agent && typeof d.agent === "object" ? d.agent : d;
@@ -474,7 +540,7 @@ function reduceInner(s, event, d, at) {
       agents.set(card.agentKey, old ? mergeCard(old, card) : newAgent(card));
       const order = old ? s.order : [...s.order, card.agentKey];
       const removed = clearRemoved(s.removed, [card.agentKey]);
-      return withSelection({ ...s, agents, order, removed });
+      return withSelection({ ...stableAgentOrder(s, agents, order), removed });
     }
     case "agent_down":
       if (!key) return s;
@@ -510,9 +576,11 @@ function reduceInner(s, event, d, at) {
     }
 
     // ---------------------------------------------------------------- per agent
-    case "session":
+    case "session": {
       if (!key || !d.session) return s;
-      return updateAgent(s, key, (a) => applySession(a, d.session));
+      const next = updateAgent(s, key, (a) => applySession(a, d.session));
+      return next === s ? s : stableAgentOrder(next, next.agents, next.order);
+    }
     case "status":
       if (!key || !d.status) return s;
       return updateAgent(s, key, (a) => {

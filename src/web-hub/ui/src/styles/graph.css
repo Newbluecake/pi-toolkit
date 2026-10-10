@@ -67,10 +67,25 @@
   width: var(--gg-w, 64px);
   padding: 0;
   position: relative;
+  background: transparent;
+}
+
+.gg-col-lanes {
+  width: var(--gg-w, 64px);
+}
+.gg-col-date,
+.gg-col-author {
+  width: 12ch;
+}
+.gg-col-hash {
+  width: 7ch;
 }
 
 .gg-svg {
   display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 
 .gg-route path {
@@ -137,7 +152,7 @@ tr.is-merge .gg-sub {
 }
 
 /* ---- current checkout highlight (§4.3) ---- */
-.gg-table tr[data-current="true"] {
+.gg-table tr[data-current="true"] > .gg-cell {
   background: var(--c-sunken);
 }
 
@@ -382,6 +397,10 @@ tr.is-merge .gg-sub {
 
 .gg-sum .icon-sm:first-child {
   flex: none;
+}
+
+.gg-sum-icon {
+  color: var(--st-running);
 }
 
 .gg-sum-text {

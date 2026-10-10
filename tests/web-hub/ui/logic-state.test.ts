@@ -39,6 +39,59 @@ const userEntry = (id: string, ts: number, text = "hi") => ({
   message: { role: "user", content: text, timestamp: ts },
 });
 
+describe("sticky sidebar order", () => {
+  function memoryStorage() {
+    let value: string | null = null;
+    return {
+      getItem: () => value,
+      setItem: (_key: string, v: string) => {
+        value = v;
+      },
+    };
+  }
+  it("survives shuffled reconnects, reload and changed agent keys by session", () => {
+    const storage = memoryStorage();
+    const a0 = { ...card("A"), session: { ...card("A").session, sessionId: "session-A" } };
+    const b0 = { ...card("B"), session: { ...card("B").session, sessionId: "session-B" } };
+    let s = reduce(initialState(storage), { event: "agents", data: [a0, b0] });
+    s = reduce(s, { event: "agents", data: [b0, a0, card("C")] });
+    expect(s.order).toEqual(["A", "B", "C"]);
+    const a = { ...a0, agentKey: "new-A" };
+    const b = { ...b0, agentKey: "new-B" };
+    const reloaded = reduce(initialState(storage), { event: "agents", data: [b, a, card("D")] });
+    expect(reloaded.order).toEqual(["new-A", "new-B", "D"]);
+  });
+  it("new agent appends and removal leaves other keys in place", () => {
+    let s = reduce(initialState(null), { event: "agents", data: [card("A"), card("B")] });
+    s = reduce(s, { event: "agent_up", data: card("C") });
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "B" } });
+    s = reduce(s, { event: "agents", data: [card("C"), card("A")] });
+    expect(s.order).toEqual(["A", "C"]);
+  });
+  it("unavailable storage preserves in-memory order", () => {
+    const storage = {
+      getItem: () => {
+        throw Error("denied");
+      },
+      setItem: () => {
+        throw Error("denied");
+      },
+    };
+    let s = reduce(initialState(storage), { event: "agents", data: [card("A"), card("B")] });
+    s = reduce(s, { event: "agents", data: [card("B"), card("A")] });
+    expect(s.order).toEqual(["A", "B"]);
+  });
+  it("bounds persistence to 200 identities and falls back to agentKey", () => {
+    const storage = memoryStorage();
+    const cards = Array.from({ length: 240 }, (_, i) => ({ agentKey: `k${i}` }));
+    const s = reduce(initialState(storage), { event: "agents", data: cards });
+    expect(s.stickyOrder).toHaveLength(200);
+    expect(JSON.parse(storage.getItem()!)).toHaveLength(200);
+    const reload = reduce(initialState(storage), { event: "agents", data: [cards[239], cards[238]] });
+    expect(reload.order).toEqual(["k238", "k239"]);
+  });
+});
+
 /** hello + agents + subscribing + history(fromSeq) ⇒ agent A loaded. */
 function loaded(historyExtra: Record<string, unknown> = {}, fromSeq = 10) {
   return run([

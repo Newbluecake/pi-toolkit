@@ -49,6 +49,7 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useWorktreeGraph } from "../../composables/useWorktreeGraph.js";
 import type { WorktreeGraphTransport } from "../../transport/types.js";
 import GraphLanes from "./GraphLanes.vue";
+import AppIcon from "../../icons/AppIcon.vue";
 import "../../styles/graph.css";
 
 const { t, lang } = useI18n();
@@ -195,7 +196,7 @@ function measure(): void {
     out.push(r.top - base + r.height / 2);
     if (first === 0) first = r.height;
   });
-  centers.value = out;
+  if (out.length !== centers.value.length || out.some((y, i) => y !== centers.value[i])) centers.value = out;
   if (first > 0) rowH.value = first;
 }
 
@@ -299,6 +300,7 @@ onBeforeUnmount(() => {
       :aria-label="t('graph.toggleAria')"
       @click="state.toggle()"
     >
+      <AppIcon name="branch" class="icon-sm gg-sum-icon" />
       <span class="gg-sum-text">{{ t("graph.headLabel", { n: state.state.value.data?.n ?? 200 }) }}</span>
       <span class="chev" aria-hidden="true">›</span>
     </button>
@@ -336,6 +338,13 @@ onBeforeUnmount(() => {
                   t("graph.caption")
                 }}
               </caption>
+              <colgroup>
+                <col class="gg-col-lanes" />
+                <col />
+                <col v-if="!mobile" class="gg-col-date" />
+                <col v-if="!mobile" class="gg-col-author" />
+                <col class="gg-col-hash" />
+              </colgroup>
               <tbody ref="tbodyEl">
                 <tr
                   v-for="(c, i) in commits"

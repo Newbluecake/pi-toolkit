@@ -103,7 +103,7 @@ export { PREVIEW_TILDE_HUB_CAP };
  * @typedef {{ agentKey: string, sessionId: string, cwd: string | null, uploads: boolean,
  *   abs?: true, dirs?: true, tilde?: true }} PathScope
  * @typedef {{ kind: "text", text: string }
- *   | { kind: "ref", text: string, path: string, line?: number, col?: number }} PathSegment
+ *   | { kind: "ref", text: string, path: string, alt?: { text: string, path: string }, line?: number, col?: number }} PathSegment
  * @typedef {{ w: number, h: number }} PreviewDimsT
  */
 
@@ -180,12 +180,28 @@ const TERMINATOR_CHARS = new Set([
 ]);
 
 const WS_RE = /\s/;
+const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const CJK_PUNCT_RE = /[\u3000-\u303f\uff00-\uffef]/u;
+const PUNCT_OR_SYMBOL_RE = /[\p{P}\p{S}\p{Z}]/u;
+const isCjkPunctuation = (ch) => CJK_PUNCT_RE.test(ch) && PUNCT_OR_SYMBOL_RE.test(ch);
+
+/** Preserve CJK filenames, but probe the prose-free prefix as well. */
+function withCjkAlternative(seg, scope) {
+  const cut = seg.text.search(CJK_RE);
+  __previewScanStats.charScans += seg.text.length;
+  if (cut > 0) {
+    const prefix = seg.text.slice(0, cut);
+    const ref = pathRefOfCode(prefix, scope, false);
+    if (ref !== null) seg.alt = { text: prefix, path: ref.path };
+  }
+  return seg;
+}
 const TRAILING_PUNCT_RE = /[.:!?]$/;
 const LINE_COL_RE = /:(\d+)(?::(\d+))?$/;
 
 /** @param {string | undefined} ch */
 function isTerminator(ch) {
-  return ch === undefined || WS_RE.test(ch) || TERMINATOR_CHARS.has(ch);
+  return ch === undefined || WS_RE.test(ch) || TERMINATOR_CHARS.has(ch) || isCjkPunctuation(ch);
 }
 
 /**
@@ -201,7 +217,7 @@ function isTerminator(ch) {
  * @param {string | undefined} ch @param {Set<string>} startSet
  */
 function isWordBoundary(ch, startSet) {
-  return isTerminator(ch) || (ch !== undefined && startSet.has(ch));
+  return isTerminator(ch) || (ch !== undefined && (startSet.has(ch) || CJK_RE.test(ch)));
 }
 
 /**
@@ -213,7 +229,7 @@ function isWordBoundary(ch, startSet) {
 function isStartContext(text, slash, startSet) {
   if (slash === 0) return true;
   const prev = text[slash - 1];
-  return prev !== undefined && (WS_RE.test(prev) || startSet.has(prev));
+  return prev !== undefined && (WS_RE.test(prev) || startSet.has(prev) || CJK_RE.test(prev) || isCjkPunctuation(prev));
 }
 
 /**
@@ -230,7 +246,7 @@ function isStartContext(text, slash, startSet) {
 function relativeStartContext(text, wordStart, startSet) {
   if (wordStart <= 0) return false;
   const prev = text[wordStart - 1];
-  return prev !== undefined && (WS_RE.test(prev) || startSet.has(prev));
+  return prev !== undefined && (WS_RE.test(prev) || startSet.has(prev) || CJK_RE.test(prev) || isCjkPunctuation(prev));
 }
 
 /** §4.6 rule 1b: last segment's extension shape — `.` + 1–10 "reasonable" chars, ≥1 char before it. */
@@ -552,7 +568,7 @@ export function findPathRefs(text, scope) {
             seg.line = spanLine;
             if (spanCol !== undefined) seg.col = spanCol;
           }
-          segments.push(seg);
+          segments.push(withCjkAlternative(seg, scope));
           refs++;
           textStart = strippedEnd;
           i = strippedEnd;
@@ -596,7 +612,7 @@ export function findPathRefs(text, scope) {
             seg.line = spanLine;
             if (spanCol !== undefined) seg.col = spanCol;
           }
-          segments.push(seg);
+          segments.push(withCjkAlternative(seg, scope));
           refs++;
           textStart = strippedEnd;
           i = strippedEnd;
@@ -651,7 +667,8 @@ export function findPathRefs(text, scope) {
         if (seg0ok) {
           const rel0 = text.slice(ws, spanP);
           __previewScanStats.charScans += rel0.length;
-          const shape = looksLikeRelativePath(rel0);
+          const cjkCut = rel0.search(CJK_RE);
+          const shape = looksLikeRelativePath(rel0) || (cjkCut > 0 && looksLikeRelativePath(rel0.slice(0, cjkCut)));
           const opener = text[ws - 1];
           const dirsEx =
             dirs &&
@@ -670,7 +687,7 @@ export function findPathRefs(text, scope) {
                 seg.line = spanLine;
                 if (spanCol !== undefined) seg.col = spanCol;
               }
-              segments.push(seg);
+              segments.push(withCjkAlternative(seg, scope));
               refs++;
               textStart = strippedEnd;
               i = strippedEnd;
@@ -704,9 +721,10 @@ export function findPathRefs(text, scope) {
  * `abs` alone (without `dirs`) changes nothing here — the trailing-slash/no-extension rules
  * are A5 additions gated on `dirs` only.
  * @param {string} text @param {PathScope | null | undefined} scope
- * @returns {{ text: string, path: string, line?: number, col?: number } | null}
+ * @param {boolean} [alternatives]
+ * @returns {{ text: string, path: string, alt?: { text: string, path: string }, line?: number, col?: number } | null}
  */
-export function pathRefOfCode(text, scope) {
+export function pathRefOfCode(text, scope, alternatives = true) {
   if (typeof text !== "string" || text === "" || scope === null || scope === undefined) return null;
   for (const ch of text) {
     if (isTerminator(ch)) return null;
@@ -752,7 +770,7 @@ export function pathRefOfCode(text, scope) {
   const out = { text, path: resolved };
   if (line !== undefined) out.line = line;
   if (col !== undefined) out.col = col;
-  return out;
+  return alternatives ? withCjkAlternative(out, scope) : out;
 }
 
 /**

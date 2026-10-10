@@ -73,7 +73,7 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
  * session-history plan §4.7.2 (P-ui): + `spawn/SessionHistoryDialog.vue` for the history
  * kind toggle (`pwh_history_kind`, "main" | "all" — a pure UI preference, same class). */
 const LOCALSTORAGE_ALLOWED =
-  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue/i;
+  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {

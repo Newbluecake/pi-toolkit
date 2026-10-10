@@ -60,6 +60,34 @@ function rng(seed: number): () => number {
   };
 }
 
+describe("CJK neighbour path recognition", () => {
+  const scope = { ...SCOPE, abs: true as const, tilde: true as const, dirs: true as const };
+  it.each([
+    ["在~/ai/claude2api下执行", "~/ai/claude2api下执行", "~/ai/claude2api"],
+    ["在/home/bluecake/ai/claude2api下执行", "/home/bluecake/ai/claude2api下执行", "/home/bluecake/ai/claude2api"],
+    ["~/ai/x下执行", "~/ai/x下执行", "~/ai/x"],
+    ["/home/u/笔记.md", "/home/u/笔记.md", "/home/u"],
+  ])("offers full and prefix for %s", (text, path, prefix) => {
+    const segs = findPathRefs(text, scope);
+    expect(segs.map((s) => s.text).join("")).toBe(text);
+    expect(segs.find((s) => s.kind === "ref")).toMatchObject({ path, alt: { path: prefix } });
+  });
+  it.each(["路径：~/ai/x，", "「/home/u/a.md」", "한/home/u/a.md", "あ/home/u/a.md", "中src/a.ts"])(
+    "accepts boundary %s",
+    (text) => {
+      expect(findPathRefs(text, scope).some((s) => s.kind === "ref")).toBe(true);
+    },
+  );
+  it("keeps ASCII mid-word and tilde-off exclusions", () => {
+    for (const text of ["abc~/x", "foo/bar", "在~/ai/x下执行"]) {
+      expect(findPathRefs(text, { ...scope, tilde: undefined }).every((s) => s.kind === "text")).toBe(true);
+    }
+  });
+  it("offers inline code alternatives", () => {
+    expect(pathRefOfCode("~/ai/x下执行", scope)).toMatchObject({ alt: { text: "~/ai/x", path: "~/ai/x" } });
+  });
+});
+
 describe("logic/preview.js findPathRefs — start contexts (§4.6 rule 1)", () => {
   it.each([
     ["line start", "/home/u/proj/a.ts rest"],
@@ -79,6 +107,7 @@ describe("logic/preview.js findPathRefs — start contexts (§4.6 rule 1)", () =
     ["after 【", "x【/home/u/proj/a.ts】"],
     ["after 《", "x《/home/u/proj/a.ts》"],
     ["after ：", "路径：/home/u/proj/a.ts。"],
+    ["after 。", "看。/home/u/proj/a.ts"],
   ])("clickable: %s", (_label, text) => {
     const segs = findPathRefs(text, SCOPE) as Seg[];
     expect(concat(segs)).toBe(text);
@@ -90,7 +119,6 @@ describe("logic/preview.js findPathRefs — start contexts (§4.6 rule 1)", () =
     ["after :", "http://example.com/home/u/proj/a.ts"],
     ["after / (double slash)", "//home/u/proj/a.ts"],
     ["after digit", "1/home/u/proj/a.ts"],
-    ["after 。", "看。/home/u/proj/a.ts"],
   ])("not clickable: %s", (_label, text) => {
     const segs = findPathRefs(text, SCOPE) as Seg[];
     expect(concat(segs)).toBe(text);
@@ -1488,12 +1516,17 @@ const O_START_EXT = new Set([...O_START, "`"]);
 const O_TRAILING = /[.:!?]$/;
 const O_LINECOL = /:(\d+)(?::(\d+))?$/;
 const O_EXT_RE = /\.[A-Za-z0-9_-]{1,10}$/;
-const oTerm = (ch: string | undefined) => ch === undefined || O_WS.test(ch) || O_TERMINATORS.has(ch);
-const oWb = (ch: string | undefined, ss: Set<string>) => oTerm(ch) || (ch !== undefined && ss.has(ch));
+const O_CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const O_CJK_PUNCT = /[\u3000-\u303f\uff00-\uffef]/u;
+const oTerm = (ch: string | undefined) =>
+  ch === undefined || O_WS.test(ch) || O_TERMINATORS.has(ch) || O_CJK_PUNCT.test(ch);
+const oWb = (ch: string | undefined, ss: Set<string>) =>
+  oTerm(ch) || (ch !== undefined && (ss.has(ch) || O_CJK.test(ch)));
 const oStartCtx = (t: string, i: number, ss: Set<string>) =>
-  i === 0 || (t[i - 1] !== undefined && (O_WS.test(t[i - 1]!) || ss.has(t[i - 1]!)));
-const oRelStartCtx = (t: string, i: number, ss: Set<string>) =>
-  i > 0 && t[i - 1] !== undefined && (O_WS.test(t[i - 1]!) || ss.has(t[i - 1]!));
+  i === 0 ||
+  (t[i - 1] !== undefined &&
+    (O_WS.test(t[i - 1]!) || ss.has(t[i - 1]!) || O_CJK.test(t[i - 1]!) || O_CJK_PUNCT.test(t[i - 1]!)));
+const oRelStartCtx = (t: string, i: number, ss: Set<string>) => i > 0 && oStartCtx(t, i, ss);
 const oLooksLikeRelative = (cand: string) => {
   const slash = cand.indexOf("/");
   if (slash <= 0) return false;
@@ -1747,7 +1780,10 @@ describe("logic/preview.js findPathRefs — §2.5.2 differential correctness gat
 
   it("legacy scopes: deep-equal to the FROZEN pre-P2 reference on every frozen input + 2 000 fuzz cases", () => {
     for (const [label, scope] of LEGACY_SCOPES) {
-      for (const text of [...FROZEN_INPUTS, ...FUZZ]) {
+      // The frozen legacy oracle predates CJK boundaries/alternatives; retain its ASCII contract.
+      for (const text of [...FROZEN_INPUTS, ...FUZZ].filter(
+        (t) => !/[\u3000-\u303f\uff00-\uffef\p{Script=Han}]/u.test(t),
+      )) {
         const live = findPathRefs(text, scope) as Seg[];
         const ref = findPathRefsRef(text, scope) as Seg[];
         expect(live, `scope=${label} text=${JSON.stringify(text)}`).toEqual(ref);
@@ -1763,7 +1799,11 @@ describe("logic/preview.js findPathRefs — §2.5.2 differential correctness gat
     "%s scope: deep-equal to the naive per-candidate oracle on every frozen input + 2 000 fuzz cases",
     (_label, scope) => {
       for (const text of [...FROZEN_INPUTS, ...FUZZ]) {
-        const live = findPathRefs(text, scope) as Seg[];
+        const live = findPathRefs(text, scope).map((seg) => {
+          if (seg.kind === "text") return seg;
+          const { alt: _alt, ...base } = seg;
+          return base;
+        }) as Seg[];
         const want = oracleFindPathRefs(text, scope);
         expect(live, `text=${JSON.stringify(text)}`).toEqual(want);
       }

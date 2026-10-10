@@ -101,6 +101,56 @@ async function settleTick(): Promise<void> {
   await nextTick();
 }
 
+describe("CJK alternatives through the real probe", () => {
+  it.each([false, true])("prefix-only existence preserves trailing prose (code=%s)", async (code) => {
+    const r = rig(ref({ ...SCOPE, tilde: true }));
+    const w = mountPathText(r, { text: "~/ai/x下执行", code });
+    r.flush();
+    expect(r.calls[0]?.paths).toEqual(["~/ai/x下执行", "~/ai/x"]);
+    r.answer(["missing", "dir"]);
+    await settleTick();
+    expect(w.get(".path-ref").text()).toBe("~/ai/x");
+    expect(w.text()).toBe("~/ai/x下执行");
+    w.unmount();
+    r.stop();
+  });
+  it("longest existing Chinese filename wins; neither existing stays plain", async () => {
+    for (const exists of [true, false]) {
+      const r = rig(ref({ ...SCOPE, abs: true, dirs: true }));
+      const w = mountPathText(r, { text: "/home/u/笔记.md" });
+      r.flush();
+      expect(r.calls[0]?.paths).toEqual(["/home/u/笔记.md", "/home/u"]);
+      r.answer(exists ? ["text", "dir"] : ["missing", "missing"]);
+      await settleTick();
+      expect(w.find(".path-ref").exists()).toBe(exists);
+      if (exists) expect(w.get(".path-ref").text()).toBe("/home/u/笔记.md");
+      w.unmount();
+      r.stop();
+    }
+  });
+  it("alternatives count toward the 100 path wire cap", () => {
+    const r = rig(ref({ ...SCOPE, tilde: true }));
+    const w = mountPathText(r, { text: Array.from({ length: 60 }, (_, i) => `~/ai/x${i}下执行`).join(" ") });
+    r.flush();
+    expect(r.calls.map((c) => c.paths.length)).toEqual([100, 20]);
+    for (const c of r.calls) expect(new TextEncoder().encode(JSON.stringify(c)).length).toBeLessThanOrEqual(8192);
+    w.unmount();
+    r.stop();
+  });
+  it("alternatives split on the UTF-8 body budget too", () => {
+    const r = rig(ref({ ...SCOPE, tilde: true }));
+    const w = mountPathText(r, {
+      text: Array.from({ length: 20 }, (_, i) => `~/ai/${"x".repeat(400)}${i}下执行`).join(" "),
+    });
+    r.flush();
+    expect(r.calls.length).toBeGreaterThan(1);
+    expect(r.calls.flatMap((c) => c.paths)).toHaveLength(40);
+    for (const c of r.calls) expect(new TextEncoder().encode(JSON.stringify(c)).length).toBeLessThanOrEqual(8192);
+    w.unmount();
+    r.stop();
+  });
+});
+
 describe("PathText × probe (2026-10-07 修订「先探测后标记」)", () => {
   it("pending/unknown render plain text; confirmed upgrades to .path-ref; click opens the stripped path", async () => {
     const r = rig();

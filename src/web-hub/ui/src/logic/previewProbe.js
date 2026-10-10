@@ -84,8 +84,8 @@ export function planProbeBatches(paths, opts) {
   let cur = [];
   let curBytes = 0;
   for (const p of paths) {
-    // 4 = two JSON quotes + comma + slack; the envelope headroom covers the rest.
-    const bytes = textEncoder.encode(p).length + 4;
+    // Count JSON escaping too (quotes, backslashes and control characters).
+    const bytes = textEncoder.encode(JSON.stringify(p)).length + 1;
     if (cur.length >= maxPaths || (cur.length > 0 && curBytes + bytes > maxBytes)) {
       batches.push(cur);
       cur = [];
