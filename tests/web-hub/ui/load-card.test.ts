@@ -189,6 +189,12 @@ describe("LoadCard.vue — top processes (fetchLoadTop single-flight + three sta
     expect(wrapper.text()).toContain("640M");
   });
 
+  it("renders unavailable top units as n/a", () => {
+    const data = { at: 1, byCpu: [{ comm: "node", count: 1, pids: [{ pid: 777 }] }], byRss: [] };
+    const wrapper = mountCard(load(), hubWithLoadTop({ loading: false, data } as HubState["loadTop"]));
+    expect(wrapper.text()).toContain("n/a");
+  });
+
   it("expanding a row reveals its per-pid breakdown; collapsing hides it again", async () => {
     const data = {
       at: 1,

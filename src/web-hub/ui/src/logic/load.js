@@ -245,7 +245,14 @@ export function pillView(load, receivedAt, now) {
  * @returns {{ comm: string, count: number, valueText: string, avg: boolean, pids: { pid: number, valueText: string }[] }}
  */
 export function topRowView(row, kind) {
-  const valueText = kind === "cpu" ? `${pct(row.cpuPct)}%` : fmtBytesShort(row.rssBytes);
+  const valueText =
+    kind === "cpu"
+      ? row.cpuPct === undefined
+        ? "n/a"
+        : `${pct(row.cpuPct)}%`
+      : row.rssBytes === undefined
+        ? "n/a"
+        : fmtBytesShort(row.rssBytes);
   return {
     comm: row.comm,
     count: row.count,
@@ -253,7 +260,14 @@ export function topRowView(row, kind) {
     avg: row.avg === true,
     pids: row.pids.map((p) => ({
       pid: p.pid,
-      valueText: kind === "cpu" ? `${pct(p.cpuPct)}%` : fmtBytesShort(p.rssBytes),
+      valueText:
+        kind === "cpu"
+          ? p.cpuPct === undefined
+            ? "n/a"
+            : `${pct(p.cpuPct)}%`
+          : p.rssBytes === undefined
+            ? "n/a"
+            : fmtBytesShort(p.rssBytes),
     })),
   };
 }
@@ -308,7 +322,11 @@ export function fmtDurationShort(ms) {
 function isTopPid(v) {
   if (!record(v)) return false;
   const p = /** @type {any} */ (v);
-  return finite(p.pid, 1, 2 ** 31 - 1) && finite(p.cpuPct, 0) && finite(p.rssBytes, 0);
+  return (
+    finite(p.pid, 1, 2 ** 31 - 1) &&
+    (p.cpuPct === undefined || finite(p.cpuPct, 0)) &&
+    (p.rssBytes === undefined || finite(p.rssBytes, 0))
+  );
 }
 
 /** @param {unknown} v @returns {v is LoadTopRowWire} */
@@ -317,7 +335,8 @@ function isTopRow(v) {
   const r = /** @type {Record<string, unknown>} */ (v);
   if (typeof r.comm !== "string" || r.comm.length > 256) return false;
   if (!finite(r.count, 1, 1e6)) return false;
-  if (!finite(r.cpuPct, 0) || !finite(r.rssBytes, 0)) return false;
+  if ((r.cpuPct !== undefined && !finite(r.cpuPct, 0)) || (r.rssBytes !== undefined && !finite(r.rssBytes, 0)))
+    return false;
   if (!Array.isArray(r.pids) || r.pids.length > 8 || !r.pids.every(isTopPid)) return false;
   return true;
 }

@@ -367,15 +367,19 @@ export interface LoadWire {
  */
 export interface LoadTopPidWire {
   pid: number;
-  cpuPct: number;
-  rssBytes: number;
+  /** Absent ⇔ n/a because USER_HZ/page size could not be read. */
+  cpuPct?: number;
+  /** Absent ⇔ n/a because USER_HZ/page size could not be read. */
+  rssBytes?: number;
 }
 
 export interface LoadTopRowWire {
   comm: string;
   count: number;
-  cpuPct: number;
-  rssBytes: number;
+  /** Absent ⇔ n/a because USER_HZ/page size could not be read. */
+  cpuPct?: number;
+  /** Absent ⇔ n/a because USER_HZ/page size could not be read. */
+  rssBytes?: number;
   /** Set when `cpuPct` is a lifetime average (no matching previous-tick sample, §5.5). */
   avg?: true;
   /** ≤8, per §5.5. */

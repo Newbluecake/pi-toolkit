@@ -240,6 +240,17 @@ describe("parseLoadTopWire — GET /api/load/top contract gate (no protocol-leve
   it("accepts a well-formed body", () => {
     expect(parseLoadTopWire(good)).toEqual(good);
   });
+  it("accepts omitted unit fields and renders them as n/a", () => {
+    const unavailable = {
+      at: 1_000,
+      byCpu: [{ comm: "node", count: 1, pids: [{ pid: 1 }] }],
+      byRss: [],
+    };
+    expect(parseLoadTopWire(unavailable)).toEqual(unavailable);
+    expect(topRowView(unavailable.byCpu[0], "cpu").valueText).toBe("n/a");
+    expect(topRowView(unavailable.byCpu[0], "rss").valueText).toBe("n/a");
+  });
+
   it("accepts the optional partial:true flag", () => {
     expect(parseLoadTopWire({ ...good, partial: true })).toEqual({ ...good, partial: true });
   });
@@ -251,5 +262,6 @@ describe("parseLoadTopWire — GET /api/load/top contract gate (no protocol-leve
     expect(
       parseLoadTopWire({ ...good, byRss: [{ comm: "x", count: 1, cpuPct: 1, rssBytes: 1, pids: [{ pid: "x" }] }] }),
     ).toBeNull();
+    expect(parseLoadTopWire({ ...good, byCpu: [{ comm: "node", count: 1, cpuPct: Number.NaN, pids: [] }] })).toBeNull();
   });
 });
