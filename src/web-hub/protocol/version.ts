@@ -105,6 +105,10 @@ export const PREVIEW_LAN_HUB_CAP = "preview.lan.v1";
  */
 export const PREVIEW_DIR_HUB_CAP = "preview.dir.v1";
 export const PREVIEW_ABS_HUB_CAP = "preview.abs.v1";
+/** Tilde-expansion addendum (`hub/preview/tilde.ts`): the hub expands a leading `~/` in a
+ * preview path to the hub user's home before the full admission chain. Same gate as
+ * `PREVIEW_ABS_HUB_CAP`; a hub without it never sees a `~/` request from the UI. */
+export const PREVIEW_TILDE_HUB_CAP = "preview.tilde.v1";
 
 /**
  * web-hub-fleet-drawer plan §3.2/§7.1 (F0): the run-transcript caps. An agent advertises a

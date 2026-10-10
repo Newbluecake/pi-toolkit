@@ -12,6 +12,14 @@
   only EMITS the entry; the navigation algebra (`childPreviewPath`, the history push) lives
   in the host + `usePreview`.
 
+  Path bar (tilde-expansion addendum, part B): a native `<form>` + `<input>` pre-filled with
+  `props.path` — submitting emits `go` with trimmed text after local byte/control checks;
+  the host re-runs the FULL admission chain on the hub for whatever comes back (no
+  client-side trust — a syntactically-invalid or denied path just surfaces through the
+  existing error/unsupported view, same as any other failed navigation). Esc restores the
+  draft to `props.path` and stops propagation so it does NOT also close the whole dialog
+  (the overlay's own Esc-closes-everything handler lives one level up, in PreviewHost).
+
   Truncation/health copy (§3.2): the `limits` flags pick their notice lines (scan / entries /
   bytes — plus the filter-layer `dropped` count), `vanished`/`statPartial` get theirs, and
   the static footnote 「受保护条目不显示」 always renders (never a count — an existence
@@ -19,10 +27,11 @@
   innerHTML/v-html anywhere — text interpolation only.
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { formatPreviewBytes } from "@logic/preview.js";
 import {
   PREVIEW_DIR_SCAN_MAX,
+  PREVIEW_PATH_MAX_BYTES,
   type PreviewDirEntry,
   type PreviewDirEntryType,
   type PreviewDirListing,
@@ -36,9 +45,50 @@ const props = defineProps<{
   readonly path: string;
   readonly listing: PreviewDirListing;
 }>();
-const emit = defineEmits<{ (e: "navigate", entry: PreviewDirEntry): void }>();
+const emit = defineEmits<{ (e: "navigate", entry: PreviewDirEntry): void; (e: "go", path: string): void }>();
 const i18n = useI18n();
 const { t } = i18n;
+
+// Path bar (part B): pre-filled with the listed directory's own path; re-filled whenever a
+// fresh listing arrives (a new `path` prop — PreviewHost `:key="view.path"` already remounts
+// this whole component per navigation anyway, but the watch keeps it correct even if that
+// ever changes). Local checks do not replace the hub's authoritative admission chain.
+const pathDraft = ref(props.path);
+const pathError = ref<"forbidden" | "tooLong" | null>(null);
+const textEncoder = new TextEncoder();
+watch(
+  pathDraft,
+  () => {
+    pathError.value = null;
+  },
+  { flush: "sync" },
+);
+watch(
+  () => props.path,
+  (p) => {
+    pathDraft.value = p;
+  },
+);
+
+function submitPathBar(): void {
+  // Check before trimming: CR/LF must never silently disappear from a request.
+  if (/[\0\r\n]/.test(pathDraft.value)) {
+    pathError.value = "forbidden";
+    return;
+  }
+  if (textEncoder.encode(pathDraft.value).length > PREVIEW_PATH_MAX_BYTES) {
+    pathError.value = "tooLong";
+    return;
+  }
+  pathError.value = null;
+  const raw = pathDraft.value.trim();
+  if (raw === "") return;
+  emit("go", raw);
+}
+
+function resetPathBar(): void {
+  pathDraft.value = props.path;
+}
 
 function typeLabel(type: PreviewDirEntryType): string {
   switch (type) {
@@ -106,6 +156,33 @@ const notices = computed<string[]>(() => {
 
 <template>
   <div class="preview-dir">
+    <form class="preview-dir-pathbar" @submit.prevent="submitPathBar">
+      <input
+        v-model="pathDraft"
+        type="text"
+        class="input preview-dir-pathbar-input"
+        :aria-label="t('preview.dirPathLabel')"
+        :placeholder="t('preview.dirPathPlaceholder')"
+        :aria-invalid="pathError ? 'true' : undefined"
+        :aria-describedby="pathError ? 'preview-dir-path-error' : undefined"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        translate="no"
+        @keydown.esc.stop.prevent="resetPathBar"
+      />
+      <button type="submit" class="btn preview-dir-pathbar-go" :aria-label="t('preview.dirPathGo')">
+        {{ t("preview.dirPathGo") }}
+      </button>
+    </form>
+    <p v-if="pathError" id="preview-dir-path-error" class="preview-dir-note" role="alert">
+      {{
+        pathError === "forbidden"
+          ? t("preview.dirPathForbidden")
+          : t("preview.dirPathTooLong", { max: PREVIEW_PATH_MAX_BYTES })
+      }}
+    </p>
     <div class="preview-dir-meta" translate="no">
       <span>{{ countLabel }}</span>
     </div>

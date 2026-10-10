@@ -35,11 +35,31 @@
  *   (U1) BOTH caps are declared, so password mode gets a scope too. dir-plan §2.5.1 (P2):
  *   `preview.abs.v1` / `preview.dir.v1` add the optional `abs` / `dirs` keys — ONLY when the
  *   cap is present (absent ⇒ key absent, so every pre-dir-plan `toEqual` pin stays green).
+ *   Tilde-expansion addendum: `preview.tilde.v1` similarly adds `tilde` — see `PREVIEW_TILDE_HUB_CAP`'s
+ *   own doc comment for why this cap is NOT (yet) `@protocol/version.ts`'s.
+ * - **`~/<rest>` recognition** (tilde-expansion addendum): a `~/<rest>` span is recognized the
+ *   same way an absolute `/<rest>` span is (line-start/whitespace/opener context, terminator
+ *   set, `:line[:col]` tail), gated behind `scope.tilde === true` — INDEPENDENT of `scope.abs`,
+ *   because an old hub can already have declared `preview.abs.v1` (shipped well before this
+ *   feature) without knowing how to expand a tilde at all; gating on `abs` would make such a
+ *   hub 400 every tilde click. The recognized `path` is the LITERAL `~/<rest>` text (never
+ *   expanded client-side — only the hub knows its own home, see `hub/preview/tilde.ts`). A
+ *   BARE `~` is never clickable. The tilde floor is ONE segment (`isClickable` validates
+ *   `rest` with `minSegments: 1` — the hub's own home is a one-segment LISTABLE directory,
+ *   so `~/notes.txt` is a reference while the absolute route keeps its ≥2-segment freeze
+ *   for `/home`, C4); a lone `~/` (zero segments) stays dead. EXCLUSIVE interpretation
+ *   (F1 fix): a `~`-prefixed token is a tilde reference or NOTHING — it never falls through
+ *   to the relative branches (`findPathRefs` route 2 rejects any leading segment starting
+ *   with `~`, `pathRefOfCode` bails before its relative branches), so `~user/...` and a
+ *   cap-off `~/...` yield no candidate at all in ANY scope, and `see ~/notes.txt` with a
+ *   live cwd can never be rewritten into `<cwd>/~/notes.txt`. A trailing `/` on a tilde
+ *   candidate folds out of the request path under `scope.dirs` only (the A5 (a)/(b) rule —
+ *   `~/snap/` without `dirs` is not a reference).
  * - `scopeKeyOf(scope)` — `agentKey|sessionId|cwd` (v3-2 双保险: the same-sessionId-cwd-never-
  *   changes invariant PLUS the key carrying cwd, so a cwd change invalidates the scope).
  *   dir-plan §2.5.1: `|abs` / `|dir` are appended for the respective flags — a cap change
  *   invalidates the scope (and the probe LRU partitions naturally); the format is unchanged
- *   when the flags are absent.
+ *   when the flags are absent. Tilde-expansion addendum: `|tilde` joins the same way.
  * - `clientImageBudget({ coarse })` — §0/P2-13: touch devices cap at 20MP, desktop at the
  *   server's 40MP; checked from the response HEADERS before the body is ever read.
  * - `parsePreviewDims` / `checkPreviewHeaders` — the §4.6 transport pre-body gate: Kind must
@@ -67,11 +87,21 @@ import {
   PREVIEW_UPLOADS_MARKER,
   validatePreviewPath,
 } from "@protocol/preview.ts";
-import { PREVIEW_ABS_HUB_CAP, PREVIEW_DIR_HUB_CAP, PREVIEW_HUB_CAP, PREVIEW_LAN_HUB_CAP } from "@protocol/version.ts";
+import {
+  PREVIEW_ABS_HUB_CAP,
+  PREVIEW_DIR_HUB_CAP,
+  PREVIEW_HUB_CAP,
+  PREVIEW_LAN_HUB_CAP,
+  PREVIEW_TILDE_HUB_CAP,
+} from "@protocol/version.ts";
+
+/** Tilde-expansion addendum: `PREVIEW_TILDE_HUB_CAP` (`@protocol/version.ts`) gates `~/<rest>`
+ * recognition; re-exported for existing importers. */
+export { PREVIEW_TILDE_HUB_CAP };
 
 /**
  * @typedef {{ agentKey: string, sessionId: string, cwd: string | null, uploads: boolean,
- *   abs?: true, dirs?: true }} PathScope
+ *   abs?: true, dirs?: true, tilde?: true }} PathScope
  * @typedef {{ kind: "text", text: string }
  *   | { kind: "ref", text: string, path: string, line?: number, col?: number }} PathSegment
  * @typedef {{ w: number, h: number }} PreviewDimsT
@@ -242,9 +272,20 @@ function resolveRelativePath(candidate, cwd) {
  * under `abs` the route is simply "protocol-valid" (`validatePreviewPath`, ≥2 segments —
  * `/help` `/reload` never become candidates); a `null` scope still never reaches here and a
  * `null` cwd keeps absolute paths clickable while relative recognition stays off.
+ *
+ * Tilde-expansion addendum: a `~/<rest>` path is judged under `scope.tilde` alone (never
+ * `scope.abs`, which an older hub can already have declared without knowing how to expand a
+ * tilde) by validating `rest` (`path.slice(1)`, which already starts with `/`) through the
+ * SAME `validatePreviewPath` — but with the tilde-specific ONE-segment floor (F1: the hub's
+ * home is a single listable segment, so `~/notes.txt` IS clickable while the absolute route
+ * keeps its ≥2 freeze); a bare `~` and a lone `~/` never reach here as candidates at all.
  * @param {string} path @param {PathScope} scope
  */
 function isClickable(path, scope) {
+  if (scope.tilde === true && path.startsWith("~/")) {
+    const candidate = path.length > 2 && path.endsWith("/") ? path.slice(0, -1) : path;
+    return validatePreviewPath(candidate.slice(1), { minSegments: 1 });
+  }
   if (!validatePreviewPath(path)) return false;
   if (scope.abs === true) return true;
   if (scope.uploads === true && path.includes(PREVIEW_UPLOADS_MARKER)) return true;
@@ -365,6 +406,7 @@ export function findPathRefs(text, scope) {
   // Per-call scope pre-computation (the scope never changes mid-scan): §2.5.2 call level.
   const abs = scope.abs === true;
   const dirs = scope.dirs === true;
+  const tilde = scope.tilde === true;
   const startSet = abs || dirs ? START_CHARS_EXT : START_CHARS;
   const cwd = scope.cwd;
   const cwdPrefix =
@@ -466,6 +508,58 @@ export function findPathRefs(text, scope) {
     const strippedEnd = Math.max(spanStrippedEnd, slash + 1);
     const hasLineCol = spanLineColStart !== -1 && slash < spanLineColStart;
     const startOk = isStartContext(text, slash, startSet);
+    // —— tilde route (tilde-expansion addendum, F1 EXCLUSIVE interpretation): `~/<rest>`
+    // recognized when `scope.tilde` — triggered off the char immediately before `slash`
+    // being `~` (so `startOk` above is already false for this `slash` — a tilde is never a
+    // whitespace/opener — route 1 below never fires for it, no ordering conflict). The gate
+    // is the run memo's O(1) fastOk with the tilde-specific ONE-segment floor: the memo was
+    // computed over `[spanFirstSlash, spanP)` and the tilde's slash is inside that window
+    // (a `~` needs a whitespace/opener/`=` before it; whitespace/openers END a run, and `=`
+    // only ever puts the tilde's own slash first — see §2.5.2's "valid for any start in the
+    // run" lemma), so `slash > lastBad` (no empty/`.`/`..` segment — this ALSO covers the
+    // `~/` zero-segment and, under `dirs`, the A5 trailing-slash fold already shaped
+    // `spanP`), `slash > lastNul`, `slash >= minStart` (the true UTF-8 byte cap on `/<rest>`
+    // — exactly what `isClickable`'s tilde branch validates, since the literal `~` never
+    // enters a client-side `validatePreviewPath` call; the hub re-validates the EXPANDED
+    // path's byte length regardless, see `hub/preview/tilde.ts`). NO `secondLastSlash`
+    // here: the absolute route's ≥2-segment freeze (C4) does not apply — the hub's home is a
+    // one-segment listable directory, so `~/notes.txt` IS a reference. A `~`-rooted token
+    // that fails here is NEVER retried as a relative candidate: route 2's `seg0ok` rejects
+    // any leading segment starting with `~`, so with cwd=/home/u/proj the prose `see
+    // ~/notes.txt` can no longer become /home/u/proj/~/notes.txt (the F1 bug) — it is a
+    // literal tilde ref or nothing.
+    if (tilde && text[slash - 1] === "~") {
+      const tildeIdx = slash - 1;
+      if (isStartContext(text, tildeIdx, startSet) && spanP - tildeIdx <= PREVIEW_PATH_MAX_BYTES) {
+        const validationEnd = spanP > tildeIdx + 1 && text[spanP - 1] === "/" ? spanP - 1 : spanP;
+        const fastOk =
+          slash > lastNul &&
+          slash >= minStart &&
+          (lastBad < 0 || lastBad < validationEnd || (text[spanP - 1] === "/" && lastBad === spanP - 1));
+        if (fastOk) {
+          const pathEnd = hasLineCol ? spanLineColStart : spanStrippedEnd;
+          const path = text.slice(tildeIdx, pathEnd);
+          __previewScanStats.charScans += path.length;
+          if (!isClickable(path, scope)) {
+            i = slash + 1;
+            continue;
+          }
+          if (textStart < tildeIdx) segments.push({ kind: "text", text: text.slice(textStart, tildeIdx) });
+          /** @type {PathSegment} */
+          const seg = { kind: "ref", text: text.slice(tildeIdx, strippedEnd), path };
+          __previewScanStats.charScans += seg.text.length;
+          if (hasLineCol) {
+            seg.line = spanLine;
+            if (spanCol !== undefined) seg.col = spanCol;
+          }
+          segments.push(seg);
+          refs++;
+          textStart = strippedEnd;
+          i = strippedEnd;
+          continue;
+        }
+      }
+    }
     // —— §2.5.2 route 1: absolute candidates (each '/' start costs O(1)) ——
     if (startOk && slash < spanP && spanP - slash <= PREVIEW_PATH_MAX_BYTES) {
       // fastOk ⇔ validatePreviewPath(text.slice(slash, spanP)) minus the structurally
@@ -514,7 +608,12 @@ export function findPathRefs(text, scope) {
     // the backward-scanned leading identifier (`spanWordStart`) instead of `slash` itself.
     if (slash === spanFirstSlash && cwdPrefix !== null) {
       const ws = spanWordStart;
-      if (ws < slash && relativeStartContext(text, ws, startSet) && spanP - ws <= PREVIEW_PATH_MAX_BYTES) {
+      if (
+        ws < slash &&
+        text[ws] !== "~" &&
+        relativeStartContext(text, ws, startSet) &&
+        spanP - ws <= PREVIEW_PATH_MAX_BYTES
+      ) {
         // seg0ok: the leading segment must be a legal segment on its own (non-empty, not
         // `.`/`..`, no `:` URI scheme, no NUL) AND the window's absolute part must carry no bad
         // segment. The prune is STRIP-AWARE (§2.5 (b)): when the candidate still carries its
@@ -542,7 +641,13 @@ export function findPathRefs(text, scope) {
           q = e;
         }
         const seg0ok =
-          !absBad && seg0 !== "" && seg0 !== "." && seg0 !== ".." && !seg0.includes(":") && !seg0.includes("\0");
+          !absBad &&
+          seg0 !== "" &&
+          seg0 !== "." &&
+          seg0 !== ".." &&
+          !seg0.includes(":") &&
+          !seg0.includes("\0") &&
+          !seg0.startsWith("~"); // F1: a leading `~` segment is tilde territory (EXCLUSIVE) — never a cwd-relative candidate
         if (seg0ok) {
           const rel0 = text.slice(ws, spanP);
           __previewScanStats.charScans += rel0.length;
@@ -612,11 +717,22 @@ export function pathRefOfCode(text, scope) {
   // the displayed text). The `/`-containment test uses the PRE-strip span so a bare `seg0/`
   // still qualifies (its stripped form has no slash left).
   const hadSlash = path.indexOf("/") > 0;
+  const tildePath = path.startsWith("~/");
   let cand = path;
-  if (dirs && cand.length > 1 && cand.endsWith("/")) cand = cand.slice(0, -1);
+  if (!tildePath && dirs && cand.length > 1 && cand.endsWith("/")) cand = cand.slice(0, -1);
   /** @type {string | null} */
   let resolved;
   if (cand.startsWith("/")) {
+    resolved = cand;
+  } else if (cand.startsWith("~")) {
+    // Tilde-expansion addendum, F1 EXCLUSIVE interpretation: a `~`-rooted code span is a
+    // tilde reference or NOTHING — `~/<rest>` resolves to its LITERAL self only under the
+    // tilde cap (isClickable below applies the one-segment floor + the dirs trailing-slash
+    // fold already stripped above, same as findPathRefs' tilde route). Every other
+    // `~`-prefixed span (`~user/...`, a bare `~`, or `~/...` with the cap off) returns null
+    // WITHOUT ever reaching the relative branches below — a leading `~` names the hub's
+    // home (or another user's), never a directory under the session cwd.
+    if (scope.tilde !== true || !cand.startsWith("~/")) return null;
     resolved = cand;
   } else if (dirs) {
     // §2.5.3: no-extension relative spans are acceptable under `dirs` — require ≥1 `/` with a
@@ -653,6 +769,7 @@ export function scopeKeyOf(scope) {
   let key = `${scope.agentKey}|${scope.sessionId}|${scope.cwd ?? ""}`;
   if (scope.abs === true) key += "|abs";
   if (scope.dirs === true) key += "|dir";
+  if (scope.tilde === true) key += "|tilde";
   return key;
 }
 
@@ -695,6 +812,9 @@ export function previewScopeOf(p) {
   // pre-dir-plan hub's scopes are deep-equal to before.
   if (caps.includes(PREVIEW_ABS_HUB_CAP)) scope.abs = true;
   if (caps.includes(PREVIEW_DIR_HUB_CAP)) scope.dirs = true;
+  // Tilde-expansion addendum: `preview.tilde.v1` — INDEPENDENT of `abs`/`dirs` (an older hub
+  // can already declare those two without knowing how to expand a `~`).
+  if (caps.includes(PREVIEW_TILDE_HUB_CAP)) scope.tilde = true;
   return scope;
 }
 
@@ -895,11 +1015,29 @@ export function classifyPreviewError(status, body) {
  * ---------------------------------------------------------------------- */
 
 /**
+ * Tilde-expansion addendum: validates a `/`- OR `~`-rooted path for NAVIGATION purposes
+ * (`childPreviewPath`/`parentPreviewPath`'s shared `{minSegments:1}` rule) — a `~/<rest>`
+ * candidate is judged on `rest` alone (the part after the tilde, which already starts with
+ * `/`), exactly like `isClickable` does for RECOGNITION, just with the looser 1-segment
+ * floor navigation already uses for plain absolute paths.
+ * @param {unknown} p @param {{ minSegments?: 1 | 2 }} [opts]
+ */
+function validatePathMaybeTilde(p, opts) {
+  if (typeof p !== "string") return false;
+  return p.startsWith("~/") ? validatePreviewPath(p.slice(1), opts) : validatePreviewPath(p, opts);
+}
+
+/**
  * A3 “点子项”: join a listed entry name onto its directory path. `name` must be a single
  * legal segment (non-empty, no `/`, no NUL, not `.`/`..`); the joined path must still be
  * protocol-valid (≤4096 UTF-8 bytes, min 1 segment — the parent already guarantees ≥1, so
  * the child always has ≥2). A `dir` carrying a trailing `/` (a (a)-rule display form) is
  * normalized first. Returns `null` for anything else — the caller keeps the row inert.
+ *
+ * Tilde-expansion addendum: `dir` may ALSO be `~`-rooted (`~` itself, or `~/<rest>`) — a
+ * listing opened via a `~/...` click or the path-bar's raw typed `~` both need to drill
+ * further down the SAME way a `/`-rooted listing does; the hub re-expands the literal `~`
+ * form on every subsequent request, so the client never needs to resolve it itself.
  * @param {string} dir @param {string} name
  * @returns {string | null}
  */
@@ -907,9 +1045,9 @@ export function childPreviewPath(dir, name) {
   if (typeof dir !== "string" || typeof name !== "string") return null;
   if (name === "" || name === "." || name === ".." || name.includes("/") || name.includes("\0")) return null;
   const base = dir.length > 1 && dir.endsWith("/") ? dir.slice(0, -1) : dir;
-  if (!base.startsWith("/")) return null;
+  if (!base.startsWith("/") && base !== "~" && !base.startsWith("~/")) return null;
   const child = `${base}/${name}`;
-  return validatePreviewPath(child, { minSegments: 1 }) ? child : null;
+  return validatePathMaybeTilde(child, { minSegments: 1 }) ? child : null;
 }
 
 /**
@@ -918,17 +1056,23 @@ export function childPreviewPath(dir, name) {
  * `null` is returned there (the UI greys the 上级 button). A trailing `/` is normalized
  * first (`/a/b/` → parent `/a`, not `/a/b`). Returns `null` for non-strings and any result
  * that is not itself a protocol-valid (≥1 segment) path.
+ *
+ * Tilde-expansion addendum (F3): `~/a/b` → `~/a` → `~` → `null` — the climb stops AT the
+ * bare `~` (the hub's own home, which IS a listable target: `routes.ts` expands a literal
+ * `~` before its `minSegments: 1` gate) and only there; `~` itself has no parent, exactly
+ * like the `/`-rooted climb stops at `/`.
  * @param {string} path
  * @returns {string | null}
  */
 export function parentPreviewPath(path) {
   if (typeof path !== "string") return null;
   const base = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
-  if (!base.startsWith("/")) return null;
+  if (!base.startsWith("/") && base !== "~" && !base.startsWith("~/")) return null;
   const cut = base.lastIndexOf("/");
-  if (cut <= 0) return null; // "/a" → "/" is not listable; malformed → refuse
+  if (cut <= 0) return null; // "~" → no parent; "/a" → "/" is not listable; malformed → refuse
   const parent = base.slice(0, cut);
-  return validatePreviewPath(parent, { minSegments: 1 }) ? parent : null;
+  if (parent === "~") return parent; // F3: `~/x` climbs to the bare `~` (home) — listable, and the stop
+  return validatePathMaybeTilde(parent, { minSegments: 1 }) ? parent : null;
 }
 
 /**

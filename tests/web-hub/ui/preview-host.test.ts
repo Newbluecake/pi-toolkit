@@ -462,6 +462,27 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     await tick();
   });
 
+  it("up from ~/snap requests bare ~ and stops at home", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "~/snap", dir: true });
+    r.dir("~/snap", []);
+    await tick();
+    const up = document.querySelectorAll<HTMLButtonElement>(".preview-nav-btn")[1]!;
+    expect(up.disabled).toBe(false);
+    up.click();
+    await tick();
+    expect(r.calls[1]!.req).toMatchObject({ path: "~", dir: true });
+    r.dir("~", []);
+    await tick();
+    expect(document.querySelector(".preview-path")!.textContent).toBe("~");
+    const homeUp = document.querySelectorAll<HTMLButtonElement>(".preview-nav-btn")[1]!;
+    expect(homeUp.disabled).toBe(true);
+    homeUp.click();
+    expect(r.calls).toHaveLength(2);
+    r.handle.close();
+    await tick();
+  });
+
   it("a file row navigates without the dir flag (the admission chain decides)", async () => {
     const r = rigDir();
     r.handle.open({ path: "/p/src", dir: true });
@@ -478,6 +499,50 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     (document.querySelector(".preview-nav-btn") as HTMLElement).click();
     await tick();
     expect(document.querySelector(".preview-dir-list")).not.toBeNull();
+    r.handle.close();
+    await tick();
+  });
+
+  it("path bar: submitting navigates (history push), pre-fills with the new listing's path", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await tick();
+    const input = document.querySelector<HTMLInputElement>(".preview-dir-pathbar-input")!;
+    expect(input.value).toBe("/p/src"); // pre-filled with the current directory
+    input.value = "~/snap/x.png";
+    input.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLFormElement>(".preview-dir-pathbar")!.requestSubmit();
+    await tick();
+    expect(r.calls[1]!.req).toMatchObject({ path: "~/snap/x.png" }); // no dir hint forced
+    r.dir("~/snap", [{ name: "x.png", type: "file", size: 1, mtimeMs: 1 }]);
+    await tick();
+    expect(document.querySelector(".preview-dir-list")!.textContent).toContain("x.png");
+    expect(document.querySelector<HTMLInputElement>(".preview-dir-pathbar-input")!.value).toBe("~/snap/x.png");
+    // 返回 restores the original listing with no refetch (same history stack as a row click)
+    const callsBefore = r.calls.length;
+    (document.querySelector(".preview-nav-btn") as HTMLElement).click();
+    await tick();
+    expect(r.calls.length).toBe(callsBefore);
+    expect(document.querySelector(".preview-dir-list")!.textContent).toContain("sub");
+    r.handle.close();
+    await tick();
+  });
+
+  it("path bar: an invalid/denied path surfaces through the existing error view, no special-casing", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    r.dir("/p/src", []);
+    await tick();
+    const input = document.querySelector<HTMLInputElement>(".preview-dir-pathbar-input")!;
+    input.value = "/etc/shadow";
+    input.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLFormElement>(".preview-dir-pathbar")!.requestSubmit();
+    await tick();
+    const w = r.waits.shift();
+    w?.resolve({ ok: false, status: 403, error: "E_PREVIEW_DENIED", reason: "denylist" });
+    await tick();
+    expect(document.querySelector(".preview-note-title")).not.toBeNull();
     r.handle.close();
     await tick();
   });

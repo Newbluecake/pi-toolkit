@@ -755,6 +755,41 @@ describe("loopback /api/preview — global admission (U4, dir-plan §1.4)", () =
 });
 
 // ---------------------------------------------------------------------------
+// tilde-expansion addendum: `~`/`~/<rest>` expanded against the HUB's own home (same home the
+// admitter's deny context resolves, `previewDeps`'s `deps.config.home`) BEFORE admission runs.
+// ---------------------------------------------------------------------------
+
+describe("loopback /api/preview — `~/<rest>` tilde expansion", () => {
+  it("`~/<rest>` resolves through the real socket exactly like the equivalent literal absolute path", async () => {
+    const h = await harness();
+    mkdirSync(join(h.tmp.dir, "snap"), { recursive: true });
+    writeFileSync(join(h.tmp.dir, "snap", "x.png").replace(/\.png$/, ".txt"), "snap body\n");
+    const r = await h.get(AGENT, SESSION, "~/snap/x.txt");
+    expect(r.status).toBe(200);
+    expect(r.body).toBe("snap body\n");
+    const preview = (h.previewLog.lines.at(-1)?.data ?? {}) as Record<string, unknown>;
+    expect(preview).toMatchObject({ audit: "preview", cls: "abs", ok: true });
+    expect(JSON.stringify(preview)).not.toContain("snap");
+  });
+
+  it("the denylist still catches a tilde-rooted system secret (expanded before the check)", async () => {
+    const h = await harness();
+    mkdirSync(join(h.tmp.dir, ".ssh"), { recursive: true });
+    writeFileSync(join(h.tmp.dir, ".ssh", "id_rsa"), "not a real key\n");
+    const r = await h.get(AGENT, SESSION, "~/.ssh/id_rsa");
+    expect(r.status).toBe(403);
+    expect(r.body).toBe('{"error":"E_PREVIEW_DENIED","reason":"denylist"}');
+  });
+
+  it("`~user/...` is never expanded — 400 E_BAD_REQUEST, same as any other non-absolute string", async () => {
+    const h = await harness();
+    const r = await h.get(AGENT, SESSION, "~root/.ssh/id_rsa");
+    expect(r.status).toBe(400);
+    expect(r.body).toBe('{"error":"E_BAD_REQUEST"}');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // dir-plan v3.1 P1b: `GET /api/preview?dir=1` over the real loopback socket
 // ---------------------------------------------------------------------------
 

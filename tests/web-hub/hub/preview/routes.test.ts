@@ -12,7 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -42,6 +42,20 @@ import { FakeHandle } from "./helpers.js";
 
 function fakeReq(headers: Record<string, string> = {}): IncomingMessage {
   return { headers } as unknown as IncomingMessage;
+}
+
+/** Minimal `IncomingMessage` stand-in that actually streams a body (`readProbeBody` reads it
+ * through `on("data")`/`once("end")`) — `fakeReq` above has no event surface at all, which is
+ * fine for GET `handle()` but not for `handleProbe()`'s body read. Emits on the next tick so
+ * `readProbeBody`'s listeners are attached first (its Promise executor runs synchronously). */
+function fakeProbeReq(headers: Record<string, string>, body: Buffer): IncomingMessage {
+  const req = new EventEmitter() as unknown as IncomingMessage & EventEmitter;
+  (req as unknown as { headers: Record<string, string> }).headers = headers;
+  setImmediate(() => {
+    req.emit("data", body);
+    req.emit("end");
+  });
+  return req;
 }
 
 /** Minimal ServerResponse stand-in: exactly the surface `handle`/`resSink`/`io.sendJson` touch. */
@@ -1382,6 +1396,101 @@ describe("P1a routes — global admission (U4)", () => {
 function neverAbort2(): AbortSignal {
   return new AbortController().signal;
 }
+
+// ---------------------------------------------------------------------------
+// tilde-expansion addendum: `~` / `~/<rest>` expanded against the hub's own home BEFORE any
+// admission check runs (`routes.ts` step ③, `tilde.ts`'s `expandTildePath`) — the admission
+// chain below it is untouched, so a `~`-rooted request walks the EXACT SAME denylist/realpath/
+// open/proc-recheck pipeline as a literal absolute path would.
+// ---------------------------------------------------------------------------
+
+describe("tilde-expansion — `~`/`~/<rest>` resolved against the hub's own home", () => {
+  const agentKey = "a4242-nonce12";
+  const sessionId = "sess123";
+
+  function fixture(): { cwd: string; registry: ReturnType<typeof makeRegistry> } {
+    const cwd = join(dir, "cwd");
+    mkdirSync(cwd, { recursive: true });
+    return { cwd, registry: makeRegistry({ agentKey, sessionId, cwd }) };
+  }
+
+  function routes(registry: Pick<RegistryView, "get">): PreviewRoutes {
+    // `dir` (the scratch tmpdir) plays the hub's "home" here, exactly like the U4 block above —
+    // `denyCtxOf(dir, ...)` is what makes `~/x` and `join(dir, "x")` the SAME admitted path.
+    return createPreviewRoutes({
+      mode: "on",
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      uploadsRoot: join(dir, "uploads-root"),
+      registry,
+      log,
+      now: Date.now,
+    });
+  }
+
+  it("`~/<rest>` is expanded and admitted exactly like the equivalent literal absolute path", async () => {
+    const fx = fixture();
+    mkdirSync(join(dir, "snap"), { recursive: true });
+    writeFileSync(join(dir, "snap", "x.png").replace(/\.png$/, ".txt"), "tilde body\n");
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, "~/snap/x.txt"), makeIo());
+    expect(res.status).toBe(200);
+    expect(res.body().toString("utf8")).toBe("tilde body\n");
+    // audit discipline unchanged: cls is the generic "abs" class, no raw path/tilde logged.
+    const last = previewAudits(log).at(-1);
+    expect(last).toMatchObject({ ok: true, cls: "abs" });
+    expect(JSON.stringify(last)).not.toContain("snap");
+  });
+
+  it("`~/.ssh/id_rsa`-style denylisted paths still 403 via the expanded form", async () => {
+    const fx = fixture();
+    mkdirSync(join(dir, ".ssh"), { recursive: true });
+    writeFileSync(join(dir, ".ssh", "id_rsa"), "not a real key\n");
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, "~/.ssh/id_rsa"), makeIo());
+    expect(res.status).toBe(403);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_DENIED", reason: "denylist" });
+  });
+
+  it("a symlink trick via `~/link` is still rejected (resolved target re-checked post-realpath)", async () => {
+    const fx = fixture();
+    mkdirSync(join(dir, "secret"), { recursive: true });
+    writeFileSync(join(dir, "secret", "id_rsa"), "not a real key either\n");
+    symlinkSync(join(dir, "secret", "id_rsa"), join(dir, "link"));
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, "~/link"), makeIo());
+    expect(res.status).toBe(403);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_DENIED", reason: "denylist" });
+  });
+
+  it("`~user/...` is NEVER expanded (only a bare `~` is) — fails the ordinary `/`-prefix gate", async () => {
+    const fx = fixture();
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, query(agentKey, sessionId, "~root/.ssh/id_rsa"), makeIo());
+    expect(res.status).toBe(400);
+    expect(res.json()).toEqual({ error: "E_BAD_REQUEST" });
+  });
+
+  it("`POST /api/preview/probe` expands `~/<rest>` the same way a real GET preview does", async () => {
+    const fx = fixture();
+    mkdirSync(join(dir, "probed"), { recursive: true });
+    writeFileSync(join(dir, "probed", "note.txt"), "hello\n");
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    const body = Buffer.from(JSON.stringify({ paths: ["~/probed/note.txt", "~/.ssh/id_rsa"] }), "utf8");
+    await r.handleProbe(
+      fakeProbeReq({ "x-pwh": "1" }, body),
+      res,
+      new URLSearchParams({ agentKey, sessionId }),
+      makeIo(),
+    );
+    expect(res.status).toBe(200);
+    expect(res.json()).toEqual({ results: [{ kind: "text" }, { kind: "missing" }] });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // dir-plan v3.1 P1b: the dir=1 route branch, §3.4 budgets, §3.3 teardown order

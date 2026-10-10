@@ -477,6 +477,35 @@ code.md-code.path-ref {
   min-height: 100%;
 }
 
+/* Path bar (tilde-expansion addendum, part B): a text input + Go button, pre-filled with the
+ * listed directory. Reuses the shared `.input`/`.btn` primitives for visual consistency with
+ * the rest of the hub UI. */
+.preview-dir-pathbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+.preview-dir-pathbar-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.preview-dir-pathbar-go {
+  flex: none;
+}
+
+/* Coarse pointers: both the input and the Go button keep a ≥44px hit target. */
+@media (pointer: coarse) {
+  .preview-dir-pathbar-input,
+  .preview-dir-pathbar-go {
+    min-height: 44px;
+  }
+}
+
 .preview-dir-meta {
   color: var(--c-text-3);
   font-size: var(--fs-xs);

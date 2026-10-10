@@ -2,7 +2,11 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import PreviewDir from "../../../src/web-hub/ui/src/components/preview/PreviewDir.vue";
-import type { PreviewDirEntry, PreviewDirListing } from "../../../src/web-hub/protocol/preview.js";
+import {
+  PREVIEW_PATH_MAX_BYTES,
+  type PreviewDirEntry,
+  type PreviewDirListing,
+} from "../../../src/web-hub/protocol/preview.js";
 
 /**
  * `PreviewDir.vue` (dir-plan v3.1 §0.2 A1/§3.2, package P3): the listing renders
@@ -205,5 +209,90 @@ describe("PreviewDir.vue — meta / notices (§3.2)", () => {
     w.vm.$emit = emitSpy;
     await w.get(INERT).trigger("click");
     expect(emitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("PreviewDir.vue — path bar (tilde-expansion addendum, part B)", () => {
+  const PATHBAR_INPUT = ".preview-dir-pathbar-input";
+  const PATHBAR_FORM = ".preview-dir-pathbar";
+
+  it("pre-fills the input with the current directory path", () => {
+    const w = mount(PreviewDir, { props: { path: "/home/u/proj", listing: listing() } });
+    expect((w.get(PATHBAR_INPUT).element as HTMLInputElement).value).toBe("/home/u/proj");
+  });
+
+  it("re-fills when the `path` prop changes (navigating to a fresh listing)", async () => {
+    const w = mount(PreviewDir, { props: { path: "/a", listing: listing() } });
+    await w.setProps({ path: "/a/b" });
+    expect((w.get(PATHBAR_INPUT).element as HTMLInputElement).value).toBe("/a/b");
+  });
+
+  it("submitting (Enter or the Go button) emits `go` with the trimmed text", async () => {
+    const w = mount(PreviewDir, { props: { path: "/a", listing: listing() } });
+    const input = w.get(PATHBAR_INPUT);
+    await input.setValue("  ~/snap/x.png  ");
+    await w.get(PATHBAR_FORM).trigger("submit");
+    expect(w.emitted("go")).toStrictEqual([["~/snap/x.png"]]);
+  });
+
+  it("an empty (or whitespace-only) draft never emits `go`", async () => {
+    const w = mount(PreviewDir, { props: { path: "/a", listing: listing() } });
+    await w.get(PATHBAR_INPUT).setValue("   ");
+    await w.get(PATHBAR_FORM).trigger("submit");
+    expect(w.emitted("go")).toBeUndefined();
+  });
+
+  it("checks UTF-8 bytes (including multibyte paths) without changing the draft", async () => {
+    const w = mount(PreviewDir, { props: { path: "/a", listing: listing() } });
+    const input = w.get(PATHBAR_INPUT);
+    const atLimit = "/" + "界".repeat(1365); // 1 + 1365 * 3 = 4096 bytes
+    expect(new TextEncoder().encode(atLimit)).toHaveLength(PREVIEW_PATH_MAX_BYTES);
+    await input.setValue(atLimit);
+    await w.get(PATHBAR_FORM).trigger("submit");
+    expect(w.emitted("go")).toStrictEqual([[atLimit]]);
+    for (const text of [atLimit + "a", "/" + "a".repeat(PREVIEW_PATH_MAX_BYTES)]) {
+      await input.setValue(text);
+      await w.get(PATHBAR_FORM).trigger("submit");
+      expect(w.emitted("go")).toHaveLength(1);
+      expect(w.get('[role="alert"]').text()).toContain("4096-byte UTF-8 limit");
+      expect((input.element as HTMLInputElement).value).toBe(text);
+      expect(input.attributes("aria-invalid")).toBe("true");
+    }
+    await input.setValue("~/snap");
+    expect(w.find('[role="alert"]').exists()).toBe(false);
+    await w.get(PATHBAR_FORM).trigger("submit");
+    expect(w.emitted("go")![1]).toEqual(["~/snap"]);
+  });
+
+  it.each(["\0", "\r", "\n"])("rejects forbidden %j locally before trimming", async (char) => {
+    const w = mount(PreviewDir, { props: { path: "/a", listing: listing() } });
+    const input = w.get(PATHBAR_INPUT);
+    const text = char + "~/snap" + char;
+    // Native text inputs strip CR/LF themselves; exercise the component's raw draft guard.
+    (w.vm as unknown as { pathDraft: string }).pathDraft = text;
+    await w.get(PATHBAR_FORM).trigger("submit");
+    expect(w.emitted("go")).toBeUndefined();
+    expect(w.get('[role="alert"]').text()).toContain("NUL, CR, or LF");
+    expect((w.vm as unknown as { pathDraft: string }).pathDraft).toBe(text);
+    expect(input.attributes("aria-invalid")).toBe("true");
+  });
+
+  it("Esc restores the draft to the current path and does not bubble (dialog stays open)", async () => {
+    const w = mount(PreviewDir, { props: { path: "/a/b", listing: listing() } });
+    const input = w.get(PATHBAR_INPUT);
+    await input.setValue("/something/else");
+    const bubbled = vi.fn();
+    w.element.addEventListener("keydown", bubbled);
+    await input.trigger("keydown", { key: "Escape" });
+    expect((input.element as HTMLInputElement).value).toBe("/a/b");
+    expect(bubbled).not.toHaveBeenCalled(); // .stop kept it from reaching an ancestor listener
+    expect(w.emitted("go")).toBeUndefined();
+  });
+
+  it("accepts aria-label/placeholder/button copy (i18n wiring, en default)", () => {
+    const w = mount(PreviewDir, { props: { path: "/a", listing: listing() } });
+    expect(w.get(PATHBAR_INPUT).attributes("aria-label")).toBeTruthy();
+    expect(w.get(PATHBAR_INPUT).attributes("placeholder")).toBeTruthy();
+    expect(w.get(".preview-dir-pathbar-go").text().length).toBeGreaterThan(0);
   });
 });

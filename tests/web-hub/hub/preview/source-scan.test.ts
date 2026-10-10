@@ -37,6 +37,7 @@ const KERNEL_FILES = [
   "open.ts",
   "probe.ts",
   "dir.ts",
+  "tilde.ts",
 ] as const;
 
 /** dir-plan §2.4 rule 2's whitelist: files outside tests/ allowed to reference NO_TRACKER

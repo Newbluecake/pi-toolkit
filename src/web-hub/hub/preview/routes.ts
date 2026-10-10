@@ -54,6 +54,7 @@ import { boundedClose, createPreviewIoTracker, defaultPreviewFs, previewFsStep }
 import { listPreviewDir } from "./dir.js";
 import { openAdmittedPath, type Opened } from "./open.js";
 import { readProbeBody, runPreviewProbe } from "./probe.js";
+import { expandTildePath } from "./tilde.js";
 import { needsMoreForDims, sniff, type SniffResult } from "./sniff.js";
 import { readAndStream, type PreviewSink, type StreamOutcome } from "./stream.js";
 import { createUploadVerifier, type UploadVerifier } from "./verify.js";
@@ -328,7 +329,10 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       // ③ params
       const agentKey = query.get("agentKey") ?? "";
       const sessionId = query.get("sessionId") ?? "";
-      const path = query.get("path") ?? "";
+      // tilde-expansion addendum: a literal `~` / `~/<rest>` is expanded against the HUB's own
+      // home BEFORE any gate below runs (`validatePreviewPath` included) — `tilde.ts`'s own
+      // doc comment has the full rationale; `~user/...` is left untouched (never expanded).
+      const path = expandTildePath(query.get("path") ?? "", deps.denyCtx.homes[0] ?? "");
       // dir-plan §3.5 (P1b): the opt-in directory flag — ONLY the exact value "1" turns an
       // admitted directory into a listing request (§1.1); absent/any other value keeps the
       // pre-P1b behavior byte-identical (a directory still answers 415 not-regular).
@@ -781,12 +785,17 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
         return;
       }
 
+      // tilde-expansion addendum: every probe candidate gets the SAME `~`/`~/<rest>` expansion
+      // as a real preview request, before it ever reaches `openAdmittedPath` — a probed path
+      // and the preview click it predicts must walk the identical admission input.
+      const home = deps.denyCtx.homes[0] ?? "";
+      const expandedPaths = body.body.paths.map((p) => expandTildePath(p, home));
       const run = await runPreviewProbe(
         { uploadsRoot, registry, uploads, admitter, log, now, tracker },
         {
           agentKey,
           sessionId,
-          paths: body.body.paths,
+          paths: expandedPaths,
           listener: io.listener,
           principal,
           ...(body.body.dirs === true ? { dirs: true } : {}),

@@ -42,6 +42,7 @@ import {
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   PREVIEW_ABS_HUB_CAP,
+  PREVIEW_TILDE_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
@@ -302,6 +303,7 @@ export async function startHub(
         : [
             PREVIEW_HUB_CAP,
             PREVIEW_ABS_HUB_CAP,
+            PREVIEW_TILDE_HUB_CAP,
             ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
             // worktree-diff D21: `wtdiff.v1` rides the SAME preview gate AND the /proc probe —
             // the three-fd pin is /proc-bound, so a platform without it never declares the cap

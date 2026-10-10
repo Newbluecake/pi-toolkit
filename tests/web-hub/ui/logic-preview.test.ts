@@ -20,6 +20,7 @@ import {
   previewOutcomeFromResponse,
   PREVIEW_MAX_REFS_PER_NODE,
   PREVIEW_MD_NODE_MAX,
+  PREVIEW_TILDE_HUB_CAP,
   previewScopeOf,
   scopeKeyOf,
 } from "../../../src/web-hub/ui/src/logic/preview.js";
@@ -891,6 +892,7 @@ describe("logic/preview.js markdown pure functions (dir-plan §4.1/§4.3, PM pac
 const ABS_SCOPE = { ...SCOPE, abs: true } as typeof SCOPE & { abs: true };
 const DIRS_SCOPE = { ...SCOPE, dirs: true } as typeof SCOPE & { dirs: true };
 const BOTH_SCOPE = { ...SCOPE, abs: true, dirs: true } as typeof SCOPE & { abs: true; dirs: true };
+const TILDE_SCOPE = { ...SCOPE, tilde: true } as typeof SCOPE & { tilde: true };
 
 describe("logic/preview.js findPathRefs — abs scope (dir-plan §2.5.1 C4, U4)", () => {
   it("cwd-external absolute paths become clickable; protocol shape still required (≥2 segments)", () => {
@@ -943,6 +945,92 @@ describe("logic/preview.js findPathRefs — abs scope (dir-plan §2.5.1 C4, U4)"
     });
     // the trailing-slash form is a dirs (A5) rule, not an abs rule — stays rejected here
     expect(pathRefOfCode("/etc/dir/", ABS_SCOPE)).toBeNull();
+  });
+});
+
+describe("logic/preview.js findPathRefs/pathRefOfCode — tilde scope (tilde-expansion addendum)", () => {
+  it("`~/<rest>` (≥1 segment) becomes clickable; the literal `~` is kept, never expanded", () => {
+    const segs = findPathRefs("see ~/snap/x.png now", TILDE_SCOPE) as Seg[];
+    expect(concat(segs)).toBe("see ~/snap/x.png now");
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "~/snap/x.png", path: "~/snap/x.png" }]);
+  });
+
+  it("a bare `~` stays unclickable while a one-segment `~/<rest>` is clickable", () => {
+    expect(refs(findPathRefs("home is ~ today", TILDE_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("see ~/single now", TILDE_SCOPE) as Seg[]).map((r) => r.path)).toEqual(["~/single"]);
+  });
+
+  it("without `scope.tilde` a `~/<rest>` span is NOT recognized, even under abs/dirs/both", () => {
+    for (const scope of [SCOPE, ABS_SCOPE, DIRS_SCOPE, BOTH_SCOPE]) {
+      expect(refs(findPathRefs("see ~/snap/x.png now", scope) as Seg[])).toEqual([]);
+    }
+  });
+
+  it("start-context rule applies to the tilde itself: mid-word `~` is never a start", () => {
+    expect(refs(findPathRefs("x~/snap/x.png", TILDE_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("(~/snap/x.png)", TILDE_SCOPE) as Seg[]).map((r) => r.path)).toEqual(["~/snap/x.png"]);
+    expect(refs(findPathRefs("~/snap/x.png", TILDE_SCOPE) as Seg[]).map((r) => r.path)).toEqual(["~/snap/x.png"]);
+  });
+
+  it("`~user/...` is never recognized (only a BARE `~` opens a tilde candidate)", () => {
+    expect(refs(findPathRefs("see ~bob/snap/x.png now", TILDE_SCOPE) as Seg[])).toEqual([]);
+    expect(refs(findPathRefs("see ~root/.ssh/id_rsa now", TILDE_SCOPE) as Seg[])).toEqual([]);
+  });
+
+  it("terminators / :line[:col] / inline code apply to tilde candidates like any other", () => {
+    const segs = findPathRefs("open ~/src/a.ts:12:3, please", TILDE_SCOPE) as Seg[];
+    expect(refs(segs)).toEqual([{ kind: "ref", text: "~/src/a.ts:12:3", path: "~/src/a.ts", line: 12, col: 3 }]);
+    expect(pathRefOfCode("~/snap/x.png", TILDE_SCOPE)).toEqual({ text: "~/snap/x.png", path: "~/snap/x.png" });
+    expect(pathRefOfCode("~/single", TILDE_SCOPE)).toEqual({ text: "~/single", path: "~/single" });
+    expect(pathRefOfCode("~", TILDE_SCOPE)).toBeNull();
+    expect(pathRefOfCode("~bob/x/y", TILDE_SCOPE)).toBeNull();
+    expect(pathRefOfCode("~/snap/x.png", { ...SCOPE, cwd: null })).toBeNull(); // no scope.tilde ⇒ never clickable
+  });
+
+  it("tilde tokens never fall through to cwd-relative paths in prose or code", () => {
+    for (const base of [SCOPE, ABS_SCOPE, DIRS_SCOPE, BOTH_SCOPE]) {
+      for (const tilde of [false, true]) {
+        const scope = { ...base, tilde };
+        expect(scope.cwd).not.toBeNull();
+        for (const token of [
+          "~/notes.txt",
+          "~/snap",
+          "~/snap/x.png",
+          "~user/notes.txt",
+          "~user/snap",
+          "~user/snap/x.png",
+          "~/",
+          "~",
+        ]) {
+          for (const trailing of [false, true]) {
+            const text = token + (trailing ? "/" : "");
+            const expected = tilde && token.startsWith("~/") && token !== "~/" ? [token + (trailing ? "/" : "")] : [];
+            for (const prose of [`see ${text} now`, `"${text}"`, text]) {
+              const segs = findPathRefs(prose, scope) as Seg[];
+              expect(concat(segs)).toBe(prose);
+              expect(
+                refs(segs).map((r) => r.path),
+                `${prose} tilde=${tilde}`,
+              ).toEqual(expected);
+            }
+            const code = pathRefOfCode(text, scope);
+            expect(code ? [code.path] : [], `code ${text} tilde=${tilde}`).toEqual(expected);
+          }
+        }
+      }
+    }
+  });
+
+  it("inline property check: every recognized tilde ref round-trips through isClickable's own rule", () => {
+    for (const [text, expectClickable] of [
+      ["~/a/b", true],
+      ["~/a", true],
+      ["~", false],
+      ["~bob/a/b", false],
+    ] as const) {
+      const segs = findPathRefs(`x ${text} y`, TILDE_SCOPE) as Seg[];
+      expect(refs(segs).length > 0).toBe(expectClickable);
+    }
   });
 });
 
@@ -1208,6 +1296,50 @@ describe("logic/preview.js previewScopeOf / scopeKeyOf — §2.5.1 abs/dirs caps
   });
 });
 
+describe("logic/preview.js previewScopeOf / scopeKeyOf — tilde-expansion addendum (preview.tilde.v1)", () => {
+  const session = { sessionId: "s1", cwd: "/home/u/proj" };
+  const base = { mode: "token" as const, hubCaps: ["preview.v1"], hasTransport: true, agentKey: "A", session };
+
+  it("previewScopeOf adds `tilde` ONLY when the hub declares preview.tilde.v1", () => {
+    expect(previewScopeOf(base)).toEqual({ agentKey: "A", sessionId: "s1", cwd: "/home/u/proj", uploads: true });
+    expect(previewScopeOf({ ...base, hubCaps: ["preview.v1", PREVIEW_TILDE_HUB_CAP] })).toEqual({
+      agentKey: "A",
+      sessionId: "s1",
+      cwd: "/home/u/proj",
+      uploads: true,
+      tilde: true,
+    });
+  });
+
+  it("`tilde` is INDEPENDENT of abs/dirs — any combination of the three caps is representable", () => {
+    expect(previewScopeOf({ ...base, hubCaps: ["preview.v1", "preview.abs.v1", PREVIEW_TILDE_HUB_CAP] })).toEqual({
+      agentKey: "A",
+      sessionId: "s1",
+      cwd: "/home/u/proj",
+      uploads: true,
+      abs: true,
+      tilde: true,
+    });
+    // an old hub that already declared abs/dir (pre-existing caps) but not tilde never gets
+    // the key — the exact scenario `isClickable`'s tilde branch being gated on `tilde` (never
+    // `abs`) protects against.
+    expect(previewScopeOf({ ...base, hubCaps: ["preview.v1", "preview.abs.v1", "preview.dir.v1"] })).toEqual({
+      agentKey: "A",
+      sessionId: "s1",
+      cwd: "/home/u/proj",
+      uploads: true,
+      abs: true,
+      dirs: true,
+    });
+  });
+
+  it("scopeKeyOf appends |tilde — format unchanged when absent, independent of |abs/|dir", () => {
+    expect(scopeKeyOf(TILDE_SCOPE)).toBe("A|s1|/home/u/proj|tilde");
+    expect(scopeKeyOf({ ...BOTH_SCOPE, tilde: true })).toBe("A|s1|/home/u/proj|abs|dir|tilde");
+    expect(scopeKeyOf(TILDE_SCOPE)).not.toBe(scopeKeyOf(SCOPE));
+  });
+});
+
 describe("logic/preview.js checkPreviewHeaders — dir gate (dir-plan §1.3 fetch path)", () => {
   const hdrs = (m: Record<string, string>) => ({ get: (n: string) => m[n] ?? null });
 
@@ -1265,6 +1397,19 @@ describe("logic/preview.js childPreviewPath / parentPreviewPath — A3 navigatio
     expect(parentPreviewPath("/")).toBeNull();
     expect(parentPreviewPath("home/u")).toBeNull();
     expect(parentPreviewPath(42)).toBeNull();
+  });
+
+  it("childPreviewPath/parentPreviewPath accept a `~`-rooted dir/path too (tilde-expansion addendum)", () => {
+    expect(childPreviewPath("~/snap", "x.png")).toBe("~/snap/x.png");
+    expect(childPreviewPath("~/snap/", "x.png")).toBe("~/snap/x.png"); // trailing slash normalized
+    expect(childPreviewPath("~", "snap")).toBe("~/snap"); // bare `~` IS a legal navigation parent
+    expect(childPreviewPath("~bob", "x")).toBeNull(); // `~user` is never a valid root here either
+
+    expect(parentPreviewPath("~/snap/sub")).toBe("~/snap");
+    expect(parentPreviewPath("~/snap")).toBe("~");
+    expect(parentPreviewPath("~/snap/")).toBe("~");
+    expect(parentPreviewPath("~")).toBeNull();
+    expect(parentPreviewPath("~bob/x")).toBeNull();
   });
 });
 

@@ -118,6 +118,18 @@ function onDirEntry(entry: PreviewDirEntry): void {
   d.navigate(ref);
 }
 
+/** Path bar (tilde-expansion addendum, part B): the user typed/pasted an absolute or `~/...`
+ * path and pressed Enter/Go. No client-side admission re-check here — `navigate()` re-runs
+ * the FULL hub admission chain for whatever string comes back; a directory opens as a
+ * listing in the SAME dialog (history push, same as `onDirEntry`/a transcript ref click), a
+ * file opens the file preview, and anything invalid/denied surfaces through the existing
+ * error/unsupported view. No `dir` hint is forced: `usePreview`'s existing 415-`not-regular`
+ * → retry-with-`dir:true` fallback (when the hub declares `preview.dir.v1`) upgrades an
+ * unprobed directory path the same way an ordinary unprobed ref click already does. */
+function onPathBarGo(path: string): void {
+  nav.value?.navigate({ path });
+}
+
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "";
   if (n < 1024) return `${n} B`;
@@ -310,6 +322,7 @@ function onKeydown(ev: KeyboardEvent): void {
             :path="view.path"
             :listing="view.listing"
             @navigate="onDirEntry"
+            @go="onPathBarGo"
           />
           <div v-else-if="view.phase === 'unsupported'" class="preview-note">
             <AppIcon name="ban" class="preview-note-icon" />
