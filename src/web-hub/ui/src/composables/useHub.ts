@@ -32,6 +32,7 @@ import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
 import { createRenderGate, type RenderPriority } from "./renderGate.js";
 import type {
   HubTransport,
+  LoadTopOutcome,
   RemoveAgentOutcome,
   RemoveTarget,
   SpawnListOutcome,
@@ -119,6 +120,16 @@ export interface UseHubHandle extends HubHandle {
    * absence as "no scope" (the graph section never renders, the panel DOM stays
    * byte-identical, I8). Same optional-passthrough discipline as `worktreeDiff` above. */
   readonly worktreeGraph?: WorktreeGraphTransport;
+  /** sysload plan §7.1/§7.3/§10 (package P4): the `GET /api/load/top` call surface, passed
+   * through from the transport iff it offers it. Mirrors `loadOlder` above (not part of the
+   * frozen `HubHandle` — `DashboardView.vue`'s own header documents why that stays minimal;
+   * `LoadCard.vue` casts to `UseHubHandle` at its one call site the same way `DashboardView`
+   * does for `loadOlder`, since `App.vue` always constructs the real object). */
+  readonly loadTop?: (signal?: AbortSignal) => Promise<LoadTopOutcome>;
+  /** sysload plan §7.1/§10 (package P4): fetch one `GET /api/load/top` snapshot into
+   * `HubState.loadTop` — a no-op while already loading (single-flight, mirrors `loadOlder`'s
+   * own in-flight guard) or when the transport doesn't offer `loadTop` at all. */
+  fetchLoadTop(): void;
   start(): Promise<void>;
   dispose(): void;
 }
@@ -663,6 +674,30 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     });
   }
 
+  /**
+   * sysload plan §7.1/§10 (package P4): fetch one `GET /api/load/top` snapshot into
+   * `HubState.loadTop`. No-op when disposed, the transport doesn't offer `loadTop` at all, or a
+   * fetch is already in flight (single-flight, mirrors `loadOlder`'s own in-flight guard) —
+   * `LoadCard` calls this on open/retry and never has to track its own loading flag.
+   */
+  function fetchLoadTop(): void {
+    if (disposed || transport.loadTop === undefined || raw.loadTop?.loading === true) return;
+    dispatch({ event: "load_top_start" });
+    void transport.loadTop().then((r: LoadTopOutcome) => {
+      dispatch(
+        r.ok
+          ? { event: "load_top_ok", data: { payload: r.data } }
+          : {
+              event: "load_top_error",
+              data: {
+                error: r.error,
+                ...("retryAfterS" in r && typeof r.retryAfterS === "number" ? { retryAfterS: r.retryAfterS } : {}),
+              },
+            },
+      );
+    });
+  }
+
   function selectRun(agentKey: string, runId: string | null): void {
     if (disposed) return;
     // Tear down any OTHER run of this agent this tab still believes subscribed (hub budget:
@@ -795,12 +830,18 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // worktree-diff plan v3.1 §4.6 (D4): same passthrough rule as `preview` — the surface rides
     // the handle iff the transport offers it (a test fake without it keeps "no scope").
     ...(transport.worktreeDiff === undefined ? {} : { worktreeDiff: transport.worktreeDiff }),
-    // worktree-graph plan v2 §4.4 (P4): same passthrough rule as `worktreeDiff` — the surface
-    // rides the handle iff the transport offers it (a test fake without it keeps "no scope").
+    // worktree-graph plan v2 §4.4 (P4): same passthrough rule as `worktreeDiff` above — the
+    // surface rides the handle iff the transport offers it (a test fake without it keeps "no
+    // scope").
     ...(transport.worktreeGraph === undefined ? {} : { worktreeGraph: transport.worktreeGraph }),
+    // sysload plan §7.1/§7.3/§10 (package P4): same passthrough rule — `fetchLoadTop` above
+    // already no-ops without it, but the raw call surface rides along too (frozen-types
+    // convention: every transport-gated surface is both directly exposed AND wrapped).
+    ...(transport.loadTop === undefined ? {} : { loadTop: transport.loadTop }),
     dispatch,
     transport,
     loadOlder,
+    fetchLoadTop,
     selectRun,
     pageRun,
     mainSubLedger: () => [...mainSubs.entries()].map(([key, m]) => ({ key, clientId: m.clientId })),

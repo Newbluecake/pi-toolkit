@@ -42,6 +42,17 @@
  * is mirrored off the status slot onto `AgentState.todo` (absent-means-cleared, same semantics
  * as the `queue` mirror) for the detail header's read-only TodoPanel.
  *
+ * Load gate / host-load (sysload plan §7.1/§7.4/§10, package P4): the optional `StatusInfo.
+ * loadGate` is mirrored off the status slot onto `AgentState.loadGate` + `loadGateReceivedAt`
+ * (the browser-clock receive instant, same "anchor at receive time" discipline as the hub-global
+ * `load` slot below — never the agent's own clock) for `FleetDrawer`'s crit banner. The hub's own
+ * direct-send `load` SSE event (host-wide CPU/MEM/DISK, independent of which agent is selected)
+ * lands on top-level `HubState.load` + `loadReceivedAt`, cleared on a fresh `hello` (new SSE
+ * connection — stale until the hub's post-`agents` resend) and whenever a `hub` frame's `caps`
+ * no longer lists `load.v1` (§7.4 "hello 与 hub 帧 caps 无 load.v1 时清空") — malformed frames are
+ * dropped wholesale via `@logic/load.js`'s `isLoadWireLike`/`isLoadGateWireLike`, same discipline
+ * `todoFromStatus` already applies to `status.todo`.
+ *
  * Steer recall (web-hub-steer-recall plan §7, P-ui): the agent-side hold snapshot rides the
  * open `status` slot. `acceptHeld` (./control.js) is the single merge point — its output lands
  * on `held`/`heldRev`/`heldEpoch` (Y2 scope = the card's CURRENT epoch; a mismatched snapshot
@@ -87,6 +98,8 @@
  *   todo?: import("../../../protocol/messages.js").TodoWire | undefined,
  *   held?: any[] | undefined, heldRev?: number | undefined, heldEpoch?: string | undefined,
  *   heldTombs: Set<string>,
+ *   loadGate?: import("../../../protocol/messages.js").LoadGateWire | undefined,
+ *   loadGateReceivedAt?: number | undefined,
  * }} AgentState
  * @typedef {{
  *   clientId: string | null, hub: any, conn: string, lastEventId?: number,
@@ -98,10 +111,14 @@
  *   supersedeDeadlineAt?: number | undefined, forced: boolean, draining: boolean,
  *   spawns: import("../../../protocol/spawn.js").SpawnsPayload | null,
  *   removed: ReadonlySet<string>, synced: boolean,
+ *   load?: import("../../../protocol/messages.js").LoadWire | undefined,
+ *   loadReceivedAt?: number | undefined,
+ *   loadTop?: { loading: boolean, data?: import("../../../protocol/messages.js").LoadTopWire | undefined, error?: string | undefined, retryAfterS?: number | undefined } | undefined,
  * }} State
  * @typedef {{ event: string, data: any, id?: number, at?: number }} Msg
  */
 import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition } from "./control.js";
+import { isLoadGateWireLike, isLoadWireLike, parseLoadTopWire } from "./load.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
 
 /**
@@ -158,6 +175,11 @@ export const LOCAL_EVENTS = Object.freeze([
   "run_paging", // {agentKey, runId}
   "run_page", // RunHistoryPayload + {agentKey} (GET /api/run/history)
   "run_page_failed", // {agentKey, runId, error, reason?}
+  // sysload plan §7.1/§10 (package P4): `useHub.fetchLoadTop()`'s single-flight GET /api/load/top
+  // drive, mirroring `paging`/`page`/`page_failed`'s shape (hub-global, no agentKey).
+  "load_top_start",
+  "load_top_ok", // {data: LoadTopWire}
+  "load_top_error", // {error: string}
 ]);
 
 export const AGENT_ORDER_STORAGE_KEY = "pwh_agent_order";
@@ -478,12 +500,24 @@ function reduceInner(s, event, d, at) {
       // from the old connection must not pollute the retained transcript (R2-2).
       const agents = new Map();
       for (const [k, a] of s.agents) agents.set(k, a.sub ? { ...a, sub: null, abandoned: true } : a);
-      return { ...s, clientId: typeof d.clientId === "string" ? d.clientId : null, agents };
+      // sysload plan §7.4: a fresh connection clears the hub-global `load`/`loadTop` slots —
+      // stale until the hub's post-`agents` snapshot resend (§7.2) or the first live frame.
+      return {
+        ...s,
+        clientId: typeof d.clientId === "string" ? d.clientId : null,
+        agents,
+        load: undefined,
+        loadReceivedAt: undefined,
+        loadTop: undefined,
+      };
     }
     case "hub": {
       // §7.3/§7.7 + §6.6: caps negotiate the control plane (missing cmd.v1 ⇒ read-only UI);
       // state/nextVersion/supersede* drive HubStateBanner (v2.1: countdown, forced, draining).
       const caps = Array.isArray(d.caps) ? d.caps : [];
+      // sysload plan §7.4: a `hub` frame whose caps dropped `load.v1` (older hub / feature
+      // turned off on the hub side) clears the slots — never left showing a frozen last reading.
+      const loadCap = caps.includes("load.v1");
       return {
         ...s,
         hub: d,
@@ -496,6 +530,9 @@ function reduceInner(s, event, d, at) {
         draining: d.draining === true,
         supersedeBlocked:
           d.supersedeBlocked === "stopped" || d.supersedeBlocked === "unknown" ? d.supersedeBlocked : undefined,
+        load: loadCap ? s.load : undefined,
+        loadReceivedAt: loadCap ? s.loadReceivedAt : undefined,
+        loadTop: loadCap ? s.loadTop : undefined,
       };
     }
     case "ping":
@@ -517,6 +554,36 @@ function reduceInner(s, event, d, at) {
       }
       return d === s.spawns ? s : { ...s, spawns: d };
     }
+    // sysload plan §7.1/§7.4: the hub's direct-send host-load snapshot — hub-global (NOT per-
+    // agent, §3), never a resync/reconnect replay slot (§7.2's hub re-sends the latest snapshot
+    // right after `agents` on connect, same posture as `spawns` above). Malformed frames are
+    // dropped wholesale (`isLoadWireLike`, same discipline as `spawns`'s own inline checks).
+    // `at` is the receive-time anchor `@logic/load.js`'s `elapsedSinceMs`/`isLoadStale` need
+    // (§10 包注 P0·M9: never trust the hub's own `load.at`).
+    case "load":
+      return isLoadWireLike(d) ? { ...s, load: d, loadReceivedAt: at } : s;
+    // sysload plan §7.1/§10: `useHub.fetchLoadTop()`'s single-flight GET /api/load/top drive.
+    // `loading` starts/stays true on `load_top_start`; a successful/failed settle independently
+    // updates `data`/`error` while clearing `loading` — `data` is KEPT across a failed refetch
+    // (the card never blanks on a transient error, per `HubState.loadTop`'s own doc).
+    case "load_top_start":
+      return { ...s, loadTop: { loading: true, ...(s.loadTop?.data !== undefined ? { data: s.loadTop.data } : {}) } };
+    case "load_top_ok": {
+      const payload = parseLoadTopWire(d.payload);
+      return payload !== null ? { ...s, loadTop: { loading: false, data: payload } } : s;
+    }
+    case "load_top_error":
+      return {
+        ...s,
+        loadTop: {
+          loading: false,
+          ...(s.loadTop?.data !== undefined ? { data: s.loadTop.data } : {}),
+          error: typeof d.error === "string" ? d.error : "E_UNKNOWN",
+          ...(typeof d.retryAfterS === "number" && Number.isFinite(d.retryAfterS) && d.retryAfterS >= 0
+            ? { retryAfterS: d.retryAfterS }
+            : {}),
+        },
+      };
     case "agents": {
       const cards = Array.isArray(d) ? d : Array.isArray(d.agents) ? d.agents : [];
       const agents = new Map();
@@ -592,6 +659,15 @@ function reduceInner(s, event, d, at) {
         // projection returns `undefined`), and the whole-slot replace above alone would leave
         // no single field the panel can read without re-narrowing `status` itself.
         next.todo = todoFromStatus(d.status);
+        // sysload plan §10 包注 P0·M9/§7.4 (package P4): mirror the optional `StatusInfo.loadGate`
+        // for `FleetDrawer`'s crit banner — same absent-means-cleared semantics as `todo` above.
+        // `loadGateReceivedAt` re-anchors to THIS frame's browser-clock receive instant every
+        // time a (validated) `loadGate` rides the status slot, so `elapsedSinceMs` never has to
+        // trust the agent's own clock (malformed/absent ⇒ both cleared together, never a stale
+        // pairing of an old `loadGate` with a fresh `loadGateReceivedAt` or vice versa).
+        const loadGate = isLoadGateWireLike(d.status.loadGate) ? d.status.loadGate : undefined;
+        next.loadGate = loadGate;
+        next.loadGateReceivedAt = loadGate === undefined ? undefined : at;
         // §7.3: the D6 queue mirror rides the status slot; queueDropped cmdIds transition the
         // matching optimistic items to `dropped` (back to the terminal editor / discarded).
         // acc32-B2②: the wire omits `queue` once empty (status.ts only sets it when non-empty)

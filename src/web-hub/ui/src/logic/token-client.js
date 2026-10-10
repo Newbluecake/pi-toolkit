@@ -40,6 +40,7 @@ import { parseWtGraphPayload, WTGRAPH_BODY_MAX_BYTES, WTGRAPH_CLIENT_TIMEOUT_MS 
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 import { historyOutcomeFromResponse } from "./sessionHistory.ts";
+import { LOAD_TOP_BODY_MAX_BYTES, LOAD_TOP_CLIENT_TIMEOUT_MS, parseLoadTopWire } from "./load.js";
 
 export const TOKEN_KEY = "pwh_token";
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -1220,6 +1221,28 @@ export function createClient(deps) {
 
   const worktreeGraph = { graph: wtgraph };
 
+  // -------------------------------------------------------------------------
+  // sysload plan §7.1/§7.3/§10 (package P4): `GET /api/load/top`
+  // -------------------------------------------------------------------------
+
+  /**
+   * `GET /api/load/top` (§7.3) — the on-demand top-process snapshot, reusing `wtdiffGet`'s
+   * capped-JSON GET flow with sysload-specific knobs (`LOAD_TOP_BODY_MAX_BYTES`/
+   * `LOAD_TOP_CLIENT_TIMEOUT_MS`, `@logic/load.js`) and `parseLoadTopWire` as the contract gate
+   * (no query params — the endpoint is hub-global, same posture as the `load` SSE event). A
+   * 401 rides `withRelogin` (silent re-login + replay, GET ⇒ side-effect free) — the final
+   * `E_AUTH` flips the login view via `transport/token.ts`'s `withAuthNotice`, same as every
+   * other read-only endpoint here.
+   * @param {any} [signal]
+   * @returns {Promise<any>}
+   */
+  async function loadTop(signal) {
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    return await wtdiffGet(API.loadTop, LOAD_TOP_BODY_MAX_BYTES, parseLoadTopWire, signal, LOAD_TOP_CLIENT_TIMEOUT_MS);
+  }
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -1323,6 +1346,7 @@ export function createClient(deps) {
     preview,
     worktreeDiff,
     worktreeGraph,
+    loadTop,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

@@ -105,15 +105,25 @@ export function useFleetDrawerOpen(mode: Readonly<Ref<FleetDrawerMode>>): FleetD
  * 「← 子 agent 列表」返回键在 RunHeader 上,所有模式都可用来回到树);未选中时是树
  * (FleetTree + 「另有 N 个」)。选中/退选经 `FLEET_SELECT`(provide 给 FleetTree)和
  * RunHeader 的 back —— 都汇到 `HubHandle.selectRun`,组件从不直连 transport。
+ *
+ * sysload plan §6.4/§7.4/§10 (package P4): the tree view additionally shows a crit/warn
+ * dispatch-paused banner (`bannerView`, `@logic/load.js`) above `FleetTree`, reading the
+ * SESSION's own `StatusInfo.loadGate` (mirrored onto `AgentState.loadGate`) — never the hub-
+ * global `LoadPill`/`LoadCard` reading. Hidden while a run is selected (mockup fleet-crit shows
+ * it only on the tree root). Duration stays on the SAME line as the headline (approved mockup
+ * tweak ③); the gate wire carries no per-metric breakdown, so (unlike the agent-side turn_end
+ * hint text) the banner cannot name which metric tripped — only the overall level + duration.
  */
-import { inject, nextTick, onBeforeUnmount, provide } from "vue";
+import { inject, nextTick, onBeforeUnmount, onMounted, provide } from "vue";
 import type { FleetRowWire } from "@protocol/messages.js";
 import type { FleetDrawerEmits, FleetDrawerProps } from "../../contracts.js";
 import "../../styles/drawer.css";
+import "../../styles/load.css";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import FleetTree from "../fleet/FleetTree.vue";
+import { bannerView } from "@logic/load.js";
 import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_SELECT } from "../fleet/summary.js";
 import RunHeader from "./RunHeader.vue";
 import RunTranscript from "./RunTranscript.vue";
@@ -131,6 +141,25 @@ const rows = computed(() => props.agent.fleet as unknown as readonly FleetRowWir
 const treeNodes = computed(() => buildFleetTree(rows.value));
 const orphans = computed(() => orphanRunIds(rows.value));
 const selectedRunId = computed(() => props.agent.runSel ?? null);
+
+// ---------------------------------------------------------------------------
+// sysload plan §6.4/§7.4/§10 (package P4): the crit/warn dispatch-paused banner, reading the
+// SESSION's own gating truth (`StatusInfo.loadGate`, mirrored onto `AgentState.loadGate` by
+// `@logic/state.js`'s "status" case) — distinct from `LoadPill`/`LoadCard`'s hub-GLOBAL reading
+// (§3/§7.2: the hub carries no gate concept at all). `bannerNow` is a light local tick so the
+// tweak-③ duration annex keeps counting up while the drawer stays open between status frames.
+// ---------------------------------------------------------------------------
+const bannerNow = ref(Date.now());
+let bannerTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  bannerTimer = setInterval(() => {
+    bannerNow.value = Date.now();
+  }, 5_000);
+});
+onBeforeUnmount(() => {
+  if (bannerTimer !== undefined) clearInterval(bannerTimer);
+});
+const banner = computed(() => bannerView(props.agent.loadGate, props.agent.loadGateReceivedAt, bannerNow.value));
 
 const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
@@ -240,6 +269,16 @@ watch(
         >
           <AppIcon name="x" class="icon-sm" />
         </button>
+      </div>
+      <div v-if="banner" class="ld-banner" :data-level="banner.level">
+        <AppIcon name="alert" class="icon-sm" />
+        <span class="ld-banner-body">
+          <strong>{{ t("load.bannerPaused") }}</strong>
+          <template v-if="banner.durationText">
+            · {{ banner.level.toUpperCase() }} ({{ banner.durationText }})</template
+          >
+          <template v-else> · {{ banner.level.toUpperCase() }}</template>
+        </span>
       </div>
       <div class="tree-scroll">
         <FleetTree :nodes="treeNodes" :now="now" :orphans="orphans" :omitted="agent.fleetOmitted" />

@@ -17,7 +17,7 @@
  */
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
-import type { FleetRowWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
+import type { FleetRowWire, LoadGateWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
 import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
 import type { ConnState, LoadTopOutcome, PreviewTransport, WorktreeDiffTransport } from "./transport/types.js";
@@ -155,6 +155,16 @@ export interface AgentState {
    * recalled / returned / unconfirmed) via the ctl slot or a local recall success — a later
    * snapshot can never resurrect them. Bounded FIFO in `@logic/state.js`. */
   readonly heldTombs?: ReadonlySet<string>;
+  /** sysload plan §10 包注 P0·M9/§7.4 (package P4): mirrored off `status.loadGate` (same
+   * absent-means-cleared discipline as `todo`/`queue` above) for `FleetDrawer`'s crit banner.
+   * `loadGateReceivedAt` is the BROWSER clock instant (`reduce()`'s `at` parameter) the status
+   * frame carrying this `loadGate` value was received — the anchor `elapsedSinceMs` needs to
+   * turn `loadGate.sinceAgoMs` into a live duration without trusting the agent's own clock
+   * (§10 包注 P0·M9). Both are set together, every time a `status` frame mirrors a defined
+   * `loadGate` (absent on an older agent peer / the feature off — byte-identical to pre-feature,
+   * I8). */
+  readonly loadGate?: LoadGateWire;
+  readonly loadGateReceivedAt?: number;
 }
 
 /** Mirrors `@logic/state.js`'s `FleetOmitted` JSDoc typedef (the `fleet` frame's `omitted`). */
@@ -247,11 +257,22 @@ export interface HubState {
    * (§7.4 “hello 与 hub 帧 caps 无 load.v1 时清空”). Staleness is judged by the BROWSER from the
    * instant it RECEIVES a frame (>4×`intervalMs`, §7.4) — never from `load.at` directly. */
   readonly load?: LoadWire;
+  /** sysload plan §7.4/§10 包注 P0·M9 (package P4): the BROWSER clock instant (`reduce()`'s
+   * `at` parameter) the current `load` frame was received — the anchor `elapsedSinceMs` needs
+   * to turn `load.sinceAgoMs` into a live duration without trusting the hub's own clock.
+   * Cleared together with `load` (hello / caps-drop / stale-on-read never applies here since
+   * staleness is judged live from `now - loadReceivedAt`, not stored). */
+  readonly loadReceivedAt?: number;
   /** sysload plan §7.1/§10 (P0 frozen, "`loadTop` 状态"): the on-demand `GET /api/load/top`
    * fetch state backing `LoadCard`'s top-process section. `data` is the last successful
    * payload (kept across a subsequent error so the card never blanks on a transient failure);
    * `error` is the last fetch's failure (if any); both are independent of `loading`. */
-  readonly loadTop?: { readonly loading: boolean; readonly data?: LoadTopWire; readonly error?: string };
+  readonly loadTop?: {
+    readonly loading: boolean;
+    readonly data?: LoadTopWire;
+    readonly error?: string;
+    readonly retryAfterS?: number;
+  };
 }
 
 /**

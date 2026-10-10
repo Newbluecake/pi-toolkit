@@ -1,0 +1,380 @@
+/*
+ * Host-load pill + popover card + FleetDrawer crit/warn banner (sysload plan
+ * docs/dev/sysload/plan.md §7.4/§10 — `ld-` prefix). Token-only, imported by
+ * `components/load/{LoadPill,LoadCard}.vue` and `components/drawer/FleetDrawer.vue` — a
+ * dedicated stylesheet keeps this package's file domain disjoint from the in-flight P1/P2/P3
+ * sysload work (same precedent as `styles/quota.css`/`styles/bash-jobs.css`).
+ *
+ * Four-tier ladder mirrors `styles/quota.css` exactly (L0 success/quiet, L1 warning, L2 orange,
+ * L3 danger + semibold) — `LoadLevelWire`'s `"unknown"` renders as L0 (fail-open: never alarms
+ * on missing data, §8 I1).
+ */
+
+.ld-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(60vw, 640px);
+  padding: 3px 9px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  background: var(--c-surface);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.ld-pill:hover {
+  background: var(--c-surface-2);
+}
+.ld-pill[data-level="1"] {
+  background: var(--c-warning-soft);
+  border-color: var(--c-warning-border);
+}
+.ld-pill[data-level="2"] {
+  background: var(--c-orange-soft);
+  border-color: var(--c-orange-border);
+}
+.ld-pill[data-level="3"] {
+  background: var(--c-danger-soft);
+  border-color: var(--c-danger-border);
+}
+.ld-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--c-success);
+}
+.ld-pill[data-level="1"] .ld-dot {
+  background: var(--c-warning);
+}
+.ld-pill[data-level="2"] .ld-dot {
+  background: var(--c-orange);
+}
+.ld-pill[data-level="3"] .ld-dot {
+  background: var(--c-danger);
+}
+.ld-seg {
+  color: var(--c-text-2);
+}
+.ld-seg.hot[data-level="1"] {
+  color: var(--c-warning-text);
+  font-weight: var(--fw-semibold);
+}
+.ld-seg.hot[data-level="2"] {
+  color: var(--c-orange-text);
+  font-weight: var(--fw-semibold);
+}
+.ld-seg.hot[data-level="3"] {
+  color: var(--c-danger);
+  font-weight: var(--fw-semibold);
+}
+.ld-sep {
+  color: var(--c-text-3);
+  margin: 0 1px;
+}
+.ld-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+/* ---------------------------------------------------------------- LoadCard popover */
+.ld-card {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: 420px;
+  max-width: calc(100vw - 24px);
+  padding: 16px 24px 40px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+}
+.ld-card:focus {
+  outline: none;
+}
+.ld-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.ld-card-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ld-card-updated {
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  white-space: nowrap;
+}
+.ld-card-since {
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  margin-top: 2px;
+}
+.ld-level-badge {
+  font-size: var(--fs-2xs);
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  font-weight: var(--fw-semibold);
+}
+.ld-level-badge[data-level="0"] {
+  color: var(--c-success);
+  background: var(--c-success-soft);
+}
+.ld-level-badge[data-level="1"] {
+  color: var(--c-warning-text);
+  background: var(--c-warning-soft);
+}
+.ld-level-badge[data-level="2"] {
+  color: var(--c-orange-text);
+  background: var(--c-orange-soft);
+}
+.ld-level-badge[data-level="3"] {
+  color: var(--c-danger);
+  background: var(--c-danger-soft);
+}
+
+.ld-section {
+  padding: var(--sp-2) 0;
+}
+.ld-section + .ld-section {
+  border-top: 1px solid var(--c-border);
+}
+.ld-section-title {
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 5px;
+  font-weight: var(--fw-semibold);
+}
+
+.ld-row {
+  display: grid;
+  grid-template-columns: 78px 1fr 48px;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 4px 0;
+}
+.ld-label {
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ld-bar {
+  height: 6px;
+  border-radius: var(--r-xs);
+  background: var(--c-sunken);
+  border: 1px solid var(--c-border);
+  overflow: hidden;
+}
+.ld-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--c-success);
+  font-style: normal;
+}
+.ld-bar[data-lv="1"] > i {
+  background: var(--c-warning);
+}
+.ld-bar[data-lv="2"] > i {
+  background: var(--c-orange);
+}
+.ld-bar[data-lv="3"] > i {
+  background: var(--c-danger);
+}
+.ld-val {
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ld-subrow {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  margin: 2px 0 4px;
+}
+
+.ld-mount-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 48px;
+  gap: var(--sp-2);
+  align-items: center;
+  margin: 4px 0;
+}
+.ld-mount-path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ld-proc-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+.ld-proc-tab {
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  font-weight: var(--fw-semibold);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ld-proc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ld-proc-item {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: var(--fs-2xs);
+  padding: 2px 0;
+  min-height: 24px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.ld-proc-item:hover {
+  color: var(--c-text);
+}
+.ld-proc-name {
+  font-family: var(--font-mono);
+  color: var(--c-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ld-proc-val {
+  color: var(--c-text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ld-proc-pids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 2px 0 4px 8px;
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.ld-top-note {
+  margin: 0;
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+}
+.ld-top-retry {
+  margin-left: 6px;
+  background: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-xs);
+  padding: 1px 6px;
+  font-size: var(--fs-2xs);
+  color: var(--c-primary);
+  cursor: pointer;
+}
+@media (pointer: coarse) {
+  .ld-top-retry {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .ld-pill {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+.ld-foot {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+}
+
+/* ---------------------------------------------------------------- FleetDrawer crit/warn banner */
+.ld-banner {
+  --n-fg: var(--c-danger);
+  --n-bg: var(--c-danger-soft);
+  --n-border: var(--c-danger-border);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--n-bg);
+  border-bottom: 1px solid var(--n-border);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+.ld-banner[data-level="1"] {
+  --n-fg: var(--c-warning-text);
+  --n-bg: var(--c-warning-soft);
+  --n-border: var(--c-warning-border);
+}
+.ld-banner .icon {
+  margin-top: 1px;
+  color: var(--n-fg);
+  flex: none;
+}
+.ld-banner-body {
+  flex: 1;
+  min-width: 0;
+}
+.ld-banner-body strong {
+  color: var(--n-fg);
+  font-weight: var(--fw-semibold);
+}
+
+/* ---------------------------------------------------------------- mobile (≤767px) */
+
+@media (max-width: 767px) {
+  .ld-card {
+    position: fixed;
+    top: calc(var(--topbar-h) + 4px);
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - var(--topbar-h) - 16px);
+    overflow-y: auto;
+  }
+}
+
+/* `.ld-proc-item` is a NEW interactive element (expand/collapse a top-process row to its pids)
+ * without a `QuotaCard` precedent to follow — bump its tap target to ≥44px under a coarse
+ * pointer (touch), same `pointer: coarse` convention every other interactive list row in this
+ * package uses (`styles/bash-jobs.css`/`agents.css`/…). */
+@media (pointer: coarse) {
+  .ld-proc-item {
+    min-height: 44px;
+  }
+}

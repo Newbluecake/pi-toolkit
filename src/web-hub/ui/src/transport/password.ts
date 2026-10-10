@@ -11,6 +11,7 @@ import { API } from "@logic/contract.js";
 import { createPasswordClient } from "@logic/password-client.js";
 import type {
   CmdOutcome,
+  LoadTopOutcome,
   PasswordTransport,
   PreviewOutcome,
   PreviewProbeOutcome,
@@ -75,6 +76,9 @@ const REST_AUTH_PATHS: ReadonlySet<string> = new Set([
   // subscribe/cmd above (the password client's `removeAgent` never fires onConn itself) — an
   // exact-match entry (not a prefix, unlike `/api/headless*`: this endpoint has no sub-paths).
   API.agentRemove,
+  // sysload plan §7.1/§7.3/§10 (package P4): `GET /api/load/top` has no query params at all
+  // (hub-global, no agentKey/sessionId) — an exact-match entry like `agentRemove`, not a prefix.
+  API.loadTop,
 ]);
 
 function isRestAuthEndpoint(url: string): boolean {
@@ -191,5 +195,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // client, so nothing double-fires.
       graph: (req, opts) => client.worktreeGraph.graph(req, opts) as Promise<WtDiffOutcome<WtGraphPayload>>,
     } satisfies WorktreeGraphTransport,
+    // sysload plan §7.1/§7.3/§10 (package P4): thin cast over the logic client's `loadTop` —
+    // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an
+    // exact-match entry for `API.loadTop`) — never inside the client, so nothing double-fires.
+    loadTop: (signal) => client.loadTop(signal) as Promise<LoadTopOutcome>,
   } satisfies PasswordTransport;
 }

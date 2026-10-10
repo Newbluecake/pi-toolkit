@@ -57,6 +57,7 @@ import { parseWtGraphPayload, WTGRAPH_BODY_MAX_BYTES, WTGRAPH_CLIENT_TIMEOUT_MS 
 import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 import { historyOutcomeFromResponse } from "./sessionHistory.ts";
+import { LOAD_TOP_BODY_MAX_BYTES, LOAD_TOP_CLIENT_TIMEOUT_MS, parseLoadTopWire } from "./load.js";
 
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
@@ -1474,6 +1475,23 @@ export function createPasswordClient(deps) {
 
   const worktreeGraph = { graph: wtgraph };
 
+  // -------------------------------------------------------------------------
+  // sysload plan §7.1/§7.3/§10 (package P4): `GET /api/load/top` — same flow as token.ts's
+  // sibling (independently duplicated, same discipline this file already applies to every
+  // other endpoint pair above).
+  // -------------------------------------------------------------------------
+
+  /**
+   * @param {any} [signal]
+   * @returns {Promise<any>}
+   */
+  async function loadTop(signal) {
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    return await wtdiffGet(API.loadTop, LOAD_TOP_BODY_MAX_BYTES, parseLoadTopWire, signal, LOAD_TOP_CLIENT_TIMEOUT_MS);
+  }
+
   return {
     /** Clear a stray `#t=` (never read/sent in password mode), fetch session info, then open the stream. */
     async start() {
@@ -1500,6 +1518,7 @@ export function createPasswordClient(deps) {
     preview,
     worktreeDiff,
     worktreeGraph,
+    loadTop,
     close() {
       closed = true;
       closeStream();

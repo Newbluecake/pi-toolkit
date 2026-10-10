@@ -36,6 +36,7 @@ import { parseRouteHash } from "../../composables/useHashRoute.js";
 import SettingsOverlay from "./SettingsOverlay.vue";
 import QuotaPill from "../quota/QuotaPill.vue";
 import { freshestQuota } from "@logic/quota.js";
+import LoadPill from "../load/LoadPill.vue";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -66,6 +67,15 @@ const quotaList = computed(() => {
   const q = freshestQuota(agents.values());
   return q === undefined ? [] : [q];
 });
+
+/** sysload plan §7.4/§10 (package P4): the hub-global `load` slot, read the SAME "0/1-item
+ *  `v-for`, never `v-if`" way `quotaList` above is (I8: zero extra DOM when the load feature is
+ *  off / not yet sampled / the hub's caps don't advertise `load.v1`). */
+const loadList = computed(() => {
+  const load = hub?.state.value.load;
+  return load === undefined ? [] : [load];
+});
+const loadReceivedAt = computed(() => hub?.state.value.loadReceivedAt);
 
 const connLabelKey = computed(() => `shell.conn.${props.conn}`);
 const uiStamp = computed(() => uiBuildStamp(UI_BUILD));
@@ -131,6 +141,7 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
     </span>
 
     <QuotaPill v-for="q in quotaList" :key="'quota'" :quota="q" />
+    <LoadPill v-for="ld in loadList" :key="'load'" :load="ld" :received-at="loadReceivedAt" />
 
     <!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
          the brand's title tooltip. -->

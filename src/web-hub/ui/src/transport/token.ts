@@ -19,6 +19,7 @@ import { createClient } from "@logic/token-client.js";
 import type {
   CmdOutcome,
   HubTransport,
+  LoadTopOutcome,
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
@@ -207,5 +208,9 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       graph: (req, opts) =>
         withAuthNotice(deps, () => client.worktreeGraph.graph(req, opts) as Promise<WtDiffOutcome<WtGraphPayload>>),
     } satisfies WorktreeGraphTransport,
+    // sysload plan §7.1/§7.3/§10 (package P4): thin cast over the logic client's `loadTop` —
+    // same final-E_AUTH rule as worktreeGraph/preview above (a GET, replayed once by the
+    // client's `withRelogin` on a 401).
+    loadTop: (signal) => withAuthNotice(deps, () => client.loadTop(signal) as Promise<LoadTopOutcome>),
   } satisfies HubTransport;
 }
