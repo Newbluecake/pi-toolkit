@@ -35,15 +35,15 @@ export interface JudgeModelRef {
 }
 
 export interface JudgeModelChainInput {
-  /** settings `topicSwitch.model`（已 trim）。 */
-  configured: string;
+  /** settings `topicSwitch.models`（逐项已 trim）；逗号/JSON 数组已在 settings 解析层归一。 */
+  configured: readonly string[];
   /** settings `title.model`。 */
   title: string;
   /** 当前会话模型 `provider/id`。 */
   session: string;
 }
 
-/** D3 链：configured → title → session（JUDGE_SESSION_MODEL_FALLBACK=false 时截到前两档）。strict 解析、去重、保序。 */
+/** D3 链：configured（按序）→ title → session（JUDGE_SESSION_MODEL_FALLBACK=false 时截到前两档）。strict 解析、去重、保序。 */
 export function judgeModelChain(i: JudgeModelChainInput): readonly JudgeModelRef[] {
   const out: JudgeModelRef[] = [];
   const push = (raw: string, origin: JudgeModelOrigin): void => {
@@ -52,7 +52,7 @@ export function judgeModelChain(i: JudgeModelChainInput): readonly JudgeModelRef
     if (out.some((r) => r.provider === ref.provider && r.id === ref.id)) return;
     out.push({ provider: ref.provider, id: ref.id, origin });
   };
-  push(i.configured, "configured");
+  for (const entry of i.configured) push(entry, "configured");
   push(i.title, "title");
   if (JUDGE_SESSION_MODEL_FALLBACK) push(i.session, "session");
   return out;
@@ -215,4 +215,76 @@ export async function judgeRelevance(
   } finally {
     cleanup();
   }
+}
+
+/** Failover per-attempt budget floor: each attempt gets at least this much of the total budget. */
+export const JUDGE_ATTEMPT_FLOOR_MS = 1_500;
+
+/** Per-attempt budget inside the TOTAL judge budget: `min(remaining, max(floor, ceil(total/2)))`. */
+export function judgeAttemptBudgetMs(totalMs: number, remainingMs: number): number {
+  const cap = Math.max(JUDGE_ATTEMPT_FLOOR_MS, Math.ceil(totalMs / 2));
+  return Math.max(0, Math.min(remainingMs, cap));
+}
+
+/** One candidate model in the failover chain: its resolved ref plus the port that calls it. */
+export interface JudgeAttempt {
+  ref: JudgeModelRef;
+  port: JudgePort;
+}
+
+/** Per-attempt diagnostics (model identity + outcome; no paths, no secrets). */
+export interface JudgeAttemptOutcome {
+  provider: string;
+  id: string;
+  origin: JudgeModelOrigin;
+  kind: JudgeVerdict["kind"];
+  ms: number;
+}
+
+export interface JudgeFailoverResult {
+  verdict: JudgeVerdict;
+  attempts: readonly JudgeAttemptOutcome[];
+}
+
+/**
+ * 按序故障转移的判定链：在总预算 `totalTimeoutMs` 内逐个尝试 `attempts`，每次尝试拿
+ * `judgeAttemptBudgetMs(total, remaining)` 毫秒（单次 `judgeRelevance` 自带 abort/timer/
+ * `withDeadline` 兕底，超时后的迟到结果丢弃）。error/timeout/parse-error ⇒ 下一个模型；
+ * 外部 abort ⇒ 立即停止（不再尝试后续模型）；成功解析 ⇒ 返回。全部失败 ⇒ 返回最后一次
+ * 尝试的失败类型（`ms` 改写为总耗时，看门狗口径不变）；空链 ⇒ `no-model`。
+ */
+export async function judgeWithFailover(
+  attempts: readonly JudgeAttempt[],
+  input: JudgeInput,
+  totalTimeoutMs: number,
+  clock: Clock,
+  signal: AbortSignal,
+): Promise<JudgeFailoverResult> {
+  const start = clock.now();
+  const outcomes: JudgeAttemptOutcome[] = [];
+  let last: JudgeVerdict | undefined;
+  for (const attempt of attempts) {
+    const remaining = totalTimeoutMs - (clock.now() - start);
+    if (remaining <= 0) break;
+    const verdict = await judgeRelevance(
+      attempt.port,
+      input,
+      judgeAttemptBudgetMs(totalTimeoutMs, remaining),
+      clock,
+      signal,
+    );
+    outcomes.push({
+      provider: attempt.ref.provider,
+      id: attempt.ref.id,
+      origin: attempt.ref.origin,
+      kind: verdict.kind,
+      ms: verdict.ms,
+    });
+    last = verdict;
+    if (verdict.kind === "aborted") break; // external abort ⇒ stop immediately, no further attempts
+    if (verdict.kind === "ok") break;
+  }
+  const ms = clock.now() - start;
+  if (last === undefined) return { verdict: { kind: "no-model", ms }, attempts: outcomes };
+  return { verdict: { ...last, ms }, attempts: outcomes };
 }

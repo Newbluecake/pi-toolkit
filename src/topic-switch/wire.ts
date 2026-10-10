@@ -40,7 +40,14 @@ import type { PromptGatePort, WebPromptRelease } from "../web-hub/agent/prompt-g
 import { buildConfirmText, confirmSwitch, type ConfirmCtx } from "./confirm.js";
 import { evaluateSyncGates, type PricedEstimate } from "./gate.js";
 import { buildBranchView, clearWatchdog, fullPayload, type HoldRuntime } from "./hold.js";
-import { JUDGE_MAX_TOKENS, judgeModelChain, judgeRelevance, type JudgeInput, type JudgePort } from "./judge.js";
+import {
+  JUDGE_MAX_TOKENS,
+  judgeModelChain,
+  judgeWithFailover,
+  type JudgeAttempt,
+  type JudgeFailoverResult,
+  type JudgeInput,
+} from "./judge.js";
 import { createReleaseQueue } from "./release.js";
 import { runRecovery } from "./recovery.js";
 import { createTopicSwitchCommand, type TopicSwitchCommandDeps } from "./command.js";
@@ -247,6 +254,12 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
   let compactWaiters: Array<() => void> = [];
   const nonces = new Map<string, { hold: HoldRuntime; timer: TimerHandle }>();
   const skipCounts: Partial<Record<SkipReason, number>> = {};
+  // Judge diagnostics for `/topic-switch status`: which model answered the last judgment +
+  // bounded per-model failure counts (model strings only — no paths, no secrets).
+  const judgeDiag: { answered: string | undefined; failures: Map<string, number> } = {
+    answered: undefined,
+    failures: new Map(),
+  };
   const ctxRef: { current?: ExtensionContext } = {};
 
   function noteSkip(reason: SkipReason): void {
@@ -442,19 +455,7 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
     const ctx = hold.holdCtx;
     const settingsNow = deps.settings();
     const sessionModel = ctx.model !== undefined ? `${ctx.model.provider}/${ctx.model.id}` : "";
-    const chain = judgeModelChain({ configured: settingsNow.model, title: deps.titleModel, session: sessionModel });
-    let model: ReturnType<ExtensionContext["modelRegistry"]["find"]> | undefined;
-    for (const ref of chain) {
-      const found = safe(() => ctx.modelRegistry.find(ref.provider, ref.id));
-      if (found !== undefined) {
-        model = found;
-        break;
-      }
-    }
-    if (model === undefined) {
-      feed(hold, { t: "judged", v: { kind: "no-model" } });
-      return;
-    }
+    const chain = judgeModelChain({ configured: settingsNow.models, title: deps.titleModel, session: sessionModel });
     const branchView = buildBranchView(ctx.sessionManager.getBranch());
     const sessionName = safe(() => pi.getSessionName());
     const input: JudgeInput = {
@@ -467,23 +468,57 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
       request: hold.payload.text,
       imageCount: hold.payload.images?.length ?? 0,
     };
-    const boundModel = model;
-    const port: JudgePort = {
-      complete: async (systemPrompt, userPrompt, signal) => {
-        const message = await ctx.modelRegistry.complete(
-          boundModel,
-          { systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
-          { signal, maxTokens: JUDGE_MAX_TOKENS },
-        );
-        return assistantMessageText(message);
-      },
-    };
-    void judgeRelevance(port, input, settingsNow.judgeTimeoutMs, clock, hold.abort.signal).then((verdict) => {
+    // Failover chain (plan D3 + runtime failover): one port per chain entry that the registry
+    // actually has; unregistered entries are skipped exactly as the single-model path did.
+    const attempts: JudgeAttempt[] = [];
+    for (const ref of chain) {
+      const found = safe(() => ctx.modelRegistry.find(ref.provider, ref.id));
+      if (found === undefined) continue;
+      const boundModel = found;
+      attempts.push({
+        ref,
+        port: {
+          complete: async (systemPrompt, userPrompt, signal) => {
+            const message = await ctx.modelRegistry.complete(
+              boundModel,
+              { systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
+              { signal, maxTokens: JUDGE_MAX_TOKENS },
+            );
+            return assistantMessageText(message);
+          },
+        },
+      });
+    }
+    if (attempts.length === 0) {
+      feed(hold, { t: "judged", v: { kind: "no-model" } });
+      return;
+    }
+    void judgeWithFailover(attempts, input, settingsNow.judgeTimeoutMs, clock, hold.abort.signal).then((result) => {
       if (currentHold !== hold) return;
+      noteJudgeDiag(result);
+      const verdict = result.verdict;
       if (verdict.kind === "ok") hold.confidence = verdict.confidence;
       hold.judgeMs = verdict.ms;
       feed(hold, { t: "judged", v: verdict });
     });
+  }
+
+  /** Last-judgment diagnostics: answered-by on success, per-model failure counts (FIFO cap 8). */
+  function noteJudgeDiag(result: JudgeFailoverResult): void {
+    for (const attempt of result.attempts) {
+      if (attempt.kind === "ok") continue;
+      const key = `${attempt.provider}/${attempt.id}`;
+      const next = (judgeDiag.failures.get(key) ?? 0) + 1;
+      judgeDiag.failures.delete(key); // re-insert at the end so the cap evicts the oldest entry
+      judgeDiag.failures.set(key, next);
+      while (judgeDiag.failures.size > 8) {
+        const oldest = judgeDiag.failures.keys().next().value;
+        if (oldest === undefined) break;
+        judgeDiag.failures.delete(oldest);
+      }
+    }
+    const answered = result.attempts.find((a) => a.kind === "ok");
+    judgeDiag.answered = answered === undefined ? undefined : `${answered.provider}/${answered.id}`;
   }
 
   function runConfirm(hold: HoldRuntime): void {
@@ -805,9 +840,12 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
   function statusText(ctx: ExtensionCommandContext): string {
     const s = deps.settings();
     const sessionModel = ctx.model !== undefined ? `${ctx.model.provider}/${ctx.model.id}` : "";
-    const chain = judgeModelChain({ configured: s.model, title: deps.titleModel, session: sessionModel });
+    const chain = judgeModelChain({ configured: s.models, title: deps.titleModel, session: sessionModel });
     const chainText =
       chain.length > 0 ? chain.map((ref) => `${ref.provider}/${ref.id}(${ref.origin})`).join(" → ") : "(none)";
+    const fails = [...judgeDiag.failures.entries()].map(([model, n]) => `${model}×${n}`).join(" ");
+    const judgeLine =
+      `judge: answered ${judgeDiag.answered ?? "(none yet)"}` + (fails.length > 0 ? ` · fails ${fails}` : "");
     const branch = safe(() => ctx.sessionManager.getBranch()) ?? [];
     const inCooldown = cooldownActive(
       branch as unknown as EntryLike[],
@@ -822,6 +860,7 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
     return [
       `topic-switch: ${s.enabled ? "on" : "off"} · threshold $${s.costThresholdUsd} · cooldown ${inCooldown ? "active" : "off"} · hold ${phase}`,
       `judge chain: ${chainText}`,
+      judgeLine,
       skipLine.length > 0 ? `skips: ${skipLine}` : "skips: (none yet)",
       `recent outcomes: ${recentOutcomesText(branch as unknown as EntryLike[])}`,
     ].join("\n");

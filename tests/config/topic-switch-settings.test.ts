@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, loadSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
-import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS } from "../../src/config/setting-specs.js";
+import {
+  currentOf,
+  defaultOf,
+  isKnownSettingKey,
+  parseSettingValue,
+  SETTING_SPECS,
+} from "../../src/config/setting-specs.js";
 import { DEFAULT_TOPIC_SWITCH_SETTINGS } from "../../src/topic-switch/settings.js";
 
 /**
@@ -102,13 +108,42 @@ describe("topicSwitch.* in SETTING_SPECS", () => {
   it("pins the default values shown by the editor/text command", () => {
     expect(defaultOf(SETTING_SPECS["topicSwitch.enabled"]!)).toBe(true);
     expect(defaultOf(SETTING_SPECS["topicSwitch.costThresholdUsd"]!)).toBe(0.5);
-    expect(defaultOf(SETTING_SPECS["topicSwitch.model"]!)).toBe("");
+    expect(defaultOf(SETTING_SPECS["topicSwitch.model"]!)).toBe(""); // empty list joins to ""
     expect(defaultOf(SETTING_SPECS["topicSwitch.judgeTimeoutS"]!)).toBe(6);
     expect(defaultOf(SETTING_SPECS["topicSwitch.minConfidence"]!)).toBe(0.7);
     expect(defaultOf(SETTING_SPECS["topicSwitch.confirmTimeoutS"]!)).toBe(30);
     expect(defaultOf(SETTING_SPECS["topicSwitch.minChars"]!)).toBe(8);
     expect(defaultOf(SETTING_SPECS["topicSwitch.regrowTokens"]!)).toBe(100_000);
     expect(defaultOf(SETTING_SPECS["topicSwitch.expirySlackS"]!)).toBe(30);
+  });
+
+  it("topicSwitch.model is a csv-style spec: stored comma string ⇄ live topicSwitch.models list", () => {
+    const spec = SETTING_SPECS["topicSwitch.model"]!;
+    expect(spec.kind).toBe("string");
+    expect(spec.csv).toBe(true);
+    expect(spec.path).toBe("topicSwitch.models");
+    // currentOf joins the live list into the stored-domain csv string
+    const settings = loadSettings({ topicSwitch: { model: "a/b,c/d" } });
+    expect(settings.topicSwitch.models).toEqual(["a/b", "c/d"]);
+    expect(currentOf(settings, spec)).toBe("a/b,c/d");
+    expect(currentOf(DEFAULT_SETTINGS, spec)).toBe("");
+  });
+
+  it("model list file forms all load: JSON array, csv string, single (legacy) string; garbage ⇒ default", () => {
+    expect(loadSettings({ topicSwitch: { model: ["a/b", "c/d"] } }).topicSwitch.models).toEqual(["a/b", "c/d"]);
+    expect(loadSettings({ topicSwitch: { model: "a/b, c/d" } }).topicSwitch.models).toEqual(["a/b", "c/d"]);
+    expect(loadSettings({ topicSwitch: { model: "a/b" } }).topicSwitch.models).toEqual(["a/b"]);
+    expect(loadSettings({ topicSwitch: { model: 7 } }).topicSwitch.models).toEqual([]);
+    expect(loadSettings({ topicSwitch: { model: null } }).topicSwitch.models).toEqual([]);
+    expect(loadSettings({}).topicSwitch.models).toEqual([]);
+  });
+
+  it("parseSettingValue round-trips the csv surface: input string → stored csv + live array; empty clears", () => {
+    const spec = SETTING_SPECS["topicSwitch.model"]!;
+    const parsed = parseSettingValue(spec, "x/one, x/two,,");
+    expect(parsed).toEqual({ ok: true, stored: "x/one,x/two", live: ["x/one", "x/two"] });
+    const cleared = parseSettingValue(spec, "");
+    expect(cleared).toEqual({ ok: true, stored: "", live: [] });
   });
 
   it("costThresholdUsd / minConfidence / minChars specs mirror the parser's min/max domain", () => {

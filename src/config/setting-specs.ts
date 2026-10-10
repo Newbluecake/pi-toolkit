@@ -969,7 +969,8 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "Adopt text appended by a later extension to the forced system prompt",
   ),
   // topic-switch (docs/dev/topic-switch/plan.md §P3b.1): nine settable keys; `debugAssumedTtlS`
-  // is a JSON-only live-acceptance seam and deliberately NOT listed here.
+  // is a JSON-only live-acceptance seam and deliberately NOT listed here. `topicSwitch.model` is
+  // csv-style: stored/displayed as a comma-joined string, live `topicSwitch.models: string[]`.
   "topicSwitch.enabled": bool(
     "topicSwitch.enabled",
     "Offer to switch to a clean new session for a new, unrelated, expensive request (default on)",
@@ -981,13 +982,12 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     max: 100,
     description: "Only offer a switch when the next request's estimated cost exceeds this (USD)",
   },
-  "topicSwitch.model": {
-    kind: "string",
-    path: "topicSwitch.model",
-    description:
-      'Strict provider/id for the relevance judge, or "" to fall back to title.model then the session model. ' +
-      "Sends the new request and a short excerpt of the recent conversation to this model.",
-  },
+  "topicSwitch.model": csvString(
+    "topicSwitch.models",
+    "Comma-separated provider/id chain for the relevance judge, tried in order with failover " +
+      '(or "" to fall back to title.model then the session model). Sends the new request and a short excerpt ' +
+      "of the recent conversation to these models.",
+  ),
   "topicSwitch.judgeTimeoutS": seconds("topicSwitch.judgeTimeoutMs", {
     min: 1,
     max: 30,

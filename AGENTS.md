@@ -456,7 +456,12 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   immediately (no dispatch) and hands ownership to `release.current()`/`release.elsewhere()`.
 - `src/topic-switch/` — new-request relevance judge → suggest a clean new session
   (`docs/dev/topic-switch/{requirements,arch,plan}.md`). Post-guard, main-session only, settings-
-  gated (`topicSwitch.enabled`, default on). Layered like the rest of the repo: pi-free decision
+  gated (`topicSwitch.enabled`, default on). The judge model chain is a configurable LIST
+  (`topicSwitch.model`: csv string or JSON array → live `topicSwitch.models`; configured in order
+  → `title.model` → session model) with runtime failover inside the total `judgeTimeoutMs` budget
+  (`judgeWithFailover`: per-attempt `min(remaining, max(1500, ceil(total/2)))`, external abort
+  stops immediately, all-fail ⇒ the existing fail-open verdict; `/topic-switch status` shows the
+  last answering model + per-model failure counts). Layered like the rest of the repo: pi-free decision
   core (`types/settings/filters/economics/gate/judge/state/records.ts`, P1) → `confirm.ts` (TUI
   ⟂ web dialog race, P3a) → pi-facing assembly (`wire/hold/release/recovery/command.ts`, P3b).
   Invariants I1–I6: the `input` handler only ever holds `interactive`/`rpc` sources (never its own

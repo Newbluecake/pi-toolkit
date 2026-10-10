@@ -11,7 +11,7 @@ describe("DEFAULT_TOPIC_SWITCH_SETTINGS", () => {
     expect(DEFAULT_TOPIC_SWITCH_SETTINGS).toEqual({
       enabled: true,
       costThresholdUsd: 0.5,
-      model: "",
+      models: [],
       judgeTimeoutMs: 6_000,
       minConfidence: 0.7,
       confirmTimeoutMs: 30_000,
@@ -39,7 +39,7 @@ describe("parseTopicSwitchSettings", () => {
     const parsed = parseTopicSwitchSettings({
       enabled: false,
       costThresholdUsd: 3.25,
-      model: " moonshot/kimi-k3 ",
+      model: [" moonshot/kimi-k3 ", "zai-coding-cn/glm-5.3-flash"],
       judgeTimeoutMs: 12_000,
       minConfidence: 0,
       confirmTimeoutMs: 300_000,
@@ -51,7 +51,7 @@ describe("parseTopicSwitchSettings", () => {
     expect(parsed).toEqual({
       enabled: false,
       costThresholdUsd: 3.25,
-      model: "moonshot/kimi-k3",
+      models: ["moonshot/kimi-k3", "zai-coding-cn/glm-5.3-flash"],
       judgeTimeoutMs: 12_000,
       minConfidence: 0,
       confirmTimeoutMs: 300_000,
@@ -66,7 +66,7 @@ describe("parseTopicSwitchSettings", () => {
     const parsed = parseTopicSwitchSettings({
       enabled: "yes", // → true
       costThresholdUsd: 0, // 0 < x ⇒ invalid → 0.5
-      model: 7, // → ""
+      model: 7, // → [] (garbage ⇒ default)
       judgeTimeoutMs: 999, // below 1s → 6000
       minConfidence: 1.2, // → 0.7
       confirmTimeoutMs: 4_999, // below 5s → 30000
@@ -139,10 +139,31 @@ describe("parseTopicSwitchSettings", () => {
     expect(parseTopicSwitchSettings({ debugAssumedTtlMs: 9_999 }).debugAssumedTtlMs).toBe(0);
   });
 
-  it("model: empty string is a legal sentinel; non-strings fall back", () => {
-    expect(parseTopicSwitchSettings({ model: "" }).model).toBe("");
-    expect(parseTopicSwitchSettings({ model: null }).model).toBe("");
-    expect(parseTopicSwitchSettings({ model: {} }).model).toBe("");
+  it("model list: single string (legacy), csv string, JSON array; garbage falls back to default", () => {
+    // legacy single-string form still works
+    expect(parseTopicSwitchSettings({ model: "moonshot/kimi-k3" }).models).toEqual(["moonshot/kimi-k3"]);
+    // csv string (the settings editor's stored form)
+    expect(parseTopicSwitchSettings({ model: "a/b, c/d,," }).models).toEqual(["a/b", "c/d"]);
+    // JSON array of strings (the hand-written settings.json form); non-string items dropped
+    expect(parseTopicSwitchSettings({ model: ["a/b", 7, null, " c/d "] }).models).toEqual(["a/b", "c/d"]);
+    // array items may themselves carry commas
+    expect(parseTopicSwitchSettings({ model: ["a/b,c/d"] }).models).toEqual(["a/b", "c/d"]);
+    // garbage ⇒ default (empty), never throws
+    for (const garbage of [7, null, {}, true, [{}], [7]]) {
+      expect(parseTopicSwitchSettings({ model: garbage }).models).toEqual([]);
+    }
+    expect(parseTopicSwitchSettings({ model: "" }).models).toEqual([]);
+    // order is preserved as written (dedupe belongs to judgeModelChain, not the parser)
+    expect(parseTopicSwitchSettings({ model: ["b/two", "a/one"] }).models).toEqual(["b/two", "a/one"]);
+  });
+
+  it("model list: every parse returns a fresh array; the frozen default is never handed out", () => {
+    const a = parseTopicSwitchSettings({ model: "x/y" }).models;
+    const b = parseTopicSwitchSettings({ model: "x/y" }).models;
+    expect(a).not.toBe(b);
+    const fallback = parseTopicSwitchSettings({}).models;
+    expect(fallback).not.toBe(DEFAULT_TOPIC_SWITCH_SETTINGS.models);
+    expect(Object.isFrozen(DEFAULT_TOPIC_SWITCH_SETTINGS.models)).toBe(true);
   });
 
   it("unknown keys are ignored (forward compatibility)", () => {

@@ -13,8 +13,13 @@
 export interface TopicSwitchSettings {
   enabled: boolean;
   costThresholdUsd: number;
-  /** strict `provider/id`; runtime parseStrictModelRef failure is treated as empty (D3 chain falls through). */
-  model: string;
+  /**
+   * Strict `provider/id` entries, in failover order. Accepts a JSON array of strings or a
+   * comma-separated string (the settings editor's stored form); a single string is the legacy
+   * one-model form. Runtime `parseStrictModelRef` failures are skipped per entry (D3 chain falls
+   * through). Order-preserving dedupe happens in `judgeModelChain`, not here.
+   */
+  models: readonly string[];
   judgeTimeoutMs: number;
   minConfidence: number;
   confirmTimeoutMs: number;
@@ -29,7 +34,7 @@ export interface TopicSwitchSettings {
 export const DEFAULT_TOPIC_SWITCH_SETTINGS: Readonly<TopicSwitchSettings> = Object.freeze({
   enabled: true,
   costThresholdUsd: 0.5,
-  model: "",
+  models: Object.freeze([] as string[]),
   judgeTimeoutMs: 6_000,
   minConfidence: 0.7,
   confirmTimeoutMs: 30_000,
@@ -44,6 +49,27 @@ function inRange(raw: unknown, min: number, max: number, fallback: number): numb
   return typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? raw : fallback;
 }
 
+/**
+ * List-valued `model` accepts either a comma-separated string (the form the settings editor
+ * writes and the legacy single-model form) or a JSON array of strings (the natural hand-written
+ * settings.json form). Non-string array items are dropped; empty tokens never make the list
+ * (splitLanCsv in config/settings.ts precedent — never throws, never mutates input).
+ */
+function parseModelList(raw: unknown): string[] {
+  const parts =
+    typeof raw === "string"
+      ? raw.split(",")
+      : Array.isArray(raw)
+        ? raw.flatMap((item) => (typeof item === "string" ? item.split(",") : []))
+        : [];
+  const out: string[] = [];
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed !== "") out.push(trimmed);
+  }
+  return out;
+}
+
 /** Parse the optional `topicSwitch` block: field-by-field fallback to defaults, never throws. */
 export function parseTopicSwitchSettings(input: unknown): TopicSwitchSettings {
   const d = DEFAULT_TOPIC_SWITCH_SETTINGS;
@@ -54,7 +80,8 @@ export function parseTopicSwitchSettings(input: unknown): TopicSwitchSettings {
   return {
     enabled: typeof v.enabled === "boolean" ? v.enabled : d.enabled,
     costThresholdUsd: inRange(v.costThresholdUsd, Number.MIN_VALUE, 100, d.costThresholdUsd),
-    model: typeof v.model === "string" ? v.model.trim() : d.model,
+    // Fresh array on every parse (the frozen default is never handed out as a mutable alias).
+    models: v.model === undefined ? [...d.models] : parseModelList(v.model),
     judgeTimeoutMs: inRange(v.judgeTimeoutMs, 1_000, 30_000, d.judgeTimeoutMs),
     minConfidence: inRange(v.minConfidence, 0, 1, d.minConfidence),
     confirmTimeoutMs: inRange(v.confirmTimeoutMs, 5_000, 300_000, d.confirmTimeoutMs),

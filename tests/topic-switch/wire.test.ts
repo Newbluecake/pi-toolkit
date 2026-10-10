@@ -1095,3 +1095,84 @@ describe("wireTopicSwitch: transfer store cap/TTL/FIFO (I5)", () => {
     expect(notified.some((m) => m.includes("没有已知"))).toBe(true);
   });
 });
+
+describe("wireTopicSwitch: judge model chain with runtime failover", () => {
+  /** ctx whose registry has BOTH x/one and x/two; `complete` rejects (429) for the x/one model
+   *  object and answers related:false/0.95 for x/two. Returns the per-call model dispatch log. */
+  function failoverCtx(uiOver: Partial<FakeCtx["ui"]>): { ctx: FakeCtx; calls: string[] } {
+    const calls: string[] = [];
+    const ctx = makeCtx({
+      modelRegistry: {
+        find: (p: string, id: string) =>
+          p === "x" && (id === "one" || id === "two") ? { provider: p, id } : undefined,
+        complete: (...args: unknown[]) => {
+          const model = args[0] as { provider: string; id: string };
+          const key = `${model.provider}/${model.id}`;
+          calls.push(key);
+          if (key === "x/one") return Promise.reject(new Error("429 rate limited"));
+          return Promise.resolve({
+            content: [{ type: "text", text: '{"related":false,"confidence":0.95}' }],
+            errorMessage: undefined,
+          });
+        },
+      },
+      ui: { setStatus: () => {}, notify: () => {}, setEditorText: () => {}, ...uiOver },
+    });
+    return { ctx, calls };
+  }
+
+  function failoverDeps(clock: FakeClock): TopicSwitchDeps {
+    return makeDeps(
+      {
+        settings: () => ({
+          ...DEFAULT_TOPIC_SWITCH_SETTINGS,
+          models: ["x/one", "x/two"],
+          judgeTimeoutMs: 1_000,
+          confirmTimeoutMs: 1_000,
+        }),
+      },
+      clock,
+    );
+  }
+
+  it("first model 429s ⇒ second model answers ⇒ confirm dialog still reached (declined outcome)", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    wireTopicSwitch(pi as never, failoverDeps(clock));
+    const selectCalls: string[] = [];
+    const { ctx, calls } = failoverCtx({
+      select: (title: string, options: string[]) => {
+        selectCalls.push(title);
+        return Promise.resolve(options[1]); // stayLabel — declined, no hop
+      },
+    });
+    pi.ctx = ctx;
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, ctx);
+    for (let i = 0; i < 8; i += 1) await flush(); // judge attempt 1 (429) → attempt 2 (ok) → confirm
+    expect(calls).toEqual(["x/one", "x/two"]); // both models tried, in chain order
+    expect(selectCalls).toHaveLength(1); // the confirm dialog really was reached — via the SECOND model
+    clock.advance(2_000); // release barrier
+    await flush();
+    const outcomes = pi.entries.filter(
+      (e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "outcome",
+    );
+    expect(outcomes.map((e) => (e.data as { outcome?: string }).outcome)).toEqual(["declined"]);
+  });
+
+  it("status shows the configured chain, the model that answered, and per-model failure counts", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    wireTopicSwitch(pi as never, failoverDeps(clock));
+    const notified: string[] = [];
+    const { ctx } = failoverCtx({ notify: (m: string) => notified.push(m) });
+    pi.ctx = ctx;
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, ctx);
+    for (let i = 0; i < 8; i += 1) await flush(); // judge failover completes: x/one fails, x/two answers
+    clock.advance(2_000);
+    await flush();
+    await pi.commands.get("topic-switch")!.handler("", ctx as never);
+    expect(notified).toHaveLength(1);
+    expect(notified[0]).toContain("judge chain: x/one(configured) → x/two(configured) → anthropic/claude(session)");
+    expect(notified[0]).toContain("judge: answered x/two · fails x/one×1");
+  });
+});
