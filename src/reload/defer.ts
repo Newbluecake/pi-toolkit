@@ -20,9 +20,33 @@ export function shouldRewriteReload(text: string): boolean {
   return text.trim() === "/reload";
 }
 
-/** Count runs whose status is not terminal. */
-export function countActiveRuns(runs: readonly { status: string }[]): number {
-  return runs.filter((run) => !TERMINAL_RUN_STATUSES.includes(run.status)).length;
+/**
+ * Count runs whose status is not terminal.
+ *
+ * admitted-run-visibility fix (2026-10-08 incident): `admittedIds` is
+ * SpawnService's own admission-time truth (`SpawnService.runningIds()`) —
+ * every run id from the instant spawn() admits it until it settles,
+ * independent of whether a runner-produced snapshot has landed in `runs`
+ * yet (a resume can take a while to open its session file before the first
+ * one does). Union'd by runId so a run visible in both never double-counts,
+ * and a run admitted after `runs` was read (or never yet carrying a usable
+ * `runId`, defensively) still counts. Omitting the second argument keeps
+ * today's registry-only behavior byte-for-byte (existing callers/tests).
+ */
+export function countActiveRuns(
+  runs: readonly { status: string; runId?: string }[],
+  admittedIds?: readonly string[],
+): number {
+  const active = runs.filter((run) => !TERMINAL_RUN_STATUSES.includes(run.status));
+  if (admittedIds === undefined || admittedIds.length === 0) return active.length;
+  const ids = new Set<string>();
+  let unidentified = 0;
+  for (const run of active) {
+    if (run.runId !== undefined) ids.add(run.runId);
+    else unidentified++;
+  }
+  for (const id of admittedIds) ids.add(id);
+  return ids.size + unidentified;
 }
 
 export interface DeferredReloadControllerDeps {

@@ -157,6 +157,28 @@ describe("/agent reload", () => {
     expect(h.reload).toHaveBeenCalledTimes(1);
   });
 
+  // admitted-run-visibility fix (2026-10-08 incident): the registry can show ZERO
+  // runs (the only one in flight is a resume whose runner has not emitted its
+  // first snapshot yet) while SpawnService's own admission-time truth
+  // (`running` set, surfaced as `admittedRunIds`) still knows about it — the fire
+  // re-count must union the two, or `/agent reload fire` reloads a run straight
+  // out from under tracking (the actual incident this fix addresses).
+  it("fire re-checks: admitted-but-unobserved run (empty registry) → stays deferred", async () => {
+    const runs = [snapshot({ status: "running" })];
+    const h = harness(runs);
+    (h.deps as { admittedRunIds?: () => readonly string[] }).admittedRunIds = () => ["r_ADMITTED"];
+    const cmd = createStatusCommand(h.deps);
+    await cmd.handler("reload", h.ctx as never);
+    expect(h.ctl.pending).toBe(true);
+    // the tracked run settles, but the admitted-but-unobserved run is still
+    // reported as admitted (no registry snapshot for it exists yet)
+    runs.length = 0;
+    await cmd.handler("reload fire", h.ctx as never);
+    expect(h.ctl.pending).toBe(true);
+    expect(h.reload).not.toHaveBeenCalled();
+    expect(h.notified.at(-1)).toContain("stays deferred");
+  });
+
   it("controller end-to-end: arm via command, settle event fires the callback", async () => {
     const h = harness([snapshot({ status: "running" })]);
     await createStatusCommand(h.deps).handler("reload", h.ctx as never);

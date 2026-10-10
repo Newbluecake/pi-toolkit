@@ -35,6 +35,27 @@ describe("countActiveRuns", () => {
     expect(countActiveRuns([])).toBe(0);
     expect(countActiveRuns([{ status: "completed" }])).toBe(0);
   });
+
+  // admitted-run-visibility fix (2026-10-08 incident): a run that SpawnService has
+  // already admitted (its admission-time `running` set) but whose first runner
+  // snapshot has not landed in the registry yet must still be counted — otherwise
+  // the deferred-reload fire-path re-count sees zero busy runs and reloads out from
+  // under it (the exact incident).
+  it("unions registry-visible runs with admission-time ids by runId", () => {
+    const runs = [{ status: "running", runId: "r_A" }];
+    // Admitted run not yet in the registry at all ⇒ adds one.
+    expect(countActiveRuns(runs, ["r_B"])).toBe(2);
+    // Admitted run that IS already visible in the registry ⇒ no double count.
+    expect(countActiveRuns(runs, ["r_A"])).toBe(1);
+    // A run visible only via admission (registry empty) still counts — this is
+    // precisely the admitted-but-unobserved window (resume's session-open can
+    // take a while before any snapshot lands).
+    expect(countActiveRuns([], ["r_B"])).toBe(1);
+    // No admitted ids (or an empty list) degrades to the registry-only count,
+    // byte-for-byte identical to omitting the argument entirely.
+    expect(countActiveRuns(runs, [])).toBe(1);
+    expect(countActiveRuns(runs, undefined)).toBe(1);
+  });
 });
 
 describe("DeferredReloadController", () => {

@@ -37,6 +37,97 @@ function deps(runner: Runner) {
   };
 }
 describe("SpawnService", () => {
+  // admitted-run-visibility fix (2026-10-08 incident): list_subagents /
+  // get_subagent_result / @label resolution must see a run the instant
+  // spawn() admits it — not only once the runner's first real onSnapshot
+  // lands (for a resume, opening the old session file can take a while
+  // before the runtime adapter even enters RuntimeRunner.run()). Simulated
+  // here with a Runner whose run() never resolves/calls onSnapshot during
+  // the assertion window.
+  it("snapshots() shows a provisional row before the runner's first onSnapshot", async () => {
+    const runner: Runner = {
+      run: () => new Promise<RunOutcome>(() => undefined), // never settles, never calls callbacks.onSnapshot
+    };
+    const service = createSpawnService(deps(runner));
+    const started = await service.spawn({ type: "worker", prompt: "hello world", label: "builder" });
+    if ("error" in started) throw new Error(started.error.message);
+    const provisional = service.snapshots().find((s) => s.runId === started.runId);
+    expect(provisional).toBeDefined();
+    expect(provisional?.status).toBe("queued");
+    expect(provisional?.diag.label).toBe("builder");
+    expect(provisional?.diag.agentType).toBe("worker");
+    expect(provisional?.diag.taskPrompt).toBe("hello world");
+    // admission-time truth (fix 1) also reports it, independent of the
+    // registry snapshot above.
+    expect(service.runningIds()).toContain(started.runId);
+  });
+
+  // Fix 3 (admitted-run-visibility plan): abort()/teardown must not silently
+  // no-op for a run the runtime adapter has not entered RuntimeRunner.run()
+  // for yet (deps.runner.abort reports ok:false because its own activeCancels
+  // map has no entry) — SpawnService falls back to the admission-time
+  // AbortController wired into the RunnerSpec it handed the runner, so the
+  // run self-cancels the instant it actually starts.
+  it("abort() falls back to the admission-time controller when the runtime adapter does not know the run yet", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const runner: Runner = {
+      run: (spec) => {
+        capturedSignal = spec.request.signal;
+        return new Promise<RunOutcome>(() => undefined); // still deep in "session open", never settles
+      },
+      abort: async () => ({ ok: false, escalatedTo: "L4" }),
+    };
+    const service = createSpawnService(deps(runner));
+    const started = await service.spawn({ type: "worker", prompt: "hello" });
+    if ("error" in started) throw new Error(started.error.message);
+    expect(capturedSignal?.aborted).toBe(false);
+    const ok = await service.abort(started.runId, "shutdown");
+    expect(ok).toBe(true);
+    expect(capturedSignal?.aborted).toBe(true);
+    // P1-1: a second (or Nth) abort() call during the same A2 window must stay
+    // idempotently `true` — cancellation is already armed, there is nothing
+    // new to arm, but that is not a failure to report as `false`.
+    const second = await service.abort(started.runId, "shutdown");
+    expect(second).toBe(true);
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  // Fix 3, end-to-end: once the simulated runner actually reaches the point
+  // where it would construct its own cancel handle (here, after an async
+  // delay standing in for H2/resume's session-open work) it observes the
+  // signal armed above and settles as a terminal "aborted" outcome — proving
+  // teardown's abort() call genuinely produces a reachable terminal entry
+  // for a run that was admitted-but-unobserved at the moment it was called,
+  // not just an armed-but-inert signal.
+  it("an admitted-but-unobserved run armed via abort() settles with a terminal outcome once the runner starts", async () => {
+    const runner: Runner = {
+      run: async (spec) => {
+        await new Promise((resolve) => setTimeout(resolve, 10)); // stand-in for H2/resume's async session-open
+        if (spec.request.signal?.aborted) {
+          return { runId: spec.runId, status: "aborted", turns: 0, durationMs: 0, diag: { ...outcome.diag } };
+        }
+        return { ...outcome, runId: spec.runId };
+      },
+      abort: async () => ({ ok: false, escalatedTo: "L4" }),
+    };
+    const service = createSpawnService(deps(runner));
+    const started = await service.spawn({ type: "worker", prompt: "hello" });
+    if ("error" in started) throw new Error(started.error.message);
+    // teardown's shutdown call (index.ts now dispatches stack.spawn.abort(...)
+    // over every `query.list()`-visible run, which — thanks to fix 2's
+    // provisional snapshot — already includes this one)
+    const ok = await service.abort(started.runId, "shutdown");
+    expect(ok).toBe(true);
+    const result = await service.waitOutcome(started.runId, 2000);
+    expect(result.kind).toBe("settled");
+    if (result.kind === "settled") expect(result.outcome.status).toBe("aborted");
+    const finalSnapshot = service.snapshots().find((s) => s.runId === started.runId);
+    expect(finalSnapshot?.status).toBe("aborted");
+    // and it is no longer reported as admitted — fix 1's busy-count union
+    // correctly drops it once it has actually settled.
+    expect(service.runningIds()).not.toContain(started.runId);
+  });
+
   // G5a 补全（2026-10-04 事故）：resolveResume 的 records 源接持久 store——
   // 重启后进程内 records 为空，但种子恢复的 durableRecords 必须能让终态 run
   // 可解析；未注入时保持旧行为（只见进程内 records）。

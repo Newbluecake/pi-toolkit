@@ -16,11 +16,23 @@ import { createCallRegistry } from "../../src/workflow/call-registry.js";
  * `src/workflow/call-registry.ts`'s A2 bounded-retry cancel loop against the
  * *real* `SpawnService`/`RuntimeRunner` stack (not a fake `abort()` double),
  * to verify the workflow side's retry semantics genuinely line up with the
- * real service's A2 contract documented in `src/service/spawn-service.ts`
- * (`abort()`'s `!running.has(runId)` guard) and
- * `src/runtime/runner.ts` (`abortRun()`'s `activeCancels` guard, which
- * returns `{ ok: false, escalatedTo: "L4" }` for as long as an H2
- * `resolveSessionSpec` extension hook is still pending).
+ * real service's A2 contract documented in `src/service/spawn-service.ts`.
+ *
+ * admitted-run-visibility plan (fix 3, 2026-10-08 incident) updated that
+ * contract: `src/runtime/runner.ts`'s `abortRun()` (the `activeCancels`
+ * guard) still returns `{ ok: false, escalatedTo: "L4" }` for as long as an
+ * H2 `resolveSessionSpec` extension hook is pending — that low-level fact is
+ * unchanged — but `SpawnService.abort()` no longer surfaces that `false` to
+ * its caller. It falls back to the per-run `AbortController` it wired into
+ * the `RunnerSpec.signal` at admission time (`start()`), so the FIRST call
+ * during this A2 window already returns `true` and arms a sticky
+ * `AbortSignal` that `createCancelHandle` observes (via its synchronous
+ * "already aborted" check) the instant `RuntimeRunner.run()` is finally
+ * entered — settling the run as `aborted` before any session/tool work
+ * begins. `CallRegistry`'s A2 bounded-retry loop (below) therefore converges
+ * on its first attempt in the common case; it stays correct (just no longer
+ * load-bearing for THIS particular gap) for any future admission path that
+ * still reports `false`.
  *
  * Reuses the exact full-stack harness pattern `tests/service/deadline-cap.test.ts`
  * already established for CC4 (real `createSpawnService` +
@@ -115,13 +127,19 @@ function buildFullStack(clock: FakeClock, driver: SessionDriver, extensions: Sub
   return { pool, store, svc };
 }
 
-describe("A2 window alignment: workflow CallRegistry retry vs the real SpawnService/RuntimeRunner (§7.1)", () => {
-  it("real abort() returns false throughout the H2 resolveSessionSpec delay (activeCancels not yet registered), then true once RuntimeRunner.run() begins — matches §7.1's A1-A5 model exactly", async () => {
+describe("A2 window alignment: workflow CallRegistry retry vs the real SpawnService/RuntimeRunner", () => {
+  it("real abort() arms cancellation immediately during the H2 resolveSessionSpec delay via the admission-time AbortController (fix 3), and the run settles aborted once RuntimeRunner.run() actually begins", async () => {
     const clock = new FakeClock();
     let releaseH2!: () => void;
     const h2Gate = new Promise<void>((resolve) => (releaseH2 = resolve));
+    // The admission-time signal spawn-service's start() threads through
+    // RunnerSpec.request.signal — resolveSessionSpec's second parameter is
+    // exactly that SpawnRequest, so capturing req.signal here observes the
+    // same AbortSignal SpawnService.abort()'s fallback arms.
+    let capturedSignal: AbortSignal | undefined;
     const slowHook: SubagentExtensionPoints = {
-      resolveSessionSpec: async (spec) => {
+      resolveSessionSpec: async (spec, req) => {
+        capturedSignal = req.signal;
         await h2Gate; // holds the run in the real A2 window (activeCancels unregistered) indefinitely, until released
         return spec;
       },
@@ -139,23 +157,31 @@ describe("A2 window alignment: workflow CallRegistry retry vs the real SpawnServ
 
     // Real A2 window: the run is `running.has(runId) === true` (spawn()
     // already returned it), but RuntimeRunner.run() is still blocked inside
-    // the H2 hook — abort() must return false, exactly as workflow design
-    // §7.1's A2 row documents ("core abort 在此返回 ok:false（已验证）").
+    // the H2 hook, so `deps.runner.abort` itself still reports `ok:false`
+    // (activeCancels unregistered — src/runtime/runner.ts's abortRun()). Fix
+    // 3 means `SpawnService.abort()` no longer surfaces that `false`: it
+    // falls back to the admission-time AbortController wired into the
+    // RunnerSpec it handed the runner, so the call succeeds right away and
+    // the signal observed by the still-pending H2 hook is armed immediately.
     await drain(clock, 3);
-    let abortResult = await svc.abort(runId, "user_stop");
-    expect(abortResult).toBe(false);
-    await drain(clock, 3);
-    abortResult = await svc.abort(runId, "user_stop");
-    expect(abortResult).toBe(false); // still stuck — this is the window CallRegistry's retry loop exists to survive
-
-    // Release H2 — RuntimeRunner.run() proceeds past the hook and registers
-    // its cancel handle (A2 -> A3 transition). The very next abort() must
-    // now succeed, either by cancelling the run before the driver's `bind()`
-    // completes or by the run reaching a terminal state on its own.
-    releaseH2();
-    await drain(clock, 5);
-    abortResult = await svc.abort(runId, "user_stop");
+    const abortResult = await svc.abort(runId, "user_stop");
     expect(abortResult).toBe(true);
+    expect(capturedSignal?.aborted).toBe(true);
+
+    // Release H2 — RuntimeRunner.run() proceeds past the hook, constructs its
+    // cancel handle, immediately observes the already-armed (sticky) signal
+    // via createCancelHandle's synchronous "already aborted" check, and
+    // self-cancels before any session/tool work begins (the run settles
+    // "aborted" straight out of the `queue_wait` phase —
+    // core/state-machine.ts's `stop_requested` handling). This is fix 3's
+    // whole point: teardown's abort() call during the admitted-but-
+    // unobserved window must not be a silent no-op — it must produce a
+    // reachable terminal outcome.
+    releaseH2();
+    await drain(clock, 10, 1);
+    const result = await svc.waitOutcome(runId, 5_000);
+    expect(result.kind).toBe("settled");
+    if (result.kind === "settled") expect(result.outcome.status).toBe("aborted");
   });
 
   it("CallRegistry.cancel()'s bounded retry loop, wired to the real svc.abort(), converges exactly when the real A2 window closes (H2 delay < cancelRetryWindowMs)", async () => {
@@ -190,28 +216,48 @@ describe("A2 window alignment: workflow CallRegistry retry vs the real SpawnServ
     registry.bind("c1", spawned.runId);
 
     const effect = registry.cancel("c1", "user_stop");
-    expect(effect).toBe("retrying"); // CR6: honestly reports "still trying" — real abort() is genuinely false right now
+    // CR6: cancel()'s synchronous return value reflects the call's phase at
+    // the moment of the call (still pre_runner/running ⇒ "retrying") — it is
+    // decided BEFORE the async deps.abort() promise this triggers even
+    // settles, independent of how fast the underlying abort() call actually
+    // succeeds (post-fix-3, immediately).
+    expect(effect).toBe("retrying");
 
-    // While H2 is still gating the run, every retry attempt keeps failing —
-    // the loop must not give up early nor falsely report success.
+    // Fix 3 (admitted-run-visibility plan): deps.abort() now resolves `true`
+    // on its very FIRST attempt — the admission-time AbortController arms
+    // immediately even while H2 is still gating the run — so the retry loop
+    // schedules no further attempt once that `ok:true` lands (see
+    // call-registry.ts's `attempt()`: `if (ok) return;`). `cancelIntent.attempts`
+    // therefore stays at 1 through every one of these clock advances; the loop
+    // would still correctly keep retrying (never giving up early nor falsely
+    // reporting success) for any future admission path whose `abort()` is
+    // genuinely still `false` here — this scenario just is not that path
+    // anymore.
     for (let i = 0; i < 4; i += 1) {
       clock.advance(250);
       await drain(clock, 2);
     }
-    expect(registry.resolve("c1")?.phase).not.toBe("settled"); // still retrying, not force-abandoned
+    // still bound, not settled — the real settle event is a SEPARATE path (the
+    // orchestrator's own waitAll(), not wired into this unit test), decoupled
+    // from how fast the underlying abort() call itself already succeeded.
+    expect(registry.resolve("c1")?.phase).not.toBe("settled");
     expect(registry.stats.retryingCancels).toBe(1);
 
-    // Release H2 partway through the retry window — the very next scheduled
-    // attempt (still well inside cancelRetryWindowMs=30s) must succeed.
+    // Releasing H2 here is a no-op for the retry loop itself — it already
+    // converged on its first attempt above, well before H2 was ever released
+    // — kept to prove the run can still reach a real RuntimeRunner.run() entry
+    // (and settle) afterward without the retry loop re-engaging or
+    // double-counting attempts.
     releaseH2();
     await drain(clock, 3);
     clock.advance(250);
     await drain(clock, 5);
 
     expect(registry.resolve("c1")?.cancelIntent?.attempts).toBeGreaterThan(0);
-    // The loop only stops retrying once `deps.abort` reports true — confirm
-    // no further attempts increment the call's outcome after this point by
-    // advancing well past the window and observing stable state.
+    // The loop only ever schedules another attempt while `deps.abort` keeps
+    // reporting false — confirm no further attempts increment the call's
+    // outcome from here on by advancing well past the retry window and
+    // observing stable state.
     const attemptsAtSuccess = registry.resolve("c1")?.cancelIntent?.attempts;
     clock.advance(30_000);
     await drain(clock, 5);

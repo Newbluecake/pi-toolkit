@@ -88,7 +88,7 @@ import wireFeishuNotify from "./feishu-notify/index.js";
 import { wireSessionNav } from "./session-nav/index.js";
 import { wireTitle } from "./title/index.js";
 import { wireDeferredReload, type DeferredReloadDeps } from "./reload/index.js";
-import type { DeferredReloadController } from "./reload/defer.js";
+import { countActiveRuns, type DeferredReloadController } from "./reload/defer.js";
 import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
 import type { AskUserRemotePort } from "./ask-user/remote.js";
 import type { WorkflowQueryPort } from "./tools/workflow-target.js";
@@ -245,9 +245,11 @@ export default function activate(rawPi: ExtensionAPI): void {
   const releaseBackgroundStatus = publishBackgroundStatus(() => {
     const stack = holder.current;
     // Background workflows count as running subagent work (between child runs they have no live run).
+    // admitted-run-visibility fix (2026-10-08 incident): union with SpawnService's own
+    // admission-time truth (runningIds()) — a just-admitted resume has no runner snapshot
+    // yet, so the registry-only read below would otherwise miss it.
     const runningSubagents = stack
-      ? stack.query.list().filter((snapshot) => ["queued", "starting", "running", "stopping"].includes(snapshot.status))
-          .length + stack.workflow.activity.list().length
+      ? countActiveRuns(stack.query.list(), stack.spawn.runningIds()) + stack.workflow.activity.list().length
       : 0;
     return {
       runningSubagents,
@@ -631,9 +633,15 @@ export default function activate(rawPi: ExtensionAPI): void {
   // but /agent needs it now, so the command gets a facade over this ref.
   const reloadRef: { current?: DeferredReloadController } = {};
   // Background workflows count too (a workflow between child runs has no live run but is still busy).
-  const activeSubagentRunCount: DeferredReloadDeps["activeRunCount"] = () =>
-    (holder.current?.query.list().filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status))
-      .length ?? 0) + (holder.current?.workflow.activity.list().length ?? 0);
+  // admitted-run-visibility fix (2026-10-08 incident): union with SpawnService's own admission-time
+  // truth (runningIds()) — a just-admitted run has no registry snapshot yet (resume's session-open
+  // can take a while before its first one lands), so the registry-only filter below would otherwise
+  // under-count and let a reload race ahead of a run nobody can see yet.
+  const activeSubagentRunCount: DeferredReloadDeps["activeRunCount"] = () => {
+    const stack = holder.current;
+    if (!stack) return 0;
+    return countActiveRuns(stack.query.list(), stack.spawn.runningIds()) + stack.workflow.activity.list().length;
+  };
   pi.registerCommand(
     "agent",
     createStatusCommand({
@@ -649,6 +657,10 @@ export default function activate(rawPi: ExtensionAPI): void {
       mention: {
         entries: () => mentionAutocompleteEntries(holder),
       },
+      // admitted-run-visibility fix (2026-10-08 incident): same admission-time union as
+      // activeSubagentRunCount/publishBackgroundStatus above — `/agent reload fire`'s own
+      // re-count (countBusy in status.ts) must see it too.
+      admittedRunIds: () => holder.current?.spawn.runningIds() ?? [],
       // child-context-switch plan.md §3.1 (P3): read-only capability-state port for the
       // "child switch: verified | ready | disabled(<reason>)" line — process-wide, works even
       // before the first session_start (no stack needed).
@@ -815,7 +827,12 @@ export default function activate(rawPi: ExtensionAPI): void {
     const pending = stack.query
       .list()
       .filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
-    await Promise.all(pending.map((s) => stack.query.stop(s.runId, "shutdown")));
+    // admitted-run-visibility fix (2026-10-08 incident): spawn.abort() (unlike query.stop(),
+    // which calls straight into the runtime adapter's activeCancels map) also falls back to
+    // the admission-time AbortController wired into start() when the runtime adapter does not
+    // know this runId yet — the exact state a just-admitted, not-yet-entered resume is in. Gated
+    // on `running.has(runId)` (SpawnService's own admission-time truth), same as fix 1/2 above.
+    await Promise.all(pending.map((s) => stack.spawn.abort(s.runId, "shutdown")));
     await Promise.all([
       stack.query.waitAll({ runIds: pending.map((s) => s.runId), waitMs: drainMs }),
       stack.workflow.runs.drain(drainMs),
@@ -1071,6 +1088,7 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     resolveResume: (handle) => requireStack(holder).spawn.resolveResume(handle),
     setConcurrencyLimit: (n) => requireStack(holder).spawn.setConcurrencyLimit(n),
     slots: () => requireStack(holder).spawn.slots(),
+    runningIds: () => requireStack(holder).spawn.runningIds(),
   };
 }
 function forwardResolveRun(holder: { current?: Stack }) {

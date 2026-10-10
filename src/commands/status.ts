@@ -91,6 +91,16 @@ export interface StatusCommandDeps {
    * — skips the line entirely (same degrade pattern as `dynamic`/`bashJobs` above).
    */
   childSwitch?: () => { state: string; reason?: string };
+  /**
+   * admitted-run-visibility fix (2026-10-08 incident): SpawnService's own
+   * admission-time truth (`SpawnService.runningIds()`), union'd into
+   * `countBusy`'s re-count so a run admitted after the registry was last
+   * written (resume's session-open can take a while before its first
+   * snapshot lands) can never make the deferred-reload fire-path see zero
+   * busy runs and reload out from under it. Absent degrades to today's
+   * registry-only count (tests/minimal hosts).
+   */
+  admittedRunIds?: () => readonly string[];
 }
 
 /**
@@ -177,7 +187,7 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
 
 /** Active subagent runs + active workflows (a non-empty workflow activity list also counts as busy). */
 function countBusy(deps: StatusCommandDeps): number {
-  const runs = countActiveRuns(deps.query.list());
+  const runs = countActiveRuns(deps.query.list(), deps.admittedRunIds?.());
   const workflows = deps.workflow?.activity.list().length ?? 0;
   return runs + workflows;
 }

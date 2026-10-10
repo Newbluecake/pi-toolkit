@@ -5,10 +5,25 @@ import type { CallCancelEffect, CallId, CallPhase, CallState } from "./types.js"
 /**
  * M3.2 (workflow design §3.6 `CallRegistry`): the five-phase call state
  * machine for `agent()` calls, plus the A2 bounded-retry cancel loop that
- * makes cancellation honest instead of silently ineffective (the core
- * defect §3.6 documents: `SpawnService.abort(runId)` can return `false` for
- * up to `startupMs` right after `spawn()` handed back a `runId`, because
- * `RuntimeRunner` hasn't registered a cancel handle yet).
+ * makes cancellation honest instead of silently ineffective.
+ *
+ * Historical core defect (§3.6): `SpawnService.abort(runId)` could return
+ * `false` for up to `startupMs` right after `spawn()` handed back a `runId`,
+ * because `RuntimeRunner` hadn't registered a cancel handle yet
+ * (`activeCancels` empty — `src/runtime/runner.ts`'s `abortRun()`). The
+ * admitted-run-visibility plan (fix 3, 2026-10-08 incident) closed that gap
+ * at the `SpawnService.abort()` layer itself: it now falls back to a
+ * per-run `AbortController` armed at admission time, so the FIRST call
+ * during that same window already returns `true` (the run is *verifiably
+ * armed* to self-cancel the instant `RuntimeRunner.run()` is entered, even
+ * though it has not settled yet). The retry loop below is kept — it is
+ * still the correct, honest behavior for any admission path whose `abort()`
+ * genuinely keeps reporting `false` (a future regression, a different
+ * `CallRegistryDeps.abort` wiring, a host that predates fix 3) — it is just
+ * no longer load-bearing for the gap that originally motivated it. See
+ * `tests/workflow/a2-window-real-spawn-service.test.ts` for the real-stack
+ * proof of both the new `true`-on-first-call behavior and the loop's
+ * continued correctness.
  *
  * M3.2 scope note (CallPhase, §3.6): `runner_startup` and `running` are
  * collapsed (see types.ts's `CallPhase` doc) — this registry does not listen
@@ -21,7 +36,14 @@ import type { CallCancelEffect, CallId, CallPhase, CallState } from "./types.js"
 
 export interface CallRegistryDeps {
   readonly clock: Clock;
-  /** `SpawnService.abort` (or an equivalent). Returns whether cancellation is *known to have taken effect*. */
+  /**
+   * `SpawnService.abort` (or an equivalent). Returns whether cancellation is
+   * *known to have taken effect OR verifiably armed to take effect at
+   * runner entry* — fix 3's admission-time `AbortController` fallback means
+   * `true` can land before the targeted run has actually reached a terminal
+   * state; it is a guarantee that cancellation WILL be observed and honored
+   * once the run starts, not a confirmation that it already has.
+   */
   abort(runId: RunId, cause: string): Promise<boolean>;
   /** WT18: `startupMs + slack` in the real design; kept as an explicit input so tests can compress it (no orchestrator hook needed — see call-registry.test.ts). */
   cancelRetryWindowMs: Millis;
@@ -116,18 +138,25 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
   }
 
   /**
-   * CR2/§7.1 A2 fix: the `bind()`-after-cancel race (a `cancel()` landed
-   * while this call's `spawner.spawn()` was still in flight, so the
-   * `CallRegistry` state is *already* terminally "settled" as withheld by
-   * the time the real `runId` shows up). A single `abort()` attempt is not
-   * enough here — the newly-discovered child can be just as deep in the
-   * real core's A2 pre_runner window (`activeCancels` not yet registered) as
-   * an ordinarily-tracked call would be, so it needs the exact same bounded
-   * retry cadence (WT18/CR7), just detached from `calls`/`cancelIntent`
+   * CR2 (bind()-after-cancel race fix): a `cancel()` landed while this call's
+   * `spawner.spawn()` was still in flight, so the `CallRegistry` state is
+   * *already* terminally "settled" as withheld by the time the real `runId`
+   * shows up. A single `abort()` attempt is not assumed to be enough here —
+   * the newly-discovered child could in principle be just as deep in the
+   * real core's A2 pre_runner window (`activeCancels` not yet registered,
+   * `src/runtime/runner.ts`'s `abortRun()`) as an ordinarily-tracked call
+   * would be, so this keeps the exact same bounded retry cadence (WT18/CR7)
+   * as the main loop above, just detached from `calls`/`cancelIntent`
    * bookkeeping (that state is already final and must not be reopened —
-   * WR1-equivalent for calls). Bounded by the same `cancelRetryWindowMs`;
-   * best-effort, never reported back to the caller (CR7: must never block
-   * the workflow's own settlement on this).
+   * WR1-equivalent for calls). Post fix-3 (admitted-run-visibility plan,
+   * 2026-10-08 incident) `deps.abort` (`SpawnService.abort`) now resolves
+   * `true` on its very first call during that same window (the
+   * admission-time `AbortController` fallback), so in practice this
+   * converges on attempt 1 just like the main loop — the retry cadence
+   * remains the correct fallback for any admission path that still reports
+   * `false`. Bounded by the same `cancelRetryWindowMs`; best-effort, never
+   * reported back to the caller (CR7: must never block the workflow's own
+   * settlement on this).
    */
   function retryOrphanAbort(callId: CallId, runId: RunId, cause: string): void {
     const startedAt = deps.clock.now();

@@ -9,11 +9,13 @@ import { formatSlots, slotsInfo, type SlotsInfo } from "../core/format.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import { formatModelCandidates, formatUnknownModelError, type ModelCandidate } from "../config/model-hint.js";
 import type { QuotaGateVerdict } from "../quota/gate.js";
-import { CONSULT_MAIN_AGENT_TYPE } from "../core/types.js";
+import { CONSULT_MAIN_AGENT_TYPE, displayAgentType } from "../core/types.js";
+import { createInitialState, TASK_PROMPT_CAP } from "../core/state-machine.js";
 import type {
   AgentTypeConfig,
   DeadlineBudget,
   ErrorInfo,
+  RunDiagnostics,
   RunId,
   RunOutcome,
   RunSnapshot,
@@ -160,6 +162,19 @@ export interface SpawnService {
    * the atomic admission reservation this method must mirror).
    */
   slots(): SlotsInfo;
+  /**
+   * admitted-run-visibility fix (2026-10-08 incident): every run id between
+   * the instant spawn() admits it and its terminal settlement — the
+   * ADMISSION-TIME truth, independent of whether a runner-produced snapshot
+   * has landed in the registry yet (a resume opens the old session file
+   * before the runtime adapter ever enters RuntimeRunner.run(), which can
+   * take a while — see spawn-service.ts's `running` set doc). Busy-counting
+   * call sites (deferred /reload's re-count, activeSubagentRunCount, the
+   * background-status provider shared with feishu-notify/cache-adaptive)
+   * must union this with their own registry-derived count so a run admitted
+   * after the last registry snapshot can never make them under-count.
+   */
+  runningIds(): readonly RunId[];
 }
 export interface SpawnServiceDeps {
   types: AgentTypeRegistry;
@@ -239,6 +254,17 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const stopping = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
   const resumeLocks = new Set<string>();
+  // Fix 3 (admitted-run-visibility plan): a per-run AbortController wired into
+  // start()'s RunnerSpec.signal (merged with any caller-supplied req.signal via
+  // AbortSignal.any) solely so abort() has a cooperative-cancel lever that still
+  // works BEFORE the runtime adapter has entered RuntimeRunner.run() for this run
+  // (deps.runner.abort finds nothing in its own activeCancels map yet and reports
+  // ok:false — the exact admitted-but-unobserved window a resume's H2/session-open
+  // can stretch out). AbortSignal.aborted is sticky, so calling .abort() here is
+  // still observed the instant createCancelHandle finally runs its synchronous
+  // "already aborted" check — one entry per currently-admitted run, deleted in
+  // finish() (same lifecycle as `running`/`slotfulLabel`, never leaks).
+  const admissionAbort = new Map<RunId, AbortController>();
   // L1 (agent-tool pool-full plan §1): every currently ADMITTED (from the
   // instant spawn() decides to proceed, until finish()) non-slotless run,
   // keyed to its effective label. This is deliberately NOT `deps.pool.stats`
@@ -310,6 +336,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     running.delete(outcome.runId);
     stopping.delete(outcome.runId);
     claimedRunIds.delete(outcome.runId);
+    admissionAbort.delete(outcome.runId); // Fix 3: release the admission-time cancel lever once settled
     nesting.delete(outcome.runId);
     slotfulLabel.delete(outcome.runId); // L1: release the conceptual slot regardless of admission policy
     const parent = parentOf.get(outcome.runId);
@@ -373,6 +400,47 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     for (const resolve of waits.get(outcome.runId) ?? []) resolve(outcome);
     waits.delete(outcome.runId);
   };
+  /**
+   * Fix 2 (admitted-run-visibility plan): a run becomes visible to
+   * list_subagents / get_subagent_result / @label resolution the INSTANT
+   * spawn() admits it, not only once the runtime adapter's first real
+   * onSnapshot lands — for a resume that can be seconds away (the adapter
+   * opens the old session file before even entering RuntimeRunner.run()).
+   * Mirrors core/state-machine.ts's own createInitialState() shape
+   * (queued/queue_wait) plus the same write-once display metadata
+   * (label/model/agentType/taskPrompt) runtime-adapter.ts folds into
+   * diag at enqueue time, so the provisional row looks like the real thing
+   * until the real onSnapshot (same records.set(runId, …) call site, see
+   * below) overwrites it. Deliberately does NOT go through deps.onSnapshot —
+   * that closure (stack.ts) pokes the usage broadcaster / fabric tree /
+   * consult cap-watcher, side effects meant for a run the host has actually
+   * observed progress from, not a placeholder that is about to be replaced.
+   */
+  const buildProvisionalSnapshot = (
+    runId: RunId,
+    req: SpawnRequest,
+    model: { provider: string; id: string } | undefined,
+  ): RunSnapshot => {
+    const at = now();
+    const initial = createInitialState(runId, 1, at, req.parentRunId);
+    const diag: RunDiagnostics = {
+      ...initial.diag,
+      ...(model ? { model } : {}),
+      ...(req.label !== undefined ? { label: req.label } : {}),
+      agentType: displayAgentType(req.type),
+      taskPrompt: req.prompt.slice(0, TASK_PROMPT_CAP),
+    };
+    return {
+      runId: initial.runId,
+      generation: initial.generation,
+      status: initial.status,
+      phase: initial.phase,
+      deadlines: initial.deadlines,
+      diag,
+      updatedAt: at,
+      ...(initial.parentRunId === undefined ? {} : { parentRunId: initial.parentRunId }),
+    };
+  };
   const start = async (
     req: SpawnRequest,
     runId: RunId,
@@ -386,6 +454,20 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     model?: { provider: string; id: string },
   ) => {
     running.add(runId);
+    // Fix 2: write the provisional snapshot synchronously, before anything
+    // else in this function yields to the event loop (same "runs to
+    // completion before start()'s caller's `void start(...)` statement
+    // returns" discipline `running.add` above already relies on).
+    records.set(runId, buildProvisionalSnapshot(runId, req, model));
+    // Fix 3: admission-time cancel lever — see admissionAbort's own doc above.
+    const admissionController = new AbortController();
+    admissionAbort.set(runId, admissionController);
+    const signal =
+      req.signal === undefined
+        ? admissionController.signal
+        : typeof AbortSignal.any === "function"
+          ? AbortSignal.any([req.signal, admissionController.signal])
+          : req.signal; // pre-ES2024 runtime fallback: admission-time cancel degrades to a no-op, caller's own signal still works
     // D5a: capture the run's ACTUAL effective reapMs (this mergeBudget result,
     // not a constant) the moment it's known, so a later wait can use it even
     // if agent-type-level budgetOverride raised/lowered it. Capacity-bounded
@@ -399,7 +481,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         type: config,
         // Extensions (X1 worktree) key side effects off the run id; give them
         // a deterministic one instead of a label fallback.
-        request: { ...req, runId },
+        request: { ...req, runId, signal },
         ...(req.cwd ? { cwd: req.cwd } : {}),
         ...(model ? { model } : {}),
         budget,
@@ -1019,7 +1101,28 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // createCancelHandle's already-aborted guard make the second pass a
       // no-op rather than an infinite loop.
       await cascadeChildren(runId, "parent_abort");
-      if (deps.runner.abort) return (await deps.runner.abort(runId, cause)).ok;
+      const result = deps.runner.abort ? (await deps.runner.abort(runId, cause)).ok : false;
+      if (result) return true;
+      // Fix 3: the runtime adapter does not know this runId yet (still deep
+      // inside the async H2/resume session-open work that precedes
+      // RuntimeRunner.run() ever being entered — deps.runner.abort reports
+      // ok:false because its own activeCancels map has no entry). Fall back
+      // to the admission-time controller wired into start()'s RunnerSpec.signal:
+      // AbortSignal semantics are sticky, so arming it now is still observed the
+      // instant createCancelHandle finally runs (its synchronous "already
+      // aborted" check), forcing an immediate self-cancel before any session or
+      // tool work begins. Returns true whether this call actually armed it or
+      // it was already armed by an earlier call (P1-1: cancellation is armed
+      // either way, so a second/Nth abort() during the same A2 window must not
+      // regress to false just because there is nothing new left to arm) —
+      // idempotent, matching the existing "cooperative request dispatched"
+      // meaning of deps.runner.abort's own ok:true, not a confirmation of
+      // terminal settlement.
+      const controller = admissionAbort.get(runId);
+      if (controller) {
+        if (!controller.signal.aborted) controller.abort(cause);
+        return true;
+      }
       return false;
     },
     async stopChildrenOf(parentId, cause = "parent_abort") {
@@ -1067,6 +1170,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const limit = deps.pool.stats?.limit ?? 0;
       return slotsInfo(limit, slotfulLabel.size, Math.max(0, slotfulLabel.size - limit));
     },
+    runningIds: () => [...running],
     snapshots: () => [...records.values()],
   };
   return service;
