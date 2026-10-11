@@ -367,11 +367,10 @@ const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinit
 
 /**
  * SVG path data for one route, using MEASURED row centers (`centers[i]`, §4.3 — never a
- * computed row height). ≤3 segments: straight when one lane; a single mockup-style cubic
- * (vertical tangents at both dots, `k = min(Δy/2, pitch/2)`) when two lanes; start-arc +
- * straight + end-arc (`s = min(Δy/4, pitch/2)`) when child lane, run lane and parent lane
- * are three distinct columns. Degenerate inputs (missing nodes, non-finite centers, non-
- * ascending rows) yield `""` (skip) or a plain line — never a throw.
+ * computed row height). A lane change is confined to at most one row pitch next to each
+ * endpoint; the middle stays vertical in the route lane. Adjacent two-lane rows retain the
+ * compact mockup cubic. Degenerate inputs (missing nodes, non-finite centers, non-ascending
+ * rows) yield `""` (skip) or a plain line — never a throw.
  */
 export function pathD(
   route: GraphRoute,
@@ -390,19 +389,61 @@ export function pathD(
   const xb = laneX(b.lane);
   if (!fin(xa) || !fin(xm) || !fin(xb)) return "";
   const dy = y2 - y1;
-  const k = fin(pitch) && pitch > 0 ? pitch / 2 : 0;
   if (dy <= 0) return `M ${fmt(xa)} ${fmt(y1)} L ${fmt(xb)} ${fmt(y2)}`;
   if (xa === xm && xm === xb) return `M ${fmt(xa)} ${fmt(y1)} L ${fmt(xb)} ${fmt(y2)}`;
-  if (xa === xb || xa === xm || xm === xb) {
-    const c = Math.min(dy / 2, k);
-    return `M ${fmt(xa)} ${fmt(y1)} C ${fmt(xa)} ${fmt(y1 + c)}, ${fmt(xb)} ${fmt(y2 - c)}, ${fmt(xb)} ${fmt(y2)}`;
+
+  const validPitch = fin(pitch) && pitch > 0;
+  const h = validPitch ? Math.min(dy / 2, pitch) : dy / 2;
+  const distinctLanes = new Set([xa, xm, xb]).size;
+  if (distinctLanes === 2 && validPitch && dy <= pitch) {
+    return `M ${fmt(xa)} ${fmt(y1)} C ${fmt(xa)} ${fmt(y1 + h)}, ${fmt(xb)} ${fmt(y2 - h)}, ${fmt(xb)} ${fmt(y2)}`;
   }
-  const s = Math.min(dy / 4, k);
-  return (
-    `M ${fmt(xa)} ${fmt(y1)} C ${fmt(xa)} ${fmt(y1 + s)}, ${fmt(xm)} ${fmt(y1 + s)}, ${fmt(xm)} ${fmt(y1 + 2 * s)}` +
-    ` L ${fmt(xm)} ${fmt(y2 - 2 * s)}` +
-    ` C ${fmt(xm)} ${fmt(y2 - s)}, ${fmt(xb)} ${fmt(y2 - s)}, ${fmt(xb)} ${fmt(y2)}`
-  );
+
+  const start = xa !== xm;
+  const end = xm !== xb;
+  let d = `M ${fmt(xa)} ${fmt(y1)}`;
+  if (start) {
+    d += ` C ${fmt(xa)} ${fmt(y1 + h / 2)}, ${fmt(xm)} ${fmt(y1 + h / 2)}, ${fmt(xm)} ${fmt(y1 + h)}`;
+  }
+  const endY = end ? y2 - h : y2;
+  d += ` L ${fmt(xm)} ${fmt(endY)}`;
+  if (end) {
+    d += ` C ${fmt(xm)} ${fmt(y2 - h / 2)}, ${fmt(xb)} ${fmt(y2 - h / 2)}, ${fmt(xb)} ${fmt(y2)}`;
+  }
+  return d;
+}
+
+/**
+ * Maximum SVG x-coordinate occupied by graph ink on each row. Folded nodes and marks use
+ * `foldX`; visible topology uses the caller's lane mapper. The result is total so an invalid
+ * row count or malformed layout simply yields zero extents for rows without usable geometry.
+ */
+export function rowLaneExtent(fold: FoldLayout, rowCount: number, laneX: LaneXFn, foldX: number): number[] {
+  const count = Number.isSafeInteger(rowCount) && rowCount > 0 ? rowCount : 0;
+  const extents = Array.from({ length: count }, () => Number.NEGATIVE_INFINITY);
+  const add = (row: number, x: number): void => {
+    if (!Number.isSafeInteger(row) || row < 0 || row >= count || !fin(x)) return;
+    extents[row] = Math.max(extents[row]!, x);
+  };
+  const nodeX = (row: number): number => {
+    const node = fold.nodes[row];
+    if (node === undefined) return Number.NaN;
+    return node.folded ? foldX : laneX(node.lane);
+  };
+
+  for (let row = 0; row < count; row++) add(row, nodeX(row));
+  for (const route of fold.routes) {
+    if (!Number.isSafeInteger(route.from) || !Number.isSafeInteger(route.to)) continue;
+    const start = Math.max(0, route.from);
+    const end = Math.min(count - 1, route.to);
+    for (let row = start; row <= end; row++) add(row, laneX(route.lane));
+    add(route.from, nodeX(route.from));
+    add(route.to, nodeX(route.to));
+  }
+  for (const stub of fold.stubs) add(stub.from, laneX(stub.lane));
+  for (const stub of fold.foldStubs) add(stub.from, laneX(stub.lane));
+  for (const row of fold.foldMarkRows) add(row, foldX);
+  return extents.map((x) => (fin(x) ? x : 0));
 }
 
 /** SVG path data for one stub: a short vertical line fading below the row (dashes are CSS).

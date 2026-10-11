@@ -41,6 +41,7 @@ import {
   layoutGraph,
   pathD,
   refChipsOf,
+  rowLaneExtent,
   stubPathD,
   wtRingsOf,
   type FoldLayout,
@@ -756,18 +757,36 @@ describe("logic/gitGraph pathD / stubPathD", () => {
     expect(pathD(route, nodes, [10, 30, 50], laneX, 22)).toBe("M 8 10 L 8 50");
   });
 
-  it("two lanes ⇒ single mockup cubic with vertical tangents (k = min(Δy/2, pitch/2))", () => {
+  it("adjacent two-lane rows retain one smooth cubic", () => {
+    const nodes: GraphNode[] = [
+      { lane: 1, color: 0 },
+      { lane: 0, color: 0 },
+    ];
+    const route: GraphRoute = { from: 0, to: 1, lane: 1, color: 0 };
+    expect(pathD(route, nodes, [10, 32], laneX, 22)).toBe("M 22 10 C 22 21, 8 21, 8 32");
+  });
+
+  it("multi-row two-lane child-on-run route changes near the parent", () => {
     const nodes: GraphNode[] = [
       { lane: 1, color: 0 },
       { lane: 0, color: 0 },
       { lane: 0, color: 0 },
     ];
     const route: GraphRoute = { from: 0, to: 2, lane: 1, color: 0 };
-    // Δy = 40, k = min(20, 11) = 11
-    expect(pathD(route, nodes, [10, 30, 50], laneX, 22)).toBe("M 22 10 C 22 21, 8 39, 8 50");
+    expect(pathD(route, nodes, [10, 30, 50], laneX, 22)).toBe("M 22 10 L 22 30 C 22 40, 8 40, 8 50");
   });
 
-  it("three lanes ⇒ start-arc + straight + end-arc (≤3 segments)", () => {
+  it("multi-row two-lane run-lane-equals-parent route changes near the child", () => {
+    const nodes: GraphNode[] = [
+      { lane: 1, color: 0 },
+      { lane: 0, color: 0 },
+      { lane: 0, color: 0 },
+    ];
+    const route: GraphRoute = { from: 0, to: 2, lane: 0, color: 0 };
+    expect(pathD(route, nodes, [10, 30, 50], laneX, 22)).toBe("M 22 10 C 22 20, 8 20, 8 30 L 8 50");
+  });
+
+  it("three lanes use one-pitch S-curves at both endpoints", () => {
     const nodes: GraphNode[] = [
       { lane: 0, color: 0 },
       { lane: 0, color: 0 },
@@ -775,10 +794,36 @@ describe("logic/gitGraph pathD / stubPathD", () => {
       { lane: 1, color: 0 },
     ];
     const route: GraphRoute = { from: 0, to: 3, lane: 2, color: 0 };
-    // Δy = 66, s = min(66/4, 11) = 11; xa=8 xm=36 xb=22
     expect(pathD(route, nodes, [0, 22, 44, 66], laneX, 22)).toBe(
       "M 8 0 C 8 11, 36 11, 36 22 L 36 44 C 36 55, 22 55, 22 66",
     );
+  });
+
+  it("invalid pitch falls back to half the route height", () => {
+    const nodes: GraphNode[] = [
+      { lane: 0, color: 0 },
+      { lane: 1, color: 0 },
+    ];
+    expect(pathD({ from: 0, to: 1, lane: 0, color: 0 }, nodes, [0, 40], laneX, 0)).toBe(
+      "M 8 0 L 8 20 C 8 30, 22 30, 22 40",
+    );
+  });
+
+  it("rowLaneExtent follows visible ink, fold marks, and folded nodes", () => {
+    const fold: FoldLayout = {
+      nodes: [
+        { lane: 0, color: 0, folded: false },
+        { lane: 3, color: 1, folded: true },
+        { lane: 1, color: 2, folded: false },
+      ],
+      routes: [{ from: 0, to: 2, lane: 1, color: 0 }],
+      stubs: [{ from: 2, lane: 1, color: 0 }],
+      foldStubs: [{ from: 1, lane: 0, color: 1, at: "depart" }],
+      foldMarkRows: [1],
+      folded: true,
+    };
+    expect(rowLaneExtent(fold, 3, laneX, 64)).toEqual([22, 64, 22]);
+    expect(rowLaneExtent(fold, 0, laneX, 64)).toEqual([]);
   });
 
   it("degenerate inputs degrade (never throw): missing nodes/NaN centers/non-ascending rows", () => {

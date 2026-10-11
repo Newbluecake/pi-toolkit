@@ -8,7 +8,8 @@
   - `aria-hidden="true"`: the topology essentials (merge / folded lane / out-of-set parent)
     are carried by the row's sr-only text in `WorktreeGraph.vue` (#14) — the SVG is decoration.
   - The SVG is absolutely positioned over the table's row range (`height` = last center +
-    half pitch + pad); the lanes column width rides `--gg-w` so the parent can size the cell.
+    half pitch + pad); its global width rides the parent's `--gg-w` token while the table lane
+    column remains zero-width.
   - Fold region (#6): a route touching any hidden lane renders NO connected path — its visible
     ends get short arrow stubs (`foldStubs`) and the fold column draws hollow diamonds on
     folded nodes plus the vertical `⋮` marks (`foldMarkRows`). NEVER a connected vertical line.
@@ -31,6 +32,8 @@ const props = defineProps<{
   readonly pitch: number;
   /** Fold column x (px) — folded diamonds + ⋮ marks draw here. */
   readonly foldX: number;
+  /** Commit dot radius, scaled with measured row pitch. */
+  readonly dotRadius: number;
   /** SVG width (px) — the parent's lane-span width (the `--gg-w` source). */
   readonly width: number;
   /** SVG height (px) — the parent's `lastCenter + halfPitch + pad`. */
@@ -119,7 +122,7 @@ const foldMarks = computed(() =>
         :class="{ 'is-merge': merges[d.i] === true }"
         :cx="laneX(d.lane)"
         :cy="d.y"
-        r="3.5"
+        :r="dotRadius"
         :style="{ color: `var(--gg-lane-${d.color % 8})` }"
       />
       <!-- folded node (#6): hollow diamond in the fold column, never in its hidden lane -->

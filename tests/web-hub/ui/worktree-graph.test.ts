@@ -40,8 +40,9 @@ describe("graph layout regressions", () => {
     expect(rule(".gg-svg")).toContain("top: 0");
     expect(rule(".gg-svg")).toContain("left: 0");
     expect(rule(".gg-lanes")).toContain("position: relative");
+    expect(rule(".gg-lanes")).toContain("overflow: visible");
     expect(rule(".gg-lanes")).toContain("background: transparent");
-    expect(rule(".gg-col-lanes")).toContain("width: var(--gg-w");
+    expect(rule(".gg-col-lanes")).toContain("width: 0");
     expect(css).toContain('tr[data-current="true"] > .gg-cell');
   });
   it("repeated measure cycles converge without changing centers or SVG height", async () => {
@@ -388,9 +389,14 @@ describe("WorktreeGraph.vue — geometry + columns (#8, Q3)", () => {
     dots.forEach((dot, i) => {
       expect(Number(dot.attributes("cy"))).toBe(centers[i]);
     });
-    // the lane column width token rides the viewport (the cell reads var(--gg-w))
+    // the SVG keeps its measured global width, while the table lane column is zero-width and
+    // each subject cell gets a row-specific indentation beside the outermost visible lane.
     const viewport = w.find(".gg-viewport");
     expect(viewport.attributes("style")).toContain("--gg-w");
+    expect(w.find(".gg-lanes").attributes("style")).toBeUndefined();
+    const subjectStyles = w.findAll("td.gg-subject").map((cell) => cell.attributes("style"));
+    expect(subjectStyles.every((style) => style?.includes("padding-left") === true)).toBe(true);
+    expect(new Set(subjectStyles).size).toBeGreaterThan(1); // row 0 carries the second route lane
   });
 
   it("≤480px (mobile): date/author columns absent, only the HEAD chip survives (Q3)", async () => {

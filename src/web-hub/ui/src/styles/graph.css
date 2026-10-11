@@ -62,16 +62,19 @@
   vertical-align: middle;
 }
 
-/* lane column: sized by --gg-w (the component's measured lane-span width) */
+/* The zero-width lane column lets the absolute SVG paint beside each row's subject text. */
 .gg-lanes {
-  width: var(--gg-w, 64px);
+  width: 0;
+  min-width: 0;
   padding: 0;
   position: relative;
+  overflow: visible;
   background: transparent;
 }
 
 .gg-col-lanes {
-  width: var(--gg-w, 64px);
+  width: 0;
+  min-width: 0;
 }
 /* date: the longest formatted value is 17 chars (en "23 Sep 2026 09:55"; zh is 16) plus the
    cell's 2×4px padding — 12ch truncated it to "2026-10-10 23:…" (2026-10-10 field report) */

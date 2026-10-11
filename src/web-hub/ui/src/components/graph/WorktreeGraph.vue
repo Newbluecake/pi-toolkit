@@ -38,6 +38,7 @@ import {
   GRAPH_LANE_LIMIT_MOBILE,
   layoutGraph,
   refChipsOf,
+  rowLaneExtent,
   wtRingsOf,
   type RefChip,
   type WtRing,
@@ -250,6 +251,7 @@ const pitch = computed(() => {
 
 /** §4.3: lane spacing = `round(pitch × 14/22)`; the dot radius scales the same way (below). */
 const laneGap = computed(() => Math.round((pitch.value * 14) / 22));
+const dotRadius = computed(() => (3.5 * pitch.value) / 22);
 
 const usedLanes = computed(() => {
   if (layout.value === null) return 0;
@@ -269,9 +271,15 @@ const svgH = computed(() => {
 const laneX = (lane: number): number =>
   fold.value !== null && lane >= laneLimit.value ? foldX.value : 8 + lane * laneGap.value;
 
-/** The lane cell's width token — one `--gg-w` custom property via `:style` object binding
+/** The SVG's global width token — one `--gg-w` custom property via `:style` object binding
  *  (QuotaCard.vue precedent; static `style=` attributes are banned, bindings are not). */
 const laneStyle = computed(() => ({ "--gg-w": `${svgW.value}px` }));
+const rowExtents = computed(() =>
+  fold.value === null ? [] : rowLaneExtent(fold.value, commits.value.length, laneX, foldX.value),
+);
+const subjectStyle = (row: number): Record<string, string> => ({
+  paddingLeft: `${(rowExtents.value[row] ?? 0) + dotRadius.value + 10}px`,
+});
 
 /** A commit's out-of-set parents (root or beyond-N) — the row's stub rows in the raw layout. */
 const stubRows = computed(() => {
@@ -359,11 +367,12 @@ onBeforeUnmount(() => {
                     :lane-x="laneX"
                     :pitch="pitch"
                     :fold-x="foldX"
+                    :dot-radius="dotRadius"
                     :width="svgW"
                     :height="svgH"
                   />
                 </td>
-                <td class="gg-cell gg-subject" :title="c.s">
+                <td class="gg-cell gg-subject" :title="c.s" :style="subjectStyle(i)">
                   <span class="gg-refs">
                     <span
                       v-for="chip in chipsOf(c.h)"
