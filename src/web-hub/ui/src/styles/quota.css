@@ -123,6 +123,28 @@
   min-width: 0;
 }
 
+/* ≤480px (phone, user-approved plan B): the pill now shows a single compact "{pct}%" chip
+ * (`.q-seg-compact`, QuotaPill.vue's `compactText`) instead of every group's full text — that
+ * content is already tiny, so this is the width the b4c8dc4 shrink rule above was actually
+ * guarding against overflowing (three alerting groups with reset annexes). On a phone-narrow
+ * bar that same shrink rule let a single-group pill collapse all the way down to an unreadable
+ * sliver (2026-10 field report, red half-circle). Pin BOTH the anchor and the pill to their own
+ * content width at this breakpoint — there is no longer anything here that needs to shrink.
+ * `min-height: 44px` folds the ≥44px coarse touch target requirement into the SAME query
+ * (CSS budget — a separate `@media (pointer: coarse)` block costs more gzip than it's worth
+ * here): on phone width this pill is a tap target first and foremost, so always giving it room
+ * is a fine trade even on the rare narrow-but-mouse-driven desktop window. */
+@media (max-width: 480px) {
+  .q-anchor,
+  .q-pill {
+    flex: 0 0 auto;
+  }
+
+  .q-pill {
+    min-height: 44px;
+  }
+}
+
 /* ---------------------------------------------------------------- popover card */
 
 .q-card {

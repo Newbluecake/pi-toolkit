@@ -219,7 +219,7 @@ describe("QuotaPill.vue — rendering and the four-level color ladder", () => {
 
   it("mobile (≤767px): exhausted compact form is `⚠ Label {clock}` (no scope, no reset prose)", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
-      matches: true,
+      matches: query === "(max-width: 767px)",
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},
@@ -235,6 +235,87 @@ describe("QuotaPill.vue — rendering and the four-level color ladder", () => {
       addEventListener: () => {},
       removeEventListener: () => {},
     }));
+  });
+});
+
+// Phone compact chip (≤480px, user-approved plan B): the pill collapses to a single `{pct}%`
+// number — the worst (provider, window) pair across the WHOLE snapshot (`@logic/quota.js`'s
+// `pillView`, the SAME selector QuotaCard's own headline already uses — not a new metric).
+describe("QuotaPill.vue — phone compact chip (≤480px)", () => {
+  function stubPhone(phone: boolean): void {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(max-width: 480px)" ? phone : false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  }
+
+  afterEach(() => {
+    stubPhone(false);
+  });
+
+  it("single provider: shows only its percentage, no provider label/scope text", () => {
+    stubPhone(true);
+    const q = quota([
+      { id: "zai-coding-cn", level: 0, stale: false, windows: [{ scope: "5h", usedPct: 62, level: 0 }] },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.get(".q-pill-text").text()).toBe("62%");
+    expect(wrapper.get(".q-pill-text").text()).not.toContain("GLM");
+  });
+
+  it("multiple groups: shows the SINGLE most-constrained percentage across the whole snapshot", () => {
+    stubPhone(true);
+    const q = quota([
+      { id: "zai-coding-cn", level: 1, stale: false, windows: [{ scope: "5h", usedPct: 55, level: 1 }] },
+      { id: "kimi-coding", level: 2, stale: false, windows: [{ scope: "week", usedPct: 88, level: 2 }] },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    // worst = kimi-coding's week window (level 2 > level 1) — 88%, not 55%.
+    expect(wrapper.get(".q-pill-text").text()).toBe("88%");
+  });
+
+  it("the compact segment carries the worst group's own severity level as data-level", () => {
+    stubPhone(true);
+    const q = quota([
+      { id: "kimi-coding", level: 3, stale: false, windows: [{ scope: "week", usedPct: 99, level: 3 }] },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.get(".q-seg-compact").attributes("data-level")).toBe("3");
+    expect(wrapper.get(".q-pill-text").text()).toBe("99%");
+  });
+
+  it("aria-label/title stay the FULL per-group sentence even though the visible text shrinks", () => {
+    stubPhone(true);
+    const q = quota([
+      { id: "zai-coding-cn", level: 0, stale: false, windows: [{ scope: "5h", usedPct: 62, level: 0 }] },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    const pill = wrapper.get(".q-pill");
+    expect(pill.attributes("aria-label")).toContain("GLM");
+    expect(pill.attributes("title")).toBe(pill.attributes("aria-label"));
+  });
+
+  it("tapping the compact chip still opens QuotaCard", async () => {
+    stubPhone(true);
+    const q = quota([
+      { id: "zai-coding-cn", level: 0, stale: false, windows: [{ scope: "5h", usedPct: 62, level: 0 }] },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.find("#quota-panel").exists()).toBe(false);
+    await wrapper.get(".q-pill").trigger("click");
+    expect(wrapper.find("#quota-panel").exists()).toBe(true);
+  });
+
+  it("desktop/tablet (phone=false) keeps the full per-group text, not the compact chip", () => {
+    stubPhone(false);
+    const q = quota([
+      { id: "zai-coding-cn", level: 0, stale: false, windows: [{ scope: "5h", usedPct: 62, level: 0 }] },
+    ]);
+    const wrapper = m(mount(QuotaPill, { props: { quota: q } }));
+    expect(wrapper.find(".q-seg-compact").exists()).toBe(false);
+    expect(wrapper.get(".q-pill-text").text()).toBe("GLM 5h 62%");
   });
 });
 
@@ -352,7 +433,7 @@ describe("QuotaPill.vue — multi-group rendering (2026-10-08 rulings: available
 
   it("mobile (≤767px): available compact form is `Label p5/p7` — `GLM 17%/43% · Kimi 20%/30%`", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
-      matches: true,
+      matches: query === "(max-width: 767px)",
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},
@@ -456,7 +537,7 @@ describe("QuotaPill.vue — multi-group rendering (2026-10-08 rulings: available
 
   it("mobile all-exhausted: `⚠ Label {clock}` only — `⚠ GLM 10/14 15:48 · ⚠ Kimi 10/12 09:06`", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
-      matches: true,
+      matches: query === "(max-width: 767px)",
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},

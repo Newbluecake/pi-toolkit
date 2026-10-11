@@ -81,6 +81,23 @@
   display: inline-flex;
 }
 
+/* ≤480px (phone, user-approved plan B): the pill already shows only its single worst segment
+ * here (LoadPill.vue's `shownSegs`) — that content is tiny, so pin BOTH the anchor and the pill
+ * to their own content width instead of letting the ambient `.topbar` flex layout shrink them
+ * (the field report's two-line "CPU" / "6%" wrap came from exactly that shrink, combined with
+ * `.ld-seg` wrapping — hence the phone-only nowrap below). */
+@media (max-width: 480px) {
+  .ld-anchor,
+  .ld-pill {
+    flex: 0 0 auto;
+  }
+  /* phone field report: a shrunk pill wrapped "CPU" / "6%" onto two lines — phone-only so the
+     481px+ cascade stays exactly as before */
+  .ld-seg {
+    white-space: nowrap;
+  }
+}
+
 /* ---------------------------------------------------------------- LoadCard popover */
 .ld-card {
   position: absolute;

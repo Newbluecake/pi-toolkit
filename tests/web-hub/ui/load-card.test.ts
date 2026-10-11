@@ -12,11 +12,14 @@ import { ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import LoadCard from "../../../src/web-hub/ui/src/components/load/LoadCard.vue";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import type { HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
 import type { LoadWire } from "../../../src/web-hub/protocol/messages.js";
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
+  resetLangForTests();
+  localStorage.clear();
   for (const w of mounted.splice(0)) w.unmount();
 });
 function m<T>(wrapper: T): T {
@@ -104,6 +107,15 @@ describe("LoadCard.vue — sections off the frozen LoadWire shape", () => {
     expect(foot.length).toBeGreaterThan(0);
     expect(wrapper.text()).not.toContain("派发已暂停");
     expect(wrapper.text().toLowerCase()).not.toContain("dispatch paused");
+  });
+
+  // User report: the old footer copy ("阈值取自 hub 启动配置" / "Thresholds from the hub's startup
+  // config") was too cryptic — it never said WHAT the thresholds are for or how to change them.
+  it("the footer explains what the thresholds are for and how to change them", () => {
+    const wrapper = mountCard(load());
+    const foot = wrapper.get(".ld-foot").text();
+    expect(foot).toContain("load.*");
+    expect(foot.toLowerCase()).toContain("/webhub restart");
   });
 });
 
@@ -227,5 +239,74 @@ describe("LoadCard.vue — top processes (fetchLoadTop single-flight + three sta
     expect(fetchLoadTop).toHaveBeenCalledTimes(1); // the mount-time fire
     await wrapper.get(".ld-top-retry").trigger("click");
     expect(fetchLoadTop).toHaveBeenCalledTimes(2);
+  });
+
+  // Bug fix (user report): the "unavailable" note's `v-else-if` used to fire alongside the
+  // loading note too (`!topError` is true while loading AND no data exist yet), so a card that
+  // was simply still waiting on its first `GET /api/load/top` round-trip showed BOTH
+  // "正在加载 top 进程…" and "top 快照不可用" at once. `topUnavailable` must only ever render once
+  // loading has actually settled with nothing to show.
+  it("loading-only: shows the loading copy and NEVER the unavailable copy at the same time", () => {
+    const wrapper = mountCard(load(), hubWithLoadTop({ loading: true }));
+    expect(wrapper.text()).toContain("Loading top processes");
+    expect(wrapper.text()).not.toContain("Top-process snapshot unavailable");
+  });
+
+  it("data: shows neither the loading nor the unavailable copy", () => {
+    const data = { at: 1, byCpu: [{ comm: "node", count: 1, cpuPct: 10, rssBytes: 1, pids: [] }], byRss: [] };
+    const wrapper = mountCard(load(), hubWithLoadTop({ loading: false, data } as HubState["loadTop"]));
+    expect(wrapper.text()).not.toContain("Loading top processes");
+    expect(wrapper.text()).not.toContain("Top-process snapshot unavailable");
+  });
+
+  it("error (no prior data): shows the unavailable copy, never the loading copy", () => {
+    const wrapper = mountCard(load(), hubWithLoadTop({ loading: false, error: "E_NETWORK" } as HubState["loadTop"]));
+    expect(wrapper.text()).toContain("Top-process snapshot unavailable");
+    expect(wrapper.text()).not.toContain("Loading top processes");
+  });
+
+  it("empty (not loading, no data, no error): shows ONLY the unavailable copy", () => {
+    const wrapper = mountCard(load(), hubWithLoadTop({ loading: false } as HubState["loadTop"]));
+    expect(wrapper.text()).toContain("Top-process snapshot unavailable");
+    expect(wrapper.text()).not.toContain("Loading top processes");
+  });
+});
+
+describe("LoadCard.vue — zh labels (2026-10 user ruling)", () => {
+  it('sectionLoadavg: "Loadavg" → "平均负载"', () => {
+    setLangOverride("zh");
+    const wrapper = mountCard(load({ loadavg: [1.2, 1.1, 0.9] }));
+    expect(wrapper.text()).toContain("平均负载");
+    expect(wrapper.text()).not.toContain("Loadavg");
+  });
+
+  it('memUsed: "MEM used" → "内存占用"', () => {
+    setLangOverride("zh");
+    const wrapper = mountCard(load({ mem: { usedPct: 81, availPct: 19, level: "ok" } }));
+    expect(wrapper.text()).toContain("内存占用");
+    expect(wrapper.text()).not.toContain("MEM used");
+  });
+
+  it('cpuBusy: "CPU busy" → "CPU 占用" (PSI labels and "CPU & PSI" stay as-is)', () => {
+    setLangOverride("zh");
+    const wrapper = mountCard(load({ cpu: { busyPct: 72, psiPct: 10, level: "ok", cores: 8 }, io: { psiPct: 5 } }));
+    expect(wrapper.text()).toContain("CPU 占用");
+    expect(wrapper.text()).not.toContain("CPU busy");
+    expect(wrapper.text()).toContain("CPU & PSI");
+    expect(wrapper.text()).toContain("PSI cpu");
+    expect(wrapper.text()).toContain("PSI io");
+  });
+
+  it("en stays unchanged (sectionLoadavg/memUsed/cpuBusy keep their English copy)", () => {
+    const wrapper = mountCard(
+      load({
+        loadavg: [1.2, 1.1, 0.9],
+        mem: { usedPct: 81, availPct: 19, level: "ok" },
+        cpu: { busyPct: 72, level: "ok", cores: 8 },
+      }),
+    );
+    expect(wrapper.text()).toContain("Loadavg");
+    expect(wrapper.text()).toContain("MEM used");
+    expect(wrapper.text()).toContain("CPU busy");
   });
 });

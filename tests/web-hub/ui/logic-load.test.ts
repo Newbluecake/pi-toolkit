@@ -184,6 +184,17 @@ describe("pillView — §7.4/视觉稿 topbar segments", () => {
   it("no metrics at all ⇒ null", () => {
     expect(pillView(wire(), 1_000, 1_000)).toBeNull();
   });
+  it("an explicit `labels` param overrides the segment prefix (zh i18n ruling); defaults stay CPU/MEM/DISK", () => {
+    const l = wire({
+      cpu: { busyPct: 3, level: "ok", cores: 8 },
+      mem: { usedPct: 10, availPct: 90, level: "ok" },
+      disks: [{ label: "/", path: "/", usedPct: 71, freeBytes: 1, totalBytes: 2, level: "ok" }],
+    });
+    const zh = pillView(l, 1_000, 1_000, { cpu: "CPU", mem: "内存", disk: "磁盘" })!;
+    expect(zh.segs.map((s) => s.text)).toEqual(["CPU 3%", "内存 10%", "磁盘 71%"]);
+    const defaulted = pillView(l, 1_000, 1_000)!;
+    expect(defaulted.segs.map((s) => s.text)).toEqual(["CPU 3%", "MEM 10%", "DISK 71%"]);
+  });
 });
 
 describe("bannerView — FleetDrawer crit/warn banner, tweak ③ single-line duration", () => {

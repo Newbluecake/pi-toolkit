@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import LoadPill from "../../../src/web-hub/ui/src/components/load/LoadPill.vue";
 import TopBar from "../../../src/web-hub/ui/src/components/shell/TopBar.vue";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import type { HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
 import type { LoadWire } from "../../../src/web-hub/protocol/messages.js";
 
@@ -23,6 +24,8 @@ vi.stubGlobal("matchMedia", (query: string) => ({
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   vi.useRealTimers();
+  resetLangForTests();
+  localStorage.clear();
   for (const w of mounted.splice(0)) w.unmount();
 });
 function m<T>(wrapper: T): T {
@@ -165,5 +168,75 @@ describe("LoadPill.vue — mobile (≤480px) shows only the worst segment", () =
     const segs = wrapper.findAll(".ld-seg");
     expect(segs).toHaveLength(1);
     expect(segs[0]!.text()).toContain("MEM 94%");
+    // Reset — otherwise this stub leaks into later tests/describe blocks in the file (there is
+    // no global afterEach unstub here).
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  });
+});
+
+describe("LoadPill.vue — zh/en segment labels (2026-10 user ruling)", () => {
+  function stubDesktop(): void {
+    // Belt-and-braces: an earlier describe block's ≤480px test stubs `matchMedia` without
+    // resetting it afterward, so explicitly pin a non-mobile viewport here rather than rely on
+    // whatever the previous test left behind.
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  }
+
+  function fullLoad(): LoadWire {
+    return load({
+      cpu: { busyPct: 3, level: "ok", cores: 8 },
+      mem: { usedPct: 10, availPct: 90, level: "ok" },
+      disks: [{ label: "/", path: "/", usedPct: 71, freeBytes: 1, totalBytes: 2, level: "ok" }],
+    });
+  }
+
+  it('en: "CPU 3% · MEM 10% · DISK 71%"', () => {
+    stubDesktop();
+    const wrapper = m(mount(LoadPill, { props: { load: fullLoad(), receivedAt: Date.now() } }));
+    const text = wrapper.get(".ld-pill").text().replace(/\s+/g, " ");
+    expect(text).toContain("CPU 3%");
+    expect(text).toContain("MEM 10%");
+    expect(text).toContain("DISK 71%");
+  });
+
+  it('zh: "CPU 3% · 内存 10% · 磁盘 71%" (CPU stays "CPU")', () => {
+    stubDesktop();
+    setLangOverride("zh");
+    const wrapper = m(mount(LoadPill, { props: { load: fullLoad(), receivedAt: Date.now() } }));
+    const text = wrapper.get(".ld-pill").text().replace(/\s+/g, " ");
+    expect(text).toContain("CPU 3%");
+    expect(text).toContain("内存 10%");
+    expect(text).toContain("磁盘 71%");
+    expect(text).not.toContain("MEM");
+    expect(text).not.toContain("DISK");
+  });
+
+  it('the ≤480px compact chip ("CPU N%") is unaffected when CPU is the worst segment, in either language', () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("480px"),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    setLangOverride("zh");
+    const l = load({
+      level: "crit",
+      cpu: { busyPct: 6, level: "crit", cores: 8 },
+      mem: { usedPct: 10, availPct: 90, level: "ok" },
+    });
+    const wrapper = m(mount(LoadPill, { props: { load: l, receivedAt: Date.now() } }));
+    const segs = wrapper.findAll(".ld-seg");
+    expect(segs).toHaveLength(1);
+    expect(segs[0]!.text()).toBe("CPU 6%");
   });
 });

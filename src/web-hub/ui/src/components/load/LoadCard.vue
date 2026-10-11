@@ -263,7 +263,7 @@ const byRssRows = computed(() => rows(topData.value?.byRss, "rss"));
           </div>
         </div>
       </div>
-      <p v-else-if="!topError" class="ld-top-note">{{ t("load.topUnavailable") }}</p>
+      <p v-else-if="!topError && !topLoading" class="ld-top-note">{{ t("load.topUnavailable") }}</p>
     </div>
 
     <div class="ld-foot">{{ t("load.footerThresholds") }}</div>

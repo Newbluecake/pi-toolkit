@@ -22,6 +22,26 @@
   persistent `ControlNotice` (shared `CONTROL_ENV.noticeExpanded`; App.vue owns the mounted
   notice, §7.4). Both chips keep the base `.chip` class (shell.css's <481px hiding rule applies
   to either).
+
+  Phone decluttering (≤480px, user-approved plan A/B/C — phone screenshot report: the bar
+  collapsed into an unreadable row of a green "在线" pill, a squeezed-to-a-sliver quota pill
+  (b4c8dc4 made it shrinkable), a two-line-wrapped CPU load pill, the language menu and the
+  sign-out button all fighting for the same narrow row). Desktop/tablet (>480px) stay
+  byte-for-byte unchanged — every new element below is either CSS-hidden at that width or, for
+  the brand-mark connection badge, physically absent from the DOM (the same "0/1-item `v-for`,
+  never `v-if`" trick `quotaList`/`loadList` already use, so the existing
+  `quota-pill.test.ts` TopBar-no-quota-data golden-HTML pin stays untouched — `phone` is false
+  under every test's stubbed `matchMedia`, so `connBadgeList` is empty there exactly like
+  today):
+    A. `.pill.conn`'s text is hidden on phone; a small `role="status"` badge on the brand mark
+       takes over conveying the SAME `t(connLabelKey)` name (dot = live, pulsing = connecting/
+       reconnecting — `.dot-live`'s own halo animation, reused verbatim — danger-red = signed
+       out, reusing `.conn[data-conn]`'s existing severity colouring) — `HubStateBanner`
+       (mounted elsewhere) keeps announcing problems regardless.
+    B. `QuotaPill`/`LoadPill` collapse to compact number chips on phone (their own files).
+    C. The language menu and sign-out move into `SettingsOverlay`'s mobile sheet (hidden from
+       the bar via CSS on phone only — `canSignOut`/`@signout` are threaded down to it exactly
+       the way they already flow through this component).
 -->
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref } from "vue";
@@ -33,6 +53,7 @@ import { uiBuildStamp } from "@logic/build-stamp.js";
 import type { TopBarEmits, TopBarProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import { parseRouteHash } from "../../composables/useHashRoute.js";
+import { useMedia } from "../../composables/useMedia.js";
 import SettingsOverlay from "./SettingsOverlay.vue";
 import QuotaPill from "../quota/QuotaPill.vue";
 import { freshestQuota } from "@logic/quota.js";
@@ -76,6 +97,13 @@ const loadList = computed(() => {
   return load === undefined ? [] : [load];
 });
 const loadReceivedAt = computed(() => hub?.state.value.loadReceivedAt);
+
+/** Phone-only connection badge (plan A): mirrors the `quotaList`/`loadList` 0/1-item `v-for`
+ *  trick above — `phone` is false under every test's stubbed `matchMedia` (and on real
+ *  desktop/tablet viewports), so `connBadgeList` is empty there and the badge contributes
+ *  literally zero DOM nodes, keeping `quota-pill.test.ts`'s TopBar golden-HTML pin intact. */
+const phone = useMedia(window, "(max-width: 480px)").matches;
+const connBadgeList = computed(() => (phone.value ? [props.conn] : []));
 
 const connLabelKey = computed(() => `shell.conn.${props.conn}`);
 const uiStamp = computed(() => uiBuildStamp(UI_BUILD));
@@ -129,7 +157,31 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 <template>
   <header class="topbar">
     <span class="brand" :title="brandTitle">
-      <span class="brand-mark" aria-hidden="true"><AppIcon name="logo" /></span>
+      <span class="brand-mark" :aria-hidden="phone ? undefined : true">
+        <AppIcon name="logo" />
+        <template v-for="c in connBadgeList" :key="'conn-badge'">
+          <!-- auth mirrors the desktop pill's unlock glyph (same danger colour) so a login-needed
+               state is recognisable by shape, not just by a red dot -->
+          <span
+            v-if="c === 'auth'"
+            class="conn conn-badge conn-badge-icon"
+            :data-conn="c"
+            role="status"
+            :aria-label="t(connLabelKey)"
+            :title="t(connLabelKey)"
+            ><AppIcon name="unlock" class="icon-sm"
+          /></span>
+          <span
+            v-else
+            class="dot conn conn-badge"
+            :class="{ 'dot-live': c === 'connecting' || c === 'reconnecting' }"
+            :data-conn="c"
+            role="status"
+            :aria-label="t(connLabelKey)"
+            :title="t(connLabelKey)"
+          ></span>
+        </template>
+      </span>
       <span translate="no">pi web-hub</span>
     </span>
 
@@ -161,7 +213,7 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 
     <span class="topbar-spacer"></span>
 
-    <LangMenu />
+    <LangMenu v-if="!phone" />
 
     <span class="settings-anchor">
       <button
@@ -177,11 +229,17 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
       >
         <AppIcon name="gear" />
       </button>
-      <SettingsOverlay v-if="open" :anchor-el="gearEl" @close="onClose" />
+      <SettingsOverlay
+        v-if="open"
+        :anchor-el="gearEl"
+        :can-sign-out="canSignOut"
+        @close="onClose"
+        @signout="emit('signout')"
+      />
     </span>
 
     <button
-      v-if="canSignOut"
+      v-if="canSignOut && !phone"
       class="btn btn-ghost"
       type="button"
       :aria-label="t('shell.signOut')"

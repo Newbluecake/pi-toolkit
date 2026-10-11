@@ -570,7 +570,17 @@ function reduceInner(s, event, d, at) {
       return { ...s, loadTop: { loading: true, ...(s.loadTop?.data !== undefined ? { data: s.loadTop.data } : {}) } };
     case "load_top_ok": {
       const payload = parseLoadTopWire(d.payload);
-      return payload !== null ? { ...s, loadTop: { loading: false, data: payload } } : s;
+      if (payload !== null) return { ...s, loadTop: { loading: false, data: payload } };
+      // A malformed payload must still settle `loading` (never a stuck spinner): same shape as
+      // the transport's own parser-null mapping (E_BAD_RESPONSE), previous data kept.
+      return {
+        ...s,
+        loadTop: {
+          loading: false,
+          ...(s.loadTop?.data !== undefined ? { data: s.loadTop.data } : {}),
+          error: "E_BAD_RESPONSE",
+        },
+      };
     }
     case "load_top_error":
       return {

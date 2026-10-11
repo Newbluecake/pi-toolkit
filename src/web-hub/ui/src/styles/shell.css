@@ -81,14 +81,22 @@
 }
 
 /* Phones never have room for it next to the conn/quota pills and the icon buttons: show the
- * mark alone (the wrap trick above would otherwise leave the shrunken brand's blank width). */
+ * mark alone (the wrap trick above would otherwise leave the shrunken brand's blank width).
+ * The badge below replaces `.pill.conn`'s text — HubStateBanner (mounted elsewhere) still
+ * announces problems regardless, so hiding it here loses no state information. */
 @media (max-width: 480px) {
   .brand > span:last-child {
+    display: none;
+  }
+
+  .pill.conn {
     display: none;
   }
 }
 
 .brand-mark {
+  position: relative; /* anchors the phone-only .conn-badge (plan A) — harmless at every width
+                          since the badge itself only ever exists in the DOM at ≤480px */
   display: grid;
   flex: none; /* never squeezed when the brand shrinks on narrow screens */
   place-items: center;
@@ -103,6 +111,30 @@
   width: 16px;
   height: 16px;
   stroke-width: 2.2;
+}
+
+/* Phone-only connection badge on the brand mark (plan A — replaces the `.pill.conn` text pill
+ * hidden below). No `display` toggle is needed here — the badge is only ever IN THE DOM at all
+ * at ≤480px (`TopBar.vue`'s `connBadgeList` 0/1-item `v-for`), so this rule applies
+ * unconditionally and is simply inert (never matched) above that width. It rides THREE existing
+ * classes instead of declaring its own box model (`class="dot conn conn-badge"`): `.dot` gives
+ * size/shape/colour-from-`--pill-fg` for free (primitives.css), `.conn`'s existing 4-state rules
+ * supply that colour (live = success green, auth = danger red — no new colour tokens), and the
+ * conditional `.dot-live` class (connecting/reconnecting) reuses its `::after` pulse animation
+ * verbatim — no bespoke spinner CSS. `.conn-badge` below only overrides what `.dot` doesn't
+ * already give it: absolute positioning anchored to `.brand-mark`'s `position: relative`. */
+.conn-badge {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+}
+
+.conn-badge-icon {
+  display: inline-flex;
+  border-radius: 50%;
+  background: var(--c-surface);
+  color: var(--pill-fg);
+  line-height: 0;
 }
 
 .conn {
@@ -233,19 +265,14 @@
 }
 
 /* 2026-10-06 field report ("登出按钮比设置按钮小"): on phones the label is hidden anyway —
- * make the sign-out button the same square icon button as the gear (44px coarse hit box). */
-@media (max-width: 480px) {
-  .topbar .lang-toggle {
-    padding-right: 0;
-  }
-
-  .topbar .settings-anchor + .btn {
-    width: 44px;
-    min-width: 44px;
-    padding: 0;
-    /* keeps the gear→logout flex-end/flex-start icon clustering above (glyphs nearly touch) */
-  }
-}
+ * make the sign-out button the same square icon button as the gear (44px coarse hit box).
+ * 2026-10 phone-declutter plan C superseded this block: the language menu and sign-out button
+ * are no longer merely CSS-hidden on phone — `TopBar.vue`'s `v-if="!phone"`/`v-if="canSignOut
+ * && !phone"` remove them from the DOM outright at ≤480px (mirroring `connBadgeList`'s own
+ * 0/1-item convention), so the ≤480px-scoped rules that used to live here (padding-right on a
+ * now-absent `.lang-toggle`; width/padding on a now-absent sign-out button) are unreachable and
+ * have been deleted rather than left as dead weight.
+ */
 
 .user-chip {
   display: inline-flex;
@@ -292,6 +319,20 @@
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-3);
   outline: none;
+}
+
+/* Phone quick-actions row (plan C, ≤480px only — see SettingsOverlay.vue's header): language
+ * switch + sign-out, moved here off the cramped top bar. No display-toggle/media query is
+ * needed here — unlike a plain `v-if`, `SettingsOverlay.vue`'s `phoneQuickList` (a 0/1-item
+ * `v-for`, same convention `TopBar.vue`'s `connBadgeList` uses) keeps this row entirely OUT of
+ * the DOM above 480px, including the 481-767px tablet band that shares the same `PickerSheet`
+ * branch — so this rule is simply inert wherever the row doesn't exist. */
+.settings-phone-quick {
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* lang menu left, sign-out right — wide enough apart that no gap is needed */
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
 }
 
 .banners {

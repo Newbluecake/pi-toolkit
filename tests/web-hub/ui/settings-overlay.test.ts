@@ -24,6 +24,17 @@ function stubMatchMedia(mobile: boolean): void {
   }));
 }
 
+/** ≤480px: both the `mobile` (767px) and `phone` (480px) queries match — the phone
+ *  quick-actions row only mounts under the LATTER (SettingsOverlay.vue's `phoneQuickList`). */
+function stubPhone(phone: boolean): void {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: phone,
+    media: "",
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -184,6 +195,69 @@ describe("SettingsOverlay.vue — mobile sheet (delegates to PickerSheet)", () =
     expect(scrim).not.toBeNull();
     scrim!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(wrapper.emitted("close")).toHaveLength(1);
+    wrapper.unmount();
+  });
+});
+
+// Phone quick-actions (plan C): the language switch + sign-out move into the mobile sheet. The
+// block is physically only ever rendered in the PickerSheet (mobile) branch — see the
+// component's own header for why the >=768px desktop popover branch never needs a copy.
+describe("SettingsOverlay.vue — phone quick-actions (plan C)", () => {
+  it("renders the language menu inside the mobile sheet", () => {
+    stubPhone(true);
+    const anchorEl = document.createElement("button");
+    const wrapper = mount(SettingsOverlay, {
+      props: { anchorEl, canSignOut: false },
+      attachTo: document.body,
+    });
+    expect(document.body.querySelector(".settings-phone-quick .lang-anchor")).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it("shows the sign-out button only when canSignOut is true", () => {
+    stubPhone(true);
+    const anchorElA = document.createElement("button");
+    const a = mount(SettingsOverlay, { props: { anchorEl: anchorElA, canSignOut: false }, attachTo: document.body });
+    expect(document.body.querySelector(".settings-phone-signout")).toBeNull();
+    a.unmount();
+
+    const anchorElB = document.createElement("button");
+    const b = mount(SettingsOverlay, { props: { anchorEl: anchorElB, canSignOut: true }, attachTo: document.body });
+    expect(document.body.querySelector(".settings-phone-signout")).not.toBeNull();
+    b.unmount();
+  });
+
+  it("clicking sign-out emits BOTH signout and close", async () => {
+    stubPhone(true);
+    const anchorEl = document.createElement("button");
+    const wrapper = mount(SettingsOverlay, {
+      props: { anchorEl, canSignOut: true },
+      attachTo: document.body,
+    });
+    const btn = document.body.querySelector<HTMLButtonElement>(".settings-phone-signout");
+    expect(btn).not.toBeNull();
+    btn!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(wrapper.emitted("signout")).toHaveLength(1);
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("the desktop popover branch never renders the phone quick-actions block", () => {
+    const anchorEl = document.createElement("button");
+    const wrapper = mount(SettingsOverlay, { props: { anchorEl, canSignOut: true }, attachTo: document.body });
+    expect(wrapper.find(".settings-phone-quick").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("the 481-767px tablet band (mobile sheet, but NOT ≤480px) does not render the phone quick-actions block either", () => {
+    stubMatchMedia(true); // mobile (767px) matches; (max-width: 480px) stays false
+    const anchorEl = document.createElement("button");
+    const wrapper = mount(SettingsOverlay, {
+      props: { anchorEl, canSignOut: true },
+      attachTo: document.body,
+    });
+    expect(document.body.querySelector(".picker-scrim")).not.toBeNull(); // confirms the mobile branch IS active
+    expect(document.body.querySelector(".settings-phone-quick")).toBeNull();
     wrapper.unmount();
   });
 });

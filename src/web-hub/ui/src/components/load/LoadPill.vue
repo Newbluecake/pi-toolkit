@@ -14,7 +14,12 @@ mirrors `QuotaPill`'s "whole-pill = MAX level" rule). ≤480px shows only the si
 "only the worst metric pill shows — field width is tight"). "主机 · hub 视角" disclosure (plan §3's "Pill/Card
 标注「主机 · hub 视角」"): the aria/title text says so explicitly, since this is a HOST-wide reading independent of
 which session/agent is selected — never to be confused with a per-session verdict (that one lives on `FleetDrawer`'s
-banner, via `StatusInfo.loadGate`). -->
+banner, via `StatusInfo.loadGate`). i18n (2026-10 user ruling, overrides AGENTS.md's usual "compact markers stay
+English" convention for THIS pill only): the segment LABELS are localized — zh renders `CPU 3% · 内存 10% · 磁盘 71%`,
+en keeps `CPU 3% · MEM 10% · DISK 71%` (`CPU` itself is identical in both languages on purpose). `@logic/load.js`'s
+`pillView` builds the actual `"{label} {pct}%"` strings from the `load.segCpu`/`segMem`/`segDisk` i18n keys passed in
+below — the ≤480px single-worst-segment chip reuses the SAME localized text (never a separate hardcoded "CPU N%"; the
+two happen to read identically only because the CPU label itself never changes). -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
@@ -54,7 +59,14 @@ onUnmounted(() => {
   if (timer !== undefined) clearInterval(timer);
 });
 
-const view = computed((): PillView | null => pillView(props.load, props.receivedAt, nowTick.value) as PillView | null);
+const view = computed(
+  (): PillView | null =>
+    pillView(props.load, props.receivedAt, nowTick.value, {
+      cpu: t("load.segCpu"),
+      mem: t("load.segMem"),
+      disk: t("load.segDisk"),
+    }) as PillView | null,
+);
 
 const shownSegs = computed((): PillSeg[] => {
   const v = view.value;

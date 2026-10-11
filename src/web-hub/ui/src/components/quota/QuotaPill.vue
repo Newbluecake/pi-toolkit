@@ -20,6 +20,14 @@
   exhausted group never loses its label — ⚠ is only ever a prefix. The pill's own `data-level`
   is the max level among the SHOWN groups (border/background semantics).
 
+  Phone compact chip (≤480px, user-approved plan B): instead of every group's full text the
+  pill collapses to a single `{pct}%` number — the single most-constrained (provider, window)
+  pair across the WHOLE snapshot, i.e. `@logic/quota.js`'s existing `pillView` (the D6 "worst of
+  everything" selector QuotaCard's own headline number already uses; a NEW metric was
+  deliberately avoided). The segment keeps its own severity dot/colour
+  (`.q-seg[data-level]`); tapping still opens the same `QuotaCard`. The aria label/title stay
+  the FULL per-group sentence regardless of width — only the visible text shrinks.
+
   `nowTick` is the one local timer this package owns: every absolute timestamp (`resetAt`) is
   re-formatted from scratch each tick (D2 — the agent never re-pushes purposefully for a clock
   edge), at a 60s cadence (reset times are never shown to the minute of the *next* minute, so a
@@ -30,7 +38,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
-import { fmtResetAt, pillDisplay, pillGroups, scopeLabel } from "@logic/quota.js";
+import { fmtResetAt, pillDisplay, pillGroups, pillView, scopeLabel } from "@logic/quota.js";
 import type { QuotaWire } from "@protocol/messages.js";
 import QuotaCard from "./QuotaCard.vue";
 import "../../styles/quota.css";
@@ -62,10 +70,21 @@ interface PillDisplay {
   groups: PillGroup[];
 }
 
+/** Mirrors `pillView`'s JSDoc return shape (same re-declaration discipline as `PillGroup` above). */
+interface PillViewResult {
+  level: 0 | 1 | 2 | 3;
+  providerId: string;
+  scope: "5h" | "week";
+  usedPct: number;
+  resetScope: "5h" | "week" | undefined;
+  resetAt: number | undefined;
+}
+
 const props = defineProps<{ quota: QuotaWire | undefined }>();
 const { t } = useI18n();
 
 const mobile = useMedia(window, "(max-width: 767px)").matches;
+const phone = useMedia(window, "(max-width: 480px)").matches;
 
 const nowTick = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -150,6 +169,14 @@ function groupAria(g: PillGroup): string {
 }
 
 const ariaLabel = computed(() => allGroups.value.map(groupAria).join("; "));
+
+/** Phone compact chip (≤480px): the single most-constrained (provider, window) pair across
+ *  the WHOLE snapshot — `pillView`'s existing D6 "worst of everything" selector, not a new
+ *  metric. `null` only when `display` is already falsy (the pill isn't mounted at all in that
+ *  case), so the `?? 0`/`?? 0` fallbacks below are defensive, never actually exercised. */
+const compact = computed((): PillViewResult | null => pillView(props.quota) as PillViewResult | null);
+const compactLevel = computed(() => compact.value?.level ?? 0);
+const compactText = computed(() => `${compact.value?.usedPct ?? 0}%`);
 </script>
 
 <template>
@@ -166,7 +193,13 @@ const ariaLabel = computed(() => allGroups.value.map(groupAria).join("; "));
       :title="ariaLabel"
       @click="onToggle"
     >
-      <span class="q-pill-text">
+      <span v-if="phone" class="q-pill-text">
+        <span class="q-seg q-seg-compact" :data-level="compactLevel">
+          <span class="q-dot" aria-hidden="true"></span>
+          <span class="q-seg-text">{{ compactText }}</span>
+        </span>
+      </span>
+      <span v-else class="q-pill-text">
         <template v-for="(g, i) in display.groups" :key="g.labelId">
           <!-- Thin separator between groups (the "·" glyph is the mobile form; desktop CSS clips
                it down to a 1px rule so it never reads like the reset annex's own " · "). -->

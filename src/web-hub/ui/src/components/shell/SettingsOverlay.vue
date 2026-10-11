@@ -24,19 +24,45 @@
   global Escape handler (closes the mid-band drawer / returns to the agent list) already bails
   out whenever `event.defaultPrevented` is true, so the two handlers never fight over the same
   keypress regardless of listener registration order.
+
+  Phone quick-actions (≤480px, plan C): the language switch and sign-out button move off the
+  cramped top bar (`TopBar.vue` hides its own `.lang-anchor`/`.signout-btn` via CSS at that
+  width) into a small row at the top of THIS panel instead — gated by its OWN `phone` media
+  query (`useMedia`, mirrors `TopBar.vue`'s `connBadgeList`/`conn-badge` convention), so the row
+  is physically absent from the DOM — not just CSS-hidden — anywhere above 480px, including the
+  481-767px band that otherwise shares this exact `PickerSheet` branch. No CSS display-toggle
+  rule is needed for `.settings-phone-quick` in shell.css as a result; it is simply inert
+  wherever it doesn't exist. `canSignOut`/`signout` are plain prop/emit, the same shape
+  `TopBar.vue` already exposes (`contracts.ts`'s frozen `TopBarProps`/`TopBarEmits` do not cover
+  this component, so adding them here is not a frozen-surface change).
 -->
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useMedia } from "../../composables/useMedia.js";
 import { useI18n } from "../../composables/useI18n.js";
+import AppIcon from "../../icons/AppIcon.vue";
+import LangMenu from "./LangMenu.vue";
 import PickerSheet from "../control/PickerSheet.vue";
 import SettingsView from "./SettingsView.vue";
 
-const props = defineProps<{ anchorEl: HTMLElement | null }>();
-const emit = defineEmits<{ close: [] }>();
+const props = withDefaults(defineProps<{ anchorEl: HTMLElement | null; canSignOut?: boolean }>(), {
+  canSignOut: false,
+});
+const emit = defineEmits<{ close: []; signout: [] }>();
 const { t } = useI18n();
 
 const mobile = useMedia(window, "(max-width: 767px)").matches;
+/** Phone-only quick-actions row (plan C): 0/1-item-rendering by `phone`, the SAME pattern
+ *  `TopBar.vue`'s `connBadgeList` uses — a plain `v-if` would still mount the row's DOM subtree
+ *  in the 481-767px tablet band (which shares this PickerSheet branch); gating on `phone`
+ *  directly keeps it out of the DOM there too, not just CSS-hidden. */
+const phone = useMedia(window, "(max-width: 480px)").matches;
+const phoneQuickList = computed(() => (phone.value ? [true] : []));
+
+function onSignOut(): void {
+  emit("signout");
+  emit("close");
+}
 
 const panelEl = ref<HTMLElement | null>(null);
 
@@ -93,6 +119,13 @@ onUnmounted(() => {
 
 <template>
   <PickerSheet v-if="mobile" id="settings-panel" side="top" :label="t('settings.title')" @close="emit('close')">
+    <div v-for="_ in phoneQuickList" :key="'phone-quick'" class="settings-phone-quick">
+      <LangMenu />
+      <button v-if="canSignOut" type="button" class="btn btn-ghost settings-phone-signout" @click="onSignOut">
+        <AppIcon name="logout" class="icon-sm" />
+        <span>{{ t("shell.signOut") }}</span>
+      </button>
+    </div>
     <SettingsView @close="emit('close')" />
   </PickerSheet>
   <div

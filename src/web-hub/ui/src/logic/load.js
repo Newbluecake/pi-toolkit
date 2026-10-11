@@ -204,22 +204,32 @@ export function pct(pct) {
 /**
  * Pill view-model (§7.4/视觉稿: `CPU 72% · MEM 81% · DISK 64%`, mobile shows only the worst
  * segment). `undefined`/stale ⇒ `null` (caller renders no pill — §8 I1/I8: no data, no DOM).
+ *
+ * `labels` (2026-10 i18n ruling: the zh UI must say "内存"/"磁盘", not "MEM"/"DISK" — this is an
+ * explicit override of AGENTS.md's usual "compact markers stay English" convention for THIS
+ * pill only; CPU stays "CPU" in both languages) defaults to the English tokens so every existing
+ * call site/test that doesn't pass one keeps behaving exactly as before — `LoadPill.vue` passes
+ * the live i18n labels (`load.segCpu`/`segMem`/`segDisk`) explicitly.
  * @param {LoadWire | undefined} load @param {number | undefined} receivedAt @param {number} now
+ * @param {{ cpu?: string, mem?: string, disk?: string }} [labels]
  * @returns {{
  *   level: 0|1|2|3,
  *   segs: { key: "cpu"|"mem"|"disk", level: 0|1|2|3, text: string }[],
  *   worstKey: "cpu"|"mem"|"disk" | undefined,
  * } | null}
  */
-export function pillView(load, receivedAt, now) {
+export function pillView(load, receivedAt, now, labels) {
   if (load === undefined || isLoadStale(load, receivedAt, now)) return null;
+  const cpuLabel = labels?.cpu ?? "CPU";
+  const memLabel = labels?.mem ?? "MEM";
+  const diskLabel = labels?.disk ?? "DISK";
   /** @type {{ key: "cpu"|"mem"|"disk", level: 0|1|2|3, text: string }[]} */
   const segs = [];
   if (load.cpu !== undefined) {
-    segs.push({ key: "cpu", level: levelRank(load.cpu.level), text: `CPU ${pct(load.cpu.busyPct)}%` });
+    segs.push({ key: "cpu", level: levelRank(load.cpu.level), text: `${cpuLabel} ${pct(load.cpu.busyPct)}%` });
   }
   if (load.mem !== undefined) {
-    segs.push({ key: "mem", level: levelRank(load.mem.level), text: `MEM ${pct(load.mem.usedPct)}%` });
+    segs.push({ key: "mem", level: levelRank(load.mem.level), text: `${memLabel} ${pct(load.mem.usedPct)}%` });
   }
   const disks = Array.isArray(load.disks) ? load.disks : [];
   if (disks.length > 0) {
@@ -227,7 +237,7 @@ export function pillView(load, receivedAt, now) {
     for (const dsk of disks) {
       if (levelRank(dsk.level) > levelRank(worstDisk.level)) worstDisk = dsk;
     }
-    segs.push({ key: "disk", level: levelRank(worstDisk.level), text: `DISK ${pct(worstDisk.usedPct)}%` });
+    segs.push({ key: "disk", level: levelRank(worstDisk.level), text: `${diskLabel} ${pct(worstDisk.usedPct)}%` });
   }
   if (segs.length === 0) return null;
   let worst = segs[0];

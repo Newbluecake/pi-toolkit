@@ -119,6 +119,16 @@ describe('reduce — "hello"/"hub" clearing (§7.4 "hello 与 hub 帧 caps 无 l
 describe('reduce — "load_top_*" (§7.1/§10 useHub.fetchLoadTop single-flight drive)', () => {
   const top = { at: 1, byCpu: [], byRss: [] };
 
+  it("a malformed ok payload still settles loading (E_BAD_RESPONSE), keeping previous data", () => {
+    let s = run([{ event: "load_top_ok", data: { payload: top } }]);
+    s = reduce(s, { event: "load_top_start" });
+    s = reduce(s, { event: "load_top_ok", data: { payload: { nope: true } } });
+    expect(s.loadTop).toEqual({ loading: false, data: top, error: "E_BAD_RESPONSE" });
+    let fresh = reduce(run([]), { event: "load_top_start" });
+    fresh = reduce(fresh, { event: "load_top_ok", data: { payload: null } });
+    expect(fresh.loadTop).toEqual({ loading: false, error: "E_BAD_RESPONSE" });
+  });
+
   it("start sets loading:true and keeps any previous data", () => {
     let s = run([{ event: "load_top_ok", data: { payload: top } }]);
     s = reduce(s, { event: "load_top_start" });
@@ -143,12 +153,6 @@ describe('reduce — "load_top_*" (§7.1/§10 useHub.fetchLoadTop single-flight 
     const s = run([{ event: "load_top_start" }, { event: "load_top_error", data: { error: "E_NETWORK" } }]);
     expect(s.loadTop).toEqual({ loading: false, error: "E_NETWORK" });
     expect("data" in (s.loadTop as object)).toBe(false);
-  });
-
-  it("a malformed load_top_ok payload is dropped (state unchanged)", () => {
-    const s0 = run([{ event: "load_top_start" }]);
-    const s1 = reduce(s0, { event: "load_top_ok", data: { payload: null } });
-    expect(s1).toBe(s0);
   });
 });
 
