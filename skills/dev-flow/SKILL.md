@@ -403,6 +403,7 @@ node ~/.agents/skills/dev-flow/scripts/conflict-check.mjs spec.json --cwd <仓�
   项目规范（发版铁律、测试命令等），不要只写「基于你的发现做 X」。
 - **trust but verify**：subagent 报「完成」不代表真完成；自报的用例数/失败数经常失真，
   验收必须自己跑命令取证。
+- 前端包验收时，必须从 `npm run check:web` 的 summary 报告首屏 JS gzip 增量并由 verifier 判定；预算上调必须说明理由。
 - **下游挂专家（consult）**：何时必挂/挂谁/何时禁挂见「挂专家」节；机制与约束见 `Agent` 工具的 `experts` 参数说明。
 - **省略 model**：不需要指定时直接省略，让 subagent 继承默认配置，不要猜。
 

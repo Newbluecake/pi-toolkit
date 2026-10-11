@@ -86,8 +86,97 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // the 255 KiB gate; the minimum round-byte bump restores 522 B of headroom.
 // Bumped to 257 KiB by web-hub-avatar W (2026-10-11): App.vue now wires useAvatar globally,
 // so the U avatar UI is no longer tree-shaken; the measured bundle is 262,723 B gz.
-const JS_BUDGET_GZIP_BYTES = 257 * 1024;
+// Budget rebase (2026-10-11): the current build measures 234,616 B gz on the first
+// screen (theme-init.js + the entry module) and 28,106 B gz in lazy chunks. The old
+// empirical total-JS budget counted lazy chunks that are not loaded on first paint;
+// keep separate budgets so first-screen regressions are visible without making lazy
+// feature growth a routine budget bump.
+const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 253 * 1024;
+const LAZY_JS_BUDGET_GZIP_BYTES = 42 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
+
+export type JsAssetClassification = {
+  firstScreen: Set<string>;
+  lazy: Set<string>;
+};
+
+function assetPath(value: string): string {
+  const pathname = value.split(/[?#]/, 1)[0] ?? value;
+  return decodeURIComponent(pathname)
+    .replace(/^\/+/, "")
+    .replace(/^(\.\/)+/, "");
+}
+
+function htmlAttributes(tag: string): Map<string, string> {
+  const attrs = new Map<string, string>();
+  for (const match of tag.matchAll(/([\w:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+    attrs.set(match[1]!.toLowerCase(), match[2] ?? match[3] ?? match[4] ?? "");
+  }
+  return attrs;
+}
+
+function staticImports(source: string): string[] {
+  const imports: string[] = [];
+  // Dynamic import() is deliberately excluded: those modules are lazy by definition. Whitespace is
+  // optional because minified output emits `import{a}from"./x.js"` / `import"./x.js"`; static
+  // re-exports (`export{a}from"./x.js"`) load eagerly too.
+  const importRe = /(?:^|[;\n}])\s*(?:import|export)\s*(?:[^("'`]+?\s*from\s*)?["']([^"']+)["']/g;
+  for (const match of source.matchAll(importRe)) imports.push(match[1]!);
+  return imports;
+}
+
+/** Classify JS files loaded by the built index.html, including static-import fallback. */
+export function classifyJsAssets(html: string, jsSources: ReadonlyMap<string, string>): JsAssetClassification {
+  const firstScreen = new Set<string>();
+  const entryModules: string[] = [];
+  const modulePreloads: string[] = [];
+  for (const match of html.matchAll(/<(script|link)\b[^>]*>/gi)) {
+    const attrs = htmlAttributes(match[0]);
+    const src = attrs.get("src");
+    const href = attrs.get("href");
+    if (match[1]!.toLowerCase() === "script" && src && (attrs.get("type") ?? "").toLowerCase() === "module") {
+      entryModules.push(assetPath(src));
+    } else if (match[1]!.toLowerCase() === "link" && attrs.get("rel")?.toLowerCase() === "modulepreload" && href) {
+      modulePreloads.push(assetPath(href));
+    } else if (match[1]!.toLowerCase() === "script" && src && assetPath(src).endsWith(".js")) {
+      firstScreen.add(assetPath(src));
+    }
+  }
+  for (const path of [...entryModules, ...modulePreloads]) firstScreen.add(path);
+
+  if (modulePreloads.length === 0) {
+    const pending = [...entryModules];
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (visited.has(current)) continue;
+      visited.add(current);
+      const source = jsSources.get(current);
+      if (!source) continue;
+      const currentDir = current.includes("/") ? current.slice(0, current.lastIndexOf("/") + 1) : "";
+      for (const imported of staticImports(source)) {
+        if (!imported.startsWith(".")) continue;
+        const resolved = assetPath(join(currentDir, imported));
+        firstScreen.add(resolved);
+        pending.push(resolved);
+      }
+    }
+  }
+
+  const allJs = new Set([...jsSources.keys()].filter((path) => path.endsWith(".js")));
+  return {
+    firstScreen: new Set([...firstScreen].filter((path) => allJs.has(path))),
+    lazy: new Set([...allJs].filter((path) => !firstScreen.has(path))),
+  };
+}
+
+export function gzipBytes(source: string | Uint8Array): number {
+  return gzipSync(source).length;
+}
+
+export function budgetExceeded(actual: number, budget: number): boolean {
+  return actual > budget;
+}
 
 class CheckError extends Error {}
 
@@ -191,8 +280,9 @@ async function main(): Promise<void> {
   const indexAbs = join(DIST_DIR, "index.html");
   await checkIndexHtml(await readFile(indexAbs, "utf8").catch(() => fail("index.html is missing")));
 
-  let jsGzipTotal = 0;
   let cssGzipTotal = 0;
+  const jsSources = new Map<string, string>();
+  const jsGzipBytes = new Map<string, number>();
   for (const abs of files) {
     const rel = relPosix(DIST_DIR, abs);
     if (rel === "build-info.json") continue;
@@ -200,7 +290,8 @@ async function main(): Promise<void> {
     if (ext === ".js") {
       const source = await readFile(abs, "utf8");
       scanForbiddenPatterns(source, rel);
-      jsGzipTotal += gzipSync(await readFile(abs)).length;
+      jsSources.set(rel, source);
+      jsGzipBytes.set(rel, gzipBytes(source));
     } else if (ext === ".css") {
       const source = await readFile(abs, "utf8");
       if (/<style[\s>]/i.test(source)) fail(`${rel}: contains a <style> tag literal (unexpected in CSS)`);
@@ -217,8 +308,14 @@ async function main(): Promise<void> {
       cssGzipTotal += gzipSync(await readFile(abs)).length;
     }
   }
-  if (jsGzipTotal > JS_BUDGET_GZIP_BYTES) {
-    fail(`JS gzip budget exceeded: ${jsGzipTotal} > ${JS_BUDGET_GZIP_BYTES} bytes`);
+  const classification = classifyJsAssets(await readFile(indexAbs, "utf8"), jsSources);
+  const firstScreenJsGzip = [...classification.firstScreen].reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
+  const lazyJsGzip = [...classification.lazy].reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
+  if (budgetExceeded(firstScreenJsGzip, FIRST_SCREEN_JS_BUDGET_GZIP_BYTES)) {
+    fail(`first-screen JS gzip budget exceeded: ${firstScreenJsGzip} > ${FIRST_SCREEN_JS_BUDGET_GZIP_BYTES} bytes`);
+  }
+  if (budgetExceeded(lazyJsGzip, LAZY_JS_BUDGET_GZIP_BYTES)) {
+    fail(`lazy JS gzip budget exceeded: ${lazyJsGzip} > ${LAZY_JS_BUDGET_GZIP_BYTES} bytes`);
   }
   if (cssGzipTotal > CSS_BUDGET_GZIP_BYTES) {
     fail(`CSS gzip budget exceeded: ${cssGzipTotal} > ${CSS_BUDGET_GZIP_BYTES} bytes`);
@@ -235,11 +332,13 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `✓ check:web — dist/web-hub-ui/ OK (${files.length} files, JS ${jsGzipTotal}B gz, CSS ${cssGzipTotal}B gz)`,
+    `✓ check:web — dist/web-hub-ui/ OK (${files.length} files, first-screen JS ${firstScreenJsGzip}B gz/${FIRST_SCREEN_JS_BUDGET_GZIP_BYTES}B, lazy JS ${lazyJsGzip}B gz/${LAZY_JS_BUDGET_GZIP_BYTES}B, CSS ${cssGzipTotal}B gz/${CSS_BUDGET_GZIP_BYTES}B)`,
   );
 }
 
-main().catch((err: unknown) => {
-  console.error(`✗ check:web — ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err: unknown) => {
+    console.error(`✗ check:web — ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}
