@@ -18,6 +18,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
+import type { AvatarInfo, AvatarPath } from "../protocol/avatar.js";
 import type { HostTokenRejectReason, LanOffReason, LanStatus } from "../protocol/lan.js";
 import type {
   AgentId,
@@ -384,6 +385,8 @@ export interface HubConfig {
    * `"off"` is the key's ABSENCE (same wire-level off pattern as `spawn`); `hub/main.ts`
    * re-validates via `normalizeHubPreviewMode` and drops the whole key on anything else. */
   preview?: "on" | "loopback";
+  /** web-hub-avatar plan v2.1 §2.6: presence of the literal key is the feature gate. */
+  avatar?: true;
   /** sysload plan (docs/dev/sysload/plan.md) §7.2/§11: the hub's OWN sampler policy, written by
    * the pi process that launched it, ONLY when `load.enabled ∧ webHub.load` are both true
    * (`buildHubConfig`, P2a) — same wire-level "feature off IS key absence" pattern as `spawn`/
@@ -571,6 +574,8 @@ export interface HubInfo {
   /** §6.7.3 ① (main-session frozen amendment): stop marker holding the replacement back —
    * drives HubStateBanner's "升级已暂停" state. */
   supersedeBlocked?: "stopped" | "unknown";
+  /** web-hub-avatar plan v2.1 §4.1: per-hub avatar generation and digest. */
+  avatar?: AvatarInfo;
 }
 
 export interface CommandRouter {
@@ -673,6 +678,8 @@ export interface FrontendDeps {
    * pre-feature assemblies keep compiling — when absent, `POST /api/agents/remove` answers 404
    * on both listeners, byte-identical to not-enabled. */
   agentRemove?: AgentRemoveFrontendPort;
+  /** web-hub-avatar plan v2.1 §2.1: optional route frontend; absent keeps the hub inert. */
+  avatar?: AvatarRoutes;
 }
 
 export interface HttpFrontend {
@@ -719,6 +726,14 @@ export interface PreviewRouteIo {
   expectedOrigin: string;
   authorize(deadline: ReqDeadline): Promise<PreviewAuthResult | PreviewAuthHandled>;
   sendJson: (res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>) => void;
+}
+
+/** The frontend surface for the avatar endpoints (A0 frozen face; H implements it). */
+export interface AvatarRoutes {
+  /** Dispatch one of `/api/avatar` or `/api/avatar/delete`; the route owns auth, limits and audit. */
+  handle(req: IncomingMessage, res: ServerResponse, path: AvatarPath, io: PreviewRouteIo): Promise<void>;
+  /** Idempotent bounded teardown used by hub close/startup-failure paths. */
+  dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
 }
 
 /** The frontend surface `createHttpFrontend` optionally carries (PV3 wires `FrontendDeps.preview`):

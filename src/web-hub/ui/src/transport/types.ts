@@ -12,6 +12,7 @@ import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.
 import type { WtGraphPayload } from "@protocol/worktree-graph.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
+import type { AvatarDeleteOutcome, AvatarFetchOutcome, AvatarWriteOutcome } from "@protocol/avatar.js";
 import type { LoadTopWire } from "@protocol/messages.js";
 import type {
   ForkReason,
@@ -124,6 +125,8 @@ export interface HubTransport {
    * `upload`/`spawn` — `usePreview`'s scope derivation (`previewScopeOf`) yields `null`
    * without it and every path renders as plain text. Both real adapters always provide it. */
   readonly preview?: PreviewTransport;
+  /** web-hub-avatar plan v2.1 §5: the single fixed hub-side avatar surface. */
+  readonly avatar?: AvatarTransport;
   /** worktree-diff plan v3.1 §4.6 (package D4): the two `GET /api/worktree-diff/*` endpoints.
    * Optional per the frozen-transport convention (test fakes / future transports may omit it) —
    * `useWorktreeDiff`'s scope derivation (D5) yields `null` without it and the panel stays
@@ -519,6 +522,16 @@ export interface PreviewTransport {
 export type PreviewProbeOutcome =
   | { readonly ok: true; readonly results: ReadonlyArray<PreviewProbeKind> }
   | { readonly ok: false; readonly status: number; readonly error: string; readonly retryAfterS?: number };
+
+// ---------------------------------------------------------------------------
+// web-hub-avatar plan v2.1 §5 — the fixed avatar transport surface
+// ---------------------------------------------------------------------------
+
+export interface AvatarTransport {
+  fetch(opts: { readonly signal: AbortSignal }): Promise<AvatarFetchOutcome>;
+  upload(bytes: Uint8Array, opts?: { readonly signal?: AbortSignal }): Promise<AvatarWriteOutcome>;
+  remove(): Promise<AvatarDeleteOutcome>;
+}
 
 // ---------------------------------------------------------------------------
 // worktree-diff plan v3.1 §4.6 (package D4) — the `GET /api/worktree-diff/*` transport surface

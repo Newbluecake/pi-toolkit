@@ -130,6 +130,9 @@ export const HOLD_CAP = "hold.v1";
 export const HOLD_AGENT_CAPS = ["hold.v1"] as const;
 export const HOLD_HUB_CAPS = ["hold.v1"] as const;
 
+/** web-hub-avatar plan §4.2: the single hub capability for the avatar surface. */
+export const AVATAR_HUB_CAP = "avatar.v1";
+
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {
   dialogs: "dialog.v1",
