@@ -576,3 +576,62 @@ export function auditWorktreeGraph(log: { info(msg: string, data?: object): void
   }
   log.info("wtgraph", out);
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-avatar plan v2.1 §2.7
+// ---------------------------------------------------------------------------
+
+export interface AvatarAuditRecord {
+  reqId: string;
+  op: "get" | "put" | "delete" | "load";
+  phase: "request" | "reject" | "reconcile";
+  ok: boolean;
+  listener?: "loopback" | "lan";
+  ip?: string;
+  user?: string;
+  code?: string;
+  reason?: string;
+  effect?: "none" | "unknown";
+  io?: "deadline" | "busy" | "abort" | "errno";
+  errno?: string;
+  bytes?: number;
+  side?: number;
+  v?: string;
+  gen?: number;
+  dedup?: boolean;
+  ms: number;
+}
+
+export const AVATAR_AUDIT_KEYS = [
+  "reqId",
+  "op",
+  "phase",
+  "ok",
+  "listener",
+  "ip",
+  "user",
+  "code",
+  "reason",
+  "effect",
+  "io",
+  "errno",
+  "bytes",
+  "side",
+  "v",
+  "gen",
+  "dedup",
+  "ms",
+] as const;
+
+export function auditAvatar(log: { info(msg: string, data?: object): void }, record: AvatarAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "avatar" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of AVATAR_AUDIT_KEYS) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (key === "errno" && (typeof value !== "string" || !/^E[A-Z0-9]{2,15}$/.test(value))) continue;
+    if (typeof value === "string" && value.includes("/")) continue;
+    out[key] = value;
+  }
+  log.info("avatar", out);
+}
