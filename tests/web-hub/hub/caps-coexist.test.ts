@@ -14,6 +14,7 @@ import {
   SPAWN_MODEL_HUB_CAP,
   UPLOAD_HUB_CAPS,
   WTDIFF_HUB_CAP,
+  AVATAR_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
@@ -120,6 +121,24 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     expect(browserCaps).not.toContain(SPAWN_MODEL_HUB_CAP);
     expect(browserCaps).not.toContain(PREVIEW_HUB_CAP);
     expect(browserCaps).not.toContain(PREVIEW_ABS_HUB_CAP); // dir-plan P1a: same gate, also absent
+    expect(browserCaps).not.toContain(AVATAR_HUB_CAP);
+  });
+
+  it("config.avatar: avatar.v1 joins BOTH surfaces and stays set-equal", async () => {
+    const home = tmp.make("wh-coexist-avatar-");
+    const fe = fakeFrontend();
+    const r = await startHub(config({ home, avatar: true }), fe.factory, { uid: process.getuid?.() ?? 0 });
+    if ("exists" in r) throw new Error("unexpected exists");
+    hubs.push(r);
+    const hub = r;
+    const browserCaps = [...hub.info.caps];
+    const c = await connectClient(hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    const agentCaps = [...(ack["caps"] as string[])];
+    c.sock.destroy();
+    expect(browserCaps).toEqual(agentCaps);
+    expect(browserCaps).toContain(AVATAR_HUB_CAP);
   });
 
   it("config.spawn: spawn.v1 joins BOTH surfaces (fail-closed probe) and they stay set-equal", async () => {

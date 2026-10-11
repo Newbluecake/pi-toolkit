@@ -14,6 +14,12 @@ import {
   WRITE_TOTAL_MS,
 } from "../../../src/web-hub/hub/req-deadline.js";
 import { LAN_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/hub/http.js";
+import {
+  AVATAR_AUTH_CAP_MS,
+  AVATAR_DELETE_MIN_MS,
+  AVATAR_STORE_MIN_MS,
+  AVATAR_TOTAL_MS,
+} from "../../../src/web-hub/protocol/avatar.js";
 import { CMD_REQUEST_TIMEOUT_MS as TOKEN_CMD_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/ui/src/logic/token-client.js";
 import { CMD_REQUEST_TIMEOUT_MS as PASSWORD_CMD_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/ui/src/logic/password-client.js";
 
@@ -97,6 +103,15 @@ describe("§3.3 nested deadline invariant (plan: agentDeadlineMs <= registryWait
     expect(LAN_REQUEST_TIMEOUT_MS).toBeLessThan(TOKEN_CMD_REQUEST_TIMEOUT_MS);
     // §1.3: the first LAN authorize keeps 11s of the 14s in reserve for body+write
     expect(UPLOAD_TOTAL_MS - LAN_AUTH_CAP_MS).toBe(11_000);
+  });
+});
+
+describe("web-hub-avatar plan v2.1 §2.3: avatar budget nesting", () => {
+  it("keeps auth + body + re-auth + store inside the total budget", () => {
+    expect(AVATAR_STORE_MIN_MS).toBe(4_000);
+    expect(AVATAR_DELETE_MIN_MS).toBe(750);
+    expect(AVATAR_AUTH_CAP_MS + 5_000 + 1_000 + AVATAR_STORE_MIN_MS).toBeLessThanOrEqual(AVATAR_TOTAL_MS);
+    expect(AVATAR_TOTAL_MS).toBeLessThan(LAN_REQUEST_TIMEOUT_MS);
   });
 });
 

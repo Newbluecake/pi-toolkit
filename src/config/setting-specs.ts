@@ -295,6 +295,8 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["on", "loopback", "off"],
     "web-hub: in-browser preview of session-cwd files and session-shared uploads (on = loopback+LAN, loopback = loopback only, off = disabled; change: /reload then /webhub restart; use loopback if others use your LAN)",
   ),
+  // web-hub-avatar plan v2.1 §2.6: non-live; change requires /reload then /webhub restart.
+  "webHub.avatar": bool("webHub.avatar", "web-hub: shared user avatar image (default on; control:false disables it)"),
   // web-hub-fleet-drawer plan §4.4 (F2): subagent transcript (fleet drawer) read plane —
   // independent of webHub.control; non-live like the rest of webHub.* (change → /reload).
   "webHub.subagentTranscript": choice(

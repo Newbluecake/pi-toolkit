@@ -47,6 +47,7 @@ import {
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
+  AVATAR_HUB_CAP,
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
@@ -73,6 +74,11 @@ import { createReaper, type Reaper } from "./spawn/reaper.js";
 import { createSpawnRoutes } from "./spawn/routes.js";
 import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
+import { createAvatarRoutes } from "./avatar/routes.js";
+import { createAvatarStore } from "./avatar/store.js";
+import type { AvatarRoutes } from "./ports.js";
+import { auditAvatar } from "./audit.js";
+import { readBody } from "./http.js";
 import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
 import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
 import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
@@ -353,6 +359,10 @@ export async function startHub(
             ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
           ]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
+      // web-hub-avatar plan v2.1 §4.2: the one hub-declared cap is carried through
+      // extraHubCaps onto both HubInfo.caps and hello_ack.caps. Agent sessions do not
+      // advertise a corresponding capability of their own.
+      ...(config.avatar === true ? [AVATAR_HUB_CAP] : []),
       // sysload P3: the hub-side sampler is available only after the bounded Linux
       // startup probe.  Feature-off (absent config.load) keeps every cap surface
       // byte-identical.
@@ -519,6 +529,53 @@ export async function startHub(
       ],
     };
     const hubJson: HubJsonWriter = createHubJsonWriter(paths.hubJson, log);
+    let avatarRoutes: AvatarRoutes | undefined;
+    if (config.avatar === true) {
+      const store = createAvatarStore({
+        stateDir: paths.stateDir,
+        now,
+        log,
+        audit: (record) => {
+          const op =
+            record.op === "get" || record.op === "put" || record.op === "delete" || record.op === "load"
+              ? record.op
+              : "load";
+          const phase =
+            record.phase === "request" || record.phase === "reject" || record.phase === "reconcile"
+              ? record.phase
+              : "request";
+          auditAvatar(log, {
+            reqId: op === "load" ? "load" : "store",
+            op,
+            phase,
+            ok: record.ok === true,
+            ms: typeof record.ms === "number" ? record.ms : 0,
+            ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+            ...(typeof record.v === "string" ? { v: record.v } : {}),
+            ...(typeof record.gen === "number" ? { gen: record.gen } : {}),
+            ...(typeof record.bytes === "number" ? { bytes: record.bytes } : {}),
+            ...(typeof record.side === "number" ? { side: record.side } : {}),
+          });
+        },
+        onChange: (change) => {
+          // The store has its own epoch fence; this second fence covers hub shutdown.
+          if (closing !== undefined) return;
+          info.avatar = change.info;
+          registry.publish({ type: "hub" });
+        },
+      });
+      avatarRoutes = createAvatarRoutes({
+        store,
+        hub: () => ({ pid: info.pid, startedAt: info.startedAt }),
+        readBody,
+        log,
+        now,
+      });
+      // A factory/startup failure before the frontend is built must still close the store.
+      cleanup.push(() => store.close(createReqDeadline(now, STEP_DEADLINE_MS).at));
+      // Avatar loading is deliberately not on the startup critical path.
+      void store.load();
+    }
     const selfRestart = createSelfRestartStore(`${paths.stateDir}/self-restart.json`);
     let unsubscribeDbRestart = (): void => {};
     function requestDbSelfRestart(): void {
@@ -1036,6 +1093,7 @@ export async function startHub(
       commands: commandRouter,
       uploadMetrics,
       agentRemove: agentRemoveService,
+      ...(avatarRoutes === undefined ? {} : { avatar: avatarRoutes }),
       ...(uploads === undefined ? {} : { uploads }),
       ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
       ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
@@ -1054,6 +1112,9 @@ export async function startHub(
     // fe.close).
     if (previewRoutes !== undefined) {
       cleanup.push(() => previewRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
+    }
+    if (avatarRoutes !== undefined) {
+      cleanup.push(() => avatarRoutes.dispose("startup-failure", createReqDeadline(now, STEP_DEADLINE_MS)));
     }
     // worktree-diff plan §1.6 (D3): right after preview's push — the startup-failure unwind
     // disposes wtdiff AFTER preview and BEFORE `fe.close()`, mirroring the runtime order below.
@@ -1485,6 +1546,7 @@ export async function startHub(
         // worktree-graph plan v2 §2.6 (P2): after wtdiff dispose, still BEFORE the HTTP face
         // stops accepting — same bounded/idempotent contract.
         if (worktreeGraphRoutes !== undefined) await bounded(worktreeGraphRoutes.dispose("close", deadline));
+        if (avatarRoutes !== undefined) await bounded(avatarRoutes.dispose("close", deadline));
         await bounded(fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files

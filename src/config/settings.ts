@@ -1018,6 +1018,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     steerRecall: true,
     uploads: "on",
     preview: "on",
+    avatar: true,
     subagentTranscript: "all",
     quota: true,
     // sysload plan §6.1/§10 (P0 pre-approved cross-domain field, planning-gap fix): hub-side
@@ -1934,6 +1935,7 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     steerRecall: typeof record.steerRecall === "boolean" ? record.steerRecall : (defaults.steerRecall ?? true),
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
+    avatar: typeof record.avatar === "boolean" ? record.avatar : (defaults.avatar ?? true),
     subagentTranscript: parseSubagentTranscriptSetting(record.subagentTranscript, defaults.subagentTranscript),
     quota: typeof record.quota === "boolean" ? record.quota : (defaults.quota ?? true),
     // sysload plan §6.1: boolean only, anything else falls back to the default `true`.

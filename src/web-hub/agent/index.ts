@@ -134,6 +134,8 @@ export interface WebHubSettings {
    * `PI_WEBHUB_CONFIG` deep-equal to the pre-preview shape. Non-live like the rest of webHub.*:
    * change needs `/reload` then `/webhub restart`. */
   preview?: PreviewMode;
+  /** web-hub-avatar plan v2.1 §2.6: one shared hub-side avatar. Non-live; `control:false` also disables it. */
+  avatar?: boolean;
   /** web-hub-fleet-drawer plan §4.4 (F2): subagent-transcript (fleet drawer) availability.
    * `"all"` (default) advertises `runtx.v1` + `runtx.lan.v1`; `"loopback"` only `runtx.v1`;
    * `"off"` neither. This is the READ plane — deliberately independent of `control`. */
@@ -996,6 +998,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // anything else); "off" is the key's ABSENCE, the same wire-level off pattern as spawn/lan.
     const preview = settings.preview ?? PREVIEW_DEFAULT_MODE;
     if (preview !== "off") config.preview = preview;
+    // web-hub-avatar plan v2.1 §2.6: feature-off is key absence, and a read/write
+    // avatar is disabled together with the web control plane.
+    if (settings.avatar === true && settings.control !== false) config.avatar = true;
     return config;
   };
 

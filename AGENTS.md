@@ -473,6 +473,14 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   commits, merge rows dimmed, full-oid worktree HEAD rings and ≤4 lanes at mobile width.
   Design: `docs/dev/worktree-graph/plan.md`; device checklist:
   `docs/dev/worktree-graph/acceptance.md`.
+  **Avatar (web-hub-avatar plan v2.1, `webHub.avatar`, default on)**: the hub stores one validated PNG at
+  `hub/avatar/{fs,store,validate,routes}.ts`, assembles it through `hub.ts`, and dispatches the three
+  `/api/avatar*` endpoints on both authenticated listeners via `hub/http.ts`; `avatar.v1` is advertised only
+  when the `HubConfig.avatar` key is present (the agent receives but does not add a cap). `control:false` or
+  the setting off omits that key and leaves the hub byte-identical. Atomic replacement, strict PNG validation,
+  bounded IO/concurrency, CSRF/auth/rate limits, full-digest ETags, generation-ordered SSE updates, and
+  exactly-once audit records are invariants; gates are `tests/web-hub/http/{api-avatar,lan-avatar}.test.ts`,
+  `tests/web-hub/hub/{caps-coexist,deadline-nesting}.test.ts`, and the real-device acceptance in the plan.
   **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
   the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
   planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product

@@ -471,3 +471,11 @@ interface AvatarAuditRecord {
 | 6   | 一般 | 「仅浏览器 cap、无 agent cap」与 `extraHubCaps` 进 hello_ack 的事实不符                                 | **接受**。改述为「hub 宣告、出现在 `HubInfo.caps` 与 `hello_ack.caps` 两个既有面、agent 忽略、agent 自身不新增 cap」                                                                                                                                                                                                       | §4.2、§0                               |
 | 7   | 一般 | `readBody` 超时抛 408、外层回 408，而方案验收要求 504                                                   | **接受**。avatar 路由自捕 `readBody` 的 408 ⇒ 504 `E_DEADLINE{effect:"none"}`、413 ⇒ `E_AVATAR_TOO_LARGE`，均 `Connection: close` + finish 后 `req.destroy()`；路由单元测试 + HTTP 1B/s 测试                                                                                                                               | §2.2 ⑦、§7.1、§7.2、§7.5-7             |
 | 8   | 一般 | 尚无实现，处置表不能当作已验证                                                                          | **接受为实施期闸门**：§7.5 列出 verifier 必须亲验的 8 项证据，缺一项即打回                                                                                                                                                                                                                                                 | §7.5                                   |
+
+---
+
+## 实施记录（2026-10-11）
+
+- 已按 A0 `680ce49`、C `1306fc1`、U `14bbd19`、H `b9cddd6` 之后实施 W（assembly）：单一 `webHub.avatar` 开关、两 listener 路由装配、`avatar.v1` cap、生命周期关闭、UI provider 与设置链路均保持键缺失即关闭的兼容语义。
+- 接受 H 的 `readBody` 构造注入与必需 `hub()` 身份参数两个偏差；二者均由装配层明确传入。
+- 按用户裁定，Firefox/Safari canvas 样本延后至真机验收（不安装 Firefox）；U 包的 JS 预算上调至 256 KiB。

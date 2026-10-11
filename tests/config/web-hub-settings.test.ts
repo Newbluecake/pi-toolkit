@@ -39,6 +39,7 @@ describe("web-hub settings", () => {
       steerRecall: true,
       uploads: "on",
       preview: "on",
+      avatar: true,
       subagentTranscript: "all",
       quota: true,
       load: true,
@@ -118,6 +119,7 @@ describe("web-hub settings", () => {
       steerRecall: true,
       uploads: "on",
       preview: "on",
+      avatar: true,
       subagentTranscript: "all",
       quota: true,
       load: true,
@@ -136,8 +138,15 @@ describe("web-hub settings", () => {
     });
   });
 
-  it("exposes the five webHub.* keys in SETTING_SPECS, all non-live", () => {
-    const keys = ["webHub.enabled", "webHub.autoStart", "webHub.port", "webHub.idleExitMinutes", "webHub.nodeLoader"];
+  it("exposes webHub.* keys in SETTING_SPECS, all non-live", () => {
+    const keys = [
+      "webHub.enabled",
+      "webHub.autoStart",
+      "webHub.port",
+      "webHub.idleExitMinutes",
+      "webHub.nodeLoader",
+      "webHub.avatar",
+    ];
     for (const key of keys) {
       expect(isKnownSettingKey(key), key).toBe(true);
       const spec = SETTING_SPECS[key]!;
@@ -160,6 +169,7 @@ describe("web-hub settings", () => {
       min: 1,
     });
     expect(SETTING_SPECS["webHub.nodeLoader"]).toMatchObject({ kind: "string", path: "webHub.nodeLoader" });
+    expect(SETTING_SPECS["webHub.avatar"]).toMatchObject({ kind: "boolean", path: "webHub.avatar" });
     // defaults surfaced in the editor
     expect(defaultOf(SETTING_SPECS["webHub.port"]!)).toBe(7878);
   });
@@ -379,6 +389,11 @@ describe("web-hub control-plane settings (plan §8)", () => {
   });
 
   it("parses explicit booleans and falls back to default for non-boolean garbage", () => {
+    expect(parseWebHubSettings({ avatar: false }).avatar).toBe(false);
+    expect(parseWebHubSettings({ avatar: true }).avatar).toBe(true);
+    for (const garbage of ["yes", 1, null, [], {}]) {
+      expect(parseWebHubSettings({ avatar: garbage }).avatar, JSON.stringify(garbage)).toBe(true);
+    }
     expect(parseWebHubSettings({ control: false }).control).toBe(false);
     expect(parseWebHubSettings({ remoteAskUser: false }).remoteAskUser).toBe(false);
     expect(parseWebHubSettings({ webCommands: false }).webCommands).toBe(false);

@@ -82,6 +82,7 @@ import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutc
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
+import { AVATAR_DELETE_PATH, AVATAR_PATH, AVATAR_STORE_MIN_MS } from "../protocol/avatar.js";
 import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
 import { sendJsonNegotiated } from "./gzip.js";
@@ -94,6 +95,7 @@ import { WTGRAPH_PATH } from "../protocol/worktree-graph.js";
 import { createHubLoad, loadTopErrorCode, LOAD_TOP_DEADLINE_MS, type HubLoadService } from "./load.js";
 import type {
   AgentView,
+  AvatarRoutes,
   CommandRouter,
   ConnGuard,
   ConnLease,
@@ -333,7 +335,7 @@ function stringField(body: unknown, name: string): string | undefined {
   return typeof v === "string" && v.length > 0 && v.length <= 256 ? v : undefined;
 }
 
-function readBody(
+export function readBody(
   req: IncomingMessage,
   maxBytes: number = MAX_BODY_BYTES,
   maxMs: number = BODY_DEADLINE_MS,
@@ -1027,6 +1029,8 @@ export interface LanRuntime {
    * instance as the loopback listener's. Absent ⇒ `POST /api/agents/remove` on LAN keeps its
    * original 404, byte-identical to not-enabled. */
   agentRemove?: AgentRemoveFrontendPort | undefined;
+  /** web-hub-avatar plan v2.1 §2.1: same route instance as loopback; absent keeps the off matrix. */
+  avatar?: AvatarRoutes | undefined;
   /** sysload P3: shared hub activation for the LAN-equal-width top endpoint. */
   load?: HubLoadService;
 }
@@ -1517,6 +1521,30 @@ async function handleLanRequestInner(
       sendJson,
       sendError,
       HttpError,
+    });
+  }
+
+  // web-hub-avatar plan v2.1 §2.1: the route owns its auth/CSRF/body pipeline;
+  // this dispatch point is deliberately immediately before the generic POST branch.
+  if (
+    rt.avatar !== undefined &&
+    ((method === "GET" && path === AVATAR_PATH) ||
+      (method === "POST" && path === AVATAR_PATH) ||
+      (method === "POST" && path === AVATAR_DELETE_PATH))
+  ) {
+    const avatarPath = path === AVATAR_DELETE_PATH ? AVATAR_DELETE_PATH : AVATAR_PATH;
+    return rt.avatar.handle(req, res, avatarPath, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, AVATAR_STORE_MIN_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      sendJson,
     });
   }
 
@@ -2402,6 +2430,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend —
   // absent ⇒ `POST /api/agents/remove` keeps its legacy reply (404, not-enabled), byte-identical.
   const agentRemoveRoutes = deps.agentRemove;
+  // web-hub-avatar plan v2.1 §2.1: one route instance serves both listeners; the
+  // absent dependency is the byte-identical feature-off path.
+  const avatarRoutes = deps.avatar;
   // @文件补全 (file-mention): the `GET /api/files/search` route frontend. Default-constructed
   // from the preview line's presence/mode (the search endpoint is preview's completion
   // sibling — same cwd-root security surface, same §4.7 listener matrix), so `hub.ts` needs no
@@ -2522,6 +2553,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       rejectAudit429,
       spawn: deps.spawn,
       preview: deps.preview,
+      avatar: deps.avatar,
       /** @文件补全 (file-mention): same instance as the loopback listener's (or undefined when
        * preview/file-search is not enabled — the LAN face then keeps its original 404). */
       fileSearch: fileSearchRoutes,
@@ -2896,6 +2928,29 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         sendJson,
         sendError,
         HttpError,
+      });
+    }
+    // web-hub-avatar plan v2.1 §2.1: loopback uses the same route object and
+    // keeps the dispatch immediately before the generic POST branch.
+    if (
+      avatarRoutes !== undefined &&
+      ((method === "GET" && path === AVATAR_PATH) ||
+        (method === "POST" && path === AVATAR_PATH) ||
+        (method === "POST" && path === AVATAR_DELETE_PATH))
+    ) {
+      const avatarPath = path === AVATAR_DELETE_PATH ? AVATAR_DELETE_PATH : AVATAR_PATH;
+      return avatarRoutes.handle(req, res, avatarPath, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        sendJson,
       });
     }
     if (method === "POST") {

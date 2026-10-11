@@ -43,8 +43,10 @@ import NoticeStack from "./components/shell/NoticeStack.vue";
 import TokenGate from "./components/shell/TokenGate.vue";
 import TopBar from "./components/shell/TopBar.vue";
 import PreviewHost from "./components/preview/PreviewHost.vue";
+import { AVATAR_CTX } from "./components/transcript/avatarContext.js";
 import { PREVIEW_CTX } from "./components/preview/previewContext.js";
 import { createAnnouncer } from "./composables/useAnnouncer.js";
+import { useAvatar } from "./composables/useAvatar.js";
 import { useHashRoute } from "./composables/useHashRoute.js";
 import { useHub } from "./composables/useHub.js";
 import { loadKeepAlive } from "@logic/sessionKeepAlive.js";
@@ -159,6 +161,12 @@ if (authMode !== "unknown") {
       hashRoute?.navigate({ name: "agent", key: agentKey });
     },
   });
+
+  const avatar = useAvatar({
+    ...(hub.transport.avatar === undefined ? {} : { transport: hub.transport.avatar }),
+    state: hub.state,
+  });
+  provide(AVATAR_CTX, avatar);
 
   // #32 C5 (control-plan v2.1 §7.1/§7.4): the control plane reaches components via inject —
   // the frozen `contracts.ts` props of TopBar/AgentDetail/AgentCard have no hub/control field.
