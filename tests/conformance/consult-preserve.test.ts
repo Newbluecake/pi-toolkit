@@ -285,7 +285,17 @@ describe("consult preserve conformance — real pi 1.0.2 + Anthropic Messages bo
           ? { kind: "text", text: "seed" }
           : index === 1
             ? { kind: "tool", calls: [{ name: "nested_probe" }] }
-            : { kind: "text", text: "done" },
+            : index === 2
+              ? {
+                  kind: "tool",
+                  calls: [
+                    { name: "read", input: { path: "." } },
+                    { name: "grep", input: { pattern: "nothing", path: "." } },
+                    { name: "find", input: { pattern: "*", path: "." } },
+                    { name: "ls", input: { path: "." } },
+                  ],
+                }
+              : { kind: "text", text: "done" },
     });
     stubs.push(stub);
     const expert = await createRealSession(stub, {
@@ -313,6 +323,9 @@ describe("consult preserve conformance — real pi 1.0.2 + Anthropic Messages bo
     const production = createConsultGuard(snapshot);
     expect(production.preflight(consult.session)).toEqual({ ok: true });
     production.install(consult.session);
+    const nestedCallSpy = vi.spyOn(consult.session as never, "_executeNestedToolCall");
+    await consult.session.prompt("run read-only tools");
+    expect(nestedCallSpy).toHaveBeenCalledTimes(0);
     const originalReadDefinition = consult.session.getToolDefinition("read");
     consult.session.getToolDefinition = (name: string) =>
       name === "read" ? { ...originalReadDefinition } : originalReadDefinition;

@@ -57,6 +57,7 @@ const JOURNAL_DIAG_FIELDS = [
   "contextUsage",
   "model",
   "thinkingLevel",
+  "consultIdentityPrediction",
   "label",
   "agentType",
   "taskPrompt",

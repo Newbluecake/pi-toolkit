@@ -2,9 +2,12 @@ import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { getSystemMessageText } from "@earendil-works/pi-ai";
 import type {
+  ConsultIdentityPrediction,
   ContextUsageInfo,
   DriverEvent,
+  ExpertRequestSnapshot,
   KillableHandle,
   RunOutcome,
   SessionSpec,
@@ -12,6 +15,7 @@ import type {
 } from "../core/types.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
 import { classifyConsultToolEnd } from "../core/consult-summary.js";
+import { readHeaderCwd } from "../consult/fork-store.js";
 import { installPrefixProbe } from "../consult/prefix-probe.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
@@ -73,6 +77,64 @@ export function markChildSession(sm: unknown, spec: SessionSpec, persist: boolea
 export function computeChildExtensionMissing(activationBefore: number, isConsultFork: boolean): boolean {
   return !isConsultFork && !childActivationAdvanced(activationBefore);
 }
+
+/**
+ * C2 M2: compare the newly opened consult session with the expert snapshot for
+ * diagnostics only. Missing facts omit only their affected key; a malformed
+ * host object or an unexpected getter never changes consult admission.
+ */
+export function compareConsultIdentity(
+  sessionValue: unknown,
+  snapshot: ExpertRequestSnapshot,
+  sessionFile?: string,
+): ConsultIdentityPrediction | undefined {
+  try {
+    if (sessionValue === null || typeof sessionValue !== "object") return undefined;
+    const session = sessionValue as {
+      systemPrompt?: unknown;
+      model?: { provider?: unknown; id?: unknown };
+      thinkingLevel?: unknown;
+      sessionManager?: { getCwd?: () => unknown };
+      _runSystemPromptOptions?: { forceSystemPrompt?: unknown };
+    };
+    const prediction: ConsultIdentityPrediction = {};
+    const sections = snapshot.systemSections;
+    const hasSystemText =
+      sections !== null &&
+      typeof sections === "object" &&
+      Object.values(sections).some((value) => typeof value === "string" && value.length > 0);
+    if (hasSystemText && typeof session.systemPrompt === "string") {
+      const recorded = getSystemMessageText({ role: "system", content: "", sections, timestamp: 0 } as never);
+      prediction.system = session.systemPrompt === recorded;
+    }
+
+    if (snapshot.model !== undefined) {
+      const model = session.model;
+      if (typeof model?.provider === "string" && typeof model.id === "string")
+        prediction.model = model.provider === snapshot.model.provider && model.id === snapshot.model.id;
+    }
+    if (snapshot.thinkingLevel !== undefined && typeof session.thinkingLevel === "string")
+      prediction.thinking = session.thinkingLevel === snapshot.thinkingLevel;
+
+    const sessionCwd = session.sessionManager?.getCwd?.();
+    const snapshotCwd = sessionFile === undefined ? undefined : readHeaderCwd(sessionFile);
+    if (typeof sessionCwd === "string" && typeof snapshotCwd === "string") prediction.cwd = sessionCwd === snapshotCwd;
+
+    const forced = session._runSystemPromptOptions;
+    const consultForced =
+      forced !== undefined && Object.prototype.hasOwnProperty.call(forced, "forceSystemPrompt")
+        ? forced.forceSystemPrompt !== undefined
+        : false;
+    const snapshotForced = (snapshot as ExpertRequestSnapshot & { forcedPrompt?: unknown }).forcedPrompt;
+    // Snapshots do not record a forced prompt today; without that side, omit the key (same
+    // "missing data ⇒ omit" rule as the other fields) instead of guessing "expert had none".
+    if (typeof snapshotForced === "boolean") prediction.forcedPrompt = consultForced === snapshotForced;
+
+    return Object.keys(prediction).length === 0 ? undefined : prediction;
+  } catch {
+    return undefined;
+  }
+}
 /** child-context-switch plan P0 (§2.3.1 point 1): customType of the entry the child-session extension appends at `agent_end` when a committed switch was never followed by a subsequent model request. */
 export const CHILD_SWITCH_SELFCHECK_CUSTOM_TYPE = "subagent:switch-selfcheck";
 /** child-context-switch plan §3.1 (point 4): customType of the entry the capability state machine (owned by a later package) appends on a disablement/other non-fatal capability notice. */
@@ -93,6 +155,8 @@ export interface SessionHandle {
   prompt(text: string): Promise<void>;
   /** Stage-1 input-budget preflight using pi's current effective prompt/tool definitions. */
   measureInputBudget?(prompt: string): { preBytes: number; preTokens: number };
+  /** C2 M2: record-only identity comparison computed before the first prompt. */
+  readonly consultIdentityPrediction?: ConsultIdentityPrediction;
   steer(text: string): Promise<void>;
   requestAbort(): Promise<void>;
   dispose(): DisposeReport;
@@ -463,13 +527,16 @@ class PiSessionHandle implements SessionHandle {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly killableHandles = new Set<KillableHandle>();
+  readonly consultIdentityPrediction?: ConsultIdentityPrediction;
   constructor(
     public readonly session: AgentSession,
     readonly childExtensionMissing: boolean = false,
     private readonly disposePrefixProbe: () => void = () => undefined,
+    consultIdentityPrediction?: ConsultIdentityPrediction,
   ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
+    if (consultIdentityPrediction !== undefined) this.consultIdentityPrediction = consultIdentityPrediction;
   }
   measureInputBudget(prompt: string): { preBytes: number; preTokens: number } {
     const byteLength = (value: string) => Buffer.byteLength(value, "utf8");
@@ -832,7 +899,7 @@ export class PiSessionDriver implements SessionDriver {
     // Consult C2 must fail closed after createAgentSession has allocated an AgentSession,
     // but before bind() or the first prompt. The driver owns this cleanup window because the
     // runner's late-arrival hook only sees successfully resolved handles.
-    const { consultGuard: _consultGuard, ...piSpec } = resolved;
+    const { consultGuard: _consultGuard, consultSnapshot, ...piSpec } = resolved;
     let created: AgentSession | undefined;
     let disposePrefixProbe: (() => void) | undefined;
     let disposed = false;
@@ -873,6 +940,8 @@ export class PiSessionDriver implements SessionDriver {
         if (verdict.ok !== true) {
           throw new Error("[consult-preserve:guard_unavailable:agent-hooks] invalid preflight result");
         }
+        const consultIdentityPrediction =
+          consultSnapshot === undefined ? undefined : compareConsultIdentity(session, consultSnapshot, sessionFile);
         try {
           guard.install(session);
         } catch (error) {
@@ -884,6 +953,7 @@ export class PiSessionDriver implements SessionDriver {
           session,
           computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
           disposePrefixProbe,
+          consultIdentityPrediction,
         );
       })
       .catch((error: unknown) => {

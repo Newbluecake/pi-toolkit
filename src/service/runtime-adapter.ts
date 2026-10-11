@@ -672,6 +672,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         const preH2Cwd = spec.cwd ?? process.cwd();
         let askerCwd: { cwd: string; isolated: boolean } = { cwd: preH2Cwd, isolated: false };
         let sessionSpec: SessionSpec = {
+          ...(consultC2 ? { consultSnapshot } : {}),
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
           ...(consultC2
             ? consultSnapshot.model === undefined && spec.model === undefined

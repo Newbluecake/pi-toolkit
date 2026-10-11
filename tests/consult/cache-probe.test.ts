@@ -18,7 +18,10 @@ const snapshot: ExpertRequestSnapshot = {
   lastRequestUsage: { input: 100, cacheRead: 50, cacheWrite: 50 },
 };
 
-const diagnostics = (costUsd: number): RunDiagnostics =>
+const diagnostics = (
+  costUsd: number,
+  consultIdentityPrediction?: RunDiagnostics["consultIdentityPrediction"],
+): RunDiagnostics =>
   ({
     createdAt: 0,
     phase: "settled",
@@ -32,6 +35,7 @@ const diagnostics = (costUsd: number): RunDiagnostics =>
     staleInputs: 0,
     unkillable: [],
     usage: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1, costUsd },
+    ...(consultIdentityPrediction === undefined ? {} : { consultIdentityPrediction }),
   }) as RunDiagnostics;
 
 const terminalExpert = (settledAt: number): RunSnapshot =>
@@ -116,6 +120,18 @@ describe("buildCacheProbe", () => {
       { input: 100, cacheRead: 100, cacheWrite: 0, output: 10, costUsd: 0.2 },
       { input: 120, cacheRead: 0, cacheWrite: 80, output: 8, costUsd: 0.3, toolsDrift: true },
     ]);
+  });
+
+  it("threads the driver prediction into the consult cache probe", () => {
+    const predicted = { system: false, model: true, thinking: true, cwd: true, forcedPrompt: false };
+    const probe = buildCacheProbe({
+      ref,
+      snapshot,
+      outcome: "completed",
+      consultDiagnostics: diagnostics(0, predicted),
+      registry: { get: () => undefined },
+    });
+    expect(probe?.identity.predicted).toEqual(predicted);
   });
 
   it("omits unavailable wire data and reports a null hit ratio for a zero prefix", () => {

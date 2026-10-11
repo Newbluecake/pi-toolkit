@@ -325,6 +325,15 @@ export interface ConsultGuard {
   counters(): ConsultGuardCounters;
 }
 
+/** Record-only C2 identity comparison attached to a consult session handle. */
+export interface ConsultIdentityPrediction {
+  system?: boolean;
+  model?: boolean;
+  thinking?: boolean;
+  cwd?: boolean;
+  forcedPrompt?: boolean;
+}
+
 export interface SpawnRequest {
   /** Dispatch-time input budget; the runtime measures both its coarse preflight and final provider payload. */
   inputBudget?: InputBudget;
@@ -1037,6 +1046,8 @@ export interface RunDiagnostics {
    *  `model_changed` after a set_model switch. Display-only; absent when the
    *  driver exposes no level and on runs persisted before this field shipped. */
   thinkingLevel?: string;
+  /** C2 M2: record-only comparison of a consult session against its expert snapshot. */
+  consultIdentityPrediction?: ConsultIdentityPrediction;
   label?: string;
   agentType?: string;
   /** Truncated dispatch prompt for agent-tree pending-row previews and /agent status. */
@@ -1309,6 +1320,8 @@ export type RunInput =
        *  session_created time). Absent when the driver exposes none — old journals
        *  and runs without the field keep loading unchanged. */
       thinking?: string;
+      /** C2 M2: handle-side record-only identity comparison, when available. */
+      consultIdentityPrediction?: ConsultIdentityPrediction;
     }
   | {
       kind: "startup_failed";
@@ -1391,6 +1404,8 @@ export interface RunState {
 export interface SessionSpec {
   /** C2 consult guard; intentionally non-serializable and never threaded as a SpawnRequest field. */
   consultGuard?: ConsultGuard;
+  /** Internal C2 handoff from the adapter to the driver; never serialized or exposed to tools. */
+  consultSnapshot?: ExpertRequestSnapshot;
   cwd?: string;
   agentDir?: string;
   model?: unknown;

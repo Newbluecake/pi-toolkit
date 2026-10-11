@@ -836,6 +836,9 @@ export function reduce(
         // M-B2 (thinking-level visibility): same ground-truth treatment for the
         // effective thinking level — only ever set when the handle reported one.
         ...(input.thinking === undefined ? {} : { thinkingLevel: input.thinking }),
+        ...(input.consultIdentityPrediction === undefined
+          ? {}
+          : { consultIdentityPrediction: input.consultIdentityPrediction }),
       },
     };
     // run-persistence plan D1/D2: the first time a sessionFile becomes known,

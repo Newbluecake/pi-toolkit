@@ -59,12 +59,13 @@ export interface ConsultCacheProbe {
   outcome: ConsultCallResult;
   identity: {
     preflight: "pass" | `fail:${string}`;
+    /** Record-only (plan §3.2 M2): a key is omitted when either side's fact is unavailable. */
     predicted?: {
-      system: boolean;
-      model: boolean;
-      thinking: boolean;
-      cwd: boolean;
-      forcedPrompt: boolean;
+      system?: boolean;
+      model?: boolean;
+      thinking?: boolean;
+      cwd?: boolean;
+      forcedPrompt?: boolean;
     };
     wire?: { system: boolean; tools: boolean; model: boolean; thinking: boolean };
     expertTools?: number;

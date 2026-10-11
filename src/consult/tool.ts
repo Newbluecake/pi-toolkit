@@ -526,6 +526,8 @@ export function buildCacheProbe(ctx: ConsultCacheProbeContext): ConsultCacheProb
       preflight: failureCode === undefined ? "pass" : `fail:${failureCode}`,
       ...(ctx.snapshot === undefined ? {} : { expertTools }),
     };
+    const predicted = ctx.consultDiagnostics?.consultIdentityPrediction;
+    if (predicted !== undefined) identity.predicted = predicted;
     if (expertRecord?.latest !== undefined && first !== undefined) {
       const wire = compareRecordedPrefix(expertRecord.latest, first);
       identity.wire = {
@@ -619,6 +621,11 @@ export function buildCacheProbe(ctx: ConsultCacheProbeContext): ConsultCacheProb
         preflight:
           prefixFailureCode(ctx.outcomeError) === undefined ? "pass" : `fail:${prefixFailureCode(ctx.outcomeError)}`,
         ...(ctx.snapshot === undefined ? {} : { expertTools: ctx.snapshot.tools.length }),
+        ...(ctx.consultDiagnostics?.consultIdentityPrediction === undefined
+          ? {}
+          : {
+              predicted: ctx.consultDiagnostics.consultIdentityPrediction,
+            }),
       },
     };
   }

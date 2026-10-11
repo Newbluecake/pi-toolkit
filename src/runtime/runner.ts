@@ -892,6 +892,9 @@ export class RuntimeRunner implements Runner {
         ...(handle.sessionFile === undefined ? {} : { sessionFile: handle.sessionFile }),
         ...(modelRef === undefined ? {} : { model: modelRef }),
         ...(thinking === undefined ? {} : { thinking }),
+        ...(handle.consultIdentityPrediction === undefined
+          ? {}
+          : { consultIdentityPrediction: handle.consultIdentityPrediction }),
       });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
       const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);
