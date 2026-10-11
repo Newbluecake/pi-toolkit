@@ -827,6 +827,9 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // transport offers it — `usePreview`'s scope derivation treats its absence as "nothing
     // is clickable" (`previewScopeOf`'s `hasTransport`).
     ...(transport.preview === undefined ? {} : { preview: transport.preview }),
+    // web-hub-avatar plan v2.1 §5: optional passthrough only; old/fake transports make no
+    // avatar request and expose no avatar surface.
+    ...(transport.avatar === undefined ? {} : { avatar: transport.avatar }),
     // worktree-diff plan v3.1 §4.6 (D4): same passthrough rule as `preview` — the surface rides
     // the handle iff the transport offers it (a test fake without it keeps "no scope").
     ...(transport.worktreeDiff === undefined ? {} : { worktreeDiff: transport.worktreeDiff }),

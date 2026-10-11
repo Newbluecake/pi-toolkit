@@ -58,6 +58,8 @@ import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 import { historyOutcomeFromResponse } from "./sessionHistory.ts";
 import { LOAD_TOP_BODY_MAX_BYTES, LOAD_TOP_CLIENT_TIMEOUT_MS, parseLoadTopWire } from "./load.js";
+import { AVATAR_DELETE_PATH, AVATAR_PATH } from "@protocol/avatar.ts";
+import { validateAvatarPng } from "@protocol/avatar-png.ts";
 
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
@@ -1492,6 +1494,123 @@ export function createPasswordClient(deps) {
     return await wtdiffGet(API.loadTop, LOAD_TOP_BODY_MAX_BYTES, parseLoadTopWire, signal, LOAD_TOP_CLIENT_TIMEOUT_MS);
   }
 
+  // -------------------------------------------------------------------------
+  // custom-avatar endpoints (web-hub-avatar plan v2.1 §2.1/§5, package C)
+  // -------------------------------------------------------------------------
+
+  let avatarEtag;
+  /** @type {Blob | undefined} */
+  let avatarBytes;
+  let avatarSide;
+
+  /** @param {any} r */
+  async function avatarErrorFromResponse(r) {
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body && typeof body === "object" ? body : {};
+    /** @type {any} */
+    const out = {
+      ok: false,
+      status: r.status,
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
+    };
+    if (typeof b.reason === "string") out.reason = b.reason;
+    if (b.effect === "unknown") out.effect = "unknown";
+    const raw = typeof r.headers?.get === "function" ? r.headers.get("Retry-After") : null;
+    const headerRetry = raw === null || raw === undefined ? NaN : Number(raw);
+    const retryAfterS =
+      Number.isFinite(headerRetry) && headerRetry >= 0
+        ? headerRetry
+        : typeof b.retryAfterS === "number" && b.retryAfterS >= 0
+          ? b.retryAfterS
+          : undefined;
+    if (retryAfterS !== undefined) out.retryAfterS = retryAfterS;
+    return out;
+  }
+
+  /** @param {unknown} e */
+  function avatarErrorFromException(e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === "E_ABORT") return { ok: false, status: 0, error: "E_ABORT" };
+    if (msg === "E_DEADLINE") return { ok: false, status: 0, error: "E_DEADLINE", effect: "unknown" };
+    return { ok: false, status: 0, error: "E_NETWORK", effect: "unknown" };
+  }
+
+  /** @param {any} opts */
+  async function avatarFetch(opts) {
+    const signal = opts?.signal;
+    if (signal?.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+    try {
+      const headers = { "X-PWH": "1" };
+      if (typeof avatarEtag === "string") headers["If-None-Match"] = avatarEtag;
+      const r = await request(AVATAR_PATH, { method: "GET", headers }, REQUEST_TIMEOUT_MS, signal);
+      if (r.status === 304) {
+        if (avatarBytes !== undefined && typeof avatarEtag === "string" && typeof avatarSide === "number")
+          return { ok: true, bytes: avatarBytes, etag: avatarEtag, side: avatarSide };
+        return { ok: false, status: 304, error: "E_NOT_MODIFIED" };
+      }
+      if (!r.ok) return await avatarErrorFromResponse(r);
+      const raw =
+        typeof r.arrayBuffer === "function"
+          ? await r.arrayBuffer()
+          : typeof r.blob === "function"
+            ? await (await r.blob()).arrayBuffer()
+            : undefined;
+      if (!(raw instanceof ArrayBuffer) && !ArrayBuffer.isView(raw))
+        return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+      const bytes =
+        raw instanceof ArrayBuffer ? new Uint8Array(raw) : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+      const validation = validateAvatarPng(bytes);
+      if (!validation.ok) return { ok: false, status: 0, error: "E_BAD_RESPONSE", reason: validation.reason };
+      const etag = typeof r.headers?.get === "function" ? r.headers.get("ETag") : null;
+      if (typeof etag !== "string" || etag === "") return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+      avatarEtag = etag;
+      avatarBytes = new Blob([bytes], { type: "image/png" });
+      avatarSide = validation.side;
+      return { ok: true, bytes: avatarBytes, etag, side: validation.side };
+    } catch (e) {
+      return avatarErrorFromException(e);
+    }
+  }
+
+  /** @param {Uint8Array} bytes @param {any} [opts] */
+  async function avatarUpload(bytes, opts) {
+    const signal = opts?.signal;
+    try {
+      const r = await request(
+        AVATAR_PATH,
+        { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-PWH": "1" }, body: bytes },
+        CMD_REQUEST_TIMEOUT_MS,
+        signal,
+      );
+      if (!r.ok) return await avatarErrorFromResponse(r);
+      return { ok: true, data: await r.json() };
+    } catch (e) {
+      return avatarErrorFromException(e);
+    }
+  }
+
+  async function avatarRemove() {
+    try {
+      const r = await request(
+        AVATAR_DELETE_PATH,
+        { method: "POST", headers: { "Content-Type": "application/json", "X-PWH": "1" }, body: "{}" },
+        CMD_REQUEST_TIMEOUT_MS,
+      );
+      if (!r.ok) return await avatarErrorFromResponse(r);
+      return { ok: true, data: await r.json() };
+    } catch (e) {
+      return avatarErrorFromException(e);
+    }
+  }
+
+  const avatar = { fetch: avatarFetch, upload: avatarUpload, remove: avatarRemove };
+
   return {
     /** Clear a stray `#t=` (never read/sent in password mode), fetch session info, then open the stream. */
     async start() {
@@ -1519,6 +1638,7 @@ export function createPasswordClient(deps) {
     worktreeDiff,
     worktreeGraph,
     loadTop,
+    avatar,
     close() {
       closed = true;
       closeStream();

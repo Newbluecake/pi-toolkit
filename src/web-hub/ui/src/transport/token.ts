@@ -16,6 +16,7 @@
  */
 import { API } from "@logic/contract.js";
 import { createClient } from "@logic/token-client.js";
+import type { AvatarDeleteOutcome, AvatarFetchOutcome, AvatarWriteOutcome } from "@protocol/avatar.js";
 import type {
   CmdOutcome,
   HubTransport,
@@ -212,5 +213,13 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
     // same final-E_AUTH rule as worktreeGraph/preview above (a GET, replayed once by the
     // client's `withRelogin` on a 401).
     loadTop: (signal) => withAuthNotice(deps, () => client.loadTop(signal) as Promise<LoadTopOutcome>),
+    // web-hub-avatar plan v2.1 §5 (package C): GET is safe to replay through the client's
+    // token relogin path; writes are deliberately one-shot and never replayed.
+    avatar: {
+      fetch: (opts) => withAuthNotice(deps, () => client.avatar.fetch(opts) as Promise<AvatarFetchOutcome>),
+      upload: (bytes, opts) =>
+        withAuthNotice(deps, () => client.avatar.upload(bytes, opts) as Promise<AvatarWriteOutcome>),
+      remove: () => withAuthNotice(deps, () => client.avatar.remove() as Promise<AvatarDeleteOutcome>),
+    },
   } satisfies HubTransport;
 }

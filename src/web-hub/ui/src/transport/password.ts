@@ -8,7 +8,9 @@
  * land unnoticed again.
  */
 import { API } from "@logic/contract.js";
+import { AVATAR_DELETE_PATH, AVATAR_PATH } from "@protocol/avatar.js";
 import { createPasswordClient } from "@logic/password-client.js";
+import type { AvatarDeleteOutcome, AvatarFetchOutcome, AvatarWriteOutcome } from "@protocol/avatar.js";
 import type {
   CmdOutcome,
   LoadTopOutcome,
@@ -79,6 +81,8 @@ const REST_AUTH_PATHS: ReadonlySet<string> = new Set([
   // sysload plan §7.1/§7.3/§10 (package P4): `GET /api/load/top` has no query params at all
   // (hub-global, no agentKey/sessionId) — an exact-match entry like `agentRemove`, not a prefix.
   API.loadTop,
+  AVATAR_PATH,
+  AVATAR_DELETE_PATH,
 ]);
 
 function isRestAuthEndpoint(url: string): boolean {
@@ -199,5 +203,12 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an
     // exact-match entry for `API.loadTop`) — never inside the client, so nothing double-fires.
     loadTop: (signal) => client.loadTop(signal) as Promise<LoadTopOutcome>,
+    // web-hub-avatar plan v2.1 §5 (package C): password mode has no relogin dance. The fetch
+    // wrapper above reports 401 for both reads and writes; no call is retried here.
+    avatar: {
+      fetch: (opts) => client.avatar.fetch(opts) as Promise<AvatarFetchOutcome>,
+      upload: (bytes, opts) => client.avatar.upload(bytes, opts) as Promise<AvatarWriteOutcome>,
+      remove: () => client.avatar.remove() as Promise<AvatarDeleteOutcome>,
+    },
   } satisfies PasswordTransport;
 }
