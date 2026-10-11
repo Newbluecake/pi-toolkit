@@ -1242,7 +1242,17 @@ export function createClient(deps) {
     if (signal !== undefined && signal !== null && signal.aborted === true) {
       return { ok: false, status: 0, error: "E_ABORT" };
     }
-    return await wtdiffGet(API.loadTop, LOAD_TOP_BODY_MAX_BYTES, parseLoadTopWire, signal, LOAD_TOP_CLIENT_TIMEOUT_MS);
+    const r = await wtdiffGet(
+      API.loadTop,
+      LOAD_TOP_BODY_MAX_BYTES,
+      parseLoadTopWire,
+      signal,
+      LOAD_TOP_CLIENT_TIMEOUT_MS,
+    );
+    // wtdiffGet settles `{ ok: true, value }`; `LoadTopOutcome` (transport/types.ts) is
+    // `{ ok: true, data }` — the transport's cast hid this mismatch and every successful
+    // snapshot was dropped as "unavailable" (2026-10-11 field report).
+    return r.ok ? { ok: true, data: r.value } : r;
   }
 
   // -------------------------------------------------------------------------

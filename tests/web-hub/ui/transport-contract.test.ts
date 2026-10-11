@@ -2506,3 +2506,28 @@ describe("password transport: worktreeGraph() 401 (one-shot — the cookie sessi
     expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
   });
 });
+
+// 2026-10-11 field report: both logic clients settled `loadTop` as `{ ok: true, value }` while
+// `LoadTopOutcome` (and useHub.fetchLoadTop) read `data` — the transports' cast hid it and the
+// load card's Top section never showed a snapshot. Pin the outcome shape on BOTH adapters.
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: loadTop outcome shape (LoadTopOutcome.data)", (_mode, make) => {
+  const TOP = {
+    at: 1,
+    byCpu: [{ comm: "pi", count: 1, cpuPct: 12.5, rssBytes: 1024, pids: [{ pid: 7, cpuPct: 12.5, rssBytes: 1024 }] }],
+    byRss: [],
+  };
+  it("a 200 snapshot settles { ok: true, data } (never `value`)", async () => {
+    const h = make(async () => respStream(200, [new TextEncoder().encode(JSON.stringify(TOP))], {}));
+    const out = await h.transport.loadTop!();
+    expect(out).toEqual({ ok: true, data: TOP });
+    expect(h.fetchCalls.some((c) => c.url === "/api/load/top" && c.init.headers?.["X-PWH"] === "1")).toBe(true);
+  });
+  it("an off-contract body still settles E_BAD_RESPONSE", async () => {
+    const h = make(async () => respStream(200, [new TextEncoder().encode(JSON.stringify({ nope: 1 }))], {}));
+    const out = await h.transport.loadTop!();
+    expect(out).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
+  });
+});
