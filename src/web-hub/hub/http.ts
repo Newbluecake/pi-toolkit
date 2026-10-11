@@ -92,7 +92,13 @@ import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
 import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
 import { WTGRAPH_PATH } from "../protocol/worktree-graph.js";
-import { createHubLoad, loadTopErrorCode, LOAD_TOP_DEADLINE_MS, type HubLoadService } from "./load.js";
+import {
+  createHubLoad,
+  loadTopErrorCode,
+  LOAD_TOP_DEADLINE_MS,
+  LOAD_TOP_LAN_TOTAL_MS,
+  type HubLoadService,
+} from "./load.js";
 import type {
   AgentView,
   AvatarRoutes,
@@ -1378,21 +1384,28 @@ async function handleLanRequestInner(
     });
   }
 
-  // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — dispatched at the same spot
-  // as the spawn branch above (after headless, before the method branches). LAN additionally
-  // requires `mode === "on"` (§4.7: `mode:"loopback"` falls through to the original 404,
-  // byte-identical to not-enabled — D12). `authorize` mirrors the cmd/dialog branch's LAN
-  // segment, but with preview's own §3.1 ② reserve (`PREVIEW_AUTH_RESERVE_MS`: after auth at
-  // least 4s of the 8s admission budget must remain for the fs phases).
+  // sysload plan §7.1/§7.3 (web-hub-load LAN-budget fix): `GET /api/load/top` — dispatched at
+  // the same spot as the spawn/preview branches (after headless, before the method branches).
+  // The auth budget is derived from `LOAD_TOP_LAN_TOTAL_MS` (an 8s total admission window, same
+  // shape as preview/wtdiff below), reserving `LOAD_TOP_DEADLINE_MS` (1.5s) for the scan phase
+  // `serveLoadTop` runs afterwards — NOT from `LOAD_TOP_DEADLINE_MS` itself, which would squeeze
+  // LAN's IPC-bound auth round-trip down to ~1s and fail it on any real system under load (see
+  // `LOAD_TOP_LAN_TOTAL_MS`'s doc comment in `load.ts` for the full before/after).
   if (rt.load !== undefined && method === "GET" && path === LOAD_TOP_PATH) {
     if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
-    const authDeadlineMs = deriveBudget(LOAD_TOP_DEADLINE_MS, LAN_AUTH_CAP_MS, 500);
+    const authDeadlineMs = deriveBudget(LOAD_TOP_LAN_TOTAL_MS, LAN_AUTH_CAP_MS, LOAD_TOP_DEADLINE_MS);
     const authFailure: { code?: string } = {};
     const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
     if (session === undefined) return;
     return serveLoadTop(rt.load, req, res, `lan:u${session.userId}:load-top`, rt.cmdLimit ?? createCmdLimit(rt.now));
   }
 
+  // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — dispatched at the same spot
+  // as the spawn branch above (after headless, before the method branches). LAN additionally
+  // requires `mode === "on"` (§4.7: `mode:"loopback"` falls through to the original 404,
+  // byte-identical to not-enabled — D12). `authorize` mirrors the cmd/dialog branch's LAN
+  // segment, but with preview's own §3.1 ② reserve (`PREVIEW_AUTH_RESERVE_MS`: after auth at
+  // least 4s of the 8s admission budget must remain for the fs phases).
   if (rt.preview !== undefined && rt.preview.mode === "on" && method === "GET" && path === PREVIEW_PATH) {
     return rt.preview.handle(req, res, query, {
       listener: "lan",

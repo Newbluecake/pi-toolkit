@@ -225,7 +225,7 @@ const byRssRows = computed(() => rows(topData.value?.byRss, "rss"));
       <div class="ld-section-title">{{ t("load.sectionTop") }}</div>
       <p v-if="topLoading" class="ld-top-note">{{ t("load.topLoading") }}</p>
       <p v-if="topError" class="ld-top-note ld-top-error" role="alert">
-        {{ t("load.topUnavailable")
+        {{ t("load.topUnavailable") }} · {{ topError
         }}<template v-if="topRetryAfter !== undefined"> · {{ t("load.retryAfter", { n: topRetryAfter }) }}</template>
         <button type="button" class="ld-top-retry" @click="fetchLoadTop">{{ t("load.topRetry") }}</button>
       </p>

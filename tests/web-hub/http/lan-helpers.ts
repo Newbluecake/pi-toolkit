@@ -18,7 +18,7 @@ import { createScope } from "../../../src/web-hub/hub/lifecycle.js";
 import { createHostsPort } from "../../../src/web-hub/hub/net-hosts.js";
 import { createKdfAdmission } from "../../../src/web-hub/hub/kdf-admission.js";
 import { createLoginLimiter, type LoginLimiter } from "../../../src/web-hub/hub/ratelimit.js";
-import type { HubEvent, HubLanConfig, HttpFrontend, LanStatus } from "../../../src/web-hub/hub/ports.js";
+import type { HubEvent, HubLanConfig, HubLoadConfig, HttpFrontend, LanStatus } from "../../../src/web-hub/hub/ports.js";
 import type { CommandRouter } from "../../../src/web-hub/hub/ports.js";
 import type { SpawnFrontendPort } from "../../../src/web-hub/hub/spawn/ports.js";
 import type { AgentRemoveFrontendPort } from "../../../src/web-hub/hub/agent-remove.js";
@@ -91,6 +91,13 @@ export async function startLan(
      * `.remove()` (the LAN `agentRemove` path's row-6 fallback needs one) — omitted keeps the
      * pre-existing empty stub (`list`/`get` only, no agents ever present). */
     registry?: RegistryView;
+    /** web-hub load/top LAN budget regression: lets a test wire `config.load` (and therefore
+     * `rt.load`/`GET /api/load/top`) through the SAME `createHttpFrontend` call the rest of this
+     * harness builds — omitted keeps the LAN face byte-identical to not-enabled (404). */
+    load?: HubLoadConfig;
+    /** Lets a test supply its own (possibly latency-injecting) `FakeLanStore` — e.g. to simulate
+     * a slow `touchSession` IPC round-trip. Omitted keeps the default in-memory `fakeLanStore()`. */
+    store?: FakeLanStore;
   } = {},
 ): Promise<LanHarness> {
   const clock = opts.clock ?? fakeClock();
@@ -98,7 +105,7 @@ export async function startLan(
   const stateDir = join(dir, "state");
   const paths = testHubPaths(stateDir);
   const log = captureLog();
-  const store = fakeLanStore();
+  const store = opts.store ?? fakeLanStore();
   const kdf = fakeKdf();
   const limiter = createLoginLimiter({ now: clock.now });
   const admission = createKdfAdmission({ now: clock.now, isTightened: limiter.isTightened });
@@ -118,7 +125,15 @@ export async function startLan(
   let lastStatus: LanStatus = { state: "starting" };
 
   const fe = createHttpFrontend({
-    config: { v: 1, home: dir, port: 0, idleExitMinutes: 10, pluginVersion: "0.0.0-test", buildId: "b1" },
+    config: {
+      v: 1,
+      home: dir,
+      port: 0,
+      idleExitMinutes: 10,
+      pluginVersion: "0.0.0-test",
+      buildId: "b1",
+      ...(opts.load === undefined ? {} : { load: opts.load }),
+    },
     paths,
     registry: opts.registry ?? { list: () => [], get: () => undefined },
     bus: {

@@ -237,8 +237,30 @@ describe("LoadCard.vue — top processes (fetchLoadTop single-flight + three sta
       hubWithLoadTop({ loading: false, error: "E_NETWORK" } as HubState["loadTop"], fetchLoadTop),
     );
     expect(fetchLoadTop).toHaveBeenCalledTimes(1); // the mount-time fire
+    expect(wrapper.text()).toContain("E_NETWORK");
     await wrapper.get(".ld-top-retry").trigger("click");
     expect(fetchLoadTop).toHaveBeenCalledTimes(2);
+  });
+
+  // Diagnostics fix (web-hub load LAN-budget bug report): the error line must surface the raw
+  // (compact, English-only per AGENTS.md's inline-marker convention) error code straight from
+  // the transport, e.g. "top 快照不可用 · E_DEADLINE" — so a future failure is self-explaining
+  // without digging through logs that, for this endpoint, carry no dedicated audit trail at all.
+  it("shows the server's error code as a compact ` · CODE` marker next to the unavailable copy", () => {
+    const wrapper = mountCard(load(), hubWithLoadTop({ loading: false, error: "E_DEADLINE" } as HubState["loadTop"]));
+    const note = wrapper.get(".ld-top-error").text();
+    expect(note).toContain("Top-process snapshot unavailable");
+    expect(note).toContain("E_DEADLINE");
+    expect(note).toMatch(/unavailable\s*\u00b7\s*E_DEADLINE/);
+  });
+
+  it("the error-code marker also renders (untranslated, same English token) under zh", () => {
+    setLangOverride("zh");
+    const wrapper = mountCard(load(), hubWithLoadTop({ loading: false, error: "E_DB" } as HubState["loadTop"]));
+    const note = wrapper.get(".ld-top-error").text();
+    expect(note).toContain("top 快照不可用");
+    expect(note).toContain("E_DB");
+    expect(note).toMatch(/快照不可用\s*\u00b7\s*E_DB/);
   });
 
   // Bug fix (user report): the "unavailable" note's `v-else-if` used to fire alongside the

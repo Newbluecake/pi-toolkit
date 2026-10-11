@@ -19,7 +19,20 @@ import type { HubLoadConfig, HubLog } from "./ports.js";
 export const LOAD_HUB_CAP = "load.v1";
 export const LOAD_TOP_CACHE_MS = 2_000;
 export const LOAD_TOP_WAITERS_MAX = 8;
+/** Scan-only budget (loopback's deadline and the LAN scan phase's fair share, below). Never the
+ * LAN request's own total/auth budget — see `LOAD_TOP_LAN_TOTAL_MS`. */
 export const LOAD_TOP_DEADLINE_MS = 1_500;
+/** web-hub-load LAN-budget fix: the LAN branch's own total admission window, mirroring the
+ * ~8s total request budgets `preview`/`worktree-diff` use for their LAN GETs (`PREVIEW_AUTH_RESERVE_MS`
+ * / `WTDIFF_AUTH_RESERVE_MS` both carve a `LAN_AUTH_CAP_MS`-capped (3s) auth budget out of an 8s
+ * total). Before this constant existed, the LAN branch derived its auth budget straight from the
+ * 1.5s scan-only `LOAD_TOP_DEADLINE_MS` (`deriveBudget(1500, 3000, 500)` = 1000ms) — far tighter
+ * than every other LAN GET endpoint. LAN auth is an IPC round-trip to the separate sqlite-backed
+ * auth store (unlike loopback's synchronous in-process cookie check), so on a real system under
+ * load that round-trip regularly exceeded 1000ms while comfortably finishing in 1-3s, making the
+ * on-demand "Top 进程" panel fail every time (503 `E_DB`) on LAN while loopback (and the SSE-pushed
+ * snapshot, whose auth path carries no deadline at all) kept working. */
+export const LOAD_TOP_LAN_TOTAL_MS = 8_000;
 
 export interface HubLoadService {
   latest(): LoadWire | undefined;
