@@ -37,10 +37,12 @@ import {
   onProvenHit,
   onRealRequest,
   onRequestSettled,
+  onSuccessfulRealRequest,
   onUnproven,
   renderCacheStatus,
   readCacheStatusTheme,
   renderKeepaliveReportLines,
+  KEEPALIVE_AUDIT_CUSTOM_TYPE,
   type CacheDisplayMode,
   type CapturedRequest,
   type CaptureFingerprint,
@@ -136,7 +138,7 @@ export interface KeepalivePort {
   /** I-K9: this instance's unique, non-reusable id; captured into `CapturedRequest.instance`. */
   readonly instanceId: string;
   noteRequest(captured: CapturedRequest): void;
-  noteRequestSettled(sessionId: string, instance: string): void;
+  noteRequestSettled(sessionId: string, instance: string, successful?: boolean): void;
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void;
   /**
    * plan.md §6.3: consumes the one-shot 1h-upgrade permit if the window has one
@@ -255,6 +257,12 @@ export interface CacheKeepaliveDeps {
   runBudgetUsd?: number;
   /** Seeds the run-level $ spend counter — resume continuity (summing a resumed session's prior audit entries) is the wiring layer's job, not this service's. Default 0. */
   runSpentSeedUsd?: number;
+  /** Session-level keepalive state read back from this branch across /reload (main session only). */
+  restoredState?: SessionTotals | undefined;
+  /** Main-session-only transient breaker recovery; child keepalive remains byte-compatible. */
+  recoverTransientFailures?: boolean | undefined;
+  /** Main-session-only session snapshot persistence; child audit entries remain byte-compatible. */
+  persistSessionState?: boolean | undefined;
   /** Rolling 24h process-wide $ budget, passed to `pingLedger.tryAcquire` on every call (so `/agent settings` changes apply live). Only meaningful together with `pingLedger`. */
   processBudgetUsd?: number;
   /** Process-wide concurrent-ping slot cap, passed to `pingLedger.tryAcquire` on every call. Only meaningful together with `pingLedger`. */
@@ -266,8 +274,6 @@ export interface CacheKeepaliveDeps {
   /** `false` ⇒ never call `ctx.ui.setStatus` (child sessions have no status bar to write). Default true (main session unaffected). */
   statusBar?: boolean;
 }
-
-const AUDIT_CUSTOM_TYPE = "subagent:cache-keepalive";
 
 function safeSetStatus(ctx: ExtensionContext, text: string | undefined): void {
   try {
@@ -306,7 +312,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private activeTools = 0;
   private uiPrompts = 0;
   private window: WindowState = createInitialWindowState();
-  private session: SessionTotals = createInitialSessionTotals();
+  private session: SessionTotals;
   private dropped = { sessionMismatch: 0, instanceMismatch: 0, epochMismatch: 0 };
   private lastSkip: TickSkipReason | undefined;
   /** See `KeepaliveReport.lastPingDiagnostics`. */
@@ -322,6 +328,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.clock = deps.clock ?? systemClock;
     this.ownSessionId = deps.sessionId;
     this.instanceId = `${deps.sessionId}#${this.clock.now()}#${randomUUID().slice(0, 8)}`;
+    this.session = deps.restoredState ?? createInitialSessionTotals();
     this.runSpentUsd = Math.max(0, deps.runSpentSeedUsd ?? 0);
   }
 
@@ -530,11 +537,20 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
   private audit(kind: string, extra: Record<string, unknown> = {}): void {
     try {
-      this.deps.appendEntry?.(AUDIT_CUSTOM_TYPE, {
+      this.deps.appendEntry?.(KEEPALIVE_AUDIT_CUSTOM_TYPE, {
         kind,
         at: this.clock.now(),
         windowEpoch: this.window.windowEpoch,
         sessionPings: this.session.pings,
+        ...(this.deps.persistSessionState
+          ? {
+              session: {
+                ...this.session,
+                disabled: this.session.disabled ?? null,
+                lastUnproven: this.session.lastUnproven ?? null,
+              },
+            }
+          : {}),
         ...extra,
       });
     } catch {
@@ -963,7 +979,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           });
         }
       } else {
-        const applied = onUnproven(this.window, this.session, pingEpoch, outcome.kind, this.clock.now());
+        const applied = onUnproven(
+          this.window,
+          this.session,
+          pingEpoch,
+          outcome.kind,
+          this.clock.now(),
+          outcome.kind === "http" ? outcome.status : undefined,
+        );
         if (applied.applied) {
           this.window = applied.window;
           this.session = applied.session;
@@ -1028,9 +1051,17 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.publishVisibility();
   }
 
-  noteRequestSettled(sessionId: string, instance: string): void {
+  noteRequestSettled(sessionId: string, instance: string, successful = false): void {
     if (!this.accept(sessionId, instance)) return;
     this.window = onRequestSettled(this.window);
+    const nextSession = this.deps.recoverTransientFailures
+      ? onSuccessfulRealRequest(this.session, successful)
+      : this.session;
+    if (nextSession !== this.session) {
+      this.session = nextSession;
+      this.audit("real-request-recovered");
+      this.publishVisibility();
+    }
   }
 
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void {

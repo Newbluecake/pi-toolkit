@@ -13,6 +13,7 @@ import {
   renderCacheStatus,
   readCacheStatusTheme,
   renderKeepaliveReportLines,
+  isSuccessfulRealRequest,
   type CapturedRequest,
   type FingerprintContextInput,
   type PrefixEstimate,
@@ -390,17 +391,17 @@ function wireCacheEvents(
   });
   // adaptive plan.md §9.4: ledger reconcile on every request-settle event —
   // the m2 watermark makes the triple-fire idempotent.
-  pi.on("message_end", (_event, ctx) => {
+  pi.on("message_end", (event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
-    if (ka) ka.noteRequestSettled(sessionId, ka.instanceId);
+    if (ka) ka.noteRequestSettled(sessionId, ka.instanceId, isSuccessfulRealRequest(event.message));
     const ad = getAdaptive();
     if (ad) ad.reconcile(sessionId, ad.instanceId);
   });
-  pi.on("turn_end", (_event, ctx) => {
+  pi.on("turn_end", (event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
-    if (ka) ka.noteRequestSettled(sessionId, ka.instanceId);
+    if (ka) ka.noteRequestSettled(sessionId, ka.instanceId, isSuccessfulRealRequest(event.message));
     const ad = getAdaptive();
     if (ad) ad.reconcile(sessionId, ad.instanceId);
   });

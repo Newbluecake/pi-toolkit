@@ -122,6 +122,7 @@ import {
   type CacheAdaptiveService,
 } from "./service/cache-adaptive.js";
 import { readBackAdaptiveSessionState } from "./cache-ttl/adaptive.js";
+import { readBackKeepaliveSessionState } from "./cache-ttl/keepalive-state.js";
 import { createQuotaStack, type QuotaHintState, type QuotaService, type QuotaStack } from "./quota/index.js";
 import { readQuotaStatusTheme } from "./quota/render.js";
 import { evaluateQuotaGate, parseSubscriptionProviders, quotaAnnotation, toLadderLevel } from "./quota/gate.js";
@@ -2347,6 +2348,15 @@ export function buildSessionStack(
         switchImminent: () => isSwitchImminentNow(compactHint, ctx),
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),
+        // Keepalive breaker state is session-level; restore it from this branch
+        // across /reload while deliberately rebuilding window/prefix state fresh.
+        restoredState: readBack
+          ? readBackKeepaliveSessionState(
+              (ctx.sessionManager as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [],
+            )
+          : undefined,
+        recoverTransientFailures: true,
+        persistSessionState: true,
       })
     : undefined;
   previousKeepalive = keepalive;

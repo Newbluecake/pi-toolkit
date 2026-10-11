@@ -124,6 +124,14 @@ Anthropic「cache read 免费刷新 TTL」的特性给缓存续命。
   try/catch，抛出即自我 dispose。
 - **I-K7（只认 proven hit，B3）**：会话级 breaker 由 `unproven` 计数驱动，**不因真实请求重置**；
   `provenWrite ≥ 1` 或 `consecutiveUnproven ≥ 2` 或 `unprovenTotal ≥ 3` ⇒ 整会话永久停用。
+- **I-K7 amendment（2026-10-11，用户裁决）**：主会话的失败 breaker 分为 transient 与
+  non-transient 两组。`network`、`accepted-then-lost`、`malformed` 以及 HTTP 408/429/5xx
+  仍按原连续 2 次 / 累计 3 次阈值立即停 ping，但该次停用标记为 transient；下一次**成功结算的
+  真实 provider 请求**（assistant response 带 usage，且不是 error/abort）清零 transient 计数并恢复
+  ping。`proven-write`、`no-usage`、其它 HTTP 4xx 及任何达到 non-transient 阈值的 mixed case
+  仍永久停用；失败或 abort 的真实请求不恢复。读回 `/reload` 时保留 transient/permanent 标记，
+  仅 transient 可由上述成功真实请求解除。I-K8 epoch 丢弃、ping ledger、child-session keepalive
+  与 adaptive breaker 语义不变。
 - **I-K8（窗口代际，B5）**：每次 ping 在发起时绑定当时的 `windowEpoch`；`runPing()` 的每个
   `await` 返回点、以及**任何 reducer 写入之前**都必须校验 epoch 未变。epoch 失配 ⇒ 静默丢弃：
   **不计 proven、不计 unproven、不回写任何窗口字段、不动 `aliveUntil`/`nextPingAt`、

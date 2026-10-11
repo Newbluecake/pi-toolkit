@@ -233,13 +233,20 @@ export interface SessionTotals {
   /** Total successful (proven-hit) pings this session. */
   pings: number;
   cacheReadTokens: number;
-  /** I-K7: reset only by a proven hit — never by a real request. */
+  /** Legacy aggregate streak, retained for status/readback compatibility. */
   consecutiveUnproven: number;
-  /** I-K7: monotonic for the session — never reset. */
+  /** Legacy aggregate total, retained for status/readback compatibility. */
   unprovenTotal: number;
-  /** I-K7: monotonic — a single proven write disables the session forever. */
+  /** Monotonic — a single proven write disables the session forever. */
   provenWrites: number;
-  disabled: { reason: string; at: Millis } | undefined;
+  /** Transient-only breaker counters; the real-request recovery path clears these. */
+  transientConsecutiveUnproven: number;
+  transientUnprovenTotal: number;
+  /** Non-transient breaker counters; these remain session-permanent. */
+  nonTransientConsecutiveUnproven: number;
+  nonTransientUnprovenTotal: number;
+  /** `transient: true` marks a disable that a successful real request may clear. */
+  disabled: { reason: string; at: Millis; transient?: true } | undefined;
   lastUnproven: { kind: string; at: Millis } | undefined;
   // plan.md §9.2 (M2): post-hoc load-bearing vs. wasted accounting.
   unnecessaryWindows: number;
@@ -268,6 +275,10 @@ export function createInitialSessionTotals(): SessionTotals {
     consecutiveUnproven: 0,
     unprovenTotal: 0,
     provenWrites: 0,
+    transientConsecutiveUnproven: 0,
+    transientUnprovenTotal: 0,
+    nonTransientConsecutiveUnproven: 0,
+    nonTransientUnprovenTotal: 0,
     disabled: undefined,
     lastUnproven: undefined,
     unnecessaryWindows: 0,
@@ -278,6 +289,89 @@ export function createInitialSessionTotals(): SessionTotals {
     discardedWindows: 0,
     discardedPings: 0,
   };
+}
+
+/** The custom entry type used to persist the session-level breaker snapshot. */
+export const KEEPALIVE_AUDIT_CUSTOM_TYPE = "subagent:cache-keepalive";
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Rehydrate only session-level breaker/accounting fields from the current
+ * branch. Window/prefix state is intentionally not restored across /reload.
+ * Invalid or partial snapshots degrade field-by-field and never throw.
+ */
+export function readBackKeepaliveSessionState(branch: readonly unknown[]): SessionTotals | undefined {
+  try {
+    let restored: SessionTotals | undefined;
+    for (const raw of branch) {
+      const entry = record(raw);
+      if (entry?.type !== "custom" || entry.customType !== KEEPALIVE_AUDIT_CUSTOM_TYPE) continue;
+      const data = record(entry.data);
+      const snapshot = record(data?.session);
+      if (!snapshot) continue;
+      const base = restored ?? createInitialSessionTotals();
+      const next: SessionTotals = { ...base };
+      for (const key of [
+        "pings",
+        "cacheReadTokens",
+        "consecutiveUnproven",
+        "unprovenTotal",
+        "provenWrites",
+        "transientConsecutiveUnproven",
+        "transientUnprovenTotal",
+        "nonTransientConsecutiveUnproven",
+        "nonTransientUnprovenTotal",
+        "unnecessaryWindows",
+        "unnecessaryPings",
+        "loadBearingWindows",
+        "loadBearingPings",
+        "avoidedMissTokens",
+        "discardedWindows",
+        "discardedPings",
+      ] as const) {
+        const value = finiteNonNegative(snapshot[key]);
+        if (value !== undefined) next[key] = value;
+      }
+      if ("disabled" in snapshot) {
+        const disabled = record(snapshot.disabled);
+        if (disabled === undefined) {
+          next.disabled = undefined;
+        } else {
+          const reason = typeof disabled.reason === "string" && disabled.reason !== "" ? disabled.reason : undefined;
+          const at = finiteNonNegative(disabled.at);
+          if (reason !== undefined && at !== undefined) {
+            next.disabled = {
+              reason,
+              at: at as Millis,
+              ...(disabled.transient === true ? { transient: true as const } : {}),
+            };
+          }
+        }
+      }
+      if ("lastUnproven" in snapshot) {
+        const last = record(snapshot.lastUnproven);
+        if (last === undefined) next.lastUnproven = undefined;
+        else {
+          const kind = typeof last.kind === "string" && last.kind !== "" ? last.kind : undefined;
+          const at = finiteNonNegative(last.at);
+          if (kind !== undefined && at !== undefined) next.lastUnproven = { kind, at: at as Millis };
+        }
+      }
+      restored = next;
+    }
+    return restored;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface KeepaliveConfig {
@@ -800,6 +894,55 @@ export function onRequestSettled(window: WindowState): WindowState {
   return window.requestInFlight ? { ...window, requestInFlight: false } : window;
 }
 
+/**
+ * A real provider response is the only settle event that can recover a
+ * transient breaker. Pi emits several settle-shaped events for one request;
+ * callers pass the assistant message from whichever event they have.
+ */
+export function isSuccessfulRealRequest(message: unknown): boolean {
+  if (message === null || typeof message !== "object" || Array.isArray(message)) return false;
+  const candidate = message as { role?: unknown; usage?: unknown; stopReason?: unknown };
+  return (
+    candidate.role === "assistant" &&
+    candidate.usage !== undefined &&
+    candidate.usage !== null &&
+    typeof candidate.usage === "object" &&
+    !Array.isArray(candidate.usage) &&
+    candidate.stopReason !== "error" &&
+    candidate.stopReason !== "aborted"
+  );
+}
+
+function isTransientUnproven(kind: UnprovenKind, httpStatus?: number): boolean {
+  if (kind === "network" || kind === "accepted-then-lost" || kind === "malformed") return true;
+  if (kind !== "http" || httpStatus === undefined) return false;
+  return httpStatus === 408 || httpStatus === 429 || (httpStatus >= 500 && httpStatus <= 599);
+}
+
+function isPermanentThresholdMet(session: SessionTotals): boolean {
+  return (
+    session.provenWrites >= 1 ||
+    session.nonTransientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT ||
+    session.nonTransientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT
+  );
+}
+
+/**
+ * Recover only a transient disable after a successful real provider request.
+ * Economic/semantic failures remain permanent, including a non-transient
+ * threshold reached after an earlier transient disable.
+ */
+export function onSuccessfulRealRequest(session: SessionTotals, successful: boolean): SessionTotals {
+  if (!successful || session.disabled?.transient !== true || isPermanentThresholdMet(session)) return session;
+  return {
+    ...session,
+    consecutiveUnproven: 0,
+    transientConsecutiveUnproven: 0,
+    transientUnprovenTotal: 0,
+    disabled: undefined,
+  };
+}
+
 /** Ping about to be sent — spend one unit of the per-window budget up front (never refunded once the fetch is issued). */
 export function onPingStarted(window: WindowState, now: Millis): WindowState {
   return { ...window, pingInFlight: true, pings: window.pings + 1, pingStartedAt: now };
@@ -844,6 +987,8 @@ export function onProvenHit(
     pings: session.pings + 1,
     cacheReadTokens: session.cacheReadTokens + outcome.cacheReadTokens,
     consecutiveUnproven: 0, // only a proven hit can clear the streak (I-K7).
+    transientConsecutiveUnproven: 0,
+    nonTransientConsecutiveUnproven: 0,
   };
   return { applied: true, window: newWindow, session: newSession };
 }
@@ -851,9 +996,9 @@ export function onProvenHit(
 /**
  * Everything that isn't a proven hit (B3): failures, missing usage, double
  * zero, disconnects, HTTP errors, network errors, and `proven-write` (a
- * positive signal a real write happened). All of it counts against the
- * session-level breaker and is never undone by a real request (I-K7).
- * I-K8: dropped silently (no counting at all) on epoch mismatch.
+ * positive signal a real write happened). Failures are counted in separate
+ * transient and permanent buckets. I-K8: dropped silently (no counting at
+ * all) on epoch mismatch.
  */
 export function onUnproven(
   window: WindowState,
@@ -861,6 +1006,7 @@ export function onUnproven(
   pingEpoch: number,
   kind: UnprovenKind,
   now: Millis,
+  httpStatus?: number,
 ): ReducerOutcome {
   if (pingEpoch !== window.windowEpoch) return { applied: false, window, session };
   const newWindow: WindowState = {
@@ -869,18 +1015,40 @@ export function onUnproven(
     capture: undefined, // stop this window from pinging again.
     lastStopReason: kind,
   };
+  const transient = isTransientUnproven(kind, httpStatus);
   const unprovenTotal = session.unprovenTotal + 1;
   const consecutiveUnproven = session.consecutiveUnproven + 1;
   const provenWrites = kind === "proven-write" ? session.provenWrites + 1 : session.provenWrites;
-  const shouldDisable =
-    provenWrites >= 1 || consecutiveUnproven >= UNPROVEN_STREAK_LIMIT || unprovenTotal >= UNPROVEN_TOTAL_LIMIT;
+  const transientConsecutiveUnproven = transient ? session.transientConsecutiveUnproven + 1 : 0;
+  const transientUnprovenTotal = transient ? session.transientUnprovenTotal + 1 : session.transientUnprovenTotal;
+  const nonTransientConsecutiveUnproven = transient ? 0 : session.nonTransientConsecutiveUnproven + 1;
+  const nonTransientUnprovenTotal = transient
+    ? session.nonTransientUnprovenTotal
+    : session.nonTransientUnprovenTotal + 1;
+  const permanent =
+    provenWrites >= 1 ||
+    nonTransientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT ||
+    nonTransientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT;
+  const transientTrip =
+    transientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT || transientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT;
+  const disabled = permanent
+    ? { reason: kind, at: now }
+    : transientTrip
+      ? session.disabled?.transient === true
+        ? session.disabled
+        : { reason: kind, at: now, transient: true as const }
+      : session.disabled;
   const newSession: SessionTotals = {
     ...session,
     unprovenTotal,
     consecutiveUnproven,
     provenWrites,
+    transientConsecutiveUnproven,
+    transientUnprovenTotal,
+    nonTransientConsecutiveUnproven,
+    nonTransientUnprovenTotal,
     lastUnproven: { kind, at: now },
-    disabled: shouldDisable ? (session.disabled ?? { reason: kind, at: now }) : session.disabled,
+    disabled,
   };
   return { applied: true, window: newWindow, session: newSession };
 }

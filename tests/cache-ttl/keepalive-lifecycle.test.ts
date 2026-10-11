@@ -6,7 +6,7 @@ import {
   type CacheKeepaliveService,
 } from "../../src/service/cache-keepalive.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
-import type { CapturedRequest } from "../../src/cache-ttl/keepalive-state.js";
+import { readBackKeepaliveSessionState, type CapturedRequest } from "../../src/cache-ttl/keepalive-state.js";
 
 const encoder = new TextEncoder();
 
@@ -44,6 +44,11 @@ function provenHitFetch(): typeof fetch {
 function noUsageFetch(): typeof fetch {
   return vi.fn(async () =>
     fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })]),
+  ) as unknown as typeof fetch;
+}
+function httpFetch(status: number): typeof fetch {
+  return vi.fn(
+    async () => ({ ok: false, status, body: undefined, text: async () => "" }) as unknown as Response,
   ) as unknown as typeof fetch;
 }
 /** fetch that hangs until manually resolved via the returned `resolve()`. */
@@ -137,6 +142,8 @@ function harness(overrides: Partial<CacheKeepaliveDeps> = {}, ctxOverrides: Reco
     fetchImpl: provenHitFetch(),
     appendEntry,
     emit,
+    recoverTransientFailures: true,
+    persistSessionState: true,
     ...overrides,
   });
   self = service;
@@ -315,6 +322,53 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
     await flush();
     expect(service.report().session.consecutiveUnproven).toBe(2);
     expect(service.report().session.disabled?.reason).toBe("no-usage");
+  });
+
+  it("recovers a transient disable only after a successful real response, then pings the next idle window", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 408, body: undefined, text: async () => "" })
+      .mockResolvedValueOnce({ ok: false, status: 408, body: undefined, text: async () => "" })
+      .mockResolvedValueOnce(
+        fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 500 })]),
+      ) as unknown as typeof fetch;
+    const { service, clock, appendEntry } = harness({ fetchImpl });
+    for (let i = 0; i < 2; i += 1) {
+      service.noteRequest(capture({}, service.instanceId, 30_000 + i));
+      service.noteRequestSettled("s1", service.instanceId);
+      clock.advance(240_000);
+      await flush();
+    }
+    expect(service.report().session.disabled).toEqual({ reason: "http", at: 480_000, transient: true });
+
+    const branch = appendEntry.mock.calls.map(([customType, data]) => ({ type: "custom", customType, data }));
+    const restored = readBackKeepaliveSessionState(branch);
+    expect(restored?.disabled).toEqual({ reason: "http", at: 480_000, transient: true });
+
+    service.noteRequest(capture({}, service.instanceId, 40_000));
+    service.noteRequestSettled("s1", service.instanceId, true);
+    expect(service.report().session.disabled).toBeUndefined();
+    expect(service.report().session.transientUnprovenTotal).toBe(0);
+    clock.advance(240_000);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(service.report().session.pings).toBe(1);
+  });
+
+  it("does not recover a transient disable when the real request settles with an error", async () => {
+    const fetchImpl = httpFetch(408);
+    const { service, clock } = harness({ fetchImpl });
+    for (let i = 0; i < 2; i += 1) {
+      service.noteRequest(capture({}, service.instanceId, 30_000 + i));
+      service.noteRequestSettled("s1", service.instanceId);
+      clock.advance(240_000);
+      await flush();
+    }
+    const disabled = service.report().session.disabled;
+    expect(disabled?.transient).toBe(true);
+    service.noteRequest(capture({}, service.instanceId, 40_000));
+    service.noteRequestSettled("s1", service.instanceId, false);
+    expect(service.report().session.disabled).toEqual(disabled);
   });
 });
 

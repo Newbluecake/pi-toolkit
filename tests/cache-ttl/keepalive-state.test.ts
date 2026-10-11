@@ -14,13 +14,16 @@ import {
   createInitialSessionTotals,
   createInitialWindowState,
   evaluateTick,
+  isSuccessfulRealRequest,
   inspectPayload,
   invalidate,
   onPingStarted,
   onProvenHit,
   onRealRequest,
   onRequestSettled,
+  onSuccessfulRealRequest,
   onUnproven,
+  readBackKeepaliveSessionState,
   renderAdaptiveReportLines,
   renderCacheStatus,
   renderKeepaliveReportLines,
@@ -577,7 +580,7 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     expect(session.consecutiveUnproven).toBe(0);
     expect(session.unprovenTotal).toBe(1);
 
-    r = onUnproven(w, session, ep, "http", 2);
+    r = onUnproven(w, session, ep, "http", 2, 500);
     session = r.session;
     w = r.window;
     expect(session.unprovenTotal).toBe(2);
@@ -586,7 +589,7 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     r = onUnproven(w, session, ep, "malformed", 3);
     session = r.session;
     expect(session.unprovenTotal).toBe(3);
-    expect(session.disabled).toEqual({ reason: "malformed", at: 3 });
+    expect(session.disabled).toEqual({ reason: "malformed", at: 3, transient: true });
   });
 
   it("I-K7: onRealRequest never resets or revives a disabled session (window reset doesn't recover)", () => {
@@ -605,6 +608,79 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
       currentFingerprint: fingerprint(),
     });
     expect(tickAfterReset.decision).toEqual({ kind: "skip", reason: "session-disabled", terminal: true });
+  });
+
+  it("classifies retryable HTTP statuses as transient but other 4xx as permanent", () => {
+    const transient = onUnproven(armedWindow({ windowEpoch: 1 }), baseSession(), 1, "http", 1, 429);
+    expect(transient.session.disabled).toBeUndefined();
+    const permanent = onUnproven(armedWindow({ windowEpoch: 1 }), baseSession(), 1, "http", 1, 400);
+    expect(permanent.session.nonTransientUnprovenTotal).toBe(1);
+    expect(permanent.session.transientUnprovenTotal).toBe(0);
+    expect(permanent.session.disabled).toBeUndefined();
+  });
+
+  it("recovers a transient disable after a successful real provider response and resets transient counters", () => {
+    let session = baseSession();
+    let window = armedWindow({ windowEpoch: 1 });
+    for (let i = 0; i < 2; i += 1) {
+      const result = onUnproven(window, session, 1, "network", i + 1);
+      session = result.session;
+      window = { ...result.window, windowEpoch: 1 };
+    }
+    expect(session.disabled).toEqual({ reason: "network", at: 2, transient: true });
+    expect(onSuccessfulRealRequest(session, false)).toBe(session);
+    const recovered = onSuccessfulRealRequest(session, true);
+    expect(recovered.disabled).toBeUndefined();
+    expect(recovered.transientUnprovenTotal).toBe(0);
+    expect(recovered.transientConsecutiveUnproven).toBe(0);
+    expect(recovered.consecutiveUnproven).toBe(0);
+  });
+
+  it("does not recover from an errored/aborted real request, proven-write, or a permanent mixed case", () => {
+    const permanent = baseSession({ disabled: { reason: "proven-write", at: 5 }, provenWrites: 1 });
+    expect(onSuccessfulRealRequest(permanent, true)).toBe(permanent);
+
+    let session = baseSession();
+    let window = armedWindow({ windowEpoch: 1 });
+    for (let i = 0; i < 2; i += 1) {
+      const result = onUnproven(window, session, 1, "network", i + 1);
+      session = result.session;
+      window = { ...result.window, windowEpoch: 1 };
+    }
+    const mixed = onUnproven(window, session, 1, "proven-write", 3).session;
+    expect(mixed.disabled).toEqual({ reason: "proven-write", at: 3 });
+    expect(onSuccessfulRealRequest(mixed, true)).toBe(mixed);
+  });
+
+  it("recognizes only a usage-bearing, non-error assistant message as a successful real request", () => {
+    expect(isSuccessfulRealRequest({ role: "assistant", usage: { input: 1 }, stopReason: "end_turn" })).toBe(true);
+    expect(isSuccessfulRealRequest({ role: "assistant", usage: { input: 1 }, stopReason: "error" })).toBe(false);
+    expect(isSuccessfulRealRequest({ role: "assistant", usage: undefined })).toBe(false);
+    expect(isSuccessfulRealRequest({ role: "toolResult", usage: { input: 1 } })).toBe(false);
+  });
+
+  it("reads transient and permanent breaker snapshots back from the current branch", () => {
+    const base = createInitialSessionTotals();
+    const snapshot = (disabled: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+      type: "custom",
+      customType: "subagent:cache-keepalive",
+      data: {
+        kind: "unproven",
+        session: {
+          ...base,
+          ...extra,
+          disabled,
+          lastUnproven: { kind: "network", at: 10 },
+        },
+      },
+    });
+    const transient = readBackKeepaliveSessionState([
+      snapshot({ reason: "network", at: 10, transient: true }, { transientUnprovenTotal: 2 }),
+    ]);
+    expect(transient?.disabled).toEqual({ reason: "network", at: 10, transient: true });
+    expect(transient?.transientUnprovenTotal).toBe(2);
+    const permanent = readBackKeepaliveSessionState([snapshot({ reason: "no-usage", at: 11 })]);
+    expect(permanent?.disabled).toEqual({ reason: "no-usage", at: 11 });
   });
 });
 
