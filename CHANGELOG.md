@@ -7,6 +7,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-11
+
+### Added
+
+- **web-hub**: custom user avatar shared across devices [avatar:W] (`da8e7e8`)
+- **web-hub**: hub-side avatar store, strict validation and routes [avatar:H] (`b9cddd6`)
+- **web-hub**: avatar settings card and user-message avatar [avatar:U] (`14bbd19`)
+- **web-hub**: avatar transport for token and password clients [avatar:C] (`1306fc1`)
+- **web-hub**: smooth trapezoid branch lines and per-row message indent in the git graph (`bcdc2ba`)
+- **web-hub**: avatar protocol surface and strict PNG validator [avatar:A0] (`680ce49`)
+- **todo**: remind the main session to track work when nothing is in progress (`0a9eb88`)
+- **consult**: record expert/consult identity drift in consult cache diagnostics [consult-c2] (`5cf100d`)
+- **consult**: snapshot-preserving consult with per-call cache probes [consult-c2:D] (`d3e2adf`)
+- **consult**: host-side prefix probe and request-level usage capture [consult-c2:E] (`7c5c54e`)
+- **memory**: /mem tidy --batch for oversized memory directories [tidy-batch:P3a] (`6ea35e3`)
+- **consult**: C2 preserve guard and snapshot-built consult sessions [consult-c2:B+C] (`6c1c11c`)
+- **consult**: frozen surface for C2 preserve — expert snapshot, guard contract, cache probes [consult-c2:A] (`be74a0a`)
+- **exp**: consult cache analysis script with retro mode [consult-c2:F] (`be5ffc3`)
+- **runtime**: dispatch-time input budget for subagent runs [tidy-batch:P-RT] (`5442a91`)
+- **memory**: settings for /mem tidy --batch [tidy-batch:P4] (`c9b7046`)
+- **memory**: journaled transaction executor, strict manifests and txn-backed restore [tidy-batch:P2b] (`c577d49`)
+- **sysload**: load-aware dispatch gate wired into the session [sysload:P2a] (`f2a5fa5`)
+- **web-hub**: hub-side system load frames and /api/load/top [sysload:P3] (`326794d`)
+- **memory**: journaled storage primitives and owner-token locks [tidy-batch:P2a] (`7e4873e`)
+- **memory**: journal decisions, batch planning and run ledger for batched tidy [tidy-batch:P1] (`24103a2`)
+- **workflow**: agent() calls wait while the load gate is closed [sysload:P2b] (`65ea6b3`)
+- **sysload**: bounded load sampler, tracker and top processes [sysload:P1] (`e9c09c8`)
+- **memory**: frozen types for batched tidy [tidy-batch:P0] (`8a0ac1f`)
+- **web-hub**: system load pill, card and drawer banner [sysload:P4] (`bb6db5c`)
+- **sysload**: frozen types, settings and protocol surface [sysload:P0] (`1a93950`)
+- **web-hub**: git graph as its own detail panel (`c238090`)
+- **web-hub**: preview ~/ paths and a directory path bar (`80cf4b2`)
+- **web-hub**: worktree graph hub endpoint (`6fbf39d`)
+- **web-hub**: worktree git graph panel UI (`72ea452`)
+- **timeout**: each extension may add up to 1h (`756adba`)
+- **fleet**: show subagent thinking level in agent tree, web fleet and list_subagents (`bff2340`)
+- **title**: rolling-window refresh cap and post-compaction refresh (`fecf162`)
+- **web-hub**: worktree graph layout logic (`33f9889`)
+- **git**: bounded worktree graph git layer (`6bb44c1`)
+- **web-hub**: worktree graph client transport (`cb169b5`)
+- **web-hub**: worktree graph wire protocol (wtgraph.v1) (`16b9974`)
+- **bash**: omit the log-path hint when the message already shows the whole log (`867bb37`)
+- **web-hub**: compact stop-session control — icon button that expands into an inline confirm pill (`d21821a`)
+- **consult**: record experts, consult outcomes, dispatch meta and verdict preset on every run (`4545fa7`)
+- **agent**: Agent tool meta param and verdict/v1 schema preset (`13070da`)
+- **consult**: core types for consult A/B instrumentation — dispatch meta, consult summary, verdict/v1 schema (`897baf5`)
+- **exp**: consult A/B arm-draw and analysis scripts (`8ebf1e0`)
+- **release**: one-shot release script — version bump rule, CHANGELOG generated from commits, pre-release checks, tag, push, publish (`6f55ace`)
+- **topic-switch**: judge model chain is a configurable list with runtime failover (`3bb87a2`)
+- **topic-switch**: suggest a clean new session when a new request is unrelated and resuming would be expensive (`003877b`)
+- **cache-ttl**: CacheWarmthPort answers whether the next request would read the prompt cache (`f2bf9a3`)
+- **web-hub**: optional prompt-gate port lets topic-switch claim an idle web prompt before dispatch (`c513380`)
+- **topic-switch**: pi-free decision core — gates, filters, cost estimate (calculateCost parity), judge, hold reducer, recovery records (`1fbbbe9`)
+- **topic-switch**: confirm dialog racing the TUI select against the web-hub remote dialog (`f76720f`)
+- **web-hub**: preview attached images before sending, with zoom (`057fa85`)
+- **web-hub**: compact session-history dialog; history entry pinned at the sidebar bottom (`955cceb`)
+- **web-hub**: tool progress rides the card border; web badge and time share a row (`3062936`)
+- **web-hub**: user messages get an avatar mirroring the assistant's; tool progress inset (`8f54b24`)
+- **web-hub**: rename live sessions from the agent list (`f4e339e`)
+- **web-hub**: floating '子 Agent' tab on the detail pane's right edge; title shows in full (`e93a98d`)
+- **web-hub**: click the session title to collapse / expand the header rows (`5bfe745`)
+- **web-hub**: slash palette — Tab completes, keep typing to filter, focus stays in the composer (`9900edf`)
+- **web-hub**: content-less command notices auto-dismiss after 6 s (`88ded57`)
+
+### Fixed
+
+- **release**: build the web UI before running tests (`40d632c`)
+- **release**: keep the generated CHANGELOG prettier-clean (`c976b69`)
+- **cache-ttl**: resume keepalive pings after a successful request when they stopped on transient errors (`8e32e65`)
+- **web-hub**: hide the top bar brand label instead of showing a clipped sliver (`7fb7dd8`)
+- **web-hub**: long quota pill no longer pushes the settings and sign-out buttons off narrow screens (`b4c8dc4`)
+- **web-hub**: wrapped inline-code paths no longer get covered by the next line on touch screens (`2f8474f`)
+- **memory**: /mem tidy --batch --status shows the directory lock holder (`d21ab20`)
+- **web-hub**: keep the hub process alive until close() finishes its teardown (`a352014`)
+- **web-hub**: fence-loss diagnostics, test HOME sandbox guard and explicit launchHome (`5a20d48`)
+- **sysload**: gate duration, HUD layout and full rejection detail (`7436b1c`)
+- **web-hub**: LAN auth database breaker restarts the hub instead of staying off (`2b3e74f`)
+- **web-hub**: @agent mentions behave like the terminal (`2f94172`)
+- **consult-ab**: enforce verdict blocker counts, report unenrolled packages, let verifiers declare an arm (`9b401b2`)
+- **web-hub**: git graph date column fits the full timestamp (`e8db15e`)
+- **web-hub**: distinct avatars for subagent and plain notices (`9db94cf`)
+- **web-hub**: CJK-adjacent paths, stable git graph rows and session order (`1d9f8a9`)
+- **web-hub**: don't label every toolkit notice as a subagent message (`7e63676`)
+- **web-hub**: close-safe hub startup and coordinated admin restart (`890afb1`)
+- **subagent**: a run dispatched right before a deferred /reload no longer vanishes (`d460746`)
+- **web-hub**: agent card shows the total cost only, breakdown in the tooltip, so the cwd title is no longer squeezed out (`fc38836`)
+- **consult**: accept the listed 'label (r_xxx)' expert form; cap/timeout messages state the real cause and elapsed time (`64a2337`)
+- **topic-switch**: /topic-switch last shows user-facing state labels instead of raw transfer states (`7e8a7bd`)
+- **bash**: job-store drops a write whose directory vanished twice instead of rejecting unhandled (`0610d4b`)
+- **web-hub**: ask_user card matches the composer row width; attach button no longer jumps while typing (`0f26a6e`)
+- **web-hub**: composer row aligns with the transcript column edges (`309e2c3`)
+- **web-hub**: composer polish — cmd badge in the sub row, card widths, armed stop halo, quieter control notice (`ee4459b`)
+- **web-hub**: path links re-probe after a negative result; full-width punctuation ends a path (`6b47b7e`)
+- **web-hub**: history enumeration no longer drops a dir on a self-induced budget timeout; CI-only test fixes (`5ec696f`)
+- **web-hub**: rename pencil no longer reserves a blank column; fleet tab counts running only (`0dcb0e3`)
+- **web-hub**: bot icon instead of the sideways '子 Agent' label; title aligns with the row icons (`58f489e`)
+- **web-hub**: outdated badge says the plugin is OLDER than the hub (and to /reload) (`347d566`)
+
+### Changed
+
+- **cache-ttl**: remove adaptive mode and automatic 1h cache upgrades (`6203d41`)
+
+### Documentation
+
+- **web-hub**: record avatar implementation baseline (`73cf655`)
+- **consult**: document C2 preserve consult, correct the old consult plan [consult-c2:H] (`6694048`)
+- **memory**: AGENTS.md journal/lock model, tidy-batch implementation record [tidy-batch:P5] (`bd8b9c5`)
+- **sysload**: AGENTS.md entry, implementation record and UI budget [sysload:P5] (`22d32e7`)
+- **memory**: /mem tidy --batch plan v3.2 (journaled archive + batched rewrite) (`99986e0`)
+- **consult**: record the main-expert ruling for C2 (`fa49e82`)
+- **consult**: C2 preserve-tools + per-request cache instrumentation plan v3.1 (review conditional pass) (`460e891`)
+- **web-hub**: user avatar upload plan v2.1 (review conditional pass) (`4e8d1a5`)
+- **sysload**: load-aware dispatch plan v2.1 (review conditional pass) (`80c1b3a`)
+- **web-hub**: hub resilience plan v2 + triage (self-restart replaces reversible LAN recovery) (`fe6e2c4`)
+- **sysload**: load-aware dispatch plan v1 + user rulings (`9b11bd6`)
+- **web-hub**: hub resilience plan (db recovery, fence false-positive, supersede TDZ) (`28421f0`)
+- **skills**: route sonnet to claude-sonnet-5-5 with sonnet-5 fallback (`6d6fdea`)
+- **web-hub**: worktree git graph plan (v2, reviewed) (`8cf9eaa`)
+- **dev-flow**: consult A/B protocol — meta on every write-package dispatch, verdict/v1 for verifiers, arm draw and analysis (`d19ade5`)
+- **consult**: A/B instrumentation plan (reviewed, conditional pass folded in) (`6a9e7e5`)
+- **dev-flow**: cr-glm/glm-5.3 as the API-billed backup line for glm-5.3 (`bf6ea7e`)
+- **dev-flow**: the available-models list mirrors enabledModels — registered models outside it can still be dispatched (`1f7bc7a`)
+- **dev-flow**: gpt-6.1-sol stays the review/verification first choice; never silently substitute gpt-6-astra when it is missing from the model list (`c1798b8`)
+- adopt the release rules (bump rule, generated CHANGELOG, release.sh flow); drop the hand-written [Unreleased] entry (`e1ee3fe`)
+- **skills**: consult dispatch rules from the 2026-10 production evaluation (`944367a`)
+- **consult**: production effectiveness evaluation 2026-10 (observational, 3.8k runs) (`f5037f2`)
+- **topic-switch**: requirements, exploration, architecture and reviewed plan (r2 + r3 rulings) (`dd1eba3`)
+
+### Tests
+
+- **web-hub**: real-hub avatar integration [avatar:T] (`7610e92`)
+- **consult**: real-pi conformance for C2 preserve; fix relative breakpoint rule in prefix comparison [consult-c2:G] (`962b20d`)
+- **web-hub**: cross-domain resilience matrix (self-restart cookies/SSE, DB slowness bounds, silent successor, concurrent close) [hub-resilience:P-Int] (`d9a8d00`)
+- **web-hub**: load capability matrix, rate limit, lifecycle and import-closure gates [sysload:P3] (`2aea630`)
+- **web-hub**: worktree graph integration gate, acceptance checklist and docs (`7f9e17e`)
+- **topic-switch**: real-pi conformance probes S1–S9 for the session hop, re-inject and recovery assumptions (`c595bc9`)
+
+### Chores
+
+- **web-hub**: budget first-screen JS separately from lazy chunks (`0539ddf`)
+
+Stats: 59 feat, 31 fix, 1 refactor/perf, 23 docs, 6 test, 1 chore
+
 ## [0.4.0] - 2026-10-09
 
 两天的 web-hub 冲刺（110 commits）：历史会话列表与恢复、steer 撤回/重新编辑、worktree diff、目录与任意路径预览、订阅额度展示，以及一大批界面打磨与流式渲染修复。
@@ -237,7 +380,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-subagent/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.2.1...v0.3.0
 [0.2.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.1.0...v0.2.0
