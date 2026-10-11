@@ -91,6 +91,7 @@ export class FakeTerminal implements Terminal {
   }
   setTitle(): void {}
   setProgress(): void {}
+  setProgramStatus(): void {}
 
   /** Feed a keystroke exactly like the OS would (synchronous input callback). */
   type(data: string): void {

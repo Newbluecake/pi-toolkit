@@ -658,7 +658,7 @@ max(ceil(f·workflowTotalMs), workflowTotalMs + maxExtensions·extendStepMs)` wi
   for local tests) — never in `dependencies`: pi ≥1.0 warns, since an installed copy can bypass the
   loader's module mapping and duplicate runtime modules. There are no runtime `dependencies`.
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
-  `>=1.0.0 <1.1.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
+  `>=1.0.0 <1.2.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
   `npm run test:conformance` (real `AgentSession` boundary-draft contract + runtime capability
   self-check, `tests/conformance/`) — it never gates pi-compat's structural probes (I14), it just
   tells you ahead of users whether `src/context-switch/capability.ts` still reaches `verified`.

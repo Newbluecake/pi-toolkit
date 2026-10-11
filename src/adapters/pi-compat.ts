@@ -127,7 +127,7 @@ export function detectPiCapabilities(pi: MinimalPiHost, version = "unknown"): Pi
   };
 }
 
-export const TESTED_PI_RANGE = "1.0.0 - 1.0.2";
+export const TESTED_PI_RANGE = "1.0.0 - 1.1.0";
 
 /**
  * Child-context-switch boundary capability (docs/dev/child-context-switch/plan.md §3.1):
@@ -249,6 +249,6 @@ function isWithinTestedRange(version: string): boolean {
   const parts = version.split(".").map((n) => Number.parseInt(n, 10));
   if (parts.length < 2 || parts.some((n) => Number.isNaN(n))) return false;
   const [major, minor] = parts as [number, number];
-  // Matches the peer range >=1.0.0 <1.1.0 (0.87's type surface is no longer compatible).
-  return major === 1 && minor === 0;
+  // Matches the peer range >=1.0.0 <1.2.0 (0.87's type surface is no longer compatible).
+  return major === 1 && (minor === 0 || minor === 1);
 }

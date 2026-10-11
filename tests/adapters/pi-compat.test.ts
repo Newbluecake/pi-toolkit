@@ -35,6 +35,22 @@ describe("pi-compat gate", () => {
     const result = assertCompatible(caps);
     expect(result.ok).toBe(true);
     expect(result).toHaveProperty("warning");
+    for (const v of ["1.2.0", "2.0.0"]) {
+      const out = assertCompatible(
+        detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
+      );
+      expect(out).toHaveProperty("warning");
+    }
+  });
+
+  it("does not warn inside the tested range (1.0.x and 1.1.x)", () => {
+    for (const v of ["1.0.0", "1.0.2", "1.1.0", "1.1.5"]) {
+      const result = assertCompatible(
+        detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
+      );
+      expect(result.ok).toBe(true);
+      expect(result).not.toHaveProperty("warning");
+    }
   });
 
   it("probeReadBackEntries detects the session-start ctx shape", () => {

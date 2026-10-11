@@ -127,12 +127,19 @@ describe("checkLauncherAsync (arch §4.2 init check)", () => {
   });
 
   it("version outside SUPPORTED_PI_RANGE ⇒ incompatible", async () => {
-    for (const v of ["0.99.0", "1.1.0", "2.0.0"]) {
+    for (const v of ["0.99.0", "1.2.0", "2.0.0"]) {
       const fs = fakeFs({ files: { "/repo/package.json": pkg(v) } });
       const res = (await checkLauncherAsync(LAUNCHER, D(), fs)) as { ok: false; reason: string; detail?: string };
       expect(res.reason).toBe("incompatible");
       expect(res.detail).toContain(v);
     }
+  });
+
+  it("1.1.0 is within SUPPORTED_PI_RANGE", async () => {
+    const fs = fakeFs({ files: { "/repo/package.json": pkg("1.1.0") } });
+    const res = (await checkLauncherAsync(LAUNCHER, D(), fs)) as { ok: boolean; version?: string };
+    expect(res.ok).toBe(true);
+    expect(res.version).toBe("1.1.0");
   });
 
   it("happy path captures BOTH fingerprints and the version", async () => {
