@@ -115,6 +115,12 @@
 .q-anchor {
   position: relative;
   display: inline-flex;
+  /* 2026-10-11 phone report (quota pill pushed the gear/sign-out off-screen): the ANCHOR is the
+   * top bar's flex item, not `.q-pill` — with the default `min-width: auto` its minimum was the
+   * pill's full nowrap text, so the pill's own `min-width: 0` never got a chance to ellipsize.
+   * Let the anchor shrink; the pill (flex 0 1 auto, min-width 0) then ellipsizes inside it. */
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 /* ---------------------------------------------------------------- popover card */
