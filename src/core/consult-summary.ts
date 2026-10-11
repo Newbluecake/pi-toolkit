@@ -49,6 +49,8 @@ export interface ConsultCallFact {
   costUsd?: number;
   truncated?: true;
   partial?: true;
+  /** Optional C2 probe folded atomically with the tool outcome. */
+  cacheProbe?: ConsultCacheProbe;
 }
 
 /** A single consult request's cache/identity observation (consult C2, §4.1). */
@@ -65,7 +67,7 @@ export interface ConsultCacheProbe {
       forcedPrompt: boolean;
     };
     wire?: { system: boolean; tools: boolean; model: boolean; thinking: boolean };
-    expertTools: number;
+    expertTools?: number;
   };
   api?: string;
   provider?: string;
@@ -178,6 +180,20 @@ function extractResultText(result: unknown): string {
     .join("\n");
 }
 
+function isCacheProbe(value: unknown): value is ConsultCacheProbe {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const probe = value as { identity?: unknown; expertRunId?: unknown; outcome?: unknown };
+  if (typeof probe.expertRunId !== "string" || typeof probe.outcome !== "string") return false;
+  if (probe.identity === null || typeof probe.identity !== "object" || Array.isArray(probe.identity)) return false;
+  const identity = probe.identity as { preflight?: unknown; expertTools?: unknown };
+  return (
+    typeof identity.preflight === "string" &&
+    (identity.preflight === "pass" || identity.preflight.startsWith("fail:")) &&
+    typeof identity.expertTools === "number" &&
+    Number.isFinite(identity.expertTools)
+  );
+}
+
 function extractDetails(result: unknown): Record<string, unknown> {
   if (result === null || typeof result !== "object") return {};
   const details = (result as { details?: unknown }).details;
@@ -206,6 +222,7 @@ export function classifyConsultToolEnd(isError: boolean, result: unknown): Consu
   if (typeof details.costUsd === "number" && Number.isFinite(details.costUsd)) fact.costUsd = details.costUsd;
   if (details.truncated === true) fact.truncated = true;
   if (details.partial === true) fact.partial = true;
+  if (isCacheProbe(details.cacheProbe)) fact.cacheProbe = details.cacheProbe;
   return fact;
 }
 
@@ -275,7 +292,8 @@ export function foldConsultCall(
     ...(base.blockedCalls === undefined ? {} : { blockedCalls: base.blockedCalls }),
     ...(base.identityFailures === undefined ? {} : { identityFailures: { ...base.identityFailures } }),
   };
-  return withByExpert(summary, base, f.expertRunId);
+  const withProbe = f.cacheProbe === undefined ? summary : foldConsultCacheProbe(summary, f.cacheProbe);
+  return withByExpert(withProbe, base, f.expertRunId);
 }
 
 function withByExpert(summary: ConsultSummary, base: ConsultSummary, expertRunId: string | undefined): ConsultSummary {

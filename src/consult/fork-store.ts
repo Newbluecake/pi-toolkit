@@ -14,7 +14,8 @@ import {
 } from "node:fs";
 import { join, resolve as resolvePath, sep } from "node:path";
 import { CURRENT_SESSION_VERSION, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ForkExpertSessionResult, Millis } from "../core/types.js";
+import { getCurrentSystemMessage, getCurrentTools } from "@earendil-works/pi-ai";
+import type { ExpertRequestSnapshot, ForkExpertSessionResult, Millis, ToolDeclaration } from "../core/types.js";
 
 /**
  * consult fork store (docs/dev/consult/plan.md §5.1/§6 C-9, package B).
@@ -175,6 +176,134 @@ function scanSessionHead(file: string): { ok: true; scan: HeadScan } | { ok: fal
         /* nothing more we can do */
       }
     }
+  }
+}
+
+/**
+ * The bounded result of the C2 loadout scan. Snapshot failures are data
+ * mismatches, not filesystem exceptions: callers must refuse the consult
+ * before spawning a child.
+ */
+export type ExpertSnapshotFailureCode =
+  "identity_mismatch:no-recorded-loadout" | "identity_mismatch:unreadable-snapshot";
+export type ExpertSnapshotScanResult =
+  { ok: true; snapshot: ExpertRequestSnapshot } | { ok: false; code: ExpertSnapshotFailureCode; reason: string };
+
+/** Keep a malformed or unexpectedly huge session from turning a consult into an unbounded read. */
+const EXPERT_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024;
+
+/** Candidate lines are the only lines we JSON-parse after the header. */
+const SNAPSHOT_LINE_RE =
+  /"type"\s*:\s*"(?:model_change|thinking_level_change)"|"role"\s*:\s*"system"|"role"\s*:\s*"assistant"[\s\S]*"usage"\s*:/;
+
+function snapshotFailure(code: ExpertSnapshotFailureCode, reason: string): ExpertSnapshotScanResult {
+  return { ok: false, code, reason };
+}
+
+function usageNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Reconstruct the expert's last provider loadout from the fork transcript.
+ * This deliberately delegates transcript semantics to pi-ai's replay helpers;
+ * it does not maintain a second tool/system state machine.  The scan is
+ * synchronous, bounded and never throws.  Non-candidate lines are ignored
+ * without JSON.parse so old sessions containing unrelated extension entries
+ * stay cheap to inspect.
+ */
+export function scanExpertSnapshot(forkFile: string): ExpertSnapshotScanResult {
+  try {
+    const sourcePath = resolvePath(forkFile);
+    const head = scanSessionHead(sourcePath);
+    if (!head.ok) return snapshotFailure("identity_mismatch:unreadable-snapshot", head.reason);
+    if (head.scan.fileSize > EXPERT_SNAPSHOT_MAX_BYTES)
+      return snapshotFailure(
+        "identity_mismatch:unreadable-snapshot",
+        `expert snapshot exceeds the ${EXPERT_SNAPSHOT_MAX_BYTES}-byte scan limit`,
+      );
+
+    const text = readFileSync(sourcePath, "utf8");
+    const messages: Array<{ role: string; [key: string]: unknown }> = [];
+    let model: { provider: string; id: string } | undefined;
+    let thinkingLevel: string | undefined;
+    let lastRequestUsage: ExpertRequestSnapshot["lastRequestUsage"];
+    const lines = text.split("\n");
+    // The header is not a candidate line; tolerate the same leading blank/junk
+    // lines as scanSessionHead while preserving transcript order.
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]!;
+      if (!SNAPSHOT_LINE_RE.test(line)) continue;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(line) as unknown;
+      } catch {
+        return snapshotFailure(
+          "identity_mismatch:unreadable-snapshot",
+          `expert snapshot line ${index + 1} is not valid JSON`,
+        );
+      }
+      if (entry === null || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      if (record.type === "model_change") {
+        if (typeof record.provider !== "string" || typeof record.modelId !== "string")
+          return snapshotFailure("identity_mismatch:unreadable-snapshot", "model_change entry is malformed");
+        model = { provider: record.provider, id: record.modelId };
+        continue;
+      }
+      if (record.type === "thinking_level_change") {
+        if (typeof record.thinkingLevel !== "string")
+          return snapshotFailure("identity_mismatch:unreadable-snapshot", "thinking_level_change entry is malformed");
+        thinkingLevel = record.thinkingLevel;
+        continue;
+      }
+      if (record.type !== "message" || record.message === null || typeof record.message !== "object") continue;
+      const message = record.message as { role?: unknown; usage?: unknown } & Record<string, unknown>;
+      if (message.role === "system") {
+        // SessionManager's persisted AgentMessage historically omits the
+        // pi-ai-only timestamp field; replay needs a defined timestamp to
+        // recognize an otherwise valid empty-tool system loadout.
+        messages.push({
+          ...message,
+          timestamp: typeof message.timestamp === "number" ? message.timestamp : 0,
+        } as { role: string; [key: string]: unknown });
+      } else if (message.role === "assistant" && message.usage !== undefined) {
+        const usage = message.usage;
+        if (usage === null || typeof usage !== "object")
+          return snapshotFailure("identity_mismatch:unreadable-snapshot", "assistant usage is malformed");
+        const u = usage as Record<string, unknown>;
+        if (!usageNumber(u.input) || !usageNumber(u.cacheRead) || !usageNumber(u.cacheWrite))
+          return snapshotFailure("identity_mismatch:unreadable-snapshot", "assistant usage is malformed");
+        lastRequestUsage = { input: u.input, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite };
+      }
+    }
+
+    if (messages.length === 0)
+      return snapshotFailure("identity_mismatch:no-recorded-loadout", "no system message in expert session");
+    const replayed = getCurrentSystemMessage(messages as never);
+    if (replayed === undefined)
+      return snapshotFailure("identity_mismatch:no-recorded-loadout", "no recorded system loadout in expert session");
+    const tools = getCurrentTools(messages as never);
+    const systemSections: Record<string, string> = {};
+    for (const [name, value] of Object.entries(replayed.sections ?? {})) {
+      if (typeof value === "string") systemSections[name] = value;
+    }
+    return {
+      ok: true,
+      snapshot: {
+        tools: tools as unknown as ToolDeclaration[],
+        systemSections,
+        ...(model === undefined ? {} : { model }),
+        ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+        sourceSessionId: head.scan.header.id,
+        ...(lastRequestUsage === undefined ? {} : { lastRequestUsage }),
+      },
+    };
+  } catch (error) {
+    return snapshotFailure(
+      "identity_mismatch:unreadable-snapshot",
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }
 

@@ -162,8 +162,24 @@ function fakeGitExec(repo: string): WorktreeExec {
 function expertSessionAt(dir: string, headerCwd: string, id: string): string {
   const file = join(dir, `${id}.jsonl`);
   const header = { type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: headerCwd };
-  const message = { type: "message", id: "m1", parentId: null, timestamp: "t", message: { role: "assistant" } };
-  writeFileSync(file, `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`);
+  const system = {
+    type: "message",
+    id: "sys",
+    parentId: null,
+    timestamp: "t",
+    message: {
+      role: "system",
+      content: "You are the expert.",
+      toolsAdded: [
+        { name: "read", description: "Read a file", parameters: { type: "object" } },
+        { name: "grep", description: "Search files", parameters: { type: "object" } },
+        { name: "find", description: "Find files", parameters: { type: "object" } },
+        { name: "ls", description: "List files", parameters: { type: "object" } },
+      ],
+    },
+  };
+  const message = { type: "message", id: "m1", parentId: "sys", timestamp: "t", message: { role: "assistant" } };
+  writeFileSync(file, `${JSON.stringify(header)}\n${JSON.stringify(system)}\n${JSON.stringify(message)}\n`);
   return file;
 }
 

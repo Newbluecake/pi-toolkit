@@ -13,6 +13,7 @@ import type { MainSessionFacts } from "../../src/consult/main-facts.js";
 import {
   FORK_TTL_MS,
   forkExpertSession,
+  scanExpertSnapshot,
   removeForkFile,
   resolveForkCwd,
   sweepForkDir,
@@ -99,6 +100,10 @@ function fakeQuery(snapshots: readonly RunSnapshot[]): QueryService {
 function forkStoreStub(opts: { removed?: string[] } = {}): ConsultForkStore {
   return {
     forkExpertSession: () => ({ ok: true, path: FORK_FILE }),
+    scanExpertSnapshot: () => ({
+      ok: true as const,
+      snapshot: { tools: [], systemSections: {}, sourceSessionId: "s_expert" },
+    }),
     removeForkFile: (path) => {
       opts.removed?.push(path);
     },
@@ -715,6 +720,7 @@ describe("wireConsult × real fork-store (package B composition)", () => {
     const expertCwd = mkdtempSync(join(tmpdir(), "consult-wire-real-"));
     const mgr = SessionManager.create(expertCwd, join(expertCwd, "sessions"));
     mgr.appendMessage({ role: "user", content: [{ type: "text", text: "expert task" }] });
+    mgr.appendMessage({ role: "system", content: "expert system" });
     mgr.appendMessage({ role: "assistant", content: [{ type: "text", text: "expert context" }] });
     const expertFile = mgr.getSessionFile()!;
     const forkDir = mkdtempSync(join(tmpdir(), "consult-wire-forks-"));
@@ -722,6 +728,7 @@ describe("wireConsult × real fork-store (package B composition)", () => {
     // exclusion and deletion scoping.
     const realForkStore: ConsultForkStore = {
       forkExpertSession: (source, fallbackCwd) => forkExpertSession(source, fallbackCwd, forkDir),
+      scanExpertSnapshot: (path) => scanExpertSnapshot(path),
       removeForkFile: (path) => {
         removeForkFile(path, forkDir);
       },

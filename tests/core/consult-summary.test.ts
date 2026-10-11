@@ -35,6 +35,18 @@ describe("classifyConsultToolEnd (consult A/B instrumentation plan §2/§5 P1a)"
     expect(classifyConsultToolEnd(true, undefined)).toEqual({ result: "invalid" });
   });
 
+  it("carries a diagnostic cache probe through tool-end classification", () => {
+    const cacheProbe = {
+      expertRunId: "r_x",
+      outcome: "completed" as const,
+      identity: { preflight: "pass" as const, expertTools: 1 },
+    };
+    expect(classifyConsultToolEnd(false, okResult({ outcome: "completed", cacheProbe }))).toMatchObject({
+      result: "completed",
+      cacheProbe,
+    });
+  });
+
   it("classifies every real tool outcome verbatim", () => {
     for (const outcome of CONSULT_OUTCOMES) {
       expect(classifyConsultToolEnd(false, okResult({ outcome, expertRunId: "r_x" }))).toEqual({

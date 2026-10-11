@@ -24,7 +24,9 @@ import {
 import { CONSULT_READONLY_TOOLS } from "../../src/runtime/tool-scope.js";
 import { CONSULT_MAIN_AGENT_TYPE, CONSULT_MAIN_EXPERT_ID } from "../../src/core/types.js";
 import type { MainSessionFacts } from "../../src/consult/main-facts.js";
+import type { ExpertSnapshotScanResult } from "../../src/consult/fork-store.js";
 import { CONSULT_NOT_IN_WHITELIST_MARK, CONSULT_OUTCOMES } from "../../src/core/consult-summary.js";
+import { registerConsultGuard, releaseConsultGuard } from "../../src/consult/preserve-guard.js";
 
 /**
  * T-2/T-3/T-4/T-5 (consult plan §9): the consult tool's gate/nack surface,
@@ -155,7 +157,14 @@ class FakePort implements ConsultSpawnPort {
   }
 }
 
-function makeForkStore(opts: { fail?: boolean; cwd?: string; withMainSession?: boolean } = {}) {
+function makeForkStore(
+  opts: {
+    fail?: boolean;
+    cwd?: string;
+    withMainSession?: boolean;
+    snapshot?: ExpertSnapshotScanResult;
+  } = {},
+) {
   const calls: Array<{ source: string; fallbackCwd: string; forceCwd?: boolean }> = [];
   const mainCalls: Array<{ source: string; fallbackCwd: string; forceCwd?: boolean }> = [];
   const removed: string[] = [];
@@ -168,6 +177,20 @@ function makeForkStore(opts: { fail?: boolean; cwd?: string; withMainSession?: b
     removeForkFile: (path) => {
       removed.push(path);
     },
+    scanExpertSnapshot: () =>
+      opts.snapshot ?? {
+        ok: true as const,
+        snapshot: {
+          tools: [
+            { name: "read", description: "read", parameters: { type: "object" } },
+            { name: "grep", description: "grep", parameters: { type: "object" } },
+            { name: "find", description: "find", parameters: { type: "object" } },
+            { name: "ls", description: "ls", parameters: { type: "object" } },
+          ],
+          systemSections: {},
+          sourceSessionId: "s_expert",
+        },
+      },
     resolveForkCwd: (_source, fallbackCwd) => {
       resolveForkCwdCalls += 1;
       return opts.cwd ?? fallbackCwd;
@@ -237,6 +260,9 @@ function harness(
     fork?: ReturnType<typeof makeForkStore>;
     port?: FakePort;
     mainSessionFacts?: () => MainSessionFacts;
+    prefixProbeRegistry?: {
+      get: (runId: string) => import("../../src/consult/prefix-probe.js").RunPrefixRecord | undefined;
+    };
     /** D10 (workflow-worktree plan §2): drives the asker cwd cell's `isolated` flag. */
     isolated?: boolean;
     selfCwd?: string;
@@ -270,6 +296,7 @@ function harness(
     },
     settings: () => settings,
     ...(opts.mainSessionFacts !== undefined ? { mainSessionFacts: opts.mainSessionFacts } : {}),
+    ...(opts.prefixProbeRegistry !== undefined ? { prefixProbeRegistry: opts.prefixProbeRegistry } : {}),
   });
   return {
     tool,
@@ -518,6 +545,96 @@ describe("consult tool: nack surface (T-2)", () => {
     expect(h.priceOf).not.toHaveBeenCalled();
   });
 
+  it("snapshot identity failures refuse before spawn with the exact §3.6 text", async () => {
+    for (const code of ["identity_mismatch:no-recorded-loadout", "identity_mismatch:unreadable-snapshot"] as const) {
+      const h = harness({ fork: makeForkStore({ snapshot: { ok: false, code, reason: code } }) });
+      const result = (await exec(h)) as ToolResult;
+      expect(result.details.outcome).toBe("identity_mismatch");
+      expect(result.content[0]!.text).toBe(
+        `Expert "explorer" could not be consulted without changing its tool definitions (${code}); the consult was refused to keep its read-only guarantee and prompt cache. Fall back to your own investigation.`,
+      );
+      expect(h.fork.removed).toEqual([FORK_PATH]);
+      expect(h.port.spawnCalls).toHaveLength(0);
+    }
+  });
+
+  it("maps preserve failures from spawn throw, admission error, and terminal outcome", async () => {
+    const cases: Array<{
+      setup: (h: Harness) => void;
+      code: "identity_mismatch:tool-definition:read" | "guard_unavailable:agent-hooks";
+      outcome: "identity_mismatch" | "guard_unavailable";
+    }> = [
+      {
+        setup: (h) => {
+          h.port.spawnShouldThrow = new Error("[consult-preserve:identity_mismatch:tool-definition:read] mismatch");
+        },
+        code: "identity_mismatch:tool-definition:read",
+        outcome: "identity_mismatch",
+      },
+      {
+        setup: (h) => {
+          h.port.spawnResult = {
+            error: {
+              kind: "config",
+              message: "[consult-preserve:guard_unavailable:agent-hooks] missing hook",
+              retryable: false,
+            },
+          };
+        },
+        code: "guard_unavailable:agent-hooks",
+        outcome: "guard_unavailable",
+      },
+      {
+        setup: (h) => {
+          h.port.outcome = {
+            ...outcome("failed", "partial answer"),
+            error: {
+              kind: "config",
+              message: "[consult-preserve:identity_mismatch:tool-definition:read] mismatch",
+              retryable: false,
+            },
+          };
+        },
+        code: "identity_mismatch:tool-definition:read",
+        outcome: "identity_mismatch",
+      },
+    ];
+    for (const testCase of cases) {
+      const h = harness();
+      testCase.setup(h);
+      const result = (await exec(h)) as ToolResult;
+      expect(result.details.outcome).toBe(testCase.outcome);
+      expect(result.details.configError).toContain(testCase.code);
+      expect(result.content[0]!.text).toBe(
+        `Expert "explorer" could not be consulted without changing its tool definitions (${testCase.code}); the consult was refused to keep its read-only guarantee and prompt cache. Fall back to your own investigation.`,
+      );
+      if (testCase.outcome === "identity_mismatch")
+        expect((result.details.cacheProbe as { identity: { preflight: string } }).identity.preflight).toBe(
+          `fail:${testCase.code}`,
+        );
+    }
+  });
+
+  it("guard termination maps to blocked_cap while preserving partial-answer behavior", async () => {
+    const guard = {
+      preflight: () => ({ ok: true as const }),
+      install: () => undefined,
+      counters: () => ({ calls: 3, batches: 2, terminated: true, identity: 0, nested: 0, costAfterUsd: 0 }),
+    };
+    registerConsultGuard("r_CONSULT1", guard);
+    try {
+      const h = harness();
+      h.port.outcome = outcome("failed", "partial answer");
+      const result = (await exec(h)) as ToolResult;
+      expect(result.details.outcome).toBe("blocked_cap");
+      expect(result.details.partial).toBe(true);
+      expect(result.content[0]!.text).toContain("partial answer");
+      expect(result.content[0]!.text).toContain("partial answer — consult ended early");
+    } finally {
+      releaseConsultGuard("r_CONSULT1");
+    }
+  });
+
   it("fork failure ({ok:false}) nacks unavailable, never throws, never spawns (review-3 #2)", async () => {
     const h = harness({ fork: makeForkStore({ fail: true }) });
     const result = (await exec(h)) as ToolResult;
@@ -583,9 +700,52 @@ describe("consult tool: success surface (T-3)", () => {
     expect(req.type).toBe("explorer");
     expect(req.modelOverride).toEqual({ provider: "acme", id: "bigmodel" });
     expect(req.label).toMatch(/^consult-explorer-[a-z0-9]{4}$/);
-    expect(req.prompt).toContain(`ONLY have read-only tools: ${CONSULT_READONLY_TOOLS.join(", ")}`);
+    expect(req.prompt).toContain(`Allowed tools: ${CONSULT_READONLY_TOOLS.join(", ")}`);
     expect(req.prompt).toContain("why?");
     expect(h.port.waitOutcomeCalls).toEqual(["r_CONSULT1"]);
+  });
+
+  it("folds the host-side prefix probe into the consult result for the diagnostic reducer", async () => {
+    const h = harness({
+      prefixProbeRegistry: {
+        get: (runId) =>
+          runId === "r_EXPERT1"
+            ? {
+                runId,
+                latest: {
+                  seq: 0,
+                  startedAt: 10,
+                  endedAt: 20,
+                  fieldHashes: { model: "m", tools: "t", system: "s", thinking: "h" },
+                },
+              }
+            : runId === "r_CONSULT1"
+              ? {
+                  runId,
+                  api: "anthropic-messages",
+                  provider: "anthropic",
+                  model: "model",
+                  first: {
+                    seq: 0,
+                    startedAt: 100,
+                    fieldHashes: { model: "m", tools: "t", system: "s", thinking: "h" },
+                  },
+                  requests: [
+                    {
+                      seq: 0,
+                      startedAt: 100,
+                      fieldHashes: {},
+                      usage: { input: 10, cacheRead: 20, cacheWrite: 0, output: 5, costUsd: 0.1 },
+                    },
+                  ],
+                }
+              : undefined,
+      },
+    });
+    const result = (await exec(h)) as ToolResult;
+    const probe = result.details.cacheProbe as { identity: { wire?: unknown }; requests?: unknown[] };
+    expect(probe.identity.wire).toEqual({ model: true, tools: true, system: true, thinking: true });
+    expect(probe.requests).toHaveLength(1);
   });
 
   it("fork is asked for the expert session with the asker cwd as fallback", async () => {

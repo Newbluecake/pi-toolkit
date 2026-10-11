@@ -10,6 +10,33 @@ import { preflight } from "./preserve-identity.js";
 
 export const NESTED_TOOL_CALL_REASON = "Nested tool calls are disabled in this read-only consult.";
 
+const CONSULT_GUARD_REGISTRY_KEY = Symbol.for("pi-subagent:consult-guard-registry");
+type GuardRegistry = Map<string, ConsultGuard>;
+
+function guardRegistry(): GuardRegistry {
+  const root = globalThis as typeof globalThis & { [CONSULT_GUARD_REGISTRY_KEY]?: GuardRegistry };
+  const current = root[CONSULT_GUARD_REGISTRY_KEY];
+  if (current instanceof Map) return current;
+  const created: GuardRegistry = new Map();
+  root[CONSULT_GUARD_REGISTRY_KEY] = created;
+  return created;
+}
+
+/** Bounded-by-run guard lookup used only to fold settled consult diagnostics. */
+export function registerConsultGuard(runId: string, guard: ConsultGuard): void {
+  const registry = guardRegistry();
+  registry.set(runId, guard);
+  while (registry.size > 64) registry.delete(registry.keys().next().value as string);
+}
+
+export function getConsultGuard(runId: string): ConsultGuard | undefined {
+  return guardRegistry().get(runId);
+}
+
+export function releaseConsultGuard(runId: string): void {
+  guardRegistry().delete(runId);
+}
+
 interface AgentToolLike {
   name: string;
   execute?: unknown;
@@ -78,18 +105,33 @@ function activeToolOf(session: SessionLike, name: string): AgentToolLike | undef
   return tool && typeof tool === "object" ? (tool as AgentToolLike) : undefined;
 }
 
-function allowedTools(snapshot: ExpertRequestSnapshot): string[] {
-  const snapshotNames = new Set(
-    snapshot.tools
-      .map((tool) => (typeof tool.name === "string" ? tool.name : undefined))
-      .filter((name): name is string => name !== undefined),
-  );
+function snapshotToolNames(snapshot: ExpertRequestSnapshot): string[] {
+  return [
+    ...new Set(
+      snapshot.tools
+        .map((tool) => (typeof tool.name === "string" ? tool.name : undefined))
+        .filter((name): name is string => name !== undefined),
+    ),
+  ];
+}
+
+/** The exact allow/deny projection shared by the guard and the R2 prompt. */
+export function consultAllowedTools(snapshot: ExpertRequestSnapshot): string[] {
+  const snapshotNames = new Set(snapshotToolNames(snapshot));
   return CONSULT_READONLY_TOOLS.filter((name) => snapshotNames.has(name));
 }
 
+/** Disabled names retain the expert declaration order required by R2. */
+export function consultDisabledTools(snapshot: ExpertRequestSnapshot): string[] {
+  const allowed = new Set(consultAllowedTools(snapshot));
+  return snapshotToolNames(snapshot).filter((name) => !allowed.has(name));
+}
+
+export const CONSULT_REFUSAL_GUIDANCE = "Answer from your existing context";
+
 export function blockedToolReason(name: string, allowed: readonly string[]): string {
   const names = allowed.length > 0 ? allowed.join(", ") : "none";
-  return `Tool "${name}" is disabled in this read-only consult. Allowed tools: ${names}. Answer from your existing context${allowed.length > 0 ? " or use an allowed tool" : ""}.`;
+  return `Tool "${name}" is disabled in this read-only consult. Allowed tools: ${names}. ${CONSULT_REFUSAL_GUIDANCE}${allowed.length > 0 ? " or use an allowed tool" : ""}.`;
 }
 
 function finishBatch(state: GuardState): void {
@@ -214,7 +256,7 @@ function countersOf(state: GuardState): ConsultGuardCounters {
 
 /** Production consult guard. Its only input is the frozen expert snapshot. */
 export function createConsultGuard(snapshot: ExpertRequestSnapshot): ConsultGuard {
-  const names = allowedTools(snapshot);
+  const names = consultAllowedTools(snapshot);
   let state: GuardState | undefined;
   let installed = false;
   return {

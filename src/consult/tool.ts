@@ -4,6 +4,8 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
   ConsultExpertRef,
   ErrorInfo,
+  ExpertRequestSnapshot,
+  RunDiagnostics,
   ForkExpertSessionResult,
   RunId,
   RunOutcome,
@@ -16,7 +18,17 @@ import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
 import { toPiToolUsage } from "../tools/usage.js";
 import { truncateResultText } from "../tools/result-text.js";
-import { buildConsultPrompt } from "./prompt.js";
+import { buildConsultPrompt, consultPromptLists } from "./prompt.js";
+import type { ExpertSnapshotScanResult } from "./fork-store.js";
+import type { ConsultCacheProbe } from "../core/consult-summary.js";
+import type { ConsultGuardCounters } from "../core/types.js";
+import {
+  compareRecordedPrefix,
+  getPrefixProbeRegistry,
+  type PrefixProbeRegistry,
+  type RunPrefixRecord,
+} from "./prefix-probe.js";
+import { getConsultGuard } from "./preserve-guard.js";
 import { createCapWatcher, type ConsultCapReason } from "./watcher.js";
 import type { MainSessionFacts, MainSessionFactsProvider } from "./main-facts.js";
 
@@ -111,6 +123,8 @@ export interface ConsultForkStore {
   resolveForkCwd?(sourceFile: string, fallbackCwd: string): string;
   /** Optional (package B): TTL + broken-header sweep of the fork dir; stack calls it at build time. */
   sweepForkDir?(): void;
+  /** C2 loadout scan. A missing/invalid loadout must refuse before spawn. */
+  scanExpertSnapshot(forkFile: string): ExpertSnapshotScanResult;
 }
 
 /** Per-asker + global concurrency gate (wireConsult closure, plan §4.1 ②). */
@@ -223,6 +237,10 @@ export interface ConsultDeps {
   port: ConsultSpawnPort;
   /** Live state/terminal snapshots (liveness re-check + freshest contextUsage). */
   query: QueryService;
+  /** Reload-proof settledAt fallback from ExpertIndex. */
+  expertSettledAt?: (runId: RunId) => number | undefined;
+  /** Optional registry seam for deterministic probe tests; production uses the process registry. */
+  prefixProbeRegistry?: PrefixProbeRegistry;
   forkStore: ConsultForkStore;
   /**
    * Model unit prices ($/M tok) with `ModelCost.tiers` selection already
@@ -294,6 +312,8 @@ export interface ConsultToolDetails {
   outcome: ConsultOutcome;
   /** Spawn admission error text (details.configError, §4.1 error table last row). */
   configError?: string;
+  /** Internal diagnostic payload folded by the host consult summary reducer. */
+  cacheProbe?: ConsultCacheProbe;
 }
 
 const TERMINAL = new Set(["completed", "failed", "timed_out", "aborted"]);
@@ -430,6 +450,178 @@ function humanReason(
 
 function expertName(ref: ConsultExpertRef): string {
   return ref.label !== undefined && ref.label !== "" ? ref.label : ref.runId;
+}
+
+function preserveFailure(message: string | undefined): { outcome: ConsultOutcome; code: string } | undefined {
+  if (message === undefined || !message.startsWith("[consult-preserve:")) return undefined;
+  const end = message.indexOf("]");
+  if (end < 0) return undefined;
+  const code = message.slice("[consult-preserve:".length, end);
+  const category = code.split(":", 1)[0];
+  if (category === "identity_mismatch" || category === "guard_unavailable" || category === "blocked_cap")
+    return { outcome: category, code };
+  return undefined;
+}
+
+function preserveRefusal(name: string, code: string): string {
+  return `Expert "${name}" could not be consulted without changing its tool definitions (${code}); the consult was refused to keep its read-only guarantee and prompt cache. Fall back to your own investigation.`;
+}
+
+function earlyCacheProbe(
+  ref: ConsultExpertRef,
+  outcome: ConsultOutcome,
+  code?: string,
+  snapshot?: ExpertRequestSnapshot,
+) {
+  return buildCacheProbe({
+    ref,
+    ...(snapshot === undefined ? {} : { snapshot }),
+    outcome,
+    ...(code === undefined ? {} : { outcomeError: `[consult-preserve:${code}]` }),
+  });
+}
+
+/** Inputs needed to build one bounded C2 probe after a consult settles. */
+export interface ConsultCacheProbeContext {
+  ref: ConsultExpertRef;
+  snapshot?: ExpertRequestSnapshot;
+  outcome: ConsultOutcome;
+  outcomeError?: string;
+  consultRunId?: RunId;
+  consultDiagnostics?: RunDiagnostics;
+  expertLive?: RunSnapshot;
+  expertSettledAt?: number;
+  guardCounters?: ConsultGuardCounters;
+  registry?: PrefixProbeRegistry;
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function prefixFailureCode(message: string | undefined): string | undefined {
+  const failure = preserveFailure(message);
+  return failure === undefined ? undefined : failure.code;
+}
+
+/**
+ * Build the §4.1/§4.2 probe from process-local records. This is diagnostic
+ * only: all reads are bounded, and a malformed/missing record degrades to an
+ * omitted field rather than changing the consult result.
+ */
+export function buildCacheProbe(ctx: ConsultCacheProbeContext): ConsultCacheProbe | undefined {
+  const registry = ctx.registry ?? getPrefixProbeRegistry();
+  let consultRecord: RunPrefixRecord | undefined;
+  let expertRecord: RunPrefixRecord | undefined;
+  try {
+    consultRecord = ctx.consultRunId === undefined ? undefined : registry.get(ctx.consultRunId);
+    expertRecord = registry.get(ctx.ref.runId);
+    const first = consultRecord?.first;
+    const requests = consultRecord?.requests
+      ?.filter((request) => request.usage !== undefined)
+      .map((request) => ({ ...request.usage!, ...(request.toolsDrift === true ? { toolsDrift: true as const } : {}) }));
+    const expertTools = ctx.snapshot?.tools.length ?? 0;
+    const failureCode = prefixFailureCode(ctx.outcomeError);
+    const identity: ConsultCacheProbe["identity"] = {
+      preflight: failureCode === undefined ? "pass" : `fail:${failureCode}`,
+      ...(ctx.snapshot === undefined ? {} : { expertTools }),
+    };
+    if (expertRecord?.latest !== undefined && first !== undefined) {
+      const wire = compareRecordedPrefix(expertRecord.latest, first);
+      identity.wire = {
+        system: wire.system,
+        tools: wire.tools,
+        model: wire.model,
+        thinking: wire.thinking,
+      };
+    }
+
+    const expertSettledAt = ctx.expertLive?.diag.settledAt ?? ctx.expertSettledAt;
+    const firstStartedAt = first?.startedAt;
+    const gapSettleMs =
+      firstStartedAt !== undefined && expertSettledAt !== undefined
+        ? Math.max(0, firstStartedAt - expertSettledAt)
+        : undefined;
+    const gapLastRequestMs =
+      firstStartedAt !== undefined && expertRecord?.latest?.endedAt !== undefined
+        ? Math.max(0, firstStartedAt - expertRecord.latest.endedAt)
+        : undefined;
+
+    let expertPrefixTokens: number | undefined;
+    let prefixSource: ConsultCacheProbe["prefixSource"];
+    const usage = ctx.snapshot?.lastRequestUsage;
+    if (usage !== undefined) {
+      const input = finiteNonNegative(usage.input);
+      const cacheRead = finiteNonNegative(usage.cacheRead);
+      const cacheWrite = finiteNonNegative(usage.cacheWrite);
+      if (input !== undefined && cacheRead !== undefined && cacheWrite !== undefined) {
+        expertPrefixTokens = input + cacheRead + cacheWrite;
+        prefixSource = "snapshot-usage";
+      }
+    }
+    if (expertPrefixTokens === undefined && ctx.ref.contextTokens !== undefined) {
+      expertPrefixTokens = ctx.ref.contextTokens;
+      prefixSource = "context-tokens";
+    }
+
+    const requestCost = (requests ?? []).reduce((sum, request) => sum + request.costUsd, 0);
+    const totalCost = finiteNonNegative(ctx.consultDiagnostics?.usage?.costUsd);
+    const keepalivePingUsd = totalCost === undefined ? undefined : Math.max(0, totalCost - requestCost);
+    const hitRatio =
+      expertPrefixTokens === undefined || expertPrefixTokens <= 0
+        ? null
+        : requests === undefined
+          ? null
+          : Math.max(
+              0,
+              Math.min(1, requests[0]?.cacheRead !== undefined ? requests[0].cacheRead / expertPrefixTokens : 0),
+            );
+    const guard =
+      ctx.guardCounters === undefined && ctx.consultRunId !== undefined ? getConsultGuard(ctx.consultRunId) : undefined;
+    const counters = ctx.guardCounters ?? guard?.counters();
+    const blocked =
+      counters === undefined
+        ? undefined
+        : {
+            ...counters,
+            costAfterUsd:
+              counters.costAfterUsd > 0
+                ? counters.costAfterUsd
+                : counters.batches > 0 && requests !== undefined
+                  ? requests
+                      .slice(Math.min(counters.batches - 1, requests.length))
+                      .reduce((sum, request) => sum + request.costUsd, 0)
+                  : counters.costAfterUsd,
+          };
+    const probe: ConsultCacheProbe = {
+      expertRunId: ctx.ref.runId,
+      outcome: ctx.outcome,
+      identity,
+      ...(consultRecord?.api === undefined ? {} : { api: consultRecord.api }),
+      ...(consultRecord?.provider === undefined ? {} : { provider: consultRecord.provider }),
+      ...(consultRecord?.model === undefined ? {} : { model: consultRecord.model }),
+      ...(gapSettleMs === undefined ? {} : { gapSettleMs }),
+      ...(gapLastRequestMs === undefined ? {} : { gapLastRequestMs }),
+      ...(expertPrefixTokens === undefined ? {} : { expertPrefixTokens }),
+      ...(prefixSource === undefined ? {} : { prefixSource }),
+      ...(requests === undefined ? {} : { requests }),
+      ...(keepalivePingUsd === undefined ? {} : { keepalivePingUsd }),
+      ...(hitRatio === undefined ? {} : { hitRatio }),
+      ...(blocked === undefined ? {} : { blocked }),
+    };
+    return probe;
+  } catch {
+    if (consultRecord !== undefined) consultRecord.probeErrors = (consultRecord.probeErrors ?? 0) + 1;
+    return {
+      expertRunId: ctx.ref.runId,
+      outcome: ctx.outcome,
+      identity: {
+        preflight:
+          prefixFailureCode(ctx.outcomeError) === undefined ? "pass" : `fail:${prefixFailureCode(ctx.outcomeError)}`,
+        ...(ctx.snapshot === undefined ? {} : { expertTools: ctx.snapshot.tools.length }),
+      },
+    };
+  }
 }
 
 /**
@@ -726,6 +918,29 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
             } satisfies ConsultToolDetails,
           };
         }
+        // C2 snapshot reconstruction happens after the fork and before spawn.
+        // Main intentionally remains the documented Q1 read-only exception.
+        let consultSnapshot: ExpertRequestSnapshot | undefined;
+        if (!isMain) {
+          const scanned = deps.forkStore.scanExpertSnapshot(fork.path);
+          if (!scanned.ok) {
+            deps.forkStore.removeForkFile(fork.path);
+            const probe = earlyCacheProbe(ref, "identity_mismatch", scanned.code);
+            return {
+              content: [{ type: "text" as const, text: preserveRefusal(expertName(ref), scanned.code) }],
+              details: {
+                expertRunId: ref.runId,
+                ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
+                outcome: "identity_mismatch",
+                configError: scanned.code,
+                ...(probe === undefined ? {} : { cacheProbe: probe }),
+              } satisfies ConsultToolDetails,
+            };
+          }
+          consultSnapshot = scanned.snapshot;
+        }
+        const promptLists = consultSnapshot === undefined ? undefined : consultPromptLists(consultSnapshot);
+        const spawnModel = consultSnapshot?.model ?? model;
         // ⑥ Spawn the consult run through the narrow port. D10: an isolated
         // asker's consult always runs in the asker's own worktree — no call
         // to `resolveForkCwd` at all. An unisolated asker keeps the §5.1
@@ -741,9 +956,11 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
               maxAnswerChars: s.maxAnswerChars,
               budgetNote,
               isMain,
+              ...(promptLists === undefined ? {} : promptLists),
             }),
             label: consultRunLabel(expertName(ref)),
-            ...(model !== undefined ? { modelOverride: model } : {}),
+            ...(spawnModel !== undefined ? { modelOverride: spawnModel } : {}),
+            ...(consultSnapshot === undefined ? {} : { consultSnapshot }),
             cwd,
             forkSessionFrom: fork.path,
             parentRunId: deps.selfRunId,
@@ -757,30 +974,45 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           // it here and now (no race possible, §4.1 error table last row).
           const message = e instanceof Error ? e.message : String(e);
           deps.forkStore.removeForkFile(fork.path);
-          return {
-            content: [{ type: "text" as const, text: `Expert "${expertName(ref)}" could not be launched: ${message}` }],
-            details: {
-              expertRunId: ref.runId,
-              ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
-              outcome: "unavailable",
-              configError: message,
-            } satisfies ConsultToolDetails,
-          };
-        }
-        if ("error" in started) {
-          deps.forkStore.removeForkFile(fork.path);
+          const preserve = preserveFailure(message);
+          const probe = earlyCacheProbe(ref, preserve?.outcome ?? "unavailable", preserve?.code, consultSnapshot);
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Expert "${expertName(ref)}" could not be launched: ${started.error.message}`,
+                text: preserve
+                  ? preserveRefusal(expertName(ref), preserve.code)
+                  : `Expert "${expertName(ref)}" could not be launched: ${message}`,
               },
             ],
             details: {
               expertRunId: ref.runId,
               ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
-              outcome: "unavailable",
+              outcome: preserve?.outcome ?? "unavailable",
+              configError: message,
+              ...(probe === undefined ? {} : { cacheProbe: probe }),
+            } satisfies ConsultToolDetails,
+          };
+        }
+        if ("error" in started) {
+          deps.forkStore.removeForkFile(fork.path);
+          const preserve = preserveFailure(started.error.message);
+          const probe = earlyCacheProbe(ref, preserve?.outcome ?? "unavailable", preserve?.code, consultSnapshot);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: preserve
+                  ? preserveRefusal(expertName(ref), preserve.code)
+                  : `Expert "${expertName(ref)}" could not be launched: ${started.error.message}`,
+              },
+            ],
+            details: {
+              expertRunId: ref.runId,
+              ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
+              outcome: preserve?.outcome ?? "unavailable",
               configError: started.error.message,
+              ...(probe === undefined ? {} : { cacheProbe: probe }),
             } satisfies ConsultToolDetails,
           };
         }
@@ -797,7 +1029,13 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           maxCostUsd: s.maxCostUsd,
           onCap: (reason) => queueMicrotask(() => deps.port.abortRun(consultRunId, reason)),
         });
-        const unwatch = deps.port.watchRun(consultRunId, watcher.onSnapshot);
+        let settledGuardCounters: ConsultGuardCounters | undefined;
+        const onSnapshot = (snapshot: RunSnapshot): void => {
+          watcher.onSnapshot(snapshot);
+          if (isTerminal(snapshot.status) && settledGuardCounters === undefined)
+            settledGuardCounters = getConsultGuard(consultRunId)?.counters();
+        };
+        const unwatch = deps.port.watchRun(consultRunId, onSnapshot);
         let outcome: RunOutcome;
         try {
           outcome = await deps.port.waitOutcome(consultRunId);
@@ -807,6 +1045,23 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         // ⑨ Result assembly (§4.1): truncate WITHOUT sessionFile (the fork
         // file is about to be deleted — never point the asker at it, §5.5).
         const capReason = watcher.capReason;
+        const preserve = preserveFailure(outcome.error?.message);
+        const outcomeTag = preserve?.outcome ?? outcomeLabel(outcome, capReason);
+        const guardCounters = settledGuardCounters ?? getConsultGuard(outcome.runId)?.counters();
+        const effectiveOutcome: ConsultOutcome = guardCounters?.terminated ? "blocked_cap" : outcomeTag;
+        const settledAt = deps.expertSettledAt?.(ref.runId);
+        const cacheProbe = buildCacheProbe({
+          ref,
+          ...(consultSnapshot === undefined ? {} : { snapshot: consultSnapshot }),
+          outcome: effectiveOutcome,
+          ...(outcome.error?.message === undefined ? {} : { outcomeError: outcome.error.message }),
+          consultRunId: outcome.runId,
+          consultDiagnostics: outcome.diag,
+          ...(live === undefined || isMain ? {} : { expertLive: live }),
+          ...(settledAt === undefined ? {} : { expertSettledAt: settledAt }),
+          ...(guardCounters === undefined ? {} : { guardCounters }),
+          ...(deps.prefixProbeRegistry === undefined ? {} : { registry: deps.prefixProbeRegistry }),
+        });
         const baseDetails = {
           expertRunId: ref.runId,
           ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
@@ -820,8 +1075,20 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           durationMs: outcome.durationMs,
           turns: outcome.turns,
           ...(outcome.diag.toolCounts !== undefined ? { toolCounts: outcome.diag.toolCounts } : {}),
+          ...(cacheProbe === undefined ? {} : { cacheProbe }),
         };
         const usage = outcome.usage !== undefined ? { usage: toPiToolUsage(outcome.usage) } : {};
+        if (preserve !== undefined) {
+          return {
+            content: [{ type: "text" as const, text: preserveRefusal(expertName(ref), preserve.code) }],
+            ...usage,
+            details: {
+              ...baseDetails,
+              outcome: effectiveOutcome,
+              ...(outcome.error?.message === undefined ? {} : { configError: outcome.error.message }),
+            } satisfies ConsultToolDetails,
+          };
+        }
         if (outcome.status === "completed") {
           const raw =
             outcome.text !== undefined && outcome.text.trim().length > 0
@@ -842,12 +1109,11 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
             details: {
               ...baseDetails,
               truncated: truncated.truncated,
-              outcome: "completed",
+              outcome: effectiveOutcome,
             } satisfies ConsultToolDetails,
           };
         }
         const hasText = outcome.text !== undefined && outcome.text.trim().length > 0;
-        const outcomeTag = outcomeLabel(outcome, capReason);
         if (!hasText) {
           return {
             content: [
@@ -860,7 +1126,7 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
               },
             ],
             ...usage,
-            details: { ...baseDetails, outcome: outcomeTag } satisfies ConsultToolDetails,
+            details: { ...baseDetails, outcome: effectiveOutcome } satisfies ConsultToolDetails,
           };
         }
         const truncated = truncateResultText(outcome.text!, s.maxAnswerChars);
@@ -879,7 +1145,7 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
             ...baseDetails,
             truncated: truncated.truncated,
             partial: true,
-            outcome: outcomeTag,
+            outcome: effectiveOutcome,
           } satisfies ConsultToolDetails,
         };
       } finally {

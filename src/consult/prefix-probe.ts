@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { PROVIDER_PREFIX_FIELDS, type PayloadPrefixComparison, type ProviderPrefixField } from "./preserve-identity.js";
+import { registerConsultGuard } from "./preserve-guard.js";
 export type { PayloadPrefixComparison, ProviderPrefixField } from "./preserve-identity.js";
 
 /** A request observation retained by the process-local consult probe. */
@@ -306,9 +307,12 @@ export function installPrefixProbe(sessionValue: unknown, specValue?: unknown): 
   const agent = session?.agent;
   if (!agent || typeof agent !== "object") return () => undefined;
   const spec = specValue as { runId?: unknown; consultGuard?: unknown } | undefined;
+  // The main fallback is defensive only; the runner always supplies newRunId().
   const runId = typeof spec?.runId === "string" && spec.runId.length > 0 ? spec.runId : "main";
   const consult = spec?.consultGuard !== undefined;
   const record = recordFor(runId, consult);
+  if (consult && spec?.consultGuard !== null && typeof spec?.consultGuard === "object")
+    registerConsultGuard(runId, spec.consultGuard as import("../core/types.js").ConsultGuard);
   const state = new ProbeState(record, consult);
   const original = agent.onPayload;
   agent.onPayload = async function (payload: unknown, model: unknown): Promise<unknown> {
@@ -342,9 +346,6 @@ export function installPrefixProbe(sessionValue: unknown, specValue?: unknown): 
   }
   return () => state.close();
 }
-
-/** Alias kept for callers that describe this operation as wiring the probe. */
-export const wirePrefixProbe = installPrefixProbe;
 
 function equalHash(left: string | undefined, right: string | undefined): boolean {
   return left === undefined && right === undefined ? true : left !== undefined && right !== undefined && left === right;

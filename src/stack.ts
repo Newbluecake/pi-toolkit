@@ -108,6 +108,7 @@ import {
   FORK_TTL_MS,
   removeForkFile,
   resolveForkCwd,
+  scanExpertSnapshot,
   sweepForkDir,
 } from "./consult/fork-store.js";
 import { wireConsult, type ConsultWiring } from "./consult/index.js";
@@ -2294,6 +2295,7 @@ export function buildSessionStack(
       forkMainSessionSnapshot(sourceFile, fallbackCwd, undefined, opts?.forceCwd ? { forceCwd: true } : {}),
     removeForkFile,
     resolveForkCwd,
+    scanExpertSnapshot,
     sweepForkDir: () => sweepForkDir(consultSessionDir(), FORK_TTL_MS),
   };
   const consult = wireConsult({

@@ -155,6 +155,18 @@ function realExpertSession(label: string): { file: string; cwd: string } {
   // consult path is exercised on a realistically marked source.
   mgr.appendCustomEntry("subagent:child", { v: 1 });
   mgr.appendMessage({ role: "user", content: [{ type: "text", text: `expert task ${label}` }] });
+  // pi 1.0 sessions record the provider-visible loadout in a system message;
+  // C2 intentionally refuses fixtures that omit it (R1).
+  mgr.appendMessage({
+    role: "system",
+    content: "You are the expert.",
+    toolsAdded: [
+      { name: "read", description: "Read a file", parameters: { type: "object" } },
+      { name: "grep", description: "Search files", parameters: { type: "object" } },
+      { name: "find", description: "Find files", parameters: { type: "object" } },
+      { name: "ls", description: "List files", parameters: { type: "object" } },
+    ],
+  });
   mgr.appendMessage({ role: "assistant", content: [{ type: "text", text: `expert investigated ${label}` }] });
   const file = mgr.getSessionFile();
   if (!file) throw new Error("expert session fixture failed to persist");

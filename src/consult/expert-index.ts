@@ -22,6 +22,8 @@ export interface ExpertRecord {
   contextTokens?: number;
   /** The run's original task prompt, summarized (`summarizeExpertTask`); display only. */
   task?: string;
+  /** Terminal time used by consult cache-gap diagnostics. */
+  settledAt?: Millis;
   updatedAt: Millis;
 }
 
@@ -161,6 +163,7 @@ export function createExpertIndex(opts: { consultDir: string }): ExpertIndex {
           ...(ctx.percent !== undefined ? { contextPercent: ctx.percent } : {}),
           ...(ctx.tokens !== undefined ? { contextTokens: ctx.tokens } : {}),
           ...(task !== undefined ? { task } : {}),
+          ...(typeof diag?.settledAt === "number" ? { settledAt: diag.settledAt } : {}),
           updatedAt: typeof snap.updatedAt === "number" ? snap.updatedAt : 0,
         });
       }

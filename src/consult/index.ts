@@ -20,6 +20,7 @@ import {
   type ConsultForkStore,
 } from "./tool.js";
 import type { MainSessionFactsProvider } from "./main-facts.js";
+import { releaseConsultGuard } from "./preserve-guard.js";
 
 /**
  * consult assembly (docs/dev/consult/plan.md §6 C-11): everything mutable
@@ -392,6 +393,11 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
         whitelist,
         port,
         query,
+        expertSettledAt: (runId) => {
+          const live = query.get(runId)?.diag.settledAt;
+          if (typeof live === "number") return live;
+          return expertIndex.list().find((record) => record.runId === runId)?.settledAt;
+        },
         forkStore,
         priceOf: deps.priceOf,
         inflight,
@@ -409,6 +415,7 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
       }
     },
     onReaped(runId, forkSessionFrom) {
+      releaseConsultGuard(runId);
       if (forkSessionFrom === undefined) return; // not a consult run
       // Defense in depth: only ever delete files the consult subsystem owns.
       if (!isUnderDir(consultDir, forkSessionFrom)) return;
@@ -425,6 +432,8 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
 }
 
 export type { ConsultAskerCwd, ConsultForkStore, ConsultSpawnPort } from "./tool.js";
-export { buildConsultPrompt } from "./prompt.js";
+export { buildConsultPrompt, consultPromptLists } from "./prompt.js";
+export { buildCacheProbe } from "./tool.js";
+export { scanExpertSnapshot } from "./fork-store.js";
 export type { ForkExpertSessionResult } from "../core/types.js";
 export type { MainSessionFacts, MainSessionFactsProvider } from "./main-facts.js";
