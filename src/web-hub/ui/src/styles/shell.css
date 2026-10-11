@@ -65,9 +65,27 @@
   letter-spacing: -0.01em;
 }
 
-.brand > span:last-child {
+/* 2026-10-11 phone report (a clipped "p" sliver next to the mark): the label is all-or-nothing.
+ * It never shrinks; when the shrunken brand can't fit mark + label on one line, the label wraps
+ * onto a second line that the fixed-height, overflow-clipped brand box hides. */
+.brand {
+  flex-wrap: wrap;
+  align-content: flex-start;
+  height: 26px;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.brand > span:last-child {
+  flex: none;
+  line-height: 26px;
+}
+
+/* Phones never have room for it next to the conn/quota pills and the icon buttons: show the
+ * mark alone (the wrap trick above would otherwise leave the shrunken brand's blank width). */
+@media (max-width: 480px) {
+  .brand > span:last-child {
+    display: none;
+  }
 }
 
 .brand-mark {
