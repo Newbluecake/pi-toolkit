@@ -52,6 +52,19 @@ code.md-code.path-ref {
     padding-inline: var(--sp-1);
     margin-inline: calc(-1 * var(--sp-1));
   }
+
+  /* An inline-code path (`code.md-code.path-ref`) loses the padding above to `.md code`'s
+   * `padding: 1px 5px` (higher specificity) while still taking the negative margin-block, so a
+   * wrapped code path under-reported its height by ~24px and the next line/list item covered
+   * its last line (2026-10-11, phone: "…anthropic-stub.ts" bottom hidden). Restore the same
+   * padding-block at a higher specificity, keep the code's 5px inline padding, and clip the
+   * sunken background to the text rows so the 44px hit area doesn't paint as a tall grey box. */
+  .md code.md-code.path-ref {
+    padding-block: calc((44px - 1.4em) / 2);
+    padding-inline: 5px;
+    margin-inline: 0;
+    background-clip: content-box;
+  }
 }
 
 /* ---------------------------------------------------------------- overlay + panel */
