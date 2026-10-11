@@ -465,3 +465,27 @@ interface ConsultCacheProbe {
 4. L790 判定线作废，由本方案 §11 取代。
 5. provider 名 `cloudrouter-*` ⇒ 本机现为 `cr-*`。
 6. §5.4「工具块在前缀头部」⇒ pi 1.0 的机理是「transcript 里的 tool-change system 消息 + provider 折叠」；实证 traffic.db #191/#195。
+
+---
+
+## 实施记录（2026-10-11）
+
+| 包  | 提交      | 内容                                                                                    |
+| --- | --------- | --------------------------------------------------------------------------------------- |
+| A   | `be74a0a` | 冻结类型（`ExpertRequestSnapshot`、`ConsultCacheProbe` 等）                             |
+| F   | `be5ffc3` | 离线分析脚本 `scripts/exp/consult-cache-analyze.mjs`（含 `--retro`）                    |
+| B+C | `6c1c11c` | 守卫（`preserve-guard.ts`、`preserve-identity.ts`）+ adapter consult 分支 + shadow 工具 |
+| E   | `7c5c54e` | 宿主侧请求级前缀探针（`prefix-probe.ts`）                                               |
+| D   | `d3e2adf` | consult 工具接线：快照扫描、拒绝文案、`blocked_cap`、`diag.consults[].cache`            |
+| G   | `962b20d` | 真实 pi conformance（`tests/conformance/consult-preserve.test.ts`，C1–C7；C8 待 Q5）    |
+| H   | 本提交    | AGENTS.md、`plan.md` 附录更正、本记录                                                   |
+
+**实施期裁决（主会话）**：
+
+- G 用真实 pi 发现 `comparePayloadPrefix` / `compareRecordedPrefix` 把断点规则实现成「绝对位置相等」，与 §4.3
+  的相对口径矛盾（每次真实 consult 都会被判 `messages=false`）。裁定为生产 bug，授权 G 修复两个比较器并保持
+  二者等价；修复随 G 提交。
+- 验收发现 `identity.predicted`（§3.2 M2 只记录项）未被 D 填充，作为 C2 收尾补丁单独交付。
+
+**仍未裁决**：Q3（终止阈值）、Q4（成本预检口径）、Q5（`agent.sessionId` 亲和；C8 因此 skip）、Q6（允许工具 = 交集）。
+均不阻塞发布（发布门槛 Q1 已裁决）。

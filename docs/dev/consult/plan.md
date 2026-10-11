@@ -1048,3 +1048,24 @@ ConsultExpertRef[]` 这个到处传递的类型变成一个更复杂的判别联
   大文件跳过逐行解析，但**仍执行** stat 漂移检测与 header（首行 8KB 窗口）+ 尾部 8KB 窗口的非末行解析
   校验，且不再把整个文件读进内存（旧实现先 `readFileSync` 整个文件再判"太大"）。测试用注入的小阈值 +
   受限读窗口 spy 锁定（不再需要真写 32MB 文件），原"测试盲区"记录作废。
+
+---
+
+## 附录（2026-10-11，C2 落地后的更正）
+
+consult C2 preserve 已按 `docs/dev/consult/expert-keepalive-plan.md` v3.1 落地（提交见该文档「实施记录」）。
+本文档正文保留为历史设计记录，以下 6 处以本附录为准（对应该方案附录 A）：
+
+1. **§5.4 / §8 / §12 的方案 B 已被 C2 取代**：请教已结束专家时不再换只读工具表，而是按专家最后一次请求的工具清单
+   - model/thinking 重建会话，只读由 `preserve-guard.ts` 的拦截守卫保证（R1 + M1/M2）。`consult.expertTools` 旋钮
+     不再规划。唯一例外是保留 id `"main"`：按用户裁决（Q1，2026-10-10）继续使用只读工具表形态（方案 §3.7）。
+2. **§2 现状（原 L68）与 §8（原 L702）「1h 实测存活 7–13.6min」作废**：确认 1h 条目存活 ≥23.2min、≤27.5min 内失效；
+   早期数字是前缀谱系分裂造成的误判。
+3. **§2 现状（原 L52）「thinkingLevel 不持久化」作废**：pi 1.0 会话写 `thinking_level_change` 条目
+   （`sdk.js:278-289`）；C2 从专家快照读回 thinking 并显式传入。
+4. **§11 的判定线（原 L790）作废**，由 expert-keepalive-plan §11（以 `ConsultCacheProbe` 埋点数据为前提的保活阶段）取代。
+5. **provider 名**：文中 `cloudrouter-*` 在本机现为 `cr-*`（如 `cr-anthropic`、`cr-response`、`cr-kimi`）。
+6. **§5.4 表格「工具块在前缀头部，必然全量重写」的机理更正**：pi 1.0 下工具变更体现为 transcript 里的
+   tool-change system 消息 + provider 侧折叠，而不是前缀头部的工具块从头不同（实证 traffic.db #191/#195）。
+   C2 的前缀比较口径见 expert-keepalive-plan §4.3（断点规则为相对口径：两侧各自只在自己最后一条
+   user/tool_result 上带断点且 ttl 相同）。
