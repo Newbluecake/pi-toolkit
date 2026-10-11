@@ -6,7 +6,11 @@ import { sampleOnce, type SamplerIo } from "./sampler.js";
 import { scanTop, type TopPrevious } from "./top.js";
 import type { TopScanOptions } from "./top.js";
 import { createLoadTracker, type LoadTracker } from "./tracker.js";
-import type { LoadPort, TopSnapshot } from "./types.js";
+import type { LoadLevel, LoadPort, TopSnapshot } from "./types.js";
+
+const severity = (level: LoadLevel): number => (level === "crit" ? 2 : level === "warn" ? 1 : 0);
+/** True when the level rose INTO warn/crit — ok→warn, ok→crit and warn→crit all count. */
+export const escalated = (before: LoadLevel, after: LoadLevel): boolean => severity(after) > severity(before);
 
 export interface LoadActivationContext {
   readonly mode?: string;
@@ -76,10 +80,12 @@ export function createLoadActivation(deps: LoadActivationDeps): LoadActivation {
           mountinfoText = result.mountinfoText;
           mountinfoAt = result.sample.mono;
         }
-        const beforeGating = tracker.verdict(result.sample.mono, result.sample.at).gating;
+        const before = tracker.verdict(result.sample.mono, result.sample.at);
         tracker.observe(result.sample);
-        const afterGating = tracker.verdict(result.sample.mono, result.sample.at).gating;
-        if (!beforeGating && afterGating) port.refreshTop();
+        const after = tracker.verdict(result.sample.mono, result.sample.at);
+        // Scan top processes whenever the level rises into warn/crit (incl. warn→crit), not only when gating flips, so
+        // the turn_end hint — which also fires with `load.gate=false` — has a snapshot to show.
+        if ((!before.gating && after.gating) || escalated(before.level, after.level)) port.refreshTop();
       })
       .catch(() => undefined)
       .finally(() => {

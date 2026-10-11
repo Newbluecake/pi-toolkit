@@ -25,7 +25,9 @@ const pct = (value: number | undefined): string => (value === undefined ? "—" 
 const bytes = (value: number | undefined): string =>
   value === undefined ? "—" : `${(value / 2 ** 30).toFixed(value >= 2 ** 30 ? 1 : 2).replace(/\.0$/, "")}G`;
 
-function loadDetail(verdict: LoadVerdict): string {
+/** Compact `[load] <level> · CPU · MEM · DISK` detail (plus a loadavg line when known), shared by the
+ * admission rejection and the turn_end escalation hint so both report the same numbers. */
+export function loadDetail(verdict: LoadVerdict): string {
   const cpu = verdict.metrics.cpu;
   const mem = verdict.metrics.mem;
   const disk = verdict.metrics.disk[0]?.state;

@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LoadSettings } from "../config/settings.js";
 import { buildLoadEscalationText, buildLoadRecoveryText } from "./render.js";
-import type { LoadLevel, LoadPort, LoadTransition } from "./types.js";
+import type { LoadLevel, LoadPort, LoadTransition, TopSnapshot } from "./types.js";
 
 export const LOAD_CUSTOM_TYPE = "subagent:load";
 
@@ -65,7 +65,11 @@ export function createLoadHintHook(deps: LoadHintDeps): (event: unknown, ctx: Ex
     if (verdict.level !== "unknown" && rank(verdict.level) >= rank(deps.settings.gateLevel))
       state.recoveryPending = false;
     const t = now();
-    const rose = verdict.level !== "unknown" && (previous === "unknown" || rank(verdict.level) > rank(previous));
+    // Only an escalation INTO warn/crit is news. `ok` is never announced as an escalation — in
+    // particular the very first known sample after activation (`previous` starts at "unknown")
+    // used to fire a "系统负载过高" hint on a perfectly idle machine.
+    const rose =
+      rank(verdict.level) >= rank("warn") && (previous === "unknown" || rank(verdict.level) > rank(previous));
     const critRepeat =
       verdict.level === "crit" &&
       state.latches.get("crit") !== undefined &&
@@ -79,7 +83,10 @@ export function createLoadHintHook(deps: LoadHintDeps): (event: unknown, ctx: Ex
     const context = deps.context?.();
     const content = recovery
       ? buildLoadRecoveryText(verdict, deps.settings.gate)
-      : buildLoadEscalationText(verdict, context?.ownRuns === undefined ? {} : { ownRuns: context.ownRuns });
+      : buildLoadEscalationText(verdict, {
+          ...(context?.ownRuns === undefined ? {} : { ownRuns: context.ownRuns }),
+          ...topContext(port),
+        });
     if (recovery && recoveryImmediate) recoveryImmediate = false;
     try {
       deps.sendMessage(
@@ -102,6 +109,17 @@ export function createLoadHintHook(deps: LoadHintDeps): (event: unknown, ctx: Ex
       // State is intentionally not advanced on a failed send; next turn retries.
     }
   };
+}
+
+function topContext(port: LoadPort): { top?: TopSnapshot } {
+  try {
+    const top = port.top();
+    // Fire-and-forget: the hint never waits on a scan; a later message sees the fresher snapshot.
+    port.refreshTop();
+    return top === undefined ? {} : { top };
+  } catch {
+    return {};
+  }
 }
 
 function rank(level: LoadLevel): number {

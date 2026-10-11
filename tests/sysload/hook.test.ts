@@ -79,3 +79,44 @@ describe("sysload hint hook", () => {
     expect(sent).toHaveLength(1);
   });
 });
+
+describe("sysload hint hook — idle machine", () => {
+  const run = (levels: LoadVerdict["level"][], top?: () => unknown) => {
+    let i = 0;
+    let now = 1;
+    const sent: string[] = [];
+    let refreshed = 0;
+    const port: LoadPort = {
+      verdict: () => makeVerdict(levels[Math.min(i, levels.length - 1)]!, false),
+      top: (top ?? (() => undefined)) as LoadPort["top"],
+      refreshTop: () => {
+        refreshed++;
+      },
+    };
+    const hook = createLoadHintHook({
+      settings: parseLoadSettings({ gate: false }),
+      port: () => port,
+      now: () => now,
+      sendMessage: (message) => sent.push(message.content),
+    });
+    for (; i < levels.length; i++) {
+      hook({}, { mode: "interactive" } as never);
+      now += 1_000_000;
+    }
+    return { sent, refreshed };
+  };
+
+  it("never announces an escalation for ok, including the first known sample after unknown", () => {
+    expect(run(["unknown", "ok", "ok", "unknown", "ok"]).sent).toEqual([]);
+    expect(run(["ok"]).sent).toEqual([]);
+  });
+
+  it("still announces warn and crit, with metric detail and a top refresh", () => {
+    const { sent, refreshed } = run(["ok", "warn", "crit"]);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain("[load] warn · CPU");
+    expect(sent[0]).toContain("系统负载偏高");
+    expect(sent[1]).toContain("系统负载过高");
+    expect(refreshed).toBe(2);
+  });
+});

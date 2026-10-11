@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { parseLoadSettings } from "../../src/config/settings.js";
-import { createLoadActivation } from "../../src/sysload/activation.js";
+import { createLoadActivation, escalated } from "../../src/sysload/activation.js";
 import { IoLedger } from "../../src/sysload/io-ledger.js";
 import { aggregateTop } from "../../src/sysload/top.js";
 
 describe("sysload activation and IO ledger", () => {
+  it("treats every rise into warn/crit as an escalation that refreshes top", () => {
+    expect(escalated("ok", "warn")).toBe(true);
+    expect(escalated("ok", "crit")).toBe(true);
+    expect(escalated("warn", "crit")).toBe(true);
+    expect(escalated("unknown", "warn")).toBe(true);
+    expect(escalated("unknown", "ok")).toBe(false);
+    expect(escalated("crit", "warn")).toBe(false);
+    expect(escalated("warn", "warn")).toBe(false);
+    expect(escalated("crit", "unknown")).toBe(false);
+  });
+
   it("does not start in print/json and dispose is idempotent", () => {
     const clock = new FakeClock();
     const activation = createLoadActivation({ settings: parseLoadSettings({}), clock, mono: () => 0, wall: () => 0 });
