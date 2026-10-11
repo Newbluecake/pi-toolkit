@@ -18,7 +18,9 @@
   flex-direction: column;
   gap: var(--sp-2);
   width: min(680px, calc(100vw - var(--sp-6)));
-  max-height: min(78vh, 720px);
+  /* fixed height: loading / empty / error / few / many rows never move or resize the frame */
+  height: min(78vh, 720px);
+  overflow: hidden;
   padding: var(--sp-4);
   border: 1px solid var(--c-border-strong);
   border-radius: var(--r-lg);
@@ -29,6 +31,7 @@
 /* ---------------------------------------------------------------- header (two rows) */
 
 .history-head {
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -85,9 +88,9 @@
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  min-height: 120px;
-  max-height: 52vh;
+  min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--c-border);
   border-radius: var(--r-md);
 }
@@ -299,6 +302,7 @@
 }
 
 .history-empty {
+  flex: 1 1 auto;
   margin: 0;
   padding: var(--sp-4) var(--sp-2);
   font-size: var(--fs-xs);
@@ -308,6 +312,8 @@
 
 /* one compact line: status texts on the left, 「加载更多」 pinned right */
 .history-foot {
+  flex: none;
+  margin-top: auto; /* pinned to the bottom of the fixed frame when the list slot is empty */
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
@@ -379,10 +385,18 @@
 @media (max-width: 640px) {
   .history-dialog {
     width: calc(100vw - var(--sp-4));
-    max-height: 88vh;
+    height: 88vh;
   }
+}
 
-  .history-list {
-    max-height: 44vh;
-  }
+/* Fixed-height frame: confirm sub-views (fork / spawn confirm) scroll inside it when tall; the
+ * status / error blocks between header and footer never shrink the list region's slot. */
+.history-dialog > .history-status,
+.history-dialog > .history-session-error {
+  flex: none;
+}
+
+.history-dialog > .spawn-confirm {
+  min-height: 0;
+  overflow-y: auto;
 }

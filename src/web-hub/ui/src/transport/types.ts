@@ -277,7 +277,14 @@ export interface SpawnTransport {
  * 409 keeps `reason:"cursor-expired"`, a 503 is the retryable "busy" state). */
 export type SpawnHistoryOutcome =
   | { readonly ok: true; readonly page: HistoryPage }
-  | { readonly ok: false; readonly error: string; readonly status: number; readonly reason?: string };
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly status: number;
+      readonly reason?: string;
+      /** 429 only: the `Retry-After` header (seconds). */
+      readonly retryAfterS?: number;
+    };
 
 // ---------------------------------------------------------------------------
 // web-hub-delete-session plan v2 §4.1/§5.3 — the `POST /api/agents/remove` transport surface

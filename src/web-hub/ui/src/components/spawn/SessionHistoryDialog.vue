@@ -35,6 +35,8 @@ import { useI18n } from "../../composables/useI18n.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import {
   HISTORY_LIST_IDLE,
+  createHistoryTokenBucket,
+  rateRetryDelayMs,
   SEARCH_DEBOUNCE_MS,
   historyErrorKey,
   historyListReducer,
@@ -102,6 +104,32 @@ let unmounted = false;
  * concurrent request on the same cursor). */
 let activeReqs = 0;
 
+// --- request pacing: client mirror of the server's history token bucket + cancellable sleeps ---
+const bucket = createHistoryTokenBucket();
+const sleepers = new Set<{ timer: ReturnType<typeof setTimeout>; done: () => void }>();
+/** Cancellable sleep; unmount resolves every pending sleeper (callers re-check `unmounted`/seq). */
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const entry = {
+      timer: setTimeout(() => {
+        sleepers.delete(entry);
+        resolve();
+      }, ms),
+      done: resolve,
+    };
+    sleepers.add(entry);
+  });
+}
+/** Waits for a token; false ⇒ the request was superseded/unmounted while queued (token NOT taken). */
+async function acquireToken(mySeq: number): Promise<boolean> {
+  for (;;) {
+    if (unmounted || mySeq !== seq) return false;
+    const wait = bucket.tryTake();
+    if (wait === 0) return true;
+    await sleep(wait);
+  }
+}
+
 async function runReq(q: HistoryQueryWire, auto: boolean): Promise<void> {
   const spawn = hub?.spawn;
   const mySeq = ++seq;
@@ -118,7 +146,18 @@ async function runReq(q: HistoryQueryWire, auto: boolean): Promise<void> {
         state.value = historyListReducer(state.value, { type: "error", status: 0, error: "E_UNSUPPORTED" });
         return;
       }
-      r = await history(q);
+      let attempt = 0;
+      for (;;) {
+        if (!(await acquireToken(mySeq))) return;
+        r = await history(q);
+        if (unmounted || mySeq !== seq) return;
+        if (r.ok || r.status !== 429) break;
+        // Silent 429 retry: keep the list/state untouched, wait, then go again (still current).
+        bucket.drain();
+        const delay = rateRetryDelayMs(++attempt, r.retryAfterS, bucket.tryTake());
+        if (delay === null) break;
+        await sleep(delay);
+      }
     } catch {
       r = { ok: false, error: "E_NETWORK", status: 0 };
     }
@@ -351,6 +390,11 @@ onMounted(async () => {
 onUnmounted(() => {
   unmounted = true;
   seq++; // drop any in-flight response
+  for (const e of sleepers) {
+    clearTimeout(e.timer);
+    e.done();
+  }
+  sleepers.clear();
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;

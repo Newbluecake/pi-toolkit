@@ -3,7 +3,7 @@
  * `SessionHistoryDialog.vue` (session-history plan §4.7.3 — P-ui). A REAL `createNewSession`
  * orchestrator over a scripted `start` drives the flow half (the dir-picker-test harness
  * pattern); the list half runs against a scripted `spawn.history`. Pins: rows/listbox
- * semantics, greyed rows, the 250ms debounce, the kind persistence (`pwh_history_kind`),
+ * semantics, greyed rows, the 350ms debounce, the kind persistence (`pwh_history_kind`),
  * load-more + auto-continue, `cursor-expired` reload, the skipped/dirsSkipped/changed/
  * enumerating banners, the empty hints, the unverified → fork confirm → submit path, the
  * 409 `session-open` flow view, `failed{kind:"session"}` inline + refresh, and the ALWAYS
@@ -312,7 +312,7 @@ describe("SessionHistoryDialog: list basics", () => {
 });
 
 describe("SessionHistoryDialog: search + kind", () => {
-  it("debounces the search 250ms (Enter commits immediately)", async () => {
+  it("debounces the search 350ms (Enter commits immediately)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const h = harness({ history: [{ ok: true, page: historyPage() }] });
     mountDialog(h);
@@ -320,7 +320,7 @@ describe("SessionHistoryDialog: search + kind", () => {
     expect(h.historyCalls).toHaveLength(1); // the initial page
     await type(q<HTMLInputElement>(".history-search input"), "parser");
     expect(h.historyCalls).toHaveLength(1); // still debounced
-    await vi.advanceTimersByTimeAsync(249);
+    await vi.advanceTimersByTimeAsync(349);
     expect(h.historyCalls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(2);
     expect(h.historyCalls).toHaveLength(2);
@@ -479,6 +479,7 @@ describe("SessionHistoryDialog: paging, auto-continue, cursor-expired, busy", ()
   });
 
   it("cursor-expired reloads the same query from scratch once; a second expiry becomes an error", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true }); // 6 calls > bucket capacity ⇒ the last waits for a token
     const h = harness({
       history: [
         { ok: true, page: historyPage({ next: "v1.ddddddddddd.1", items: [mainItem()] }) },
@@ -501,6 +502,7 @@ describe("SessionHistoryDialog: paging, auto-continue, cursor-expired, busy", ()
     // and the retry button re-issues the query — a MANUAL retry is a NEW query, so it gets
     // its own one auto-restart (call 4's 409 restarts once more via call 5 before erroring)
     await click(q<HTMLButtonElement>(".history-session-error button"));
+    await vi.advanceTimersByTimeAsync(1000);
     expect(h.historyCalls).toHaveLength(6);
     expect(h.historyCalls[4]?.cursor).toBeUndefined();
   });
@@ -789,5 +791,83 @@ describe("SessionHistoryDialog: resume / fork flows", () => {
     await click(q<HTMLButtonElement>(".history-row-actions button"));
     expect(h.starts).toHaveLength(0);
     expect(q(".history-session-error").textContent).toContain("no longer offers session history");
+  });
+});
+
+describe("SessionHistoryDialog: request pacing + silent 429 retry", () => {
+  const rate = (retryAfterS?: number): SpawnHistoryOutcome => ({
+    ok: false,
+    error: "E_RATE",
+    status: 429,
+    ...(retryAfterS !== undefined ? { retryAfterS } : {}),
+  });
+
+  it("rapid queries never burst past the bucket capacity; excess waits for tokens", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const h = harness({ history: [{ ok: true, page: historyPage() }] });
+    mountDialog(h);
+    await flushPromises();
+    const input = q<HTMLInputElement>(".history-search input");
+    for (const v of ["a", "b", "c", "d", "e", "f"]) {
+      await type(input, v);
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await flushPromises();
+    }
+    // 1 initial + 6 commits wanted; only the last is current, earlier queued ones are dropped.
+    expect(h.historyCalls.length).toBeLessThanOrEqual(4);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.historyCalls[h.historyCalls.length - 1]?.q).toBe("f");
+    // superseded queued queries (b–e) were dropped without being sent
+    expect(h.historyCalls.map((c) => c.q)).not.toContain("e");
+  });
+
+  it("one 429 is retried silently and the error text never appears", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const h = harness({ history: [rate(1), { ok: true, page: historyPage({ items: [mainItem()] }) }] });
+    mountDialog(h);
+    await flushPromises();
+    expect(h.historyCalls).toHaveLength(1);
+    expect(document.body.textContent).not.toContain("Too many requests");
+    expect(qa(".history-session-error")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.historyCalls).toHaveLength(2);
+    expect(qa(".history-row")).toHaveLength(1);
+    expect(document.body.textContent).not.toContain("Too many requests");
+  });
+
+  it("only the 4th consecutive 429 surfaces the error", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const h = harness({ history: [rate(1)] });
+    mountDialog(h);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.historyCalls).toHaveLength(3);
+    expect(qa(".history-session-error")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.historyCalls).toHaveLength(4);
+    expect(q(".history-session-error").textContent).toContain("Too many requests");
+  });
+
+  it("unmount leaves no timers and sends nothing more", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const h = harness({ history: [rate(2)] });
+    const w = mountDialog(h);
+    await flushPromises();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    w.unmount();
+    mounted.splice(mounted.indexOf(w), 1);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.historyCalls).toHaveLength(1);
+  });
+
+  it("layout: list sits inside the fixed-height dialog frame (structure only; jsdom has no layout)", async () => {
+    const h = harness({ history: [{ ok: true, page: historyPage({ items: [mainItem()] }) }] });
+    mountDialog(h);
+    await flushPromises();
+    const dlg = q(".history-dialog");
+    expect(dlg.contains(q(".history-list"))).toBe(true);
+    expect(dlg.contains(q(".history-foot"))).toBe(true);
   });
 });

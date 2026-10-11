@@ -2217,7 +2217,7 @@ describe.each([
     const h2 = make(async (url) =>
       url.startsWith("/api/headless/history") ? resp(429, { error: "E_RATE" }, { "Retry-After": "7" }) : resp(200),
     );
-    expect(await h2.transport.spawn!.history!({})).toEqual({ ok: false, error: "E_RATE", status: 429 });
+    expect(await h2.transport.spawn!.history!({})).toEqual({ ok: false, error: "E_RATE", status: 429, retryAfterS: 7 });
   });
 
   it("a non-object 200 body maps to E_BAD_RESPONSE (status 200 kept)", async () => {

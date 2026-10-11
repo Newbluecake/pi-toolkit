@@ -44,8 +44,78 @@ export const HISTORY_KIND_STORAGE_KEY = "pwh_history_kind";
 /** Auto-continue rounds per input (§7.3 arch / §4.7.1: 每次输入最多 3 轮). */
 export const AUTO_CONTINUE_MAX = 3;
 
-/** Search debounce (§7.2 arch: 防抖 250ms). Exported for tests; the component owns the timer. */
-export const SEARCH_DEBOUNCE_MS = 250;
+/**
+ * Search debounce (§7.2 arch: 防抖 250ms → 350ms). A typing pause of 250ms is well inside a normal
+ * keystroke gap, so mid-word queries fired and each burned up to 4 server tokens (first page +
+ * auto-continue); 350ms still feels instant but skips most of those intermediate queries.
+ * Exported for tests; the component owns the timer.
+ */
+export const SEARCH_DEBOUNCE_MS = 350;
+
+/**
+ * Client mirror of the server's per-principal history token bucket (`src/web-hub/hub/spawn/
+ * routes.ts` HISTORY_READ_CAPACITY / HISTORY_READ_REFILL_MS — session-history plan §3.6 frozen
+ * values). Keep in sync by hand; the server is the authority, this only avoids sending requests
+ * that are certain to 429.
+ */
+export const HISTORY_BUCKET_CAPACITY = 4;
+export const HISTORY_BUCKET_REFILL_MS = 500;
+/** Silent 429 retries per request before the error surfaces. */
+export const HISTORY_RATE_RETRY_MAX = 3;
+/** Lower bound of a silent 429 retry delay. */
+export const HISTORY_RATE_RETRY_MIN_MS = 500;
+
+export interface HistoryTokenBucket {
+  /** Takes a token and returns 0, or returns the ms until the next token (nothing taken). */
+  tryTake(): number;
+  /** Server said 429 ⇒ our mirror was optimistic: drop all local tokens. */
+  drain(): void;
+}
+
+/** Lazy-refill token bucket on an injectable clock (pure; no timers — callers sleep). */
+export function createHistoryTokenBucket(
+  now: () => number = Date.now,
+  capacity: number = HISTORY_BUCKET_CAPACITY,
+  refillMs: number = HISTORY_BUCKET_REFILL_MS,
+): HistoryTokenBucket {
+  let tokens = capacity;
+  let last = now();
+  const refill = (): void => {
+    const t = now();
+    const gained = Math.floor((t - last) / refillMs);
+    if (gained > 0) {
+      tokens = Math.min(capacity, tokens + gained);
+      last = tokens >= capacity ? t : last + gained * refillMs;
+    }
+  };
+  return {
+    tryTake() {
+      refill();
+      if (tokens >= 1) {
+        if (tokens >= capacity) last = now();
+        tokens -= 1;
+        return 0;
+      }
+      return Math.max(1, last + refillMs - now());
+    },
+    drain() {
+      refill();
+      tokens = 0;
+      last = now();
+    },
+  };
+}
+
+/**
+ * Delay before silent retry number `attempt` (1-based) of a 429, or `null` when the budget is
+ * spent (⇒ surface the error). `Retry-After` wins; otherwise the next-token wait; floor 500ms.
+ */
+export function rateRetryDelayMs(attempt: number, retryAfterS: number | undefined, nextTokenMs: number): number | null {
+  if (attempt > HISTORY_RATE_RETRY_MAX) return null;
+  const base =
+    retryAfterS !== undefined && Number.isFinite(retryAfterS) && retryAfterS >= 0 ? retryAfterS * 1000 : nextTokenMs;
+  return Math.max(HISTORY_RATE_RETRY_MIN_MS, base);
+}
 
 // ---------------------------------------------------------------------------
 // row model
@@ -600,6 +670,8 @@ export function writeHistoryKindPref(
 interface HistoryResponseLike {
   readonly ok: boolean;
   readonly status: number;
+  /** Optional: only `Retry-After` is read (429 pacing); test doubles may omit it. */
+  readonly headers?: { get(name: string): string | null };
   json(): Promise<unknown>;
 }
 
@@ -611,7 +683,9 @@ interface HistoryResponseLike {
  */
 export async function historyOutcomeFromResponse(
   r: HistoryResponseLike,
-): Promise<{ ok: true; page: HistoryPage } | { ok: false; error: string; status: number; reason?: string }> {
+): Promise<
+  { ok: true; page: HistoryPage } | { ok: false; error: string; status: number; reason?: string; retryAfterS?: number }
+> {
   let body: unknown;
   try {
     body = await r.json();
@@ -625,10 +699,17 @@ export async function historyOutcomeFromResponse(
   }
   const b = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
   const reason = typeof b["reason"] === "string" ? (b["reason"] as string) : undefined;
+  let retryAfterS: number | undefined;
+  if (r.status === 429) {
+    const raw = r.headers?.get("Retry-After");
+    const n = raw === null || raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+    if (Number.isFinite(n) && n >= 0) retryAfterS = n;
+  }
   return {
     ok: false,
     error: typeof b["error"] === "string" ? (b["error"] as string) : r.status === 401 ? "E_AUTH" : `HTTP ${r.status}`,
     status: r.status,
     ...(reason !== undefined ? { reason } : {}),
+    ...(retryAfterS !== undefined ? { retryAfterS } : {}),
   };
 }

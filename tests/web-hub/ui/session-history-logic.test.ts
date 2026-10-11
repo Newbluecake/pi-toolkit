@@ -9,6 +9,12 @@
 import { describe, expect, it } from "vitest";
 import {
   AUTO_CONTINUE_MAX,
+  HISTORY_BUCKET_CAPACITY,
+  HISTORY_BUCKET_REFILL_MS,
+  HISTORY_RATE_RETRY_MAX,
+  createHistoryTokenBucket,
+  historyOutcomeFromResponse,
+  rateRetryDelayMs,
   HISTORY_LIST_IDLE,
   SESSION_ERR_CODES,
   formatRelTime,
@@ -536,5 +542,58 @@ describe("history kind preference (pwh_history_kind)", () => {
         "main",
       ),
     ).not.toThrow();
+  });
+});
+
+describe("history token bucket mirror + 429 retry decision", () => {
+  it("mirrors the server constants (routes.ts §3.6: 4 / 500ms)", () => {
+    expect(HISTORY_BUCKET_CAPACITY).toBe(4);
+    expect(HISTORY_BUCKET_REFILL_MS).toBe(500);
+  });
+
+  it("allows a burst of capacity, then reports the wait, then refills 1 per 500ms", () => {
+    let t = 1000;
+    const b = createHistoryTokenBucket(() => t);
+    for (let i = 0; i < 4; i++) expect(b.tryTake()).toBe(0);
+    expect(b.tryTake()).toBe(500);
+    t += 200;
+    expect(b.tryTake()).toBe(300);
+    t += 300;
+    expect(b.tryTake()).toBe(0);
+    expect(b.tryTake()).toBe(500);
+    t += 10_000; // refill caps at capacity
+    for (let i = 0; i < 4; i++) expect(b.tryTake()).toBe(0);
+    expect(b.tryTake()).toBeGreaterThan(0);
+  });
+
+  it("drain() empties the local tokens", () => {
+    let t = 0;
+    const b = createHistoryTokenBucket(() => t);
+    b.drain();
+    expect(b.tryTake()).toBe(500);
+    t += 500;
+    expect(b.tryTake()).toBe(0);
+  });
+
+  it("rateRetryDelayMs: Retry-After wins, floor 500ms, gives up after the max", () => {
+    expect(rateRetryDelayMs(1, 2, 100)).toBe(2000);
+    expect(rateRetryDelayMs(1, undefined, 100)).toBe(500);
+    expect(rateRetryDelayMs(2, undefined, 800)).toBe(800);
+    expect(rateRetryDelayMs(1, 0, 900)).toBe(500);
+    expect(rateRetryDelayMs(HISTORY_RATE_RETRY_MAX, 1, 0)).toBe(1000);
+    expect(rateRetryDelayMs(HISTORY_RATE_RETRY_MAX + 1, 1, 0)).toBeNull();
+  });
+
+  it("historyOutcomeFromResponse carries Retry-After on 429 only", async () => {
+    const mk = (status: number, ra: string | null) => ({
+      ok: false,
+      status,
+      headers: { get: (n: string) => (n === "Retry-After" ? ra : null) },
+      json: async () => ({ error: "E_RATE" }),
+    });
+    expect(await historyOutcomeFromResponse(mk(429, "3"))).toMatchObject({ ok: false, status: 429, retryAfterS: 3 });
+    const bad = await historyOutcomeFromResponse(mk(429, "soon"));
+    expect(bad).not.toHaveProperty("retryAfterS");
+    expect(await historyOutcomeFromResponse(mk(503, "3"))).not.toHaveProperty("retryAfterS");
   });
 });
