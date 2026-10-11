@@ -229,14 +229,14 @@ export function buildSessionStack(
 ): Stack;
 ```
 
-- **模块级 `previousXxx` 变量 + dispose-at-top 模式**（stack.ts:106-125 声明区，1180-1188 dispose 区）：每个跨会话存活的服务（`FleetWidgetController`、`UsageBroadcaster`、`Coalescer` x2、`BashJobManager`、`FabricMailbox`、`CacheKeepaliveService`、`CacheAdaptiveService`）都用一个模块级 `let previousXxx: T | undefined` 承接"同模块内 session 切换"（`/new`、fork、resume），在 `buildSessionStack` **顶部**先 `previousXxx?.dispose(); previousXxx = undefined;` 再重建。**`/reload` 这条路径这套 handoff 不生效**（jiti 重新 import 模块，模块级变量清零），必须靠 `Stack` 接口上暴露的字段（如 `fleetWidget?`, `bashJobs?`）在 `index.ts` 的 `session_shutdown` 处理器里显式 `.dispose()`（index.ts:501-527）。
+- **模块级 `previousXxx` 变量 + dispose-at-top 模式**（stack.ts:106-125 声明区，1180-1188 dispose 区）：每个跨会话存活的服务（`FleetWidgetController`、`UsageBroadcaster`、`Coalescer` x2、`BashJobManager`、`FabricMailbox`、`CacheKeepaliveService`）都用一个模块级 `let previousXxx: T | undefined` 承接"同模块内 session 切换"（`/new`、fork、resume），在 `buildSessionStack` **顶部**先 `previousXxx?.dispose(); previousXxx = undefined;` 再重建。**`/reload` 这条路径这套 handoff 不生效**（jiti 重新 import 模块，模块级变量清零），必须靠 `Stack` 接口上暴露的字段（如 `fleetWidget?`, `bashJobs?`）在 `index.ts` 的 `session_shutdown` 处理器里显式 `.dispose()`（index.ts:501-527）。
 - **quota service 应该怎么挂**：
   1. 在 stack.ts 顶部模块级变量区加 `let previousQuota: QuotaService | undefined;`（如果它要跨会话存活定时器）；
   2. `buildSessionStack` 顶部先 dispose 旧的；
-  3. 构造新的 `quota = settings.quota.enabled ? createQuotaService({ clock: systemClock, ... }) : undefined;`（跟 `keepalive`/`adaptive` 同款可选构造，stack.ts 里 `keepalive`/`adaptive` 两段代码，1172-1197 行区间）；
+  3. 构造新的 `quota = settings.quota.enabled ? createQuotaService({ clock: systemClock, ... }) : undefined;`（跟 `keepalive` 同款可选构造，参见 `stack.ts` 的 `keepalive` 构造块；此处原行号为历史锚点）；
   4. `previousQuota = quota;`
   5. 加进 `Stack` 接口（`export interface Stack { ...; quota?: QuotaService; }`）与函数末尾的 `return { ...; ...(quota ? { quota } : {}) };`（stack.ts 末尾 return 块，1362-1381 行）；
-  6. `index.ts` 的 `session_shutdown` 处理器要加 `holder.current.quota?.dispose();`，跟 `keepalive`/`adaptive`/`bashJobs` 并列（index.ts:505-520）。
+  6. `index.ts` 的 `session_shutdown` 处理器要加 `holder.current.quota?.dispose();`，跟 `keepalive`/`bashJobs` 并列（index.ts:505-520）。
 - **互相注入的方式**：全部通过闭包捕获同一个 `ctx`/`settings`/`pi`，以及像 `runnerRef`/`spawnRef`/`widgetRef` 这样的**晚绑定 ref 对象**解决"A 需要还没构造出来的 B"的循环依赖（stack.ts 里至少 4 处用这个模式，如 `runnerRef: { current?: Runner } = {}`）。quota 若要给 spawn 闸门提供快照读取，同样用一个 `quotaRef: { current?: QuotaService }` 或者直接把 `quota.snapshot` 方法通过 `models`/`spawn` 依赖对象传入 `createSpawnService`（跟 `resolveModelHint`/`availableModels` 同款）。
 
 ---

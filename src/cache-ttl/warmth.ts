@@ -3,7 +3,7 @@
  *
  * topic-switch plan.md P2 (#7, #12): a pure, synchronous, never-throwing judgement of whether
  * the NEXT Anthropic request would read a warm prompt cache, built entirely from evidence this
- * package already tracks (the usage ledger, the keepalive service, the adaptive predictor, and
+ * package already tracks (the usage ledger, the keepalive service, and
  * the last payload this module itself sent). It never recomputes economics (that's
  * `src/topic-switch/economics.ts`, P1) and it never guesses: every "warm" verdict traces back to
  * a proven touch; `mode`/`lastSent`/1h write traces only raise the bar for proving "cold" (the
@@ -42,16 +42,15 @@ export interface WarmthEvidence {
     pingInFlight: boolean;
     pingScheduled: boolean;
   };
-  adaptive?: { covers: boolean; any1hWrites: boolean };
   /** `anyLongWriteSince(ctx, now - MAX_TTL_MS)` — a longer-range 1h-write signal than `ledger.cacheWrite1h` alone (which only reflects the single latest entry). */
   recent1hWrite: boolean | "unknown";
-  mode: "auto" | "on" | "off" | "adaptive";
+  mode: "auto" | "on" | "off";
   slackMs: number;
   ttlOverrideMs?: number;
 }
 
 export type CacheWarmth =
-  | { state: "warm"; reason: "1h-cover" | "proven-recent" }
+  | { state: "warm"; reason: "proven-recent" }
   | { state: "cold"; reason: "ttl-elapsed" | "uncached"; nextWriteTtl: "5m" | "1h" | "none" }
   | {
       state: "unknown";
@@ -103,9 +102,8 @@ function computeWarmth(e: WarmthEvidence): CacheWarmth {
   if (routeChanged(ledger, e.route)) return { state: "unknown", reason: "route-changed" };
   const ledgerAt = ledger.at;
 
-  // 2. Warm only from evidence: an active adaptive 1h cover, or a proven touch within the
-  //    (possibly overridden) nominal TTL. mode/lastSent/1h traces never appear in this branch.
-  if (e.adaptive?.covers === true) return { state: "warm", reason: "1h-cover" };
+  // 2. Warm only from evidence: a proven touch within the (possibly overridden)
+  //    nominal TTL. mode/lastSent/1h traces never appear in this branch.
   const provenTouch = maxDefined(
     ledger.cacheRead + ledger.cacheWrite > 0 ? ledgerAt : undefined,
     e.keepalive?.provenReadAt,
@@ -146,11 +144,7 @@ function computeWarmth(e: WarmthEvidence): CacheWarmth {
   // ledgerAt is always defined at this point, so latestPossibleTouch is too.
   const touch = latestPossibleTouch as number;
   const oneHourPossible =
-    e.mode === "on" ||
-    e.lastSent?.ttl1h === true ||
-    (ledger.cacheWrite1h ?? 0) > 0 ||
-    e.adaptive?.any1hWrites === true ||
-    e.recent1hWrite !== false;
+    e.mode === "on" || e.lastSent?.ttl1h === true || (ledger.cacheWrite1h ?? 0) > 0 || e.recent1hWrite !== false;
   const maxLife = e.ttlOverrideMs ?? (oneHourPossible ? MAX_TTL_MS : NOMINAL_5M_MS);
   if (e.now - touch >= maxLife + e.slackMs) {
     return { state: "cold", reason: "ttl-elapsed", nextWriteTtl: nextWriteTtlFor(e) };

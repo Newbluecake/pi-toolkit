@@ -577,17 +577,17 @@ export type { QuotaService, QuotaHintState, ProviderVerdict, QuotaSnapshot, Ladd
 
 ### 4.1 `src/stack.ts`
 
-1. **模块级交接变量**（紧跟 `previousAdaptive` 之后，`src/stack.ts:129` 附近）：
+1. **模块级交接变量**（紧跟 `previousKeepalive` 之后，`src/stack.ts:129` 附近）：
    ```ts
-   /** quota 服务：与 keepalive/adaptive 同款「下一次 build 顶部 dispose」交接。 */
+   /** quota 服务：与 keepalive 同款「下一次 build 顶部 dispose」交接。 */
    let previousQuota: QuotaStack | undefined;
    ```
-2. **`buildSessionStack` 顶部 dispose**（紧跟 `previousAdaptive?.dispose()` 之后，`src/stack.ts:774` 附近）：
+2. **`buildSessionStack` 顶部 dispose**（紧跟 `previousKeepalive?.dispose()` 之后，`src/stack.ts:774` 附近）：
    ```ts
    previousQuota?.dispose();
    previousQuota = undefined;
    ```
-3. **构造**（放在 `adaptive` 构造之后、fleet widget 之前，`src/stack.ts:1196` 附近）：
+3. **构造**（放在 `keepalive` 构造之后、fleet widget 之前，`src/stack.ts:1196` 附近）：
    ```ts
    const quota = settings.quota.enabled
      ? createQuotaStack({
@@ -610,7 +610,7 @@ export type { QuotaService, QuotaHintState, ProviderVerdict, QuotaSnapshot, Ladd
    /** turn_end 注入的会话级闩锁状态；与 quota 同生共死。 */
    quotaHint?: QuotaHintState;
    ```
-5. **返回对象**追加（与 `keepalive`/`adaptive` 同款条件展开）：
+5. **返回对象**追加（与 `keepalive` 同款条件展开）：
    ```ts
    ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),
    ```
@@ -645,7 +645,7 @@ export type { QuotaService, QuotaHintState, ProviderVerdict, QuotaSnapshot, Ladd
      }),
    );
    ```
-2. **session_shutdown / 防御性 session_start dispose**：在两处已有的 `stack.keepalive?.dispose(); stack.adaptive?.dispose();` 旁各加一行：
+2. **session_shutdown / 防御性 session_start dispose**：在两处已有的 `stack.keepalive?.dispose();` 旁各加一行：
 
    ```ts
    holder.current.quota?.dispose(); // session_start 的防御分支

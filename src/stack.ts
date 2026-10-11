@@ -13,7 +13,6 @@ import {
   buildSwitchHintText,
   buildUsageTickText,
   effectiveThresholdPercentWithTokens,
-  isSwitchImminent,
   usageTickStep,
   windowScaledForcePercent,
 } from "./compact-hint/threshold.js";
@@ -116,12 +115,6 @@ import type { ConsultForkStore } from "./consult/tool.js";
 import type { MainSessionFacts } from "./consult/main-facts.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
-import {
-  createCacheAdaptiveService,
-  computeAdaptiveSignals,
-  type CacheAdaptiveService,
-} from "./service/cache-adaptive.js";
-import { readBackAdaptiveSessionState } from "./cache-ttl/adaptive.js";
 import { readBackKeepaliveSessionState } from "./cache-ttl/keepalive-state.js";
 import { createQuotaStack, type QuotaHintState, type QuotaService, type QuotaStack } from "./quota/index.js";
 import { readQuotaStatusTheme } from "./quota/render.js";
@@ -214,9 +207,7 @@ let previousBashJobRecovery: { dispose(): void } | undefined;
 let previousFabricMailbox: ReturnType<typeof createFabricMailbox> | undefined;
 /** cache-ttl keepalive (plan.md §2.2): same rebuild-dispose pattern as the usage broadcaster. */
 let previousKeepalive: CacheKeepaliveService | undefined;
-/** cache-ttl adaptive (adaptive plan.md §9): same rebuild-dispose pattern as the keepalive service. */
-let previousAdaptive: CacheAdaptiveService | undefined;
-/** quota（quota-plan §4.1）：与 keepalive/adaptive 同款「下一次 build 顶部 dispose」
+/** quota（quota-plan §4.1）：与 keepalive 同款「下一次 build 顶部 dispose」
  *  交接。`/reload` 走 session_shutdown dispose Stack.quota（M3：QuotaService.dispose
  *  是唯一清理所有者且幂等），与 previousFleetWidget 同一套双路径纪律。 */
 let previousQuota: QuotaStack | undefined;
@@ -872,11 +863,6 @@ export interface CompactHintState {
   forceDemandTurns: number;
   /** 本轮高位期内已发出的硬性切换要求次数；用量回落到强制线以下即归零。 */
   demandCount: number;
-  /** task #14：最近一次 turn_end 算出的生效线 + 交接暂存端口。「快要切换」在**请求时**由
-   *  `isSwitchImminentNow` 用实时用量判定（压缩后 usage 未知 ⇒ false；turn_end 之后涨进余量区
-   *  也能看到），cache-ttl 据此不再为即将丢弃的前缀付 1h 入场费。未算过（print/json、compact
-   *  关）时 undefined ⇒ 恒 false。 */
-  imminence: { hintPercent: number; forcePercent: number; handoffPending: (() => boolean) | undefined } | undefined;
   /** 价格感知动态阈值运行时（dynamic-threshold-plan.md D3）；mode=off / print、json 构造
    *  时缺席或惰性。与 `Stack.dynamic` 引用同一对象（§2.4 所有权在 Stack）。 */
   dynamic?: DynamicRuntime | undefined;
@@ -958,8 +944,6 @@ export interface Stack {
   fabric?: { dispose(): void; pump(): void };
   /** 提示词缓存保活调度器（plan.md §2）；settings.cacheTtl.keepalive=false 时缺席。 */
   keepalive?: CacheKeepaliveService;
-  /** 自适应 1h TTL 决策器（adaptive plan.md §9）；settings.cacheTtl.adaptiveEnabled=false 时缺席。 */
-  adaptive?: CacheAdaptiveService;
   /** 额度感知派单（docs/dev/quota/quota-plan.md）：同步缓存判定面。settings.quota.enabled=false 时缺席（R11）。 */
   quota?: QuotaService;
   /** turn_end 注入的会话级闩锁状态；与 quota 同生共死（M3：dispose 的唯一所有者是 QuotaService）。 */
@@ -1037,29 +1021,6 @@ export interface Stack {
  * forwarding path (customType literal, event shape) — index.ts stays
  * assembly-only (I7) and just registers this once per activate().
  */
-/**
- * task #14: is the current prefix about to be discarded by a context switch? Evaluated at
- * request time against LIVE usage and the lines the last turn_end published, so it neither
- * lags a big tool result that landed after turn_end nor outlives a compaction (pi reports
- * usage as unknown until the first post-compaction response). A pending handoff counts
- * regardless of usage. Every failure degrades to `false` (the pre-#14 behaviour).
- */
-export function isSwitchImminentNow(
-  state: Pick<CompactHintState, "imminence">,
-  ctx: Pick<ExtensionContext, "getContextUsage">,
-): boolean {
-  const imminence = state.imminence;
-  if (imminence === undefined) return false;
-  try {
-    if (imminence.handoffPending?.() === true) return true;
-    const percent = ctx.getContextUsage()?.percent;
-    if (percent == null) return false;
-    return isSwitchImminent(percent, imminence.hintPercent, imminence.forcePercent);
-  } catch {
-    return false;
-  }
-}
-
 export function createCompactHintHook(
   holder: { current?: Stack },
   deps: {
@@ -1160,8 +1121,6 @@ export function createCompactHintHook(
       usage.contextWindow,
       state.reserveTokens,
     );
-    // task #14: publish the effective lines; cache-ttl judges imminence against live usage per request.
-    state.imminence = { hintPercent: effective, forcePercent: effectiveForce, handoffPending: deps.handoffPending };
     // child-context-switch plan §2.2：切换次数已用尽 ⇒ 不再进入 force 分支（不发 hint/demand），
     // 落到下面的 tick-only 早退（不能让模型去做做不了的事；兜底交给 pi 自己的自动压缩）。
     const switchesExhausted = state.switchesExhausted?.() === true;
@@ -1499,8 +1458,6 @@ export function buildSessionStack(
   previousFabricMailbox = undefined;
   previousKeepalive?.dispose();
   previousKeepalive = undefined;
-  previousAdaptive?.dispose();
-  previousAdaptive = undefined;
   previousQuota?.dispose();
   previousQuota = undefined;
   previousWorkflowRuns?.abandon();
@@ -1622,7 +1579,6 @@ export function buildSessionStack(
     switchTool: settings.compact.enabled && settings.compact.switchTool,
     forceDemandTurns: settings.compact.forceDemandTurns,
     demandCount: 0,
-    imminence: undefined,
   };
   const widgetRef: { current?: FleetWidgetController } = {};
   // quota-plan D2: lifecycle-triggered refreshes stay lazy and reuse the
@@ -1723,7 +1679,7 @@ export function buildSessionStack(
   }
   const spawnRef: { current?: SpawnService } = {};
   // quota-plan §4.1 / integration-map §7：spawn 闸门（下方 createSpawnService）
-  // 需要 quota，而 quota 按计划构造在 keepalive/adaptive 之后——晚绑定 ref
+  // 需要 quota，而 quota 按计划构造在 keepalive 之后——晚绑定 ref
   // 解决「A 需要还没构造出来的 B」（runnerRef/widgetRef 同款）。
   const mention = createMentionRegistry();
   // X6b: session-scoped, capped FIFO — notes are one-line previews, never read
@@ -2339,13 +2295,6 @@ export function buildSessionStack(
           // A background workflow between child runs is still background work.
           workflowActivity.list().length > 0,
         isCurrent: (self) => previousKeepalive === self,
-        // Lazily read: `adaptive` is constructed below, so this closure must
-        // resolve at publish time, not at construction time.
-        adaptiveSnapshot: () => previousAdaptive?.snapshot(),
-        // F1: stand down while adaptive's settled 1h entry covers the prefix (lazy, same reason).
-        adaptiveCoversPrefix: (horizonMs) => previousAdaptive?.coversPrefix(horizonMs) === true,
-        // task #14: skip the one-shot 1h upgrade for a prefix the next switch discards.
-        switchImminent: () => isSwitchImminentNow(compactHint, ctx),
         appendEntry: (type, data) => pi.appendEntry(type, data),
         emit: (channel, payload) => pi.events.emit(channel, payload),
         // Keepalive breaker state is session-level; restore it from this branch
@@ -2361,48 +2310,7 @@ export function buildSessionStack(
     : undefined;
   previousKeepalive = keepalive;
 
-  // adaptive plan.md §3.2: the three strong signals are injected as one closure
-  // (same pattern as keepalive's `backgroundBusy`). `uiPrompts` / `activeTools`
-  // are counted inside the service itself from forwarded events. A throwing
-  // `signals()` degrades to all-zero ⇒ never upgrades (§15 R7).
-  const adaptive = settings.cacheTtl.adaptiveEnabled
-    ? createCacheAdaptiveService({
-        clock: systemClock,
-        ctx,
-        sessionId: currentSessionId(ctx),
-        settings: settings.cacheTtl,
-        // Background workflows count as subagent work (running-only `list()`, never the display linger).
-        signals: () =>
-          computeAdaptiveSignals(
-            query.list(),
-            bashJobs?.backgroundJobCount() ?? 0,
-            systemClock.now(),
-            workflowActivity.list(),
-          ),
-        // D1: the predictor's warm/cold split must see the pinger's evidence —
-        // `keepalive` is constructed just above, so this is a direct read (the
-        // reverse direction needs the lazy `previousAdaptive` closure instead).
-        provenCacheReadAt: () => keepalive?.provenCacheReadAt(),
-        // F1: no new 1h prefix for gaps the pinger already bridges.
-        keepaliveHorizonMs: (prefixTokens) => keepalive?.gapHorizonMs(prefixTokens),
-        // task #14: no new 1h prefix (entry fee) for one compact-hint says is about to be discarded.
-        switchImminent: () => isSwitchImminentNow(compactHint, ctx),
-        isCurrent: (self) => previousAdaptive === self,
-        appendEntry: (type, data) => pi.appendEntry(type, data),
-        emit: (channel, payload) => pi.events.emit(channel, payload),
-        // field-2026-09-24 §3.1: budgets/breaker are session-permanent — a rebuild
-        // (`/reload`) rehydrates them from this branch's own audit entries.
-        // getBranch() (not getEntries) so an abandoned fork's trips don't leak.
-        restoredState: readBack
-          ? readBackAdaptiveSessionState(
-              (ctx.sessionManager as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [],
-            )
-          : undefined,
-      })
-    : undefined;
-  previousAdaptive = adaptive;
-
-  // quota（quota-plan §4.1）：额度感知派单——与 keepalive/adaptive 同款可选构造 +
+  // quota（quota-plan §4.1）：额度感知派单——与 keepalive 同款可选构造 +
   // previous* 交接。构造零副作用（demotion store 惰性加载）；providers="" 时
   // 零 adapter ⇒ 零网络（测试隔离位）。
   const quota = settings.quota.enabled
@@ -2787,7 +2695,6 @@ export function buildSessionStack(
     ...(bashJobs ? { bashJobs } : {}),
     ...(bashJobRecovery ? { bashJobRecovery } : {}),
     ...(keepalive ? { keepalive } : {}),
-    ...(adaptive ? { adaptive } : {}),
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
   };

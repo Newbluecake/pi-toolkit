@@ -10,7 +10,6 @@ import {
   cacheWriteCostUsd,
   closeWindowAccounting,
   compareFingerprint,
-  consumeUpgrade,
   createInitialSessionTotals,
   createInitialWindowState,
   evaluateTick,
@@ -24,10 +23,8 @@ import {
   onSuccessfulRealRequest,
   onUnproven,
   readBackKeepaliveSessionState,
-  renderAdaptiveReportLines,
   renderCacheStatus,
   renderKeepaliveReportLines,
-  type AdaptiveSnapshot,
   type CaptureFingerprint,
   type CapturedRequest,
   type KeepaliveConfig,
@@ -78,7 +75,6 @@ function config(overrides: Partial<KeepaliveConfig> = {}): KeepaliveConfig {
     intervalMs: 240_000,
     maxPings: 11,
     minPrefixTokens: 20_000,
-    upgradeAfterBudget: true,
     ...overrides,
   };
 }
@@ -373,7 +369,7 @@ describe("evaluateTick — short-circuit ladder", () => {
     expect(atMargin.decision).toEqual({ kind: "skip", reason: "cache-expired", terminal: true });
   });
 
-  it("#14 budget exhausted ⇒ terminal skip + upgradePending armed; #15 not-due before that", () => {
+  it("#14 budget exhausted ⇒ terminal skip; #15 not-due before that", () => {
     const window = armedWindow({ pings: 11, nextPingAt: 0 });
     const result = evaluateTick({
       now: 1000,
@@ -385,7 +381,7 @@ describe("evaluateTick — short-circuit ladder", () => {
       currentFingerprint: fingerprint(),
     });
     expect(result.decision).toEqual({ kind: "skip", reason: "budget-exhausted", terminal: true });
-    expect(result.window.upgradePending).toBe(true);
+    expect(result.window).toBe(window);
 
     const notYetExhausted = evaluateTick({
       now: 1000,
@@ -431,7 +427,6 @@ describe("onRealRequest", () => {
     expect(next.pings).toBe(0);
     expect(next.requestInFlight).toBe(true);
     expect(next.pingInFlight).toBe(false);
-    expect(next.upgradePending).toBe(false);
   });
 
   it("I-K7: does not reset any session-level breaker counters", () => {
@@ -689,84 +684,10 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
 // ---------------------------------------------------------------------------
 
 describe("invalidate", () => {
-  it("clears capture + upgradePending and bumps windowEpoch, nothing else", () => {
-    const window = armedWindow({ upgradePending: true, pings: 4, requestInFlight: true, windowEpoch: 2 });
+  it("clears capture and bumps windowEpoch, nothing else", () => {
+    const window = armedWindow({ pings: 4, requestInFlight: true, windowEpoch: 2 });
     const next = invalidate(window, "session-compact");
-    expect(next).toEqual({ ...window, capture: undefined, upgradePending: false, windowEpoch: 3 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// consumeUpgrade — one-shot 1h upgrade (§6.3, I-K5)
-// ---------------------------------------------------------------------------
-
-describe("consumeUpgrade", () => {
-  const eligibleWindow: WindowState = { ...armedWindow(), upgradePending: true, lastReadStartedAt: 0 };
-
-  it("consumes when session matches, mode is auto, setting is on, and the cache is presumed dead", () => {
-    const result = consumeUpgrade(eligibleWindow, {
-      sessionMatches: true,
-      mode: "auto",
-      upgradeAfterBudgetEnabled: true,
-      now: ASSUMED_TTL_MS + 1,
-    });
-    expect(result.consumed).toBe(true);
-    expect(result.window.upgradePending).toBe(false);
-  });
-
-  it("does not consume when upgradePending is false", () => {
-    const result = consumeUpgrade(
-      { ...eligibleWindow, upgradePending: false },
-      {
-        sessionMatches: true,
-        mode: "auto",
-        upgradeAfterBudgetEnabled: true,
-        now: ASSUMED_TTL_MS + 1,
-      },
-    );
-    expect(result.consumed).toBe(false);
-  });
-
-  it("does not consume for explicit on/off modes (I-K5)", () => {
-    for (const mode of ["on", "off"] as const) {
-      const result = consumeUpgrade(eligibleWindow, {
-        sessionMatches: true,
-        mode,
-        upgradeAfterBudgetEnabled: true,
-        now: ASSUMED_TTL_MS + 1,
-      });
-      expect(result.consumed).toBe(false);
-    }
-  });
-
-  it("does not consume when the setting is off", () => {
-    const result = consumeUpgrade(eligibleWindow, {
-      sessionMatches: true,
-      mode: "auto",
-      upgradeAfterBudgetEnabled: false,
-      now: ASSUMED_TTL_MS + 1,
-    });
-    expect(result.consumed).toBe(false);
-  });
-
-  it("does not consume across a session mismatch", () => {
-    const result = consumeUpgrade(eligibleWindow, {
-      sessionMatches: false,
-      mode: "auto",
-      upgradeAfterBudgetEnabled: true,
-      now: ASSUMED_TTL_MS + 1,
-    });
-    expect(result.consumed).toBe(false);
-  });
-
-  it("does not consume when the cache would not yet be dead (honesty check)", () => {
-    const result = consumeUpgrade(eligibleWindow, {
-      sessionMatches: true,
-      mode: "auto",
-      upgradeAfterBudgetEnabled: true,
-      now: 1_000,
-    });
-    expect(result.consumed).toBe(false);
+    expect(next).toEqual({ ...window, capture: undefined, windowEpoch: 3 });
   });
 });
 
@@ -1107,18 +1028,11 @@ describe("renderCacheStatus", () => {
     expect(text).not.toContain("$0");
   });
 
-  it("shows the budget-exhausted message with the 1h-upgrade hint only when mode is auto and upgradeAfterBudget is on", () => {
+  it("shows the capped budget without any 1h-upgrade hint in every mode", () => {
     const capped = report({ window: armedWindow({ pings: 11 }), config: config({ maxPings: 11 }) });
-    expect(renderCacheStatus({ mode: "auto", dirty: false, report: capped })).toBe("ping 11/11 capped →1h");
-    // I-K5: off/on suppress the upgrade regardless of upgradeAfterBudget — the
-    // hint must not lie about a transition that will never happen.
+    expect(renderCacheStatus({ mode: "auto", dirty: false, report: capped })).toBe("ping 11/11 capped");
     expect(renderCacheStatus({ mode: "off", dirty: false, report: capped })).toBe("cache 5m · ping 11/11 capped");
     expect(renderCacheStatus({ mode: "on", dirty: false, report: capped })).toBe("cache 1h · ping 11/11 capped");
-    const cappedNoUpgrade = report({
-      window: armedWindow({ pings: 11 }),
-      config: config({ maxPings: 11, upgradeAfterBudget: false }),
-    });
-    expect(renderCacheStatus({ mode: "auto", dirty: false, report: cappedNoUpgrade })).toBe("ping 11/11 capped");
   });
 
   it("suppresses the →1h hint when the model/route doesn't support long cache retention, even in auto mode with budget enabled", () => {
@@ -1149,152 +1063,6 @@ describe("renderCacheStatus", () => {
       report: report({ session: baseSession({ disabled: { reason: "proven-write", at: 1 }, pings: 4 }) }),
     });
     expect(text).toBe("ping off:proven-write ×4");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// adaptive segments: the status line is one terminal row shared with every
-// other extension's status, so the adaptive segments are kept as short as they
-// can be without losing a fact (structured `detail` keeps the exact values).
-// ---------------------------------------------------------------------------
-
-function adaptiveSnapshot(overrides: Partial<AdaptiveSnapshot> = {}): AdaptiveSnapshot {
-  return {
-    lastDecision: undefined,
-    coverRemainingMs: undefined,
-    upgradeWriteTokens: 0,
-    writeBudgetTokens: 200_000,
-    budgetFraction: 0,
-    upgradeWriteUsd: 0,
-    writeBudgetUsd: 1,
-    usdFraction: 0,
-    feeUpgrades: 0,
-    feeWriteTokens: 0,
-    feeBudgetTokens: 600_000,
-    feeWriteUsd: 0,
-    feeBudgetUsd: 3,
-    feeBudgetExhausted: false,
-    warmUpgrades: 0,
-    coldUpgradesUsed: 0,
-    coldUpgradeCap: 1,
-    coldCooldownRemainingMs: undefined,
-    longGapCount: 0,
-    confirmed1hWrites: 0,
-    unconfirmed1hWrites: 0,
-    indirect1hConfirms: 0,
-    ineffective1h: 0,
-    droppedPending: 0,
-    breaker: undefined,
-    lastReconcile: undefined,
-    ...overrides,
-  };
-}
-
-describe("renderCacheStatus — adaptive segments", () => {
-  it("keeps the plain 5m mode segment while adaptive is healthy", () => {
-    expect(renderCacheStatus({ mode: "adaptive", dirty: false, report: undefined, adaptive: adaptiveSnapshot() })).toBe(
-      "cache adaptive · 5m",
-    );
-  });
-
-  it("abbreviates the near-cap budget as a percentage and the breaker reason", () => {
-    const text = renderCacheStatus({
-      mode: "adaptive",
-      dirty: false,
-      report: undefined,
-      adaptive: adaptiveSnapshot({
-        upgradeWriteTokens: 198_000,
-        budgetFraction: 0.99,
-        breaker: { reason: "warm-write-too-expensive", at: 1 },
-      }),
-    });
-    // The `5m` segment is dropped: `off:<reason>` already implies it.
-    expect(text).toBe("cache adaptive · budget 99% · off:warm-write-costly");
-  });
-
-  it("never rounds the budget percentage up to 100% before the cap is hit", () => {
-    const text = renderCacheStatus({
-      mode: "adaptive",
-      dirty: false,
-      report: undefined,
-      adaptive: adaptiveSnapshot({ upgradeWriteTokens: 199_600, budgetFraction: 0.998 }),
-    });
-    expect(text).toContain("budget 99%");
-  });
-
-  it("shows the USD budget percentage when IT is the budget closer to its cap", () => {
-    const text = renderCacheStatus({
-      mode: "adaptive",
-      dirty: false,
-      report: undefined,
-      adaptive: adaptiveSnapshot({
-        upgradeWriteTokens: 20_000,
-        budgetFraction: 0.1,
-        upgradeWriteUsd: 0.96,
-        usdFraction: 0.96,
-      }),
-    });
-    expect(text).toContain("budget 96%");
-  });
-
-  it("keeps the USD pair in the structured detail even when only the token side is hot", () => {
-    const snapshot = buildCacheStatusSnapshot({
-      mode: "adaptive",
-      dirty: false,
-      report: undefined,
-      adaptive: adaptiveSnapshot({ upgradeWriteTokens: 198_000, budgetFraction: 0.99, upgradeWriteUsd: 0.02 }),
-    });
-    expect(snapshot.segments.find((s) => s.id === "adaptive:budget")?.detail).toMatchObject({
-      upgradeWriteUsd: 0.02,
-      writeBudgetUsd: 1,
-    });
-  });
-
-  it("keeps the exact tokens and the raw breaker id in the structured detail", () => {
-    const snapshot = buildCacheStatusSnapshot({
-      mode: "adaptive",
-      dirty: false,
-      report: undefined,
-      adaptive: adaptiveSnapshot({
-        upgradeWriteTokens: 198_000,
-        budgetFraction: 0.99,
-        breaker: { reason: "warm-write-too-expensive", at: 1 },
-      }),
-    });
-    expect(snapshot.segments.find((s) => s.id === "adaptive:budget")?.detail).toEqual({
-      upgradeWriteTokens: 198_000,
-      writeBudgetTokens: 200_000,
-      upgradeWriteUsd: 0,
-      writeBudgetUsd: 1,
-      feeWriteTokens: 0,
-      feeBudgetTokens: 600_000,
-      feeWriteUsd: 0,
-      feeBudgetUsd: 3,
-    });
-    expect(snapshot.segments.find((s) => s.id === "adaptive:breaker")?.detail).toMatchObject({
-      reason: "warm-write-too-expensive",
-      at: 1,
-    });
-  });
-
-  it("keeps the upgrade / cover segments unchanged", () => {
-    const text = renderCacheStatus({
-      mode: "adaptive",
-      dirty: false,
-      report: undefined,
-      adaptive: adaptiveSnapshot({
-        lastDecision: {
-          upgrade: true,
-          class: "warm",
-          reason: undefined,
-          signals: ["subagent"],
-          predictedDeltaTokens: 0,
-          at: 1,
-        },
-        coverRemainingMs: 2_220_000,
-      }),
-    });
-    expect(text).toBe("cache adaptive · →1h (subagent) · 1h cover 37m");
   });
 });
 
@@ -1371,48 +1139,6 @@ describe("renderKeepaliveReportLines", () => {
     expect(text).toContain("baseUrl=https://cloudrouter-anthropic.example.com");
     // Never a header/auth VALUE (secrets) in the rendered text — only key names.
     expect(text).not.toMatch(/sk-ant/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// N2 (v1 review): the `/cache-ttl status` budget line is the only place that
-// surfaces the USD gate's raw accrual, and it had no direct test.
-// ---------------------------------------------------------------------------
-
-describe("renderAdaptiveReportLines — dual write budget line", () => {
-  const budgetLine = (overrides: Partial<AdaptiveSnapshot>): string =>
-    renderAdaptiveReportLines(adaptiveSnapshot(overrides)).find((line) => line.startsWith("adaptive budget:")) ?? "";
-
-  it("shows both budgets with the USD gate armed", () => {
-    const line = budgetLine({ upgradeWriteTokens: 48_000, upgradeWriteUsd: 0.4, writeBudgetUsd: 1 });
-    expect(line).toContain("write 48k/200k tok");
-    expect(line).toContain("$0.40/$1.00");
-  });
-
-  it("renders the USD side as /off when the gate is disabled, still reporting the accrual", () => {
-    const line = budgetLine({ upgradeWriteTokens: 1_000, upgradeWriteUsd: 2.5, writeBudgetUsd: 0 });
-    expect(line).toContain("$2.50/off");
-    expect(line).toContain("write 1k/200k tok"); // token fallback stays the visible gate
-  });
-
-  it("reports the entry fee on its own line, never mixed into the marginal budget", () => {
-    const lines = renderAdaptiveReportLines(
-      adaptiveSnapshot({ feeUpgrades: 1, feeWriteTokens: 265_875, feeWriteUsd: 2.52, upgradeWriteTokens: 4_499 }),
-    );
-    const fee = lines.find((line) => line.startsWith("adaptive entry fee:")) ?? "";
-    expect(fee).toContain("paid 1×");
-    expect(fee).toContain("266k/600k tok");
-    expect(fee).toContain("$2.52/$3.00");
-    expect(fee).not.toContain("exhausted");
-    expect(lines.find((line) => line.startsWith("adaptive budget:"))).toContain("write 4k/200k tok");
-  });
-
-  it("flags an exhausted fee budget (no new prefix can be opened)", () => {
-    const fee =
-      renderAdaptiveReportLines(adaptiveSnapshot({ feeWriteTokens: 700_000, feeBudgetExhausted: true })).find((line) =>
-        line.startsWith("adaptive entry fee:"),
-      ) ?? "";
-    expect(fee).toContain("exhausted (no new prefix)");
   });
 });
 

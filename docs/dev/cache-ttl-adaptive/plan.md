@@ -1,3 +1,7 @@
+# 已废弃（2026-10-11）
+
+> USER DECISION 2026-10-11：78 个会话的现场数据表明 adaptive 1h 净收益为 −$16.21；cr-anthropic 的 1h 条目约 20–25 分钟失效，263 次升级中 193 次没有发生 1h 写入。自动 adaptive 和 keepalive 预算耗尽后的 1h 升级现已移除；保留 auto/on/off、保活与 transient 恢复。本文仅留作历史记录，施工口径见 [移除影响盘点](../cache-ttl-remove-1h/inventory.md)。
+
 # `cacheTtl.mode = "adaptive"` 实施方案（自适应 1h 预测器）
 
 > 前置：本文假定读者已读过 `docs/dev/cache-ttl-keepalive/plan.md`（下称「保活方案」）与其

@@ -660,8 +660,8 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "reload.defer": bool("reload.defer", "Defer /reload until running subagents settle"),
   "cacheTtl.mode": choice(
     "cacheTtl.mode",
-    ["auto", "on", "off", "adaptive"],
-    "Anthropic prompt-cache TTL: auto=follow pi/env, on=force 1h, off=provider default (5m), adaptive=predict 1h before long gaps",
+    ["auto", "on", "off"],
+    "Anthropic prompt-cache TTL: auto=follow pi/env, on=force 1h, off=provider default (5m)",
   ),
   "cacheTtl.keepalive": bool("cacheTtl.keepalive", "Master switch for prompt-cache keepalive pings"),
   "cacheTtl.keepaliveIntervalS": seconds("cacheTtl.keepaliveIntervalMs", {
@@ -679,76 +679,6 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "cacheTtl.keepaliveMinPrefixTokens",
     0,
     "Minimum measured prefix tokens required before keepalive engages",
-  ),
-  "cacheTtl.keepaliveUpgradeAfterBudget": bool(
-    "cacheTtl.keepaliveUpgradeAfterBudget",
-    "Allow the next must-write request to upgrade the session to 1h TTL",
-  ),
-  "cacheTtl.adaptiveEnabled": bool(
-    "cacheTtl.adaptiveEnabled",
-    "Master switch for adaptive 1h prediction; when on, an unset mode resolves to adaptive",
-  ),
-  "cacheTtl.adaptiveWriteBudgetTokens": count(
-    "cacheTtl.adaptiveWriteBudgetTokens",
-    0,
-    "Per-session measured cacheWrite budget for adaptive upgrades; 0 disables upgrading",
-  ),
-  "cacheTtl.adaptiveWriteBudgetUsd": {
-    kind: "number",
-    path: "cacheTtl.adaptiveWriteBudgetUsd",
-    min: 0,
-    // MUST mirror the `usd(value, default, 0, 100)` bound in settings.ts: the
-    // editor / `set` path validates against this spec only, while a reload
-    // re-parses through usd(), which FALLS BACK TO THE DEFAULT (it does not
-    // clamp) for out-of-range values. Without max the editor would accept
-    // e.g. 500, apply it live (settings.cacheTtl is the same object the
-    // adaptive service reads) and then silently revert to 1.0 on the next
-    // reload.
-    max: 100,
-    description:
-      "Per-session USD budget (marginal 1h-upgrade write cost) for adaptive upgrades; 0 disables the USD gate (unlike adaptiveWriteBudgetTokens, where 0 disables upgrading entirely)",
-  },
-  "cacheTtl.adaptiveFeeBudgetTokens": count(
-    "cacheTtl.adaptiveFeeBudgetTokens",
-    0,
-    "Per-session entry-fee budget (tokens) for the first, full-prefix 1h write of a prefix; 0 disables opening any prefix",
-  ),
-  "cacheTtl.adaptiveFeeBudgetUsd": {
-    kind: "number",
-    path: "cacheTtl.adaptiveFeeBudgetUsd",
-    min: 0,
-    // Same mirror-the-parser rule as adaptiveWriteBudgetUsd above.
-    max: 100,
-    description:
-      "Per-session USD budget for entry fees (first full-prefix 1h write); 0 disables the USD fee gate (tokens still apply)",
-  },
-  "cacheTtl.adaptiveMaxDeltaTokens": count(
-    "cacheTtl.adaptiveMaxDeltaTokens",
-    0,
-    "Max predicted increment (tokens) allowed for a warm adaptive upgrade",
-  ),
-  "cacheTtl.adaptiveRefreshAfterTokens": count(
-    "cacheTtl.adaptiveRefreshAfterTokens",
-    0,
-    "Tokens written since the last 1h upgrade before another warm upgrade is allowed",
-  ),
-  "cacheTtl.adaptiveColdUpgrades": count(
-    "cacheTtl.adaptiveColdUpgrades",
-    0,
-    "Cold adaptive upgrades allowed per session; 0 disables cold upgrades",
-  ),
-  "cacheTtl.adaptiveColdCooldownS": seconds("cacheTtl.adaptiveColdCooldownMs", {
-    min: 60,
-    max: 7200,
-    description: "Minimum interval between two cold adaptive upgrades",
-  }),
-  "cacheTtl.adaptiveColdMinHorizonS": seconds("cacheTtl.adaptiveColdMinHorizonMs", {
-    max: 7200,
-    description: "Minimum remaining subagent horizon required for a cold upgrade",
-  }),
-  "cacheTtl.adaptiveHistoryGapSignal": bool(
-    "cacheTtl.adaptiveHistoryGapSignal",
-    "Allow the weak history-long-gap signal to arm warm adaptive upgrades",
   ),
 
   "worktree.gitTimeoutS": seconds("worktree.gitTimeoutMs", { description: "Git command timeout for worktree ops" }),

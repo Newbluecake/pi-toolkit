@@ -47,7 +47,7 @@ function settings(): AgentSettings {
     ...DEFAULT_SETTINGS,
     fleetWidget: false,
     bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
-    cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, keepalive: false, adaptiveEnabled: false },
+    cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, keepalive: false },
     quota: { ...DEFAULT_SETTINGS.quota, providers: "" },
   };
 }

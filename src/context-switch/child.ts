@@ -239,7 +239,6 @@ function freshCompactHintState(
     switchTool: true,
     forceDemandTurns: compact.forceDemandTurns,
     demandCount: 0,
-    imminence: undefined,
     switchesExhausted,
   };
 }

@@ -1,3 +1,5 @@
+> 已废弃（2026-10-11）：自动 1h 升级已按用户裁决移除（78 会话净 −$16.21；1h 寿命约 20–25min；193/263 升级无 1h 写入）；仅供历史参考，见 [废弃说明](plan.md)。
+
 # cache-ttl adaptive 功能验证（2026-09-25）
 
 对象：`cacheTtl.mode = "adaptive"`（`src/cache-ttl/adaptive.ts` 纯函数 + `src/service/cache-adaptive.ts` 服务），

@@ -15,7 +15,7 @@ function assistantEntry(usage: Record<string, unknown>, model = "claude-x") {
 }
 
 describe("readLatestAssistantUsage", () => {
-  it("reads cacheRead/cacheWrite/cacheWrite1h from the last assistant message, with anchoring fields", () => {
+  it("reads cacheRead/cacheWrite/cacheWrite1h from the last assistant message, with route identity", () => {
     const entries = [
       { type: "message", message: { role: "user" } },
       assistantEntry({ cacheRead: 100, cacheWrite: 20, cacheWrite1h: 20, cost: { total: 0.42 } }),
@@ -27,31 +27,8 @@ describe("readLatestAssistantUsage", () => {
       cacheRead: 400,
       cacheWrite: 5,
       cacheWrite1h: undefined,
-      costTotalUsd: undefined,
-      cacheWriteUsd: undefined,
-      entrySeq: 3,
-      entriesLength: 4,
       modelId: "claude-y",
     });
-  });
-
-  it("reads cost.cacheWrite into cacheWriteUsd with the same finite() guard as costTotalUsd", () => {
-    const withCost = readLatestAssistantUsage(
-      ctxWith([assistantEntry({ cacheRead: 100, cacheWrite: 20, cost: { total: 0.42, cacheWrite: 0.16 } })]),
-    );
-    expect(withCost.costTotalUsd).toBe(0.42);
-    expect(withCost.cacheWriteUsd).toBe(0.16);
-    // malformed / absent cost object ⇒ undefined (the USD gate then falls back to tokens)
-    expect(
-      readLatestAssistantUsage(ctxWith([assistantEntry({ cacheRead: 1, cacheWrite: 2, cost: "nope" })])).cacheWriteUsd,
-    ).toBeUndefined();
-    expect(
-      readLatestAssistantUsage(ctxWith([assistantEntry({ cacheRead: 1, cacheWrite: 2, cost: { total: 0.1 } })]))
-        .cacheWriteUsd,
-    ).toBeUndefined();
-    expect(
-      readLatestAssistantUsage(ctxWith([assistantEntry({ cacheRead: 1, cacheWrite: 2 })])).cacheWriteUsd,
-    ).toBeUndefined();
   });
 
   it("cacheWrite1h missing ⇒ undefined (distinguishable from a reported 0)", () => {
@@ -66,9 +43,7 @@ describe("readLatestAssistantUsage", () => {
   it("degrades to source=unknown on no entries / throwing getEntries / non-array, never throws", () => {
     expect(readLatestAssistantUsage(undefined).source).toBe("unknown");
     expect(readLatestAssistantUsage({}).source).toBe("unknown");
-    expect(readLatestAssistantUsage(ctxWith([]))).toEqual(
-      expect.objectContaining({ source: "unknown", entrySeq: -1, entriesLength: 0, modelId: "" }),
-    );
+    expect(readLatestAssistantUsage(ctxWith([]))).toEqual(expect.objectContaining({ source: "unknown", modelId: "" }));
     expect(readLatestAssistantUsage({ sessionManager: { getEntries: () => "nope" } }).source).toBe("unknown");
     expect(
       readLatestAssistantUsage({
@@ -81,13 +56,6 @@ describe("readLatestAssistantUsage", () => {
     ).toBe("unknown");
   });
 
-  it("keeps the real entriesLength even when no assistant usage exists yet (pending snapshot anchor)", () => {
-    const entries = [{ type: "message", message: { role: "user" } }, { type: "custom" }];
-    expect(readLatestAssistantUsage(ctxWith(entries))).toEqual(
-      expect.objectContaining({ source: "unknown", entriesLength: 2 }),
-    );
-  });
-
   it("modelId is empty when the entry carries no model string (M1: empty never matches a real model id)", () => {
     const entries = [{ type: "message", message: { role: "assistant", usage: { cacheRead: 1, cacheWrite: 1 } } }];
     expect(readLatestAssistantUsage(ctxWith(entries)).modelId).toBe("");
@@ -97,7 +65,7 @@ describe("readLatestAssistantUsage", () => {
     // pi's compaction APPENDS a compaction entry; the pre-compact assistant entry stays readable.
     const entries = [assistantEntry({ cacheRead: 300, cacheWrite: 10 }), { type: "compaction" }];
     const ledger = readLatestAssistantUsage(ctxWith(entries));
-    expect(ledger).toEqual(expect.objectContaining({ source: "usage", entrySeq: 0, cacheRead: 300 }));
+    expect(ledger).toEqual(expect.objectContaining({ source: "usage", cacheRead: 300 }));
   });
 });
 

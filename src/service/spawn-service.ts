@@ -170,7 +170,7 @@ export interface SpawnService {
    * before the runtime adapter ever enters RuntimeRunner.run(), which can
    * take a while — see spawn-service.ts's `running` set doc). Busy-counting
    * call sites (deferred /reload's re-count, activeSubagentRunCount, the
-   * background-status provider shared with feishu-notify/cache-adaptive)
+   * background-status provider shared with feishu-notify)
    * must union this with their own registry-derived count so a run admitted
    * after the last registry snapshot can never make them under-count.
    */

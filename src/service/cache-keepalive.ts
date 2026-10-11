@@ -18,21 +18,15 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
 import {
-  ANTHROPIC_MESSAGES_API,
-  ASSUMED_TTL_MS,
-  PING_DENY_PROVIDERS,
   TICK_INTERVAL_MS,
   TTL_SAFETY_MARGIN_MS,
   cacheReadCostUsd,
   cacheWriteCostUsd,
   compareFingerprint,
-  consumeUpgrade as consumeUpgradeReducer,
   createInitialSessionTotals,
   createInitialWindowState,
   evaluateTick,
   invalidate as invalidateReducer,
-  keepaliveGapHorizonMs,
-  keepaliveModeAllowsPing,
   onPingStarted,
   onProvenHit,
   onRealRequest,
@@ -57,7 +51,6 @@ import {
 import { buildPingRequest, preparePingPayload, sendKeepalivePing, type PingOutcome } from "../cache-ttl/ping-client.js";
 import type { ChildKeepaliveLedger, Lease } from "../cache-ttl/ping-ledger.js";
 import type { CacheTtlSettings } from "../config/settings.js";
-import type { AdaptiveSnapshot } from "../cache-ttl/adaptive.js";
 import type { Millis } from "../core/types.js";
 
 /** pi-free-ish subset of what this module needs from `ctx.model` (structurally satisfied by pi-ai's `Model`). */
@@ -140,14 +133,6 @@ export interface KeepalivePort {
   noteRequest(captured: CapturedRequest): void;
   noteRequestSettled(sessionId: string, instance: string, successful?: boolean): void;
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void;
-  /**
-   * plan.md §6.3: consumes the one-shot 1h-upgrade permit if the window has one
-   * pending, identity checks pass, and the cache is presumed dead by now.
-   * Deliberately does NOT gate on `cacheTtl.mode` — callers must additionally
-   * require `mode === "auto"` themselves (I-K5); this keeps the service
-   * mode-agnostic.
-   */
-  consumeUpgrade(sessionId: string, instance: string, now?: number): boolean;
   report(): KeepaliveReport;
   /**
    * D1: start time of the most recent PROVEN cache read in the CURRENT window
@@ -155,28 +140,9 @@ export interface KeepalivePort {
    * been proven or the window was invalidated / stopped by an unproven ping
    * (both clear `capture`, which is the liveness guard used here).
    *
-   * Consumed by the adaptive predictor's warm/cold split so a window kept
-   * alive by pings is never mistaken for a dead one. Identity-free on purpose:
-   * it reports this instance's own state and the caller (stack wiring) already
-   * holds the current instance.
+   * Consumed by the warmth port as proven evidence. Reports this instance's own state.
    */
   provenCacheReadAt(): Millis | undefined;
-  /**
-   * F1 (adaptive verification-2026-09-25): the longest gap this pinger can bridge
-   * after a request whose measured prefix is `prefixTokens` (0 when unproven), or
-   * `undefined` when it cannot ping that window at all — disabled, session-disabled
-   * breaker, headless run mode, non-anthropic / denied route, or a prefix below
-   * `keepaliveMinPrefixTokens` (gate #8, review R1).
-   *
-   * Contract (review rounds 2–3): this is the pinger's capability for the window the
-   * NEXT real request opens. Whether that request itself can be replayed — it must be
-   * streaming (gate #7.5) — is only known to the caller holding the outgoing payload,
-   * so the adaptive caller checks it (R7) and must not ask for a non-streaming one.
-   * The per-window ping budget and a single unproven ping are deliberately NOT
-   * checked: both reset with that new window; repeated failures trip the session
-   * breaker (⇒ `undefined`). Identity-free like `provenCacheReadAt`.
-   */
-  gapHorizonMs(prefixTokens: number): Millis | undefined;
   setEnabled(on: boolean): void;
   /**
    * plan.md merge note (UI cleanup): `cache-ttl.ts` owns the mode/dirty
@@ -186,8 +152,7 @@ export interface KeepalivePort {
    * changes (and once per `before_provider_request`, so a freshly rebuilt
    * service catches up quickly) so the service's own self-triggered
    * `publishVisibility()` calls (after a ping resolves, etc.) render with
-   * the CURRENT mode rather than a stale/default one — this is what keeps
-   * the `capped →1h` hint honest (I-K5: only true when mode is `"auto"`).
+   * the CURRENT mode rather than a stale/default one.
    */
   syncModeState(mode: CacheDisplayMode, dirty: boolean): void;
 }
@@ -215,24 +180,6 @@ export interface CacheKeepaliveDeps {
   /** I-K9: whether `self` is still the holder's current instance (stack.ts passes `(self) => holder.current?.keepalive === self`). */
   isCurrent: (self: CacheKeepaliveService) => boolean;
   fetchImpl?: typeof fetch;
-  /**
-   * Both services write the one merged status key, so a keepalive-triggered
-   * publish must be able to re-render the adaptive segments too — otherwise
-   * every ping/window change would blank them until the next request.
-   */
-  adaptiveSnapshot?: () => AdaptiveSnapshot | undefined;
-  /**
-   * F1: whether the adaptive predictor's settled 1h entry covers the current
-   * prefix (`CacheAdaptiveService.coversPrefix`). Lazily read (adaptive is built
-   * after keepalive). Absent / throwing ⇒ false ⇒ pinging is unchanged.
-   */
-  adaptiveCoversPrefix?: (horizonMs: Millis) => boolean;
-  /**
-   * task #14: compact-hint's switch-imminent flag. `true` ⇒ the one-shot 1h upgrade after
-   * budget exhaustion is skipped (it would rewrite at 2x a prefix the next switch discards).
-   * Absent / throwing ⇒ false ⇒ unchanged. Plain pings are never affected.
-   */
-  switchImminent?: () => boolean;
   appendEntry?: (customType: string, data: unknown) => void;
   emit?: (channel: string, payload: unknown) => void;
   // -- child-ka-core (docs/dev/child-context-switch/plan.md §2.4/§7 P1) -------
@@ -317,7 +264,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private lastSkip: TickSkipReason | undefined;
   /** See `KeepaliveReport.lastPingDiagnostics`. */
   private lastPingDiagnostics: KeepalivePingDiagnostics | undefined;
-  /** Mirrors `cache-ttl.ts`'s mode/dirty closure (see `syncModeState`'s doc comment). "auto" is a safe default: it never renders the `→1h` upgrade hint on its own. */
+  /** Mirrors `cache-ttl.ts`'s mode/dirty closure (see `syncModeState`'s doc comment). */
   private modeState: { mode: CacheDisplayMode; dirty: boolean } = { mode: "auto", dirty: false };
   /** child-ka-core: this run's cumulative ACTUALLY-CHARGED $ spend (never includes reservations that were later revoked). Seeded by `deps.runSpentSeedUsd` so a resumed session continues its prior total. */
   private runSpentUsd: number;
@@ -364,7 +311,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       intervalMs: s.keepaliveIntervalMs,
       maxPings: s.keepaliveMaxPings,
       minPrefixTokens: s.keepaliveMinPrefixTokens,
-      upgradeAfterBudget: s.keepaliveUpgradeAfterBudget,
       ...(this.deps.allowHeadless !== undefined ? { allowHeadless: this.deps.allowHeadless } : {}),
       ...(this.deps.maxSessionPings !== undefined ? { maxSessionPings: this.deps.maxSessionPings } : {}),
     };
@@ -384,15 +330,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       return this.deps.ctx.mode;
     } catch {
       return "";
-    }
-  }
-
-  /** F1: never let the adaptive port break a tick — absent/throwing ⇒ not covered. */
-  private safeAdaptiveCovers(): boolean {
-    try {
-      return this.deps.adaptiveCoversPrefix?.(keepaliveGapHorizonMs(this.config())) === true;
-    } catch {
-      return false;
     }
   }
 
@@ -497,7 +434,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
    * (compat flag explicitly `false`) — pi's own default is `true` when the
    * flag is unset, so an absent flag still counts as supported. If `ctx.model`
    * can't be read at all, fall back to `false` (conservative: never promise a
-   * `→1h` transition we can't confirm is possible).
+   * 1h support we can't confirm is possible).
    */
   private supportsLongCacheRetention(): boolean {
     const model = this.safeModel();
@@ -528,7 +465,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           mode: this.modeState.mode,
           dirty: this.modeState.dirty,
           report: this.report(),
-          ...(this.deps.adaptiveSnapshot?.() ? { adaptive: this.deps.adaptiveSnapshot() } : {}),
         },
         readCacheStatusTheme(this.deps.ctx),
       ),
@@ -659,7 +595,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
    * check would have caught the window while still armed — real-machine
    * repro: 3 windows, 1 hit). This schedules a SECOND, independent
    * `clock.setTimer` landing EXACTLY at `nextPingAt` and reuses `onTick()`
-   * verbatim — every gate (armed/budget/adaptive/fingerprint/...) still
+   * verbatim — every gate (armed/budget/fingerprint/...) still
    * applies; this only removes the polling-granularity risk.
    *
    * Rescheduled at every point that changes `window.nextPingAt` or clears
@@ -705,7 +641,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   /**
    * todo #28: a TERMINAL skip on a window that still had a capture means this
    * window just permanently lost its ability to ping (budget exhausted, cache
-   * judged dead, fingerprint/route mismatch, adaptive cover, ...) — worth one
+   * judged dead, fingerprint/route mismatch, ...) — worth one
    * lightweight diagnostic so "why didn't it ping" doesn't need session-file
    * archaeology. Deduped per `windowEpoch`: a window re-armed by
    * `noteToolStart`/`noteUiPromptStart` after the periodic loop already
@@ -734,7 +670,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       session: this.session,
       window: this.window,
       currentFingerprint: capture ? this.currentFingerprintFor(capture) : EMPTY_FINGERPRINT,
-      adaptiveCovered: this.safeAdaptiveCovers(),
       nativeWarmerActive: this.safeNativeWarmerActive(),
     });
     this.window = result.window;
@@ -1072,30 +1007,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.syncExactTimer();
   }
 
-  private safeSwitchImminent(): boolean {
-    try {
-      return this.deps.switchImminent?.() === true;
-    } catch {
-      return false;
-    }
-  }
-
-  consumeUpgrade(sessionId: string, instance: string, now?: number): boolean {
-    if (!this.accept(sessionId, instance)) return false;
-    const result = consumeUpgradeReducer(this.window, {
-      sessionMatches: true, // accept() already verified identity above (I-K6/I-K9).
-      mode: "auto", // service is mode-agnostic; caller (cache-ttl.ts) enforces I-K5's `mode === "auto"` gate itself.
-      upgradeAfterBudgetEnabled: this.config().upgradeAfterBudget,
-      now: now ?? this.clock.now(),
-      assumedTtlMs: ASSUMED_TTL_MS,
-      // Lazy: the predicate reads live context usage (a session projection), and it only
-      // matters on the rare request that carries a pending one-shot upgrade.
-      switchImminent: this.window.upgradePending && this.safeSwitchImminent(),
-    });
-    this.window = result.window;
-    return result.consumed;
-  }
-
   report(): KeepaliveReport {
     const model = this.safeModel();
     return {
@@ -1120,25 +1031,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     // longer evidence about the CURRENT prefix, so report nothing.
     if (this.window.capture === undefined) return undefined;
     return this.window.lastProvenPingStartedAt;
-  }
-
-  gapHorizonMs(prefixTokens: number): Millis | undefined {
-    if (this.disposed) return undefined;
-    const config = this.config();
-    if (!config.enabled || config.maxPings <= 0) return undefined;
-    if (!(prefixTokens >= config.minPrefixTokens)) return undefined;
-    if (this.session.disabled !== undefined) return undefined;
-    if (!keepaliveModeAllowsPing(this.safeMode())) return undefined;
-    let model: KeepaliveModelInfo | undefined;
-    try {
-      model = this.deps.ctx.model as unknown as KeepaliveModelInfo | undefined;
-    } catch {
-      return undefined;
-    }
-    if (model?.api !== ANTHROPIC_MESSAGES_API || PING_DENY_PROVIDERS.has(model.provider)) return undefined;
-    // Streamability is judged on the CURRENT request by the caller (review R7): the
-    // previous window's capture says nothing about the window the next request opens.
-    return keepaliveGapHorizonMs(config);
   }
 
   setEnabled(on: boolean): void {

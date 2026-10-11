@@ -313,7 +313,7 @@ export interface CompactSettings {
   childMaxSwitches: number;
 }
 
-export type CacheTtlMode = "auto" | "on" | "off" | "adaptive";
+export type CacheTtlMode = "auto" | "on" | "off";
 export interface CacheTtlSettings {
   mode: CacheTtlMode;
   /** 保活总开关。Default true. */
@@ -327,35 +327,6 @@ export interface CacheTtlSettings {
   keepaliveMaxPings: number;
   /** 前缀实测下界门槛（tokens）。Default 20000。 */
   keepaliveMinPrefixTokens: number;
-  /** 允许「下一次必写请求」升级成 1h（§6.3）。Default true. */
-  keepaliveUpgradeAfterBudget: boolean;
-  /** adaptive 总开关（adaptive 方案 §7.1，默认启用）：true 时未显式写 mode 的默认解析为 "adaptive"；false ⇒ 回落 auto 且不咨询 adaptive service。 */
-  adaptiveEnabled: boolean;
-  /** 每会话 adaptive 升级引发的实测 cacheWrite 总预算（tokens）。Default 200000。 */
-  adaptiveWriteBudgetTokens: number;
-  /** 每会话 adaptive 升级的边际支出预算（美元，主闸；0 = 关闭美元闸、只看 token 预算）。
-   *  累计口径：结算账本的 cost.cacheWrite × 0.375（5m→1h 边际占比，推导见 adaptive.ts
-   *  MARGINAL_WRITE_FRACTION）。Default 1.0。 */
-  adaptiveWriteBudgetUsd: number;
-  /** 每会话「入场费」预算（tokens）：未被 1h 覆盖的首次升级会整条前缀重写，单列一档预算，
-   *  不与 adaptiveWriteBudgetTokens（稳态边际）混算。0 = 永不开新前缀 ⇒ 整条升级路径关闭。
-   *  Default 600000。 */
-  adaptiveFeeBudgetTokens: number;
-  /** 入场费的美元预算（0 = 关闭美元闸）。累计口径：cost.cacheWrite × 0.95（推导见 adaptive.ts
-   *  ENTRY_FEE_MARGINAL_WRITE_FRACTION）。Default 3.0。 */
-  adaptiveFeeBudgetUsd: number;
-  /** 热升级允许的预测增量 Δ̂ 上限（tokens）。Default 32000。 */
-  adaptiveMaxDeltaTokens: number;
-  /** 距上次 1h 升级累计写入超过该值才允许再次热升级（tokens）。Default 16000。 */
-  adaptiveRefreshAfterTokens: number;
-  /** 每会话冷升级次数上限；0 = 禁用冷升级。Default 1。 */
-  adaptiveColdUpgrades: number;
-  /** 两次冷升级的最小间隔（内部 ms；文件存 adaptiveColdCooldownS 秒）。Default 1_200_000 (20min)，钳位 [60s, 7200s]。 */
-  adaptiveColdCooldownMs: number;
-  /** 冷升级要求的 subagent 最小剩余时域（内部 ms；文件存 adaptiveColdMinHorizonS 秒）。Default 600_000 (10min)。 */
-  adaptiveColdMinHorizonMs: number;
-  /** 是否启用 S4 历史长空档弱信号（只影响热升级）。Default true. */
-  adaptiveHistoryGapSignal: boolean;
   /** child-ka-core（docs/dev/child-context-switch/plan.md §2.4/§4）：子会话保活总开关。
    *  Default true；false ⇒ 子会话不注册 capture/keepalive，不写审计条目，无网络（还受上面的
    *  `keepalive` 总开关约束）。 */
@@ -916,18 +887,6 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     keepaliveIntervalMs: 240_000,
     keepaliveMaxPings: 11,
     keepaliveMinPrefixTokens: 20_000,
-    keepaliveUpgradeAfterBudget: true,
-    adaptiveEnabled: true,
-    adaptiveWriteBudgetTokens: 200_000,
-    adaptiveWriteBudgetUsd: 1.0,
-    adaptiveFeeBudgetTokens: 600_000,
-    adaptiveFeeBudgetUsd: 3.0,
-    adaptiveMaxDeltaTokens: 32_000,
-    adaptiveRefreshAfterTokens: 16_000,
-    adaptiveColdUpgrades: 1,
-    adaptiveColdCooldownMs: 1_200_000,
-    adaptiveColdMinHorizonMs: 600_000,
-    adaptiveHistoryGapSignal: true,
     childKeepalive: true,
     childKeepaliveMaxPingsPerRun: 24,
     childKeepaliveMaxConcurrent: 4,
@@ -1152,8 +1111,6 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "memory.tidy.timeoutMs",
   "memory.tidy.batch.totalTimeoutMs",
   "cacheTtl.keepaliveIntervalMs",
-  "cacheTtl.adaptiveColdCooldownMs",
-  "cacheTtl.adaptiveColdMinHorizonMs",
   "quota.refreshMs",
   "quota.refreshHotMs",
   "quota.staleAfterMs",
@@ -1406,9 +1363,7 @@ function parseFabricSettings(input: unknown): FabricSettings {
 /** Parse the optional Anthropic prompt-cache TTL settings block. Field-by-field tolerant (parseMemorySettings 同款 bool()/num() helpers), never throws. */
 export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
   const defaults = DEFAULT_SETTINGS.cacheTtl;
-  // 缺省整块时也走 adaptiveEnabled 升格（§7.1）：开 ⇒ "adaptive"，关 ⇒ 现状 "auto"。
-  if (!input || typeof input !== "object" || Array.isArray(input))
-    return { ...defaults, mode: defaults.adaptiveEnabled ? "adaptive" : defaults.mode };
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const value = input as Record<string, unknown>;
   const bool = (raw: unknown, fallback: boolean): boolean => (typeof raw === "boolean" ? raw : fallback);
   const num = (raw: unknown, fallback: number, min: number, max: number): number =>
@@ -1417,16 +1372,10 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
   const usd = (raw: unknown, fallback: number, min: number, max: number): number =>
     typeof raw === "number" && Number.isFinite(raw) && raw >= min && raw <= max ? raw : fallback;
   const mode = value.mode;
-  const adaptiveEnabled = bool(value.adaptiveEnabled, defaults.adaptiveEnabled);
+  const parsedMode = mode === "auto" || mode === "on" || mode === "off" ? mode : defaults.mode;
+  if (mode === "adaptive") console.warn('[pi-subagent] cacheTtl mode "adaptive" was removed; using auto');
   return {
-    // adaptive 方案 §7.1（默认值修订）：显式写的合法 mode 一律尊重；缺省/非法时
-    // 由 adaptiveEnabled 单开关决定默认档（开 ⇒ "adaptive"，关 ⇒ "auto"——与现状逐字节一致）。
-    mode:
-      mode === "auto" || mode === "on" || mode === "off" || mode === "adaptive"
-        ? mode
-        : adaptiveEnabled
-          ? "adaptive"
-          : defaults.mode,
+    mode: parsedMode,
     keepalive: bool(value.keepalive, defaults.keepalive),
     keepaliveIntervalMs: num(
       value.keepaliveIntervalMs,
@@ -1441,38 +1390,6 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
       0,
       Number.MAX_SAFE_INTEGER,
     ),
-    keepaliveUpgradeAfterBudget: bool(value.keepaliveUpgradeAfterBudget, defaults.keepaliveUpgradeAfterBudget),
-    adaptiveEnabled,
-    adaptiveWriteBudgetTokens: num(
-      value.adaptiveWriteBudgetTokens,
-      defaults.adaptiveWriteBudgetTokens,
-      0,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    adaptiveWriteBudgetUsd: usd(value.adaptiveWriteBudgetUsd, defaults.adaptiveWriteBudgetUsd, 0, 100),
-    adaptiveFeeBudgetTokens: num(
-      value.adaptiveFeeBudgetTokens,
-      defaults.adaptiveFeeBudgetTokens,
-      0,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    adaptiveFeeBudgetUsd: usd(value.adaptiveFeeBudgetUsd, defaults.adaptiveFeeBudgetUsd, 0, 100),
-    adaptiveMaxDeltaTokens: num(
-      value.adaptiveMaxDeltaTokens,
-      defaults.adaptiveMaxDeltaTokens,
-      0,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    adaptiveRefreshAfterTokens: num(
-      value.adaptiveRefreshAfterTokens,
-      defaults.adaptiveRefreshAfterTokens,
-      0,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    adaptiveColdUpgrades: num(value.adaptiveColdUpgrades, defaults.adaptiveColdUpgrades, 0, Number.MAX_SAFE_INTEGER),
-    adaptiveColdCooldownMs: num(value.adaptiveColdCooldownMs, defaults.adaptiveColdCooldownMs, 60_000, 7_200_000),
-    adaptiveColdMinHorizonMs: num(value.adaptiveColdMinHorizonMs, defaults.adaptiveColdMinHorizonMs, 0, 7_200_000),
-    adaptiveHistoryGapSignal: bool(value.adaptiveHistoryGapSignal, defaults.adaptiveHistoryGapSignal),
     childKeepalive: bool(value.childKeepalive, defaults.childKeepalive),
     childKeepaliveMaxPingsPerRun: num(
       value.childKeepaliveMaxPingsPerRun,
@@ -2560,7 +2477,13 @@ function migrateLegacyCacheTtlState(
       console.warn(`[pi-subagent] ${settingsPath}: invalid cacheTtl setting preserved; using auto`);
     return { value: raw, changed: false, deleteLegacy: true, legacyPath };
   }
-  return { value: { ...raw, cacheTtl: { mode } }, changed: true, deleteLegacy: true, legacyPath };
+  if (mode === "adaptive") console.warn('[pi-subagent] legacy cache TTL mode "adaptive" was removed; using auto');
+  return {
+    value: { ...raw, cacheTtl: { mode: mode === "adaptive" ? DEFAULT_SETTINGS.cacheTtl.mode : mode } },
+    changed: true,
+    deleteLegacy: true,
+    legacyPath,
+  };
 }
 
 /**

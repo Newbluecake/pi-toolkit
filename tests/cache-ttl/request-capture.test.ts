@@ -16,7 +16,6 @@ function fakePort(instanceId = "inst-1"): KeepalivePort {
     noteRequest: vi.fn(),
     noteRequestSettled: vi.fn(),
     invalidate: vi.fn(),
-    consumeUpgrade: vi.fn().mockReturnValue(false),
     report: vi.fn(),
   } as unknown as KeepalivePort;
 }

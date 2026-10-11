@@ -25,7 +25,6 @@ function fakePort(overrides: Partial<Record<keyof KeepalivePort, unknown>> = {})
     noteRequest: vi.fn(),
     noteRequestSettled: vi.fn(),
     invalidate: vi.fn(),
-    consumeUpgrade: vi.fn().mockReturnValue(false),
     report: vi.fn(),
     setEnabled: vi.fn(),
     syncModeState: vi.fn(),
@@ -150,11 +149,8 @@ describe("keepalive header/payload capture pairing (root-cause fix)", () => {
 describe("cache TTL settings", () => {
   it("parses only whitelisted modes", () => {
     expect(parseCacheTtlSettings({ mode: "on", extra: true })).toEqual(expect.objectContaining({ mode: "on" }));
-    expect(parseCacheTtlSettings({ mode: "adaptive" })).toEqual(expect.objectContaining({ mode: "adaptive" }));
-    // adaptive plan §7.1: absent/invalid mode ⇒ flag-gated default (adaptiveEnabled defaults on)
     for (const input of [undefined, null, [], "on", { mode: "bad" }, { mode: 1 }])
-      expect(parseCacheTtlSettings(input)).toEqual(expect.objectContaining({ mode: "adaptive" }));
-    expect(parseCacheTtlSettings({ adaptiveEnabled: false })).toEqual(expect.objectContaining({ mode: "auto" }));
+      expect(parseCacheTtlSettings(input)).toEqual(expect.objectContaining({ mode: "auto" }));
     expect(loadSettings({ cacheTtl: { mode: "off", extra: true } }).cacheTtl).toEqual(
       expect.objectContaining({ mode: "off" }),
     );
@@ -264,8 +260,8 @@ describe("/cache-ttl getArgumentCompletions", () => {
         .getArgumentCompletions("")!
         .map((i: any) => i.value)
         .sort(),
-    ).toEqual(["adaptive", "auto", "keepalive", "off", "on", "save", "status"]);
-    expect(cmd.getArgumentCompletions("ad")!.map((i: any) => i.value)).toEqual(["adaptive"]);
+    ).toEqual(["auto", "keepalive", "off", "on", "save", "status"]);
+    expect(cmd.getArgumentCompletions("ad")!.map((i: any) => i.value)).toEqual([]);
   });
 
   it("second level: keepalive on/off", () => {

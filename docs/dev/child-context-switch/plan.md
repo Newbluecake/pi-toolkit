@@ -2,7 +2,7 @@
 
 > 需求原话：「我觉得子会话可以支持switch context」「然后支持cache ttl ping即可」。
 > 范围：subagent 子会话 ① 模型自写交接的上下文切换（含 compact-hint 的 tick / 提醒 / demand）；② 子会话等待期间的前缀缓存保活 ping。
-> 不在范围：子会话的 TTL 改写（on/off/adaptive）、`compact_context` / `set_compact_threshold` 进子会话、主会话行为的任何变化。
+> 不在范围：子会话的 TTL 改写（on/off）、`compact_context` / `set_compact_threshold` 进子会话、主会话行为的任何变化。
 > v2：v1 被评审（gpt-sol）打回，8 条意见的处置见文末「v1→v2 评审处置」。v2 相对 v1 的主要变化：并发槽改为持有者释放 + 兜底 lease；写清 pi 自动压缩失败时子 run 的终态与交付；边界草稿按 turn_end 事件字段做结构校验和 canContinue 复算；新增每 run / 进程级美元预算；切换次数上限做成设置并进结果诊断；pi 版本门 + 真实 AgentSession conformance 测试；「关闭即回到今天」收窄为可测的零新增行为。
 > v3：用户不接受「精确 0.87.x 版本门」这一 I14 例外，要求「最新版本也能使用、不依赖版本号」，最低适配目标为 npm latest。v3 把 §3.1 的版本门替换为**运行时能力检测 + 首次使用自证 + 安全降级**（§3.1），并把切换从 `continue` 契约上解耦（§0 事实 2、§2.1）。处置见文末「v2→v3 处置」。
 > v3.1：v3 复审「有条件通过」，只补 4 个条件（L3(c) 按条目边界自证、runner 自证失败锁存与优先级、结算处未完成切换的兜底失败检查、L2 探针验证投影可读与文件重开后仍在），已定决策与其余设计不变。处置见文末「v3→v3.1 评审处置」。
@@ -46,7 +46,6 @@
 - `buildSessionStack` 只由主会话 `session_start` 调（`src/index.ts:575`）；子会话不建栈（没有 session_start，而且在守卫之后）。
 - `CompactHintState` 构造：`:1068-1083`；compact-hint 钩子 `createCompactHintHook`：`:668`，首行 `if (ctx.mode === "print" || ctx.mode === "json") return;`（`:691`）；强制兜底 `ctx.compact({...})`：`:838`。
 - keepalive：`:1627-1650`，`backgroundBusy` = 本栈 run / bash job / workflow（`:1633-1637`）；上一实例在下次 build 顶部 dispose（`:1042`），模块级 `previousKeepalive`（`:168`）。
-- adaptive：`:1656-1691`，依赖 keepalive 的 `provenCacheReadAt` / `gapHorizonMs`。
 - 动态阈值：`:1721-1756`（print/json 返回惰性 runtime）。
 
 ### 1.3 子会话如何启动
@@ -121,7 +120,7 @@ src/index.ts (pre-guard, wireMemory 之后)
 
 `boundaryStaticProbe()` 是 §3.1 的 L0 结构探测（不看版本号）。注册之后，工具能不能真正暂存切换，由进程级能力状态机决定（§3.1：`unknown → observed → ready → verified`，任何一步失败 ⇒ `disabled`）。所有 `pi.on` / `registerTool` 都在 activate 内同步完成，状态在首个用得上的事件里惰性构建（§0 事实 3）。
 
-在子会话里保持惰性（不变）：fleet widget、HUD、scheduler、fabric 路由主体、quota、adaptive、动态阈值、`/cache-ttl`、TTL 改写、`compact_context`、`set_compact_threshold`、Agent/workflow 工具面。
+在子会话里保持惰性（不变）：fleet widget、HUD、scheduler、fabric 路由主体、quota、动态阈值、`/cache-ttl`、TTL 改写、`compact_context`、`set_compact_threshold`、Agent/workflow 工具面。
 
 ### 2.1 子会话 switch_context（边界草稿方案）
 
@@ -255,8 +254,8 @@ src/index.ts (pre-guard, wireMemory 之后)
 
 - 把 `wireCacheTtl` 里 `before_provider_request` / `before_provider_headers` 的 passthrough capture 与配对逻辑抽成共用 helper `createRequestCapture(port)`（`src/cache-ttl/cache-ttl.ts`，主会话行为不变）。子会话只做 capture，**永不改写 payload**。
 - 在首个 `before_provider_request` 用事件 ctx 惰性构造 `createCacheKeepaliveService`，deps 为：
-  - `backgroundBusy: () => false`（武装只看 activeTools）；`isCurrent: (self) => self === local`；不接 adaptive / `adaptiveCoversPrefix` / `switchImminent`；`emit` 不接。
-  - `settings`：派生视图，`keepaliveUpgradeAfterBudget=false`（子会话没有 TTL 改写，1h 升级无从谈起），`intervalMs/maxPings/minPrefixTokens` 复用 `cacheTtl.*`。
+  - `backgroundBusy: () => false`（武装只看 activeTools）；`isCurrent: (self) => self === local`；`emit` 不接。
+  - `settings`：派生视图，`intervalMs/maxPings/minPrefixTokens` 复用 `cacheTtl.*`。
   - 新 deps（见下）：`allowHeadless: true`、`maxSessionPings`、`pingLedger`（并发槽 + 美元预算）、`authTimeoutMs: 30_000`、`reportCost: true`、`statusBar: false`。
 - 转发 `tool_execution_start/end`、`message_end`、`turn_end`、`agent_end`、`agent_settled`（→ `noteAgentSettled` + **dispose**），以及漂移事件 `model_select` / `thinking_level_select` / `session_compact` / `session_compact_failed`（子会话 pi 自动压缩时会发）→ `invalidate`。边界切换不发 `session_compact`，但会改写前缀，所以 `entry_appended`（compaction）也 → `invalidate`。
 
@@ -284,7 +283,7 @@ src/index.ts (pre-guard, wireMemory 之后)
 
 **美元预算**：
 
-- 每 run：`cacheTtl.childKeepaliveRunBudgetUsd`，默认 **$1.50**；进程级：`cacheTtl.childKeepaliveProcessBudgetUsd`，默认 **$10.00 / 滚动 24h**。`0` = 子会话不 ping（注意：与 `adaptiveWriteBudgetUsd` 的「0 = 闸门关」相反，这里取保守方向）。
+- 每 run：`cacheTtl.childKeepaliveRunBudgetUsd`，默认 **$1.50**；进程级：`cacheTtl.childKeepaliveProcessBudgetUsd`，默认 **$10.00 / 滚动 24h**。`0` = 子会话不 ping。
 - 每次 ping 前（在 `tryAcquire` 之前）估算 `estimateUsd = cacheReadCostUsd(model.cost, capture.prefix.tokens)`（tier 感知）：
   - 模型没有 cost 信息 ⇒ `skip("usd-unpriced", terminal)`：价格不明就无法守预算。
   - `runSpent + estimate > runBudget` ⇒ `skip("usd-run", terminal)`；ledger 拒绝 ⇒ `skip("usd-process", terminal)`。本实例停止 ping，并写一条 `budget-stop` 审计。下一个子 run 重新判定。
@@ -300,8 +299,6 @@ src/index.ts (pre-guard, wireMemory 之后)
 **成本计入子 run**：`src/runtime/session-driver.ts` 的 `mapEvent` 新增一条映射：`entry_appended` 且 `entry.type === "custom" && customType === "subagent:cache-keepalive" && data.costUsd > 0` ⇒ `{ t: "message_end", usage: { input:0, output:0, cacheRead, cacheWrite, costUsd } }`。这样 X9 累加器（`state-machine.ts:491-500, 719`）→ run 成本、fleet widget、HUD 实时子 agent 成本、`/agent costs` 全都自动包含。副作用是 `lastEventAt` 被刷新，这是无害的：ping 只在「请求不在途 且 有工具在跑」时发（`tool_exec` 的截止只看 `phaseEnteredAt`，`deadline.ts:72-73`），掩盖不了静默的 model_turn。T-K7 钉住这一点。
 
 **终态**：① `agent_settled` ⇒ 立即 dispose（子会话一个 prompt 对应一次 settle；resume 会新建会话和实例）；② 陈旧 ctx 自毁（≤1 个 tick，15s 内，期间不会发出 ping）；③ 进程级 `Symbol.for("pi-subagent:child-keepalive")` 注册表（sessionId → dispose），由 runner 的 `onReaped(runId, forkSessionFrom, sessionId)`（`runner.ts:274`，第三个参数已存在）经 runtime-adapter 转发调用，保证 reap 时同步 dispose。三条路径幂等，dispose 都会 `lease.settle()`。
-
-**adaptive**：子会话禁用（也没有 TTL 改写通道）。理由：子会话由机器驱动，没有人类长空档，1h 入场费（plan §16.3）得不偿失；keepalive 与 adaptive 的相互依赖（§17-§20）也不带进子会话。
 
 **与 pi 原生预热的关系**：若子会话模型声明了 `promptCache`（原生 `CacheWarmer` 有资格在 streaming 期间预热），子 keepalive 退让，新 skip 原因 `"native-warmer"`（终态），避免双 ping。本机 `cr-*` 路由没有 `promptCache`，所以实际仍由我们 ping。主会话的同类重叠不在本方案范围内，列入风险。
 

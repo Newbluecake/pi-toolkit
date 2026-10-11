@@ -16,7 +16,6 @@ function baseState(initial: Partial<CompactHintState> = {}): CompactHintState {
     switchTool: true,
     forceDemandTurns: 1,
     demandCount: 0,
-    imminence: undefined,
     ...initial,
   };
 }

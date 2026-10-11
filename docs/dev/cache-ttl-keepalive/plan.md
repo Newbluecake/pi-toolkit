@@ -1,3 +1,5 @@
+> 2026-10-11 用户裁决：保留保活 ping、预算、账本、子会话与 transient 恢复；删除预算耗尽后自动升级 1h（原 §6.3），auto 不再自动改写 TTL。
+
 # 提示词缓存保活 ping（cache-ttl keepalive）实施方案
 
 状态：**v2 施工口径（已按 `review.md` 的 4 个 Blocker + M1–M6 + m1–m3 修订）**。
@@ -79,10 +81,7 @@ Anthropic「cache read 免费刷新 TTL」的特性给缓存续命。
    （评审确认此推导正确。Fable read 0.025× ⇒ `n < 49`，但统一取最保守的 11.5，理由见 §6.2。）
 2. **短空档纯亏**：若实际落在 B（空档 < TTL），C 比 B 多花 `0.1P × n`。这是**默认开启的已知代价**，
    用户已裁决接受；方案只负责让它**事后可量化**（§9.2 的 `load-bearing` / `unnecessary` 分类）。
-3. **1h 升级判据（不由 n 推导）**：只有在「这次真实请求**必定**是全量写」时，才比较
-   `1.25P`（5m 写）与 `2P`（1h 写）：边际 `0.75P` 买下一小时覆盖。它是否值得取决于
-   **预期还会发生多少次长空档**，与 ping 次数无关 ⇒ 做成独立开关
-   `cacheTtl.keepaliveUpgradeAfterBudget`，默认开但可关（§6.3）。
+3. **自动 1h 升级已移除（2026-10-11）**：现场数据否定了预期收益；预算耗尽只停止本窗口 ping，不改写下一次真实请求。
 
 订阅制（Claude Pro/Max OAuth）用户没有按 token 计费，ping 消耗额度而非美元；比值相同，
 配额问题按 §15 R7 的用户裁决处理。
@@ -117,8 +116,7 @@ Anthropic「cache read 免费刷新 TTL」的特性给缓存续命。
   费用（未知时显示“费用未知”，**禁止显示 $0**）。
 - **I-K4（零悬挂）**：定时器走 `systemClock.setTimer`（已 unref）；dispose 清定时器 + abort 在途
   ping + 释放 reader/listener；`/reload` 不残留；ping 失败静默、不重试、不阻塞 pi 任何流程。
-- **I-K5（不篡改用户显式设置）**：不改 `cacheTtl.mode` 三档语义；唯一 TTL 升级路径是 §6.3 的
-  一次性 `upgradePending`，且仅在 `mode === "auto"` 生效。
+- **I-K5（不篡改用户显式设置）**：保活不改写 TTL；auto/on/off 三档只由用户显式选择或 pi/env 决定。预算耗尽不会触发升级。
 - **I-K6（会话身份，B1）**：每条捕获、每次事件、每个 tick、**每个 `await` 返回点**都必须验证
   `sessionId` 与服务实例身份仍是当前会话；不匹配 ⇒ 静默丢弃并计数。stale ctx 的任何读取都
   try/catch，抛出即自我 dispose。
@@ -131,7 +129,7 @@ Anthropic「cache read 免费刷新 TTL」的特性给缓存续命。
   ping。`proven-write`、`no-usage`、其它 HTTP 4xx 及任何达到 non-transient 阈值的 mixed case
   仍永久停用；失败或 abort 的真实请求不恢复。读回 `/reload` 时保留 transient/permanent 标记，
   仅 transient 可由上述成功真实请求解除。I-K8 epoch 丢弃、ping ledger、child-session keepalive
-  与 adaptive breaker 语义不变。
+  语义不变。
 - **I-K8（窗口代际，B5）**：每次 ping 在发起时绑定当时的 `windowEpoch`；`runPing()` 的每个
   `await` 返回点、以及**任何 reducer 写入之前**都必须校验 epoch 未变。epoch 失配 ⇒ 静默丢弃：
   **不计 proven、不计 unproven、不回写任何窗口字段、不动 `aliveUntil`/`nextPingAt`、
@@ -242,8 +240,6 @@ export interface KeepalivePort {
   noteRequestSettled(sessionId: string, instance: string): void;
   /** 显式作废本窗口捕获（compaction / 模型切换 / 系统提示漂移 / payload 形状异常…）；会自增 windowEpoch。 */
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void;
-  /** §6.3：消费一次「下一次必写请求升级成 1h」的许可。 */
-  consumeUpgrade(sessionId: string, instance: string, now?: number): boolean;
   /** `/cache-ttl status` 的数据源（纯数据，渲染在 cache-ttl 层）。 */
   report(): KeepaliveReport;
   /** `/cache-ttl keepalive on|off`（仅当前进程）。 */
@@ -265,7 +261,6 @@ export interface CacheTtlDeps {
   （`cacheTtl.keepalive=false`）⇒ 捕获调用整体跳过，**不抛、不 warn、不记状态**，
   `before_provider_request` 的返回值与今天完全一致。
 - 写法：`const port = deps.keepalive?.(); if (!port) return;`——单点、可测（§13.4）。
-- `consumeUpgrade` 同理：port 缺席 ⇒ 视作 `false`，改写路径按纯 mode 走。
 
 ### 2.4 会话切换竞态的三层防护（B1）
 
@@ -276,7 +271,7 @@ export interface CacheTtlDeps {
    `sessionId = ctx.sessionManager?.getSessionId?.()`（try/catch，读不到给 `""`）并放进
    `CapturedRequest`，并从 `port.instanceId` 读当前实例 id 一并带上。服务实例自持构建期的
    `ownSessionId` 与不可复用的 `instanceId`；`noteRequest`/`noteRequestSettled`/`invalidate`/
-   `consumeUpgrade`/武装计数一律先过 `accept()`（§8.2）：
+   武装计数一律先过 `accept()`（§8.2）：
    ```ts
    // 四重校验：未 dispose + 同会话 + 同实例 + 仍是 holder 上的当前实例
    if (this.disposed) return false;
@@ -329,8 +324,8 @@ export interface CacheTtlDeps {
 | `src/cache-ttl/cache-ttl.ts`               | 改造                                | handler 签名加 `ctx`（`explore.md §2` 预警）；改写后捕获并交给 `deps.keepalive()`；`/cache-ttl keepalive on\|off`、`/cache-ttl status`                                                                                                  |
 | `src/stack.ts`                             | 改造                                | `previousKeepalive` 句柄、`Stack.keepalive`、build 顶部 dispose、构造与注入（§2.2）                                                                                                                                                     |
 | `src/index.ts`                             | 改造                                | 传 holder read-through、两处 dispose 兜底（§2.2）                                                                                                                                                                                       |
-| `src/config/settings.ts`                   | 改造                                | `CacheTtlSettings` 扩 5 字段 + 默认值 + `parseCacheTtlSettings` + `TIME_SETTING_MS_PATHS`                                                                                                                                               |
-| `src/config/setting-specs.ts`              | 改造                                | **5 个**新 spec（m1）                                                                                                                                                                                                                   |
+| `src/config/settings.ts`                   | 改造                                | `CacheTtlSettings` 扩 4 字段 + 默认值 + `parseCacheTtlSettings` + `TIME_SETTING_MS_PATHS`                                                                                                                                               |
+| `src/config/setting-specs.ts`              | 改造                                | **4 个**新 spec（m1）                                                                                                                                                                                                                   |
 | `README.md` / `README.en.md` / `AGENTS.md` | 文档                                | 功能条目与模块描述（`src/service/` 与 `src/cache-ttl/` 两处都要提一句）                                                                                                                                                                 |
 
 ---
@@ -346,8 +341,7 @@ export interface CacheTtlDeps {
 pi.on("before_provider_request", (event, ctx) => {
   const port = deps.keepalive?.(); // holder read-through；空 ⇒ 全程 no-op（§2.3）
   const sessionId = readSessionId(ctx); // try/catch，失败给 ""
-  const upgrade = port?.consumeUpgrade(sessionId) === true; // §6.3
-  const effective: CacheTtlMode = upgrade && mode === "auto" ? "on" : mode;
+  const effective: CacheTtlMode = mode;
   const payload = event.payload;
   if (!isObjectRecord(payload) || !Array.isArray(payload.messages)) {
     port?.invalidate("payload-shape", sessionId);
@@ -519,7 +513,7 @@ export function readLatestAssistantCacheTokens(ctx: ExtensionContext): { tokens:
                       │        │      → 本窗口停 + 会话级计数 ↑ → 阈值即 DISABLED(session)
                       │        └── cache_creation > 0（proven write）→ 立刻 DISABLED(session)
                       │
-                      └── STOPPED(budget) ◄─ pings == maxPings（置 upgradePending，停 tick）
+                      └── STOPPED(budget) ◄─ pings == maxPings（停 tick）
                           STOPPED(expired) ◄─ now ≥ aliveUntil − margin（停 tick）
 ```
 
@@ -546,7 +540,7 @@ export function readLatestAssistantCacheTokens(ctx: ExtensionContext): { tokens:
 | 11  | `window.pingInFlight`                                                                         | `skip("ping-in-flight")`，续期（并发去重）                                          |
 | 12  | `!armed`                                                                                      | `skip("not-armed")`，续期                                                           |
 | 13  | `now ≥ aliveUntil − TTL_SAFETY_MARGIN_MS`                                                     | `skip("cache-expired")`，**终局**（缓存推定已死，再 ping 就是全量写——最重要的一条） |
-| 14  | `window.pings ≥ config.maxPings`                                                              | `skip("budget-exhausted")` + 置 `upgradePending`（§6.3），**终局**                  |
+| 14  | `window.pings ≥ config.maxPings`                                                              | `skip("budget-exhausted")`，**终局**                                                |
 | 15  | `now < window.nextPingAt`                                                                     | `skip("not-due")`，续期                                                             |
 | 16  | 其余                                                                                          | **`ping`**                                                                          |
 
@@ -585,7 +579,7 @@ onUnproven(w, s, kind, now):                  // 失败/无 usage/双 0/断连/H
   if (s.provenWrites >= 1 || s.consecutiveUnproven >= UNPROVEN_STREAK_LIMIT /*2*/ ||
       s.unprovenTotal >= UNPROVEN_TOTAL_LIMIT /*3*/) s.disabled = { reason: kind, at: now };
 
-invalidate(w, reason): w.capture = undefined; w.upgradePending = false; w.windowEpoch += 1;
+invalidate(w, reason): w.capture = undefined; w.windowEpoch += 1;
 ```
 
 `onProvenHit` 用 **ping 发起时刻**推进时钟：官方口径“寿命从写/读该条目的请求**开始**时刻起算”，
@@ -610,7 +604,7 @@ invalidate(w, reason): w.capture = undefined; w.upgradePending = false; w.window
 
 ---
 
-## 6. 间隔、预算与升级（问题 2）
+## 6. 间隔与预算（问题 2）
 
 ### 6.1 间隔 = 240 秒（4 分钟）
 
@@ -629,29 +623,11 @@ invalidate(w, reason): w.capture = undefined; w.upgradePending = false; w.window
 - 会话累计 ping 次数不设上限（每次真实请求都是“用户真的在用这个会话”的证据），但 I-K7 的
   会话级熔断不可绕过。
 
-### 6.3 预算耗尽后：只在「反正要写」时升级 1h（M1 口径）
+### 6.3 预算耗尽后：停止本窗口 ping（2026-10-11 修订）
 
-```
-pings == maxPings 且仍 armed
-      └─► w.upgradePending = true          // 只记标志，不花钱
-              │
-              ▼
-   下一次 before_provider_request：consumeUpgrade(sessionId) 返回 true 当且仅当
-       w.upgradePending
-    && sessionId === ownSessionId                       // I-K6
-    && mode === "auto"                                  // I-K5：不篡改显式 on/off
-    && settings.cacheTtl.keepaliveUpgradeAfterBudget
-    && now − w.lastReadStartedAt > ASSUMED_TTL_MS        // 缓存推定已死 ⇒ 这次本来就要全量写
-   ⇒ effectiveMode = "on"（复用现有 rewrite()，写 ttl:"1h"）；标志清零
-```
-
-- **口径修正（M1）**：这条**不是**由 `n = 11` 推导出来的。它的判据只有一个：
-  «这次请求必然是全量写» ⇒ 比较 `1.25P`（5m）与 `2P`（1h），**边际 0.75P** 买一小时覆盖。
-  是否值得取决于“预期还会有多少次长空档”，因此做成可关的独立开关，默认 true（长后台任务
-  通常不止一轮），而**不**声称“预算耗尽就应该升级”。
-- `now − lastReadStartedAt > TTL` 是诚实性前置：否则就变成主动付 2×。
-- `upgradePending` 在 `invalidate()`、`dispose()`、消费后清零。
-- `mode === "off"` 不升级（尊重用户显式 5m）；`mode === "on"` 已是 1h（G5 早已关门）。
+达到 maxPings 后只返回终局 budget-exhausted，清除定时器；下一次真实请求重新开窗。
+原 consumeUpgrade / upgradePending / keepaliveUpgradeAfterBudget 与状态栏 →1h 提示已删除。
+auto 始终 passthrough；on/off 的显式 TTL 改写保持不变。不再为预算耗尽自动购买 1h。
 
 ---
 
@@ -873,7 +849,7 @@ private sameEpoch(pingEpoch: number): boolean {
 }
 ```
 
-`noteRequest` / `noteRequestSettled` / `invalidate` / `consumeUpgrade` / 武装计数入口一律先过
+`noteRequest` / `noteRequestSettled` / `invalidate` / 武装计数入口一律先过
 `accept`；`runPing()` 的每个 await 返回点、以及每次调 reducer 之前一律先过 `sameEpoch`。
 
 ### 8.3 定时器（UsageBroadcaster 范式）
@@ -985,15 +961,14 @@ onPingStarted(now)
 
 ## 10. 设置项（问题 6）
 
-### 10.1 五个 spec（m1：数量统一）
+### 10.1 四个 spec（2026-10-11 移除升级开关）
 
-| 键（存储/展示）                        | 内部字段                   | 类型          | 默认           | 说明                                                 |
-| -------------------------------------- | -------------------------- | ------------- | -------------- | ---------------------------------------------------- |
-| `cacheTtl.keepalive`                   | `keepalive`                | boolean       | **true**       | 保活总开关（用户维持默认开）                         |
-| `cacheTtl.keepaliveIntervalS`          | `keepaliveIntervalMs`      | 秒（内部 ms） | 240（240_000） | ping 间隔；parse 钳位 [60s, 240s]（原 280s，见附录） |
-| `cacheTtl.keepaliveMaxPings`           | `keepaliveMaxPings`        | count         | 11             | 每窗口硬上限；0 = 关闭                               |
-| `cacheTtl.keepaliveMinPrefixTokens`    | `keepaliveMinPrefixTokens` | count         | 20000          | 前缀实测下界门槛                                     |
-| `cacheTtl.keepaliveUpgradeAfterBudget` | 同名                       | boolean       | true           | 允许「下一次必写请求」升级成 1h（§6.3）              |
+| 键（存储/展示）                     | 内部字段                   | 类型          | 默认           | 说明                                                 |
+| ----------------------------------- | -------------------------- | ------------- | -------------- | ---------------------------------------------------- |
+| `cacheTtl.keepalive`                | `keepalive`                | boolean       | **true**       | 保活总开关（用户维持默认开）                         |
+| `cacheTtl.keepaliveIntervalS`       | `keepaliveIntervalMs`      | 秒（内部 ms） | 240（240_000） | ping 间隔；parse 钳位 [60s, 240s]（原 280s，见附录） |
+| `cacheTtl.keepaliveMaxPings`        | `keepaliveMaxPings`        | count         | 11             | 每窗口硬上限；0 = 关闭                               |
+| `cacheTtl.keepaliveMinPrefixTokens` | `keepaliveMinPrefixTokens` | count         | 20000          | 前缀实测下界门槛                                     |
 
 **不做设置项**（写死常量 + 注释）：`ASSUMED_TTL_MS`、`TTL_SAFETY_MARGIN_MS`、`TICK_INTERVAL_MS`、
 `PING_TIMEOUT_MS`、`UNPROVEN_STREAK_LIMIT = 2`、`UNPROVEN_TOTAL_LIMIT = 3`、`PING_DENY_PROVIDERS`。
@@ -1003,14 +978,14 @@ onPingStarted(now)
 
 - 保活是**独立开关**，不改 `auto/on/off` 三档语义。
 - `mode = on`（已 1h）⇒ payload 带 `ttl:"1h"` ⇒ G5 关门，保活自动休眠。
-- `mode = off`（显式 5m）⇒ 保活照常，但 §6.3 的 1h 升级**不生效**。
-- `mode = auto` ⇒ 保活工作；升级仅此档、且一次性。
+- `mode = off`（显式 5m）⇒ 保活照常，TTL 只按用户设置改写。
+- `mode = auto` ⇒ 保活工作，TTL 始终跟随 pi/env，无自动升级。
 - **disarm 一律回落 passthrough**：保活从不写 `cacheTtl.mode`、不持久化任何东西。
 - 配额：按用户裁决**不做**任何配额感知（§15 R7）；唯一的可靠性卫生是 §7.5 的连续 2 次停用。
 
 ### 10.3 改动点（锚点来自 `explore.md §1`）
 
-1. `src/config/settings.ts:133-135` — `CacheTtlSettings` 加 5 字段。
+1. `src/config/settings.ts:133-135` — `CacheTtlSettings` 加 4 字段。
 2. `src/config/settings.ts:327` — `DEFAULT_SETTINGS.cacheTtl` 补默认值。
 3. `src/config/settings.ts:591-596` — `parseCacheTtlSettings` 改逐字段容错（抄 `parseMemorySettings`
    的内联 `bool()/num()`，`settings.ts:624-643`；`keepaliveIntervalMs` 用 `num(raw, d, 60_000, MAX_SAFE_KEEPALIVE_INTERVAL_MS)`，=240_000；原 280_000 见附录）。
@@ -1074,12 +1049,11 @@ vitest，`tests/` 镜像 `src/`；沿用“各模块手搓极简 stub、不共�
 | 迁移表 #1–#16 逐条短路 | 表驱动，每个 `skip`/`invalidate` 原因命中且**终局/续期分类正确**                                                                                              |
 | 存活期边界             | `now = aliveUntil − margin − 1` ⇒ ping；`= aliveUntil − margin` ⇒ `cache-expired`（必须覆盖）                                                                 |
 | 时钟锚点               | `onRealRequest` 后 `nextPingAt = now + interval`；`onProvenHit` 用 `pingStartedAt` 推进                                                                       |
-| 预算                   | 第 11 次后 `budget-exhausted` + `upgradePending`；第 12 次不 ping                                                                                             |
-| 升级消费               | 仅 `mode==="auto"` + 设置开 + 距上次读 > TTL + sessionId 匹配时返回 true，且只一次                                                                            |
+| 预算                   | 第 11 次后 `budget-exhausted`；第 12 次不 ping                                                                                                                |
 | **B3 会话级熔断**      | `proven-write` 一次 ⇒ `disabled`；`no-usage`/`accepted-then-lost`/`http`/`network`/`malformed` 连续 2 次 ⇒ `disabled`；交替命中/失败累计 3 次 ⇒ `disabled`    |
 | **B3 窗口重置不复活**  | `onRealRequest` 后 `s.unprovenTotal/consecutiveUnproven/provenWrites/disabled` **全部不变**                                                                   |
 | **M4 指纹**            | `provider/api/ctxModelId/baseUrl/authHeaderKeys/sessionId` 逐字段差异 ⇒ `fingerprint-drift:<field>`；`breakpointPath`/`toolsDigest`/`systemDigest` 变化被识别 |
-| 事件作废               | 表中每个事件 ⇒ `capture === undefined` 且 `upgradePending` 清零                                                                                               |
+| 事件作废               | 表中每个事件 ⇒ `capture === undefined`                                                                                                                        |
 | `inspectPayload`       | 嵌套/自引用成环（抄 `cache-ttl.test.ts:41-43`）、`ttl:"1h"`、`thinking:{type:"disabled"}`、无 `cache_control`                                                 |
 | **M3 前缀**            | `source==="usage"` 且 ≥ 门槛 ⇒ 过；`source==="unknown"` ⇒ `prefix-unproven`（**即使 tokens 很大**）；“总 context 大但 cacheRead+cacheWrite 小” ⇒ 拒           |
 | **M2 窗口分类**        | 真实请求早于 `windowStartAt + TTL` ⇒ `unnecessary*` 累加；晚于 ⇒ `loadBearing*` + `avoidedMissTokens`                                                         |
@@ -1124,7 +1098,7 @@ vitest，`tests/` 镜像 `src/`；沿用“各模块手搓极简 stub、不共�
 - **holder 为空（M6）**：`deps.keepalive` 未注入 / 返回 `undefined` ⇒ handler 返回值与今天一致、
   不抛、不 warn（三种空态各一例）。
 - `auto` 模式仍返回 `undefined`，但 `noteRequest` 收到**独立副本**（改捕获副本不影响 `event.payload`）。
-- `upgradePending` 时 `auto` 走 `on` 改写，且只一次；`off` 模式不升级。
+- 预算耗尽后 auto 仍 passthrough；off/on 显式改写不变，无任何自动升级。
 - `structuredClone` 失败 ⇒ `invalidate("clone-failed")` 且现有 warn 行为不变。
 - `/cache-ttl keepalive on|off`、`/cache-ttl status` 输出（含“费用未知”与 `dropped` 字段）。
 
@@ -1167,19 +1141,19 @@ vitest，`tests/` 镜像 `src/`；沿用“各模块手搓极简 stub、不共�
 每步独立可提交、可回滚，Conventional Commits。验证统一为 `npm run typecheck && npx vitest run <相关测试>`，
 最后一步跑全量四件套。**顺序原则（M6）：先定 holder + stack service 生命周期，再写装配集成测试。**
 
-| 步骤                                | 提交                                                                               | 涉及文件                                                                                                                                                                                                                                              | 验证                                                                                    |
-| ----------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| **1. 设置项**                       | `feat(config): cache-ttl keepalive settings`                                       | `src/config/settings.ts`、`src/config/setting-specs.ts`、`tests/config/cache-ttl-settings.test.ts`                                                                                                                                                    | `npx vitest run tests/config tests/ui/settings-editor.test.ts`                          |
-| **2. 纯层：状态机 + 指纹 + 文案**   | `feat(cache-ttl): keepalive state machine, fingerprint and accounting (pure)`      | `src/cache-ttl/keepalive-state.ts`、`tests/cache-ttl/keepalive-state.test.ts`                                                                                                                                                                         | `npx vitest run tests/cache-ttl/keepalive-state.test.ts`                                |
-| **3. 纯层：ping 请求构造 + 客户端** | `feat(cache-ttl): anthropic keepalive ping request builder and client`             | `src/cache-ttl/ping-client.ts`、`tests/cache-ttl/keepalive-ping.test.ts`                                                                                                                                                                              | `npx vitest run tests/cache-ttl/keepalive-ping.test.ts`                                 |
-| **4. 生命周期骨架（B1+B2 先行）**   | `feat(stack): own the cache-keepalive service lifecycle`                           | `src/service/cache-keepalive.ts`（骨架：accept/dispose/tick，ping 走注入）、`src/stack.ts`（`previousKeepalive`、`Stack.keepalive`、dispose 块、构造）、`src/index.ts`（holder read-through + 两处 dispose）、`tests/service/cache-keepalive.test.ts` | `npx vitest run tests/service/cache-keepalive.test.ts tests/integration/wiring.test.ts` |
-| **5. 捕获接缝**                     | `feat(cache-ttl): capture the outgoing payload for keepalive`                      | `src/cache-ttl/cache-ttl.ts`（handler 加 `ctx`、捕获、`invalidate`）、`tests/cache-ttl/cache-ttl.test.ts`（含 holder 空态）                                                                                                                           | `npx vitest run tests/cache-ttl`                                                        |
-| **6. 真正发 ping + 熔断**           | `feat(service): send prompt-cache keepalive pings with proven-hit-only breaker`    | `src/service/cache-keepalive.ts`（auth、m2 复查、结果分类、B3 计数）、`tests/service/*`、`tests/integration/cache-keepalive-wiring.test.ts`                                                                                                           | `npx vitest run tests/service tests/integration/cache-keepalive-wiring.test.ts`         |
-| **7. 可见性 + M2 审计**             | `feat(cache-ttl): keepalive status bar, /cache-ttl status and window accounting`   | `keepalive-state.ts`（文案/分类）、`src/service/cache-keepalive.ts`（setStatus/appendEntry/emit）、`src/cache-ttl/cache-ttl.ts`（`status` 子命令）、对应测试                                                                                          | `npx vitest run tests/cache-ttl tests/service`                                          |
-| **8. 预算耗尽升级**                 | `feat(cache-ttl): upgrade the next unavoidable write to 1h after keepalive budget` | `keepalive-state.ts`（`consumeUpgrade`）、`cache-ttl.ts`（effectiveMode）、集成测试第 7 步场景                                                                                                                                                        | `npx vitest run tests/cache-ttl tests/integration/cache-keepalive-wiring.test.ts`       |
-| **9.（可选）HUD 段**                | `feat(hud): show keepalive read/cost segment`                                      | `src/service/cache-keepalive.ts`（emit）、`src/hud/index.ts`、`src/hud/footer.ts`、`tests/hud/*`                                                                                                                                                      | `npx vitest run tests/hud`                                                              |
-| **10. 文档**                        | `docs: document prompt-cache keepalive`                                            | `README.md:98,210`、`README.en.md:102,214`、`AGENTS.md`（`src/cache-ttl/` + `src/service/` 条目）、`CHANGELOG.md`                                                                                                                                     | `npm run format:check`                                                                  |
-| **收尾**                            | —                                                                                  | —                                                                                                                                                                                                                                                     | `npm run format && npm run typecheck && npm test && npm run build`                      |
+| 步骤                                | 提交                                                                             | 涉及文件                                                                                                                                                                                                                                              | 验证                                                                                    |
+| ----------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **1. 设置项**                       | `feat(config): cache-ttl keepalive settings`                                     | `src/config/settings.ts`、`src/config/setting-specs.ts`、`tests/config/cache-ttl-settings.test.ts`                                                                                                                                                    | `npx vitest run tests/config tests/ui/settings-editor.test.ts`                          |
+| **2. 纯层：状态机 + 指纹 + 文案**   | `feat(cache-ttl): keepalive state machine, fingerprint and accounting (pure)`    | `src/cache-ttl/keepalive-state.ts`、`tests/cache-ttl/keepalive-state.test.ts`                                                                                                                                                                         | `npx vitest run tests/cache-ttl/keepalive-state.test.ts`                                |
+| **3. 纯层：ping 请求构造 + 客户端** | `feat(cache-ttl): anthropic keepalive ping request builder and client`           | `src/cache-ttl/ping-client.ts`、`tests/cache-ttl/keepalive-ping.test.ts`                                                                                                                                                                              | `npx vitest run tests/cache-ttl/keepalive-ping.test.ts`                                 |
+| **4. 生命周期骨架（B1+B2 先行）**   | `feat(stack): own the cache-keepalive service lifecycle`                         | `src/service/cache-keepalive.ts`（骨架：accept/dispose/tick，ping 走注入）、`src/stack.ts`（`previousKeepalive`、`Stack.keepalive`、dispose 块、构造）、`src/index.ts`（holder read-through + 两处 dispose）、`tests/service/cache-keepalive.test.ts` | `npx vitest run tests/service/cache-keepalive.test.ts tests/integration/wiring.test.ts` |
+| **5. 捕获接缝**                     | `feat(cache-ttl): capture the outgoing payload for keepalive`                    | `src/cache-ttl/cache-ttl.ts`（handler 加 `ctx`、捕获、`invalidate`）、`tests/cache-ttl/cache-ttl.test.ts`（含 holder 空态）                                                                                                                           | `npx vitest run tests/cache-ttl`                                                        |
+| **6. 真正发 ping + 熔断**           | `feat(service): send prompt-cache keepalive pings with proven-hit-only breaker`  | `src/service/cache-keepalive.ts`（auth、m2 复查、结果分类、B3 计数）、`tests/service/*`、`tests/integration/cache-keepalive-wiring.test.ts`                                                                                                           | `npx vitest run tests/service tests/integration/cache-keepalive-wiring.test.ts`         |
+| **7. 可见性 + M2 审计**             | `feat(cache-ttl): keepalive status bar, /cache-ttl status and window accounting` | `keepalive-state.ts`（文案/分类）、`src/service/cache-keepalive.ts`（setStatus/appendEntry/emit）、`src/cache-ttl/cache-ttl.ts`（`status` 子命令）、对应测试                                                                                          | `npx vitest run tests/cache-ttl tests/service`                                          |
+| **8. 预算耗尽升级（已移除）**       | 2026-10-11 用户裁决                                                              | 只保留 budget-exhausted 终局，不消费任何升级许可                                                                                                                                                                                                      | 预算与 auto passthrough 回归测试                                                        |
+| **9.（可选）HUD 段**                | `feat(hud): show keepalive read/cost segment`                                    | `src/service/cache-keepalive.ts`（emit）、`src/hud/index.ts`、`src/hud/footer.ts`、`tests/hud/*`                                                                                                                                                      | `npx vitest run tests/hud`                                                              |
+| **10. 文档**                        | `docs: document prompt-cache keepalive`                                          | `README.md:98,210`、`README.en.md:102,214`、`AGENTS.md`（`src/cache-ttl/` + `src/service/` 条目）、`CHANGELOG.md`                                                                                                                                     | `npm run format:check`                                                                  |
+| **收尾**                            | —                                                                                | —                                                                                                                                                                                                                                                     | `npm run format && npm run typecheck && npm test && npm run build`                      |
 
 依赖关系：1–3 可并行；**4 必须在 5/6 之前**（先立生命周期与会话身份，再接捕获与发包）；
 7/8 依赖 6；9 可选、最后做。
@@ -1311,7 +1285,7 @@ attempt, outcomeKind })`；最终落地的 `KeepalivePingDiagnostics`（`lastPin
 
 **用户裁决的修复**：不改 240s 取值/费用论证；`window.nextPingAt` 确定后额外调度一个
 `clock.setTimer` 一次性精确定时器（`CacheKeepaliveServiceImpl.syncExactTimer`/`clearExactTimer`），
-到点直接复用 `onTick()`/`evaluateTick` 全部门禁（armed/budget/adaptive/fingerprint/...），15s
+到点直接复用 `onTick()`/`evaluateTick` 全部门禁（armed/budget/fingerprint/...），15s
 周期 tick 保留作兜底。重排点：`noteRequest`（新窗口）、`runPing` 的 proven-hit（窗口延期）/
 unproven（capture 清空）/ping 中途发现 fingerprint drift、`invalidate()`、`onTick()` 自身的
 `#9 invalidate` 分支；`dispose()` 清理。`config.enabled=false` 或 `window.capture===undefined`
@@ -1362,7 +1336,7 @@ mock 在**被调用的同一拍**（尚未 `await` 任何东西）就同步改�
 "auth 解析期间模型悄悄变了"；一旦精确定时器与周期 tick 真的会在同一刻背靠背触发，第二个
 （周期）tick 在纯态机层面看到的就是已经被污染的 `ctx.model`，会在自己的 `evaluateTick` 里比
 `pingInFlight`（`#11`）更早地命中 `#9` 的 fingerprint-drift `invalidate` 分支，把仍处于
-`pingInFlight` 状态的窗口直接判死（`invalidate()` 纯函数只碰 `capture`/`upgradePending`/
+`pingInFlight` 状态的窗口直接判死（`invalidate()` 纯函数只碰 `capture`/
 `windowEpoch`，不清 `pingInFlight`/`pings`），导致真正在途的 `runPing` 之后自己的 epoch 校验
 必然不通过、永远没人退款——`pingInFlight`/`pings` 永久泄漏。这在真实生产环境不可能发生（真实
 `getApiKeyAndHeaders` 是真异步 I/O，不会在"被调用"这一同步瞬间就产生副作用；两个真实定时器

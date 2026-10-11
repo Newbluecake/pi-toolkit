@@ -3,7 +3,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { wireCacheTtl, type CacheTtlWiring } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
-import type { CacheAdaptiveService } from "../../src/service/cache-adaptive.js";
 import { MAX_TTL_MS } from "../../src/cache-ttl/warmth.js";
 
 afterEach(() => {
@@ -16,13 +15,11 @@ function fakeKeepalive(overrides: Partial<CacheKeepaliveService> = {}): CacheKee
     noteRequest: vi.fn(),
     noteRequestSettled: vi.fn(),
     invalidate: vi.fn(),
-    consumeUpgrade: vi.fn().mockReturnValue(false),
     report: vi.fn().mockReturnValue({
       armed: false,
       window: { lastReadStartedAt: undefined, pingStartedAt: undefined, pingInFlight: false, nextPingAt: undefined },
     }),
     provenCacheReadAt: vi.fn().mockReturnValue(undefined),
-    gapHorizonMs: vi.fn().mockReturnValue(undefined),
     setEnabled: vi.fn(),
     syncModeState: vi.fn(),
     noteToolStart: vi.fn(),
@@ -34,29 +31,10 @@ function fakeKeepalive(overrides: Partial<CacheKeepaliveService> = {}): CacheKee
   } as unknown as CacheKeepaliveService;
 }
 
-function fakeAdaptive(overrides: Partial<CacheAdaptiveService> = {}): CacheAdaptiveService {
-  return {
-    instanceId: "adapt-1",
-    coversPrefix: vi.fn().mockReturnValue(false),
-    snapshot: vi.fn().mockReturnValue({ confirmed1hWrites: 0, unconfirmed1hWrites: 0 }),
-    decide: vi.fn().mockReturnValue(undefined),
-    invalidateAdaptive: vi.fn(),
-    noteToolStart: vi.fn(),
-    noteToolEnd: vi.fn(),
-    noteUiPromptStart: vi.fn(),
-    noteUiPromptEnd: vi.fn(),
-    noteAgentSettled: vi.fn(),
-    noteRequestSettled: vi.fn(),
-    reconcile: vi.fn(),
-    ...overrides,
-  } as unknown as CacheAdaptiveService;
-}
-
 function setup(
   opts: {
-    mode?: "auto" | "on" | "off" | "adaptive";
+    mode?: "auto" | "on" | "off";
     keepalive?: CacheKeepaliveService;
-    adaptive?: CacheAdaptiveService;
   } = {},
 ) {
   const hooks = new Map<string, (event: any, ctx: any) => unknown>();
@@ -65,18 +43,16 @@ function setup(
     registerCommand: (_name: string, _value: any) => {},
   } as unknown as ExtensionAPI;
   let keepalive = opts.keepalive;
-  let adaptive = opts.adaptive;
   const wiring: CacheTtlWiring = wireCacheTtl(
     pi,
     { ...DEFAULT_SETTINGS, cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, mode: opts.mode ?? "auto" } },
-    { keepalive: () => keepalive, adaptive: () => adaptive },
+    { keepalive: () => keepalive },
   );
   return {
     hooks,
     pi,
     wiring,
     setKeepalive: (v: CacheKeepaliveService | undefined) => (keepalive = v),
-    setAdaptive: (v: CacheAdaptiveService | undefined) => (adaptive = v),
   };
 }
 
@@ -191,21 +167,16 @@ describe("wireCacheTtl returns a CacheTtlWiring with a never-throwing warmth por
     expect(result).toEqual({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "5m" });
   });
 
-  it("keepalive/adaptive instances are re-fetched on every assess call (a stack rebuild is picked up immediately)", () => {
-    const { wiring, setKeepalive, setAdaptive } = setup({ mode: "adaptive" });
-    const ledgered = makeCtx({ entries: [assistantEntry({ cacheRead: 0, cacheWrite: 0 }, { timestamp: 1_000 })] });
-
+  it("keepalive instances are re-fetched after a stack rebuild", () => {
+    const { wiring, setKeepalive } = setup();
+    const ctx = makeCtx({ entries: [assistantEntry({ cacheRead: 0, cacheWrite: 0 }, { timestamp: 1_000 })] });
     setKeepalive(fakeKeepalive({ provenCacheReadAt: vi.fn().mockReturnValue(1_000) }));
-    setAdaptive(fakeAdaptive({ coversPrefix: vi.fn().mockReturnValue(true) }));
-    const first = wiring.warmth.assess(ledgered, 1_500, { slackMs: 1_000 });
-    expect(first).toEqual({ state: "warm", reason: "1h-cover" });
-
-    // Swap to a NEW instance pair that reports no cover at all — must be reflected immediately,
-    // never a cached read of the old instances.
+    expect(wiring.warmth.assess(ctx, 1_500, { slackMs: 1_000 })).toEqual({ state: "warm", reason: "proven-recent" });
     setKeepalive(fakeKeepalive());
-    setAdaptive(fakeAdaptive());
-    const second = wiring.warmth.assess(ledgered, 1_500, { slackMs: 1_000 });
-    expect(second).not.toEqual({ state: "warm", reason: "1h-cover" });
+    expect(wiring.warmth.assess(ctx, 1_500, { slackMs: 1_000 })).toEqual({
+      state: "unknown",
+      reason: "not-provably-cold",
+    });
   });
 
   it("assess never throws when ctx access throws (degrades to unknown/read-error)", () => {
@@ -244,7 +215,7 @@ describe("wireCacheTtl returns a CacheTtlWiring with a never-throwing warmth por
     expect(wiring.warmth.assess(ctx, Date.now(), { slackMs: 1_000 }).state).toBe("unknown");
   });
 
-  it("no cacheTtl.keepalive/adaptive deps wired at all ⇒ assess degrades gracefully (never throws, no warm-by-default)", () => {
+  it("no cacheTtl.keepalive deps wired at all ⇒ assess degrades gracefully (never throws, no warm-by-default)", () => {
     const hooks = new Map<string, (event: any, ctx: any) => unknown>();
     const pi = {
       on: (name: string, handler: any) => hooks.set(name, handler),

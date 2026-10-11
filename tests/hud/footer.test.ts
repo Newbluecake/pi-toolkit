@@ -28,11 +28,11 @@ describe("renderExtensionStatusLines", () => {
       [
         ["quota", "kimi 62%"],
         ["pi-subagent:web-hub", "web ●"],
-        ["cache-ttl", "cache adaptive · 5m"],
+        ["cache-ttl", "cache 5m"],
       ],
       theme,
     );
-    expect(lines).toEqual(["cache adaptive · 5m", "web ●", "kimi 62%"]);
+    expect(lines).toEqual(["cache 5m", "web ●", "kimi 62%"]);
     expect(renderExtensionStatusLines([["pi-subagent:web-hub", "web ●"]], theme, 80)).toEqual(["web ●"]);
   });
 

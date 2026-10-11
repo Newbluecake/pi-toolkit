@@ -76,7 +76,6 @@ const SETTINGS: CacheTtlSettings = {
   keepaliveIntervalMs: 240_000,
   keepaliveMaxPings: 11,
   keepaliveMinPrefixTokens: 20_000,
-  keepaliveUpgradeAfterBudget: true,
 };
 
 function fakeCtx(overrides: Record<string, unknown> = {}) {
@@ -220,19 +219,6 @@ describe("cache-keepalive service — tick self-arm / self-stop", () => {
     service.dispose(); // idempotent
     resolve(["irrelevant"]);
     await flush();
-  });
-
-  it("keeps the adaptive segments when a ping-driven publish re-renders the shared status key", async () => {
-    // Both services own the one merged "cache-ttl" key. Before adaptiveSnapshot
-    // was injected, any keepalive publish blanked the adaptive segments until
-    // the next real request re-rendered them (visible as status-bar flicker).
-    const adaptiveSnapshot = vi.fn(() => ({ lastDecision: { ttl: "1h" as const } }) as never);
-    const { service, ctx } = harness({ adaptiveSnapshot });
-    service.noteRequest(capture({}, service.instanceId));
-    service.noteRequestSettled("s1", service.instanceId);
-    await flush();
-    expect(adaptiveSnapshot).toHaveBeenCalled();
-    service.dispose();
   });
 });
 
@@ -393,8 +379,8 @@ describe("cache-keepalive service — armed signals", () => {
   });
 });
 
-describe("cache-keepalive service — budget + upgrade", () => {
-  it("stops at maxPings, sets upgradePending, and consumeUpgrade fires only once when the cache is presumed dead", async () => {
+describe("cache-keepalive service — budget", () => {
+  it("stops at maxPings without scheduling any automatic upgrade", async () => {
     const fetchImpl = provenHitFetch();
     const { service, clock } = harness({
       fetchImpl,
@@ -410,10 +396,7 @@ describe("cache-keepalive service — budget + upgrade", () => {
     expect(service.report().window.pings).toBe(1); // budget exhausted, no 2nd ping
     expect(clock.pendingTimers).toBe(0); // terminal skip — no more re-arming
 
-    clock.advance(400_000); // now way past the assumed TTL since the last read
-    const consumed = service.consumeUpgrade("s1", service.instanceId, clock.now());
-    expect(consumed).toBe(true);
-    expect(service.consumeUpgrade("s1", service.instanceId, clock.now())).toBe(false); // one-shot
+    expect(service.report().lastSkip).toBe("budget-exhausted");
   });
 });
 
@@ -634,120 +617,12 @@ describe("cache-keepalive service — m1 fetch-reject late path (validation repo
   });
 });
 
-// F1 (adaptive verification-2026-09-25): the service side of the keepalive ↔
-// adaptive arbitration — the tick consults the injected `adaptiveCoversPrefix`
-// dep, and `gapHorizonMs(30_000)` reports `undefined` whenever this pinger cannot ping.
-describe("cache-keepalive service — F1 arbitration with adaptive", () => {
-  it("stands down (terminal adaptive-1h skip, zero pings) while adaptive covers the prefix", async () => {
-    const fetchImpl = vi.fn(provenHitFetch());
-    const seen: number[] = [];
-    const { service, clock } = harness({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-      adaptiveCoversPrefix: (horizonMs) => {
-        seen.push(horizonMs);
-        return true;
-      },
-    });
-    service.noteRequest(capture({}, service.instanceId));
-    service.noteRequestSettled("s1", service.instanceId);
-    clock.advance(240_000);
-    await flush();
-    expect(service.report().lastSkip).toBe("adaptive-1h");
-    expect(service.report().window.pings).toBe(0);
-    expect(clock.pendingTimers).toBe(0); // terminal: the loop stopped
-    expect(fetchImpl).not.toHaveBeenCalled();
-    // R2: the dep is asked against THIS pinger's horizon (11 × 240 s + 300 s).
-    expect(seen[0]).toBe(2_940_000);
-  });
-
-  it("pings as before when the dep reports false, is absent, or throws", async () => {
-    for (const dep of [
-      () => false,
-      undefined,
-      () => {
-        throw new Error("boom");
-      },
-    ]) {
-      const { service, clock } = harness(dep === undefined ? {} : { adaptiveCoversPrefix: dep });
-      service.noteRequest(capture({}, service.instanceId));
-      service.noteRequestSettled("s1", service.instanceId);
-      clock.advance(245_000);
-      await flush();
-      expect(service.report().window.pings).toBe(1);
-      service.dispose();
-    }
-  });
-
-  it("gapHorizonMs = maxPings × interval + TTL on a pingable session", () => {
-    const { service } = harness();
-    expect(service.gapHorizonMs(30_000)).toBe(11 * 240_000 + 300_000);
-  });
-
-  it.each([
-    ["headless print mode", {}, { mode: "print" }],
-    [
-      "denied provider (per-request billing)",
-      {},
-      { model: { provider: "github-copilot", api: "anthropic-messages", id: "c", baseUrl: "" } },
-    ],
-    ["non-anthropic api", {}, { model: { provider: "openai", api: "openai-responses", id: "g", baseUrl: "" } }],
-    ["model unreadable", {}, { model: undefined }],
-  ])("gapHorizonMs is undefined for %s", (_name, deps, ctxOverrides) => {
-    const { service } = harness(deps, ctxOverrides);
-    expect(service.gapHorizonMs(30_000)).toBeUndefined();
-  });
-
-  it("gapHorizonMs is undefined when the prefix after this request cannot be pinged (R1: below min / unproven)", () => {
-    const { service } = harness();
-    expect(service.gapHorizonMs(19_999)).toBeUndefined();
-    expect(service.gapHorizonMs(0)).toBeUndefined();
-    expect(service.gapHorizonMs(20_000)).toBe(2_940_000);
-  });
-
-  it("gapHorizonMs is undefined when disabled, with a zero ping budget, after the session breaker, or once disposed", async () => {
-    const off = harness().service;
-    off.setEnabled(false);
-    expect(off.gapHorizonMs(30_000)).toBeUndefined();
-
-    const zero = createCacheKeepaliveService({
-      clock: new FakeClock(0),
-      ctx: fakeCtx() as never,
-      sessionId: "s1",
-      settings: { ...SETTINGS, keepaliveMaxPings: 0 },
-      backgroundBusy: () => true,
-      isCurrent: () => true,
-    });
-    expect(zero.gapHorizonMs(30_000)).toBeUndefined();
-
-    // (streamability is judged on the CURRENT request by the adaptive caller — review R7 — so a
-    // non-streaming PREVIOUS capture no longer makes the horizon undefined here)
-    const ns = harness().service;
-    ns.noteRequest(capture({ payload: { messages: [], stream: false } }, ns.instanceId));
-    expect(ns.gapHorizonMs(30_000)).toBe(2_940_000);
-
-    const fetchImpl = vi.fn(async () =>
-      fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200 })]),
-    ) as unknown as typeof fetch;
-    const broken = harness({ fetchImpl });
-    broken.service.noteRequest(capture({}, broken.service.instanceId));
-    broken.service.noteRequestSettled("s1", broken.service.instanceId);
-    broken.clock.advance(240_000);
-    await flush();
-    expect(broken.service.report().session.disabled).toBeDefined();
-    expect(broken.service.gapHorizonMs(30_000)).toBeUndefined();
-
-    const gone = harness().service;
-    gone.dispose();
-    expect(gone.gapHorizonMs(30_000)).toBeUndefined();
-  });
-});
-
 // todo #28: at the default/max-safe `keepaliveIntervalMs` (240s), the gap between
 // `nextPingAt` and the cache-expired cutoff is exactly one `TICK_INTERVAL_MS` (15s) —
 // see `MAX_SAFE_KEEPALIVE_INTERVAL_MS`'s doc comment in keepalive-state.ts. The 15s
 // periodic tick's own coarse phase can therefore miss the window (real-machine repro:
 // 3 windows, 1 hit) whenever its one guaranteed in-window opportunity happens to land
-// at a moment some OTHER gate (armed/adaptive/...) transiently fails. The fix adds a
+// at a moment some OTHER gate (armed/...) transiently fails. The fix adds a
 // second, independent one-shot timer scheduled EXACTLY at `nextPingAt` (reusing
 // `onTick()`/`evaluateTick` verbatim — every existing gate still applies).
 describe("cache-keepalive service — todo #28: precise nextPingAt timer", () => {
@@ -854,28 +729,6 @@ describe("cache-keepalive service — todo #28 P1: setEnabled(false) cancels the
     await flush();
 
     expect(fetchImpl).not.toHaveBeenCalled(); // no ping at the stale instant — cache-expired by now
-    expect(service.report().session.pings).toBe(0);
-  });
-
-  it("a terminal skip reached via the PERIODIC tick (adaptive-1h cover) also drops the pending exact timer", async () => {
-    let covers = false;
-    const fetchImpl = vi.fn(provenHitFetch());
-    const { service, clock } = harness({
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-      adaptiveCoversPrefix: () => covers,
-    });
-    service.noteRequest(capture({}, service.instanceId));
-    service.noteRequestSettled("s1", service.instanceId);
-    expect(clock.pendingTimers).toBe(2); // periodic tick (due 15_000) + exact timer (due 240_000)
-
-    covers = true; // becomes covered before nextPingAt — only the periodic tick observes this first
-    clock.advance(15_000); // fires the periodic tick, NOT the exact timer
-    expect(service.report().lastSkip).toBe("adaptive-1h");
-    expect(clock.pendingTimers).toBe(0); // both the periodic tick (terminal, no re-arm) and the exact timer are gone
-
-    clock.advance(225_000); // -> t=240_000, the ORIGINAL nextPingAt — nothing left to fire
-    await flush();
-    expect(fetchImpl).not.toHaveBeenCalled();
     expect(service.report().session.pings).toBe(0);
   });
 });

@@ -8,8 +8,6 @@ import {
 import {
   buildFingerprint,
   inspectPayload,
-  payloadLineageKey,
-  renderAdaptiveReportLines,
   renderCacheStatus,
   readCacheStatusTheme,
   renderKeepaliveReportLines,
@@ -20,11 +18,9 @@ import {
 } from "./keepalive-state.js";
 import { anyLongWriteSince, prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
 import { assessWarmth, MAX_TTL_MS, type CacheWarmth, type WarmthEvidence } from "./warmth.js";
-import type { AdaptiveDecision } from "./adaptive.js";
-import type { CacheAdaptiveService } from "../service/cache-adaptive.js";
 import type { CacheKeepaliveService, KeepalivePort } from "../service/cache-keepalive.js";
 
-// Moved to ./usage-ledger.js (adaptive plan.md §10.1 step 1) — re-exported so
+// Moved to ./usage-ledger.js — re-exported so
 // any external importer of this module keeps working.
 export { readLatestAssistantCacheTokens } from "./usage-ledger.js";
 
@@ -38,12 +34,6 @@ export interface CacheTtlDeps {
    * methods (`noteToolStart`, etc.) that aren't part of the narrower port surface.
    */
   keepalive?: () => CacheKeepaliveService | undefined;
-  /**
-   * adaptive plan.md §9.3: holder read-through for the adaptive service, same
-   * pattern as `keepalive`. Absent ⇒ adaptive mode behaves exactly like auto
-   * (passthrough; I-A1), so the extension still works before the stack wiring lands.
-   */
-  adaptive?: () => CacheAdaptiveService | undefined;
 }
 
 /**
@@ -78,12 +68,11 @@ interface LastSent {
 
 /**
  * Builds the `CacheWarmthPort` from the live closures `wireCacheTtl` owns (mode, lastSent,
- * keepalive/adaptive holder read-throughs — re-fetched on every `assess` call so a stack rebuild
+ * keepalive holder read-throughs — re-fetched on every `assess` call so a stack rebuild
  * after this port was handed out is picked up automatically, plan.md P2).
  */
 function createWarmthPort(
   deps: CacheTtlDeps,
-  getAdaptive: () => CacheAdaptiveService | undefined,
   getMode: () => CacheTtlMode,
   getLastSent: () => LastSent | undefined,
 ): CacheWarmthPort {
@@ -126,15 +115,6 @@ function createWarmthPort(
           pingScheduled: (report?.armed ?? false) && report?.window.nextPingAt !== undefined,
         };
 
-        const adaptiveSvc = getAdaptive();
-        const adaptiveSnapshot = adaptiveSvc?.snapshot();
-        const adaptive: NonNullable<WarmthEvidence["adaptive"]> = {
-          covers: adaptiveSvc?.coversPrefix(0) ?? false,
-          any1hWrites: adaptiveSnapshot
-            ? adaptiveSnapshot.confirmed1hWrites + adaptiveSnapshot.unconfirmed1hWrites > 0
-            : false,
-        };
-
         const recent1hWrite = anyLongWriteSince(ctx, now - MAX_TTL_MS);
 
         const evidence: WarmthEvidence = {
@@ -143,7 +123,6 @@ function createWarmthPort(
           ledger,
           ...(lastSentEvidence !== undefined ? { lastSent: lastSentEvidence } : {}),
           keepalive,
-          adaptive,
           recent1hWrite,
           mode: getMode(),
           slackMs: opts.slackMs,
@@ -161,7 +140,6 @@ const MODE_LABEL: Record<CacheTtlMode, string> = {
   auto: "auto (follow PI_CACHE_RETENTION)",
   on: "on (force 1h)",
   off: "off (provider default 5m)",
-  adaptive: "adaptive (predict 1h before long gaps)",
 };
 
 function isObjectRecord(value: unknown): value is RecordValue {
@@ -176,26 +154,14 @@ function isObjectRecord(value: unknown): value is RecordValue {
  * render, not a stale cached string). Also syncs the service's `modeState`
  * mirror so its OWN self-triggered renders stay accurate between calls here.
  */
-function updateStatus(
-  ctx: ExtensionContext,
-  mode: CacheTtlMode,
-  dirty: boolean,
-  deps: CacheTtlDeps,
-  getAdaptive: () => CacheAdaptiveService | undefined,
-): void {
+function updateStatus(ctx: ExtensionContext, mode: CacheTtlMode, dirty: boolean, deps: CacheTtlDeps): void {
   const port = deps.keepalive?.();
   port?.syncModeState(mode, dirty);
   if (!ctx?.ui || typeof ctx.ui.setStatus !== "function") return;
-  ctx.ui.setStatus(
-    "cache-ttl",
-    renderCacheStatus(
-      { mode, dirty, report: port?.report(), adaptive: getAdaptive()?.snapshot() },
-      readCacheStatusTheme(ctx),
-    ),
-  );
+  ctx.ui.setStatus("cache-ttl", renderCacheStatus({ mode, dirty, report: port?.report() }, readCacheStatusTheme(ctx)));
 }
 
-/** adaptive plan.md §10.2: the action the current request needs — "force-1h" writes ttl, "strip-ttl" deletes it, "passthrough" never reaches here. */
+/** The action the current request needs — "force-1h" writes ttl, "strip-ttl" deletes it, "passthrough" never reaches here. */
 type RewriteAction = "force-1h" | "strip-ttl";
 
 function rewrite(node: unknown, action: RewriteAction, seen: WeakSet<object>): void {
@@ -266,8 +232,6 @@ export function captureRequest(
     payload,
     fingerprint: buildFingerprint(payload, buildFingerprintContext(ctx, sessionId)),
     shape: inspectPayload(payload),
-    // adaptive plan.md §3.1 step 5/9: derived from the one ledger read the
-    // caller already did for the adaptive decision — no second scan.
     prefix,
     capturedAt: Date.now(),
   };
@@ -346,38 +310,26 @@ export function createRequestCapture(port: KeepalivePort): RequestCapture {
  * only per AGENTS.md); moved here verbatim (no behavior change) so the pi-facing
  * cache-ttl module owns it end to end — `index.ts` now only calls `wireCacheTtl`.
  */
-function wireCacheEvents(
-  pi: ExtensionAPI,
-  deps: CacheTtlDeps,
-  getAdaptive: () => CacheAdaptiveService | undefined,
-): void {
+function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
   pi.on("tool_execution_start", (_event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteToolStart(sessionId, ka.instanceId);
-    const ad = getAdaptive();
-    if (ad) ad.noteToolStart(sessionId, ad.instanceId); // audit/status only (plan.md §3.3: never a decision input)
   });
   pi.on("tool_execution_end", (_event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteToolEnd(sessionId, ka.instanceId);
-    const ad = getAdaptive();
-    if (ad) ad.noteToolEnd(sessionId, ad.instanceId);
   });
   pi.on("ui_prompt_start", (_event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteUiPromptStart(sessionId, ka.instanceId);
-    const ad = getAdaptive();
-    if (ad) ad.noteUiPromptStart(sessionId, ad.instanceId); // S3
   });
   pi.on("ui_prompt_end", (_event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteUiPromptEnd(sessionId, ka.instanceId);
-    const ad = getAdaptive();
-    if (ad) ad.noteUiPromptEnd(sessionId, ad.instanceId);
   });
   pi.on("agent_settled", (_event, ctx) => {
     const sessionId = readSessionId(ctx);
@@ -386,49 +338,37 @@ function wireCacheEvents(
       ka.noteAgentSettled(sessionId, ka.instanceId);
       ka.noteRequestSettled(sessionId, ka.instanceId);
     }
-    const ad = getAdaptive();
-    if (ad) ad.noteAgentSettled(sessionId, ad.instanceId);
   });
-  // adaptive plan.md §9.4: ledger reconcile on every request-settle event —
-  // the m2 watermark makes the triple-fire idempotent.
   pi.on("message_end", (event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteRequestSettled(sessionId, ka.instanceId, isSuccessfulRealRequest(event.message));
-    const ad = getAdaptive();
-    if (ad) ad.reconcile(sessionId, ad.instanceId);
   });
   pi.on("turn_end", (event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteRequestSettled(sessionId, ka.instanceId, isSuccessfulRealRequest(event.message));
-    const ad = getAdaptive();
-    if (ad) ad.reconcile(sessionId, ad.instanceId);
   });
   pi.on("agent_end", (_event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteRequestSettled(sessionId, ka.instanceId);
-    const ad = getAdaptive();
-    if (ad) ad.reconcile(sessionId, ad.instanceId);
   });
-  const invalidateBoth = (reason: Parameters<CacheAdaptiveService["invalidateAdaptive"]>[0], ctx: ExtensionContext) => {
+  const invalidateKeepalive = (reason: Parameters<CacheKeepaliveService["invalidate"]>[0], ctx: ExtensionContext) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.invalidate(reason, sessionId, ka.instanceId);
-    const ad = getAdaptive();
-    if (ad) ad.invalidateAdaptive(reason, sessionId, ad.instanceId);
   };
-  pi.on("model_select", (_event, ctx) => invalidateBoth("model-select", ctx));
-  pi.on("thinking_level_select", (_event, ctx) => invalidateBoth("thinking-level-select", ctx));
-  pi.on("session_compact", (_event, ctx) => invalidateBoth("session-compact", ctx));
-  pi.on("session_compact_failed", (_event, ctx) => invalidateBoth("session-compact-failed", ctx));
-  pi.on("session_tree", (_event, ctx) => invalidateBoth("session-tree", ctx));
+  pi.on("model_select", (_event, ctx) => invalidateKeepalive("model-select", ctx));
+  pi.on("thinking_level_select", (_event, ctx) => invalidateKeepalive("thinking-level-select", ctx));
+  pi.on("session_compact", (_event, ctx) => invalidateKeepalive("session-compact", ctx));
+  pi.on("session_compact_failed", (_event, ctx) => invalidateKeepalive("session-compact-failed", ctx));
+  pi.on("session_tree", (_event, ctx) => invalidateKeepalive("session-tree", ctx));
   pi.on("resources_discover", (_event, ctx) => {
-    invalidateBoth("resources-changed", ctx);
+    invalidateKeepalive("resources-changed", ctx);
     return undefined;
   });
-  pi.on("session_info_changed", (_event, ctx) => invalidateBoth("session-changed", ctx));
+  pi.on("session_info_changed", (_event, ctx) => invalidateKeepalive("session-changed", ctx));
 }
 
 export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: CacheTtlDeps = {}): CacheTtlWiring {
@@ -436,28 +376,15 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   let persisted = mode;
   let dirty = false;
   const persist = deps.persist ?? ((value) => persistSettingOverride("cacheTtl.mode", value, defaultSettingsPath()));
-  // See `RequestCapture`'s doc comment above for the pairing strategy. Rebuilt
-  // whenever the port identity changes (mirrors the old code's per-request
-  // `const port = deps.keepalive?.()` read).
   let capturePort: KeepalivePort | undefined;
   let capture: RequestCapture | undefined;
-
-  // topic-switch plan.md P2: the last payload shape this module itself sent on the current
-  // session (see `LastSent`'s doc comment). `undefined` on a fresh activation and reset on every
-  // `session_start` — a new session or resume never inherits a prior session's lastSent.
   let lastSent: LastSent | undefined;
 
-  // adaptive plan.md §7.1 (default-on revision): the single `adaptiveEnabled`
-  // flag gates every adaptive consultation. Flag off ⇒ adaptive mode degrades
-  // to passthrough and today's auto/on/off behaviour is byte-for-byte unchanged.
-  const getAdaptive = (): CacheAdaptiveService | undefined =>
-    settings.cacheTtl.adaptiveEnabled ? deps.adaptive?.() : undefined;
-
-  wireCacheEvents(pi, deps, getAdaptive);
+  wireCacheEvents(pi, deps);
 
   pi.on("session_start", async (_event, ctx) => {
     lastSent = undefined;
-    updateStatus(ctx, mode, dirty, deps, getAdaptive);
+    updateStatus(ctx, mode, dirty, deps);
   });
   pi.on("before_provider_request", (event, ctx) => {
     const port = deps.keepalive?.();
@@ -467,51 +394,16 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
       capturePort = port;
       capture = port ? createRequestCapture(port) : undefined;
     }
-    // Any capture still pending from a previous `before_provider_request` never
-    // got its matching `before_provider_headers` (e.g. the previous request
-    // errored out before reaching the HTTP stage) — it is now definitely stale
-    // and must never be paired with THIS request's headers. Drop it silently
-    // (never turns into a ping — see `RequestCapture`'s doc comment).
+    // Drop a half-capture whose matching headers never arrived.
     capture?.clear();
-
     if (!isObjectRecord(event.payload) || !Array.isArray(event.payload.messages)) {
       port?.invalidate("payload-shape", sessionId, port.instanceId);
       return undefined;
     }
-
-    // adaptive plan.md §3.1 step 5: one ledger read, two consumers (the
-    // adaptive decision below and the keepalive capture's prefix estimate).
     const ledger = readLatestAssistantUsage(ctx);
-    // topic-switch plan.md P2: computed once, reused by the adaptive decision below AND the
-    // `lastSent` write further down ("shape 只算一次，adaptive 复用") — a read-only walk of the
-    // pre-rewrite payload. `rewrite()` only ever edits an EXISTING `cache_control.ttl` in place,
-    // never adds a new breakpoint, so this pre-rewrite shape's `ephemeralBreakpoints`/`ttl1h`
-    // accurately describe the payload actually sent regardless of which `action` runs below.
     const shape = inspectPayload(event.payload);
-
-    // §3.1 step 6: adaptive per-request decision. I-A9: mutually exclusive with
-    // the §6.3 consumeUpgrade below — `mode` is never both "adaptive" and "auto".
-    const adaptiveSvc = mode === "adaptive" ? getAdaptive() : undefined;
-    const decision: AdaptiveDecision | undefined = adaptiveSvc?.decide(sessionId, adaptiveSvc.instanceId, {
-      shape, // read-only walk of the pre-rewrite payload
-      ledger,
-      lineageKey: payloadLineageKey(event.payload), // review R4: prefix lineage identity
-      streaming: (event.payload as { stream?: unknown }).stream === true, // review R7: can keepalive replay it?
-    });
-
-    // §6.3/I-K5: the service is mode-agnostic (it doesn't know about on/off/auto) —
-    // this "mode === auto" check is what actually enforces I-K5 here.
-    const upgrade =
-      decision?.upgrade === true ||
-      (port !== undefined && mode === "auto" && port.consumeUpgrade(sessionId, port.instanceId));
-    const action: RewriteAction | "passthrough" = upgrade
-      ? "force-1h"
-      : mode === "on"
-        ? "force-1h"
-        : mode === "off"
-          ? "strip-ttl"
-          : "passthrough";
-    if (mode === "adaptive") updateStatus(ctx, mode, dirty, deps, getAdaptive); // refresh the ttl-now segment
+    const action: RewriteAction | "passthrough" =
+      mode === "on" ? "force-1h" : mode === "off" ? "strip-ttl" : "passthrough";
 
     // topic-switch plan.md P2: write lastSent once the payload shape check has passed and `action`
     // is known — every return below this point (passthrough, clone-failed, rewritten) carries it.
@@ -528,7 +420,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     }
 
     if (action === "passthrough") {
-      // auto / adaptive-declined: never rewrite the payload — but still capture
+      // auto: never rewrite the payload — but still capture
       // a private clone for the keepalive replay (pi reuses `event.payload` for
       // `{...params, stream:true}` downstream, so holding onto the live object
       // for minutes is a risk, plan.md §3.1).
@@ -558,7 +450,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     rewrite(cloned, action, new WeakSet<object>());
     // Capture AFTER the rewrite (order is load-bearing): `inspectPayload(cloned)`
     // reflects the bytes actually sent, which is how keepalive gate #7 sees the
-    // 1h write and suspends pinging for this window (adaptive plan.md §6.1).
+    // 1h write and suspends pinging for this window.
     if (port) capture?.stage(captureRequest(cloned as RecordValue, ctx, sessionId, port, prefixFromLedger(ledger)));
     return cloned as RecordValue;
   });
@@ -573,9 +465,9 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   pi.on("before_provider_headers", (event) => {
     capture?.consumeHeaders(event.headers);
   });
-  const USAGE = "usage: /cache-ttl on | off | auto | adaptive | save | keepalive on|off | status";
+  const USAGE = "usage: /cache-ttl on | off | auto | save | keepalive on|off | status";
   pi.registerCommand("cache-ttl", {
-    description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|adaptive|save|keepalive on|off|status]",
+    description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|save|keepalive on|off|status]",
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
@@ -590,10 +482,9 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           { value: "on", label: "on", description: "强制 1h TTL" },
           { value: "off", label: "off", description: "关闭 TTL 覆写" },
           { value: "auto", label: "auto", description: "自动模式" },
-          { value: "adaptive", label: "adaptive", description: "自适应 TTL" },
           { value: "save", label: "save", description: "持久化当前模式" },
           { value: "keepalive", label: "keepalive", description: "保活开关（on|off）" },
-          { value: "status", label: "status", description: "查看保活/自适应状态" },
+          { value: "status", label: "status", description: "查看保活状态" },
         ].filter((item) => item.value.startsWith(partial));
       } catch {
         return [];
@@ -621,10 +512,8 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
 
       if (head === "status") {
         const port = deps.keepalive?.();
-        const adaptiveSvc = getAdaptive();
         const lines: string[] = [];
         if (port) lines.push(...renderKeepaliveReportLines(port.report()));
-        if (adaptiveSvc) lines.push(...renderAdaptiveReportLines(adaptiveSvc.snapshot()));
         if (lines.length === 0) {
           ctx.ui.notify("keepalive service unavailable (no active session, or cacheTtl.keepalive=false)", "info");
           return;
@@ -633,10 +522,10 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
         return;
       }
 
-      if (arg === "on" || arg === "off" || arg === "auto" || arg === "adaptive") {
+      if (arg === "on" || arg === "off" || arg === "auto") {
         mode = arg;
         dirty = mode !== persisted;
-        updateStatus(ctx, mode, dirty, deps, getAdaptive);
+        updateStatus(ctx, mode, dirty, deps);
         ctx.ui.notify(
           `cache TTL switched to: ${MODE_LABEL[mode]} (current process only; /cache-ttl save to persist)`,
           "info",
@@ -653,7 +542,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
         }
         persisted = mode;
         dirty = false;
-        updateStatus(ctx, mode, false, deps, getAdaptive);
+        updateStatus(ctx, mode, false, deps);
         ctx.ui.notify(`cache TTL persisted as ${MODE_LABEL[mode]}`, "info");
       } else if (arg === "") {
         const saved = dirty ? `\npersisted mode: ${MODE_LABEL[persisted]}` : "";
@@ -667,7 +556,6 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   return {
     warmth: createWarmthPort(
       deps,
-      getAdaptive,
       () => mode,
       () => lastSent,
     ),

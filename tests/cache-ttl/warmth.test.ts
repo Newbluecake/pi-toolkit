@@ -15,7 +15,6 @@ function evidence(overrides: Partial<WarmthEvidence> = {}): WarmthEvidence {
     route: { api: "anthropic-messages", provider: "anthropic", modelId: "claude-x" },
     ledger: { at: NOW - 1_000, provider: "anthropic", modelId: "claude-x", cacheRead: 100, cacheWrite: 0 },
     keepalive: { pingInFlight: false, pingScheduled: false },
-    adaptive: { covers: false, any1hWrites: false },
     recent1hWrite: false,
     mode: "auto",
     slackMs: 1_000,
@@ -35,7 +34,6 @@ describe("assessWarmth — step 1: api/ledger/route gates", () => {
     const result = assessWarmth(
       evidence({
         route: { api: "openai-chat", provider: "openai", modelId: "gpt-x" },
-        adaptive: { covers: true, any1hWrites: false },
       }),
     );
     expect(result).toEqual({ state: "unknown", reason: "unsupported-api" });
@@ -80,17 +78,6 @@ describe("assessWarmth — step 1: api/ledger/route gates", () => {
 });
 
 describe("assessWarmth — step 2: warm only from evidence", () => {
-  it("adaptive.covers ⇒ warm/1h-cover, regardless of mode/lastSent/stale ledger", () => {
-    const result = assessWarmth(
-      evidence({
-        ledger: { at: NOW - 10 * MAX_TTL_MS, provider: "anthropic", modelId: "claude-x", cacheRead: 1, cacheWrite: 0 },
-        adaptive: { covers: true, any1hWrites: false },
-        mode: "off",
-      }),
-    );
-    expect(result).toEqual({ state: "warm", reason: "1h-cover" });
-  });
-
   it("a proven ledger touch (cacheRead+cacheWrite>0) within the nominal window ⇒ warm/proven-recent", () => {
     const result = assessWarmth(
       evidence({
@@ -368,22 +355,6 @@ describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1
       }),
     );
     expect(result).toEqual({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "5m" });
-  });
-
-  it("adaptive.any1hWrites raises the bar to 1h", () => {
-    const result = assessWarmth(
-      evidence({
-        adaptive: { covers: false, any1hWrites: true },
-        ledger: {
-          at: NOW - (NOMINAL_5M_MS + 10_000),
-          provider: "anthropic",
-          modelId: "claude-x",
-          cacheRead: 0,
-          cacheWrite: 0,
-        },
-      }),
-    );
-    expect(result).toEqual({ state: "unknown", reason: "not-provably-cold" });
   });
 
   it("lastSent.at feeds the latest-possible-touch max (a recent lastSent keeps a stale ledger from proving cold)", () => {

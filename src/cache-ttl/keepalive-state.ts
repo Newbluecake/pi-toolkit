@@ -18,9 +18,6 @@
 
 import type { Millis } from "../core/types.js";
 import type { PingHeaderSource, PingOutcome } from "./ping-client.js";
-// Type-only back-reference (adaptive.ts value-imports constants from THIS
-// module): erased at runtime ⇒ no ESM cycle (adaptive plan.md §3.5).
-import type { AdaptiveBreakerReason, AdaptiveSnapshot } from "./adaptive.js";
 
 // ---------------------------------------------------------------------------
 // Constants (plan.md §6.1/§6.2/§7.5/§10.1 — safety knobs, deliberately not
@@ -58,11 +55,6 @@ export const PING_DENY_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot
 export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 /** G2: only these run modes can plausibly resume a long-idle session. */
 const RUN_MODES_ALLOWING_PING: ReadonlySet<string> = new Set(["tui", "rpc"]);
-
-/** Gate #4 as a predicate, for callers outside `evaluateTick` (F1 horizon report). */
-export function keepaliveModeAllowsPing(mode: string): boolean {
-  return RUN_MODES_ALLOWING_PING.has(mode);
-}
 
 // ---------------------------------------------------------------------------
 // ping-client.ts type re-export (collapsed onto the real types in step 4 —
@@ -183,30 +175,14 @@ export interface WindowState {
   requestInFlight: boolean;
   pingInFlight: boolean;
   pingStartedAt: Millis | undefined;
-  /**
-   * Start time of the most recent PROVEN cache read in this window — i.e. the
-   * `pingStartedAt` of the last `proven-hit` ping. Unlike `lastReadStartedAt`
-   * (which `onRealRequest` sets optimistically at request start, before any
-   * hit is known) this is only ever written by evidence: a ping that came
-   * back with `cache_read > 0 && cache_creation === 0`.
-   *
-   * Why it exists (field incident, see docs/dev/cache-ttl-adaptive/plan.md
-   * §17): the adaptive predictor's warm/cold split used to key off the last
-   * REAL request alone, so a window kept demonstrably alive by 13 minutes of
-   * successful pings was still classified `cold` — "the prefix is dead
-   * anyway" — and upgraded to 1h, which cannot read the 5m entries the pings
-   * had just refreshed. That turned a free full hit into a full-prefix 1h
-   * rewrite. `CacheKeepaliveService.provenCacheReadAt()` exports this field
-   * so the predictor can see the proof.
-   */
+  /** Start time of the most recent PROVEN cache read in this window. */
   lastProvenPingStartedAt: Millis | undefined;
-  upgradePending: boolean;
   /**
    * Non-plan addition (documented deviation, see final reply): the reason the
    * *current* window stopped pinging after an unproven result, so status
    * text (§9.1 "本轮已停：<kind>") doesn't need extra service-side
    * bookkeeping. Cleared on the next real request; left untouched by
-   * `invalidate()` (which only touches the three fields plan.md specifies).
+   * `invalidate()` (which only touches the two fields plan.md specifies).
    */
   lastStopReason: string | undefined;
 }
@@ -224,7 +200,6 @@ export function createInitialWindowState(): WindowState {
     pingInFlight: false,
     pingStartedAt: undefined,
     lastProvenPingStartedAt: undefined,
-    upgradePending: false,
     lastStopReason: undefined,
   };
 }
@@ -379,7 +354,6 @@ export interface KeepaliveConfig {
   intervalMs: Millis;
   maxPings: number;
   minPrefixTokens: number;
-  upgradeAfterBudget: boolean;
   /**
    * child-ka-core (plan.md §2.4/§3): additionally allow `mode === "print"`
    * through gate #4 (G2) — a child (subagent) session's run mode. Default
@@ -394,16 +368,6 @@ export interface KeepaliveConfig {
    * Default `undefined` = unbounded (today's behavior).
    */
   maxSessionPings?: number;
-}
-
-/**
- * F1 (adaptive verification-2026-09-25): the longest real-request gap a keepalive
- * window can bridge — the last ping lands at `maxPings × intervalMs` and keeps the
- * entry alive for one more TTL. The adaptive predictor refuses to open a NEW 1h
- * prefix while every gap the session has shown fits inside this horizon.
- */
-export function keepaliveGapHorizonMs(config: Pick<KeepaliveConfig, "intervalMs" | "maxPings">): Millis {
-  return Math.max(0, config.maxPings) * config.intervalMs + ASSUMED_TTL_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,8 +388,6 @@ export type TickSkipReason =
   | "request-in-flight"
   | "ping-in-flight"
   | "not-armed"
-  /** F1 (adaptive verification-2026-09-25): a settled, confirmed 1h entry already backs this prefix — pinging the 5m chain would pay for the same gap twice. */
-  | "adaptive-1h"
   | "cache-expired"
   | "budget-exhausted"
   /** child-ka-core: per-run proven-hit cap (`config.maxSessionPings`) reached — pure, checked in `evaluateTick`. */
@@ -493,12 +455,6 @@ export interface EvaluateTickInput {
   /** Freshly-derived fingerprint of "what would go out right now"; compared against `window.capture.fingerprint`. */
   currentFingerprint: CaptureFingerprint;
   /**
-   * F1: the adaptive predictor reports that a settled, confirmed 1h entry covers
-   * the current prefix with only a small 5m tail (`adaptiveCoversPrefix`). Absent
-   * ⇒ false (keepalive-only sessions are unchanged).
-   */
-  adaptiveCovered?: boolean;
-  /**
    * child-ka-core: true when pi's own native `CacheWarmer` is already handling
    * this model/route (it declares `promptCache`) — the caller (service layer)
    * derives this from `ctx.model`; `evaluateTick` itself never reads `ctx`.
@@ -509,12 +465,12 @@ export interface EvaluateTickInput {
 
 export interface TickResult {
   decision: TickDecision;
-  /** Possibly-updated window (only rules #9 `invalidate` and #14 `budget-exhausted` mutate it). */
+  /** Possibly-updated window (only rule #9 `invalidate` mutates it). */
   window: WindowState;
 }
 
 export function evaluateTick(input: EvaluateTickInput): TickResult {
-  const { config, session, window, armed, mode, now, currentFingerprint, adaptiveCovered, nativeWarmerActive } = input;
+  const { config, session, window, armed, mode, now, currentFingerprint, nativeWarmerActive } = input;
 
   const skip = (reason: TickSkipReason, terminal: boolean): TickResult => ({
     decision: { kind: "skip", reason, terminal },
@@ -569,23 +525,14 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   if (window.requestInFlight) return skip("request-in-flight", false);
   // #11
   if (window.pingInFlight) return skip("ping-in-flight", false);
-  // #11.5 — F1: the request after the gap will read the 1h entry and rewrite only
-  // the small 5m tail; every ping would duplicate that cover. Terminal: the cover
-  // only changes at the next real request, which opens a new window anyway.
-  if (adaptiveCovered === true) return skip("adaptive-1h", true);
   // #12 — G8
   if (!armed) return skip("not-armed", false);
   // #13 — most important: the cache is presumed dead, pinging now would be a full write.
   if (window.aliveUntil !== undefined && now >= window.aliveUntil - TTL_SAFETY_MARGIN_MS) {
     return skip("cache-expired", true);
   }
-  // #14 — I-K2 hard budget; arms the one-shot 1h upgrade (§6.3).
-  if (window.pings >= config.maxPings) {
-    return {
-      decision: { kind: "skip", reason: "budget-exhausted", terminal: true },
-      window: { ...window, upgradePending: true },
-    };
-  }
+  // #14 — I-K2 hard budget.
+  if (window.pings >= config.maxPings) return skip("budget-exhausted", true);
   // #15
   if (window.nextPingAt !== undefined && now < window.nextPingAt) return skip("not-due", false);
   // #16
@@ -725,13 +672,12 @@ function analyzePayload(payload: unknown): PayloadAnalysis {
 }
 
 /**
- * R4 (adaptive review 2026-09-25): a cheap identity of the prefix LINEAGE — the
+ * R4 (cache review 2026-09-25): a cheap identity of the prefix LINEAGE — the
  * parts of the payload that, when they change, make every cached entry of the
  * previous lineage unreadable (system text digest, tool list, thinking config).
- * Two requests with different keys cannot share a cache prefix, so the adaptive
- * predictor must neither treat one's 1h cover as the other's nor judge the route
- * from a miss across lineages (field: wake turns ran without the memory/agent
- * sections, 01a0d2f9 / 01a0d2e4). Same digests `CaptureFingerprint` uses (G7).
+ * Two requests with different keys cannot share a cache prefix, so cache state
+ * must never carry assumptions across lineages (field: wake turns ran without
+ * the memory/agent sections, 01a0d2f9 / 01a0d2e4). Same digests `CaptureFingerprint` uses (G7).
  */
 export function payloadLineageKey(payload: unknown): string | undefined {
   if (!isObjectRecord(payload)) return undefined;
@@ -883,7 +829,6 @@ export function onRealRequest(
     pingInFlight: false,
     pingStartedAt: undefined,
     lastProvenPingStartedAt: undefined,
-    upgradePending: false,
     lastStopReason: undefined,
   };
   return { window: newWindow, session: closedSession };
@@ -1057,50 +1002,10 @@ export function onUnproven(
  * Explicit invalidation (payload-shape anomaly, compaction, model switch,
  * fingerprint drift, ...). Bumps `windowEpoch` (I-K8) so any ping already in
  * flight for the old window is discarded on return. Deliberately touches
- * only the three fields plan.md §5.3 specifies — nothing else.
+ * only the two fields plan.md §5.3 specifies — nothing else.
  */
 export function invalidate(window: WindowState, _reason: InvalidateReason): WindowState {
-  return { ...window, capture: undefined, upgradePending: false, windowEpoch: window.windowEpoch + 1 };
-}
-
-// ---------------------------------------------------------------------------
-// One-shot 1h upgrade after budget exhaustion (plan.md §6.3, I-K5)
-// ---------------------------------------------------------------------------
-
-export interface ConsumeUpgradeInput {
-  /** I-K6: the caller must have already verified session/instance identity. */
-  sessionMatches: boolean;
-  mode: "auto" | "on" | "off";
-  upgradeAfterBudgetEnabled: boolean;
-  now: Millis;
-  assumedTtlMs?: Millis;
-  /** task #14: compact-hint says the prefix is about to be discarded ⇒ never upgrade (stays pending). */
-  switchImminent?: boolean;
-}
-
-export interface ConsumeUpgradeResult {
-  consumed: boolean;
-  window: WindowState;
-}
-
-/**
- * Only fires when the next real request is *guaranteed* to be a full write
- * anyway (now − lastReadStartedAt > TTL) — otherwise this would be actively
- * paying the 2× 1h rate instead of the 1.25× 5m rate. I-K5: only in `auto`
- * mode; never touches explicit `on`/`off`.
- */
-export function consumeUpgrade(window: WindowState, input: ConsumeUpgradeInput): ConsumeUpgradeResult {
-  const assumedTtlMs = input.assumedTtlMs ?? ASSUMED_TTL_MS;
-  const eligible =
-    window.upgradePending &&
-    input.sessionMatches &&
-    input.mode === "auto" &&
-    input.upgradeAfterBudgetEnabled &&
-    input.switchImminent !== true &&
-    window.lastReadStartedAt !== undefined &&
-    input.now - window.lastReadStartedAt > assumedTtlMs;
-  if (!eligible) return { consumed: false, window };
-  return { consumed: true, window: { ...window, upgradePending: false } };
+  return { ...window, capture: undefined, windowEpoch: window.windowEpoch + 1 };
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,8 +1104,7 @@ export interface KeepaliveReport {
    * `ctx.model.compat.supportsLongCacheRetention` (Anthropic-messages compat
    * flag; pi's own default is `true` when unset). `false` means pi will
    * never write `cache_control.ttl: "1h"` for this model on this route no
-   * matter what `/cache-ttl on` or the budget-exhausted upgrade do — so the
-   * `→1h` status hint would be an outright lie. `false` here also when the
+   * matter what `/cache-ttl on` does. `false` here also when the
    * service couldn't read `ctx.model` at all (conservative: don't promise a
    * transition we can't confirm is possible).
    */
@@ -1249,171 +1153,46 @@ function formatCost(costUsd: number | undefined): string {
 }
 
 /** The cache-TTL modes (mirrors `config/settings.ts`'s `CacheTtlMode` structurally — kept as a local literal union so this pi-free module never imports from `../config/`). */
-export type CacheDisplayMode = "auto" | "on" | "off" | "adaptive";
+export type CacheDisplayMode = "auto" | "on" | "off";
 
 export interface CacheStatusInput {
   mode: CacheDisplayMode;
   dirty: boolean;
-  /** `undefined` ⇒ the keepalive service isn't present (setting off, or not yet built). */
   report: KeepaliveReport | undefined;
-  /** `undefined` ⇒ adaptive isn't in play (mode isn't adaptive, or the service isn't wired). */
-  adaptive?: AdaptiveSnapshot | undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Structured status snapshot (adaptive plan.md §8.1 — segments first, strings
-// second, so a future HUD renderer can colorize without re-parsing text).
-// ---------------------------------------------------------------------------
-
-export type CacheSegmentKind = "mode" | "ttl-now" | "ping" | "adaptive";
+export type CacheSegmentKind = "mode" | "ttl-now" | "ping";
 export type CacheSegmentTone = "neutral" | "info" | "good" | "warn" | "bad";
 
 export interface CacheStatusSegment {
   kind: CacheSegmentKind;
-  /** Stable machine-readable id (HUD coloring/ordering hook), never internationalized. */
   id: string;
-  /** Human-readable short text (the current TUI status bar joins these). */
   text: string;
   tone: CacheSegmentTone;
-  /** Optional structured detail for HUD expansion — never pre-assembled strings. */
   detail?: Record<string, string | number | boolean>;
 }
 
 export interface CacheStatusSnapshot {
   mode: CacheDisplayMode;
   dirty: boolean;
-  /** What the current request actually writes — the line the user most wants. */
   effectiveTtl: "1h" | "5m" | "provider-default" | "unknown";
-  /** Why it's that (upgrade signals joined / decline reason / "mode:on" …), machine-readable. */
   effectiveReason: string;
   segments: readonly CacheStatusSegment[];
   keepalive?: KeepaliveReport;
-  adaptive?: AdaptiveSnapshot;
 }
 
-/**
- * Status-bar abbreviations for the breaker reasons. The merged status line is a
- * single terminal row shared with every other extension's status (cache-ttl is
- * its longest contributor), so the longest reason gets a shorter display form.
- * Only the display text is abbreviated: `detail.reason` keeps the machine id and
- * `/cache-ttl status` still prints it in full. The map is exhaustive over
- * `AdaptiveBreakerReason` on purpose — a new reason fails to compile here rather
- * than silently reverting to a raw name of unbounded length.
- */
-const BREAKER_DISPLAY: Record<AdaptiveBreakerReason, string> = {
-  "warm-write-too-expensive": "warm-write-costly",
-  "warm-miss": "warm-miss",
-  "write-budget": "write-budget",
-  "1h-ineffective": "1h-ineffective",
-};
-
-/** adaptive plan.md §8.2: the ttl-now / cover / budget / breaker segments (only in adaptive mode with a snapshot). */
-function adaptiveSegments(snapshot: AdaptiveSnapshot): CacheStatusSegment[] {
-  const segments: CacheStatusSegment[] = [];
-  const last = snapshot.lastDecision;
-  // A tripped breaker short-circuits the upgrade, so the ttl-now segment is
-  // derivable from `off:<reason>` and only spends status-line width (plan.md
-  // §8.2's breaker row is `cache adaptive · off:<reason>`): drop it.
-  if (snapshot.breaker === undefined) {
-    if (last?.upgrade === true) {
-      // "→1h?" (warn) while every 1h write so far is unconfirmed (proxy may be
-      // dropping the cache_creation split — plan.md §5.2).
-      const unconfirmedOnly = snapshot.unconfirmed1hWrites > 0 && snapshot.confirmed1hWrites === 0;
-      segments.push({
-        kind: "ttl-now",
-        id: "ttl-now:1h",
-        text: `→1h${unconfirmedOnly ? "?" : ""}${last.signals.length > 0 ? ` (${last.signals.join("+")})` : ""}`,
-        tone: unconfirmedOnly ? "warn" : "good",
-      });
-    } else {
-      segments.push({ kind: "ttl-now", id: "ttl-now:5m", text: "5m", tone: "neutral" });
-    }
-  }
-  if (snapshot.coverRemainingMs !== undefined) {
-    segments.push({
-      kind: "adaptive",
-      id: "adaptive:cover",
-      text: `1h cover ${Math.ceil(snapshot.coverRemainingMs / 60_000)}m`,
-      tone: "info",
-      detail: { coverRemainingMs: snapshot.coverRemainingMs },
-    });
-  }
-  // Dual budget gate: USD is primary, tokens are the fallback for routes without
-  // cost data. The segment shows whichever budget is CLOSER to its cap (the one
-  // about to fire), while `detail` keeps both pairs of exact numbers.
-  const tokenFraction = snapshot.writeBudgetTokens > 0 ? snapshot.budgetFraction : 0;
-  const usdFraction = snapshot.writeBudgetUsd > 0 ? snapshot.usdFraction : 0;
-  const worstFraction = Math.max(tokenFraction, usdFraction);
-  if (worstFraction >= 0.8) {
-    segments.push({
-      kind: "adaptive",
-      id: "adaptive:budget",
-      // Percentage, not `198k/200k`: the segment only appears at ≥80% so the
-      // question it answers is "how close to the cap", and the exact tokens
-      // stay in `detail` (HUD expansion) + `/cache-ttl status`.
-      text: `budget ${Math.floor(worstFraction * 100)}%`,
-      tone: "warn",
-      detail: {
-        upgradeWriteTokens: snapshot.upgradeWriteTokens,
-        writeBudgetTokens: snapshot.writeBudgetTokens,
-        upgradeWriteUsd: snapshot.upgradeWriteUsd,
-        writeBudgetUsd: snapshot.writeBudgetUsd,
-        feeWriteTokens: snapshot.feeWriteTokens,
-        feeBudgetTokens: snapshot.feeBudgetTokens,
-        feeWriteUsd: snapshot.feeWriteUsd,
-        feeBudgetUsd: snapshot.feeBudgetUsd,
-      },
-    });
-  }
-  if (snapshot.breaker !== undefined) {
-    segments.push({
-      kind: "adaptive",
-      id: "adaptive:breaker",
-      text: `off:${BREAKER_DISPLAY[snapshot.breaker.reason]}`,
-      tone: "bad",
-      detail: { reason: snapshot.breaker.reason, at: snapshot.breaker.at },
-    });
-  }
-  return segments;
-}
-
-/**
- * Single structured snapshot of the merged status line. `renderCacheStatus`
- * below is a thin wrapper over this (join of segment texts) so the two never
- * disagree. Note the segment text dropped the pre-refactor colon
- * (`cache: 5m` → `cache 5m`) when the segments became independently
- * colourisable — the modes are behaviourally unchanged, the label is not
- * byte-identical.
- */
 export function buildCacheStatusSnapshot(input: CacheStatusInput): CacheStatusSnapshot {
-  const { mode, dirty, report, adaptive } = input;
+  const { mode, dirty, report } = input;
   const segments: CacheStatusSegment[] = [];
   if (mode === "on")
     segments.push({ kind: "mode", id: "mode:on", text: `cache 1h${dirty ? "*" : ""}`, tone: "neutral" });
   else if (mode === "off")
     segments.push({ kind: "mode", id: "mode:off", text: `cache 5m${dirty ? "*" : ""}`, tone: "neutral" });
-  else if (mode === "adaptive")
-    segments.push({ kind: "mode", id: "mode:adaptive", text: `cache adaptive${dirty ? "*" : ""}`, tone: "neutral" });
 
-  let effectiveTtl: CacheStatusSnapshot["effectiveTtl"];
-  let effectiveReason: string;
-  if (mode === "adaptive") {
-    if (adaptive) segments.push(...adaptiveSegments(adaptive));
-    effectiveTtl = adaptive?.lastDecision?.upgrade === true ? "1h" : "5m";
-    effectiveReason =
-      adaptive?.lastDecision === undefined
-        ? "no-decision"
-        : adaptive.lastDecision.upgrade
-          ? adaptive.lastDecision.signals.join("+")
-          : (adaptive.lastDecision.reason ?? "no-decision");
-  } else {
-    effectiveTtl = mode === "on" ? "1h" : mode === "off" ? "5m" : "provider-default";
-    effectiveReason = `mode:${mode}`;
-  }
-
-  const pingText = renderPingSegment(mode, report);
+  const effectiveTtl = mode === "on" ? "1h" : mode === "off" ? "5m" : "provider-default";
+  const effectiveReason = `mode:${mode}`;
+  const pingText = renderPingSegment(report);
   if (pingText !== undefined) segments.push({ kind: "ping", id: "ping:status", text: pingText, tone: "neutral" });
-
   return {
     mode,
     dirty,
@@ -1421,68 +1200,7 @@ export function buildCacheStatusSnapshot(input: CacheStatusInput): CacheStatusSn
     effectiveReason,
     segments,
     ...(report !== undefined ? { keepalive: report } : {}),
-    ...(adaptive !== undefined ? { adaptive } : {}),
   };
-}
-
-/** Multi-line `/cache-ttl status` section for the adaptive predictor (adaptive plan.md §8.3). */
-export function renderAdaptiveReportLines(snapshot: AdaptiveSnapshot): string[] {
-  const lines: string[] = [];
-  const last = snapshot.lastDecision;
-  if (last === undefined) {
-    lines.push("adaptive: no decision yet");
-  } else if (last.upgrade) {
-    lines.push(
-      `adaptive: last=upgrade(${last.class ?? "?"}${last.signals.length > 0 ? `, ${last.signals.join("+")}` : ""}) @ ${last.at}`,
-    );
-  } else {
-    lines.push(`adaptive: last=declined(${last.reason ?? "?"}) @ ${last.at}`);
-  }
-  const cooldown =
-    snapshot.coldCooldownRemainingMs === undefined || snapshot.coldCooldownRemainingMs === 0
-      ? "cooldown ready"
-      : `cooldown ${Math.ceil(snapshot.coldCooldownRemainingMs / 60_000)}m`;
-  const budgetUsd =
-    snapshot.writeBudgetUsd > 0
-      ? `$${snapshot.upgradeWriteUsd.toFixed(2)}/$${snapshot.writeBudgetUsd.toFixed(2)}`
-      : `$${snapshot.upgradeWriteUsd.toFixed(2)}/off`;
-  lines.push(
-    `adaptive budget: write ${formatTokenCount(snapshot.upgradeWriteTokens)}/${formatTokenCount(snapshot.writeBudgetTokens)} tok · ${budgetUsd} · warm ${snapshot.warmUpgrades} · cold ${snapshot.coldUpgradesUsed}/${snapshot.coldUpgradeCap} · ${cooldown} · longGaps=${snapshot.longGapCount}`,
-  );
-  // Entry fee (plan.md §16.3): the one-time full-prefix 1h write. Shown as its own
-  // line because it is a different KIND of spend from the marginal budget above
-  // — reading them as one number is exactly the mistake the split fixes.
-  const feeUsd =
-    snapshot.feeBudgetUsd > 0
-      ? `$${snapshot.feeWriteUsd.toFixed(2)}/$${snapshot.feeBudgetUsd.toFixed(2)}`
-      : `$${snapshot.feeWriteUsd.toFixed(2)}/off`;
-  lines.push(
-    `adaptive entry fee: paid ${snapshot.feeUpgrades}× · ${formatTokenCount(snapshot.feeWriteTokens)}/${formatTokenCount(snapshot.feeBudgetTokens)} tok · ${feeUsd}${snapshot.feeBudgetExhausted ? " · exhausted (no new prefix)" : ""}`,
-  );
-  const cover =
-    snapshot.coverRemainingMs !== undefined
-      ? `cover ends in ${Math.ceil(snapshot.coverRemainingMs / 60_000)}m`
-      : "no cover";
-  const learned =
-    snapshot.learned1hLifeMs !== undefined
-      ? ` · learned life ≤${Math.floor(snapshot.learned1hLifeMs / 60_000)}m (collapses ${snapshot.coverCollapses})`
-      : "";
-  lines.push(
-    `adaptive 1h: confirmed ${snapshot.confirmed1hWrites} · unconfirmed ${snapshot.unconfirmed1hWrites} · indirect ${snapshot.indirect1hConfirms} · ineffective ${snapshot.ineffective1h} · ${cover}${learned}`,
-  );
-  if (snapshot.lastReconcile !== undefined) {
-    const r = snapshot.lastReconcile;
-    lines.push(
-      `adaptive last reconcile: cacheRead=${formatTokenCount(r.cacheRead)} cacheWrite=${formatTokenCount(r.cacheWrite)} cacheWrite1h=${r.cacheWrite1h ?? "n/a"} cacheWrite$=${r.cacheWriteUsd !== undefined ? `$${r.cacheWriteUsd.toFixed(3)}` : "n/a"} cost=${r.costTotalUsd !== undefined ? `$${r.costTotalUsd.toFixed(3)}` : "n/a"}`,
-    );
-  }
-  lines.push(
-    snapshot.breaker !== undefined
-      ? `adaptive breaker: disabled: ${snapshot.breaker.reason} @ ${snapshot.breaker.at}`
-      : "adaptive breaker: none",
-  );
-  lines.push(`adaptive dropped: pending=${snapshot.droppedPending}`);
-  return lines;
 }
 
 /**
@@ -1491,28 +1209,12 @@ export function renderAdaptiveReportLines(snapshot: AdaptiveSnapshot): string[] 
  * (the segments are joined by `renderCacheStatus` below). `undefined` ⇒
  * nothing keepalive-related worth showing right now.
  */
-function renderPingSegment(mode: CacheDisplayMode, report: KeepaliveReport | undefined): string | undefined {
+function renderPingSegment(report: KeepaliveReport | undefined): string | undefined {
   if (report === undefined) return undefined;
   const { session, window, config } = report;
-
-  if (session.disabled !== undefined) {
-    return `ping off:${session.disabled.reason} ×${session.pings}`;
-  }
-  if (window.pings > 0 && window.pings >= config.maxPings) {
-    // I-K5: mode !== "auto" means the caller (cache-ttl.ts) never lets
-    // consumeUpgrade fire, so promising "→1h" in that configuration would be
-    // a lie about what actually happens next. Also gated on
-    // `supportsLongCacheRetention` (compat-flag fix, same audit pass): a
-    // model/route that never accepts `ttl:"1h"` can never actually upgrade,
-    // regardless of mode/budget settings. adaptive plan.md §6.2: in adaptive
-    // mode this hint intentionally disappears (mode !== "auto") — the
-    // adaptive segments in buildCacheStatusSnapshot take over.
-    const upgradeHint = mode === "auto" && config.upgradeAfterBudget && report.supportsLongCacheRetention ? " →1h" : "";
-    return `ping ${window.pings}/${config.maxPings} capped${upgradeHint}`;
-  }
-  if (window.lastStopReason !== undefined) {
-    return `ping paused:${window.lastStopReason}`;
-  }
+  if (session.disabled !== undefined) return `ping off:${session.disabled.reason} ×${session.pings}`;
+  if (window.pings > 0 && window.pings >= config.maxPings) return `ping ${window.pings}/${config.maxPings} capped`;
+  if (window.lastStopReason !== undefined) return `ping paused:${window.lastStopReason}`;
   if (session.pings === 0 && window.pings === 0) return undefined;
   const cumulative = session.pings > window.pings ? ` Σ${session.pings}` : "";
   return `ping ${window.pings}/${config.maxPings}${cumulative} · ${formatTokenCount(session.cacheReadTokens)} · ${formatCost(report.costUsd)}`;

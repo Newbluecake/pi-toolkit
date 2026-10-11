@@ -127,7 +127,7 @@ function settings(overrides: Partial<AgentSettings> = {}): AgentSettings {
     fabric: { ...DEFAULT_SETTINGS.fabric, enabled: false },
     workflow: { ...DEFAULT_SETTINGS.workflow, enabled: false },
     quota: { ...DEFAULT_SETTINGS.quota, enabled: false },
-    cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, keepalive: false, adaptiveEnabled: false },
+    cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, keepalive: false },
     bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
     consult: { ...DEFAULT_SETTINGS.consult, enabled: true, timeoutMs: 5_000 },
     ...overrides,

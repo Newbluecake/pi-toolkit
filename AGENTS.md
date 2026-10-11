@@ -182,42 +182,24 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   failure disables immediately, a post-`verified` recheck disables only after 2 consecutive
   uncommitted). All rejection reasons fold into `diag.contextSwitches.rejected[]` (FIFO cap 5),
   readable from `get_subagent_result`.
-- `src/cache-ttl/` — prompt-cache TTL mode (auto/on/off) wiring: status-bar indicator plus
-  persisted settings override. Adaptive 1h upgrades are bounded by two write budgets — a USD
-  marginal-cost gate (`adaptiveWriteBudgetUsd`, default $1, `0` = gate off) as the primary and
-  the legacy token budget (`adaptiveWriteBudgetTokens`, 200k, `0` = no upgrades at all) as the
-  fallback for routes that report no cost split; either one trips `write-budget` for the rest of
-  the session. The M2 probe floor scales with the measured prefix — `min(64k, max(4k, 0.5×P))` —
-  so a near-full prefix rewrite is caught at small prefixes while P ≥ 128k keeps the old fixed
-  64k floor. **Entry fee** (plan §16.3, field-measured): a `ttl:"1h"` request does not read a
-  5m-written prefix, so the FIRST upgrade of a prefix rewrites all of it as 1h. That one-time
-  cost has its own budget (`adaptiveFeeBudgetTokens` 600k / `adaptiveFeeBudgetUsd` $3, accrued at
-  0.95× `cost.cacheWrite`; `0` tokens = feature off) and the warm probes (`warm-miss` /
-  `warm-write-too-expensive`) only judge COVERED 1h→1h settlements — judging the transition
-  false-tripped every session on its first upgrade. **保活与自适应不是正交的**（现场事故
-  2026-09-23，plan §17）：`decideAdaptiveTtl` 的 warm/cold 判据必须把 keepalive 的
-  `provenCacheReadAt()`（最近一次 proven-hit 的读起点）算进来，否则一段被 ping 证明活着的
-  前缀会被判 cold 并整块升 1h——而 1h 请求读不到 5m 条目（同会话 13/13 实测），那是一次
-  全价重写。`1h-ineffective` 探针同理只认「读占上一次前缀的比例」，不认 `cacheRead > 0`。
-  同理，已覆盖前缀的续 1h 也要重写升级后累积的 5m 尾巴（`tokensSinceLast1hWrite`）：warm
-  预测/`delta-too-large` 按「尾巴 + Δ」判，尾巴部分美元边际按 0.95 计（plan §18）。
-  **保活与自适应按空档择一**（plan §19，验证 `verification-2026-09-25.md`）：保活能桥接的空档
-  （`keepaliveGapHorizonMs`，默认 49min）内 adaptive 不开新前缀（`keepalive-covers`），被确认的 1h
-  覆盖期间保活不 ping（tick 门 `adaptive-1h`）；前缀漂移（缩短 / warm 窗口内整前缀失效）只清 cover、
-  不判 `1h-ineffective`；入场费只认强信号时域。**§20（2026-09-26）**：F1 的「见过超出保活时域的空档」只认
-  武装空档（`armedGaps`，保活证明过读中的那些——人为午休不算）；已覆盖续期读崩塌 ⇒ 学到路由 1h 寿命上界
-  `learned1hLifeMs`，cover 封顶为其 0.8 倍；被 ping 撑住的空档不做 1h 判决。经济学仿真（含 5 策略 × 12 负载的
-  策略矩阵）：`tests/cache-ttl/adaptive-economics.test.ts`。
-  Design: `docs/dev/cache-ttl-adaptive/plan.md`. **Child-session keepalive** (child-context-switch
+- `src/cache-ttl/` — prompt-cache TTL modes `auto`/`on`/`off`, status-bar indicator,
+  persisted settings override, and `/cache-ttl`. Auto follows pi/env; on explicitly forces 1h;
+  off strips the TTL override. No automatic 1h upgrades remain (user decision 2026-10-11).
+  Keepalive replays captured payloads and verbatim headers under bounded ping budgets,
+  fingerprint/session/epoch guards, and unref'd timers (service in `src/service/cache-keepalive.ts`).
+  Main-session transient failures pause pinging at the existing streak/total limits; a successful
+  real provider response clears only transient counters and restores pinging. Proven writes and
+  non-transient breaker trips remain permanent; `/reload` restores the branch's breaker state.
+  Design: `docs/dev/cache-ttl-keepalive/plan.md`. **Child-session keepalive** (child-context-switch
   plan §2.4, `src/cache-ttl/child.ts` + `child-registry.ts`): capture-only (never rewrites the
   outgoing payload); limits 11/window · 24/run · 4 concurrent · $1.5/run · $10/24h process-rolling
   (`ping-ledger.ts`), no price info ⇒ no ping (`usd-unpriced`); ping cost folds into the child run's
   own `usage.costUsd` (fleet/HUD visible); disposed on `agent_settled` and defensively via the
   registry's `onReaped`. **`warmth.ts`** (topic-switch plan P2): a pi-free, never-throwing
   `CacheWarmthPort` (`wireCacheTtl`'s return value, `CacheTtlWiring.warmth`) that judges whether
-  the NEXT Anthropic request would read a warm prompt cache from evidence alone (adaptive
-  `coversPrefix(0)` or a proven recent touch) — `mode`/`lastSent`/1h-write traces only raise the
-  bar for PROVING cold (Anthropic's 1h max TTL) and pick `nextWriteTtl`; anything unprovable is
+  the NEXT Anthropic request would read a warm prompt cache from a proven recent ledger or
+  keepalive touch (`provenCacheReadAt()`). `mode`/`lastSent`/1h-write traces only raise the bar
+  for PROVING cold (Anthropic's 1h max TTL) and pick `nextWriteTtl`; anything unprovable is
   `unknown` (topic-switch's gate 3a treats that as "don't ask", same I6 fail-open direction).
 - `src/child/` — child-session assembly entry point (`wire.ts`'s `wireChildSession`, called from
   `src/index.ts` pre-guard when `isChildSession`, alongside `wireMemory`/`wireChildBashJobs`): composes

@@ -304,7 +304,6 @@ export default function activate(rawPi: ExtensionAPI): void {
 
   const cacheTtl = wireCacheTtl(pi, settings, {
     keepalive: () => holder.current?.keepalive,
-    adaptive: () => holder.current?.adaptive,
   });
   // Built FRESH per activate(): depending on pi's version, /reload either
   // re-runs activate on the cached module or re-imports a FRESH module (jiti
@@ -792,7 +791,6 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.backgroundCompletions.dispose();
       holder.current.fleetWidget?.dispose();
       holder.current.keepalive?.dispose();
-      holder.current.adaptive?.dispose();
       holder.current.quota?.dispose();
       holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
       holder.current.load?.dispose();
@@ -844,7 +842,6 @@ export default function activate(rawPi: ExtensionAPI): void {
     // blinks off/on at the combined tick rate, worse with every reload.
     stack.fleetWidget?.dispose();
     stack.keepalive?.dispose();
-    stack.adaptive?.dispose();
     stack.quota?.dispose();
     stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
     stack.load?.dispose();

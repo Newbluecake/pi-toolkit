@@ -108,7 +108,6 @@ const SETTINGS: CacheTtlSettings = {
   keepaliveIntervalMs: 240_000,
   keepaliveMaxPings: 11,
   keepaliveMinPrefixTokens: 20_000,
-  keepaliveUpgradeAfterBudget: true,
 };
 
 function fakeCtx(overrides: Record<string, unknown> = {}) {
