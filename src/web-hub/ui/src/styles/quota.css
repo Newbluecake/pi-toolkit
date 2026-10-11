@@ -130,10 +130,8 @@
  * bar that same shrink rule let a single-group pill collapse all the way down to an unreadable
  * sliver (2026-10 field report, red half-circle). Pin BOTH the anchor and the pill to their own
  * content width at this breakpoint — there is no longer anything here that needs to shrink.
- * `min-height: 44px` folds the ≥44px coarse touch target requirement into the SAME query
- * (CSS budget — a separate `@media (pointer: coarse)` block costs more gzip than it's worth
- * here): on phone width this pill is a tap target first and foremost, so always giving it room
- * is a fine trade even on the rare narrow-but-mouse-driven desktop window. */
+ * The ≥44px touch target comes from an invisible ::before hit area, NOT min-height: a 44px-tall
+ * visible pill looked bloated next to the logo (2026-10-11 user report). */
 @media (max-width: 480px) {
   .q-anchor,
   .q-pill {
@@ -141,7 +139,13 @@
   }
 
   .q-pill {
-    min-height: 44px;
+    position: relative;
+  }
+
+  .q-pill::before {
+    content: "";
+    position: absolute;
+    inset: -10px -4px;
   }
 }
 
