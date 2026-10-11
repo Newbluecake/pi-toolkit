@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -62,7 +62,21 @@ describe("tidy batch P3a orchestration", () => {
       settings: settings(),
     });
     expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("lock: free");
     expect(messages[0]).toContain("lease: free");
+  });
+
+  it("--status shows a held directory lock's holder without touching it", async () => {
+    const fx = fixture();
+    const lock = JSON.stringify({ pid: 1, host: "other-host", token: "t", at: 1_700_000_000_000 });
+    writeFileSync(join(fx.dir, ".lock"), lock);
+    const messages: string[] = [];
+    await handleBatchTidyCommand("--batch --status", context(fx.cwd, messages), {
+      paths: fx.paths,
+      settings: settings(),
+    });
+    expect(messages[0]).toContain("lock: pid 1 on other-host since 2023-11-14T22:13:20.000Z");
+    expect(readFileSync(join(fx.dir, ".lock"), "utf8")).toBe(lock);
   });
 
   it("serves RPC dry-run without a spawn port and reports the plan", async () => {

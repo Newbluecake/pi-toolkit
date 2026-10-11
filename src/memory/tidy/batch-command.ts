@@ -221,7 +221,10 @@ function statusText(dir: string): string {
   const leaseLine = lease
     ? `lease: pid ${lease.payload.pid} on ${lease.payload.host} since ${new Date(lease.payload.at).toISOString()}${lease.payload.draining.length ? ` draining ${lease.payload.draining.join(",")}` : ""}`
     : "lease: free";
-  const rows: string[] = [leaseLine];
+  // Read-only: a stale or foreign directory lock blocks every memory write, so --status shows its
+  // holder too (only `/mem tidy --break-lock` may clear it, M-T4).
+  const lockHolder = lockReadText(dir);
+  const rows: string[] = [lockHolder === "none" ? "lock: free" : `lock: ${lockHolder}`, leaseLine];
   const invalid: { id: string; reason: string }[] = [];
   for (const id of listDirNames(`${dir}/.backup`)) {
     let dirs;
@@ -290,13 +293,12 @@ async function breakLockCommand(ctx: ExtensionCommandContext, dir: string, timin
   );
 }
 function lockReadText(dir: string): string {
-  const raw = (() => {
-    try {
-      return readRegular(dir, ".lock").text;
-    } catch {
-      return "none";
-    }
-  })();
+  let raw: string;
+  try {
+    raw = readRegular(dir, ".lock").text;
+  } catch {
+    return "none";
+  }
   try {
     const p = JSON.parse(raw) as { pid?: number; host?: string; at?: number };
     return p.pid && p.host
