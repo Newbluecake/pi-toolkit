@@ -10,11 +10,14 @@ export interface PrefixRequestRecord {
   endedAt?: number;
   fieldHashes: Partial<Record<ProviderPrefixField, string>>;
   messageHashes?: string[];
-  breakpoints?: Array<{ msg: number; block: number; ttl?: string }>;
+  /** Breakpoints relative to the request's last user/tool-result message. */
+  breakpoints?: Array<{ block: number; ttl?: string }>;
+  /** False when a provider placed a breakpoint anywhere but that last message. */
+  breakpointsValid?: boolean;
+  /** Only TTL participates in the cross-request breakpoint comparison. */
+  breakpointTtls?: string[];
   usage?: { input: number; cacheRead: number; cacheWrite: number; output: number; costUsd: number };
   toolsDrift?: true;
-  /** Full breakpoint values, hashed so cache_control fields other than ttl remain comparable. */
-  breakpointHashes?: string[];
 }
 
 export interface RunPrefixRecord {
@@ -111,13 +114,22 @@ function breakpointTtl(cacheControl: unknown): string | undefined {
 
 function messageDetails(messages: unknown): {
   hashes?: string[];
-  breakpoints?: Array<{ msg: number; block: number; ttl?: string }>;
-  breakpointHashes?: string[];
+  breakpoints?: Array<{ block: number; ttl?: string }>;
+  breakpointsValid?: boolean;
+  breakpointTtls?: string[];
 } {
   if (!Array.isArray(messages)) return {};
   const hashes: string[] = [];
-  const breakpoints: Array<{ msg: number; block: number; ttl?: string }> = [];
-  const breakpointHashes: string[] = [];
+  let lastUserOrToolResult = -1;
+  messages.forEach((message, index) => {
+    if (message !== null && typeof message === "object") {
+      const role = (message as { role?: unknown }).role;
+      if (role === "user" || role === "tool_result") lastUserOrToolResult = index;
+    }
+  });
+  const breakpoints: Array<{ block: number; ttl?: string }> = [];
+  const breakpointTtls: string[] = [];
+  let breakpointsValid = true;
   for (let msg = 0; msg < messages.length; msg++) {
     const message = messages[msg];
     hashes.push(hashJson(withoutCacheControl(message)));
@@ -127,14 +139,15 @@ function messageDetails(messages: unknown): {
     for (let block = 0; block < content.length; block++) {
       const cacheControl = cacheControlAt(content[block]);
       if (cacheControl === undefined) continue;
-      const point: { msg: number; block: number; ttl?: string } = { msg, block };
+      if (msg !== lastUserOrToolResult) breakpointsValid = false;
+      const point: { block: number; ttl?: string } = { block };
       const ttl = breakpointTtl(cacheControl);
       if (ttl !== undefined) point.ttl = ttl;
+      breakpointTtls.push(ttl ?? "");
       breakpoints.push(point);
-      breakpointHashes.push(hashJson(cacheControl));
     }
   }
-  return { hashes, breakpoints, breakpointHashes };
+  return { hashes, breakpoints, breakpointsValid, breakpointTtls };
 }
 
 function recordFieldHashes(
@@ -160,7 +173,8 @@ function recordFieldHashes(
       const details = messageDetails(object.messages);
       if (details.hashes !== undefined) record.messageHashes = details.hashes;
       if (details.breakpoints !== undefined) record.breakpoints = details.breakpoints;
-      if (details.breakpointHashes !== undefined) record.breakpointHashes = details.breakpointHashes;
+      if (details.breakpointsValid !== undefined) record.breakpointsValid = details.breakpointsValid;
+      if (details.breakpointTtls !== undefined) record.breakpointTtls = details.breakpointTtls;
     } catch {
       state.error();
     }
@@ -351,18 +365,13 @@ function equalHash(left: string | undefined, right: string | undefined): boolean
   return left === undefined && right === undefined ? true : left !== undefined && right !== undefined && left === right;
 }
 
-function equalArray(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
-  if (left === undefined || right === undefined) return left === undefined && right === undefined;
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
 function breakpointComparison(expert: PrefixRequestRecord, consult: PrefixRequestRecord): boolean {
-  const left = expert.breakpoints ?? [];
-  const right = consult.breakpoints ?? [];
-  if (stableJson(left) !== stableJson(right)) return false;
-  if (expert.breakpointHashes !== undefined && consult.breakpointHashes !== undefined)
-    return equalArray(expert.breakpointHashes, consult.breakpointHashes);
-  return true;
+  if (expert.breakpointsValid !== true || consult.breakpointsValid !== true) return false;
+  const left = expert.breakpointTtls ?? [];
+  const right = consult.breakpointTtls ?? [];
+  return (
+    (expert.breakpoints ?? []).length === (consult.breakpoints ?? []).length && stableJson(left) === stableJson(right)
+  );
 }
 
 /** Compare two stored records using exactly the frozen raw-payload field rules. */

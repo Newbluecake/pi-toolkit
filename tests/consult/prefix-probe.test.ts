@@ -96,6 +96,22 @@ describe("consult prefix probe", () => {
           ],
         },
       ],
+      [
+        base,
+        {
+          ...base,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", cache_control: { type: "ephemeral", ttl: "5m" }, text: "hello" }],
+            },
+            {
+              role: "user",
+              content: [{ type: "text", cache_control: { type: "ephemeral", ttl: "5m" }, text: "later" }],
+            },
+          ],
+        },
+      ],
     ];
 
     for (const [index, [expert, consult]] of pairs.entries()) {
