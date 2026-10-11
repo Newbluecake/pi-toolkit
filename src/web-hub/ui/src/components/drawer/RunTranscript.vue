@@ -22,6 +22,8 @@ import type { RunTranscriptProps, TranscriptSource } from "../../contracts.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_VIEW, HUB_CTX, type ControlView } from "../control/controlContext.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import { AVATAR_CTX } from "../transcript/avatarContext.js";
+import type { AvatarHandle } from "../../composables/useAvatar.js";
 import Transcript from "../transcript/Transcript.vue";
 import { fleetActivity } from "../fleet/summary.js";
 
@@ -35,6 +37,8 @@ const hub = inject(HUB_CTX, null);
 // (controlContext.ts 是冻结面,不在本包文件域),这里以显式 cast 提供 null —— 所有消费点
 // (TxUser 等)都是 `inject(CONTROL_VIEW, null)` + 可选链,null 与缺省行为逐字节一致。
 provide(CONTROL_VIEW, null as unknown as ControlView);
+// Child-agent transcripts intentionally keep the fixed icon (avatar plan §5/Q1).
+provide(AVATAR_CTX, null as unknown as AvatarHandle);
 
 const tx = computed(() => props.agent.runTx ?? null);
 

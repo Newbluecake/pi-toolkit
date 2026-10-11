@@ -51,6 +51,7 @@ import { spawnModelSupported } from "../../logic/spawn.js";
 import { SPAWN_HUB_CAP } from "@protocol/version.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import SettingsModelPicker from "./SettingsModelPicker.vue";
+import SettingsAvatarCard from "./SettingsAvatarCard.vue";
 import type { ThemePref } from "../../types.js";
 import "../../styles/settings.css";
 
@@ -207,6 +208,7 @@ function onModelSelect(value: string): void {
       </header>
 
       <div class="settings-grid">
+        <SettingsAvatarCard />
         <section class="settings-card" :aria-label="t('settings.themeSection')">
           <h2 class="settings-h">{{ t("settings.themeSection") }}</h2>
           <div class="settings-options" role="radiogroup" :aria-label="t('settings.themeSection')">

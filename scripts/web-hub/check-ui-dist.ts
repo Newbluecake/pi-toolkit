@@ -81,7 +81,10 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // pill / card / drawer banner + en/zh load dictionaries) and the @mention parity UI, total JS
 // measured 255,430 B gz on a clean committed tree ⇒ budget raised to 255 KiB (261,120 B,
 // ~5.6 KB headroom).
-const JS_BUDGET_GZIP_BYTES = 255 * 1024;
+// Bumped to 256 KiB by web-hub-avatar U (2026-10-11, docs/dev/web-hub-avatar/plan.md §5):
+// the client editor/composable and settings/transcript wiring measured 261,622 B gz, just over
+// the 255 KiB gate; the minimum round-byte bump restores 522 B of headroom.
+const JS_BUDGET_GZIP_BYTES = 256 * 1024;
 const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
 
 class CheckError extends Error {}

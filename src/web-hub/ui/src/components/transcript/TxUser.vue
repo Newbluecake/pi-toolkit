@@ -14,12 +14,14 @@
   Same day 「web 和时间放在同一行」: badges + time share one `.msg-foot` row under the bubble.
 -->
 <script setup lang="ts">
-import { computed, inject } from "vue";
+import { computed, inject, ref, watch } from "vue";
 import { formatDateTime } from "../../format.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_VIEW } from "../control/controlContext.js";
 import PathText from "../preview/PathText.vue";
 import AppIcon from "../../icons/AppIcon.vue";
+import { AVATAR_CTX } from "./avatarContext.js";
+import "../../styles/avatar.css";
 
 const props = defineProps<{
   readonly text: string;
@@ -33,13 +35,25 @@ const timeLabel = computed(() =>
 );
 
 const view = inject(CONTROL_VIEW, null);
+const avatar = inject(AVATAR_CTX, null);
+const avatarFailed = ref(false);
+watch(
+  () => avatar?.src.value,
+  () => {
+    avatarFailed.value = false;
+  },
+);
+const avatarSrc = computed(() => (avatarFailed.value ? null : (avatar?.src.value ?? null)));
 const fromWeb = computed(() => view?.isWebMessage(props.timestamp) === true);
 </script>
 
 <template>
   <div class="msg-user tx-item">
     <div class="bubble"><PathText :text="text" /></div>
-    <span class="avatar avatar-user" aria-hidden="true"><AppIcon name="user" class="icon" /></span>
+    <span class="avatar avatar-user" aria-hidden="true">
+      <img v-if="avatarSrc" class="avatar-img" :src="avatarSrc" alt="" decoding="async" @error="avatarFailed = true" />
+      <AppIcon v-else name="user" class="icon" />
+    </span>
     <span v-if="fromWeb || truncated || timeLabel" class="msg-foot">
       <span v-if="fromWeb" class="badge badge-web" translate="no">{{ t("control.badgeWeb") }}</span>
       <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>
