@@ -698,8 +698,8 @@ Releases are cut from `master` by `scripts/release/release.sh <version>` (adapte
   subjects/bodies therefore ARE the changelog — write them for users. Do not hand-edit released
   sections either; to change the output, change the script.
 - **Flow**: on `master`, clean tree, up to date with `origin/master` ⇒ sync `package.json` /
-  `package-lock.json` ⇒ generate CHANGELOG ⇒ `format:check` → `typecheck` → `test` → `build` →
-  `build:web` + `check:web` (any failure aborts before commit/tag) ⇒ commit
+  `package-lock.json` ⇒ generate CHANGELOG ⇒ `format:check` → `typecheck` → `build` →
+  `build:web` + `check:web` → `test` (any failure aborts before commit/tag) ⇒ commit
   `chore(release): bump version to vX.Y.Z` ⇒ annotated tag carrying the section ⇒ push ⇒
   `scripts/release/package.sh` (zips + sha256 + notes) ⇒ `gh release create`. Flags: `--dry-run`,
   `--changelog`, `--skip-tests` (emergency only), `--skip-push`, `--skip-publish`.

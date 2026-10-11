@@ -41,8 +41,8 @@
 #      `[Unreleased]` is left empty afterwards. Updates/adds the compare-link
 #      refs at the bottom of the file.
 #   5. (--changelog stops here.)
-#   6. Runs the pre-release check suite: format:check, typecheck, test,
-#      build, build:web + check:web. Build steps are run with
+#   6. Runs the pre-release check suite: format:check, typecheck, build,
+#      build:web + check:web, then test (the dist test needs the bumped dist). Build steps are run with
 #      NODE_ENV=production pinned (mirrors package.sh — vitest sets
 #      NODE_ENV=test, which changes the Vue SFC compiler's output and would
 #      make the UI bundle miss its own gzip budget).
@@ -487,12 +487,14 @@ if [[ $SKIP_TESTS -eq 0 ]]; then
   [[ $DRY_RUN -eq 0 ]] && npm run format:check
   info "  -> npm run typecheck"
   [[ $DRY_RUN -eq 0 ]] && npm run typecheck
-  info "  -> npm test"
-  [[ $DRY_RUN -eq 0 ]] && npm test
+  # Build BEFORE npm test: step 3 already bumped package.json, and the dist integration test
+  # (tests/integration/web-hub-ui-dist.test.ts) rejects a dist/web-hub-ui built for the old version.
   info "  -> npm run build (NODE_ENV=production)"
   [[ $DRY_RUN -eq 0 ]] && NODE_ENV=production npm run build
   info "  -> npm run build:web (NODE_ENV=production) && npm run check:web"
   [[ $DRY_RUN -eq 0 ]] && { NODE_ENV=production npm run build:web && npm run check:web; }
+  info "  -> npm test"
+  [[ $DRY_RUN -eq 0 ]] && npm test
   ok "Pre-release checks passed"
 else
   warn "[5/9] Skipping pre-release checks (--skip-tests — emergency use only)"
