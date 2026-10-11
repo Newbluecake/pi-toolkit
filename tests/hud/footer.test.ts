@@ -45,7 +45,25 @@ describe("renderExtensionStatusLines", () => {
     const plain = { fg: (_color: string, text: string) => text };
     // "kimi 62%" (8) + " │ " (3) + "web ●" (5) = 16
     expect(renderExtensionStatusLines(entries, plain, 16)).toEqual(["5m", "kimi 62% │ web ●"]);
-    expect(renderExtensionStatusLines(entries, plain, 15)).toEqual(["5m", "web ●", "kimi 62%"]);
+    // too narrow for the quota line: web rides at the end of the generic status line instead
+    expect(renderExtensionStatusLines(entries, plain, 15)).toEqual(["5m web ●", "kimi 62%"]);
+    // too narrow for both: web owns its line
+    expect(renderExtensionStatusLines(entries, plain, 7)).toEqual(["5m", "web ●", "kimi 62%"]);
+  });
+
+  it("quota + load + web 放得下时同一行，否则 web 挂到 status 行末尾而非独占一行", () => {
+    const entries: [string, string][] = [
+      ["quota", "kimi 62%"],
+      ["load", "load ok"],
+      ["pi-subagent:web-hub", "web ●"],
+      ["cache-ttl", "5m"],
+    ];
+    const plain = { fg: (_color: string, text: string) => text };
+    // 8 + 3 + 7 + 3 + 5 = 26
+    expect(renderExtensionStatusLines(entries, plain, 26)).toEqual(["5m", "kimi 62% │ load ok │ web ●"]);
+    expect(renderExtensionStatusLines(entries, plain, 25)).toEqual(["5m web ●", "kimi 62% │ load ok"]);
+    // no generic status line to ride on: web keeps its own line
+    expect(renderExtensionStatusLines(entries.slice(0, 3), plain, 25)).toEqual(["web ●", "kimi 62% │ load ok"]);
   });
 
   it("其余条目按 key 排序后合并为一行", () => {

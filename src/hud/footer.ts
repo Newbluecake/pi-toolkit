@@ -211,20 +211,35 @@ export function renderExtensionStatusLines(
   // before quota (§7.4). Web-hub keeps its older quota-sharing rule, but never
   // displaces the load line when both are present.
   const sep = theme.fg("dim", " │ ");
+  const fits = (...parts: string[]): boolean =>
+    width !== undefined && parts.reduce((sum, p) => sum + visibleWidth(p), 0) <= width;
+  // Web-hub's status is short (`web ●`): before giving it a line of its own, let it ride at the
+  // end of the generic status line when that still fits (2026-10-11 user report: the load
+  // segment pushed it onto a lonely extra line).
+  const placeWeb = (): void => {
+    if (web === undefined) return;
+    const head = lines[0];
+    if (others.length > 0 && head !== undefined && fits(head, " ", web)) lines[0] = head + " " + web;
+    else lines.push(web);
+  };
   if (quota !== undefined && load !== undefined && width !== undefined) {
-    if (visibleWidth(quota) + visibleWidth(sep) + visibleWidth(load) <= width) {
+    if (web !== undefined && fits(quota, sep, load, sep, web)) {
+      lines.push(quota + sep + load + sep + web);
+      return lines;
+    }
+    if (fits(quota, sep, load)) {
+      placeWeb();
       lines.push(quota + sep + load);
-      if (web !== undefined) lines.push(web);
       return lines;
     }
   }
   if (web !== undefined && quota !== undefined && width !== undefined && load === undefined) {
-    if (visibleWidth(quota) + visibleWidth(sep) + visibleWidth(web) <= width) {
+    if (fits(quota, sep, web)) {
       lines.push(quota + sep + web);
       return lines;
     }
   }
-  if (web !== undefined) lines.push(web);
+  placeWeb();
   if (load !== undefined) lines.push(load);
   if (quota !== undefined) lines.push(quota);
   return lines;
