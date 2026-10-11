@@ -46,6 +46,7 @@ import {
   tickTurn,
   type NudgeConfig,
   type NudgeState,
+  type NudgePrecondition,
   type TodoTrackerSnapshot,
 } from "./nudge.js";
 import {
@@ -527,19 +528,29 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
 
     // E3 + trigger evaluation. Hidden message, never triggers a new turn.
     pi.on("turn_end", () => {
-      const hasInProgressTask = state.tasks.some((task) => task.status === "in_progress");
-      const result = tickTurn(nudgeState, nudgeConfig, hasInProgressTask);
+      const precondition: NudgePrecondition = {
+        inProgress: state.tasks.filter((task) => task.status === "in_progress").length,
+        pending: state.tasks.filter((task) => task.status === "pending").length,
+      };
+      const result = tickTurn(nudgeState, nudgeConfig, precondition);
       nudgeState = result.state;
       if (!result.fire) return;
-      const inProgressTasks = state.tasks.filter((task) => task.status === "in_progress");
-      const text = buildNudgeText({ e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3 }, inProgressTasks);
+      const listedTasks =
+        result.kind === "untracked"
+          ? state.tasks.filter((task) => task.status === "pending")
+          : state.tasks.filter((task) => task.status === "in_progress");
+      const text = buildNudgeText(
+        { e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3 },
+        listedTasks,
+        result.kind,
+      );
       try {
         deps.sendMessage?.(
           {
             customType: TODO_NUDGE_CUSTOM_TYPE,
             content: text,
             display: false,
-            details: { e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3 },
+            details: { e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3, kind: result.kind },
           },
           { triggerTurn: false },
         );

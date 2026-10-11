@@ -81,12 +81,20 @@ export function recordTodoTouch(_state: NudgeState, config: NudgeConfig): NudgeS
 export interface NudgeTickResult {
   readonly state: NudgeState;
   readonly fire: boolean;
+  readonly kind?: NudgeKind;
 }
 
+export interface NudgePrecondition {
+  readonly inProgress: number;
+  readonly pending: number;
+}
+
+export type NudgeKind = "stale" | "untracked";
+
 /**
- * Called once per turn_end. `hasInProgressTask` is the current
- * (pending/in_progress-derived) precondition — with none in_progress, the
- * feature never fires regardless of any accumulated evidence.
+ * Called once per turn_end. Evidence can nudge either existing in-progress
+ * work or untracked work; the zero-evidence fallback remains limited to the
+ * existing in-progress case.
  *
  * Cooldown semantics: `cooldownTurnsLeft` counts turns that are STILL
  * silent. Right after a fire it is set to the cooldown length (say 8); the
@@ -94,7 +102,12 @@ export interface NudgeTickResult {
  * (the 9th) is the first one eligible to fire again — i.e. "cooldownTurns
  * 轮内不再提醒" counts turns, not fires.
  */
-export function tickTurn(state: NudgeState, config: NudgeConfig, hasInProgressTask: boolean): NudgeTickResult {
+export function tickTurn(
+  state: NudgeState,
+  config: NudgeConfig,
+  precondition: NudgePrecondition | boolean,
+): NudgeTickResult {
+  const inProgress = typeof precondition === "boolean" ? (precondition ? 1 : 0) : precondition.inProgress;
   const e3 = Math.min(state.e3 + 1, COUNTER_CAP);
   const evidenceAgeTurns = state.evidenceAgeTurns === null ? null : Math.min(state.evidenceAgeTurns + 1, COUNTER_CAP);
   const wasCoolingDown = state.cooldownTurnsLeft > 0;
@@ -102,10 +115,12 @@ export function tickTurn(state: NudgeState, config: NudgeConfig, hasInProgressTa
   const hasEvidence = state.e1 + state.e2 >= 1;
   const evidenceTrigger = hasEvidence && evidenceAgeTurns !== null && evidenceAgeTurns >= config.graceTurns;
   const fallbackTrigger = !hasEvidence && e3 >= config.fallbackTurns;
-  const candidate = evidenceTrigger || fallbackTrigger;
+  const hasInProgressTask = inProgress > 0;
+  const candidate = hasInProgressTask ? evidenceTrigger || fallbackTrigger : evidenceTrigger;
+  const kind: NudgeKind = hasInProgressTask ? "stale" : "untracked";
 
   const ticked: NudgeState = { ...state, e3, evidenceAgeTurns, cooldownTurnsLeft };
-  if (!candidate || !hasInProgressTask || wasCoolingDown) {
+  if (!candidate || wasCoolingDown) {
     return { state: ticked, fire: false };
   }
 
@@ -119,6 +134,7 @@ export function tickTurn(state: NudgeState, config: NudgeConfig, hasInProgressTa
       noTouchStreak: state.noTouchStreak + 1,
     },
     fire: true,
+    kind,
   };
 }
 
@@ -154,15 +170,27 @@ function truncateTitle(subject: string): string {
  * zero-count evidence item is omitted entirely; at most 5 in_progress tasks
  * are listed, each title truncated to 60 chars.
  */
-export function buildNudgeText(counts: NudgeCounts, inProgressTasks: readonly NudgeTaskSummary[]): string {
+export function buildNudgeText(
+  counts: NudgeCounts,
+  tasks: readonly NudgeTaskSummary[],
+  kind: NudgeKind = "stale",
+): string {
   const clauses: string[] = [];
   if (counts.e1 > 0) clauses.push(`${counts.e1} 个子 agent/workflow 完成`);
   if (counts.e2 > 0) clauses.push(`${counts.e2} 次 git 提交`);
   if (counts.e3 > 0) clauses.push(`已过 ${counts.e3} 轮`);
-  const listed = inProgressTasks
+  const listed = tasks
     .slice(0, MAX_LISTED_TASKS)
     .map((task) => `#${task.id} ${truncateTitle(task.subject)}`)
     .join("、");
+  if (kind === "untracked") {
+    const pending = listed ? `待办：${listed}。` : "";
+    return (
+      `[todo] 自上次更新任务以来：${clauses.slice(0, 2).join("、")}，但当前没有进行中的任务。` +
+      pending +
+      "请用 TaskCreate 登记正在做的工作，或用 TaskUpdate 把对应任务标为 in_progress/completed；确实不需要跟踪可以忽略。"
+    );
+  }
   return (
     `[todo] 自上次更新任务以来：${clauses.join("、")}。进行中：${listed}。` +
     "如状态或进度有变，请用 TaskUpdate 更新；没有变化可以忽略。"

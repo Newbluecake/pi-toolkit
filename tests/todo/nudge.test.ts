@@ -59,10 +59,34 @@ describe("todo/nudge: evidence trigger (grace window)", () => {
     expect(next.fire).toBe(true);
   });
 
-  it("evidence trigger requires at least one in_progress task", () => {
+  it("evidence trigger fires as untracked work without an in_progress task", () => {
     const evidenced = recordEvidence(initNudgeState(CONFIG), "e1");
     const results = tickN(evidenced, CONFIG, false, CONFIG.graceTurns + 5);
-    expect(results.every((r) => r.fire === false)).toBe(true);
+    expect(results.some((r) => r.fire)).toBe(true);
+    expect(results.find((r) => r.fire)?.kind).toBe("untracked");
+  });
+});
+
+describe("todo/nudge: untracked evidence trigger", () => {
+  it.each([["e1"], ["e2"]] as const)("fires for %s evidence without in_progress work", (kind) => {
+    const evidenced = recordEvidence(initNudgeState(CONFIG), kind);
+    const results = tickN(evidenced, CONFIG, false, CONFIG.graceTurns);
+    expect(results.at(-1)?.fire).toBe(true);
+    expect(results.at(-1)?.kind).toBe("untracked");
+  });
+
+  it("does not use the zero-evidence fallback without in_progress work", () => {
+    const results = tickN(initNudgeState(CONFIG), CONFIG, false, CONFIG.fallbackTurns + 10);
+    expect(results.every((result) => !result.fire)).toBe(true);
+  });
+
+  it("shares cooldown/backoff with the in-progress kind", () => {
+    const evidenced = recordEvidence(initNudgeState(CONFIG), "e1");
+    const first = tickN(evidenced, CONFIG, false, CONFIG.graceTurns).at(-1)!;
+    expect(first.kind).toBe("untracked");
+    const silent = tickN(first.state, CONFIG, true, CONFIG.cooldownTurns);
+    expect(silent.every((result) => !result.fire)).toBe(true);
+    expect(tickTurn(silent.at(-1)!.state, CONFIG, true).kind).toBe("stale");
   });
 });
 

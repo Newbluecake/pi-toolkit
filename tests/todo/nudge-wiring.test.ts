@@ -202,6 +202,30 @@ describe("todo/index wireTodo: nudge firing", () => {
     }
   });
 
+  test("untracked E1 work fires with pending-task listing and distinct text", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { isChildSession: false, nudge: NUDGE, sendMessage: host.pi.sendMessage });
+    const ctx = fakeCtx();
+    await exec(host, "TaskCreate", { subject: "Pending review", description: "d" }, ctx);
+    messageStart(host, "subagent:notification");
+    for (let i = 0; i < NUDGE.graceTurns; i++) turnEnd(host);
+    expect(host.sent).toHaveLength(1);
+    expect(host.sent[0]?.message.content).toContain("但当前没有进行中的任务");
+    expect(host.sent[0]?.message.content).toContain("待办：#1 Pending review");
+    expect(host.sent[0]?.message.details).toMatchObject({ kind: "untracked" });
+  });
+
+  test("untracked E2 work fires without any in_progress task", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, { isChildSession: false, nudge: NUDGE, sendMessage: host.pi.sendMessage });
+    const ctx = fakeCtx();
+    toolStart(host, "call-1", "bash", { command: "git commit -m wip" });
+    toolEnd(host, "call-1", "bash", false);
+    for (let i = 0; i < NUDGE.graceTurns; i++) turnEnd(host);
+    expect(host.sent).toHaveLength(1);
+    expect(host.sent[0]?.message.content).toContain("但当前没有进行中的任务");
+  });
+
   test("E2: a successful git write bash command counts as evidence and fires after graceTurns", async () => {
     const host = fakePi();
     wireTodo(host.pi, { isChildSession: false, nudge: NUDGE, sendMessage: host.pi.sendMessage });
