@@ -412,7 +412,9 @@ if [[ $SKIP_CHANGELOG -eq 0 ]]; then
   GENERATED_SECTION=$(printf '%s\n' "$GENERATED_SECTION" | cat -s)
 
   NEW_SECTION="## [$VERSION] - $TODAY"$'\n\n'"$GENERATED_SECTION"
-  [[ -n "$STATS_LINE" ]] && NEW_SECTION+=$'\n'"$STATS_LINE"$'\n'
+  # Blank line before Stats: the $(...) above stripped the trailing newline, and a line glued
+  # to the last bullet is a lazy list continuation that prettier re-indents (format:check fails).
+  [[ -n "$STATS_LINE" ]] && NEW_SECTION+=$'\n\n'"$STATS_LINE"$'\n'
 
   if [[ $DRY_RUN -eq 1 ]]; then
     echo "── generated CHANGELOG section (dry-run, not written) ──────────────"
