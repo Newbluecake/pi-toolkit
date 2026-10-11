@@ -93,7 +93,11 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // feature growth a routine budget bump.
 const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 253 * 1024;
 const LAZY_JS_BUDGET_GZIP_BYTES = 42 * 1024;
-const CSS_BUDGET_GZIP_BYTES = 25 * 1024;
+// CSS (one file, cssCodeSplit:false ⇒ all of it is first-screen): the 25 KiB set in vue-plan v2.1
+// was as empirical as the old JS total. 2026-10-11 (user: don't spend effort squeezing gzip bytes)
+// it follows the same rule as the first-screen JS budget — measured 25,615 B gz × 1.10 rounded up
+// to a whole KiB = 28 KiB — so it stays a regression alarm instead of a per-feature chore.
+const CSS_BUDGET_GZIP_BYTES = 28 * 1024;
 
 export type JsAssetClassification = {
   firstScreen: Set<string>;
