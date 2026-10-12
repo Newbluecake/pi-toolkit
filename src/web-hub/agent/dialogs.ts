@@ -113,6 +113,16 @@ function validAnswers(record: DialogRecord, answers: DialogAnswerWire[]): string
     if (answer.other !== null && typeof answer.other !== "string") return "other must be a string or null";
     if (answer.other !== null && Buffer.byteLength(answer.other, "utf8") > OTHER_MAX_BYTES) return "other is too long";
     if (answer.other !== null && question.allowOther === false) return "other is not allowed";
+    // Per-question skip: always allowed (same standing as the automatic Other). A skipped
+    // answer is exactly {selected: [], other: null, skipped: true} — never mixed with a
+    // real answer, and it satisfies the per-question answer requirement.
+    if (answer.skipped !== undefined && typeof answer.skipped !== "boolean") return "skipped must be a boolean";
+    if (answer.skipped === true) {
+      if (answer.selected.length > 0 || (answer.other !== null && answer.other !== "")) {
+        return "a skipped answer must not carry selected or other";
+      }
+      continue;
+    }
     if (answer.selected.length === 0 && (answer.other === null || answer.other === "")) {
       return "each question needs an option or other answer";
     }
@@ -130,7 +140,11 @@ function encodeAnswers(questions: AskUserQuestion[], answers: DialogAnswerWire[]
     Object.assign(
       result,
       encodeAnswer(
-        { selected: answer.selected, other: answer.other },
+        {
+          selected: answer.selected,
+          other: answer.other,
+          ...(answer.skipped === true ? { skipped: true } : {}),
+        },
         {
           key,
           multiSelect: question.multiSelect === true,

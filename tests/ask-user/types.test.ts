@@ -7,6 +7,7 @@ import {
   OTHER_LABEL,
   QuestionSchema,
   ResultSchema,
+  SKIP_LABEL,
   SPLIT_PANE_MIN_WIDTH,
   SPLIT_PANE_SEPARATOR,
   createQuestionState,
@@ -49,6 +50,15 @@ describe("types", () => {
     expect(ResultSchema.properties.questions).toBeDefined();
     expect(ResultSchema.properties.answers).toBeDefined();
     expect(ResultSchema.properties.cancelled.type).toBe("boolean");
+  });
+
+  it("carries the per-question skip as an OPTIONAL answer field and fresh state", () => {
+    expect(SKIP_LABEL).toBe("Skip");
+    const skippedProp = AnswerValueSchema.properties.skipped as { type?: string };
+    expect(skippedProp.type).toBe("boolean");
+    const required = (AnswerValueSchema as unknown as { required?: string[] }).required ?? [];
+    expect(required).toEqual(["selected", "other"]);
+    expect(createQuestionState().skipped).toBe(false);
   });
 
   it("exports the frozen layout constants", () => {

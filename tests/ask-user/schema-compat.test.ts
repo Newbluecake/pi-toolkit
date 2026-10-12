@@ -46,4 +46,20 @@ describe("ask_user schema compatibility", () => {
       }),
     ).toBe(false);
   });
+
+  it("accepts skipped answers in the result schema (and rejects a non-boolean skipped)", () => {
+    const base = { questions: validInput.questions, cancelled: false };
+    expect(
+      Value.Check(ResultSchema, {
+        ...base,
+        answers: { "Which option?": { selected: [], other: null, skipped: true } },
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(ResultSchema, {
+        ...base,
+        answers: { "Which option?": { selected: [], other: null, skipped: "yes" } },
+      }),
+    ).toBe(false);
+  });
 });

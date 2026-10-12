@@ -59,6 +59,7 @@ describe("cmd (hub\u2192agent)", () => {
       { op: "steer_subagent", runId: "run_1", text: "steer" },
       { op: "abort_subagent", runId: "run_1" },
       { op: "dialog_answer", dialogId: "ask:1", epoch: "e1", answers: [{ selected: ["a"], other: null }] },
+      { op: "dialog_answer", dialogId: "ask:1", epoch: "e1", answers: [{ selected: [], other: null, skipped: true }] },
       { op: "dialog_cancel", dialogId: "ask:1", epoch: "e1" },
       { op: "command", name: "compact", args: "" },
     ];

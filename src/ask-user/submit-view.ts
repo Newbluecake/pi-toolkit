@@ -29,6 +29,9 @@ export function answerValueText(value: AnswerValue): string {
 
 export function getAnswerText(q: Question, state: QuestionState): AnswerValue | null {
   if (!state.confirmed) return null;
+  // A skip counts as handled: the question enters the result explicitly marked, never as an
+  // empty answer.
+  if (state.skipped) return { selected: [], other: null, skipped: true };
   const selected: string[] = [];
   if (q.multiSelect) {
     [...state.selectedIndices]
@@ -67,9 +70,11 @@ export function renderSubmitView(
     const answer = getAnswerText(question, states[index]!);
     const header = truncateToWidth(question.header ?? "", HEADER_MAX_CHARS);
     add(
-      answer
-        ? ` ${theme.fg("muted", `${header}: `)}${theme.fg("text", answerValueText(answer))}`
-        : ` ${theme.fg("dim", `${header}: `)}${theme.fg("warning", "—")}`,
+      answer === null
+        ? ` ${theme.fg("dim", `${header}: `)}${theme.fg("warning", "—")}`
+        : answer.skipped === true
+          ? ` ${theme.fg("muted", `${header}: `)}${theme.fg("dim", "— skipped")}`
+          : ` ${theme.fg("muted", `${header}: `)}${theme.fg("text", answerValueText(answer))}`,
     );
   });
   add("");

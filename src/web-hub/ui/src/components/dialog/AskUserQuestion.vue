@@ -38,6 +38,7 @@ const inputName = computed(() => `ask-q-${index.value}`);
 function setSelected(next: string[]): void {
   const i = index.value;
   if (!form || i < 0 || form.suspended.value) return;
+  // Picking an option retracts a skip (the fresh slot object simply drops `skipped`).
   form.selections[i] = { selected: next, other: selection.value.other };
   form.saveDraft();
 }
@@ -45,8 +46,27 @@ function setSelected(next: string[]): void {
 function setOther(text: string): void {
   const i = index.value;
   if (!form || i < 0 || form.suspended.value) return;
+  // Typing an Other answer retracts a skip too.
   form.selections[i] = { selected: selection.value.selected, other: text };
   form.saveDraft();
+}
+
+/** Per-question skip (「我可以不回答这个问题」): mark the question deliberately unanswered.
+ *  Toggling off leaves the question blank again (the skip had cleared selected/other). */
+function onSkipToggle(): void {
+  const i = index.value;
+  if (!form || i < 0 || form.suspended.value) return;
+  if (selection.value.skipped === true) {
+    form.selections[i] = { selected: [], other: null };
+    form.saveDraft();
+    return;
+  }
+  // Snapshot BEFORE the mutation — same first-answer/revision rule as onRadio: skipping an
+  // already-answered question is a revision and must not yank the user to another tab.
+  const wasAnswered = form.isAnswered(i);
+  form.selections[i] = { selected: [], other: null, skipped: true };
+  form.saveDraft();
+  form.onAnswered?.(i, wasAnswered);
 }
 
 function isChecked(label: string): boolean {
@@ -80,7 +100,11 @@ function onOtherInput(ev: Event): void {
 </script>
 
 <template>
-  <fieldset class="ask-question" :disabled="form?.suspended.value === true">
+  <fieldset
+    class="ask-question"
+    :class="{ 'ask-skipped': selection.skipped === true }"
+    :disabled="form?.suspended.value === true"
+  >
     <legend class="ask-question-text">{{ question.question }}</legend>
     <p v-if="question.context" class="ask-context">{{ question.context }}</p>
     <div class="ask-options">
@@ -122,6 +146,20 @@ function onOtherInput(ev: Event): void {
           />
         </span>
       </label>
+    </div>
+    <div class="ask-skip-row">
+      <button
+        type="button"
+        class="btn btn-ghost ask-skip"
+        data-skip
+        :aria-pressed="selection.skipped === true"
+        :aria-label="t('dialog.skipAria')"
+        :disabled="form?.suspended.value === true"
+        @click="onSkipToggle"
+      >
+        {{ selection.skipped === true ? t("dialog.skippedMark") : t("dialog.skip") }}
+      </button>
+      <span v-if="selection.skipped === true" class="ask-skipped-note">{{ t("dialog.skippedNote") }}</span>
     </div>
   </fieldset>
 </template>

@@ -2,6 +2,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 import {
   isHighSurrogate,
   OTHER_LABEL,
+  SKIP_LABEL,
   type Question,
   type QuestionState,
   SPLIT_PANE_LEFT_MIN,
@@ -24,6 +25,8 @@ export interface DisplayOption {
   label: string;
   description?: string;
   isOther?: boolean;
+  /** Pseudo-option appended after Other: marks the question as skipped instead of answered. */
+  isSkip?: boolean;
 }
 
 export interface RenderContext {
@@ -35,7 +38,7 @@ export interface RenderContext {
 }
 
 export function allOptions(q: Question): DisplayOption[] {
-  return [...q.options, { label: OTHER_LABEL, isOther: true }];
+  return [...q.options, { label: OTHER_LABEL, isOther: true }, { label: SKIP_LABEL, isSkip: true }];
 }
 
 export function getSplitPaneWidths(width: number): { left: number; right: number } | null {
@@ -90,6 +93,13 @@ function buildOptionLines(ctx: RenderContext, hideDescriptions: boolean): string
     const activeCursor = state.mode === "freeform" ? state.savedOptionsCursorIndex : state.cursorIndex;
     const focused = i === activeCursor;
     const prefix = focused ? t.fg("accent", ">") : " ";
+
+    if (option.isSkip) {
+      const marker = state.skipped ? t.fg("success", "✓") : " ";
+      const labelColor = state.skipped ? "success" : focused ? "accent" : "muted";
+      add(`${prefix} ${marker} ${t.fg(labelColor, `${i + 1}. ${option.label}`)}`);
+      continue;
+    }
 
     if (option.isOther) {
       if (state.mode === "freeform") {
@@ -149,7 +159,11 @@ function buildPreviewLines(ctx: RenderContext, maxLines: number): string[] {
   const { question: q, state, theme: t, width } = ctx;
   const option = allOptions(q)[state.cursorIndex];
   if (!option) return [t.fg("dim", "—")];
-  let text = option.isOther ? `${option.label}: enter a custom answer not listed above.` : option.label;
+  let text = option.isOther
+    ? `${option.label}: enter a custom answer not listed above.`
+    : option.isSkip
+      ? `${option.label}: submit without answering this question.`
+      : option.label;
   if (!option.isOther && option.description?.trim()) text += `\n\n${option.description}`;
   const wrapped = wrapTextWithAnsi(t.fg("muted", text), Math.max(PREVIEW_MIN_WIDTH, width));
   const lines = wrapped.slice(0, maxLines);
@@ -202,9 +216,17 @@ export function renderQuestionView(ctx: RenderContext): string[] {
   if (split) buildSplitPane(ctx, split).forEach((line) => add(line));
   else buildOptionLines(ctx, false).forEach((line) => add(line));
   add("");
-  const onOther = state.cursorIndex === allOptions(q).length - 1;
+  const focusedOption = allOptions(q)[state.cursorIndex];
+  const onOther = focusedOption?.isOther === true;
+  const onSkip = focusedOption?.isSkip === true;
   const tabHint = isSingle ? "" : " · ←/→ switch tabs";
-  const action = onOther ? "Enter open editor" : q.multiSelect ? "Space toggle · Enter confirm" : "Enter select";
-  add(t.fg("dim", ` ↑↓ navigate · ${action}${tabHint} · Esc back`));
+  const action = onOther
+    ? "Enter open editor"
+    : onSkip
+      ? "Enter skip"
+      : q.multiSelect
+        ? "Space toggle · Enter confirm"
+        : "Enter select";
+  add(t.fg("dim", ` ↑↓ navigate · ${action} · s skip${tabHint} · Esc back`));
   return lines;
 }

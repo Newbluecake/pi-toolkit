@@ -137,4 +137,60 @@ describe("web-hub multiSelect answer survives a background interrupt + re-ask", 
     expect(q4Answer).toBeDefined();
     expect(q4Answer!.selected).toHaveLength(3);
   });
+
+  it("a web-skipped question rides the real bridge back as skipped:true (encode → decode round trip)", async () => {
+    const h = harness();
+    const c = tuiContext();
+    const pending = h.tool.execute("call-1", PARAMS, undefined, undefined, c.ctx);
+    await flush();
+    const dialogId = h.bridge.frame().open[0]!.dialogId;
+
+    const answerResult = h.bridge.answer(
+      dialogId,
+      [
+        { selected: [], other: null, skipped: true },
+        { selected: ["A"], other: null },
+        { selected: ["重启"], other: null },
+        { selected: [...Q4_OPTIONS], other: null },
+      ],
+      "alice@10.0.0.5",
+      "cmd-answer-1",
+      "e1",
+    );
+    expect(answerResult).toEqual({ ok: true, data: { op: "dialog_answer" } });
+
+    const result = await pending;
+    expect(result.details.cancelled).toBe(false);
+    expect(result.details.answers["要不要同步？"]).toEqual({ selected: [], other: null, skipped: true });
+    expect(result.details.answers["详情页怎么处理？"]).toEqual({ selected: ["A"], other: null });
+    expect(result.content[0].text).toContain('"要不要同步？" = "(skipped)"');
+    expect(result.content[0].text).toContain('"详情页怎么处理？" = "A"');
+  });
+
+  it("the bridge rejects a skipped answer that still carries selected/other (never a mixed answer)", async () => {
+    const h = harness();
+    const c = tuiContext();
+    const pending = h.tool.execute("call-1", PARAMS, undefined, undefined, c.ctx);
+    await flush();
+    const dialogId = h.bridge.frame().open[0]!.dialogId;
+
+    const mixed = h.bridge.answer(
+      dialogId,
+      [
+        { selected: ["Yes"], other: null, skipped: true },
+        { selected: ["A"], other: null },
+        { selected: ["重启"], other: null },
+        { selected: [...Q4_OPTIONS], other: null },
+      ],
+      "alice@10.0.0.5",
+      "cmd-bad",
+      "e1",
+    );
+    expect(mixed).toMatchObject({ ok: false, code: "E_BAD_ANSWER" });
+    // The dialog is still open for a corrected answer.
+    expect(h.bridge.frame().open).toHaveLength(1);
+    h.bridge.cancel(dialogId, "alice@10.0.0.5", "cmd-cancel", "e1");
+    const result = await pending;
+    expect(result.details.cancelled).toBe(true);
+  });
 });

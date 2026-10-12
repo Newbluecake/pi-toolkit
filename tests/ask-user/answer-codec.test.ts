@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { decodeAnswer, decodeOther, encodeAnswer } from "../../src/ask-user/answer-codec.js";
+import { decodeAnswer, decodeOther, decodeSkipped, encodeAnswer } from "../../src/ask-user/answer-codec.js";
 
 describe("answer codec", () => {
   it("encodes single-select and Other values", () => {
@@ -47,6 +47,29 @@ describe("answer codec", () => {
   it("does not read inherited object properties", () => {
     const answers = Object.create({ value: "inherited" }) as Record<string, string>;
     expect(decodeAnswer(answers, "value", false)).toBeUndefined();
+  });
+
+  it("encodes and decodes the per-question skip channel", () => {
+    // A skipped answer carries ONLY the `<key>__skipped` marker — no selected/other leak.
+    expect(encodeAnswer({ selected: [], other: null, skipped: true }, { key: "db", multiSelect: false })).toEqual({
+      db__skipped: "1",
+    });
+    expect(encodeAnswer({ selected: [], other: null, skipped: true }, { key: "db", multiSelect: true })).toEqual({
+      db__skipped: "1",
+    });
+    expect(decodeSkipped({ db__skipped: "1" }, "db")).toBe(true);
+    expect(decodeSkipped({ db: "A" }, "db")).toBe(false);
+    expect(decodeSkipped({}, "db")).toBe(false);
+    // skipped: false/undefined stays absent (byte-identical to a plain answer).
+    expect(encodeAnswer({ selected: ["A"], other: null, skipped: false }, { key: "db", multiSelect: false })).toEqual({
+      db: "A",
+    });
+    expect(encodeAnswer({ selected: ["A"], other: null }, { key: "db", multiSelect: false })).toEqual({ db: "A" });
+  });
+
+  it("does not read an inherited __skipped marker", () => {
+    const answers = Object.create({ db__skipped: "1" }) as Record<string, string>;
+    expect(decodeSkipped(answers, "db")).toBe(false);
   });
 });
 

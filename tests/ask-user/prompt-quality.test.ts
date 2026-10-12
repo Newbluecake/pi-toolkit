@@ -10,6 +10,8 @@ Do NOT use this tool to outsource judgment you should make — if you can form a
 
 If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text. In multi-question mode give each question a short header (<=12 chars) for the tab bar; if you omit it, one is derived from the question text.
 
+The user can skip any question instead of answering it. A skipped question comes back in answers as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment for that question and do NOT immediately re-ask it.
+
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
 
@@ -27,6 +29,7 @@ const EXPECTED_GUIDELINES = [
   "Do NOT use ask_user for trivia answerable by reading code/docs, or to confirm simple actions ('I'll delete X') — plain text suffices there.",
   "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
   "Do NOT include an 'Other' option yourself — it is always available automatically.",
+  "The user may skip any question; a skipped answer has skipped:true and means 'you decide' — do not immediately re-ask it.",
 ];
 
 function registeredTool(): any {

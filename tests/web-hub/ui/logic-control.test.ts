@@ -167,6 +167,27 @@ describe("buildDialogAnswers / dialogComplete (§7.2/§7.4)", () => {
     expect(dialogComplete(questions, [{ selected: ["A"] }, { other: null }])).toBe(false);
     expect(dialogComplete(questions, [])).toBe(false);
   });
+
+  it("per-question skip (「我可以不回答这个问题」): ships exactly {selected:[],other:null,skipped:true} and completes", () => {
+    // A skipped selection wins over any stray selected/other it still carries.
+    const answers = buildDialogAnswers(questions, [
+      { selected: ["A"], other: "leftover", skipped: true },
+      { skipped: true },
+    ]);
+    expect(answers).toEqual([
+      { selected: [], other: null, skipped: true },
+      { selected: [], other: null, skipped: true },
+    ]);
+    expect(dialogComplete(questions, answers)).toBe(true);
+    // skipped:false is inert — the question still needs a real answer.
+    expect(dialogComplete(questions, buildDialogAnswers(questions, [{ selected: ["A"] }, { skipped: false }]))).toBe(
+      false,
+    );
+    expect(buildDialogAnswers(questions, [{ skipped: false }, { selected: ["X"] }])).toEqual([
+      { selected: [], other: null },
+      { selected: ["X"], other: null },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

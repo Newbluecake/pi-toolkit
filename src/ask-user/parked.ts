@@ -192,6 +192,7 @@ function sanitizeDraft(raw: unknown): ParkedDraft | undefined {
     mode: record.mode === "freeform" ? "freeform" : "options",
     draftText: typeof record.draftText === "string" ? record.draftText : "",
     savedOptionsCursorIndex: typeof record.savedOptionsCursorIndex === "number" ? record.savedOptionsCursorIndex : 0,
+    skipped: record.skipped === true,
     activeTab: typeof record.activeTab === "number" ? record.activeTab : 0,
   };
 }

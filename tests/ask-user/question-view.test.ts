@@ -7,8 +7,9 @@ const makeState = (over: Partial<QuestionState> = {}): QuestionState => ({ ...cr
 const joined = (lines: string[]): string => lines.join("\n");
 
 describe("question view", () => {
-  it("adds Other and renders single-column options with descriptions", () => {
-    expect(allOptions(singleQ).at(-1)).toEqual({ label: "Other", isOther: true });
+  it("adds Other and Skip after the declared options and renders single-column options with descriptions", () => {
+    expect(allOptions(singleQ).at(-2)).toEqual({ label: "Other", isOther: true });
+    expect(allOptions(singleQ).at(-1)).toEqual({ label: "Skip", isSkip: true });
     const output = joined(
       renderQuestionView({ question: singleQ, state: makeState(), theme: stubTheme, width: 60, isSingle: true }),
     );
@@ -53,5 +54,44 @@ describe("question view", () => {
     expect(
       renderQuestionView({ question: singleQ, state: makeState(), theme: stubTheme, width: 1, isSingle: true }).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("renders the Skip pseudo-option with hint, preview, and a skipped-state marker", () => {
+    // singleQ: 2 options + Other + Skip ⇒ Skip is row 4 (index 3).
+    const focused = joined(
+      renderQuestionView({
+        question: singleQ,
+        state: makeState({ cursorIndex: 3 }),
+        theme: stubTheme,
+        width: 60,
+        isSingle: true,
+      }),
+    );
+    expect(focused).toContain("4. Skip");
+    expect(focused).toContain("Enter skip");
+    expect(focused).toContain("s skip");
+
+    // Split-pane preview explains what skipping means.
+    const preview = joined(
+      renderQuestionView({
+        question: singleQ,
+        state: makeState({ cursorIndex: 3 }),
+        theme: stubTheme,
+        width: 100,
+        isSingle: true,
+      }),
+    );
+    expect(preview).toContain("submit without answering this question");
+
+    const skipped = joined(
+      renderQuestionView({
+        question: singleQ,
+        state: makeState({ skipped: true, confirmed: true }),
+        theme: stubTheme,
+        width: 60,
+        isSingle: true,
+      }),
+    );
+    expect(skipped).toContain("✓ 4. Skip");
   });
 });

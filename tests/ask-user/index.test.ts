@@ -296,4 +296,53 @@ describe("renderers", () => {
     expect(text).toContain("●");
     expect(text).toContain("○");
   });
+
+  it("renders a skipped question distinctly from an answered one", () => {
+    const { tool } = capture();
+    const component = tool.renderResult(
+      {
+        details: {
+          questions: [{ question: "Q", header: "DB", options: [{ label: "A" }, { label: "B" }] }],
+          answers: { Q: { selected: [], other: null, skipped: true } },
+          cancelled: false,
+        },
+      },
+      { expanded: false, isPartial: false },
+      stubTheme,
+      { isError: false },
+    );
+    const text = renderText(component);
+    expect(text).toContain("DB: (skipped)");
+    expect(text).not.toContain("(no answer)");
+  });
+});
+
+describe("per-question skip (「我可以不回答这个问题」)", () => {
+  it("TUI: a skipped question submits as skipped:true and the result text says (skipped)", async () => {
+    const { tool } = capture();
+    const result = await tool.execute(
+      "id",
+      valid,
+      undefined,
+      undefined,
+      tuiContext((component) => component.handleInput("s")),
+    );
+    expect(result.details.cancelled).toBe(false);
+    expect(result.details.answers["Which DB?"]).toEqual({ selected: [], other: null, skipped: true });
+    expect(result.content[0].text).toContain('"Which DB?" = "(skipped)"');
+  });
+
+  it("RPC: the <key>__skipped flat-record channel decodes into skipped:true", async () => {
+    const { tool } = capture();
+    const result = await tool.execute("id", valid, undefined, undefined, {
+      mode: "rpc" as const,
+      hasUI: true,
+      ui: {
+        select: async () => JSON.stringify({ "Which DB?__skipped": "1" }),
+      },
+    });
+    expect(result.details.cancelled).toBe(false);
+    expect(result.details.answers["Which DB?"]).toEqual({ selected: [], other: null, skipped: true });
+    expect(result.content[0].text).toContain('"Which DB?" = "(skipped)"');
+  });
 });

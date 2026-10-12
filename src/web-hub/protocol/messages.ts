@@ -585,6 +585,9 @@ export interface CmdExpect {
 export interface DialogAnswerWire {
   selected: string[];
   other: string | null;
+  /** Per-question skip (ask_user 「我可以不回答这个问题」): additive; when true the answer
+   *  carries no selected/other and the question comes back to the model as skipped:true. */
+  skipped?: boolean;
 }
 export interface AskUserOptionWire {
   label: string;
@@ -1379,7 +1382,11 @@ const CmdOriginSchema = Type.Object(
 );
 const CmdExpectSchema = Type.Object({ sessionId: Type.Optional(Type.String()) }, { additionalProperties: false });
 const DialogAnswerSchema = Type.Object(
-  { selected: Type.Array(Type.String()), other: Type.Union([Type.String(), Type.Null()]) },
+  {
+    selected: Type.Array(Type.String()),
+    other: Type.Union([Type.String(), Type.Null()]),
+    skipped: Type.Optional(Type.Boolean()),
+  },
   { additionalProperties: false },
 );
 const CommandOutputEntrySchema = Type.Object(

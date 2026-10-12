@@ -199,6 +199,35 @@
   outline-offset: 1px;
 }
 
+/* Per-question skip (「我可以不回答这个问题」): a small ghost row under the options, visually
+ * quieter than a real option so it never reads as an answer choice. */
+.ask-skip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.ask-skip {
+  font-size: var(--fs-xs);
+  min-height: 36px; /* comfortable touch target without option-row weight */
+}
+
+.ask-skip[aria-pressed="true"] {
+  border-color: var(--c-primary);
+  color: var(--c-primary);
+}
+
+.ask-skipped-note {
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+/* A skipped question's option list dims — the answer was "leave it to the agent". */
+.ask-skipped .ask-options {
+  opacity: 0.55;
+}
+
 .ask-actions {
   display: flex;
   align-items: center;

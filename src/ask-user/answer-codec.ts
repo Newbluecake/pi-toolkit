@@ -28,6 +28,10 @@ export function encodeAnswer(value: AnswerValue, opts: { key: string; multiSelec
     put(result, `${opts.key}__other`, value.other);
   }
 
+  if (value.skipped === true) {
+    put(result, `${opts.key}__skipped`, "1");
+  }
+
   return result;
 }
 
@@ -62,4 +66,9 @@ export function decodeAnswer(
 export function decodeOther(answers: Record<string, string>, key: string): string | undefined {
   const otherKey = `${key}__other`;
   return hasOwn(answers, otherKey) ? answers[otherKey] : undefined;
+}
+
+/** The `<key>__skipped` channel: any own property marks the question as skipped. */
+export function decodeSkipped(answers: Record<string, string>, key: string): boolean {
+  return hasOwn(answers, `${key}__skipped`);
 }

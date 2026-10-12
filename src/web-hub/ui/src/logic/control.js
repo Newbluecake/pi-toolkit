@@ -254,10 +254,11 @@ export function commandPolicyFor(commands = [], name, busy = false) {
 /**
  * §7.2: per-question selections → `DialogAnswerWire[]`. Selections are filtered to labels the
  * question actually offers (defense in depth — the agent re-validates with E_BAD_ANSWER);
- * `other` is trimmed and becomes `null` when empty. Returns `undefined` when the shapes don't
+ * `other` is trimmed and becomes `null` when empty. A skipped question ships exactly
+ * `{ selected: [], other: null, skipped: true }`. Returns `undefined` when the shapes don't
  * line up (caller keeps the form open).
- * @param {any[]} questions @param {any[]} selections — `[{ selected?: string[], other?: string | null }]`
- * @returns {{ selected: string[], other: string | null }[] | undefined}
+ * @param {any[]} questions @param {any[]} selections — `[{ selected?: string[], other?: string | null, skipped?: boolean }]`
+ * @returns {{ selected: string[], other: string | null, skipped?: boolean }[] | undefined}
  */
 export function buildDialogAnswers(questions, selections) {
   if (!Array.isArray(questions) || !Array.isArray(selections) || questions.length !== selections.length) {
@@ -267,6 +268,10 @@ export function buildDialogAnswers(questions, selections) {
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     const sel = selections[i] && typeof selections[i] === "object" ? selections[i] : {};
+    if (sel.skipped === true) {
+      answers.push({ selected: [], other: null, skipped: true });
+      continue;
+    }
     const labels = new Set(
       (Array.isArray(q?.options) ? q.options : [])
         .map((o) => (o && typeof o.label === "string" ? o.label : undefined))
@@ -281,15 +286,17 @@ export function buildDialogAnswers(questions, selections) {
 }
 
 /**
- * Submit-enabled rule (§7.4 AskUserForm): every question has at least one selected option or a
- * non-empty Other. @param {any[]} questions @param {any} answers
+ * Submit-enabled rule (§7.4 AskUserForm): every question has at least one selected option, a
+ * non-empty Other, or is marked skipped. @param {any[]} questions @param {any} answers
  */
 export function dialogComplete(questions, answers) {
   if (!Array.isArray(questions) || !Array.isArray(answers) || questions.length !== answers.length) return false;
   return answers.every(
     (a) =>
       a &&
-      ((Array.isArray(a.selected) && a.selected.length > 0) || (typeof a.other === "string" && a.other.trim() !== "")),
+      (a.skipped === true ||
+        (Array.isArray(a.selected) && a.selected.length > 0) ||
+        (typeof a.other === "string" && a.other.trim() !== "")),
   );
 }
 

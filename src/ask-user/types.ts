@@ -3,6 +3,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import type { BackgroundCompletionKind } from "./background.js";
 
 export const OTHER_LABEL = "Other";
+export const SKIP_LABEL = "Skip";
 export const HEADER_MAX_CHARS = 12;
 export const QUESTION_MAX_CHARS = 1000;
 export const SPLIT_PANE_MIN_WIDTH = 84;
@@ -87,6 +88,10 @@ export type InputQuestion = Static<typeof InputSchema>["questions"][number];
 export const AnswerValueSchema = Type.Object({
   selected: Type.Array(Type.String()),
   other: Type.Union([Type.String(), Type.Null()]),
+  /** Per-question skip (「我可以不回答这个问题」): the user deliberately left this question
+   *  unanswered. Distinct from an empty answer — a skipped question carries
+   *  `{ selected: [], other: null, skipped: true }` and must stay visible in the result. */
+  skipped: Type.Optional(Type.Boolean()),
 });
 
 export type AnswerValue = Static<typeof AnswerValueSchema>;
@@ -126,6 +131,8 @@ export interface DraftQuestionState {
   mode: QuestionMode;
   draftText: string;
   savedOptionsCursorIndex: number;
+  /** Per-question skip flag; persisted so an interrupt → re-ask cycle keeps it. */
+  skipped: boolean;
 }
 
 /** Whole-dialog draft: one slot per question (undefined = no draft for that question) plus the
@@ -154,6 +161,7 @@ export interface QuestionState {
   mode: QuestionMode;
   draftText: string;
   savedOptionsCursorIndex: number;
+  skipped: boolean;
 }
 
 export function createQuestionState(): QuestionState {
@@ -167,6 +175,7 @@ export function createQuestionState(): QuestionState {
     mode: "options",
     draftText: "",
     savedOptionsCursorIndex: 0,
+    skipped: false,
   };
 }
 

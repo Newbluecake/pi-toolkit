@@ -13,6 +13,9 @@ import type { ComputedRef, InjectionKey } from "vue";
 export interface AskSelection {
   selected: string[];
   other: string | null;
+  /** Per-question skip (「我可以不回答这个问题」): true ⇒ the question is deliberately left
+   *  unanswered; it counts as handled for submit gating and ships as skipped:true. */
+  skipped?: boolean;
 }
 
 export interface AskFormCtx {

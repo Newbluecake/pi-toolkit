@@ -139,6 +139,16 @@ describe("AskUserForm.vue — structure (§7.4)", () => {
     await tabs[1]!.trigger("click");
     expect(w.findAll(".ask-question")[1]!.findAll("input[type='checkbox']")).toHaveLength(2);
   });
+
+  it("Other renders by default (allowOther absent) and only an explicit allowOther:false hides it", () => {
+    // SINGLE carries no allowOther — the automatic Other row must still render.
+    expect(mountForm(SINGLE).find("[data-other]").exists()).toBe(true);
+    const noOther = {
+      ...SINGLE,
+      questions: [{ ...SINGLE.questions[0]!, allowOther: false }],
+    };
+    expect(mountForm(noOther).find("[data-other]").exists()).toBe(false);
+  });
 });
 
 describe("AskUserForm.vue — submit gating + payload (§7.4)", () => {
@@ -425,6 +435,82 @@ describe("AskUserForm.vue — auto-advance on single-select (2026-10 mobile UX)"
     await radioOf(w, 0).setValue(true);
     expect(w.find("[data-question-tab]").exists()).toBe(false);
     expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+  });
+});
+
+describe("AskUserForm.vue — per-question skip (「我可以不回答这个问题」)", () => {
+  it("renders a skip affordance per question; skipping completes it and submits skipped:true", async () => {
+    const w = mountForm(SINGLE);
+    const skipBtn = w.find("[data-skip]");
+    expect(skipBtn.exists()).toBe(true);
+    expect(skipBtn.text()).toBe("Skip");
+    expect(w.find("[data-submit]").attributes("disabled")).toBeDefined();
+    await skipBtn.trigger("click");
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: [], other: null, skipped: true }]]]);
+  });
+
+  it("the skipped state is visibly marked (aria-pressed, note, fieldset class) and dims the options", async () => {
+    const w = mountForm(SINGLE);
+    await w.find("[data-skip]").trigger("click");
+    const skipBtn = w.find("[data-skip]");
+    expect(skipBtn.attributes("aria-pressed")).toBe("true");
+    expect(skipBtn.text()).toContain("Skipped");
+    expect(w.find(".ask-skipped-note").exists()).toBe(true);
+    expect(w.find(".ask-question").classes()).toContain("ask-skipped");
+  });
+
+  it("clicking skip again un-skips and the submit gate closes", async () => {
+    const w = mountForm(SINGLE);
+    await w.find("[data-skip]").trigger("click");
+    expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
+    await w.find("[data-skip]").trigger("click");
+    expect(w.find("[data-skip]").attributes("aria-pressed")).toBe("false");
+    expect(w.find("[data-submit]").attributes("disabled")).toBeDefined();
+  });
+
+  it("picking an option after a skip retracts it", async () => {
+    const w = mountForm(SINGLE);
+    await w.find("[data-skip]").trigger("click");
+    await w.find(".ask-question input[type='radio']").setValue(true);
+    expect(w.find("[data-skip]").attributes("aria-pressed")).toBe("false");
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: ["Plan A — rewrite"], other: null }]]]);
+  });
+
+  it("typing an Other answer after a skip retracts it", async () => {
+    const w = mountForm(SINGLE);
+    await w.find("[data-skip]").trigger("click");
+    await w.find(".ask-other-input").setValue("plan C, actually");
+    expect(w.find("[data-skip]").attributes("aria-pressed")).toBe("false");
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: [], other: "plan C, actually" }]]]);
+  });
+
+  it("skipping a tab auto-advances to the next unanswered tab (same grammar as a radio pick)", async () => {
+    const w = mountForm(MULTI);
+    const tabs = w.findAll("[data-question-tab]");
+    await w.findAll(".ask-question")[0]!.find("[data-skip]").trigger("click");
+    expect(tabs[1]!.attributes("aria-selected")).toBe("true");
+    expect(tabs[0]!.classes()).toContain("answered");
+  });
+
+  it("skip persists into the draft and restores on remount", async () => {
+    const env = fakeEnv();
+    const w = mountForm(SINGLE, { env });
+    await w.find("[data-skip]").trigger("click");
+    const key = dialogDraftKey("agent-a", "epoch-1", "ask:tc-single-1");
+    expect(env.dialogDrafts.get(key)).toEqual([{ selected: [], other: null, skipped: true }]);
+    w.unmount();
+    const remounted = mountForm(SINGLE, { env });
+    expect(remounted.find("[data-skip]").attributes("aria-pressed")).toBe("true");
+    expect(remounted.find("[data-submit]").attributes("disabled")).toBeUndefined();
+  });
+
+  it("suspended: the skip button is disabled too", () => {
+    const w = mountForm(SINGLE, { suspended: true });
+    expect(w.find("[data-skip]").attributes("disabled")).toBeDefined();
   });
 });
 

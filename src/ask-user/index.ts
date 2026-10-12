@@ -450,6 +450,12 @@ function classifyOutcome(result: Result | null, signal: AbortSignal | undefined)
   return { kind: "user-cancelled", result: null };
 }
 
+function answerTextForModel(answer: AnswerValue | undefined): string {
+  if (answer === undefined) return "(no answer)";
+  if (answer.skipped === true) return "(skipped)";
+  return answerValueText(answer);
+}
+
 function renderExpandedOptions(q: Question, answer: AnswerValue | undefined, theme: ThemeLike): TruncatedText[] {
   const selected = new Set(answer?.selected ?? []);
   return q.options.map(
@@ -467,6 +473,8 @@ const DESCRIPTION = `Ask the user to resolve ambiguity you cannot resolve yourse
 Do NOT use this tool to outsource judgment you should make — if you can form a defensible recommendation from the codebase, proceed and state your choice. Do NOT use for trivia answerable by reading code/docs, or for simple confirmations ("I'll delete X") where plain text suffices. You cannot use this tool to collect free-form requirements, long-form feedback, or multi-paragraph input — it returns short selections only.
 
 If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text. In multi-question mode give each question a short header (<=12 chars) for the tab bar; if you omit it, one is derived from the question text.
+
+The user can skip any question instead of answering it. A skipped question comes back in answers as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment for that question and do NOT immediately re-ask it.
 
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
@@ -586,6 +594,7 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       "Do NOT use ask_user for trivia answerable by reading code/docs, or to confirm simple actions ('I'll delete X') — plain text suffices there.",
       "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
       "Do NOT include an 'Other' option yourself — it is always available automatically.",
+      "The user may skip any question; a skipped answer has skipped:true and means 'you decide' — do not immediately re-ask it.",
     ],
     parameters: InputSchema,
 
@@ -671,7 +680,7 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
               text: result.questions
                 .map((question) => {
                   const answer = result.answers[question.question];
-                  return `"${question.question}" = "${answer ? answerValueText(answer) : "(no answer)"}"`;
+                  return `"${question.question}" = "${answerTextForModel(answer)}"`;
                 })
                 .join("\n"),
             },
@@ -761,7 +770,7 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
           new TruncatedText(
             theme.fg("success", "✓ ") +
               theme.fg("accent", `${header}: `) +
-              theme.fg("text", answer ? answerValueText(answer) : "(no answer)"),
+              (answer?.skipped === true ? theme.fg("dim", "(skipped)") : theme.fg("text", answerTextForModel(answer))),
             0,
             0,
           ),

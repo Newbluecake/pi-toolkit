@@ -58,6 +58,7 @@ function loadDraft(): AskSelection[] {
     return {
       selected: Array.isArray(rec.selected) ? rec.selected.filter((s): s is string => typeof s === "string") : [],
       other: typeof rec.other === "string" ? rec.other : null,
+      skipped: rec.skipped === true,
     };
   });
 }
@@ -67,7 +68,12 @@ const selections = reactive<AskSelection[]>(loadDraft());
 function saveDraft(): void {
   env?.dialogDrafts.set(
     draftKey.value,
-    selections.map((s) => ({ selected: [...s.selected], other: s.other })),
+    // skipped rides the draft only when set — a plain answer's draft stays byte-identical.
+    selections.map((s) => ({
+      selected: [...s.selected],
+      other: s.other,
+      ...(s.skipped === true ? { skipped: true } : {}),
+    })),
   );
 }
 
@@ -86,7 +92,8 @@ const submitBtn = ref<HTMLButtonElement | null>(null);
 
 function isAnswered(sel: AskSelection | undefined): boolean {
   if (sel === undefined) return false;
-  return sel.selected.length > 0 || (typeof sel.other === "string" && sel.other.trim() !== "");
+  // A skip counts as answered (handled) — the submit gate and tab ✓ marks follow it.
+  return sel.skipped === true || sel.selected.length > 0 || (typeof sel.other === "string" && sel.other.trim() !== "");
 }
 
 // Context-facing form (askFormContext.ts's AskFormCtx.isAnswered): by INDEX, not by selection.

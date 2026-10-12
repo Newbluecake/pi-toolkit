@@ -75,6 +75,7 @@ describe("parked registry units", () => {
           mode: "options" as const,
           draftText: "",
           savedOptionsCursorIndex: 0,
+          skipped: false,
         },
       ],
       activeTab: 0,
@@ -192,7 +193,7 @@ describe("parked persistence wiring", () => {
       question: "Q",
       header: undefined,
       draft: {
-        optionCount: 3,
+        optionCount: 4,
         cursorIndex: 1,
         selectedIndex: null,
         selectedIndices: [],
@@ -202,6 +203,7 @@ describe("parked persistence wiring", () => {
         mode: "options",
         draftText: "",
         savedOptionsCursorIndex: 0,
+        skipped: false,
         activeTab: 0,
       },
     });

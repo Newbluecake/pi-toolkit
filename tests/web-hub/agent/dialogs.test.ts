@@ -80,6 +80,42 @@ describe("dialog bridge", () => {
     expect(bridge.frame().open).toHaveLength(1);
   });
 
+  it("per-question skip (「我可以不回答这个问题」): accepted alone, rejected when mixed, encoded as __skipped", () => {
+    const { bridge } = make();
+    const session = bridge.open({ toolCallId: "tool-1", questions: [question], allowCancel: true })!;
+    let outcome: unknown;
+    session.setOnRemote((value) => {
+      outcome = value;
+      return true;
+    });
+
+    // A skipped answer must not carry selected/other …
+    expect(
+      bridge.answer("ask:tool-1", [{ selected: ["A"], other: null, skipped: true }], "web", "m1", "epoch-1"),
+    ).toMatchObject({ ok: false, code: "E_BAD_ANSWER", message: "a skipped answer must not carry selected or other" });
+    expect(
+      bridge.answer("ask:tool-1", [{ selected: [], other: "x", skipped: true }], "web", "m2", "epoch-1"),
+    ).toMatchObject({ ok: false, code: "E_BAD_ANSWER" });
+    // … and a non-boolean skipped is a protocol violation.
+    expect(
+      bridge.answer("ask:tool-1", [{ selected: [], other: null, skipped: 1 as never }], "web", "m3", "epoch-1"),
+    ).toMatchObject({ ok: false, code: "E_BAD_ANSWER", message: "skipped must be a boolean" });
+    // An empty answer WITHOUT the skip marker is still rejected (skip ≠ empty).
+    expect(bridge.answer("ask:tool-1", [{ selected: [], other: null }], "web", "m4", "epoch-1")).toMatchObject({
+      ok: false,
+      code: "E_BAD_ANSWER",
+    });
+    expect(outcome).toBeUndefined();
+    expect(bridge.frame().open).toHaveLength(1);
+
+    // skipped:true alone satisfies the per-question answer requirement.
+    expect(bridge.answer("ask:tool-1", [{ selected: [], other: null, skipped: true }], "web", "m5", "epoch-1")).toEqual(
+      { ok: true, data: { op: "dialog_answer" } },
+    );
+    expect(outcome).toEqual({ kind: "answer", answers: { Q__skipped: "1" }, origin: "web" });
+    expect(bridge.frame().open).toHaveLength(0);
+  });
+
   it("rejects the loser and supports cancellation and detach", () => {
     const { bridge } = make();
     const first = bridge.open({ toolCallId: "one", questions: [question], allowCancel: true })!;

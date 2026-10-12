@@ -1,4 +1,4 @@
-import { decodeAnswer, decodeOther } from "./answer-codec.js";
+import { decodeAnswer, decodeOther, decodeSkipped } from "./answer-codec.js";
 import type { AnswerValue, Question } from "./types.js";
 
 export const ASK_USER_MARKER = "\0XYZ_ASK_USER";
@@ -117,6 +117,12 @@ export function protoAnswersToResult(
     const key = protoQuestion.header ?? protoQuestion.question;
     const decoded = decodeAnswer(answers, key, protoQuestion.multiSelect === true);
     const other = decodeOther(answers, key) ?? null;
+    // A skipped question stays visible in the result (never confused with an empty answer);
+    // skip wins over any stray selected/other values on the same key.
+    if (decodeSkipped(answers, key)) {
+      result[question.question] = { selected: [], other: null, skipped: true };
+      continue;
+    }
 
     let selected: string[];
     if (Array.isArray(decoded)) {

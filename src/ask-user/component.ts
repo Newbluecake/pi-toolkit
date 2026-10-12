@@ -94,6 +94,7 @@ export class AskUserComponent implements Component {
       mode: state.mode,
       draftText: state.draftText,
       savedOptionsCursorIndex: state.savedOptionsCursorIndex,
+      skipped: state.skipped,
     };
   }
 
@@ -117,6 +118,7 @@ export class AskUserComponent implements Component {
       state.mode = d.mode === "freeform" ? "freeform" : "options";
       state.draftText = d.draftText;
       state.savedOptionsCursorIndex = Math.min(Math.max(0, d.savedOptionsCursorIndex), d.optionCount - 1);
+      state.skipped = d.skipped === true;
       applied = true;
     });
     if (applied) this.activeTab = Math.min(Math.max(0, draft.activeTab), this.questions.length);
@@ -267,7 +269,22 @@ export class AskUserComponent implements Component {
       return;
     }
 
-    const onOther = state.cursorIndex === allOptions(question).length - 1;
+    const focusedOption = allOptions(question)[state.cursorIndex];
+    const onOther = focusedOption?.isOther === true;
+    const onSkip = focusedOption?.isSkip === true;
+
+    // `s` toggles the per-question skip from anywhere on the option list (options mode only —
+    // in the Other editor `s` is ordinary text).
+    if (data === "s") {
+      this.toggleSkip(state);
+      return;
+    }
+
+    if (onSkip) {
+      if (matchesKey(data, "enter")) this.markSkipped(state);
+      return;
+    }
+
     if (onOther && matchesKey(data, "enter")) {
       state.savedOptionsCursorIndex = state.cursorIndex;
       state.mode = "freeform";
@@ -283,12 +300,14 @@ export class AskUserComponent implements Component {
       if (matchesKey(data, "space")) this.toggleIndex(state, state.cursorIndex);
       else if (matchesKey(data, "enter")) {
         state.selectedIndices.add(state.cursorIndex);
+        state.skipped = false;
         this.afterConfirm(state);
       }
     } else if (matchesKey(data, "enter")) {
       state.selectedIndex = state.cursorIndex;
       state.freeTextValue = null;
       state.freeDraft = null;
+      state.skipped = false;
       this.afterConfirm(state);
     }
   }
@@ -352,10 +371,11 @@ export class AskUserComponent implements Component {
         // Other answers replace a single selection, but coexist with multi-select selections.
         state.selectedIndex = null;
         state.freeDraft = null;
+        state.skipped = false;
         this.afterConfirm(state);
       } else {
         state.freeTextValue = null;
-        if (question.multiSelect ? state.selectedIndices.size === 0 : state.selectedIndex === null)
+        if (!state.skipped && (question.multiSelect ? state.selectedIndices.size === 0 : state.selectedIndex === null))
           state.confirmed = false;
         this.rerender();
       }
@@ -398,9 +418,37 @@ export class AskUserComponent implements Component {
   }
 
   private toggleIndex(state: QuestionState, index: number): void {
-    if (state.selectedIndices.has(index)) state.selectedIndices.delete(index);
-    else state.selectedIndices.add(index);
-    if (state.selectedIndices.size === 0 && state.freeTextValue === null) state.confirmed = false;
+    if (state.selectedIndices.has(index)) {
+      state.selectedIndices.delete(index);
+    } else {
+      state.selectedIndices.add(index);
+      // Picking an option retracts a skip.
+      state.skipped = false;
+    }
+    if (state.selectedIndices.size === 0 && state.freeTextValue === null && !state.skipped) state.confirmed = false;
+    this.rerender();
+  }
+
+  /** Skip marks the question answered-by-omission: selections/Other are cleared and the
+   *  dialog advances exactly like a confirmed answer. */
+  private markSkipped(state: QuestionState): void {
+    state.skipped = true;
+    state.selectedIndex = null;
+    state.selectedIndices.clear();
+    state.freeTextValue = null;
+    state.freeDraft = null;
+    this.afterConfirm(state);
+  }
+
+  private toggleSkip(state: QuestionState): void {
+    if (!state.skipped) {
+      this.markSkipped(state);
+      return;
+    }
+    // Un-skipping leaves nothing selected (the skip cleared it), so the question goes back
+    // to unanswered and the submit gate closes again.
+    state.skipped = false;
+    state.confirmed = false;
     this.rerender();
   }
 

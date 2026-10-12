@@ -62,6 +62,29 @@ describe("submit view", () => {
     expect(result.answers.Q2).toBeUndefined();
   });
 
+  it("treats a skipped question as handled: explicit skipped answer, — skipped marker, submit-ready", () => {
+    const skippedState = state({ confirmed: true, skipped: true });
+    expect(getAnswerText(questions[0]!, skippedState)).toEqual({ selected: [], other: null, skipped: true });
+
+    const view = renderSubmitView(
+      questions,
+      [skippedState, state({ confirmed: true, selectedIndices: new Set([0]) })],
+      stubTheme,
+      70,
+    ).join("\n");
+    expect(view).toContain("— skipped");
+    expect(view).toContain("Ready to submit");
+    expect(view).toContain("All questions answered");
+
+    const result = buildResult(questions, [skippedState, state()]);
+    expect(result.answers.Q1).toEqual({ selected: [], other: null, skipped: true });
+    expect(result.answers.Q2).toBeUndefined();
+  });
+
+  it("a skip marker alone is not enough — the question must also be confirmed", () => {
+    expect(getAnswerText(questions[0]!, state({ skipped: true }))).toBeNull();
+  });
+
   it("renders a button bar in every focus state", () => {
     expect(renderButtonBar(stubTheme, false, "submit")).toContain("Submit");
     expect(renderButtonBar(stubTheme, true, "cancel")).toContain("Cancel");

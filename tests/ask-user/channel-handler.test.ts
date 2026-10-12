@@ -135,6 +135,27 @@ describe("RPC question and answer conversion", () => {
     });
   });
 
+  it("decodes a skipped question as an explicit skipped answer; skip wins over stray values", () => {
+    const questions: Question[] = [
+      { question: "Q1", options: [{ label: "A" }, { label: "B" }] },
+      { question: "Q2", header: "Second", options: [{ label: "X" }, { label: "Y" }] },
+      { question: "Q3", header: "Third", options: [{ label: "M" }, { label: "N" }] },
+    ];
+    const protoQuestions = toProtoQuestions(questions);
+    const result = protoAnswersToResult(questions, protoQuestions, {
+      Q1__skipped: "1",
+      Second__skipped: "1",
+      Second: "X", // a stray selection on a skipped key loses to the skip marker
+      Second__other: "stray",
+      // Third has no marker at all and stays absent (same as an unanswered question).
+    });
+
+    expect(result).toEqual({
+      Q1: { selected: [], other: null, skipped: true },
+      Q2: { selected: [], other: null, skipped: true },
+    });
+  });
+
   it("guards the payload at runtime", () => {
     expect(isAskUserAnswers(null)).toBe(false);
     expect(isAskUserAnswers([])).toBe(false);
