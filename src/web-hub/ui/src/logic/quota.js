@@ -10,7 +10,11 @@
  * `freshestQuota` is the D5 cross-session hoist: every subscribed agent's `AgentState.status`
  * carries its own mirrored `StatusInfo.quota` (untouched — `@logic/state.js` already stores
  * `status` wholesale, so no reducer change was needed for this feature, see quota-web plan's
- * delivery note); this picks whichever one has the largest `at`.
+ * delivery note). Selection ranks by DATA freshness, not publish time (2026-10-12 ruling,
+ * fixes the idle-process hijack): a non-stale wire always beats a stale one, ties break on the
+ * newest per-provider `fetchedAt`, and only then on the publish stamp `at`. Ranking by `at`
+ * alone let an idle pi (frozen snapshot, never refreshed) hijack the pill every time it
+ * published a status for an unrelated reason — its `at` was always the newest.
  *
  * `fmtResetAt` mirrors `src/quota/render.ts`'s `formatResetAt` (same-day → "HH:MM", else →
  * "M/D HH:MM") so the web card reads the same way the HUD/injected prose already does — that
@@ -218,6 +222,7 @@ function mergedGlmWindows(cn, intl) {
  *   resetScope: "5h"|"week"|undefined,
  *   resetAt: number|undefined,
  *   available: boolean,
+ *   stale: boolean,
  * }[]}
  */
 export function pillGroups(quota) {
@@ -284,6 +289,9 @@ export function pillGroups(quota) {
       resetScope,
       resetAt,
       available: headline.level < 3,
+      // 2026-10-12: surfaced so the pill can gray out a frozen wire (idle processes never
+      // refresh — see freshestQuota). GLM merged rows inherit the union flag off `source`.
+      stale: p.stale === true,
     };
   };
 
@@ -365,21 +373,56 @@ export function pillDisplay(quota) {
 }
 
 /**
- * D5 cross-session hoist: among every subscribed agent's mirrored `status.quota`, picks the one
- * with the largest `at`. Agents without a (well-formed) quota wire are skipped; `undefined` when
- * none carries one (quota feature off everywhere / no session sampled yet).
+ * D5 cross-session hoist: among every subscribed agent's mirrored `status.quota`, picks the
+ * freshest DATA (2026-10-12 ruling — supersedes the original "largest `at`" rule, which let an
+ * idle process's frozen snapshot hijack the pill on every unrelated republish):
+ *  1. a wire with NO stale provider beats any wire with one;
+ *  2. else the newest per-provider `fetchedAt` wins (missing/non-finite reads as 0);
+ *  3. else the publish stamp `at` breaks the tie (deterministic; preserves the pre-fix order
+ *     for equally-fresh wires).
+ * Agents without a (well-formed) quota wire are skipped; `undefined` when none carries one
+ * (quota feature off everywhere / no session sampled yet).
  * @param {Iterable<{ status?: Record<string, unknown> }>} agents
  * @returns {QuotaWire | undefined}
  */
 export function freshestQuota(agents) {
   let best;
+  let bestKey;
   for (const a of agents) {
     const status = a && typeof a === "object" ? a.status : undefined;
     const q = status && typeof status === "object" ? /** @type {any} */ (status).quota : undefined;
     if (q === null || typeof q !== "object") continue;
     if (typeof q.at !== "number" || !Number.isFinite(q.at)) continue;
     if (!Array.isArray(q.providers)) continue;
-    if (best === undefined || q.at > best.at) best = q;
+    const key = quotaFreshnessKey(q);
+    if (
+      best === undefined ||
+      (key.stale !== bestKey.stale
+        ? !key.stale
+        : key.fetched !== bestKey.fetched
+          ? key.fetched > bestKey.fetched
+          : q.at > best.at)
+    ) {
+      best = q;
+      bestKey = key;
+    }
   }
   return best;
+}
+
+/** Freshness rank of one wire: `stale` = ANY provider flagged stale (one rotten provider
+ *  poisons the hoist — the pill merges/hides providers later, so a partially-frozen snapshot
+ *  must never win over a fully-live one); `fetched` = newest `fetchedAt` among providers
+ *  (missing/non-finite ⇒ 0, so pre-feature wires without the field degrade to the `at`
+ *  tie-break, byte-identical to the old rule). */
+function quotaFreshnessKey(q) {
+  let stale = false;
+  let fetched = 0;
+  for (const p of q.providers) {
+    if (p === null || typeof p !== "object") continue;
+    if (p.stale === true) stale = true;
+    const f = p.fetchedAt;
+    if (typeof f === "number" && Number.isFinite(f) && f > fetched) fetched = f;
+  }
+  return { stale, fetched };
 }

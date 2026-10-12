@@ -84,6 +84,13 @@
   background: var(--c-danger);
 }
 
+/* 2026-10-12: a stale (frozen) wire overrides the severity ladder with a neutral gray dot —
+ * the numbers it shows are old, so its colour must not claim live severity. Placed AFTER the
+ * level rules so the equal-specificity attribute selector wins by source order. */
+.q-seg[data-stale="true"] .q-dot {
+  background: var(--c-text-3);
+}
+
 .q-seg-text {
   color: var(--c-text-2);
 }

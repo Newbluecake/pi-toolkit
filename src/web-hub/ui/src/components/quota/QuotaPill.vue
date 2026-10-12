@@ -63,6 +63,7 @@ interface PillGroup {
   resetScope: "5h" | "week" | undefined;
   resetAt: number | undefined;
   available: boolean;
+  stale: boolean;
 }
 
 interface PillDisplay {
@@ -153,7 +154,11 @@ function segText(g: PillGroup): string {
     return `${label} ${g.windows.map((w) => `${w.usedPct}%`).join("/")}`;
   }
   const windows = g.windows.map((w) => `${scopeLabel(w.scope)} ${w.usedPct}%`).join(" · ");
-  return `${label} ${windows}${resetAnnex(g)}`;
+  // 2026-10-12: a frozen (stale) wire is visibly marked — gray dot via [data-stale] + a
+  // trailing compact English `·stale` token (AGENTS.md marker policy), so an idle process's
+  // old snapshot can never again look fully live on the pill face.
+  const staleSuffix = g.stale ? " ·stale" : "";
+  return `${label} ${windows}${resetAnnex(g)}${staleSuffix}`;
 }
 
 /** One group's aria sentence (existing `pillAriaBase`/`pillAriaReset` templates, one per group
@@ -167,6 +172,10 @@ function groupAria(g: PillGroup): string {
   }
   return t("quota.pillAriaBase", { provider, scope, pct: g.usedPct });
 }
+
+/** Wire-level stale for the phone compact chip: any stale provider grays the dot (the chip
+ *  shows a whole-snapshot worst number, so per-group granularity doesn't exist there). */
+const anyStale = computed(() => (props.quota?.providers ?? []).some((p) => p.stale === true));
 
 const ariaLabel = computed(() => allGroups.value.map(groupAria).join("; "));
 
@@ -194,7 +203,7 @@ const compactText = computed(() => `${compact.value?.usedPct ?? 0}%`);
       @click="onToggle"
     >
       <span v-if="phone" class="q-pill-text">
-        <span class="q-seg q-seg-compact" :data-level="compactLevel">
+        <span class="q-seg q-seg-compact" :data-level="compactLevel" :data-stale="anyStale || undefined">
           <span class="q-dot" aria-hidden="true"></span>
           <span class="q-seg-text">{{ compactText }}</span>
         </span>
@@ -204,7 +213,7 @@ const compactText = computed(() => `${compact.value?.usedPct ?? 0}%`);
           <!-- Thin separator between groups (the "·" glyph is the mobile form; desktop CSS clips
                it down to a 1px rule so it never reads like the reset annex's own " · "). -->
           <span v-if="i > 0" class="q-sep" aria-hidden="true"> · </span>
-          <span class="q-seg" :data-level="g.level">
+          <span class="q-seg" :data-level="g.level" :data-stale="g.stale || undefined">
             <span class="q-dot" aria-hidden="true"></span>
             <span class="q-seg-text">{{ segText(g) }}</span>
           </span>

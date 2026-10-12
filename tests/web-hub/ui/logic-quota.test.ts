@@ -224,6 +224,7 @@ describe("pillGroups — one group per provider (headline, ordering, availabilit
         resetScope: "week", // triggered week ⇒ week annex (its resetAt itself is unknown here)
         resetAt: undefined,
         available: true,
+        stale: false,
       },
       {
         ids: ["zai-coding-cn"],
@@ -236,6 +237,7 @@ describe("pillGroups — one group per provider (headline, ordering, availabilit
         resetScope: undefined,
         resetAt: undefined,
         available: true,
+        stale: false,
       },
     ]);
   });
@@ -518,11 +520,48 @@ describe("freshestQuota — D5 cross-session hoist", () => {
     expect(freshestQuota([])).toBeUndefined();
   });
 
-  it("picks the agent with the largest `at`", () => {
+  it("equal freshness ⇒ the largest `at` wins (pre-fix order preserved)", () => {
     const a = { status: { quota: quota([], 1_000) } };
     const b = { status: { quota: quota([], 5_000) } };
     const c = { status: { quota: quota([], 3_000) } };
     expect(freshestQuota([a, b, c])).toBe(b.status.quota);
+  });
+
+  it("2026-10-12 ruling: a stale wire NEVER beats a non-stale one, however newer its `at`", () => {
+    // the idle-process hijack: frozen snapshot republished every tick (newest at) must lose
+    const idle = {
+      status: { quota: quota([provider("kimi-coding", [window("5h", 6, 0)], { stale: true, fetchedAt: 100 })], 9_000) },
+    };
+    const live = {
+      status: { quota: quota([provider("kimi-coding", [window("5h", 11, 0)], { fetchedAt: 200 })], 1_000) },
+    };
+    expect(freshestQuota([idle, live])).toBe(live.status.quota);
+    expect(freshestQuota([live, idle])).toBe(live.status.quota); // order-independent
+  });
+
+  it("among non-stale wires the newest fetchedAt wins, then `at` breaks the tie", () => {
+    const olderData = {
+      status: { quota: quota([provider("kimi-coding", [window("5h", 6, 0)], { fetchedAt: 100 })], 9_000) },
+    };
+    const newerData = {
+      status: { quota: quota([provider("kimi-coding", [window("5h", 11, 0)], { fetchedAt: 200 })], 1_000) },
+    };
+    expect(freshestQuota([olderData, newerData])).toBe(newerData.status.quota);
+    const tieA = {
+      status: { quota: quota([provider("kimi-coding", [window("5h", 6, 0)], { fetchedAt: 200 })], 2_000) },
+    };
+    const tieB = {
+      status: { quota: quota([provider("kimi-coding", [window("5h", 6, 0)], { fetchedAt: 200 })], 3_000) },
+    };
+    expect(freshestQuota([tieA, tieB])).toBe(tieB.status.quota);
+  });
+
+  it("a missing/non-finite fetchedAt reads as 0 (pre-feature wires degrade to the `at` rule)", () => {
+    const legacy = { status: { quota: quota([provider("kimi-coding", [window("5h", 6, 0)])], 5_000) } }; // no fetchedAt
+    const withData = {
+      status: { quota: quota([provider("kimi-coding", [window("5h", 6, 0)], { fetchedAt: Number.NaN })], 6_000) },
+    };
+    expect(freshestQuota([legacy, withData])).toBe(withData.status.quota); // both fetched=0 ⇒ at desc
   });
 
   it("skips agents without a well-formed quota wire", () => {
@@ -537,5 +576,23 @@ describe("freshestQuota — D5 cross-session hoist", () => {
 
   it("tolerates agents without a status object at all", () => {
     expect(freshestQuota([{}, { status: undefined }])).toBeUndefined();
+  });
+});
+
+describe("pillGroups — stale flag (2026-10-12 pill marker)", () => {
+  it("a stale provider yields a stale group; GLM merge unions both sides", () => {
+    const live = pillGroups(quota([provider("kimi-coding", [window("5h", 10, 0)])]));
+    expect(live[0]?.stale).toBe(false);
+    const frozen = pillGroups(quota([provider("kimi-coding", [window("5h", 10, 0)], { stale: true })]));
+    expect(frozen[0]?.stale).toBe(true);
+    const merged = pillGroups(
+      quota([
+        provider("zai-coding-cn", [window("week", 90, 2)], { stale: true }),
+        provider("zai", [window("week", 88, 2)]),
+      ]),
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.labelId).toBe("zai-coding-cn");
+    expect(merged[0]?.stale).toBe(true); // union: one stale member poisons the merged row
   });
 });
