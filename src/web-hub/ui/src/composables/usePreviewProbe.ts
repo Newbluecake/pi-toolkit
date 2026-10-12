@@ -149,12 +149,14 @@ export function usePreviewProbe(opts: UsePreviewProbeOptions): PreviewProbeHandl
     let out: PreviewProbeOutcome;
     // dir-plan §5 P3 (dirs 透传): a `dirs` scope asks directories to answer "dir" (A5/A4) —
     // without the flag the request body stays byte-identical to pre-dir-plan.
-    const req: { agentKey: string; sessionId: string; paths: readonly string[]; dirs?: true } = {
+    // preview-download: a `files` scope likewise asks binary regular files to answer "file".
+    const req: { agentKey: string; sessionId: string; paths: readonly string[]; dirs?: true; files?: true } = {
       agentKey: scope.agentKey,
       sessionId: scope.sessionId,
       paths: batch,
     };
     if (scope.dirs === true) req.dirs = true;
+    if (scope.files === true) req.files = true;
     try {
       out = await opts.probe(req);
     } catch {

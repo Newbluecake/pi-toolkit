@@ -127,23 +127,115 @@
   color: var(--c-text-2);
 }
 
-/* the directory the session will run in — monospace, full dialog width */
+/* the directory the session will run in — monospace, flexible width next to the 「浏览」 toggle */
+.spawn-cwd-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
 .spawn-cwd-input {
+  flex: 1;
+  min-width: 0;
   font-family: var(--font-mono);
 }
 
-/* 「本次模型」 (default-model plan F2, D6/D7) — same mono free-typed input as the settings
- * card's default-model field; the invalid state rides aria-invalid. */
-.spawn-model-input {
+.spawn-browse-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* --- spawn-dirbrowse: the in-dialog directory browser panel --- */
+.spawn-browse {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+}
+
+.spawn-browse-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.spawn-browse-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
   font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 长路径优先保留尾部（当前位置比根更重要），bdi 隔离交给 title */
+  text-align: left;
 }
 
-.spawn-model-input[aria-invalid="true"] {
-  border-color: var(--c-danger-border);
+.spawn-browse-list {
+  display: grid;
+  gap: 1px;
+  max-height: 240px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
 }
 
-.spawn-model-warn {
-  color: var(--c-warning-text);
+.spawn-browse-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.spawn-browse-row:hover:not(.is-inert),
+.spawn-browse-row:focus-visible {
+  background: var(--c-surface);
+}
+
+.spawn-browse-row.is-inert {
+  color: var(--c-text-3);
+  cursor: default;
+}
+
+.spawn-browse-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spawn-browse-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* --- spawn-dirmkdir: the inline 「新建文件夹」 form --- */
+.spawn-mkdir-form {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.spawn-mkdir-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.spawn-mkdir-error {
+  /* shares .spawn-picker-error's look; own class for the picker's test queries */
 }
 
 /* recent directories: a multi-column grid of cards (label + full path, ellipsized) */
@@ -208,24 +300,6 @@
   color: var(--c-text-3);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.spawn-prompt-input {
-  width: 100%;
-  min-height: 140px;
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--c-border-strong);
-  border-radius: var(--r-sm);
-  background: var(--c-surface);
-  color: var(--c-text);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  resize: vertical;
-}
-
-.spawn-prompt-input:focus-visible {
-  border-color: var(--c-focus);
-  outline: none;
 }
 
 .spawn-picker-status {
@@ -554,8 +628,8 @@
     padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
   }
 
-  .spawn-prompt-input {
-    min-height: 96px;
+  .spawn-browse-list {
+    max-height: 180px;
   }
 }
 
@@ -594,6 +668,11 @@
   .spawn-recent-btn,
   .spawn-row-actions .btn,
   .spawn-picker-actions .btn,
+  .spawn-browse-toggle,
+  .spawn-browse-row,
+  .spawn-browse-bar .btn,
+  .spawn-browse-actions .btn,
+  .spawn-mkdir-form .btn,
   .spawn-confirm-actions .btn {
     min-height: 44px;
   }

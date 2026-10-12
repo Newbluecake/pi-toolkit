@@ -20,6 +20,7 @@ import {
   previewOutcomeFromResponse,
   PREVIEW_MAX_REFS_PER_NODE,
   PREVIEW_MD_NODE_MAX,
+  PREVIEW_DOWNLOAD_HUB_CAP,
   PREVIEW_TILDE_HUB_CAP,
   previewScopeOf,
   scopeKeyOf,
@@ -1882,5 +1883,28 @@ describe("logic/preview.js findPathRefs — §2.5.2 operation-count performance 
       for (const [, scope] of PERF_SCOPES) findPathRefs(text, scope);
     }
     expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+});
+
+describe("logic/preview.js previewScopeOf / scopeKeyOf — preview-download (preview.download.v1)", () => {
+  const session = { sessionId: "s1", cwd: "/home/u/proj" };
+  const base = { mode: "token" as const, hubCaps: ["preview.v1"], hasTransport: true, agentKey: "A", session };
+
+  it("previewScopeOf adds `files` ONLY when the hub declares preview.download.v1", () => {
+    expect(previewScopeOf(base)).toEqual({ agentKey: "A", sessionId: "s1", cwd: "/home/u/proj", uploads: true });
+    expect(previewScopeOf({ ...base, hubCaps: ["preview.v1", PREVIEW_DOWNLOAD_HUB_CAP] })).toEqual({
+      agentKey: "A",
+      sessionId: "s1",
+      cwd: "/home/u/proj",
+      uploads: true,
+      files: true,
+    });
+  });
+
+  it("scopeKeyOf appends |file for the files flag — format unchanged when absent", () => {
+    const filesScope = previewScopeOf({ ...base, hubCaps: ["preview.v1", PREVIEW_DOWNLOAD_HUB_CAP] });
+    expect(scopeKeyOf(filesScope)).toBe("A|s1|/home/u/proj|file");
+    // a cap change invalidates the key — the probe LRU partitions naturally
+    expect(scopeKeyOf(filesScope)).not.toBe(scopeKeyOf(previewScopeOf(base)));
   });
 });

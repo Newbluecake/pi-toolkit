@@ -161,6 +161,20 @@ code.md-code.path-ref {
   flex: none;
 }
 
+/* preview-download: the header's file-download button + its failure line */
+.preview-download {
+  flex: none;
+}
+
+.preview-download-error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-danger-border);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
 .preview-plaintext {
   display: flex;
   align-items: center;

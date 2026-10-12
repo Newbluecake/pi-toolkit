@@ -60,6 +60,10 @@ const preview = {
   dirTypeFile: "文件",
   dirTypeSymlink: "符号链接",
   dirTypeOther: "特殊文件",
+  // preview-download（对话框头部的文件下载按钮 —— 仅文件，目录没有）
+  download: "下载",
+  downloadFailed: "下载失败 — 请重试。",
+  unsupportedDownload: "该文件类型不支持预览 — 可直接下载。",
 } satisfies Messages<typeof en>;
 
 export default preview;

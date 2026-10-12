@@ -61,10 +61,12 @@ import {
 } from "../req-deadline.js";
 import {
   FIRST_PROMPT_GRACE_MS,
+  MKDIR_BODY_MAX,
   SPAWN_BODY_MAX,
   SPAWN_GONE_REASON,
   SPAWN_ID_RE,
   SPAWN_PREFS_BODY_MAX,
+  parseMkdirRequestBody,
   parseSpawnPrefsRequest,
   parseSpawnRequestBody,
   type HubSpawnConfig,
@@ -84,6 +86,7 @@ import {
 import type { ForkSnapshot, HistoryListQuery, HistoryService, OccupancyProof, SessionPin } from "./history/ports.js";
 import type { DirService } from "./dirs.js";
 import type { FirstPromptForwarder } from "./first-prompt.js";
+import type { MkdirService } from "./mkdir.js";
 import type { SpawnPrefs } from "./prefs.js";
 import type { SpawnFrontendPort, SpawnRouteIo } from "./ports.js";
 import { toPublicPayload, toViewer } from "./project.js";
@@ -134,6 +137,10 @@ const PROVE_RESERVE_MS = 3_000;
 /** §4.6.2 gate 9": `history.snapshot()`'s own budget for a fork request. */
 const SNAPSHOT_CAP_MS = 4_000;
 const SNAPSHOT_RESERVE_MS = 1_000;
+/** spawn-dirmkdir: `POST /api/headless/mkdir`'s write bucket (10/min per principal — the
+ *  prefs write bucket's parameters, same interactive-frequency class). */
+const MKDIR_CAPACITY = 10;
+const MKDIR_REFILL_MS = 6_000;
 
 // ---------------------------------------------------------------------------
 // deps & shape
@@ -157,6 +164,10 @@ export interface SpawnRoutesDeps {
    *  (P-int owns the construction — P-route only depends on this port's type). Absent ⇒
    *  `historyOn` is false regardless of `cfg.history` (§5's byte-identical guarantee). */
   history?: HistoryService;
+  /** spawn-dirmkdir: the browse panel's 「新建文件夹」 service (`POST /api/headless/mkdir`).
+   *  Injected by hub.ts whenever spawn is enabled (its admission reuses preview's deny chain);
+   *  absent ⇒ the route is byte-identical to an unknown path (404), same `historyOn` pattern. */
+  mkdir?: MkdirService;
 }
 
 interface IdemEntry {
@@ -265,7 +276,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   // ------------------------------------------------------------- audit (arch §6.6)
 
   interface RejectFields {
-    endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs" | "history";
+    endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs" | "history" | "mkdir";
     code: string;
     reqId?: string;
     spawnId?: string;
@@ -1242,6 +1253,112 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     io.sendJson(res, 200, { prefs: { defaultModel: prefs.get() } });
   }
 
+  // ------------------------------------------------------------- POST /api/headless/mkdir (spawn-dirmkdir)
+
+  /**
+   * The browse panel's 「新建文件夹」 (user 拍板: preview 端点全员只读,所以这个 WRITE 挂在
+   * spawn 名字空间). Gate order mirrors handlePrefs (strict CSRF → auth → own rate bucket →
+   * bounded body read → strict schema) and then delegates to `deps.mkdir`, whose admission
+   * reuses preview's deny chain (denylist literal + resolved, virtual roots, bounded IO).
+   * The path NEVER reaches an audit line or an error body (preview's §2.8 oracle discipline —
+   * 文案不泄露路径).
+   */
+  async function handleMkdir(req: IncomingMessage, res: ServerResponse, io: SpawnRouteIo): Promise<void> {
+    const reqDeadline = createReqDeadline(now, WRITE_TOTAL_MS);
+
+    // gate 1 — strict CSRF (same grade as every other spawn write)
+    if (!io.strictCsrfOk()) {
+      rejectAudit(io, { ip: io.ip }, { endpoint: "mkdir", code: "E_CSRF" });
+      throw new io.HttpError(403, "E_CSRF");
+    }
+
+    // gate 2 — auth
+    const auth = await authorizeOrAudit(io, reqDeadline, "mkdir");
+    if (auth === undefined) return;
+
+    // gate 3 — write rate bucket
+    const owner = { listener: io.listener, reqId: "", ...(auth.user === undefined ? {} : { user: auth.user }) };
+    const principal = spawnPrincipal(owner);
+    const rate = limit.admit(`${principal}:spawn-mkdir`, MKDIR_CAPACITY, MKDIR_REFILL_MS);
+    if (!rate.ok) {
+      rateAudit(io, auth, `spawn-mkdir:${principal}`, { endpoint: "mkdir", code: "E_RATE" });
+      sendRateLimited(io, res, rate.retryAfterMs);
+      return;
+    }
+
+    // gate 4 — body read (≤ MKDIR_BODY_MAX, bounded like every write endpoint)
+    const bodyMs = deriveBudget(reqDeadline.remaining(), BODY_CAP_MS, BODY_RESERVE_MS);
+    if (bodyMs <= 0) {
+      rejectAudit(io, auth, { endpoint: "mkdir", code: "E_DEADLINE" });
+      sendConnClosing(io, req, res, 408, "E_DEADLINE", "no budget left to read the request body");
+      return;
+    }
+    let raw: unknown;
+    try {
+      raw = await io.readJson(req, MKDIR_BODY_MAX, bodyMs);
+    } catch (err) {
+      const status = statusOf(err);
+      if (status === 413) {
+        rejectAudit(io, auth, { endpoint: "mkdir", code: "E_BAD_REQUEST" });
+        sendConnClosing(io, req, res, 413, "E_BAD_REQUEST", "body too large");
+      } else if (status === 408) {
+        rejectAudit(io, auth, { endpoint: "mkdir", code: "E_DEADLINE" });
+        sendConnClosing(io, req, res, 408, "E_DEADLINE", "body read timeout");
+      } else {
+        rejectAudit(io, auth, { endpoint: "mkdir", code: "E_BAD_REQUEST" });
+        io.sendJson(res, 400, { error: "E_BAD_REQUEST", message: "request error" });
+      }
+      return;
+    }
+
+    // gate 5 — strict schema + the single-segment name rule (parseMkdirRequestBody)
+    const parsed = parseMkdirRequestBody(raw);
+    if (!parsed.ok) {
+      rejectAudit(io, auth, { endpoint: "mkdir", code: "E_BAD_REQUEST" });
+      io.sendJson(res, 400, {
+        error: "E_BAD_REQUEST",
+        ...(parsed.error === "name-invalid" || parsed.error === "path-invalid" ? { reason: parsed.error } : {}),
+        message:
+          parsed.error === "name-invalid"
+            ? "invalid folder name"
+            : parsed.error === "path-invalid"
+              ? "invalid parent path"
+              : "bad mkdir request body",
+      });
+      return;
+    }
+
+    // gate 6 — admission + create (deny chain + bounded IO live in the service)
+    const svc = deps.mkdir;
+    if (svc === undefined) {
+      // defensive: `handle()` only reaches here when deps.mkdir was injected.
+      io.sendError(res, 404, "E_NOT_FOUND");
+      return;
+    }
+    const r = await svc.mkdir(parsed.body.path, parsed.body.name, reqDeadline);
+    if (!r.ok) {
+      rejectAudit(io, auth, { endpoint: "mkdir", code: r.code });
+      const headers: Record<string, string> = {};
+      if (r.code === "E_BUSY") headers["Retry-After"] = "1";
+      io.sendJson(
+        res,
+        r.status,
+        { error: r.code, ...(r.reason === undefined ? {} : { reason: r.reason }) },
+        Object.keys(headers).length > 0 ? headers : undefined,
+      );
+      return;
+    }
+    auditSpawn(log, {
+      audit: "spawn",
+      phase: "request",
+      endpoint: "mkdir",
+      listener: io.listener,
+      ip: auth.ip,
+      ...(auth.user === undefined ? {} : { user: auth.user }),
+    });
+    io.sendJson(res, 200, { ok: true, path: r.path });
+  }
+
   // ------------------------------------------------------------- POST /api/headless/:id/stop
 
   async function handleStop(
@@ -1345,6 +1462,13 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     // GET here is a plain 404 (and `lan:"off"` already fell through the guard above).
     if (path === "/api/headless/prefs") {
       if (method === "POST") return handlePrefs(req, res, io);
+      io.sendError(res, 404, "E_NOT_FOUND");
+      return;
+    }
+    // spawn-dirmkdir: write-only like prefs; without the service the path is byte-identical to
+    // unknown (404 — same `historyOn` gate pattern, arch §8.2's not-enabled matrix row).
+    if (path === "/api/headless/mkdir") {
+      if (method === "POST" && deps.mkdir !== undefined) return handleMkdir(req, res, io);
       io.sendError(res, 404, "E_NOT_FOUND");
       return;
     }

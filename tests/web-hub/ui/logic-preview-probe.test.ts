@@ -223,11 +223,11 @@ describe("parseProbeResults — 200-body contract", () => {
   });
 
   it("traverses PREVIEW_PROBE_KINDS: every tuple member accepted, any other string rejected", () => {
-    expect([...PREVIEW_PROBE_KINDS]).toEqual(["text", "image", "dir", "missing"]);
+    expect([...PREVIEW_PROBE_KINDS]).toEqual(["text", "image", "dir", "file", "missing"]);
     for (const kind of PREVIEW_PROBE_KINDS) {
       expect(parseProbeResults({ results: [{ kind }] }, 1)).toEqual({ ok: true, kinds: [kind] });
     }
-    for (const kind of ["binary", "DIR", "", "tex", "folder", "dirr"]) {
+    for (const kind of ["binary", "DIR", "", "tex", "folder", "dirr", "FILE"]) {
       expect(parseProbeResults({ results: [{ kind }] }, 1)).toEqual({ ok: false, error: "E_BAD_RESPONSE" });
     }
   });

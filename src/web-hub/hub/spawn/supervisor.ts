@@ -127,7 +127,7 @@ import {
 export interface SpawnAuditRecord {
   audit: "spawn";
   phase: "request" | "reject" | "state" | "remove";
-  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove" | "prefs" | "history";
+  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove" | "prefs" | "history" | "mkdir";
   reqId?: string;
   listener?: "loopback" | "lan";
   ip?: string;

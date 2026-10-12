@@ -27,6 +27,9 @@ import { canonicalOrigin, parseOrigin } from "../../protocol/lan.js";
 import {
   PREVIEW_ADMIT_TOTAL_MS,
   PREVIEW_DIR_QUERY,
+  PREVIEW_DOWNLOAD_MAX_BYTES,
+  PREVIEW_DOWNLOAD_QUERY,
+  PREVIEW_DOWNLOAD_STREAM_MS,
   PREVIEW_HDR,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_IMAGE_MAX_PIXELS,
@@ -261,7 +264,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     user?: string | undefined;
     agentKey?: string | undefined;
     cls?: "upload" | "cwd" | "abs" | undefined;
-    kind?: "text" | "image" | "dir" | undefined;
+    kind?: "text" | "image" | "dir" | "download" | undefined; // "download": preview-download ⑧dl
     ok: boolean;
     code?: string | undefined;
     reason?: string | undefined;
@@ -337,6 +340,15 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       // admitted directory into a listing request (§1.1); absent/any other value keeps the
       // pre-P1b behavior byte-identical (a directory still answers 415 not-regular).
       const wantDir = query.get(PREVIEW_DIR_QUERY) === "1";
+      // preview-download: the opt-in raw-byte download flag — same "1"-only rule, and
+      // MUTUALLY EXCLUSIVE with dir=1 (both ⇒ 400; a directory with download=1 alone keeps
+      // the admission chain's plain 415 not-regular, pinned by tests).
+      const wantDownload = query.get(PREVIEW_DOWNLOAD_QUERY) === "1";
+      if (wantDir && wantDownload) {
+        acc.code = "E_BAD_REQUEST";
+        send("E_BAD_REQUEST", { error: "E_BAD_REQUEST" });
+        return;
+      }
       // dir-plan §2.2 (U4/§1.4): single-segment absolute paths (`/home`, `/etc/hostname`) now
       // enter admission — the recognition layer keeps its own ≥2-segment freeze (C4).
       if (
@@ -479,6 +491,84 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
         acc.truncated = dirRes.listing.truncated;
         sendDirListing(io, res, dirRes.listing);
         return;
+      }
+
+      // ⑧dl download branch (preview-download): raw bytes for ANY admitted regular file —
+      // no sniff, no kind/dims gate, no image byte cap (the download cap is the 256 MiB
+      // protocol constant, loopback/LAN 同宽 U1, checked BEFORE the head). The stream itself
+      // rides the same readAndStream kernel (streaming sha256 for the upload class, held-back
+      // last chunk, destroy-on-mismatch) with the download flow's octet-stream headers and
+      // its own 120s write-out budget (sized for the cap over a slow LAN).
+      if (wantDownload) {
+        if (opened.size > PREVIEW_DOWNLOAD_MAX_BYTES) {
+          acc.code = "E_PREVIEW_TOO_LARGE";
+          acc.reason = "bytes";
+          io.sendJson(res, PREVIEW_STATUS["E_PREVIEW_TOO_LARGE"]!, {
+            error: "E_PREVIEW_TOO_LARGE",
+            size: opened.size,
+            max: PREVIEW_DOWNLOAD_MAX_BYTES,
+            reason: "bytes",
+          });
+          return;
+        }
+        // basename for Content-Disposition — the same lossy-name rule as the UI (a name with
+        // U+FFFD degrades to "download"); the REQUESTED path's basename, not the realpath's
+        // (the user recognises what they clicked).
+        const slash = path.lastIndexOf("/");
+        const base = slash >= 0 && slash < path.length - 1 ? path.slice(slash + 1) : path;
+        const filename = base === "" || base.includes("\uFFFD") ? "download" : base;
+        streamed = true;
+        const dlOutcome: StreamOutcome = await readAndStream(
+          {
+            fh: opened.fh,
+            size: opened.size,
+            sniff: { kind: "binary" }, // unused by the download flow — no sniff ran
+            sample: Buffer.alloc(0),
+            ...(opened.verify === undefined ? {} : { verify: opened.verify }),
+            download: { filename },
+          },
+          resSink(res),
+          {
+            signal,
+            streamAt: PREVIEW_DOWNLOAD_STREAM_MS,
+            textMax: PREVIEW_TEXT_MAX_BYTES,
+            now,
+            verifier,
+          },
+        );
+        if (dlOutcome.ok) {
+          acc.ok = true;
+          acc.kind = "download";
+          acc.bytes = dlOutcome.bytes;
+          acc.verify = dlOutcome.verify;
+          return;
+        }
+        acc.reason = dlOutcome.reason;
+        switch (dlOutcome.reason) {
+          case "client-abort":
+            acc.code = "E_ABORT";
+            return; // 不应答 (§4.3 map)
+          case "hub-close":
+            acc.code = "E_ABORT";
+            if (!dlOutcome.headersSent) send("E_HUB_RESTARTING", { error: "E_HUB_RESTARTING" });
+            return;
+          case "shrunk":
+          case "hash-mismatch":
+          case "identity-changed":
+            acc.code = "E_PREVIEW_CHANGED";
+            if (!dlOutcome.headersSent) send("E_PREVIEW_CHANGED", { error: "E_PREVIEW_CHANGED" });
+            return;
+          case "verify-timeout":
+          case "verify-deadline":
+          case "stream-deadline":
+            acc.code = "E_DEADLINE";
+            if (!dlOutcome.headersSent) send("E_DEADLINE", { error: "E_DEADLINE" });
+            return;
+          default:
+            acc.code = "E_INTERNAL";
+            if (!dlOutcome.headersSent) send("E_INTERNAL", { error: "E_INTERNAL" });
+            return;
+        }
       }
 
       // ⑧ sniff (§3.1 ⑧ — the two reads stay inside the shared admission deadline)
@@ -799,6 +889,8 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
           listener: io.listener,
           principal,
           ...(body.body.dirs === true ? { dirs: true } : {}),
+          // preview-download: the files opt-in threads through exactly like dirs above.
+          ...(body.body.files === true ? { files: true } : {}),
         },
         r,
         signal,

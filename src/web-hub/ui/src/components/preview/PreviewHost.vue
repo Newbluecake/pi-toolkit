@@ -25,8 +25,9 @@
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, provide, ref, watch } from "vue";
-import { childPreviewPath, parentPreviewPath } from "@logic/preview.js";
+import { childPreviewPath, clientImageBudget, parentPreviewPath } from "@logic/preview.js";
 import type { PreviewDirEntry } from "@protocol/preview.js";
+import { PREVIEW_DOWNLOAD_HUB_CAP } from "@protocol/version.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
@@ -34,6 +35,7 @@ import { asDirHandle, type PreviewHandleDir, type PreviewViewDir } from "../../c
 import AppIcon from "../../icons/AppIcon.vue";
 import type { PreviewView } from "../../types.js";
 import CopyButton from "../detail/CopyButton.vue";
+import { HUB_CTX } from "../control/controlContext.js";
 import PreviewDir from "./PreviewDir.vue";
 import PreviewImage from "./PreviewImage.vue";
 import PreviewText from "./PreviewText.vue";
@@ -41,6 +43,7 @@ import { browserLocalStorage } from "../shell/themeStorage.js";
 import { PREVIEW_CTX } from "./previewContext.js";
 
 const ctx = inject(PREVIEW_CTX, null);
+const hub = inject(HUB_CTX, null);
 const { t } = useI18n();
 
 // `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the §5.2 standing warning.
@@ -161,6 +164,137 @@ function close(): void {
   ctx?.handle.close();
 }
 
+// --- 下载 (preview-download, 2026-10 user 拍板): 文件预览（text/image/markdown=text 相位）
+// 头部常驻「下载」按钮 — 目录列表（dir 相位）不显示。走同一个 `GET /api/preview` 端点重取
+// bytes（读语义不变，hub 侧零改动；预览传输层已带 X-PWH 头 + header 契约校验 + 尺寸上限中
+// 止），浏览器侧 Blob → objectURL → a[download] 保存 —— 不能 `<a href>` 直连，导航请求带不
+// 了自定义头。文件名 = 路径 basename，lossy（U+FFFD）降级为 "download"。 -----------------
+const dlBusy = ref(false);
+const dlFailed = ref(false);
+
+/** Only file phases (text/image — markdown IS the text phase) offer download; dir and every
+ *  failure phase don't. The button also requires the preview transport (a component-level
+ *  fake without HUB_CTX never renders a dead button). Reset the failure line on every
+ *  phase/path change. */
+const downloadable = computed(
+  () => (view.value.phase === "image" || view.value.phase === "text") && hub?.preview !== undefined,
+);
+
+/** preview-download: the `preview.download.v1` cap gates the download surface for
+ *  NON-previewable files (the unsupported phase's offer); previewable files keep the plain
+ *  `fetch`-based button regardless (it predates the cap). The transport method itself is
+ *  required too — a component-level fake without it never renders a dead button. */
+const downloadCap = computed(() => {
+  const h = hub?.state.value.hub;
+  const caps = h !== null && h !== undefined && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+  return Array.isArray(caps) && caps.includes(PREVIEW_DOWNLOAD_HUB_CAP) && hub?.preview?.download !== undefined;
+});
+watch(
+  () => ("path" in view.value ? `${view.value.phase}:${view.value.path}` : view.value.phase),
+  () => {
+    dlFailed.value = false;
+  },
+);
+
+/** The fetch needs a live session pair (the endpoint's ③/⑤ gate) — re-derived from the
+ *  selected agent EXACTLY like `usePreview`'s scope derivation (a scope change closes the
+ *  dialog, so an open dialog's derivation is stable for the click's lifetime). */
+const downloadSession = computed(() => {
+  const st = hub?.state.value;
+  if (st === undefined || st === null) return null;
+  const selected = st.selected;
+  if (selected === null || selected === undefined) return null;
+  const agent = st.agents.get(selected);
+  const session =
+    agent?.session ?? (agent?.card !== undefined ? (agent.card as { session?: unknown }).session : undefined);
+  const sessionId =
+    session !== null && typeof session === "object" ? (session as { sessionId?: unknown }).sessionId : undefined;
+  if (typeof sessionId !== "string" || sessionId === "") return null;
+  return { agentKey: selected, sessionId };
+});
+
+/** basename of the download path; a lossy name (U+FFFD from a lossy decode) is never written
+ *  to disk as-is — degrade to "download". */
+function downloadNameOf(p: string): string {
+  const slash = p.lastIndexOf("/");
+  const base = slash >= 0 && slash < p.length - 1 ? p.slice(slash + 1) : p;
+  return base === "" || base.includes("\uFFFD") ? "download" : base;
+}
+
+async function download(): Promise<void> {
+  const preview = hub?.preview;
+  const sess = downloadSession.value;
+  const v = view.value;
+  if (preview === undefined || sess === null || dlBusy.value) return;
+  if (v.phase !== "image" && v.phase !== "text") return;
+  const path = v.path;
+  dlBusy.value = true;
+  dlFailed.value = false;
+  try {
+    const out = await preview.fetch(
+      { agentKey: sess.agentKey, sessionId: sess.sessionId, path },
+      { signal: new AbortController().signal, maxPixels: clientImageBudget() },
+    );
+    if (!out.ok || out.kind === "dir") {
+      dlFailed.value = true;
+      return;
+    }
+    // Content-Type 用响应头原值: image 的 Blob 已带 sniffed mime；text 端点恒为 text/plain
+    const blob = out.kind === "image" ? out.blob : new Blob([out.text], { type: "text/plain;charset=utf-8" });
+    saveBlob(blob, downloadNameOf(path));
+  } catch {
+    dlFailed.value = true;
+  } finally {
+    dlBusy.value = false;
+  }
+}
+
+/** Blob → objectURL → `a[download]` (the ONLY sanctioned save chain: the endpoint requires
+ *  `X-PWH: 1`, so a plain `<a href>` navigation can never authenticate). The objectURL is
+ *  revoked a macrotask after the click handed it to the browser. */
+function saveBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a); // Firefox requires the anchor in the DOM
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+}
+
+/** The unsupported phase's download offer (preview-download): re-fetch through the SAME
+ *  endpoint with `download=1` — the hub then serves raw octet-stream bytes of ANY admitted
+ *  regular file (no sniff/kind gate). Rendered only under `downloadCap`. */
+async function downloadUnsupported(): Promise<void> {
+  const dl = hub?.preview?.download;
+  const sess = downloadSession.value;
+  const v = view.value;
+  if (dl === undefined || sess === null || dlBusy.value) return;
+  if (v.phase !== "unsupported") return;
+  const path = v.path;
+  dlBusy.value = true;
+  dlFailed.value = false;
+  try {
+    const out = await dl(
+      { agentKey: sess.agentKey, sessionId: sess.sessionId, path },
+      { signal: new AbortController().signal },
+    );
+    if (!out.ok) {
+      dlFailed.value = true;
+      return;
+    }
+    saveBlob(out.blob, downloadNameOf(path));
+  } catch {
+    dlFailed.value = true;
+  } finally {
+    dlBusy.value = false;
+  }
+}
+
 // --- focus management + scroll lock (§4.6: 焦点进入、循环、归还；滚动锁一定会清理) ---
 const panelEl = ref<HTMLElement | null>(null);
 let returnFocus: Element | null = null;
@@ -278,6 +412,19 @@ function onKeydown(ev: KeyboardEvent): void {
           <span class="preview-path" :title="path" translate="no"
             ><bdi dir="ltr">{{ path }}</bdi></span
           >
+          <!-- preview-download: files only (text/image); the dir phase never shows it. Native
+               button ⇒ keyboard-reachable inside the panel's Tab cycle; spinner while busy. -->
+          <button
+            v-if="downloadable"
+            class="btn btn-ghost btn-icon preview-download"
+            type="button"
+            :disabled="dlBusy"
+            :aria-label="t('preview.download')"
+            :title="t('preview.download')"
+            @click="download"
+          >
+            <AppIcon :name="dlBusy ? 'loader' : 'arrow-down'" :class="dlBusy ? 'spin' : undefined" />
+          </button>
           <button
             class="btn btn-ghost btn-icon preview-close"
             type="button"
@@ -287,6 +434,9 @@ function onKeydown(ev: KeyboardEvent): void {
             <AppIcon name="x" />
           </button>
         </header>
+        <p v-if="dlFailed" class="preview-download-error" role="alert">
+          {{ t("preview.downloadFailed") }}
+        </p>
         <p v-if="showPlainWarning" class="preview-plaintext" role="note">
           <AppIcon name="unlock" class="icon-sm" />
           <span>{{ t("preview.plaintextWarning") }}</span>
@@ -327,10 +477,28 @@ function onKeydown(ev: KeyboardEvent): void {
           <div v-else-if="view.phase === 'unsupported'" class="preview-note">
             <AppIcon name="ban" class="preview-note-icon" />
             <h3 class="preview-note-title">{{ t("preview.unsupportedTitle") }}</h3>
-            <p>{{ t("preview.unsupportedBody", { reason: unsupportedReason }) }}</p>
+            <p>
+              {{
+                downloadCap
+                  ? t("preview.unsupportedDownload")
+                  : t("preview.unsupportedBody", { reason: unsupportedReason })
+              }}
+            </p>
             <p v-if="view.size !== undefined" class="preview-meta">
               {{ t("preview.fileSize", { size: formatBytes(view.size) }) }}
             </p>
+            <!-- preview-download: the unsupported phase offers a direct download when the hub
+                 declares `preview.download.v1` — the button re-fetches with `download=1`. -->
+            <button
+              v-if="downloadCap"
+              class="btn btn-primary preview-download-unsupported"
+              type="button"
+              :disabled="dlBusy"
+              @click="downloadUnsupported"
+            >
+              <AppIcon :name="dlBusy ? 'loader' : 'arrow-down'" class="icon-sm" :class="dlBusy ? 'spin' : undefined" />
+              <span>{{ t("preview.download") }}</span>
+            </button>
           </div>
           <div v-else-if="view.phase === 'tooLarge'" class="preview-note">
             <AppIcon name="alert" class="preview-note-icon" />

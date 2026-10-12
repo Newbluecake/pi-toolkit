@@ -443,6 +443,10 @@ export interface PreviewPathScope {
   readonly abs?: true;
   /** A4/A5: directory candidates (`dir=1` / `dirs:true` + the (a)/(b)/(c) recognition rules). */
   readonly dirs?: true;
+  /** preview-download (2026-10-12 拍板): `preview.download.v1` — the probe sends `files:true`
+   *  so binary-but-downloadable regular files answer `"file"` (clickable into the unsupported
+   *  phase's download offer) instead of `"missing"`. */
+  readonly files?: true;
 }
 
 /** plan §3.2's UI-side state machine (state lives in `usePreview`, App-level — never in the

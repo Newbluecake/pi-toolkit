@@ -761,6 +761,50 @@ describe.each([
     expect(typeof sp!.dirs).toBe("function");
     expect(typeof sp!.start).toBe("function");
     expect(typeof sp!.stop).toBe("function");
+    expect(typeof sp!.mkdir).toBe("function"); // spawn-dirmkdir
+  });
+
+  it("mkdir(): POST /api/headless/mkdir with X-PWH:1 and the verbatim {path,name}; 200 {path} rides (spawn-dirmkdir)", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/mkdir" ? resp(200, { ok: true, path: "/real/proj/fresh" }) : resp(200),
+    );
+    const r = await h.transport.spawn!.mkdir!("~/proj", "fresh");
+    expect(r).toEqual({ ok: true, path: "/real/proj/fresh" });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless/mkdir")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["Content-Type"]).toBe("application/json");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual({ path: "~/proj", name: "fresh" });
+  });
+
+  it("mkdir(): the error half keeps status/reason verbatim (409 exists, 403 readonly, 400 name-invalid)", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/mkdir" ? resp(409, { error: "E_CONFLICT", reason: "exists" }) : resp(200),
+    );
+    expect(await h.transport.spawn!.mkdir!("/p", "taken")).toEqual({
+      ok: false,
+      error: "E_CONFLICT",
+      status: 409,
+      reason: "exists",
+    });
+    const h2 = make(async (url) =>
+      url === "/api/headless/mkdir" ? resp(403, { error: "E_DENIED", reason: "readonly" }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.mkdir!("/p", "x")).toEqual({
+      ok: false,
+      error: "E_DENIED",
+      status: 403,
+      reason: "readonly",
+    });
+    const h3 = make(async (url) =>
+      url === "/api/headless/mkdir" ? resp(400, { error: "E_BAD_REQUEST", reason: "name-invalid" }) : resp(200),
+    );
+    expect(await h3.transport.spawn!.mkdir!("/p", "a/b")).toEqual({
+      ok: false,
+      error: "E_BAD_REQUEST",
+      status: 400,
+      reason: "name-invalid",
+    });
   });
 
   it('list(): GET /api/headless with X-PWH:"1"; 200 {policy, items} rides as {policy, items}', async () => {
@@ -1218,6 +1262,74 @@ describe.each([
     expect(await p).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
     expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/preview"))).toHaveLength(1);
   });
+
+  // --- preview-download: download() (2026-10-12 拍板) — identical wire both modes ---------
+
+  const DL_HEADERS = {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": "3",
+    "X-PWH-Preview-Kind": "download",
+    "X-PWH-Preview-Size": "3",
+  };
+
+  it("implements download() on every adapter", () => {
+    expect(typeof make().transport.preview?.download).toBe("function");
+  });
+
+  it('download(): GET /api/preview?…&download=1 with X-PWH:"1"; 200 Kind:download rides as a blob', async () => {
+    const h = make(async () => respBytes(200, new Uint8Array([80, 75, 3]), DL_HEADERS));
+    const out = await h.transport.preview!.download!(PREVIEW_REQ, { signal: new AbortController().signal });
+    const call = h.fetchCalls.find((c) => c.url === `${PREVIEW_URL}&download=1`);
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("GET");
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.kind).toBe("download");
+      expect(out.size).toBe(3);
+      expect(out.blob.type).toBe("application/octet-stream");
+      expect(new Uint8Array(await out.blob.arrayBuffer())).toEqual(new Uint8Array([80, 75, 3]));
+    }
+  });
+
+  it("a Kind:download answer to an UN-opted-in fetch() is E_BAD_RESPONSE, body never read (§1.3 discipline)", async () => {
+    const r200 = respBytes(200, new Uint8Array([80, 75, 3]), DL_HEADERS);
+    const h = make(async () => r200);
+    const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
+    expect(out).toMatchObject({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    expect(r200.arrayBufferCalls()).toBe(0);
+  });
+
+  it("download(): Content-Length over the 256 MiB cap aborts PRE-body as E_PREVIEW_TOO_LARGE{bytes}", async () => {
+    const r200 = respBytes(200, new Uint8Array([1]), {
+      ...DL_HEADERS,
+      "Content-Length": String(256 * 1024 * 1024 + 1),
+    });
+    const h = make(async () => r200);
+    const out = await h.transport.preview!.download!(PREVIEW_REQ, { signal: new AbortController().signal });
+    expect(out).toMatchObject({ ok: false, error: "E_PREVIEW_TOO_LARGE", reason: "bytes", max: 256 * 1024 * 1024 });
+    expect(r200.arrayBufferCalls()).toBe(0);
+  });
+
+  it("download(): a short body ⇒ E_PREVIEW_CHANGED (same Content-Length oracle as fetch); 415 rides verbatim", async () => {
+    const h = make(async () => respBytes(200, new Uint8Array([80]), DL_HEADERS)); // 1 byte vs 3
+    expect(await h.transport.preview!.download!(PREVIEW_REQ, { signal: new AbortController().signal })).toEqual({
+      ok: false,
+      status: 200,
+      error: "E_PREVIEW_CHANGED",
+    });
+    const h415 = make(async (url) =>
+      url.startsWith("/api/preview")
+        ? respBytes(415, new Uint8Array(), {}, { error: "E_PREVIEW_UNSUPPORTED", reason: "not-regular" })
+        : resp(200),
+    );
+    expect(await h415.transport.preview!.download!(PREVIEW_REQ, { signal: new AbortController().signal })).toEqual({
+      ok: false,
+      status: 415,
+      error: "E_PREVIEW_UNSUPPORTED",
+      reason: "not-regular",
+    });
+  });
 });
 
 describe("token transport: preview() 401 recovery (withRelogin, GET replay is side-effect free)", () => {
@@ -1283,6 +1395,23 @@ describe.each([
     expect(call!.init.method).toBe("POST");
     expect(call!.init.headers?.["X-PWH"]).toBe("1");
     expect(JSON.parse(String(call!.init.body))).toEqual({ paths: PROBE_REQ.paths });
+  });
+
+  it('files:true rides the body verbatim; a files-LESS request folds a received "file" per-entry to "missing" (preview-download, §1.3 mirror)', async () => {
+    const h = make(async () => resp(200, { results: [{ kind: "file" }, { kind: "text" }] }));
+    const out = await h.transport.preview!.probe({ ...PROBE_REQ, files: true });
+    expect(out).toEqual({ ok: true, results: ["file", "text"] });
+    const call = h.fetchCalls.find((c) => c.url.startsWith(PROBE_URL))!;
+    expect(JSON.parse(String(call.init.body))).toEqual({ paths: PROBE_REQ.paths, files: true });
+
+    // files-less: the client-layer fold (the hub may legitimately answer "file" only to a
+    // files:true request; a skewed hub answering it anyway gets the §1.3 fold, exactly like
+    // "dir" under a dirs-less request)
+    const h2 = make(async () => resp(200, { results: [{ kind: "file" }, { kind: "text" }] }));
+    const out2 = await h2.transport.preview!.probe(PROBE_REQ);
+    expect(out2).toEqual({ ok: true, results: ["missing", "text"] });
+    const call2 = h2.fetchCalls.find((c) => c.url.startsWith(PROBE_URL))!;
+    expect(JSON.parse(String(call2.init.body))).toEqual({ paths: PROBE_REQ.paths });
   });
 
   it("a non-200 surfaces the error half (status/error, retryAfterS folded from 429)", async () => {

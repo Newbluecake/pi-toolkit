@@ -63,6 +63,16 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
   ["createObjectURL (banned — preview uses data: URLs; blob: would need CSP relaxed, D1/HP8)", /\bcreateObjectURL\b/],
 ];
 
+/** Per-pattern file exemptions (each entry MUST carry its rationale here, not at the call
+ *  site). preview-download (2026-10 user 拍板): PreviewHost's 「下载」 button hands a blob:
+ *  objectURL to an `<a download>` anchor ONLY — the URL is navigated for SAVE, never loaded
+ *  into the page as a resource, so the `img-src`/D1 rationale behind the ban does not apply
+ *  (no CSP relaxation needed: nothing renders from it). Every other file stays banned. */
+const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
+  "createObjectURL (banned — preview uses data: URLs; blob: would need CSP relaxed, D1/HP8)":
+    /components\/preview\/PreviewHost\.vue/,
+};
+
 /** localStorage is only legitimate for the theme preference, the token-mode transport, and a
  * handful of pure UI-preference persistence spots added later (never auth/session data):
  * `ControlNotice.vue`'s per-variant dismiss memory (user decision: "全部可关", §7.6 revision),
@@ -118,7 +128,11 @@ describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
       const raw = readFileSync(f, "utf8");
       const scoped = f.endsWith(".vue") ? scriptRegionsOf(raw) : raw;
       const src = stripJsComments(scoped);
-      for (const [name, re] of SOURCE_BANNED) if (re.test(src)) offenders.push(`${relative(ROOT, f)}: ${name}`);
+      for (const [name, re] of SOURCE_BANNED) {
+        if (re.test(src) && SOURCE_BANNED_EXCEPT[name]?.test(relative(ROOT, f)) !== true) {
+          offenders.push(`${relative(ROOT, f)}: ${name}`);
+        }
+      }
     }
     expect(offenders, offenders.join("; ")).toEqual([]);
   });

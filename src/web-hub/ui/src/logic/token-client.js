@@ -25,6 +25,7 @@ import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
   PREVIEW_CLIENT_TIMEOUT_MS,
   PREVIEW_DIR_BODY_MAX_BYTES,
+  PREVIEW_DOWNLOAD_CLIENT_TIMEOUT_MS,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_PROBE_CLIENT_TIMEOUT_MS,
 } from "@protocol/preview.ts";
@@ -698,6 +699,33 @@ export function createClient(deps) {
         return { ok: false, error: spawnFromError(e).error, status: 0 };
       }
     },
+    /**
+     * spawn-dirmkdir: `POST /api/headless/mkdir` — create ONE folder inside an admitted parent
+     * (the DirPicker browse panel's 「新建文件夹」). Rides `withRelogin` like the other
+     * endpoints (a replayed POST after re-login is safe: an already-created name answers 409
+     * `E_CONFLICT{reason:"exists"}` instead of a second create). The 200 `{path}` echo (the
+     * RESOLVED absolute path) rides back verbatim; the error half keeps `reason` so the
+     * picker's classified error line (`exists`/`permission`/`readonly`/…) works.
+     * @param {string} path @param {string} name @returns {Promise<any>}
+     */
+    async mkdir(path, name) {
+      try {
+        const r = await withRelogin(() => postRaw(API.headlessMkdir, { path, name }, CMD_REQUEST_TIMEOUT_MS));
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) {
+          /** @type {any} */
+          const err = { ok: false, error: out.error, status: out.status };
+          if (typeof out.reason === "string") err.reason = out.reason;
+          if (typeof out.retryAfterS === "number") err.retryAfterS = out.retryAfterS;
+          return err;
+        }
+        const d = out.data;
+        return { ok: true, path: typeof d.path === "string" ? d.path : "" };
+      } catch (e) {
+        const { retryable: _retryable, ...rest } = spawnFromError(e);
+        return rest;
+      }
+    },
   };
 
   // -------------------------------------------------------------------------
@@ -925,7 +953,7 @@ export function createClient(deps) {
    * genuinely could not succeed (it never sends `dir=1`), which is exactly probe `missing`'s
    * definition. A whole-batch `E_BAD_RESPONSE` would degrade every candidate for one bad
    * entry — deliberately NOT taken here.
-   * @param {{ agentKey: string, sessionId: string, paths: readonly string[], dirs?: true }} req
+   * @param {{ agentKey: string, sessionId: string, paths: readonly string[], dirs?: true, files?: true }} req
    * @param {{ signal?: any }} [opts]
    * @returns {Promise<any>}
    */
@@ -935,6 +963,8 @@ export function createClient(deps) {
       return { ok: false, status: 0, error: "E_ABORT" };
     }
     const dirs = req.dirs === true;
+    // preview-download: same opt-in discipline as `dirs` — literal true only.
+    const files = req.files === true;
     const url = `${API.previewProbe}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}`;
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
@@ -968,7 +998,11 @@ export function createClient(deps) {
           credentials: "same-origin",
           method: "POST",
           headers: { "Content-Type": "application/json", "X-PWH": "1" },
-          body: JSON.stringify(dirs ? { paths: req.paths, dirs: true } : { paths: req.paths }),
+          body: JSON.stringify({
+            paths: req.paths,
+            ...(dirs ? { dirs: true } : {}),
+            ...(files ? { files: true } : {}),
+          }),
           ...(ac ? { signal: ac.signal } : {}),
         });
       /** @type {any} */
@@ -996,7 +1030,8 @@ export function createClient(deps) {
       const parsed = parseProbeResults(body, req.paths.length);
       if (!parsed.ok) return { ok: false, status: 0, error: parsed.error };
       // dir-plan §1.3 single fold point: dirs-less + "dir" ⇒ per-entry "missing".
-      const kinds = dirs ? parsed.kinds : parsed.kinds.map((k) => (k === "dir" ? "missing" : k));
+      // preview-download mirrors it: files-less + "file" ⇒ per-entry "missing".
+      const kinds = parsed.kinds.map((k) => ((!dirs && k === "dir") || (!files && k === "file") ? "missing" : k));
       return { ok: true, results: kinds };
     } finally {
       deps.clearTimeout(deadlineTimer);
@@ -1006,7 +1041,97 @@ export function createClient(deps) {
     }
   }
 
-  const preview = { fetch: previewFetch, probe: probePost };
+  /**
+   * preview-download: `GET /api/preview?download=1` — raw bytes of ANY admitted regular
+   * file (the preview dialog's 「下载」 button + the unsupported-phase offer). Same skeleton
+   * as `previewFetch` (X-PWH: 1, `withRelogin` — a GET is replay-safe), with the download
+   * opt-in branch of `checkPreviewHeaders` as the header contract and a Content-Length body
+   * oracle (an incomplete body ⇒ `E_PREVIEW_CHANGED`, same as the image/text flows). The
+   * deadline is `PREVIEW_DOWNLOAD_STREAM_MS + 30s` — the hub streams up to 120s for the
+   * 256 MiB cap, so the 40s preview timeout would cut big downloads mid-stream.
+   * @param {{ agentKey: string, sessionId: string, path: string }} req
+   * @param {{ signal?: any }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function previewDownload(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.preview}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&path=${encodeURIComponent(req.path)}&download=1`;
+    const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
+    const ac = AC ? new AC() : undefined;
+    let expired = false;
+    /** @type {any} */
+    let deadlineTimer = null;
+    /** @type {Promise<never>} */
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = timer(() => {
+        expired = true;
+        ac?.abort();
+        reject(new Error("E_DEADLINE"));
+      }, PREVIEW_DOWNLOAD_CLIENT_TIMEOUT_MS);
+    });
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onExternalAbort = () => ac?.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    /** @param {unknown} e */
+    const fromError = (e) => {
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+        return { ok: false, status: 0, error: "E_DEADLINE" };
+      return { ok: false, status: 0, error: "E_NETWORK" };
+    };
+    try {
+      const send = () =>
+        deps.fetch(url, {
+          credentials: "same-origin",
+          method: "GET",
+          headers: { "X-PWH": "1" },
+          ...(ac ? { signal: ac.signal } : {}),
+        });
+      /** @type {any} */
+      let r;
+      try {
+        r = await Promise.race([withRelogin(send), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (!r.ok) return await previewOutcomeFromResponse(r);
+      const chk = checkPreviewHeaders(r.headers, { download: true });
+      if (!chk.ok) {
+        ac?.abort(); // pre-body refusal — never pull the bytes of an out-of-contract response
+        return { ok: false, status: 0, ...chk };
+      }
+      /** @type {any} */
+      let buf;
+      try {
+        buf = await Promise.race([r.arrayBuffer(), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (!buf || typeof buf.byteLength !== "number" || buf.byteLength !== chk.size) {
+        return { ok: false, status: r.status, error: "E_PREVIEW_CHANGED" };
+      }
+      return {
+        ok: true,
+        kind: "download",
+        size: chk.size,
+        blob: new Blob([buf], { type: "application/octet-stream" }),
+      };
+    } finally {
+      deps.clearTimeout(deadlineTimer);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
+    }
+  }
+
+  const preview = { fetch: previewFetch, probe: probePost, download: previewDownload };
 
   // -------------------------------------------------------------------------
   // worktree-diff endpoints (worktree-diff plan v3.1 §1.2/§4.6, package D4)

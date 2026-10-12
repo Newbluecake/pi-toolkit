@@ -15,7 +15,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PREVIEW_PROBE_MAX_PATHS, PREVIEW_PROBE_PATH } from "../../../src/web-hub/protocol/preview.js";
+import {
+  PREVIEW_DOWNLOAD_MAX_BYTES,
+  PREVIEW_PROBE_MAX_PATHS,
+  PREVIEW_PROBE_PATH,
+} from "../../../src/web-hub/protocol/preview.js";
 import { webHubUploadsDir } from "../../../src/web-hub/protocol/paths.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createPreviewRoutes } from "../../../src/web-hub/hub/preview/routes.js";
@@ -194,5 +198,53 @@ describe("POST /api/preview/probe — dirs:true (P1b)", () => {
     const f = h.file("n.txt", "hi");
     const r = await post(h, { paths: [d, f, join(h.cwd, "gone.txt")], dirs: true });
     expect(JSON.parse(r.body)).toEqual({ results: [{ kind: "dir" }, { kind: "text" }, { kind: "missing" }] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// preview-download (2026-10-12 拍板): `files:true` over the real loopback socket
+// ---------------------------------------------------------------------------
+
+describe("POST /api/preview/probe — files:true (preview-download)", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await setup();
+  });
+  afterEach(async () => {
+    await h.cleanup();
+  });
+
+  it("a binary file answers file ONLY when the body opts in; without files it stays missing (旧行为钉住)", async () => {
+    // zip magic + non-text bytes — sniffs binary
+    const zip = h.file("bundle.zip", Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]));
+    const withFiles = await post(h, { paths: [zip], files: true });
+    expect(withFiles.status).toBe(200);
+    expect(JSON.parse(withFiles.body)).toEqual({ results: [{ kind: "file" }] });
+    const without = await post(h, { paths: [zip] });
+    expect(JSON.parse(without.body)).toEqual({ results: [{ kind: "missing" }] });
+    // a non-true `files` value is dropped (not an error), same discipline as dirs
+    const falsy = await post(h, { paths: [zip], files: "yes" });
+    expect(JSON.parse(falsy.body)).toEqual({ results: [{ kind: "missing" }] });
+  });
+
+  it("a file over the 256 MiB download cap stays missing even with files:true (sparse file)", async () => {
+    const { openSync, ftruncateSync, closeSync } = await import("node:fs");
+    const big = join(h.cwd, "huge.bin");
+    const fd = openSync(big, "w");
+    ftruncateSync(fd, PREVIEW_DOWNLOAD_MAX_BYTES + 1);
+    closeSync(fd);
+    const r = await post(h, { paths: [big], files: true });
+    expect(JSON.parse(r.body)).toEqual({ results: [{ kind: "missing" }] });
+  });
+
+  it("files+dirs ride the same request independently (file/dir/text/missing in order)", async () => {
+    const d = join(h.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    const zip = h.file("b.zip", Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    const txt = h.file("n.txt", "hi");
+    const r = await post(h, { paths: [zip, d, txt, join(h.cwd, "gone")], files: true, dirs: true });
+    expect(JSON.parse(r.body)).toEqual({
+      results: [{ kind: "file" }, { kind: "dir" }, { kind: "text" }, { kind: "missing" }],
+    });
   });
 });

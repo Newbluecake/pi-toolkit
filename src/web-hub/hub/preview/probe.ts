@@ -27,6 +27,7 @@
 
 import type { IncomingMessage } from "node:http";
 import {
+  PREVIEW_DOWNLOAD_MAX_BYTES,
   PREVIEW_PROBE_MAX_BODY_BYTES,
   PREVIEW_PROBE_MAX_PATHS,
   validatePreviewPath,
@@ -50,25 +51,29 @@ export interface ProbeBodyInput {
   /** dir-plan §1.1/§3.5 (P1b): `dirs: true` asks directories to answer `"dir"` instead of
    * `"missing"` — threaded straight into the open's `allowDir`. */
   readonly dirs?: true;
+  /** preview-download: `files: true` asks binary-but-downloadable regular files to answer
+   * `"file"` instead of `"missing"` (over the download cap ⇒ still `"missing"`). Same
+   * literal-`true`-only discipline as `dirs`. */
+  readonly files?: true;
 }
 
 export type ProbeBodyResult =
-  | { ok: true; paths: string[]; dirs?: true }
+  | { ok: true; paths: string[]; dirs?: true; files?: true }
   | { ok: false; status: number; code: "E_BAD_REQUEST"; reason: "json" | "shape" | "too-many" };
 
 /**
  * Pure JSON-shape validation (exported for direct unit tests): body must be an object with a
- * `paths` ARRAY of strings, at most `PREVIEW_PROBE_MAX_PATHS` entries; `dirs` is legal only as
- * the literal `true` (anything else is dropped, keeping the pre-dir behavior). Per-entry path
- * VALIDITY is deliberately NOT a body error — a single malformed entry answers `"missing"`
- * for itself (the UI only sends `isClickable`-validated paths; one hostile entry must not
- * kill the whole message's probe).
+ * `paths` ARRAY of strings, at most `PREVIEW_PROBE_MAX_PATHS` entries; `dirs`/`files` are
+ * legal only as the literal `true` (anything else is dropped, keeping the pre-flag
+ * behavior). Per-entry path VALIDITY is deliberately NOT a body error — a single malformed
+ * entry answers `"missing"` for itself (the UI only sends `isClickable`-validated paths; one
+ * hostile entry must not kill the whole message's probe).
  */
 export function parseProbeBody(raw: unknown): ProbeBodyResult {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "shape" };
   }
-  const o = raw as { paths?: unknown; dirs?: unknown };
+  const o = raw as { paths?: unknown; dirs?: unknown; files?: unknown };
   const paths = o.paths;
   if (!Array.isArray(paths)) return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "shape" };
   if (paths.length > PREVIEW_PROBE_MAX_PATHS) {
@@ -77,7 +82,12 @@ export function parseProbeBody(raw: unknown): ProbeBodyResult {
   for (const p of paths) {
     if (typeof p !== "string") return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "shape" };
   }
-  return { ok: true, paths, ...(o.dirs === true ? { dirs: true as const } : {}) };
+  return {
+    ok: true,
+    paths,
+    ...(o.dirs === true ? { dirs: true as const } : {}),
+    ...(o.files === true ? { files: true as const } : {}),
+  };
 }
 
 export type ProbeBodyRead =
@@ -123,7 +133,16 @@ export function readProbeBody(req: IncomingMessage): Promise<ProbeBodyRead> {
       }
       const shape = parseProbeBody(parsed);
       resolve(
-        shape.ok ? { ok: true, body: { paths: shape.paths, ...(shape.dirs === true ? { dirs: true } : {}) } } : shape,
+        shape.ok
+          ? {
+              ok: true,
+              body: {
+                paths: shape.paths,
+                ...(shape.dirs === true ? { dirs: true } : {}),
+                ...(shape.files === true ? { files: true } : {}),
+              },
+            }
+          : shape,
       );
     };
     const onData = (chunk: Buffer): void => {
@@ -160,7 +179,7 @@ export type ProbeRunResult = { ok: true; results: PreviewProbeKind[] } | { ok: f
  */
 export async function runPreviewProbe(
   deps: ProbeKernelDeps,
-  params: Omit<OpenPathInput, "path"> & { paths: readonly string[]; dirs?: boolean },
+  params: Omit<OpenPathInput, "path"> & { paths: readonly string[]; dirs?: boolean; files?: boolean },
   deadline: ReqDeadline,
   signal: AbortSignal,
 ): Promise<ProbeRunResult> {
@@ -181,7 +200,7 @@ export async function runPreviewProbe(
  * plain close). */
 async function probeOne(
   deps: ProbeKernelDeps,
-  input: OpenPathInput & { dirs?: boolean },
+  input: OpenPathInput & { dirs?: boolean; files?: boolean },
   deadline: ReqDeadline,
   signal: AbortSignal,
 ): Promise<PreviewProbeKind | undefined> {
@@ -204,7 +223,14 @@ async function probeOne(
     const sample = await readHead(deps, opened.fh, opened.size, deadline, signal);
     if (signal.aborted) return undefined;
     const s = sniff(sample, opened.size);
-    return s.kind === "text" ? "text" : s.kind === "image" ? "image" : "missing";
+    if (s.kind === "text") return "text";
+    if (s.kind === "image") return "image";
+    // preview-download (2026-10-12 拍板): under `files: true` a binary-sniffed REGULAR file
+    // answers `"file"` instead of folding to `"missing"` — it exists, was admitted, and is
+    // downloadable (a click opens the unsupported phase WITH the download offer). Over the
+    // download cap the click could never succeed ⇒ keep the old `"missing"` verdict.
+    if (input.files === true && opened.size <= PREVIEW_DOWNLOAD_MAX_BYTES) return "file";
+    return "missing";
   } catch (err) {
     if (signal.aborted) return undefined; // an aborted request is never answered
     return "missing"; // head read failed (deadline etc.) — indistinguishable from dead

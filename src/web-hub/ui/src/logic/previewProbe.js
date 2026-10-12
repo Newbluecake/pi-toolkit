@@ -30,10 +30,13 @@
  * - `parseProbeResults(raw, expectedCount)` — the `POST /api/preview/probe` 200-body
  *   contract: `{results:[{kind}…]}`, same length and order as the request. The kind set is
  *   `PREVIEW_PROBE_KINDS` — dir-plan §1.3's SINGLE SOURCE ("text" | "image" | "dir" |
- *   "missing"), imported from the protocol; this parser judges membership with the tuple's
+ *   "file" | "missing"; the 2026-10-12 `files:true` opt-in added "file" = exists /
+ *   admitted / regular / within the download cap / binary-unsniffable), imported from the
+ *   protocol; this parser judges membership with the tuple's
  *   `.includes()` and declares no local literal union of its own. A `"dir"` answer is legal
  *   ONLY for a request that sent `dirs: true`; a dirs-less client folds it per-entry to
- *   `"missing"` in ITS layer (the logic clients' `probePost`, §1.3's single fold point).
+ *   `"missing"` in ITS layer (the logic clients' `probePost`, §1.3's single fold point) —
+ *   `"file"` vs `files: true` folds the same way in the same layer.
  *   ANY other deviation is `E_BAD_RESPONSE` (the caller fails the whole batch — the hub is
  *   out of contract, not the paths).
  *

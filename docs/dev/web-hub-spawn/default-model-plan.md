@@ -1,5 +1,9 @@
 # web-hub 受管会话「新建会话默认模型」— 实施方案 v2
 
+> **2026-10-12 用户拍板撤销（F2 部分）**：SpawnModelField / DirPicker 的「本次模型」字段已移除——
+> 新建会话提交体只剩 `{cwd}`（不再携带 `model`），hub 侧以 `prefs.defaultModel` 兜底（§3 ② 的
+> 有效模型解析逻辑不变）。设置面板的 hub 级默认模型卡片（F1）保留，不受影响。
+>
 > 范围：web-hub 设置面板新增「新建会话默认模型」，只作用于 hub 自己 fork 的 `pi --mode rpc` 子进程
 > （`/api/headless*`，supervisor 在 `src/web-hub/hub/spawn/`）。**绝不读写 `~/.pi/agent/settings.json`。**
 > 依赖：`arch.md`（§4.5 admit、§7.7 store、§8.2 路由矩阵）、`plan.md`（SP9 幂等/门序）。v1 被评审打回，修订见 §9。

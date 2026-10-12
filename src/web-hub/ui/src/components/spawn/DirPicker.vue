@@ -3,14 +3,19 @@
   §3.2; 2026-10 redesigned from an inline sidebar panel to a Teleport'd dialog — user 拍板:
   新建会话可以占满页面,不需要担心遮挡其他会话). Renders the `useNewSession` (SP11) flow
   phases and forwards every user intent to that orchestrator — no wire calls, no verdicts of
-  its own beyond the §8.2 48 KiB client-side precheck (the same `PROMPT_TEXT_MAX_BYTES`
-  constant the protocol exports):
+  its own (spawn-dirbrowse/-dirmkdir, 2026-10 user 拍板: the optional first-prompt textarea is
+  GONE — the flow layer's `fp:*` mechanism stays for flows that carry one; and the cwd field
+  gains an in-dialog directory BROWSER riding the existing read-only `GET /api/preview?dir=1`
+  listing endpoint, plus a 「新建文件夹」 inline form riding the NEW `POST /api/headless/mkdir`):
 
-  - `idle` — the form: cwd input (prefilled with the selected agent's cwd or `~`), the
-    `GET /api/headless/dirs` recent list, an optional first-prompt textarea.
+  - `idle` — the form: cwd input (prefilled with the selected agent's cwd or `~`) + the 「浏览」
+    toggle (only when the hub declares `preview.dir.v1` AND the preview transport exists), the
+    `GET /api/headless/dirs` recent list, and the collapsible browse panel (current path +
+    「上一级」 + 「新建文件夹」 on top, subdir-only listing, 「选择此目录」 at the bottom).
   - `submitting` — form disabled, status line.
   - `confirming` — replaced by SpawnConfirm (409 `E_CONFIRM_REQUIRED`, arch §6.3).
-  - `awaiting` / `unknown` — status lines; the first-prompt mirror rides along as `fp:*` chips.
+  - `awaiting` / `unknown` — status lines; the first-prompt mirror rides along as `fp:*` chips
+    (only for flows that CARRY a first prompt — the picker itself no longer creates any).
   - `failed` — the §3.2 error taxonomy line (`classifySpawnError` kind → `spawn.err*`), inputs
     restored from `flow.input` (失败保留输入; `refilled:"picker"` returns the retained body the
     same way), Retry resubmits under a NEW id via `newSession.retry()`.
@@ -28,11 +33,9 @@
   and the Tab trap no longer reach the dialog (a11y fix — `ownsDocumentKeydown` keeps Escape
   closing only the topmost overlay).
 
-  default-model plan F2 (D6/D7): a 「本次模型」 field (`SpawnModelField`) sits between the
-  recent list and the first prompt, rendered only when the hub advertises `spawn.model.v1`.
-  Its initial value is the hub preference (`prefs.defaultModel ?? ""`), the submit always
-  sends `model` explicitly (D2 — `""` = explicit pi default), an invalid ref disables
-  submit, and a failed flow restores it from `flow.input` exactly like cwd.
+  The picker deliberately has NO model field (2026-10-12 user 拍板): a new session simply
+  runs with the hub-wide default model (`prefs.defaultModel` ?? pi default, applied hub-side
+  when the POST omits `model`); the settings page's default-model card is untouched.
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
@@ -40,14 +43,13 @@ import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
 import type { DirEntryWire } from "@protocol/spawn.js";
-import { PROMPT_TEXT_MAX_BYTES } from "@protocol/spawn.js";
+import { isValidMkdirName } from "@protocol/spawn.js";
+import { PREVIEW_IMAGE_MAX_PIXELS, type PreviewDirListing } from "@protocol/preview.js";
+import { PREVIEW_DIR_HUB_CAP } from "@protocol/version.js";
+import { childPreviewPath, parentPreviewPath } from "../../logic/preview.js";
 import { HUB_CTX } from "../control/controlContext.js";
-import { browserLocalStorage } from "../shell/themeStorage.js";
-import { isSpawnModelRef, knownModelRefs, readModelCache, writeModelCache } from "../../logic/models.js";
-import { spawnModelSupported } from "../../logic/spawn.js";
 import type { NewSessionInput } from "../../types.js";
 import SpawnConfirm from "./SpawnConfirm.vue";
-import SpawnModelField from "./SpawnModelField.vue";
 import "../../styles/spawn.css";
 
 const props = defineProps<{
@@ -71,69 +73,18 @@ const newSession = computed(() => hub?.spawn?.newSession ?? null);
 const flow = computed(() => newSession.value?.flow.value ?? ({ phase: "idle" } as const));
 
 // ---------------------------------------------------------------------------
-// 「本次模型」 (default-model plan F2, D6/D7): rendered only when the hub advertises
-// `spawn.model.v1`; the initial value is the hub preference (`prefs.defaultModel ?? ""`),
-// the submit always sends `model` explicitly (D2 — incl. `""` = explicit pi default), and
-// an invalid ref (hub's own `parseSpawnModelRef` gate via `isSpawnModelRef`) disables
-// submit. The cap check / datalist union / cache mirror SettingsView's default-model card.
+// hub caps (the browse toggle's `preview.dir.v1` gate; the picker itself sends no `model`
+// field — 2026-10-12 拍板, the hub's default model applies)
 // ---------------------------------------------------------------------------
-const spawn = hub?.spawn;
 const hubCaps = computed<unknown>(() => {
   const h = hub?.state.value.hub;
   return h !== null && h !== undefined && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
 });
-const modelCap = computed(() => spawnModelSupported(hubCaps.value));
-
-const model = ref("");
-const modelTrimmed = computed(() => model.value.trim());
-const modelInvalid = computed(
-  () => modelCap.value && modelTrimmed.value !== "" && !isSpawnModelRef(modelTrimmed.value),
-);
-/** The hub-wide default, for SpawnModelField's placeholder (`null` ⇒ pi default). The
- * `prefs?.` chain stays defensive: pre-F1 fakes/partial handles may lack the slot. */
-const prefsDefaultModel = computed(() => spawn?.prefs?.value?.defaultModel ?? null);
-
-// Initialize once from the hub preference when it arrives — a later prefs change (or a
-// settings-card save in another tab) must never clobber an in-progress edit. The
-// touched-latch covers the narrow window where prefs are still in flight but the user
-// has already typed (verifier finding: the first arrival would otherwise overwrite it).
-let modelInitialized = false;
-function onModelInput(v: string): void {
-  modelInitialized = true;
-  model.value = v;
-}
-watch(
-  () => spawn?.prefs?.value,
-  (p) => {
-    if (modelInitialized || p === null || p === undefined) return;
-    modelInitialized = true;
-    model.value = p.defaultModel ?? "";
-  },
-  { immediate: true },
-);
-
-// D7's list: union of online agents' `session.models.items` (cache refreshed whenever it is
-// non-empty); the last non-empty cache covers the no-online-agent case.
-const modelStorage = browserLocalStorage();
-const knownRefs = computed(() => knownModelRefs(hub?.state.value.agents));
-watch(
-  knownRefs,
-  (refs) => {
-    if (refs.length > 0) writeModelCache(modelStorage, refs);
-  },
-  { immediate: true },
-);
-const modelOptions = computed(() => (knownRefs.value.length > 0 ? knownRefs.value : readModelCache(modelStorage)));
 
 // ---------------------------------------------------------------------------
 // form state (local; restored from flow.input on failure — plan §3.2 保留输入)
 // ---------------------------------------------------------------------------
 const cwd = ref(props.prefillCwd ?? "~");
-const firstPrompt = ref("");
-
-const textEncoder = new TextEncoder();
-const promptBytes = computed(() => textEncoder.encode(firstPrompt.value).length);
-const promptTooLong = computed(() => promptBytes.value > PROMPT_TEXT_MAX_BYTES);
 
 /** Restore the failed flow's input exactly once per reqId (a later edit is never clobbered). */
 let restoredReqId: string | null = null;
@@ -141,13 +92,6 @@ watch(flow, (f) => {
   if (f.phase === "failed" && f.input !== undefined && f.reqId !== undefined && f.reqId !== restoredReqId) {
     restoredReqId = f.reqId;
     cwd.value = f.input.cwd;
-    firstPrompt.value = f.input.firstPrompt?.text ?? "";
-    // F2: restore the 「本次模型」 exactly like cwd (失败保留输入) — an untouched field keeps
-    // its value, since the restore runs only once per reqId.
-    if (f.input.model !== undefined) {
-      modelInitialized = true;
-      model.value = f.input.model;
-    }
   }
   if (f.phase === "idle") restoredReqId = null;
   if (f.phase === "done") emit("done");
@@ -173,9 +117,6 @@ onMounted(async () => {
   }
   const spawn = hub?.spawn;
   if (spawn === undefined) return;
-  // F2: make sure the hub preference is known (it also rides every list(), but the picker
-  // may open before the first one settles).
-  if (modelCap.value) void spawn.refreshPrefs();
   try {
     const r = await spawn.dirs();
     if (r.ok) {
@@ -194,6 +135,211 @@ function pickRecent(dir: DirEntryWire): void {
 }
 
 // ---------------------------------------------------------------------------
+// 目录浏览器 (spawn-dirbrowse + spawn-dirmkdir, 2026-10 user 拍板) — an in-dialog browse
+// panel, NOT a new modal. READS ride the existing read-only `GET /api/preview?path=…&dir=1`
+// listing endpoint through `hub.preview.fetch` (the preview transport — same helper family
+// the preview overlay uses; `&dir=1` opt-in, `X-PWH: 1` and the header contract all live in
+// the logic clients); the one WRITE (「新建文件夹」) rides the NEW `POST /api/headless/mkdir`
+// through `hub.spawn.mkdir`. The 「浏览」 toggle renders only when the hub declares
+// `preview.dir.v1` AND the transport exists.
+//
+// The preview endpoint requires a LIVE session's `agentKey`/`sessionId` pair (the hub's step
+// ③/⑤) — browsing absolute paths is global (dir-plan U4), so ANY online agent's session
+// satisfies it; with none online the panel degrades to its unsupported error line.
+// ---------------------------------------------------------------------------
+const browseCap = computed(() => {
+  const caps = hubCaps.value;
+  return Array.isArray(caps) && caps.includes(PREVIEW_DIR_HUB_CAP) && hub?.preview !== undefined;
+});
+
+interface BrowseSession {
+  readonly agentKey: string;
+  readonly sessionId: string;
+}
+
+/** Any online agent's live session pair — the preview endpoint's ③/⑤ gate needs one, and
+ *  global (U4) admission makes ANY of them equally valid for browsing absolute paths. */
+const browseSession = computed<BrowseSession | null>(() => {
+  const agents = hub?.state.value.agents;
+  if (agents === undefined || agents === null) return null;
+  for (const [agentKey, agent] of agents) {
+    if (agent.down) continue;
+    const session = agent.session;
+    if (session !== undefined && typeof session.sessionId === "string" && session.sessionId !== "") {
+      return { agentKey, sessionId: session.sessionId };
+    }
+  }
+  return null;
+});
+
+type BrowsePhase = "loading" | "ready" | "error";
+const browseOpen = ref(false);
+const browsePath = ref("~");
+const browsePhase = ref<BrowsePhase>("loading");
+const browseListing = ref<PreviewDirListing | null>(null);
+const browseErrorKey = ref<string | null>(null);
+/** Supersede guard: only the LATEST load may write state (a slow parent answer landing after
+ *  a drill-down must never clobber the child's listing). */
+let browseSeq = 0;
+let browseAbort: AbortController | null = null;
+
+/** Subdirectories only — files/symlinks/`other` never render (the picker chooses a DIR). */
+const browseDirs = computed(() => (browseListing.value?.entries ?? []).filter((e) => e.type === "dir"));
+/** 「上一级」 target (`parentPreviewPath` — `null` at the one-segment floor, button greys). */
+const browseParent = computed(() => parentPreviewPath(browsePath.value));
+
+/** Non-200 / transport-local error → its `spawn.browseErr*` i18n key (the §3.2-taxonomy
+ *  sibling for browsing — prose lines, same style as the picker's other error rows). */
+function classifyBrowseError(out: { readonly error: string }): string {
+  switch (out.error) {
+    case "E_PREVIEW_DENIED":
+      return "spawn.browseErrDenied";
+    case "E_NOT_FOUND":
+      return "spawn.browseErrNotFound";
+    case "E_BAD_REQUEST":
+      return "spawn.browseErrBadPath";
+    case "E_PREVIEW_UNSUPPORTED":
+      return "spawn.browseErrUnsupported";
+    case "E_RATE":
+    case "E_BUSY":
+      return "spawn.browseErrBusy";
+    default:
+      return "spawn.browseErrNetwork";
+  }
+}
+
+async function browseLoad(path: string): Promise<void> {
+  const preview = hub?.preview;
+  const sess = browseSession.value;
+  browsePath.value = path;
+  browseListing.value = null;
+  browseErrorKey.value = null;
+  if (preview === undefined || sess === null) {
+    browsePhase.value = "error";
+    browseErrorKey.value = "spawn.browseErrUnsupported";
+    return;
+  }
+  const seq = ++browseSeq;
+  browseAbort?.abort();
+  const ac = new AbortController();
+  browseAbort = ac;
+  browsePhase.value = "loading";
+  const out = await preview.fetch(
+    { agentKey: sess.agentKey, sessionId: sess.sessionId, path, dir: true },
+    { signal: ac.signal, maxPixels: PREVIEW_IMAGE_MAX_PIXELS },
+  );
+  if (seq !== browseSeq) return; // superseded by a newer navigation
+  if (out.ok) {
+    if (out.kind === "dir") {
+      browseListing.value = out.listing;
+      browsePhase.value = "ready";
+    } else {
+      // a hub answering a file/text kind to a dir=1 ask is out of contract — unsupported line
+      browsePhase.value = "error";
+      browseErrorKey.value = "spawn.browseErrUnsupported";
+    }
+    return;
+  }
+  if (out.error === "E_ABORT") return; // our own supersede/close abort — stay silent
+  browsePhase.value = "error";
+  browseErrorKey.value = classifyBrowseError(out);
+}
+
+function browseToggle(): void {
+  if (browseOpen.value) {
+    browseClose();
+    return;
+  }
+  browseOpen.value = true;
+  mkdirCancel();
+  // the cwd input's CURRENT value is the starting point ("" falls back to `~` — the hub
+  // expands a bare `~` / `~/…` against its own home, `hub/preview/tilde.ts`)
+  const start = cwd.value.trim();
+  void browseLoad(start === "" ? "~" : start);
+}
+
+function browseClose(): void {
+  browseOpen.value = false;
+  browseSeq += 1; // any in-flight load's answer is now stale
+  browseAbort?.abort();
+  browseAbort = null;
+  mkdirCancel();
+}
+
+function browseInto(name: string): void {
+  const child = childPreviewPath(browsePath.value, name);
+  if (child === null) return; // a name that can't join stays inert (defensive — protocol already shape-checks)
+  void browseLoad(child);
+}
+
+function browseUp(): void {
+  const parent = browseParent.value;
+  if (parent === null) return;
+  void browseLoad(parent);
+}
+
+/** 「选择此目录」 — write the browsed path into the cwd input and collapse the panel. */
+function browseChoose(): void {
+  cwd.value = browsePath.value;
+  browseClose();
+}
+
+// --- 「新建文件夹」 (spawn-dirmkdir): inline form in the panel header; a successful create
+// refreshes the current listing so the new folder is immediately drillable. ---------------
+const mkdirOpen = ref(false);
+const mkdirName = ref("");
+const mkdirBusy = ref(false);
+const mkdirErrorKey = ref<string | null>(null);
+
+function mkdirStart(): void {
+  mkdirOpen.value = true;
+  mkdirName.value = "";
+  mkdirErrorKey.value = null;
+}
+
+function mkdirCancel(): void {
+  mkdirOpen.value = false;
+  mkdirName.value = "";
+  mkdirBusy.value = false;
+  mkdirErrorKey.value = null;
+}
+
+/** mkdir wire error → its `spawn.mkdirErr*` key (名称非法/已存在/权限/只读/超时/网络). */
+function classifyMkdirError(out: { readonly error: string; readonly reason?: string }): string {
+  if (out.error === "E_BAD_REQUEST") return "spawn.mkdirErrName";
+  if (out.error === "E_CONFLICT")
+    return out.reason === "not-directory" ? "spawn.mkdirErrNotDir" : "spawn.mkdirErrExists";
+  if (out.error === "E_DENIED")
+    return out.reason === "readonly" ? "spawn.mkdirErrReadonly" : "spawn.mkdirErrPermission";
+  if (out.error === "E_NOT_FOUND") return "spawn.mkdirErrNoParent";
+  if (out.error === "E_DEADLINE") return "spawn.mkdirErrTimeout";
+  if (out.error === "E_RATE" || out.error === "E_BUSY") return "spawn.browseErrBusy";
+  return "spawn.mkdirErrNetwork";
+}
+
+async function mkdirConfirm(): Promise<void> {
+  const sp = hub?.spawn;
+  const mkdir = sp?.mkdir;
+  if (mkdir === undefined || mkdirBusy.value) return;
+  const name = mkdirName.value;
+  // local precheck first — the protocol's shared rule; the hub re-validates authoritatively
+  if (!isValidMkdirName(name)) {
+    mkdirErrorKey.value = "spawn.mkdirErrName";
+    return;
+  }
+  mkdirBusy.value = true;
+  mkdirErrorKey.value = null;
+  const out = await mkdir(browsePath.value, name);
+  mkdirBusy.value = false;
+  if (!out.ok) {
+    mkdirErrorKey.value = classifyMkdirError(out);
+    return;
+  }
+  mkdirCancel();
+  await browseLoad(browsePath.value); // refresh — the new folder appears, ready to drill into
+}
+
+// ---------------------------------------------------------------------------
 // dialog shell (Teleport'd — see header comment; the PickerSheet contract)
 // ---------------------------------------------------------------------------
 const panelEl = ref<HTMLElement | null>(null);
@@ -204,6 +350,10 @@ let releaseScrollLock: (() => void) | null = null;
 
 onUnmounted(() => {
   document.removeEventListener("keydown", onDocumentKeydown, true);
+  // an in-flight browse/mkdir fetch outlives nothing — abort with the dialog
+  browseSeq += 1;
+  browseAbort?.abort();
+  browseAbort = null;
   // Close and unmount are one path (the parent renders the dialog only while open), so this
   // covers both — the scroll lock release is idempotent and focus returns to the opener.
   releaseScrollLock?.();
@@ -244,28 +394,16 @@ const busyPhase = computed(() => {
   const p = flow.value.phase;
   return p === "submitting" || p === "awaiting" || p === "unknown" || p === "confirming";
 });
-const submitDisabled = computed(
-  () =>
-    newSession.value === null ||
-    busyPhase.value ||
-    cwd.value.trim() === "" ||
-    promptTooLong.value ||
-    modelInvalid.value,
-);
+const submitDisabled = computed(() => newSession.value === null || busyPhase.value || cwd.value.trim() === "");
 
 const submitBtn = ref<HTMLButtonElement | null>(null);
 
 function onSubmit(): void {
   const ns = newSession.value;
   if (ns === null || submitDisabled.value) return;
-  const text = firstPrompt.value;
+  // 2026-10-12 拍板: no `model` field — the hub applies its default-model preference.
   const input: NewSessionInput = {
     cwd: cwd.value.trim(),
-    // F2/D2: the picker ALWAYS sends `model` explicitly when the cap exists — `""` is the
-    // deliberate 「pi 默认」 tri-state, not "absent ⇒ hub preference" (the field's initial
-    // value already materialized the preference).
-    ...(modelCap.value ? { model: modelTrimmed.value } : {}),
-    ...(text !== "" ? { firstPrompt: { text } } : {}),
   };
   void ns.submit(input);
 }
@@ -282,7 +420,8 @@ const ERR_KEYS: Record<string, string> = {
   spawn: "spawn.errSpawn",
   "first-prompt": "spawn.errFirstPrompt",
   confirm: "spawn.errNetwork",
-  model: "spawn.errModelInvalid", // F2: hub-side 400 E_BAD_REQUEST{reason:"model-invalid"}
+  // (the picker no longer sends `model` — 2026-10-12 拍板 — so the "model" failure kind is
+  // unreachable here and has no entry; classifySpawnError keeps it for other callers)
 };
 const HINT_KEYS: Record<string, string> = {
   "register-timeout-hello": "spawn.hintRegisterTimeoutHello",
@@ -410,18 +549,119 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
 
           <div class="spawn-field">
             <label class="spawn-field-label" for="spawn-cwd">{{ t("spawn.pickerCwdLabel") }}</label>
-            <input
-              id="spawn-cwd"
-              ref="cwdInput"
-              v-model="cwd"
-              class="input spawn-cwd-input"
-              type="text"
-              name="spawn-cwd"
-              :placeholder="t('spawn.pickerCwdPlaceholder')"
-              autocomplete="off"
-              spellcheck="false"
-              :disabled="busyPhase"
-            />
+            <div class="spawn-cwd-row">
+              <input
+                id="spawn-cwd"
+                ref="cwdInput"
+                v-model="cwd"
+                class="input spawn-cwd-input"
+                type="text"
+                name="spawn-cwd"
+                :placeholder="t('spawn.pickerCwdPlaceholder')"
+                autocomplete="off"
+                spellcheck="false"
+                :disabled="busyPhase"
+              />
+              <button
+                v-if="browseCap"
+                class="btn btn-ghost spawn-browse-toggle"
+                type="button"
+                :disabled="busyPhase"
+                :aria-expanded="browseOpen"
+                @click="browseToggle"
+              >
+                <AppIcon name="folder" class="icon-sm" />{{ t("spawn.pickerBrowse") }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="browseOpen" class="spawn-browse" :aria-label="t('spawn.pickerBrowse')">
+            <div class="spawn-browse-bar">
+              <button
+                class="btn btn-ghost btn-xs"
+                type="button"
+                :disabled="browseParent === null || browsePhase === 'loading'"
+                @click="browseUp"
+              >
+                <AppIcon name="arrow-up" class="icon-sm" />{{ t("spawn.browseUp") }}
+              </button>
+              <span class="spawn-browse-path" :title="browsePath" translate="no">{{ browsePath }}</span>
+              <button
+                v-if="!mkdirOpen"
+                class="btn btn-ghost btn-xs spawn-mkdir-open"
+                type="button"
+                :disabled="browsePhase === 'loading' || mkdirBusy"
+                @click="mkdirStart"
+              >
+                {{ t("spawn.mkdirNew") }}
+              </button>
+            </div>
+            <form v-if="mkdirOpen" class="spawn-mkdir-form" @submit.prevent="mkdirConfirm">
+              <input
+                v-model="mkdirName"
+                class="input spawn-mkdir-input"
+                type="text"
+                name="spawn-mkdir-name"
+                :placeholder="t('spawn.mkdirPlaceholder')"
+                autocomplete="off"
+                spellcheck="false"
+                :disabled="mkdirBusy"
+              />
+              <button class="btn btn-primary btn-xs" type="submit" :disabled="mkdirBusy || mkdirName === ''">
+                {{ t("spawn.mkdirCreate") }}
+              </button>
+              <button class="btn btn-ghost btn-xs" type="button" :disabled="mkdirBusy" @click="mkdirCancel">
+                {{ t("spawn.mkdirCancel") }}
+              </button>
+            </form>
+            <p v-if="mkdirErrorKey" class="spawn-picker-error spawn-mkdir-error" role="alert">
+              {{ t(mkdirErrorKey) }}
+            </p>
+            <p v-if="browsePhase === 'loading'" class="spawn-picker-status" role="status">
+              <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.browseLoading") }}
+            </p>
+            <p v-else-if="browsePhase === 'error'" class="spawn-picker-error" role="alert">
+              {{ t(browseErrorKey ?? "spawn.browseErrNetwork") }}
+            </p>
+            <template v-else>
+              <p v-if="browseListing !== null && browseListing.truncated" class="spawn-picker-note">
+                {{ t("spawn.browseTruncated", { n: browseListing.entries.length }) }}
+              </p>
+              <p v-if="browseDirs.length === 0" class="spawn-picker-note">{{ t("spawn.browseEmpty") }}</p>
+              <ul v-else class="spawn-browse-list">
+                <li v-for="entry in browseDirs" :key="entry.name">
+                  <button
+                    v-if="entry.lossy !== true"
+                    class="spawn-browse-row"
+                    type="button"
+                    :title="entry.name"
+                    @click="browseInto(entry.name)"
+                  >
+                    <AppIcon name="folder" class="icon-sm" />
+                    <span class="spawn-browse-name"
+                      ><bdi translate="no">{{ entry.name }}</bdi></span
+                    >
+                  </button>
+                  <!-- A3: a lossy name (U+FFFD) renders inert — never a dead button -->
+                  <div v-else class="spawn-browse-row is-inert" :title="entry.name">
+                    <AppIcon name="folder" class="icon-sm" />
+                    <span class="spawn-browse-name"
+                      ><bdi translate="no">{{ entry.name }}</bdi></span
+                    >
+                  </div>
+                </li>
+              </ul>
+            </template>
+            <div class="spawn-browse-actions">
+              <button
+                class="btn btn-primary btn-xs spawn-browse-choose"
+                type="button"
+                :disabled="browsePhase === 'loading'"
+                @click="browseChoose"
+              >
+                {{ t("spawn.browseSelect") }}
+              </button>
+            </div>
           </div>
 
           <div v-if="recent.length > 0" class="spawn-field">
@@ -445,30 +685,6 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
             <p v-if="recentPartial" class="spawn-picker-note">{{ t("spawn.pickerRecentPartial") }}</p>
           </div>
           <p v-else-if="recentFailed" class="spawn-picker-note">{{ t("spawn.pickerRecentError") }}</p>
-
-          <SpawnModelField
-            v-if="modelCap"
-            :model-value="model"
-            :default-model="prefsDefaultModel"
-            :options="modelOptions"
-            :disabled="busyPhase"
-            @update:model-value="onModelInput"
-          />
-
-          <div class="spawn-field">
-            <label class="spawn-field-label" for="spawn-first-prompt">{{ t("spawn.pickerPromptLabel") }}</label>
-            <textarea
-              id="spawn-first-prompt"
-              v-model="firstPrompt"
-              class="spawn-prompt-input"
-              name="spawn-first-prompt"
-              :placeholder="t('spawn.pickerPromptPlaceholder')"
-              :disabled="busyPhase"
-            ></textarea>
-            <p v-if="promptTooLong" class="spawn-picker-error" role="alert">
-              {{ t("spawn.pickerPromptTooLong", { n: promptBytes }) }}
-            </p>
-          </div>
 
           <p v-if="flow.phase === 'submitting'" class="spawn-picker-status" role="status">
             <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.pickerSubmitting") }}

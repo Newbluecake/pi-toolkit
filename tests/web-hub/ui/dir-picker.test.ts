@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 /**
  * `DirPicker.vue` + `SpawnConfirm.vue` (web-hub-spawn plan SP12 / arch §9.1, plan §3.2; 2026-10
- * modal-dialog redesign). The picker is driven by a REAL `createNewSession` (SP11)
- * orchestrator over a fake `start`, so these tests pin the component wiring AND the flow
- * phases: recent dirs, the 409 ⇒ SpawnConfirm view (resolvedCwd via textContent, LAN
- * plaintext warning), failures preserving the input, and the 48 KiB client-side precheck —
- * plus the Teleport'd dialog shell (scrim close, Escape, focus trap/return, scroll lock).
+ * modal-dialog redesign; 2026-10-12 拍板: first-prompt textarea and the 「本次模型」 field are
+ * both GONE — the submit is `{cwd}` only). The picker is driven by a REAL `createNewSession`
+ * (SP11) orchestrator over a fake `start`, so these tests pin the component wiring AND the
+ * flow phases: recent dirs, the 409 ⇒ SpawnConfirm view (resolvedCwd via textContent, LAN
+ * plaintext warning), failures preserving the input, the in-dialog directory browser +
+ * 「新建文件夹」 — plus the Teleport'd dialog shell (scrim close, Escape, focus trap/return,
+ * scroll lock).
  *
  * The dialog Teleports to `<body>`, so ALL interaction goes through `document.body` queries +
  * native events (the PickerSheet-test pattern — VTU's teleport stub does NOT propagate slot
@@ -44,18 +46,31 @@ interface Harness {
   /** F1/F2: the spawn handle's prefs mirror — tests mutate it to simulate an arriving GET. */
   readonly prefs: ShallowRef<SpawnPrefsWire | null>;
   readonly refreshCalls: { n: number };
+  /** spawn-dirbrowse: the preview transport's fetch call log (opts.fetch was given). */
+  readonly previewCalls: Array<{ agentKey: string; sessionId: string; path: string; dir?: true }>;
+  /** spawn-dirmkdir: the spawn handle's mkdir call log. */
+  readonly mkdirCalls: Array<{ path: string; name: string }>;
 }
 
 /** HUB_CTX with a real §3.2 orchestrator over a scripted `start`; dirs() returns `recent`.
- * `caps` drives both the picker's `spawn.model.v1` gate and the orchestrator's second cap
- * guard (`modelCap` dep) — the body only ever carries `model` when it is advertised. */
+ * `caps` only feeds the ORCHESTRATOR's second cap guard (`modelCap` dep) — the picker itself
+ * has no model gate anymore (2026-10-12 拍板: the 「本次模型」 field is gone, submits never
+ * carry `model`).
+ * spawn-dirbrowse/-dirmkdir: `preview` (a scripted fetch) lands on the hub handle only when
+ * `opts.preview` is given, `withSession` seeds ONE online agent with a live session (the
+ * preview endpoint's agentKey/sessionId gate), and `opts.mkdir` scripts the mkdir answer. */
 function harness(opts: {
   start: (req: SpawnRequestBody) => Promise<SpawnOutcome>;
   recent?: DirEntryWire[];
   caps?: string[];
   prefs?: SpawnPrefsWire | null;
+  preview?: (req: { agentKey: string; sessionId: string; path: string; dir?: true }) => Promise<unknown>;
+  mkdir?: (path: string, name: string) => Promise<unknown>;
+  withSession?: boolean;
 }): Harness {
   const starts: SpawnRequestBody[] = [];
+  const previewCalls: Harness["previewCalls"] = [];
+  const mkdirCalls: Harness["mkdirCalls"] = [];
   const clock = fakeClock();
   const caps = opts.caps ?? [];
   const prefs = shallowRef<SpawnPrefsWire | null>(opts.prefs ?? null);
@@ -71,9 +86,23 @@ function harness(opts: {
     clearTimeout: clock.clearTimeout,
     newId: () => `req-${starts.length}-aaaaaaaaaaaa`,
   });
+  const agents = new Map<string, unknown>();
+  if (opts.withSession === true) {
+    agents.set("a1", { down: false, session: { sessionId: "sess-1", cwd: "/home/u/proj" } });
+  }
   const hub: HubHandle = {
-    state: ref({ agents: new Map(), spawns: null, hub: { caps } } as unknown as HubState),
+    state: ref({ agents, spawns: null, hub: { caps } } as unknown as HubState),
     dispatch: () => {},
+    ...(opts.preview === undefined
+      ? {}
+      : {
+          preview: {
+            fetch: (req: { agentKey: string; sessionId: string; path: string; dir?: true }) => {
+              previewCalls.push(req);
+              return opts.preview!(req);
+            },
+          },
+        }),
     spawn: {
       list: async () => ({ ok: false, error: "E_NOT_FOUND", status: 404 }),
       dirs: async () => ({ ok: true, recent: opts.recent ?? [] }),
@@ -86,9 +115,13 @@ function harness(opts: {
         return { ok: false, error: "E_NOT_FOUND", status: 404 };
       },
       setDefaultModel: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
-    },
-  };
-  return { hub, starts, prefs, refreshCalls };
+      mkdir: async (path: string, name: string) => {
+        mkdirCalls.push({ path, name });
+        return (opts.mkdir?.(path, name) ?? { ok: false, error: "E_UNSUPPORTED", status: 0 }) as never;
+      },
+    } as unknown as HubHandle["spawn"],
+  } as HubHandle;
+  return { hub, starts, prefs, refreshCalls, previewCalls, mkdirCalls };
 }
 
 // --- Teleport'd-DOM helpers (the dialog lives at document.body) ------------------------------
@@ -174,7 +207,7 @@ describe("DirPicker.vue (SP12)", () => {
     expect(qa(".spawn-recent-btn")[0]!.classList.contains("is-current")).toBe(false);
   });
 
-  it("submits {cwd, firstPrompt} through the orchestrator exactly once per click", async () => {
+  it("submits {cwd} through the orchestrator exactly once per click (no first-prompt field — removed per user 拍板)", async () => {
     let call = 0;
     const h = harness({
       start: async () => {
@@ -185,14 +218,10 @@ describe("DirPicker.vue (SP12)", () => {
     mountPicker(h, { prefillCwd: "~/work" });
     await flushPromises();
     await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/proj");
-    await setValue(q<HTMLTextAreaElement>("#spawn-first-prompt"), "hello session");
     await click(q(".spawn-picker-actions .btn-primary"));
     expect(call).toBe(2); // §3.2: network error ⇒ the SAME id resent once
-    expect(h.starts[0]).toEqual({
-      id: "req-0-aaaaaaaaaaaa",
-      cwd: "/home/u/proj",
-      firstPrompt: { text: "hello session" },
-    });
+    expect(h.starts[0]).toEqual({ id: "req-0-aaaaaaaaaaaa", cwd: "/home/u/proj" });
+    expect(h.starts[0]).not.toHaveProperty("firstPrompt");
     expect(h.starts[1]).toEqual(h.starts[0]);
   });
 
@@ -255,30 +284,16 @@ describe("DirPicker.vue (SP12)", () => {
     mountPicker(h);
     await flushPromises();
     await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/keepme");
-    await setValue(q<HTMLTextAreaElement>("#spawn-first-prompt"), "draft body");
     await click(q(".spawn-picker-actions .btn-primary"));
 
     expect(q(".spawn-picker-error").textContent).toContain("Process limit reached");
     expect(q(".spawn-picker-error").textContent).toContain("4/4 processes");
     expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/keepme");
-    expect(q<HTMLTextAreaElement>("#spawn-first-prompt").value).toBe("draft body");
 
     await click(q(".spawn-picker-actions .btn:not(.btn-primary):not(.btn-ghost)"));
     expect(calls).toBe(2); // retry ⇒ a NEW id (§3.2)
     expect(h.starts[1]!.id).not.toBe(h.starts[0]!.id);
     expect(h.starts[1]!.cwd).toBe("/home/u/keepme");
-  });
-
-  it("first prompt over 48 KiB ⇒ submit disabled with the byte precheck line (never hits the wire)", async () => {
-    const h = harness({ start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }) });
-    mountPicker(h);
-    await flushPromises();
-    await setValue(q<HTMLTextAreaElement>("#spawn-first-prompt"), "x".repeat(48 * 1024 + 1));
-    const submit = q<HTMLButtonElement>(".spawn-picker-actions .btn-primary");
-    expect(submit.disabled).toBe(true);
-    expect(q(".spawn-picker-error").textContent).toContain("48 KiB");
-    await click(submit);
-    expect(h.starts).toHaveLength(0);
   });
 });
 
@@ -359,7 +374,7 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
     expect(document.activeElement).toBe(submit); // wrapped back to the last
   });
 
-  it("spawn.css pins the dialog shell: fixed scrim z-40, min(760px) panel at 85dvh, ≤640px bottom sheet, recent grid, 140px prompt", () => {
+  it("spawn.css pins the dialog shell: fixed scrim z-40, min(760px) panel at 85dvh, ≤640px bottom sheet, recent grid, browse panel", () => {
     const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/spawn.css"), "utf8");
     const scrim = css.match(/\.spawn-scrim \{([\s\S]*?)\n\}/);
     expect(scrim).not.toBeNull();
@@ -374,7 +389,11 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
     const recent = css.match(/\.spawn-recent \{([\s\S]*?)\n\}/);
     expect(recent).not.toBeNull();
     expect(recent![1]).toContain("grid-template-columns");
-    expect(css).toContain("min-height: 140px");
+    // the first-prompt textarea is gone (user 拍板); the browse panel styles exist instead
+    expect(css).not.toContain(".spawn-prompt-input");
+    expect(css).toContain(".spawn-browse-list");
+    expect(css).toContain(".spawn-browse-row");
+    expect(css).toContain(".spawn-mkdir-form");
     const narrow = css.match(/@media \(max-width: 640px\) \{([\s\S]*?)\n\}/);
     expect(narrow).not.toBeNull();
     expect(narrow![1]).toContain(".spawn-scrim");
@@ -385,149 +404,6 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
     expect(coarse![1]).toContain(".spawn-recent-btn");
     expect(coarse![1]).toContain(".spawn-picker-actions .btn");
     expect(css).not.toContain("v-html");
-  });
-});
-
-describe("DirPicker.vue — 「本次模型」 (default-model plan F2, D6/D7)", () => {
-  const MODEL_CAPS = ["spawn.v1", "spawn.model.v1"];
-
-  it("no spawn.model.v1 cap ⇒ the field is absent, refreshPrefs is never called, and the submit body has no `model` key", async () => {
-    const h = harness({
-      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
-      caps: ["spawn.v1"],
-      prefs: { defaultModel: "anthropic/claude-opus-4-5" },
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    expect(document.body.querySelector("#spawn-model")).toBeNull();
-    expect(h.refreshCalls.n).toBe(0);
-    await click(q(".spawn-picker-actions .btn-primary"));
-    expect(h.starts.length).toBeGreaterThan(0);
-    expect(h.starts[0]).not.toHaveProperty("model");
-  });
-
-  it("cap present ⇒ the field initializes from prefs.defaultModel and the submit sends it explicitly", async () => {
-    const h = harness({
-      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
-      caps: MODEL_CAPS,
-      prefs: { defaultModel: "anthropic/claude-opus-4-5" },
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    expect(q<HTMLInputElement>("#spawn-model").value).toBe("anthropic/claude-opus-4-5");
-    expect(h.refreshCalls.n).toBe(1); // mounted ⇒ prefs refetched (cap present)
-    await click(q(".spawn-picker-actions .btn-primary"));
-    expect(h.starts[0]!.model).toBe("anthropic/claude-opus-4-5");
-  });
-
-  it("prefs arriving after mount initialize the field exactly once — a later prefs change never clobbers an edit", async () => {
-    const h = harness({
-      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
-      caps: MODEL_CAPS,
-      prefs: null,
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    expect(q<HTMLInputElement>("#spawn-model").value).toBe(""); // unknown prefs ⇒ empty
-    h.prefs.value = { defaultModel: "p/m" }; // the GET settles
-    await flushPromises();
-    expect(q<HTMLInputElement>("#spawn-model").value).toBe("p/m");
-    await setValue(q<HTMLInputElement>("#spawn-model"), "openai/gpt-5");
-    h.prefs.value = { defaultModel: "zai/glm-5" }; // another tab saved a new default
-    await flushPromises();
-    expect(q<HTMLInputElement>("#spawn-model").value).toBe("openai/gpt-5");
-  });
-
-  it("prefs arriving after the user already typed never overwrite that edit (touched-latch)", async () => {
-    const h = harness({
-      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
-      caps: MODEL_CAPS,
-      prefs: null, // the GET is still in flight
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    await setValue(q<HTMLInputElement>("#spawn-model"), "openai/gpt-5"); // typed before prefs land
-    h.prefs.value = { defaultModel: "p/m" }; // the GET settles afterwards
-    await flushPromises();
-    expect(q<HTMLInputElement>("#spawn-model").value).toBe("openai/gpt-5");
-  });
-
-  it('an empty field submits model:"" (the explicit pi-default tri-state)', async () => {
-    const h = harness({
-      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
-      caps: MODEL_CAPS,
-      prefs: { defaultModel: null },
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    await click(q(".spawn-picker-actions .btn-primary"));
-    expect(h.starts[0]).toHaveProperty("model", "");
-  });
-
-  it("an invalid ref disables submit and shows the validation note; a valid one re-enables", async () => {
-    const h = harness({
-      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
-      caps: MODEL_CAPS,
-      prefs: { defaultModel: null },
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    const submit = q<HTMLButtonElement>(".spawn-picker-actions .btn-primary");
-    expect(submit.disabled).toBe(false);
-    await setValue(q<HTMLInputElement>("#spawn-model"), "noslash");
-    expect(submit.disabled).toBe(true);
-    expect(q<HTMLInputElement>("#spawn-model").getAttribute("aria-invalid")).toBe("true");
-    expect(q(".spawn-model-warn").textContent).toContain("Not a valid provider/id");
-    await click(submit);
-    expect(h.starts).toHaveLength(0); // never hits the wire
-    await setValue(q<HTMLInputElement>("#spawn-model"), "openai/gpt-5");
-    expect(submit.disabled).toBe(false);
-    expect(document.body.querySelector(".spawn-model-warn")).toBeNull();
-  });
-
-  it("the datalist unions online agents' session.models (D7)", async () => {
-    const h = harness({
-      start: async () => ({ ok: false, error: "E_NETWORK", retryable: true }),
-      caps: MODEL_CAPS,
-      prefs: { defaultModel: null },
-    });
-    (h.hub.state.value as { agents: Map<string, unknown> }).agents.set("a1", {
-      down: false,
-      session: {
-        models: {
-          status: "ok",
-          items: [{ provider: "anthropic", id: "claude-opus-4-5", name: "Claude Opus 4.5" }],
-          total: 1,
-          policy: { model: "allow", thinking: "allow" },
-          sampledAt: 1,
-        },
-      },
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    const options = qa("#spawn-model-options option");
-    expect(options.map((o) => o.getAttribute("value"))).toEqual(["anthropic/claude-opus-4-5"]);
-  });
-
-  it("400 E_BAD_REQUEST{reason:model-invalid} ⇒ the errModelInvalid line; the typed model survives like cwd; retry resends it", async () => {
-    let calls = 0;
-    const h = harness({
-      start: async () => {
-        calls += 1;
-        return { ok: false, error: "E_BAD_REQUEST", reason: "model-invalid", retryable: false };
-      },
-      caps: MODEL_CAPS,
-      prefs: { defaultModel: null },
-    });
-    mountPicker(h, { prefillCwd: "/home/u/proj" });
-    await flushPromises();
-    await setValue(q<HTMLInputElement>("#spawn-model"), "typo/model");
-    await click(q(".spawn-picker-actions .btn-primary"));
-    expect(q(".spawn-picker-error").textContent).toContain("The model was rejected");
-    expect(q<HTMLInputElement>("#spawn-model").value).toBe("typo/model"); // 失败保留输入
-    await click(q(".spawn-picker-actions .btn:not(.btn-primary):not(.btn-ghost)"));
-    expect(calls).toBe(2);
-    expect(h.starts[1]!.model).toBe("typo/model");
   });
 });
 
@@ -574,5 +450,236 @@ describe("DirPicker.vue — document-level keydown (a11y fix)", () => {
     (document.activeElement as HTMLElement | null)?.blur?.();
     await keydown(document.body, { key: "Tab" });
     expect(document.activeElement).toBe(q("#spawn-cwd")); // wrapped to the first focusable
+  });
+});
+
+describe("DirPicker.vue — 目录浏览器 + 新建文件夹 (spawn-dirbrowse/-dirmkdir)", () => {
+  const DIR_CAPS = ["spawn.v1", "preview.dir.v1"];
+
+  /** A minimal PreviewDirListing (the hub sorts dirs-first; the fake keeps the given order). */
+  function listing(
+    entries: Array<{ name: string; type: "dir" | "file" | "symlink" | "other"; lossy?: true }>,
+    over: Record<string, unknown> = {},
+  ) {
+    return {
+      entries,
+      total: entries.length,
+      scanned: entries.length,
+      complete: true,
+      truncated: false,
+      limits: { scan: false, entries: false, bytes: false },
+      vanished: 0,
+      dropped: 0,
+      ...over,
+    };
+  }
+
+  function browseHarness(
+    preview: (req: { agentKey: string; sessionId: string; path: string; dir?: true }) => Promise<unknown>,
+    opts: { caps?: string[]; mkdir?: (path: string, name: string) => Promise<unknown> } = {},
+  ) {
+    return harness({
+      start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
+      caps: opts.caps ?? DIR_CAPS,
+      withSession: true,
+      preview,
+      ...(opts.mkdir === undefined ? {} : { mkdir: opts.mkdir }),
+    });
+  }
+
+  it("no preview.dir.v1 cap ⇒ the 「浏览」 toggle never renders", async () => {
+    const h = browseHarness(async () => ({ ok: false, error: "E_NOT_FOUND", status: 404 }), {
+      caps: ["spawn.v1"],
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    expect(document.body.querySelector(".spawn-browse-toggle")).toBeNull();
+    expect(document.body.querySelector(".spawn-browse")).toBeNull();
+  });
+
+  it("open → dirs-only listing (files/symlinks filtered) → drill down → 上一级 → 选择此目录 writes cwd and closes", async () => {
+    const h = browseHarness(async (req) => {
+      if (req.path === "/home/u/proj") {
+        return {
+          ok: true,
+          kind: "dir",
+          listing: listing([
+            { name: "sub", type: "dir" },
+            { name: "readme.md", type: "file" },
+            { name: "link", type: "symlink" },
+          ]),
+        };
+      }
+      if (req.path === "/home/u/proj/sub") {
+        return { ok: true, kind: "dir", listing: listing([{ name: "deep", type: "dir" }]) };
+      }
+      return { ok: true, kind: "dir", listing: listing([]) };
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+
+    await click(q(".spawn-browse-toggle"));
+    // the open load starts from the cwd input's value, with a live session pair + dir opt-in
+    expect(h.previewCalls[0]).toEqual({ agentKey: "a1", sessionId: "sess-1", path: "/home/u/proj", dir: true });
+    const rows = qa(".spawn-browse-row");
+    expect(rows).toHaveLength(1); // dirs only — file/symlink filtered out
+    expect(rows[0]!.textContent).toContain("sub");
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj");
+
+    await click(rows[0]!); // drill into sub
+    expect(h.previewCalls[1]!.path).toBe("/home/u/proj/sub");
+    expect(qa(".spawn-browse-row")).toHaveLength(1);
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj/sub");
+
+    const upBtn = qa(".spawn-browse-bar .btn")[0]!;
+    await click(upBtn); // 上一级 → back to the parent
+    expect(h.previewCalls[2]!.path).toBe("/home/u/proj");
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj");
+
+    await click(q(".spawn-browse-choose")); // 选择此目录
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj");
+    expect(document.body.querySelector(".spawn-browse")).toBeNull(); // panel collapsed
+  });
+
+  it("「上一级」 greys out at the one-segment floor (/home has no listable parent)", async () => {
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }));
+    mountPicker(h, { prefillCwd: "/home" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    const upBtn = q<HTMLButtonElement>(".spawn-browse-bar .btn");
+    expect(upBtn.disabled).toBe(true);
+  });
+
+  it("a lossy dir entry renders inert (never a clickable button, protocol A3)", async () => {
+    const h = browseHarness(async () => ({
+      ok: true,
+      kind: "dir",
+      listing: listing([
+        { name: "good", type: "dir" },
+        { name: "badname", type: "dir", lossy: true },
+      ]),
+    }));
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    expect(qa("button.spawn-browse-row")).toHaveLength(1);
+    expect(qa(".spawn-browse-row.is-inert")).toHaveLength(1);
+  });
+
+  it("empty directory / truncated listing get their notice lines", async () => {
+    const h = browseHarness(async () => ({
+      ok: true,
+      kind: "dir",
+      // 截断形态: entries < total (truncated ≡ entries.length < total || !complete)
+      listing: listing([{ name: "only", type: "dir" }], {
+        total: 500,
+        truncated: true,
+        limits: { scan: false, entries: true, bytes: false },
+      }),
+    }));
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    expect(q(".spawn-browse").textContent).toContain("Showing the first 1 entries only");
+    expect(q(".spawn-browse").textContent).not.toContain("No subdirectories");
+
+    // 空目录形态（不带 truncated）
+    const h2 = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }));
+    mountPicker(h2, { prefillCwd: "/home/u/empty" });
+    await flushPromises();
+    await click(qa(".spawn-browse-toggle")[1]!);
+    expect(qa(".spawn-browse")[1]!.textContent).toContain("No subdirectories here.");
+  });
+
+  it("fetch failure shows the classified error line (404 → not found; 403 → denied)", async () => {
+    const h = browseHarness(async () => ({ ok: false, error: "E_NOT_FOUND", status: 404 }));
+    mountPicker(h, { prefillCwd: "/home/u/gone" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    expect(q(".spawn-browse .spawn-picker-error").textContent).toContain("Directory not found");
+
+    const h2 = browseHarness(async () => ({ ok: false, error: "E_PREVIEW_DENIED", status: 403, reason: "denylist" }));
+    mountPicker(h2, { prefillCwd: "/root" });
+    await flushPromises();
+    await click(qa(".spawn-browse-toggle")[1]!);
+    expect(qa(".spawn-browse .spawn-picker-error")[1]!.textContent).toContain("not readable");
+  });
+
+  it("no live session anywhere ⇒ the panel degrades to the unsupported line without fetching", async () => {
+    const h = harness({
+      start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
+      caps: DIR_CAPS,
+      // withSession deliberately false — zero online agents
+      preview: async () => ({ ok: true, kind: "dir", listing: listing([]) }),
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    expect(h.previewCalls).toHaveLength(0);
+    expect(q(".spawn-browse .spawn-picker-error").textContent).toContain("does not support directory browsing");
+  });
+
+  it("「新建文件夹」: inline form → mkdir(browsePath, name) → success refreshes the listing", async () => {
+    let created = false;
+    const h = browseHarness(
+      async () => ({
+        ok: true,
+        kind: "dir",
+        listing: listing(created ? [{ name: "fresh", type: "dir" }] : []),
+      }),
+      {
+        mkdir: async () => {
+          created = true;
+          return { ok: true, path: "/home/u/proj/fresh" };
+        },
+      },
+    );
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    expect(h.previewCalls).toHaveLength(1);
+
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(h.mkdirCalls).toEqual([{ path: "/home/u/proj", name: "fresh" }]);
+    // success ⇒ the current directory reloads and the new folder is drillable
+    expect(h.previewCalls).toHaveLength(2);
+    expect(q(".spawn-browse-row").textContent).toContain("fresh");
+    expect(document.body.querySelector(".spawn-mkdir-form")).toBeNull(); // form closed
+  });
+
+  it("mkdir failure shows the classified line and keeps the form open (exists / invalid name)", async () => {
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }), {
+      mkdir: async () => ({ ok: false, error: "E_CONFLICT", reason: "exists", status: 409 }),
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "taken");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(q(".spawn-mkdir-error").textContent).toContain("already exists");
+    expect(document.body.querySelector(".spawn-mkdir-form")).not.toBeNull(); // form stays open
+
+    // a locally-invalid name never hits the wire
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "a/b");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(h.mkdirCalls).toHaveLength(1);
+    expect(q(".spawn-mkdir-error").textContent).toContain("Invalid name");
+  });
+
+  it("mkdir cancel closes the inline form without a call", async () => {
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }), {
+      mkdir: async () => ({ ok: true, path: "/x/y" }),
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "nope");
+    await click(q(".spawn-mkdir-form .btn-ghost"));
+    expect(h.mkdirCalls).toHaveLength(0);
+    expect(document.body.querySelector(".spawn-mkdir-form")).toBeNull();
   });
 });

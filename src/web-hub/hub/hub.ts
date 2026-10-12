@@ -44,6 +44,7 @@ import {
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_TILDE_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
+  PREVIEW_DOWNLOAD_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
@@ -80,6 +81,8 @@ import type { AvatarRoutes } from "./ports.js";
 import { auditAvatar } from "./audit.js";
 import { readBody } from "./http.js";
 import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
+import type { PreviewDenyContext } from "./preview/admit.js";
+import { createMkdirService } from "./spawn/mkdir.js";
 import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
 import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
 import { hubLoadProbe, LOAD_HUB_CAP, normalizeHubLoadConfig } from "./load.js";
@@ -348,6 +351,9 @@ export async function startHub(
             PREVIEW_HUB_CAP,
             PREVIEW_ABS_HUB_CAP,
             PREVIEW_TILDE_HUB_CAP,
+            // preview-download: rides the SAME `config.preview` gate as ABS/TILDE (the
+            // admission chain is fd-agnostic — no /proc dependency, unlike DIR above).
+            PREVIEW_DOWNLOAD_HUB_CAP,
             ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
             // worktree-diff D21: `wtdiff.v1` rides the SAME preview gate AND the /proc probe —
             // the three-fd pin is /proc-bound, so a platform without it never declares the cap
@@ -398,6 +404,11 @@ export async function startHub(
     let uploadInflightTick: ReturnType<typeof setInterval> | undefined = undefined;
     let uploadSweepTick: ReturnType<typeof setInterval> | undefined = undefined;
     let uploads: UploadStore | undefined = undefined;
+    // spawn-dirmkdir: preview's §2.6 deny context, hoisted to assembly scope — `POST
+    // /api/headless/mkdir`'s admission reuses the SAME deny chain, so spawn-on hubs resolve it
+    // even when preview itself is off (the preview block below reuses the resolved value
+    // instead of resolving twice). `undefined` when neither feature is on.
+    let previewDenyCtx: PreviewDenyContext | undefined = undefined;
     let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined = undefined;
     let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined = undefined;
     let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined = undefined;
@@ -931,6 +942,28 @@ export async function startHub(
       // ready ≤2s — 4s total budget); `withSignal` folds a startup abort into the same await.
       await startupStep(spawnSup.init(createReqDeadline(now, SPAWN_INIT_BUDGET_MS)));
       startup.signal.throwIfAborted();
+      // spawn-dirmkdir: the browse panel's 「新建文件夹」 endpoint reuses preview's §2.6 deny
+      // chain, so its deny context resolves HERE when spawn is on — even with preview off (the
+      // preview block below reuses this value when it runs). Same 2s/never-fails semantics as
+      // the preview resolution (a degraded member keeps its literal form + a path-free WARN).
+      previewDenyCtx = await startupStep(
+        resolvePreviewDenyContext(
+          { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
+          {
+            tracker: createPreviewIoTracker(),
+            now,
+            log,
+            signal: startup.signal,
+          },
+        ),
+      );
+      startup.signal.throwIfAborted();
+      const mkdirSvc = createMkdirService({
+        denyCtx: previewDenyCtx,
+        tracker: createPreviewIoTracker(),
+        log,
+        now,
+      });
       spawnRoutes = createSpawnRoutes({
         supervisor: spawnSup,
         dirs: spawnDirs,
@@ -941,6 +974,7 @@ export async function startHub(
         rejectAudit429: new Map(),
         log,
         now,
+        mkdir: mkdirSvc,
         // session-history plan §4.8: `historyOn` already required it — absent keeps the route
         // surface byte-identical to history-off (P-route's §5 gate reads `deps.history`).
         ...(spawnHistory === undefined ? {} : { history: spawnHistory }),
@@ -996,17 +1030,21 @@ export async function startHub(
     // form + a path-free WARN, backstopped by the §2.3 global twins. agentDir shares the
     // spawn assembly's exact source (L512's SP3): `PI_CODING_AGENT_DIR ?? ${home}/.pi/agent`.
     if (config.preview !== undefined) {
-      const denyCtx = await startupStep(
-        resolvePreviewDenyContext(
-          { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
-          {
-            tracker: createPreviewIoTracker(),
-            now,
-            log,
-            signal: startup.signal,
-          },
-        ),
-      );
+      // spawn-dirmkdir: reuse the spawn assembly's resolution when it already ran (spawn on);
+      // otherwise resolve here exactly as before (spawn-off + preview-on stays byte-identical).
+      const denyCtx =
+        previewDenyCtx ??
+        (await startupStep(
+          resolvePreviewDenyContext(
+            { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
+            {
+              tracker: createPreviewIoTracker(),
+              now,
+              log,
+              signal: startup.signal,
+            },
+          ),
+        ));
       startup.signal.throwIfAborted();
       previewRoutes = createPreviewRoutes({
         mode: config.preview,

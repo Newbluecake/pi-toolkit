@@ -11,6 +11,7 @@ import type { HubLog } from "../../../src/web-hub/hub/ports.js";
 import { createSpawnRoutes } from "../../../src/web-hub/hub/spawn/routes.js";
 import type { AdmitResult, DirService } from "../../../src/web-hub/hub/spawn/dirs.js";
 import type { FirstPromptForwarder, FirstPromptStateView } from "../../../src/web-hub/hub/spawn/first-prompt.js";
+import type { MkdirService } from "../../../src/web-hub/hub/spawn/mkdir.js";
 import type { SpawnPrefs } from "../../../src/web-hub/hub/spawn/prefs.js";
 import type { SpawnFrontendPort } from "../../../src/web-hub/hub/spawn/ports.js";
 import type {
@@ -568,6 +569,9 @@ export interface SpawnKit {
   spawn: SpawnFrontendPort;
   cfg: HubSpawnConfig;
   history?: FakeHistoryService;
+  /** spawn-dirmkdir: the injected mkdir service (absent ⇒ the route is 404, byte-identical
+   *  to unknown — the `historyOn` gate pattern). */
+  mkdir?: MkdirService;
 }
 
 export const KIT_CFG: HubSpawnConfig = {
@@ -582,12 +586,15 @@ export const KIT_CFG: HubSpawnConfig = {
 
 /** Real `createSpawnRoutes` over the fakes, with a controllable clock (rate/idempotency-TTL tests).
  *  `history` (session-history plan §4.6.5): omitted ⇒ `deps.history` is undefined —
- *  byte-identical to history-off even when `cfg.history` is explicitly `true`. */
+ *  byte-identical to history-off even when `cfg.history` is explicitly `true`.
+ *  `mkdir` (spawn-dirmkdir): omitted ⇒ `deps.mkdir` is undefined — the mkdir route 404s,
+ *  byte-identical to an unknown path. */
 export function spawnKit(
   cfg: Partial<HubSpawnConfig> = {},
   clock: FakeClock,
   prefs: FakeSpawnPrefs = fakeSpawnPrefs(),
   history?: FakeHistoryService,
+  mkdir?: MkdirService,
 ): SpawnKit {
   const supervisor = fakeSpawnSupervisor();
   const dirs = fakeDirs();
@@ -604,6 +611,7 @@ export function spawnKit(
     rejectAudit429: new Map(),
     log,
     now: clock.now,
+    ...(mkdir === undefined ? {} : { mkdir }),
     ...(history === undefined ? {} : { history }),
   });
   return {
@@ -615,6 +623,7 @@ export function spawnKit(
     clock,
     spawn,
     cfg: full,
+    ...(mkdir === undefined ? {} : { mkdir }),
     ...(history === undefined ? {} : { history }),
   };
 }

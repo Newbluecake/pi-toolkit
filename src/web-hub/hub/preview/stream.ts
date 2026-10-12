@@ -78,6 +78,10 @@ interface StreamSrc {
   sample: Buffer;
   /** present ⇒ upload class: image hashes against `sha256`, text runs `verifyWhole`. */
   verify?: { uploadId: string; sha256: string };
+  /** preview-download: present ⇒ the DOWNLOAD flow (raw bytes, `Content-Disposition:
+   *  attachment` carrying this basename, `application/octet-stream`, no sniff/kind gate).
+   *  The route skips the sample read for these (download starts at offset 0). */
+  download?: { filename: string };
 }
 
 interface StreamOpts {
@@ -154,6 +158,7 @@ export function readAndStream(src: StreamSrc, sink: PreviewSink, opts: StreamOpt
 
   return (async (): Promise<StreamOutcome> => {
     try {
+      if (src.download !== undefined) return await streamDownload(ctx);
       if (src.sniff.kind === "image") return await streamImage(ctx);
       return await streamText(ctx);
     } catch (err) {
@@ -163,6 +168,78 @@ export function readAndStream(src: StreamSrc, sink: PreviewSink, opts: StreamOpt
       await src.fh.close().catch(() => undefined);
     }
   })();
+}
+
+// ---------------------------------------------------------------------------
+// download flow (preview-download) — the image flow's streaming-hash sibling: same
+// read loop, same held-back last chunk (an upload download is sha256-verified WHILE
+// streaming and nothing final leaves before the digest + post-stat identity match), but
+// octet-stream headers with the real basename and NO dims/mime — no sniff ever ran.
+// ---------------------------------------------------------------------------
+
+/** RFC 5987 `filename*` percent-encoding: everything outside the attr-char whitelist is
+ *  percent-encoded (stricter than encodeURIComponent, which leaves `'`/`(`/`)`/`*` bare). */
+function encodeFilenameStar(name: string): string {
+  let out = "";
+  for (const b of Buffer.from(name, "utf8")) {
+    const c = String.fromCharCode(b);
+    out += /^[A-Za-z0-9!#$&+.^_`|~-]$/.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+async function streamDownload(ctx: FlowCtx): Promise<StreamOutcome> {
+  const { src, sink, opts, state, fail, race, writeChunk } = ctx;
+  if (src.download === undefined) return fail("io"); // unreachable — dispatch guard
+
+  const pre = await race(src.fh.stat());
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": String(src.size),
+    [PREVIEW_HDR.kind]: "download",
+    [PREVIEW_HDR.size]: String(src.size),
+    "Content-Disposition": `attachment; filename*=UTF-8''${encodeFilenameStar(src.download.filename)}`,
+    "X-Content-Type-Options": "nosniff",
+    "Cross-Origin-Resource-Policy": "same-origin",
+  };
+  sink.writeHead(200, headers);
+  state.headSent = true;
+
+  const hasher = src.verify !== undefined ? createHash("sha256") : undefined;
+  let pos = 0;
+  let pending: Buffer | undefined; // the held-back chunk — never written until proven non-final
+  const samplePart = src.sample.subarray(0, Math.min(src.sample.length, src.size));
+  if (samplePart.length > 0) {
+    hasher?.update(samplePart);
+    pending = Buffer.from(samplePart);
+    pos = samplePart.length;
+  }
+
+  const chunk = Buffer.allocUnsafe(STREAM_CHUNK_BYTES);
+  while (pos < src.size) {
+    const want = Math.min(chunk.length, src.size - pos);
+    const { bytesRead } = await race(src.fh.read(chunk, 0, want, pos));
+    if (bytesRead === 0) return fail("shrunk"); // EOF before `size` bytes — file shrank
+    if (pending !== undefined) await writeChunk(pending); // more data existed ⇒ pending was not final
+    const fresh = chunk.subarray(0, bytesRead);
+    hasher?.update(fresh);
+    pending = Buffer.from(fresh);
+    pos += bytesRead;
+  }
+
+  const post = await race(src.fh.stat());
+  if (hasher !== undefined && src.verify !== undefined && hasher.digest("hex") !== src.verify.sha256) {
+    return fail("hash-mismatch"); // destroy: body ends short of Content-Length
+  }
+  if (!sameIdentity(identityOf(post), identityOf(pre))) {
+    return fail("identity-changed");
+  }
+  if (src.verify !== undefined) opts.verifier.remember(src.verify.uploadId, identityOf(post));
+
+  if (pending !== undefined) await writeChunk(pending);
+  sink.end();
+  return { ok: true, bytes: src.size, truncated: false };
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import { nextTick, ref, type Ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import PreviewHost from "../../../src/web-hub/ui/src/components/preview/PreviewHost.vue";
 import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
+import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { resetBodyScrollLock } from "../../../src/web-hub/ui/src/composables/useScrollLock.js";
 import { MESSAGES } from "../../../src/web-hub/ui/src/i18n/index.js";
 import type { PreviewHandle, PreviewView } from "../../../src/web-hub/ui/src/types.js";
@@ -330,8 +331,9 @@ import type { PreviewDirListing } from "../../../src/web-hub/protocol/preview.js
 import type { HubState } from "../../../src/web-hub/ui/src/types.js";
 import type { PreviewDirOutcome, PreviewTransport } from "../../../src/web-hub/ui/src/transport/types.js";
 
-/** The REAL composable over a deferred stub transport — the true P3 host ↔ handle pair. */
-function rigDir() {
+/** The REAL composable over a deferred stub transport — the true P3 host ↔ handle pair.
+ *  `hub` (preview-download tests): an optional HUB_CTX fake riding the same mount. */
+function rigDir(hub?: unknown) {
   const agents = new Map<string, unknown>([
     [
       "A",
@@ -375,7 +377,12 @@ function rigDir() {
   document.body.appendChild(host);
   const wrapper = mount(PreviewHost, {
     attachTo: host,
-    global: { provide: { [PREVIEW_CTX as symbol]: { handle, plaintext: false } satisfies PreviewContext } },
+    global: {
+      provide: {
+        [PREVIEW_CTX as symbol]: { handle, plaintext: false } satisfies PreviewContext,
+        ...(hub === undefined ? {} : { [HUB_CTX as symbol]: hub }),
+      },
+    },
   });
   const text = (path: string, body: string): void => {
     const w = waits.shift();
@@ -686,5 +693,240 @@ describe("PreviewHost.vue — directory browsing keeps the panel height stable",
     expect(panel()!.classList.contains("is-hold-tall")).toBe(false); // a fresh open starts compact
     view.value = { phase: "closed" };
     await tick();
+  });
+});
+
+// --- shared helpers for the two download suites (preview-download) ---
+/** HUB_CTX fake: one online selected agent + a scripted preview.fetch (+
+ *  preview.download when `opts.download` is given; `opts.caps` overrides the hub caps). */
+function hubWithFetch(
+  fetch: (req: { agentKey: string; sessionId: string; path: string }) => Promise<unknown>,
+  opts: {
+    download?: (req: { agentKey: string; sessionId: string; path: string }) => Promise<unknown>;
+    caps?: string[];
+  } = {},
+) {
+  const calls: Array<{ agentKey: string; sessionId: string; path: string }> = [];
+  const downloadCalls: Array<{ agentKey: string; sessionId: string; path: string }> = [];
+  const hub = {
+    state: ref({
+      selected: "A",
+      agents: new Map([["A", { down: false, session: { sessionId: "s1", cwd: "/p" } }]]),
+      hub: { caps: opts.caps ?? ["preview.v1"] },
+    }),
+    preview: {
+      fetch: (req: { agentKey: string; sessionId: string; path: string }) => {
+        calls.push(req);
+        return fetch(req);
+      },
+      ...(opts.download === undefined
+        ? {}
+        : {
+            download: (req: { agentKey: string; sessionId: string; path: string }) => {
+              downloadCalls.push(req);
+              return opts.download!(req);
+            },
+          }),
+    },
+    dispatch: () => {},
+  };
+  return { hub, calls, downloadCalls };
+}
+
+function mountWithHub(ctx: PreviewContext, hub: unknown): ReturnType<typeof mount> {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  return mount(PreviewHost, {
+    attachTo: host,
+    global: {
+      provide: { [PREVIEW_CTX as symbol]: ctx, [HUB_CTX as symbol]: hub },
+    },
+  });
+}
+
+/** Stub the objectURL pair + anchor click; returns the captured save intents. */
+function stubSave() {
+  const saved: Array<{ href: string; download: string }> = [];
+  const blobs: Blob[] = [];
+  const createSpy = vi.spyOn(URL, "createObjectURL").mockImplementation((b: Blob) => `blob:fake-${blobs.push(b)}`);
+  const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    saved.push({ href: this.href, download: this.download });
+  });
+  return { saved, blobs, createSpy, revokeSpy, clickSpy };
+}
+
+describe("PreviewHost.vue — 下载 (preview-download)", () => {
+  it("text phase: the button re-fetches through the same endpoint and saves basename + text/plain blob", async () => {
+    const { handle, view } = makeHandle();
+    const { hub, calls } = hubWithFetch(async () => ({
+      ok: true,
+      kind: "text",
+      size: 4,
+      truncated: false,
+      text: "body",
+    }));
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "text", path: "/p/src/a.ts", size: 4, truncated: false, text: "body" };
+    await tick();
+
+    const s = stubSave();
+    const btn = document.querySelector<HTMLButtonElement>(".preview-download")!;
+    expect(btn).not.toBeNull();
+    expect(btn.getAttribute("aria-label")).toBe("Download");
+    btn.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    expect(calls).toEqual([{ agentKey: "A", sessionId: "s1", path: "/p/src/a.ts" }]);
+    expect(s.saved[0]).toEqual({ href: "blob:fake-1", download: "a.ts" });
+    expect(s.blobs[0]!.type).toBe("text/plain;charset=utf-8");
+    expect(await s.blobs[0]!.text()).toBe("body");
+    await vi.waitFor(() => expect(s.revokeSpy).toHaveBeenCalledWith("blob:fake-1")); // 用后 revoke
+    expect(document.querySelector(".preview-download-error")).toBeNull();
+  });
+
+  it("image phase: the response Blob (with the header mime) is saved verbatim", async () => {
+    const { handle, view } = makeHandle();
+    const blob = new Blob(["PNG"], { type: "image/png" });
+    const { hub } = hubWithFetch(async () => ({
+      ok: true,
+      kind: "image",
+      mime: "image/png",
+      size: 3,
+      dims: { w: 1, h: 1 },
+      blob,
+    }));
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = {
+      phase: "image",
+      path: "/p/shot.png",
+      dataUrl: "data:image/png;base64,AAA",
+      mime: "image/png",
+      dims: { w: 1, h: 1 },
+      size: 3,
+    };
+    await tick();
+    const s = stubSave();
+    document.querySelector<HTMLButtonElement>(".preview-download")!.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    expect(s.blobs[0]).toBe(blob);
+    expect(s.saved[0]!.download).toBe("shot.png");
+  });
+
+  it('a lossy basename (U+FFFD) degrades to "download"', async () => {
+    const { handle, view } = makeHandle();
+    const { hub } = hubWithFetch(async () => ({ ok: true, kind: "text", size: 1, truncated: false, text: "x" }));
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "text", path: "/p/bad\uFFFD", size: 1, truncated: false, text: "x" };
+    await tick();
+    const s = stubSave();
+    document.querySelector<HTMLButtonElement>(".preview-download")!.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    expect(s.saved[0]!.download).toBe("download");
+  });
+
+  it("dir phase never shows the button; failure shows the error line and a retry re-fetches", async () => {
+    // dir phase (via the real usePreview rig — the nav face renders the listing); a hub with
+    // a working preview transport is provided, so the button's absence is the phase's doing.
+    const { hub: dirHub } = hubWithFetch(async () => ({ ok: false, error: "E_NETWORK", status: 0 }));
+    const r = rigDir(dirHub);
+    r.handle.open({ path: "/p/src", dir: true });
+    await tick();
+    r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await tick();
+    expect(document.querySelector(".preview-download")).toBeNull();
+    r.handle.close();
+    await tick();
+
+    // failure ⇒ classified error line; a second click re-fetches
+    const { handle, view } = makeHandle();
+    let n = 0;
+    const { hub, calls } = hubWithFetch(async () => {
+      n += 1;
+      return n === 1
+        ? { ok: false, error: "E_NETWORK", status: 0 }
+        : { ok: true, kind: "text", size: 1, truncated: false, text: "x" };
+    });
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "text", path: "/p/a.ts", size: 1, truncated: false, text: "x" };
+    await tick();
+    const btn = document.querySelector<HTMLButtonElement>(".preview-download")!;
+    btn.click();
+    await vi.waitFor(() => expect(document.querySelector(".preview-download-error")).not.toBeNull());
+    expect(document.querySelector(".preview-download-error")!.textContent).toContain("Download failed");
+    const s = stubSave();
+    btn.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    expect(calls).toHaveLength(2);
+    await vi.waitFor(() => expect(document.querySelector(".preview-download-error")).toBeNull());
+  });
+});
+
+describe("PreviewHost.vue — 不可预览类型的下载 (preview-download, download=1)", () => {
+  const DL_CAPS = ["preview.v1", "preview.download.v1"];
+
+  it("unsupported phase WITH the cap: 「不支持预览 — 可下载」 + a download button that saves via download=1", async () => {
+    const { handle, view } = makeHandle();
+    const blob = new Blob([new Uint8Array([0x50, 0x4b, 3, 4])], { type: "application/octet-stream" });
+    const { hub, downloadCalls } = hubWithFetch(async () => ({ ok: false, error: "E_NETWORK", status: 0 }), {
+      caps: DL_CAPS,
+      download: async () => ({ ok: true, kind: "download", blob, size: 4 }),
+    });
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "unsupported", path: "/p/bundle.zip", reason: "binary", size: 4 };
+    await tick();
+
+    const note = document.querySelector(".preview-note")!;
+    expect(note.textContent).toContain("cannot be previewed");
+    expect(note.textContent).toContain("download it instead");
+    const btn = document.querySelector<HTMLButtonElement>(".preview-download-unsupported")!;
+    expect(btn).not.toBeNull();
+
+    const s = stubSave();
+    btn.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    // the download=1 transport path was used (never the preview fetch), path verbatim
+    expect(downloadCalls).toEqual([{ agentKey: "A", sessionId: "s1", path: "/p/bundle.zip" }]);
+    expect(s.saved[0]!.download).toBe("bundle.zip");
+    expect(s.blobs[0]).toBe(blob);
+    expect(document.querySelector(".preview-download-error")).toBeNull();
+  });
+
+  it("unsupported phase WITHOUT preview.download.v1 (old hub): the pure error state stays — no button, reason text", async () => {
+    const { handle, view } = makeHandle();
+    const { hub } = hubWithFetch(async () => ({ ok: false, error: "E_NETWORK", status: 0 }), {
+      caps: ["preview.v1"], // no download cap
+      download: async () => ({ ok: true, kind: "download", blob: new Blob([]), size: 0 }),
+    });
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "unsupported", path: "/p/bundle.zip", reason: "binary", size: 4 };
+    await tick();
+    expect(document.querySelector(".preview-download-unsupported")).toBeNull();
+    expect(document.querySelector(".preview-note")!.textContent).toContain("binary file");
+  });
+
+  it("download=1 failure shows the error line; the button stays for a retry", async () => {
+    const { handle, view } = makeHandle();
+    let n = 0;
+    const { hub, downloadCalls } = hubWithFetch(async () => ({ ok: false, error: "E_NETWORK", status: 0 }), {
+      caps: DL_CAPS,
+      download: async () => {
+        n += 1;
+        return n === 1
+          ? { ok: false, error: "E_DEADLINE", status: 0 }
+          : { ok: true, kind: "download", blob: new Blob(["z"]), size: 1 };
+      },
+    });
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "unsupported", path: "/p/bundle.zip", reason: "binary", size: 1 };
+    await tick();
+    const btn = document.querySelector<HTMLButtonElement>(".preview-download-unsupported")!;
+    btn.click();
+    await vi.waitFor(() => expect(document.querySelector(".preview-download-error")).not.toBeNull());
+    const s = stubSave();
+    btn.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    expect(downloadCalls).toHaveLength(2);
   });
 });

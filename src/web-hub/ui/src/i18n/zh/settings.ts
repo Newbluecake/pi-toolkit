@@ -39,20 +39,18 @@ const settings = {
   plainWarnShow: "显示警告（默认）",
   plainWarnHide: "隐藏警告",
   // default-model plan F1 —「新建会话默认模型」卡片（2026-10 改为只选不输：自由输入框换成
-  // 切换按钮风格的选取器，「跟随 pi 默认」是列表首行）。`defaultModelPlaceholder` /
-  // `defaultModelInvalid` 保留——SpawnModelField（新建会话弹窗的本次模型字段）仍在用。
-  // 模型 ref（provider/id）和 chip 内的 not in list 标记两种语言都是英文 token；散文翻译。
+  // 切换按钮风格的选取器，「跟随 pi 默认」是列表首行）。2026-10-12：`defaultModelPlaceholder`
+  // / `defaultModelInvalid` 随 SpawnModelField（新建会话弹窗的本次模型字段，用户拍板移除）
+  // 一并删除。模型 ref（provider/id）和 chip 内的 not in list 标记两种语言都是英文 token；散文翻译。
   defaultModelSection: "新建会话默认模型",
   defaultModelHint:
     "从此 hub 新建会话（网页选目录/新建入口）时使用的模型。不修改 ~/.pi/agent/settings.json，也不影响已在运行的会话。",
   defaultModelShared: "此值在已登录的所有设备间共享。",
-  defaultModelPlaceholder: "provider/id — 留空表示 pi 默认",
   defaultModelFollowPi: "跟随 pi 默认",
   defaultModelFollowPiHint: "新建会话沿用 pi 自身的默认",
   defaultModelListAria: "默认模型选择",
   defaultModelSaving: "保存中…",
   defaultModelSaved: "已保存。",
-  defaultModelInvalid: "不是合法的 provider/id — 例如 anthropic/claude-opus-4-5",
   defaultModelUnsupported: "此 hub 版本过旧，不支持默认模型设置 — 升级后请运行 /webhub restart。",
   defaultModelSaveFailed: "保存失败 — hub 拒绝或无法持久化，请重试。",
   defaultModelNoList: "暂无模型列表——有会话在线后才会在这里出现。",

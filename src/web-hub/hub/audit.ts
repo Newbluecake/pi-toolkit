@@ -335,8 +335,9 @@ export interface PreviewAuditRecord {
    * other absolute path (U4's new class — statistics only, never an admission decision). */
   cls?: "upload" | "cwd" | "abs" | undefined;
   /** sniffed content kind of the admitted file (undefined before ⑧ decided); `"dir"` for a
-   * dir-plan §3.5 (P1b) listing answer. */
-  kind?: "text" | "image" | "dir" | undefined;
+   * dir-plan §3.5 (P1b) listing answer; `"download"` for a preview-download raw-byte answer
+   * (no sniff ran — the kind IS the mode). */
+  kind?: "text" | "image" | "dir" | "download" | undefined;
   ok: boolean;
   code?: string | undefined;
   reason?: string | undefined;

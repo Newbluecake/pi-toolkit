@@ -21,6 +21,7 @@ import type {
   CmdOutcome,
   HubTransport,
   LoadTopOutcome,
+  PreviewDownloadOutcome,
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
@@ -31,6 +32,7 @@ import type {
   RunSubResult,
   SpawnDirsOutcome,
   SpawnListOutcome,
+  SpawnMkdirOutcome,
   SpawnOutcome,
   SpawnPrefsOutcome,
   SpawnStopOutcome,
@@ -170,6 +172,9 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // session-history plan §4.7.1: GET /api/headless/history — same thin-cast rule (a GET,
       // side-effect free; the client's `withRelogin` replay is always safe).
       history: (q) => withAuthNotice(deps, () => client.spawn.history(q) as Promise<SpawnHistoryOutcome>),
+      // spawn-dirmkdir: POST /api/headless/mkdir — same thin-cast rule (the client replayed a
+      // 401 through `withRelogin`; a replayed create is safe — an existing name answers 409).
+      mkdir: (path, name) => withAuthNotice(deps, () => client.spawn.mkdir(path, name) as Promise<SpawnMkdirOutcome>),
     } satisfies SpawnTransport,
     // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`
     // — the same final-E_AUTH rule as upload/spawn (the client already replayed once through
@@ -186,6 +191,10 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // client already replayed once through `withRelogin` (a probe POST is read-only,
       // replay-safe).
       probe: (req, opts) => withAuthNotice(deps, () => client.preview.probe(req, opts) as Promise<PreviewProbeOutcome>),
+      // preview-download: GET /api/preview?download=1 — same final-E_AUTH rule (a GET, the
+      // client's `withRelogin` replay is side-effect free).
+      download: (req, opts) =>
+        withAuthNotice(deps, () => client.preview.download(req, opts) as Promise<PreviewDownloadOutcome>),
     } satisfies PreviewTransport,
     worktreeDiff: {
       // worktree-diff plan v3.1 §4.6 (D4): thin casts over the logic client's wtdiff

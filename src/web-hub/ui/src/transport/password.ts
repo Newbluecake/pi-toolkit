@@ -15,6 +15,7 @@ import type {
   CmdOutcome,
   LoadTopOutcome,
   PasswordTransport,
+  PreviewDownloadOutcome,
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
@@ -25,6 +26,7 @@ import type {
   RunSubResult,
   SpawnDirsOutcome,
   SpawnListOutcome,
+  SpawnMkdirOutcome,
   SpawnOutcome,
   SpawnPrefsOutcome,
   SpawnStopOutcome,
@@ -169,6 +171,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // fetch wrapper's `/api/headless` prefix rule covers `/history`; the shared suite in
       // `transport-contract.test.ts` pins wire parity with the token adapter).
       history: (q) => client.spawn.history(q) as Promise<SpawnHistoryOutcome>,
+      // spawn-dirmkdir: POST /api/headless/mkdir — one-shot like the rest (the wrapper's
+      // `/api/headless` prefix covers `/mkdir`); parity pinned by the same shared suite.
+      mkdir: (path, name) => client.spawn.mkdir(path, name) as Promise<SpawnMkdirOutcome>,
     } satisfies SpawnTransport,
     // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`.
     // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an
@@ -183,6 +188,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // 401 ⇒ onConn("auth") (`isRestAuthEndpoint`'s `/api/preview` prefix covers the probe
       // path too).
       probe: (req, opts) => client.preview.probe(req, opts) as Promise<PreviewProbeOutcome>,
+      // preview-download: GET /api/preview?download=1 — same wrapper rule (the
+      // `isRestAuthEndpoint` `/api/preview` prefix covers it); parity pinned by the shared suite.
+      download: (req, opts) => client.preview.download(req, opts) as Promise<PreviewDownloadOutcome>,
     } satisfies PreviewTransport,
     worktreeDiff: {
       // worktree-diff plan v3.1 §4.6 (D4): thin casts over the logic client's wtdiff namespace.

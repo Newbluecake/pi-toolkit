@@ -24,6 +24,7 @@ import type {
   SpawnDirsOutcome,
   SpawnHistoryOutcome,
   SpawnListOutcome,
+  SpawnMkdirOutcome,
   SpawnOutcome,
   SpawnPrefsOutcome,
   SpawnStopOutcome,
@@ -42,6 +43,10 @@ export interface SpawnCallSurface {
   readonly prefs: Readonly<Ref<SpawnPrefsWire | null>>;
   refreshPrefs(): Promise<SpawnListOutcome>;
   setDefaultModel(defaultModel: string): Promise<SpawnPrefsOutcome>;
+  /** spawn-dirmkdir: `POST /api/headless/mkdir` (the DirPicker browse panel's 「新建文件夹」) —
+   *  `E_UNSUPPORTED` when the transport's spawn namespace lacks `mkdir` (test fakes, a stale
+   *  hub); the panel only offers the button alongside its browse surface anyway. */
+  mkdir(path: string, name: string): Promise<SpawnMkdirOutcome>;
 }
 
 const UNSUPPORTED_LIST: SpawnListOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
@@ -50,6 +55,7 @@ const UNSUPPORTED_START: SpawnOutcome = { ok: false, error: "E_UNSUPPORTED", ret
 const UNSUPPORTED_STOP: SpawnStopOutcome = { ok: false, error: "E_UNSUPPORTED" };
 const UNSUPPORTED_PREFS: SpawnPrefsOutcome = { ok: false, error: "E_UNSUPPORTED", retryable: false };
 const UNSUPPORTED_HISTORY: SpawnHistoryOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
+const UNSUPPORTED_MKDIR: SpawnMkdirOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
 
 export function createSpawn(transport: HubTransport): SpawnCallSurface {
   const spawn = transport.spawn;
@@ -64,6 +70,7 @@ export function createSpawn(transport: HubTransport): SpawnCallSurface {
       stop: () => Promise.resolve(UNSUPPORTED_STOP),
       setDefaultModel: () => Promise.resolve(UNSUPPORTED_PREFS),
       history: () => Promise.resolve(UNSUPPORTED_HISTORY),
+      mkdir: () => Promise.resolve(UNSUPPORTED_MKDIR),
     };
   }
   const sp = spawn; // narrowed alias — hoisted function declarations don't keep the guard's narrowing
@@ -92,6 +99,8 @@ export function createSpawn(transport: HubTransport): SpawnCallSurface {
     // session-history plan §4.7.1: a transport-level spawn namespace without `history`
     // (test fakes) degrades to E_UNSUPPORTED — never a TypeError inside the dialog.
     history: (q) => (sp.history === undefined ? Promise.resolve(UNSUPPORTED_HISTORY) : sp.history(q)),
+    // spawn-dirmkdir: same missing-method degrade as `history` above.
+    mkdir: (path, name) => (sp.mkdir === undefined ? Promise.resolve(UNSUPPORTED_MKDIR) : sp.mkdir(path, name)),
   };
 }
 

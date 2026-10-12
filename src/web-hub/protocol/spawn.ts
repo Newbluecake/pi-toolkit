@@ -528,6 +528,60 @@ export function parseSpawnPrefsRequest(
 }
 
 // ---------------------------------------------------------------------------
+// mkdir (spawn-dirmkdir — the DirPicker browse panel's 「新建文件夹」 write endpoint,
+// POST /api/headless/mkdir; hub side lives in hub/spawn/mkdir.ts + routes.ts)
+// ---------------------------------------------------------------------------
+
+/** A new folder's name cap, UTF-8 bytes (Linux NAME_MAX). */
+export const MKDIR_NAME_MAX_BYTES = 255;
+
+/** POST /api/headless/mkdir body cap, UTF-8 bytes (path 4096 + name 255 + JSON overhead). */
+export const MKDIR_BODY_MAX = 8 * 1024;
+
+/** POST /api/headless/mkdir body shape: strict. `path` is the PARENT directory (absolute, or
+ * `~`/`~/...` — expanded hub-side against the hub's own home, same rule as preview's tilde
+ * addendum); `name` is the single new segment to create inside it (non-recursive). */
+export interface MkdirRequestBody {
+  path: string;
+  name: string;
+}
+
+/** The single-segment name rule, shared verbatim by the hub's schema gate and the UI's local
+ * precheck: non-empty, ≤ {@link MKDIR_NAME_MAX_BYTES} UTF-8 bytes, no `/`, not `.`/`..`, no NUL. */
+export function isValidMkdirName(name: unknown): name is string {
+  if (typeof name !== "string" || name === "" || name === "." || name === "..") return false;
+  if (name.includes("/") || name.includes("\0")) return false;
+  return byteLength(name) <= MKDIR_NAME_MAX_BYTES;
+}
+
+/** Strict POST body schema (`additionalProperties: false`). Deliberately NO `maxLength`
+ * prefilters — an over-long `name` fails {@link isValidMkdirName} and an over-long `path`
+ * fails the `path-invalid` check inside {@link parseMkdirRequestBody}, so both surface as
+ * their named 400 reasons instead of an opaque schema error. */
+export const MkdirRequestSchema = Type.Object(
+  { path: Type.String(), name: Type.String() },
+  { additionalProperties: false },
+);
+
+export type MkdirError = "not-an-object" | "schema" | "name-invalid" | "path-invalid";
+
+/**
+ * Validate + parse an arbitrary JSON value into a `MkdirRequestBody`. The path's SYNTAX
+ * (absolute, segment rules) is the hub admission chain's job — here only the byte cap is
+ * enforced (a longer body never even parses: {@link MKDIR_BODY_MAX}). Never throws.
+ */
+export function parseMkdirRequestBody(
+  raw: unknown,
+): { ok: true; body: MkdirRequestBody } | { ok: false; error: MkdirError } {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "not-an-object" };
+  if (!Value.Check(MkdirRequestSchema, raw)) return { ok: false, error: "schema" };
+  const body: MkdirRequestBody = Value.Decode(MkdirRequestSchema, raw);
+  if (!isValidMkdirName(body.name)) return { ok: false, error: "name-invalid" };
+  if (body.path === "" || byteLength(body.path) > SPAWN_CWD_MAX_BYTES) return { ok: false, error: "path-invalid" };
+  return { ok: true, body };
+}
+
+// ---------------------------------------------------------------------------
 // lifecycle / supervision constants (arch §7; consumers land in SP4–SP8)
 // ---------------------------------------------------------------------------
 

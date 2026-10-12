@@ -57,6 +57,10 @@ const preview = {
   dirTypeFile: "file",
   dirTypeSymlink: "symbolic link",
   dirTypeOther: "special file",
+  // preview-download (file download button in the dialog header — files only, never dirs)
+  download: "Download",
+  downloadFailed: "Download failed — retry.",
+  unsupportedDownload: "This file type cannot be previewed — you can download it instead.",
 } satisfies Record<string, string>;
 
 export default preview;

@@ -277,9 +277,9 @@ describe("protocol/preview — dir listing constants (dir-plan §1.1/§3.4)", ()
     );
   });
 
-  it("pins PREVIEW_PROBE_KINDS — the single enum source (§1.3), dir included, no extras", () => {
-    expect([...PREVIEW_PROBE_KINDS]).toEqual(["text", "image", "dir", "missing"]);
-    expect(new Set(PREVIEW_PROBE_KINDS).size).toBe(4); // all distinct
+  it("pins PREVIEW_PROBE_KINDS — the single enum source (§1.3), dir+file included, no extras", () => {
+    expect([...PREVIEW_PROBE_KINDS]).toEqual(["text", "image", "dir", "file", "missing"]);
+    expect(new Set(PREVIEW_PROBE_KINDS).size).toBe(5); // all distinct
   });
 });
 

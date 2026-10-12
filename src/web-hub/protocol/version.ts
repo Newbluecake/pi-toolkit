@@ -109,6 +109,12 @@ export const PREVIEW_ABS_HUB_CAP = "preview.abs.v1";
  * preview path to the hub user's home before the full admission chain. Same gate as
  * `PREVIEW_ABS_HUB_CAP`; a hub without it never sees a `~/` request from the UI. */
 export const PREVIEW_TILDE_HUB_CAP = "preview.tilde.v1";
+/** preview-download (2026-10-12 user 拍板): `GET /api/preview?download=1` — raw-byte download
+ * of ANY admitted regular file (no text/image sniff gate). Same declaration gate as
+ * `PREVIEW_ABS_HUB_CAP` (the mere presence of `config.preview`; loopback mode ⇒ loopback
+ * clients only, same width rule as preview itself). A hub without it keeps unsupported-file
+ * clicks at the pure error phase in the UI. */
+export const PREVIEW_DOWNLOAD_HUB_CAP = "preview.download.v1";
 
 /**
  * web-hub-fleet-drawer plan §3.2/§7.1 (F0): the run-transcript caps. An agent advertises a

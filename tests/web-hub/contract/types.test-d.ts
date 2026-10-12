@@ -529,18 +529,18 @@ describe("types.test-d.ts (bash-jobs-panel 包 A0 frozen status-slot surface)", 
 // element type ≡ PreviewProbeKind, PreviewOutcome's dir-variant listing ≡ PreviewDirListing)
 // are P2's half of the contract and land with `ui/src/transport/types.ts`.
 describe("types.test-d.ts (web-hub-preview dir-plan P0 protocol surface)", () => {
-  it("PreviewResponseKind is exactly text | image | dir (X-PWH-Preview-Kind's full set, §1.1)", () => {
-    expectTypeOf<PreviewResponseKind>().toEqualTypeOf<"text" | "image" | "dir">();
+  it("PreviewResponseKind is exactly text | image | dir | download (X-PWH-Preview-Kind's full set, §1.1 + preview-download)", () => {
+    expectTypeOf<PreviewResponseKind>().toEqualTypeOf<"text" | "image" | "dir" | "download">();
   });
 
-  it("PreviewProbeKind gains dir and IS the PREVIEW_PROBE_KINDS tuple's union (§1.3 single source)", () => {
-    expectTypeOf<PreviewProbeKind>().toEqualTypeOf<"text" | "image" | "dir" | "missing">();
+  it("PreviewProbeKind gains dir+file and IS the PREVIEW_PROBE_KINDS tuple's union (§1.3 single source)", () => {
+    expectTypeOf<PreviewProbeKind>().toEqualTypeOf<"text" | "image" | "dir" | "file" | "missing">();
     expectTypeOf<PreviewProbeKind>().toEqualTypeOf<(typeof PREVIEW_PROBE_KINDS)[number]>();
-    expectTypeOf<typeof PREVIEW_PROBE_KINDS>().toEqualTypeOf<readonly ["text", "image", "dir", "missing"]>();
+    expectTypeOf<typeof PREVIEW_PROBE_KINDS>().toEqualTypeOf<readonly ["text", "image", "dir", "file", "missing"]>();
   });
 
-  it("probe request/response bodies keep their §1.1 shapes (dirs?: true, results[].kind)", () => {
-    expectTypeOf<PreviewProbeRequestBody>().toEqualTypeOf<{ paths: string[]; dirs?: true }>();
+  it("probe request/response bodies keep their §1.1 shapes (dirs?/files?: true, results[].kind)", () => {
+    expectTypeOf<PreviewProbeRequestBody>().toEqualTypeOf<{ paths: string[]; dirs?: true; files?: true }>();
     expectTypeOf<PreviewProbeResponseBody>().toEqualTypeOf<{ results: Array<{ kind: PreviewProbeKind }> }>();
   });
 

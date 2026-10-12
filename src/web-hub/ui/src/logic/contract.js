@@ -69,6 +69,9 @@ export const API = Object.freeze({
   // default-model plan F1 (§3 ④): POST-only prefs endpoint (`{defaultModel}` ⇒ 200 `{prefs}`).
   // Hand-written literal like the two above — `tests/web-hub/ui/logic-contract.test.ts` pins it.
   headlessPrefs: "/api/headless/prefs",
+  // spawn-dirmkdir: POST-only create-folder endpoint (`{path, name}` ⇒ 200 `{path}`).
+  // Hand-written literal like the headless paths above — pinned by the same contract test.
+  headlessMkdir: "/api/headless/mkdir",
   // web-hub-delete-session plan v2 §4.1/§5.3: POST /api/agents/remove — imported from the
   // protocol module (same anti-drift rule as the upload/preview paths above), never a hand
   // copy of the literal.

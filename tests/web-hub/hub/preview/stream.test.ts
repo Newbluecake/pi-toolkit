@@ -397,6 +397,85 @@ describe("stream: images", () => {
 });
 
 // ---------------------------------------------------------------------------
+// download (preview-download) — the image flow's streaming-hash sibling: octet-stream
+// headers, no sniff/dims, same held-back-last-chunk + destroy-on-mismatch kernel
+// ---------------------------------------------------------------------------
+
+describe("stream: download (preview-download)", () => {
+  /** `readAndStream`'s download src: sniff unused (`binary` placeholder), empty sample. */
+  function downloadSrc(content: Buffer, expectedSha?: string, size = content.length) {
+    return {
+      fh: new FakeHandle(content),
+      size,
+      sniff: { kind: "binary" as const },
+      sample: Buffer.alloc(0),
+      ...(expectedSha === undefined ? {} : { verify: { uploadId: "u1", sha256: expectedSha } }),
+      download: { filename: "bundle.zip" },
+    };
+  }
+
+  it("streams byte-exact with the download header contract (Kind/CT/Content-Disposition filename*/nosniff)", async () => {
+    const content = Buffer.alloc(100 * KIB, 0x5a);
+    const sink = new FakeSink();
+    const out = await readAndStream(downloadSrc(content, sha(content)), sink, opts());
+    expect(out).toEqual({ ok: true, bytes: content.length, truncated: false, verify: undefined });
+    expect(sink.body().equals(content)).toBe(true);
+    const headers = sink.head?.headers ?? {};
+    expect(headers[PREVIEW_HDR.kind]).toBe("download");
+    expect(headers["Content-Type"]).toBe("application/octet-stream");
+    expect(headers["Content-Length"]).toBe(String(content.length));
+    expect(headers["Content-Disposition"]).toBe("attachment; filename*=UTF-8''bundle.zip");
+    expect(headers["X-Content-Type-Options"]).toBe("nosniff");
+    expect(headers[PREVIEW_HDR.dims]).toBeUndefined(); // no sniff metadata
+    expect(sink.ended).toBe(true);
+    expect(sink.destroyed).toBe(false);
+  });
+
+  it("hash mismatch ⇒ destroy and the client's body is short of Content-Length (same as the image rule)", async () => {
+    const content = Buffer.alloc(100 * KIB, 0x88);
+    const sink = new FakeSink();
+    const out = await readAndStream(downloadSrc(content, sha(Buffer.alloc(100 * KIB, 0x99))), sink, opts());
+    expect(out).toEqual({ ok: false, reason: "hash-mismatch", headersSent: true });
+    expect(sink.destroyed).toBe(true);
+    expect(sink.ended).toBe(false);
+    expect(sink.bytes).toBeLessThan(content.length); // last chunk held back, never sent
+  });
+
+  it("file SHRANK: EOF before `size` ⇒ shrunk, destroy, bytes < size", async () => {
+    const admitted = 100 * KIB;
+    const shrunken = Buffer.alloc(80 * KIB, 0x77);
+    const sink = new FakeSink();
+    const out = await readAndStream(downloadSrc(shrunken, undefined, admitted), sink, opts());
+    expect(out).toEqual({ ok: false, reason: "shrunk", headersSent: true });
+    expect(sink.destroyed).toBe(true);
+    expect(sink.bytes).toBeLessThan(admitted);
+  });
+
+  it("identity change (grew mid-stream) ⇒ destroy, like the image flow", async () => {
+    const admitted = 100 * KIB;
+    const grown = Buffer.alloc(150 * KIB, 0x66);
+    const pre = fakeStat({ size: admitted, ctimeMs: 1000 });
+    const post = fakeStat({ size: grown.length, ctimeMs: 2000 });
+    const fh = new ScriptedHandle(grown, [pre, post]);
+    const sink = new FakeSink();
+    const out = await readAndStream(
+      {
+        fh,
+        size: admitted,
+        sniff: { kind: "binary" as const },
+        sample: Buffer.alloc(0),
+        download: { filename: "g.bin" },
+      },
+      sink,
+      opts(),
+    );
+    expect(out).toEqual({ ok: false, reason: "identity-changed", headersSent: true });
+    expect(sink.destroyed).toBe(true);
+    expect(sink.bytes).toBeLessThan(admitted);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // lifecycle: aborts, deadlines, slow clients, fd ownership, unref'd timers
 // ---------------------------------------------------------------------------
 

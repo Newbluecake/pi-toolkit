@@ -270,6 +270,12 @@ export interface SpawnTransport {
    * `E_UNSUPPORTED`, and the settings card never calls it without the `spawn.model.v1` cap).
    * Both real adapters always provide it. */
   setPrefs?(defaultModel: string): Promise<SpawnPrefsOutcome>;
+  /** spawn-dirmkdir: `POST /api/headless/mkdir` — create ONE folder inside an admitted parent
+   * (the DirPicker browse panel's 「新建文件夹」). Optional per the frozen-transport
+   * convention — `createSpawn` degrades a missing method to `E_UNSUPPORTED`, and the panel
+   * only offers the button while its browse surface (`preview.dir.v1`) exists anyway. Both
+   * real adapters always provide it. */
+  mkdir?(path: string, name: string): Promise<SpawnMkdirOutcome>;
 }
 
 /** session-history plan §4.7.1's frozen outcome: a narrowed `HistoryPage`, or the wire error
@@ -283,6 +289,21 @@ export type SpawnHistoryOutcome =
       readonly status: number;
       readonly reason?: string;
       /** 429 only: the `Retry-After` header (seconds). */
+      readonly retryAfterS?: number;
+    };
+
+/** spawn-dirmkdir: `POST /api/headless/mkdir`'s outcome. The 200 `{path}` echo is the created
+ * directory's RESOLVED absolute path; the error half keeps `reason` verbatim
+ * (`"name-invalid"` / `"path-invalid"` / `"denylist"` / `"virtual-fs"` / `"exists"` /
+ * `"not-directory"` / `"permission"` / `"readonly"` / …) for the DirPicker's classified
+ * error line, `status` 0 for client-local codes (same convention as the other outcomes). */
+export type SpawnMkdirOutcome =
+  | { readonly ok: true; readonly path: string }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly status: number;
+      readonly reason?: string;
       readonly retryAfterS?: number;
     };
 
@@ -410,6 +431,20 @@ export interface UploadTransport {
 // web-hub-preview plan v3 §4.6 (package PV4) — the `GET /api/preview` transport surface
 // ---------------------------------------------------------------------------
 
+/** preview-download (2026-10-12 拍板): the `GET /api/preview?download=1` outcome. `blob`
+ *  carries the raw bytes (`application/octet-stream` — no mime sniff, by design); the error
+ *  half mirrors `PreviewOutcome`'s (`status` 0 for client-local codes, `reason` rides
+ *  through for the classified UI line). */
+export type PreviewDownloadOutcome =
+  | { readonly ok: true; readonly kind: "download"; readonly blob: Blob; readonly size: number }
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly error: string;
+      readonly reason?: string;
+      readonly retryAfterS?: number;
+    };
+
 /**
  * §4.6's frozen `PreviewOutcome`. The success halves are HEADER-driven (§3.2/D2: metadata
  * rides `X-PWH-Preview-*`, the body is raw bytes): `image` carries the sniffed mime/dims plus
@@ -496,6 +531,18 @@ export interface PreviewTransport {
     },
     opts: { readonly signal: AbortSignal; readonly maxPixels: number },
   ): Promise<PreviewDirOutcome>;
+  /** preview-download (2026-10-12 拍板): `GET /api/preview?download=1` — raw bytes of ANY
+   * admitted regular file (no sniff/kind gate), backing the preview dialog's 「下载」 button
+   * and the unsupported-phase download offer. Same auth/CSRF/header-contract discipline as
+   * `fetch` (`X-PWH: 1`, `checkPreviewHeaders`'s download opt-in branch, the Content-Length
+   * body oracle, `previewOutcomeFromResponse`'s error mapping); the client deadline rides
+   * `PREVIEW_DOWNLOAD_STREAM_MS` + slack because the hub streams up to 120s. Optional per the
+   * frozen-transport convention — the UI gates on the `preview.download.v1` cap anyway. Both
+   * real adapters always provide it. */
+  download?(
+    req: { readonly agentKey: string; readonly sessionId: string; readonly path: string },
+    opts: { readonly signal: AbortSignal },
+  ): Promise<PreviewDownloadOutcome>;
   /** 2026-10-07 修订「先探测后标记」: `POST /api/preview/probe` — batch existence probe, same
    * auth/CSRF surface as `fetch` (cookie credentials + `X-PWH: 1`), ONE request for a whole
    * message's candidates. Optional per the frozen-types convention — an older/foreign
@@ -504,13 +551,15 @@ export interface PreviewTransport {
    *
    * dir-plan §1.3/§5 P2: `dirs: true` adds it to the JSON body (directories then answer
    * `"dir"`); a dirs-less request folds a received `"dir"` per-entry to `"missing"`
-   * (§1.3's single fold point — the logic clients' `probePost`). */
+   * (§1.3's single fold point — the logic clients' `probePost`). preview-download:
+   * `files: true` rides the same body with the same fold rule for `"file"`. */
   probe?(
     req: {
       readonly agentKey: string;
       readonly sessionId: string;
       readonly paths: readonly string[];
       readonly dirs?: true;
+      readonly files?: true;
     },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<PreviewProbeOutcome>;

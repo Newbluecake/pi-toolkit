@@ -79,6 +79,8 @@
  */
 import {
   PREVIEW_CLIENT_PIXELS_COARSE,
+  PREVIEW_DOWNLOAD_KIND,
+  PREVIEW_DOWNLOAD_MAX_BYTES,
   PREVIEW_HDR,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_IMAGE_MAX_PIXELS,
@@ -90,18 +92,20 @@ import {
 import {
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
+  PREVIEW_DOWNLOAD_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   PREVIEW_TILDE_HUB_CAP,
 } from "@protocol/version.ts";
 
 /** Tilde-expansion addendum: `PREVIEW_TILDE_HUB_CAP` (`@protocol/version.ts`) gates `~/<rest>`
- * recognition; re-exported for existing importers. */
-export { PREVIEW_TILDE_HUB_CAP };
+ * recognition; re-exported for existing importers. `PREVIEW_DOWNLOAD_HUB_CAP`
+ * (preview-download) gates the probe's `files:true` opt-in — re-exported the same way. */
+export { PREVIEW_TILDE_HUB_CAP, PREVIEW_DOWNLOAD_HUB_CAP };
 
 /**
  * @typedef {{ agentKey: string, sessionId: string, cwd: string | null, uploads: boolean,
- *   abs?: true, dirs?: true, tilde?: true }} PathScope
+ *   abs?: true, dirs?: true, tilde?: true, files?: true }} PathScope
  * @typedef {{ kind: "text", text: string }
  *   | { kind: "ref", text: string, path: string, alt?: { text: string, path: string }, line?: number, col?: number }} PathSegment
  * @typedef {{ w: number, h: number }} PreviewDimsT
@@ -788,6 +792,7 @@ export function scopeKeyOf(scope) {
   if (scope.abs === true) key += "|abs";
   if (scope.dirs === true) key += "|dir";
   if (scope.tilde === true) key += "|tilde";
+  if (scope.files === true) key += "|file"; // preview-download — same invalidation rule as |dir
   return key;
 }
 
@@ -833,6 +838,10 @@ export function previewScopeOf(p) {
   // Tilde-expansion addendum: `preview.tilde.v1` — INDEPENDENT of `abs`/`dirs` (an older hub
   // can already declare those two without knowing how to expand a `~`).
   if (caps.includes(PREVIEW_TILDE_HUB_CAP)) scope.tilde = true;
+  // preview-download (2026-10-12 拍板): `preview.download.v1` adds `files` — the probe asks
+  // binary-but-downloadable regular files to answer `"file"` (clickable into the unsupported
+  // phase's download offer) instead of folding them to `"missing"`.
+  if (caps.includes(PREVIEW_DOWNLOAD_HUB_CAP)) scope.files = true;
   return scope;
 }
 
@@ -870,11 +879,17 @@ const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
  * With the opt-in the gate stops here: a dir body is capped-and-parsed JSON, not a
  * length-oracled byte stream, so none of the Content-Length/Content-Type machinery below
  * applies (`parsePreviewDirListing` is the real contract gate).
+ *
+ * preview-download — the download gate: `Kind: download` likewise requires `opts.download ===
+ * true` (the `&download=1` GET). The body IS length-oracled (octet-stream, no sniff, no
+ * truncation), so the Content-Length gate below DOES apply — against the 256 MiB download cap
+ * instead of the image/text caps.
  * @param {{ get(name: string): string | null } | null | undefined} headers
- * @param {{ maxPixels?: number, imageMaxBytes?: number, dir?: boolean }} [opts]
+ * @param {{ maxPixels?: number, imageMaxBytes?: number, dir?: boolean, download?: boolean }} [opts]
  * @returns {{ ok: true, kind: "image", mime: string, size: number, totalSize: number, dims: PreviewDimsT, truncated: false }
  *   | { ok: true, kind: "text", size: number, totalSize: number, truncated: boolean }
  *   | { ok: true, kind: "dir" }
+ *   | { ok: true, kind: "download", size: number }
  *   | { ok: false, error: string, reason?: string, size?: number, max?: number, dims?: PreviewDimsT }}
  */
 export function checkPreviewHeaders(headers, opts) {
@@ -884,6 +899,24 @@ export function checkPreviewHeaders(headers, opts) {
   if (kind === "dir") {
     if (!(opts !== undefined && opts.dir === true)) return { ok: false, error: "E_BAD_RESPONSE" };
     return { ok: true, kind: "dir" };
+  }
+  if (kind === PREVIEW_DOWNLOAD_KIND) {
+    if (!(opts !== undefined && opts.download === true)) return { ok: false, error: "E_BAD_RESPONSE" };
+    const dlSizeRaw = get("Content-Length");
+    const dlSize = dlSizeRaw === null || dlSizeRaw === "" ? NaN : Number(dlSizeRaw);
+    if (!Number.isInteger(dlSize) || dlSize < 0) return { ok: false, error: "E_BAD_RESPONSE" };
+    if (dlSize > PREVIEW_DOWNLOAD_MAX_BYTES) {
+      return {
+        ok: false,
+        error: "E_PREVIEW_TOO_LARGE",
+        reason: "bytes",
+        size: dlSize,
+        max: PREVIEW_DOWNLOAD_MAX_BYTES,
+      };
+    }
+    const dlCt = (get("Content-Type") ?? "").toLowerCase();
+    if (!dlCt.startsWith("application/octet-stream")) return { ok: false, error: "E_BAD_RESPONSE" };
+    return { ok: true, kind: "download", size: dlSize };
   }
   if (kind !== "image" && kind !== "text") return { ok: false, error: "E_BAD_RESPONSE" };
   // Transport compression (dynamic preview-text gzip): `Content-Length` names the COMPRESSED

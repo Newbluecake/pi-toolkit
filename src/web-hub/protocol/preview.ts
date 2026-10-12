@@ -33,19 +33,29 @@ export const PREVIEW_PROBE_MAX_BODY_BYTES = 8 * 1024;
  * the UI keeps the candidate as plain text.
  *
  * dir-plan §1.1 (P0): `"dir"` joins the union — a directory answers it ONLY when the request
- * opted in (`dirs: true` on the probe body, §3.5); a dirs-less request never sees it. */
-export type PreviewProbeKind = "text" | "image" | "dir" | "missing";
+ * opted in (`dirs: true` on the probe body, §3.5); a dirs-less request never sees it.
+ *
+ * preview-download (2026-10-12 拍板): `"file"` joins with the SAME opt-in discipline (`files:
+ * true`) — it means "exists, admitted, regular, ≤ the download cap, but binary-sniffed (not
+ * previewable)" — i.e. a click opens the dialog's unsupported phase WITH the download offer.
+ * A files-less request never sees it (the client folds it per-entry to `"missing"`, exactly
+ * mirroring the `"dir"` rule); an over-`PREVIEW_DOWNLOAD_MAX_BYTES` file stays `"missing"`
+ * even under `files: true` (a click could not succeed — the old contract's spirit). */
+export type PreviewProbeKind = "text" | "image" | "dir" | "file" | "missing";
 
 /** dir-plan §1.3: the single source of the probe-kind enum — the hub's response construction,
  * the UI transport types and the UI parser all import THIS tuple (element type /
  * `.includes()`); no local literal union may compete with it. */
-export const PREVIEW_PROBE_KINDS = ["text", "image", "dir", "missing"] as const;
+export const PREVIEW_PROBE_KINDS = ["text", "image", "dir", "file", "missing"] as const;
 
 /** dir-plan §1.1: the probe request body. `dirs: true` asks directories to answer `"dir"`
- * instead of `"missing"`; absent keeps the pre-dir behavior byte-identical. */
+ * instead of `"missing"`; absent keeps the pre-dir behavior byte-identical. `files: true`
+ * (preview-download) asks binary regular files to answer `"file"` — the two flags are
+ * independent and may ride the same request. */
 export interface PreviewProbeRequestBody {
   paths: string[];
   dirs?: true;
+  files?: true;
 }
 
 /** dir-plan §1.1: the probe response body (the hub constructs it `satisfies` this type, §1.3). */
@@ -122,8 +132,9 @@ export const PREVIEW_UPLOADS_MARKER = "/.pi/agent/web-hub/uploads/";
 export type PreviewImageMime = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
 
 /** dir-plan §1.1: the complete value set of the `X-PWH-Preview-Kind` response header —
- * `text`/`image` bodies (plan v3) plus `dir` (dir-plan A; opt-in `dir=1` requests only). */
-export type PreviewResponseKind = "text" | "image" | "dir";
+ * `text`/`image` bodies (plan v3) plus `dir` (dir-plan A; opt-in `dir=1` requests only) plus
+ * `download` (preview-download; opt-in `download=1` requests only — raw octet-stream bytes). */
+export type PreviewResponseKind = "text" | "image" | "dir" | "download";
 
 /** The `X-PWH-Preview-*` response header names (`PREVIEW_HDR.kind/size/bytes/truncated/dims`). */
 export const PREVIEW_HDR = {
@@ -219,6 +230,34 @@ export function validatePreviewPath(p: string, opts?: { minSegments?: 1 | 2 }): 
 /** The opt-in query flag name: only the exact value `"1"` turns a directory path into a
  * listing request (§3.5); absent (or any other value) keeps today's byte-identical behavior. */
 export const PREVIEW_DIR_QUERY = "dir";
+
+// ---------------------------------------------------------------------------
+// download mode (preview-download, 2026-10-12 user 拍板 — opt-in `download=1`)
+// ---------------------------------------------------------------------------
+
+/** The opt-in query flag name: only the exact value `"1"` turns the request into a raw-byte
+ * download (`Content-Disposition: attachment`, no sniff/kind gate). MUTUALLY EXCLUSIVE with
+ * `dir=1` — both set ⇒ 400 `E_BAD_REQUEST`. A directory with `download=1` alone stays 415
+ * `not-regular` (the admission chain never opens it as a listing). */
+export const PREVIEW_DOWNLOAD_QUERY = "download";
+
+/** Download body cap (256 MiB — streamed, loopback/LAN 同宽 per U1); over ⇒ 413
+ * `E_PREVIEW_TOO_LARGE{reason:"bytes"}` before the head is written. */
+export const PREVIEW_DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024;
+
+/** Download write-out budget (ms) — sized for the 256 MiB cap over a slow LAN, a single
+ * number for both listeners (U1 同宽), independent of `PREVIEW_STREAM_MS`. */
+export const PREVIEW_DOWNLOAD_STREAM_MS = 120_000;
+
+/** Client-side download deadline (ms): the hub's 120s stream budget + 30s of admission /
+ * network slack. Shared by BOTH logic clients (anti-drift, same rule as
+ * `PREVIEW_CLIENT_TIMEOUT_MS`). */
+export const PREVIEW_DOWNLOAD_CLIENT_TIMEOUT_MS = PREVIEW_DOWNLOAD_STREAM_MS + 30_000;
+
+/** The `X-PWH-Preview-Kind` value a download response carries (the client header contract
+ * rejects it for requests that did NOT opt in — same single-response-violation rule as
+ * `dir`, dir-plan §1.3). */
+export const PREVIEW_DOWNLOAD_KIND = "download";
 
 /** ① Scan cap: at most this many dirents are read from the handle (`limits.scan` flags the cut). */
 export const PREVIEW_DIR_SCAN_MAX = 10_000;

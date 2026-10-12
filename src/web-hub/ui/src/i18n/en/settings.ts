@@ -47,21 +47,19 @@ const settings = {
   plainWarnHide: "Hide warnings",
   // default-model plan F1 — the 「新建会话默认模型」 card (2026-10 select-only rework: the
   // free-text input/datalist is gone; a switcher-styled picker chip + listbox selects from
-  // the known list, with 「跟随 pi 默认」 as a list row). `defaultModelPlaceholder` /
-  // `defaultModelInvalid` stay — SpawnModelField (the spawn dialog's per-session field) still
-  // uses them. The model ref (`provider/id`) and the chip's `not in list` marker are English
-  // tokens in both languages; prose blocks translate.
+  // the known list, with 「跟随 pi 默认」 as a list row). 2026-10-12: `defaultModelPlaceholder`
+  // / `defaultModelInvalid` went away with SpawnModelField (the spawn dialog's per-session
+  // field — removed per user 拍板). The model ref (`provider/id`) and the chip's `not in
+  // list` marker are English tokens in both languages; prose blocks translate.
   defaultModelSection: "Default model for new sessions",
   defaultModelHint:
     "Used when a session is started from this hub (the web pick-dir/new-session entries). It never touches ~/.pi/agent/settings.json and never changes an already-running session.",
   defaultModelShared: "One value shared by every signed-in device of this hub.",
-  defaultModelPlaceholder: "provider/id — empty means pi's own default",
   defaultModelFollowPi: "Follow pi default",
   defaultModelFollowPiHint: "new sessions use pi's own default",
   defaultModelListAria: "Default model picker",
   defaultModelSaving: "Saving…",
   defaultModelSaved: "Saved.",
-  defaultModelInvalid: "Not a valid provider/id — e.g. anthropic/claude-opus-4-5",
   defaultModelUnsupported:
     "This hub is too old for the default-model preference — run /webhub restart after upgrading.",
   defaultModelSaveFailed: "Save failed — the hub rejected or could not persist it; retry.",

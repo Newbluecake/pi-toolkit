@@ -21,13 +21,13 @@ import type { HubHandle, PreviewHandle, PreviewPathScope, PreviewView } from "..
 
 const SCOPE: PreviewPathScope = { agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true };
 
-type ProbeCall = { agentKey: string; sessionId: string; paths: string[]; dirs?: true };
+type ProbeCall = { agentKey: string; sessionId: string; paths: string[]; dirs?: true; files?: true };
 
 interface ProbeRig {
   handle: PreviewHandle;
   probeHandle: PreviewProbeHandle;
   calls: ProbeCall[];
-  answer: (kinds: Array<"text" | "image" | "dir" | "missing">) => void;
+  answer: (kinds: Array<"text" | "image" | "dir" | "file" | "missing">) => void;
   failRequest: (err: string) => void;
   flush(): void;
   pending(): boolean;
@@ -317,6 +317,46 @@ describe("TxAssistant × probe — one batched request per message", () => {
     r.answer(["text"]);
     await settleTick();
     expect(w.get(".path-ref").text()).toBe("/p/src/a.ts");
+    r.stop();
+  });
+});
+
+describe("PathText × probe — files scope (preview-download)", () => {
+  it("a files scope sends files:true; a file-kind answer confirms the candidate (clickable into the download offer)", async () => {
+    const r = rig(ref<PreviewPathScope | null>({ ...SCOPE, files: true }));
+    const w = mountPathText(r, { text: "grab /p/bundle.zip now" });
+    r.flush();
+    await settleTick();
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]!.files).toBe(true); // preview-download files passthrough
+    expect(r.calls[0]!.dirs).toBeUndefined();
+    expect(r.calls[0]!.paths).toEqual(["/p/bundle.zip"]);
+    r.answer(["file"]);
+    await settleTick();
+    // "file" settles as confirmed — the zip path lights up; the click opens the dialog
+    // (unsupported phase → download button), per the 2026-10-12 拍板 chain
+    const el = w.find(".path-ref");
+    expect(el.exists()).toBe(true);
+    expect(r.probeHandle.kindOf?.("/p/bundle.zip")).toBe("file");
+    const open = vi.fn();
+    r.handle.open = open;
+    await el.trigger("click");
+    expect(open).toHaveBeenCalledWith({ path: "/p/bundle.zip" });
+    r.stop();
+  });
+
+  it('a files-LESS scope never sends files; a misbehaving hub\'s "file" answer is folded to missing upstream', async () => {
+    const r = rig(); // SCOPE without files
+    const w = mountPathText(r, { text: "grab /p/bundle.zip now" });
+    r.flush();
+    await settleTick();
+    expect(r.calls[0]!.files).toBeUndefined(); // byte-identical body
+    // the client-layer fold (§1.3 mirror) already turned a "file" into "missing" — simulated
+    // here by answering the folded form: the zip stays plain text
+    r.answer(["missing"]);
+    await settleTick();
+    expect(w.find(".path-ref").exists()).toBe(false);
+    expect(r.probeHandle.kindOf?.("/p/bundle.zip")).toBe("missing");
     r.stop();
   });
 });

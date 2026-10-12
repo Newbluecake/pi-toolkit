@@ -12,7 +12,7 @@ import { usePreviewProbe, type PreviewProbeHandle } from "../../../src/web-hub/u
 import type { PreviewProbeOutcome } from "../../../src/web-hub/ui/src/transport/types.js";
 import type { PreviewPathScope } from "../../../src/web-hub/ui/src/types.js";
 
-type ProbeCall = { agentKey: string; sessionId: string; paths: string[]; dirs?: true };
+type ProbeCall = { agentKey: string; sessionId: string; paths: string[]; dirs?: true; files?: true };
 
 const SCOPE: PreviewPathScope = { agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true };
 
@@ -413,5 +413,46 @@ describe("usePreviewProbe — dirs passthrough + kindOf (dir-plan P3)", () => {
     await flushMicrotasks();
     expect(handle.kindOf?.("/p/first")).toBeUndefined(); // aged out, FIFO
     expect(handle.kindOf?.("/p/x299")).toBe("dir");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// preview-download (2026-10-12 拍板) — files 透传 + "file" kind
+// ---------------------------------------------------------------------------
+
+describe("usePreviewProbe — files passthrough (preview-download)", () => {
+  it("a files scope adds files:true to the probe body; a plain scope stays byte-identical", async () => {
+    const scope = ref<PreviewPathScope | null>({ ...SCOPE, files: true });
+    const t = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "file" as const) }));
+    const { handle, sched } = setup(scope, t);
+    handle.ensure(["/p/bundle.zip"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(t.calls[0]!.files).toBe(true);
+    expect(t.calls[0]!.dirs).toBeUndefined();
+
+    const plain = ref<PreviewPathScope | null>(SCOPE);
+    const t2 = makeProbe((c) => ({ ok: true, results: c.paths.map(() => "text" as const) }));
+    const r2 = setup(plain, t2);
+    r2.handle.ensure(["/p/a.ts"]);
+    r2.sched.flush();
+    await flushMicrotasks();
+    expect(t2.calls[0]!.files).toBeUndefined(); // no files key at all — byte-identical body
+  });
+
+  it('kindOf returns "file" for a binary-but-downloadable answer; it counts as confirmed (clickable)', async () => {
+    const scope = ref<PreviewPathScope | null>({ ...SCOPE, files: true });
+    const t = makeProbe((c) => ({
+      ok: true,
+      results: c.paths.map((p) => (p === "/p/bundle.zip" ? ("file" as const) : ("missing" as const))),
+    }));
+    const { handle, sched } = setup(scope, t);
+    handle.ensure(["/p/bundle.zip", "/p/gone.zip"]);
+    sched.flush();
+    await flushMicrotasks();
+    expect(handle.kindOf?.("/p/bundle.zip")).toBe("file");
+    expect(handle.stateOf("/p/bundle.zip")).toBe("confirmed"); // PathText lights it up
+    expect(handle.kindOf?.("/p/gone.zip")).toBe("missing");
+    expect(handle.stateOf("/p/gone.zip")).toBe("missing");
   });
 });
