@@ -19,10 +19,11 @@
   While IDLE there is no stop affordance at all — the ring is today's details toggle.
 
   Data arrives via the inject-only `DETAIL_METRICS` channel (`AgentDetail` provides it — the
-  frozen `ComposerProps` stay untouched). No provider (dashboard, read-only dock) or no
-  `contextUsage` reported yet ⇒ the RING renders nothing — but a busy agent still needs its
-  stop reachable, so that case falls back to today's standalone `StopButton` (the old
-  stop-only CSS tier keys on `.stop-btn` WITHOUT `.ctx-ring`, so no layout rule changes).
+  frozen `ComposerProps` stay untouched). No provider (dashboard, read-only dock) ⇒ the ring
+  can't exist and a busy agent's stop falls back to the standalone `StopButton` (the old
+  stop-only CSS tier keys on `.stop-btn` WITHOUT `.ctx-ring`). Provider present + usage still
+  pending ⇒ idle renders nothing, while busy renders the ring SHELL (track + centered stop
+  icon, arc at 0) so stop never flashes the bare standalone square mid-switch (2026-10-12).
 
   Ring geometry (radius/stroke) is FIXED px, never token-derived: it is a graphic, not text, so
   it stays the same size at any `--fs-scale` (the `pwh_fontscale` preference must not blow it
@@ -49,7 +50,16 @@ const metrics = inject(DETAIL_METRICS, null);
 
 const locale = computed(() => localeFor(i18n.lang));
 const usage = computed(() => metrics?.contextUsage.value);
-const hasRing = computed(() => metrics !== null && usage.value !== undefined);
+/* 2026-10-12 裸红方块 fix: provider presence and usage availability are DISTINCT gates.
+ * The usage-backed arc still requires real usage, but the ring ZONE renders whenever the
+ * provider exists AND (busy || usage known): a busy session whose contextUsage is still
+ * pending (the first seconds after switching sessions) keeps stop inside the ring shell —
+ * previously it fell through to the standalone StopButton, a bare red square that read as a
+ * rendering glitch. The standalone fallback is now reserved for provider-ABSENT contexts
+ * (dashboard / read-only dock). */
+const hasProvider = metrics !== null;
+const hasUsage = computed(() => usage.value !== undefined);
+const showZone = computed(() => hasProvider && (props.busy || hasUsage.value));
 const percent = computed(() => usage.value?.percent ?? null);
 const tokens = computed(() => usage.value?.tokens);
 const window_ = computed(() => usage.value?.contextWindow);
@@ -132,7 +142,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
 </script>
 
 <template>
-  <span v-if="hasRing" ref="root" class="ctx-ring" :data-tone="tone" :data-stop="busy || undefined">
+  <span v-if="showZone" ref="root" class="ctx-ring" :data-tone="tone" :data-stop="busy || undefined">
     <!-- Busy: the ring's ENTIRE hit zone is the two-step stop button (stop wins — this button
          carries no panel toggle and the panel below can't be open). The arc keeps rendering
          around the centered icon so context usage stays visible. -->
@@ -146,6 +156,8 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       @click="trigger"
       @keydown="onStopKeydown"
     >
+      <!-- Track always renders (the shell); the bar arc sits at 0 while usage is pending and
+           fills in when the first contextUsage arrives — the stop icon is centered either way. -->
       <svg class="ctx-ring-svg" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
         <circle class="ctx-ring-track" cx="10" cy="10" :r="R" />
         <circle class="ctx-ring-bar" cx="10" cy="10" :r="R" :stroke-dasharray="dash" transform="rotate(-90 10 10)" />
@@ -189,8 +201,9 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       </div>
     </dl>
   </span>
-  <!-- No ring (no DETAIL_METRICS provider / no contextUsage yet): the ring self-hides, but a
-       busy agent's stop must stay reachable ⇒ today's standalone StopButton look (the old
-       stop-only padding tier keys on `.stop-btn` without `.ctx-ring`). -->
-  <StopButton v-else :busy="busy" :queue-count="queueCount" @stop="emit('stop')" />
+  <!-- Provider ABSENT (dashboard / read-only dock): the ring can't exist at all, so a busy
+       agent's stop falls back to the standalone StopButton (the old stop-only CSS tier keys on
+       `.stop-btn` WITHOUT `.ctx-ring`). Provider present + idle + usage pending renders nothing
+       (showZone false), exactly like the pre-fix no-usage idle case. -->
+  <StopButton v-else-if="!hasProvider" :busy="busy" :queue-count="queueCount" @stop="emit('stop')" />
 </template>

@@ -198,16 +198,26 @@ describe("ContextRing.vue — merged stop mode (2026-10 user request: stop 图�
     expect(wrapper.find(".ctx-ring-btn:not(.ctx-ring-stop-btn)").exists()).toBe(false); // no competing handler
   });
 
-  it("busy + NO ring (no provider / no usage) ⇒ standalone StopButton fallback (stop stays reachable)", async () => {
+  it("busy + NO provider ⇒ standalone StopButton fallback (stop stays reachable)", async () => {
     const noProvider = mountRing(undefined, { busy: true });
     expect(noProvider.find(".ctx-ring").exists()).toBe(false);
     await noProvider.get(".stop-btn").trigger("click"); // arm
     await noProvider.get(".stop-btn").trigger("click"); // confirm
     expect(noProvider.emitted("stop")).toHaveLength(1);
+  });
 
+  it("busy + provider but usage pending ⇒ ring SHELL carries stop (no bare standalone square, 2026-10-12)", async () => {
     const noUsage = mountRing(metrics({ noUsage: true }), { busy: true });
-    expect(noUsage.find(".ctx-ring").exists()).toBe(false);
-    expect(noUsage.find(".stop-btn").exists()).toBe(true);
+    expect(noUsage.find(".ctx-ring").exists()).toBe(true);
+    expect(noUsage.find(".stop-btn").exists()).toBe(false); // standalone fallback is provider-absent only
+    const btn = noUsage.get(".ctx-ring-stop-btn");
+    expect(noUsage.find(".ctx-ring-stop-icon").exists()).toBe(true);
+    // arc parked at 0 while usage is pending; the track ring + icon still frame the stop zone
+    expect(noUsage.get(".ctx-ring-bar").attributes("stroke-dasharray")).toBe(`0 ${CIRC}`);
+    expect(noUsage.get(".ctx-ring").attributes("data-stop")).toBe("true");
+    await btn.trigger("click"); // arm
+    await btn.trigger("click"); // confirm
+    expect(noUsage.emitted("stop")).toHaveLength(1);
   });
 
   it("idle + ring ⇒ no stop affordance at all (today's plain ring, unchanged)", () => {
