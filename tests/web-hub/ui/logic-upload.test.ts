@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
+  COMMAND_ARGS_MAX_UTF8_BYTES,
   PROMPT_MAX_UTF8_BYTES,
   attachmentReduce,
   canSendWithAttachments,
@@ -558,20 +559,37 @@ describe("canSendWithAttachments (§3.2 sendGate truth table)", () => {
     });
   });
 
-  it("command mode (default: parseSlash) blocks attachments and folds the policy deny early-exit", () => {
+  it("command mode (default: parseSlash) ALLOWS attachments (2026-10-12 ruling) and keeps the policy deny", () => {
     const cmd = { ...base, text: "/model x" };
-    expect(canSendWithAttachments({ ...cmd, attachments: [ready("/p/a.png")] })).toMatchObject({
-      ok: false,
-      reason: "command-attachments",
-    });
+    const withAtt = canSendWithAttachments({ ...cmd, policy: "allow", attachments: [ready("/p/a.png")] });
+    // the attachment block rides inside the command args, after the typed text
+    expect(withAtt).toMatchObject({ ok: true });
+    expect((withAtt as { text: string }).text.startsWith("/model x\n\n[web-hub attachments]")).toBe(true);
     expect(canSendWithAttachments({ ...cmd, policy: "allow" })).toMatchObject({ ok: true });
     expect(canSendWithAttachments({ ...cmd, policy: "confirm" })).toMatchObject({ ok: true });
     expect(canSendWithAttachments({ ...cmd, policy: "deny" })).toMatchObject({ ok: false, reason: "command-policy" });
     expect(canSendWithAttachments(cmd)).toMatchObject({ ok: false, reason: "command-policy" }); // no policy ⇒ deny
+    // deny wins even with attachments
+    expect(canSendWithAttachments({ ...cmd, policy: "deny", attachments: [ready("/p/a.png")] })).toMatchObject({
+      ok: false,
+      reason: "command-policy",
+    });
     // `//` escape never parses as a command ⇒ attachments ride along
     expect(
       canSendWithAttachments({ ...base, text: "//not-a-command", attachments: [ready("/p/a.png")] }),
     ).toMatchObject({ ok: true });
+  });
+
+  it("command mode is gated against the 16 KiB args cap, not the 48 KiB prompt cap", () => {
+    expect(COMMAND_ARGS_MAX_UTF8_BYTES).toBe(16 * 1024); // hub COMMAND_ARGS_MAX_BYTES mirror
+    const body = "/model " + "a".repeat(16 * 1024); // composed ≤ 48 KiB, args > 16 KiB
+    const r = canSendWithAttachments({ ...base, text: body, policy: "allow" });
+    expect(r).toMatchObject({ ok: false, reason: "args-too-large" });
+    // just under the cap passes (args = composed minus the "/model" token)
+    const okBody = "/model " + "a".repeat(16 * 1024 - 7);
+    expect(canSendWithAttachments({ ...base, text: okBody, policy: "allow" })).toMatchObject({ ok: true });
+    // the same body as a plain prompt is fine (48 KiB cap)
+    expect(canSendWithAttachments({ ...base, text: "//model " + "a".repeat(16 * 1024) })).toMatchObject({ ok: true });
   });
 
   it("commandRouted override: DetailDock's routing decision wins over the local parseSlash guess", () => {
@@ -579,10 +597,16 @@ describe("canSendWithAttachments (§3.2 sendGate truth table)", () => {
     expect(
       canSendWithAttachments({ ...base, text: "/foo", commandRouted: false, attachments: [ready("/p/a.png")] }),
     ).toMatchObject({ ok: true });
-    // commandsEnabled=true ⇒ routed regardless of sendAsText, so attachments are blocked
+    // commandsEnabled=true ⇒ routed regardless of sendAsText; attachments now ride inside args
     expect(
-      canSendWithAttachments({ ...base, text: "//foo", commandRouted: true, attachments: [ready("/p/a.png")] }),
-    ).toMatchObject({ ok: false, reason: "command-attachments" });
+      canSendWithAttachments({
+        ...base,
+        text: "//foo",
+        commandRouted: true,
+        policy: "allow",
+        attachments: [ready("/p/a.png")],
+      }),
+    ).toMatchObject({ ok: true });
     expect(canSendWithAttachments({ ...base, text: "hi", commandRouted: true, policy: "allow" })).toMatchObject({
       ok: true,
     });

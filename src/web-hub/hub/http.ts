@@ -2287,7 +2287,9 @@ async function dispatchCmdOrDialog(
   // web-hub-upload plan §2.6 (v3 #8, U3 hard gate): pin the prompt's referenced attachments
   // SYNCHRONOUSLY in this no-await region, before the frame is ever forwarded — so no sweep can
   // evict them out from under an in-flight prompt. Only fresh (non-dup, non-queryOnly)
-  // prompt/steer_subagent ops carry attachment blocks. A pin failure means a referenced file is
+  // prompt/steer_subagent/command ops carry attachment blocks (command + attachment allowed
+  // since the 2026-10-12 ruling: the block rides inside the command ARGS, same as TUI
+  // free-text args). A pin failure means a referenced file is
   // already gone/evicting: refuse WITHOUT forwarding (effect "none"), telling the frontend which
   // upload ids died so it can ask for a re-upload. Unknown/other-principals' paths are ignored by
   // the store (no existence leak).
@@ -2296,9 +2298,12 @@ async function dispatchCmdOrDialog(
     opts.uploads !== undefined &&
     !dup &&
     queryOnly !== true &&
-    (cmd.op === "prompt" || cmd.op === "steer_subagent")
+    (cmd.op === "prompt" || cmd.op === "steer_subagent" || cmd.op === "command")
   ) {
-    const pin = opts.uploads.pinForPrompt({ principal: principalKey, text: cmd.text });
+    const pin = opts.uploads.pinForPrompt({
+      principal: principalKey,
+      text: cmd.op === "command" ? cmd.args : cmd.text,
+    });
     if (!pin.ok) {
       auditReject({ ip, ...(user === undefined ? {} : { user }), agentKey, op: cmd.op, code: "E_UPLOAD_GONE" });
       auditUpload(log, {

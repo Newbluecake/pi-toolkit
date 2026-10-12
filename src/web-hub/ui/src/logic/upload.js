@@ -43,6 +43,13 @@ import { UPLOAD_HUB_CAPS } from "@protocol/version.ts";
  */
 export const PROMPT_MAX_UTF8_BYTES = 48 * 1024;
 
+/**
+ * UI-side mirror of the hub's command-args cap (`COMMAND_ARGS_MAX_BYTES`, hub/http.ts — 16 KiB).
+ * A command-routed send puts the WHOLE composed text (正文 + attachment block) into `args`, so
+ * command mode is gated against this tighter limit, not the 48 KiB prompt cap.
+ */
+export const COMMAND_ARGS_MAX_UTF8_BYTES = 16 * 1024;
+
 const encoder = new TextEncoder();
 
 /** UTF-8 byte length of `s` (0 for non-strings). Lone surrogates encode as U+FFFD per WHATWG. */
@@ -411,7 +418,7 @@ export function composePrompt(text, attachments = []) {
  *   commandRouted?: boolean, policy?: "allow" | "confirm" | "deny" | null }} SendGateParams
  * @typedef {{ ok: true, text: string, bytes: number }
  *   | { ok: false, reason: "disabled" | "sending" | "empty" | "queued" | "uploading" | "failed"
- *     | "command-attachments" | "command-policy" | "attachment-block" | "too-large",
+ *     | "command-policy" | "attachment-block" | "too-large" | "args-too-large",
  *     bytes?: number }} SendGateResult
  */
 
@@ -421,7 +428,7 @@ export function composePrompt(text, attachments = []) {
  * formula order — the first violated clause becomes `reason`:
  *
  *  `enabled` ∧ ¬`sending` ∧（正文非空 ∨ 有 ready 附件）∧ 托盘无 `queued`/`uploading`/`failed`
- *  ∧（命令模式 ⇒ 无附件 且 policy ∈ allow/confirm）∧ 拼接后 UTF-8 ≤ 48 KiB.
+ *  ∧（命令模式 ⇒ policy ∈ allow/confirm）∧ 拼接后 UTF-8 ≤ 48 KiB（命令模式 ⇒ args ≤ 16 KiB）.
  *
  * - The tray clause (v3 review + author ruling): every item that the post-send tray clear would
  *   discard against the user's intent blocks — `queued` (waiting for a slot), `uploading`,
@@ -430,9 +437,14 @@ export function composePrompt(text, attachments = []) {
  * - `commandRouted` is DetailDock's actual routing (`parseSlash(text) !== undefined &&
  *   commandsEnabled`, `sendAsText` deliberately NOT part of it — `Composer.vue`'s narrower
  *   `commandMode` would let a `//`-escaped "/foo" + attachment through, but DetailDock.onSend
- *   re-runs parseSlash and would execute it as a command with the block glued into its args).
+ *   re-runs parseSlash and would execute it as a command).
  *   When omitted the gate falls back to `parseSlash(text) !== undefined` (conservative: blocks).
- *   Command mode blocks attachments outright (「附件只能随普通消息发送」) and folds the old
+ *   Command mode + attachments is ALLOWED (2026-10-12 ruling): the attachment block rides inside
+ *   the command args, matching the TUI's free-text-args semantics (`/skill:docx <block>` works —
+ *   the skill expands and the block enters context with it). Two consequences the gate enforces:
+ *   `policy === "deny"` commands still never leave the palette (`command-policy`), and the
+ *   composed args must fit the hub's 16 KiB command-args cap (`args-too-large`), which is
+ *   tighter than the 48 KiB prompt cap. (Previously command mode blocked attachments outright (「附件只能随普通消息发送」) and folds the old
  *   `policy === "deny"` keyboard early-exit into `command-policy`.
  * - On success the composed text/bytes ride along so `doSend` emits exactly what was gated
  *   (compose once, never twice — the two could drift between calls).
@@ -451,12 +463,17 @@ export function canSendWithAttachments(params = {}) {
   const blocking = tray.find((a) => a.state === "queued" || a.state === "uploading" || a.state === "failed");
   if (blocking) return { ok: false, reason: blocking.state };
   const routed = commandRouted === undefined ? parseSlash(body) !== undefined : commandRouted === true;
-  if (routed) {
-    if (tray.length > 0) return { ok: false, reason: "command-attachments" };
-    if (policy !== "allow" && policy !== "confirm") return { ok: false, reason: "command-policy" };
-  }
+  if (routed && policy !== "allow" && policy !== "confirm") return { ok: false, reason: "command-policy" };
   const composed = composePrompt(body, ready);
   if (!composed.ok) return { ok: false, reason: composed.reason, bytes: composed.bytes };
+  if (routed) {
+    // The composed text lands in `args` minus the `/name` token (parseSlash also drops the
+    // whitespace after the name; subtracting only the token over-counts by those bytes — the
+    // safe direction).
+    const name = /^\/([^\s]+)/.exec(body)?.[1] ?? "";
+    const argsBytes = composed.bytes - utf8Len(`/${name}`);
+    if (argsBytes > COMMAND_ARGS_MAX_UTF8_BYTES) return { ok: false, reason: "args-too-large", bytes: argsBytes };
+  }
   return { ok: true, text: composed.text, bytes: composed.bytes };
 }
 

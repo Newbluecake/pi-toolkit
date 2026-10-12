@@ -782,6 +782,20 @@ describe("reference pinning on /api/cmd prompt (plan §2.6, v3 #8)", () => {
     expect(h.store.stats().referencedFiles).toBe(1);
   });
 
+  it("command with an attachment block in args is pinned the same way (2026-10-12: command+attachment allowed)", async () => {
+    const router = fakeRouter(okReply);
+    const h = await harness({ router });
+    const f = await uploadFile(h, Buffer.from("cmd pin"), { mime: "image/png" });
+    const res = await postJson(
+      h.port,
+      "/api/cmd",
+      { agentKey: AGENT, id: nid(), op: "command", name: "skill:docx", args: promptFor(f, "测是") },
+      cmdHeaders(h),
+    );
+    expect(res.status).toBe(200);
+    expect(h.store.stats().referencedFiles).toBe(1);
+  });
+
   it("an unknown path in the block is ignored (no pin, no error, prompt still forwarded)", async () => {
     const router = fakeRouter(okReply);
     const h = await harness({ router });

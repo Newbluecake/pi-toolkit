@@ -376,7 +376,8 @@ Paths can be passed to the read tool as-is; quote them when using a shell.
     都只调用 `doSend`。现有 `onKeydown` 里的 `policy === "deny"` 早退（`:123`）并入 `sendGate`。
   - 行为变化（有意）：v1 前键盘 Enter 在 `sending` 为真时仍可发送（`doSend` 不查 `sending`），v2 与按钮一致地拦下；`composer.test.ts:148` 已钉住按钮在
     sending 时禁用，新增键盘同语义用例。
-- 命令模式（`parseSlash(text) !== undefined`，`logic/control.js:56`）+ 附件 ⇒ 拦下并提示「附件只能随普通消息发送：移除附件，或用 `//` 开头按文本发送」。
+- ~~命令模式（`parseSlash(text) !== undefined`，`logic/control.js:56`）+ 附件 ⇒ 拦下并提示「附件只能随普通消息发送：移除附件，或用 `//` 开头按文本发送」。~~
+  **2026-10-12 修订**：命令 + 附件放行——附件块拼进命令 args（与 TUI 自由文本参数语义一致，`/skill:docx <块>` 可用）；闸门改为：policy=deny 仍拦（`command-policy`），且 args 需 ≤ hub 的 16 KiB `COMMAND_ARGS_MAX_BYTES`（`args-too-large`，比 prompt 的 48 KiB 更紧）。hub 侧 `pinForPrompt` 同步扩展到 `op:"command"`（扫 `args`），TTL/引用结算不变。
 - 发送后清空托盘（与正文同样乐观清空）。
 
 ---

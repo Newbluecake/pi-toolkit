@@ -40,8 +40,8 @@ const upload = {
   // --- send-gate hints (§3.2 — the tray-related block reasons) ---
   gateUploading: "Attachments are still uploading — wait for them to finish",
   gateFailed: "An attachment failed to upload — retry or remove it before sending",
-  gateCommand:
-    "Attachments can only be sent with a normal message: remove them, or start the text with // to send it as text",
+  gateArgsTooLarge:
+    "Command arguments (incl. the attachment block) exceed the 16 KiB limit — remove the attachments, or start the text with // to send it as a prompt",
   gateTooLarge: "Message plus attachment block exceeds the 48 KiB limit",
   gateBlocked: "Attachments cannot be sent in the current state",
 

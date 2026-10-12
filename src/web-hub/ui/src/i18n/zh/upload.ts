@@ -41,7 +41,7 @@ const upload = {
   // --- 发送闸门提示（§3.2——与托盘相关的拦截原因） ---
   gateUploading: "附件仍在上传中——等它们完成后再发送",
   gateFailed: "有附件上传失败——请先重试或移除",
-  gateCommand: "附件只能随普通消息发送：移除附件，或用 // 开头按文本发送",
+  gateArgsTooLarge: "命令参数（含附件块）超过 16 KiB 上限——移除附件，或用 // 开头按文本发送",
   gateTooLarge: "正文与附件块合计超过 48 KiB 上限",
   gateBlocked: "当前状态下附件无法发送",
 

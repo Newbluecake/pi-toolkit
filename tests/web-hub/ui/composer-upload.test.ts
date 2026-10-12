@@ -275,12 +275,10 @@ describe("sendGate 三路径一致 (#12) — deny conditions refuse Enter, Alt+E
       opts: { tray: [readyAttachment({ state: "failed", error: "E_NETWORK", retryable: true })] },
       text: "hi",
     },
-    {
-      name: "command mode + ready attachment",
-      opts: { tray: [readyAttachment()], commandsEnabled: true },
-      text: "/session",
-    },
     { name: "composed text over 48 KiB", opts: {}, text: "x".repeat(49 * 1024) },
+    // command mode + attachment is ALLOWED (2026-10-12 ruling) — the block rides inside args;
+    // the remaining command deny is the 16 KiB args cap:
+    { name: "command args over 16 KiB", opts: { commandsEnabled: true }, text: "/session " + "x".repeat(17 * 1024) },
     { name: "sending in flight", opts: { sending: true }, text: "hi" },
     { name: "deny command", opts: { commandsEnabled: true }, text: "/quit" },
     { name: "read-only (enabled=false)", opts: { enabled: false }, text: "hi" },
@@ -361,12 +359,15 @@ describe("sendGate 放行细节", () => {
     expect(sent).toContain(READY_PATH);
   });
 
-  it("command mode + attachment shows the §3.2 gate hint", async () => {
+  it("command mode + attachment SENDS (2026-10-12 ruling): the block rides inside the command args", async () => {
     const { w } = mountComposer({ tray: [readyAttachment()], commandsEnabled: true });
     await typeText(w, "/session");
-    const hint = w.find(".composer-hint");
-    expect(hint.exists()).toBe(true);
-    expect(hint.text()).toContain("Attachments can only be sent with a normal message");
+    expect(w.find(".composer-hint").exists()).toBe(false);
+    expect(w.find("[data-send]").attributes("disabled")).toBeUndefined();
+    await w.find("textarea").trigger("keydown", { key: "Enter" });
+    const sent = String(w.emitted("send")![0]![0]);
+    expect(sent.startsWith("/session\n\n[web-hub attachments]")).toBe(true);
+    expect(sent).toContain(READY_PATH);
   });
 
   it("发送后清托盘走 discard（绝不 remove/abort）且文本框清空", async () => {

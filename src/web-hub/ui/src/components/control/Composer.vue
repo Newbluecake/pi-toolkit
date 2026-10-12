@@ -649,8 +649,8 @@ function traySourceOf(id: string): unknown {
 
 /** §3.2's ONE gate — button `:disabled`, `doSend`'s first line, and the keyboard path all see
  * this exact answer. `commandRouted` mirrors DetailDock.onSend's routing (`parseSlash` +
- * `commandsEnabled`, deliberately NOT `sendAsText`) so a gated-ok send can never be re-routed
- * into a command execution with the attachment block glued on. */
+ * `commandsEnabled`, deliberately NOT `sendAsText`) so the gate's command-policy / 16 KiB args
+ * checks see exactly the text DetailDock would execute. */
 function sendGate() {
   return canSendWithAttachments({
     enabled: props.enabled,
@@ -676,7 +676,7 @@ const gateHint = computed(() => {
   if (g.ok) return null;
   if (g.reason === "queued" || g.reason === "uploading") return t("upload.gateUploading");
   if (g.reason === "failed") return t("upload.gateFailed");
-  if (g.reason === "command-attachments") return t("upload.gateCommand");
+  if (g.reason === "args-too-large") return t("upload.gateArgsTooLarge");
   if (g.reason === "too-large") return t("upload.gateTooLarge");
   if (g.reason === "attachment-block") return t("upload.gateBlocked");
   return null;
