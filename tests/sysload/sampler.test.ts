@@ -85,4 +85,31 @@ describe("sysload sampler", () => {
     );
     expect(second.sample.cpu).toMatchObject({ kind: "ok", value: { busyPct: 20, psiPct: 2.5 } });
   });
+
+  it("shows a mount only once when both display paths resolve to it", async () => {
+    const io = {
+      readFileSync: (path: string) => files[path] ?? "",
+      realpath: async (p: string) => p,
+      statfs: async () => ({ blocks: 100n, bfree: 20n, bavail: 10n, bsize: 4096n }),
+    };
+    const plan = { home: "/home/user", cwd: "/", mono: () => 0, at: () => 10 };
+
+    // HOME lives on the root mount ⇒ only `~` is sampled, `/` is dropped.
+    const same = await sampleOnce(
+      io,
+      { ...plan, mountinfoText: mountinfo },
+      new IoLedger({ active: new Map(), capacity: 2 }),
+    );
+    expect(same.sample.disks.map((disk) => disk.label)).toEqual(["~"]);
+    expect(same.sample.disks[0]?.reading.kind).toBe("ok");
+
+    // HOME on its own mount ⇒ both paths are kept.
+    const two = "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:2 / /home/user rw - ext4 /dev/sda2 rw\n";
+    const split = await sampleOnce(
+      io,
+      { ...plan, mountinfoText: two },
+      new IoLedger({ active: new Map(), capacity: 2 }),
+    );
+    expect(split.sample.disks.map((disk) => disk.label)).toEqual(["~", "/"]);
+  });
 });

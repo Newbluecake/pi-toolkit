@@ -230,6 +230,11 @@ export async function sampleOnce(
   ];
   const cache = plan.realpathCache ?? new Map<string, { path: string; at: number }>();
   const disks: LoadDiskPathSample[] = [];
+  // P0's two display paths frequently live on the SAME mount (HOME on the root fs): show the
+  // mount once. Identity = mountId + majorMinor (types.ts §5.2's continuity identity), so a
+  // path resolving to the same mount is dropped entirely — no duplicate display, no duplicate
+  // statfs ledger slot. `~` is kept as the representative (the more meaningful label).
+  const seenMounts = new Set<string>();
   for (const [label, path] of diskPaths) {
     const resolvedPath = await resolvePath(path, ledger, io, cache, mono, left, isCurrent);
     if (resolvedPath === undefined || mountText === undefined) {
@@ -237,6 +242,11 @@ export async function sampleOnce(
       continue;
     }
     const resolved = resolveMount(resolvedPath, parsedMounts);
+    if (resolved.mount !== undefined && resolved.skipped === undefined) {
+      const mountKey = `${resolved.mount.mountId}:${resolved.mount.majorMinor}`;
+      if (seenMounts.has(mountKey)) continue;
+      seenMounts.add(mountKey);
+    }
     disks.push(await statMount(label, resolvedPath, resolved, ledger, io, left, isCurrent));
   }
   const ioPsiPct = parsePressure(read("/proc/pressure/io") ?? "")?.someAvg10;
