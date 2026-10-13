@@ -35,6 +35,7 @@ import IconSprite from "./icons/IconSprite.vue";
 import { browserLocalStorage } from "./components/shell/themeStorage.js";
 import { hubVersionStamp } from "@logic/build-stamp.js";
 import ControlNotice from "./components/control/ControlNotice.vue";
+import PageDropZone from "./components/control/PageDropZone.vue";
 import { CONTROL_ENV, HUB_CTX, type ControlEnv } from "./components/control/controlContext.js";
 import DashboardView from "./components/shell/DashboardView.vue";
 import HubStateBanner from "./components/shell/HubStateBanner.vue";
@@ -241,6 +242,31 @@ function announceConn(next: ConnState): void {
 }
 if (authMode !== "unknown") watch(conn, announceConn, { immediate: true });
 
+/* 2026-10-12 Aw Snap 排查面包屑（临时诊断）：每次路由切换把 {hash, heapMB, dom, at} 写进
+ * localStorage——标签页崩溃后 localStorage 仍在，读 `pwh_diag_route` 就知道崩在哪个会话、
+ * 当时堆内存多大。一个 key 覆盖写，零增长；根因确认后移除。 */
+if (route !== undefined)
+  watch(
+    route,
+    () => {
+      try {
+        const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+        localStorage.setItem(
+          "pwh_diag_route",
+          JSON.stringify({
+            hash: window.location.hash,
+            heapMB: mem ? Math.round(mem.usedJSHeapSize / 1048576) : null,
+            dom: document.querySelectorAll("*").length,
+            at: Date.now(),
+          }),
+        );
+      } catch {
+        /* a breadcrumb never breaks the app */
+      }
+    },
+    { immediate: true },
+  );
+
 async function onSubmit(payload: { username: string; password: string }): Promise<void> {
   await passwordAuth?.submit(payload);
 }
@@ -294,6 +320,11 @@ onUnmounted(() => {
       @submit="onSubmit"
     />
     <TokenGate v-else reason="token-invalid" />
+    <!-- Page-wide file drop zone (2026-10 user ruling 「整个页面都是拖放区」): always-on while
+         the auth mode is known — it swallows file drops everywhere (anti-navigation) even on
+         the login/boot screens, and shows the full-page overlay only when the current route
+         names a session whose uploads are available. -->
+    <PageDropZone v-if="route" :route="route" />
     <PreviewHost />
   </template>
   <p v-if="authMode !== 'unknown'" ref="announcerEl" class="sr-only" role="status" aria-live="polite"></p>

@@ -18,6 +18,7 @@ import type {
   AdmittedRequest,
   Death,
   InternalRecord,
+  RelaunchResult,
   RemoveResult,
   SpawnSupervisor,
   StartResult,
@@ -69,6 +70,11 @@ export interface FakeSpawnSupervisor extends SpawnSupervisor {
   /** Controllable `lookupByAgentKey`/`deathOf` — default lookup scans `recordsOut` by agentKey
    * (latest `updatedAt`); default deathOf is "unknown" unless overridden. */
   setDeathOf(resultOrFn: Death | undefined | ((spawnId: string) => Death | undefined)): void;
+  /** spawn-relaunch: `relaunch()`'s call log + controllable result (default mirrors the real
+   * supervisor's non-terminal⇒dup / terminal+confirmed-death⇒accepted split off the seeded
+   * record's `state`, with the fake's own `deathFn` standing in for `computeDeath`). */
+  relaunchCalls: Array<{ spawnId: string }>;
+  setRelaunchResult(resultOrFn: RelaunchResult | ((spawnId: string) => RelaunchResult)): void;
 }
 
 export const ALLOWED_POLICY: SpawnPolicyWire = {
@@ -97,12 +103,18 @@ export function fakeSpawnSupervisor(): FakeSpawnSupervisor {
   const removeCalls: FakeSpawnSupervisor["removeCalls"] = [];
   let removeFn: ((spawnId: string) => RemoveResult) | undefined;
   let deathFn: (spawnId: string) => Death | undefined = () => "unknown";
+  const relaunchCalls: FakeSpawnSupervisor["relaunchCalls"] = [];
+  let relaunchFn: ((spawnId: string) => RelaunchResult) | undefined;
   return {
     startCalls,
     stopCalls,
     policyCalls,
     recordsOut,
     removeCalls,
+    relaunchCalls,
+    setRelaunchResult(resultOrFn) {
+      relaunchFn = typeof resultOrFn === "function" ? resultOrFn : () => resultOrFn;
+    },
     setRemoveResult(resultOrFn) {
       removeFn = typeof resultOrFn === "function" ? resultOrFn : () => resultOrFn;
     },
@@ -222,6 +234,17 @@ export function fakeSpawnSupervisor(): FakeSpawnSupervisor {
     },
     deathOf(spawnId) {
       return deathFn(spawnId);
+    },
+    relaunch(spawnId) {
+      relaunchCalls.push({ spawnId });
+      if (relaunchFn !== undefined) return relaunchFn(spawnId);
+      const rec = recordsOut.find((r) => r.spawnId === spawnId);
+      if (rec === undefined) return { ok: false, code: "E_NOT_FOUND" };
+      const terminal = rec.state === "exited" || rec.state === "failed";
+      if (!terminal) return { ok: true, state: rec.state, dup: true };
+      const d = deathFn(spawnId);
+      if (d === "confirmed") return { ok: true, state: "starting", dup: false };
+      return { ok: false, code: "E_AGENT_ONLINE", reason: "exit-unconfirmed" };
     },
     async shutdown() {},
   };

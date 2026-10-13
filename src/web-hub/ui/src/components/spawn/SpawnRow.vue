@@ -75,6 +75,18 @@ const restoreFailureLabel = computed(() => {
   return key !== undefined ? t(key) : failure;
 });
 
+/** 2026-10-13 用户拍板 ②: the first-prompt mirror moved from the (now auto-closed) DirPicker
+ *  onto this sidebar row — the Public projection's `firstPrompt{state,code?}` slice, rendered
+ *  as the same `fp:*` inline markers the picker used to show (English tokens, both languages). */
+const fpChipLabel = computed(() => {
+  const fp = props.rec.firstPrompt;
+  if (fp === undefined) return null;
+  if (fp.state === "pending") return t("spawn.fpPending");
+  if (fp.state === "sending") return t("spawn.fpSending");
+  if (fp.state === "delivered") return t("spawn.fpDelivered");
+  return null;
+});
+
 // ---------------------------------------------------------------------------
 // delete entry (web-hub-delete-session plan v2 §0.3/§5.4, user 拍板 #7): starting/failed rows
 // get the same two-step delete as AgentCard, by spawnId; the existing 「关闭」 (local, memory-
@@ -194,6 +206,8 @@ async function onRetry(): Promise<void> {
       <!-- default-model plan F1 (D3): the effective fork model as an inline marker (English
            token in both languages, AGENTS.md UI-text split) -->
       <span v-if="rec.model" class="chip chip-mono" :title="rec.model" translate="no">{{ rec.model }}</span>
+      <!-- 2026-10-13 拍板 ②: first-prompt mirror chip (fp: pending/sending/delivered) -->
+      <span v-if="fpChipLabel" class="chip chip-spawn" translate="no">{{ fpChipLabel }}</span>
       <!-- session-history plan PD15: the origin marker (English token: history | fork) -->
       <span v-if="fromOrigin" class="chip chip-mono" :title="t('history.fromRetryHidden')" translate="no">{{
         fromOrigin

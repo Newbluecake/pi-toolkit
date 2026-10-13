@@ -808,6 +808,10 @@ export const DEFAULT_WEBHUB_SPAWN_SETTINGS: WebHubSpawnSettings = {
   // web-hub-session-history plan §3.7 (P-cfg): browse all past sessions and resume/fork them
   // from the web — default ON, effective only under an explicitly enabled spawn block.
   history: true,
+  // 2026-10-13 用户拍板（U1 单用户信任模型既判）: LAN 每次 spawn 的 E_CONFIRM_REQUIRED 确认门
+  // 默认 ON（现状）；设为 false 即明示放弃这层 LAN 渠道证明（已知目录/历史会话直达 202，
+  // 未知目录仍需确认；session-open 的 fork 决策不在豁免范围）。
+  lanConfirm: true,
 };
 
 export const DEFAULT_SETTINGS: AgentSettings = {
@@ -1916,6 +1920,7 @@ export function parseWebHubSpawnBlock(input: unknown): WebHubSpawnSettings {
     lan: lan === "off" || lan === "known" || lan === "roots" ? lan : defaults.lan,
     restore: typeof record.restore === "boolean" ? record.restore : defaults.restore,
     history: typeof record.history === "boolean" ? record.history : defaults.history,
+    lanConfirm: typeof record.lanConfirm === "boolean" ? record.lanConfirm : defaults.lanConfirm,
   };
 }
 

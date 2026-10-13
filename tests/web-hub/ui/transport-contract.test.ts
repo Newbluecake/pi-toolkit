@@ -762,6 +762,53 @@ describe.each([
     expect(typeof sp!.start).toBe("function");
     expect(typeof sp!.stop).toBe("function");
     expect(typeof sp!.mkdir).toBe("function"); // spawn-dirmkdir
+    expect(typeof sp!.relaunch).toBe("function"); // spawn-relaunch
+  });
+
+  it("relaunch(): POST /api/headless/relaunch with X-PWH:1 and the verbatim {spawnId}; 202 {spawnId,state,dup?} rides (spawn-relaunch)", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/relaunch" ? resp(202, { spawnId: "sp-rel-1", state: "starting" }) : resp(200),
+    );
+    const r = await h.transport.spawn!.relaunch!("sp-rel-1");
+    expect(r).toEqual({ ok: true, spawnId: "sp-rel-1", state: "starting" });
+    const call = h.fetchCalls.find((c) => c.url === "/api/headless/relaunch")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["Content-Type"]).toBe("application/json");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body as string)).toEqual({ spawnId: "sp-rel-1" });
+  });
+
+  it("relaunch(): dup rides; the error half keeps status/reason verbatim (410 gone, 409 alive, 404 missing)", async () => {
+    const dup = make(async (url) =>
+      url === "/api/headless/relaunch" ? resp(202, { spawnId: "s", state: "live", dup: true }) : resp(200),
+    );
+    expect(await dup.transport.spawn!.relaunch!("s")).toEqual({ ok: true, spawnId: "s", state: "live", dup: true });
+    const gone = make(async (url) =>
+      url === "/api/headless/relaunch" ? resp(410, { error: "E_SPAWN_GONE", reason: "session-missing" }) : resp(200),
+    );
+    expect(await gone.transport.spawn!.relaunch!("s")).toEqual({
+      ok: false,
+      error: "E_SPAWN_GONE",
+      status: 410,
+      reason: "session-missing",
+    });
+    const alive = make(async (url) =>
+      url === "/api/headless/relaunch" ? resp(409, { error: "E_AGENT_ONLINE", reason: "exit-unconfirmed" }) : resp(200),
+    );
+    expect(await alive.transport.spawn!.relaunch!("s")).toEqual({
+      ok: false,
+      error: "E_AGENT_ONLINE",
+      status: 409,
+      reason: "exit-unconfirmed",
+    });
+    const missing = make(async (url) =>
+      url === "/api/headless/relaunch" ? resp(404, { error: "E_NOT_FOUND" }) : resp(200),
+    );
+    expect(await missing.transport.spawn!.relaunch!("s")).toEqual({
+      ok: false,
+      error: "E_NOT_FOUND",
+      status: 404,
+    });
   });
 
   it("mkdir(): POST /api/headless/mkdir with X-PWH:1 and the verbatim {path,name}; 200 {path} rides (spawn-dirmkdir)", async () => {

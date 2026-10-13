@@ -17,7 +17,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FrontendDeps, FrontendFactory, HubConfig, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { installProcessHandlers, startHub, type RunningHub, type StartHubDeps } from "../../../src/web-hub/hub/hub.js";
-import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP, SPAWN_RELAUNCH_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import { webHubSpawnFiles, webHubStateDir } from "../../../src/web-hub/protocol/paths.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import type { Reaper, ReaperTrackRecord } from "../../../src/web-hub/hub/spawn/reaper.js";
@@ -354,6 +354,31 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     expect(existsSync(webHubSpawnFiles(kit.hub.paths.stateDir).spawnsJson)).toBe(false); // nothing started ⇒ store never wrote
   });
 
+  it("spawn-relaunch cap: `spawn.relaunch.v1` rides BOTH surfaces only when spawn.restore === true (and the platform probe passed)", async () => {
+    // restore absent ⇒ no cap (the SPAWN_CFG baseline above pins the exact tail already)
+    const off = await startKit({ spawn: SPAWN_CFG, withAssembly: true });
+    expect(off.hub.info.caps).not.toContain(SPAWN_RELAUNCH_HUB_CAP);
+
+    // restore on ⇒ the cap joins the spawn.v1 tail on the browser surface…
+    const on = await startKit({ spawn: { ...SPAWN_CFG, restore: true }, withAssembly: true });
+    expect(on.hub.info.caps).toContain(SPAWN_HUB_CAP);
+    expect(on.hub.info.caps).toContain(SPAWN_RELAUNCH_HUB_CAP);
+    // …and the agent-facing hello_ack carries the identical array (同源数组展开, order included)
+    const c = await connectClient(on.hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    expect(ack["caps"] as string[]).toEqual([...on.hub.info.caps]);
+    c.sock.destroy();
+
+    // restore on but the platform probe failed ⇒ fail closed, no cap (death confirmation is /proc-bound)
+    const noPlatform = await startKit({
+      spawn: { ...SPAWN_CFG, restore: true },
+      withAssembly: true,
+      probe: { platform: "darwin" },
+    });
+    expect(noPlatform.hub.info.caps).not.toContain(SPAWN_RELAUNCH_HUB_CAP);
+  });
+
   it("platform probe failure ⇒ fail closed: caps still carry spawn.v1, policy reason platform, no store file", async () => {
     const kit = await startKit({ spawn: SPAWN_CFG, withAssembly: true, probe: { platform: "darwin" } });
     expect(kit.hub.info.caps).toContain(SPAWN_HUB_CAP);
@@ -366,6 +391,13 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     const policy = kit.sup!.policy("loopback:token", "loopback", "http", false);
     expect(policy.allowed).toBe(false);
     expect(policy.reason).toBe("platform");
+  });
+
+  it("spawn lanConfirm (2026-10-13 U1 拍板): the REAL supervisor's policy() honors the parsed config — false ⇒ LAN 'unknown-dir', absent ⇒ LAN 'always'", async () => {
+    const off = await startKit({ spawn: { ...SPAWN_CFG, lan: "known", lanConfirm: false }, withAssembly: true });
+    expect(off.sup!.policy("lan:alice", "lan", "http", false).confirm).toBe("unknown-dir");
+    const on = await startKit({ spawn: { ...SPAWN_CFG, lan: "known" }, withAssembly: true });
+    expect(on.sup!.policy("lan:alice", "lan", "http", false).confirm).toBe("always");
   });
 
   it("live managed record keeps the hub from idle-exiting; hub.json spawn.count follows via the registry tick", async () => {

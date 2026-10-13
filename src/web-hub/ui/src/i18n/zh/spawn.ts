@@ -46,6 +46,7 @@ const spawn = {
   browseErrUnsupported: "此 hub 不支持目录浏览。",
   browseErrBusy: "hub 正忙 — 稍后重试。",
   browseErrNetwork: "网络错误 — 请重试。",
+  browseFollowInvalid: "路径不是有效目录 — 面板停留在当前位置。",
   mkdirNew: "新建文件夹",
   mkdirPlaceholder: "文件夹名称",
   mkdirCreate: "创建",
@@ -154,6 +155,19 @@ const spawn = {
   restoreFailCwdChanged: "会话目录已变化或不存在，无法恢复",
   restoreFailRegisterTimeout: "恢复的会话一直未注册",
   restoreFailExitedEarly: "恢复的 pi 进程在启动期间退出",
+
+  relaunchHint: "点击重新拉起",
+  relaunchPending: "正在拉起…",
+  relaunchErrGone: "会话文件已不存在，无法拉起",
+  relaunchErrAlive: "进程仍在运行（或无法确认已退出），未拉起",
+  relaunchErrMissing: "会话记录已不存在，无法拉起",
+  relaunchErrState: "该会话当前无法重新拉起",
+  relaunchErrDenied: "此 hub 不允许拉起（LAN 策略 / 平台限制）",
+  relaunchErrLauncher: "hub 当前无法启动 pi — 请稍后重试",
+  relaunchErrRate: "拉起请求过多 — 请稍后重试",
+  relaunchErrDeadline: "hub 未及时响应 — 请确认会话是否已起来",
+  relaunchErrUnsupported: "此 hub 不支持重新拉起",
+  relaunchErrNetwork: "网络错误 — 请重试",
 } satisfies Messages<typeof en>;
 
 export default spawn;

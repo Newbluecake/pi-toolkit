@@ -98,26 +98,40 @@
 /* (the coarse-pointer width bump for `.composer-attach` was retired with the in-card move —
  * see the block above.) */
 
-/* --- drop overlay (§4.1 entry 2; .composer itself gets position:relative here) --- */
+/* --- page-wide drop overlay + toast (2026-10 user ruling 「整个页面都是拖放区」:
+ * `PageDropZone.vue` owns the window-level listeners; the composer no longer has a zone of
+ * its own — an in-composer drop bubbles up and is handled exactly once) --- */
 
-.composer {
-  position: relative;
-}
-
-.drop-overlay {
-  position: absolute;
-  inset: calc(-1 * var(--sp-2));
-  z-index: 2;
+.page-drop-overlay {
+  position: fixed;
+  inset: var(--sp-3);
+  z-index: 70; /* above the preview overlay (60) — visual only, pointer-events:none below */
   display: flex;
   align-items: center;
   justify-content: center;
   border: 2px dashed var(--c-primary);
-  border-radius: var(--r-md);
+  border-radius: var(--r-lg);
   background: var(--c-primary-soft);
   color: var(--c-on-primary-soft);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: var(--fw-medium);
-  pointer-events: none; /* overlay never swallows drags/clicks — the root keeps the events */
+  pointer-events: none; /* overlay never swallows drags/clicks — window keeps the events */
+}
+
+.page-drop-toast {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-6);
+  transform: translateX(-50%);
+  z-index: 70;
+  max-width: min(90vw, 480px);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  box-shadow: var(--shadow-1);
+  font-size: var(--fs-sm);
 }
 
 /* --- attachment tray (§4.2) --- */

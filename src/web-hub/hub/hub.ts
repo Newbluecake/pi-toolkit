@@ -39,6 +39,7 @@ import {
   RUNTX_HUB_CAPS,
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
+  SPAWN_RELAUNCH_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   PREVIEW_ABS_HUB_CAP,
@@ -344,6 +345,11 @@ export async function startHub(
             SPAWN_HUB_CAP,
             SPAWN_MODEL_HUB_CAP,
             ...(config.spawn.history === true && spawnPlatform?.ok === true ? [SPAWN_HISTORY_HUB_CAP] : []),
+            // spawn-relaunch: `POST /api/headless/relaunch` reuses the restore machinery (L6
+            // death confirmation is /proc-bound), so the cap demands BOTH the restore config
+            // flag AND the platform probe — a hub without it 404s the route like a restore-off
+            // hub does (the UI renders no relaunch affordance without the cap anyway).
+            ...(config.spawn.restore === true && spawnPlatform?.ok === true ? [SPAWN_RELAUNCH_HUB_CAP] : []),
           ]),
       ...(config.preview === undefined
         ? []
@@ -842,6 +848,9 @@ export async function startHub(
         audit: (r) => auditSpawn(log, r),
         pluginVersion: config.pluginVersion,
         stderrDir: spawnFiles.logDir,
+        // spawn-relaunch: the base for `locateSessionFile`'s default-session-dir fallback (same
+        // expression as spawnDirs'/history's agentDir above).
+        agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent`,
         // session-history plan §4.6.3/§4.8 (v3.4 X1): the restore re-fork's path-pin pair —
         // injected ONLY when history is on; absent ⇒ restore keeps its exact pre-history
         // behavior (no capture, no goLive verify, §5). Same `HistorySyncFs` for both halves.

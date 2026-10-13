@@ -55,6 +55,7 @@ describe("web-hub settings", () => {
         lan: "off",
         restore: true,
         history: true,
+        lanConfirm: true,
       },
     });
   });
@@ -575,6 +576,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       lan: "off",
       restore: true,
       history: true,
+      lanConfirm: true,
     });
     expect(parseWebHubSettings({}).spawn).toEqual(spawnDefaults);
     expect(parseWebHubSettings(undefined).spawn).toEqual(spawnDefaults);
@@ -597,6 +599,16 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     expect(parseWebHubSettings({ spawn: { history: true } }).spawn?.history).toBe(true);
     for (const garbage of ["no", 0, null, undefined, []]) {
       expect(parseWebHubSettings({ spawn: { history: garbage } }).spawn?.history, JSON.stringify(garbage)).toBe(true);
+    }
+  });
+
+  it("2026-10-13 U1 拍板: lanConfirm keeps a real boolean, defaults to true for anything else", () => {
+    expect(parseWebHubSettings({ spawn: { lanConfirm: false } }).spawn?.lanConfirm).toBe(false);
+    expect(parseWebHubSettings({ spawn: { lanConfirm: true } }).spawn?.lanConfirm).toBe(true);
+    for (const garbage of ["no", 0, null, undefined, []]) {
+      expect(parseWebHubSettings({ spawn: { lanConfirm: garbage } }).spawn?.lanConfirm, JSON.stringify(garbage)).toBe(
+        true,
+      );
     }
   });
 
@@ -694,6 +706,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
           lan: "known",
           restore: false,
           history: false,
+          lanConfirm: false,
         },
       },
     }).webHub.spawn;
@@ -708,6 +721,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
       lan: "known",
       restore: false,
       history: false,
+      lanConfirm: false,
     });
   });
 

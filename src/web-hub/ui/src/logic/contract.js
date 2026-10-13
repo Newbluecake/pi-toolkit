@@ -72,6 +72,9 @@ export const API = Object.freeze({
   // spawn-dirmkdir: POST-only create-folder endpoint (`{path, name}` ⇒ 200 `{path}`).
   // Hand-written literal like the headless paths above — pinned by the same contract test.
   headlessMkdir: "/api/headless/mkdir",
+  // spawn-relaunch: POST-only relaunch endpoint (`{spawnId}` ⇒ 202 `{spawnId, state, dup?}`).
+  // Hand-written literal like the headless paths above — pinned by the same contract test.
+  headlessRelaunch: "/api/headless/relaunch",
   // web-hub-delete-session plan v2 §4.1/§5.3: POST /api/agents/remove — imported from the
   // protocol module (same anti-drift rule as the upload/preview paths above), never a hand
   // copy of the literal.

@@ -21,7 +21,9 @@ import type { Attachment, ControlHandle, HubHandle, UploadsHandle } from "../../
  *   >48 KiB / sending / deny command / read-only) refuse Enter, Alt+Enter AND the button;
  *   under allow conditions all three emit the identical gate-composed text (Enter/click with
  *   the current deliver, Alt+Enter as followUp).
- * - the three entries (paste / drag&drop / attach button), tray interactions (remove →
+ * - the composer's LOCAL entries (paste / attach button — drag & drop moved to the App-level
+ *   `PageDropZone` in 2026-10, user ruling 「整个页面都是拖放区」; page-drop.test.ts pins it),
+ *   tray interactions (remove →
  *   `uploads.remove`, retry → `uploads.retry`), the permanent plaintext warning, and §3.2's
  *   post-send tray clear via `discard` — NEVER `remove` (which would abort-delete the hub
  *   files the just-sent prompt references).
@@ -425,56 +427,6 @@ describe("paste entry (§4.1)", () => {
     const ev = dispatchWith(w.find("textarea").element, "paste", "clipboardData", fileDt([file]));
     expect(ev.defaultPrevented).toBe(false);
     expect(uploads.calls.add).toHaveLength(0);
-  });
-});
-
-describe("drag & drop entry (§4.1)", () => {
-  it("dragenter/over 显示遮罩，dragleave 计数归零后隐藏", async () => {
-    const { w } = mountComposer({});
-    const root = w.find(".composer").element;
-    dispatchWith(root, "dragenter", "dataTransfer", { types: ["Files"], items: [], files: [] });
-    dispatchWith(root, "dragover", "dataTransfer", { types: ["Files"], items: [], files: [] });
-    await nextTick();
-    expect(w.find(".drop-overlay").exists()).toBe(true);
-    dispatchWith(root, "dragleave", "dataTransfer", { types: ["Files"], items: [], files: [] });
-    await nextTick();
-    expect(w.find(".drop-overlay").exists()).toBe(false);
-  });
-
-  it("drop 文件 ⇒ 进托盘", async () => {
-    const { w, uploads } = mountComposer({});
-    const file = makeFile("dropped.bin", 16, "application/octet-stream");
-    const ev = dispatchWith(w.find(".composer").element, "drop", "dataTransfer", fileDt([file]));
-    expect(ev.defaultPrevented).toBe(true);
-    expect(uploads.calls.add).toHaveLength(1);
-    await nextTick();
-    expect(w.find(".tray-name").text()).toBe("dropped.bin");
-  });
-
-  it("拖入目录 ⇒ 拒收提示，不进托盘", async () => {
-    const { w, uploads } = mountComposer({});
-    const file = makeFile("pics", 0, "");
-    dispatchWith(
-      w.find(".composer").element,
-      "drop",
-      "dataTransfer",
-      fileDt([file], { entries: [{ isDirectory: true, name: "pics" }] }),
-    );
-    await nextTick();
-    expect(uploads.calls.add).toHaveLength(0);
-    expect(w.find(".composer-hint").text()).toContain("Folders cannot be attached");
-    expect(w.find(".attachment-tray").exists()).toBe(false);
-  });
-
-  it("文本拖拽（无 Files type）⇒ 不显示遮罩", async () => {
-    const { w } = mountComposer({});
-    dispatchWith(w.find(".composer").element, "dragenter", "dataTransfer", {
-      types: ["text/plain"],
-      items: [],
-      files: [],
-    });
-    await nextTick();
-    expect(w.find(".drop-overlay").exists()).toBe(false);
   });
 });
 

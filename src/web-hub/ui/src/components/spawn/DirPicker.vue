@@ -14,8 +14,10 @@
     「上一级」 + 「新建文件夹」 on top, subdir-only listing, 「选择此目录」 at the bottom).
   - `submitting` — form disabled, status line.
   - `confirming` — replaced by SpawnConfirm (409 `E_CONFIRM_REQUIRED`, arch §6.3).
-  - `awaiting` / `unknown` — status lines; the first-prompt mirror rides along as `fp:*` chips
-    (only for flows that CARRY a first prompt — the picker itself no longer creates any).
+  - `awaiting` / `unknown` — the 202 accepted ⇒ the dialog CLOSES immediately (2026-10-13 用户
+    拍板 ②: 等待状态在侧边会话列表看 — SpawnRow carries the record, incl. the `fp:*` chips,
+    from here). The status lines below stay only for a picker opened while a SHARED flow is
+    already awaiting (the flow is a singleton on `hub.spawn.newSession`).
   - `failed` — the §3.2 error taxonomy line (`classifySpawnError` kind → `spawn.err*`), inputs
     restored from `flow.input` (失败保留输入; `refilled:"picker"` returns the retained body the
     same way), Retry resubmits under a NEW id via `newSession.retry()`.
@@ -94,6 +96,13 @@ watch(flow, (f) => {
     cwd.value = f.input.cwd;
   }
   if (f.phase === "idle") restoredReqId = null;
+  // 2026-10-13 用户拍板 ②: 202 accepted ⇒ 立即关对话框 — the sidebar's SpawnRow carries the
+  // starting/awaiting/failed state from here (the useNewSession phase machine itself is
+  // unchanged; a failure BEFORE the 202 still lands in this dialog's `failed` phase).
+  if (f.phase === "awaiting") {
+    emit("close");
+    return;
+  }
   if (f.phase === "done") emit("done");
 });
 
@@ -208,12 +217,18 @@ function classifyBrowseError(out: { readonly error: string }): string {
   }
 }
 
-async function browseLoad(path: string): Promise<void> {
+/** spawn-browse-follow: follow-mode load — a failure REVERTS to the previous path/listing
+ *  (the panel stays where it was) and raises the light hint instead of the full error phase. */
+async function browseLoad(path: string, opts?: { follow?: boolean }): Promise<void> {
+  const follow = opts?.follow === true;
   const preview = hub?.preview;
   const sess = browseSession.value;
+  const prevPath = browsePath.value;
+  const prevListing = browseListing.value;
   browsePath.value = path;
   browseListing.value = null;
   browseErrorKey.value = null;
+  if (follow) followHint.value = false;
   if (preview === undefined || sess === null) {
     browsePhase.value = "error";
     browseErrorKey.value = "spawn.browseErrUnsupported";
@@ -228,7 +243,7 @@ async function browseLoad(path: string): Promise<void> {
     { agentKey: sess.agentKey, sessionId: sess.sessionId, path, dir: true },
     { signal: ac.signal, maxPixels: PREVIEW_IMAGE_MAX_PIXELS },
   );
-  if (seq !== browseSeq) return; // superseded by a newer navigation
+  if (seq !== browseSeq) return; // superseded by a newer navigation — drop the late answer
   if (out.ok) {
     if (out.kind === "dir") {
       browseListing.value = out.listing;
@@ -241,9 +256,40 @@ async function browseLoad(path: string): Promise<void> {
     return;
   }
   if (out.error === "E_ABORT") return; // our own supersede/close abort — stay silent
+  if (follow) {
+    // 跟随失败: 面板停在原地（回滚路径/列表）+ 一行轻提示，不抢焦点不刷屏
+    browsePath.value = prevPath;
+    browseListing.value = prevListing;
+    browsePhase.value = "ready";
+    followHint.value = true;
+    return;
+  }
   browsePhase.value = "error";
   browseErrorKey.value = classifyBrowseError(out);
 }
+
+// --- 输入联动 (spawn-browse-follow, 2026-10-12 用户拍板: 「文件浏览器打开的情况下,路径输入
+// 可以实时影响文件浏览器」): while the panel is open, editing the cwd input re-navigates the
+// panel after a ~300ms debounce. A valid directory ⇒ the panel jumps; anything else (missing /
+// not-a-dir / denied) ⇒ the panel stays put with one light hint line. The watcher never fires
+// for programmatic writes with the panel closed (「选择此目录」 writes AFTER browseClose, so
+// there is no loop); with the panel OPEN a recent-dir click intentionally follows too.
+// ---------------------------------------------------------------------------
+const followHint = ref(false);
+let followTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(cwd, () => {
+  if (!browseOpen.value) return; // panel closed ⇒ no follow (also the anti-loop guard)
+  if (followTimer !== null) clearTimeout(followTimer);
+  followTimer = setTimeout(() => {
+    followTimer = null;
+    if (!browseOpen.value) return;
+    const path = cwd.value.trim();
+    if (path === "" || path === browsePath.value) return; // nothing to do
+    if (/[\0\r\n]/.test(path)) return; // 非法字符不发请求
+    void browseLoad(path, { follow: true });
+  }, 300);
+});
 
 function browseToggle(): void {
   if (browseOpen.value) {
@@ -251,6 +297,7 @@ function browseToggle(): void {
     return;
   }
   browseOpen.value = true;
+  followHint.value = false;
   mkdirCancel();
   // the cwd input's CURRENT value is the starting point ("" falls back to `~` — the hub
   // expands a bare `~` / `~/…` against its own home, `hub/preview/tilde.ts`)
@@ -260,6 +307,11 @@ function browseToggle(): void {
 
 function browseClose(): void {
   browseOpen.value = false;
+  followHint.value = false;
+  if (followTimer !== null) {
+    clearTimeout(followTimer);
+    followTimer = null;
+  }
   browseSeq += 1; // any in-flight load's answer is now stale
   browseAbort?.abort();
   browseAbort = null;
@@ -269,12 +321,14 @@ function browseClose(): void {
 function browseInto(name: string): void {
   const child = childPreviewPath(browsePath.value, name);
   if (child === null) return; // a name that can't join stays inert (defensive — protocol already shape-checks)
+  followHint.value = false;
   void browseLoad(child);
 }
 
 function browseUp(): void {
   const parent = browseParent.value;
   if (parent === null) return;
+  followHint.value = false;
   void browseLoad(parent);
 }
 
@@ -354,6 +408,10 @@ onUnmounted(() => {
   browseSeq += 1;
   browseAbort?.abort();
   browseAbort = null;
+  if (followTimer !== null) {
+    clearTimeout(followTimer);
+    followTimer = null;
+  }
   // Close and unmount are one path (the parent renders the dialog only while open), so this
   // covers both — the scroll lock release is idempotent and focus returns to the opener.
   releaseScrollLock?.();
@@ -616,6 +674,9 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
             </form>
             <p v-if="mkdirErrorKey" class="spawn-picker-error spawn-mkdir-error" role="alert">
               {{ t(mkdirErrorKey) }}
+            </p>
+            <p v-if="followHint" class="spawn-picker-note spawn-browse-follow-note" role="note">
+              {{ t("spawn.browseFollowInvalid") }}
             </p>
             <p v-if="browsePhase === 'loading'" class="spawn-picker-status" role="status">
               <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.browseLoading") }}

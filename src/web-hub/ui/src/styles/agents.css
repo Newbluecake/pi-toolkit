@@ -635,6 +635,76 @@
   text-align: right;
 }
 
+/* ---------------------------------------------------------------- spawn-relaunch
+ * (「点击重新拉起」): a stale row whose card belongs to a terminal MANAGED spawn record. The
+ * whole card stays the `<a>` (capture-phase click intercept in AgentList.vue performs the
+ * relaunch); `.relaunchable` only adds the pointer cursor. The hint pill floats over the
+ * card's top-right corner with the same hover-reveal / touch-always-visible discipline as
+ * `.remove-btn` above; `.busy` (in-flight call) keeps it visible with a spinner until the
+ * request settles. The per-row failure line (`.relaunch-note`) mirrors `.remove-note`. */
+.agent-item.relaunchable > .agent-card {
+  cursor: pointer;
+}
+
+.agent-item .relaunch-hint {
+  position: absolute;
+  top: 6px;
+  right: var(--sp-2);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+  color: var(--c-accent, var(--c-text-2));
+  font-size: var(--fs-2xs);
+  pointer-events: none; /* the card itself is the hit area */
+  white-space: nowrap;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.relaunch-hint.busy .icon-sm {
+  animation: spin 1s linear infinite; /* primitives.css's shared @keyframes */
+  transform-origin: center;
+}
+
+@media (hover: hover) {
+  .agent-item .relaunch-hint {
+    opacity: 0;
+  }
+
+  .agent-item:hover .relaunch-hint,
+  .agent-item:focus-within .relaunch-hint,
+  .relaunch-hint.busy {
+    opacity: 1;
+  }
+}
+
+@media (hover: none) {
+  .agent-item .relaunch-hint {
+    opacity: 1;
+  }
+}
+
+.agent-item .relaunch-note {
+  position: absolute;
+  right: var(--sp-2);
+  bottom: 8px;
+  z-index: 2;
+  margin: 0;
+  max-width: 220px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-xs);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-1);
+  color: var(--c-danger);
+  font-size: var(--fs-2xs);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
 /* AgentCard's row1 chip for a managed record mid-delete (removing:true) */
 .chip-removing {
   border-color: var(--c-warning-border);

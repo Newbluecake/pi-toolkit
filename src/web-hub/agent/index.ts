@@ -112,6 +112,10 @@ export interface WebHubSpawnSettings extends HubSpawnConfig {
   /** web-hub-session-history plan §3.7 (P-cfg): settings-layer default `true`; crosses the
    * wire as `HubSpawnConfig.history` only inside an enabled spawn block. */
   history: boolean;
+  /** 2026-10-13 用户拍板（U1 单用户信任模型既判）: settings-layer default `true`（现状：LAN
+   * 每次 spawn 都要 E_CONFIRM_REQUIRED 确认）；`false` 明示放弃这层 LAN 渠道证明。只在
+   * enabled 的 spawn 块内随 `HubSpawnConfig.lanConfirm` 过线。 */
+  lanConfirm: boolean;
 }
 
 export interface WebHubSettings {
@@ -974,9 +978,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     }
     // web-hub-spawn §SP2: only an explicitly enabled spawn block reaches the hub — `undefined`
     // and `enabled:false` alike leave `config.spawn` unset, so the hub's "not enabled" response
-    // matrix (arch §8.2) stays byte-identical to a pre-spawn hub. Exactly the nine policy
-    // fields (the ninth, `history`, is session-history plan §3.7/P-cfg); `enabled` itself
-    // never crosses the wire.
+    // matrix (arch §8.2) stays byte-identical to a pre-spawn hub. Exactly the ten policy
+    // fields (the ninth, `history`, is session-history plan §3.7/P-cfg; the tenth,
+    // `lanConfirm`, is the 2026-10-13 U1 拍板); `enabled` itself never crosses the wire.
     if (settings.spawn?.enabled === true) {
       const spawn: HubSpawnConfig = {
         roots: settings.spawn.roots,
@@ -990,6 +994,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         restore: settings.spawn.restore,
         // web-hub-session-history plan §3.7 (P-cfg): the ninth field, only inside an enabled block.
         history: settings.spawn.history,
+        // 2026-10-13 U1 拍板: the tenth field, only inside an enabled block.
+        lanConfirm: settings.spawn.lanConfirm,
       };
       config.spawn = spawn;
     }

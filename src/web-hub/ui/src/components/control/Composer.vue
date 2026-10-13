@@ -42,13 +42,16 @@
   Drafts: on every input the text is pushed to `control.setDraft(agentKey, …)` (§7.1's
   in-memory per-agent drafts — no localStorage), restored on mount, cleared after a send.
 
-  Attachments (web-hub-upload plan §3.2/§4.1, package U5): three entries — textarea `@paste`
-  (classified by `@logic/upload.js`'s pure `classifyPaste`: files-only pastes are intercepted,
-  files+text pastes keep the text flowing into the textarea), drag & drop onto `.composer`
-  (counter-guarded overlay; `webkitGetAsEntry()?.isDirectory` rejects with a hint), and the
-  paperclip button + hidden `<input type="file" multiple>` (the only reliable mobile entry).
-  All three delegate admission/scheduling to `ControlHandle.uploads` (U4b's `useUploads`) and
-  are disabled together when `!enabled` or `uploadAvailability(...)` fails.
+  Attachments (web-hub-upload plan §3.2/§4.1, package U5): two LOCAL entries — textarea
+  `@paste` (classified by `@logic/upload.js`'s pure `classifyPaste`: files-only pastes are
+  intercepted, files+text pastes keep the text flowing into the textarea) and the paperclip
+  button + hidden `<input type="file" multiple>` (the only reliable mobile entry) — plus the
+  PAGE-WIDE drop zone (`PageDropZone.vue`, App-level, 2026-10 user ruling 「整个页面都是拖放区」):
+  the composer carries NO drag handlers of its own, an in-composer drop bubbles to the
+  window listeners exactly once (double-processing is structurally impossible). All entries
+  delegate admission/scheduling to `ControlHandle.uploads` (U4b's `useUploads`) through the
+  shared `addAttachments` pipeline (`./attachmentAdd.ts`) and are disabled together when
+  `!enabled` or `uploadAvailability(...)` fails.
 
   §3.2's **single send gate**: `sendGate()` (pure judgment in `@logic/upload.js`'s
   `canSendWithAttachments`) backs the button's `:disabled`, `doSend()`'s FIRST line, and the
@@ -100,15 +103,15 @@ import {
   moveMentionActive,
   mentionTargets,
 } from "@logic/mention.js";
-import { canSendWithAttachments, classifyPaste, collectDrop, pastedName, uploadAvailability } from "@logic/upload.js";
+import { canSendWithAttachments, classifyPaste, uploadAvailability } from "@logic/upload.js";
 import { buildFileSearchUrl, parseFileSearchResults } from "@logic/file-mention.js";
 import { API } from "@logic/contract.js";
-import { UPLOAD_ATTACH_MAX_PER_MSG } from "@protocol/upload.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { ComposerEmits, ComposerProps } from "../../contracts.js";
-import type { AddReject, ControlHandle } from "../../types.js";
+import type { ControlHandle } from "../../types.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import { addAttachments } from "./attachmentAdd.js";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
 import ContextRing from "./ContextRing.vue";
@@ -499,26 +502,7 @@ const uploadOn = computed(() => {
   return uploadAvailability({ hubCaps, card: view?.agent.value.card, authMode: env?.authMode });
 });
 
-/** §2.3: screenshots/nameless blobs get a `pasted-<stamp>[-n].<ext>` name; real names pass through. */
-function renameIfNameless(file: unknown, seq: number): unknown {
-  const f = file as { name?: unknown; type?: unknown; lastModified?: unknown } | null;
-  if (typeof f?.name === "string" && f.name !== "") return file;
-  const mime = typeof f?.type === "string" ? f.type : null;
-  const lastModified = typeof f?.lastModified === "number" ? f.lastModified : undefined;
-  try {
-    if (typeof File === "function" && typeof Blob === "function" && file instanceof Blob) {
-      return new File([file], pastedName(mime, Date.now(), seq), {
-        type: mime ?? "",
-        ...(lastModified !== undefined ? { lastModified } : {}),
-      });
-    }
-  } catch {
-    // fall through — a non-constructible file keeps its (empty) name
-  }
-  return file;
-}
-
-/** Transient add/drop feedback line (directory rejects, admission rejects) — auto-clears. */
+/** Transient add/paste feedback line (admission rejects) — auto-clears. */
 const hint = ref<string | null>(null);
 let hintTimer: ReturnType<typeof setTimeout> | undefined;
 function showHint(msg: string): void {
@@ -535,32 +519,10 @@ onUnmounted(() => {
   document.removeEventListener("pointerdown", onDocPointerDown, true);
 });
 
-function fileNameOf(file: unknown): string {
-  const name = (file as { name?: unknown } | null)?.name;
-  return typeof name === "string" && name !== "" ? name : "file";
-}
-
-/** Surface `useUploads.add`'s admission rejects (§4.2: the first one stands for the batch). */
-function reportRejects(rejected: readonly AddReject[]): void {
-  const first = rejected[0];
-  if (first === undefined) return;
-  const name = fileNameOf(first.file);
-  if (first.reason === "too-large") showHint(t("upload.hintTooLarge", { name }));
-  else if (first.reason === "too-many") showHint(t("upload.hintTooMany", { n: UPLOAD_ATTACH_MAX_PER_MSG }));
-  else if (first.reason === "duplicate") showHint(t("upload.hintDuplicate", { name }));
-  else showHint(t("upload.hintInvalid", { name }));
-}
-
 function addFiles(files: readonly unknown[]): void {
   const key = agentKey.value;
   if (!uploadOn.value || uploadsHandle === undefined || key === null || files.length === 0) return;
-  let seq = 0;
-  reportRejects(
-    uploadsHandle.add(
-      key,
-      files.map((f) => renameIfNameless(f, ++seq)),
-    ).rejected,
-  );
+  addAttachments(uploadsHandle, key, files, t, showHint);
 }
 
 /** §4.1 entry 1 — paste. Files-only ⇒ intercepted as attachments; files+text ⇒ the text still
@@ -573,49 +535,10 @@ function onPaste(ev: ClipboardEvent): void {
   if (cls.preventDefault) ev.preventDefault();
 }
 
-/** §4.1 entry 2 — drag & drop. Counter-guarded so child-element enter/leave pairs don't flicker
- * the overlay; `types` must contain `Files` (text drags over the composer stay untouched). */
-const dropActive = ref(false);
-let dragDepth = 0;
-function dtHasFiles(dt: DataTransfer | null): boolean {
-  if (dt === null) return false;
-  for (const ty of Array.from(dt.types ?? [])) if (ty === "Files") return true;
-  return false;
-}
-
-function onDragEnter(ev: DragEvent): void {
-  if (!uploadOn.value || !dtHasFiles(ev.dataTransfer)) return;
-  ev.preventDefault();
-  dragDepth += 1;
-  dropActive.value = true;
-}
-
-function onDragOver(ev: DragEvent): void {
-  if (!uploadOn.value || !dtHasFiles(ev.dataTransfer)) return;
-  ev.preventDefault(); // required — otherwise the browser never fires `drop` here
-  dropActive.value = true;
-}
-
-function onDragLeave(): void {
-  if (!dropActive.value) return;
-  dragDepth = Math.max(0, dragDepth - 1);
-  if (dragDepth === 0) dropActive.value = false;
-}
-
-function onDrop(ev: DragEvent): void {
-  dragDepth = 0;
-  dropActive.value = false;
-  if (!uploadOn.value || uploadsHandle === undefined || !dtHasFiles(ev.dataTransfer)) return;
-  ev.preventDefault();
-  const res = collectDrop(ev.dataTransfer);
-  if (!res.ok) {
-    showHint(t("upload.hintDirectory", { names: res.names.join(", ") }));
-    return;
-  }
-  addFiles(res.files);
-}
-
-/** §4.1 entry 3 — the paperclip button (§4.4: the only reliable mobile entry). */
+/** §4.1 entry 2 — the paperclip button (§4.4: the only reliable mobile entry). Entry 3 is
+ * the PAGE-WIDE drop zone: `PageDropZone.vue` owns the window-level drag listeners (2026-10
+ * user ruling), so the composer deliberately has none — an in-composer drop bubbles up and
+ * is handled exactly once, identical to a drop anywhere else on the page. */
 const fileInputEl = ref<HTMLInputElement | null>(null);
 function onAttachClick(): void {
   fileInputEl.value?.click();
@@ -794,16 +717,7 @@ watch(
 </script>
 
 <template>
-  <div
-    ref="rootEl"
-    class="composer"
-    :class="{ 'cmd-mode': commandMode }"
-    @paste="onPaste"
-    @dragenter="onDragEnter"
-    @dragover="onDragOver"
-    @dragleave="onDragLeave"
-    @drop="onDrop"
-  >
+  <div ref="rootEl" class="composer" :class="{ 'cmd-mode': commandMode }" @paste="onPaste">
     <CommandPalette
       v-if="paletteVisible && slash"
       :commands="commands"
@@ -865,7 +779,6 @@ watch(
       @remove="onTrayRemove"
       @retry="onTrayRetry"
     />
-    <div v-if="dropActive" class="drop-overlay">{{ t("upload.dropHint") }}</div>
     <div class="composer-row">
       <input
         ref="fileInputEl"

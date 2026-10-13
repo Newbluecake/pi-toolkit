@@ -357,7 +357,11 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   Orphan invariants L1–L5: intent on disk before fork, an independent reaper watchdog child TERM→KILLs
   tracked orphans ≤12s after ANY hub death, boot-time recovery re-verifies identity before signaling, and
   every signal is preceded by a sync identity re-verify. `spawn.v1` rides both cap surfaces only when
-  `config.spawn` exists. SP13's `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
+  `config.spawn` exists. `webHub.spawn.lanConfirm` (default true; 2026-10-13 U1 拍板) gates the LAN
+  per-spawn `E_CONFIRM_REQUIRED` round-trip — `false` drops LAN to loopback's `unknown-dir` rule (the
+  session-open fork confirm is a real decision and never skipped); the waiting state after a 202 lives
+  on the sidebar SpawnRow (the picker closes on `awaiting`). SP13's
+  `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
   child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.test.ts` (real pi) are the
   S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`.
   **Restore across hub restarts (`webHub.spawn.restore`, default true, only under `spawn.enabled`)**: a
@@ -367,6 +371,23 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   before every fork; `/webhub stop` leaves a one-shot `<stateDir>/spawn/restore.veto` (restart clears it);
   `restore:false` is byte-identical to pre-restore behavior. HR1–HR7 / CR1–CR3 gates — design:
   `docs/dev/web-hub-spawn-restore/plan.md`.
+  **Relaunch an offline managed session (`POST /api/headless/relaunch`, cap `spawn.relaunch.v1` —
+  advertised only when `spawn.restore === true` AND the platform probe passed)**: clicking a
+  stale/offline AgentList card bound to a TERMINAL managed record re-forks its session through
+  the SAME restore job (`supervisor.relaunch()` rewrites the record to `starting{reaping}` with
+  `restore.prevAgentKey` = the old card, then `runRestoreJob`: L6 death re-check → D7 session
+  preflight → `forkInto` with `--session <file>` / `--session-id <id>`, never `--model`).
+  Refusals: unknown spawnId or restore-off ⇒ 404; death not `confirmed` ⇒ 409
+  `E_AGENT_ONLINE{exit-unconfirmed}` (B-alive); no/invalid sessionId or a pending delete ⇒ 409
+  `E_BAD_REQUEST{no-session|removing}`; the persisted session file gone/tampered ⇒ 410
+  `E_SPAWN_GONE{session-missing|session-invalid}`; a record without a `sessionFile` gets ONE
+  bounded locate-by-id in pi's default session dir (`restore-plan.ts`'s `locateSessionFile`)
+  before the `--session-id` fallback. Idempotent: a non-terminal record ⇒ 202 `dup:true`, never
+  a second fork. A relaunch re-anchors the lifetime (`lifetimeAnchorAt`, runtime-only — restore
+  D14's createdAt anchor stays untouched for boot restores). UI: `logic/spawn.js`'s
+  `relaunchableFor` gates the affordance on the cap; the whole stale card becomes the action
+  (capture-phase intercept, the × / rename buttons pass through), success navigates to the old
+  key's detail where the existing `successorOf` follow lands on the new live card.
   **Delete session (`POST /api/agents/remove`, web-hub-delete-session plan v2)**: an AgentCard / SpawnRow two-step
   delete removes the card (and, for a managed session, stops the process first); the session jsonl is never deleted.
   Three invariants: **B-alive** — a record/card is dropped only after a read-only identity probe confirms death (or

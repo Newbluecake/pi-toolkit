@@ -162,3 +162,79 @@ export function planSessionArgv(rec: RestoreSessionInput, fs: RestoreSessionFs, 
   if (!checked.ok) return { ok: false, failure: "session-invalid", detail: checked.detail };
   return { ok: true, tail: ["--session", file] };
 }
+
+// ---------------------------------------------------------------------------
+// spawn-relaunch: locate a session file by id (the relaunch fallback when the record never
+// adopted a `sessionFile` — e.g. the agent never reported one). Pure decision module rules
+// still apply: every fs touch goes through the injected seam, nothing throws.
+// ---------------------------------------------------------------------------
+
+/** pi's own cwd → session dir encoding (pi's `getDefaultSessionDirPath`): leading slash
+ *  stripped, every `/ \ :` turned into `-`, wrapped in `--…--` under `<agentDir>/sessions/`. */
+export function defaultSessionDirForCwd(cwd: string, agentDir: string): string {
+  const safe = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  return `${agentDir}/sessions/${safe}`;
+}
+
+/** The fs seam `locateSessionFile` needs on top of {@link RestoreSessionFs}. */
+export interface LocateSessionFs extends RestoreSessionFs {
+  readdirSync(p: string): string[];
+}
+
+/** Bounded scan cap — files whose head is read per locate call. */
+export const LOCATE_SESSION_SCAN_MAX = 64;
+
+/** First-line `{"type":"session","id":…}` probe — the id, or undefined. Never throws. */
+function sessionHeaderIdOf(head: string): string | undefined {
+  const nl = head.indexOf("\n");
+  const line = nl < 0 ? head : head.slice(0, nl);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  if (!("type" in parsed) || parsed.type !== "session") return undefined;
+  if (!("id" in parsed) || typeof parsed.id !== "string") return undefined;
+  return parsed.id;
+}
+
+/**
+ * Find the session file for `sessionId` in pi's DEFAULT session dir for `cwd`. Best-effort and
+ * bounded: any fs error, a missing dir, or no exact id match ⇒ `undefined` (the caller then
+ * follows D7's unknown-file rule — `--session-id`, pi's own project-local lookup, which also
+ * covers a custom `sessionDir` this encoding cannot know about). The returned path is only a
+ * CANDIDATE: the caller still runs it through `planSessionArgv`'s full preflight
+ * (symlink/uid/header id+cwd checks) before it ever reaches an argv.
+ */
+export function locateSessionFile(
+  fs: LocateSessionFs,
+  agentDir: string,
+  cwd: string,
+  sessionId: string,
+): string | undefined {
+  if (!RESTORE_SESSION_ID_RE.test(sessionId)) return undefined;
+  const dir = defaultSessionDirForCwd(cwd, agentDir);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  let scanned = 0;
+  for (const name of names) {
+    if (scanned >= LOCATE_SESSION_SCAN_MAX) break;
+    if (!name.endsWith(".jsonl")) continue;
+    scanned += 1;
+    const path = `${dir}/${name}`;
+    let head: string;
+    try {
+      head = fs.readHeadSync(path, RESTORE_SESSION_HEAD_BYTES);
+    } catch {
+      continue;
+    }
+    if (sessionHeaderIdOf(head) === sessionId) return path;
+  }
+  return undefined;
+}

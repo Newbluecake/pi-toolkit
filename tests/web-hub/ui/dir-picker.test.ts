@@ -314,7 +314,7 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
     expect(document.body.style.overflow).toBe("");
   });
 
-  it("scrim click closes mid-awaiting WITHOUT cancelling the flow (SpawnRow keeps progress); focus returns to the opener", async () => {
+  it("202 accepted ⇒ the dialog closes ITSELF immediately (2026-10-13 拍板 ②: waiting lives on the sidebar SpawnRow); the flow keeps running and focus returns", async () => {
     const h = harness({
       start: async () => ({ ok: true, data: { spawnId: "sp1", state: "starting", cwd: "/home/u/proj" } }),
     });
@@ -327,13 +327,12 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
 
     await click(q(".spawn-picker-actions .btn-primary"));
     expect(h.hub.spawn!.newSession.flow.value.phase).toBe("awaiting");
-
-    await click(q(".spawn-scrim")); // @click.self on the scrim itself
+    // no scrim click needed: the 202's `awaiting` transition emits `close` on its own
     expect(wrapper.emitted("close")).toHaveLength(1);
-    expect(h.hub.spawn!.newSession.flow.value.phase).toBe("awaiting"); // NOT cancelled
 
     wrapper.unmount(); // the parent reacts to `close` with v-if=false
-    expect(document.activeElement).toBe(opener);
+    expect(h.hub.spawn!.newSession.flow.value.phase).toBe("awaiting"); // closing never cancels the flow
+    expect(document.activeElement).toBe(opener); // focus returned to the opener
   });
 
   it("Escape during `confirming` cancels the pending confirm AND emits close", async () => {
@@ -681,5 +680,177 @@ describe("DirPicker.vue — 目录浏览器 + 新建文件夹 (spawn-dirbrowse/-
     await click(q(".spawn-mkdir-form .btn-ghost"));
     expect(h.mkdirCalls).toHaveLength(0);
     expect(document.body.querySelector(".spawn-mkdir-form")).toBeNull();
+  });
+});
+
+describe("DirPicker.vue — 输入联动 (spawn-browse-follow)", () => {
+  const DIR_CAPS = ["spawn.v1", "preview.dir.v1"];
+
+  function listing(entries: Array<{ name: string; type: "dir" | "file"; lossy?: true }>) {
+    return {
+      entries,
+      total: entries.length,
+      scanned: entries.length,
+      complete: true,
+      truncated: false,
+      limits: { scan: false, entries: false, bytes: false },
+      vanished: 0,
+      dropped: 0,
+    };
+  }
+
+  /** A manually-driven preview fetch: every call parks until `answer` resolves it. */
+  function deferredPreview() {
+    const calls: Array<{ agentKey: string; sessionId: string; path: string; dir?: true }> = [];
+    const waiting: Array<{ resolve: (out: unknown) => void; path: string }> = [];
+    return {
+      calls,
+      fetch: (req: { agentKey: string; sessionId: string; path: string; dir?: true }) => {
+        calls.push(req);
+        return new Promise((resolve) => waiting.push({ resolve, path: req.path }));
+      },
+      /** Resolve the OLDEST parked fetch (FIFO); the harness can also resolve by path. */
+      answer(out: unknown): void {
+        const w = waiting.shift();
+        if (w === undefined) throw new Error("no parked fetch");
+        w.resolve(out);
+      },
+      answerPath(path: string, out: unknown): void {
+        const i = waiting.findIndex((w) => w.path === path);
+        if (i < 0) throw new Error(`no parked fetch for ${path}`);
+        const [w] = waiting.splice(i, 1);
+        w!.resolve(out);
+      },
+    };
+  }
+
+  function followHarness(p: ReturnType<typeof deferredPreview>) {
+    return harness({
+      start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
+      caps: DIR_CAPS,
+      withSession: true,
+      preview: p.fetch,
+    });
+  }
+
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  it("editing the cwd input re-navigates the panel after the debounce; a valid directory jumps", async () => {
+    const p = deferredPreview();
+    const h = followHarness(p);
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    expect(p.calls).toHaveLength(1); // the open load
+    p.answer({ ok: true, kind: "dir", listing: listing([{ name: "sub", type: "dir" }]) });
+    await flushPromises();
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj");
+
+    // no fetch before the debounce elapses
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/other");
+    expect(p.calls).toHaveLength(1);
+    await sleep(320);
+    expect(p.calls).toHaveLength(2);
+    expect(p.calls[1]!.path).toBe("/home/u/other");
+    p.answer({ ok: true, kind: "dir", listing: listing([{ name: "deep", type: "dir" }]) });
+    await flushPromises();
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/other");
+    expect(qa(".spawn-browse-row")).toHaveLength(1);
+    expect(q(".spawn-browse-row").textContent).toContain("deep");
+    expect(document.body.querySelector(".spawn-browse-follow-note")).toBeNull();
+  });
+
+  it("an invalid directory leaves the panel in place with the light hint (path bar reverts)", async () => {
+    const p = deferredPreview();
+    const h = followHarness(p);
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    p.answer({ ok: true, kind: "dir", listing: listing([{ name: "sub", type: "dir" }]) });
+    await flushPromises();
+
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/gone");
+    await sleep(320);
+    expect(p.calls).toHaveLength(2);
+    p.answer({ ok: false, error: "E_NOT_FOUND", status: 404 });
+    await flushPromises();
+    // 原地: 列表/路径条都是旧的, 一行轻提示
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj");
+    expect(q(".spawn-browse-row").textContent).toContain("sub");
+    expect(q(".spawn-browse-follow-note").textContent).toContain("Not a valid directory");
+    expect(document.body.querySelector(".spawn-browse .spawn-picker-error")).toBeNull(); // no full error phase
+
+    // a follow-up VALID input clears the hint
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/proj");
+    await sleep(320);
+    // path === browsePath ⇒ no new fetch, but the hint clears on the next successful follow;
+    // jump elsewhere to prove the clear
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/other");
+    await sleep(320);
+    p.answer({ ok: true, kind: "dir", listing: listing([]) });
+    await flushPromises();
+    expect(document.body.querySelector(".spawn-browse-follow-note")).toBeNull();
+  });
+
+  it("race: a stale answer (first-sent, late-arriving) is discarded once a newer load landed", async () => {
+    const p = deferredPreview();
+    const h = followHarness(p);
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    p.answer({ ok: true, kind: "dir", listing: listing([{ name: "base", type: "dir" }]) });
+    await flushPromises();
+
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/a-first");
+    await sleep(320); // fetch A in flight
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/b-second");
+    await sleep(320); // fetch B in flight (A superseded)
+    expect(p.calls.map((c) => c.path)).toEqual(["/home/u/proj", "/a-first", "/b-second"]);
+
+    // B lands first and applies
+    p.answerPath("/b-second", { ok: true, kind: "dir", listing: listing([{ name: "B", type: "dir" }]) });
+    await flushPromises();
+    expect(q(".spawn-browse-path").textContent).toBe("/b-second");
+    expect(q(".spawn-browse-row").textContent).toContain("B");
+
+    // A arrives late ⇒ discarded (seq guard), the panel stays on B
+    p.answerPath("/a-first", { ok: true, kind: "dir", listing: listing([{ name: "A", type: "dir" }]) });
+    await flushPromises();
+    expect(q(".spawn-browse-path").textContent).toBe("/b-second");
+    expect(q(".spawn-browse-row").textContent).toContain("B");
+  });
+
+  it("「选择此目录」 writes the input AFTER closing — no follow loop, no extra fetch", async () => {
+    const p = deferredPreview();
+    const h = followHarness(p);
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    p.answer({ ok: true, kind: "dir", listing: listing([]) });
+    await flushPromises();
+    await click(q(".spawn-browse-choose")); // writes cwd + closes
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj");
+    expect(document.body.querySelector(".spawn-browse")).toBeNull();
+    await sleep(400); // longer than the debounce — the programmatic write must not follow
+    expect(p.calls).toHaveLength(1);
+  });
+
+  it("empty input and NUL-containing input never fire a request", async () => {
+    const p = deferredPreview();
+    const h = followHarness(p);
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    p.answer({ ok: true, kind: "dir", listing: listing([]) });
+    await flushPromises();
+    expect(p.calls).toHaveLength(1);
+
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "");
+    await sleep(320);
+    expect(p.calls).toHaveLength(1); // empty ⇒ no fetch
+
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/bad\0nul");
+    await sleep(320);
+    expect(p.calls).toHaveLength(1); // NUL ⇒ no fetch
   });
 });

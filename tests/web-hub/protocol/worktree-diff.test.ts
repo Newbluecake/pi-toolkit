@@ -89,8 +89,9 @@ describe("protocol/worktree-diff — frozen constants (§1.3)", () => {
     const at = API_ERRORS.indexOf("E_WTDIFF_DENIED");
     expect(API_ERRORS[at - 1]).toBe("E_AGENT_ONLINE");
     expect(API_ERRORS.slice(at, at + 2)).toEqual(["E_WTDIFF_DENIED", "E_WTDIFF_UNSUPPORTED"]);
-    // later plans may only append AFTER them (web-hub-avatar A0: the two E_AVATAR_* codes)
-    expect(API_ERRORS.slice(at + 2)).toEqual(["E_AVATAR_TOO_LARGE", "E_AVATAR_UNSUPPORTED"]);
+    // later plans may only append AFTER them (web-hub-avatar A0: the two E_AVATAR_* codes;
+    // spawn-relaunch: E_SPAWN_GONE)
+    expect(API_ERRORS.slice(at + 2)).toEqual(["E_AVATAR_TOO_LARGE", "E_AVATAR_UNSUPPORTED", "E_SPAWN_GONE"]);
     // all pre-existing codes keep their indices (append-only, never reorder)
     expect(API_ERRORS.indexOf("E_AGENT_ONLINE")).toBeGreaterThan(API_ERRORS.indexOf("E_PREVIEW_CHANGED"));
     // SSE_EVENTS untouched by D0

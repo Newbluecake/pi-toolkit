@@ -28,7 +28,12 @@
  * `@protocol/spawn.ts` itself is only ever referenced through JSDoc `import()` TYPES here —
  * it pulls typebox at runtime and this module doesn't need a single runtime value from it.
  */
-import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP, SPAWN_HISTORY_HUB_CAP } from "@protocol/version.ts";
+import {
+  SPAWN_HUB_CAP,
+  SPAWN_MODEL_HUB_CAP,
+  SPAWN_HISTORY_HUB_CAP,
+  SPAWN_RELAUNCH_HUB_CAP,
+} from "@protocol/version.ts";
 
 /**
  * @typedef {import("../../../protocol/spawn.js").SpawnPolicyWire} SpawnPolicyWire
@@ -429,4 +434,95 @@ export const RESTORE_FAILURE_CODES = Object.freeze(Object.keys(RESTORE_FAILURE_K
 /** @param {unknown} failure @returns {string | undefined} */
 export function restoreFailureKey(failure) {
   return typeof failure === "string" ? RESTORE_FAILURE_KEYS[failure] : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// spawn-relaunch (「离线/过期会话点击直接重新拉起」): the offline managed card's relaunch
+// affordance + the error taxonomy for its inline failure line. Same purity discipline as the
+// rest of this module.
+// ---------------------------------------------------------------------------
+
+/** States a relaunchable record is in: terminal AND still bound to the (now offline) card. */
+const RELAUNCHABLE_STATES = new Set(["exited", "failed"]);
+
+/**
+ * The terminal managed record an offline card may relaunch (`{spawnId}`), or `undefined` —
+ * AgentList's stale-row affordance lookup. All of: the hub advertises `spawn.relaunch.v1`
+ * (absent ⇒ never), a record bound to `agentKey` is in `exited`/`failed`, it is not mid-delete
+ * (`removing`), and it has no restore in flight (`restore.phase` set ⇒ already relaunching —
+ * the SpawnRow's `restoring` row covers it). The hub re-derives every condition authoritatively
+ * (`supervisor.relaunch()`); this helper only decides whether the affordance renders.
+ * @param {SpawnsPayload | null | undefined} spawns
+ * @param {string} agentKey
+ * @param {unknown} hubCaps
+ * @returns {{ spawnId: string } | undefined}
+ */
+export function relaunchableFor(spawns, agentKey, hubCaps) {
+  const caps = Array.isArray(hubCaps) ? hubCaps : [];
+  if (!caps.includes(SPAWN_RELAUNCH_HUB_CAP)) return undefined;
+  if (typeof agentKey !== "string" || agentKey === "") return undefined;
+  /** @type {any} */
+  let best;
+  for (const rec of itemsOf(spawns)) {
+    if (rec.agentKey !== agentKey || !RELAUNCHABLE_STATES.has(rec.state)) continue;
+    if (rec.removing === true) continue;
+    if (typeof restoreOf(rec)?.phase === "string") continue;
+    if (
+      best === undefined ||
+      (typeof rec.updatedAt === "number" ? rec.updatedAt : 0) >=
+        (typeof best.updatedAt === "number" ? best.updatedAt : 0)
+    ) {
+      best = rec;
+    }
+  }
+  return best === undefined ? undefined : { spawnId: best.spawnId };
+}
+
+/** Relaunch wire error/reason literals — hand-copied from `protocol/spawn.ts`'s
+ *  `RELAUNCH_REASON_*` constants (that module pulls typebox at runtime; this file stays
+ *  typebox-free, same rationale as SESSION_REJECT_REASONS above; tests pin the two equal). */
+const RELAUNCH_REASONS = {
+  unconfirmed: "exit-unconfirmed",
+  noSession: "no-session",
+  removing: "removing",
+  sessionMissing: "session-missing",
+  sessionInvalid: "session-invalid",
+};
+
+/** Values of {@link RELAUNCH_REASONS} (test anchor against protocol drift). */
+export const RELAUNCH_REASON_CODES = Object.freeze(Object.values(RELAUNCH_REASONS));
+
+/**
+ * AgentList's relaunch failure taxonomy (`spawn.relaunchErr*` i18n keys). Returns `undefined`
+ * for a non-error outcome. `E_SPAWN_GONE` ⇒ "gone" (410 session file missing/invalid);
+ * `E_AGENT_ONLINE` ⇒ "alive" (409 exit-unconfirmed); 404 ⇒ "missing" (record gone); 409
+ * `E_BAD_REQUEST` ⇒ "state" (no-session / removing); `E_SPAWN_DENIED` ⇒ "denied" (LAN policy /
+ * platform); `E_LAUNCHER`/`E_RATE`/`E_DEADLINE`/`E_UNSUPPORTED` map like their spawn peers.
+ * @param {any} outcome
+ * @returns {"gone" | "alive" | "missing" | "state" | "denied" | "launcher" | "rate" | "deadline" | "unsupported" | "network" | undefined}
+ */
+export function classifyRelaunchError(outcome) {
+  if (!outcome || typeof outcome !== "object" || outcome.ok === true) return undefined;
+  switch (outcome.error) {
+    case "E_SPAWN_GONE":
+      return "gone";
+    case "E_AGENT_ONLINE":
+      return "alive";
+    case "E_NOT_FOUND":
+      return "missing";
+    case "E_BAD_REQUEST":
+      return "state";
+    case "E_SPAWN_DENIED":
+      return "denied";
+    case "E_LAUNCHER":
+      return "launcher";
+    case "E_RATE":
+      return "rate";
+    case "E_DEADLINE":
+      return "deadline";
+    case "E_UNSUPPORTED":
+      return "unsupported";
+    default:
+      return "network";
+  }
 }

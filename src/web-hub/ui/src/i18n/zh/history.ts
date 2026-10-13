@@ -32,6 +32,7 @@ const history = {
   blockedMoved: "目录已变为符号链接",
   blockedInvalid: "会话文件损坏",
   resume: "继续",
+  resumeTitle: "点击恢复此会话",
   forkAction: "复制为新会话",
   goto: "转到",
   overflowAria: "此会话的更多操作",

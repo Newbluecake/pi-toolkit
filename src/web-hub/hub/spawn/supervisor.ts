@@ -108,8 +108,10 @@ import type { CaptureSessionPathPin, SessionPathPin, VerifySessionPathPin } from
 import {
   classifyForRestore,
   hidesIdentityOnWire,
+  locateSessionFile,
   planSessionArgv,
   restoreWireOf,
+  type LocateSessionFs,
   type RestoreSessionFs,
 } from "./restore-plan.js";
 import {
@@ -127,7 +129,7 @@ import {
 export interface SpawnAuditRecord {
   audit: "spawn";
   phase: "request" | "reject" | "state" | "remove";
-  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove" | "prefs" | "history" | "mkdir";
+  endpoint?: "list" | "dirs" | "spawn" | "stop" | "remove" | "prefs" | "history" | "mkdir" | "relaunch";
   reqId?: string;
   listener?: "loopback" | "lan";
   ip?: string;
@@ -266,6 +268,28 @@ export type RemoveResult =
   | { ok: false; code: "E_NOT_FOUND" }
   | { ok: false; code: "E_DEADLINE" };
 
+/**
+ * spawn-relaunch (「离线/过期会话点击直接重新拉起」): `supervisor.relaunch()`'s result —
+ * re-forking a TERMINAL managed record's session through the SAME restore job machinery
+ * (`runRestoreJob`/`restoreForkSync`; L6 death confirmation, D7 session preflight, no `--model`).
+ * `ok:true` + `dup:false` ⇒ the record was transitioned to `starting{restore.phase:"reaping"}`
+ * and a restore job was queued (202); `dup:true` ⇒ the record was already non-terminal (a
+ * relaunch already in flight, or the session is simply alive — B-alive: never a second fork).
+ * The error codes map to: 404 `E_NOT_FOUND`; 409 `E_AGENT_ONLINE{reason:"exit-unconfirmed"}`
+ * (death not confirmable — restore L6/B-alive); 409 `E_BAD_REQUEST{reason:"no-session"|
+ * "removing"}`; 410 `E_SPAWN_GONE{reason}` (session file gone/unusable); 403
+ * `E_SPAWN_DENIED{reason:"platform"}`; 503 `E_LAUNCHER{reason}`; 504 `E_DEADLINE`.
+ */
+export type RelaunchResult =
+  | { ok: true; state: SpawnState; dup: boolean }
+  | { ok: false; code: "E_NOT_FOUND" }
+  | { ok: false; code: "E_AGENT_ONLINE"; reason: "exit-unconfirmed" }
+  | { ok: false; code: "E_BAD_REQUEST"; reason: "no-session" | "removing" }
+  | { ok: false; code: "E_SPAWN_GONE"; reason: "session-missing" | "session-invalid" }
+  | { ok: false; code: "E_SPAWN_DENIED"; reason: "platform" }
+  | { ok: false; code: "E_LAUNCHER"; reason: "launcher" | "persist" | "reaper" }
+  | { ok: false; code: "E_DEADLINE" };
+
 // ---------------------------------------------------------------------------
 // records
 // ---------------------------------------------------------------------------
@@ -359,6 +383,10 @@ interface Supervised extends InternalRecord {
   lastBusy: boolean;
   /** D17: releases this record's restore-job concurrency slot (live / terminal / stopping / close). */
   restoreSlot: (() => void) | undefined;
+  /** spawn-relaunch: a user-triggered relaunch re-anchors the lifetime to the relaunch moment
+   *  (restore D14's createdAt anchor would expire a long-dead session immediately at goLive).
+   *  Runtime-only — a hub crash mid-relaunch falls back to the createdAt anchor at boot (safe). */
+  lifetimeAnchorAt: number | undefined;
 }
 
 /** web-hub-spawn-restore plan §10.2: `shutdown`'s mode — `restore` only tags + parks, the
@@ -414,6 +442,15 @@ export interface SpawnSupervisor {
   /** web-hub-delete-session plan v2 §2.4: read-only death verdict for a record, by `spawnId` —
    * shares `remove()`'s private judgment (§2.1). Undefined when no such record exists. */
   deathOf(spawnId: string): Death | undefined;
+  /** spawn-relaunch: re-fork a TERMINAL, confirmed-dead managed record's session through the
+   * restore job machinery (same spawnId, `restore.prevAgentKey` = the old card's key — the UI
+   * follows it like a hub-restart restore). Gated hub-side on `cfg.restore === true` (the
+   * `spawn.relaunch.v1` cap is advertised under the same condition); a supervisor built with
+   * restore off answers `E_NOT_FOUND`, byte-identical to an unknown spawnId. Never forks while
+   * the old process is not `confirmed` dead (L6/B-alive); idempotent on a non-terminal record
+   * (`dup:true`, no state change). Synchronous preflight + commit; the fork itself runs in the
+   * queued restore job. */
+  relaunch(spawnId: string, deadline: ReqDeadline): RelaunchResult;
   /** arch §7.6 graded shutdown: bounded graceful wait → verified SIGTERM → flush → reaper EOF.
    *  web-hub-spawn-restore plan §10.2: `mode:"restore"` (only honored when `cfg.restore`) first
    *  tags eligible records `restoreIntent` and persists synchronously; absent ⇒ terminate. */
@@ -490,6 +527,11 @@ export interface SpawnSupervisorDeps {
   /** `<stateDir>/spawn/fork-src/` (PD12); undefined ⇒ `init()` never touches it (§5: history off
    *  or the dir was never created because no fork has ever happened yet). */
   forkSrcDir?: string;
+  // ---- spawn-relaunch (optional)
+  /** `process.env.PI_CODING_AGENT_DIR ?? <home>/.pi/agent` — the base for
+   *  `locateSessionFile`'s default-session-dir fallback when a relaunch target never adopted a
+   *  `sessionFile`. Absent ⇒ the locate step is skipped (straight to `--session-id`). */
+  agentDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,7 +1483,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.control = rec.agentKey !== undefined && (registry.getCaps(rec.agentKey) ?? []).includes("cmd.v1");
     if (rec.control !== true) rec.hint = "control-off";
     rec.registerTimer = clearHandle(rec.registerTimer);
-    rec.lifetimeDeadlineAt = rec.createdAt + cfg.maxLifetimeMinutes * 60_000;
+    // spawn-relaunch: a relaunched record's lifetime re-anchors at the relaunch moment
+    // (`lifetimeAnchorAt`); every other path keeps restore D14's createdAt anchor verbatim.
+    rec.lifetimeDeadlineAt = (rec.lifetimeAnchorAt ?? rec.createdAt) + cfg.maxLifetimeMinutes * 60_000;
     armLifetimeTimer(rec);
     clearBreaker(); // §3.1 ⑦: live ⇒ 熔断计数清零
     rec.updatedAt = now();
@@ -1732,6 +1776,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       stableTimer: undefined,
       lastBusy: false,
       restoreSlot: undefined,
+      lifetimeAnchorAt: undefined,
       ...(sessionTarget === undefined ? {} : { sessionTarget }),
       ...(sessionFrom === undefined ? {} : { from: sessionFrom }),
       ...(sessionPathPin === undefined ? {} : { sessionPathPin }),
@@ -1952,6 +1997,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       stableTimer: undefined,
       lastBusy: false,
       restoreSlot: undefined,
+      lifetimeAnchorAt: undefined,
     };
     return rec;
   }
@@ -2309,8 +2355,13 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     for (const rec of cands) {
       const t = trackIdentityOf(rec);
       if (t !== undefined) reaper.track(t); // L2: the OLD process is guarded while we reap it
-      restoreQueue.push(rec);
+      enqueueRestore(rec);
     }
+  }
+
+  /** Feed one record into the restore-job pump (D17's concurrency cap applies). */
+  function enqueueRestore(rec: Supervised): void {
+    restoreQueue.push(rec);
     const task = setImmediate(pumpRestores);
     task.unref?.();
   }
@@ -2613,7 +2664,10 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     viaTrustedProxy: boolean,
   ): SpawnPolicyWire {
     const base = {
-      confirm: listener === "lan" ? ("always" as const) : ("unknown-dir" as const),
+      // 2026-10-13 用户拍板（U1 单用户信任模型既判）: `webHub.spawn.lanConfirm === false`
+      // 放弃 LAN 渠道「每次 spawn 都 confirm」的证明（arch §6.3/§8.2），LAN 退到与 loopback
+      // 相同的 unknown-dir 门 —— 已知目录/历史会话直达 202，未知目录仍需确认。
+      confirm: listener === "lan" && cfg.lanConfirm !== false ? ("always" as const) : ("unknown-dir" as const),
       scope:
         listener === "loopback"
           ? ("roots" as const)
@@ -2653,6 +2707,112 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     }
     if (closedFlag) return { allowed: false, reason: "launcher", detail: "closed", ...base };
     return { allowed: true, ...base };
+  }
+
+  // ----------------------------------------------------------------- spawn-relaunch
+
+  /**
+   * spawn-relaunch — see the interface doc. Reuses the restore job end-to-end: the commit below
+   * rewrites the terminal record into the exact shape a boot-classified restore candidate has
+   * (`starting` + `restore.phase:"reaping"`, the OLD identity still on the record), so
+   * `runRestoreJob` re-confirms the death (L6), preflights the session coordinates (D7), forks
+   * through the shared `forkInto` and lands in `goLive` like any restore — and the wire
+   * projection (`restore.prevAgentKey`) lets the UI follow it like a hub-restart restore.
+   */
+  function relaunch(spawnId: string, deadline: ReqDeadline): RelaunchResult {
+    const rec = records.get(spawnId);
+    if (rec === undefined) return { ok: false, code: "E_NOT_FOUND" };
+    // Hub-side feature gate mirrors the cap (`spawn.relaunch.v1` rides `cfg.restore === true`):
+    // a restore-off hub answers byte-identically to an unknown spawnId.
+    if (!restoreOn) return { ok: false, code: "E_NOT_FOUND" };
+    if (closedFlag) return { ok: false, code: "E_LAUNCHER", reason: "persist" };
+    if (!isTerminalSpawnState(rec.state)) {
+      // Idempotent: a relaunch is already in flight (starting + restore slice) or the session
+      // simply came back alive — either way the requested end state holds; never a second fork.
+      return { ok: true, state: rec.state === "launching" ? "starting" : rec.state, dup: true };
+    }
+    if (rec.removePending) return { ok: false, code: "E_BAD_REQUEST", reason: "removing" };
+    if (deadline.remaining() < INTENT_MIN_REMAINING_MS) return { ok: false, code: "E_DEADLINE" };
+    // L6 / B-alive: a terminal record whose process is not CONFIRMED dead is never replaced
+    // (bootId + starttime + uid re-probe — restore's own death verdict).
+    if (computeDeath(rec) !== "confirmed") {
+      return { ok: false, code: "E_AGENT_ONLINE", reason: "exit-unconfirmed" };
+    }
+    if (!deps.platform.ok) return { ok: false, code: "E_SPAWN_DENIED", reason: "platform" };
+    // D16-style preconditions — restoreForkSync re-checks every one of them at fork time; failing
+    // them HERE answers synchronously instead of via a failed SSE transition.
+    if (!store.healthy) return { ok: false, code: "E_LAUNCHER", reason: "persist" };
+    if (!reaper.available || reaperDown) return { ok: false, code: "E_LAUNCHER", reason: "reaper" };
+    const launcher = deps.launcher;
+    if (launcher === undefined || launcherChanged || launcherCheck === undefined || !launcherCheck.ok) {
+      return { ok: false, code: "E_LAUNCHER", reason: "launcher" };
+    }
+    if (!recheckLauncherSync(launcherCheck.fp, deps.launcherFs)) {
+      launcherChanged = true; // arch §4.2: same degrade as start()/restoreForkSync
+      return { ok: false, code: "E_LAUNCHER", reason: "launcher" };
+    }
+    const sessionId = rec.sessionId;
+    if (sessionId === undefined || !RESTORE_SESSION_ID_RE.test(sessionId)) {
+      return { ok: false, code: "E_BAD_REQUEST", reason: "no-session" };
+    }
+    // Session coordinate preflight (D7, sync). When the record never adopted a `sessionFile`, ONE
+    // bounded locate-by-id in pi's default session dir runs first; a hit is adopted (so the fork
+    // — and any later restore — uses `--session <file>`), a miss keeps D7's `--session-id` rule.
+    if (rec.sessionFile === undefined && deps.agentDir !== undefined) {
+      const locateFs: LocateSessionFs = { ...sessionFs, readdirSync: readdirFn };
+      const located = locateSessionFile(locateFs, deps.agentDir, rec.cwd, sessionId);
+      if (located !== undefined && isValidRestoreSessionFile(located)) {
+        rec.sessionFile = located;
+        rec.sessionPersisted = true;
+      }
+    }
+    const plan = planSessionArgv(
+      { sessionId, sessionFile: rec.sessionFile, sessionPersisted: rec.sessionPersisted, cwd: rec.cwd },
+      sessionFs,
+      getuidFn(),
+    );
+    if (!plan.ok) return { ok: false, code: "E_SPAWN_GONE", reason: plan.failure };
+
+    // Commit (L1 discipline: the transition lands on disk BEFORE the job can fork). The OLD
+    // identity (pid/procStartTicks/bootId/uid/exit) deliberately stays on the record until
+    // restoreForkSync clears it — the job's own computeDeath re-check must still see it.
+    const t = now();
+    const prevKey = rec.agentKey;
+    rec.state = "starting";
+    delete rec.endReason;
+    delete rec.noProcess;
+    rec.stop = undefined;
+    delete rec.hint;
+    rec.hintDetail = undefined;
+    rec.uiCancelled.length = 0;
+    delete rec.firstPrompt; // the old process's prompt slice is stale (boot restore clears it too)
+    delete rec.sessionTarget; // the original spawn's history target no longer describes this fork
+    delete rec.sessionPathPin;
+    delete rec.forkSnapshot;
+    delete rec.agentKey;
+    rec.linked = false;
+    rec.control = undefined;
+    rec.breakerExempt = true; // D16: a relaunch failure (session gone, register timeout…) never trips the breaker
+    rec.lifetimeAnchorAt = t; // user-triggered relaunch re-anchors the lifetime (see goLive)
+    rec.restore = {
+      attempts: 0,
+      lastAt: t,
+      phase: "reaping",
+      ...(prevKey === undefined ? {} : { prevAgentKey: prevKey }),
+    };
+    rec.updatedAt = t;
+    const saved = store.saveNow(storedSnapshot());
+    if (!saved.ok) {
+      // Same settle as restoreForkSync's own persist failure: no fork ever happens, the record
+      // ends failed{spawn_error} (never-forked — the old process is confirmed dead, so a later
+      // delete confirms immediately).
+      failRestorePreflight(rec, "persist");
+      return { ok: false, code: "E_LAUNCHER", reason: "persist" };
+    }
+    deps.audit({ audit: "spawn", phase: "state", spawnId: rec.spawnId, state: "starting", code: "relaunch" });
+    schedulePush();
+    enqueueRestore(rec);
+    return { ok: true, state: "starting", dup: false };
   }
 
   return {
@@ -2760,6 +2920,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       const rec = records.get(spawnId);
       return rec === undefined ? undefined : computeDeath(rec);
     },
+    relaunch,
     shutdown,
   };
 }

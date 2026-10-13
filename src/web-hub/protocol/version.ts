@@ -78,6 +78,19 @@ export const SPAWN_MODEL_HUB_CAP = "spawn.model.v1";
 export const SPAWN_HISTORY_HUB_CAP = "spawn.history.v1"; // only when config.spawn?.history === true; no PROTO bump
 
 /**
+ * web-hub spawn-relaunch (「离线/过期会话点击直接重新拉起」): the hub cap advertising
+ * `POST /api/headless/relaunch` — re-forking a TERMINAL managed record's session
+ * (`pi --mode rpc --session <file>`, same kill-old-then-fork/L6 discipline as spawn-restore).
+ * Relaunch reuses the restore machinery, so the cap is advertised only when
+ * `config.spawn?.restore === true` AND the spawn platform probe passed (death confirmation is
+ * /proc-bound), on both hub cap surfaces, exactly like `SPAWN_HISTORY_HUB_CAP`. A browser that
+ * does NOT see it renders no relaunch affordance on offline managed cards; an old browser just
+ * ignores the unknown cap string. No agent↔hub frames, no SSE event — no PROTO bump (same
+ * §2.3 rule as every cap above).
+ */
+export const SPAWN_RELAUNCH_HUB_CAP = "spawn.relaunch.v1"; // only when config.spawn?.restore === true && platform ok
+
+/**
  * web-hub-preview plan v3 §4.1 (PV1): the two hub caps advertising the read-only content-preview
  * endpoint (`GET /api/preview`). `PREVIEW_HUB_CAP` is declared whenever the feature is on
  * (`webHub.preview` = `"loopback"` or `"on"`); `PREVIEW_LAN_HUB_CAP` only when the mode is

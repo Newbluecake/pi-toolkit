@@ -62,11 +62,13 @@ import {
 import {
   FIRST_PROMPT_GRACE_MS,
   MKDIR_BODY_MAX,
+  RELAUNCH_BODY_MAX,
   SPAWN_BODY_MAX,
   SPAWN_GONE_REASON,
   SPAWN_ID_RE,
   SPAWN_PREFS_BODY_MAX,
   parseMkdirRequestBody,
+  parseRelaunchRequestBody,
   parseSpawnPrefsRequest,
   parseSpawnRequestBody,
   type HubSpawnConfig,
@@ -94,6 +96,7 @@ import {
   spawnPrincipal,
   type AdmittedRequest,
   type AdmittedSessionRequest,
+  type RelaunchResult,
   type SpawnSupervisor,
   type StartResult,
 } from "./supervisor.js";
@@ -141,6 +144,10 @@ const SNAPSHOT_RESERVE_MS = 1_000;
  *  prefs write bucket's parameters, same interactive-frequency class). */
 const MKDIR_CAPACITY = 10;
 const MKDIR_REFILL_MS = 6_000;
+/** spawn-relaunch: `POST /api/headless/relaunch`'s write bucket (10/min per principal — the
+ *  mkdir/prefs parameters; each accepted call forks one pi process through the restore job). */
+const RELAUNCH_CAPACITY = 10;
+const RELAUNCH_REFILL_MS = 6_000;
 
 // ---------------------------------------------------------------------------
 // deps & shape
@@ -276,7 +283,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   // ------------------------------------------------------------- audit (arch §6.6)
 
   interface RejectFields {
-    endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs" | "history" | "mkdir";
+    endpoint: "list" | "dirs" | "spawn" | "stop" | "prefs" | "history" | "mkdir" | "relaunch";
     code: string;
     reqId?: string;
     spawnId?: string;
@@ -1359,6 +1366,124 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     io.sendJson(res, 200, { ok: true, path: r.path });
   }
 
+  // ------------------------------------------------------------- POST /api/headless/relaunch (spawn-relaunch)
+
+  /**
+   * spawn-relaunch (「离线/过期会话点击直接重新拉起」): re-fork a TERMINAL managed record's
+   * session. Gate order mirrors handleStop/handlePrefs (strict CSRF → auth → own rate bucket →
+   * bounded body → strict schema); the record lookup, L6/B-alive death confirmation, session
+   * preflight and the commit all live in `supervisor.relaunch()` (synchronous — the fork itself
+   * runs in the queued restore job and rides the `spawns` SSE like a hub-restart restore).
+   * LAN policy: the shared `handle()` guard already 404s `lan:"off"` pre-auth; the supervisor's
+   * own platform gate answers `E_SPAWN_DENIED{reason:"platform"}` (spawn.lan 政策同宽 — a
+   * context that refuses spawn refuses relaunch).
+   */
+  async function handleRelaunch(req: IncomingMessage, res: ServerResponse, io: SpawnRouteIo): Promise<void> {
+    const reqDeadline = createReqDeadline(now, WRITE_TOTAL_MS);
+
+    // gate 1 — strict CSRF (same grade as every other spawn write)
+    if (!io.strictCsrfOk()) {
+      rejectAudit(io, { ip: io.ip }, { endpoint: "relaunch", code: "E_CSRF" });
+      throw new io.HttpError(403, "E_CSRF");
+    }
+
+    // gate 2 — auth
+    const auth = await authorizeOrAudit(io, reqDeadline, "relaunch");
+    if (auth === undefined) return;
+
+    // gate 3 — write rate bucket
+    const owner = { listener: io.listener, reqId: "", ...(auth.user === undefined ? {} : { user: auth.user }) };
+    const principal = spawnPrincipal(owner);
+    const rate = limit.admit(`${principal}:spawn-relaunch`, RELAUNCH_CAPACITY, RELAUNCH_REFILL_MS);
+    if (!rate.ok) {
+      rateAudit(io, auth, `spawn-relaunch:${principal}`, { endpoint: "relaunch", code: "E_RATE" });
+      sendRateLimited(io, res, rate.retryAfterMs);
+      return;
+    }
+
+    // gate 4 — body read (≤ RELAUNCH_BODY_MAX, bounded like every write endpoint)
+    const bodyMs = deriveBudget(reqDeadline.remaining(), BODY_CAP_MS, BODY_RESERVE_MS);
+    if (bodyMs <= 0) {
+      rejectAudit(io, auth, { endpoint: "relaunch", code: "E_DEADLINE" });
+      sendConnClosing(io, req, res, 408, "E_DEADLINE", "no budget left to read the request body");
+      return;
+    }
+    let raw: unknown;
+    try {
+      raw = await io.readJson(req, RELAUNCH_BODY_MAX, bodyMs);
+    } catch (err) {
+      const status = statusOf(err);
+      if (status === 413) {
+        rejectAudit(io, auth, { endpoint: "relaunch", code: "E_BAD_REQUEST" });
+        sendConnClosing(io, req, res, 413, "E_BAD_REQUEST", "body too large");
+      } else if (status === 408) {
+        rejectAudit(io, auth, { endpoint: "relaunch", code: "E_DEADLINE" });
+        sendConnClosing(io, req, res, 408, "E_DEADLINE", "body read timeout");
+      } else {
+        rejectAudit(io, auth, { endpoint: "relaunch", code: "E_BAD_REQUEST" });
+        io.sendJson(res, 400, { error: "E_BAD_REQUEST", message: "request error" });
+      }
+      return;
+    }
+
+    // gate 5 — strict schema (a single `SPAWN_ID_RE` spawnId)
+    const parsed = parseRelaunchRequestBody(raw);
+    if (!parsed.ok) {
+      rejectAudit(io, auth, { endpoint: "relaunch", code: "E_BAD_REQUEST" });
+      io.sendJson(res, 400, {
+        error: "E_BAD_REQUEST",
+        ...(parsed.error === "spawn-id" ? { reason: "spawn-id" } : {}),
+        message: "bad relaunch request body",
+      });
+      return;
+    }
+    const spawnId = parsed.body.spawnId;
+
+    // gate 6 — the supervisor's synchronous verdict (lookup → death confirmation → preflight →
+    // commit + job enqueue); arch §6.0 (#8 user ruling) applies here too: any authenticated
+    // principal may relaunch any managed session, same as stop — there is no owner check.
+    const r: RelaunchResult = supervisor.relaunch(spawnId, reqDeadline);
+    if (!r.ok) {
+      rejectAudit(io, auth, { endpoint: "relaunch", spawnId, code: r.code });
+      switch (r.code) {
+        case "E_NOT_FOUND":
+          io.sendError(res, 404, "E_NOT_FOUND");
+          return;
+        case "E_AGENT_ONLINE":
+          io.sendJson(res, 409, { error: "E_AGENT_ONLINE", reason: r.reason });
+          return;
+        case "E_BAD_REQUEST":
+          io.sendJson(res, 409, { error: "E_BAD_REQUEST", reason: r.reason });
+          return;
+        case "E_SPAWN_GONE":
+          io.sendJson(res, 410, { error: "E_SPAWN_GONE", reason: r.reason });
+          return;
+        case "E_SPAWN_DENIED":
+          sendSpawnDenied(io, res, r.reason);
+          return;
+        case "E_LAUNCHER":
+          sendLauncher(io, res, r.reason);
+          return;
+        case "E_DEADLINE":
+          io.sendError(res, 504, "E_DEADLINE");
+          return;
+      }
+    }
+    auditSpawn(log, {
+      audit: "spawn",
+      phase: "request",
+      endpoint: "relaunch",
+      reqId: spawnId,
+      listener: io.listener,
+      ip: auth.ip,
+      ...(auth.user === undefined ? {} : { user: auth.user }),
+      spawnId,
+      state: r.state,
+      ...(r.dup ? { dup: true } : {}),
+    });
+    io.sendJson(res, 202, { spawnId, state: r.state, ...(r.dup ? { dup: true } : {}) });
+  }
+
   // ------------------------------------------------------------- POST /api/headless/:id/stop
 
   async function handleStop(
@@ -1469,6 +1594,13 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     // unknown (404 — same `historyOn` gate pattern, arch §8.2's not-enabled matrix row).
     if (path === "/api/headless/mkdir") {
       if (method === "POST" && deps.mkdir !== undefined) return handleMkdir(req, res, io);
+      io.sendError(res, 404, "E_NOT_FOUND");
+      return;
+    }
+    // spawn-relaunch: write-only (GET/other methods ⇒ 404, same as prefs/mkdir). The
+    // supervisor's own `restoreOn` gate keeps a restore-off hub byte-identical to unknown.
+    if (path === "/api/headless/relaunch") {
+      if (method === "POST") return handleRelaunch(req, res, io);
       io.sendError(res, 404, "E_NOT_FOUND");
       return;
     }

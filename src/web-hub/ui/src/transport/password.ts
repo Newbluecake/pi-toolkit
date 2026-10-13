@@ -27,6 +27,7 @@ import type {
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnMkdirOutcome,
+  SpawnRelaunchOutcome,
   SpawnOutcome,
   SpawnPrefsOutcome,
   SpawnStopOutcome,
@@ -174,6 +175,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // spawn-dirmkdir: POST /api/headless/mkdir — one-shot like the rest (the wrapper's
       // `/api/headless` prefix covers `/mkdir`); parity pinned by the same shared suite.
       mkdir: (path, name) => client.spawn.mkdir(path, name) as Promise<SpawnMkdirOutcome>,
+      // spawn-relaunch: POST /api/headless/relaunch — one-shot like the rest (the wrapper's
+      // `/api/headless` prefix covers `/relaunch`); parity pinned by the same shared suite.
+      relaunch: (spawnId) => client.spawn.relaunch(spawnId) as Promise<SpawnRelaunchOutcome>,
     } satisfies SpawnTransport,
     // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`.
     // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an

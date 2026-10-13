@@ -726,6 +726,38 @@ export function createClient(deps) {
         return rest;
       }
     },
+    /**
+     * spawn-relaunch: `POST /api/headless/relaunch` — re-fork a terminal managed record's
+     * session. Rides `withRelogin` like the other endpoints — a replayed POST after re-login
+     * is safe: the hub's relaunch is idempotent on a non-terminal record (`dup:true`, never a
+     * second fork). The 202 `{spawnId, state, dup?}` rides back (narrowed); the error half
+     * keeps `reason`/`status` so AgentList's `classifyRelaunchError` buckets it.
+     * @param {string} spawnId @returns {Promise<any>}
+     */
+    async relaunch(spawnId) {
+      try {
+        const r = await withRelogin(() => postRaw(API.headlessRelaunch, { spawnId }, CMD_REQUEST_TIMEOUT_MS));
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) {
+          /** @type {any} */
+          const err = { ok: false, error: out.error, status: out.status };
+          if (typeof out.reason === "string") err.reason = out.reason;
+          if (typeof out.message === "string") err.message = out.message;
+          if (typeof out.retryAfterS === "number") err.retryAfterS = out.retryAfterS;
+          return err;
+        }
+        const d = out.data;
+        return {
+          ok: true,
+          spawnId: typeof d.spawnId === "string" ? d.spawnId : spawnId,
+          state: typeof d.state === "string" ? d.state : "starting",
+          ...(d.dup === true ? { dup: true } : {}),
+        };
+      } catch (e) {
+        const { retryable: _retryable, ...rest } = spawnFromError(e);
+        return rest;
+      }
+    },
   };
 
   // -------------------------------------------------------------------------

@@ -155,6 +155,33 @@ describe("LAN visibility matrix (arch §6.4, #8)", () => {
     expect(JSON.parse(res.body)).toEqual({ state: "stopping" });
     expect(kit.supervisor.stopCalls).toEqual([{ spawnId, force: false }]);
   });
+
+  it("spawn-relaunch: B may RELAUNCH A's offline session (same 同 hub 全信任 ruling as stop) — 202, no owner check", async () => {
+    const kit = spawnKit({ lan: "known" }, fakeClock());
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    const bob = await loginAs(h, "bob", 2);
+    const spawnId = "relau000-0000-lan1";
+    kit.supervisor.seedRecord({ spawnId, state: "exited", endReason: "user" });
+    kit.supervisor.setDeathOf("confirmed");
+    const res = await lanPostJson(h.port, "/api/headless/relaunch", { spawnId }, { Cookie: bob });
+    expect(res.status).toBe(202);
+    expect(JSON.parse(res.body)).toEqual({ spawnId, state: "starting" });
+    expect(kit.supervisor.relaunchCalls).toEqual([{ spawnId }]);
+  });
+
+  it("lanConfirm 关 (2026-10-13 U1 拍板, policy.confirm='unknown-dir'): LAN 已知目录 spawn 直达 202,不再回 409", async () => {
+    const kit = spawnKit({ lan: "known" }, fakeClock());
+    // lanConfirm:false 时 supervisor.policy() 对 LAN 回答 unknown-dir（supervisor.test.ts 钉住）——
+    // 路由只读 policy；这里钉「路由忠于 policy」这一半。
+    kit.supervisor.setPolicy({ ...ALLOWED_POLICY, confirm: "unknown-dir" });
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    const alice = await loginAs(h, "alice", 1);
+    const res = await lanPostJson(h.port, "/api/headless", { ...BODY_A }, { Cookie: alice });
+    expect(res.status).toBe(202); // 直达 — 无 confirm 往返
+    expect(kit.supervisor.startCalls).toHaveLength(1);
+  });
 });
 
 describe("LAN scope threading (arch §6.4: roots capped to known on plaintext direct)", () => {
@@ -396,6 +423,51 @@ describe("LAN session-backed POST (session-history plan §4.6.6)", () => {
       { Cookie: alice },
     );
     expect(confirmed.status).toBe(202);
+  });
+
+  it("lanConfirm 关 (U1 拍板, policy.confirm='unknown-dir'): 历史 resume 直达 202 — 点击即启动,无 409 中间步", async () => {
+    const history = fakeHistory();
+    const pin = fakeSessionPin();
+    history.setResolveResult({ ok: true, pin });
+    const kit = spawnKit({ lan: "known", history: true }, fakeClock(), undefined, history);
+    kit.supervisor.setPolicy({ ...ALLOWED_POLICY, confirm: "unknown-dir" });
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    const alice = await loginAs(h, "alice", 1);
+    const res = await lanPostJson(
+      h.port,
+      "/api/headless",
+      { id: "lanhist02aaaaaaaaaa", cwd: pin.cwd, session: SESSION_REF },
+      { Cookie: alice },
+    );
+    expect(res.status).toBe(202);
+    expect(kit.supervisor.startCalls).toHaveLength(1);
+    expect(kit.supervisor.startCalls[0]!.session).toMatchObject({ mode: "resume", id: pin.id });
+  });
+
+  it("lanConfirm 关也不豁免 session-open: 占用检测不 free ⇒ 仍 409 session-open (真决策, fork 确认保留)", async () => {
+    const history = fakeHistory();
+    const pin = fakeSessionPin();
+    history.setResolveResult({ ok: true, pin });
+    history.setProveResult({
+      free: false,
+      reason: "open",
+      live: { state: "open", by: "card", agentKey: "k1", pid: 4242 },
+    });
+    const kit = spawnKit({ lan: "known", history: true }, fakeClock(), undefined, history);
+    kit.supervisor.setPolicy({ ...ALLOWED_POLICY, confirm: "unknown-dir" });
+    const h = await startLan({ spawn: kit.spawn });
+    harnesses.push(h);
+    const alice = await loginAs(h, "alice", 1);
+    const res = await lanPostJson(
+      h.port,
+      "/api/headless",
+      { id: "lanhist03aaaaaaaaaa", cwd: pin.cwd, session: SESSION_REF },
+      { Cookie: alice },
+    );
+    expect(res.status).toBe(409);
+    expect(JSON.parse(res.body)).toMatchObject({ error: "E_CONFIRM_REQUIRED", reason: "session-open" });
+    expect(kit.supervisor.startCalls).toHaveLength(0);
   });
 
   it("fork + confirm ⇒ one 202 round-trip", async () => {

@@ -3,8 +3,8 @@
  *
  *   - `spawn` 缺失 / `enabled:false` ⇒ `PI_WEBHUB_CONFIG` 与 spawn 合入前的形态**深相等**
  *     （连 `spawn` 键都不存在 —— arch §8.2 未启用矩阵的 wire 层前提）；
- *   - `enabled:true` ⇒ `config.spawn` 恰好 9 个 `HubSpawnConfig` 字段（`enabled` 本身从不上 wire；
- *     第 9 个 `history` 是 session-history plan §3.7 P-cfg）。
+ *   - `enabled:true` ⇒ `config.spawn` 恰好 10 个 `HubSpawnConfig` 字段（`enabled` 本身从不上 wire；
+ *     第 9 个 `history` 是 session-history plan §3.7 P-cfg，第 10 个 `lanConfirm` 是 2026-10-13 U1 拍板）。
  *
  * 手法照抄 `wiring-lan.test.ts`：auto-spawn 一条 hub 进程（nodeLoader 指向假 jiti-cli、
  * netConnect 抛 ENOENT），从 spawnImpl spy 的 env 里读 `PI_WEBHUB_CONFIG`。
@@ -105,6 +105,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       lan: "roots",
       restore: true,
       history: true,
+      lanConfirm: true,
     };
     const settings: WebHubSettings = { ...SETTINGS, autoStart: true, nodeLoader: fakeNodeLoader(), spawn };
     const config = await hubConfigFor(settings);
@@ -112,7 +113,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
     expect("spawn" in config).toBe(false);
   });
 
-  it("settings.spawn.enabled: true ⇒ config.spawn carries exactly the 8 HubSpawnConfig fields + history (field count +1)", async () => {
+  it("settings.spawn.enabled: true ⇒ config.spawn carries exactly the 9 HubSpawnConfig fields + lanConfirm (field count +1)", async () => {
     const spawn: WebHubSpawnSettings = {
       enabled: true,
       roots: ["~/proj", "/srv/work"],
@@ -124,6 +125,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       lan: "known",
       restore: false,
       history: false,
+      lanConfirm: false,
     };
     const settings: WebHubSettings = { ...SETTINGS, autoStart: true, nodeLoader: fakeNodeLoader(), spawn };
     const config = await hubConfigFor(settings);
@@ -137,6 +139,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       lan: "known" as const,
       restore: false,
       history: false,
+      lanConfirm: false,
     };
     expect(config).toEqual({ ...baselineConfig(), spawn: expectedSpawn });
     // pin the exact key set — `enabled` never crosses the wire, nothing else sneaks in
@@ -144,6 +147,7 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       [
         "history",
         "lan",
+        "lanConfirm",
         "maxLifetimeMinutes",
         "maxPerPrincipal",
         "maxProcesses",

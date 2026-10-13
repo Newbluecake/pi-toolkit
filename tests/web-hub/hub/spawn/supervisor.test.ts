@@ -3556,3 +3556,346 @@ describe("spawn restore RS5: boot classification + restore jobs (L1/L5/L6)", () 
     expect(h.spawnCalls).toHaveLength(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// spawn-relaunch (「离线/过期会话点击直接重新拉起」): supervisor.relaunch() — a TERMINAL,
+// confirmed-dead record re-enters the restore job machinery (same spawnId, prevAgentKey = the
+// old card, L6 re-check inside the job, D7 session preflight at the endpoint, no --model).
+// ---------------------------------------------------------------------------
+
+describe("spawn-relaunch: supervisor.relaunch()", () => {
+  /** Terminal StoredRecord ready to relaunch: live once, exited{user} with a REAL exit. */
+  const terminalStored = (over: Partial<StoredRecord> = {}): StoredRecord =>
+    liveStored({ state: "exited", endReason: "user", exit: { code: 0, signal: null }, ...over });
+
+  it("happy path: terminal+confirmed ⇒ starting{reaping,prevAgentKey}, commit persisted BEFORE fork; argv --session <file>, no --model; prev card dropped; goLive completes the restore shape", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminalStored()]);
+    await h.sup.init(deadline());
+    expect(h.sup.records()[0]).toMatchObject({ state: "exited", agentKey: "kold" });
+
+    const r = h.sup.relaunch("sprestore0000001", deadline());
+    expect(r).toEqual({ ok: true, state: "starting", dup: false });
+    const rec = h.sup.records()[0]!;
+    expect(rec).toMatchObject({
+      state: "starting",
+      restore: { phase: "reaping", attempts: 0, prevAgentKey: "kold" },
+    });
+    expect(rec.agentKey).toBeUndefined();
+    expect(rec.pid).toBe(5001); // the OLD identity stays until the job's own re-check clears it
+    expect(h.spawnCalls).toHaveLength(0); // the fork is the queued job's, never the endpoint's
+    // L1: the commit write (starting+reaping) precedes any fork work
+    const commits = savesOf(h, "sprestore0000001");
+    expect(commits.some((s) => s.state === "starting" && s.restore?.phase === "reaping")).toBe(true);
+    expect(h.order.indexOf("spawnFn")).toBe(-1);
+    expect(h.audits.some((a) => a.code === "relaunch" && a.spawnId === "sprestore0000001")).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(0); // the job: death re-confirmed → preflight → fork
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.spawnCalls[0]!.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session", SESS_FILE]);
+    expect(h.kills).toHaveLength(0); // already confirmed dead — no signal at all
+    expect(kit.gone).toEqual([{ spawnId: "sprestore0000001", key: "kold" }]);
+
+    // drive the restored child to live — same goLive path as a boot restore
+    const child = h.children[0]!;
+    h.registry.seed("knew", { pid: child.pid, cwd: REALPATH }, ["cmd.v1"]);
+    child.emit("spawn");
+    h.registry.publish({
+      type: "agent_up",
+      agent: {
+        agentKey: "knew",
+        kind: "rpc",
+        pid: child.pid,
+        cwd: REALPATH,
+        state: "live",
+        pluginVersion: "1.0.2",
+        outdated: false,
+        prompts: [],
+      },
+    });
+    h.registry.publish({
+      type: "session",
+      agentKey: "knew",
+      session: { ...sessionInfo(), sessionId: "sess-old", sessionFile: SESS_FILE },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const live = h.sup.records()[0]!;
+    expect(live.state).toBe("live");
+    expect(live.agentKey).toBe("knew");
+    expect(live.restore).toMatchObject({ attempts: 1, prevAgentKey: "kold", restoredAt: expect.any(Number) });
+    expect(live.restore?.phase).toBeUndefined();
+    expect(h.onLive).toHaveLength(1);
+  });
+
+  it("lifetime re-anchors at the relaunch moment (not the original createdAt — D14 is restore-only)", async () => {
+    const kit = restoreKit({}, { maxLifetimeMinutes: 10 });
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminalStored({ createdAt: Date.now() - 9 * 60_000 })]);
+    await h.sup.init(deadline());
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const child = h.children[0]!;
+    h.registry.seed("knew", { pid: child.pid, cwd: REALPATH }, ["cmd.v1"]);
+    child.emit("spawn");
+    h.registry.publish({
+      type: "agent_up",
+      agent: {
+        agentKey: "knew",
+        kind: "rpc",
+        pid: child.pid,
+        cwd: REALPATH,
+        state: "live",
+        pluginVersion: "1.0.2",
+        outdated: false,
+        prompts: [],
+      },
+    });
+    h.registry.publish({
+      type: "session",
+      agentKey: "knew",
+      session: { ...sessionInfo(), sessionId: "sess-old", sessionFile: SESS_FILE },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sup.records()[0]!.state).toBe("live");
+    // createdAt anchor would already have expired the session (~1min left); the relaunch anchor
+    // gives it the full 10min from the relaunch.
+    await vi.advanceTimersByTimeAsync(9 * 60_000 + 30_000);
+    expect(h.sup.records()[0]!.state).toBe("live");
+    await vi.advanceTimersByTimeAsync(1 * 60_000);
+    // past the relaunch anchor: the lifetime stop ladder has run to completion
+    expect(h.sup.records()[0]!).toMatchObject({ state: "exited", endReason: "lifetime" });
+  });
+
+  it("idempotent: a non-terminal record (relaunch in flight, or simply live) ⇒ ok+dup, no state change, no fork", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminalStored()]);
+    await h.sup.init(deadline());
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toEqual({ ok: true, state: "starting", dup: false });
+    // second call while the job is still queued/running — same spawnId, no second transition
+    const again = h.sup.relaunch("sprestore0000001", deadline());
+    expect(again).toEqual({ ok: true, state: "starting", dup: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.spawnCalls).toHaveLength(1);
+
+    // drive it live, then relaunch again: a live session answers dup without any state change
+    const child = h.children[0]!;
+    h.registry.seed("knew", { pid: child.pid, cwd: REALPATH }, ["cmd.v1"]);
+    child.emit("spawn");
+    h.registry.publish({
+      type: "agent_up",
+      agent: {
+        agentKey: "knew",
+        kind: "rpc",
+        pid: child.pid,
+        cwd: REALPATH,
+        state: "live",
+        pluginVersion: "1.0.2",
+        outdated: false,
+        prompts: [],
+      },
+    });
+    h.registry.publish({
+      type: "session",
+      agentKey: "knew",
+      session: { ...sessionInfo(), sessionId: "sess-old", sessionFile: SESS_FILE },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sup.records()[0]!.state).toBe("live");
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toEqual({ ok: true, state: "live", dup: true });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.spawnCalls).toHaveLength(1);
+  });
+
+  it("404: unknown spawnId; and cfg.restore=false ⇒ E_NOT_FOUND even for a known record (cap gate twin)", async () => {
+    const kit = restoreKit();
+    loadInto(kit, [terminalStored()]);
+    await kit.h.sup.init(deadline());
+    expect(kit.h.sup.relaunch("nope-nope-nope-nope", deadline())).toEqual({ ok: false, code: "E_NOT_FOUND" });
+
+    const off = restoreKit({}, { restore: false });
+    loadInto(off, [terminalStored()]);
+    await off.h.sup.init(deadline());
+    expect(off.h.sup.relaunch("sprestore0000001", deadline())).toEqual({ ok: false, code: "E_NOT_FOUND" });
+  });
+
+  it("409 exit-unconfirmed (L6/B-alive): terminal but the process probes ALIVE (or unknown) ⇒ refused, record untouched, no fork", async () => {
+    const kit = restoreKit();
+    const { h, world } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    // no exit event ever arrived; the pid is still alive under the same starttime
+    world.alive.set(5001, { start: 77 });
+    loadInto(kit, [liveStored({ state: "exited", endReason: "crash" })]);
+    await h.sup.init(deadline());
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_AGENT_ONLINE",
+      reason: "exit-unconfirmed",
+    });
+    expect(h.sup.records()[0]!).toMatchObject({ state: "exited", agentKey: "kold" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.spawnCalls).toHaveLength(0);
+    expect(h.kills).toHaveLength(0); // relaunch never signals — the restore job would, we never got there
+
+    const kit2 = restoreKit();
+    kit2.world.unreadable = true;
+    loadInto(kit2, [liveStored({ state: "exited", endReason: "crash" })]);
+    await kit2.h.sup.init(deadline());
+    expect(kit2.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_AGENT_ONLINE",
+      reason: "exit-unconfirmed",
+    });
+  });
+
+  it("410 session gone: persisted file now missing ⇒ session-missing; header id mismatch ⇒ session-invalid; record untouched", async () => {
+    const kit = restoreKit();
+    loadInto(kit, [terminalStored()]); // files map empty ⇒ SESS_FILE gone, sessionPersisted: true
+    await kit.h.sup.init(deadline());
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_SPAWN_GONE",
+      reason: "session-missing",
+    });
+    expect(kit.h.sup.records()[0]!).toMatchObject({ state: "exited" });
+    expect(kit.h.spawnCalls).toHaveLength(0);
+
+    const kit2 = restoreKit();
+    kit2.files.set(SESS_FILE, { head: sessHeader("sess-other") });
+    loadInto(kit2, [terminalStored()]);
+    await kit2.h.sup.init(deadline());
+    expect(kit2.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_SPAWN_GONE",
+      reason: "session-invalid",
+    });
+  });
+
+  it("409 no-session: a terminal record without a valid sessionId; 409 removing: removePending wins", async () => {
+    const kit = restoreKit();
+    loadInto(kit, [terminalStored({ sessionId: undefined, sessionFile: undefined, sessionPersisted: undefined })]);
+    await kit.h.sup.init(deadline());
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_BAD_REQUEST",
+      reason: "no-session",
+    });
+
+    // removePending: an UNCONFIRMED exit keeps the boot-converged remove intent pending past init
+    const kit2 = restoreKit();
+    kit2.world.unreadable = true;
+    loadInto(kit2, [terminalStored({ exit: { code: 0, signal: null, unconfirmed: true }, removeIntent: true })]);
+    await kit2.h.sup.init(deadline());
+    expect(kit2.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_BAD_REQUEST",
+      reason: "removing",
+    });
+  });
+
+  it("precondition matrix: store unhealthy ⇒ persist; reaper down ⇒ reaper; launcher recheck fails ⇒ launcher (503 class)", async () => {
+    const kit = restoreKit();
+    loadInto(kit, [terminalStored()]);
+    await kit.h.sup.init(deadline());
+    kit.h.store.healthy = false;
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_LAUNCHER",
+      reason: "persist",
+    });
+
+    const kit2 = restoreKit();
+    loadInto(kit2, [terminalStored()]);
+    await kit2.h.sup.init(deadline());
+    kit2.h.reaper.unavailable = true;
+    expect(kit2.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_LAUNCHER",
+      reason: "reaper",
+    });
+
+    const kit3 = restoreKit();
+    loadInto(kit3, [terminalStored()]);
+    await kit3.h.sup.init(deadline());
+    kit3.h.recheckOk = false;
+    expect(kit3.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_LAUNCHER",
+      reason: "launcher",
+    });
+    for (const k of [kit, kit2, kit3]) expect(k.h.spawnCalls).toHaveLength(0);
+  });
+
+  it("locate fallback: no sessionFile on record ⇒ bounded scan of pi's default session dir; hit ⇒ adopted + --session <file>; miss ⇒ --session-id <id>", async () => {
+    const AGENT_DIR = "/home/u/.pi/agent";
+    const kit = restoreKit({
+      agentDir: AGENT_DIR,
+      readdirSync: (p: string) => {
+        if (p === `${AGENT_DIR}/sessions/--w-proj--`) return ["2026_sess-old.jsonl"];
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+    });
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminalStored({ sessionFile: undefined, sessionPersisted: undefined })]);
+    await kit.h.sup.init(deadline());
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    expect(kit.h.sup.records()[0]!.sessionFile).toBe(SESS_FILE); // adopted for the fork + future restores
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kit.h.spawnCalls[0]!.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session", SESS_FILE]);
+
+    const miss = restoreKit({
+      agentDir: AGENT_DIR,
+      readdirSync: () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+    });
+    loadInto(miss, [terminalStored({ sessionFile: undefined, sessionPersisted: undefined })]);
+    await miss.h.sup.init(deadline());
+    expect(miss.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(miss.h.spawnCalls[0]!.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session-id", "sess-old"]);
+  });
+
+  it("commit persist failure ⇒ failed{spawn_error}+never-forked (no fork, no orphan), E_LAUNCHER persist", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminalStored()]);
+    await h.sup.init(deadline());
+    h.store.saveNowResults.push({ ok: false, code: "ENOSPC" });
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_LAUNCHER",
+      reason: "persist",
+    });
+    const rec = h.sup.records()[0]!;
+    expect(rec).toMatchObject({
+      state: "failed",
+      endReason: "spawn_error",
+      noProcess: "never-forked",
+      restore: { failure: "persist" },
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.spawnCalls).toHaveLength(0);
+    expect(h.sup.deathOf(rec.spawnId)).toBe("confirmed"); // a later delete confirms immediately
+  });
+});
+
+describe("spawn lanConfirm (2026-10-13 U1 拍板): the LAN per-spawn confirm gate is configurable", () => {
+  it("default/absent ⇒ LAN confirm 'always' (现状); lanConfirm:false ⇒ LAN drops to 'unknown-dir'; loopback never changes", async () => {
+    const on = makeHarness({ cfg: baseCfg() });
+    await on.sup.init(deadline());
+    expect(on.sup.policy("p", "lan", "http", false).confirm).toBe("always");
+    expect(on.sup.policy("p", "loopback", "http", false).confirm).toBe("unknown-dir");
+
+    const off = makeHarness({ cfg: baseCfg({ lanConfirm: false }) });
+    await off.sup.init(deadline());
+    expect(off.sup.policy("p", "lan", "http", false).confirm).toBe("unknown-dir");
+    expect(off.sup.policy("p", "lan", "https", true).confirm).toBe("unknown-dir");
+    expect(off.sup.policy("p", "loopback", "http", false).confirm).toBe("unknown-dir");
+  });
+});

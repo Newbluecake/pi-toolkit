@@ -661,6 +661,22 @@ describe("SessionHistoryDialog: resume / fork flows", () => {
     expect(w.emitted("close")).toHaveLength(1); // awaiting ⇒ close
   });
 
+  it("B 拍板核验: the resume primary carries the 「点击恢复」 hover affordance (title), and a direct 202 never shows SpawnConfirm", async () => {
+    const h = harness({
+      history: [{ ok: true, page: historyPage({ items: [mainItem()] }) }],
+      start: async () => ({ ok: true, data: { spawnId: "sp-9", state: "starting" } }),
+    });
+    const w = mountDialog(h);
+    await flushPromises();
+    const btn = q<HTMLButtonElement>(".history-row-actions button");
+    expect(btn.title).toBe("Click to resume this session");
+    await click(btn);
+    await flushPromises();
+    // 202 直达: no E_CONFIRM_REQUIRED ⇒ no SpawnConfirm at any point; the dialog closed on awaiting
+    expect(document.body.querySelector(".spawn-confirm")).toBeNull();
+    expect(w.emitted("close")).toHaveLength(1);
+  });
+
   it("a forkOnly unverified row: primary IS 「复制为新会话」; confirm submits mode:fork once (PD17)", async () => {
     const h = harness({
       history: [

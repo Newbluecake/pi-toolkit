@@ -53,6 +53,7 @@ const spawn = {
   browseErrUnsupported: "This hub does not support directory browsing.",
   browseErrBusy: "The hub is busy — retry in a moment.",
   browseErrNetwork: "Network error — retry.",
+  browseFollowInvalid: "Not a valid directory — the panel stays where it is.",
   mkdirNew: "New folder",
   mkdirPlaceholder: "Folder name",
   mkdirCreate: "Create",
@@ -174,6 +175,21 @@ const spawn = {
   restoreFailCwdChanged: "The session directory changed or is gone — cannot restore",
   restoreFailRegisterTimeout: "The restored session never registered",
   restoreFailExitedEarly: "The restored pi process exited during startup",
+
+  // --- spawn-relaunch (「点击重新拉起」 affordance on offline managed cards, AgentList) ---
+  // inline markers (English tokens in both languages)
+  relaunchHint: "Click to relaunch",
+  relaunchPending: "Relaunching…",
+  relaunchErrGone: "The session file no longer exists — cannot relaunch",
+  relaunchErrAlive: "The process is still running, or its exit cannot be confirmed — not relaunched",
+  relaunchErrMissing: "The session record is gone — it cannot be relaunched",
+  relaunchErrState: "This session cannot be relaunched right now",
+  relaunchErrDenied: "Relaunching is not allowed on this hub (LAN policy / platform)",
+  relaunchErrLauncher: "The hub cannot launch pi right now — try again later",
+  relaunchErrRate: "Too many relaunch requests — retry in a moment",
+  relaunchErrDeadline: "The hub did not answer in time — check whether the session came up",
+  relaunchErrUnsupported: "This hub does not offer relaunching",
+  relaunchErrNetwork: "Network error — retry",
 } satisfies Record<string, string>;
 
 export default spawn;

@@ -81,9 +81,13 @@ const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
  * overlay/fullscreen 不持久化). 2026-10-08: + `composables/useI18n.ts` for the manual language
  * override (`pwh_lang`, TopBar 中/EN toggle — mirrors useTheme.ts's `pwh_theme` discipline).
  * session-history plan §4.7.2 (P-ui): + `spawn/SessionHistoryDialog.vue` for the history
- * kind toggle (`pwh_history_kind`, "main" | "all" — a pure UI preference, same class). */
+ * kind toggle (`pwh_history_kind`, "main" | "all" — a pure UI preference, same class).
+ * 2026-10-12 (TEMPORARY): + `App.vue` for the Aw Snap investigation breadcrumb
+ * (`pwh_diag_route` — single-key overwrite of {hash, heapMB, dom, at} on every route switch;
+ * the hash carries an agentKey, not auth/session data). Removal is a tracked exit condition of
+ * docs/dev/web-hub-aw-snap/investigation.md — drop it from this list when the breadcrumb goes. */
 const LOCALSTORAGE_ALLOWED =
-  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js/i;
+  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|App\.vue/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {

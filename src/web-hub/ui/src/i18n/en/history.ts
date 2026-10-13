@@ -39,6 +39,7 @@ const history = {
   blockedMoved: "The directory was replaced by a symlink",
   blockedInvalid: "The session file is damaged",
   resume: "Resume",
+  resumeTitle: "Click to resume this session",
   forkAction: "Copy as new session",
   goto: "Go to",
   overflowAria: "More actions for this session",

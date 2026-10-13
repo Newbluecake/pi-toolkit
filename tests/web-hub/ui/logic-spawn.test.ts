@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
+  classifyRelaunchError,
   classifySpawnError,
   isFreshlyRestored,
   isMine,
@@ -8,6 +9,8 @@ import {
   managedFor,
   newSessionActions,
   pendingRows,
+  RELAUNCH_REASON_CODES,
+  relaunchableFor,
   RESTORE_FAILURE_CODES,
   restoreFailureKey,
   restorePhaseKey,
@@ -623,5 +626,130 @@ describe("classifySpawnError: session-class reasons (session-history plan §4.7.
     );
     expect(classifySpawnError({ ok: false, error: "E_BAD_REQUEST", retryable: false })).toBe("dir");
     expect(classifySpawnError({ ok: false, error: "E_DIR", retryable: false })).toBe("dir");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// spawn-relaunch: relaunchableFor (offline-card affordance gate) + classifyRelaunchError
+// ---------------------------------------------------------------------------
+
+describe("relaunchableFor (「点击重新拉起」 affordance gate)", () => {
+  it("a terminal (exited/failed) record bound to the key + the spawn.relaunch.v1 cap ⇒ {spawnId}; latest updatedAt wins", async () => {
+    const { SPAWN_RELAUNCH_HUB_CAP } = await import("../../../src/web-hub/protocol/version.js");
+    const spawns: SpawnsPayload = {
+      active: 0,
+      max: 4,
+      items: [
+        rec({ spawnId: "s1", state: "exited", agentKey: "A", updatedAt: 100 }),
+        rec({ spawnId: "s2", state: "failed", agentKey: "A", updatedAt: 200 }),
+        rec({ spawnId: "s3", state: "exited", agentKey: "B", updatedAt: 300 }),
+        rec({ spawnId: "s4", state: "live", agentKey: "A", updatedAt: 400 }),
+      ],
+    };
+    expect(relaunchableFor(spawns, "A", [SPAWN_RELAUNCH_HUB_CAP])).toEqual({ spawnId: "s2" });
+    expect(relaunchableFor(spawns, "B", [SPAWN_RELAUNCH_HUB_CAP])).toEqual({ spawnId: "s3" });
+    expect(relaunchableFor(spawns, "C", [SPAWN_RELAUNCH_HUB_CAP])).toBeUndefined();
+  });
+
+  it("no cap ⇒ never (the UI MUST NOT offer what a restore-off hub 404s)", async () => {
+    const { SPAWN_RELAUNCH_HUB_CAP } = await import("../../../src/web-hub/protocol/version.js");
+    expect(SPAWN_RELAUNCH_HUB_CAP).toBe("spawn.relaunch.v1");
+    const spawns: SpawnsPayload = {
+      active: 0,
+      max: 4,
+      items: [rec({ spawnId: "s1", state: "exited", agentKey: "A" })],
+    };
+    expect(relaunchableFor(spawns, "A", [])).toBeUndefined();
+    expect(relaunchableFor(spawns, "A", ["spawn.v1"])).toBeUndefined();
+    expect(relaunchableFor(spawns, "A", undefined)).toBeUndefined();
+    expect(relaunchableFor(spawns, "A", "garbage")).toBeUndefined();
+  });
+
+  it("removing records and records mid-restore (restore.phase set) are excluded", async () => {
+    const { SPAWN_RELAUNCH_HUB_CAP } = await import("../../../src/web-hub/protocol/version.js");
+    const caps = [SPAWN_RELAUNCH_HUB_CAP];
+    const removing: SpawnsPayload = {
+      active: 0,
+      max: 4,
+      items: [rec({ spawnId: "s1", state: "exited", agentKey: "A", removing: true })],
+    };
+    expect(relaunchableFor(removing, "A", caps)).toBeUndefined();
+    const restoring: SpawnsPayload = {
+      active: 1,
+      max: 4,
+      items: [
+        rec({
+          spawnId: "s1",
+          state: "starting",
+          agentKey: undefined,
+          restore: { attempt: 1, phase: "registering", prevAgentKey: "A" },
+        }),
+      ],
+    };
+    expect(relaunchableFor(restoring, "A", caps)).toBeUndefined();
+    // a terminal record whose restore FAILED is relaunchable again (the user retries)
+    const failed: SpawnsPayload = {
+      active: 0,
+      max: 4,
+      items: [
+        rec({ spawnId: "s1", state: "failed", agentKey: "A", restore: { attempt: 1, failure: "register-timeout" } }),
+      ],
+    };
+    expect(relaunchableFor(failed, "A", caps)).toEqual({ spawnId: "s1" });
+  });
+
+  it("null/garbage payloads and non-string keys ⇒ undefined", async () => {
+    const { SPAWN_RELAUNCH_HUB_CAP } = await import("../../../src/web-hub/protocol/version.js");
+    expect(relaunchableFor(null, "A", [SPAWN_RELAUNCH_HUB_CAP])).toBeUndefined();
+    expect(relaunchableFor({ items: "x" }, "A", [SPAWN_RELAUNCH_HUB_CAP])).toBeUndefined();
+    expect(
+      relaunchableFor({ active: 0, max: 1, items: [rec({ spawnId: "s1", state: "exited", agentKey: "A" })] }, "", [
+        SPAWN_RELAUNCH_HUB_CAP,
+      ]),
+    ).toBeUndefined();
+  });
+});
+
+describe("classifyRelaunchError (spawn.relaunchErr* buckets)", () => {
+  it("the wire mapping: 410 gone / 409 alive / 404 missing / 409 state / 403 denied / 503 launcher / 429 rate", () => {
+    expect(classifyRelaunchError({ ok: false, error: "E_SPAWN_GONE", reason: "session-missing", status: 410 })).toBe(
+      "gone",
+    );
+    expect(classifyRelaunchError({ ok: false, error: "E_SPAWN_GONE", reason: "session-invalid", status: 410 })).toBe(
+      "gone",
+    );
+    expect(classifyRelaunchError({ ok: false, error: "E_AGENT_ONLINE", reason: "exit-unconfirmed", status: 409 })).toBe(
+      "alive",
+    );
+    expect(classifyRelaunchError({ ok: false, error: "E_NOT_FOUND", status: 404 })).toBe("missing");
+    expect(classifyRelaunchError({ ok: false, error: "E_BAD_REQUEST", reason: "no-session", status: 409 })).toBe(
+      "state",
+    );
+    expect(classifyRelaunchError({ ok: false, error: "E_BAD_REQUEST", reason: "removing", status: 409 })).toBe("state");
+    expect(classifyRelaunchError({ ok: false, error: "E_SPAWN_DENIED", reason: "platform", status: 403 })).toBe(
+      "denied",
+    );
+    expect(classifyRelaunchError({ ok: false, error: "E_LAUNCHER", reason: "reaper", status: 503 })).toBe("launcher");
+    expect(classifyRelaunchError({ ok: false, error: "E_RATE", status: 429 })).toBe("rate");
+    expect(classifyRelaunchError({ ok: false, error: "E_DEADLINE", status: 0 })).toBe("deadline");
+    expect(classifyRelaunchError({ ok: false, error: "E_UNSUPPORTED", status: 0 })).toBe("unsupported");
+    expect(classifyRelaunchError({ ok: false, error: "E_NETWORK", status: 0 })).toBe("network");
+    expect(classifyRelaunchError({ ok: true, spawnId: "s", state: "starting" })).toBeUndefined();
+    expect(classifyRelaunchError(undefined)).toBeUndefined();
+  });
+
+  it("the reason literals match protocol/spawn.ts's RELAUNCH_REASON_* constants (anti-drift pin)", async () => {
+    const proto = await import("../../../src/web-hub/protocol/spawn.js");
+    expect(RELAUNCH_REASON_CODES).toEqual([
+      proto.RELAUNCH_REASON_UNCONFIRMED,
+      proto.RELAUNCH_REASON_NO_SESSION,
+      proto.RELAUNCH_REASON_REMOVING,
+      proto.RELAUNCH_REASON_SESSION_MISSING,
+      proto.RELAUNCH_REASON_SESSION_INVALID,
+    ]);
+    // the wire error codes themselves are in the frozen API_ERRORS list (append-only tail)
+    const { API_ERRORS } = await import("../../../src/web-hub/protocol/http-contract.js");
+    expect(API_ERRORS).toContain("E_SPAWN_GONE");
+    expect(API_ERRORS).toContain("E_AGENT_ONLINE");
   });
 });

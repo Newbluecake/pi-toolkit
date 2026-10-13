@@ -6,9 +6,13 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyForRestore,
+  defaultSessionDirForCwd,
   hidesIdentityOnWire,
+  LOCATE_SESSION_SCAN_MAX,
+  locateSessionFile,
   planSessionArgv,
   restoreWireOf,
+  type LocateSessionFs,
   type RestoreClassifyContext,
   type RestoreSessionFs,
 } from "../../../../src/web-hub/hub/spawn/restore-plan.js";
@@ -205,5 +209,59 @@ describe("restoreWireOf / hidesIdentityOnWire (§9.1/§9.2)", () => {
     expect(hidesIdentityOnWire({ attempts: 0, lastAt: 1, phase: "reaping" })).toBe(true);
     expect(hidesIdentityOnWire({ attempts: 1, lastAt: 1, phase: "registering" })).toBe(false);
     expect(hidesIdentityOnWire(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// spawn-relaunch: locateSessionFile / defaultSessionDirForCwd — the bounded locate-by-id
+// fallback a relaunch runs when the record never adopted a `sessionFile`.
+// ---------------------------------------------------------------------------
+
+describe("locateSessionFile / defaultSessionDirForCwd (spawn-relaunch)", () => {
+  const DIR = "/h/.pi/agent/sessions/--w-p--";
+  const locFs = (files: Record<string, { head?: string }>, names: string[] | undefined): LocateSessionFs => ({
+    ...fsOf(files),
+    readdirSync: (p) => {
+      if (names === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      if (p !== DIR) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return names;
+    },
+  });
+
+  it("pi's cwd encoding: leading slash stripped, / \\ : → -, wrapped in --…--", () => {
+    expect(defaultSessionDirForCwd("/w/p", "/h/.pi/agent")).toBe(DIR);
+    expect(defaultSessionDirForCwd("/", "/h/.pi/agent")).toBe("/h/.pi/agent/sessions/----");
+    expect(defaultSessionDirForCwd("/a:b/c", "/h/.pi/agent")).toBe("/h/.pi/agent/sessions/--a-b-c--");
+  });
+
+  it("exact id match on a session header wins; other ids / non-jsonl / garbage are skipped", () => {
+    const files = {
+      [`${DIR}/a.jsonl`]: { head: header({ id: "sess-1" }) },
+      [`${DIR}/b.jsonl`]: { head: header({ id: "sess-2" }) },
+      [`${DIR}/c.jsonl`]: { head: "not json\n" },
+    };
+    const fs = locFs(files, ["a.jsonl", "b.jsonl", "c.jsonl", "notes.txt"]);
+    expect(locateSessionFile(fs, "/h/.pi/agent", "/w/p", "sess-2")).toBe(`${DIR}/b.jsonl`);
+    expect(locateSessionFile(fs, "/h/.pi/agent", "/w/p", "sess-9")).toBeUndefined();
+  });
+
+  it("missing dir / unreadable entries / malformed id ⇒ undefined (the caller's --session-id rule)", () => {
+    expect(locateSessionFile(locFs({}, undefined), "/h/.pi/agent", "/w/p", "sess-1")).toBeUndefined();
+    expect(
+      locateSessionFile(locFs({ [`${DIR}/a.jsonl`]: {} }, ["a.jsonl"]), "/h/.pi/agent", "/w/p", "sess-1"),
+    ).toBeUndefined();
+    expect(locateSessionFile(locFs({}, []), "/h/.pi/agent", "/w/p", "--bad")).toBeUndefined();
+  });
+
+  it("the scan is bounded at LOCATE_SESSION_SCAN_MAX .jsonl files", () => {
+    const names = Array.from({ length: LOCATE_SESSION_SCAN_MAX + 5 }, (_, i) => `f${i}.jsonl`);
+    const files = { [`${DIR}/f${LOCATE_SESSION_SCAN_MAX}.jsonl`]: { head: header({ id: "sess-1" }) } };
+    // the hit sits BEYOND the cap ⇒ not found
+    expect(locateSessionFile(locFs(files, names), "/h/.pi/agent", "/w/p", "sess-1")).toBeUndefined();
+    // …and just inside it ⇒ found
+    names.reverse();
+    expect(locateSessionFile(locFs(files, names), "/h/.pi/agent", "/w/p", "sess-1")).toBe(
+      `${DIR}/f${LOCATE_SESSION_SCAN_MAX}.jsonl`,
+    );
   });
 });

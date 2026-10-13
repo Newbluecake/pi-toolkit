@@ -834,6 +834,38 @@ export function createPasswordClient(deps) {
         return rest;
       }
     },
+    /**
+     * spawn-relaunch: `POST /api/headless/relaunch` — the SAME wire behavior as the token
+     * client's `spawn.relaunch` (`transport-contract.test.ts` pins the two identical).
+     * One-shot like the rest of this client's spawn surface: a 401 is reported by the
+     * `isRestAuthEndpoint` fetch wrapper (`/api/headless*` prefix covers `/relaunch`), never
+     * here. The hub's relaunch is idempotent on a non-terminal record (`dup:true`).
+     * @param {string} spawnId @returns {Promise<any>}
+     */
+    async relaunch(spawnId) {
+      try {
+        const r = await postApi(API.headlessRelaunch, { spawnId }, CMD_REQUEST_TIMEOUT_MS);
+        const out = await spawnFromResponse(r);
+        if (out.ok === false) {
+          /** @type {any} */
+          const err = { ok: false, error: out.error, status: out.status };
+          if (typeof out.reason === "string") err.reason = out.reason;
+          if (typeof out.message === "string") err.message = out.message;
+          if (typeof out.retryAfterS === "number") err.retryAfterS = out.retryAfterS;
+          return err;
+        }
+        const d = out.data;
+        return {
+          ok: true,
+          spawnId: typeof d.spawnId === "string" ? d.spawnId : spawnId,
+          state: typeof d.state === "string" ? d.state : "starting",
+          ...(d.dup === true ? { dup: true } : {}),
+        };
+      } catch (e) {
+        const { retryable: _retryable, ...rest } = spawnFromError(e);
+        return rest;
+      }
+    },
   };
 
   // -------------------------------------------------------------------------

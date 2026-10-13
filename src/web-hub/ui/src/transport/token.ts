@@ -33,6 +33,7 @@ import type {
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnMkdirOutcome,
+  SpawnRelaunchOutcome,
   SpawnOutcome,
   SpawnPrefsOutcome,
   SpawnStopOutcome,
@@ -175,6 +176,11 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // spawn-dirmkdir: POST /api/headless/mkdir — same thin-cast rule (the client replayed a
       // 401 through `withRelogin`; a replayed create is safe — an existing name answers 409).
       mkdir: (path, name) => withAuthNotice(deps, () => client.spawn.mkdir(path, name) as Promise<SpawnMkdirOutcome>),
+      // spawn-relaunch: POST /api/headless/relaunch — same thin-cast rule (the client replayed
+      // a 401 through `withRelogin`; a replayed relaunch is safe — the hub's idempotent
+      // non-terminal check answers `dup:true` instead of forking twice).
+      relaunch: (spawnId) =>
+        withAuthNotice(deps, () => client.spawn.relaunch(spawnId) as Promise<SpawnRelaunchOutcome>),
     } satisfies SpawnTransport,
     // web-hub-delete-session plan v2 §4.1/§5.3: thin cast over the logic client's `removeAgent`
     // — the same final-E_AUTH rule as upload/spawn (the client already replayed once through

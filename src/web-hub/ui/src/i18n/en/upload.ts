@@ -31,6 +31,7 @@ const upload = {
   // --- entries (paste / drop / attach button) ---
   attachAria: "Attach files",
   dropHint: "Drop files to attach them",
+  dropUnavailable: "This session can't take attachments",
   hintTooLarge: "{name} exceeds the 100 MiB file limit",
   hintTooMany: "At most {n} attachments per message",
   hintDuplicate: "{name} is already attached",

@@ -32,6 +32,7 @@ const upload = {
   // --- 入口（粘贴 / 拖入 / 附件按钮） ---
   attachAria: "添加附件",
   dropHint: "松开以添加附件",
+  dropUnavailable: "当前会话不支持附件",
   hintTooLarge: "{name} 超过单文件 100 MiB 上限",
   hintTooMany: "每条消息最多 {n} 个附件",
   hintDuplicate: "{name} 已在附件列表中",

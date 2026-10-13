@@ -186,6 +186,14 @@ describe("web/contract.js API.headlessPrefs (default-model plan F1)", () => {
   });
 });
 
+// spawn-relaunch: the relaunch endpoint literal is hand-written like the other headless paths
+// above — pinned here.
+describe("web/contract.js API.headlessRelaunch (spawn-relaunch)", () => {
+  it("points at POST /api/headless/relaunch", () => {
+    expect(web.API.headlessRelaunch).toBe("/api/headless/relaunch");
+  });
+});
+
 // worktree-diff plan v3.1 §1.2/§4.6 (package D4): the two file-diff endpoints are imported
 // from `protocol/worktree-diff.ts` — same anti-drift rule as the preview/upload paths above
 // (same reference target, never a hand copy). `protocol/http-contract.ts`'s WTDIFF_ENDPOINTS

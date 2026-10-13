@@ -102,7 +102,9 @@ describe("protocol/preview — API_ERRORS tail (§4.1: four E_PREVIEW_* after E_
     // web-hub-avatar plan v2.1 (A0): its two E_AVATAR_* codes are the next tail append.
     expect(API_ERRORS[launcher + 8]).toBe("E_AVATAR_TOO_LARGE");
     expect(API_ERRORS[launcher + 9]).toBe("E_AVATAR_UNSUPPORTED");
-    expect(API_ERRORS[launcher + 10]).toBeUndefined(); // nothing sneaks in after them
+    // spawn-relaunch: E_SPAWN_GONE (410, relaunch target's session file gone) is the next tail append.
+    expect(API_ERRORS[launcher + 10]).toBe("E_SPAWN_GONE");
+    expect(API_ERRORS[launcher + 11]).toBeUndefined(); // nothing sneaks in after them
   });
 
   it("contains each preview code exactly once (no reordering, no duplicates)", () => {

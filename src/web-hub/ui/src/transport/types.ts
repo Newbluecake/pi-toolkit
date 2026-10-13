@@ -276,6 +276,12 @@ export interface SpawnTransport {
    * only offers the button while its browse surface (`preview.dir.v1`) exists anyway. Both
    * real adapters always provide it. */
   mkdir?(path: string, name: string): Promise<SpawnMkdirOutcome>;
+  /** spawn-relaunch: `POST /api/headless/relaunch` — re-fork a terminal managed record's
+   * session (the offline card's 「点击重新拉起」). Optional per the frozen-transport
+   * convention — `createSpawn` degrades a missing method to `E_UNSUPPORTED`, and the
+   * affordance never renders without the `spawn.relaunch.v1` cap anyway. Both real adapters
+   * always provide it. */
+  relaunch?(spawnId: string): Promise<SpawnRelaunchOutcome>;
 }
 
 /** session-history plan §4.7.1's frozen outcome: a narrowed `HistoryPage`, or the wire error
@@ -304,6 +310,24 @@ export type SpawnMkdirOutcome =
       readonly error: string;
       readonly status: number;
       readonly reason?: string;
+      readonly retryAfterS?: number;
+    };
+
+/** spawn-relaunch: `POST /api/headless/relaunch`'s outcome — 202 `{spawnId, state, dup?}`
+ * (`dup:true` = the record was already non-terminal: a relaunch in flight or the session alive
+ * again — idempotent, no second fork). The error half keeps `reason` verbatim
+ * (`"exit-unconfirmed"` on 409 `E_AGENT_ONLINE`, `"no-session"`/`"removing"` on 409
+ * `E_BAD_REQUEST`, `"session-missing"`/`"session-invalid"` on 410 `E_SPAWN_GONE`) plus
+ * `status` (0 for client-local codes, same convention as the other outcomes) so AgentList's
+ * `classifyRelaunchError` can bucket it. */
+export type SpawnRelaunchOutcome =
+  | { readonly ok: true; readonly spawnId: string; readonly state: SpawnState; readonly dup?: boolean }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly status: number;
+      readonly reason?: string;
+      readonly message?: string;
       readonly retryAfterS?: number;
     };
 

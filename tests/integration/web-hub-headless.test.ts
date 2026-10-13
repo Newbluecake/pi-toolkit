@@ -1781,6 +1781,120 @@ describe.skipIf(!IS_LINUX)("web-hub spawn restore — in-process graceful paths 
     await waitRestoreRec(h.stateDir, spawnId, (r) => r.restore === undefined, 10_000, "stability window cleared");
   }, 60_000);
 
+  it("HR8 spawn-relaunch e2e (「离线会话点击重新拉起」): live ⇒ stop ⇒ exited ⇒ POST /api/headless/relaunch 202 (+ in-flight dup) ⇒ same spawnId back live on `--session <abs file>`, new pid/agentKey, prevAgentKey = old key, no --model; caps carry spawn.relaunch.v1", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    const h = await boot(home);
+    expect(h.hub.info.caps).toContain("spawn.relaunch.v1"); // restore on ⇒ the cap rides
+    const cwd = projDir(home, "proj", ["--cmd-echo", "--write-session"]);
+    const spawnId = await spawnIt(h, cwd);
+    const r1 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.sessionPersisted === true,
+      15_000,
+      "live + session file observed",
+    );
+    const oldPid = r1.pid!;
+    procChildren.add(oldPid);
+    const oldKey = (await ownerItem(h, spawnId))?.agentKey;
+    expect(oldKey).toBeDefined();
+
+    // a LIVE record answers the endpoint idempotently — never a second fork
+    const alive = await postJson(
+      h.port,
+      "/api/headless/relaunch",
+      { spawnId },
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(alive.status).toBe(202);
+    expect(JSON.parse(alive.body)).toMatchObject({ spawnId, state: "live", dup: true });
+    expect(forkArgvs(cwd)).toHaveLength(1);
+
+    // stop ⇒ terminal exited{user}, real exit ⇒ the death is confirmed
+    const stop = await postJson(
+      h.port,
+      `/api/headless/${spawnId}/stop`,
+      {},
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(stop.status).toBe(202);
+    await waitRestoreRec(h.stateDir, spawnId, (r) => r.state === "exited", 10_000, "exited after stop");
+    await waitPidGone(oldPid, 8_000, "old child gone");
+
+    // the relaunch itself
+    const res = await postJson(
+      h.port,
+      "/api/headless/relaunch",
+      { spawnId },
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(res.status).toBe(202);
+    expect(JSON.parse(res.body)).toEqual({ spawnId, state: "starting" });
+    // in-flight re-entry is idempotent (the commit is synchronous — the record is already starting)
+    const dup = await postJson(
+      h.port,
+      "/api/headless/relaunch",
+      { spawnId },
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(JSON.parse(dup.body)).toMatchObject({ spawnId, dup: true });
+
+    const r2 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.pid !== undefined && r.pid !== oldPid,
+      20_000,
+      "relaunched live with a new pid",
+    );
+    procChildren.add(r2.pid!);
+    expect(r2.sessionId).toBe(r1.sessionId); // the SAME session file reopened
+    expect(r2.sessionFile).toBe(r1.sessionFile);
+    expect(r2.restore).toMatchObject({ attempts: 1, prevAgentKey: oldKey });
+    const item = await ownerItem(h, spawnId);
+    expect(item?.agentKey).toBeDefined();
+    expect(item?.agentKey).not.toBe(oldKey);
+    const argvs = forkArgvs(cwd);
+    expect(argvs).toHaveLength(2);
+    expect(argvs[1]!.argv).toEqual(["--mode", "rpc", "--session", r1.sessionFile!]);
+    expect(argvs[1]!.argv).not.toContain("--model");
+  }, 60_000);
+
+  it("HR8b spawn-relaunch e2e: session file deleted while offline ⇒ 410 E_SPAWN_GONE{session-missing}, record stays exited, no fork", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    const h = await boot(home);
+    const cwd = projDir(home, "proj", ["--write-session"]);
+    const spawnId = await spawnIt(h, cwd);
+    const r1 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.sessionPersisted === true,
+      15_000,
+      "live + session file observed",
+    );
+    procChildren.add(r1.pid!);
+    const stop = await postJson(
+      h.port,
+      `/api/headless/${spawnId}/stop`,
+      {},
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(stop.status).toBe(202);
+    await waitRestoreRec(h.stateDir, spawnId, (r) => r.state === "exited", 10_000, "exited after stop");
+    rmSync(r1.sessionFile!); // the user deleted the session file
+    const res = await postJson(
+      h.port,
+      "/api/headless/relaunch",
+      { spawnId },
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(res.status).toBe(410);
+    expect(JSON.parse(res.body)).toEqual({ error: "E_SPAWN_GONE", reason: "session-missing" });
+    expect(restoreRecOf(h.stateDir, spawnId)).toMatchObject({ state: "exited" });
+    expect(forkArgvs(cwd)).toHaveLength(1); // never forked
+  }, 60_000);
+
   it("HR3: legacy spawns.json (v2, live, full identity, NO sessionId) + a real orphan ⇒ exactly H3's outcome: TERM, exited{orphan}, no fork, no restore field", async () => {
     sandbox = sandboxHome();
     const home = sandbox.home;

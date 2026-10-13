@@ -282,6 +282,12 @@ export interface HubSpawnConfig {
    * exactly this key. Non-boolean ⇒ the whole spawn block is rejected (P-cfg, same rule as
    * `restore`). */
   history?: boolean;
+  /** 2026-10-13 用户拍板（U1 单用户信任模型既判）: LAN 来源 spawn 的逐次 E_CONFIRM_REQUIRED
+   * 确认门（arch §6.3/§8.2 的 `confirm:"always"`）可关闭。Absent ⇒ true hub-side（现状：LAN
+   * 每次 confirm —— 该门的本意是 LAN 渠道证明用户意图，`false` 即用户明示放弃这层证明）。
+   * 只影响 E_CONFIRM_REQUIRED 这一类；session-open 占用冲突的 fork 决策（真决策）不在豁免
+   * 范围。Non-boolean ⇒ the whole spawn block is rejected (same rule as `restore`/`history`). */
+  lanConfirm?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +584,48 @@ export function parseMkdirRequestBody(
   const body: MkdirRequestBody = Value.Decode(MkdirRequestSchema, raw);
   if (!isValidMkdirName(body.name)) return { ok: false, error: "name-invalid" };
   if (body.path === "" || byteLength(body.path) > SPAWN_CWD_MAX_BYTES) return { ok: false, error: "path-invalid" };
+  return { ok: true, body };
+}
+
+// ---------------------------------------------------------------------------
+// relaunch (web-hub spawn-relaunch — 「离线/过期会话点击直接重新拉起」,
+// POST /api/headless/relaunch; hub side lives in hub/spawn/supervisor.ts's `relaunch()`
+// + routes.ts's `handleRelaunch`)
+// ---------------------------------------------------------------------------
+
+/** POST /api/headless/relaunch body cap, UTF-8 bytes (a single spawnId + JSON overhead). */
+export const RELAUNCH_BODY_MAX = 1024;
+
+/** POST /api/headless/relaunch body shape: strict — the terminal managed record to re-fork. */
+export interface RelaunchRequestBody {
+  spawnId: string;
+}
+
+/** Strict POST body schema (`additionalProperties: false`). No `maxLength` prefilter — an
+ *  over-long `spawnId` fails the `SPAWN_ID_RE` pattern inside {@link parseRelaunchRequestBody}
+ *  as its named 400 reason, and a longer body never even parses ({@link RELAUNCH_BODY_MAX}). */
+export const RelaunchRequestSchema = Type.Object({ spawnId: Type.String() }, { additionalProperties: false });
+
+export type RelaunchBodyError = "not-an-object" | "schema" | "spawn-id";
+
+/** The `reason` values a 409 `E_AGENT_ONLINE` / 409 `E_BAD_REQUEST` / 410 `E_SPAWN_GONE`
+ *  relaunch reply carries (the UI's `classifyRelaunchError` buckets). */
+export const RELAUNCH_REASON_UNCONFIRMED = "exit-unconfirmed";
+export const RELAUNCH_REASON_NO_SESSION = "no-session";
+export const RELAUNCH_REASON_REMOVING = "removing";
+export const RELAUNCH_REASON_SESSION_MISSING = "session-missing";
+export const RELAUNCH_REASON_SESSION_INVALID = "session-invalid";
+
+/**
+ * Validate + parse an arbitrary JSON value into a `RelaunchRequestBody`. Never throws.
+ */
+export function parseRelaunchRequestBody(
+  raw: unknown,
+): { ok: true; body: RelaunchRequestBody } | { ok: false; error: RelaunchBodyError } {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "not-an-object" };
+  if (!Value.Check(RelaunchRequestSchema, raw)) return { ok: false, error: "schema" };
+  const body: RelaunchRequestBody = Value.Decode(RelaunchRequestSchema, raw);
+  if (!SPAWN_ID_RE.test(body.spawnId)) return { ok: false, error: "spawn-id" };
   return { ok: true, body };
 }
 

@@ -116,6 +116,9 @@ export const API_ERRORS = [
   // web-hub-avatar plan v2.1 §2.1 (A0): append-only avatar upload errors.
   "E_AVATAR_TOO_LARGE", // 413 — request body exceeds AVATAR_MAX_BYTES
   "E_AVATAR_UNSUPPORTED", // 415 — strict PNG walk or hub-side IDAT validation rejected it
+  // web-hub spawn-relaunch: the relaunch target's session file is gone/unusable — refusal,
+  // record untouched (body carries reason: "session-missing" | "session-invalid").
+  "E_SPAWN_GONE", // 410
 ] as const;
 
 /** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */

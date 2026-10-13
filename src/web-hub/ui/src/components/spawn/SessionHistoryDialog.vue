@@ -618,6 +618,7 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
                     type="button"
                     :disabled="flowBusy"
                     :aria-label="row.forkOnly === undefined ? t('history.resume') : t('history.forkAction')"
+                    :title="row.forkOnly === undefined ? t('history.resumeTitle') : t('history.forkAction')"
                     @click.stop="onPrimary(row)"
                   >
                     {{ row.forkOnly === undefined ? t("history.resume") : t("history.forkAction") }}

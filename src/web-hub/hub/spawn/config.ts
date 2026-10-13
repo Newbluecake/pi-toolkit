@@ -104,6 +104,14 @@ export function parseHubSpawnConfig(raw: unknown): { ok: true; spawn: HubSpawnCo
     return { ok: false, detail: `history=${String(historyRaw)}: must be a boolean` };
   }
 
+  // 2026-10-13 用户拍板 (U1): optional bool; absent ⇒ true (consumers read
+  // `cfg.lanConfirm !== false` — an older pi launching a newer hub keeps the LAN-always
+  // confirm); any non-bool ⇒ the whole block is rejected (same rule as `restore`/`history`).
+  const lanConfirmRaw = raw["lanConfirm"];
+  if (lanConfirmRaw !== undefined && typeof lanConfirmRaw !== "boolean") {
+    return { ok: false, detail: `lanConfirm=${String(lanConfirmRaw)}: must be a boolean` };
+  }
+
   return {
     ok: true,
     spawn: {
@@ -118,6 +126,8 @@ export function parseHubSpawnConfig(raw: unknown): { ok: true; spawn: HubSpawnCo
       ...(restoreRaw === undefined ? {} : { restore: restoreRaw }),
       // present ⇒ verbatim; absent stays absent (consumers read `cfg.history === true`).
       ...(historyRaw === undefined ? {} : { history: historyRaw }),
+      // present ⇒ verbatim; absent stays absent (consumers read `cfg.lanConfirm !== false`).
+      ...(lanConfirmRaw === undefined ? {} : { lanConfirm: lanConfirmRaw }),
     },
   };
 }

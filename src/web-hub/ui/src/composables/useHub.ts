@@ -806,6 +806,9 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     setDefaultModel: (defaultModel) => spawnBase.setDefaultModel(defaultModel),
     history: (q) => spawnBase.history(q),
     historyCap: () => hasCap(SPAWN_HISTORY_HUB_CAP),
+    // spawn-relaunch: the offline managed card's relaunch call — `createSpawn` already
+    // degrades a transport without `relaunch` to `E_UNSUPPORTED`.
+    relaunch: (spawnId) => spawnBase.relaunch(spawnId),
     newSession,
   };
 

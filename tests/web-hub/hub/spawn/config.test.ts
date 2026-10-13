@@ -120,6 +120,21 @@ describe("parseHubSpawnConfig (web-hub-spawn §SP2, hub-side strict re-validatio
     }
   });
 
+  it("2026-10-13 U1 拍板: lanConfirm is an optional bool — absent stays absent (⇒ true 现状), present round-trips, non-bool rejects the block", () => {
+    const absent = parseHubSpawnConfig(valid);
+    expect(absent.ok && absent.spawn.lanConfirm).toBeUndefined();
+    expect(absent.ok && absent.spawn.lanConfirm !== false).toBe(true);
+    for (const v of [true, false]) {
+      const r = parseHubSpawnConfig({ ...valid, lanConfirm: v });
+      expect(r).toEqual({ ok: true, spawn: { ...valid, lanConfirm: v } });
+    }
+    for (const bad of ["true", 1, null, {}]) {
+      const r = parseHubSpawnConfig({ ...valid, lanConfirm: bad });
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+      expect(!r.ok && r.detail).toMatch(/^lanConfirm=/);
+    }
+  });
+
   it("session-history §3.7 (P-cfg): history is an optional bool — absent stays absent (⇒ false), present round-trips, non-bool rejects the block", () => {
     const absent = parseHubSpawnConfig(valid);
     expect(absent.ok && absent.spawn.history).toBeUndefined();

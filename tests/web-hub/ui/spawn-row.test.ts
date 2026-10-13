@@ -199,3 +199,24 @@ describe("SpawnRow.vue — the from marker (session-history plan PD15)", () => {
     expect(w.findAll(".chip-mono").map((c) => c.text())).toContain("history");
   });
 });
+
+describe("SpawnRow.vue — first-prompt mirror chip (2026-10-13 拍板 ②: 等待态挪到侧栏)", () => {
+  it("starting rows carry the fp:* chip while a first prompt is pending/sending; none without a firstPrompt slot", () => {
+    const f = fakeHub({ caps: ["spawn.v1"] });
+    const pending = mountRow({ ...BASE_REC, firstPrompt: { state: "pending" } }, f);
+    expect(pending.find(".chip-spawn[translate='no']").exists()).toBe(true);
+    expect(pending.text()).toContain("fp: pending");
+    pending.unmount();
+
+    const sending = mountRow({ ...BASE_REC, firstPrompt: { state: "sending" } }, f);
+    expect(sending.text()).toContain("fp: sending");
+    sending.unmount();
+
+    const delivered = mountRow({ ...BASE_REC, firstPrompt: { state: "delivered" } }, f);
+    expect(delivered.text()).toContain("fp: delivered");
+    delivered.unmount();
+
+    const none = mountRow(BASE_REC, f);
+    expect(none.text()).not.toContain("fp:");
+  });
+});

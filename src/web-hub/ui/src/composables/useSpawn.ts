@@ -27,6 +27,7 @@ import type {
   SpawnMkdirOutcome,
   SpawnOutcome,
   SpawnPrefsOutcome,
+  SpawnRelaunchOutcome,
   SpawnStopOutcome,
 } from "../transport/types.js";
 
@@ -47,6 +48,10 @@ export interface SpawnCallSurface {
    *  `E_UNSUPPORTED` when the transport's spawn namespace lacks `mkdir` (test fakes, a stale
    *  hub); the panel only offers the button alongside its browse surface anyway. */
   mkdir(path: string, name: string): Promise<SpawnMkdirOutcome>;
+  /** spawn-relaunch: `POST /api/headless/relaunch` (the offline managed card's 「点击重新拉起」)
+   *  — `E_UNSUPPORTED` when the transport's spawn namespace lacks `relaunch` (test fakes, a
+   *  stale hub); the affordance never renders without the `spawn.relaunch.v1` cap anyway. */
+  relaunch(spawnId: string): Promise<SpawnRelaunchOutcome>;
 }
 
 const UNSUPPORTED_LIST: SpawnListOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
@@ -56,6 +61,7 @@ const UNSUPPORTED_STOP: SpawnStopOutcome = { ok: false, error: "E_UNSUPPORTED" }
 const UNSUPPORTED_PREFS: SpawnPrefsOutcome = { ok: false, error: "E_UNSUPPORTED", retryable: false };
 const UNSUPPORTED_HISTORY: SpawnHistoryOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
 const UNSUPPORTED_MKDIR: SpawnMkdirOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
+const UNSUPPORTED_RELAUNCH: SpawnRelaunchOutcome = { ok: false, error: "E_UNSUPPORTED", status: 0 };
 
 export function createSpawn(transport: HubTransport): SpawnCallSurface {
   const spawn = transport.spawn;
@@ -71,6 +77,7 @@ export function createSpawn(transport: HubTransport): SpawnCallSurface {
       setDefaultModel: () => Promise.resolve(UNSUPPORTED_PREFS),
       history: () => Promise.resolve(UNSUPPORTED_HISTORY),
       mkdir: () => Promise.resolve(UNSUPPORTED_MKDIR),
+      relaunch: () => Promise.resolve(UNSUPPORTED_RELAUNCH),
     };
   }
   const sp = spawn; // narrowed alias — hoisted function declarations don't keep the guard's narrowing
@@ -101,6 +108,8 @@ export function createSpawn(transport: HubTransport): SpawnCallSurface {
     history: (q) => (sp.history === undefined ? Promise.resolve(UNSUPPORTED_HISTORY) : sp.history(q)),
     // spawn-dirmkdir: same missing-method degrade as `history` above.
     mkdir: (path, name) => (sp.mkdir === undefined ? Promise.resolve(UNSUPPORTED_MKDIR) : sp.mkdir(path, name)),
+    // spawn-relaunch: same missing-method degrade as `history`/`mkdir` above.
+    relaunch: (spawnId) => (sp.relaunch === undefined ? Promise.resolve(UNSUPPORTED_RELAUNCH) : sp.relaunch(spawnId)),
   };
 }
 

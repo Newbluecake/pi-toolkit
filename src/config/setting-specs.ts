@@ -405,6 +405,12 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "webHub.spawn.history",
     "web-hub spawn: browse all past sessions and resume/fork them from the web (default on; change: /reload then /webhub restart)",
   ),
+  // 2026-10-13 用户拍板（U1 单用户信任模型既判）: default on (现状：LAN 每次 spawn 都要确认)；
+  // false 放弃 LAN 渠道的逐次确认门 —— session-open 的 fork 决策不在豁免范围。
+  "webHub.spawn.lanConfirm": bool(
+    "webHub.spawn.lanConfirm",
+    "web-hub spawn: require a per-spawn confirmation for LAN-originated session starts (default on; off = LAN behaves like loopback's known-dir pass-through; change: /reload then /webhub restart)",
+  ),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   // Main-session todo staleness nudge (todo-nudge plan): all four keys are
