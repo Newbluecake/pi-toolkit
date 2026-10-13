@@ -29,6 +29,9 @@ import "./styles/control.css";
 import "./styles/dialog.css";
 // PV6 (web-hub-preview plan v3 §4.6): path-ref segments + the preview overlay.
 import "./styles/preview.css";
+// web-hub-privacy plan v2.1 (P2): the session privacy lock (lock screen / unmark dialog /
+// card affordance).
+import "./styles/privacy.css";
 // syntax-highlight (2026-10): tok-* token colors (CSS vars, light/dark per tokens.css).
 import "./styles/highlight.css";
 import IconSprite from "./icons/IconSprite.vue";

@@ -447,7 +447,7 @@ function onScrimKeydown(ev: KeyboardEvent): void {
   if (ev.key === "Tab") trapTab(ev);
 }
 
-const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay";
+const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay, .privacy-scrim";
 
 function ownsDocumentKeydown(ev: KeyboardEvent): boolean {
   const panel = panelEl.value;

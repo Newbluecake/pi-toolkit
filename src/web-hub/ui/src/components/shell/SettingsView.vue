@@ -43,12 +43,20 @@ import {
 import { useDeliverDefault, type DeliverDefault } from "../../composables/useDeliverDefault.js";
 import { useMotionPref, type MotionPref } from "../../composables/useMotionPref.js";
 import { KEEPALIVE_CHOICES, loadKeepAlive, setKeepAlivePref } from "@logic/sessionKeepAlive.js";
+import {
+  PRIVACY_TIMEOUT_MAX_MIN,
+  PRIVACY_TIMEOUT_MIN_MIN,
+  clampPrivacyTimeoutMin,
+  loadPrivacyTimeoutMin,
+  setPrivacyTimeoutMin,
+} from "@logic/privacy.js";
 import { browserLocalStorage } from "./themeStorage.js";
 import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
 import { CONTROL_ENV } from "../control/controlContext.js";
 import { isSpawnModelRef, knownModelRefs, readModelCache, writeModelCache } from "../../logic/models.js";
 import { spawnModelSupported } from "../../logic/spawn.js";
 import { SPAWN_HUB_CAP } from "@protocol/version.js";
+import { PRIVACY_HUB_CAP } from "@protocol/version.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import SettingsModelPicker from "./SettingsModelPicker.vue";
 import SettingsAvatarCard from "./SettingsAvatarCard.vue";
@@ -150,6 +158,20 @@ const hubCaps = computed<unknown>(() => {
 const spawnCap = computed(() => Array.isArray(hubCaps.value) && hubCaps.value.includes(SPAWN_HUB_CAP));
 /** No `spawn.model.v1` ⇒ disabled + upgrade hint; nothing model-shaped ever hits the wire. */
 const modelCap = computed(() => spawnModelSupported(hubCaps.value));
+
+// web-hub-privacy plan v2.1 (P2): the 「隐私锁」 card — the idle-relock timeout browser pref
+// (`pwh_privacy_timeout`, minutes 1–60, default 10; pure logic in `@logic/privacy.ts`). The
+// card renders ONLY while the hub advertises `privacy.v1` (无 cap ⇒ 零痕迹, byte-identical);
+// the phone band never locks regardless (the pref simply goes unread there). The composable
+// re-reads the pref on every idle-timer arm, so a change applies on the next interaction.
+const privacyCap = computed(() => Array.isArray(hubCaps.value) && hubCaps.value.includes(PRIVACY_HUB_CAP));
+const privTimeoutStorage = browserLocalStorage();
+const privTimeout = ref<number>(loadPrivacyTimeoutMin(privTimeoutStorage));
+function onPrivTimeoutChange(ev: Event): void {
+  const v = clampPrivacyTimeoutMin(Number((ev.target as HTMLInputElement).value));
+  privTimeout.value = v;
+  setPrivacyTimeoutMin(privTimeoutStorage, v);
+}
 
 type ModelSaveState = "idle" | "saving" | "saved" | "failed";
 const modelSaveState = ref<ModelSaveState>("idle");
@@ -289,6 +311,23 @@ function onModelSelect(value: string): void {
               <span class="settings-option-label">{{ t(opt.labelKey) }}</span>
               <AppIcon v-if="keepAlive === opt.value" name="check" class="icon-sm settings-option-check" />
             </button>
+          </div>
+        </section>
+
+        <section v-if="privacyCap" class="settings-card settings-card-wide" :aria-label="t('privacy.timeoutSection')">
+          <h2 class="settings-h">{{ t("privacy.timeoutSection") }}</h2>
+          <p class="settings-note">{{ t("privacy.timeoutHint") }}</p>
+          <div class="settings-font">
+            <input
+              type="number"
+              class="input settings-privacy-timeout"
+              :min="PRIVACY_TIMEOUT_MIN_MIN"
+              :max="PRIVACY_TIMEOUT_MAX_MIN"
+              :value="privTimeout"
+              :aria-label="t('privacy.timeoutLabel')"
+              @change="onPrivTimeoutChange"
+            />
+            <span class="settings-font-readout" aria-hidden="true">{{ t("privacy.timeoutUnit") }}</span>
           </div>
         </section>
 

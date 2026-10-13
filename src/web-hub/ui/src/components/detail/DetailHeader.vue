@@ -46,6 +46,7 @@ import { browserLocalStorage } from "../shell/themeStorage.js";
 import { managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { DetailHeaderEmits, DetailHeaderProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
+import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 import { SIDEBAR_DRAWER } from "../shell/sidebarDrawer.js";
 import "../../styles/spawn.css";
 import { cardOf, sessionOf, statusOf } from "./agentViews.js";
@@ -90,6 +91,30 @@ const title = computed(() => {
 
 const drawer = inject(SIDEBAR_DRAWER, null);
 const showBack = computed(() => props.narrow || drawer?.active.value === true);
+
+// ---------------------------------------------------------------------------
+// web-hub-privacy plan v2.1 (P2): the header lock button — the keyboard/备用 entrance next to
+// the card's hover affordance (v2.1 N1). 命名分离 (a pinned distinction): an UNMARKED session
+// gets 「隐私标记」 (persistent, calls `privacy.lock({locked:true})` — no password); a MARKED
+// session being viewed (necessarily view-unlocked — otherwise the lock screen owns the pane
+// and this header isn't mounted) gets 「立即锁定」 (pure client-side view relock, no request).
+// Desktop band + `privacy.v1` cap only; no provider / no cap / phone band ⇒ no button at all.
+// ---------------------------------------------------------------------------
+const privacy = inject(PRIVACY_LOCK_CTX, null);
+const privacyMarked = computed(() => privacy?.isMarked(props.agent.key) ?? false);
+const privacyButton = computed(
+  () => privacy !== null && privacy.enabled.value && privacy.sessionIdOf(props.agent.key) !== null,
+);
+const privacyError = computed(() => {
+  const err = privacy?.actionError.value;
+  return err !== null && err !== undefined && err.agentKey === props.agent.key ? err : null;
+});
+
+function onPrivacyClick(): void {
+  if (privacy === null) return;
+  if (privacyMarked.value) privacy.relock("manual");
+  else void privacy.mark(props.agent.key);
+}
 
 // ---------------------------------------------------------------------------
 // web-hub-spawn SP12 (arch §9.1) — additive, inject-only (the frozen DetailHeaderProps stay
@@ -258,6 +283,18 @@ function onToggleHeadInfo(): void {
         </button>
       </h2>
       <StatusPill :state="visual" :label="statusLabel" />
+      <!-- web-hub-privacy P2: 隐私标记 (unmarked → persistent mark) vs 立即锁定 (marked +
+           viewing → view relock) — the two names never mix (plan v2.1 N1 命名分离). -->
+      <button
+        v-if="privacyButton"
+        class="btn btn-ghost privacy-head-btn"
+        type="button"
+        :title="privacyMarked ? t('privacy.lockNow') : t('privacy.mark')"
+        :aria-label="privacyMarked ? t('privacy.lockNowAria') : t('privacy.markAria')"
+        @click="onPrivacyClick"
+      >
+        <AppIcon name="lock" class="icon" />
+      </button>
       <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
         t("spawn.badgeRestoring")
       }}</span>
@@ -321,6 +358,9 @@ function onToggleHeadInfo(): void {
       </template>
     </div>
 
+    <p v-if="privacyError" class="privacy-head-error" role="alert">
+      {{ t(privacyError.key, { code: privacyError.code }) }}
+    </p>
     <p v-if="stopError" class="spawn-stop-note" role="alert">
       {{ t("spawn.stopSessionFailed", { code: stopError }) }}
     </p>

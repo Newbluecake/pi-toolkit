@@ -33,6 +33,7 @@ export type IconName =
   | "key"
   | "layers"
   | "loader"
+  | "lock"
   | "logo"
   | "logout"
   | "message"
@@ -80,6 +81,7 @@ export const ICON_NAMES: readonly IconName[] = [
   "key",
   "layers",
   "loader",
+  "lock",
   "logo",
   "logout",
   "message",

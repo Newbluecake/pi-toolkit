@@ -572,8 +572,8 @@ function onScrimKeydown(ev: KeyboardEvent): void {
 // inner `stopPropagation` semantics are unchanged.
 // ---------------------------------------------------------------------------
 
-/** Every Teleport'd overlay root this dialog can stack with (PickerSheet, preview, a second picker). */
-const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay";
+/** Every Teleport'd overlay root this dialog can stack with (PickerSheet, preview, a second picker, the P2 privacy-unmark dialog). */
+const OVERLAY_ROOTS = ".spawn-scrim, .picker-scrim, .preview-overlay, .privacy-scrim";
 
 /**
  * Escape/Tab belong to this dialog only while it is the TOPMOST open overlay: teleported

@@ -4,7 +4,8 @@
   `viewBox`/path data, so `AppIcon.vue`'s `<use href="#i-<name>">` renders identically to the
   mockups (plus `monitor`/`moon`/`sun`, added in #26 W3 for the compact theme toggle, and
   `file`/`image`/`paperclip`, added by web-hub-upload U5 for the attachment tray/attach
-  button). Rendered once by `App.vue`; every icon everywhere else is `<use>`, never a second
+  button, and `lock`, added by web-hub-privacy P2 as the closed counterpart of `unlock`).
+  Rendered once by `App.vue`; every icon everywhere else is `<use>`, never a second
   copy of the paths. `names.ts`'s `ICON_NAMES` must stay in exact sync with the ids below
   (enforced by `tests/web-hub/ui/smoke.test.ts`).
 
@@ -110,6 +111,11 @@
       <path d="M12 3.5l8.5 4.5-8.5 4.5L3.5 8zM3.5 12.5l8.5 4.5 8.5-4.5M3.5 16.5l8.5 4.5 8.5-4.5" />
     </symbol>
     <symbol id="i-loader" viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" /></symbol>
+    <!-- web-hub-privacy P2: closed-lock counterpart of `i-unlock` (same rect, shackle closed). -->
+    <symbol id="i-lock" viewBox="0 0 24 24">
+      <rect x="4.5" y="11" width="15" height="10" rx="2" />
+      <path d="M8 11V7.5a4 4 0 0 1 8 0V11" />
+    </symbol>
     <symbol id="i-logo" viewBox="0 0 24 24"><path d="M5 8h14M9.5 8v10M15 8v8a2 2 0 0 0 2 2" /></symbol>
     <symbol id="i-logout" viewBox="0 0 24 24">
       <path d="M14.5 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3.5M10 16l-4-4 4-4M6 12h9.5" />

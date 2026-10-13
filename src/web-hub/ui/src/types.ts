@@ -20,7 +20,13 @@ import type { PreviewDims } from "@protocol/preview.js";
 import type { FleetRowWire, LoadGateWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
 import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
-import type { ConnState, LoadTopOutcome, PreviewTransport, WorktreeDiffTransport } from "./transport/types.js";
+import type {
+  ConnState,
+  LoadTopOutcome,
+  PreviewTransport,
+  PrivacyTransport,
+  WorktreeDiffTransport,
+} from "./transport/types.js";
 import type {
   RemoveAgentOutcome,
   RemoveTarget,
@@ -430,6 +436,11 @@ export interface HubHandle {
    * them (the drawer then renders its not-connected state). */
   readonly selectRun?: (agentKey: string, runId: string | null) => void;
   readonly pageRun?: (agentKey: string) => void;
+  /** web-hub-privacy plan v2.1 (P2): the `/api/privacy/*` call surface (`verify` is LAN-only,
+   * `lock` rides both listeners). Optional per the frozen-types convention — `useHub` provides
+   * it iff the underlying transport does; `usePrivacyLock` treats its absence as "unlock/mark
+   * actions unavailable" (the chrome itself is gated on the hub's `privacy.v1` cap). */
+  readonly privacy?: PrivacyTransport;
   /** web-hub-delete-session plan v2 §5.3/§5.4: `POST /api/agents/remove`, called from
    * `RemoveButton.vue`. Optional per the frozen-types convention — `useHub` always provides
    * it (degrading to `E_UNSUPPORTED` when the transport lacks `removeAgent`); component-level

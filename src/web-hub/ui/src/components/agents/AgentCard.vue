@@ -12,6 +12,7 @@ import { formatPercent } from "../../format.js";
 import { isFreshlyRestored, managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { AgentCardProps } from "../../contracts.js";
 import { HUB_CTX } from "../control/controlContext.js";
+import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 
 const props = defineProps<AgentCardProps>();
 const i18n = useI18n();
@@ -25,6 +26,34 @@ const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
   return Array.isArray(dialogs?.open) && dialogs.open.length > 0;
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-privacy plan v2.1 (P2): the 标记入口 — a lock affordance on the card. 锁定态常显
+// (a marked session ALWAYS shows the closed lock; clicking it opens the 取消标记 dialog — LAN
+// password / loopback confirm); 未锁定悬停显示 (`.privacy-lock-btn[data-marked="false"]` is
+// opacity-0 until hover/focus-within in privacy.css — keyboard focus reveals it too). Desktop
+// band + `privacy.v1` cap only (`usePrivacyLock`'s `enabled`); no provider / no cap / phone
+// band ⇒ nothing renders (byte-level zero trace). The ask_user needsAnswer badge is NOT
+// gated on the lock (plan: 卡片保留 needsAnswer 徽标,内容解锁后才可见).
+// ---------------------------------------------------------------------------
+const privacy = inject(PRIVACY_LOCK_CTX, null);
+const privacyMarked = computed(() => privacy?.isMarked(props.card.key) ?? false);
+const privacyAffordance = computed(
+  () => privacy !== null && privacy.enabled.value && privacy.sessionIdOf(props.card.key) !== null,
+);
+const privacyError = computed(() => {
+  const err = privacy?.actionError.value;
+  return err !== null && err !== undefined && err.agentKey === props.card.key ? err : null;
+});
+
+/** The affordance click: marked ⇒ open the 取消标记 dialog; unmarked ⇒ 「隐私标记」 directly
+ *  (locking is not a sensitive operation — no password, plan v2 评审 #2). `.prevent.stop` on
+ *  the click keeps the enclosing <a> from navigating. */
+function onPrivacyClick(): void {
+  if (privacy === null) return;
+  if (privacyMarked.value) privacy.requestUnmark(props.card.key);
+  else void privacy.mark(props.card.key);
+}
 
 // web-hub-spawn SP12 (arch §9.1): a non-terminal spawn record managing this card's agent adds
 // the `web` badge — same inject channel as needsAnswer (the frozen props stay untouched).
@@ -77,7 +106,23 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       <span v-if="managed?.removing" class="chip chip-removing" translate="no">
         {{ t("agents.removing") }}
       </span>
+      <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
+           `data-marked`). The click never navigates the card's <a>. -->
+      <button
+        v-if="privacyAffordance"
+        type="button"
+        class="privacy-lock-btn"
+        :data-marked="privacyMarked ? 'true' : 'false'"
+        :aria-label="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.markAria')"
+        :title="privacyMarked ? `${t('privacy.badgeMarked')} — ${t('privacy.unmarkTitle')}` : t('privacy.mark')"
+        @click.prevent.stop="onPrivacyClick"
+      >
+        <AppIcon :name="privacyMarked ? 'lock' : 'unlock'" class="icon-sm" />
+      </button>
       <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
+    </span>
+    <span v-if="privacyError" class="privacy-card-error" role="alert">
+      {{ t(privacyError.key, { code: privacyError.code }) }}
     </span>
 
     <span class="agent-session" :class="{ mono: card.sessionLabel === t('agents.noSessionName') }" translate="no">{{

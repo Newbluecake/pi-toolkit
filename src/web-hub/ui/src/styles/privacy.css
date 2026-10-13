@@ -1,0 +1,194 @@
+/**
+ * web-hub-privacy plan v2.1 (package P2): the session privacy lock —
+ * `.privacy-lock*` (the lock screen that REPLACES the AgentDetail subtree on a locked,
+ * non-view-unlocked session, desktop band only), `.privacy-scrim`/`.privacy-unmark*` (the
+ * 取消标记 dialog), and `.privacy-lock-btn`/`.privacy-badge` (the AgentCard affordance).
+ * Token/spacing/color reuse only (tokens.css); no new color values.
+ */
+
+/* --- lock screen (fills the detail pane; DashboardView wraps it in `.detail`) ------------ */
+
+.privacy-lock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: var(--sp-4);
+}
+
+.privacy-lock-card {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-3);
+  width: min(420px, 100%);
+  padding: var(--sp-6) var(--sp-5);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+  text-align: center;
+}
+
+.privacy-lock-icon {
+  display: inline-flex;
+  padding: var(--sp-3);
+  border-radius: 50%;
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+}
+
+.privacy-lock-icon .icon {
+  width: 28px;
+  height: 28px;
+}
+
+.privacy-lock-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.privacy-lock-session {
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+  font-weight: 500;
+}
+
+.privacy-lock-body {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.privacy-lock-form {
+  width: 100%;
+  display: grid;
+  gap: var(--sp-2);
+  text-align: start;
+}
+
+.privacy-lock-hint {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.privacy-lock-confirm {
+  min-width: 12em;
+}
+
+/* --- unmark dialog (Teleport'd to <body>; z-index above preview overlay 60 — it can be
+       opened over an open preview from the card underneath) -------------------------------- */
+
+.privacy-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--sp-4);
+  padding-top: max(clamp(var(--sp-6), 12vh, 128px), env(safe-area-inset-top));
+  padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
+  background: rgb(19 32 38 / 0.45);
+}
+
+.privacy-unmark {
+  display: grid;
+  gap: var(--sp-3);
+  width: min(440px, calc(100vw - 2 * var(--sp-4)));
+  max-height: calc(100dvh - clamp(var(--sp-6), 12vh, 128px) - var(--sp-4) - env(safe-area-inset-bottom));
+  overflow-y: auto;
+  padding: var(--sp-4);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+}
+
+.privacy-unmark-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.privacy-unmark-body {
+  margin: 0;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.privacy-unmark-form {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.privacy-unmark-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* --- AgentCard affordance ------------------------------------------------------------------
+   锁定态常显（`.privacy-badge` is a plain chip, no interaction ambiguity）；未锁定的卡片
+   悬停/聚焦时才露出 `.privacy-lock-btn`（键盘聚焦同样可见，focus-within 覆盖 Tab 到达）。 */
+
+.privacy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--c-text-3);
+}
+
+.privacy-lock-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-3);
+  cursor: pointer;
+}
+
+/* hover-reveal only while UNMARKED (the marked badge/button is always visible) */
+.agent-card .privacy-lock-btn[data-marked="false"] {
+  opacity: 0;
+}
+
+.agent-card:hover .privacy-lock-btn[data-marked="false"],
+.agent-card:focus-within .privacy-lock-btn[data-marked="false"],
+.privacy-lock-btn[data-marked="false"]:focus-visible {
+  opacity: 1;
+}
+
+.privacy-lock-btn:hover,
+.privacy-lock-btn:focus-visible {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.privacy-card-error {
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
+/* DetailHeader's 标记 / 立即锁定 button rides the existing `btn btn-ghost` chrome (same as
+   the stop button) — only its inline error note needs a class. */
+.privacy-head-error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}

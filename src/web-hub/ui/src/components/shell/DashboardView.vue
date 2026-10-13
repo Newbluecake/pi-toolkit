@@ -32,9 +32,10 @@
   *parsed* (`parseRouteHash`'s existing behavior, unchanged) on the way to being redirected away.
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
+import { computed, inject, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
+import { usePrivacyLock } from "../../composables/usePrivacyLock.js";
 import { createScrollMemory, SCROLL_MEMORY } from "../../composables/useScrollMemory.js";
 import { useSidebarWidth } from "../../composables/useSidebarWidth.js";
 import { SIDEBAR_RAIL_WIDTH, useSidebarCollapse } from "../../composables/useSidebarCollapse.js";
@@ -45,6 +46,11 @@ import { restoringKeys } from "../../logic/spawn.js";
 import { toAgentCardView } from "../agents/agentCardModel.js";
 import AgentList from "../agents/AgentList.vue";
 import AgentDetail from "../detail/AgentDetail.vue";
+import { CONTROL_ENV } from "../control/controlContext.js";
+import { PREVIEW_CTX } from "../preview/previewContext.js";
+import PrivacyLockScreen from "../privacy/PrivacyLockScreen.vue";
+import PrivacyUnmarkDialog from "../privacy/PrivacyUnmarkDialog.vue";
+import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 import EmptyState from "./EmptyState.vue";
 import { SIDEBAR_DRAWER } from "./sidebarDrawer.js";
 import { browserLocalStorage } from "./themeStorage.js";
@@ -56,6 +62,48 @@ const narrow = useMedia(window, "(max-width: 767px)").matches;
 const wide = useMedia(window, "(min-width: 1025px)").matches;
 const drawerBand = useMedia(window, "(min-width: 481px) and (max-width: 1024px)").matches;
 
+// ---------------------------------------------------------------------------
+// web-hub-privacy plan v2.1 (P2): the session privacy lock. The ONE `usePrivacyLock` handle
+// is created here — P0: the gate lives at THIS level (a locked, non-view-unlocked viewed
+// session never mounts <AgentDetail>; `PrivacyLockScreen` replaces that whole subtree) — and
+// provided to AgentCard (badge/标记入口), DetailHeader (标记/立即锁定) and SettingsView via
+// PRIVACY_LOCK_CTX. 仅桌面 band (≥768px, i.e. `!narrow`) 生效 — the phone band ignores the
+// privacy slot entirely (用户裁决 2026-10-13). `onRelock` closes the App-level preview dialog;
+// every other overlay of the locked session (wtdiff/graph dialogs, AskUserForm, FleetDrawer,
+// DetailDock's cmdResult) lives INSIDE AgentDetail and dies with its unmount. Standalone
+// mounts without CONTROL_ENV degrade to the token variant (click-to-confirm — never a fake
+// password box, and `verify` is never fired).
+// ---------------------------------------------------------------------------
+const controlEnv = inject(CONTROL_ENV, null);
+const previewCtx = inject(PREVIEW_CTX, null);
+const privacyMode = controlEnv?.authMode ?? "token";
+const privacy = usePrivacyLock({
+  hub: props.hub,
+  mode: privacyMode,
+  desktop: computed(() => !narrow.value),
+  route: computed(() => props.route),
+  storage: browserLocalStorage(),
+  win: window,
+  doc: document,
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (h) => window.clearTimeout(h),
+  onRelock: () => previewCtx?.handle.close(),
+});
+provide(PRIVACY_LOCK_CTX, privacy);
+
+/** The lock screen's session title (name → sessionId prefix → 「(no session name)」 — the same
+ *  fallback chain `DetailHeader.vue` uses). The ONLY session fact the lock screen shows. */
+const privacyTitle = computed(() => {
+  const a = selectedAgent.value;
+  const s = a?.session;
+  if (s !== null && typeof s === "object") {
+    const name = (s as { name?: unknown }).name;
+    if (typeof name === "string" && name !== "") return name;
+    const sid = (s as { sessionId?: unknown }).sessionId;
+    if (typeof sid === "string" && sid !== "") return sid.slice(0, 8);
+  }
+  return t("agents.noSessionName");
+});
 
 // ---------------------------------------------------------------------------
 // draggable sidebar width (desktop ≥1025px split only — `useSidebarWidth.ts`)
@@ -273,16 +321,32 @@ function onLoadOlder(agentKey: string): void {
       <!-- `:key` 必须保留（2026-10-07 回归修复）：AgentDetail 的 setup 把 agentKey 作为静态
            字符串捕获进 provide（CONTROL_VIEW/CONTROL_CTX），没有 key 时切会话不重建实例，
            发消息/切模型/草稿全部路由到第一个打开的会话。 -->
-      <AgentDetail
-        v-if="selectedAgent"
-        :key="selectedAgent.key"
-        :agent="selectedAgent"
-        :now="ticker.now.value"
-        :narrow="false"
-        @back="onBack"
-        @retry="onRetry(selectedAgent!.key)"
-        @load-older="onLoadOlder(selectedAgent!.key)"
-      />
+      <!-- web-hub-privacy P2 (P0 门控): fail-closed 窗口（cap 在、privacy 帧未到）不渲染任何
+           会话详情；锁定且未视图解锁 ⇒ PrivacyLockScreen 整棵替换 AgentDetail。 -->
+      <template v-if="selectedAgent">
+        <div v-if="privacy.failClosed.value" class="detail" data-privacy="fail-closed">
+          <EmptyState icon="loader" :title="t('detail.loadingTitle')" :body="t('detail.loadingBody')" />
+        </div>
+        <div v-else-if="privacy.isViewLocked(selectedAgent.key)" class="detail">
+          <PrivacyLockScreen
+            :title="privacyTitle"
+            :mode="privacyMode"
+            :busy="privacy.screenBusy.value"
+            :error="privacy.screenError.value"
+            @unlock="privacy.unlock(selectedAgent!.key, $event)"
+          />
+        </div>
+        <AgentDetail
+          v-else
+          :key="selectedAgent.key"
+          :agent="selectedAgent"
+          :now="ticker.now.value"
+          :narrow="false"
+          @back="onBack"
+          @retry="onRetry(selectedAgent!.key)"
+          @load-older="onLoadOlder(selectedAgent!.key)"
+        />
+      </template>
       <div v-else-if="selectedRestoring" class="detail" data-restoring="">
         <EmptyState icon="loader" :title="t('spawn.restoringTitle')" :body="t('spawn.restoringBody')" />
       </div>
@@ -309,16 +373,32 @@ function onLoadOlder(agentKey: string): void {
     </template>
 
     <template v-else-if="route.name === 'agent'">
-      <AgentDetail
-        v-if="selectedAgent"
-        :key="selectedAgent.key"
-        :agent="selectedAgent"
-        :now="ticker.now.value"
-        :narrow="narrow"
-        @back="onBack"
-        @retry="onRetry(selectedAgent!.key)"
-        @load-older="onLoadOlder(selectedAgent!.key)"
-      />
+      <!-- web-hub-privacy P2: same gate as the wide branch above (the 768–1024 mid band is
+           desktop for privacy; the phone band never reaches it — `enabled` is false there). -->
+      <template v-if="selectedAgent">
+        <div v-if="privacy.failClosed.value" class="detail" data-privacy="fail-closed">
+          <EmptyState icon="loader" :title="t('detail.loadingTitle')" :body="t('detail.loadingBody')" />
+        </div>
+        <div v-else-if="privacy.isViewLocked(selectedAgent.key)" class="detail">
+          <PrivacyLockScreen
+            :title="privacyTitle"
+            :mode="privacyMode"
+            :busy="privacy.screenBusy.value"
+            :error="privacy.screenError.value"
+            @unlock="privacy.unlock(selectedAgent!.key, $event)"
+          />
+        </div>
+        <AgentDetail
+          v-else
+          :key="selectedAgent.key"
+          :agent="selectedAgent"
+          :now="ticker.now.value"
+          :narrow="narrow"
+          @back="onBack"
+          @retry="onRetry(selectedAgent!.key)"
+          @load-older="onLoadOlder(selectedAgent!.key)"
+        />
+      </template>
       <div v-else-if="selectedRestoring" class="detail" data-restoring="">
         <EmptyState icon="loader" :title="t('spawn.restoringTitle')" :body="t('spawn.restoringBody')" />
       </div>
@@ -340,5 +420,17 @@ function onLoadOlder(agentKey: string): void {
         </EmptyState>
       </div>
     </template>
+
+    <!-- web-hub-privacy P2 (v2.1 N1): the 取消标记 dialog — LAN asks for the LAN password
+         (request-scoped only), loopback asks for a plain confirmation. Hosted here (Teleports
+         to <body>); opened from the AgentCard lock affordance / DetailHeader. -->
+    <PrivacyUnmarkDialog
+      v-if="privacy.unmarkTarget.value !== null"
+      :mode="privacyMode"
+      :busy="privacy.unmarkBusy.value"
+      :error="privacy.unmarkError.value"
+      @confirm="privacy.confirmUnmark($event)"
+      @close="privacy.cancelUnmark()"
+    />
   </div>
 </template>

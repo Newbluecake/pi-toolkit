@@ -844,6 +844,10 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // already no-ops without it, but the raw call surface rides along too (frozen-types
     // convention: every transport-gated surface is both directly exposed AND wrapped).
     ...(transport.loadTop === undefined ? {} : { loadTop: transport.loadTop }),
+    // web-hub-privacy plan v2.1 (P2): same passthrough rule — the `/api/privacy/*` surface
+    // rides the handle iff the transport offers it (a test fake without it simply has no
+    // unlock/mark call path; the UI chrome itself gates on the hub's `privacy.v1` cap).
+    ...(transport.privacy === undefined ? {} : { privacy: transport.privacy }),
     dispatch,
     transport,
     loadOlder,
