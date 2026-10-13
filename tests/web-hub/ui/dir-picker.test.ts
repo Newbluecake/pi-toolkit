@@ -820,6 +820,72 @@ describe("DirPicker.vue — 输入联动 (spawn-browse-follow)", () => {
     expect(q(".spawn-browse-row").textContent).toContain("B");
   });
 
+  it("a follow fetch keeps the current listing on screen while in flight — no loading swap (anti-jitter, 2026-10-13)", async () => {
+    const p = deferredPreview();
+    const h = followHarness(p);
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    p.answer({
+      ok: true,
+      kind: "dir",
+      listing: listing([
+        { name: "a", type: "dir" },
+        { name: "b", type: "dir" },
+        { name: "c", type: "dir" },
+      ]),
+    });
+    await flushPromises();
+    expect(qa(".spawn-browse-row")).toHaveLength(3);
+
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/other");
+    await sleep(320); // follow fetch now in flight
+    expect(p.calls).toHaveLength(2);
+    // 在途期间：列表/路径条保持原样，loading 行不接管（弹窗高度不变 = 不抖）
+    expect(qa(".spawn-browse-row")).toHaveLength(3);
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj");
+    expect(document.body.querySelector(".spawn-browse .spawn-picker-status")).toBeNull();
+    expect(document.body.querySelector(".spawn-browse-follow-busy.is-active")).not.toBeNull(); // bar spinner
+
+    p.answer({ ok: true, kind: "dir", listing: listing([{ name: "deep", type: "dir" }]) });
+    await flushPromises();
+    expect(qa(".spawn-browse-row")).toHaveLength(1);
+    expect(q(".spawn-browse-row").textContent).toContain("deep");
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/other");
+    expect(document.body.querySelector(".spawn-browse-follow-busy.is-active")).toBeNull();
+  });
+
+  it("a failing follow keeps the hint steady across keystrokes (cleared by success or by re-matching the panel path)", async () => {
+    const p = deferredPreview();
+    const h = followHarness(p);
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    p.answer({ ok: true, kind: "dir", listing: listing([{ name: "sub", type: "dir" }]) });
+    await flushPromises();
+
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/g1");
+    await sleep(320);
+    p.answer({ ok: false, error: "E_NOT_FOUND", status: 404 });
+    await flushPromises();
+    expect(q(".spawn-browse-follow-note")).not.toBeNull();
+
+    // 继续敲到另一个失败路径：新 fetch 在途期间 hint 不闪（保持显示）
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/g2");
+    await sleep(320);
+    expect(p.calls).toHaveLength(3);
+    expect(q(".spawn-browse-follow-note")).not.toBeNull(); // 在途仍显示
+    p.answer({ ok: false, error: "E_NOT_FOUND", status: 404 });
+    await flushPromises();
+    expect(q(".spawn-browse-follow-note")).not.toBeNull();
+
+    // 输入回到面板当前路径 ⇒ 提示清除且不发请求
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/proj");
+    await sleep(320);
+    expect(p.calls).toHaveLength(3);
+    expect(document.body.querySelector(".spawn-browse-follow-note")).toBeNull();
+  });
+
   it("「选择此目录」 writes the input AFTER closing — no follow loop, no extra fetch", async () => {
     const p = deferredPreview();
     const h = followHarness(p);

@@ -217,18 +217,24 @@ function classifyBrowseError(out: { readonly error: string }): string {
   }
 }
 
-/** spawn-browse-follow: follow-mode load — a failure REVERTS to the previous path/listing
- *  (the panel stays where it was) and raises the light hint instead of the full error phase. */
+/** spawn-browse-follow: follow-mode load — with a listing already on screen the panel keeps
+ *  showing it for the WHOLE fetch (anti-jitter, 2026-10-13 用户报告: 输路径每敲一个字母弹窗抖一下 —
+ *  blanking up to 240px of rows for a one-line loading status re-centers the dialog twice per
+ *  debounced fetch); a small bar spinner marks the in-flight follow, only a SUCCESS swaps
+ *  path+listing, and a failure leaves the panel where it was with the light hint line. */
 async function browseLoad(path: string, opts?: { follow?: boolean }): Promise<void> {
   const follow = opts?.follow === true;
   const preview = hub?.preview;
   const sess = browseSession.value;
   const prevPath = browsePath.value;
   const prevListing = browseListing.value;
-  browsePath.value = path;
-  browseListing.value = null;
+  const keepContent = follow && prevListing !== null && preview !== undefined && sess !== null;
+  if (!keepContent) {
+    browsePath.value = path;
+    browseListing.value = null;
+    if (follow) followHint.value = false; // legacy blank-load: clear at start
+  }
   browseErrorKey.value = null;
-  if (follow) followHint.value = false;
   if (preview === undefined || sess === null) {
     browsePhase.value = "error";
     browseErrorKey.value = "spawn.browseErrUnsupported";
@@ -238,26 +244,38 @@ async function browseLoad(path: string, opts?: { follow?: boolean }): Promise<vo
   browseAbort?.abort();
   const ac = new AbortController();
   browseAbort = ac;
-  browsePhase.value = "loading";
+  if (keepContent) {
+    followBusy.value = true;
+  } else {
+    followBusy.value = false;
+    browsePhase.value = "loading";
+  }
   const out = await preview.fetch(
     { agentKey: sess.agentKey, sessionId: sess.sessionId, path, dir: true },
     { signal: ac.signal, maxPixels: PREVIEW_IMAGE_MAX_PIXELS },
   );
   if (seq !== browseSeq) return; // superseded by a newer navigation — drop the late answer
+  followBusy.value = false;
+  if (out.ok && out.kind === "dir") {
+    browsePath.value = path; // keepContent: the panel moves only NOW — zero mid-flight shift
+    browseListing.value = out.listing;
+    browsePhase.value = "ready";
+    followHint.value = false; // 成功才清提示（在途/失败期间保持，防逐字闪烁）
+    return;
+  }
   if (out.ok) {
-    if (out.kind === "dir") {
-      browseListing.value = out.listing;
-      browsePhase.value = "ready";
-    } else {
-      // a hub answering a file/text kind to a dir=1 ask is out of contract — unsupported line
-      browsePhase.value = "error";
-      browseErrorKey.value = "spawn.browseErrUnsupported";
+    // a hub answering a file/text kind to a dir=1 ask is out of contract — keepContent stays put
+    if (keepContent) {
+      followHint.value = true;
+      return;
     }
+    browsePhase.value = "error";
+    browseErrorKey.value = "spawn.browseErrUnsupported";
     return;
   }
   if (out.error === "E_ABORT") return; // our own supersede/close abort — stay silent
   if (follow) {
-    // 跟随失败: 面板停在原地（回滚路径/列表）+ 一行轻提示，不抢焦点不刷屏
+    // 跟随失败: 面板停在原地（路径/列表保持）+ 一行轻提示，不抢焦点不刷屏
     browsePath.value = prevPath;
     browseListing.value = prevListing;
     browsePhase.value = "ready";
@@ -276,6 +294,8 @@ async function browseLoad(path: string, opts?: { follow?: boolean }): Promise<vo
 // there is no loop); with the panel OPEN a recent-dir click intentionally follows too.
 // ---------------------------------------------------------------------------
 const followHint = ref(false);
+/** Anti-jitter in-flight marker (spinner in the browse bar) — see browseLoad's keepContent path. */
+const followBusy = ref(false);
 let followTimer: ReturnType<typeof setTimeout> | null = null;
 
 watch(cwd, () => {
@@ -285,7 +305,11 @@ watch(cwd, () => {
     followTimer = null;
     if (!browseOpen.value) return;
     const path = cwd.value.trim();
-    if (path === "" || path === browsePath.value) return; // nothing to do
+    if (path === "") return; // nothing to do
+    if (path === browsePath.value) {
+      followHint.value = false; // 输入与面板重新一致 ⇒ 提示失去意义
+      return;
+    }
     if (/[\0\r\n]/.test(path)) return; // 非法字符不发请求
     void browseLoad(path, { follow: true });
   }, 300);
@@ -308,6 +332,7 @@ function browseToggle(): void {
 function browseClose(): void {
   browseOpen.value = false;
   followHint.value = false;
+  followBusy.value = false;
   if (followTimer !== null) {
     clearTimeout(followTimer);
     followTimer = null;
@@ -644,6 +669,15 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
                 <AppIcon name="arrow-up" class="icon-sm" />{{ t("spawn.browseUp") }}
               </button>
               <span class="spawn-browse-path" :title="browsePath" translate="no">{{ browsePath }}</span>
+              <!-- 常驻槽位 + visibility 切换：spinner 出现/消失不引起任何布局位移 -->
+              <span
+                class="spawn-browse-follow-busy"
+                :class="{ 'is-active': followBusy }"
+                role="status"
+                :aria-label="t('spawn.browseLoading')"
+              >
+                <AppIcon name="loader" class="icon-sm spin" />
+              </span>
               <button
                 v-if="!mkdirOpen"
                 class="btn btn-ghost btn-xs spawn-mkdir-open"
