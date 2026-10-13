@@ -196,6 +196,10 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
   }
   const uiLines = control.ui.statusLines();
   notifyAll(ctx, uiLines, uiLines[0]?.startsWith("ui=ok") ? "info" : "warning");
+  // web-hub-privacy plan v2.1 (P3): privacy-lock lines ride the same hub.json read; the first
+  // line decides the level exactly like lan/ui above (`privacy=on` ⇒ info, warnings ⇒ warning).
+  const privacyLines = control.privacy.statusLines();
+  notifyAll(ctx, privacyLines, privacyLines[0]?.startsWith("privacy=on") ? "info" : "warning");
 }
 
 async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {

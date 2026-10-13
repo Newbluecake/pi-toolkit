@@ -53,8 +53,10 @@ import { createRunTranscripts, type RunTranscriptPort } from "./run-transcript.j
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
+import { formatPrivacyStatusLines } from "./privacy-status.js";
 import { packageUiDistDir } from "../protocol/paths.js";
 import type { UiStatus } from "../hub/ui-root.js";
+import type { PrivacyHubStatus } from "../protocol/privacy.js";
 import { resolveJitiCli, spawnHub, type LauncherPlan } from "./launcher.js";
 import { MaskedInputComponent, runPasswdPrompt, type PasswdOutcome } from "./passwd-prompt.js";
 import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
@@ -302,6 +304,10 @@ export interface WebHubControl {
   };
   /** vue-plan.md v2.1 §2.3（P5b）：Vue UI 状态行，同样直接读 `hub.json`（无需 admin socket）。 */
   ui: {
+    statusLines(): string[];
+  };
+  /** web-hub-privacy plan v2.1（P3）：隐私锁状态行，同样直接读 `hub.json`（无需 admin socket）。 */
+  privacy: {
     statusLines(): string[];
   };
 }
@@ -1271,6 +1277,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     argv?: string[];
     lan?: LanStatus;
     ui?: UiStatus;
+    privacy?: PrivacyHubStatus;
   }
 
   const readHubJsonRecord = (): HubJsonSnapshot | undefined => {
@@ -1286,6 +1293,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       // structural validation only — a malformed `ui` (old hub, corrupt write) is treated as
       // "absent" (agent/ui-status.ts's `formatUiStatusLines` fallback path), never thrown.
       if (isStructurallyUiStatus(parsed.ui)) rec.ui = parsed.ui as UiStatus;
+      // privacy (plan v2.1 P3): same structural-only treatment — malformed ⇒ absent.
+      if (isStructurallyPrivacyStatus(parsed.privacy)) rec.privacy = parsed.privacy;
       return rec;
     } catch {
       return undefined;
@@ -1311,6 +1320,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     return false;
   }
 
+  /** privacy 字段的同型结构校验（plan v2.1 P3）——只查 `formatPrivacyStatusLines` 会读的字段。 */
+  function isStructurallyPrivacyStatus(v: unknown): v is PrivacyHubStatus {
+    if (v === null || typeof v !== "object") return false;
+    const o = v as Record<string, unknown>;
+    return typeof o.degraded === "boolean";
+  }
+
   /** §2.3 pi 侧提示：`hub.json` 的 `ui` 字段（hub 未运行/旧 hub 时缺失 ⇒ 回退本地
    * `existsSync` 检查）。 */
   const uiStatusLines = (): string[] => {
@@ -1330,6 +1346,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       settingsEnabled: settings.lan?.enabled === true,
       ...(rec?.pid !== undefined ? { hubPid: rec.pid } : {}),
       paths: lanPaths,
+    });
+  };
+
+  /** web-hub-privacy plan v2.1（P3）：隐私锁状态行，同样直接读 `hub.json`。 */
+  const privacyStatusLines = (): string[] => {
+    const rec = readHubJsonRecord();
+    return formatPrivacyStatusLines(rec?.privacy, {
+      settingsEnabled: settings.privacy === true,
+      hasHubRecord: rec !== undefined,
     });
   };
 
@@ -1473,6 +1498,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     ui: {
       statusLines: uiStatusLines,
+    },
+    privacy: {
+      statusLines: privacyStatusLines,
     },
   };
 }

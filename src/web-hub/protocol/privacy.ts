@@ -46,3 +46,12 @@ export interface PrivacyVerifyResult {
 export interface PrivacyLockResult {
   ok: boolean;
 }
+
+/** `hub.json`'s `privacy` field shape (plan v2.1 P3): the hub writes it only when
+ * `config.privacy === true` (feature off ⇒ key absent, hub.json byte-identical); `degraded`
+ * mirrors `hub/privacy/store.ts`'s load-time flag (corrupt `privacy.json` ⇒ renamed `.bak`,
+ * marks cleared). Read by the agent side's `/webhub status` (`agent/privacy-status.ts`) — it
+ * lives HERE, in protocol/, because the agent layer may not import `../hub/**`. */
+export interface PrivacyHubStatus {
+  readonly degraded: boolean;
+}

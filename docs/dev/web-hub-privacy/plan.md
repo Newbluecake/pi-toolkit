@@ -2,6 +2,7 @@
 
 状态：v2.1（2026-10-13，按复审 r_X9GBY3TX 的轻量打回修订：N1 取消标记路径、N3 R4 诚实化、N4 帧管线入拆包、N5 fork 时序提前、N6–N9 小项）。
 v1 评审（r_GDBGK5S6）：打回——P0 + 6 P1，v2 已全部落实。
+实施：P1 hub / P2 UI / P3 收尾均已提交（2026-10-13）。
 
 ## 需求裁决（用户四问，2026-10-13，不变）
 
@@ -35,7 +36,7 @@ v1 评审（r_GDBGK5S6）：打回——P0 + 6 P1，v2 已全部落实。
 - `POST /api/privacy/lock` `{ agentKey, sessionId, locked, password? }`：
   - `locked:true`：直接生效（标记不需要密码——把东西锁起来不是敏感操作）。
   - `locked:false`：**LAN 上**必须内联 `password`，服务端当场校验后才解除（评审 #2：这才是服务端强制执行点）；**loopback 上不要求 password**（v2.1 N1：token 模式无第二凭证，与「点击确认查看」同强度，按 listener 分支）。
-  - **sessionId 一致性校验**（评审 #5）：与 preview 的 ⑤ 先例相同——hub 校验该 agent 当前 `session.sessionId === sessionId`，不符返回 `409 E_SESSION_CHANGED`（**复用** `API_ERRORS` 已有码，http-contract.ts:79；agent 无 session 时同码处理），防止「看到 A 点锁、期间 /new、锁落到新会话」的竞态。
+  - **sessionId 一致性校验**（评审 #5）：与 preview 的 ⑤ 先例相同——hub 校验该 agent 当前 `session.sessionId === sessionId`，不符返回 `409 E_SESSION_CHANGED`（**复用** `API_ERRORS` 已有码，http-contract.ts:85；agent 无 session 时同码处理），防止「看到 A 点锁、期间 /new、锁落到新会话」的竞态。
 - `POST /api/privacy/verify` **loopback 上不挂**（404）——它没有密码可验（v2.1 N1）。
 - **取消标记的 UI 流程**（v2.1 N1）：LAN 上「移除隐私标记」走独立密码弹窗（密码只存在于该请求内，不缓存、不复用查看解锁的任何状态）；loopback 上是一个确认对话框。**命名区分两个动作**：「隐私标记」（持久，卡片/头部操作）vs「立即锁定」（视图回锁，详情头部按钮）——i18n 文案分开，不混用。
 - **标记入口补触屏路径**（v2.1 N1；v2.1+ 用户裁决后弱化）：卡片锁标悬停显示是桌面便利；详情头部保留锁按钮作为键盘/备用入口。**手机 band 整体不启用本功能**（见「客户端行为」），不再需要专门的触屏设计。

@@ -1493,6 +1493,13 @@ export async function startHub(
       initialSpawn = spawnStatusOf(spawnSup);
       lastSpawnStatus = initialSpawn;
     }
+    // web-hub-privacy plan v2.1 (P3): surface the store's load-time `degraded` flag through
+    // hub.json so `/webhub status` can warn about a corrupted-then-renamed privacy.json. The
+    // store loads once at boot (above, before spawn assembly), so the flag rides the FIRST
+    // write() — no patchPrivacy needed. Key absent when the feature is off (hub.json stays
+    // byte-identical to a hub without the feature).
+    const initialPrivacy =
+      config.privacy === true && privacyStore !== undefined ? { degraded: privacyStore.degraded } : undefined;
     const identity = await startupStep(identityFields());
     // No await separates this gate from hub.json and the running log publication.
     if (closing !== undefined) return await closedResult();
@@ -1509,6 +1516,7 @@ export async function startHub(
       ...identity,
       ...(initialLan === undefined ? {} : { lan: initialLan }),
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
+      ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),
       ui: initialUi,
     }); // ⑦
 

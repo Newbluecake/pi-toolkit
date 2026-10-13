@@ -493,6 +493,16 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   bounded IO/concurrency, CSRF/auth/rate limits, full-digest ETags, generation-ordered SSE updates, and
   exactly-once audit records are invariants; gates are `tests/web-hub/http/{api-avatar,lan-avatar}.test.ts`,
   `tests/web-hub/hub/{caps-coexist,deadline-nesting}.test.ts`, and the real-device acceptance in the plan.
+  **Privacy lock (web-hub-privacy plan v2.1, `webHub.privacy`, default on)**: per-sessionId view-time
+  re-verification against shoulder-surfing — marks live in `<stateDir>/privacy.json`
+  (`hub/privacy/{store,routes}.ts`, 0600 atomic writes, E_LIMIT over 4096, corrupt ⇒ `.bak` + degraded),
+  `POST /api/privacy/{lock,verify}` (verify is LAN-only; unlock on LAN requires the inline password, on
+  loopback it degrades honestly to click-to-confirm), the `privacy` SSE frame is direct-send only (never in
+  the replay ring, ordered before `agents`), and hub-initiated forks inherit the mark BEFORE spawn. The UI
+  locks only on the desktop band (≥768px; the mobile band ignores the frames entirely), relocks four ways
+  (route change / idle timeout / manual / tab hidden), and an old hub without `privacy.v1` leaves the UI
+  byte-identical. `/webhub status` renders the on/off + degraded + loopback-difference lines off
+  `hub.json.privacy` (`agent/privacy-status.ts`). Design: `docs/dev/web-hub-privacy/plan.md`.
   **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
   the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
   planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product

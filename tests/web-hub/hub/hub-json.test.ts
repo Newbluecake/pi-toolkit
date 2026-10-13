@@ -225,3 +225,30 @@ describe("createHubJsonWriter (plan §1.4.2)", () => {
     }
   });
 });
+
+describe("hub.json privacy field (web-hub-privacy plan v2.1, P3)", () => {
+  it("write() round-trips the privacy summary verbatim", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      const w = createHubJsonWriter(file, memLog());
+      w.write(baseRecord({ privacy: { degraded: true } }));
+      const onDisk = JSON.parse(readFileSync(file, "utf8")) as HubRecord;
+      expect(onDisk.privacy).toEqual({ degraded: true });
+      expect(w.current()?.privacy).toEqual({ degraded: true });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a record without privacy stays without the key (feature-off byte-compat)", () => {
+    const { file, cleanup } = tmpFile();
+    try {
+      const w = createHubJsonWriter(file, memLog());
+      w.write(baseRecord());
+      const raw = readFileSync(file, "utf8");
+      expect("privacy" in (JSON.parse(raw) as Record<string, unknown>)).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+});

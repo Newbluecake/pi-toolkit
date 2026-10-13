@@ -22,6 +22,7 @@ import type { LanStatus } from "../protocol/lan.js";
 import type { HubLog } from "./ports.js";
 import type { PROTO } from "../protocol/version.js";
 import type { UiStatus } from "./ui-root.js";
+import type { PrivacyHubStatus } from "../protocol/privacy.js";
 
 export interface HubRecord {
   pid: number;
@@ -44,6 +45,12 @@ export interface HubRecord {
    * （platform/launcher/persist/reaper/cooldown/breaker）。与 `lan`/`ui` 同一“首次 write() 前
    * 先排队”语义——见 `patchSpawn`。 */
   spawn?: { count: number; reason?: string };
+  /** web-hub-privacy plan v2.1（P3）：隐私锁状态摘要，供 `/webhub status` 读取。仅在
+   * `config.privacy === true` 时写入（off ⇒ 键缺席，hub.json 保持与无此功能字节一致）；
+   * `degraded` 镜像 `privacy/store.ts` 的 load-time 标志（privacy.json 损坏已改名 .bak、
+   * 标记集清空）。load 只发生在启动时，所以只随首个 write() 落地，无需 patch 方法。
+   * 形状定义在 `protocol/privacy.ts`（agent 侧同样要读，不能放 hub/ 里）。 */
+  privacy?: PrivacyHubStatus;
 }
 
 export interface HubJsonWriter {
