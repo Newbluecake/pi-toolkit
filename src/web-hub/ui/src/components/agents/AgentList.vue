@@ -6,12 +6,15 @@
 
   Desktop collapse (user-reported: the sidebar had no way to reclaim its width on a fixed desktop
   split): a header toggle shrinks `.sidebar` to a narrow icon rail via the SAME `--sidebar-w` CSS
-  variable `shell.css`'s `.layout` grid already reads (overridden here, at the highest-specificity
-  inline level, when collapsed; removed — falling back to the stylesheet's own breakpoint values
-  — when expanded), persisted across reloads in `localStorage`. The toggle itself (and the whole
-  collapse effect) is CSS-gated to `min-width: 1025px` (`agents.css`) rather than JS/`narrow`-gated,
-  so mobile's existing full-screen list/drawer behaviour is untouched by construction — collapsing
-  on desktop and then shrinking the window never leaves the list stuck hidden.
+  variable `shell.css`'s `.layout` grid already reads. The STATE is owned by `DashboardView.vue`
+  (`useSidebarCollapse` composable; prop `collapsed` + `update:collapsed` here) so a single
+  `layoutStyle` computed arbitrates between the rail width and the dragged width — both resolve
+  through the same custom property on `.layout` (2026-10-13 bug: a previously dragged width,
+  inline on `.layout`, shadowed this component's 56px written on `<html>`, hiding the content
+  while the column kept its width). The toggle itself (and the whole collapse effect) is
+  CSS-gated to `min-width: 1025px` (`agents.css`) rather than JS/`narrow`-gated, so mobile's
+  existing full-screen list/drawer behaviour is untouched by construction — collapsing on
+  desktop and then shrinking the window never leaves the list stuck hidden.
 
   "New session" (2026-10 redesign of the web-hub-spawn SP12 split button): the header's
   `NewSessionMenu` main button is now a MANAGED SPAWN in the selected session's cwd — it opens
@@ -37,10 +40,9 @@
   string, not usable as an edit prefill).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, inject, nextTick, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { useMedia } from "../../composables/useMedia.js";
 import { renameEnabled } from "../../logic/control.js";
 import {
   classifyRelaunchError,
@@ -66,7 +68,7 @@ import AgentCard from "./AgentCard.vue";
 import RemoveButton from "./RemoveButton.vue";
 import RenameButton from "./RenameButton.vue";
 
-const props = defineProps<AgentListProps>();
+const props = withDefaults(defineProps<AgentListProps>(), { collapsed: false });
 const emit = defineEmits<AgentListEmits>();
 const { t } = useI18n();
 
@@ -89,50 +91,16 @@ function onFilterInput(ev: Event): void {
 }
 
 // ---------------------------------------------------------------------------
-// desktop collapse (persisted, CSS-gated to >=1025px — see header comment)
+// desktop collapse (persisted, CSS-gated to >=1025px — see header comment). The STATE lives
+// in DashboardView (`useSidebarCollapse`): the collapsed rail and the dragged width resolve
+// through the SAME `--sidebar-w` on `.layout`, so a single computed there must arbitrate
+// (2026-10-13 bug: AgentList-owned 56px on `<html>` lost to a dragged inline width on
+// `.layout` ⇒ blank full-width panel with a lone chevron).
 // ---------------------------------------------------------------------------
 
-const COLLAPSE_KEY = "webhub.agentList.collapsed";
-const RAIL_WIDTH = "56px";
-
-function readCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(COLLAPSE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function applySidebarWidth(isCollapsed: boolean): void {
-  try {
-    if (isCollapsed) document.documentElement.style.setProperty("--sidebar-w", RAIL_WIDTH);
-    else document.documentElement.style.removeProperty("--sidebar-w");
-  } catch {
-    // non-DOM test harness — the var is a pure cosmetic layout hint, never load-bearing
-  }
-}
-
-const collapsed = ref(readCollapsed());
-
-/** The rail width must exist ONLY in the desktop split band (≥1025px, the same breakpoint whose
- * media query owns every `.is-collapsed` rule): the var is an inline style on `<html>`, which
- * beats every stylesheet band — leaving it on at narrow widths squeezed the whole app shell
- * into a 56px column (2026-10-12 BUG2: collapse persisted from desktop ⇒ narrow viewport gets
- * a blank page with a lone rail). Track the band reactively so a resize across it applies or
- * lifts the rail immediately. */
-const desktopBand = useMedia(window, "(min-width: 1025px)").matches;
-watch([collapsed, desktopBand], ([c, desktop]) => applySidebarWidth(c && desktop), { immediate: true });
-
 function toggleCollapsed(): void {
-  collapsed.value = !collapsed.value;
-  try {
-    window.localStorage.setItem(COLLAPSE_KEY, collapsed.value ? "1" : "0");
-  } catch {
-    // best-effort persistence only
-  }
+  emit("update:collapsed", !props.collapsed);
 }
-
-onBeforeUnmount(() => applySidebarWidth(false));
 
 // ---------------------------------------------------------------------------
 // new session (§header comment; web-hub-spawn SP12 — actions come from @logic/spawn.js, SP11)

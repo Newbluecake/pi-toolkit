@@ -87,9 +87,13 @@ export interface AgentListProps {
   readonly cards: readonly AgentCardView[];
   readonly selectedKey: string | null;
   readonly filter: string;
+  /** Desktop rail state — owned by DashboardView (`useSidebarCollapse`); see AgentList's header.
+   *  Optional (default false) so the dozens of presentational test mounts stay prop-minimal. */
+  readonly collapsed?: boolean | undefined;
 }
 export interface AgentListEmits {
   "update:filter": [value: string];
+  "update:collapsed": [value: boolean];
 }
 
 export interface AgentCardProps {

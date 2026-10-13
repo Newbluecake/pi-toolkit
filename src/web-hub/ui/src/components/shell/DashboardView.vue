@@ -37,6 +37,7 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
 import { createScrollMemory, SCROLL_MEMORY } from "../../composables/useScrollMemory.js";
 import { useSidebarWidth } from "../../composables/useSidebarWidth.js";
+import { SIDEBAR_RAIL_WIDTH, useSidebarCollapse } from "../../composables/useSidebarCollapse.js";
 import { useTicker } from "../../composables/useTicker.js";
 import type { UseHubHandle } from "../../composables/useHub.js";
 import type { DashboardViewProps } from "../../contracts.js";
@@ -55,6 +56,7 @@ const narrow = useMedia(window, "(max-width: 767px)").matches;
 const wide = useMedia(window, "(min-width: 1025px)").matches;
 const drawerBand = useMedia(window, "(min-width: 481px) and (max-width: 1024px)").matches;
 
+
 // ---------------------------------------------------------------------------
 // draggable sidebar width (desktop ≥1025px split only — `useSidebarWidth.ts`)
 // ---------------------------------------------------------------------------
@@ -69,9 +71,15 @@ const sidebarResize = useSidebarWidth({
   target: layoutEl,
   body: document.body,
 });
-const layoutStyle = computed(() =>
-  wide.value && sidebarResize.width.value !== null ? { "--sidebar-w": `${sidebarResize.width.value}px` } : undefined,
-);
+// Desktop collapse (≥1025px rail) — state lives HERE (not in AgentList) because both the rail
+// and the dragged width resolve through the same `--sidebar-w` on `.layout`; one computed
+// arbitrates (2026-10-13: collapse-on-`<html>` lost to a dragged width inline on `.layout`).
+const sidebarCollapse = useSidebarCollapse({ storage: browserLocalStorage() });
+const layoutStyle = computed(() => {
+  if (!wide.value) return undefined;
+  if (sidebarCollapse.collapsed.value) return { "--sidebar-w": SIDEBAR_RAIL_WIDTH };
+  return sidebarResize.width.value !== null ? { "--sidebar-w": `${sidebarResize.width.value}px` } : undefined;
+});
 const sidebarAriaNow = computed(() => sidebarResize.width.value ?? sidebarResize.currentWidth());
 
 const ticker = useTicker({
@@ -236,12 +244,16 @@ function onLoadOlder(agentKey: string): void {
       :cards="cards"
       :selected-key="selectedKey"
       :filter="filter"
+      :collapsed="sidebarCollapse.collapsed.value"
       @update:filter="filter = $event"
+      @update:collapsed="sidebarCollapse.set($event)"
       @click="onListClick"
     />
-    <!-- draggable split separator (≥1025px only; absolutely positioned, never a grid track) -->
+    <!-- draggable split separator (≥1025px only; absolutely positioned, never a grid track).
+         Hidden while collapsed: the rail is fixed at 56px and a drag would persist a width the
+         user cannot see take effect. -->
     <div
-      v-if="wide"
+      v-if="wide && !sidebarCollapse.collapsed.value"
       class="sidebar-resizer"
       role="separator"
       aria-orientation="vertical"

@@ -149,87 +149,46 @@ describe("AgentCard.vue needs-answer badge (C5, §7.4)", () => {
 
 /**
  * Desktop collapse toggle (user-reported: the sidebar had no way to reclaim its width on a
- * fixed desktop split). CSS-gated to >=768px (see `agents.css`), so this just checks the
- * toggle/class/persistence contract — not real geometry (no layout engine in happy-dom).
+ * fixed desktop split). CSS-gated to >=1025px (see `agents.css`), so this just checks the
+ * prop/emit contract — the STATE (persistence + the `--sidebar-w` arbitration with the dragged
+ * width) lives in DashboardView (`useSidebarCollapse`), covered by use-sidebar-collapse.test.ts
+ * and the dashboard-view layoutStyle tests.
  */
-describe("AgentList.vue — desktop collapse toggle", () => {
-  it("starts expanded by default; toggle flips aria-pressed, the is-collapsed class, and persists", async () => {
+describe("AgentList.vue — desktop collapse toggle (prop/emit contract)", () => {
+  it("collapsed=false ⇒ no class; clicking the toggle EMITS update:collapsed (state stays the parent's)", async () => {
     const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
     const toggle = wrapper.get(".sidebar-collapse-toggle");
     expect(toggle.attributes("aria-pressed")).toBe("false");
     expect(wrapper.find(".sidebar").classes()).not.toContain("is-collapsed");
 
     await toggle.trigger("click");
-    expect(toggle.attributes("aria-pressed")).toBe("true");
+    expect(wrapper.emitted("update:collapsed")).toStrictEqual([[true]]);
+    // 父级未响应前组件自身不变（受控 prop）
+    expect(wrapper.find(".sidebar").classes()).not.toContain("is-collapsed");
+
+    await wrapper.setProps({ collapsed: true });
     expect(wrapper.find(".sidebar").classes()).toContain("is-collapsed");
-    expect(localStorage.getItem("webhub.agentList.collapsed")).toBe("1");
+    expect(toggle.attributes("aria-pressed")).toBe("true");
 
     await toggle.trigger("click");
-    expect(wrapper.find(".sidebar").classes()).not.toContain("is-collapsed");
-    expect(localStorage.getItem("webhub.agentList.collapsed")).toBe("0");
+    expect(wrapper.emitted("update:collapsed")).toStrictEqual([[true], [false]]);
   });
 
-  it("starts collapsed on mount when localStorage already says so", () => {
-    localStorage.setItem("webhub.agentList.collapsed", "1");
-    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+  it("collapsed=true renders the rail class + pressed toggle", () => {
+    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "", collapsed: true } });
     expect(wrapper.find(".sidebar").classes()).toContain("is-collapsed");
     expect(wrapper.get(".sidebar-collapse-toggle").attributes("aria-pressed")).toBe("true");
   });
 
-  it("collapsing never removes the search input / agent list from the DOM (CSS-only, mobile-safe)", async () => {
-    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
-    await wrapper.get(".sidebar-collapse-toggle").trigger("click");
+  it("collapsed never removes the search input / agent list from the DOM (CSS-only, mobile-safe)", () => {
+    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "", collapsed: true } });
     expect(wrapper.find("input.input").exists()).toBe(true);
     expect(wrapper.find("ul.agent-list").exists()).toBe(true);
   });
-});
 
-/**
- * 2026-10-12 BUG2: the rail width is an INLINE style on `<html>` — it beats every stylesheet
- * breakpoint, so it must exist only in the desktop split band (≥1025px). A collapse persisted
- * from desktop used to squeeze the whole app shell into a 56px column at narrow widths
- * (blank page + lone rail). These tests pin the band gating with a query-aware matchMedia stub.
- */
-describe("AgentList.vue — rail width band gating (BUG2)", () => {
-  function stubBand(desktop: boolean, capture?: { cb?: (ev: { matches: boolean }) => void }): void {
-    vi.stubGlobal("matchMedia", (query: string) => ({
-      matches: query === "(min-width: 1025px)" ? desktop : false,
-      addEventListener: (_t: string, l: (ev: { matches: boolean }) => void) => {
-        if (capture !== undefined && query === "(min-width: 1025px)") capture.cb = l;
-      },
-      removeEventListener: () => {},
-    }));
-  }
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    document.documentElement.style.removeProperty("--sidebar-w");
-  });
-
-  it("collapsed + narrow band ⇒ NO inline --sidebar-w (the BUG2 escape hatch)", () => {
-    stubBand(false);
+  it("writes NO --sidebar-w anywhere (2026-10-13 bug: the html-level 56px lost to a dragged .layout inline width ⇒ blank panel)", () => {
     localStorage.setItem("webhub.agentList.collapsed", "1");
-    mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
-    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("");
-  });
-
-  it("collapsed + desktop band ⇒ rail var set; a band flip to narrow lifts it reactively", async () => {
-    const cap: { cb?: (ev: { matches: boolean }) => void } = {};
-    stubBand(true, cap);
-    localStorage.setItem("webhub.agentList.collapsed", "1");
-    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
-    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("56px");
-    cap.cb?.({ matches: false });
-    await wrapper.vm.$nextTick();
-    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("");
-    cap.cb?.({ matches: true });
-    await wrapper.vm.$nextTick();
-    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("56px");
-  });
-
-  it("expanded on desktop leaves the var untouched", () => {
-    stubBand(true);
-    mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+    mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "", collapsed: true } });
     expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("");
   });
 });

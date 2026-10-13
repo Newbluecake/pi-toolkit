@@ -392,3 +392,55 @@ describe("DashboardView.vue — agent switch remounts AgentDetail (2026-10-07 re
     expect(afterUid).not.toBe(beforeUid);
   });
 });
+
+/**
+ * 2026-10-13 sidebar-collapse × dragged-width arbitration (user report: 「收起按钮只藏了内容，
+ * 面板还占着原来的宽度」— AgentList wrote the 56px rail on `<html>` while a previously dragged
+ * width sat inline on `.layout`, and the element-level custom property shadowed the inherited
+ * one). The state now lives in DashboardView (`useSidebarCollapse`) and ONE `layoutStyle`
+ * computed arbitrates: collapsed ⇒ 56px wins; else dragged; else stylesheet breakpoints.
+ */
+describe("DashboardView.vue — sidebar collapse arbitration (blank-panel bug)", () => {
+  afterEach(() => {
+    localStorage.removeItem("webhub.agentList.collapsed");
+    localStorage.removeItem("pwh_sidebar_w");
+  });
+
+  it("collapsed + a previously dragged width ⇒ the 56px rail wins on .layout; the resizer hides", () => {
+    stubMatchMedia(false); // ≥1025px wide split
+    localStorage.setItem("webhub.agentList.collapsed", "1");
+    localStorage.setItem("pwh_sidebar_w", "510");
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hubWithOneAgent());
+    const style = wrapper.get(".layout").attributes("style") ?? "";
+    expect(style).toContain("--sidebar-w: 56px");
+    expect(style).not.toContain("510");
+    expect(wrapper.find(".sidebar").classes()).toContain("is-collapsed");
+    expect(wrapper.find(".sidebar-resizer").exists()).toBe(false); // no invisible-effect drag
+  });
+
+  it("expanded + dragged width ⇒ the dragged width applies and the resizer renders", () => {
+    stubMatchMedia(false);
+    localStorage.setItem("pwh_sidebar_w", "510");
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hubWithOneAgent());
+    expect(wrapper.get(".layout").attributes("style") ?? "").toContain("--sidebar-w: 510px");
+    expect(wrapper.find(".sidebar-resizer").exists()).toBe(true);
+  });
+
+  it("clicking the rail toggle expands back to the dragged width (round trip through parent state)", async () => {
+    stubMatchMedia(false);
+    localStorage.setItem("webhub.agentList.collapsed", "1");
+    localStorage.setItem("pwh_sidebar_w", "510");
+    const wrapper = mountDashboard({ name: "agent", key: "agent-a" }, hubWithOneAgent());
+    await wrapper.get(".sidebar-collapse-toggle").trigger("click");
+    expect(wrapper.get(".layout").attributes("style") ?? "").toContain("--sidebar-w: 510px");
+    expect(wrapper.find(".sidebar-resizer").exists()).toBe(true);
+    expect(localStorage.getItem("webhub.agentList.collapsed")).toBe("0"); // persisted by the composable
+  });
+
+  it("narrow band + persisted collapse ⇒ NO inline width (the 2026-10-12 BUG2 escape hatch survives the refactor)", () => {
+    stubMatchMedia(true); // phone band
+    localStorage.setItem("webhub.agentList.collapsed", "1");
+    const wrapper = mountDashboard({ name: "list" }, hubWithOneAgent());
+    expect(wrapper.get(".layout").attributes("style") ?? "").not.toContain("--sidebar-w");
+  });
+});
