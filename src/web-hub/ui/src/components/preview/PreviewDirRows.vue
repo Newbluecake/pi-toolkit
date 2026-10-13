@@ -155,6 +155,15 @@ function indentStyle(depth: number): Record<string, string> {
  * move across ALL visible rows (nested included — DOM order IS visual order). */
 function onRowKeydown(ev: KeyboardEvent, row: RowView): void {
   const key = ev.key;
+  // 2026-10-13 验收 M1 跟进：单击=展开后键盘失去钻取入口（Enter/Space=单击=展开）。
+  // Ctrl/Cmd+Enter = 钻取（等价鼠标双击）；preventDefault 阻止按钮的原生 click 激活，
+  // 否则会先触发一次单击展开。文件/symlink 行的 Enter 保持原生 click（打开预览）。
+  if (key === "Enter" && (ev.ctrlKey || ev.metaKey) && row.expandable) {
+    ev.preventDefault();
+    cancelPendingClick();
+    emit("navigate", row.entry);
+    return;
+  }
   if (key !== "ArrowDown" && key !== "ArrowUp" && key !== "ArrowLeft" && key !== "ArrowRight") return;
   const btn = ev.currentTarget;
   if (!(btn instanceof HTMLElement)) return;

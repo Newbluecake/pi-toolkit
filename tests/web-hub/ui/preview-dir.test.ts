@@ -471,6 +471,26 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
     }
   });
 
+  it("Ctrl+Enter on a dir row drills down (keyboard drill path — acceptance M1 follow-up), without expanding", async () => {
+    vi.useFakeTimers();
+    try {
+      const { tree, calls } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
+      const entries: PreviewDirEntry[] = [{ name: "sub", type: "dir", mtimeMs: 1 }];
+      const w = mountDir(tree, entries);
+      nameBtnOf(w, "sub").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+      await flushPromises();
+      expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]); // 立即钻取
+      await vi.advanceTimersByTimeAsync(PREVIEW_TREE_DBLCLICK_MS * 3);
+      await flushPromises();
+      expect(calls).toHaveLength(0); // 不触发展开 fetch
+      expect(tree.nodes.size).toBe(0);
+      expect(nameBtnOf(w, "sub").getAttribute("aria-expanded")).toBe("false");
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a second click AFTER the window is a new single click (toggle expand then collapse)", async () => {
     vi.useFakeTimers();
     try {
@@ -513,7 +533,9 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
       { name: "sub", type: "dir", mtimeMs: 1 },
       { name: "a.ts", type: "file", size: 1, mtimeMs: 1 },
     ]);
-    expect(nameBtnOf(w, "sub").getAttribute("title")).toBe("sub — click to expand, double-click to open");
+    expect(nameBtnOf(w, "sub").getAttribute("title")).toBe(
+      "sub — click to expand/collapse, double-click or Ctrl+Enter to open",
+    );
     expect(nameBtnOf(w, "sub").getAttribute("aria-expanded")).toBe("false"); // 行也是展开触发器
     expect(nameBtnOf(w, "a.ts").getAttribute("title")).toBe("a.ts");
     expect(nameBtnOf(w, "a.ts").getAttribute("aria-expanded")).toBeNull();
