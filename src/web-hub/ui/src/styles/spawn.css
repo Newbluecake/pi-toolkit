@@ -86,12 +86,15 @@
   inset: 0;
   z-index: 40;
   display: flex;
-  align-items: center;
+  /* 顶锚定（2026-10-13 用户报告「输路径时弹窗顶部抖动」）：垂直居中时任何内容高度变化
+   * （提示行出现/消失、目录列表行数增减）都会同时推动顶边与底边。顶锚定后内容只向下生长，
+   * 标题/路径输入框纹丝不动。≤640px 仍是底部抽屉（下方媒体查询覆写为 flex-end）。 */
+  align-items: flex-start;
   justify-content: center;
   padding: var(--sp-4);
   /* safe-area: the dialog can cover the whole viewport — same max() wrapping as
    * control.css/dock.css. */
-  padding-top: max(var(--sp-4), env(safe-area-inset-top));
+  padding-top: max(clamp(var(--sp-6), 8vh, 96px), env(safe-area-inset-top));
   padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
   background: rgb(19 32 38 / 0.45);
 }
@@ -100,7 +103,8 @@
   display: grid;
   gap: var(--sp-3);
   width: min(760px, calc(100vw - 2 * var(--sp-4)));
-  max-height: 85dvh;
+  /* 顶锚定配套：高度上限 = 视口 − 顶部偏移 − 底部边距，防长内容探出视口底 */
+  max-height: calc(100dvh - clamp(var(--sp-6), 8vh, 96px) - var(--sp-4) - env(safe-area-inset-bottom));
   overflow-y: auto;
   padding: var(--sp-4);
   border: 1px solid var(--c-border-strong);
@@ -636,6 +640,7 @@
 
   .spawn-picker {
     width: 100%;
+    max-height: 85dvh; /* 底抽屉恢复视口比例上限（覆写顶锚定的 calc） */
     border-radius: 12px 12px 0 0;
     padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
   }

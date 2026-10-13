@@ -373,17 +373,21 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
     expect(document.activeElement).toBe(submit); // wrapped back to the last
   });
 
-  it("spawn.css pins the dialog shell: fixed scrim z-40, min(760px) panel at 85dvh, ≤640px bottom sheet, recent grid, browse panel", () => {
+  it("spawn.css pins the dialog shell: fixed scrim z-40, top-anchored panel (anti-jitter 2026-10-13), ≤640px bottom sheet, recent grid, browse panel", () => {
     const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/spawn.css"), "utf8");
     const scrim = css.match(/\.spawn-scrim \{([\s\S]*?)\n\}/);
     expect(scrim).not.toBeNull();
     expect(scrim![1]).toContain("position: fixed");
     expect(scrim![1]).toContain("z-index: 40");
     expect(scrim![1]).toContain("env(safe-area-inset-bottom)");
+    // 顶锚定（用户报告「输路径时顶部抖动」）：居中会在内容高度变化时推顶边
+    expect(scrim![1]).toContain("align-items: flex-start");
+    expect(scrim![1]).toContain("padding-top: max(clamp(var(--sp-6), 8vh, 96px), env(safe-area-inset-top))");
     const panel = css.match(/\.spawn-picker \{([\s\S]*?)\n\}/);
     expect(panel).not.toBeNull();
     expect(panel![1]).toContain("width: min(760px, calc(100vw - 2 * var(--sp-4)))");
-    expect(panel![1]).toContain("max-height: 85dvh");
+    // 高度上限随顶偏移收缩（不再是固定 85dvh；移动端媒体查询里恢复 85dvh）
+    expect(panel![1]).toContain("max-height: calc(100dvh - clamp(var(--sp-6), 8vh, 96px)");
     expect(panel![1]).toContain("overflow-y: auto");
     const recent = css.match(/\.spawn-recent \{([\s\S]*?)\n\}/);
     expect(recent).not.toBeNull();
