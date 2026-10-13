@@ -58,6 +58,21 @@ import { buildTxEntries } from "./entries.js";
  * scroll-triggered pagination threshold (plan §3.6); not a frozen/shared constant elsewhere. */
 const PAGE_TRIGGER_PX = 96;
 
+/* 2026-10-13 滚动回退排查面包屑（临时诊断，同 App.vue 的 pwh_diag_route 惯例）：用户报告
+ * 「A 滚到底 → 切 B 做些操作 → 回 A 视图回滚了一截」。把 save/restore/following 翻转的
+ * 关键事实写进 localStorage 的 12 条 ring（复现后读 `pwh_diag_scroll`）。根因确认后移除。 */
+function diagScroll(rec: Record<string, unknown>): void {
+  try {
+    const raw = localStorage.getItem("pwh_diag_scroll");
+    const arr: unknown[] = raw !== null ? (JSON.parse(raw) as unknown[]) : [];
+    arr.push({ ...rec, at: Date.now() });
+    while (arr.length > 12) arr.shift();
+    localStorage.setItem("pwh_diag_scroll", JSON.stringify(arr));
+  } catch {
+    /* a breadcrumb never breaks the app */
+  }
+}
+
 const props = withDefaults(defineProps<TranscriptProps>(), { anchorId: "transcript" });
 const emit = defineEmits<TranscriptEmits>();
 const { t } = useI18n();
@@ -88,10 +103,21 @@ if (memory !== null && props.memoryKey !== undefined) {
     const j = findAnchor(buildAnchorIndex(build.value.anchors), rec.anchorIds);
     if (j === undefined) {
       restoreFailed = true; // anchor cut out of the tail snapshot, or ambiguous — degrade
+      diagScroll({ op: "restore-setup-miss", key: props.memoryKey, len: entriesLen.value });
     } else {
       initialStart = restoreStart(j, entriesLen.value, defaultWindowSize(mobile.matches.value));
       restorePhase = { ids: rec.anchorIds, offsetPx: rec.anchorOffsetPx ?? 0 };
+      diagScroll({
+        op: "restore-setup",
+        key: props.memoryKey,
+        j,
+        start: initialStart,
+        len: entriesLen.value,
+        off: rec.anchorOffsetPx,
+      });
     }
+  } else if (rec !== undefined) {
+    diagScroll({ op: "mount", key: props.memoryKey, following: rec.following, len: entriesLen.value });
   }
 }
 
@@ -209,7 +235,17 @@ function onScroll(): void {
     return;
   }
   const distanceFromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
-  if (props.following && distanceFromBottom > NEAR_BOTTOM_PX) emit("update:following", false);
+  if (props.following && distanceFromBottom > NEAR_BOTTOM_PX) {
+    diagScroll({
+      op: "unfollow",
+      key: props.memoryKey,
+      dist: Math.round(distanceFromBottom),
+      scrollTop: Math.round(box.scrollTop),
+      scrollHeight: box.scrollHeight,
+      clientHeight: box.clientHeight,
+    });
+    emit("update:following", false);
+  }
   // Symmetric auto-restore: scrolling back down to near the bottom turns `following` back on,
   // same as the "N new" jump pill — without this, a user who scrolls away and then scrolls back
   // to the tail by hand stayed un-followed forever. Strict `<=`/`>` on either side of the SAME
@@ -302,9 +338,13 @@ onMounted(() => {
           const contentTop = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
           writeScrollTop(contentTop - phase.offsetPx);
           written = true;
+          diagScroll({ op: "restore-write", key: props.memoryKey, top: Math.round(contentTop - phase.offsetPx) });
         }
       }
-      if (!written) emit("update:following", true); // the anchor vanished between setup and paint
+      if (!written) {
+        diagScroll({ op: "restore-el-miss", key: props.memoryKey });
+        emit("update:following", true); // the anchor vanished between setup and paint
+      }
     } else if (restoreFailed) {
       restoreFailed = false;
       emit("update:following", true);
@@ -421,6 +461,16 @@ function saveScrollMemory(): void {
   const key = props.memoryKey;
   if (props.following) {
     memory.set(key, { following: true });
+    const box0 = scrollBox.value;
+    diagScroll({
+      op: "save",
+      key,
+      following: true,
+      scrollTop: box0 ? Math.round(box0.scrollTop) : null,
+      scrollHeight: box0?.scrollHeight ?? null,
+      clientHeight: box0?.clientHeight ?? null,
+      len: entriesLen.value,
+    });
     return;
   }
   const box = scrollBox.value;
@@ -446,8 +496,19 @@ function saveScrollMemory(): void {
   const picked = pickAnchor(rows, box.scrollTop);
   if (picked === undefined) {
     memory.set(key, { following: false }); // nothing anchorable on screen — next mount degrades
+    diagScroll({ op: "save", key, following: false, anchor: null, len: entriesLen.value });
   } else {
     memory.set(key, { following: false, anchorIds: picked.ids, anchorOffsetPx: picked.offsetPx });
+    diagScroll({
+      op: "save",
+      key,
+      following: false,
+      anchor: picked.ids[0] ?? null,
+      off: Math.round(picked.offsetPx),
+      scrollTop: Math.round(box.scrollTop),
+      scrollHeight: box.scrollHeight,
+      len: entriesLen.value,
+    });
   }
 }
 </script>
