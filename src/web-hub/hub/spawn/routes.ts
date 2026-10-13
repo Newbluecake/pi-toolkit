@@ -175,6 +175,20 @@ export interface SpawnRoutesDeps {
    *  Injected by hub.ts whenever spawn is enabled (its admission reuses preview's deny chain);
    *  absent ⇒ the route is byte-identical to an unknown path (404), same `historyOn` pattern. */
   mkdir?: MkdirService;
+  /** web-hub-privacy plan v2.1 (P1, 「Fork 继承」): the hub-side privacy-lock store. Injected
+   *  by hub.ts only when `webHub.privacy` is on; absent ⇒ fork inheritance is skipped entirely
+   *  (byte-identical to pre-feature). When present, a fork whose SOURCE session is locked
+   *  writes the NEW sessionId's mark BEFORE the supervisor fork is launched; a write
+   *  failure/`E_LIMIT` fails the whole fork request (fail 方向与 store 一致 — 绝不放行无锁
+   *  fork). */
+  privacy?: SpawnPrivacyPort;
+}
+
+/** The narrow privacy-store surface the fork path needs (hub.ts passes the real
+ *  `PrivacyStore`; tests inject a spy). */
+export interface SpawnPrivacyPort {
+  isLocked(sessionId: string): boolean;
+  setLocked(sessionId: string, locked: boolean): Promise<void>;
 }
 
 interface IdemEntry {
@@ -1037,6 +1051,31 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
         snap = snapResult.snapshot;
       }
 
+      // web-hub-privacy plan v2.1 (P1, 「Fork 继承」/ v2.1 N5 时序): a locked SOURCE session's
+      // fork inherits the mark — the NEW sessionId is known here (generated now, used by the
+      // sync section below), so the mark is written BEFORE gate 10's second authorize and long
+      // before `supervisor.start()` ever forks (「先写标记后 spawn」). A write failure /
+      // E_LIMIT fails the WHOLE fork request (fail 方向与 store 一致 — 绝不放行无锁 fork);
+      // the discard below keeps the snapshot from leaking on that path. The write sits in the
+      // async zone on purpose: the sync section's zero-await occupancy guarantees stay intact,
+      // and a fork that later dies at gate 10/11 merely leaves an orphan mark (harmless —
+      // 首版不 GC, plan「数据模型」).
+      let forkNewId: string | undefined;
+      if (sessionIntent.mode === "fork" && snap !== undefined) {
+        forkNewId = randomUUID();
+        if (deps.privacy !== undefined && deps.privacy.isLocked(pin.id)) {
+          try {
+            await deps.privacy.setLocked(forkNewId, true);
+          } catch (err) {
+            snap.discard();
+            const code = statusOf(err) === 409 ? "E_LIMIT" : "E_INTERNAL";
+            rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code });
+            io.sendJson(res, code === "E_LIMIT" ? 409 : 500, { error: code });
+            return;
+          }
+        }
+      }
+
       // gate 10 — second authorize
       const stillAuthed = await authorizeOrAudit(io, reqDeadline, "spawn", intent.id);
       if (stillAuthed === undefined) {
@@ -1079,7 +1118,9 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
           io.sendJson(res, 409, { error: "E_DIR", reason: "session-changed" });
           return;
         }
-        const newId = randomUUID();
+        // web-hub-privacy: the new sessionId (and its inherited lock mark) were minted in the
+        // async zone above — the sync section only consumes it.
+        const newId = forkNewId ?? randomUUID();
         sessionArgv = { mode: "fork", abs: snap.path, id: pin.id, newId, snapshot: snap.path };
       }
 

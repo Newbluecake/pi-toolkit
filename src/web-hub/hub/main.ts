@@ -123,6 +123,14 @@ async function main(): Promise<void> {
     config = rest;
   }
 
+  // web-hub-privacy plan v2.1 (P1): same fail-soft discipline as `avatar` — the literal key
+  // `true` is the only legal value; anything else (hand-edited/old launcher config) drops the
+  // key, leaving the feature off but the hub running.
+  if (config.privacy !== undefined && config.privacy !== true) {
+    const { privacy: _drop, ...rest } = config;
+    config = rest;
+  }
+
   // sysload P3: config.load is a startup snapshot.  Reject the complete key on
   // malformed values rather than partially clamping it; this keeps the hub's
   // cap, sampler, SSE and REST surfaces as one feature gate.

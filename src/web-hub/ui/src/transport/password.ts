@@ -19,6 +19,8 @@ import type {
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
+  PrivacyOutcome,
+  PrivacyTransport,
   RemoveAgentOutcome,
   RemoveTarget,
   Result,
@@ -86,6 +88,10 @@ const REST_AUTH_PATHS: ReadonlySet<string> = new Set([
   API.loadTop,
   AVATAR_PATH,
   AVATAR_DELETE_PATH,
+  // web-hub-privacy plan v2.1 (P1): both `/api/privacy/*` POSTs are one-shot calls whose 401 is
+  // a lost cookie session — exact-match entries like `agentRemove`/`loadTop` above.
+  API.privacyVerify,
+  API.privacyLock,
 ]);
 
 function isRestAuthEndpoint(url: string): boolean {
@@ -222,5 +228,13 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       upload: (bytes, opts) => client.avatar.upload(bytes, opts) as Promise<AvatarWriteOutcome>,
       remove: () => client.avatar.remove() as Promise<AvatarDeleteOutcome>,
     },
+    // web-hub-privacy plan v2.1 (P1): thin casts over the logic client's `privacy` namespace.
+    // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has
+    // exact-match entries for both `/api/privacy/*` paths) — never inside the client, so
+    // nothing double-fires. A wrong-password 200 verdict / limiter 429 ride through verbatim.
+    privacy: {
+      verify: (password) => client.privacy.verify(password) as Promise<PrivacyOutcome>,
+      lock: (req) => client.privacy.lock(req) as Promise<PrivacyOutcome>,
+    } satisfies PrivacyTransport,
   } satisfies PasswordTransport;
 }

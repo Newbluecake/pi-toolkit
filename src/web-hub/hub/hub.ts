@@ -50,6 +50,7 @@ import {
   WTGRAPH_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
   AVATAR_HUB_CAP,
+  PRIVACY_HUB_CAP,
 } from "../protocol/version.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
@@ -78,6 +79,9 @@ import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
 import { createAvatarRoutes } from "./avatar/routes.js";
 import { createAvatarStore } from "./avatar/store.js";
+import { createPrivacyRoutes } from "./privacy/routes.js";
+import { createPrivacyStore, type PrivacyStore } from "./privacy/store.js";
+import { verifyPassword } from "./lan-auth.js";
 import type { AvatarRoutes } from "./ports.js";
 import { auditAvatar } from "./audit.js";
 import { readBody } from "./http.js";
@@ -375,6 +379,10 @@ export async function startHub(
       // extraHubCaps onto both HubInfo.caps and hello_ack.caps. Agent sessions do not
       // advertise a corresponding capability of their own.
       ...(config.avatar === true ? [AVATAR_HUB_CAP] : []),
+      // web-hub-privacy plan v2.1 (P1): `privacy.v1` rides the SAME two surfaces through this
+      // one array (评审 #10: HubInfo.caps 与 hello_ack.caps 两面同源) whenever
+      // `config.privacy` exists. STATIC — it never follows whether the LAN listener came up.
+      ...(config.privacy === true ? [PRIVACY_HUB_CAP] : []),
       // sysload P3: the hub-side sampler is available only after the bounded Linux
       // startup probe.  Feature-off (absent config.load) keeps every cap surface
       // byte-identical.
@@ -415,6 +423,11 @@ export async function startHub(
     // even when preview itself is off (the preview block below reuses the resolved value
     // instead of resolving twice). `undefined` when neither feature is on.
     let previewDenyCtx: PreviewDenyContext | undefined = undefined;
+    // web-hub-privacy plan v2.1 (P1): DECLARED here with every other early assembly binding —
+    // `close()` reads it (the write-chain drain below) and can run BEFORE the assembly point
+    // further down ever executes (a `let` at the assembly point would be a TDZ throw in that
+    // window — the startup-gate tests pin exactly this).
+    let privacyStore: PrivacyStore | undefined;
     let previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined = undefined;
     let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined = undefined;
     let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined = undefined;
@@ -751,6 +764,32 @@ export async function startHub(
      * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
     let lanClosedByRotateScan = false;
 
+    // web-hub-privacy plan v2.1 (P1): the privacy-lock STORE is created and loaded HERE —
+    // before the spawn assembly below — because the session-history fork path
+    // (`spawn/routes.ts`'s doSessionBranch) inherits a locked source session's mark onto the
+    // new sessionId BEFORE the fork is launched (「先写新 sessionId 标记再 spawn」), so the
+    // store must already exist by the time `createSpawnRoutes` is called. Gated on
+    // `config.privacy === true` (off ⇒ no store, `privacy.json` never touched — a re-enable
+    // finds every mark intact). `load()` never throws: corrupt/unreadable ⇒ renamed to .bak +
+    // empty set + WARN (`degraded` is P3's `/webhub status` source). The ROUTES are assembled
+    // later (right before the frontend), where every successful mutation republishes the full
+    // set as the direct-send `privacy` bus event. (Declared at assembly scope above —
+    // `close()` reads it before this point may ever run.)
+    if (config.privacy === true) {
+      privacyStore = createPrivacyStore({
+        stateDir: paths.stateDir,
+        log,
+        onChange: (locked) => {
+          // Same shutdown fence as the avatar store's onChange below.
+          if (closing !== undefined) return;
+          registry.publish({ type: "privacy", locked });
+        },
+      });
+      await startupStep(privacyStore.load());
+      // Startup-failure path: drain the store's write chain (idempotent, never throws).
+      cleanup.push(() => privacyStore!.close());
+    }
+
     const commandRouter = createCommandRouter({ registry, log, now });
     // ---------------------------------------------------------------------
     // web-hub-spawn plan §SP10 (arch §4.1/§7): the managed-spawn assembly — the ONLY place
@@ -987,6 +1026,10 @@ export async function startHub(
         // session-history plan §4.8: `historyOn` already required it — absent keeps the route
         // surface byte-identical to history-off (P-route's §5 gate reads `deps.history`).
         ...(spawnHistory === undefined ? {} : { history: spawnHistory }),
+        // web-hub-privacy plan v2.1 (P1, 「Fork 继承」): a hub-initiated fork inherits a locked
+        // source session's mark — the store was created/loaded ABOVE this assembly, so the
+        // dependency is available exactly when the feature is on (off ⇒ byte-identical).
+        ...(privacyStore === undefined ? {} : { privacy: privacyStore }),
       });
       // SP13 (SP10 acceptance leftover P3): the shutdown entry itself is pushed AFTER the
       // frontend's own cleanup entry further below — reverse-order release then runs it BEFORE
@@ -1122,6 +1165,35 @@ export async function startHub(
       log,
       now,
     });
+    // web-hub-privacy plan v2.1 (P1): the privacy-lock ROUTES (the store was created/loaded
+    // above, before the spawn assembly — see the comment there). Gated on the same
+    // `config.privacy === true`; off ⇒ no routes, no `privacy` frame, no cap.
+    let privacyRoutes: ReturnType<typeof createPrivacyRoutes> | undefined;
+    if (privacyStore !== undefined) {
+      privacyRoutes = createPrivacyRoutes({
+        store: privacyStore,
+        registry,
+        // 「校验管线」(v2 评审 #3): the extracted `verifyPassword` rides the SAME LAN store/KDF/
+        // limiter/admission instances login uses — fail-only limiter accounting lives inside
+        // `verifyPassword` itself. Absent LAN assembly ⇒ verify 404s and LAN unlocks fail closed.
+        ...(lanDeps === undefined
+          ? {}
+          : {
+              verifyPassword: (userId: number, password: string, clientIp: string) =>
+                verifyPassword({ clientIp }, userId, password, {
+                  store: lanDeps.store,
+                  kdf: lanDeps.kdf,
+                  limiter: lanDeps.limiter,
+                  admission: lanDeps.admission,
+                  onCorruptKdfParams: (username, reason) => {
+                    log.error("web-hub privacy: corrupt kdf params (db-invalid:kdf)", { username, reason });
+                  },
+                }),
+            }),
+        log,
+        now,
+      });
+    }
     fe = frontend({
       config,
       paths,
@@ -1141,6 +1213,7 @@ export async function startHub(
       uploadMetrics,
       agentRemove: agentRemoveService,
       ...(avatarRoutes === undefined ? {} : { avatar: avatarRoutes }),
+      ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
       ...(uploads === undefined ? {} : { uploads }),
       ...(spawnRoutes === undefined ? {} : { spawn: spawnRoutes }),
       ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
@@ -1600,6 +1673,10 @@ export async function startHub(
         // are retained) before the rest of the teardown. The crash path may not reach this —
         // those orphans are the next startup's sweep("startup") job (§2.2.4).
         if (uploads !== undefined) await bounded(uploads.close());
+        // web-hub-privacy plan v2.1 (P1): drain the privacy store's write chain AFTER the
+        // frontend stopped accepting requests (no new mutations can start), same posture as the
+        // upload store above. The chain itself carries no timers; close() never rejects.
+        if (privacyStore !== undefined) await bounded(privacyStore.close());
         // fleet-drawer plan §5.3 (F3b): explicit runtime-path dispose (the cleanup array is
         // startup-failure-only, upload plan #13) — service first (drops the bus subscription
         // and held watches), then the reader (fails in-flight scans as `busy`).

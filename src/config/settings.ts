@@ -982,6 +982,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     uploads: "on",
     preview: "on",
     avatar: true,
+    // web-hub-privacy plan v2.1「设置」(P1): per-session privacy lock; default on, non-live.
+    privacy: true,
     subagentTranscript: "all",
     quota: true,
     // sysload plan §6.1/§10 (P0 pre-approved cross-domain field, planning-gap fix): hub-side
@@ -1857,6 +1859,8 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
     avatar: typeof record.avatar === "boolean" ? record.avatar : (defaults.avatar ?? true),
+    // web-hub-privacy plan v2.1 (P1): boolean only, anything else falls back to the default `true`.
+    privacy: typeof record.privacy === "boolean" ? record.privacy : (defaults.privacy ?? true),
     subagentTranscript: parseSubagentTranscriptSetting(record.subagentTranscript, defaults.subagentTranscript),
     quota: typeof record.quota === "boolean" ? record.quota : (defaults.quota ?? true),
     // sysload plan §6.1: boolean only, anything else falls back to the default `true`.

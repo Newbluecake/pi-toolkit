@@ -25,6 +25,8 @@ import type {
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
+  PrivacyOutcome,
+  PrivacyTransport,
   RemoveAgentOutcome,
   RemoveTarget,
   Result,
@@ -236,5 +238,14 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
         withAuthNotice(deps, () => client.avatar.upload(bytes, opts) as Promise<AvatarWriteOutcome>),
       remove: () => withAuthNotice(deps, () => client.avatar.remove() as Promise<AvatarDeleteOutcome>),
     },
+    // web-hub-privacy plan v2.1 (P1): thin casts over the logic client's `privacy` namespace —
+    // same final-E_AUTH rule as avatar above (the client replays once through `withRelogin` on a
+    // 401; a final E_AUTH means the stored token is dead). A wrong-password 200 verdict
+    // (`data.ok:false`) and a limiter 429 (`retryAfterS`) ride through verbatim — this layer
+    // never retries on its own.
+    privacy: {
+      verify: (password) => withAuthNotice(deps, () => client.privacy.verify(password) as Promise<PrivacyOutcome>),
+      lock: (req) => withAuthNotice(deps, () => client.privacy.lock(req) as Promise<PrivacyOutcome>),
+    } satisfies PrivacyTransport,
   } satisfies HubTransport;
 }

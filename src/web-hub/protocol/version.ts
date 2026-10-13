@@ -152,6 +152,20 @@ export const HOLD_HUB_CAPS = ["hold.v1"] as const;
 /** web-hub-avatar plan §4.2: the single hub capability for the avatar surface. */
 export const AVATAR_HUB_CAP = "avatar.v1";
 
+/**
+ * web-hub-privacy plan v2.1 (P1): the hub cap advertising the per-session privacy lock —
+ * `POST /api/privacy/verify` (LAN only) + `POST /api/privacy/lock` (both listeners) + the
+ * `privacy` SSE frame. Advertised ONLY when `config.privacy` exists (`webHub.privacy`,
+ * default true — `false` is the key's ABSENCE, same wire-level off pattern as `avatar`),
+ * folded into `extraHubCaps` in `hub.ts` so `HubInfo.caps` and `hello_ack.caps` stay
+ * two-face-same-source (评审 #10: the cap is STATIC — it never follows whether the LAN
+ * listener came up). A browser that doesn't see it renders zero lock UI (byte-identical to
+ * pre-feature); one that sees it but has not yet received the `privacy` frame fails CLOSED
+ * (no session detail renders — plan「锁状态下发」). No agent↔hub frames — no PROTO bump
+ * (same §2.3 rule as every cap above).
+ */
+export const PRIVACY_HUB_CAP = "privacy.v1";
+
 /** D14: capability required before a control-plane slot is sent. */
 export const SLOT_REQUIRED_CAP = {
   dialogs: "dialog.v1",

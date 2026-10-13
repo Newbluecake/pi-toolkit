@@ -2707,3 +2707,50 @@ describe.each([
     expect(out).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
   });
 });
+
+// web-hub-privacy plan v2.1 (P1, 传输层同形): `privacy.verify`/`privacy.lock` — identical wire
+// + outcome mapping on BOTH transports (the `transport.privacy` namespace must exist on both).
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: privacy verify/lock (web-hub-privacy P1)", (_mode, make) => {
+  const LOCK_REQ = { agentKey: "A", sessionId: "s1", locked: false, password: "pw" };
+
+  it("verify(): POST /api/privacy/verify {password}; 200 {ok:false} is a VERDICT, not an error", async () => {
+    const h = make(async (url) => (url === "/api/privacy/verify" ? resp(200, { ok: false }) : resp(200)));
+    const out = await h.transport.privacy!.verify("pw");
+    expect(out).toEqual({ ok: true, data: { ok: false } });
+    const call = h.fetchCalls.find((c) => c.url === "/api/privacy/verify")!;
+    expect(call.init.method).toBe("POST");
+    expect(call.init.headers?.["X-PWH"]).toBe("1");
+    expect(JSON.parse(call.init.body ?? "{}")).toEqual({ password: "pw" });
+  });
+
+  it("lock(): POST /api/privacy/lock with the verbatim body; 200 {ok:true} settles", async () => {
+    const h = make(async (url) => (url === "/api/privacy/lock" ? resp(200, { ok: true }) : resp(200)));
+    const out = await h.transport.privacy!.lock(LOCK_REQ);
+    expect(out).toEqual({ ok: true, data: { ok: true } });
+    const call = h.fetchCalls.find((c) => c.url === "/api/privacy/lock")!;
+    expect(JSON.parse(call.init.body ?? "{}")).toEqual(LOCK_REQ);
+  });
+
+  it("a 429 folds Retry-After into retryAfterS (login countdown UI reuses it); 409 keeps E_SESSION_CHANGED", async () => {
+    const h = make(async (url) =>
+      url === "/api/privacy/verify" ? resp(429, { error: "E_LOCKED" }, { "Retry-After": "30" }) : resp(200),
+    );
+    const out = await h.transport.privacy!.verify("pw");
+    expect(out).toEqual({ ok: false, error: "E_LOCKED", status: 429, retryAfterS: 30 });
+
+    const h2 = make(async (url) =>
+      url === "/api/privacy/lock" ? resp(409, { error: "E_SESSION_CHANGED" }) : resp(200),
+    );
+    const out2 = await h2.transport.privacy!.lock(LOCK_REQ);
+    expect(out2).toEqual({ ok: false, error: "E_SESSION_CHANGED", status: 409 });
+  });
+
+  it("an off-contract 200 body (no boolean ok) settles E_BAD_RESPONSE", async () => {
+    const h = make(async () => resp(200, { nope: 1 }));
+    const out = await h.transport.privacy!.verify("pw");
+    expect(out).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
+  });
+});

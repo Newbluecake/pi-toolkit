@@ -226,3 +226,13 @@ describe("web/contract.js API.wtgraph (worktree-graph plan v2 §4.4, P4)", () =>
     expect(web.API.wtgraph).toBe("/api/worktree-graph");
   });
 });
+
+describe("web/contract.js API.privacyVerify/privacyLock (web-hub-privacy plan v2.1, P1)", () => {
+  it("both are the protocol module's frozen paths (same reference, not a copy)", async () => {
+    const privProto = await import("../../../src/web-hub/protocol/privacy.js");
+    expect(web.API.privacyVerify).toBe(privProto.PRIVACY_VERIFY_PATH);
+    expect(web.API.privacyVerify).toBe("/api/privacy/verify");
+    expect(web.API.privacyLock).toBe(privProto.PRIVACY_LOCK_PATH);
+    expect(web.API.privacyLock).toBe("/api/privacy/lock");
+  });
+});

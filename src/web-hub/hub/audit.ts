@@ -636,3 +636,52 @@ export function auditAvatar(log: { info(msg: string, data?: object): void }, rec
   }
   log.info("avatar", out);
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-privacy plan v2.1 (P1): the privacy-lock audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * Privacy audit record (plan「接口」审计条). ONE line per `/api/privacy/*` decision, written by
+ * `hub/privacy/routes.ts`. `agentKey` rides plaintext per the existing convention (v2 评审 #10
+ * 纠正了 v1 的「哈希级标识」). NEVER carries the password (not even a hash/length — the field
+ * simply does not exist here) and NEVER the sessionId (same "never sessionId" discipline as
+ * `SPAWN_AUDIT_KEYS`); `locked` is the boolean direction of a lock op.
+ */
+export interface PrivacyAuditRecord {
+  phase: "request" | "reject";
+  op: "verify" | "lock";
+  listener?: "loopback" | "lan";
+  ip?: string;
+  user?: string;
+  agentKey?: string;
+  locked?: boolean;
+  ok: boolean;
+  code?: string;
+  ms?: number;
+}
+
+/** Runtime whitelist for `auditPrivacy` — anything not listed here is dropped, even if passed. */
+export const PRIVACY_AUDIT_KEYS = [
+  "phase",
+  "op",
+  "listener",
+  "ip",
+  "user",
+  "agentKey",
+  "locked",
+  "ok",
+  "code",
+  "ms",
+] as const;
+
+/** `log.info("privacy", { audit: "privacy", ...pick(record, PRIVACY_AUDIT_KEYS) })`. */
+export function auditPrivacy(log: { info(msg: string, data?: object): void }, record: PrivacyAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "privacy" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of PRIVACY_AUDIT_KEYS) {
+    const v = raw[key];
+    if (v !== undefined) out[key] = v;
+  }
+  log.info("privacy", out);
+}

@@ -20,6 +20,7 @@ import type {
   KdfParams,
   KdfPort,
   LanStorePort,
+  LanUserRecord,
   LoginLimiterPort,
   PortOptions,
   RequestContext,
@@ -59,6 +60,35 @@ export interface LanLoginDeps {
    * closed with a plain 401 `E_AUTH` (§6.1 "不区分失败原因"); a dummy KDF run keeps the timing
    * profile identical to the unknown-user / wrong-password branches. */
   onCorruptKdfParams?: (username: string, reason: string) => void;
+}
+
+/** The KDF half of the §6.1 pipeline, shared verbatim by login and privacy-verify
+ * (web-hub-privacy plan v2.1「校验管线」): §5.1 "读取校验" on the stored params (corrupt ⇒
+ * dummy run + `onCorruptKdfParams` + mismatch verdict), a real `kdf.run` either way (a missing
+ * user runs the DUMMY params so the timing profile never discloses user existence), and a
+ * constant-time compare. Caller owns the KDF admission slot (acquire/release) and the limiter
+ * accounting. */
+async function kdfMatches(
+  user: LanUserRecord | undefined,
+  password: string,
+  deps: LanLoginDeps,
+  opts?: PortOptions,
+): Promise<boolean> {
+  let corruptKdf = false;
+  let params: KdfParams = DUMMY_PARAMS;
+  if (user !== undefined) {
+    const validity = validateKdfParams(user);
+    if (validity.ok) {
+      params = { n: user.n, r: user.r, p: user.p, keyLen: user.hash.length, salt: user.salt };
+    } else {
+      corruptKdf = true;
+      deps.onCorruptKdfParams?.(user.username, validity.reason);
+    }
+  }
+  const derived = await deps.kdf.run(password, params, opts);
+  return (
+    user !== undefined && !corruptKdf && derived.length === user.hash.length && timingSafeEqual(derived, user.hash)
+  );
 }
 
 export type LanLoginOutcome =
@@ -113,26 +143,16 @@ export async function runLanLogin(
   opts?.onAdmitted?.();
   try {
     const user = username === undefined ? undefined : await deps.store.getUser(username, opts);
-    // §5.1 "读取校验" (LC review fix, lan-plan.md §15.9 #2): a stored record's KDF params must be
-    // re-validated before they're ever fed to `scrypt` — a corrupted row (n/r/p out of range) could
-    // otherwise turn a login attempt into a memory/time DoS. A dummy KDF run (same shape as the
-    // "no such user" branch) keeps this indistinguishable in timing; the login still just 401s
-    // (§6.1 "不区分失败原因") and the corruption is surfaced only via `onCorruptKdfParams` for logging.
-    let corruptKdf = false;
-    let params: KdfParams = DUMMY_PARAMS;
-    if (user !== undefined) {
-      const validity = validateKdfParams(user);
-      if (validity.ok) {
-        params = { n: user.n, r: user.r, p: user.p, keyLen: user.hash.length, salt: user.salt };
-      } else {
-        corruptKdf = true;
-        deps.onCorruptKdfParams?.(user.username, validity.reason);
-      }
+    // §5.1 "读取校验" (LC review fix, lan-plan.md §15.9 #2) lives inside `kdfMatches` now —
+    // shared with the privacy-verify pipeline below; behavior unchanged (corrupt ⇒ dummy run +
+    // `onCorruptKdfParams` + mismatch).
+    if (!(await kdfMatches(user, password, deps, opts))) {
+      deps.limiter.fail(ctx.clientIp);
+      return { status: 401 };
     }
-    const derived = await deps.kdf.run(password, params, opts);
-    const matches =
-      user !== undefined && !corruptKdf && derived.length === user.hash.length && timingSafeEqual(derived, user.hash);
-    if (user === undefined || corruptKdf || !matches) {
+    if (user === undefined) {
+      // Unreachable in practice (kdfMatches already returns false for an unknown user); kept as
+      // a defensive narrowing so the session below is never created without a record.
       deps.limiter.fail(ctx.clientIp);
       return { status: 401 };
     }
@@ -144,6 +164,69 @@ export async function runLanLogin(
     const initialPasswordInUse = user.initialPassword !== undefined;
     if (initialPasswordInUse) await deps.store.markInitialLogin(user.username, ctx.clientIp, now, opts);
     return { status: 200, cookie: session.sid, initialPasswordInUse };
+  } finally {
+    admission.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-privacy plan v2.1「校验管线」(P1): stateless password re-verification for an
+// ALREADY-authenticated LAN session (view-unlock + LAN-side unlock of a privacy mark).
+// ---------------------------------------------------------------------------
+
+export type LanVerifyOutcome =
+  | { status: 200; ok: boolean }
+  | {
+      status: 429;
+      retryAfterMs: number;
+      saturated?: boolean;
+      /** Same split as `LanLoginOutcome`'s 429 (backoff lockout vs KDF admission queue) — the
+       * route maps it to the same `E_LOCKED`/`E_RATE` wire codes the login handler uses. */
+      kind: "backoff" | "admission";
+    };
+
+/**
+ * Extracted from `runLanLogin` (plan「接口」评审 #3): verify the CURRENT session user's LAN
+ * password — 会话取 userId → `getUserSummary(userId)` 取 username → `getUser` → 共用 KDF
+ * admission → 比对. Deliberate differences from login:
+ *
+ * - **No session is created** (stateless check) and no cookie is touched.
+ * - **Shares the per-IP login limiter** (`limiter.admit` gates, `limiter.fail` counts a wrong
+ *   password toward the SAME backoff as failed logins — same credential, same strength), but a
+ *   SUCCESS never calls `limiter.succeed()` (复审 N-3: an unlock success must not reset the
+ *   login backoff an attacker is currently accumulating against the same account).
+ * - The verdict is `200 {ok:false}` material, never a 401 — the ROUTE owns that mapping
+ *   (`hub/privacy/routes.ts`); a port rejection (`E_DB`…) propagates exactly like login's.
+ */
+export async function verifyPassword(
+  ctx: Pick<RequestContext, "clientIp">,
+  userId: number,
+  password: string,
+  deps: LanLoginDeps,
+  opts?: { signal?: AbortSignal; onAdmitted?: () => void },
+): Promise<LanVerifyOutcome> {
+  const admitResult = deps.limiter.admit(ctx.clientIp);
+  if (!admitResult.ok) {
+    return {
+      status: 429,
+      retryAfterMs: admitResult.retryAfterMs,
+      kind: "backoff",
+      ...(admitResult.saturated === true ? { saturated: true as const } : {}),
+    };
+  }
+  const fresh = deps.limiter.isFresh?.(ctx.clientIp) ?? true;
+  const admission = await deps.admission.acquire(ctx.clientIp, fresh, opts);
+  if (!admission.ok) return { status: 429, retryAfterMs: admission.retryAfterMs, kind: "admission" };
+  opts?.onAdmitted?.();
+  try {
+    const summary = await deps.store.getUserSummary(userId, opts);
+    const user = summary === undefined ? undefined : await deps.store.getUser(summary.username, opts);
+    const matches = await kdfMatches(user, password, deps, opts);
+    if (!matches) {
+      deps.limiter.fail(ctx.clientIp);
+      return { status: 200, ok: false };
+    }
+    return { status: 200, ok: true }; // deliberately NO limiter.succeed() — see doc comment
   } finally {
     admission.release();
   }

@@ -111,6 +111,7 @@
  *   supersedeDeadlineAt?: number | undefined, forced: boolean, draining: boolean,
  *   spawns: import("../../../protocol/spawn.js").SpawnsPayload | null,
  *   removed: ReadonlySet<string>, synced: boolean,
+ *   privacy: { cap: boolean, ready: boolean, locked: ReadonlySet<string> },
  *   load?: import("../../../protocol/messages.js").LoadWire | undefined,
  *   loadReceivedAt?: number | undefined,
  *   loadTop?: { loading: boolean, data?: import("../../../protocol/messages.js").LoadTopWire | undefined, error?: string | undefined, retryAfterS?: number | undefined } | undefined,
@@ -140,6 +141,8 @@ function pinnedEvent(name) {
 }
 
 const AGENT_REMOVED_EVENT = pinnedEvent("agent_removed");
+/** web-hub-privacy plan v2.1 (P1): same module-load-time drift pin as `agent_removed` above. */
+const PRIVACY_EVENT = pinnedEvent("privacy");
 
 /** Local (non-SSE) events understood by `reduce`. */
 export const LOCAL_EVENTS = Object.freeze([
@@ -288,6 +291,13 @@ export function initialState(storage = browserOrderStorage()) {
     // snapshot lands. `hello` keeps it (the old cards stay on screen across a reconnect), so
     // a reconnect never falls back into the loading state.
     synced: false,
+    // web-hub-privacy plan v2.1 (P1): the privacy-lock slot — `cap` tracks the hub frame's
+    // `privacy.v1` (absent ⇒ byte-identical pre-feature: no lock UI at all); `ready` flips
+    // true on the first `privacy` frame (the hub sends the full snapshot BEFORE `agents` in
+    // every connect burst); `cap && !ready` is the FAIL-CLOSED window (P2 renders no session
+    // detail in it); `locked` is the current locked-sessionId set (clients intersect it with
+    // `agent.session?.sessionId`).
+    privacy: { cap: false, ready: false, locked: new Set() },
   };
 }
 
@@ -519,10 +529,15 @@ function reduceInner(s, event, d, at) {
       for (const [k, a] of s.agents) agents.set(k, a.sub ? { ...a, sub: null, abandoned: true } : a);
       // sysload plan §7.4: a fresh connection clears the hub-global `load`/`loadTop` slots —
       // stale until the hub's post-`agents` snapshot resend (§7.2) or the first live frame.
+      // web-hub-privacy plan v2.1 (P1): same posture for the privacy slot — the hub re-sends
+      // the full locked-set snapshot BEFORE `agents` on every connect, so `ready` drops back
+      // to false (fail-closed window) and the set clears until then. `cap` survives: it is
+      // recomputed by the `hub` frame that precedes it.
       return {
         ...s,
         clientId: typeof d.clientId === "string" ? d.clientId : null,
         agents,
+        privacy: { cap: s.privacy.cap, ready: false, locked: new Set() },
         load: undefined,
         loadReceivedAt: undefined,
         loadTop: undefined,
@@ -535,10 +550,15 @@ function reduceInner(s, event, d, at) {
       // sysload plan §7.4: a `hub` frame whose caps dropped `load.v1` (older hub / feature
       // turned off on the hub side) clears the slots — never left showing a frozen last reading.
       const loadCap = caps.includes("load.v1");
+      // web-hub-privacy plan v2.1 (P1): a `hub` frame whose caps dropped `privacy.v1` (older
+      // hub / `webHub.privacy` turned off) clears the whole slot — never left gating/hiding
+      // against a hub that no longer speaks privacy (byte-identical pre-feature behavior).
+      const privacyCap = caps.includes("privacy.v1");
       return {
         ...s,
         hub: d,
         control: caps.includes("cmd.v1"),
+        privacy: privacyCap ? { ...s.privacy, cap: true } : { cap: false, ready: false, locked: new Set() },
         hubState: d.state === "running" || d.state === "stopping" || d.state === "restarting" ? d.state : undefined,
         nextVersion: typeof d.nextVersion === "string" ? d.nextVersion : undefined,
         supersedePending: d.supersedePending === true,
@@ -551,6 +571,17 @@ function reduceInner(s, event, d, at) {
         loadReceivedAt: loadCap ? s.loadReceivedAt : undefined,
         loadTop: loadCap ? s.loadTop : undefined,
       };
+    }
+    // web-hub-privacy plan v2.1 (P1): the locked-set full-snapshot/broadcast frame. Overwrite
+    // semantics (same discipline as `spawns`); malformed frames are dropped wholesale. `ready`
+    // flips true on the first valid frame — until then `cap && !ready` is the fail-closed
+    // window (plan「锁状态下发」: 不渲染任何会话详情).
+    case PRIVACY_EVENT: {
+      if (!Array.isArray(d.locked) || !d.locked.every((x) => typeof x === "string")) return s;
+      const next = new Set(d.locked);
+      const prev = s.privacy;
+      if (prev.ready && prev.locked.size === next.size && [...next].every((x) => prev.locked.has(x))) return s;
+      return { ...s, privacy: { cap: prev.cap, ready: true, locked: next } };
     }
     case "ping":
       return s;
@@ -1740,6 +1771,28 @@ export function needsSubscribe(s) {
 /** @param {State} s @returns {AgentState | undefined} */
 export function selectedAgent(s) {
   return s.selected === null ? undefined : s.agents.get(s.selected);
+}
+
+/**
+ * web-hub-privacy plan v2.1 (P1, fail-closed 标志位): the hub advertises `privacy.v1` but the
+ * first `privacy` frame has not landed yet (fresh connect burst not past its pre-`agents`
+ * snapshot) — P2's DashboardView renders NO session detail in this window (防降级窗口).
+ * @param {State} s @returns {boolean}
+ */
+export function privacyFailClosed(s) {
+  return s.privacy.cap && !s.privacy.ready;
+}
+
+/**
+ * web-hub-privacy plan v2.1 (P1, 客户端求交): whether the agent's CURRENT session carries a
+ * privacy mark — `lockedSet.has(agent.session?.sessionId)`. `/new`/`/resume`换 sessionId 自动
+ * 正确 (v2 评审 #4); an agent without a session is never locked.
+ * @param {State} s @param {string} agentKey @returns {boolean}
+ */
+export function isAgentLocked(s, agentKey) {
+  const a = s.agents.get(agentKey);
+  const sid = a && a.session && typeof a.session === "object" ? a.session.sessionId : undefined;
+  return typeof sid === "string" && s.privacy.locked.has(sid);
 }
 
 /**

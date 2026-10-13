@@ -273,6 +273,20 @@ export interface HubState {
     readonly error?: string;
     readonly retryAfterS?: number;
   };
+  /** web-hub-privacy plan v2.1 (P1, 数据层 only — P2 owns the views): the privacy-lock slot,
+   * mirroring `@logic/state.js`'s `State.privacy`. `cap` tracks the hub frame's `privacy.v1`
+   * (absent ⇒ byte-identical pre-feature: zero lock UI); `ready` flips true on the first
+   * `privacy` frame (the hub sends the full locked-set snapshot BEFORE `agents` in every
+   * connect burst and re-broadcasts on every change; `hello` drops `ready` back to false).
+   * `cap && !ready` is the FAIL-CLOSED window — no session detail renders in it
+   * (plan「锁状态下发」; `@logic/state.js`'s `privacyFailClosed` computes it). `locked` is the
+   * current locked-sessionId set — clients intersect it with `agent.session?.sessionId`
+   * (`isAgentLocked`). */
+  readonly privacy?: {
+    readonly cap: boolean;
+    readonly ready: boolean;
+    readonly locked: ReadonlySet<string>;
+  };
 }
 
 /**

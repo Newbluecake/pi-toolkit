@@ -83,6 +83,7 @@ import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
 import { AVATAR_DELETE_PATH, AVATAR_PATH, AVATAR_STORE_MIN_MS } from "../protocol/avatar.js";
+import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "../protocol/privacy.js";
 import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
 import { sendJsonNegotiated } from "./gzip.js";
@@ -125,6 +126,8 @@ import type {
   PreviewRoutes,
   PreviewAuthHandled,
   PreviewAuthResult,
+  PrivacyRouteIo,
+  PrivacyRoutes,
   WorktreeDiffRoutes,
   WorktreeGraphRoutes,
   RegistryView,
@@ -706,6 +709,13 @@ function createRouteSet(
     runTx?: RunTranscriptService;
     /** sysload P3: latest host snapshot, sent after the spawns snapshot and never replayed. */
     load?: () => import("../protocol/messages.js").LoadWire | undefined;
+    /** web-hub-privacy plan v2.1 (P1): this listener's locked-sessionId snapshot provider —
+     * present ONLY when the privacy feature is assembled (`FrontendDeps.privacy`). The connect
+     * burst sends the full set BEFORE `agents` (fail-closed anchor: a client holding the
+     * `privacy.v1` cap waits for exactly this frame), and `onHubEvent`'s `case "privacy"`
+     * direct-sends every change (never the replay ring, never an `id:`). Absent ⇒ no `privacy`
+     * frame is ever sent, byte-identical to not-enabled. */
+    privacy?: () => readonly string[];
   },
 ): RouteSet {
   const pending = new Map<string, Map<string, PendingSub>>();
@@ -849,6 +859,15 @@ function createRouteSet(
           // Host load is direct-send: no id and no replay-ring entry.
           for (const client of sse.list()) client.send("load", e.wire);
           break;
+        // web-hub-privacy plan v2.1 (P1): the locked-set broadcast is direct-send too (never the
+        // replay ring — a reconnecting client gets the full snapshot in its connect burst
+        // instead). The `routeDeps.privacy` presence gate mirrors `case "spawns"`: feature off
+        // ⇒ this listener never emits a `privacy` frame even if a bus event somehow arrives.
+        case "privacy":
+          if (routeDeps.privacy !== undefined) {
+            for (const client of sse.list()) client.send("privacy", { locked: [...e.locked] });
+          }
+          break;
       }
     } catch (err) {
       routeDeps.log.error("web-hub http: bus event dispatch failed", { type: e.type, error: String(err) });
@@ -887,6 +906,12 @@ function createRouteSet(
     const lastEventId = typeof raw === "string" && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
     const client = sse.attach(req, res, lastEventId, auth);
     client.send("hub", { ...routeDeps.info(), port: routeDeps.port() });
+    // web-hub-privacy plan v2.1 (P1): the locked-set snapshot rides the connect burst BEFORE
+    // `agents` (plan「锁状态下发」, with spawns/load as the同构 precedent) — a client holding
+    // the `privacy.v1` cap fails CLOSED until exactly this frame lands, so it must precede the
+    // first card data the UI could render details from.
+    const privacyLocked = routeDeps.privacy?.();
+    if (privacyLocked !== undefined) client.send("privacy", { locked: [...privacyLocked] });
     client.send("agents", { agents: routeDeps.registry.list().map(toCard) });
     // web-hub-spawn plan §SP9: the `spawns` snapshot rides right after `agents`, so a
     // (re)connecting browser gets the full fleet + spawn-board picture in one connect burst.
@@ -1037,6 +1062,10 @@ export interface LanRuntime {
   agentRemove?: AgentRemoveFrontendPort | undefined;
   /** web-hub-avatar plan v2.1 §2.1: same route instance as loopback; absent keeps the off matrix. */
   avatar?: AvatarRoutes | undefined;
+  /** web-hub-privacy plan v2.1 (P1): same route instance as loopback; absent keeps both
+   * `/api/privacy/*` paths at their byte-identical not-enabled 404s. The LAN dispatch mounts
+   * BOTH `verify` and `lock` (loopback mounts only `lock` — v2.1 N1). */
+  privacy?: PrivacyRoutes | undefined;
   /** sysload P3: shared hub activation for the LAN-equal-width top endpoint. */
   load?: HubLoadService;
 }
@@ -1559,6 +1588,32 @@ async function handleLanRequestInner(
       },
       sendJson,
     });
+  }
+
+  // web-hub-privacy plan v2.1 (P1): `/api/privacy/verify` + `/api/privacy/lock` on the LAN
+  // listener (loopback mounts only `lock` — see handleApi below). Same insertion point class as
+  // avatar above (immediately before the generic POST branch); the route owns its own
+  // CSRF/body/audit pipeline, the authorize closure mirrors the avatar segment but ALSO yields
+  // the session's numeric userId (the `verifyPassword` pipeline's starting point, plan「校验
+  // 管线」: 会话取 userId → getUserSummary → getUser → 共用 KDF admission).
+  if (rt.privacy !== undefined && method === "POST" && (path === PRIVACY_VERIFY_PATH || path === PRIVACY_LOCK_PATH)) {
+    const io: PrivacyRouteIo = {
+      listener: "lan",
+      ip: ctx.clientIp,
+      strictCsrfOk: () => strictCsrfOk(req, ctx.externalOrigin),
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, LAN_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}`, userId: session.userId };
+      },
+      readJson,
+      sendJson,
+      sendError,
+      HttpError,
+    };
+    return path === PRIVACY_VERIFY_PATH ? rt.privacy.handleVerify(req, res, io) : rt.privacy.handleLock(req, res, io);
   }
 
   if (method === "POST") {
@@ -2451,6 +2506,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // web-hub-avatar plan v2.1 §2.1: one route instance serves both listeners; the
   // absent dependency is the byte-identical feature-off path.
   const avatarRoutes = deps.avatar;
+  // web-hub-privacy plan v2.1 (P1): same single-instance/two-listener discipline as avatar;
+  // absent ⇒ no dispatch, no `privacy` SSE frame, byte-identical to pre-feature.
+  const privacyRoutes = deps.privacy;
   // @文件补全 (file-mention): the `GET /api/files/search` route frontend. Default-constructed
   // from the preview line's presence/mode (the search endpoint is preview's completion
   // sibling — same cwd-root security surface, same §4.7 listener matrix), so `hub.ts` needs no
@@ -2511,6 +2569,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     now,
     ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
     ...(load === undefined ? {} : { load: () => load.latest() }),
+    ...(privacyRoutes === undefined ? {} : { privacy: () => privacyRoutes.locked() }),
   });
   loadRouteSets.push(routes);
 
@@ -2544,6 +2603,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       now,
       ...(deps.runTx === undefined ? {} : { runTx: deps.runTx }),
       ...(load === undefined ? {} : { load: () => load.latest() }),
+      ...(privacyRoutes === undefined ? {} : { privacy: () => privacyRoutes.locked() }),
     });
     loadRouteSets.push(lanRoutes);
     lanRunSink = lanRoutes.runSink;
@@ -2572,6 +2632,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       spawn: deps.spawn,
       preview: deps.preview,
       avatar: deps.avatar,
+      /** web-hub-privacy plan v2.1 (P1): same instance as the loopback listener's (or undefined
+       * when `webHub.privacy` is off — both `/api/privacy/*` paths then keep their 404s). */
+      privacy: privacyRoutes,
       /** @文件补全 (file-mention): same instance as the loopback listener's (or undefined when
        * preview/file-search is not enabled — the LAN face then keeps its original 404). */
       fileSearch: fileSearchRoutes,
@@ -2969,6 +3032,30 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
+      });
+    }
+    // web-hub-privacy plan v2.1 (P1): `/api/privacy/lock` on the loopback listener — same
+    // insertion point class as agent-remove/avatar above (immediately before the generic POST
+    // branch); authorize is the same sync cookie-map lookup. `/api/privacy/verify` is
+    // deliberately NOT mounted here (v2.1 N1: token mode has no second credential) — it falls
+    // through to the generic POST branch's authed 404 below, byte-identical to not-enabled.
+    if (privacyRoutes !== undefined && method === "POST" && path === PRIVACY_LOCK_PATH) {
+      return privacyRoutes.handleLock(req, res, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        strictCsrfOk: () =>
+          strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        readJson,
+        sendJson,
+        sendError,
+        HttpError,
       });
     }
     if (method === "POST") {

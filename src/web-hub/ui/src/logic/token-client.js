@@ -1567,6 +1567,45 @@ export function createClient(deps) {
 
   const avatar = { fetch: avatarFetch, upload: avatarUpload, remove: avatarRemove };
 
+  // ---------------------------------------------------------------------------
+  // web-hub-privacy plan v2.1 (P1, 传输层 only — P2 owns the views): `verify` (LAN-only
+  // endpoint; a loopback/token hub 404s it and P2 renders the click-to-confirm variant there)
+  // and `lock` (both listeners; LAN unlock carries an inline `password`). A wrong password is
+  // a 200 verdict (`data.ok === false`), NEVER an error — 401 is reserved for a lost session.
+  // A 429 carries `retryAfterS` (the login limiter's Retry-After — same countdown UI).
+  // ---------------------------------------------------------------------------
+  /**
+   * @param {string} path @param {unknown} body
+   * @returns {Promise<{ ok: true, data: { ok: boolean } } | { ok: false, error: string, status?: number, retryAfterS?: number }>}
+   */
+  async function privacyPost(path, body) {
+    try {
+      const r = await withRelogin(() => postRaw(path, body, CMD_REQUEST_TIMEOUT_MS));
+      if (r.ok) {
+        const d = await r.json();
+        if (d === null || typeof d !== "object" || typeof d.ok !== "boolean")
+          return { ok: false, error: "E_BAD_RESPONSE", status: r.status };
+        return { ok: true, data: { ok: d.ok } };
+      }
+      const retryRaw = typeof r.headers?.get === "function" ? r.headers.get("Retry-After") : null;
+      const retryS = retryRaw === null ? NaN : Number(retryRaw);
+      return {
+        ok: false,
+        error: await errorOf(r),
+        status: r.status,
+        ...(Number.isFinite(retryS) && retryS >= 0 ? { retryAfterS: retryS } : {}),
+      };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+  const privacy = {
+    /** @param {string} password */
+    verify: (password) => privacyPost(API.privacyVerify, { password }),
+    /** @param {{ agentKey: string, sessionId: string, locked: boolean, password?: string }} req */
+    lock: (req) => privacyPost(API.privacyLock, req),
+  };
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -1672,6 +1711,7 @@ export function createClient(deps) {
     worktreeGraph,
     loadTop,
     avatar,
+    privacy,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

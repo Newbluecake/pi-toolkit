@@ -8,7 +8,7 @@
  */
 import { createCmdLimit } from "../../../src/web-hub/hub/cmd-limit.js";
 import type { HubLog } from "../../../src/web-hub/hub/ports.js";
-import { createSpawnRoutes } from "../../../src/web-hub/hub/spawn/routes.js";
+import { createSpawnRoutes, type SpawnPrivacyPort } from "../../../src/web-hub/hub/spawn/routes.js";
 import type { AdmitResult, DirService } from "../../../src/web-hub/hub/spawn/dirs.js";
 import type { FirstPromptForwarder, FirstPromptStateView } from "../../../src/web-hub/hub/spawn/first-prompt.js";
 import type { MkdirService } from "../../../src/web-hub/hub/spawn/mkdir.js";
@@ -611,13 +611,16 @@ export const KIT_CFG: HubSpawnConfig = {
  *  `history` (session-history plan §4.6.5): omitted ⇒ `deps.history` is undefined —
  *  byte-identical to history-off even when `cfg.history` is explicitly `true`.
  *  `mkdir` (spawn-dirmkdir): omitted ⇒ `deps.mkdir` is undefined — the mkdir route 404s,
- *  byte-identical to an unknown path. */
+ *  byte-identical to an unknown path.
+ *  `privacy` (web-hub-privacy plan v2.1 P1, 「Fork 继承」): omitted ⇒ `deps.privacy` is
+ *  undefined — fork inheritance is skipped, byte-identical to pre-feature. */
 export function spawnKit(
   cfg: Partial<HubSpawnConfig> = {},
   clock: FakeClock,
   prefs: FakeSpawnPrefs = fakeSpawnPrefs(),
   history?: FakeHistoryService,
   mkdir?: MkdirService,
+  privacy?: SpawnPrivacyPort,
 ): SpawnKit {
   const supervisor = fakeSpawnSupervisor();
   const dirs = fakeDirs();
@@ -636,6 +639,7 @@ export function spawnKit(
     now: clock.now,
     ...(mkdir === undefined ? {} : { mkdir }),
     ...(history === undefined ? {} : { history }),
+    ...(privacy === undefined ? {} : { privacy }),
   });
   return {
     supervisor,

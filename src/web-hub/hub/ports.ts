@@ -387,6 +387,12 @@ export interface HubConfig {
   preview?: "on" | "loopback";
   /** web-hub-avatar plan v2.1 §2.6: presence of the literal key is the feature gate. */
   avatar?: true;
+  /** web-hub-privacy plan v2.1 (P1, 「设置」节): presence of the literal key is the feature
+   * gate (same wire-level pattern as `avatar`): `webHub.privacy` default true — `false` leaves
+   * the key ABSENT, so an off hub mounts no routes, sends no `privacy` frame, declares no
+   * `privacy.v1` cap, and never touches the on-disk `privacy.json` (marks survive a disable
+   * round-trip). Non-live: change needs `/reload` + `/webhub restart`. */
+  privacy?: true;
   /** sysload plan (docs/dev/sysload/plan.md) §7.2/§11: the hub's OWN sampler policy, written by
    * the pi process that launched it, ONLY when `load.enabled ∧ webHub.load` are both true
    * (`buildHubConfig`, P2a) — same wire-level "feature off IS key absence" pattern as `spawn`/
@@ -477,6 +483,12 @@ export type HubEvent =
    * as the `load` SSE event and (like `spawns`) snapshots the latest wire on connect, sent right
    * AFTER `spawns` (§7.2). */
   | { type: "load"; wire: LoadWire }
+  /** web-hub-privacy plan v2.1 (P1): the hub-global locked-sessionId set changed — broadcast as
+   * the direct-send `privacy` SSE event (no `agentKey`, no `id:`, never the replay ring — same
+   * 直发 posture as `load`). `http.ts`'s `openEvents` ALSO sends the snapshot on every connect
+   * burst, BEFORE `agents` (with spawns/load as the同构 precedent). Published by hub.ts from the
+   * privacy store's `onChange`. */
+  | { type: "privacy"; locked: readonly string[] }
   /** web-hub-spawn plan §SP1 (arch §6.4): the `spawns` SSE broadcast — carries the Public
    * projection ONLY (`SpawnsPayload`); owner detail never rides the bus. `http.ts` (SP9)
    * forwards it as the `spawns` SSE event and snapshots it on connect. */
@@ -680,6 +692,13 @@ export interface FrontendDeps {
   agentRemove?: AgentRemoveFrontendPort;
   /** web-hub-avatar plan v2.1 §2.1: optional route frontend; absent keeps the hub inert. */
   avatar?: AvatarRoutes;
+  /** web-hub-privacy plan v2.1 (P1): the privacy-lock route frontend
+   * (`hub/privacy/routes.ts`'s `createPrivacyRoutes`), constructed by hub.ts only when
+   * `config.privacy === true`. Optional so test doubles and pre-feature assemblies keep
+   * compiling — when absent, `/api/privacy/lock` answers 404 on both listeners and
+   * `/api/privacy/verify` 404s (LAN included), byte-identical to not-enabled, and no `privacy`
+   * SSE frame is ever sent. */
+  privacy?: PrivacyRoutes;
 }
 
 export interface HttpFrontend {
@@ -769,6 +788,61 @@ export interface PreviewRoutes {
 export interface FileSearchRoutes {
   readonly mode: "on" | "loopback";
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-privacy plan v2.1 (P1): the privacy-lock route frontend's frozen surface — same
+// declaration rationale as `PreviewRoutes`/`WorktreeDiffRoutes` above (`FrontendDeps.privacy`
+// needs the type before `hub/privacy/routes.ts` exists from ports.ts's perspective). The io
+// shape mirrors `AgentRemoveIo` (`SpawnRouteIo` minus the LAN-admission-scope fields) plus one
+// addition: `PrivacyAuthResult.userId`, the LAN session's numeric user id, which only the
+// listener's `authorize` closure can know (`http.ts`'s `requireLanSession`) and which the
+// `verify`/LAN-unlock password pipeline needs (`lan-auth.ts`'s extracted `verifyPassword`).
+// ---------------------------------------------------------------------------
+
+/** Successful privacy-route `authorize()`: `SpawnAuthResult` plus the LAN session's userId
+ * (present exactly on the LAN listener; loopback authorizes by cookie only). */
+export interface PrivacyAuthResult {
+  ip: string;
+  user?: string;
+  /** LAN only — the authenticated session's `users.id`, the input `verifyPassword` starts from
+   * (会话取 userId → getUserSummary → getUser → 共用 KDF admission, plan「校验管线」). */
+  userId?: number;
+}
+
+/** `authorize()` already sent its own error response (401/429/503); `code` is mirror-back only. */
+export interface PrivacyAuthHandled {
+  handled: true;
+  code: string;
+}
+
+/** Per-request io injected by `http.ts`'s dispatch points (one per listener), mirroring
+ * `AgentRemoveIo` = `SpawnRouteIo` minus `scheme`/`viaTrustedProxy`, with the widened auth
+ * result above. */
+export interface PrivacyRouteIo {
+  listener: "loopback" | "lan";
+  /** Known before `authorize()` ever runs (LAN: `ctx.clientIp`; loopback: peer IP). */
+  ip: string;
+  strictCsrfOk(): boolean;
+  authorize(deadline: ReqDeadline): Promise<PrivacyAuthResult | PrivacyAuthHandled>;
+  readJson(req: IncomingMessage, maxBytes?: number, maxMs?: number): Promise<unknown>;
+  sendJson(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>): void;
+  sendError(res: ServerResponse, status: number, code: string, message?: string): void;
+  HttpError: new (status: number, code: string, message?: string) => Error & { status: number; code: string };
+}
+
+/** The frontend surface `createHttpFrontend` optionally carries (P1 wires
+ * `FrontendDeps.privacy`): `handleVerify` dispatches `POST /api/privacy/verify` (LAN ONLY —
+ * the loopback dispatch point never routes it, and the route itself 404s a non-LAN call as a
+ * defensive second gate, v2.1 N1); `handleLock` dispatches `POST /api/privacy/lock` for ONE
+ * listener (both listeners mount it). No `dispose`: the routes hold no fds/timers of their
+ * own — the store's write chain is drained by `PrivacyStore.close()` (hub.ts-owned). */
+export interface PrivacyRoutes {
+  handleVerify(req: IncomingMessage, res: ServerResponse, io: PrivacyRouteIo): Promise<void>;
+  handleLock(req: IncomingMessage, res: ServerResponse, io: PrivacyRouteIo): Promise<void>;
+  /** The current locked-sessionId set (sorted) — `http.ts`'s `openEvents` connect burst and
+   * (via the bus `privacy` event gate) the listener-level presence check read it. */
+  locked(): readonly string[];
 }
 
 // ---------------------------------------------------------------------------

@@ -127,6 +127,10 @@ export interface HubTransport {
   readonly preview?: PreviewTransport;
   /** web-hub-avatar plan v2.1 §5: the single fixed hub-side avatar surface. */
   readonly avatar?: AvatarTransport;
+  /** web-hub-privacy plan v2.1 (P1): the privacy-lock surface. Optional per the
+   * frozen-transport convention (test fakes may omit it); both real adapters always provide
+   * it. P2's UI additionally gates every affordance on the hub's `privacy.v1` cap. */
+  readonly privacy?: PrivacyTransport;
   /** worktree-diff plan v3.1 §4.6 (package D4): the two `GET /api/worktree-diff/*` endpoints.
    * Optional per the frozen-transport convention (test fakes / future transports may omit it) —
    * `useWorktreeDiff`'s scope derivation (D5) yields `null` without it and the panel stays
@@ -611,6 +615,38 @@ export interface AvatarTransport {
   fetch(opts: { readonly signal: AbortSignal }): Promise<AvatarFetchOutcome>;
   upload(bytes: Uint8Array, opts?: { readonly signal?: AbortSignal }): Promise<AvatarWriteOutcome>;
   remove(): Promise<AvatarDeleteOutcome>;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-privacy plan v2.1 (P1, 传输层 only) — the privacy-lock transport surface
+// ---------------------------------------------------------------------------
+
+/** `POST /api/privacy/lock` request (both listeners; `password` is REQUIRED on a LAN unlock,
+ *  never sent on loopback — the hub enforces that split, not the client). */
+export interface PrivacyLockRequest {
+  readonly agentKey: string;
+  readonly sessionId: string;
+  readonly locked: boolean;
+  readonly password?: string;
+}
+
+/**
+ * Shared outcome for `verify`/`lock`: a 200 carries the hub's verdict (`ok:false` = wrong
+ * password — NEVER an error, and NEVER a 401, plan v2 评审 #3); the error half keeps the wire
+ * code verbatim (`E_SESSION_CHANGED` on a 409, `E_LIMIT`, `E_LOCKED`/`E_RATE` on a 429 — with
+ * `retryAfterS` folded from `Retry-After`, so P2 can reuse the login countdown UI verbatim).
+ * `status` is absent/0 for client-local codes (`E_NETWORK`/`E_DEADLINE`/`E_BAD_RESPONSE`).
+ */
+export type PrivacyOutcome =
+  | { readonly ok: true; readonly data: { readonly ok: boolean } }
+  | { readonly ok: false; readonly error: string; readonly status?: number; readonly retryAfterS?: number };
+
+export interface PrivacyTransport {
+  /** `POST /api/privacy/verify` — LAN/password mode only (a token-mode hub 404s it; P2 never
+   *  calls it there — the loopback lock screen is a click-to-confirm, plan v2.1 N1). */
+  verify(password: string): Promise<PrivacyOutcome>;
+  /** `POST /api/privacy/lock` — both listeners. */
+  lock(req: PrivacyLockRequest): Promise<PrivacyOutcome>;
 }
 
 // ---------------------------------------------------------------------------

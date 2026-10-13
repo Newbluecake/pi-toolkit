@@ -297,6 +297,12 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ),
   // web-hub-avatar plan v2.1 §2.6: non-live; change requires /reload then /webhub restart.
   "webHub.avatar": bool("webHub.avatar", "web-hub: shared user avatar image (default on; control:false disables it)"),
+  // web-hub-privacy plan v2.1「设置」(P1): non-live; change requires /reload then /webhub restart.
+  // off ⇒ hub 不挂路由/不发 privacy 帧/不下 privacy.v1 cap/保留已有 privacy.json 标记文件。
+  "webHub.privacy": bool(
+    "webHub.privacy",
+    "web-hub: per-session privacy lock, L2 view-time re-verification (default on; off keeps privacy.json marks untouched)",
+  ),
   // web-hub-fleet-drawer plan §4.4 (F2): subagent transcript (fleet drawer) read plane —
   // independent of webHub.control; non-live like the rest of webHub.* (change → /reload).
   "webHub.subagentTranscript": choice(

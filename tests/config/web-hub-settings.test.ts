@@ -40,6 +40,7 @@ describe("web-hub settings", () => {
       uploads: "on",
       preview: "on",
       avatar: true,
+      privacy: true,
       subagentTranscript: "all",
       quota: true,
       load: true,
@@ -121,6 +122,7 @@ describe("web-hub settings", () => {
       uploads: "on",
       preview: "on",
       avatar: true,
+      privacy: true,
       subagentTranscript: "all",
       quota: true,
       load: true,
@@ -128,6 +130,12 @@ describe("web-hub settings", () => {
       spawn: spawnDefaults,
     });
     expect(parseWebHubSettings({ enabled: true, port: -1 })).toEqual({ ...defaults, enabled: true });
+  });
+
+  it("webHub.privacy (web-hub-privacy plan v2.1 P1): default true; explicit false survives; garbage falls back", () => {
+    expect(parseWebHubSettings({}).privacy).toBe(true);
+    expect(parseWebHubSettings({ privacy: false }).privacy).toBe(false);
+    expect(parseWebHubSettings({ privacy: "off" }).privacy).toBe(true);
   });
 
   it("is wired into loadSettings", () => {

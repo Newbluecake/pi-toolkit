@@ -140,6 +140,13 @@ export interface WebHubSettings {
   preview?: PreviewMode;
   /** web-hub-avatar plan v2.1 §2.6: one shared hub-side avatar. Non-live; `control:false` also disables it. */
   avatar?: boolean;
+  /** web-hub-privacy plan v2.1「设置」(P1): per-session privacy lock (L2 view-time
+   *  re-verification). Default `true`; `false` ⇒ `HubConfig.privacy` stays unset, keeping
+   *  `PI_WEBHUB_CONFIG` deep-equal to the pre-feature shape (the hub mounts no routes, sends no
+   *  `privacy` frame, declares no `privacy.v1` cap, and never touches the on-disk marks).
+   *  Non-live like the rest of webHub.* (change → /reload then /webhub restart). Deliberately
+   *  independent of `control` — it gates a VIEW plane, not the control plane. */
+  privacy?: boolean;
   /** web-hub-fleet-drawer plan §4.4 (F2): subagent-transcript (fleet drawer) availability.
    * `"all"` (default) advertises `runtx.v1` + `runtx.lan.v1`; `"loopback"` only `runtx.v1`;
    * `"off"` neither. This is the READ plane — deliberately independent of `control`. */
@@ -1007,6 +1014,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // web-hub-avatar plan v2.1 §2.6: feature-off is key absence, and a read/write
     // avatar is disabled together with the web control plane.
     if (settings.avatar === true && settings.control !== false) config.avatar = true;
+    // web-hub-privacy plan v2.1 (P1): feature-off is key absence (same wire-level pattern as
+    // avatar); NOT coupled to `control` (it gates a view plane, not the control plane).
+    if (settings.privacy === true) config.privacy = true;
     return config;
   };
 

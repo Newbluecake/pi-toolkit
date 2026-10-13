@@ -1814,6 +1814,47 @@ export function createPasswordClient(deps) {
 
   const avatar = { fetch: avatarFetch, upload: avatarUpload, remove: avatarRemove };
 
+  // ---------------------------------------------------------------------------
+  // web-hub-privacy plan v2.1 (P1, 传输层 only — P2 owns the views). Mirrors token-client's
+  // twin 1:1 (the two transports stay independent modules by design;
+  // `transport-contract.test.ts` pins behavioral parity): `verify` (this LAN/password transport
+  // is the ONLY mode whose hub actually mounts the endpoint) and `lock` (LAN unlock carries an
+  // inline `password`). A wrong password is a 200 verdict (`data.ok === false`), NEVER an
+  // error — 401 is reserved for a lost session; a 429 carries `retryAfterS` (the shared login
+  // limiter's Retry-After — same countdown UI as the login form).
+  // ---------------------------------------------------------------------------
+  /**
+   * @param {string} path @param {unknown} body
+   * @returns {Promise<{ ok: true, data: { ok: boolean } } | { ok: false, error: string, status?: number, retryAfterS?: number }>}
+   */
+  async function privacyPost(path, body) {
+    try {
+      const r = await postApi(path, body, CMD_REQUEST_TIMEOUT_MS);
+      if (r.ok) {
+        const d = await r.json();
+        if (d === null || typeof d !== "object" || typeof d.ok !== "boolean")
+          return { ok: false, error: "E_BAD_RESPONSE", status: r.status };
+        return { ok: true, data: { ok: d.ok } };
+      }
+      const retryRaw = typeof r.headers?.get === "function" ? r.headers.get("Retry-After") : null;
+      const retryS = retryRaw === null ? NaN : Number(retryRaw);
+      return {
+        ok: false,
+        error: await errorOf(r),
+        status: r.status,
+        ...(Number.isFinite(retryS) && retryS >= 0 ? { retryAfterS: retryS } : {}),
+      };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+  const privacy = {
+    /** @param {string} password */
+    verify: (password) => privacyPost(API.privacyVerify, { password }),
+    /** @param {{ agentKey: string, sessionId: string, locked: boolean, password?: string }} req */
+    lock: (req) => privacyPost(API.privacyLock, req),
+  };
+
   return {
     /** Clear a stray `#t=` (never read/sent in password mode), fetch session info, then open the stream. */
     async start() {
@@ -1842,6 +1883,7 @@ export function createPasswordClient(deps) {
     worktreeGraph,
     loadTop,
     avatar,
+    privacy,
     close() {
       closed = true;
       closeStream();

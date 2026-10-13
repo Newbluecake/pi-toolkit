@@ -32,6 +32,7 @@ import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
 import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "@protocol/worktree-diff.ts";
 import { WTGRAPH_PATH } from "@protocol/worktree-graph.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
+import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "@protocol/privacy.ts";
 
 /** SSE `event:` names pushed by the hub (order irrelevant, set must match) — same array as
  * `protocol/http-contract.ts`'s `SSE_EVENTS`, not a copy. */
@@ -98,6 +99,12 @@ export const API = Object.freeze({
   // sysload plan §7.1/§7.3 (package P4): the on-demand top-process endpoint, imported from
   // `protocol/http-contract.ts` — same anti-drift rule as the wtgraph/wtdiff paths above.
   loadTop: LOAD_TOP_PATH,
+  // web-hub-privacy plan v2.1 (P1): the privacy-lock endpoints, imported from
+  // `protocol/privacy.ts` — same anti-drift rule. `privacyVerify` is LAN-only (the hub 404s it
+  // on loopback; P2's lock screen renders the click-to-confirm variant there instead);
+  // `privacyLock` rides both listeners. `tests/web-hub/ui/logic-contract.test.ts` pins both.
+  privacyVerify: PRIVACY_VERIFY_PATH,
+  privacyLock: PRIVACY_LOCK_PATH,
   // @文件补全 (file-mention): the composer's file-search endpoint. Hand-written literal, NOT
   // imported from `hub/file-search.ts` — that module is hub-side (imports `node:fs*`) and must
   // never reach the browser bundle; `tests/web-hub/ui/logic-file-mention.test.ts` pins this
