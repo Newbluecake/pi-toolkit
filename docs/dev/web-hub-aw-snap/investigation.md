@@ -1,6 +1,32 @@
 # web-hub 切换会话 Aw Snap 崩溃排查（进行中）
 
-状态：**第二次复现已取证**（2026-10-13 13:30 CST）。根因未完全定位，但已取得关键排除项与一个新的确定性故障面（LAN /api/events 挂起）。
+状态：**根因定位中**（2026-10-13 晚重大突破：锁定 LAN-only wedge）。晚间用户侧升级为「进入 bunker 会话即卡死→崩溃页」（确定复现）。
+
+## 2026-10-13 晚 决定性取证链（bunker = a2162331-iOEqbE，「AgentEnv部署架构调研」）
+
+**症状**：主页/其他会话正常；切 bunker ⇒ 主线程 30–50s 循环 block，堆平（32MB 不动）、DOM 静止 357 节点（骨架），最终 Aw Snap。
+
+1. `pwh_diag_trace`（85026ea，sync localStorage 面包屑，`pwh_trace=1` 门控）崩前轨迹：全部组件 mount 完成、`state:history:done`（400 entries/2MB 帧/reduce 1ms）⇒ **freeze 在 history 应用之后、首个内容渲染完成之前**。
+2. 离线回放真实 live 帧（tests/web-hub/ui/bunker-repro.test.ts，THROWAWAY 未提交）：reduce 1ms / buildTxEntries 2ms / parseMarkdown 262 文本 54ms / findPathRefs 527 文本 64ms / Prism 58 fence 36ms——**内容无辜**。
+3. happy-dom 全挂载（bunker-render-repro.test.ts）：首个内容 flush ~1s（TxAssistant 850ms/MarkdownView 650ms），全树仅 6071 节点——也远低于 50s。
+4. **headless Chromium + CDP Profiler 在 loopback（127.0.0.1:7878，token）切 bunker 完全不卡**（dom=6552 渲染完，heap 10MB，98.2% idle）——`/tmp/bunker-prof.mjs`。
+5. 结论：**bunker × LAN（password 客户端）组合才崩**；loopback 同会话不崩、LAN 其他会话不崩。嫌疑：两 client 差异路径（password-client.js vs token-client.js，各 ~1900 行平行实现）/ LAN plaintext 非安全上下文 API 差 / LAN SSE 故障面。
+
+**待做实验**：
+
+- 用户 Chrome 开 loopback（`http://127.0.0.1:7878/`，token 在 `~/.pi/agent/web-hub/token`）切 bunker ⇒ 不卡 = LAN 实锤 + 临时通道。
+- 造强制走 password-client 的构建在 loopback 复现（免 LAN 密码）。
+- LAN 实锤后 diff 两 client 的 SSE/subscribe/重连路径。
+
+**环境注意**：hub 进程 pid 2162282（13:30 启动）**动态重解析 dist**——19:11/19:48 的 build:web 无重启即被伺服。用户页面已确认跑 BuMVt0qE（含 tracer 构建）。
+
+**监控装置**：`pwh_diag_trace`（85026ea）；`pwh_diag_scroll`（7b0a8b1，滚动记忆）；deveye 主 tab eval 心跳（pwh_diag_perf，刷新即失）；reader tab 模式（同源 list tab 读 localStorage）。
+
+**退出条件**：根因修复后移除 pwh_diag_route/pwh_diag_scroll/pwh_diag_trace 三处面包屑 + source-scan allowlist 两条 TEMPORARY + 两个 THROWAWAY 测试。
+
+---
+
+## 早前：第二次复现取证（2026-10-13 白天，旧构建）
 
 ## 现象（用户报告，2026-10-12）
 
