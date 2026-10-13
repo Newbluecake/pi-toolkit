@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-14
+
+### Added
+
+- **web-hub**: privacy lock /webhub status lines + plan/AGENTS wrap-up (P3) (`9e87a91`)
+- **web-hub**: privacy lock UI (P2) — lock screen, marks, four-way relock (`811415f`)
+- **web-hub**: trim the top-left brand to icon + "pi" (`29f2ff5`)
+- **web-hub**: privacy lock hub package (P1) — per-session privacy marks (`c580a47`)
+- **web-hub**: Ctrl+Enter drills into a dir row (keyboard parity for double-click) (`e644986`)
+- **web-hub**: dir-tree single-click expands, double-click drills in (`178be72`)
+- **web-hub**: tree-style inline expansion in the directory preview dialog (`009650a`)
+- **web-hub**: image preview fullscreen + wheel zoom down to 50% (`8dfd3cf`)
+- **web-hub**: session relaunch, streamlined spawn flow, and page-wide uploads (`c4fe4a6`)
+- **cache-ttl**: provider evidence layer gates warmth, keepalive TTL, and dead-line breaker (`bb8a5e4`)
+- **ask-user**: per-question skip on every surface (`d18bdcd`)
+- **web-hub**: slim spawn dialog, dir browser with mkdir, preview downloads (`7976638`)
+- **web-hub**: allow attachments on slash commands (block rides in args) (`76ec41e`)
+- **compat**: support pi 1.1.x (`b86b86a`)
+- **web-hub**: roomier phone top bar and Chinese load labels (`56a5bf2`)
+
+### Fixed
+
+- **web-hub**: collapse shrinks the sidebar column even after a drag-resize (`6e9f685`)
+- **web-hub**: tolerate a trailing slash in preview-admission paths (`d99d4b8`)
+- **web-hub**: top-anchor the new-session dialog so its top edge never jumps (`b243117`)
+- **web-hub**: stop the new-session dialog jittering on each typed path letter (`58d2a99`)
+- **web-hub**: SSE connect timeout + visible boot failure (was: eternal splash) (`298e334`)
+- **web-hub**: LAN clipboard, load-top overflow, narrow-viewport sidebar, restore order stability (`f831052`)
+- **web-hub**: keep stop inside the ring shell while usage is pending (`1a41b32`)
+- **web-hub**: quota pill hoist ranks data freshness, marks stale wires (`72ac5d4`)
+- **sysload**: show a disk mount only once when both display paths resolve to it (`2fe00ea`)
+- **web-hub**: keep the session-history dialog stable while typing (`2ff4140`)
+- **sysload**: stop announcing "load too high" on an idle machine (`02bb49f`)
+- **web-hub**: show the load card's top processes (`b0a1ae7`)
+- **web-hub**: give LAN top-process requests the normal auth budget (`946a105`)
+- **web-hub**: slim quota and CPU pills on phones (`e267ee7`)
+- **hud**: keep the web-hub status off a line of its own (`e19f4e4`)
+
+### Documentation
+
+- **web-hub**: aw-snap — LAN-only wedge evidence chain (trace + offline replay + headless profiler) (`5135815`)
+- **web-hub**: scroll-rollback investigation file (breadcrumb live, awaiting repro) (`dc8b6c7`)
+- **web-hub**: aw-snap investigation — second reproduction forensics (`ea6c02a`)
+- **web-hub**: aw-snap crash investigation handoff (`be230b1`)
+
+### Tests
+
+- **web-hub**: allowlist Transcript.vue localStorage in source-scan (pwh_diag_scroll) (`e0d31bc`)
+
+### Chores
+
+- **web-hub**: freeze tracer (pwh_diag_trace) + HP3 stream test deflake (`85026ea`)
+- **web-hub**: scroll-rollback diagnostic breadcrumbs (pwh_diag_scroll) (`21a1eeb`)
+- **web-hub**: rebase the CSS budget on the measured size (`afd70fa`)
+
+Stats: 15 feat, 15 fix, 4 docs, 1 test, 3 chore
+
 ## [0.5.0] - 2026-10-11
 
 ### Added
@@ -380,7 +437,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.2.1...v0.3.0
