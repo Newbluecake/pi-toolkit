@@ -51,6 +51,13 @@ export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser writ
 export const WATCHDOG_TICK_MS = 5_000;
 export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
+// Handshake deadline for a fresh EventSource (mirrors password-client's, restated here so the
+// two transports stay independent modules): a healthy hello lands in a few hundred ms, and
+// Chromium fires NO `error` for an accepted-but-silent connection — it just sits at readyState
+// CONNECTING, so without this timer the only guard was the 45s SILENCE watchdog (2026-10-13 LAN
+// incident: /api/events hung mid-handshake, conn stuck "connecting" forever). 10s is ~an order
+// of magnitude above the healthy case yet far below the silence watchdog.
+export const CONNECT_TIMEOUT_MS = 10_000;
 // web-hub-upload plan §4.2/§1.2 (package U4b): a 503 `E_BUSY` (startup scan not finished, §2.2.4)
 // is auto-retried on a bounded backoff before it ever reaches the tray. Mirrors
 // password-client's login busy policy (`BUSY_RETRY_MAX`/`BUSY_RETRY_DEFAULT_MS`) — restated
@@ -95,6 +102,8 @@ export function createClient(deps) {
   let watchdog = null;
   /** @type {any} */
   let reopenTimer = null;
+  /** @type {any} */
+  let connectTimer = null;
   let reloginUsed = false;
   let backoff = BACKOFF_MIN_MS;
   let closed = false;
@@ -239,6 +248,11 @@ export function createClient(deps) {
     return out;
   }
 
+  function clearConnectTimer() {
+    if (connectTimer !== null) deps.clearTimeout(connectTimer);
+    connectTimer = null;
+  }
+
   function armWatchdog() {
     if (watchdog !== null) deps.clearTimeout(watchdog);
     watchdog = timer(() => {
@@ -281,6 +295,26 @@ export function createClient(deps) {
     es = source;
     opens++;
     lastFrameAt = deps.now();
+    // Handshake deadline (see CONNECT_TIMEOUT_MS): no hello in time ⇒ the connection hung
+    // mid-handshake — Chromium never reports that as `error`, and the 45s silence watchdog is
+    // far too late for boot. Close the hung stream ourselves and retry on the normal backoff.
+    // Cleared by `hello`, by close(), and by the CLOSED `error` branch (which hands the stream
+    // to the relogin/reopen flow — the timer must not race it); deliberately NOT cleared by a
+    // transient (CONNECTING) `error`: the spec is "hello within CONNECT_TIMEOUT_MS of
+    // creation", a browser auto-retry does not buy a fresh deadline.
+    clearConnectTimer();
+    connectTimer = timer(() => {
+      connectTimer = null;
+      if (closed || es !== source) return;
+      try {
+        source.close();
+      } catch {
+        /* already closed */
+      }
+      es = null;
+      deps.onConn("reconnecting");
+      scheduleReopen();
+    }, CONNECT_TIMEOUT_MS);
     for (const name of SSE_EVENTS) {
       source.addEventListener(name, (/** @type {any} */ ev) => {
         if (es !== source) return; // stale stream
@@ -292,6 +326,7 @@ export function createClient(deps) {
           return; // malformed frame: ignore
         }
         if (name === "hello") {
+          clearConnectTimer();
           reloginUsed = false;
           backoff = BACKOFF_MIN_MS;
           deps.onConn("open");
@@ -308,6 +343,9 @@ export function createClient(deps) {
         deps.onConn("reconnecting"); // browser auto-reconnects with Last-Event-ID
         return;
       }
+      // CLOSED ⇒ HTTP error (401 after hub restart, …): the connect attempt is over, so its
+      // handshake deadline must not race the relogin/reopen flow below.
+      clearConnectTimer();
       // CLOSED ⇒ HTTP error (401 after hub restart, …): one silent re-login, then back off.
       es = null;
       void reloginOnce().then((ok) => {
@@ -1638,6 +1676,7 @@ export function createClient(deps) {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);
       if (reopenTimer !== null) deps.clearTimeout(reopenTimer);
+      clearConnectTimer();
       watchdog = reopenTimer = null;
       if (es) {
         try {

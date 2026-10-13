@@ -5,6 +5,7 @@ import {
   TOKEN_KEY,
   REQUEST_TIMEOUT_MS,
   CMD_REQUEST_TIMEOUT_MS,
+  CONNECT_TIMEOUT_MS,
 } from "../../../src/web-hub/ui/src/logic/token-client.js";
 import { SILENCE_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 
@@ -181,6 +182,7 @@ describe("createClient", () => {
     const e = env();
     await e.client.start();
     const first = FakeES.all[0]!;
+    first.emit("hello", { clientId: "c1" }); // established stream — only the silence watchdog applies
     await e.c.advance(SILENCE_MS - 5_000);
     first.emit("ping", {}); // keeps it alive
     await e.c.advance(SILENCE_MS - 5_000);
@@ -241,6 +243,109 @@ describe("createClient", () => {
     expect(e.calls).toHaveLength(0);
     expect(FakeES.all).toHaveLength(1);
     e.client.close();
+  });
+
+  it("hello never arrives within CONNECT_TIMEOUT_MS ⇒ hung stream closed, reconnecting, backoff reopen", async () => {
+    const e = env();
+    await e.client.start();
+    const first = FakeES.all[0]!;
+    // Just under the deadline: nothing happens yet.
+    await e.c.advance(CONNECT_TIMEOUT_MS - 1);
+    expect(first.closed).toBe(false);
+    expect(FakeES.all).toHaveLength(1);
+    expect(e.conns.at(-1)).toBe("connecting");
+    // Deadline hits: the hung stream is closed (no leak), conn reports reconnecting, and the
+    // reopen rides the normal backoff (BACKOFF_MIN_MS — never a same-tick busy loop).
+    await e.c.advance(1);
+    expect(first.closed).toBe(true);
+    expect(e.conns.at(-1)).toBe("reconnecting");
+    expect(FakeES.all).toHaveLength(1); // backoff not elapsed yet
+    await e.c.advance(1_000);
+    expect(FakeES.all).toHaveLength(2);
+    expect(FakeES.all.filter((x) => !x.closed)).toHaveLength(1);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
+  });
+
+  it("hello before the deadline disarms the connect timer (no false reopen afterwards)", async () => {
+    const e = env();
+    await e.client.start();
+    const first = FakeES.all[0]!;
+    await e.c.advance(CONNECT_TIMEOUT_MS - 1);
+    first.emit("hello", { clientId: "c1" });
+    expect(e.conns.at(-1)).toBe("open");
+    // Well past the deadline, still under the 45s silence watchdog: no reopen, stream alive.
+    await e.c.advance(CONNECT_TIMEOUT_MS + 5_000);
+    expect(FakeES.all).toHaveLength(1);
+    expect(first.closed).toBe(false);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
+  });
+
+  it("a second stream whose hello also hangs is timed out independently (backoff doubles)", async () => {
+    const e = env();
+    await e.client.start();
+    await e.c.advance(CONNECT_TIMEOUT_MS); // first handshake times out
+    await e.c.advance(1_000); // first backoff (1s) ⇒ reopen
+    expect(FakeES.all).toHaveLength(2);
+    const second = FakeES.all[1]!;
+    await e.c.advance(CONNECT_TIMEOUT_MS); // second handshake times out too
+    expect(second.closed).toBe(true);
+    expect(FakeES.all).toHaveLength(2); // doubled backoff (2s) not elapsed yet
+    await e.c.advance(1_999);
+    expect(FakeES.all).toHaveLength(2);
+    await e.c.advance(1);
+    expect(FakeES.all).toHaveLength(3);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
+  });
+
+  it("CLOSED during the handshake with a slow re-login: the stale connect timer is structurally inert here", async () => {
+    // Parity check against the password client's probe race: this client's CLOSED branch sets
+    // `es = null` SYNCHRONOUSLY before reloginOnce(), so the stale connect timer's
+    // `es !== source` guard makes it a no-op even if its clearConnectTimer() were removed —
+    // unlike password-client, where `es === source` survives into probeSessionAfterClose and
+    // the clear is load-bearing. This test pegs that immunity: the re-login fetch is deferred
+    // past the connect deadline, and nothing may preempt the relogin-driven reopen.
+    let resolveLogin: ((r: Resp) => void) | null = null;
+    const e = env({
+      stored: "saved",
+      fetch: (url) => {
+        if (url === "/api/login")
+          return new Promise((res) => {
+            resolveLogin = res;
+          });
+        return Promise.resolve(resp(200));
+      },
+    });
+    await e.client.start();
+    const first = FakeES.all[0]!;
+    await e.c.advance(CONNECT_TIMEOUT_MS - 1); // t=9999
+    first.fail(true); // CLOSED just before the deadline ⇒ es=null, reloginOnce() in flight
+    await flush();
+    expect(resolveLogin).not.toBeNull();
+    // Cross the connect deadline with the re-login still pending: no force-close, no
+    // reconnecting, no preemptive reopen — the relogin flow owns the next step alone.
+    await e.c.advance(1); // t=10000 — the stale timer's original slot
+    await e.c.advance(100);
+    expect(first.closed).toBe(false);
+    expect(e.conns).not.toContain("reconnecting");
+    expect(FakeES.all).toHaveLength(1);
+    // Re-login succeeds ⇒ exactly one reconnecting + one reopen on the normal backoff.
+    resolveLogin!(resp(200));
+    await flush();
+    expect(e.conns.at(-1)).toBe("reconnecting");
+    expect(e.conns.filter((c) => c === "reconnecting")).toHaveLength(1);
+    await e.c.advance(999);
+    expect(FakeES.all).toHaveLength(1);
+    await e.c.advance(1);
+    expect(FakeES.all).toHaveLength(2);
+    // Exactly one live stream: #1 reached readyState CLOSED via its own error (the client
+    // correctly never close()d it — asserted above), #2 is the single relogin-driven reopen.
+    expect(FakeES.all.filter((x) => x.readyState !== 2)).toHaveLength(1);
+    expect(FakeES.all[1]!.closed).toBe(false);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
   });
 
   it("API 401 ⇒ re-login once and retry; second 401 is returned as error", async () => {

@@ -204,6 +204,53 @@ const conn = computed<ConnState>(() => hub?.state.value.conn ?? "connecting");
  * auth resolves (open/reconnecting ⇒ dashboard, "auth" ⇒ the form). "connecting" never recurs
  * after boot (drops go "reconnecting"), so this is strictly boot-only. */
 const booting = computed(() => authMode === "password" && conn.value === "connecting");
+
+/* Boot-failure watchdog (2026-10-13 LAN incident: /api/events could hang mid-handshake with
+ * conn stuck "connecting" and the splash spinning forever, no error, no way out). Password mode
+ * only — token mode has no boot splash. If the very first connection never reaches "open"
+ * within BOOT_FAIL_MS, the splash becomes an actionable error state (message + retry button).
+ * 15s sits just above one full automatic connect round (the client's CONNECT_TIMEOUT_MS = 10s
+ * handshake deadline + the first 1s reopen backoff), so auto-recovery has already had its
+ * chance before the user is asked to act. Once the first "open" lands, this whole mechanism is
+ * inert (mid-session drops are the TopBar conn pill's job, not the splash's). */
+const BOOT_FAIL_MS = 15_000;
+const bootFailed = ref(false);
+let bootEverOpened = false;
+let bootTimer: number | null = null;
+
+function clearBootTimer(): void {
+  if (bootTimer !== null) window.clearTimeout(bootTimer);
+  bootTimer = null;
+}
+
+function armBootTimer(): void {
+  clearBootTimer();
+  bootTimer = window.setTimeout(() => {
+    bootTimer = null;
+    if (!bootEverOpened) bootFailed.value = true;
+  }, BOOT_FAIL_MS);
+}
+
+if (authMode === "password")
+  watch(conn, (c) => {
+    if (c === "open") {
+      bootEverOpened = true;
+      bootFailed.value = false;
+      clearBootTimer();
+    }
+  });
+
+/** The boot-failure error splash: replaces both the spinner splash and the dashboard until the
+ * first "open" lands (or the user signs out and back in through a real reconnect). */
+const showBootFailure = computed(() => authMode === "password" && bootFailed.value && conn.value !== "open");
+
+function onBootRetry(): void {
+  bootFailed.value = false;
+  armBootTimer(); // another 15s of auto-recovery before the error comes back
+  // Truly rebuild the transport layer: password client's start() re-fires onConn("connecting")
+  // (back to the spinner splash) and openStream() closes the old EventSource and opens a fresh one.
+  if (hub) void hub.start();
+}
 // C5: control negotiated (hub caps include cmd.v1) ⇒ persistent ControlNotice + Control chip.
 const controlOn = computed(() => hub?.state.value.control === true);
 const hubVersion = computed<string | null>(() => {
@@ -220,6 +267,8 @@ const showDashboard = computed(() => {
   if (authMode === "password") return conn.value === "open" || conn.value === "reconnecting";
   return conn.value !== "auth";
 });
+/** Dashboard chrome (h1/skip-link/app grid) — suppressed while the boot-failure splash owns the page. */
+const showShell = computed(() => showDashboard.value && !showBootFailure.value);
 
 const globalNotices = computed<readonly Notice[]>(() => {
   if (authMode !== "password" || passwordAuth?.initialPasswordHint.value !== true) return [];
@@ -278,9 +327,11 @@ async function onSignOut(): Promise<void> {
 onMounted(() => {
   if (hub) void hub.start();
   hashRoute?.start();
+  if (authMode === "password") armBootTimer();
 });
 
 onUnmounted(() => {
+  clearBootTimer();
   hub?.dispose();
   hashRoute?.dispose();
   passwordAuth?.dispose();
@@ -292,10 +343,14 @@ onUnmounted(() => {
   <IconSprite />
   <TokenGate v-if="authMode === 'unknown'" reason="auth-mode-unknown" />
   <template v-else>
-    <h1 v-if="showDashboard" class="sr-only">{{ t("shell.dashboardHeading") }}</h1>
-    <a v-if="showDashboard" class="skip-link" href="#transcript">{{ t("shell.skipToConversation") }}</a>
+    <h1 v-if="showShell" class="sr-only">{{ t("shell.dashboardHeading") }}</h1>
+    <a v-if="showShell" class="skip-link" href="#transcript">{{ t("shell.skipToConversation") }}</a>
 
-    <div v-if="showDashboard" class="app">
+    <div v-if="showBootFailure" class="boot-splash boot-failed" role="alert">
+      <p class="boot-error-text">{{ t("shell.bootFailed") }}</p>
+      <button type="button" class="btn btn-primary boot-retry" @click="onBootRetry">{{ t("shell.retry") }}</button>
+    </div>
+    <div v-else-if="showShell" class="app">
       <TopBar :conn="conn" :hub-version="hubVersion" :can-sign-out="authMode === 'password'" @signout="onSignOut" />
       <!-- 2026-10-08 布局修复：三条横幅（HubStateBanner/ControlNotice/NoticeStack）各自条件渲染，
            直接作 .app 的网格项会让 .layout 在它们缺省时掉进 auto 行（auto auto 1fr 的 1fr 行空掉，

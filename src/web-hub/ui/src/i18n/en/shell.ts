@@ -22,6 +22,8 @@ const shell = {
   "conn.reconnecting": "Reconnecting…",
   "conn.auth": "Signed out",
   booting: "Loading…",
+  bootFailed: "Connection failed. Check the network and the hub, then retry.",
+  retry: "Retry",
   sidebarResize: "Resize sidebar",
   sidebarResizeHint: "Drag to resize · double-click to reset",
   "theme.system": "System",

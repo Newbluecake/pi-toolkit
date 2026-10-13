@@ -68,6 +68,13 @@ export const LOGIN_TIMEOUT_MS = 25_000; // plan §10 "排队等待": KDF fair-sc
 export const WATCHDOG_TICK_MS = 5_000;
 export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
+// Handshake deadline for a fresh EventSource: a healthy hello lands in a few hundred ms (the
+// password-mode boot splash was built on exactly that observation), and Chromium fires NO
+// `error` for an accepted-but-silent connection — it just sits at readyState CONNECTING, so
+// without this timer the only guard was the 45s SILENCE watchdog (2026-10-13 LAN incident:
+// /api/events hung mid-handshake, conn stuck "connecting" forever). 10s is ~an order of
+// magnitude above the healthy case yet far below the silence watchdog.
+export const CONNECT_TIMEOUT_MS = 10_000;
 export const BUSY_RETRY_MAX = 5;
 export const BUSY_RETRY_DEFAULT_MS = 2_000;
 export const RATE_RETRY_DEFAULT_MS = 1_000;
@@ -126,6 +133,8 @@ export function createPasswordClient(deps) {
   let watchdog = null;
   /** @type {any} */
   let reopenTimer = null;
+  /** @type {any} */
+  let connectTimer = null;
   let backoff = BACKOFF_MIN_MS;
   let closed = false;
 
@@ -901,9 +910,15 @@ export function createPasswordClient(deps) {
     }
   }
 
+  function clearConnectTimer() {
+    if (connectTimer !== null) deps.clearTimeout(connectTimer);
+    connectTimer = null;
+  }
+
   function closeStream() {
     if (watchdog !== null) deps.clearTimeout(watchdog);
     if (reopenTimer !== null) deps.clearTimeout(reopenTimer);
+    clearConnectTimer();
     watchdog = reopenTimer = null;
     if (es) {
       try {
@@ -1002,6 +1017,26 @@ export function createPasswordClient(deps) {
     const source = new deps.EventSource(API.events, { withCredentials: true });
     es = source;
     lastFrameAt = deps.now();
+    // Handshake deadline (see CONNECT_TIMEOUT_MS): no hello in time ⇒ the connection hung
+    // mid-handshake — Chromium never reports that as `error`, and the 45s silence watchdog is
+    // far too late for boot. Close the hung stream ourselves and retry on the normal backoff.
+    // Cleared by `hello`, by closeStream(), and by the CLOSED `error` branch (which hands the
+    // stream to probeSessionAfterClose — the timer must not race that probe); deliberately NOT
+    // cleared by a transient (CONNECTING) `error`: the spec is "hello within CONNECT_TIMEOUT_MS
+    // of creation", a browser auto-retry does not buy a fresh deadline.
+    clearConnectTimer();
+    connectTimer = timer(() => {
+      connectTimer = null;
+      if (closed || es !== source) return;
+      try {
+        source.close();
+      } catch {
+        /* already closed */
+      }
+      es = null;
+      deps.onConn("reconnecting");
+      scheduleReopen();
+    }, CONNECT_TIMEOUT_MS);
     for (const name of SSE_EVENTS) {
       source.addEventListener(name, (/** @type {any} */ ev) => {
         if (es !== source) return; // stale stream
@@ -1014,6 +1049,7 @@ export function createPasswordClient(deps) {
         }
         if (name === "auth") {
           const reason = data && (data.reason === "revoked" || data.reason === "expired") ? data.reason : "revoked";
+          clearConnectTimer();
           es = null;
           try {
             source.close();
@@ -1026,6 +1062,7 @@ export function createPasswordClient(deps) {
           return;
         }
         if (name === "hello") {
+          clearConnectTimer();
           backoff = BACKOFF_MIN_MS;
           deps.onConn("open");
         }
@@ -1041,6 +1078,9 @@ export function createPasswordClient(deps) {
         deps.onConn("reconnecting"); // browser auto-reconnects (genuine network hiccup, never a plain HTTP error — verified against Chromium)
         return;
       }
+      // CLOSED: the connect attempt is over (the stream failed outright), so its handshake
+      // deadline must not fire mid-probe and race probeSessionAfterClose's own reopen schedule.
+      clearConnectTimer();
       // CLOSED: 401 and 503 are indistinguishable here (both fail the connection, no browser
       // retry) — probe §10 review fix (lan-plan.md §15.9 #8) disambiguates instead of treating
       // every CLOSED as "not signed in".

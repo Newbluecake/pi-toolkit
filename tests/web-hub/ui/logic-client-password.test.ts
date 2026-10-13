@@ -7,6 +7,7 @@ import {
   CLOSE_PROBE_BACKOFF_MS,
   BACKOFF_MIN_MS,
   CMD_REQUEST_TIMEOUT_MS,
+  CONNECT_TIMEOUT_MS,
 } from "../../../src/web-hub/ui/src/logic/password-client.js";
 import { SILENCE_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 
@@ -282,6 +283,7 @@ describe("createPasswordClient: SSE lifecycle", () => {
     const e = env();
     await e.client.start();
     const first = FakeES.all[0]!;
+    first.emit("hello", { clientId: "c1" }); // established stream — only the silence watchdog applies
     await e.c.advance(SILENCE_MS - 5_000);
     first.emit("ping", {});
     await e.c.advance(SILENCE_MS - 5_000);
@@ -289,6 +291,106 @@ describe("createPasswordClient: SSE lifecycle", () => {
     await e.c.advance(10_000);
     expect(FakeES.all).toHaveLength(2);
     e.client.close();
+  });
+
+  it("hello never arrives within CONNECT_TIMEOUT_MS ⇒ hung stream closed, reconnecting, backoff reopen (2026-10-13 hung-handshake incident)", async () => {
+    const e = env();
+    await e.client.start();
+    const first = FakeES.all[0]!;
+    // Just under the deadline: nothing happens yet.
+    await e.c.advance(CONNECT_TIMEOUT_MS - 1);
+    expect(first.closed).toBe(false);
+    expect(FakeES.all).toHaveLength(1);
+    expect(e.conns.at(-1)).toBe("connecting");
+    // Deadline hits: the hung stream is closed (no leak), conn reports reconnecting, and the
+    // reopen rides the normal backoff (BACKOFF_MIN_MS — never a same-tick busy loop).
+    await e.c.advance(1);
+    expect(first.closed).toBe(true);
+    expect(e.conns.at(-1)).toBe("reconnecting");
+    expect(FakeES.all).toHaveLength(1); // backoff not elapsed yet
+    await e.c.advance(BACKOFF_MIN_MS);
+    expect(FakeES.all).toHaveLength(2);
+    expect(FakeES.all.filter((x) => !x.closed)).toHaveLength(1);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
+  });
+
+  it("hello before the deadline disarms the connect timer (no false reopen afterwards)", async () => {
+    const e = env();
+    await e.client.start();
+    const first = FakeES.all[0]!;
+    await e.c.advance(CONNECT_TIMEOUT_MS - 1);
+    first.emit("hello", { clientId: "c1" });
+    expect(e.conns.at(-1)).toBe("open");
+    // Well past the deadline, still under the 45s silence watchdog: no reopen, stream alive.
+    await e.c.advance(CONNECT_TIMEOUT_MS + 5_000);
+    expect(FakeES.all).toHaveLength(1);
+    expect(first.closed).toBe(false);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
+  });
+
+  it("a second stream whose hello also hangs is timed out independently (backoff doubles)", async () => {
+    const e = env();
+    await e.client.start();
+    await e.c.advance(CONNECT_TIMEOUT_MS); // first handshake times out
+    await e.c.advance(BACKOFF_MIN_MS); // first backoff ⇒ reopen
+    expect(FakeES.all).toHaveLength(2);
+    const second = FakeES.all[1]!;
+    await e.c.advance(CONNECT_TIMEOUT_MS); // second handshake times out too
+    expect(second.closed).toBe(true);
+    expect(FakeES.all).toHaveLength(2); // doubled backoff not elapsed yet
+    await e.c.advance(BACKOFF_MIN_MS * 2 - 1);
+    expect(FakeES.all).toHaveLength(2);
+    await e.c.advance(1);
+    expect(FakeES.all).toHaveLength(3);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
+  });
+
+  it("CLOSED during the handshake with a slow session probe: the stale connect timer must not preempt the probe (2026-10-13 hung-handshake incident)", async () => {
+    // The probe's /api/session fetch is deferred past the connect deadline, so the connect
+    // timer's original fire slot (t=10000) arrives while the probe is still in flight — the
+    // exact window the CLOSED branch's `clearConnectTimer()` exists for. (The first
+    // /api/session call is start()'s session-info probe, answered immediately.)
+    let sessionCalls = 0;
+    let resolveProbe: ((r: Resp) => void) | null = null;
+    const e = env({
+      fetch: (url) => {
+        if (url === "/api/session" && ++sessionCalls >= 2)
+          return new Promise((res) => {
+            resolveProbe = res;
+          });
+        return Promise.resolve(resp(200));
+      },
+    });
+    await e.client.start();
+    const first = FakeES.all[0]!;
+    await e.c.advance(CONNECT_TIMEOUT_MS - 1); // t=9999
+    first.fail(true); // CLOSED just before the deadline ⇒ probeSessionAfterClose starts, fetch in flight
+    await flush();
+    expect(resolveProbe).not.toBeNull();
+    // Cross the connect deadline with the probe still in flight. ① The stale timer must NOT
+    // preempt: it may not force-close the stream, may not report reconnecting, may not schedule
+    // a reopen of its own. (Without the CLOSED branch's clearConnectTimer() all three fail:
+    // the timer still sees `es === source` in this client and fires its close+reopen path.)
+    await e.c.advance(1); // t=10000 — the stale timer's original slot
+    await e.c.advance(100);
+    expect(first.closed).toBe(false);
+    expect(e.conns).not.toContain("reconnecting");
+    expect(FakeES.all).toHaveLength(1);
+    // ② The probe answers 200 ⇒ the probe path alone drives exactly one reconnecting + reopen.
+    resolveProbe!(resp(200));
+    await flush();
+    expect(e.conns.at(-1)).toBe("reconnecting");
+    expect(e.conns.filter((c) => c === "reconnecting")).toHaveLength(1);
+    await e.c.advance(BACKOFF_MIN_MS - 1);
+    expect(FakeES.all).toHaveLength(1); // the probe's backoff, not the stale timer's, owns the timing
+    await e.c.advance(1);
+    expect(FakeES.all).toHaveLength(2);
+    expect(FakeES.all.filter((x) => !x.closed)).toHaveLength(1);
+    e.client.close();
+    expect(e.c.pending()).toBe(0);
   });
 
   it("close() stops everything: no reopen after close", async () => {
