@@ -1,7 +1,6 @@
 # web-hub 切换会话 Aw Snap 崩溃排查（进行中）
 
-状态：**等待复现**（2026-10-12 起，诊断面包屑已埋入 UI）。
-本文档是调查交接：任何时候崩溃复现，按「复现 SOP」一节取证即可继续，无需重新了解背景。
+状态：**第二次复现已取证**（2026-10-13 13:30 CST）。根因未完全定位，但已取得关键排除项与一个新的确定性故障面（LAN /api/events 挂起）。
 
 ## 现象（用户报告，2026-10-12）
 
@@ -19,7 +18,62 @@ Vue 报错不会导致 Aw Snap（最多白屏），所以排查方向锁定**内
 - 健康基线：bunker 会话 heap 45MB / DOM 4077 节点；各会话 `console` 零 error。
 - 崩溃发生期间正值 toolkit 高频开发：UI 多次重建、hub 多次 restart、会话反复重连——**新旧码混部瞬态**未排除。
 
+## 第二次复现取证（2026-10-13 13:30 CST，面包屑首次实战）
+
+时间线（UTC+8）：
+
+- 13:30:35 hub 重启（新 build bb8a5e4-dirty，含面包屑），两个 managed rpc 会话自动 restore。
+- 13:30:40–54 用户页面（已是新 UI）正常渲染 pi-toolkit 与 bunker 会话（hub.log 有 preview probe）。
+- ~13:30:50–56 第一次 Aw Snap（bunker 会话页）。
+- 13:30:56.6 面包屑写入：`{hash:"#/agent/a2162331-iOEqbE", heapMB:22, dom:134}` —— 这是**重载后启动早期**的值（面包屑记录的是路由切换时刻，不是崩溃时刻！dom 134 = 只有启动 splash），说明重载后卡在加载态、transcript 尚未渲染即再次崩溃。
+
+面包屑读数排除「keep-alive OOM」假设：进入会话时 heap 22MB / dom 134，远低于基线。
+注意：面包屑的 heap/dom 是**进入路由时**的采样，对崩溃时刻无代表性（设计教训，后续可考虑定时追加采样）。
+
+### 崩溃会话画像（bunker，sessionFile 3.2MB / 408 行）
+
+- 含 10 个 toolResult 图片块（base64 PNG，最大 477KB，解码后合计约 43MB）——但 UI 把 image 块渲染成 `[image]` 占位符（state.js resultText），**不解码**，已排除。
+- 最大文本块 31KB，无病态单行/控制字符。
+- 全量文本过真实 `findPathRefs`：无慢扫描、无灾难回溯（/tmp/pathregex-test.mjs）。
+
+### 排查中发现的确定性故障面（比崩溃本身更可复现）
+
+**新打开的页面（LAN 密码模式）卡在「加载中…」（conn 永远 "connecting"），数分钟后渲染进程主线程彻底卡死**（同源所有 tab 连带无响应——Chrome 站隔离共享 renderer），预期最终 Aw Snap。这与用户「重载后又崩」的路径吻合。
+
+实验矩阵（2026-10-13 下午）：
+
+| 环境                                                      | 结果                                                |
+| --------------------------------------------------------- | --------------------------------------------------- |
+| 用户 Chrome @LAN（密码模式，7879）                        | 卡启动 → 主线程卡死（deveye eval 从可用到全线超时） |
+| 同 tab 内手动 `new EventSource('/api/events')`            | 起初正常（hello/agents/... 全到），后期也开始挂起   |
+| 同 tab 内 `fetch('/api/events')`                          | **永不响应**（请求字节已进 Node，Recv-Q=0）         |
+| 同 tab 内 8 并发 `fetch('/api/session')` 等其他端点       | 全部秒回 200                                        |
+| curl LAN /api/events 无 cookie                            | 秒回 401（handler 活着）                            |
+| curl loopback（token，7878）/api/events                   | 完全正常，持续流                                    |
+| Node harness 真实 token-client + state.js 对 live hub     | 完全正常：7ms open、history 400 条、60s CPU 582ms   |
+| headless chromium 整机复现（loopback+token，进入 bunker） | 完全正常：1s 启动、5884 DOM 节点渲染、60s 稳定      |
+| u2（192.168.32.49）早已打开的页面                         | 一直正常（旧连接活着）                              |
+
+关键矛盾点：`/api/events` 带有效 cookie 在 LAN 挂起，但同一函数（requireLanSession）同 cookie 的其他端点正常；handler 代码路径（isSseRoute 分支 → attach → 同步写 hello）无挂起点。hub 进程 inspector（SIGUSR1 已开，ws://127.0.0.1:9229）显示 `process._getActiveRequests()` 为空。
+
+**主嫌疑：Aw Snap 后 Chrome 网络栈残留的僵尸 SSE socket**——renderer 崩溃/卡死后其 SSE 连接未被正常关闭，hub 侧 response 永不结束；Node HTTP/1.1 keep-alive 语义下同 socket 的后续请求要等前一个 response 结束才解析，于是落在僵尸 socket 上的新请求（含新页面的 /api/events）永久挂起。佐证：hub 侧多个 .38 socket 曾带 46B 未确认 Send-Q（ping 帧发出无 ACK）；关 tab 后旧 socket 仍存留数分钟。
+
+### 健壮性修复（2026-10-13，随验收结论修正机制叙述）
+
+已修（客户端）：两个 client 新增 CONNECT_TIMEOUT_MS=10s（10s 无 hello ⇒ 关旧连接按 backoff 重建，全分支无泄漏）；App.vue 加 BOOT_FAIL_MS=15s 启动失败错误态（role=alert + 重试按钮真重建，首个 open 后失活）。
+
+机制修正（验收时读码确认）：原叙述「主线程饿死导致 45s 看门狗回调不执行」**不成立**——`armWatchdog` 在 45s 静默时先 `onConn("reconnecting")` 再 `openStream()`，是普通 setTimeout，不依赖主线程健康。准确机制：**45s 看门狗确实会把 conn 翻成 reconnecting，但 reopen 的新 EventSource 再次挂上僵尸 socket（accepted-but-silent，无 hello 无 error），于是每 45s 循环一次「关旧开新再挂起」，永远到不了 open**。残留矛盾：卡死页实测 splash（conn=connecting）持续 15 分钟而代码应在 45s 后离开 connecting——尚未完全自洽，可能与「后期主线程饿死」或观察口径有关，留待清态复现时验证。
+
+### 待验证 / 下一步
+
+1. 清态复现：用户关闭所有 web-hub tab + /webhub restart 后，用**全新**页面验证是否还卡启动（排除僵尸 socket 后应恢复）。
+2. 若清态后仍复现 → 用已挂的 inspector 深挖 lanSse/requireLanSession；若能复现卡死，可 CDP Debugger.pause 抓 busy stack。
+3. 无论根因，客户端健壮性缺口要补：openStream 后 N 秒收不到 hello 应视为失败并换全新连接重试（防僵尸 socket 永久挂起启动流程），卡死态要有可见错误而非永远「加载中」。
+4. 主线程卡死本身（wedged renderer）的具体旋转代码仍未抓到栈——下次复现且 eval 尚可用时，优先用 CDP Debugger.pause 抓栈（headless repro 脚本 /tmp/uirepro/repro.mjs 已带此逻辑）。
+
 ## 嫌疑假设（按优先级）
+
+> 2026-10-13 更新：假设 1（keep-alive OOM）已被面包屑排除（见上节）；「内容路径」中图片解码/base64 渲染/路径正则均已排除。当前主嫌疑转为「崩溃后浏览器侧僵尸 SSE socket 导致新启动挂起 + 主线程卡死代码」（见上节）。
 
 1. **keep-alive 多重订阅叠加 OOM**：`sessionKeepAlive`（docs/dev/web-hub-session-switch/）让浏览器保持
    最近 K 个会话的订阅与 transcript 驻留内存（默认 K=3）。若连续切换的都是巨型会话
