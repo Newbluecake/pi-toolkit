@@ -69,6 +69,8 @@ const preview = {
   dirTreeError: "展开失败：",
   dirTreeLimitDirs: "展开的文件夹过多（上限 {n} 个）——请先收起一些。",
   dirTreeLimitEntries: "已达到树行数预算（{n} 行）——请先收起部分文件夹。",
+  // 2026-10 交互调整：目录行单击内联展开，双击进入
+  dirRowHint: "单击展开/折叠，双击进入",
   // preview-download（对话框头部的文件下载按钮 —— 仅文件，目录没有）
   download: "下载",
   downloadFailed: "下载失败 — 请重试。",

@@ -5,9 +5,11 @@
   inside its own <li> (<ul role="group">), so nesting depth is unbounded while the DOM stays
   one flat descendant set per list — ArrowUp/Down walk `querySelectorAll` over visible rows.
 
-  交互分工（需求 §1 决策）：行名按钮保留既有「钻取」导航（emit navigate，宿主走
-  history push）；chevron 按钮专管内联展开/折叠。展开状态/缓存在注入的 `tree` store
-  （usePreview 的 per-visit handle）里——本组件无状态，钻取/返回导致的重挂载不丢展开。
+  交互分工（2026-10 交互调整，用户需求）：目录行（有 chevron）单击 = 内联展开/折叠
+  （延迟 PREVIEW_TREE_DBLCLICK_MS 生效，双击窗内被取消），双击 = 钻取进入（emit
+  navigate，同原行名单击行为）；文件/符号链接行单击打开预览不变；chevron 保留独立
+  即时 toggle。展开状态/缓存在注入的 `tree` store（usePreview 的 per-visit handle）
+  里——本组件无状态，钻取/返回导致的重挂载不丢展开。
 
   无 tree 降级（验收跟进 #16-a）：`tree === undefined`（旧 fake）时不渲染 rowwrap 包裹、
   chevron/spacer、tree 角色与状态行——`<li>` 直出 `PreviewDirRow`（其根就是
@@ -23,12 +25,16 @@
   ArrowRight 可达，chevron 不翻倍 Tab 停顿），带 aria-expanded + aria-label。
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onUnmounted } from "vue";
 import { childPreviewPath, formatPreviewBytes } from "@logic/preview.js";
 import type { PreviewDirEntry, PreviewDirEntryType } from "@protocol/preview.js";
 import { formatDateTime, formatNumber, localeFor } from "../../format.js";
 import { useI18n } from "../../composables/useI18n.js";
-import type { PreviewTreeNode, PreviewTreeStore } from "../../composables/usePreviewTree.js";
+import {
+  PREVIEW_TREE_DBLCLICK_MS,
+  type PreviewTreeNode,
+  type PreviewTreeStore,
+} from "../../composables/usePreviewTree.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import PreviewDirRow, { type DirRowView } from "./PreviewDirRow.vue";
 
@@ -91,8 +97,48 @@ function nodeOf(row: RowView): PreviewTreeNode | undefined {
   return row.childPath === null ? undefined : props.tree?.nodes.get(row.childPath);
 }
 
+/** The pending single-click expand (dblclick disambiguation) — at most one row at a time;
+ * a click on another row starts its own window without cancelling this one's timer. */
+let pendingClick: { readonly path: string; readonly timer: ReturnType<typeof setTimeout> } | null = null;
+
+function cancelPendingClick(): void {
+  if (pendingClick !== null) {
+    clearTimeout(pendingClick.timer);
+    pendingClick = null;
+  }
+}
+onUnmounted(cancelPendingClick); // 重挂载/关弹窗：绝不向已卸载组件的树写状态
+
+/** Row click semantics (2026-10 交互调整):
+ * - file/symlink row: click = open (emit navigate) — unchanged;
+ * - dir row (expandable): single click = toggle expand AFTER the dblclick window; a second
+ *   click inside the window cancels the not-yet-fired expand and drills down instead — a
+ *   double click therefore produces ZERO net expansion change (no expand-then-collapse
+ *   flicker). The chevron below stays an immediate, separate toggle. */
+function onRowClick(row: RowView): void {
+  if (!row.expandable || props.tree === undefined || row.childPath === null) {
+    emit("navigate", row.entry);
+    return;
+  }
+  if (pendingClick !== null && pendingClick.path === row.childPath) {
+    cancelPendingClick(); // 双击：撤销未生效的单击展开
+    emit("navigate", row.entry); // 双击 = 钻取
+    return;
+  }
+  const path = row.childPath;
+  const timer = setTimeout(() => {
+    if (pendingClick?.timer === timer) pendingClick = null;
+    props.tree?.toggle(path);
+  }, PREVIEW_TREE_DBLCLICK_MS);
+  pendingClick = { path, timer };
+}
+
+/** chevron = 即时 toggle（不经双击窗）；同路径有未生效的单击展开时先撤销，避免双击。 */
 function toggleRow(row: RowView): void {
-  if (row.childPath !== null) props.tree?.toggle(row.childPath);
+  if (row.childPath !== null) {
+    if (pendingClick?.path === row.childPath) cancelPendingClick();
+    props.tree?.toggle(row.childPath);
+  }
 }
 
 function retryRow(row: RowView): void {
@@ -184,9 +230,19 @@ function focusDelta(btn: HTMLElement, delta: 1 | -1): void {
           <AppIcon name="chev-right" class="icon-sm" />
         </button>
         <span v-else class="preview-dir-chevron-spacer" aria-hidden="true"></span>
-        <PreviewDirRow :row="row" @navigate="emit('navigate', $event)" @rowkeydown="onRowKeydown($event, row)" />
+        <!-- aria（2026-10 交互调整）：行按钮本身现在也是展开触发器（单击 toggle），
+             aria-expanded 同时挂在行按钮与 chevron 上（双处同步、值恒一致）——SR 用户
+             用 Enter/Space 激活行按钮等同单击，状态必须读得到；chevron 保留自身
+             aria-expanded 因为它是独立的第二个触发器。 -->
+        <PreviewDirRow
+          :row="row"
+          :title-hint="row.expandable ? t('preview.dirRowHint') : undefined"
+          :aria-expanded="row.expandable ? nodeOf(row)?.expanded === true : undefined"
+          @rowclick="onRowClick(row)"
+          @rowkeydown="onRowKeydown($event, row)"
+        />
       </div>
-      <PreviewDirRow v-else :row="row" @navigate="emit('navigate', $event)" />
+      <PreviewDirRow v-else :row="row" @rowclick="emit('navigate', $event)" />
       <!-- 行内展开状态：loading / error+重试 都不弹新窗（需求 §2）。 -->
       <template v-if="tree !== undefined && row.expandable">
         <div

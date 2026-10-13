@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import PreviewDir from "../../../src/web-hub/ui/src/components/preview/PreviewDir.vue";
 import {
   createPreviewTree,
+  PREVIEW_TREE_DBLCLICK_MS,
   PREVIEW_TREE_MAX_ENTRIES,
   PREVIEW_TREE_MAX_EXPANDED,
 } from "../../../src/web-hub/ui/src/composables/usePreviewTree.js";
@@ -342,6 +343,13 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
     return btn as HTMLElement;
   }
 
+  /** The row NAME button (single-click expand / double-click drill live on it). */
+  function nameBtnOf(w: ReturnType<typeof mount>, name: string): HTMLElement {
+    const btn = rowOf(w, name).querySelector("button.preview-dir-row");
+    if (btn === null) throw new Error(`no row button for ${name}`);
+    return btn as HTMLElement;
+  }
+
   function mountDir(
     tree: ReturnType<typeof createPreviewTree>,
     entries: PreviewDirEntry[],
@@ -418,14 +426,97 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
     expect(rowOf(w, "x.ts").getAttribute("aria-level")).toBe("2");
   });
 
-  it("row-name click still drills down (emits navigate) WITHOUT triggering an expansion fetch", async () => {
-    const { tree, calls } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
-    const entries: PreviewDirEntry[] = [{ name: "sub", type: "dir", mtimeMs: 1 }];
-    const w = mountDir(tree, entries);
-    await w.get(`${BUTTONS}`).trigger("click");
-    expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]);
-    expect(calls).toHaveLength(0);
-    expect(w.find(GROUP).exists()).toBe(false);
+  it("dir row SINGLE-click expands inline — but only AFTER the dblclick window (no fetch before it)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { tree, calls } = treeWith(() =>
+        Promise.resolve({ ok: true, listing: listing({}, [{ name: "x", type: "file", size: 1, mtimeMs: 1 }]) }),
+      );
+      const w = mountDir(tree, [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+      nameBtnOf(w, "sub").dispatchEvent(new Event("click"));
+      await flushPromises();
+      expect(calls).toHaveLength(0); // 窗内：既不展开也不钻取
+      expect(w.emitted("navigate")).toBeUndefined();
+      expect(w.find(GROUP).exists()).toBe(false);
+      await vi.advanceTimersByTimeAsync(PREVIEW_TREE_DBLCLICK_MS);
+      await flushPromises();
+      expect(calls).toStrictEqual(["/p/src/sub"]); // 窗后：单击生效为展开
+      expect(w.find(GROUP).exists()).toBe(true);
+      expect(w.emitted("navigate")).toBeUndefined(); // 单击目录行不钻取
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dir row DOUBLE-click drills down with ZERO net expansion (the pending expand is cancelled — no flicker)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { tree, calls } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
+      const entries: PreviewDirEntry[] = [{ name: "sub", type: "dir", mtimeMs: 1 }];
+      const w = mountDir(tree, entries);
+      const btn = nameBtnOf(w, "sub");
+      btn.dispatchEvent(new Event("click"));
+      btn.dispatchEvent(new Event("click")); // 窗内第二次点击 = 双击
+      expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]); // 双击 = 钻取，立即
+      await vi.advanceTimersByTimeAsync(PREVIEW_TREE_DBLCLICK_MS * 3);
+      await flushPromises();
+      // 关键钉住：双击不产生净展开状态变化（单击展开被撤销，从未生效）
+      expect(calls).toHaveLength(0);
+      expect(tree.nodes.size).toBe(0);
+      expect(w.find(GROUP).exists()).toBe(false);
+      expect(chevronOf(w, "sub").getAttribute("aria-expanded")).toBe("false");
+      expect(nameBtnOf(w, "sub").getAttribute("aria-expanded")).toBe("false"); // 双处同步
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a second click AFTER the window is a new single click (toggle expand then collapse)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { tree, calls } = treeWith(() =>
+        Promise.resolve({ ok: true, listing: listing({}, [{ name: "x", type: "file", size: 1, mtimeMs: 1 }]) }),
+      );
+      const w = mountDir(tree, [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+      nameBtnOf(w, "sub").dispatchEvent(new Event("click"));
+      await vi.advanceTimersByTimeAsync(PREVIEW_TREE_DBLCLICK_MS); // 第一次单击生效 → 展开
+      await flushPromises();
+      expect(w.find(GROUP).exists()).toBe(true);
+      nameBtnOf(w, "sub").dispatchEvent(new Event("click")); // 窗外单击 → 折叠
+      await vi.advanceTimersByTimeAsync(PREVIEW_TREE_DBLCLICK_MS);
+      await flushPromises();
+      expect(w.find(GROUP).exists()).toBe(false);
+      expect(calls).toStrictEqual(["/p/src/sub"]); // 折叠不丢缓存，无新请求
+      expect(w.emitted("navigate")).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("file row click still opens immediately (no dblclick window, no delay)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { tree, calls } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
+      const entries: PreviewDirEntry[] = [{ name: "a.ts", type: "file", size: 1, mtimeMs: 1 }];
+      const w = mountDir(tree, entries);
+      nameBtnOf(w, "a.ts").dispatchEvent(new Event("click"));
+      expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]); // 同步触发，未经定时器
+      expect(calls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dir row carries the interaction-hint title + synced aria-expanded; file rows keep the plain name title", () => {
+    const { tree } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
+    const w = mountDir(tree, [
+      { name: "sub", type: "dir", mtimeMs: 1 },
+      { name: "a.ts", type: "file", size: 1, mtimeMs: 1 },
+    ]);
+    expect(nameBtnOf(w, "sub").getAttribute("title")).toBe("sub — click to expand, double-click to open");
+    expect(nameBtnOf(w, "sub").getAttribute("aria-expanded")).toBe("false"); // 行也是展开触发器
+    expect(nameBtnOf(w, "a.ts").getAttribute("title")).toBe("a.ts");
+    expect(nameBtnOf(w, "a.ts").getAttribute("aria-expanded")).toBeNull();
   });
 
   it("nested expansion: a dir inside an expanded listing expands in place (multi-level)", async () => {

@@ -431,13 +431,15 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     await tick();
   });
 
-  it("row click navigates (dir:true for a dir row); 返回 restores the previous listing with no refetch", async () => {
+  it("dir row double-click navigates (dir:true); 返回 restores the previous listing with no refetch", async () => {
     const r = rigDir();
     r.handle.open({ path: "/p/src", dir: true });
     r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
     await tick();
-    // `.preview-dir-row` — the NAME button (preview-tree adds a leading chevron button)
-    (document.querySelectorAll(".preview-dir-list button.preview-dir-row")[0] as HTMLElement).click();
+    // 2026-10 交互调整：目录行单击 = 内联展开（延迟窗），双击 = 钻取。连点两次 = 双击。
+    const row = document.querySelectorAll(".preview-dir-list button.preview-dir-row")[0] as HTMLElement;
+    row.click();
+    row.click();
     await tick();
     expect(r.calls[1]!.req).toMatchObject({ path: "/p/src/sub", dir: true });
     expect((document.querySelector(".preview-nav-btn") as HTMLButtonElement).disabled).toBe(false);
@@ -585,8 +587,10 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     r.handle.open({ path: "/p/src", dir: true });
     r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
     await tick();
-    // `.preview-dir-row` — the NAME button (preview-tree adds a leading chevron button)
-    (document.querySelectorAll(".preview-dir-list button.preview-dir-row")[0] as HTMLElement).click();
+    // 2026-10 交互调整：目录行双击 = 钻取（单击只是内联展开）。
+    const row = document.querySelectorAll(".preview-dir-list button.preview-dir-row")[0] as HTMLElement;
+    row.click();
+    row.click();
     await tick();
     const ev = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
     overlay()!.dispatchEvent(ev);

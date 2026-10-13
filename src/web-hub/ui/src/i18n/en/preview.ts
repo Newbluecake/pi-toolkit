@@ -66,6 +66,8 @@ const preview = {
   dirTreeError: "Expand failed:",
   dirTreeLimitDirs: "Too many folders expanded (max {n}) — collapse one first.",
   dirTreeLimitEntries: "Tree row budget reached ({n}) — collapse some folders first.",
+  // 2026-10 interaction: dir row single-click expands inline, double-click drills down
+  dirRowHint: "click to expand, double-click to open",
   // preview-download (file download button in the dialog header — files only, never dirs)
   download: "Download",
   downloadFailed: "Download failed — retry.",

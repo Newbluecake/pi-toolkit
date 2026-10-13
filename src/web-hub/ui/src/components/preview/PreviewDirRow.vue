@@ -5,6 +5,11 @@
   (`other`/lossy) renders the grey text div — never a dead button. The component's ROOT is
   the button/div itself (no wrapper element), so a tree-less PreviewDirRows keeps the
   pre-tree `li > button.preview-dir-row` DOM byte-identical.
+
+  Clicks are NOT interpreted here — the raw click is emitted as `rowclick` and
+  PreviewDirRows decides (file/symlink ⇒ drill; dir row ⇒ single-click expand /
+  double-click drill disambiguation). `titleHint` (dir rows with a tree) appends the
+  single/double-click explanation to the title after the name.
 -->
 <script lang="ts">
 import type { PreviewDirEntry } from "@protocol/preview.js";
@@ -21,14 +26,24 @@ export interface DirRowView {
 </script>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 
-const props = defineProps<{ readonly row: DirRowView }>();
+const props = defineProps<{
+  readonly row: DirRowView;
+  /** Dir rows with a tree store: interaction hint appended to the title after the name. */
+  readonly titleHint?: string | undefined;
+}>();
 const emit = defineEmits<{
-  (e: "navigate", entry: PreviewDirEntry): void;
+  /** Raw click on a clickable row — PreviewDirRows assigns the single/double semantics. */
+  (e: "rowclick", entry: PreviewDirEntry): void;
   /** Forwarded native keydown — PreviewDirRows hangs the tree arrow-key ops on it. */
   (e: "rowkeydown", ev: KeyboardEvent): void;
 }>();
+
+const title = computed(() =>
+  props.titleHint !== undefined ? `${props.row.entry.name} — ${props.titleHint}` : props.row.entry.name,
+);
 </script>
 
 <template>
@@ -36,8 +51,8 @@ const emit = defineEmits<{
     v-if="props.row.clickable"
     class="preview-dir-row"
     type="button"
-    :title="props.row.entry.name"
-    @click="emit('navigate', props.row.entry)"
+    :title="title"
+    @click="emit('rowclick', props.row.entry)"
     @keydown="emit('rowkeydown', $event)"
   >
     <AppIcon :name="props.row.icon" class="icon-sm preview-dir-row-icon" />
@@ -48,7 +63,7 @@ const emit = defineEmits<{
     <span class="preview-dir-size" translate="no">{{ props.row.sizeLabel }}</span>
     <span class="preview-dir-mtime" translate="no">{{ props.row.mtimeLabel }}</span>
   </button>
-  <div v-else class="preview-dir-row is-inert" :title="props.row.entry.name">
+  <div v-else class="preview-dir-row is-inert" :title="title">
     <AppIcon :name="props.row.icon" class="icon-sm preview-dir-row-icon" />
     <span class="sr-only">{{ props.row.typeLabel }} </span>
     <span class="preview-dir-name"

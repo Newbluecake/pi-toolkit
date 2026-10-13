@@ -27,6 +27,15 @@ export const PREVIEW_TREE_MAX_EXPANDED = 64;
 /** 全部已缓存子列表的条目总和上限（见文件头预算说明）。 */
 export const PREVIEW_TREE_MAX_ENTRIES = 3000;
 
+/**
+ * 目录行「单击展开 / 双击钻取」的消歧窗（2026-10 交互调整）：单击延迟该时长后才真正
+ * toggle——窗内第二次点击视为双击，取消未生效的展开并直接钻取，因此双击不会产生
+ * 「先展开又折叠」的净状态变化（无视觉抖动）。取值依据：Windows/macOS 默认双击间隔
+ * 上限约 500ms，取一半对慢双击足够宽容，而 250ms 的单击展开延迟低于可感知阈值
+ * （与 VS Code 文件树的 single-click 预览延迟同量级）。
+ */
+export const PREVIEW_TREE_DBLCLICK_MS = 250;
+
 export interface PreviewTreeNode {
   status: "loading" | "loaded" | "error";
   /** 已缓存的子列表（loaded 时非空；折叠不丢）。 */
