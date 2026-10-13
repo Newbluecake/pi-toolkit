@@ -21,6 +21,8 @@
   shell-no-title-tooltips 在触屏档位断言全页无 [title])。
 -->
 <script setup lang="ts">
+import { tracePoint } from "../../logic/trace.js";
+tracePoint("fleet:setup");
 import { computed } from "vue";
 import type { FleetSummaryBarEmits, FleetSummaryBarProps } from "../../contracts.js";
 import "../../styles/fleet.css";

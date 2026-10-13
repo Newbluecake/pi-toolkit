@@ -41,6 +41,8 @@
   pre-graph shape (I8).
 -->
 <script setup lang="ts">
+import { tracePoint } from "../../logic/trace.js";
+tracePoint("wt:setup");
 import { computed, inject, reactive, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";

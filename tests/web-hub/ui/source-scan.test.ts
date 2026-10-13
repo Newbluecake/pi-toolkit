@@ -88,9 +88,11 @@ const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
  * docs/dev/web-hub-aw-snap/investigation.md — drop it from this list when the breadcrumb goes.
  * 2026-10-13 (TEMPORARY): + `transcript/Transcript.vue` for the scroll-rollback investigation
  * breadcrumb (`pwh_diag_scroll` — a 12-entry ring of save/restore/unfollow facts: scroll
- * geometry + anchor ids only, no message content). Remove together with the breadcrumb. */
+ * geometry + anchor ids only, no message content). Remove together with the breadcrumb.
+ * 2026-10-13 (TEMPORARY): + `logic/trace.js` for the freeze tracer (`pwh_diag_trace` sync ring,
+ * #11 卡死排查; gated on `pwh_trace=1`, default fully inert). Remove with the investigation. */
 const LOCALSTORAGE_ALLOWED =
-  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|App\.vue|transcript\/Transcript\.vue/i;
+  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|logic\/trace\.js|App\.vue|transcript\/Transcript\.vue/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {

@@ -37,6 +37,8 @@
   `.detail-head-info` in detail.css.
 -->
 <script setup lang="ts">
+import { tracePoint } from "../../logic/trace.js";
+tracePoint("dh:setup");
 import { computed, inject, nextTick, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";

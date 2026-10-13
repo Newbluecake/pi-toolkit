@@ -31,6 +31,8 @@
   #2: the path never crosses the wire; the settlement notification card already carries it).
 -->
 <script setup lang="ts">
+import { tracePoint } from "../../logic/trace.js";
+tracePoint("bashjobs:setup");
 import { computed, onUnmounted, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";

@@ -21,6 +21,8 @@
   still-pending restore.
 -->
 <script setup lang="ts">
+import { tracePoint } from "../../logic/trace.js";
+tracePoint("tx:setup");
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { TranscriptEmits, TranscriptProps } from "../../contracts.js";
 import "../../styles/transcript.css";
@@ -316,6 +318,7 @@ function schedulePin(): void {
 
 let contentResizeObserver: ResizeObserver | undefined;
 onMounted(() => {
+  tracePoint("tx:mounted");
   if (typeof ResizeObserver !== "undefined" && innerBox.value) {
     contentResizeObserver = new ResizeObserver(schedulePin);
     contentResizeObserver.observe(innerBox.value);

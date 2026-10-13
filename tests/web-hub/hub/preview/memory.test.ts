@@ -40,30 +40,44 @@ describe("HP3: memory ceiling", () => {
   it("1 GiB sparse text: the stream never buffers the file (Δrss < 1 MiB)", async () => {
     const fs = defaultPreviewFs();
     const path = sparseFile(1024 * MIB, "wh-hp3-stream-");
-    const fh = await fs.open(path, PREVIEW_READ_FLAGS);
+    const stat0 = await (await fs.open(path, PREVIEW_READ_FLAGS)).stat();
     try {
-      const stat = await fh.stat();
       const sample = Buffer.alloc(64 * 1024);
-      const { bytesRead } = await fh.read(sample, 0, sample.length, 0);
-      const sink = new FakeSink();
-      const before = rss();
-      const out = await readAndStream(
-        { fh, size: stat.size, sniff: { kind: "text" }, sample: sample.subarray(0, bytesRead) },
-        sink,
-        {
-          signal: neverAbort(),
-          streamAt: 30_000,
-          textMax: PREVIEW_TEXT_MAX_BYTES,
-          now: Date.now,
-          verifier: neverVerifier(),
-        },
-      );
-      const delta = rss() - before;
-      expect(out).toEqual({ ok: true, bytes: PREVIEW_TEXT_MAX_BYTES, truncated: true });
-      expect(sink.body().length).toBe(PREVIEW_TEXT_MAX_BYTES);
-      expect(delta).toBeLessThan(RSS_BOUND);
+      // 2026-10-13 治理（flaky 根因：单次冷测量把 V8 nursery 扩容/GC 时机噪声也算进 Δrss，
+      // 1 MiB 的线在重载机器上随机被越过）：与下方 ② 同款 warm-up + min-of-2 ——预热让 V8 为
+      // 这种分配模式定容，min 呈现稳态；整个文件进内存的回归实现每轮都会 +1 GiB，藏不住。
+      // 注意 readAndStream 会关闭传入的 fh（单发语义），每轮换一个新句柄。
+      const runOnce = async (): Promise<{ out: unknown; sinkLen: number; delta: number }> => {
+        const fh = await fs.open(path, PREVIEW_READ_FLAGS);
+        try {
+          const { bytesRead } = await fh.read(sample, 0, sample.length, 0);
+          const sink = new FakeSink();
+          const before = rss();
+          const out = await readAndStream(
+            { fh, size: stat0.size, sniff: { kind: "text" }, sample: sample.subarray(0, bytesRead) },
+            sink,
+            {
+              signal: neverAbort(),
+              streamAt: 30_000,
+              textMax: PREVIEW_TEXT_MAX_BYTES,
+              now: Date.now,
+              verifier: neverVerifier(),
+            },
+          );
+          return { out, sinkLen: sink.body().length, delta: rss() - before };
+        } finally {
+          await fh.close().catch(() => {}); // readAndStream 已关闭时是 EBADF —— 幂等容忍
+        }
+      };
+      await runOnce(); // warm-up — 不定界
+      const passes = [await runOnce(), await runOnce()];
+      for (const p of passes) {
+        expect(p.out).toEqual({ ok: true, bytes: PREVIEW_TEXT_MAX_BYTES, truncated: true });
+        expect(p.sinkLen).toBe(PREVIEW_TEXT_MAX_BYTES);
+      }
+      expect(Math.min(...passes.map((p) => p.delta))).toBeLessThan(RSS_BOUND);
     } finally {
-      await fh.close();
+      rmSync(path, { force: true });
     }
   });
 

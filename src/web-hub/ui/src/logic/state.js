@@ -121,6 +121,7 @@
 import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition } from "./control.js";
 import { isLoadGateWireLike, isLoadWireLike, parseLoadTopWire } from "./load.js";
 import { SSE_EVENTS } from "@protocol/http-contract.ts";
+import { tracePoint } from "./trace.js";
 
 /**
  * Anti-drift pin (verifier r1 #2, P2 打回): `"agent_removed"` has no standalone named export in
@@ -773,7 +774,10 @@ function reduceInner(s, event, d, at) {
         if (sessionFrameStale(a, d))
           // D2-7(c): in-flight snapshot of a replaced session — drop and re-arm
           return { ...a, sub: a.sub ? { ...a.sub, pending: false } : a.sub, needsResync: true };
-        return applyHistory(a, d);
+        tracePoint("state:history", { key, n: Array.isArray(d.entries) ? d.entries.length : -1 });
+        const appliedH = applyHistory(a, d);
+        tracePoint("state:history:done", { key });
+        return appliedH;
       });
     case "ev":
       if (!key || typeof d.seq !== "number" || !d.e || typeof d.e.type !== "string") return s;

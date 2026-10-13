@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { tracePoint } from "../../logic/trace.js";
+tracePoint("graph:setup");
 import { computed, defineAsyncComponent, inject, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
