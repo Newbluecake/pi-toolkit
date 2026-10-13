@@ -40,7 +40,7 @@ import {
 } from "../../../git/diff.js";
 import type { GitRunner } from "../../../git/run.js";
 import { canonicalOrigin, parseOrigin } from "../../protocol/lan.js";
-import { validatePreviewPath } from "../../protocol/preview.js";
+import { normalizePreviewPath, validatePreviewPath } from "../../protocol/preview.js";
 import {
   isWtRequestableEntry,
   WTDIFF_ADMIT_MS,
@@ -402,7 +402,7 @@ export function createWorktreeDiffRoutes(deps: WorktreeDiffRoutesDeps): Worktree
       // ③ params
       const agentKey = query.get("agentKey") ?? "";
       const sessionId = query.get("sessionId") ?? "";
-      const wt = query.get("wt") ?? "";
+      const wt = normalizePreviewPath(query.get("wt") ?? "");
       const untrackedRaw = query.get("untracked");
       if (
         !AGENT_KEY_RE.test(agentKey) ||

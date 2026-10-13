@@ -93,6 +93,14 @@ describe("POST /api/headless/mkdir (spawn-dirmkdir)", () => {
     expect(existsSync(join(tmp.dir, "via-tilde"))).toBe(true);
   });
 
+  it("200: a trailing-slash parent is tolerated and canonicalized (no `//` in the join)", async () => {
+    await withRealMkdir();
+    const r = await mkdirPost({ path: `${tmp.dir}/`, name: "trail" });
+    expect(r.status).toBe(200);
+    expect(JSON.parse(r.body).path).toBe(join(tmp.dir, "trail"));
+    expect(existsSync(join(tmp.dir, "trail"))).toBe(true);
+  });
+
   it("400 E_BAD_REQUEST{name-invalid}: empty / slash / dot / dotdot / NUL / >255 bytes", async () => {
     await withRealMkdir();
     for (const name of ["", "a/b", ".", "..", "a\0b", "x".repeat(256)]) {

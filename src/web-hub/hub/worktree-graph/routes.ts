@@ -32,7 +32,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { classifyGraphExit, tipsFromRefs, parseForEachRefZ, parseGraphLogZ, wtGraphArgs } from "../../../git/graph.js";
 import type { GitRunner } from "../../../git/run.js";
 import { canonicalOrigin, parseOrigin } from "../../protocol/lan.js";
-import { validatePreviewPath } from "../../protocol/preview.js";
+import { normalizePreviewPath, validatePreviewPath } from "../../protocol/preview.js";
 import {
   WTGRAPH_GIT_PHASE_MS,
   WTGRAPH_LOG_MAX_BYTES,
@@ -305,7 +305,7 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
       // ③ params
       const agentKey = query.get("agentKey") ?? "";
       const sessionId = query.get("sessionId") ?? "";
-      const wt = query.get("wt") ?? "";
+      const wt = normalizePreviewPath(query.get("wt") ?? "");
       if (
         !AGENT_KEY_RE.test(agentKey) ||
         !SESSION_ID_RE.test(sessionId) ||

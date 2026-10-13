@@ -821,6 +821,23 @@ describe("loopback /api/preview — dir=1 listings (P1b)", () => {
     await h.cleanup();
   });
 
+  it("a trailing slash is tolerated and canonicalized (2026-10-13 用户报告: 「多一个 / 就不是有效路径」)", async () => {
+    const h = await harness();
+    const d = join(h.cwd, "pkg");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "a.txt"), "a");
+    const r = await rawRequest(h.port, {
+      method: "GET",
+      path: `${PREVIEW_PATH}?agentKey=${AGENT}&sessionId=${SESSION}&path=${encodeURIComponent(d + "/")}&dir=1`,
+      headers: { "X-PWH": "1", Cookie: h.cookie },
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers["x-pwh-preview-kind"]).toBe("dir");
+    const listing = JSON.parse(r.body) as { entries: Array<{ name: string }> };
+    expect(listing.entries.map((e) => e.name)).toEqual(["a.txt"]);
+    await h.cleanup();
+  });
+
   it("without the opt-in the same directory keeps the pre-P1b 415, byte-identical", async () => {
     const h = await harness();
     const d = join(h.cwd, "pkg");

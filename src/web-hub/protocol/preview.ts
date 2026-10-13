@@ -223,6 +223,15 @@ export function validatePreviewPath(p: string, opts?: { minSegments?: 1 | 2 }): 
   return true;
 }
 
+/** Admission canonical form (2026-10-13 用户报告「多一个 / 就不是有效路径」): strip ONE trailing
+ *  slash (`/a/b/` → `/a/b` — shells and tab-completion produce it constantly). Hub routes
+ *  normalize BEFORE {@link validatePreviewPath}, so the validator's frozen contract (incl. the
+ *  recognition layer's) is untouched and every downstream consumer (denylist prefix compares,
+ *  child joins, fs, audit) sees the canonical spelling. Pure string op — never throws. */
+export function normalizePreviewPath(p: string): string {
+  return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
+}
+
 // ---------------------------------------------------------------------------
 // directory listing (dir-plan §1.1/§3.2 — opt-in `dir=1`; frozen wire surface)
 // ---------------------------------------------------------------------------

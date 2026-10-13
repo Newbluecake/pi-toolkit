@@ -37,6 +37,7 @@ import {
   PREVIEW_SAMPLE_BYTES,
   PREVIEW_STREAM_MS,
   PREVIEW_TEXT_MAX_BYTES,
+  normalizePreviewPath,
   validatePreviewPath,
   type PreviewDirListing,
   type PreviewProbeResponseBody,
@@ -335,7 +336,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       // tilde-expansion addendum: a literal `~` / `~/<rest>` is expanded against the HUB's own
       // home BEFORE any gate below runs (`validatePreviewPath` included) — `tilde.ts`'s own
       // doc comment has the full rationale; `~user/...` is left untouched (never expanded).
-      const path = expandTildePath(query.get("path") ?? "", deps.denyCtx.homes[0] ?? "");
+      const path = normalizePreviewPath(expandTildePath(query.get("path") ?? "", deps.denyCtx.homes[0] ?? ""));
       // dir-plan §3.5 (P1b): the opt-in directory flag — ONLY the exact value "1" turns an
       // admitted directory into a listing request (§1.1); absent/any other value keeps the
       // pre-P1b behavior byte-identical (a directory still answers 415 not-regular).

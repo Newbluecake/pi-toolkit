@@ -39,6 +39,7 @@ import {
   PREVIEW_TEXT_MAX_BYTES,
   PREVIEW_UPLOADS_MARKER,
   PREVIEW_VERIFY_MS,
+  normalizePreviewPath,
   validatePreviewPath,
 } from "../../../src/web-hub/protocol/preview.js";
 
@@ -135,6 +136,19 @@ describe("validatePreviewPath (§4.1)", () => {
     expect(validatePreviewPath("/a//b")).toBe(false);
     expect(validatePreviewPath("//a/b")).toBe(false);
     expect(validatePreviewPath("/a/b/")).toBe(false);
+  });
+
+  it("normalizePreviewPath strips exactly one trailing slash — hub admission normalizes BEFORE validating (2026-10-13)", () => {
+    // 用户报告「多一个 / 就不是有效路径」：normalize → validate 后尾部斜杠被容忍，
+    // 但 validator 本身的冻结契约不变（上面那条）
+    expect(normalizePreviewPath("/a/b/")).toBe("/a/b");
+    expect(normalizePreviewPath("/a/b")).toBe("/a/b");
+    expect(normalizePreviewPath("/")).toBe("/"); // length-1 untouched
+    expect(normalizePreviewPath("/a/b//")).toBe("/a/b/"); // one strip only — validate still rejects
+    // roundtrip: normalize-then-validate（hub 四个入口的顺序）
+    expect(validatePreviewPath(normalizePreviewPath("/a/b/"))).toBe(true);
+    expect(validatePreviewPath(normalizePreviewPath("/a/b//"))).toBe(false);
+    expect(validatePreviewPath(normalizePreviewPath("/home"), { minSegments: 1 })).toBe(true);
   });
 
   it("rejects '.' and '..' segments anywhere", () => {

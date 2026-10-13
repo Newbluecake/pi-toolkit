@@ -26,7 +26,7 @@
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
 import { mkdir, realpath } from "node:fs/promises";
-import { validatePreviewPath } from "../../protocol/preview.js";
+import { normalizePreviewPath, validatePreviewPath } from "../../protocol/preview.js";
 import { isValidMkdirName } from "../../protocol/spawn.js";
 import type { HubLog } from "../ports.js";
 import type { ReqDeadline } from "../req-deadline.js";
@@ -127,7 +127,7 @@ export function createMkdirService(deps: MkdirServiceDeps): MkdirService {
       if (!isValidMkdirName(name)) {
         return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "name-invalid" };
       }
-      const parent = expandTildePath(parentRaw, deps.denyCtx.homes[0] ?? "");
+      const parent = normalizePreviewPath(expandTildePath(parentRaw, deps.denyCtx.homes[0] ?? ""));
       if (!validatePreviewPath(parent, { minSegments: 1 })) {
         return { ok: false, status: 400, code: "E_BAD_REQUEST", reason: "path-invalid" };
       }
