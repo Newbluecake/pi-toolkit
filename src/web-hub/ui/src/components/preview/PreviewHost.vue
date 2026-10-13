@@ -465,12 +465,14 @@ function onKeydown(ev: KeyboardEvent): void {
             :path="path"
           />
           <!-- A3/P3: the listing — rendered only with the navigation face (a frozen fake can
-               never produce a dir phase; the guard keeps the branch total anyway). -->
+               never produce a dir phase; the guard keeps the branch total anyway).
+               preview-tree: `nav.tree` carries the per-visit inline-expansion store. -->
           <PreviewDir
             v-else-if="view.phase === 'dir' && nav !== null"
             :key="view.path"
             :path="view.path"
             :listing="view.listing"
+            :tree="nav.tree"
             @navigate="onDirEntry"
             @go="onPathBarGo"
           />

@@ -655,3 +655,97 @@ button.preview-dir-row:focus-visible {
     min-height: 44px;
   }
 }
+
+/* ------------------------------------------------- preview-tree (inline expansion) */
+/* Indentation model: every row's `.preview-dir-rowwrap` carries `--pdt-depth`
+ * (0-based) as an inline var; one level = 18px. Nested <ul role="group"> draws the guide
+ * line as a 1px background strip aligned with the PARENT row's chevron center — the ul
+ * itself has no padding, so child rows measure their indent from the same li edge. */
+.preview-dir-group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background-image: linear-gradient(var(--c-border), var(--c-border));
+  background-repeat: no-repeat;
+  background-size: 1px 100%;
+  background-position: calc(var(--pdt-depth, 0) * 18px + 10px) 0;
+}
+
+.preview-dir-rowwrap {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  padding-inline-start: calc(var(--pdt-depth, 0) * 18px);
+}
+
+.preview-dir-rowwrap > .preview-dir-row {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Chevron: expand/collapse only (the name button keeps drill-down). tabindex=-1 —
+ * keyboard users expand via ArrowRight on the row, so the Tab cycle is not doubled. */
+.preview-dir-chevron {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  color: var(--c-text-3);
+  cursor: pointer;
+}
+
+.preview-dir-chevron:hover {
+  background: var(--c-primary-soft);
+  color: var(--c-text);
+}
+
+.preview-dir-chevron:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.preview-dir-chevron .icon-sm {
+  transition: transform 0.15s ease;
+}
+
+.preview-dir-chevron.is-expanded .icon-sm {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-dir-chevron .icon-sm {
+    transition: none;
+  }
+}
+
+/* Non-dir rows keep name alignment with their dir siblings. */
+.preview-dir-chevron-spacer {
+  flex: none;
+  width: 20px;
+}
+
+/* Inline loading / error+retry / empty / truncated status rows (never a new dialog). */
+.preview-dir-tree-status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  padding-inline-start: calc(var(--pdt-depth, 0) * 18px + 20px + var(--sp-2));
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.preview-dir-tree-status.is-error {
+  color: var(--c-warning-text);
+}
+
+.preview-dir-tree-retry {
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-xs);
+}

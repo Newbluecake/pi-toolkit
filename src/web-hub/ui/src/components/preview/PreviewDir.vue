@@ -12,6 +12,16 @@
   only EMITS the entry; the navigation algebra (`childPreviewPath`, the history push) lives
   in the host + `usePreview`.
 
+  preview-tree (2026-10 用户需求): the row list itself moved to the recursive
+  `PreviewDirRows.vue` — every dir row grows a chevron for INLINE expansion (lazy `dir=1`
+  fetch on first expand via the same endpoint, per-path cache in the injected `tree` store,
+  折叠不丢), while the row-name button keeps its drill-down `navigate` emit unchanged.
+  The store lives on `usePreview`'s per-visit handle, so the host's `:key="view.path"`
+  remount on drill/back does NOT lose expansions; a fresh open/close drops them
+  (弹窗关闭即弃). Budget refusals (`tree.refusal`) render as one inline notice line —
+  never a new dialog. Without the `tree` prop (legacy fakes) the rows render byte-identical
+  to pre-tree DOM (no chevrons, no tree roles).
+
   Path bar (tilde-expansion addendum, part B): a native `<form>` + `<input>` pre-filled with
   `props.path` — submitting emits `go` with trimmed text after local byte/control checks;
   the host re-runs the FULL admission chain on the hub for whatever comes back (no
@@ -28,22 +38,27 @@
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { formatPreviewBytes } from "@logic/preview.js";
 import {
   PREVIEW_DIR_SCAN_MAX,
   PREVIEW_PATH_MAX_BYTES,
   type PreviewDirEntry,
-  type PreviewDirEntryType,
   type PreviewDirListing,
 } from "@protocol/preview.js";
+import {
+  PREVIEW_TREE_MAX_ENTRIES,
+  PREVIEW_TREE_MAX_EXPANDED,
+  type PreviewTreeStore,
+} from "../../composables/usePreviewTree.js";
 import { useI18n } from "../../composables/useI18n.js";
-import { formatDateTime, formatNumber, localeFor } from "../../format.js";
-import AppIcon from "../../icons/AppIcon.vue";
+import { formatNumber, localeFor } from "../../format.js";
+import PreviewDirRows from "./PreviewDirRows.vue";
 
 const props = defineProps<{
   /** The listed directory's absolute path (A3 row joins derive from it in the host). */
   readonly path: string;
   readonly listing: PreviewDirListing;
+  /** preview-tree: the per-visit inline-expansion store (absent ⇒ no chevrons). */
+  readonly tree?: PreviewTreeStore | undefined;
 }>();
 const emit = defineEmits<{ (e: "navigate", entry: PreviewDirEntry): void; (e: "go", path: string): void }>();
 const i18n = useI18n();
@@ -90,41 +105,15 @@ function resetPathBar(): void {
   pathDraft.value = props.path;
 }
 
-function typeLabel(type: PreviewDirEntryType): string {
-  switch (type) {
-    case "dir":
-      return t("preview.dirTypeDir");
-    case "file":
-      return t("preview.dirTypeFile");
-    case "symlink":
-      return t("preview.dirTypeSymlink");
-    default:
-      return t("preview.dirTypeOther");
-  }
-}
-
-interface RowView {
-  readonly entry: PreviewDirEntry;
-  /** A3: FIFO/socket/device (`other`) and lossy names never navigate. */
-  readonly clickable: boolean;
-  readonly isDot: boolean;
-  readonly icon: "folder" | "file";
-  readonly typeLabel: string;
-  readonly sizeLabel: string;
-  readonly mtimeLabel: string;
-}
-
-const rows = computed<RowView[]>(() =>
-  props.listing.entries.map((entry): RowView => ({
-    entry,
-    clickable: entry.type !== "other" && entry.lossy !== true,
-    isDot: entry.name.startsWith("."),
-    icon: entry.type === "dir" ? "folder" : "file",
-    typeLabel: typeLabel(entry.type),
-    sizeLabel: entry.type === "file" ? formatPreviewBytes(entry.size) : "",
-    mtimeLabel: formatDateTime(entry.mtimeMs ?? null, localeFor(i18n.lang)),
-  })),
-);
+/** preview-tree: the store's budget refusal as one inline notice line (never a dialog). */
+const refusalLabel = computed(() => {
+  const r = props.tree?.refusal.value;
+  if (r === "dirs")
+    return t("preview.dirTreeLimitDirs", { n: formatNumber(PREVIEW_TREE_MAX_EXPANDED, localeFor(i18n.lang)) });
+  if (r === "entries")
+    return t("preview.dirTreeLimitEntries", { n: formatNumber(PREVIEW_TREE_MAX_ENTRIES, localeFor(i18n.lang)) });
+  return null;
+});
 
 /** §3.2: `complete:false` ⇒ the scanned prefix is a lower bound — 「≥ total」. */
 const countLabel = computed(() => {
@@ -187,35 +176,20 @@ const notices = computed<string[]>(() => {
       <span>{{ countLabel }}</span>
     </div>
     <p v-for="(note, i) in notices" :key="i" class="preview-dir-note" role="note">{{ note }}</p>
-    <p v-if="rows.length === 0" class="preview-dir-empty">{{ t("preview.dirEmpty") }}</p>
-    <ul v-else class="preview-dir-list">
-      <li v-for="row in rows" :key="row.entry.name" :class="{ 'is-dot': row.isDot }">
-        <button
-          v-if="row.clickable"
-          class="preview-dir-row"
-          type="button"
-          :title="row.entry.name"
-          @click="emit('navigate', row.entry)"
-        >
-          <AppIcon :name="row.icon" class="icon-sm preview-dir-row-icon" />
-          <span class="sr-only">{{ row.typeLabel }} </span>
-          <span class="preview-dir-name"
-            ><bdi translate="no">{{ row.entry.name }}</bdi></span
-          >
-          <span class="preview-dir-size" translate="no">{{ row.sizeLabel }}</span>
-          <span class="preview-dir-mtime" translate="no">{{ row.mtimeLabel }}</span>
-        </button>
-        <div v-else class="preview-dir-row is-inert" :title="row.entry.name">
-          <AppIcon :name="row.icon" class="icon-sm preview-dir-row-icon" />
-          <span class="sr-only">{{ row.typeLabel }} </span>
-          <span class="preview-dir-name"
-            ><bdi translate="no">{{ row.entry.name }}</bdi></span
-          >
-          <span class="preview-dir-size" translate="no">{{ row.sizeLabel }}</span>
-          <span class="preview-dir-mtime" translate="no">{{ row.mtimeLabel }}</span>
-        </div>
-      </li>
-    </ul>
+    <!-- preview-tree: budget refusal — inline lightweight hint, cleared by the next toggle. -->
+    <p v-if="refusalLabel !== null" class="preview-dir-note preview-dir-tree-refusal" role="status">
+      {{ refusalLabel }}
+    </p>
+    <p v-if="listing.entries.length === 0" class="preview-dir-empty">{{ t("preview.dirEmpty") }}</p>
+    <PreviewDirRows
+      v-else
+      root
+      :parent-path="path"
+      :entries="listing.entries"
+      :depth="1"
+      :tree="tree"
+      @navigate="emit('navigate', $event)"
+    />
     <!-- §2.8/A1: static, count-free — denylist hits are neither listed nor counted. -->
     <p class="preview-dir-footnote">{{ t("preview.dirProtected") }}</p>
   </div>

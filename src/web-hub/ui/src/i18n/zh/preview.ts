@@ -62,6 +62,13 @@ const preview = {
   dirTypeFile: "文件",
   dirTypeSymlink: "符号链接",
   dirTypeOther: "特殊文件",
+  // preview-tree（目录行内展开 —— chevron 展开/折叠；点名字仍是进入目录）
+  dirExpand: "内联展开",
+  dirCollapse: "收起",
+  dirTreeLoading: "加载中…",
+  dirTreeError: "展开失败：",
+  dirTreeLimitDirs: "展开的文件夹过多（上限 {n} 个）——请先收起一些。",
+  dirTreeLimitEntries: "已达到树行数预算（{n} 行）——请先收起部分文件夹。",
   // preview-download（对话框头部的文件下载按钮 —— 仅文件，目录没有）
   download: "下载",
   downloadFailed: "下载失败 — 请重试。",

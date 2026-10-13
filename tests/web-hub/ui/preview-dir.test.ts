@@ -1,7 +1,12 @@
 // @vitest-environment happy-dom
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import PreviewDir from "../../../src/web-hub/ui/src/components/preview/PreviewDir.vue";
+import {
+  createPreviewTree,
+  PREVIEW_TREE_MAX_ENTRIES,
+  PREVIEW_TREE_MAX_EXPANDED,
+} from "../../../src/web-hub/ui/src/composables/usePreviewTree.js";
 import {
   PREVIEW_PATH_MAX_BYTES,
   type PreviewDirEntry,
@@ -294,5 +299,318 @@ describe("PreviewDir.vue — path bar (tilde-expansion addendum, part B)", () =>
     expect(w.get(PATHBAR_INPUT).attributes("aria-label")).toBeTruthy();
     expect(w.get(PATHBAR_INPUT).attributes("placeholder")).toBeTruthy();
     expect(w.get(".preview-dir-pathbar-go").text().length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * preview-tree (2026-10 用户需求): inline directory expansion. Chevron = lazy in-place
+ * expand/collapse (same dir=1 endpoint via the injected tree store, no server change); the
+ * row-name button keeps its drill-down `navigate` emit. Covers: lazy-fetch timing, nesting,
+ * inline error+retry, both client budgets, cache hit (collapse keeps the listing), keyboard
+ * ops, and expansion surviving a remount (the host's `:key` remount on drill/back).
+ */
+describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
+  const CHEVRON = ".preview-dir-chevron";
+  const GROUP = "ul.preview-dir-group";
+  const STATUS = ".preview-dir-tree-status";
+  const REFUSAL = ".preview-dir-tree-refusal";
+  const RETRY = ".preview-dir-tree-retry";
+
+  type FetchResult = { ok: true; listing: PreviewDirListing } | { ok: false; error: string };
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  /** A real store over a scripted fetch — the tests exercise store+component together. */
+  function treeWith(fn: (path: string) => Promise<FetchResult>) {
+    const calls: string[] = [];
+    const tree = createPreviewTree((path) => {
+      calls.push(path);
+      return fn(path);
+    });
+    return { tree, calls };
+  }
+
+  function chevronOf(w: ReturnType<typeof mount>, name: string): HTMLElement {
+    const btn = rowOf(w, name).querySelector(CHEVRON);
+    if (btn === null) throw new Error(`no chevron on row ${name}`);
+    return btn as HTMLElement;
+  }
+
+  function mountDir(
+    tree: ReturnType<typeof createPreviewTree>,
+    entries: PreviewDirEntry[],
+    path = "/p/src",
+  ): ReturnType<typeof mount> {
+    return mount(PreviewDir, { props: { path, listing: listing({}, entries), tree } });
+  }
+
+  it("no tree prop ⇒ li > button.preview-dir-row directly (no rowwrap/chevron/spacer, no tree roles)", () => {
+    const w = mount(PreviewDir, {
+      props: { path: "/p/src", listing: listing({}, [{ name: "sub", type: "dir", mtimeMs: 1 }]) },
+    });
+    const li = w.findAll(ROWS)[0]!.element;
+    // 真实结构断言：li 唯一直接子元素就是行按钮本身（改动前的 DOM 形态）
+    expect(li.children).toHaveLength(1);
+    const only = li.children[0]!;
+    expect(only.tagName).toBe("BUTTON");
+    expect(only.classList.contains("preview-dir-row")).toBe(true);
+    expect(w.find(".preview-dir-rowwrap").exists()).toBe(false);
+    expect(w.find(".preview-dir-chevron").exists()).toBe(false);
+    expect(w.find(".preview-dir-chevron-spacer").exists()).toBe(false);
+    expect(w.get(".preview-dir-list").attributes("role")).toBeUndefined();
+    expect(li.getAttribute("role")).toBeNull();
+  });
+
+  it("with a tree store ⇒ the rowwrap wrapper + chevron column wrap the same row button", () => {
+    const { tree } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
+    const w = mountDir(tree, [
+      { name: "sub", type: "dir", mtimeMs: 1 },
+      { name: "a.ts", type: "file", size: 1, mtimeMs: 1 },
+    ]);
+    const wraps = w.findAll(".preview-dir-rowwrap");
+    expect(wraps).toHaveLength(2);
+    // dir row: chevron + row button; file row: spacer + row button — button stays a .preview-dir-row
+    const dirRow = rowOf(w, "sub");
+    expect(dirRow.querySelector(":scope > .preview-dir-rowwrap > .preview-dir-chevron")).not.toBeNull();
+    expect(dirRow.querySelector(":scope > .preview-dir-rowwrap > button.preview-dir-row")).not.toBeNull();
+    const fileRow = rowOf(w, "a.ts");
+    expect(fileRow.querySelector(":scope > .preview-dir-rowwrap > .preview-dir-chevron-spacer")).not.toBeNull();
+    expect(fileRow.querySelector(":scope > .preview-dir-rowwrap > button.preview-dir-row")).not.toBeNull();
+  });
+
+  it("first chevron click lazy-fetches that dir only (loading row inline), then renders children indented", async () => {
+    const d = deferred<FetchResult>();
+    const { tree, calls } = treeWith(() => d.promise);
+    const w = mountDir(tree, [
+      { name: "sub", type: "dir", mtimeMs: 1 },
+      { name: "a.ts", type: "file", size: 1, mtimeMs: 1 },
+    ]);
+    expect(w.find(GROUP).exists()).toBe(false);
+    expect(calls).toHaveLength(0); // nothing fetched before the first expand
+
+    await chevronOf(w, "sub").dispatchEvent(new Event("click"));
+    expect(calls).toStrictEqual(["/p/src/sub"]); // childPreviewPath join, dir=1 via the store
+    expect(w.get(STATUS).text()).toContain("Loading…"); // 行内 loading, 不弹窗
+    expect(w.get(STATUS).attributes("role")).toBe("status");
+
+    d.resolve({
+      ok: true,
+      listing: listing({}, [
+        { name: "x.ts", type: "file", size: 1, mtimeMs: 1 },
+        { name: "inner", type: "dir", mtimeMs: 1 },
+      ]),
+    });
+    await flushPromises();
+    expect(w.find(STATUS).exists()).toBe(false);
+    const group = w.get(GROUP);
+    expect(group.attributes("role")).toBe("group");
+    expect(group.findAll(".preview-dir-name").map((n) => n.text())).toEqual(["x.ts", "inner"]);
+    expect(chevronOf(w, "sub").getAttribute("aria-expanded")).toBe("true");
+    // tree roles: root ul=tree, li=treeitem with aria-level (1 at root, 2 inside the group)
+    expect(w.get(".preview-dir-list").attributes("role")).toBe("tree");
+    expect(rowOf(w, "sub").getAttribute("aria-level")).toBe("1");
+    expect(rowOf(w, "x.ts").getAttribute("aria-level")).toBe("2");
+  });
+
+  it("row-name click still drills down (emits navigate) WITHOUT triggering an expansion fetch", async () => {
+    const { tree, calls } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
+    const entries: PreviewDirEntry[] = [{ name: "sub", type: "dir", mtimeMs: 1 }];
+    const w = mountDir(tree, entries);
+    await w.get(`${BUTTONS}`).trigger("click");
+    expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]);
+    expect(calls).toHaveLength(0);
+    expect(w.find(GROUP).exists()).toBe(false);
+  });
+
+  it("nested expansion: a dir inside an expanded listing expands in place (multi-level)", async () => {
+    const { tree, calls } = treeWith((path) =>
+      Promise.resolve({
+        ok: true,
+        listing:
+          path === "/p/src/a"
+            ? listing({}, [{ name: "b", type: "dir", mtimeMs: 1 }])
+            : listing({}, [{ name: "leaf.ts", type: "file", size: 1, mtimeMs: 1 }]),
+      }),
+    );
+    const w = mountDir(tree, [{ name: "a", type: "dir", mtimeMs: 1 }]);
+    await chevronOf(w, "a").dispatchEvent(new Event("click"));
+    await flushPromises();
+    await chevronOf(w, "b").dispatchEvent(new Event("click"));
+    await flushPromises();
+    expect(calls).toStrictEqual(["/p/src/a", "/p/src/a/b"]);
+    expect(rowOf(w, "leaf.ts").getAttribute("aria-level")).toBe("3");
+    expect(w.findAll(GROUP)).toHaveLength(2);
+  });
+
+  it("a failed expand shows an inline error + retry (no new dialog); retry refetches and succeeds", async () => {
+    let attempt = 0;
+    const { tree, calls } = treeWith(() => {
+      attempt++;
+      return attempt === 1
+        ? Promise.resolve({ ok: false, error: "E_DENIED" })
+        : Promise.resolve({ ok: true, listing: listing({}, [{ name: "ok.ts", type: "file", size: 1, mtimeMs: 1 }]) });
+    });
+    const w = mountDir(tree, [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await chevronOf(w, "sub").dispatchEvent(new Event("click"));
+    await flushPromises();
+    const err = w.get(`${STATUS}.is-error`);
+    expect(err.attributes("role")).toBe("alert");
+    expect(err.text()).toContain("E_DENIED");
+    expect(w.find(GROUP).exists()).toBe(false);
+
+    await w.get(RETRY).trigger("click");
+    await flushPromises();
+    expect(calls).toStrictEqual(["/p/src/sub", "/p/src/sub"]);
+    expect(w.find(STATUS).exists()).toBe(false);
+    expect(rowOf(w, "ok.ts")).toBeTruthy();
+  });
+
+  it("budget: the (max+1)-th expanded directory is refused with an inline hint; collapse frees the slot", async () => {
+    const entries: PreviewDirEntry[] = Array.from({ length: PREVIEW_TREE_MAX_EXPANDED + 1 }, (_, i) => ({
+      name: `d${String(i).padStart(2, "0")}`,
+      type: "dir" as const,
+      mtimeMs: 1,
+    }));
+    const { tree, calls } = treeWith(() => Promise.resolve({ ok: true, listing: listing() }));
+    const w = mountDir(tree, entries);
+    for (let i = 0; i < PREVIEW_TREE_MAX_EXPANDED; i++) {
+      await chevronOf(w, `d${String(i).padStart(2, "0")}`).dispatchEvent(new Event("click"));
+      await flushPromises();
+    }
+    expect(calls).toHaveLength(PREVIEW_TREE_MAX_EXPANDED);
+    expect(w.find(REFUSAL).exists()).toBe(false);
+
+    const last = `d${String(PREVIEW_TREE_MAX_EXPANDED).padStart(2, "0")}`;
+    await chevronOf(w, last).dispatchEvent(new Event("click"));
+    await flushPromises();
+    expect(calls).toHaveLength(PREVIEW_TREE_MAX_EXPANDED); // refused BEFORE any fetch
+    expect(w.get(REFUSAL).text()).toContain(String(PREVIEW_TREE_MAX_EXPANDED));
+    expect(w.get(REFUSAL).attributes("role")).toBe("status");
+
+    // collapse one → the freed slot admits the previously refused expand
+    await chevronOf(w, "d00").dispatchEvent(new Event("click"));
+    await chevronOf(w, last).dispatchEvent(new Event("click"));
+    await flushPromises();
+    expect(w.find(REFUSAL).exists()).toBe(false);
+    expect(calls).toHaveLength(PREVIEW_TREE_MAX_EXPANDED + 1);
+  });
+
+  it("budget: a child listing overflowing the entry cap is neither cached nor expanded", async () => {
+    const big: PreviewDirEntry[] = Array.from({ length: PREVIEW_TREE_MAX_ENTRIES + 1 }, (_, i) => ({
+      name: `f${i}`,
+      type: "file" as const,
+      size: 1,
+      mtimeMs: 1,
+    }));
+    const { tree, calls } = treeWith(() => Promise.resolve({ ok: true, listing: listing({}, big) }));
+    const w = mountDir(tree, [{ name: "big", type: "dir", mtimeMs: 1 }]);
+    await chevronOf(w, "big").dispatchEvent(new Event("click"));
+    await flushPromises();
+    expect(calls).toStrictEqual(["/p/src/big"]); // fetched, then refused at cache admission
+    expect(w.get(REFUSAL).text()).toContain(PREVIEW_TREE_MAX_ENTRIES.toLocaleString("en-US"));
+    expect(w.find(GROUP).exists()).toBe(false);
+    expect(chevronOf(w, "big").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("cache hit: collapse keeps the listing — re-expanding never refetches", async () => {
+    const d = () =>
+      Promise.resolve({
+        ok: true as const,
+        listing: listing({}, [{ name: "x", type: "file" as const, size: 1, mtimeMs: 1 }]),
+      });
+    const { tree, calls } = treeWith(d);
+    const w = mountDir(tree, [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await chevronOf(w, "sub").dispatchEvent(new Event("click"));
+    await flushPromises();
+    expect(w.find(GROUP).exists()).toBe(true);
+    await chevronOf(w, "sub").dispatchEvent(new Event("click")); // collapse
+    expect(w.find(GROUP).exists()).toBe(false);
+    expect(chevronOf(w, "sub").getAttribute("aria-expanded")).toBe("false");
+    await chevronOf(w, "sub").dispatchEvent(new Event("click")); // re-expand — cache hit
+    expect(w.find(GROUP).exists()).toBe(true);
+    expect(calls).toStrictEqual(["/p/src/sub"]); // exactly one fetch
+  });
+
+  it("keyboard: Right expands a collapsed dir / steps into first child; Left collapses / steps to parent; Up/Down move", async () => {
+    const { tree, calls } = treeWith(() =>
+      Promise.resolve({ ok: true, listing: listing({}, [{ name: "child.ts", type: "file", size: 1, mtimeMs: 1 }]) }),
+    );
+    const w = mount(PreviewDir, {
+      attachTo: document.body,
+      props: {
+        path: "/p/src",
+        listing: listing({}, [
+          { name: "sub", type: "dir", mtimeMs: 1 },
+          { name: "z.ts", type: "file", size: 1, mtimeMs: 1 },
+        ]),
+        tree,
+      },
+    });
+    const rowBtns = () => w.findAll(BUTTONS).map((b) => b.element as HTMLElement);
+
+    // Down/Up move across visible rows
+    await w.findAll(BUTTONS)[0]!.trigger("keydown", { key: "ArrowDown" });
+    expect(document.activeElement).toBe(rowBtns()[1]);
+    await w.findAll(BUTTONS)[1]!.trigger("keydown", { key: "ArrowUp" });
+    expect(document.activeElement).toBe(rowBtns()[0]);
+
+    // Right on a collapsed dir expands (lazy fetch); focus stays on the row
+    await w.findAll(BUTTONS)[0]!.trigger("keydown", { key: "ArrowRight" });
+    expect(calls).toStrictEqual(["/p/src/sub"]);
+    await flushPromises();
+    expect(rowBtns().map((el) => el.textContent)).toHaveLength(3); // child row rendered
+
+    // Right again on the expanded dir steps into the first child row
+    await w.findAll(BUTTONS)[0]!.trigger("keydown", { key: "ArrowRight" });
+    expect(document.activeElement).toBe(rowBtns()[1]);
+    expect(rowBtns()[1]!.textContent).toContain("child.ts");
+
+    // Left on the child steps back to the parent row; Left on the expanded dir collapses
+    await w.findAll(BUTTONS)[1]!.trigger("keydown", { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(rowBtns()[0]);
+    await w.findAll(BUTTONS)[0]!.trigger("keydown", { key: "ArrowLeft" });
+    expect(chevronOf(w, "sub").getAttribute("aria-expanded")).toBe("false");
+    expect(w.find(GROUP).exists()).toBe(false);
+    w.unmount();
+  });
+
+  it("expansion survives a remount (drill-down/back `:key` remount) — the store outlives the component", async () => {
+    const { tree, calls } = treeWith(() =>
+      Promise.resolve({ ok: true, listing: listing({}, [{ name: "x", type: "file", size: 1, mtimeMs: 1 }]) }),
+    );
+    const entries: PreviewDirEntry[] = [{ name: "sub", type: "dir", mtimeMs: 1 }];
+    const w1 = mountDir(tree, entries);
+    await chevronOf(w1, "sub").dispatchEvent(new Event("click"));
+    await flushPromises();
+    expect(w1.find(GROUP).exists()).toBe(true);
+    w1.unmount(); // what PreviewHost's `:key="view.path"` does on drill/back
+
+    const w2 = mountDir(tree, entries);
+    expect(w2.find(GROUP).exists()).toBe(true); // still expanded, no refetch
+    expect(chevronOf(w2, "sub").getAttribute("aria-expanded")).toBe("true");
+    expect(calls).toStrictEqual(["/p/src/sub"]);
+  });
+
+  it("clear() (dialog close / fresh open) drops every node and aborts in-flight fetches", async () => {
+    const d = deferred<FetchResult>();
+    const { tree } = treeWith(() => d.promise);
+    const w = mountDir(tree, [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await chevronOf(w, "sub").dispatchEvent(new Event("click"));
+    expect(w.find(STATUS).exists()).toBe(true);
+    tree.clear();
+    await flushPromises();
+    expect(w.find(STATUS).exists()).toBe(false);
+    expect(tree.nodes.size).toBe(0);
+    // a late resolve after clear() is dropped by the generation guard — no node reappears
+    d.resolve({ ok: true, listing: listing({}, [{ name: "x", type: "file", mtimeMs: 1 }]) });
+    await flushPromises();
+    expect(tree.nodes.size).toBe(0);
+    expect(w.find(GROUP).exists()).toBe(false);
   });
 });

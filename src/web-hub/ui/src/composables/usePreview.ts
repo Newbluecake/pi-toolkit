@@ -54,6 +54,7 @@ import {
   scopeKeyOf,
 } from "@logic/preview.js";
 import { usePreviewProbe, type PreviewProbeHandle } from "./usePreviewProbe.js";
+import { createPreviewTree, type PreviewTreeStore } from "./usePreviewTree.js";
 import type { PreviewDirListing } from "@protocol/preview.js";
 import type { PreviewDirOutcome, PreviewTransport } from "../transport/types.js";
 import type { HubState, PreviewHandle, PreviewPathScope, PreviewView } from "../types.js";
@@ -137,6 +138,13 @@ export interface PreviewHandleDir {
   up(): void;
   /** A3: history stack depth (drives the 返回 button's disabled state). Reactive. */
   readonly stackDepth: Readonly<Ref<number>>;
+  /**
+   * preview-tree (2026-10): the in-dialog inline-expansion store — per-visit like the
+   * history stack (cleared by the same `open()`/`close()` call sites, kept across
+   * `navigate()`/`back()` so drill-down never loses expansions). Always present on the
+   * real handle; `PreviewDir` degrades to no-chevrons when a fake omits it.
+   */
+  readonly tree: PreviewTreeStore;
 }
 
 /**
@@ -206,16 +214,46 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     }
   }
 
+  // preview-tree: the inline-expansion store. Its fetchDir rides the SAME scope + transport
+  // as open/navigate (an expansion is just a `dir:true` listing fetch that does NOT touch
+  // the view/seq state machine); every in-flight expansion fetch has its own controller,
+  // aborted by tree.clear(). A dir:true fetch that comes back non-dir (the path raced into
+  // a regular file server-side) maps to the same E_PREVIEW_UNSUPPORTED code the error phase
+  // would have shown — never a wrong tree.
+  const tree = createPreviewTree(async (path, signal) => {
+    const sc = scope.value;
+    const transport = opts.preview;
+    if (sc === null || transport === undefined) return { ok: false, error: "E_NO_SCOPE" };
+    try {
+      const out = await transport.fetch(
+        { agentKey: sc.agentKey, sessionId: sc.sessionId, path, dir: true },
+        { signal, maxPixels: clientImageBudget({ coarse: opts.coarse.value }) },
+      );
+      if (!out.ok) return { ok: false, error: out.error };
+      if (out.kind !== "dir") return { ok: false, error: "E_PREVIEW_UNSUPPORTED" };
+      return { ok: true, listing: out.listing };
+    } catch {
+      return { ok: false, error: "E_NETWORK" };
+    }
+  });
+
   function clearStack(): void {
     stack.length = 0;
     stackDepth.value = 0;
+  }
+
+  function clearVisit(): void {
+    // visit-scoped state goes together: history stack AND the inline-expansion tree
+    // (弹窗关闭即弃; a fresh open is a fresh visit).
+    clearStack();
+    tree.clear();
   }
 
   function close(): void {
     abortInFlight();
     lastPath = null;
     lastDir = undefined;
-    clearStack();
+    clearVisit();
     if (view.value.phase !== "closed") view.value = { phase: "closed" };
   }
 
@@ -389,7 +427,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   }
 
   function open(ref: PreviewNavRef): void {
-    clearStack(); // A3: a fresh open is a fresh visit — the history stack restarts empty
+    clearVisit(); // A3: a fresh open is a fresh visit — the history stack restarts empty
     load(ref.path, ref.dir);
   }
 
@@ -451,7 +489,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     if (disposed) return;
     disposed = true;
     stopWatch();
-    clearStack();
+    clearVisit();
     abortInFlight();
   }
   onScopeDispose(dispose, true); // failSilently: safe to call outside a component/effect scope (unit tests)
@@ -468,6 +506,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     back,
     up,
     stackDepth,
+    tree,
   };
 
   // The frozen-face bridge: everything except `view` is structurally identical (and

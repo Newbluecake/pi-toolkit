@@ -436,7 +436,8 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     r.handle.open({ path: "/p/src", dir: true });
     r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
     await tick();
-    (document.querySelectorAll(".preview-dir-list button")[0] as HTMLElement).click();
+    // `.preview-dir-row` — the NAME button (preview-tree adds a leading chevron button)
+    (document.querySelectorAll(".preview-dir-list button.preview-dir-row")[0] as HTMLElement).click();
     await tick();
     expect(r.calls[1]!.req).toMatchObject({ path: "/p/src/sub", dir: true });
     expect((document.querySelector(".preview-nav-btn") as HTMLButtonElement).disabled).toBe(false);
@@ -495,7 +496,8 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     r.handle.open({ path: "/p/src", dir: true });
     r.dir("/p/src", [{ name: "a.ts", type: "file", size: 3, mtimeMs: 1 }]);
     await tick();
-    (document.querySelectorAll(".preview-dir-list button")[0] as HTMLElement).click();
+    // `.preview-dir-row` — the NAME button (preview-tree adds a leading chevron button)
+    (document.querySelectorAll(".preview-dir-list button.preview-dir-row")[0] as HTMLElement).click();
     await tick();
     expect(r.calls[1]!.req).toMatchObject({ path: "/p/src/a.ts" });
     expect(r.calls[1]!.req.dir).toBeUndefined();
@@ -583,7 +585,8 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     r.handle.open({ path: "/p/src", dir: true });
     r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
     await tick();
-    (document.querySelectorAll(".preview-dir-list button")[0] as HTMLElement).click();
+    // `.preview-dir-row` — the NAME button (preview-tree adds a leading chevron button)
+    (document.querySelectorAll(".preview-dir-list button.preview-dir-row")[0] as HTMLElement).click();
     await tick();
     const ev = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
     overlay()!.dispatchEvent(ev);

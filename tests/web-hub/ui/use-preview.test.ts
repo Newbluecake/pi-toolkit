@@ -732,3 +732,63 @@ describe("usePreview: dir phase + navigation (dir-plan §0.2 A3, P3)", () => {
     expect(h.calls[1]!.opts.signal.aborted).toBe(true);
   });
 });
+
+describe("usePreview: preview-tree wiring (inline expansion lifecycle)", () => {
+  it("tree.toggle lazy-fetches through the SAME scope+transport with dir:true, never touching the view", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/src", dir: true });
+    h.waits[0]!.resolve(DIR_OK(["sub/"]));
+    await flush();
+    h.nav.tree.toggle("/p/src/sub");
+    expect(h.calls[1]!.req).toMatchObject({ agentKey: "A", sessionId: "s1", path: "/p/src/sub", dir: true });
+    expect(h.nav.view.value.phase).toBe("dir"); // the dialog view is untouched by expansions
+    expect(h.nav.view.value).toMatchObject({ path: "/p/src" });
+    h.waits[1]!.resolve(DIR_OK(["x.ts"]));
+    await flush();
+    const node = h.nav.tree.nodes.get("/p/src/sub");
+    expect(node).toMatchObject({ status: "loaded", expanded: true });
+    expect(node?.listing?.entries.map((e) => e.name)).toEqual(["x.ts"]);
+  });
+
+  it("navigate()/back() keep the expansion tree; open()/close() drop it (弹窗关闭即弃)", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/src", dir: true });
+    h.waits[0]!.resolve(DIR_OK(["sub/"]));
+    await flush();
+    h.nav.tree.toggle("/p/src/sub");
+    h.waits[1]!.resolve(DIR_OK([]));
+    await flush();
+    expect(h.nav.tree.nodes.has("/p/src/sub")).toBe(true);
+
+    h.nav.navigate({ path: "/p/src/sub", dir: true }); // drill-down keeps expansions
+    expect(h.nav.tree.nodes.has("/p/src/sub")).toBe(true);
+    h.waits[2]!.resolve(DIR_OK([]));
+    await flush();
+    h.nav.back(); // back keeps them too (snapshot restore, no refetch)
+    expect(h.nav.tree.nodes.has("/p/src/sub")).toBe(true);
+
+    h.nav.open({ path: "/p/other", dir: true }); // a fresh open is a fresh visit
+    expect(h.nav.tree.nodes.size).toBe(0);
+    h.waits[3]!.resolve(DIR_OK(["x/"]));
+    await flush();
+    h.nav.tree.toggle("/p/other/x");
+    h.waits[4]!.resolve(DIR_OK([]));
+    await flush();
+    expect(h.nav.tree.nodes.size).toBe(1);
+    h.nav.close(); // 弹窗关闭即弃
+    expect(h.nav.tree.nodes.size).toBe(0);
+  });
+
+  it("an expansion fetch resolving after close() is dropped (clear's generation guard)", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/src", dir: true });
+    h.waits[0]!.resolve(DIR_OK(["sub/"]));
+    await flush();
+    h.nav.tree.toggle("/p/src/sub");
+    h.nav.close();
+    expect(h.calls[1]!.opts.signal.aborted).toBe(true); // clear() aborts in-flight expansions
+    h.waits[1]!.resolve(DIR_OK(["x.ts"])); // late settle — must not resurrect the node
+    await flush();
+    expect(h.nav.tree.nodes.size).toBe(0);
+  });
+});

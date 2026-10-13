@@ -59,6 +59,13 @@ const preview = {
   dirTypeFile: "file",
   dirTypeSymlink: "symbolic link",
   dirTypeOther: "special file",
+  // preview-tree (inline directory expansion — chevron on dir rows; names still drill down)
+  dirExpand: "Expand inline",
+  dirCollapse: "Collapse",
+  dirTreeLoading: "Loading…",
+  dirTreeError: "Expand failed:",
+  dirTreeLimitDirs: "Too many folders expanded (max {n}) — collapse one first.",
+  dirTreeLimitEntries: "Tree row budget reached ({n}) — collapse some folders first.",
   // preview-download (file download button in the dialog header — files only, never dirs)
   download: "Download",
   downloadFailed: "Download failed — retry.",
