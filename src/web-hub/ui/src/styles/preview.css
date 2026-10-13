@@ -287,6 +287,14 @@ code.md-code.path-ref {
   height: 100%;
 }
 
+/* Fullscreen (zoom-enhance 2026-10): the component root itself is the fullscreen target,
+ * so it must paint its own backdrop while in the top layer. */
+.preview-image:fullscreen {
+  background: var(--c-bg);
+  padding: var(--sp-3);
+  box-sizing: border-box;
+}
+
 .preview-image-toolbar {
   display: flex;
   align-items: center;
@@ -294,8 +302,9 @@ code.md-code.path-ref {
   gap: var(--sp-2);
 }
 
-/* attachment-preview (2026-10) zoom controls: [−][125%][+] plus the fit⇄actual toggle.
- * Text glyphs (+/−) — no sprite additions needed. */
+/* attachment-preview (2026-10) zoom controls + zoom-enhance (wheel/50% floor/fullscreen):
+ * [−][125%][+] plus the fit⇄actual toggle and the ⛶ fullscreen button. Text glyphs
+ * (+/−/⛶) — no sprite additions needed. */
 .preview-image-tools {
   display: inline-flex;
   align-items: center;

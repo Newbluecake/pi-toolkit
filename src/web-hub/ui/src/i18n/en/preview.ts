@@ -15,6 +15,8 @@ const preview = {
   actualSize: "Actual size",
   zoomIn: "Zoom in",
   zoomOut: "Zoom out",
+  fullscreen: "Full screen",
+  exitFullscreen: "Exit full screen",
   copyPath: "Copy path",
   truncatedBadge: "Truncated",
   truncatedNote: "Showing the first {size} — copy only takes what is shown.",

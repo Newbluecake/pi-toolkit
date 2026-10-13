@@ -18,6 +18,8 @@ const preview = {
   actualSize: "原始尺寸",
   zoomIn: "放大",
   zoomOut: "缩小",
+  fullscreen: "全屏",
+  exitFullscreen: "退出全屏",
   copyPath: "复制路径",
   truncatedBadge: "已截断",
   truncatedNote: "仅显示前 {size}——复制只取已显示部分。",

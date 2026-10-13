@@ -1,30 +1,44 @@
 <!--
   Image phase of the preview overlay (web-hub-preview plan v3 §4.6, package PV5; 2026-10
-  attachment-preview: minimal zoom added — benefits every image preview, not just the tray).
+  attachment-preview: minimal zoom added — benefits every image preview, not just the tray;
+  2026-10 zoom-enhance: wheel zoom + 50% floor + fullscreen).
   Only a `data:` URL ever reaches `<img src>` — D1: CSP is not relaxed, so a host bug passing
   a `blob:`/remote URL renders NOTHING rather than smuggling a request past the policy (the
   `usePreview` state machine already verified the `data:<mime>;base64,` prefix; this is the
   component-level backstop). No `createObjectURL` anywhere (source-scan banned, HP8).
 
-  Zoom model (attachment-preview feature spec): fit-to-window ⇄ actual size, plus
-  - `+` / `−` buttons stepping the actual-size scale by 1.25× (clamped 100%–400%); `−` at
-    100% falls back to fit, `+` from fit enters actual — the buttons and the toggle are two
-    views of one state, never conflicting;
+  Zoom model (attachment-preview spec + 2026-10 zoom-enhance): fit-to-window ⇄ actual size,
+  scale range 50%–400% of natural size (100% = natural), plus
+  - `+` / `−` buttons stepping the actual-size scale by 1.25×; `+` from fit enters actual at
+    100%, `−` steps below 100% down to the 50% floor — fit itself is only reached through the
+    toggle / click / Enter (the buttons and the toggle are two views of one state, never
+    conflicting);
+  - mouse wheel zooms around the cursor (cursor-centered anchor): the image point under the
+    cursor stays under the cursor, stepping smoothly by exp(−deltaY·0.002) (≈×1.22 per
+    standard tick, proportional for trackpads/pinch). The first wheel tick while in fit mode
+    starts from the CURRENT FIT RATIO (measured displayed ÷ natural), so a large image eases
+    out of fit instead of jumping to 100%. Pan is re-clamped against the new scale's overflow
+    (same bounds math as drag pan);
   - click/tap on the image toggles fit ⇄ actual (a pointerdown→pointerup pair that moved
     less than 5px counts as a click; anything more is a drag, never a toggle);
   - drag-to-pan while the actual-size image overflows the viewport (pointer capture, pan
-    clamped to the overflow so the image can never be dragged fully off-screen; pan resets
-    on every mode/scale change so a stale offset never survives a zoom step);
-  - keyboard: the image is a focusable `role="button"` (Enter/Space toggles fit) and arrow
-    keys pan by 40px — zoom/pan is fully reachable without a pointer.
+    clamped to the overflow so the image can never be dragged fully off-screen; button/toggle
+    zoom steps reset the pan so a stale offset never survives a step — wheel zoom instead
+    re-anchors it);
+  - fullscreen: a toolbar button runs the Fullscreen API on the component root (native Esc
+    exits; `fullscreenchange` keeps the button state honest). Browsers without the API simply
+    hide the button (degrade); a rejected requestFullscreen leaves the state untouched;
+  - keyboard: the image is a focusable `role="button"` (Enter/Space toggles fit), `+`/`=` and
+    `-`/`_` zoom like the buttons, and arrow keys pan by 40px — zoom/pan is fully reachable
+    without a pointer.
 
   `dims` is optional since 2026-10 (the tray viewer has no hub-computed dims): when absent,
   the meta line picks the image's natural dimensions up from its `load` event. Scheduling
-  stays event-driven (pointer/keyboard handlers mutate reactive state directly) — no rAF
-  (`renderGate.ts` owns scheduling; `requestAnimationFrame` is source-scan banned).
+  stays event-driven (pointer/keyboard/wheel handlers mutate reactive state directly) — no
+  rAF (`renderGate.ts` owns scheduling; `requestAnimationFrame` is source-scan banned).
 -->
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
 import { useI18n } from "../../composables/useI18n.js";
 
@@ -40,8 +54,13 @@ const { t } = useI18n();
 const safe = computed(() => props.dataUrl.startsWith("data:image/"));
 
 // --- zoom state -------------------------------------------------------------
+const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 4;
 const ZOOM_STEP = 1.25;
+/** Wheel zoom speed: scale multiplier per CSS px of deltaY (≈×1.22 per 100px tick). */
+const WHEEL_ZOOM_PER_PX = 0.002;
+/** deltaMode=1 (lines) → px conversion, per the CSSOM-view convention. */
+const WHEEL_LINE_PX = 16;
 /** Pointer travel (CSS px) below which a press-release counts as a click, not a drag. */
 const DRAG_THRESHOLD = 5;
 /** Arrow-key pan step (CSS px). */
@@ -53,9 +72,10 @@ const pan = ref({ x: 0, y: 0 });
 const dragging = ref(false);
 const percent = computed(() => `${Math.round(scale.value * 100)}%`);
 const canZoomIn = computed(() => fit.value || scale.value < ZOOM_MAX);
-const canZoomOut = computed(() => !fit.value);
+const canZoomOut = computed(() => !fit.value && scale.value > ZOOM_MIN);
 
-/** `<img>`/body refs for pan clamping (visual rects — transform included). */
+/** Root/`<img>`/body refs (fullscreen target; pan clamping — visual rects, transform incl.). */
+const rootEl = ref<HTMLElement | null>(null);
 const bodyEl = ref<HTMLElement | null>(null);
 const imgEl = ref<HTMLElement | null>(null);
 
@@ -93,15 +113,95 @@ function zoomIn(): void {
 }
 
 function zoomOut(): void {
-  if (fit.value) return;
-  if (scale.value <= 1) {
-    fit.value = true; // − at 100% is the inverse of + from fit
-    resetPan();
-    return;
-  }
-  scale.value = Math.max(1, Math.round((scale.value / ZOOM_STEP) * 100) / 100);
+  if (!canZoomOut.value) return;
+  scale.value = Math.max(ZOOM_MIN, Math.round((scale.value / ZOOM_STEP) * 100) / 100);
   resetPan();
 }
+
+// --- wheel zoom (cursor-centered; fit eases out from its measured ratio) -----
+/**
+ * The ratio the image is CURRENTLY displayed at relative to natural size. In actual mode
+ * that is `scale`; in fit mode it is measured (displayed width ÷ natural width) so the
+ * first wheel tick continues from the on-screen size instead of jumping to 100%.
+ */
+function effectiveScale(): number | null {
+  if (!fit.value) return scale.value;
+  const img = imgEl.value;
+  const d = shownDims.value;
+  if (img === null || d === undefined || d === null || d.w <= 0) return null;
+  const w = img.getBoundingClientRect().width; // fit mode: no transform, so this is layout px
+  if (w <= 0) return null;
+  return w / d.w;
+}
+
+function zoomAt(factor: number, cx: number, cy: number): void {
+  const s0 = effectiveScale() ?? 1; // unmeasurable (pre-load) → legacy jump from 100%
+  const s1 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(s0 * factor * 1000) / 1000));
+  if (!fit.value && s1 === scale.value) return; // already resting on a bound
+  const img = imgEl.value;
+  const body = bodyEl.value;
+  if (img !== null && body !== null && s0 > 0) {
+    // Keep the image point under the cursor fixed: pan' = (cursor−C)·(1−s1/s0) + pan·(s1/s0)
+    // with C the image center (flexbox keeps the layout box centered in the body), then
+    // re-clamp against the NEW scale's overflow (same bounds math as panBounds()).
+    const r = img.getBoundingClientRect();
+    const b = body.getBoundingClientRect();
+    const ratio = s1 / s0;
+    const px = (cx - (r.left + r.width / 2)) * (1 - ratio) + pan.value.x * ratio;
+    const py = (cy - (r.top + r.height / 2)) * (1 - ratio) + pan.value.y * ratio;
+    const layoutW = r.width / s0;
+    const layoutH = r.height / s0;
+    const dx = Math.max(0, (layoutW * s1 - b.width) / 2);
+    const dy = Math.max(0, (layoutH * s1 - b.height) / 2);
+    pan.value = {
+      x: Math.round(Math.min(dx, Math.max(-dx, px)) * 10) / 10,
+      y: Math.round(Math.min(dy, Math.max(-dy, py)) * 10) / 10,
+    };
+  } else {
+    resetPan();
+  }
+  fit.value = false;
+  scale.value = s1;
+}
+
+function onWheel(ev: WheelEvent): void {
+  let delta = ev.deltaY;
+  if (ev.deltaMode === 1) delta *= WHEEL_LINE_PX; // lines → px (page mode falls through raw)
+  if (delta === 0) return;
+  zoomAt(Math.exp(-delta * WHEEL_ZOOM_PER_PX), ev.clientX, ev.clientY);
+}
+
+// --- fullscreen (Fullscreen API on the component root; hidden when unsupported) ---
+/** Feature-detected once at setup; unsupported browsers degrade by hiding the button. */
+const fullscreenAvailable = typeof document !== "undefined" && document.fullscreenEnabled === true;
+const isFullscreen = ref(false);
+
+function onFullscreenChange(): void {
+  isFullscreen.value = document.fullscreenElement === rootEl.value;
+}
+
+async function toggleFullscreen(): Promise<void> {
+  if (isFullscreen.value) {
+    if (typeof document.exitFullscreen === "function") {
+      try {
+        await document.exitFullscreen();
+      } catch {
+        // transient — the fullscreenchange listener resyncs the state either way
+      }
+    }
+    return;
+  }
+  const el = rootEl.value;
+  if (el === null || typeof el.requestFullscreen !== "function") return;
+  try {
+    await el.requestFullscreen();
+  } catch {
+    // rejected (permission/policy/transient) — the button simply stays off
+  }
+}
+
+onMounted(() => document.addEventListener("fullscreenchange", onFullscreenChange));
+onBeforeUnmount(() => document.removeEventListener("fullscreenchange", onFullscreenChange));
 
 // --- pan (actual mode only; clamped to the overflow so the image stays on screen) ---
 function panBounds(): { dx: number; dy: number } {
@@ -174,6 +274,16 @@ function onImgKeydown(ev: KeyboardEvent): void {
     toggleFit();
     return;
   }
+  if (ev.key === "+" || ev.key === "=") {
+    ev.preventDefault();
+    zoomIn();
+    return;
+  }
+  if (ev.key === "-" || ev.key === "_") {
+    ev.preventDefault();
+    zoomOut();
+    return;
+  }
   let dx = 0;
   let dy = 0;
   if (ev.key === "ArrowLeft") dx = -KEY_PAN_STEP;
@@ -196,7 +306,7 @@ function onImgLoad(ev: Event): void {
 </script>
 
 <template>
-  <div v-if="safe" class="preview-image">
+  <div v-if="safe" ref="rootEl" class="preview-image">
     <div class="preview-image-toolbar">
       <span class="preview-meta" translate="no">{{ metaLine }}</span>
       <span class="preview-image-tools">
@@ -224,9 +334,20 @@ function onImgLoad(ev: Event): void {
         <button class="btn btn-ghost preview-image-toggle" type="button" @click="toggleFit">
           {{ fit ? t("preview.actualSize") : t("preview.fit") }}
         </button>
+        <button
+          v-if="fullscreenAvailable"
+          type="button"
+          class="btn btn-ghost preview-zoom-btn preview-fullscreen-btn"
+          :aria-pressed="isFullscreen"
+          :aria-label="isFullscreen ? t('preview.exitFullscreen') : t('preview.fullscreen')"
+          :title="isFullscreen ? t('preview.exitFullscreen') : t('preview.fullscreen')"
+          @click="toggleFullscreen"
+        >
+          ⛶
+        </button>
       </span>
     </div>
-    <div ref="bodyEl" class="preview-image-body" :class="{ actual: !fit }">
+    <div ref="bodyEl" class="preview-image-body" :class="{ actual: !fit }" @wheel.prevent="onWheel">
       <img
         ref="imgEl"
         :src="dataUrl"
