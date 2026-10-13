@@ -3,6 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
+import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type { RunSnapshot, SpawnRequest, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
@@ -304,6 +305,9 @@ export default function activate(rawPi: ExtensionAPI): void {
 
   const cacheTtl = wireCacheTtl(pi, settings, {
     keepalive: () => holder.current?.keepalive,
+    // O1/O3/O4 (provider-evidence, 2026-10-12): warmth 1h-horizon gating, usage observation
+    // recording and the `/cache-ttl probe` writeback all share the process-wide store.
+    evidence: getProviderEvidenceStore(),
   });
   // Built FRESH per activate(): depending on pi's version, /reload either
   // re-runs activate on the cached module or re-imports a FRESH module (jiti

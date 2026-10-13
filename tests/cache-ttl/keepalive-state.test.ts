@@ -218,6 +218,70 @@ describe("evaluateTick — short-circuit ladder", () => {
     expect(result.decision).toEqual({ kind: "skip", reason: "ttl-1h", terminal: true });
   });
 
+  it("#7 分流 (O2 follow-up): ttl1h capture + PROVEN 1h evidence ⇒ legacy ttl-1h skip (现状钉住)", () => {
+    const window = armedWindow({
+      capture: captured({ shape: { ephemeralBreakpoints: 1, ttl1h: true, hasThinking: false, maxTokens: undefined } }),
+    });
+    const result = evaluateTick({
+      now: 240_000, // due — without the gate this window would ping
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession(),
+      window,
+      currentFingerprint: fingerprint(),
+      write1hEvidence: true,
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "ttl-1h", terminal: true });
+  });
+
+  it("#7 分流 (O2 follow-up): ttl1h capture + NO evidence ⇒ falls through to the normal ping path", () => {
+    const window = armedWindow({
+      capture: captured({ shape: { ephemeralBreakpoints: 1, ttl1h: true, hasThinking: false, maxTokens: undefined } }),
+    });
+    // Not yet due ⇒ behaves like any ordinary 5m window (not-due, non-terminal).
+    const early = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession(),
+      window,
+      currentFingerprint: fingerprint(),
+      write1hEvidence: false,
+    });
+    expect(early.decision).toEqual({ kind: "skip", reason: "not-due", terminal: false });
+    // Due ⇒ ping (the ttl strip itself happens in runPing, service layer).
+    const due = evaluateTick({
+      now: 240_000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession(),
+      window,
+      currentFingerprint: fingerprint(),
+      write1hEvidence: false,
+    });
+    expect(due.decision).toEqual({ kind: "ping" });
+  });
+
+  it("#7 分流 (O2 follow-up): write1hEvidence absent (no store wired) ⇒ legacy byte-identical skip", () => {
+    const window = armedWindow({
+      capture: captured({ shape: { ephemeralBreakpoints: 1, ttl1h: true, hasThinking: false, maxTokens: undefined } }),
+    });
+    const result = evaluateTick({
+      now: 240_000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession(),
+      window,
+      currentFingerprint: fingerprint(),
+      // write1hEvidence deliberately omitted
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "ttl-1h", terminal: true });
+  });
+
   it("#7.5 B1: a captured payload without stream:true is refused (not-streaming), never rewritten", () => {
     const window = armedWindow({ capture: captured({ payload: { messages: [], stream: false } }) });
     const result = evaluateTick({

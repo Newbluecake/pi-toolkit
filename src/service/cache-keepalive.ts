@@ -48,7 +48,14 @@ import {
   type TickSkipReason,
   type WindowState,
 } from "../cache-ttl/keepalive-state.js";
-import { buildPingRequest, preparePingPayload, sendKeepalivePing, type PingOutcome } from "../cache-ttl/ping-client.js";
+import {
+  buildPingRequest,
+  preparePingPayload,
+  sendKeepalivePing,
+  stripCacheControlTtl,
+  type PingOutcome,
+} from "../cache-ttl/ping-client.js";
+import type { ProviderEvidenceStore } from "../cache-ttl/provider-evidence.js";
 import type { ChildKeepaliveLedger, Lease } from "../cache-ttl/ping-ledger.js";
 import type { CacheTtlSettings } from "../config/settings.js";
 import type { Millis } from "../core/types.js";
@@ -165,6 +172,12 @@ export interface CacheKeepaliveService extends KeepalivePort {
   noteUiPromptEnd(sessionId: string, instance: string): void;
   /** `agent_settled`: force `activeTools`/`uiPrompts` back to 0 (self-heals a leaked start/end pair). */
   noteAgentSettled(sessionId: string, instance: string): void;
+  /**
+   * O3: a real request's usage showed `cacheRead > 0` on this session's route. Clears the
+   * session-local `no-cache-value` latch (the cross-session ledger reset already happened at
+   * the observation site — `provider-evidence.ts`'s `observeUsageIntoEvidence`).
+   */
+  noteUsageCacheRead(sessionId: string, instance: string): void;
   dispose(): void;
 }
 
@@ -220,6 +233,18 @@ export interface CacheKeepaliveDeps {
   reportCost?: boolean;
   /** `false` ⇒ never call `ctx.ui.setStatus` (child sessions have no status bar to write). Default true (main session unaffected). */
   statusBar?: boolean;
+  /**
+   * O2/O3 (provider-evidence, 2026-10-12): the shared provider-route evidence store
+   * (`src/cache-ttl/provider-evidence.ts`). Used for two things:
+   *   - O2: when a captured payload carries `cache_control.ttl:"1h"`, the replay keeps `ttl`
+   *     only when this store has PROVEN 1h landing evidence for the route (otherwise gate #7's
+   *     分流 lets the window through and `stripCacheControlTtl` degrades it to a 5m ping).
+   *   - O3: the `no-cache-value` breaker — routes fused off by the store are skipped at tick
+   *     time (and latched into `session.disabled`), and at `dispose()` this session's
+   *     keepalive-active-but-zero-read verdict is folded back into the store.
+   * Absent ⇒ neither behaviour (byte-identical to before; tests stay hermetic).
+   */
+  evidence?: ProviderEvidenceStore | undefined;
 }
 
 function safeSetStatus(ctx: ExtensionContext, text: string | undefined): void {
@@ -270,6 +295,12 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private runSpentUsd: number;
   /** child-ka-core: the ledger lease currently held for an in-flight ping, if any — `dispose()`'s defensive backstop settles it if `runPing`'s own `finally` somehow never ran. */
   private currentLease: Lease | undefined;
+  /** O3: the route of the most recent capture (fingerprint provider + wire modelId) — kept past `capture` clearing so dispose-time accounting still knows which route this session ran on. */
+  private lastRoute: { provider: string; modelId: string } | undefined;
+  /** O3: true once any cache read was observed this session (proven-hit ping or a real request's usage via `noteUsageCacheRead`). */
+  private observedCacheRead = false;
+  /** O3: ping attempts actually issued this session (the "keepalive was active" half of the zero-read verdict). */
+  private pingAttempts = 0;
 
   constructor(private readonly deps: CacheKeepaliveDeps) {
     this.clock = deps.clock ?? systemClock;
@@ -671,6 +702,18 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       window: this.window,
       currentFingerprint: capture ? this.currentFingerprintFor(capture) : EMPTY_FINGERPRINT,
       nativeWarmerActive: this.safeNativeWarmerActive(),
+      // O2 follow-up (gate #7 分流): resolve the route's 1h landing evidence at tick time.
+      // Store absent ⇒ undefined ⇒ legacy skip (byte-identical); store present but no record /
+      // read failure ⇒ false ⇒ the ttl-1h window falls through to a stripped 5m ping (I6).
+      ...(capture !== undefined && this.deps.evidence !== undefined
+        ? {
+            write1hEvidence: this.deps.evidence.hasWrite1hEvidence(
+              capture.fingerprint.provider,
+              capture.fingerprint.modelId,
+              now,
+            ),
+          }
+        : {}),
     });
     this.window = result.window;
     switch (result.decision.kind) {
@@ -695,6 +738,19 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         if (!result.decision.terminal) this.arm();
         return;
       case "ping": {
+        // O3 (provider-evidence breaker): a route fused off by the persisted evidence ledger
+        // (`no-cache-value`) never pings again until a real cache read resets it. Latched into
+        // `session.disabled` so the merged status bar annotates it (`ping off:no-cache-value`)
+        // and every later tick short-circuits at evaluateTick #2 — plus the regular session
+        // snapshot carries it across /reload.
+        if (this.deps.evidence?.isNoCacheValue(capture!.fingerprint.provider, capture!.fingerprint.modelId, now)) {
+          this.session = { ...this.session, disabled: { reason: "no-cache-value", at: now } };
+          this.lastSkip = "no-cache-value";
+          this.auditTerminalSkipOnce("no-cache-value");
+          this.clearExactTimer();
+          this.publishVisibility();
+          return;
+        }
         const gate = this.childPingGate(capture!, now);
         if (!gate.allow) {
           this.lastSkip = gate.reason;
@@ -717,6 +773,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         }
         const pingStartedAt = now;
         this.window = onPingStarted(this.window, pingStartedAt);
+        this.pingAttempts += 1; // O3: "keepalive was active" for the dispose-time verdict.
         const pingEpoch = this.window.windowEpoch;
         this.currentLease = gate.lease;
         this.arm(); // keep ticking while the ping is in flight (plan.md §8.3)
@@ -797,6 +854,27 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       }
 
       const body = preparePingPayload(capture.payload);
+      // O2 (provider-evidence TTL gating): if the captured payload carries a `ttl:"1h"` write
+      // intent, keep it ONLY when this route has a proven 1h landing on record — otherwise strip
+      // `ttl` (and nothing else) so the replay degrades to a plain 5m ephemeral ping. On a
+      // collapsing relay the bare `ttl` field buys nothing while billing the 2× 1h write rate,
+      // and a 5m ping cannot refresh a real 1h entry anyway (separate cache namespaces).
+      // Reachable since the gate #7 分流 (2026-10-12): evidence-less ttl-1h captures fall
+      // through to here. `stripCacheControlTtl` is copy-on-write (the capture is shared state)
+      // and fingerprint-neutral (ttl values were never fingerprinted — breakpoint paths were).
+      // See ping-client.ts's doc comment.
+      const pingBody =
+        capture.shape.ttl1h === true &&
+        this.deps.evidence?.hasWrite1hEvidence(
+          capture.fingerprint.provider,
+          capture.fingerprint.modelId,
+          this.clock.now(),
+        ) !== true
+          ? stripCacheControlTtl(body)
+          : body;
+      // O2 follow-up: distinguish a "ttl-1h ⇒ 5m 放行" ping from an ordinary 5m ping in the
+      // audit trail / `/cache-ttl status` (copy-on-write ⇒ identity change exactly when stripped).
+      const ttlStripped = pingBody !== body;
       const authHeaders: Record<string, string> = {};
       for (const [key, value] of Object.entries(auth.headers ?? {})) {
         if (typeof value === "string") authHeaders[key] = value;
@@ -807,7 +885,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // No more hand-assembled/hardcoded headers here (see `buildPingRequest`'s
       // doc comment for why that was the actual bug).
       const baseUrl = auth.baseUrl ?? model.baseUrl;
-      const { request, headerSource, filledAuthKeys } = buildPingRequest(body, baseUrl, capture.headers, {
+      const { request, headerSource, filledAuthKeys } = buildPingRequest(pingBody, baseUrl, capture.headers, {
         ...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
         headers: authHeaders,
       });
@@ -825,6 +903,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         headerKeyDiff: filledAuthKeys,
         model: model.id,
         baseUrl,
+        ...(ttlStripped ? { ttlStripped: true } : {}),
       };
 
       // Ping retry (user requirement 2026-09-26, docs/dev/cache-ttl-keepalive/plan.md
@@ -886,6 +965,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           this.window = applied.window;
           this.session = applied.session;
           this.syncExactTimer(); // todo #28: nextPingAt just advanced — reschedule the precise timer.
+          // O3: a proven hit IS an observed cache read — reset the route's no-cache-value
+          // ledger entry immediately (and mark this session as having seen a hit).
+          this.observedCacheRead = true;
+          this.deps.evidence?.noteCacheRead(
+            capture.fingerprint.provider,
+            capture.fingerprint.modelId,
+            this.clock.now(),
+          );
           this.lastPingDiagnostics = {
             ...diagnostics,
             at: this.clock.now(),
@@ -969,6 +1056,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
   noteRequest(captured: CapturedRequest): void {
     if (!this.accept(captured.sessionId, captured.instance)) return;
+    // O3: remember the route beyond the capture's own lifetime (dispose-time accounting).
+    this.lastRoute = { provider: captured.fingerprint.provider, modelId: captured.fingerprint.modelId };
     if (this.window.pingInFlight) {
       try {
         this.abortController?.abort();
@@ -1084,10 +1173,55 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.uiPrompts = 0;
   }
 
+  noteUsageCacheRead(sessionId: string, instance: string): void {
+    if (!this.accept(sessionId, instance)) return;
+    this.observedCacheRead = true;
+    // O3: the route provably reads cache again — lift a session-local no-cache-value latch
+    // immediately ("任一请求观察到 cacheRead>0 立即复位"). Other disable reasons stay sticky.
+    if (this.session.disabled?.reason === "no-cache-value") {
+      this.session = { ...this.session, disabled: undefined };
+      this.audit("no-cache-value-recovered");
+      this.publishVisibility();
+    }
+  }
+
   // -- lifecycle --------------------------------------------------------------
+
+  /**
+   * O3 (provider-evidence breaker): fold this session's outcome into the route's zero-read
+   * streak, once per session (`session.noCacheValueCounted` survives /reload via the regular
+   * session snapshot, so a rebuilt service never double-counts).
+   *
+   * Counted only when ALL of:
+   *   - the evidence store is wired and the route is known;
+   *   - keepalive was actually ACTIVE (`pingAttempts > 0`) — a session with no capture (or one
+   *     that never reached a ping) says nothing about the route (「无保活捕获的会话不计入账本」);
+   *   - no cache read was ever observed (neither a proven-hit ping nor a real request's usage);
+   *   - mode ≠ "off" (user ruling 2026-10-12: mode=off is the user explicitly stripping ttl
+   *     intents — cache behaviour on such sessions is treated as already-known, never judged).
+   *     Child keepalive services never receive a `syncModeState` call, so their `modeState`
+   *     stays at the "auto" default and they remain eligible.
+   */
+  private accountNoCacheValueSession(): void {
+    const store = this.deps.evidence;
+    if (!store) return;
+    if (this.session.noCacheValueCounted === true) return;
+    if (this.pingAttempts === 0 || this.observedCacheRead) return;
+    if (this.modeState.mode === "off") return;
+    const route = this.lastRoute;
+    if (!route || !route.provider || !route.modelId) return;
+    this.session = { ...this.session, noCacheValueCounted: true };
+    try {
+      store.noteZeroReadSession(route.provider, route.modelId, this.clock.now());
+      this.audit("no-cache-value-session", { provider: route.provider, modelId: route.modelId });
+    } catch {
+      // evidence is best-effort — dispose must never throw.
+    }
+  }
 
   dispose(): void {
     if (this.disposed) return;
+    this.accountNoCacheValueSession();
     this.disposed = true;
     if (this.timer) this.clock.clearTimer(this.timer);
     this.timer = undefined;

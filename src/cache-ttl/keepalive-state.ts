@@ -223,6 +223,13 @@ export interface SessionTotals {
   /** `transient: true` marks a disable that a successful real request may clear. */
   disabled: { reason: string; at: Millis; transient?: true } | undefined;
   lastUnproven: { kind: string; at: Millis } | undefined;
+  /**
+   * O3 (provider-evidence breaker, 2026-10-12): this session's keepalive-active-but-zero-read
+   * verdict was already folded into the provider evidence ledger at dispose time. Persisted
+   * (via the regular session snapshot) so a `/reload`-rebuilt service never counts the SAME
+   * session twice.
+   */
+  noCacheValueCounted?: boolean;
   // plan.md §9.2 (M2): post-hoc load-bearing vs. wasted accounting.
   unnecessaryWindows: number;
   unnecessaryPings: number;
@@ -341,6 +348,8 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
           if (kind !== undefined && at !== undefined) next.lastUnproven = { kind, at: at as Millis };
         }
       }
+      // O3: restore the once-per-session accounting guard (see SessionTotals.noCacheValueCounted).
+      if (snapshot.noCacheValueCounted === true) next.noCacheValueCounted = true;
       restored = next;
     }
     return restored;
@@ -408,6 +417,16 @@ export type TickSkipReason =
   | "usd-run"
   /** child-ka-core: the model/route has no cost data at all — a budget can't be enforced without a price. Decided in the service layer, see `"global-cap"`. */
   | "usd-unpriced"
+  /**
+   * O3 (provider-evidence breaker, 2026-10-12): this provider+model route is fused off by the
+   * persisted evidence ledger — `NO_CACHE_VALUE_STREAK_LIMIT` consecutive sessions had an
+   * ACTIVE keepalive yet never observed a single cache read (requests all succeeded; the cache
+   * simply never hit, so every ping is provably worthless). Decided in the service layer
+   * (`cache-keepalive.ts`'s `onTick`), which also latches `session.disabled` with the same
+   * reason so the status bar annotates it and later ticks short-circuit at #2. Resets only via
+   * an observed `cacheRead > 0` (`ProviderEvidenceStore.noteCacheRead`).
+   */
+  | "no-cache-value"
   | "not-due";
 
 export type InvalidateReason =
@@ -454,6 +473,20 @@ export interface EvaluateTickInput {
   window: WindowState;
   /** Freshly-derived fingerprint of "what would go out right now"; compared against `window.capture.fingerprint`. */
   currentFingerprint: CaptureFingerprint;
+  /**
+   * O2 follow-up (gate #7 分流, 2026-10-12 用户拍板): whether this capture's provider+model
+   * route has PROVEN 1h-write landing evidence, resolved by the SERVICE layer at tick time via
+   * the injected evidence store (`provider-evidence.ts`) — this module stays pi-free and never
+   * sees the store itself.
+   *   - `true`  ⇒ a real 1h entry lives for an hour; gate #7 keeps the legacy `skip("ttl-1h")`.
+   *   - `false` ⇒ collapsing route (or the store's read failed — the store fails towards
+   *     "no evidence" by design): gate #7 lets the window THROUGH to the ping path, where
+   *     `runPing`'s `stripCacheControlTtl` degrades the replay to plain 5m semantics. This is
+   *     the safe direction (I6): stripped of `ttl`, the ping is exactly a normal 5m ping — it
+   *     cannot do worse than the route's own behaviour.
+   *   - `undefined` (no evidence store wired at all) ⇒ legacy byte-identical skip.
+   */
+  write1hEvidence?: boolean;
   /**
    * child-ka-core: true when pi's own native `CacheWarmer` is already handling
    * this model/route (it declares `promptCache`) — the caller (service layer)
@@ -504,8 +537,14 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   }
   // #6 — G5
   if (capture.shape.ephemeralBreakpoints === 0) return skip("no-cache-control", true);
-  // #7 — G5
-  if (capture.shape.ttl1h) return skip("ttl-1h", true);
+  // #7 — G5. O2 follow-up (分流): a ttl:"1h" capture is skipped only on a route with PROVEN
+  // 1h landing evidence (`write1hEvidence === true`, incl. the legacy `undefined` default) —
+  // there a real 1h entry lives an hour and the 5m ping cadence doesn't match its semantics.
+  // Without evidence (collapsing relay / store read failure) the window falls through to the
+  // ping path and `runPing` strips `ttl` (see ping-client.ts's `stripCacheControlTtl`): the
+  // 5m-based interval / budget / aliveUntil assumptions below then apply UNCHANGED, which is
+  // exactly right — stripped of the intent field, the entry really is a 5m entry.
+  if (capture.shape.ttl1h && input.write1hEvidence !== false) return skip("ttl-1h", true);
   // #7.5 — I-K1/B1: only a payload that was itself a real streaming request can
   // be replayed byte-for-byte with an early-abort read; `preparePingPayload`
   // deliberately never rewrites `stream`, so a captured non-streaming payload
@@ -1140,6 +1179,13 @@ export interface KeepalivePingDiagnostics {
    * naming a value.
    */
   attempts?: number | undefined;
+  /**
+   * O2 follow-up (gate #7 分流): this ping's replay had its `cache_control.ttl` stripped
+   * (`stripCacheControlTtl`) because the route has no proven 1h landing evidence — the
+   * distinguishing marker between an ordinary 5m ping and a "ttl-1h ⇒ 5m 放行" ping in the
+   * audit trail and `/cache-ttl status`.
+   */
+  ttlStripped?: boolean | undefined;
 }
 
 function formatTokenCount(n: number): string {
@@ -1296,8 +1342,9 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
     const d = report.lastPingDiagnostics;
     const headerDiff = d.headerKeyDiff.length > 0 ? ` (filled: ${d.headerKeyDiff.join(",")})` : "";
     const attemptsSuffix = d.attempts !== undefined ? ` · attempts=${d.attempts}` : "";
+    const ttlSuffix = d.ttlStripped === true ? " · ttl-stripped(1h→5m)" : "";
     lines.push(
-      `last ping: ${d.outcomeKind} @ ${d.at} · +${d.elapsedSinceCaptureMs}ms since capture · prefix ${d.prefixTokens}tok (${d.prefixSource}) · cache_read=${d.cacheReadInputTokens ?? "n/a"} cache_creation=${d.cacheCreationInputTokens ?? "n/a"} · headers: ${d.headerSource}${headerDiff} · model=${d.model} · baseUrl=${d.baseUrl}${attemptsSuffix}`,
+      `last ping: ${d.outcomeKind} @ ${d.at} · +${d.elapsedSinceCaptureMs}ms since capture · prefix ${d.prefixTokens}tok (${d.prefixSource}) · cache_read=${d.cacheReadInputTokens ?? "n/a"} cache_creation=${d.cacheCreationInputTokens ?? "n/a"} · headers: ${d.headerSource}${headerDiff} · model=${d.model} · baseUrl=${d.baseUrl}${attemptsSuffix}${ttlSuffix}`,
     );
   }
   lines.push(

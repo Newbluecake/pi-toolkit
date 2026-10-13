@@ -14,6 +14,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentSettings } from "../config/settings.js";
 import { CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE } from "../runtime/session-driver.js";
 import { createRequestCapture, captureRequest, type CapturedRequestBase } from "./cache-ttl.js";
+import { getProviderEvidenceStore, observeUsageIntoEvidence } from "./provider-evidence.js";
 import { getChildKeepaliveLedger } from "./ping-ledger.js";
 import { getChildKeepaliveDisposeRegistry } from "./child-registry.js";
 import { getChildBashRegistry } from "../bash/child-registry.js";
@@ -83,6 +84,9 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
       allowHeadless: true,
       maxSessionPings: cfg.childKeepaliveMaxPingsPerRun,
       pingLedger: getChildKeepaliveLedger(),
+      // O2/O3 (2026-10-12): child keepalive goes through the SAME provider-evidence gating as
+      // the main session (the store is the process-wide singleton, shared with it).
+      evidence: getProviderEvidenceStore(),
       runBudgetUsd: cfg.childKeepaliveRunBudgetUsd,
       runSpentSeedUsd: seedRunSpentUsd(ctx),
       processBudgetUsd: cfg.childKeepaliveProcessBudgetUsd,
@@ -162,7 +166,20 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
   });
   pi.on("message_end", (_event, ctx) => {
     const svc = ensureService(ctx);
-    svc?.noteRequestSettled(safeSessionId(ctx), svc.instanceId);
+    if (!svc) return undefined;
+    svc.noteRequestSettled(safeSessionId(ctx), svc.instanceId);
+    // O1/O3 evidence observation, same as the main session's message_end hook
+    // (cache-ttl.ts): fold this message's usage into the shared evidence store and forward a
+    // cache-read sighting to the service's O3 accounting.
+    const model = ctx?.model as { provider?: string; id?: string } | undefined;
+    const observed = observeUsageIntoEvidence(
+      ctx,
+      { provider: model?.provider ?? "", modelId: model?.id ?? "" },
+      getProviderEvidenceStore(),
+      Date.now(),
+    );
+    if (observed.cacheReadObserved) svc.noteUsageCacheRead(safeSessionId(ctx), svc.instanceId);
+    return undefined;
   });
   pi.on("turn_end", (_event, ctx) => {
     const svc = ensureService(ctx);

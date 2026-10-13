@@ -10,6 +10,18 @@
 
 ## 修订记录
 
+### v3（2026-10-12，十线路探针实测后的证据化改造 + 用户裁决）
+
+实测发现（项目记忆 cache-ttl.md）：cr-anthropic / kimi-coding 上 `ttl:"1h"` 写不出 1h 条目（`write1h=0`，塌缩成 5m）；cr-response/gpt-5.5 缓存记账全灭。据此新增 `src/cache-ttl/provider-evidence.ts`（provider+model 级持久化证据层，`~/.pi/agent/cache-provider-evidence.json`），四项改造：
+
+| 条目                         | 内容                                                                                                                                                                                                                                 | 落点                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| **O1 warmth 视界证据门控**   | 1h 上限只认落地证据（`cacheWrite1h>0` 观测 / `recent1hWrite===true` / 证据层记录），`mode=on` 与 `lastSent.ttl1h` 等意图不再抬窗；无证据 ⇒ 5m 视界                                                                                   | `warmth.ts` step 5                                                 |
+| **O2 ping TTL 剥离**         | ping replay 无 1h 证据 ⇒ `stripCacheControlTtl` 只删 `cache_control.ttl`（copy-on-write，指纹中性——ttl 从不参与指纹）                                                                                                                | `ping-client.ts`、`cache-keepalive.ts`                             |
+| **O3 无价值熔断**            | 连续 3 个「保活活跃但零 cacheRead」会话 ⇒ `no-cache-value` 熔断停 ping + 状态栏标注；任一 cacheRead>0 立即复位；mode=off/无 ping 会话不计入；跨 /reload 防重复计                                                                     | `provider-evidence.ts`、`cache-keepalive.ts`、`keepalive-state.ts` |
+| **O4 `/cache-ttl probe`**    | 对当前线路 3 个真实请求体检（5m 写入→立即复读→1h 写入看拆分），30s 预算，结果回写证据层                                                                                                                                              | `probe.ts`、`cache-ttl.ts`                                         |
+| **gate #7 分流（用户裁决）** | G5/T5 的「已是 1h ⇒ 不保活」被部分推翻：**无 1h 落地证据**的线路放行 1h 捕获进 ping 路径（剥 ttl 后按 5m 保活，节奏/预算/视界复用 5m 假设）；**有证据**线路维持 skip 不变；证据层缺省 ⇒ 字节级旧行为。ping 诊断带 `ttlStripped` 标记 | `keepalive-state.ts` gate #7、`cache-keepalive.ts`                 |
+
 ### v2（针对首轮评审的 B1–B4 / M1–M6 / m1–m3）
 
 | 评审条目                        | 改了什么                                                                                                                                                                                                                                                                                                                                                                | 改在哪一节                             |
@@ -977,7 +989,7 @@ onPingStarted(now)
 ### 10.2 与 `cacheTtl.mode` 的关系（I-K5）
 
 - 保活是**独立开关**，不改 `auto/on/off` 三档语义。
-- `mode = on`（已 1h）⇒ payload 带 `ttl:"1h"` ⇒ G5 关门，保活自动休眠。
+- `mode = on`（已 1h）⇒ payload 带 `ttl:"1h"` ⇒ G5 关门，保活自动休眠。**（v3 修订：仅当该线路有 1h 落地证据时休眠；无证据的塌缩线路剥 ttl 后按 5m 保活，见修订记录 v3）**
 - `mode = off`（显式 5m）⇒ 保活照常，TTL 只按用户设置改写。
 - `mode = auto` ⇒ 保活工作，TTL 始终跟随 pi/env，无自动升级。
 - **disarm 一律回落 passthrough**：保活从不写 `cacheTtl.mode`、不持久化任何东西。
@@ -1018,21 +1030,21 @@ onPingStarted(now)
 
 ## 12. 取舍记录（被否决的备选）
 
-| #   | 备选                                                           | 否决理由                                                                                                                                           |
-| --- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| T1  | `modelRegistry.complete()` 重建请求                            | 需重建 `Context`，序列化差一点就 miss + 1.25P 全量写（任务书已定）                                                                                 |
-| T2  | 无条件 `max_tokens: 1`                                         | thinking 会话 400；摘掉 thinking 又作废 messages 缓存块 ⇒ 全量写                                                                                   |
-| T3  | 非流式请求 + 读 body                                           | thinking 会话压不低 `max_tokens`，可能真生成几千 token；流式 + `message_start` 早停对两种会话都安全                                                |
-| T4  | payload 全量 hash 指纹                                         | MB 级 payload 每请求一次全量序列化；用 §3.3 的结构化便宜指纹即可覆盖 M4 要求                                                                       |
-| T5  | 给 1h TTL 会话也做 50 分钟 ping                                | v1 范围外（用户已付 2× 买了一小时）；留作后续（`ASSUMED_TTL_MS` 改为从 capture 推导）                                                              |
-| T6  | 独立 `/cache-keepalive` 命令                                   | 同一主题，做成 `/cache-ttl` 子命令                                                                                                                 |
-| T7  | **在 `wireCacheTtl` 闭包里自建 `setInterval`（v1 方案）**      | 生命周期由两个不相干 handler 管理，无法由 stack dispose 统一释放，且引入 B1 的“新盒子先建、stack 后换”窗口。**上游已拍板改为 stack service**（§2） |
-| T8  | 用 `ctx.isIdle()` 作唯一“无请求在途”判据                       | 工具执行期间为 false，错杀“前台 Agent 阻塞”主场景                                                                                                  |
-| T9  | 伪造 session entry 让 HUD 计入花费                             | 污染上下文与轮次统计，pi 无 usage-only 追加 API                                                                                                    |
-| T10 | provider 允许名单 / 护栏常量做成设置项                         | 误配即账单事故；写死 + 注释                                                                                                                        |
-| T11 | 常驻 `setInterval` + `unref()`（而非 `Clock.setTimer` 自续期） | 与仓库 `Clock` 抽象不一致、FakeClock 不能精确断言、空闲会话白转（§8.3）                                                                            |
-| T12 | 用 `readBackgroundStatus()` 读后台状态                         | 那是给跨模块消费者的 `Symbol.for` 全局；stack 内部应直接用自己的 `query`/`bashJobs`（上游明确要求）                                                |
-| T13 | 配额感知（`Retry-After`、429/402 分类、每日上限）              | 用户已裁决不需要；只保留连续 2 次 unproven 停用（§7.5、§15 R7）                                                                                    |
+| #   | 备选                                                           | 否决理由                                                                                                                                                                              |
+| --- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| T1  | `modelRegistry.complete()` 重建请求                            | 需重建 `Context`，序列化差一点就 miss + 1.25P 全量写（任务书已定）                                                                                                                    |
+| T2  | 无条件 `max_tokens: 1`                                         | thinking 会话 400；摘掉 thinking 又作废 messages 缓存块 ⇒ 全量写                                                                                                                      |
+| T3  | 非流式请求 + 读 body                                           | thinking 会话压不低 `max_tokens`，可能真生成几千 token；流式 + `message_start` 早停对两种会话都安全                                                                                   |
+| T4  | payload 全量 hash 指纹                                         | MB 级 payload 每请求一次全量序列化；用 §3.3 的结构化便宜指纹即可覆盖 M4 要求                                                                                                          |
+| T5  | 给 1h TTL 会话也做 50 分钟 ping                                | v1 范围外（用户已付 2× 买了一小时）；留作后续（`ASSUMED_TTL_MS` 改为从 capture 推导）。**（v3 修订：部分推翻——塌缩线路的 1h 意图剥成 5m 保活；真实 1h 线路仍不保活，见修订记录 v3）** |
+| T6  | 独立 `/cache-keepalive` 命令                                   | 同一主题，做成 `/cache-ttl` 子命令                                                                                                                                                    |
+| T7  | **在 `wireCacheTtl` 闭包里自建 `setInterval`（v1 方案）**      | 生命周期由两个不相干 handler 管理，无法由 stack dispose 统一释放，且引入 B1 的“新盒子先建、stack 后换”窗口。**上游已拍板改为 stack service**（§2）                                    |
+| T8  | 用 `ctx.isIdle()` 作唯一“无请求在途”判据                       | 工具执行期间为 false，错杀“前台 Agent 阻塞”主场景                                                                                                                                     |
+| T9  | 伪造 session entry 让 HUD 计入花费                             | 污染上下文与轮次统计，pi 无 usage-only 追加 API                                                                                                                                       |
+| T10 | provider 允许名单 / 护栏常量做成设置项                         | 误配即账单事故；写死 + 注释                                                                                                                                                           |
+| T11 | 常驻 `setInterval` + `unref()`（而非 `Clock.setTimer` 自续期） | 与仓库 `Clock` 抽象不一致、FakeClock 不能精确断言、空闲会话白转（§8.3）                                                                                                               |
+| T12 | 用 `readBackgroundStatus()` 读后台状态                         | 那是给跨模块消费者的 `Symbol.for` 全局；stack 内部应直接用自己的 `query`/`bashJobs`（上游明确要求）                                                                                   |
+| T13 | 配额感知（`Retry-After`、429/402 分类、每日上限）              | 用户已裁决不需要；只保留连续 2 次 unproven 停用（§7.5、§15 R7）                                                                                                                       |
 
 ---
 

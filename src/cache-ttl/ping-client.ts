@@ -117,6 +117,59 @@ export function preparePingPayload(captured: Record<string, unknown>): Record<st
   return body;
 }
 
+/**
+ * O2 (provider-evidence TTL gating, 2026-10-12): remove ONLY the `ttl` field from
+ * every ephemeral `cache_control` node, degrading a `ttl:"1h"` write intent to a
+ * plain 5m ephemeral breakpoint. Used when the replay route has NO proven 1h
+ * landing on record (`provider-evidence.ts`) — on a collapsing relay the `ttl`
+ * field buys nothing (the 1h entry never exists) while still billing the 2× 1h
+ * write rate, and a 5m ping can never refresh a real 1h entry anyway (separate
+ * cache namespaces, official semantics).
+ *
+ * Fingerprint semantics are unchanged BY CONSTRUCTION: `CaptureFingerprint` was
+ * computed at capture time from the REAL request and covers breakpoint PATHS,
+ * digests and counts — never `ttl` values — so deleting `ttl` here touches no
+ * fingerprinted field. Every other byte of the replay stays verbatim (I-K1).
+ *
+ * Copy-on-write: the input tree is never mutated (the keepalive capture is shared
+ * state reused across pings), subtrees containing no `ttl` are returned by
+ * reference, and cycles are left untouched (captures are `structuredClone`
+ * products and acyclic in practice — the WeakSet is pure defence).
+ */
+export function stripCacheControlTtl<T>(node: T): T {
+  return stripTtlNode(node, new WeakSet<object>()) as T;
+}
+
+function stripTtlNode(node: unknown, seen: WeakSet<object>): unknown {
+  if (node === null || typeof node !== "object" || seen.has(node)) return node;
+  seen.add(node);
+  if (Array.isArray(node)) {
+    let changed = false;
+    const out = node.map((item) => {
+      const stripped = stripTtlNode(item, seen);
+      if (stripped !== item) changed = true;
+      return stripped;
+    });
+    return changed ? out : node;
+  }
+  const obj = node as RecordValue;
+  const control = obj.cache_control;
+  const stripControl = isObjectRecord(control) && control.type === "ephemeral" && "ttl" in control;
+  let result: RecordValue | undefined;
+  for (const [key, value] of Object.entries(obj)) {
+    let next: unknown;
+    if (key === "cache_control" && stripControl) {
+      const { ttl: _dropped, ...rest } = control;
+      next = rest;
+    } else {
+      next = stripTtlNode(value, seen);
+    }
+    if (next !== value && result === undefined) result = { ...obj };
+    if (result !== undefined) result[key] = next;
+  }
+  return result ?? node;
+}
+
 function stripTrailingSlash(url: string): string {
   return url.endsWith("/") ? url.slice(0, -1) : url;
 }
@@ -227,34 +280,71 @@ async function readCapped(res: Response, limit: number): Promise<string> {
   }
 }
 
-interface AnthropicUsage {
-  input_tokens?: number;
-  output_tokens?: number;
-  cache_read_input_tokens?: number;
-  cache_creation_input_tokens?: number;
+/**
+ * Raw usage numbers scanned from the first `message_start` SSE event — the shared
+ * currency of both the keepalive ping (classified into `PingOutcome`) and the
+ * `/cache-ttl probe` (O4, which needs the 1h/5m write SPLIT, not a verdict).
+ */
+export interface RawScannedUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /**
+   * `usage.cache_creation.ephemeral_1h_input_tokens` — the proof that a real 1h entry exists.
+   * `undefined` when the route doesn't report the split at all (distinct from a reported 0).
+   */
+  cacheWrite1h: number | undefined;
 }
+
+/**
+ * Outcome of `postAndScanUsage` — the keepalive/probe-shared wire result BEFORE
+ * classification. The non-`usage` kinds map 1:1 onto the same-named `PingOutcome`
+ * variants.
+ */
+export type UsageScanOutcome =
+  | { kind: "usage"; usage: RawScannedUsage | undefined } // `undefined` = message_start carried no usage object
+  | { kind: "http"; status: number } // any non-2xx HTTP status
+  | { kind: "accepted-then-lost" } // got a 200 response but stream ended/errored/timed out before message_start
+  | { kind: "network" } // fetch itself failed / aborted before receiving a response
+  | { kind: "malformed" }; // no body, or scanned 64KB without seeing message_start
 
 interface AnthropicMessageStartEvent {
   type: "message_start";
-  message?: { usage?: AnthropicUsage };
+  message?: { usage?: Record<string, unknown> };
 }
 
 function isMessageStartEvent(value: unknown): value is AnthropicMessageStartEvent {
   return isObjectRecord(value) && value.type === "message_start";
 }
 
-/** Classify a `message_start` event's usage into the proven/unproven verdict. */
-function classifyUsage(event: AnthropicMessageStartEvent): PingOutcome {
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** Project pi-ai's wire usage shape (`cache_creation.ephemeral_1h_input_tokens` split included) onto `RawScannedUsage`. */
+function rawUsageFrom(event: AnthropicMessageStartEvent): RawScannedUsage | undefined {
   const usage = event.message?.usage;
+  if (!usage) return undefined;
+  const creation = isObjectRecord(usage.cache_creation) ? usage.cache_creation : undefined;
+  const split1h = creation ? creation.ephemeral_1h_input_tokens : undefined;
+  return {
+    inputTokens: finiteOr(usage.input_tokens, 0),
+    outputTokens: finiteOr(usage.output_tokens, 0),
+    cacheRead: finiteOr(usage.cache_read_input_tokens, 0),
+    cacheWrite: finiteOr(usage.cache_creation_input_tokens, 0),
+    cacheWrite1h: typeof split1h === "number" && Number.isFinite(split1h) ? split1h : undefined,
+  };
+}
+
+/** Classify scanned usage into the keepalive proven/unproven verdict (I-K7). */
+function classifyUsage(usage: RawScannedUsage | undefined): PingOutcome {
   if (!usage) return { kind: "no-usage" };
-  const cacheRead = usage.cache_read_input_tokens ?? 0;
-  const cacheCreation = usage.cache_creation_input_tokens ?? 0;
-  const inputTokens = usage.input_tokens ?? 0;
-  if (cacheRead > 0 && cacheCreation === 0) {
-    return { kind: "proven-hit", cacheReadTokens: cacheRead, inputTokens };
+  if (usage.cacheRead > 0 && usage.cacheWrite === 0) {
+    return { kind: "proven-hit", cacheReadTokens: usage.cacheRead, inputTokens: usage.inputTokens };
   }
-  if (cacheCreation > 0) {
-    return { kind: "proven-write", cacheWriteTokens: cacheCreation };
+  if (usage.cacheWrite > 0) {
+    return { kind: "proven-write", cacheWriteTokens: usage.cacheWrite };
   }
   return { kind: "no-usage" };
 }
@@ -269,8 +359,11 @@ export interface SendPingOptions {
 }
 
 /**
- * Send a single keepalive ping: bare POST, stream just far enough to classify the
- * result (early-abort at `message_start`), and release all resources.
+ * Shared send-and-scan core (O4 extraction, 2026-10-12): bare POST, stream just far
+ * enough to capture the first `message_start` event's raw usage (early-abort), and
+ * release all resources. `sendKeepalivePing` is a thin classifying wrapper over this;
+ * `/cache-ttl probe` (`probe.ts`) consumes the raw usage directly (it needs the
+ * 1h/5m write split, not the proven/unproven verdict).
  *
  * This function never throws. It guarantees, on every exit path (successful
  * early-stop, timeout, external/parent abort, non-2xx HTTP status, malformed
@@ -282,7 +375,7 @@ export interface SendPingOptions {
  *
  * (§7.4 / m3 resource-release contract.)
  */
-export async function sendKeepalivePing(request: PingRequest, options: SendPingOptions = {}): Promise<PingOutcome> {
+export async function postAndScanUsage(request: PingRequest, options: SendPingOptions = {}): Promise<UsageScanOutcome> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const parentSignal = options.signal;
   const timeoutMs = options.timeoutMs ?? DEFAULT_PING_TIMEOUT_MS;
@@ -353,7 +446,7 @@ export async function sendKeepalivePing(request: PingRequest, options: SendPingO
             continue; // ignore unparsable SSE frames, keep scanning
           }
           if (isMessageStartEvent(parsed)) {
-            return classifyUsage(parsed);
+            return { kind: "usage", usage: rawUsageFrom(parsed) };
           }
         }
 
@@ -375,10 +468,21 @@ export async function sendKeepalivePing(request: PingRequest, options: SendPingO
   }
 }
 
-function classify(error: unknown, headersReceived: boolean): PingOutcome {
+function classify(error: unknown, headersReceived: boolean): UsageScanOutcome {
   // Once we've received response headers, any failure while reading the body
   // (abort/timeout/network drop) means the server accepted the request but we
   // lost the result before it could be proven — never silently call it "network".
   if (headersReceived) return { kind: "accepted-then-lost" };
   return { kind: "network" };
+}
+
+/**
+ * Send a single keepalive ping (see `postAndScanUsage` for the wire/resource
+ * contract) and classify the scanned usage into the proven/unproven verdict.
+ * Never throws.
+ */
+export async function sendKeepalivePing(request: PingRequest, options: SendPingOptions = {}): Promise<PingOutcome> {
+  const scan = await postAndScanUsage(request, options);
+  if (scan.kind !== "usage") return scan;
+  return classifyUsage(scan.usage);
 }

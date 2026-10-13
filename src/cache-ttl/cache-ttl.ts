@@ -12,11 +12,16 @@ import {
   readCacheStatusTheme,
   renderKeepaliveReportLines,
   isSuccessfulRealRequest,
+  cacheReadCostUsd,
+  cacheWriteCostUsd,
   type CapturedRequest,
   type FingerprintContextInput,
+  type KeepaliveCostModel,
   type PrefixEstimate,
 } from "./keepalive-state.js";
 import { anyLongWriteSince, prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
+import { observeUsageIntoEvidence, type ProviderEvidenceStore } from "./provider-evidence.js";
+import { PROBE_TOTAL_TIMEOUT_MS, runCacheProbe, type ProbeResult } from "./probe.js";
 import { assessWarmth, MAX_TTL_MS, type CacheWarmth, type WarmthEvidence } from "./warmth.js";
 import type { CacheKeepaliveService, KeepalivePort } from "../service/cache-keepalive.js";
 
@@ -34,6 +39,16 @@ export interface CacheTtlDeps {
    * methods (`noteToolStart`, etc.) that aren't part of the narrower port surface.
    */
   keepalive?: () => CacheKeepaliveService | undefined;
+  /**
+   * O1/O3/O4 (2026-10-12): the shared provider-route evidence store (`provider-evidence.ts`).
+   * Absent ⇒ no evidence gating/recording at all (tests stay hermetic; production wires the
+   * process-wide singleton from `src/index.ts`). Read failures inside the store degrade to
+   * "no evidence" (the conservative cold judgement), so an absent store is behaviourally the
+   * same as an unreadable one.
+   */
+  evidence?: ProviderEvidenceStore | undefined;
+  /** O4: injectable fetch for `/cache-ttl probe` (tests); defaults to `globalThis.fetch`. */
+  probeFetch?: typeof fetch | undefined;
 }
 
 /**
@@ -82,6 +97,7 @@ function createWarmthPort(
         const model = ctx?.model as { api?: string; provider?: string; id?: string } | undefined;
         const route = { api: model?.api ?? "", provider: model?.provider ?? "", modelId: model?.id ?? "" };
         const sessionId = readSessionId(ctx);
+        const store = deps.evidence;
 
         const ledgerUsage = readLatestAssistantUsage(ctx);
         const ledger: WarmthEvidence["ledger"] =
@@ -95,6 +111,18 @@ function createWarmthPort(
                 ...(ledgerUsage.cacheWrite1h !== undefined ? { cacheWrite1h: ledgerUsage.cacheWrite1h } : {}),
               }
             : undefined;
+
+        // O1: a `cacheWrite1h > 0` observation IS landing evidence — record it on sight so the
+        // 30d rolling record survives this entry scrolling out of the session ledger. Mode-
+        // independent on purpose (user ruling 2026-10-12): mode=off stops OUR ttl intents, it
+        // doesn't make an observed fact less true.
+        if (store && ledgerUsage.source === "usage" && (ledgerUsage.cacheWrite1h ?? 0) > 0) {
+          store.noteWrite1hLanded(
+            ledgerUsage.providerId ?? route.provider,
+            ledgerUsage.modelId !== "" ? ledgerUsage.modelId : route.modelId,
+            now,
+          );
+        }
 
         const sent = getLastSent();
         const lastSentEvidence: WarmthEvidence["lastSent"] =
@@ -116,6 +144,18 @@ function createWarmthPort(
         };
 
         const recent1hWrite = anyLongWriteSince(ctx, now - MAX_TTL_MS);
+        // O1: `recent1hWrite === true` is also landing evidence — but `anyLongWriteSince` scans
+        // entries without route attribution, so only record it when the latest entry is anchored
+        // to the CURRENT route (otherwise the sighting could belong to a previous model's route).
+        if (
+          store &&
+          recent1hWrite === true &&
+          ledger !== undefined &&
+          ledger.modelId === route.modelId &&
+          (ledger.provider === undefined || ledger.provider === route.provider)
+        ) {
+          store.noteWrite1hLanded(route.provider, route.modelId, now);
+        }
 
         const evidence: WarmthEvidence = {
           now,
@@ -124,6 +164,7 @@ function createWarmthPort(
           ...(lastSentEvidence !== undefined ? { lastSent: lastSentEvidence } : {}),
           keepalive,
           recent1hWrite,
+          write1hEvidence: store?.hasWrite1hEvidence(route.provider, route.modelId, now) ?? false,
           mode: getMode(),
           slackMs: opts.slackMs,
           ...(opts.ttlOverrideMs !== undefined ? { ttlOverrideMs: opts.ttlOverrideMs } : {}),
@@ -141,6 +182,143 @@ const MODE_LABEL: Record<CacheTtlMode, string> = {
   on: "on (force 1h)",
   off: "off (provider default 5m)",
 };
+
+/** O4: race an auth-resolution promise against a bounded, unref'd timeout (never leaves a dangling timer). */
+function withTimeoutMs<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out")), ms);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+/** O4: render the probe verdict lines (and the M5-compliant cost line) for `/cache-ttl probe`. */
+function renderProbeReport(
+  model: { provider?: string; id?: string; cost?: KeepaliveCostModel | undefined },
+  result: ProbeResult,
+): string {
+  const lines: string[] = [];
+  lines.push(`probe ${model.provider ?? "?"}/${model.id ?? "?"} — ${result.requests} request(s) sent (real billing)`);
+  if (result.requests > 0) {
+    lines.push(
+      `cache write (5m): ${result.cacheAlive ? `alive (${result.tokens.write5m} tok written)` : "DEAD — provider registered no cache write"}`,
+    );
+  }
+  if (result.phases.reread.outcome === "usage") {
+    lines.push(
+      `immediate re-read: ${result.immediateHit ? `hit (${result.tokens.read} tok)` : "MISS — the 5m namespace does not read back"}`,
+    );
+  }
+  if (result.phases.write1h.outcome === "usage") {
+    lines.push(
+      result.write1hLanded
+        ? `1h landing: yes (${result.tokens.write1h} tok into the 1h namespace)`
+        : `1h landing: NO — ttl:"1h" accepted but ephemeral_1h_input_tokens stayed 0 (collapsed to 5m)`,
+    );
+  }
+  if (result.error !== undefined) lines.push(`stopped early: ${result.error}`);
+
+  // M5: never print "$0" for an unknown rate — if any billed piece has no price, the whole
+  // probe's cost is "unknown".
+  const billed: { tokens: number; rate: number | undefined }[] = [
+    { tokens: result.phases.write.usage?.cacheWrite ?? 0, rate: cacheWriteCostUsd(model.cost, 1) },
+    { tokens: result.phases.reread.usage?.cacheRead ?? 0, rate: cacheReadCostUsd(model.cost, 1) },
+    { tokens: result.phases.write1h.usage?.cacheWrite ?? 0, rate: cacheWriteCostUsd(model.cost, 1) },
+  ];
+  const unknownCost = billed.some((piece) => piece.tokens > 0 && piece.rate === undefined);
+  if (unknownCost) {
+    lines.push("cost: unknown (model has no cache rate data)");
+  } else {
+    const total =
+      (cacheWriteCostUsd(model.cost, result.phases.write.usage?.cacheWrite ?? 0) ?? 0) +
+      (cacheReadCostUsd(model.cost, result.phases.reread.usage?.cacheRead ?? 0) ?? 0) +
+      (cacheWriteCostUsd(model.cost, result.phases.write1h.usage?.cacheWrite ?? 0) ?? 0);
+    lines.push(`cost: ≈$${total.toFixed(4)} (estimated; 1h writes priced at the 5m write rate)`);
+  }
+  lines.push(
+    "evidence: recorded to the provider-evidence store (30d rolling; drives warmth 1h horizon + ping ttl gating)",
+  );
+  return lines.join("\n");
+}
+
+/** O4: `/cache-ttl probe` — three real requests against the current route; see probe.ts. */
+async function runProbeCommand(ctx: ExtensionContext, deps: CacheTtlDeps): Promise<void> {
+  const notify = (message: string, level: "info" | "warning" | "error"): void => {
+    try {
+      ctx.ui.notify(message, level);
+    } catch {
+      // stale ctx — never let the probe report break anything.
+    }
+  };
+  const model = ctx?.model as
+    | { api?: string; provider?: string; id?: string; baseUrl?: string; cost?: KeepaliveCostModel | undefined }
+    | undefined;
+  if (!model || typeof model.id !== "string" || model.id === "") {
+    notify("probe: no active model in this session", "warning");
+    return;
+  }
+  if (model.api !== "anthropic-messages") {
+    notify(
+      `probe: only anthropic-messages routes carry cache_control semantics (current api: ${model.api ?? "unknown"}) — nothing sent`,
+      "warning",
+    );
+    return;
+  }
+  let auth: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>> | undefined;
+  try {
+    auth = await withTimeoutMs(ctx.modelRegistry.getApiKeyAndHeaders(model as never), 10_000);
+  } catch {
+    auth = undefined;
+  }
+  if (!auth || !auth.ok) {
+    notify("probe: auth resolution failed — nothing sent", "error");
+    return;
+  }
+  const baseUrl = auth.baseUrl ?? model.baseUrl;
+  if (typeof baseUrl !== "string" || baseUrl === "") {
+    notify("probe: this model has no baseUrl — nothing sent", "error");
+    return;
+  }
+  // ProviderHeaders values may be `null` (header deletion markers in pi's contract) — only
+  // string values can go on the wire.
+  const authHeaders: Record<string, string> = {};
+  for (const [key, value] of Object.entries(auth.headers ?? {})) {
+    if (typeof value === "string") authHeaders[key] = value;
+  }
+  notify(
+    `probing ${model.provider ?? "?"}/${model.id} — up to 3 REAL billed requests, ${Math.round(PROBE_TOTAL_TIMEOUT_MS / 1000)}s budget…`,
+    "info",
+  );
+  const result = await runCacheProbe({
+    baseUrl,
+    model: model.id,
+    ...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
+    authHeaders,
+    ...(deps.probeFetch !== undefined ? { fetchImpl: deps.probeFetch } : {}),
+  });
+  // Write the verdict back into the shared evidence store (O1/O2/O3's evidence source):
+  // a landed 1h write refreshes the 30d record, an immediate hit resets the no-cache-value
+  // breaker (provider-evidence.ts's noteProbe does both folds).
+  const store = deps.evidence;
+  if (store && result.requests > 0) {
+    store.noteProbe(
+      model.provider ?? "",
+      model.id,
+      { cacheAlive: result.cacheAlive, immediateHit: result.immediateHit, write1hLanded: result.write1hLanded },
+      Date.now(),
+    );
+  }
+  notify(renderProbeReport(model, result), result.ok ? "info" : "warning");
+}
 
 function isObjectRecord(value: unknown): value is RecordValue {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -343,6 +521,21 @@ function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
     if (ka) ka.noteRequestSettled(sessionId, ka.instanceId, isSuccessfulRealRequest(event.message));
+    // O1/O3 evidence observation (mode-independent, user ruling 2026-10-12 — see
+    // `observeUsageIntoEvidence`'s doc comment): fold this message's usage into the provider-
+    // route evidence store, and forward a cache-read sighting to the keepalive service so its
+    // end-of-session O3 accounting knows this session DID see cache hits.
+    const store = deps.evidence;
+    if (store) {
+      const model = ctx?.model as { provider?: string; id?: string } | undefined;
+      const observed = observeUsageIntoEvidence(
+        ctx,
+        { provider: model?.provider ?? "", modelId: model?.id ?? "" },
+        store,
+        Date.now(),
+      );
+      if (observed.cacheReadObserved && ka) ka.noteUsageCacheRead(sessionId, ka.instanceId);
+    }
   });
   pi.on("turn_end", (event, ctx) => {
     const sessionId = readSessionId(ctx);
@@ -465,9 +658,9 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   pi.on("before_provider_headers", (event) => {
     capture?.consumeHeaders(event.headers);
   });
-  const USAGE = "usage: /cache-ttl on | off | auto | save | keepalive on|off | status";
+  const USAGE = "usage: /cache-ttl on | off | auto | save | keepalive on|off | status | probe";
   pi.registerCommand("cache-ttl", {
-    description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|save|keepalive on|off|status]",
+    description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|save|keepalive on|off|status|probe]",
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
@@ -485,6 +678,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           { value: "save", label: "save", description: "持久化当前模式" },
           { value: "keepalive", label: "keepalive", description: "保活开关（on|off）" },
           { value: "status", label: "status", description: "查看保活状态" },
+          { value: "probe", label: "probe", description: "线路体检（≤3 个真实计费请求，30s 预算）" },
         ].filter((item) => item.value.startsWith(partial));
       } catch {
         return [];
@@ -493,6 +687,12 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
       const [head, ...rest] = arg.split(/\s+/).filter(Boolean);
+
+      // O4: route health probe — sends up to 3 REAL billed requests against the current route.
+      if (head === "probe") {
+        await runProbeCommand(ctx, deps);
+        return;
+      }
 
       if (head === "keepalive") {
         const port = deps.keepalive?.();

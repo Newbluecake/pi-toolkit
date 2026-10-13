@@ -201,6 +201,15 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   keepalive touch (`provenCacheReadAt()`). `mode`/`lastSent`/1h-write traces only raise the bar
   for PROVING cold (Anthropic's 1h max TTL) and pick `nextWriteTtl`; anything unprovable is
   `unknown` (topic-switch's gate 3a treats that as "don't ask", same I6 fail-open direction).
+  **Provider evidence layer (2026-10-12, plan v3 — ten-line probe measurements)**: `provider-evidence.ts`
+  (pi-free, `~/.pi/agent/cache-provider-evidence.json`, 0600/atomic/1MiB cap/30d rolling TTL/200-route
+  FIFO/fail-silent) records per provider+model whether 1h writes ever LANDED (relay collapse is real:
+  cr-anthropic/kimi-coding write zero 1h entries), probe verdicts, and the no-cache-value streak.
+  warmth's 1h ceiling requires landing EVIDENCE (intent like mode=on no longer raises the window);
+  keepalive gate #7 splits on it (no evidence ⇒ 1h captures get a ttl-stripped 5m ping; evidence ⇒
+  legacy skip; store absent ⇒ byte-identical legacy); 3 consecutive keepalive-active-but-zero-read
+  sessions trip a self-healing `no-cache-value` ping breaker; `/cache-ttl probe` runs a 3-request
+  live checkup that feeds the same store.
 - `src/child/` — child-session assembly entry point (`wire.ts`'s `wireChildSession`, called from
   `src/index.ts` pre-guard when `isChildSession`, alongside `wireMemory`/`wireChildBashJobs`): composes
   `wireChildContextSwitch` + `wireChildKeepalive`, wiring their one cross-cutting signal (a committed

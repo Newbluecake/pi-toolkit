@@ -115,6 +115,7 @@ import type { ConsultForkStore } from "./consult/tool.js";
 import type { MainSessionFacts } from "./consult/main-facts.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
+import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
 import { readBackKeepaliveSessionState } from "./cache-ttl/keepalive-state.js";
 import { createQuotaStack, type QuotaHintState, type QuotaService, type QuotaStack } from "./quota/index.js";
 import { readQuotaStatusTheme } from "./quota/render.js";
@@ -2306,6 +2307,9 @@ export function buildSessionStack(
           : undefined,
         recoverTransientFailures: true,
         persistSessionState: true,
+        // O2/O3 (provider-evidence, 2026-10-12): route-level TTL evidence + the
+        // no-cache-value breaker. Process-wide singleton — shared with child keepalives.
+        evidence: getProviderEvidenceStore(),
       })
     : undefined;
   previousKeepalive = keepalive;

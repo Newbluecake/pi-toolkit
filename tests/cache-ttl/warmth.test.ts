@@ -16,6 +16,7 @@ function evidence(overrides: Partial<WarmthEvidence> = {}): WarmthEvidence {
     ledger: { at: NOW - 1_000, provider: "anthropic", modelId: "claude-x", cacheRead: 100, cacheWrite: 0 },
     keepalive: { pingInFlight: false, pingScheduled: false },
     recent1hWrite: false,
+    write1hEvidence: false,
     mode: "auto",
     slackMs: 1_000,
     ...overrides,
@@ -203,7 +204,7 @@ describe("assessWarmth — step 4: uncached by construction", () => {
   });
 });
 
-describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1h traces never produce warm", () => {
+describe("assessWarmth — step 5/6: prove cold by elapsed time; the 1h horizon requires PROVEN landing evidence (O1)", () => {
   it("far-elapsed touch with no 1h evidence anywhere ⇒ cold/ttl-elapsed, nextWriteTtl 5m", () => {
     const result = assessWarmth(
       evidence({
@@ -239,9 +240,9 @@ describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1
     expect(result).toEqual({ state: "unknown", reason: "not-provably-cold" });
   });
 
-  it("mode:'on' with a touch inside the 1h window but outside 5m ⇒ still NOT warm (unknown/not-provably-cold)", () => {
-    // This is the r2 ruling under direct test: mode never flips the verdict to warm, it only
-    // raises the bar the elapsed-time proof has to clear.
+  it("mode:'on' WITHOUT landing evidence no longer raises the bar (O1): 5m+slack elapsed ⇒ cold, nextWriteTtl stays 1h", () => {
+    // O1 (2026-10-12): mode=on is an INTENT, not a fact — collapsing relays accept `ttl:"1h"`
+    // but never write a 1h entry, so the horizon stays at 5m until a landing is proven.
     const result = assessWarmth(
       evidence({
         mode: "on",
@@ -254,10 +255,10 @@ describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1
         },
       }),
     );
-    expect(result).toEqual({ state: "unknown", reason: "not-provably-cold" });
+    expect(result).toEqual({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "1h" });
   });
 
-  it("lastSent.ttl1h with a touch inside the 1h window but outside 5m ⇒ still NOT warm", () => {
+  it("lastSent.ttl1h WITHOUT landing evidence no longer raises the bar either (O1): 5m+slack elapsed ⇒ cold", () => {
     const result = assessWarmth(
       evidence({
         ledger: {
@@ -276,7 +277,7 @@ describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1
         },
       }),
     );
-    expect(result.state).not.toBe("warm");
+    expect(result).toEqual({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "1h" });
   });
 
   it("ledger.cacheWrite1h>0 with a touch inside the 1h window but outside 5m ⇒ still NOT warm", () => {
@@ -295,10 +296,10 @@ describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1
     expect(result.state).not.toBe("warm");
   });
 
-  it("mode:'on' raises the proof bar to the 1h ceiling: cold only once 1h+slack has elapsed", () => {
+  it("write1hEvidence:true raises the proof bar to the 1h ceiling: cold only once 1h+slack has elapsed (O1)", () => {
     const justUnder = assessWarmth(
       evidence({
-        mode: "on",
+        write1hEvidence: true,
         ledger: {
           at: NOW - (MAX_TTL_MS + 999),
           provider: "anthropic",
@@ -312,7 +313,7 @@ describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1
 
     const atOrPast = assessWarmth(
       evidence({
-        mode: "on",
+        write1hEvidence: true,
         ledger: {
           at: NOW - (MAX_TTL_MS + 1_000),
           provider: "anthropic",
@@ -322,15 +323,48 @@ describe("assessWarmth — step 5/6: prove cold by elapsed time; mode/lastSent/1
         },
       }),
     );
-    expect(atOrPast).toEqual({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "1h" });
+    expect(atOrPast).toEqual({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "5m" });
   });
 
-  it("recent1hWrite:'unknown' also raises the bar to 1h (never treated as `false`)", () => {
+  it("mode:'on' WITH landing evidence ⇒ 1h ceiling applies (evidence and intent compose)", () => {
+    const result = assessWarmth(
+      evidence({
+        mode: "on",
+        write1hEvidence: true,
+        ledger: {
+          at: NOW - (MAX_TTL_MS + 999),
+          provider: "anthropic",
+          modelId: "claude-x",
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      }),
+    );
+    expect(result).toEqual({ state: "unknown", reason: "not-provably-cold" });
+  });
+
+  it("recent1hWrite:'unknown' NO LONGER raises the bar (O1): an unproven maybe is treated as 5m (fail towards cold)", () => {
     const result = assessWarmth(
       evidence({
         recent1hWrite: "unknown",
         ledger: {
           at: NOW - (NOMINAL_5M_MS + 10_000),
+          provider: "anthropic",
+          modelId: "claude-x",
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      }),
+    );
+    expect(result).toEqual({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "5m" });
+  });
+
+  it("recent1hWrite:true (a confirmed recent 1h write) raises the bar to 1h (O1)", () => {
+    const result = assessWarmth(
+      evidence({
+        recent1hWrite: true,
+        ledger: {
+          at: NOW - (MAX_TTL_MS + 999),
           provider: "anthropic",
           modelId: "claude-x",
           cacheRead: 0,

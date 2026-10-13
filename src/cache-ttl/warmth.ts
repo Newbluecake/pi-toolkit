@@ -6,9 +6,11 @@
  * package already tracks (the usage ledger, the keepalive service, and
  * the last payload this module itself sent). It never recomputes economics (that's
  * `src/topic-switch/economics.ts`, P1) and it never guesses: every "warm" verdict traces back to
- * a proven touch; `mode`/`lastSent`/1h write traces only raise the bar for proving "cold" (the
- * Anthropic max TTL is 1h, so beyond that + slack with zero touches is a PROOF of cold, not a
- * guess) and pick `nextWriteTtl`. Anything that can't be proven either way is `"unknown"` — the
+ * a proven touch; `mode`/`lastSent` pick `nextWriteTtl`, and the cold-proof horizon is raised to
+ * Anthropic's 1h max TTL ONLY by *proven* 1h landings (O1, 2026-10-12: an observed `cacheWrite1h>0`,
+ * a confirmed recent 1h write, or the persisted provider-evidence record — never by the mere
+ * INTENT of mode=on / a sent `ttl:"1h"`, which collapsing relays silently downgrade to 5m, see
+ * `provider-evidence.ts`). Anything that can't be proven either way is `"unknown"` — the
  * caller (topic-switch's gate, I6) must treat `unknown` as "don't ask".
  */
 
@@ -44,6 +46,16 @@ export interface WarmthEvidence {
   };
   /** `anyLongWriteSince(ctx, now - MAX_TTL_MS)` — a longer-range 1h-write signal than `ledger.cacheWrite1h` alone (which only reflects the single latest entry). */
   recent1hWrite: boolean | "unknown";
+  /**
+   * O1 (2026-10-12): true only when this provider+model route has a PROVEN 1h-write landing on
+   * record (`provider-evidence.ts`: an observed `cacheWrite1h > 0` within the rolling 30d TTL, or
+   * a `/cache-ttl probe` landing). This is the only way the cold-proof horizon may reach the 1h
+   * ceiling beyond the two direct observations (`ledger.cacheWrite1h`, `recent1hWrite`) — intent
+   * signals (`mode === "on"`, `lastSent.ttl1h`) deliberately no longer qualify: on a collapsing
+   * relay the intent is unwritable, so trusting it inflates "possibly still warm" by 55 minutes
+   * and misleads topic-switch's gate 3a.
+   */
+  write1hEvidence: boolean;
   mode: "auto" | "on" | "off";
   slackMs: number;
   ttlOverrideMs?: number;
@@ -132,8 +144,10 @@ function computeWarmth(e: WarmthEvidence): CacheWarmth {
 
   // 5. Prove cold by elapsed time: the latest possible touch (ledger, our own last send, or any
   //    keepalive activity) must be older than the longest TTL that could possibly still be
-  //    alive, plus slack. mode/lastSent/1h traces ONLY raise that bar to the 1h ceiling — they
-  //    never flip the verdict to warm (that already happened, or didn't, in step 2).
+  //    alive, plus slack. O1: the 1h ceiling requires PROOF of a landed 1h write — the latest
+  //    entry's own `cacheWrite1h > 0`, a confirmed recent 1h write (`recent1hWrite === true`;
+  //    "unknown" no longer qualifies), or the persisted provider-evidence record. mode/lastSent
+  //    intent never raises the bar (and still never flips the verdict to warm — that's step 2).
   const latestPossibleTouch = maxDefined(
     ledgerAt,
     e.lastSent?.at,
@@ -143,8 +157,7 @@ function computeWarmth(e: WarmthEvidence): CacheWarmth {
   );
   // ledgerAt is always defined at this point, so latestPossibleTouch is too.
   const touch = latestPossibleTouch as number;
-  const oneHourPossible =
-    e.mode === "on" || e.lastSent?.ttl1h === true || (ledger.cacheWrite1h ?? 0) > 0 || e.recent1hWrite !== false;
+  const oneHourPossible = (ledger.cacheWrite1h ?? 0) > 0 || e.recent1hWrite === true || e.write1hEvidence === true;
   const maxLife = e.ttlOverrideMs ?? (oneHourPossible ? MAX_TTL_MS : NOMINAL_5M_MS);
   if (e.now - touch >= maxLife + e.slackMs) {
     return { state: "cold", reason: "ttl-elapsed", nextWriteTtl: nextWriteTtlFor(e) };
