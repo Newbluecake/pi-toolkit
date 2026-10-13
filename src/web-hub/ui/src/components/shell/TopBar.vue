@@ -182,7 +182,8 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
           ></span>
         </template>
       </span>
-      <span translate="no">pi web-hub</span>
+      <!-- 2026-10-13 用户拍板：品牌区只留 icon+「pi」（web-hub 字样去掉）；全称仍留在 tooltip。 -->
+      <span translate="no">pi</span>
     </span>
 
     <span class="pill conn" :data-conn="conn" role="status">

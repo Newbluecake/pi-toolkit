@@ -1,6 +1,9 @@
 <!--
   AUTO-GENERATED fixture — quota-web plan verification r_WV2Y9VQZ #3 (audit trail for the
   "TopBar DOM byte-identical to pre-feature when there is no quota data" pin). DO NOT hand-edit.
+  Exception 2026-10-13: the visible brand label changed from "pi web-hub" to "pi" (user ruling,
+  commit 85e38cc) — a deliberate, reviewed baseline refresh of the brand span (and its HTML comment),
+  not a drift fix.
 
   What this is: the exact `outerHTML` produced by mounting the PRE-quota-web `TopBar.vue` (i.e.
   the file as it stood at the capture source below, before the quota pill) with
@@ -28,5 +31,5 @@
   same `git show HEAD:<path>` + temp-file dynamic `import()` + `mount()` dance as above,
   programmatically, and overwrites this file including this header.
 -->
-<header class="topbar"><span class="brand" title="pi web-hub · ui 0.0.0-test@0123456 · 01-02 11:04"><span class="brand-mark" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-logo"></use></svg></span><span translate="no">pi web-hub</span></span><span class="pill conn" data-conn="open" role="status"><span class="dot dot-live"></span> Live</span><!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
+<header class="topbar"><span class="brand" title="pi web-hub · ui 0.0.0-test@0123456 · 01-02 11:04"><span class="brand-mark" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-logo"></use></svg></span><!-- 2026-10-13 用户拍板：品牌区只留 icon+「pi」（web-hub 字样去掉）；全称仍留在 tooltip。 --><span translate="no">pi</span></span><span class="pill conn" data-conn="open" role="status"><span class="dot dot-live"></span> Live</span><!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
          the brand's title tooltip. --><span class="topbar-meta" translate="no">ui 0.0.0-test@0123456 · 01-02 11:04</span><span class="chip readonly-chip"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye"></use></svg>Read-only</span><span class="topbar-spacer"></span><span class="lang-anchor"><button type="button" class="btn btn-ghost lang-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="lang-menu" aria-label="Language: English" title="Language: English"><span class="lang-toggle-cur" translate="no">EN</span><svg class="icon icon-sm" aria-hidden="true"><use href="#i-chev-down"></use></svg></button><!--v-if--></span><span class="settings-anchor"><button type="button" class="btn btn-ghost btn-icon settings-link" aria-label="Settings" title="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings-panel"><svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg></button><!--v-if--></span><!--v-if--></header>
