@@ -85,9 +85,12 @@ const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
  * 2026-10-12 (TEMPORARY): + `App.vue` for the Aw Snap investigation breadcrumb
  * (`pwh_diag_route` — single-key overwrite of {hash, heapMB, dom, at} on every route switch;
  * the hash carries an agentKey, not auth/session data). Removal is a tracked exit condition of
- * docs/dev/web-hub-aw-snap/investigation.md — drop it from this list when the breadcrumb goes. */
+ * docs/dev/web-hub-aw-snap/investigation.md — drop it from this list when the breadcrumb goes.
+ * 2026-10-13 (TEMPORARY): + `transcript/Transcript.vue` for the scroll-rollback investigation
+ * breadcrumb (`pwh_diag_scroll` — a 12-entry ring of save/restore/unfollow facts: scroll
+ * geometry + anchor ids only, no message content). Remove together with the breadcrumb. */
 const LOCALSTORAGE_ALLOWED =
-  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|App\.vue/i;
+  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|App\.vue|transcript\/Transcript\.vue/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {
