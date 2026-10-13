@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AgentList from "../../../src/web-hub/ui/src/components/agents/AgentList.vue";
 import type { AgentCardView } from "../../../src/web-hub/ui/src/types.js";
 
@@ -181,6 +181,56 @@ describe("AgentList.vue — desktop collapse toggle", () => {
     await wrapper.get(".sidebar-collapse-toggle").trigger("click");
     expect(wrapper.find("input.input").exists()).toBe(true);
     expect(wrapper.find("ul.agent-list").exists()).toBe(true);
+  });
+});
+
+/**
+ * 2026-10-12 BUG2: the rail width is an INLINE style on `<html>` — it beats every stylesheet
+ * breakpoint, so it must exist only in the desktop split band (≥1025px). A collapse persisted
+ * from desktop used to squeeze the whole app shell into a 56px column at narrow widths
+ * (blank page + lone rail). These tests pin the band gating with a query-aware matchMedia stub.
+ */
+describe("AgentList.vue — rail width band gating (BUG2)", () => {
+  function stubBand(desktop: boolean, capture?: { cb?: (ev: { matches: boolean }) => void }): void {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(min-width: 1025px)" ? desktop : false,
+      addEventListener: (_t: string, l: (ev: { matches: boolean }) => void) => {
+        if (capture !== undefined && query === "(min-width: 1025px)") capture.cb = l;
+      },
+      removeEventListener: () => {},
+    }));
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.documentElement.style.removeProperty("--sidebar-w");
+  });
+
+  it("collapsed + narrow band ⇒ NO inline --sidebar-w (the BUG2 escape hatch)", () => {
+    stubBand(false);
+    localStorage.setItem("webhub.agentList.collapsed", "1");
+    mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("");
+  });
+
+  it("collapsed + desktop band ⇒ rail var set; a band flip to narrow lifts it reactively", async () => {
+    const cap: { cb?: (ev: { matches: boolean }) => void } = {};
+    stubBand(true, cap);
+    localStorage.setItem("webhub.agentList.collapsed", "1");
+    const wrapper = mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("56px");
+    cap.cb?.({ matches: false });
+    await wrapper.vm.$nextTick();
+    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("");
+    cap.cb?.({ matches: true });
+    await wrapper.vm.$nextTick();
+    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("56px");
+  });
+
+  it("expanded on desktop leaves the var untouched", () => {
+    stubBand(true);
+    mount(AgentList, { props: { cards: [card()], selectedKey: null, filter: "" } });
+    expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("");
   });
 });
 
@@ -1493,5 +1543,270 @@ describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
     expect(wrapper.find(".remove-btn").exists()).toBe(true);
     expect(wrapper.find("li.agent-item").classes()).toContain("renamable");
     expect(wrapper.find("li.agent-item").classes()).toContain("removable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// spawn-relaunch (「离线/过期会话点击直接重新拉起」): stale rows whose card is bound to a
+// TERMINAL managed spawn record turn the whole card into the relaunch action.
+// ---------------------------------------------------------------------------
+
+describe("AgentList.vue — spawn-relaunch (offline managed card)", () => {
+  const RELAUNCH_CAP = "spawn.relaunch.v1";
+
+  function terminalSpawnRec(agentKey: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      spawnId: "sp-rel-0001",
+      state: "exited",
+      createdAt: 1,
+      updatedAt: 2,
+      cwdLabel: "proj",
+      origin: { listener: "loopback", reqId: "r1" },
+      agentKey,
+      ...over,
+    };
+  }
+
+  interface RelaunchFake {
+    hub: HubHandle;
+    calls: string[];
+    setOutcome(o: unknown): void;
+    hold(): void; // keep the next call pending (double-click guard test)
+    release(): void;
+  }
+
+  function relaunchHub(agentKey: string, spawns: unknown, caps: string[] = [RELAUNCH_CAP]): RelaunchFake {
+    const calls: string[] = [];
+    let outcome: unknown = { ok: true, spawnId: "sp-rel-0001", state: "starting" };
+    let pending: (() => void) | undefined;
+    let holdNext = false;
+    const hub = {
+      state: ref({
+        control: true,
+        agents: new Map([[agentKey, agentState({ key: agentKey, down: true })]]),
+        spawns,
+        hub: { caps },
+      }) as Ref<HubState>,
+      dispatch: () => {},
+      spawn: {
+        relaunch: async (spawnId: string) => {
+          calls.push(spawnId);
+          if (holdNext) {
+            holdNext = false;
+            await new Promise<void>((resolve) => {
+              pending = resolve;
+            });
+          }
+          return outcome;
+        },
+      },
+      removeAgent: async (): Promise<RemoveAgentOutcome> => ({ ok: true, removed: true }),
+    } as unknown as HubHandle;
+    return {
+      hub,
+      calls,
+      setOutcome(o) {
+        outcome = o;
+      },
+      hold() {
+        holdNext = true;
+      },
+      release() {
+        pending?.();
+      },
+    };
+  }
+
+  const offCard = (key: string): AgentCardView =>
+    card({ key, down: true, stale: true, visualState: "offline", statusLabel: "Offline" });
+
+  beforeEach(() => {
+    window.location.hash = "";
+  });
+
+  it("clicking the card calls spawn.relaunch(spawnId) and navigates to the old key's detail (successor follow takes it from there)", async () => {
+    const fake = relaunchHub("a-off", { items: [terminalSpawnRec("a-off")], active: 0, max: 4 });
+    const wrapper = mount(AgentList, {
+      props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
+    });
+    const item = wrapper.get("li.agent-item.relaunchable");
+    expect(item.get(".relaunch-hint").text()).toContain("Click to relaunch");
+    await item.get("a.agent-card").trigger("click");
+    await flushPromises();
+    expect(fake.calls).toEqual(["sp-rel-0001"]);
+    expect(window.location.hash).toBe("#/agent/a-off");
+    expect(wrapper.find(".relaunch-note").exists()).toBe(false);
+  });
+
+  it("double-click while in flight ⇒ ONE call, and the busy label shows until it settles", async () => {
+    const fake = relaunchHub("a-off", { items: [terminalSpawnRec("a-off")], active: 0, max: 4 });
+    fake.hold();
+    const wrapper = mount(AgentList, {
+      props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
+    });
+    const item = wrapper.get("li.agent-item.relaunchable");
+    await item.get("a.agent-card").trigger("click");
+    await item.get("a.agent-card").trigger("click");
+    expect(fake.calls).toEqual(["sp-rel-0001"]); // 防双击
+    expect(item.get(".relaunch-hint").text()).toContain("Relaunching…");
+    expect(item.classes()).toContain("relaunching");
+    fake.release();
+    await flushPromises();
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it.each([
+    [{ ok: false, error: "E_SPAWN_GONE", reason: "session-missing", status: 410 }, "no longer exists"],
+    [{ ok: false, error: "E_AGENT_ONLINE", reason: "exit-unconfirmed", status: 409 }, "still running"],
+    [{ ok: false, error: "E_NOT_FOUND", status: 404 }, "record is gone"],
+    [{ ok: false, error: "E_SPAWN_DENIED", reason: "platform", status: 403 }, "not allowed"],
+    [{ ok: false, error: "E_NETWORK", status: 0 }, "Network error"],
+  ])("a failure renders the classified inline note, never navigates: %j", async (outcome, needle) => {
+    const fake = relaunchHub("a-off", { items: [terminalSpawnRec("a-off")], active: 0, max: 4 });
+    fake.setOutcome(outcome);
+    const wrapper = mount(AgentList, {
+      props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
+    });
+    await wrapper.get("li.agent-item.relaunchable a.agent-card").trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".relaunch-note").text()).toContain(needle as string);
+    expect(window.location.hash).toBe("");
+  });
+
+  it("a NON-managed offline row (no terminal record) keeps the plain click=select behavior — no affordance, no call", async () => {
+    const fake = relaunchHub("a-off", { items: [], active: 0, max: 4 });
+    const wrapper = mount(AgentList, {
+      props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
+    });
+    expect(wrapper.find("li.agent-item.relaunchable").exists()).toBe(false);
+    expect(wrapper.find(".relaunch-hint").exists()).toBe(false);
+    await wrapper.get("a.agent-card").trigger("click");
+    await flushPromises();
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("without the spawn.relaunch.v1 cap the affordance never renders (restore-off hub 404s the route)", async () => {
+    const fake = relaunchHub("a-off", { items: [terminalSpawnRec("a-off")], active: 0, max: 4 }, ["spawn.v1"]);
+    const wrapper = mount(AgentList, {
+      props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
+    });
+    expect(wrapper.find(".relaunch-hint").exists()).toBe(false);
+    await wrapper.get("a.agent-card").trigger("click");
+    await flushPromises();
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("the row's own × button still works inside a relaunchable row (click is NOT intercepted)", async () => {
+    const fake = relaunchHub("a-off", { items: [terminalSpawnRec("a-off")], active: 0, max: 4 });
+    const wrapper = mount(AgentList, {
+      props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
+    });
+    // the offline row gets the RemoveButton (removalTargetForAgent ⇒ offline); clicking it must
+    // arm the delete, never relaunch
+    const btn = wrapper.get(".remove-btn");
+    await btn.trigger("click");
+    await flushPromises();
+    expect(fake.calls).toHaveLength(0);
+    expect(window.location.hash).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// restore order-stability (2026-10-13, user report: restart+restore 卡片跳动): a card whose
+// managed session is mid-restore stays in the LIVE group (with its restoring chip) instead of
+// sinking into 「过期与离线」 while its process is temporarily dead.
+// ---------------------------------------------------------------------------
+
+describe("AgentList.vue — restore order-stability (restoring 卡不换组)", () => {
+  /** A hub whose state carries the given agents + a spawns payload with one in-flight restore. */
+  function restoringHub(agentKeys: string[], restoringPrevKey: string): HubHandle {
+    const agents = new Map(agentKeys.map((k) => [k, agentState({ key: k, down: true })]));
+    return {
+      state: ref({
+        control: true,
+        agents,
+        spawns: {
+          items: [
+            {
+              spawnId: "sp-restoring",
+              state: "starting",
+              createdAt: 1,
+              updatedAt: 2,
+              cwdLabel: "proj",
+              origin: { listener: "loopback", reqId: "r" },
+              restore: { attempt: 1, phase: "registering", prevAgentKey: restoringPrevKey },
+            },
+          ],
+          active: 1,
+          max: 4,
+        },
+      }) as Ref<HubState>,
+      dispatch: () => {},
+    } as unknown as HubHandle;
+  }
+
+  it("a down card named by an in-flight restore.prevAgentKey stays in the LIVE group (no sink to 过期与离线), restoring chip intact", () => {
+    const cards = [
+      card({ key: "live-1", shortCwd: "live" }),
+      card({ key: "dead-managed", shortCwd: "managed", down: true, stale: true, visualState: "offline" }),
+      card({ key: "dead-plain", shortCwd: "plain", down: true, stale: true, visualState: "offline" }),
+    ];
+    const hub = restoringHub(["live-1", "dead-managed", "dead-plain"], "dead-managed");
+    const wrapper = mount(AgentList, {
+      props: { cards, selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    const items = wrapper.findAll("li.agent-item");
+    // live-1, then the restoring dead-managed card (exempted), then the group header + plain dead
+    expect(items).toHaveLength(3);
+    expect(items[0]!.text()).toContain("live");
+    expect(items[1]!.text()).toContain("managed");
+    expect(items[1]!.text()).toContain("restoring"); // the existing restoring chip still shows
+    expect(items[2]!.text()).toContain("plain");
+    // exactly one group header — dead-plain is its only member now
+    expect(wrapper.findAll("li.agent-group")).toHaveLength(1);
+    const groupIdx = wrapper.findAll("ul.agent-list > li").findIndex((li) => li.classes().includes("agent-group"));
+    const texts = wrapper.findAll("ul.agent-list > li").map((li) => li.text());
+    expect(texts.indexOf(texts.find((x) => x.includes("plain"))!)).toBeGreaterThan(groupIdx);
+    expect(wrapper.find("ul.agent-list > li.agent-group")!.text()).toBe("Stale & Offline");
+  });
+
+  it("once the restore record settles (no phase), the exemption lifts — a still-down card groups normally", () => {
+    const cards = [card({ key: "dead-managed", down: true, stale: true, visualState: "offline" })];
+    const agents = new Map([["dead-managed", agentState({ key: "dead-managed", down: true })]]);
+    const hub = {
+      state: ref({
+        control: true,
+        agents,
+        spawns: {
+          items: [
+            {
+              spawnId: "sp-restoring",
+              state: "live",
+              createdAt: 1,
+              updatedAt: 2,
+              cwdLabel: "proj",
+              origin: { listener: "loopback", reqId: "r" },
+              agentKey: "new-key",
+              restore: { attempt: 1, prevAgentKey: "dead-managed", restoredAt: 3 }, // stable window, no phase
+            },
+          ],
+          active: 1,
+          max: 4,
+        },
+      }) as Ref<HubState>,
+      dispatch: () => {},
+    } as unknown as HubHandle;
+    const wrapper = mount(AgentList, {
+      props: { cards, selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
+    });
+    expect(wrapper.find("li.agent-group").exists()).toBe(true); // sank back into 过期与离线
   });
 });

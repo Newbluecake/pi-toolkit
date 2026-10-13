@@ -40,10 +40,13 @@
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
+import { useMedia } from "../../composables/useMedia.js";
 import { renameEnabled } from "../../logic/control.js";
 import {
+  classifyRelaunchError,
   newSessionActions,
   pendingRows,
+  relaunchableFor,
   restoringKeys,
   spawnAvailability,
   spawnDeniedKey,
@@ -72,8 +75,14 @@ const filtered = computed(() => {
   if (needle === "") return props.cards;
   return props.cards.filter((c) => `${c.shortCwd} ${c.sessionLabel}`.toLowerCase().includes(needle));
 });
-const live = computed(() => filtered.value.filter((c) => !c.stale && !c.down));
-const staleOrDown = computed(() => filtered.value.filter((c) => c.stale || c.down));
+// 2026-10-13 restore order-stability (user report: restart+restore 卡片跳动): a card whose
+// managed session is mid-restore (an in-flight spawn record's `restore.prevAgentKey` names it)
+// stays in the LIVE group with its `restoring` chip — its process being temporarily dead must
+// not sink it into 「过期与离线」 mid-flight. The final position itself is stabilized one layer
+// down (`@logic/state.js`'s stableAgentOrder slots the successor back at its historic rank).
+const restoringSet = computed(() => restoringKeys(hub?.state.value.spawns ?? null));
+const live = computed(() => filtered.value.filter((c) => (!c.stale && !c.down) || restoringSet.value.has(c.key)));
+const staleOrDown = computed(() => filtered.value.filter((c) => (c.stale || c.down) && !restoringSet.value.has(c.key)));
 
 function onFilterInput(ev: Event): void {
   emit("update:filter", (ev.target as HTMLInputElement).value);
@@ -104,11 +113,18 @@ function applySidebarWidth(isCollapsed: boolean): void {
 }
 
 const collapsed = ref(readCollapsed());
-applySidebarWidth(collapsed.value);
+
+/** The rail width must exist ONLY in the desktop split band (≥1025px, the same breakpoint whose
+ * media query owns every `.is-collapsed` rule): the var is an inline style on `<html>`, which
+ * beats every stylesheet band — leaving it on at narrow widths squeezed the whole app shell
+ * into a 56px column (2026-10-12 BUG2: collapse persisted from desktop ⇒ narrow viewport gets
+ * a blank page with a lone rail). Track the band reactively so a resize across it applies or
+ * lifts the rail immediately. */
+const desktopBand = useMedia(window, "(min-width: 1025px)").matches;
+watch([collapsed, desktopBand], ([c, desktop]) => applySidebarWidth(c && desktop), { immediate: true });
 
 function toggleCollapsed(): void {
   collapsed.value = !collapsed.value;
-  applySidebarWidth(collapsed.value);
   try {
     window.localStorage.setItem(COLLAPSE_KEY, collapsed.value ? "1" : "0");
   } catch {
@@ -335,6 +351,9 @@ interface AgentRow {
   readonly card: AgentCardView;
   readonly target: ReturnType<typeof removalTargetForAgent>;
   readonly rename: { readonly enabled: boolean; readonly name: string };
+  /** spawn-relaunch: the terminal managed record this offline card may re-fork
+   *  (`relaunchableFor` — undefined ⇒ the row keeps the plain click=select behavior). */
+  readonly relaunch: { readonly spawnId: string } | undefined;
 }
 
 /** web-hub-rename plan: same enable formula as `AgentDetail.vue`'s `controlEnabled` +
@@ -368,10 +387,97 @@ function toRow(c: AgentCardView): AgentRow {
     card: c,
     target: removalTargetForAgent(hub?.state.value.agents.get(c.key), hub?.state.value.spawns ?? null),
     rename: renameInfoFor(c),
+    relaunch: relaunchableFor(hub?.state.value.spawns ?? null, c.key, hubCaps.value),
   };
 }
 const liveRows = computed<AgentRow[]>(() => live.value.map(toRow));
 const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
+
+// ---------------------------------------------------------------------------
+// spawn-relaunch (「离线/过期会话点击直接重新拉起」): a stale row whose card is managed by a
+// TERMINAL spawn record turns the WHOLE card click into 「重新拉起」 (capture-phase intercept
+// of AgentCard's anchor — plain hash navigation stays the fallback for every other row).
+// `relaunching` (per-card, memory-only) is the in-flight guard against double clicks; a
+// failure renders a per-row inline error (`classifyRelaunchError` → `spawn.relaunchErr*`).
+// Success: the 202 means the record is `starting` again — we navigate to the OLD key's detail,
+// where DashboardView's restoring state shows and useHub's `successorOf` follow moves the
+// route to the new card once the session is live (the same path a hub-restart restore takes).
+// ---------------------------------------------------------------------------
+const relaunching = ref<ReadonlySet<string>>(new Set());
+const relaunchErr = ref<{ key: string; text: string } | null>(null);
+
+/** Bucket → its `spawn.relaunchErr*` line (prose blocks — translated in zh). */
+function relaunchErrorText(outcome: unknown): string {
+  switch (classifyRelaunchError(outcome)) {
+    case "gone":
+      return t("spawn.relaunchErrGone");
+    case "alive":
+      return t("spawn.relaunchErrAlive");
+    case "missing":
+      return t("spawn.relaunchErrMissing");
+    case "state":
+      return t("spawn.relaunchErrState");
+    case "denied":
+      return t("spawn.relaunchErrDenied");
+    case "launcher":
+      return t("spawn.relaunchErrLauncher");
+    case "rate":
+      return t("spawn.relaunchErrRate");
+    case "deadline":
+      return t("spawn.relaunchErrDeadline");
+    case "unsupported":
+      return t("spawn.relaunchErrUnsupported");
+    default:
+      return t("spawn.relaunchErrNetwork");
+  }
+}
+
+async function relaunchCard(row: AgentRow): Promise<void> {
+  const spawn = hub?.spawn;
+  const relaunch = row.relaunch;
+  if (spawn === undefined || relaunch === undefined) return;
+  const key = row.card.key;
+  if (relaunching.value.has(key)) return; // 防双击
+  relaunchErr.value = null;
+  const next = new Set(relaunching.value);
+  next.add(key);
+  relaunching.value = next;
+  const call = spawn.relaunch;
+  if (call === undefined) {
+    // useHub always provides it (degraded); a bare component-level fake may omit it.
+    relaunchErr.value = { key, text: relaunchErrorText({ ok: false, error: "E_UNSUPPORTED" }) };
+    const done = new Set(relaunching.value);
+    done.delete(key);
+    relaunching.value = done;
+    return;
+  }
+  try {
+    const out = await call.call(spawn, relaunch.spawnId);
+    if (out.ok) {
+      // Navigate to the OLD key: the detail shows 「正在恢复」 while the restore job forks,
+      // then follows the successor card automatically once the session is live.
+      window.location.hash = `#/agent/${encodeURIComponent(key)}`;
+      return;
+    }
+    relaunchErr.value = { key, text: relaunchErrorText(out) };
+  } finally {
+    const done = new Set(relaunching.value);
+    done.delete(key);
+    relaunching.value = done;
+  }
+}
+
+/** Capture-phase click on a stale row: a relaunchable card's whole body is the 「重新拉起」
+ *  action; clicks on the row's own buttons (×/rename) and every non-relaunchable row pass
+ *  through untouched (the anchor's default hash navigation = 选中查看死 transcript). */
+function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
+  if (row.relaunch === undefined) return;
+  const el = ev.target as HTMLElement | null;
+  if (el !== null && typeof el.closest === "function" && el.closest("button") !== null) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  void relaunchCard(row);
+}
 </script>
 
 <template>
@@ -493,9 +599,30 @@ const staleRows = computed<AgentRow[]>(() => staleOrDown.value.map(toRow));
         v-for="row in staleRows"
         :key="row.card.key"
         class="agent-item"
-        :class="{ removable: !!row.target, renamable: row.rename.enabled }"
+        :class="{
+          removable: !!row.target,
+          renamable: row.rename.enabled,
+          relaunchable: row.relaunch !== undefined,
+          relaunching: relaunching.has(row.card.key),
+        }"
+        @click.capture="onStaleRowClick(row, $event)"
       >
         <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
+        <!-- spawn-relaunch affordance: hover-revealed on hover-capable pointers, always visible
+             on touch (same `.agent-item` convention as the delete button); the busy state swaps
+             the label for a spinner line and stays visible until the call settles. -->
+        <span
+          v-if="row.relaunch !== undefined"
+          class="relaunch-hint"
+          :class="{ busy: relaunching.has(row.card.key) }"
+          role="note"
+        >
+          <AppIcon :name="relaunching.has(row.card.key) ? 'loader' : 'refresh'" class="icon-sm" />
+          {{ relaunching.has(row.card.key) ? t("spawn.relaunchPending") : t("spawn.relaunchHint") }}
+        </span>
+        <p v-if="relaunchErr !== null && relaunchErr.key === row.card.key" class="relaunch-note" role="alert">
+          {{ relaunchErr.text }}
+        </p>
         <RenameButton v-if="row.rename.enabled" :agent-key="row.card.key" :name="row.rename.name" />
         <RemoveButton
           v-if="row.target"

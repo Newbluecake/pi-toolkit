@@ -247,7 +247,10 @@
 
 .ld-proc-cols {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0,1fr) — never 1fr alone: grid/flex children default to min-width:auto (content
+   * width), so a long comm name (kworker/u33:25-events_unbound…) used to blow the column out
+   * and push the RSS value past the card edge (2026-10-12 溢出 bug). */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--sp-3);
 }
 .ld-proc-tab {
@@ -288,11 +291,16 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* min-width:0 + flex:1 — lets the name actually shrink below its content width so the
+     ellipsis engages; without it the value column got squeezed out of the card. */
+  min-width: 0;
+  flex: 1 1 auto;
 }
 .ld-proc-val {
   color: var(--c-text-3);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
 }
 .ld-proc-pids {
   display: flex;

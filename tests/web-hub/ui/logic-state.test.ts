@@ -90,6 +90,60 @@ describe("sticky sidebar order", () => {
     const reload = reduce(initialState(storage), { event: "agents", data: [cards[239], cards[238]] });
     expect(reload.order).toEqual(["k238", "k239"]);
   });
+
+  // 2026-10-13 restore order-stability (user report: /webhub restart + restore 后卡片跳动) —
+  // the full disconnect → down → restore → live sequence must end with the card at its
+  // ORIGINAL index, even though the agentKey changed and the old key left mid-flight.
+  it("hub restart + restore: the successor (same sessionId, new agentKey) returns to the ORIGINAL slot", () => {
+    const storage = memoryStorage();
+    const mk = (key: string, sessionId: string) => card(key, { session: { ...card(key).session, sessionId } });
+    const x = mk("X-old", "sess-X");
+    const y = mk("Y", "sess-Y");
+    const z = mk("Z", "sess-Z");
+    let s = reduce(initialState(storage), { event: "agents", data: [x, y, z] });
+    expect(s.order).toEqual(["X-old", "Y", "Z"]);
+
+    // hub restarts: the dead managed card is absent from the new hub's snapshot…
+    s = reduce(s, { event: "agents", data: [y, z] });
+    expect(s.order).toEqual(["Y", "Z"]);
+    // …and the reaped predecessor's removal lands too (idempotent on the order)
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "X-old" } });
+    expect(s.order).toEqual(["Y", "Z"]);
+
+    // the restored fork registers under a NEW key; the session frame can land a beat late
+    s = reduce(s, { event: "agent_up", data: card("X-new", { session: undefined }) });
+    expect(s.order).toEqual(["Y", "Z", "X-new"]); // identity unknown yet ⇒ tail (transient)
+    s = reduce(s, {
+      event: "session",
+      data: { agentKey: "X-new", session: { ...card("X-new").session, sessionId: "sess-X" } },
+    });
+    expect(s.order).toEqual(["X-new", "Y", "Z"]); // historic rank wins — no换位
+
+    // a reload on top of that still resolves the same order (persistence carries the identity)
+    const reloaded = reduce(initialState(storage), { event: "agents", data: [z, mk("X-new", "sess-X"), y] });
+    expect(reloaded.order).toEqual(["X-new", "Y", "Z"]);
+  });
+
+  it("restore successor arriving WITH its session on agent_up slots in directly at the historic rank", () => {
+    const storage = memoryStorage();
+    const mk = (key: string, sessionId: string) => card(key, { session: { ...card(key).session, sessionId } });
+    let s = reduce(initialState(storage), { event: "agents", data: [mk("A", "sess-A"), mk("B", "sess-B")] });
+    s = reduce(s, { event: "agent_removed", data: { agentKey: "A" } });
+    expect(s.order).toEqual(["B"]);
+    s = reduce(s, { event: "agent_up", data: mk("A2", "sess-A") });
+    expect(s.order).toEqual(["A2", "B"]); // no tail-then-jump — the session identity lands immediately
+  });
+
+  it("a genuinely NEW identity still appends at the tail (the global rank sort never reorders existing cards)", () => {
+    const storage = memoryStorage();
+    const mk = (key: string, sessionId: string) => card(key, { session: { ...card(key).session, sessionId } });
+    let s = reduce(initialState(storage), { event: "agents", data: [mk("A", "sess-A"), mk("B", "sess-B")] });
+    s = reduce(s, { event: "agent_up", data: mk("C", "sess-C") });
+    expect(s.order).toEqual(["A", "B", "C"]);
+    // and a later snapshot in any hub order keeps the established order
+    s = reduce(s, { event: "agents", data: [mk("C", "sess-C"), mk("A", "sess-A"), mk("B", "sess-B")] });
+    expect(s.order).toEqual(["A", "B", "C"]);
+  });
 });
 
 /** hello + agents + subscribing + history(fromSeq) ⇒ agent A loaded. */

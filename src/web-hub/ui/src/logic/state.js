@@ -223,6 +223,23 @@ function stableAgentOrder(s, agents, incoming) {
     return ar - br;
   });
   const order = [...known, ...fresh];
+  // 2026-10-13 restore order-stability fix (user report: /webhub restart + restore 后列表卡片跳动):
+  // a card whose persisted identity was seen before — the restore successor carries the SAME
+  // sessionId under a NEW agentKey — must slot back at its HISTORIC rank, not the tail. Sort the
+  // WHOLE order by sticky rank (stable: ties keep relative order). Known keys' ranks are already
+  // ascending (stickyOrder is maintained in `order`'s own sequence below), so existing cards
+  // never move; unranked (genuinely new) identities keep their appended tail order; the
+  // successor re-enters at the old card's exact index. The old key leaving mid-flight
+  // (`agent_removed` on the reaped prevAgentKey) never disturbs the rank memory — stickyOrder
+  // outlives individual keys by design. Decision note: fixed HERE (the reducer) rather than in
+  // AgentList's presentation grouping, because `order` is the single source every consumer
+  // (sidebar, keyboard nav, selection auto-pick) reads — a view-level patch would leave the
+  // other readers jumping.
+  order.sort((a, b) => {
+    const ar = ranks.get(orderIdentity(agents.get(a).card)) ?? Number.POSITIVE_INFINITY;
+    const br = ranks.get(orderIdentity(agents.get(b).card)) ?? Number.POSITIVE_INFINITY;
+    return ar - br;
+  });
   let stickyOrder = [...s.stickyOrder];
   for (const k of order) {
     const id = orderIdentity(agents.get(k).card);

@@ -28,7 +28,10 @@ function scheduleReset(): void {
 }
 
 /** Off-screen (not `display: none` — a `Range` can't select that) selectable copy of `text`,
- * removed a few seconds later. */
+ * removed a few seconds later. `white-space: pre-wrap` keeps newlines/indentation intact when
+ * the selection is serialized by a manual Ctrl/Cmd+C (2026-10-12: the default `normal` used
+ * to collapse the whole text into one line). Rare path since useClipboard's execCommand
+ * fallback — this only remains for browsers that block BOTH clipboard APIs. */
 function selectFallback(text: string): void {
   const span = document.createElement("span");
   span.textContent = text;
@@ -37,6 +40,7 @@ function selectFallback(text: string): void {
   span.style.left = "0";
   span.style.opacity = "0";
   span.style.pointerEvents = "none";
+  span.style.whiteSpace = "pre-wrap";
   document.body.appendChild(span);
   const range = document.createRange();
   range.selectNodeContents(span);
