@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createSpawnService } from "../../src/service/spawn-service.js";
+import { TombstoneStore } from "../../src/service/tombstone.js";
 import type { AgentTypeConfig, RunOutcome, RunSnapshot, SpawnRequest } from "../../src/core/types.js";
 import type { Runner, SlotPool } from "../../src/service/ports.js";
 import type { ModelCandidate } from "../../src/config/model-hint.js";
@@ -90,7 +91,12 @@ function port(o: PortOpts = {}): ExternalAgentsPort {
     dispose: () => undefined,
   };
 }
-function harness(opts: { external?: ExternalAgentsPort; agentDir?: string; durable?: RunSnapshot[] }) {
+function harness(opts: {
+  external?: ExternalAgentsPort;
+  agentDir?: string;
+  durable?: RunSnapshot[];
+  tombstones?: RunSnapshot[];
+}) {
   const runs: Array<{ runId: string; model?: unknown }> = [];
   const labels: string[] = [];
   const runner: Runner = {
@@ -115,6 +121,16 @@ function harness(opts: { external?: ExternalAgentsPort; agentDir?: string; durab
     ...(opts.external ? { external: opts.external } : {}),
     ...(opts.agentDir ? { agentDir: opts.agentDir } : {}),
     ...(opts.durable ? { durableRecords: () => opts.durable! } : {}),
+    // §15 跟踪项 2（P5）：tombstone-only resume 目标（live/durable 都已不在）。
+    ...(opts.tombstones
+      ? {
+          tombstones: (() => {
+            const store = new TombstoneStore(60_000, () => 0);
+            for (const s of opts.tombstones!) store.register(s);
+            return store;
+          })(),
+        }
+      : {}),
   });
   return { service, runs, labels };
 }
@@ -198,6 +214,15 @@ describe("spawn admission: external (droid) gate", () => {
   });
   it("external resume without override inherits the droid model (type default pi model ignored)", async () => {
     const h = harness({ external: port(), agentDir, durable: [snap("r_EXTSESS01", extFile, DROID)] });
+    const r = await h.service.spawn({ type: "pidef", prompt: "x", resumeFrom: "r_EXTSESS01" });
+    await flush();
+    expect("runId" in r).toBe(true);
+    expect(h.runs[0]?.model).toEqual(DROID);
+  });
+  it("§15-2 (P5): tombstone-only resume target without override still inherits the droid model", async () => {
+    // live 记录与 durable store 都已不在（重启 + 逐出后）：唯一残存的是 tombstone，
+    // 其 model 字段（P5 补）成为继承源——无 override 的外部 resume 不再落回类型默认。
+    const h = harness({ external: port(), agentDir, tombstones: [snap("r_EXTSESS01", extFile, DROID)] });
     const r = await h.service.spawn({ type: "pidef", prompt: "x", resumeFrom: "r_EXTSESS01" });
     await flush();
     expect("runId" in r).toBe(true);

@@ -192,6 +192,20 @@ describe("runtime-adapter: external (droid) runs", () => {
     expect((captured as Record<string, unknown>).toolScope).toBeDefined();
   });
 
+  it("§15-1 (P5): planRun persist falls back to externalPersistDefault (rememberAgents=false ⇒ no transcript)", async () => {
+    // 三档：显式 persist 优先；缺省回落注入值（与 PiSessionDriver 的 ?? rememberAgents
+    // 同口径）；未注入时保持 true（与改动前一致）。
+    const explicit: PlanRunInput[] = [];
+    await runWith(rs({ provider: "droid", id: "m" }), "ok", { external: fakePort(explicit) });
+    expect(explicit[0]!.persist).toBe(true); // 未注入 ⇒ 默认 true（旧口径）
+    const inherit: PlanRunInput[] = [];
+    await runWith(rs({ provider: "droid", id: "m" }), "ok", {
+      external: fakePort(inherit),
+      externalPersistDefault: false,
+    });
+    expect(inherit[0]!.persist).toBe(false); // rememberAgents=false 兑底生效
+  });
+
   const schema = { type: "object", properties: { v: { type: "number" } }, required: ["v"] };
   it("schema: final ```json block is extracted and validated", async () => {
     const { outcome } = await runWith(rs({ provider: "droid", id: "m" }, schema), 'done\n```json\n{"v":1}\n```', {

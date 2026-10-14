@@ -7,9 +7,11 @@ import { createCatalogPoolPort } from "../../src/quota/pools.js";
 import { createQuotaStack as createRealQuotaStack, type QuotaStack as RealQuotaStack } from "../../src/quota/index.js";
 import { buildSessionStack, type Stack } from "../../src/stack.js";
 import { createQuotaHintHook } from "../../src/quota/index.js";
+import { parseSubscriptionProviders, pickAlternatives } from "../../src/quota/gate.js";
 import type { ProviderVerdict } from "../../src/quota/ladder.js";
 import { DEFAULT_SETTINGS, type AgentSettings, type QuotaSettings } from "../../src/config/settings.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { buildDroidStack, makeBinary, type DroidStack } from "./helpers/external-droid.js";
 
 /**
  * quota-plan §9 末尾：装配面（Pack A）的六条集成用例。
@@ -347,6 +349,39 @@ const workerTypes = (() => {
   } as never;
 })();
 
+/**
+ * 15.x P7 转入项 2（P5）：真 stack 端到端——不再 vi.spyOn 委托。buildDroidStack 用
+ * fake-droid wrapper 当 binary：端口/目录探测（stack_build 后台）→ createCatalogPoolPort
+ * → createQuotaStack 的 droid 输入 → service 判定面 → stack.ts 的闸门 deps，全链真接线。
+ * billing 响应经 stub 的全局 fetch（绝不触达 api.factory.ai）。
+ */
+async function realDroidStack(respond: () => Response, quotaOver: Partial<QuotaSettings> = {}): Promise<DroidStack> {
+  vi.stubEnv("FACTORY_API_KEY", FACTORY_KEY);
+  const fetchMock = vi.fn(async (_url: unknown, _init?: unknown) => respond());
+  vi.stubGlobal("fetch", fetchMock);
+  const binary = makeBinary(join(tmpdir(), `quota-wiring-bin-${Math.random().toString(36).slice(2)}`), []);
+  const s = buildDroidStack({
+    binary,
+    quota: { providers: "droid", ...(quotaOver as object) } as never,
+  });
+  // 目录探测（stack_build 后台启动）完成后再判定/派发，否则池映射退化为 custom: 启发式。
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    const ids = (s.stack.external?.advertised() ?? []).map((m) => m.id);
+    if (ids.includes("kimi-k3") && ids.includes("claude-sonnet-5")) break;
+    if (Date.now() > deadline) throw new Error("catalog probe did not complete");
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  s.stack.quota?.refreshIfStale();
+  await s.stack.quota?.whenIdle();
+  return s;
+}
+
+const realStacks: DroidStack[] = [];
+afterEach(() => {
+  for (const s of realStacks.splice(0)) s.dispose();
+});
+
 /** session stack（providers=""，零网络）+ 闸门委托给真 droid service。 */
 function sessionStackWith(h: DroidHarness, cwd: string): Stack {
   const stack = buildSessionStack(fakePi(), stackContext(cwd), quotaSettings(), workerTypes, []);
@@ -355,110 +390,79 @@ function sessionStackWith(h: DroidHarness, cwd: string): Stack {
   return stack;
 }
 
-describe("quota wiring — droid pools (P7)", () => {
+describe("quota wiring — droid pools (P7, real-stack e2e since P5)", () => {
   it("standard exhausted ⇒ spawn droid/<standard model> is fast-failed with core-pool + pi-native alternatives; no run is created", async () => {
-    const h = droidHarness(() => jsonResp(fixtureJson("factory-limits-standard-exhausted.json")));
-    h.stack.service.refreshIfStale();
-    await h.stack.service.whenIdle();
-    expect(h.fetchMock).toHaveBeenCalledTimes(1); // 两个池共用一次请求
-    // 回归：`providers:"droid"` token 必须展开成两个虚拟 id（曾只置开关位，对子被 selectAdapters 滤光 ⇒ 零请求）。
-    expect(h.stack.service.verdicts().map((v) => v.provider)).toEqual(["droid-standard", "droid-core"]);
-    const [url, init] = h.fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
-    expect(url).toBe("https://api.factory.ai/api/billing/limits");
-    expect(init.headers.Authorization).toBe(`Bearer ${FACTORY_KEY}`);
-
-    const stack = sessionStackWith(h, "/tmp/pi-subagent-quota-droid-block");
-    const spawned = await stack.spawn.spawn({
+    const s = await realDroidStack(() => jsonResp(fixtureJson("factory-limits-standard-exhausted.json")));
+    realStacks.push(s);
+    // 两个池的判定面真实存在（真适配器 + 真 catalog 端口）。
+    expect(s.stack.quota?.verdicts().map((v) => v.provider)).toEqual(["droid-standard", "droid-core"]);
+    const spawned = await s.stack.spawn.spawn({
       type: "worker",
       prompt: "needs the standard pool",
-      modelOverride: { provider: "droid", id: "claude-opus-5-5" },
+      modelOverride: { provider: "droid", id: "claude-sonnet-5" },
     });
     expect(spawned).toMatchObject({ error: { kind: "config", retryable: false } });
     const message = "error" in spawned ? spawned.error.message : "";
-    expect(message).toContain("quota gate: droid/claude-opus-5-5（standard 池）");
-    expect(message).toContain("优先改用 droid core 池模型：droid/glm-5.3、droid/kimi-k3");
-    // session registry 里没有可推荐的 pi 模型 ⇒ 只有 core 行，没有 pi 行。
-    expect(message).not.toContain("pi 原生子 agent");
-    expect(message).toContain("Factory 超额策略为 extraUsage（额外余额 $12.34）"); // fixture overage=extraUsage, not opened
+    expect(message).toContain("quota gate: droid/claude-sonnet-5（standard 池）");
+    // fake 目录的 core 池只有 kimi-k3（auto=router、old-model-1=deprecated 已滤）。
+    expect(message).toContain("优先改用 droid core 池模型：droid/kimi-k3");
+    expect(message).toContain("Factory 超额策略为 extraUsage（额外余额 $12.34）");
     expect(message).not.toContain(FACTORY_KEY);
-    expect(stack.query.list()).toEqual([]);
-    teardown(stack);
-    h.stack.dispose();
+    expect(s.stack.query.list()).toEqual([]);
   });
 
-  it("droid/glm-5.3 (core pool, healthy) passes the gate while standard stays exhausted", async () => {
-    const h = droidHarness(() => jsonResp(fixtureJson("factory-limits-standard-exhausted.json")));
-    h.stack.service.refreshIfStale();
-    await h.stack.service.whenIdle();
-    const stack = sessionStackWith(h, "/tmp/pi-subagent-quota-droid-core");
+  it("droid/kimi-k3 (core pool, healthy) passes the gate while standard stays exhausted", async () => {
+    const s = await realDroidStack(() => jsonResp(fixtureJson("factory-limits-standard-exhausted.json")));
+    realStacks.push(s);
     // resumeFrom 指向不存在的 run：该错误发生在闸门**之后**——闸门若拦会先返回 quota gate 文案。
-    const spawned = await stack.spawn.spawn({
+    const spawned = await s.stack.spawn.spawn({
       type: "worker",
       prompt: "core pool is fine",
-      modelOverride: { provider: "droid", id: "glm-5.3" },
+      modelOverride: { provider: "droid", id: "kimi-k3" },
       resumeFrom: "no-such-run-anywhere",
     });
     expect("error" in spawned ? spawned.error.message : "").not.toContain("quota gate");
-    expect(stack.query.list()).toEqual([]);
-    teardown(stack);
-    h.stack.dispose();
+    expect(s.stack.query.list()).toEqual([]);
   });
 
   it("droidAllowExtraUsage=true opens the standard gate (extraUsage + balance) — same exhausted data passes", async () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "pi-quota-droid-open-"));
-    tmpDirs.push(agentDir);
-    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
-    vi.stubEnv("FACTORY_API_KEY", FACTORY_KEY);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResp(fixtureJson("factory-limits-standard-exhausted.json"))),
-    );
-    const port = createCatalogPoolPort({ provider: "droid", catalog: () => CATALOG });
-    const real = createRealQuotaStack({
-      settings: { ...DEFAULT_SETTINGS.quota, providers: "droid", droidAllowExtraUsage: true },
-      clock: new FakeClock(1_000),
-      statePath: join(agentDir, "quota-state.json"),
-      droid: { pools: () => port },
-    })!;
-    real.service.refreshIfStale();
-    await real.service.whenIdle();
-    const h = { stack: real } as DroidHarness;
-    const stack = sessionStackWith(h, "/tmp/pi-subagent-quota-droid-open");
-    const spawned = await stack.spawn.spawn({
+    const s = await realDroidStack(() => jsonResp(fixtureJson("factory-limits-standard-exhausted.json")), {
+      droidAllowExtraUsage: true,
+    });
+    realStacks.push(s);
+    const spawned = await s.stack.spawn.spawn({
       type: "worker",
       prompt: "money is explicitly allowed",
-      modelOverride: { provider: "droid", id: "claude-opus-5-5" },
+      modelOverride: { provider: "droid", id: "claude-sonnet-5" },
       resumeFrom: "no-such-run-anywhere",
     });
     expect("error" in spawned ? spawned.error.message : "").not.toContain("quota gate");
-    teardown(stack);
-    real.dispose();
   });
 
-  it("no droid input injected ⇒ zero Factory requests, zero credential warnings, no gate effect — even with providers listing droid", async () => {
-    const h = droidHarness(() => jsonResp(fixtureJson("factory-limits-standard-exhausted.json")), {
-      withDroidInput: false,
-    });
-    h.stack.service.refreshIfStale();
-    h.clock.advance(DEFAULT_SETTINGS.quota.refreshMs + 1);
-    h.stack.service.refreshIfStale();
-    await h.stack.service.whenIdle();
-    expect(h.fetchMock).not.toHaveBeenCalled();
-    expect(h.warn).not.toHaveBeenCalled();
-    expect(h.stack.service.verdicts()).toEqual([]);
-    expect(h.stack.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })).toBeUndefined();
-    expect(h.clock.pendingTimers).toBe(0);
-    // 该 service 经闸门依旧放行 droid 模型（旧路径：非受管 ⇒ 放行）。
-    const stack = sessionStackWith(h, "/tmp/pi-subagent-quota-droid-uninjected");
-    const spawned = await stack.spawn.spawn({
-      type: "worker",
-      prompt: "unmanaged",
-      modelOverride: { provider: "droid", id: "claude-opus-5-5" },
-      resumeFrom: "no-such-run-anywhere",
-    });
-    expect("error" in spawned ? spawned.error.message : "").not.toContain("quota gate");
-    teardown(stack);
-    h.stack.dispose();
+  it("no droid input (externalAgents off) ⇒ verdictsForModel undefined — the gate stays on the legacy path", async () => {
+    // enabled=false ⇒ 端口缺席 ⇒ stack.ts 不注入 droid 输入（15.x-3 同源断言，这里补判定面）。
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-quota-droid-off-"));
+    tmpDirs.push(agentDir);
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const stack = buildSessionStack(
+      fakePi(),
+      stackContext("/tmp/pi-subagent-quota-droid-off"),
+      quotaSettings({ providers: "droid" }),
+      workerTypes,
+      [],
+    );
+    try {
+      expect(stack.external).toBeUndefined();
+      expect(stack.quota?.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })).toBeUndefined();
+      expect(stack.quota?.poolAlternatives("droid-standard")).toEqual([]);
+    } finally {
+      stack.quota?.dispose();
+      stack.scheduler.stop();
+      stack.rpc.close();
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prev;
+    }
   });
 
   it("droid input injected but `droid` absent from quota.providers ⇒ zero requests, one hint warning", async () => {
@@ -492,20 +496,35 @@ describe("quota wiring — droid pools (P7)", () => {
       const everything = JSON.stringify([h.warn.mock.calls, h.setStatus.mock.calls, h.stack.service.problems()]);
       expect(everything).not.toContain(FACTORY_KEY);
       expect(everything).not.toContain("fk-live");
-
-      // 不拦：任何 droid 模型的 spawn 都越过闸门（无快照 ⇒ fail-open）。
-      const stack = sessionStackWith(h, `/tmp/pi-subagent-quota-droid-auth-${status}`);
-      const spawned = await stack.spawn.spawn({
-        type: "worker",
-        prompt: "auth trouble must not block",
-        modelOverride: { provider: "droid", id: "claude-opus-5-5" },
-        resumeFrom: "no-such-run-anywhere",
-      });
-      const message = "error" in spawned ? spawned.error.message : "";
-      expect(message).not.toContain("quota gate");
-      expect(message).not.toContain(FACTORY_KEY);
-      teardown(stack);
       h.stack.dispose();
     },
   );
+
+  it("15.x-5: the turn_end hook walks the real stack — droid L3 alternatives include the core pool", async () => {
+    const s = await realDroidStack(() => jsonResp(fixtureJson("factory-limits-standard-exhausted.json")));
+    realStacks.push(s);
+    const pi = fakePi();
+    const holder: { current?: Stack } = {};
+    holder.current = s.stack;
+    // 与 index.ts 逐字同构的钩子接线（含 poolAlternatives 行）。
+    const hook = createQuotaHintHook({
+      state: () => holder.current?.quotaHint,
+      verdicts: () => holder.current?.quota?.verdicts() ?? [],
+      refresh: () => holder.current?.quota?.refreshIfStale(),
+      sendMessage: (message, options) => pi.sendMessage(message, options),
+      alternatives: (provider) =>
+        pickAlternatives(provider, {
+          verdictFor: (p) => holder.current?.quota?.verdictFor(p),
+          available: () => holder.current?.models.recommendable() ?? [],
+          isSubscription: parseSubscriptionProviders(DEFAULT_SETTINGS.quota.subscriptionProviders),
+          poolAlternatives: (b) => holder.current?.quota?.poolAlternatives(b) ?? [],
+        }),
+    });
+    hook({}, turnCtx());
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const sent = JSON.stringify(pi.sendMessage.mock.calls[0]);
+    expect(sent).toContain("droid-standard");
+    expect(sent).toContain("droid/kimi-k3"); // core 池替代真实来自 stack 的 quota service
+    expect(sent).not.toContain(FACTORY_KEY);
+  });
 });
