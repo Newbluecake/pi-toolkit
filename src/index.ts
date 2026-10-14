@@ -524,6 +524,12 @@ export default function activate(rawPi: ExtensionAPI): void {
       runs: { setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts) },
       resolveHint: (hint) => holder.current?.models.resolveHint(hint),
       available: () => holder.current?.models.available() ?? [],
+      // external-agent plan §5.4/§5.5（P5）：仅 externalAgents.droid.enabled 时注入（settings
+      // 在 activate() 快照；enabled ⇒ 每个 session stack 都带端口）。谓词经 holder 晚绑定，
+      // /reload 后新栈缺席即自动失效；缺席 ⇒ droid/x 走原未知模型路径（字节一致，评审 #7）。
+      ...(settings.externalAgents.droid.enabled
+        ? { externalOwns: (p: string) => holder.current?.external?.owns(p) === true }
+        : {}),
       resolveRun: forwardResolveRun(holder),
     }),
   );
@@ -634,6 +640,15 @@ export default function activate(rawPi: ExtensionAPI): void {
     "pi_subagent_models",
     availableModelsSection({
       stackAvailable: () => holder.current?.models.available(),
+      // external-agent plan §5.3/§5.5（P5）：端口存在时投影 droid 子块——advertiseMax 截断
+      // 与 total（… +N more）都在这里（§15 跟踪项 4）；tokenMultiplier 已折进 note。
+      externalModels: () => {
+        const port = holder.current?.external;
+        if (port === undefined) return undefined;
+        const all = port.advertised();
+        const max = settings.externalAgents.droid.advertiseMax;
+        return [{ provider: "droid", models: all.slice(0, max), total: all.length }];
+      },
     }),
   );
   // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear
@@ -803,6 +818,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.fleetWidget?.dispose();
       holder.current.keepalive?.dispose();
       holder.current.quota?.dispose();
+      holder.current.external?.dispose(); // external-agent plan §5.5（P5）：停目录探测（与 /reload 重建双保险）
       holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
       holder.current.load?.dispose();
       holder.current.scheduler.stop();
@@ -819,6 +835,10 @@ export default function activate(rawPi: ExtensionAPI): void {
       [mergeExtensionPoints(extensionPoints)],
       _event.reason,
       loadHintState,
+      // external-agent plan §5.5（P5）：memory 的外部导出（P4a renderForExternal）经
+      // holder 晚绑定——wireMemory 在 activate() 早期已返回，这里只传 getter；是否
+      // 真正注入由 buildSessionStack 按 externalAgents.droid.{enabled,injectMemory} 判定。
+      memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
     );
     holder.current = stack;
     if (ctx.hasUI && typeof ctx.ui.addAutocompleteProvider === "function") {

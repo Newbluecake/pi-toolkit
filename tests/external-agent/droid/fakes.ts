@@ -3,9 +3,9 @@
  * UsageLedger/CatalogStore（不 import P2 实现——并行纪律）。
  */
 import { FakeClock } from "../../../src/core/clock.js";
+import type { UsageDelta } from "../../../src/core/types.js";
 import type {
   ExternalTokenCounts,
-  UsageDelta,
   UsageLedger,
   UsageLedgerTotals,
   ChildExit,
@@ -17,8 +17,8 @@ import type {
   CatalogStore,
   ExternalCatalog,
   ExternalFrameworkDeps,
-  ExternalPricing,
 } from "../../../src/external-agent/types.js";
+import type { ExternalPricing } from "../../../src/core/types.js";
 import type { ExternalSessionSpec, TranscriptHeader } from "../../../src/external-agent/types.js";
 
 export { FakeClock };
@@ -86,6 +86,8 @@ export class FakeRpc implements JsonRpcClient {
   dynamicHandler: (() => FakeRpcHandler | undefined) | undefined;
   failAllCalls: ClassifiedLike[] = [];
   fed: (Buffer | string)[] = [];
+  /** §15（P3 验收遗留）：failAll 同真客户端语义拒绝挂起请求（无 handler 的永悬 promise 也一样）。 */
+  private pendingRejects = new Set<(e: ClassifiedLike) => void>();
   constructor(public opts: JsonRpcClientOptions) {}
   feed(chunk: Buffer | string): void {
     this.fed.push(chunk);
@@ -93,7 +95,10 @@ export class FakeRpc implements JsonRpcClient {
   request<T = unknown>(method: string, params: unknown, timeoutMs: number): Promise<T> {
     this.requests.push({ method, params, timeoutMs });
     const handler = this.handler ?? this.dynamicHandler?.();
-    if (handler === undefined) return new Promise<T>(() => {});
+    if (handler === undefined)
+      return new Promise<T>((_resolve, reject) => {
+        this.pendingRejects.add(reject);
+      });
     try {
       const result = handler(method, params);
       if (result instanceof Error) return Promise.reject(result);
@@ -104,6 +109,15 @@ export class FakeRpc implements JsonRpcClient {
   }
   failAll(e: ClassifiedLike): void {
     this.failAllCalls.push(e);
+    const rejects = [...this.pendingRejects];
+    this.pendingRejects.clear();
+    for (const reject of rejects) {
+      try {
+        reject(e);
+      } catch {
+        /* 防御 */
+      }
+    }
   }
   stats(): { lateResponses: number; nonJsonLines: number } {
     return { lateResponses: 0, nonJsonLines: 0 };
@@ -278,7 +292,7 @@ export interface FakeDeps {
   spawnOpts: ManagedChildOptions[];
   warnings: string[];
   spawnError?: Error;
-  rpcHandler?: FakeRpcHandler;
+  rpcHandler?: FakeRpcHandler | undefined;
   readHeader?: (path: string) => TranscriptHeader | undefined;
 }
 

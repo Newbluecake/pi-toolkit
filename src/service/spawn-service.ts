@@ -366,7 +366,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     for (const snap of deps.durableRecords?.() ?? []) {
       if (snap.runId === runId && snap.diag.model !== undefined) return snap.diag.model;
     }
-    return undefined;
+    // external-agent §15 跟踪项 2（P5）：live/durable 都已不在（tombstone-only）时的
+    // 最后来源——外部会话 resume 无 override 时继承 droid 模型不再落空。
+    return tombstones.get(runId)?.model;
   };
   const terminal = (s: string) => ["completed", "failed", "timed_out", "aborted"].includes(s);
   const finish = (outcome: RunOutcome) => {

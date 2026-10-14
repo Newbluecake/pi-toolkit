@@ -18,7 +18,7 @@
  * 用法：node fake-droid.mjs [--mode <name>] [--script <jsonl>] [--delay-ms <n>]
  *         [--ignore-sigterm] [--no-exit-on-eof]
  * 模式（§7.2 全清单；也可用同名独立 flag）：default(无) / hang-after-init / no-first-event /
- *   silent-turn / half-line / crash-mid-turn / ignore-interrupt / ignore-sigterm /
+ *   silent-turn / half-line / crash-mid-turn / exit-during-init / ignore-interrupt / ignore-sigterm /
  *   no-exit-on-eof / drift / envelope-reject / permission-request / permission-no-ack /
  *   ask-user-request / http-402 / stdout-garbage / spawn-grandchild / slow-init / usage-script /
  *   echo-cwd / unknown-model-on-update
@@ -26,10 +26,18 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 const PROTO = "1.264.0";
 const API = "1.0.0";
+
+/** P5 集成观测接缝（测试 wrapper 经 env 注入路径；生产路径恒空 ⇒ 零行为变化）。 */
+const trace = (line) => {
+  if (typeof process.env.DROID_TRACE_FILE !== "string") return;
+  try {
+    appendFileSync(process.env.DROID_TRACE_FILE, line + "\n");
+  } catch {}
+};
 
 const FAKE_MODELS = [
   {
@@ -93,6 +101,7 @@ function parseArgs(argv) {
     ignoreSigterm: false,
     noExitOnEof: false,
     selfTest: false,
+    modelsFile: undefined,
   };
   const args = [...argv];
   while (args.length > 0) {
@@ -101,6 +110,7 @@ function parseArgs(argv) {
     else if (a === "--mode") o.mode = args.shift();
     else if (a === "--script") o.script = args.shift();
     else if (a === "--delay-ms") o.delayMs = Number(args.shift() ?? 0);
+    else if (a === "--models-file") o.modelsFile = args.shift();
     else if (a === "--ignore-sigterm") o.ignoreSigterm = true;
     else if (a === "--no-exit-on-eof") o.noExitOnEof = true;
     else if (a === "exec" || a === "--input-format" || a === "--output-format") {
@@ -113,6 +123,8 @@ function parseArgs(argv) {
 }
 
 function runFake(o) {
+  trace(`env:DISABLE_AUTO_UPDATE=${process.env.DISABLE_AUTO_UPDATE ?? "unset"}`);
+  trace(`env:FACTORYD_DISABLE_AUTO_UPDATE=${process.env.FACTORYD_DISABLE_AUTO_UPDATE ?? "unset"}`);
   const proto = o.mode === "drift" ? "9.9.9" : PROTO;
   const envelope = { jsonrpc: "2.0", factoryApiVersion: API, factoryProtocolVersion: proto };
   const send = (frame) => process.stdout.write(JSON.stringify({ ...envelope, ...frame }) + "\n");
@@ -450,8 +462,15 @@ function runFake(o) {
       return;
     }
     const { id, method, params } = frame;
+    trace(`${method}`);
     switch (method) {
       case "droid.initialize_session": {
+        if (o.mode === "exit-during-init") {
+          // §15（P3 验收遗留）：收到 init 就退出、不应答——驱动 provider 的早退监听
+          //（rpc.failAll）而不是 initTimeoutMs 超时。
+          process.exit(3);
+          return;
+        }
         const doInit = () => {
           sessionId = typeof params?.sessionId === "string" ? params.sessionId : randomUUID();
           if (typeof params?.modelId === "string") settings.modelId = params.modelId;
@@ -466,9 +485,20 @@ function runFake(o) {
             hostId: "fake-host",
             session: { messages: [] },
             settings: fullEcho(),
-            availableModels: FAKE_MODELS,
+            availableModels: o.modelsFile !== undefined ? JSON.parse(readFileSync(o.modelsFile, "utf8")) : FAKE_MODELS,
           };
-          if (o.mode === "echo-cwd") result.echo = { processCwd: process.cwd(), initCwd: params?.cwd };
+          if (o.mode === "echo-cwd") {
+            result.echo = { processCwd: process.cwd(), initCwd: params?.cwd };
+            // P5 集成观测：把 fake 的进程 cwd / init cwd 报给测试（echo-cwd 模式专用）。
+            if (typeof process.env.DROID_ECHO_FILE === "string") {
+              try {
+                appendFileSync(
+                  process.env.DROID_ECHO_FILE,
+                  JSON.stringify({ processCwd: process.cwd(), initCwd: params?.cwd }) + "\n",
+                );
+              } catch {}
+            }
+          }
           respond(id, result);
         };
         if (o.mode === "slow-init") setTimeout(doInit, o.delayMs > 0 ? o.delayMs : 1500);
@@ -571,6 +601,7 @@ function runFake(o) {
         process.kill(g.pid, "SIGKILL");
       } catch {}
     });
+    trace(`grandchild:${g.pid}`);
   }
 }
 

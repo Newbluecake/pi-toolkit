@@ -7,9 +7,13 @@ const blocks = (...b: ExternalContextBlock[]): readonly ExternalContextBlock[] =
 describe("renderFirstMessage (external-agent plan §2.12/§4.8)", () => {
   it("resume path: everything absent ⇒ text verbatim", () => {
     expect(renderFirstMessage({ contextBlocks: [], text: "do the thing" })).toBe("do the thing");
-    expect(renderFirstMessage({ contextBlocks: [], text: "do the thing", toolNameHint: undefined })).toBe(
-      "do the thing",
-    );
+    expect(
+      renderFirstMessage({
+        contextBlocks: [],
+        text: "do the thing",
+        ...({ toolNameHint: undefined } as unknown as { toolNameHint?: string }),
+      }),
+    ).toBe("do the thing");
   });
 
   it("agent-role block wraps rolePrompt and the tool name mapping", () => {

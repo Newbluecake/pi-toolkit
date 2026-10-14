@@ -223,6 +223,27 @@ export function createDroidProvider(
         /* client 内部已按协议错误收口 */
       }
     });
+    // §15 跟踪项（P3 验收 r_KZS914MP）：init/update 阶段监听进程早退——droid 提前死亡时
+    // 立即 failAll 挂起请求（否则要干等 initTimeoutMs 才超时，有界但慢）。句柄创建后
+    //（setupDone）由 session.ts 的同款监听接管，这里不再介入。
+    let setupDone = false;
+    void child.exited.then(
+      (exit) => {
+        if (setupDone) return;
+        try {
+          rpc.failAll(
+            new ClassifiedError({
+              kind: "internal",
+              retryable: false,
+              message: `droid exited unexpectedly during session setup (code ${exit.code} / signal ${exit.signal}); stderr: ${child.stderrTail()}`,
+            }),
+          );
+        } catch {
+          /* failAll 不应抛，防御 */
+        }
+      },
+      () => {},
+    );
     const failSpawned = (e: unknown): never => {
       child.terminate("now");
       throw asClassified(e, deps.redact);
@@ -337,26 +358,29 @@ export function createDroidProvider(
       thinkingInOutput: DROID_THINKING_IN_OUTPUT,
       cumulativeIncludesChild: DROID_CUMULATIVE_INCLUDES_CHILD,
     });
-    return createDroidSession({
-      deps,
-      settings: s,
-      spec,
-      child: child!,
-      rpc,
-      envelope,
-      handlersRef,
-      cwd,
-      sessionId: sessionId!,
-      effectiveModelId: lastFullEcho?.modelId ?? ext.modelId,
-      ...(lastFullEcho?.reasoningEffort === undefined ? {} : { effectiveEffort: lastFullEcho.reasoningEffort }),
-      ...(lastFullEcho?.autonomyLevel === undefined ? {} : { autonomyEcho: lastFullEcho.autonomyLevel }),
-      ...(transcript === undefined ? {} : { transcript }),
-      ledger,
-      resume: o.resume,
-      catalog,
-      bufferedNotifications,
-      ...(protocolDriftWarned ? { protocolDriftWarned: true } : {}),
-    });
+    return (() => {
+      setupDone = true;
+      return createDroidSession({
+        deps,
+        settings: s,
+        spec,
+        child: child!,
+        rpc,
+        envelope,
+        handlersRef,
+        cwd,
+        sessionId: sessionId!,
+        effectiveModelId: lastFullEcho?.modelId ?? ext.modelId,
+        ...(lastFullEcho?.reasoningEffort === undefined ? {} : { effectiveEffort: lastFullEcho.reasoningEffort }),
+        ...(lastFullEcho?.autonomyLevel === undefined ? {} : { autonomyEcho: lastFullEcho.autonomyLevel }),
+        ...(transcript === undefined ? {} : { transcript }),
+        ledger,
+        resume: o.resume,
+        catalog,
+        bufferedNotifications,
+        ...(protocolDriftWarned ? { protocolDriftWarned: true } : {}),
+      });
+    })();
   };
 
   return {

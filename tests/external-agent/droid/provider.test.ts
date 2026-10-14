@@ -64,7 +64,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
       runId: "run-1",
     });
     // observeInit 刷新目录缓存
-    expect((f.deps.catalogStore as { written: unknown[] }).written.length).toBeGreaterThan(0);
+    expect((f.deps.catalogStore as unknown as { written: unknown[] }).written.length).toBeGreaterThan(0);
     // add_user_message 只在 prompt 时才发
     expect(f.rpcs[0]!.requests.some((r) => r.method === DROID_METHODS.addUserMessage)).toBe(false);
   });
@@ -300,7 +300,58 @@ describe("droid/provider prompt 驱动（端到端假链路）", () => {
     await flush();
     expect(handle.getLastAssistantText()).toBe("HI");
     expect(handle.getUsage()?.input).toBe(3);
-    expect(events[0].t).toBe("external_meta");
+    expect(events[0]!.t).toBe("external_meta");
     expect(events.some((e) => e.t === "settled")).toBe(true);
+  });
+});
+
+describe("droid/provider init/update 阶段进程早退 + echo 等待回落（§15 跟踪项，P5）", () => {
+  it("init 期间进程早退 ⇒ 立即 failAll（internal），不等 initTimeoutMs", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const { f, provider } = setup();
+    f.rpcHandler = undefined; // init 请求永悬（fake-droid exit-during-init 同构）
+    const created = provider.create(makeSpec({ cwd }));
+    const observed = created.catch((e: unknown) => e); // 立即挂 handler，避免 unhandled rejection
+    const child = f.children[0]!;
+    await flush();
+    child.exit(3, null); // §15：提前死亡
+    await flush();
+    expect(f.rpcs[0]!.failAllCalls).toHaveLength(1);
+    const info = classifiedInfo(f.rpcs[0]!.failAllCalls[0]);
+    expect(info?.kind).toBe("internal");
+    expect(info?.retryable).toBe(false);
+    expect(info?.message).toContain("exited unexpectedly during session setup");
+    await expect(created).rejects.toMatchObject({ message: expect.stringContaining("setup") });
+    expect((await observed) instanceof Error).toBe(true);
+    expect(child.terminated).toContain("now"); // failSpawned 收口组杀
+  });
+
+  it("update 后无全量 echo ⇒ requestTimeoutMs 超时回落最新 echo（init result.settings）", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const { f, provider } = setup();
+    // init 应答带全量 settings（不通知）；update 应答 {} 但**不**发 settings_updated。
+    f.rpcHandler = (method) => {
+      if (method === DROID_METHODS.initializeSession)
+        return {
+          sessionId: SESSION_ID,
+          hostId: "h",
+          session: { messages: [] },
+          settings: { modelId: "gpt-6-luna", reasoningEffort: "low", autonomyLevel: "high" },
+          availableModels: [],
+        };
+      if (method === DROID_METHODS.updateSessionSettings) return {};
+      if (method === DROID_METHODS.closeSession) return {};
+      return {};
+    };
+    const created = provider.create(makeSpec({ cwd }));
+    await flush();
+    // echo 等待挂在 requestTimeoutMs 计时器上；到点前未决。
+    f.clock.advance(SETTINGS.requestTimeoutMs - 1);
+    await flush();
+    // 到点 ⇒ 回落 init echo，生效值校验通过，create 完成。
+    f.clock.advance(1);
+    const handle = await created;
+    expect(handle.sessionId).toBe(SESSION_ID);
+    expect(f.children[0]!.terminated).toHaveLength(0); // 未因此收口
   });
 });

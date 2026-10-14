@@ -154,9 +154,9 @@ describe("droid/session attach 与首条消息", () => {
     await p;
     expect(handle.getLastAssistantText()).toBe("answer-text");
     expect(handle.getUsage()?.input).toBe(1);
-    expect(handle.getModelRef()).toEqual({ provider: "droid", id: "gpt-6-luna" });
-    expect(handle.getThinkingLevel()).toBe("low");
-    expect(handle.getTurnErrorInfo()).toBeUndefined();
+    expect(handle.getModelRef?.()).toEqual({ provider: "droid", id: "gpt-6-luna" });
+    expect(handle.getThinkingLevel?.()).toBe("low");
+    expect(handle.getTurnErrorInfo?.()).toBeUndefined();
     expect(handle.sessionFile).toContain(SESSION_ID);
   });
 });
@@ -324,7 +324,7 @@ describe("droid/session steer/abort/dispose/killable（acceptance ⑩）", () =>
     await p;
     await a;
     expect(child.terminated).toHaveLength(0);
-    expect(handle.getTurnErrorInfo()).toBeUndefined(); // 我方 abort ⇒ runner 按 stopCause 结算
+    expect(handle.getTurnErrorInfo?.()).toBeUndefined(); // 我方 abort ⇒ runner 按 stopCause 结算
   });
 
   it("requestAbort 后 interrupt 未结算 ⇒ 5s 升级 graceful", async () => {
@@ -462,7 +462,7 @@ describe("droid/session context_usage 与错误脱敏", () => {
       },
     });
     await p;
-    const info = handle.getTurnErrorInfo();
+    const info = handle.getTurnErrorInfo!();
     expect(info).toMatchObject({ kind: "auth", retryable: false });
     expect(info!.message).toContain("FACTORY_API_KEY");
     expect(info!.message).toContain("***");

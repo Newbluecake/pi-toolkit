@@ -72,8 +72,13 @@ import {
   registryModelExists,
   type ModelLookupLike,
 } from "./config/available-models.js";
-import { resolveModelHint } from "./config/model-hint.js";
+import { parseStrictModelRef, resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
+import { createExternalAgentsPort } from "./external-agent/port.js";
+import { RoutingSessionDriver } from "./external-agent/router.js";
+import type { ExternalAgentsPort } from "./external-agent/types.js";
+import { createCatalogPoolPort, type CatalogPoolPort } from "./quota/pools.js";
+import type { QuotaPoolPort } from "./quota/types.js";
 import type { Runner } from "./service/ports.js";
 import {
   createNotifier,
@@ -247,6 +252,12 @@ let previousWorktreeOrphansStartup: { dispose(): void } | undefined;
  * fresh-module `/reload` case) can never double-release.
  */
 let previousHostBashViewCapabilityRelease: (() => void) | undefined;
+/**
+ * external-agent plan §5.5 (P5)：上一个 build 的外部 agent 端口（停目录探测；不杀运行中
+ * 的 run）。与 previousWorktreeLate 同款双路径 dispose（下一次 build 顶部 + index.ts 的
+ * session_shutdown，覆盖 /reload 重建新模块的情形）。
+ */
+let previousExternal: { dispose(): void } | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -947,6 +958,11 @@ export interface Stack {
   keepalive?: CacheKeepaliveService;
   /** 额度感知派单（docs/dev/quota/quota-plan.md）：同步缓存判定面。settings.quota.enabled=false 时缺席（R11）。 */
   quota?: QuotaService;
+  /**
+   * 外部 agent 端口（external-agent plan §5.5，P5）：externalAgents.droid.enabled 时
+   * 存在；index.ts 的 session_shutdown 经它 dispose（停目录探测；不杀运行中的 run）。
+   */
+  external?: ExternalAgentsPort;
   /** turn_end 注入的会话级闩锁状态；与 quota 同生共死（M3：dispose 的唯一所有者是 QuotaService）。 */
   quotaHint?: QuotaHintState;
   /** sysload activation and admission surface; absent when load.enabled is false. */
@@ -1421,6 +1437,16 @@ function safeSetLoadStatus(ctx: ExtensionContext, port: LoadPort | undefined, en
   }
 }
 
+/**
+ * external-agent plan §5.5（P5）：index.ts 传给 buildSessionStack 的外部 agent跨接线。
+ * `memoryBlock` 是 wireMemory 返回的 renderForExternal 经 holder 晚绑定的入口（memory
+ * 关闭时 index.ts 不传）；是否注入由 settings.externalAgents.droid.{enabled,injectMemory}
+ * 决定（在 buildSessionStack 内判定，保持关闭态零接线）。
+ */
+export interface StackExternalInput {
+  memoryBlock?: (cwd: string) => string | undefined;
+}
+
 export function buildSessionStack(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -1430,6 +1456,7 @@ export function buildSessionStack(
   /** /goal 读回口径（v4 条件 8）需要 session_start 的 reason；默认 "reload"（静默读回）。 */
   sessionReason: GoalSessionStartReason = "reload",
   loadHintState?: LoadHintState,
+  externalInput?: StackExternalInput,
 ): Stack {
   // ask-user-async plan §3.3 (P2): FIRST disposal of the rebuild — the old
   // hub must stop broadcasting before the old coalescer/bash manager below
@@ -1469,6 +1496,8 @@ export function buildSessionStack(
   previousWorktreeOrphansStartup = undefined;
   previousHostBashViewCapabilityRelease?.();
   previousHostBashViewCapabilityRelease = undefined;
+  previousExternal?.dispose();
+  previousExternal = undefined;
 
   if (loadHintState !== undefined) {
     loadHintState.latches.clear();
@@ -1829,6 +1858,57 @@ export function buildSessionStack(
   // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
   // M-D: runIds whose "subagent:started" event has already been emitted (once per run).
   const announcedStarts = new Set<string>();
+  // ── 外部 agent 端口（external-agent plan §5.5，P5）──
+  // enabled=false ⇒ createExternalAgentsPort 返回 undefined ⇒ 下方一切 external 注入
+  // 缺席，driver 仍是纯 PiSessionDriver（关闭态零接线、零行为变化，R10 回滚①）。
+  // 构造点在 models/driver 之前：resolveHint 包装与 RoutingSessionDriver 都消费它。
+  const externalPort = createExternalAgentsPort({
+    settings: settings.externalAgents,
+    agentDir: getAgentDir(),
+    clock: systemClock,
+    registry: () => {
+      try {
+        return ctx.modelRegistry.getAll().map((m) => ({
+          provider: m.provider,
+          id: m.id,
+          ...(m.cost ? { cost: m.cost } : {}),
+        }));
+      } catch {
+        return undefined; // 被替换会话上的陈旧注册表 ⇒ fail-open（定价退化 unpriced）
+      }
+    },
+    piProviders: () => {
+      try {
+        return ctx.modelRegistry.getAvailable().map((m) => m.provider);
+      } catch {
+        return [];
+      }
+    },
+    ...(settings.externalAgents.droid.enabled &&
+    settings.externalAgents.droid.injectMemory &&
+    externalInput?.memoryBlock !== undefined
+      ? { memoryBlock: externalInput.memoryBlock }
+      : {}),
+    warnOnce: (_key, message) => console.warn(`[pi-subagent] ${message}`),
+  });
+  if (externalPort !== undefined) {
+    previousExternal = externalPort.port;
+    // §4.7：构建期后台目录探测（single-flight、有界、unref、失败静默）。
+    externalPort.providers.get("droid")?.catalog.refreshInBackground("stack_build");
+  }
+  // quota-plan r2 §4 接线清单 1：droid 池端口（与 quota stack 的输入同源；getter 晚绑定
+  // 到 providers/catalog/settings）。构造后立即 warm()——把目录缓存首次 ≤256KiB 的同步读
+  // 挪到 stack 构建阶段，避开首个 droid spawn 的闸门判定；与上面的 refreshInBackground
+  // 相邻（目录缓存不存在时是空操作，首探由后台探测补）。端口缺席 ⇒ undefined ⇒ 零接线。
+  const droidPoolPort: CatalogPoolPort | undefined =
+    externalPort !== undefined
+      ? createCatalogPoolPort({
+          provider: "droid",
+          catalog: () => externalPort.providers.get("droid")?.catalog.snapshot(),
+          preferred: () => settings.externalAgents.droid.models,
+        })
+      : undefined;
+  droidPoolPort?.warm();
   // Fuzzy model hints (frontmatter `model: sonnet`, Agent tool `model: "kimi-k3"`,
   // set_model) resolve against pi's available models — getAvailable() already
   // filters to authenticated/usable entries, so a hint can never land on a
@@ -1849,11 +1929,18 @@ export function buildSessionStack(
       contextWindow: m.contextWindow,
     }));
   const models: StackModelPort = {
-    resolveHint: (hint) =>
-      resolveModelHint(
+    resolveHint: (hint) => {
+      // external-agent plan §5.4 (P5)：严格 provider/id 且是外部 provider ⇒ 直接返回
+      //（fuzzy hint 永不落到 droid）；端口缺席 ⇒ 原函数（字节一致）。
+      if (externalPort !== undefined) {
+        const strict = parseStrictModelRef(hint);
+        if (strict !== undefined && externalPort.port.owns(strict.provider)) return strict;
+      }
+      return resolveModelHint(
         hint,
         ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
-      ),
+      );
+    },
     find: (p, id) => ctx.modelRegistry.find(p, id),
     available: availableEntries,
     recommendable: () => {
@@ -1920,7 +2007,21 @@ export function buildSessionStack(
   });
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,
-    driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
+    // external-agent plan §5.5 (P5)：端口存在 ⇒ RoutingSessionDriver 按 spec.external 分派
+    // 外部 run，其余原样委托 pi driver；缺席 ⇒ 纯 PiSessionDriver（与改动前一致）。
+    driver: (() => {
+      const piDriver = new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id));
+      return externalPort !== undefined ? new RoutingSessionDriver(piDriver, externalPort.providers) : piDriver;
+    })(),
+    ...(externalPort !== undefined
+      ? {
+          external: externalPort.port,
+          // §15 跟踪项 1（P4b 验收遗留）：planRun 的 persist 与 PiSessionDriver 的
+          // `?? rememberAgents` 口径对齐——rememberAgents=false 时未显式 persist 的
+          // droid run 也不写 transcript。
+          externalPersistDefault: settings.rememberAgents,
+        }
+      : {}),
     pool,
     store,
     watchdog,
@@ -1999,6 +2100,9 @@ export function buildSessionStack(
     types,
     pool,
     runner,
+    // external-agent plan §5.1/§5.5（P4b/P5）：端口存在时注入 external 准入门 + agentDir
+    //（结构性外部会话判定用）；缺席 ⇒ 既有行为（droid/x 走原 unknown-model 文案）。
+    ...(externalPort !== undefined ? { external: externalPort.port, agentDir: getAgentDir() } : {}),
     budget: settings.budget,
     maxNestedDepth: settings.maxNestedDepth,
     // G5a 补全：resume/get_result 的解析器 records 源接持久 store（重启后由
@@ -2269,6 +2373,9 @@ export function buildSessionStack(
     consultDir: consultSessionDir(),
     prefetchedEntries,
     mainSessionFacts: () => mainSessionFactsFrom(ctx),
+    // external-agent plan §5.4/§5.5（P5）：仅在端口存在时注入 provider-claim 谓词
+    //（评审 #7：关闭态下第三项判定缺席 ⇒ 字节一致）。
+    ...(externalPort !== undefined ? { isExternalProvider: (p: string) => externalPort.port.owns(p) } : {}),
   });
   consultRef.current = consult;
   // M9: created early — the fleet widget below lists in-flight workflows.
@@ -2326,6 +2433,9 @@ export function buildSessionStack(
         settings: settings.quota,
         clock: systemClock,
         statePath: join(getAgentDir(), "quota-state.json"),
+        // quota-plan r2 §4 接线清单 1（P5）：droid 池输入——外部端口存在时供给
+        //（getter 晚绑定）；缺席 ⇒ 不构造 droid 适配器（零网络/零凭据/零告警，D11）。
+        ...(droidPoolPort !== undefined ? { droid: { pools: (): QuotaPoolPort => droidPoolPort } } : {}),
         ...(settings.quota.hud
           ? {
               setStatus: (text: string | undefined) => safeSetQuotaStatus(ctx, text),
@@ -2704,6 +2814,7 @@ export function buildSessionStack(
     ...(bashJobRecovery ? { bashJobRecovery } : {}),
     ...(keepalive ? { keepalive } : {}),
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),
+    ...(externalPort !== undefined ? { external: externalPort.port } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
   };
 }

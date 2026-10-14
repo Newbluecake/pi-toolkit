@@ -213,6 +213,13 @@ export interface RuntimeAdapterDeps {
    * behavior. Injected by P5 (only when externalAgents.droid.enabled).
    */
   external?: ExternalAgentsPort;
+  /**
+   * external-agent §15 跟踪项 1（P5）：planRun 的 `persist` 回落值，与 PiSessionDriver
+   * 的 `sessionSpec.persist ?? rememberAgents` 同口径。缺省 true（与改动前一致）；
+   * stack.ts 在端口存在时注入 settings.rememberAgents——rememberAgents=false 且未显式
+   * persist 的 droid run 因此不写 transcript。
+   */
+  externalPersistDefault?: boolean;
 }
 
 /**
@@ -998,7 +1005,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               ...(spec.request.schema === undefined ? {} : { schema: spec.request.schema }),
               resume: spec.request.resumeFrom !== undefined,
               cwd: sessionSpec.cwd ?? preH2Cwd,
-              persist: sessionSpec.persist ?? true,
+              persist: sessionSpec.persist ?? deps.externalPersistDefault ?? true,
             }),
           };
         }

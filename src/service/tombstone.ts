@@ -13,6 +13,12 @@ export interface Tombstone {
    * Type-only in this batch; `register()` copies it in P1.
    */
   readonly timeoutPolicy?: TimeoutPolicy;
+  /**
+   * external-agent plan §15 跟踪项 2（P5）：逐出时的 diag.model 快照。外部会话 resume
+   * 无 modelOverride 时继承 droid 模型（§5.1 ②）；live/durable 都已不在时唯一来源。
+   * 内部 pi run 同样受益（原本 tombstone-only 的 resume 目标会失去默认模型）。旧条目缺席。
+   */
+  readonly model?: { provider: string; id: string };
 }
 
 /** In-memory terminal handle index. Entries are intentionally bounded by TTL. */
@@ -36,6 +42,8 @@ export class TombstoneStore {
       // §2.7：策略作为 run 的持久事实随逐出记录存活，TTL 内的 resume 继承它；
       // 旧快照缺字段就不拷，读侧对缺席走中性文案。
       ...(snapshot.diag.timeoutPolicy === undefined ? {} : { timeoutPolicy: snapshot.diag.timeoutPolicy }),
+      // external-agent §15 跟踪项 2（P5）：同款「缺就不拷」。
+      ...(snapshot.diag.model === undefined ? {} : { model: snapshot.diag.model }),
     });
   }
   has(runId: RunId): boolean {
