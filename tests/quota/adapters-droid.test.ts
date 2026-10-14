@@ -136,11 +136,20 @@ describe("parseFactoryLimits", () => {
       [42, "off"],
     ] as const) {
       const parsed = parseFactoryLimits(
-        { overage: raw, limits: { standard: { fiveHour: { usedPercent: 1, windowEnd: FUTURE } } } },
+        { overagePreference: raw, limits: { standard: { fiveHour: { usedPercent: 1, windowEnd: FUTURE } } } },
         NOW,
       );
       expect(parsed?.standard?.billing?.overage).toBe(want);
     }
+  });
+
+  it("overage: legacy `overage` name is a fallback; overagePreference wins", () => {
+    const limits = { standard: { fiveHour: { usedPercent: 1, windowEnd: FUTURE } } };
+    const ov = (root: Record<string, unknown>) =>
+      parseFactoryLimits({ ...root, limits }, NOW)?.standard?.billing?.overage;
+    expect(ov({ overage: "extraUsage" })).toBe("extraUsage");
+    expect(ov({ overagePreference: "droidCore", overage: "extraUsage" })).toBe("droidCore");
+    expect(ov({ overagePreference: "bogus", overage: "extraUsage" })).toBe("off");
   });
 
   it("extraUsageBalanceCents: negative/NaN/non-number ⇒ clamped to 0; rounds to integer cents", () => {

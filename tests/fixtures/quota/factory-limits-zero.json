@@ -1,7 +1,7 @@
 {
-  "_comment": "Synthesized from the schema frozen in docs/dev/external-agent/quota-plan.md r2 §3 (no real capture in-repo; SP4 pending). All-zero readings with active windows.",
+  "_comment": "Synthesized from the schema frozen in docs/dev/external-agent/quota-plan.md r2 §3 (synthetic; 2026-10-14 SP4 real capture verified overagePreference; extraUsageAllowed / extraUsageBalanceCents and the limits.{standard,core}.{fiveHour,weekly,monthly}.{usedPercent,windowEnd,secondsRemaining} shape confirmed by a 2026-10-14 main-session capture). All-zero readings with active windows.",
   "usesTokenRateLimitsBilling": true,
-  "overage": "droidCore",
+  "overagePreference": "droidCore",
   "extraUsageAllowed": false,
   "extraUsageBalanceCents": 0,
   "limits": {

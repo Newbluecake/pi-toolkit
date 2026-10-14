@@ -1,7 +1,7 @@
 {
-  "_comment": "standard pool 5h exhausted (usedPercent 100, windowEnd in the future), extraUsage overage with a real balance; core pool healthy. Synthesized per quota-plan r2 §3.",
+  "_comment": "standard pool 5h exhausted (usedPercent 100, windowEnd in the future), extraUsage overage with a real balance; core pool healthy. Synthesized per quota-plan r2 §3; 2026-10-14 SP4 real capture verified the top-level field is overagePreference (2026-10-14 main-session capture also confirmed extraUsageAllowed / extraUsageBalanceCents / canManageOverage at top level and limits.{standard,core}.{fiveHour,weekly,monthly}.{usedPercent,windowEnd,secondsRemaining}).",
   "usesTokenRateLimitsBilling": true,
-  "overage": "extraUsage",
+  "overagePreference": "extraUsage",
   "extraUsageAllowed": true,
   "extraUsageBalanceCents": 1234,
   "limits": {

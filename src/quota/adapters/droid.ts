@@ -76,7 +76,7 @@ function parseWindow(raw: unknown, scope: WindowScope, now: Millis): QuotaWindow
   return active ? { scope, usedPct: Math.round(clampPercent(used)), resetAt } : { scope, usedPct: 0 };
 }
 
-/** overage 只认 "droidCore" / "extraUsage"，其余一律 "off"（droid 语义 blocked）。 */
+/** 真机字段名 overagePreference（2026-10-14 SP4），旧名 overage 回退；只认 "droidCore" / "extraUsage"，其余一律 "off"（droid 语义 blocked）。 */
 function parseOverage(value: unknown): DroidOverage {
   return value === "droidCore" || value === "extraUsage" ? value : "off";
 }
@@ -106,7 +106,7 @@ function parsePool(
     billing: {
       kind: "factory",
       pool,
-      overage: parseOverage(rawRoot.overage),
+      overage: parseOverage(rawRoot.overagePreference ?? rawRoot.overage),
       extraUsageAllowed: rawRoot.extraUsageAllowed === true,
       extraUsageBalanceCents,
     },
