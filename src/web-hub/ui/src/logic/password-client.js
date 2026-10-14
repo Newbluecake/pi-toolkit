@@ -40,11 +40,15 @@
 import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
+  PREVIEW_CHUNK_QUERY,
   PREVIEW_CLIENT_TIMEOUT_MS,
   PREVIEW_DIR_BODY_MAX_BYTES,
   PREVIEW_DOWNLOAD_CLIENT_TIMEOUT_MS,
+  PREVIEW_IDENT_QUERY,
   PREVIEW_IMAGE_MAX_BYTES,
+  PREVIEW_OFFSET_QUERY,
   PREVIEW_PROBE_CLIENT_TIMEOUT_MS,
+  validatePreviewIdent,
 } from "@protocol/preview.ts";
 import { parsePreviewDirListing } from "@protocol/preview.ts";
 import {
@@ -1094,6 +1098,37 @@ export function createPasswordClient(deps) {
   // -------------------------------------------------------------------------
 
   /**
+   * chunked-plan §4.1 (P2a): normalize `req.chunk` (`true` = first chunk, `{offset, ident}`
+   * = continuation) into the query suffix + the `checkPreviewHeaders` gate object. `chunk`
+   * combined with `dir` is a protocol violation (§2.2 mutual exclusion) rejected LOCALLY
+   * with `E_BAD_REQUEST` — never sent. A malformed chunk object (non-integer/negative
+   * offset, invalid ident) is rejected the same way; the hub would 400 it anyway. Mirrors
+   * the token client's helper verbatim (the two transports stay independent modules;
+   * `transport-contract.test.ts` pins identical behavior).
+   * @param {{ dir?: true, chunk?: true | { offset: number, ident: string } }} req
+   * @returns {{ suffix: string, gate?: { offset: number, ident?: string } } | { badRequest: true }}
+   */
+  function previewChunkPart(req) {
+    const chunk = req.chunk;
+    if (chunk === undefined) return { suffix: "" };
+    if (req.dir === true) return { badRequest: true };
+    if (chunk === true) return { suffix: `&${PREVIEW_CHUNK_QUERY}=1`, gate: { offset: 0 } };
+    if (
+      chunk !== null &&
+      typeof chunk === "object" &&
+      Number.isSafeInteger(chunk.offset) &&
+      chunk.offset >= 0 &&
+      validatePreviewIdent(chunk.ident)
+    ) {
+      return {
+        suffix: `&${PREVIEW_CHUNK_QUERY}=1&${PREVIEW_OFFSET_QUERY}=${chunk.offset}&${PREVIEW_IDENT_QUERY}=${encodeURIComponent(chunk.ident)}`,
+        gate: { offset: chunk.offset, ident: chunk.ident },
+      };
+    }
+    return { badRequest: true };
+  }
+
+  /**
    * `GET /api/preview` (§4.6) — same flow as the token client's, minus the relogin dance
    * (password mode has none; a 401 means the cookie session is gone and is reported by
    * `transport/password.ts`'s fetch wrapper via `isRestAuthEndpoint`, which covers
@@ -1108,7 +1143,8 @@ export function createPasswordClient(deps) {
    * Content-Length), then `parsePreviewDirListing` is the contract gate. An un-opt-in-ed
    * request receiving `Kind: dir` fails `checkPreviewHeaders` (`E_BAD_RESPONSE`, §1.3's fetch
    * path — a single-response contract violation, body aborted unread).
-   * @param {{ agentKey: string, sessionId: string, path: string, dir?: true }} req
+   * @param {{ agentKey: string, sessionId: string, path: string, dir?: true,
+   *   chunk?: true | { offset: number, ident: string } }} req
    * @param {{ signal?: any, maxPixels?: number }} [opts]
    * @returns {Promise<any>}
    */
@@ -1118,7 +1154,9 @@ export function createPasswordClient(deps) {
     if (signal !== undefined && signal !== null && signal.aborted === true) {
       return { ok: false, status: 0, error: "E_ABORT" };
     }
-    const url = `${API.preview}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&path=${encodeURIComponent(req.path)}${req.dir === true ? "&dir=1" : ""}`;
+    const chunkPart = previewChunkPart(req);
+    if ("badRequest" in chunkPart) return { ok: false, status: 0, error: "E_BAD_REQUEST" };
+    const url = `${API.preview}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}&path=${encodeURIComponent(req.path)}${req.dir === true ? "&dir=1" : ""}${chunkPart.suffix}`;
     const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
     const ac = AC ? new AC() : undefined;
     let expired = false;
@@ -1166,6 +1204,7 @@ export function createPasswordClient(deps) {
         imageMaxBytes: PREVIEW_IMAGE_MAX_BYTES.lan,
         ...(maxPixels !== undefined ? { maxPixels } : {}),
         dir: req.dir === true,
+        ...(chunkPart.gate !== undefined ? { chunk: chunkPart.gate } : {}),
       });
       if (!chk.ok) {
         // Pre-body refusal: abort so the server stops sending, never touch the body.
@@ -1250,7 +1289,12 @@ export function createPasswordClient(deps) {
         kind: "text",
         size: chk.totalSize,
         truncated: chk.truncated,
+        // chunked-plan §4.1: `bytes` = this response's decoded body bytes (valid against old
+        // hubs too — the truncated-copy fix depends on it); `chunk` rides only when the
+        // header gate accepted the offset/ident echo.
+        bytes: chk.size,
         text: new TextDecoder().decode(buf),
+        ...(chk.chunk !== undefined ? { chunk: chk.chunk } : {}),
       };
     } finally {
       deps.clearTimeout(deadlineTimer);

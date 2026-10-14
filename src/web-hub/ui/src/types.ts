@@ -472,6 +472,10 @@ export interface PreviewPathScope {
    *  so binary-but-downloadable regular files answer `"file"` (clickable into the unsupported
    *  phase's download offer) instead of `"missing"`. */
   readonly files?: true;
+  /** chunked-plan §4.1 (P2a): `preview.chunk.v1` — the text phase may build a continuation
+   *  stream (`chunk=1` opt-in, D2). Absent cap ⇒ absent key (pre-chunk hubs keep scopes
+   *  byte-identical). */
+  readonly chunks?: true;
 }
 
 /** plan §3.2's UI-side state machine (state lives in `usePreview`, App-level — never in the
@@ -493,6 +497,14 @@ export type PreviewView =
       readonly text: string;
       readonly truncated: boolean;
       readonly size: number;
+      /** chunked-plan §4.7 (P2a): the DISPLAYED body bytes (the response's decoded length) —
+       * the truncated-note fix renders "仅显示前 {bytes}（共 {size}）" instead of the old
+       * "仅显示前 {size}" bug. Absent only for a pre-fix fake/legacy path. */
+      readonly bytes?: number;
+      /** chunked-plan §4.2 (P2a types / P2b composable): the continuation stream — present
+       * only when the scope carried `chunks`, the first chunk echoed offset/ident, and the
+       * body is truncated. `usePreview` is its sole writer (shallowReactive). */
+      readonly stream?: PreviewTextStream;
     }
   | { readonly phase: "unsupported"; readonly path: string; readonly reason?: string; readonly size?: number }
   | {
@@ -510,6 +522,34 @@ export type PreviewView =
       readonly retryable: boolean;
       readonly retryAfterS?: number;
     };
+
+/**
+ * chunked-plan §4.2 (P2a types / P2b composable): the chunked-continuation stream attached
+ * to a text-phase view. `chunks` is append-only (each append swaps in a NEW array, old
+ * elements keep their identity); `loaded` is the next request's offset (= Σ chunk bytes).
+ * `usePreview` is the ONLY writer (shallowReactive); components never write back. The pure
+ * transition logic lives in `@logic/previewStream.js` (`nextChunkAction` /
+ * `classifyChunkOutcome`).
+ */
+export interface PreviewTextStream {
+  /** The first chunk's `X-PWH-Preview-Ident` — every continuation must echo it (D12). */
+  readonly ident: string;
+  /** The file's total size (first chunk's `X-PWH-Preview-Size`). */
+  readonly total: number;
+  /** The UI-side total cap (`clientTextStreamCap` — desktop 8 MiB / touch 4 MiB, D1). */
+  readonly cap: number;
+  /** The first chunk's byte length — the floor of `loaded`, kept for the 入栈降级 (§4.2). */
+  readonly firstBytes: number;
+  chunks: readonly string[];
+  loaded: number;
+  state: "more" | "loading" | "waiting" | "done" | "cap" | "changed" | "error";
+  error?: string;
+  retryable?: boolean;
+  /** waiting → loading 的定时器到点时间（ms 时钟由 usePreview 决定）。 */
+  retryAt?: number;
+  /** Consecutive 429/503 auto-retries so far; any success or a manual 重试 resets it (r2, #2). */
+  autoRetries: number;
+}
 
 /** `usePreview`'s (PV4) handle — provided at the App level by PV6 for PathText/PreviewHost. */
 export interface PreviewHandle {

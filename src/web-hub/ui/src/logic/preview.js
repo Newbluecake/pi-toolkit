@@ -86,11 +86,14 @@ import {
   PREVIEW_IMAGE_MAX_PIXELS,
   PREVIEW_PATH_MAX_BYTES,
   PREVIEW_TEXT_MAX_BYTES,
+  PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES,
   PREVIEW_UPLOADS_MARKER,
+  validatePreviewIdent,
   validatePreviewPath,
 } from "@protocol/preview.ts";
 import {
   PREVIEW_ABS_HUB_CAP,
+  PREVIEW_CHUNK_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
   PREVIEW_DOWNLOAD_HUB_CAP,
   PREVIEW_HUB_CAP,
@@ -100,12 +103,14 @@ import {
 
 /** Tilde-expansion addendum: `PREVIEW_TILDE_HUB_CAP` (`@protocol/version.ts`) gates `~/<rest>`
  * recognition; re-exported for existing importers. `PREVIEW_DOWNLOAD_HUB_CAP`
- * (preview-download) gates the probe's `files:true` opt-in — re-exported the same way. */
-export { PREVIEW_TILDE_HUB_CAP, PREVIEW_DOWNLOAD_HUB_CAP };
+ * (preview-download) gates the probe's `files:true` opt-in — re-exported the same way.
+ * chunked-plan §2.1 (P2a): `PREVIEW_CHUNK_HUB_CAP` gates the chunked continuation protocol
+ * (D2 — without it the UI never sends `chunk=1`). */
+export { PREVIEW_TILDE_HUB_CAP, PREVIEW_DOWNLOAD_HUB_CAP, PREVIEW_CHUNK_HUB_CAP };
 
 /**
  * @typedef {{ agentKey: string, sessionId: string, cwd: string | null, uploads: boolean,
- *   abs?: true, dirs?: true, tilde?: true, files?: true }} PathScope
+ *   abs?: true, dirs?: true, tilde?: true, files?: true, chunks?: true }} PathScope
  * @typedef {{ kind: "text", text: string }
  *   | { kind: "ref", text: string, path: string, alt?: { text: string, path: string }, line?: number, col?: number }} PathSegment
  * @typedef {{ w: number, h: number }} PreviewDimsT
@@ -807,6 +812,20 @@ export function clientImageBudget(p) {
 }
 
 /**
+ * chunked-plan §4.1 (D1, 2026-10-14 拍板): the UI-side TOTAL byte cap for a chunked text
+ * stream — touch (`pointer: coarse`) 4 MiB, everything else 8 MiB, keyed off the pointer the
+ * same way `clientImageBudget` is (never off the listener; both ≤ the hub's 16 MiB hard
+ * ceiling, relation pinned in the protocol tests).
+ * @param {{ coarse?: boolean }} [p]
+ * @returns {number}
+ */
+export function clientTextStreamCap(p) {
+  return p !== undefined && p.coarse === true
+    ? PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES.coarse
+    : PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES.fine;
+}
+
+/**
  * §4.6 作用域推导 (truth table): `hasTransport` = the transport exposes `preview`; capOk =
  * password mode requires `preview.lan.v1`, anything else requires `preview.v1` (under the
  * default mode "on" BOTH are declared, so a LAN browser gets a scope — U1). `session` is the
@@ -842,6 +861,11 @@ export function previewScopeOf(p) {
   // binary-but-downloadable regular files to answer `"file"` (clickable into the unsupported
   // phase's download offer) instead of folding them to `"missing"`.
   if (caps.includes(PREVIEW_DOWNLOAD_HUB_CAP)) scope.files = true;
+  // chunked-plan §4.1 (P2a): `preview.chunk.v1` adds `chunks` — the text phase may build a
+  // continuation stream (D2: without the cap the UI never sends `chunk=1`, so an old hub's
+  // response stays byte-identical and no stream is ever built). Absent cap ⇒ absent key, the
+  // same only-add-when-present rule as `abs`/`dirs`.
+  if (caps.includes(PREVIEW_CHUNK_HUB_CAP)) scope.chunks = true;
   return scope;
 }
 
@@ -884,10 +908,21 @@ const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
  * true` (the `&download=1` GET). The body IS length-oracled (octet-stream, no sniff, no
  * truncation), so the Content-Length gate below DOES apply — against the 256 MiB download cap
  * instead of the image/text caps.
+ *
+ * chunked-plan §4.1 (P2a) — the chunk gate: `opts.chunk: { offset, ident? }` marks a
+ * `chunk=1` request (`ident` absent = the FIRST chunk). A chunked TEXT response must echo
+ * `X-PWH-Preview-Offset` EXACTLY equal to the requested offset and carry a protocol-valid
+ * `X-PWH-Preview-Ident` (a continuation must also echo the SAME ident) — any mismatch ⇒
+ * `E_BAD_RESPONSE` (§2.4's double保险 against an old hub answering from offset 0 or a
+ * proxy mangling headers); the success half then carries `chunk: { offset, ident }`. The ONE
+ * degrade: a first chunk with BOTH headers absent (an old hub or a header-stripping proxy)
+ * succeeds WITHOUT the `chunk` key, so the UI falls back to legacy one-shot display instead
+ * of erroring. Requests that never opted in (no `opts.chunk`) ignore both headers entirely.
  * @param {{ get(name: string): string | null } | null | undefined} headers
- * @param {{ maxPixels?: number, imageMaxBytes?: number, dir?: boolean, download?: boolean }} [opts]
+ * @param {{ maxPixels?: number, imageMaxBytes?: number, dir?: boolean, download?: boolean,
+ *   chunk?: { offset: number, ident?: string } }} [opts]
  * @returns {{ ok: true, kind: "image", mime: string, size: number, totalSize: number, dims: PreviewDimsT, truncated: false }
- *   | { ok: true, kind: "text", size: number, totalSize: number, truncated: boolean }
+ *   | { ok: true, kind: "text", size: number, totalSize: number, truncated: boolean, chunk?: { offset: number, ident: string } }
  *   | { ok: true, kind: "dir" }
  *   | { ok: true, kind: "download", size: number }
  *   | { ok: false, error: string, reason?: string, size?: number, max?: number, dims?: PreviewDimsT }}
@@ -939,7 +974,24 @@ export function checkPreviewHeaders(headers, opts) {
     }
     if (!ct.startsWith("text/plain")) return { ok: false, error: "E_BAD_RESPONSE" };
     const truncatedRaw = get(PREVIEW_HDR.truncated);
-    return { ok: true, kind: "text", size, totalSize, truncated: truncatedRaw === "1" || truncatedRaw === "true" };
+    /** @type {{ ok: true, kind: "text", size: number, totalSize: number, truncated: boolean,
+     *   chunk?: { offset: number, ident: string } }} */
+    const out = { ok: true, kind: "text", size, totalSize, truncated: truncatedRaw === "1" || truncatedRaw === "true" };
+    const chunkReq = opts !== undefined ? opts.chunk : undefined;
+    if (chunkReq !== undefined) {
+      const offsetRaw = get(PREVIEW_HDR.offset);
+      const identRaw = get(PREVIEW_HDR.ident);
+      const isFirst = chunkReq.ident === undefined;
+      if (isFirst && offsetRaw === null && identRaw === null) {
+        return out; // old hub / stripped headers ⇒ legacy one-shot display, no stream (§2.4)
+      }
+      const offsetOk =
+        offsetRaw !== null && /^(0|[1-9][0-9]*)$/.test(offsetRaw) && Number(offsetRaw) === chunkReq.offset;
+      const identOk = validatePreviewIdent(identRaw) && (isFirst || identRaw === chunkReq.ident);
+      if (!offsetOk || !identOk) return { ok: false, error: "E_BAD_RESPONSE" };
+      out.chunk = { offset: chunkReq.offset, ident: /** @type {string} */ (identRaw) };
+    }
+    return out;
   }
   const imageMaxBytes =
     opts !== undefined && typeof opts.imageMaxBytes === "number"

@@ -510,6 +510,14 @@ export type PreviewOutcome =
       readonly size: number;
       readonly truncated: boolean;
       readonly text: string;
+      /** chunked-plan §4.1 (P2a): this response's decoded body bytes (`X-PWH-Preview-Bytes`
+       * / Content-Length) — present on NEW-hub responses and derivable for old ones, so the
+       * truncated-copy fix ("仅显示前 {loaded}") works against both. */
+      readonly bytes?: number;
+      /** chunked-plan §4.1: the accepted offset/ident echo — present only on a `chunk=1`
+       * request whose response passed the header gate (its absence on a first chunk means
+       * "old hub / stripped headers ⇒ legacy one-shot display", §2.4). */
+      readonly chunk?: { readonly offset: number; readonly ident: string };
     }
   | {
       readonly ok: false;
@@ -556,6 +564,13 @@ export interface PreviewTransport {
        * `kind:"dir"` variant (`listing`), everything else stays image/text — and P3's
        * `usePreview` narrows all three exhaustively. */
       readonly dir?: true;
+      /** chunked-plan §4.1 (P2a): the opt-in continuation protocol (D2 — only ever sent
+       * when the hub caps carry `preview.chunk.v1`). `true` appends `&chunk=1` (first
+       * chunk); `{offset, ident}` appends `&chunk=1&offset=…&ident=…` (continuation).
+       * MUTUALLY EXCLUSIVE with `dir` — combined, the clients refuse LOCALLY with
+       * `E_BAD_REQUEST` without sending anything. Absent keeps the request byte-identical
+       * to pre-chunk-plan. */
+      readonly chunk?: true | { readonly offset: number; readonly ident: string };
     },
     opts: { readonly signal: AbortSignal; readonly maxPixels: number },
   ): Promise<PreviewDirOutcome>;

@@ -41,6 +41,39 @@ const SAFE_HREF_RE = /^https?:\/\/[^\s]+$/i;
 const MAX_DEPTH = 6;
 const MAX_QUOTE_DEPTH = 10;
 
+const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})\s*$/;
+
+/**
+ * chunked-plan §4.3.2: the fence-closing scan, extracted verbatim out of `parseBlocks` (pure
+ * refactor — the fixed-seed differential test against `fixtures/markdown-ref.js` pins the
+ * output byte-for-byte). Returns the index of the closing fence line for the fence opened at
+ * `lines[i]` with marker `marker` (same char, run length ≥ the opener's), or -1 when the
+ * fence runs unclosed to the end of `lines`. `scanMarkdownTail` mirrors `parseBlocks`
+ * through this shared helper so the two can never disagree on where a fence ends.
+ * @param {string[]} lines @param {number} i @param {string} marker
+ * @returns {number}
+ */
+function findFenceClose(lines, i, marker) {
+  for (let j = i + 1; j < lines.length; j++) {
+    const close = FENCE_CLOSE_RE.exec(/** @type {string} */ (lines[j]));
+    if (close && close[1]?.[0] === marker[0] && (close[1]?.length ?? 0) >= marker.length) return j;
+  }
+  return -1;
+}
+
+/**
+ * chunked-plan §4.3.3: the fence marker (` ``` ` / `~~~` run) of an opening-fence line, or
+ * `null` when the line does not open a fence. Exported so `logic/previewStream.js`'s forced
+ * cut can close/reopen an unclosed fence with the SAME marker without re-typing the regex.
+ * @param {unknown} line
+ * @returns {string | null}
+ */
+export function markdownFenceMarker(line) {
+  if (typeof line !== "string") return null;
+  const fence = FENCE_RE.exec(line);
+  return fence === null ? null : /** @type {string} */ (fence[1]);
+}
+
 /** @param {string} href */
 export function isSafeHref(href) {
   return SAFE_HREF_RE.test(href);
@@ -92,17 +125,12 @@ function parseBlocks(lines, qdepth) {
       flushList();
       const marker = /** @type {string} */ (fence[1]);
       const lang = (fence[2] ?? "").trim().split(/\s+/)[0] ?? "";
-      /** @type {string[]} */
-      const body = [];
-      let j = i + 1;
-      for (; j < lines.length; j++) {
-        const l = /** @type {string} */ (lines[j]);
-        const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(l);
-        if (close && close[1]?.[0] === marker[0] && (close[1]?.length ?? 0) >= marker.length) break;
-        body.push(l);
-      }
-      out.push({ type: "code_block", lang, text: body.join("\n") }); // unclosed ⇒ runs to the end
-      i = j;
+      // chunked-plan §4.3.2: the closing scan lives in `findFenceClose` (shared with
+      // `scanMarkdownTail`); unclosed ⇒ the body runs to the end of `lines`.
+      const closeIdx = findFenceClose(lines, i, marker);
+      const end = closeIdx === -1 ? lines.length : closeIdx;
+      out.push({ type: "code_block", lang, text: lines.slice(i + 1, end).join("\n") });
+      i = end;
       continue;
     }
     if (line.trim() === "") {
@@ -444,4 +472,86 @@ function findClose(src, from, mark, noClose) {
   }
   noClose.set(mark, from);
   return -1;
+}
+
+/* -------------------------------------------------------------------------
+ * Chunked markdown streaming (web-hub-preview chunked-plan §4.3, package P2a) —
+ * `scanMarkdownTail`, appended ONLY. A mirror scan over the COMPLETE lines of a pending
+ * tail that finds the last TOP-LEVEL blank line (the only safe cut point: `parseBlocks`
+ * flushes paragraphs/lists there, and the three multi-line constructs — fences, quotes,
+ * tables — are mirrored through the parser's own private helpers so a line that is inside
+ * one of them is never mistaken for a cut point). The §4.3.1 invariant (property-tested):
+ * for `cut` returned here, `parseMarkdown(text.slice(0, cut)) ++ parseMarkdown(text.slice(cut))`
+ * deep-equals `parseMarkdown(text)`.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * @param {string[]} lines
+ * @returns {number[]} starts[i] = the char offset of `lines[i]` in the joined text
+ */
+function lineStartsOf(lines) {
+  const starts = new Array(lines.length);
+  let at = 0;
+  for (let i = 0; i < lines.length; i++) {
+    starts[i] = at;
+    at += /** @type {string} */ (lines[i]).length + 1;
+  }
+  return starts;
+}
+
+/**
+ * chunked-plan §4.3.2: scan the COMPLETE lines of `text` (already `\r\n?`→`\n` normalized,
+ * starting at a top-level boundary) and report the last safe cut.
+ *
+ * Mirrors `parseBlocks`'s recognition order exactly — fence first, then blank, heading,
+ * quote, table — minus list/paragraph handling (single-line constructs carry no cross-blank
+ * state, so they cannot affect where a cut is safe). Only complete lines are scanned: the
+ * lookahead a table needs (`i+1`) never sees the incomplete trailing line, and a closing
+ * fence on the incomplete line is likewise invisible — both only ever SHRINK the reported
+ * cut, never produce a wrong one (the conservative direction).
+ * @param {string} text
+ * @returns {{ cut: number, lineEnd: number, openFence: string | null }}
+ *   cut       start of the line AFTER the last top-level blank line (-1 = no safe cut);
+ *   lineEnd   one past the last "\n" (0 when there is no complete line at all);
+ *   openFence  when the complete lines end INSIDE an unclosed fence, its opening line (for
+ *              the forced cut's close/reopen, §4.3.3)
+ */
+export function scanMarkdownTail(text) {
+  const nl = text.lastIndexOf("\n");
+  if (nl < 0) return { cut: -1, lineEnd: 0, openFence: null };
+  const lines = text.slice(0, nl).split("\n"); // complete lines only
+  const starts = lineStartsOf(lines);
+  let cut = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = /** @type {string} */ (lines[i]);
+    const fence = FENCE_RE.exec(line); // same order as parseBlocks: fence first
+    if (fence) {
+      const j = findFenceClose(lines, i, /** @type {string} */ (fence[1]));
+      if (j === -1) return { cut, lineEnd: nl + 1, openFence: line };
+      i = j;
+      continue;
+    }
+    if (line.trim() === "") {
+      cut = i + 1 < lines.length ? /** @type {number} */ (starts[i + 1]) : nl + 1;
+      continue;
+    }
+    if (HEADING_RE.test(line)) continue;
+    if (QUOTE_RE.test(line)) {
+      // A quote swallows its `>`-prefixed blank lines and lazy continuations — mirror the
+      // same consumption (the collected nodes are discarded; only the end index matters).
+      i = collectQuote(lines, i, [], 0);
+      continue;
+    }
+    if (line.includes("|") && i + 1 < lines.length) {
+      // A table data row may itself LOOK like an opening fence (e.g. "```a|b") — mirror the
+      // table's consumption so such a line is never treated as one.
+      const t = tryParseTable(lines, i);
+      if (t) {
+        i = t.end;
+        continue;
+      }
+    }
+    // list item / continuation / paragraph line: single-line state, no effect on cuts.
+  }
+  return { cut, lineEnd: nl + 1, openFence: null };
 }

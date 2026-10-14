@@ -11,7 +11,7 @@
  * allow-list.
  */
 import { describe, expect, it } from "vitest";
-import { isSafeHref, parseMarkdown } from "../../../src/web-hub/ui/src/logic/markdown.js";
+import { isSafeHref, parseMarkdown, scanMarkdownTail } from "../../../src/web-hub/ui/src/logic/markdown.js";
 
 describe("markdown whitelist (parser level)", () => {
   it("javascript:/data:/vbscript:/relative links do not produce a link node", () => {
@@ -334,5 +334,158 @@ describe("parser performance", () => {
     const ms = performance.now() - t0;
     expect(nodes.length).toBeGreaterThan(0);
     expect(ms).toBeLessThan(200);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * chunked-plan §4.3 (package P2a): `scanMarkdownTail` — the mirror scan that finds the
+ * last TOP-LEVEL blank line of a pending tail. Unit cases cover §4.3.5; the property test
+ * pins the §4.3.1 invariant: cutting at the reported `cut` (repeatedly) and parsing each
+ * segment separately yields EXACTLY the whole-document parse.
+ * ------------------------------------------------------------------------- */
+
+/** mulberry32 — deterministic PRNG (same discipline as logic-markdown-perf.test.ts). */
+function rng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Seeded markdown document generator (\n-only — the segmenter normalizes before scanning). */
+function genMarkdownDoc(r: () => number): string {
+  const pick = <T>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
+  const blocks: string[] = [];
+  const n = 6 + Math.floor(r() * 14);
+  for (let b = 0; b < n; b++) {
+    const kind = Math.floor(r() * 8);
+    if (kind === 0) {
+      blocks.push(`# H${b}`);
+    } else if (kind === 1) {
+      const lines = 1 + Math.floor(r() * 3);
+      blocks.push(Array.from({ length: lines }, (_, i) => `para ${b} line ${i} with *em* and \`code\``).join("\n"));
+    } else if (kind === 2) {
+      const fence = pick(["```", "~~~", "````", "``````"] as const);
+      const body: string[] = [];
+      const bl = 1 + Math.floor(r() * 4);
+      for (let i = 0; i < bl; i++) {
+        // body lines include blanks and fence-LOOKING lines that must not close early
+        body.push(pick(["code line", "", "```", "~~~", " ```", "| a | b |", "> not quote"] as const));
+      }
+      const close = r() < 0.85 ? `\n${fence}${r() < 0.3 ? fence[0] : ""}` : ""; // 15% unclosed
+      blocks.push(`${fence}js\n${body.join("\n")}${close}`);
+    } else if (kind === 3) {
+      blocks.push(`| h${b} | x |\n| --- | ---: |\n| 1 | 2 |\n| \`\`\`a | b |`);
+    } else if (kind === 4) {
+      const lines = [`> quote ${b}`];
+      if (r() < 0.5) lines.push(">");
+      if (r() < 0.5) lines.push(`lazy continuation ${b}`);
+      lines.push(`> end ${b}`);
+      blocks.push(lines.join("\n"));
+    } else if (kind === 5) {
+      blocks.push(`- item ${b}a\n- item ${b}b\n  continuation\n1. one\n2. two`);
+    } else if (kind === 6) {
+      blocks.push(`reference [a][r] stays literal\n\n[r]: https://example.com/${b}`);
+    } else {
+      blocks.push(`plain ${b}`);
+    }
+    blocks.push("\n".repeat(Math.floor(r() * 3))); // 0–2 blank lines between blocks
+  }
+  let doc = blocks.join("\n");
+  if (r() < 0.5) doc += "\n"; // trailing newline or not
+  if (r() < 0.3) doc += "incomplete tail"; // mid-line end
+  return doc;
+}
+
+describe("markdown scanMarkdownTail (chunked-plan §4.3.2, §4.3.5)", () => {
+  it("no newline at all ⇒ no cut, lineEnd 0, no openFence", () => {
+    expect(scanMarkdownTail("")).toEqual({ cut: -1, lineEnd: 0, openFence: null });
+    expect(scanMarkdownTail("no newline")).toEqual({ cut: -1, lineEnd: 0, openFence: null });
+  });
+
+  it("plain paragraphs: the last top-level blank's NEXT line start is the cut", () => {
+    // "a\n\nb\nc" — blank after "a"; the incomplete tail "c" stays pending.
+    expect(scanMarkdownTail("a\n\nb\nc")).toEqual({ cut: 3, lineEnd: 5, openFence: null });
+    // blank as the LAST complete line ⇒ cut = one past the final "\n"
+    expect(scanMarkdownTail("a\n\n")).toEqual({ cut: 3, lineEnd: 3, openFence: null });
+    // no blank line ⇒ no cut
+    expect(scanMarkdownTail("a\nb\nc")).toEqual({ cut: -1, lineEnd: 4, openFence: null });
+  });
+
+  it("§4.3.5-1/3: fences spanning blanks are never cut inside (``` and ~~~)", () => {
+    expect(scanMarkdownTail("```\na\n\nb")).toEqual({ cut: -1, lineEnd: 7, openFence: "```" });
+    expect(scanMarkdownTail("~~~\na\n\nb")).toEqual({ cut: -1, lineEnd: 7, openFence: "~~~" });
+    // a blank BEFORE the fence is still a valid cut; the fence tail is reported open
+    expect(scanMarkdownTail("p\n\n```\na\n\nb")).toEqual({ cut: 3, lineEnd: 10, openFence: "```" });
+    // a LONGER closer closes; the blank after it is a cut again
+    expect(scanMarkdownTail("```\n\n````\n\nb")).toEqual({ cut: 11, lineEnd: 11, openFence: null });
+    // a DIFFERENT-char fence does not close
+    expect(scanMarkdownTail("~~~\n```\n\nb")).toEqual({ cut: -1, lineEnd: 9, openFence: "~~~" });
+  });
+
+  it("§4.3.5-2: an unclosed fence to EOF reports openFence with the last good cut", () => {
+    const r = scanMarkdownTail("a\n\n```js\nx\ny\n");
+    expect(r.cut).toBe(3);
+    expect(r.openFence).toBe("```js");
+  });
+
+  it("§4.3.5-4: a table swallows a fence-looking data row ('```a|b' is not a fence)", () => {
+    const r = scanMarkdownTail("| h |\n|---|\n```a|b\n\nz");
+    expect(r.openFence).toBeNull();
+    expect(r.cut).toBe(20); // the blank after the table IS a top-level cut
+    // a fence-looking line after a BROKEN table (bad delimiter) is a real fence
+    const broken = scanMarkdownTail("| h |\n|nope|\n```a|b\n\nz");
+    expect(broken.openFence).not.toBeNull();
+  });
+
+  it("§4.3.5-5: quotes swallow '>' blanks and lazy continuations; a bare blank ends them", () => {
+    // "> a\n>\n> b" is ONE quote — its interior blank is not a top-level cut
+    const r = scanMarkdownTail("> a\n>\n> b\n\nnext");
+    expect(r.cut).toBe(11); // the bare blank after the quote
+    expect(r.openFence).toBeNull();
+    // lazy continuation line joins the quote, so the blank after IT is the cut
+    const lazy = scanMarkdownTail("> a\nlazy\n\nnext");
+    expect(lazy.cut).toBe(10);
+  });
+
+  it("§4.3.5-6: lists with continuation lines end at the bare blank (mixed markers)", () => {
+    const r = scanMarkdownTail("- a\n  cont\n1. one\n\nb");
+    expect(r.cut).toBe(19);
+    expect(r.openFence).toBeNull();
+  });
+
+  it("§4.3.5-14: reference-style links stay literal on BOTH sides of a cut (D7 tripwire)", () => {
+    const doc = "[a][r]\n\n[r]: https://x\n\nend";
+    const { cut } = scanMarkdownTail(doc);
+    expect(cut).toBeGreaterThan(0);
+    const whole = parseMarkdown(doc);
+    const joined = [...parseMarkdown(doc.slice(0, cut)), ...parseMarkdown(doc.slice(cut))];
+    expect(joined).toEqual(whole);
+    expect(JSON.stringify(whole)).not.toContain('"link"');
+  });
+
+  it("property (§4.3.1): every reported cut splits the parse EXACTLY (seeded corpus)", () => {
+    for (let seed = 1; seed <= 60; seed++) {
+      const r = rng(30_000 + seed);
+      const doc = genMarkdownDoc(r);
+      // Repeatedly cut the pending tail at scanMarkdownTail's cut (the segmenter's loop),
+      // then parse the pieces and compare against the whole-document parse.
+      const parts: string[] = [];
+      let pending = doc;
+      for (;;) {
+        const { cut } = scanMarkdownTail(pending);
+        if (cut <= 0) break;
+        parts.push(pending.slice(0, cut));
+        pending = pending.slice(cut);
+      }
+      parts.push(pending);
+      expect(parts.join("")).toBe(doc); // cuts never lose or gain a character
+      const joined = parts.flatMap((p) => parseMarkdown(p));
+      expect(JSON.parse(JSON.stringify(joined))).toEqual(JSON.parse(JSON.stringify(parseMarkdown(doc))));
+    }
   });
 });

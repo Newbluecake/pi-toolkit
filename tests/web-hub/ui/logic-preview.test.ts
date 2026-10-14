@@ -9,6 +9,7 @@ import {
   childPreviewPath,
   classifyPreviewError,
   clientImageBudget,
+  clientTextStreamCap,
   countMdNodes,
   findPathRefs,
   formatPreviewBytes,
@@ -20,6 +21,7 @@ import {
   previewOutcomeFromResponse,
   PREVIEW_MAX_REFS_PER_NODE,
   PREVIEW_MD_NODE_MAX,
+  PREVIEW_CHUNK_HUB_CAP,
   PREVIEW_DOWNLOAD_HUB_CAP,
   PREVIEW_TILDE_HUB_CAP,
   previewScopeOf,
@@ -31,6 +33,8 @@ import {
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_IMAGE_MAX_PIXELS,
   PREVIEW_TEXT_MAX_BYTES,
+  PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES,
+  PREVIEW_TEXT_STREAM_HUB_MAX_BYTES,
   PREVIEW_UPLOADS_MARKER,
   validatePreviewPath,
 } from "../../../src/web-hub/protocol/preview.js";
@@ -1906,5 +1910,138 @@ describe("logic/preview.js previewScopeOf / scopeKeyOf — preview-download (pre
     expect(scopeKeyOf(filesScope)).toBe("A|s1|/home/u/proj|file");
     // a cap change invalidates the key — the probe LRU partitions naturally
     expect(scopeKeyOf(filesScope)).not.toBe(scopeKeyOf(previewScopeOf(base)));
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * chunked-plan §4.1 (package P2a): the chunk branch of `checkPreviewHeaders`, the
+ * `chunks` scope key, and `clientTextStreamCap`.
+ * ------------------------------------------------------------------------- */
+
+describe("logic/preview.js checkPreviewHeaders — the chunk gate (chunked-plan §4.1/§2.4)", () => {
+  const hdrs = (m: Record<string, string>) => ({ get: (n: string) => m[n] ?? null });
+  const IDENT = "i1.abcdefghijklmnop123456"; // matches PREVIEW_IDENT_RE (i1. + 22 base64url)
+  const IDENT2 = "i1.ZYXWVUTSRQPONMLK987654";
+  const textHdrs = (extra: Record<string, string> = {}) =>
+    hdrs({
+      [PREVIEW_HDR.kind]: "text",
+      [PREVIEW_HDR.size]: "300000",
+      [PREVIEW_HDR.truncated]: "1",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": String(PREVIEW_TEXT_MAX_BYTES),
+      ...extra,
+    });
+
+  it("first chunk (offset 0, no ident): echoed offset+valid ident ⇒ success carrying chunk", () => {
+    const r = checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "0", [PREVIEW_HDR.ident]: IDENT }), {
+      chunk: { offset: 0 },
+    });
+    expect(r).toEqual({
+      ok: true,
+      kind: "text",
+      size: PREVIEW_TEXT_MAX_BYTES,
+      totalSize: 300000,
+      truncated: true,
+      chunk: { offset: 0, ident: IDENT },
+    });
+  });
+
+  it("first chunk with BOTH headers absent ⇒ degraded success WITHOUT chunk (old hub / stripped)", () => {
+    const r = checkPreviewHeaders(textHdrs(), { chunk: { offset: 0 } });
+    expect(r).toEqual({ ok: true, kind: "text", size: PREVIEW_TEXT_MAX_BYTES, totalSize: 300000, truncated: true });
+    expect("chunk" in (r as object)).toBe(false);
+  });
+
+  it("first chunk with only ONE of the two headers ⇒ E_BAD_RESPONSE (half-protocol)", () => {
+    expect(checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "0" }), { chunk: { offset: 0 } })).toMatchObject({
+      ok: false,
+      error: "E_BAD_RESPONSE",
+    });
+    expect(checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.ident]: IDENT }), { chunk: { offset: 0 } })).toMatchObject({
+      ok: false,
+      error: "E_BAD_RESPONSE",
+    });
+  });
+
+  it("first chunk echoing a NON-ZERO offset ⇒ E_BAD_RESPONSE", () => {
+    expect(
+      checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "100", [PREVIEW_HDR.ident]: IDENT }), {
+        chunk: { offset: 0 },
+      }),
+    ).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
+  });
+
+  it("continuation: offset/ident echo must match the request exactly", () => {
+    const req = { chunk: { offset: 262144, ident: IDENT } };
+    const ok = checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "262144", [PREVIEW_HDR.ident]: IDENT }), req);
+    expect(ok).toMatchObject({ ok: true, kind: "text", chunk: { offset: 262144, ident: IDENT } });
+    // offset mismatch (an old hub answering from 0 would be caught here)
+    expect(checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "0", [PREVIEW_HDR.ident]: IDENT }), req)).toMatchObject(
+      { ok: false, error: "E_BAD_RESPONSE" },
+    );
+    // ident mismatch (a different file generation)
+    expect(
+      checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "262144", [PREVIEW_HDR.ident]: IDENT2 }), req),
+    ).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
+    // malformed ident
+    expect(
+      checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "262144", [PREVIEW_HDR.ident]: "not-an-ident" }), req),
+    ).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
+    // malformed offset
+    expect(
+      checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "0262144", [PREVIEW_HDR.ident]: IDENT }), req),
+    ).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
+  });
+
+  it("a NON-opted-in request ignores the chunk headers entirely (byte-identical legacy shape)", () => {
+    const r = checkPreviewHeaders(textHdrs({ [PREVIEW_HDR.offset]: "0", [PREVIEW_HDR.ident]: IDENT }), {});
+    expect(r).toEqual({ ok: true, kind: "text", size: PREVIEW_TEXT_MAX_BYTES, totalSize: 300000, truncated: true });
+  });
+
+  it("the chunk gate does not apply to images (hub ignores chunk=1 for image sniff)", () => {
+    const r = checkPreviewHeaders(
+      hdrs({
+        [PREVIEW_HDR.kind]: "image",
+        [PREVIEW_HDR.dims]: "10x10",
+        "Content-Type": "image/png",
+        "Content-Length": "3",
+      }),
+      { chunk: { offset: 0 }, maxPixels: 40_000_000 },
+    );
+    expect(r).toMatchObject({ ok: true, kind: "image" });
+    expect("chunk" in (r as object)).toBe(false);
+  });
+});
+
+describe("logic/preview.js previewScopeOf chunks key + clientTextStreamCap (chunked-plan §4.1, D1)", () => {
+  const session = { sessionId: "s1", cwd: "/home/u/proj" };
+
+  it("preview.chunk.v1 adds `chunks: true`; without the cap the scope is deep-equal to before", () => {
+    const base = previewScopeOf({
+      mode: "token",
+      hubCaps: ["preview.v1"],
+      hasTransport: true,
+      agentKey: "A",
+      session,
+    });
+    expect(base).toEqual({ agentKey: "A", sessionId: "s1", cwd: "/home/u/proj", uploads: true });
+    expect(base !== null && "chunks" in base).toBe(false);
+    const withChunk = previewScopeOf({
+      mode: "token",
+      hubCaps: ["preview.v1", PREVIEW_CHUNK_HUB_CAP],
+      hasTransport: true,
+      agentKey: "A",
+      session,
+    });
+    expect(withChunk).toEqual({ agentKey: "A", sessionId: "s1", cwd: "/home/u/proj", uploads: true, chunks: true });
+  });
+
+  it("clientTextStreamCap: coarse (touch) 4 MiB, otherwise 8 MiB, both ≤ the hub hard ceiling", () => {
+    expect(clientTextStreamCap({ coarse: true })).toBe(PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES.coarse);
+    expect(clientTextStreamCap({ coarse: true })).toBe(4 * 1024 * 1024);
+    expect(clientTextStreamCap({ coarse: false })).toBe(8 * 1024 * 1024);
+    expect(clientTextStreamCap()).toBe(8 * 1024 * 1024);
+    expect(clientTextStreamCap({ coarse: true })).toBeLessThanOrEqual(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES);
+    expect(clientTextStreamCap()).toBeLessThanOrEqual(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES);
   });
 });

@@ -1186,7 +1186,99 @@ describe.each([
       }),
     );
     const out = await h.transport.preview!.fetch(PREVIEW_REQ, previewOpts());
-    expect(out).toEqual({ ok: true, kind: "text", size: 999999, truncated: true, text: "hello 预览" });
+    // chunked-plan §4.1 (P2a): the text outcome now also carries `bytes` (the decoded body
+    // length — the truncated-copy fix works against old hubs too).
+    expect(out).toEqual({ ok: true, kind: "text", size: 999999, truncated: true, bytes: 12, text: "hello 预览" });
+  });
+
+  // --- chunked continuation (chunked-plan §4.1, P2a) — identical wire on both adapters ---
+
+  const CHUNK_IDENT = "i1.abcdefghijklmnop123456";
+  const chunkTextResp = (text: string, extra: Record<string, string> = {}) => {
+    const bytes = new TextEncoder().encode(text);
+    return respBytes(200, bytes, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": String(bytes.byteLength),
+      "X-PWH-Preview-Kind": "text",
+      "X-PWH-Preview-Size": "999999",
+      "X-PWH-Preview-Truncated": "1",
+      ...extra,
+    });
+  };
+
+  it("chunk:true ⇒ &chunk=1 on the URL; echo headers accepted ⇒ outcome carries chunk + bytes", async () => {
+    const h = make(async () =>
+      chunkTextResp("chunk0", { "X-PWH-Preview-Offset": "0", "X-PWH-Preview-Ident": CHUNK_IDENT }),
+    );
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, chunk: true }, previewOpts());
+    expect(h.fetchCalls[0]!.url).toBe(`${PREVIEW_URL}&chunk=1`);
+    expect(out).toEqual({
+      ok: true,
+      kind: "text",
+      size: 999999,
+      truncated: true,
+      bytes: 6,
+      text: "chunk0",
+      chunk: { offset: 0, ident: CHUNK_IDENT },
+    });
+  });
+
+  it("chunk:{offset,ident} ⇒ &chunk=1&offset=N&ident=… on the URL; echo validated against the request", async () => {
+    const h = make(async () =>
+      chunkTextResp("next", { "X-PWH-Preview-Offset": "262144", "X-PWH-Preview-Ident": CHUNK_IDENT }),
+    );
+    const out = await h.transport.preview!.fetch(
+      { ...PREVIEW_REQ, chunk: { offset: 262144, ident: CHUNK_IDENT } },
+      previewOpts(),
+    );
+    expect(h.fetchCalls[0]!.url).toBe(`${PREVIEW_URL}&chunk=1&offset=262144&ident=${encodeURIComponent(CHUNK_IDENT)}`);
+    expect(out).toMatchObject({ ok: true, kind: "text", chunk: { offset: 262144, ident: CHUNK_IDENT } });
+  });
+
+  it("chunk + dir ⇒ LOCAL E_BAD_REQUEST, no request is sent (§2.2 mutual exclusion)", async () => {
+    const h = make(async () => resp(200));
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, dir: true, chunk: true }, previewOpts());
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_REQUEST" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/preview"))).toHaveLength(0);
+  });
+
+  it("a malformed chunk object ⇒ LOCAL E_BAD_REQUEST, no request is sent", async () => {
+    const h = make(async () => resp(200));
+    const out = await h.transport.preview!.fetch(
+      { ...PREVIEW_REQ, chunk: { offset: 10, ident: "bad" } },
+      previewOpts(),
+    );
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_REQUEST" });
+    expect(h.fetchCalls.filter((c) => c.url.startsWith("/api/preview"))).toHaveLength(0);
+  });
+
+  it("first chunk without echo headers ⇒ legacy degrade (ok text, `bytes` but no `chunk`)", async () => {
+    const h = make(async () => chunkTextResp("hello"));
+    const out = await h.transport.preview!.fetch({ ...PREVIEW_REQ, chunk: true }, previewOpts());
+    expect(out.ok).toBe(true);
+    expect(out).toMatchObject({ kind: "text", bytes: 5 });
+    expect("chunk" in (out as object)).toBe(false);
+  });
+
+  it("offset/ident echo mismatch ⇒ E_BAD_RESPONSE status 0 (§2.4 double保险)", async () => {
+    const wrongOffset = make(async () =>
+      chunkTextResp("dup!", { "X-PWH-Preview-Offset": "0", "X-PWH-Preview-Ident": CHUNK_IDENT }),
+    );
+    expect(
+      await wrongOffset.transport.preview!.fetch(
+        { ...PREVIEW_REQ, chunk: { offset: 262144, ident: CHUNK_IDENT } },
+        previewOpts(),
+      ),
+    ).toMatchObject({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+    const wrongIdent = make(async () =>
+      chunkTextResp("dup!", { "X-PWH-Preview-Offset": "262144", "X-PWH-Preview-Ident": "i1.ZYXWVUTSRQPONMLK987654" }),
+    );
+    expect(
+      await wrongIdent.transport.preview!.fetch(
+        { ...PREVIEW_REQ, chunk: { offset: 262144, ident: CHUNK_IDENT } },
+        previewOpts(),
+      ),
+    ).toMatchObject({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
   });
 
   it("dims over the client maxPixels budget ⇒ E_PREVIEW_TOO_LARGE pixels, aborts BEFORE reading the body", async () => {

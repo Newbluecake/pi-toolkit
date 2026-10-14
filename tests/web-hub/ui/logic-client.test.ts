@@ -597,3 +597,107 @@ describe("createClient: spawn.history (session-history plan §4.7.1)", () => {
     expect(e.calls.filter((c) => c.url === "/api/login")).toHaveLength(1);
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * chunked-plan §4.1 (package P2a): preview fetch `chunk` opt-in — URL assembly, the local
+ * dir/chunk mutex, and the text outcome's `bytes`/`chunk` fields. The password client's
+ * copy of this suite (logic-client-password.test.ts) pins identical behavior; the shared
+ * adapter-level suite lives in transport-contract.test.ts.
+ * ------------------------------------------------------------------------- */
+
+describe("createClient preview: chunked continuation (chunked-plan §4.1)", () => {
+  const IDENT = "i1.abcdefghijklmnop123456";
+  const respBytes = (bytes: Uint8Array, headers: Record<string, string>, status = 200) =>
+    ({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (n: string) => headers[n] ?? null },
+      json: async () => ({}),
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+    }) as any;
+  const textResp = (text: string, extra: Record<string, string> = {}) => {
+    const bytes = new TextEncoder().encode(text);
+    return respBytes(bytes, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": String(bytes.byteLength),
+      "X-PWH-Preview-Kind": "text",
+      "X-PWH-Preview-Size": "999999",
+      "X-PWH-Preview-Truncated": "1",
+      ...extra,
+    });
+  };
+  const REQ = { agentKey: "A", sessionId: "s1", path: "/home/u/proj/big.log" };
+  const OPTS = () => ({ signal: new AbortController().signal, maxPixels: 40_000_000 });
+
+  it("chunk:true appends &chunk=1; the echoed offset/ident ride the outcome with `bytes`", async () => {
+    const e = env({
+      fetch: async () => textResp("chunk0", { "X-PWH-Preview-Offset": "0", "X-PWH-Preview-Ident": IDENT }),
+    });
+    const out = await e.client.preview.fetch({ ...REQ, chunk: true }, OPTS());
+    expect(e.calls[0]!.url).toBe(
+      `/api/preview?agentKey=A&sessionId=s1&path=${encodeURIComponent("/home/u/proj/big.log")}&chunk=1`,
+    );
+    expect(out).toEqual({
+      ok: true,
+      kind: "text",
+      size: 999999,
+      truncated: true,
+      bytes: 6,
+      text: "chunk0",
+      chunk: { offset: 0, ident: IDENT },
+    });
+  });
+
+  it("chunk:{offset,ident} appends &chunk=1&offset=N&ident=… (ident encoded)", async () => {
+    const e = env({
+      fetch: async () => textResp("next", { "X-PWH-Preview-Offset": "262144", "X-PWH-Preview-Ident": IDENT }),
+    });
+    const out = await e.client.preview.fetch({ ...REQ, chunk: { offset: 262144, ident: IDENT } }, OPTS());
+    expect(e.calls[0]!.url).toContain("&chunk=1&offset=262144&ident=" + encodeURIComponent(IDENT));
+    expect(out).toMatchObject({ ok: true, kind: "text", bytes: 4, chunk: { offset: 262144, ident: IDENT } });
+  });
+
+  it("chunk + dir ⇒ local E_BAD_REQUEST, nothing is sent (§2.2 mutual exclusion)", async () => {
+    const e = env();
+    const out = await e.client.preview.fetch({ ...REQ, dir: true, chunk: true }, OPTS());
+    expect(out).toEqual({ ok: false, status: 0, error: "E_BAD_REQUEST" });
+    expect(e.calls).toHaveLength(0);
+  });
+
+  it("a malformed chunk object (bad ident / negative offset) ⇒ local E_BAD_REQUEST, nothing sent", async () => {
+    const e = env();
+    expect(await e.client.preview.fetch({ ...REQ, chunk: { offset: 1, ident: "nope" } }, OPTS())).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_REQUEST",
+    });
+    expect(await e.client.preview.fetch({ ...REQ, chunk: { offset: -1, ident: IDENT } }, OPTS())).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_REQUEST",
+    });
+    expect(e.calls).toHaveLength(0);
+  });
+
+  it("first chunk without the echo headers ⇒ legacy degrade: ok text with `bytes`, no `chunk`", async () => {
+    const e = env({ fetch: async () => textResp("hello 预览") });
+    const out = await e.client.preview.fetch({ ...REQ, chunk: true }, OPTS());
+    expect(out.ok).toBe(true);
+    expect(out).toMatchObject({ kind: "text", bytes: 12, text: "hello 预览" });
+    expect("chunk" in out).toBe(false);
+  });
+
+  it("a non-chunked text outcome carries `bytes` too (the truncated-copy fix, old hubs alike)", async () => {
+    const e = env({ fetch: async () => textResp("hello 预览") });
+    const out = await e.client.preview.fetch(REQ, OPTS());
+    expect(out).toEqual({ ok: true, kind: "text", size: 999999, truncated: true, bytes: 12, text: "hello 预览" });
+  });
+
+  it("offset echo mismatch on a continuation ⇒ E_BAD_RESPONSE status 0 (nothing appended)", async () => {
+    const e = env({
+      fetch: async () => textResp("dup!", { "X-PWH-Preview-Offset": "0", "X-PWH-Preview-Ident": IDENT }),
+    });
+    const out = await e.client.preview.fetch({ ...REQ, chunk: { offset: 262144, ident: IDENT } }, OPTS());
+    expect(out).toMatchObject({ ok: false, status: 0, error: "E_BAD_RESPONSE" });
+  });
+});
