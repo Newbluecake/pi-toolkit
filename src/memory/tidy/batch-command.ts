@@ -20,7 +20,15 @@ import { memoryDirFor, type MemoryPaths, MemoryError } from "../paths.js";
 import { snapshotMemoryDir, sha256Hex, type TidySnapshot, type TidySnapshotFile } from "./snapshot.js";
 import { selectArchiveCandidates } from "./archive-signals.js";
 import { editIndex } from "./index-edit.js";
-import { selectionAction, selectionItems, reduceSelection, type SelectionState } from "./selection.js";
+import {
+  fmtKiB,
+  selectedTotal,
+  selectionAction,
+  selectionItems,
+  reduceSelection,
+  type SelectionState,
+} from "./selection.js";
+import { openSelectionView, SelectionViewModel } from "./selection-view.js";
 import { planBatches, overheadFloorBytes, type BatchCandidate } from "./batch-plan.js";
 import { createLedger, reserve, settle } from "./run-ledger.js";
 import type { TidyBatchSettings } from "./batch-settings.js";
@@ -136,9 +144,6 @@ function owner(): TidyOwner {
     ...(lease.startTicks === undefined ? {} : { startTicks: String(lease.startTicks) }),
     ...(lease.bootId === undefined ? {} : { bootId: lease.bootId }),
   };
-}
-function fmtKiB(bytes: number): string {
-  return `${(Math.max(0, bytes) / 1024).toFixed(1)}KiB`;
 }
 function modelRef(
   ctx: ExtensionCommandContext,
@@ -329,6 +334,21 @@ async function selectArchives(
     candidates,
     selected: new Set(candidates.filter((x) => x.suggested && !x.conflict).map((x) => x.name)),
   };
+  // The custom overlay keeps the cursor in place across toggles; the bounded
+  // select loop (no initial-cursor parameter in pi's dialog options) is the
+  // fallback for hosts without ctx.ui.custom (or with an inert one).
+  if (typeof ctx.ui.custom === "function") return selectArchivesOverlay(ctx, snap, deadline, state);
+  return selectArchivesSelectLoop(ctx, snap, deadline, state);
+}
+
+async function selectArchivesSelectLoop(
+  ctx: ExtensionCommandContext,
+  snap: TidySnapshot,
+  deadline: BatchTiming,
+  initial: SelectionState,
+): Promise<readonly TidySnapshotFile[]> {
+  let state = initial;
+  const candidates = initial.candidates;
   for (;;) {
     const items = selectionItems(state);
     const choice = await withDialog(deadline, (signal) =>
@@ -370,6 +390,38 @@ async function selectArchives(
       continue;
     }
     state = reduceSelection(state, action);
+  }
+}
+
+/** Overlay variant: one `ui.custom` list per phase; view/confirm-cancel re-open with cursor intact. */
+async function selectArchivesOverlay(
+  ctx: ExtensionCommandContext,
+  snap: TidySnapshot,
+  deadline: BatchTiming,
+  initial: SelectionState,
+): Promise<readonly TidySnapshotFile[]> {
+  const model = new SelectionViewModel(initial);
+  for (;;) {
+    const event = await withDialog(deadline, (signal) => openSelectionView(ctx.ui, model, { signal }));
+    if (event === undefined) return selectArchivesSelectLoop(ctx, snap, deadline, model.state); // custom exists but never engaged
+    if (event.kind === "cancel") return [];
+    if (event.kind === "view") {
+      const file = snap.files.find((x) => x.name === event.name);
+      if (file) {
+        const viewed = await withDialog(deadline, (signal) =>
+          showBoundedViewer(ctx.ui, file.name, file.body, { signal }),
+        );
+        void viewed;
+      }
+      continue;
+    }
+    const total = selectedTotal(model.state);
+    const confirmed = await withDialog(deadline, (signal) =>
+      ctx.ui.confirm("Archive selected files", `Move ${total.files} files (${fmtKiB(total.bytes)}) to archive/?`, {
+        signal,
+      }),
+    );
+    if (confirmed) return snap.files.filter((x) => model.state.selected.has(x.name));
   }
 }
 

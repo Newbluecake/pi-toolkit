@@ -31,7 +31,8 @@ function prefix(index: number): string {
 function selectedBytes(state: SelectionState): number {
   return state.candidates.filter((c) => state.selected.has(c.name)).reduce((sum, c) => sum + c.bytes, 0);
 }
-function fmtKiB(bytes: number): string {
+/** KiB formatting shared by the bounded labels and the custom overlay. */
+export function fmtKiB(bytes: number): string {
   const value = Number((Math.max(0, bytes) / 1024).toFixed(1));
   return `${String(value)}KiB`;
 }
