@@ -436,6 +436,48 @@ export interface HeldItemWire {
   at: number;
 }
 
+/** cache-keepalive-web plan §2: one line-breaker row. Open schema (additionalProperties:true). */
+export interface CacheKeepaliveLineWire {
+  label: string;
+  open: boolean;
+  status?: number;
+  trips: number;
+  retryAt?: number;
+  current?: true;
+  wildcard?: true;
+}
+/** cache-keepalive-web plan §2: last keepalive ping outcome. `kind` is an open string. */
+export interface CacheKeepaliveLastPingWire {
+  at: number;
+  kind: string;
+  status?: number;
+  transient?: boolean;
+  attempts?: number;
+}
+/** cache-keepalive-web plan §2/D11: `StatusInfo.cacheKeepalive` body. Deliberately has no `armed`. */
+export interface CacheKeepaliveWire {
+  v: 1;
+  at: number;
+  mode: string;
+  dirty?: true;
+  enabled: boolean;
+  modeText?: string;
+  ping?: { text: string; state: string; retryAt?: number; tail?: string };
+  window: { pings: number; max: number };
+  session: {
+    pings: number;
+    cacheReadTokens: number;
+    costUsd?: number;
+    avoidedMissTokens: number;
+    loadBearingWindows: number;
+    unnecessaryWindows: number;
+    discardedWindows: number;
+  };
+  lastPing?: CacheKeepaliveLastPingWire;
+  disabled?: { reason: string; at: number; httpStatus?: number; transient?: true };
+  lines: CacheKeepaliveLineWire[];
+  omitted?: number;
+}
 export interface StatusInfo {
   leafId: string | null; // spike K7④：leaf 变化是 idle custom_message 的唯一信号（不经扩展事件）
   busy: boolean;
@@ -468,6 +510,10 @@ export interface StatusInfo {
    *  riding the same status slot lifecycle as `todo`/`worktrees`/`bashJobs`/`quota`. Absent = load
    *  feature off / not sampled yet / print-json session (byte-equal to the pre-feature shape). */
   loadGate?: LoadGateWire;
+  /** cache-keepalive-web plan §2: optional prompt-cache keepalive summary (main session), riding the
+   *  same status slot lifecycle as `todo`/`worktrees`/`bashJobs`/`quota`. Absent = web-hub off /
+   *  cacheTtl.keepalive off / nothing to report (byte-equal to the pre-feature shape). Decode side stays open. */
+  cacheKeepalive?: CacheKeepaliveWire;
   /** web-hub-steer-recall plan §2.3 S2: held (recallable) + returned web steer/followUp rows
    *  (≤ HELD_WIRE_MAX_ITEMS), riding the same status slot lifecycle as `todo`/`worktrees`. Absent
    *  ⇔ empty / steerRecall off / holdWired false — byte-equal to the pre-feature shape. Deliberately
@@ -1157,6 +1203,82 @@ const HeldItemSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+// cache-keepalive-web plan §2 (P0 freeze): same open posture as QuotaWireSchema — a `decodeWith`
+// failure drops the whole status frame, so the boundary is deliberately wider than the projection.
+// `mode`/`ping.state`/`lastPing.kind` are open strings (never Union<Literal>).
+const CKStr = (maxLength = 256) => Type.String({ maxLength });
+const CacheKeepaliveLineWireSchema = Type.Object(
+  {
+    label: CKStr(),
+    open: Type.Boolean(),
+    status: Type.Optional(Type.Number()),
+    trips: Type.Number(),
+    retryAt: Type.Optional(Type.Number()),
+    current: Type.Optional(Type.Literal(true)),
+    wildcard: Type.Optional(Type.Literal(true)),
+  },
+  { additionalProperties: true },
+);
+export const CacheKeepaliveWireSchema = Type.Object(
+  {
+    v: Type.Literal(1),
+    at: Type.Number(),
+    mode: CKStr(),
+    dirty: Type.Optional(Type.Literal(true)),
+    enabled: Type.Boolean(),
+    modeText: Type.Optional(CKStr()),
+    ping: Type.Optional(
+      Type.Object(
+        {
+          text: CKStr(),
+          state: CKStr(),
+          retryAt: Type.Optional(Type.Number()),
+          tail: Type.Optional(CKStr()),
+        },
+        { additionalProperties: true },
+      ),
+    ),
+    window: Type.Object({ pings: Type.Number(), max: Type.Number() }, { additionalProperties: true }),
+    session: Type.Object(
+      {
+        pings: Type.Number(),
+        cacheReadTokens: Type.Number(),
+        costUsd: Type.Optional(Type.Number()),
+        avoidedMissTokens: Type.Number(),
+        loadBearingWindows: Type.Number(),
+        unnecessaryWindows: Type.Number(),
+        discardedWindows: Type.Number(),
+      },
+      { additionalProperties: true },
+    ),
+    lastPing: Type.Optional(
+      Type.Object(
+        {
+          at: Type.Number(),
+          kind: CKStr(),
+          status: Type.Optional(Type.Number()),
+          transient: Type.Optional(Type.Boolean()),
+          attempts: Type.Optional(Type.Number()),
+        },
+        { additionalProperties: true },
+      ),
+    ),
+    disabled: Type.Optional(
+      Type.Object(
+        {
+          reason: CKStr(),
+          at: Type.Number(),
+          httpStatus: Type.Optional(Type.Number()),
+          transient: Type.Optional(Type.Literal(true)),
+        },
+        { additionalProperties: true },
+      ),
+    ),
+    lines: Type.Array(CacheKeepaliveLineWireSchema, { maxItems: 32 }),
+    omitted: Type.Optional(Type.Number()),
+  },
+  { additionalProperties: true },
+);
 const StatusInfoSchema = Type.Object({
   leafId: Type.Union([Type.String(), Type.Null()]),
   busy: Type.Boolean(),
@@ -1173,6 +1295,7 @@ const StatusInfoSchema = Type.Object({
   bashJobs: Type.Optional(BashJobsWireSchema),
   quota: Type.Optional(QuotaWireSchema),
   loadGate: Type.Optional(LoadGateWireSchema),
+  cacheKeepalive: Type.Optional(CacheKeepaliveWireSchema),
   // web-hub-steer-recall plan §2.3 S2'
   held: Type.Optional(Type.Array(HeldItemSchema, { maxItems: 32 })),
   heldRev: Type.Optional(Type.Integer({ minimum: 0 })),
