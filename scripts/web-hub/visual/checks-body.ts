@@ -179,18 +179,20 @@ async function checkTranscriptWindowCap(ctx: CheckContext): Promise<CheckOutcome
   return pass("transcript-window-cap", `mounted=${count}`);
 }
 
-/** ui-design.md §6.6: off-screen `.tx-item`s use `content-visibility: auto` to skip layout/paint. */
-async function checkContentVisibilityAuto(ctx: CheckContext): Promise<CheckOutcome> {
+/** #11 (2026-10-14): `.tx-item` must NOT compute `content-visibility: auto` — it was the Aw Snap
+ * root cause (layout oscillation against the follow-to-bottom pin). Supersedes ui-design.md
+ * §6.6's original "content-visibility: auto" requirement. */
+async function checkTxItemNoContentVisibility(ctx: CheckContext): Promise<CheckOutcome> {
   const applicability = await bodyApplicability(ctx);
-  const shared = await applicabilityOutcome("content-visibility-auto", ctx, applicability);
+  const shared = await applicabilityOutcome("tx-item-no-content-visibility", ctx, applicability);
   if (shared !== null) return shared;
   const result = await ctx.page.evaluate(() => {
     const el = document.querySelector(".tx-item");
     if (!el) return undefined;
     return getComputedStyle(el).contentVisibility;
   });
-  if (result === undefined) return outcome("content-visibility-auto", false, ".tx-item not found");
-  return outcome("content-visibility-auto", result === "auto", `computed content-visibility=${result}`);
+  if (result === undefined) return outcome("tx-item-no-content-visibility", false, ".tx-item not found");
+  return outcome("tx-item-no-content-visibility", result !== "auto", `computed content-visibility=${result}`);
 }
 
 /** ui-design.md §6.4: long code/tool output scrolls *inside* its own block, never the page. */
@@ -229,7 +231,7 @@ export const check: CheckModule = {
     return [
       await checkFleetDrawerOpen(ctx),
       await checkTranscriptWindowCap(ctx),
-      await checkContentVisibilityAuto(ctx),
+      await checkTxItemNoContentVisibility(ctx),
       await checkLongContentScrollsWithinBlock(ctx),
       await checkNoTitleTooltips(ctx),
     ];

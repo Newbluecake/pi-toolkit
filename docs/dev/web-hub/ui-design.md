@@ -247,7 +247,7 @@
 
 - 首屏只渲染最近 **N = 80** 条（≤480）/ 200 条（其它），更早的通过「Load Older」分页（hub 单页上限 `HISTORY_LIMIT_MAX = 400`）。
 - DOM 上限：transcript 超过 300 个条目时卸载最旧的一段，顶部换成「N earlier messages hidden · Show」占位（点击重新挂载），而不是无限增长。
-- 已完成条目加 `content-visibility: auto; contain-intrinsic-size: auto 120px`（样稿 `.tx-item`），离屏跳过布局/绘制。
+- ~~已完成条目加 `content-visibility: auto; contain-intrinsic-size: auto 120px`（样稿 `.tx-item`），离屏跳过布局/绘制。~~（**2026-10-14 已撤销**：#11 Aw Snap 根因——`content-visibility: auto` 的 120px 占位与真实高度互换，和「跟随到底」的滚动补偿形成排版振荡，在用户 Edge 上主线程卡死后渲染进程崩溃；`.tx-item` 现不再使用它，视觉巡检 `tx-item-no-content-visibility` 反向钉住。见 `docs/dev/web-hub-aw-snap/investigation.md`。）
 - 已定稿条目按 `itemRenderKey` 缓存（沿用 `transcript.js` 思路；Vue 中为 `v-memo="[renderKey]"` 或拆成 props 不变的子组件）。
 - 流式节流：`message_update` / `tool_execution_update` 先进 reducer，渲染用 `requestAnimationFrame` 合批；手机上最多 10 次/秒（≥100ms 间隔），markdown 只重解析正在流式的尾部消息；工具 partial 只保留最后 200 行/16 KiB 展示（全量仍在 state，展开「Show full output」时再渲染）。
 - `document.hidden` 时暂停 DOM 渲染（reducer 继续跑，回到前台一次性渲染），省电也避免后台标签堆积。

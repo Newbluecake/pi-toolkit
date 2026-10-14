@@ -34,11 +34,14 @@
   padding: var(--sp-3) var(--col-gutter) var(--sp-6);
 }
 
-/* off-screen history items skip layout/paint (cheap on phones) */
-.tx-item {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
-}
+/* #11 (2026-10-14, Aw Snap root cause): `.tx-item` must NOT use `content-visibility: auto`.
+ * Its 120px placeholder ↔ real-height swaps fed the follow-to-bottom pin (scrollTop chases
+ * scrollHeight) into a layout oscillation on real Edge/Chrome builds — main thread pinned for
+ * 30–50s with a flat JS heap, then a renderer crash dump — on sessions whose item heights
+ * happened to sit on the threshold. Headless Chromium never reproduced it; the user's Edge
+ * stopped crashing the moment this rule was overridden. The transcript is already WINDOWED
+ * (bounded mount count), so laying out every mounted item is the cheap, deterministic choice.
+ * The visual check `tx-item-no-content-visibility` pins this. */
 
 .tx-older {
   align-self: center;

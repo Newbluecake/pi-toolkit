@@ -106,7 +106,7 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     for (const name of [
       "fleet-drawer-open",
       "transcript-window-cap",
-      "content-visibility-auto",
+      "tx-item-no-content-visibility",
       "long-content-scrolls-within-block",
     ]) {
       expect(byName.get(name)?.ok, `${name} should be a not-applicable pass`).toBe(true);
