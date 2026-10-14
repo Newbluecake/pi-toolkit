@@ -13,7 +13,7 @@
 // identical output twice cannot distinguish a cache hit from a re-render.
 
 import { MEMORY_TOOL_V2_TEXT } from "../../src/memory/tool-surface.js";
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -145,6 +145,11 @@ function seedMemoryFile(name: string, body: string) {
   writeFileSync(join(dir, name), body);
 }
 
+function removeMemoryFile(name: string) {
+  const slug = cwd.replace(/\/+$/, "").replace(/\//g, "-");
+  rmSync(join(memRoot, slug, name));
+}
+
 describe("wireMemory (§7.8, M3: registers into the hub)", () => {
   test("registers the memory tool, /mem command, and both hooks", () => {
     const host = fakePi();
@@ -268,6 +273,7 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
   test("startup doctor reminder is UI-only, main-only and deduplicated by fingerprint", () => {
     const host = fakePi();
     wireMemory(host.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: false, sections: host.hub });
+    seedMemoryFile("core.md", "# Core\n");
     seedMemoryFile("topic.md", "# Topic\n");
     const context = (id: string) => {
       const { ctx, notifications } = fakeUiCtx(cwd);
@@ -278,7 +284,9 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     emit(host, "session_start", { type: "session_start", reason: "new" }, first.ctx);
     emit(host, "session_start", { type: "session_start", reason: "new" }, first.ctx);
     expect(first.notifications).toHaveLength(0); // D06 warns alone do not trigger
-    seedMemoryFile("pitfalls.md", "---\npin: true\n---\n# Pitfalls\n");
+    // field-study F2: drop the primary entirely — the no-primary D01 warn must
+    // reach the startup reminder (this state used to be completely silent).
+    removeMemoryFile("core.md");
     const second = context("s2");
     emit(host, "session_start", { type: "session_start", reason: "new" }, second.ctx);
     expect(second.notifications).toHaveLength(1);

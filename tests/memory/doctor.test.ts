@@ -33,6 +33,10 @@ const SETTINGS: DoctorSettings = {
   staleDays: 60,
 };
 
+// layout:legacy — the inline renderer; D01's no-primary warn and D09 must
+// sit out entirely (review: they describe the tiered resident-core model).
+const LEGACY_SETTINGS: DoctorSettings = { ...SETTINGS, layout: "legacy" };
+
 const NOW_MS = new Date("2026-09-26T00:00:00.000Z").getTime();
 
 // Each call gets a fresh unique default topic unless the caller overrides
@@ -85,9 +89,19 @@ describe("selectPrimaryCore", () => {
   it("no primary when there's no core.md and no pin:true file", () => {
     expect(selectPrimaryCore([file("topic-a.md"), file("topic-b.md")])).toBeUndefined();
   });
+  it("an archived core.md does not count (matches tiered.ts's non-archived pick)", () => {
+    expect(selectPrimaryCore([file("core.md", { meta: meta({ status: "archived" }) })])).toBeUndefined();
+    // an archived core.md + a pin file ⇒ the pin file is the primary
+    expect(
+      selectPrimaryCore([
+        file("core.md", { meta: meta({ status: "archived" }) }),
+        file("p.md", { meta: meta({ pin: true }) }),
+      ]),
+    ).toBe("p.md");
+  });
 });
 
-describe("D01 — degraded primary (no core.md)", () => {
+describe("D01 — primary core (degraded stand-in / no primary at all)", () => {
   it("positive: pin file stands in as primary", () => {
     const f = findingsOf(snap([file("pitfalls.md", { meta: meta({ pin: true }) })]), "D01");
     expect(f).toHaveLength(1);
@@ -98,8 +112,62 @@ describe("D01 — degraded primary (no core.md)", () => {
       0,
     );
   });
-  it("negative: no core.md and no pin file at all", () => {
-    expect(findingsOf(snap([file("topic-a.md"), file("topic-b.md")]), "D01")).toHaveLength(0);
+  // Field-study F2: the worst resident state (no core.md, not even a pin
+  // stand-in ⇒ 0 bytes of always-on content) used to be completely silent.
+  it("positive (F2): no core.md and no pin — no-primary warn with generic guidance", () => {
+    const f = findingsOf(snap([file("topic-a.md"), file("topic-b.md")]), "D01");
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ severity: "warn" });
+    expect(f[0]?.file).toBeUndefined();
+    expect(f[0]?.message).toContain("no primary core");
+    expect(f[0]?.message).toContain("0 bytes of resident rules");
+    expect(f[0]?.fix).toContain("core.md");
+    expect(f[0]?.fix).toContain("pin: true");
+  });
+  it("positive (F2): MEMORY.md present — warn names it and states it is never injected whole", () => {
+    const f = findingsOf(snap([file("MEMORY.md", { size: 9000 }), file("topic-a.md")]), "D01");
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ severity: "warn", file: "MEMORY.md" });
+    expect(f[0]?.message).toContain("MEMORY.md");
+    expect(f[0]?.message).toContain("never injected whole");
+    expect(f[0]?.fix).toContain("core.md");
+    // lowercase variant detects too (case-insensitive "memory.md")
+    expect(findingsOf(snap([file("memory.md")]), "D01")[0]?.file).toBe("memory.md");
+  });
+  it("negative (F2): empty memory dir stays silent", () => {
+    expect(runDoctor(snap([]), SETTINGS)).toHaveLength(0);
+  });
+  it("negative (F2): fully-archived library stays silent", () => {
+    expect(findingsOf(snap([file("old.md", { meta: meta({ status: "archived" }) })]), "D01")).toHaveLength(0);
+  });
+  it("negative (review): layout:legacy + no primary — the warn is tiered-only and sits out", () => {
+    const findings = runDoctor(snap([file("topic-a.md"), file("MEMORY.md", { size: 9000 })]), LEGACY_SETTINGS);
+    expect(findings.filter((f) => f.id === "D01")).toHaveLength(0);
+  });
+  it("positive (review): archived core.md (no pin) is no primary — warn mentions the archived core", () => {
+    const f = findingsOf(snap([file("core.md", { meta: meta({ status: "archived" }) }), file("topic-a.md")]), "D01");
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ severity: "warn" });
+    expect(f[0]?.message).toContain("status: archived");
+    expect(f[0]?.fix).toContain("status: active");
+  });
+  it("positive (review): archived core.md + pin file ⇒ degraded-primary info names the pin stand-in", () => {
+    const f = findingsOf(
+      snap([file("core.md", { meta: meta({ status: "archived" }) }), file("p.md", { meta: meta({ pin: true }) })]),
+      "D01",
+    );
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ severity: "info", file: "p.md" });
+  });
+  it("negative (review): archived MEMORY.md is not called out as a hand-maintained index", () => {
+    const f = findingsOf(
+      snap([file("MEMORY.md", { size: 9000, meta: meta({ status: "archived" }) }), file("topic-a.md")]),
+      "D01",
+    );
+    expect(f).toHaveLength(1);
+    expect(f[0]?.file).toBeUndefined();
+    expect(f[0]?.message).not.toContain("MEMORY.md");
+    expect(f[0]?.message).not.toContain("hand-maintained");
   });
 });
 
@@ -132,6 +200,9 @@ describe("D02 — primary core over coreBytes", () => {
   });
   it("negative: no render info available (pre-P1) — rule sits out, never guesses", () => {
     expect(findingsOf(snap([file("pitfalls.md", { meta: meta({ pin: true }) })]), "D02")).toHaveLength(0);
+  });
+  it("negative (F2): no primary — D02 never fires even with a render (its markers are primary-derived)", () => {
+    expect(findingsOf(snap([file("topic-a.md")], { render: render({ level: 1 }) }), "D02")).toHaveLength(0);
   });
 });
 
@@ -320,6 +391,37 @@ describe("D09 — block degradation level", () => {
   });
   it("negative: L0", () => {
     expect(findingsOf(snap([file("core.md")], { render: render({ level: 0 }) }), "D09")).toHaveLength(0);
+  });
+  it("positive (F2): no primary core — D09 is no longer gated out (index-only L1 still reports)", () => {
+    const f = findingsOf(
+      snap([file("MEMORY.md", { size: 9000 }), file("topic-a.md")], { render: render({ level: 1 }) }),
+      "D09",
+    );
+    expect(f).toHaveLength(1);
+    expect(f[0]?.severity).toBe("warn");
+    expect(f[0]?.message).toContain("L1");
+  });
+  it("negative (F2): no primary + L0 render stays silent", () => {
+    expect(findingsOf(snap([file("topic-a.md")], { render: render({ level: 0 }) }), "D09")).toHaveLength(0);
+  });
+  it("negative (review): layout:legacy — D09 sits out entirely (levels describe the tiered renderer only)", () => {
+    const findings = runDoctor(
+      snap([file("pitfalls.md", { meta: meta({ pin: true }) })], {
+        render: render({ level: 2, omittedSections: ["s1"] }),
+      }),
+      LEGACY_SETTINGS,
+    );
+    expect(findings.filter((f) => f.id === "D09")).toHaveLength(0);
+    // D02 stays un-gated (review scopes the legacy fix to the no-primary D01
+    // warn and D09) — pin this deliberate scope.
+    expect(findings.filter((f) => f.id === "D02")).toHaveLength(1);
+  });
+  it("positive: layout omitted defaults to tiered — D09 still fires (back-compat for hand-fed snapshots)", () => {
+    expect(
+      runDoctor(snap([file("core.md")], { render: render({ level: 2 }) }), { ...SETTINGS }).filter(
+        (f) => f.id === "D09",
+      ),
+    ).toHaveLength(1);
   });
 });
 

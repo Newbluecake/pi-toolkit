@@ -80,6 +80,13 @@ export interface DoctorSettings {
   topicWarnBytes: number;
   topicMaxBytes: number;
   staleDays: number;
+  /** Memory layout the injected block actually uses. The no-primary D01
+   *  warn and D09 describe the TIERED renderer's resident-core/degradation
+   *  model; under `legacy` the block inlines file bodies (render.ts) and
+   *  those findings would be factually wrong — they sit out entirely.
+   *  Omitted ⇒ `"tiered"` (the default layout, and every hand-fed test
+   *  snapshot that predates the field). */
+  layout?: "legacy" | "tiered";
 }
 
 const ID_ORDER: readonly DoctorId[] = [
@@ -100,14 +107,17 @@ const ID_ORDER: readonly DoctorId[] = [
 // ───────────────────────────── primary-core selection (§2.1) ─────────────────────────────
 
 /**
- * `core.md` if present, else the first (by filename, code-point order)
- * `pin: true` non-archived file — the same "primary core" role the
- * injection layer (§2.1) selects. Pure and independent of `renderTiered` —
- * doctor needs to know WHICH file is primary for D01/D02/D03/D04/D05/D06
- * regardless of whether a render port is available.
+ * Active `core.md` if present, else the first (by filename, code-point
+ * order) `pin: true` non-archived file — the same "primary core" role the
+ * injection layer (§2.1) selects (`tiered.ts` picks both candidates from
+ * its non-archived set only, so a `status: archived` core.md injects
+ * nothing and must not count here either). Pure and independent of
+ * `renderTiered` — doctor needs to know WHICH file is primary for
+ * D01/D02/D03/D04/D05/D06 regardless of whether a render port is available.
  */
 export function selectPrimaryCore(files: readonly DoctorSnapshotFile[]): string | undefined {
-  if (files.some((f) => f.name === "core.md")) return "core.md";
+  const core = files.find((f) => f.name === "core.md" && f.meta.status !== "archived");
+  if (core) return "core.md";
   const pinned = files.filter((f) => f.meta.pin && f.meta.status !== "archived").map((f) => f.name);
   pinned.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   return pinned[0];
@@ -280,10 +290,51 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
   const findings: DoctorFinding[] = [];
   const files = snapshot.files;
   const primary = selectPrimaryCore(files);
-  const hasCoreMd = files.some((f) => f.name === "core.md");
+  // D01's no-primary warn and D09 are tiered-renderer findings — under
+  // layout:legacy the block inlines file bodies and has no resident-core
+  // concept, so they would be factually wrong there (defaults to tiered,
+  // the default layout, for hand-fed snapshots that omit the field).
+  const layoutTiered = (settings.layout ?? "tiered") === "tiered";
 
-  // D01: degraded primary (no core.md, a pin:true file stands in).
-  if (!hasCoreMd && primary !== undefined) {
+  // D01: primary-core health. Two cases:
+  //  · NO primary at all (no active core.md, not even a pin:true stand-in) —
+  //    the worst resident state: 0 bytes of always-on content are injected
+  //    each turn, yet this used to be completely silent (field-study F2,
+  //    docs/dev/memory/field-study-claude2api.md). Now a warn with
+  //    actionable guidance; a hand-maintained MEMORY.md-style index gets an
+  //    explicit "it is treated as a normal topic file and never injected
+  //    whole" callout, because its author usually believes the injected
+  //    block IS that index. Tiered only — see layoutTiered above. Empty /
+  //    fully-archived libraries stay silent — there is no resident content
+  //    to miss.
+  //  · degraded primary (no active core.md, a pin:true file stands in) — info,
+  //    as before.
+  if (primary === undefined) {
+    if (layoutTiered && files.some((f) => f.meta.status !== "archived")) {
+      const handIndex = files.find((f) => f.name.toLowerCase() === "memory.md" && f.meta.status !== "archived");
+      const archivedCore = files.find((f) => f.name === "core.md" && f.meta.status === "archived");
+      const extra: string[] = [];
+      if (handIndex) {
+        extra.push(
+          `"${handIndex.name}" looks like a hand-maintained index, but it is treated as a normal topic file and never injected whole.`,
+        );
+      }
+      if (archivedCore) extra.push("A core.md exists but is status: archived, so it injects nothing.");
+      findings.push({
+        id: "D01",
+        severity: "warn",
+        ...(handIndex ? { file: handIndex.name } : {}),
+        message: `No core.md and no pinned file — no primary core, so no always-on memory content is injected (0 bytes of resident rules${
+          extra.length === 0 ? "; the block carries only the auto-generated index" : ""
+        }).${extra.length > 0 ? ` ${extra.join(" ")}` : ""}`,
+        fix: handIndex
+          ? `Move the always-on rules from ${handIndex.name} into core.md, or add \`pin: true\` to a suitable file — ${handIndex.name} itself will not be auto-injected.`
+          : archivedCore
+            ? "Set core.md back to status: active, or add `pin: true` to a suitable file's frontmatter."
+            : "Create core.md with the always-on rules, or add `pin: true` to a suitable file's frontmatter.",
+      });
+    }
+  } else if (primary !== "core.md") {
     findings.push({
       id: "D01",
       severity: "info",
@@ -437,33 +488,46 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
     }
   }
 
-  // D02 / D09: render-derived.
-  if (snapshot.render && primary !== undefined) {
+  // D02 / D09: render-derived. Gated on the render existing only — NOT on
+  // a primary being selected (field-study F2: D09 used to sit out entirely
+  // for a no-primary block, hiding "degraded to L1" index-only injection).
+  // D02 itself is about the primary's own admission and still needs one:
+  // without a primary its markers (omittedSections / the over-core-budget
+  // index line) can never hold, so it simply never fires there.
+  if (snapshot.render) {
     const r = snapshot.render;
-    const primaryOmitted = r.omittedSections.length > 0;
-    const primaryExcluded = primaryFullyExcluded(r);
-    if (primaryOmitted || primaryExcluded) {
-      findings.push({
-        id: "D02",
-        severity: "error",
-        file: primary,
-        message: primaryOmitted
-          ? `${primary}'s body exceeds coreBytes (${formatSize(settings.coreBytes)}) — only whole sections fit (omitted: ${r.omittedSections.join(", ")}).`
-          : `${primary}'s body exceeds coreBytes (${formatSize(settings.coreBytes)}) — not even the preamble fits; it was demoted out of the core block entirely.`,
-      });
+    if (primary !== undefined) {
+      const primaryOmitted = r.omittedSections.length > 0;
+      const primaryExcluded = primaryFullyExcluded(r);
+      if (primaryOmitted || primaryExcluded) {
+        findings.push({
+          id: "D02",
+          severity: "error",
+          file: primary,
+          message: primaryOmitted
+            ? `${primary}'s body exceeds coreBytes (${formatSize(settings.coreBytes)}) — only whole sections fit (omitted: ${r.omittedSections.join(", ")}).`
+            : `${primary}'s body exceeds coreBytes (${formatSize(settings.coreBytes)}) — not even the preamble fits; it was demoted out of the core block entirely.`,
+        });
+      }
     }
-    if (r.level > 0 && r.level < 5) {
-      findings.push({
-        id: "D09",
-        severity: "warn",
-        message: `Memory block degraded to L${r.level}${degradeDetail(r)}.`,
-      });
-    } else if (r.level === 5) {
-      findings.push({
-        id: "D09",
-        severity: "error",
-        message: `Memory block frame exceeds blockBytes (${formatSize(settings.blockBytes)}) even in its minimal form (L5) — the slug or file set is too large.`,
-      });
+    // D09 speaks the tiered renderer's degradation ladder (L1–L5). Under
+    // layout:legacy the injected block is the legacy renderer's inline form
+    // — these levels describe nothing real there, so the rule sits out
+    // entirely (review: legacy libraries must not get newly-false D09s).
+    if (layoutTiered) {
+      if (r.level > 0 && r.level < 5) {
+        findings.push({
+          id: "D09",
+          severity: "warn",
+          message: `Memory block degraded to L${r.level}${degradeDetail(r)}.`,
+        });
+      } else if (r.level === 5) {
+        findings.push({
+          id: "D09",
+          severity: "error",
+          message: `Memory block frame exceeds blockBytes (${formatSize(settings.blockBytes)}) even in its minimal form (L5) — the slug or file set is too large.`,
+        });
+      }
     }
   }
 

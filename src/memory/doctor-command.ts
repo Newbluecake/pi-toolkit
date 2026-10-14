@@ -53,6 +53,7 @@ function toDoctorSettings(settings: MemorySettings): DoctorSettings {
     topicWarnBytes: settings.topicWarnBytes,
     topicMaxBytes: settings.topicMaxBytes,
     staleDays: settings.doctor.staleDays,
+    layout: settings.layout,
   };
 }
 
