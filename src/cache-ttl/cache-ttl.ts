@@ -455,6 +455,14 @@ export interface RequestCapture {
   consumeHeaders(headers: unknown): void;
 }
 
+/** Route (provider + model id) of a settled assistant message; undefined when either is missing. */
+function settledRouteOf(message: unknown): { provider: string; modelId: string } | undefined {
+  const m = message as { provider?: unknown; model?: unknown } | null | undefined;
+  return typeof m?.provider === "string" && m.provider !== "" && typeof m.model === "string" && m.model !== ""
+    ? { provider: m.provider, modelId: m.model }
+    : undefined;
+}
+
 export function createRequestCapture(port: KeepalivePort): RequestCapture {
   let pending: CapturedRequestBase | undefined;
   return {
@@ -520,7 +528,13 @@ function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
   pi.on("message_end", (event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
-    if (ka) ka.noteRequestSettled(sessionId, ka.instanceId, isSuccessfulRealRequest(event.message));
+    if (ka)
+      ka.noteRequestSettled(
+        sessionId,
+        ka.instanceId,
+        isSuccessfulRealRequest(event.message),
+        settledRouteOf(event.message),
+      );
     // O1/O3 evidence observation (mode-independent, user ruling 2026-10-12 — see
     // `observeUsageIntoEvidence`'s doc comment): fold this message's usage into the provider-
     // route evidence store, and forward a cache-read sighting to the keepalive service so its
@@ -540,7 +554,13 @@ function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
   pi.on("turn_end", (event, ctx) => {
     const sessionId = readSessionId(ctx);
     const ka = deps.keepalive?.();
-    if (ka) ka.noteRequestSettled(sessionId, ka.instanceId, isSuccessfulRealRequest(event.message));
+    if (ka)
+      ka.noteRequestSettled(
+        sessionId,
+        ka.instanceId,
+        isSuccessfulRealRequest(event.message),
+        settledRouteOf(event.message),
+      );
   });
   pi.on("agent_end", (_event, ctx) => {
     const sessionId = readSessionId(ctx);
@@ -658,16 +678,16 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   pi.on("before_provider_headers", (event) => {
     capture?.consumeHeaders(event.headers);
   });
-  const USAGE = "usage: /cache-ttl on | off | auto | save | keepalive on|off | status | probe";
+  const USAGE = "usage: /cache-ttl on | off | auto | save | keepalive on|off|reset | status | probe";
   pi.registerCommand("cache-ttl", {
-    description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|save|keepalive on|off|status|probe]",
+    description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|save|keepalive on|off|reset|status|probe]",
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
         const tokens = a.split(/\s+/).filter(Boolean);
         const partial = a.endsWith(" ") || a === "" ? "" : (tokens[tokens.length - 1] ?? "");
         if (tokens[0] === "keepalive" && (tokens.length > 1 || a.endsWith(" "))) {
-          return ["on", "off"]
+          return ["on", "off", "reset"]
             .filter((v) => v.startsWith(partial))
             .map((v) => ({ value: `keepalive ${v}`, label: v, description: "keepalive " + v }));
         }
@@ -676,7 +696,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           { value: "off", label: "off", description: "关闭 TTL 覆写" },
           { value: "auto", label: "auto", description: "自动模式" },
           { value: "save", label: "save", description: "持久化当前模式" },
-          { value: "keepalive", label: "keepalive", description: "保活开关（on|off）" },
+          { value: "keepalive", label: "keepalive", description: "保活开关（on|off|reset）" },
           { value: "status", label: "status", description: "查看保活状态" },
           { value: "probe", label: "probe", description: "线路体检（≤3 个真实计费请求，30s 预算）" },
         ].filter((item) => item.value.startsWith(partial));
@@ -704,8 +724,30 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           }
           port.setEnabled(sub === "on");
           ctx.ui.notify(`keepalive switched to ${sub} (current process only)`, "info");
+        } else if (sub === "reset") {
+          if (!port) {
+            ctx.ui.notify("keepalive service unavailable (no active session, or cacheTtl.keepalive=false)", "warning");
+            return;
+          }
+          const r = port.resetBreakers();
+          const parts: string[] = [];
+          if (r.sessionDisabled !== undefined) parts.push(`session-disabled(${r.sessionDisabled})`);
+          if (r.openLines > 0) parts.push(`${r.openLines} line breaker(s)`);
+          if (r.economicCleared) parts.push("proven-write cleared");
+          if (r.evidenceCleared) parts.push("evidence(no-cache-value, current line only)");
+          if (parts.length === 0) {
+            ctx.ui.notify("keepalive reset: nothing to clear (no breaker open)", "info");
+          } else {
+            parts.splice(parts.length - (r.evidenceCleared ? 1 : 0), 0, "counters zeroed");
+            let text = `keepalive reset: cleared ${parts.join(" · ")} · resumes on next real request`;
+            if (r.economicCleared) {
+              text +=
+                "\n注意：已手动清除经济类熔断（proven-write）。若该线路 ping 仍会触发缓存写入，下一次写入会再次永久停用保活。";
+            }
+            ctx.ui.notify(text, "info");
+          }
         } else {
-          ctx.ui.notify("usage: /cache-ttl keepalive on|off", "warning");
+          ctx.ui.notify("usage: /cache-ttl keepalive on|off|reset", "warning");
         }
         return;
       }

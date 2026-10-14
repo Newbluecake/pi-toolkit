@@ -88,6 +88,8 @@ export interface ProviderEvidenceStore {
   noteZeroReadSession(provider: string, modelId: string, now: Millis): void;
   /** O3: any observed `cacheRead > 0` (real request usage or a proven-hit ping) resets the breaker immediately. */
   noteCacheRead(provider: string, modelId: string, now: Millis): void;
+  /** User manual reset: clear this route's no-cache-value streak + breaker (no fabricated cacheRead evidence; write1h/probe untouched). */
+  resetNoCacheValue(provider: string, modelId: string, now: Millis): void;
   /** O4: record a probe verdict (also feeds write1h/noCacheValue evidence per its findings). */
   noteProbe(provider: string, modelId: string, probe: ProviderRouteProbe, now: Millis): void;
   /** Diagnostic read (`/cache-ttl probe` output, status). `undefined` when nothing is known. */
@@ -296,6 +298,19 @@ class ProviderEvidenceStoreImpl implements ProviderEvidenceStore {
   }
 
   noteCacheRead(provider: string, modelId: string, now: Millis): void {
+    try {
+      this.mutate(provider, modelId, now, (route) => {
+        if (route.zeroReadSessions === 0 && route.noCacheValueSince === undefined) return false;
+        route.zeroReadSessions = 0;
+        delete route.noCacheValueSince;
+        return true;
+      });
+    } catch {
+      // never throws.
+    }
+  }
+
+  resetNoCacheValue(provider: string, modelId: string, now: Millis): void {
     try {
       this.mutate(provider, modelId, now, (route) => {
         if (route.zeroReadSessions === 0 && route.noCacheValueSince === undefined) return false;

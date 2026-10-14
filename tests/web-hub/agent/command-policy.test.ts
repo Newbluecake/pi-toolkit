@@ -110,6 +110,7 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("cache-ttl", "status", "extension").policy).toBe("allow");
     expect(resolve("cache-ttl", "on", "extension").policy).toBe("confirm");
     expect(resolve("cache-ttl", "keepalive on", "extension").policy).toBe("confirm");
+    expect(resolve("cache-ttl", "keepalive reset", "extension").policy).toBe("confirm");
     expect(resolve("cache-ttl", "save", "extension").policy).toBe("confirm");
   });
 

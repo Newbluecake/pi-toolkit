@@ -135,7 +135,7 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     return { policy: "confirm" };
   },
   // /cache-ttl [status] → read-only. Every mode switch / keepalive toggle / save mutates process
-  // (or persisted) state.
+  // (or persisted) state. `keepalive reset` also clears economic breakers (proven-write) — confirm.
   "cache-ttl"(tokens) {
     const sub = tokens[0];
     if (sub === undefined || sub === "status") return { policy: "allow" };

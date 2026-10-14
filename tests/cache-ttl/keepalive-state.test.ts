@@ -673,21 +673,25 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     const transient = onUnproven(armedWindow({ windowEpoch: 1 }), baseSession(), 1, "http", 1, 429);
     expect(transient.session.disabled).toBeUndefined();
     const permanent = onUnproven(armedWindow({ windowEpoch: 1 }), baseSession(), 1, "http", 1, 400);
-    expect(permanent.session.nonTransientUnprovenTotal).toBe(1);
+    // 4xx is a line-level rejection: counted in lineStates, never in the session-level counters.
+    expect(permanent.session.nonTransientUnprovenTotal).toBe(0);
     expect(permanent.session.transientUnprovenTotal).toBe(0);
+    expect(Object.values(permanent.session.lineStates)[0]?.total).toBe(1);
     expect(permanent.session.disabled).toBeUndefined();
   });
 
   it("records the HTTP status on the disable when an http failure trips the breaker", () => {
-    // permanent: a non-transient 403 tripping the non-transient streak limit.
+    // non-transient 403 tripping the streak limit opens the LINE breaker (not session.disabled).
     let session = baseSession();
     let window = armedWindow({ windowEpoch: 1 });
     for (let i = 0; i < UNPROVEN_STREAK_LIMIT; i += 1) {
+      window = armedWindow({ windowEpoch: 1 });
       const result = onUnproven(window, session, 1, "http", 100 + i, 403);
       session = result.session;
-      window = result.window;
     }
-    expect(session.disabled).toEqual({ reason: "http", at: 100 + UNPROVEN_STREAK_LIMIT - 1, httpStatus: 403 });
+    expect(session.disabled).toBeUndefined();
+    const rec = Object.values(session.lineStates)[0];
+    expect(rec).toMatchObject({ open: true, status: 403, trips: 1, openedAt: 100 + UNPROVEN_STREAK_LIMIT - 1 });
 
     // transient: 503 tripping the transient streak limit.
     session = baseSession();
@@ -707,13 +711,13 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
 
   it("drops an out-of-range HTTP status instead of recording it on the disable", () => {
     let session = baseSession();
-    let window = armedWindow({ windowEpoch: 1 });
     for (let i = 0; i < UNPROVEN_STREAK_LIMIT; i += 1) {
-      const result = onUnproven(window, session, 1, "http", 100 + i, 99);
+      const result = onUnproven(armedWindow({ windowEpoch: 1 }), session, 1, "http", 100 + i, 99);
       session = result.session;
-      window = result.window;
     }
-    expect(session.disabled).toEqual({ reason: "http", at: 100 + UNPROVEN_STREAK_LIMIT - 1 });
+    const rec = Object.values(session.lineStates)[0];
+    expect(rec?.open).toBe(true);
+    expect(rec?.status).toBeUndefined();
   });
 
   it("recovers a transient disable after a successful real provider response and resets transient counters", () => {

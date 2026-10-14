@@ -189,7 +189,11 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   fingerprint/session/epoch guards, and unref'd timers (service in `src/service/cache-keepalive.ts`).
   Main-session transient failures pause pinging at the existing streak/total limits; a successful
   real provider response clears only transient counters and restores pinging. Proven writes and
-  non-transient breaker trips remain permanent; `/reload` restores the branch's breaker state.
+  non-transient breaker trips (`no-usage`) remain permanent; `/reload` restores the branch's breaker state.
+  Non-transient HTTP rejections (4xx, zero-billing) are line-level (`session.lineStates`, key =
+  provider+baseUrl+model): a same-line successful real request resets them (backoff 30m×2^(n-2) on repeat,
+  cap 24h; legacy session-level http disables migrate to a wildcard breaker), and `/cache-ttl keepalive reset`
+  manually clears every breaker (design: `docs/dev/cache-ttl-keepalive/breaker-recovery-plan.md`).
   Design: `docs/dev/cache-ttl-keepalive/plan.md`. **Child-session keepalive** (child-context-switch
   plan §2.4, `src/cache-ttl/child.ts` + `child-registry.ts`): capture-only (never rewrites the
   outgoing payload); limits 11/window · 24/run · 4 concurrent · $1.5/run · $10/24h process-rolling

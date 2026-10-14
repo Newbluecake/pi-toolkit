@@ -253,6 +253,90 @@ export interface SessionTotals {
    */
   discardedWindows: number;
   discardedPings: number;
+  /**
+   * Line-level breaker/backoff records; carries ONLY non-transient HTTP rejections (4xx etc.,
+   * zero-billing by construction — plan.md I-K7 amendment 2). Key = `LineRef.key`.
+   * Old snapshots lack it and read back as `{}`.
+   */
+  lineStates: Readonly<Record<string, LineState>>;
+}
+
+/** Reserved key: a legacy / unresolvable-line http breaker; any successful real request resets it, no cooldown. */
+export const LINE_KEY_WILDCARD = "*";
+/** Line breaker backoff: first trip cooldown 0; same-status re-trip (trips>=2) BASE·2^(trips-2), capped. */
+export const LINE_COOLDOWN_BASE_MS: Millis = 30 * 60_000;
+export const LINE_COOLDOWN_CAP_MS: Millis = 24 * 3_600_000;
+/** A trip this long after the last reset/trip starts `trips` over from 1. */
+export const LINE_TRIPS_FORGET_MS: Millis = 24 * 3_600_000;
+/** Snapshot-size bound for `lineStates`. */
+export const MAX_LINE_STATES = 16;
+
+export interface LineRef {
+  /** `"L"+hash53(...)` or LINE_KEY_WILDCARD. */
+  key: string;
+  /** Display only: `provider/model@host`, <=96 chars, never path/query. */
+  label: string;
+}
+
+export interface LineState {
+  label: string;
+  status?: number;
+  consecutive: number;
+  total: number;
+  open: boolean;
+  openedAt?: Millis;
+  trips: number;
+  resetEligibleAt?: Millis;
+  lastResetAt?: Millis;
+  updatedAt: Millis;
+}
+
+function normalizeBaseUrl(raw: string): { normalized: string; host: string } {
+  const text = (raw ?? "").trim();
+  try {
+    const u = new URL(text);
+    const host = u.host.toLowerCase();
+    const path = u.pathname.replace(/\/+$/, "");
+    return { normalized: `${u.protocol.toLowerCase()}//${host}${path}`, host };
+  } catch {
+    return { normalized: text, host: "" };
+  }
+}
+
+/** Pure line key; provider and ctxModelId both empty ⇒ undefined (callers fall back to the wildcard). */
+export function lineKeyOf(fp: Pick<CaptureFingerprint, "provider" | "ctxModelId" | "baseUrl">): LineRef | undefined {
+  const provider = fp.provider ?? "";
+  const model = fp.ctxModelId ?? "";
+  if (provider === "" && model === "") return undefined;
+  const { normalized, host } = normalizeBaseUrl(fp.baseUrl ?? "");
+  const key = `L${hash53(`${provider}\n${normalized}\n${model}`)}`;
+  const label = `${provider}/${model}${host !== "" ? `@${host}` : ""}`.slice(0, 96);
+  return { key, label };
+}
+
+export function lineCooldownMs(trips: number): Millis {
+  if (!(trips > 1)) return 0 as Millis;
+  const exp = Math.min(trips - 2, 30);
+  return Math.min(LINE_COOLDOWN_CAP_MS, LINE_COOLDOWN_BASE_MS * 2 ** exp) as Millis;
+}
+
+export function isLineOpen(session: SessionTotals, key: string): boolean {
+  return session.lineStates[key]?.open === true || session.lineStates[LINE_KEY_WILDCARD]?.open === true;
+}
+
+export function countOpenLines(session: SessionTotals): number {
+  let n = 0;
+  for (const rec of Object.values(session.lineStates)) if (rec.open) n += 1;
+  return n;
+}
+
+/** ms → `<1m` / `25m` / `3h` (ceil, so a still-cooling line never shows 0). */
+export function formatMsShort(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0m";
+  if (ms < 60_000) return "<1m";
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes <= 120) return `${minutes}m`;
+  return `${Math.min(24, Math.ceil(minutes / 60))}h`;
 }
 
 export function createInitialSessionTotals(): SessionTotals {
@@ -275,6 +359,7 @@ export function createInitialSessionTotals(): SessionTotals {
     avoidedMissTokens: 0,
     discardedWindows: 0,
     discardedPings: 0,
+    lineStates: {},
   };
 }
 
@@ -296,6 +381,60 @@ function sanitizeHttpStatus(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? value : undefined;
 }
 
+const LINE_KEY_RE = /^(L[0-9a-z]{1,16}|\*)$/;
+
+function sanitizeLineStates(value: unknown): Record<string, LineState> {
+  const src = record(value);
+  if (src === undefined) return {};
+  const out: Record<string, LineState> = {};
+  for (const key of Object.keys(src)) {
+    if (!LINE_KEY_RE.test(key) || !Object.prototype.hasOwnProperty.call(src, key)) continue;
+    const r = record(src[key]);
+    if (r === undefined) continue;
+    const label = typeof r.label === "string" && r.label !== "" ? r.label.slice(0, 96) : undefined;
+    const updatedAt = finiteNonNegative(r.updatedAt);
+    if (label === undefined || updatedAt === undefined) continue;
+    const trips = Math.min(64, Math.floor(finiteNonNegative(r.trips) ?? 0));
+    const status = sanitizeHttpStatus(r.status);
+    const openedAt = finiteNonNegative(r.openedAt);
+    const resetEligibleAt = finiteNonNegative(r.resetEligibleAt);
+    const lastResetAt = finiteNonNegative(r.lastResetAt);
+    out[key] = {
+      label,
+      ...(status !== undefined ? { status } : {}),
+      consecutive: finiteNonNegative(r.consecutive) ?? 0,
+      total: finiteNonNegative(r.total) ?? 0,
+      open: r.open === true,
+      ...(openedAt !== undefined ? { openedAt: openedAt as Millis } : {}),
+      trips,
+      ...(resetEligibleAt !== undefined ? { resetEligibleAt: resetEligibleAt as Millis } : {}),
+      ...(lastResetAt !== undefined ? { lastResetAt: lastResetAt as Millis } : {}),
+      updatedAt: updatedAt as Millis,
+    };
+  }
+  return capLineStates(out);
+}
+
+/** Capacity bound: evict closed-oldest first, then open-oldest; the wildcard is never evicted. */
+function capLineStates(states: Record<string, LineState>): Record<string, LineState> {
+  const keys = Object.keys(states);
+  if (keys.length <= MAX_LINE_STATES) return states;
+  const evictable = keys
+    .filter((k) => k !== LINE_KEY_WILDCARD)
+    .sort((a, b) => {
+      const ra = states[a] as LineState;
+      const rb = states[b] as LineState;
+      if (ra.open !== rb.open) return ra.open ? 1 : -1;
+      return ra.updatedAt - rb.updatedAt;
+    });
+  const out = { ...states };
+  for (const k of evictable) {
+    if (Object.keys(out).length <= MAX_LINE_STATES) break;
+    delete out[k];
+  }
+  return out;
+}
+
 /**
  * Rehydrate only session-level breaker/accounting fields from the current
  * branch. Window/prefix state is intentionally not restored across /reload.
@@ -304,6 +443,7 @@ function sanitizeHttpStatus(value: unknown): number | undefined {
 export function readBackKeepaliveSessionState(branch: readonly unknown[]): SessionTotals | undefined {
   try {
     let restored: SessionTotals | undefined;
+    let lastLacksLineStates = false;
     for (const raw of branch) {
       const entry = record(raw);
       if (entry?.type !== "custom" || entry.customType !== KEEPALIVE_AUDIT_CUSTOM_TYPE) continue;
@@ -351,6 +491,8 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
           }
         }
       }
+      if ("lineStates" in snapshot) next.lineStates = sanitizeLineStates(snapshot.lineStates);
+      lastLacksLineStates = !("lineStates" in snapshot);
       if ("lastUnproven" in snapshot) {
         const last = record(snapshot.lastUnproven);
         if (last === undefined) next.lastUnproven = undefined;
@@ -363,6 +505,34 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
       // O3: restore the once-per-session accounting guard (see SessionTotals.noCacheValueCounted).
       if (snapshot.noCacheValueCounted === true) next.noCacheValueCounted = true;
       restored = next;
+    }
+    // Legacy migration: an old-format session-level permanent http disable becomes a wildcard
+    // line breaker (any successful real request resets it).
+    if (
+      restored !== undefined &&
+      lastLacksLineStates &&
+      restored.disabled?.reason === "http" &&
+      restored.disabled.transient !== true
+    ) {
+      const d = restored.disabled;
+      const rec: LineState = {
+        label: "unknown line (legacy)",
+        ...(d.httpStatus !== undefined ? { status: d.httpStatus } : {}),
+        consecutive: 0,
+        total: 0,
+        open: true,
+        openedAt: d.at,
+        trips: 1,
+        resetEligibleAt: d.at,
+        updatedAt: d.at,
+      };
+      restored = {
+        ...restored,
+        disabled: undefined,
+        nonTransientConsecutiveUnproven: 0,
+        nonTransientUnprovenTotal: 0,
+        lineStates: { ...restored.lineStates, [LINE_KEY_WILDCARD]: rec },
+      };
     }
     return restored;
   } catch {
@@ -398,6 +568,7 @@ export interface KeepaliveConfig {
 export type TickSkipReason =
   | "disabled"
   | "session-disabled"
+  | "line-disabled"
   | "no-capture"
   | "mode"
   | "not-anthropic"
@@ -535,6 +706,13 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   // #3
   const capture = window.capture;
   if (capture === undefined) return skip("no-capture", true);
+  // #3.5 — line-level http breaker (4xx rejections are zero-billing; reset by a same-line success).
+  {
+    const line = lineKeyOf(capture.fingerprint);
+    if (line !== undefined ? isLineOpen(session, line.key) : session.lineStates[LINE_KEY_WILDCARD]?.open === true) {
+      return skip("line-disabled", true);
+    }
+  }
   // #4 — G2. child-ka-core: `allowHeadless` additionally allows "print" (a child
   // session's run mode) — the main session never sets this, so its behavior is
   // byte-identical (only "tui"/"rpc" pass).
@@ -928,14 +1106,74 @@ function isPermanentThresholdMet(session: SessionTotals): boolean {
  * Economic/semantic failures remain permanent, including a non-transient
  * threshold reached after an earlier transient disable.
  */
-export function onSuccessfulRealRequest(session: SessionTotals, successful: boolean): SessionTotals {
-  if (!successful || session.disabled?.transient !== true || isPermanentThresholdMet(session)) return session;
+export function onSuccessfulRealRequest(
+  session: SessionTotals,
+  successful: boolean,
+  options?: { line: LineRef | undefined; now: Millis },
+): SessionTotals {
+  if (!successful) return session;
+  let next = session;
+  if (session.disabled?.transient === true && !isPermanentThresholdMet(session)) {
+    next = {
+      ...next,
+      consecutiveUnproven: 0,
+      transientConsecutiveUnproven: 0,
+      transientUnprovenTotal: 0,
+      disabled: undefined,
+    };
+  }
+  if (options !== undefined) {
+    const states = next.lineStates;
+    let changed: Record<string, LineState> | undefined;
+    if (states[LINE_KEY_WILDCARD]?.open === true) {
+      changed = { ...states };
+      delete changed[LINE_KEY_WILDCARD];
+    }
+    const key = options.line?.key;
+    const rec = key !== undefined ? states[key] : undefined;
+    if (key !== undefined && rec !== undefined && rec.open && options.now >= (rec.resetEligibleAt ?? 0)) {
+      changed = changed ?? { ...states };
+      const { openedAt: _o, resetEligibleAt: _r, ...rest } = rec;
+      changed[key] = {
+        ...rest,
+        open: false,
+        consecutive: 0,
+        total: 0,
+        lastResetAt: options.now,
+        updatedAt: options.now,
+      };
+    }
+    if (changed !== undefined) next = { ...next, lineStates: changed };
+  }
+  return next;
+}
+
+export interface BreakerResetSummary {
+  sessionDisabled: string | undefined;
+  openLines: number;
+  economicCleared: boolean;
+}
+
+/** Manual reset (pure): clears every breaker incl. economic ones; keeps audit/accounting fields. */
+export function resetAllBreakers(session: SessionTotals): { session: SessionTotals; summary: BreakerResetSummary } {
   return {
-    ...session,
-    consecutiveUnproven: 0,
-    transientConsecutiveUnproven: 0,
-    transientUnprovenTotal: 0,
-    disabled: undefined,
+    session: {
+      ...session,
+      disabled: undefined,
+      transientConsecutiveUnproven: 0,
+      transientUnprovenTotal: 0,
+      nonTransientConsecutiveUnproven: 0,
+      nonTransientUnprovenTotal: 0,
+      consecutiveUnproven: 0,
+      unprovenTotal: 0,
+      provenWrites: 0,
+      lineStates: {},
+    },
+    summary: {
+      sessionDisabled: session.disabled?.reason,
+      openLines: countOpenLines(session),
+      economicCleared: session.provenWrites > 0,
+    },
   };
 }
 
@@ -986,6 +1224,16 @@ export function onProvenHit(
     transientConsecutiveUnproven: 0,
     nonTransientConsecutiveUnproven: 0,
   };
+  const hitKey =
+    window.capture !== undefined
+      ? (lineKeyOf(window.capture.fingerprint)?.key ?? LINE_KEY_WILDCARD)
+      : LINE_KEY_WILDCARD;
+  const hitRec = session.lineStates[hitKey];
+  if (hitRec !== undefined && !hitRec.open) {
+    const rest = { ...session.lineStates };
+    delete rest[hitKey];
+    newSession.lineStates = rest;
+  }
   return { applied: true, window: newWindow, session: newSession };
 }
 
@@ -1005,6 +1253,7 @@ export function onUnproven(
   httpStatus?: number,
 ): ReducerOutcome {
   if (pingEpoch !== window.windowEpoch) return { applied: false, window, session };
+  const lineRef = window.capture !== undefined ? lineKeyOf(window.capture.fingerprint) : undefined;
   const newWindow: WindowState = {
     ...window,
     pingInFlight: false,
@@ -1012,6 +1261,57 @@ export function onUnproven(
     lastStopReason: kind,
   };
   const transient = isTransientUnproven(kind, httpStatus);
+  if (kind === "http" && !transient) {
+    // Line-level path: a rejected (non-transient http) ping is zero-billing; never touches
+    // session.nonTransient* / session.disabled.
+    const key = lineRef?.key ?? LINE_KEY_WILDCARD;
+    const label = lineRef?.label ?? "unknown line";
+    const status = sanitizeHttpStatus(httpStatus);
+    const rec = session.lineStates[key];
+    let lineStates: Record<string, LineState>;
+    if (rec?.open === true) {
+      lineStates = { ...session.lineStates, [key]: { ...rec, updatedAt: now } };
+    } else {
+      const base: LineState = rec ?? { label, consecutive: 0, total: 0, open: false, trips: 0, updatedAt: now };
+      const consecutive = base.consecutive + 1;
+      const total = base.total + 1;
+      let next: LineState = { ...base, label, consecutive, total, updatedAt: now };
+      // Keep the PREVIOUS trip's status on a re-counting record (trips>0) so the sameStatus
+      // comparison at trip time sees it; a fresh record records the status right away.
+      if (status !== undefined && base.trips === 0) next.status = status;
+      if (consecutive >= UNPROVEN_STREAK_LIMIT || total >= UNPROVEN_TOTAL_LIMIT) {
+        // compare against the PREVIOUS status (rec), never next.status
+        const sameStatus =
+          key !== LINE_KEY_WILDCARD &&
+          rec !== undefined &&
+          rec.status === status &&
+          rec.trips > 0 &&
+          now - (rec.lastResetAt ?? rec.openedAt ?? 0) < LINE_TRIPS_FORGET_MS;
+        const trips = sameStatus ? rec.trips + 1 : 1;
+        if (status !== undefined) next.status = status;
+        else delete next.status;
+        next = {
+          ...next,
+          open: true,
+          openedAt: now,
+          trips,
+          resetEligibleAt: (key === LINE_KEY_WILDCARD ? now : now + lineCooldownMs(trips)) as Millis,
+        };
+      }
+      lineStates = capLineStates({ ...session.lineStates, [key]: next });
+    }
+    return {
+      applied: true,
+      window: newWindow,
+      session: {
+        ...session,
+        unprovenTotal: session.unprovenTotal + 1,
+        consecutiveUnproven: session.consecutiveUnproven + 1,
+        lastUnproven: { kind, at: now },
+        lineStates,
+      },
+    };
+  }
   const httpStatusField = kind === "http" ? sanitizeHttpStatus(httpStatus) : undefined;
   const unprovenTotal = session.unprovenTotal + 1;
   const consecutiveUnproven = session.consecutiveUnproven + 1;
@@ -1036,8 +1336,17 @@ export function onUnproven(
         ? session.disabled
         : { reason: kind, at: now, transient: true as const, ...statusExtra }
       : session.disabled;
+  let lineStatesAfter = session.lineStates;
+  if (transient) {
+    const tk = lineRef?.key ?? LINE_KEY_WILDCARD;
+    const trec = session.lineStates[tk];
+    if (trec !== undefined && !trec.open && trec.consecutive !== 0) {
+      lineStatesAfter = { ...session.lineStates, [tk]: { ...trec, consecutive: 0 } };
+    }
+  }
   const newSession: SessionTotals = {
     ...session,
+    lineStates: lineStatesAfter,
     unprovenTotal,
     consecutiveUnproven,
     provenWrites,
@@ -1169,6 +1478,10 @@ export interface KeepaliveReport {
    * Never carries header/auth VALUES — only key names (`headerKeyDiff`).
    */
   lastPingDiagnostics: KeepalivePingDiagnostics | undefined;
+  /** Current line key (`lineKeyOf` of `ctx.model`) — lets the status line show only the current line's breaker. */
+  currentLineKey?: string | undefined;
+  /** `clock.now()` at report time (for cooldown display). */
+  now?: Millis | undefined;
 }
 
 /** See `KeepaliveReport.lastPingDiagnostics`. */
@@ -1277,6 +1590,23 @@ function renderPingSegment(report: KeepaliveReport | undefined): string | undefi
     const status = d.reason === "http" && d.httpStatus !== undefined ? ` ${d.httpStatus}` : "";
     return `ping off:${d.reason}${status} ×${session.pings}`;
   }
+  {
+    const cur = report.currentLineKey !== undefined ? session.lineStates[report.currentLineKey] : undefined;
+    const rec =
+      cur?.open === true
+        ? cur
+        : session.lineStates[LINE_KEY_WILDCARD]?.open === true
+          ? session.lineStates[LINE_KEY_WILDCARD]
+          : undefined;
+    if (rec !== undefined) {
+      let text = `ping off:http${rec.status !== undefined ? ` ${rec.status}` : ""}`;
+      if (report.now !== undefined && rec.resetEligibleAt !== undefined && rec.resetEligibleAt > report.now) {
+        text += ` ·retry ${formatMsShort(rec.resetEligibleAt - report.now)}`;
+      }
+      if (rec.trips >= 2) text += ` ·t${rec.trips}`;
+      return text;
+    }
+  }
   if (window.pings > 0 && window.pings >= config.maxPings) return `ping ${window.pings}/${config.maxPings} capped`;
   if (window.lastStopReason !== undefined) return `ping paused:${window.lastStopReason}`;
   if (session.pings === 0 && window.pings === 0) return undefined;
@@ -1368,6 +1698,20 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
   lines.push(
     `breaker: unprovenTotal=${session.unprovenTotal} consecutiveUnproven=${session.consecutiveUnproven} provenWrites=${session.provenWrites}`,
   );
+  for (const rec of Object.values(session.lineStates)) {
+    if (!rec.open) continue;
+    const eligible =
+      report.now !== undefined && rec.resetEligibleAt !== undefined && rec.resetEligibleAt > report.now
+        ? ` · reset eligible in ${formatMsShort(rec.resetEligibleAt - report.now)}`
+        : "";
+    lines.push(
+      `line off: ${rec.label} · http${rec.status !== undefined ? ` ${rec.status}` : ""} · trips ${rec.trips}${eligible}`,
+    );
+  }
+  const armedHistory = Object.values(session.lineStates).filter(
+    (r) => !r.open && (r.trips > 0 || r.consecutive > 0),
+  ).length;
+  if (armedHistory > 0) lines.push(`line armed: ${armedHistory} closed record(s) with history`);
   lines.push(
     session.disabled !== undefined ? `disabled: ${session.disabled.reason} @ ${session.disabled.at}` : "not disabled",
   );

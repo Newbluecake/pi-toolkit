@@ -142,6 +142,14 @@ Anthropic「cache read 免费刷新 TTL」的特性给缓存续命。
   仍永久停用；失败或 abort 的真实请求不恢复。读回 `/reload` 时保留 transient/permanent 标记，
   仅 transient 可由上述成功真实请求解除。I-K8 epoch 丢弃、ping ledger、child-session keepalive
   语义不变。
+- **I-K7 amendment 2（2026-10-14，用户拍板，设计见 `breaker-recovery-plan.md` r2）**：非瞬态 HTTP
+  拒绝（408/429/5xx 以外的 4xx 等）从会话级永久熔断中摘出，改记入按线路
+  （`provider + baseUrl + ctxModelId`）的 `session.lineStates`：该线路连续 2 / 累计 3 次被拒 ⇒
+  线路熔断，只挡这条线路；**同线路**任意一次成功真实请求即复位（首次冷却 0），复位后同状态码再被拒
+  按 30m×2^(n-2) 退避（封顶 24h，换码/超 24h 重算）。4xx 请求被服务端拒绝、不可能产生缓存计费，
+  故不属于 I-K7 要堵的隐形写入。线路不可得时落通配 `"*"`（任意成功即复位）；旧快照的会话级
+  `{reason:"http"}` 永久熔断读回时迁移为通配熔断。`proven-write`、`no-usage`、`no-cache-value`、
+  费用闸**仍永久/会话级**，仅 `/cache-ttl keepalive reset`（web 端 confirm）可手动清除。
 - **I-K8（窗口代际，B5）**：每次 ping 在发起时绑定当时的 `windowEpoch`；`runPing()` 的每个
   `await` 返回点、以及**任何 reducer 写入之前**都必须校验 epoch 未变。epoch 失配 ⇒ 静默丢弃：
   **不计 proven、不计 unproven、不回写任何窗口字段、不动 `aliveUntil`/`nextPingAt`、
@@ -753,6 +761,8 @@ export type PingOutcome =
 | 其余全部（`no-usage`/`accepted-then-lost`/`http`/`network`/`malformed`/超时/abort） | **无法证明纯命中** ⇒ 一律按“可能已写入”处理 | `onUnproven(kind)`：本窗口停 + **会话级**计数 ↑                            |
 
 会话级停用阈值（三条，任一命中即 `disabled`，**真实请求不重置**）：
+
+> 脚注（I-K7 amendment 2）：下表中的 `http` 非瞬态（4xx 等）不再走会话级阈值，改为按线路熔断且可被同线路成功请求复位；以下阈值现仅适用于 `proven-write` / `no-usage` 及瞬态组。
 
 - `provenWrites ≥ 1`（有证据的昂贵失败，一击）；
 - `consecutiveUnproven ≥ 2`（**B4 裁决后保留的唯一可靠性卫生**）；

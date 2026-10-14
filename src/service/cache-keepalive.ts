@@ -32,6 +32,11 @@ import {
   onRealRequest,
   onRequestSettled,
   onSuccessfulRealRequest,
+  countOpenLines,
+  lineKeyOf,
+  resetAllBreakers,
+  type BreakerResetSummary,
+  type LineRef,
   onUnproven,
   renderCacheStatus,
   readCacheStatusTheme,
@@ -138,7 +143,12 @@ export interface KeepalivePort {
   /** I-K9: this instance's unique, non-reusable id; captured into `CapturedRequest.instance`. */
   readonly instanceId: string;
   noteRequest(captured: CapturedRequest): void;
-  noteRequestSettled(sessionId: string, instance: string, successful?: boolean): void;
+  noteRequestSettled(
+    sessionId: string,
+    instance: string,
+    successful?: boolean,
+    settledRoute?: { provider: string; modelId: string },
+  ): void;
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void;
   report(): KeepaliveReport;
   /**
@@ -178,6 +188,8 @@ export interface CacheKeepaliveService extends KeepalivePort {
    * the observation site — `provider-evidence.ts`'s `observeUsageIntoEvidence`).
    */
   noteUsageCacheRead(sessionId: string, instance: string): void;
+  /** Manual breaker reset (`/cache-ttl keepalive reset`): clears every breaker incl. economic ones + the current line's no-cache-value evidence. */
+  resetBreakers(): BreakerResetSummary & { evidenceCleared: boolean };
   dispose(): void;
 }
 
@@ -297,6 +309,10 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private currentLease: Lease | undefined;
   /** O3: the route of the most recent capture (fingerprint provider + wire modelId) — kept past `capture` clearing so dispose-time accounting still knows which route this session ran on. */
   private lastRoute: { provider: string; modelId: string } | undefined;
+  /** Line (provider/ctxModelId/baseUrl) of the most recent capture — the precise attribution source for a settled success. */
+  private inflightLine: { provider: string; ctxModelId: string; baseUrl: string } | undefined;
+  /** Dedup for `line-reset-skipped` audits (bounded). */
+  private readonly unresolvedAudited = new Set<string>();
   /** O3: true once any cache read was observed this session (proven-hit ping or a real request's usage via `noteUsageCacheRead`). */
   private observedCacheRead = false;
   /** O3: ping attempts actually issued this session (the "keepalive was active" half of the zero-read verdict). */
@@ -1001,6 +1017,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           });
         }
       } else {
+        const captureLine = this.window.capture !== undefined ? lineKeyOf(this.window.capture.fingerprint) : undefined;
         const applied = onUnproven(
           this.window,
           this.session,
@@ -1036,6 +1053,9 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
             ...diagnostics,
             unprovenKind: outcome.kind,
             disabled: applied.session.disabled !== undefined,
+            lineOpen: countOpenLines(applied.session) > 0,
+            ...(captureLine !== undefined ? { lineKey: captureLine.key } : {}),
+            ...(outcome.kind === "http" ? { httpStatus: outcome.status } : {}),
             cacheReadInputTokens: 0,
             cacheCreationInputTokens,
             attempts,
@@ -1058,6 +1078,11 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     if (!this.accept(captured.sessionId, captured.instance)) return;
     // O3: remember the route beyond the capture's own lifetime (dispose-time accounting).
     this.lastRoute = { provider: captured.fingerprint.provider, modelId: captured.fingerprint.modelId };
+    this.inflightLine = {
+      provider: captured.fingerprint.provider,
+      ctxModelId: captured.fingerprint.ctxModelId,
+      baseUrl: captured.fingerprint.baseUrl,
+    };
     if (this.window.pingInFlight) {
       try {
         this.abortController?.abort();
@@ -1075,17 +1100,77 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.publishVisibility();
   }
 
-  noteRequestSettled(sessionId: string, instance: string, successful = false): void {
+  /** Attribute a settled success to a known line; undefined ⇒ only the wildcard may reset. */
+  private resolveSettledLine(route: { provider: string; modelId: string }): LineRef | undefined {
+    const inflight = this.inflightLine;
+    if (inflight !== undefined) {
+      if (inflight.provider === route.provider && inflight.ctxModelId === route.modelId) return lineKeyOf(inflight);
+    } else {
+      const model = this.safeModel();
+      if (model !== undefined && model.provider === route.provider && model.id === route.modelId) {
+        return lineKeyOf({ provider: model.provider, ctxModelId: model.id, baseUrl: model.baseUrl });
+      }
+    }
+    const id = `${route.provider}\n${route.modelId}`;
+    if (!this.unresolvedAudited.has(id) && this.unresolvedAudited.size < 8) {
+      this.unresolvedAudited.add(id);
+      this.audit("line-reset-skipped", { reason: "route-unresolved" });
+    }
+    return undefined;
+  }
+
+  noteRequestSettled(
+    sessionId: string,
+    instance: string,
+    successful = false,
+    settledRoute?: { provider: string; modelId: string },
+  ): void {
     if (!this.accept(sessionId, instance)) return;
     this.window = onRequestSettled(this.window);
+    const line = successful && settledRoute !== undefined ? this.resolveSettledLine(settledRoute) : undefined;
     const nextSession = this.deps.recoverTransientFailures
-      ? onSuccessfulRealRequest(this.session, successful)
+      ? onSuccessfulRealRequest(this.session, successful, { line, now: this.clock.now() })
       : this.session;
     if (nextSession !== this.session) {
+      const lineReset = countOpenLines(nextSession) < countOpenLines(this.session);
       this.session = nextSession;
-      this.audit("real-request-recovered");
+      this.audit(lineReset ? "line-reset" : "real-request-recovered", lineReset ? { lineKey: line?.key ?? "*" } : {});
+      if (lineReset) {
+        // `line-disabled` is a terminal skip (exact timer cleared, no re-arm) — re-arm now.
+        this.lastSkip = undefined;
+        this.syncExactTimer();
+        if (this.timer === undefined) this.arm();
+      }
       this.publishVisibility();
     }
+  }
+
+  resetBreakers(): BreakerResetSummary & { evidenceCleared: boolean } {
+    if (this.disposed)
+      return { sessionDisabled: undefined, openLines: 0, economicCleared: false, evidenceCleared: false };
+    const { session, summary } = resetAllBreakers(this.session);
+    this.session = session;
+    let evidenceCleared = false;
+    const route = this.lastRoute ?? this.currentRouteFromModel();
+    if (this.deps.evidence !== undefined && route !== undefined && route.provider !== "" && route.modelId !== "") {
+      try {
+        this.deps.evidence.resetNoCacheValue(route.provider, route.modelId, this.clock.now());
+        evidenceCleared = true;
+      } catch {
+        // best-effort.
+      }
+    }
+    this.lastSkip = undefined;
+    this.audit("breaker-reset-manual", { ...summary, evidenceCleared });
+    this.syncExactTimer();
+    if (this.timer === undefined) this.arm();
+    this.publishVisibility();
+    return { ...summary, evidenceCleared };
+  }
+
+  private currentRouteFromModel(): { provider: string; modelId: string } | undefined {
+    const model = this.safeModel();
+    return model !== undefined ? { provider: model.provider, modelId: model.id } : undefined;
   }
 
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void {
@@ -1111,6 +1196,11 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       prefixSource: this.window.capture?.prefix.source,
       supportsLongCacheRetention: this.supportsLongCacheRetention(),
       lastPingDiagnostics: this.lastPingDiagnostics,
+      currentLineKey:
+        model !== undefined
+          ? lineKeyOf({ provider: model.provider, ctxModelId: model.id, baseUrl: model.baseUrl })?.key
+          : undefined,
+      now: this.clock.now(),
     };
   }
 

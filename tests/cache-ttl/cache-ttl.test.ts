@@ -272,7 +272,7 @@ describe("/cache-ttl getArgumentCompletions", () => {
         .getArgumentCompletions("keepalive ")!
         .map((i: any) => i.value)
         .sort(),
-    ).toEqual(["keepalive off", "keepalive on"]);
+    ).toEqual(["keepalive off", "keepalive on", "keepalive reset"]);
     expect(
       cmd
         .getArgumentCompletions("keepalive o")!
@@ -287,5 +287,40 @@ describe("/cache-ttl getArgumentCompletions", () => {
     expect(cmd.getArgumentCompletions("bogus")).toEqual([]);
     expect(cmd.getArgumentCompletions("keepalive bogus")).toEqual([]);
     expect(() => cmd.getArgumentCompletions(null as unknown as string)).not.toThrow();
+  });
+});
+
+describe("/cache-ttl keepalive reset", () => {
+  function run(resetResult: unknown, hasPort = true) {
+    const commands = new Map<string, any>();
+    const pi = { on: vi.fn(), registerCommand: (n: string, v: any) => commands.set(n, v) } as unknown as ExtensionAPI;
+    const port = fakePort({ resetBreakers: vi.fn(() => resetResult) });
+    wireCacheTtl(pi, DEFAULT_SETTINGS, { keepalive: () => (hasPort ? (port as any) : undefined) });
+    const notify = vi.fn();
+    return { notify, port, go: () => commands.get("cache-ttl").handler("keepalive reset", { ui: { notify } }) };
+  }
+
+  it("reports what was cleared, with the economic warning when proven-write was cleared", async () => {
+    const t = run({ sessionDisabled: "proven-write", openLines: 2, economicCleared: true, evidenceCleared: true });
+    await t.go();
+    const text = t.notify.mock.calls[0]![0] as string;
+    expect(text).toContain("keepalive reset: cleared session-disabled(proven-write) · 2 line breaker(s)");
+    expect(text).toContain("counters zeroed");
+    expect(text).toContain("evidence(no-cache-value, current line only)");
+    expect(text).toContain("resumes on next real request");
+    expect(text).toContain("注意：已手动清除经济类熔断");
+  });
+
+  it("no economic warning for line-only resets; 'nothing to clear' and unavailable paths", async () => {
+    const a = run({ sessionDisabled: undefined, openLines: 1, economicCleared: false, evidenceCleared: false });
+    await a.go();
+    expect(a.notify.mock.calls[0]![0]).not.toContain("注意");
+    const b = run({ sessionDisabled: undefined, openLines: 0, economicCleared: false, evidenceCleared: false });
+    await b.go();
+    expect(b.notify.mock.calls[0]![0]).toBe("keepalive reset: nothing to clear (no breaker open)");
+    const c = run({}, false);
+    await c.go();
+    expect(c.notify.mock.calls[0]![0]).toContain("keepalive service unavailable");
+    expect(c.notify.mock.calls[0]![1]).toBe("warning");
   });
 });
