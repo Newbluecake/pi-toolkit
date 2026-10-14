@@ -325,11 +325,16 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
       clock.advance(240_000);
       await flush();
     }
-    expect(service.report().session.disabled).toEqual({ reason: "http", at: 480_000, transient: true });
+    expect(service.report().session.disabled).toEqual({
+      reason: "http",
+      at: 480_000,
+      transient: true,
+      httpStatus: 408,
+    });
 
     const branch = appendEntry.mock.calls.map(([customType, data]) => ({ type: "custom", customType, data }));
     const restored = readBackKeepaliveSessionState(branch);
-    expect(restored?.disabled).toEqual({ reason: "http", at: 480_000, transient: true });
+    expect(restored?.disabled).toEqual({ reason: "http", at: 480_000, transient: true, httpStatus: 408 });
 
     service.noteRequest(capture({}, service.instanceId, 40_000));
     service.noteRequestSettled("s1", service.instanceId, true);

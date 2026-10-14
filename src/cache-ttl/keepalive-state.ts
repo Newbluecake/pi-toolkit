@@ -220,8 +220,13 @@ export interface SessionTotals {
   /** Non-transient breaker counters; these remain session-permanent. */
   nonTransientConsecutiveUnproven: number;
   nonTransientUnprovenTotal: number;
-  /** `transient: true` marks a disable that a successful real request may clear. */
-  disabled: { reason: string; at: Millis; transient?: true } | undefined;
+  /**
+   * `transient: true` marks a disable that a successful real request may clear.
+   * `httpStatus` is recorded only when `reason === "http"` so the status line
+   * can show which status code tripped the breaker (408/429/5xx are transient,
+   * other 4xx permanent). Optional: old persisted snapshots lack it.
+   */
+  disabled: { reason: string; at: Millis; transient?: true; httpStatus?: number } | undefined;
   lastUnproven: { kind: string; at: Millis } | undefined;
   /**
    * O3 (provider-evidence breaker, 2026-10-12): this session's keepalive-active-but-zero-read
@@ -286,6 +291,11 @@ function finiteNonNegative(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/** Valid HTTP status codes only (100–599 integers); anything else is dropped. */
+function sanitizeHttpStatus(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? value : undefined;
+}
+
 /**
  * Rehydrate only session-level breaker/accounting fields from the current
  * branch. Window/prefix state is intentionally not restored across /reload.
@@ -331,10 +341,12 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
           const reason = typeof disabled.reason === "string" && disabled.reason !== "" ? disabled.reason : undefined;
           const at = finiteNonNegative(disabled.at);
           if (reason !== undefined && at !== undefined) {
+            const httpStatus = sanitizeHttpStatus(disabled.httpStatus);
             next.disabled = {
               reason,
               at: at as Millis,
               ...(disabled.transient === true ? { transient: true as const } : {}),
+              ...(httpStatus !== undefined ? { httpStatus } : {}),
             };
           }
         }
@@ -1000,6 +1012,7 @@ export function onUnproven(
     lastStopReason: kind,
   };
   const transient = isTransientUnproven(kind, httpStatus);
+  const httpStatusField = kind === "http" ? sanitizeHttpStatus(httpStatus) : undefined;
   const unprovenTotal = session.unprovenTotal + 1;
   const consecutiveUnproven = session.consecutiveUnproven + 1;
   const provenWrites = kind === "proven-write" ? session.provenWrites + 1 : session.provenWrites;
@@ -1015,12 +1028,13 @@ export function onUnproven(
     nonTransientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT;
   const transientTrip =
     transientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT || transientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT;
+  const statusExtra = httpStatusField !== undefined ? { httpStatus: httpStatusField } : {};
   const disabled = permanent
-    ? { reason: kind, at: now }
+    ? { reason: kind, at: now, ...statusExtra }
     : transientTrip
       ? session.disabled?.transient === true
         ? session.disabled
-        : { reason: kind, at: now, transient: true as const }
+        : { reason: kind, at: now, transient: true as const, ...statusExtra }
       : session.disabled;
   const newSession: SessionTotals = {
     ...session,
@@ -1258,7 +1272,11 @@ export function buildCacheStatusSnapshot(input: CacheStatusInput): CacheStatusSn
 function renderPingSegment(report: KeepaliveReport | undefined): string | undefined {
   if (report === undefined) return undefined;
   const { session, window, config } = report;
-  if (session.disabled !== undefined) return `ping off:${session.disabled.reason} ×${session.pings}`;
+  if (session.disabled !== undefined) {
+    const d = session.disabled;
+    const status = d.reason === "http" && d.httpStatus !== undefined ? ` ${d.httpStatus}` : "";
+    return `ping off:${d.reason}${status} ×${session.pings}`;
+  }
   if (window.pings > 0 && window.pings >= config.maxPings) return `ping ${window.pings}/${config.maxPings} capped`;
   if (window.lastStopReason !== undefined) return `ping paused:${window.lastStopReason}`;
   if (session.pings === 0 && window.pings === 0) return undefined;

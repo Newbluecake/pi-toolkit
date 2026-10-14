@@ -678,6 +678,44 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     expect(permanent.session.disabled).toBeUndefined();
   });
 
+  it("records the HTTP status on the disable when an http failure trips the breaker", () => {
+    // permanent: a non-transient 403 tripping the non-transient streak limit.
+    let session = baseSession();
+    let window = armedWindow({ windowEpoch: 1 });
+    for (let i = 0; i < UNPROVEN_STREAK_LIMIT; i += 1) {
+      const result = onUnproven(window, session, 1, "http", 100 + i, 403);
+      session = result.session;
+      window = result.window;
+    }
+    expect(session.disabled).toEqual({ reason: "http", at: 100 + UNPROVEN_STREAK_LIMIT - 1, httpStatus: 403 });
+
+    // transient: 503 tripping the transient streak limit.
+    session = baseSession();
+    window = armedWindow({ windowEpoch: 1 });
+    for (let i = 0; i < UNPROVEN_STREAK_LIMIT; i += 1) {
+      const result = onUnproven(window, session, 1, "http", 200 + i, 503);
+      session = result.session;
+      window = result.window;
+    }
+    expect(session.disabled).toEqual({
+      reason: "http",
+      at: 200 + UNPROVEN_STREAK_LIMIT - 1,
+      transient: true,
+      httpStatus: 503,
+    });
+  });
+
+  it("drops an out-of-range HTTP status instead of recording it on the disable", () => {
+    let session = baseSession();
+    let window = armedWindow({ windowEpoch: 1 });
+    for (let i = 0; i < UNPROVEN_STREAK_LIMIT; i += 1) {
+      const result = onUnproven(window, session, 1, "http", 100 + i, 99);
+      session = result.session;
+      window = result.window;
+    }
+    expect(session.disabled).toEqual({ reason: "http", at: 100 + UNPROVEN_STREAK_LIMIT - 1 });
+  });
+
   it("recovers a transient disable after a successful real provider response and resets transient counters", () => {
     let session = baseSession();
     let window = armedWindow({ windowEpoch: 1 });
@@ -740,6 +778,31 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     expect(transient?.transientUnprovenTotal).toBe(2);
     const permanent = readBackKeepaliveSessionState([snapshot({ reason: "no-usage", at: 11 })]);
     expect(permanent?.disabled).toEqual({ reason: "no-usage", at: 11 });
+  });
+
+  it("preserves a valid httpStatus through snapshot read-back and drops invalid ones", () => {
+    const base = createInitialSessionTotals();
+    const snapshot = (disabled: Record<string, unknown>) => ({
+      type: "custom",
+      customType: "subagent:cache-keepalive",
+      data: { kind: "unproven", session: { ...base, disabled } },
+    });
+    // persistence roundtrip keeps the status code (and the transient flag).
+    expect(
+      readBackKeepaliveSessionState([snapshot({ reason: "http", at: 10, transient: true, httpStatus: 503 })])?.disabled,
+    ).toEqual({ reason: "http", at: 10, transient: true, httpStatus: 503 });
+    // legacy record without httpStatus reads back unchanged.
+    expect(readBackKeepaliveSessionState([snapshot({ reason: "http", at: 10 })])?.disabled).toEqual({
+      reason: "http",
+      at: 10,
+    });
+    // invalid statuses are dropped; the disable itself survives.
+    for (const bad of [99, 600, 403.5, "403", Number.NaN]) {
+      expect(readBackKeepaliveSessionState([snapshot({ reason: "http", at: 10, httpStatus: bad })])?.disabled).toEqual({
+        reason: "http",
+        at: 10,
+      });
+    }
   });
 });
 
@@ -1127,6 +1190,32 @@ describe("renderCacheStatus", () => {
       report: report({ session: baseSession({ disabled: { reason: "proven-write", at: 1 }, pings: 4 }) }),
     });
     expect(text).toBe("ping off:proven-write ×4");
+  });
+
+  it("shows the HTTP status code for an http disable, transient or permanent", () => {
+    const permanent = renderCacheStatus({
+      mode: "auto",
+      dirty: false,
+      report: report({ session: baseSession({ disabled: { reason: "http", at: 1, httpStatus: 403 } }) }),
+    });
+    expect(permanent).toBe("ping off:http 403 ×0");
+    const transient = renderCacheStatus({
+      mode: "auto",
+      dirty: false,
+      report: report({
+        session: baseSession({ disabled: { reason: "http", at: 1, transient: true, httpStatus: 503 }, pings: 2 }),
+      }),
+    });
+    expect(transient).toBe("ping off:http 503 ×2");
+  });
+
+  it("keeps the legacy text for an http disable without a recorded status", () => {
+    const text = renderCacheStatus({
+      mode: "auto",
+      dirty: false,
+      report: report({ session: baseSession({ disabled: { reason: "http", at: 1 }, pings: 3 }) }),
+    });
+    expect(text).toBe("ping off:http ×3");
   });
 });
 
