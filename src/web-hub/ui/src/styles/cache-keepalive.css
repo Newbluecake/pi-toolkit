@@ -1,0 +1,267 @@
+/*
+ * Prompt-cache keepalive panel styles (cache-keepalive-web plan §4.1, P-B) — token-only,
+ * imported by `components/detail/CacheKeepalivePanel.vue`. Deliberately its own file (same
+ * precedent as `styles/bash-jobs.css` / `styles/todo.css`): `styles/detail.css` is owned by
+ * another in-flight line and source-scan.test.ts bans scoped <style> blocks outright. The
+ * summary row mirrors the `.bj-sum` / `.wt-sum` grammar (icon + single-line ellipsis + the
+ * chevron rotate-on-open transition, 20px min-height / 16px under `pointer: coarse` — the
+ * summary-row family rule); the expanded body's `.ck-kv` mirrors `.kv`'s box treatment, and
+ * the breaker list caps its height and scrolls inside (same cap-and-scroll ruling as
+ * `.bj-list`), with NO `overscroll-behavior: contain` (2026-10 scroll-freeze fix).
+ */
+
+.ck-panel {
+  margin-top: var(--sp-1);
+}
+
+.ck-sum {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  min-height: 20px; /* summary-row family (2026-10-06 desktop ×1/4 compaction) */
+  margin: 0 -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  text-align: left;
+}
+
+.ck-sum:hover {
+  background: var(--c-surface-2);
+}
+
+.ck-sum .icon-sm:first-child {
+  flex: none;
+}
+
+.ck-sum-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ck-sum .chev {
+  margin-left: auto;
+  flex: none;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.ck-panel[data-open="true"] .ck-sum .chev {
+  transform: rotate(90deg);
+}
+
+/* Marker tone (from `ping.state`, open string — unknown ⇒ neutral): `line-off`/`disabled` bad,
+ * `paused`/`capped` warn, everything else neutral. Tints only the text, never the hit area. */
+.ck-panel[data-tone="bad"] .ck-sum-text {
+  color: var(--st-failed);
+}
+
+.ck-panel[data-tone="warn"] .ck-sum-text {
+  color: var(--c-warning-text);
+}
+
+.ck-body {
+  margin: var(--sp-1) 0 0;
+  padding: var(--sp-1) 6px 0;
+  max-height: min(48vh, 380px);
+  overflow-y: auto;
+}
+
+/* Expanded kv block — mirrors `.kv`'s box treatment (detail.css), but stays its own class so
+ * this file never depends on detail.css internals. Two-column grid; ≤480px collapses to one. */
+.ck-kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 2px var(--sp-3);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+}
+
+.ck-kv dt {
+  color: var(--c-text-3);
+  white-space: nowrap;
+}
+
+.ck-kv dd {
+  margin: 0;
+  min-width: 0;
+  padding: 0 0 var(--sp-1);
+  color: var(--c-text);
+  overflow-wrap: anywhere;
+}
+
+.ck-kv dd:last-child {
+  padding-bottom: 0;
+}
+
+/* English token fragments (mode/ping/kind/http/trips) — mono, muted, never localized. */
+.ck-token {
+  font-family: var(--font-mono);
+  color: var(--c-text-2);
+}
+
+/* Prose annex (mode explanation) — its own muted line, never fights the token. */
+.ck-note {
+  display: block;
+  margin-top: 2px;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  overflow-wrap: anywhere;
+}
+
+/* Session totals: each metric on its own wrapped segment (label + value pairs). */
+.ck-meta {
+  display: inline-block;
+  margin-right: var(--sp-3);
+  color: var(--c-text-3);
+}
+
+.ck-age {
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+}
+
+/* transient/permanent + current/legacy/history chips — the `.bj-chip` grammar. */
+.ck-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  max-width: 100%;
+  min-height: calc(18px * var(--fs-scale, 1));
+  padding: 0 6px;
+  margin-left: 4px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.ck-chip[data-kind="permanent"] {
+  color: var(--c-warning-text);
+}
+
+/* Breaker list: label on the first line (mono, ellipsis, full text on `title`), the status
+ * chips wrap under it (plan §4.2 mobile ruling — flex-wrap, label owns the row). */
+.ck-lines {
+  margin-top: var(--sp-2);
+}
+
+.ck-lines-title {
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 6px;
+}
+
+.ck-lines-empty {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  padding: 2px 6px;
+}
+
+.ck-lines-list {
+  list-style: none;
+  margin: var(--sp-1) 0 0;
+  padding: 0;
+}
+
+.ck-line {
+  display: flex;
+  flex-direction: column;
+  gap: 1px var(--sp-2);
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+}
+
+.ck-line:hover {
+  background: var(--c-surface-2);
+}
+
+.ck-line[data-open="false"] {
+  opacity: 0.7;
+}
+
+.ck-line-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.ck-line[data-open="false"] .ck-line-label {
+  color: var(--c-text-3);
+}
+
+.ck-line-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px var(--sp-2);
+  padding-left: calc(14px + var(--sp-2));
+  min-width: 0;
+}
+
+.ck-retry {
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-warning-text);
+}
+
+.ck-line[data-open="true"] .ck-retry {
+  color: var(--st-failed);
+}
+
+.ck-more {
+  padding: 3px 6px;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* ≤480px (same reflow ruling as `.bj-cmd`): the kv grid collapses to one column (label above
+ * value) and the line meta loses its indent so nothing overflows a 360px viewport. */
+@media (max-width: 480px) {
+  .ck-kv {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ck-kv dt {
+    padding-top: var(--sp-1);
+  }
+
+  .ck-line-meta {
+    padding-left: 0;
+  }
+}
+
+/* coarse pointers: the fold toggle keeps the summary-row family compaction (same 16px rule as
+ * `.bj-sum` / `.wt-sum` — ui-design §3.12 precedent). */
+@media (pointer: coarse) {
+  .ck-sum {
+    min-height: 16px; /* summary-row family compaction — see detail.css */
+    line-height: 1.2;
+  }
+}

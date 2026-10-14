@@ -37,7 +37,7 @@
   `.detail-head-info` in detail.css.
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onUnmounted, ref } from "vue";
+import { computed, defineAsyncComponent, inject, nextTick, onUnmounted, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -57,6 +57,7 @@ import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import BashJobsPanel from "./BashJobsPanel.vue";
 import { bashJobsOf } from "./bashJobsView.js";
+import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -77,6 +78,14 @@ const worktrees = computed(() => worktreesOf(props.agent));
 // bash-jobs-panel 包 B (D4): the session's own background bash jobs ride `StatusInfo.bashJobs`
 // (same no-state.js-mirror posture as worktrees); undefined ⇒ the panel renders nothing.
 const bashJobs = computed(() => bashJobsOf(props.agent));
+
+// cache-keepalive-web P-B (§4): the main session's prompt-cache keepalive rides
+// `StatusInfo.cacheKeepalive` (same no-state.js-mirror posture as bashJobs); undefined ⇒ no
+// panel (web-hub off / keepalive off / silent projection — byte-equal to the pre-feature shape).
+// The panel BODY is a lazy chunk (defineAsyncComponent, GraphPanel→WorktreeGraph precedent)
+// for the first-screen budget: only the narrowing helper + this wrapper ride the main bundle.
+const cacheKeepalive = computed(() => cacheKeepaliveOf(props.agent));
+const CacheKeepalivePanel = defineAsyncComponent(() => import("./CacheKeepalivePanel.vue"));
 
 const title = computed(() => {
   const name = session.value?.name;
@@ -396,6 +405,10 @@ function onToggleHeadInfo(): void {
       <!-- bash-jobs-panel 包 B (D4): the session's own background bash jobs, straight from
            `status.bashJobs`; renders nothing when the wire is absent or has zero rows. -->
       <BashJobsPanel v-if="bashJobs" :jobs="bashJobs" />
+
+      <!-- cache-keepalive-web P-B (§4): the main session's prompt-cache keepalive, straight
+           from `status.cacheKeepalive`; renders nothing when the wire is absent (read-only). -->
+      <CacheKeepalivePanel v-if="cacheKeepalive" :keepalive="cacheKeepalive" />
     </div>
   </header>
 </template>

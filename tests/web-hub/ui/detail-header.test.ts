@@ -673,3 +673,107 @@ describe("DetailHeader.vue — restoring badge (spawn-restore plan §9.1, F20)",
     expect(other.find(".chip-restoring").exists()).toBe(false);
   });
 });
+
+/** Flush the queues until the LAZY panel chunk resolves (defineAsyncComponent — vitest's
+ * SFC transform of the dynamic import takes real wall-clock time, so a fixed settle loop
+ * can outrun it when the file runs standalone; awaiting the same module first warms the
+ * module registry so the component's loader promise settles within a flushPromises()). */
+async function settleLazyPanel(): Promise<void> {
+  await import("../../../src/web-hub/ui/src/components/detail/CacheKeepalivePanel.vue");
+  await flushPromises();
+  await new Promise((r) => setTimeout(r, 0));
+  await flushPromises();
+}
+
+/**
+ * cache-keepalive-web plan §4.3 (P-B): the header mounts `CacheKeepalivePanel` straight from
+ * `status.cacheKeepalive` (no state.js mirror — same posture as the bash-jobs panel), after
+ * the BashJobsPanel slot; no wire (or malformed wire) ⇒ no panel (byte-equal to the
+ * pre-feature shape). The panel body itself is a lazy chunk (defineAsyncComponent — the
+ * first-screen budget), so every mount test settles the async import first.
+ */
+describe("DetailHeader.vue — cache-keepalive panel mount (cache-keepalive-web P-B)", () => {
+  const ck = {
+    v: 1,
+    at: 1_700_000_000_000,
+    mode: "on",
+    dirty: true,
+    enabled: true,
+    modeText: "cache 1h*",
+    ping: { text: "ping 3/11 Σ12 · 450k · ≈$0.12", state: "active" },
+    window: { pings: 3, max: 11 },
+    session: {
+      pings: 12,
+      cacheReadTokens: 450_000,
+      costUsd: 0.12,
+      avoidedMissTokens: 1_234,
+      loadBearingWindows: 2,
+      unnecessaryWindows: 1,
+      discardedWindows: 0,
+    },
+    lastPing: { at: 1_699_999_995_000, kind: "proven-hit" },
+    lines: [
+      { label: "cr-anthropic/claude-opus-5-5@api.example.com", open: true, status: 403, trips: 3, current: true },
+    ],
+  };
+
+  it("mounts the panel after the bash-jobs slot when status.cacheKeepalive is present", async () => {
+    const wrapper = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, cacheKeepalive: ck } as never }),
+        narrow: false,
+      },
+    });
+    await settleLazyPanel();
+    const panel = wrapper.find(".ck-panel");
+    expect(panel.exists()).toBe(true);
+    expect(wrapper.find(".ck-sum-text").text()).toBe("cache 1h* · ping 3/11 Σ12 · 450k · ≈$0.12");
+    // mounted at the info block's bottom, after the (absent here) bash-jobs slot
+    const kids = wrapper.find(".detail-head-info").element.children;
+    expect(kids[kids.length - 1]).toBe(panel.element);
+  });
+
+  it("renders after the bash-jobs panel when both wires are present", async () => {
+    const bj = {
+      rows: [
+        {
+          id: "job-a",
+          cmd: "sleep 60",
+          status: "running",
+          exitCode: null,
+          createdAt: 1_700_000_000_000,
+          elapsedMs: 5_000,
+          logBytes: 0,
+        },
+      ],
+      total: 1,
+      running: 1,
+      failed: 0,
+      sampledAt: 1_700_000_005_000,
+    };
+    const wrapper = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, bashJobs: bj, cacheKeepalive: ck } as never }),
+        narrow: false,
+      },
+    });
+    await settleLazyPanel();
+    const kids = [...wrapper.find(".detail-head-info").element.children];
+    const bjIdx = kids.findIndex((el) => el.classList.contains("bj-panel"));
+    const ckIdx = kids.findIndex((el) => el.classList.contains("ck-panel"));
+    expect(bjIdx).toBeGreaterThanOrEqual(0);
+    expect(ckIdx).toBe(bjIdx + 1);
+  });
+
+  it("renders no panel when the wire is absent or malformed (legacy agent ⇒ byte-equal header)", () => {
+    const absent = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
+    expect(absent.find(".ck-panel").exists()).toBe(false);
+    const malformed = mount(DetailHeader, {
+      props: {
+        agent: agent({ status: { busy: false, pending: false, cacheKeepalive: { v: 2, lines: [] } } as never }),
+        narrow: false,
+      },
+    });
+    expect(malformed.find(".ck-panel").exists()).toBe(false);
+  });
+});
