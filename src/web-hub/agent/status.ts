@@ -16,6 +16,7 @@ import type {
   FleetRowWire,
   HeldItemWire,
   QuotaWire,
+  CacheKeepaliveWire,
   StatusInfo,
   WorktreesWire,
 } from "../protocol/messages.js";
@@ -44,6 +45,7 @@ export function readStatus(
   quota?: () => QuotaWire | undefined,
   held?: () => { items: HeldItemWire[]; rev: number; epoch: string } | undefined,
   load?: () => LoadPort | undefined,
+  cacheKeepalive?: () => CacheKeepaliveWire | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -99,6 +101,12 @@ export function readStatus(
   if (quota !== undefined) {
     const wire = quota();
     if (wire !== undefined) status.quota = wire;
+  }
+  // cache-keepalive-web plan §3.3: same overwrite-only-slot rationale — no getter / silent
+  // projection ⇒ the field stays absent, byte-equal to the pre-feature status shape.
+  if (cacheKeepalive !== undefined) {
+    const wire = cacheKeepalive();
+    if (wire !== undefined) status.cacheKeepalive = wire;
   }
   // web-hub-steer-recall plan §4.6 (A5): held web steer/followUp rows riding the same open
   // StatusInfoSchema slot pattern as todo/worktrees/bashJobs/quota. Gated ONLY on the wiring

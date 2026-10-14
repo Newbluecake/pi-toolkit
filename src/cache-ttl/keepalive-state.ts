@@ -377,7 +377,7 @@ function finiteNonNegative(value: unknown): number | undefined {
 }
 
 /** Valid HTTP status codes only (100–599 integers); anything else is dropped. */
-function sanitizeHttpStatus(value: unknown): number | undefined {
+export function sanitizeHttpStatus(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? value : undefined;
 }
 
@@ -1096,7 +1096,7 @@ export function isSuccessfulRealRequest(message: unknown): boolean {
   );
 }
 
-function isTransientUnproven(kind: UnprovenKind, httpStatus?: number): boolean {
+export function isTransientUnproven(kind: UnprovenKind, httpStatus?: number): boolean {
   if (kind === "network" || kind === "accepted-then-lost" || kind === "malformed") return true;
   if (kind !== "http" || httpStatus === undefined) return false;
   return httpStatus === 408 || httpStatus === 429 || (httpStatus >= 500 && httpStatus <= 599);
@@ -1526,6 +1526,11 @@ export interface KeepalivePingDiagnostics {
    */
   attempts?: number | undefined;
   /**
+   * web-hub keepalive panel (D8): HTTP status of an `http`-kind unproven ping (100–599). In-memory
+   * only — never persisted, never audited, never rendered by `/cache-ttl status`.
+   */
+  httpStatus?: number | undefined;
+  /**
    * O2 follow-up (gate #7 分流): this ping's replay had its `cache_control.ttl` stripped
    * (`stripCacheControlTtl`) because the route has no proven 1h landing evidence — the
    * distinguishing marker between an ordinary 5m ping and a "ttl-1h ⇒ 5m 放行" ping in the
@@ -1595,19 +1600,29 @@ export function buildCacheStatusSnapshot(input: CacheStatusInput): CacheStatusSn
   };
 }
 
+export type PingSegmentState = "active" | "capped" | "paused" | "line-off" | "disabled";
+export interface PingSegmentParts {
+  /** Head of the ping segment (for `line-off`: without the `·retry`/`·tN` suffixes). */
+  text: string;
+  state: PingSegmentState;
+  /** `line-off` only: the line breaker's `resetEligibleAt` (absolute, only when still in the future of `report.now`). */
+  retryAt?: Millis;
+  /** `line-off` only, trips >= 2: `·t${trips}`. */
+  tail?: string;
+}
+
 /**
- * The one and only `"ping ..."` segment of the merged status line — every
- * case from the task's required text table, minus the leading mode prefix
- * (the segments are joined by `renderCacheStatus` below). `undefined` ⇒
- * nothing keepalive-related worth showing right now.
+ * The structured form of the `"ping ..."` segment (shared by the TUI status line and the web-hub
+ * keepalive panel, so the two can never drift). `renderPingSegment` is `compose(parts, now)`.
+ * `undefined` ⇒ nothing keepalive-related worth showing right now.
  */
-function renderPingSegment(report: KeepaliveReport | undefined): string | undefined {
+export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegmentParts | undefined {
   if (report === undefined) return undefined;
   const { session, window, config } = report;
   if (session.disabled !== undefined) {
     const d = session.disabled;
     const status = d.reason === "http" && d.httpStatus !== undefined ? ` ${d.httpStatus}` : "";
-    return `ping off:${d.reason}${status} ×${session.pings}`;
+    return { text: `ping off:${d.reason}${status} ×${session.pings}`, state: "disabled" };
   }
   {
     const cur = report.currentLineKey !== undefined ? session.lineStates[report.currentLineKey] : undefined;
@@ -1618,19 +1633,37 @@ function renderPingSegment(report: KeepaliveReport | undefined): string | undefi
           ? session.lineStates[LINE_KEY_WILDCARD]
           : undefined;
     if (rec !== undefined) {
-      let text = `ping off:http${rec.status !== undefined ? ` ${rec.status}` : ""}`;
+      const parts: PingSegmentParts = {
+        text: `ping off:http${rec.status !== undefined ? ` ${rec.status}` : ""}`,
+        state: "line-off",
+      };
       if (report.now !== undefined && rec.resetEligibleAt !== undefined && rec.resetEligibleAt > report.now) {
-        text += ` ·retry ${formatMsShort(rec.resetEligibleAt - report.now)}`;
+        parts.retryAt = rec.resetEligibleAt;
       }
-      if (rec.trips >= 2) text += ` ·t${rec.trips}`;
-      return text;
+      if (rec.trips >= 2) parts.tail = `·t${rec.trips}`;
+      return parts;
     }
   }
-  if (window.pings > 0 && window.pings >= config.maxPings) return `ping ${window.pings}/${config.maxPings} capped`;
-  if (window.lastStopReason !== undefined) return `ping paused:${window.lastStopReason}`;
+  if (window.pings > 0 && window.pings >= config.maxPings)
+    return { text: `ping ${window.pings}/${config.maxPings} capped`, state: "capped" };
+  if (window.lastStopReason !== undefined) return { text: `ping paused:${window.lastStopReason}`, state: "paused" };
   if (session.pings === 0 && window.pings === 0) return undefined;
   const cumulative = session.pings > window.pings ? ` Σ${session.pings}` : "";
-  return `ping ${window.pings}/${config.maxPings}${cumulative} · ${formatTokenCount(session.cacheReadTokens)} · ${formatCost(report.costUsd)}`;
+  return {
+    text: `ping ${window.pings}/${config.maxPings}${cumulative} · ${formatTokenCount(session.cacheReadTokens)} · ${formatCost(report.costUsd)}`,
+    state: "active",
+  };
+}
+
+/** The one and only `"ping ..."` segment of the merged status line (see `pingSegmentParts`). */
+function renderPingSegment(report: KeepaliveReport | undefined): string | undefined {
+  const p = pingSegmentParts(report);
+  if (p === undefined) return undefined;
+  let s = p.text;
+  if (p.retryAt !== undefined && report?.now !== undefined && p.retryAt > report.now)
+    s += ` ·retry ${formatMsShort(p.retryAt - report.now)}`;
+  if (p.tail !== undefined) s += ` ${p.tail}`;
+  return s;
 }
 
 /**

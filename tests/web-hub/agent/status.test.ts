@@ -66,3 +66,31 @@ describe("web-hub status load gate projection", () => {
     expect(status.loadGate?.sinceAgoMs).toBeUndefined();
   });
 });
+
+describe("web-hub status cacheKeepalive slot", () => {
+  const wire = {
+    v: 1 as const,
+    at: 1,
+    mode: "on",
+    enabled: true,
+    window: { pings: 1, max: 11 },
+    session: {
+      pings: 1,
+      cacheReadTokens: 0,
+      avoidedMissTokens: 0,
+      loadBearingWindows: 0,
+      unnecessaryWindows: 0,
+      discardedWindows: 0,
+    },
+    lines: [],
+  };
+  const call = (ka?: () => typeof wire | undefined) =>
+    readStatus(ctx, tap, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, ka);
+
+  it("getter ⇒ status.cacheKeepalive set; undefined result or no getter ⇒ deepEqual the pre-feature shape", () => {
+    expect(call(() => wire).cacheKeepalive).toEqual(wire);
+    const base = call();
+    expect("cacheKeepalive" in base).toBe(false);
+    expect(call(() => undefined)).toEqual(base);
+  });
+});

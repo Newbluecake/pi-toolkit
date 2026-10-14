@@ -17,6 +17,8 @@ import {
   onProvenHit,
   onSuccessfulRealRequest,
   onUnproven,
+  pingSegmentParts,
+  isTransientUnproven,
   readBackKeepaliveSessionState,
   renderCacheStatus,
   renderKeepaliveReportLines,
@@ -596,3 +598,118 @@ describe("service: line isolation, reset and breaker command", () => {
   });
 });
 void (undefined as unknown as Ms);
+
+// ---------------------------------------------------------------------------
+// pingSegmentParts (cache-keepalive-web plan §3.1/§3.6) — baseline 95f7a6f (post-#29)
+// ---------------------------------------------------------------------------
+describe("pingSegmentParts", () => {
+  const mkReport = (session: SessionTotals, extra: Partial<KeepaliveReport> = {}): KeepaliveReport => ({
+    enabled: true,
+    armed: true,
+    window: createInitialWindowState(),
+    session,
+    config: { enabled: true, intervalMs: 240_000, maxPings: 11, minPrefixTokens: 20_000 },
+    costUsd: undefined,
+    dropped: { sessionMismatch: 0, instanceMismatch: 0, epochMismatch: 0 },
+    lastSkip: undefined,
+    prefixSource: undefined,
+    supportsLongCacheRetention: true,
+    lastPingDiagnostics: undefined,
+    ...extra,
+  });
+  const compose = (r: KeepaliveReport): string | undefined => {
+    const p = pingSegmentParts(r);
+    if (p === undefined) return undefined;
+    let s = p.text;
+    if (p.retryAt !== undefined && r.now !== undefined && p.retryAt > r.now)
+      s += ` ·retry ${formatMsShort(p.retryAt - r.now)}`;
+    if (p.tail !== undefined) s += ` ${p.tail}`;
+    return s;
+  };
+  const render = (r: KeepaliveReport) => renderCacheStatus({ mode: "auto", dirty: false, report: r });
+
+  const lineOpenSession = (): SessionTotals => {
+    let s = reject(reject(createInitialSessionTotals(), 0), 1);
+    s = onSuccessfulRealRequest(s, true, { line: lineKey(), now: 2 as never });
+    return { ...reject(reject(s, 10), 11), pings: 9 };
+  };
+  const corpus = (): Array<[string, KeepaliveReport, string | undefined, string | undefined]> => {
+    const key = lineKey().key;
+    const base = createInitialSessionTotals();
+    const disabled = { ...base, pings: 7, disabled: { reason: "http", at: 5, httpStatus: 403 } };
+    const disabledNoCode = { ...base, pings: 3, disabled: { reason: "no-usage", at: 5 } };
+    const win = (w: Partial<WindowState>) => ({ ...createInitialWindowState(), ...w });
+    return [
+      ["undefined report", undefined as never, undefined, undefined],
+      ["nothing yet", mkReport(base), undefined, undefined],
+      ["disabled http", mkReport(disabled), "disabled", "ping off:http 403 ×7"],
+      ["disabled no code", mkReport(disabledNoCode), "disabled", "ping off:no-usage ×3"],
+      [
+        "line-off with retry+trips",
+        mkReport(lineOpenSession(), { currentLineKey: key, now: 11 as never }),
+        "line-off",
+        "ping off:http 403 ·retry 30m ·t2",
+      ],
+      [
+        "line-off other line",
+        mkReport(lineOpenSession(), { currentLineKey: lineKey({ provider: "x" }).key, now: 11 as never }),
+        "active",
+        "ping 0/11 Σ9 · 0 · unknown",
+      ],
+      ["capped", mkReport({ ...base, pings: 11 }, { window: win({ pings: 11 }) }), "capped", "ping 11/11 capped"],
+      [
+        "paused",
+        mkReport({ ...base, pings: 2 }, { window: win({ pings: 2, lastStopReason: "network" as never }) }),
+        "paused",
+        "ping paused:network",
+      ],
+      [
+        "active",
+        mkReport({ ...base, pings: 4, cacheReadTokens: 450_000 }, { window: win({ pings: 3 }), costUsd: 0.12 }),
+        "active",
+        "ping 3/11 Σ4 · 450k · ≈$0.12",
+      ],
+    ];
+  };
+
+  it.each(corpus().map((c) => [c[0], c] as const))("%s: state + compose==render (text parity)", (_n, c) => {
+    const [, r, state, text] = c;
+    const p = pingSegmentParts(r);
+    expect(p?.state).toBe(state);
+    if (r === undefined) return;
+    expect(render(r)).toBe(text);
+    expect(compose(r)).toBe(text);
+  });
+
+  it("line-off parts: head has no suffix; retryAt absolute only while in the future; tail only for trips>=2", () => {
+    const key = lineKey().key;
+    const s = lineOpenSession();
+    const p = pingSegmentParts(mkReport(s, { currentLineKey: key, now: 11 as never }))!;
+    expect(p.text).toBe("ping off:http 403");
+    expect(p.retryAt).toBe(s.lineStates[key]!.resetEligibleAt);
+    expect(p.tail).toBe("·t2");
+    const expired = pingSegmentParts(
+      mkReport(s, { currentLineKey: key, now: (s.lineStates[key]!.resetEligibleAt! + 1) as never }),
+    )!;
+    expect(expired.retryAt).toBeUndefined();
+    const first = reject(reject(createInitialSessionTotals(), 0), 1);
+    const p1 = pingSegmentParts(mkReport(first, { currentLineKey: key, now: 2 as never }))!;
+    expect(p1.state).toBe("line-off");
+    expect(p1.tail).toBeUndefined();
+  });
+
+  it("isTransientUnproven is exported with the existing classification", () => {
+    expect(isTransientUnproven("http", 503)).toBe(true);
+    expect(isTransientUnproven("http", 408)).toBe(true);
+    expect(isTransientUnproven("http", 403)).toBe(false);
+    expect(isTransientUnproven("network")).toBe(true);
+    expect(isTransientUnproven("proven-write")).toBe(false);
+  });
+
+  it("formatMsShort matches the shared vectors", async () => {
+    const v = (await import("../fixtures/cache-keepalive-format-vectors.json", { with: { type: "json" } })) as {
+      default: { cases: Array<[number, string]> };
+    };
+    for (const [ms, want] of v.default.cases) expect(formatMsShort(ms)).toBe(want);
+  });
+});

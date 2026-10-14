@@ -35,6 +35,7 @@ import {
   countOpenLines,
   lineKeyOf,
   resetAllBreakers,
+  sanitizeHttpStatus,
   type BreakerResetSummary,
   type LineRef,
   onUnproven,
@@ -1051,6 +1052,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
             cacheReadInputTokens: 0,
             cacheCreationInputTokens,
             attempts,
+            ...(outcome.kind === "http" ? { httpStatus: sanitizeHttpStatus(outcome.status) } : {}),
           };
           chargeUsd = this.budgetChargeForOutcome(outcome, capture, model);
           this.runSpentUsd += chargeUsd;

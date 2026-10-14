@@ -16,6 +16,7 @@ import {
   type CacheKeepaliveService,
 } from "../../src/service/cache-keepalive.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
+import { renderKeepaliveReportLines } from "../../src/cache-ttl/keepalive-state.js";
 import type { CapturedRequest } from "../../src/cache-ttl/keepalive-state.js";
 
 const encoder = new TextEncoder();
@@ -270,6 +271,30 @@ describe("cache-keepalive service — ping retry (non-retryable outcomes are fin
     expect(report.session.unprovenTotal).toBe(1);
     expect(report.session.lastUnproven?.kind).toBe("accepted-then-lost");
     expect(report.lastPingDiagnostics?.attempts).toBe(1);
+  });
+
+  it("httpStatus is recorded in lastPingDiagnostics for http unproven only (in-memory, not rendered)", async () => {
+    const http = sequencedFetch([httpStep(403)]);
+    const a = harness({ fetchImpl: http.fetchImpl });
+    await armAndTick(a.service, a.clock);
+    const d = a.service.report().lastPingDiagnostics!;
+    expect(d.outcomeKind).toBe("http");
+    expect(d.httpStatus).toBe(403);
+    // /cache-ttl status output is independent of the in-memory-only field.
+    const rep = a.service.report();
+    const stripped = { ...rep, lastPingDiagnostics: { ...d, httpStatus: undefined } };
+    expect(renderKeepaliveReportLines(rep)).toEqual(renderKeepaliveReportLines(stripped));
+
+    const net = sequencedFetch([acceptedThenLostStep]);
+    const b = harness({ fetchImpl: net.fetchImpl });
+    await armAndTick(b.service, b.clock);
+    const d2 = b.service.report().lastPingDiagnostics!;
+    expect("httpStatus" in d2).toBe(false);
+
+    const hit = sequencedFetch([provenHitStep]);
+    const c = harness({ fetchImpl: hit.fetchImpl });
+    await armAndTick(c.service, c.clock);
+    expect("httpStatus" in c.service.report().lastPingDiagnostics!).toBe(false);
   });
 
   it("400 (a plain 4xx, not in the retryable set) is never retried", async () => {

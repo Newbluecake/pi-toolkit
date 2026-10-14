@@ -71,7 +71,8 @@ import type { BashJobsWire } from "../protocol/messages.js";
 import { todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
 import { projectQuota, quotaFingerprint } from "./quota-sampler.js";
-import type { QuotaWire } from "../protocol/messages.js";
+import type { CacheKeepaliveWire, QuotaWire } from "../protocol/messages.js";
+import { cacheKeepaliveFingerprint, projectCacheKeepalive, type CacheKeepaliveInput } from "./cache-keepalive.js";
 import type { ProviderVerdict } from "../../quota/ladder.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
@@ -226,6 +227,10 @@ export interface WebHubDeps {
    *  `() => holder.current?.quota?.verdicts() ?? []`). Unset (webHub.quota=false, or the quota
    *  feature itself produces no verdicts) ⇒ the `StatusInfo.quota` field is never set. */
   quota?: () => readonly ProviderVerdict[];
+  /** cache-keepalive-web plan §3.3: late-bound getter of the main session's keepalive report + cache
+   *  mode (`src/index.ts` threads it only when `cacheTtl.keepalive` is on). Unset ⇒ the
+   *  `StatusInfo.cacheKeepalive` field is never set (byte-equal to the pre-feature shape). */
+  cacheKeepalive?: () => CacheKeepaliveInput | undefined;
   /** sysload session gate projection and hub config source. */
   load?: { port: () => LoadPort | undefined; settings: LoadSettings };
   /** topic-switch plan P4 (D2, #5) / arch §15 r2 row 1: optional, late-bound web-prompt claim
@@ -358,6 +363,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   let lastBashSigs: Map<string, string> | undefined;
   // quota-web plan §2 (D3): same lifecycle as lastTodoFp/lastBashFp — reset on session_start.
   let lastQuotaFp: string | undefined;
+  // cache-keepalive-web plan §3.3: same lifecycle — reset on session_start.
+  let lastKaFp: string | undefined;
   let connGen = 0;
   let lastModelsKey: string | undefined;
   let modelsTick = 0;
@@ -444,6 +451,15 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // synchronous in-memory read, so there is no sampler state to own here (see quota-sampler.ts's
   // module docstring). Re-evaluated fresh on every call; the 1Hz tick below only decides whether
   // a given evaluation is worth publishing.
+  const cacheKeepaliveProjection = (): CacheKeepaliveWire | undefined => {
+    const d = deps.cacheKeepalive;
+    if (d === undefined) return undefined;
+    try {
+      return projectCacheKeepalive(d(), now());
+    } catch {
+      return undefined;
+    }
+  };
   const quotaProjection = (): QuotaWire | undefined => {
     const d = deps.quota;
     if (d === undefined) return undefined;
@@ -597,6 +613,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           }
         : undefined,
       deps.load?.port,
+      deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
     );
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
@@ -675,6 +692,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       const quotaFp = quotaFingerprint(quotaProjection());
       if (quotaFp !== lastQuotaFp) {
         lastQuotaFp = quotaFp;
+        publishStatus();
+      }
+    }
+    // cache-keepalive-web plan §3.4: no events either — 1Hz fingerprint gate (`at` excluded, no `armed`).
+    if (deps.cacheKeepalive !== undefined) {
+      const kaFp = cacheKeepaliveFingerprint(cacheKeepaliveProjection());
+      if (kaFp !== lastKaFp) {
+        lastKaFp = kaFp;
         publishStatus();
       }
     }
@@ -903,6 +928,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             deps.quota !== undefined ? quotaProjection : undefined,
             undefined,
             deps.load?.port,
+            deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
           ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
@@ -1114,6 +1140,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lastBashFp = undefined;
     lastBashSigs = undefined;
     lastQuotaFp = undefined;
+    lastKaFp = undefined;
     lastModelsKey = undefined;
     modelsTick = 0;
     tap.resetForSession(Number.NaN);

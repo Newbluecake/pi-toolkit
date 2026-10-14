@@ -14,8 +14,12 @@ function setup(mode: "auto" | "on" | "off" = "auto", persist = vi.fn()) {
   const notify = vi.fn();
   const status = vi.fn();
   const ctx = { ui: { notify, setStatus: status } } as unknown as ExtensionContext;
-  wireCacheTtl(pi, { ...DEFAULT_SETTINGS, cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, mode } }, { persist });
-  return { hooks, commands, ctx, notify, status, persist };
+  const wiring = wireCacheTtl(
+    pi,
+    { ...DEFAULT_SETTINGS, cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, mode } },
+    { persist },
+  );
+  return { hooks, commands, ctx, notify, status, persist, wiring };
 }
 
 /** Minimal `KeepalivePort` double for the header/payload pairing tests below. */
@@ -222,6 +226,20 @@ describe("cache TTL settings", () => {
     await cmd.handler("save", state.ctx);
     expect(persist).toHaveBeenCalledWith("off");
     expect(state.status).toHaveBeenLastCalledWith("cache-ttl", "cache 5m"); // 保存后无 *
+  });
+
+  it("wiring.status() follows mode/dirty across on/off/auto/save", async () => {
+    const persist = vi.fn().mockReturnValue(undefined);
+    const state = setup("on", persist);
+    const cmd = state.commands.get("cache-ttl");
+    expect(state.wiring.status()).toEqual({ mode: "on", dirty: false });
+    await cmd.handler("off", state.ctx);
+    expect(state.wiring.status()).toEqual({ mode: "off", dirty: true });
+    await cmd.handler("auto", state.ctx);
+    expect(state.wiring.status()).toEqual({ mode: "auto", dirty: true });
+    await cmd.handler("off", state.ctx);
+    await cmd.handler("save", state.ctx);
+    expect(state.wiring.status()).toEqual({ mode: "off", dirty: false });
   });
 
   it("shows both runtime and persisted modes when dirty and warns on bad args", async () => {

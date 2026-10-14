@@ -1,0 +1,18 @@
+{
+  "_comment": "formatMsShort shared vectors (cache-keepalive-web plan §3.6/§4.3). Derived from src/cache-ttl/keepalive-state.ts formatMsShort at baseline 95f7a6f (post-#29). Read by tests/cache-ttl (agent side) and tests/web-hub/ui (UI side). Each case: [ms, expected].",
+  "cases": [
+    [0, "0m"],
+    [-5, "0m"],
+    [1, "<1m"],
+    [59999, "<1m"],
+    [60000, "1m"],
+    [60001, "2m"],
+    [1500000, "25m"],
+    [1800000, "30m"],
+    [7200000, "120m"],
+    [7200001, "3h"],
+    [10800000, "3h"],
+    [86400000, "24h"],
+    [999999999999, "24h"]
+  ]
+}

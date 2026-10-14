@@ -1019,6 +1019,18 @@ export default function activate(rawPi: ExtensionAPI): void {
       // absent `deps.quota` as "feature off", so the sampler never runs and the wire field never
       // appears — byte-equal to the pre-feature shape).
       ...(settings.webHub.quota !== false ? { quota: () => holder.current?.quota?.verdicts() ?? [] } : {}),
+      ...(settings.cacheTtl.keepalive
+        ? {
+            cacheKeepalive: () => {
+              try {
+                const ka = holder.current?.keepalive; // fetched every call: follows stack rebuilds
+                return ka === undefined ? undefined : { report: ka.report(), ...cacheTtl.status() };
+              } catch {
+                return undefined;
+              }
+            },
+          }
+        : {}),
       ...(settings.load.enabled ? { load: { port: () => holder.current?.load?.port(), settings: settings.load } } : {}),
       // topic-switch plan.md §P3b.1 D2 flip point: removing this one line is the whole kill-switch
       // for web prompts ever being judged — web-hub then always takes its native dispatch path.

@@ -14,6 +14,7 @@ import {
   isSuccessfulRealRequest,
   cacheReadCostUsd,
   cacheWriteCostUsd,
+  type CacheDisplayMode,
   type CapturedRequest,
   type FingerprintContextInput,
   type KeepaliveCostModel,
@@ -63,6 +64,8 @@ export interface CacheWarmthPort {
 /** `wireCacheTtl`'s return value (plan.md P2 #12; was `void`, line 321 pre-change). */
 export interface CacheTtlWiring {
   readonly warmth: CacheWarmthPort;
+  /** Read-only snapshot of the authoritative display mode / dirty flag (web-hub keepalive panel, D7). */
+  status(): { mode: CacheDisplayMode; dirty: boolean };
 }
 
 /**
@@ -801,5 +804,6 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
       () => mode,
       () => lastSent,
     ),
+    status: () => ({ mode, dirty }),
   };
 }
