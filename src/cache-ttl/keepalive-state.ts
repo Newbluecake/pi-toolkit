@@ -534,6 +534,15 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
         lineStates: { ...restored.lineStates, [LINE_KEY_WILDCARD]: rec },
       };
     }
+    // #29 r2 migration (idempotent): a legacy `disabled{transient:true}` pause is lifted on read-back.
+    if (restored?.disabled?.transient === true) {
+      restored = {
+        ...restored,
+        disabled: undefined,
+        transientConsecutiveUnproven: 0,
+        transientUnprovenTotal: 0,
+      };
+    }
     return restored;
   } catch {
     return undefined;
@@ -1316,8 +1325,18 @@ export function onUnproven(
   const unprovenTotal = session.unprovenTotal + 1;
   const consecutiveUnproven = session.consecutiveUnproven + 1;
   const provenWrites = kind === "proven-write" ? session.provenWrites + 1 : session.provenWrites;
-  const transientConsecutiveUnproven = transient ? session.transientConsecutiveUnproven + 1 : 0;
-  const transientUnprovenTotal = transient ? session.transientUnprovenTotal + 1 : session.transientUnprovenTotal;
+  // #29 r2: server-never-processed transients (network / 408/429/5xx) were already retried until
+  // the cache window ran out; they never pause the session (the next window retries afresh) and
+  // do not feed the transient breaker. Only possibly-billed transients (accepted-then-lost /
+  // malformed) still count toward it.
+  const neverProcessed = kind === "network" || kind === "http";
+  const countsTowardTrip = transient && !neverProcessed;
+  const transientConsecutiveUnproven = countsTowardTrip
+    ? session.transientConsecutiveUnproven + 1
+    : transient
+      ? session.transientConsecutiveUnproven
+      : 0;
+  const transientUnprovenTotal = countsTowardTrip ? session.transientUnprovenTotal + 1 : session.transientUnprovenTotal;
   const nonTransientConsecutiveUnproven = transient ? 0 : session.nonTransientConsecutiveUnproven + 1;
   const nonTransientUnprovenTotal = transient
     ? session.nonTransientUnprovenTotal

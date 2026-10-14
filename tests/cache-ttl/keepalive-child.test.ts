@@ -215,7 +215,7 @@ function getSid(h: Harness): string {
 // ---------------------------------------------------------------------------
 
 describe("child keepalive — T-K3b: lease held across retries denies a concurrent instance", () => {
-  it("A holds the slot through 3 network-failure attempts (2s/5s backoff); B is global-cap throughout; B succeeds once A settles", async () => {
+  it("A holds the slot through its network-failure retries (r2: until the window margin runs out); B is global-cap throughout; B succeeds once A settles", async () => {
     const clock = new FakeClock(0);
     const ledger = createChildKeepaliveLedger();
     // A short interval (still within the production-clamped [60s,240s] range) gives
@@ -244,20 +244,94 @@ describe("child keepalive — T-K3b: lease held across retries denies a concurre
     expect(ledger.activeCount()).toBe(1); // A still holds it mid-retry
     expect(b.service.report().lastSkip).toBe("global-cap");
 
-    clock.advance(5_000); // A's second backoff -> attempt 3 (final, PING_MAX_ATTEMPTS=3)
+    clock.advance(5_000); // A's second backoff -> attempt 3; r2: retries continue (10s, 20s, 30s...) within the window
     await flush();
+    expect(ledger.activeCount()).toBe(1);
+    expect(b.service.report().lastSkip).toBe("global-cap");
 
-    // A's sequence is now finished (3 network failures, all "never processed" ⇒ charge 0)
-    // and its lease was released in `runPing`'s `finally`.
+    // Walk past the window's margin cutoff. r2 lease renewal: A's retry span (~195s here) outlives
+    // CHILD_PING_LEASE_MS (150s), but every retry renews the lease, so B can never reclaim the slot
+    // (cap 1 never exceeded) and A is the only holder until it settles at the margin cutoff.
+    let maxActive = 0;
+    let bPingedWhileAHeld = false;
+    for (let t = 0; t < 300; t += 1) {
+      clock.advance(1_000);
+      await flush();
+      maxActive = Math.max(maxActive, ledger.activeCount());
+      if (ledger.activeCount() > 0 && b.service.report().session.pings > 0) bPingedWhileAHeld = true;
+    }
+    expect(maxActive).toBe(1);
+    expect(bPingedWhileAHeld).toBe(false);
     expect(ledger.activeCount()).toBe(0);
+    // One ping however many attempts (all "never processed"), below both breaker thresholds.
     expect(a.service.report().session.unprovenTotal).toBe(1);
-    expect(a.service.report().session.disabled).toBeUndefined(); // below both breaker thresholds
+    expect(a.service.report().session.disabled).toBeUndefined();
+    expect(ledger.spent24h(clock.now())).toBe(0); // never-processed ⇒ $0
+  });
 
-    // B's own next re-arm (15s after the global-cap denial) now finds the slot free.
-    clock.advance(15_000);
+  it("a reclaimed lease stops A's retries without re-acquiring; charge stays $0 for never-processed", async () => {
+    const clock = new FakeClock(0);
+    const ledger = createChildKeepaliveLedger();
+    const settings = { ...BASE_SETTINGS, keepaliveIntervalMs: 60_000 };
+    const fetchImpl = networkFailFetch();
+    const a = harness(clock, "sA", {
+      pingLedger: ledger,
+      maxConcurrentPings: 1,
+      runBudgetUsd: 100,
+      processBudgetUsd: 100,
+      settings,
+      fetchImpl,
+    });
+    arm(a);
+    clock.advance(60_000);
     await flush();
-    expect(b.service.report().session.pings).toBe(1); // B's proven-hit succeeded
-    expect(ledger.activeCount()).toBe(0); // B's own lease settled synchronously with its proven-hit
+    expect(ledger.activeCount()).toBe(1);
+    const callsBefore = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+    // Simulate the lease having been reclaimed by someone else (expire it, then another holder acquires).
+    clock.advance(1_000);
+    const stolen = ledger.tryAcquire({
+      holderId: "other",
+      estimateUsd: 0,
+      maxConcurrent: 5,
+      processBudgetUsd: 100,
+      now: clock.now() + 1_000_000,
+    });
+    expect(stolen.ok).toBe(true); // reclaimExpired (now far in the future) recycled A's lease
+    if (stolen.ok) stolen.lease.settle(clock.now());
+    for (let t = 0; t < 200; t += 1) {
+      clock.advance(1_000);
+      await flush();
+    }
+    // A made at most the one further attempt that was already in flight; it never re-acquired a slot.
+    const callsAfter = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(callsAfter - callsBefore).toBeLessThanOrEqual(1);
+    expect(a.service.report().session.unprovenTotal).toBe(1);
+    expect(ledger.activeCount()).toBe(0);
+  });
+
+  it("dispose during a long retry backoff leaves no pending timers and no lease (#29 r2)", async () => {
+    const clock = new FakeClock(0);
+    const ledger = createChildKeepaliveLedger();
+    const a = harness(clock, "sA", {
+      pingLedger: ledger,
+      maxConcurrentPings: 1,
+      runBudgetUsd: 100,
+      processBudgetUsd: 100,
+      settings: { ...BASE_SETTINGS, keepaliveIntervalMs: 60_000 },
+      fetchImpl: networkFailFetch(),
+    });
+    arm(a);
+    clock.advance(60_000);
+    await flush();
+    clock.advance(2_000);
+    await flush();
+    clock.advance(5_000);
+    await flush(); // now sleeping in the 10s backoff
+    expect(ledger.activeCount()).toBe(1);
+    a.service.dispose();
+    await flush();
+    expect(ledger.activeCount()).toBe(0);
+    expect(clock.pendingTimers).toBe(0);
   });
 
   it("disposing A mid-backoff releases its lease immediately; A's late (aborted) fetch result never double-releases", async () => {

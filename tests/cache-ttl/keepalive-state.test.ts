@@ -626,7 +626,7 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     let ep = 1;
     let w = window;
 
-    let r = onUnproven(w, session, ep, "network", 1);
+    let r = onUnproven(w, session, ep, "accepted-then-lost", 1);
     session = r.session;
     w = r.window;
     expect(session.disabled).toBeUndefined();
@@ -639,7 +639,7 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     expect(session.consecutiveUnproven).toBe(0);
     expect(session.unprovenTotal).toBe(1);
 
-    r = onUnproven(w, session, ep, "http", 2, 500);
+    r = onUnproven(w, session, ep, "accepted-then-lost", 2);
     session = r.session;
     w = r.window;
     expect(session.unprovenTotal).toBe(2);
@@ -693,20 +693,28 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     const rec = Object.values(session.lineStates)[0];
     expect(rec).toMatchObject({ open: true, status: 403, trips: 1, openedAt: 100 + UNPROVEN_STREAK_LIMIT - 1 });
 
-    // transient: 503 tripping the transient streak limit.
+    // transient: 503 (never processed, retried until the window ran out) never trips the session (#29 r2).
     session = baseSession();
     window = armedWindow({ windowEpoch: 1 });
-    for (let i = 0; i < UNPROVEN_STREAK_LIMIT; i += 1) {
+    for (let i = 0; i < UNPROVEN_TOTAL_LIMIT + 2; i += 1) {
       const result = onUnproven(window, session, 1, "http", 200 + i, 503);
       session = result.session;
-      window = result.window;
+      window = { ...result.window, windowEpoch: 1 };
     }
-    expect(session.disabled).toEqual({
-      reason: "http",
-      at: 200 + UNPROVEN_STREAK_LIMIT - 1,
-      transient: true,
-      httpStatus: 503,
-    });
+    expect(session.disabled).toBeUndefined();
+    expect(session.transientUnprovenTotal).toBe(0);
+    expect(session.unprovenTotal).toBe(UNPROVEN_TOTAL_LIMIT + 2);
+    // the same holds for 408 and network.
+    for (const [kind, status] of [
+      ["http", 408],
+      ["network", undefined],
+    ] as const) {
+      let s2 = baseSession();
+      for (let i = 0; i < 5; i += 1) {
+        s2 = onUnproven(armedWindow({ windowEpoch: 1 }), s2, 1, kind, 300 + i, status).session;
+      }
+      expect(s2.disabled).toBeUndefined();
+    }
   });
 
   it("drops an out-of-range HTTP status instead of recording it on the disable", () => {
@@ -724,11 +732,11 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     let session = baseSession();
     let window = armedWindow({ windowEpoch: 1 });
     for (let i = 0; i < 2; i += 1) {
-      const result = onUnproven(window, session, 1, "network", i + 1);
+      const result = onUnproven(window, session, 1, "malformed", i + 1);
       session = result.session;
       window = { ...result.window, windowEpoch: 1 };
     }
-    expect(session.disabled).toEqual({ reason: "network", at: 2, transient: true });
+    expect(session.disabled).toEqual({ reason: "malformed", at: 2, transient: true });
     expect(onSuccessfulRealRequest(session, false)).toBe(session);
     const recovered = onSuccessfulRealRequest(session, true);
     expect(recovered.disabled).toBeUndefined();
@@ -744,7 +752,7 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     let session = baseSession();
     let window = armedWindow({ windowEpoch: 1 });
     for (let i = 0; i < 2; i += 1) {
-      const result = onUnproven(window, session, 1, "network", i + 1);
+      const result = onUnproven(window, session, 1, "malformed", i + 1);
       session = result.session;
       window = { ...result.window, windowEpoch: 1 };
     }
@@ -778,8 +786,9 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     const transient = readBackKeepaliveSessionState([
       snapshot({ reason: "network", at: 10, transient: true }, { transientUnprovenTotal: 2 }),
     ]);
-    expect(transient?.disabled).toEqual({ reason: "network", at: 10, transient: true });
-    expect(transient?.transientUnprovenTotal).toBe(2);
+    // #29 r2 migration: a legacy transient pause is lifted on read-back (and idempotently so).
+    expect(transient?.disabled).toBeUndefined();
+    expect(transient?.transientUnprovenTotal).toBe(0);
     const permanent = readBackKeepaliveSessionState([snapshot({ reason: "no-usage", at: 11 })]);
     expect(permanent?.disabled).toEqual({ reason: "no-usage", at: 11 });
   });
@@ -791,10 +800,10 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
       customType: "subagent:cache-keepalive",
       data: { kind: "unproven", session: { ...base, disabled } },
     });
-    // persistence roundtrip keeps the status code (and the transient flag).
+    // a legacy transient pause is lifted on read-back (#29 r2 migration).
     expect(
       readBackKeepaliveSessionState([snapshot({ reason: "http", at: 10, transient: true, httpStatus: 503 })])?.disabled,
-    ).toEqual({ reason: "http", at: 10, transient: true, httpStatus: 503 });
+    ).toBeUndefined();
     // legacy record without httpStatus reads back unchanged.
     expect(readBackKeepaliveSessionState([snapshot({ reason: "http", at: 10 })])?.disabled).toEqual({
       reason: "http",

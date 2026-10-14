@@ -94,9 +94,19 @@ interface KeepaliveModelInfo {
  * is wrong", and never `accepted-then-lost`, which got a 200 and may already have been billed).
  * Two retries max (three attempts total), backed off 2s then 5s.
  */
-const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
-const PING_RETRY_DELAYS_MS: readonly Millis[] = [2_000, 5_000];
-const PING_MAX_ATTEMPTS = 1 + PING_RETRY_DELAYS_MS.length;
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
+/**
+ * r2 (2026-10-14, plan.md "ping 重试 r2"): retry until the cache window runs out — 2s → 5s → 10s
+ * → 20s → 30s, then a constant 30s — bounded by `aliveUntil − TTL_SAFETY_MARGIN_MS`. When
+ * `aliveUntil` is unknown, fall back to the legacy 3-attempt cap.
+ */
+const PING_RETRY_DELAYS_MS: readonly Millis[] = [2_000, 5_000, 10_000, 20_000, 30_000];
+const PING_RETRY_STEADY_DELAY_MS: Millis = 30_000;
+const PING_MAX_ATTEMPTS_UNKNOWN_WINDOW = 3;
+
+function pingRetryDelayMs(attempt: number): Millis {
+  return PING_RETRY_DELAYS_MS[attempt - 1] ?? PING_RETRY_STEADY_DELAY_MS;
+}
 
 function isRetryablePingOutcome(outcome: PingOutcome): boolean {
   if (outcome.kind === "network") return true;
@@ -927,8 +937,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // request (no cache billing possible) are retried — `network` and a fixed set of
       // transient HTTP statuses (`isRetryablePingOutcome`). `accepted-then-lost` and
       // every other unproven kind are final on the first attempt: the server may already
-      // have billed a write. Up to `PING_MAX_ATTEMPTS - 1` retries, backed off by
-      // `PING_RETRY_DELAYS_MS`; every await return point re-checks `sameEpoch` (I-K8 —
+      // have billed a write. Retries until the window's TTL margin runs out, backed off by
+      // `PING_RETRY_DELAYS_MS` then a constant 30s; every await return point re-checks `sameEpoch` (I-K8 —
       // covers epoch bump from a real request / invalidate / dispose in one guard) and
       // silently abandons (no proven/unproven counting at all) on mismatch. The whole
       // sequence is also bounded by the window's remaining TTL margin: a retry that
@@ -954,11 +964,10 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         // I-K8: await return point — the one that matters most (§7.5 "abort 与迟到返回").
         if (!this.sameEpoch(pingEpoch)) return;
 
-        if (outcome.kind === "proven-hit" || !isRetryablePingOutcome(outcome) || attempts >= PING_MAX_ATTEMPTS) {
-          break;
-        }
+        if (outcome.kind === "proven-hit" || !isRetryablePingOutcome(outcome)) break;
+        if (this.window.aliveUntil === undefined && attempts >= PING_MAX_ATTEMPTS_UNKNOWN_WINDOW) break;
 
-        const delayMs = PING_RETRY_DELAYS_MS[attempts - 1]!;
+        const delayMs = pingRetryDelayMs(attempts);
         const nowBeforeBackoff = this.clock.now();
         const remainingMs =
           this.window.aliveUntil !== undefined
@@ -973,6 +982,10 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         await this.sleep(delayMs);
         // I-K8: await return point after the backoff wait.
         if (!this.sameEpoch(pingEpoch)) return;
+        // #29 r2: keep the child ping lease alive across a long retry span. A lease already
+        // reclaimed by another instance means the slot is no longer ours — stop retrying (never
+        // re-acquire) and finalize with the last outcome; charge stays by outcome kind.
+        if (lease && !lease.renew(this.clock.now())) break;
       }
 
       if (outcome.kind === "proven-hit") {

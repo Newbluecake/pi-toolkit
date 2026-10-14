@@ -187,8 +187,12 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   off strips the TTL override. No automatic 1h upgrades remain (user decision 2026-10-11).
   Keepalive replays captured payloads and verbatim headers under bounded ping budgets,
   fingerprint/session/epoch guards, and unref'd timers (service in `src/service/cache-keepalive.ts`).
-  Main-session transient failures pause pinging at the existing streak/total limits; a successful
-  real provider response clears only transient counters and restores pinging. Proven writes and
+  A single ping retries until the cache window runs out (2s→5s→10s→20s→30s then constant 30s, bounded by
+  `aliveUntil − TTL_SAFETY_MARGIN_MS`; 3 attempts when `aliveUntil` is unknown; retryable = network + HTTP
+  408/429/500/502/503/504/529; r2 2026-10-14). Never-processed transients (network / retryable HTTP) no longer
+  pause the session — the next window retries afresh (legacy `disabled{transient:true}` snapshots are lifted on
+  read-back); only possibly-billed transients (accepted-then-lost / malformed) still use the streak/total
+  limits, cleared by a successful real response. Proven writes and
   non-transient breaker trips (`no-usage`) remain permanent; `/reload` restores the branch's breaker state.
   Non-transient HTTP rejections (4xx, zero-billing) are line-level (`session.lineStates`, key =
   provider+baseUrl+model): a same-line successful real request resets them (backoff 30m×2^(n-2) on repeat,

@@ -313,8 +313,8 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
   it("recovers a transient disable only after a successful real response, then pings the next idle window", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce({ ok: false, status: 408, body: undefined, text: async () => "" })
-      .mockResolvedValueOnce({ ok: false, status: 408, body: undefined, text: async () => "" })
+      .mockResolvedValueOnce(fakeOkResponse([]))
+      .mockResolvedValueOnce(fakeOkResponse([]))
       .mockResolvedValueOnce(
         fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 500 })]),
       ) as unknown as typeof fetch;
@@ -325,16 +325,17 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
       clock.advance(240_000);
       await flush();
     }
+    // accepted-then-lost (possibly billed) still uses the transient breaker; network/408 no longer do (#29 r2).
     expect(service.report().session.disabled).toEqual({
-      reason: "http",
+      reason: "accepted-then-lost",
       at: 480_000,
       transient: true,
-      httpStatus: 408,
     });
 
     const branch = appendEntry.mock.calls.map(([customType, data]) => ({ type: "custom", customType, data }));
     const restored = readBackKeepaliveSessionState(branch);
-    expect(restored?.disabled).toEqual({ reason: "http", at: 480_000, transient: true, httpStatus: 408 });
+    // read-back lifts a legacy transient pause (#29 r2 migration).
+    expect(restored?.disabled).toBeUndefined();
 
     service.noteRequest(capture({}, service.instanceId, 40_000));
     service.noteRequestSettled("s1", service.instanceId, true);
@@ -347,7 +348,7 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
   });
 
   it("does not recover a transient disable when the real request settles with an error", async () => {
-    const fetchImpl = httpFetch(408);
+    const fetchImpl = vi.fn(async () => fakeOkResponse([])) as unknown as typeof fetch;
     const { service, clock } = harness({ fetchImpl });
     for (let i = 0; i < 2; i += 1) {
       service.noteRequest(capture({}, service.instanceId, 30_000 + i));
@@ -360,6 +361,33 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
     service.noteRequest(capture({}, service.instanceId, 40_000));
     service.noteRequestSettled("s1", service.instanceId, false);
     expect(service.report().session.disabled).toEqual(disabled);
+  });
+});
+
+describe("cache-keepalive service — #29 r2 retry until the cache expires", () => {
+  it("retries a 408 on the 2/5/10/20/30s schedule until the window margin runs out and never pauses the session", async () => {
+    const fetchImpl = httpFetch(408);
+    const calls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const { service, clock } = harness({ fetchImpl, settings: { ...SETTINGS, keepaliveIntervalMs: 60_000 } });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    const times: number[] = [];
+    let seen = 0;
+    for (let t = 0; t < 400; t += 1) {
+      clock.advance(1_000);
+      await flush();
+      while (seen < calls.length) {
+        times.push(clock.now());
+        seen += 1;
+      }
+    }
+    // first attempt at the 60s tick, then +2,+5,+10,+20,+30,+30,... gaps.
+    const gaps = times.slice(1, 9).map((x, i) => x - times[i]!);
+    expect(gaps.slice(0, 5)).toEqual([2_000, 5_000, 10_000, 20_000, 30_000]);
+    expect(gaps[5]).toBe(30_000);
+    expect(times.length).toBeGreaterThan(6);
+    expect(service.report().session.disabled).toBeUndefined();
+    expect(service.report().session.transientUnprovenTotal).toBe(0);
   });
 });
 

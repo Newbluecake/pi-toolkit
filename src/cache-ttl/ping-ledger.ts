@@ -79,6 +79,13 @@ export interface Lease {
    * holder's later lease that happens to reuse the same concurrency slot.
    */
   settle(now: Millis, chargeUsd?: number): void;
+  /**
+   * #29 r2: pushes this lease's expiry to `now + CHILD_PING_LEASE_MS` (called before each retry
+   * attempt of a long retry span). Returns `false` when the lease is no longer held (already
+   * settled or reclaimed by another `tryAcquire`) — the caller must then stop and must NOT
+   * re-acquire, so the concurrency cap is never exceeded.
+   */
+  renew(now: Millis): boolean;
 }
 
 export type AcquireResult = { ok: true; lease: Lease } | { ok: false; reason: LeaseDenyReason };
@@ -97,7 +104,7 @@ interface LeaseRecord {
   readonly token: string;
   readonly holderId: string;
   readonly acquiredAt: Millis;
-  readonly expiresAt: Millis;
+  expiresAt: Millis;
   readonly estimateUsd: number;
 }
 
@@ -190,12 +197,20 @@ class ChildKeepaliveLedgerImpl implements ChildKeepaliveLedger {
       if (charge > 0) this.recordSpend(settleNow, charge);
     };
 
+    const renew = (renewNow: Millis): boolean => {
+      const held = this.active.get(token);
+      if (held === undefined) return false;
+      held.expiresAt = Math.max(held.expiresAt, renewNow + CHILD_PING_LEASE_MS);
+      return true;
+    };
+
     const lease: Lease = {
       token,
       holderId,
       acquiredAt: record.acquiredAt,
       expiresAt: record.expiresAt,
       settle,
+      renew,
     };
     return { ok: true, lease };
   }

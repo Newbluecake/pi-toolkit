@@ -286,3 +286,32 @@ describe("ping-ledger — 24h rolling bucket window", () => {
     expect(ledger.spent24h(DAY)).toBe(1);
   });
 });
+
+describe("ping-ledger — lease renewal (#29 r2)", () => {
+  const acq = (ledger: ReturnType<typeof createChildKeepaliveLedger>, now: number, maxConcurrent = 1) =>
+    ledger.tryAcquire({ holderId: "h", estimateUsd: 0.5, maxConcurrent, processBudgetUsd: 100, now: now as never });
+
+  it("renew pushes expiry so tryAcquire does not reclaim; unrenewed lease is reclaimed", () => {
+    const ledger = createChildKeepaliveLedger();
+    const r = acq(ledger, 0);
+    if (!r.ok) throw new Error("acquire");
+    expect(r.lease.renew(100_000 as never)).toBe(true);
+    // original expiry (150s) passed, but renewed to 250s
+    expect(acq(ledger, 200_000).ok).toBe(false);
+    expect(ledger.activeCount()).toBe(1);
+    expect(acq(ledger, 260_000).ok).toBe(true); // renewed expiry elapsed ⇒ reclaimed
+  });
+
+  it("renew returns false once settled or reclaimed, and never resurrects the slot", () => {
+    const ledger = createChildKeepaliveLedger();
+    const r = acq(ledger, 0);
+    if (!r.ok) throw new Error("acquire");
+    expect(acq(ledger, 200_000).ok).toBe(true); // reclaims r
+    expect(r.lease.renew(200_001 as never)).toBe(false);
+    expect(ledger.activeCount()).toBe(1); // only the new holder
+    const r2 = acq(createChildKeepaliveLedger(), 0);
+    if (!r2.ok) throw new Error("acquire");
+    r2.lease.settle(1 as never);
+    expect(r2.lease.renew(2 as never)).toBe(false);
+  });
+});

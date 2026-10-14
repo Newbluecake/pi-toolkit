@@ -381,9 +381,10 @@ describe("persistence / migration", () => {
   });
 
   it("does not migrate transient / non-http / already-new-format snapshots; migration is idempotent", () => {
-    expect(
-      readBackKeepaliveSessionState([entry({ disabled: { reason: "http", at: 1, transient: true } })])!.disabled,
-    ).toBeDefined();
+    // #29 r2: a legacy transient pause is lifted (not migrated into a line breaker).
+    const lifted = readBackKeepaliveSessionState([entry({ disabled: { reason: "http", at: 1, transient: true } })])!;
+    expect(lifted.disabled).toBeUndefined();
+    expect(lifted.lineStates).toEqual({});
     expect(readBackKeepaliveSessionState([entry({ disabled: { reason: "no-usage", at: 1 } })])!.disabled?.reason).toBe(
       "no-usage",
     );

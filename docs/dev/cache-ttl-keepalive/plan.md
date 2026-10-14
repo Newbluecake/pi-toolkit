@@ -1371,3 +1371,17 @@ mock 在**被调用的同一拍**（尚未 `await` 任何东西）就同步改�
 `npx vitest run tests/cache-ttl tests/service tests/integration/child-keepalive.test.ts`
 （跑两次，742 passed）、`npm run -s format:check`、`npx vitest run` 全量（427 files / 6648
 passed / 2 skipped）均绿。
+
+## ping 重试 r2（2026-10-14 用户拍板）
+
+- 单次 ping 重试到缓存过期为止：间隔 2s → 5s → 10s → 20s → 30s，之后恒 30s；每次等待前检查
+  `remaining = aliveUntil − TTL_SAFETY_MARGIN_MS − now`，不足下一次间隔即停止，沿用最后一次结果作终局。
+  `aliveUntil` 未知时退化为 3 次上限。每个 await 返回点照旧 sameEpoch 检查（I-K8），dispose 立即中止等待。
+- 瞬态失败（network / 可重试 HTTP）重试到期仍失败：不再累加 transient 熔断计数、不再产生
+  `disabled{transient:true}`（不再 `ping paused`），下一个窗口照常重试。accepted-then-lost / malformed
+  （可能已计费）仍按原 transient 计数与阈值。旧快照中的 `disabled{transient:true}` 读回时解除（幂等迁移）。
+- `RETRYABLE_HTTP_STATUSES` = {408, 429, 500, 502, 503, 504, 529}；`isNeverProcessedOutcome` 与之同源（计 $0）。
+- 一次 ping 无论重试多少次只算 1 个 ping；每次尝试仍记 `ping-attempt` audit，`attempts` 进 lastPingDiagnostics。
+- 租约续期（主会话裁定）：子会话 ping 的账本租约（`CHILD_PING_LEASE_MS`=150s）在每次重试等待结束、发出下一次尝试前
+  `lease.renew(now)` 续到 `now + 150s`；续期失败（租约已被他人回收）即放弃后续重试、以最后一次结果终局，不抢回槽位，
+  并发上限永不突破；计费仍按结果类别（never-processed 计 $0）。
