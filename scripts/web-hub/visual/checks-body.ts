@@ -20,6 +20,9 @@
  * `render-gate-property.test.ts`) upstream of every component in this package — `Transcript.vue`
  * has no throttling of its own to verify, it just renders whatever `agent` prop it's handed.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { CheckContext, CheckModule, CheckOutcome } from "../visual.js";
 
 function pass(name: string, detail?: string): CheckOutcome {
@@ -225,6 +228,169 @@ async function checkNoTitleTooltips(ctx: CheckContext): Promise<CheckOutcome> {
   return outcome("no-title-tooltips-in-body", count === 0, `${count} [title] element(s) found`);
 }
 
+/** chunked-plan §6.4 (#11 Aw Snap): NO stylesheet rule may declare `content-visibility` — walks
+ * every `CSSStyleRule` of every readable sheet (nested `@media`/`@supports` included). Needs no
+ * open preview dialog, so it applies to every loaded page. */
+async function checkNoContentVisibilityRule(ctx: CheckContext): Promise<CheckOutcome> {
+  // NB: evaluate callbacks are serialized by Playwright — keep them free of named inner
+  // functions (tsx's keep-names helper `__name` does not exist in the page).
+  const hits = await ctx.page.evaluate(() => {
+    const found: string[] = [];
+    const stack: CSSRule[] = [];
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        stack.push(...Array.from(sheet.cssRules));
+      } catch {
+        // cross-origin sheet — unreadable, and none are served by the hub
+      }
+    }
+    while (stack.length > 0) {
+      const rule = stack.pop()!;
+      const nested = (rule as CSSGroupingRule).cssRules;
+      if (nested !== undefined) stack.push(...Array.from(nested));
+      const st = (rule as CSSStyleRule).style;
+      if (st !== undefined && typeof st.getPropertyValue === "function") {
+        if (st.getPropertyValue("content-visibility") !== "" || /content-visibility\s*:/i.test(rule.cssText)) {
+          found.push(rule.cssText.slice(0, 80));
+        }
+      }
+    }
+    return found;
+  });
+  return outcome(
+    "ui-no-content-visibility-rule",
+    hits.length === 0,
+    hits.length === 0 ? undefined : `content-visibility declared in: ${hits.join(" | ")}`,
+  );
+}
+
+/** chunked-plan §6.5 (r2 #1): the corpus + the REAL `createSourceSegmenter` output live in
+ * `seg-parity-snippet.js` as a JSON literal (`const CASES = …;`), drift-guarded against the live
+ * segmenter by `tests/web-hub/ui/checks-body.test.ts` (this harness cannot import the UI logic:
+ * its `@protocol` alias only resolves under vite/vitest). */
+export const SEG_PARITY_SNIPPET_PATH: string = (() => {
+  try {
+    return fileURLToPath(new URL("./seg-parity-snippet.js", import.meta.url));
+  } catch {
+    // a non-`file:` module URL (vitest's happy-dom environment) — the harness always runs from the repo root
+    return resolve("scripts/web-hub/visual/seg-parity-snippet.js");
+  }
+})();
+
+export interface SegParityCase {
+  readonly name: string;
+  readonly text: string;
+  readonly chunk: number;
+  readonly segs: ReadonlyArray<{ readonly text: string; readonly sep: string }>;
+}
+
+export function loadSegParityCases(src: string = readFileSync(SEG_PARITY_SNIPPET_PATH, "utf8")): SegParityCase[] {
+  const m = /^const CASES = (\[[\s\S]*?\]);$/m.exec(src);
+  if (m === null) throw new Error("seg-parity-snippet.js: `const CASES = [...]` literal not found");
+  // prettier rewrites the JSON literal as plain JS (unquoted keys) — evaluate it as an expression
+  return new Function(`return ${m[1]!}`)() as SegParityCase[];
+}
+
+interface SegParityRow {
+  readonly name: string;
+  readonly ok: boolean;
+  readonly hA: number;
+  readonly hB: number;
+  readonly linesA: number;
+  readonly linesB: number;
+  readonly rectsA: number;
+  readonly rectsB: number;
+}
+
+/** Source-view segmented rendering ≡ ONE `<pre>` (same width, `height:auto`): scrollHeight within
+ * 1px, equal line counts, equal rect-row counts. Real layout only — a DOM without one (happy-dom)
+ * reports an informational skip. Headless Chromium here is a Blink stand-in only (see the plan's
+ * §6.5 limits); Edge/Firefox run the same measurement from the DevTools snippet. */
+async function checkSegRenderParity(ctx: CheckContext): Promise<CheckOutcome> {
+  const name = "preview-seg-render-parity";
+  const cases = loadSegParityCases();
+  // NB: no named inner functions inside the serialized callback (see the note above).
+  const rows = await ctx.page.evaluate(
+    (arg: { cases: SegParityCase[] }) => {
+      const host = document.createElement("div");
+      host.style.position = "absolute";
+      host.style.left = "-10000px";
+      host.style.top = "0";
+      host.style.width = "480px";
+      document.body.appendChild(host);
+      const out: SegParityRow[] = [];
+      for (const c of arg.cases) {
+        const els: HTMLElement[] = [];
+        for (const tag of ["pre", "div"]) {
+          const el = document.createElement(tag);
+          el.className = "preview-text-body";
+          el.style.width = "480px";
+          el.style.height = "auto";
+          el.style.overflow = "visible";
+          el.style.flex = "none";
+          el.style.minHeight = "0";
+          host.appendChild(el);
+          els.push(el);
+        }
+        const a = els[0]!;
+        const b = els[1]!;
+        a.textContent = c.text;
+        for (const s of c.segs) {
+          const d = document.createElement("div");
+          d.className = "preview-seg";
+          d.textContent = s.text;
+          b.appendChild(d);
+        }
+        const cs = getComputedStyle(a);
+        const lh = parseFloat(cs.lineHeight);
+        const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+        const rects: number[] = [];
+        for (const el of [a, b]) {
+          const base = el.getBoundingClientRect().top;
+          const tops = new Set<number>();
+          const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          for (let n = walker.nextNode(); n !== null; n = walker.nextNode()) {
+            const range = document.createRange();
+            range.selectNodeContents(n);
+            for (const r of Array.from(range.getClientRects())) {
+              if (r.height > 0) tops.add(Math.round(r.top - base));
+            }
+          }
+          rects.push(tops.size);
+        }
+        const hA = a.scrollHeight;
+        const hB = b.scrollHeight;
+        const linesA = Math.round((hA - pad) / lh);
+        const linesB = Math.round((hB - pad) / lh);
+        out.push({
+          name: c.name,
+          ok: Math.abs(hA - hB) <= 1 && linesA === linesB && rects[0] === rects[1],
+          hA,
+          hB,
+          linesA,
+          linesB,
+          rectsA: rects[0]!,
+          rectsB: rects[1]!,
+        });
+      }
+      host.remove();
+      return out;
+    },
+    { cases },
+  );
+  if (rows.every((r) => r.hA === 0 && r.hB === 0)) return pass(name, "skipped (no layout engine)");
+  const bad = rows.filter((r) => !r.ok);
+  return outcome(
+    name,
+    bad.length === 0,
+    bad.length === 0
+      ? undefined
+      : bad
+          .map((r) => `${r.name}: h ${r.hA}/${r.hB} lines ${r.linesA}/${r.linesB} rects ${r.rectsA}/${r.rectsB}`)
+          .join("; "),
+  );
+}
+
 export const check: CheckModule = {
   id: "body",
   async run(ctx: CheckContext): Promise<CheckOutcome[]> {
@@ -234,6 +400,8 @@ export const check: CheckModule = {
       await checkTxItemNoContentVisibility(ctx),
       await checkLongContentScrollsWithinBlock(ctx),
       await checkNoTitleTooltips(ctx),
+      await checkNoContentVisibilityRule(ctx),
+      await checkSegRenderParity(ctx),
     ];
   },
 };

@@ -133,6 +133,11 @@ function onPathBarGo(path: string): void {
   nav.value?.navigate({ path });
 }
 
+/** The displayed body's UTF-8 length — only a fallback for a fake/legacy view without `bytes`. */
+function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "";
   if (n < 1024) return `${n} B`;
@@ -231,6 +236,21 @@ async function download(): Promise<void> {
   dlBusy.value = true;
   dlFailed.value = false;
   try {
+    // chunked-plan D11: a text preview may be only a prefix of the file (256 KiB chunks) —
+    // when the hub declares `preview.download.v1` save the COMPLETE file via `download=1`.
+    const dl = hub?.preview?.download;
+    if (v.phase === "text" && downloadCap.value && dl !== undefined) {
+      const full = await dl(
+        { agentKey: sess.agentKey, sessionId: sess.sessionId, path },
+        { signal: new AbortController().signal },
+      );
+      if (!full.ok) {
+        dlFailed.value = true;
+        return;
+      }
+      saveBlob(full.blob, downloadNameOf(path));
+      return;
+    }
     const out = await preview.fetch(
       { agentKey: sess.agentKey, sessionId: sess.sessionId, path },
       { signal: new AbortController().signal, maxPixels: clientImageBudget() },
@@ -460,9 +480,14 @@ function onKeydown(ev: KeyboardEvent): void {
             :key="view.path"
             :text="view.text"
             :truncated="view.truncated"
-            :size-label="formatBytes(view.size)"
+            :loaded-label="formatBytes(view.bytes ?? utf8Length(view.text))"
+            :total-label="formatBytes(view.size)"
+            :stream="view.stream"
             :filename="basename"
             :path="path"
+            @load-more="nav?.loadMore?.()"
+            @reopen="nav?.reopen?.()"
+            @retry-stream="nav?.loadMore?.()"
           />
           <!-- A3/P3: the listing — rendered only with the navigation face (a frozen fake can
                never produce a dir phase; the guard keeps the branch total anyway).

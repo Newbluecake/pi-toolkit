@@ -85,3 +85,37 @@ describe("i18n namespace parity", () => {
     expect(diffNamespaces(en, zh)).toEqual([]);
   });
 });
+
+describe("preview namespace — chunked stream keys (chunked-plan §4.7)", () => {
+  const KEYS = [
+    "truncatedNote",
+    "truncatedRenderNote",
+    "streamProgress",
+    "streamLoading",
+    "streamLoadMore",
+    "streamWaiting",
+    "streamCap",
+    "streamChanged",
+    "streamReopen",
+    "streamError",
+    "streamRetry",
+    "streamSegSource",
+    "streamBudgetSource",
+    "streamTailIncomplete",
+  ];
+  const en = MESSAGES.en["preview"] as Record<string, string>;
+  const zh = MESSAGES.zh["preview"] as Record<string, string>;
+
+  it.each(KEYS)("%s exists in both languages with the same placeholders", (k) => {
+    expect(typeof en[k]).toBe("string");
+    expect(typeof zh[k]).toBe("string");
+    expect(placeholdersOf(zh[k]!)).toEqual(placeholdersOf(en[k]!));
+  });
+
+  it("the fixed truncated note takes {loaded} + {total} (never the old single {size})", () => {
+    for (const d of [en, zh]) {
+      expect(placeholdersOf(d["truncatedNote"]!)).toEqual(new Set(["loaded", "total"]));
+      expect(placeholdersOf(d["truncatedRenderNote"]!)).toEqual(new Set(["loaded", "total"]));
+    }
+  });
+});

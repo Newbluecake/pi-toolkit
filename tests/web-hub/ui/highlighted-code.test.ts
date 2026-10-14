@@ -141,11 +141,12 @@ describe("PreviewText.vue — filename-driven highlight", () => {
 
   it("unknown extension (a.txt) stays plain; truncation badge is unaffected", async () => {
     const wrapper = mount(PreviewText, {
-      props: { text: JS_SNIPPET, truncated: true, sizeLabel: "256.0 KiB", filename: "a.txt" },
+      props: { text: JS_SNIPPET, truncated: true, loadedLabel: "256.0 KiB", totalLabel: "2.3 MiB", filename: "a.txt" },
     });
     await new Promise((r) => setTimeout(r, 300));
     expect(wrapper.findAll("pre span").length).toBe(0);
-    expect(wrapper.get(".preview-truncated").text()).toContain("256.0 KiB");
+    // en locale: "Showing the first {loaded} of {total} …" (chunked-plan §4.7 — never the total as shown)
+    expect(wrapper.get(".preview-truncated").text()).toContain("first 256.0 KiB of 2.3 MiB");
     expect(wrapper.get("pre.preview-text-body").text()).toBe(JS_SNIPPET);
   });
 });

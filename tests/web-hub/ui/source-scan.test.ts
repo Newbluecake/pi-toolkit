@@ -60,6 +60,9 @@ const SOURCE_BANNED: Array<[string, RegExp]> = [
   // web-hub-preview plan v3 §6.1 HP8 (PV4): previewed images convert through FileReader's
   // readAsDataURL (`data:` rides the existing `img-src 'self' data:` CSP) — a `blob:` URL
   // would need CSP relaxed, so the API that creates one is banned outright (D1).
+  // chunked-plan §6.4 (#11 Aw Snap root cause): never used anywhere in the UI — the streamed
+  // preview appends plain blocks and relies on that. Comments are stripped before the scan.
+  ["content-visibility (banned — #11 Aw Snap; chunked-plan D9)", /content-visibility|contentVisibility/],
   ["createObjectURL (banned — preview uses data: URLs; blob: would need CSP relaxed, D1/HP8)", /\bcreateObjectURL\b/],
 ];
 
@@ -137,6 +140,15 @@ describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
         }
       }
     }
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
+  it("no stylesheet under the UI declares content-visibility (comments stripped)", () => {
+    const css = globSync(`${UI_DIR}/src/**/*.css`, { cwd: ROOT }).map((f) => resolve(ROOT, f));
+    expect(css.length).toBeGreaterThan(3); // glob-failure canary
+    const offenders = css
+      .filter((f) => /content-visibility/i.test(readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "")))
+      .map((f) => relative(ROOT, f));
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
 

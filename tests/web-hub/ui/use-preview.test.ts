@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { nextTick, ref, type Ref } from "vue";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   asDirHandle,
   PREVIEW_NAV_STACK_MAX,
@@ -103,7 +103,13 @@ interface Harness {
   readonly state: Ref<HubState>;
   readonly coarse: Ref<boolean>;
   readonly calls: Array<{
-    req: { agentKey: string; sessionId: string; path: string; dir?: true };
+    req: {
+      agentKey: string;
+      sessionId: string;
+      path: string;
+      dir?: true;
+      chunk?: true | { offset: number; ident: string };
+    };
     opts: { signal: AbortSignal; maxPixels: number };
   }>;
   readonly waits: Array<ReturnType<typeof deferred<PreviewDirOutcome>>>;
@@ -790,5 +796,303 @@ describe("usePreview: preview-tree wiring (inline expansion lifecycle)", () => {
     h.waits[1]!.resolve(DIR_OK(["x.ts"])); // late settle — must not resurrect the node
     await flush();
     expect(h.nav.tree.nodes.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// chunked-plan §4.2 / §6.3 (P2b): the continuation stream
+// ---------------------------------------------------------------------------------------
+describe("usePreview: chunked stream (chunked-plan §4.2)", () => {
+  const CHUNK_CAPS = ["preview.v1", "preview.lan.v1", "preview.chunk.v1"];
+  const IDENT = "i1.AAAAAAAAAAAAAAAAAAAAAA";
+  const KIB = 1024;
+  const first = (over: Record<string, unknown> = {}): PreviewOutcome =>
+    ({
+      ok: true,
+      kind: "text",
+      size: 1000 * KIB,
+      truncated: true,
+      text: "first\n",
+      bytes: 256 * KIB,
+      chunk: { offset: 0, ident: IDENT },
+      ...over,
+    }) as PreviewOutcome;
+  const next = (text: string, over: Record<string, unknown> = {}): PreviewOutcome =>
+    ({
+      ok: true,
+      kind: "text",
+      size: 1000 * KIB,
+      truncated: true,
+      text,
+      bytes: 256 * KIB,
+      chunk: { offset: 0, ident: IDENT },
+      ...over,
+    }) as PreviewOutcome;
+  const err = (error: string, status: number, extra: Record<string, unknown> = {}): PreviewDirOutcome =>
+    ({ ok: false, status, error, ...extra }) as PreviewDirOutcome;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function openStream(h: Harness): Promise<NonNullable<Extract<PreviewView, { phase: "text" }>["stream"]>> {
+    h.handle.open({ path: "/p/big.log" });
+    h.waits[0]!.resolve(first());
+    await flush();
+    const v = h.handle.view.value;
+    if (v.phase !== "text" || v.stream === undefined) throw new Error("expected a text stream");
+    return v.stream;
+  }
+
+  it("first request carries chunk:true with the cap, a truncated chunked reply builds the stream; dir requests never do", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    expect(h.calls[0]!.req.chunk).toBe(true);
+    expect(s).toMatchObject({
+      ident: IDENT,
+      total: 1000 * KIB,
+      cap: 8 * 1024 * KIB,
+      firstBytes: 256 * KIB,
+      loaded: 256 * KIB,
+      state: "more",
+      autoRetries: 0,
+    });
+    expect(s.chunks).toEqual(["first\n"]);
+    h.handle.dispose();
+    const d = makeHarness({ caps: CHUNK_CAPS });
+    d.handle.open({ path: "/p/dir", dir: true });
+    expect(d.calls[0]!.req.chunk).toBeUndefined();
+    d.handle.dispose();
+  });
+
+  it("no cap ⇒ no chunk param and no stream; untruncated or ident-less first chunk ⇒ no stream", async () => {
+    const h = makeHarness();
+    h.handle.open({ path: "/p/a" });
+    expect(h.calls[0]!.req.chunk).toBeUndefined();
+    h.waits[0]!.resolve(first());
+    await flush();
+    expect((h.handle.view.value as { stream?: unknown }).stream).toBeUndefined();
+    h.handle.dispose();
+
+    const g = makeHarness({ caps: CHUNK_CAPS });
+    g.handle.open({ path: "/p/a" });
+    g.waits[0]!.resolve(first({ chunk: undefined }));
+    await flush();
+    expect((g.handle.view.value as { stream?: unknown }).stream).toBeUndefined();
+    g.handle.open({ path: "/p/b" });
+    g.waits[1]!.resolve(first({ truncated: false }));
+    await flush();
+    expect((g.handle.view.value as { stream?: unknown }).stream).toBeUndefined();
+    g.handle.dispose();
+  });
+
+  it("a first chunk already at the cap starts in `cap`", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    h.handle.open({ path: "/p/a" });
+    h.waits[0]!.resolve(first({ bytes: 8 * 1024 * KIB, size: 20 * 1024 * KIB }));
+    await flush();
+    const v = h.handle.view.value as Extract<PreviewView, { phase: "text" }>;
+    expect(v.stream!.state).toBe("cap");
+    h.nav.loadMore();
+    expect(h.calls).toHaveLength(1);
+    h.handle.dispose();
+  });
+
+  it("loadMore: single-flight, request carries {offset, ident}, success appends and returns to more", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    h.nav.loadMore();
+    h.nav.loadMore(); // loading ⇒ ignored
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1]!.req.chunk).toEqual({ offset: 256 * KIB, ident: IDENT });
+    expect(s.state).toBe("loading");
+    h.waits[1]!.resolve(next("second\n"));
+    await flush();
+    expect(s.chunks).toEqual(["first\n", "second\n"]);
+    expect(s.loaded).toBe(512 * KIB);
+    expect(s.state).toBe("more");
+    h.handle.dispose();
+  });
+
+  it("300 ms min gap: an early loadMore coalesces into ONE timer that fires the request", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    h.nav.loadMore();
+    h.waits[1]!.resolve(next("b\n"));
+    await flush();
+    h.nav.loadMore();
+    h.nav.loadMore();
+    expect(h.calls).toHaveLength(2); // gap not elapsed
+    expect(s.state).toBe("more");
+    await vi.advanceTimersByTimeAsync(300);
+    expect(h.calls).toHaveLength(3);
+    expect(s.state).toBe("loading");
+    h.handle.dispose();
+  });
+
+  it("last chunk (untruncated, loaded === total) ⇒ done; terminal states ignore loadMore", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    s.loaded = 1000 * KIB - 10; // fast-forward: 10 bytes remain
+    h.nav.loadMore();
+    h.waits[1]!.resolve(next("tail", { truncated: false, bytes: 10 }));
+    await flush();
+    expect(s.state).toBe("done");
+    h.nav.loadMore();
+    expect(h.calls).toHaveLength(2);
+    h.handle.dispose();
+  });
+
+  it("reaching the UI cap stops with `cap`", async () => {
+    const g = makeHarness({ caps: CHUNK_CAPS });
+    g.handle.open({ path: "/p/a" });
+    g.waits[0]!.resolve(first({ size: 20 * 1024 * KIB }));
+    await flush();
+    const gs = (g.handle.view.value as Extract<PreviewView, { phase: "text" }>).stream!;
+    gs.loaded = 8 * 1024 * KIB - 5;
+    g.nav.loadMore();
+    g.waits[1]!.resolve(next("x", { size: 20 * 1024 * KIB }));
+    await flush();
+    expect(gs.state).toBe("cap");
+    g.handle.dispose();
+  });
+
+  it("409 E_PREVIEW_CHANGED ⇒ changed (no append); reopen() reloads the path without touching the stack", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    h.nav.loadMore();
+    h.waits[1]!.resolve(err("E_PREVIEW_CHANGED", 409));
+    await flush();
+    expect(s.state).toBe("changed");
+    expect(s.chunks).toEqual(["first\n"]);
+    expect(h.nav.stackDepth.value).toBe(0);
+    h.nav.reopen();
+    expect(h.handle.view.value).toEqual({ phase: "loading", path: "/p/big.log" });
+    expect(h.calls[2]!.req.chunk).toBe(true);
+    expect(h.nav.stackDepth.value).toBe(0);
+    h.handle.dispose();
+  });
+
+  it("429 ⇒ waiting ⇒ Retry-After retry; success resets autoRetries; three in a row ⇒ error(retryable); 重试 resets the streak", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    h.nav.loadMore();
+    h.waits[1]!.resolve(err("E_RATE", 429, { retryAfterS: 1 }));
+    await flush();
+    expect(s.state).toBe("waiting");
+    expect(s.autoRetries).toBe(1);
+    h.nav.loadMore(); // waiting ⇒ no request
+    await vi.advanceTimersByTimeAsync(900);
+    expect(h.calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.calls).toHaveLength(3);
+    expect(s.state).toBe("loading");
+    h.waits[2]!.resolve(err("E_RATE", 429, { retryAfterS: 1 }));
+    await flush();
+    expect(s.autoRetries).toBe(2);
+    expect(s.state).toBe("waiting");
+    await vi.advanceTimersByTimeAsync(1000);
+    h.waits[3]!.resolve(next("ok\n"));
+    await flush();
+    expect(s.state).toBe("more");
+    expect(s.autoRetries).toBe(0);
+    expect(s.chunks).toEqual(["first\n", "ok\n"]);
+    // three more 429s in a row: waiting, waiting, waiting, then error on the next
+    await vi.advanceTimersByTimeAsync(300);
+    h.nav.loadMore();
+    let idx = 4;
+    for (let i = 0; i < 3; i++) {
+      expect(s.state).toBe("loading");
+      h.waits[idx++]!.resolve(err("E_BUSY", 503, { retryAfterS: 1 }));
+      await flush();
+      expect(s.state).toBe("waiting");
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    h.waits[idx++]!.resolve(err("E_BUSY", 503, { retryAfterS: 1 }));
+    await flush();
+    expect(s.state).toBe("error");
+    expect(s.retryable).toBe(true);
+    h.nav.loadMore(); // manual 重试 from a retryable error
+    expect(s.state).toBe("loading");
+    expect(s.autoRetries).toBe(0);
+    h.handle.dispose();
+  });
+
+  it("non-retryable errors (403/E_BAD_RESPONSE) stay error without a retry path", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    h.nav.loadMore();
+    h.waits[1]!.resolve(err("E_BAD_RESPONSE", 0));
+    await flush();
+    expect(s.state).toBe("error");
+    expect(s.retryable).toBe(false);
+    h.nav.loadMore();
+    expect(h.calls).toHaveLength(2);
+    h.handle.dispose();
+  });
+
+  it("E_SESSION_CHANGED on a continuation closes the preview", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    await openStream(h);
+    h.nav.loadMore();
+    h.waits[1]!.resolve(err("E_SESSION_CHANGED", 409));
+    await flush();
+    expect(h.handle.view.value.phase).toBe("closed");
+    h.handle.dispose();
+  });
+
+  it("close / navigate / open / scope change abort the continuation and drop its late outcome", async () => {
+    for (const how of ["close", "open", "navigate", "scope"] as const) {
+      const h = makeHarness({ caps: CHUNK_CAPS });
+      const s = await openStream(h);
+      h.nav.loadMore();
+      const signal = h.calls[1]!.opts.signal;
+      if (how === "close") h.handle.close();
+      else if (how === "open") h.handle.open({ path: "/p/other" });
+      else if (how === "navigate") h.nav.navigate({ path: "/p/other" });
+      else
+        h.state.value = makeState({
+          caps: CHUNK_CAPS,
+          session: { sessionId: "s2", sessionFile: "/p/s.jsonl", cwd: "/p" },
+        }).value;
+      await flush();
+      expect(signal.aborted, how).toBe(true);
+      h.waits[1]!.resolve(next("late\n"));
+      await flush();
+      expect(s.chunks, how).toEqual(["first\n"]);
+      h.handle.dispose();
+    }
+  });
+
+  it("back() after a navigate: the stream is demoted to the first chunk and can keep loading", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    const s = await openStream(h);
+    h.nav.loadMore();
+    h.waits[1]!.resolve(next("second\n"));
+    await flush();
+    expect(s.chunks).toHaveLength(2);
+    h.nav.navigate({ path: "/p/other" });
+    h.waits[2]!.resolve(TEXT_OK);
+    await flush();
+    expect(s.chunks).toEqual(["first\n"]);
+    expect(s.loaded).toBe(256 * KIB);
+    expect(s.state).toBe("more");
+    h.nav.back();
+    const v = h.handle.view.value as Extract<PreviewView, { phase: "text" }>;
+    expect(v.stream).toBe(s);
+    await new Promise((r) => setTimeout(r, 310));
+    h.nav.loadMore();
+    expect(h.calls[3]!.req).toMatchObject({ path: "/p/big.log", chunk: { offset: 256 * KIB, ident: IDENT } });
+    h.handle.dispose();
+  });
+
+  it("a coarse pointer gets the 4 MiB cap", async () => {
+    const h = makeHarness({ caps: CHUNK_CAPS });
+    h.coarse.value = true;
+    const s = await openStream(h);
+    expect(s.cap).toBe(4 * 1024 * KIB);
+    h.handle.dispose();
   });
 });

@@ -230,3 +230,29 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     expect(fleet?.detail).toMatch(/tree \.run is empty/);
   });
 });
+
+describe("check.run — chunked-preview checks (chunked-plan §6.4/§6.5)", () => {
+  it("both new checks are part of the module and apply to every page (no .detail-body needed)", async () => {
+    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
+    const ctx = fakeCtx({ bodyHtml: `<div class="app"></div>`, scenario: "states" });
+    const outcomes = await check.run(ctx);
+    const byName = new Map(outcomes.map((o) => [o.name, o]));
+    expect(byName.get("ui-no-content-visibility-rule")?.ok).toBe(true);
+    // happy-dom has no layout engine ⇒ informational skip, never a false failure
+    expect(byName.get("preview-seg-render-parity")).toEqual({
+      name: "preview-seg-render-parity",
+      ok: true,
+      detail: "skipped (no layout engine)",
+    });
+  });
+
+  it("ui-no-content-visibility-rule fails when any stylesheet rule declares it (incl. nested @media)", async () => {
+    const ctx = fakeCtx({
+      bodyHtml: `<style>@media (min-width: 1px) { .x { content-visibility: auto; } }</style><div class="app"></div>`,
+    });
+    const outcomes = await check.run(ctx);
+    const o = outcomes.find((x) => x.name === "ui-no-content-visibility-rule");
+    expect(o?.ok).toBe(false);
+    expect(o?.detail).toContain("content-visibility");
+  });
+});

@@ -229,6 +229,20 @@ describe("logic/previewStream.js createMarkdownSegmenter (chunked-plan §4.3.3)"
     expect(out.flatMap(segNodes)).toEqual(whole);
   });
 
+  it("r3: CRLF markdown is unaffected by the source CRLF rule (normalized first ⇒ same nodes as LF)", () => {
+    const lf = "# t\n\npara one\n\n\n- a\n- b\n\ntail\n";
+    const crlf = lf.replace(/\n/g, "\r\n");
+    const run = (text: string): unknown[] => {
+      const seg = createMarkdownSegmenter();
+      const out: MdSeg[] = [];
+      for (let i = 0; i < text.length; i += 7) out.push(...(seg.push(text.slice(i, i + 7)) as MdSeg[]));
+      out.push(...(seg.flush("eof") as MdSeg[]));
+      return out.flatMap(segNodes);
+    };
+    expect(run(crlf)).toEqual(run(lf));
+    expect(run(crlf)).toEqual(parseMarkdown(lf));
+  });
+
   it("default constants match the plan (D8 / §4.3.3)", () => {
     expect(PREVIEW_MD_PENDING_MAX).toBe(512 * 1024);
     expect(PREVIEW_MD_STREAM_NODE_MAX).toBe(160_000);
@@ -245,11 +259,13 @@ function genSourceText(r: () => number): string {
   const n = 4 + Math.floor(r() * 40);
   for (let i = 0; i < n; i++) {
     const k = r();
-    if (k < 0.3)
+    if (k < 0.2)
       pieces.push("\n".repeat(1 + Math.floor(r() * 4))); // blank runs
-    else if (k < 0.45)
+    else if (k < 0.32)
       pieces.push(`line ${i}\r\n`); // CRLF
-    else if (k < 0.5)
+    else if (k < 0.42)
+      pieces.push("\r\n".repeat(1 + Math.floor(r() * 3))); // empty CRLF lines (r3)
+    else if (k < 0.47)
       pieces.push("\r"); // lone CR
     else if (k < 0.55)
       pieces.push(`${"long".repeat(50 + Math.floor(r() * 100))}\n`); // long line
@@ -280,6 +296,11 @@ function assertSourceInvariants(text: string, segs: SrcSeg[], forceEnabled: bool
     if (s.final !== true) {
       expect(s.text).not.toBe(""); // (a)
       expect(s.text.endsWith("\n")).toBe(false);
+      if (s.forced !== true) {
+        // (e) r3: the last line minus trailing CRs is non-empty (never end on an empty CRLF line)
+        const last = s.text.slice(s.text.lastIndexOf("\n") + 1).replace(/\r+$/, "");
+        expect(last, JSON.stringify(s.text)).not.toBe("");
+      }
     }
     // (c)
     expect(s.sep === "\n").toBe(s.forced !== true && s.final !== true);
@@ -355,10 +376,37 @@ describe("logic/previewStream.js createSourceSegmenter (chunked-plan §4.3.4, r2
     expect(seg2.flush("stop")).toEqual([{ id: 1, text: "\n\n\n", sep: "", final: true }]);
   });
 
-  it("CRLF is raw: 'a\\r\\n\\r\\nb' cuts to 'a\\r\\n\\r' | 'b' (chars identical to one <pre>)", () => {
+  it("r3 CRLF: 'a\\r\\n\\r\\nb' never ends a segment on the empty CRLF line ⇒ 'a\\r' | '\\r\\nb'", () => {
     const seg = createSourceSegmenter();
-    expect(seg.push("a\r\n\r\nb")).toEqual([{ id: 1, text: "a\r\n\r", sep: "\n" }]);
-    expect(seg.flush("eof")).toEqual([{ id: 2, text: "b", sep: "", final: true }]);
+    expect(seg.push("a\r\n\r\nb")).toEqual([{ id: 1, text: "a\r", sep: "\n" }]);
+    expect(seg.flush("eof")).toEqual([{ id: 2, text: "\r\nb", sep: "", final: true }]);
+  });
+
+  it("r3 CRLF: several consecutive empty CRLF lines stay inside the NEXT segment", () => {
+    const seg = createSourceSegmenter();
+    expect(seg.push("a\r\n\r\n\r\nb\r\n")).toEqual([{ id: 1, text: "a\r\n\r\n\r\nb\r", sep: "\n" }]);
+    const seg2 = createSourceSegmenter();
+    expect(seg2.push("a\r\n\r\n\r\n")).toEqual([{ id: 1, text: "a\r", sep: "\n" }]);
+    expect(seg2.flush("eof")).toEqual([{ id: 2, text: "\r\n\r\n", sep: "", final: true }]);
+  });
+
+  it("r3 mixed LF/CRLF and lone CR: cuts only after a line with real content", () => {
+    const seg = createSourceSegmenter();
+    expect(seg.push("a\n\r\nb\r\n\nc\n")).toEqual([{ id: 1, text: "a\n\r\nb\r\n\nc", sep: "\n" }]);
+    const seg2 = createSourceSegmenter();
+    // a lone CR line is "empty" too: 'x\n\r\n' cannot cut after the \r line
+    expect(seg2.push("x\n\r\n")).toEqual([{ id: 1, text: "x", sep: "\n" }]);
+    expect(seg2.push("\rq\n")).toEqual([{ id: 2, text: "\r\n\rq", sep: "\n" }]);
+    const seg3 = createSourceSegmenter();
+    expect(seg3.push("\r\n")).toEqual([]); // nothing but an empty CRLF line: HELD
+    expect(seg3.push("\r\r\n")).toEqual([]);
+    expect(seg3.flush("eof")).toEqual([{ id: 1, text: "\r\n\r\r\n", sep: "", final: true }]);
+  });
+
+  it("r3 a pending of only CR/LF is never force-cut", () => {
+    const seg = createSourceSegmenter({ forceChars: 8 });
+    expect(seg.push("\r\n".repeat(20))).toEqual([]);
+    expect(seg.pendingLength).toBe(40);
   });
 
   it("force cut on one long newline-free line: sep '' and copy conservation", () => {

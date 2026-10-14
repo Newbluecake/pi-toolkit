@@ -37,8 +37,10 @@ export const STREAM_RETRY_DEFAULT_S = 1;
  * `pre-wrap` element whose boundary REPLACES exactly one consumed "\n", so segmented
  * rendering is line-identical to a single `<pre>` IFF every non-final segment is non-empty
  * and does NOT end with "\n" (a trailing newline inside a block is swallowed; a leading one
- * renders as a stable blank line). Cut point `p`: the LAST "\n" in pending with `p > 0` and
- * `pending[p-1] !== "\n"`. `pending` is the RAW text (never normalized — copy fidelity).
+ * renders as a stable blank line). Cut point `p`: the LAST "\n" in pending with `p > 0` whose
+ * segment's last line, minus its trailing "\r"s, is non-empty (r3: "\r\n" is one terminator —
+ * an empty CRLF line must never end a segment, Blink swallows it). `pending` is the RAW text
+ * (never normalized — copy fidelity).
  *
  * Segment shape: { id, text, sep, forced?, final? } — the consumed text is
  * `segments.map(s => s.text + s.sep).join("")`, STRICTLY equal to the input (forced cuts
@@ -55,7 +57,7 @@ export const STREAM_RETRY_DEFAULT_S = 1;
  * `final` segment (both modes identical — the source view has always shown a partial last
  * line; a `final` segment MAY end with "\n" or consist of newlines only, matching a single
  * `<pre>`'s tail behavior). A pending that is all newlines (no legal cut) is HELD until
- * more text or a flush arrives; the force cut requires at least one non-newline char, so an
+ * more text or a flush arrives; the force cut requires at least one non-CR/LF char, so an
  * all-newline pending is never force-cut (its length stays bounded by the stream cap).
  * @param {{ forceChars?: number }} [opts]
  */
@@ -66,16 +68,29 @@ export function createSourceSegmenter(opts) {
       : SOURCE_FORCE_CHARS;
   let pending = "";
   let nextId = 1;
+  /**
+   * r3 (CRLF): `\r\n` is ONE line terminator — a legal cut `\n` at `p` needs the segment's LAST
+   * line, with its trailing `\r`s removed, to be non-empty: Blink swallows a block-final line
+   * that is empty-but-for-CR (it renders no height), so cutting after an empty CRLF line would
+   * lose that blank line vs. a single `<pre>`.
+   * @param {number} p index of a "\n" in pending, p > 0
+   */
+  function legalCut(p) {
+    let q = p - 1;
+    while (q >= 0 && pending[q] === "\r") q--;
+    return q >= 0 && pending[q] !== "\n";
+  }
+
   /** @returns {SourceSegment[]} */
   function take() {
     let p = pending.lastIndexOf("\n");
-    while (p > 0 && pending[p - 1] === "\n") p = pending.lastIndexOf("\n", p - 1); // skip \n runs
+    while (p > 0 && !legalCut(p)) p = pending.lastIndexOf("\n", p - 1); // skip illegal cuts
     if (p > 0) {
       const seg = /** @type {SourceSegment} */ { id: nextId++, text: pending.slice(0, p), sep: "\n" };
       pending = pending.slice(p + 1); // a remainder starting with "\n" ⇒ next block opens blank
       return [seg];
     }
-    if (pending.length > forceChars && /[^\n]/.test(pending)) {
+    if (pending.length > forceChars && /[^\r\n]/.test(pending)) {
       // No legal cut but a non-newline char exists ⇒ pending is `\n*` + one long newline-free
       // run (its last char is never "\n"). Force-cut the WHOLE pending; `sep:""` records that
       // no newline was consumed (the line visually wraps at the boundary — accepted, §4.3.4).

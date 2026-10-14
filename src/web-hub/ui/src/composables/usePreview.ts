@@ -45,19 +45,21 @@
  *   click to a listing. A real non-regular file answers 415 both times and the error phase
  *   surfaces as before (one wasted round trip, never a wrong view).
  */
-import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
+import { computed, onScopeDispose, ref, shallowReactive, watch, type Ref } from "vue";
 import {
   classifyPreviewError,
   clientImageBudget,
+  clientTextStreamCap,
   parentPreviewPath,
   previewScopeOf,
   scopeKeyOf,
 } from "@logic/preview.js";
 import { usePreviewProbe, type PreviewProbeHandle } from "./usePreviewProbe.js";
 import { createPreviewTree, type PreviewTreeStore } from "./usePreviewTree.js";
+import { classifyChunkOutcome, nextChunkAction } from "@logic/previewStream.js";
 import type { PreviewDirListing } from "@protocol/preview.js";
 import type { PreviewDirOutcome, PreviewTransport } from "../transport/types.js";
-import type { HubState, PreviewHandle, PreviewPathScope, PreviewView } from "../types.js";
+import type { HubState, PreviewHandle, PreviewPathScope, PreviewTextStream, PreviewView } from "../types.js";
 
 /** The structural slice of the DOM `FileReader` this composable needs (injectable for tests —
  * node has no `FileReader`; the real wiring (PV6, App.vue) simply doesn't pass
@@ -136,6 +138,12 @@ export interface PreviewHandleDir {
   back(): void;
   /** A3: navigate to `parentPreviewPath(view.path)` (a no-op at one-segment paths). */
   up(): void;
+  /** chunked-plan §4.2: idempotent "the next segment is needed" signal (single-flight,
+   * ≥300 ms spaced, coalesced; from a retryable `error` it is the manual 重试). */
+  loadMore(): void;
+  /** chunked-plan §4.2: reload the current path WITHOUT touching the navigation stack
+   * (the `changed` state's 重新打开). */
+  reopen(): void;
   /** A3: history stack depth (drives the 返回 button's disabled state). Reactive. */
   readonly stackDepth: Readonly<Ref<number>>;
   /**
@@ -206,12 +214,44 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   const stack: Array<{ readonly view: PreviewViewDir; readonly focus: Element | null }> = [];
   const stackDepth = ref(0);
 
+  // chunked-plan §4.2: the continuation stream's own cancellation domain (a SEPARATE
+  // controller/seq from the main load, so a late continuation can never write into a view it
+  // no longer belongs to) + the coalescing / Retry-After timer.
+  let streamSeq = 0;
+  let streamCtl: AbortController | null = null;
+  let streamTimer: ReturnType<typeof setTimeout> | null = null;
+  let streamLastEndedAt = Number.NEGATIVE_INFINITY;
+  let streamCtx: { readonly sc: PreviewPathScope; readonly path: string } | null = null;
+
+  /** Cancel whatever the stream has in flight; a loading/waiting stream returns to `more`
+   * (cancellation is never an error — §4.2 取消 row). */
+  function abortStream(): void {
+    streamSeq++;
+    if (streamCtl !== null) {
+      streamCtl.abort();
+      streamCtl = null;
+    }
+    if (streamTimer !== null) {
+      clearTimeout(streamTimer);
+      streamTimer = null;
+    }
+    const v = view.value;
+    if (
+      v.phase === "text" &&
+      v.stream !== undefined &&
+      (v.stream.state === "loading" || v.stream.state === "waiting")
+    ) {
+      v.stream.state = "more";
+    }
+  }
+
   function abortInFlight(): void {
     seq++;
     if (ctl !== null) {
       ctl.abort();
       ctl = null;
     }
+    abortStream();
   }
 
   // preview-tree: the inline-expansion store. Its fetchDir rides the SAME scope + transport
@@ -316,6 +356,142 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     return probeHandle?.kindOf !== undefined && probeHandle.kindOf(path) === "dir";
   }
 
+  /** §4.2 建流条件: scope carries `chunks`, the first chunk is truncated and echoed
+   * offset/ident (`outcome.chunk`), and its byte length is known. Anything else ⇒ legacy
+   * one-shot truncated display (no stream). */
+  function buildStream(
+    outcome: Extract<PreviewDirOutcome, { ok: true; kind: "text" }>,
+    sc: PreviewPathScope,
+    path: string,
+  ): PreviewTextStream | undefined {
+    if (sc.chunks !== true || outcome.truncated !== true) return undefined;
+    if (outcome.chunk === undefined || outcome.bytes === undefined) return undefined;
+    const cap = clientTextStreamCap({ coarse: opts.coarse.value });
+    const s = shallowReactive<PreviewTextStream>({
+      ident: outcome.chunk.ident,
+      total: outcome.size,
+      cap,
+      firstBytes: outcome.bytes,
+      chunks: [outcome.text],
+      loaded: outcome.bytes,
+      state: outcome.bytes >= cap ? "cap" : "more",
+      autoRetries: 0,
+    });
+    streamCtx = { sc, path };
+    streamLastEndedAt = Number.NEGATIVE_INFINITY;
+    return s;
+  }
+
+  function currentStream(): PreviewTextStream | undefined {
+    const v = view.value;
+    return v.phase === "text" ? v.stream : undefined;
+  }
+
+  function streamFetch(s: PreviewTextStream): void {
+    const transport = opts.preview;
+    const c = streamCtx;
+    if (transport === undefined || c === null) return;
+    s.state = "loading";
+    delete s.error;
+    delete s.retryable;
+    delete s.retryAt;
+    const mySeq = ++streamSeq;
+    const ac = new AbortController();
+    streamCtl = ac;
+    void transport
+      .fetch(
+        {
+          agentKey: c.sc.agentKey,
+          sessionId: c.sc.sessionId,
+          path: c.path,
+          chunk: { offset: s.loaded, ident: s.ident },
+        },
+        { signal: ac.signal, maxPixels: clientImageBudget({ coarse: opts.coarse.value }) },
+      )
+      .catch((): PreviewDirOutcome => ({ ok: false, status: 0, error: "E_NETWORK" }) as PreviewDirOutcome)
+      .then((out) => {
+        if (mySeq !== streamSeq || currentStream() !== s) return; // superseded — drop
+        if (streamCtl === ac) streamCtl = null;
+        streamLastEndedAt = Date.now();
+        const d = classifyChunkOutcome(s, out) as {
+          state?: PreviewTextStream["state"];
+          append?: { text: string; bytes: number };
+          loaded?: number;
+          autoRetries?: number;
+          retryAfterS?: number;
+          error?: string;
+          retryable?: boolean;
+          close?: true;
+          drop?: true;
+        };
+        if (d.drop === true) {
+          s.state = "more";
+          return;
+        }
+        if (d.close === true) {
+          close();
+          return;
+        }
+        if (d.append !== undefined) {
+          s.chunks = [...s.chunks, d.append.text];
+          s.loaded = d.loaded ?? s.loaded;
+        }
+        if (d.autoRetries !== undefined) s.autoRetries = d.autoRetries;
+        if (d.error !== undefined) s.error = d.error;
+        if (d.retryable !== undefined) s.retryable = d.retryable;
+        if (d.state === "waiting") {
+          const waitMs = (d.retryAfterS ?? 1) * 1000;
+          s.retryAt = Date.now() + waitMs;
+          s.state = "waiting";
+          streamTimer = setTimeout(() => {
+            streamTimer = null;
+            if (currentStream() === s && s.state === "waiting") streamFetch(s);
+          }, waitMs);
+          return;
+        }
+        s.state = d.state ?? "error";
+      });
+  }
+
+  function pumpStream(s: PreviewTextStream): void {
+    const act = nextChunkAction(s, Date.now(), streamLastEndedAt) as
+      { type: "load"; resetRetries?: boolean } | { type: "schedule"; delayMs: number } | { type: "none" };
+    if (act.type === "load") {
+      if (act.resetRetries === true) s.autoRetries = 0;
+      streamFetch(s);
+    } else if (act.type === "schedule" && streamTimer === null) {
+      streamTimer = setTimeout(() => {
+        streamTimer = null;
+        if (currentStream() === s) pumpStream(s);
+      }, act.delayMs);
+    }
+  }
+
+  function loadMore(): void {
+    const s = currentStream();
+    if (s !== undefined) pumpStream(s);
+  }
+
+  function reopen(): void {
+    if (lastPath === null) return;
+    load(lastPath, lastDir); // same path/dir-ness; the history stack is untouched
+  }
+
+  /** §4.2 入栈降级: a stack snapshot keeps only the first chunk (memory stays ≤ 64 × 256 KiB);
+   * back() resumes from there — the ident guarantees consistency. */
+  function demoteStream(v: PreviewViewDir): void {
+    if (v.phase !== "text" || v.stream === undefined) return;
+    abortStream();
+    const s = v.stream;
+    s.chunks = s.chunks.slice(0, 1);
+    s.loaded = s.firstBytes;
+    s.state = "more";
+    s.autoRetries = 0;
+    delete s.error;
+    delete s.retryable;
+    delete s.retryAt;
+  }
+
   /**
    * The single settle path for EVERY fetch outcome — exhaustive over the P3 union
    * (`PreviewDirOutcome`: text / image / dir) plus the two interrupt classes (seq drop and
@@ -357,15 +533,19 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
       return;
     }
     switch (outcome.kind) {
-      case "text":
+      case "text": {
+        const stream = buildStream(outcome, ctx.sc, path);
         view.value = {
           phase: "text",
           path,
           text: outcome.text,
           truncated: outcome.truncated,
           size: outcome.size,
+          ...(outcome.bytes !== undefined ? { bytes: outcome.bytes } : {}),
+          ...(stream !== undefined ? { stream } : {}),
         };
         return;
+      }
       case "dir":
         view.value = { phase: "dir", path, listing: outcome.listing };
         return;
@@ -417,7 +597,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
           agentKey: sc.agentKey,
           sessionId: sc.sessionId,
           path,
-          ...(wantDir ? { dir: true } : {}),
+          ...(wantDir ? { dir: true } : sc.chunks === true ? { chunk: true as const } : {}),
         },
         { signal: ac.signal, maxPixels },
       )
@@ -444,6 +624,7 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     if (scope.value === null || opts.preview === undefined) return; // no scope ⇒ nothing clickable
     const cur = view.value;
     if (cur.phase === "text" || cur.phase === "image" || cur.phase === "dir") {
+      demoteStream(cur);
       if (stack.length >= PREVIEW_NAV_STACK_MAX) stack.shift(); // FIFO: oldest falls out
       stack.push({ view: cur, focus: captureFocus() });
       stackDepth.value = stack.length;
@@ -463,6 +644,11 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     if ("path" in v) {
       lastPath = v.path;
       lastDir = v.phase === "dir" ? true : undefined;
+    }
+    if (v.phase === "text" && v.stream !== undefined && scope.value !== null) {
+      // the demoted stream resumes under THIS view's context (the closure holds one at a time)
+      streamCtx = { sc: scope.value, path: v.path };
+      streamLastEndedAt = Number.NEGATIVE_INFINITY;
     }
     // A3/焦点: back() re-focuses the element that navigated away from the restored view when
     // it still exists; otherwise focus simply stays on the invoking control (never lost to
@@ -505,6 +691,8 @@ export function usePreview(opts: UsePreviewOptions): PreviewHandle {
     navigate,
     back,
     up,
+    loadMore,
+    reopen,
     stackDepth,
     tree,
   };

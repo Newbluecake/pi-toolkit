@@ -937,3 +937,128 @@ describe("PreviewHost.vue — 不可预览类型的下载 (preview-download, dow
     expect(downloadCalls).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// chunked-plan §4.7/§4.8/D11 (P2b)
+// ---------------------------------------------------------------------------------------
+describe("PreviewHost.vue — chunked preview (P2b)", () => {
+  it("truncated note regression: shows the DISPLAYED bytes, not the file size (2.3 MiB file, 256 KiB shown)", async () => {
+    const { handle, view } = makeHandle();
+    mountHost({ handle, plaintext: false });
+    view.value = {
+      phase: "text",
+      path: "/p/big.log",
+      size: Math.round(2.3 * 1024 * 1024),
+      bytes: 256 * 1024,
+      truncated: true,
+      text: "x",
+    };
+    await tick();
+    const note = document.querySelector(".preview-truncated")!.textContent!;
+    expect(note).toContain("first 256 KiB of 2.3 MiB");
+    expect(note).not.toContain("first 2.3 MiB");
+  });
+
+  it("falls back to the UTF-8 length of the text when the view carries no bytes", async () => {
+    const { handle, view } = makeHandle();
+    mountHost({ handle, plaintext: false });
+    view.value = { phase: "text", path: "/p/a.log", size: 4096, truncated: true, text: "héllo" }; // 6 bytes
+    await tick();
+    expect(document.querySelector(".preview-truncated")!.textContent).toContain("first 6 B of 4.0 KiB");
+  });
+
+  it("text download with the preview.download.v1 cap saves the COMPLETE file via download=1 (D11)", async () => {
+    const { handle, view } = makeHandle();
+    const full = new Blob(["whole file"], { type: "application/octet-stream" });
+    const { hub, calls, downloadCalls } = hubWithFetch(
+      async () => ({ ok: true, kind: "text", size: 1, truncated: false, text: "x" }),
+      {
+        caps: ["preview.v1", "preview.download.v1"],
+        download: async () => ({ ok: true, blob: full }),
+      },
+    );
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "text", path: "/p/big.log", size: 9_000_000, truncated: true, text: "part" };
+    await tick();
+    const s = stubSave();
+    document.querySelector<HTMLButtonElement>(".preview-download")!.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    expect(downloadCalls).toEqual([{ agentKey: "A", sessionId: "s1", path: "/p/big.log" }]);
+    expect(calls).toEqual([]); // no truncated re-fetch
+    expect(s.blobs[0]).toBe(full);
+    expect(s.saved[0]!.download).toBe("big.log");
+  });
+
+  it("without the download cap the text download keeps the legacy fetch path", async () => {
+    const { handle, view } = makeHandle();
+    const { hub, calls, downloadCalls } = hubWithFetch(
+      async () => ({ ok: true, kind: "text", size: 4, truncated: false, text: "body" }),
+      { download: async () => ({ ok: true, blob: new Blob(["x"]) }) }, // method present, cap absent
+    );
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "text", path: "/p/a.ts", size: 4, truncated: false, text: "body" };
+    await tick();
+    const s = stubSave();
+    document.querySelector<HTMLButtonElement>(".preview-download")!.click();
+    await vi.waitFor(() => expect(s.saved).toHaveLength(1));
+    expect(calls).toHaveLength(1);
+    expect(downloadCalls).toEqual([]);
+  });
+
+  it("a failed full download surfaces the download error line", async () => {
+    const { handle, view } = makeHandle();
+    const { hub } = hubWithFetch(async () => ({ ok: true, kind: "text", size: 1, truncated: false, text: "x" }), {
+      caps: ["preview.v1", "preview.download.v1"],
+      download: async () => ({ ok: false, status: 500, error: "E_X" }),
+    });
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "text", path: "/p/a.log", size: 9, truncated: true, text: "x" };
+    await tick();
+    stubSave();
+    document.querySelector<HTMLButtonElement>(".preview-download")!.click();
+    await vi.waitFor(() => expect(document.querySelector(".preview-download-error")).not.toBeNull());
+  });
+
+  it("stream wiring: load-more / reopen / retry-stream reach the handle's navigation face", async () => {
+    const view = ref<PreviewView>({ phase: "closed" }) as Ref<PreviewView>;
+    const loadMore = vi.fn();
+    const reopen = vi.fn();
+    const handle = {
+      view,
+      scope: ref(null),
+      open: vi.fn(),
+      close: vi.fn(),
+      retry: vi.fn(),
+      dispose: vi.fn(),
+      navigate: vi.fn(),
+      back: vi.fn(),
+      up: vi.fn(),
+      loadMore,
+      reopen,
+      stackDepth: ref(0),
+    } as unknown as PreviewHandle;
+    mountHost({ handle, plaintext: false });
+    const stream = {
+      ident: "i1.AAAAAAAAAAAAAAAAAAAAAA",
+      total: 900_000,
+      cap: 8 * 1024 * 1024,
+      firstBytes: 256 * 1024,
+      chunks: ["a\nb\n"],
+      loaded: 256 * 1024,
+      state: "changed",
+      autoRetries: 0,
+    };
+    view.value = {
+      phase: "text",
+      path: "/p/x.log",
+      size: 900_000,
+      truncated: true,
+      text: "a\nb\n",
+      stream,
+    } as PreviewView;
+    await tick();
+    expect(document.querySelector(".preview-stream")).not.toBeNull();
+    document.querySelector<HTMLButtonElement>(".preview-stream-btn")!.click(); // 重新打开
+    expect(reopen).toHaveBeenCalledTimes(1);
+  });
+});

@@ -423,6 +423,64 @@ code.md-code.path-ref {
   justify-content: flex-end;
 }
 
+/* -------------------------------------------- chunked stream (chunked-plan §4.4–§4.6, P2b) */
+/* Segments are plain blocks that INHERIT `white-space`/font from the scroll container: no
+ * margin/padding/white-space of their own (a block boundary stands in for exactly one "\n",
+ * §4.3.4), and NEVER content-visibility (#11 Aw Snap; source-scan pins it). */
+.preview-seg {
+  display: block;
+}
+
+.preview-seg-src {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The sentinel must never become a scroll-anchoring node (it would pin the view to the
+ * bottom and chain-load forever). */
+.preview-stream-sentinel {
+  height: 1px;
+  overflow-anchor: none;
+}
+
+/* Progress/error/limit line lives in the actions row, OUTSIDE the scroll area. */
+.preview-stream-status {
+  flex: 1;
+  min-width: 0;
+  margin-right: auto;
+  overflow: hidden;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-stream-btn {
+  flex: none;
+  margin-right: var(--sp-2);
+  padding: 3px var(--sp-2);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.preview-stream-btn:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.preview-stream-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ------------------------------------------------------------ markdown (dir-plan v3.1 §4.1, PM) */
 /* Rendered-md body: same scroll container contract as .preview-text-body, but normal prose
  * typography — the `md` companion class (see PreviewText.vue) pulls the shared transcript

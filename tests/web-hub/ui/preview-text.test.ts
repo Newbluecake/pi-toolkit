@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { shallowReactive } from "vue";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PreviewTextStream } from "../../../src/web-hub/ui/src/types.js";
 import PreviewText from "../../../src/web-hub/ui/src/components/preview/PreviewText.vue";
 
 /**
@@ -24,10 +26,15 @@ describe("PreviewText.vue", () => {
   });
 
   it("shows the truncated badge + note only when truncated", () => {
-    const wrapper = mount(PreviewText, { props: { text: "abc", truncated: true, sizeLabel: "256.0 KiB" } });
+    const wrapper = mount(PreviewText, {
+      props: { text: "abc", truncated: true, loadedLabel: "256.0 KiB", totalLabel: "2.3 MiB" },
+    });
     const note = wrapper.get(".preview-truncated");
     expect(note.text()).toContain("Truncated");
     expect(note.text()).toContain("256.0 KiB");
+    expect(note.text()).toContain("2.3 MiB");
+    // bug fix: "first {loaded} of {total}" — never the total as the shown amount
+    expect(note.text()).toContain("first 256.0 KiB of 2.3 MiB");
   });
 
   it("the copy button copies the displayed text (never the path)", async () => {
@@ -152,5 +159,222 @@ describe("PreviewText.vue — markdown (dir-plan §4.1, PM package)", () => {
     expect(wrapper.find(".preview-md").exists()).toBe(true);
     expect(wrapper.find(".preview-md-note").exists()).toBe(false);
     expect(toggle(wrapper, 0).attributes("disabled")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// chunked-plan §4.4–§4.6 / §6.3 (P2b): stream mode
+// ---------------------------------------------------------------------------------------
+describe("PreviewText.vue — chunked stream mode", () => {
+  class FakeIO {
+    static instances: FakeIO[] = [];
+    readonly observed: Element[] = [];
+    disconnected = false;
+    constructor(
+      readonly cb: (entries: Array<{ isIntersecting: boolean }>) => void,
+      readonly options: IntersectionObserverInit,
+    ) {
+      FakeIO.instances.push(this);
+    }
+    observe(el: Element): void {
+      this.observed.push(el);
+    }
+    disconnect(): void {
+      this.disconnected = true;
+    }
+    fire(isIntersecting: boolean): void {
+      this.cb([{ isIntersecting }]);
+    }
+  }
+  const liveIO = (): FakeIO => FakeIO.instances.filter((i) => !i.disconnected).at(-1)!;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    FakeIO.instances = [];
+  });
+
+  function mkStream(over: Partial<PreviewTextStream> = {}): PreviewTextStream {
+    return shallowReactive<PreviewTextStream>({
+      ident: "i1.AAAAAAAAAAAAAAAAAAAAAA",
+      total: 3 * 1024 * 1024,
+      cap: 8 * 1024 * 1024,
+      firstBytes: 256 * 1024,
+      chunks: ["a\nb\n"],
+      loaded: 256 * 1024,
+      state: "more",
+      autoRetries: 0,
+      ...over,
+    });
+  }
+  const mountStream = (stream: PreviewTextStream, extra: Record<string, unknown> = {}) =>
+    mount(PreviewText, {
+      props: { text: stream.chunks[0]!, truncated: true, stream, filename: "x.log", path: "/p/x.log", ...extra },
+      attachTo: document.body,
+    });
+
+  it("source view: segments are .preview-seg divs in a .preview-stream container with a sentinel; no top truncated note", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIO);
+    const stream = mkStream();
+    const w = mountStream(stream);
+    expect(w.find(".preview-truncated").exists()).toBe(false);
+    expect(w.find("pre").exists()).toBe(false);
+    const body = w.get(".preview-text-body.preview-stream");
+    expect(body.attributes("tabindex")).toBe("0");
+    expect(body.findAll(".preview-seg").map((e) => e.text())).toEqual(["a\nb"]); // the trailing "\n" is the consumed separator
+    const sentinel = body.get(".preview-stream-sentinel");
+    expect(sentinel.attributes("aria-hidden")).toBe("true");
+    expect(sentinel.element.parentElement).toBe(body.element);
+    w.unmount();
+  });
+
+  it("appending a chunk keeps the OLD segment elements (same node identity)", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIO);
+    const stream = mkStream({ chunks: ["l1\nl2\nl3"] });
+    const w = mountStream(stream);
+    const before = w.findAll(".preview-seg").map((e) => e.element);
+    expect(before.map((e) => e.textContent)).toEqual(["l1\nl2"]);
+    stream.chunks = [...stream.chunks, "\nl4\nl5"];
+    await w.vm.$nextTick();
+    const after = w.findAll(".preview-seg").map((e) => e.element);
+    expect(after).toHaveLength(2);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]!.textContent).toBe("l3\nl4");
+    w.unmount();
+  });
+
+  it("done flushes the pending tail; status text disappears; observer disconnects; copy = consumed source", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIO);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+    const stream = mkStream({ chunks: ["a\n\nb\nc"] });
+    const w = mountStream(stream);
+    expect(w.find(".preview-stream-status").exists()).toBe(true);
+    stream.chunks = [...stream.chunks, "\nd\n"];
+    stream.state = "done";
+    await w.vm.$nextTick();
+    expect(w.find(".preview-stream-status").exists()).toBe(false);
+    expect(liveIO()).toBeUndefined();
+    await w.get(".preview-text-actions button:last-of-type").trigger("click");
+    await flush();
+    expect(writeText).toHaveBeenCalledWith("a\n\nb\nc\nd\n");
+    w.unmount();
+  });
+
+  it("IO: observes the sentinel under the scroll container with an 800px bottom margin; intersecting ⇒ load-more", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIO);
+    const w = mountStream(mkStream());
+    const io = liveIO();
+    expect(io.options.rootMargin).toBe("0px 0px 800px 0px");
+    expect(io.options.root).toBe(w.get(".preview-stream").element);
+    expect(io.observed[0]).toBe(w.get(".preview-stream-sentinel").element);
+    io.fire(false);
+    expect(w.emitted("load-more")).toBeUndefined();
+    io.fire(true);
+    expect(w.emitted("load-more")).toHaveLength(1);
+    w.unmount();
+    expect(io.disconnected).toBe(true);
+  });
+
+  it("returning to `more` while the sentinel is still visible re-emits load-more", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIO);
+    const stream = mkStream();
+    const w = mountStream(stream);
+    liveIO().fire(true);
+    expect(w.emitted("load-more")).toHaveLength(1);
+    stream.state = "loading";
+    await w.vm.$nextTick();
+    stream.state = "more";
+    await w.vm.$nextTick();
+    expect(w.emitted("load-more")).toHaveLength(2);
+    w.unmount();
+  });
+
+  it("works without IntersectionObserver; the 加载更多 button is always there and disabled while loading", async () => {
+    const stream = mkStream();
+    const w = mountStream(stream);
+    const btn = () => w.get(".preview-stream-btn");
+    expect(btn().text()).toBe("Load more");
+    expect(btn().attributes("disabled")).toBeUndefined();
+    await btn().trigger("click");
+    expect(w.emitted("load-more")).toHaveLength(1);
+    stream.state = "loading";
+    await w.vm.$nextTick();
+    expect(btn().attributes("disabled")).toBeDefined();
+    w.unmount();
+  });
+
+  it("status line per state (progress / loading / waiting / cap / changed / error) + the right action buttons", async () => {
+    const stream = mkStream();
+    const w = mountStream(stream);
+    const status = () => w.find(".preview-stream-status").text();
+    expect(status()).toBe("Loaded 256 KiB / 3.0 MiB");
+    stream.state = "loading";
+    await w.vm.$nextTick();
+    expect(status()).toBe("Loading next part…");
+    stream.state = "waiting";
+    stream.retryAt = Date.now() + 2000;
+    await w.vm.$nextTick();
+    expect(status()).toMatch(/^Server busy, retrying in [12]s…$/);
+    stream.state = "cap";
+    await w.vm.$nextTick();
+    expect(status()).toContain("preview limit reached");
+    expect(w.find(".preview-stream-btn").exists()).toBe(false);
+    stream.state = "changed";
+    await w.vm.$nextTick();
+    expect(status()).toContain("changed during preview");
+    await w.get(".preview-stream-btn").trigger("click");
+    expect(w.emitted("reopen")).toHaveLength(1);
+    stream.state = "error";
+    stream.error = "E_DEADLINE";
+    stream.retryable = true;
+    await w.vm.$nextTick();
+    expect(status()).toContain("E_DEADLINE");
+    await w.get(".preview-stream-btn").trigger("click");
+    expect(w.emitted("retry-stream")).toHaveLength(1);
+    stream.retryable = false;
+    await w.vm.$nextTick();
+    expect(w.find(".preview-stream-btn").exists()).toBe(false);
+    w.unmount();
+  });
+
+  it("markdown: rendered view segments per top-level block; over-budget block degrades alone; toggle re-observes", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIO);
+    const stream = mkStream({ chunks: ["# One\n\npara\n\n```js\nx\n\ny\n```\n\ntail"] });
+    const w = mountStream(stream, { filename: "R.md", path: "/p/R.md", text: stream.chunks[0] });
+    expect(w.find(".preview-md.preview-stream").exists()).toBe(true);
+    const segs = w.findAll(".preview-seg");
+    expect(segs.length).toBeGreaterThanOrEqual(1);
+    expect(w.find(".preview-seg h3.md-h").text()).toBe("One");
+    const first = w.get(".preview-seg").element;
+    stream.chunks = [...stream.chunks, "\n\nmore\n\nend"];
+    await w.vm.$nextTick();
+    expect(w.get(".preview-seg").element).toBe(first); // old segment never re-patched
+    // B7 is a non-stream rule: the rendered button stays enabled
+    expect(w.findAll(".preview-toggle-btn")[0]!.attributes("disabled")).toBeUndefined();
+    const ioBefore = liveIO();
+    await w.findAll(".preview-toggle-btn")[1]!.trigger("click");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.find(".preview-text-body.preview-stream").exists()).toBe(true);
+    expect(liveIO()).not.toBe(ioBefore);
+    expect(w.get(".preview-stream-sentinel").element).toBe(liveIO().observed[0]);
+    w.unmount();
+  });
+
+  it("markdown stop-flush marks the tail incomplete", async () => {
+    const stream = mkStream({ chunks: ["para one\n\npara two partial"], state: "more" });
+    const w = mountStream(stream, { filename: "R.md", path: "/p/R.md" });
+    stream.state = "cap";
+    await w.vm.$nextTick();
+    expect(w.text()).toContain("The ending may be incomplete");
+    w.unmount();
+  });
+
+  it("non-stream DOM is unchanged: <pre> body, top note, no stream bits", () => {
+    const w = mount(PreviewText, { props: { text: "x", truncated: true, loadedLabel: "1 B", totalLabel: "2 B" } });
+    expect(w.find("pre.preview-text-body").exists()).toBe(true);
+    expect(w.find(".preview-truncated").exists()).toBe(true);
+    expect(w.find(".preview-stream-sentinel").exists()).toBe(false);
+    expect(w.find(".preview-stream-status").exists()).toBe(false);
   });
 });

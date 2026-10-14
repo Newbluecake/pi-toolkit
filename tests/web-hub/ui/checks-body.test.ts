@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { createSourceSegmenter } from "../../../src/web-hub/ui/src/logic/previewStream.js";
 import {
+  loadSegParityCases,
   containsPlaceholderAppMarker,
   isStrictBodyMode,
   PLACEHOLDER_APP_MARKER,
@@ -42,5 +44,52 @@ describe("checks-body.ts placeholder-App detection", () => {
     it('is true only when PWH_VISUAL_STRICT_BODY is exactly "1"', () => {
       expect(isStrictBodyMode({ PWH_VISUAL_STRICT_BODY: "1" })).toBe(true);
     });
+  });
+});
+
+/**
+ * chunked-plan §6.5 (r2 #1): the seg-parity corpus embedded in `seg-parity-snippet.js` must be
+ * exactly what the REAL source segmenter produces (the harness cannot import it itself).
+ */
+describe("seg-parity-snippet.js corpus", () => {
+  const cases = loadSegParityCases();
+
+  it("covers the §4.3.4 inference-table shapes", () => {
+    const names = cases.map((c) => c.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "blank-line",
+        "two-blank-lines",
+        "leading-blank-lines",
+        "crlf-blank-line",
+        "eof-single-newline",
+        "eof-only-newlines",
+        "many-boundaries",
+        "crlf-many-blank-lines",
+        "mixed-lf-crlf",
+      ]),
+    );
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it.each(cases.map((c) => [c.name, c] as const))("%s: embedded segments == live createSourceSegmenter", (_n, c) => {
+    const seg = createSourceSegmenter();
+    const out: Array<{ text: string; sep: string }> = [];
+    for (let i = 0; i < c.text.length; i += c.chunk) {
+      for (const s of seg.push(c.text.slice(i, i + c.chunk))) out.push({ text: s.text, sep: s.sep });
+    }
+    for (const s of seg.flush("eof")) out.push({ text: s.text, sep: s.sep });
+    expect(c.segs).toEqual(out);
+    // the copy-conservation law: the consumed text is the original, byte for byte
+    expect(out.map((x) => x.text + x.sep).join("")).toBe(c.text);
+  });
+
+  it("the snippet is self-contained: no imports, one CASES literal, prints PASS/FAIL", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../../scripts/web-hub/visual/seg-parity-snippet.js", import.meta.url), "utf8");
+    expect(src).not.toMatch(/^\s*(import|export)\s/m);
+    expect(src.match(/^const CASES = /gm)).toHaveLength(1);
+    expect(src).toContain("PASS");
+    expect(src).toContain("FAIL");
   });
 });
