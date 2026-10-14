@@ -1335,3 +1335,4 @@ P4b 新增可选 dep `isExternalProvider?`/`externalOwns?`；P4c `formatWidgetCo
 - P2：ENOENT 文案 `msgBinaryNotFound` 仍写 droid，接第二个 CLI 时泛化；`createSpawnChild(redact)` 让 provider 注入自己的脱敏键（`createRedactor(env, secretEnvKeys)`）。
 - P2/P3：droid 专有信封字段 `type` 已从框架移到 `droid/envelope.ts`（b707053 + P3）。
 - 冻结面：`runner` 无 create() 重试循环，`startup_transient` 暂不使用（types.ts 注释已改）。
+- P3（验收 r_KZS914MP minor）：provider 的 init/update 阶段不监听进程早退（不调 rpc.failAll），droid 提前死亡要等 initTimeoutMs 才失败（有界但慢）⇒ P5 补早退监听 + 「init 期间进程早退」「echo 等待超时回落」两个用例（fake-droid `crash-mid-turn`/新增 `exit-during-init` 模式）。
