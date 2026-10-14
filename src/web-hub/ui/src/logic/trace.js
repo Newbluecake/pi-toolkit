@@ -41,3 +41,62 @@ export function tracePoint(name, extra) {
     /* a breadcrumb never breaks the app */
   }
 }
+
+/**
+ * TEMPORARY (#11, 2026-10-14 — user idea): one-shot state dump printed after app init so the
+ * user can right-click → "Copy string contents" and paste it back, instead of running console
+ * snippets. FULL localStorage values (never truncated — the freeze trigger lives in there; an
+ * earlier truncated export could not be replayed), plus the environment facts the crash depends
+ * on. Any key whose name mentions "token" is redacted. Re-print any time with `pwhDiag()`.
+ * Never throws; delete with the investigation.
+ * @param {Record<string, unknown>} [extra]
+ * @returns {string}
+ */
+export function diagDump(extra) {
+  try {
+    /** @type {Record<string, string>} */
+    const ls = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k === null) continue;
+      ls[k] = /token/i.test(k) ? "[redacted]" : (localStorage.getItem(k) ?? "");
+    }
+    const mq = (q) => {
+      try {
+        return window.matchMedia(q).matches;
+      } catch {
+        return null;
+      }
+    };
+    return JSON.stringify({
+      at: new Date().toISOString(),
+      href: location.origin + location.pathname,
+      hash: location.hash.replace(/([#&?]t=)[^&]*/g, "$1[redacted]"),
+      authMode: document.documentElement.dataset["authMode"] ?? null,
+      ua: navigator.userAgent,
+      reducedMotion: mq("(prefers-reduced-motion: reduce)"),
+      dark: mq("(prefers-color-scheme: dark)"),
+      dpr: window.devicePixelRatio,
+      viewport: [window.innerWidth, window.innerHeight],
+      ...(extra ?? {}),
+      localStorage: ls,
+    });
+  } catch (e) {
+    return JSON.stringify({ error: String(e) });
+  }
+}
+
+/** Print the dump once and expose `pwhDiag()` for a later re-print. @param {Record<string, unknown>} [extra] */
+export function installDiagDump(extra) {
+  try {
+    /** @type {any} */ (window).pwhDiag = () => {
+      const s = diagDump(extra);
+      console.info("[pwh-diag]", s);
+      return s;
+    };
+    console.info("[pwh-diag]", diagDump(extra));
+    console.info("[pwh-diag] 右键上一行 → Copy string contents 粘贴给排查方；随时输入 pwhDiag() 可重新打印。");
+  } catch {
+    /* a diagnostic never breaks the app */
+  }
+}
