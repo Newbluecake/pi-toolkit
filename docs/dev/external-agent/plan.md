@@ -1336,3 +1336,12 @@ P4b 新增可选 dep `isExternalProvider?`/`externalOwns?`；P4c `formatWidgetCo
 - P2/P3：droid 专有信封字段 `type` 已从框架移到 `droid/envelope.ts`（b707053 + P3）。
 - 冻结面：`runner` 无 create() 重试循环，`startup_transient` 暂不使用（types.ts 注释已改）。
 - P3（验收 r_KZS914MP minor）：provider 的 init/update 阶段不监听进程早退（不调 rpc.failAll），droid 提前死亡要等 initTimeoutMs 才失败（有界但慢）⇒ P5 补早退监听 + 「init 期间进程早退」「echo 等待超时回落」两个用例（fake-droid `crash-mid-turn`/新增 `exit-during-init` 模式）。
+
+### 15.x P7 验收转入的 P5 跟踪项（r_WC5KW7WM，P7 = `4d052c0`）
+
+1. `stack.ts` 的 `createQuotaStack` 调用点注入 `droid: { pools: () => droidPoolPort }`（`createCatalogPoolPort`：catalog = `external.providers.get("droid")?.catalog.snapshot()`，preferred = `settings.externalAgents.droid.models`），构造后紧挨着 `refreshInBackground("stack_build")` **立即 `warm()`**。
+2. P5 接线后去掉 `tests/integration/quota-wiring.test.ts` 中的 `vi.spyOn` 委托，补一条不用 spy 的端到端 droid 闸门用例。
+3. `tests/integration/external-disabled-bytes.test.ts`：enabled=false ⇒ 零 api.factory.ai 请求 + 零 `[quota] droid` 告警；enabled=true 且 `quota.providers:""` ⇒ 同样零请求。
+4. `tests/external-agent/port.test.ts`：`createCatalogPoolPort` 接真实 ExternalCatalog 形状；`warm()` 吞掉 catalog 抛错。
+5. `src/index.ts` hook 的 `poolAlternatives` 行补一条走真实 stack 的 hook 集成用例。
+6. SP4：真机抓包核对 billing 字段位置（P7 偏差 1：从响应顶层读）与 windowEnd 格式。
