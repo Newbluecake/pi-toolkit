@@ -26,10 +26,12 @@ process.env.HOME = fakeHome;
 // core agent-types hook asserted below and fires in child sessions too. This
 // suite scopes itself to the core agent-types/models wiring, so it disables
 // memory via the settings file; memory wiring is covered by tests/memory/*.
+// The date module (src/date/) also hooks before_agent_start pre-guard and
+// returns a first-turn message, so it is disabled here too (tests/date/*).
 mkdirSync(join(fakeHome, ".pi", "agent"), { recursive: true });
 writeFileSync(
   join(fakeHome, ".pi", "agent", "pi-subagent.json"),
-  JSON.stringify({ memory: { enabled: false } }) + "\n",
+  JSON.stringify({ memory: { enabled: false }, date: { enabled: false } }) + "\n",
   "utf8",
 );
 
