@@ -33,7 +33,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
       args: DROID_EXEC_ARGS,
       cwd,
       killGraceMs: SETTINGS.killGraceMs,
-      ownerWatchdog: false, // DROID_EXITS_ON_STDIN_EOF=true
+      ownerWatchdog: true, // DROID_EXITS_ON_STDIN_EOF=false（D10）⇒ sh 哨兵
     });
     expect(f.spawnOpts[0]!.extraEnv).toBe(DROID_CHILD_ENV); // acceptance ⑪：同一常量对象
 

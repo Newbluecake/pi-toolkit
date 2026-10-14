@@ -24,7 +24,7 @@ describe("droid/protocol constants（plan §6.2 P3 冻结值）", () => {
     expect(DROID_PERMISSION_REPLY).toEqual({ selectedOption: "proceed_once" });
     expect(DROID_PERMISSION_ACK_TIMEOUT_MS).toBe(10_000);
     expect(DROID_CHILD_ENV).toEqual({ DISABLE_AUTO_UPDATE: "1", FACTORYD_DISABLE_AUTO_UPDATE: "1" });
-    expect(DROID_EXITS_ON_STDIN_EOF).toBe(true);
+    expect(DROID_EXITS_ON_STDIN_EOF).toBe(false);
     expect(DROID_THINKING_IN_OUTPUT).toBe(true);
     expect(DROID_CUMULATIVE_INCLUDES_CHILD).toBe(false);
   });

@@ -24,8 +24,8 @@ export const DROID_CHILD_ENV = {
   DISABLE_AUTO_UPDATE: "1",
   FACTORYD_DISABLE_AUTO_UPDATE: "1",
 } as const;
-/** S3：idle 关 stdin ~1s 自退。turn 中途 EOF 未实测 ⇒ P5 conformance D10 固化；不成立则改 false 启用哨兵。 */
-export const DROID_EXITS_ON_STDIN_EOF = true;
+/** S3：idle 关 stdin ~1s 自退；但 P5 conformance D10（droid 0.241.1）实测 turn 中途关 stdin 不退出、跑完该轮才退 ⇒ false，启用 sh 哨兵（ownerWatchdog）收口孤儿。 */
+export const DROID_EXITS_ON_STDIN_EOF = false;
 /** E1（未实测，P5 D12 固化）：thinking token 已含在 output 计费口径内（true ⇒ 不按 output 重复计价）。 */
 export const DROID_THINKING_IN_OUTPUT = true;
 /** E3（未实测，P5 D13 固化）：cumulativeTokenUsage 不含 droid 原生子 agent 用量。 */
