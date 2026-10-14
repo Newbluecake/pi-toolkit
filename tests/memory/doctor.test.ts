@@ -350,12 +350,51 @@ describe("D13 — secret scan", () => {
     ["GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz012345"],
     ["Slack token", "xoxb-1234567890-abcdefghij"],
     ["private key header", "-----BEGIN RSA PRIVATE KEY-----"],
-    ["password kv", "password: supersecretvalue"],
+    ["password kv", "password: hunter2hunter2"],
+    ["token kv with digits", "token=ghs_9f8e7d6c5b4a39281706"],
+    ["hex secret", "secret: 3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c"],
+    ["underscore-separated keyword", "api_token=hunter2hunter2"],
+    ["dash-separated keyword", "x-auth-token: ghs_9f8e7d6c5b4a39281706"],
+    ["uppercase keyword", "TOKEN=hunter2hunter2"],
+    ["quoted JSON value", '"token": "hunter2hunter2"'],
   ])("positive: %s", (_label, secret) => {
     const f = findingsOf(snap([file("core.md"), file("leak.md", { content: `line1\n${secret}\nline3\n` })]), "D13");
     expect(f.length).toBeGreaterThan(0);
     expect(f[0]).toMatchObject({ severity: "error", file: "leak.md", line: 2 });
     expect(f[0]?.message).not.toContain(secret);
+    // masked: first 4 chars + …
+    expect(f[0]?.message).toContain("…");
+  });
+  it("positive: loose-rule masking keeps only the first 4 chars", () => {
+    const f = findingsOf(snap([file("core.md"), file("leak.md", { content: "password: hunter2hunter2\n" })]), "D13");
+    expect(f[0]?.message).toBe("Possible secret detected: pass…");
+  });
+  it("negative: credential-like thresholds (pure letters < 20, no letter+digit mix)", () => {
+    const content = [
+      "password: supersecretvalue",
+      "token: 1234567890",
+      "secret: short1val",
+      "token=12345678901234567890",
+    ].join("\n");
+    expect(findingsOf(snap([file("core.md"), file("edge.md", { content })]), "D13")).toHaveLength(0);
+  });
+  it("negative: loose-rule false positives (boundary + value exclusions)", () => {
+    const content = [
+      "hasUsableAccessToken=true",
+      "JUDGE_BYTES_PER_TOKEN=4",
+      "x-cluster-internal-token: $CLUSTER_INTERNAL_TOKEN",
+      "POST /sign?token=<uuid>",
+      "token=(octet-stream)",
+      "token = 19,115",
+      "token: ${API_TOKEN}",
+      "password: ********",
+      "TOKEN=%API_TOKEN%",
+      "tokenizer: hunter2hunter2",
+      "secret_value: hunter2hunter2",
+      "'secret': 'true'",
+      "`JUDGE_TOKEN=4`XYZ_2abcdef7k`",
+    ].join("\n");
+    expect(findingsOf(snap([file("core.md"), file("noise.md", { content })]), "D13")).toHaveLength(0);
   });
   it("negative: clean content", () => {
     expect(findingsOf(snap([file("core.md"), file("clean.md", { content: "just some prose\n" })]), "D13")).toHaveLength(
@@ -613,7 +652,7 @@ describe("createStartupReminder (§6.3)", () => {
       expect(ctxA.ui.notify).toHaveBeenCalledTimes(1);
 
       // introduce a NEW error-level finding (a secret) under a fresh session id
-      writeFileSync(join(fx.memDir, "leak.md"), "---\ntopic: leak\n---\n\npassword: supersecretvalue\n");
+      writeFileSync(join(fx.memDir, "leak.md"), "---\ntopic: leak\n---\n\npassword: hunter2hunter2\n");
       const ctxB = fakeExtensionContext({ cwd: fx.cwd, sessionManager: { getSessionId: () => "sB" } as never });
       reminder.check({ type: "session_start", reason: "new" }, ctxB);
       expect(ctxB.ui.notify).toHaveBeenCalledTimes(1);

@@ -308,7 +308,7 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     expect(start(first, "s1")).toHaveLength(1);
     const second = activate(); // pi may reactivate extensions when replacing a session
     expect(start(second, "s2")).toHaveLength(0);
-    seedMemoryFile("leak.md", "---\ntopic: leak\n---\n# Leak\npassword: supersecretvalue\n");
+    seedMemoryFile("leak.md", "---\ntopic: leak\n---\n# Leak\npassword: hunter2hunter2\n");
     expect(start(second, "s3")).toHaveLength(1);
     const third = activate();
     expect(start(third, "s4")).toHaveLength(0);
