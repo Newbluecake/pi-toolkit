@@ -135,7 +135,9 @@ export interface ManagedChild {
   graceExpired(): boolean;
   stderrTail(maxBytes?: number): string; // 已脱敏，默认 2KiB
 }
-/** 同步 spawn；ENOENT ⇒ throw ClassifiedError{config}；EAGAIN/EMFILE ⇒ ClassifiedError{startup_transient, retryable:true}。 */
+/** 同步 spawn；ENOENT ⇒ throw ClassifiedError{config}；EAGAIN/EMFILE ⇒ ClassifiedError{internal}。
+ *  （不用 startup_transient：runner 目前没有 create() 重试循环，reducer 的 startup_retry 分支无 effect，
+ *  抛它会让 run 悬空；P1 验收 2026-10-14 裁定。待 runner 补重试循环后再改回。） */
 export type SpawnChild = (o: ManagedChildOptions) => ManagedChild;
 
 // ── JSON-RPC ──
