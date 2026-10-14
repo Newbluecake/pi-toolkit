@@ -34,6 +34,12 @@ metadata:
    不得静默换成 gpt-6-astra**——该列表优先取会话的 scoped models（pi settings 的 `enabledModels`），
    没列进去的模型照样已注册、照样能派；按速查表的精确 ID 直接派，派发被拒才按回退链降级并明说原因
    （2026-10-10 教训：看列表没有就用 gpt-6-astra 顶替，单日传输失败 4 次）。
+   **安全策略拒绝 ≠ 传输错误**（如 Anthropic「triggered restrictions on violative cyber content… Usage Policy」）：
+   不自动按回退链重发原 prompt。主会话先判定被拦内容：① **误拦**（任务本身正当，如分析自家代码的签名/鉴权逻辑、
+   协议兼容、错误处理）→ 可改派异厂商模型续跑（glm-5.3 / kimi-k3 订阅优先），派单 prompt 写明正当目的与范围；
+   ② 被拦部分**本身就是规避第三方风控/安全检测**（克隆客户端 TLS 指纹、伪造遥测/心跳流量、为躲检测做的外观伪装等）
+   → 从任务中剔除该部分、向用户说明后再派，**不得换模型重发原任务**。两种情况都在汇报里明说被拦及处置
+   （2026-10-14：droid 对齐方案 opus-5.5 被拦，剔除 TLS 指纹/header 外观/心跳三项后改派 kimi-k3）。
 3. **fable / gpt-6-astra（≠ gpt-6.1-sol）只用于复杂任务**（L3），常规任务禁止动用。
 4. **能并行必并行**：判定可并行的任务必须在**同一条消息**中发出多个 `Agent` 调用，或在
    `SubagentWorkflow` 里用 `parallel()`/`pipeline()`；顺序派发不算并行。
