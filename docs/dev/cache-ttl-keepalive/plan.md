@@ -3,6 +3,7 @@
 # 提示词缓存保活 ping（cache-ttl keepalive）实施方案
 
 状态：**v2 施工口径（已按 `review.md` 的 4 个 Blocker + M1–M6 + m1–m3 修订）**。
+web-hub 状态同步（#26 第二步）见 [`webhub-plan.md`](webhub-plan.md)。
 配套调研 `explore.md`（装配管线取证）、评审 `review.md`。现状代码 `src/cache-ttl/cache-ttl.ts`（101 行）。
 本文档给出可直接照着写代码的设计，**每个决策都附理由与被否决的备选**。
 

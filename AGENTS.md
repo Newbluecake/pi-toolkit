@@ -418,6 +418,10 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   to a read-only `BashJobsPanel` on the web detail header. Command + log tail are kept per the U1 sole-LAN-user
   ruling — `agent/redact.ts`'s secret scrubbing is HYGIENE ONLY, never a security boundary. Design:
   `docs/dev/web-hub/bash-jobs-panel-plan.md`.
+  **Cache keepalive panel (cache-ttl-keepalive webhub plan)**: `agent/cache-keepalive.ts` projects the keepalive report to the
+  optional `StatusInfo.cacheKeepalive` slot (append-only, 1Hz fingerprint-gated publish, wire never carries `armed`, 8 KiB
+  budget) for a read-only, lazy-loaded `CacheKeepalivePanel` on the web detail header. Design:
+  `docs/dev/cache-ttl-keepalive/webhub-plan.md`.
   **Content preview (web-hub-preview plan v3 + dir-plan v3.1, setting `webHub.preview` — `"on" | "loopback" | "off"`, default
   `"on"` per the 2026-10-05 user ruling U1: sole LAN user behind password auth, risk explicitly accepted; change
   is non-live — `/reload` then `/webhub restart`)**: an absolute path in a settled message (assistant text, user

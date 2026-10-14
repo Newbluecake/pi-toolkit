@@ -1,6 +1,8 @@
 # #26 第二步：缓存保活状态同步到 web-hub，实施方案 r2
 
-> 状态：方案 r2（吸收 glm-5.3 评审 r1 全部 7 项，见文末「修订记录 r2」；D5 已由用户拍板）。基线：`77b1cda`（#28 线路熔断）、`8f25203`（#26 第一步）；**开工基线 = #29（保活尽力重试）合入之后**，见 §0.5。
+> **状态：已实施** — P0 `95f7a6f`（协议 `StatusInfo.cacheKeepalive`）、P-A `5b07c41`（agent 侧投影）、P-B `68cc3a8`（详情头只读懒加载面板）、P-C 文档收尾。偏差见文末「实施偏差」。
+>
+> 方案 r2（吸收 glm-5.3 评审 r1 全部 7 项，见文末「修订记录 r2」；D5 已由用户拍板）。基线：`77b1cda`（#28 线路熔断）、`8f25203`（#26 第一步）；**开工基线 = #29（保活尽力重试）合入之后**，见 §0.5。
 > 车道：**L2**（跨 `cache-ttl`、`web-hub/agent`、`protocol`、UI，新增协议字段）。
 > 落盘位置：`docs/dev/cache-ttl-keepalive/webhub-plan.md`。
 > 核对依据：todo-web、bash-jobs-panel、quota-web 三份先例方案及其对应代码；`keepalive-state.ts`、`cache-keepalive.ts`、`cache-ttl.ts`、`web-hub/agent/{status,index,todo,quota-sampler}.ts`、`protocol/messages.ts`、UI `detail/*`。
@@ -521,3 +523,9 @@ export function cacheKeepaliveWireBytes(wire: CacheKeepaliveWire): number;
 | #6 工作区在途事实陈旧 / 并行性未点名             | 建议   | **采纳**：刷新 §1 在途行（#23 P0–P2a 已提交、P2b 验收中；droid P1–P4 已提交、P5/P7 待做；#29 即将合入）；§5 点名与 droid P5（`src/index.ts` 不同区块，不碰 `src/stack.ts`）、P7/P7w（`messages.ts` 同文件不同段，互不改对方段，append-only，后合入方 rebase）的并行与 rebase 规则                                                                                                                                                                                                                                                                                                                                                                         | §1 在途行、§5                                                                                                 |
 | #7 `lastPingDiagnostics` 既有 `toEqual` 断言会红 | 建议   | **采纳**：§3.6 service 测试行补「既有断言同步更新，随 P-A 同包提交」                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | §3.6                                                                                                          |
 | （附带）#29 引入的 `attempts` 取值范围           | —      | 投影 clamp `attempts` 到 [1,999]；「ping 重试中」中间态列为非目标                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | §0.5、§2、§3.2、§8                                                                                            |
+
+## 实施偏差
+
+- P-B：`CacheKeepalivePanel` 改用 `defineAsyncComponent` 懒加载，以守住首屏体积预算（原方案为静态引入）。
+- 超过 16 行上限被截断的行也计入 `omitted`（原方案仅统计预算削减）。
+- `httpStatus` 断言放在 `tests/cache-ttl/keepalive-ping-retry.test.ts`（原方案放在别处的 service 测试）。
