@@ -79,8 +79,11 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../sysload/types.js",
     "../topic-switch/settings.js",
     "../web-hub/protocol/lan.js",
+    // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
+    "./model-hint.js",
     "./time-units.js",
   ],
+  "src/config/model-hint.ts": [],
   "src/sysload/io-ledger.ts": [],
   // P0's compatibility re-export keeps the shared file limits available to pi-free callers.
   "src/memory/tidy/batch-settings.ts": ["../contracts.js"],

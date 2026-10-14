@@ -605,12 +605,100 @@ export type WorktreeDisposal = {
   commit?: string;
 };
 
+// ── 外部 agent（external-agent plan §2.1，冻结面）：定价 / run 规格 / 诊断 ──
+
+/** USD per 1M tokens（与 pi ModelCost 同口径）。 */
+export interface ExternalPriceRates {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+export interface ExternalPriceTier extends ExternalPriceRates {
+  /** 与 pi ModelCostTier 同义：单次请求 input 总量超过此值时整次请求用该档。 */
+  inputTokensAbove: number;
+}
+export interface ExternalPriceTable extends ExternalPriceRates {
+  tiers?: readonly ExternalPriceTier[];
+}
+/** 价格从哪来：override=用户覆盖；upstream=droid 标注的上游 provider 的官方条目；family=按模型家族前缀推断的厂商条目；
+ *  consensus=无规范 provider 时多个注册表条目价格一致。 */
+export type ExternalPricingBasis = "override" | "upstream" | "family" | "consensus";
+export type ExternalUnpricedReason =
+  | "no_match"
+  | "ambiguous"
+  | "zero_price"
+  | "router_model"
+  | "override_unpriced"
+  | "invalid_override"
+  | "registry_unavailable";
+export type ExternalPricing =
+  | {
+      status: "priced";
+      source: string; // "anthropic/claude-opus-5-5" | "settings"
+      basis: ExternalPricingBasis;
+      /** basis ∈ {family, consensus} ⇒ true：近似价（如 factory 自托管模型按厂商 API 牌价）。 */
+      approx: boolean;
+      table: ExternalPriceTable;
+    }
+  | { status: "unpriced"; reason: ExternalUnpricedReason; detail?: string };
+
+// ── 外部 agent：run 规格（adapter 构造，驱动只读） ──
+export interface ExternalContextBlock {
+  kind: "memory" | "capabilities";
+  text: string;
+}
+export interface ExternalRunSpec {
+  provider: string; // "droid"
+  modelId: string; // droid 内模型 id（无 "droid/" 前缀）
+  thinkingLevel?: string; // pi 档位；provider 自行映射到 reasoningEffort
+  roleName: string; // agent 类型名
+  rolePrompt?: string; // 仅 prompt_mode:replace 类型的 systemPrompt
+  contextBlocks: readonly ExternalContextBlock[]; // fresh: [memory?, capabilities]；resume: []
+  schema?: JsonSchema; // 仅用于渲染「末尾输出 ```json」指令
+  persistTranscript: boolean; // = PiSessionDriver 的 persist 口径
+  runId: string;
+  pricing: ExternalPricing; // planRun 时快照；run 生命周期内不变
+  degraded: readonly string[]; // planRun 决定的降级项（§4.8）
+}
+
+// ── 外部 agent：诊断 ──
+export interface ExternalPricingDiag {
+  status: "priced" | "unpriced" | "partial"; // partial = 部分用量无法定价（droid 原生子 agent 用量）
+  source?: string;
+  basis?: ExternalPricingBasis;
+  approx?: true;
+  reason?: string; // ExternalUnpricedReason 或 "child_usage"
+  detail?: string;
+}
+export interface ExternalRunMeta {
+  provider: string;
+  sessionId?: string;
+  autonomy?: string; // droid settings echo 的实际 autonomyLevel
+  protocolVersion?: string;
+  agentVersion?: string;
+  credits?: number; // 本 run 累计 factoryCredits（单调）
+  thinkingTokens?: number;
+  childTokens?: number; // droid 原生子 agent 的 token（不计价）
+  pricing?: ExternalPricingDiag;
+  permissionApprovals?: number; // 已同步批准的 request_permission 次数
+  degraded?: readonly string[];
+  nativeSessionFile?: string;
+  unknownNotifications?: number;
+  /** external-agent plan r3（§14）：异常退出对账补记 usage 成功时置 true（只可为 true）。 */
+  reconciled?: true;
+}
+export type ExternalMetaPatch = Partial<ExternalRunMeta> & { provider: string };
+
 export interface UsageDelta {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
   costUsd: number;
+  /** U4：本增量/累计里有无法定价的部分。"all"=全部无法定价（costUsd 恒 0）；"partial"=costUsd 只含可定价部分。
+   *  pi 驱动永不设置 ⇒ pi run 的 usage 永无此键。 */
+  unpriced?: "all" | "partial";
 }
 export interface ContextUsageInfo {
   tokens: number | null;
@@ -773,7 +861,16 @@ export type DriverEvent =
   | {
       t: "dispatch_measure";
       measure: DispatchMeasure;
-    };
+    }
+  /**
+   * 外部 agent（external-agent plan §2.1，冻结面）：外部 provider 的诊断元数据补丁
+   * （ExternalMetaPatch）。与 `context_usage` 同族：任意状态（含终态、stale
+   * generation）接受，只做 `diag.external = mergeExternalMeta(diag.external,
+   * event.meta)`，不刷新 lastEventAt/lastEventType、无 effect（见 state-machine.ts
+   * 的 external_meta 分支与 core/external-meta.ts 的合并规则）。PiSessionDriver
+   * 永不产生 ⇒ pi run 的 diag 永无 `external` 键。
+   */
+  | { t: "external_meta"; meta: ExternalMetaPatch };
 
 /**
  * bash-timeout-grace plan §3.1 (P0b, frozen): one child-session bash job as
@@ -1217,6 +1314,13 @@ export interface RunDiagnostics {
    */
   childExtensionMissing?: true;
   /**
+   * 外部 agent（external-agent plan §2.1）：本 run 的外部 provider 运行时元数据
+   * （ExternalRunMeta），由 `external_meta` session_event 经 mergeExternalMeta 折入。
+   * best-effort 家族（同 contextUsage）：终态后只改 diag 不改已封存的 outcome；
+   * pi run 永无此键。随 journal 白名单持久化（run-journal.ts）。
+   */
+  external?: ExternalRunMeta;
+  /**
    * run-persistence plan D4 (§4): present ONLY on the in-memory terminal
    * snapshot that `seedRunStoreFromEntries` synthesizes (via
    * `interruptedFromJournal`, core/run-journal.ts) from a run whose session
@@ -1450,6 +1554,11 @@ export interface SessionSpec {
    * way by service/runtime-adapter.ts before H2 extensions run.
    */
   customTools?: unknown[];
+  /**
+   * 外部 agent（external-agent plan §2.1，冻结面）：存在即由 RoutingSessionDriver
+   * 交给外部 provider；PiSessionDriver 永不读取。
+   */
+  external?: ExternalRunSpec;
   /**
    * `prompt_mode: replace` agent types: the type's system prompt, which
    * replaces pi's base system prompt (preamble / tool list / rules / docs).

@@ -1303,6 +1303,53 @@ const FLAT_MATRIX: FlatCase[] = RUN_PHASES.flatMap((phase) =>
   INPUT_KINDS.map((kind) => ({ phase, kind, cell: MATRIX[phase][kind] })),
 );
 
+describe("external agent usage marking (plan §2.5, review #10)", () => {
+  const usage = (over: Partial<NonNullable<import("../../src/core/types.js").UsageDelta>> = {}) => ({
+    input: 1,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    costUsd: 0.01,
+    ...over,
+  });
+  const messageEnd = (u?: ReturnType<typeof usage>): RunInput =>
+    ({
+      kind: "session_event",
+      at: 1,
+      event: { t: "message_end", ...(u === undefined ? {} : { usage: u }) },
+    }) as RunInput;
+  const withUsage = (...deltas: Array<ReturnType<typeof usage> | undefined>): RunState => {
+    let s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+    for (const d of deltas) s = apply(s, messageEnd(d)).state;
+    return s;
+  };
+
+  it("pi deltas never carry unpriced ⇒ diag.usage has no unpriced key (关闭态字节一致)", () => {
+    const s = withUsage(usage(), usage());
+    expect(s.diag.usage).toBeDefined();
+    expect("unpriced" in (s.diag.usage ?? {})).toBe(false);
+    expect(s.diag.usage).toEqual({ input: 2, output: 2, cacheRead: 0, cacheWrite: 0, costUsd: 0.02 });
+  });
+
+  it("unpriced accumulates via mergeUnpriced semantics", () => {
+    expect(withUsage(usage({ unpriced: "all", costUsd: 0 })).diag.usage?.unpriced).toBe("all");
+    expect(
+      withUsage(usage({ unpriced: "all", costUsd: 0 }), usage({ unpriced: "all", costUsd: 0 })).diag.usage?.unpriced,
+    ).toBe("all");
+    expect(withUsage(usage({ unpriced: "partial" }), usage({ unpriced: "partial" })).diag.usage?.unpriced).toBe(
+      "partial",
+    );
+    // unpriced delta followed by a pi-style delta (no key) ⇒ partial
+    expect(withUsage(usage({ unpriced: "all", costUsd: 0 }), usage()).diag.usage?.unpriced).toBe("partial");
+    expect(withUsage(usage(), usage({ unpriced: "partial", costUsd: 0 })).diag.usage?.unpriced).toBe("partial");
+    // mixed all + partial ⇒ partial
+    expect(withUsage(usage({ unpriced: "all", costUsd: 0 }), usage({ unpriced: "partial" })).diag.usage?.unpriced).toBe(
+      "partial",
+    );
+  });
+});
+
 describe("executable transition matrix (§4.4.1)", () => {
   it("has an explicit oracle for all 12 phases x 14 inputs = 168 keys", () => {
     expect(RUN_PHASES).toHaveLength(12);
@@ -1348,6 +1395,76 @@ describe("executable transition matrix (§4.4.1)", () => {
         payloadTokens: 6,
       });
     }
+  });
+
+  // 外部 agent（external-agent plan §2.5）：external_meta 与 context_usage 同族 ——
+  // 任意相位（含终态 settled/reap）接受、纯 diag 补丁、零 effect、不刷新
+  // lastEventAt/lastEventType（AGENTS.md 硬要求：matrix 同步加 external_meta）。
+  it("covers external_meta as a diag-only transition in every phase, liveness untouched", () => {
+    for (const phase of RUN_PHASES) {
+      const before = fixture(phase);
+      const result = reduce(
+        before,
+        {
+          generation: 1,
+          input: {
+            kind: "session_event",
+            at: 4242,
+            event: { t: "external_meta", meta: { provider: "droid", sessionId: "abcd1234", credits: 7 } },
+          },
+        },
+        budget,
+      );
+      expect(result.effects, phase).toEqual([]);
+      expect(result.state.status, phase).toBe(before.status);
+      expect(result.state.phase, phase).toBe(before.phase);
+      expect(result.state.diag.lastEventAt, phase).toBe(before.diag.lastEventAt);
+      expect(result.state.diag.lastEventType, phase).toBe(before.diag.lastEventType);
+      expect(result.state.diag.staleInputs, phase).toBe(before.diag.staleInputs);
+      expect(result.state.diag.external, phase).toEqual({ provider: "droid", sessionId: "abcd1234", credits: 7 });
+      // merging is incremental: a second patch folds in (credits max), still no effects
+      const again = reduce(
+        result.state,
+        {
+          generation: 1,
+          input: {
+            kind: "session_event",
+            at: 4243,
+            event: { t: "external_meta", meta: { provider: "droid", credits: 3, degraded: ["protocol_drift"] } },
+          },
+        },
+        budget,
+      );
+      expect(again.effects, phase).toEqual([]);
+      expect(again.state.diag.external, phase).toEqual({
+        provider: "droid",
+        sessionId: "abcd1234",
+        credits: 7,
+        degraded: ["protocol_drift"],
+      });
+    }
+  });
+
+  it("external_meta is accepted on stale generations too (diag-only, staleInputs untouched)", () => {
+    const before = fixture("model_turn");
+    const result = reduce(
+      before,
+      {
+        generation: before.generation + 1, // stale
+        input: {
+          kind: "session_event",
+          at: 5,
+          event: { t: "external_meta", meta: { provider: "droid", autonomy: "high" } },
+        },
+      },
+      budget,
+    );
+    expect(result.effects).toEqual([]);
+    expect(result.state.status).toBe(before.status);
+    // the diag-only branch runs BEFORE the generation check: external meta is
+    // folded and staleInputs is NOT bumped (same family as context_usage).
+    expect(result.state.diag.staleInputs).toBe(before.diag.staleInputs);
+    expect(result.state.diag.external).toEqual({ provider: "droid", autonomy: "high" });
   });
 
   it.each(FLAT_MATRIX.map((c) => [`${c.phase}/${c.kind}`, c] as const))(
@@ -1436,6 +1553,28 @@ describe("P1-P14 property invariants", () => {
             preTokens: Math.floor(next() * 500),
             payloadBytes: Math.floor(next() * 1000),
             payloadTokens: Math.floor(next() * 500),
+          },
+        },
+      };
+    // 外部 agent（external-agent plan §2.5）：seeded property 同步加 external_meta——
+    // 随机补丁在任何相位/终态都只能是纯 diag 合并，不得产生 effect 或改变活性。
+    if (next() < 0.15)
+      return {
+        kind: "session_event",
+        at,
+        event: {
+          t: "external_meta",
+          meta: {
+            provider: "droid",
+            ...(next() < 0.5 ? { sessionId: `s${Math.floor(next() * 9)}` } : {}),
+            ...(next() < 0.5 ? { credits: Math.floor(next() * 100) } : {}),
+            ...(next() < 0.3
+              ? {
+                  pricing:
+                    next() < 0.5 ? { status: "priced", source: "a" } : { status: "unpriced", reason: "no_match" },
+                }
+              : {}),
+            ...(next() < 0.3 ? { degraded: [`d${Math.floor(next() * 4)}`] } : {}),
           },
         },
       };
@@ -1732,6 +1871,9 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
           // child-context-switch plan P3 acceptance follow-up (§2.3.1 V1-V6
           // visibility gap): same exemption family, additive.
           "context_switch_rejected",
+          // 外部 agent（external-agent plan §2.5）：同一 best-effort 豁免家族，
+          // 任意状态接受的纯 diag 补丁。
+          "external_meta",
         ] as const);
         switch (eventKind) {
           case "turn_start":
@@ -1770,6 +1912,12 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
               kind,
               at,
               event: { t: "context_usage", usage: { tokens: null, contextWindow: 262_144, percent: null } },
+            };
+          case "external_meta":
+            return {
+              kind,
+              at,
+              event: { t: "external_meta", meta: { provider: "droid", credits: Math.floor(next() * 50) } },
             };
           case "tool_start":
             return { kind, at, event: { t: "tool_start", toolCallId: "a", toolName: "bash" } };

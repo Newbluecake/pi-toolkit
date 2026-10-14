@@ -10,6 +10,7 @@ import {
 } from "./deadline.js";
 import { deliveryKey } from "./delivery-key.js";
 import { foldConsultCall } from "./consult-summary.js";
+import { mergeExternalMeta, mergeUnpriced } from "./external-meta.js";
 import { journalSnapshotFromState } from "./run-journal.js";
 import { isTerminalStatus } from "./status.js";
 import { capExpertRefs } from "./types.js";
@@ -49,12 +50,17 @@ function accumulateUsage(prev: UsageDelta | undefined, delta: UsageDelta | undef
   // Defense in depth (drivers already clamp at the boundary): a non-finite
   // field must never poison the lifetime accumulator with NaN.
   const add = (a: number, b: number) => (Number.isFinite(b) ? a + b : a);
+  // 外部 agent（external-agent plan §2.5，U4）：unpriced 累加合并（mergeUnpriced）。
+  // pi 增量永不携带该键 ⇒ prev/delta 均无时结果对象永无 unpriced 键，pi run 的
+  // diag.usage 字节不变。
+  const unpriced = mergeUnpriced(prev, delta);
   return {
     input: add(base.input, delta.input),
     output: add(base.output, delta.output),
     cacheRead: add(base.cacheRead, delta.cacheRead),
     cacheWrite: add(base.cacheWrite, delta.cacheWrite),
     costUsd: add(base.costUsd, delta.costUsd),
+    ...(unpriced === undefined ? {} : { unpriced }),
   };
 }
 
@@ -575,6 +581,15 @@ export function reduce(
   // emitting a persistence effect.
   if (input.kind === "session_event" && input.event.t === "context_usage")
     return { state: { ...state, diag: { ...state.diag, contextUsage: input.event.usage } }, effects: [] };
+  // 外部 agent（external-agent plan §2.5）：external_meta 与 context_usage 同族——任意状态
+  // （含终态、stale generation）接受，只做 diag.external = mergeExternalMeta(...)；
+  // 不刷新 lastEventAt/lastEventType、无 effect、不触碰已封存的 outcome。PiSessionDriver
+  // 永不产生该事件 ⇒ pi run 的 diag 永无 external 键（关闭态字节一致）。
+  if (input.kind === "session_event" && input.event.t === "external_meta")
+    return {
+      state: { ...state, diag: { ...state.diag, external: mergeExternalMeta(state.diag.external, input.event.meta) } },
+      effects: [],
+    };
   if (input.kind === "session_event" && input.event.t === "dispatch_measure")
     return { state: { ...state, diag: { ...state.diag, dispatchMeasure: input.event.measure } }, effects: [] };
   // child-context-switch plan P0 (§2.3.1/§2.4): three more best-effort

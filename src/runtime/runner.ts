@@ -8,6 +8,7 @@ import {
   SET_MODEL_TIMEOUT_MS,
 } from "../core/deadline.js";
 import type { Clock } from "../core/clock.js";
+import { classifiedInfo } from "../core/errors.js";
 import { createInitialState, reduce } from "../core/state-machine.js";
 import { isTerminalStatus } from "../core/status.js";
 import { markLiveSessionFile, releaseLiveSessionFile } from "../core/live-session-files.js";
@@ -312,6 +313,10 @@ const error = (e: unknown, kind: ErrorInfo["kind"] = "internal"): ErrorInfo => (
 });
 /** Cap for a start-phase exception message carried into diag.error / the outbox failReason. */
 export const START_ERROR_MESSAGE_CAP = 1000;
+/** Apply the START_ERROR_MESSAGE_CAP truncation to a message string. */
+function capStartErrorMessage(raw: string): string {
+  return raw.length > START_ERROR_MESSAGE_CAP ? `${raw.slice(0, START_ERROR_MESSAGE_CAP - 1)}…` : raw;
+}
 /**
  * A session_create / extension_bind / prompt() *rejection* (as opposed to a
  * cancel or a deadline) is a real failure with a real cause — e.g. pi's
@@ -321,9 +326,13 @@ export const START_ERROR_MESSAGE_CAP = 1000;
  * generic "cancelled" the guards used to report for every rejection.
  */
 function startError(e: unknown): ErrorInfo {
+  // 外部 agent（external-agent plan §2.7）：ClassifiedError 的 kind/retryable 透传（消息仍截断）；
+  // startup_transient+retryable 会被 reducer 按 startupRetries 重试——外部驱动只对 EAGAIN/EMFILE 用它。
+  const info = classifiedInfo(e);
+  if (info !== undefined)
+    return { kind: info.kind, retryable: info.retryable, message: capStartErrorMessage(info.message) };
   const raw = (e instanceof Error ? e.message : String(e)).trim() || "session start failed (empty error message)";
-  const message = raw.length > START_ERROR_MESSAGE_CAP ? `${raw.slice(0, START_ERROR_MESSAGE_CAP - 1)}…` : raw;
-  return { kind: "internal", message, retryable: false };
+  return { kind: "internal", message: capStartErrorMessage(raw), retryable: false };
 }
 /**
  * child-context-switch plan P0 (§2.3.1, runner error concatenation): a
@@ -1075,6 +1084,9 @@ export class RuntimeRunner implements Runner {
       // "error" surfaces only on the message). Without this, a provider
       // crash looks like "completed with empty text".
       const turnError = prompted.ok ? handle.getTurnError?.() : undefined;
+      // 外部 agent（external-agent plan §2.7）：带 kind/retryable 的 turn 错误优先于裸 turnError
+      // （getTurnErrorInfo 存在且返回值时）；PiSessionHandle 不实现 ⇒ pi 路径行为不变。
+      const turnInfo = prompted.ok ? handle.getTurnErrorInfo?.() : undefined;
       const promptError = ((): ErrorInfo | undefined => {
         if (inputBudgetFailure !== undefined) return error(inputBudgetFailure, "config");
         if (prompted.ok) {
@@ -1099,6 +1111,7 @@ export class RuntimeRunner implements Runner {
             const base = `context switch self-check failed: ${selfcheckReason}`;
             return error(turnError === undefined ? base : `${base}; turn error: ${turnError}`, "model");
           }
+          if (turnInfo !== undefined) return { ...turnInfo, message: capStartErrorMessage(turnInfo.message) };
           if (turnError === undefined) return undefined;
           return error(`${turnError}${compactionFailureAnnotation(state.diag) ?? ""}`, "model");
         }

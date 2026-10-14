@@ -80,6 +80,7 @@ const JOURNAL_DIAG_FIELDS = [
   "dispatchMeta",
   "schemaPreset",
   "consults",
+  "external",
 ] as const satisfies readonly (keyof RunDiagnostics)[];
 
 function projectDiag(diag: RunDiagnostics): RunDiagnostics {

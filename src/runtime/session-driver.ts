@@ -7,6 +7,7 @@ import type {
   ConsultIdentityPrediction,
   ContextUsageInfo,
   DriverEvent,
+  ErrorInfo,
   ExpertRequestSnapshot,
   KillableHandle,
   RunOutcome,
@@ -174,6 +175,11 @@ export interface SessionHandle {
   getToolSources?(): ReadonlyMap<string, string>;
   getLastAssistantText(): string | undefined;
   getTurnError?(): string | undefined;
+  /**
+   * 外部 agent（external-agent plan §2.7，冻结面）：带 kind/retryable 的 turn 错误；
+   * 存在且返回值时优先于 getTurnError()。PiSessionHandle 不实现（pi 路径行为不变）。
+   */
+  getTurnErrorInfo?(): ErrorInfo | undefined;
   /** M-B2: the session's *actual* model (ground truth — covers runs with no spawn-time override/type default). */
   getModelRef?(): { provider: string; id: string } | undefined;
   /** set_model: switch this live session's model. `model` is an opaque pi Model
@@ -288,48 +294,11 @@ function errorInfo(error: unknown): NonNullable<RunOutcome["error"]> {
   const e = error instanceof Error ? error : new Error(String(error));
   return { kind: "internal", message: e.message, ...(e.stack ? { stack: e.stack } : {}), retryable: false };
 }
-/**
- * M-A: single-line, truncated preview of a tool call's arguments for the
- * live trail UI. Picks the most informative scalar (bash command, file path,
- * pattern…) and falls back to compact JSON. Display-only — never fed back to
- * a model — and hard-capped so a huge prompt/file body cannot bloat diag.
- */
-export function previewToolArgs(args: unknown, max = 80): string | undefined {
-  if (args === null || args === undefined) return undefined;
-  let text: string;
-  if (typeof args === "string") text = args;
-  else if (typeof args === "object") {
-    const r = args as Record<string, unknown>;
-    const str = (k: string): string | undefined =>
-      typeof r[k] === "string" && (r[k] as string).trim().length > 0 ? (r[k] as string) : undefined;
-    // Addressed tools (consult: expert+question; message_agent: to+text) read
-    // best as "→ target: body" instead of a JSON blob.
-    const target = str("expert") ?? str("to");
-    const body = str("question") ?? str("text");
-    const preferred = ["command", "path", "file_path", "pattern", "query", "description", "prompt", "url"];
-    const key = preferred.find((k) => str(k) !== undefined);
-    if (target !== undefined && body !== undefined) text = `→ ${target}: ${body}`;
-    else if (key) text = r[key] as string;
-    else {
-      // Compact `key=value` pairs; only non-scalar values fall back to JSON.
-      try {
-        text = Object.entries(r)
-          .filter(([, v]) => v !== undefined && v !== null && v !== "")
-          .map(([k, v]) =>
-            typeof v === "string" || typeof v === "number" || typeof v === "boolean"
-              ? `${k}=${String(v)}`
-              : `${k}=${JSON.stringify(v) ?? ""}`,
-          )
-          .join(" ");
-      } catch {
-        return undefined;
-      }
-    }
-  } else text = String(args);
-  text = text.replace(/\s+/g, " ").trim();
-  if (!text) return undefined;
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
+/* previewToolArgs moved verbatim to src/core/tool-preview.ts (external-agent plan §2.4);
+ * re-exported here so every existing import (tests included) keeps working byte-identically.
+ * Also imported for this module's own local use below. */
+import { previewToolArgs } from "../core/tool-preview.js";
+export { previewToolArgs };
 
 /**
  * X12: collect the tracked-run ids a toolResult message's `details` carries:
