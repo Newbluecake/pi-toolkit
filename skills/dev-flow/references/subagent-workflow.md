@@ -76,7 +76,7 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 （完整 `provider/id` 优先；同 prompt 换模型不会命中 journal 旧结果），也可以继续写进 agent 类型 frontmatter 的 `model:`。
 
 Explore=`cr-anthropic/claude-sonnet-5-5`，Plan=`cr-anthropic/claude-opus-5-5`，
-reviewer / verifier = gpt-6.1-sol（`cr-response/gpt-6.1-sol` ⇄ `zhipu-pool/gpt-6.1-sol`），
+reviewer / verifier = gpt-6.1-sol（reviewer：`cr-response/gpt-6.1-sol` ⇄ `zhipu-pool/gpt-6.1-sol`；**verifier 只用 `cr-response/gpt-6.1-sol`，禁派 `zhipu-pool/*`**），
 dev=`cr-anthropic/claude-sonnet-5-5` ⇄ gpt-6.1-sol（`cr-response` ⇄ `zhipu-pool`；并列首选、按包分摊；gpt-6.1-sol 开发的包 verifier 改派 Claude 系）；有订阅额度时 kimi-k3 / glm-5.3 可替换同阶段首选；
 gpt-5.6-terra / gpt-6-astra 只作兜底。以 SKILL.md「各阶段模型分工」表为准。
 
