@@ -667,6 +667,8 @@ export interface AgentSettings {
   webHub: WebHubSettings;
   /** Merged plugins: web_search tool (Codex/SerpAPI/Bocha/Tavily failover). Default on. */
   webSearch: EnabledGroup;
+  /** [date] 注入（date 模块）：会话首轮 + 跨日注入当前日期（消息形式，不动系统提示）。Pre-guard，主/子会话都生效。Default on. */
+  date: EnabledGroup;
   /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasklist + aboveEditor widget. Default on. */
   todo: TodoSettings;
   /** ask_user interactive question tool (main session only — child subagent sessions never see it). Default on. */
@@ -1116,6 +1118,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
   },
   webSearch: { enabled: true },
+  date: { enabled: true },
   todo: { enabled: true, nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 } },
   askUser: {
     enabled: true,
@@ -1390,6 +1393,7 @@ export function loadSettings(source: unknown): AgentSettings {
     hud: parseHudSettings(value.hud),
     webHub: parseWebHubSettings(value.webHub),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
+    date: parseEnabledGroup(value.date, DEFAULT_SETTINGS.date),
     todo: parseTodoSettings(value.todo),
     askUser: parseAskUserSettings(value.askUser),
     feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),

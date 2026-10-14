@@ -418,6 +418,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "web-hub spawn: require a per-spawn confirmation for LAN-originated session starts (default on; off = LAN behaves like loopback's known-dir pass-through; change: /reload then /webhub restart)",
   ),
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
+  "date.enabled": bool(
+    "date.enabled",
+    "Inject the current date ([date] YYYY-MM-DD Ddd (TZ) marker) on a session's first turn and again only when the day rolls over (main + child sessions)",
+  ),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   // Main-session todo staleness nudge (todo-nudge plan): all four keys are
   // plain turn counts, never durations — no `time: true`, no seconds/ms split.

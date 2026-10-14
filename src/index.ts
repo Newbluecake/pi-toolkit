@@ -73,6 +73,7 @@ import { createGoalLoopHook } from "./goal/hook.js";
 import { persistGoalRecord } from "./goal/store.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
 import { registerWebSearchTool } from "./web-search/index.js";
+import { wireDate } from "./date/index.js";
 import { wireTodo } from "./todo/index.js";
 import { wireMemory } from "./memory/index.js";
 import type { TidySpawnRequest } from "./memory/contracts.js";
@@ -150,6 +151,9 @@ export default function activate(rawPi: ExtensionAPI): void {
   const askUserRemoteRef: { current?: () => AskUserRemotePort | undefined } = {};
 
   if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
+  // date 模块：首轮 + 跨日以隐藏消息注入当前日期（主/子会话都注入；pre-guard）。
+  // enabled=false ⇒ wireDate 零注册。
+  wireDate(pi, { enabled: preGuardSettings.date.enabled });
   // todo-nudge (L1 feature): the tracker only turns on for the main session
   // with todo.nudge.enabled; sendMessage matches the compact-hint/quota-hint
   // hidden-message shape (display:false, triggerTurn:false, never sendUserMessage).
