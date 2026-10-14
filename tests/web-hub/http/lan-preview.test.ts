@@ -472,3 +472,67 @@ describe("LAN /api/preview — global admission (U4, dir-plan §1.4/C9)", () => 
     expect(loopback.body).toBe('{"error":"E_NOT_FOUND"}');
   });
 });
+
+// ---------------------------------------------------------------------------
+// chunked text (chunked-plan §6.1): LAN serves the SAME chunked behavior as
+// loopback (U1 同宽), and mode:"loopback" keeps LAN at 404 for chunk=1 too.
+// ---------------------------------------------------------------------------
+
+describe("LAN /api/preview — chunked text (chunked-plan)", () => {
+  function chunkPath(p: string, cont?: { offset: number; ident: string }): string {
+    const qs = new URLSearchParams({
+      agentKey: AGENT,
+      sessionId: SESSION,
+      path: p,
+      ...(cont === undefined ? {} : { offset: String(cont.offset), ident: cont.ident }),
+    });
+    qs.set("chunk", "1");
+    return `${PREVIEW_PATH}?${qs.toString()}`;
+  }
+
+  it("mode on: the chunk walk behaves exactly like loopback (headers + byte-exact chunks)", async () => {
+    const h = await harness();
+    const cookie = await h.cookieFor(1, "alice");
+    // ASCII-only payload: lanRequest's body is a string; byte-exactness over mixed content is
+    // pinned by the loopback suite — here the LAN row needs the wire behavior, not the codec.
+    const unit = "lan row 0123456789 abcdefghijklmnopqrstuvwxyz\r\n";
+    const content = unit.repeat(Math.ceil((600 * 1024) / unit.length));
+    const p = h.file("lan-chunk.txt", content);
+    let offset = 0;
+    let ident = "";
+    let round = 0;
+    let joined = "";
+    for (;;) {
+      round += 1;
+      expect(round).toBeLessThan(8);
+      const r = await lanRequest(h.port, {
+        path: chunkPath(p, offset === 0 ? undefined : { offset, ident }),
+        headers: { "X-PWH": "1", Cookie: cookie },
+      });
+      expect(r.status).toBe(200);
+      expect(r.headers?.["x-pwh-preview-offset"]).toBe(String(offset));
+      expect(r.headers?.["x-pwh-preview-ident"]).toMatch(/^i1\.[A-Za-z0-9_-]{22}$/);
+      expect(r.headers?.["x-pwh-preview-kind"]).toBe("text");
+      expect(r.headers?.["cache-control"]).toBe("no-store");
+      const bytes = Buffer.byteLength(r.body);
+      expect(bytes).toBeGreaterThan(0);
+      joined += r.body;
+      ident = r.headers?.["x-pwh-preview-ident"] ?? "";
+      offset += bytes;
+      if (r.headers?.["x-pwh-preview-truncated"] === "0") break;
+    }
+    expect(joined).toBe(content);
+  });
+
+  it('mode:"loopback": LAN with chunk=1 answers 404, byte-identical to every other preview mode', async () => {
+    const h = await harness({ mode: "loopback" });
+    const cookie = await h.cookieFor(1, "alice");
+    const p = h.file("off.txt", "no lan streaming");
+    const r = await lanRequest(h.port, {
+      path: chunkPath(p, { offset: 0, ident: "i1." + "A".repeat(22) }),
+      headers: { "X-PWH": "1", Cookie: cookie },
+    });
+    expect(r.status).toBe(404);
+    expect(r.body).toBe('{"error":"E_NOT_FOUND"}');
+  });
+});

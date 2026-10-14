@@ -10,12 +10,27 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PREVIEW_PATH, PREVIEW_TEXT_MAX_BYTES, parsePreviewDirListing } from "../../../src/web-hub/protocol/preview.js";
+import {
+  PREVIEW_PATH,
+  PREVIEW_TEXT_CHUNK_BYTES,
+  PREVIEW_TEXT_MAX_BYTES,
+  parsePreviewDirListing,
+} from "../../../src/web-hub/protocol/preview.js";
 import { webHubUploadsDir } from "../../../src/web-hub/protocol/paths.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createPreviewRoutes } from "../../../src/web-hub/hub/preview/routes.js";
@@ -869,5 +884,142 @@ describe("loopback /api/preview — dir=1 listings (P1b)", () => {
     expect(r.headers["x-pwh-preview-kind"]).toBe("text");
     expect(r.body).toBe("upload body");
     await h.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// chunked text streaming (chunked-plan §6.1 e2e): the 1.2 MiB mixed-content walk
+// (decoded concatenation strictly equals the original), the three mid-walk
+// mutation classes (append / same-length rewrite / rename replace ⇒ 409), the
+// chunk-only response headers and gzip-per-chunk.
+// ---------------------------------------------------------------------------
+
+describe("loopback /api/preview — chunked text (chunked-plan)", () => {
+  function chunkUrl(p: string, cont?: { offset: number; ident: string }): string {
+    const qs = new URLSearchParams({
+      agentKey: AGENT,
+      sessionId: SESSION,
+      path: p,
+      ...(cont === undefined ? {} : { offset: String(cont.offset), ident: cont.ident }),
+    });
+    qs.set("chunk", "1");
+    return `${PREVIEW_PATH}?${qs.toString()}`;
+  }
+
+  function mixedContent(targetBytes: number): Buffer {
+    const unit = Buffer.from("row-αβγ-漢字-😀-tail\r\nnext line\r\n", "utf8");
+    return Buffer.concat(Array(Math.ceil(targetBytes / unit.length)).fill(unit)).subarray(0, targetBytes);
+  }
+
+  it("walks a 1.2 MiB mixed text to the end; the concatenated chunks strictly equal the original", async () => {
+    const h = await harness();
+    const content = mixedContent(Math.round(1.2 * 1024 * 1024));
+    const p = h.file("big-mixed.md", content);
+    const got: Buffer[] = [];
+    let offset = 0;
+    let ident = "";
+    for (let round = 0; round < 16; round += 1) {
+      const res = await rawCollect(h.port, {
+        path: chunkUrl(p, offset === 0 ? undefined : { offset, ident }),
+        headers: { "X-PWH": "1", Cookie: h.cookie },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers["x-pwh-preview-kind"]).toBe("text");
+      expect(Number(res.headers["x-pwh-preview-size"])).toBe(content.length);
+      expect(res.headers["x-pwh-preview-offset"]).toBe(String(offset));
+      expect(res.headers["x-pwh-preview-ident"]).toMatch(/^i1\.[A-Za-z0-9_-]{22}$/);
+      expect(res.headers["cache-control"]).toBe("no-store");
+      const bytes = Number(res.headers["x-pwh-preview-bytes"] ?? 0);
+      expect(bytes).toBeGreaterThan(0);
+      expect(bytes).toBeLessThanOrEqual(PREVIEW_TEXT_CHUNK_BYTES);
+      expect(res.bytes.length).toBe(bytes);
+      got.push(res.bytes);
+      ident = res.headers["x-pwh-preview-ident"] ?? "";
+      offset += bytes;
+      if (res.headers["x-pwh-preview-truncated"] === "0") break;
+    }
+    expect(offset).toBe(content.length);
+    const joined = Buffer.concat(got);
+    expect(joined.equals(content)).toBe(true);
+    // and it is valid UTF-8 end to end (every cut landed on a character boundary or EOF)
+    expect(() => new TextDecoder("utf-8", { fatal: true }).decode(joined)).not.toThrow();
+  });
+
+  it("a PLAIN (non-chunked) response carries NO offset/ident headers — byte-identical to before", async () => {
+    const h = await harness();
+    const p = h.file("plain.txt", "small plain");
+    const r = await h.get(AGENT, SESSION, p);
+    expect(r.status).toBe(200);
+    expect(r.headers["x-pwh-preview-offset"]).toBeUndefined();
+    expect(r.headers["x-pwh-preview-ident"]).toBeUndefined();
+  });
+
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms).unref?.());
+
+  for (const [label, mutate] of [
+    ["append (size moved)", (p: string): void => appendFileSync(p, Buffer.alloc(64, 0x62))],
+    [
+      "same-length rewrite (only ctime moved)",
+      async (p: string): Promise<void> => {
+        // keep the first chunk's stat and the rewrite at least a filesystem-timestamp tick
+        // apart — size and inode deliberately do NOT move here, ctime is the only tell
+        await sleep(25);
+        writeFileSync(p, Buffer.alloc(64 * 1024, 0x63));
+      },
+    ],
+    [
+      "rename replace (new inode)",
+      (p: string): void => {
+        const tmp = `${p}.new`;
+        writeFileSync(tmp, Buffer.alloc(64 * 1024, 0x64));
+        renameSync(tmp, p);
+      },
+    ],
+  ] as Array<[string, (p: string) => void | Promise<void>]>) {
+    it(`mid-walk ${label} ⇒ 409 E_PREVIEW_CHANGED, nothing stitched`, async () => {
+      const h = await harness();
+      const content = mixedContent(600 * 1024);
+      const p = h.file("mut.md", content);
+      const first = await rawRequest(h.port, {
+        method: "GET",
+        path: chunkUrl(p),
+        headers: { "X-PWH": "1", Cookie: h.cookie },
+      });
+      expect(first.status).toBe(200);
+      const ident = first.headers["x-pwh-preview-ident"] ?? "";
+      const firstBytes = Number(first.headers["x-pwh-preview-bytes"] ?? 0);
+      await mutate(p);
+      const second = await rawRequest(h.port, {
+        method: "GET",
+        path: chunkUrl(p, { offset: firstBytes, ident }),
+        headers: { "X-PWH": "1", Cookie: h.cookie },
+      });
+      expect(second.status).toBe(409);
+      expect(JSON.parse(second.body)).toEqual({ error: "E_PREVIEW_CHANGED" });
+    });
+  }
+
+  it("gzip per chunk: Content-Encoding gzip, X-PWH-Preview-Bytes names the UNCOMPRESSED cut", async () => {
+    const h = await harness();
+    const content = mixedContent(Math.round(1.1 * 1024 * 1024));
+    const p = h.file("gz.md", content);
+    let offset = 0;
+    let ident = "";
+    for (let round = 0; round < 8; round += 1) {
+      const res = await rawCollect(h.port, {
+        path: chunkUrl(p, offset === 0 ? undefined : { offset, ident }),
+        headers: { "X-PWH": "1", Cookie: h.cookie, "Accept-Encoding": "gzip" },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-encoding"]).toBe("gzip");
+      const bytes = Number(res.headers["x-pwh-preview-bytes"] ?? 0);
+      const cut = gunzipSync(res.bytes);
+      expect(cut.length).toBe(bytes);
+      expect(cut.equals(content.subarray(offset, offset + bytes))).toBe(true);
+      ident = res.headers["x-pwh-preview-ident"] ?? "";
+      offset += bytes;
+      if (res.headers["x-pwh-preview-truncated"] === "0") break;
+    }
+    expect(offset).toBe(content.length);
   });
 });

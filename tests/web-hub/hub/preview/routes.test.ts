@@ -12,7 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -22,19 +22,21 @@ import { createPreviewRoutes } from "../../../../src/web-hub/hub/preview/routes.
 import { createFsAdmitter, denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
 import type { FsAdmitter, PreviewFs } from "../../../../src/web-hub/hub/preview/admit.js";
 import { createPreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
+import type { PreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
 import { defaultPreviewFs } from "../../../../src/web-hub/hub/preview/fs.js";
 import { createUploadVerifier } from "../../../../src/web-hub/hub/preview/verify.js";
 import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import type { PreviewRouteIo, PreviewRoutes, RegistryView } from "../../../../src/web-hub/hub/ports.js";
 import type { OpenForPreviewParams, OpenForPreviewResult, UploadStore } from "../../../../src/web-hub/hub/uploads.js";
 import {
+  PREVIEW_HDR,
   PREVIEW_IMAGE_MAX_PIXELS,
   PREVIEW_TEXT_MAX_BYTES,
   parsePreviewDirListing,
   type PreviewDirListing,
 } from "../../../../src/web-hub/protocol/preview.js";
 import { memLog, type MemLog } from "../helpers.js";
-import { FakeHandle } from "./helpers.js";
+import { FakeHandle, fakeStat } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // fakes
@@ -1803,5 +1805,565 @@ describe("P1b routes — the dir=1 branch", () => {
     releaseClose(); // the late settle must neither throw nor produce an unhandled rejection
     await sleep(50);
     expect(previewAudits(log).at(-1)).toMatchObject({ ok: false, code: "E_ABORT", reason: "hub-close" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// chunked text (chunked-plan §3.3/§6.1): the ③ param matrix, the R-walk (D5 — a
+// continuation structurally re-walks the SAME handle(), ⓪–⑩ with no exemption), the
+// chunk-only outcome mappings, the audit `offset` field and dispose aborting an
+// in-flight continuation.
+// ---------------------------------------------------------------------------
+
+describe("PV3 routes — chunked text (chunked-plan)", () => {
+  const agentKey = "a4242-nonce12";
+  const sessionId = "sess123";
+
+  function fixture(): {
+    cwd: string;
+    file(rel: string, content: string | Buffer): string;
+    registry: ReturnType<typeof makeRegistry>;
+  } {
+    const cwd = join(dir, "cwd-chunk");
+    mkdirSync(cwd, { recursive: true });
+    return {
+      cwd,
+      file(rel: string, content: string | Buffer): string {
+        const p = join(cwd, rel);
+        mkdirSync(join(p, ".."), { recursive: true });
+        writeFileSync(p, content);
+        return p;
+      },
+      registry: makeRegistry({ agentKey, sessionId, cwd }),
+    };
+  }
+
+  /** the chunked query builder: first chunk = chunk=1; continuation = +offset&ident.
+   * `noChunk` builds the half-protocol cases (offset/ident WITHOUT chunk=1). */
+  function chunkQ(
+    p: string,
+    cont?: { offset: number; ident: string },
+    extra: Record<string, string> = {},
+    opts: { noChunk?: boolean } = {},
+  ): URLSearchParams {
+    return new URLSearchParams({
+      agentKey,
+      sessionId,
+      path: p,
+      ...(opts.noChunk === true ? {} : { chunk: "1" }),
+      ...(cont === undefined ? {} : { offset: String(cont.offset), ident: cont.ident }),
+      ...extra,
+    });
+  }
+
+  function routes(
+    registry: Pick<RegistryView, "get">,
+    over: {
+      uploads?: Pick<UploadStore, "openForPreview">;
+      admitter?: FsAdmitter;
+      tracker?: PreviewIoTracker;
+      verifier?: ReturnType<typeof createUploadVerifier>;
+    } = {},
+  ): PreviewRoutes {
+    return createPreviewRoutes({
+      mode: "on",
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      uploadsRoot: join(dir, "uploads-root"),
+      registry,
+      log,
+      now: Date.now,
+      ...(over.uploads === undefined ? {} : { uploads: over.uploads }),
+      ...(over.admitter === undefined ? {} : { admitter: over.admitter }),
+      ...(over.tracker === undefined ? {} : { tracker: over.tracker }),
+      ...(over.verifier === undefined ? {} : { verifier: over.verifier }),
+    });
+  }
+
+  /** walks a fresh 600 KiB text file and returns {path, ident, firstBytes} via a first chunk. */
+  async function openStream(
+    r: PreviewRoutes,
+    p: string,
+    io = makeIo(),
+  ): Promise<{ ident: string; bytes: number; offset: number; truncated: boolean }> {
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p), io);
+    if (res.status !== 200) throw new Error(`first chunk failed: ${res.status} ${res.body().toString()}`);
+    return {
+      ident: res.headers[PREVIEW_HDR.ident] ?? "",
+      bytes: Number(res.headers[PREVIEW_HDR.bytes] ?? 0),
+      offset: Number(res.headers[PREVIEW_HDR.offset] ?? 0),
+      truncated: res.headers[PREVIEW_HDR.truncated] === "1",
+    };
+  }
+
+  // ---- ③ the §2.2 param matrix ------------------------------------------------
+
+  it("③ five classes of malformed chunk params ⇒ 400 (half protocol / mutex / unpaired / bad offset / bad ident)", async () => {
+    const fx = fixture();
+    const p = fx.file("ok.txt", "hi");
+    const r = routes(fx.registry);
+    const goodIdent = "i1." + "A".repeat(22);
+    const cases: Array<[string, URLSearchParams]> = [
+      ["offset without chunk", chunkQ(p, undefined, { offset: "5" }, { noChunk: true })],
+      ["ident without chunk", chunkQ(p, undefined, { ident: goodIdent }, { noChunk: true })],
+      ["chunk + dir", chunkQ(p, undefined, { dir: "1" })],
+      ["chunk + download", chunkQ(p, undefined, { download: "1" })],
+      ["offset without ident", chunkQ(p, undefined, { chunk: "1", offset: "5" })],
+      ["ident without offset", chunkQ(p, undefined, { chunk: "1", ident: goodIdent })],
+      ["malformed offset (leading zero)", chunkQ(p, { offset: 5, ident: goodIdent }, { offset: "05" })],
+      [
+        "malformed offset (>= hub ceiling)",
+        chunkQ(p, { offset: 5, ident: goodIdent }, { offset: "99999999999999999999" }),
+      ],
+      ["malformed ident", chunkQ(p, { offset: 5, ident: "i1.short" })],
+    ];
+    for (const [label, q] of cases) {
+      const res = new FakeRes();
+      await r.handle(fakeReq({ "x-pwh": "1" }), res, q, makeIo());
+      expect(res.status, label).toBe(400);
+      expect(res.json(), label).toEqual({ error: "E_BAD_REQUEST" });
+    }
+    // chunk=1 with a NON-"1" value is not chunked mode at all — plain 200 (query.get !== "1")
+    const plain = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), plain, chunkQ(p, undefined, { chunk: "true" }), makeIo());
+    expect(plain.status).toBe(200);
+    expect(plain.headers[PREVIEW_HDR.offset]).toBeUndefined();
+  });
+
+  it("③ offset=0 + ident is legal (identity-checked re-read of the first chunk)", async () => {
+    const fx = fixture();
+    const p = fx.file("mid.txt", Buffer.alloc(300 * 1024, 0x61));
+    const r = routes(fx.registry);
+    const first = await openStream(r, p);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: 0, ident: first.ident }), makeIo());
+    expect(res.status).toBe(200);
+    expect(res.headers[PREVIEW_HDR.offset]).toBe("0");
+    expect(res.headers[PREVIEW_HDR.ident]).toBe(first.ident);
+    expect(Number(res.headers[PREVIEW_HDR.bytes])).toBe(first.bytes);
+  });
+
+  // ---- R-walk (D5): a continuation structurally walks the SAME ⓪–⑩ pipeline ------
+
+  it("R-walk ①②: continuation without X-PWH ⇒ 403 before auth; authorize runs per chunk", async () => {
+    const fx = fixture();
+    const p = fx.file("w.txt", "walk");
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq(), res, chunkQ(p, { offset: 0, ident: "i1." + "A".repeat(22) }), makeIo({ user: null }));
+    expect(res.status).toBe(403);
+    expect(res.json()).toEqual({ error: "E_CSRF" });
+
+    // authorize IS consulted on every chunk request (spy count == requests)
+    const baseIo = makeIo();
+    let authCalls = 0;
+    const spyIo: PreviewRouteIo = { ...baseIo, authorize: (d) => ((authCalls += 1), baseIo.authorize(d)) };
+    const ok1 = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), ok1, chunkQ(p), spyIo);
+    const ok2 = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), ok2, chunkQ(p), spyIo);
+    expect(ok1.status).toBe(200);
+    expect(ok2.status).toBe(200);
+    expect(authCalls).toBe(2);
+  });
+
+  it("R-walk ④: a continuation burst draws from the SAME token bucket (21st ⇒ 429)", async () => {
+    // unknown agent ⇒ 404 at ⑤ (after the bucket) — no fs touched, the burst is pure bucket
+    const fx = fixture();
+    const r = routes(fx.registry);
+    const io = makeIo();
+    const run = async (): Promise<number> => {
+      const res = new FakeRes();
+      await r.handle(
+        fakeReq({ "x-pwh": "1" }),
+        res,
+        chunkQ("/x/y", { offset: 5, ident: "i1." + "A".repeat(22) }, { agentKey: "ghost" }),
+        io,
+      );
+      return res.status;
+    };
+    for (let i = 0; i < 20; i += 1) expect(await run()).toBe(404);
+    const rejected = new FakeRes();
+    await r.handle(
+      fakeReq({ "x-pwh": "1" }),
+      rejected,
+      chunkQ("/x/y", { offset: 5, ident: "i1." + "A".repeat(22) }, { agentKey: "ghost" }),
+      io,
+    );
+    expect(rejected.status).toBe(429);
+    expect(rejected.json()).toEqual({ error: "E_RATE" });
+  });
+
+  it("R-walk ④: a continuation occupies the SAME in-flight slots (2 busy ⇒ 3rd 503 inflight)", async () => {
+    const fx = fixture();
+    const p = fx.file("gate.txt", "gated");
+    // an admitter that parks on a gate — two parked requests hold the principal's 2 slots
+    const gates: Array<() => void> = [];
+    const parked: FsAdmitter = {
+      admit: () =>
+        new Promise((resolve) => {
+          gates.push(() => resolve({ ok: true, fh: new FakeHandle(Buffer.from("gated")), size: 5, realpath: p }));
+        }),
+    };
+    const r = routes(fx.registry, { admitter: parked });
+    const io = makeIo();
+    const started = [
+      r.handle(fakeReq({ "x-pwh": "1" }), new FakeRes(), chunkQ(p), io),
+      r.handle(fakeReq({ "x-pwh": "1" }), new FakeRes(), chunkQ(p, { offset: 0, ident: "i1." + "A".repeat(22) }), io),
+    ];
+    await sleep(20); // both parked at ⑦ with slots taken
+    const third = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), third, chunkQ(p, { offset: 0, ident: "i1." + "A".repeat(22) }), io);
+    expect(third.status).toBe(503);
+    expect(third.json()).toEqual({ error: "E_BUSY" });
+    expect(previewAudits(log).at(-1)).toMatchObject({ code: "E_BUSY", reason: "inflight" });
+    for (const g of gates) g();
+    await Promise.all(started);
+  });
+
+  it("R-walk ⑤: a changed sessionId between chunks ⇒ 409 E_SESSION_CHANGED", async () => {
+    const fx = fixture();
+    const p = fx.file("s.txt", Buffer.alloc(300 * 1024, 0x61));
+    let sid = sessionId;
+    const registry: Pick<RegistryView, "get"> = {
+      get: (k) =>
+        k === agentKey
+          ? ({
+              agentKey: k,
+              kind: "tui",
+              pid: 1,
+              cwd: fx.cwd,
+              state: "live",
+              pluginVersion: "0",
+              outdated: false,
+              prompts: [],
+              session: { sessionId: sid, cwd: fx.cwd, reason: "test", leafId: null, mode: "tui" as const },
+            } as unknown as ReturnType<RegistryView["get"]>)
+          : undefined,
+    };
+    const r = routes(registry);
+    const first = await openStream(r, p);
+    sid = "sess999"; // the session was replaced mid-stream
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res.status).toBe(409);
+    expect(res.json()).toEqual({ error: "E_SESSION_CHANGED" });
+  });
+
+  it("R-walk ⑦: admitter.admit runs on EVERY chunk request (spy count == requests)", async () => {
+    const fx = fixture();
+    const p = fx.file("a.txt", Buffer.alloc(300 * 1024, 0x61));
+    const inner = createFsAdmitter({
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      tracker: createPreviewIoTracker(),
+      log,
+      now: Date.now,
+    });
+    let admits = 0;
+    const spy: FsAdmitter = {
+      admit: (input, deadline, signal) => {
+        admits += 1;
+        return inner.admit(input, deadline, signal);
+      },
+    };
+    const r = routes(fx.registry, { admitter: spy });
+    const first = await openStream(r, p);
+    let offset = first.bytes;
+    let rounds = 0;
+    while (offset < 300 * 1024 && rounds < 5) {
+      rounds += 1;
+      const res = new FakeRes();
+      await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset, ident: first.ident }), makeIo());
+      expect(res.status).toBe(200);
+      offset += Number(res.headers[PREVIEW_HDR.bytes] ?? 0);
+    }
+    expect(admits).toBe(1 + rounds);
+  });
+
+  it("R-walk ⑦: denylist hit on a continuation ⇒ 403 even with a well-formed ident", async () => {
+    const fx = fixture();
+    const p = join(dir, "elsewhere", "id_rsa");
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: 0, ident: "i1." + "A".repeat(22) }), makeIo());
+    expect(res.status).toBe(403);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_DENIED", reason: "denylist" });
+    const line = previewAudits(log).at(-1);
+    expect(JSON.stringify(line)).not.toContain("id_rsa");
+  });
+
+  it("R-walk ⑦: the file swapped to a symlink between chunks ⇒ the re-walked admission rejects it", async () => {
+    const fx = fixture();
+    const p = fx.file("swap.txt", Buffer.alloc(300 * 1024, 0x61));
+    const secret = join(dir, ".ssh", "id_rsa");
+    mkdirSync(join(secret, ".."), { recursive: true });
+    writeFileSync(secret, "SECRET");
+    const r = routes(fx.registry);
+    const first = await openStream(r, p);
+    rmSync(p);
+    symlinkSync(secret, p); // realpath now lands on a denylisted segment — never a 200 body
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res.status).toBe(403);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_DENIED", reason: "denylist" });
+    expect(res.body().toString()).not.toContain("SECRET");
+  });
+
+  it("R-walk ⑧: readSample re-runs on every chunk (per-request read calls on the opened handle)", async () => {
+    const fx = fixture();
+    const p = fx.file("rs.txt", Buffer.alloc(300 * 1024, 0x61));
+    const inner = createFsAdmitter({
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      tracker: createPreviewIoTracker(),
+      log,
+      now: Date.now,
+    });
+    let reads = 0;
+    const counting: FsAdmitter = {
+      admit: async (input, deadline, signal) => {
+        const out = await inner.admit(input, deadline, signal);
+        if (out.ok) {
+          const fh = out.fh;
+          out.fh = {
+            fd: fh.fd,
+            stat: () => fh.stat(),
+            read: (buf: Buffer, off: number, len: number, pos: number) => {
+              reads += 1;
+              return fh.read(buf, off, len, pos);
+            },
+            close: () => fh.close(),
+          };
+        }
+        return out;
+      },
+    };
+    const r = routes(fx.registry, { admitter: counting });
+    const first = await openStream(r, p);
+    expect(reads).toBeGreaterThan(0);
+    const before = reads;
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res.status).toBe(200);
+    expect(reads).toBeGreaterThan(before); // the continuation re-read the sniff sample
+  });
+
+  it("R-walk ⑥: an upload-class continuation re-calls openForPreview (the §4.2 chain re-runs)", async () => {
+    const uploadsRoot = join(dir, "uploads-root");
+    const content = Buffer.alloc(300 * 1024, 0x61);
+    const upath = join(uploadsRoot, "s-sess123/upid9/up.txt");
+    mkdirSync(join(upath, ".."), { recursive: true });
+    writeFileSync(upath, content);
+    const sha256 = createHash("sha256").update(content).digest("hex");
+    const base = defaultPreviewFs();
+    let opens = 0;
+    const uploads: Pick<UploadStore, "openForPreview"> = {
+      openForPreview: async () => {
+        opens += 1;
+        const fh = await base.open(upath, 0);
+        const st = await fh.stat();
+        return {
+          ok: true,
+          fh: {
+            fd: fh.fd,
+            stat: async () => st,
+            read: (buf: Buffer, off: number, len: number, pos: number) => fh.read(buf, off, len, pos),
+            close: () => fh.close(),
+          } as never,
+          size: st.size,
+          uploadId: "upid9",
+          sha256,
+          layout: "generated",
+          shared: true,
+        } as never;
+      },
+    };
+    const r = routes(fixture().registry, { uploads });
+    const first = await openStream(r, upath);
+    const res = new FakeRes();
+    await r.handle(
+      fakeReq({ "x-pwh": "1" }),
+      res,
+      chunkQ(upath, { offset: first.bytes, ident: first.ident }),
+      makeIo(),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers[PREVIEW_HDR.offset]).toBe(String(first.bytes));
+    expect(opens).toBe(2); // one open per chunk request — no caching anywhere
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: true, cls: "upload", shared: true });
+  });
+
+  // ---- ⑧/⑨ chunk-specific mappings ---------------------------------------------
+
+  it("⑧ a continuation that re-sniffs as an image/binary ⇒ 409 E_PREVIEW_CHANGED (never 415/image)", async () => {
+    const fx = fixture();
+    const p = fx.file("turn.txt", Buffer.alloc(300 * 1024, 0x61));
+    const r = routes(fx.registry);
+    const first = await openStream(r, p);
+    // swapped to an image — sniff fires before the stream's ident arithmetic
+    writeFileSync(p, pngBytes(3, 4, 128));
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res.status).toBe(409);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_CHANGED" });
+    // swapped to binary — same 409, NOT the first-chunk 415
+    writeFileSync(p, Buffer.concat([Buffer.from("ok text\n"), Buffer.alloc(64, 0)]));
+    const res2 = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res2, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res2.status).toBe(409);
+    expect(res2.json()).toEqual({ error: "E_PREVIEW_CHANGED" });
+  });
+
+  it("⑧ a FIRST chunk that sniffs as an image takes the image branch verbatim (chunk ignored, no offset/ident headers)", async () => {
+    const fx = fixture();
+    const p = fx.file("img.png", pngBytes(2, 3, 256));
+    const r = routes(fx.registry);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p), makeIo());
+    expect(res.status).toBe(200);
+    expect(res.headers[PREVIEW_HDR.kind]).toBe("image");
+    expect(res.headers[PREVIEW_HDR.offset]).toBeUndefined();
+    expect(res.headers[PREVIEW_HDR.ident]).toBeUndefined();
+    expect(res.headers["Cache-Control"]).toBeUndefined();
+  });
+
+  it("⑨ append between chunks (size and ctime moved) ⇒ 409 E_PREVIEW_CHANGED, nothing stitched", async () => {
+    const fx = fixture();
+    const p = fx.file("log.txt", Buffer.alloc(300 * 1024, 0x61));
+    const r = routes(fx.registry);
+    const first = await openStream(r, p);
+    appendFileSync(p, Buffer.alloc(10, 0x62));
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res.status).toBe(409);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_CHANGED" });
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: false, code: "E_PREVIEW_CHANGED" });
+  });
+
+  it("⑨ same-length content rewrite (only ctime moved) ⇒ 409 via the ident mismatch", async () => {
+    // deterministic variant of the e2e mutation class: a mutable FakeHandle whose stat flips
+    // ONLY ctimeMs between the two requests (same dev/ino/size — exactly the real-fs case where
+    // a same-length rewrite dodges the size/inode tells and only ctime moves).
+    const fx = fixture();
+    const p = join(fx.cwd, "rw.txt");
+    const content = Buffer.alloc(300 * 1024, 0x61);
+    const fh = new FakeHandle(content);
+    const fakeAdmit: FsAdmitter = {
+      admit: async () => ({ ok: true, fh, size: content.length, realpath: p }),
+    };
+    const r = routes(fx.registry, { admitter: fakeAdmit });
+    const first = await openStream(r, p);
+    fh.stat_ = fakeStat({ dev: 11, ino: 22, size: content.length, ctimeMs: 4242 }); // only ctime moved
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res.status).toBe(409);
+    expect(res.json()).toEqual({ error: "E_PREVIEW_CHANGED" });
+  });
+
+  it("⑨ range: offset ≥ size with a CORRECT ident ⇒ 400 {error, reason:'offset'}", async () => {
+    const fx = fixture();
+    const p = fx.file("small.txt", "tiny file");
+    const r = routes(fx.registry);
+    const first = await openStream(r, p);
+    expect(first.truncated).toBe(false);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: 9, ident: first.ident }), makeIo());
+    expect(res.status).toBe(400);
+    expect(res.json()).toEqual({ error: "E_BAD_REQUEST", reason: "offset" });
+    expect(previewAudits(log).at(-1)).toMatchObject({ code: "E_BAD_REQUEST", reason: "offset" });
+  });
+
+  it("⑨ busy: the chunked branch's tracker pre-check ⇒ 503 E_BUSY + Retry-After: 1", async () => {
+    const fx = fixture();
+    const p = fx.file("b.txt", "busy me");
+    const fakeAdmit: FsAdmitter = {
+      admit: async () => ({ ok: true, fh: new FakeHandle(Buffer.from("busy me")), size: 7, realpath: p }),
+    };
+    // pass at the readSample check, trip at the chunked stream's pre-stat check
+    let checks = 0;
+    const arming: PreviewIoTracker = {
+      get zombies(): number {
+        checks += 1;
+        return checks <= 1 ? 0 : 5;
+      },
+      get max(): number {
+        return 2;
+      },
+    };
+    const r = routes(fx.registry, { admitter: fakeAdmit, tracker: arming });
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p), makeIo());
+    expect(res.status).toBe(503);
+    expect(res.json()).toEqual({ error: "E_BUSY" });
+    expect(res.headers["Retry-After"]).toBe("1");
+    expect(previewAudits(log).at(-1)).toMatchObject({ ok: false, code: "E_BUSY", reason: "stream" });
+  });
+
+  // ---- ⑩ audit + lifecycle ------------------------------------------------------
+
+  it("⑩ the audit line carries offset (statistics only) and never the path", async () => {
+    const fx = fixture();
+    const p = fx.file("aud.txt", Buffer.alloc(600 * 1024, 0x61));
+    const r = routes(fx.registry);
+    const first = await openStream(r, p);
+    const res = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), res, chunkQ(p, { offset: first.bytes, ident: first.ident }), makeIo());
+    expect(res.status).toBe(200);
+    const line = previewAudits(log).at(-1);
+    expect(line).toMatchObject({ ok: true, kind: "text", offset: first.bytes });
+    expect(JSON.stringify(line)).not.toContain(p);
+    // a first chunk audits offset 0; a non-chunked request audits NO offset at all
+    const plain = new FakeRes();
+    await r.handle(fakeReq({ "x-pwh": "1" }), plain, query(agentKey, sessionId, p), makeIo());
+    expect(previewAudits(log).at(-1)).not.toHaveProperty("offset");
+  });
+
+  it("⑩ dispose() aborts an in-flight continuation (bounded teardown reaches it)", async () => {
+    const fx = fixture();
+    const p = fx.file("d.txt", Buffer.alloc(300 * 1024, 0x61));
+    const inner = createFsAdmitter({
+      denyCtx: denyCtxOf(dir, join(dir, ".pi/agent")),
+      tracker: createPreviewIoTracker(),
+      log,
+      now: Date.now,
+    });
+    const slow: FsAdmitter = {
+      admit: async (input, deadline, signal) => {
+        const out = await inner.admit(input, deadline, signal);
+        if (out.ok) {
+          const fh = out.fh;
+          out.fh = {
+            fd: fh.fd,
+            stat: () => fh.stat(),
+            read: (buf: Buffer, off: number, len: number, pos: number) =>
+              // ONLY the continuation's positional read (at the chunk-1 cap) is slow —
+              // readSample (pos 0) and the first chunk's reads stay fast, so the request is
+              // parked INSIDE ⑨'s chunked read, exactly the window dispose must reach.
+              pos === PREVIEW_TEXT_MAX_BYTES
+                ? new Promise((resolve) => {
+                    const t = setTimeout(() => resolve(fh.read(buf, off, len, pos)), 400);
+                    t.unref();
+                  })
+                : fh.read(buf, off, len, pos),
+            close: () => fh.close(),
+          };
+        }
+        return out;
+      },
+    };
+    const r = routes(fx.registry, { admitter: slow });
+    const first = await openStream(r, p);
+    const res = new FakeRes();
+    const inflight = r.handle(
+      fakeReq({ "x-pwh": "1" }),
+      res,
+      chunkQ(p, { offset: first.bytes, ident: first.ident }),
+      makeIo(),
+    );
+    await sleep(30); // the continuation is now parked inside its chunked read
+    await r.dispose("close", createReqDeadline(Date.now, 1_000));
+    await inflight;
+    expect(res.status).toBe(503); // pre-head hub-close ⇒ E_HUB_RESTARTING
+    expect(res.json()).toEqual({ error: "E_HUB_RESTARTING" });
+    expect(previewAudits(log).at(-1)).toMatchObject({ code: "E_ABORT", reason: "hub-close" });
   });
 });

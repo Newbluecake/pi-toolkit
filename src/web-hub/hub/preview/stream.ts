@@ -36,6 +36,8 @@ import { createHash } from "node:crypto";
 import { PREVIEW_HDR, PREVIEW_VERIFY_MS } from "../../protocol/preview.js";
 import { acceptsGzip, GZIP_MIN_BYTES, gzipAsync } from "../gzip.js";
 import { isPreviewIoError, racePreviewIo } from "./fs.js";
+import type { PreviewIoTracker } from "./fs.js";
+import { previewIdentOf } from "./ident.js";
 import type { PreviewHandle } from "./admit.js";
 import { utf8SafeCut } from "./sniff.js";
 import type { SniffResult } from "./sniff.js";
@@ -60,7 +62,14 @@ export type StreamFailReason =
   | "identity-changed"
   | "verify-timeout"
   | "verify-deadline"
-  | "io";
+  | "io"
+  /** chunked-plan §2.3: a continuation whose `offset ≥ size` (client arithmetic error) —
+   * pre-head only, mapped 400 `E_BAD_REQUEST{reason:"offset"}` by the routes. */
+  | "range"
+  /** chunked-plan §3.2 (r2 #4): the chunked branch's OWN pre-race tracker check tripping —
+   * the ONLY source of this reason (`racePreviewIo` never produces it; `classify` has no
+   * branch for it), mapped 503 `E_BUSY` + `Retry-After: 1` by the routes. */
+  | "busy";
 
 export type StreamOutcome =
   | { ok: true; bytes: number; truncated: boolean; verify?: "hashed" | "cached" | "joined" }
@@ -82,6 +91,13 @@ interface StreamSrc {
    *  attachment` carrying this basename, `application/octet-stream`, no sniff/kind gate).
    *  The route skips the sample read for these (download starts at offset 0). */
   download?: { filename: string };
+  /** chunked-plan §3.2: present ⇒ the CHUNKED text flow (`streamChunkedText`) — the routes
+   *  set it ONLY for a `chunk=1` request whose sniff said `text` (a first-chunk image keeps
+   *  the image flow; a continuation that re-sniffed non-text is 409'd by the routes before
+   *  this layer). `offset` is the request's validated byte offset (0 for the first chunk),
+   *  `ident` the echo to prove the file is the one the client started from (absent on the
+   *  first chunk), `ceiling` the hub hard cap (the read length never crosses it). */
+  chunk?: { offset: number; ident?: string; ceiling: number };
 }
 
 interface StreamOpts {
@@ -96,6 +112,12 @@ interface StreamOpts {
    * async thread-pool gzip raced against the write-out deadline); images never compress — they
    * are already-compressed formats and their flow streams instead of buffering. */
   acceptEncoding?: string;
+  /** chunked-plan §3.2: the routes instance's zombie-IO tracker — passed ONLY in chunked
+   *  mode. Present ⇒ every race in the chunked branch counts an abandoned underlying as a
+   *  zombie (5th `racePreviewIo` arg) AND is preceded by the fast-fail pre-check
+   *  (`zombies >= max` ⇒ `fail("busy")`). Undefined ⇒ today's untracked semantics, so a
+   *  non-chunked request's path is byte-identical to before. */
+  tracker?: PreviewIoTracker;
 }
 
 interface FlowState {
@@ -140,7 +162,7 @@ function baseHeaders(
 export function readAndStream(src: StreamSrc, sink: PreviewSink, opts: StreamOpts): Promise<StreamOutcome> {
   const deadlineAt = opts.now() + opts.streamAt;
   const state: FlowState = { headSent: false };
-  const race = <T>(p: Promise<T>): Promise<T> => racePreviewIo(p, deadlineAt, opts.signal, opts.now);
+  const race = <T>(p: Promise<T>): Promise<T> => racePreviewIo(p, deadlineAt, opts.signal, opts.now, opts.tracker);
   const abortKind = (): StreamFailReason => (opts.signal.reason === "hub-close" ? "hub-close" : "client-abort");
   const classify = (err: unknown): StreamFailReason => {
     if (opts.signal.aborted) return abortKind();
@@ -160,6 +182,7 @@ export function readAndStream(src: StreamSrc, sink: PreviewSink, opts: StreamOpt
     try {
       if (src.download !== undefined) return await streamDownload(ctx);
       if (src.sniff.kind === "image") return await streamImage(ctx);
+      if (src.chunk !== undefined) return await streamChunkedText(ctx);
       return await streamText(ctx);
     } catch (err) {
       return fail(classify(err));
@@ -376,4 +399,119 @@ async function streamText(ctx: FlowCtx): Promise<StreamOutcome> {
   return verifyTag === undefined
     ? { ok: true, bytes: cut, truncated: cut < src.size }
     : { ok: true, bytes: cut, truncated: cut < src.size, verify: verifyTag };
+}
+
+// ---------------------------------------------------------------------------
+// chunked text flow (chunked-plan §3.2) — the continuation sibling of `streamText`:
+// same verify-FIRST-then-head shape (upload `verifyWhole` / cwd post-stat identity, both
+// BEFORE `writeHead` — the source-order ruling holds here too), plus the ident echo check
+// against the stream-start `pre` stat and the hub hard ceiling. Every fs-ish race is preceded
+// by the tracker pre-check (`busy` fast-fail) and raced WITH the tracker, so a cold/slow fs
+// can never wedge the hub. `src.chunk === undefined` requests never enter this function —
+// their code path is byte-identical to pre-chunked (pinned by tests).
+// ---------------------------------------------------------------------------
+
+async function streamChunkedText(ctx: FlowCtx): Promise<StreamOutcome> {
+  const { src, sink, opts, state, fail, classify, race, writeChunk } = ctx;
+  const chunk = src.chunk;
+  if (chunk === undefined) return fail("io"); // unreachable — dispatch guard
+  /** r2 #4: `busy` comes ONLY from this pre-check, never from `classify`. */
+  const tripped = (): boolean => opts.tracker !== undefined && opts.tracker.zombies >= opts.tracker.max;
+
+  if (tripped()) return fail("busy");
+  const pre = await race(src.fh.stat());
+
+  // identity (§2.3): the echoed token must match the CURRENT pre stat, and the size must
+  // still equal the admitted one — either drifting means "the file changed between chunks",
+  // answered 409 `E_PREVIEW_CHANGED` before any head is written (D12: never stitch).
+  const identNow = previewIdentOf(identityOf(pre));
+  if ((chunk.ident !== undefined && chunk.ident !== identNow) || pre.size !== src.size) {
+    return fail("identity-changed");
+  }
+
+  // §2.2/§2.3: offset ≥ size is a client arithmetic error ⇒ `range` (400 reason:"offset").
+  // The one exception: offset 0 on an empty file is a legal "first chunk of nothing".
+  if (chunk.offset >= src.size && !(chunk.offset === 0 && src.size === 0)) return fail("range");
+
+  const start = chunk.offset;
+  const want = Math.min(src.size - start, opts.textMax, chunk.ceiling - start);
+  const body = Buffer.alloc(want);
+  let got = 0;
+  if (start === 0) {
+    // only the FIRST chunk reuses the sniff sample; a continuation reads positionally.
+    const fromSample = Math.min(src.sample.length, want);
+    if (fromSample > 0) {
+      body.set(src.sample.subarray(0, fromSample), 0);
+      got = fromSample;
+    }
+  }
+  while (got < want) {
+    if (tripped()) return fail("busy");
+    const { bytesRead } = await race(src.fh.read(body, got, want - got, start + got));
+    if (bytesRead === 0) return fail("shrunk");
+    got += bytesRead;
+  }
+
+  // §3.2 step 5: cut on a UTF-8 character boundary (except at EOF, where the whole — possibly
+  // dangling — tail is served verbatim), then the PROGRESS rule: a cut of 0 with want > 0
+  // (the boundary lands inside a multi-byte sequence whose lead byte sits exactly at `want`)
+  // is bumped to `want` — a 0-byte body would loop the UI forever loading "more".
+  let cut = start + want === src.size ? want : utf8SafeCut(body, want);
+  if (cut === 0 && want > 0) cut = want;
+
+  // verification branch — byte-for-byte the same decision as `streamText` (source-order
+  // ruling: upload `verifyWhole` / cwd post-stat compare, both strictly BEFORE the head).
+  let verifyTag: "hashed" | "cached" | "joined" | undefined;
+  if (src.verify !== undefined) {
+    if (tripped()) return fail("busy");
+    const outcome = await race(
+      opts.verifier.verifyWhole(
+        { uploadId: src.verify.uploadId, sha256: src.verify.sha256, fh: src.fh, identity: identityOf(pre) },
+        { signal: opts.signal, waitUntil: Math.min(ctx.deadlineAt, opts.now() + PREVIEW_VERIFY_MS) },
+      ),
+    );
+    if (typeof outcome !== "string") return fail(outcome.fail);
+    verifyTag = outcome;
+  } else {
+    if (tripped()) return fail("busy");
+    const post = await race(src.fh.stat());
+    if (!sameIdentity(identityOf(post), identityOf(pre))) return fail("identity-changed");
+  }
+
+  // gzip: same negotiation as `streamText` (per-chunk independent compression), raced with
+  // the tracker and preceded by the busy pre-check.
+  let out = body.subarray(0, cut);
+  let gz: Buffer | undefined;
+  if (out.length >= GZIP_MIN_BYTES && acceptsGzip(opts.acceptEncoding)) {
+    try {
+      if (tripped()) return fail("busy");
+      const compressed = await race(gzipAsync(out));
+      gz = compressed.length < out.length ? compressed : undefined;
+    } catch (err) {
+      return fail(classify(err));
+    }
+  }
+
+  const truncated = start + cut < src.size;
+  const headers = baseHeaders("text", "text/plain; charset=utf-8", src.size, truncated, cut);
+  headers["Content-Length"] = String(gz === undefined ? cut : gz.length);
+  // chunked-only headers (§2.3): the offset echo (MUST equal the request's offset), the
+  // identity token (computed from the stream-start `pre` stat) and no-store — a non-chunked
+  // response carries NONE of these (byte-identical, pinned by tests).
+  headers[PREVIEW_HDR.offset] = String(start);
+  headers[PREVIEW_HDR.ident] = identNow;
+  headers["Cache-Control"] = "no-store";
+  if (gz !== undefined) {
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+  }
+  sink.writeHead(200, headers);
+  state.headSent = true;
+
+  const send = gz === undefined ? out : gz;
+  if (send.length > 0) await writeChunk(send);
+  sink.end();
+  return verifyTag === undefined
+    ? { ok: true, bytes: cut, truncated }
+    : { ok: true, bytes: cut, truncated, verify: verifyTag };
 }

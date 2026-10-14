@@ -27,6 +27,7 @@ import {
   PREVIEW_TILDE_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
   PREVIEW_DOWNLOAD_HUB_CAP,
+  PREVIEW_CHUNK_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   RUNTX_HUB_CAPS,
@@ -153,6 +154,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
     expect(browserCaps).not.toContain(PREVIEW_ABS_HUB_CAP);
     expect(browserCaps).not.toContain(PREVIEW_TILDE_HUB_CAP);
     expect(browserCaps).not.toContain(PREVIEW_DOWNLOAD_HUB_CAP);
+    expect(browserCaps).not.toContain(PREVIEW_CHUNK_HUB_CAP);
     c.sock.destroy();
   });
 
@@ -176,6 +178,9 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       PREVIEW_TILDE_HUB_CAP,
       // preview-download: rides the config.preview gate (no /proc dependency)
       PREVIEW_DOWNLOAD_HUB_CAP,
+      // chunked-plan §3.4: preview.chunk.v1 rides the SAME config.preview gate (no /proc
+      // dependency — file preview itself is fd-agnostic), right behind preview.download.v1.
+      PREVIEW_CHUNK_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
@@ -200,6 +205,9 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       PREVIEW_TILDE_HUB_CAP,
       // preview-download: rides the config.preview gate (no /proc dependency)
       PREVIEW_DOWNLOAD_HUB_CAP,
+      // chunked-plan §3.4: preview.chunk.v1 rides the SAME config.preview gate (no /proc
+      // dependency — file preview itself is fd-agnostic), right behind preview.download.v1.
+      PREVIEW_CHUNK_HUB_CAP,
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),

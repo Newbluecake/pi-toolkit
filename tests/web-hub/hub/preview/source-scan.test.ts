@@ -38,6 +38,8 @@ const KERNEL_FILES = [
   "probe.ts",
   "dir.ts",
   "tilde.ts",
+  // chunked-plan §3.1: the identity-token derivation (pure, node:crypto only — no fs)
+  "ident.ts",
 ] as const;
 
 /** dir-plan §2.4 rule 2's whitelist: files outside tests/ allowed to reference NO_TRACKER
@@ -137,8 +139,11 @@ describe("preview source scan (PV2a)", () => {
       }
     }
     // the whitelisted pre-tracker callers keep their (deliberate) omission — pinned so the
-    // 未纳入 decision stays visible instead of silently eroding.
-    for (const name of ["verify.ts", "stream.ts"] as const) {
+    // 未纳入 decision stays visible instead of silently eroding. chunked-plan §3.2 lifted
+    // stream.ts's ban ONLY: `StreamOpts.tracker` is the opt-in (chunked-mode-only) 5th
+    // race arg + busy pre-check; a non-chunked request still rides the untracked path
+    // byte-identically (verify.ts keeps the full ban).
+    for (const name of ["verify.ts"] as const) {
       const source = readFileSync(PREVIEW_DIR + name, "utf8");
       expect(source.includes("PreviewIoTracker"), `${name}: tracker types must not creep in (§2.4 未纳入)`).toBe(false);
     }

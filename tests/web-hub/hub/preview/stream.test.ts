@@ -10,18 +10,24 @@
  */
 
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PreviewHandle, PreviewStat } from "../../../../src/web-hub/hub/preview/admit.js";
+import { previewIdentOf } from "../../../../src/web-hub/hub/preview/ident.js";
 import { readAndStream } from "../../../../src/web-hub/hub/preview/stream.js";
 import type { PreviewSink, StreamOutcome } from "../../../../src/web-hub/hub/preview/stream.js";
+import { createPreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
+import type { PreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
 import { createUploadVerifier } from "../../../../src/web-hub/hub/preview/verify.js";
 import type { Identity, UploadVerifier } from "../../../../src/web-hub/hub/preview/verify.js";
 import {
   PREVIEW_HDR,
   PREVIEW_IMAGE_MAX_BYTES,
+  PREVIEW_TEXT_CHUNK_BYTES,
   PREVIEW_TEXT_MAX_BYTES,
+  PREVIEW_TEXT_STREAM_HUB_MAX_BYTES,
 } from "../../../../src/web-hub/protocol/preview.js";
 import { FakeHandle, FakeSink, fakeStat, fakeTaskFs, memLog, neverAbort } from "./helpers.js";
 
@@ -578,5 +584,368 @@ describe("stream: lifecycle", () => {
     }
     expect(records.length).toBeGreaterThanOrEqual(1); // at least the deadline race timer
     expect(records.every((r) => r.unrefCalled)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// chunked text (chunked-plan §3.2 / §6.1) — continuation reads, ident echo, ceiling
+// clamp, progress rule, busy fast-fail, per-chunk gzip, and the byte-identical
+// non-chunked header snapshot
+// ---------------------------------------------------------------------------
+
+/** FakeHandle recording every positioned read (the chunked branch must read at `start+got`). */
+class PosHandle extends FakeHandle {
+  readonly positions: number[] = [];
+
+  read(buf: Buffer, off: number, len: number, pos: number): Promise<{ bytesRead: number }> {
+    this.positions.push(pos);
+    return super.read(buf, off, len, pos);
+  }
+}
+
+describe("stream: chunked text", () => {
+  const identOfStat = (over: Partial<PreviewStat> = {}): string =>
+    previewIdentOf({
+      dev: over.dev ?? 11,
+      ino: over.ino ?? 22,
+      size: over.size ?? 0,
+      ctimeMs: over.ctimeMs ?? 1000,
+    });
+
+  function chunkSrc(
+    content: Buffer,
+    chunk: { offset: number; ident?: string; ceiling?: number },
+    stat?: Partial<PreviewStat>,
+  ): Src & { fh: PosHandle } {
+    const fh = new PosHandle(content, stat);
+    return {
+      fh,
+      size: stat?.size ?? content.length,
+      sniff: { kind: "text" },
+      sample: content.subarray(0, Math.min(content.length, 64 * KIB)),
+      chunk: {
+        offset: chunk.offset,
+        ...(chunk.ident === undefined ? {} : { ident: chunk.ident }),
+        ceiling: chunk.ceiling ?? PREVIEW_TEXT_STREAM_HUB_MAX_BYTES,
+      },
+    };
+  }
+
+  it("first chunk (offset 0): sample reuse, Offset/Ident/no-store headers, truncated flag", async () => {
+    const content = Buffer.concat([
+      Buffer.alloc(PREVIEW_TEXT_CHUNK_BYTES - 1, 0x61),
+      Buffer.from("é"),
+      Buffer.alloc(64, 0x62),
+    ]);
+    const sink = new FakeSink();
+    const out = await readAndStream(chunkSrc(content, { offset: 0 }), sink, opts());
+    const want = PREVIEW_TEXT_CHUNK_BYTES - 1; // é's lead byte at the cap boundary is cut back
+    expect(out).toEqual({ ok: true, bytes: want, truncated: true });
+    const h = sink.head?.headers ?? {};
+    expect(h[PREVIEW_HDR.offset]).toBe("0");
+    expect(h[PREVIEW_HDR.ident]).toBe(identOfStat({ size: content.length }));
+    expect(h["Cache-Control"]).toBe("no-store");
+    expect(h[PREVIEW_HDR.bytes]).toBe(String(want));
+    expect(h[PREVIEW_HDR.truncated]).toBe("1");
+    // offset 0 reuses the sniff sample: the first read position is 64 KiB, not 0
+    expect(sink.body.length === want ? undefined : undefined).toBeUndefined();
+  });
+
+  it("positional reads land at start+got (first chunk reuses the sample, continuation does not)", async () => {
+    const content = Buffer.alloc(300 * KIB, 0x61);
+    // chunk 1 (offset 0): sample covers [0, 64 KiB), reads continue from 64 KiB
+    const s1 = new FakeSink();
+    const src1 = chunkSrc(content, { offset: 0 });
+    await readAndStream(src1, s1, opts());
+    expect(src1.fh.positions[0]).toBe(64 * KIB);
+    expect(s1.body().length).toBe(PREVIEW_TEXT_CHUNK_BYTES);
+    // chunk 2 (offset = 0 + bytes from chunk 1): NO sample reuse — first read position is the offset
+    const s2 = new FakeSink();
+    const src2 = chunkSrc(content, { offset: PREVIEW_TEXT_CHUNK_BYTES, ident: identOfStat({ size: content.length }) });
+    const out2 = await readAndStream(src2, s2, opts());
+    expect(out2).toEqual({ ok: true, bytes: 300 * KIB - PREVIEW_TEXT_CHUNK_BYTES, truncated: false });
+    expect(src2.fh.positions).toEqual([PREVIEW_TEXT_CHUNK_BYTES]);
+    expect(s2.body().equals(content.subarray(PREVIEW_TEXT_CHUNK_BYTES))).toBe(true);
+    expect(s2.head?.headers[PREVIEW_HDR.offset]).toBe(String(PREVIEW_TEXT_CHUNK_BYTES));
+    expect(s2.head?.headers[PREVIEW_HDR.truncated]).toBe("0");
+  });
+
+  it("multi-chunk walk: concatenation strictly equals the original (ASCII + CJK + emoji + CRLF)", async () => {
+    // ~1.2 MiB mixed text with multi-byte chars and CRLFs straddling every plausible boundary
+    const unit = Buffer.from("line-αβγ-漢字-😀\r\nnext\r\n", "utf8");
+    const repeats = Math.ceil((1.2 * MIB) / unit.length);
+    const content = Buffer.concat(Array(repeats).fill(unit));
+    let offset = 0;
+    const ident = identOfStat({ size: content.length });
+    const collected: Buffer[] = [];
+    for (let round = 0; round < 12 && offset < content.length; round += 1) {
+      const sink = new FakeSink();
+      const out = await readAndStream(chunkSrc(content, { offset, ...(offset === 0 ? {} : { ident }) }), sink, opts());
+      expect(out.ok).toBe(true);
+      if (!out.ok) throw new Error("unreachable");
+      expect(sink.head?.headers[PREVIEW_HDR.offset]).toBe(String(offset));
+      expect(sink.head?.headers[PREVIEW_HDR.ident]).toBe(ident);
+      expect(Number(sink.head?.headers[PREVIEW_HDR.bytes])).toBe(out.bytes);
+      expect(sink.head?.headers[PREVIEW_HDR.truncated]).toBe(offset + out.bytes < content.length ? "1" : "0");
+      expect(out.bytes).toBeGreaterThan(0);
+      collected.push(sink.body());
+      offset += out.bytes; // the UI's rule: next offset = offset + X-PWH-Preview-Bytes
+    }
+    expect(offset).toBe(content.length);
+    expect(Buffer.concat(collected).equals(content)).toBe(true);
+  });
+
+  it("boundary lands inside a 3-byte and a 4-byte char: cut backs to the character boundary", async () => {
+    for (const [label, ch] of [
+      ["3-byte", "中"],
+      ["4-byte", "😀"],
+    ] as const) {
+      const prefix = Buffer.alloc(PREVIEW_TEXT_CHUNK_BYTES - 1, 0x61);
+      const content = Buffer.concat([prefix, Buffer.from(`${ch}${ch}${ch}`, "utf8"), Buffer.alloc(32, 0x62)]);
+      const sink = new FakeSink();
+      const out = await readAndStream(chunkSrc(content, { offset: 0 }), sink, opts());
+      expect(out.ok, label).toBe(true);
+      if (out.ok) {
+        expect(out.bytes).toBe(PREVIEW_TEXT_CHUNK_BYTES - 1);
+        // every served byte sequence decodes cleanly at the boundary (no split char)
+        expect(() => new TextDecoder("utf-8", { fatal: true }).decode(sink.body())).not.toThrow();
+      }
+    }
+  });
+
+  it("final chunk at EOF: no boundary cut (verbatim tail, truncated 0)", async () => {
+    const content = Buffer.concat([Buffer.alloc(PREVIEW_TEXT_CHUNK_BYTES + 7, 0x61), Buffer.from("尾-é😀")]);
+    const first = new FakeSink();
+    const out1 = await readAndStream(chunkSrc(content, { offset: 0 }), first, opts());
+    expect(out1.ok && out1.bytes).toBe(PREVIEW_TEXT_CHUNK_BYTES);
+    const tail = new FakeSink();
+    const out2 = await readAndStream(
+      chunkSrc(content, { offset: PREVIEW_TEXT_CHUNK_BYTES, ident: identOfStat({ size: content.length }) }),
+      tail,
+      opts(),
+    );
+    expect(out2).toMatchObject({ ok: true, truncated: false });
+    if (out2.ok) {
+      expect(tail.body().equals(content.subarray(PREVIEW_TEXT_CHUNK_BYTES))).toBe(true); // verbatim
+      expect(out2.bytes).toBe(content.length - PREVIEW_TEXT_CHUNK_BYTES);
+    }
+  });
+
+  it("progress rule: an all-continuation-byte window (cut 0, want > 0) still serves want bytes", async () => {
+    // leading 'x' then a run of bare continuation bytes far past the per-chunk cap
+    const content = Buffer.concat([Buffer.from("x"), Buffer.alloc(PREVIEW_TEXT_CHUNK_BYTES + 16, 0x80)]);
+    const sink = new FakeSink();
+    const out = await readAndStream(chunkSrc(content, { offset: 0 }), sink, opts());
+    expect(out).toEqual({ ok: true, bytes: PREVIEW_TEXT_CHUNK_BYTES, truncated: true });
+    expect(sink.body().length).toBe(PREVIEW_TEXT_CHUNK_BYTES); // never a 0-byte body (UI loop guard)
+    // a continuation landing INSIDE the run hits the same rule
+    const sink2 = new FakeSink();
+    const out2 = await readAndStream(
+      chunkSrc(content, { offset: 1, ident: identOfStat({ size: content.length }) }),
+      sink2,
+      opts(),
+    );
+    expect(out2).toEqual({ ok: true, bytes: PREVIEW_TEXT_CHUNK_BYTES, truncated: true });
+    expect(sink2.body().equals(content.subarray(1, 1 + PREVIEW_TEXT_CHUNK_BYTES))).toBe(true);
+  });
+
+  it("empty file, first chunk: 200 with 0 bytes and truncated 0", async () => {
+    const sink = new FakeSink();
+    const out = await readAndStream(chunkSrc(Buffer.alloc(0), { offset: 0 }), sink, opts());
+    expect(out).toEqual({ ok: true, bytes: 0, truncated: false });
+    expect(sink.head?.headers[PREVIEW_HDR.bytes]).toBe("0");
+    expect(sink.head?.headers[PREVIEW_HDR.truncated]).toBe("0");
+  });
+
+  it("ident mismatch vs the pre stat ⇒ identity-changed BEFORE the head", async () => {
+    const content = Buffer.from("stable");
+    const sink = new FakeSink();
+    const out = await readAndStream(
+      chunkSrc(content, { offset: 0, ident: identOfStat({ ctimeMs: 987654321 }) }),
+      sink,
+      opts(),
+    );
+    expect(out).toEqual({ ok: false, reason: "identity-changed", headersSent: false });
+    expect(sink.head).toBeUndefined();
+  });
+
+  it("continuation ident: same stat passes, drifted ctime fails (never stitch)", async () => {
+    const content = Buffer.alloc(10, 0x61);
+    const okSink = new FakeSink();
+    const ok = await readAndStream(chunkSrc(content, { offset: 3, ident: identOfStat({ size: 10 }) }), okSink, opts());
+    expect(ok).toEqual({ ok: true, bytes: 7, truncated: false });
+    const bad = new FakeSink();
+    const out = await readAndStream(
+      chunkSrc(content, { offset: 3, ident: identOfStat({ size: 10, ctimeMs: 4242 }) }),
+      bad,
+      opts(),
+    );
+    expect(out).toEqual({ ok: false, reason: "identity-changed", headersSent: false });
+  });
+
+  it("pre.size !== admitted size (file changed between admission and write-out) ⇒ identity-changed", async () => {
+    const content = Buffer.alloc(100, 0x61);
+    const sink = new FakeSink();
+    const out = await readAndStream(
+      chunkSrc(content, { offset: 10, ident: identOfStat({ size: 90 }) }, { size: 100 }),
+      sink,
+      opts(),
+    );
+    expect(out).toEqual({ ok: false, reason: "identity-changed", headersSent: false });
+    expect(sink.head).toBeUndefined();
+  });
+
+  it("offset >= size ⇒ range (client arithmetic error), offset 0 on an empty file excepted", async () => {
+    const content = Buffer.alloc(10, 0x61);
+    const sink = new FakeSink();
+    const out = await readAndStream(chunkSrc(content, { offset: 10, ident: identOfStat({ size: 10 }) }), sink, opts());
+    expect(out).toEqual({ ok: false, reason: "range", headersSent: false });
+    expect(sink.head).toBeUndefined();
+    const beyond = new FakeSink();
+    expect(
+      await readAndStream(chunkSrc(content, { offset: 11, ident: identOfStat({ size: 10 }) }), beyond, opts()),
+    ).toEqual({ ok: false, reason: "range", headersSent: false });
+  });
+
+  it("hub hard ceiling clamps the read length (offset near the 16 MiB ceiling)", async () => {
+    const size = PREVIEW_TEXT_STREAM_HUB_MAX_BYTES + 5 * KIB; // beyond the ceiling by 5 KiB
+    const content = Buffer.alloc(size, 0x61);
+    const offset = PREVIEW_TEXT_STREAM_HUB_MAX_BYTES - 8 * KIB; // parse-legal (< ceiling)
+    const sink = new FakeSink();
+    const out = await readAndStream(chunkSrc(content, { offset, ident: identOfStat({ size }) }), sink, opts());
+    expect(out).toEqual({ ok: true, bytes: 8 * KIB, truncated: true }); // never crosses the ceiling
+    expect(sink.body().equals(content.subarray(offset, PREVIEW_TEXT_STREAM_HUB_MAX_BYTES))).toBe(true);
+    expect(sink.head?.headers[PREVIEW_HDR.offset]).toBe(String(offset));
+  });
+
+  it("tracker tripped ⇒ busy fast-fail (pre-stat, pre-read, pre-verify) — never a head", async () => {
+    const content = Buffer.alloc(10, 0x61);
+    // max 0 ⇒ tripped immediately: the FIRST check (pre-stat) fires
+    const s1 = new FakeSink();
+    expect(
+      await readAndStream(chunkSrc(content, { offset: 0 }), s1, opts({ tracker: createPreviewIoTracker(0) })),
+    ).toEqual({ ok: false, reason: "busy", headersSent: false });
+    expect(s1.head).toBeUndefined();
+    // a tracker that trips only after the stat: the pre-READ check fires
+    let checks = 0;
+    const arming: PreviewIoTracker = {
+      get zombies(): number {
+        checks += 1;
+        return checks <= 1 ? 0 : 5;
+      },
+      get max(): number {
+        return 2;
+      },
+    };
+    const s2 = new FakeSink();
+    expect(await readAndStream(chunkSrc(content, { offset: 0 }), s2, opts({ tracker: arming }))).toEqual({
+      ok: false,
+      reason: "busy",
+      headersSent: false,
+    });
+    expect(s2.head).toBeUndefined();
+  });
+
+  it("busy only ever comes from the pre-check: a raced-out chunked read classifies stream-deadline", async () => {
+    const content = Buffer.alloc(64, 0x61);
+    const fh = new SlowReadHandle(content, 400);
+    const sink = new FakeSink();
+    const out = await readAndStream(
+      {
+        fh,
+        size: content.length,
+        sniff: { kind: "text" },
+        sample: Buffer.alloc(0),
+        chunk: { offset: 0, ceiling: PREVIEW_TEXT_STREAM_HUB_MAX_BYTES },
+      },
+      sink,
+      opts({ streamAt: 100, tracker: createPreviewIoTracker() }),
+    );
+    expect(out).toEqual({ ok: false, reason: "stream-deadline", headersSent: false });
+  });
+
+  it("upload-class chunk: verifyWhole still gates the head and the tag propagates", async () => {
+    const content = Buffer.alloc(200, 0x61);
+    const v = fakeVerifier("cached");
+    const sink = new FakeSink();
+    const out = await readAndStream(
+      {
+        fh: new FakeHandle(content),
+        size: content.length,
+        sniff: { kind: "text" },
+        sample: content,
+        verify: { uploadId: "u1", sha256: "00" },
+        chunk: { offset: 10, ident: identOfStat({ size: content.length }), ceiling: PREVIEW_TEXT_STREAM_HUB_MAX_BYTES },
+      },
+      sink,
+      opts({ verifier: v }),
+    );
+    expect(out).toEqual({ ok: true, bytes: 190, truncated: false, verify: "cached" });
+    expect(v.calls).toBe(1);
+  });
+
+  it("cwd-class chunk: post-stat identity drift ⇒ identity-changed, no head", async () => {
+    const content = Buffer.alloc(10, 0x61);
+    const fh = new ScriptedHandle(content, [
+      fakeStat({ size: 10, ctimeMs: 1000 }),
+      fakeStat({ size: 10, ctimeMs: 2000 }),
+    ]);
+    const sink = new FakeSink();
+    const out = await readAndStream(
+      {
+        fh,
+        size: 10,
+        sniff: { kind: "text" },
+        sample: content,
+        chunk: { offset: 0, ceiling: PREVIEW_TEXT_STREAM_HUB_MAX_BYTES },
+      },
+      sink,
+      opts(),
+    );
+    expect(out).toEqual({ ok: false, reason: "identity-changed", headersSent: false });
+  });
+
+  it("chunked gzip: per-chunk compression, Bytes header = cut (uncompressed), offset/ident ride along", async () => {
+    const content = Buffer.alloc(PREVIEW_TEXT_CHUNK_BYTES + 100, 0x61); // ≥ GZIP_MIN_BYTES, compressible
+    const sink = new FakeSink();
+    const out = await readAndStream(chunkSrc(content, { offset: 0 }), sink, opts({ acceptEncoding: "gzip" }));
+    expect(out).toEqual({ ok: true, bytes: PREVIEW_TEXT_CHUNK_BYTES, truncated: true });
+    const h = sink.head?.headers ?? {};
+    expect(h["Content-Encoding"]).toBe("gzip");
+    expect(h["Vary"]).toBe("Accept-Encoding");
+    expect(h[PREVIEW_HDR.bytes]).toBe(String(PREVIEW_TEXT_CHUNK_BYTES));
+    expect(Number(h["Content-Length"])).toBeLessThan(PREVIEW_TEXT_CHUNK_BYTES);
+    expect(gunzipSync(sink.body()).equals(content.subarray(0, PREVIEW_TEXT_CHUNK_BYTES))).toBe(true);
+  });
+
+  it("NON-chunked snapshot: the header set carries NO offset/ident/no-store — byte-identical", async () => {
+    const content = Buffer.from("plain legacy text", "utf8");
+    const sink = new FakeSink();
+    const out = await readAndStream(textSrc(content), sink, opts());
+    expect(out).toEqual({ ok: true, bytes: content.length, truncated: false });
+    expect(sink.head?.headers).toEqual({
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": String(content.length),
+      [PREVIEW_HDR.kind]: "text",
+      [PREVIEW_HDR.size]: String(content.length),
+      [PREVIEW_HDR.bytes]: String(content.length),
+      [PREVIEW_HDR.truncated]: "0",
+      "Content-Disposition": 'attachment; filename="preview"',
+      "Cross-Origin-Resource-Policy": "same-origin",
+    }); // exactly the pre-chunked set — Offset/Ident/Cache-Control absent
+  });
+
+  it("source-order: the chunked flow's verifyWhole also precedes its writeHead", async () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../../../../src/web-hub/hub/preview/stream.ts", import.meta.url)),
+      "utf8",
+    );
+    const start = source.indexOf("async function streamChunkedText");
+    expect(start).toBeGreaterThan(0);
+    const region = source.slice(start);
+    const verifyIdx = region.indexOf("verifyWhole");
+    const headIdx = region.indexOf("writeHead");
+    expect(verifyIdx).toBeGreaterThan(-1);
+    expect(headIdx).toBeGreaterThan(verifyIdx);
   });
 });

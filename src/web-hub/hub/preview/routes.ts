@@ -26,18 +26,24 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { canonicalOrigin, parseOrigin } from "../../protocol/lan.js";
 import {
   PREVIEW_ADMIT_TOTAL_MS,
+  PREVIEW_CHUNK_QUERY,
   PREVIEW_DIR_QUERY,
   PREVIEW_DOWNLOAD_MAX_BYTES,
   PREVIEW_DOWNLOAD_QUERY,
   PREVIEW_DOWNLOAD_STREAM_MS,
   PREVIEW_HDR,
+  PREVIEW_IDENT_QUERY,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_IMAGE_MAX_PIXELS,
   PREVIEW_JPEG_SCAN_MAX_BYTES,
+  PREVIEW_OFFSET_QUERY,
   PREVIEW_SAMPLE_BYTES,
   PREVIEW_STREAM_MS,
   PREVIEW_TEXT_MAX_BYTES,
+  PREVIEW_TEXT_STREAM_HUB_MAX_BYTES,
   normalizePreviewPath,
+  parsePreviewOffset,
+  validatePreviewIdent,
   validatePreviewPath,
   type PreviewDirListing,
   type PreviewProbeResponseBody,
@@ -54,7 +60,7 @@ import {
   type PreviewFs,
   type PreviewHandle,
 } from "./admit.js";
-import { boundedClose, createPreviewIoTracker, defaultPreviewFs, previewFsStep } from "./fs.js";
+import { boundedClose, createPreviewIoTracker, defaultPreviewFs, previewFsStep, type PreviewIoTracker } from "./fs.js";
 import { listPreviewDir } from "./dir.js";
 import { openAdmittedPath, type Opened } from "./open.js";
 import { readProbeBody, runPreviewProbe } from "./probe.js";
@@ -216,6 +222,12 @@ export interface PreviewRoutesDeps {
    * injectable surface the admitter uses). Defaults to the real adapter; tests inject scripted
    * handles to drive the §3.3 lifecycle cases. */
   fs?: Partial<PreviewFs> | undefined;
+  /** chunked-plan §3.2/§6.1: preview's own zombie-IO tracker — defaults to a private
+   * `createPreviewIoTracker()` per instance (§2.4 ownership unchanged; the default admitter,
+   * both `readSample` loops, probe's `readHead`, dir.ts AND the chunked stream's races all
+   * share it). The seam exists so tests can drive the chunked branch's `busy` fast-fail
+   * (503 `E_BUSY` + Retry-After) with a scripted tracker; production never passes it. */
+  tracker?: PreviewIoTracker | undefined;
 }
 
 /** §1.3 typed probe sender — `io.sendJson`'s `body: unknown` cannot catch a hub↔UI drift, this
@@ -239,9 +251,10 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
   const { mode, uploadsRoot, registry, uploads, log, now } = deps;
   const limit: CmdLimit = deps.limit ?? createCmdLimit(now);
   /** §2.4 instance ownership: ONE tracker per `createPreviewRoutes` instance, handed to the
-   * default admitter, both `readSample` loops and probe's `readHead` (dir.ts joins in P1b).
-   * Closure-local (never module scope) ⇒ a `/reload`-built sibling starts from 0 zombies. */
-  const tracker = createPreviewIoTracker();
+   * default admitter, both `readSample` loops, probe's `readHead` (dir.ts joins in P1b) AND
+   * (chunked-plan §3.2) the chunked stream's races. Closure-local (never module scope) ⇒ a
+   * `/reload`-built sibling starts from 0 zombies. */
+  const tracker: PreviewIoTracker = deps.tracker ?? createPreviewIoTracker();
   const admitter: FsAdmitter = deps.admitter ?? createFsAdmitter({ denyCtx: deps.denyCtx, tracker, log, now });
   const verifier: UploadVerifier = deps.verifier ?? createUploadVerifier({ log, now });
   const dirFs: PreviewFs = { ...defaultPreviewFs(), ...deps.fs };
@@ -273,6 +286,9 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     shared?: boolean | undefined;
     bytes?: number | undefined;
     total?: number | undefined;
+    /** chunked-plan §3.3: the chunked-mode request's offset (0 for a first chunk) — a
+     * statistics-only integer, written only when `chunk=1` was accepted at ③. */
+    offset?: number | undefined;
     truncated?: boolean | undefined;
     ms?: number | undefined;
     ext?: string | undefined;
@@ -350,6 +366,36 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
         send("E_BAD_REQUEST", { error: "E_BAD_REQUEST" });
         return;
       }
+      // chunked-plan §2.2 (P1): the opt-in continuation flag — only the exact value "1" turns
+      // a text preview into chunked mode; `offset`/`ident` ride as a PAIR (absent on the first
+      // chunk). Validation matrix, in order, any failure ⇒ 400 E_BAD_REQUEST:
+      //   ① chunk ≠ "1" yet offset/ident present (half-protocol reject);
+      //   ② chunk=1 together with dir=1 / download=1 (mutually exclusive modes);
+      //   ③ chunk=1 with only ONE of offset/ident (both or neither);
+      //   ④ malformed offset (`parsePreviewOffset`: decimal, no leading zeros, safe int,
+      //      strictly below the 16 MiB hub hard ceiling);
+      //   ⑤ malformed ident (`PREVIEW_IDENT_RE`).
+      // `offset=0` + ident IS legal (an identity-checked re-read of the first chunk). A
+      // request without any chunk parameter skips every check — byte-identical to before.
+      const wantChunk = query.get(PREVIEW_CHUNK_QUERY) === "1";
+      const chunkOffsetRaw = query.get(PREVIEW_OFFSET_QUERY);
+      const chunkIdentRaw = query.get(PREVIEW_IDENT_QUERY);
+      const chunkParamsOk =
+        (wantChunk || (chunkOffsetRaw === null && chunkIdentRaw === null)) &&
+        (!wantChunk || (chunkOffsetRaw === null) === (chunkIdentRaw === null)) &&
+        (!wantChunk ||
+          ((chunkOffsetRaw === null || parsePreviewOffset(chunkOffsetRaw) !== null) &&
+            (chunkIdentRaw === null || validatePreviewIdent(chunkIdentRaw)))) &&
+        !(wantChunk && (wantDir || wantDownload));
+      if (!chunkParamsOk) {
+        acc.code = "E_BAD_REQUEST";
+        send("E_BAD_REQUEST", { error: "E_BAD_REQUEST" });
+        return;
+      }
+      const chunkOffset = wantChunk && chunkOffsetRaw !== null ? parsePreviewOffset(chunkOffsetRaw) : undefined;
+      const chunkIdent = wantChunk && chunkIdentRaw !== null ? chunkIdentRaw : undefined;
+      const isCont = chunkOffset !== undefined;
+      if (wantChunk) acc.offset = chunkOffset ?? 0;
       // dir-plan §2.2 (U4/§1.4): single-segment absolute paths (`/home`, `/etc/hostname`) now
       // enter admission — the recognition layer keeps its own ≥2-segment freeze (C4).
       if (
@@ -580,6 +626,16 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
       }
       const sniffed = sniff(sample, opened.size);
       acc.kind = sniffed.kind === "image" ? "image" : sniffed.kind === "text" ? "text" : undefined;
+      // chunked-plan §3.3: a CONTINUATION re-ran the sniff like every request does (D5 — the
+      // full ⓪–⑩ chain, no exemption); a file that no longer sniffs as text kills the stream:
+      // 409 E_PREVIEW_CHANGED BEFORE the binary-415 / image branches (a continuation never
+      // returns 415 or an image body). A FIRST chunk (chunk=1 without offset) that sniffs
+      // image still takes the image branch verbatim — chunk is ignored for images.
+      if (wantChunk && isCont && sniffed.kind !== "text") {
+        acc.code = "E_PREVIEW_CHANGED";
+        send("E_PREVIEW_CHANGED", { error: "E_PREVIEW_CHANGED" });
+        return;
+      }
       if (sniffed.kind === "binary") {
         acc.code = "E_PREVIEW_UNSUPPORTED";
         acc.reason = "binary";
@@ -633,10 +689,16 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
         }
       }
 
-      // ⑨ write-out (§4.5.2) — from here on readAndStream owns the handle.
+      // ⑨ write-out (§4.5.2) — from here on readAndStream owns the handle. chunked-plan §3.2/
+      // §3.3: a chunked-mode TEXT request additionally carries `chunk` (the validated offset,
+      // the optional ident echo and the 16 MiB hub hard ceiling) and the routes instance's
+      // tracker — the ONLY flow whose races count as zombies (continuations hit cold/slow fs
+      // at arbitrary offsets, so they join the §2.4 circuit breaker). Everything else — first
+      // chunk included — rides the exact same src/opts shape as before.
       streamed = true;
       const rawAcceptEncoding = req.headers["accept-encoding"];
       const acceptEncoding = Array.isArray(rawAcceptEncoding) ? rawAcceptEncoding[0] : rawAcceptEncoding;
+      const wantChunkText = wantChunk && sniffed.kind === "text";
       const outcome: StreamOutcome = await readAndStream(
         {
           fh: opened.fh,
@@ -644,6 +706,15 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
           sniff: sniffed,
           sample,
           ...(opened.verify === undefined ? {} : { verify: opened.verify }),
+          ...(wantChunkText
+            ? {
+                chunk: {
+                  offset: chunkOffset ?? 0,
+                  ...(chunkIdent === undefined ? {} : { ident: chunkIdent }),
+                  ceiling: PREVIEW_TEXT_STREAM_HUB_MAX_BYTES,
+                },
+              }
+            : {}),
         },
         resSink(res),
         {
@@ -653,6 +724,7 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
           now,
           verifier,
           ...(acceptEncoding === undefined ? {} : { acceptEncoding }),
+          ...(wantChunkText ? { tracker } : {}),
         },
       );
       if (outcome.ok) {
@@ -682,6 +754,19 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
         case "stream-deadline":
           acc.code = "E_DEADLINE";
           if (!outcome.headersSent) send("E_DEADLINE", { error: "E_DEADLINE" });
+          return;
+        // chunked-plan §2.3: the two chunked-only pre-head failures. `range` is a client
+        // arithmetic error (offset ≥ size); `busy` is the chunked branch's tracker pre-check
+        // — both are answered with the retry hint the UI's 429/503 backoff understands.
+        case "range":
+          acc.code = "E_BAD_REQUEST";
+          acc.reason = "offset";
+          if (!outcome.headersSent) send("E_BAD_REQUEST", { error: "E_BAD_REQUEST", reason: "offset" });
+          return;
+        case "busy":
+          acc.code = "E_BUSY";
+          acc.reason = "stream";
+          if (!outcome.headersSent) send("E_BUSY", { error: "E_BUSY" }, { "Retry-After": "1" });
           return;
         default:
           acc.code = "E_INTERNAL";

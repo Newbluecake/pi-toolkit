@@ -46,6 +46,7 @@ import {
   PREVIEW_TILDE_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
   PREVIEW_DOWNLOAD_HUB_CAP,
+  PREVIEW_CHUNK_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
@@ -364,6 +365,10 @@ export async function startHub(
             // preview-download: rides the SAME `config.preview` gate as ABS/TILDE (the
             // admission chain is fd-agnostic — no /proc dependency, unlike DIR above).
             PREVIEW_DOWNLOAD_HUB_CAP,
+            // chunked-plan §3.4/§2.4: `preview.chunk.v1` rides the SAME `config.preview` gate
+            // too (continuations re-walk the full admission chain — fd-agnostic, no /proc
+            // condition); both cap surfaces share this one array, so §4.7 holds by construction.
+            PREVIEW_CHUNK_HUB_CAP,
             ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
             // worktree-diff D21: `wtdiff.v1` rides the SAME preview gate AND the /proc probe —
             // the three-fd pin is /proc-bound, so a platform without it never declares the cap

@@ -348,6 +348,9 @@ export interface PreviewAuditRecord {
   bytes?: number | undefined;
   /** admitted file size (⑦). */
   total?: number | undefined;
+  /** chunked-plan §3.3: the chunked-mode request's offset (0 for a first chunk) — a
+   * statistics-only integer, present only on `chunk=1` requests. Never a path or name. */
+  offset?: number | undefined;
   truncated?: boolean | undefined;
   ms?: number | undefined;
   ext?: string | undefined;
@@ -371,6 +374,7 @@ export const PREVIEW_AUDIT_KEYS = [
   "shared",
   "bytes",
   "total",
+  "offset",
   "truncated",
   "ms",
   "ext",
