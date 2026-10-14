@@ -1022,6 +1022,10 @@ export default function activate(rawPi: ExtensionAPI): void {
       // absent `deps.quota` as "feature off", so the sampler never runs and the wire field never
       // appears — byte-equal to the pre-feature shape).
       ...(settings.webHub.quota !== false ? { quota: () => holder.current?.quota?.verdicts() ?? [] } : {}),
+      // external-agent quota-plan r2 §9A.4 (P7wa): auth-class problems (401/402/403) ride the
+      // same gate — `holder.current.quota` is the QuotaService itself (K9); problems() is a
+      // synchronous, family-deduped in-memory read.
+      ...(settings.webHub.quota !== false ? { quotaProblems: () => holder.current?.quota?.problems() ?? [] } : {}),
       ...(settings.cacheTtl.keepalive
         ? {
             cacheKeepalive: () => {

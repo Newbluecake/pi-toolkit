@@ -1,49 +1,19 @@
 /**
  * P7w (docs/dev/external-agent/quota-plan.md §9A.1/§9A.5): the quota wire gained droid pool ids,
  * `month`, per-row `billing` and top-level `problems` — append-only. LEGACY_QUOTA_WIRE_SCHEMA is a
- * verbatim copy of the pre-change `QuotaWireSchema` (what a not-yet-upgraded hub decodes with),
- * pinning that (1) ungated droid frames are rejected by it (so the cap gate is necessary),
- * (2) legacy-shaped wires decode identically under both schemas, (3) the new schema accepts the
- * new shapes and enforces their bounds.
+ * verbatim copy of the pre-change `QuotaWireSchema` (what a not-yet-upgraded hub decodes with,
+ * shared with tests/web-hub/agent/quota-sampler.test.ts since P7wa), pinning that (1) ungated
+ * droid frames are rejected by it (so the cap gate is necessary), (2) legacy-shaped wires decode
+ * identically under both schemas, (3) the new schema accepts the new shapes and enforces their
+ * bounds.
  */
-import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import { QuotaWireSchema, decodeAgentFrame } from "../../../src/web-hub/protocol/messages.js";
 import { QUOTA_POOLS_HUB_CAP, QUOTA_POOLS_HUB_CAPS } from "../../../src/web-hub/protocol/version.js";
+import { LEGACY_QUOTA_WIRE_SCHEMA } from "./legacy-quota-schema.js";
 
-// ---- verbatim pre-P7w copy (do not edit) ---------------------------------------------------
-const LegacyQuotaWindowSchema = Type.Object(
-  {
-    scope: Type.Union([Type.Literal("5h"), Type.Literal("week")]),
-    usedPct: Type.Number({ minimum: 0, maximum: 100 }),
-    level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
-    resetAt: Type.Optional(Type.Number()),
-    etaMs: Type.Optional(Type.Number()),
-  },
-  { additionalProperties: true },
-);
-const LegacyQuotaProviderSchema = Type.Object(
-  {
-    id: Type.Union([Type.Literal("zai-coding-cn"), Type.Literal("zai"), Type.Literal("kimi-coding")]),
-    plan: Type.Optional(Type.String({ maxLength: 64 })),
-    level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
-    stale: Type.Boolean(),
-    fetchedAt: Type.Optional(Type.Number()),
-    demotedUntil: Type.Optional(Type.Number()),
-    windows: Type.Array(LegacyQuotaWindowSchema, { maxItems: 8 }),
-  },
-  { additionalProperties: true },
-);
-const LEGACY_QUOTA_WIRE_SCHEMA = Type.Object(
-  {
-    v: Type.Literal(1),
-    at: Type.Number({ minimum: 0 }),
-    providers: Type.Array(LegacyQuotaProviderSchema, { maxItems: 16 }),
-  },
-  { additionalProperties: true },
-);
-// ---------------------------------------------------------------------------------------------
+// The legacy schema now lives in ./legacy-quota-schema.ts (verbatim, do not edit).
 
 const legacyWire = () => ({
   v: 1,

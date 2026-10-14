@@ -39,7 +39,13 @@ import {
 } from "../protocol/messages.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
-import { UPLOAD_AGENT_CAPS, RUNTX_AGENT_CAPS, HOLD_AGENT_CAPS, HOLD_CAP } from "../protocol/version.js";
+import {
+  UPLOAD_AGENT_CAPS,
+  RUNTX_AGENT_CAPS,
+  HOLD_AGENT_CAPS,
+  HOLD_CAP,
+  QUOTA_POOLS_HUB_CAP,
+} from "../protocol/version.js";
 import type { LanStatus } from "../protocol/lan.js";
 import {
   acquireConnection,
@@ -74,6 +80,7 @@ import { projectQuota, quotaFingerprint } from "./quota-sampler.js";
 import type { CacheKeepaliveWire, QuotaWire } from "../protocol/messages.js";
 import { cacheKeepaliveFingerprint, projectCacheKeepalive, type CacheKeepaliveInput } from "./cache-keepalive.js";
 import type { ProviderVerdict } from "../../quota/ladder.js";
+import type { QuotaProblem } from "../../quota/types.js";
 import { createCommandCapture, type CommandCapturePort } from "./command-capture.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
 import { createCommandLedger } from "./ledger.js";
@@ -227,6 +234,12 @@ export interface WebHubDeps {
    *  `() => holder.current?.quota?.verdicts() ?? []`). Unset (webHub.quota=false, or the quota
    *  feature itself produces no verdicts) ⇒ the `StatusInfo.quota` field is never set. */
   quota?: () => readonly ProviderVerdict[];
+  /** external-agent quota-plan r2 §9A.4 (P7wa): live getter for the main session's
+   *  `QuotaService.problems()` — auth-class problems (401/402/403) ride `QuotaWire.problems`
+   *  while the live link's hello_ack.caps carries `quota.pools.v1`. Unset ⇒ no problems;
+   *  a throwing getter is downgraded to "no problems" at projection time (a broken getter
+   *  must never take the status frame down — see the wiring test). */
+  quotaProblems?: () => readonly QuotaProblem[];
   /** cache-keepalive-web plan §3.3: late-bound getter of the main session's keepalive report + cache
    *  mode (`src/index.ts` threads it only when `cacheTtl.keepalive` is on). Unset ⇒ the
    *  `StatusInfo.cacheKeepalive` field is never set (byte-equal to the pre-feature shape). */
@@ -463,7 +476,27 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const quotaProjection = (): QuotaWire | undefined => {
     const d = deps.quota;
     if (d === undefined) return undefined;
-    return projectQuota(d(), now());
+    // quota-plan r2 §9A.4 (P7wa): droid rows / month / billing / problems ride the wire ONLY
+    // while the live link's hello_ack.caps carries `quota.pools.v1` — same PURE-read shape as
+    // holdCap() (never cached, never bound to a link generation): a reconnect to an upgraded
+    // hub flips the projection here and the 1Hz tick's fingerprint gate publishes on the next
+    // tick, no extra event needed. While disconnected pools stays false, so the slot keeps the
+    // legacy projection (an old hub must never decode an unknown enum and drop the frame, R7).
+    const pools = conn?.status().state === "live" && (conn?.caps.includes(QUOTA_POOLS_HUB_CAP) ?? false);
+    return projectQuota(d(), now(), {
+      pools,
+      problems: pools ? quotaProblemsSafe() : [], // ignored by projectQuota when pools !== true
+    });
+  };
+  /** 端口契约永不抛；兜注入桩（§11 wiring 行：quotaProblems 抛错 ⇒ 视为无 problems）。 */
+  const quotaProblemsSafe = (): readonly QuotaProblem[] => {
+    const g = deps.quotaProblems;
+    if (g === undefined) return [];
+    try {
+      return g();
+    } catch {
+      return [];
+    }
   };
 
   const commandLedger = createCommandLedger();

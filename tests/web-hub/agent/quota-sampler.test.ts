@@ -1,8 +1,13 @@
 // quota-web plan §2 (D3/D4): `projectQuota`/`quotaFingerprint` — pure projection + the 1Hz
 // fingerprint gate (no sampler state, no timers: see the module's own docstring for why this
 // differs from worktree-sampler.ts/bash-jobs-sampler.ts).
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { Value } from "@sinclair/typebox/value";
 import { projectQuota, quotaFingerprint } from "../../../src/web-hub/agent/quota-sampler.js";
+import { QuotaWireSchema } from "../../../src/web-hub/protocol/messages.js";
+import { LEGACY_QUOTA_WIRE_SCHEMA } from "../protocol/legacy-quota-schema.js";
 import type { ProviderVerdict, WindowVerdict } from "../../../src/quota/ladder.js";
 
 function window(over: Partial<WindowVerdict> = {}): WindowVerdict {
@@ -166,5 +171,211 @@ describe("projectQuota — droid / month legacy guard (P7)", () => {
       },
     };
     expect(JSON.stringify(projectQuota([v], 0))).not.toContain("billing");
+  });
+});
+
+// quota-plan r2 §9A.4（P7wa）：cap 门控的 pools 模式——`quota.pools.v1` 在场时 droid 两池行、
+// month 窗口、billing（D20 字段）、problems 上线；不在场时与 P7 字节一致。
+describe("projectQuota — pools mode (P7wa, §9A.4)", () => {
+  const billing = (over: Partial<Parameters<typeof droidVerdict>[0]["billing"]> = {}) =>
+    ({
+      kind: "factory",
+      pool: "standard",
+      overage: "extraUsage",
+      extraUsageAllowed: true,
+      extraUsageBalanceCents: 1_234,
+      ...over,
+    }) as NonNullable<ProviderVerdict["billing"]>;
+  function droidVerdict(over: Partial<ProviderVerdict> = {}): ProviderVerdict {
+    return verdict({
+      provider: "droid-standard",
+      level: 3,
+      windows: [
+        window({ scope: "5h", usedPct: 100, level: 3, reason: "exhausted" }),
+        window({ scope: "week", usedPct: 40, level: 0 }),
+        window({ scope: "month", usedPct: 88, level: 2, resetAt: 9_000 }),
+      ],
+      ...over,
+    });
+  }
+  const kimi = verdict({
+    provider: "kimi-coding",
+    level: 1,
+    windows: [window({ scope: "week", usedPct: 55, level: 1 })],
+  });
+
+  it("pools:true keeps droid rows and the month window; passes the CURRENT wire schema", () => {
+    const std = droidVerdict({ billing: billing() });
+    const core = verdict({
+      provider: "droid-core",
+      windows: [window({ scope: "month", usedPct: 3 })],
+      billing: billing({ pool: "core", overage: "droidCore", extraUsageBalanceCents: 0 }),
+    });
+    const wire = projectQuota([std, core, kimi], 5_000, { pools: true })!;
+    expect(wire.providers.map((p) => p.id)).toEqual(["droid-standard", "droid-core", "kimi-coding"]);
+    expect(wire.providers[0]!.windows.map((w) => w.scope)).toEqual(["5h", "week", "month"]);
+    expect(wire.providers[1]!.windows.map((w) => w.scope)).toEqual(["month"]);
+    expect("problems" in wire).toBe(false);
+    expect(Value.Check(QuotaWireSchema, wire)).toBe(true);
+  });
+
+  it("billing carries exactly D20's fields: overage + cents, gateOpen only when true", () => {
+    const closed = droidVerdict({ billing: billing({ gateOpen: false }) });
+    const wClosed = projectQuota([closed], 0, { pools: true })!;
+    expect(wClosed.providers[0]!.billing).toEqual({ overage: "extraUsage", extraUsageBalanceCents: 1_234 });
+    expect(JSON.stringify(wClosed)).not.toContain("gateOpen");
+    // kind/pool/extraUsageAllowed are agent-internal semantics — never on the wire (D20)
+    expect(JSON.stringify(wClosed)).not.toContain("extraUsageAllowed");
+    expect(JSON.stringify(wClosed)).not.toContain('"pool"');
+    expect(JSON.stringify(wClosed)).not.toContain('"kind"');
+
+    const open = droidVerdict({ billing: billing({ gateOpen: true }) });
+    const wOpen = projectQuota([open], 0, { pools: true })!;
+    expect(wOpen.providers[0]!.billing).toEqual({
+      overage: "extraUsage",
+      extraUsageBalanceCents: 1_234,
+      gateOpen: true,
+    });
+  });
+
+  it("billing is NOT projected in legacy mode even for a droid row carrying it", () => {
+    const v = droidVerdict({ billing: billing({ gateOpen: true }) });
+    expect(projectQuota([v, kimi], 0, { pools: false })!.providers.map((p) => p.id)).toEqual(["kimi-coding"]);
+    expect(JSON.stringify(projectQuota([v, kimi], 0))).not.toContain("billing");
+  });
+
+  it("problems: only family droid, capped at 4; non-droid family and bad statuses dropped", () => {
+    const problems = [
+      { family: "droid", status: 402 },
+      { family: "other", status: 401 }, // 非固定字面量 ⇒ 丢弃
+      { family: "droid", status: 99 }, // 越界 ⇒ 丢弃
+      { family: "droid", status: 600 }, // 越界 ⇒ 丢弃
+      { family: "droid", status: 403.5 }, // 非整数 ⇒ 丢弃
+      { family: "droid", status: 401 },
+      { family: "droid", status: 403 },
+      { family: "droid", status: 500 },
+    ];
+    const wire = projectQuota([droidVerdict()], 0, { pools: true, problems })!;
+    expect(wire.problems).toEqual([
+      { family: "droid", status: 402 },
+      { family: "droid", status: 401 },
+      { family: "droid", status: 403 },
+      { family: "droid", status: 500 },
+    ]);
+    expect(Value.Check(QuotaWireSchema, wire)).toBe(true);
+  });
+
+  it("problems are ignored unless pools is true (never on the legacy wire)", () => {
+    const problems = [{ family: "droid", status: 402 }];
+    expect(JSON.stringify(projectQuota([kimi], 0, { problems }))).not.toContain("problems");
+    expect(JSON.stringify(projectQuota([kimi], 0, { pools: false, problems }))).not.toContain("problems");
+  });
+
+  it("problems-only (all droid rows absent / empty verdicts) ⇒ providers:[] + problems", () => {
+    const wire = projectQuota([], 7_000, { pools: true, problems: [{ family: "droid", status: 402 }] })!;
+    expect(wire).toEqual({ v: 1, at: 7_000, providers: [], problems: [{ family: "droid", status: 402 }] });
+    expect(Value.Check(QuotaWireSchema, wire)).toBe(true);
+    // 两者都空 ⇒ undefined（字段缺席）
+    expect(projectQuota([], 7_000, { pools: true })).toBeUndefined();
+    expect(projectQuota([], 7_000, { pools: true, problems: [{ family: "other", status: 401 }] })).toBeUndefined();
+  });
+
+  it("pools:true over kimi-only input (no billing/month/problems) is byte-identical to legacy", () => {
+    const legacy = projectQuota([kimi], 3_000);
+    const pools = projectQuota([kimi], 3_000, { pools: true });
+    expect(JSON.stringify(pools)).toBe(JSON.stringify(legacy));
+  });
+
+  it("no-opts vs {pools:false} are byte-identical on mixed droid+kimi input, and pass the OLD schema copy", () => {
+    const std = droidVerdict({ billing: billing({ gateOpen: true }) });
+    const core = verdict({ provider: "droid-core", windows: [window({ scope: "month", usedPct: 3 })] });
+    const input = [std, kimi, core];
+    const noOpts = projectQuota(input, 9_000);
+    const poolsFalse = projectQuota(input, 9_000, { pools: false, problems: [{ family: "droid", status: 402 }] });
+    expect(JSON.stringify(poolsFalse)).toBe(JSON.stringify(noOpts));
+    // §9A.5-2：旧 hub（改动前 schema 副本）能解码 pools:false 的输出——不丢帧
+    expect(Value.Check(LEGACY_QUOTA_WIRE_SCHEMA, poolsFalse)).toBe(true);
+    expect(quotaFingerprint(poolsFalse)).toBe(quotaFingerprint(noOpts));
+  });
+
+  it("golden: {pools:false} (and no-opts) reproduce the P7 fixture wire byte-for-byte", () => {
+    const fixture = JSON.parse(
+      readFileSync(resolve(process.cwd(), "tests/fixtures/quota-kimi-zai-golden.json"), "utf8"),
+    ) as {
+      meta: { now: number };
+      verdicts: Record<string, ProviderVerdict>;
+      sampler: { wire: unknown; fingerprint: string };
+    };
+    // 与 recordKimiZaiGolden 相同的输入列表（kimi-zai-golden.ts 的 sampler 段）
+    const input = ["kimi-trap", "zai-cn-l1", "zai-l1", "demotion-floor"].map(
+      (k) => fixture.verdicts[k] as ProviderVerdict,
+    );
+    const now = fixture.meta.now;
+    for (const opts of [undefined, { pools: false }] as const) {
+      const wire = projectQuota(input, now, opts);
+      expect(JSON.parse(JSON.stringify(wire))).toEqual(fixture.sampler.wire);
+      expect(quotaFingerprint(wire)).toBe(fixture.sampler.fingerprint);
+    }
+    expect(Value.Check(LEGACY_QUOTA_WIRE_SCHEMA, projectQuota(input, now, { pools: false }))).toBe(true);
+  });
+});
+
+describe("quotaFingerprint — pools additions (P7wa, §9A.4)", () => {
+  const billing = (over: Partial<NonNullable<ProviderVerdict["billing"]>> = {}) =>
+    ({
+      kind: "factory",
+      pool: "standard",
+      overage: "extraUsage",
+      extraUsageAllowed: true,
+      extraUsageBalanceCents: 1_000,
+      ...over,
+    }) as NonNullable<ProviderVerdict["billing"]>;
+  const droid = (b?: ProviderVerdict["billing"]): ProviderVerdict =>
+    verdict({
+      provider: "droid-standard",
+      windows: [window({ scope: "month", usedPct: 5 })],
+      ...(b !== undefined ? { billing: b } : {}),
+    });
+
+  it("legacy-shaped output keeps the exact pre-P7wa fingerprint bytes (no billing/problems keys)", () => {
+    const kimi = verdict({ provider: "kimi-coding" });
+    expect(quotaFingerprint(projectQuota([kimi], 0, { pools: true }))).toBe(
+      JSON.stringify([
+        {
+          id: "kimi-coding",
+          level: 0,
+          demotedUntil: undefined,
+          stale: false,
+          fetchedAt: 1_000,
+          windows: [{ scope: "5h", usedPct: 10, resetAt: undefined, etaMs: undefined }],
+        },
+      ]),
+    );
+  });
+
+  it("flips on billing (overage / cents / gateOpen) and on problems", () => {
+    const base = quotaFingerprint(projectQuota([droid(billing())], 0, { pools: true }));
+    expect(quotaFingerprint(projectQuota([droid()], 0, { pools: true }))).not.toBe(base); // billing 出现
+    expect(
+      quotaFingerprint(projectQuota([droid(billing({ extraUsageBalanceCents: 2_000 }))], 0, { pools: true })),
+    ).not.toBe(base); // cents 变化
+    expect(quotaFingerprint(projectQuota([droid(billing({ overage: "droidCore" }))], 0, { pools: true }))).not.toBe(
+      base,
+    ); // overage 变化
+    expect(quotaFingerprint(projectQuota([droid(billing({ gateOpen: true }))], 0, { pools: true }))).not.toBe(base); // gateOpen 装饰
+    const withProblems = projectQuota([droid(billing())], 0, {
+      pools: true,
+      problems: [{ family: "droid", status: 402 }],
+    })!;
+    expect(quotaFingerprint(withProblems)).not.toBe(base);
+    expect(quotaFingerprint({ ...withProblems, problems: [{ family: "droid", status: 401 }] })).not.toBe(
+      quotaFingerprint(withProblems),
+    );
+  });
+
+  it("ignores `at` even with problems (two reads a tick apart keep the fingerprint)", () => {
+    const mk = (at: number) =>
+      projectQuota([droid()], at, { pools: true, problems: [{ family: "droid", status: 402 }] })!;
+    expect(quotaFingerprint(mk(1_000))).toBe(quotaFingerprint(mk(61_000)));
   });
 });
