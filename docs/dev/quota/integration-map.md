@@ -371,3 +371,20 @@ tests/integration/
 tests/config/
   quota-settings.test.ts   # parseQuotaSettings 字段级容错
 ```
+
+---
+
+## 偏差记录：droid 池与 month 窗口（#22 P7，2026-10-14）
+
+- `createQuotaStack` 新增可选输入 `droid: { pools: () => QuotaPoolPort | undefined }`
+  （P5 经 `createCatalogPoolPort` 供给并 `warm()` 预热）；缺席 ⇒ 不构造 droid
+  适配器：零网络、零凭据读取、零告警，kimi/zai 字节不变。
+- `QuotaService` 追加 `verdictsForModel` / `poolAlternatives` / `problems`；
+  spawn 闸门 deps（stack.ts）追加 `modelView` / `poolAlternatives`；
+  `src/index.ts` 的 hook `alternatives` 回调追加 `poolAlternatives`（见
+  `docs/dev/external-agent/quota-plan.md` r2 §9）。
+- `src/web-hub/agent/quota-sampler.ts` 在 P7 阶段只放行三个旧 id 并过滤 month
+  窗口（安全默认）；cap 门控的 pools 模式归 P7wa。
+- 测试面新增：`tests/quota/kimi-zai-golden.test.ts`（fixture
+  `tests/fixtures/quota-kimi-zai-golden.json`，永不重生成）、`adapters-droid`、
+  `pools`、`tests/integration/quota-wiring.test.ts` 的 droid 用例。

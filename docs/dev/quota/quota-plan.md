@@ -1455,3 +1455,26 @@ week（HUD `7d`）拉高到 50/95/98（7 天窗口天然摊薄，旧的 75/90 �
   `LadderThresholds` 调用形态）、`tests/config/quota-settings.test.ts`（默认值、
   窗口覆盖、全局旧字段的双窗口覆盖与失效判定、窗口内钳制、SETTING_SPECS 六词条）、
   `tests/quota/render.test.ts`（7d 阈值文案按 95% 展示）。
+
+---
+
+## 偏差记录：droid 池与 month 窗口（#22 P7，2026-10-14）
+
+本文件描述的是「两窗口（5h/week）、三 provider（zai-coding-cn/zai/kimi-coding）」
+世界；P7（施工口径 `docs/dev/external-agent/quota-plan.md` r2）落地后以下面为准：
+
+- **三 provider → 五个 id**：Factory 的 standard / core 两个计费池建模成虚拟
+  provider `droid-standard` / `droid-core`（D1）；`quota.providers` 白名单新增
+  token `droid`（展开成两个池），默认值改为 `zai-coding-cn,zai,kimi-coding,droid`。
+- **两窗口 → 三窗口**：`WindowScope` 追加 `"month"`（D9：默认阈值 50/95/98，
+  紧凑 token `mo`，`quota.windows.month.*` 可覆盖；D10：month 关闭规则 3b
+  forecast-before-reset，保留 3a）。
+- **按模型闸门**：`droid/<id>` 经 `QuotaService.verdictsForModel` 查所属池再取该池
+  verdict（D4 启发式 + `quota.droidPools` 覆盖兜底）；池未知时两池都触线才拦（D5）。
+- **extraUsage**（D6 拍板）：默认仍拦，`quota.droidAllowExtraUsage=true` 才放行；
+  余额经 `QuotaBillingInfo` 全程披露。401/402/403 不拦 spawn，只 warnOnce +
+  HUD `droid auth <code>`（D3）。
+- **web**：droid 行与 month 窗口仅在 hub 通告 `quota.pools.v1` cap 时发送
+  （P7w/P7wa；旧 hub 不丢帧）。
+- 详细冻结面与评审闭环见 `docs/dev/external-agent/quota-plan.md` r2 与
+  `quota-review-r1/r2.md`。
