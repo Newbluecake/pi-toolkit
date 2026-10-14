@@ -15,6 +15,28 @@ export interface Frontmatter {
 const OPEN_RE = /^---\r?\n/;
 const KV_RE = /^([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$/;
 
+/** The drift-import banner pre-fix `/mem import` wrote at the very HEAD of a
+ *  file — BEFORE the frontmatter block, which hid it from every parser
+ *  anchored at offset 0 (field study F1). Shape: the `> **pi copy** …`
+ *  blockquote line(s) plus the separating blank line(s) that follow.
+ *  Anchored at offset 0 only (no `m` flag) and requiring the trailing blank
+ *  line, so a similar line inside user prose never matches. Same
+ *  `**pi copy**` prefix anchor as render.ts's DRIFT_HEADER_RE, so both header
+ *  vintages strip (方案 §5.4 双向兼容). */
+const LEADING_DRIFT_HEADER_RE = /^>\s\*\*pi copy\*\*[^\n]*\r?\n(?:>\s[^\n]*\r?\n)*(?:\r?\n)+/;
+
+/**
+ * Strip a drift-import banner sitting at the very head of a file (BEFORE the
+ * frontmatter — the pre-fix `/mem import` layout) so a frontmatter block that
+ * follows it becomes parseable again. Only the strict offset-0 banner shape
+ * strips; content without it is returned unchanged (the SAME string, so
+ * no-banner callers stay byte-identical).
+ */
+export function stripLeadingDriftHeader(content: string): string {
+  const m = LEADING_DRIFT_HEADER_RE.exec(content);
+  return m ? content.slice(m[0].length) : content;
+}
+
 /**
  * Parse a leading `---\n…\n---` frontmatter block. Returns undefined when the
  * content does not start with `---` or the closing fence is missing.
@@ -40,22 +62,26 @@ export function parseFrontmatter(content: string): Frontmatter | undefined {
 }
 
 /** Remove the leading frontmatter block (and any blank lines right after it).
- *  Content without frontmatter is returned unchanged. */
+ *  A head drift-import banner (pre-fix import layout) is stripped first so the
+ *  frontmatter behind it still counts. Content without frontmatter is returned
+ *  unchanged (banner included — body renderers strip it via stripDriftHeader). */
 export function stripFrontmatter(content: string): string {
-  const fm = parseFrontmatter(content);
+  const effective = stripLeadingDriftHeader(content);
+  const fm = parseFrontmatter(effective);
   if (!fm) return content;
-  return content.slice(fm.bodyStart).replace(/^(?:\r?\n)+/, "");
+  return effective.slice(fm.bodyStart).replace(/^(?:\r?\n)+/, "");
 }
 
 /** `pin: true` in a head frontmatter block (line-level; `pin: yes` does NOT
- *  count, nor does a non-head block) — 方案 §5.1.2. */
+ *  count, nor does a non-head block) — 方案 §5.1.2. Drift-banner tolerant. */
 export function isPinned(content: string): boolean {
-  return parseFrontmatter(content)?.fields.get("pin") === "true";
+  return parseFrontmatter(stripLeadingDriftHeader(content))?.fields.get("pin") === "true";
 }
 
-/** The frontmatter `source` value (e.g. "agent"), or undefined when absent. */
+/** The frontmatter `source` value (e.g. "agent"), or undefined when absent.
+ *  Drift-banner tolerant. */
 export function frontmatterSource(content: string): string | undefined {
-  return parseFrontmatter(content)?.fields.get("source");
+  return parseFrontmatter(stripLeadingDriftHeader(content))?.fields.get("source");
 }
 
 /**

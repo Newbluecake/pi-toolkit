@@ -17,7 +17,7 @@
 // Zero pi/typebox imports; independently unit-testable.
 
 import { dirname, join, resolve } from "node:path";
-import { upsertFrontmatterFields } from "./frontmatter.js";
+import { parseFrontmatter, upsertFrontmatterFields } from "./frontmatter.js";
 import { MemoryError, memoryDirFor, defaultPaths, type MemoryPaths } from "./paths.js";
 import {
   appendLegacy,
@@ -216,6 +216,23 @@ export const DRIFT_HEADER =
   "> **pi copy** — imported from Claude Code memory by pi-toolkit `/mem import`. " +
   "CC original is canonical until you edit here; mirror changes to CC if you still use both.\n\n";
 
+/**
+ * Splice the drift banner into an imported body. When the source file carries
+ * a frontmatter block, the banner goes AFTER it (field study F1: a head
+ * banner hid the block from every offset-0-anchored parser); files without
+ * frontmatter keep the legacy banner-first layout. Idempotent by
+ * construction: re-imports either skip the existing destination file
+ * (createExclusive) or regenerate from the untouched CC source (force), so
+ * banners never stack.
+ */
+function withDriftHeader(body: string): string {
+  const fm = parseFrontmatter(body);
+  if (!fm) return DRIFT_HEADER + body;
+  const head = body.slice(0, fm.bodyStart).replace(/\s+$/, "");
+  const rest = body.slice(fm.bodyStart).replace(/^(?:\r?\n)+/, "");
+  return `${head}\n\n${DRIFT_HEADER}${rest}`;
+}
+
 export interface ImportResult {
   project: string; // CC slug
   piDir: string;
@@ -227,7 +244,8 @@ export interface ImportResult {
 /**
  * Import a single CC project's memory into pi (1:1, idempotent).
  * Files are COPIED (CC originals untouched) with a drift-mitigation header
- * prepended. Re-running skips files that already exist at the destination
+ * spliced in (after the frontmatter block when one exists — see
+ * `withDriftHeader`). Re-running skips files that already exist at the destination
  * (unless force). Import 产物不加 provenance frontmatter（drift-header 已是
  * 其溯源标记，双标注重叠有害 —— 方案 §5.4）。
  *
@@ -260,7 +278,7 @@ export async function importProject(slug: string, force = false, paths?: MemoryP
         skipped++; // symlink / raced delete in the CC source — never fatal
         continue;
       }
-      const data = Buffer.from(DRIFT_HEADER + body, "utf8");
+      const data = Buffer.from(withDriftHeader(body), "utf8");
       if (force) {
         try {
           statRegularIfExists(real, name); // throws for an existing symlink — force never clobbers it

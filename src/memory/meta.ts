@@ -6,7 +6,7 @@
 //
 // Zero pi/typebox imports; independently unit-testable.
 
-import { parseFrontmatter } from "./frontmatter.js";
+import { parseFrontmatter, stripLeadingDriftHeader } from "./frontmatter.js";
 import { stripDriftHeader } from "./render.js";
 import type { MemoryMeta, MemoryMetaResult, MemoryStatus } from "./contracts.js";
 
@@ -39,9 +39,13 @@ export function splitReadWhen(raw: string): string[] {
  */
 export function parseMemoryMeta(raw: string, fallbackTopic: string): MemoryMetaResult {
   const errors: string[] = [];
-  const fm = parseFrontmatter(raw);
+  // Strip a head drift-import banner (pre-fix `/mem import` wrote it BEFORE
+  // the frontmatter — field study F1) so the block behind it parses again.
+  // No-banner files get the same string back — byte-identical behavior.
+  const effective = stripLeadingDriftHeader(raw);
+  const fm = parseFrontmatter(effective);
   if (fm) {
-    const block = raw.slice(0, fm.bodyStart);
+    const block = effective.slice(0, fm.bodyStart);
     const lineCount = block.split("\n").length;
     if (Buffer.byteLength(block, "utf8") > MAX_FRONTMATTER_BYTES || lineCount > MAX_FRONTMATTER_LINES) {
       errors.push(
