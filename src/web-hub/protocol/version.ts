@@ -130,6 +130,21 @@ export const PREVIEW_TILDE_HUB_CAP = "preview.tilde.v1";
 export const PREVIEW_DOWNLOAD_HUB_CAP = "preview.download.v1";
 
 /**
+ * web-hub-preview chunked-plan §2 (P0): the hub cap advertising chunked text streaming —
+ * `GET /api/preview?chunk=1[&offset=N&ident=…]` continuation requests and the
+ * `X-PWH-Preview-Offset` / `X-PWH-Preview-Ident` response headers (`protocol/preview.ts`).
+ * Declared under EXACTLY the same gate as `PREVIEW_DOWNLOAD_HUB_CAP` (the mere presence of
+ * `config.preview`, folded into `extraHubCaps` on both cap surfaces in lockstep) — unlike
+ * `WTDIFF_HUB_CAP` there is NO `/proc/self/fd` condition, because file preview itself does
+ * not depend on `/proc`. The cap is mandatory (chunked-plan §2.4): an old hub silently
+ * IGNORES the unknown `offset` param and answers from 0, so a UI that does not see it must
+ * never send `chunk`/`offset`/`ident` (it would append the duplicated first chunk). Like
+ * every cap above it adds no agent↔hub frames, so no PROTO bump (same §2.3 rule; the
+ * 1.1 → 1.2 bump is fleet F0's alone, see PROTO above).
+ */
+export const PREVIEW_CHUNK_HUB_CAP = "preview.chunk.v1";
+
+/**
  * web-hub-fleet-drawer plan §3.2/§7.1 (F0): the run-transcript caps. An agent advertises a
  * subset of `RUNTX_AGENT_CAPS` depending on `webHub.subagentTranscript` (`"all"` ⇒ both,
  * `"loopback"` ⇒ `runtx.v1` only, `"off"` ⇒ neither — F2 wires `capsExtra`); the hub

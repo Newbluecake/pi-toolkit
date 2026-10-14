@@ -13,7 +13,10 @@ import { API_ERRORS } from "../../../src/web-hub/protocol/http-contract.js";
 import {
   normalizeHubPreviewMode,
   parsePreviewDirListing,
+  parsePreviewOffset,
   PREVIEW_ADMIT_TOTAL_MS,
+  PREVIEW_CHUNK_MIN_GAP_MS,
+  PREVIEW_CHUNK_QUERY,
   PREVIEW_CLIENT_PIXELS_COARSE,
   PREVIEW_CLIENT_TIMEOUT_MS,
   PREVIEW_DEFAULT_MODE,
@@ -27,19 +30,26 @@ import {
   PREVIEW_DIR_SCAN_MAX,
   PREVIEW_DIR_STAT_CONCURRENCY,
   PREVIEW_HDR,
+  PREVIEW_IDENT_QUERY,
+  PREVIEW_IDENT_RE,
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_IMAGE_MAX_PIXELS,
   PREVIEW_JPEG_SCAN_MAX_BYTES,
+  PREVIEW_OFFSET_QUERY,
   PREVIEW_PATH,
   PREVIEW_PATH_MAX_BYTES,
   PREVIEW_PROBE_KINDS,
   PREVIEW_SAMPLE_BYTES,
   PREVIEW_SNIFF_TEXT_BYTES,
   PREVIEW_STREAM_MS,
+  PREVIEW_TEXT_CHUNK_BYTES,
   PREVIEW_TEXT_MAX_BYTES,
+  PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES,
+  PREVIEW_TEXT_STREAM_HUB_MAX_BYTES,
   PREVIEW_UPLOADS_MARKER,
   PREVIEW_VERIFY_MS,
   normalizePreviewPath,
+  validatePreviewIdent,
   validatePreviewPath,
 } from "../../../src/web-hub/protocol/preview.js";
 
@@ -68,6 +78,10 @@ describe("protocol/preview — constants (§4.1)", () => {
       bytes: "X-PWH-Preview-Bytes",
       truncated: "X-PWH-Preview-Truncated",
       dims: "X-PWH-Preview-Dims",
+      // chunked-plan §2.1 (P0): chunked-mode-only response headers — a non-chunked
+      // response carries NEITHER (byte-identical pre-chunked behavior).
+      offset: "X-PWH-Preview-Offset",
+      ident: "X-PWH-Preview-Ident",
     });
   });
 
@@ -601,5 +615,117 @@ describe("parsePreviewDirListing (dir-plan §1.1)", () => {
     ["dropped is NaN", { ...valid(), dropped: Number.NaN }],
   ])("rejects: %s", (_label, raw) => {
     expect(parsePreviewDirListing(raw, byteLen(raw))).toBeNull();
+  });
+});
+
+// chunked-plan §2.1/§2.2 (P0 协议冻结): the opt-in chunked text-streaming surface — query
+// param names, per-chunk/total caps and their pinned relations, `parsePreviewOffset` and
+// `validatePreviewIdent`. Non-chunked behavior is untouched (the PREVIEW_HDR pin above is the
+// byte-identical-by-omission contract: the two new keys are chunked-mode-only).
+describe("protocol/preview — chunked streaming constants (chunked-plan §2.1)", () => {
+  it('pins the query param names (exact-value "1" opt-in, same rule as dir/download)', () => {
+    expect(PREVIEW_CHUNK_QUERY).toBe("chunk");
+    expect(PREVIEW_OFFSET_QUERY).toBe("offset");
+    expect(PREVIEW_IDENT_QUERY).toBe("ident");
+  });
+
+  it("pins the per-chunk and total caps (D1 拍板: hub hard ceiling 16 MiB, UI 8/4 MiB)", () => {
+    expect(PREVIEW_TEXT_CHUNK_BYTES).toBe(256 * 1024);
+    expect(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES).toBe(16 * 1024 * 1024);
+    expect(PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES).toEqual({ fine: 8 * 1024 * 1024, coarse: 4 * 1024 * 1024 });
+    expect(PREVIEW_CHUNK_MIN_GAP_MS).toBe(300);
+  });
+
+  it("pins the constant relations (§2.1/§2.5/§3.5)", () => {
+    // every chunk is exactly the same shape as today's one-shot text response
+    expect(PREVIEW_TEXT_CHUNK_BYTES).toBe(PREVIEW_TEXT_MAX_BYTES);
+    // UI default caps never exceed the hub hard ceiling (both listeners same width, U1)
+    expect(PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES.fine).toBeLessThanOrEqual(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES);
+    expect(PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES.coarse).toBeLessThanOrEqual(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES);
+    expect(PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES.coarse).toBeLessThanOrEqual(PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES.fine);
+    // the UI's min gap stays at/above the hub token bucket's 250ms refill period
+    // (hub/preview/routes.ts's PREVIEW_BUCKET_REFILL_MS = 250 — module-private, P1's domain;
+    // the literal is cross-referenced here so a refill-speedup review sees this pin)
+    expect(PREVIEW_CHUNK_MIN_GAP_MS).toBeGreaterThanOrEqual(250);
+  });
+
+  it("pins the identity-token wire format (D3: i1.<22 base64url>)", () => {
+    expect(PREVIEW_IDENT_RE.source).toBe("^i1\\.[A-Za-z0-9_-]{22}$");
+  });
+});
+
+describe("parsePreviewOffset (chunked-plan §2.1)", () => {
+  it("accepts plain decimal offsets below the hub hard ceiling", () => {
+    expect(parsePreviewOffset("0")).toBe(0);
+    expect(parsePreviewOffset("1")).toBe(1);
+    expect(parsePreviewOffset("262144")).toBe(262144);
+    // hard ceiling boundary −1 is the last legal offset
+    expect(parsePreviewOffset(String(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES - 1))).toBe(
+      PREVIEW_TEXT_STREAM_HUB_MAX_BYTES - 1,
+    );
+  });
+
+  it("rejects the hard ceiling itself and anything above", () => {
+    expect(parsePreviewOffset(String(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES))).toBeNull();
+    expect(parsePreviewOffset(String(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES + 1))).toBeNull();
+    // safe-integer-but-huge strings are over the ceiling
+    expect(parsePreviewOffset("9007199254740991")).toBeNull(); // Number.MAX_SAFE_INTEGER
+  });
+
+  it("rejects non-canonical and non-decimal forms", () => {
+    expect(parsePreviewOffset(null)).toBeNull();
+    expect(parsePreviewOffset("")).toBeNull();
+    expect(parsePreviewOffset("01")).toBeNull(); // leading zero
+    expect(parsePreviewOffset("00")).toBeNull();
+    expect(parsePreviewOffset("-1")).toBeNull();
+    expect(parsePreviewOffset("+1")).toBeNull();
+    expect(parsePreviewOffset("1e3")).toBeNull();
+    expect(parsePreviewOffset("1.5")).toBeNull();
+    expect(parsePreviewOffset("0x10")).toBeNull();
+    expect(parsePreviewOffset(" 1")).toBeNull();
+    expect(parsePreviewOffset("1 ")).toBeNull();
+    expect(parsePreviewOffset("１２")).toBeNull(); // full-width digits
+  });
+
+  it("rejects offsets beyond the safe-integer range (never silently rounds)", () => {
+    expect(parsePreviewOffset("9007199254740993")).toBeNull(); // 2^53 + 1
+    expect(parsePreviewOffset("123456789012345678901234567890")).toBeNull();
+  });
+
+  it("never throws on garbage input", () => {
+    for (const garbage of [undefined, 0, true, {}, []] as unknown as string[]) {
+      expect(() => parsePreviewOffset(garbage)).not.toThrow();
+      expect(parsePreviewOffset(garbage)).toBeNull();
+    }
+  });
+});
+
+describe("validatePreviewIdent (chunked-plan §2.1)", () => {
+  const validIdent = `i1.${"a".repeat(22)}`;
+
+  it("accepts exactly i1.<22 base64url chars>", () => {
+    expect(validatePreviewIdent(validIdent)).toBe(true);
+    // the full base64url alphabet (incl. - and _) is legal
+    expect(validatePreviewIdent("i1.ABCDEFGHIJKLMNOPQRST-_")).toBe(true);
+    expect(validatePreviewIdent("i1.0123456789abcdef012345")).toBe(true);
+  });
+
+  it("rejects wrong length, wrong prefix, and non-base64url chars", () => {
+    expect(validatePreviewIdent(`i1.${"a".repeat(21)}`)).toBe(false); // too short
+    expect(validatePreviewIdent(`i1.${"a".repeat(23)}`)).toBe(false); // too long
+    expect(validatePreviewIdent(`i2.${"a".repeat(22)}`)).toBe(false); // wrong version prefix
+    expect(validatePreviewIdent(`${"a".repeat(22)}`)).toBe(false); // no prefix
+    expect(validatePreviewIdent(`i1.${"a".repeat(21)}+`)).toBe(false); // base64 (not base64url) char
+    expect(validatePreviewIdent(`i1.${"a".repeat(21)}/`)).toBe(false);
+    expect(validatePreviewIdent(`i1.${"a".repeat(21)}=`)).toBe(false); // padding never appears
+    expect(validatePreviewIdent(`i1.${"a".repeat(22)}\n`)).toBe(false); // anchored — no trailing junk
+    expect(validatePreviewIdent("")).toBe(false);
+  });
+
+  it("rejects non-strings without throwing", () => {
+    for (const garbage of [undefined, null, 0, true, {}, []]) {
+      expect(() => validatePreviewIdent(garbage)).not.toThrow();
+      expect(validatePreviewIdent(garbage)).toBe(false);
+    }
   });
 });

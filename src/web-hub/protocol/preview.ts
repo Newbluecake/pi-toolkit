@@ -136,7 +136,9 @@ export type PreviewImageMime = "image/png" | "image/jpeg" | "image/gif" | "image
  * `download` (preview-download; opt-in `download=1` requests only — raw octet-stream bytes). */
 export type PreviewResponseKind = "text" | "image" | "dir" | "download";
 
-/** The `X-PWH-Preview-*` response header names (`PREVIEW_HDR.kind/size/bytes/truncated/dims`). */
+/** The `X-PWH-Preview-*` response header names. `kind/size/bytes/truncated/dims` are the
+ * plan-v3 set; `offset`/`ident` (chunked-plan §2.3) are appended by the hub ONLY on chunked-mode
+ * (`chunk=1`) text responses — a non-chunked response carries neither, byte-identical to before. */
 export const PREVIEW_HDR = {
   kind: "X-PWH-Preview-Kind",
   size: "X-PWH-Preview-Size",
@@ -151,6 +153,12 @@ export const PREVIEW_HDR = {
   bytes: "X-PWH-Preview-Bytes",
   truncated: "X-PWH-Preview-Truncated",
   dims: "X-PWH-Preview-Dims",
+  /** chunked-plan §2.3: this chunk's starting byte offset (chunked-mode responses only; MUST
+   * equal the request's `offset`, 0 for the first chunk). */
+  offset: "X-PWH-Preview-Offset",
+  /** chunked-plan §2.3 (D3): the file identity token `i1.<22 base64url>` (chunked-mode
+   * responses only), computed from the stream-start `pre` stat. */
+  ident: "X-PWH-Preview-Ident",
 } as const;
 
 /** Image dimensions in pixels (`X-PWH-Preview-Dims` is its `"<w>x<h>"` serialization, PV3). */
@@ -262,6 +270,71 @@ export const PREVIEW_DOWNLOAD_STREAM_MS = 120_000;
  * network slack. Shared by BOTH logic clients (anti-drift, same rule as
  * `PREVIEW_CLIENT_TIMEOUT_MS`). */
 export const PREVIEW_DOWNLOAD_CLIENT_TIMEOUT_MS = PREVIEW_DOWNLOAD_STREAM_MS + 30_000;
+
+// ---------------------------------------------------------------------------
+// chunked text streaming (web-hub-preview chunked-plan §2 — opt-in `chunk=1`; frozen P0 surface)
+// ---------------------------------------------------------------------------
+
+/** chunked-plan §2.2: the opt-in query flag name — only the exact value `"1"` turns a text
+ * preview into chunked mode (same exact-value rule as `dir`/`download`). Absent (or any other
+ * value) keeps today's one-shot truncated response byte-identical. MUTUALLY EXCLUSIVE with
+ * `dir=1`/`download=1` — both set ⇒ 400 `E_BAD_REQUEST`. */
+export const PREVIEW_CHUNK_QUERY = "chunk";
+
+/** chunked-plan §2.2: the continuation offset query parameter (decimal byte offset, paired
+ * with `ident`; absent on the first chunk, which is just `chunk=1`). */
+export const PREVIEW_OFFSET_QUERY = "offset";
+
+/** chunked-plan §2.2 (D3): the file-identity query parameter — echoes the first chunk's
+ * `X-PWH-Preview-Ident` back; paired with `offset` (either both or neither ⇒ 400). */
+export const PREVIEW_IDENT_QUERY = "ident";
+
+/** chunked-plan §2.1: per-chunk body cap = the existing text cap — every chunk's deadline /
+ * memory profile is exactly the same shape as today's first-chunk response. */
+export const PREVIEW_TEXT_CHUNK_BYTES = PREVIEW_TEXT_MAX_BYTES;
+
+/** chunked-plan §2.1 (D1, 2026-10-14 拍板): the hub HARD ceiling — in chunked mode the hub
+ * never serves a byte at offset ≥ this value (loopback/LAN same width, U1). A request whose
+ * `offset` reaches it is rejected (400 `E_BAD_REQUEST`) by {@link parsePreviewOffset}. */
+export const PREVIEW_TEXT_STREAM_HUB_MAX_BYTES = 16 * 1024 * 1024;
+
+/** chunked-plan §2.1/§2.5 (D1): the UI-side default total caps — `fine` (desktop pointer)
+ * 8 MiB, `coarse` (touch) 4 MiB, keyed off `pointer: coarse` like `clientImageBudget`, NOT
+ * off the listener. Both must stay ≤ the hub hard ceiling (relation test pinned). */
+export const PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES = {
+  fine: 8 * 1024 * 1024,
+  coarse: 4 * 1024 * 1024,
+} as const;
+
+/** chunked-plan §2.1: the UI's minimum gap between two continuation requests — ≥ the hub
+ * token bucket's 250 ms refill period (`hub/preview/routes.ts`'s `PREVIEW_BUCKET_REFILL_MS`),
+ * with headroom for parallel ordinary preview clicks. */
+export const PREVIEW_CHUNK_MIN_GAP_MS = 300;
+
+/** chunked-plan §2.1 (D3): the identity-token wire format — `"i1."` + the first 22 base64url
+ * chars of `sha256("dev:ino:size:ctimeMs")` (128 bits). Keyless and deterministic, so it
+ * survives a hub restart; ctime (not mtime) because `utimes` can forge mtime but not ctime. */
+export const PREVIEW_IDENT_RE = /^i1\.[A-Za-z0-9_-]{22}$/;
+
+/**
+ * chunked-plan §2.1: strict `offset` parse — decimal digits only, no leading zeros (`"0"`
+ * excepted), a safe integer, and strictly below the hub hard ceiling. Anything else ⇒ `null`.
+ * Never throws. The hub maps `null` to 400 `E_BAD_REQUEST`; the UI uses it as a precheck.
+ */
+export function parsePreviewOffset(raw: string | null): number | null {
+  // typeof-first (same defensive convention as validatePreviewPath): a non-string never
+  // reaches the regex — `RegExp.test(0)` would otherwise coerce to the matching "0".
+  if (typeof raw !== "string" || !/^(0|[1-9][0-9]*)$/.test(raw)) return null;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) return null;
+  if (n >= PREVIEW_TEXT_STREAM_HUB_MAX_BYTES) return null;
+  return n;
+}
+
+/** chunked-plan §2.1: identity-token validation — a string matching {@link PREVIEW_IDENT_RE}. */
+export function validatePreviewIdent(raw: unknown): raw is string {
+  return typeof raw === "string" && PREVIEW_IDENT_RE.test(raw);
+}
 
 /** The `X-PWH-Preview-Kind` value a download response carries (the client header contract
  * rejects it for requests that did NOT opt in — same single-response-violation rule as

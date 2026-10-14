@@ -40,7 +40,11 @@ import type { HostTokenResult } from "../../../src/web-hub/protocol/lan.js";
 import type { TopSnapshot } from "../../../src/sysload/types.js";
 import {
   parsePreviewDirListing,
+  parsePreviewOffset,
+  PREVIEW_HDR,
   PREVIEW_PROBE_KINDS,
+  PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES,
+  validatePreviewIdent,
   validatePreviewPath,
   type PreviewDirEntry,
   type PreviewDirEntryType,
@@ -50,7 +54,11 @@ import {
   type PreviewProbeResponseBody,
   type PreviewResponseKind,
 } from "../../../src/web-hub/protocol/preview.js";
-import { PREVIEW_ABS_HUB_CAP, PREVIEW_DIR_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import {
+  PREVIEW_ABS_HUB_CAP,
+  PREVIEW_CHUNK_HUB_CAP,
+  PREVIEW_DIR_HUB_CAP,
+} from "../../../src/web-hub/protocol/version.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "../../../src/web-hub/protocol/worktree-diff.js";
 import type { WtGraphPayload } from "../../../src/web-hub/protocol/worktree-graph.js";
 import type {
@@ -590,6 +598,38 @@ describe("types.test-d.ts (web-hub-preview dir-plan P0 protocol surface)", () =>
   it("dir/abs hub caps are the frozen literal strings (§1.2)", () => {
     expectTypeOf<typeof PREVIEW_DIR_HUB_CAP>().toEqualTypeOf<"preview.dir.v1">();
     expectTypeOf<typeof PREVIEW_ABS_HUB_CAP>().toEqualTypeOf<"preview.abs.v1">();
+  });
+});
+
+// web-hub-preview chunked-plan §2.1 (P0 协议冻结): the chunked text-streaming protocol
+// surface — the hub cap literal, the two new PREVIEW_HDR keys, and the frozen signatures of
+// `parsePreviewOffset` / `validatePreviewIdent`. The hub-side fold (`extraHubCaps`) and the
+// UI-side consumption are P1/P2a's halves and land with their own packages.
+describe("types.test-d.ts (web-hub-preview chunked-plan P0 protocol surface)", () => {
+  it("PREVIEW_CHUNK_HUB_CAP is the frozen literal string (§2.1, same gate as PREVIEW_DOWNLOAD_HUB_CAP)", () => {
+    expectTypeOf<typeof PREVIEW_CHUNK_HUB_CAP>().toEqualTypeOf<"preview.chunk.v1">();
+  });
+
+  it("the chunked PREVIEW_HDR keys are the frozen literal header names (§2.1/§2.3)", () => {
+    expectTypeOf<(typeof PREVIEW_HDR)["offset"]>().toEqualTypeOf<"X-PWH-Preview-Offset">();
+    expectTypeOf<(typeof PREVIEW_HDR)["ident"]>().toEqualTypeOf<"X-PWH-Preview-Ident">();
+  });
+
+  it("PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES is the frozen budget-pair shape (D1: desktop 8 MiB / touch 4 MiB)", () => {
+    // `as const` on arithmetic expressions yields readonly `number` members (not literal
+    // types — same as PREVIEW_IMAGE_MAX_BYTES); the 8/4 MiB literal VALUES are pinned by the
+    // runtime toEqual in tests/web-hub/protocol/preview.test.ts.
+    expectTypeOf<typeof PREVIEW_TEXT_STREAM_CLIENT_MAX_BYTES>().toEqualTypeOf<{
+      readonly fine: number;
+      readonly coarse: number;
+    }>();
+  });
+
+  it("parsePreviewOffset / validatePreviewIdent keep their frozen §2.1 signatures", () => {
+    expectTypeOf<Parameters<typeof parsePreviewOffset>>().toEqualTypeOf<[string | null]>();
+    expectTypeOf<ReturnType<typeof parsePreviewOffset>>().toEqualTypeOf<number | null>();
+    expectTypeOf<Parameters<typeof validatePreviewIdent>>().toEqualTypeOf<[unknown]>();
+    expectTypeOf<ReturnType<typeof validatePreviewIdent>>().toEqualTypeOf<boolean>();
   });
 });
 
