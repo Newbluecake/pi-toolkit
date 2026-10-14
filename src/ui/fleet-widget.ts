@@ -79,9 +79,19 @@ export const WIDGET_MAX_ROWS = 40;
  * Compact cost for the widget: 4 decimals below half a cent (subagent runs
  * are typically sub-cent — same concern as formatUsage), 2 decimals at/above
  * (e.g. "$1.05"). Boundary: exactly $0.005 renders as "$0.01".
+ *
+ * external-agent plan §3.4 (P4c): `unpriced` is the sticky UsageDelta marker
+ * for cost that could not be priced — "all" renders the bare `unpriced` token
+ * (costUsd is structurally 0 there, printing "$0.0000" would read as free);
+ * "partial" keeps the priced portion and appends `+?` (`$1.23+?`, or
+ * `$0.0000+?` when the priced portion rounds to zero — still NOT `unpriced`,
+ * since part of the usage WAS priced). Omitting the argument is byte-identical
+ * to the pre-P4c rendering.
  */
-export function formatWidgetCost(costUsd: number): string {
-  return `$${costUsd < 0.005 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`;
+export function formatWidgetCost(costUsd: number, unpriced?: "all" | "partial"): string {
+  if (unpriced === "all") return "unpriced";
+  const base = `$${costUsd < 0.005 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`;
+  return unpriced === "partial" ? `${base}+?` : base;
 }
 
 /** Widget row log size; bytes remain explicit below 1KB because tiny logs are common. */
@@ -316,7 +326,7 @@ function widgetRowMain(
     // stats (context/cost/total).
     ...(row.remainingMs === undefined ? [] : [{ name: "deadline", value: deadlineField(row) }]),
     { name: "context", value: row.contextUsage ? formatContextUsage(row.contextUsage) : "" },
-    ...(row.usage ? [{ name: "cost", value: formatWidgetCost(row.usage.costUsd) }] : []),
+    ...(row.usage ? [{ name: "cost", value: formatWidgetCost(row.usage.costUsd, row.usage.unpriced) }] : []),
     { name: "total", value: `Σ${formatDuration(row.elapsedMs)}` },
   ];
   const shown = new Map(fields.map((field) => [field.name, field.value]));
@@ -395,7 +405,7 @@ function widgetTerminalDetail(row: FleetRow, width: number): string {
   const modelBaseWithLevel = modelBase === undefined ? undefined : `${modelBase}${levelSuffix}`;
   const suffix = [row.status, formatDuration(row.elapsedMs)];
   if (row.contextUsage) suffix.push(formatContextUsage(row.contextUsage));
-  if (row.usage) suffix.push(formatWidgetCost(row.usage.costUsd));
+  if (row.usage) suffix.push(formatWidgetCost(row.usage.costUsd, row.usage.unpriced));
   const candidates = [modelWithLevel, modelBaseWithLevel, undefined];
   const fits = (candidate: string | undefined, labelText: string) =>
     visibleWidth([labelText, type, wt, candidate, ...suffix].filter(Boolean).join(" ")) <= width;
@@ -762,6 +772,10 @@ export function buildFleetWidgetLines(
     } else general.push(row);
   }
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
+  // P4c (external-agent §3.4): any unpriced active run marks the header total
+  // with `+?`; a fleet whose ONLY active cost is unpriced shows the bare token
+  // instead of a misleading "$0.00"-style total (or no total at all).
+  const activeUnpriced = activeRows.some((r) => r.usage?.unpriced !== undefined);
   // Ordered entries: workflow ⚙ group headers (plus their free phase-chain
   // line, dim queued waiting rows and lingering just-settled child rows)
   // interleaved with their claimed runs, then the general run forest. ⚙
@@ -921,7 +935,11 @@ export function buildFleetWidgetLines(
   const header =
     `${color(worst, "●")} ${model.activeCount} active Agents` +
     (activeBash.length > 0 ? ` · ${activeBash.length} bash` : "") +
-    (activeCost > 0 ? ` · ${formatWidgetCost(activeCost)}` : "") +
+    (activeCost > 0
+      ? ` · ${formatWidgetCost(activeCost)}${activeUnpriced ? "+?" : ""}`
+      : activeUnpriced
+        ? " · unpriced"
+        : "") +
     (awaitingTerminal.length > 0 ? ` · ${awaitingTerminal.length} 待处理` : "") +
     (hidden > 0 ? ` · +${hidden} more` : "");
   lines.unshift(

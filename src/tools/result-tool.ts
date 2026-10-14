@@ -22,9 +22,10 @@ import {
   formatContextSwitches,
   formatCompactionFailureNote,
   formatChildExtensionMissing,
+  formatExternal,
   truncateResultText,
 } from "./result-text.js";
-import type { RunExitFacts } from "../core/types.js";
+import type { ExternalRunMeta, RunExitFacts } from "../core/types.js";
 import type { ContextSwitchDiag, CompactionFailureRecord } from "../core/types.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
 import {
@@ -507,7 +508,14 @@ function formatOutcome(
     error?: { message: string };
     timeoutReason?: string;
     durationMs: number;
-    usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
+    usage?: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      costUsd: number;
+      unpriced?: "all" | "partial";
+    };
     diag?: {
       sessionFile?: string;
       exitFacts?: RunExitFacts;
@@ -515,6 +523,7 @@ function formatOutcome(
       compactionFailures?: CompactionFailureRecord[];
       childExtensionMissing?: true;
       schemaPreset?: SchemaPresetId;
+      external?: ExternalRunMeta;
     };
   },
   maxChars = 0,
@@ -523,8 +532,17 @@ function formatOutcome(
   // carries it — unlike the completion notification (which shows `21s` once
   // and is gone), this makes wall-clock duration retrievable on every
   // post-terminal read of the result.
-  const trailer = outcome.usage
-    ? `\n\n(duration: ${formatDuration(outcome.durationMs)} · usage: in:${outcome.usage.input} out:${outcome.usage.output} cache_r:${outcome.usage.cacheRead} cache_w:${outcome.usage.cacheWrite} cost:$${outcome.usage.costUsd.toFixed(4)})`
+  // external-agent plan §3.4 (P4c): the sticky `unpriced` marker decides the
+  // cost rendering — never costUsd≈0 guessing ("all" ⇒ `cost:unpriced`,
+  // "partial" ⇒ `cost:$x.xxxx+unpriced`; absent ⇒ byte-identical legacy).
+  const usage = outcome.usage;
+  const costText = usage
+    ? usage.unpriced === "all"
+      ? "unpriced"
+      : `$${usage.costUsd.toFixed(4)}${usage.unpriced === "partial" ? "+unpriced" : ""}`
+    : undefined;
+  const trailer = usage
+    ? `\n\n(duration: ${formatDuration(outcome.durationMs)} · usage: in:${usage.input} out:${usage.output} cache_r:${usage.cacheRead} cache_w:${usage.cacheWrite} cost:${costText})`
     : `\n\n(duration: ${formatDuration(outcome.durationMs)})`;
   // bash-timeout-grace plan §3.7/T25 (P5): `diag.exitFacts` is threaded here
   // via the `exit_facts` session_event (§3.8, P0b) → `RunOutcome.diag`
@@ -536,7 +554,16 @@ function formatOutcome(
   const contextSwitchesText = formatContextSwitches(outcome.diag?.contextSwitches);
   const compactionFailureText = formatCompactionFailureNote(outcome.diag?.compactionFailures, outcome.error?.message);
   const childExtensionMissingText = formatChildExtensionMissing(outcome.diag?.childExtensionMissing);
-  const exitSuffix = [exitFactsText, contextSwitchesText, compactionFailureText, childExtensionMissingText]
+  // external-agent plan §3.4 (P4c): external provider identity/pricing line
+  // (undefined for every pi run ⇒ the suffix stays byte-identical).
+  const externalText = formatExternal(outcome.diag?.external);
+  const exitSuffix = [
+    externalText,
+    exitFactsText,
+    contextSwitchesText,
+    compactionFailureText,
+    childExtensionMissingText,
+  ]
     .filter((line): line is string => line !== undefined)
     .map((line) => `\n\n${line}`)
     .join("");

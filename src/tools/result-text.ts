@@ -1,5 +1,11 @@
 import { formatDuration } from "../core/format.js";
-import type { CompactionFailureRecord, ContextSwitchDiag, RunExitFacts, RunExitJob } from "../core/types.js";
+import type {
+  CompactionFailureRecord,
+  ContextSwitchDiag,
+  ExternalRunMeta,
+  RunExitFacts,
+  RunExitJob,
+} from "../core/types.js";
 
 export interface TruncatedResultText {
   /** The body, plus a truncation marker when the body exceeded maxChars. */
@@ -168,4 +174,50 @@ export function formatChildExtensionMissing(childExtensionMissing: true | undefi
     "cache-ttl keepalive were unavailable this run (parent likely loaded it via -e/--no-extensions, outside " +
     "settings.json; see AGENTS.md's src/runtime/ note; use `pi install` instead)."
   );
+}
+
+/** Compact credit counter: 1800 ⇒ "1.8k", below 1000 stays a plain integer. */
+function formatExternalCredits(credits: number): string {
+  if (credits >= 1000) return `${(credits / 1000).toFixed(1)}k`;
+  return `${Math.round(credits)}`;
+}
+
+/**
+ * external-agent plan §3.4 (P4c, frozen signature): renders
+ * `RunDiagnostics.external` as one identity/pricing line, appended by
+ * get_subagent_result's formatOutcome (src/tools/result-tool.ts) — same
+ * threading pattern as formatExitFacts/formatContextSwitches above. Returns
+ * `undefined` when the run has no external metadata at all (every pi run), so
+ * callers simply skip the line and non-external output stays byte-identical.
+ *
+ * Shape: `droid · session 1a2b3c4d · autonomy high · priced
+ * anthropic/claude-opus-5-5 · 1.8k credits`. Approximate prices (basis
+ * family/consensus) are marked `~src (basis, approx)`; an unpriced run names
+ * its reason and points at the settings override; `partial` keeps the priced
+ * source and flags the unpriced remainder (e.g. droid native child-agent
+ * usage). Compact markers stay English-only per the UI text split rule.
+ */
+export function formatExternal(meta: ExternalRunMeta | undefined): string | undefined {
+  if (!meta) return undefined;
+  const parts: string[] = [meta.provider];
+  if (meta.sessionId) parts.push(`session ${meta.sessionId.slice(0, 8)}`);
+  if (meta.autonomy) parts.push(`autonomy ${meta.autonomy}`);
+  const pricing = meta.pricing;
+  if (pricing) {
+    const pricedSource =
+      pricing.source === undefined
+        ? undefined
+        : pricing.approx === true
+          ? `~${pricing.source} (${pricing.basis ?? "unknown"}, approx)`
+          : pricing.source;
+    if (pricing.status === "unpriced") {
+      parts.push(`unpriced (${pricing.reason ?? "unknown"}) — set externalAgents.${meta.provider}.pricing["<id>"]`);
+    } else if (pricing.status === "partial") {
+      parts.push(`${pricedSource ? `priced ${pricedSource} ` : ""}+unpriced (${pricing.reason ?? "unknown"})`);
+    } else {
+      parts.push(pricedSource ? `priced ${pricedSource}` : "priced");
+    }
+  }
+  if (meta.credits !== undefined) parts.push(`${formatExternalCredits(meta.credits)} credits`);
+  return parts.join(" · ");
 }

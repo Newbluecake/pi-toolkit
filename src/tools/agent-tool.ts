@@ -86,7 +86,7 @@ export function buildProgressLines(snap: RunSnapshot, now: number, maxTools = 3)
     phaseLabel(snap.phase, d, now),
     `turn ${d.turns + 1}`,
     formatDuration(Math.max(0, now - d.createdAt)),
-    ...(d.usage ? [formatWidgetCost(d.usage.costUsd)] : []),
+    ...(d.usage ? [formatWidgetCost(d.usage.costUsd, d.usage.unpriced)] : []),
   ].join(" · ")}`;
   const lines = [header];
   for (const r of (d.toolHistory ?? []).slice(-maxTools)) {
@@ -120,7 +120,7 @@ export function formatOutcomeSummary(outcome: RunOutcome): string {
       .join(" ");
     parts.push(`${total} tool${total === 1 ? "" : "s"} (${breakdown})`);
   }
-  if (outcome.usage) parts.push(formatWidgetCost(outcome.usage.costUsd));
+  if (outcome.usage) parts.push(formatWidgetCost(outcome.usage.costUsd, outcome.usage.unpriced));
   parts.push(formatDuration(outcome.durationMs));
   return parts.join(" · ");
 }

@@ -320,7 +320,11 @@ function handleSettings(store: SettingsStore | undefined, args: string[], budget
  */
 function formatUsage(u: UsageDelta | undefined): string {
   if (!u) return "";
-  return ` usage=in:${u.input} out:${u.output} cache_r:${u.cacheRead} cache_w:${u.cacheWrite} cost:$${u.costUsd.toFixed(4)}`;
+  // external-agent plan §3.4 (P4c): same rendering as the result-tool usage
+  // line — "all" ⇒ `cost:unpriced`, "partial" ⇒ `cost:$x.xxxx+unpriced`.
+  const cost =
+    u.unpriced === "all" ? "unpriced" : `$${u.costUsd.toFixed(4)}${u.unpriced === "partial" ? "+unpriced" : ""}`;
+  return ` usage=in:${u.input} out:${u.output} cache_r:${u.cacheRead} cache_w:${u.cacheWrite} cost:${cost}`;
 }
 function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | undefined {
   const present = items.filter((u): u is UsageDelta => u !== undefined);
@@ -448,7 +452,11 @@ export function renderCosts(query: QueryService): string {
   for (const s of runs) {
     const d = s.diag;
     const active = !terminalStatuses.includes(s.status);
-    const cost = d.usage ? `$${d.usage.costUsd.toFixed(4)}` : "$0.0000";
+    const cost = d.usage
+      ? d.usage.unpriced === "all"
+        ? "unpriced"
+        : `$${d.usage.costUsd.toFixed(4)}${d.usage.unpriced === "partial" ? "+?" : ""}`
+      : "$0.0000";
     const cols = [
       `  ${cost.padStart(8)}`,
       active ? "▸" : s.status === "completed" ? "✓" : "✗",
@@ -465,9 +473,13 @@ export function renderCosts(query: QueryService): string {
   }
   const countedRuns = runs.filter((s) => !absorbedIds.has(s.runId));
   const total = sumUsage(countedRuns.map((s) => s.diag.usage));
+  // P4c (external-agent §3.4): unpriced runs contribute costUsd 0 to the
+  // total, so the total line discloses how many runs it under-counts.
+  const unpricedCount = countedRuns.filter((s) => s.diag.usage?.unpriced !== undefined).length;
   if (total)
     lines.push(
-      `  Total: $${total.costUsd.toFixed(4)} · in:${total.input} out:${total.output} cache_r:${total.cacheRead}`,
+      `  Total: $${total.costUsd.toFixed(4)} · in:${total.input} out:${total.output} cache_r:${total.cacheRead}` +
+        (unpricedCount > 0 ? ` (+${unpricedCount} unpriced runs)` : ""),
     );
   const absorbedCount = runs.length - countedRuns.length;
   if (absorbedCount > 0)
