@@ -31,6 +31,15 @@ import {
   type ResolveResumeResult,
   type ResolveRunResult,
 } from "./resolve-target.js";
+import type { ExternalAgentsPort } from "../external-agent/types.js";
+import { isExternalSessionPath } from "../external-agent/paths.js";
+import {
+  MSG_EXPERTS_UNSUPPORTED,
+  MSG_READONLY_DOMAIN,
+  MSG_RESUME_ISOLATION,
+  msgResumeCrossRuntime,
+  msgResumeDisabled,
+} from "../external-agent/messages.js";
 
 /**
  * consult (plan §16): the "no type" admission branch for `consult("main",
@@ -213,6 +222,22 @@ export interface SpawnServiceDeps {
    */
   modelExists?: (model: { provider: string; id: string }) => boolean | undefined;
   /**
+   * external-agent plan §5.1 (P4b): the droid provider admission gate. Absent
+   * ⇒ byte-identical pre-feature behavior — a `droid/x` model falls through to
+   * the `modelExists` check below and is rejected as an unknown pi model.
+   * Present (P5, only when externalAgents.droid.enabled) ⇒ the zero-side-effect
+   * admission zone below claims `droid/*` models and enforces the readonly /
+   * availability / experts / fork / resume cross-runtime rules.
+   */
+  external?: ExternalAgentsPort;
+  /**
+   * external-agent plan §5.1 (P4b): the pi agent dir (`getAgentDir()`), used
+   * for the structural external-session detection (`isExternalSessionPath`)
+   * that stays live even when `external` is absent (the ⑤ always-on resume
+   * guard). Injected by P5 alongside `external`.
+   */
+  agentDir?: string;
+  /**
    * 额度闸门（quota-plan §6）：**同步**、只读缓存、返回 undefined 放行。
    * 未注入时行为与今天完全一致（全特性可一键回退，plan R11）。
    */
@@ -332,6 +357,17 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   });
   const resolveRun = (handle: string) => resolveRunId(handle, targetDeps());
   const resolveResume = (handle: string) => resolveResumeTarget(handle, targetDeps());
+  // external-agent plan §5.1 (P4b): resume-target model lookup, for inheriting
+  // a droid run's model when a resume omits a model override. Live records
+  // first, then the durable store — the same precedence resolve-target uses.
+  const modelOfRun = (runId: RunId): { provider: string; id: string } | undefined => {
+    const live = records.get(runId);
+    if (live?.diag.model !== undefined) return live.diag.model;
+    for (const snap of deps.durableRecords?.() ?? []) {
+      if (snap.runId === runId && snap.diag.model !== undefined) return snap.diag.model;
+    }
+    return undefined;
+  };
   const terminal = (s: string) => ["completed", "failed", "timed_out", "aborted"].includes(s);
   const finish = (outcome: RunOutcome) => {
     outcomes.set(outcome.runId, outcome);
@@ -662,12 +698,86 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           admittedModel = resolved;
         }
       }
+      // ── external-agent plan §5.1 (P4b) admission ──
+      // Zero-side-effect zone, after hint resolution and before `modelExists`.
+      // ① resume-target pre-resolution (pure read): decide whether the resume
+      // target is an external-agent session, from structural evidence (path
+      // under `<agentDir>/external-agent/`) or the port's own owner lookup.
+      // ⑤ the always-on guard rejects an external session file when the port
+      // is absent (structural evidence only, never the enabled flag).
+      let resumeTargetRunId: RunId | undefined;
+      let resumeTargetExternal = false;
+      if (req.resumeFrom !== undefined && (deps.external !== undefined || deps.agentDir !== undefined)) {
+        const resume = resolveResume(req.resumeFrom);
+        if (resume.ok) {
+          const file = resume.sessionFile;
+          resumeTargetExternal =
+            (deps.agentDir !== undefined && isExternalSessionPath(file, deps.agentDir)) ||
+            deps.external?.ownerOfSessionFile(file) !== undefined;
+          resumeTargetRunId = resume.runId;
+          if (resumeTargetExternal) {
+            if (deps.external === undefined) {
+              return {
+                error: { kind: "config", message: msgResumeDisabled(resume.runId), retryable: false },
+              };
+            }
+            // ② resume target is external: inherit the target's droid model
+            // when no override is given (resume never changes runtime); a pi
+            // model override is a cross-runtime resume and is rejected.
+            if (req.modelOverride === undefined) {
+              const targetModel = modelOfRun(resume.runId);
+              if (targetModel !== undefined) admittedModel = targetModel;
+            } else if (deps.external.owns(req.modelOverride.provider) !== true) {
+              return {
+                error: { kind: "config", message: msgResumeCrossRuntime(resume.runId, "droid"), retryable: false },
+              };
+            }
+          }
+        }
+      }
+      const admittedExternal = admittedModel !== undefined && deps.external?.owns(admittedModel.provider) === true;
+      // ③ admitted model is claimed by an external provider: enforce the
+      // readonly / availability / model / experts / fork / resume rules, all
+      // with zero side effects. Passing skips the pi registry existence check
+      // below; quota/load gates keep running as usual (no droid adapter ⇒ the
+      // quota gate fails open).
+      if (admittedExternal && deps.external !== undefined && admittedModel !== undefined) {
+        if (req.toolDomain === "readonly") {
+          return { error: { kind: "config", message: MSG_READONLY_DOMAIN, retryable: false } };
+        }
+        const unavailable = deps.external.unavailableReason(admittedModel.provider);
+        if (unavailable !== undefined) {
+          return { error: { kind: "config", message: unavailable, retryable: false } };
+        }
+        if (deps.external.exists(admittedModel) === false) {
+          return {
+            error: { kind: "config", message: deps.external.unknownModelMessage(admittedModel), retryable: false },
+          };
+        }
+        if (req.consultExperts !== undefined && req.consultExperts.length > 0) {
+          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false } };
+        }
+        if (req.forkSessionFrom !== undefined) {
+          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false } };
+        }
+        if (resumeTargetRunId !== undefined && !resumeTargetExternal) {
+          return {
+            error: { kind: "config", message: msgResumeCrossRuntime(resumeTargetRunId, "pi"), retryable: false },
+          };
+        }
+        if (resumeTargetExternal && req.isolation !== undefined) {
+          return { error: { kind: "config", message: MSG_RESUME_ISOLATION, retryable: false } };
+        }
+      }
       // Strict provider/id admission check (a renamed provider such as
       // `cloudrouter-anthropic/…` → `cr-anthropic/…`): fail fast with
       // suggestions instead of creating a run that can only die at session
       // create. Same zero-side-effect admission zone as the hint check above;
-      // an unavailable registry (undefined) never blocks.
-      if (admittedModel && deps.modelExists?.(admittedModel) === false) {
+      // an unavailable registry (undefined) never blocks. External-agent
+      // models (claimed by `deps.external`) skip this — the provider's own
+      // `exists`/`unknownModelMessage` checks above are the authoritative
+      // admission gate for them (plan §5.1 ③).
+      if (admittedModel && !admittedExternal && deps.modelExists?.(admittedModel) === false) {
         const fromType = req.modelOverride === undefined && config.model !== undefined;
         return {
           error: {

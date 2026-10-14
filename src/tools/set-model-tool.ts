@@ -5,6 +5,7 @@ import { SET_MODEL_TIMEOUT_MS, withDeadline } from "../core/deadline.js";
 import { systemClock, type Clock } from "../core/clock.js";
 import { THINKING_LEVELS, type SetModelOutcome } from "../core/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
+import { MSG_SET_MODEL_ON_EXTERNAL, MSG_SET_MODEL_TO_EXTERNAL } from "../external-agent/messages.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
 
 /**
@@ -86,6 +87,14 @@ export interface SetModelToolDeps {
   resolveRun?: (handle: string) => ResolveRunResult;
   /** Clock for the host-path deadline (m2); defaults to systemClock, tests inject FakeClock. */
   clock?: Clock;
+  /**
+   * external-agent plan §5.4 (P4b): provider-claim predicate, injected by P5
+   * only when the external port exists (`(p) => port.owns(p)`). Absent ⇒
+   * `droid/x` follows the original unknown-model path (byte-identical).
+   * Present ⇒ switching TO an external model is rejected, and an `unsupported`
+   * outcome on an external run is reworded (mid-run switching is unsupported).
+   */
+  externalOwns?: (provider: string) => boolean;
 }
 
 const HOST_DESCRIPTION =
@@ -147,6 +156,7 @@ function mapRunOutcome(
   detailsTarget: string,
   outcome: SetModelOutcome,
   requestedThinking: string | undefined,
+  externalRunTarget: boolean,
 ) {
   if (outcome.ok)
     return successResult(
@@ -173,7 +183,11 @@ function mapRunOutcome(
         `model switch for run ${textTarget} timed out after ${SET_MODEL_TIMEOUT_MS / 1000}s; the session may still be on the previous model`,
       );
     case "unsupported":
-      throw new Error("this session cannot switch models mid-run");
+      // external-agent plan §5.4 (P4b): an external (droid) run never exposes
+      // set_model, so the runner reports `unsupported` — reword the generic
+      // message when the target run is external (the port is what makes such
+      // runs exist at all). Absent port ⇒ byte-identical original message.
+      throw new Error(externalRunTarget ? MSG_SET_MODEL_ON_EXTERNAL : "this session cannot switch models mid-run");
   }
 }
 
@@ -224,9 +238,12 @@ export function createSetModelTool(deps: SetModelToolDeps): ToolDefinition<typeo
             availableSuffix(deps),
         );
       const opts = thinking === undefined ? {} : { thinking };
+      // external-agent plan §5.4 (P4b): switching TO an external model is
+      // rejected before any target classification (self or foreign).
+      if (deps.externalOwns?.(ref.provider) === true) throw new Error(MSG_SET_MODEL_TO_EXTERNAL);
       if (isSelf && runForm) {
         const outcome = await deps.runs!.setModel(deps.selfRunId!, ref, opts);
-        return mapRunOutcome("this session", "self", outcome, thinking);
+        return mapRunOutcome("this session", "self", outcome, thinking, false);
       }
       if (isSelf) {
         // Host form self-switch.
@@ -277,7 +294,7 @@ export function createSetModelTool(deps: SetModelToolDeps): ToolDefinition<typeo
       if (resolved && !resolved.ok) throw new Error(resolved.error);
       const runId = resolved?.ok ? resolved.runId : rawTarget!;
       const outcome = await deps.runs!.setModel(runId, ref, opts);
-      return mapRunOutcome(rawTarget!, runId, outcome, thinking);
+      return mapRunOutcome(rawTarget!, runId, outcome, thinking, deps.externalOwns !== undefined);
     },
   } satisfies ToolDefinition<typeof SetModelParams>;
 }

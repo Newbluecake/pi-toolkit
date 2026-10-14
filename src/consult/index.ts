@@ -1,4 +1,7 @@
 import { existsSync, statSync } from "node:fs";
+import { dirname } from "node:path";
+import { isExternalSessionPath } from "../external-agent/paths.js";
+import { msgExpertIsExternal } from "../external-agent/messages.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   CONSULT_MAIN_AGENT_TYPE,
@@ -92,6 +95,13 @@ export interface WireConsultDeps {
    * session's own `ExtensionContext`, mirroring the HUD footer precedent).
    */
   mainSessionFacts?: MainSessionFactsProvider;
+  /**
+   * external-agent plan §5.4 (P4b): provider-claim predicate, injected by P5
+   * only when the external port exists (`(p) => port.owns(p)`). Absent ⇒ a pi
+   * run whose model's provider literally reads "droid" is NOT treated as
+   * external (byte-identical pre-feature behavior — review #7).
+   */
+  isExternalProvider?: (provider: string) => boolean;
 }
 
 const TERMINAL = new Set(["completed", "failed", "timed_out", "aborted"]);
@@ -106,6 +116,10 @@ function fileExists(path: string): boolean {
 
 export function wireConsult(deps: WireConsultDeps): ConsultWiring {
   const { settings, query, forkStore, consultDir } = deps;
+  // external-agent plan §5.4 (P4b): the agent dir, derived from `consultDir`
+  // (= `<agentDir>/cache/consult-sessions`, the frozen `consultSessionDir()`
+  // contract) so the structural external-session check needs no extra dep.
+  const agentDir = dirname(dirname(consultDir));
   const expertIndex = createExpertIndex({ consultDir });
   if (deps.prefetchedEntries) expertIndex.rebuildFromEntries(deps.prefetchedEntries);
   // consult (plan §16): read fresh on every call, never cached here — see
@@ -228,6 +242,18 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
   ): { ref?: ConsultExpertRef; warning?: string; failure?: string } {
     const record = expertIndex.list().find((r) => r.runId === runId);
     const sessionFile = liveSnap?.diag.sessionFile ?? record?.sessionFile;
+    const model = liveSnap?.diag.model ?? record?.model;
+    // external-agent plan §5.4 (P4b): a droid external run is never a
+    // consultable expert — structural evidence only (review #7): the run's
+    // external diag, the session file's location under <agentDir>/external-agent/,
+    // or the injected provider predicate (only present when the port exists).
+    if (
+      liveSnap?.diag.external !== undefined ||
+      isExternalSessionPath(sessionFile, agentDir) ||
+      (model?.provider !== undefined && deps.isExternalProvider?.(model.provider) === true)
+    ) {
+      return { failure: msgExpertIsExternal(runId) };
+    }
     if (sessionFile === undefined || sessionFile.length === 0) {
       return {
         failure:

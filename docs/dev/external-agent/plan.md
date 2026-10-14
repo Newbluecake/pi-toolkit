@@ -1325,3 +1325,13 @@ P4b 新增可选 dep `isExternalProvider?`/`externalOwns?`；P4c `formatWidgetCo
 
 - **用户确认**：开工；`toolDomain:"readonly"` 维持「直接拒绝走 droid」；unpriced 在 HUD / web-hub / pi 会话总计按 0 计接受为已知缺口（后续小包补标记）。
 - **新增：异常退出时用会话文件对账（P3 实现，P5 集成测试覆盖）**。droid 进程在一轮未结束时退出（崩溃 / reaper 组杀 / 超时）会丢失该轮 `agent_turn_completed`，L1–L8 账本漏记。run 终态时若账本存在「已开始未结算」的 turn，best-effort 读取 `~/.factory/sessions/<cwd slug>/<sessionId>.settings.json` 的累计 tokenUsage（字段名以 droid-protocol.md §5 实测为准），与账本已记累计逐字段相减，正差额作为一次补记 usage（价格沿用 run 冻结价，`external_meta` 标 `reconciled:true`）；负差/缺字段/解析失败一律放弃且不报错。约束：只读、≤256 KiB、单次 ≤500ms 有界、不阻塞终态投递（超时即放弃）、绝不重复计费（同一 turnId 已结算则不补）、路径由 sessionId 推出且需 `O_NOFOLLOW` + 普通文件校验；不打印文件内容。P3 补单测（正差补记 / 负差放弃 / 文件缺失 / 超时放弃 / 已结算不补），P5 fake-droid 加「turn 中途 SIGKILL + 预置 settings.json」场景。不改冻结面（若需在 P1 类型加 `reconciled` 字段，在 P1 一并加入）。
+
+## 15. P5 跟踪项（波次 2 验收遗留，2026-10-14 主会话汇总）
+
+- P4b：runtime-adapter `planRun` 的 `persist` 取 `sessionSpec.persist ?? true`，与 PiSessionDriver 的 `?? rememberAgents` 口径不一致（rememberAgents=false 时 droid 仍写 transcript）⇒ P5 装配时注入 rememberAgents 兜底。
+- P4b：外部会话 resume 只剩 tombstone 时不继承 droid 模型（tombstone 无 model 字段）⇒ P5 给 tombstone 记 model，或在文档里写明。
+- P4b：consult 用 `dirname(dirname(consultDir))` 推 agentDir，P5 若改 consultDir 位置必须同步。
+- P4a：§5.3 的 `(×<multiplier>)` 由 P5 把 tokenMultiplier 折进 `ExternalAdvertisedModel.note`；advertiseMax 截断也在 P5。
+- P2：ENOENT 文案 `msgBinaryNotFound` 仍写 droid，接第二个 CLI 时泛化；`createSpawnChild(redact)` 让 provider 注入自己的脱敏键（`createRedactor(env, secretEnvKeys)`）。
+- P2/P3：droid 专有信封字段 `type` 已从框架移到 `droid/envelope.ts`（b707053 + P3）。
+- 冻结面：`runner` 无 create() 重试循环，`startup_transient` 暂不使用（types.ts 注释已改）。

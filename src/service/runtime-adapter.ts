@@ -30,6 +30,9 @@ import { writeLateWorktreeDisposition } from "../adapters/worktree-disposition-s
 import { TASK_PROMPT_CAP } from "../core/state-machine.js";
 import { journalSnapshotFromState } from "../core/run-journal.js";
 import { isTerminalStatus } from "../core/status.js";
+import type { ExternalAgentsPort } from "../external-agent/types.js";
+import { extractStructuredJson } from "../external-agent/schema-extract.js";
+import { msgSchemaNoJson } from "../external-agent/messages.js";
 import {
   BasicEffectInterpreter,
   RuntimeRunner,
@@ -202,6 +205,14 @@ export interface RuntimeAdapterDeps {
    * entirely (in-memory run-log degradation).
    */
   journal?: (snapshot: RunSnapshot) => void;
+  /**
+   * external-agent plan §5.2 (P4b): the droid provider port. When present and
+   * `spec.model`'s provider is claimed (`owns`), the adapter produces a bare
+   * `SessionSpec` (no customTools / toolScope / systemPrompt) and attaches
+   * `SessionSpec.external` after H2; absent ⇒ byte-identical pre-feature
+   * behavior. Injected by P5 (only when externalAgents.droid.enabled).
+   */
+  external?: ExternalAgentsPort;
 }
 
 /**
@@ -621,6 +632,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       // (L819/843/889-area) stay on isConsultRun, unaffected by tidy.
       const readonlyDomain = isConsultRun || spec.request.toolDomain === "readonly";
       if (readonlyDomain) journalSuppressedRunIds.add(spec.runId); // run-persistence plan D10
+      // external-agent plan §5.2 (P4b): the sole "this is an external (droid)
+      // run" predicate — the admitted model's provider is claimed by the port.
+      // External runs are never consult forks nor readonly-domain (spawn
+      // admission rejects both), so all three flags stay mutually exclusive.
+      const isExternal = spec.model !== undefined && deps.external?.owns(spec.model.provider) === true;
       // consult §4.4 early-exit bookkeeping: set right before the runner is
       // entered. Every return/throw before that point (settleConfigFailure,
       // pre-runner sync throws) never reaches the runner's own finally, so
@@ -687,11 +703,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                   .map((tool) => tool.name)
                   .filter((name): name is string => typeof name === "string"),
               }
-            : spec.type.tools === undefined
+            : spec.type.tools === undefined || isExternal
               ? {}
               : { tools: spec.type.tools }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-          ...(spec.type.promptMode === "replace" && spec.type.systemPrompt
+          ...(!isExternal && spec.type.promptMode === "replace" && spec.type.systemPrompt
             ? { systemPrompt: spec.type.systemPrompt }
             : {}),
         };
@@ -709,7 +725,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // treatment) rather than relying on the implicit "a consult request
         // carries no consultExperts" premise (review-2 #13). StructuredOutput
         // below is the one deliberate exception — see its own comment.
-        if (deps.fabric && !readonlyDomain) {
+        if (deps.fabric && !readonlyDomain && !isExternal) {
           customTools.push(
             createMessageAgentTool({
               router: deps.fabric.router,
@@ -746,18 +762,20 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // tool 100% unit-testable.
         // consult §5.4 B-1: a consulted expert copy gets none of the injected
         // tools — read-only four only. P0-r §7.0 point 1: widened to readonlyDomain.
-        if (!readonlyDomain) {
+        // external-agent plan §5.2: a droid run gets none of them either.
+        if (!readonlyDomain && !isExternal) {
           customTools.push(
             createSetModelTool({
               selfRunId: spec.runId,
               runs: { setModel: (runId, model, opts) => runtime.setModelForRun(runId, model, opts ?? {}) },
               ...(deps.resolveModelHint ? { resolveHint: deps.resolveModelHint } : {}),
               ...(deps.availableModels ? { available: deps.availableModels } : {}),
+              ...(deps.external ? { externalOwns: (p: string) => deps.external!.owns(p) } : {}),
             }),
           );
           grantedReserved.push("set_model");
         }
-        if (!readonlyDomain && spec.type.canSpawn?.length && deps.nestedSpawn) {
+        if (!readonlyDomain && !isExternal && spec.type.canSpawn?.length && deps.nestedSpawn) {
           const port = deps.nestedSpawn();
           if (port) {
             customTools.push(
@@ -783,7 +801,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // dispatcher attached a resolved expert whitelist gets the consult
         // tool — and never a readonly-domain run itself (widened from
         // !isConsultRun to !readonlyDomain, P0-r §7.0 point 1; review-2 #13).
-        if (!readonlyDomain && spec.request.consultExperts?.length && deps.consult) {
+        if (!readonlyDomain && !isExternal && spec.request.consultExperts?.length && deps.consult) {
           const consultTool = deps.consult(spec.runId, () => askerCwd, spec.request.consultExperts);
           if (consultTool !== undefined) {
             customTools.push(consultTool);
@@ -804,7 +822,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // definitions, §1) and whether pi's own `tools` allowlist and the
         // enforcer policy's `provenance` map need to carry "StructuredOutput"
         // (handled after H2, below).
-        if (!isConsultRun && spec.request.schema !== undefined) {
+        if (!isConsultRun && !isExternal && spec.request.schema !== undefined) {
           const schema = spec.request.schema;
           const structuredOutputTool = createStructuredOutputTool({
             schema,
@@ -893,6 +911,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // when the agent type declares one (same M1 rescue as every other
         // grantedReserved push).
         if (
+          !isExternal &&
           bashJobGrant({
             ...(spec.type.tools !== undefined ? { typeTools: spec.type.tools } : {}),
             childBashJobs: deps.childBashJobsEnabled ?? false,
@@ -908,7 +927,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // non-consult child run, gated only by the wiring layer's live capability read (never
         // granted once the process-wide state machine has disabled the feature). P0-r §7.0 point 1:
         // widened to readonlyDomain so a tidy run never gets it either.
-        if (!readonlyDomain && (deps.childSwitchContextGrant?.() ?? false)) {
+        if (!readonlyDomain && !isExternal && (deps.childSwitchContextGrant?.() ?? false)) {
           grantedReserved.push("switch_context");
         }
         if (customTools.length)
@@ -956,6 +975,31 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             cwd: sessionSpec.cwd ?? preH2Cwd,
             isolated:
               spec.request.isolation === "worktree" && sessionSpec.cwd !== undefined && sessionSpec.cwd !== preH2Cwd,
+          };
+        }
+        // external-agent plan §5.2 (P4b): attach the pure-data ExternalRunSpec
+        // AFTER H2 (so the post-H2 cwd is authoritative), so no extension that
+        // rebuilds `sessionSpec` during H2 loses the field. planRun is pure
+        // synchronous (pricing memo + memory block render), never spawns.
+        if (isExternal && deps.external !== undefined && spec.model !== undefined) {
+          sessionSpec = {
+            ...sessionSpec,
+            external: deps.external.planRun({
+              runId: spec.runId,
+              model: spec.model,
+              ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+              typeName: spec.type.name,
+              ...(spec.type.promptMode === "replace" && spec.type.systemPrompt
+                ? { rolePrompt: spec.type.systemPrompt }
+                : {}),
+              canSpawn: (spec.type.canSpawn?.length ?? 0) > 0,
+              canMessage: (spec.type.canMessage?.length ?? 0) > 0,
+              declaresTools: spec.type.tools !== undefined,
+              ...(spec.request.schema === undefined ? {} : { schema: spec.request.schema }),
+              resume: spec.request.resumeFrom !== undefined,
+              cwd: sessionSpec.cwd ?? preH2Cwd,
+              persist: sessionSpec.persist ?? true,
+            }),
           };
         }
         // consult §5.4 B-2 / P0-r §7.0 points 2/6a: FORCE the read-only tool
@@ -1041,57 +1085,59 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               ),
             ]
           : [];
-        const toolScope = {
-          policy: readonlyDomain
-            ? buildToolScopePolicy({
-                tools: consultC2
-                  ? consultSnapshot.tools
-                      .map((tool) => tool.name)
-                      .filter((name): name is string => typeof name === "string")
-                  : CONSULT_READONLY_TOOLS,
-                granted: consultC2 ? consultGranted : readonlyHasSchema ? ["StructuredOutput"] : [],
-                ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
-                ...(consultC2 ? { reportBlockedOnBind: true } : {}),
-              })
-            : buildToolScopePolicy({
-                ...(spec.type.tools ? { tools: spec.type.tools } : {}),
-                granted: grantedReserved,
+        const toolScope = isExternal
+          ? undefined
+          : {
+              policy: readonlyDomain
+                ? buildToolScopePolicy({
+                    tools: consultC2
+                      ? consultSnapshot.tools
+                          .map((tool) => tool.name)
+                          .filter((name): name is string => typeof name === "string")
+                      : CONSULT_READONLY_TOOLS,
+                    granted: consultC2 ? consultGranted : readonlyHasSchema ? ["StructuredOutput"] : [],
+                    ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
+                    ...(consultC2 ? { reportBlockedOnBind: true } : {}),
+                  })
+                : buildToolScopePolicy({
+                    ...(spec.type.tools ? { tools: spec.type.tools } : {}),
+                    granted: grantedReserved,
+                  }),
+              enforcer: createToolScopeEnforcer({
+                // TS4: never silent. Note: §7.5's literal "WARN + diag.degraded"
+                // is only half-met here — the enforcer is built before the run's
+                // dispatch channel exists, so blocked/failed enforcement lands in
+                // the log but not in diag.degraded (documented gap, P3).
+                onBlocked: (names) => {
+                  console.warn(
+                    `[pi-subagent] tool scope: blocked late-registered/reserved tool(s) not in run ${spec.runId}'s whitelist: ${names.join(", ")}`,
+                  );
+                  if (consultC2) {
+                    console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip (${names.join(", ")})`);
+                    void runtime.abortRun(spec.runId, "user_stop");
+                  }
+                },
+                onError: (error) =>
+                  console.warn(
+                    `[pi-subagent] tool scope: setActiveTools failed for run ${spec.runId} (retried at next turn boundary): ${error instanceof Error ? error.message : String(error)}`,
+                  ),
+                // P0-r §7.0 point 6b: a shadowed builtin/StructuredOutput was stripped
+                // for THIS run — always reported (bind included), since a mismatch
+                // here is itself the misconfiguration signal, not an expected
+                // baseline strip.
+                onShadowed: (entries) => {
+                  for (const e of entries) {
+                    console.warn(
+                      `[pi-subagent] readonly domain: removed shadowed tool ${e.name} (source: ${e.actual ?? "unknown"}, expected ${e.expected}) from run ${spec.runId}`,
+                    );
+                  }
+                  if (consultC2) {
+                    console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip`);
+                    void runtime.abortRun(spec.runId, "user_stop");
+                  }
+                },
               }),
-          enforcer: createToolScopeEnforcer({
-            // TS4: never silent. Note: §7.5's literal "WARN + diag.degraded"
-            // is only half-met here — the enforcer is built before the run's
-            // dispatch channel exists, so blocked/failed enforcement lands in
-            // the log but not in diag.degraded (documented gap, P3).
-            onBlocked: (names) => {
-              console.warn(
-                `[pi-subagent] tool scope: blocked late-registered/reserved tool(s) not in run ${spec.runId}'s whitelist: ${names.join(", ")}`,
-              );
-              if (consultC2) {
-                console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip (${names.join(", ")})`);
-                void runtime.abortRun(spec.runId, "user_stop");
-              }
-            },
-            onError: (error) =>
-              console.warn(
-                `[pi-subagent] tool scope: setActiveTools failed for run ${spec.runId} (retried at next turn boundary): ${error instanceof Error ? error.message : String(error)}`,
-              ),
-            // P0-r §7.0 point 6b: a shadowed builtin/StructuredOutput was stripped
-            // for THIS run — always reported (bind included), since a mismatch
-            // here is itself the misconfiguration signal, not an expected
-            // baseline strip.
-            onShadowed: (entries) => {
-              for (const e of entries) {
-                console.warn(
-                  `[pi-subagent] readonly domain: removed shadowed tool ${e.name} (source: ${e.actual ?? "unknown"}, expected ${e.expected}) from run ${spec.runId}`,
-                );
-              }
-              if (consultC2) {
-                console.warn(`[pi-subagent] consult identity_mismatch:enforcer-strip`);
-                void runtime.abortRun(spec.runId, "user_stop");
-              }
-            },
-          }),
-        };
+            };
         // D9 ("只读提示的 prompt 路径", v2.1 condition 4): `promptNotes` is NOT a
         // driver-facing SessionSpec field — pulled out here so it never rides
         // along in `...sessionFields` into the create/resume request, and
@@ -1110,7 +1156,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           // F3/F4: includes inputBudget as a runtime-only field; it is
           // consumed by RuntimeRunner and never copied into SessionSpec/pi.
           ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
-          toolScope,
+          ...(toolScope === undefined ? {} : { toolScope }),
           // M-A: display-only metadata for the presentation layer (diag.model/
           // label/agentType). spec.model is already the merged
           // modelOverride-or-type-default pair; undefined means "pi session
@@ -1164,7 +1210,39 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         runnerEntered = true;
         let outcome = await runtime.run(req, spec.budget);
         // X10 host-side re-validation (second of the two mandatory checks).
-        if (spec.request.schema !== undefined) {
+        if (isExternal) {
+          // external-agent plan §5.2 (P4b): droid has no StructuredOutput tool —
+          // a schema answer is parsed from the final ```json block instead.
+          // Only a completed run is schema-checked (same as the pi path's
+          // early return for non-completed); no repair round (U6).
+          if (spec.request.schema !== undefined && outcome.status === "completed") {
+            const extracted = extractStructuredJson(outcome.text ?? "");
+            if (!extracted.ok) {
+              outcome = {
+                ...outcome,
+                status: "failed",
+                error: { kind: "schema", message: msgSchemaNoJson(), retryable: false },
+              };
+            } else {
+              outcome = applyStructuredOutputPolicy(
+                outcome,
+                spec.request.schema,
+                extracted.value,
+                spec.request.schemaPreset === "verdict/v1" ? validateVerdictV1Semantics : undefined,
+              );
+            }
+            settled = outcome;
+            try {
+              const snapshot = deps.store.get(spec.runId);
+              if (snapshot)
+                deps.store.put({ ...snapshot, outcome, status: outcome.status, updatedAt: deps.clock.now() });
+            } catch (err) {
+              console.warn(
+                `[pi-subagent] post-policy snapshot persist failed for ${spec.runId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          } else settled = outcome;
+        } else if (spec.request.schema !== undefined) {
           outcome = applyStructuredOutputPolicy(
             outcome,
             spec.request.schema,
