@@ -37,6 +37,7 @@ import {
   DIALOG_BG_HUB_CAPS,
   HOLD_HUB_CAPS,
   RUNTX_HUB_CAPS,
+  QUOTA_POOLS_HUB_CAPS,
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
   SPAWN_RELAUNCH_HUB_CAP,
@@ -560,6 +561,7 @@ export async function startHub(
         ...DIALOG_BG_HUB_CAPS,
         ...HOLD_HUB_CAPS,
         ...RUNTX_HUB_CAPS,
+        ...QUOTA_POOLS_HUB_CAPS,
         ...extraHubCaps,
       ],
     };

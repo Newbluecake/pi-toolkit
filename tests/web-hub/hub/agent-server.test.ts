@@ -9,6 +9,7 @@ import {
   HOLD_HUB_CAPS,
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
+  QUOTA_POOLS_HUB_CAPS,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
 import {
@@ -113,7 +114,14 @@ describe("agent-server handshake", () => {
       pingMs: TIMING.pingMs,
       leaseMs: TIMING.staleMs,
       http: { port: 7878 },
-      caps: [...P2_HUB_CAPS, ...UPLOAD_HUB_CAPS, ...DIALOG_BG_HUB_CAPS, ...HOLD_HUB_CAPS, ...RUNTX_HUB_CAPS],
+      caps: [
+        ...P2_HUB_CAPS,
+        ...UPLOAD_HUB_CAPS,
+        ...DIALOG_BG_HUB_CAPS,
+        ...HOLD_HUB_CAPS,
+        ...RUNTX_HUB_CAPS,
+        ...QUOTA_POOLS_HUB_CAPS,
+      ],
     });
     expect(registry.list()).toHaveLength(1);
     expect(agentServer.connectionCount()).toBe(1);

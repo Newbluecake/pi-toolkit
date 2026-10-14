@@ -228,6 +228,23 @@
   border: 1px solid var(--c-border);
 }
 
+/* P7w: droid overage-policy badge (QuotaCard, droid-standard row only) */
+.q-badge.q-overage {
+  color: var(--c-text-2);
+  border: 1px solid var(--c-border);
+}
+
+/* P7w: droid billing API auth problem. The pill chip rides `.q-seg[data-level="2"]` (orange dot);
+ * the text itself stays at the normal segment colour. */
+.q-seg.q-problem .q-seg-text {
+  color: var(--c-text-2);
+}
+.q-problem-row {
+  margin: 4px 0 6px;
+  font-size: var(--fs-2xs);
+  color: var(--c-orange);
+}
+
 .q-row {
   display: grid;
   grid-template-columns: 30px 1fr auto;

@@ -10,6 +10,7 @@ import {
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_HUB_CAP,
   RUNTX_HUB_CAPS,
+  QUOTA_POOLS_HUB_CAPS,
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
   UPLOAD_HUB_CAPS,
@@ -113,6 +114,7 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
       ...P2_HUB_CAPS,
       ...UPLOAD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
+      ...QUOTA_POOLS_HUB_CAPS, // P7w (quota-plan §9A.2): unconditional, both surfaces
       ...DIALOG_BG_HUB_CAPS,
       ...HOLD_HUB_CAPS,
     ]) {

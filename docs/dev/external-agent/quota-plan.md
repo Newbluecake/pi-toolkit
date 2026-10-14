@@ -453,7 +453,8 @@ if (view !== undefined) return evaluatePooledGate(model, view, deps); // 新路�
   | 旧 agent / P7（无 pools 模式） | 现状                                              | 新 hub 解码旧形状不受影响（schema 只是放宽），UI 不出现 droid |
   | P7wa                           | 看不到 cap ⇒ pools=false ⇒ 与 P7 字节一致，不丢帧 | pools=true ⇒ 发 droid 行、month、billing、problems            |
 
-- UI 由 hub 自带（`dist/web-hub-ui/` 或按 hubVersion 钉住的外部目录），UI 版本恒等于 hub 版本，所以 UI 侧不需要再判断 cap：能收到 droid 行的 UI 一定认识它。
+- UI 由 hub 自带（`dist/web-hub-ui/` 或按 hubVersion 钉住的外部目录）。**新鲜加载的 UI 恒等于 hub 版本**，所以 UI 侧不需要再判断 cap：能收到 droid 行的新 UI 一定认识它。**陈旧 tab 连新 hub 时降级**（r2 复审建议 #1）：已打开的旧 UI tab 在 hub 升级重连后可能收到 droid 行 / month 窗口，UI 不做 schema 校验，旧 `providerLabel` 对未知 id 回退为裸 id、旧 `windowsOf` 过滤掉 month、`billing` / `problems` 被忽略——只显示裸 id + 5h/week，不崩、不丢帧（登记为 R16）。
+- `problems` 技术上不受封闭枚举约束（旧 hub 其实能解码），随 `quota.pools.v1` 门控仅为统一口径（r2 复审建议 #2）。
 
 ### 9A.1 协议冻结面（`src/web-hub/protocol/{version,messages}.ts`，append-only）
 
@@ -841,6 +842,7 @@ npx vitest run tests/web-hub/protocol tests/web-hub/hub tests/web-hub/ui && npm 
 | R13 | web pill 在多个会话之间切换时，droid 组时有时无（`freshestQuota` 只选一个 wire；P7wa 之前的旧会话、或连到旧 hub 的会话不带 droid 行） | 现有新鲜度规则（非陈旧 → 最新 fetchedAt → at）会让持续刷新的会话胜出；droid 已启用的会话额度刷新更频繁。可接受，写入 P6 README。                                                                                                                                                                                |
 | R14 | 与 #26 的 `messages.ts` / `agent/index.ts` / `src/index.ts` 发生文本冲突                                                              | §10 的合并顺序：P7w 与 #26 P0 后合方 rebase；P7wa 排在 #26 P-A 之后。                                                                                                                                                                                                                                           |
 | R15 | 桌面 TopBar 宽度：GLM、Kimi、droid、droid core 四组                                                                                   | available 模式只显示未耗尽的组（现有规则）；移动端走紧凑数字；P7w 验收贴桌面和手机截图。                                                                                                                                                                                                                        |
+| R16 | 陈旧 UI tab 连上新 hub 后收到 droid 行 / month 窗口（§9A.0）                                                                          | 旧 UI 降级：未知 id 显示裸 id、只渲染 5h/week、忽略 billing/problems；不崩不丢帧。刷新页面即得完整 UI。                                                                                                                                                                                                         |
 
 ---
 

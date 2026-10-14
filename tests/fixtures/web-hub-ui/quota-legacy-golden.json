@@ -1,0 +1,662 @@
+{
+  "logic": {
+    "kimiOnly": {
+      "groups": [
+        {
+          "ids": ["kimi-coding"],
+          "labelId": "kimi-coding",
+          "level": 0,
+          "scope": "week",
+          "usedPct": 20,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 8
+            },
+            {
+              "scope": "week",
+              "level": 0,
+              "usedPct": 20
+            }
+          ],
+          "weekResetAt": 1792058400000,
+          "available": true,
+          "stale": false
+        }
+      ],
+      "display": {
+        "mode": "available",
+        "groups": [
+          {
+            "ids": ["kimi-coding"],
+            "labelId": "kimi-coding",
+            "level": 0,
+            "scope": "week",
+            "usedPct": 20,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 8
+              },
+              {
+                "scope": "week",
+                "level": 0,
+                "usedPct": 20
+              }
+            ],
+            "weekResetAt": 1792058400000,
+            "available": true,
+            "stale": false
+          }
+        ]
+      },
+      "view": {
+        "level": 0,
+        "providerId": "kimi-coding",
+        "scope": "week",
+        "usedPct": 20
+      }
+    },
+    "zaiPair": {
+      "groups": [
+        {
+          "ids": ["zai-coding-cn", "zai"],
+          "labelId": "zai-coding-cn",
+          "level": 0,
+          "scope": "5h",
+          "usedPct": 42,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 42
+            },
+            {
+              "scope": "week",
+              "level": 0,
+              "usedPct": 41
+            }
+          ],
+          "weekResetAt": 1792130400000,
+          "available": true,
+          "stale": false
+        }
+      ],
+      "display": {
+        "mode": "available",
+        "groups": [
+          {
+            "ids": ["zai-coding-cn", "zai"],
+            "labelId": "zai-coding-cn",
+            "level": 0,
+            "scope": "5h",
+            "usedPct": 42,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 42
+              },
+              {
+                "scope": "week",
+                "level": 0,
+                "usedPct": 41
+              }
+            ],
+            "weekResetAt": 1792130400000,
+            "available": true,
+            "stale": false
+          }
+        ]
+      },
+      "view": {
+        "level": 0,
+        "providerId": "zai-coding-cn",
+        "scope": "5h",
+        "usedPct": 42
+      }
+    },
+    "glmAndKimi": {
+      "groups": [
+        {
+          "ids": ["zai-coding-cn", "zai"],
+          "labelId": "zai-coding-cn",
+          "level": 0,
+          "scope": "week",
+          "usedPct": 43,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 20
+            },
+            {
+              "scope": "week",
+              "level": 0,
+              "usedPct": 43
+            }
+          ],
+          "weekResetAt": 1792130400000,
+          "available": true,
+          "stale": false
+        },
+        {
+          "ids": ["kimi-coding"],
+          "labelId": "kimi-coding",
+          "level": 0,
+          "scope": "week",
+          "usedPct": 20,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 8
+            },
+            {
+              "scope": "week",
+              "level": 0,
+              "usedPct": 20
+            }
+          ],
+          "weekResetAt": 1792058400000,
+          "available": true,
+          "stale": false
+        }
+      ],
+      "display": {
+        "mode": "available",
+        "groups": [
+          {
+            "ids": ["zai-coding-cn", "zai"],
+            "labelId": "zai-coding-cn",
+            "level": 0,
+            "scope": "week",
+            "usedPct": 43,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 20
+              },
+              {
+                "scope": "week",
+                "level": 0,
+                "usedPct": 43
+              }
+            ],
+            "weekResetAt": 1792130400000,
+            "available": true,
+            "stale": false
+          },
+          {
+            "ids": ["kimi-coding"],
+            "labelId": "kimi-coding",
+            "level": 0,
+            "scope": "week",
+            "usedPct": 20,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 8
+              },
+              {
+                "scope": "week",
+                "level": 0,
+                "usedPct": 20
+              }
+            ],
+            "weekResetAt": 1792058400000,
+            "available": true,
+            "stale": false
+          }
+        ]
+      },
+      "view": {
+        "level": 0,
+        "providerId": "zai-coding-cn",
+        "scope": "week",
+        "usedPct": 43
+      }
+    },
+    "glmIntlOnly": {
+      "groups": [
+        {
+          "ids": ["zai"],
+          "labelId": "zai",
+          "level": 0,
+          "scope": "5h",
+          "usedPct": 30,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 30
+            },
+            {
+              "scope": "week",
+              "level": 0,
+              "usedPct": 30
+            }
+          ],
+          "weekResetAt": 1792130400000,
+          "available": true,
+          "stale": false
+        }
+      ],
+      "display": {
+        "mode": "available",
+        "groups": [
+          {
+            "ids": ["zai"],
+            "labelId": "zai",
+            "level": 0,
+            "scope": "5h",
+            "usedPct": 30,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 30
+              },
+              {
+                "scope": "week",
+                "level": 0,
+                "usedPct": 30
+              }
+            ],
+            "weekResetAt": 1792130400000,
+            "available": true,
+            "stale": false
+          }
+        ]
+      },
+      "view": {
+        "level": 0,
+        "providerId": "zai",
+        "scope": "5h",
+        "usedPct": 30
+      }
+    },
+    "stale": {
+      "groups": [
+        {
+          "ids": ["kimi-coding"],
+          "labelId": "kimi-coding",
+          "level": 0,
+          "scope": "week",
+          "usedPct": 20,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 8
+            },
+            {
+              "scope": "week",
+              "level": 0,
+              "usedPct": 20
+            }
+          ],
+          "weekResetAt": 1792058400000,
+          "available": true,
+          "stale": true
+        }
+      ],
+      "display": {
+        "mode": "available",
+        "groups": [
+          {
+            "ids": ["kimi-coding"],
+            "labelId": "kimi-coding",
+            "level": 0,
+            "scope": "week",
+            "usedPct": 20,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 8
+              },
+              {
+                "scope": "week",
+                "level": 0,
+                "usedPct": 20
+              }
+            ],
+            "weekResetAt": 1792058400000,
+            "available": true,
+            "stale": true
+          }
+        ]
+      },
+      "view": {
+        "level": 0,
+        "providerId": "kimi-coding",
+        "scope": "week",
+        "usedPct": 20
+      }
+    },
+    "demoted": {
+      "groups": [
+        {
+          "ids": ["kimi-coding"],
+          "labelId": "kimi-coding",
+          "level": 0,
+          "scope": "5h",
+          "usedPct": 75,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 75
+            },
+            {
+              "scope": "week",
+              "level": 0,
+              "usedPct": 20
+            }
+          ],
+          "weekResetAt": 1792058400000,
+          "available": true,
+          "stale": false
+        }
+      ],
+      "display": {
+        "mode": "available",
+        "groups": [
+          {
+            "ids": ["kimi-coding"],
+            "labelId": "kimi-coding",
+            "level": 0,
+            "scope": "5h",
+            "usedPct": 75,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 75
+              },
+              {
+                "scope": "week",
+                "level": 0,
+                "usedPct": 20
+              }
+            ],
+            "weekResetAt": 1792058400000,
+            "available": true,
+            "stale": false
+          }
+        ]
+      },
+      "view": {
+        "level": 0,
+        "providerId": "kimi-coding",
+        "scope": "5h",
+        "usedPct": 75
+      }
+    },
+    "exhaustedMix": {
+      "groups": [
+        {
+          "ids": ["zai-coding-cn", "zai"],
+          "labelId": "zai-coding-cn",
+          "level": 3,
+          "scope": "week",
+          "usedPct": 99,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 0,
+              "usedPct": 10
+            },
+            {
+              "scope": "week",
+              "level": 3,
+              "usedPct": 99
+            }
+          ],
+          "weekResetAt": 1792130400000,
+          "resetScope": "week",
+          "resetAt": 1792130400000,
+          "available": false,
+          "stale": false
+        },
+        {
+          "ids": ["kimi-coding"],
+          "labelId": "kimi-coding",
+          "level": 3,
+          "scope": "week",
+          "usedPct": 100,
+          "windows": [
+            {
+              "scope": "week",
+              "level": 3,
+              "usedPct": 100
+            }
+          ],
+          "weekResetAt": 1792044000000,
+          "resetScope": "week",
+          "resetAt": 1792044000000,
+          "available": false,
+          "stale": false
+        }
+      ],
+      "display": {
+        "mode": "exhausted",
+        "groups": [
+          {
+            "ids": ["zai-coding-cn", "zai"],
+            "labelId": "zai-coding-cn",
+            "level": 3,
+            "scope": "week",
+            "usedPct": 99,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 0,
+                "usedPct": 10
+              },
+              {
+                "scope": "week",
+                "level": 3,
+                "usedPct": 99
+              }
+            ],
+            "weekResetAt": 1792130400000,
+            "resetScope": "week",
+            "resetAt": 1792130400000,
+            "available": false,
+            "stale": false
+          },
+          {
+            "ids": ["kimi-coding"],
+            "labelId": "kimi-coding",
+            "level": 3,
+            "scope": "week",
+            "usedPct": 100,
+            "windows": [
+              {
+                "scope": "week",
+                "level": 3,
+                "usedPct": 100
+              }
+            ],
+            "weekResetAt": 1792044000000,
+            "resetScope": "week",
+            "resetAt": 1792044000000,
+            "available": false,
+            "stale": false
+          }
+        ]
+      },
+      "view": {
+        "level": 3,
+        "providerId": "kimi-coding",
+        "scope": "week",
+        "usedPct": 100,
+        "resetScope": "week",
+        "resetAt": 1792044000000
+      }
+    },
+    "l1Annex": {
+      "groups": [
+        {
+          "ids": ["kimi-coding"],
+          "labelId": "kimi-coding",
+          "level": 1,
+          "scope": "5h",
+          "usedPct": 80,
+          "windows": [
+            {
+              "scope": "5h",
+              "level": 1,
+              "usedPct": 80
+            },
+            {
+              "scope": "week",
+              "level": 1,
+              "usedPct": 55
+            }
+          ],
+          "weekResetAt": 1792094400000,
+          "resetScope": "week",
+          "resetAt": 1792094400000,
+          "available": true,
+          "stale": false
+        }
+      ],
+      "display": {
+        "mode": "available",
+        "groups": [
+          {
+            "ids": ["kimi-coding"],
+            "labelId": "kimi-coding",
+            "level": 1,
+            "scope": "5h",
+            "usedPct": 80,
+            "windows": [
+              {
+                "scope": "5h",
+                "level": 1,
+                "usedPct": 80
+              },
+              {
+                "scope": "week",
+                "level": 1,
+                "usedPct": 55
+              }
+            ],
+            "weekResetAt": 1792094400000,
+            "resetScope": "week",
+            "resetAt": 1792094400000,
+            "available": true,
+            "stale": false
+          }
+        ]
+      },
+      "view": {
+        "level": 1,
+        "providerId": "kimi-coding",
+        "scope": "5h",
+        "usedPct": 80,
+        "resetScope": "week",
+        "resetAt": 1792094400000
+      }
+    },
+    "freshest": {
+      "v": 1,
+      "at": 1791950370000,
+      "providers": [
+        {
+          "id": "kimi-coding",
+          "level": 0,
+          "stale": false,
+          "fetchedAt": 1791950340000,
+          "windows": [
+            {
+              "scope": "5h",
+              "usedPct": 8,
+              "level": 0,
+              "resetAt": 1791957600000
+            },
+            {
+              "scope": "week",
+              "usedPct": 20,
+              "level": 0,
+              "resetAt": 1792058400000
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "html": {
+    "pill/en/desktop/kimiOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 8% · 7d 20%</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/kimiOnly": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 8%;\"></i></span><span class=\"q-val\">8%</span><span class=\"q-sub\"><!--v-if-->14:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/desktop/zaiPair": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 5h 42%\" title=\"Subscription quota: GLM 5h 42%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 5h 42% · 7d 41%</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/zaiPair": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">pro</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 42%;\"></i></span><span class=\"q-val\">42%</span><span class=\"q-sub\"><!--v-if-->13:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 41%;\"></i></span><span class=\"q-val\">41%</span><span class=\"q-sub q-warn\">At current rate, exhausts in about 3 h · 10/16 14:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/desktop/glmAndKimi": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 7d 43%; Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: GLM 7d 43%; Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 5h 20% · 7d 43%</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 8% · 7d 20%</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/glmAndKimi": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">pro</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->13:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 43%;\"></i></span><span class=\"q-val\">43%</span><span class=\"q-sub q-warn\">At current rate, exhausts in about 3 h · 10/16 14:00 reset</span></div>\n  </div>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 8%;\"></i></span><span class=\"q-val\">8%</span><span class=\"q-sub\"><!--v-if-->14:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/desktop/glmIntlOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 5h 30%\" title=\"Subscription quota: GLM 5h 30%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 5h 30% · 7d 30%</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/glmIntlOnly": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 30%;\"></i></span><span class=\"q-val\">30%</span><span class=\"q-sub\"><!--v-if-->13:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 30%;\"></i></span><span class=\"q-val\">30%</span><span class=\"q-sub q-warn\">At current rate, exhausts in about 3 h · 10/16 14:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/desktop/stale": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\" data-stale=\"true\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 8% · 7d 20% ·stale</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/stale": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span><span class=\"q-badge q-stale\">stale 20 min</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 8%;\"></i></span><span class=\"q-val\">8%</span><span class=\"q-sub\"><!--v-if-->14:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/desktop/demoted": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 5h 75%\" title=\"Subscription quota: Kimi 5h 75%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 75% · 7d 20%</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/demoted": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span><span class=\"q-badge q-demoted\">⤓ demoted · resumes 15:00</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 75%;\"></i></span><span class=\"q-val\">75%</span><span class=\"q-sub\"><!--v-if-->14:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/desktop/exhaustedMix": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"3\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 7d 99%, resets 10/16 14:00; Subscription quota: Kimi 7d 100%, resets 10/15 14:00\" title=\"Subscription quota: GLM 7d 99%, resets 10/16 14:00; Subscription quota: Kimi 7d 100%, resets 10/15 14:00\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ GLM · 7d 10/16 14:00 reset</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ Kimi · 7d 10/15 14:00 reset</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/exhaustedMix": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">pro</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 10%;\"></i></span><span class=\"q-val\">10%</span><span class=\"q-sub\"><!--v-if-->13:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"3\"><i style=\"width: 99%;\"></i></span><span class=\"q-val\">99%</span><span class=\"q-sub q-warn\">At current rate, exhausts in about 3 h · 10/16 14:00 reset</span></div>\n  </div>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"3\"><i style=\"width: 100%;\"></i></span><span class=\"q-val\">100%</span><span class=\"q-sub\"><!--v-if-->10/15 14:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/desktop/l1Annex": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"1\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 5h 80%, resets 10/16 04:00\" title=\"Subscription quota: Kimi 5h 80%, resets 10/16 04:00\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"1\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 80% · 7d 55% · 10/16 04:00 reset</span></span></span></button>\n<!--v-if--></span>",
+    "card/en/l1Annex": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"Subscription quota\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">Subscription quota</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"1\"><i style=\"width: 80%;\"></i></span><span class=\"q-val\">80%</span><span class=\"q-sub\"><!--v-if-->13:00 reset</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">week</span><span class=\"q-bar\" data-lv=\"1\"><i style=\"width: 55%;\"></i></span><span class=\"q-val\">55%</span><span class=\"q-sub\"><!--v-if-->10/16 04:00 reset</span></div>\n  </div>\n  <div class=\"q-foot\"><span>Sampled by the main session</span><span>Updated 11:59</span></div>\n</div>",
+    "pill/en/mobile/kimiOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 8%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/mobile/zaiPair": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 5h 42%\" title=\"Subscription quota: GLM 5h 42%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 42%/41%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/mobile/glmAndKimi": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 7d 43%; Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: GLM 7d 43%; Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 20%/43%</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 8%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/mobile/glmIntlOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 5h 30%\" title=\"Subscription quota: GLM 5h 30%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 30%/30%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/mobile/stale": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\" data-stale=\"true\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 8%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/mobile/demoted": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 5h 75%\" title=\"Subscription quota: Kimi 5h 75%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 75%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/mobile/exhaustedMix": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"3\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 7d 99%, resets 10/16 14:00; Subscription quota: Kimi 7d 100%, resets 10/15 14:00\" title=\"Subscription quota: GLM 7d 99%, resets 10/16 14:00; Subscription quota: Kimi 7d 100%, resets 10/15 14:00\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ GLM 10/16 14:00</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ Kimi 10/15 14:00</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/mobile/l1Annex": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"1\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 5h 80%, resets 10/16 04:00\" title=\"Subscription quota: Kimi 5h 80%, resets 10/16 04:00\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"1\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 80%/55%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/kimiOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/zaiPair": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 5h 42%\" title=\"Subscription quota: GLM 5h 42%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">42%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/glmAndKimi": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 7d 43%; Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: GLM 7d 43%; Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">43%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/glmIntlOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 5h 30%\" title=\"Subscription quota: GLM 5h 30%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">30%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/stale": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 7d 20%\" title=\"Subscription quota: Kimi 7d 20%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\" data-stale=\"true\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/demoted": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 5h 75%\" title=\"Subscription quota: Kimi 5h 75%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">75%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/exhaustedMix": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"3\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: GLM 7d 99%, resets 10/16 14:00; Subscription quota: Kimi 7d 100%, resets 10/15 14:00\" title=\"Subscription quota: GLM 7d 99%, resets 10/16 14:00; Subscription quota: Kimi 7d 100%, resets 10/15 14:00\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">100%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/en/phone/l1Annex": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"1\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"Subscription quota: Kimi 5h 80%, resets 10/16 04:00\" title=\"Subscription quota: Kimi 5h 80%, resets 10/16 04:00\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"1\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">80%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/desktop/kimiOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 7d 20%\" title=\"订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 8% · 7d 20%</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/kimiOnly": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 8%;\"></i></span><span class=\"q-val\">8%</span><span class=\"q-sub\"><!--v-if-->14:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/desktop/zaiPair": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 5h 42%\" title=\"订阅额度：GLM 5h 42%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 5h 42% · 7d 41%</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/zaiPair": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">pro</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 42%;\"></i></span><span class=\"q-val\">42%</span><span class=\"q-sub\"><!--v-if-->13:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 41%;\"></i></span><span class=\"q-val\">41%</span><span class=\"q-sub q-warn\">按当前速率约 3 小时 耗尽 · 10/16 14:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/desktop/glmAndKimi": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 7d 43%; 订阅额度：Kimi 7d 20%\" title=\"订阅额度：GLM 7d 43%; 订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 5h 20% · 7d 43%</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 8% · 7d 20%</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/glmAndKimi": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">pro</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->13:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 43%;\"></i></span><span class=\"q-val\">43%</span><span class=\"q-sub q-warn\">按当前速率约 3 小时 耗尽 · 10/16 14:00 重置</span></div>\n  </div>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 8%;\"></i></span><span class=\"q-val\">8%</span><span class=\"q-sub\"><!--v-if-->14:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/desktop/glmIntlOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 5h 30%\" title=\"订阅额度：GLM 5h 30%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 5h 30% · 7d 30%</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/glmIntlOnly": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 30%;\"></i></span><span class=\"q-val\">30%</span><span class=\"q-sub\"><!--v-if-->13:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 30%;\"></i></span><span class=\"q-val\">30%</span><span class=\"q-sub q-warn\">按当前速率约 3 小时 耗尽 · 10/16 14:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/desktop/stale": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 7d 20%\" title=\"订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\" data-stale=\"true\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 8% · 7d 20% ·stale</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/stale": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span><span class=\"q-badge q-stale\">数据 20 分钟前</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 8%;\"></i></span><span class=\"q-val\">8%</span><span class=\"q-sub\"><!--v-if-->14:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/desktop/demoted": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 5h 75%\" title=\"订阅额度：Kimi 5h 75%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 75% · 7d 20%</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/demoted": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span><span class=\"q-badge q-demoted\">⤓ 已降位 · 15:00 恢复</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 75%;\"></i></span><span class=\"q-val\">75%</span><span class=\"q-sub\"><!--v-if-->14:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 20%;\"></i></span><span class=\"q-val\">20%</span><span class=\"q-sub\"><!--v-if-->10/15 18:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/desktop/exhaustedMix": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"3\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 7d 99%，10/16 14:00 重置; 订阅额度：Kimi 7d 100%，10/15 14:00 重置\" title=\"订阅额度：GLM 7d 99%，10/16 14:00 重置; 订阅额度：Kimi 7d 100%，10/15 14:00 重置\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ GLM · 7d 10/16 14:00 重置</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ Kimi · 7d 10/15 14:00 重置</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/exhaustedMix": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">GLM</span><span class=\"q-pill q-plan\">pro</span><span class=\"q-pill q-plan\">max</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"0\"><i style=\"width: 10%;\"></i></span><span class=\"q-val\">10%</span><span class=\"q-sub\"><!--v-if-->13:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"3\"><i style=\"width: 99%;\"></i></span><span class=\"q-val\">99%</span><span class=\"q-sub q-warn\">按当前速率约 3 小时 耗尽 · 10/16 14:00 重置</span></div>\n  </div>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"3\"><i style=\"width: 100%;\"></i></span><span class=\"q-val\">100%</span><span class=\"q-sub\"><!--v-if-->10/15 14:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/desktop/l1Annex": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"1\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 5h 80%，10/16 04:00 重置\" title=\"订阅额度：Kimi 5h 80%，10/16 04:00 重置\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"1\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 5h 80% · 7d 55% · 10/16 04:00 重置</span></span></span></button>\n<!--v-if--></span>",
+    "card/zh/l1Annex": "<div id=\"quota-panel\" class=\"q-card\" role=\"dialog\" aria-label=\"订阅额度\" tabindex=\"-1\">\n  <h2 class=\"q-card-title\">订阅额度</h2>\n  <div class=\"q-prov\">\n    <div class=\"q-head\"><span class=\"q-name\">Kimi</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">5h</span><span class=\"q-bar\" data-lv=\"1\"><i style=\"width: 80%;\"></i></span><span class=\"q-val\">80%</span><span class=\"q-sub\"><!--v-if-->13:00 重置</span></div>\n    <div class=\"q-row\"><span class=\"q-scope\">周</span><span class=\"q-bar\" data-lv=\"1\"><i style=\"width: 55%;\"></i></span><span class=\"q-val\">55%</span><span class=\"q-sub\"><!--v-if-->10/16 04:00 重置</span></div>\n  </div>\n  <div class=\"q-foot\"><span>主会话采样</span><span>更新于 11:59</span></div>\n</div>",
+    "pill/zh/mobile/kimiOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 7d 20%\" title=\"订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 8%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/mobile/zaiPair": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 5h 42%\" title=\"订阅额度：GLM 5h 42%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 42%/41%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/mobile/glmAndKimi": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 7d 43%; 订阅额度：Kimi 7d 20%\" title=\"订阅额度：GLM 7d 43%; 订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 20%/43%</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 8%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/mobile/glmIntlOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 5h 30%\" title=\"订阅额度：GLM 5h 30%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">GLM 30%/30%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/mobile/stale": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 7d 20%\" title=\"订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\" data-stale=\"true\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 8%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/mobile/demoted": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 5h 75%\" title=\"订阅额度：Kimi 5h 75%\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 75%/20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/mobile/exhaustedMix": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"3\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 7d 99%，10/16 14:00 重置; 订阅额度：Kimi 7d 100%，10/15 14:00 重置\" title=\"订阅额度：GLM 7d 99%，10/16 14:00 重置; 订阅额度：Kimi 7d 100%，10/15 14:00 重置\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ GLM 10/16 14:00</span></span>\n<!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><span class=\"q-sep\" aria-hidden=\"true\"> · </span><span class=\"q-seg\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">⚠ Kimi 10/15 14:00</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/mobile/l1Annex": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"1\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 5h 80%，10/16 04:00 重置\" title=\"订阅额度：Kimi 5h 80%，10/16 04:00 重置\"><span class=\"q-pill-text\"><!-- Thin separator between groups (the \"·\" glyph is the mobile form; desktop CSS clips\n               it down to a 1px rule so it never reads like the reset annex's own \" · \"). --><!--v-if--><span class=\"q-seg\" data-level=\"1\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">Kimi 80%/55%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/kimiOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 7d 20%\" title=\"订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/zaiPair": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 5h 42%\" title=\"订阅额度：GLM 5h 42%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">42%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/glmAndKimi": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 7d 43%; 订阅额度：Kimi 7d 20%\" title=\"订阅额度：GLM 7d 43%; 订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">43%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/glmIntlOnly": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 5h 30%\" title=\"订阅额度：GLM 5h 30%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">30%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/stale": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 7d 20%\" title=\"订阅额度：Kimi 7d 20%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\" data-stale=\"true\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">20%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/demoted": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"0\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 5h 75%\" title=\"订阅额度：Kimi 5h 75%\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"0\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">75%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/exhaustedMix": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"3\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：GLM 7d 99%，10/16 14:00 重置; 订阅额度：Kimi 7d 100%，10/15 14:00 重置\" title=\"订阅额度：GLM 7d 99%，10/16 14:00 重置; 订阅额度：Kimi 7d 100%，10/15 14:00 重置\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"3\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">100%</span></span></span></button>\n<!--v-if--></span>",
+    "pill/zh/phone/l1Annex": "<span class=\"q-anchor\"><button type=\"button\" class=\"q-pill\" data-level=\"1\" aria-haspopup=\"dialog\" aria-expanded=\"false\" aria-controls=\"quota-panel\" aria-label=\"订阅额度：Kimi 5h 80%，10/16 04:00 重置\" title=\"订阅额度：Kimi 5h 80%，10/16 04:00 重置\"><span class=\"q-pill-text\"><span class=\"q-seg q-seg-compact\" data-level=\"1\"><span class=\"q-dot\" aria-hidden=\"true\"></span><span class=\"q-seg-text\">80%</span></span></span></button>\n<!--v-if--></span>"
+  }
+}

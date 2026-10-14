@@ -6,6 +6,7 @@ import {
   DIALOG_BG_HUB_CAPS,
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
+  QUOTA_POOLS_HUB_CAPS,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
 import { SUPERSEDE_YIELD_MS } from "../../../src/web-hub/hub/supersede.js";
@@ -288,6 +289,15 @@ describe("startHub — fleet-drawer F3b runTx wiring", () => {
     const hub = await start(home, fe);
     void hub;
     expect(fe.deps[0]!.info().caps).toEqual(expect.arrayContaining([...RUNTX_HUB_CAPS]));
+  });
+
+  it("P7w: HubInfo.caps carries quota.pools.v1 right after the RUNTX caps (unconditional)", async () => {
+    const home = tmp.make("wh-hub-quotapools-");
+    const fe = fakeFrontend({ port: 40005 });
+    await start(home, fe);
+    const caps = fe.deps[0]!.info().caps;
+    expect(caps).toEqual(expect.arrayContaining([...QUOTA_POOLS_HUB_CAPS]));
+    expect(caps.indexOf("quota.pools.v1")).toBe(caps.indexOf(RUNTX_HUB_CAPS[0]) + 1);
   });
 
   it("FrontendDeps.runTx is the assembled RunTranscriptService and closes cleanly", async () => {

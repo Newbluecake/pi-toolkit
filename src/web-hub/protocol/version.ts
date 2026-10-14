@@ -156,6 +156,13 @@ export const PREVIEW_CHUNK_HUB_CAP = "preview.chunk.v1";
 export const RUNTX_AGENT_CAPS = ["runtx.v1", "runtx.lan.v1"] as const;
 export const RUNTX_HUB_CAPS = ["runtx.v1"] as const;
 
+/** P7w (quota-plan §9A.1/D19): the hub can decode droid pool quota (`QuotaProviderWire.id` ∈
+ *  droid-*, `QuotaWindowWire.scope="month"`, `billing`, `problems`). Advertised unconditionally on
+ *  BOTH hub cap surfaces (`HubInfo.caps` / `hello_ack.caps`, right after RUNTX_HUB_CAPS); the agent
+ *  only emits those shapes when hello_ack.caps ∋ this cap. No new frame ⇒ no PROTO bump. */
+export const QUOTA_POOLS_HUB_CAP = "quota.pools.v1";
+export const QUOTA_POOLS_HUB_CAPS = [QUOTA_POOLS_HUB_CAP] as const;
+
 /** web-hub-steer-recall plan §2.3 S1. Agent advertises iff holdWired(settings) (hold.ts); the hub
  *  advertises on BOTH cap surfaces (HubInfo.caps / hello_ack.caps), same rule as DIALOG_BG_HUB_CAPS.
  *  The agent only ever HOLDS while `holdCap()` — link live ∧ hello_ack.caps ∋ hold.v1 — is true at

@@ -113,3 +113,22 @@ export interface QuotaWire {
 
 - `tests/web-hub/ui/logic-quota.test.ts`：`glmMergeable` 表、`pillGroups`（排序/headline/双窗/weekResetAt/合并/拆分/单侧/倒序/重置后缀矩阵/防御性 NaN+未知 id）、`pillDisplay`（mixed ⇒ 只可用；全耗尽 ⇒ week 重置；单 provider；GLM 同耗尽仍合并；无 week 窗回退）。
 - `tests/web-hub/ui/quota-pill.test.ts`：两模式渲染端到端（含 aria 覆盖隐藏组、移动形态、`⚠` 前缀永不替换标签）、卡片倒序回归 + 徽章聚合、CSS 锚点（分段色阶、pill 宽度约束）。
+
+## 8. droid 池与 month（#22 P7w，2026-10-14）
+
+施工口径：`docs/dev/external-agent/quota-plan.md` §9A.0–§9A.5（协议冻结面、UI 规格、字节不变保证）。本节只记录对 §1–§7 的修订与落地偏差。
+
+### 8.1 修订
+
+- **协议（append-only）**：`QuotaWindowSchema.scope` 加 `month`；`QuotaProviderSchema.id` 加 `droid-standard` / `droid-core`；provider 行可选 `billing`（`overage`/`extraUsageBalanceCents`/`gateOpen`）；`QuotaWire` 可选 `problems`（≤4，`family:"droid"`、status 100–599）。新 cap `quota.pools.v1`（`QUOTA_POOLS_HUB_CAP`）无条件通告在 hub 的两个 cap 面（`hello_ack.caps` 与 `HubInfo.caps`，紧随 `RUNTX_HUB_CAPS`）；不新增帧，不升 PROTO。agent 侧只在看到该 cap 时才发上述内容（P7wa）。
+- **UI**：`scopeLabel("month")="mo"`；`windowsOf` 排序 5h/week/month；D6 重置附注对 `droid-*` 行 month（level≥1）优先；新增分组字段 `exhaustScope`/`exhaustResetAt`（非 droid ⇒ week，与旧 `weekResetAt` 等价；droid ⇒ 最长已耗尽窗口的 scope 与重置时间；无已知重置时间 ⇒ scope 取 headline 窗口、时钟省略）、`extra`（仅 droid-standard + extraUsage + L3）；`pillProblems`；`pillDisplay` 在只有 problems 时返回 `{mode:"available",groups:[],problems}`。Pill：`droid 5h 12% · 7d 40% · mo 5%`、移动端 `droid 12%/40%/5%`、`extra $X`、`droid auth <code>` 芯片（level 2，pill 级别至少 2；phone 只有 problems 时 chip 文本为 `auth <code>`）。Card：month 行、standard 行超额徽章（droidCore / extraUsage+余额 / 已放行）、标题下 auth 问题行。i18n 中英文同步。
+- **兼容**：陈旧 UI tab 连新 hub 时降级为裸 id + 仅 5h/week（`quota-plan.md` R16）。
+
+### 8.2 字节不变保证
+
+- `tests/fixtures/web-hub-ui/quota-legacy-golden.json`：改动前（未改动的 UI 代码）生成一次，永不重生成。覆盖 kimi / zai 对 / GLM+Kimi / GLM 国际单侧 / stale / demoted / L3 全耗尽 / L1 附注 8 份 wire 的 `pillGroups`（旧字段）/`pillDisplay`/`pillView`/`freshestQuota`，以及 QuotaPill（en/zh × 桌面/移动/phone）与 QuotaCard（en/zh）的 HTML。组件模板不得加 HTML 注释（开发态注释会进快照）。
+- `tests/web-hub/protocol/quota-pools-schema.test.ts` 内嵌改动前 schema 副本，钉住「旧 hub 解码不受影响」与「未门控 droid 帧会被旧 schema 拒」。
+
+### 8.3 测试锚点
+
+`tests/web-hub/ui/{quota-legacy-golden,quota-pools,logic-quota}.test.ts`、`tests/web-hub/protocol/quota-pools-schema.test.ts`、`tests/web-hub/hub/{agent-server-admin,hub,caps-coexist}.test.ts`。

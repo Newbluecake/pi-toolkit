@@ -29,7 +29,18 @@
 /** `scope` → the compact English token used everywhere else in the repo (AGENTS.md UI-text
  *  split; mirrors `src/quota/render.ts`'s `formatScope`). */
 export function scopeLabel(scope) {
-  return scope === "week" ? "7d" : "5h";
+  return scope === "week" ? "7d" : scope === "month" ? "mo" : "5h";
+}
+
+/** P7w (quota-plan §9A.3/D20): integer cents → `$12.34`. Invalid/negative ⇒ `undefined`. */
+export function fmtCents(cents) {
+  if (typeof cents !== "number" || !Number.isFinite(cents) || cents < 0) return undefined;
+  return `$${(Math.round(cents) / 100).toFixed(2)}`;
+}
+
+/** P7w: droid pool rows (`droid-standard` / `droid-core`) — the only ones that carry month windows. */
+function isDroidId(id) {
+  return typeof id === "string" && id.startsWith("droid-");
 }
 
 /** Same calendar day (local time) as `now` ⇒ "HH:MM"; otherwise "M/D HH:MM". `resetAt`
@@ -215,11 +226,14 @@ function mergedGlmWindows(cn, intl) {
  *   ids: string[],
  *   labelId: string,
  *   level: 0|1|2|3,
- *   scope: "5h"|"week",
+ *   scope: "5h"|"week"|"month",
  *   usedPct: number,
- *   windows: {scope: "5h"|"week", level: 0|1|2|3, usedPct: number}[],
+ *   windows: {scope: "5h"|"week"|"month", level: 0|1|2|3, usedPct: number}[],
  *   weekResetAt: number|undefined,
- *   resetScope: "5h"|"week"|undefined,
+ *   exhaustScope: "5h"|"week"|"month"|undefined,
+ *   exhaustResetAt: number|undefined,
+ *   extra?: { cents: number },
+ *   resetScope: "5h"|"week"|"month"|undefined,
  *   resetAt: number|undefined,
  *   available: boolean,
  *   stale: boolean,
@@ -241,9 +255,9 @@ export function pillGroups(quota) {
         worst.set(w.scope, w);
       }
     }
-    const order = { "5h": 0, week: 1 };
+    const order = { "5h": 0, week: 1, month: 2 };
     return [...worst.values()]
-      .filter((w) => w.scope === "5h" || w.scope === "week")
+      .filter((w) => w.scope === "5h" || w.scope === "week" || w.scope === "month")
       .sort((a, b) => order[a.scope] - order[b.scope])
       .map((w) => ({
         scope: w.scope,
@@ -262,7 +276,13 @@ export function pillGroups(quota) {
     const five = worstWindow(p.windows.filter((w) => w.scope === "5h"));
     let resetScope;
     let resetAt;
-    if (week !== undefined && week.level >= 1) {
+    // P7w D6: droid rows add month (level>=1) as the highest-priority annex; a non-droid row never
+    // carries a month window, so its rule is unchanged.
+    const month = isDroidId(p.id) ? worstWindow(p.windows.filter((w) => w.scope === "month")) : undefined;
+    if (month !== undefined && month.level >= 1) {
+      resetScope = "month";
+      resetAt = month.resetAt;
+    } else if (week !== undefined && week.level >= 1) {
       resetScope = "week";
       resetAt = week.resetAt;
     } else if (five !== undefined && five.level >= 1 && five.usedPct > 70) {
@@ -274,6 +294,25 @@ export function pillGroups(quota) {
       resetScope = headline.scope;
       resetAt = headline.resetAt;
     }
+    // P7w: exhausted-mode clock source. Non-droid rows keep the legacy week clock; a droid row
+    // waits for its LONGEST exhausted (level>=3) window to reset (same max rule as the HUD's
+    // recoveryCountdownText). No known reset ⇒ scope falls back to the headline window's, clock omitted.
+    let exhaustScope = "week";
+    let exhaustResetAt = week !== undefined ? week.resetAt : headline.resetAt;
+    if (isDroidId(p.id)) {
+      let longest;
+      for (const w of p.windows) {
+        if (w.level < 3 || typeof w.resetAt !== "number" || !Number.isFinite(w.resetAt)) continue;
+        if (longest === undefined || w.resetAt > longest.resetAt) longest = w;
+      }
+      exhaustScope = longest !== undefined ? longest.scope : headline.scope;
+      exhaustResetAt = longest !== undefined ? longest.resetAt : undefined;
+    }
+    // P7w D20: pill `extra $X` only for the standard pool at L3 under the extraUsage overage policy.
+    const extraFmt =
+      p.id === "droid-standard" && p.billing?.overage === "extraUsage" && headline.level >= 3
+        ? fmtCents(p.billing.extraUsageBalanceCents)
+        : undefined;
     return {
       ids,
       labelId,
@@ -286,6 +325,9 @@ export function pillGroups(quota) {
       // Exhausted-display clock source: the WEEK window's resetAt, or the headline window's
       // when the provider has no week window at all (unknown ⇒ omit the clock).
       weekResetAt: week !== undefined ? week.resetAt : headline.resetAt,
+      exhaustScope,
+      exhaustResetAt,
+      ...(extraFmt !== undefined ? { extra: { cents: p.billing.extraUsageBalanceCents } } : {}),
       resetScope,
       resetAt,
       available: headline.level < 3,
@@ -362,14 +404,36 @@ export function glmPair(providers) {
  *    unknown).
  * `null` when there is nothing to show (no windowed providers) — caller renders no pill.
  * @param {QuotaWire | undefined} quota
- * @returns {{ mode: "available"|"exhausted", groups: ReturnType<typeof pillGroups> } | null}
+ * @returns {{ mode: "available"|"exhausted", groups: ReturnType<typeof pillGroups>, problems?: ReturnType<typeof pillProblems> } | null}
  */
 export function pillDisplay(quota) {
   const groups = pillGroups(quota);
-  if (groups.length === 0) return null;
+  const problems = pillProblems(quota);
+  const extra = problems.length > 0 ? { problems } : {};
+  // P7w: only problems (no windowed group) still yields a pill so an auth failure is visible.
+  if (groups.length === 0) return problems.length > 0 ? { mode: "available", groups: [], problems } : null;
   const available = groups.filter((g) => g.available);
-  if (available.length > 0) return { mode: "available", groups: available };
-  return { mode: "exhausted", groups };
+  if (available.length > 0) return { mode: "available", groups: available, ...extra };
+  return { mode: "exhausted", groups, ...extra };
+}
+
+/**
+ * P7w (quota-plan §9A.3): `QuotaWire.problems` → `[{ family, status }]` — malformed entries are
+ * dropped (UI never validates the wire, so be defensive), at most 4. Absent ⇒ [].
+ * @param {QuotaWire | undefined} quota
+ * @returns {{ family: "droid", status: number }[]}
+ */
+export function pillProblems(quota) {
+  const raw = quota !== undefined && quota !== null ? /** @type {any} */ (quota).problems : undefined;
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const p of raw) {
+    if (p === null || typeof p !== "object") continue;
+    if (p.family !== "droid" || !Number.isInteger(p.status) || p.status < 100 || p.status > 599) continue;
+    out.push({ family: "droid", status: p.status });
+    if (out.length >= 4) break;
+  }
+  return out;
 }
 
 /**

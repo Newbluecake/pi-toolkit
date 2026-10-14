@@ -16,7 +16,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { etaDurationKey, fmtResetAt, glmPair } from "@logic/quota.js";
+import { etaDurationKey, fmtCents, fmtResetAt, glmPair, pillProblems } from "@logic/quota.js";
 import type { QuotaProviderWire, QuotaWindowWire, QuotaWire } from "@protocol/messages.js";
 import "../../styles/quota.css";
 
@@ -35,7 +35,12 @@ interface GlmPair {
 }
 
 /** One head badge of a provider row. */
-type CardBadge = { kind: "demoted"; until: number } | { kind: "stale"; provider: QuotaProviderWire };
+type CardBadge =
+  | { kind: "demoted"; until: number }
+  | { kind: "stale"; provider: QuotaProviderWire }
+  // P7w (D20): droid-standard overage policy / "extra usage allowed" (gateOpen).
+  | { kind: "overage"; billing: NonNullable<QuotaProviderWire["billing"]> }
+  | { kind: "allowed" };
 
 /** One rendered provider row. GLM merge (2026-10-14 user ruling, `glmPair` — same rule as
  * the pill): when both GLM ids are present they ALWAYS merge into ONE row labeled "GLM"
@@ -90,6 +95,10 @@ function cardRows(providers: QuotaProviderWire[]): CardRow[] {
     } else if (p.stale) {
       badges.push({ kind: "stale", provider: p });
     }
+    if (p.id === "droid-standard" && p.billing !== undefined && p.billing.overage !== "off") {
+      badges.push({ kind: "overage", billing: p.billing });
+      if (p.billing.gateOpen === true && p.billing.overage === "extraUsage") badges.push({ kind: "allowed" });
+    }
     rows.push({
       key: p.id,
       labelId: p.id,
@@ -102,6 +111,7 @@ function cardRows(providers: QuotaProviderWire[]): CardRow[] {
 }
 
 const rows = computed<CardRow[]>(() => cardRows(props.quota.providers));
+const problems = computed(() => pillProblems(props.quota) as Array<{ family: "droid"; status: number }>);
 
 const panelEl = ref<HTMLElement | null>(null);
 
@@ -150,15 +160,25 @@ function badgeText(b: CardBadge): string {
     const clock = fmtResetAt(b.until, props.now) ?? "";
     return t("quota.demotedBadgeUntil", { clock });
   }
+  if (b.kind === "overage") {
+    if (b.billing.overage === "droidCore") return t("quota.overageCore");
+    const amount = fmtCents(b.billing.extraUsageBalanceCents) ?? "$0.00";
+    return t("quota.overageExtra", { amount });
+  }
+  if (b.kind === "allowed") return t("quota.overageAllowed");
   return staleBadgeText(b.provider);
 }
 
 function badgeKey(b: CardBadge): string {
-  return b.kind === "demoted" ? "demoted" : `stale-${b.provider.id}`;
+  return b.kind === "stale" ? `stale-${b.provider.id}` : b.kind;
+}
+
+function badgeClass(b: CardBadge): string {
+  return b.kind === "demoted" ? "q-demoted" : b.kind === "stale" ? "q-stale" : "q-overage";
 }
 
 function scopeText(scope: QuotaWindowWire["scope"]): string {
-  return scope === "week" ? t("quota.scopeWeek") : t("quota.scope5h");
+  return scope === "week" ? t("quota.scopeWeek") : scope === "month" ? t("quota.scopeMonth") : t("quota.scope5h");
 }
 
 function barWidth(usedPct: number): string {
@@ -206,17 +226,16 @@ function resetText(w: QuotaWindowWire): string | undefined {
 <template>
   <div id="quota-panel" ref="panelEl" class="q-card" role="dialog" :aria-label="t('quota.title')" tabindex="-1">
     <h2 class="q-card-title">{{ t("quota.title") }}</h2>
+    <div v-for="(p, i) in problems" :key="`problem-${p.status}-${i}`" class="q-problem-row">
+      {{ t("quota.authProblem", { status: p.status }) }}
+    </div>
     <div v-for="row in rows" :key="row.key" class="q-prov">
       <div class="q-head">
         <span class="q-name">{{ providerLabel(row.labelId) }}</span>
         <span v-for="plan in row.plans" :key="plan" class="q-pill q-plan">{{ plan }}</span>
-        <span
-          v-for="b in row.badges"
-          :key="badgeKey(b)"
-          class="q-badge"
-          :class="b.kind === 'demoted' ? 'q-demoted' : 'q-stale'"
-          >{{ badgeText(b) }}</span
-        >
+        <span v-for="b in row.badges" :key="badgeKey(b)" class="q-badge" :class="badgeClass(b)">{{
+          badgeText(b)
+        }}</span>
       </div>
       <div v-for="w in row.windows" :key="w.scope" class="q-row">
         <span class="q-scope">{{ scopeText(w.scope) }}</span>

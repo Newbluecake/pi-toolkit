@@ -35,6 +35,16 @@ const quota = {
   footerSampledBy: "Sampled by the main session",
   footerUpdatedAt: "Updated {clock}",
   emptyNote: "No subscription quota data yet",
+  // P7w (quota-plan §9A.3): droid pools + month window + billing/auth markers.
+  "provider.droid-standard": "droid",
+  "provider.droid-core": "droid core",
+  scopeMonth: "month",
+  overageCore: "Overage: switch to core pool",
+  overageExtra: "Overage: extra usage ({amount})",
+  overageAllowed: "extra usage allowed",
+  authProblem:
+    "droid quota unavailable: Factory billing API returned HTTP {status} — check FACTORY_API_KEY and restart pi",
+  problemAria: "droid quota: HTTP {status}",
 };
 
 export default quota;

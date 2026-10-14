@@ -241,6 +241,11 @@ export interface BashJobsWire {
   sampledAt: number; // agent-clock epoch ms of the projection that produced this content
 }
 
+/** P7w (quota-plan §9A.1): `month` only comes from an agent that saw hello_ack.caps ∋ `quota.pools.v1`. */
+export type QuotaScopeWire = "5h" | "week" | "month";
+/** P7w: `droid-*` ids only come from an agent that saw `quota.pools.v1`. */
+export type QuotaProviderIdWire = "zai-coding-cn" | "zai" | "kimi-coding" | "droid-standard" | "droid-core";
+
 /**
  * quota-web plan §1 (D1-D9): one window (`5h`/`week`, displayed as `7d`) of a provider's
  * `StatusInfo.quota` row. `etaMs`/`resetAt` absent ⇒ no prediction / unknown reset — the UI
@@ -248,7 +253,7 @@ export interface BashJobsWire {
  * timestamps locally (D2: the agent side never re-pushes purely for a clock tick).
  */
 export interface QuotaWindowWire {
-  scope: "5h" | "week";
+  scope: QuotaScopeWire; // month only from an agent that saw `quota.pools.v1` (P7w)
   usedPct: number; // 0..100
   level: 0 | 1 | 2 | 3;
   resetAt?: number; // epoch ms
@@ -262,7 +267,7 @@ export interface QuotaWindowWire {
  * window could otherwise do forever.
  */
 export interface QuotaProviderWire {
-  id: "zai-coding-cn" | "zai" | "kimi-coding";
+  id: QuotaProviderIdWire;
   plan?: string; // GLM 的档位（max/pro…）
   level: 0 | 1 | 2 | 3; // provider 级 = 窗口 max
   stale: boolean;
@@ -273,6 +278,21 @@ export interface QuotaProviderWire {
   fetchedAt?: number;
   demotedUntil?: number;
   windows: QuotaWindowWire[];
+  /** P7w (append-only): droid-* rows only. */
+  billing?: QuotaBillingWire;
+}
+
+/** P7w: droid-* row billing marker (quota-plan §9A.1). */
+export interface QuotaBillingWire {
+  overage: "droidCore" | "extraUsage" | "off";
+  extraUsageBalanceCents: number; // integer ≥ 0
+  gateOpen?: true; // present only when the service decorated the row as gate-open
+}
+
+/** P7w: a quota source that cannot be sampled (droid billing API HTTP 401/402/403). */
+export interface QuotaProblemWire {
+  family: "droid";
+  status: number;
 }
 
 /**
@@ -285,6 +305,8 @@ export interface QuotaWire {
   v: 1;
   at: number;
   providers: QuotaProviderWire[];
+  /** P7w (append-only): only in pools mode and non-empty. */
+  problems?: QuotaProblemWire[];
 }
 
 /**
@@ -1138,7 +1160,7 @@ export const BashJobsWireSchema = Type.Object(
 // precedent) — a `decodeWith` failure drops the WHOLE status frame.
 const QuotaWindowSchema = Type.Object(
   {
-    scope: Type.Union([Type.Literal("5h"), Type.Literal("week")]),
+    scope: Type.Union([Type.Literal("5h"), Type.Literal("week"), Type.Literal("month")]),
     usedPct: Type.Number({ minimum: 0, maximum: 100 }),
     level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
     resetAt: Type.Optional(Type.Number()),
@@ -1146,15 +1168,30 @@ const QuotaWindowSchema = Type.Object(
   },
   { additionalProperties: true },
 );
+const QuotaBillingSchema = Type.Object(
+  {
+    overage: Type.Union([Type.Literal("droidCore"), Type.Literal("extraUsage"), Type.Literal("off")]),
+    extraUsageBalanceCents: Type.Integer({ minimum: 0 }),
+    gateOpen: Type.Optional(Type.Literal(true)),
+  },
+  { additionalProperties: true },
+);
 const QuotaProviderSchema = Type.Object(
   {
-    id: Type.Union([Type.Literal("zai-coding-cn"), Type.Literal("zai"), Type.Literal("kimi-coding")]),
+    id: Type.Union([
+      Type.Literal("zai-coding-cn"),
+      Type.Literal("zai"),
+      Type.Literal("kimi-coding"),
+      Type.Literal("droid-standard"),
+      Type.Literal("droid-core"),
+    ]),
     plan: Type.Optional(Type.String({ maxLength: 64 })),
     level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
     stale: Type.Boolean(),
     fetchedAt: Type.Optional(Type.Number()),
     demotedUntil: Type.Optional(Type.Number()),
     windows: Type.Array(QuotaWindowSchema, { maxItems: 8 }),
+    billing: Type.Optional(QuotaBillingSchema),
   },
   { additionalProperties: true },
 );
@@ -1163,6 +1200,15 @@ export const QuotaWireSchema = Type.Object(
     v: Type.Literal(1),
     at: Type.Number({ minimum: 0 }),
     providers: Type.Array(QuotaProviderSchema, { maxItems: 16 }),
+    problems: Type.Optional(
+      Type.Array(
+        Type.Object(
+          { family: Type.Literal("droid"), status: Type.Integer({ minimum: 100, maximum: 599 }) },
+          { additionalProperties: true },
+        ),
+        { maxItems: 4 },
+      ),
+    ),
   },
   { additionalProperties: true },
 );

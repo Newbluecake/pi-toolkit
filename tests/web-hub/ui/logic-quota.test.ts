@@ -28,6 +28,7 @@ describe("scopeLabel", () => {
   it("maps week→7d, everything else→5h (compact token, same both languages)", () => {
     expect(scopeLabel("week")).toBe("7d");
     expect(scopeLabel("5h")).toBe("5h");
+    expect(scopeLabel("month")).toBe("mo"); // P7w
   });
 });
 
@@ -221,6 +222,8 @@ describe("pillGroups — one group per provider (headline, ordering, availabilit
           { scope: "week", level: 2, usedPct: 91 },
         ],
         weekResetAt: undefined, // week window exists but carries no resetAt
+        exhaustScope: "week", // P7w: non-droid rows keep the legacy week clock
+        exhaustResetAt: undefined,
         resetScope: "week", // triggered week ⇒ week annex (its resetAt itself is unknown here)
         resetAt: undefined,
         available: true,
@@ -234,6 +237,8 @@ describe("pillGroups — one group per provider (headline, ordering, availabilit
         usedPct: 62,
         windows: [{ scope: "5h", level: 0, usedPct: 62 }],
         weekResetAt: undefined, // no week window, headline has no resetAt either
+        exhaustScope: "week",
+        exhaustResetAt: undefined,
         resetScope: undefined,
         resetAt: undefined,
         available: true,
