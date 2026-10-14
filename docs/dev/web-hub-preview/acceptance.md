@@ -397,3 +397,90 @@ node scripts/dev/preview-denylist-audit.mjs          # 只读；可选 --deep（
 `src/web-hub/hub/preview/admit.ts` 加规则 + **bump `PREVIEW_DENYLIST_VERSION`** + 同 PR 刷新
 `tests/fixtures/preview-denylist-corpus.json`（`denylist-corpus.test.ts` 钉版本一致，改规则不更新
 语料直接红）。`OK: no readable credential-heuristic file…` 才算过。
+
+## §chunked 分段加载（#23，真机清单）
+
+设计：`chunked-plan.md`。在 Edge 桌面 + 手机各验一遍。每条失败时统一收集：① 截图；② DevTools Console 粘贴 `scripts/web-hub/visual/seg-parity-snippet.js` 的输出；③ Network 面板中 `/api/preview` chunk 请求的 `offset` 参数与状态码。
+
+### C0 准备文件（hub 所在机器）
+
+````sh
+mkdir -p /tmp/pwh-chunk && cd /tmp/pwh-chunk
+# 1.2 MiB 纯文本，每行带行号
+seq 1 150000 | sed 's/^/line /' > big.txt
+# >8 MiB（约 12 MiB，用于上限）
+seq 1 1500000 | sed 's/^/line /' > huge.txt
+# CRLF + 大量空行
+for i in $(seq 1 60000); do printf 'row %d\r\n\r\n' "$i"; done > crlf.txt
+# 大 markdown：表格 + 代码块
+python3 - <<'PY'
+with open('big.md','w') as f:
+    for i in range(3000):
+        f.write(f"## 段 {i}\n\n| a | b | c |\n|---|---|---|\n| {i} | x | y |\n| {i+1} | x | y |\n\n```js\nconst n = {i};\n```\n\n正文 {i}\n\n")
+PY
+ls -l
+````
+
+在会话里让助手输出这些绝对路径（如 `/tmp/pwh-chunk/big.txt`），点击打开预览。
+
+### C1 滚动到底自动续读与进度
+
+- 步骤：打开 `big.txt`，滚到底部并持续滚动。
+- 期望：到底自动加载下一段，进度（已显示/共）递增，最终显示完整、到 `line 150000` 为止，无「截断」提示残留。
+- 失败收集：通用三项。
+
+### C2 Markdown 渲染与源码切换
+
+- 步骤：打开 `big.md`（默认渲染），滚动续读若干段；切到源码，再切回。
+- 期望：表格/代码块不被段边界切碎；切换后内容与进度保留，无重复、无缺失；源码模式同样可续读。
+- 失败收集：通用三项（Console 片段用于比对渲染与源码一致性）。
+
+### C3 复制全文守恒
+
+- 步骤：`big.txt` 续读到完成，点「复制」，粘贴到文件后 `wc -c` 对比 `/tmp/pwh-chunk/big.txt`。
+- 期望：字节数一致；未读完时复制只含已显示部分（提示文案如此说明）。
+- 失败收集：两个 wc 结果 + 通用三项。
+
+### C4 续读中文件被改
+
+- 步骤：打开 `big.txt` 不滚完；终端执行 `echo extra >> /tmp/pwh-chunk/big.txt`；再继续滚动。
+- 期望：停止续读并提示文件已变化、请重新打开；不追加任何内容；重新打开后恢复正常。
+- 失败收集：通用三项（看状态码是否 409/identity 相关）。
+
+### C5 上限提示
+
+- 步骤：打开 `huge.txt`，持续滚到不再加载。
+- 期望：桌面在约 8 MiB、手机（触屏）约 4 MiB 处停止并显示达到上限的提示（实际略超上限不超过一段 256 KiB）；hub 硬顶 16 MiB 不会被突破。
+- 失败收集：已加载字节、通用三项。
+
+### C6 下载得到完整文件
+
+- 步骤：在 `huge.txt` 预览对话框点下载。
+- 期望：下载文件与源文件 `sha256sum` 一致（不受预览上限影响）。
+
+### C7 429/503 退避
+
+- 难以人工触发：可在滚动时快速反复开关对话框或多标签同时续读 `huge.txt` 以尝试触发 `E_BUSY`/429；期望出现「等待」状态并自动退避重试，不丢不重。触发不了则标记「跳过」，由单测覆盖。
+- 失败收集：通用三项（重点看 Retry-After 与后续 offset 是否连续）。
+
+### C8 会话切换/关闭对话框时停止
+
+- 步骤：`huge.txt` 续读中，① 关闭对话框 ② 重开后切换到另一会话。
+- 期望：Network 面板不再出现新的 chunk 请求；回到原会话重开后从头正常加载。
+
+### C9 CRLF 不丢空行
+
+- 步骤：打开 `crlf.txt`，滚到末尾，跨多个 chunk 边界检查。
+- 期望：每个 `row N` 之间保留一个空行；全文共 120000 行；复制后 `wc -l` 与源文件一致。
+- 失败收集：出错位置的 offset、通用三项。
+
+### C10 长时间滚动不崩（#11 Aw Snap 哨兵）
+
+- 步骤：桌面与手机分别打开 `big.md`，来回快速滚动并续读到上限，持续 5 分钟；同时观察任务管理器内存。
+- 期望：标签页不出现 Aw Snap/崩溃，内存稳定（桌面约 50–100 MiB 量级）。
+- 失败收集：崩溃时间点、`edge://crashes`、内存曲线截图。
+
+### C11（可选）旧 hub 兼容
+
+- 步骤：让新 UI 连接不带 `preview.chunk.v1` cap 的旧 hub，打开 `big.txt`。
+- 期望：退回一次性截断显示，提示文案正确显示「已显示/共」，无重复内容、无续读请求。

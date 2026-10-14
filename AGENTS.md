@@ -449,6 +449,7 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   stats only — never a path or entry name). `mode:"loopback"` keeps the endpoint LAN-absent (404, byte-
   identical to `off` on LAN) while loopback keeps previewing. Design + real-device acceptance:
   `docs/dev/web-hub-preview/{plan,dir-plan,acceptance}.md`.
+  **Chunked text preview** (cap `preview.chunk.v1`, opt-in `chunk=1` / `offset=N` / `ident=i1.…` query; every chunk re-walks the full admission chain; UI ceiling 8 MiB desktop / 4 MiB touch, hub hard cap 16 MiB): design `docs/dev/web-hub-preview/chunked-plan.md`.
   **Worktree diff (worktree-diff plan v3.1, D0–D6)**: per-file diff viewing for the session repo's
   worktrees, riding the SAME `webHub.preview` gate (mode `on`/`loopback`; no separate setting) plus
   a `/proc/self/fd` probe (Linux-only, fail-closed — no `wtdiff.v1` cap and no routes without it).

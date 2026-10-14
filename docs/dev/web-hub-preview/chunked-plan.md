@@ -1,5 +1,7 @@
 # web-hub「内容预览」大文本分段续读 · 施工方案（chunked-plan v1）
 
+> **状态：已实施**（P0 `6ea6c55`、P1 hub `40bb5ab`、P2a `0599845`、P2b `b2ddbc7`；P3 文档与真机验收清单见 `acceptance.md` §chunked）。
+
 > 规划产物（planning subagent，只读调研后成稿）。上位文档：`plan.md`（v3，PV1–PV6）、`dir-plan.md`（v3.1，A/B/C 三项增强）、`acceptance.md`。
 > 范围：文本预览（含 Markdown 渲染视图与源码视图）超过 `PREVIEW_TEXT_MAX_BYTES`（256 KiB）时，**滚动到底自动加载下一段**；顺带修正截断提示文案 bug。
 > 兼容原则沿用前两份方案：**只增不改**。新行为走 opt-in 查询参数，由新 cap `preview.chunk.v1` 门控；旧端两两组合都回落到现有「一次性截断」行为，旧 UI 收到的响应逐字节不变。
