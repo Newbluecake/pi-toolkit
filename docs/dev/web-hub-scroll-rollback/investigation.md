@@ -29,3 +29,7 @@
 ## 退出条件
 
 根因确认并修复后：移除 `Transcript.vue` 的 diagScroll 及全部调用点、移除 `tests/web-hub/ui/source-scan.test.ts` 的 allowlist 条目与注释、关闭 todo #19、本文档标记结案（或归档结论）。
+
+## 2026-10-14 更新
+
+#11（Aw Snap）根因 content-visibility:auto 已移除；怀疑本问题同根因（屏外条目按 120px 占位，恢复 scrollTop 时落点偏）；pwh_diag_scroll 面包屑暂留观察。

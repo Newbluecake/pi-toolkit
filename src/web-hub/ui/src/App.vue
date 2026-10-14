@@ -294,31 +294,6 @@ function announceConn(next: ConnState): void {
 }
 if (authMode !== "unknown") watch(conn, announceConn, { immediate: true });
 
-/* 2026-10-12 Aw Snap 排查面包屑（临时诊断）：每次路由切换把 {hash, heapMB, dom, at} 写进
- * localStorage——标签页崩溃后 localStorage 仍在，读 `pwh_diag_route` 就知道崩在哪个会话、
- * 当时堆内存多大。一个 key 覆盖写，零增长；根因确认后移除。 */
-if (route !== undefined)
-  watch(
-    route,
-    () => {
-      try {
-        const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
-        localStorage.setItem(
-          "pwh_diag_route",
-          JSON.stringify({
-            hash: window.location.hash,
-            heapMB: mem ? Math.round(mem.usedJSHeapSize / 1048576) : null,
-            dom: document.querySelectorAll("*").length,
-            at: Date.now(),
-          }),
-        );
-      } catch {
-        /* a breadcrumb never breaks the app */
-      }
-    },
-    { immediate: true },
-  );
-
 async function onSubmit(payload: { username: string; password: string }): Promise<void> {
   await passwordAuth?.submit(payload);
 }

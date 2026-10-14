@@ -1,6 +1,34 @@
-# web-hub 切换会话 Aw Snap 崩溃排查（进行中）
+# web-hub 切换会话 Aw Snap 崩溃排查
 
-状态：**根因定位中**（2026-10-13 晚重大突破：锁定 LAN-only wedge）。晚间用户侧升级为「进入 bunker 会话即卡死→崩溃页」（确定复现）。
+状态：**已定位并修复**（2026-10-14）。根因为 transcript.css 的 `.tx-item { content-visibility: auto }` 与跟随到底滚动补偿形成排版振荡，详见下方「根因」。
+
+## 根因（2026-10-14 定位）
+
+`.tx-item { content-visibility: auto; contain-intrinsic-size: auto 120px }` 的 120px 占位 ↔ 真实高度互换，与 Transcript 跟随到底的滚动补偿（scrollTop 追 scrollHeight）形成**排版振荡**：屏外条目进出视口时占位/真实高度反复互换，滚动补偿又不断改写 scrollTop 引发新一轮互换，主线程卡 30–50s 而 JS 堆不涨，随后渲染进程崩溃并生成转储。用户 Edge 155/Win10 的 `edge://crashes` 在 8 分钟内记录了 11 条崩溃。
+
+## 二分过程
+
+1. hub 日志对齐崩溃时刻，排除服务端因素。
+2. 真机 DevTools Console 不刷新页面，用 `document.styleSheets[0].insertRule('<sel>{display:none!important}',0)` 逐类隐藏：隐藏 `.transcript` 不崩 → 在 transcript 内逐类隐藏，隐藏任意体量大的一类都不崩 → 判断为高度/排版相关而非某类内容。
+3. 注入 `.tx-item{content-visibility:visible!important;contain-intrinsic-size:none!important}` 后不再崩溃——实锤。
+
+## 排除项（红鲱鱼）
+
+隐私锁/密码表单、`.tool-progress` 遮罩动画、`pwh_motion` 动画偏好、localStorage 内容、图片解码均与根因无关。早前怀疑的「僵尸 SSE socket」「keep-alive OOM」「内容路径渲染」也均被排除（见下文排查记录）。
+
+## 教训
+
+无头 Chromium（Linux 软件合成、较旧版本）复现不了此类排版振荡崩溃，真机 CSSOM 二分（insertRule 逐类隐藏）最有效。
+
+## 修复
+
+删除 `.tx-item` 的 `content-visibility` / `contain-intrinsic-size` 规则（styles/transcript.css），视觉巡检反转为 `tx-item-no-content-visibility`（scripts/web-hub/visual/checks-body.ts + checks-body-applicability.test.ts）。
+
+## 诊断代码清理（2026-10-14）
+
+trace.js（pwh_diag_trace ring + 启动 dump + pwhDiag）、App.vue 的 pwh_diag_route 面包屑、两个 THROWAWAY 测试（bunker-repro / bunker-render-repro）及 source-scan 两条对应 TEMPORARY allowlist 均已移除；pwh_diag_scroll 面包屑暂留给 #19（怀疑同根因，观察中）。
+
+---
 
 ## 2026-10-13 晚 决定性取证链（bunker = a2162331-iOEqbE，「AgentEnv部署架构调研」）
 

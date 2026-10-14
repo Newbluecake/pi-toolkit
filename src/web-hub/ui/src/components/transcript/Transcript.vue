@@ -21,8 +21,6 @@
   still-pending restore.
 -->
 <script setup lang="ts">
-import { tracePoint } from "../../logic/trace.js";
-tracePoint("tx:setup");
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { TranscriptEmits, TranscriptProps } from "../../contracts.js";
 import "../../styles/transcript.css";
@@ -60,9 +58,11 @@ import { buildTxEntries } from "./entries.js";
  * scroll-triggered pagination threshold (plan §3.6); not a frozen/shared constant elsewhere. */
 const PAGE_TRIGGER_PX = 96;
 
-/* 2026-10-13 滚动回退排查面包屑（临时诊断，同 App.vue 的 pwh_diag_route 惯例）：用户报告
+/* 2026-10-13 滚动回退排查面包屑（临时诊断，localStorage 面包屑惯例）：用户报告
  * 「A 滚到底 → 切 B 做些操作 → 回 A 视图回滚了一截」。把 save/restore/following 翻转的
- * 关键事实写进 localStorage 的 12 条 ring（复现后读 `pwh_diag_scroll`）。根因确认后移除。 */
+ * 关键事实写进 localStorage 的 12 条 ring（复现后读 `pwh_diag_scroll`）。根因确认后移除。
+ * 2026-10-14：#11 根因 content-visibility:auto 已移除，怀疑 #19 同根因（占位高度致恢复落点偏），
+ * 观察一段时间无复现后移除本面包屑。 */
 function diagScroll(rec: Record<string, unknown>): void {
   try {
     const raw = localStorage.getItem("pwh_diag_scroll");
@@ -318,7 +318,6 @@ function schedulePin(): void {
 
 let contentResizeObserver: ResizeObserver | undefined;
 onMounted(() => {
-  tracePoint("tx:mounted");
   if (typeof ResizeObserver !== "undefined" && innerBox.value) {
     contentResizeObserver = new ResizeObserver(schedulePin);
     contentResizeObserver.observe(innerBox.value);

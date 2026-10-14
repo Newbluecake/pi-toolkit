@@ -42,7 +42,6 @@ import { SCROLL_MEMORY } from "../../composables/useScrollMemory.js";
 import type { AgentDetailEmits, AgentDetailProps } from "../../contracts.js";
 import type { CmdOutcome, Notice } from "../../types.js";
 import type { DialogClosedWire, DialogWire } from "@protocol/messages.js";
-import { tracePoint } from "../../logic/trace.js";
 import {
   CONTROL_VIEW,
   DETAIL_METRICS,
@@ -63,7 +62,6 @@ const RETRY_NOTICE_ID = "history-error";
 
 const props = defineProps<AgentDetailProps>();
 const emit = defineEmits<AgentDetailEmits>();
-tracePoint("ad:setup", { key: props.agent?.key });
 const { t } = useI18n();
 
 const agentNotices = computed(() => buildAgentNotices(props.agent, t));

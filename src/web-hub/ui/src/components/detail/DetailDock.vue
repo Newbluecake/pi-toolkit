@@ -27,8 +27,6 @@
   without control.cmd / agent offline).
 -->
 <script setup lang="ts">
-import { tracePoint } from "../../logic/trace.js";
-tracePoint("dock:setup");
 import { computed, inject, onUnmounted, ref, watch } from "vue";
 import { commandPolicyFor, parseSlash, validRecallText } from "@logic/control.js";
 import { clientImageBudget, previewScopeOf } from "@logic/preview.js";

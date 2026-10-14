@@ -20,8 +20,6 @@
   terminal / …" from `dialogs.closed[].by`) — this component only emits.
 -->
 <script setup lang="ts">
-import { tracePoint } from "../../logic/trace.js";
-tracePoint("ask:setup");
 import { computed, inject, nextTick, provide, reactive, ref, watch } from "vue";
 import { buildDialogAnswers, dialogComplete } from "@logic/control.js";
 import type { AskUserQuestionWire, DialogWire } from "@protocol/messages.js";

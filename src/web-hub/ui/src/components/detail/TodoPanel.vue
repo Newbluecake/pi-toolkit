@@ -20,8 +20,6 @@
   or `styles/detail.css`, which the in-flight fleet-drawer F6 line owns.
 -->
 <script setup lang="ts">
-import { tracePoint } from "../../logic/trace.js";
-tracePoint("todo:setup");
 import { computed, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import type { IconName } from "../../icons/names.js";

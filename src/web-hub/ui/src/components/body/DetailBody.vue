@@ -8,8 +8,6 @@
   `:memory-key="agent.key"`(session-switch plan §1.4 E1-6 的滚动记忆 opt-in)。
 -->
 <script setup lang="ts">
-import { tracePoint } from "../../logic/trace.js";
-tracePoint("body:setup");
 import type { FleetRowWire } from "@protocol/messages.js";
 import type { DetailBodyEmits, DetailBodyProps } from "../../contracts.js";
 import FleetSummaryBar from "../fleet/FleetSummaryBar.vue";
