@@ -63,11 +63,11 @@ export interface SpawnedJob {
 }
 
 export type KillOutcome =
-  /** The group leader was already gone (ESRCH) — `killJobTree` is idempotent. */
+  /** The process group was already empty (ESRCH on `kill(-pgid, 0)`) — `killJobTree` is idempotent. */
   | "already-dead"
-  /** Died within the grace window after SIGTERM. */
+  /** The whole group (leader AND members) emptied within the grace window after SIGTERM. */
   | "terminated"
-  /** Outlived the grace window and was SIGKILLed. */
+  /** Some group member (even with the leader already dead) outlived the grace window and the group was SIGKILLed. */
   | "killed"
   /** Identity/group checks failed; nothing was signalled (§3.3 safety floor). */
   | "refused";
@@ -239,6 +239,24 @@ function sleepUnref(ms: Millis): Promise<void> {
     const timer = setTimeout(resolve, Math.max(0, ms));
     (timer as { unref?: () => void }).unref?.();
   });
+}
+
+/**
+ * Is the process group still non-empty? `kill(-pgid, 0)`: ESRCH ⇒ empty;
+ * EPERM ⇒ non-empty (exists but not signalable — unreachable here since jobs
+ * are spawned by our own uid; the follow-up SIGKILL would hit EPERM as well and
+ * the outcome still reports "killed"). win32 has no groups: degrade to probePid.
+ * Linux guarantees a pgid cannot be reused while any member lives, so a
+ * non-empty group is provably ours once the starttime/pgrp guards passed.
+ */
+function groupAlive(pgid: number): boolean {
+  if (!isPosix()) return probePid(pgid);
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return errnoOf(error) !== "ESRCH";
+  }
 }
 
 /** `false` on ESRCH (already dead); `true` otherwise (EPERM counts as alive). */
@@ -459,9 +477,9 @@ export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort
     const deadline = Date.now() + graceMs;
     while (Date.now() < deadline) {
       await sleepUnref(Math.min(pollMs, Math.max(1, deadline - Date.now())));
-      if (!probePid(pid)) return "terminated";
+      if (!groupAlive(pid)) return "terminated";
     }
-    if (!probePid(pid)) return "terminated";
+    if (!groupAlive(pid)) return "terminated";
 
     signalGroup(pid, "SIGKILL");
     return "killed";

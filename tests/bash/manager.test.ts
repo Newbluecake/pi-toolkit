@@ -1115,6 +1115,16 @@ describe("bash job manager: recover (§3.6)", () => {
     expect(h.notified).toEqual([]);
   });
 
+  it("recover() kills a crash-recovered subagent job with a 500ms grace (reaper-orphans §7.4)", async () => {
+    const h = await harness();
+    await seed(h.store, "b_P0F00007", { status: "running", pid: 9307, spawnedAt: 600, owner: "subagent" });
+    h.port.ownership.set(9307, "alive");
+    await h.manager.recover();
+    expect(h.port.killCalls).toHaveLength(1);
+    expect(h.port.killCalls[0]?.pid).toBe(9307);
+    expect(h.port.killCalls[0]?.options?.graceMs).toBe(500);
+  });
+
   it("an abort landing between the identity check and the signal never kills the process (§2.5 step 4, subagent recovery)", async () => {
     // §3.9: `record.owner === "subagent"` routes through `kill(jobId, {}, aborted)`
     // inside recover(); for an adopted job (no local handle) that branch does

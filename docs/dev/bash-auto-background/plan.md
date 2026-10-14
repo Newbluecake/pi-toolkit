@@ -201,6 +201,11 @@ killProcessTree 杀掉，job 终态 `timed_out`，照常发完成通知。理由
 
 - status.json 记录 `pid`；posix 下 pgid == pid（detached），kill 走 `-pid` 进程组，
   SIGTERM → `killGraceMs`（默认 2_000，unref 定时器）→ SIGKILL 升级。
+- 终止判据（reaper-orphans plan §2、§7.2–§7.3）：以「进程组是否为空」（`kill(-pgid, 0)`）而非组长 pid 存活判定；
+  组长已死但成员残留时 grace 后仍整组 SIGKILL。这不违反 §3.3/§11「宁可漏杀」：Linux 保证只要组内
+  还有成员 pgid 就不会被复用，故 starttime/pgrp==pid 守卫通过后非空组必为本 job 所有（pid_max 可能仅
+  32768，回收的 pid 还须 setpgid 自立为组长才可能误中，窗口极窄）。仅 Linux 有此钉住保证，
+  非 Linux 暴露面与旧行为相同；EPERM 视为非空（同 uid spawn 下不可达）。
 - win32：`taskkill /F /T /PID`（复制 pi shell.js:184-210 的做法，System32 绝对路径）。
 
 ### 3.3 日志文件布局与上限

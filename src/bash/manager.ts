@@ -95,6 +95,9 @@ export function formatLogTruncationNotice(maxLogBytes: number): string {
   return `\n[log truncated at ${maxLogBytes} bytes]\n`;
 }
 
+/** reaper-orphans plan §7.4: grace for recover()'s serial subagent-job kills. */
+export const RECOVER_KILL_GRACE_MS = 500;
+
 export interface BashJobManagerOptions {
   store: JobStore;
   processPort: ProcessPort;
@@ -1801,7 +1804,9 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
         // this table wants — alive+signalled → killed, alive+refused →
         // orphaned, dead → exited_unknown, unsafe → orphaned.
         subagentTotal++;
-        const result = await kill(record.jobId, {}, aborted).catch((error) => {
+        // reaper-orphans plan §7.4: serial loop ⇒ cap each SIGTERM-resistant
+        // leftover group at a 500ms grace so recovery stays within budget.
+        const result = await kill(record.jobId, { graceMs: RECOVER_KILL_GRACE_MS }, aborted).catch((error) => {
           warn(`bash job ${record.jobId} crash-recovery kill failed: ${String(error)}`);
           return undefined;
         });
