@@ -1,0 +1,33 @@
+## Available models (pi-subagent)
+`set_model` and `Agent` require the FULL `provider/id` exactly as written below — the provider prefix is mandatory and a bare model id may be rejected. Copy one of these values verbatim:
+- anthropic/claude-opus-4-5 — Claude Opus 4.5 (ctx 200k, reasoning)
+- anthropic/claude-haiku-4-5 — Claude Haiku 4.5 (ctx 200k)
+- openai/gpt-5.2 (ctx 1M)
+- kimi/kimi-k2.5
+- moonshot/kimi-k2.5-turbo (ctx 128k)
+- prov0/model-0 — Filler 0
+- prov1/model-1 — Filler 1
+- prov2/model-2 — Filler 2
+- prov3/model-3 — Filler 3
+- prov4/model-4 — Filler 4
+- prov5/model-5 — Filler 5
+- prov6/model-6 — Filler 6
+- prov7/model-7 — Filler 7
+- prov8/model-8 — Filler 8
+- prov9/model-9 — Filler 9
+- prov10/model-10 — Filler 10
+- prov11/model-11 — Filler 11
+- prov12/model-12 — Filler 12
+- prov13/model-13 — Filler 13
+- prov14/model-14 — Filler 14
+- prov15/model-15 — Filler 15
+- prov16/model-16 — Filler 16
+- prov17/model-17 — Filler 17
+- prov18/model-18 — Filler 18
+- prov19/model-19 — Filler 19
+- prov20/model-20 — Filler 20
+- prov21/model-21 — Filler 21
+- prov22/model-22 — Filler 22
+- prov23/model-23 — Filler 23
+- prov24/model-24 — Filler 24
+- ... and 1 more

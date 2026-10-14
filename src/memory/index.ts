@@ -34,7 +34,7 @@ import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
 import type { TidyPort } from "./contracts.js";
 import { createMemCommand } from "./command.js";
-import { memorySection } from "./inject.js";
+import { memorySection, renderExternalMemoryBlock } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
 import { createMemoryTool } from "./tool.js";
 import { createMemoryToolV2 } from "./tool-v2.js";
@@ -62,6 +62,10 @@ export interface WireMemoryResult {
    *  "tidy unavailable in this session" fallback (child sessions never get
    *  this called at all). */
   attachTidy(port: TidyPort | undefined): void;
+  /** external-agent plan §5.6：导出给外部 agent run（droid）的记忆块（子会话视角）。
+   *  P5 经 holder 晚绑定给 `ExternalAgentsPort` 的 `memoryBlock` 端口；
+   *  `externalAgents.droid.injectMemory=false` 时 P5 干脆不传该端口。 */
+  renderForExternal(cwd: string): string | undefined;
 }
 
 export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryResult {
@@ -156,6 +160,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   return {
     attachTidy(port) {
       tidyPort = port;
+    },
+    renderForExternal(cwd: string): string | undefined {
+      return renderExternalMemoryBlock({ settings: opts.settings, cache }, cwd);
     },
   };
 }

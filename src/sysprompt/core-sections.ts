@@ -3,6 +3,7 @@ import {
   formatAvailableModelsForPrompt,
   resolvePromptModels,
   type AvailableModelEntry,
+  type ExternalPromptModels,
   type ModelRegistryLike,
   type ScopedModelLike,
 } from "../config/available-models.js";
@@ -21,9 +22,24 @@ export function agentTypesSection(deps: { types: { list(): readonly AgentTypeCon
   };
 }
 
+/** external-agent plan §5.3：P5 注入的外部模型端口。缺席/抛错/非数组都降级为
+ *  「无 external 子块」——提示词路径绝不因 P5 接线问题而崩。 */
+function safeExternalModels(
+  externalModels: (() => readonly ExternalPromptModels[] | undefined) | undefined,
+): readonly ExternalPromptModels[] | undefined {
+  if (typeof externalModels !== "function") return undefined;
+  try {
+    const value = externalModels();
+    return Array.isArray(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function promptModels(
   input: SectionProviderInput,
   stackAvailable: () => readonly AvailableModelEntry[] | undefined,
+  externalModels?: () => readonly ExternalPromptModels[] | undefined,
 ): string {
   // `ctx.scopedModels` is a live ExtensionContext getter (plan.md §4.6:
   // "ctx.scopedModels 抛错视为空") — the try/catch has to sit here, at the
@@ -37,14 +53,18 @@ function promptModels(
   }
   return formatAvailableModelsForPrompt(
     resolvePromptModels(scoped, stackAvailable(), input.ctx.modelRegistry as ModelRegistryLike),
+    safeExternalModels(externalModels),
   );
 }
 
 export function availableModelsSection(deps: {
   stackAvailable: () => readonly AvailableModelEntry[] | undefined;
+  /** external-agent plan §5.3（P5 装配）：外部 provider（droid）的展示子块；
+   *  缺席（现状，字节不变）或返回 undefined/[] ⇒ 纯 pi 输出。 */
+  externalModels?: () => readonly ExternalPromptModels[] | undefined;
 }): SectionRegistration {
   return {
-    provider: (input) => promptModels(input, deps.stackAvailable),
+    provider: (input) => promptModels(input, deps.stackAvailable, deps.externalModels),
     title: AVAILABLE_MODELS_TITLE,
   };
 }

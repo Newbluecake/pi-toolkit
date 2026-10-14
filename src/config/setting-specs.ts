@@ -1044,6 +1044,22 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     max: 600,
     description: "Extra slack beyond the assumed cache TTL before a prefix is proven cold",
   }),
+  // external-agent plan §6.2 P4a 验收③：TUI 只暴露这三个叶子。其余
+  // `externalAgents.droid.*`（binary / models / advertiseMax / pricing / 各超时）
+  // 是 JSON-only 设置（写入 settings 文件即可，非 live），故意不进本表。
+  "externalAgents.droid.enabled": bool(
+    "externalAgents.droid.enabled",
+    "Route subagent runs to the external Factory droid CLI as virtual provider droid/<model> (default off)",
+  ),
+  "externalAgents.droid.injectMemory": bool(
+    "externalAgents.droid.injectMemory",
+    "Inject the project memory block into external agent runs (child-session profile)",
+  ),
+  "externalAgents.droid.protocolCheck": choice(
+    "externalAgents.droid.protocolCheck",
+    ["strict", "warn"],
+    "Droid protocol version check: strict = fail the provider on mismatch, warn = degrade and continue",
+  ),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

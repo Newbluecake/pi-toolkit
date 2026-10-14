@@ -358,3 +358,50 @@ export function memorySection(deps: MemorySectionDeps): SectionRegistration {
     },
   };
 }
+
+/**
+ * external-agent plan §5.6：导出给外部 agent run（droid）的记忆块。语义 = 子会话
+ * 视角：`injectInChildSessions:false` 或 `childProfile:"none"` ⇒ undefined；tiered 用
+ * `profile = childProfile`、`access = accessFromTools(["read"], toolSurface)`、同一字节
+ * 预算；legacy 用 `renderMemoryBlock`；任何异常 ⇒ undefined；不读 frozenBlocks（冻结是
+ * pi 会话的注入语义，外部 run 永远拿当前盘上状态）。cwd 解析沿用 B3：worktree 出身
+ * 的 run（H2 之后的 cwd）注入主仓的记忆，与 `renderLive` 的 `resolveCwd` 同口径。
+ *
+ * P5 经 `wireMemory` 返回的 `renderForExternal` 晚绑定注入 `memoryBlock` 端口；
+ * `externalAgents.droid.injectMemory` 的开关在 P5 侧判定（不传即关）。
+ */
+export function renderExternalMemoryBlock(
+  deps: { settings: MemorySettings; cache: RenderCache },
+  cwd: string,
+): string | undefined {
+  const settings = deps.settings;
+  if (!settings.injectInChildSessions) return undefined;
+  if (settings.childProfile === "none") return undefined;
+  try {
+    const dir = resolveWorktreeOrigin(cwd) ?? cwd;
+    if (settings.layout === "tiered") {
+      const input: TieredRenderInput = {
+        cwd: dir,
+        profile: settings.childProfile,
+        access: accessFromTools(["read"], settings.toolSurface),
+        coreBytes: settings.coreBytes,
+        blockBytes: settings.blockBytes,
+        indexMax: settings.indexMax,
+      };
+      return renderTiered(input).text || undefined;
+    }
+    const budget: InjectBudget = {
+      inlineMax: settings.inlineMax,
+      byteCap: settings.byteCap,
+      indexMax: settings.indexMax,
+    };
+    const fingerprint = memoryFingerprint(dir);
+    const cached = deps.cache.get(dir, budget, fingerprint);
+    if (cached !== undefined) return cached.block;
+    const block = renderMemoryBlock(dir, budget);
+    deps.cache.set(dir, budget, fingerprint, block);
+    return block;
+  } catch {
+    return undefined;
+  }
+}
