@@ -1,0 +1,413 @@
+{
+  "meta": {
+    "now": 1791950400000,
+    "tz": "Asia/Shanghai",
+    "note": "Recorded on the pre-P7 implementation. NEVER regenerate — P7 changes must reproduce these bytes."
+  },
+  "verdicts": {
+    "kimi-trap": {
+      "provider": "kimi-coding",
+      "level": 3,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 8,
+          "level": 0,
+          "reason": "none",
+          "resetAt": 1791957600000
+        },
+        {
+          "scope": "week",
+          "usedPct": 100,
+          "level": 3,
+          "reason": "exhausted",
+          "resetAt": 1792224000000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "zai-cn-l1": {
+      "provider": "zai-coding-cn",
+      "level": 1,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 55,
+          "level": 1,
+          "reason": "pct",
+          "resetAt": 1791955800000
+        },
+        {
+          "scope": "week",
+          "usedPct": 10,
+          "level": 0,
+          "reason": "none",
+          "resetAt": 1792382400000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "zai-l1": {
+      "provider": "zai",
+      "level": 1,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 55,
+          "level": 1,
+          "reason": "pct",
+          "resetAt": 1791955800000
+        },
+        {
+          "scope": "week",
+          "usedPct": 10,
+          "level": 0,
+          "reason": "none",
+          "resetAt": 1792382400000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "zai-l2": {
+      "provider": "zai",
+      "level": 2,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 80,
+          "level": 2,
+          "reason": "pct",
+          "resetAt": 1791954000000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "kimi-l3-pct": {
+      "provider": "kimi-coding",
+      "level": 3,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 95,
+          "level": 3,
+          "reason": "pct",
+          "resetAt": 1791952200000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "stale": {
+      "provider": "zai-coding-cn",
+      "level": 1,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 60,
+          "level": 1,
+          "reason": "pct"
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": true
+    },
+    "demotion-floor": {
+      "provider": "kimi-coding",
+      "level": 2,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 10,
+          "level": 0,
+          "reason": "none",
+          "resetAt": 1791957600000
+        },
+        {
+          "scope": "week",
+          "usedPct": 5,
+          "level": 0,
+          "reason": "none",
+          "resetAt": 1792468800000
+        }
+      ],
+      "demoted": true,
+      "demotedUntil": 1791961200000,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "reset-elapsed": {
+      "provider": "zai",
+      "level": 0,
+      "windows": [
+        {
+          "scope": "week",
+          "usedPct": 99,
+          "level": 0,
+          "reason": "reset-elapsed",
+          "resetAt": 1791950399000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "forecast-before-reset": {
+      "provider": "zai",
+      "level": 2,
+      "windows": [
+        {
+          "scope": "week",
+          "usedPct": 60,
+          "level": 2,
+          "reason": "forecast-before-reset",
+          "resetAt": 1791957600000,
+          "etaMs": 3600000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    },
+    "forecast-eta": {
+      "provider": "zai-coding-cn",
+      "level": 3,
+      "windows": [
+        {
+          "scope": "5h",
+          "usedPct": 40,
+          "level": 3,
+          "reason": "forecast-eta",
+          "resetAt": 1791964800000,
+          "etaMs": 600000
+        }
+      ],
+      "demoted": false,
+      "fetchedAt": 1791950400000,
+      "stale": false
+    }
+  },
+  "renders": {
+    "statusPlain": "quota kimi 8%/100% resets 3d4h · zai 55%/10% · kimi 10%/5%",
+    "statusThemed": "<dim>quota</dim> <dim>kimi</dim> <error>8%/100%</error> <dim>resets 3d4h</dim><dim> · </dim><dim>zai</dim> <text>55%/10%</text><dim> · </dim><dim>kimi</dim> <warning>10%/5%</warning>",
+    "statusStale": "quota zai 60% ·stale 60m",
+    "statusEmpty": null,
+    "tick": "[quota] zai-coding-cn 5h 55% · 7d 10%",
+    "message": "[quota] zai-coding-cn 5h 55% · 7d 10%\n[quota 预警] zai 5h 已用 80%（阈值 75%）（窗口 13:00 重置）。\n订阅额度照常优先使用，派单不变；到 L3（≥90% 或即将耗尽）才会切换。\n[quota 严重] kimi-coding 7d 已用 100%（窗口 10/17 16:00 重置）。\n本轮不要把新任务派给 kimi-coding（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。\n替代候选（订阅优先）：zai-coding-cn。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
+    "messageMergedL3": "[quota 严重] kimi-coding 7d 已用 100%（窗口 10/17 16:00 重置）。\n[quota 严重] kimi-coding 5h 已用 95%（窗口 12:30 重置）。\n本轮不要把新任务派给 kimi-coding、kimi-coding（继续派给它们会在 spawn 阶段被快速失败拦下，不会消耗 run）。\n替代候选（订阅优先）：zai-coding-cn。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
+    "warn": "[quota 预警] zai 5h 已用 80%（阈值 75%）（窗口 13:00 重置）。\n订阅额度照常优先使用，派单不变；到 L3（≥90% 或即将耗尽）才会切换。",
+    "warnDemotionFloor": "[quota 预警] kimi-coding 仍在降位期（此前额度告急触发降位，预计 15:00 解除），最新读数（5h 10% · 7d 5%）与降位矛盾，可能是上游返回的残缺数据，已按降位处理。\n新任务优先考虑其它订阅模型；若仍派给它，可能因额度耗尽失败。暂无替代候选，按路由表另选合适模型（可检查 pi /model）。",
+    "block": "[quota 严重] kimi-coding 7d 已用 100%（窗口 10/17 16:00 重置）。\n本轮不要把新任务派给 kimi-coding（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。\n替代候选（订阅优先）：kimi-coding、zai-coding-cn。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
+    "blockPaygo": "[quota 严重] kimi-coding 7d 已用 100%（窗口 10/17 16:00 重置）。\n本轮不要把新任务派给 kimi-coding（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。\n无可用订阅；按量计费 provider：cloudrouter-anthropic。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；不胜任就按路由表另选合适模型，不必硬凑。",
+    "recovery": ["[quota 恢复] kimi-coding 7d 窗口已重置，当前 5h 12% · 7d 3%，spawn 闸门已放行，可恢复派单。"],
+    "available": ["[quota] zai-coding-cn / zai 订阅可用，当前 5h 55% · 7d 10%，可正常派单。"],
+    "adviceObjectSub": "替代候选（订阅优先）：kimi-coding、zai-coding-cn。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
+    "adviceObjectPaygo": "无可用订阅；按量计费 provider：cloudrouter-anthropic。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；不胜任就按路由表另选合适模型，不必硬凑。",
+    "adviceArray": "替代候选（订阅优先）：kimi-coding、zai。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
+    "adviceEmpty": "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。"
+  },
+  "gate": {
+    "blocked": {
+      "level": 3,
+      "message": "quota gate: kimi-coding 的 7d 配额已用尽（100%，10/17 16:00 重置），本次 spawn 已快速失败，未消耗任何 run。\n替代候选（订阅优先）：zai-coding-cn、zai。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。\n（在 settings 文件里把 quota.gate 设为 false 可关闭本闸门。）",
+      "alternatives": {
+        "providers": ["zai-coding-cn", "zai"],
+        "subscription": true
+      }
+    },
+    "blockedWithNewDeps": {
+      "level": 3,
+      "message": "quota gate: kimi-coding 的 7d 配额已用尽（100%，10/17 16:00 重置），本次 spawn 已快速失败，未消耗任何 run。\n替代候选（订阅优先）：zai-coding-cn、zai。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。\n（在 settings 文件里把 quota.gate 设为 false 可关闭本闸门。）",
+      "alternatives": {
+        "providers": ["zai-coding-cn", "zai"],
+        "subscription": true
+      }
+    },
+    "gatePassL0": null,
+    "gatePassUnknown": null,
+    "picked": {
+      "providers": ["zai-coding-cn", "zai"],
+      "subscription": true
+    },
+    "pickedWithNewDeps": {
+      "providers": ["zai-coding-cn", "zai"],
+      "subscription": true
+    },
+    "annotationL1": " [5h 55%]",
+    "annotationL3": " [7d 100% ⚠]",
+    "annotationDemoted": " [⤓demoted ⚠]",
+    "annotationL0": null
+  },
+  "hook": [
+    {
+      "customType": "subagent:quota",
+      "content": "[quota] zai-coding-cn 5h 55% · 7d 10%",
+      "display": true,
+      "details": {
+        "level": 1,
+        "providers": [
+          {
+            "provider": "zai-coding-cn",
+            "level": 1,
+            "demoted": false,
+            "windows": [
+              {
+                "scope": "5h",
+                "usedPct": 55,
+                "level": 1
+              },
+              {
+                "scope": "week",
+                "usedPct": 10,
+                "level": 0
+              }
+            ]
+          },
+          {
+            "provider": "zai",
+            "level": 1,
+            "demoted": false,
+            "windows": [
+              {
+                "scope": "5h",
+                "usedPct": 55,
+                "level": 1
+              },
+              {
+                "scope": "week",
+                "usedPct": 10,
+                "level": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "customType": "subagent:quota",
+      "content": "[quota 严重] kimi-coding 7d 已用 100%（窗口 10/17 16:00 重置）。\n本轮不要把新任务派给 kimi-coding（继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run）。\n替代候选（订阅优先）：zai-coding-cn。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
+      "display": true,
+      "details": {
+        "level": 3,
+        "providers": [
+          {
+            "provider": "kimi-coding",
+            "level": 3,
+            "demoted": false,
+            "windows": [
+              {
+                "scope": "5h",
+                "usedPct": 8,
+                "level": 0
+              },
+              {
+                "scope": "week",
+                "usedPct": 100,
+                "level": 3
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "sampler": {
+    "wire": {
+      "v": 1,
+      "at": 1791950400000,
+      "providers": [
+        {
+          "id": "kimi-coding",
+          "level": 3,
+          "stale": false,
+          "fetchedAt": 1791950400000,
+          "windows": [
+            {
+              "scope": "5h",
+              "usedPct": 8,
+              "level": 0,
+              "resetAt": 1791957600000
+            },
+            {
+              "scope": "week",
+              "usedPct": 100,
+              "level": 3,
+              "resetAt": 1792224000000
+            }
+          ]
+        },
+        {
+          "id": "zai-coding-cn",
+          "level": 1,
+          "stale": false,
+          "fetchedAt": 1791950400000,
+          "windows": [
+            {
+              "scope": "5h",
+              "usedPct": 55,
+              "level": 1,
+              "resetAt": 1791955800000
+            },
+            {
+              "scope": "week",
+              "usedPct": 10,
+              "level": 0,
+              "resetAt": 1792382400000
+            }
+          ]
+        },
+        {
+          "id": "zai",
+          "level": 1,
+          "stale": false,
+          "fetchedAt": 1791950400000,
+          "windows": [
+            {
+              "scope": "5h",
+              "usedPct": 55,
+              "level": 1,
+              "resetAt": 1791955800000
+            },
+            {
+              "scope": "week",
+              "usedPct": 10,
+              "level": 0,
+              "resetAt": 1792382400000
+            }
+          ]
+        },
+        {
+          "id": "kimi-coding",
+          "level": 2,
+          "stale": false,
+          "fetchedAt": 1791950400000,
+          "windows": [
+            {
+              "scope": "5h",
+              "usedPct": 10,
+              "level": 0,
+              "resetAt": 1791957600000
+            },
+            {
+              "scope": "week",
+              "usedPct": 5,
+              "level": 0,
+              "resetAt": 1792468800000
+            }
+          ],
+          "demotedUntil": 1791961200000
+        }
+      ]
+    },
+    "fingerprint": "[{\"id\":\"kimi-coding\",\"level\":3,\"stale\":false,\"fetchedAt\":1791950400000,\"windows\":[{\"scope\":\"5h\",\"usedPct\":8,\"resetAt\":29865960},{\"scope\":\"week\",\"usedPct\":100,\"resetAt\":29870400}]},{\"id\":\"zai-coding-cn\",\"level\":1,\"stale\":false,\"fetchedAt\":1791950400000,\"windows\":[{\"scope\":\"5h\",\"usedPct\":55,\"resetAt\":29865930},{\"scope\":\"week\",\"usedPct\":10,\"resetAt\":29873040}]},{\"id\":\"zai\",\"level\":1,\"stale\":false,\"fetchedAt\":1791950400000,\"windows\":[{\"scope\":\"5h\",\"usedPct\":55,\"resetAt\":29865930},{\"scope\":\"week\",\"usedPct\":10,\"resetAt\":29873040}]},{\"id\":\"kimi-coding\",\"level\":2,\"demotedUntil\":1791961200000,\"stale\":false,\"fetchedAt\":1791950400000,\"windows\":[{\"scope\":\"5h\",\"usedPct\":10,\"resetAt\":29865960},{\"scope\":\"week\",\"usedPct\":5,\"resetAt\":29874480}]}]"
+  }
+}
