@@ -30,7 +30,7 @@ export type { WebHubSettings, WebHubLanSettings, WebHubSpawnSettings };
 import { canonicalOrigin, classifyHostToken, parseOrigin, type InvalidHostToken } from "../web-hub/protocol/lan.js";
 // quota (阶梯阈值按窗口区分): WindowScope is a zero-pi-import type from src/quota/types.ts
 // (plan 分层纪律) —— type-only import, no runtime dependency on the quota module graph.
-import type { WindowScope } from "../quota/types.js";
+import type { QuotaPoolId, WindowScope } from "../quota/types.js";
 // topic-switch plan.md P1 "settings.ts": config/settings.ts imports ONLY this module for the
 // `topicSwitch` block — it owns the interface, the frozen defaults and the never-throws parser.
 import {
@@ -438,6 +438,12 @@ export interface QuotaSettings {
   zaiBaseUrl: string;
   zaiOverseasBaseUrl: string;
   kimiBaseUrl: string;
+  /** Factory 计费接口（droid 池，D17）；私有部署逃生阀，JSON-file-only。 */
+  factoryBaseUrl: string;
+  /** D6 拍板：standard 池耗尽且超额策略为 extraUsage 时是否放行（默认不放行——不代用户花真钱）。 */
+  droidAllowExtraUsage: boolean;
+  /** 模型 → 池的人工覆盖（R1 启发式误判的纠错主通道）；键是 droid 模型 id，值 standard|core|none。JSON-file-only。 */
+  droidPools: Readonly<Record<string, QuotaPoolId | "none">>;
   /** Cloudflare 需要浏览器 UA（Kimi 实测）。空串 = 用内置默认。 */
   userAgent: string;
 }
@@ -1011,7 +1017,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   },
   quota: {
     enabled: true,
-    providers: "zai-coding-cn,zai,kimi-coding",
+    providers: "zai-coding-cn,zai,kimi-coding,droid",
     subscriptionProviders: "",
     refreshMs: 600_000, // 10min（简报的 refreshMinutes: 10）
     refreshHotMs: 120_000, // 2min（L1/近耗尽 provider）
@@ -1023,6 +1029,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     windows: {
       "5h": { l1Percent: 50, l2Percent: 75, l3Percent: 90 },
       week: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
+      month: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
     },
     tickStepPercent: 10,
     minIntervalMs: 300_000, // 5min
@@ -1035,6 +1042,9 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     zaiBaseUrl: "https://open.bigmodel.cn",
     zaiOverseasBaseUrl: "https://api.z.ai",
     kimiBaseUrl: "https://api.kimi.com",
+    factoryBaseUrl: "https://api.factory.ai",
+    droidAllowExtraUsage: false,
+    droidPools: {},
     userAgent: "",
   },
   // Load-aware dispatch (docs/dev/sysload/plan.md §6.1): cpu/mem/disk reuse
@@ -1586,8 +1596,26 @@ export function parseQuotaSettings(input: unknown): QuotaSettings {
     zaiBaseUrl: url(value.zaiBaseUrl, defaults.zaiBaseUrl),
     zaiOverseasBaseUrl: url(value.zaiOverseasBaseUrl, defaults.zaiOverseasBaseUrl),
     kimiBaseUrl: url(value.kimiBaseUrl, defaults.kimiBaseUrl),
+    factoryBaseUrl: url(value.factoryBaseUrl, defaults.factoryBaseUrl),
+    droidAllowExtraUsage: bool(value.droidAllowExtraUsage, defaults.droidAllowExtraUsage),
+    droidPools: parseDroidPools(value.droidPools),
     userAgent: str(value.userAgent, defaults.userAgent),
   };
+}
+
+/** droid 模型 id 键形（plan §2.7：≤128 字符的模型 id 字符集）。 */
+const DROID_POOL_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
+/** `quota.droidPools` 解析（plan §2.7）：非对象 ⇒ {}；非法键/非法值逐条丢弃；≤200 条。永不抛。 */
+function parseDroidPools(raw: unknown): Readonly<Record<string, QuotaPoolId | "none">> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, QuotaPoolId | "none"> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (Object.keys(out).length >= 200) break;
+    if (!DROID_POOL_KEY.test(key)) continue;
+    if (value !== "standard" && value !== "core" && value !== "none") continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /**
@@ -1613,7 +1641,7 @@ function parseWindowThresholds(
   return { l1Percent: l1, l2Percent: l2, l3Percent: l3 };
 }
 
-/** `quota.windows` 块解析：非对象/缺失 → 对两个窗口都应用 globalOverride 后的默认。 */
+/** `quota.windows` 块解析：非对象/缺失 → 对所有窗口都应用 globalOverride 后的默认。 */
 function parseQuotaWindowThresholds(
   raw: unknown,
   defaults: Readonly<Record<WindowScope, QuotaWindowThresholds>>,
@@ -1623,6 +1651,7 @@ function parseQuotaWindowThresholds(
   return {
     "5h": parseWindowThresholds(record?.["5h"], defaults["5h"], globalOverride),
     week: parseWindowThresholds(record?.week, defaults.week, globalOverride),
+    month: parseWindowThresholds(record?.month, defaults.month, globalOverride),
   };
 }
 

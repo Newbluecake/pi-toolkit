@@ -25,6 +25,9 @@ describe("ENV_FALLBACK", () => {
       "zai-coding-cn": "ZAI_API_KEY",
       zai: "ZAI_API_KEY",
       "kimi-coding": "KIMI_CODING_API_KEY",
+      // P7（D3 拍板）：droid 两池只用 FACTORY_API_KEY（与 droid 子进程同一把 key）。
+      "droid-standard": "FACTORY_API_KEY",
+      "droid-core": "FACTORY_API_KEY",
     });
   });
 });
@@ -90,5 +93,24 @@ describe("createCredentialResolver", () => {
     // 不同 provider 各自一次
     expect(resolve("zai")).toBeUndefined();
     expect(warnings).toHaveLength(2);
+  });
+
+  it("droid: both pool ids fall back to FACTORY_API_KEY and warn once under the merged 'droid' key", () => {
+    // P7（quota-plan r2 §3，D3）：droid-standard / droid-core 共享 FACTORY_API_KEY。
+    const resolve = makeResolver(undefined, { FACTORY_API_KEY: "factory-env-key" });
+    expect(resolve("droid-standard")).toBe("factory-env-key");
+    expect(resolve("droid-core")).toBe("factory-env-key");
+
+    // 两个 id 只告警一次（warnKey 合并），文案里的 provider 名写 `droid`；
+    // kimi/zai 的键与文案不受影响。
+    const warnings: string[] = [];
+    const missing = makeResolver(undefined, {}, (m) => warnings.push(m));
+    expect(missing("droid-standard")).toBeUndefined();
+    expect(missing("droid-core")).toBeUndefined();
+    expect(missing("droid-standard")).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"droid"');
+    expect(warnings[0]).toContain("FACTORY_API_KEY");
+    expect(warnings[0]).not.toContain("droid-standard");
   });
 });

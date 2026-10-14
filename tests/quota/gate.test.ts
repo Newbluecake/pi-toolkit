@@ -3,7 +3,7 @@
 // aggressiveness, pickAlternatives ordering & exclusions, quotaAnnotation
 // marks, and the formatModelCandidates backward-compat lock.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatModelCandidates, type ModelCandidate } from "../../src/config/model-hint.js";
 import {
   evaluateQuotaGate,
@@ -479,5 +479,231 @@ describe("windows whose reset has elapsed (relaxation)", () => {
         gateDeps((p) => verdicts[p]),
       ),
     ).toEqual({ providers: ["kimi-coding", "zai"], subscription: true });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// quota-plan r2 §11 gate.test.ts（P7）：droid 池闸门（§6 evaluatePooledGate）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+import type { QuotaModelView } from "../../src/quota/service.js";
+import type { QuotaBillingInfo } from "../../src/quota/types.js";
+
+function poolVerdict(
+  id: "droid-standard" | "droid-core",
+  pct: number,
+  level: LadderLevel,
+  over: { stale?: boolean; billing?: Partial<QuotaBillingInfo> } = {},
+): ProviderVerdict {
+  return {
+    ...makeVerdict({
+      provider: id,
+      level,
+      windows: [win("5h", pct, level, RESET_0211, pct >= 100 ? "exhausted" : "pct")],
+      ...(over.stale === undefined ? {} : { stale: over.stale }),
+    }),
+    billing: {
+      kind: "factory",
+      pool: id === "droid-standard" ? "standard" : "core",
+      overage: "droidCore",
+      extraUsageAllowed: false,
+      extraUsageBalanceCents: 0,
+      ...over.billing,
+    },
+  };
+}
+
+const PI_VERDICTS: Record<string, ProviderVerdict> = {
+  "kimi-coding": makeVerdict({ provider: "kimi-coding", level: 0, windows: [win("5h", 8, 0)] }),
+  "zai-coding-cn": makeVerdict({ provider: "zai-coding-cn", level: 0, windows: [win("5h", 20, 0)] }),
+};
+
+function droidDeps(
+  view: QuotaModelView | undefined,
+  over: { poolAlternatives?: (b: string) => readonly string[]; blockAtLevel?: LadderLevel } = {},
+): QuotaGateDeps {
+  return {
+    verdictFor: (p) => PI_VERDICTS[p],
+    available: () => CANDIDATES,
+    blockAtLevel: over.blockAtLevel ?? 3,
+    now: NOW,
+    modelView: () => view,
+    ...(over.poolAlternatives === undefined ? {} : { poolAlternatives: over.poolAlternatives }),
+  };
+}
+
+const DROID_MODEL = { provider: "droid", id: "claude-opus-5-5" };
+
+function stdView(v: ProviderVerdict | undefined): QuotaModelView {
+  return { pool: "standard", keys: ["droid-standard"], verdicts: [v] };
+}
+
+describe("evaluateQuotaGate — droid pool path", () => {
+  it("pool known + standard exhausted ⇒ blocked: head names the pool, core models line precedes the pi-native line", () => {
+    const verdict = evaluateQuotaGate(
+      DROID_MODEL,
+      droidDeps(stdView(poolVerdict("droid-standard", 100, 3)), {
+        poolAlternatives: () => ["droid/glm-5.3", "droid/kimi-k3"],
+      }),
+    );
+    expect(verdict?.level).toBe(3);
+    const msg = verdict?.message ?? "";
+    expect(msg).toContain("quota gate: droid/claude-opus-5-5（standard 池）的 5h 配额已用尽（100%，");
+    expect(msg).toContain("02:11 重置），本次 spawn 已快速失败，未消耗任何 run。");
+    const coreIdx = msg.indexOf("优先改用 droid core 池模型：droid/glm-5.3、droid/kimi-k3");
+    const piIdx = msg.indexOf("改用 pi 原生子 agent");
+    expect(coreIdx).toBeGreaterThan(-1);
+    expect(piIdx).toBeGreaterThan(coreIdx); // core 行在前、pi 行在后（评审 #4）
+    expect(msg).toContain("或改用 pi 原生子 agent");
+    expect(msg).toContain("quota.gate 设为 false");
+    expect(verdict?.alternatives).toMatchObject({ external: true, models: ["droid/glm-5.3", "droid/kimi-k3"] });
+    expect(verdict?.alternatives.providers.length).toBeGreaterThan(0);
+  });
+
+  it("no droid-internal alternatives ⇒ only the pi line (retitled), no `models` key", () => {
+    const verdict = evaluateQuotaGate(DROID_MODEL, droidDeps(stdView(poolVerdict("droid-standard", 100, 3))));
+    expect(verdict?.message).toContain("改用 pi 原生子 agent");
+    expect(verdict?.message).not.toContain("或改用");
+    expect(verdict?.message).not.toContain("core 池仍有额度");
+    expect(verdict?.alternatives.external).toBe(true);
+    expect("models" in (verdict?.alternatives ?? {})).toBe(false);
+  });
+
+  it("core pool blocked ⇒ never asks poolAlternatives; pi-only line", () => {
+    const spy = vi.fn(() => ["droid/glm-5.3"]);
+    const view: QuotaModelView = { pool: "core", keys: ["droid-core"], verdicts: [poolVerdict("droid-core", 100, 3)] };
+    const verdict = evaluateQuotaGate({ provider: "droid", id: "glm-5.3" }, droidDeps(view, { poolAlternatives: spy }));
+    expect(verdict?.message).toContain("（core 池）");
+    expect(spy).not.toHaveBeenCalled();
+    expect("models" in (verdict?.alternatives ?? {})).toBe(false);
+    expect(verdict?.alternatives.external).toBe(true);
+    expect(verdict?.message).toContain("改用 pi 原生子 agent");
+  });
+
+  it("below the gate line ⇒ pass; gateLevel=2 blocks an L2 pool", () => {
+    expect(evaluateQuotaGate(DROID_MODEL, droidDeps(stdView(poolVerdict("droid-standard", 80, 2))))).toBeUndefined();
+    expect(
+      evaluateQuotaGate(DROID_MODEL, droidDeps(stdView(poolVerdict("droid-standard", 80, 2)), { blockAtLevel: 2 })),
+    ).toBeDefined();
+  });
+
+  it("pool unknown: ONE pool at the line ⇒ pass (D5); BOTH pools at the line ⇒ block with 『计费池未知』 copy", () => {
+    const std = poolVerdict("droid-standard", 100, 3);
+    const coreOk = poolVerdict("droid-core", 10, 0);
+    const coreHot = poolVerdict("droid-core", 100, 3);
+    const mk = (a: ProviderVerdict, b: ProviderVerdict): QuotaModelView => ({
+      pool: undefined,
+      keys: ["droid-standard", "droid-core"],
+      verdicts: [a, b],
+    });
+    expect(evaluateQuotaGate(DROID_MODEL, droidDeps(mk(std, coreOk)))).toBeUndefined();
+    expect(evaluateQuotaGate(DROID_MODEL, droidDeps(mk(coreOk, std)))).toBeUndefined();
+    const blocked = evaluateQuotaGate(DROID_MODEL, droidDeps(mk(std, coreHot)));
+    expect(blocked?.message).toContain("计费池未知，standard 与 core 池均已触线");
+    expect(blocked?.message).toContain("standard 池 5h 配额已用尽");
+    expect(blocked?.message).toContain("core 池 5h 配额已用尽");
+    // 池未知时不给 droid 内替代（core 同样触线）。
+    expect("models" in (blocked?.alternatives ?? {})).toBe(false);
+  });
+
+  it("any needed pool stale or without snapshot ⇒ pass (fail-open)", () => {
+    expect(
+      evaluateQuotaGate(DROID_MODEL, droidDeps(stdView(poolVerdict("droid-standard", 100, 3, { stale: true })))),
+    ).toBeUndefined();
+    expect(evaluateQuotaGate(DROID_MODEL, droidDeps(stdView(undefined)))).toBeUndefined();
+    const unknown: QuotaModelView = {
+      pool: undefined,
+      keys: ["droid-standard", "droid-core"],
+      verdicts: [poolVerdict("droid-standard", 100, 3), undefined],
+    };
+    expect(evaluateQuotaGate(DROID_MODEL, droidDeps(unknown))).toBeUndefined();
+    const staleCore: QuotaModelView = {
+      ...unknown,
+      verdicts: [poolVerdict("droid-standard", 100, 3), poolVerdict("droid-core", 100, 3, { stale: true })],
+    };
+    expect(evaluateQuotaGate(DROID_MODEL, droidDeps(staleCore))).toBeUndefined();
+  });
+
+  it("pool `none` (BYOK ⇒ no keys) ⇒ pass", () => {
+    expect(evaluateQuotaGate(DROID_MODEL, droidDeps({ pool: "none", keys: [], verdicts: [] }))).toBeUndefined();
+  });
+
+  it("D6: extraUsage not opened ⇒ blocked with balance + setting name; gateOpen ⇒ pass", () => {
+    const extra = { overage: "extraUsage" as const, extraUsageAllowed: true, extraUsageBalanceCents: 1234 };
+    const blocked = evaluateQuotaGate(
+      DROID_MODEL,
+      droidDeps(stdView(poolVerdict("droid-standard", 100, 3, { billing: extra }))),
+    );
+    expect(blocked?.message).toContain("Factory 超额策略为 extraUsage（额外余额 $12.34）");
+    expect(blocked?.message).toContain("quota.droidAllowExtraUsage");
+    const opened = evaluateQuotaGate(
+      DROID_MODEL,
+      droidDeps(stdView(poolVerdict("droid-standard", 100, 3, { billing: { ...extra, gateOpen: true } }))),
+    );
+    expect(opened).toBeUndefined();
+    // droidCore 策略的拦截不带 extraUsage 行。
+    const plain = evaluateQuotaGate(DROID_MODEL, droidDeps(stdView(poolVerdict("droid-standard", 100, 3))));
+    expect(plain?.message).not.toContain("quota.droidAllowExtraUsage");
+  });
+
+  it("message line order: head → [extra] → core models → pi line → close hint", () => {
+    const extra = { overage: "extraUsage" as const, extraUsageAllowed: true, extraUsageBalanceCents: 100 };
+    const msg =
+      evaluateQuotaGate(
+        DROID_MODEL,
+        droidDeps(stdView(poolVerdict("droid-standard", 100, 3, { billing: extra })), {
+          poolAlternatives: () => ["droid/glm-5.3"],
+        }),
+      )?.message ?? "";
+    const marks = [
+      "quota gate:",
+      "Factory 超额策略",
+      "优先改用 droid core 池模型",
+      "或改用 pi 原生子 agent",
+      "按任务需求选",
+      "quota.gate 设为 false",
+    ];
+    const idx = marks.map((m) => msg.indexOf(m));
+    expect(idx.every((i) => i >= 0)).toBe(true);
+    expect([...idx].sort((a, b) => a - b)).toEqual(idx);
+  });
+
+  it("modelView returning undefined falls through to the legacy path (non-droid model blocked ⇒ no external/models)", () => {
+    const verdicts: Record<string, ProviderVerdict> = {
+      ...PI_VERDICTS,
+      "zai-coding-cn": makeVerdict({
+        provider: "zai-coding-cn",
+        level: 3,
+        windows: [win("5h", 98, 3, RESET_0211, "exhausted")],
+      }),
+    };
+    const verdict = evaluateQuotaGate(
+      { provider: "zai-coding-cn", id: "glm-5.3" },
+      { ...droidDeps(undefined, { poolAlternatives: () => ["droid/glm-5.3"] }), verdictFor: (p) => verdicts[p] },
+    );
+    expect(verdict).toBeDefined();
+    expect("external" in (verdict?.alternatives ?? {})).toBe(false);
+    expect("models" in (verdict?.alternatives ?? {})).toBe(false);
+    expect(verdict?.message).not.toContain("pi 原生子 agent");
+  });
+});
+
+describe("pickAlternatives — droid decoration", () => {
+  const deps = {
+    verdictFor: (p: string) => PI_VERDICTS[p],
+    available: () => CANDIDATES,
+    poolAlternatives: (b: string) => (b === "droid-standard" ? ["droid/glm-5.3"] : []),
+  };
+
+  it("droid-standard blocked ⇒ external + models; droid-core blocked ⇒ external without models", () => {
+    expect(pickAlternatives("droid-standard", deps)).toMatchObject({ external: true, models: ["droid/glm-5.3"] });
+    const core = pickAlternatives("droid-core", deps);
+    expect(core.external).toBe(true);
+    expect("models" in core).toBe(false);
+  });
+
+  it("non-droid blocked ⇒ exact legacy shape (no external/models keys) even when poolAlternatives is supplied", () => {
+    const sel = pickAlternatives("zai-coding-cn", deps);
+    expect(Object.keys(sel).sort()).toEqual(["providers", "subscription"]);
   });
 });

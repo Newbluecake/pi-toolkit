@@ -8,7 +8,14 @@
  * the MAX across windows (the "Kimi week-exhausted while 5h idle" trap).
  */
 
-import type { LadderLevel, QuotaProviderId, QuotaSnapshot, QuotaWindow, WindowScope } from "./types.js";
+import type {
+  LadderLevel,
+  QuotaBillingInfo,
+  QuotaProviderId,
+  QuotaSnapshot,
+  QuotaWindow,
+  WindowScope,
+} from "./types.js";
 import type { Millis } from "../core/types.js";
 
 export interface LadderThresholds {
@@ -17,6 +24,8 @@ export interface LadderThresholds {
   readonly l3: number;
   /** ETA 低于此值直接 L3。 */
   readonly l3EtaMs: Millis;
+  /** false ⇒ 关闭规则 3b（forecast-before-reset）；缺省 = true（行为不变）。 */
+  readonly forecastBeforeReset?: boolean | undefined;
 }
 
 export type LadderReason = "none" | "pct" | "forecast-before-reset" | "forecast-eta" | "exhausted" | "reset-elapsed";
@@ -44,6 +53,8 @@ export interface ProviderVerdict {
   /** 快照年龄超过 staleAfterMs —— 闸门据此退化为不阻断。 */
   readonly stale: boolean;
   readonly plan?: string | undefined;
+  /** Factory 计费元数据（droid 池专属）：snapshot.billing 的条件透传 + service 的 gateOpen 装饰。 */
+  readonly billing?: QuotaBillingInfo | undefined;
 }
 
 /**
@@ -67,6 +78,9 @@ export const DEFAULT_THRESHOLDS: LadderThresholds = { l1: 50, l2: 75, l3: 90, l3
 export const DEFAULT_THRESHOLDS_BY_WINDOW: Readonly<Record<WindowScope, LadderThresholds>> = {
   "5h": { l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000 },
   week: { l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000 },
+  // month（D9/D10 拍板）：默认阈值同 week（50/95/98）；月窗口斜率外推必误报，
+  // 关闭规则 3b（forecast-before-reset），保留 3a（ETA 硬线）。
+  month: { l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000, forecastBeforeReset: false },
 };
 
 /** `providerVerdict` 的 thresholds 入参：单一阈值（沿用旧调用方）或按 scope 解析的函数。 */
@@ -132,8 +146,14 @@ export function windowLevel(
       // 3a) ETA 短于硬线 ⇒ L3（无论重置多远）
       level = 3;
       reason = "forecast-eta";
-    } else if (window.resetAt !== undefined && now + etaMs < window.resetAt && level < 2) {
+    } else if (
+      thresholds.forecastBeforeReset !== false &&
+      window.resetAt !== undefined &&
+      now + etaMs < window.resetAt &&
+      level < 2
+    ) {
       // 3b) 预测在窗口重置**之前**耗尽 ⇒ 至少 L2。resetAt 未知时不做此判定。
+      // thresholds.forecastBeforeReset === false（month 窗口，D10）时整条规则关闭。
       level = 2;
       reason = "forecast-before-reset";
     }
@@ -186,6 +206,7 @@ export function providerVerdict(
     fetchedAt: snapshot.fetchedAt,
     stale,
     ...(snapshot.plan === undefined ? {} : { plan: snapshot.plan }),
+    ...(snapshot.billing === undefined ? {} : { billing: snapshot.billing }),
   };
 }
 

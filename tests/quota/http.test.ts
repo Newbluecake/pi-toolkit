@@ -113,6 +113,63 @@ describe("createFetchJson", () => {
     expect(warnings[0]).toContain("[REDACTED]");
   });
 
+  // quota-plan r2 §11 http.test.ts（P7）：onHttpError 只在最终失败时调一次。
+  it("onHttpError: a non-retryable 402 reports the status exactly once", async () => {
+    const statuses: Array<number | undefined> = [];
+    const fetchJson = createFetchJson({ fetchImpl: async () => jsonResponse({ error: "pay" }, 402) });
+    await expect(
+      fetchJson(URL_UNDER_TEST, { headers: {}, onHttpError: (s) => statuses.push(s) }),
+    ).resolves.toBeUndefined();
+    expect(statuses).toEqual([402]);
+  });
+
+  it("onHttpError: a mid-retry 500 is NOT reported; only the final failure is (once)", async () => {
+    const statuses: Array<number | undefined> = [];
+    let calls = 0;
+    const fetchJson = createFetchJson({
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonResponse({ error: "boom" }, 500);
+      },
+    });
+    vi.useFakeTimers();
+    const pending = fetchJson(URL_UNDER_TEST, { headers: {}, onHttpError: (s) => statuses.push(s) });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(pending).resolves.toBeUndefined();
+    expect(calls).toBe(2);
+    expect(statuses).toEqual([500]);
+  });
+
+  it("onHttpError: a retry that succeeds never reports", async () => {
+    const statuses: Array<number | undefined> = [];
+    let calls = 0;
+    const fetchJson = createFetchJson({
+      fetchImpl: async () => (++calls === 1 ? jsonResponse({}, 500) : jsonResponse({ ok: true })),
+    });
+    vi.useFakeTimers();
+    const pending = fetchJson(URL_UNDER_TEST, { headers: {}, onHttpError: (s) => statuses.push(s) });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(pending).resolves.toEqual({ ok: true });
+    expect(statuses).toEqual([]);
+  });
+
+  it("onHttpError: a throwing callback never breaks the never-throw contract", async () => {
+    const fetchJson = createFetchJson({ fetchImpl: async () => jsonResponse({ error: "forbidden" }, 403) });
+    await expect(
+      fetchJson(URL_UNDER_TEST, {
+        headers: {},
+        onHttpError: () => {
+          throw new Error("listener bug");
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("onHttpError: omitted ⇒ unchanged behavior (still resolves undefined on 403)", async () => {
+    const fetchJson = createFetchJson({ fetchImpl: async () => jsonResponse({}, 403) });
+    await expect(fetchJson(URL_UNDER_TEST, { headers: {} })).resolves.toBeUndefined();
+  });
+
   it("resolves undefined when the parent signal is already aborted", async () => {
     const controller = new AbortController();
     controller.abort();

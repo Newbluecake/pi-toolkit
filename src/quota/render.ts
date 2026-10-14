@@ -11,7 +11,7 @@
  * 所以 L3 文案里的「会被 spawn 拦下」承诺永远不会对着陈旧快照说出。
  */
 
-import type { WindowScope } from "./types.js";
+import { isDroidQuotaId, type QuotaProblem, type WindowScope } from "./types.js";
 import type { Millis } from "../core/types.js";
 import {
   DEFAULT_THRESHOLDS_BY_WINDOW,
@@ -24,7 +24,20 @@ import {
 const MINUTE_MS = 60_000;
 
 export function formatScope(scope: WindowScope): string {
-  return scope === "week" ? "7d" : "5h";
+  // month ⇒ "mo"（D9 拍板）；kimi/zai 只有 5h/week ⇒ 输出不变。
+  return scope === "week" ? "7d" : scope === "month" ? "mo" : "5h";
+}
+
+/**
+ * 展示标签（D1 虚拟 id 的人性化写法）：droid-standard → "droid standard 池"、
+ * droid-core → "droid core 池"；其余 provider 原样返回（kimi/zai 字节不变承诺）。
+ * 用于注入块/恢复播报/可用播报/闸门文案的标签位；tick 行与 HUD 段名保留原始 id
+ * 的紧凑英文 token（AGENTS.md UI split）。
+ */
+export function quotaLabel(provider: string): string {
+  if (provider === "droid-standard") return "droid standard 池";
+  if (provider === "droid-core") return "droid core 池";
+  return provider;
 }
 
 /**
@@ -147,6 +160,10 @@ export interface AlternativeSelection {
   readonly providers: readonly string[];
   /** true when the selected pool is tier 0/1 subscription providers. */
   readonly subscription: boolean;
+  /** droid 内替代（D7）：core 池模型（`droid/<id>`），被拦的是 droid-standard 时才出现。 */
+  readonly models?: readonly string[] | undefined;
+  /** 被拦的是 droid 池 ⇒ providers 行改标题「改用 pi 原生子 agent」（D8 拍板）。 */
+  readonly external?: true | undefined;
 }
 
 export type AlternativeInput = AlternativeSelection | readonly string[];
@@ -157,10 +174,35 @@ function normalizeAlternatives(input: AlternativeInput): AlternativeSelection {
 }
 
 export function alternativesAdvice(input: AlternativeInput): string {
-  const { providers, subscription } = normalizeAlternatives(input);
-  if (providers.length === 0) return "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。";
-  const heading = subscription ? "替代候选（订阅优先）" : "无可用订阅；按量计费 provider";
-  return `${heading}：${providers.join("、")}。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；${subscription ? "订阅额度不用会作废；" : ""}不胜任就按路由表另选合适模型，不必硬凑。`;
+  const selection = normalizeAlternatives(input);
+  const { providers, subscription } = selection;
+  if (selection.external !== true) {
+    // 旧分支（kimi/zai / 数组输入）：字节不变。
+    if (providers.length === 0) return "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。";
+    const heading = subscription ? "替代候选（订阅优先）" : "无可用订阅；按量计费 provider";
+    return `${heading}：${providers.join("、")}。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；${subscription ? "订阅额度不用会作废；" : ""}不胜任就按路由表另选合适模型，不必硬凑。`;
+  }
+  // D8（拍板）：droid 池被拦 ⇒ 两类候选都列，core 池优先；pi 行明示执行语义会变。
+  const models = selection.models ?? [];
+  const lines: string[] = [];
+  if (models.length > 0) {
+    lines.push(
+      `同一 Factory 账户的 core 池仍有额度，优先改用 droid core 池模型：${models.join("、")}。` +
+        "（standard 池 = droid 的 Anthropic/OpenAI/Google/xAI 模型；core 池 = Factory 托管开源模型）",
+    );
+  }
+  if (providers.length > 0) {
+    const tier = subscription ? "订阅优先" : "无可用订阅，按量计费";
+    lines.push(
+      `${models.length > 0 ? "或改" : "改"}用 pi 原生子 agent（${tier}）：${providers.join("、")}。` +
+        "注意这会换成 pi 子 agent 运行（不是外部 droid，权限与工具按 pi 的 agent 类型）。",
+    );
+  }
+  if (lines.length === 0) {
+    return "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。";
+  }
+  lines.push("按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。");
+  return lines.join("\n");
 }
 
 /**
@@ -195,6 +237,41 @@ export function demotionFloorClause(v: ProviderVerdict, now: Millis): string {
 }
 
 const GATE_PROMISE = "继续派给它会在 spawn 阶段被快速失败拦下，不会消耗 run";
+
+/** extra 余额的展示格式：cents ⇒ `$12.34`。 */
+function extraUsageText(cents: number): string {
+  return `$${(Math.max(0, Math.round(cents)) / 100).toFixed(2)}`;
+}
+
+/**
+ * billing 子句（quota-plan r2 §7）：只在该 verdict 属于 standard 池（`billing.pool
+ * === "standard"`）时生效，追加在 L2/L3 首行之后。kimi/zai 无 billing ⇒ undefined
+ * （输出字节不变）。
+ */
+function billingClause(v: ProviderVerdict): string | undefined {
+  const b = v.billing;
+  if (b === undefined || b.pool !== "standard") return undefined;
+  if (b.overage === "extraUsage") {
+    const balance = extraUsageText(b.extraUsageBalanceCents);
+    if (b.gateOpen === true) {
+      // D6 放行后：如实披露「在花真钱」，不再承诺拦截。
+      return `Factory 超额策略为 extraUsage：继续派会消耗额外余额 ${balance}（真钱），闸门不拦截；优先改用 core 池或订阅模型。`;
+    }
+    return `Factory 超额策略为 extraUsage（额外余额 ${balance}）：standard 池耗尽后 droid 会按量扣额外余额；pi-toolkit 闸门仍按额度拦截（放行需设 quota.droidAllowExtraUsage=true）。`;
+  }
+  if (b.overage === "droidCore") {
+    return "Factory 超额策略为 droidCore：standard 池耗尽后请改用 core 池模型。";
+  }
+  return undefined;
+}
+
+/** 在首行（以 `。` 结尾）之后插入 billing 子句；无子句 ⇒ 原文返回（字节不变）。 */
+function withBillingClause(text: string, clause: string | undefined): string {
+  if (clause === undefined) return text;
+  const newline = text.indexOf("\n");
+  if (newline < 0) return `${text}\n${clause}`;
+  return `${text.slice(0, newline)}\n${clause}${text.slice(newline)}`;
+}
 
 /**
  * L2 提示块（含 ETA / reset）。2026-09 口径修订：订阅额度窗口内不用就作废，L2 不再建议
@@ -231,7 +308,10 @@ export function buildQuotaWarnText(
     }
   }
   const l3 = w === undefined ? DEFAULT_THRESHOLDS_BY_WINDOW["5h"].l3 : DEFAULT_THRESHOLDS_BY_WINDOW[w.scope].l3;
-  return `${head}。\n订阅额度照常优先使用，派单不变；到 L3（≥${l3}% 或即将耗尽）才会切换。`;
+  return withBillingClause(
+    `${head}。\n订阅额度照常优先使用，派单不变；到 L3（≥${l3}% 或即将耗尽）才会切换。`,
+    billingClause(v),
+  );
 }
 
 /** L3 强烈块（含本轮禁用 + 替代候选 + 按需取舍说明）。 */
@@ -241,7 +321,12 @@ export function buildQuotaBlockText(
   now: Millis,
   label: string = v.provider,
 ): string {
-  return `${quotaBlockHead(v, now, label)}。\n${directUseText(label, alternatives)}`;
+  // D6 放行（gateOpen）：不再承诺「会被拦下」，改为如实劝阻（继续派会花额外余额）。
+  const gateOpen = v.billing?.pool === "standard" && v.billing.overage === "extraUsage" && v.billing.gateOpen === true;
+  const body = gateOpen
+    ? `建议本轮不要把新任务派给 ${label}（继续派会花额外余额）。\n${alternativesAdvice(alternatives)}`
+    : directUseText(label, alternatives);
+  return withBillingClause(`${quotaBlockHead(v, now, label)}。\n${body}`, billingClause(v));
 }
 
 /** L3 块的首行（读数 + ETA + 重置时刻），不含句号与后续建议。 */
@@ -271,6 +356,8 @@ function buildMergedBlockText(
   now: Millis,
 ): string | undefined {
   const normalized = entries.map((e) => normalizeAlternatives(e.section.alternatives));
+  // droid 池段（external / models）走两段式文案，无法无损合并 ⇒ 回落逐段输出。
+  if (normalized.some((n) => n.external === true || (n.models?.length ?? 0) > 0)) return undefined;
   const subscription = normalized[0]?.subscription ?? true;
   if (normalized.some((n) => n.subscription !== subscription)) return undefined;
   const blocked = new Set(entries.flatMap((e) => e.members));
@@ -328,7 +415,9 @@ export function buildQuotaRecoveryTexts(events: readonly QuotaRecoveryEvent[], n
     if (g === undefined) groups.set(key, { event: e, providers: [e.verdict.provider] });
     else g.providers.push(e.verdict.provider);
   }
-  return [...groups.values()].map(({ event, providers }) => buildQuotaRecoveryText(event, now, providers.join(" / ")));
+  return [...groups.values()].map(({ event, providers }) =>
+    buildQuotaRecoveryText(event, now, providers.map(quotaLabel).join(" / ")),
+  );
 }
 
 /**
@@ -345,7 +434,8 @@ export function buildQuotaAvailableTexts(verdicts: readonly ProviderVerdict[]): 
     else g.providers.push(v.provider);
   }
   return [...groups.values()].map(
-    ({ v, providers }) => `[quota] ${providers.join(" / ")} 订阅可用，当前 ${readingsText(v)}，可正常派单。`,
+    ({ v, providers }) =>
+      `[quota] ${providers.map(quotaLabel).join(" / ")} 订阅可用，当前 ${readingsText(v)}，可正常派单。`,
   );
 }
 
@@ -370,11 +460,18 @@ function groupSamePool(
   return [...groups.values()].map(({ section, providers }) => {
     const members = new Set(providers);
     const normalized = normalizeAlternatives(section.alternatives);
-    const alternatives = {
+    const alternatives: AlternativeSelection = {
       providers: normalized.providers.filter((a) => !members.has(a.split("/")[0] ?? a)),
       subscription: normalized.subscription,
+      // droid 段的 external/models 随组透传（合并块遇之回落逐段，见 buildMergedBlockText）。
+      ...(normalized.external === undefined ? {} : { external: normalized.external }),
+      ...(normalized.models === undefined ? {} : { models: normalized.models }),
     };
-    return { section: { verdict: section.verdict, alternatives }, label: providers.join(" / "), members: providers };
+    return {
+      section: { verdict: section.verdict, alternatives },
+      label: providers.map(quotaLabel).join(" / "),
+      members: providers,
+    };
   });
 }
 
@@ -453,7 +550,10 @@ export function readQuotaStatusTheme(ctx: unknown): QuotaStatusTheme | undefined
  * 两次独立拉取间的微小漂移不会分成两行。
  */
 function poolSignature(v: ProviderVerdict): string {
-  return `${v.plan ?? ""}/${v.windows
+  // droid 两个池读数可能相同：加 `${provider}#` 前缀防止被同池去重/合并（§7）；
+  // 其它 provider 的签名字节不变（kimi/zai golden 锁死）。
+  const prefix = isDroidQuotaId(v.provider) ? `${v.provider}#` : "";
+  return `${prefix}${v.plan ?? ""}/${v.windows
     .map((w) => `${w.scope}:${Math.round(w.usedPct)}@${w.resetAt === undefined ? "?" : Math.floor(w.resetAt / 60_000)}`)
     .join("|")}`;
 }
@@ -484,24 +584,106 @@ function hudSegmentThemed(v: ProviderVerdict, now: Millis, theme: QuotaStatusThe
   return `${name} ${theme.fg(levelColor(v.level), value)}${countdown === undefined ? "" : ` ${theme.fg("dim", `resets ${countdown}`)}`}`;
 }
 
+/** droid 池段的单元格：month 窗口写成 `mo 5%`（D14），5h/week 维持 `12%`。 */
+function droidCellText(w: WindowVerdict): string {
+  const base = `${pctOf(w.usedPct)}%${resetSuffix(w)}`;
+  return w.scope === "month" ? `mo ${base}` : base;
+}
+
+/** `extra $Y` 的出现条件（D14）：超额策略为 extraUsage 且 standard 池有窗口耗尽（非 reset-elapsed）。 */
+function droidExtraSuffix(v: ProviderVerdict): string {
+  const b = v.billing;
+  if (b?.overage !== "extraUsage") return "";
+  const exhausted = v.windows.some((w) => w.reason !== "reset-elapsed" && pctOf(w.usedPct) >= 100);
+  return exhausted ? ` extra ${extraUsageText(b.extraUsageBalanceCents)}` : "";
+}
+
+/**
+ * D14（拍板）：droid 两个池合并成一段 `droid 12%/40%/mo 5% core 0%/0%/mo 0%`，
+ * 始终显示（有快照就显示）；两池各自带重置倒计时；`extra $Y` 按需追加。
+ */
+function droidSegment(
+  std: ProviderVerdict | undefined,
+  core: ProviderVerdict | undefined,
+  now: Millis,
+  theme: QuotaStatusTheme | undefined,
+): string {
+  const poolPart = (v: ProviderVerdict, label: string | undefined): string => {
+    const cells = v.windows.map(droidCellText).join("/");
+    const countdown = recoveryCountdownText(v, now);
+    const extra = v.provider === "droid-standard" ? droidExtraSuffix(v) : "";
+    if (theme === undefined) {
+      const name = label === undefined ? "droid" : `droid ${label}`;
+      return `${name} ${cells}${countdown === undefined ? "" : ` resets ${countdown}`}${extra}`;
+    }
+    let out = theme.fg("dim", "droid");
+    if (label !== undefined) out += ` ${theme.fg("dim", label)}`;
+    out += ` ${theme.fg(levelColor(v.level), cells)}`;
+    if (countdown !== undefined) out += ` ${theme.fg("dim", `resets ${countdown}`)}`;
+    if (extra !== "") out += theme.fg(levelColor(v.level), extra);
+    return out;
+  };
+  // 合并形态：`droid <std cells> core <core cells>`（label 仅 core 带）；单池时只有一段。
+  if (std !== undefined && core !== undefined) {
+    const stdCells = std.windows.map(droidCellText).join("/");
+    const stdCountdown = recoveryCountdownText(std, now);
+    const coreCells = core.windows.map(droidCellText).join("/");
+    const coreCountdown = recoveryCountdownText(core, now);
+    const extra = droidExtraSuffix(std);
+    if (theme === undefined) {
+      return (
+        `droid ${stdCells}${stdCountdown === undefined ? "" : ` resets ${stdCountdown}`}${extra}` +
+        ` core ${coreCells}${coreCountdown === undefined ? "" : ` resets ${coreCountdown}`}`
+      );
+    }
+    let out = theme.fg("dim", "droid");
+    out += ` ${theme.fg(levelColor(std.level), stdCells)}`;
+    if (stdCountdown !== undefined) out += ` ${theme.fg("dim", `resets ${stdCountdown}`)}`;
+    if (extra !== "") out += theme.fg(levelColor(std.level), extra);
+    out += ` ${theme.fg("dim", "core")}`;
+    out += ` ${theme.fg(levelColor(core.level), coreCells)}`;
+    if (coreCountdown !== undefined) out += ` ${theme.fg("dim", `resets ${coreCountdown}`)}`;
+    return out;
+  }
+  if (std !== undefined) return poolPart(std, undefined);
+  return poolPart(core as ProviderVerdict, "core");
+}
+
 /**
  * HUD 一行（含陈旧标记）：`quota zai 62%/21% · kimi 8%/100% resets 2d11h`（有窗口
  * 超过 95% 的 provider 段末尾带重置倒计时，见 `recoveryCountdownText`）。
  * 全部 provider 无快照（verdicts 为空）⇒ undefined（不占位）；
  * 任一快照年龄超过 refreshMs ⇒ 行尾追加 ` ·stale 12m`（取最老者）。
+ *
+ * droid（quota-plan r2 §7 / D14）：去重之后 `droid-standard` / `droid-core` 合并成
+ * 一段（见 `droidSegment`）；认证类问题（401/402/403，D3）渲染成 `droid auth <code>`
+ * 段（主题版 warning 色）；只有 problems、没有 verdict 时整行为 `quota droid auth
+ * <code>`。没有 droid、没有 problems ⇒ 完全走旧代码路径（字节不变）。
  */
 export function renderQuotaStatus(
   verdicts: readonly ProviderVerdict[],
   now: Millis,
   refreshMs: Millis,
   theme?: QuotaStatusTheme | undefined,
+  problems?: readonly QuotaProblem[] | undefined,
 ): string | undefined {
   const rows = dedupeVerdicts(verdicts);
-  if (rows.length === 0) return undefined;
+  const activeProblems = problems === undefined ? [] : problems;
+  if (rows.length === 0 && activeProblems.length === 0) return undefined;
   let maxAge = 0;
   for (const v of rows) maxAge = Math.max(maxAge, now - v.fetchedAt);
   const joiner = theme === undefined ? " · " : theme.fg("dim", " · ");
-  const segments = rows.map((v) => (theme === undefined ? hudSegment(v, now) : hudSegmentThemed(v, now, theme)));
+  const std = rows.find((v) => v.provider === "droid-standard");
+  const core = rows.find((v) => v.provider === "droid-core");
+  const segments: string[] = [];
+  for (const v of rows) {
+    if (isDroidQuotaId(v.provider)) continue; // 合并段单独处理
+    segments.push(theme === undefined ? hudSegment(v, now) : hudSegmentThemed(v, now, theme));
+  }
+  if (std !== undefined || core !== undefined) segments.push(droidSegment(std, core, now, theme));
+  for (const p of activeProblems) {
+    segments.push(theme === undefined ? `droid auth ${p.status}` : theme.fg("warning", `droid auth ${p.status}`));
+  }
   let line = `${theme === undefined ? "quota" : theme.fg("dim", "quota")} ${segments.join(joiner)}`;
   if (maxAge > refreshMs) {
     const stale = ` ·stale ${Math.floor(maxAge / MINUTE_MS)}m`;

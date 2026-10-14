@@ -1,0 +1,19 @@
+{
+  "_comment": "standard pool 5h exhausted (usedPercent 100, windowEnd in the future), extraUsage overage with a real balance; core pool healthy. Synthesized per quota-plan r2 §3.",
+  "usesTokenRateLimitsBilling": true,
+  "overage": "extraUsage",
+  "extraUsageAllowed": true,
+  "extraUsageBalanceCents": 1234,
+  "limits": {
+    "standard": {
+      "fiveHour": { "usedPercent": 100, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 18000 },
+      "weekly": { "usedPercent": 40, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 604800 },
+      "monthly": { "usedPercent": 5, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 2592000 }
+    },
+    "core": {
+      "fiveHour": { "usedPercent": 0, "windowEnd": null, "secondsRemaining": 0 },
+      "weekly": { "usedPercent": 2, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 604800 },
+      "monthly": { "usedPercent": 1, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 2592000 }
+    }
+  }
+}

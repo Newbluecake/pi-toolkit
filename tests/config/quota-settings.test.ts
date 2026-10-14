@@ -43,13 +43,19 @@ const QUOTA_SPEC_KEYS = [
   "quota.gateLevel",
   "quota.hud",
   "quota.requestTimeoutS",
+  // P7（D16）：month 窗口覆盖 + droid extraUsage 放行阀。
+  "quota.windows.month.l1Percent",
+  "quota.windows.month.l2Percent",
+  "quota.windows.month.l3Percent",
+  "quota.droidAllowExtraUsage",
 ] as const;
 
 describe("quota settings", () => {
   it("pins the defaults (quota-plan §8.2)", () => {
     expect(defaults).toEqual({
       enabled: true,
-      providers: "zai-coding-cn,zai,kimi-coding",
+      // P7（D2）：默认白名单新增 droid token（展开成 droid-standard / droid-core 两个池）。
+      providers: "zai-coding-cn,zai,kimi-coding,droid",
       subscriptionProviders: "",
       refreshMs: 600_000,
       refreshHotMs: 120_000,
@@ -61,6 +67,8 @@ describe("quota settings", () => {
       windows: {
         "5h": { l1Percent: 50, l2Percent: 75, l3Percent: 90 },
         week: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
+        // P7（D9 拍板）：month 窗口默认同 week（50/95/98）。
+        month: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
       },
       tickStepPercent: 10,
       minIntervalMs: 300_000,
@@ -73,6 +81,10 @@ describe("quota settings", () => {
       zaiBaseUrl: "https://open.bigmodel.cn",
       zaiOverseasBaseUrl: "https://api.z.ai",
       kimiBaseUrl: "https://api.kimi.com",
+      // P7：droid 池（D17 JSON-only 逃生阀 / D6 默认拦截 / R1 覆盖表）。
+      factoryBaseUrl: "https://api.factory.ai",
+      droidAllowExtraUsage: false,
+      droidPools: {},
       userAgent: "",
     });
   });
@@ -106,6 +118,9 @@ describe("quota settings", () => {
         zaiBaseUrl: "ftp://example.com",
         zaiOverseasBaseUrl: 7,
         kimiBaseUrl: {},
+        factoryBaseUrl: "ftp://factory.internal",
+        droidAllowExtraUsage: "yes",
+        droidPools: ["not-a-record"],
         userAgent: 42,
       }),
     ).toEqual(defaults);
@@ -180,10 +195,19 @@ describe("quota settings", () => {
       max: 3,
       integer: true,
     });
-    // escape hatches stay JSON-file-only (§8.5)
-    for (const absent of ["quota.zaiBaseUrl", "quota.zaiOverseasBaseUrl", "quota.kimiBaseUrl", "quota.userAgent"]) {
+    // escape hatches stay JSON-file-only (§8.5；P7 的 factoryBaseUrl / droidPools 同款)
+    for (const absent of [
+      "quota.zaiBaseUrl",
+      "quota.zaiOverseasBaseUrl",
+      "quota.kimiBaseUrl",
+      "quota.userAgent",
+      "quota.factoryBaseUrl",
+      "quota.droidPools",
+    ]) {
       expect(isKnownSettingKey(absent), absent).toBe(false);
     }
+    // P7（D16）：quota.providers 的描述含 droid token。
+    expect(SETTING_SPECS["quota.providers"]?.description).toContain("droid");
   });
 
   it("converts the file's *S seconds to internal milliseconds via loadSettings", () => {
@@ -199,10 +223,11 @@ describe("quota settings", () => {
 // `quota.windows.<scope>.*` 窗口级覆盖，且与旧的全局 l1Percent/l2Percent/l3Percent
 // 保持向后兼容（全局字段 = 对两个窗口的覆盖）。优先级：窗口级 > 全局 > 按窗口默认。
 describe("quota settings: per-window threshold overrides", () => {
-  it("pins the per-window defaults: 5h 50/75/90, week 50/95/98", () => {
+  it("pins the per-window defaults: 5h 50/75/90, week 50/95/98, month 50/95/98", () => {
     expect(defaults.windows).toEqual({
       "5h": { l1Percent: 50, l2Percent: 75, l3Percent: 90 },
       week: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
+      month: { l1Percent: 50, l2Percent: 95, l3Percent: 98 },
     });
   });
 
@@ -227,6 +252,24 @@ describe("quota settings: per-window threshold overrides", () => {
     const parsed = parseQuotaSettings({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
     expect(parsed.windows["5h"]).toEqual({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
     expect(parsed.windows.week).toEqual({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
+    // P7（D9）：旧的全局字段同样作用于 month 窗口。
+    expect(parsed.windows.month).toEqual({ l1Percent: 40, l2Percent: 60, l3Percent: 80 });
+  });
+
+  it("month window: window-level override wins over the legacy global override", () => {
+    const parsed = parseQuotaSettings({
+      l2Percent: 60,
+      windows: { month: { l3Percent: 99 } },
+    });
+    // month 无 l1/l2 窗口级覆盖 ⇒ 回退到显式全局 l2=60；l1 未显式设置 ⇒ 用 month 默认 50。
+    expect(parsed.windows.month).toEqual({ l1Percent: 50, l2Percent: 60, l3Percent: 99 });
+    expect(parsed.windows.week).toEqual({ l1Percent: 50, l2Percent: 60, l3Percent: 98 });
+  });
+
+  it("month window: clamps monotonically and ignores garbage", () => {
+    const parsed = parseQuotaSettings({ windows: { month: { l1Percent: 80, l2Percent: 50 } } });
+    expect(parsed.windows.month).toEqual({ l1Percent: 80, l2Percent: 80, l3Percent: 98 });
+    expect(parseQuotaSettings({ windows: { month: { l1Percent: 0 } } }).windows.month).toEqual(defaults.windows.month);
   });
 
   it("window-level field wins over the legacy global override", () => {
@@ -272,6 +315,10 @@ describe("quota settings: per-window threshold overrides", () => {
       "quota.windows.week.l1Percent",
       "quota.windows.week.l2Percent",
       "quota.windows.week.l3Percent",
+      // P7（D16）：month 窗口的三个覆盖键同等待遇。
+      "quota.windows.month.l1Percent",
+      "quota.windows.month.l2Percent",
+      "quota.windows.month.l3Percent",
     ] as const;
     for (const key of keys) {
       expect(isKnownSettingKey(key), key).toBe(true);
@@ -281,5 +328,57 @@ describe("quota settings: per-window threshold overrides", () => {
       expect(defaultOf(spec), key).not.toBeUndefined();
       expect(currentOf(DEFAULT_SETTINGS, spec), key).not.toBe("(unset)");
     }
+  });
+});
+
+// P7（quota-plan r2 §8 / D16 / D17）：droid 池的设置块——factoryBaseUrl 校验、
+// droidPools 解析与丢弃、extraUsage 放行阀默认关。
+describe("quota settings: droid pools", () => {
+  it("factoryBaseUrl: http(s) only, trailing slashes trimmed, garbage falls back", () => {
+    expect(parseQuotaSettings({ factoryBaseUrl: "https://factory.internal:8443/" }).factoryBaseUrl).toBe(
+      "https://factory.internal:8443",
+    );
+    expect(parseQuotaSettings({ factoryBaseUrl: "ftp://x" }).factoryBaseUrl).toBe(defaults.factoryBaseUrl);
+    expect(parseQuotaSettings({ factoryBaseUrl: "" }).factoryBaseUrl).toBe(defaults.factoryBaseUrl);
+    expect(parseQuotaSettings({ factoryBaseUrl: 42 }).factoryBaseUrl).toBe(defaults.factoryBaseUrl);
+  });
+
+  it("droidAllowExtraUsage defaults to false and only accepts booleans", () => {
+    expect(parseQuotaSettings(undefined).droidAllowExtraUsage).toBe(false);
+    expect(parseQuotaSettings({ droidAllowExtraUsage: true }).droidAllowExtraUsage).toBe(true);
+    expect(parseQuotaSettings({ droidAllowExtraUsage: 1 }).droidAllowExtraUsage).toBe(false);
+  });
+
+  it("droidPools: keeps valid entries, drops invalid keys/values, caps at 200", () => {
+    const parsed = parseQuotaSettings({
+      droidPools: {
+        "glm-5.3": "core",
+        "claude-opus-5-5": "standard",
+        "custom:mine": "none",
+        bad$key: "core", // 非法键字符 ⇒ 丢弃
+        "": "core", // 空键 ⇒ 丢弃
+        "kimi-k3": "bogus", // 非法值 ⇒ 丢弃
+        "deepseek-v4": 42, // 非字符串 ⇒ 丢弃
+      },
+    });
+    expect(parsed.droidPools).toEqual({
+      "glm-5.3": "core",
+      "claude-opus-5-5": "standard",
+      "custom:mine": "none",
+    });
+    // 超上限截断（201 条合法键 ⇒ 只留前 200 条）。
+    const many: Record<string, string> = {};
+    for (let i = 0; i < 201; i += 1) many[`model-${i}`] = "core";
+    expect(Object.keys(parseQuotaSettings({ droidPools: many }).droidPools)).toHaveLength(200);
+    // 非对象 ⇒ {}
+    expect(parseQuotaSettings({ droidPools: "nope" }).droidPools).toEqual({});
+  });
+
+  it("droid settings round-trip through loadSettings", () => {
+    const loaded = loadSettings({
+      quota: { droidAllowExtraUsage: true, droidPools: { "glm-5.3": "core" } },
+    });
+    expect(loaded.quota.droidAllowExtraUsage).toBe(true);
+    expect(loaded.quota.droidPools).toEqual({ "glm-5.3": "core" });
   });
 });

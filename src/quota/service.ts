@@ -40,20 +40,47 @@ import {
 } from "./ladder.js";
 import { renderQuotaStatus, type QuotaStatusTheme } from "./render.js";
 import {
+  DROID_PROVIDER,
+  DROID_QUOTA_IDS,
   isQuotaProviderId,
   type CredentialResolver,
   type FetchJson,
   type ProviderAdapter,
+  type QuotaPoolId,
+  type QuotaPoolPort,
+  type QuotaProblem,
   type QuotaProviderId,
   type QuotaSnapshot,
   type QuotaWindow,
   type WindowScope,
 } from "./types.js";
+import type { CatalogModelLike } from "./pools.js";
+
+/**
+ * `verdictsForModel` 的返回（quota-plan r2 §2.4）：按模型所属计费池解析出的判定视图。
+ * 池已知 ⇒ keys 为对应单个虚拟 id；未知 ⇒ 两个池（D5：两池都触线才拦）；
+ * `"none"`（BYOK 不计费）⇒ 空 keys（闸门放行）。
+ */
+export interface QuotaModelView {
+  readonly pool: QuotaPoolId | "none" | undefined;
+  readonly keys: readonly QuotaProviderId[];
+  /** 与 keys 对齐；undefined = 无快照。 */
+  readonly verdicts: readonly (ProviderVerdict | undefined)[];
+}
 
 export interface QuotaService {
   /** **同步**读缓存判定（spawn 闸门 / hook / HUD 唯一入口）。永不发请求、永不抛。 */
   verdicts(now?: Millis): readonly ProviderVerdict[];
   verdictFor(provider: string, now?: Millis): ProviderVerdict | undefined;
+  /**
+   * 按模型判定（droid 池闸门，quota-plan r2 §2.4）：undefined ⇒ 该模型不受池管理
+   * （非 droid / droid 适配器未构造）⇒ 闸门走旧路径。同步、只读。
+   */
+  verdictsForModel(model: { provider: string; id: string }, now?: Millis): QuotaModelView | undefined;
+  /** blocked === "droid-standard" 且 core 未被排除 ⇒ ≤limit 个 "droid/<id>"（D7）；其余 ⇒ []。 */
+  poolAlternatives(blocked: string, limit?: number): readonly string[];
+  /** 认证类问题（401/402/403），按 family 去重（D3：不拦 spawn，只显示）。 */
+  problems(): readonly QuotaProblem[];
   /** fire-and-forget；未过期或在途则空转。永不抛、永不返回被拒 Promise。 */
   refreshIfStale(): void;
   /** 仅测试：等待当前所有在途刷新落地。 */
@@ -74,6 +101,11 @@ export interface QuotaServiceDeps {
   /** HUD 主题（ctx.ui.theme 的结构子集）；旧 pi / 非 TUI 时 undefined ⇒ 纯文本。 */
   readonly theme?: (() => QuotaStatusTheme | undefined) | undefined;
   readonly warn?: ((message: string) => void) | undefined;
+  /**
+   * 晚绑定池端口（P5 经 createCatalogPoolPort 供给；quota-plan r2 §2.1）。缺席 ⇒
+   * droid 模型的池恒未知（D5 fail-open）。端口 getter 返回 undefined 时同样退化。
+   */
+  readonly pools?: (() => QuotaPoolPort | undefined) | undefined;
   /**
    * 观测重置分支的恢复事件出口（额度恢复播报）：快照被接受且 classifyDrop 认定
    * 重置（有证据 / 两次确认）时，在全部状态落定（降位当场重建、HUD）之后每 provider
@@ -132,7 +164,14 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
 
   const thresholds = (scope: WindowScope): LadderThresholds => {
     const w = settings.windows[scope];
-    return { l1: w.l1Percent, l2: w.l2Percent, l3: w.l3Percent, l3EtaMs: settings.l3EtaMs };
+    // D10：month 窗口关闭规则 3b（forecast-before-reset）——月窗口斜率外推必误报；3a 保留。
+    return {
+      l1: w.l1Percent,
+      l2: w.l2Percent,
+      l3: w.l3Percent,
+      l3EtaMs: settings.l3EtaMs,
+      ...(scope === "month" ? { forecastBeforeReset: false } : {}),
+    };
   };
 
   const ringKey = (provider: string, scope: WindowScope): string => `${provider}|${scope}`;
@@ -145,6 +184,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
         return settings.zaiOverseasBaseUrl;
       case "kimi-coding":
         return settings.kimiBaseUrl;
+      case "droid-standard":
+      case "droid-core":
+        return settings.factoryBaseUrl;
     }
   };
 
@@ -170,7 +212,7 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       demoted = false; // demotion store 契约永不抛；此兜底为注入桩而设。
     }
     try {
-      return providerVerdict(snapshot, {
+      const verdict = providerVerdict(snapshot, {
         now,
         thresholds,
         staleAfterMs: settings.staleAfterMs,
@@ -178,6 +220,18 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
         demoted,
         demotedUntil,
       });
+      // D6（拍板）service 装饰：standard 池 + extraUsage + 账户允许 + 余额 >0，且用户
+      // 显式打开 quota.droidAllowExtraUsage ⇒ gateOpen（闸门放行，文案/HUD 披露余额）。
+      // 只有 verdict.billing 存在（droid 池）才返回新对象——kimi/zai 的对象引用与形状不变。
+      const billing = verdict.billing;
+      if (billing === undefined) return verdict;
+      const gateOpen =
+        settings.droidAllowExtraUsage &&
+        billing.pool === "standard" &&
+        billing.overage === "extraUsage" &&
+        billing.extraUsageAllowed &&
+        billing.extraUsageBalanceCents > 0;
+      return { ...verdict, billing: { ...billing, gateOpen } };
     } catch {
       return undefined; // 纯函数层不应抛；万一抛了（注入桩）也不拖垮整批 verdict。
     }
@@ -206,9 +260,39 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   const writeStatus = (now: Millis): void => {
     if (disposed || deps.setStatus === undefined) return;
     try {
-      deps.setStatus(renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.()));
+      deps.setStatus(renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.(), problemsNow()));
     } catch {
       // HUD 不可用不影响数据面。
+    }
+  };
+
+  /** 认证类问题汇总（401/402/403），按 family 去重；适配器桩异常吞掉。 */
+  const problemsNow = (): readonly QuotaProblem[] => {
+    const out: QuotaProblem[] = [];
+    const seen = new Set<string>();
+    for (const adapter of deps.adapters) {
+      let problem: QuotaProblem | undefined;
+      try {
+        problem = adapter.lastProblem?.();
+      } catch {
+        problem = undefined; // 端口契约永不抛；兜注入桩。
+      }
+      if (problem !== undefined && !seen.has(problem.family)) {
+        seen.add(problem.family);
+        out.push(problem);
+      }
+    }
+    return out;
+  };
+
+  /** 模型 → 池：settings.droidPools 覆盖优先（R1 纠错主通道），端口启发式其次（D4）。 */
+  const poolFor = (modelId: string): QuotaPoolId | "none" | undefined => {
+    const override = settings.droidPools[modelId];
+    if (override !== undefined) return override;
+    try {
+      return deps.pools?.()?.poolOf(modelId);
+    } catch {
+      return undefined; // 端口契约永不抛；兜注入桩。
     }
   };
 
@@ -307,6 +391,8 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   const refreshIfStale = (): void => {
     if (disposed) return;
     for (const adapter of deps.adapters) {
+      // D11 关闭态：inactive 适配器本轮跳过——不读凭据、不记 lastAttempt、不发请求。
+      if (adapter.isActive?.() === false) continue;
       const id = adapter.id;
       const now = clock.now();
       const ttl = effectiveTtl(id, now);
@@ -346,7 +432,19 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
           userAgent: settings.userAgent,
         });
         // dispose 之后落地：什么都不做（M3 在途防护——拒写 status、拒改状态）。
-        if (disposed || snapshot === undefined || snapshot.provider !== id) return;
+        if (disposed) return;
+        if (snapshot === undefined || snapshot.provider !== id) {
+          // 刷新未产出快照但适配器有认证问题（401/402/403，D3）：也写一次 HUD，
+          // 让 `droid auth <code>` 在不落快照的情况下显示出来。
+          let hasProblem = false;
+          try {
+            hasProblem = adapter.lastProblem?.() !== undefined;
+          } catch {
+            hasProblem = false;
+          }
+          if (hasProblem) writeStatus(clock.now());
+          return;
+        }
         try {
           applySnapshot(snapshot);
         } catch (error) {
@@ -376,6 +474,73 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     verdictFor(provider, now) {
       const at = now ?? clock.now();
       return isQuotaProviderId(provider) ? verdictOf(provider, at) : undefined;
+    },
+    verdictsForModel(model, now) {
+      // 非 droid / droid 适配器未构造 ⇒ 不受池管理 ⇒ 闸门走旧路径（undefined）。
+      if (model.provider !== DROID_PROVIDER) return undefined;
+      if (!deps.adapters.some((a) => a.id === "droid-standard" || a.id === "droid-core")) return undefined;
+      const at = now ?? clock.now();
+      const pool = poolFor(model.id);
+      const keys: readonly QuotaProviderId[] =
+        pool === "none"
+          ? []
+          : pool === undefined
+            ? DROID_QUOTA_IDS
+            : [pool === "standard" ? "droid-standard" : "droid-core"];
+      return { pool, keys, verdicts: keys.map((k) => verdictOf(k, at)) };
+    },
+    poolAlternatives(blocked, limit = 3) {
+      // D7 + 评审 #5：仅 droid-standard 被拦且 core 未被排除时推荐 core 池模型；
+      // 加法（端口目录序 + droidPools 改判进 core 的键）后减法（改判出 core 的、
+      // 目录标 deprecated/router 的、custom:），去重，取前 limit 个。
+      if (blocked !== "droid-standard") return [];
+      const coreVerdict = verdictOf("droid-core", clock.now());
+      if (coreVerdict !== undefined && !coreVerdict.stale && coreVerdict.level >= 3) return [];
+      let port: QuotaPoolPort | undefined;
+      try {
+        port = deps.pools?.();
+      } catch {
+        port = undefined;
+      }
+      const candidates: string[] = [];
+      const seen = new Set<string>();
+      const push = (id: string): void => {
+        if (!seen.has(id)) {
+          seen.add(id);
+          candidates.push(id);
+        }
+      };
+      if (port !== undefined) {
+        try {
+          for (const id of port.modelsInPool("core")) push(id); // 已是「偏好序在前、目录序在后」
+        } catch {
+          // 端口契约永不抛；兜注入桩。
+        }
+      }
+      for (const [id, value] of Object.entries(settings.droidPools)) {
+        if (value === "core") push(id); // 评审 #5 加法：用户改判进 core 的模型进替代建议
+      }
+      const infoOf = (id: string): CatalogModelLike | undefined => {
+        // CatalogPoolPort 的结构探测（quota 不自持目录；P5 供的端口带 infoOf）。
+        const capable = port as { infoOf?: (modelId: string) => CatalogModelLike | undefined } | undefined;
+        try {
+          return capable?.infoOf?.(id);
+        } catch {
+          return undefined;
+        }
+      };
+      const kept = candidates.filter((id) => {
+        if (id.startsWith("custom:")) return false;
+        const override = settings.droidPools[id];
+        if (override !== undefined && override !== "core") return false; // 减法：被改判出 core
+        const info = infoOf(id);
+        if (info !== undefined && (info.deprecated === true || info.kind === "router")) return false;
+        return true; // 覆盖键在目录里查不到 ⇒ 保留（用户明确意图）
+      });
+      return kept.slice(0, Math.max(0, limit)).map((id) => `droid/${id}`);
+    },
+    problems() {
+      return problemsNow();
     },
     refreshIfStale,
     whenIdle() {

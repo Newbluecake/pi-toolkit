@@ -2042,6 +2042,10 @@ export function buildSessionStack(
               blockAtLevel: toLadderLevel(settings.quota.gateLevel),
               now: systemClock.now(),
               isSubscription: parseSubscriptionProviders(settings.quota.subscriptionProviders),
+              // droid 池闸门（quota-plan r2 §9）：droid 适配器未构造时
+              // verdictsForModel 恒返回 undefined ⇒ 走旧路径（字节不变）。
+              modelView: (m) => quota.service.verdictsForModel(m),
+              poolAlternatives: (b) => quota.service.poolAlternatives(b),
             });
           },
         }

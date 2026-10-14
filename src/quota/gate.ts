@@ -23,12 +23,14 @@
 import type { ModelCandidate, ModelRef } from "../config/model-hint.js";
 import type { Millis } from "../core/types.js";
 import { isDemotionFloorOnly, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
-import type { LadderLevel } from "./types.js";
+import { isDroidQuotaId, type LadderLevel } from "./types.js";
+import type { QuotaModelView } from "./service.js";
 import {
   alternativesAdvice,
   demotionFloorClause,
   formatResetAt,
   formatScope,
+  quotaLabel,
   type AlternativeSelection,
 } from "./render.js";
 
@@ -49,6 +51,13 @@ export interface QuotaGateDeps {
    * （如 copilot-*）。缺省 ⇒ 只有带窗口数据的受管 provider 算订阅。
    */
   readonly isSubscription?: ((provider: string) => boolean) | undefined;
+  /**
+   * droid 池判定视图（quota-plan r2 §2.4/§6；stack.ts 接 `QuotaService.verdictsForModel`）。
+   * 返回 undefined ⇒ 该模型不受池管理 ⇒ 走旧路径（字节不变）。
+   */
+  readonly modelView?: ((model: ModelRef) => QuotaModelView | undefined) | undefined;
+  /** droid 内替代（D7；stack.ts 接 `QuotaService.poolAlternatives`）。 */
+  readonly poolAlternatives?: ((blocked: string) => readonly string[]) | undefined;
 }
 
 /** `quota.subscriptionProviders`（逗号分隔）→ 判定函数；空串 ⇒ 恒 false。 */
@@ -64,6 +73,9 @@ export function parseSubscriptionProviders(raw: string): (provider: string) => b
 
 /** undefined = 放行。只读缓存，**零 IO、零 await**。 */
 export function evaluateQuotaGate(model: ModelRef, deps: QuotaGateDeps): QuotaGateVerdict | undefined {
+  // droid 池路径（quota-plan r2 §6）：按模型所属计费池判定；view undefined ⇒ 旧路径。
+  const view = deps.modelView?.(model);
+  if (view !== undefined) return evaluatePooledGate(model, view, deps);
   // 无快照 = 非受管 provider（中转池/自建网关，plan §12 明确不做）：放行。
   const verdict = deps.verdictFor(model.provider);
   if (verdict === undefined) return undefined;
@@ -81,6 +93,77 @@ export function evaluateQuotaGate(model: ModelRef, deps: QuotaGateDeps): QuotaGa
 }
 
 /**
+ * droid 池闸门（quota-plan r2 §6，D5 拍板）：池已知 ⇒ 只看该池；池未知 ⇒ 两个池
+ * 都触线才拦；任一池无快照/陈旧 ⇒ 放行（fail-open）。`billing.gateOpen === true`
+ * （quota.droidAllowExtraUsage，D6）的池不算触线。
+ */
+function evaluatePooledGate(model: ModelRef, view: QuotaModelView, deps: QuotaGateDeps): QuotaGateVerdict | undefined {
+  if (view.keys.length === 0) return undefined; // "none"：BYOK 不计费，恒放行
+  const verdicts: ProviderVerdict[] = [];
+  for (const v of view.verdicts) {
+    if (v === undefined || v.stale) return undefined; // fail-open
+    verdicts.push(v);
+  }
+  for (const v of verdicts) {
+    if (v.level < deps.blockAtLevel || v.billing?.gateOpen === true) return undefined;
+  }
+  const blocked = view.keys[0] ?? "droid-standard";
+  const models =
+    view.keys.length === 1 && blocked === "droid-standard" ? (deps.poolAlternatives?.("droid-standard") ?? []) : [];
+  const picked = pickAlternatives(blocked, deps, DEFAULT_ALTERNATIVE_LIMIT);
+  const alternatives: AlternativeSelection = {
+    providers: picked.providers,
+    subscription: picked.subscription,
+    external: true, // D8：pi 订阅行改标题「改用 pi 原生子 agent」
+    ...(models.length > 0 ? { models } : {}),
+  };
+  let level: LadderLevel = 0;
+  for (const v of verdicts) if (v.level > level) level = v.level;
+  return {
+    level,
+    message: buildPooledGateMessage(model, view, verdicts, alternatives, deps.now),
+    alternatives,
+  };
+}
+
+/** `$12.34`（与 render.ts 的 extraUsageText 同口径）。 */
+function extraCentsText(cents: number): string {
+  return `$${(Math.max(0, Math.round(cents)) / 100).toFixed(2)}`;
+}
+
+/** droid 池快速失败文案（§6）：池已知/未知两种首行 + extraUsage 追加行 + 替代建议。 */
+function buildPooledGateMessage(
+  model: ModelRef,
+  view: QuotaModelView,
+  verdicts: readonly ProviderVerdict[],
+  alternatives: AlternativeSelection,
+  now: Millis,
+): string {
+  const name = `${model.provider}/${model.id}`;
+  let head: string;
+  if (view.pool === undefined) {
+    head =
+      `quota gate: ${name}（计费池未知，standard 与 core 池均已触线：` +
+      `standard 池 ${windowClause(verdicts[0]!, now)}；core 池 ${windowClause(verdicts[1]!, now)}），` +
+      "本次 spawn 已快速失败，未消耗任何 run。";
+  } else {
+    head = `quota gate: ${name}（${view.pool} 池）的 ${windowClause(verdicts[0]!, now)}，本次 spawn 已快速失败，未消耗任何 run。`;
+  }
+  const lines: string[] = [head];
+  // D6：超额策略为 extraUsage 且未被放行 ⇒ 披露余额与逃生阀（文案、HUD、web 全程可见）。
+  const extra = verdicts.find((v) => v.billing?.overage === "extraUsage" && v.billing.gateOpen !== true);
+  if (extra?.billing !== undefined) {
+    lines.push(
+      `Factory 超额策略为 extraUsage（额外余额 ${extraCentsText(extra.billing.extraUsageBalanceCents)}）：` +
+        "pi-toolkit 默认不代你花额外余额；确需继续，在 settings 文件把 quota.droidAllowExtraUsage 设为 true。",
+    );
+  }
+  lines.push(alternativesAdvice(alternatives));
+  lines.push("（在 settings 文件里把 quota.gate 设为 false 可关闭本闸门。）");
+  return lines.join("\n");
+}
+
+/**
  * 按额度健康度给候选排序后取前 n 个「provider/id」。排序键：
  * `订阅层 asc, level asc, maxUsedPct asc, 注册表顺序 asc`。已 block 的 provider
  * （自身或任何 level >= gateLevel 的 provider）一律排除。
@@ -95,7 +178,7 @@ export function evaluateQuotaGate(model: ModelRef, deps: QuotaGateDeps): QuotaGa
  */
 export function pickAlternatives(
   blocked: string,
-  deps: Pick<QuotaGateDeps, "verdictFor" | "available" | "isSubscription">,
+  deps: Pick<QuotaGateDeps, "verdictFor" | "available" | "isSubscription" | "poolAlternatives">,
   limit?: number,
 ): AlternativeSelection {
   const cap = limit === undefined ? DEFAULT_ALTERNATIVE_LIMIT : Math.max(0, limit);
@@ -138,10 +221,21 @@ export function pickAlternatives(
   // 有订阅候选 ⇒ 只推荐订阅；否则才退到按量计费。
   const pool = scored.some((s) => s.tier < 2) ? scored.filter((s) => s.tier < 2) : scored;
   pool.sort((a, b) => a.tier - b.tier || a.level - b.level || a.pct - b.pct || a.order - b.order);
-  return {
-    providers: pool.slice(0, cap).map((s) => s.provider),
-    subscription: pool.length > 0 && pool[0]!.tier < 2,
-  };
+  const providers = pool.slice(0, cap).map((s) => s.provider);
+  const subscription = pool.length > 0 && pool[0]!.tier < 2;
+  // droid 池被拦（quota-plan r2 §6，D8）：返回值带 external: true（pi 行改标题
+  // 「改用 pi 原生子 agent」）；droid-standard 且 core 有健康候选时再挂 models。
+  // 非 droid 被拦 ⇒ 对象形状与改动前完全一样（kimi/zai golden 钉住）。
+  if (isDroidQuotaId(blocked)) {
+    const models = blocked === "droid-standard" ? (deps.poolAlternatives?.(blocked) ?? []) : [];
+    return {
+      providers,
+      subscription,
+      external: true,
+      ...(models.length > 0 ? { models } : {}),
+    };
+  }
+  return { providers, subscription };
 }
 
 /** formatModelCandidates 的 annotate 实参：返回 " [5h 92% ⚠]" 之类后缀或 undefined。 */
@@ -243,12 +337,13 @@ function buildGateMessage(
   alternatives: AlternativeSelection,
   now: Millis,
 ): string {
+  const label = quotaLabel(provider); // kimi/zai 原样返回（字节不变）；droid 虚拟 id 翻译为「droid xx 池」
   const altLine =
-    alternatives.providers.length > 0
+    alternatives.providers.length > 0 || alternatives.external === true
       ? alternativesAdvice(alternatives)
       : "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。";
   return (
-    `quota gate: ${provider}${isDemotionFloorOnly(verdict) ? " " : " 的 "}${windowClause(verdict, now)}，本次 spawn 已快速失败，未消耗任何 run。\n` +
+    `quota gate: ${label}${isDemotionFloorOnly(verdict) ? " " : " 的 "}${windowClause(verdict, now)}，本次 spawn 已快速失败，未消耗任何 run。\n` +
     `${altLine}\n` +
     `（在 settings 文件里把 quota.gate 设为 false 可关闭本闸门。）`
   );

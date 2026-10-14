@@ -830,3 +830,282 @@ describe("buildQuotaAvailableTexts (plan B)", () => {
     expect(buildQuotaAvailableTexts([])).toEqual([]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// quota-plan r2 §11 render.test.ts（P7）：droid 池的 HUD / 标签 / 替代建议 / billing 子句。
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { quotaLabel } from "../../src/quota/render.js";
+import type { AlternativeSelection } from "../../src/quota/render.js";
+import type { QuotaBillingInfo, QuotaProblem } from "../../src/quota/types.js";
+
+function dw(
+  scope: WindowScope,
+  usedPct: number,
+  level: LadderLevel,
+  reason: WindowVerdict["reason"] = level > 0 ? "pct" : "none",
+  extra?: Partial<WindowVerdict>,
+): WindowVerdict {
+  return { scope, usedPct, level, reason, ...extra };
+}
+
+function pool(
+  id: "droid-standard" | "droid-core",
+  windows: readonly WindowVerdict[],
+  level: LadderLevel,
+  billing?: Partial<QuotaBillingInfo>,
+): ProviderVerdict {
+  return {
+    provider: id,
+    level,
+    windows,
+    demoted: false,
+    fetchedAt: NOW,
+    stale: false,
+    billing: {
+      kind: "factory",
+      pool: id === "droid-standard" ? "standard" : "core",
+      overage: "droidCore",
+      extraUsageAllowed: false,
+      extraUsageBalanceCents: 0,
+      ...billing,
+    },
+  };
+}
+
+const MARK_THEME = { fg: (color: string, text: string) => `<${color}:${text}>` };
+
+describe("quotaLabel / formatScope(month)", () => {
+  it("translates droid virtual ids, leaves every other provider untouched", () => {
+    expect(quotaLabel("droid-standard")).toBe("droid standard 池");
+    expect(quotaLabel("droid-core")).toBe("droid core 池");
+    expect(quotaLabel("zai-coding-cn")).toBe("zai-coding-cn");
+    expect(quotaLabel("droid")).toBe("droid");
+    expect(formatScope("month")).toBe("mo");
+  });
+});
+
+describe("renderQuotaStatus — droid merged segment (D14)", () => {
+  const std = pool("droid-standard", [dw("5h", 12, 0), dw("week", 40, 0), dw("month", 5, 0)], 0);
+  const core = pool("droid-core", [dw("5h", 0, 0), dw("week", 2, 0), dw("month", 1, 0)], 0);
+
+  it("both pools merge into ONE segment: `droid <std cells> core <core cells>`; month cells read `mo N%`", () => {
+    expect(renderQuotaStatus([std, core], NOW, 600_000)).toBe("quota droid 12%/40%/mo 5% core 0%/2%/mo 1%");
+  });
+
+  it("a single pool shows `droid …` (standard) or `droid core …` (core only)", () => {
+    expect(renderQuotaStatus([std], NOW, 600_000)).toBe("quota droid 12%/40%/mo 5%");
+    expect(renderQuotaStatus([core], NOW, 600_000)).toBe("quota droid core 0%/2%/mo 1%");
+  });
+
+  it("each pool carries its own reset countdown only when >95% (and the extra-usage tag only on standard)", () => {
+    const hot = pool(
+      "droid-standard",
+      [dw("5h", 100, 3, "exhausted", { resetAt: NOW + 3_600_000 }), dw("month", 5, 0)],
+      3,
+      { overage: "extraUsage", extraUsageAllowed: true, extraUsageBalanceCents: 1234 },
+    );
+    const coreHot = pool("droid-core", [dw("5h", 97, 2, "pct", { resetAt: NOW + 2 * 3_600_000 })], 2, {
+      overage: "extraUsage",
+      extraUsageBalanceCents: 999,
+    });
+    const line = renderQuotaStatus([hot, coreHot], NOW, 600_000) ?? "";
+    expect(line).toBe("quota droid 100%/mo 5% resets 1h extra $12.34 core 97% resets 2h");
+    expect(line.match(/extra/g)).toHaveLength(1); // core never prints `extra`
+  });
+
+  it("`extra $Y` needs overage=extraUsage AND an exhausted, non-reset-elapsed window", () => {
+    const extraBilling = { overage: "extraUsage" as const, extraUsageAllowed: true, extraUsageBalanceCents: 50 };
+    const notExhausted = pool("droid-standard", [dw("5h", 60, 1)], 1, extraBilling);
+    expect(renderQuotaStatus([notExhausted], NOW, 600_000)).not.toContain("extra");
+    const elapsed = pool("droid-standard", [dw("5h", 100, 0, "reset-elapsed", { resetAt: NOW - 1 })], 0, extraBilling);
+    expect(renderQuotaStatus([elapsed], NOW, 600_000)).not.toContain("extra");
+    const droidCoreOverage = pool("droid-standard", [dw("5h", 100, 3, "exhausted")], 3);
+    expect(renderQuotaStatus([droidCoreOverage], NOW, 600_000)).not.toContain("extra");
+    const exhausted = pool(
+      "droid-standard",
+      [dw("5h", 100, 3, "exhausted", { resetAt: NOW + 60_000 })],
+      3,
+      extraBilling,
+    );
+    expect(renderQuotaStatus([exhausted], NOW, 600_000)).toContain("extra $0.50");
+  });
+
+  it("themed: dim name/`core`/countdown, level-colored values, warning-colored auth", () => {
+    const hot = pool("droid-standard", [dw("5h", 100, 3, "exhausted", { resetAt: NOW + 3_600_000 })], 3);
+    const problems: QuotaProblem[] = [{ family: "droid", status: 402 }];
+    expect(renderQuotaStatus([hot, core], NOW, 600_000, MARK_THEME, problems)).toBe(
+      "<dim:quota> <dim:droid> <error:100%> <dim:resets 1h> <dim:core> <text:0%/2%/mo 1%><dim: · ><warning:droid auth 402>",
+    );
+  });
+
+  it("auth problems: appended after verdict segments (plain + themed); problems-only ⇒ `quota droid auth 402`", () => {
+    const p: QuotaProblem[] = [{ family: "droid", status: 402 }];
+    expect(renderQuotaStatus([std], NOW, 600_000, undefined, p)).toBe("quota droid 12%/40%/mo 5% · droid auth 402");
+    expect(renderQuotaStatus([], NOW, 600_000, undefined, p)).toBe("quota droid auth 402");
+    expect(renderQuotaStatus([], NOW, 600_000, MARK_THEME, p)).toBe("<dim:quota> <warning:droid auth 402>");
+    expect(renderQuotaStatus([], NOW, 600_000, undefined, [])).toBeUndefined();
+  });
+
+  it("legacy providers keep their segments next to the droid one; the stale suffix still applies", () => {
+    const zai = verdict({ provider: "zai-coding-cn", windows: [w("5h", 62, 1, "pct")] });
+    const old = { ...std, fetchedAt: NOW - 20 * 60_000 };
+    expect(renderQuotaStatus([zai, old], NOW, 600_000)).toBe("quota zai 62% · droid 12%/40%/mo 5% ·stale 20m");
+  });
+
+  it("identical readings in the two pools are NOT collapsed into one (provider#-prefixed signature)", () => {
+    const a = pool("droid-standard", [dw("5h", 10, 0)], 0);
+    const b = pool("droid-core", [dw("5h", 10, 0)], 0);
+    expect(dedupeVerdicts([a, b])).toHaveLength(2);
+    expect(renderQuotaStatus([a, b], NOW, 600_000)).toBe("quota droid 10% core 10%");
+  });
+});
+
+describe("alternativesAdvice — external × models (D8)", () => {
+  const MODELS_LINE = "同一 Factory 账户的 core 池仍有额度，优先改用 droid core 池模型：droid/glm-5.3、droid/kimi-k3。";
+  const sel = (over: Partial<AlternativeSelection>): AlternativeSelection => ({
+    providers: [],
+    subscription: true,
+    external: true,
+    ...over,
+  });
+
+  it("models + providers: core line first, then 『或改用 pi 原生子 agent（订阅优先）』, then the closing line", () => {
+    const text = alternativesAdvice(
+      sel({ models: ["droid/glm-5.3", "droid/kimi-k3"], providers: ["kimi-coding", "zai-coding-cn"] }),
+    );
+    const lines = text.split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain(MODELS_LINE);
+    expect(lines[1]).toBe(
+      "或改用 pi 原生子 agent（订阅优先）：kimi-coding、zai-coding-cn。注意这会换成 pi 子 agent 运行（不是外部 droid，权限与工具按 pi 的 agent 类型）。",
+    );
+    expect(lines[2]).toBe("按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。");
+  });
+
+  it("models only: no pi line", () => {
+    const text = alternativesAdvice(sel({ models: ["droid/glm-5.3", "droid/kimi-k3"] }));
+    expect(text).toContain(MODELS_LINE);
+    expect(text).not.toContain("pi 原生子 agent");
+    expect(text.endsWith("不必硬凑。")).toBe(true);
+  });
+
+  it("providers only: the pi line opens with 『改用』 (no 『或』), and swaps the tier phrase when not subscription", () => {
+    const sub = alternativesAdvice(sel({ providers: ["kimi-coding"] }));
+    expect(sub.startsWith("改用 pi 原生子 agent（订阅优先）：kimi-coding。")).toBe(true);
+    expect(sub).not.toContain("core 池仍有额度");
+    const paid = alternativesAdvice(sel({ providers: ["cloudrouter-anthropic"], subscription: false }));
+    expect(paid).toContain("改用 pi 原生子 agent（无可用订阅，按量计费）：cloudrouter-anthropic。");
+  });
+
+  it("neither: the dedicated 『暂无替代候选…窗口重置后自动恢复』 line", () => {
+    expect(alternativesAdvice(sel({}))).toBe(
+      "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。",
+    );
+  });
+
+  it("without external, models alone are ignored and the legacy branch is byte-identical", () => {
+    expect(alternativesAdvice({ providers: ["kimi-coding"], subscription: true })).toBe(
+      "替代候选（订阅优先）：kimi-coding。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。",
+    );
+    expect(alternativesAdvice(["kimi-coding"])).toContain("替代候选（订阅优先）");
+  });
+});
+
+describe("billing clauses (§7) + merged block fallback", () => {
+  const std3 = (billing: Partial<QuotaBillingInfo>) =>
+    pool("droid-standard", [dw("5h", 100, 3, "exhausted", { resetAt: RESET })], 3, billing);
+  const std2 = (billing: Partial<QuotaBillingInfo>) =>
+    pool("droid-standard", [dw("5h", 80, 2, "pct", { resetAt: RESET })], 2, billing);
+  const ALT: AlternativeSelection = { providers: ["kimi-coding"], subscription: true, external: true };
+  const NOT_OPENED =
+    "Factory 超额策略为 extraUsage（额外余额 $12.34）：standard 池耗尽后 droid 会按量扣额外余额；pi-toolkit 闸门仍按额度拦截（放行需设 quota.droidAllowExtraUsage=true）。";
+  const OPENED =
+    "Factory 超额策略为 extraUsage：继续派会消耗额外余额 $12.34（真钱），闸门不拦截；优先改用 core 池或订阅模型。";
+  const DROID_CORE_CLAUSE = "Factory 超额策略为 droidCore：standard 池耗尽后请改用 core 池模型。";
+  const extra = { overage: "extraUsage" as const, extraUsageAllowed: true, extraUsageBalanceCents: 1234 };
+
+  it("extraUsage, not opened: clause sits right after the head line; L3 block still promises the gate", () => {
+    const text = buildQuotaBlockText(std3(extra), ALT, NOW, quotaLabel("droid-standard"));
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("[quota 严重] droid standard 池 5h 已用 100%");
+    expect(lines[1]).toBe(NOT_OPENED);
+    expect(text).toContain("继续派给它会在 spawn 阶段被快速失败拦下");
+  });
+
+  it("extraUsage, opened (gateOpen): real-money clause, and L3 no longer promises 『会被拦下』", () => {
+    const text = buildQuotaBlockText(std3({ ...extra, gateOpen: true }), ALT, NOW, quotaLabel("droid-standard"));
+    expect(text.split("\n")[1]).toBe(OPENED);
+    expect(text).toContain("建议本轮不要把新任务派给 droid standard 池（继续派会花额外余额）。");
+    expect(text).not.toContain("被快速失败拦下");
+    expect(text).not.toContain("会被拦下");
+  });
+
+  it("droidCore overage: pool-switch clause (L2 warn and L3 block)", () => {
+    const warn = buildQuotaWarnText(std2({}), NOW, quotaLabel("droid-standard"));
+    expect(warn.split("\n")[1]).toBe(DROID_CORE_CLAUSE);
+    const block = buildQuotaBlockText(std3({}), ALT, NOW, quotaLabel("droid-standard"));
+    expect(block.split("\n")[1]).toBe(DROID_CORE_CLAUSE);
+  });
+
+  it("overage `off`, or a core-pool verdict ⇒ no billing clause at all", () => {
+    expect(buildQuotaBlockText(std3({ overage: "off" }), ALT, NOW)).not.toContain("Factory 超额策略");
+    const coreV = pool("droid-core", [dw("5h", 100, 3, "exhausted")], 3, extra);
+    expect(buildQuotaBlockText(coreV, ALT, NOW)).not.toContain("Factory 超额策略");
+    expect(buildQuotaWarnText(pool("droid-core", [dw("5h", 80, 2)], 2, extra), NOW)).not.toContain("Factory 超额策略");
+  });
+
+  it("L2 warn: extraUsage clause, and the L3 threshold quoted for a month window is the month default (98)", () => {
+    const warn = buildQuotaWarnText(std2(extra), NOW, quotaLabel("droid-standard"));
+    expect(warn.split("\n")[1]).toBe(NOT_OPENED);
+    const monthWarn = buildQuotaWarnText(
+      pool("droid-standard", [dw("month", 96, 2, "pct", { resetAt: RESET })], 2),
+      NOW,
+      "droid standard 池",
+    );
+    expect(monthWarn).toContain("mo 已用 96%（阈值 95%）");
+    expect(monthWarn).toContain("到 L3（≥98% 或即将耗尽）");
+  });
+
+  it("two L3 sections where one is a droid pool never merge into one block (fall back to per-section output)", () => {
+    const zai = verdict({
+      provider: "zai-coding-cn",
+      level: 3,
+      windows: [w("5h", 100, 3, "exhausted", { resetAt: RESET })],
+    });
+    const kimi = verdict({
+      provider: "kimi-coding",
+      level: 3,
+      windows: [w("5h", 100, 3, "exhausted", { resetAt: RESET })],
+    });
+    const std = std3({});
+    const merged = buildQuotaMessage(
+      [
+        { verdict: zai, alternatives: { providers: ["x"], subscription: true } },
+        { verdict: kimi, alternatives: { providers: ["x"], subscription: true } },
+      ],
+      NOW,
+    );
+    // sanity: legacy pair does merge into one 禁用句.
+    expect(merged.match(/本轮不要把新任务派给/g)).toHaveLength(1);
+    const mixed = buildQuotaMessage(
+      [
+        { verdict: zai, alternatives: { providers: ["x"], subscription: true } },
+        {
+          verdict: std,
+          alternatives: { providers: ["x"], subscription: true, external: true, models: ["droid/glm-5.3"] },
+        },
+      ],
+      NOW,
+    );
+    expect(mixed).toContain("[quota 严重] zai-coding-cn 5h");
+    expect(mixed).toContain("[quota 严重] droid standard 池 5h");
+    expect(mixed).toContain("优先改用 droid core 池模型：droid/glm-5.3");
+    expect(mixed.match(/本轮不要把新任务派给/g)).toHaveLength(2);
+  });
+
+  it("dedupe/grouping labels use quotaLabel for droid L3 sections", () => {
+    const text = buildQuotaMessage([{ verdict: std3({}), alternatives: ALT }], NOW);
+    expect(text).toContain("本轮不要把新任务派给 droid standard 池");
+  });
+});

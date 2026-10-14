@@ -845,7 +845,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "quota.providers": {
     kind: "string",
     path: "quota.providers",
-    description: "Comma-separated quota providers (zai-coding-cn,zai,kimi-coding); empty = none",
+    description: "Comma-separated quota providers (zai-coding-cn,zai,kimi-coding,droid); empty = none",
   },
   "quota.subscriptionProviders": {
     kind: "string",
@@ -909,6 +909,27 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "quota.windows.week.l3Percent",
     1,
     "week (7d) window L3 threshold override (used %); falls back to quota.l3Percent, then the week default (98)",
+  ),
+  // month window (droid pools, external-agent quota-plan r2 D9/D16): same override
+  // semantics as the week window; month defaults are 50/95/98.
+  "quota.windows.month.l1Percent": count(
+    "quota.windows.month.l1Percent",
+    1,
+    "month window L1 threshold override (used %); falls back to quota.l1Percent, then the month default (50)",
+  ),
+  "quota.windows.month.l2Percent": count(
+    "quota.windows.month.l2Percent",
+    1,
+    "month window L2 threshold override (used %); falls back to quota.l2Percent, then the month default (95)",
+  ),
+  "quota.windows.month.l3Percent": count(
+    "quota.windows.month.l3Percent",
+    1,
+    "month window L3 threshold override (used %); falls back to quota.l3Percent, then the month default (98)",
+  ),
+  "quota.droidAllowExtraUsage": bool(
+    "quota.droidAllowExtraUsage",
+    "Let droid spawns through when the standard pool is exhausted and Factory overage spends extra usage (real money)",
   ),
   "quota.l3EtaS": seconds("quota.l3EtaMs", { max: 86_400, description: "Predicted exhaustion horizon that forces L3" }),
   "quota.tickStepPercent": count("quota.tickStepPercent", 0, "Used-% grid between L1 ticks; 0 = level latch only"),

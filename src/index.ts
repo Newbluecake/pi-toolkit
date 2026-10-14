@@ -407,6 +407,9 @@ export default function activate(rawPi: ExtensionAPI): void {
           // 只推荐 /models 里激活的模型（scope ∩ available，未配置 scope 时为 available）。
           available: () => holder.current?.models.recommendable() ?? [],
           isSubscription: isQuotaSubscription,
+          // droid 池被拦时的 droid 内替代（quota-plan r2 §9；holder.current.quota
+          // 即 QuotaService，K9）。适配器未构造 ⇒ 恒 [] ⇒ 输出字节不变。
+          poolAlternatives: (b) => holder.current?.quota?.poolAlternatives(b) ?? [],
         }),
     }),
   );

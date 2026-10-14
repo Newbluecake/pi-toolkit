@@ -17,7 +17,7 @@
  */
 
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
-import type { CredentialResolver, QuotaProviderId } from "./types.js";
+import { isDroidQuotaId, type CredentialResolver, type QuotaProviderId } from "./types.js";
 
 export interface CredentialResolverOptions {
   /** 测试注入点：默认 pi 的 readStoredCredential。返回 unknown 便于注入桩。 */
@@ -33,7 +33,19 @@ export const ENV_FALLBACK: Readonly<Record<QuotaProviderId, string>> = {
   "zai-coding-cn": "ZAI_API_KEY",
   zai: "ZAI_API_KEY",
   "kimi-coding": "KIMI_CODING_API_KEY",
+  // D3 拍板：droid 两池只用 FACTORY_API_KEY（与 droid 子进程继承同一把 key），
+  // 不读 ~/.factory/env.sh（那是新 shell 才 source 的）。
+  "droid-standard": "FACTORY_API_KEY",
+  "droid-core": "FACTORY_API_KEY",
 };
+
+/**
+ * warnOnce 的键（quota-plan r2 §3）：droid 两个虚拟 id 共享一把 key ⇒ 合并成一个键
+ * `"droid"`，文案里的 provider 名也写 `droid`；kimi/zai 的键和文案都不变。
+ */
+export function warnKey(provider: QuotaProviderId): string {
+  return isDroidQuotaId(provider) ? "droid" : provider;
+}
 
 /** `$VAR` / `${VAR}` 模板——必须全量匹配（部分内插如 `sk-$x` 不算模板，视为坏值）。 */
 const ENV_TEMPLATE = /^\$\{?([A-Za-z_]\w*)\}?$/;
@@ -63,11 +75,12 @@ export function createCredentialResolver(options: CredentialResolverOptions = {}
   const env: Readonly<Record<string, string | undefined>> = options.env ?? process.env;
   const warned = new Set<string>();
   const warnOnce = (provider: QuotaProviderId): void => {
-    if (warned.has(provider)) return;
-    warned.add(provider);
+    const key = warnKey(provider);
+    if (warned.has(key)) return;
+    warned.add(key);
     try {
       options.warn?.(
-        `[quota] no usable credential for "${provider}" (auth.json or ${ENV_FALLBACK[provider] ?? "?"}) — provider skipped`,
+        `[quota] no usable credential for "${key}" (auth.json or ${ENV_FALLBACK[provider] ?? "?"}) — provider skipped`,
       );
     } catch {
       // 日志通道本身坏了也不能破坏「同步、永不抛」契约。

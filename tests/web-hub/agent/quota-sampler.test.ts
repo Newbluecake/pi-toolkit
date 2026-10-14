@@ -115,3 +115,56 @@ describe("quotaFingerprint", () => {
     expect(quotaFingerprint(projectQuota([verdict({ fetchedAt: 9_999 })], 0))).not.toBe(base);
   });
 });
+
+// quota-plan r2 §11（P7）：droid 行过滤 / month 防御——P7 单独合入时 web 永不收到 droid
+// 数据（旧 hub 的 decodeWith 遇封闭枚举外的值会丢整帧）。
+describe("projectQuota — droid / month legacy guard (P7)", () => {
+  const droidStd = verdict({
+    provider: "droid-standard",
+    level: 3,
+    windows: [window({ scope: "5h", usedPct: 100, level: 3, reason: "exhausted" })],
+  });
+  const droidCore = verdict({ provider: "droid-core", windows: [window({ scope: "month", usedPct: 3 })] });
+
+  it("only droid rows ⇒ undefined (field omitted, byte-equal to pre-feature)", () => {
+    expect(projectQuota([droidStd, droidCore], 1_000)).toBeUndefined();
+    expect(quotaFingerprint(projectQuota([droidStd, droidCore], 1_000))).toBe("");
+  });
+
+  it("droid mixed with kimi ⇒ output is byte-identical to the kimi-only projection", () => {
+    const kimi = verdict({
+      provider: "kimi-coding",
+      level: 1,
+      windows: [window({ scope: "week", usedPct: 55, level: 1 })],
+    });
+    const alone = projectQuota([kimi], 5_000);
+    const mixed = projectQuota([droidStd, kimi, droidCore], 5_000);
+    expect(JSON.stringify(mixed)).toBe(JSON.stringify(alone));
+    expect(mixed?.providers.map((p) => p.id)).toEqual(["kimi-coding"]);
+    expect(quotaFingerprint(mixed)).toBe(quotaFingerprint(alone));
+  });
+
+  it("a kimi/zai verdict carrying a month window (defensive) drops the month window, keeps the rest", () => {
+    const v = verdict({
+      provider: "zai-coding-cn",
+      windows: [window({ scope: "5h", usedPct: 10 }), window({ scope: "month", usedPct: 99, level: 3 })],
+    });
+    const wire = projectQuota([v], 0)!;
+    expect(wire.providers[0]?.windows.map((w) => w.scope)).toEqual(["5h"]);
+    expect(JSON.stringify(wire)).not.toContain("month");
+  });
+
+  it("billing is never projected on the legacy wire", () => {
+    const v = {
+      ...verdict({ provider: "kimi-coding" }),
+      billing: {
+        kind: "factory" as const,
+        pool: "standard" as const,
+        overage: "extraUsage" as const,
+        extraUsageAllowed: true,
+        extraUsageBalanceCents: 100,
+      },
+    };
+    expect(JSON.stringify(projectQuota([v], 0))).not.toContain("billing");
+  });
+});

@@ -3,15 +3,25 @@
 // setStatus 生命周期、M3 dispose 单一所有者（幂等 / 在途防护）、零 timer。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_SETTINGS, type QuotaSettings } from "../../src/config/settings.js";
 import { createDemotionStore, type DemotionStore } from "../../src/quota/demotion.js";
 import { createQuotaService, type QuotaService } from "../../src/quota/service.js";
+import { createDroidAdapters } from "../../src/quota/adapters/droid.js";
+import { createCatalogPoolPort } from "../../src/quota/pools.js";
 import type { QuotaRecoveryEvent } from "../../src/quota/ladder.js";
-import type { ProviderAdapter, QuotaProviderId, QuotaSnapshot, QuotaWindowsSnapshot } from "../../src/quota/types.js";
+import type {
+  ProviderAdapter,
+  QuotaBillingInfo,
+  QuotaPoolPort,
+  QuotaProblem,
+  QuotaProviderId,
+  QuotaSnapshot,
+  QuotaWindowsSnapshot,
+} from "../../src/quota/types.js";
 
 let dir: string;
 
@@ -855,5 +865,538 @@ describe("elapsed-reset TTL bypass", () => {
     expect(f.events).toHaveLength(1); // 恰一条恢复事件（不因绕过重复）
     expect([...(f.events[0]?.resetScopes ?? [])]).toEqual(["week"]);
     expect(f.service.verdictFor("kimi-coding")?.windows[1]?.usedPct).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// quota-plan r2 §11 service.test.ts（P7）：droid 池。
+// ─────────────────────────────────────────────────────────────────────────────
+
+function droidSnapshot(
+  id: "droid-standard" | "droid-core",
+  windows: readonly { scope: "5h" | "week" | "month"; usedPct: number; resetAt?: number }[],
+  fetchedAt: number,
+  billing?: Partial<QuotaBillingInfo>,
+): QuotaWindowsSnapshot {
+  const pool = id === "droid-standard" ? "standard" : "core";
+  return {
+    provider: id,
+    kind: "windows",
+    windows: windows.map((w) => ({
+      scope: w.scope,
+      usedPct: w.usedPct,
+      ...(w.resetAt === undefined ? {} : { resetAt: w.resetAt }),
+    })),
+    fetchedAt,
+    billing: {
+      kind: "factory",
+      pool,
+      overage: "droidCore",
+      extraUsageAllowed: false,
+      extraUsageBalanceCents: 0,
+      ...billing,
+    },
+  };
+}
+
+interface DroidFixture {
+  readonly clock: FakeClock;
+  readonly service: QuotaService;
+  readonly demotions: DemotionStore;
+  readonly std: Stub;
+  readonly core: Stub;
+  readonly setStatus: ReturnType<typeof vi.fn>;
+  readonly warn: ReturnType<typeof vi.fn>;
+}
+
+/** 两个桩 droid 适配器 + 可注入的池端口；adapters 里含 droid ⇒ verdictsForModel 才受管。 */
+function makeDroidFixture(
+  over: {
+    settings?: Partial<QuotaSettings>;
+    pools?: () => QuotaPoolPort | undefined;
+    problem?: () => QuotaProblem | undefined;
+  } = {},
+): DroidFixture {
+  const clock = new FakeClock(1_000);
+  const settings: QuotaSettings = { ...DEFAULT_SETTINGS.quota, ...over.settings };
+  const std = stubAdapter("droid-standard");
+  const core = stubAdapter("droid-core");
+  const setStatus = vi.fn();
+  const warn = vi.fn();
+  const demotions = createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn });
+  const adapters: ProviderAdapter[] = [
+    { ...std.adapter, ...(over.problem === undefined ? {} : { lastProblem: over.problem }) },
+    core.adapter,
+  ];
+  const service = createQuotaService({
+    settings,
+    clock,
+    adapters,
+    credentials: () => "factory-key",
+    fetchJson: async () => undefined,
+    demotions,
+    setStatus,
+    warn,
+    ...(over.pools === undefined ? {} : { pools: over.pools }),
+  });
+  return { clock, service, demotions, std, core, setStatus, warn };
+}
+
+const CATALOG = [
+  { id: "claude-opus-5-5", upstreamProvider: "anthropic" },
+  { id: "gpt-6", upstreamProvider: "openai" },
+  { id: "glm-5.3", upstreamProvider: "factory" },
+  { id: "kimi-k3", upstreamProvider: "factory" },
+  { id: "old-core", upstreamProvider: "factory", deprecated: true },
+];
+
+function catalogPort(preferred: readonly string[] = []) {
+  return createCatalogPoolPort({ provider: "droid", catalog: () => ({ models: CATALOG }), preferred: () => preferred });
+}
+
+async function land(f: DroidFixture, std: number, core: number, billing?: Partial<QuotaBillingInfo>): Promise<void> {
+  const reset = f.clock.now() + 3_600_000;
+  f.std.set(() =>
+    droidSnapshot("droid-standard", [{ scope: "5h", usedPct: std, resetAt: reset }], f.clock.now(), billing),
+  );
+  f.core.set(() => droidSnapshot("droid-core", [{ scope: "5h", usedPct: core, resetAt: reset }], f.clock.now()));
+  f.service.refreshIfStale();
+  await f.service.whenIdle();
+}
+
+describe("droid: isActive gating (D11)", () => {
+  it("inactive ⇒ no credential read, no lastAttempt, no fetch; flipping to active fetches immediately (no TTL backoff)", async () => {
+    const clock = new FakeClock(1_000);
+    let active = false;
+    let fetches = 0;
+    const credentials = vi.fn(() => "factory-key");
+    const warn = vi.fn();
+    const adapter: ProviderAdapter = {
+      id: "droid-standard",
+      kind: "windows",
+      isActive: () => active,
+      fetchQuota: async () => {
+        fetches += 1;
+        return droidSnapshot("droid-standard", [{ scope: "5h", usedPct: 10 }], clock.now());
+      },
+    };
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [adapter],
+      credentials,
+      fetchJson: async () => undefined,
+      demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn }),
+      warn,
+    });
+    service.refreshIfStale();
+    clock.advance(1_000);
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(credentials).not.toHaveBeenCalled();
+    expect(fetches).toBe(0);
+    expect(service.verdicts()).toEqual([]);
+    // 若 inactive 轮次记了 lastAttempt，这里（同一 TTL 窗口内）会被退避挡住。
+    active = true;
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(credentials).toHaveBeenCalledTimes(1);
+    expect(fetches).toBe(1);
+    expect(service.verdictFor("droid-standard")).toBeDefined();
+    service.dispose();
+  });
+
+  it("closed state with the real adapters: zero network, zero credentials, zero warnings, zero timers", async () => {
+    const clock = new FakeClock(1_000);
+    const pair = createDroidAdapters({ isActive: () => false });
+    const credentials = vi.fn(() => "factory-key");
+    const fetchJson = vi.fn(async () => undefined);
+    const warn = vi.fn();
+    const setStatus = vi.fn();
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [pair.standard, pair.core],
+      credentials,
+      fetchJson,
+      demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn }),
+      setStatus,
+      warn,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      service.refreshIfStale();
+      clock.advance(DEFAULT_SETTINGS.quota.refreshMs + 1);
+    }
+    await service.whenIdle();
+    expect(fetchJson).not.toHaveBeenCalled();
+    expect(credentials).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(service.verdicts()).toEqual([]);
+    expect(service.problems()).toEqual([]);
+    expect(setStatus.mock.calls.every((c) => c[0] === undefined)).toBe(true);
+    expect(clock.pendingTimers).toBe(0);
+    service.dispose();
+  });
+});
+
+describe("droid: one request per refresh pass (R6, slow pool rides the fast pool's request)", () => {
+  function realFixture() {
+    const clock = new FakeClock(1_000);
+    const raw = JSON.parse(readFileSync("tests/fixtures/quota/factory-limits-zero.json", "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const fetchJson = vi.fn(async () => raw);
+    const pair = createDroidAdapters({ isActive: () => true });
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [pair.standard, pair.core],
+      credentials: () => "factory-key",
+      fetchJson,
+      demotions: createDemotionStore({
+        path: join(dir, "quota-state.json"),
+        now: () => clock.now(),
+        warn: () => undefined,
+      }),
+    });
+    return { clock, raw, fetchJson, service };
+  }
+
+  it("a first pass yields BOTH pool snapshots from exactly one request, with zero timers", async () => {
+    const { clock, fetchJson, service } = realFixture();
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(fetchJson).toHaveBeenCalledTimes(1);
+    expect(service.verdicts().map((v) => v.provider)).toEqual(["droid-standard", "droid-core"]);
+    expect(clock.pendingTimers).toBe(0);
+    service.dispose();
+  });
+
+  it("when both pools come due together (cold TTL), still one request per pass", async () => {
+    const { clock, fetchJson, service } = realFixture();
+    service.refreshIfStale();
+    await service.whenIdle();
+    clock.advance(DEFAULT_SETTINGS.quota.refreshMs + 1);
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(fetchJson).toHaveBeenCalledTimes(2);
+    service.dispose();
+  });
+
+  it("only the hot pool is due ⇒ one request refreshes just that pool; the cold pool keeps its old snapshot", async () => {
+    const clock = new FakeClock(1_000);
+    const hot = JSON.parse(
+      readFileSync("tests/fixtures/quota/factory-limits-standard-exhausted.json", "utf8"),
+    ) as unknown;
+    const fetchJson = vi.fn(async () => hot);
+    const pair = createDroidAdapters({ isActive: () => true });
+    const service = createQuotaService({
+      settings: { ...DEFAULT_SETTINGS.quota, refreshHotMs: 120_000 },
+      clock,
+      adapters: [pair.standard, pair.core],
+      credentials: () => "factory-key",
+      fetchJson,
+      demotions: createDemotionStore({
+        path: join(dir, "quota-state.json"),
+        now: () => clock.now(),
+        warn: () => undefined,
+      }),
+    });
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(fetchJson).toHaveBeenCalledTimes(1);
+    const coreFetchedAt = service.verdictFor("droid-core")?.fetchedAt;
+    clock.advance(120_001); // standard is L3 ⇒ hot TTL; core is L0 ⇒ cold TTL (10 min)
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(fetchJson).toHaveBeenCalledTimes(2);
+    expect(service.verdictFor("droid-core")?.fetchedAt).toBe(coreFetchedAt); // not refreshed
+    expect(service.verdictFor("droid-standard")?.fetchedAt).toBe(clock.now());
+    clock.advance(DEFAULT_SETTINGS.quota.refreshMs); // now both due: still a single shared request
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(fetchJson).toHaveBeenCalledTimes(3);
+    expect(service.verdictFor("droid-core")?.fetchedAt).toBe(clock.now());
+    service.dispose();
+  });
+});
+
+describe("droid: verdictsForModel (§2.4/§5.5)", () => {
+  it("non-droid provider ⇒ undefined; no droid adapter constructed ⇒ undefined (legacy path)", () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    expect(f.service.verdictsForModel({ provider: "kimi-coding", id: "kimi-k3" })).toBeUndefined();
+    const legacy = makeFixture();
+    expect(legacy.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })).toBeUndefined();
+  });
+
+  it("known pool ⇒ a single virtual key with an aligned verdict (undefined while no snapshot)", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    const before = f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" });
+    expect(before).toMatchObject({ pool: "standard", keys: ["droid-standard"], verdicts: [undefined] });
+    await land(f, 100, 10);
+    const std = f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" });
+    expect(std?.keys).toEqual(["droid-standard"]);
+    expect(std?.verdicts[0]).toMatchObject({ provider: "droid-standard", level: 3 });
+    const core = f.service.verdictsForModel({ provider: "droid", id: "glm-5.3" });
+    expect(core).toMatchObject({ pool: "core", keys: ["droid-core"] });
+    expect(core?.verdicts[0]).toMatchObject({ provider: "droid-core", level: 0 });
+  });
+
+  it("unknown pool ⇒ both pools in standard→core order; port absent ⇒ unknown too", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    await land(f, 100, 10);
+    const unknown = f.service.verdictsForModel({ provider: "droid", id: "mystery-model" });
+    expect(unknown?.pool).toBeUndefined();
+    expect(unknown?.keys).toEqual(["droid-standard", "droid-core"]);
+    expect(unknown?.verdicts.map((v) => v?.level)).toEqual([3, 0]);
+    const noPort = makeDroidFixture();
+    expect(noPort.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })?.keys).toEqual([
+      "droid-standard",
+      "droid-core",
+    ]);
+    const nullPort = makeDroidFixture({ pools: () => undefined });
+    expect(nullPort.service.verdictsForModel({ provider: "droid", id: "glm-5.3" })?.pool).toBeUndefined();
+  });
+
+  it("custom: (BYOK) ⇒ pool none ⇒ no keys", () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    expect(f.service.verdictsForModel({ provider: "droid", id: "custom:my-model" })).toEqual({
+      pool: "none",
+      keys: [],
+      verdicts: [],
+    });
+  });
+
+  it("settings.droidPools overrides the port's heuristic in both directions", () => {
+    const f = makeDroidFixture({
+      pools: () => catalogPort(),
+      settings: { droidPools: { "glm-5.3": "standard", "claude-opus-5-5": "core", "inkling-x": "none" } },
+    });
+    expect(f.service.verdictsForModel({ provider: "droid", id: "glm-5.3" })?.keys).toEqual(["droid-standard"]);
+    expect(f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })?.keys).toEqual(["droid-core"]);
+    expect(f.service.verdictsForModel({ provider: "droid", id: "inkling-x" })?.keys).toEqual([]);
+  });
+
+  it("a throwing port degrades to unknown instead of throwing", () => {
+    const f = makeDroidFixture({
+      pools: () => {
+        throw new Error("port bug");
+      },
+    });
+    expect(f.service.verdictsForModel({ provider: "droid", id: "glm-5.3" })?.pool).toBeUndefined();
+  });
+});
+
+describe("droid: gateOpen decoration (D6)", () => {
+  const eligible = { overage: "extraUsage" as const, extraUsageAllowed: true, extraUsageBalanceCents: 500 };
+
+  async function gateOpenOf(settings: Partial<QuotaSettings>, billing: Partial<QuotaBillingInfo>) {
+    const f = makeDroidFixture({ settings });
+    await land(f, 100, 10, billing);
+    return f.service.verdictFor("droid-standard")?.billing?.gateOpen;
+  }
+
+  it("true only when ALL four conditions plus the user's explicit droidAllowExtraUsage hold", async () => {
+    expect(await gateOpenOf({ droidAllowExtraUsage: true }, eligible)).toBe(true);
+  });
+
+  it("false when the setting is off (default), overage != extraUsage, account disallows, or balance is 0", async () => {
+    expect(await gateOpenOf({ droidAllowExtraUsage: false }, eligible)).toBe(false);
+    expect(await gateOpenOf({ droidAllowExtraUsage: true }, { ...eligible, overage: "droidCore" })).toBe(false);
+    expect(await gateOpenOf({ droidAllowExtraUsage: true }, { ...eligible, extraUsageAllowed: false })).toBe(false);
+    expect(await gateOpenOf({ droidAllowExtraUsage: true }, { ...eligible, extraUsageBalanceCents: 0 })).toBe(false);
+  });
+
+  it("never opens the core pool, and kimi/zai verdicts keep identity and shape (no billing key)", async () => {
+    const f = makeDroidFixture({ settings: { droidAllowExtraUsage: true } });
+    await land(f, 100, 100, eligible);
+    expect(f.service.verdictFor("droid-core")?.billing?.gateOpen).toBe(false);
+    const legacy = makeFixture();
+    legacy.kimi.set(() => windowsSnapshot("kimi-coding", [{ scope: "5h", usedPct: 10 }], legacy.clock.now()));
+    legacy.service.refreshIfStale();
+    await legacy.service.whenIdle();
+    expect("billing" in (legacy.service.verdictFor("kimi-coding") ?? {})).toBe(false);
+  });
+});
+
+describe("droid: poolAlternatives (§5.6, review #5: addition + subtraction)", () => {
+  it("lists core-pool models as droid/<id> in preferred-first order, capped at the limit (default 3)", () => {
+    const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3"]) });
+    expect(f.service.poolAlternatives("droid-standard")).toEqual(["droid/kimi-k3", "droid/glm-5.3"]); // deprecated filtered
+    expect(f.service.poolAlternatives("droid-standard", 1)).toEqual(["droid/kimi-k3"]);
+    expect(f.service.poolAlternatives("droid-standard", 0)).toEqual([]);
+  });
+
+  it("only droid-standard has droid-internal alternatives (droid-core / non-droid / unknown ids ⇒ [])", () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    expect(f.service.poolAlternatives("droid-core")).toEqual([]);
+    expect(f.service.poolAlternatives("kimi-coding")).toEqual([]);
+    expect(f.service.poolAlternatives("droid")).toEqual([]);
+  });
+
+  it("core healthy / core stale / core no snapshot ⇒ still offered; core at L3 ⇒ excluded ⇒ []", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    expect(f.service.poolAlternatives("droid-standard")).not.toEqual([]); // no snapshot
+    await land(f, 100, 10);
+    expect(f.service.poolAlternatives("droid-standard")).not.toEqual([]); // healthy
+    f.clock.advance(DEFAULT_SETTINGS.quota.staleAfterMs + 1);
+    expect(f.service.verdictFor("droid-core")?.stale).toBe(true);
+    expect(f.service.poolAlternatives("droid-standard")).not.toEqual([]); // stale ⇒ not excluded
+    const hot = makeDroidFixture({ pools: () => catalogPort() });
+    await land(hot, 100, 100);
+    expect(hot.service.poolAlternatives("droid-standard")).toEqual([]); // core L3, fresh
+  });
+
+  it("ADDITION: a model re-judged into core by droidPools appears even though the catalog calls it standard", () => {
+    const f = makeDroidFixture({
+      pools: () => catalogPort(),
+      settings: { droidPools: { "gpt-6": "core" } },
+    });
+    expect(f.service.poolAlternatives("droid-standard", 10)).toEqual(["droid/glm-5.3", "droid/kimi-k3", "droid/gpt-6"]);
+  });
+
+  it("SUBTRACTION: a catalog core model re-judged OUT of core is removed", () => {
+    const f = makeDroidFixture({
+      pools: () => catalogPort(),
+      settings: { droidPools: { "glm-5.3": "standard", "kimi-k3": "none" } },
+    });
+    expect(f.service.poolAlternatives("droid-standard", 10)).toEqual([]);
+  });
+
+  it("override key absent from the catalog is KEPT (explicit user intent), also with no port at all", () => {
+    const withPort = makeDroidFixture({
+      pools: () => catalogPort(),
+      settings: { droidPools: { "brand-new-core": "core" } },
+    });
+    expect(withPort.service.poolAlternatives("droid-standard", 10)).toContain("droid/brand-new-core");
+    const noPort = makeDroidFixture({ settings: { droidPools: { "brand-new-core": "core" } } });
+    expect(noPort.service.poolAlternatives("droid-standard")).toEqual(["droid/brand-new-core"]);
+  });
+
+  it("catalog-flagged deprecated/router models are removed even when droidPools forces them into core; custom: never", () => {
+    const port = createCatalogPoolPort({
+      provider: "droid",
+      catalog: () => ({
+        models: [
+          { id: "dead", upstreamProvider: "anthropic", deprecated: true },
+          { id: "auto", kind: "router" },
+          { id: "glm-5.3", upstreamProvider: "factory" },
+        ],
+      }),
+    });
+    const f = makeDroidFixture({
+      pools: () => port,
+      settings: { droidPools: { dead: "core", auto: "core", "custom:x": "core" } },
+    });
+    expect(f.service.poolAlternatives("droid-standard", 10)).toEqual(["droid/glm-5.3"]);
+  });
+});
+
+describe("droid: problems (D3) reach the HUD", () => {
+  it("problems() dedupes by family and swallows a throwing adapter hook", () => {
+    const clock = new FakeClock(1_000);
+    const mk = (id: "droid-standard" | "droid-core", lastProblem: () => QuotaProblem | undefined): ProviderAdapter => ({
+      id,
+      kind: "windows",
+      lastProblem,
+      fetchQuota: async () => undefined,
+    });
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [
+        mk("droid-standard", () => ({ family: "droid", status: 402 })),
+        mk("droid-core", () => ({ family: "droid", status: 402 })),
+        mk("droid-core", () => {
+          throw new Error("hook bug");
+        }),
+      ],
+      credentials: () => "k",
+      fetchJson: async () => undefined,
+      demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now() }),
+    });
+    expect(service.problems()).toEqual([{ family: "droid", status: 402 }]);
+  });
+
+  it("a refresh that yields NO snapshot but has a problem still writes the HUD (`quota droid auth 402`)", async () => {
+    let problem: QuotaProblem | undefined = undefined;
+    const f = makeDroidFixture({ problem: () => problem });
+    f.setStatus.mockClear();
+    f.std.set(() => {
+      problem = { family: "droid", status: 402 };
+      return undefined;
+    });
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.service.verdicts()).toEqual([]);
+    expect(f.setStatus).toHaveBeenLastCalledWith("quota droid auth 402");
+  });
+
+  it("a problem-free no-snapshot refresh does not touch the HUD", async () => {
+    const f = makeDroidFixture({ problem: () => undefined });
+    f.setStatus.mockClear();
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.setStatus).not.toHaveBeenCalled();
+  });
+
+  it("problems ride along with snapshots in the merged HUD line", async () => {
+    const f = makeDroidFixture({ problem: () => ({ family: "droid", status: 403 }) });
+    await land(f, 20, 5);
+    const line = f.setStatus.mock.calls.at(-1)?.[0] as string;
+    expect(line).toContain("droid 20%");
+    expect(line).toContain("droid auth 403");
+  });
+});
+
+describe("droid: per-virtual-id isolation (rings, demotion, dispose)", () => {
+  it("an L3 standard pool is demoted under its own id; core is untouched", async () => {
+    const f = makeDroidFixture();
+    await land(f, 100, 10);
+    expect(f.demotions.get("droid-standard", f.clock.now())).toBeDefined();
+    expect(f.demotions.get("droid-core", f.clock.now())).toBeUndefined();
+    expect(f.service.verdictFor("droid-core")?.level).toBe(0);
+    expect(f.service.verdictFor("droid-standard")).toMatchObject({ level: 3, demoted: true });
+  });
+
+  it("a verified reset on standard clears ONLY standard's demotion and keeps core's sample ring", async () => {
+    const f = makeDroidFixture();
+    const reset = f.clock.now() + 600_000;
+    f.std.set(() => droidSnapshot("droid-standard", [{ scope: "5h", usedPct: 100, resetAt: reset }], f.clock.now()));
+    f.core.set(() => droidSnapshot("droid-core", [{ scope: "5h", usedPct: 99, resetAt: reset }], f.clock.now()));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.demotions.get("droid-standard", f.clock.now())).toBeDefined();
+    expect(f.demotions.get("droid-core", f.clock.now())).toBeDefined();
+    // standard rolls over after its reset time; core keeps climbing within its own window.
+    f.clock.advance(DEFAULT_SETTINGS.quota.refreshMs + 600_000);
+    const next = f.clock.now() + 18_000_000;
+    f.std.set(() => droidSnapshot("droid-standard", [{ scope: "5h", usedPct: 2, resetAt: next }], f.clock.now()));
+    f.core.set(() =>
+      droidSnapshot("droid-core", [{ scope: "5h", usedPct: 99, resetAt: reset + 36_000_000 }], f.clock.now()),
+    );
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.demotions.get("droid-standard", f.clock.now())).toBeUndefined();
+    expect(f.demotions.get("droid-core", f.clock.now())).toBeDefined();
+  });
+
+  it("month windows get thresholds 50/95/98 and no forecast-before-reset through the service", async () => {
+    const f = makeDroidFixture();
+    const reset = f.clock.now() + 10 * 86_400_000;
+    f.std.set(() => droidSnapshot("droid-standard", [{ scope: "month", usedPct: 60, resetAt: reset }], f.clock.now()));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    f.clock.advance(DEFAULT_SETTINGS.quota.refreshMs);
+    f.std.set(() => droidSnapshot("droid-standard", [{ scope: "month", usedPct: 65, resetAt: reset }], f.clock.now()));
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    // 5%/10min slope (ETA ~70min, well before reset) would exhaust long before `reset` — a 5h/week window would be raised to L2.
+    expect(f.service.verdictFor("droid-standard")?.windows[0]).toMatchObject({
+      scope: "month",
+      level: 1,
+      reason: "pct",
+    });
   });
 });

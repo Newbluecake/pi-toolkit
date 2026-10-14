@@ -1,0 +1,19 @@
+{
+  "_comment": "Synthesized from the schema frozen in docs/dev/external-agent/quota-plan.md r2 §3 (no real capture in-repo; SP4 pending). All-zero readings with active windows.",
+  "usesTokenRateLimitsBilling": true,
+  "overage": "droidCore",
+  "extraUsageAllowed": false,
+  "extraUsageBalanceCents": 0,
+  "limits": {
+    "standard": {
+      "fiveHour": { "usedPercent": 0, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 18000 },
+      "weekly": { "usedPercent": 0, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 604800 },
+      "monthly": { "usedPercent": 0, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 2592000 }
+    },
+    "core": {
+      "fiveHour": { "usedPercent": 0, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 18000 },
+      "weekly": { "usedPercent": 0, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 604800 },
+      "monthly": { "usedPercent": 0, "windowEnd": "2999-01-01T00:00:00.000Z", "secondsRemaining": 2592000 }
+    }
+  }
+}

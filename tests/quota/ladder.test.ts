@@ -334,3 +334,101 @@ describe("providerVerdict per-window thresholds", () => {
     expect(v.level).toBe(2);
   });
 });
+
+// quota-plan r2 §11 ladder.test.ts（P7）：month 默认阈值、forecastBeforeReset:false、billing 条件透传。
+describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
+  const month = DEFAULT_THRESHOLDS_BY_WINDOW.month;
+  const monthWin = (usedPct: number, resetAt?: number) => ({
+    scope: "month" as const,
+    usedPct,
+    ...(resetAt === undefined ? {} : { resetAt }),
+  });
+
+  it("pins the month defaults to 50/95/98 with the forecast-before-reset rule off; 5h/week keep theirs", () => {
+    expect(month).toEqual({ l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000, forecastBeforeReset: false });
+    expect(DEFAULT_THRESHOLDS_BY_WINDOW["5h"]).toEqual({ l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000 });
+    expect(DEFAULT_THRESHOLDS_BY_WINDOW.week).toEqual({ l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000 });
+  });
+
+  it("maps the month grid 49/50/94/95/97/98 → L0/L1/L1/L2/L2/L3", () => {
+    const cases: readonly [number, 0 | 1 | 2 | 3][] = [
+      [49, 0],
+      [50, 1],
+      [94, 1],
+      [95, 2],
+      [97, 2],
+      [98, 3],
+    ];
+    for (const [pct, level] of cases) {
+      expect(windowLevel(monthWin(pct, NOW + 10 * HOUR), { now: NOW, thresholds: month })).toMatchObject({
+        scope: "month",
+        level,
+      });
+    }
+  });
+
+  it("forecastBeforeReset:false does NOT raise 62% to L2 (the same inputs DO raise it when the flag is absent)", () => {
+    const input = { now: NOW, etaMs: HOUR };
+    const off = windowLevel(monthWin(62, NOW + 3 * HOUR), { ...input, thresholds: month });
+    expect(off).toMatchObject({ level: 1, reason: "pct" });
+    const on = windowLevel(monthWin(62, NOW + 3 * HOUR), {
+      ...input,
+      thresholds: { ...month, forecastBeforeReset: true },
+    });
+    expect(on).toMatchObject({ level: 2, reason: "forecast-before-reset" });
+    const absent = windowLevel(monthWin(62, NOW + 3 * HOUR), {
+      ...input,
+      thresholds: { l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000 },
+    });
+    expect(absent).toMatchObject({ level: 2, reason: "forecast-before-reset" });
+  });
+
+  it("forecastBeforeReset:false still lets rule 3a (ETA < l3EtaMs) raise to L3", () => {
+    const v = windowLevel(monthWin(62, NOW + 3 * HOUR), { now: NOW, etaMs: 20 * 60_000, thresholds: month });
+    expect(v).toMatchObject({ level: 3, reason: "forecast-eta" });
+  });
+
+  it("providerVerdict resolves per-scope thresholds so a month window ignores the forecast while 5h keeps it", () => {
+    const snap = windowsSnapshot("droid-standard", [
+      { scope: "5h", usedPct: 62, resetAt: NOW + 3 * HOUR },
+      { scope: "month", usedPct: 62, resetAt: NOW + 3 * HOUR },
+    ]);
+    const v = providerVerdict(snap, {
+      now: NOW,
+      thresholds: (scope) => DEFAULT_THRESHOLDS_BY_WINDOW[scope],
+      staleAfterMs: STALE_AFTER_MS,
+      etaOf: () => HOUR,
+      demoted: false,
+    });
+    expect(v.windows.find((x) => x.scope === "5h")).toMatchObject({ level: 2, reason: "forecast-before-reset" });
+    expect(v.windows.find((x) => x.scope === "month")).toMatchObject({ level: 1, reason: "pct" });
+    expect(v.level).toBe(2);
+  });
+});
+
+describe("providerVerdict billing passthrough", () => {
+  const billing = {
+    kind: "factory" as const,
+    pool: "standard" as const,
+    overage: "extraUsage" as const,
+    extraUsageAllowed: true,
+    extraUsageBalanceCents: 1234,
+  };
+  const input = {
+    now: NOW,
+    thresholds: DEFAULT_THRESHOLDS,
+    staleAfterMs: STALE_AFTER_MS,
+    etaOf: () => undefined,
+    demoted: false,
+  };
+
+  it("carries snapshot.billing through by reference when present", () => {
+    const snap = { ...windowsSnapshot("droid-standard", [{ scope: "5h", usedPct: 10 }]), billing };
+    expect(providerVerdict(snap, input).billing).toBe(billing);
+  });
+
+  it("omits the billing key entirely when the snapshot has none (kimi/zai shape unchanged)", () => {
+    const v = providerVerdict(windowsSnapshot("kimi-coding", [{ scope: "5h", usedPct: 10 }]), input);
+    expect("billing" in v).toBe(false);
+  });
+});

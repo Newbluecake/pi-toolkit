@@ -663,3 +663,132 @@ describe("createQuotaHintHook availability announcements (plan B)", () => {
     warn.mockRestore();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// quota-plan r2 §11 hook.test.ts（P7）：droid 两个池各自的闩锁 / 替代建议 / 可用播报。
+// hook.ts 零改动——虚拟 id 即 provider 键；alternatives 接线与 src/index.ts 同构
+// （真实 pickAlternatives + poolAlternatives）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { pickAlternatives } from "../../src/quota/gate.js";
+
+function poolV(
+  id: "droid-standard" | "droid-core",
+  pct: number,
+  level: LadderLevel,
+  over: Partial<ProviderVerdict> = {},
+): ProviderVerdict {
+  return verdict({
+    provider: id,
+    level,
+    windows: [w("5h", pct, level, pct >= 100 ? "exhausted" : level > 0 ? "pct" : "none")],
+    ...over,
+  });
+}
+
+describe("createQuotaHintHook — droid pools", () => {
+  it("each pool owns its latch: a standard L1 announcement does not consume or reset core's", () => {
+    const h = harness({
+      state: { availableAnnounced: new Set(["droid-standard", "droid-core"]) },
+      verdicts: [poolV("droid-standard", 62, 1), poolV("droid-core", 5, 0)],
+    });
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    expect(h.state.latches.has("droid-standard")).toBe(true);
+    expect(h.state.latches.has("droid-core")).toBe(false);
+    // 下一轮 core 也进 L1：独立播报，standard 保持静默。
+    h.clock = h.clock + 10 * 60_000;
+    h.setVerdicts([poolV("droid-standard", 62, 1), poolV("droid-core", 55, 1)]);
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.message.content).toContain("droid-core");
+    expect(h.sent[1]?.message.content).not.toContain("droid-standard");
+    expect(h.state.latches.get("droid-core")?.level).toBe(1);
+  });
+
+  it("core recovering to L0 clears only core's latch; standard's L3 latch survives", () => {
+    const h = harness({
+      state: { availableAnnounced: new Set(["droid-standard", "droid-core"]) },
+      verdicts: [poolV("droid-standard", 100, 3), poolV("droid-core", 5, 0)],
+    });
+    h.state.latches.set("droid-core", { level: 1, step: 60, at: 0, usedPct: 62 });
+    h.state.latches.set("droid-standard", { level: 3, step: 90, at: 0, usedPct: 99 });
+    h.hook({}, ctx());
+    expect(h.state.latches.has("droid-core")).toBe(false);
+    expect(h.state.latches.get("droid-standard")?.level).toBe(3);
+  });
+
+  it("droid-standard L3: injected alternatives carry droid core models (poolAlternatives) AND the pi-native line", () => {
+    const pi: Record<string, ProviderVerdict> = {
+      "kimi-coding": verdict({ provider: "kimi-coding", level: 0, windows: [w("5h", 8, 0, "none")] }),
+    };
+    const std = poolV("droid-standard", 100, 3);
+    const h = harness({
+      verdicts: [std],
+      alternatives: (provider) =>
+        pickAlternatives(provider, {
+          verdictFor: (p) => pi[p],
+          available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
+          poolAlternatives: (b) => (b === "droid-standard" ? ["droid/glm-5.3", "droid/kimi-k3"] : []),
+        }),
+    });
+    h.hook({}, ctx());
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("[quota 严重] droid standard 池 5h 已用 100%");
+    expect(content).toContain("优先改用 droid core 池模型：droid/glm-5.3、droid/kimi-k3");
+    expect(content).toContain("或改用 pi 原生子 agent（订阅优先）：kimi-coding");
+    expect(content).toContain("本轮不要把新任务派给 droid standard 池");
+  });
+
+  it("droid-core L3: pi-native line only (no droid-internal models)", () => {
+    const h = harness({
+      verdicts: [poolV("droid-core", 100, 3)],
+      alternatives: (provider) =>
+        pickAlternatives(provider, {
+          verdictFor: () => undefined,
+          available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
+          poolAlternatives: (b) => (b === "droid-standard" ? ["droid/glm-5.3"] : []),
+        }),
+    });
+    h.hook({}, ctx());
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("droid core 池");
+    expect(content).toContain("改用 pi 原生子 agent");
+    expect(content).not.toContain("droid/glm-5.3");
+  });
+
+  it("both pools at L3 ⇒ one message, two separate blocks (never merged)", () => {
+    const h = harness({
+      verdicts: [poolV("droid-standard", 100, 3), poolV("droid-core", 100, 3)],
+      alternatives: (provider) =>
+        pickAlternatives(provider, {
+          verdictFor: () => undefined,
+          available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
+        }),
+    });
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("[quota 严重] droid standard 池");
+    expect(content).toContain("[quota 严重] droid core 池");
+    expect(content.match(/本轮不要把新任务派给/g)).toHaveLength(2);
+  });
+
+  it("availability: both fresh L0 pools announce on separate lines with the right labels (identical readings not merged)", () => {
+    const h = harness({
+      verdicts: [
+        poolV("droid-standard", 0, 0, { windows: [w("5h", 0, 0, "none")] }),
+        poolV("droid-core", 0, 0, { windows: [w("5h", 0, 0, "none")] }),
+      ],
+    });
+    h.hook({}, ctx());
+    expect(h.sent).toHaveLength(1);
+    const lines = (h.sent[0]?.message.content ?? "").split("\n");
+    expect(lines).toEqual([
+      "[quota] droid standard 池 订阅可用，当前 5h 0%，可正常派单。",
+      "[quota] droid core 池 订阅可用，当前 5h 0%，可正常派单。",
+    ]);
+    expect(h.state.availableAnnounced.has("droid-standard")).toBe(true);
+    expect(h.state.availableAnnounced.has("droid-core")).toBe(true);
+  });
+});

@@ -154,6 +154,13 @@ export function createFetchJson(options: FetchJsonOptions = {}): FetchJson {
         attempt >= maxAttempts ||
         !isRetryableError(outcome.failure.error, outcome.failure.status, outcome.failure.body)
       ) {
+        // 最终失败（重试耗尽 / 不可重试）：回调一次 HTTP 状态码（droid 的 401/402/403
+        // 归类用，quota-plan r2 §3）；中途重试不调。回调异常不外抛。
+        try {
+          init.onHttpError?.(outcome.failure.status);
+        } catch {
+          // 分类回调不能破坏「永不抛」契约。
+        }
         safeWarn(describe(outcome.failure, attempt));
         return undefined;
       }

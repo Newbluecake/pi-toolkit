@@ -17,6 +17,7 @@
 import type { Clock } from "../core/clock.js";
 import type { QuotaSettings } from "../config/settings.js";
 import { ADAPTERS, selectAdapters } from "./adapters/index.js";
+import { createDroidAdapters, type DroidAdapterPair } from "./adapters/droid.js";
 import { createCredentialResolver } from "./credentials.js";
 import { createDemotionStore, type DemotionRecord, type DemotionStore } from "./demotion.js";
 import { createFetchJson } from "./http.js";
@@ -28,10 +29,19 @@ import {
   type QuotaHintDeps,
   type QuotaHintState,
 } from "./hook.js";
-import { createQuotaService, type QuotaService, type QuotaServiceDeps } from "./service.js";
+import { createQuotaService, type QuotaModelView, type QuotaService, type QuotaServiceDeps } from "./service.js";
 import type { QuotaStatusTheme } from "./render.js";
 import type { ProviderVerdict, QuotaRecoveryEvent } from "./ladder.js";
-import { isQuotaProviderId, type LadderLevel, type QuotaProviderId, type QuotaSnapshot } from "./types.js";
+import {
+  DROID_QUOTA_IDS,
+  isDroidQuotaId,
+  isQuotaProviderId,
+  type LadderLevel,
+  type QuotaPoolPort,
+  type QuotaProblem,
+  type QuotaProviderId,
+  type QuotaSnapshot,
+} from "./types.js";
 
 export interface QuotaStack {
   readonly service: QuotaService;
@@ -48,16 +58,40 @@ export interface QuotaStackInput {
   /** HUD 主题 getter（stack.ts 注入 readQuotaStatusTheme(ctx)）；缺省纯文本。 */
   readonly theme?: (() => QuotaStatusTheme | undefined) | undefined;
   readonly warn?: ((message: string) => void) | undefined;
+  /**
+   * droid 池输入（quota-plan r2 §2.5，**P5 唯一要接的线**）：externalAgents.droid
+   * 启用时由 stack.ts 供给。缺席 ⇒ 不构造 droid 适配器：零网络、零凭据读取、零告警
+   * （D11），kimi/zai 输出字节不变。
+   */
+  readonly droid?: { readonly pools: () => QuotaPoolPort | undefined } | undefined;
+}
+
+/** `settings.quota.providers` 白名单解析结果：`droid` token 展开成两个池的开关位。 */
+interface ProviderWhitelist {
+  readonly ids: readonly QuotaProviderId[];
+  /** 白名单里有 `droid`（或单写的 `droid-standard` / `droid-core`）token。 */
+  readonly droid: boolean;
 }
 
 /** `settings.quota.providers`（逗号分隔白名单）→ 受控 id 列表；未知 id 静默忽略，空串 = 空。 */
-function parseProviderWhitelist(raw: string): readonly QuotaProviderId[] {
+function parseProviderWhitelist(raw: string): ProviderWhitelist {
   const out: QuotaProviderId[] = [];
+  let droid = false;
   for (const part of raw.split(",")) {
     const id = part.trim();
-    if (isQuotaProviderId(id)) out.push(id);
+    if (id === "droid") {
+      droid = true; // token `droid` 展开成两个池（D2）：两个虚拟 id 都进白名单，否则 selectAdapters 会把对子滤光
+      for (const pool of DROID_QUOTA_IDS) if (!out.includes(pool)) out.push(pool);
+      continue;
+    }
+    if (isDroidQuotaId(id)) {
+      droid = true; // 顺带接受单写 droid-standard / droid-core
+      if (!out.includes(id)) out.push(id);
+      continue;
+    }
+    if (isQuotaProviderId(id) && !out.includes(id)) out.push(id);
   }
-  return out;
+  return { ids: out, droid };
 }
 
 /** stack.ts 的唯一调用面。settings.quota.enabled=false 时返回 undefined。 */
@@ -71,7 +105,31 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     timeoutMs: settings.requestTimeoutMs,
     ...(warn === undefined ? {} : { warn }),
   });
-  const adapters = selectAdapters(parseProviderWhitelist(settings.providers));
+  const whitelist = parseProviderWhitelist(settings.providers);
+  // droid 池（D2/D11）：input.droid 存在且白名单含 droid ⇒ 构造适配器对子（isActive
+  // 晚绑定 P5 端口 getter，端口缺席 ⇒ inactive ⇒ 不读凭据不发请求）；input.droid
+  // 存在但白名单不含 droid ⇒ warnOnce 一次（不构造）。input.droid 缺席 ⇒ 零副作用。
+  let droidPair: DroidAdapterPair | undefined;
+  let droidPools: (() => QuotaPoolPort | undefined) | undefined;
+  if (input.droid !== undefined) {
+    if (whitelist.droid) {
+      const droidInput = input.droid;
+      droidPair = createDroidAdapters({
+        isActive: () => droidInput.pools() !== undefined,
+        ...(warn === undefined ? {} : { warn }),
+      });
+      droidPools = droidInput.pools;
+    } else if (warn !== undefined) {
+      try {
+        warn(
+          '[quota] droid is enabled (externalAgents.droid) but not in quota.providers — add "droid" to quota.providers',
+        );
+      } catch {
+        // 日志通道不能破坏装配。
+      }
+    }
+  }
+  const adapters = selectAdapters(whitelist.ids, droidPair);
   const demotions = createDemotionStore({
     path: statePath,
     now: () => clock.now(),
@@ -105,6 +163,7 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     fetchJson,
     demotions,
     onObservedReset: pushRecovery,
+    ...(droidPools === undefined ? {} : { pools: droidPools }),
     ...(input.setStatus === undefined ? {} : { setStatus: input.setStatus }),
     ...(input.theme === undefined ? {} : { theme: input.theme }),
     ...(warn === undefined ? {} : { warn }),
@@ -125,6 +184,9 @@ export type {
   ProviderVerdict,
   QuotaHintDeps,
   QuotaHintState,
+  QuotaModelView,
+  QuotaPoolPort,
+  QuotaProblem,
   QuotaProviderId,
   QuotaRecoveryEvent,
   QuotaService,
@@ -136,8 +198,13 @@ export {
   QUOTA_CUSTOM_TYPE,
   createCredentialResolver,
   createDemotionStore,
+  createDroidAdapters,
   createFetchJson,
   createQuotaHintHook,
   createQuotaService,
   selectAdapters,
 };
+export { createCatalogPoolPort, derivePool } from "./pools.js";
+export type { CatalogModelLike, CatalogPoolPort } from "./pools.js";
+export { DROID_PROVIDER, DROID_QUOTA_IDS, isDroidQuotaId } from "./types.js";
+export type { DroidQuotaProviderId, QuotaPoolId, QuotaBillingInfo } from "./types.js";
