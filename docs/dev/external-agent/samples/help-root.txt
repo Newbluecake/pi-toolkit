@@ -1,0 +1,41 @@
+Usage: droid [options] [command] [prompt...]
+
+Droid - Factory's AI coding agent in your terminal
+
+Options:
+  -v, --version                             output the version number
+  --settings <path>                         Path to runtime settings file merged for this process only
+  --append-system-prompt <text>             Append custom text to the end of the system prompt
+  --append-system-prompt-file <path>        Append file contents to the end of the system prompt
+  -r, --resume [sessionId]                  Resume a session by id or session link (shows a session picker without one)
+  --last                                    With --resume: skip the picker and resume the most recent session in the current folder
+  --fork <sessionId>                        Fork and resume a session
+  --cwd <path>                              Working directory path
+  -w, --worktree [name]                     Run in a git worktree
+  --worktree-dir <path>                     Deprecated: set the worktree directory in the Factory desktop app instead
+  --auto <level>                            Autonomy level: low|medium|high
+  --use-spec                                Start in spec mode
+  --disable-builtin-skills                  Disable Factory-provided builtin skills
+  -h, --help                                display help for command
+
+Commands:
+  resume [options] [sessionId] [prompt...]  Resume a session (shows a session picker without an id)
+  exec [options] [prompt]                   Run non-interactively (for scripts/automation)
+  daemon [options]                          Run the Factory daemon server
+  search|find [options] <query>             Search across local sessions (messages, documents, tool results)
+  update [options]                          Check for and install Droid updates
+  mcp                                       Manage MCP servers
+  plugin                                    Manage plugins
+  computer                                  Manage Remote Control registrations
+  doctor [options]                          Diagnose configuration, connectivity, certificate, proxy, auth, and daemon issues
+  help [command]                            display help for command
+
+Examples:
+  droid "review app.tsx"              Start with an initial prompt
+  droid                               Start interactive mode (default)
+  droid resume                        Pick a previous session to resume
+  droid exec "analyze this file"      Run non-interactively (for scripts/automation)
+  droid exec -f prompt.txt            Execute from file (non-interactive)
+  droid update                        Check for and install updates manually
+
+For more details, see: https://docs.factory.ai/cli/getting-started/overview

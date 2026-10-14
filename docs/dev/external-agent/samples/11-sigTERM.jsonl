@@ -1,0 +1,2 @@
+{"jsonrpc":"2.0","type":"notification","factoryApiVersion":"1.0.0","factoryProtocolVersion":"1.264.0","method":"droid.session_notification","params":{"notification":{"type":"mcp_status_changed","servers":[],"summary":{"total":0,"connected":0,"connecting":0,"failed":0,"disabled":0}}}}
+{"jsonrpc":"2.0","type":"notification","factoryApiVersion":"1.0.0","factoryProtocolVersion":"1.264.0","method":"droid.session_notification","params":{"sessionId":"","notification":{"type":"droid_working_state_changed","newState":"idle"}}}

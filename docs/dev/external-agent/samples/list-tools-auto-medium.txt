@@ -1,0 +1,39 @@
+Available tools for GPT-6 Sol
+Autonomy: auto medium
+
+Read
+  • DismissHandoffItems (Dismiss Handoff Items) - status: allowed
+  • EndFeatureRun (End Feature Run) - status: allowed
+  • ExitSpecMode (Propose Specification) - status: blocked
+  • FetchUrl (Web Fetch) - status: allowed
+  • GenerateImage (Generate Image) - status: allowed
+  • Glob - status: allowed
+  • Grep - status: allowed
+  • ListAutomations (List Automations) - status: allowed
+  • ListAutomationTemplates (List Automation Templates) - status: allowed
+  • LS - status: allowed
+  • ProposeMission (Propose Mission) - status: allowed
+  • Read - status: allowed
+  • ReadAutomation (Read Automation) - status: allowed
+  • StageSettingsChanges (Stage Settings Changes) - status: allowed
+  • StartMissionRun (Start Mission Run) - status: allowed
+  • TodoWrite (Plan) - status: allowed
+  • WebSearch (Web Search) - status: allowed
+
+Edit
+  • ApplyPatch (Apply Patch) - status: allowed
+
+Execute
+  • CreateAutomation (Create Automation) - status: allowed
+  • DeleteAutomation (Delete Automation) - status: allowed
+  • EditAutomation (Edit Automation) - status: allowed
+  • Execute - status: allowed
+  • GenerateDroid (Generate Droid Configuration) - status: allowed
+  • Loop - status: allowed
+  • RunAutomation (Run Automation) - status: allowed
+  • Skill - status: allowed
+  • Task - status: blocked
+  • TaskOutput (Result) - status: allowed
+  • TaskStop - status: allowed
+  • ToolSearch - status: allowed
+

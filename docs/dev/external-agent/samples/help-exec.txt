@@ -1,0 +1,323 @@
+Usage: droid exec [options] [prompt]
+
+Execute a single command (non-interactive mode)
+
+Arguments:
+  prompt                      The prompt to execute
+
+Options:
+  -o, --output-format <format>  Output format: text|json|stream-json|stream-jsonrpc|acp (default: "text")
+  --input-format <format>     Input format: stream-json for multi-turn sessions; stream-jsonrpc is controlled via JSON-RPC requests
+  -f, --file <path>           Read prompt from file
+  --auto <level>              Autonomy level: low|medium|high
+  --skip-permissions-unsafe   Skip ALL permission checks - allows all permissions (unsafe)
+  --disable-builtin-skills    Disable Factory-provided builtin skills (not supported in ACP modes)
+  -s, --session-id <id>       Existing session to continue (requires a prompt)
+  --fork <id>                 Fork an existing session into a new session (requires a prompt)
+  -m, --model <id>            Model ID to use (default: gpt-6-sol)
+  -r, --reasoning-effort <level>  Reasoning effort (defaults per model)
+  --spec-model <id>           Model ID to use for spec mode (defaults to main model)
+  --spec-reasoning-effort <level>  Reasoning effort for spec mode (defaults per spec model)
+  --use-spec                  Start in spec mode
+  --only-tools <ids>          Use only tool IDs or MCP:<server>[/<tool>] selectors
+  --add-tools <ids>           Add tool IDs or MCP:<server>[/<tool>] selectors
+  --remove-tools <ids>        Remove tool IDs or MCP:<server>[/<tool>] selectors
+  --cwd <path>                Working directory path
+  --settings <path>           Path to runtime settings file merged for this process only
+  -w, --worktree [name]       Run in a git worktree (name selects the branch to use or create; default: <current-branch>-<id>)
+  --worktree-dir <path>       Deprecated: set worktreeDirectory in ~/.factory/settings.json instead
+  --tag <spec>                Session tag (name or JSON, repeatable)
+  --log-group-id <id>         Log group ID for filtering logs
+  --mission                   Run in mission mode (orchestrate a multi-agent mission)
+  --worker-model <id>         Model ID used by mission workers (only valid with --mission)
+  --worker-reasoning-effort <level>  Reasoning effort for mission workers (only valid with --mission)
+  --validator-model <id>      Model ID used by mission validation workers (only valid with --mission)
+  --validator-reasoning-effort <level>  Reasoning effort for mission validation workers (only valid with --mission)
+  --append-system-prompt <text>  Append custom text to the end of the system prompt
+  --append-system-prompt-file <path>  Append file contents to the end of the system prompt
+  --list-tools                List available tools for the selected model and exit
+  -h, --help                  display help for command
+
+Stream JSON-RPC Mode:
+  With --input-format stream-jsonrpc, session settings come from JSON-RPC requests. These
+  flags are still validated but have no effect, and a warning on stderr names any that are set:
+    -m/--model
+    --auto
+    -r/--reasoning-effort
+    --disable-builtin-skills
+    --use-spec
+    --spec-model
+    --spec-reasoning-effort
+    --only-tools/--add-tools/--remove-tools
+    -s/--session-id
+    --tag
+    --session-title
+
+Autonomy Levels:
+  Droid exec uses a tiered autonomy system to control what operations the agent can perform.
+  By default, it runs in read-only mode, requiring explicit flags to enable modifications.
+
+  DEFAULT (no flags)         Read-only mode - The safest mode for reviewing planned changes without execution
+                             • Reading files or logs: cat, less, head, tail, systemctl status
+                             • Display commands: echo, pwd
+                             • Information gathering: whoami, date, uname, ps, top
+                             • Git read operations: git status, git log, git diff
+                             • Directory listing: ls, find (without -delete or -exec)
+                             ✗ No modifications to files or system
+                             Use case: Safe for reviewing what changes would be made
+
+  --auto low                 Low-risk operations - Basic file operations while blocking system changes
+                             • File creation/modification in non-system directories: touch, mkdir, mv, cp
+                             ✗ No system modifications or package installations
+                             Use case: Documentation updates, code formatting, adding comments
+
+  --auto medium              Development operations - Significant but recoverable side effects
+                             • Installing packages from trusted sources: npm install, pip install (without sudo)
+                             • Network requests to trusted endpoints: curl, wget to known APIs
+                             • Git operations (local only): git commit, git checkout, git pull
+                             • Building code: make, npm run build, mvn compile
+                             ✗ No git push, sudo commands, or production changes
+                             Use case: Local development, testing, dependency management
+
+  --auto high                Production operations - Security implications or major side effects
+                             • Running arbitrary/untrusted code: curl | bash, eval, downloaded scripts
+                             • Exposing ports or modifying firewall rules
+                             • Git push operations: git push, git push --force
+                             • Production deployments, database migrations, sensitive operations
+                             • Commands accessing/modifying passwords or keys
+                             ✗ Still blocks: sudo rm -rf /, system-wide changes
+                             Use case: CI/CD pipelines, automated deployments
+
+  --skip-permissions-unsafe  Bypass all checks - DANGEROUS!
+                             • Allows ALL operations without confirmation
+                             • Can execute irreversible operations
+                             • Only use in isolated environments (Docker, throwaway VMs)
+                             ✗ Cannot be combined with --auto flags
+                             Use case: Isolated environments only
+
+Mission Mode:
+  --mission                  Run in mission mode (multi-agent orchestration)
+                             • Automatically upgrades session to orchestrator mode
+                             • Spawns worker sessions via factoryd to implement features
+                             • Uses GPT-5.2 High reasoning by default (override with --model)
+                             • Missions auto-approve proposals (no interactive confirmation)
+                             • Requires --auto high or --skip-permissions-unsafe
+                             Use case: Complex multi-step projects that benefit from parallel workers
+
+Session Flags:
+  --session-id <id>          Continue an existing session (requires a prompt)
+                             Loads conversation history for context but does NOT replay old messages in output
+  --fork <id>                Fork an existing session into a new local session (requires a prompt)
+                             Copies conversation history first, then continues on the forked branch
+  --tag <spec>               Session tag for categorization (repeatable)
+                             Plain name: --tag code-review
+                             JSON object: --tag '{"name":"code-review","metadata":{"prUrl":"..."}}'
+
+Tool Controls:
+  --list-tools               Print the tools available for the selected model and exit
+  --only-tools <list>        Use only tool IDs or MCP:<server>[/<tool>] selectors
+  --add-tools <list>         Add tool IDs or MCP:<server>[/<tool>] selectors
+  --remove-tools <list>      Remove tool IDs or MCP:<server>[/<tool>] selectors
+  MCP:<server>               Select every tool from an MCP server
+  MCP:<server>/<tool>        Select one tool from an MCP server
+                             Percent-encode each server or tool segment when needed
+
+Available Models:
+  auto                         Auto Model
+  claude-fable-5.1             Fable 5.1
+  claude-fable-5               Fable 5
+  claude-opus-5-5              Opus 5.5
+  claude-opus-5-5-fast         Opus 5.5 Fast Mode
+  claude-opus-5                Opus 5
+  claude-opus-5-fast           Opus 5 Fast Mode
+  claude-opus-4-8              Opus 4.8
+  claude-opus-4-8-fast         Opus 4.8 Fast Mode
+  claude-opus-4-7              Opus 4.7
+  claude-opus-4-6              Opus 4.6
+  claude-opus-4-5-20251101     Opus 4.5
+  claude-sonnet-5              Sonnet 5
+  claude-sonnet-4-6            Sonnet 4.6
+  claude-sonnet-4-5-20250929   Sonnet 4.5
+  claude-haiku-4-5-20251001    Haiku 4.5
+  gpt-6-astra                  GPT-6 Astra
+  gpt-6-sol                    GPT-6 Sol (default)
+  gpt-6-luna                   GPT-6 Luna
+  gpt-5.6-sol                  GPT-5.6 Sol
+  gpt-5.6-sol-fast             GPT-5.6 Sol Fast Mode
+  gpt-5.6-terra                GPT-5.6 Terra
+  gpt-5.6-luna                 GPT-5.6 Luna
+  gpt-5.5                      GPT-5.5
+  gpt-5.5-fast                 GPT-5.5 Fast Mode
+  gpt-5.5-pro                  GPT-5.5 Pro
+  gpt-5.4                      GPT-5.4
+  gpt-5.4-fast                 GPT-5.4 Fast Mode
+  gpt-5.4-mini                 GPT-5.4 Mini
+  gpt-5.4-mini-fast            GPT-5.4 Mini Fast Mode
+  gpt-5.3-codex                GPT-5.3-Codex
+  gpt-5.3-codex-fast           GPT-5.3-Codex Fast Mode
+  gpt-5.2                      GPT-5.2
+  gemini-3.1-pro-preview       Gemini 3.1 Pro
+  gemini-3.8-flash             Gemini 3.8 Flash
+  gemini-3.7-flash             Gemini 3.7 Flash
+  gemini-3.6-flash             Gemini 3.6 Flash
+  gemini-3.5-flash             Gemini 3.5 Flash
+  gemini-3-flash-preview       Gemini 3 Flash
+  inkling                      Inkling
+  mistral-medium-3.5           Mistral Medium 3.5
+  glm-5.3-flash                GLM-5.3-Flash
+  glm-5.3                      GLM-5.3
+  glm-5.2                      GLM-5.2
+  kimi-k3                      Kimi K3
+  qwen3.8-max                  Qwen3.8 Max
+  nemotron-3-ultra             Nemotron 3 Ultra
+  deepseek-v4.1-flash          DeepSeek V4.1 Flash
+  deepseek-v4-flash-0731       DeepSeek V4 Flash 0731 [Deprecated]
+  deepseek-v4-pro              DeepSeek V4 Pro [Deprecated]
+  grok-4.7                     Grok 4.7
+  grok-4.6                     Grok 4.6
+  grok-4.5                     Grok 4.5
+  minimax-m2.7                 MiniMax M2.7 [Deprecated]
+
+Model details:
+  - Auto Model: supports reasoning: No; supported: [none]; default: none
+  - Fable 5.1: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Fable 5: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Opus 5.5: supports reasoning: Yes; supported: [low, medium, high, xhigh, max]; default: medium
+  - Opus 5.5 Fast Mode: supports reasoning: Yes; supported: [low, medium, high, xhigh, max]; default: medium
+  - Opus 5: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Opus 5 Fast Mode: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Opus 4.8: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Opus 4.8 Fast Mode: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Opus 4.7: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Opus 4.6: supports reasoning: Yes; supported: [off, low, medium, high, max]; default: high
+  - Opus 4.5: supports reasoning: Yes; supported: [off, low, medium, high]; default: off
+  - Sonnet 5: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - Sonnet 4.6: supports reasoning: Yes; supported: [off, low, medium, high, max]; default: high
+  - Sonnet 4.5: supports reasoning: Yes; supported: [off, low, medium, high]; default: off
+  - Haiku 4.5: supports reasoning: Yes; supported: [off, low, medium, high]; default: off
+  - GPT-6 Astra: supports reasoning: Yes; supported: [low, medium, high, xhigh, max]; default: medium
+  - GPT-6 Sol: supports reasoning: Yes; supported: [none, low, medium, high, xhigh, max]; default: medium
+  - GPT-6 Luna: supports reasoning: Yes; supported: [none, low, medium, high, xhigh, max]; default: medium
+  - GPT-5.6 Sol: supports reasoning: Yes; supported: [none, low, medium, high, xhigh, max]; default: medium
+  - GPT-5.6 Sol Fast Mode: supports reasoning: Yes; supported: [none, low, medium, high, xhigh, max]; default: medium
+  - GPT-5.6 Terra: supports reasoning: Yes; supported: [none, low, medium, high, xhigh, max]; default: medium
+  - GPT-5.6 Luna: supports reasoning: Yes; supported: [none, low, medium, high, xhigh, max]; default: medium
+  - GPT-5.5: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: medium
+  - GPT-5.5 Fast Mode: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: medium
+  - GPT-5.5 Pro: supports reasoning: Yes; supported: [medium, high, xhigh]; default: medium
+  - GPT-5.4: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: medium
+  - GPT-5.4 Fast Mode: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: medium
+  - GPT-5.4 Mini: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: high
+  - GPT-5.4 Mini Fast Mode: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: high
+  - GPT-5.3-Codex: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: medium
+  - GPT-5.3-Codex Fast Mode: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: medium
+  - GPT-5.2: supports reasoning: Yes; supported: [off, low, medium, high, xhigh]; default: low
+  - Gemini 3.1 Pro: supports reasoning: Yes; supported: [low, medium, high]; default: high
+  - Gemini 3.8 Flash: supports reasoning: Yes; supported: [low, medium, high]; default: high
+  - Gemini 3.7 Flash: supports reasoning: Yes; supported: [low, medium, high]; default: high
+  - Gemini 3.6 Flash: supports reasoning: Yes; supported: [low, medium, high]; default: high
+  - Gemini 3.5 Flash: supports reasoning: Yes; supported: [minimal, low, medium, high]; default: high
+  - Gemini 3 Flash: supports reasoning: Yes; supported: [minimal, low, medium, high]; default: high
+  - Inkling: supports reasoning: Yes; supported: [off, minimal, low, medium, high, xhigh, max]; default: high
+  - Mistral Medium 3.5: supports reasoning: Yes; supported: [off, high]; default: high
+  - GLM-5.3-Flash: supports reasoning: Yes; supported: [low, high, max]; default: high
+  - GLM-5.3: supports reasoning: Yes; supported: [low, high, max]; default: max
+  - GLM-5.2: supports reasoning: Yes; supported: [off, high, max]; default: high
+  - Kimi K3: supports reasoning: Yes; supported: [off, low, high, max]; default: high
+  - Qwen3.8 Max: supports reasoning: Yes; supported: [low, medium, xhigh]; default: xhigh
+  - Nemotron 3 Ultra: supports reasoning: Yes; supported: [off, high]; default: high
+  - DeepSeek V4.1 Flash: supports reasoning: Yes; supported: [off, low, high, max]; default: high
+  - DeepSeek V4 Flash 0731 [Deprecated]: supports reasoning: Yes; supported: [off, low, high, max]; default: high
+  - DeepSeek V4 Pro [Deprecated]: supports reasoning: Yes; supported: [off, low, high, max]; default: high
+  - Grok 4.7: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: high
+  - Grok 4.6: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: high
+  - Grok 4.5: supports reasoning: Yes; supported: [low, medium, high]; default: high
+  - MiniMax M2.7 [Deprecated]: supports reasoning: Yes; supported: [high]; default: high
+
+Pinning the Latest Model:
+  Any model flag (-m/--model, --spec-model, --worker-model, --validator-model) also accepts a
+  tier alias that runs the newest released model in that tier your organization allows:
+    anthropic-latest-{premium,balanced,medium,fast}
+    openai-latest-{premium,balanced,medium,fast}
+    oss-latest-{premium,balanced,fast}
+  A version wildcard pins one model line instead: claude-opus-*, gpt-*-sol, gpt-*-luna, glm-*
+  * matches only the version, so claude-opus-* never selects a Fast variant (use claude-opus-*-fast).
+  The alias is resolved when the session starts; the session keeps that model afterwards.
+
+Authentication:
+  Create an API key: https://app.factory.ai/settings/api-keys
+
+  Setting API key examples:
+    macOS/Linux:
+      export FACTORY_API_KEY=fk-... && droid exec "fix the bug"
+    Windows (PowerShell):
+      $env:FACTORY_API_KEY="fk-..." ; droid exec "fix the bug"
+    Windows (CMD):
+      set FACTORY_API_KEY=fk-... && droid exec "fix the bug"
+
+  Note: Keep your API key secret. Do not commit it to source control.
+
+Examples:
+  # DEFAULT (no flags) - Read-only mode for planning and analysis
+  droid exec "Analyze the authentication system and create a detailed plan for migrating from session-based auth to OAuth2"
+  droid exec "Review the codebase for security vulnerabilities and generate a prioritized list of improvements"
+  droid exec "Analyze the project architecture and create a dependency graph"
+
+  # --auto low - Safe file operations
+  droid exec --auto low "add JSDoc comments to all functions"
+  droid exec --auto low "fix typos in README.md"
+  droid exec --auto low "format all Python files with black"
+
+  # --auto medium - Development tasks
+  droid exec --auto medium "install deps, run tests, fix issues"
+  droid exec --auto medium "update packages and resolve conflicts"
+  droid exec --auto medium "set up the development environment and run the test suite"
+
+  # Tool discovery and selection
+  droid exec --list-tools
+  droid exec --model gpt-5 --list-tools --output-format json
+  droid exec --only-tools Read,Grep "inspect this repository"
+  droid exec --add-tools 'MCP:slack/search_messages' "find relevant messages"
+  droid exec --remove-tools Execute "refactor without running commands"
+  droid exec --only-tools 'Read,MCP:github' --add-tools Grep "review this repository"
+
+  # Using custom models
+  droid exec --model custom:deepseek-v3 "analyze this code"
+  droid exec --auto medium --model custom:qwen-turbo "implement this feature"
+
+  # --auto high - Production operations
+  droid exec --auto high "fix bug, test, commit, and push to main"
+  droid exec --auto high "deploy to staging after running tests"
+  droid exec --auto high "run database migration and update production config"
+
+  # --mission - Multi-agent mission orchestration
+  droid exec --mission --skip-permissions-unsafe "Build a full authentication system with OAuth2"
+  droid exec --mission --auto high "Refactor the database layer to use connection pooling"
+  droid exec --mission --auto high --model gpt-5 "Add comprehensive test coverage for the API layer"
+
+  # --mission with per-run worker / validator model overrides
+  droid exec --mission --auto high \
+    --model claude-opus-4-6 \
+    --worker-model claude-opus-4-6 --worker-reasoning-effort medium \
+    --validator-model gpt-5 --validator-reasoning-effort high \
+    "Refactor the auth system"
+
+  # File input with different autonomy levels
+  droid exec -f requirements.md
+  droid exec -f task.md --auto low
+  cat prompt.txt | droid exec --auto medium
+  echo "analyze code" | droid exec
+
+  # Session continuation (preserves context, no message replay)
+  droid exec -s <session-id> "continue previous task"
+  droid exec -s <session-id> "what did we discuss?"
+  droid exec --fork <session-id> "take a different approach from here"
+
+  # --skip-permissions-unsafe - Only in isolated environments!
+  # In a Docker container:
+  docker run --rm -v $(pwd):/workspace alpine:latest sh -c "
+    droid exec --skip-permissions-unsafe 'Install system deps, modify configs, run tests'"
+
+  # In ephemeral CI/CD runner:
+  droid exec --skip-permissions-unsafe "Modify /etc/hosts, install kernel modules, reset network"
+

@@ -1,0 +1,1 @@
+Warning: these flags have no effect with --input-format stream-jsonrpc: -m/--model. Set session options in JSON-RPC requests instead.

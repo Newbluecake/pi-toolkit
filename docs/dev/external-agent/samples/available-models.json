@@ -1,0 +1,379 @@
+{
+  "exportedFrom": "09c-jsonrpc-init2.jsonl",
+  "droidVersion": "0.241.1",
+  "exportedAt": "2026-10-14",
+  "models": [
+    {
+      "id": "auto",
+      "modelProvider": "factory",
+      "modelId": "auto",
+      "tokenMultiplier": 1
+    },
+    {
+      "id": "claude-fable-5.1",
+      "modelProvider": "anthropic",
+      "modelId": "claude-fable-5.1",
+      "tokenMultiplier": 4
+    },
+    {
+      "id": "claude-fable-5",
+      "modelProvider": "anthropic",
+      "modelId": "claude-fable-5",
+      "tokenMultiplier": 4
+    },
+    {
+      "id": "claude-opus-5-5",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-5-5",
+      "tokenMultiplier": 1.6
+    },
+    {
+      "id": "claude-opus-5-5-fast",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-5-5-fast",
+      "tokenMultiplier": 3.2
+    },
+    {
+      "id": "claude-opus-5",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-5",
+      "tokenMultiplier": 2
+    },
+    {
+      "id": "claude-opus-5-fast",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-5-fast",
+      "tokenMultiplier": 4
+    },
+    {
+      "id": "claude-opus-4-8",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-4-8",
+      "tokenMultiplier": 2
+    },
+    {
+      "id": "claude-opus-4-8-fast",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-4-8-fast",
+      "tokenMultiplier": 4
+    },
+    {
+      "id": "claude-opus-4-7",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-4-7",
+      "tokenMultiplier": 2
+    },
+    {
+      "id": "claude-opus-4-6",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-4-6",
+      "tokenMultiplier": 2
+    },
+    {
+      "id": "claude-opus-4-5-20251101",
+      "modelProvider": "anthropic",
+      "modelId": "claude-opus-4-5-20251101",
+      "tokenMultiplier": 2
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "modelProvider": "anthropic",
+      "modelId": "claude-sonnet-5-5",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "claude-sonnet-5",
+      "modelProvider": "anthropic",
+      "modelId": "claude-sonnet-5",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "modelProvider": "anthropic",
+      "modelId": "claude-sonnet-4-6",
+      "tokenMultiplier": 1.2
+    },
+    {
+      "id": "claude-sonnet-4-5-20250929",
+      "modelProvider": "anthropic",
+      "modelId": "claude-sonnet-4-5-20250929",
+      "tokenMultiplier": 1.2
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "modelProvider": "anthropic",
+      "modelId": "claude-haiku-5-5",
+      "tokenMultiplier": 0.04
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "modelProvider": "anthropic",
+      "modelId": "claude-haiku-4-5-20251001",
+      "tokenMultiplier": 0.4
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "modelProvider": "openai",
+      "modelId": "gpt-6.1-sol",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "gpt-6-astra",
+      "modelProvider": "openai",
+      "modelId": "gpt-6-astra",
+      "tokenMultiplier": 4
+    },
+    {
+      "id": "gpt-6-sol",
+      "modelProvider": "openai",
+      "modelId": "gpt-6-sol",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "gpt-6-luna",
+      "modelProvider": "openai",
+      "modelId": "gpt-6-luna",
+      "tokenMultiplier": 0.04
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.6-sol",
+      "tokenMultiplier": 1.6
+    },
+    {
+      "id": "gpt-5.6-sol-fast",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.6-sol-fast",
+      "tokenMultiplier": 3.2
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.6-terra",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.6-luna",
+      "tokenMultiplier": 0.08
+    },
+    {
+      "id": "gpt-5.5",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.5",
+      "tokenMultiplier": 2
+    },
+    {
+      "id": "gpt-5.5-fast",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.5-fast",
+      "tokenMultiplier": 5
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.5-pro",
+      "tokenMultiplier": 12
+    },
+    {
+      "id": "gpt-5.4",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.4",
+      "tokenMultiplier": 1
+    },
+    {
+      "id": "gpt-5.4-fast",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.4-fast",
+      "tokenMultiplier": 2
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.4-mini",
+      "tokenMultiplier": 0.3
+    },
+    {
+      "id": "gpt-5.4-mini-fast",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.4-mini-fast",
+      "tokenMultiplier": 0.6
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.3-codex",
+      "tokenMultiplier": 0.7
+    },
+    {
+      "id": "gpt-5.3-codex-fast",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.3-codex-fast",
+      "tokenMultiplier": 1.4
+    },
+    {
+      "id": "gpt-5.2",
+      "modelProvider": "openai",
+      "modelId": "gpt-5.2",
+      "tokenMultiplier": 0.7
+    },
+    {
+      "id": "gemini-4-argon",
+      "modelProvider": "google",
+      "modelId": "gemini-4-argon",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "modelProvider": "google",
+      "modelId": "gemini-3.1-pro-preview",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "modelProvider": "google",
+      "modelId": "gemini-3.8-flash",
+      "tokenMultiplier": 0.3
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "modelProvider": "google",
+      "modelId": "gemini-3.7-flash",
+      "tokenMultiplier": 0.3
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "modelProvider": "google",
+      "modelId": "gemini-3.6-flash",
+      "tokenMultiplier": 0.6
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "modelProvider": "google",
+      "modelId": "gemini-3.5-flash",
+      "tokenMultiplier": 0.6
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "modelProvider": "google",
+      "modelId": "gemini-3-flash-preview",
+      "tokenMultiplier": 0.2
+    },
+    {
+      "id": "inkling",
+      "modelProvider": "factory",
+      "modelId": "inkling",
+      "tokenMultiplier": 0.4
+    },
+    {
+      "id": "mistral-large-4",
+      "modelProvider": "factory",
+      "modelId": "mistral-large-4",
+      "tokenMultiplier": 0.272
+    },
+    {
+      "id": "mistral-medium-3.5",
+      "modelProvider": "factory",
+      "modelId": "mistral-medium-3.5",
+      "tokenMultiplier": 0.6
+    },
+    {
+      "id": "glm-5.3-flash",
+      "modelProvider": "factory",
+      "modelId": "glm-5.3-flash",
+      "tokenMultiplier": 0.06
+    },
+    {
+      "id": "glm-5.3",
+      "modelProvider": "factory",
+      "modelId": "glm-5.3",
+      "tokenMultiplier": 0.56
+    },
+    {
+      "id": "glm-5.2",
+      "modelProvider": "factory",
+      "modelId": "glm-5.2",
+      "tokenMultiplier": 0.56
+    },
+    {
+      "id": "glm-5.2-fast",
+      "modelProvider": "factory",
+      "modelId": "glm-5.2-fast",
+      "tokenMultiplier": 0.84
+    },
+    {
+      "id": "kimi-k3",
+      "modelProvider": "factory",
+      "modelId": "kimi-k3",
+      "tokenMultiplier": 1.2
+    },
+    {
+      "id": "qwen3.8-max",
+      "modelProvider": "factory",
+      "modelId": "qwen3.8-max",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "nemotron-3-ultra",
+      "modelProvider": "factory",
+      "modelId": "nemotron-3-ultra",
+      "tokenMultiplier": 0.24
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "modelProvider": "factory",
+      "modelId": "deepseek-v4.1-flash",
+      "tokenMultiplier": 0.12
+    },
+    {
+      "id": "deepseek-v4-flash-0731",
+      "modelProvider": "factory",
+      "modelId": "deepseek-v4-flash-0731",
+      "tokenMultiplier": 0.176
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "modelProvider": "factory",
+      "modelId": "deepseek-v4-pro",
+      "tokenMultiplier": 0.528
+    },
+    {
+      "id": "minimax-m3",
+      "modelProvider": "factory",
+      "modelId": "minimax-m3",
+      "tokenMultiplier": 0.12
+    },
+    {
+      "id": "muse-spark-1.2",
+      "modelProvider": "factory",
+      "modelId": "muse-spark-1.2",
+      "tokenMultiplier": 0.5
+    },
+    {
+      "id": "grok-4.7",
+      "modelProvider": "xai",
+      "modelId": "grok-4.7",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "grok-4.6",
+      "modelProvider": "xai",
+      "modelId": "grok-4.6",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "grok-4.5",
+      "modelProvider": "xai",
+      "modelId": "grok-4.5",
+      "tokenMultiplier": 0.8
+    },
+    {
+      "id": "minimax-m2.7",
+      "modelProvider": "factory",
+      "modelId": "minimax-m2.7",
+      "tokenMultiplier": 0.12
+    }
+  ]
+}

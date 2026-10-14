@@ -1,0 +1,12 @@
+Invalid model: no-such-model-xyz
+
+Available built-in models:
+  auto, claude-fable-5.1, claude-fable-5, claude-opus-5-5, claude-opus-5-5-fast, claude-opus-5, claude-opus-5-fast, claude-opus-4-8, claude-opus-4-8-fast, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5-20251101, claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6, claude-sonnet-4-5-20250929, claude-haiku-5-5, claude-haiku-4-5-20251001, gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-sol-fast, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.5-fast, gpt-5.5-pro, gpt-5.4, gpt-5.4-fast, gpt-5.4-mini, gpt-5.4-mini-fast, gpt-5.3-codex, gpt-5.3-codex-fast, gpt-5.2, gemini-4-argon, gemini-3.1-pro-preview, gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3-flash-preview, inkling, mistral-large-4, mistral-medium-3.5, glm-5.3-flash, glm-5.3, glm-5.2, glm-5.2-fast, kimi-k3, qwen3.8-max, nemotron-3-ultra, deepseek-v4.1-flash, deepseek-v4-flash-0731, deepseek-v4-pro, minimax-m3, muse-spark-1.2, grok-4.7, grok-4.6, grok-4.5, minimax-m2.7
+
+No custom models configured. Add them to ~/.factory/settings.json
+Invalid model: no-such-model-xyz
+
+Available built-in models:
+  auto, claude-fable-5.1, claude-fable-5, claude-opus-5-5, claude-opus-5-5-fast, claude-opus-5, claude-opus-5-fast, claude-opus-4-8, claude-opus-4-8-fast, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5-20251101, claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6, claude-sonnet-4-5-20250929, claude-haiku-5-5, claude-haiku-4-5-20251001, gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-sol-fast, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.5-fast, gpt-5.5-pro, gpt-5.4, gpt-5.4-fast, gpt-5.4-mini, gpt-5.4-mini-fast, gpt-5.3-codex, gpt-5.3-codex-fast, gpt-5.2, gemini-4-argon, gemini-3.1-pro-preview, gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3-flash-preview, inkling, mistral-large-4, mistral-medium-3.5, glm-5.3-flash, glm-5.3, glm-5.2, glm-5.2-fast, kimi-k3, qwen3.8-max, nemotron-3-ultra, deepseek-v4.1-flash, deepseek-v4-flash-0731, deepseek-v4-pro, minimax-m3, muse-spark-1.2, grok-4.7, grok-4.6, grok-4.5, minimax-m2.7
+
+No custom models configured. Add them to ~/.factory/settings.json
