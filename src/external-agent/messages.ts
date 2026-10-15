@@ -114,13 +114,30 @@ export function capabilitiesText(o: { canSpawn: boolean; canMessage: boolean }):
   );
 }
 
-/** §5.3 提示词头部文案（`### External agent models (<provider>)` 标题之后的一行说明）。 */
-export function externalModelsPromptHeader(provider: string): string {
+/** §5.3 提示词头部文案（`### External agent models (<provider>)` 标题之后的一行说明）。
+ *  `allowed` 非空（2026-10-16 拍板：非空 `externalAgents.<provider>.models` 视为白名单）⇒ 末句
+ *  改为只接受名单内 id；缺省/空数组 ⇒ 「Any <provider> model id is accepted.」（字节不变）。 */
+export function externalModelsPromptHeader(provider: string, allowed?: readonly string[]): string {
+  const accept =
+    allowed === undefined || allowed.length === 0
+      ? `Any ${provider} model id is accepted.`
+      : `Only the ${provider} model ids listed in externalAgents.${provider}.models are accepted ` +
+        `(${allowed.join(", ")}); other ids are rejected at spawn admission.`;
   return (
     `\`${provider}/<id>\` runs the subagent as a Factory ${provider} CLI process with full permissions, not a pi ` +
     'session: no consult/experts, message_agent, nested Agent, set_model or toolDomain:"readonly"; resuming is ' +
     "pinned to the original working directory; schema answers are parsed from a final ```json block; cost is " +
-    "computed from the underlying model's pi price (shown as unpriced when unknown). Any " +
-    `${provider} model id is accepted.`
+    "computed from the underlying model's pi price (shown as unpriced when unknown). " +
+    accept
+  );
+}
+
+/** 白名单拒绝文案（2026-10-16 拍板：非空 `externalAgents.droid.models` 是新 spawn 的白名单）。
+ *  spawn 准入用（resume 继承的模型不走这里）；名单判定不依赖目录。 */
+export function msgDroidModelNotAllowed(modelId: string, allowed: readonly string[]): string {
+  return (
+    `droid model "${modelId}" is not allowed: externalAgents.droid.models is configured as an allowlist and does ` +
+    `not include it. Allowed droid models: ${allowed.join(", ")}. Add the id to externalAgents.droid.models in ` +
+    "the settings file, or set the list to [] to accept any droid model id."
   );
 }

@@ -751,6 +751,17 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         if (unavailable !== undefined) {
           return { error: { kind: "config", message: unavailable, retryable: false } };
         }
+        // 2026-10-16 用户拍板：非空 externalAgents.droid.models 是新 spawn 的白名单——
+        // droid 模型 id 不在名单内 ⇒ 拒绝（与 unknown-model 同一零副作用准入位；名单判定
+        // 不依赖目录，目录不可用也照样执行）。resume 无 override 继承目标 run 的模型不受
+        // 限（老 run 不因名单收紧而无法续跑）；显式 modelOverride 仍按新选择对待。工作流
+        // agent() 子调用与嵌套 Agent 走同一准入，同样受限。
+        if (!(resumeTargetExternal && req.modelOverride === undefined)) {
+          const rejection = deps.external.modelAllowlistRejection?.(admittedModel);
+          if (rejection !== undefined) {
+            return { error: { kind: "config", message: rejection, retryable: false } };
+          }
+        }
         if (deps.external.exists(admittedModel) === false) {
           return {
             error: { kind: "config", message: deps.external.unknownModelMessage(admittedModel), retryable: false },

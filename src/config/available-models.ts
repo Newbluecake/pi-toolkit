@@ -86,11 +86,14 @@ const MAX_PROMPT_MODELS = 30;
 /** external-agent plan §5.3：P5 从 `ExternalAgentsPort.advertised()` 投影出的一个
  *  provider 子块。`models` 已是过滤+截断后的展示列表（models 设置 ⇒ 只列它们；否则
  *  非 deprecated、kind!=="router"、非 `custom:`，按原序前 `advertiseMax` 个——都在
- *  P5 侧完成），`total` 是过滤后的模型总数，超出部分渲染成 `… +N more`。 */
+ *  P5 侧完成），`total` 是过滤后的模型总数，超出部分渲染成 `… +N more`。
+ *  `allowlist` 非空（2026-10-16 拍板：非空 `externalAgents.<provider>.models` 是白名单）⇒
+ *  携带全量名单（未经 advertiseMax 截断），头部说明据此改写为「只接受名单内 id」。 */
 export interface ExternalPromptModels {
   provider: string;
   models: readonly ExternalAdvertisedModel[];
   total: number;
+  allowlist?: readonly string[] | undefined;
 }
 
 function formatContextWindow(contextWindow: number): string {
@@ -145,7 +148,11 @@ export function formatExternalModelsForPrompt(ext: ExternalPromptModels): string
   });
   const remaining = ext.total - ext.models.length;
   if (remaining > 0) lines.push(`- … +${remaining} more`);
-  return [`### External agent models (${ext.provider})`, externalModelsPromptHeader(ext.provider), ...lines].join("\n");
+  return [
+    `### External agent models (${ext.provider})`,
+    externalModelsPromptHeader(ext.provider, ext.allowlist),
+    ...lines,
+  ].join("\n");
 }
 
 /** external-agent plan §5.3：`external` 缺省/空（或全部子块为空）⇒ 逐字节等于仅 pi 的

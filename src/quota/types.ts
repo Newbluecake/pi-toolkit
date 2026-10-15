@@ -82,8 +82,14 @@ export interface QuotaPoolPort {
   readonly provider: string; // "droid"
   /** "none" = 不计费（BYOK）；undefined = 未知。 */
   poolOf(modelId: string): QuotaPoolId | "none" | undefined;
-  /** 该池可推荐的模型 id（已滤 deprecated / router / custom:），偏好序在前。 */
+  /** 该池可推荐的模型 id（已滤 deprecated / router / custom:），偏好序在前。
+   *  白名单模式（2026-10-16 用户拍板）：非空 externalAgents.droid.models ⇒ 只返回名单内
+   *  id（配置序，目录追加段不再出现）。 */
   modelsInPool(pool: QuotaPoolId): readonly string[];
+  /** 非空 `externalAgents.droid.models` ⇒ 全量名单；缺省方法 / undefined / 空数组 ⇒ 无
+   *  白名单（推荐面维持旧行为）。service 层据此把 `quota.droidPools` 的推荐面加法也
+   *  限制在名单内。同步、永不抛。 */
+  allowlist?(): readonly string[] | undefined;
 }
 
 /**

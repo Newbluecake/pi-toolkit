@@ -665,13 +665,22 @@ export default function activate(rawPi: ExtensionAPI): void {
     availableModelsSection({
       stackAvailable: () => holder.current?.models.available(),
       // external-agent plan §5.3/§5.5（P5）：端口存在时投影 droid 子块——advertiseMax 截断
-      // 与 total（… +N more）都在这里（§15 跟踪项 4）；tokenMultiplier 已折进 note。
+      // 与 total（… +N more）都在这里（§15 跟踪项 4）；tokenMultiplier 已折进 note。非空
+      // models 同时是白名单（2026-10-16 拍板）⇒ 全量名单随子块透传，头部说明改写。
       externalModels: () => {
         const port = holder.current?.external;
         if (port === undefined) return undefined;
         const all = port.advertised();
         const max = settings.externalAgents.droid.advertiseMax;
-        return [{ provider: "droid", models: all.slice(0, max), total: all.length }];
+        const allowlist = settings.externalAgents.droid.models;
+        return [
+          {
+            provider: "droid",
+            models: all.slice(0, max),
+            total: all.length,
+            ...(allowlist.length > 0 ? { allowlist } : {}),
+          },
+        ];
       },
     }),
   );

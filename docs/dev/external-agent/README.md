@@ -17,7 +17,7 @@ pi-toolkit 可以把 [Factory droid](https://factory.ai) 当作虚拟 provider `
    }
    ```
 
-   其余键：`protocolCheck`（`strict` 默认 / `warn`）、`models`（提示词展示的模型 id，`[]` = 自动）、`injectMemory`、`pricing`、`catalogTtlS`、`requestTimeoutS`、`initTimeoutS`、`killGraceS`。启用/二进制/协议检查为非 live，需 `/reload`。
+   其余键：`protocolCheck`（`strict` 默认 / `warn`）、`models`（提示词展示的模型 id，`[]` = 自动；**非空时同时是新 spawn 的白名单**——名单外的 `droid/<id>` 会在准入被拒并列出允许的 id，resume 不受限）、`injectMemory`、`pricing`、`catalogTtlS`、`requestTimeoutS`、`initTimeoutS`、`killGraceS`。启用/二进制/协议检查为非 live，需 `/reload`。
 
 4. **强烈建议**关闭 droid 自更新（自更新会导致协议漂移）：
 
@@ -29,7 +29,7 @@ pi-toolkit 可以把 [Factory droid](https://factory.ai) 当作虚拟 provider `
 
 ## 模型选择
 
-模型目录来自 droid 自身（`availableModels`），缓存在 `<agentDir>/cache/external-agent/`，超过 `catalogTtlS`（默认 24h）或 droid 二进制变化后台重探。提示词最多展示 `advertiseMax` 个（0..50，默认 12）；用 `models` 固定展示列表。传入未知模型 id 会被拒绝并给出候选，不会静默改成默认模型。
+模型目录来自 droid 自身（`availableModels`），缓存在 `<agentDir>/cache/external-agent/`，超过 `catalogTtlS`（默认 24h）或 droid 二进制变化后台重探。提示词最多展示 `advertiseMax` 个（0..50，默认 12）；用 `models` 固定展示列表。传入未知模型 id 会被拒绝并给出候选，不会静默改成默认模型。非空 `models` 同时是白名单：quota 推荐/逐池清单只列名单内模型（名单外目录模型不再出现，「等 N 个」只计名单内）；新 spawn 名单外 id 会在准入被拒（目录不可用也照样执行），resume 继承的模型不受限；名单内但目录查不到的 id 若 `quota.droidPools` 能改判其池则仍可进推荐，否则跳过。
 
 ## 计费
 

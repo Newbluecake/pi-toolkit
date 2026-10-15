@@ -11,6 +11,7 @@ import {
   externalModelsPromptHeader,
   msgAuthFailure,
   msgBinaryNotFound,
+  msgDroidModelNotAllowed,
   msgExpertIsExternal,
   msgPermissionUnacknowledged,
   msgProviderNameCollision,
@@ -109,5 +110,29 @@ describe("external-agent messages (plan §2.11)", () => {
     expect(text).toContain("```json block");
     expect(text).toContain("shown as unpriced when unknown");
     expect(text).toContain("Any droid model id is accepted.");
+  });
+
+  it("externalModelsPromptHeader: default / empty allowed list is byte-identical to the single-arg form", () => {
+    const one = externalModelsPromptHeader("droid");
+    expect(externalModelsPromptHeader("droid", undefined)).toBe(one);
+    expect(externalModelsPromptHeader("droid", [])).toBe(one);
+  });
+
+  it("externalModelsPromptHeader: non-empty allowlist (2026-10-16 拍板) ⇒ only listed ids accepted, named with the setting", () => {
+    const text = externalModelsPromptHeader("droid", ["glm-5.3", "kimi-k3"]);
+    expect(text).not.toContain("Any droid model id is accepted");
+    expect(text).toContain("externalAgents.droid.models");
+    expect(text).toContain("glm-5.3, kimi-k3");
+    expect(text).toContain("Only the droid model ids");
+    // 前半句限制清单不变（resume 钉目录等仍在）。
+    expect(text).toContain("resuming is pinned to the original working directory");
+  });
+
+  it("msgDroidModelNotAllowed names the id, the setting, and every allowed id", () => {
+    const text = msgDroidModelNotAllowed("inkling", ["glm-5.3", "kimi-k3"]);
+    expect(text).toContain('droid model "inkling" is not allowed');
+    expect(text).toContain("externalAgents.droid.models");
+    expect(text).toContain("Allowed droid models: glm-5.3, kimi-k3");
+    expect(text).toContain("set the list to []");
   });
 });

@@ -216,13 +216,21 @@ export function createDroidCatalog(deps: ExternalFrameworkDeps, settings: () => 
   };
 }
 
-/** update -32602 "Unknown model" 的拒绝文案（§4.4 step 2：error 文本含 model ⇒ config + 目录候选）。 */
-export function unknownDroidModelMessage(modelId: string, catalog: ExternalCatalog | undefined): string {
+/** update -32602 "Unknown model" 的拒绝文案（§4.4 step 2：error 文本含 model ⇒ config + 目录候选）。
+ *  `allowed` 非空（白名单模式，2026-10-16 拍板）且目录缺席 ⇒ 不再说「any droid model id is
+ *  accepted」——准入届时也只放行名单内 id（名单判定不依赖目录）。 */
+export function unknownDroidModelMessage(
+  modelId: string,
+  catalog: ExternalCatalog | undefined,
+  allowed?: readonly string[],
+): string {
   const candidates = catalog?.models.filter((m) => !m.deprecated).map((m) => m.id) ?? [];
   const listed = candidates.slice(0, 12).join(", ");
   const suffix =
     candidates.length === 0
-      ? "model catalog unavailable — any droid model id is accepted; see `droid exec --help`"
+      ? allowed !== undefined && allowed.length > 0
+        ? "model catalog unavailable — only the model ids in externalAgents.droid.models are accepted"
+        : "model catalog unavailable — any droid model id is accepted; see `droid exec --help`"
       : `known droid models: ${listed}${candidates.length > 12 ? `, … +${candidates.length - 12} more` : ""}`;
   return `unknown droid model "${modelId}" (droid.update_session_settings rejected it): ${suffix}`;
 }

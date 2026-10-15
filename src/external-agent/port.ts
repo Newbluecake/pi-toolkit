@@ -16,7 +16,13 @@ import { createCatalogStore } from "./catalog-store.js";
 import { createDroidProvider } from "./droid/provider.js";
 import { unknownDroidModelMessage } from "./droid/catalog.js";
 import { createJsonRpcClient } from "./jsonrpc.js";
-import { capabilitiesText, msgBinaryNotFound, msgProviderNameCollision, msgProtocolDrift } from "./messages.js";
+import {
+  capabilitiesText,
+  msgBinaryNotFound,
+  msgDroidModelNotAllowed,
+  msgProviderNameCollision,
+  msgProtocolDrift,
+} from "./messages.js";
 import { probeCwd } from "./paths.js";
 import { resolveExternalPricing } from "./pricing.js";
 import { spawnManagedChild } from "./process.js";
@@ -156,6 +162,14 @@ export function createExternalAgentsPort(o: {
       if (catalog === undefined) return undefined; // 目录不可用 ⇒ fail-open，交给 init+update 校验
       return catalog.models.some((m) => m.id === ref.id);
     },
+    // 白名单判定（2026-10-16 拍板）不依赖目录：目录不可用时准入也只放行名单内 id。
+    // resume 继承的模型由 spawn-service 豁免（不调本方法），老 run 不因名单收紧而无法续跑。
+    modelAllowlistRejection(ref) {
+      if (ref.provider !== "droid") return undefined;
+      const allowed = settings.droid.models;
+      if (allowed.length === 0 || allowed.includes(ref.id)) return undefined;
+      return msgDroidModelNotAllowed(ref.id, allowed);
+    },
     unavailableReason(provider) {
       if (provider !== "droid") return undefined;
       if (fixedReason !== undefined) return fixedReason;
@@ -165,7 +179,7 @@ export function createExternalAgentsPort(o: {
       return undefined;
     },
     unknownModelMessage(ref) {
-      return unknownDroidModelMessage(ref.id, droid.catalog.snapshot());
+      return unknownDroidModelMessage(ref.id, droid.catalog.snapshot(), settings.droid.models);
     },
     advertised,
     ownerOfSessionFile(path) {

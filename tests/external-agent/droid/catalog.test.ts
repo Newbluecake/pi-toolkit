@@ -175,4 +175,25 @@ describe("droid/catalog binaryFingerprint 与 unknownDroidModelMessage", () => {
     expect(withCatalog).not.toContain("old-1"); // deprecated 不列
     expect(unknownDroidModelMessage("bogus", undefined)).toContain("catalog unavailable");
   });
+
+  it("unknownDroidModelMessage：白名单模式（2026-10-16 拍板）下目录缺席不再说 any id accepted；有目录时名单不改变候选文案", () => {
+    const legacy = unknownDroidModelMessage("bogus", undefined);
+    expect(legacy).toContain("any droid model id is accepted");
+    const allowlist = unknownDroidModelMessage("bogus", undefined, ["glm-5.3", "kimi-k3"]);
+    expect(allowlist).toContain("catalog unavailable");
+    expect(allowlist).not.toContain("any droid model id is accepted");
+    expect(allowlist).toContain("externalAgents.droid.models");
+    // 空名单等同缺省（字节一致）；有目录时（-32602 真实场景）仍是目录候选文案。
+    expect(unknownDroidModelMessage("bogus", undefined, [])).toBe(legacy);
+    const withCatalog = unknownDroidModelMessage(
+      "bogus",
+      {
+        provider: "droid",
+        fetchedAt: 0,
+        models: parseAvailableModels(AVAIL),
+      },
+      ["glm-5.3"],
+    );
+    expect(withCatalog).toContain("known droid models");
+  });
 });

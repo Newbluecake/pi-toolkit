@@ -13,6 +13,7 @@ import {
   MSG_EXPERTS_UNSUPPORTED,
   MSG_READONLY_DOMAIN,
   MSG_RESUME_ISOLATION,
+  msgDroidModelNotAllowed,
   msgResumeCrossRuntime,
   msgResumeDisabled,
 } from "../../src/external-agent/messages.js";
@@ -75,11 +76,18 @@ function snap(runId: string, sessionFile: string, model?: { provider: string; id
 interface PortOpts {
   unavailable?: string;
   exists?: boolean | undefined;
+  /** 非空 ⇒ 与真 port 同逻辑：名单外 id 的 modelAllowlistRejection 文案。 */
+  allowlist?: readonly string[];
 }
 function port(o: PortOpts = {}): ExternalAgentsPort {
   return {
     owns: (p) => p === "droid",
     exists: () => ("exists" in o ? o.exists : true),
+    // 与 src/external-agent/port.ts 同逻辑（不依赖目录），文案用真构建器。
+    modelAllowlistRejection: (r) =>
+      o.allowlist !== undefined && o.allowlist.length > 0 && !o.allowlist.includes(r.id)
+        ? msgDroidModelNotAllowed(r.id, o.allowlist)
+        : undefined,
     unavailableReason: () => o.unavailable,
     unknownModelMessage: (r) => `unknown droid model ${r.id}`,
     advertised: () => [],
@@ -269,5 +277,110 @@ describe("spawn admission: external (droid) gate", () => {
     const b = await h.service.spawn({ type: "pidef", prompt: "x", resumeFrom: "r_PISESS01" });
     await flush();
     expect("runId" in a && "runId" in b).toBe(true);
+  });
+});
+
+describe("spawn admission: droid model allowlist（2026-10-16 拍板：非空 externalAgents.droid.models）", () => {
+  const LIST = ["glm-5.3", "kimi-k3"];
+
+  it("new spawn of a non-listed id ⇒ config rejection listing allowed ids + naming the setting; zero side effects", async () => {
+    const h = harness({ external: port({ allowlist: LIST }), agentDir });
+    await expectRejected(
+      h,
+      { type: "worker", prompt: "x", modelOverride: { provider: "droid", id: "inkling" } },
+      msgDroidModelNotAllowed("inkling", LIST),
+    );
+    const msgText = msgDroidModelNotAllowed("inkling", LIST);
+    expect(msgText).toContain("externalAgents.droid.models");
+    expect(msgText).toContain("Allowed droid models: glm-5.3, kimi-k3");
+  });
+
+  it("listed id passes the allowlist and keeps flowing into the catalog exists check", async () => {
+    const listed = { provider: "droid", id: "glm-5.3" };
+    const ok = harness({ external: port({ allowlist: LIST }), agentDir });
+    const r = await ok.service.spawn({ type: "worker", prompt: "x", modelOverride: listed });
+    await flush();
+    expect("runId" in r).toBe(true);
+    expect(ok.runs[0]?.model).toEqual(listed);
+    // 名单内但目录 exists===false ⇒ 仍是原 unknown-model 拒绝（目录口径不变）。
+    const h = harness({ external: port({ allowlist: LIST, exists: false }), agentDir });
+    await expectRejected(h, { type: "worker", prompt: "x", modelOverride: listed }, "unknown droid model glm-5.3");
+  });
+
+  it("resume without override inherits a non-listed droid model and keeps working (old runs never break)", async () => {
+    const legacyModel = { provider: "droid", id: "gpt-6-luna" }; // 不在名单内
+    const h = harness({
+      external: port({ allowlist: LIST, exists: true }),
+      agentDir,
+      durable: [snap("r_EXTSESS01", extFile, legacyModel)],
+    });
+    const r = await h.service.spawn({ type: "pidef", prompt: "x", resumeFrom: "r_EXTSESS01" });
+    await flush();
+    expect("runId" in r).toBe(true);
+    expect(h.runs[0]?.model).toEqual(legacyModel);
+    // tombstone-only 外部 resume 同样豁免（§15-2 继承源）。
+    const h2 = harness({
+      external: port({ allowlist: LIST, exists: true }),
+      agentDir,
+      tombstones: [snap("r_EXTSESS01", extFile, legacyModel)],
+    });
+    const r2 = await h2.service.spawn({ type: "pidef", prompt: "x", resumeFrom: "r_EXTSESS01" });
+    await flush();
+    expect("runId" in r2).toBe(true);
+    expect(h2.runs[0]?.model).toEqual(legacyModel);
+  });
+
+  it("resume WITH an explicit non-listed droid override is a new choice ⇒ rejected; a listed override is fine", async () => {
+    const h = harness({
+      external: port({ allowlist: LIST }),
+      agentDir,
+      durable: [snap("r_EXTSESS01", extFile, DROID)],
+    });
+    await expectRejected(
+      h,
+      { type: "worker", prompt: "x", resumeFrom: "r_EXTSESS01", modelOverride: { provider: "droid", id: "inkling" } },
+      msgDroidModelNotAllowed("inkling", LIST),
+    );
+    const ok = harness({
+      external: port({ allowlist: LIST }),
+      agentDir,
+      durable: [snap("r_EXTSESS01", extFile, DROID)],
+    });
+    const r = await ok.service.spawn({
+      type: "worker",
+      prompt: "x",
+      resumeFrom: "r_EXTSESS01",
+      modelOverride: { provider: "droid", id: "kimi-k3" },
+    });
+    await flush();
+    expect("runId" in r).toBe(true);
+    expect(ok.runs[0]?.model).toEqual({ provider: "droid", id: "kimi-k3" });
+  });
+
+  it("empty allowlist ([]) ⇒ no rejection ever: admission byte-identical to the pre-feature behavior", async () => {
+    const h = harness({ external: port({ allowlist: [] }), agentDir });
+    const r = await h.service.spawn({ type: "worker", prompt: "x", modelOverride: DROID });
+    await flush();
+    expect("runId" in r).toBe(true);
+    expect(h.runs[0]?.model).toEqual(DROID);
+    // 旧 port（无 modelAllowlistRejection 方法）同样不受影响。
+    const h2 = harness({ external: port(), agentDir });
+    const r2 = await h2.service.spawn({
+      type: "worker",
+      prompt: "x",
+      modelOverride: { provider: "droid", id: "inkling" },
+    });
+    await flush();
+    expect("runId" in r2).toBe(true);
+  });
+
+  it("allowlist rejection wins over the pi-registry existence check and runs before quota/load gates", async () => {
+    // 准入顺序：unavailable → allowlist → exists。unavailable（整体不可用）仍优先。
+    const h = harness({ external: port({ allowlist: LIST, unavailable: "drift!" }), agentDir });
+    await expectRejected(
+      h,
+      { type: "worker", prompt: "x", modelOverride: { provider: "droid", id: "inkling" } },
+      "drift!",
+    );
   });
 });

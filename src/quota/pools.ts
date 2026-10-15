@@ -93,27 +93,38 @@ export function createCatalogPoolPort(o: {
     modelsInPool(pool) {
       const catalog = readCatalog();
       if (catalog === undefined) return [];
-      // 推荐面过滤（§2.1）：deprecated / router / custom: 不推荐。
+      const preferred = readPreferred();
+      // 白名单模式（2026-10-16 用户拍板）：非空 externalAgents.droid.models ⇒ 推荐面只出
+      // 配置过的 id（配置序），目录里名单外的模型一律不再出现（不再追加目录序）。配置 id
+      // 不在目录里 ⇒ 池推导不出（custom: 恒 none）⇒ 跳过；若 quota.droidPools 把它改判进
+      // 该池，service 层的加法仍会带上它（用户明确意图）。deprecated/router 的推荐面过滤
+      // （§2.1）对配置 id 同样适用（service 层减法也还会再滤一道）。
+      if (preferred.length > 0) {
+        const byId = new Map(catalog.models.map((m) => [m.id, m]));
+        const out: string[] = [];
+        const seen = new Set<string>();
+        for (const id of preferred) {
+          if (seen.has(id) || id.startsWith("custom:")) continue;
+          const m = byId.get(id);
+          if (m !== undefined && (m.deprecated === true || m.kind === "router")) continue;
+          if (derivePool(m, id) === pool) {
+            seen.add(id);
+            out.push(id);
+          }
+        }
+        return out;
+      }
+      // 空名单（默认）⇒ 旧行为：目录全量（推荐面过滤 §2.1：deprecated / router / custom:
+      // 不推荐）。preferred 非空已在上面走白名单分支，此处无偏好序可排。
       const recommendable = (m: CatalogModelLike): boolean =>
         m.deprecated !== true && m.kind !== "router" && !m.id.startsWith("custom:") && derivePool(m, m.id) === pool;
-      const byId = new Map(catalog.models.map((m) => [m.id, m]));
-      const out: string[] = [];
-      const seen = new Set<string>();
-      // 偏好序在前（externalAgents.droid.models），目录序在后（D7）。
-      for (const id of readPreferred()) {
-        const m = byId.get(id);
-        if (m !== undefined && recommendable(m) && !seen.has(id)) {
-          seen.add(id);
-          out.push(id);
-        }
-      }
-      for (const m of catalog.models) {
-        if (recommendable(m) && !seen.has(m.id)) {
-          seen.add(m.id);
-          out.push(m.id);
-        }
-      }
-      return out;
+      return catalog.models.filter(recommendable).map((m) => m.id);
+    },
+    // 白名单模式（2026-10-16 拍板）暴露给 service 层：quota.droidPools 的推荐面加法也
+    // 限制在名单内（名单外的覆盖键仍参与 poolOf 判定，只是不再被推荐）。
+    allowlist() {
+      const preferred = readPreferred();
+      return preferred.length > 0 ? preferred : undefined;
     },
     warm() {
       if (warmed) return;

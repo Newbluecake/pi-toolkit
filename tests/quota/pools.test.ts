@@ -49,13 +49,11 @@ describe("createCatalogPoolPort", () => {
     expect(port.poolOf("custom:byok")).toBe("none");
   });
 
-  it("modelsInPool filters deprecated/router/custom: and puts preferred ids first", () => {
-    const port = createCatalogPoolPort({
-      provider: "droid",
-      catalog: () => catalog(models),
-      preferred: () => ["kimi-k3"],
-    });
-    expect(port.modelsInPool("core")).toEqual(["kimi-k3", "glm-5.3"]); // 偏好序在前
+  it("modelsInPool（空名单 ⇒ 目录全量）filters deprecated/router/custom:", () => {
+    // 非空 preferred 已是白名单模式（见下方 describe）——旧「偏好序在前+目录序在后」
+    // 的追加段不再存在；此处钉空名单（默认）的全量目录行为。
+    const port = createCatalogPoolPort({ provider: "droid", catalog: () => catalog(models) });
+    expect(port.modelsInPool("core")).toEqual(["glm-5.3", "kimi-k3"]);
     expect(port.modelsInPool("standard")).toEqual(["claude-opus-5-5"]);
   });
 
@@ -98,5 +96,59 @@ describe("createCatalogPoolPort", () => {
     const port = createCatalogPoolPort({ provider: "droid", catalog: () => externalCatalogLike });
     expect(port.poolOf("glm-5.3")).toBe("core");
     expect(port.poolOf("claude-opus-5-5")).toBe("standard");
+  });
+});
+
+describe("createCatalogPoolPort allowlist mode (2026-10-16 拍板：非空 externalAgents.droid.models)", () => {
+  // 名单外目录模型（会出现在旧版推荐里，测试它们不再出现）。
+  const wide: CatalogModelLike[] = [
+    { id: "glm-5.3", upstreamProvider: "factory" },
+    { id: "kimi-k3", upstreamProvider: "factory" },
+    { id: "claude-sonnet-5-5", upstreamProvider: "anthropic" },
+    { id: "mistral-large-4", upstreamProvider: "factory" }, // 名单外 core
+    { id: "claude-fable-5.1", upstreamProvider: "anthropic" }, // 名单外 standard
+    { id: "inkling", upstreamProvider: "factory" }, // 名单外 core
+    { id: "old-configured", upstreamProvider: "factory", deprecated: true }, // 名单内但 deprecated
+    { id: "auto-configured", kind: "router", upstreamProvider: "factory" }, // 名单内但 router
+    { id: "custom:mine", upstreamProvider: "factory" },
+  ];
+  const portWith = (preferred: readonly string[]) =>
+    createCatalogPoolPort({ provider: "droid", catalog: () => ({ models: wide }), preferred: () => preferred });
+
+  it("modelsInPool 只出名单内 id（配置序）；名单外目录模型一律不出现", () => {
+    const port = portWith(["kimi-k3", "glm-5.3", "claude-sonnet-5-5", "gpt-6.1-sol"]);
+    expect(port.modelsInPool("core")).toEqual(["kimi-k3", "glm-5.3"]); // 配置序，不是目录序
+    expect(port.modelsInPool("standard")).toEqual(["claude-sonnet-5-5"]);
+    const all = [...port.modelsInPool("core"), ...port.modelsInPool("standard")];
+    expect(all).not.toContain("mistral-large-4");
+    expect(all).not.toContain("inkling");
+    expect(all).not.toContain("claude-fable-5.1");
+  });
+
+  it("配置 id 不在目录里 ⇒ 池推导不出 ⇒ 跳过（custom: 恒 none；deprecated/router 名单内同标不推荐）", () => {
+    const port = portWith(["gpt-6.1-sol", "old-configured", "auto-configured", "custom:mine"]);
+    expect(port.modelsInPool("core")).toEqual([]);
+    expect(port.modelsInPool("standard")).toEqual([]);
+    expect(port.poolOf("gpt-6.1-sol")).toBeUndefined(); // 池判定本身不变（可被 quota.droidPools 覆盖）
+  });
+
+  it("allowlist()：非空 preferred ⇒ 名单；空/缺省 ⇒ undefined；目录不可用 ⇒ modelsInPool 空但名单仍在", () => {
+    expect(portWith(["glm-5.3"]).allowlist?.()).toEqual(["glm-5.3"]);
+    expect(portWith([]).allowlist?.()).toBeUndefined();
+    const port = createCatalogPoolPort({
+      provider: "droid",
+      catalog: () => {
+        throw new Error("store unreadable");
+      },
+      preferred: () => ["glm-5.3"],
+    });
+    expect(port.modelsInPool("core")).toEqual([]);
+    expect(port.allowlist?.()).toEqual(["glm-5.3"]); // service 层的 droidPools 加法仍能按名单过滤
+  });
+
+  it("空 preferred ⇒ 旧行为：目录全量 + 偏好序在前（白名单模式关闭）", () => {
+    const port = portWith([]);
+    expect(port.modelsInPool("core")).toEqual(["glm-5.3", "kimi-k3", "mistral-large-4", "inkling"]);
+    expect(port.modelsInPool("standard")).toEqual(["claude-sonnet-5-5", "claude-fable-5.1"]);
   });
 });

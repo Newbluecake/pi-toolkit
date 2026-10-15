@@ -10,6 +10,7 @@ import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_SETTINGS, type QuotaSettings } from "../../src/config/settings.js";
 import { createDemotionStore, type DemotionStore } from "../../src/quota/demotion.js";
 import { createQuotaService, type QuotaService } from "../../src/quota/service.js";
+import { alternativesAdvice } from "../../src/quota/render.js";
 import { createDroidAdapters } from "../../src/quota/adapters/droid.js";
 import { createCatalogPoolPort } from "../../src/quota/pools.js";
 import type { QuotaRecoveryEvent } from "../../src/quota/ladder.js";
@@ -1222,7 +1223,9 @@ describe("droid: gateOpen decoration (D6)", () => {
 
 describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（2026-10-15 拍板）", () => {
   it("standard 被拦且 core 可信有余量 ⇒ 建议包 = core 推荐 + 两池清单（状态 ok/blocked）", async () => {
-    const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3"]) });
+    // preferred 非空 = 白名单（2026-10-16 拍板）：把两池的目录模型都写进名单，保持本用例
+    // 「两池都有候选」的意图；core 配置序 kimi-k3 在前。名单外模型（如有）不再出现。
+    const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3", "glm-5.3", "claude-opus-5-5", "gpt-6"]) });
     await land(f, 100, 10); // std 5h 100% ⇒ L3；core 10% ⇒ L0
     expect(f.service.poolAlternatives("droid-standard")).toEqual([
       {
@@ -1372,8 +1375,9 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
 });
 
 describe("droid: droidAlternatives — pi-blocked supplement (2026-10-15 拍板)", () => {
-  it("core before standard, preferred order first, per-pool cap (default 3); no snapshot yet ⇒ NOT listed (终版拍板取代 fail-open)", async () => {
-    const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3"]) });
+  it("core before standard, configured order first, per-pool cap (default 3); no snapshot yet ⇒ NOT listed (终版拍板取代 fail-open)", async () => {
+    // preferred 非空 = 白名单（2026-10-16 拍板）：名单覆盖两池候选以保持原用例意图。
+    const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3", "glm-5.3", "claude-opus-5-5", "gpt-6"]) });
     expect(f.service.droidAlternatives()).toEqual([]); // 无快照：数据拿不到就当没有该订阅
     await land(f, 10, 20);
     const expected = [
@@ -1493,6 +1497,108 @@ describe("droid: 鉴权问题（401/402/403）不可见 + 信任过滤（2026-10
       keys: ["droid-standard"],
       verdicts: [undefined],
     });
+  });
+});
+
+describe("droid: allowlist mode（2026-10-16 拍板：非空 externalAgents.droid.models 只推荐名单内模型）", () => {
+  // 目录含名单外模型（inkling / mistral-large-4 / claude-fable-5.1）——旧版会把它们全推进
+  // 推荐/逐池清单（「等 45 个」现场）；白名单模式下不得再出现。
+  const WIDE = [
+    ...CATALOG, // claude-opus-5-5(std) gpt-6(std) glm-5.3(core) kimi-k3(core) old-core(deprecated, core)
+    { id: "inkling", upstreamProvider: "factory" },
+    { id: "mistral-large-4", upstreamProvider: "factory" },
+    { id: "claude-fable-5.1", upstreamProvider: "anthropic" },
+  ];
+  const widePort = (preferred: readonly string[]) =>
+    createCatalogPoolPort({ provider: "droid", catalog: () => ({ models: WIDE }), preferred: () => preferred });
+
+  it("poolAlternatives / 逐池清单只含名单内 id；「等 N 个」只计名单内；通知文本不再出现名单外模型", async () => {
+    const f = makeDroidFixture({ pools: () => widePort(["kimi-k3"]) });
+    await land(f, 100, 10); // std L3 被拦；core L0 有余量
+    const advice = f.service.poolAlternatives("droid-standard");
+    expect(advice).toEqual([
+      {
+        pool: "core",
+        models: ["droid/kimi-k3"], // glm-5.3 未配置 ⇒ 不推；inkling/mistral-large-4 名单外 ⇒ 不推
+        listing: [{ pool: "core", state: "ok", total: 1, models: ["droid/kimi-k3"] }], // standard 无名单内候选 ⇒ 整池省略
+      },
+    ]);
+    // 用户可见通知行（gate 文案内嵌的 alternativesAdvice）：名单外模型不出现。
+    const a = advice[0]!;
+    const text = alternativesAdvice({
+      providers: [],
+      subscription: true,
+      external: true,
+      models: a.models,
+      modelsPool: a.pool,
+      poolListing: a.listing,
+    });
+    expect(text).toContain("droid/kimi-k3");
+    expect(text).not.toContain("inkling");
+    expect(text).not.toContain("mistral-large-4");
+    expect(text).not.toContain("claude-fable-5.1");
+    expect(text).not.toContain("glm-5.3");
+    expect(text).not.toContain("等 "); // 名单内总数 1 ≤ 截断 5 ⇒ 无「等 N 个」
+    expect(f.service.droidAlternatives()).toEqual([{ pool: "core", models: ["droid/kimi-k3"] }]);
+  });
+
+  it("「等 N 个」在白名单模式下只计名单内：6 个配置 core id ⇒ 清单列 5 个 + 等 6 个（目录里更多也不计）", async () => {
+    const configured = ["kimi-k3", "glm-5.3", "c1", "c2", "c3", "c4"];
+    const wide6 = [...WIDE, ...["c1", "c2", "c3", "c4"].map((id) => ({ id, upstreamProvider: "factory" }))];
+    const port = createCatalogPoolPort({
+      provider: "droid",
+      catalog: () => ({ models: wide6 }),
+      preferred: () => configured,
+    });
+    const f = makeDroidFixture({ pools: () => port, settings: { gate: true, gateLevel: 2 } });
+    await land(f, 80, 10); // std 5h 80% ⇒ L2 ≥ 闸门线 2 ⇒ 清单标 blocked；core 10% ⇒ L0
+    const listing = f.service.poolAlternatives("droid-core")![0]!.listing;
+    const coreEntry = listing.find((e) => e.pool === "core")!;
+    expect(coreEntry).toMatchObject({ state: "ok", total: 6 });
+    expect(coreEntry.models).toHaveLength(5);
+    expect(coreEntry.models).not.toContain("droid/inkling");
+    const text = alternativesAdvice({ providers: [], subscription: true, external: true, poolListing: listing });
+    expect(text).toContain("Core 池（有余量）：");
+    expect(text).toContain("等 6 个");
+    expect(text).not.toContain("inkling");
+    expect(text).not.toContain("mistral-large-4");
+  });
+
+  it("droidPools 加法仍生效但限名单内：名单内目录外 id 被改判进池则保留；名单外覆盖键不再被推荐（判定不受影响）", async () => {
+    const f = makeDroidFixture({
+      pools: () => widePort(["kimi-k3", "gpt-6.1-sol"]),
+      settings: { droidPools: { "gpt-6.1-sol": "core", "brand-new-core": "core", inkling: "core" } },
+    });
+    await land(f, 100, 10);
+    expect(f.service.poolAlternatives("droid-standard", 10)[0]?.models).toEqual([
+      "droid/kimi-k3",
+      "droid/gpt-6.1-sol", // 名单内 + 目录外 + droidPools 改判 ⇒ 保留（用户明确意图）
+    ]);
+    // 名单外覆盖键（brand-new-core / 目录内 inkling）不再进推荐，但 poolOf 判定照常（闸门口径不变）。
+    expect(f.service.verdictsForModel({ provider: "droid", id: "brand-new-core" })).toMatchObject({
+      pool: "core",
+      keys: ["droid-core"],
+    });
+    expect(f.service.verdictsForModel({ provider: "droid", id: "inkling" })).toMatchObject({
+      pool: "core",
+      keys: ["droid-core"],
+    });
+  });
+
+  it("空名单（preferred=[]）⇒ 旧行为：目录全量 + droidPools 加法不限名单", async () => {
+    const f = makeDroidFixture({
+      pools: () => widePort([]),
+      settings: { droidPools: { "brand-new-core": "core" } },
+    });
+    await land(f, 100, 10);
+    const models = f.service.poolAlternatives("droid-standard", 10)[0]?.models ?? [];
+    expect(models).toEqual([
+      "droid/glm-5.3",
+      "droid/kimi-k3",
+      "droid/inkling",
+      "droid/mistral-large-4",
+      "droid/brand-new-core",
+    ]);
   });
 });
 

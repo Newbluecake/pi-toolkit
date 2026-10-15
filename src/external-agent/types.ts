@@ -95,6 +95,11 @@ export interface ExternalAgentsPort {
   owns(provider: string): boolean;
   /** true 已知 / false 确定未知 / undefined 目录不可用（fail-open，交给 init+update 校验）。 */
   exists(ref: { provider: string; id: string }): boolean | undefined;
+  /** 2026-10-16 用户拍板：非空 `externalAgents.droid.models` 视为新 spawn 的白名单——id
+   *  不在名单内 ⇒ 返回拒绝文案（点名设置与名单）；undefined ⇒ 放行（名单为空 / id 在名单
+   *  内 / 非本 provider）。名单判定不依赖目录（目录不可用同样执行）；resume 继承的模型由
+   *  调用方（spawn 准入）豁免，不问本方法。可选方法：旧桩/旧实现缺省 ⇒ 无白名单。 */
+  modelAllowlistRejection?(ref: { provider: string; id: string }): string | undefined;
   /** 漂移（strict）/ 二进制缺失 / provider 名冲突 等整体不可用原因；有值即准入拒绝。 */
   unavailableReason(provider: string): string | undefined;
   unknownModelMessage(ref: { provider: string; id: string }): string;

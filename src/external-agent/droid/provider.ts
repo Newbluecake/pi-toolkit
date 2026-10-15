@@ -316,9 +316,10 @@ export function createDroidProvider(
         const message = e instanceof Error ? e.message : String(e);
         if (/unknown model/i.test(message))
           // S5：update 干净拒绝 -32602 "Unknown model: …" ⇒ config + 目录候选；add_user_message 从未发出。
+          // 白名单模式（2026-10-16 拍板）下目录缺席时不再说「any id accepted」——准入只放行名单内 id。
           throw new ClassifiedError({
             kind: "config",
-            message: unknownDroidModelMessage(ext.modelId, catalog.snapshot()),
+            message: unknownDroidModelMessage(ext.modelId, catalog.snapshot(), s.models),
             retryable: false,
           });
         throw e;

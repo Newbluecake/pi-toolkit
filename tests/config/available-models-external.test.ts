@@ -98,6 +98,33 @@ describe("formatExternalModelsForPrompt (§5.3)", () => {
     expect(exact.endsWith("- … +0 more")).toBe(false);
     expect(exact.split("\n")).toHaveLength(3);
   });
+
+  it("allowlist field (2026-10-16 拍板) rewrites the header; absent/empty field stays byte-identical", () => {
+    const listed = [
+      { provider: "droid", id: "glm-5.3", name: "GLM 5.3" },
+      { provider: "droid", id: "kimi-k3" },
+    ];
+    // 缺省 / 空名单 ⇒ 头部字节不变（默认「Any … accepted」）。
+    const legacy = formatExternalModelsForPrompt(ext("droid", listed));
+    expect(legacy.split("\n")[1]).toBe(externalModelsPromptHeader("droid"));
+    expect(formatExternalModelsForPrompt({ ...ext("droid", listed), allowlist: [] }).split("\n")[1]).toBe(
+      externalModelsPromptHeader("droid"),
+    );
+    // 非空 allowlist ⇒ 只接受名单内 id（全量名单，不受 advertiseMax 截断影响）。
+    const allow = formatExternalModelsForPrompt({
+      provider: "droid",
+      models: [listed[0]!], // advertiseMax 截断后的展示列表
+      total: 2,
+      allowlist: ["glm-5.3", "kimi-k3"],
+    });
+    const header = allow.split("\n")[1]!;
+    expect(header).toBe(externalModelsPromptHeader("droid", ["glm-5.3", "kimi-k3"]));
+    expect(header).toContain("Only the droid model ids");
+    expect(header).toContain("(glm-5.3, kimi-k3)");
+    expect(header).not.toContain("Any droid model id is accepted");
+    // 模型行不受 allowlist 影响（展示列表仍由 advertised()+advertiseMax 决定）。
+    expect(allow.split("\n")[2]).toBe("- droid/glm-5.3 — GLM 5.3");
+  });
 });
 
 describe("formatAvailableModelsForPrompt with external sub-blocks (§5.3)", () => {

@@ -142,6 +142,35 @@ describe("createExternalAgentsPort", () => {
     expect(r!.port.unknownModelMessage({ provider: "droid", id: "nope" })).toContain("known droid models");
   });
 
+  it("modelAllowlistRejection（2026-10-16 拍板）：非空 models ⇒ 名单外拒绝文案（不依赖目录），名单内/空名单/非 droid ⇒ undefined", () => {
+    // 目录缺席：白名单判定照样执行（准入不因目录不可用而放行名单外 id）。
+    const fresh = join(tmp, "no-catalog", String(Math.random()).slice(2));
+    const none = makePort({}, settings({ models: ["glm-5.3", "kimi-k3"] }), fresh);
+    expect(none.r!.port.modelAllowlistRejection?.({ provider: "droid", id: "inkling" })).toContain(
+      "externalAgents.droid.models",
+    );
+    expect(none.r!.port.modelAllowlistRejection?.({ provider: "droid", id: "glm-5.3" })).toBeUndefined();
+    // 有目录时同一判定；非本 provider 恒 undefined。
+    seedCatalog();
+    const { r } = makePort({}, settings({ models: ["gpt-6-luna"] }));
+    expect(r!.port.modelAllowlistRejection?.({ provider: "droid", id: "claude-opus-5-5" })).toContain(
+      "Allowed droid models: gpt-6-luna",
+    );
+    expect(r!.port.modelAllowlistRejection?.({ provider: "droid", id: "gpt-6-luna" })).toBeUndefined();
+    expect(r!.port.modelAllowlistRejection?.({ provider: "anthropic", id: "opus" })).toBeUndefined();
+    // 空名单（默认）⇒ 恒 undefined（准入行为不变）。
+    const empty = makePort();
+    expect(empty.r!.port.modelAllowlistRejection?.({ provider: "droid", id: "anything" })).toBeUndefined();
+  });
+
+  it("unknownModelMessage：白名单模式下目录缺席 ⇒ 只按名单接受的文案（settings 透传）", () => {
+    const fresh = join(tmp, "no-catalog", String(Math.random()).slice(2));
+    const { r } = makePort({}, settings({ models: ["glm-5.3"] }), fresh);
+    expect(r!.port.unknownModelMessage({ provider: "droid", id: "ghost" })).toContain(
+      "only the model ids in externalAgents.droid.models are accepted",
+    );
+  });
+
   describe("advertised（§15 跟踪项 4：multiplier→note；截断在 index.ts 投影）", () => {
     it("目录过滤：非 deprecated、非 router、非 custom:，droid 原序；tokenMultiplier≠1 折进 note", () => {
       seedCatalog();

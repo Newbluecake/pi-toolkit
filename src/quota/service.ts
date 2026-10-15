@@ -338,6 +338,10 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
    * 端口目录序（偏好序在前，已滤 deprecated/router/custom:）+ droidPools 改判进该池
    * 的键；减法 = custom:、被改判出该池的、目录标 deprecated/router 的；去重后返回
    * 裸模型 id（无 droid/ 前缀、未截断）。目录查不到的覆盖键保留（用户明确意图）。
+   *
+   * 白名单模式（2026-10-16 用户拍板）：非空 externalAgents.droid.models ⇒ 推荐面（含
+   * droidPools 加法）只出名单内 id；名单外的覆盖键仍参与 poolFor 判定（闸门口径
+   * 不变），只是不再被推荐。端口未提供 allowlist ⇒ 旧行为。
    */
   const poolCandidates = (pool: QuotaPoolId): readonly string[] => {
     let port: QuotaPoolPort | undefined;
@@ -346,6 +350,13 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     } catch {
       port = undefined;
     }
+    let allowlist: readonly string[] | undefined = undefined;
+    try {
+      allowlist = port?.allowlist?.();
+    } catch {
+      allowlist = undefined; // 端口契约永不抛；兑注入桩
+    }
+    const inAllowlist = (id: string): boolean => allowlist === undefined || allowlist.includes(id);
     const candidates: string[] = [];
     const seen = new Set<string>();
     const push = (id: string): void => {
@@ -356,13 +367,13 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     };
     if (port !== undefined) {
       try {
-        for (const id of port.modelsInPool(pool)) push(id); // 已是「偏好序在前、目录序在后」
+        for (const id of port.modelsInPool(pool)) push(id); // 已是「偏好序在前、目录序在后」（白名单模式则只含名单内 id）
       } catch {
         // 端口契约永不抛；兜注入桩。
       }
     }
     for (const [id, value] of Object.entries(settings.droidPools)) {
-      if (value === pool) push(id); // 评审 #5 加法：用户改判进该池的模型进替代建议
+      if (value === pool && inAllowlist(id)) push(id); // 评审 #5 加法：用户改判进该池的模型进替代建议（白名单模式下限名单内）
     }
     const infoOf = (id: string): CatalogModelLike | undefined => {
       // CatalogPoolPort 的结构探测（quota 不自持目录；P5 供的端口带 infoOf）。
