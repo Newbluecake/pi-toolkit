@@ -510,7 +510,16 @@ export default function activate(rawPi: ExtensionAPI): void {
       now: () => systemClock.now(),
     }),
   );
-  pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  // steer reply (steer-tool reply param): same fabric signal as the @mention
+  // wiring below (`holder.current?.fabric != null`) — read live at call time
+  // so a /reload or settings change takes effect without re-registration.
+  pi.registerTool(
+    createSteerTool({
+      query: forwardQuery(holder),
+      resolveRun: forwardResolveRun(holder),
+      fabricEnabled: () => holder.current?.fabric != null,
+    }),
+  );
   // set_model host form (plan §4.11): self-switch goes through the ExtensionAPI
   // (only available when the pi build exposes it — otherwise `host` stays
   // absent and self-switching degrades to a clear error while switching a
