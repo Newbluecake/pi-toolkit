@@ -345,6 +345,9 @@ click/type 复现交互，headless 场景走 `browser create --headless`），�
 - 给 L0/L1 任务套 Plan + 评审 + 验收全流程。
 - 下游 subagent 重复探索（prompt 里没给文件路径/产物路径）。
 - 单个模型报错后原地重试，而不是按回退链换。
+- worktree 隔离的并行开发包里用 `git stash`：stash 在同仓库所有 worktree 间**共享**，并行 agent 会互相 pop 走对方改动
+  （2026-10-14 claude2api：D2 与 WP-B 串改动）。派单 prompt 写明禁用 stash，基线对比用 `git diff > patch` 或临时 commit。
+- 多个并行包同时跑全量测试（如 `go test ./...`）把机器压到 loadavg 70+：派单时要求开发中只跑定向包，全量只在收尾跑一次并限并发（`-p 2`）。
 - 机械性改动开 `high` thinking；只读小查询开 `high`。
 - 让 verifier 重跑全量测试（应主会话后台跑，verifier 只读 diff + 定向命令取证）。
 - 无文件交集却上 `isolation: "worktree"`，白白增加合并成本。
