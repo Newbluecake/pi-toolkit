@@ -541,6 +541,7 @@ async function grammarRepo(prefix: string): Promise<{ root: string; linked: stri
 
   // the linked worktree — its own M + ?
   const linked = `${root}-linked`;
+  tempRoots.add(linked); // sibling of the mkdtemp root — not covered by the root's own cleanup
   git(root, ["worktree", "add", "-q", "-b", "linked", linked]);
   await writeFile(join(linked, "linked-mod.txt"), "lm\n");
   await writeFile(join(linked, "linked-new.txt"), "ln\n");
@@ -695,6 +696,7 @@ describe.skipIf(!hasGit || !gitInFixedPath || !hasProcFd)("web-hub worktree-diff
     const other = await repo("pwh-wtd-other-");
     await commitFile(other, "o.txt", "o\n", "base");
     const otherWt = `${other}-wt`;
+    tempRoots.add(otherWt);
     git(other, ["worktree", "add", "-q", "-b", "victim", otherWt]);
     const r2 = await wtFiles(live, otherWt);
     expect(r2.status).toBe(403);
