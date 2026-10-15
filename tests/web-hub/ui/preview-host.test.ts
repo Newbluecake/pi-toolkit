@@ -456,6 +456,25 @@ describe("PreviewHost.vue — dir phase + 返回/上级 (dir-plan A3, P3)", () =
     await tick();
   });
 
+  it("a file inside an INLINE-expanded subfolder opens <dir>/<sub>/<file> (regression: subfolder segment was dropped ⇒ E_NOT_FOUND)", async () => {
+    const r = rigDir();
+    r.handle.open({ path: "/p/src", dir: true });
+    r.dir("/p/src", [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await tick();
+    (document.querySelector(".preview-dir-chevron") as HTMLElement).click(); // inline expand
+    await tick();
+    r.dir("/p/src/sub", [{ name: "note.md", type: "file", size: 1, mtimeMs: 1 }]);
+    await tick();
+    const rows = [...document.querySelectorAll<HTMLElement>(".preview-dir-list button.preview-dir-row")];
+    const fileRow = rows.find((b) => b.textContent?.includes("note.md"));
+    expect(fileRow).toBeDefined();
+    fileRow!.click();
+    await tick();
+    expect(r.calls.at(-1)!.req).toMatchObject({ path: "/p/src/sub/note.md" });
+    r.handle.close();
+    await tick();
+  });
+
   it("上级 fetches the parent listing with dir:true and greys out at one segment", async () => {
     const r = rigDir();
     r.handle.open({ path: "/p/src", dir: true });

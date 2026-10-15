@@ -49,7 +49,11 @@ const props = defineProps<{
   /** Inline-expansion store; undefined ⇒ no chevrons/wrappers (pre-tree byte-identical DOM). */
   readonly tree?: PreviewTreeStore | undefined;
 }>();
-const emit = defineEmits<{ (e: "navigate", entry: PreviewDirEntry): void }>();
+/** `parentPath` = the directory this row is listed in. A row inside an INLINE-expanded
+ *  subfolder lives under that subfolder, not under the dialog's current listing, so the host
+ *  must join the name onto THIS path (2026-10-15 fix: joining onto the top-level listing
+ *  dropped the expanded subfolder segment ⇒ E_NOT_FOUND). */
+const emit = defineEmits<{ (e: "navigate", entry: PreviewDirEntry, parentPath: string): void }>();
 const i18n = useI18n();
 const { t } = i18n;
 
@@ -117,12 +121,12 @@ onUnmounted(cancelPendingClick); // 重挂载/关弹窗：绝不向已卸载组�
  *   flicker). The chevron below stays an immediate, separate toggle. */
 function onRowClick(row: RowView): void {
   if (!row.expandable || props.tree === undefined || row.childPath === null) {
-    emit("navigate", row.entry);
+    emit("navigate", row.entry, props.parentPath);
     return;
   }
   if (pendingClick !== null && pendingClick.path === row.childPath) {
     cancelPendingClick(); // 双击：撤销未生效的单击展开
-    emit("navigate", row.entry); // 双击 = 钻取
+    emit("navigate", row.entry, props.parentPath); // 双击 = 钻取
     return;
   }
   const path = row.childPath;
@@ -161,7 +165,7 @@ function onRowKeydown(ev: KeyboardEvent, row: RowView): void {
   if (key === "Enter" && (ev.ctrlKey || ev.metaKey) && row.expandable) {
     ev.preventDefault();
     cancelPendingClick();
-    emit("navigate", row.entry);
+    emit("navigate", row.entry, props.parentPath);
     return;
   }
   if (key !== "ArrowDown" && key !== "ArrowUp" && key !== "ArrowLeft" && key !== "ArrowRight") return;
@@ -251,7 +255,7 @@ function focusDelta(btn: HTMLElement, delta: 1 | -1): void {
           @rowkeydown="onRowKeydown($event, row)"
         />
       </div>
-      <PreviewDirRow v-else :row="row" @rowclick="emit('navigate', $event)" />
+      <PreviewDirRow v-else :row="row" @rowclick="emit('navigate', $event, parentPath)" />
       <!-- 行内展开状态：loading / error+重试 都不弹新窗（需求 §2）。 -->
       <template v-if="tree !== undefined && row.expandable">
         <div
@@ -292,7 +296,7 @@ function focusDelta(btn: HTMLElement, delta: 1 | -1): void {
             :entries="nodeOf(row)!.listing!.entries"
             :depth="depth + 1"
             :tree="tree"
-            @navigate="emit('navigate', $event)"
+            @navigate="(entry, parentPath) => emit('navigate', entry, parentPath)"
           />
           <div
             v-if="nodeOf(row)?.listing?.truncated === true"

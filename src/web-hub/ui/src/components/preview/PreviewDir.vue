@@ -60,7 +60,10 @@ const props = defineProps<{
   /** preview-tree: the per-visit inline-expansion store (absent ⇒ no chevrons). */
   readonly tree?: PreviewTreeStore | undefined;
 }>();
-const emit = defineEmits<{ (e: "navigate", entry: PreviewDirEntry): void; (e: "go", path: string): void }>();
+const emit = defineEmits<{
+  (e: "navigate", entry: PreviewDirEntry, parentPath: string): void;
+  (e: "go", path: string): void;
+}>();
 const i18n = useI18n();
 const { t } = i18n;
 
@@ -188,7 +191,7 @@ const notices = computed<string[]>(() => {
       :entries="listing.entries"
       :depth="1"
       :tree="tree"
-      @navigate="emit('navigate', $event)"
+      @navigate="(entry, parentPath) => emit('navigate', entry, parentPath)"
     />
     <!-- §2.8/A1: static, count-free — denylist hits are neither listed nor counted. -->
     <p class="preview-dir-footnote">{{ t("preview.dirProtected") }}</p>

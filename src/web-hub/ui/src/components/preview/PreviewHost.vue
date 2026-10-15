@@ -111,10 +111,12 @@ function up(): void {
  * (`childPreviewPath`) is re-checked here — a bad row never fires a request. A `dir` row
  * requests the listing directly (`dir:true`); a symlink row leaves the decision to the
  * admission chain (the 415 fallback upgrades it to a listing if it is a directory). */
-function onDirEntry(entry: PreviewDirEntry): void {
+function onDirEntry(entry: PreviewDirEntry, parentPath?: string): void {
   const d = nav.value;
   if (d === null || view.value.phase !== "dir") return;
-  const child = childPreviewPath(view.value.path, entry.name);
+  // A row from an inline-expanded subfolder carries its own parent dir; joining onto the
+  // top-level listing would drop the subfolder segment (2026-10-15 E_NOT_FOUND report).
+  const child = childPreviewPath(parentPath ?? view.value.path, entry.name);
   if (child === null) return;
   const ref: { readonly path: string; readonly dir?: true } =
     entry.type === "dir" ? { path: child, dir: true } : { path: child };

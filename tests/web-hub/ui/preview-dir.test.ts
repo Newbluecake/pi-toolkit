@@ -59,9 +59,9 @@ describe("PreviewDir.vue — rows (A1/A3)", () => {
     expect(buttons).toHaveLength(3); // symlink included — the admission chain decides (A3)
     for (const b of buttons) expect(b.element.tagName).toBe("BUTTON");
     await buttons[0]!.trigger("click");
-    expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]);
+    expect(w.emitted("navigate")).toStrictEqual([[entries[0], "/p/src"]]);
     await buttons[2]!.trigger("click");
-    expect(w.emitted("navigate")![1]).toStrictEqual([entries[2]]);
+    expect(w.emitted("navigate")![1]).toStrictEqual([entries[2], "/p/src"]);
   });
 
   it("`other` (FIFO/socket/device) and lossy (U+FFFD) rows are inert — never buttons", () => {
@@ -426,6 +426,34 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
     expect(rowOf(w, "x.ts").getAttribute("aria-level")).toBe("2");
   });
 
+  it("a file/dir row inside an EXPANDED subfolder emits its own parent dir (regression: E_NOT_FOUND when the host joined onto the top-level listing)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { tree } = treeWith(() =>
+        Promise.resolve({
+          ok: true,
+          listing: listing({}, [
+            { name: "x.md", type: "file", size: 1, mtimeMs: 1 },
+            { name: "inner", type: "dir", mtimeMs: 1 },
+          ]),
+        }),
+      );
+      const w = mountDir(tree, [{ name: "sub", type: "dir", mtimeMs: 1 }]);
+      await chevronOf(w, "sub").dispatchEvent(new Event("click"));
+      await flushPromises();
+      nameBtnOf(w, "x.md").dispatchEvent(new Event("click"));
+      const emitted = w.emitted("navigate")!;
+      expect(emitted[0]![0]).toMatchObject({ name: "x.md" });
+      expect(emitted[0]![1]).toBe("/p/src/sub"); // NOT the listing root "/p/src"
+      // double click on a nested dir drills down with the nested parent too
+      nameBtnOf(w, "inner").dispatchEvent(new Event("click"));
+      nameBtnOf(w, "inner").dispatchEvent(new Event("click"));
+      expect(w.emitted("navigate")![1]![1]).toBe("/p/src/sub");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("dir row SINGLE-click expands inline — but only AFTER the dblclick window (no fetch before it)", async () => {
     vi.useFakeTimers();
     try {
@@ -457,7 +485,7 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
       const btn = nameBtnOf(w, "sub");
       btn.dispatchEvent(new Event("click"));
       btn.dispatchEvent(new Event("click")); // 窗内第二次点击 = 双击
-      expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]); // 双击 = 钻取，立即
+      expect(w.emitted("navigate")).toStrictEqual([[entries[0], "/p/src"]]); // 双击 = 钻取，立即
       await vi.advanceTimersByTimeAsync(PREVIEW_TREE_DBLCLICK_MS * 3);
       await flushPromises();
       // 关键钉住：双击不产生净展开状态变化（单击展开被撤销，从未生效）
@@ -479,7 +507,7 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
       const w = mountDir(tree, entries);
       nameBtnOf(w, "sub").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
       await flushPromises();
-      expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]); // 立即钻取
+      expect(w.emitted("navigate")).toStrictEqual([[entries[0], "/p/src"]]); // 立即钻取
       await vi.advanceTimersByTimeAsync(PREVIEW_TREE_DBLCLICK_MS * 3);
       await flushPromises();
       expect(calls).toHaveLength(0); // 不触发展开 fetch
@@ -520,7 +548,7 @@ describe("PreviewDir.vue — inline tree expansion (preview-tree)", () => {
       const entries: PreviewDirEntry[] = [{ name: "a.ts", type: "file", size: 1, mtimeMs: 1 }];
       const w = mountDir(tree, entries);
       nameBtnOf(w, "a.ts").dispatchEvent(new Event("click"));
-      expect(w.emitted("navigate")).toStrictEqual([[entries[0]]]); // 同步触发，未经定时器
+      expect(w.emitted("navigate")).toStrictEqual([[entries[0], "/p/src"]]); // 同步触发，未经定时器
       expect(calls).toHaveLength(0);
     } finally {
       vi.useRealTimers();
