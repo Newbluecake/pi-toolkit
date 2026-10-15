@@ -136,7 +136,7 @@ interrupt → close）、`S/30-jsonrpc-resume-deny.jsonl`（resume）、`S/31-js
 ```
 
 - `initialize_session` 必填 `machineId`、`cwd`（缺省时错误信息直接列出缺失字段）。
-- **resume**：`initialize_session` 传 `sessionId:<旧id>` 即续跑该会话（实测写入同一会话文件）；
+- **resume**：⚠️ 2026-10-14 更正（#31，见 `resume-memory.md`）：`initialize_session` 传 `sessionId:<旧id>` 只是「复用 id 新建」——续写同一会话文件，但**不把历史装进模型上下文**（`session.messages:[]` 恒空，对不存在的 id 还会静默新建）。真正的恢复是 `droid.load_session({sessionId})`（缺失 ⇒ `-32004`），pi-toolkit 的 resume 已改走它。原记录：实测写入同一会话文件；
   但 result 的 `session.messages` 仍为空（历史不回传），且**会话持久化的设置覆盖 init 参数**
   （实测：旧会话存的是 medium，init 传 `autonomyLevel:"off"` 被忽略，result 显示 medium——
   改设置要在 init 后再发 `droid.update_session_settings`，实测生效并有 `settings_updated` 通知）。
@@ -232,7 +232,7 @@ or --auto high. For destructive commands, use --skip-permissions-unsafe."` → �
   `BLUE-OTTER-42`，exit 0。completion `numTurns:6`（累计）、`cache_read_input_tokens:61848`
   （证明历史真加载）。
 - `-s` 续跑输出**不回放历史消息**（与 help 一致），只发新消息事件。
-- JSON-RPC 等价续跑：`initialize_session` 传 `sessionId`（实测同文件续写；注意 §2 的设置覆盖坑）。
+- JSON-RPC 等价续跑：`droid.load_session({sessionId})`（会恢复模型上下文；#31 更正——`initialize_session` 传 `sessionId` 只续写文件、模型失忆，见 `resume-memory.md`）。
 - `--fork <id>` 分叉为新会话（未实测行为细节）。
 - 并发 resume 同一 session id 的行为未验证。
 

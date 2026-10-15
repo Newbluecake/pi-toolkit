@@ -737,6 +737,8 @@ S2 实测形状）。常量全部在 `droid/protocol.ts`。其它反向请求（
 
 ### 4.4 会话设置与 resume cwd（P3 `droid/settings.ts` + `droid/provider.ts`）
 
+> **#31 更新（2026-10-15）**：resume 分支已由 `initialize_session(sessionId)` 改为 `droid.load_session({sessionId, autoRejectPermissionRequests:false})`（前者只续文件、不恢复 LLM 历史；`-32004` ⇒ config fail-closed）。根因与实测见 [`resume-memory.md`](./resume-memory.md)。
+
 **create**：
 
 1. spawn（cwd = `spec.cwd`，即 post-H2）→ `initialize_session({ machineId:"pi-toolkit", cwd, modelId, autonomyLevel: DROID_AUTONOMY_FULL, reasoningEffort?, autoRejectPermissionRequests: false })`。

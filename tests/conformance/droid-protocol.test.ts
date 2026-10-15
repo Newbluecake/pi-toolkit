@@ -64,6 +64,8 @@ interface Session {
   frames: Record<string, unknown>[];
   permissionRequests: unknown[];
   askUserRequests: unknown[];
+  /** initialize_session 响应里的 `session.messages`（D8b 陷阱断言用；未调 init 时为 undefined）。 */
+  initMessages?: unknown;
   request<T = unknown>(method: string, params: unknown, timeoutMs?: number): Promise<T>;
   /** 只关 stdin（D10 EOF 实验；SIGTERM/SIGKILL 都不发）。 */
   closeStdin(): void;
@@ -240,6 +242,7 @@ async function initSession(o: {
     }),
   )) as Record<string, unknown>;
   s.sessionId = String(init.sessionId ?? "");
+  s.initMessages = (init.session as { messages?: unknown } | undefined)?.messages;
   expect(s.sessionId.length).toBeGreaterThan(0);
   const update = buildUpdateSettingsParams({
     modelId: o.model ?? MODEL,
@@ -396,38 +399,96 @@ describe("droid protocol conformance (D1–D14, real droid)", () => {
       }
     }, 300_000);
 
-    it("D8: resume (sessionId) reopens the same session (update re-applies); ⚠ RPC resume does NOT restore LLM context on droid 0.241.1", async () => {
+    /** 在新进程上 load_session 已存在的会话（生产 resume 路径），随后无条件 update。 */
+    const loadSession = async (
+      cwd: string,
+      sessionId: string,
+    ): Promise<{ s: Session; load: Record<string, unknown> }> => {
+      const s = startSession({ cwd });
+      const load = (await s.request<Record<string, unknown>>(DROID_METHODS.loadSession, {
+        sessionId,
+        autoRejectPermissionRequests: false,
+      })) as Record<string, unknown>;
+      s.sessionId = sessionId;
+      await s.request(
+        DROID_METHODS.updateSessionSettings,
+        buildUpdateSettingsParams({ modelId: MODEL, reasoningEffort: EFFORT }),
+      );
+      return { s, load };
+    };
+    const assistantText = (s: Session): string =>
+      s.notifications
+        .map(droidNotification)
+        .filter((n) => n?.type === "create_message")
+        .map((n) => JSON.stringify(n))
+        .join(" ");
+    const CODEWORD = "BANANA-42";
+    let d8Cwd: string | undefined;
+    let d8Id: string | undefined;
+    const seedD8 = async (): Promise<{ cwd: string; id: string; cumInput: number }> => {
+      if (d8Cwd !== undefined && d8Id !== undefined) return { cwd: d8Cwd, id: d8Id, cumInput: 0 };
       const cwd = tempCwd();
       const first = await initSession({ cwd });
       try {
-        await ask(first, "Remember this codeword for later: BANANA-42. Reply OK.");
+        await ask(first, `Remember this codeword for later: ${CODEWORD}. Reply OK.`);
         await first.waitTurn();
       } finally {
         first.kill();
       }
-      const second = await initSession({ cwd, sessionId: first.sessionId });
+      d8Cwd = cwd;
+      d8Id = first.sessionId;
+      return { cwd, id: first.sessionId, cumInput: 0 };
+    };
+
+    it("D8a: resume via load_session RESTORES the LLM context (hard gate; production resume path)", async () => {
+      const { cwd, id } = await seedD8();
+      const { s, load } = await loadSession(cwd, id);
       try {
-        // sessionId 接续：同 id、同会话文件追加（生产 resume 依赖这一点）。
-        expect(second.sessionId).toBe(first.sessionId);
-        // ⚠ 真机实测（0.241.1）：init 的 session.messages 为空、模型上下文不携带
-        //（「记得吗」答 I don't know；会话文件正确追加）。生产影响：外部 resume 续跑
-        // 同一 droid 会话文件，但模型不记得前情——记入 §15/P3 后续（CLI `-r` 或新版本验证）。
-        const initMsgs = second.notifications.length; // update echo 等通知存在
-        expect(initMsgs).toBeGreaterThan(0);
-        await ask(second, "What codeword did I ask you to remember? Reply with only the codeword.");
-        const done = await second.waitTurn();
+        const session = load.session as { messages?: unknown[] } | undefined;
+        expect(Array.isArray(session?.messages) && session!.messages!.length > 0).toBe(true);
+        await ask(s, "What codeword did I ask you to remember? Reply with only the codeword.");
+        const done = await s.waitTurn();
         expect(done.reason).toBe("completed");
-        // 记录证据（不作为门禁）：上下文恢复与否。
-        const text = second.notifications
-          .map(droidNotification)
-          .filter((n) => n?.type === "create_message")
-          .map((n) => JSON.stringify(n))
-          .join(" ");
-        console.warn(`[conf D8] resume context restored: ${text.includes("BANANA-42")}`);
+        const cumulative = (done.frame.cumulativeTokenUsage ?? {}) as Record<string, unknown>;
+        const loadedUsage = (load.tokenUsage ?? {}) as Record<string, unknown>;
+        // 累计用量接续：load 恢复的累计是基线（≤ 本 turn 后累计）。
+        expect(Number(cumulative.inputTokens ?? 0)).toBeGreaterThanOrEqual(Number(loadedUsage.inputTokens ?? 0));
+        expect(assistantText(s)).toContain(CODEWORD);
       } finally {
-        second.kill();
+        s.kill();
       }
     }, 240_000);
+
+    it("D8b: TRAP pinned — initialize_session(sessionId) only continues the FILE, model has no memory (0.241.1; evidence row, not a product gate)", async () => {
+      const { cwd, id } = await seedD8();
+      const s = await initSession({ cwd, sessionId: id });
+      try {
+        expect(s.sessionId).toBe(id);
+        // 硬断言（验收 #31 minor 2）：init 响应的 session.messages 恒为空数组——这是二进制里写死的行为，
+        // 不会 flaky；若某天非空，说明 droid 改了 init 语义，需要重新评估 resume 路径。
+        expect(s.initMessages).toEqual([]);
+        await ask(s, "What codeword did I ask you to remember? Reply with only the codeword.");
+        const done = await s.waitTurn();
+        expect(done.reason).toBe("completed");
+        // 证据行：0.241.1 失忆。若某天 droid 修好，这里会打印 true——升级信号，不是门禁。
+        console.warn(`[conf D8b] initialize_session resume context restored: ${assistantText(s).includes(CODEWORD)}`);
+      } finally {
+        s.kill();
+      }
+    }, 240_000);
+
+    it("D8c: load_session with an unknown sessionId ⇒ RPC error -32004 (zero billing)", async () => {
+      const s = startSession({ cwd: tempCwd() });
+      try {
+        await expect(
+          s.request(DROID_METHODS.loadSession, { sessionId: "00000000-0000-4000-8000-000000000000" }),
+        ).rejects.toSatisfy(
+          (e) => (e as { rpcCode?: unknown }).rpcCode === -32004 || /-32004|Session not found/.test(String(e)),
+        );
+      } finally {
+        s.kill();
+      }
+    }, 60_000);
 
     it("D9: get_context_stats shape", async () => {
       const cwd = tempCwd();

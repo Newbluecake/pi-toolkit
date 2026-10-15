@@ -392,7 +392,7 @@ export function settingsEcho(modelId = "gpt-6-luna", autonomyLevel = "high", rea
 /** 驱动 provider 流程的假 RPC handler：init/update/close 正常应答，update 前发全量 echo。 */
 export function standardRpcHandler(
   rpc: FakeRpc,
-  over: { modelId?: string; sessionId?: string; autonomy?: string } = {},
+  over: { modelId?: string; sessionId?: string; autonomy?: string; loadMissing?: boolean } = {},
 ): FakeRpcHandler {
   const modelId = over.modelId ?? "gpt-6-luna";
   const sessionId = over.sessionId ?? "12345678-abcd-4321-9876-abcdef012345";
@@ -403,6 +403,30 @@ export function standardRpcHandler(
         hostId: "h",
         session: { messages: [] },
         settings: { modelId, reasoningEffort: "low", autonomyLevel: over.autonomy ?? "high" },
+        availableModels: [
+          {
+            id: modelId,
+            modelProvider: "openai",
+            supportedReasoningEfforts: ["low", "high"],
+            defaultReasoningEffort: "low",
+            deprecated: false,
+          },
+        ],
+      };
+    }
+    if (method === "droid.load_session") {
+      if (over.loadMissing === true)
+        return Object.assign(new Error("JSON-RPC error -32004 on droid.load_session: Session not found"), {
+          rpcCode: -32004,
+        });
+      // 形状对齐 resume-memory.md E5：无顶层 sessionId，带 session.messages / settings / tokenUsage。
+      return {
+        hostId: "h",
+        session: { messages: [{ id: "m1", role: "user", content: [] }] },
+        settings: { modelId, reasoningEffort: "low", autonomyLevel: over.autonomy ?? "high" },
+        tokenUsage: { inputTokens: 5000, outputTokens: 900 },
+        workingState: "idle",
+        hasOlderMessages: false,
         availableModels: [
           {
             id: modelId,

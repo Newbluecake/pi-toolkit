@@ -52,7 +52,7 @@ Factory 额度是 standard / core 两个池，窗口为 month（HUD 紧凑标记
 
 ## 已知限制与风险
 
-- **resume 后模型可能不记得前情**（D8 实测，调查中，见 todo #31）。临时建议：需要连续上下文时，在新 run 的 prompt 里给全背景。
+- ~~resume 后模型不记得前情~~ **已修复（#31）**：根因是 `droid.initialize_session(sessionId)` 只续会话文件、不恢复 LLM 历史；resume 现改走 `droid.load_session`，真正恢复上下文。副作用（fail closed）：droid 原生会话文件（`~/.factory/sessions/…`）被清理/换机器时 resume 直接报 `config`（`Session not found -32004`），不再静默失忆续跑。详见 `resume-memory.md`。
 - resume 钉 transcript 头行记录的原 cwd；该目录（如已清理的 worktree）不存在则报 `config` 错误，不回落；外部 resume 不能与 isolation 同用。
 - **R10 残余风险**：droid 以完整权限（autonomy high，权限请求自动批准）运行，并读取用户全局 skills / AGENTS.md / MCP 配置，子 agent 可调用你配置的 MCP 工具。建议在 droid 侧为 exec 场景收紧 MCP；破坏性任务用 worktree 隔离。
 - 只读工具域（consult 专家、tidy）拒绝走 droid。

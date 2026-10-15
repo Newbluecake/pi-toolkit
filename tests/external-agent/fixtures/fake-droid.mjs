@@ -6,6 +6,10 @@
  * 协议面（droid-protocol.md §13 实测形状）：
  * - 出站帧恒带 type + factoryApiVersion:"1.0.0" + factoryProtocolVersion:"1.264.0"（drift 模式改 9.9.9）。
  * - initialize_session：settings_updated 全量 echo 先于响应；响应带 sessionId/settings/availableModels。
+ * - load_session（resume 语义，resume-memory.md）：已知 id ⇒ 恢复 live 历史 + 累计用量，响应带 session.messages/
+ *   tokenUsage/settings；未知 id ⇒ `-32004 "Session not found"`。initialize_session 对已知 id 只续「文件」
+ *   不恢复 live 历史（模拟 0.241.1 的失忆陷阱）。会话库：`--memory-file <path>` / env DROID_MEMORY_FILE（跨进程）否则进程内。
+ *   prompt 含 `RECALL?` ⇒ assistant 回 `RECALL:<live 历史里的 CODE-xxx 暗号>`。
  * - update_session_settings：成功 ⇒ 先部分 echo 再全量 echo，响应 `{}`；--mode unknown-model-on-update
  *   ⇒ `-32602 "Unknown model: <id>"`（S5）。
  * - add_user_message：响应 `{}` 后跑一个罐头 turn（working_state → 用量基线（S10）→ 增量 →
@@ -26,7 +30,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const PROTO = "1.264.0";
 const API = "1.0.0";
@@ -102,6 +106,7 @@ function parseArgs(argv) {
     noExitOnEof: false,
     selfTest: false,
     modelsFile: undefined,
+    memoryFile: undefined,
   };
   const args = [...argv];
   while (args.length > 0) {
@@ -111,6 +116,7 @@ function parseArgs(argv) {
     else if (a === "--script") o.script = args.shift();
     else if (a === "--delay-ms") o.delayMs = Number(args.shift() ?? 0);
     else if (a === "--models-file") o.modelsFile = args.shift();
+    else if (a === "--memory-file") o.memoryFile = args.shift();
     else if (a === "--ignore-sigterm") o.ignoreSigterm = true;
     else if (a === "--no-exit-on-eof") o.noExitOnEof = true;
     else if (a === "exec" || a === "--input-format" || a === "--output-format") {
@@ -132,6 +138,31 @@ function runFake(o) {
   const respondError = (id, code, message) => send({ type: "response", id, error: { code, message } });
 
   let sessionId;
+  // 会话库（resume 语义）：{ [sessionId]: { messages: string[]（文件里的 user 文本）, cum } }。
+  const memFile = o.memoryFile ?? process.env.DROID_MEMORY_FILE;
+  const memLocal = {};
+  const loadStore = () => {
+    if (typeof memFile !== "string") return memLocal;
+    try {
+      return existsSync(memFile) ? JSON.parse(readFileSync(memFile, "utf8")) : {};
+    } catch {
+      return {};
+    }
+  };
+  const saveStore = (st) => {
+    if (typeof memFile !== "string") return;
+    try {
+      writeFileSync(memFile, JSON.stringify(st));
+    } catch {}
+  };
+  let fileMessages = []; // 「会话文件」里累计的 user 文本
+  let liveMessages = []; // 「模型上下文」里的 user 文本（仅 load_session 恢复）
+  const persist = () => {
+    if (sessionId === undefined) return;
+    const st = loadStore();
+    st[sessionId] = { messages: [...fileMessages], cum: { ...cum } };
+    if (typeof memFile === "string") saveStore(st);
+  };
   const settings = {
     modelId: "gpt-6-luna",
     reasoningEffort: "low",
@@ -218,6 +249,15 @@ function runFake(o) {
   };
 
   const cannedTurn = (text) => {
+    fileMessages.push(text);
+    liveMessages.push(text);
+    const reply = text.includes("RECALL?")
+      ? "RECALL:" +
+        liveMessages
+          .slice(0, -1)
+          .flatMap((m) => m.match(/CODE-[A-Za-z0-9]+/g) ?? [])
+          .join(",")
+      : "DONE";
     const turnId = randomUUID();
     turnActive = true;
     working("streaming_assistant_message");
@@ -231,18 +271,19 @@ function runFake(o) {
     bump(delta);
     usageChanged();
     const msgId = randomUUID();
-    notify({ type: "assistant_text_delta", messageId: msgId, blockIndex: 0, textDelta: "DONE" });
+    notify({ type: "assistant_text_delta", messageId: msgId, blockIndex: 0, textDelta: reply });
     notify({ type: "assistant_text_complete", messageId: msgId, blockIndex: 0 });
     notify({
       type: "create_message",
       message: {
         id: msgId,
         role: "assistant",
-        content: [{ type: "text", text: "DONE" }],
+        content: [{ type: "text", text: reply }],
         createdAt: Date.now(),
         modelId: settings.modelId,
       },
     });
+    persist();
     finishTurn("completed", {
       inputTokens: delta.input,
       outputTokens: delta.output,
@@ -253,6 +294,7 @@ function runFake(o) {
     });
   };
 
+  const persistAfter = () => persist();
   const usageScriptTurn = () => {
     turnActive = true;
     working("streaming_assistant_message");
@@ -479,6 +521,12 @@ function runFake(o) {
             settings.autonomyLevel = params.autonomyLevel;
             settings.autonomyMode = `auto-${params.autonomyLevel}`;
           }
+          // 已知 id：只续文件 + 累计（persistence 层），live 历史恒空（0.241.1 失忆陷阱）。
+          const known = loadStore()[sessionId];
+          fileMessages = known ? [...known.messages] : [];
+          liveMessages = [];
+          if (known) Object.assign(cum, known.cum);
+          persist();
           notify({ type: "settings_updated", settings: fullEcho() });
           const result = {
             sessionId,
@@ -503,6 +551,36 @@ function runFake(o) {
         };
         if (o.mode === "slow-init") setTimeout(doInit, o.delayMs > 0 ? o.delayMs : 1500);
         else doInit();
+        return;
+      }
+      case "droid.load_session": {
+        const sid = typeof params?.sessionId === "string" ? params.sessionId : "";
+        const known = loadStore()[sid];
+        if (!known) {
+          respondError(id, -32004, "Session not found");
+          return;
+        }
+        sessionId = sid;
+        fileMessages = [...known.messages];
+        liveMessages = [...known.messages];
+        Object.assign(cum, known.cum);
+        notify({ type: "settings_updated", settings: fullEcho() });
+        respond(id, {
+          session: {
+            messages: liveMessages.map((t) => ({
+              id: randomUUID(),
+              role: "user",
+              content: [{ type: "text", text: t }],
+            })),
+          },
+          settings: fullEcho(),
+          availableModels: o.modelsFile !== undefined ? JSON.parse(readFileSync(o.modelsFile, "utf8")) : FAKE_MODELS,
+          tokenUsage: cumFrame(),
+          cwd: process.cwd(),
+          hostId: "fake-host",
+          workingState: "idle",
+          hasOlderMessages: false,
+        });
         return;
       }
       case "droid.update_session_settings": {
@@ -715,6 +793,72 @@ async function selfTest() {
       frames.every((f) => f.factoryProtocolVersion === PROTO),
       "envelope version",
     );
+  });
+
+  await check("load_session: known id restores live history; unknown ⇒ -32004; init amnesia", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fake-droid-mem-"));
+    const memFile = join(dir, "mem.json");
+    const run = async (script, until) => {
+      const env = { ...process.env, DROID_MEMORY_FILE: memFile };
+      return await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [file], { stdio: ["pipe", "pipe", "pipe"], env });
+        const frames = [];
+        let b = "";
+        const t = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error("timeout"));
+        }, 4000);
+        child.stdout.on("data", (c) => {
+          b += c.toString();
+          let i;
+          while ((i = b.indexOf("\n")) >= 0) {
+            try {
+              frames.push(JSON.parse(b.slice(0, i)));
+            } catch {}
+            b = b.slice(i + 1);
+          }
+          if (frames.some(until)) {
+            clearTimeout(t);
+            child.kill("SIGKILL");
+            resolve(frames);
+          }
+        });
+        script((o2) => child.stdin.write(JSON.stringify(o2) + "\n"));
+      });
+    };
+    const assistantText = (frames) =>
+      frames
+        .filter(
+          (f) =>
+            f.params?.notification?.type === "create_message" && f.params.notification.message?.role === "assistant",
+        )
+        .map((f) => f.params.notification.message.content[0].text)
+        .join("");
+    const SID = "11111111-2222-4333-8444-555555555555";
+    await run((w) => {
+      w({ ...INIT, params: { ...INIT.params, sessionId: SID } });
+      w(UPDATE);
+      w({ ...PROMPT, params: { text: "remember CODE-AB12" } });
+    }, isTurnDone);
+    const loaded = await run((w) => {
+      w({ ...INIT, method: "droid.load_session", params: { sessionId: SID } });
+      w(UPDATE);
+      w({ ...PROMPT, params: { text: "RECALL?" } });
+    }, isTurnDone);
+    const lr = loaded.find((f) => f.id === "1")?.result;
+    assert(lr?.session?.messages?.length === 1 && lr.tokenUsage.inputTokens === 120, "load restores history+usage");
+    assert(assistantText(loaded) === "RECALL:CODE-AB12", `load recall ${assistantText(loaded)}`);
+    const amnesia = await run((w) => {
+      w({ ...INIT, params: { ...INIT.params, sessionId: SID } });
+      w(UPDATE);
+      w({ ...PROMPT, params: { text: "RECALL?" } });
+    }, isTurnDone);
+    assert(assistantText(amnesia) === "RECALL:", `init amnesia ${assistantText(amnesia)}`);
+    const missing = await run(
+      (w) => w({ ...INIT, method: "droid.load_session", params: { sessionId: "nope" } }),
+      (f) => f.id === "1",
+    );
+    assert(missing.find((f) => f.id === "1")?.error?.code === -32004, "-32004");
   });
 
   await check("unknown-model-on-update", async () => {

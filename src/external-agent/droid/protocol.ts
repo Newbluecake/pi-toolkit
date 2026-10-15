@@ -62,6 +62,8 @@ export const DROID_TOOL_NAME_HINT =
 /** 方法名（droid-protocol §2 实测 + 二进制证据）。 */
 export const DROID_METHODS = {
   initializeSession: "droid.initialize_session",
+  /** resume 专用：真正恢复 LLM 历史（initialize_session 对已存在 id 只续文件不恢复上下文；resume-memory.md）。 */
+  loadSession: "droid.load_session",
   addUserMessage: "droid.add_user_message",
   interruptSession: "droid.interrupt_session",
   closeSession: "droid.close_session",

@@ -190,6 +190,29 @@ describe("external droid integration — chain (§7.2)", () => {
     expect(snap2?.diag.model).toEqual({ provider: "droid", id: "gpt-6-luna" });
   }, 90_000);
 
+  it("resume 恢复历史（load_session）：第二 run 记得第一 run 的暗号；累计用量不重复计费", async () => {
+    const root = tmpRoot();
+    const mem = join(root, "mem.json");
+    const s = buildDroidStack({ binary: makeBinary(root, ["--memory-file", mem]) });
+    stacks.push(s);
+    const first = await spawnDroid(s, "remember CODE-ZX81 please");
+    const d1 = await waitFor(s.stack, first, 30_000);
+    expect(d1.status).toBe("completed");
+    expect(d1.outcome?.usage).toMatchObject({ input: 120, output: 12 });
+    const second = await s.stack.spawn.spawn({ type: "worker", prompt: "RECALL?", resumeFrom: first }).then((r) => {
+      if (!("runId" in r)) throw new Error(`resume rejected: ${JSON.stringify(r)}`);
+      return r.runId as string;
+    });
+    const d2 = await waitFor(s.stack, second, 30_000);
+    expect(d2.status).toBe("completed");
+    expect(d2.outcome?.text).toContain("CODE-ZX81"); // 暗号来自 load_session 恢复的 live 历史
+    // 计费：load 恢复的累计（120/12…）只是基线，第二 run 只记本 run 增量（120/12，而非 240/24）。
+    expect(d2.outcome?.usage).toMatchObject({ input: 120, output: 12 });
+    // 线上方法：第一 run initialize_session，resume 走 load_session（trace 含 load 恰一次）。
+    const calls = readLines(s.traceFile);
+    expect(calls.filter((l) => l === "droid.load_session")).toHaveLength(1);
+  }, 90_000);
+
   it("resume cwd 钉死（echo-cwd）①：spec.cwd=B ⇒ fake 进程 cwd 与 init cwd 都是 A", async () => {
     const dirA = mkdtempSync(join(tmpdir(), "droid-cwd-a-"));
     const dirB = mkdtempSync(join(tmpdir(), "droid-cwd-b-"));

@@ -11,7 +11,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { ClassifiedError, classifiedInfo } from "../../core/errors.js";
 import type { DroidAgentSettings } from "../../config/settings.js";
-import { msgBinaryNotFound, msgProtocolDrift, msgResumeCwdGone } from "../messages.js";
+import { msgBinaryNotFound, msgProtocolDrift, msgResumeCwdGone, msgResumeSessionNotFound } from "../messages.js";
 import { externalSessionPath, isExternalSessionPath } from "../paths.js";
 import type {
   ExternalAgentProvider,
@@ -28,11 +28,13 @@ import {
   DROID_CUMULATIVE_INCLUDES_CHILD,
   DROID_EXITS_ON_STDIN_EOF,
   DROID_EXEC_ARGS,
+  DROID_AUTO_REJECT_PERMISSIONS,
   DROID_METHODS,
   DROID_RESUME_CUSTOM_TYPE,
   DROID_THINKING_IN_OUTPUT,
   DROID_UNSUPPORTED_REQUEST_REPLY,
 } from "./protocol.js";
+import { droidNativeSessionPaths, factoryHomeDir } from "./reconcile.js";
 import { createDroidSession, type DroidRpcHandlers, type DroidRpcHandlersRef } from "./session.js";
 import {
   buildInitParams,
@@ -252,24 +254,50 @@ export function createDroidProvider(
     // ── init → observeInit → update → 生效值比对 ──
     let sessionId: string;
     try {
-      const initResult = await rpc.request<Record<string, unknown>>(
-        DROID_METHODS.initializeSession,
-        buildInitParams({
-          cwd,
-          modelId: ext.modelId,
-          ...(effort === undefined ? {} : { reasoningEffort: effort }),
-          ...(resumeSessionId === undefined ? {} : { sessionId: resumeSessionId }),
-        }),
-        s.initTimeoutMs,
-      );
+      let initResult: Record<string, unknown>;
+      if (resumeSessionId !== undefined) {
+        // resume：load_session 才真正恢复 LLM 历史（initialize_session 只续文件，resume-memory.md）。
+        // 响应无顶层 sessionId ⇒ 取 transcript 头行的值；-32004 ⇒ config（fail closed，不发 prompt）。
+        try {
+          initResult = await rpc.request<Record<string, unknown>>(
+            DROID_METHODS.loadSession,
+            { sessionId: resumeSessionId, autoRejectPermissionRequests: DROID_AUTO_REJECT_PERMISSIONS },
+            s.initTimeoutMs,
+          );
+        } catch (e) {
+          const code = (e as { rpcCode?: unknown } | undefined)?.rpcCode;
+          if (code === -32004 || (e instanceof Error && /Session not found/i.test(e.message)))
+            throw new ClassifiedError({
+              kind: "config",
+              message: msgResumeSessionNotFound(
+                droidNativeSessionPaths({ homeDir: factoryHomeDir(), cwd, sessionId: resumeSessionId }).sessionFile,
+              ),
+              retryable: false,
+            });
+          throw e;
+        }
+        sessionId = resumeSessionId;
+      } else {
+        initResult = await rpc.request<Record<string, unknown>>(
+          DROID_METHODS.initializeSession,
+          buildInitParams({
+            cwd,
+            modelId: ext.modelId,
+            ...(effort === undefined ? {} : { reasoningEffort: effort }),
+          }),
+          s.initTimeoutMs,
+        );
+      }
       if (setupFailure !== undefined) throw setupFailure;
-      sessionId = str(initResult?.sessionId) ?? "";
-      if (sessionId.length === 0)
-        throw new ClassifiedError({
-          kind: "config",
-          message: "droid initialize_session returned no sessionId (protocol drift?)",
-          retryable: false,
-        });
+      if (resumeSessionId === undefined) {
+        sessionId = str(initResult?.sessionId) ?? "";
+        if (sessionId.length === 0)
+          throw new ClassifiedError({
+            kind: "config",
+            message: "droid initialize_session returned no sessionId (protocol drift?)",
+            retryable: false,
+          });
+      }
       const initEcho = extractSettingsEcho(initResult);
       if (isFullSettingsEcho(initEcho)) lastFullEcho = initEcho;
       catalog.observeInit(initResult?.availableModels, envelope.lastSeenProtocolVersion());

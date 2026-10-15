@@ -32,6 +32,14 @@ export function msgResumeCwdGone(cwd: string): string {
   );
 }
 
+export function msgResumeSessionNotFound(sessionFile: string): string {
+  return (
+    "cannot resume this droid session: droid reports Session not found (-32004). Its native session log " +
+    `${sessionFile} is missing (~/.factory/sessions cleaned, different machine/home, or session deleted). ` +
+    "Resuming would silently lose the model's memory of the earlier conversation, so it is refused. Start a new run instead."
+  );
+}
+
 export const MSG_RESUME_ISOLATION: string =
   "isolation cannot be combined with resuming a droid run: droid sessions are pinned to their original working directory";
 

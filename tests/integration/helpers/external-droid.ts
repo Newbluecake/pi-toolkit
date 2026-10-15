@@ -28,12 +28,16 @@ export interface DroidStack {
 }
 
 /** 生成一个可执行 wrapper 脚本当 droid binary（模式/参数烤进脚本；观测文件经 env 注入）。 */
-export function makeBinary(root: string, args: readonly string[]): string {
+export function makeBinary(root: string, argsIn: readonly string[]): string {
+  // 会话库默认落在 binary 同目录：resume 起的新 fake 进程才能 load_session 到上一个进程建的会话。
+  const args = argsIn.includes("--memory-file")
+    ? argsIn
+    : [...argsIn, "--memory-file", join(root, "fake-droid-mem.json")];
   const dir = join(root, "bin");
   mkdirSync(dir, { recursive: true });
   const path = join(
     dir,
-    `droid-${args.join("_").replaceAll(/[^A-Za-z0-9._-]/g, "") || "default"}-${Math.random().toString(36).slice(2, 8)}`,
+    `droid-${argsIn.join("_").replaceAll(/[^A-Za-z0-9._-]/g, "") || "default"}-${Math.random().toString(36).slice(2, 8)}`,
   );
   const script = [
     "#!/bin/sh",

@@ -200,13 +200,40 @@ describe("droid/provider resume cwd 钉死（acceptance ⑦，S7）", () => {
     const file = externalSessionPath(agentDir, "droid", SESSION_ID);
     const handle = await provider.resume(file, makeSpec({ cwd: dirB, resume: true }));
     expect(f.spawnOpts[0]!.cwd).toBe(dirA);
-    const init = f.rpcs[0]!.requests.find((r) => r.method === DROID_METHODS.initializeSession);
-    expect(init?.params).toMatchObject({ cwd: dirA, sessionId: SESSION_ID });
+    // resume 走 load_session（真正恢复 LLM 历史），不再发 initialize_session。
+    const methods = f.rpcs[0]!.requests.map((r) => r.method);
+    expect(methods).not.toContain(DROID_METHODS.initializeSession);
+    const load = f.rpcs[0]!.requests.find((r) => r.method === DROID_METHODS.loadSession);
+    expect(load?.params).toEqual({ sessionId: SESSION_ID, autoRejectPermissionRequests: false });
+    expect(methods.indexOf(DROID_METHODS.loadSession)).toBeLessThan(
+      methods.indexOf(DROID_METHODS.updateSessionSettings),
+    );
     // transcript resume 模式 + 追加 subagent:external-resume
     expect(f.transcripts[0]!.resume).toBe(true);
     expect(f.transcripts[0]!.path).toBe(file);
     expect(f.transcripts[0]!.appended.some((e) => e.customType === "subagent:external-resume")).toBe(true);
     expect(handle.sessionId).toBe(SESSION_ID);
+  });
+
+  it("load_session -32004 ⇒ config 失败（文案含原生日志路径）、组杀、不发 add_user_message、不开 transcript", async () => {
+    const dirA = mkdtempSync(join(tmpdir(), "droid-cwd-a-"));
+    const { f, provider, agentDir } = setup();
+    f.readHeader = () => headerFor(dirA);
+    f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!, { loadMissing: true })(m, p);
+    const file = externalSessionPath(agentDir, "droid", SESSION_ID);
+    await expect(provider.resume(file, makeSpec({ cwd: dirA, resume: true }))).rejects.toSatisfy((e) => {
+      const i = classifiedInfo(e);
+      return (
+        i?.kind === "config" &&
+        i.retryable === false &&
+        /Session not found/.test(i.message) &&
+        i.message.includes(`${SESSION_ID}.jsonl`)
+      );
+    });
+    const methods = f.rpcs[0]!.requests.map((r) => r.method);
+    expect(methods).toEqual([DROID_METHODS.loadSession]); // 无 update / initialize / add_user_message
+    expect(f.transcripts).toHaveLength(0);
+    expect(f.children[0]!.terminated).toContain("now");
   });
 
   it("头行缺失/非 droid ⇒ config 拒绝且不起进程", async () => {
