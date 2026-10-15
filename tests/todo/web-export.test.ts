@@ -113,7 +113,8 @@ describe("wireTodo — getTodoSnapshot (todo-web T1)", () => {
 
     const clear = host.commands.get("tasklist")!;
     await clear.handler("clear", ctx);
-    expect(snap()).toEqual({ tasks: [], nextId: 1 }); // emptyState() resets id numbering too
+    // todo-archive D9: clear keeps the nextId high-water mark (ids never reused).
+    expect(snap()).toEqual({ tasks: [], nextId: 3 });
   });
 
   test("session_start restore replaces the closure state behind the same getter", async () => {

@@ -21,142 +21,33 @@
  * `npm run test:conformance` runs just this directory. It is NOT a release gate by itself — see
  * plan §3.1 "契约测试与升级流程": upgrading pi means running this first, then the full gate.
  */
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { parseSessionEntries, SessionManager } from "@earendil-works/pi-coding-agent";
 import {
-  DefaultResourceLoader,
-  SessionManager,
-  SettingsManager,
-  createAgentSession,
-  parseSessionEntries,
-} from "@earendil-works/pi-coding-agent";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+  assistantTextMsg,
+  assistantToolCallMsg,
+  disposeHarnessDirs,
+  fakeModel,
+  fakeModelRuntime,
+  withSession,
+  type ScriptedTurn,
+} from "./agent-session-harness.js";
 
-interface ScriptedTurn {
-  toolCall: boolean;
-  build: (model: ReturnType<typeof fakeModel>) => unknown;
-}
+/*
+ * The fakeModel / fakeModelRuntime / withSession plumbing now lives in
+ * ./agent-session-harness.ts (moved verbatim by the todo-archive plan §3 so its conformance
+ * suite reuses the same real-AgentSession harness). This file keeps only its own tests.
+ */
 
-function fakeModel() {
-  return {
-    id: "fake-model",
-    name: "Fake Model",
-    api: "anthropic-messages",
-    provider: "fake-provider",
-    baseUrl: "http://localhost",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0 },
-    contextWindow: 200_000,
-    maxTokens: 4096,
-  };
-}
-
-function fakeModelRuntime(model: ReturnType<typeof fakeModel>, scripted: ScriptedTurn[]) {
-  let call = 0;
-  const requestSizes: number[] = [];
-  const requestMessages: unknown[][] = [];
-  return {
-    streamSimple: (_m: unknown, context: { messages?: unknown[] }) => {
-      requestSizes.push(context.messages?.length ?? 0);
-      requestMessages.push(context.messages ?? []);
-      const turn = scripted[call] ?? scripted[scripted.length - 1]!;
-      call += 1;
-      const stream = createAssistantMessageEventStream();
-      stream.push({
-        type: "done",
-        reason: turn.toolCall ? "toolUse" : "stop",
-        message: turn.build(model),
-      });
-      return stream;
-    },
-    getAuth: async () => undefined,
-    hasConfiguredAuth: () => true,
-    checkAuth: async () => ({ ok: true }),
-    isUsingOAuth: () => false,
-    getAvailableSnapshot: () => [model],
-    getModel: () => model,
-    callCount: () => call,
-    requestSizes,
-    requestMessages,
-  };
-}
-
-function assistantTextMsg(model: ReturnType<typeof fakeModel>, text: string) {
-  return {
-    role: "assistant",
-    content: [{ type: "text", text }],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-    stopReason: "stop",
-    timestamp: Date.now(),
-  };
-}
-function assistantToolCallMsg(
-  model: ReturnType<typeof fakeModel>,
-  toolCallId: string,
-  name: string,
-  args: Record<string, unknown>,
-) {
-  return {
-    role: "assistant",
-    content: [{ type: "toolCall", id: toolCallId, name, arguments: args }],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-    stopReason: "toolUse",
-    timestamp: Date.now(),
-  };
-}
-
-const dirs: string[] = [];
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  // withSession (now in the harness) owns the temp-dir registry; drain it here.
+  disposeHarnessDirs();
 });
 
-async function withSession(
-  opts: { scripted: ScriptedTurn[]; extensionFactories?: unknown[]; persist?: boolean },
-  run: (env: {
-    session: import("@earendil-works/pi-coding-agent").AgentSession;
-    cwd: string;
-    modelRuntime: ReturnType<typeof fakeModelRuntime>;
-  }) => Promise<void>,
-) {
-  const cwd = mkdtempSync(join(tmpdir(), "pi-boundary-conformance-"));
-  dirs.push(cwd);
-  const model = fakeModel();
-  const modelRuntime = fakeModelRuntime(model, opts.scripted);
-  const settingsManager = SettingsManager.create(cwd, join(cwd, ".pi-agent"));
-  const loader = new DefaultResourceLoader({
-    cwd,
-    agentDir: join(cwd, ".pi-agent"),
-    settingsManager,
-    extensionFactories: (opts.extensionFactories ?? []) as never,
-  });
-  await loader.reload();
-  const sessionManager = opts.persist
-    ? SessionManager.create(cwd, join(cwd, "sessions"))
-    : SessionManager.inMemory(cwd);
-  const { session } = await createAgentSession({
-    cwd,
-    model: model as never,
-    modelRuntime: modelRuntime as never,
-    sessionManager,
-    settingsManager,
-    resourceLoader: loader,
-    tools: ["bash"],
-  });
-  try {
-    await run({ session, cwd, modelRuntime });
-  } finally {
-    session.dispose();
-  }
-}
+/*
+ * (withSession moved verbatim to ./agent-session-harness.ts — imported above.)
+ */
 
 /** A turn_end handler mirroring the shape our own boundary handler would produce, without pulling
  *  in src/context-switch/child.ts (P3, not part of this package): compaction (firstKeptEntryId

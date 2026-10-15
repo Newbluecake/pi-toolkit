@@ -860,6 +860,22 @@ export interface TodoNudgeSettings {
 /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasklist widget, plus the staleness nudge sub-block. */
 export interface TodoSettings extends EnabledGroup {
   nudge: TodoNudgeSettings;
+  /** Completed-task auto-archive (todo-archive plan D1). Both knobs are non-live (/reload). */
+  archive: TodoArchiveSettings;
+}
+
+/**
+ * Completed-task auto-archive (todo-archive plan §2, user ruling 2026-10-15): `onCompact` sweeps
+ * every completed task when the session compacts; `afterTurns` archives a completed task on the
+ * Nth `turn_end` after its completion (turns are finer-grained than user requests — tune N
+ * accordingly). Both are turn/compaction-count semantics, never durations, so like the nudge
+ * block they stay out of the `*Ms`/`*S` time-unit migration. Non-live: read at wiring time only.
+ */
+export interface TodoArchiveSettings {
+  /** Archive all completed tasks on session compaction. Default true. */
+  onCompact: boolean;
+  /** Archive a completed task after this many turn_end events; 0 disables the per-turn sweeper. Default 30, min 0. */
+  afterTurns: number;
 }
 
 /**
@@ -1119,7 +1135,11 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   },
   webSearch: { enabled: true },
   date: { enabled: true },
-  todo: { enabled: true, nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 } },
+  todo: {
+    enabled: true,
+    nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 },
+    archive: { onCompact: true, afterTurns: 30 },
+  },
   askUser: {
     enabled: true,
     backgroundInterrupt: {
@@ -1855,11 +1875,28 @@ function parseHudSettings(input: unknown): HudSettings {
  */
 function parseTodoSettings(input: unknown): TodoSettings {
   const defaults = DEFAULT_SETTINGS.todo;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults, nudge: { ...defaults.nudge } };
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    return { ...defaults, nudge: { ...defaults.nudge }, archive: { ...defaults.archive } };
   const record = input as Record<string, unknown>;
   return {
     enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
     nudge: parseTodoNudgeSettings(record.nudge, defaults.nudge),
+    archive: parseTodoArchiveSettings(record.archive, defaults.archive),
+  };
+}
+
+/** todo-archive plan §2: field-by-field fallback to DEFAULT_SETTINGS.todo.archive; `afterTurns`
+ * accepts integers >= 0 (0 = off); never throws. */
+function parseTodoArchiveSettings(input: unknown, defaults: TodoArchiveSettings): TodoArchiveSettings {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const record = input as Record<string, unknown>;
+  const afterTurns = record.afterTurns;
+  return {
+    onCompact: typeof record.onCompact === "boolean" ? record.onCompact : defaults.onCompact,
+    afterTurns:
+      typeof afterTurns === "number" && Number.isFinite(afterTurns) && Number.isInteger(afterTurns) && afterTurns >= 0
+        ? afterTurns
+        : defaults.afterTurns,
   };
 }
 

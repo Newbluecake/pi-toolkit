@@ -32,7 +32,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earend
 import { isWebInvocation } from "../web-hub/agent/command-capture.js";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
-import { TodoPanel, TodoWidget } from "./ui.js";
+import { TodoPanel, TodoWidget, WIDGET_RECENT_COMPLETED } from "./ui.js";
 import { WORKFLOW_NOTIFICATION_TYPE } from "../adapters/workflow-notice.js";
 import { BASH_JOB_NOTIFICATION_TYPE } from "../stack.js";
 import { TODO_WIDGET_MOUNTED_EVENT } from "../ui/widget-mount-events.js";
@@ -51,17 +51,23 @@ import {
 } from "./nudge.js";
 import {
   activeBlockers,
+  archiveCompleted,
+  clearTasks,
   cloneState,
+  completionTime,
   createTask,
   deleteTask,
   emptyState,
   getTask,
+  isArchived,
   newlyUnblockedTasks,
   orderTasks,
+  partitionTasks,
   replayState,
   STATE_ENTRY,
   type Task,
   type TaskInput,
+  type TaskPartition,
   type TodoState,
   updateTask,
 } from "./state.js";
@@ -88,7 +94,14 @@ const TaskCreateSchema = Type.Object({
 });
 type TaskCreateInput = Static<typeof TaskCreateSchema>;
 
-const TaskListSchema = Type.Object({});
+const TaskListSchema = Type.Object({
+  includeCompleted: Type.Optional(
+    Type.Boolean({
+      description:
+        "Also list completed and archived tasks (the default output lists open tasks only and appends a footer with the hidden counts).",
+    }),
+  ),
+});
 type TaskListInput = Static<typeof TaskListSchema>;
 
 const TaskGetSchema = Type.Object({ taskId: TaskIdSchema });
@@ -132,7 +145,21 @@ export interface TodoNudgeDeps {
     message: { customType: string; content: string; display: boolean; details?: unknown },
     options: { triggerTurn: false },
   ) => void;
+  /** Completed-task auto-archive knobs (todo-archive plan D1, `todo.archive.*` settings). Defaults:
+   *  `{ onCompact: true, afterTurns: 30 }`. The per-turn sweeper is registered in main AND child
+   *  sessions, independent of the nudge tracker. */
+  readonly archive?: TodoArchiveDeps;
 }
+
+/** todo-archive plan D1: archive-on-compaction + archive-after-N-turns knobs. */
+export interface TodoArchiveDeps {
+  /** Sweep all completed tasks inside the serialized `session_compact` handler (default true). */
+  readonly onCompact: boolean;
+  /** Archive a completed task on the Nth `turn_end` after its completion; 0 disables the per-turn sweeper (default 30). */
+  readonly afterTurns: number;
+}
+
+const DEFAULT_ARCHIVE_DEPS: TodoArchiveDeps = { onCompact: true, afterTurns: 30 };
 
 export interface TodoWireResult {
   /**
@@ -184,8 +211,35 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   let nudgeState: NudgeState = initNudgeState(nudgeConfig);
   const pendingBashCommands = new Map<string, string>();
 
+  // todo-archive (D1/D8): archive knobs + per-turn completion-age bookkeeping. `turnSeq` counts
+  // turn_end events (only while a per-turn sweeper is registered); `doneSince` maps task id → the
+  // turnSeq at which the task was (re-)observed as "completed and not archived". All mutation of
+  // both lives inside commit()/restore()/the archive turn_end handler — no module-scope state.
+  const archive: TodoArchiveDeps = deps.archive ?? DEFAULT_ARCHIVE_DEPS;
+  let turnSeq = 0;
+  const doneSince = new Map<number, number>();
+
   const noteTodoTouch = (): void => {
     nudgeState = recordTodoTouch(nudgeState, nudgeConfig);
+  };
+
+  /** todo-archive D8: the ONLY point that assigns `state`. Reconciles `doneSince` per task against
+   *  the previous state so intra-turn reopen→recomplete cycles re-age (every tool call commits
+   *  individually). Called only inside serialized work or restore() (session boundaries). */
+  const commit = (next: TodoState): void => {
+    const prevById = new Map(state.tasks.map((task) => [task.id, task]));
+    const nextById = new Map(next.tasks.map((task) => [task.id, task]));
+    for (const task of next.tasks) {
+      if (task.status !== "completed" || isArchived(task)) continue;
+      const before = prevById.get(task.id);
+      const wasDone = before !== undefined && before.status === "completed" && !isArchived(before);
+      if (!wasDone || before.completedAt !== task.completedAt) doneSince.set(task.id, turnSeq);
+    }
+    for (const id of [...doneSince.keys()]) {
+      const task = nextById.get(id);
+      if (!task || task.status !== "completed" || isArchived(task)) doneSince.delete(id);
+    }
+    state = next;
   };
 
   const restore = (ctx: ExtensionContext): void => {
@@ -206,7 +260,13 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     // degrade to an empty replay instead of throwing (repo convention:
     // graceful degradation on missing host APIs).
     const branch = typeof ctx.sessionManager?.getBranch === "function" ? ctx.sessionManager.getBranch() : [];
-    state = replayState(branch) ?? emptyState();
+    commit(replayState(branch) ?? emptyState());
+    // todo-archive §2: after replay the completion ages restart — register every currently
+    // "completed and not archived" task at the CURRENT turnSeq (re-count from here).
+    doneSince.clear();
+    for (const task of state.tasks) {
+      if (task.status === "completed" && !isArchived(task)) doneSince.set(task.id, turnSeq);
+    }
     refreshWidget();
   };
 
@@ -216,8 +276,10 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
 
   const refreshWidget = (ui = currentUI): void => {
     if (!ui) return;
-    const tasks = state.tasks;
-    if (tasks.length === 0) {
+    // todo-archive §2: the hidden⇒visible judgment follows the collapsed widget's own row set
+    // (open + 2 recent completions) — a list of only archived tasks unmounts the widget.
+    const visible = partitionTasks(state.tasks, WIDGET_RECENT_COMPLETED).visible;
+    if (visible.length === 0) {
       // Empty ⇒ hidden: unmount (matches pre-existing behavior) and forget
       // the mount so the NEXT non-empty transition remounts fresh.
       if (mountedWidget) {
@@ -251,16 +313,36 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     pi.events?.emit(TODO_WIDGET_MOUNTED_EVENT, { at: Date.now() });
   };
 
-  const enqueue = <T>(work: () => T): Promise<T> => {
-    // Every Task* tool execute funnels through here — including the
-    // read-only List/Get calls, which the spec explicitly counts as a touch.
-    noteTodoTouch();
+  /** todo-archive D8: serialization only — no nudge touch. Automatic archiving (the per-turn
+   *  sweeper and the compaction sweep) goes through here so it never resets the nudge counters. */
+  const serialize = <T>(work: () => T): Promise<T> => {
     const run = queue.then(work);
     queue = run.then(
       () => undefined,
       () => undefined,
     );
     return run;
+  };
+
+  const enqueue = <T>(work: () => T): Promise<T> => {
+    // Every Task* tool execute funnels through here — including the
+    // read-only List/Get calls, which the spec explicitly counts as a touch.
+    noteTodoTouch();
+    return serialize(work);
+  };
+
+  /** todo-archive §2: archive the given completed tasks (or "all"), only inside serialized work.
+   *  Persists exactly once per effective change; failures are contained (warn + keep going). */
+  const sweep = (ids: number[] | "all"): void => {
+    try {
+      const next = archiveCompleted(state, ids, Date.now());
+      if (next === state) return;
+      commit(next);
+      persist();
+      refreshWidget();
+    } catch (error) {
+      console.warn(`[pi-subagent] todo archive sweep failed: ${String(error)}`);
+    }
   };
 
   const successfulResult = (
@@ -341,7 +423,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     async execute(_toolCallId, params: TaskCreateInput, _signal, _onUpdate, ctx) {
       return enqueue(() => {
         const result = createTask(state, params as TaskInput);
-        state = result.state;
+        commit(result.state);
         persist();
         refreshWidget();
         return successfulResult("create", { task: result.task });
@@ -364,12 +446,12 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   registerMutation<TaskListInput>(
     "TaskList",
     "TaskList",
-    "List all tasks with status, ownership and dependency information.",
+    "List tasks with status, ownership and dependency information. The default output lists open tasks only; when completed or archived tasks are hidden, a footer reports their counts, the latest completed ids and how to list everything (includeCompleted:true; archived rows are marked, TaskGet still works on them).",
     TaskListSchema,
     "list",
-    (_params) => {
+    (params) => {
       refreshWidget();
-      return { text: formatTaskList(state) };
+      return { text: formatTaskList(state, { includeCompleted: params.includeCompleted ?? false }) };
     },
     false,
   );
@@ -404,7 +486,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
         removeBlockedBy: params.removeBlockedBy,
         removeBlocks: params.removeBlocks,
       } as TaskInput);
-      state = result.state;
+      commit(result.state);
       refreshWidget();
       const unblocked = result.changed ? newlyUnblockedTasks(before, state) : [];
       return { task: result.task, changed: result.changed, unblocked };
@@ -420,7 +502,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     (params) => {
       const before = state;
       const result = deleteTask(state, params.taskId);
-      state = result.state;
+      commit(result.state);
       const unblocked = newlyUnblockedTasks(before, state);
       return { task: result.task, unblocked };
     },
@@ -444,7 +526,9 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
         )
           return;
         await enqueue(() => {
-          state = emptyState();
+          // todo-archive D9: clearTasks keeps the nextId high-water mark so ids
+          // are never reused within this branch/session.
+          commit(clearTasks(state));
           persist();
           refreshWidget();
         });
@@ -452,6 +536,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
         return;
       }
       if (ctx.mode !== "tui" || isWebInvocation(ctx)) {
+        // Collapsed format (open tasks + hidden-count footer) for non-TUI/web invocations.
         ctx.ui.notify(formatTaskList(state), "info");
         return;
       }
@@ -468,7 +553,29 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
 
   pi.on("session_start", async (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
-  pi.on("session_compact", (_event, ctx) => restore(ctx));
+  // todo-archive D1(a)/D8: compaction restores first (inside the same serial queue, AFTER any
+  // already-enqueued tool mutations), then sweeps every completed task. The handler returns the
+  // serialize() promise — pi awaits session_compact handlers, so the archive entry is on disk
+  // before compact() resolves. session_start/session_tree stay synchronous restore-only (R6).
+  pi.on("session_compact", (_event, ctx) =>
+    serialize(() => {
+      restore(ctx);
+      if (archive.onCompact) sweep("all");
+    }),
+  );
+  // todo-archive D1(b): the per-turn sweeper, registered OUTSIDE the nudge conditional — main
+  // AND child sessions, independent of nudge tracking. A task is archived on the Nth turn_end
+  // after its completion; collapsed/hidden completed tasks age the same way. Runs through
+  // serialize() so it neither resets the nudge (D8) nor races in-flight tool mutations.
+  if (archive.afterTurns > 0) {
+    pi.on("turn_end", () =>
+      serialize(() => {
+        turnSeq++;
+        const due = [...doneSince].filter(([, since]) => turnSeq - since >= archive.afterTurns).map(([id]) => id);
+        if (due.length > 0) sweep(due);
+      }),
+    );
+  }
   pi.on("session_shutdown", (_event, ctx) => {
     if (ctx.mode === "tui") ctx.ui.setWidget(WIDGET_KEY, undefined);
     mountedWidget = false;
@@ -594,14 +701,49 @@ function formatTaskLine(task: Task, tasks: readonly Task[]): string {
   const blockers = activeBlockers(task, tasks);
   const suffix = blockers.length > 0 ? ` [blocked by ${blockers.map((id) => `#${id}`).join(", ")}]` : "";
   const owner = task.owner ? ` (${task.owner})` : "";
-  return `${icon} #${task.id} ${task.status} ${task.subject}${owner}${suffix}`;
+  const archived = isArchived(task) ? " [archived]" : "";
+  return `${icon} #${task.id} ${task.status} ${task.subject}${owner}${suffix}${archived}`;
 }
 
-function formatTaskList(state: TodoState): string {
+/** Up to this many latest-completed ids appear in the collapsed TaskList footer (todo-archive D3). */
+const FOOTER_LATEST_IDS = 3;
+
+function formatHiddenFooter(partition: TaskPartition): string | undefined {
+  const parts: string[] = [];
+  if (partition.hiddenCompleted > 0) {
+    const latest = [...partition.completed]
+      .sort((a, b) => {
+        const delta = completionTime(b) - completionTime(a);
+        return delta !== 0 ? delta : b.id - a.id;
+      })
+      .slice(0, FOOTER_LATEST_IDS)
+      .reverse()
+      .map((task) => `#${task.id}`)
+      .join(", ");
+    parts.push(`Completed: ${partition.hiddenCompleted} hidden (latest ${latest}; includeCompleted:true lists all)`);
+  }
+  if (partition.archived.length > 0) {
+    parts.push(`Archived: ${partition.archived.length} (TaskGet <id> still works)`);
+  }
+  return parts.length > 0 ? parts.join(" \u00b7 ") : undefined;
+}
+
+/** todo-archive D3: the default output lists open tasks only; hidden completed/archived tasks are
+ *  summarized in a one-line footer (zero-count clauses omitted). With only open tasks the output
+ *  is byte-identical to the pre-archive full listing; `includeCompleted:true` restores the full
+ *  listing with ` [archived]` markers. Dependency info always comes from the FULL task list. */
+function formatTaskList(state: TodoState, opts: { includeCompleted?: boolean } = {}): string {
   if (state.tasks.length === 0) return "No tasks.";
-  return orderTasks(state.tasks)
-    .map((task) => `${formatTaskLine(task, state.tasks)}\n  ${task.description}`)
-    .join("\n");
+  if (opts.includeCompleted) {
+    return orderTasks(state.tasks)
+      .map((task) => `${formatTaskLine(task, state.tasks)}\n  ${task.description}`)
+      .join("\n");
+  }
+  const partition = partitionTasks(state.tasks, 0);
+  const lines = partition.open.map((task) => `${formatTaskLine(task, state.tasks)}\n  ${task.description}`);
+  const footer = formatHiddenFooter(partition);
+  if (lines.length === 0) return footer ? `No open tasks.\n${footer}` : "No open tasks.";
+  return footer ? `${lines.join("\n")}\n${footer}` : lines.join("\n");
 }
 
 function formatToolText(action: Action, state: TodoState, task?: Task, changed = true): string {

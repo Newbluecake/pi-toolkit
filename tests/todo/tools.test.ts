@@ -201,9 +201,13 @@ describe("wireTodo tools", () => {
     ];
     const ctx2 = fakeCtx(host2, "tui", branch);
     await host2.handlers.get("session_start")?.({}, ctx2);
-    const list = await exec(host2, "TaskList", {}, ctx2);
+    const list = await exec(host2, "TaskList", { includeCompleted: true }, ctx2);
     expect(list.content[0]?.text).toContain("#1");
     expect(list.content[0]?.text).toContain("completed");
+    // Default (collapsed) output hides the completed task behind the footer.
+    const collapsed = await exec(host2, "TaskList", {}, ctx2);
+    expect(collapsed.content[0]?.text).not.toContain("#1 pending");
+    expect(collapsed.content[0]?.text).toContain("Completed: 1 hidden");
   });
 
   test("N5: widget stays sealed in rpc sessions, opens in tui", async () => {
@@ -344,5 +348,343 @@ describe("wireTodo tools", () => {
     const completed = await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, rpcCtx);
     expect(completed.content[0]?.text).toContain("Unblocked: #2 B");
     expect(host.notifications).toEqual([]);
+  });
+});
+
+// ── todo-archive (plan §3): TaskList folding, auto-archive wiring, clear high-water ──
+
+describe("wireTodo todo-archive", () => {
+  /** Branch view over everything persist() appended so far — the replay source for restore(). */
+  function branchOf(host: Host): unknown[] {
+    return host.appended.map(({ customType, data }) => ({ type: "custom", customType, data }));
+  }
+
+  describe("TaskList folding (D3)", () => {
+    test("only open tasks ⇒ byte-identical to the pre-archive full output", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "do A" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "in_progress" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "do B" }, ctx);
+
+      const list = await exec(host, "TaskList", {}, ctx);
+      expect(list.content[0]?.text).toBe(`\u2733 #1 in_progress A\n  do A\n\u25cb #2 pending B\n  do B`);
+    });
+
+    test("hidden completed + archived tasks produce the footer (zero-count clauses omitted)", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+      await exec(host, "TaskCreate", { subject: "C", description: "C" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "3", status: "completed" }, ctx);
+
+      // Completed only: latest ids ascending, no Archived clause.
+      const withOpen = await exec(host, "TaskList", {}, ctx);
+      expect(withOpen.content[0]?.text).toBe(
+        `\u25cb #1 pending A\n  A\nCompleted: 2 hidden (latest #2, #3; includeCompleted:true lists all)`,
+      );
+
+      // Archive #3 via the compaction sweep, then drop the last open task too.
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      const onlyDone = await exec(host, "TaskList", {}, ctx);
+      expect(onlyDone.content[0]?.text).toBe(
+        "No open tasks.\n" +
+          "Completed: 1 hidden (latest #1; includeCompleted:true lists all) \u00b7 " +
+          "Archived: 2 (TaskGet <id> still works)",
+      );
+    });
+
+    test("footer caps the latest-id list at 3", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      for (const subject of ["A", "B", "C", "D", "E"]) {
+        await exec(host, "TaskCreate", { subject, description: subject }, ctx);
+      }
+      for (const id of ["1", "2", "3", "4", "5"]) {
+        await exec(host, "TaskUpdate", { taskId: id, status: "completed" }, ctx);
+      }
+      const list = await exec(host, "TaskList", {}, ctx);
+      expect(list.content[0]?.text).toContain(
+        "Completed: 5 hidden (latest #3, #4, #5; includeCompleted:true lists all)",
+      );
+    });
+
+    test("no tasks at all still says 'No tasks.'", async () => {
+      const host = fakePi();
+      wireTodo(host.pi);
+      const ctx = fakeCtx(host);
+      const list = await exec(host, "TaskList", {}, ctx);
+      expect(list.content[0]?.text).toBe("No tasks.");
+    });
+
+    test("includeCompleted:true restores the full output with [archived] markers; TaskGet still works", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+
+      const full = await exec(host, "TaskList", { includeCompleted: true }, ctx);
+      const text = full.content[0]?.text ?? "";
+      expect(text).toBe(`\u25cb #2 pending B\n  B\n\u2713 #1 completed A [archived]\n  A`);
+      expect(text).not.toContain("Completed:"); // no footer in full mode
+
+      const got = await exec(host, "TaskGet", { taskId: "1" }, ctx);
+      expect(got.content[0]?.text).toContain("#1 completed A");
+      expect(got.content[0]?.text).toContain("[archived]");
+    });
+
+    test("an archived completed predecessor does not block successors in the default list", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B", blockedBy: ["1"] }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+
+      // Pre-fix bug shape: partitioned subset would make #1 look blocking again.
+      const list = await exec(host, "TaskList", {}, ctx);
+      expect(list.content[0]?.text).not.toContain("blocked by");
+      const full = await exec(host, "TaskList", { includeCompleted: true }, ctx);
+      expect(full.content[0]?.text).not.toContain("blocked by");
+    });
+  });
+
+  describe("compaction sweep (D1a/D8)", () => {
+    test("session_compact archives all completed tasks after restore, persisting exactly once", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      expect(host.appended).toHaveLength(3);
+
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+      expect(host.appended).toHaveLength(4); // ONE archive snapshot
+      const swept = host.appended.at(-1)?.data as TodoState;
+      expect(swept.tasks[0]?.archivedAt).toBeDefined();
+      expect(swept.tasks[1]?.archivedAt).toBeUndefined(); // #2 still open
+      expect(swept.tasks[0]?.completedAt).toBeDefined();
+
+      // Nothing new to archive ⇒ no further write.
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+      expect(host.appended).toHaveLength(4);
+    });
+
+    test("onCompact:false restores without sweeping", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      const before = host.appended.length;
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+      expect(host.appended).toHaveLength(before); // restore only, no sweep write
+    });
+
+    test("session_start and session_tree never sweep", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      const before = host.appended.length;
+      await host.handlers.get("session_start")?.({}, fakeCtx(host, "tui", branchOf(host)));
+      await host.handlers.get("session_tree")?.({}, fakeCtx(host, "tui", branchOf(host)));
+      expect(host.appended).toHaveLength(before);
+    });
+  });
+
+  describe("per-turn archive ages (D1b/D8/commit)", () => {
+    test("afterTurns=0 registers no turn_end handler", () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      expect(host.handlers.has("turn_end")).toBe(false);
+
+      const hostNudge = fakePi();
+      wireTodo(hostNudge.pi, { nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 } });
+      expect(hostNudge.handlers.has("turn_end")).toBe(true); // nudge only, archive defaults 30
+    });
+
+    test("archives on the Nth turn_end, batching everything due into ONE persist", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 2 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      const before = host.appended.length;
+
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before); // 1st turn_end: age 1 < 2
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before + 1); // 2nd: age 2 ⇒ archived
+      const snapshot = host.appended.at(-1)?.data as TodoState;
+      expect(snapshot.tasks[0]?.archivedAt).toBeDefined();
+      // Already archived ⇒ further turns never write again.
+      await host.handlers.get("turn_end")?.({});
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before + 1);
+    });
+
+    test("a same-turn reopen+recomplete before the Nth boundary restarts the age", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 2 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+
+      await host.handlers.get("turn_end")?.({}); // age 1
+      // Turn 2: reopen then re-complete within the same turn.
+      await exec(host, "TaskUpdate", { taskId: "1", status: "pending" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      const before = host.appended.length;
+      await host.handlers.get("turn_end")?.({}); // age since re-completion = 1 < 2
+      expect(host.appended).toHaveLength(before);
+      await host.handlers.get("turn_end")?.({}); // age 2 ⇒ archived
+      expect(host.appended).toHaveLength(before + 1);
+    });
+
+    test("multiple tool calls in one turn all age from the same baseline", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 1 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+      const before = host.appended.length;
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before + 1); // both archived in one sweep
+      const snapshot = host.appended.at(-1)?.data as TodoState;
+      expect(snapshot.tasks.map((task) => task.archivedAt ?? 0).every((at) => at > 0)).toBe(true);
+    });
+
+    test("a queued reopen and a concurrent turn_end serialize in queue order — no false archive", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 1 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      const before = host.appended.length;
+
+      // The reopen is enqueued FIRST, the turn_end lands behind it in the same queue.
+      const reopen = exec(host, "TaskUpdate", { taskId: "1", status: "pending" }, ctx);
+      const turn = host.handlers.get("turn_end")?.({});
+      await Promise.all([reopen, turn]);
+
+      // Reopen ran before the sweeper looked at the state ⇒ nothing was archived.
+      const snapshot = host.appended.at(-1)?.data as TodoState;
+      expect(snapshot.tasks[0]?.status).toBe("pending");
+      expect(snapshot.tasks[0]?.archivedAt).toBeUndefined();
+      expect(snapshot.tasks[0]?.completedAt).toBeUndefined();
+      expect(host.appended).toHaveLength(before + 1); // only the reopen's own persist
+    });
+
+    test("delete and archive clean the age map (no later ghost sweeps)", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 1 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+      await exec(host, "TaskDelete", { taskId: "2" }, ctx); // completed task deleted pre-age
+      const before = host.appended.length;
+      await host.handlers.get("turn_end")?.({});
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before); // deleted id never sweeps
+
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before + 2); // update + archive sweep
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before + 2); // archived id cleaned from the map
+    });
+
+    test("collapsed (not displayed) completed tasks age identically", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: false, afterTurns: 1 } });
+      const ctx = fakeCtx(host);
+      for (const subject of ["A", "B", "C", "D"]) {
+        await exec(host, "TaskCreate", { subject, description: subject }, ctx);
+      }
+      // Complete 3: only the 2 most recent are visible anywhere; #1 is fully collapsed.
+      for (const id of ["1", "2", "3"]) {
+        await exec(host, "TaskUpdate", { taskId: id, status: "completed" }, ctx);
+      }
+      const before = host.appended.length;
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before + 1);
+      const snapshot = host.appended.at(-1)?.data as TodoState;
+      expect(snapshot.tasks.filter((task) => task.archivedAt !== undefined).map((task) => task.id)).toEqual([1, 2, 3]);
+    });
+
+    test("isChildSession:true with nudge off still archives per turn", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { isChildSession: true, archive: { onCompact: false, afterTurns: 1 } });
+      expect(host.handlers.has("turn_end")).toBe(true);
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      const before = host.appended.length;
+      await host.handlers.get("turn_end")?.({});
+      expect(host.appended).toHaveLength(before + 1);
+      expect((host.appended.at(-1)?.data as TodoState).tasks[0]?.archivedAt ?? 0).toBeGreaterThan(0);
+    });
+  });
+
+  describe("/tasklist clear keeps the nextId high-water mark (D9)", () => {
+    test("create → complete → archive → delete → clear → create gets a fresh id", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host))); // archive #1
+      await exec(host, "TaskDelete", { taskId: "2" }, ctx);
+
+      const command = host.commands.get("tasklist");
+      await command?.handler("clear", ctx);
+      const cleared = host.appended.at(-1)?.data as TodoState;
+      expect(cleared.tasks).toEqual([]);
+      expect(cleared.nextId).toBe(3); // high-water preserved
+
+      const created = await exec(host, "TaskCreate", { subject: "C", description: "C" }, ctx);
+      expect(created.details.task.id).toBe(3);
+
+      // Replay after clear: nextId survives the round trip.
+      const host2 = fakePi();
+      wireTodo(host2.pi);
+      const ctx2 = fakeCtx(host2, "tui", branchOf(host));
+      await host2.handlers.get("session_start")?.({}, ctx2);
+      await host2.handlers.get("session_compact")?.({}, ctx2); // no-op sweep, but restore replays
+      const again = await exec(host2, "TaskCreate", { subject: "D", description: "D" }, ctx2);
+      expect(again.details.task.id).toBe(4); // #3 snapshot existed; nextId advanced past it
+    });
+  });
+
+  describe("widget unmount (D7)", () => {
+    test("a list of only archived tasks unmounts the widget", async () => {
+      const host = fakePi();
+      wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+      const ctx = fakeCtx(host);
+      await host.handlers.get("session_start")?.({}, ctx);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      expect(host.widgetCalls.some((call) => call.key === "claude-code-todo" && call.content !== undefined)).toBe(true);
+
+      await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+      await host.handlers.get("session_compact")?.({}, fakeCtx(host, "tui", branchOf(host)));
+      expect(host.widgetCalls.at(-1)).toEqual({ key: "claude-code-todo", content: undefined });
+    });
   });
 });

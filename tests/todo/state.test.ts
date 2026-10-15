@@ -4,13 +4,18 @@
 import { describe, expect, test } from "vitest";
 import {
   activeBlockers,
+  archiveCompleted,
+  clearTasks,
   cloneState,
+  completionTime,
   createTask,
   deleteTask,
   emptyState,
+  isArchived,
   isBlocked,
   newlyUnblockedTasks,
   orderTasks,
+  partitionTasks,
   restoreState,
   updateTask,
 } from "../../src/todo/state.js";
@@ -99,6 +104,192 @@ describe("claude todo state", () => {
       state = updateTask(state, "1", { status: "pending" }, 4).state;
 
       expect(orderTasks(state.tasks).map((task) => task.id)).toEqual([1, 2]);
+    });
+
+    // todo-archive §2: three segments — open → completed (not archived) → archived.
+    test("archived tasks sink below completed ones; without archived tasks the order is unchanged", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = createTask(state, { subject: "C", description: "C" }, 3).state;
+      state = updateTask(state, "1", { status: "completed" }, 4).state;
+      state = updateTask(state, "3", { status: "completed" }, 5).state;
+      const noArchived = orderTasks(state.tasks).map((task) => task.id);
+      expect(noArchived).toEqual([2, 1, 3]); // identical to the two-segment order
+
+      state = archiveCompleted(state, "all", 6);
+      // #1 and #3 both completed → both archived; archived segment keeps stored order.
+      expect(orderTasks(state.tasks).map((task) => task.id)).toEqual([2, 1, 3]);
+
+      const again = archiveCompleted(state, "all", 7);
+      expect(again).toBe(state); // idempotent: everything already archived
+    });
+  });
+
+  // ── todo-archive (plan §2/§3) ──
+
+  describe("completedAt bookkeeping (D2)", () => {
+    test("set on the transition into completed", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      expect(state.tasks[0]?.completedAt).toBeUndefined();
+      state = updateTask(state, "1", { status: "completed" }, 100).state;
+      expect(state.tasks[0]?.completedAt).toBe(100);
+      expect(completionTime(state.tasks[0]!)).toBe(100);
+    });
+
+    test("preserved on edits of other fields — an edited old completion is not re-ranked as latest", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = updateTask(state, "1", { status: "completed" }, 10).state;
+      state = updateTask(state, "2", { status: "completed" }, 20).state;
+      // Edit #1 long after both completed: updatedAt moves but completedAt must not.
+      state = updateTask(state, "1", { subject: "A!" }, 999).state;
+      expect(state.tasks[0]?.completedAt).toBe(10);
+      expect(state.tasks[0]?.updatedAt).toBe(999);
+      const recent = partitionTasks(state.tasks, 1).recentCompleted;
+      expect(recent.map((task) => task.id)).toEqual([2]); // #2 (completed 20) still the latest
+    });
+
+    test("cleared together with archivedAt on reopen", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = updateTask(state, "1", { status: "completed" }, 10).state;
+      state = archiveCompleted(state, "all", 11);
+      expect(state.tasks[0]?.archivedAt).toBe(11);
+      state = updateTask(state, "1", { status: "pending" }, 12).state;
+      expect(state.tasks[0]?.completedAt).toBeUndefined();
+      expect(state.tasks[0]?.archivedAt).toBeUndefined();
+      expect(isArchived(state.tasks[0]!)).toBe(false);
+    });
+
+    test("completionTime falls back to updatedAt for old snapshots without completedAt", () => {
+      const task = createTask(emptyState(), { subject: "A", description: "A" }, 1).task;
+      expect(task.completedAt).toBeUndefined();
+      expect(completionTime(task)).toBe(task.updatedAt);
+    });
+  });
+
+  describe("archiveCompleted (§2)", () => {
+    test("archives only completed-and-unarchived tasks; never touches updatedAt", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = updateTask(state, "1", { status: "completed" }, 10).state;
+      const updatedAtBefore = state.tasks.map((task) => task.updatedAt);
+
+      state = archiveCompleted(state, "all", 50);
+      expect(state.tasks[0]?.archivedAt).toBe(50);
+      expect(state.tasks[1]?.archivedAt).toBeUndefined(); // #2 still open
+      expect(state.tasks.map((task) => task.updatedAt)).toEqual(updatedAtBefore);
+    });
+
+    test("idempotent: nothing to archive returns the SAME reference", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      expect(archiveCompleted(state, "all", 10)).toBe(state); // nothing completed
+      state = updateTask(state, "1", { status: "completed" }, 11).state;
+      state = archiveCompleted(state, "all", 12);
+      expect(archiveCompleted(state, "all", 13)).toBe(state); // already archived
+      expect(archiveCompleted(state, [99], 14)).toBe(state); // unknown id
+    });
+
+    test("explicit id list archives only those ids", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = updateTask(state, "1", { status: "completed" }, 10).state;
+      state = updateTask(state, "2", { status: "completed" }, 11).state;
+      state = archiveCompleted(state, [2], 20);
+      expect(state.tasks[0]?.archivedAt).toBeUndefined();
+      expect(state.tasks[1]?.archivedAt).toBe(20);
+    });
+  });
+
+  describe("partitionTasks (D4/D7)", () => {
+    test("selects recent completions by completionTime desc, displays them ascending", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = createTask(state, { subject: "C", description: "C" }, 3).state;
+      state = updateTask(state, "1", { status: "completed" }, 10).state; // oldest completion
+      state = updateTask(state, "2", { status: "completed" }, 30).state; // latest
+      state = updateTask(state, "3", { status: "completed" }, 20).state;
+
+      const partition = partitionTasks(state.tasks, 2);
+      expect(partition.open).toEqual([]);
+      expect(partition.recentCompleted.map((task) => task.id)).toEqual([3, 2]); // ascending display
+      expect(partition.hiddenCompleted).toBe(1);
+      expect(partition.visible.map((task) => task.id)).toEqual([3, 2]);
+    });
+
+    test("equal completion times tie-break by higher id = more recent", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = updateTask(state, "1", { status: "completed" }, 5).state;
+      state = updateTask(state, "2", { status: "completed" }, 5).state;
+      expect(partitionTasks(state.tasks, 1).recentCompleted.map((task) => task.id)).toEqual([2]);
+    });
+
+    test("old snapshots without completedAt order by the updatedAt fallback", () => {
+      const legacy = restoreState({
+        tasks: [
+          {
+            id: 1,
+            subject: "A",
+            description: "A",
+            status: "completed",
+            blocks: [],
+            blockedBy: [],
+            createdAt: 1,
+            updatedAt: 10,
+          },
+          {
+            id: 2,
+            subject: "B",
+            description: "B",
+            status: "completed",
+            blocks: [],
+            blockedBy: [],
+            createdAt: 2,
+            updatedAt: 20,
+          },
+        ],
+        nextId: 3,
+      })!;
+      expect(partitionTasks(legacy!.tasks, 1).recentCompleted.map((task) => task.id)).toEqual([2]);
+    });
+
+    test("segments open / completed / archived and keeps open in stored order", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      state = updateTask(state, "2", { status: "completed" }, 3).state;
+      state = archiveCompleted(state, [2], 4);
+      state = createTask(state, { subject: "C", description: "C" }, 5).state;
+      state = updateTask(state, "1", { status: "completed" }, 6).state;
+
+      const partition = partitionTasks(state.tasks, 0);
+      expect(partition.open.map((task) => task.id)).toEqual([3]);
+      expect(partition.completed.map((task) => task.id)).toEqual([1]);
+      expect(partition.archived.map((task) => task.id)).toEqual([2]);
+      expect(partition.hiddenCompleted).toBe(1);
+      expect(partition.visible.map((task) => task.id)).toEqual([3]);
+    });
+  });
+
+  describe("clearTasks (D9)", () => {
+    test("empties the list but keeps the nextId high-water mark", () => {
+      let state = emptyState();
+      state = createTask(state, { subject: "A", description: "A" }, 1).state;
+      state = createTask(state, { subject: "B", description: "B" }, 2).state;
+      const cleared = clearTasks(state);
+      expect(cleared.tasks).toEqual([]);
+      expect(cleared.nextId).toBe(3);
+      const created = createTask(cleared, { subject: "C", description: "C" }, 3);
+      expect(created.task.id).toBe(3);
     });
   });
 

@@ -161,6 +161,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     ? wireTodo(pi, {
         isChildSession,
         nudge: preGuardSettings.todo.nudge,
+        // todo-archive plan D1: completed-task auto-archive knobs (non-live, /reload to apply).
+        archive: preGuardSettings.todo.archive,
         sendMessage: (message, options) => pi.sendMessage(message, options),
       })
     : undefined;

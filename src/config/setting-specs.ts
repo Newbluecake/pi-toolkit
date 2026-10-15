@@ -444,6 +444,17 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     1,
     "Turns to suppress re-nudging after a nudge fires (doubles per consecutive no-touch nudge, capped at 4x)",
   ),
+  // todo-archive plan §2/D1 (user ruling 2026-10-15): completed-task auto-archive. Both knobs are
+  // turn/compaction counts, never durations — no `time: true`. Non-live: needs /reload.
+  "todo.archive.onCompact": bool(
+    "todo.archive.onCompact",
+    "todo archive: archive every completed task when the session compacts (default on; non-live, needs /reload)",
+  ),
+  "todo.archive.afterTurns": count(
+    "todo.archive.afterTurns",
+    0,
+    "todo archive: archive a completed task N turns (turn_end events) after its completion, 0 disables (default 30; turns are finer-grained than user requests; non-live, needs /reload)",
+  ),
   "askUser.enabled": bool("askUser.enabled", "Interactive ask_user question tool (main session only)"),
   // ask-user-async plan §6.1 (P2): background-completion interrupt knobs. The
   // four durations are stored/edited as integer seconds (`*S` keys) over

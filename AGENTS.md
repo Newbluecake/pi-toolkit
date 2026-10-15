@@ -280,7 +280,9 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   policy; credentials from env or `~/.config/pi/web-search.env`; registered pre-guard.
 - `src/todo/` — merged pi-claude-todo: TaskCreate/List/Get/Update/Delete + aboveEditor widget
   (key `claude-code-todo`, coexists with the fleet widget) + `/tasklist`. Persists via the
-  `claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only. A read-only
+  `claude-code-todo-state` session entry; registered pre-guard; widget is TUI-only. Completed tasks
+  collapse out of the default views and auto-archive (on compaction and after `todo.archive.afterTurns`
+  turns; `TaskList includeCompleted:true` lists everything) per `docs/dev/todo-archive/plan.md`. A read-only
   summary also reaches the web hub: `TodoWireResult.getTodoSnapshot()` → `projectTodo`
   (`src/web-hub/agent/todo.ts`, 32-task cap / 240B description / 32KiB three-pass budget) rides
   the optional `StatusInfo.todo` slot (append-only, no proto bump) to a collapsible `TodoPanel`

@@ -6,7 +6,15 @@
 // when they are interleaved.
 
 import { describe, expect, test } from "vitest";
-import { createTask, emptyState, replayState, STATE_ENTRY, type TodoState, updateTask } from "../../src/todo/state.js";
+import {
+  archiveCompleted,
+  createTask,
+  emptyState,
+  replayState,
+  STATE_ENTRY,
+  type TodoState,
+  updateTask,
+} from "../../src/todo/state.js";
 
 function stateWith(subject: string): TodoState {
   return createTask(emptyState(), { subject, description: `desc ${subject}` }, 1).state;
@@ -72,5 +80,84 @@ describe("replayState", () => {
     expect(replayState([toolResultEntry(older), customEntry(newer)])).toEqual(newer);
     // Same shape twice → the later entry wins.
     expect(replayState([customEntry(newer), customEntry(older)])).toEqual(older);
+  });
+
+  // ── todo-archive (plan §3): the two new optional fields must survive replay —
+  // in BOTH historical shapes — and degrade per D2 on inconsistent data. ──
+
+  test("carries archivedAt and completedAt forward through BOTH historical shapes", () => {
+    let state = emptyState();
+    state = createTask(state, { subject: "A", description: "A" }, 1).state;
+    state = updateTask(state, "1", { status: "completed" }, 10).state;
+    state = archiveCompleted(state, "all", 20);
+
+    // The wire shape is the JSON round-trip persist() writes.
+    const persisted = JSON.parse(JSON.stringify(state)) as unknown;
+    expect(replayState([customEntry(persisted)])).toEqual(state);
+    expect(replayState([toolResultEntry(persisted)])).toEqual(state);
+
+    const restored = replayState([customEntry(persisted)])!;
+    expect(restored.tasks[0]?.completedAt).toBe(10);
+    expect(restored.tasks[0]?.archivedAt).toBe(20);
+  });
+
+  test("non-completed tasks carrying the fields keep the candidate valid with just the fields dropped", () => {
+    let state = emptyState();
+    state = createTask(state, { subject: "A", description: "A" }, 1).state;
+    const dirty = {
+      ...JSON.parse(JSON.stringify(state)),
+      tasks: state.tasks.map((task) => ({ ...task, completedAt: 5, archivedAt: 6 })),
+    } as unknown;
+    const restored = replayState([customEntry(dirty)])!;
+    expect(restored).toBeDefined();
+    expect(restored.tasks[0]?.status).toBe("pending");
+    expect(restored.tasks[0]?.completedAt).toBeUndefined();
+    expect(restored.tasks[0]?.archivedAt).toBeUndefined();
+
+    const sameViaToolResult = replayState([toolResultEntry(dirty)])!;
+    expect(sameViaToolResult.tasks[0]?.completedAt).toBeUndefined();
+  });
+
+  test("non-finite timestamp values are dropped individually, candidate stays valid", () => {
+    let state = emptyState();
+    state = createTask(state, { subject: "A", description: "A" }, 1).state;
+    state = updateTask(state, "1", { status: "completed" }, 10).state;
+    const dirty = {
+      ...JSON.parse(JSON.stringify(state)),
+      tasks: state.tasks.map((task) => ({ ...task, completedAt: "yesterday", archivedAt: Number.NaN })),
+    } as unknown;
+    const restored = replayState([customEntry(dirty)])!;
+    expect(restored.tasks[0]?.completedAt).toBeUndefined();
+    expect(restored.tasks[0]?.archivedAt).toBeUndefined();
+  });
+
+  test("old entries (no new fields) round-trip identically", () => {
+    let state = emptyState();
+    state = createTask(state, { subject: "A", description: "A" }, 1).state;
+    state = updateTask(state, "1", { status: "completed" }, 10).state;
+    // Strip the new field entirely — the pre-feature persisted shape.
+    const legacy = {
+      ...state,
+      tasks: state.tasks.map(({ ...task }) => {
+        delete (task as { completedAt?: number }).completedAt;
+        return task;
+      }),
+    } as unknown;
+    const restored = replayState([customEntry(JSON.parse(JSON.stringify(legacy)))])!;
+    expect(restored).toEqual(legacy);
+    expect(restored.tasks[0]?.completedAt).toBeUndefined();
+    expect(restored.tasks[0]?.archivedAt).toBeUndefined();
+  });
+
+  test("an unarchived snapshot after an archived one wins (last valid candidate)", () => {
+    let state = emptyState();
+    state = createTask(state, { subject: "A", description: "A" }, 1).state;
+    state = updateTask(state, "1", { status: "completed" }, 10).state;
+    const archived = archiveCompleted(state, "all", 20);
+    // Reopen AFTER the archived snapshot: archivedAt/completedAt cleared again.
+    const reopened = updateTask(archived, "1", { status: "pending" }, 30);
+
+    expect(replayState([customEntry(archived), customEntry(reopened.state)])).toEqual(reopened.state);
+    expect(replayState([customEntry(reopened.state), customEntry(archived)])).toEqual(archived);
   });
 });

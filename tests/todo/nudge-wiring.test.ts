@@ -26,6 +26,9 @@ interface Host {
   tools: Map<string, AnyTool>;
   commands: Map<string, unknown>;
   handlers: Map<string, (event: unknown, ctx: ExtensionContext) => unknown>;
+  /** ALL turn_end handlers in registration order — real pi.events supports several per event
+   *  (todo-archive registers one outside the nudge conditional, plus the nudge's own). */
+  turnEndHandlers: Array<(event: unknown, ctx: ExtensionContext) => unknown>;
   sent: SentMessage[];
 }
 
@@ -35,13 +38,16 @@ function fakePi(): Host {
     tools: new Map(),
     commands: new Map(),
     handlers: new Map(),
+    turnEndHandlers: [],
     sent: [],
   };
   const pi = {
     registerTool: (def: AnyTool) => host.tools.set(def.name, def),
     registerCommand: (name: string, options: unknown) => host.commands.set(name, options),
-    on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) =>
-      host.handlers.set(event, handler),
+    on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+      host.handlers.set(event, handler);
+      if (event === "turn_end") host.turnEndHandlers.push(handler);
+    },
     appendEntry: () => undefined,
     sendMessage: (message: SentMessage["message"], options: SentMessage["options"]) =>
       host.sent.push({ message, options }),
@@ -69,6 +75,11 @@ function turnEnd(host: Host): void {
   host.handlers.get("turn_end")?.({}, fakeCtx());
 }
 
+/** Fire EVERY turn_end handler (registration order, awaited) — the realistic pi.events shape. */
+async function turnEndAll(host: Host): Promise<void> {
+  for (const handler of host.turnEndHandlers) await handler({}, fakeCtx());
+}
+
 function toolStart(host: Host, toolCallId: string, toolName: string, args: unknown): void {
   host.handlers.get("tool_execution_start")?.({ toolCallId, toolName, args }, fakeCtx());
 }
@@ -82,6 +93,10 @@ function messageStart(host: Host, customType: string): void {
 }
 
 const NUDGE = { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 };
+/** Archive-off companion so the nudge-gating tests below keep asserting NUDGE-only registration
+ *  (with the default `afterTurns: 30` the todo-archive turn_end handler also registers — tested
+ *  separately in the coexistence block). */
+const NO_ARCHIVE = { onCompact: false, afterTurns: 0 };
 
 async function makeInProgressTask(host: Host, ctx: ExtensionContext, subject = "Do the thing"): Promise<void> {
   await exec(host, "TaskCreate", { subject, description: "d" }, ctx);
@@ -91,7 +106,7 @@ async function makeInProgressTask(host: Host, ctx: ExtensionContext, subject = "
 describe("todo/index wireTodo: nudge gating", () => {
   test("no opts at all (existing callers): zero new handlers, behavior unchanged", () => {
     const host = fakePi();
-    const result = wireTodo(host.pi);
+    const result = wireTodo(host.pi, { archive: NO_ARCHIVE });
     expect(host.handlers.has("turn_end")).toBe(false);
     expect(host.handlers.has("tool_execution_start")).toBe(false);
     expect(host.handlers.has("tool_execution_end")).toBe(false);
@@ -101,7 +116,12 @@ describe("todo/index wireTodo: nudge gating", () => {
 
   test("child session: zero new handlers even with nudge.enabled=true", () => {
     const host = fakePi();
-    const result = wireTodo(host.pi, { isChildSession: true, nudge: NUDGE, sendMessage: host.pi.sendMessage });
+    const result = wireTodo(host.pi, {
+      isChildSession: true,
+      nudge: NUDGE,
+      archive: NO_ARCHIVE,
+      sendMessage: host.pi.sendMessage,
+    });
     expect(host.handlers.has("turn_end")).toBe(false);
     expect(host.handlers.has("message_start")).toBe(false);
     expect(result.getTrackerSnapshot).toBeUndefined();
@@ -112,6 +132,7 @@ describe("todo/index wireTodo: nudge gating", () => {
     const result = wireTodo(host.pi, {
       isChildSession: false,
       nudge: { ...NUDGE, enabled: false },
+      archive: NO_ARCHIVE,
       sendMessage: host.pi.sendMessage,
     });
     expect(host.handlers.has("turn_end")).toBe(false);
@@ -348,5 +369,76 @@ describe("todo/index wireTodo: send failures are swallowed", () => {
     for (let i = 0; i < NUDGE.fallbackTurns - 1; i++) turnEnd(host);
     expect(() => turnEnd(host)).not.toThrow();
     expect(throwingSend).toHaveBeenCalledOnce();
+  });
+});
+
+// ── todo-archive (plan §3): archive × nudge coexistence. The archive turn_end registers
+// OUTSIDE the nudge conditional (D1b), so both handlers live on the same event. ──
+
+describe("todo/index wireTodo: todo-archive × nudge coexistence", () => {
+  test("both turn_end handlers register and the archive sweeper runs alongside the nudge", async () => {
+    const host = fakePi();
+    const { getTrackerSnapshot } = wireTodo(host.pi, {
+      isChildSession: false,
+      nudge: NUDGE,
+      archive: { onCompact: false, afterTurns: 1 },
+      sendMessage: host.pi.sendMessage,
+    });
+    expect(host.turnEndHandlers).toHaveLength(2);
+
+    const ctx = fakeCtx();
+    await makeInProgressTask(host, ctx); // #1 in_progress
+    await exec(host, "TaskCreate", { subject: "Done thing", description: "d" }, ctx); // #2 pending
+    await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+
+    await turnEndAll(host); // sweep archives #2 (age 1 ≥ 1); nudge e3 → 1
+    expect(getTrackerSnapshot!().turnsSinceTouch).toBe(1);
+    const list = await exec(host, "TaskList", { includeCompleted: true }, ctx);
+    expect(list.content[0]?.text).toContain("[archived]");
+  });
+
+  test("archived tasks never count toward openTaskCount (nor the untracked precondition)", async () => {
+    const host = fakePi();
+    const { getTrackerSnapshot } = wireTodo(host.pi, {
+      isChildSession: false,
+      nudge: NUDGE,
+      archive: { onCompact: false, afterTurns: 1 },
+      sendMessage: host.pi.sendMessage,
+    });
+    const ctx = fakeCtx();
+    await makeInProgressTask(host, ctx);
+    await exec(host, "TaskCreate", { subject: "Done thing", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+    expect(getTrackerSnapshot!().openTaskCount).toBe(1); // only #1 before archiving
+
+    await turnEndAll(host); // #2 archived
+    // Archived completion stays out of openTaskCount; the in_progress task keeps the
+    // precondition "tracked", so the untracked (pending-listing) branch never engages.
+    expect(getTrackerSnapshot!().openTaskCount).toBe(1);
+    for (let i = 0; i < NUDGE.fallbackTurns + 2; i++) await turnEndAll(host);
+    expect(host.sent).toHaveLength(1);
+    expect(host.sent[0]?.message.content).toContain("进行中：#1"); // stale branch, not untracked
+  });
+
+  test("a per-turn archive sweep does NOT reset the nudge counters (serialize, not enqueue)", async () => {
+    const host = fakePi();
+    wireTodo(host.pi, {
+      isChildSession: false,
+      nudge: { ...NUDGE, fallbackTurns: 3 },
+      archive: { onCompact: false, afterTurns: 1 },
+      sendMessage: host.pi.sendMessage,
+    });
+    const ctx = fakeCtx();
+    await makeInProgressTask(host, ctx);
+    await exec(host, "TaskCreate", { subject: "Done thing", description: "d" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+
+    // Turn 1 sweeps #2 into the archive. If that sweep had gone through enqueue() (a todo
+    // touch), e3 would drop to 0 here and the fallback below would never accumulate.
+    await turnEndAll(host);
+    await turnEndAll(host);
+    await turnEndAll(host);
+    expect(host.sent).toHaveLength(1); // fallback fired at e3 = 3 despite the sweep on turn 1
+    expect(host.sent[0]?.message.content).toContain("已过 3 轮");
   });
 });

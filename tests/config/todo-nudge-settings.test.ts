@@ -4,11 +4,8 @@ import { SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 describe("config: todo.nudge (main-session todo staleness nudge, L1 feature)", () => {
   it("defaults: enabled=true, graceTurns=2, fallbackTurns=20, cooldownTurns=8", () => {
-    expect(DEFAULT_SETTINGS.todo).toEqual({
-      enabled: true,
-      nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 },
-    });
-    expect(loadSettings({}).todo).toEqual(DEFAULT_SETTINGS.todo);
+    expect(DEFAULT_SETTINGS.todo.nudge).toEqual({ enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 });
+    expect(loadSettings({}).todo.nudge).toEqual(DEFAULT_SETTINGS.todo.nudge);
   });
 
   it("todo.enabled still works standalone (nudge falls back to defaults)", () => {
@@ -47,6 +44,12 @@ describe("config: todo.nudge (main-session todo staleness nudge, L1 feature)", (
   it("a malformed todo block (non-object) falls back entirely to defaults", () => {
     for (const bad of [null, "x", 5, []]) {
       expect(loadSettings({ todo: bad }).todo).toEqual(DEFAULT_SETTINGS.todo);
+    }
+  });
+
+  it("a malformed ARCHIVE block (non-object) falls back entirely to the archive defaults", () => {
+    for (const bad of [null, "x", 5, []]) {
+      expect(loadSettings({ todo: { archive: bad } }).todo.archive).toEqual(DEFAULT_SETTINGS.todo.archive);
     }
   });
 

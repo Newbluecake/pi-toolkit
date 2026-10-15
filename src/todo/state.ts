@@ -16,6 +16,13 @@ export interface Task {
   metadata?: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
+  /** Set when the task transitions into `completed` (todo-archive D2); preserved across edits of
+   *  other fields, cleared together with `archivedAt` on reopen. Meaningful only while
+   *  `status === "completed"`; old snapshots without it fall back to `updatedAt` (`completionTime`). */
+  completedAt?: number;
+  /** Presence alone means "archived" (todo-archive D2); `updatedAt` is never touched by archiving.
+   *  Cleared on reopen. Meaningful only while `status === "completed"`. */
+  archivedAt?: number;
 }
 
 export interface TodoState {
@@ -59,6 +66,83 @@ const STATUSES: readonly TaskStatus[] = ["pending", "in_progress", "completed"];
 
 export function emptyState(): TodoState {
   return { tasks: [], nextId: 1 };
+}
+
+/** Completion timestamp for recency ordering (todo-archive D2): `completedAt` when present, else
+ *  the pre-feature `updatedAt` fallback — a documented one-time imprecision for old sessions where
+ *  a completed task later edited would rank as newer than it really is. */
+export function completionTime(task: Task): number {
+  return task.completedAt ?? task.updatedAt;
+}
+
+/** Archival is presence-based (todo-archive D2): `archivedAt !== undefined`. */
+export function isArchived(task: Task): boolean {
+  return task.archivedAt !== undefined;
+}
+
+/** Row selection for display surfaces (todo-archive D4/D7). ROWS ONLY — dependency lookups
+ *  (activeBlockers/isBlocked/counts) must always be fed the FULL task list: a partition that omits
+ *  archived completed predecessors would misreport successors as blocked. */
+export interface TaskPartition {
+  /** Display rows this partition was asked for: `[...open, ...recentCompleted]` (recent ascending). */
+  readonly visible: Task[];
+  /** pending/in_progress tasks, stored order. */
+  readonly open: Task[];
+  /** Completed and NOT archived, stored order. */
+  readonly completed: Task[];
+  /** The `recentCount` most recently completed non-archived tasks, ascending display order
+   *  (selection is by `completionTime` desc, ties broken by higher id = more recent). */
+  readonly recentCompleted: Task[];
+  /** Completed non-archived tasks not covered by `recentCompleted`. */
+  readonly hiddenCompleted: number;
+  /** Archived tasks, stored order. */
+  readonly archived: Task[];
+}
+
+export function partitionTasks(tasks: readonly Task[], recentCount: number): TaskPartition {
+  const open: Task[] = [];
+  const completed: Task[] = [];
+  const archived: Task[] = [];
+  for (const task of tasks) {
+    if (task.status !== "completed") open.push(task);
+    else if (isArchived(task)) archived.push(task);
+    else completed.push(task);
+  }
+  const latest = [...completed].sort((a, b) => {
+    const delta = completionTime(b) - completionTime(a);
+    return delta !== 0 ? delta : b.id - a.id;
+  });
+  const recent = latest.slice(0, Math.max(0, recentCount)).reverse();
+  return {
+    visible: [...open, ...recent],
+    open,
+    completed,
+    recentCompleted: recent,
+    hiddenCompleted: completed.length - recent.length,
+    archived,
+  };
+}
+
+/** Archive completed tasks (todo-archive D1/D2). Only "completed and not yet archived" tasks are
+ *  touched; `updatedAt` is never modified; ids that are unknown, open, or already archived are
+ *  skipped. Returns the SAME reference when there is nothing to archive. */
+export function archiveCompleted(state: TodoState, ids: number[] | "all", now: number): TodoState {
+  const targets = ids === "all" ? undefined : new Set(ids);
+  let changed = false;
+  const next = cloneState(state);
+  for (const task of next.tasks) {
+    if (task.status !== "completed" || task.archivedAt !== undefined) continue;
+    if (targets !== undefined && !targets.has(task.id)) continue;
+    task.archivedAt = now;
+    changed = true;
+  }
+  return changed ? next : state;
+}
+
+/** `/tasklist clear` (todo-archive D9): empties the task list while keeping the `nextId` high-water
+ *  mark, so ids are never reused within a branch/session even after a clear. */
+export function clearTasks(state: TodoState): TodoState {
+  return { tasks: [], nextId: state.nextId };
 }
 
 export function cloneState(state: TodoState): TodoState {
@@ -116,6 +200,7 @@ export function updateTask(
   const next = cloneState(state);
   const task = findTask(next, taskId);
   const before = JSON.stringify(task);
+  const was = task.status === "completed";
   const removeBlockedBy = normalizeIds(input.removeBlockedBy, "removeBlockedBy");
   const removeBlocks = normalizeIds(input.removeBlocks, "removeBlocks");
   const hasMutation =
@@ -153,6 +238,14 @@ export function updateTask(
   }
   if (input.status !== undefined) {
     if (!isTaskStatus(input.status)) throw new Error(`status must be one of: ${STATUSES.join(", ")}`);
+    // todo-archive D2 bookkeeping: stamp on the transition into completed, clear both markers on
+    // the transition out (reopen). A completed→completed no-op leaves the fields untouched, and
+    // edits of other fields never come through this branch at all.
+    if (!was && input.status === "completed") task.completedAt = now;
+    else if (was && input.status !== "completed") {
+      delete task.completedAt;
+      delete task.archivedAt;
+    }
     task.status = input.status;
   }
 
@@ -197,17 +290,21 @@ export function getTask(state: TodoState, id: unknown): Task {
 }
 
 /**
- * Presentation order: open tasks (pending/in_progress) keep their relative
- * creation order, completed tasks sink to the bottom. The stored array order
+ * Presentation order (todo-archive §2): open tasks keep their relative creation order, completed
+ * non-archived tasks sink below them, archived tasks sink to the very bottom. With no archived
+ * tasks the result is byte-identical to the pre-archive two-segment order. The stored array order
  * is never mutated — apply this at display/serialization boundaries.
  */
 export function orderTasks(tasks: readonly Task[]): Task[] {
   const open: Task[] = [];
   const completed: Task[] = [];
+  const archived: Task[] = [];
   for (const task of tasks) {
-    (task.status === "completed" ? completed : open).push(task);
+    if (task.status !== "completed") open.push(task);
+    else if (isArchived(task)) archived.push(task);
+    else completed.push(task);
   }
-  return [...open, ...completed];
+  return [...open, ...completed, ...archived];
 }
 
 export function restoreState(value: unknown): TodoState | undefined {
@@ -248,6 +345,10 @@ export function restoreState(value: unknown): TodoState | undefined {
         : {}),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
+      // todo-archive D2: the two optional timestamps survive restore only as finite numbers on a
+      // completed task; otherwise just the field is dropped — the candidate state stays valid.
+      ...(isFiniteTimestamp(task.completedAt) && task.status === "completed" ? { completedAt: task.completedAt } : {}),
+      ...(isFiniteTimestamp(task.archivedAt) && task.status === "completed" ? { archivedAt: task.archivedAt } : {}),
     });
   }
   const state = { tasks, nextId: Math.max(record.nextId, 1) };
@@ -436,6 +537,10 @@ function uniqueIds(ids: readonly number[]): number[] {
 
 function isIntegerId(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isFiniteTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function cloneTask(task: Task): Task {
