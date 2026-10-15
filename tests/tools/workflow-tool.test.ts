@@ -5,7 +5,7 @@ import type { ChildOutcome, ChildSpawner } from "../../src/workflow/host.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
 import { createOrchestrator } from "../../src/workflow/orchestrator.js";
 import { createWorkflowActivityRegistry, type WorkflowActivitySnapshot } from "../../src/workflow/activity.js";
-import { createBackgroundWorkflows, type BackgroundWorkflows } from "../../src/workflow/background.js";
+import { createBackgroundWorkflows, runBoundMs, type BackgroundWorkflows } from "../../src/workflow/background.js";
 import type { WorkflowOutcome, WorkflowRunBudget } from "../../src/workflow/types.js";
 import type { RunSnapshot } from "../../src/core/types.js";
 import {
@@ -101,54 +101,78 @@ function toolWith(runs: BackgroundWorkflows, budget: WorkflowRunBudget = REAL_BU
 }
 
 async function settle(runs: BackgroundWorkflows, workflowId: string): Promise<WorkflowOutcome> {
-  const waited = await runs.wait(workflowId, { waitMs: 15_000 });
+  // Wait budget derived from the product's own zero-hang bound, not a happy-path
+  // guess: `runBoundMs(REAL_BUDGET)` is the registry's worst-case wall clock for
+  // this budget (workflowTotalMs 20s + TICK_MS 250 + abortGrace 10s +
+  // terminateConfirm 2s + reconcile 1s = 33.25s) before its fallback finalize
+  // fires — the same "bound + 1s" margin the registry itself uses for stop().
+  // Healthy runs settle in ~40–220ms even under 48 busy competing processes, so
+  // this bound only matters when the whole machine stalls; then the workflow
+  // still settles inside the product contract while the old flat 15s gave up
+  // before it. The real-worker tests' vitest timeout sits above this bound (see below).
+  const waited = await runs.wait(workflowId, { waitMs: runBoundMs(REAL_BUDGET) + 1_000 });
   if (!waited.ok) throw new Error(`workflow did not settle: ${waited.reason}`);
   return waited.view.outcome;
 }
+
+/** vitest timeout for every test that calls settle() on a real worker: above settle()'s product-derived worst case
+ * (runBoundMs(REAL_BUDGET) = 33.25s, +1s margin). Under a full-suite machine stall the workflow
+ * is still inside the registry's own zero-hang bound when the old flat 10–15s cut the test off
+ * (flake: "Test timed out in 15000ms"). The healthy path measured 40–220ms even with 48 busy
+ * competing processes, so the higher ceiling never slows a normal run. */
+const REAL_WORKER_TEST_TIMEOUT_MS = 40_000;
 
 const text = (r: { content: { type: string; text?: string }[] }) =>
   r.content.map((c) => (c.type === "text" ? (c.text ?? "") : "")).join("\n");
 
 describe("SubagentWorkflow tool: background-only", () => {
-  it("returns immediately with a workflow id + label marker while the workflow is still running", async () => {
-    const { spawner, release } = makeSpawner({ hold: true });
-    const runs = realRuns(spawner);
-    const tool = toolWith(runs);
-    const script = 'export const meta = { name: "held-flow", description: "t" };\nreturn await agent("task");';
-    const result = await tool.execute("call-bg", { script }, undefined);
-    const details = result.details as { workflowId: string; label: string; status: string; background: boolean };
-    expect(details).toMatchObject({ label: "held-flow", status: "running", background: true });
-    expect(details.workflowId).toMatch(/^wf_[0-9a-f]{20}$/);
-    // The call did not wait for the terminal state: the registry still has it running.
-    expect(runs.get(details.workflowId)?.status).toBe("running");
-    const body = text(result);
-    expect(body).toContain(`workflow_id: ${details.workflowId}`);
-    expect(body).toContain(`get_subagent_result(run_id: "${details.workflowId}")`);
-    expect(body).toContain(`abort_subagent(run_id: "${details.workflowId}")`);
-    expect(body).toMatch(/do not block or poll/);
-    expect(body).toContain(`[workflow label: "held-flow" · workflow_id: ${details.workflowId} · status: running]`);
-    release();
-    const outcome = await settle(runs, details.workflowId);
-    expect(outcome.status).toBe("completed");
-    expect(outcome.result).toBe("done:task");
-  }, 20_000);
+  it(
+    "returns immediately with a workflow id + label marker while the workflow is still running",
+    async () => {
+      const { spawner, release } = makeSpawner({ hold: true });
+      const runs = realRuns(spawner);
+      const tool = toolWith(runs);
+      const script = 'export const meta = { name: "held-flow", description: "t" };\nreturn await agent("task");';
+      const result = await tool.execute("call-bg", { script }, undefined);
+      const details = result.details as { workflowId: string; label: string; status: string; background: boolean };
+      expect(details).toMatchObject({ label: "held-flow", status: "running", background: true });
+      expect(details.workflowId).toMatch(/^wf_[0-9a-f]{20}$/);
+      // The call did not wait for the terminal state: the registry still has it running.
+      expect(runs.get(details.workflowId)?.status).toBe("running");
+      const body = text(result);
+      expect(body).toContain(`workflow_id: ${details.workflowId}`);
+      expect(body).toContain(`get_subagent_result(run_id: "${details.workflowId}")`);
+      expect(body).toContain(`abort_subagent(run_id: "${details.workflowId}")`);
+      expect(body).toMatch(/do not block or poll/);
+      expect(body).toContain(`[workflow label: "held-flow" · workflow_id: ${details.workflowId} · status: running]`);
+      release();
+      const outcome = await settle(runs, details.workflowId);
+      expect(outcome.status).toBe("completed");
+      expect(outcome.result).toBe("done:task");
+    },
+    REAL_WORKER_TEST_TIMEOUT_MS,
+  );
 
-  it("the workflow is detached from the tool call's signal once started (Esc on the turn does not stop it)", async () => {
-    const { spawner, release } = makeSpawner({ hold: true });
-    const runs = realRuns(spawner);
-    const tool = toolWith(runs);
-    const controller = new AbortController();
-    const result = await tool.execute(
-      "call-detached",
-      { script: 'export const meta = { name: "d", description: "t" };\nreturn await agent("x");' },
-      controller.signal,
-    );
-    const id = (result.details as { workflowId: string }).workflowId;
-    controller.abort(); // after start
-    release();
-    const outcome = await settle(runs, id);
-    expect(outcome.status).toBe("completed"); // not "aborted"
-  }, 20_000);
+  it(
+    "the workflow is detached from the tool call's signal once started (Esc on the turn does not stop it)",
+    async () => {
+      const { spawner, release } = makeSpawner({ hold: true });
+      const runs = realRuns(spawner);
+      const tool = toolWith(runs);
+      const controller = new AbortController();
+      const result = await tool.execute(
+        "call-detached",
+        { script: 'export const meta = { name: "d", description: "t" };\nreturn await agent("x");' },
+        controller.signal,
+      );
+      const id = (result.details as { workflowId: string }).workflowId;
+      controller.abort(); // after start
+      release();
+      const outcome = await settle(runs, id);
+      expect(outcome.status).toBe("completed"); // not "aborted"
+    },
+    REAL_WORKER_TEST_TIMEOUT_MS,
+  );
 
   it("an already-aborted signal is still rejected before anything starts", async () => {
     const { spawner, spawnedPrompts } = makeSpawner();
@@ -223,82 +247,103 @@ describe("SubagentWorkflow tool: background-only", () => {
 });
 
 describe("SubagentWorkflow (background): real worker end-to-end", () => {
-  it("a two-agent script (sequential) runs through a real worker and settles with the combined result", async () => {
-    const { spawner, spawnedPrompts } = makeSpawner();
-    const runs = realRuns(spawner);
-    const script =
-      'export const meta = { name: "two-agent", description: "t" };\n' +
-      'const a = await agent("first task");\n' +
-      'const b = await agent("second task");\n' +
-      'return a + "|" + b;';
-    const r = await toolWith(runs).execute("call-1", { script }, undefined);
-    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
-    expect(spawnedPrompts).toEqual(["first task", "second task"]);
-    expect(outcome.status).toBe("completed");
-    expect(outcome.children).toHaveLength(2);
-    expect(renderOutcomeText(outcome)).toContain("done:first task|done:second task");
-  }, 15_000);
+  it(
+    "a two-agent script (sequential) runs through a real worker and settles with the combined result",
+    async () => {
+      const { spawner, spawnedPrompts } = makeSpawner();
+      const runs = realRuns(spawner);
+      const script =
+        'export const meta = { name: "two-agent", description: "t" };\n' +
+        'const a = await agent("first task");\n' +
+        'const b = await agent("second task");\n' +
+        'return a + "|" + b;';
+      const r = await toolWith(runs).execute("call-1", { script }, undefined);
+      const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+      expect(spawnedPrompts).toEqual(["first task", "second task"]);
+      expect(outcome.status).toBe("completed");
+      expect(outcome.children).toHaveLength(2);
+      expect(renderOutcomeText(outcome)).toContain("done:first task|done:second task");
+    },
+    REAL_WORKER_TEST_TIMEOUT_MS,
+  );
 
-  it("a two-agent script run in parallel() also completes end-to-end", async () => {
-    const { spawner, spawnedPrompts } = makeSpawner();
-    const runs = realRuns(spawner);
-    const script =
-      'export const meta = { name: "parallel-two", description: "t" };\n' +
-      'const [a, b] = await parallel([() => agent("p1"), () => agent("p2")]);\n' +
-      'return [a, b].join(",");';
-    const r = await toolWith(runs).execute("call-2", { script }, undefined);
-    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
-    expect(spawnedPrompts.sort()).toEqual(["p1", "p2"]);
-    expect(outcome.status).toBe("completed");
-  }, 15_000);
+  it(
+    "a two-agent script run in parallel() also completes end-to-end",
+    async () => {
+      const { spawner, spawnedPrompts } = makeSpawner();
+      const runs = realRuns(spawner);
+      const script =
+        'export const meta = { name: "parallel-two", description: "t" };\n' +
+        'const [a, b] = await parallel([() => agent("p1"), () => agent("p2")]);\n' +
+        'return [a, b].join(",");';
+      const r = await toolWith(runs).execute("call-2", { script }, undefined);
+      const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+      expect(spawnedPrompts.sort()).toEqual(["p1", "p2"]);
+      expect(outcome.status).toBe("completed");
+    },
+    REAL_WORKER_TEST_TIMEOUT_MS,
+  );
 
-  it("a script error (after an await) settles as failed with the workflow's diagnostic text", async () => {
-    const runs = realRuns(makeSpawner().spawner);
-    const script = 'export const meta = { name: "t", description: "t" };\nawait agent("x");\nthrow new Error("boom");';
-    const r = await toolWith(runs).execute("call-4", { script }, undefined);
-    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
-    expect(outcome.status).toBe("failed");
-    expect(renderOutcomeText(outcome)).toMatch(/boom/);
-  }, 10_000);
+  it(
+    "a script error (after an await) settles as failed with the workflow's diagnostic text",
+    async () => {
+      const runs = realRuns(makeSpawner().spawner);
+      const script =
+        'export const meta = { name: "t", description: "t" };\nawait agent("x");\nthrow new Error("boom");';
+      const r = await toolWith(runs).execute("call-4", { script }, undefined);
+      const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+      expect(outcome.status).toBe("failed");
+      expect(renderOutcomeText(outcome)).toMatch(/boom/);
+    },
+    REAL_WORKER_TEST_TIMEOUT_MS,
+  );
 
-  it("a pipeline stage that throws settles items to null AND surfaces a stage-error WARNING (the null is never silent)", async () => {
-    const runs = realRuns(makeSpawner().spawner);
-    // First-stage signature bug, the exact incident shape: (item) reads the
-    // *prev* arg (undefined on stage 0), so every item throws a TypeError.
-    const script =
-      'export const meta = { name: "pipe-null", description: "t" };\n' +
-      "const graded = await pipeline(\n" +
-      "  [{ dim: 'a' }, { dim: 'b' }],\n" +
-      "  async (item) => item.dim.toUpperCase(),\n" +
-      "  async (prev) => prev + '!',\n" +
-      ");\n" +
-      "return JSON.stringify(graded);";
-    const r = await toolWith(runs).execute("call-5", { script }, undefined);
-    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
-    const body = renderOutcomeText(outcome);
-    expect(body).toContain("[null,null]");
-    expect(outcome.status).toBe("completed");
-    expect(body).toMatch(/WARNING: 2 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
-    expect(body).toMatch(/pipeline\[item 0 stage 0\]:/);
-    expect(body).toMatch(/Cannot read propert/);
-  }, 15_000);
+  it(
+    "a pipeline stage that throws settles items to null AND surfaces a stage-error WARNING (the null is never silent)",
+    async () => {
+      const runs = realRuns(makeSpawner().spawner);
+      // First-stage signature bug, the exact incident shape: (item) reads the
+      // *prev* arg (undefined on stage 0), so every item throws a TypeError.
+      const script =
+        'export const meta = { name: "pipe-null", description: "t" };\n' +
+        "const graded = await pipeline(\n" +
+        "  [{ dim: 'a' }, { dim: 'b' }],\n" +
+        "  async (item) => item.dim.toUpperCase(),\n" +
+        "  async (prev) => prev + '!',\n" +
+        ");\n" +
+        "return JSON.stringify(graded);";
+      const r = await toolWith(runs).execute("call-5", { script }, undefined);
+      const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+      const body = renderOutcomeText(outcome);
+      expect(body).toContain("[null,null]");
+      expect(outcome.status).toBe("completed");
+      expect(body).toMatch(/WARNING: 2 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
+      expect(body).toMatch(/pipeline\[item 0 stage 0\]:/);
+      expect(body).toMatch(/Cannot read propert/);
+    },
+    REAL_WORKER_TEST_TIMEOUT_MS,
+  );
 
-  it("a parallel thunk that throws resolves its slot to null AND surfaces a stage-error WARNING", async () => {
-    const runs = realRuns(makeSpawner().spawner);
-    const script =
-      'export const meta = { name: "par-null", description: "t" };\n' +
-      "const r = await parallel([\n" +
-      "  async () => { throw new Error('thunk boom'); },\n" +
-      "  async () => 'ok',\n" +
-      "]);\n" +
-      "return JSON.stringify(r);";
-    const r = await toolWith(runs).execute("call-6", { script }, undefined);
-    const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
-    const body = renderOutcomeText(outcome);
-    expect(body).toContain('[null,"ok"]');
-    expect(body).toMatch(/WARNING: 1 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
-    expect(body).toMatch(/parallel\[item 0\]: thunk boom/);
-  }, 15_000);
+  it(
+    "a parallel thunk that throws resolves its slot to null AND surfaces a stage-error WARNING",
+    async () => {
+      const runs = realRuns(makeSpawner().spawner);
+      const script =
+        'export const meta = { name: "par-null", description: "t" };\n' +
+        "const r = await parallel([\n" +
+        "  async () => { throw new Error('thunk boom'); },\n" +
+        "  async () => 'ok',\n" +
+        "]);\n" +
+        "return JSON.stringify(r);";
+      const r = await toolWith(runs).execute("call-6", { script }, undefined);
+      const outcome = await settle(runs, (r.details as { workflowId: string }).workflowId);
+      const body = renderOutcomeText(outcome);
+      expect(body).toContain('[null,"ok"]');
+      expect(body).toMatch(/WARNING: 1 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
+      expect(body).toMatch(/parallel\[item 0\]: thunk boom/);
+    },
+    REAL_WORKER_TEST_TIMEOUT_MS,
+  );
 });
 
 describe("SubagentWorkflow disabled stub (settings.workflow.enabled === false)", () => {
