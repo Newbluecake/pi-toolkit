@@ -11,6 +11,12 @@ const mode = process.argv[2] ?? "activation";
 const fifo = join(tmpdir(), `pi-toolkit-sysload-${process.pid}.fifo`);
 execFileSync("mkfifo", [fifo]);
 
+// Keep the loop busy from the very start (before any mode branch): the top-mode branch ends in
+// a deliberately-stuck top-level `await`, and an EMPTY loop + pending TLA makes Node print its
+// "Detected unsettled top-level await" warning to stderr ~1ms after the verdict line — which
+// races into the harness's merged stdout+stderr and used to break the last-line JSON.parse.
+setInterval(() => {}, 1_000);
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const stuck = () => new Promise(() => {});
 
@@ -70,5 +76,4 @@ try {
     execFileSync("rm", ["-f", fifo]);
   } catch {}
 }
-setInterval(() => {}, 1_000);
 await new Promise(() => {});

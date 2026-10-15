@@ -177,6 +177,8 @@ async function indexStatOf(gitdir: string): Promise<string> {
 interface ProcStat {
   pid: number;
   comm: string;
+  /** Process state ("R", "S", "Z", …) — "Z" = already dead, waiting to be reaped. */
+  state: string;
   ppid: number;
   pgrp: number;
   starttimeTicks: number;
@@ -194,6 +196,7 @@ function readProcStat(pid: number): ProcStat | undefined {
     return {
       pid: pidNum,
       comm,
+      state: fields[0] ?? "",
       ppid: Number(fields[1]),
       pgrp: Number(fields[2]),
       starttimeTicks: Number(fields[19]), // field 22 (1-based) = index 19 after state(3)
@@ -226,18 +229,24 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Any live git process whose parent is `parent` (hub-spawned git, per §1.8's plain spawn). */
+/** Any live git process whose parent is `parent` (hub-spawned git, per §1.8's plain spawn).
+ * Zombies are excluded: a killed-but-not-yet-reaped child is dead, not residual — under gate-level
+ * CPU load the reap/reparent latency regularly exceeds the test's fixed settle sleeps. */
 function gitChildrenOf(parent: number): number[] {
   return allProcStats()
-    .filter((s) => s.comm === "git" && s.ppid === parent)
+    .filter((s) => s.comm === "git" && s.state !== "Z" && s.ppid === parent)
     .map((s) => s.pid);
 }
 
 /** Detached-spawned git is its OWN process-group leader (`detached:true`, run.ts) — after the
- * hub dies, a survivor shows up as ppid==1 && pgrp==pid && comm=="git", fresh since `since`. */
+ * hub dies, a survivor shows up as ppid==1 && pgrp==pid && comm=="git", fresh since `since`.
+ * Zombies are excluded for the same reason as above: a zombie was killed (the hub's killGroup
+ * did its job); it is not a live orphaned leader. */
 function orphanGitLeadersSince(sinceTicks: number): number[] {
   return allProcStats()
-    .filter((s) => s.comm === "git" && s.ppid === 1 && s.pgrp === s.pid && s.starttimeTicks >= sinceTicks)
+    .filter(
+      (s) => s.comm === "git" && s.state !== "Z" && s.ppid === 1 && s.pgrp === s.pid && s.starttimeTicks >= sinceTicks,
+    )
     .map((s) => s.pid);
 }
 
@@ -1052,7 +1061,7 @@ describe.skipIf(!hasGit || !gitInFixedPath || !hasProcFd || PLAN === undefined)(
             return false;
           }
         },
-        20_000,
+        40_000,
         "child hub up",
       );
       const hubJson = JSON.parse(readFileSync(paths.hubJson, "utf8")) as { pid: number; port: number };
@@ -1082,14 +1091,49 @@ describe.skipIf(!hasGit || !gitInFixedPath || !hasProcFd || PLAN === undefined)(
 
         // the close fixture: fire the big-list request, wait for a hub-child git to exist, SIGTERM
         const sinceTicks = readProcStat(process.pid)!.starttimeTicks;
-        const pending = filesOf(root); // C2 will scan the 8k-file bulk tree
-        await waitUntil(() => gitChildrenOf(hubPid).length > 0, 10_000, "hub-child git observed");
+        // Under gate-level CPU oversubscription the hub-side pipeline is load-elastic in TWO
+        // ways: the request may take a long time to reach its first git call, and an overloaded
+        // hub may legitimately settle the whole request (e.g. 503 busy from its own bounded
+        // admission/zombie-IO deadlines) WITHOUT ever spawning the C2. A single fired request
+        // therefore cannot guarantee an observable git child — reproduced both ways live (a
+        // >30s no-git window, and instant no-git settles). Retry sequentially until a C2 git
+        // really starts; every attempt is hub-side and client-side (20s) bounded, never a hang.
+        const sawGit = async (ms: number): Promise<boolean> => {
+          const deadline = Date.now() + ms;
+          while (gitChildrenOf(hubPid).length === 0) {
+            if (Date.now() > deadline) return false;
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          return true;
+        };
+        let pending: Promise<RawResponse> | undefined;
+        let observed = false;
+        const observeDeadline = Date.now() + 90_000;
+        while (!observed) {
+          pending = filesOf(root); // C2 will scan the 8k-file bulk tree
+          observed = await sawGit(15_000);
+          if (!observed) {
+            await pending.catch(() => undefined); // settled with no git — hub refused under load
+            if (Date.now() > observeDeadline) throw new Error("hub-child git never observed under load");
+          }
+        }
         process.kill(hubPid, "SIGTERM");
-        await waitUntil(() => !pidAlive(hubPid), 15_000, "child hub exited after SIGTERM");
-        await sleep(500); // killGroup + reaping slack
+        await waitUntil(() => !pidAlive(hubPid), 30_000, "child hub exited after SIGTERM");
+
+        // killGroup + reaping slack: converge on the residual invariants instead of a fixed
+        // sleep — TERM delivery and kernel reap/reparent latency are load-elastic (zombies are
+        // already filtered by the probes above; this waits out the live→dead transition only).
+        await waitUntil(
+          () =>
+            orphanGitLeadersSince(sinceTicks).length === 0 &&
+            gitChildrenOf(hubPid).length === 0 &&
+            fdsIntoTempRoots(hubPid).length === 0,
+          10_000,
+          "git group reaped after hub exit",
+        );
 
         // the request terminated (any settle is fine: abort answer or socket death — never a hang)
-        const settled = await Promise.race([pending.then(() => true), sleep(2_000).then(() => false)]);
+        const settled = await Promise.race([pending!.then(() => true), sleep(5_000).then(() => false)]);
         expect(settled).toBe(true);
 
         // §5 D6: no residual git — no children of the (dead) hub, no orphaned group leaders born
@@ -1106,7 +1150,7 @@ describe.skipIf(!hasGit || !gitInFixedPath || !hasProcFd || PLAN === undefined)(
         }
         rmSync(home, { recursive: true, force: true });
       }
-    }, 90_000);
+    }, 180_000);
   },
 );
 

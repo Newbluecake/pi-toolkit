@@ -160,8 +160,10 @@ describe("wiring — turn_end flush (one bounded entry per turn; none without to
     // written, delivered and decoded by the fake hub — under a loaded/slow CI runner that can
     // take longer than the repo's usual single-frame 3_000ms budget (see helpers.ts's
     // `waitUntil`), so this one wait gets a larger, still-bounded budget rather than a timeout
-    // tuned for a quiet box.
-    await waitUntil(() => hub!.all().some((f) => f.t === "ev" && f.e.type === "turn_end"), 15_000, "turn_end ev");
+    // tuned for a quiet box. 60s, not 15s: under 12-burner gate stress the in-process socket
+    // frames' wall time regularly exceeds 15s (reproduced 2/2 after the 30s test-timeout fix
+    // unmasked this layer — the earlier 4/4 failures were vitest's 10s default kill).
+    await waitUntil(() => hub!.all().some((f) => f.t === "ev" && f.e.type === "turn_end"), 60_000, "turn_end ev");
     const evs = hub!.all().filter((f): f is Extract<{ t: string; e: any }, { t: "ev" }> => f.t === "ev");
     expect(evs.find((f) => f.e.type === "tool_execution_start")!.e.startedAt).toBe(10_000);
     expect(evs.find((f) => f.e.type === "tool_execution_end")!.e.durationMs).toBe(1_500);
@@ -178,7 +180,12 @@ describe("wiring — turn_end flush (one bounded entry per turn; none without to
 
     fire("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
     await waitUntil(() => hub!.all().some((f) => f.t === "bye"), 3_000, "bye");
-  });
+    // Explicit test timeout above vitest's 10s default: the turn_end wait's own budget is 15s
+    // (see the comment there), and under gate-level CPU load those in-process socket frames can
+    // legitimately take >10s of wall time — the internal bounded waits must be allowed to run
+    // to completion so a real failure surfaces as their clear "timeout waiting for X" message
+    // instead of vitest's generic test-timeout kill (reproduced 4/4 under 12 burners).
+  }, 90_000);
 
   it("the timing entry's renderer is registered at wiring time (renders nothing)", () => {
     const { pi } = fakePi();
