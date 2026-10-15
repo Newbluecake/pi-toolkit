@@ -565,6 +565,15 @@ function runFake(o) {
         liveMessages = [...known.messages];
         Object.assign(cum, known.cum);
         notify({ type: "settings_updated", settings: fullEcho() });
+        // echo-cwd：resume 走 load_session（#31），它没有 cwd 参数——会话 cwd 就是进程 cwd。
+        if (o.mode === "echo-cwd" && typeof process.env.DROID_ECHO_FILE === "string") {
+          try {
+            appendFileSync(
+              process.env.DROID_ECHO_FILE,
+              JSON.stringify({ processCwd: process.cwd(), initCwd: null, via: "load_session" }) + "\n",
+            );
+          } catch {}
+        }
         respond(id, {
           session: {
             messages: liveMessages.map((t) => ({

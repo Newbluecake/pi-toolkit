@@ -221,9 +221,16 @@ describe("external droid integration — chain (§7.2)", () => {
     const first = await spawnDroid(s, "in A", { cwd: dirA });
     const done = await waitFor(s.stack, first, 30_000);
     expect(done.status).toBe("completed");
-    const echoes = readLines(s.echoFile).map((l) => JSON.parse(l));
+    const echoes = readLines(s.echoFile).map(
+      (l) => JSON.parse(l) as { processCwd: string; initCwd: string | null; via?: string },
+    );
     expect(echoes.length).toBeGreaterThanOrEqual(2); // 探测 1 次 + run 1 次
-    const runEcho = echoes[echoes.length - 1]!;
+    // 目录探测（catalog probe，cwd 在 <agentDir>/cache 下）是后台的，负载下可能晚于 run 落行——按 cwd 排除它。
+    const runEchoes = (): { processCwd: string; initCwd: string | null; via?: string }[] =>
+      readLines(s.echoFile)
+        .map((l) => JSON.parse(l) as { processCwd: string; initCwd: string | null; via?: string })
+        .filter((e) => !e.processCwd.startsWith(s.agentDir));
+    const runEcho = runEchoes().at(-1)!;
     expect(runEcho.processCwd).toBe(dirA);
     expect(runEcho.initCwd).toBe(dirA);
 
@@ -236,9 +243,11 @@ describe("external droid integration — chain (§7.2)", () => {
       });
     const done2 = await waitFor(s.stack, second, 30_000);
     expect(done2.status).toBe("completed");
-    const resumeEcho = JSON.parse(readLines(s.echoFile).at(-1)!);
-    expect(resumeEcho.processCwd).toBe(dirA); // 进程 cwd = 头行 cwd
-    expect(resumeEcho.initCwd).toBe(dirA); // init 参数 cwd = 头行 cwd（≠ spec.cwd=B）
+    const resumeEcho = runEchoes().at(-1)!;
+    expect(runEchoes()).toHaveLength(2); // run + resume（探测已排除）
+    expect(resumeEcho.processCwd).toBe(dirA); // 进程 cwd = 头行 cwd（≠ spec.cwd=B）
+    // resume 走 load_session（#31），没有 init cwd 参数——droid 的会话 cwd 即进程 cwd。
+    expect(resumeEcho).toMatchObject({ initCwd: null, via: "load_session" });
   }, 90_000);
 
   it("resume cwd 钉死 ②：头行 cwd（目录 A）被删 ⇒ failed{config}（msgResumeCwdGone），不起进程", async () => {
