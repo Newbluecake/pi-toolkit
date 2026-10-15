@@ -30,17 +30,18 @@ metadata:
    `subagent-model-hints` 扩展 block。
 2. **按序回退**：首选报错（过载/429/超时/额度耗尽）就换下一个，不在同一模型上反复重试。
    例外：**gpt-6.1-sol 是评审首选**（**验收禁用任何 GPT 系**，2026-10-14 用户令，见任务验收行）（与 Claude 系的方案/开发模型天然异源，保证评审独立；实测评审质量好、
-   默认走 copilot 渠道 `copilot-response/gpt-6.1-sol`，cr-response / zhipu-pool 两线作备线）；gpt-5.6-terra / gpt-6-astra 仍只作兜底。**系统提示的可用模型列表里没有 gpt-6.1-sol 时
-   不得静默换成 gpt-6-astra**——该列表优先取会话的 scoped models（pi settings 的 `enabledModels`），
+   只走 copilot 渠道 `copilot-response/gpt-6.1-sol`，2026-10-15 用户令：dev-flow 不再使用 cr-response / zhipu-pool
+   线路，gpt-6-astra / gpt-5.6-terra 同时移出路由表）。**系统提示的可用模型列表里没有 gpt-6.1-sol 时
+   不得静默换成别的模型**——该列表优先取会话的 scoped models（pi settings 的 `enabledModels`），
    没列进去的模型照样已注册、照样能派；按速查表的精确 ID 直接派，派发被拒才按回退链降级并明说原因
-   （2026-10-10 教训：看列表没有就用 gpt-6-astra 顶替，单日传输失败 4 次）。
+   （2026-10-10 教训：看列表没有就换模型顶替，单日传输失败 4 次）。
    **安全策略拒绝 ≠ 传输错误**（如 Anthropic「triggered restrictions on violative cyber content… Usage Policy」）：
    不自动按回退链重发原 prompt。主会话先判定被拦内容：① **误拦**（任务本身正当，如分析自家代码的签名/鉴权逻辑、
    协议兼容、错误处理）→ 可改派异厂商模型续跑（glm-5.3 / kimi-k3 订阅优先），派单 prompt 写明正当目的与范围；
    ② 被拦部分**本身就是规避第三方风控/安全检测**（克隆客户端 TLS 指纹、伪造遥测/心跳流量、为躲检测做的外观伪装等）
    → 从任务中剔除该部分、向用户说明后再派，**不得换模型重发原任务**。两种情况都在汇报里明说被拦及处置
    （2026-10-14：droid 对齐方案 opus-5.5 被拦，剔除 TLS 指纹/header 外观/心跳三项后改派 kimi-k3）。
-3. **fable / gpt-6-astra（≠ gpt-6.1-sol）只用于复杂任务**（L3），常规任务禁止动用。
+3. **fable 只用于复杂任务**（L3），常规任务禁止动用。
 4. **能并行必并行**：判定可并行的任务必须在**同一条消息**中发出多个 `Agent` 调用，或在
    `SubagentWorkflow` 里用 `parallel()`/`pipeline()`；顺序派发不算并行。
    **同一轮并行超过 6 个 agent 必须用 `SubagentWorkflow`**（全局并发上限默认 6，第 7 个起在全局槽位排队且有排队超时；
@@ -65,17 +66,15 @@ metadata:
 
 ## 模型 ID 速查表
 
-| 别名            | 精确 ID（按优先级）                                                                                                                                                                                                                                                                                          |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| sonnet          | `cr-anthropic/claude-sonnet-5-5` → `cr-anthropic/claude-sonnet-5`（2026-10-10 起 5.5 为首选，$3/$15 暂按 5 填；5.5 报错时降回 5 续跑）                                                                                                                                                                       |
-| kimi-k3         | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                                                                                                                                                                                                 |
-| glm-5.3         | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）→ `cr-glm/glm-5.3`（**API 按量计费备线**：两条订阅线报错/429/额度耗尽时换它续跑，不参与订阅优先升首选；走 openai-completions，单价暂按智谱官方 $1.4/$4.4，待核实）                                      |
-| opus-5.5        | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                                                                  |
-| fable           | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                                                                 |
-| gpt-6.1-sol     | `copilot-response/gpt-6.1-sol`（**默认渠道**，2026-10-15 用户令）→ `cr-response/gpt-6.1-sol` ⇄ `zhipu-pool/gpt-6.1-sol`（备线：copilot 报错/429/额度耗尽/传输中断时按序换线续跑；**禁止用于验收**（任何线路含 copilot，见任务验收行））；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5× |
-| gpt-5.6-terra   | `cr-response/gpt-5.6-terra`                                                                                                                                                                                                                                                                                  |
-| gpt-6-astra     | `cr-response/gpt-6-astra` ⇄ `zhipu-pool/gpt-6-astra`                                                                                                                                                                                                                                                         |
-| deepseek-v4-pro | `deepseek/deepseek-v4-pro`（验收次选；与 Claude/GLM/Kimi 系异源）                                                                                                                                                                                                                                            |
+| 别名            | 精确 ID（按优先级）                                                                                                                                                                                                                                                     |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sonnet          | `cr-anthropic/claude-sonnet-5-5` → `cr-anthropic/claude-sonnet-5`（2026-10-10 起 5.5 为首选，$3/$15 暂按 5 填；5.5 报错时降回 5 续跑）                                                                                                                                  |
+| kimi-k3         | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`                                                                                                                                                                                                            |
+| glm-5.3         | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）→ `cr-glm/glm-5.3`（**API 按量计费备线**：两条订阅线报错/429/额度耗尽时换它续跑，不参与订阅优先升首选；走 openai-completions，单价暂按智谱官方 $1.4/$4.4，待核实） |
+| opus-5.5        | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                             |
+| fable           | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                            |
+| gpt-6.1-sol     | `copilot-response/gpt-6.1-sol`（**唯一渠道**，2026-10-15 用户令；报错/429/额度耗尽时按阶段回退链换模型，传输中断时 resume 重试；**禁止用于验收**，见任务验收行）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5×                                   |
+| deepseek-v4-pro | `deepseek/deepseek-v4-pro`（验收次选；与 Claude/GLM/Kimi 系异源）                                                                                                                                                                                                       |
 
 ### 疑难升级阶梯（fable 闸门）
 
@@ -148,24 +147,24 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 
 ## 各阶段模型分工
 
-| 阶段                   | 首选                                                                 | 次选                                               | 说明                                                                                                                                                                                                         |
-| ---------------------- | -------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **核心调度**（主会话） | opus-5.5                                                             | kimi-k3（有订阅额度时）                            | 任务拆解、派单、汇总、裁定                                                                                                                                                                                   |
-| **代码探索**           | glm-5.3（zai 订阅有余量时首选）→ droid 订阅线 → sonnet               | kimi-k3（订阅有余量时）                            | `subagent_type=Explore`，只读定位代码/梳理调用链                                                                                                                                                             |
-| **架构设计**           | opus-5.5                                                             | gpt-6-astra（兜底）                                | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                                                                                                        |
-| **方案制定**           | opus-5.5                                                             | sonnet（简单方案）                                 | `subagent_type=Plan`                                                                                                                                                                                         |
-| **前端开发**           | glm-5.3（zai 订阅有余量时首选）→ droid 订阅线 → sonnet               | opus-5.5（视觉设计/疑难）→ kimi-k3（订阅有余量时） | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                                                                                                       |
-| **复杂任务方案**       | opus-5.5                                                             | gpt-6-astra（兜底）                                | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                                                                                                    |
-| **疑难攻坚**           | opus-5.5                                                             | gpt-6-astra（兜底）                                | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                                                                                               |
-| **方案评审**           | gpt-6.1-sol（copilot 默认）                                          | glm-5.3（订阅有余量时）→ kimi-k3                   | `subagent_type=reviewer`；必须与方案模型异源                                                                                                                                                                 |
-| **开发实施**           | glm-5.3（zai 订阅有余量时首选）→ droid 订阅线 → sonnet ⇄ gpt-6.1-sol | kimi-k3（订阅有余量时）→ opus-5.5                  | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                                                                                                  |
-| **任务验收**           | glm-5.3（订阅有余量时；开发用了 GLM 的包禁派）→ kimi-k3              | deepseek-v4-pro → sonnet                           | `subagent_type=verifier`；必须与开发模型异源；打回后复验优先 resume 原 verifier；**禁派任何 GPT 系模型**（gpt-6.1-sol / gpt-6-astra / gpt-5.6-terra 等，任何线路含 copilot / zhipu-pool；2026-10-14 用户令） |
+| 阶段                   | 首选                                                                 | 次选                                               | 说明                                                                                                                                                            |
+| ---------------------- | -------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **核心调度**（主会话） | opus-5.5                                                             | kimi-k3（有订阅额度时）                            | 任务拆解、派单、汇总、裁定                                                                                                                                      |
+| **代码探索**           | glm-5.3（zai 订阅有余量时首选）→ droid 订阅线 → sonnet               | kimi-k3（订阅有余量时）                            | `subagent_type=Explore`，只读定位代码/梳理调用链                                                                                                                |
+| **架构设计**           | opus-5.5                                                             | gpt-6.1-sol（兜底）                                | `subagent_type=architect`，产出架构文档，仅 L3 或新模块从零搭建时启用                                                                                           |
+| **方案制定**           | opus-5.5                                                             | sonnet（简单方案）                                 | `subagent_type=Plan`                                                                                                                                            |
+| **前端开发**           | glm-5.3（zai 订阅有余量时首选）→ droid 订阅线 → sonnet               | opus-5.5（视觉设计/疑难）→ kimi-k3（订阅有余量时） | `subagent_type=frontend-dev`，仅含 UI 工作时启用；含页面级 bug 排查/验证时优先派它而非 general-purpose                                                          |
+| **复杂任务方案**       | opus-5.5                                                             | gpt-6.1-sol（兜底）                                | 仅 L3；opus-5.5 方案被判 Blocker 后才 `ask_user` 升 fable                                                                                                       |
+| **疑难攻坚**           | opus-5.5                                                             | gpt-6.1-sol（兜底）                                | 连续 2 轮无进展的 bug/重构；仍卡死 → `ask_user` 批准后升 fable                                                                                                  |
+| **方案评审**           | gpt-6.1-sol（copilot 默认）                                          | glm-5.3（订阅有余量时）→ kimi-k3                   | `subagent_type=reviewer`；必须与方案模型异源                                                                                                                    |
+| **开发实施**           | glm-5.3（zai 订阅有余量时首选）→ droid 订阅线 → sonnet ⇄ gpt-6.1-sol | kimi-k3（订阅有余量时）→ opus-5.5                  | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                                                     |
+| **任务验收**           | glm-5.3（订阅有余量时；开发用了 GLM 的包禁派）→ kimi-k3              | deepseek-v4-pro → sonnet                           | `subagent_type=verifier`；必须与开发模型异源；打回后复验优先 resume 原 verifier；**禁派任何 GPT 系模型**（gpt-6.1-sol 等任何 GPT，任何线路；2026-10-14 用户令） |
 
 **droid 订阅线（`droid/<model>`，须 `externalAgents.droid.enabled`；2026-10-15 用户拍板进路由表）**：Factory 订阅额度不用也作废，[quota] 行显示 droid 池有余量（未触 L3）时，**代码探索 / 前端开发 / 开发实施**按上表排在 zai GLM 订阅之后、按量线（sonnet/opus 按量）之前。池内顺序：core 池（Factory 托管开源模型，`droid/glm-5.3` → `droid/kimi-k3`）先于 standard 池（`droid/claude-sonnet-5-5`，疑难再 `droid/claude-opus-5-5`）；standard 池被拦时按 [quota] 建议改 core 池。**评审 / 验收 / 方案 / consult 专家一律不用 droid**（只读无法保证、不能挂专家），且异源规则照旧：droid 底层是 GLM 的开发包，验收同样不得派 GLM。经 `Agent({model:"droid/<id>"})` 派发。限制：**不能**当 consult 专家、**不能**跑 tidy（只读工具域被拒）；它以完整权限运行（读用户全局 skills/MCP），破坏性任务建议 worktree 隔离；resume 钉原目录（worktree 被清后不可 resume）；**验收仍用 pi 模型**（异源，且禁 GPT 系规则照旧）；额度受 Factory standard/core 两池闸门约束（触线会被拒绝派发）。详见 `docs/dev/external-agent/README.md`。
 
 开发双首选（2026-09）：sonnet 与 gpt-6.1-sol 并列，多个开发包并行时按包分摊（gpt-6.1-sol 更便宜、上下文 1.05M）；**gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）**，不派任何 GPT 系。
 
-路由现状（2026-10）：zai 订阅有余量时 GLM 按上方「GLM 订阅优先」规则升为候选阶段首选；kimi-coding / zai 订阅常耗尽，额度耗尽或 L3 预警时回退到按量线（cr-anthropic / cr-response / zhipu-pool）的默认顺序（**验收除外：任何情况下都不回退到 GPT 系**）；GLM 仍在候选内的阶段可改派 `cr-glm/glm-5.3`（同模型、API 按量计费，按表中常规位次用，不升首选），GLM 的异源约束照旧。
+路由现状（2026-10）：zai 订阅有余量时 GLM 按上方「GLM 订阅优先」规则升为候选阶段首选；kimi-coding / zai 订阅常耗尽，额度耗尽或 L3 预警时回退到按量线（cr-anthropic 等）的默认顺序（**验收除外：任何情况下都不回退到 GPT 系**）；GLM 仍在候选内的阶段可改派 `cr-glm/glm-5.3`（同模型、API 按量计费，按表中常规位次用，不升首选），GLM 的异源约束照旧。
 
 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier /
 general / Explore），自带角色 prompt 与工具约束；调用时传 `subagent_type` 并按本表传 `model`。
@@ -430,9 +429,7 @@ node ~/.agents/skills/dev-flow/scripts/conflict-check.mjs spec.json --cwd <仓�
 | 开发实施            | `medium`（机械性改动 `low`）              |
 | 方案评审 / 任务验收 | `medium`                                  |
 
-模型档位限制：`claude-opus-5-5` 为自适应思考，支持到 `xhigh` / `max`；
-`gpt-6-astra` 不支持 `off`（API 拒绝 `reasoning.effort: "none"`，400），
-最低 `low`；支持 `low` / `medium` / `high` / `xhigh` / `max`。
+模型档位限制：`claude-opus-5-5` 为自适应思考，支持到 `xhigh` / `max`。
 
 ## 参考与协作
 
