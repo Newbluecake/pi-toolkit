@@ -21,6 +21,20 @@
   border-top: 1px solid var(--c-border);
 }
 
+/* 2026-10-15 user ruling: in the fleet drawer the bash group title is a peer section header
+ * of the drawer's "子 Agent" title, so it takes `.drawer-title`'s type (fs-sm / semibold /
+ * body color) instead of the muted fs-xs summary-row grammar; icon + chevron stay muted. */
+.fleet-bash .bj-sum {
+  min-height: 32px;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.fleet-bash .bj-sum .icon-sm {
+  color: var(--c-text-3);
+}
+
 /* Rows sit on a tinted surface so bash rows read apart from agent rows. No status-colored
  * left accent (2026-10-15 user ruling: it looked like a stray "(" and agent rows have no
  * counterpart) — status lives in the status icon/text only. */
