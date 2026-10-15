@@ -7,9 +7,9 @@
   整个分组不渲染(旧 hub/agent 不带该字段时与现状一致)。
 
   与 agent 行的区分(拍板 ③):分组不参与 agent 的父子缩进/`FLEET_STATE_ICON` 状态图标体系 ——
-  每行以固定的 terminal 图标开头(身份标记),随后是 BashJobsPanel 原样的状态语义
-  (`statusToken`:loader 旋转=running / check=done / x=failed / alert=timeout…,英文 token
-  文案),行底色 + 按状态着色的左边框与 agent 行一眼区分。行可点击展开:完整 redacted 命令
+  terminal 图标只出现在分组标题(2026-10-15 用户拍板:行内身份图标与左边框都去掉),每行以
+  BashJobsPanel 原样的状态语义开头(`statusToken`:loader 旋转=running / check=done /
+  x=failed / alert=timeout…,英文 token 文案),行底色与 agent 行区分。行可点击展开:完整 redacted 命令
   (纯文本)+ 日志尾 `<pre>`(PLAIN TEXT,绝不 v-html —— source-scan 全仓禁止;tail 是
   agent 端 best-effort redact 过的任意进程输出,D2a)。
 
@@ -139,8 +139,6 @@ function toggleRow(row: BashJobRowWire): void {
           :aria-expanded="row.tail === undefined ? undefined : expandedId === row.id"
           @click="toggleRow(row)"
         >
-          <!-- 身份图标:每行固定的 terminal 标记,与 agent 行(bot/状态图标体系)区分 -->
-          <AppIcon name="terminal" class="icon-sm bj-term" />
           <AppIcon
             :name="statusToken(row).icon"
             class="icon-sm bj-ico"

@@ -6,7 +6,7 @@
  * - `bashJobsOf` 的无 wire/空行不渲染裁决(旧 hub/agent 不带字段 ⇒ 与现状一致);
  * - 组标题计数语法 `bash · 2 running · 8 done`(英文紧凑标记)、默认开合(有 running ⇒
  *   展开,全终态 ⇒ 收起)、`aria-expanded`;
- * - 行渲染:每行固定 terminal 身份图标(与 agent 行区分)、状态 icon/token(沿用
+ * - 行渲染:terminal 图标只在组标题(行内不再有身份图标)、状态 icon/token(沿用
  *   BashJobsPanel 语义)、short id、redacted cmd(全文在 `title`)、`exit N`/`grace`、
  *   logBytes `+`;
  * - 行展开:完整命令 + 日志尾 PLAIN TEXT(`<script>` payload 保持惰性文本,绝无 v-html);
@@ -129,8 +129,8 @@ describe("FleetBashJobs.vue — 组标题与默认开合", () => {
   });
 });
 
-describe("FleetBashJobs.vue — rows (拍板 ③: terminal 图标 + 状态语义,与 agent 行区分)", () => {
-  it("terminal identity icon per row, status icon/token, short id, cmd (full text on title), exit/grace/elapsed/bytes", async () => {
+describe("FleetBashJobs.vue — rows (拍板 ③: 状态语义 + 行底色,与 agent 行区分)", () => {
+  it("no per-row terminal icon (title only), status icon/token, short id, cmd (full text on title), exit/grace/elapsed/bytes", async () => {
     const long = 'curl -H "Authorization: ***" https://example.com/' + "x".repeat(300);
     const wrapper = await mountGroupOpen(
       wire([
@@ -153,10 +153,9 @@ describe("FleetBashJobs.vue — rows (拍板 ③: terminal 图标 + 状态语义
     );
     const item = wrapper.find(".bj-item");
     expect(item.attributes("data-status")).toBe("failed");
-    // 每行固定 terminal 身份图标 + 状态图标(两套并存,状态颜色只在 status icon/text 上)
-    const term = item.find(".bj-term");
-    expect(term.exists()).toBe(true);
-    expect(term.attributes("data-kind")).toBeUndefined();
+    // terminal 图标只留在组标题(2026-10-15 拍板):行内只有状态图标
+    expect(item.find(".bj-term").exists()).toBe(false);
+    expect(wrapper.find(".bj-sum").findAll("svg").length).toBeGreaterThan(0);
     expect(item.find(".bj-ico").attributes("data-kind")).toBe("failed");
     expect(item.find(".bj-id").text()).toBe("job-bbbb");
     const cmd = item.find(".bj-cmd");

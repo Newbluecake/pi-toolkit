@@ -28,13 +28,6 @@
   background: var(--c-surface);
 }
 
-/* The per-row identity icon (terminal marker) stays muted — status color belongs to the
- * status icon/text only. */
-.bj-term {
-  flex: none;
-  color: var(--c-text-3);
-}
-
 .bj-sum {
   display: flex;
   align-items: center;
