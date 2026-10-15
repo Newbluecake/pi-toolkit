@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-15
+
+### Added
+
+- **external-agent**: wire the droid provider into the session stack (P5) (`3b9dc0e`)
+- **date**: tell the model the current date on the first turn and at day rollover (`2958e62`)
+- **web-hub**: project droid quota pools to the hub when it supports them (P7wa) (`4b64584`)
+- **quota**: Factory droid quota pools with per-model gating (P7) (`4d052c0`)
+- **web-hub**: read-only cache keepalive panel in the session header (P-B) (`68cc3a8`)
+- **web-hub**: show droid quota pools in the web UI (P7w) (`125e461`)
+- **web-hub**: load large text previews chunk by chunk as you scroll (P2b) (`b2ddbc7`)
+- **web-hub**: publish cache keepalive state to the web hub (P-A) (`5b07c41`)
+- **web-hub**: StatusInfo.cacheKeepalive wire contract (keepalive panel P0) (`95f7a6f`)
+- **cache-ttl**: keep retrying keepalive pings until the cache expires (`2dc2a90`)
+- **external-agent**: Factory droid adapter (P3) (`658d045`)
+- **external-agent**: spawn, runtime and tool gating for droid runs (P4b) (`42d6a0e`)
+- **external-agent**: provider-agnostic framework for external CLI agents (P2) (`b707053`)
+- **external-agent**: prompt, settings and memory hooks for droid (P4a) (`fa9d63f`)
+- **web-hub**: chunked text preview on the hub (P1) (`40bb5ab`)
+- **web-hub**: chunked preview client logic (P2a) (`0599845`)
+- **external-agent**: show unpriced external-agent costs (P4c) (`2002ffa`)
+- **cache-ttl**: line-level keepalive breaker with reset on success (`77b1cda`)
+- **external-agent**: freeze droid provider shared surface (P1) (`df2957f`)
+- **web-hub**: chunked preview protocol and preview.chunk.v1 cap (#23) (`6ea6c55`)
+- **cache-ttl**: show the HTTP status when keepalive pings are switched off (`8f25203`)
+
+### Fixed
+
+- **external-agent**: resume droid sessions with load_session so the model remembers (`a7e079f`)
+- **external-agent**: don't rely on stdin EOF to stop a busy droid (`645b57d`)
+- **quota**: read Factory's overagePreference billing field (`dd4ea4a`)
+- **bash**: SIGKILL the whole job group when members outlive the leader (`fc40fa9`)
+- **memory**: warn when no core file means nothing is injected every turn (`3eaa290`)
+- **memory**: read frontmatter behind the /mem import drift banner (`ea3cebe`)
+- **memory**: keep the cursor in place when toggling /mem tidy --batch selections (`8d4ded7`)
+- **memory**: stop /mem doctor D13 flagging identifiers and placeholders as secrets (`1e50685`)
+- **web-hub**: drop content-visibility:auto on transcript items — Aw Snap root cause (#11) (`6e62b7b`)
+
+### Documentation
+
+- **external-agent**: droid resume memory loss root cause (#31) (`25945cd`)
+- **external-agent**: droid provider user guide, AGENTS entry and dev-flow routing (P6) (`2b27d92`)
+- **dev-flow**: anti-patterns for shared git stash and parallel full test runs (`7b80f39`)
+- **bash**: #27 orphan root cause and fix plan r2 (`2fdb4e0`)
+- **external-agent**: P5 tracking items from P7 acceptance (`d3edd62`)
+- **quota**: record droid pools and month window deviations (`6ac1247`)
+- **cache-ttl**: mark keepalive web-hub sync implemented; AGENTS pointer (P-C) (`ac3be1a`)
+- **web-hub**: chunked preview acceptance checklist and AGENTS note (P3) (`c27e840`)
+- **external-agent**: droid quota plan r2 (P7/P7w/P7wa) + reviews (`1c14859`)
+- **cache-ttl**: web-hub keepalive panel plan r2 + review r1 (`f981df4`)
+- **cache-ttl**: keepalive breaker recovery plan + review r1 (`7fcf545`)
+- **memory**: field study of a large imported project memory (`10a4ec8`)
+- **web-hub**: chunked preview loading plan and review (#23) (`eb5fd45`)
+- **external-agent**: droid provider requirements, protocol study, architecture and plan (`a195301`)
+- **dev-flow**: treat safety-policy refusals differently from transport errors (`ceeff29`)
+- **dev-flow**: never use GPT-family models for verification (`ff67abd`)
+- **dev-flow**: never route verifiers to zhipu-pool (`3e4f5c5`)
+
+### Tests
+
+- **external-agent**: make the resume-cwd echo case real and race-free (`dee8b88`)
+- **web-hub**: pre-warm the lazy graph chunk in the GraphPanel expand case (`3a4d5c0`)
+- **bash**: wait for the job record to settle before the pipe-holder kill case (`e963d43`)
+- **integration**: disable the date module in the system-prompt wiring suite (`3316763`)
+- **external-agent**: opt-in real droid conformance suite (D1-D14) (`e75060f`)
+- **external-agent**: droid chain, hang and disabled-bytes integration suites (`8ccd3cf`)
+- **quota**: pin kimi/zai quota output with a golden fixture (`caff590`)
+
+### Chores
+
+- **web-hub**: remove Aw Snap investigation diagnostics (#11) (`f379b5e`)
+- **web-hub**: print a full-state [pwh-diag] dump at boot + pwhDiag() (#11) (`13caf1d`)
+
+Stats: 21 feat, 9 fix, 17 docs, 7 test, 2 chore
+
 ## [0.5.1] - 2026-10-14
 
 ### Added
@@ -437,7 +512,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.3.0...v0.4.0
