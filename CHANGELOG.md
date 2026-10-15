@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-15
+
+### Added
+
+- **compat**: support pi 1.2.x (`9149c75`)
+- **web-hub**: lead the fleet drawer title with the bot icon (`9204a6c`)
+- **quota**: suggest droid pool models when a pi subscription runs out (`e928db7`)
+- **web-hub**: show background bash jobs as a group in the fleet drawer (`aef6c67`)
+
+### Fixed
+
+- **web-hub**: label the fleet drawer back button and tree 'Agents' (`64837de`)
+- **compat**: queue resume messages as followUp on pi 1.2 (`a401758`)
+- **web-hub**: title the fleet drawer 'Agents' and the bash group 'Bash' (`f291284`)
+- **web-hub**: match the fleet bash group title to the drawer title type (`bee72f5`)
+- **web-hub**: keep the terminal icon only on the fleet bash group title (`f7421e3`)
+- **web-hub**: drop the status accent bar from fleet bash rows (`7d55d3e`)
+- **web-hub**: square the left corners of fleet bash rows (`ede633e`)
+- **external-agent**: bump droid protocol pin to 1.265.0 (`9a2c123`)
+- **web-hub**: preview ANSI-colored terminal logs as text (`fd38405`)
+- **ask-user**: drop the pause glyph from the parked-question status (`29f81c6`)
+- **sysload**: count CPU cores from the per-core /proc/stat lines (`04aab2f`)
+
+### Documentation
+
+- **skills**: drop the cr-response and zhipu-pool lines from dev-flow (`46bd4ba`)
+- **skills**: route gpt-6.1-sol through the copilot channel by default (`d563a7f`)
+- **dev-flow**: route droid subscription pools into explore/frontend/dev stages (`7909213`)
+
+### Tests
+
+- **web-hub**: wait for the preview audit line instead of racing it (`e52e2ba`)
+- fix three load-sensitive flakes in the full suite (`b0910eb`)
+- **external-agent**: move the fake droid fixture to protocol 1.265.0 (`c807d62`)
+- clean up temp dirs in ~35 suites that leaked into /tmp (`1355ffb`)
+- **web-hub**: clean up wtdiff linked worktrees after each test (`5b3491e`)
+- **web-hub**: wait for a live link before firing tool-timing events (`11728e3`)
+- **web-hub**: register test agents with a live pid (`1c9923c`)
+
+Stats: 4 feat, 11 fix, 3 docs, 7 test
+
 ## [0.5.3] - 2026-10-15
 
 ### Fixed
@@ -525,7 +566,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.0...v0.5.1
