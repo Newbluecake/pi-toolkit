@@ -92,10 +92,13 @@ describe("GraphPanel", () => {
     expect(wrapper.findAll("button")).toHaveLength(1);
     expect(wrapper.find(".wt-sum").attributes("aria-expanded")).toBe("false");
     expect(graph.graph).not.toHaveBeenCalled();
+    // Pre-warm the lazy SFC chunk: its first vitest transform can outlast settle()'s
+    // fixed microtask/macrotask budget when run in isolation or under load (#20).
+    await import("../../../src/web-hub/ui/src/components/graph/WorktreeGraph.vue");
     await wrapper.find(".wt-sum").trigger("click");
     await wrapper.vm.$nextTick();
     await settle();
-    expect(graph.graph).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(graph.graph).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     expect(wrapper.find(".gg-sum").exists()).toBe(false);
   });
   it("retries a failed lazy import", async () => {
