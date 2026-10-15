@@ -203,6 +203,70 @@ describe("wireTitle — first title generation", () => {
   });
 });
 
+describe("wireTitle — pi 1.2 bas union shapes (plan §3.3, D2=A)", () => {
+  const userShape = (prompt: string) => ({ messageType: "user", prompt, images: [] as unknown[], systemPrompt: "" });
+  const customShape = () => ({
+    messageType: "custom",
+    message: { role: "user", content: "subagent 完成通知" },
+    systemPrompt: "",
+  });
+
+  it("pi ≥1.2 messageType=user events take the exact same first-title path as the 1.1 {prompt} form", async () => {
+    const { pi, handlers, appendEntry } = makePi();
+    const { ctx, complete } = makeCtx();
+    wireTitle(pi as never, DEPS);
+    const before = handlers.find((h) => h.event === "before_agent_start")!;
+    before.handler(userShape("帮我修一个登录超时") as never, ctx);
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1);
+    const request = complete.mock.calls[0]![1] as { messages: { content: string }[] };
+    expect(request.messages[0]!.content).toContain("帮我修一个登录超时");
+    expect(pi.setSessionName).toHaveBeenCalledWith("接线层标题");
+    expect(appendEntry).toHaveBeenCalledWith("subagent:title", expect.objectContaining({ v: 1, name: "接线层标题" }));
+  });
+
+  it("pi ≥1.2 wake runs (messageType=custom) are skipped entirely: no first title, no write, no throw", async () => {
+    const { pi, handlers, appendEntry } = makePi();
+    const { ctx, complete } = makeCtx();
+    wireTitle(pi as never, DEPS);
+    const before = handlers.find((h) => h.event === "before_agent_start")!;
+    expect(() => before.handler(customShape() as never, ctx)).not.toThrow();
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+    expect(pi.setSessionName).not.toHaveBeenCalled();
+    expect(appendEntry).not.toHaveBeenCalled();
+  });
+
+  it("wake runs do not count toward refreshEveryInputs: 4 customs + settles never refresh, 4 user inputs do", async () => {
+    const { pi, handlers } = makePi();
+    pi.getSessionName.mockReturnValue("旧标题");
+    const entries = [customTitleEntry("x", { v: 1, name: "旧标题", at: 1 })];
+    const { ctx, complete } = makeCtx({ entries, completeImpl: () => "刷新后的新标题" });
+    wireTitle(pi as never, { ...DEPS, refreshEveryInputs: 4, refreshAfterMinutes: 0 });
+    const before = handlers.find((h) => h.event === "before_agent_start")!;
+    const end = handlers.find((h) => h.event === "agent_end")!;
+    const settled = handlers.find((h) => h.event === "agent_settled")!;
+
+    // pi ≥1.2 下唤醒轮同样会触发 agent_end/agent_settled，但 bas 被接线层跳过：不计数。
+    for (let i = 0; i < 4; i++) {
+      before.handler(customShape() as never, ctx);
+      end.handler({ messages: [assistant("ok")] } as never, ctx);
+      settled.handler({} as never, ctx);
+      await flush();
+    }
+    expect(complete).not.toHaveBeenCalled(); // 4 个唤醒轮从未达到刷新门槛
+
+    for (let i = 0; i < 4; i++) {
+      before.handler({ prompt: `用户输入${i + 1}` } as never, ctx);
+      end.handler({ messages: [assistant("ok")] } as never, ctx);
+      settled.handler({} as never, ctx);
+      await flush();
+    }
+    expect(complete).toHaveBeenCalledTimes(1); // 第 4 个用户输入恰好达到 refreshEveryInputs=4
+    expect(pi.setSessionName).toHaveBeenCalledWith("刷新后的新标题");
+  });
+});
+
 describe("wireTitle — refresh via agent_end/agent_settled", () => {
   it("refreshes after N inputs, carrying ownership record forward and extracting the assistant excerpt", async () => {
     const { pi, handlers, appendEntry } = makePi();

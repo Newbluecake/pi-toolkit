@@ -193,6 +193,28 @@ describe("mode: stable / live / legacy (three-state, task item 6)", () => {
     expect(r3).toEqual({ systemPrompt: "BASE\n\nA" });
   });
 
+  test("pi ≥1.2 custom (wake) bas events fold sections too — hub must not filter on messageType (pi-1.2-compat plan §3.4)", () => {
+    const host = fakePi();
+    const hub = makeHub(host, { mode: () => "stable" });
+    const s = testSection();
+    hub.register("pi_subagent_types", s.reg);
+
+    s.setLive("A");
+    const handler = host.handlers.get("before_agent_start")!;
+    const res = handler(
+      {
+        type: "before_agent_start",
+        messageType: "custom",
+        message: { role: "user", content: "notif" },
+        systemPrompt: "BASE",
+        systemPromptOptions: {},
+      },
+      {},
+    );
+    // 唤醒轮同谱系的前提就是 hub 在 custom run 上照样折叠并返回 systemPrompt。
+    expect(res).toEqual({ systemPrompt: "BASE\n\nA" });
+  });
+
   test("legacy: raw live every turn, byte-identical to the fold oracle, never a message, never appendEntry", () => {
     const host = fakePi();
     const hub = makeHub(host, { mode: () => "legacy" });

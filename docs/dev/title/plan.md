@@ -95,6 +95,8 @@ v1 只在首条用户消息生成一次、永不更新。问题：首条消息�
    `type==="message" && message.role==="user"` 的条数），基线 = 最近自有记录的 `inputs`
    （无记录则 0）；运行时长清零。`before_agent_start` 每次计数 +1（在门检之前）。
    注意 v1 的「通知唤醒轮不经过 before_agent_start」：唤醒轮不计入用户输入，符合预期。
+   （pi ≥1.2 修订：唤醒轮现在会经过 bas（messageType=custom），由接线层 `src/title/index.ts`
+   按 messageType 过滤，唤醒轮仍不计入，语义不变——docs/dev/pi-1.2-compat/plan.md §3.3。）
 8. **写入前复验保留 v1 全部守卫**：重读名字（期间所有权变了 ⇒ 作废）+ 会话身份快照复验。
    刷新场景的「名字变了」判据 = 当前名字 !== 触发时的名字。
 9. **子会话不触发**（不变）。

@@ -127,7 +127,7 @@ export function detectPiCapabilities(pi: MinimalPiHost, version = "unknown"): Pi
   };
 }
 
-export const TESTED_PI_RANGE = "1.0.0 - 1.1.0";
+export const TESTED_PI_RANGE = "1.0.0 - 1.2.0";
 
 /**
  * Child-context-switch boundary capability (docs/dev/child-context-switch/plan.md §3.1):
@@ -249,6 +249,25 @@ function isWithinTestedRange(version: string): boolean {
   const parts = version.split(".").map((n) => Number.parseInt(n, 10));
   if (parts.length < 2 || parts.some((n) => Number.isNaN(n))) return false;
   const [major, minor] = parts as [number, number];
-  // Matches the peer range >=1.0.0 <1.2.0 (0.87's type surface is no longer compatible).
-  return major === 1 && (minor === 0 || minor === 1);
+  // Matches the peer range >=1.0.0 <1.3.0 (0.87's type surface is no longer compatible).
+  return major === 1 && minor >= 0 && minor <= 2;
+}
+
+/**
+ * before_agent_start trigger shape (docs/dev/pi-1.2-compat/plan.md §3). pi 1.0/1.1 fire the event
+ * only for prompt()-started runs and carry `prompt` with no `messageType`; pi 1.2 makes it a union on
+ * `messageType` ("user" + prompt/images | "custom" + message, no prompt) and ALSO fires it for
+ * `sendMessage(…, { triggerTurn: true })` wake runs. Read structurally off `unknown` on purpose:
+ * importing 1.2-only type names, or touching `.messageType` on the 1.1 interface, would not compile
+ * against the 1.0/1.1 peer floor. This is a shape probe, not a version gate (I14).
+ */
+export type BeforeAgentStartTrigger = { kind: "user"; prompt: string } | { kind: "custom" } | { kind: "unknown" };
+
+export function readBeforeAgentStartTrigger(event: unknown): BeforeAgentStartTrigger {
+  if (event === null || typeof event !== "object") return { kind: "unknown" };
+  const e = event as { messageType?: unknown; prompt?: unknown };
+  if (e.messageType === "custom") return { kind: "custom" };
+  // Unknown future kinds are treated as "not a user prompt" (fail-safe for user-only handlers).
+  if (e.messageType !== undefined && e.messageType !== "user") return { kind: "unknown" };
+  return typeof e.prompt === "string" ? { kind: "user", prompt: e.prompt } : { kind: "unknown" };
 }

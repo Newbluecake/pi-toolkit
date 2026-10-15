@@ -306,7 +306,8 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   snapshot + tail updates, default) / `live` (refresh every turn through the hub, no freezing) / `legacy`
   (raw append, byte-identical to pre-hub behavior, never persists). `systemPrompt.wakeReplay` (default
   true) independently gates the notification-wake-run replay (`false` = not registered at all, not
-  registered-but-inert); `systemPrompt.adoptForeignForcedPrompt` (default false) gates whether a later
+  registered-but-inert) (dormant on pi ≥1.2: pi's own forced-prompt projection runs last and supersedes
+  it; kept for the 1.0/1.1 peer floor); `systemPrompt.adoptForeignForcedPrompt` (default false) gates whether a later
   extension's forced-prompt text gets adopted into the replay instead of just WARNed about. A snapshot's
   state persists via a `subagent:prompt-sections` session entry (`pi.appendEntry`, read back through
   `getBranch()` — never `getEntries()`, which can resurrect a stale fork's snapshot) so it survives
@@ -732,7 +733,7 @@ max(ceil(f·workflowTotalMs), workflowTotalMs + maxExtensions·extendStepMs)` wi
   for local tests) — never in `dependencies`: pi ≥1.0 warns, since an installed copy can bypass the
   loader's module mapping and duplicate runtime modules. There are no runtime `dependencies`.
 - Peer dependencies on `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` are pinned to
-  `>=1.0.0 <1.2.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
+  `>=1.0.0 <1.3.0`; bump deliberately and re-check `src/adapters/pi-compat.ts`. Before bumping, run
   `npm run test:conformance` (real `AgentSession` boundary-draft contract + runtime capability
   self-check, `tests/conformance/`) — it never gates pi-compat's structural probes (I14), it just
   tells you ahead of users whether `src/context-switch/capability.ts` still reaches `verified`.

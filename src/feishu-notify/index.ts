@@ -41,6 +41,7 @@ import {
 } from "./core.js";
 import { getGitBranch } from "./git.js";
 import { readBackgroundStatus } from "../service/background-status.js";
+import { readBeforeAgentStartTrigger } from "../adapters/pi-compat.js";
 
 /**
  * 本扩展所在包的根目录（<root>/src/feishu-notify 或 <root>/dist/feishu-notify → <root>/）。
@@ -502,7 +503,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (event.prompt) taskPrompt = event.prompt;
+    // pi ≥1.2 also fires this for wake runs (no prompt): keep the current user task's prompt.
+    const start = readBeforeAgentStartTrigger(event);
+    if (start.kind === "user" && start.prompt) taskPrompt = start.prompt;
   });
 
   pi.on("agent_start", async (_event, ctx) => {

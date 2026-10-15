@@ -30,6 +30,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import { parseStrictModelRef } from "../config/model-hint.js";
+import { readBeforeAgentStartTrigger } from "../adapters/pi-compat.js";
 import { createTitleTrigger, type TitleGenerationDeps, type TitlePorts, type TitleTrigger } from "./title.js";
 
 /** 自有标题记录的 customType（会话级 appendEntry，schema `{v:1,name,at}`）。 */
@@ -232,10 +233,15 @@ export function wireTitle(pi: ExtensionAPI, deps: WireTitleDeps): TitleWiring | 
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    // pi ≥1.2 also fires this for sendMessage(triggerTurn) wake runs (messageType "custom"). Those are
+    // not user input (docs/dev/title/plan.md:97): skip counting / first title / busy-time entirely —
+    // byte-for-byte the pi 1.0/1.1 behavior, where wake runs never reached this handler.
+    const start = readBeforeAgentStartTrigger(event);
+    if (start.kind !== "user") return;
     // ctxRef 只给 readUserInputs 这三个同步端口用（本次调用里立即被消费）；
     // completion 等异步依赖走下面就地构造的 buildDeps(ctx)。
     ctxRef.current = ctx;
-    trigger.onBeforeAgentStart(event.prompt, buildDeps(ctx));
+    trigger.onBeforeAgentStart(start.prompt, buildDeps(ctx));
   });
   pi.on("agent_end", (event) => {
     // 取 event.messages 中最后一条 assistant（不是数组最后一个元素——末尾可能是

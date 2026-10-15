@@ -5,6 +5,7 @@ import {
   detectPiCapabilities,
   probeBoundaryStatic,
   probeReadBackEntries,
+  readBeforeAgentStartTrigger,
 } from "../../src/adapters/pi-compat.js";
 
 describe("pi-compat gate", () => {
@@ -35,7 +36,7 @@ describe("pi-compat gate", () => {
     const result = assertCompatible(caps);
     expect(result.ok).toBe(true);
     expect(result).toHaveProperty("warning");
-    for (const v of ["1.2.0", "2.0.0"]) {
+    for (const v of ["1.3.0", "2.0.0"]) {
       const out = assertCompatible(
         detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
       );
@@ -43,8 +44,8 @@ describe("pi-compat gate", () => {
     }
   });
 
-  it("does not warn inside the tested range (1.0.x and 1.1.x)", () => {
-    for (const v of ["1.0.0", "1.0.2", "1.1.0", "1.1.5"]) {
+  it("does not warn inside the tested range (1.0.x, 1.1.x and 1.2.x)", () => {
+    for (const v of ["1.0.0", "1.0.2", "1.1.0", "1.1.5", "1.2.0", "1.2.7"]) {
       const result = assertCompatible(
         detectPiCapabilities({ sendMessage() {}, appendEntry() {}, events: { on() {}, emit() {} } }, v),
       );
@@ -184,5 +185,35 @@ describe("checkTurnEndShape (plan §3.1 L1: does THIS turn_end event have 0.87-s
       ok: false,
       reason: "l1-event-shape",
     });
+  });
+});
+
+describe("readBeforeAgentStartTrigger (pi 1.2 bas union, plan §3.1)", () => {
+  // 语义表逐行覆盖（docs/dev/pi-1.2-compat/plan.md §3.1）。
+  it("pi 1.0/1.1 bas events (prompt, no messageType) read as user", () => {
+    expect(readBeforeAgentStartTrigger({ prompt: "x", systemPrompt: "s" })).toEqual({ kind: "user", prompt: "x" });
+  });
+
+  it("pi ≥1.2 user turns (messageType user + prompt) read as user", () => {
+    expect(readBeforeAgentStartTrigger({ messageType: "user", prompt: "x", images: [] })).toEqual({
+      kind: "user",
+      prompt: "x",
+    });
+  });
+
+  it("pi ≥1.2 wake runs (messageType custom, no prompt) read as custom", () => {
+    expect(readBeforeAgentStartTrigger({ messageType: "custom", message: { role: "user", content: "notif" } })).toEqual(
+      { kind: "custom" },
+    );
+  });
+
+  it("unknown future kinds read as unknown", () => {
+    expect(readBeforeAgentStartTrigger({ messageType: "other", prompt: "x" })).toEqual({ kind: "unknown" });
+  });
+
+  it("malformed input reads as unknown", () => {
+    expect(readBeforeAgentStartTrigger({ systemPrompt: "s" })).toEqual({ kind: "unknown" });
+    expect(readBeforeAgentStartTrigger(null)).toEqual({ kind: "unknown" });
+    expect(readBeforeAgentStartTrigger("str")).toEqual({ kind: "unknown" });
   });
 });

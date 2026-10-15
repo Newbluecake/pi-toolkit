@@ -492,6 +492,67 @@ describe("16. idle reminder basic", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 16b. before_agent_start taskPrompt capture (pi 1.1 / 1.2 bas union shapes)
+// ---------------------------------------------------------------------------
+
+describe("16b. before_agent_start taskPrompt capture (pi 1.1 / 1.2 shapes)", () => {
+  it("pi ≥1.2 user bas captures the task prompt; a later custom (wake) bas keeps it", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, commands } = setup();
+    const ctx = makeCtx();
+
+    await emit("session_start", {}, ctx);
+    await commands.get("watch").handler("", ctx); // 持久门控：后续卡片都能发
+
+    // pi ≥1.2 用户轮：messageType=user + prompt
+    await emit(
+      "before_agent_start",
+      { type: "before_agent_start", messageType: "user", prompt: "任务X", systemPrompt: "" },
+      ctx,
+    );
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // 结果卡（首 run 无任务上下文兑底 ⇒ isUserRun）
+    expect(fetchMock.mock.calls[0]![1].body).toContain("任务X");
+
+    // pi ≥1.2 唤醒轮：messageType=custom，无 prompt —— taskPrompt 必须保留"任务X"。
+    fetchMock.mockClear();
+    await emit(
+      "before_agent_start",
+      {
+        type: "before_agent_start",
+        messageType: "custom",
+        message: { role: "user", content: "subagent 完成通知" },
+        systemPrompt: "",
+      },
+      ctx,
+    );
+    await emit("agent_start", {}, ctx); // 扩展触发续跑：无输入 ⇒ 不发结果卡
+    await emit("agent_settled", {}, ctx);
+    await vi.advanceTimersByTimeAsync(300_000); // 空闲提醒在 settle 时快照 taskPrompt
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const idleBody = fetchMock.mock.calls[0]![1].body;
+    expect(idleBody).toContain("空闲提醒");
+    expect(idleBody).toContain("任务X");
+  });
+
+  it("pi 1.1 shape {prompt} (no messageType) still captures the task prompt", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, commands } = setup();
+    const ctx = makeCtx();
+
+    await emit("session_start", {}, ctx);
+    await commands.get("watch").handler("", ctx);
+    await emit("before_agent_start", { type: "before_agent_start", prompt: "任务Y" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1].body).toContain("任务Y");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 17. @notify + subagent combo (idle re-arm across continuation run)
 // ---------------------------------------------------------------------------
 
