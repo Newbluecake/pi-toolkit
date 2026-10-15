@@ -22,8 +22,7 @@ import type {
 } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
-import { projectTodo } from "./todo.js";
-import type { TodoState } from "../../todo/state.js";
+import type { TodoWire } from "../protocol/messages.js";
 import { projectLoadGate } from "../../sysload/wire.js";
 import type { LoadPort } from "../../sysload/types.js";
 
@@ -39,7 +38,7 @@ export function readStatus(
   tap: EventTap,
   fleet: readonly RunSnapshot[],
   queueMirror?: QueueMirror,
-  todo?: () => TodoState,
+  todo?: () => TodoWire | undefined,
   worktrees?: () => WorktreesWire | undefined,
   bashJobs?: () => BashJobsWire | undefined,
   quota?: () => QuotaWire | undefined,
@@ -74,11 +73,14 @@ export function readStatus(
     const dropped = queueMirror.takeDropped();
     if (dropped.length > 0) status.queueDropped = dropped;
   }
-  // todo-web plan §3.3 (T3): sampled in the same call as busy/leafId/queue so the
-  // browser never sees a torn "new leaf + stale todo" pair. No getter (todo
-  // disabled / child session) ⇒ field absent, byte-equal to the pre-feature shape.
+  // todo-web plan §3.3 (T3) + todo-archive v2.1 §2: the seam is now a PROJECTION closure
+  // (same shape as worktrees/bashJobs/quota below) — the cap-gated folding lives in
+  // agent/index.ts's `todoProjection`. Sampled in the same call as busy/leafId/queue so the
+  // browser never sees a torn "new leaf + stale todo" pair. No getter (todo disabled / child
+  // session) or undefined result (no visible tasks) ⇒ field absent, byte-equal to the
+  // pre-feature shape.
   if (todo !== undefined) {
-    const projected = projectTodo(todo());
+    const projected = todo();
     if (projected !== undefined) status.todo = projected;
   }
   // worktree-web plan §4.4 (W3): sampled in the same call, same overwrite-only-slot

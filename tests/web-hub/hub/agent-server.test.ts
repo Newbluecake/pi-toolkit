@@ -10,6 +10,7 @@ import {
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
+  TODO_ARCHIVE_HUB_CAPS,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
 import {
@@ -121,6 +122,7 @@ describe("agent-server handshake", () => {
         ...HOLD_HUB_CAPS,
         ...RUNTX_HUB_CAPS,
         ...QUOTA_POOLS_HUB_CAPS,
+        ...TODO_ARCHIVE_HUB_CAPS,
       ],
     });
     expect(registry.list()).toHaveLength(1);

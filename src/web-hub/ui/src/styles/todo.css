@@ -136,6 +136,15 @@
   font-size: var(--fs-xs);
 }
 
+/* todo-archive plan v2.1 §2 (package B): the two new fold tail rows — same muted hint styling
+ * as .todo-more (they are list-level hints, not task rows). */
+.todo-done,
+.todo-archived {
+  padding: 3px 0 3px calc(14px + var(--sp-2));
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
 /* coarse pointers: the fold toggle keeps a 44px hit box (ui-design §3.12, §7.5 precedent) */
 @media (pointer: coarse) {
   .todo-sum {

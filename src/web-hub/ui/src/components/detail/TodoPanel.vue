@@ -18,6 +18,12 @@
   precedent as DetailHeader's own ≤480px metrics fold). Styles live in `styles/todo.css`
   (imported below) rather than scoped `<style>` — source-scan bans `<style>` blocks outright —
   or `styles/detail.css`, which the in-flight fleet-drawer F6 line owns.
+
+  todo-archive plan v2.1 §2 (package B, D4/D5): the tail now has up to three fold lines,
+  in order — `todoCompletedHidden` ("✓ {n} done"), `todoMore(max(0, omitted − completedHidden))`
+  and `todoArchived` ("{n} archived"). An old wire without the two new fields renders exactly
+  as before: completedHidden undefined ⇒ todoMore falls back to the raw omitted count and
+  neither fold line appears.
 -->
 <script setup lang="ts">
 import { computed, ref } from "vue";
@@ -33,6 +39,10 @@ const props = defineProps<{ readonly todo: TodoWire }>();
 const { t } = useI18n();
 
 const open = ref(false);
+
+/** todo-archive v2.1 (D5): the "more" tail excludes what `todoCompletedHidden` already counted —
+ *  an old wire (no completedHidden) degrades to the raw `omitted` count, byte-identical rendering. */
+const moreCount = computed(() => Math.max(0, (props.todo.omitted ?? 0) - (props.todo.completedHidden ?? 0)));
 
 const summary = computed(() =>
   t("detail.todoTitle", {
@@ -97,8 +107,14 @@ function blockedLabel(task: TodoTaskWire): string {
           <span v-if="task.blockedBy.length > 0" class="todo-blocked">{{ blockedLabel(task) }}</span>
         </span>
       </li>
-      <li v-if="todo.omitted !== undefined && todo.omitted > 0" class="todo-more">
-        {{ t("detail.todoMore", { n: todo.omitted }) }}
+      <li v-if="todo.completedHidden !== undefined && todo.completedHidden > 0" class="todo-done">
+        {{ t("detail.todoCompletedHidden", { n: todo.completedHidden }) }}
+      </li>
+      <li v-if="moreCount > 0" class="todo-more">
+        {{ t("detail.todoMore", { n: moreCount }) }}
+      </li>
+      <li v-if="todo.archived !== undefined && todo.archived > 0" class="todo-archived">
+        {{ t("detail.todoArchived", { n: todo.archived }) }}
       </li>
     </ul>
   </section>

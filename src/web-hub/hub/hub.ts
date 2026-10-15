@@ -38,6 +38,7 @@ import {
   HOLD_HUB_CAPS,
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
+  TODO_ARCHIVE_HUB_CAPS,
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
   SPAWN_RELAUNCH_HUB_CAP,
@@ -562,6 +563,9 @@ export async function startHub(
         ...HOLD_HUB_CAPS,
         ...RUNTX_HUB_CAPS,
         ...QUOTA_POOLS_HUB_CAPS,
+        // todo-archive plan v2.1 §2 (D5): unconditional, both surfaces — same position as
+        // agent-server.ts's hello_ack.caps fold (caps-coexist pins the set equality).
+        ...TODO_ARCHIVE_HUB_CAPS,
         ...extraHubCaps,
       ],
     };

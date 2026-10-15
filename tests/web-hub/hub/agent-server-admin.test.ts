@@ -18,6 +18,7 @@ import {
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
+  TODO_ARCHIVE_HUB_CAPS,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, memLog, tmpDirs, type TestClient } from "./helpers.js";
@@ -87,6 +88,7 @@ describe("agent-server + admin wiring (plan §8)", () => {
       ...HOLD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
       "quota.pools.v1",
+      "todo.archive.v1",
     ]);
   });
 
@@ -105,6 +107,7 @@ describe("agent-server + admin wiring (plan §8)", () => {
       ...HOLD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
       ...QUOTA_POOLS_HUB_CAPS,
+      ...TODO_ARCHIVE_HUB_CAPS,
     ]);
   });
 
@@ -124,6 +127,7 @@ describe("agent-server + admin wiring (plan §8)", () => {
       ...HOLD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
       ...QUOTA_POOLS_HUB_CAPS,
+      ...TODO_ARCHIVE_HUB_CAPS,
       "spawn.v1",
     ]);
     expect(caps[caps.length - 1]).toBe("spawn.v1");

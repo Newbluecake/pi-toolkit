@@ -9,6 +9,7 @@
  */
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import DetailHeader from "../../../src/web-hub/ui/src/components/detail/DetailHeader.vue";
 import TodoPanel from "../../../src/web-hub/ui/src/components/detail/TodoPanel.vue";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
@@ -92,6 +93,68 @@ describe("TodoPanel.vue (todo-web plan §4, T4)", () => {
     await wrapper.find(".todo-sum").trigger("click");
     expect(wrapper.findAll(".todo-list button")).toHaveLength(0);
     expect(wrapper.findAll(".todo-list input")).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// todo-archive plan v2.1 §2 (package B, D4/D5): the three fold tail rows — todoCompletedHidden,
+// todoMore(max(0, omitted − completedHidden)) and todoArchived — plus the old-wire degradation
+// (no new fields ⇒ exactly the pre-feature rendering).
+// ---------------------------------------------------------------------------
+describe("TodoPanel.vue fold tail rows (todo-archive v2.1, D5)", () => {
+  const tailLines = async (over: Partial<TodoWire>): Promise<string[]> => {
+    const wrapper = mount(TodoPanel, { props: { todo: todoFixture(over) } });
+    await wrapper.find(".todo-sum").trigger("click");
+    const lines: string[] = [];
+    const done = wrapper.find(".todo-done");
+    if (done.exists()) lines.push(done.text());
+    const more = wrapper.find(".todo-more");
+    if (more.exists()) lines.push(more.text());
+    const archived = wrapper.find(".todo-archived");
+    if (archived.exists()) lines.push(archived.text());
+    return lines;
+  };
+
+  it("renders the three tail rows in order: done fold, more, archived", async () => {
+    expect(await tailLines({ completedHidden: 2, omitted: 5, archived: 3 })).toEqual([
+      "✓ 2 done",
+      "(+3 more)",
+      "3 archived",
+    ]);
+  });
+
+  it("completedHidden absorbing the whole omitted count ⇒ the more line disappears", async () => {
+    expect(await tailLines({ completedHidden: 8, omitted: 8, archived: 5 })).toEqual(["✓ 8 done", "5 archived"]);
+  });
+
+  it("omitted below completedHidden never renders a negative more line", async () => {
+    // defensive: a future projection change can only max() to 0, never "(+-1 more)"
+    expect(await tailLines({ completedHidden: 6, omitted: 4 })).toEqual(["✓ 6 done"]);
+  });
+
+  it("zero values render no tail rows at all", async () => {
+    expect(await tailLines({ completedHidden: 0, omitted: 0, archived: 0 })).toEqual([]);
+  });
+
+  it("old wire (no new fields) renders EXACTLY as before: one omitted line, no fold rows", async () => {
+    // completedHidden/archived absent ⇒ todoMore degrades to the raw omitted count
+    expect(await tailLines({ omitted: 4 })).toEqual(["(+4 more)"]);
+    expect(await tailLines({ omitted: undefined })).toEqual([]);
+  });
+
+  it("zh translations render for the fold rows (D4 拍板: web walks i18n)", async () => {
+    setLangOverride("zh");
+    try {
+      const wrapper = mount(TodoPanel, {
+        props: { todo: todoFixture({ completedHidden: 2, omitted: 5, archived: 3 }) },
+      });
+      await wrapper.find(".todo-sum").trigger("click");
+      expect(wrapper.find(".todo-done").text()).toBe("已完成 2 项");
+      expect(wrapper.find(".todo-more").text()).toBe("（+3 更多）");
+      expect(wrapper.find(".todo-archived").text()).toBe("已归档 3 项");
+    } finally {
+      resetLangForTests();
+    }
   });
 });
 

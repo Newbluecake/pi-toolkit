@@ -32,6 +32,7 @@ import {
   PREVIEW_LAN_HUB_CAP,
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
+  TODO_ARCHIVE_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
@@ -58,6 +59,7 @@ function baselineCaps(): string[] {
     ...HOLD_HUB_CAPS,
     ...RUNTX_HUB_CAPS,
     ...QUOTA_POOLS_HUB_CAPS,
+    ...TODO_ARCHIVE_HUB_CAPS,
   ];
 }
 

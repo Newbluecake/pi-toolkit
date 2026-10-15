@@ -133,17 +133,27 @@ export interface TodoTaskWire {
   descTruncated?: true;
 }
 
-/** `StatusInfo.todo`'s body: a bounded, orderTasks-ordered projection of the main session's task list. */
+/** `StatusInfo.todo`'s body: a bounded, open-first projection of the main session's task list
+ *  (todo-archive D5: `[...open, ...3 most-recent completed]`, archived tasks never emitted). */
 export interface TodoWire {
-  /** ≤ TODO_WIRE_MAX_TASKS (32), orderTasks order (completed sink to the bottom). */
+  /** ≤ TODO_WIRE_MAX_TASKS (32), `[...open, ...recentCompleted]` — open tasks first. */
   tasks: TodoTaskWire[];
-  /** Full-population task count (includes capped-away rows); always = counts open+inProgress+completed. */
+  /** Non-archived task count (includes capped/folded-away rows; archived never counted);
+   *  always = counts open+inProgress+completed. */
   total: number;
-  /** Full-population counts; `blocked` = non-completed tasks with open blockers (TUI widget's gauge). */
+  /** Counts over the non-archived population; `blocked` = non-completed tasks with open blockers
+   *  (lookups always against the FULL task list — todo-archive D7). */
   counts: { open: number; inProgress: number; completed: number; blocked: number };
-  /** total - tasks.length, when the 32-task cap or the byte budget dropped rows. */
+  /** total - tasks.length, when the 32-task cap, the recent-3 fold or the byte budget dropped
+   *  rows (todo-archive D5: includes the folded completed tasks). */
   omitted?: number;
-  /** max(updatedAt) over the projected tasks ("recently updated" display). */
+  /** todo-archive D5: completed (non-archived) tasks not emitted as rows (recent-3 fold + cap /
+   *  budget drops). Sent ONLY while the live hub's hello_ack.caps carries `todo.archive.v1`. */
+  completedHidden?: number;
+  /** todo-archive D5: archived task count (never in rows/total/counts). Sent ONLY while the live
+   *  hub's hello_ack.caps carries `todo.archive.v1`. */
+  archived?: number;
+  /** max(updatedAt) over the projected tasks ("recently updated" display; pre-budget-trim). */
   updatedAt: number;
 }
 
@@ -1061,7 +1071,11 @@ const TodoTaskSchema = Type.Object(
   },
   { additionalProperties: false },
 );
-const TodoWireSchema = Type.Object(
+// todo-archive plan v2.1 §2 (D5): the two optional fields ride the SAME closed schema (kept
+// `additionalProperties:false` — an open schema would let a typo'd field slip through to every
+// peer); the compat story is the `todo.archive.v1` hub cap instead of schema openness (an old
+// hub never receives the new fields, plan §4). Exported for tests/web-hub/protocol tests.
+export const TodoWireSchema = Type.Object(
   {
     tasks: Type.Array(TodoTaskSchema),
     total: Type.Integer(),
@@ -1070,6 +1084,8 @@ const TodoWireSchema = Type.Object(
       { additionalProperties: false },
     ),
     omitted: Type.Optional(Type.Integer()),
+    completedHidden: Type.Optional(Type.Integer({ minimum: 0 })),
+    archived: Type.Optional(Type.Integer({ minimum: 0 })),
     updatedAt: Type.Number(),
   },
   { additionalProperties: false },

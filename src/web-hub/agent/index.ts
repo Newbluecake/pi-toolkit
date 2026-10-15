@@ -45,6 +45,7 @@ import {
   HOLD_AGENT_CAPS,
   HOLD_CAP,
   QUOTA_POOLS_HUB_CAP,
+  TODO_ARCHIVE_HUB_CAP,
 } from "../protocol/version.js";
 import type { LanStatus } from "../protocol/lan.js";
 import {
@@ -73,8 +74,8 @@ import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createWorktreeSampler } from "./worktree-sampler.js";
 import { bashJobsLightFingerprint, bashJobsRowSignature, projectBashJobs, selectJobs } from "./bash-jobs.js";
 import { createBashJobsSampler, type BashJobsSource } from "./bash-jobs-sampler.js";
-import type { BashJobsWire } from "../protocol/messages.js";
-import { todoLightFingerprint } from "./todo.js";
+import type { BashJobsWire, TodoWire } from "../protocol/messages.js";
+import { projectTodo, todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
 import { projectQuota, quotaFingerprint } from "./quota-sampler.js";
 import type { CacheKeepaliveWire, QuotaWire } from "../protocol/messages.js";
@@ -464,6 +465,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // synchronous in-memory read, so there is no sampler state to own here (see quota-sampler.ts's
   // module docstring). Re-evaluated fresh on every call; the 1Hz tick below only decides whether
   // a given evaluation is worth publishing.
+  // todo-archive plan v2.1 §2 (D5): the todo projection closure — same PURE-read cap gate as
+  // quota's `pools` below (never cached, never bound to a link generation): `completedHidden` /
+  // `archived` ride the wire ONLY while the live link's hello_ack.caps carries `todo.archive.v1`
+  // (an un-upgraded hub's closed TodoWireSchema would silently drop the whole status frame,
+  // plan §4). B1 keeps the optional-source gate INSIDE the closure too: `deps.todo === undefined`
+  // (todo.enabled=false ⇒ `wireTodo` never ran) ⇒ undefined, never a `deps.todo!()` throw.
+  const todoArchiveCap = (): boolean =>
+    conn?.status().state === "live" && (conn?.caps.includes(TODO_ARCHIVE_HUB_CAP) ?? false);
+  const todoProjection = (): TodoWire | undefined =>
+    deps.todo !== undefined ? projectTodo(deps.todo(), { archiveFields: todoArchiveCap() }) : undefined;
   const cacheKeepaliveProjection = (): CacheKeepaliveWire | undefined => {
     const d = deps.cacheKeepalive;
     if (d === undefined) return undefined;
@@ -632,7 +643,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       tap,
       readFleet(),
       queueMirror,
-      deps.todo,
+      // todo-archive v2.1 §2 (D5/B1): projection closure (cap-gated inside); the optional-source
+      // gate stays explicit at BOTH call sites — deps.todo undefined ⇒ no getter at all.
+      deps.todo !== undefined ? todoProjection : undefined,
       () => wtSampler.current(),
       deps.bashJobs !== undefined ? bashJobsProjection : undefined,
       deps.quota !== undefined ? quotaProjection : undefined,
@@ -714,7 +727,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // (Task* tool results settle inside the enqueue queue), so the same 1Hz tick
     // carries a light-fingerprint gate — publish only on real change (lastFleetFp
     // pattern). `deps.todo` reads only our own closure, so no stale-ctx guard needed.
-    const todoFp = deps.todo !== undefined ? todoLightFingerprint(deps.todo()) : undefined;
+    // todo-archive v2.1 §2: the fingerprint carries the cap bit ("|a0"/"|a1") — a reconnect
+    // to an upgraded hub flips the projection's archiveFields even with an unchanged state,
+    // and the next tick republishes (quota pools' same reconnect story).
+    const todoFp =
+      deps.todo !== undefined ? todoLightFingerprint(deps.todo()) + (todoArchiveCap() ? "|a1" : "|a0") : undefined;
     if (todoFp !== lastTodoFp) {
       lastTodoFp = todoFp;
       publishStatus();
@@ -955,7 +972,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             tap,
             snaps,
             queueMirror,
-            deps.todo,
+            deps.todo !== undefined ? todoProjection : undefined,
             () => wtSampler.current(),
             deps.bashJobs !== undefined ? bashJobsProjection : undefined,
             deps.quota !== undefined ? quotaProjection : undefined,

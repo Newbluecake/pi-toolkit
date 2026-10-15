@@ -35,6 +35,7 @@ import {
   P2_HUB_CAPS,
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
+  TODO_ARCHIVE_HUB_CAPS,
   UPLOAD_HUB_CAPS,
 } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, tmpDirs, waitFor, hello, type TestClient } from "./helpers.js";
@@ -163,6 +164,7 @@ describe("startHub + defaultLanAssembly (plan \u00a71.4, \u00a78) \u2014 config.
       ...HOLD_HUB_CAPS,
       ...RUNTX_HUB_CAPS,
       ...QUOTA_POOLS_HUB_CAPS,
+      ...TODO_ARCHIVE_HUB_CAPS,
     ]);
 
     c.send({ t: "lan_req", rid: "r1", op: "info" });
@@ -343,6 +345,7 @@ skipIfNoSqlite(
         ...HOLD_HUB_CAPS,
         ...RUNTX_HUB_CAPS,
         ...QUOTA_POOLS_HUB_CAPS,
+        ...TODO_ARCHIVE_HUB_CAPS,
       ]);
 
       c.send({ t: "lan_req", rid: "r1", op: "info" });

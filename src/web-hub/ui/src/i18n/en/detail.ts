@@ -85,6 +85,12 @@ const detail = {
   // Deep-link refresh flicker fix: pre-first-`agents`-snapshot loading state (DashboardView).
   loadingTitle: "Connecting…",
   loadingBody: "Waiting for the hub's first snapshot.",
+  // todo-archive plan v2.1 §2 (package B, D4/D5): TodoPanel's fold tail rows. zh translates both
+  // lines as prose (「已完成 {n} 项」/「已归档 {n} 项」, D4 拍板 — web walks i18n, unlike the TUI's
+  // English-token fold line). Appended at the file's end — another package inserts before
+  // `todoCompletedHidden`, never here.
+  todoCompletedHidden: "✓ {n} done",
+  todoArchived: "{n} archived",
 } satisfies Record<string, string>;
 
 export default detail;

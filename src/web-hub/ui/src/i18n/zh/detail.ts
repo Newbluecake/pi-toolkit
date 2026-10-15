@@ -83,6 +83,11 @@ const detail = {
   removedBody: "会话文件仍保留，可在终端用 pi 恢复。",
   loadingTitle: "正在连接…",
   loadingBody: "正在等待 hub 的首个快照。",
+  // todo-archive plan v2.1 §2（包 B，D4/D5）：TodoPanel 折叠尾行。zh 按散文翻译（D4 拍板：web 走
+  // i18n，不同于 TUI 折叠行的英文 token）。追加在文件末尾——其它包插在 `todoCompletedHidden`
+  // 之前，永不动这里。
+  todoCompletedHidden: "已完成 {n} 项",
+  todoArchived: "已归档 {n} 项",
 } satisfies Messages<typeof en>;
 
 export default detail;

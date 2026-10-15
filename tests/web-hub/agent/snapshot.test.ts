@@ -241,24 +241,18 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
   // todo-web plan §3.3/§7 (T3): the optional 5th seam — a getter ⇒ sampled
   // projection in the same frame; no getter / empty list ⇒ the `todo` key is
   // absent (toEqual pins key-level absence, not just undefined-vs-null).
-  it("readStatus: todo getter ⇒ status.todo sampled atomically; empty/absent ⇒ key missing", () => {
+  // todo-archive v2.1 §2: the seam's shape is now a PROJECTION closure
+  // (`() => TodoWire | undefined`, same as worktrees/quota below) — the
+  // folding/cap gate lives in agent/index.ts's `todoProjection`.
+  it("readStatus: todo projection getter ⇒ status.todo sampled atomically; undefined/absent ⇒ key missing", () => {
     const { ctx } = fakeCtx({ leaf: "L9" });
     const tap = noopTap();
     tap.resetForSession(Number.NaN);
     const populated = {
-      tasks: [
-        {
-          id: 1,
-          subject: "s",
-          description: "d",
-          status: "pending" as const,
-          blocks: [],
-          blockedBy: [],
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      ],
-      nextId: 2,
+      tasks: [{ id: 1, subject: "s", status: "pending" as const, blockedBy: [] }],
+      total: 1,
+      counts: { open: 1, inProgress: 0, completed: 0, blocked: 0 },
+      updatedAt: 2,
     };
     const s = readStatus(ctx, tap, [], undefined, () => populated);
     expect(s.todo).toMatchObject({
@@ -267,7 +261,7 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
       counts: { open: 1, inProgress: 0, completed: 0, blocked: 0 },
     });
 
-    const emptied = readStatus(ctx, tap, [], undefined, () => ({ tasks: [], nextId: 2 }));
+    const emptied = readStatus(ctx, tap, [], undefined, () => undefined);
     expect("todo" in emptied).toBe(false);
 
     const noGetter = readStatus(ctx, tap, []);

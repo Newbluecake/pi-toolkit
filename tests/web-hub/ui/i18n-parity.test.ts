@@ -119,3 +119,25 @@ describe("preview namespace — chunked stream keys (chunked-plan §4.7)", () =>
     }
   });
 });
+
+// todo-archive plan v2.1 §3（包 B）：TodoPanel 折叠尾行的两个新 key（含占位符一致性；
+// detail 命名空间整体的中英 key 集合相等由上方第一个断言覆盖）。
+describe("detail namespace — todo-archive fold tail keys (todo-archive v2.1 §2)", () => {
+  const KEYS = ["todoCompletedHidden", "todoArchived"];
+  const en = MESSAGES.en["detail"] as Record<string, string>;
+  const zh = MESSAGES.zh["detail"] as Record<string, string>;
+
+  it.each(KEYS)("%s exists in both languages with the same {n} placeholder", (k) => {
+    expect(typeof en[k]).toBe("string");
+    expect(typeof zh[k]).toBe("string");
+    expect(placeholdersOf(zh[k]!)).toEqual(placeholdersOf(en[k]!));
+    expect(placeholdersOf(en[k]!)).toEqual(new Set(["n"]));
+  });
+
+  it("the strings match the D4 拍板 wording", () => {
+    expect(en["todoCompletedHidden"]).toBe("✓ {n} done");
+    expect(zh["todoCompletedHidden"]).toBe("已完成 {n} 项");
+    expect(en["todoArchived"]).toBe("{n} archived");
+    expect(zh["todoArchived"]).toBe("已归档 {n} 项");
+  });
+});

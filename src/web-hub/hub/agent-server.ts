@@ -35,6 +35,7 @@ import {
   HOLD_HUB_CAPS,
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
+  TODO_ARCHIVE_HUB_CAPS,
   protoCompatible,
 } from "../protocol/version.js";
 import type { AdminHandler } from "./admin.js";
@@ -186,6 +187,8 @@ export function createAgentServer(
             ...RUNTX_HUB_CAPS,
             // P7w (quota-plan §9A.2): same position as hub.ts's HubInfo.caps.
             ...QUOTA_POOLS_HUB_CAPS,
+            // todo-archive plan v2.1 §2 (D5): same position as hub.ts's HubInfo.caps.
+            ...TODO_ARCHIVE_HUB_CAPS,
             // web-hub-spawn plan §SP10: conditional cap tail (spawn.v1 + spawn.model.v1) —
             // 同源数组展开（集合/顺序一致，非同一实例）：hub.ts spreads the SAME source array into
             // HubInfo.caps, so the two surfaces can never drift.

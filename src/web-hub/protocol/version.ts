@@ -163,6 +163,14 @@ export const RUNTX_HUB_CAPS = ["runtx.v1"] as const;
 export const QUOTA_POOLS_HUB_CAP = "quota.pools.v1";
 export const QUOTA_POOLS_HUB_CAPS = [QUOTA_POOLS_HUB_CAP] as const;
 
+/** todo-archive plan v2.1 §2 (D5): the hub can decode the todo wire's `completedHidden` / `archived`
+ *  fields (`StatusInfo.todo`). Advertised unconditionally on BOTH hub cap surfaces (`HubInfo.caps` /
+ *  `hello_ack.caps`, right after QUOTA_POOLS_HUB_CAPS); the agent only emits those two fields when
+ *  hello_ack.caps ∋ this cap — an un-upgraded hub's closed `TodoWireSchema` would silently drop the
+ *  whole status/snapshot frame otherwise (plan §4 upgrade window). No new frame ⇒ no PROTO bump. */
+export const TODO_ARCHIVE_HUB_CAP = "todo.archive.v1";
+export const TODO_ARCHIVE_HUB_CAPS = [TODO_ARCHIVE_HUB_CAP] as const;
+
 /** web-hub-steer-recall plan §2.3 S1. Agent advertises iff holdWired(settings) (hold.ts); the hub
  *  advertises on BOTH cap surfaces (HubInfo.caps / hello_ack.caps), same rule as DIALOG_BG_HUB_CAPS.
  *  The agent only ever HOLDS while `holdCap()` — link live ∧ hello_ack.caps ∋ hold.v1 — is true at
