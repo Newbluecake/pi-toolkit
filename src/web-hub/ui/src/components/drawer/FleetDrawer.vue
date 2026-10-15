@@ -268,6 +268,7 @@ watch(
     </template>
     <template v-else>
       <div class="drawer-head">
+        <AppIcon name="bot" class="icon-sm drawer-title-icon" />
         <span class="drawer-title">{{ t("fleet.panelTitle") }}</span>
         <button
           class="btn btn-ghost btn-icon drawer-close"

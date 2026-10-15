@@ -173,6 +173,16 @@ describe("U1: 三种模式(§6.2)— data-drawer 与 localStorage 持久化", ()
     expect(window.localStorage.getItem(OPEN_KEY)).toBeNull();
   });
 
+  it("抽屉标题以 bot 图标开头(2026-10-15:标题去掉「子」字,改用图标表意)", () => {
+    stubModes(MODE_DOCKED);
+    mountDetail(baseAgent());
+    const head = drawerEl()!.querySelector(".drawer-head")!;
+    const icon = head.querySelector(".drawer-title-icon");
+    expect(icon).not.toBeNull();
+    expect(head.firstElementChild).toBe(icon);
+    expect(head.querySelector(".drawer-title")!.textContent).not.toContain("子");
+  });
+
   it("fullscreen(≤767px):fixed 全屏模式,挂载关闭、不持久化", () => {
     stubModes(MODE_FULL);
     mountDetail(baseAgent());

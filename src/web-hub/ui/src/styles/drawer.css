@@ -79,6 +79,13 @@
   border-bottom: 1px solid var(--c-border);
 }
 
+/* 2026-10-15: the fleet drawer title leads with the bot icon (same family as the bash group's
+ * terminal icon below it); muted like the bash title icon so the text carries the weight. */
+.drawer-title-icon {
+  flex: none;
+  color: var(--c-text-3);
+}
+
 .drawer-title {
   flex: 1;
   min-width: 0;
