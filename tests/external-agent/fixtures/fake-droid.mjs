@@ -4,7 +4,7 @@
  * --output-format stream-jsonrpc` 形状）。离线：不起真 droid、不碰 Factory API。
  *
  * 协议面（droid-protocol.md §13 实测形状）：
- * - 出站帧恒带 type + factoryApiVersion:"1.0.0" + factoryProtocolVersion:"1.264.0"（drift 模式改 9.9.9）。
+ * - 出站帧恒带 type + factoryApiVersion:"1.0.0" + factoryProtocolVersion:"1.265.0"（drift 模式改 9.9.9）。
  * - initialize_session：settings_updated 全量 echo 先于响应；响应带 sessionId/settings/availableModels。
  * - load_session（resume 语义，resume-memory.md）：已知 id ⇒ 恢复 live 历史 + 累计用量，响应带 session.messages/
  *   tokenUsage/settings；未知 id ⇒ `-32004 "Session not found"`。initialize_session 对已知 id 只续「文件」
@@ -32,7 +32,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
-const PROTO = "1.264.0";
+const PROTO = "1.265.0";
 const API = "1.0.0";
 
 /** P5 集成观测接缝（测试 wrapper 经 env 注入路径；生产路径恒空 ⇒ 零行为变化）。 */
