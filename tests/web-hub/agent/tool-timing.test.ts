@@ -140,10 +140,21 @@ describe("wiring — turn_end flush (one bounded entry per turn; none without to
   it("tool start/end → turn_end appends exactly one entry; a tools-less turn_end appends none", async () => {
     hub = await startFakeHub(pathsIn(tmp.dir).socketPath);
     const { pi, fire } = fakePi();
-    wireWebHub(pi, deps());
+    const control = wireWebHub(pi, deps());
     const { ctx } = fakeCtx({ mode: "tui" });
     fire("session_start", { type: "session_start", reason: "startup" }, ctx);
-    await waitUntil(() => hub!.all().some((f) => f.t === "hello"), 3_000, "hello");
+    // Wait for the AGENT-side link to be live — not just for the hub to have received the
+    // hello. The hub sees hello while the link is still "handshaking", and connection.ts's
+    // documented contract drops ev frames in every non-live state (markGap; slots replay,
+    // ev does not). The hello_ack read is a poll-phase callback while waitUntil polls via
+    // the timers phase, and libuv runs expired timers BEFORE poll in a loop iteration — so
+    // under CPU starvation a single descheduled wake-up resolves a "hello seen" wait while
+    // the ack is still sitting unread in the kernel buffer (or past the 2s hello_ack budget,
+    // forcing a reconnect). Events fired in that window are silently dropped and the ev wait
+    // below can only time out (this was the 60s flake; repro: delayed-ack hub drops the frame
+    // and emits exactly `hello,session,status,fleet,gap,status`). wiring.test.ts already uses
+    // this live-wait pattern for the same reason.
+    await waitUntil(() => control.status().state === "live", 60_000, "live");
 
     const spy = vi.spyOn(pi, "appendEntry");
     fire("tool_execution_start", { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: {} }, ctx);
@@ -155,14 +166,10 @@ describe("wiring — turn_end flush (one bounded entry per turn; none without to
     );
     fire("turn_end", { type: "turn_end", turnIndex: 0, messageEntryId: "e1", toolResultEntryIds: ["r1"] }, ctx);
 
-    // live frames carry the agent-clock timing fields through the hub. This waits on real
-    // socket I/O for THREE already-queued frames (tool_execution_start/end + turn_end) to be
-    // written, delivered and decoded by the fake hub — under a loaded/slow CI runner that can
-    // take longer than the repo's usual single-frame 3_000ms budget (see helpers.ts's
-    // `waitUntil`), so this one wait gets a larger, still-bounded budget rather than a timeout
-    // tuned for a quiet box. 60s, not 15s: under 12-burner gate stress the in-process socket
-    // frames' wall time regularly exceeds 15s (reproduced 2/2 after the 30s test-timeout fix
-    // unmasked this layer — the earlier 4/4 failures were vitest's 10s default kill).
+    // live frames carry the agent-clock timing fields through the hub. Real socket I/O for
+    // THREE already-queued frames (tool_execution_start/end + turn_end) to be written,
+    // delivered and decoded by the fake hub — kept generously bounded for loaded CI runners
+    // (see helpers.ts's `waitUntil`).
     await waitUntil(() => hub!.all().some((f) => f.t === "ev" && f.e.type === "turn_end"), 60_000, "turn_end ev");
     const evs = hub!.all().filter((f): f is Extract<{ t: string; e: any }, { t: "ev" }> => f.t === "ev");
     expect(evs.find((f) => f.e.type === "tool_execution_start")!.e.startedAt).toBe(10_000);
@@ -180,11 +187,9 @@ describe("wiring — turn_end flush (one bounded entry per turn; none without to
 
     fire("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
     await waitUntil(() => hub!.all().some((f) => f.t === "bye"), 3_000, "bye");
-    // Explicit test timeout above vitest's 10s default: the turn_end wait's own budget is 15s
-    // (see the comment there), and under gate-level CPU load those in-process socket frames can
-    // legitimately take >10s of wall time — the internal bounded waits must be allowed to run
-    // to completion so a real failure surfaces as their clear "timeout waiting for X" message
-    // instead of vitest's generic test-timeout kill (reproduced 4/4 under 12 burners).
+    // Explicit test timeout above vitest's 10s default so the bounded waits above can run to
+    // completion under gate-level CPU load and surface their clear "timeout waiting for X"
+    // message instead of vitest's generic test-timeout kill.
   }, 90_000);
 
   it("the timing entry's renderer is registered at wiring time (renders nothing)", () => {
