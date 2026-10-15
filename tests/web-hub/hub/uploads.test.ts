@@ -1535,8 +1535,23 @@ describe("all timers are unref'd (hasRef() === false)", () => {
       );
       while (releaseWrite === undefined) await realSleep(5);
       await expectCode(() => chunkP, "E_DEADLINE");
+      // chunkP can reject from runLocked's request timer BEFORE the write step's own deadline timer
+      // fires (near-tie, order depends on libuv's cached loop time). Releasing the write in that
+      // window turns it into a plain short write (truncate-back, never poisoned ⇒ no cleanup ever
+      // scheduled). Wait for the poison eviction first so the write settles under a poisoned upload.
+      // realSleep (original setTimeout) keeps these waits out of the `created` timer list.
+      const pollReal = async (pred: () => boolean, budgetMs: number): Promise<void> => {
+        const t0 = Date.now();
+        while (!pred() && Date.now() - t0 < budgetMs) await realSleep(5);
+      };
+      const poisoned = () => audits.some((a) => a.phase === "evict" && a.uploadId === p.id);
+      // budget: the write step's deadline is already ≤80ms away, then one fs close (≤ FS_STEP_CAP_MS 5s)
+      await pollReal(poisoned, 10_000);
+      expect(poisoned()).toBe(true);
       releaseWrite!(); // raw write settles (as a short write) — poison cleanup proceeds
-      for (let i = 0; i < 800 && existsSync(`${root}/s-sess123/${p.id}`); i++) await realSleep(5);
+      // budget: one fs rm step is capped at FS_STEP_CAP_MS (5s) plus chain verify; 10s leaves 2x slack
+      // for a CPU/IO-starved box. Real time, not iteration count, bounds the wait.
+      await pollReal(() => !existsSync(`${root}/s-sess123/${p.id}`), 10_000);
       expect(existsSync(`${root}/s-sess123/${p.id}`)).toBe(false);
       await store.close();
     } finally {

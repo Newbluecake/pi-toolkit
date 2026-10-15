@@ -131,6 +131,11 @@ describe("external droid integration — zero-hang (§7.2)", () => {
   it("402（http-402）⇒ failed{auth} 不可重试、只起 1 个进程、文案无凭据", async () => {
     const s = buildDroidStack({ binary: makeBinary(root(), ["--mode", "http-402"]) });
     stacks.push(s);
+    // build 探测（stack 构建期 refreshInBackground，后台/失败静默）与 run 的 settle 无时序
+    // 保证：高并发下探测进程的 init trace 行可能晚于 402 的快速 failed{auth} 落盘（偶发
+    // 计到 1）。先有界等到探测的行出现（run 未起，此刻的 init 行只能是探测的），再起 run；
+    // 「build 探测 1 + run 1」的断言语义不变（run 若重试/多起 ⇒ 3 行 ⇒ 仍失败）。
+    await waitForTrace(s, (l) => l === "droid.initialize_session", 1, 30_000);
     process.env.FACTORY_API_KEY = "fk-test-secret-DO-NOT-PRINT";
     try {
       const runId = await spawnHang(s);
@@ -198,4 +203,28 @@ async function untilRunning(s: DroidStack, runId: string, timeoutMs = 20_000): P
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error("run never became running");
+}
+
+/**
+ * 有界等待 trace 里满足谓词的行数达到 minCount。目录探测进程的 trace 落盘与 run 的
+ * settle 之间没有时序契约（探测是构建期后台、失败静默），并发下可能晚数秒——断言
+ * 前必须显式同步。超时上限取 30s（> 探测自身 20s 上限，留足落盘余量，测试预算 60s 内）。
+ */
+async function waitForTrace(
+  s: DroidStack,
+  match: (line: string) => boolean,
+  minCount: number,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const count = readLines(s.traceFile).filter(match).length;
+    if (count >= minCount) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `trace reached only ${count}/${minCount} matching lines within ${timeoutMs}ms: ${readLines(s.traceFile).join(" | ")}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }

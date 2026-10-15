@@ -372,6 +372,31 @@ function cmdId(seed: string): string {
   return seed.padEnd(16, "0").slice(0, 32);
 }
 
+/** Wait for the LAN listener to reach state "on" — bounded at exactly the hub's own
+ * `LAN_START_DEADLINE_MS` (src/web-hub/hub/http.ts, 30s). LAN start is `void`-fired right
+ * after `hubJson.write()` and races this wait; under full-`npm test` CPU/fork contention the
+ * startup chain (maintenance `node -e` child incl. scrypt N=32768 with its 5s execFile cap,
+ * then in-process `transport.bind()`) can push the starting→on transition past the old 10s
+ * budget — measured 0–1ms both idle and under 4× oversubscription here, so the wait exists
+ * purely for the loaded tail. Waiting past the product's own ceiling is pointless: a start
+ * that cannot finish within 30s is classified terminal `off` by the hub itself, so this
+ * stays bounded at that ceiling (never unbounded). On timeout the final status rides along
+ * in the error so a future flake self-identifies as still-`starting` vs terminal
+ * `off{reason}` (a `db-timeout` there is machine load tripping the maint child's 5s cap —
+ * `MAINT_DEADLINE_MS` in src/web-hub/hub/db.ts — not a product hang). */
+async function waitLanOn(env: Env): Promise<void> {
+  const budgetMs = 30_000; // = LAN_START_DEADLINE_MS (see above)
+  try {
+    await waitUntil(() => env.hub.lanStatus()?.state === "on", budgetMs, "lan on");
+  } catch (err) {
+    const final = env.hub.lanStatus();
+    throw new Error(
+      `timeout waiting for lan on after ${budgetMs}ms; final lanStatus=${JSON.stringify(final) ?? "undefined"}`,
+      { cause: err },
+    );
+  }
+}
+
 /** LAN's host allow-list is canonicalized against `HubLanConfig.port` (the CONFIGURED port), not
  * whatever the OS actually hands back for `port:0` — so a LAN scenario needs a pre-reserved real
  * port (same reason `tests/integration/web-hub-lan.test.ts` never uses `port:0` for `lan`). */
@@ -935,7 +960,7 @@ describe.skipIf(NO_NODE_SQLITE)("web-hub control-plane integration (#32 C7) — 
     }
     const lan: HubLanConfig = { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
     env = await setup({ lan });
-    await waitUntil(() => env!.hub.lanStatus()?.state === "on", 10_000, "lan on");
+    await waitLanOn(env);
     const lanPort = env.hub.lanStatus()!.port;
     const host = `${ip}:${lanPort}`;
 
@@ -976,7 +1001,7 @@ describe.skipIf(NO_NODE_SQLITE)("web-hub control-plane integration (#32 C7) — 
     expect(auditLines.some((l) => l.includes(id))).toBe(true);
     // U7: no line anywhere carries the prompt text.
     expect(log).not.toContain("hello from LAN");
-  }, 20_000);
+  }, 45_000); // ≥ setup + waitLanOn's 30s LAN_START_DEADLINE_MS-aligned budget + dispatch/audit
 });
 
 // ===========================================================================
@@ -1151,7 +1176,7 @@ describe.skipIf(NO_NODE_SQLITE)("web-hub control-plane integration (#32 C7) — 
     }
     const lan: HubLanConfig = { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
     env = await setup({ lan });
-    await waitUntil(() => env!.hub.lanStatus()?.state === "on", 10_000, "lan on");
+    await waitLanOn(env);
     const lanPort = env.hub.lanStatus()!.port;
     const host = `${ip}:${lanPort}`;
 
@@ -1184,7 +1209,7 @@ describe.skipIf(NO_NODE_SQLITE)("web-hub control-plane integration (#32 C7) — 
 
     admin.sock.destroy();
     lanSse.close();
-  }, 25_000);
+  }, 45_000); // ≥ setup + waitLanOn's 30s LAN_START_DEADLINE_MS-aligned budget + rotate/SSE waits
 });
 
 // ===========================================================================
