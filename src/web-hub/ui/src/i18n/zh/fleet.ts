@@ -12,7 +12,7 @@ const fleet = {
   running: "{n} 个运行中",
   totalCost: "共 {n} 个 · {cost}",
   showFinished: "显示已完成的 {n} 个",
-  treeLabel: "子 Agent 树",
+  treeLabel: "Agents",
 } satisfies Messages<typeof en>;
 
 export default fleet;

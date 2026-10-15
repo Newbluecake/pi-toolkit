@@ -8,8 +8,8 @@ import en from "../en/drawer.js";
 type Messages<T> = { [K in keyof T]: string };
 
 const drawer = {
-  close: "关闭子 Agent 抽屉",
-  backToTree: "子 Agent 列表",
+  close: "关闭 Agents 抽屉",
+  backToTree: "Agents",
   runTranscriptAria: "子 Agent 对话",
   parentMissing: "父 run 未列出",
   omittedActive: "另有 {n} 个运行中未列出",

@@ -12,8 +12,8 @@
  * `detail.latest`/`detail.newCount` (the mini jump-to-latest pill).
  */
 const drawer = {
-  close: "Close subagent drawer",
-  backToTree: "Subagent list",
+  close: "Close Agents drawer",
+  backToTree: "Agents",
   runTranscriptAria: "Subagent transcript",
   parentMissing: "parent run not listed",
   omittedActive: "{n} more running not listed",

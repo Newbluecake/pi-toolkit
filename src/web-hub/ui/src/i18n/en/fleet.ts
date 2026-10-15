@@ -8,7 +8,7 @@ const fleet = {
   running: "{n} running",
   totalCost: "{n} total · {cost}",
   showFinished: "Show {n} Finished Runs",
-  treeLabel: "Subagent tree",
+  treeLabel: "Agents",
 } satisfies Record<string, string>;
 
 export default fleet;

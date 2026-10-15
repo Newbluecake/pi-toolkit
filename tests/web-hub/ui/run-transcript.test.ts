@@ -185,6 +185,8 @@ describe("U7: 两个 Transcript 并存(§6.6/#16)", () => {
     await nextTick();
     expect(transcripts[0]!.props("following")).toBe(true);
     expect(document.querySelector("#fleet-drawer .run-tx-latest")).not.toBeNull(); // 抽屉自己的迷你按钮
+    // 2026-10-15:返回按钮只写「Agents」(不再「子 Agent 列表」/「Subagent list」)
+    expect(document.querySelector("#fleet-drawer .drawer-back")!.textContent!.trim()).toBe("Agents");
   });
 });
 
