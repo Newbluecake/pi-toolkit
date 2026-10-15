@@ -4,7 +4,7 @@
  * turned into `t()` lookups with `{n}`/`{cost}` placeholders.
  */
 const fleet = {
-  panelTitle: "Subagents",
+  panelTitle: "Agents",
   running: "{n} running",
   totalCost: "{n} total · {cost}",
   showFinished: "Show {n} Finished Runs",

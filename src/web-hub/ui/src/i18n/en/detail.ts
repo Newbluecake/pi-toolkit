@@ -59,7 +59,7 @@ const detail = {
   // (summary segments, status/exit/grace/bytes/freshness tokens) stay English-token-only in
   // BOTH locales per the AGENTS.md UI-text rule — zh keeps them byte-identical; only the
   // aria label gets a real translation.
-  bashJobsTitle: "bash",
+  bashJobsTitle: "Bash",
   bashJobsSummary: "Background bash jobs: {running} running, {done} done, {failed} failed",
   bashJobsRunning: "{n} running",
   bashJobsDone: "{n} done",

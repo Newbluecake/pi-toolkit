@@ -4,7 +4,7 @@
  * BashJobsPanel 迁到 fleet 抽屉树视图的独立「bash」分组 —— `FleetBashJobs.vue` +
  * `bashJobsView.ts`(view helper 原样沿用,agent 端投影/协议不动)。覆盖:
  * - `bashJobsOf` 的无 wire/空行不渲染裁决(旧 hub/agent 不带字段 ⇒ 与现状一致);
- * - 组标题计数语法 `bash · 2 running · 8 done`(英文紧凑标记)、默认开合(有 running ⇒
+ * - 组标题计数语法 `Bash · 2 running · 8 done`(英文紧凑标记)、默认开合(有 running ⇒
  *   展开,全终态 ⇒ 收起)、`aria-expanded`;
  * - 行渲染:terminal 图标只在组标题(行内不再有身份图标)、状态 icon/token(沿用
  *   BashJobsPanel 语义)、short id、redacted cmd(全文在 `title`)、`exit N`/`grace`、
@@ -102,10 +102,10 @@ describe("bashJobsOf / summaryCounts (view helper, 沿用 bash-jobs-panel 包 B)
 });
 
 describe("FleetBashJobs.vue — 组标题与默认开合", () => {
-  it("group title count grammar `bash · 2 running · 5 done · 1 failed`; running ⇒ default expanded", () => {
+  it("group title count grammar `Bash · 2 running · 5 done · 1 failed`; running ⇒ default expanded", () => {
     const w = wire([row()], { total: 8, running: 2, failed: 1 });
     const wrapper = mountGroup(w);
-    expect(wrapper.find(".bj-sum-text").text()).toBe("bash · 2 running · 5 done · 1 failed");
+    expect(wrapper.find(".bj-sum-text").text()).toBe("Bash · 2 running · 5 done · 1 failed");
     expect(wrapper.find(".bj-sum").attributes("aria-expanded")).toBe("true");
     expect(wrapper.find(".bj-list").exists()).toBe(true);
     expect(wrapper.find(".fleet-bash").attributes("aria-readonly")).toBe("true");
@@ -113,7 +113,7 @@ describe("FleetBashJobs.vue — 组标题与默认开合", () => {
 
   it("omits zero-count segments; all-terminal ⇒ default collapsed", () => {
     const wrapper = mountGroup(wire([row({ status: "completed", exitCode: 0 })], { total: 3, running: 0, failed: 0 }));
-    expect(wrapper.find(".bj-sum-text").text()).toBe("bash · 3 done");
+    expect(wrapper.find(".bj-sum-text").text()).toBe("Bash · 3 done");
     expect(wrapper.find(".bj-sum").attributes("aria-expanded")).toBe("false");
     expect(wrapper.find(".bj-list").exists()).toBe(false);
   });
@@ -401,7 +401,7 @@ describe("FleetDrawer — 「bash」分组(树视图末尾,agent 树之后)", ()
     const wrapper = mountDrawer(drawerAgent({ status: { busy: false, pending: false, bashJobs: wire([row()]) } }));
     const group = wrapper.find(".fleet-bash");
     expect(group.exists()).toBe(true);
-    expect(wrapper.find(".bj-sum-text").text()).toBe("bash · 1 running");
+    expect(wrapper.find(".bj-sum-text").text()).toBe("Bash · 1 running");
     // 分组在 agent 树(`.tree`)之后
     const kids = [...wrapper.find(".tree-scroll").element.children];
     const treeIdx = kids.findIndex((el) => el.classList.contains("tree"));

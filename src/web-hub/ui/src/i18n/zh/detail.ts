@@ -60,7 +60,7 @@ const detail = {
   // bash-jobs-panel plan §3 包 B (D4)：后台 bash 任务面板。紧凑行内标记（摘要分段、状态/
   // exit/grace/字节/新鲜度 token）两种语言都只用英文 token（AGENTS.md UI 文本规则）——zh 保
   // 持逐字节一致；只有 aria 标签真正翻译。
-  bashJobsTitle: "bash",
+  bashJobsTitle: "Bash",
   bashJobsSummary: "后台 bash 任务：{running} 个进行中、{done} 个已完成、{failed} 个失败",
   bashJobsRunning: "{n} running",
   bashJobsDone: "{n} done",

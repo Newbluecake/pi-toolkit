@@ -22,7 +22,7 @@
 }
 
 /* 2026-10-15 user ruling: in the fleet drawer the bash group title is a peer section header
- * of the drawer's "Agent" title, so it takes `.drawer-title`'s type (fs-sm / semibold /
+ * of the drawer's "Agents" title, so it takes `.drawer-title`'s type (fs-sm / semibold /
  * body color) instead of the muted fs-xs summary-row grammar; icon + chevron stay muted. */
 .fleet-bash .bj-sum {
   min-height: 32px;

@@ -8,7 +8,7 @@ import en from "../en/fleet.js";
 type Messages<T> = { [K in keyof T]: string };
 
 const fleet = {
-  panelTitle: "Agent",
+  panelTitle: "Agents",
   running: "{n} 个运行中",
   totalCost: "共 {n} 个 · {cost}",
   showFinished: "显示已完成的 {n} 个",

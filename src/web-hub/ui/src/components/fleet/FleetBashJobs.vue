@@ -1,7 +1,7 @@
 <!--
   Fleet drawer 的「bash」分组(2026-10-15 用户拍板 L1 前端包):主会话的后台 bash 任务从
   详情头部的 BashJobsPanel 迁到子 agent 视图 —— 抽屉树视图里、agent 树之后独立一组,组标题
-  `bash · 2 running · 8 done`(紧凑英文标记,两个语言档一致,AGENTS.md UI-text rule)。
+  `Bash · 2 running · 8 done`(紧凑英文标记,两个语言档一致,AGENTS.md UI-text rule)。
   数据集不变:`StatusInfo.bashJobs`(agent 端投影 src/web-hub/agent/bash-jobs.ts,行选择/预算
   规则不动),由 FleetDrawer 经 `bashJobsOf(agent)`  narrowed 后传入;wire 缺失或零行 ⇒
   整个分组不渲染(旧 hub/agent 不带该字段时与现状一致)。
@@ -42,7 +42,7 @@ const open = ref(summaryCounts(props.jobs).running > 0);
 const expandedId = ref<string | null>(null);
 
 // ---------------------------------------------------------------------------
-// 组标题(D4 计数语法):`bash · 2 running · 8 done`,零计数段省略
+// 组标题(D4 计数语法):`Bash · 2 running · 8 done`,零计数段省略
 // ---------------------------------------------------------------------------
 const counts = computed(() => summaryCounts(props.jobs));
 const summary = computed(() => {
@@ -51,7 +51,7 @@ const summary = computed(() => {
   if (c.running > 0) segments.push(t("detail.bashJobsRunning", { n: c.running }));
   if (c.done > 0) segments.push(t("detail.bashJobsDone", { n: c.done }));
   if (c.failed > 0) segments.push(t("detail.bashJobsFailed", { n: c.failed }));
-  // `bash · 2 running · 8 done` — every segment (incl. the title) joins with ` · `.
+  // `Bash · 2 running · 8 done` — every segment (incl. the title) joins with ` · `.
   return segments.length > 0 ? `${t("detail.bashJobsTitle")} · ${segments.join(" · ")}` : t("detail.bashJobsTitle");
 });
 /** Prose aria-label for the toggle (the visible summary is English tokens only). */

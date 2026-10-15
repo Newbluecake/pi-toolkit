@@ -347,14 +347,14 @@ describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘
     // 2026-10-09 「这个单词竖过来感觉很怪」: 竖排面板名改为 bot 图标,名字只在 aria-label
     expect(btn.find(".panel-title").exists()).toBe(false);
     expect(btn.get(".fab-icon use").attributes("href")).toBe("#i-bot");
-    expect(btn.text()).not.toContain("Subagents");
+    expect(btn.text()).not.toContain("Agents");
     // 2026-10-09: 徽标只数进行中的(3 running / 6 total ⇒ "3"),已结束的不计
     expect(btn.get(".fab-count").text()).toBe("3");
     expect(btn.get(".fab-count").attributes("data-st")).toBe("running");
     expect(btn.find(".fab-count .dot").exists()).toBe(true);
     // 原摘要行的聚合计数(running/总数/成本)不丢 —— 全量收进 aria-label
     const label = btn.attributes("aria-label") ?? "";
-    expect(label).toContain("Subagents");
+    expect(label).toContain("Agents");
     expect(label).toContain("3 running");
     expect(label).toContain("6 total");
     expect(label).toContain("$0.5600");

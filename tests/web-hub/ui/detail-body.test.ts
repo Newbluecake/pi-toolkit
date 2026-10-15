@@ -75,8 +75,8 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     expect(bar.exists()).toBe(true);
     // 2026-10 悬浮化:可见面只剩图标 + 计数徽标(2026-10-09 竖排面板名改为 bot 图标;行名
     // 在抽屉里的树上 —— fleet-tree.test.ts 的职责);面板名与聚合计数进 aria-label
-    expect(bar.text()).not.toContain("Subagents");
-    expect(bar.attributes("aria-label")).toContain("Subagents");
+    expect(bar.text()).not.toContain("Agents");
+    expect(bar.attributes("aria-label")).toContain("Agents");
     expect(bar.get(".fab-count").text()).toBe("1");
     expect(bar.attributes("aria-controls")).toBe("fleet-drawer");
     expect(bar.attributes("aria-label")).toContain("1 running");
