@@ -11,7 +11,7 @@
  *
  * 2026-10-15 (fleet group): `.fleet-bash` is the group wrapper inside the drawer's
  * `.tree-scroll` — a top border separates it from the agent tree, and rows get a tinted
- * surface + a status-colored left border so bash rows are visually distinct from agent rows
+ * surface so bash rows are visually distinct from agent rows
  * (拍板 ③: terminal 图标 + 不同底色/标签,不参与 agent 父子缩进/状态图标体系).
  */
 
@@ -21,28 +21,11 @@
   border-top: 1px solid var(--c-border);
 }
 
-/* Rows sit on a tinted surface with a status-colored left accent — at-a-glance
- * running/done/failed without reading the token text. The left corners stay square: the
- * base `.bj-row` radius would bend the 2px accent into a "(" curve. */
+/* Rows sit on a tinted surface so bash rows read apart from agent rows. No status-colored
+ * left accent (2026-10-15 user ruling: it looked like a stray "(" and agent rows have no
+ * counterpart) — status lives in the status icon/text only. */
 .fleet-bash .bj-row {
   background: var(--c-surface);
-  border-left: 2px solid var(--c-border);
-  border-radius: 0 var(--r-sm) var(--r-sm) 0;
-}
-
-.fleet-bash .bj-item[data-status="running"] .bj-row,
-.fleet-bash .bj-item[data-status="staged"] .bj-row {
-  border-left-color: var(--st-running);
-}
-
-.fleet-bash .bj-item[data-status="done"] .bj-row {
-  border-left-color: var(--st-done);
-}
-
-.fleet-bash .bj-item[data-status="failed"] .bj-row,
-.fleet-bash .bj-item[data-status="timeout"] .bj-row,
-.fleet-bash .bj-item[data-status="killed"] .bj-row {
-  border-left-color: var(--st-failed);
 }
 
 /* The per-row identity icon (terminal marker) stays muted — status color belongs to the
