@@ -120,7 +120,12 @@ async function handleGo(nonce: string, ctx: ExtensionCommandContext, deps: Topic
         }
         taken = true;
         try {
-          await rctx.sendUserMessage(toContent(payload));
+          // deliverAs:"followUp" (pi-1.2-compat §6.1 D3=B): the brand-new session can already be
+          // busy (e.g. a bash-job wake run opening during startup) — pi 1.2 rejects a bare
+          // sendUserMessage there and the wrapper swallows it into extension_error (text lost);
+          // queued delivery keeps I2 (exactly one delivery). The CAS above still guarantees
+          // single delivery; the catch below stays as the belt-and-suspenders fallback.
+          await rctx.sendUserMessage(toContent(payload), { deliverAs: "followUp" });
         } catch {
           try {
             rctx.ui.notify("原请求未能在新会话送达，输入 /topic-switch last --send 重发。", "warning");

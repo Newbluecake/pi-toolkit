@@ -1161,3 +1161,23 @@ AGENTS.md 要求「bump deliberately and re-check `src/adapters/pi-compat.ts`」
 | 14  | 建议   | **采纳**：R5a 检测限定在每个 run 的第一个请求（与 #5 共用 `firstRequestPending`）；I7 改写为「请求路径只做内存操作，例外仅首请求的一次 `getSystemPrompt()`」；单测断言同一 run 内只调用一次                                                                  | §4.1 I7、§4.5、§7.3                                       | F14：第三方强制文本 run 内冻结                                                                                                                                                |
 | 15  | 建议   | **采纳**：I3 改写为「`forgetAnnounced` 之后允许重复，代价已知、属常态」；D3 写明常态并交由 I9 约束；按 `firstKeptEntryId` 不忘记的优化列为 E7                                                                                                                | §4.1 I3、D3、E7                                           | 压缩常保留最后一个用户轮附近的更新消息（`pc87:agent-session.js:2220`）                                                                                                        |
 | —   | 机械   | **C9 未按 review-3 更正**：review-3「已核查项」称 `pi.on()` 在 0.87 也不返回 unsubscribe，复核源码不成立——`pc87:dist/core/extensions/loader.js:202-218` 的 `api.on` 返回退订闭包（0.84 `pc84:…/loader.js:233-238` 确为 `void`）。C9 保留 v3 描述并补证据     | §7.5 C9                                                   | 用户指示「按已核查项更正」，但该核查项与源码不符；如实记录，不照改                                                                                                            |
+
+---
+
+## 修订记录（2026-10-15，pi 1.2.0 适配）
+
+**S1 唤醒轮回放层在 pi ≥1.2 下休眠（决策 D1=A，`docs/dev/pi-1.2-compat/plan.md` §5）**：pi 1.2.0
+原生修复了本方案 §4.4 针对的根因——唤醒 run（`sendMessage(…, { triggerTurn: true })`）现在也会经过
+`before_agent_start`（`messageType: "custom"` 分支），且 pi 自己的 forced-prompt 投影
+（`_installAgentForcedPromptProjection`，安装顺序在 hidden-declarations 之后、最后执行）每次都会用同一
+投影形态重写头消息。实测（plan §5.1 的 `zz-wake-debug` 实验）：1.2 下 `wakeReplay` 开与关产生的三连请求
+（用户轮 → 唤醒轮 → 用户轮）字节完全一致，唤醒轮都携带折叠段落；回放层的输出在 1.2 下每次都被 pi 的投影
+覆盖，G1 在 1.2 由 pi 原生兑现。
+
+处置：**代码与默认值不动**（`systemPrompt.wakeReplay` 仍默认 true），回放层在 1.2 下休眠（每请求多一次
+`getCurrentSystemMessage` 扫描加一次数组拷贝），为 1.0/1.1 peer 下限保留；hub 的 bas 折叠在 custom 形态上
+照常执行（§3.4 的「hub 不按 messageType 过滤」由此成为 1.2 唤醒轮同谱系的必要条件）。新增
+`tests/conformance/wake-run-sysprompt.test.ts` 钉住三件事：`wakeReplay:true` 在两版 pi 下唤醒轮头与前后
+用户轮逐字节相等；`wakeReplay:false` 仅在 pi ≥1.2 跑且断言同样相等（该用例失败 ⇒ pi 退化、回放层仍有必要；
+peer 下限升到 ≥1.2 时它就是删除回放层的依据）；custom 形态 bas 仅在 pi ≥1.2 观察得到——1.1 下唤醒 run 根本
+不触发 bas，这正是回放层存在的原因。`src/sysprompt/wake-replay.ts` 头注释同步改写。

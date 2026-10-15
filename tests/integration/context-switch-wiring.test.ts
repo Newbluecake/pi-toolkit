@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
 import { SWITCH_RESUME_TEXT } from "../../src/tools/switch-context-tool.js";
+import { RESUME_TEXT as COMPACT_RESUME_TEXT } from "../../src/tools/compact-tool.js";
 import { DROP_ALL_SENTINEL } from "../../src/context-switch/hook.js";
 
 /**
@@ -27,6 +28,8 @@ function fakePi() {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, ToolDefinition>();
   const userMessages: string[] = [];
+  /** `options` argument of every `pi.sendUserMessage` call, aligned with `userMessages` (pi-1.2-compat §6.1: the resume continuations must queue as followUp). */
+  const userMessageOptions: unknown[] = [];
   const pi = {
     registerTool(tool: { name: string }) {
       if (!tools.has(tool.name)) tools.set(tool.name, tool as ToolDefinition);
@@ -36,14 +39,15 @@ function fakePi() {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
     },
     sendMessage() {},
-    sendUserMessage(text: string) {
+    sendUserMessage(text: string, options?: unknown) {
       userMessages.push(text);
+      userMessageOptions.push(options);
     },
     appendEntry() {},
     events: { on: () => () => undefined, emit: () => undefined },
     exec: async () => ({ code: 1, stdout: "", stderr: "", killed: false }),
   };
-  return { pi: pi as unknown as ExtensionAPI, handlers, tools, userMessages };
+  return { pi: pi as unknown as ExtensionAPI, handlers, tools, userMessages, userMessageOptions };
 }
 
 function writeSettings(raw: unknown): void {
@@ -129,7 +133,7 @@ describe("context-switch wiring", () => {
   });
 
   it("end to end: the tool's handoff becomes the compaction summary, then the model is resumed", async () => {
-    const { pi, tools, handlers, userMessages } = fakePi();
+    const { pi, tools, handlers, userMessages, userMessageOptions } = fakePi();
     activate(pi);
     const tool = tools.get("switch_context")!;
     let callbacks: { onComplete: () => void; onError: (error: Error) => void } | undefined;
@@ -155,6 +159,106 @@ describe("context-switch wiring", () => {
 
     callbacks!.onComplete();
     expect(userMessages).toContain(SWITCH_RESUME_TEXT);
+    // pi-1.2-compat §6.1 (D3=B): the resume continuation must queue as followUp — pi 1.2 counts
+    // the whole startup window as busy and silently drops a bare sendUserMessage there.
+    const resumeIdx = userMessages.indexOf(SWITCH_RESUME_TEXT);
+    expect(userMessageOptions[resumeIdx]).toEqual({ deliverAs: "followUp" });
+  });
+
+  it("legacy compact_context: the onComplete resume is sent with {deliverAs:'followUp'} (pi-1.2-compat §6.1)", async () => {
+    writeSettings({ compact: { switchTool: false }, topicSwitch: { enabled: false } });
+    const { pi, tools, userMessages, userMessageOptions } = fakePi();
+    activate(pi);
+    const tool = tools.get("compact_context")!;
+    let callbacks:
+      { onComplete: (result: { tokensBefore: number }) => void; onError: (error: Error) => void } | undefined;
+    const ctx = {
+      mode: "tui",
+      compact: (options: {
+        onComplete: (result: { tokensBefore: number }) => void;
+        onError: (error: Error) => void;
+      }) => {
+        callbacks = options;
+      },
+      getContextUsage: () => ({ tokens: 240_000 }),
+      ui: { notify: () => undefined },
+    };
+    await tool.execute!("call", {} as never, undefined as never, undefined as never, ctx as never);
+    expect(callbacks).toBeDefined();
+    callbacks!.onComplete({ tokensBefore: 240_000 });
+    expect(userMessages).toEqual([COMPACT_RESUME_TEXT]);
+    expect(userMessageOptions[0]).toEqual({ deliverAs: "followUp" });
+  });
+
+  it("compact-hint forced path (activate level): the force onComplete resume goes through the real src/index.ts closure with {deliverAs:'followUp'} (pi-1.2-compat §6.1)", async () => {
+    // No settings file: defaults (compact enabled, switchTool, forceDemandTurns=1, forceAtPercent=88
+    // anchored at a 1M window). This is deliberately NOT compact-hint-wiring.test.ts — that file's
+    // `sendUserMessage: resume` is a dep-injected stub and can never see the real activate()-time
+    // closure this pin guards (src/index.ts's createCompactHintHook wiring).
+    const { pi, handlers, userMessages, userMessageOptions } = fakePi();
+    activate(pi);
+
+    // Build a real stack (the compact-hint state lives in holder.current, only set by the
+    // session_start rebuild). Minimal ctx shape proven by compact-dynamic-wiring.test.ts.
+    const sessionCtx = {
+      mode: "tui",
+      cwd: fakeHome,
+      hasUI: false,
+      sessionManager: { getEntries: () => [], getSessionId: () => "wiring-force", getBranch: () => [] },
+      modelRegistry: { getAvailable: () => [], find: () => undefined },
+      ui: new Proxy(
+        { notify: () => undefined, theme: { fg: (_color: string, text: string) => text } },
+        {
+          get: (target, prop) =>
+            prop in target ? (target as Record<string | symbol, unknown>)[prop as string] : () => undefined,
+        },
+      ),
+      getContextUsage: () => ({ percent: 95, contextWindow: 1_000_000, tokens: 950_000 }),
+      model: {
+        provider: "anthropic",
+        id: "opus-5.5",
+        api: "anthropic-messages",
+        baseUrl: "https://api.anthropic.test",
+        contextWindow: 1_000_000,
+        cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+      },
+    } as never;
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ reason: "new" }, sessionCtx);
+    }
+
+    // turn_end with usage past the force line: first call = the switch_context demand turn
+    // (forceDemandTurns=1), second call = the actual forced compaction.
+    const compactCalls: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+    const turnEndCtx = {
+      mode: "tui",
+      hasUI: false,
+      sessionManager: { getBranch: () => [] },
+      getContextUsage: () => ({ percent: 95, tokens: 950_000, contextWindow: 1_000_000 }),
+      compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => {
+        compactCalls.push(options);
+      },
+    } as never;
+    const runTurnEnd = () => {
+      for (const handler of handlers.get("turn_end") ?? []) {
+        try {
+          const result = handler({}, turnEndCtx);
+          if (result instanceof Promise) result.catch(() => undefined);
+        } catch {
+          /* isolate one listener's failure — same as topic-switch.test.ts's emit */
+        }
+      }
+    };
+    runTurnEnd(); // demand turn: no forced compaction yet
+    expect(compactCalls).toHaveLength(0);
+    runTurnEnd(); // demand exhausted: force fires
+    expect(compactCalls).toHaveLength(1);
+
+    compactCalls[0]!.onComplete();
+    // The real src/index.ts closure queued the resume as followUp instead of a bare
+    // sendUserMessage that pi 1.2 would silently drop when a run is starting.
+    expect(userMessages).toHaveLength(1);
+    expect(userMessageOptions[0]).toEqual({ deliverAs: "followUp" });
   });
 
   it("keep_recent=false drops everything before the cut point", async () => {

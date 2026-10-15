@@ -352,7 +352,11 @@ export default function activate(rawPi: ExtensionAPI): void {
     "turn_end",
     createCompactHintHook(holder, {
       sendMessage: (message, options) => pi.sendMessage(message, options),
-      sendUserMessage: (text) => pi.sendUserMessage(text),
+      // deliverAs:"followUp": pi 1.2 counts the whole _prepareRun window (pre-compaction check +
+      // all before_agent_start handlers) as busy, so the post-force onComplete resume can land
+      // while a new run is starting — without deliverAs the text is silently dropped there
+      // (extension_error only); idle runs ignore the option byte-for-byte (pi-1.2-compat §6.1).
+      sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
       handoffPending: () => handoffStore.hasFresh(),
     }),
   );
@@ -560,7 +564,10 @@ export default function activate(rawPi: ExtensionAPI): void {
       pi.registerTool(
         createSwitchContextTool({
           store: handoffStore,
-          sendUserMessage: (text) => pi.sendUserMessage(text),
+          // deliverAs:"followUp": on pi 1.2 the onComplete resume can race a run that is still
+          // inside its startup window (busy) — queue instead of dropping (pi-1.2-compat §6.1);
+          // idle behavior is byte-identical on every supported pi version.
+          sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
           // todo-nudge switch-before hint (L1 feature): only wired when the
           // tracker is actually active — wireTodo returns no port at all
           // when todo.nudge is disabled or todo itself is off, so a disabled
@@ -590,7 +597,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     // 彻底替换为默认：switchTool 开启时不再暴露 compact_context，
     // 除非显式 compact.keepCompactTool=true（回退开关）。
     if (!settings.compact.switchTool || settings.compact.keepCompactTool) {
-      pi.registerTool(createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text) }));
+      // Same deliverAs rationale as the switch_context closure above (pi-1.2-compat §6.1).
+      pi.registerTool(
+        createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }) }),
+      );
     }
     pi.registerTool(
       createSetCompactThresholdTool({

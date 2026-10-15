@@ -13,8 +13,16 @@
  * Harness: `topic-switch-runtime-harness.ts`. No topic-switch code is loaded (`src/topic-switch/`
  * does not exist yet — this package runs in parallel with P1-P4); the probe extension injected via
  * `extensionFactories` is this test file's own fixture.
+ *
+ * pi 1.2 (docs/dev/pi-1.2-compat/plan.md §4): S4's wait condition was revised for the startup
+ * window (a run counts as busy only from `_startRun` on, so `!isStreaming` alone is satisfied by
+ * the pre-start gap right after the `input` event) and S4b was added as a pi ≥1.2-only contract
+ * (back-to-back followUp reinjections each reach the model exactly once). On pi ≤1.1 the same
+ * burst LOSES messages — 1.1's release-queue correctness relies on the inter-item barrier
+ * (wire.ts's ordered echo + agent_start), which is exactly why S4b is `it.runIf(piMinor >= 2)`.
  */
 import { describe, expect, it } from "vitest";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import {
   createProbeHarness,
   sleep,
@@ -22,6 +30,9 @@ import {
   type ProbeEvent,
   type ProbeHooks,
 } from "./topic-switch-runtime-harness.js";
+
+/** Reading the pi version in a TEST is fine — I14 only forbids version gates in `src/`. */
+const piMinor = Number(VERSION.split(".")[1] ?? 0);
 
 /** Poll until `pred()` is true or `timeoutMs` elapses (every one of our waits must be bounded —
  *  AGENTS.md zero-hang invariant, even in test helpers). */
@@ -165,7 +176,7 @@ describe("topic-switch conformance S0 — runtime probes S1-S9", () => {
     }
   });
 
-  it("S4: reinjection via pi.sendUserMessage(text,{deliverAs:'followUp'}) while idle — handled input leaves no trace, each reinjection is exactly one input event, source extension, streamingBehavior undefined (idle opens a turn immediately)", async () => {
+  it("S4: reinjection via pi.sendUserMessage(text,{deliverAs:'followUp'}) while idle — handled input leaves no trace, each reinjection is exactly one input event, source extension, streamingBehavior undefined (idle opens a turn immediately; pi 1.2 wait semantics: plan.md §4)", async () => {
     const hooks: ProbeHooks = {
       onInput: (ev) => {
         if (ev.text === "ORIGINAL") return { action: "handled" };
@@ -185,10 +196,15 @@ describe("topic-switch conformance S0 — runtime probes S1-S9", () => {
           .some((e) => e.type === "message"),
       ).toBe(false);
 
-      for (const marker of ["FOLLOWUP-1", "FOLLOWUP-2", "FOLLOWUP-3"]) {
+      const markers = ["FOLLOWUP-1", "FOLLOWUP-2", "FOLLOWUP-3"];
+      for (const [i, marker] of markers.entries()) {
         harness.currentPi().sendUserMessage(marker, { deliverAs: "followUp" });
         await waitUntil(() => harness.events.some((e) => e.t === "input" && textOf(e) === marker));
-        await waitUntil(() => !harness.session().isStreaming);
+        // pi 1.2: a run counts as busy only from _startRun on — the input event fires BEFORE
+        // that, so `!isStreaming` alone is satisfied by the pre-start gap. Wait for this
+        // marker's OWN model call AND the run's end before reinjecting the next one (each
+        // marker must open its own idle turn; verified green on pi 1.1 AND 1.2 — plan.md §4.4).
+        await waitUntil(() => harness.modelRuntime.callCount() >= i + 1 && !harness.session().isStreaming);
       }
 
       for (const marker of ["FOLLOWUP-1", "FOLLOWUP-2", "FOLLOWUP-3"]) {
@@ -198,10 +214,40 @@ describe("topic-switch conformance S0 — runtime probes S1-S9", () => {
         expect(matches[0]!["streamingBehavior"]).toBeUndefined();
       }
       expect(harness.modelRuntime.callCount()).toBe(3);
+      // Each request's LAST followUp marker is that request's own marker: request i carries
+      // markers[0..i] with markers[i] exactly once at the tail — one model call each, in order.
+      harness.modelRuntime.requestMessages.forEach((messages, i) => {
+        const text = JSON.stringify(messages);
+        expect(text.lastIndexOf("FOLLOWUP-")).toBe(text.indexOf(markers[i]!));
+      });
     } finally {
       await harness.dispose();
     }
   });
+
+  it.runIf(piMinor >= 2)(
+    "S4b (pi ≥1.2): back-to-back followUp reinjections from idle — each reaches the model exactly once, in order, one request each",
+    async () => {
+      // Pins pi 1.2's startup-window semantics — the safety margin topic-switch's release queue
+      // relies on there. On pi ≤1.1 the same burst LOSES messages (F2 never reaches the model,
+      // no extension_error — plan.md §4.2): 1.1 correctness depends on the inter-item barrier
+      // instead, so this test must NOT run there (hence runIf). Version reads live in tests
+      // only; `src/` stays version-gate-free (I14).
+      const harness = await createProbeHarness({ scripted: [textTurn("ack")] });
+      try {
+        const markers = ["B-1", "B-2", "B-3"];
+        for (const m of markers) harness.currentPi().sendUserMessage(m, { deliverAs: "followUp" });
+        await waitUntil(() => harness.modelRuntime.callCount() >= 3 && !harness.session().isStreaming);
+        expect(harness.modelRuntime.callCount()).toBe(3);
+        expect((JSON.stringify(harness.modelRuntime.requestMessages[2] ?? []).match(/B-\d/g) ?? []).join(",")).toBe(
+          markers.join(","),
+        );
+        expect(harness.events.filter((e) => e.t === "extension_error")).toHaveLength(0);
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
 
   it("S5: pi.sendUserMessage during compaction never reaches the input handler (prompt() throws before _runInputHandlers)", async () => {
     let compactHookResolve:

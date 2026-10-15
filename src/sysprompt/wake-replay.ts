@@ -1,11 +1,23 @@
 /**
  * Wake-run prompt replay, pure core (sysprompt-stable plan v3.1 §4.4, package S1).
  *
- * Notification wake runs (`pi.sendMessage(…, { triggerTurn: true })`) never pass
+ * pi ≤1.1: notification wake runs (`pi.sendMessage(…, { triggerTurn: true })`) never pass
  * through `before_agent_start` (its only caller is `prompt()`), so their request
  * head is rendered from the base prompt while user runs carry the run-level
  * forced text — two alternating byte lineages that invalidate the whole prompt
- * prefix on every cross-class switch (field-2026-09-24 §5.1: 44% vs 10%).
+ * prefix on every cross-class switch (field-2026-09-24 §5.1: 44% vs 10%). This
+ * layer replays the captured forced text onto wake requests so both run classes
+ * share one byte lineage.
+ *
+ * pi ≥1.2 natively fixed that root cause (CHANGELOG 1.2.0 #10267): wake runs now
+ * fire `before_agent_start` too (`messageType: "custom"`), and pi's own
+ * forced-prompt projection runs last, overriding this layer's output — the
+ * resulting request head is byte-identical to having no replay at all
+ * (docs/dev/pi-1.2-compat/plan.md §5, decision D1=A; pinned by
+ * tests/conformance/wake-run-sysprompt.test.ts). The layer is therefore DORMANT
+ * on pi ≥1.2 (each request only pays one `getCurrentSystemMessage` scan plus an
+ * array copy) but kept verbatim for the 1.0/1.1 peer floor — delete it only when
+ * the peer floor rises to ≥1.2.
  *
  * This module holds no pi imports and no state beyond the `WakeReplay` closure:
  * `buildReplayMessages` reproduces pi's own forced-prompt projection shape

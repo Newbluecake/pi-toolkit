@@ -291,6 +291,7 @@ describe("topic-switch integration: full success path (real activate(), real gen
     const nonce = (hop!.content as string).slice("/topic-switch __go ".length);
 
     const delivered: unknown[] = [];
+    const deliveredOptions: unknown[] = [];
     const rctxNotified: string[] = [];
     const gen2Notified: string[] = [];
     const gen2Editor: string[] = [];
@@ -308,8 +309,9 @@ describe("topic-switch integration: full success path (real activate(), real gen
         gen2.emit("session_start", { type: "session_start", reason: "new" }, gen2Ctx);
         // 3. withSession, still on gen1's closure (the callback command.ts built).
         const rctx = {
-          sendUserMessage: async (content: unknown) => {
+          sendUserMessage: async (content: unknown, options?: unknown) => {
             delivered.push(content);
+            deliveredOptions.push(options);
           },
           ui: { notify: (m: string) => rctxNotified.push(m) },
         };
@@ -321,6 +323,9 @@ describe("topic-switch integration: full success path (real activate(), real gen
 
     // Exactly one delivery, into the NEW session.
     expect(delivered).toHaveLength(1);
+    // pi-1.2-compat §6.1 (D3=B): the withSession delivery queues as followUp — the new session
+    // can already be busy (e.g. a bash-job wake run) and pi 1.2 drops a bare sendUserMessage.
+    expect(deliveredOptions).toEqual([{ deliverAs: "followUp" }]);
     // B1: gen2's session_start recovery must not have touched the editor or warned at all.
     expect(gen2Editor).toEqual([]);
     expect(gen2Notified).toEqual([]);
