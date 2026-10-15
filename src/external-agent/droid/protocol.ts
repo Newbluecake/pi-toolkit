@@ -6,7 +6,7 @@
  */
 
 /** 信封版本（S6：droid 每条入站消息都带自身版本；请求侧版本 droid 不校验，但我方恒发钉住值）。 */
-export const DROID_PROTOCOL_VERSION = "1.264.0";
+export const DROID_PROTOCOL_VERSION = "1.265.0";
 export const DROID_API_VERSION = "1.0.0";
 /** 仅信息展示：本适配器实测通过的 droid 版本。 */
 export const DROID_TESTED_VERSIONS: readonly string[] = ["0.241.1"];
