@@ -257,7 +257,7 @@ pending ──(agent_settled 且 seq ≤ endSeq)──▶ orphaned（diag.orphan
 1. **草稿恢复**：打断时快照组件状态，按单题指纹存 parked；重问命中时恢复，并显示 `resumed` 标记行。
 2. **防抖与预算**（§5.2）。
 3. **持久化**：parked 写 session entry，跨 `/reload`、resume、compact、switch_context 恢复（§6.3）。
-4. **可见性与提醒**：状态栏 `ask⏸N`（英文 token）；`agent_settled` 时仍有本 run 产生的 parked 未被重问 ⇒ 一次 `ui.notify`（中文，列出 header）；
+4. **可见性与提醒**：状态栏 `ask N`（英文 token）；`agent_settled` 时仍有本 run 产生的 parked 未被重问 ⇒ 一次 `ui.notify`（中文，列出 header）；
    compact/switch_context 之后若有 parked ⇒ 追加一条 `triggerTurn:false` 的提醒消息（§6.4），把题目重新带回上下文。**不**自动触发轮次催模型。
 
 ## 5. 打断协调器
@@ -511,7 +511,7 @@ P1 首个提交先冻结 §3.1 端口、§5.1 `InteractionOutcome`、§6.2 `Inte
 9. 预算：同题第 4 次 fire ⇒ 不打断、框内指示为 `answer to continue`，回答后返回 answered（已接受的降级）。
 10. 框内指示：落下等待中 / 预算耗尽 / resumed 三种文案；`setNotice(undefined)` 时 render 输出与基线逐字节一致。
 11. 模型侧（评审 #11）：
-    - **不重问**：集成用例中脚本化模型在打断后只输出文本结束 ⇒ 分支里有 `ask-user:parked`，状态栏 `ask⏸1`，`ui.notify` 恰 1 次且含 header，LLM 请求数 = 脚本轮数（无额外 run）。
+    - **不重问**：集成用例中脚本化模型在打断后只输出文本结束 ⇒ 分支里有 `ask-user:parked`，状态栏 `ask 1`，`ui.notify` 恰 1 次且含 header，LLM 请求数 = 脚本轮数（无额外 run）。
     - **错误自答**：结果文本逐字单测（含 `NOT answered`、`do not answer on the user's behalf`、`[interrupt k/N]`），`details.cancelled===true && answers` 为空；
       真机抽样（tmux，2 个模型 × 5 次）：伪造「用户选了 X」= 0 次，「重问 + 明确声明问题已无意义」≥ 4/5；不达标只改文本不改机制。
     - **压缩后丢题**：打断 → 触发压缩 ⇒ `session_compact` 后 parked 从 `getBranch` 恢复，下一次请求上下文含 `ask-user:parked-reminder` 且列出题目；重问恢复草稿。

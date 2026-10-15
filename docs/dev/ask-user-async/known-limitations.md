@@ -33,7 +33,7 @@
 ## 3. 模型重问是尽力而非保证（§4，评审 #11）
 
 打断后由**模型**重新调用 ask_user；扩展只做草稿恢复、防抖、parked 持久化、状态栏
-`ask⏸N`、`agent_settled` 一次中文 notify、compact 后 `triggerTurn:false` 提醒消息。模型
+`ask N`、`agent_settled` 一次中文 notify、compact 后 `triggerTurn:false` 提醒消息。模型
 可能不重问（此时题目留在 parked 注册表与状态栏，等下一轮或用户提起），也可能无视结果
 文本自行代答（结果文本明令禁止，真机抽样验收见 plan §10 P1-11，不达标只改文本不改机制）。
 

@@ -486,6 +486,6 @@ describe("ask_user inline status texts keep wide-risk glyphs clear (emoji-termin
     ]) {
       expect(findGlyphCollisions(text), text).toEqual([]);
     }
-    expect(mod.parkedStatusText(1)).toBe("ask⏸ 1");
+    expect(mod.parkedStatusText(1)).toBe("ask 1");
   });
 });
