@@ -113,6 +113,8 @@ function testSettings() {
     ...DEFAULT_SETTINGS,
     fleetWidget: false,
     bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
+    // quota warnings now surface via ctx.ui.notify (TUI-safe hostWarn); this suite counts notify calls.
+    quota: { ...DEFAULT_SETTINGS.quota, enabled: false },
   };
 }
 

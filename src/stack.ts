@@ -1423,6 +1423,26 @@ function safeSetQuotaStatus(ctx: ExtensionContext, text: string | undefined): vo
   }
 }
 
+/**
+ * TUI-safe warning sink. In interactive TUI mode a raw `console.warn` writes
+ * straight to the terminal and corrupts pi's layout (seen with the droid quota
+ * adapter's "invalid FACTORY_API_KEY" warning), so with a UI the message goes
+ * through `ctx.ui.notify`; print/json/child sessions (no UI) keep stderr.
+ * Never throws: a stale ctx falls back to console.warn.
+ */
+export function hostWarn(ctx: ExtensionContext, message: string): void {
+  const text = `[pi-subagent] ${message}`;
+  try {
+    if (ctx.hasUI && ctx.ui && typeof ctx.ui.notify === "function") {
+      ctx.ui.notify(text, "warning");
+      return;
+    }
+  } catch {
+    // stale ctx / ui not ready — fall through to stderr
+  }
+  console.warn(text);
+}
+
 function rankLoadLevel(level: string): number {
   return level === "crit" ? 2 : level === "warn" ? 1 : level === "ok" ? 0 : -1;
 }
@@ -1862,6 +1882,7 @@ export function buildSessionStack(
   // enabled=false ⇒ createExternalAgentsPort 返回 undefined ⇒ 下方一切 external 注入
   // 缺席，driver 仍是纯 PiSessionDriver（关闭态零接线、零行为变化，R10 回滚①）。
   // 构造点在 models/driver 之前：resolveHint 包装与 RoutingSessionDriver 都消费它。
+  const externalWarned = new Set<string>();
   const externalPort = createExternalAgentsPort({
     settings: settings.externalAgents,
     agentDir: getAgentDir(),
@@ -1889,7 +1910,12 @@ export function buildSessionStack(
     externalInput?.memoryBlock !== undefined
       ? { memoryBlock: externalInput.memoryBlock }
       : {}),
-    warnOnce: (_key, message) => console.warn(`[pi-subagent] ${message}`),
+    // Really once per key (the key used to be ignored ⇒ one warning per run), and TUI-safe.
+    warnOnce: (key, message) => {
+      if (externalWarned.has(key)) return;
+      externalWarned.add(key);
+      hostWarn(ctx, message);
+    },
   });
   if (externalPort !== undefined) {
     previousExternal = externalPort.port;
@@ -2442,7 +2468,7 @@ export function buildSessionStack(
               theme: () => readQuotaStatusTheme(ctx),
             }
           : {}),
-        warn: (message) => console.warn(`[pi-subagent] ${message}`),
+        warn: (message) => hostWarn(ctx, message),
       })
     : undefined;
   previousQuota = quota;
@@ -2602,7 +2628,7 @@ export function buildSessionStack(
       processPort,
       sessionId: currentSessionId(ctx),
       skipDirNames: [selfDirName],
-      warn: (message: string) => console.warn(`[pi-subagent] ${message}`),
+      warn: (message: string) => hostWarn(ctx, message),
     } as const;
     bashJobRecovery = scheduleBashJobRecovery({
       runRecovery: async (signal) => {
@@ -2634,7 +2660,7 @@ export function buildSessionStack(
         }
       },
       runCleanup: (signal) => reconcileRootDir(dirOptions, signal),
-      warn: (message) => console.warn(`[pi-subagent] ${message}`),
+      warn: (message) => hostWarn(ctx, message),
     });
   }
   previousBashJobRecovery = bashJobRecovery;
