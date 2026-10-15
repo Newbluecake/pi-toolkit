@@ -770,6 +770,10 @@ export interface AgentCardView {
   readonly modelShort: string;
   readonly contextPercent: number | null;
   readonly runningSubCount: number;
+  /** 2026-10-15 会话列表也展示运行中的命令:the session's own RUNNING background bash jobs
+   * (`status.bashJobs` wire's `running` = non-terminal rows incl. staged, 「仍在跑」 semantics);
+   * 0 (no/malformed/empty wire) ⇒ the terminal-icon segment is not rendered. */
+  readonly runningBashCount: number;
   /** Pre-formatted `own [+ sub $x]` cost label (tabular-nums display string). */
   readonly costLabel: string;
   /** Hover breakdown (own + subagents) when subagents cost anything; the label itself is the total only. */

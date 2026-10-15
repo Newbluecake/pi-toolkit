@@ -130,7 +130,13 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
     }}</span>
 
     <span
-      v-if="card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.statusLabel"
+      v-if="
+        card.modelShort ||
+        card.contextPercent !== null ||
+        card.runningSubCount > 0 ||
+        card.runningBashCount > 0 ||
+        card.statusLabel
+      "
       class="agent-meta"
     >
       <span v-if="card.modelShort" class="model" translate="no">{{ card.modelShort }}</span>
@@ -156,9 +162,26 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
           }}</span></span
         >
       </template>
-      <template v-if="card.statusLabel">
+      <!-- 2026-10-15 会话列表也展示运行中的命令:terminal 图标 + 同一段 agents.runningCount
+           文案(图标区分 agent/命令);仅统计 status.bashJobs 的非终态行(含 staged)。 -->
+      <template v-if="card.runningBashCount > 0">
         <span
           v-if="card.modelShort || card.contextPercent !== null || card.runningSubCount > 0"
+          class="sep"
+          aria-hidden="true"
+          >·</span
+        >
+        <span
+          ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{
+            t("agents.runningCount", { n: card.runningBashCount })
+          }}</span></span
+        >
+      </template>
+      <template v-if="card.statusLabel">
+        <span
+          v-if="
+            card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.runningBashCount > 0
+          "
           class="sep"
           aria-hidden="true"
           >·</span

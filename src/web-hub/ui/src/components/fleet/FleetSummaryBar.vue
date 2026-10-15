@@ -20,8 +20,11 @@
   收进 `aria-label`(不给 `title` —— ui-design §6.3「不依赖 hover」,visual 的
   shell-no-title-tooltips 在触屏档位断言全页无 [title])。
   2026-10-15 bash→fleet 迁移(拍板 ⑤):没有子 agent 但有后台 bash 任务(`bashJobs`
-  prop)时按钮同样渲染 —— 否则抽屉里的 bash 分组不可达;agent 计数(徽标/聚合)不混入
-  bash,bash 仅以 aria-label 小计出现。
+  prop)时按钮同样渲染 —— 否则抽屉里的 bash 分组不可达。
+  2026-10-15 用户再次拍板:「如果有运行中的命令,这里的数字也要统计进去,不然我以为
+  任务停了」—— 徽标 = 运行中的子 agent 数 + 运行中的后台 bash 命令数(wire 的 `running`
+  = 非终态行数,含 staged,即「仍在跑」口径),两者皆 0 时不显示;aria-label 里 agent
+  与 bash 的分项小计保留(取代同日早些「agent 计数永不混入 bash」的旧拍板)。
 -->
 <script setup lang="ts">
 import { computed } from "vue";
@@ -40,16 +43,18 @@ const { t } = useI18n();
 const summary = computed(() => fleetSummary(props.rows));
 const costLabel = computed(() => formatUsd(summary.value.costUsd));
 
-// 2026-10-15 bash→fleet 迁移(拍板 ⑤):agent 计数永不混入 bash —— 徽标/聚合计数仍只读
-// fleet 行;bash 只决定「无子 agent 但有 bash 任务时入口按钮仍出现」,并在 aria-label 里
-// 追加一个 bash 小计(英文紧凑标记)。`bashJobs` 已由 DetailBody 经 bashJobsOf narrowed
-// (零行/缺失 ⇒ undefined)。
+// 2026-10-15 用户再次拍板:徽标计入运行中的 bash —— `badgeCount` = fleet running + bash
+// running(wire 的 `running` 为非终态行数,含 staged,「仍在跑」语义)。`bashJobs` 已由
+// DetailBody 经 bashJobsOf narrowed(零行/缺失 ⇒ undefined);aria-label 的 agent/bash
+// 分项小计不变。
 const bashCounts = computed(() => (props.bashJobs === undefined ? null : summaryCounts(props.bashJobs)));
 const bashTotal = computed(() => {
   const c = bashCounts.value;
   return c === null ? 0 : c.running + c.done + c.failed;
 });
 const visible = computed(() => summary.value.total > 0 || bashTotal.value > 0);
+/** 2026-10-15 拍板:徽标 = 运行中的子 agent + 运行中的后台 bash 命令;两者皆 0 ⇒ 不显示。 */
+const badgeCount = computed(() => summary.value.running + (bashCounts.value?.running ?? 0));
 
 /** 可见面只留图标/标题/计数;running·总数·成本全量进 aria-label(桌面 hover 无 tooltip 依赖)。 */
 const ariaLabel = computed(() => {
@@ -77,9 +82,9 @@ const ariaLabel = computed(() => {
   >
     <AppIcon name="chev-left" class="icon icon-sm chev" />
     <AppIcon name="bot" class="icon fab-icon" />
-    <span v-if="summary.running > 0" class="pill fab-count" data-st="running">
+    <span v-if="badgeCount > 0" class="pill fab-count" data-st="running">
       <span class="dot"></span>
-      <span class="num">{{ summary.running }}</span>
+      <span class="num">{{ badgeCount }}</span>
     </span>
   </button>
 </template>

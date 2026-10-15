@@ -15,8 +15,8 @@
  * - elapsed 走时改为共享 `now` prop 驱动(FleetTree 语法)——组件内部不再有 ticker;
  * - FleetDrawer 集成:树视图里 agent 树之后出现分组、无 wire/零行不出现、选中 run 时
  *   不出现;
- * - FleetSummaryBar:agent 计数不混入 bash;无子 agent 但有 bash 任务时入口按钮仍出现,
- *   aria-label 追加 bash 小计。
+ * - FleetSummaryBar:徽标计入运行中的 bash(2026-10-15 用户再次拍板);无子 agent 但有
+ *   bash 任务时入口按钮仍出现,aria-label 保留 agent/bash 分项小计。
  */
 import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -465,45 +465,63 @@ describe("FleetDrawer — 「bash」分组(树视图末尾,agent 树之后)", ()
 });
 
 // ---------------------------------------------------------------------------
-// FleetSummaryBar:agent 计数不混入 bash;bash 小计进 aria-label
+// FleetSummaryBar:2026-10-15 用户再次拍板「如果有运行中的命令,这里的数字也要统计进去」
+// —— 徽标 = agent running + bash running(wire `running` 含 staged 等非终态行);
+// aria-label 的 agent/bash 分项小计保留。
 // ---------------------------------------------------------------------------
-describe("FleetSummaryBar — bash 小计 (拍板 ⑤)", () => {
+describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次拍板)", () => {
   it("no agents and no bashJobs ⇒ the button stays hidden (legacy 不占位)", () => {
     const wrapper = mount(FleetSummaryBar, { props: { rows: [], open: false } });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(false);
   });
 
-  it("no agents but bash jobs present ⇒ the button renders (抽屉里的 bash 分组要可达)", () => {
+  it("仅 bash running ⇒ 按钮出现且徽标计入 bash「1」;抽屉里的 bash 分组要可达", () => {
     const wrapper = mount(FleetSummaryBar, {
       props: { rows: [], open: false, bashJobs: wire([row()], { total: 3, running: 1, failed: 0 }) },
     });
     const btn = wrapper.find(".fleet-summary-bar");
     expect(btn.exists()).toBe(true);
-    // 徽标仍只数 agent running —— 没有 agent 行 ⇒ 无徽标
-    expect(wrapper.find(".fab-count").exists()).toBe(false);
+    // 2026-10-15 新口径:没有 agent 行但 bash 在跑 ⇒ 徽标显示 bash running 数
+    expect(wrapper.find(".fab-count .num").text()).toBe("1");
+    expect(wrapper.get(".fab-count").attributes("data-st")).toBe("running");
     expect(btn.attributes("aria-label")).toContain("bash 1 running");
   });
 
-  it("agents + bash: aria-label carries both; the agent badge never counts bash", () => {
-    const rows = [fleetRow("r_1"), fleetRow("r_2", { terminal: true })] as never[];
+  it("agents + bash: 2 agent running + 1 bash running ⇒ 徽标「3」;aria-label 分项小计保留", () => {
+    const rows = [fleetRow("r_1"), fleetRow("r_2")] as never[];
     const wrapper = mount(FleetSummaryBar, {
-      props: { rows, open: false, bashJobs: wire([row()], { total: 2, running: 2, failed: 0 }) },
+      props: { rows, open: false, bashJobs: wire([row()], { total: 2, running: 1, failed: 0 }) },
     });
     const btn = wrapper.find(".fleet-summary-bar");
-    expect(wrapper.find(".fab-count .num").text()).toBe("1"); // agent running only
+    expect(wrapper.find(".fab-count .num").text()).toBe("3"); // agent 2 + bash 1
     const label = btn.attributes("aria-label") ?? "";
-    expect(label).toContain("bash 2 running");
+    expect(label).toContain("2 running"); // agent 分项
+    expect(label).toContain("bash 1 running"); // bash 分项
   });
 
-  it("all-terminal bash jobs ⇒ the subtotal falls back to a done/failed total", () => {
+  it("all-terminal(agents 终态 + bash 终态)⇒ 无徽标;bash 小计回退 done/failed 总数", () => {
+    const rows = [fleetRow("r_1", { terminal: true, status: "completed" })] as never[];
     const wrapper = mount(FleetSummaryBar, {
       props: {
-        rows: [],
+        rows,
         open: false,
         bashJobs: wire([row({ status: "completed", exitCode: 0 })], { total: 5, running: 0, failed: 1 }),
       },
     });
+    expect(wrapper.find(".fleet-summary-bar").exists()).toBe(true); // 仍有内容,入口保留
+    expect(wrapper.find(".fab-count").exists()).toBe(false);
     expect(wrapper.find(".fleet-summary-bar").attributes("aria-label")).toContain("bash 5 done");
+  });
+
+  it("staged 等非终态 bash 行计入徽标(wire running = 非终态数,「仍在跑」口径)", () => {
+    const wrapper = mount(FleetSummaryBar, {
+      props: {
+        rows: [],
+        open: false,
+        bashJobs: wire([row({ status: "staged" })], { total: 1, running: 1, failed: 0 }),
+      },
+    });
+    expect(wrapper.find(".fab-count .num").text()).toBe("1");
   });
 
   it("without the bashJobs prop the aria-label is byte-identical to the legacy shape", () => {

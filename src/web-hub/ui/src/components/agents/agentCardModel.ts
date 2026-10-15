@@ -11,6 +11,7 @@ import { agentVisualState } from "../../composables/visual-state.js";
 import type { I18nHandle } from "../../composables/useI18n.js";
 import { formatUsd } from "../../format.js";
 import type { AgentCardView, AgentState, RunVisualState } from "../../types.js";
+import { bashJobsOf, summaryCounts } from "../detail/bashJobsView.js";
 
 function record(v: unknown): Record<string, unknown> {
   return v !== null && typeof v === "object" ? (v as Record<string, unknown>) : {};
@@ -83,6 +84,15 @@ function runningSubCountOf(agent: AgentState): number {
   return n;
 }
 
+/** 2026-10-15 会话列表也展示运行中的命令:the session's own RUNNING background bash jobs.
+ * `agent.status.bashJobs` is broadcast for every card (not just the open session); narrowed via
+ * `bashJobsOf` (absent/malformed/empty wire ⇒ 0). The wire's `running` is the agent-side
+ * non-terminal row count (staged included) — exactly the 「仍在跑」 semantics. */
+function runningBashCountOf(agent: AgentState): number {
+  const wire = bashJobsOf(agent);
+  return wire === undefined ? 0 : summaryCounts(wire).running;
+}
+
 /** ui-design.md §5.1's per-card status pill — only shown for a "worth flagging" state. */
 function statusLabelOf(agent: AgentState, visual: RunVisualState, t: I18nHandle["t"]): string | null {
   const card = record(agent.card);
@@ -110,6 +120,7 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"]): AgentCar
     modelShort: modelShortOf(agent),
     contextPercent: contextPercentOf(agent),
     runningSubCount: runningSubCountOf(agent),
+    runningBashCount: runningBashCountOf(agent),
     costLabel: agentCostLabel(agent),
     ...(costTitleOf(agent, t) ?? {}),
     visualState: visual,

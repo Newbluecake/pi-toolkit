@@ -91,7 +91,12 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // empirical total-JS budget counted lazy chunks that are not loaded on first paint;
 // keep separate budgets so first-screen regressions are visible without making lazy
 // feature growth a routine budget bump.
-const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 253 * 1024;
+// Bumped to 254 KiB by the fleet badge + agent-card bash counts (2026-10-15, 用户拍板「如果有
+// 运行中的命令,这里的数字也要统计进去」/「会话列表也要展示运行中的命令」): FleetSummaryBar's
+// badge sums `summaryCounts(bashJobs).running` into the agent count and AgentCard gains a
+// terminal-icon running-bash segment (`runningBashCount` via bashJobsOf/summaryCounts);
+// measured 259,164 B gz, +112 B over the previous 259,052 B — minimum KiB-granularity bump.
+const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 254 * 1024;
 const LAZY_JS_BUDGET_GZIP_BYTES = 42 * 1024;
 // CSS (one file, cssCodeSplit:false ⇒ all of it is first-screen): the 25 KiB set in vue-plan v2.1
 // was as empirical as the old JS total. 2026-10-11 (user: don't spend effort squeezing gzip bytes)

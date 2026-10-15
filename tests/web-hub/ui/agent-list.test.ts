@@ -32,6 +32,7 @@ function card(over: Partial<AgentCardView> = {}): AgentCardView {
     modelShort: "claude-opus-5-5",
     contextPercent: 62,
     runningSubCount: 4,
+    runningBashCount: 0,
     costLabel: "$195.54",
     visualState: "running",
     statusLabel: "Working",
@@ -144,6 +145,143 @@ describe("AgentCard.vue needs-answer badge (C5, §7.4)", () => {
 
     const noHub = mount(AgentCard, { props: { card: card(), selected: false } });
     expect(noHub.find(".badge-answer").exists()).toBe(false);
+  });
+});
+
+/**
+ * 2026-10-15 「会话列表也要展示运行中的命令」:agent-meta 新增 terminal 图标段 — 运行中的
+ * 后台 bash 命令数,复用 `agents.runningCount` 文案(branch 图标区分 agent / terminal 图标
+ * 区分命令)。数据源 `agent.status.bashJobs`(hub 对所有卡片广播 status),模型侧
+ * `toAgentCardView` 经 `bashJobsOf` 收窄 + `summaryCounts` 取 `running`(非终态行,含
+ * staged)。无运行中命令 ⇒ 不渲染;`·` 分隔符逻辑把新段计入(statusLabel 段前判断)。
+ */
+import { toAgentCardView } from "../../../src/web-hub/ui/src/components/agents/agentCardModel.js";
+import type { BashJobsWire } from "../../../src/web-hub/protocol/messages.js";
+
+const BASH_SAMPLED_AT = 1_700_000_000_000;
+const bashWire = (running: number, over: Partial<BashJobsWire> = {}): BashJobsWire => ({
+  rows: [
+    {
+      id: "job-aaaa1111",
+      cmd: "sleep 60",
+      status: running > 0 ? "running" : "completed",
+      exitCode: running > 0 ? null : 0,
+      createdAt: BASH_SAMPLED_AT - 5_000,
+      elapsedMs: 5_000,
+      logBytes: 0,
+    },
+  ],
+  total: 3,
+  running,
+  failed: 0,
+  sampledAt: BASH_SAMPLED_AT,
+  ...over,
+});
+
+function agentStateWithBash(bashJobs: BashJobsWire | undefined): AgentState {
+  return {
+    key: "a1",
+    card: {},
+    down: false,
+    prompts: [],
+    fleet: [],
+    ...(bashJobs === undefined ? {} : { status: { bashJobs } }),
+  } as unknown as AgentState;
+}
+
+const keyT = (key: string): string => key;
+
+describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表也展示运行中的命令)", () => {
+  it("仅 bash running ⇒ terminal 段渲染数字,branch 段不出现,无悬挂分隔符", () => {
+    const wrapper = mount(AgentCard, {
+      props: {
+        card: card({
+          modelShort: "",
+          contextPercent: null,
+          runningSubCount: 0,
+          runningBashCount: 2,
+          statusLabel: null,
+        }),
+        selected: false,
+      },
+    });
+    const meta = wrapper.get(".agent-meta");
+    expect(meta.find("use[href='#i-terminal']").exists()).toBe(true);
+    expect(meta.find("use[href='#i-branch']").exists()).toBe(false);
+    expect(meta.text()).toBe("2 running"); // en 默认文案,无分隔符(唯一段)
+    expect(meta.findAll(".sep")).toHaveLength(0);
+  });
+
+  it("agent + bash 都在跑 ⇒ 两段都在,分隔符按段计数正确", () => {
+    const wrapper = mount(AgentCard, {
+      props: {
+        card: card({ runningSubCount: 3, runningBashCount: 2, statusLabel: "Working" }),
+        selected: false,
+      },
+    });
+    const meta = wrapper.get(".agent-meta");
+    expect(meta.find("use[href='#i-branch']").exists()).toBe(true);
+    expect(meta.find("use[href='#i-terminal']").exists()).toBe(true);
+    expect(meta.text()).toContain("3 running");
+    expect(meta.text()).toContain("2 running");
+    // model · 62% · 3 running · 2 running · Working ⇒ 4 个分隔符
+    expect(meta.findAll(".sep")).toHaveLength(4);
+  });
+
+  it("无 bash / bash 全终态 ⇒ terminal 段不渲染(现有 agent 段不受影响)", () => {
+    const none = mount(AgentCard, {
+      props: { card: card({ runningBashCount: 0 }), selected: false },
+    });
+    expect(none.get(".agent-meta").find("use[href='#i-terminal']").exists()).toBe(false);
+    expect(none.get(".agent-meta").text()).toContain("4 running");
+
+    // statusLabel 段前的分隔判断不再把 bash 段计入(0):仅 sub 段 + status ⇒ 1 个分隔符
+    const onlySub = mount(AgentCard, {
+      props: { card: card({ modelShort: "", contextPercent: null, runningBashCount: 0 }), selected: false },
+    });
+    expect(onlySub.get(".agent-meta").findAll(".sep")).toHaveLength(1);
+  });
+
+  it("仅 bash 段 + statusLabel ⇒ statusLabel 前的分隔符把新段计入(不丢 ·)", () => {
+    const wrapper = mount(AgentCard, {
+      props: {
+        card: card({ modelShort: "", contextPercent: null, runningSubCount: 0, runningBashCount: 1 }),
+        selected: false,
+      },
+    });
+    const meta = wrapper.get(".agent-meta");
+    // happy-dom 的 .text() 不在相邻 span 之间补空白:分隔符存在性由 .sep 计数断言
+    expect(meta.text()).toContain("1 running");
+    expect(meta.text()).toContain("Working");
+    expect(meta.findAll(".sep")).toHaveLength(1);
+  });
+});
+
+describe("toAgentCardView — runningBashCount (agent.status.bashJobs → 模型)", () => {
+  it("有运行中的 bash ⇒ runningBashCount = wire.running(含 staged 的非终态口径)", () => {
+    const view = toAgentCardView(agentStateWithBash(bashWire(2, { total: 5 })), keyT);
+    expect(view.runningBashCount).toBe(2);
+    const staged = toAgentCardView(agentStateWithBash(bashWire(1, { total: 1 })), keyT);
+    expect(staged.runningBashCount).toBe(1);
+  });
+
+  it("bash 全终态 / 无 wire / 空 rows ⇒ 0", () => {
+    expect(toAgentCardView(agentStateWithBash(bashWire(0)), keyT).runningBashCount).toBe(0);
+    expect(toAgentCardView(agentStateWithBash(undefined), keyT).runningBashCount).toBe(0);
+    expect(toAgentCardView(agentStateWithBash({ ...bashWire(0), rows: [] }), keyT).runningBashCount).toBe(0);
+  });
+
+  it("runningSubCount 仍只数 fleet 行,bash 不影响它", () => {
+    const agent = {
+      ...agentStateWithBash(bashWire(2)),
+      fleet: [
+        { runId: "r1", terminal: false, status: "running" },
+        { runId: "r2", terminal: true },
+      ],
+    } as unknown as AgentState;
+    const view = toAgentCardView(agent, keyT);
+    expect(view.runningSubCount).toBe(1);
+    expect(view.runningBashCount).toBe(2);
   });
 });
 
