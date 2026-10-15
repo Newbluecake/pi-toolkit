@@ -667,7 +667,7 @@ export interface AgentSettings {
   webHub: WebHubSettings;
   /** Merged plugins: web_search tool (Codex/SerpAPI/Bocha/Tavily failover). Default on. */
   webSearch: EnabledGroup;
-  /** [date] 注入（date 模块）：会话首轮 + 跨日注入当前日期（消息形式，不动系统提示）。Pre-guard，主/子会话都生效。Default on. */
+  /** [date] 注入（date 模块）：会话首轮 + 跨日 + 新一轮距上次注入 ≥3h 时注入当前日期与时刻（HH:MM，消息形式，不动系统提示）。Pre-guard，主/子会话都生效。Default on. */
   date: EnabledGroup;
   /** Merged plugins: TaskCreate/List/Get/Update/Delete + /tasklist + aboveEditor widget. Default on. */
   todo: TodoSettings;

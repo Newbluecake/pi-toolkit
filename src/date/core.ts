@@ -2,13 +2,14 @@
  * [date] 注入 — pi-free 核心（date 模块）。
  *
  * pi 的系统提示不含日期，模型在跨天长对话里不知道「今天」是哪天。本模块以
- * **消息**（而非系统提示）形式注入当前日期：首轮一次 + 跨日各一次，内容形如
- * `[date] 2026-10-15 Thu (Asia/Shanghai)`（紧凑英文标记；跨日那条追加一句
- * 极短中文说明）。不改系统提示 —— sysprompt-stable 的冻结快照保 prompt 缓存，
+ * **消息**（而非系统提示）形式注入当前日期+时刻：首轮一次 + 跨日各一次 + 同日闲置
+ * ≥3h 的 before_agent_start 重注入一次，内容形如
+ * `[date] 2026-10-15 Thu 22:30 (Asia/Shanghai)`（紧凑英文标记；跨日那条追加一句
+ * 极短中文说明 + 时刻语义）。不改系统提示 —— sysprompt-stable 的冻结快照保 prompt 缓存，
  * 注入走 before_agent_start 的 message / sendMessage 通道。
  *
- * 本文件只做纯逻辑：格式化、时区解析/回退、跨日判定，时钟与时区均可注入
- * （`createDateTimeSource({ now, timeZone })`），不 import pi。
+ * 本文件只做纯逻辑：格式化、时区解析/回退、跨日判定、闲置重注入判定，时钟与时区
+ * 均可注入（`createDateTimeSource({ now, timeZone })`），不 import pi。
  *
  * 时区标签：优先 `Intl.DateTimeFormat().resolvedOptions().timeZone` 的 IANA id；
  * 取不到（极端宿主）回退到宿主 UTC 偏移标签（`UTC+08:00`），此时日期/星期按
@@ -20,6 +21,16 @@ export const DATE_CUSTOM_TYPE = "subagent:date";
 /** 跨日那条附加的极短中文说明（仅跨日注入使用；首轮为裸标记）。 */
 export const CROSS_DAY_NOTE = "当前日期已变更";
 
+/** 时刻语义说明：HH:MM 是注入时刻的快照，非恒定「现在」。仅拼进跨日附注。 */
+export const TIME_AS_OF_NOTE = "时间为注入时刻";
+
+/**
+ * 闲置重注入阈值（用户拍板）：before_agent_start 时距上次注入 ≥3h（墙钟）
+ * 则同日也再注入一次当前日期+时刻。运行中（turn_end）不做闲置注入。
+ * 常量放 core（无新设置项）。
+ */
+export const DATE_REINJECT_IDLE_MS = 3 * 60 * 60 * 1000;
+
 export type TimeZoneLabel =
   { readonly kind: "iana"; readonly id: string } | { readonly kind: "offset"; readonly label: string };
 
@@ -30,7 +41,7 @@ export interface DateTimeSource {
   dateKey(at: number): string;
   /** 英文短星期（`Thu`）。 */
   weekday(at: number): string;
-  /** 完整注入标记：`[date] 2026-10-15 Thu (Asia/Shanghai)`。 */
+  /** 完整注入标记：`[date] 2026-10-15 Thu 22:30 (Asia/Shanghai)`。 */
   marker(at: number): string;
 }
 
@@ -66,14 +77,22 @@ export function dateChanged(previous: string | undefined, current: string): bool
   return previous !== undefined && previous !== current;
 }
 
+/**
+ * 闲置重注入判定：上次注入时刻未知（旧条目缺 `details.at` / 从未注入）⇒ 不触发
+ * （恢复后首轮本来就会注入）；差值为负（时钟回拨）同样不触发。纯函数。
+ */
+export function idleReinjectDue(previousAt: number | undefined, at: number): boolean {
+  return previousAt !== undefined && at - previousAt >= DATE_REINJECT_IDLE_MS;
+}
+
 /** 首轮注入内容：裸标记（无附注）。 */
 export function firstTurnContent(marker: string): string {
   return marker;
 }
 
-/** 跨日注入内容：标记 + 极短中文说明。 */
+/** 跨日注入内容：标记 + 极短中文说明 + 时刻语义（时间只是注入时快照）。 */
 export function crossDayContent(marker: string): string {
-  return `${marker} — ${CROSS_DAY_NOTE}`;
+  return `${marker} — ${CROSS_DAY_NOTE}，${TIME_AS_OF_NOTE}`;
 }
 
 export function createDateTimeSource(opts: DateTimeSourceOpts = {}): DateTimeSource {
@@ -92,13 +111,19 @@ export function createDateTimeSource(opts: DateTimeSourceOpts = {}): DateTimeSou
   // 偏移回退时不传 timeZone ⇒ 按宿主本地时区算日期/星期（与偏移语义一致）。
   const tzOption: { timeZone?: string } = zone.kind === "iana" ? { timeZone: zone.id } : {};
   const label = zone.kind === "iana" ? zone.id : zone.label;
-  // en-CA 数字年月日天然输出 YYYY-MM-DD。
+  // en-CA 数字年月日天然输出 YYYY-MM-DD；en-GB + h23 输出 24h `HH:MM`（午夜 00:05，绝不 24:00）。
   const dateFmt = new Intl.DateTimeFormat("en-CA", { ...tzOption, year: "numeric", month: "2-digit", day: "2-digit" });
   const dayFmt = new Intl.DateTimeFormat("en-US", { ...tzOption, weekday: "short" });
+  const timeFmt = new Intl.DateTimeFormat("en-GB", {
+    ...tzOption,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
   return {
     timeZone: zone,
     dateKey: (at: number) => dateFmt.format(at),
     weekday: (at: number) => dayFmt.format(at),
-    marker: (at: number) => `[date] ${dateFmt.format(at)} ${dayFmt.format(at)} (${label})`,
+    marker: (at: number) => `[date] ${dateFmt.format(at)} ${dayFmt.format(at)} ${timeFmt.format(at)} (${label})`,
   };
 }
