@@ -263,6 +263,71 @@ describe("sniff: text decision", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ANSI-aware text decision (L1, 2026-10-15): terminal logs are TEXT — an ESC that
+// plausibly introduces an escape sequence is exempt from the control ratio, and BS/FF
+// join tab/LF/CR in the whitespace-exempt set. Pure-ESC garbage stays binary.
+// ---------------------------------------------------------------------------
+
+describe("sniff: ANSI-aware text decision (L1 — terminal logs are text)", () => {
+  it("a CJK terminal log full of SGR color codes is text (the /tmp/*.log case)", () => {
+    const log = Buffer.from(
+      "\u001b[36m==>\u001b[0m 正在安装依赖…\n" +
+        "\u001b[1;32mOK\u001b[0m \u001b[32m✓\u001b[0m 完成 3 个包\n" +
+        "\u001b[33mwarn\u001b[0m 没有找到配置文件\n",
+      "utf8",
+    );
+    expect(sniff(log, log.length)).toEqual({ kind: "text" });
+    // dense SGR (an escape pair around every printable char) stays text
+    const dense = Buffer.from("\u001b[36ma\u001b[0m\u001b[31mb\u001b[0m".repeat(200), "utf8");
+    expect(sniff(dense, dense.length)).toEqual({ kind: "text" });
+  });
+
+  it("OSC title sequences (BEL- and ST-terminated) are text", () => {
+    // the BEL terminator itself still counts as a control char — a realistic-length line keeps
+    // the ratio under 2% (the ST form contributes none)
+    const log = Buffer.concat([
+      Buffer.from("\u001b]0;pi-toolkit build log - compiling ui\u0007vite building…\n", "utf8"),
+      Buffer.from("\u001b]2;tail follow\u001b\\ done\n", "utf8"),
+      Buffer.from("step 2/3 linking\n", "utf8"),
+    ]);
+    expect(sniff(log, log.length)).toEqual({ kind: "text" });
+  });
+
+  it("backspace progress bars and form-feed page breaks are text (0x08/0x0c exempt)", () => {
+    const bar = Buffer.from("=====\b\b\b\b\b".repeat(Math.ceil((4 * KIB) / 10)), "utf8");
+    expect(sniff(bar, bar.length)).toEqual({ kind: "text" }); // 50% BS — text now
+    const ff = Buffer.alloc(4 * KIB, 0x61);
+    for (let i = 0; i < ff.length; i += 30) ff[i] = 0x0c; // ~3.3% FF — over the old 2% line
+    expect(sniff(ff, ff.length)).toEqual({ kind: "text" });
+  });
+
+  it("pure ESC garbage is binary (an ESC must actually introduce a sequence)", () => {
+    const b = Buffer.alloc(4 * KIB, 0x1b);
+    expect(sniff(b, b.length)).toEqual({ kind: "binary" });
+  });
+
+  it("ESC followed by a control byte (no introducer) still counts", () => {
+    // ESC + LF pairs: the LFs are exempt, so ONLY the non-introducing ESCs decide — 50% ⇒ binary
+    const b = Buffer.alloc(4 * KIB, 0x61);
+    for (let i = 0; i + 1 < b.length; i += 2) {
+      b[i] = 0x1b;
+      b[i + 1] = 0x0a;
+    }
+    expect(sniff(b, b.length)).toEqual({ kind: "binary" });
+    // contrast: ESC + "[" pairs are all exempt (the rest is printable) ⇒ text
+    const ok = Buffer.alloc(4 * KIB, 0x61);
+    for (let i = 0; i + 1 < ok.length; i += 2) ok[i + 1] = 0x5b;
+    expect(sniff(ok, ok.length)).toEqual({ kind: "text" });
+  });
+
+  it("other control chars beyond the ratio stay binary (NUL/C1 rules unchanged)", () => {
+    const b = Buffer.alloc(4 * KIB, 0x61);
+    for (let i = 0; i < b.length; i += 50) b[i] = 0x01; // ~2% other C0 — still counts
+    expect(sniff(b, b.length)).toEqual({ kind: "binary" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // masquerades — magic only, extensions never consulted
 // ---------------------------------------------------------------------------
 

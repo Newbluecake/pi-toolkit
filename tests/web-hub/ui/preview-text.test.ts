@@ -47,6 +47,18 @@ describe("PreviewText.vue", () => {
     expect(writeText).toHaveBeenCalledTimes(1);
     expect(writeText).toHaveBeenCalledWith("shown part only");
   });
+
+  it("L1: ANSI escapes are stripped from the display AND the copy value (terminal logs)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+    const text = "\u001b[36m==>\u001b[0m 正在安装…\n\u001b[1;32mOK\u001b[0m\n";
+    const wrapper = mount(PreviewText, { props: { text, truncated: false, filename: "x.log", path: "/tmp/x.log" } });
+    expect(wrapper.get("pre.preview-text-body").text()).toBe("==> 正在安装…\nOK"); // DOM text() trims the trailing newline
+    await wrapper.get(".preview-text-actions button").trigger("click");
+    await flush();
+    expect(writeText).toHaveBeenCalledWith("==> 正在安装…\nOK\n"); // copy keeps it
+  });
 });
 
 describe("PreviewText.vue — markdown (dir-plan §4.1, PM package)", () => {
@@ -78,6 +90,21 @@ describe("PreviewText.vue — markdown (dir-plan §4.1, PM package)", () => {
     expect(toggle(wrapper, 1).attributes("aria-pressed")).toBe("true");
     await toggle(wrapper, 0).trigger("click");
     expect(wrapper.find(".preview-md").exists()).toBe(true);
+  });
+
+  it("L1: markdown strips ANSI before parsing (rendered and source views)", async () => {
+    const wrapper = mount(PreviewText, {
+      props: {
+        text: "\u001b[36m# 标题\u001b[0m\n\n\u001b[1m正文\u001b[0m body",
+        truncated: false,
+        filename: "README.md",
+        path: "/p/README.md",
+      },
+    });
+    expect(wrapper.get(".preview-md h3.md-h").text()).toBe("标题");
+    expect(wrapper.get(".preview-md p.md-p").text()).toBe("正文 body");
+    await toggle(wrapper, 1).trigger("click");
+    expect(wrapper.get("pre.preview-text-body").text()).toBe("# 标题\n\n正文 body");
   });
 
   it("non-md files keep the exact pre-change DOM (no toggle, no extra nodes)", () => {
@@ -258,6 +285,26 @@ describe("PreviewText.vue — chunked stream mode", () => {
     await w.get(".preview-text-actions button:last-of-type").trigger("click");
     await flush();
     expect(writeText).toHaveBeenCalledWith("a\n\nb\nc\nd\n");
+    w.unmount();
+  });
+
+  it("L1: an escape sequence split across chunk boundaries leaves no residue (display + copy)", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIO);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+    // chunk 1 ends INSIDE `\u001b[36m`; chunk 2 completes it — the cut may also split a CJK char
+    const stream = mkStream({ chunks: ["\u001b[36m==>\u001b[0m line one\nline two \u001b[3"] });
+    const w = mountStream(stream);
+    expect(w.findAll(".preview-seg").map((e) => e.text())).toEqual(["==> line one"]); // `\u001b[3` held back
+    stream.chunks = [...stream.chunks, "6m彩色\u001b[0m tail\n"];
+    await w.vm.$nextTick();
+    stream.state = "done";
+    await w.vm.$nextTick();
+    expect(w.findAll(".preview-seg").map((e) => e.text())).toEqual(["==> line one", "line two 彩色 tail"]);
+    await w.get(".preview-text-actions button:last-of-type").trigger("click");
+    await flush();
+    expect(writeText).toHaveBeenCalledWith("==> line one\nline two 彩色 tail\n");
     w.unmount();
   });
 

@@ -34,6 +34,7 @@
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { resolveFileLang } from "@logic/highlight.js";
+import { createAnsiStripper, stripAnsi } from "@logic/ansi.js";
 import { parseMarkdown } from "@logic/markdown.js";
 import { countMdNodes, isMarkdownPath, prepareMarkdownPreview, PREVIEW_MD_NODE_MAX } from "@logic/preview.js";
 import { createMarkdownSegmenter, createSourceSegmenter } from "@logic/previewStream.js";
@@ -74,8 +75,13 @@ const highlightLang = computed(() => resolveFileLang(props.filename ?? ""));
 
 // --- markdown mode (B1–B7) -------------------------------------------------------------
 const isMd = computed(() => isMarkdownPath(props.path ?? props.filename ?? ""));
-/** B5: shown source = raw body, minus a truncated md's incomplete final line. */
-const shownSource = computed(() => (isMd.value ? prepareMarkdownPreview(props.text, props.truncated) : props.text));
+/** B5 + L1: shown source = ANSI-stripped raw body (terminal logs render clean — the display,
+ * the copy button and the markdown parse all see this; download keeps the raw bytes via
+ * PreviewHost's own refetch), minus a truncated md's incomplete final line. */
+const shownSource = computed(() => {
+  const stripped = stripAnsi(props.text);
+  return isMd.value ? prepareMarkdownPreview(stripped, props.truncated) : stripped;
+});
 /** B4: per-open mode (the Host's `:key="view.path"` resets it on every new file). */
 const mode = ref<"rendered" | "source">("rendered");
 const mdNodes = computed<readonly MdNode[] | null>(() =>
@@ -97,6 +103,11 @@ const srcSegs = shallowRef<readonly SourceSegment[]>([]);
 const mdSegs = shallowRef<readonly MdSegment[]>([]);
 let srcSegmenter: ReturnType<typeof createSourceSegmenter> | null = null;
 let mdSegmenter: ReturnType<typeof createMarkdownSegmenter> | null = null;
+// L1: each feed strips ANSI before its segmenter — a stripper HOLDS an incomplete trailing
+// sequence as a carry, so one split across chunk boundaries never leaves `[36m` residue in
+// the next segment (display AND copy therefore see exactly `stripAnsi(whole text)`).
+let srcStripper: ReturnType<typeof createAnsiStripper> | null = null;
+let mdStripper: ReturnType<typeof createAnsiStripper> | null = null;
 let srcCursor = 0;
 let mdCursor = 0;
 let srcFlushed = false;
@@ -109,17 +120,20 @@ function terminalFlush(): "eof" | "stop" | null {
 }
 
 /** The source segmenter ALWAYS follows the stream (cheap string ops; it also backs the copy
- * value in rendered mode). */
+ * value in rendered mode). The stripper's carry at a terminal flush is dropped (an
+ * unterminated trailing sequence never displays). */
 function syncSource(): void {
   const s = props.stream;
   if (s === undefined) return;
   srcSegmenter ??= createSourceSegmenter();
+  srcStripper ??= createAnsiStripper();
   const add: SourceSegment[] = [];
   const chunks = s.chunks;
-  while (srcCursor < chunks.length) add.push(...srcSegmenter.push(chunks[srcCursor++] ?? ""));
+  while (srcCursor < chunks.length) add.push(...srcSegmenter.push(srcStripper.push(chunks[srcCursor++] ?? "")));
   const tf = terminalFlush();
   if (tf !== null && !srcFlushed && srcCursor >= chunks.length) {
     srcFlushed = true;
+    srcStripper.flush();
     add.push(...srcSegmenter.flush(tf));
   }
   if (add.length > 0) srcSegs.value = [...srcSegs.value, ...add.map((x) => markRaw(x))];
@@ -130,12 +144,14 @@ function syncMd(): void {
   const s = props.stream;
   if (s === undefined || !isMd.value || effectiveMode.value !== "rendered") return;
   mdSegmenter ??= createMarkdownSegmenter();
+  mdStripper ??= createAnsiStripper();
   const add: MdSegment[] = [];
   const chunks = s.chunks;
-  while (mdCursor < chunks.length) add.push(...mdSegmenter.push(chunks[mdCursor++] ?? ""));
+  while (mdCursor < chunks.length) add.push(...mdSegmenter.push(mdStripper.push(chunks[mdCursor++] ?? "")));
   const tf = terminalFlush();
   if (tf !== null && !mdFlushed && mdCursor >= chunks.length) {
     mdFlushed = true;
+    mdStripper.flush();
     add.push(...mdSegmenter.flush(tf));
   }
   if (add.length > 0) mdSegs.value = [...mdSegs.value, ...add.map((x) => markRaw(x))];
@@ -148,7 +164,8 @@ function syncStream(): void {
 syncStream();
 watch(() => [props.stream?.chunks.length ?? 0, props.stream?.state, effectiveMode.value] as const, syncStream);
 
-/** Copy = exactly the consumed source (`text + sep` is strictly the original, §4.3.4). */
+/** Copy = the ANSI-stripped consumed source (`text + sep` is strictly the stripped input,
+ * §4.3.4 — the raw bytes stay downloadable through PreviewHost's own refetch). */
 const copyValue = computed(() =>
   isStream.value ? srcSegs.value.map((x) => x.text + x.sep).join("") : shownSource.value,
 );

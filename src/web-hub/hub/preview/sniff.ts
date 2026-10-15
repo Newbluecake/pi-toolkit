@@ -192,7 +192,24 @@ function looksLikeText(sample: Uint8Array, totalSize: number): boolean {
   let controls = 0;
   for (let i = 0; i < text.length; i += 1) {
     const c = text.charCodeAt(i);
-    const isControl = (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c === 0x7f || (c >= 0x80 && c <= 0x9f);
+    // ESC (0x1b) is exempt ONLY when it plausibly INTRODUCES an ANSI escape sequence — the
+    // next byte lying in 0x20–0x7e covers every CSI/OSC/string/two-byte form's introducer
+    // and final range (terminal logs are full of `\x1b[36m==>\x1b[0m`; everything else in a
+    // well-formed sequence is printable anyway). A bare ESC followed by another control
+    // byte — pure-ESC garbage — still counts.
+    if (c === 0x1b) {
+      const next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0x20 && next <= 0x7e) continue;
+      controls += 1;
+      continue;
+    }
+    // 0x08 (BS) and 0x0c (FF) join tab/LF/CR in the whitespace-exempt set: backspace drives
+    // in-place progress bars (`=\b==\b`) and form feed is the classic log page break (`^L`).
+    // NUL, DEL, the C1 range and every other C0 control still count; > 2% ⇒ binary.
+    const isControl =
+      (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d && c !== 0x08 && c !== 0x0c) ||
+      c === 0x7f ||
+      (c >= 0x80 && c <= 0x9f);
     if (isControl) controls += 1;
   }
   return text.length === 0 || controls / text.length <= 0.02;
