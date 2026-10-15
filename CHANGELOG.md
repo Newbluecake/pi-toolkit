@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-15
+
+### Fixed
+
+- **stack**: keep quota/droid/bash-job warnings from corrupting the TUI (`9fe76db`)
+
+### Tests
+
+- **web-hub**: make wtdiff D6 reach mid-C2 reliably, skip only if unreachable (`aa47a6e`)
+- deflake starvation, wtdiff D6 and tool-timing under load (`5470079`)
+
+Stats: 1 fix, 2 test
+
 ## [0.5.2] - 2026-10-15
 
 ### Added
@@ -512,7 +525,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.4.0...v0.5.0
