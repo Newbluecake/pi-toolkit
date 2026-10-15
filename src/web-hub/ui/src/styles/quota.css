@@ -58,17 +58,24 @@
 /* One group = one segment: own dot (four-tier ladder) + text. Available groups stay muted
  * (--c-text-2); only an unavailable L3 group gets danger + semibold text. */
 .q-dot {
+  /* inline-block (not a flex child): `.q-seg` is plain inline text, see below. */
+  display: inline-block;
   width: 7px;
   height: 7px;
+  margin-right: 4px;
+  vertical-align: middle;
   flex: none;
   border-radius: 50%;
   background: var(--c-text-3);
 }
 
+/* 2026-10-15 (“quota 这里又一片空白区域”): a segment is plain INLINE text, not
+ * `inline-flex`. An inline-flex box is an atomic inline, and `text-overflow: ellipsis` on
+ * `.q-pill-text` cannot cut inside one — the first group that did not fully fit was swapped for
+ * a lone “…” and the room it would have used stayed blank. As inline text the overflowing group
+ * is truncated mid-text right where the pill ends. */
 .q-seg {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  display: inline;
 }
 
 .q-seg[data-level="0"] .q-dot {
