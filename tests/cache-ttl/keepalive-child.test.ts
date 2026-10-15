@@ -219,9 +219,10 @@ describe("child keepalive — T-K3b: lease held across retries denies a concurre
     const clock = new FakeClock(0);
     const ledger = createChildKeepaliveLedger();
     // A short interval (still within the production-clamped [60s,240s] range) gives
-    // B's post-denial retry (15s later) enough TTL headroom before the 45s safety
-    // margin's cutoff — with the plan's own 240s default, a global-cap retry has
-    // NO slack at all (nextPingAt=240s, cutoff=255s, first retry is due AT 255s).
+    // B's post-denial retry (15s later) ample TTL headroom before the 15s safety
+    // margin's cutoff (the 45s→15s margin change of 2026-10-16 widened this further:
+    // even the 240s default now leaves 30s of slack — nextPingAt=240s, cutoff=285s,
+    // first retry due 255s — but the 60s interval keeps this test far from that edge).
     const settings = { ...BASE_SETTINGS, keepaliveIntervalMs: 60_000 };
     const common = { pingLedger: ledger, maxConcurrentPings: 1, runBudgetUsd: 100, processBudgetUsd: 100, settings };
 
@@ -249,9 +250,10 @@ describe("child keepalive — T-K3b: lease held across retries denies a concurre
     expect(ledger.activeCount()).toBe(1);
     expect(b.service.report().lastSkip).toBe("global-cap");
 
-    // Walk past the window's margin cutoff. r2 lease renewal: A's retry span (~195s here) outlives
-    // CHILD_PING_LEASE_MS (150s), but every retry renews the lease, so B can never reclaim the slot
-    // (cap 1 never exceeded) and A is the only holder until it settles at the margin cutoff.
+    // Walk past the window's margin cutoff. r2 lease renewal: A's retry span (~217s here)
+    // outlives CHILD_PING_LEASE_MS (150s), but every retry renews the lease, so B can never
+    // reclaim the slot (cap 1 never exceeded) and A is the only holder until it settles at
+    // the margin cutoff (last attempt @277s: 285s cutoff − 277s = 8s < the next 30s backoff).
     let maxActive = 0;
     let bPingedWhileAHeld = false;
     for (let t = 0; t < 300; t += 1) {
@@ -532,9 +534,16 @@ describe("child keepalive — T-K4: audit cost fields", () => {
     arm(a);
     clock.advance(240_000);
     await flush();
+    // Retry ladder to window exhaustion (15s margin since 2026-10-16: cutoff 285_000, so
+    // attempts land at 240/242/247/257/277s — the last breaks because 285−277 = 8s < the next
+    // 30s backoff; under the old 45s margin this sequence ended at 247s / 3 attempts).
     clock.advance(2_000);
     await flush();
     clock.advance(5_000);
+    await flush();
+    clock.advance(10_000);
+    await flush();
+    clock.advance(20_000);
     await flush();
 
     const entry = findAudit(a.appendEntry, "unproven");
@@ -600,9 +609,15 @@ describe("child keepalive — T-K4: audit cost fields", () => {
     arm(a, 270_000);
     clock.advance(240_000);
     await flush();
+    // Retry ladder to window exhaustion (15s margin: attempts at 240/242/247/257/277s; the
+    // old 45s margin finalized after the third attempt at 247s).
     clock.advance(2_000);
     await flush();
     clock.advance(5_000);
+    await flush();
+    clock.advance(10_000);
+    await flush();
+    clock.advance(20_000);
     await flush();
 
     const entry = findAudit(a.appendEntry, "unproven");
@@ -846,22 +861,22 @@ describe("child keepalive — todo #28: precise nextPingAt timer", () => {
     clock.advance(1);
     h.service.noteRequest(capture({ sessionId: sid }, h.service.instanceId, 270_000));
     h.service.noteRequestSettled(sid, h.service.instanceId);
-    // nextPingAt = 1 + 240_000 = 240_001; cutoff = 1 + 300_000 - 45_000 = 255_001. The
-    // periodic grid (0, 15_000, 30_000, ...) does not include 240_001 — its first point
-    // inside [240_001, 255_001) is 255_000, not nextPingAt itself.
+    // nextPingAt = 1 + 240_000 = 240_001; cutoff = 1 + 300_000 - 15_000 = 285_001 (safety
+    // margin 15s since 2026-10-16). The periodic grid (0, 15_000, 30_000, ...) does not
+    // include 240_001 — its first point inside [240_001, 285_001) is 255_000, not nextPingAt
+    // itself (in-window grid opportunities: 255_000/270_000/285_000).
     clock.advance(240_000); // -> t=240_001: only the precise timer lands here
     await flush();
     expect(h.service.report().session.pings).toBe(1); // proven-hit via the precise timer
     expect(h.service.report().window.lastReadStartedAt).toBe(240_001);
 
-    // The tool goes idle EXACTLY at the periodic grid's one in-window opportunity (255_000)
-    // and only comes back after the cutoff (255_001) — under periodic-only ticks this is
-    // precisely what would sink the window (not-armed skip at 255_000, cache-expired at the
-    // next tick 270_000). Post-fix this is moot (the window already succeeded above); confirms
-    // nothing regresses.
+    // The tool goes idle before EVERY grid opportunity in the window (255_000, 270_000)
+    // and only comes back after the cutoff (285_001) — under periodic-only ticks this is
+    // precisely what would sink the window (not-armed skips, then cache-expired).
+    // Post-fix this is moot (the window already succeeded above); confirms nothing regresses.
     clock.advance(14_998); // -> t=254_999
     h.service.noteToolEnd(sid, h.service.instanceId);
-    clock.advance(6_000); // -> t=260_999
+    clock.advance(30_002); // -> t=285_001: crosses 255_000/270_000 (not-armed) and the cutoff
     h.service.noteToolStart(sid, h.service.instanceId); // armed again, too late to matter
     await flush();
     expect(h.service.report().session.pings).toBe(1); // unchanged — no phantom second ping

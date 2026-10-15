@@ -26,8 +26,19 @@ import type { PingHeaderSource, PingOutcome } from "./ping-client.js";
 
 /** Anthropic's advertised ephemeral (5m) cache entry lifetime. */
 export const ASSUMED_TTL_MS: Millis = 300_000;
-/** Safety margin subtracted from `aliveUntil` before we consider a ping "too late" (plan.md #13). */
-export const TTL_SAFETY_MARGIN_MS: Millis = 45_000;
+/**
+ * Safety margin subtracted from `aliveUntil` before we consider a ping "too late" (plan.md #13).
+ *
+ * 15s (2026-10-16, was 45s): `aliveUntil` is anchored at the request START while the server
+ * refreshes the entry only when the request is processed (strictly later), so the estimate is
+ * already early — the margin only needs to cover ping queueing/latency before reaching the
+ * server. At 45s the default 240s interval left just a 15s retry window (`DEFAULT_PING_TIMEOUT_MS`
+ * alone is 20s), so one slow attempt (~13s, field evidence 2026-10-16: two `network` failures,
+ * each `attempts: 1`) exhausted it with no retry and the TUI showed `ping paused:network` (now
+ * `ping miss:network`) until the next real request. At 15s the default-config retry window is
+ * 45s (retry cutoff at 285s of the 300s TTL ⇒ attempts at +240/+242/+247/+257/+277s).
+ */
+export const TTL_SAFETY_MARGIN_MS: Millis = 15_000;
 /** Scheduler tick precision (service layer; exported so tests/service code share one constant). */
 export const TICK_INTERVAL_MS: Millis = 15_000;
 /**
@@ -42,9 +53,14 @@ export const TICK_INTERVAL_MS: Millis = 15_000;
  * (found investigating todo #15's real-machine "never pings" report, 2026-09-27; the report's own
  * default-settings case had exactly `TICK_INTERVAL_MS` = 15s of margin at the 240s default —
  * this constant pins that margin so a user-configured `keepaliveIntervalMs` can't erase it).
+ * PINNED at 240_000 (2026-10-16): `TTL_SAFETY_MARGIN_MS` shrank 45s→15s the same day, which
+ * would move the raw formula to 270_000 — but the user-visible clamp must NOT follow (user
+ * ruling): 240s stays both the default and the max, so no user's persisted setting silently
+ * changes meaning. At 240s the margin between `nextPingAt` and the cache-expired cutoff is now
+ * `TICK_INTERVAL_MS` × 3 (45s), i.e. three guaranteed in-window periodic opportunities.
  * `src/config/settings.ts` clamps `keepaliveIntervalMs` to this value.
  */
-export const MAX_SAFE_KEEPALIVE_INTERVAL_MS: Millis = ASSUMED_TTL_MS - TTL_SAFETY_MARGIN_MS - TICK_INTERVAL_MS;
+export const MAX_SAFE_KEEPALIVE_INTERVAL_MS: Millis = 240_000;
 /** I-K7: consecutive unproven pings before the whole session is disabled. */
 export const UNPROVEN_STREAK_LIMIT = 2;
 /** I-K7: cumulative (non-consecutive) unproven pings before the whole session is disabled. */
@@ -1537,6 +1553,20 @@ export interface KeepalivePingDiagnostics {
    * audit trail and `/cache-ttl status`.
    */
   ttlStripped?: boolean | undefined;
+  /**
+   * Wall time from the FIRST HTTP attempt's send to the final outcome settling — the whole
+   * retry sequence, not just the last attempt (per-attempt times live in the service's
+   * `ping-attempt` audit entries). Recorded for unproven outcomes (2026-10-16 field-evidence
+   * follow-up); `undefined` on older/other shapes.
+   */
+  durationMs?: Millis | undefined;
+  /**
+   * `network` outcomes only: short sanitized failure descriptor derived from the error's
+   * name/code (`ECONNRESET`, `UND_ERR_SOCKET`, `AbortError`, `keepalive ping timeout`) — never
+   * URLs/headers/bodies/secrets, capped at 80 chars. See `ping-client.ts`'s
+   * `networkErrorDescriptor`.
+   */
+  error?: string | undefined;
 }
 
 function formatTokenCount(n: number): string {
@@ -1646,7 +1676,11 @@ export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegme
   }
   if (window.pings > 0 && window.pings >= config.maxPings)
     return { text: `ping ${window.pings}/${config.maxPings} capped`, state: "capped" };
-  if (window.lastStopReason !== undefined) return { text: `ping paused:${window.lastStopReason}`, state: "paused" };
+  // "miss", not "paused" (2026-10-16 rename): a window-level stop is NOT a session pause —
+  // never-processed transients don't pause the session anymore (r2), the next real request
+  // simply opens a new window. The internal `PingSegmentState` value stays `"paused"` (wire
+  // enum, frozen in webhub-plan §0.5 and pinned by both sides' tests).
+  if (window.lastStopReason !== undefined) return { text: `ping miss:${window.lastStopReason}`, state: "paused" };
   if (session.pings === 0 && window.pings === 0) return undefined;
   const cumulative = session.pings > window.pings ? ` Σ${session.pings}` : "";
   return {

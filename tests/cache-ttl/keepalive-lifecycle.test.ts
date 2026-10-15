@@ -650,13 +650,15 @@ describe("cache-keepalive service — m1 fetch-reject late path (validation repo
   });
 });
 
-// todo #28: at the default/max-safe `keepaliveIntervalMs` (240s), the gap between
-// `nextPingAt` and the cache-expired cutoff is exactly one `TICK_INTERVAL_MS` (15s) —
-// see `MAX_SAFE_KEEPALIVE_INTERVAL_MS`'s doc comment in keepalive-state.ts. The 15s
-// periodic tick's own coarse phase can therefore miss the window (real-machine repro:
-// 3 windows, 1 hit) whenever its one guaranteed in-window opportunity happens to land
-// at a moment some OTHER gate (armed/...) transiently fails. The fix adds a
-// second, independent one-shot timer scheduled EXACTLY at `nextPingAt` (reusing
+// todo #28: at the default/max `keepaliveIntervalMs` (240s), the gap between
+// `nextPingAt` and the cache-expired cutoff can be small enough that the periodic
+// tick's coarse phase misses it — see `MAX_SAFE_KEEPALIVE_INTERVAL_MS`'s doc comment
+// in keepalive-state.ts. At the time of the fix (2026-09-27, 45s safety margin) the gap
+// was exactly one `TICK_INTERVAL_MS` (15s) — one guaranteed in-window opportunity;
+// since the margin shrank to 15s (2026-10-16) the gap is 45s (three grid points), so a
+// window now needs THREE coincidentally-unfavorable ticks to sink — but the phase-miss
+// risk the fix addresses is unchanged (real-machine repro: 3 windows, 1 hit). The fix
+// adds a second, independent one-shot timer scheduled EXACTLY at `nextPingAt` (reusing
 // `onTick()`/`evaluateTick` verbatim — every existing gate still applies).
 describe("cache-keepalive service — todo #28: precise nextPingAt timer", () => {
   it("fires exactly at nextPingAt, catching a window the periodic tick's coarse phase would sink (its one in-window opportunity coincides with a transient not-armed instant)", async () => {
@@ -668,23 +670,24 @@ describe("cache-keepalive service — todo #28: precise nextPingAt timer", () =>
     clock.advance(1);
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
-    // nextPingAt = 1 + 240_000 = 240_001; cutoff = 1 + 300_000 - 45_000 = 255_001.
-    // The periodic grid (0, 15_000, 30_000, ...) does NOT include 240_001 — its first
-    // point inside [240_001, 255_001) is 255_000, not nextPingAt itself.
+    // nextPingAt = 1 + 240_000 = 240_001; cutoff = 1 + 300_000 - 15_000 = 285_001 (the safety
+    // margin shrank 45s→15s on 2026-10-16). The periodic grid (0, 15_000, 30_000, ...) does NOT
+    // include 240_001 — its first point inside [240_001, 285_001) is 255_000, not nextPingAt
+    // itself (and the grid's in-window opportunities are now 255_000/270_000/285_000 — three,
+    // where the old 45s margin left exactly one).
     clock.advance(240_000); // -> t=240_001: only the new precise timer lands here
     await flush();
     expect(service.report().session.pings).toBe(1); // proven-hit via the precise timer
     expect(service.report().window.lastReadStartedAt).toBe(240_001); // reads exactly at nextPingAt
 
     // Confirms the scenario is genuinely adversarial for periodic-only polling: the tool
-    // goes idle EXACTLY at the periodic grid's one in-window opportunity (255_000) and only
-    // comes back after the cutoff (255_001) — under periodic-only ticks (pre-fix) this is
-    // precisely what sinks the window (not-armed skip at 255_000, then cache-expired at the
-    // next tick, 270_000). Post-fix this is moot (the window already succeeded above); the
-    // point is that nothing here regresses.
+    // goes idle before EVERY grid opportunity in the window (255_000, 270_000) and only
+    // comes back after the cutoff (285_001) — under periodic-only ticks (pre-fix) this is
+    // precisely what sinks the window (not-armed skips, then cache-expired). Post-fix this
+    // is moot (the window already succeeded above); the point is that nothing here regresses.
     clock.advance(14_998); // -> t=254_999
     service.noteToolEnd("s1", service.instanceId);
-    clock.advance(6_000); // -> t=260_999: crosses 255_000 (not-armed) and the cutoff
+    clock.advance(30_002); // -> t=285_001: crosses 255_000/270_000 (not-armed) AND the cutoff
     service.noteToolStart("s1", service.instanceId); // armed again, too late to matter
     await flush();
     expect(service.report().session.pings).toBe(1); // unchanged — no phantom second ping

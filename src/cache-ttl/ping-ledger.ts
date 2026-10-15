@@ -34,9 +34,12 @@ import type { Millis } from "../core/types.js";
 export const CHILD_KEEPALIVE_LEDGER_KEY = Symbol.for("pi-subagent:child-keepalive-ledger");
 
 /**
- * Worst-case single ping sequence duration (plan.md §2.4): auth await ≤
- * `authTimeoutMs` (30s) + up to 3 HTTP attempts × 20s hard timeout each +
- * backoff (2s + 5s) ≈ 97s. 150s = 97s + ~53s margin (~1.5×) — purely a
+ * Worst-case single ping ATTEMPT duration (plan.md §2.4): auth await ≤
+ * `authTimeoutMs` (30s) + one HTTP attempt's 20s hard timeout + backoff. A full retry
+ * sequence can run longer (retries continue until `aliveUntil − TTL_SAFETY_MARGIN_MS`,
+ * up to ~45s past the ping at the default interval, more with 1h captures) — the holder
+ * keeps the lease alive by renewing it before every retry (`lease.renew`), so this
+ * 150s TTL only bounds one renewal span. It remains purely a
  * defensive backstop against a holder that never calls `settle()` (which
  * should never happen on the happy or any known error path; every exit of
  * `runPing` is wrapped in a `finally` that settles). NOT a settings key on

@@ -645,11 +645,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
   /**
    * Precise one-shot timer for `window.nextPingAt` (todo #28 — field incident:
-   * at the default/max-safe `keepaliveIntervalMs` the gap between `nextPingAt`
-   * and the cache-expired cutoff is exactly one `TICK_INTERVAL_MS`, see
-   * `MAX_SAFE_KEEPALIVE_INTERVAL_MS`'s doc comment. The 15s periodic tick's
-   * coarse granularity can miss that one window (e.g. it happens to land at a
-   * moment where `armed()` just flipped false, while an earlier, more precise
+   * at the time of the fix the default/max `keepaliveIntervalMs` left exactly one
+   * `TICK_INTERVAL_MS` between `nextPingAt` and the cache-expired cutoff (see
+   * `MAX_SAFE_KEEPALIVE_INTERVAL_MS`'s doc comment; the 2026-10-16 margin change
+   * 45s→15s widened that to 3 grid steps, but the phase-miss risk stands — only
+   * the periodic grid decides WHEN ticks land, so a window can still lose every
+   * in-window opportunity to transient not-armed instants). The 15s periodic tick's
+   * coarse granularity can miss the window (e.g. every in-window tick happens to land
+   * at a moment where `armed()` just flipped false, while an earlier, more precise
    * check would have caught the window while still armed — real-machine
    * repro: 3 windows, 1 hit). This schedules a SECOND, independent
    * `clock.setTimer` landing EXACTLY at `nextPingAt` and reuses `onTick()`
@@ -947,8 +950,10 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // outcome is used as final instead.
       let outcome: PingOutcome | undefined;
       let attempts = 0;
+      const firstAttemptAt = this.clock.now();
       for (;;) {
         attempts += 1;
+        const attemptStartedAt = this.clock.now();
         const controller = new AbortController();
         this.abortController = controller;
         try {
@@ -960,7 +965,16 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           if (this.abortController === controller) this.abortController = undefined;
         }
 
-        this.audit("ping-attempt", { attempt: attempts, outcomeKind: outcome.kind });
+        // 2026-10-16 field-evidence follow-up: per-attempt wall time (retry-window analysis
+        // needs "how long did one attempt take" — the field failures were ~13s attempts that
+        // left <2s of the old 45s margin) plus, for `network`, a short sanitized error
+        // descriptor (`networkErrorDescriptor` — name/code only, never URLs/headers/bodies).
+        this.audit("ping-attempt", {
+          attempt: attempts,
+          outcomeKind: outcome.kind,
+          durationMs: this.clock.now() - attemptStartedAt,
+          ...(outcome.kind === "network" && outcome.error !== undefined ? { error: outcome.error } : {}),
+        });
 
         // I-K8: await return point — the one that matters most (§7.5 "abort 与迟到返回").
         if (!this.sameEpoch(pingEpoch)) return;
@@ -1045,6 +1059,10 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           this.session = applied.session;
           this.syncExactTimer(); // todo #28: window.capture just got cleared — cancels the exact timer.
           const cacheCreationInputTokens = outcome.kind === "proven-write" ? outcome.cacheWriteTokens : undefined;
+          // `durationMs` = the whole retry sequence (first attempt send → final outcome); per-attempt
+          // times are in the `ping-attempt` entries. `error` = final attempt's sanitized network
+          // descriptor (network kind only — see `networkErrorDescriptor`).
+          const unprovenDurationMs = this.clock.now() - firstAttemptAt;
           this.lastPingDiagnostics = {
             ...diagnostics,
             at: this.clock.now(),
@@ -1052,6 +1070,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
             cacheReadInputTokens: 0,
             cacheCreationInputTokens,
             attempts,
+            durationMs: unprovenDurationMs,
+            ...(outcome.kind === "network" && outcome.error !== undefined ? { error: outcome.error } : {}),
             ...(outcome.kind === "http" ? { httpStatus: sanitizeHttpStatus(outcome.status) } : {}),
           };
           chargeUsd = this.budgetChargeForOutcome(outcome, capture, model);
@@ -1074,6 +1094,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
             cacheReadInputTokens: 0,
             cacheCreationInputTokens,
             attempts,
+            durationMs: unprovenDurationMs,
+            ...(outcome.kind === "network" && outcome.error !== undefined ? { error: outcome.error } : {}),
             ...costFields,
           });
         }

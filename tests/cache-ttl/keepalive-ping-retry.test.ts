@@ -1,12 +1,13 @@
 /**
- * Ping retry (user requirement, 2026-09-26 — docs/dev/cache-ttl-keepalive/plan.md's
- * appended "ping 重试" section): `sendKeepalivePing` outcomes that prove the server
+ * Ping retry (user requirement, 2026-09-26, r2 2026-10-14 — docs/dev/cache-ttl-keepalive/plan.md's
+ * appended "ping 重试" sections): `sendKeepalivePing` outcomes that prove the server
  * never processed the request (`network`, and a fixed set of transient HTTP statuses)
- * get up to two retries (three attempts total), backed off 2s/5s via the injected
- * `Clock` — never the real timer. Every other outcome (`accepted-then-lost`,
- * `proven-write`, `no-usage`, `malformed`, non-retryable HTTP) is final on the first
- * attempt. See tests/cache-ttl/keepalive-lifecycle.test.ts for the sibling identity/
- * epoch-guard suite this borrows its harness style from.
+ * are retried on a 2s/5s/10s/20s/30s… backoff until the window's TTL margin
+ * (`aliveUntil − TTL_SAFETY_MARGIN_MS`, 15s margin since 2026-10-16 — 45s before)
+ * runs out, via the injected `Clock` — never the real timer. Every other outcome
+ * (`accepted-then-lost`, `proven-write`, `no-usage`, `malformed`, non-retryable HTTP)
+ * is final on the first attempt. See tests/cache-ttl/keepalive-lifecycle.test.ts for the
+ * sibling identity/epoch-guard suite this borrows its harness style from.
  */
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
@@ -92,6 +93,8 @@ function manualFetch(): {
 }
 
 const networkErrorStep = () => Promise.reject(new Error("network down"));
+/** Network failure carrying a `code` — exercises the sanitized error descriptor (`ECONNRESET`). */
+const codedNetworkErrorStep = () => Promise.reject(Object.assign(new Error("fetch failed"), { code: "ECONNRESET" }));
 const provenHitStep = () =>
   Promise.resolve(
     fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 500, cache_creation_input_tokens: 0 })]),
@@ -217,23 +220,54 @@ describe("cache-keepalive service — ping retry (retryable outcomes)", () => {
     expect(attemptAudits.map(([, data]: [string, any]) => data.attempt)).toEqual([1, 2]);
   });
 
-  it("three consecutive network failures ⇒ exactly one unproven counted (not three), kind is the last attempt's", async () => {
-    const { fetchImpl, calls } = sequencedFetch([networkErrorStep, networkErrorStep, networkErrorStep]);
-    const { service, clock } = harness({ fetchImpl });
+  it("network failures retried across the whole default-config window ⇒ exactly one unproven counted (not five), kind is the last attempt's; audit carries durationMs + sanitized error descriptor", async () => {
+    // TTL_SAFETY_MARGIN_MS is 15s since 2026-10-16 (was 45s): with the default 240s
+    // interval the retry cutoff is aliveUntil(300_000) − 15_000 = 285_000, so attempts
+    // land at 240/242/247/257/277s (the old 45s margin stopped at 247s / 3 attempts).
+    const { fetchImpl, calls } = sequencedFetch([
+      codedNetworkErrorStep,
+      codedNetworkErrorStep,
+      codedNetworkErrorStep,
+      codedNetworkErrorStep,
+      codedNetworkErrorStep,
+    ]);
+    const { service, clock, appendEntry } = harness({ fetchImpl });
     await armAndTick(service, clock);
 
-    clock.advance(2_000); // -> attempt 2
+    clock.advance(2_000); // -> attempt 2 @242
     await flush();
-    clock.advance(5_000); // -> attempt 3 (last)
+    clock.advance(5_000); // -> attempt 3 @247
+    await flush();
+    clock.advance(10_000); // -> attempt 4 @257
+    await flush();
+    clock.advance(20_000); // -> attempt 5 @277 (last: 285−277 = 8s < the next 30s backoff)
     await flush();
 
-    expect(calls()).toBe(3);
+    expect(calls()).toBe(5);
     const report = service.report();
     expect(report.session.unprovenTotal).toBe(1);
     expect(report.session.consecutiveUnproven).toBe(1);
     expect(report.session.lastUnproven?.kind).toBe("network");
-    expect(report.lastPingDiagnostics?.attempts).toBe(3);
+    expect(report.lastPingDiagnostics?.attempts).toBe(5);
+    expect(report.lastPingDiagnostics?.durationMs).toBe(37_000); // 240_000 (first send) -> 277_000 (final)
+    expect(report.lastPingDiagnostics?.error).toBe("ECONNRESET");
     expect(report.session.disabled).toBeUndefined(); // below both breaker thresholds
+
+    // Every ping-attempt audit entry carries the sanitized descriptor (code only — never
+    // the "fetch failed" message) and a per-attempt durationMs (0 for instantly-failing stubs).
+    const attemptAudits = appendEntry.mock.calls.filter((call: [string, any]) => call[1].kind === "ping-attempt");
+    expect(attemptAudits).toHaveLength(5);
+    for (const call of attemptAudits) {
+      const data = call[1] as Record<string, any>;
+      expect(data.outcomeKind).toBe("network");
+      expect(data.error).toBe("ECONNRESET");
+      expect(typeof data.durationMs).toBe("number");
+    }
+    expect(attemptAudits.map((call: [string, any]) => call[1].attempt)).toEqual([1, 2, 3, 4, 5]);
+    const unprovenAudit = appendEntry.mock.calls.find(([, data]: [string, any]) => data.kind === "unproven");
+    expect(unprovenAudit).toBeDefined();
+    expect((unprovenAudit![1] as any).durationMs).toBe(37_000);
+    expect((unprovenAudit![1] as any).error).toBe("ECONNRESET");
   });
 
   it("503 then 200 proven-hit ⇒ retried and succeeds", async () => {
@@ -348,19 +382,58 @@ describe("cache-keepalive service — ping retry safety (epoch/abort/dispose/TTL
     expect(calls()).toBe(1); // never retried after dispose
   });
 
+  it("a ~13s network attempt failing at t≈253s is now RETRIED (15s margin, 2026-10-16): the field-evidence case that never retried under the old 45s margin", async () => {
+    // Field evidence (session audit `subagent:cache-keepalive`): two `network` failures,
+    // each `attempts: 1`, failing ~13s after send at the default 240s interval. Under the
+    // old 45s margin the cutoff was 255_000 — a failure at 253_500 leaves 1_500ms, less
+    // than the first 2s backoff, so the strict `remainingMs < delayMs` check refuses the
+    // retry (this test fails under the old margin). With the 15s margin the cutoff is
+    // 285_000: 31_500ms remain, so the 2s backoff fires and the second attempt succeeds.
+    const { fetchImpl, calls, settle } = manualFetch();
+    const { service, clock, appendEntry } = harness({ fetchImpl });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000); // fires the ping
+    await flush();
+    expect(calls()).toBe(1);
+
+    clock.advance(13_500); // time passes while attempt #1 is in flight; t=253_500
+    settle(0, { reject: Object.assign(new Error("fetch failed"), { code: "ECONNRESET" }) });
+    await flush();
+
+    const attemptAudits = appendEntry.mock.calls.filter(([, data]: [string, any]) => data.kind === "ping-attempt");
+    expect(attemptAudits).toHaveLength(1); // only attempt 1 so far
+    expect((attemptAudits[0]![1] as any).durationMs).toBe(13_500); // attempt wall time
+    expect((attemptAudits[0]![1] as any).error).toBe("ECONNRESET");
+
+    clock.advance(2_000); // the 2s backoff now fits (31.5s remain before the 285s cutoff)
+    await flush();
+    expect(calls()).toBe(2); // THE retry — the whole point of the margin change
+    settle(1, {
+      resolve: fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 500, cache_creation_input_tokens: 0 })]),
+    });
+    await flush();
+
+    const report = service.report();
+    expect(report.session.pings).toBe(1); // proven hit on attempt 2
+    expect(report.session.unprovenTotal).toBe(0);
+    expect(report.lastPingDiagnostics?.outcomeKind).toBe("proven-hit");
+    expect(report.lastPingDiagnostics?.attempts).toBe(2);
+  });
+
   it("insufficient TTL headroom for another attempt ⇒ no retry, last outcome counted as final", async () => {
     // The first attempt is left "in flight" under the FakeClock long enough that, once
     // it fails, less than the 2s backoff remains before aliveUntil - TTL_SAFETY_MARGIN_MS
-    // (ASSUMED_TTL_MS 300_000 - TTL_SAFETY_MARGIN_MS 45_000 = 255_000 absolute).
+    // (ASSUMED_TTL_MS 300_000 - TTL_SAFETY_MARGIN_MS 15_000 = 285_000 absolute).
     const { fetchImpl, calls, settle } = manualFetch();
     const { service, clock } = harness({ fetchImpl });
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
-    clock.advance(240_000); // fires the ping (remaining to margin: 255_000 - 240_000 = 15_000)
+    clock.advance(240_000); // fires the ping (remaining to margin: 285_000 - 240_000 = 45_000)
     await flush();
     expect(calls()).toBe(1);
 
-    clock.advance(13_500); // time passes while attempt #1 is in flight; remaining now 1_500ms
+    clock.advance(43_500); // time passes while attempt #1 is in flight; remaining now 1_500ms
     settle(0, { reject: new Error("network down") });
     await flush();
 
@@ -369,5 +442,9 @@ describe("cache-keepalive service — ping retry safety (epoch/abort/dispose/TTL
     expect(report.session.unprovenTotal).toBe(1);
     expect(report.session.lastUnproven?.kind).toBe("network");
     expect(report.lastPingDiagnostics?.attempts).toBe(1);
+    // A code-less Error degrades to its name in the descriptor (never the message —
+    // "network down" must not leak into the audit trail).
+    expect(report.lastPingDiagnostics?.error).toBe("Error");
+    expect(report.lastPingDiagnostics?.durationMs).toBe(43_500);
   });
 });

@@ -68,7 +68,7 @@ export type PingOutcome =
   | { kind: "no-usage" } // 200 but usage missing, or cache_read === cache_creation === 0
   | { kind: "accepted-then-lost" } // got a 200 response but stream ended/errored/timed out before message_start
   | { kind: "http"; status: number } // any non-2xx HTTP status
-  | { kind: "network" } // fetch itself failed / aborted before receiving a response
+  | { kind: "network"; error?: string } // fetch itself failed / aborted before receiving a response
   | { kind: "malformed" }; // no body, or scanned 64KB without seeing message_start
 
 const PING_SCAN_LIMIT_BYTES = 64 * 1024;
@@ -306,7 +306,7 @@ export type UsageScanOutcome =
   | { kind: "usage"; usage: RawScannedUsage | undefined } // `undefined` = message_start carried no usage object
   | { kind: "http"; status: number } // any non-2xx HTTP status
   | { kind: "accepted-then-lost" } // got a 200 response but stream ended/errored/timed out before message_start
-  | { kind: "network" } // fetch itself failed / aborted before receiving a response
+  | { kind: "network"; error?: string } // fetch itself failed / aborted before receiving a response
   | { kind: "malformed" }; // no body, or scanned 64KB without seeing message_start
 
 interface AnthropicMessageStartEvent {
@@ -468,12 +468,59 @@ export async function postAndScanUsage(request: PingRequest, options: SendPingOp
   }
 }
 
+/** The abort reason `postAndScanUsage`'s timeout timer aborts with — recognized verbatim by `networkErrorDescriptor`. */
+const PING_TIMEOUT_SENTINEL = "keepalive ping timeout";
+
+/** Hard cap on the descriptor (task spec: ~80; never let a pathological name/code grow past it). */
+const NETWORK_ERROR_DESCRIPTOR_MAX = 80;
+
+function sanitizeDescriptor(raw: string): string {
+  // Collapse whitespace FIRST (so a tab isn't just deleted mid-token), then keep only
+  // identifier-ish characters: URLs ("/", "?", "&", "="), header/body syntax and control
+  // chars are dropped STRUCTURALLY, before the belt-and-braces `redactSecrets` pass.
+  const collapsed = raw.replace(/\s+/g, " ");
+  const safe = collapsed.replace(/[^A-Za-z0-9_ .:+-]/g, "");
+  return redactSecrets(safe, []).trim().slice(0, NETWORK_ERROR_DESCRIPTOR_MAX);
+}
+
+/**
+ * Short sanitized descriptor of a network-class failure, for diagnostics/audit trails
+ * (2026-10-16 field-evidence follow-up): the error's `code` (`ECONNRESET`, `UND_ERR_SOCKET`,
+ * `UND_ERR_CONNECT_TIMEOUT`, ...) — walking the `cause` chain and an `AggregateError`'s first
+ * `errors` entry (undici wraps: `TypeError: fetch failed` → `AggregateError` → coded cause),
+ * falling back to our own timeout sentinel message, then the error `name` (`AbortError`,
+ * `TypeError`), then `"network"`.
+ *
+ * NEVER uses arbitrary error MESSAGES (they can carry URLs/headers/bodies/secrets) — only
+ * `code`/`name` identifiers plus the exact-match internal sentinel — and caps the result at 80
+ * chars. Belt-and-braces `redactSecrets` on top. Always returns a string.
+ */
+export function networkErrorDescriptor(error: unknown): string {
+  let cur: unknown = error;
+  for (let depth = 0; depth < 4 && cur instanceof Error; depth += 1) {
+    const err = cur as Error & { code?: unknown; errors?: unknown };
+    if (typeof err.code === "string" && err.code !== "") return sanitizeDescriptor(err.code);
+    if (err.message === PING_TIMEOUT_SENTINEL) return PING_TIMEOUT_SENTINEL;
+    const aggregated = err.errors;
+    if (Array.isArray(aggregated) && aggregated.length > 0 && aggregated[0] instanceof Error) {
+      cur = aggregated[0];
+      continue;
+    }
+    if (err.cause instanceof Error) {
+      cur = err.cause;
+      continue;
+    }
+    return sanitizeDescriptor(err.name !== "" ? err.name : "network");
+  }
+  return "network";
+}
+
 function classify(error: unknown, headersReceived: boolean): UsageScanOutcome {
   // Once we've received response headers, any failure while reading the body
   // (abort/timeout/network drop) means the server accepted the request but we
   // lost the result before it could be proven — never silently call it "network".
   if (headersReceived) return { kind: "accepted-then-lost" };
-  return { kind: "network" };
+  return { kind: "network", error: networkErrorDescriptor(error) };
 }
 
 /**

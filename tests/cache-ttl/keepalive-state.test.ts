@@ -1193,7 +1193,7 @@ describe("renderCacheStatus", () => {
       dirty: false,
       report: report({ window: armedWindow({ pings: 1, lastStopReason: "http" }) }),
     });
-    expect(text).toBe("ping paused:http");
+    expect(text).toBe("ping miss:http");
   });
 
   it("shows the disabled state with reason and lifetime ping count", () => {

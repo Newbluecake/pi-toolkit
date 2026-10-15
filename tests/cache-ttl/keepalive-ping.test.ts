@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildPingRequest,
+  networkErrorDescriptor,
   preparePingPayload,
   redactSecrets,
   sendKeepalivePing,
@@ -362,14 +363,21 @@ describe("sendKeepalivePing — HTTP errors", () => {
 });
 
 describe("sendKeepalivePing — network / abort / timeout", () => {
-  it("classifies a fetch rejection before headers as network", async () => {
-    const fetchImpl = vi.fn(async () => {
-      throw new Error("getaddrinfo ENOTFOUND");
+  it("classifies a fetch rejection before headers as network, carrying the sanitized code descriptor (never the message)", async () => {
+    const coded = vi.fn(async () => {
+      throw Object.assign(new Error("getaddrinfo ENOTFOUND api.anthropic.com"), { code: "ENOTFOUND" });
     }) as unknown as typeof fetch;
 
-    const outcome = await sendKeepalivePing(SAMPLE_REQUEST, { fetchImpl });
+    const outcome = await sendKeepalivePing(SAMPLE_REQUEST, { fetchImpl: coded });
 
-    expect(outcome).toEqual({ kind: "network" });
+    expect(outcome).toEqual({ kind: "network", error: "ENOTFOUND" });
+
+    // No code and no recognizable name ⇒ bare `Error`; the raw message never surfaces.
+    const plain = vi.fn(async () => {
+      throw new Error("getaddrinfo ENOTFOUND");
+    }) as unknown as typeof fetch;
+    const bare = await sendKeepalivePing(SAMPLE_REQUEST, { fetchImpl: plain });
+    expect(bare).toEqual({ kind: "network", error: "Error" });
   });
 
   it("times out before headers are received -> network, and clears the timer", async () => {
@@ -381,7 +389,9 @@ describe("sendKeepalivePing — network / abort / timeout", () => {
       await vi.advanceTimersByTimeAsync(1000);
       const outcome = await promise;
 
-      expect(outcome).toEqual({ kind: "network" });
+      // This fake's abort listener rejects with its own AbortError-named error (not the
+      // controller's abort reason) — the descriptor falls back to that name.
+      expect(outcome).toEqual({ kind: "network", error: "AbortError" });
       expect(vi.getTimerCount()).toBe(0); // the timeout timer was cleared, nothing left pending
     } finally {
       vi.useRealTimers();
@@ -412,7 +422,7 @@ describe("sendKeepalivePing — network / abort / timeout", () => {
     parent.abort();
     const outcome = await promise;
 
-    expect(outcome).toEqual({ kind: "network" });
+    expect(outcome).toEqual({ kind: "network", error: "AbortError" });
     const init = calls[0] as RequestInit;
     expect((init.signal as AbortSignal).aborted).toBe(true);
   });
@@ -467,6 +477,40 @@ describe("sendKeepalivePing — network / abort / timeout", () => {
       signal: parent.signal,
     });
     expect(removeSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("networkErrorDescriptor — sanitized network-failure descriptor (2026-10-16 diagnostics)", () => {
+  it("prefers the error's code, walking the cause chain and AggregateError.errors (undici's wrap shape)", () => {
+    expect(networkErrorDescriptor(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toBe("ECONNRESET");
+    const cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), { code: "ECONNREFUSED" });
+    expect(networkErrorDescriptor(new Error("fetch failed", { cause }))).toBe("ECONNREFUSED");
+    const aggregate = new AggregateError([Object.assign(new Error("x"), { code: "UND_ERR_SOCKET" })], "aggregated");
+    expect(networkErrorDescriptor(new Error("fetch failed", { cause: aggregate }))).toBe("UND_ERR_SOCKET");
+    expect(networkErrorDescriptor(Object.assign(new Error("x"), { code: "UND_ERR_CONNECT_TIMEOUT" }))).toBe(
+      "UND_ERR_CONNECT_TIMEOUT",
+    );
+  });
+
+  it("recognizes the keepalive ping timeout sentinel verbatim; falls back to the error name; never the message", () => {
+    expect(networkErrorDescriptor(new Error("keepalive ping timeout"))).toBe("keepalive ping timeout");
+    expect(networkErrorDescriptor(new TypeError("fetch failed"))).toBe("TypeError");
+    expect(networkErrorDescriptor(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }))).toBe(
+      "AbortError",
+    );
+    // Raw messages NEVER surface — even when they look like codes.
+    expect(networkErrorDescriptor(new Error("ECONNRESET"))).toBe("Error");
+  });
+
+  it("caps at 80 chars, collapses whitespace, strips URL-ish separators structurally, degrades to 'network'", () => {
+    expect(networkErrorDescriptor(Object.assign(new Error("x"), { code: "X".repeat(200) }))).toHaveLength(80);
+    expect(networkErrorDescriptor(Object.assign(new Error("x"), { code: "A B\tC" }))).toBe("A B C");
+    const urlish = networkErrorDescriptor(
+      Object.assign(new Error("x"), { code: "https://api.example.com/v1?key=abc" }),
+    );
+    expect(urlish).not.toMatch(/[/=?&]/);
+    expect(networkErrorDescriptor(undefined)).toBe("network");
+    expect(networkErrorDescriptor("a plain string")).toBe("network");
   });
 });
 

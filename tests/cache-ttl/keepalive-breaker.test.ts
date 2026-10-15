@@ -661,7 +661,7 @@ describe("pingSegmentParts", () => {
         "paused",
         mkReport({ ...base, pings: 2 }, { window: win({ pings: 2, lastStopReason: "network" as never }) }),
         "paused",
-        "ping paused:network",
+        "ping miss:network",
       ],
       [
         "active",

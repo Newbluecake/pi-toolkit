@@ -123,9 +123,9 @@ describe("markerText (TUI-parallel assembly, plan §2/§4.2)", () => {
     expect(markerText(w, NOW)).toBe("cache 1h* · ping off:http 403 ×7");
   });
 
-  it("window-level paused form survives as a known state", () => {
-    const w = wire({ ping: { text: "ping paused:network", state: "paused" }, lines: [] });
-    expect(markerText(w, NOW)).toBe("cache 1h* · ping paused:network");
+  it("window-level stopped form survives as a known state (label reads `ping miss:<reason>` since the 2026-10-16 rename — same wording as the TUI)", () => {
+    const w = wire({ ping: { text: "ping miss:network", state: "paused" }, lines: [] });
+    expect(markerText(w, NOW)).toBe("cache 1h* · ping miss:network");
   });
 
   it("elapsed retryAt ⇒ no `·retry` (the expanded rows show `eligible now` instead)", () => {
