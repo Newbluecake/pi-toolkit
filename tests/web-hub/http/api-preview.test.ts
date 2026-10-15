@@ -52,6 +52,20 @@ import {
 } from "./helpers.js";
 import { memLog } from "../hub/helpers.js";
 
+/** The preview route writes its single audit line in the request's `finally`, AFTER awaiting the
+ * file handle close — so the client can hold a complete 200 response before that line exists.
+ * Wait (real time, bounded) for at least one `preview` audit line instead of reading the log the
+ * instant the response lands; returns the audit lines (the last one is this request's). */
+async function previewAuditLines(
+  log: { lines: ReadonlyArray<{ msg: string; data?: unknown }> },
+  ms = 5_000,
+): Promise<Array<{ msg: string; data?: unknown }>> {
+  const t0 = Date.now();
+  const pick = () => log.lines.filter((l) => l.msg === "preview");
+  while (pick().length === 0 && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 5));
+  return pick();
+}
+
 const AGENT = "a4242-nonce12";
 const SESSION = "sess123";
 const CSP =
@@ -544,7 +558,7 @@ describe("loopback /api/preview — ④ rate limit, in-flight, audit discipline"
     const secret = h.file("very-secret-filename.txt", "top secret content");
     const r = await h.get(AGENT, SESSION, secret);
     expect(r.status).toBe(200);
-    const lines = h.previewLog.lines.filter((l) => l.msg === "preview");
+    const lines = await previewAuditLines(h.previewLog);
     expect(lines.length).toBeGreaterThan(0);
     for (const l of lines) {
       const data = (l.data ?? {}) as Record<string, unknown>;
@@ -749,7 +763,7 @@ describe("loopback /api/preview — global admission (U4, dir-plan §1.4)", () =
     const r = await h.get(AGENT, SESSION, outside);
     expect(r.status).toBe(200);
     expect(r.body).toBe("absolute path body\n");
-    const preview = (h.previewLog.lines.at(-1)?.data ?? {}) as Record<string, unknown>;
+    const preview = ((await previewAuditLines(h.previewLog)).at(-1)?.data ?? {}) as Record<string, unknown>;
     expect(preview).toMatchObject({ audit: "preview", cls: "abs", ok: true });
     expect(JSON.stringify(preview)).not.toContain("abs.txt");
     expect(JSON.stringify(preview)).not.toContain("outside");
@@ -782,7 +796,7 @@ describe("loopback /api/preview — `~/<rest>` tilde expansion", () => {
     const r = await h.get(AGENT, SESSION, "~/snap/x.txt");
     expect(r.status).toBe(200);
     expect(r.body).toBe("snap body\n");
-    const preview = (h.previewLog.lines.at(-1)?.data ?? {}) as Record<string, unknown>;
+    const preview = ((await previewAuditLines(h.previewLog)).at(-1)?.data ?? {}) as Record<string, unknown>;
     expect(preview).toMatchObject({ audit: "preview", cls: "abs", ok: true });
     expect(JSON.stringify(preview)).not.toContain("snap");
   });
@@ -829,7 +843,7 @@ describe("loopback /api/preview — dir=1 listings (P1b)", () => {
     expect(listing.entries.map((e) => e.name)).toEqual(["sub", "alpha.txt", "beta.txt"]);
     expect(listing.complete).toBe(true);
     expect(parsePreviewDirListing(JSON.parse(r.body), Buffer.byteLength(r.body))).not.toBeNull();
-    const preview = (h.previewLog.lines.at(-1)?.data ?? {}) as Record<string, unknown>;
+    const preview = ((await previewAuditLines(h.previewLog)).at(-1)?.data ?? {}) as Record<string, unknown>;
     expect(preview).toMatchObject({ audit: "preview", ok: true, kind: "dir", cls: "cwd", total: 3, truncated: false });
     expect(JSON.stringify(preview)).not.toContain("alpha.txt");
     expect(JSON.stringify(preview)).not.toContain("beta.txt");
