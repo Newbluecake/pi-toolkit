@@ -22,10 +22,12 @@
 }
 
 /* Rows sit on a tinted surface with a status-colored left accent — at-a-glance
- * running/done/failed without reading the token text. */
+ * running/done/failed without reading the token text. The left corners stay square: the
+ * base `.bj-row` radius would bend the 2px accent into a "(" curve. */
 .fleet-bash .bj-row {
   background: var(--c-surface);
   border-left: 2px solid var(--c-border);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
 }
 
 .fleet-bash .bj-item[data-status="running"] .bj-row,
