@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createJobStore } from "../../src/bash/job-store.js";
 import { createBashJobManager, type BashJobManager } from "../../src/bash/manager.js";
 import { createProcessPort, probePid, type ProcessPort, type SpawnedJob } from "../../src/bash/process.js";
+import { isTerminalJobStatus } from "../../src/bash/types.js";
 import { systemClock } from "../../src/core/clock.js";
 import {
   createOrphanFixture,
@@ -124,6 +125,14 @@ describe.skipIf(process.platform !== "linux")("BashJobManager.kill against a SIG
     pgids.push(s.job.pid);
     // Leader gone while the worker still holds (and writes to) the inherited pipes ⇒ local handle still open.
     expect(await until(() => !probePid(s.job.pid))).toBe(true);
+    // Under load the manager may not have processed the leader's exit yet; the
+    // pipe-holder branch only runs once the record itself is terminal.
+    expect(
+      await until(() => {
+        const r = m.get(jobId);
+        return r !== undefined && isTerminalJobStatus(r.status);
+      }),
+    ).toBe(true);
     expect(liveGroupMembers(s.job.pid)).toBeGreaterThan(0);
     const result = await m.kill(jobId, { graceMs: GRACE });
     expect(result.reason).toMatch(/surviving pipe holders were terminated/);
