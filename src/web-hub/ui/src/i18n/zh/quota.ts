@@ -34,14 +34,16 @@ const quota = {
   footerUpdatedAt: "更新于 {clock}",
   emptyNote: "暂无订阅额度数据",
   // P7w（quota-plan §9A.3）：droid 池 + month 窗口 + 计费/鉴权标记。
-  "provider.droid-standard": "droid",
-  "provider.droid-core": "droid core",
+  // 2026-10-15 label ruling：「Droid Std」/「Droid Core」——品牌与池名均大写对称；协议/模型
+  // id（droid-standard、droid/glm-… 等）保持小写不变。
+  "provider.droid-standard": "Droid Std",
+  "provider.droid-core": "Droid Core",
   scopeMonth: "月",
   overageCore: "超额：改用 core 池",
   overageExtra: "超额：额外余额（{amount}）",
   overageAllowed: "已允许花额外余额",
-  authProblem: "droid 额度不可用：Factory 计费接口返回 HTTP {status}，请检查 FACTORY_API_KEY 并重启 pi",
-  problemAria: "droid 额度：HTTP {status}",
+  authProblem: "Droid 额度不可用：Factory 计费接口返回 HTTP {status}，请检查 FACTORY_API_KEY 并重启 pi",
+  problemAria: "Droid 额度：HTTP {status}",
 } satisfies Messages<typeof en>;
 
 export default quota;

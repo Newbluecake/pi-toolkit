@@ -20,9 +20,16 @@ import { etaDurationKey, fmtCents, fmtResetAt, glmPair, pillProblems } from "@lo
 import type { QuotaProviderWire, QuotaWindowWire, QuotaWire } from "@protocol/messages.js";
 import "../../styles/quota.css";
 
-const props = defineProps<{ quota: QuotaWire; now: number; anchorEl: HTMLElement | null }>();
+const props = defineProps<{ quota: QuotaWire; now: number; anchorEl: HTMLElement | null; peek?: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 const { t } = useI18n();
+
+/** Mount-time snapshot (NOT reactive-on-purpose): a hover-peek mount (QuotaPill's 2026-10-15
+ *  hover popover) neither steals focus on mount nor "returns" it to the trigger on close — the
+ *  pointer never asked for focus, so focus must not move. A click-pin on top of a live peek
+ *  keeps this snapshot (the card was mounted by the hover), which is exactly right: focus was
+ *  never taken, so there is nothing to return. */
+const wasPeek = props.peek === true;
 
 /** Mirrors `glmPair`'s JSDoc return shape (`logic/quota.js` — the ONE shared GLM-pair rule
  *  this card reuses instead of re-implementing; never constructed locally). `source` is
@@ -137,13 +144,13 @@ onMounted(async () => {
   document.addEventListener("keydown", onKeydown, true);
   document.addEventListener("pointerdown", onPointerDown, true);
   await nextTick();
-  panelEl.value?.focus();
+  if (!wasPeek) panelEl.value?.focus();
 });
 
 onUnmounted(() => {
   document.removeEventListener("keydown", onKeydown, true);
   document.removeEventListener("pointerdown", onPointerDown, true);
-  props.anchorEl?.focus();
+  if (!wasPeek) props.anchorEl?.focus();
 });
 
 function providerLabel(id: string): string {

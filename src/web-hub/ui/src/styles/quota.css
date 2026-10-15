@@ -23,10 +23,16 @@
   /* 2026-10 verifier #3: was `flex: none` — three alerting groups with reset annexes could grow
    * past the viewport and push the top bar's right-hand controls out from under `.app`'s
    * `overflow:hidden`. Bound + let it shrink like `.brand` (shell.css: flex 0 1 auto); the text
-   * container ellipsizes, aria/title still carry the full text. */
+   * container ellipsizes, aria/title still carry the full text.
+   * 2026-10-15 width tiers: tightened 60vw/640px → 50vw/560px — the pill may never claim more
+   * than half the bar (brand + conn pill + right-hand controls must own the rest at every
+   * width), and 560px still hosts the widest observed three-group full face (~520px); anything
+   * wider belongs to the hover card, and the tier machinery drops to compact/names long before
+   * this cap becomes the binding constraint anyway. QuotaPill.vue's `cssCapPx()` probe resolves
+   * THIS value at runtime, so the tier logic always follows whatever is written here. */
   flex: 0 1 auto;
   min-width: 0;
-  max-width: min(60vw, 640px);
+  max-width: min(50vw, 560px);
   padding: 3px 9px;
   border: 1px solid var(--c-border);
   border-radius: var(--r-pill);
@@ -161,6 +167,75 @@
     position: absolute;
     inset: -10px -4px;
   }
+}
+
+/* ------------------------------------------------------- width-tier measurer (2026-10-15) */
+
+/* The hidden measurer (QuotaPill.vue's `.q-measure`): one uncapped copy of the face per tier,
+ * all three always rendered. `visibility: hidden` (never `display: none`) so the engine still
+ * computes layout and `offsetWidth` reads each tier's true natural width; `pointer-events:
+ * none` keeps it out of hit-testing; absolutely positioned inside `.q-anchor` (already
+ * `position: relative`) so it never contributes to the bar's layout — measuring must not move
+ * the thing being measured. */
+.q-measure {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Each tier span reuses the real `.q-pill` + `.q-pill-text` + `.q-seg`/`.q-sep` markup so its
+ * width is faithful (same padding/border/font, same L3 semibold); only the width-bounding
+ * declarations are lifted so `offsetWidth` is the UNCAPPED natural width the tier needs. */
+.q-measure .q-pill {
+  max-width: none;
+  flex: none;
+}
+
+.q-measure .q-pill-text {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* ------------------------------------------------- compact/names tier label colours */
+
+/* In the compact and names tiers the subscription state rides ON THE LABEL (colour ladder +
+ * semibold), not only on the 7px dot — a names-tier face must stay readable at a glance. Same
+ * scheme-aware tokens as the dot ladder above; `--c-warning-text`/`--c-orange-text` are the
+ * higher-contrast text variants tokens.css provides for exactly this (text needs more contrast
+ * than a dot/bar), `--c-success`/`--c-danger` are already text-grade (the L3 rule above uses
+ * `--c-danger` as text today). The full tier keeps today's muted look byte-for-byte. */
+.q-pill[data-face="compact"] .q-seg-text,
+.q-pill[data-face="names"] .q-seg-text {
+  font-weight: var(--fw-semibold);
+}
+
+.q-pill[data-face="compact"] .q-seg[data-level="0"] .q-seg-text,
+.q-pill[data-face="names"] .q-seg[data-level="0"] .q-seg-text {
+  color: var(--c-success);
+}
+
+.q-pill[data-face="compact"] .q-seg[data-level="1"] .q-seg-text,
+.q-pill[data-face="names"] .q-seg[data-level="1"] .q-seg-text {
+  color: var(--c-warning-text);
+}
+
+.q-pill[data-face="compact"] .q-seg[data-level="2"] .q-seg-text,
+.q-pill[data-face="names"] .q-seg[data-level="2"] .q-seg-text {
+  color: var(--c-orange-text);
+}
+
+.q-pill[data-face="compact"] .q-seg[data-level="3"] .q-seg-text,
+.q-pill[data-face="names"] .q-seg[data-level="3"] .q-seg-text {
+  color: var(--c-danger);
+}
+
+/* A frozen wire overrides the ladder with neutral gray (same policy as the stale dot rule
+ * above — old numbers must not claim live severity). */
+.q-pill[data-face="compact"] .q-seg[data-stale="true"] .q-seg-text,
+.q-pill[data-face="names"] .q-seg[data-stale="true"] .q-seg-text {
+  color: var(--c-text-3);
 }
 
 /* ---------------------------------------------------------------- popover card */

@@ -165,19 +165,19 @@ describe("QuotaPill: droid", () => {
     const texts = mountPill(HEALTHY)
       .findAll(".q-seg-text")
       .map((x) => x.text());
-    expect(texts).toEqual(["droid 5h 12% · 7d 40% · mo 5%", "droid core 5h 0% · 7d 0% · mo 0%"]);
+    expect(texts).toEqual(["Droid Std 5h 12% · 7d 40% · mo 5%", "Droid Core 5h 0% · 7d 0% · mo 0%"]);
   });
   it("zh: pool labels are brand tokens", () => {
     const texts = mountPill(HEALTHY, "zh")
       .findAll(".q-seg-text")
       .map((x) => x.text());
-    expect(texts[0]).toBe("droid 5h 12% · 7d 40% · mo 5%");
+    expect(texts[0]).toBe("Droid Std 5h 12% · 7d 40% · mo 5%");
   });
   it("mobile: pct-only with three values", () => {
     const texts = mountPill(HEALTHY, "en", true)
       .findAll(".q-seg-text")
       .map((x) => x.text());
-    expect(texts).toEqual(["droid 12%/40%/5%", "droid core 0%/0%/0%"]);
+    expect(texts).toEqual(["Droid Std 12%/40%/5%", "Droid Core 0%/0%/0%"]);
   });
   it("exhausted: ⚠ label · <scope of longest exhausted> clock reset", () => {
     const q = wire([
@@ -187,8 +187,8 @@ describe("QuotaPill: droid", () => {
     const texts = mountPill(q)
       .findAll(".q-seg-text")
       .map((x) => x.text());
-    expect(texts[0]).toBe("⚠ droid · mo 17:00 reset");
-    expect(texts[1]).toBe("⚠ droid core · 5h 14:00 reset");
+    expect(texts[0]).toBe("⚠ Droid Std · mo 17:00 reset");
+    expect(texts[1]).toBe("⚠ Droid Core · 5h 14:00 reset");
   });
   it("extra $ appended after the annex on a standard L3 pool (available mode)", () => {
     const q = wire([
@@ -204,20 +204,20 @@ describe("QuotaPill: droid", () => {
     ]);
     expect(mountPill(q).text()).not.toContain("extra");
     const text = mountPill(solo).get(".q-seg-text").text();
-    expect(text).toBe("⚠ droid · 5h 13:00 reset"); // all exhausted ⇒ exhausted form, no extra
+    expect(text).toBe("⚠ Droid Std · 5h 13:00 reset"); // all exhausted ⇒ exhausted form, no extra
   });
   it("auth problem chip next to groups, with level>=2 and aria", () => {
     const q = wire(HEALTHY.providers, [{ family: "droid", status: 402 }]);
     const wrapper = mountPill(q);
     const chip = wrapper.get(".q-problem");
-    expect(chip.text()).toBe("droid auth 402");
+    expect(chip.text()).toBe("Droid auth 402");
     expect(chip.attributes("data-level")).toBe("2");
     expect(wrapper.get(".q-pill").attributes("data-level")).toBe("2");
-    expect(wrapper.get(".q-pill").attributes("aria-label")).toContain("droid quota: HTTP 402");
+    expect(wrapper.get(".q-pill").attributes("aria-label")).toContain("Droid quota: HTTP 402");
   });
   it("problems-only: pill renders; phone chip reads `auth 402`", () => {
     const q = wire([], [{ family: "droid", status: 402 }]);
-    expect(mountPill(q).get(".q-problem").text()).toBe("droid auth 402");
+    expect(mountPill(q).get(".q-problem").text()).toBe("Droid auth 402");
     const phone = mountPill(q, "en", true, true);
     expect(phone.get(".q-seg-compact .q-seg-text").text()).toBe("auth 402");
   });
@@ -236,7 +236,7 @@ describe("QuotaCard: droid", () => {
   it("renders a month row and the droidCore overage badge on the standard row only", async () => {
     const card = await openCard(HEALTHY);
     const rows = card.findAll(".q-prov");
-    expect(rows.map((r) => r.get(".q-name").text())).toEqual(["droid", "droid core"]);
+    expect(rows.map((r) => r.get(".q-name").text())).toEqual(["Droid Std", "Droid Core"]);
     expect(rows[0]!.findAll(".q-scope").map((x) => x.text())).toEqual(["5h", "week", "month"]);
     expect(rows[0]!.get(".q-overage").text()).toBe("Overage: switch to core pool");
     expect(rows[1]!.find(".q-overage").exists()).toBe(false);
@@ -261,7 +261,7 @@ describe("QuotaCard: droid", () => {
   it("auth problem row under the title (en/zh)", async () => {
     const q = wire(HEALTHY.providers, [{ family: "droid", status: 402 }]);
     expect((await openCard(q)).get(".q-problem-row").text()).toBe(
-      "droid quota unavailable: Factory billing API returned HTTP 402 — check FACTORY_API_KEY and restart pi",
+      "Droid quota unavailable: Factory billing API returned HTTP 402 — check FACTORY_API_KEY and restart pi",
     );
     expect((await openCard(q, "zh")).get(".q-problem-row").text()).toContain("HTTP 402");
   });

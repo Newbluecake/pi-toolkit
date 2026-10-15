@@ -96,7 +96,16 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // badge sums `summaryCounts(bashJobs).running` into the agent count and AgentCard gains a
 // terminal-icon running-bash segment (`runningBashCount` via bashJobsOf/summaryCounts);
 // measured 259,164 B gz, +112 B over the previous 259,052 B — minimum KiB-granularity bump.
-const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 254 * 1024;
+// Bumped to 255 KiB by the quota pill width tiers + hover peek (2026-10-15, 用户需求「quota 在
+// topbar 的宽度不能一直增长，如果项目过多，可以转换成悬浮展示的形式」): QuotaPill gains the
+// three-face tier system (full/compact/names text forms + a hidden per-tier clone measurer +
+// ResizeObserver-driven evaluation with hysteresis and a CSS-cap probe) and the hover-peek
+// popover wiring (pin/peek state, 150ms open / 200ms close timers, QuotaCard's no-focus-steal
+// `peek` prop); QuotaCard/i18n label changes ride along. Measured 260,326 B gz vs 259,165 B
+// before (+1,161 B, incl. the verifier R1/R2 per-tier data-face on the measurer clones) — after byte-level trims (single cssText probe write, index-based tier
+// scan, shared hover handlers) the remaining ~1.1 KB is intrinsic to the spec (hysteresis and
+// the cap probe are required behaviour, not fat), so the minimum 1 KiB bump it is.
+const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 255 * 1024;
 const LAZY_JS_BUDGET_GZIP_BYTES = 42 * 1024;
 // CSS (one file, cssCodeSplit:false ⇒ all of it is first-screen): the 25 KiB set in vue-plan v2.1
 // was as empirical as the old JS total. 2026-10-11 (user: don't spend effort squeezing gzip bytes)

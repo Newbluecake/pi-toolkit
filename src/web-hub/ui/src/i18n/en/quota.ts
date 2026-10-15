@@ -36,15 +36,17 @@ const quota = {
   footerUpdatedAt: "Updated {clock}",
   emptyNote: "No subscription quota data yet",
   // P7w (quota-plan §9A.3): droid pools + month window + billing/auth markers.
-  "provider.droid-standard": "droid",
-  "provider.droid-core": "droid core",
+  // 2026-10-15 label ruling: "Droid Std"/"Droid Core" — capitalized brand + pool word,
+  // symmetric pair; protocol/model ids (droid-standard, droid/glm-…) stay lowercase everywhere.
+  "provider.droid-standard": "Droid Std",
+  "provider.droid-core": "Droid Core",
   scopeMonth: "month",
   overageCore: "Overage: switch to core pool",
   overageExtra: "Overage: extra usage ({amount})",
   overageAllowed: "extra usage allowed",
   authProblem:
-    "droid quota unavailable: Factory billing API returned HTTP {status} — check FACTORY_API_KEY and restart pi",
-  problemAria: "droid quota: HTTP {status}",
+    "Droid quota unavailable: Factory billing API returned HTTP {status} — check FACTORY_API_KEY and restart pi",
+  problemAria: "Droid quota: HTTP {status}",
 };
 
 export default quota;
