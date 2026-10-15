@@ -707,3 +707,72 @@ describe("pickAlternatives — droid decoration", () => {
     expect(Object.keys(sel).sort()).toEqual(["providers", "subscription"]);
   });
 });
+
+describe("evaluateQuotaGate / pickAlternatives — pi blocked × droid pool supplement (2026-10-15 拍板)", () => {
+  const PI_BLOCKED: Record<string, ProviderVerdict> = {
+    "zai-coding-cn": makeVerdict({
+      provider: "zai-coding-cn",
+      level: 3,
+      windows: [win("5h", 98, 3, RESET_0211, "exhausted")],
+    }),
+    "kimi-coding": makeVerdict({ provider: "kimi-coding", level: 0, windows: [win("5h", 8, 0)] }),
+  };
+  const POOLS = [
+    { pool: "core" as const, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+    { pool: "standard" as const, models: ["droid/claude-opus-5-5"] },
+  ];
+
+  it("droid available ⇒ the rejection message appends the droid line after the pi candidates", () => {
+    const verdict = evaluateQuotaGate(
+      { provider: "zai-coding-cn", id: "glm-5.3" },
+      { ...gateDeps((p) => PI_BLOCKED[p]), droidAlternatives: () => POOLS },
+    );
+    expect(verdict?.alternatives.droidPools).toEqual(POOLS);
+    const msg = verdict?.message ?? "";
+    expect(msg).toContain(
+      "有余量的外部 droid 池也可用：droid/glm-5.3、droid/kimi-k3（core 池）；droid/claude-opus-5-5（standard 池）。",
+    );
+    expect(msg).toContain("不能当 consult/验收");
+    const piIdx = msg.indexOf("替代候选（订阅优先）：kimi-coding。");
+    expect(piIdx).toBeGreaterThan(-1);
+    expect(piIdx).toBeLessThan(msg.indexOf("有余量的外部 droid 池也可用"));
+  });
+
+  it("droid supplement empty ⇒ the message is byte-identical to the no-dep legacy gate copy", () => {
+    const noDep = evaluateQuotaGate(
+      { provider: "zai-coding-cn", id: "glm-5.3" },
+      gateDeps((p) => PI_BLOCKED[p]),
+    );
+    const empty = evaluateQuotaGate(
+      { provider: "zai-coding-cn", id: "glm-5.3" },
+      { ...gateDeps((p) => PI_BLOCKED[p]), droidAlternatives: () => [] },
+    );
+    expect(empty?.message).toBe(noDep?.message);
+    expect("droidPools" in (empty?.alternatives ?? {})).toBe(false);
+    expect("droidPools" in (noDep?.alternatives ?? {})).toBe(false);
+  });
+
+  it("pi alternatives empty but droid available ⇒ droid line still rendered (not 暂无替代候选)", () => {
+    const verdict = evaluateQuotaGate(
+      { provider: "zai-coding-cn", id: "glm-5.3" },
+      {
+        verdictFor: (p) => (p === "zai-coding-cn" ? PI_BLOCKED["zai-coding-cn"] : undefined),
+        available: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }], // 候选表里只有被拦者
+        blockAtLevel: 3,
+        now: NOW,
+        droidAlternatives: () => POOLS,
+      },
+    );
+    expect(verdict?.message).not.toContain("暂无替代候选");
+    expect(verdict?.message).toContain("有余量的外部 droid 池也可用");
+  });
+
+  it("external branch (droid pool blocked) ignores droidAlternatives — D7/D8 copy only", () => {
+    const verdict = evaluateQuotaGate(DROID_MODEL, {
+      ...droidDeps(stdView(poolVerdict("droid-standard", 100, 3)), { poolAlternatives: () => ["droid/glm-5.3"] }),
+      droidAlternatives: () => POOLS,
+    });
+    expect(verdict?.message).not.toContain("有余量的外部 droid 池也可用");
+    expect(verdict?.alternatives.droidPools).toBeUndefined();
+  });
+});

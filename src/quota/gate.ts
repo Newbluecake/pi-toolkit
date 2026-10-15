@@ -23,7 +23,7 @@
 import type { ModelCandidate, ModelRef } from "../config/model-hint.js";
 import type { Millis } from "../core/types.js";
 import { isDemotionFloorOnly, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
-import { isDroidQuotaId, type LadderLevel } from "./types.js";
+import { isDroidQuotaId, type DroidPoolAlternative, type LadderLevel } from "./types.js";
 import type { QuotaModelView } from "./service.js";
 import {
   alternativesAdvice,
@@ -58,6 +58,12 @@ export interface QuotaGateDeps {
   readonly modelView?: ((model: ModelRef) => QuotaModelView | undefined) | undefined;
   /** droid 内替代（D7；stack.ts 接 `QuotaService.poolAlternatives`）。 */
   readonly poolAlternatives?: ((blocked: string) => readonly string[]) | undefined;
+  /**
+   * pi provider 被拦时的补充候选（2026-10-15 用户拍板；stack.ts 接
+   * `QuotaService.droidAlternatives`）。缺席/返回空 ⇒ 选中对象形状与旧版一致
+   * （kimi/zai golden 钉住）；external 分支（droid 池被拦）不读它。
+   */
+  readonly droidAlternatives?: (() => readonly DroidPoolAlternative[] | undefined) | undefined;
 }
 
 /** `quota.subscriptionProviders`（逗号分隔）→ 判定函数；空串 ⇒ 恒 false。 */
@@ -178,7 +184,7 @@ function buildPooledGateMessage(
  */
 export function pickAlternatives(
   blocked: string,
-  deps: Pick<QuotaGateDeps, "verdictFor" | "available" | "isSubscription" | "poolAlternatives">,
+  deps: Pick<QuotaGateDeps, "verdictFor" | "available" | "isSubscription" | "poolAlternatives" | "droidAlternatives">,
   limit?: number,
 ): AlternativeSelection {
   const cap = limit === undefined ? DEFAULT_ALTERNATIVE_LIMIT : Math.max(0, limit);
@@ -235,7 +241,19 @@ export function pickAlternatives(
       ...(models.length > 0 ? { models } : {}),
     };
   }
-  return { providers, subscription };
+  // 2026-10-15 用户拍板：pi provider 被拦 ⇒ 附上有余量的 droid 池候选（dep 缺席 /
+  // 空 / 抛异常 ⇒ 字段缺席，形状与旧版一致）。
+  let droidPools: readonly DroidPoolAlternative[] | undefined = undefined;
+  try {
+    droidPools = deps.droidAlternatives?.();
+  } catch {
+    droidPools = undefined; // 补充候选链不能拖垮主候选（注入桩兜底）。
+  }
+  return {
+    providers,
+    subscription,
+    ...((droidPools?.length ?? 0) > 0 ? { droidPools } : {}),
+  };
 }
 
 /** formatModelCandidates 的 annotate 实参：返回 " [5h 92% ⚠]" 之类后缀或 undefined。 */
@@ -339,7 +357,7 @@ function buildGateMessage(
 ): string {
   const label = quotaLabel(provider); // kimi/zai 原样返回（字节不变）；droid 虚拟 id 翻译为「droid xx 池」
   const altLine =
-    alternatives.providers.length > 0 || alternatives.external === true
+    alternatives.providers.length > 0 || alternatives.external === true || (alternatives.droidPools?.length ?? 0) > 0
       ? alternativesAdvice(alternatives)
       : "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。";
   return (

@@ -414,6 +414,9 @@ export default function activate(rawPi: ExtensionAPI): void {
           // droid 池被拦时的 droid 内替代（quota-plan r2 §9；holder.current.quota
           // 即 QuotaService，K9）。适配器未构造 ⇒ 恒 [] ⇒ 输出字节不变。
           poolAlternatives: (b) => holder.current?.quota?.poolAlternatives(b) ?? [],
+          // pi provider 被拦/告急时的补充候选（2026-10-15 拍板）：droid 未启用 ⇒
+          // 恒 [] ⇒ 输出字节不变。
+          droidAlternatives: () => holder.current?.quota?.droidAlternatives() ?? [],
         }),
     }),
   );

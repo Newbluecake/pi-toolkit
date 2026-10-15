@@ -2176,6 +2176,9 @@ export function buildSessionStack(
               // verdictsForModel 恒返回 undefined ⇒ 走旧路径（字节不变）。
               modelView: (m) => quota.service.verdictsForModel(m),
               poolAlternatives: (b) => quota.service.poolAlternatives(b),
+              // pi provider 被拦时的补充候选（2026-10-15 拍板）：端口/适配器未构造
+              // ⇒ 恒 [] ⇒ 闸门文案字节不变。
+              droidAlternatives: () => quota.service.droidAlternatives(),
             });
           },
         }

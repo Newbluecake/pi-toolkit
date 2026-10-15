@@ -86,6 +86,17 @@ export interface QuotaPoolPort {
   modelsInPool(pool: QuotaPoolId): readonly string[];
 }
 
+/**
+ * pi provider 被拦/告急时的外部 droid 补充候选（2026-10-15 用户拍板）：一个池 +
+ * 该池模型（已带 `droid/` 前缀）。core 池排在 standard 池前；入选池须未 stale、
+ * 未触闸门线（gate 关闭时仍按 L3 排除）——推荐一个闸门自己也会拦下（或读数不真）
+ * 的模型只会制造第二次快速失败。
+ */
+export interface DroidPoolAlternative {
+  readonly pool: QuotaPoolId;
+  readonly models: readonly string[];
+}
+
 /** L0 静默 / L1 提示 / L2 建议 / L3 强烈。数值可比较——provider 级取 max。 */
 export type LadderLevel = 0 | 1 | 2 | 3;
 

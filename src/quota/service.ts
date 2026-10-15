@@ -44,6 +44,7 @@ import {
   DROID_QUOTA_IDS,
   isQuotaProviderId,
   type CredentialResolver,
+  type DroidPoolAlternative,
   type FetchJson,
   type ProviderAdapter,
   type QuotaPoolId,
@@ -79,6 +80,13 @@ export interface QuotaService {
   verdictsForModel(model: { provider: string; id: string }, now?: Millis): QuotaModelView | undefined;
   /** blocked === "droid-standard" 且 core 未被排除 ⇒ ≤limit 个 "droid/<id>"（D7）；其余 ⇒ []。 */
   poolAlternatives(blocked: string, limit?: number): readonly string[];
+  /**
+   * pi provider 被拦/告急时的补充候选（2026-10-15 用户拍板）：有余量的 droid 池模型，
+   * core 池在前、每池 ≤limit 个 `droid/<id>`。池须未 stale、未触闸门线（gate 关闭
+   * 时仍按 L3 排除；触线池即使 gateOpen（花额外余额）也不列——那不是「有余量」）。
+   * 池端口缺席（droid 未启用/未接线）或两池都不可用 ⇒ []，调用方输出字节不变。
+   */
+  droidAlternatives(limit?: number): readonly DroidPoolAlternative[];
   /** 认证类问题（401/402/403），按 family 去重（D3：不拦 spawn，只显示）。 */
   problems(): readonly QuotaProblem[];
   /** fire-and-forget；未过期或在途则空转。永不抛、永不返回被拒 Promise。 */
@@ -297,6 +305,56 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   };
 
   /**
+   * §5.6 候选加减法（评审 #5，poolAlternatives / droidAlternatives 共用）：加法 =
+   * 端口目录序（偏好序在前，已滤 deprecated/router/custom:）+ droidPools 改判进该池
+   * 的键；减法 = custom:、被改判出该池的、目录标 deprecated/router 的；去重后返回
+   * 裸模型 id（无 droid/ 前缀、未截断）。目录查不到的覆盖键保留（用户明确意图）。
+   */
+  const poolCandidates = (pool: QuotaPoolId): readonly string[] => {
+    let port: QuotaPoolPort | undefined;
+    try {
+      port = deps.pools?.();
+    } catch {
+      port = undefined;
+    }
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    const push = (id: string): void => {
+      if (!seen.has(id)) {
+        seen.add(id);
+        candidates.push(id);
+      }
+    };
+    if (port !== undefined) {
+      try {
+        for (const id of port.modelsInPool(pool)) push(id); // 已是「偏好序在前、目录序在后」
+      } catch {
+        // 端口契约永不抛；兜注入桩。
+      }
+    }
+    for (const [id, value] of Object.entries(settings.droidPools)) {
+      if (value === pool) push(id); // 评审 #5 加法：用户改判进该池的模型进替代建议
+    }
+    const infoOf = (id: string): CatalogModelLike | undefined => {
+      // CatalogPoolPort 的结构探测（quota 不自持目录；P5 供的端口带 infoOf）。
+      const capable = port as { infoOf?: (modelId: string) => CatalogModelLike | undefined } | undefined;
+      try {
+        return capable?.infoOf?.(id);
+      } catch {
+        return undefined;
+      }
+    };
+    return candidates.filter((id) => {
+      if (id.startsWith("custom:")) return false;
+      const override = settings.droidPools[id];
+      if (override !== undefined && override !== pool) return false; // 减法：被改判出该池
+      const info = infoOf(id);
+      if (info !== undefined && (info.deprecated === true || info.kind === "router")) return false;
+      return true; // 覆盖键在目录里查不到 ⇒ 保留（用户明确意图）
+    });
+  };
+
+  /**
    * 刷新落地：异常读数防护 → 存快照 → 重置检测/样本环 → 降位标记 → HUD。
    * 调用方保证 disposed === false。
    */
@@ -491,53 +549,35 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     },
     poolAlternatives(blocked, limit = 3) {
       // D7 + 评审 #5：仅 droid-standard 被拦且 core 未被排除时推荐 core 池模型；
-      // 加法（端口目录序 + droidPools 改判进 core 的键）后减法（改判出 core 的、
-      // 目录标 deprecated/router 的、custom:），去重，取前 limit 个。
+      // 候选加减法见 poolCandidates（与 droidAlternatives 共用）。
       if (blocked !== "droid-standard") return [];
       const coreVerdict = verdictOf("droid-core", clock.now());
       if (coreVerdict !== undefined && !coreVerdict.stale && coreVerdict.level >= 3) return [];
+      return poolCandidates("core")
+        .slice(0, Math.max(0, limit))
+        .map((id) => `droid/${id}`);
+    },
+    droidAlternatives(limit = 3) {
+      // 2026-10-15 用户拍板：pi provider 被拦/告急时的补充候选。端口缺席 ⇒ []（droid
+      // 未启用/未接线，调用方输出字节不变）；无快照的池视同可用（闸门 fail-open 同款）。
       let port: QuotaPoolPort | undefined;
       try {
         port = deps.pools?.();
       } catch {
         port = undefined;
       }
-      const candidates: string[] = [];
-      const seen = new Set<string>();
-      const push = (id: string): void => {
-        if (!seen.has(id)) {
-          seen.add(id);
-          candidates.push(id);
-        }
-      };
-      if (port !== undefined) {
-        try {
-          for (const id of port.modelsInPool("core")) push(id); // 已是「偏好序在前、目录序在后」
-        } catch {
-          // 端口契约永不抛；兜注入桩。
-        }
+      if (port === undefined) return [];
+      const line = settings.gate ? toLadderLevel(settings.gateLevel) : 3;
+      const out: DroidPoolAlternative[] = [];
+      for (const pool of ["core", "standard"] as const) {
+        const verdict = verdictOf(pool === "core" ? "droid-core" : "droid-standard", clock.now());
+        if (verdict !== undefined && (verdict.stale || verdict.level >= line)) continue;
+        const models = poolCandidates(pool)
+          .slice(0, Math.max(0, limit))
+          .map((id) => `droid/${id}`);
+        if (models.length > 0) out.push({ pool, models });
       }
-      for (const [id, value] of Object.entries(settings.droidPools)) {
-        if (value === "core") push(id); // 评审 #5 加法：用户改判进 core 的模型进替代建议
-      }
-      const infoOf = (id: string): CatalogModelLike | undefined => {
-        // CatalogPoolPort 的结构探测（quota 不自持目录；P5 供的端口带 infoOf）。
-        const capable = port as { infoOf?: (modelId: string) => CatalogModelLike | undefined } | undefined;
-        try {
-          return capable?.infoOf?.(id);
-        } catch {
-          return undefined;
-        }
-      };
-      const kept = candidates.filter((id) => {
-        if (id.startsWith("custom:")) return false;
-        const override = settings.droidPools[id];
-        if (override !== undefined && override !== "core") return false; // 减法：被改判出 core
-        const info = infoOf(id);
-        if (info !== undefined && (info.deprecated === true || info.kind === "router")) return false;
-        return true; // 覆盖键在目录里查不到 ⇒ 保留（用户明确意图）
-      });
-      return kept.slice(0, Math.max(0, limit)).map((id) => `droid/${id}`);
+      return out;
     },
     problems() {
       return problemsNow();

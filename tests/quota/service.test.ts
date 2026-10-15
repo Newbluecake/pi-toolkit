@@ -1293,6 +1293,71 @@ describe("droid: poolAlternatives (§5.6, review #5: addition + subtraction)", (
   });
 });
 
+describe("droid: droidAlternatives — pi-blocked supplement (2026-10-15 拍板)", () => {
+  it("core before standard, preferred order first, per-pool cap (default 3); no snapshot yet ⇒ fail-open listing", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3"]) });
+    const expected = [
+      { pool: "core", models: ["droid/kimi-k3", "droid/glm-5.3"] }, // 偏好序在前，deprecated 滤除
+      { pool: "standard", models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+    ];
+    expect(f.service.droidAlternatives()).toEqual(expected); // 无快照：fail-open（闸门同款）
+    await land(f, 10, 20);
+    expect(f.service.droidAlternatives()).toEqual(expected);
+    expect(f.service.droidAlternatives(1)).toEqual([
+      { pool: "core", models: ["droid/kimi-k3"] },
+      { pool: "standard", models: ["droid/claude-opus-5-5"] },
+    ]);
+    expect(f.service.droidAlternatives(0)).toEqual([]);
+  });
+
+  it("a pool at L3 is not listed even with gateOpen (extraUsage ≠ 有余量); the other pool still is", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort(), settings: { droidAllowExtraUsage: true } });
+    await land(f, 100, 20, { overage: "extraUsage", extraUsageAllowed: true, extraUsageBalanceCents: 500 });
+    expect(f.service.verdictFor("droid-standard")?.billing?.gateOpen).toBe(true);
+    expect(f.service.droidAlternatives()).toEqual([{ pool: "core", models: ["droid/glm-5.3", "droid/kimi-k3"] }]);
+  });
+
+  it("a stale pool is NOT listed (unlike poolAlternatives' stale tolerance); the fresh pool still is", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    const frozen = f.clock.now();
+    f.core.set(() =>
+      droidSnapshot("droid-core", [{ scope: "5h", usedPct: 5, resetAt: frozen + 10 * 3_600_000 }], frozen),
+    );
+    f.std.set(() =>
+      droidSnapshot(
+        "droid-standard",
+        [{ scope: "5h", usedPct: 10, resetAt: f.clock.now() + 3_600_000 }],
+        f.clock.now(),
+      ),
+    );
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    f.clock.advance(DEFAULT_SETTINGS.quota.staleAfterMs + 1);
+    f.service.refreshIfStale(); // std 重拉变新鲜；core 桩冻结在旧 fetchedAt
+    await f.service.whenIdle();
+    expect(f.service.verdictFor("droid-core")?.stale).toBe(true);
+    expect(f.service.verdictFor("droid-standard")?.stale).toBe(false);
+    expect(f.service.droidAlternatives()).toEqual([
+      { pool: "standard", models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+    ]);
+  });
+
+  it("the exclusion line mirrors the gate: gateLevel 2 skips L2 pools; gate off still skips L3 pools", async () => {
+    const strict = makeDroidFixture({ pools: () => catalogPort(), settings: { gate: true, gateLevel: 2 } });
+    await land(strict, 80, 20); // std 5h 80% ⇒ L2
+    expect(strict.service.droidAlternatives()).toEqual([{ pool: "core", models: ["droid/glm-5.3", "droid/kimi-k3"] }]);
+    const off = makeDroidFixture({ pools: () => catalogPort(), settings: { gate: false } });
+    await land(off, 100, 100);
+    expect(off.service.droidAlternatives()).toEqual([]); // gate 关：L3 仍按拍板排除
+  });
+
+  it("no pool port ⇒ [] even with droidPools overrides (contrast: poolAlternatives keeps them)", () => {
+    const f = makeDroidFixture({ settings: { droidPools: { "brand-new-core": "core" } } });
+    expect(f.service.droidAlternatives()).toEqual([]);
+    expect(f.service.poolAlternatives("droid-standard")).toEqual(["droid/brand-new-core"]);
+  });
+});
+
 describe("droid: problems (D3) reach the HUD", () => {
   it("problems() dedupes by family and swallows a throwing adapter hook", () => {
     const clock = new FakeClock(1_000);

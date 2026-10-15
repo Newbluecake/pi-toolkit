@@ -11,7 +11,7 @@
  * 所以 L3 文案里的「会被 spawn 拦下」承诺永远不会对着陈旧快照说出。
  */
 
-import { isDroidQuotaId, type QuotaProblem, type WindowScope } from "./types.js";
+import { isDroidQuotaId, type DroidPoolAlternative, type QuotaProblem, type WindowScope } from "./types.js";
 import type { Millis } from "../core/types.js";
 import {
   DEFAULT_THRESHOLDS_BY_WINDOW,
@@ -164,6 +164,12 @@ export interface AlternativeSelection {
   readonly models?: readonly string[] | undefined;
   /** 被拦的是 droid 池 ⇒ providers 行改标题「改用 pi 原生子 agent」（D8 拍板）。 */
   readonly external?: true | undefined;
+  /**
+   * pi provider 被拦/告急时的补充候选（2026-10-15 用户拍板）：有余量的 droid 池模型，
+   * core 池在前。缺席/空 ⇒ 输出与旧版字节一致（kimi/zai golden 钉住）；external 分支
+   * 不读它（D7/D8 文案不变）。
+   */
+  readonly droidPools?: readonly DroidPoolAlternative[] | undefined;
 }
 
 export type AlternativeInput = AlternativeSelection | readonly string[];
@@ -173,14 +179,32 @@ function normalizeAlternatives(input: AlternativeInput): AlternativeSelection {
   return input as AlternativeSelection;
 }
 
+/**
+ * pi provider 被拦/告急时追加的外部 droid 池候选行（2026-10-15 用户拍板）：在 pi
+ * 候选之后列有余量的 droid 池模型（core 池在前，每池分组标注），并注明执行语义——
+ * 外部 droid、以完整权限运行、不是 pi 子 agent、不能当 consult/验收。
+ * undefined / 空列表 / 全空池 ⇒ undefined（调用方输出与旧版字节一致）。
+ */
+function droidPoolAdviceLine(pools: readonly DroidPoolAlternative[] | undefined): string | undefined {
+  if (pools === undefined) return undefined;
+  const parts = pools.filter((p) => p.models.length > 0).map((p) => `${p.models.join("、")}（${p.pool} 池）`);
+  if (parts.length === 0) return undefined;
+  return `有余量的外部 droid 池也可用：${parts.join("；")}。注意：外部 droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。`;
+}
+
 export function alternativesAdvice(input: AlternativeInput): string {
   const selection = normalizeAlternatives(input);
   const { providers, subscription } = selection;
   if (selection.external !== true) {
-    // 旧分支（kimi/zai / 数组输入）：字节不变。
-    if (providers.length === 0) return "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。";
+    // 旧分支（kimi/zai / 数组输入）：droidPools 缺席/空 ⇒ 字节不变。
+    const droidLine = droidPoolAdviceLine(selection.droidPools);
+    if (providers.length === 0) {
+      if (droidLine === undefined) return "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。";
+      return `暂无 pi provider 替代候选（可检查 pi /model）。\n${droidLine}\n按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。`;
+    }
     const heading = subscription ? "替代候选（订阅优先）" : "无可用订阅；按量计费 provider";
-    return `${heading}：${providers.join("、")}。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；${subscription ? "订阅额度不用会作废；" : ""}不胜任就按路由表另选合适模型，不必硬凑。`;
+    const base = `${heading}：${providers.join("、")}。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；${subscription ? "订阅额度不用会作废；" : ""}不胜任就按路由表另选合适模型，不必硬凑。`;
+    return droidLine === undefined ? base : `${base}\n${droidLine}`;
   }
   // D8（拍板）：droid 池被拦 ⇒ 两类候选都列，core 池优先；pi 行明示执行语义会变。
   const models = selection.models ?? [];
@@ -358,6 +382,13 @@ function buildMergedBlockText(
   const normalized = entries.map((e) => normalizeAlternatives(e.section.alternatives));
   // droid 池段（external / models）走两段式文案，无法无损合并 ⇒ 回落逐段输出。
   if (normalized.some((n) => n.external === true || (n.models?.length ?? 0) > 0)) return undefined;
+  // 2026-10-15 拍板（droid 候选补充）：droidPools 全段一致才随合并块透传一次；
+  // 不一致（快照恰好落在两段计算之间落地）⇒ 回落逐段输出，宁重复不矛盾。
+  const droidKeyOf = (n: AlternativeSelection): string =>
+    (n.droidPools ?? []).map((p) => `${p.pool}:${p.models.join(",")}`).join("|");
+  const firstKey = droidKeyOf(normalized[0] ?? { providers: [], subscription: true });
+  if (normalized.some((n) => droidKeyOf(n) !== firstKey)) return undefined;
+  const droidPools = normalized[0]?.droidPools;
   const subscription = normalized[0]?.subscription ?? true;
   if (normalized.some((n) => n.subscription !== subscription)) return undefined;
   const blocked = new Set(entries.flatMap((e) => e.members));
@@ -368,7 +399,7 @@ function buildMergedBlockText(
   if (providers.length === 0 && normalized.some((n) => n.providers.length > 0)) return undefined;
   const heads = entries.map((e) => `${quotaBlockHead(e.section.verdict, now, e.label)}。`);
   const labels = entries.map((e) => e.label).join("、");
-  return `${heads.join("\n")}\n${directUseText(labels, { providers, subscription }, true)}`;
+  return `${heads.join("\n")}\n${directUseText(labels, { providers, subscription, ...((droidPools?.length ?? 0) > 0 ? { droidPools } : {}) }, true)}`;
 }
 
 /**
@@ -466,6 +497,7 @@ function groupSamePool(
       // droid 段的 external/models 随组透传（合并块遇之回落逐段，见 buildMergedBlockText）。
       ...(normalized.external === undefined ? {} : { external: normalized.external }),
       ...(normalized.models === undefined ? {} : { models: normalized.models }),
+      ...(normalized.droidPools === undefined ? {} : { droidPools: normalized.droidPools }),
     };
     return {
       section: { verdict: section.verdict, alternatives },

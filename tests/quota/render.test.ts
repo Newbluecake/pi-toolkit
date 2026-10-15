@@ -1012,6 +1012,109 @@ describe("alternativesAdvice — external × models (D8)", () => {
   });
 });
 
+describe("alternativesAdvice — droid pool supplement for blocked pi providers (2026-10-15 拍板)", () => {
+  const DROID_LINE =
+    "有余量的外部 droid 池也可用：droid/glm-5.3、droid/kimi-k3（core 池）；droid/claude-opus-5-5（standard 池）。注意：外部 droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。";
+  const POOLS = [
+    { pool: "core" as const, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+    { pool: "standard" as const, models: ["droid/claude-opus-5-5"] },
+  ];
+
+  it("appends the droid line after the pi candidates; core pool groups before standard", () => {
+    const text = alternativesAdvice({ providers: ["kimi-coding"], subscription: true, droidPools: POOLS });
+    const lines = text.split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe("替代候选（订阅优先）：kimi-coding。");
+    expect(lines[2]).toBe(DROID_LINE);
+    expect(text).toContain("订阅额度不用会作废"); // pi 行正文原样保留在前
+  });
+
+  it("no pi providers: replaces the 暂无替代候选 line instead of contradicting it", () => {
+    const text = alternativesAdvice({
+      providers: [],
+      subscription: true,
+      droidPools: [{ pool: "core", models: ["droid/glm-5.3"] }],
+    });
+    expect(text).not.toContain("暂无替代候选");
+    expect(text).toBe(
+      [
+        "暂无 pi provider 替代候选（可检查 pi /model）。",
+        "有余量的外部 droid 池也可用：droid/glm-5.3（core 池）。注意：外部 droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。",
+        "按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。",
+      ].join("\n"),
+    );
+  });
+
+  it("droid absent / empty / all-empty pools ⇒ byte-identical legacy copy", () => {
+    const legacy =
+      "替代候选（订阅优先）：kimi-coding。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；订阅额度不用会作废；不胜任就按路由表另选合适模型，不必硬凑。";
+    expect(alternativesAdvice({ providers: ["kimi-coding"], subscription: true })).toBe(legacy);
+    expect(alternativesAdvice({ providers: ["kimi-coding"], subscription: true, droidPools: [] })).toBe(legacy);
+    expect(
+      alternativesAdvice({
+        providers: ["kimi-coding"],
+        subscription: true,
+        droidPools: [
+          { pool: "core", models: [] },
+          { pool: "standard", models: [] },
+        ],
+      }),
+    ).toBe(legacy);
+    expect(alternativesAdvice({ providers: [], subscription: true, droidPools: [] })).toBe(
+      "暂无替代候选，按路由表另选合适模型（可检查 pi /model）。",
+    );
+  });
+
+  it("external branch ignores droidPools (D7/D8 copy unchanged)", () => {
+    const text = alternativesAdvice({
+      providers: [],
+      subscription: true,
+      external: true,
+      droidPools: [{ pool: "core", models: ["droid/glm-5.3"] }],
+    });
+    expect(text).not.toContain("有余量的外部 droid 池也可用");
+  });
+
+  it("merged multi-provider L3 block carries the droid line once when all sections agree; disagreement falls back to per-section", () => {
+    const hot5h = [w("5h", 93, 3, "pct", { resetAt: RESET })];
+    const hotWeek = [w("week", 100, 3, "exhausted", { resetAt: RESET })];
+    const agree = buildQuotaMessage(
+      [
+        {
+          verdict: verdict({ provider: "zai-coding-cn", level: 3, windows: hot5h }),
+          alternatives: { providers: ["deepseek/x"], subscription: true, droidPools: POOLS },
+        },
+        {
+          verdict: verdict({ provider: "kimi-coding", level: 3, windows: hotWeek }),
+          alternatives: { providers: ["deepseek/x"], subscription: true, droidPools: POOLS },
+        },
+      ],
+      NOW,
+    );
+    expect(agree.split("本轮不要把新任务派给").length - 1).toBe(1); // 仍是合并块：禁用句只说一次
+    expect(agree.split("有余量的外部 droid 池也可用").length - 1).toBe(1); // droid 行只说一次
+    const disagree = buildQuotaMessage(
+      [
+        {
+          verdict: verdict({ provider: "zai-coding-cn", level: 3, windows: hot5h }),
+          alternatives: { providers: ["deepseek/x"], subscription: true, droidPools: POOLS },
+        },
+        {
+          verdict: verdict({ provider: "kimi-coding", level: 3, windows: hotWeek }),
+          alternatives: {
+            providers: ["deepseek/x"],
+            subscription: true,
+            droidPools: [{ pool: "core", models: ["droid/kimi-k3"] }],
+          },
+        },
+      ],
+      NOW,
+    );
+    expect(disagree.split("本轮不要把新任务派给").length - 1).toBe(2); // 回落逐段，宁重复不矛盾
+    expect(disagree).toContain("有余量的外部 droid 池也可用");
+  });
+});
+
 describe("billing clauses (§7) + merged block fallback", () => {
   const std3 = (billing: Partial<QuotaBillingInfo>) =>
     pool("droid-standard", [dw("5h", 100, 3, "exhausted", { resetAt: RESET })], 3, billing);

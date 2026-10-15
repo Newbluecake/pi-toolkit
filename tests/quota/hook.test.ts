@@ -792,3 +792,43 @@ describe("createQuotaHintHook — droid pools", () => {
     expect(h.state.availableAnnounced.has("droid-core")).toBe(true);
   });
 });
+
+describe("createQuotaHintHook — droid pool supplement for blocked pi providers (2026-10-15 拍板)", () => {
+  it("pi provider L3: the injected block appends the droid line after the pi alternatives", () => {
+    const h = harness({
+      verdicts: [verdict({ level: 3, windows: [w("5h", 93, 3)] })],
+      alternatives: () => ({
+        providers: ["kimi-coding"],
+        subscription: true,
+        droidPools: [
+          { pool: "core", models: ["droid/glm-5.3", "droid/kimi-k3"] },
+          { pool: "standard", models: ["droid/claude-opus-5-5"] },
+        ],
+      }),
+    });
+    h.hook({}, ctx());
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("[quota 严重] zai-coding-cn");
+    const piIdx = content.indexOf("替代候选（订阅优先）：kimi-coding。");
+    const droidIdx = content.indexOf(
+      "有余量的外部 droid 池也可用：droid/glm-5.3、droid/kimi-k3（core 池）；droid/claude-opus-5-5（standard 池）。",
+    );
+    expect(piIdx).toBeGreaterThan(-1);
+    expect(droidIdx).toBeGreaterThan(piIdx);
+    expect(content).toContain("不能当 consult/验收");
+  });
+
+  it("droid supplement absent/empty ⇒ the injected block is byte-identical to the legacy one", () => {
+    const legacy = harness({
+      verdicts: [verdict({ level: 3, windows: [w("5h", 93, 3)] })],
+      alternatives: () => ({ providers: ["kimi-coding"], subscription: true }),
+    });
+    legacy.hook({}, ctx());
+    const empty = harness({
+      verdicts: [verdict({ level: 3, windows: [w("5h", 93, 3)] })],
+      alternatives: () => ({ providers: ["kimi-coding"], subscription: true, droidPools: [] }),
+    });
+    empty.hook({}, ctx());
+    expect(empty.sent[0]?.message.content).toBe(legacy.sent[0]?.message.content);
+  });
+});
