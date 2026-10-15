@@ -1,17 +1,53 @@
 /*
- * Background bash-jobs panel styles (bash-jobs-panel plan §3 包 B / D4) — token-only,
- * imported by `components/detail/BashJobsPanel.vue`. Deliberately its own file (same
- * precedent as `styles/todo.css` / `styles/worktrees.css`): `styles/detail.css` is owned by
- * another in-flight line and source-scan.test.ts bans scoped <style> blocks outright. The
- * summary row mirrors the `.todo-sum` / `.wt-sum` grammar, incl. the chevron rotate-on-open
+ * Background bash-jobs styles — token-only, imported by `components/fleet/FleetBashJobs.vue`
+ * (2026-10-15 bash→fleet 迁移: was the detail header's BashJobsPanel). Deliberately its own
+ * file (same precedent as `styles/todo.css` / `styles/worktrees.css`): `styles/detail.css` is
+ * owned by another in-flight line and source-scan.test.ts bans scoped <style> blocks outright.
+ * The summary row mirrors the `.todo-sum` / `.wt-sum` grammar, incl. the chevron rotate-on-open
  * transition and the compacted 20px (16px under `pointer: coarse`) min-height family rule
  * (2026-10-08: aligned to `.wt-sum` — bash-jobs was missed by the 2026-10-06 desktop ×1/4
  * compaction and sat at 40/20px, visibly taller than the worktree row above it); the
  * expanded list caps its height and scrolls inside, same as `.todo-list` / `.wt-list`.
+ *
+ * 2026-10-15 (fleet group): `.fleet-bash` is the group wrapper inside the drawer's
+ * `.tree-scroll` — a top border separates it from the agent tree, and rows get a tinted
+ * surface + a status-colored left border so bash rows are visually distinct from agent rows
+ * (拍板 ③: terminal 图标 + 不同底色/标签,不参与 agent 父子缩进/状态图标体系).
  */
 
-.bj-panel {
-  margin-top: var(--sp-1);
+.fleet-bash {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--c-border);
+}
+
+/* Rows sit on a tinted surface with a status-colored left accent — at-a-glance
+ * running/done/failed without reading the token text. */
+.fleet-bash .bj-row {
+  background: var(--c-surface);
+  border-left: 2px solid var(--c-border);
+}
+
+.fleet-bash .bj-item[data-status="running"] .bj-row,
+.fleet-bash .bj-item[data-status="staged"] .bj-row {
+  border-left-color: var(--st-running);
+}
+
+.fleet-bash .bj-item[data-status="done"] .bj-row {
+  border-left-color: var(--st-done);
+}
+
+.fleet-bash .bj-item[data-status="failed"] .bj-row,
+.fleet-bash .bj-item[data-status="timeout"] .bj-row,
+.fleet-bash .bj-item[data-status="killed"] .bj-row {
+  border-left-color: var(--st-failed);
+}
+
+/* The per-row identity icon (terminal marker) stays muted — status color belongs to the
+ * status icon/text only. */
+.bj-term {
+  flex: none;
+  color: var(--c-text-3);
 }
 
 .bj-sum {
@@ -54,7 +90,7 @@
   transition: transform var(--dur-base) var(--ease-out);
 }
 
-.bj-panel[data-open="true"] .bj-sum .chev {
+.fleet-bash[data-open="true"] .bj-sum .chev {
   transform: rotate(90deg);
 }
 

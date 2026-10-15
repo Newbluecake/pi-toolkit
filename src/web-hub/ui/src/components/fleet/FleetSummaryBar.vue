@@ -19,6 +19,9 @@
   竖排 tab 的可见内容只有「图标 + 计数徽标」;聚合计数(running/总数/成本)全部
   收进 `aria-label`(不给 `title` —— ui-design §6.3「不依赖 hover」,visual 的
   shell-no-title-tooltips 在触屏档位断言全页无 [title])。
+  2026-10-15 bash→fleet 迁移(拍板 ⑤):没有子 agent 但有后台 bash 任务(`bashJobs`
+  prop)时按钮同样渲染 —— 否则抽屉里的 bash 分组不可达;agent 计数(徽标/聚合)不混入
+  bash,bash 仅以 aria-label 小计出现。
 -->
 <script setup lang="ts">
 import { computed } from "vue";
@@ -28,6 +31,7 @@ import { formatUsd } from "../../format.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { fleetSummary } from "./summary.js";
+import { summaryCounts } from "../detail/bashJobsView.js";
 
 const props = defineProps<FleetSummaryBarProps>();
 const emit = defineEmits<FleetSummaryBarEmits>();
@@ -36,18 +40,34 @@ const { t } = useI18n();
 const summary = computed(() => fleetSummary(props.rows));
 const costLabel = computed(() => formatUsd(summary.value.costUsd));
 
+// 2026-10-15 bash→fleet 迁移(拍板 ⑤):agent 计数永不混入 bash —— 徽标/聚合计数仍只读
+// fleet 行;bash 只决定「无子 agent 但有 bash 任务时入口按钮仍出现」,并在 aria-label 里
+// 追加一个 bash 小计(英文紧凑标记)。`bashJobs` 已由 DetailBody 经 bashJobsOf narrowed
+// (零行/缺失 ⇒ undefined)。
+const bashCounts = computed(() => (props.bashJobs === undefined ? null : summaryCounts(props.bashJobs)));
+const bashTotal = computed(() => {
+  const c = bashCounts.value;
+  return c === null ? 0 : c.running + c.done + c.failed;
+});
+const visible = computed(() => summary.value.total > 0 || bashTotal.value > 0);
+
 /** 可见面只留图标/标题/计数;running·总数·成本全量进 aria-label(桌面 hover 无 tooltip 依赖)。 */
 const ariaLabel = computed(() => {
   const parts = [t("fleet.panelTitle")];
   if (summary.value.running > 0) parts.push(t("fleet.running", { n: summary.value.running }));
   parts.push(t("fleet.totalCost", { n: summary.value.total, cost: costLabel.value }));
+  const bash = bashCounts.value;
+  if (bash !== null) {
+    if (bash.running > 0) parts.push(`bash ${t("detail.bashJobsRunning", { n: bash.running })}`);
+    else parts.push(`bash ${t("detail.bashJobsDone", { n: bash.done + bash.failed })}`);
+  }
   return parts.join(" · ");
 });
 </script>
 
 <template>
   <button
-    v-if="summary.total > 0"
+    v-if="visible"
     class="fleet-summary-bar"
     type="button"
     aria-controls="fleet-drawer"

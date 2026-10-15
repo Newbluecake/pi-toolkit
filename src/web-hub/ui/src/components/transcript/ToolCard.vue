@@ -65,7 +65,7 @@ const showFullPartial = ref(false);
  * Done/error cards show the agent-measured `durationMs`; a running card ticks its elapsed at
  * 1 Hz purely browser-side (`runningSince` is a BROWSER-clock receipt — agent and browser
  * clocks are never mixed) off a `useTicker` created only while this card runs and disposed on
- * unmount (same lifecycle as BashJobsPanel's live ticker). Unknown ⇒ NO element at all. */
+ * unmount (same lifecycle grammar as the fleet bash group's live elapsed). Unknown ⇒ NO element at all. */
 const durRunning = computed(
   () =>
     props.view.state === "running" &&

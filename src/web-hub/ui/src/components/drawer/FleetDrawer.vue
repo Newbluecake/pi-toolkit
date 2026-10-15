@@ -123,6 +123,8 @@ import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import FleetTree from "../fleet/FleetTree.vue";
+import FleetBashJobs from "../fleet/FleetBashJobs.vue";
+import { bashJobsOf } from "../detail/bashJobsView.js";
 import { bannerView } from "@logic/load.js";
 import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_SELECT } from "../fleet/summary.js";
 import RunHeader from "./RunHeader.vue";
@@ -141,6 +143,12 @@ const rows = computed(() => props.agent.fleet as unknown as readonly FleetRowWir
 const treeNodes = computed(() => buildFleetTree(rows.value));
 const orphans = computed(() => orphanRunIds(rows.value));
 const selectedRunId = computed(() => props.agent.runSel ?? null);
+
+// 2026-10-15 bash→fleet 迁移(用户拍板 L1):主会话后台 bash 任务作为树视图末尾的独立
+// 「bash」分组(FleetBashJobs),wire 同原详情头部面板(`StatusInfo.bashJobs`,经
+// bashJobsOf narrowed;缺失/零行 ⇒ 分组不出现,旧 hub/agent 与现状一致)。agent 计数
+// (fleetSummary/徽标)不混入 bash。
+const bashJobs = computed(() => bashJobsOf(props.agent));
 
 // ---------------------------------------------------------------------------
 // sysload plan §6.4/§7.4/§10 (package P4): the crit/warn dispatch-paused banner, reading the
@@ -282,6 +290,8 @@ watch(
       </div>
       <div class="tree-scroll">
         <FleetTree :nodes="treeNodes" :now="now" :orphans="orphans" :omitted="agent.fleetOmitted" />
+        <!-- 2026-10-15:子 agent 树之后的独立 bash 分组(无任务/无字段 ⇒ 不渲染)。 -->
+        <FleetBashJobs v-if="bashJobs" :jobs="bashJobs" :now="now" />
       </div>
     </template>
   </aside>

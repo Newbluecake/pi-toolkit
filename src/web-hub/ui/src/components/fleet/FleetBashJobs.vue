@@ -1,57 +1,48 @@
 <!--
-  Background bash-jobs panel (bash-jobs-panel plan §3 包 B / D4): a read-only summary of the
-  session's own background bash jobs, fed by `StatusInfo.bashJobs` (包 A0 wire) via
-  `bashJobsOf(agent)` in `DetailHeader` — no `state.js` mirror, no `types.ts` change (same
-  posture as `WorktreePanel`). Collapsed by default: the one-line summary (`bash 2 running ·
-  5 done · 1 failed`, English tokens in BOTH locales per the AGENTS.md UI-text rule) is the
-  glance surface; expanding lists every row with a status icon, short id, the redacted cmd
-  (mono, single-line ellipsis, full redacted text on `title`), status token, `exit N` /
-  `grace` chips, locally-ticking elapsed, `logBytes` (`+` when the tail view starts mid-file)
-  and the agent-judged freshness marker (`sampling…` / `tail Ns old` / `unavailable` /
-  `no output yet` — read off `tailCurrent`/`tailUnavailable`, D3-3, the UI never compares
-  clocks/bytes itself).
+  Fleet drawer 的「bash」分组(2026-10-15 用户拍板 L1 前端包):主会话的后台 bash 任务从
+  详情头部的 BashJobsPanel 迁到子 agent 视图 —— 抽屉树视图里、agent 树之后独立一组,组标题
+  `bash · 2 running · 8 done`(紧凑英文标记,两个语言档一致,AGENTS.md UI-text rule)。
+  数据集不变:`StatusInfo.bashJobs`(agent 端投影 src/web-hub/agent/bash-jobs.ts,行选择/预算
+  规则不动),由 FleetDrawer 经 `bashJobsOf(agent)`  narrowed 后传入;wire 缺失或零行 ⇒
+  整个分组不渲染(旧 hub/agent 不带该字段时与现状一致)。
 
-  Rows with a `tail` are buttons: clicking expands a `<pre>` with the tail as PLAIN TEXT
-  (never `v-html` — source-scan bans it repo-wide; the tail is redacted agent-side but is
-  still arbitrary process output; redaction is best-effort hygiene, NOT a security boundary —
-  D2a, its standing UI hint was dropped by user ruling 2026-10-08). The expanded list ends
-  with an `(+N more)` line when the wire carries `omitted`.
+  与 agent 行的区分(拍板 ③):分组不参与 agent 的父子缩进/`FLEET_STATE_ICON` 状态图标体系 ——
+  每行以固定的 terminal 图标开头(身份标记),随后是 BashJobsPanel 原样的状态语义
+  (`statusToken`:loader 旋转=running / check=done / x=failed / alert=timeout…,英文 token
+  文案),行底色 + 按状态着色的左边框与 agent 行一眼区分。行可点击展开:完整 redacted 命令
+  (纯文本)+ 日志尾 `<pre>`(PLAIN TEXT,绝不 v-html —— source-scan 全仓禁止;tail 是
+  agent 端 best-effort redact 过的任意进程输出,D2a)。
 
-  Elapsed 走时 baseline (D4, same grammar as FleetTree's tickBaselines): a Map keyed by job
-  id holds `{elapsedMs, at}`; a new wire frame (the row's `elapsedMs` changes) resets `at` to
-  the shared now, and the display adds `max(0, now - at)`. Terminal rows show the wire's
-  frozen `elapsedMs` directly. Baselines are pruned when the row set shrinks, and the
-  1 Hz ticker (`useTicker` — hidden-page-aware, never requestAnimationFrame) only exists
-  while at least one row is live (`staged`/`running`); it is disposed on unmount.
+  Elapsed 走时与 FleetTree 同一套语法:本组件不自带 ticker,走时由父级(FleetDrawer ←
+  AgentDetail)的共享 `now` prop 驱动;以 job id 为键的 baseline Map 在 wire `elapsedMs`
+  变化(新帧)时把 `at` 重置为共享 now,显示值 = baseline + max(0, now − at);终态行直接
+  显示 wire 冻结的 `elapsedMs`。行集合收缩时 pruning,展开中的行消失时收起。
 
-  Fold state is a plain local ref — NOT persisted across reloads, same precedent as
-  `TodoPanel`/`WorktreePanel` (source-scan.test.ts's persistence allowlist doesn't cover this
-  component). Styles live in `styles/bash-jobs.css` (imported below), not scoped `<style>` —
-  source-scan bans `<style>` blocks outright. No `logPath`, no CopyButton anywhere (plan v2
-  #2: the path never crosses the wire; the settlement notification card already carries it).
+  折叠状态是普通局部 ref —— 不跨 reload 持久化(同 TodoPanel/WorktreePanel 先例;
+  source-scan 的持久化白名单不覆盖本组件)。有运行中的任务时分组默认展开,全终态时默认
+  收起(终态计数已在组标题里一目了然)。样式沿用 `styles/bash-jobs.css`(`.bj-*` 类不变,
+  overscroll-guard.test.ts 按类名钉),分组包装与状态底色也在该文件。
 -->
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { useTicker, type TickerHandle } from "../../composables/useTicker.js";
 import { formatDuration } from "../../format.js";
 import type { BashJobRowWire, BashJobsWire } from "@protocol/messages.js";
-import { formatBytes, statusToken, summaryCounts, tailFreshness, type TailFreshness } from "./bashJobsView.js";
+import type { FleetBashJobsProps } from "../../contracts.js";
+import { formatBytes, statusToken, summaryCounts, tailFreshness, type TailFreshness } from "../detail/bashJobsView.js";
 import "../../styles/bash-jobs.css";
 
-// Deliberately local props interface (same escape hatch as TodoPanel/WorktreePanel):
-// contracts.ts is owned by another in-flight line and `BashJobsWire` comes straight from
-// `@protocol/messages.js`.
-const props = defineProps<{ readonly jobs: BashJobsWire }>();
+const props = defineProps<FleetBashJobsProps>();
 const { t } = useI18n();
 
-const open = ref(false);
+/** 有运行中的任务时默认展开,全终态默认收起(一次性的初始值,不随 wire 后续变化强制开合)。 */
+const open = ref(summaryCounts(props.jobs).running > 0);
 /** At most one row's tail is expanded at a time (the wire caps rows at 20 — no fold math needed). */
 const expandedId = ref<string | null>(null);
 
 // ---------------------------------------------------------------------------
-// collapsed summary (D4): `bash 2 running · 5 done · 1 failed`, zero segments omitted
+// 组标题(D4 计数语法):`bash · 2 running · 8 done`,零计数段省略
 // ---------------------------------------------------------------------------
 const counts = computed(() => summaryCounts(props.jobs));
 const summary = computed(() => {
@@ -60,54 +51,15 @@ const summary = computed(() => {
   if (c.running > 0) segments.push(t("detail.bashJobsRunning", { n: c.running }));
   if (c.done > 0) segments.push(t("detail.bashJobsDone", { n: c.done }));
   if (c.failed > 0) segments.push(t("detail.bashJobsFailed", { n: c.failed }));
-  // `bash 2 running · 5 done · 1 failed` — the title prefix joins with a space, segments with ` · `.
-  return segments.length > 0 ? `${t("detail.bashJobsTitle")} ${segments.join(" · ")}` : t("detail.bashJobsTitle");
+  // `bash · 2 running · 8 done` — every segment (incl. the title) joins with ` · `.
+  return segments.length > 0 ? `${t("detail.bashJobsTitle")} · ${segments.join(" · ")}` : t("detail.bashJobsTitle");
 });
 /** Prose aria-label for the toggle (the visible summary is English tokens only). */
 const toggleAria = computed(() => t("detail.bashJobsSummary", { ...counts.value }));
 
 // ---------------------------------------------------------------------------
-// elapsed 走时 (D4): per-row baseline Map + a ticker that only exists while a row is live
+// elapsed 走时(FleetTree 语法,共享 `now` prop 驱动 —— 本组件不自带 ticker)
 // ---------------------------------------------------------------------------
-const hasLive = computed(() => props.jobs.rows.some((row) => statusToken(row).live));
-const nowMs = ref(Date.now());
-let ticker: TickerHandle | null = null;
-let stopNowBridge: (() => void) | null = null;
-
-function stopTicker(): void {
-  stopNowBridge?.();
-  stopNowBridge = null;
-  ticker?.dispose();
-  ticker = null;
-}
-
-watch(
-  hasLive,
-  (live) => {
-    if (live && ticker === null) {
-      const handle = useTicker({
-        doc: document,
-        win: window,
-        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-        clearTimeout: (h) => window.clearTimeout(h),
-        now: () => Date.now(),
-      });
-      ticker = handle;
-      nowMs.value = handle.now.value;
-      stopNowBridge = watch(handle.now, (v) => {
-        nowMs.value = v;
-      });
-    } else if (!live) {
-      stopTicker();
-    }
-  },
-  { immediate: true },
-);
-onUnmounted(stopTicker);
-
-/** Baseline per job id (FleetTree grammar): a row's wire `elapsedMs` changing means a new
- * frame arrived — reset `at` to the shared now so the local tick continues from the fresh
- * value instead of double-counting the frame gap. */
 const tickBaselines = new Map<string, { elapsedMs: number; at: number }>();
 watch(
   () => props.jobs.rows,
@@ -118,7 +70,7 @@ watch(
       alive.add(id);
       const elapsed = typeof row.elapsedMs === "number" ? row.elapsedMs : 0;
       const b = tickBaselines.get(id);
-      if (b === undefined || b.elapsedMs !== elapsed) tickBaselines.set(id, { elapsedMs: elapsed, at: nowMs.value });
+      if (b === undefined || b.elapsedMs !== elapsed) tickBaselines.set(id, { elapsedMs: elapsed, at: props.now });
     }
     for (const key of [...tickBaselines.keys()]) if (!alive.has(key)) tickBaselines.delete(key);
     if (expandedId.value !== null && !alive.has(expandedId.value)) expandedId.value = null;
@@ -129,12 +81,12 @@ watch(
 function displayElapsed(row: BashJobRowWire): string {
   const elapsed = typeof row.elapsedMs === "number" ? row.elapsedMs : 0;
   if (!statusToken(row).live) return formatDuration(elapsed);
-  const b = tickBaselines.get(String(row.id)) ?? { elapsedMs: elapsed, at: nowMs.value };
-  return formatDuration(b.elapsedMs + Math.max(0, nowMs.value - b.at));
+  const b = tickBaselines.get(String(row.id)) ?? { elapsedMs: elapsed, at: props.now };
+  return formatDuration(b.elapsedMs + Math.max(0, props.now - b.at));
 }
 
 // ---------------------------------------------------------------------------
-// row rendering helpers
+// row 渲染辅助(与 BashJobsPanel 原样一致)
 // ---------------------------------------------------------------------------
 function shortId(row: BashJobRowWire): string {
   return String(row.id).slice(0, 8);
@@ -172,7 +124,7 @@ function toggleRow(row: BashJobRowWire): void {
 </script>
 
 <template>
-  <section class="bj-panel" :data-open="open" aria-readonly="true">
+  <section class="fleet-bash" :data-open="open" aria-readonly="true">
     <button class="bj-sum" type="button" :aria-expanded="open" :aria-label="toggleAria" @click="open = !open">
       <AppIcon name="terminal" class="icon-sm" />
       <span class="bj-sum-text">{{ summary }}</span>
@@ -187,6 +139,8 @@ function toggleRow(row: BashJobRowWire): void {
           :aria-expanded="row.tail === undefined ? undefined : expandedId === row.id"
           @click="toggleRow(row)"
         >
+          <!-- 身份图标:每行固定的 terminal 标记,与 agent 行(bot/状态图标体系)区分 -->
+          <AppIcon name="terminal" class="icon-sm bj-term" />
           <AppIcon
             :name="statusToken(row).icon"
             class="icon-sm bj-ico"

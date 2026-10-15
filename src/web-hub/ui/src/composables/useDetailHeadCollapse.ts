@@ -1,7 +1,7 @@
 /**
  * Detail-header info-block collapse preference (2026-10 user request 「红框部分支持收起，
  * 点击标题展开」): the block under the session-detail title — `SessionInfo`, `TodoPanel`,
- * `WorktreePanel`, `BashJobsPanel` — collapses behind the title itself, which becomes the
+ * `WorktreePanel`, `CacheKeepalivePanel` — collapses behind the title itself, which becomes the
  * disclosure toggle. This is a pure browser-local UI preference in the `pwh_theme` /
  * `pwh_deliver` / `pwh_keepalive` / `pwh_hide_plaintext_warn` family — NOT a pi-process
  * setting — and it is global (not per session): one collapse state for every detail view.

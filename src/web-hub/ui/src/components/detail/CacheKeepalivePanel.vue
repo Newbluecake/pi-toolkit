@@ -1,8 +1,8 @@
 <!--
   Read-only prompt-cache keepalive panel (cache-keepalive-web plan §4, P-B): a collapsed one-line
-  marker in the detail header (after BashJobsPanel), fed by `StatusInfo.cacheKeepalive` (P-A
+  marker in the detail header (the info block's last row), fed by `StatusInfo.cacheKeepalive` (P-A
   wire) via `cacheKeepaliveOf(agent)` in `DetailHeader` — no state.js mirror, no types.ts change
-  (same posture as BashJobsPanel/WorktreePanel).
+  (same posture as WorktreePanel).
 
   Collapsed (`cache 1h* · ping off:http 403 ·retry 25m ·t3`): `markerText()` re-assembles the TUI
   status line byte-parallel — the `·retry Xm` countdown is computed from the BROWSER clock
@@ -44,7 +44,7 @@ import {
 } from "./cacheKeepaliveView.js";
 import "../../styles/cache-keepalive.css";
 
-// Deliberately local props interface (same escape hatch as BashJobsPanel/WorktreePanel):
+// Deliberately local props interface (same escape hatch as WorktreePanel):
 // contracts.ts is owned by another in-flight line and `CacheKeepaliveWire` comes straight from
 // `@protocol/messages.js`.
 const props = defineProps<{ readonly keepalive: CacheKeepaliveWire }>();

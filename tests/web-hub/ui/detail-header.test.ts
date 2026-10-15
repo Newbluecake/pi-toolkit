@@ -571,11 +571,11 @@ describe("DetailHeader.vue — worktree panel mount (worktree-web W4)", () => {
 });
 
 /**
- * bash-jobs-panel plan §3 包 B (D4): the header mounts `BashJobsPanel` straight from
- * `status.bashJobs` (no state.js mirror — same posture as the worktree panel), after the
- * WorktreePanel slot; no wire (or zero rows) ⇒ no panel.
+ * 2026-10-15 bash→fleet 迁移(用户拍板 L1):后台 bash 任务面板已从这个头部移除 ——
+ * 它现在住在 fleet 抽屉的「bash」分组(components/fleet/FleetBashJobs.vue);`status.bashJobs`
+ * 存在时头部不再渲染任何 `.fleet-bash`/`.bj-*` 内容。
  */
-describe("DetailHeader.vue — bash-jobs panel mount (bash-jobs-panel 包 B)", () => {
+describe("DetailHeader.vue — bash-jobs panel removed (2026-10-15 bash→fleet)", () => {
   const bj = {
     rows: [
       {
@@ -594,54 +594,16 @@ describe("DetailHeader.vue — bash-jobs panel mount (bash-jobs-panel 包 B)", (
     sampledAt: 1_700_000_005_000,
   };
 
-  it("mounts the panel after the worktree slot when status.bashJobs is present", () => {
+  it("renders NO bash rows in the header even when status.bashJobs is present", () => {
     const wrapper = mount(DetailHeader, {
       props: {
         agent: agent({ status: { busy: false, pending: false, bashJobs: bj } as never }),
         narrow: false,
       },
     });
-    const panel = wrapper.find(".bj-panel");
-    expect(panel.exists()).toBe(true);
-    expect(wrapper.find(".bj-sum-text").text()).toBe("bash 1 running");
-    // mounted at the info block's bottom (`.detail-head-info`), after the (absent here)
-    // worktree slot — 2026-10 「红框收起」 moved the info rows into the collapsible block
-    const kids = wrapper.find(".detail-head-info").element.children;
-    expect(kids[kids.length - 1]).toBe(panel.element);
-  });
-
-  it("renders after the worktree panel when both wires are present", () => {
-    const wt = {
-      rows: [{ label: "~/repo", path: "/home/dev/repo", branch: "master", head: "0123456", current: true, main: true }],
-      total: 1,
-      probed: 1,
-      dirtyCount: 0,
-      agentCount: 0,
-      sampledAt: 1_700_000_000_000,
-    };
-    const wrapper = mount(DetailHeader, {
-      props: {
-        agent: agent({ status: { busy: false, pending: false, worktrees: wt, bashJobs: bj } as never }),
-        narrow: false,
-      },
-    });
-    const kids = [...wrapper.find(".detail-head-info").element.children];
-    const wtIdx = kids.findIndex((el) => el.classList.contains("wt-panel"));
-    const bjIdx = kids.findIndex((el) => el.classList.contains("bj-panel"));
-    expect(wtIdx).toBeGreaterThanOrEqual(0);
-    expect(bjIdx).toBe(wtIdx + 1);
-  });
-
-  it("renders no panel when the wire is absent or carries zero rows", () => {
-    const absent = mount(DetailHeader, { props: { agent: agent(), narrow: false } });
-    expect(absent.find(".bj-panel").exists()).toBe(false);
-    const empty = mount(DetailHeader, {
-      props: {
-        agent: agent({ status: { busy: false, pending: false, bashJobs: { ...bj, rows: [] } } as never }),
-        narrow: false,
-      },
-    });
-    expect(empty.find(".bj-panel").exists()).toBe(false);
+    expect(wrapper.find(".fleet-bash").exists()).toBe(false);
+    expect(wrapper.find(".bj-sum").exists()).toBe(false);
+    expect(wrapper.find(".bj-list").exists()).toBe(false);
   });
 });
 
@@ -687,8 +649,8 @@ async function settleLazyPanel(): Promise<void> {
 
 /**
  * cache-keepalive-web plan §4.3 (P-B): the header mounts `CacheKeepalivePanel` straight from
- * `status.cacheKeepalive` (no state.js mirror — same posture as the bash-jobs panel), after
- * the BashJobsPanel slot; no wire (or malformed wire) ⇒ no panel (byte-equal to the
+ * `status.cacheKeepalive` (no state.js mirror — same posture as the worktree panel), as the
+ * info block's last row; no wire (or malformed wire) ⇒ no panel (byte-equal to the
  * pre-feature shape). The panel body itself is a lazy chunk (defineAsyncComponent — the
  * first-screen budget), so every mount test settles the async import first.
  */
@@ -717,7 +679,7 @@ describe("DetailHeader.vue — cache-keepalive panel mount (cache-keepalive-web 
     ],
   };
 
-  it("mounts the panel after the bash-jobs slot when status.cacheKeepalive is present", async () => {
+  it("mounts the panel as the info block's last row when status.cacheKeepalive is present", async () => {
     const wrapper = mount(DetailHeader, {
       props: {
         agent: agent({ status: { busy: false, pending: false, cacheKeepalive: ck } as never }),
@@ -728,12 +690,12 @@ describe("DetailHeader.vue — cache-keepalive panel mount (cache-keepalive-web 
     const panel = wrapper.find(".ck-panel");
     expect(panel.exists()).toBe(true);
     expect(wrapper.find(".ck-sum-text").text()).toBe("cache 1h* · ping 3/11 Σ12 · 450k · ≈$0.12");
-    // mounted at the info block's bottom, after the (absent here) bash-jobs slot
+    // mounted at the info block's bottom
     const kids = wrapper.find(".detail-head-info").element.children;
     expect(kids[kids.length - 1]).toBe(panel.element);
   });
 
-  it("renders after the bash-jobs panel when both wires are present", async () => {
+  it("a present-but-ignored status.bashJobs wire does not shift the panel (bash → fleet 2026-10-15)", async () => {
     const bj = {
       rows: [
         {
@@ -759,10 +721,9 @@ describe("DetailHeader.vue — cache-keepalive panel mount (cache-keepalive-web 
     });
     await settleLazyPanel();
     const kids = [...wrapper.find(".detail-head-info").element.children];
-    const bjIdx = kids.findIndex((el) => el.classList.contains("bj-panel"));
-    const ckIdx = kids.findIndex((el) => el.classList.contains("ck-panel"));
-    expect(bjIdx).toBeGreaterThanOrEqual(0);
-    expect(ckIdx).toBe(bjIdx + 1);
+    // the bash wire is no longer rendered here at all; the keepalive panel stays the last row
+    expect(kids.some((el) => el.classList.contains("fleet-bash"))).toBe(false);
+    expect(kids[kids.length - 1]?.classList.contains("ck-panel")).toBe(true);
   });
 
   it("renders no panel when the wire is absent or malformed (legacy agent ⇒ byte-equal header)", () => {

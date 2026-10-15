@@ -8,13 +8,19 @@
   `:memory-key="agent.key"`(session-switch plan §1.4 E1-6 的滚动记忆 opt-in)。
 -->
 <script setup lang="ts">
+import { computed } from "vue";
 import type { FleetRowWire } from "@protocol/messages.js";
 import type { DetailBodyEmits, DetailBodyProps } from "../../contracts.js";
 import FleetSummaryBar from "../fleet/FleetSummaryBar.vue";
 import Transcript from "../transcript/Transcript.vue";
+import { bashJobsOf } from "../detail/bashJobsView.js";
 
 const props = defineProps<DetailBodyProps>();
 const emit = defineEmits<DetailBodyEmits>();
+
+// 2026-10-15 bash→fleet 迁移:入口按钮的 bash 小计/可见性输入(已 narrowed,零行/缺失 ⇒
+// undefined);agent 计数不混入 bash。
+const bashJobs = computed(() => bashJobsOf(props.agent));
 </script>
 
 <template>
@@ -22,6 +28,7 @@ const emit = defineEmits<DetailBodyEmits>();
     <FleetSummaryBar
       :rows="agent.fleet as unknown as readonly FleetRowWire[]"
       :open="drawerOpen ?? false"
+      :bash-jobs="bashJobs"
       @toggle="emit('toggle-drawer')"
     />
     <Transcript

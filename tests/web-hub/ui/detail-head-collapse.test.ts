@@ -2,7 +2,7 @@
 /**
  * `pwh_detail_head_collapsed` (`composables/useDetailHeadCollapse.ts`, 2026-10 user request
  * 「红框部分支持收起，点击标题展开」): the detail-header info block (SessionInfo / TodoPanel /
- * WorktreePanel / BashJobsPanel) collapses behind the title, which becomes the disclosure
+ * WorktreePanel / CacheKeepalivePanel) collapses behind the title, which becomes the disclosure
  * toggle. Pinned here:
  *
  *  - pref absent/invalid ⇒ EXPANDED, byte-identical rows (the pre-feature default, fail-open);

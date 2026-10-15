@@ -6,7 +6,7 @@
  * a runtime surprise. Components with no emits only get a `*Props` interface.
  */
 import type { AgentCard, HistoryPayload } from "@protocol/http-contract.js";
-import type { FleetRowWire, SessionInfo as WireSessionInfo } from "@protocol/messages.js";
+import type { BashJobsWire, FleetRowWire, SessionInfo as WireSessionInfo } from "@protocol/messages.js";
 import type { IconName } from "./icons/names.js";
 import type {
   AgentCardView,
@@ -274,9 +274,21 @@ export interface FleetSummaryBarProps {
   readonly rows: readonly FleetRowWire[];
   /** 抽屉当前是否打开(仅驱动 `aria-expanded`;docked+open 时整条由 CSS 隐藏)。 */
   readonly open: boolean;
+  /** 2026-10-15 bash→fleet 迁移:主会话后台 bash 任务 wire(bashJobsOf 已 narrowed ——
+   *  零行/缺失 ⇒ undefined)。仅用于「无子 agent 但有 bash 任务时入口按钮仍出现」+ aria-label
+   *  的 bash 小计;running 徽标永远只数 agent 行。 */
+  readonly bashJobs?: BashJobsWire | undefined;
 }
 export interface FleetSummaryBarEmits {
   toggle: [];
+}
+
+/** 2026-10-15 bash→fleet 迁移(components/fleet/FleetBashJobs.vue):fleet 抽屉树视图末尾
+ *  的「bash」独立分组 —— 主会话后台 bash 任务,从详情头部的 BashJobsPanel 迁来。 */
+export interface FleetBashJobsProps {
+  readonly jobs: BashJobsWire;
+  /** 共享走时源(FleetDrawer ← AgentDetail),与 FleetTreeProps.now 同一语法。 */
+  readonly now: number;
 }
 
 export interface FleetTreeProps {

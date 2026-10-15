@@ -52,6 +52,7 @@ import {
 import AskUserForm from "../dialog/AskUserForm.vue";
 import { buildAgentNotices } from "./agentNotices.js";
 import { statusOf } from "./agentViews.js";
+import { bashJobsOf } from "./bashJobsView.js";
 import DetailBody from "../body/DetailBody.vue";
 import DetailDock from "./DetailDock.vue";
 import DetailHeader from "./DetailHeader.vue";
@@ -497,6 +498,9 @@ const dockCtlProps = computed(() => ({
 const drawerMode = useFleetDrawerMode(window).mode;
 const { open: drawerOpen, toggle: toggleDrawerState, close: closeDrawerState } = useFleetDrawerOpen(drawerMode);
 const hasFleet = computed(() => props.agent.fleet.length > 0);
+// 2026-10-15 bash→fleet 迁移:后台 bash 任务住在抽屉树视图的「bash」分组里 —— 无子 agent
+// 但有 bash 任务时抽屉同样挂载(否则分组不可达)。
+const hasBashJobs = computed(() => bashJobsOf(props.agent) !== undefined);
 const selectedRunId = computed(() => props.agent.runSel ?? null);
 /** 2026-10-08 (user field report: fresh session's composer sat in a squashed left column):
  * `data-drawer-open` must only be set when the drawer will actually RENDER (the `v-if` below
@@ -528,7 +532,7 @@ function onCloseDrawer(): void {
     class="detail"
     aria-labelledby="detail-title"
     :data-drawer="drawerMode"
-    :data-drawer-open="(drawerOpen && (hasFleet || selectedRunId !== null)) || undefined"
+    :data-drawer-open="(drawerOpen && (hasFleet || hasBashJobs || selectedRunId !== null)) || undefined"
   >
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 
@@ -588,7 +592,7 @@ function onCloseDrawer(): void {
            v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
       <FleetDrawer
-        v-if="hasFleet || selectedRunId !== null"
+        v-if="hasFleet || hasBashJobs || selectedRunId !== null"
         :agent="agent"
         :now="now"
         :mode="drawerMode"

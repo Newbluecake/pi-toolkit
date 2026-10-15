@@ -27,7 +27,7 @@
   the `.metrics-summary` toggle and `detail.metricsToggleAria` went with it.
 
   2026-10 (user request 「红框部分支持收起，点击标题展开」): the info block under the titlebar
-  (SessionInfo / TodoPanel / WorktreePanel / BashJobsPanel) collapses behind the title itself —
+  (SessionInfo / TodoPanel / WorktreePanel / CacheKeepalivePanel) collapses behind the title itself —
   the title text is wrapped in a disclosure <button> (h2 keeps `id="detail-title"`), the state
   is the browser-local `pwh_detail_head_collapsed` pref (global, fail-open to EXPANDED; see
   `composables/useDetailHeadCollapse.ts`), and the transient `<p>` notices stay outside the
@@ -55,8 +55,6 @@ import StatusPill from "./StatusPill.vue";
 import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
-import BashJobsPanel from "./BashJobsPanel.vue";
-import { bashJobsOf } from "./bashJobsView.js";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
 import { worktreesOf } from "./worktreesView.js";
 
@@ -75,9 +73,9 @@ const statusLabel = computed(() => t(`common.status.${visual.value}`));
 // the status reducer replaces `agent.status` wholesale); undefined ⇒ the panel renders nothing.
 const worktrees = computed(() => worktreesOf(props.agent));
 
-// bash-jobs-panel 包 B (D4): the session's own background bash jobs ride `StatusInfo.bashJobs`
-// (same no-state.js-mirror posture as worktrees); undefined ⇒ the panel renders nothing.
-const bashJobs = computed(() => bashJobsOf(props.agent));
+// 2026-10-15 (user ruling, bash→fleet): the background bash jobs LEFT this header — they now
+// live as the fleet drawer's own 「bash」 group (components/fleet/FleetBashJobs.vue, same
+// `StatusInfo.bashJobs` wire via bashJobsOf). Nothing renders here anymore.
 
 // cache-keepalive-web P-B (§4): the main session's prompt-cache keepalive rides
 // `StatusInfo.cacheKeepalive` (same no-state.js-mirror posture as bashJobs); undefined ⇒ no
@@ -234,7 +232,7 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
 
 // ---------------------------------------------------------------------------
 // 2026-10 (user request 「红框部分支持收起，点击标题展开」): the whole info block under the
-// titlebar — SessionInfo / TodoPanel / WorktreePanel / BashJobsPanel — collapses behind the
+// titlebar — SessionInfo / TodoPanel / WorktreePanel / CacheKeepalivePanel — collapses behind the
 // title itself. The preference is browser-local (`pwh_detail_head_collapsed`, "1" = collapsed),
 // global (not per session) and fails open to EXPANDED, so the header stays byte-identical for
 // anyone who never toggles. The transient `<p>` notices above the block (stop error, first-
@@ -401,10 +399,6 @@ function onToggleHeadInfo(): void {
            (old mounts) or a missing hub cap keeps the panel byte-identical (I8). -->
       <WorktreePanel v-if="worktrees" :worktrees="worktrees" :agent-key="agent.key" :session="session" />
       <GraphPanel v-if="worktrees" :worktrees="worktrees" :agent-key="agent.key" :session="session" />
-
-      <!-- bash-jobs-panel 包 B (D4): the session's own background bash jobs, straight from
-           `status.bashJobs`; renders nothing when the wire is absent or has zero rows. -->
-      <BashJobsPanel v-if="bashJobs" :jobs="bashJobs" />
 
       <!-- cache-keepalive-web P-B (§4): the main session's prompt-cache keepalive, straight
            from `status.cacheKeepalive`; renders nothing when the wire is absent (read-only). -->

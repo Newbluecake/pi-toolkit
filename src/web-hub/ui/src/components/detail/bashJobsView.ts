@@ -1,9 +1,10 @@
 /**
- * bash-jobs-panel plan §3 包 B (D4): pure view-logic for the detail header's background
- * bash-jobs panel. `bashJobsOf` narrows `AgentState.status.bashJobs` (a deliberately loose
+ * bash→fleet 迁移(2026-10-15 用户拍板 L1): pure view-logic for the fleet drawer's 「bash」
+ * group (`components/fleet/FleetBashJobs.vue`; formerly the detail header's BashJobsPanel).
+ * `bashJobsOf` narrows `AgentState.status.bashJobs` (a deliberately loose
  * `Record<string, unknown>` in `types.ts`, P0-frozen) to the `BashJobsWire` shape declared in
  * `@protocol/messages.js` — same posture as `worktreesView.ts`'s `worktreesOf` (the status
- * reducer replaces `agent.status` wholesale, so the panel reads the slot directly and
+ * reducer replaces `agent.status` wholesale, so consumers read the slot directly and
  * `state.js`/`types.ts` stay untouched, plan §0).
  *
  * Render rules the component consumes from here:
