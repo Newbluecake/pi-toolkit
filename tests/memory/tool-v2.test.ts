@@ -10,6 +10,7 @@ import {
   readFileSync,
   symlinkSync,
   utimesSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,6 +34,7 @@ interface Fixture {
 
 function fixture(): Fixture {
   const tmp = mkdtempSync(join(tmpdir(), "pi-mem-toolv2-"));
+  tmpRoots.push(tmp);
   const cwd = join(tmp, "proj");
   mkdirSync(cwd, { recursive: true });
   const paths = { memoryRoot: join(tmp, "mem"), ccProjectsRoot: join(tmp, "cc") };
@@ -87,8 +89,11 @@ function writeFile(dir: string, name: string, body: string, mtimeIso?: string): 
   }
 }
 
+const tmpRoots: string[] = [];
+
 afterEach(() => {
   vi.restoreAllMocks();
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 // ───────────────────────────── I1: view ─────────────────────────────

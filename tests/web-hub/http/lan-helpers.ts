@@ -111,123 +111,142 @@ export async function startLan(
     privacy?: boolean;
   } = {},
 ): Promise<LanHarness> {
-  const clock = opts.clock ?? fakeClock();
   const dir = mkdtempSync(join(tmpdir(), "pwh-lan-"));
-  const stateDir = join(dir, "state");
-  const paths = testHubPaths(stateDir);
-  const log = captureLog();
-  const store = opts.store ?? fakeLanStore();
-  const kdf = fakeKdf();
-  const limiter = createLoginLimiter({ now: clock.now });
-  const admission = createKdfAdmission({ now: clock.now, isTightened: limiter.isTightened });
-  const hosts = createHostsPort();
-  const scope = createScope({ log, now: clock.now });
+  let fe: HttpFrontend | undefined;
+  let scope: ReturnType<typeof createScope> | undefined;
+  const body = async (): Promise<LanHarness> => {
+    const clock = opts.clock ?? fakeClock();
+    const stateDir = join(dir, "state");
+    const paths = testHubPaths(stateDir);
+    const log = captureLog();
+    const store = opts.store ?? fakeLanStore();
+    const kdf = fakeKdf();
+    const limiter = createLoginLimiter({ now: clock.now });
+    const admission = createKdfAdmission({ now: clock.now, isTightened: limiter.isTightened });
+    const hosts = createHostsPort();
+    const scopeCreated = createScope({ log, now: clock.now });
+    scope = scopeCreated;
 
-  const subs = new Set<(e: HubEvent) => void>();
+    const subs = new Set<(e: HubEvent) => void>();
 
-  const cfg: HubLanConfig = {
-    port: opts.cfg?.port ?? (await freePort()),
-    extraHosts: [],
-    trustProxyFrom: [],
-    externalOrigins: [],
-    ...opts.cfg,
-  };
+    const cfg: HubLanConfig = {
+      port: opts.cfg?.port ?? (await freePort()),
+      extraHosts: [],
+      trustProxyFrom: [],
+      externalOrigins: [],
+      ...opts.cfg,
+    };
 
-  let lastStatus: LanStatus = { state: "starting" };
+    let lastStatus: LanStatus = { state: "starting" };
 
-  // web-hub-privacy plan v2.1 (P1): assembled exactly like hub.ts does — the store loads from
-  // the harness's tmpfs stateDir, and `verifyPassword` shares the login pipeline's limiter/kdf/
-  // admission instances (the「limiter 共享」test anchor depends on that instance identity).
-  let privacyRoutes: PrivacyRoutes | undefined;
-  let privacyStore: PrivacyStore | undefined;
-  if (opts.privacy === true) {
-    // hub.ts's `ensurePrivateDir` equivalent — the harness never creates stateDir on its own.
-    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    privacyStore = createPrivacyStore({ stateDir, log });
-    await privacyStore.load();
-    privacyRoutes = createPrivacyRoutes({
-      store: privacyStore,
-      registry: opts.registry ?? { list: () => [], get: () => undefined },
-      verifyPassword: (userId, password, clientIp) =>
-        verifyPassword({ clientIp }, userId, password, { store, kdf, limiter, admission }),
-      log,
-      now: clock.now,
-    });
-  }
+    // web-hub-privacy plan v2.1 (P1): assembled exactly like hub.ts does — the store loads from
+    // the harness's tmpfs stateDir, and `verifyPassword` shares the login pipeline's limiter/kdf/
+    // admission instances (the「limiter 共享」test anchor depends on that instance identity).
+    let privacyRoutes: PrivacyRoutes | undefined;
+    let privacyStore: PrivacyStore | undefined;
+    if (opts.privacy === true) {
+      // hub.ts's `ensurePrivateDir` equivalent — the harness never creates stateDir on its own.
+      mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+      privacyStore = createPrivacyStore({ stateDir, log });
+      await privacyStore.load();
+      privacyRoutes = createPrivacyRoutes({
+        store: privacyStore,
+        registry: opts.registry ?? { list: () => [], get: () => undefined },
+        verifyPassword: (userId, password, clientIp) =>
+          verifyPassword({ clientIp }, userId, password, { store, kdf, limiter, admission }),
+        log,
+        now: clock.now,
+      });
+    }
 
-  const fe = createHttpFrontend({
-    config: {
-      v: 1,
-      home: dir,
-      port: 0,
-      idleExitMinutes: 10,
-      pluginVersion: "0.0.0-test",
-      buildId: "b1",
-      ...(opts.load === undefined ? {} : { load: opts.load }),
-    },
-    paths,
-    registry: opts.registry ?? { list: () => [], get: () => undefined },
-    bus: {
-      subscribe: (fn) => {
-        subs.add(fn);
-        return () => subs.delete(fn);
+    const feCreated = createHttpFrontend({
+      config: {
+        v: 1,
+        home: dir,
+        port: 0,
+        idleExitMinutes: 10,
+        pluginVersion: "0.0.0-test",
+        buildId: "b1",
+        ...(opts.load === undefined ? {} : { load: opts.load }),
       },
-    },
-    history: {
-      snapshot: async (agentKey: string) => ({
-        agentKey,
-        entries: [],
-        tailMessages: [],
-        fromSeq: 1,
-        hasMore: false,
-        source: "file" as const,
-      }),
-      page: async (agentKey: string) => ({
-        agentKey,
-        entries: [],
-        tailMessages: [],
-        fromSeq: 1,
-        hasMore: false,
-        source: "file" as const,
-      }),
-      onLeafChanged: () => {},
-    },
-    log,
-    info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
-    now: clock.now,
-    lan: { cfg, store, kdf, limiter, admission, hosts, scope, onStatus: (s) => (lastStatus = s) },
-    ...(opts.commands === undefined ? {} : { commands: opts.commands }),
-    ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
-    ...(opts.agentRemove === undefined ? {} : { agentRemove: opts.agentRemove }),
-    ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
-  });
+      paths,
+      registry: opts.registry ?? { list: () => [], get: () => undefined },
+      bus: {
+        subscribe: (fn) => {
+          subs.add(fn);
+          return () => subs.delete(fn);
+        },
+      },
+      history: {
+        snapshot: async (agentKey: string) => ({
+          agentKey,
+          entries: [],
+          tailMessages: [],
+          fromSeq: 1,
+          hasMore: false,
+          source: "file" as const,
+        }),
+        page: async (agentKey: string) => ({
+          agentKey,
+          entries: [],
+          tailMessages: [],
+          fromSeq: 1,
+          hasMore: false,
+          source: "file" as const,
+        }),
+        onLeafChanged: () => {},
+      },
+      log,
+      info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
+      now: clock.now,
+      lan: { cfg, store, kdf, limiter, admission, hosts, scope: scopeCreated, onStatus: (s) => (lastStatus = s) },
+      ...(opts.commands === undefined ? {} : { commands: opts.commands }),
+      ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
+      ...(opts.agentRemove === undefined ? {} : { agentRemove: opts.agentRemove }),
+      ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
+    });
+    fe = feCreated;
 
-  if (fe.lan === undefined) throw new Error("test bug: fe.lan not constructed");
-  const autoStart = opts.autoStart ?? true;
-  let status: LanStatus = lastStatus;
-  let port = 0;
-  if (autoStart) {
-    status = await fe.lan.start();
-    lastStatus = status;
-    port = status.state === "on" ? status.port : 0;
-  }
+    if (feCreated.lan === undefined) throw new Error("test bug: fe.lan not constructed");
+    const autoStart = opts.autoStart ?? true;
+    let status: LanStatus = lastStatus;
+    let port = 0;
+    if (autoStart) {
+      status = await feCreated.lan.start();
+      lastStatus = status;
+      port = status.state === "on" ? status.port : 0;
+    }
 
-  return {
-    fe,
-    status,
-    port,
-    cfg,
-    store,
-    limiter,
-    clock,
-    logLines: log.lines,
-    ...(privacyStore === undefined ? {} : { privacyStore }),
-    async cleanup() {
-      await fe.close();
-      await scope.dispose();
-      rmSync(dir, { recursive: true, force: true });
-    },
+    return {
+      fe: feCreated,
+      status,
+      port,
+      cfg,
+      store,
+      limiter,
+      clock,
+      logLines: log.lines,
+      ...(privacyStore === undefined ? {} : { privacyStore }),
+      async cleanup() {
+        await feCreated.close();
+        await scopeCreated.dispose();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
   };
+  try {
+    return await body();
+  } catch (err) {
+    // fail-safe: any throw between mkdtemp and the returned cleanup must not leak the temp dir
+    try {
+      await fe?.close();
+      await scope?.dispose();
+    } catch {
+      // best effort — releasing the temp dir matters more
+    }
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 export interface RawResponse {

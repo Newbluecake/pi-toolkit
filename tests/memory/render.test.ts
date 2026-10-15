@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   AGENT_SOURCE_FENCE,
   injectionSentinel,
@@ -18,8 +18,14 @@ import { DRIFT_HEADER } from "../../src/memory/store.js";
 const CWD = "/proj/app";
 const SLUG = toSlug(CWD); // "-proj-app"
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function fixture(): { paths: MemoryPaths; dir: string } {
   const root = mkdtempSync(join(tmpdir(), "mem-render-"));
+  tmpRoots.push(root);
   const paths: MemoryPaths = { memoryRoot: join(root, "mem"), ccProjectsRoot: join(root, "cc") };
   return { paths, dir: memoryDirFor(CWD, paths) };
 }

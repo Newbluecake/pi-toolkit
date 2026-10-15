@@ -1,10 +1,10 @@
 /**
  * web-hub session-history plan §4.5.7 (`snapshot.ts`): fork snapshots (PD12).
  */
-import { mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
 import {
   createHistoryIoGate,
@@ -49,10 +49,18 @@ async function pinFile(content: string) {
   return result.pin;
 }
 
+const extraTmpDirs: string[] = [];
+
 beforeEach(() => {
+  extraTmpDirs.length = 0;
   root = mkdtempSync(join(tmpdir(), "pwh-snap-"));
   mkdirSync(join(root, "spawn"), { recursive: true }); // mirrors prod: stateDir/spawn/ already exists
   forkSrcDir = join(root, "spawn", "fork-src");
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+  for (const d of extraTmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 function snapDeps() {
@@ -129,6 +137,7 @@ describe("snapshotFork", () => {
 
   it("fork-src directory is a symlink ⇒ fails closed (504, the frozen SnapshotResult has no 503 slot)", async () => {
     const elsewhere = mkdtempSync(join(tmpdir(), "pwh-elsewhere-"));
+    extraTmpDirs.push(elsewhere);
     symlinkSync(elsewhere, forkSrcDir); // parent (root/spawn) already exists from beforeEach
     const pin = await pinFile(HEADER);
     const result = await snapshotFork(
@@ -199,6 +208,7 @@ describe("sweepForkSrcDir", () => {
     mkdirSync(forkSrcDir, { recursive: true, mode: 0o700 });
     writeFileSync(join(forkSrcDir, "snap-a.jsonl"), "x");
     const target = mkdtempSync(join(tmpdir(), "pwh-target-"));
+    extraTmpDirs.push(target);
     writeFileSync(join(target, "should-survive.jsonl"), "y");
     symlinkSync(join(target, "should-survive.jsonl"), join(forkSrcDir, "snap-link.jsonl"));
     await sweepForkSrcDir(forkSrcDir, defaultHistoryFs(), 256);

@@ -5,8 +5,17 @@
  * (W1) keeps covering `STATE_DIR_POLICY` and the pure `resolveHubPaths` policy
  * selection — this file only exercises the enforcement LP fills in.
  */
-import { describe, expect, it } from "vitest";
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  chmodSync,
+  chownSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { chmod as realChmod, lstat as realLstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,8 +31,15 @@ import {
 const isRoot = process.getuid?.() === 0;
 const realUid = process.getuid?.() ?? 0;
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function tmp(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "webhub-priv-")));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "webhub-priv-")));
+  tmpRoots.push(dir);
+  return dir;
 }
 
 /** A sticky-bit parent dir (mimics `/tmp`) that `TMP_SOCKET_DIR_POLICY` requires. */

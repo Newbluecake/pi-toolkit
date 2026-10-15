@@ -1,10 +1,10 @@
 // memory-plan §7.6: the `/mem` command handler. Driven directly with an
 // inline fake ExtensionCommandContext; per-test tmpdir + paths injection.
 
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createMemCommand } from "../../src/memory/command.js";
 import { forgetWorktreeOrigin, recordWorktreeOrigin } from "../../src/core/worktree-origin.js";
@@ -19,8 +19,14 @@ interface Fixture {
   paths: MemoryPaths;
 }
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function fixture(): Fixture {
   const tmp = mkdtempSync(join(tmpdir(), "pi-mem-cmd-"));
+  tmpRoots.push(tmp);
   const cwd = join(tmp, "proj");
   mkdirSync(cwd, { recursive: true });
   return { tmp, cwd, paths: { memoryRoot: join(tmp, "mem"), ccProjectsRoot: join(tmp, "cc") } };

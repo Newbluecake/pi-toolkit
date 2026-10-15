@@ -1,12 +1,24 @@
-import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { forgetWorktreeOrigin, recordWorktreeOrigin, resolveWorktreeOrigin } from "../../src/core/worktree-origin.js";
+
+const tmpDirs: string[] = [];
+
+function mkTmp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
+
+afterEach(() => {
+  for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 /** Unique non-existent paths — realpath fails → raw fallback keeps keys exact. */
 function fakePath(tag: string): string {
-  return join(mkdtempSync(join(tmpdir(), "wto-")), "nonexistent-" + tag);
+  return join(mkTmp("wto-"), "nonexistent-" + tag);
 }
 
 describe("worktree-origin registry", () => {
@@ -73,8 +85,8 @@ describe("worktree-origin registry", () => {
   });
 
   it("normalizes symlinked keys on both record and resolve (R1)", () => {
-    const real = mkdtempSync(join(tmpdir(), "wto-real-"));
-    const linkDir = mkdtempSync(join(tmpdir(), "wto-link-"));
+    const real = mkTmp("wto-real-");
+    const linkDir = mkTmp("wto-link-");
     const link = join(linkDir, "wt-link");
     symlinkSync(real, link);
     const repo = fakePath("repo");
@@ -88,8 +100,8 @@ describe("worktree-origin registry", () => {
   });
 
   it("normalizes symlinked originalCwd values too", () => {
-    const realRepo = mkdtempSync(join(tmpdir(), "wto-repo-"));
-    const linkDir = mkdtempSync(join(tmpdir(), "wto-repolink-"));
+    const realRepo = mkTmp("wto-repo-");
+    const linkDir = mkTmp("wto-repolink-");
     const repoLink = join(linkDir, "repo-link");
     symlinkSync(realRepo, repoLink);
     const wt = fakePath("wt2");
@@ -101,7 +113,7 @@ describe("worktree-origin registry", () => {
   it("mkdir-sync'd real dirs resolve through realpath normalization (macOS /var vs /private/var shape)", () => {
     // tmpdir() itself may sit behind a symlink; recording the raw tmpdir path
     // and resolving the realpath (or vice versa) must still hit.
-    const wt = mkdtempSync(join(tmpdir(), "wto-wt-"));
+    const wt = mkTmp("wto-wt-");
     const repo = fakePath("repo3");
     recordWorktreeOrigin(wt, repo);
     expect(resolveWorktreeOrigin(realpathSync(wt))).toBe(repo);

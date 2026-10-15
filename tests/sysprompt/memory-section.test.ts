@@ -17,10 +17,10 @@
 // gates the section in child sessions exactly as it did pre-M3.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPromptSectionHub, type PromptSectionHub, type PromptSectionHubOpts } from "../../src/sysprompt/hub.js";
 import { agentTypesSection, availableModelsSection } from "../../src/sysprompt/core-sections.js";
@@ -79,8 +79,14 @@ function registerCoreSections(hub: PromptSectionHub): void {
   hub.register("pi_subagent_models", availableModelsSection({ stackAvailable: () => MODELS }));
 }
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function fixture(settings: Partial<MemorySettings> = {}) {
   const tmp = mkdtempSync(join(tmpdir(), "pi-mem-hub-"));
+  tmpRoots.push(tmp);
   const cwd = join(tmp, "proj");
   mkdirSync(cwd, { recursive: true });
   const memoryDir = join(tmp, "mem", toSlug(cwd));

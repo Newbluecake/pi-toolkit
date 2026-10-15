@@ -5,7 +5,7 @@
 // - legacy ⇒ `renderMemoryBlock`（共享 wireMemory 的 RenderCache）；
 // - 异常 ⇒ undefined；不读 frozenBlocks。
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -32,6 +32,7 @@ function fixture(settings: Partial<MemorySettings> = {}): { cwd: string; setting
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  for (const d of roots.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 function addMemoryFile(cwd: string, name: string, body: string): void {

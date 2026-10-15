@@ -1,7 +1,18 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function mkTmp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpRoots.push(dir);
+  return dir;
+}
 import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../../src/config/settings.js";
 import {
   binaryFingerprint,
@@ -57,7 +68,7 @@ describe("droid/catalog parseAvailableModels", () => {
 
 describe("droid/catalog store 与探测", () => {
   it("snapshot：内存 ⇒ 磁盘缓存；绝不 spawn", () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "droid-agent-"));
+    const agentDir = mkTmp("droid-agent-");
     const f = makeFakeDeps(agentDir);
     const store = f.deps.catalogStore as FakeCatalogStore;
     const catalog = createDroidCatalog(f.deps, () => SETTINGS);
@@ -68,7 +79,7 @@ describe("droid/catalog store 与探测", () => {
   });
 
   it("refreshInBackground：探测写缓存（probeCwd + extraEnv），close 后 graceful", async () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "droid-agent-"));
+    const agentDir = mkTmp("droid-agent-");
     const f = makeFakeDeps(agentDir);
     f.rpcHandler = (m) => {
       if (m === DROID_METHODS.initializeSession)
@@ -93,7 +104,7 @@ describe("droid/catalog store 与探测", () => {
   });
 
   it("single-flight：探测中重复调用不再 spawn", async () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "droid-agent-"));
+    const agentDir = mkTmp("droid-agent-");
     const f = makeFakeDeps(agentDir);
     f.rpcHandler = undefined; // FakeRpc handler 缺席 ⇒ request 永远 pending（探测挂起）
     const catalog = createDroidCatalog(f.deps, () => SETTINGS);
@@ -105,7 +116,7 @@ describe("droid/catalog store 与探测", () => {
   });
 
   it("探测失败（spawn 抛错）静默：snapshot 保持旧缓存", async () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "droid-agent-"));
+    const agentDir = mkTmp("droid-agent-");
     const f = makeFakeDeps(agentDir);
     const store = f.deps.catalogStore as FakeCatalogStore;
     store.onDisk = { provider: "droid", fetchedAt: 7, models: [] };
@@ -117,7 +128,7 @@ describe("droid/catalog store 与探测", () => {
   });
 
   it("探测中漂移 ⇒ catalog.drift 记录", async () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "droid-agent-"));
+    const agentDir = mkTmp("droid-agent-");
     const f = makeFakeDeps(agentDir);
     f.rpcHandler = (m) => {
       if (m === DROID_METHODS.initializeSession) {
@@ -133,7 +144,7 @@ describe("droid/catalog store 与探测", () => {
   });
 
   it("observeInit：run init 顺带刷新目录（零额外进程）", () => {
-    const agentDir = mkdtempSync(join(tmpdir(), "droid-agent-"));
+    const agentDir = mkTmp("droid-agent-");
     const f = makeFakeDeps(agentDir);
     const catalog = createDroidCatalog(f.deps, () => SETTINGS);
     catalog.observeInit(AVAIL, "1.264.0");
@@ -147,7 +158,7 @@ describe("droid/catalog store 与探测", () => {
 
 describe("droid/catalog binaryFingerprint 与 unknownDroidModelMessage", () => {
   it("binaryFingerprint：realpath|size|mtime|ino；不存在 ⇒ undefined", () => {
-    const f = join(mkdtempSync(join(tmpdir(), "droid-bin-")), "droid");
+    const f = join(mkTmp("droid-bin-"), "droid");
     writeFileSync(f, "x");
     expect(binaryFingerprint(f)).toMatch(/\|\d+\|\d+(\.\d+)?\|\d+$/);
     expect(binaryFingerprint("/nonexistent/droid")).toBeUndefined();

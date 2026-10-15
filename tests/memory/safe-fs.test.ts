@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { MemoryError } from "../../src/memory/paths.js";
 import {
   appendLegacy,
@@ -44,8 +44,15 @@ import {
   writeTempRegular,
 } from "../../src/memory/safe-fs.js";
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function tmp(): string {
-  return mkdtempSync(join(tmpdir(), "mem-safe-fs-"));
+  const dir = mkdtempSync(join(tmpdir(), "mem-safe-fs-"));
+  tmpRoots.push(dir);
+  return dir;
 }
 
 describe("listRegular", () => {

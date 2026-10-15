@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   buildDroidStack,
   makeBinary,
@@ -17,8 +17,15 @@ import {
 } from "./helpers/external-droid.js";
 
 const stacks: DroidStack[] = [];
+const tmpDirs: string[] = [];
 afterEach(() => {
   for (const s of stacks.splice(0)) s.dispose();
+  for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+afterAll(() => {
+  // tmpRoot()'s shared root is RE-CREATED across tests (mkdirSync in the else branch), so it
+  // must not ride the per-test tmpDirs drain — removed once, at file end.
+  if (sharedRoot !== "") rmSync(sharedRoot, { recursive: true, force: true });
 });
 
 function spawnDroid(s: DroidStack, prompt: string, over: Record<string, unknown> = {}) {
@@ -215,7 +222,9 @@ describe("external droid integration — chain (§7.2)", () => {
 
   it("resume cwd 钉死（echo-cwd）①：spec.cwd=B ⇒ fake 进程 cwd 与 init cwd 都是 A", async () => {
     const dirA = mkdtempSync(join(tmpdir(), "droid-cwd-a-"));
+    tmpDirs.push(dirA);
     const dirB = mkdtempSync(join(tmpdir(), "droid-cwd-b-"));
+    tmpDirs.push(dirB);
     const s = buildDroidStack({ binary: makeBinary(tmpRoot(), ["--mode", "echo-cwd"]) });
     stacks.push(s);
     const first = await spawnDroid(s, "in A", { cwd: dirA });
@@ -252,6 +261,7 @@ describe("external droid integration — chain (§7.2)", () => {
 
   it("resume cwd 钉死 ②：头行 cwd（目录 A）被删 ⇒ failed{config}（msgResumeCwdGone），不起进程", async () => {
     const dirA = mkdtempSync(join(tmpdir(), "droid-cwd-gone-"));
+    tmpDirs.push(dirA);
     const s = buildDroidStack({ binary: makeBinary(tmpRoot(), ["--mode", "echo-cwd"]) });
     stacks.push(s);
     const first = await spawnDroid(s, "in A", { cwd: dirA });

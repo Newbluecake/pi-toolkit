@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ export function sandboxHome(): { home: string; restore: () => void } {
     restore: () => {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
     },
   };
 }

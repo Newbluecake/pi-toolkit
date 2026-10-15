@@ -8,10 +8,10 @@
 // combined fold (memory -> types -> models) and the hub's stable-mode
 // behavior are covered by tests/sysprompt/memory-section.test.ts.
 
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS, type MemorySettings } from "../../src/config/settings.js";
 import { forgetWorktreeOrigin, recordWorktreeOrigin } from "../../src/core/worktree-origin.js";
@@ -28,8 +28,14 @@ interface Fixture {
   budget: InjectBudget;
 }
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function fixture(): Fixture {
   const tmp = mkdtempSync(join(tmpdir(), "pi-mem-inject-"));
+  tmpRoots.push(tmp);
   const cwd = join(tmp, "proj");
   mkdirSync(cwd, { recursive: true });
   const s = DEFAULT_SETTINGS.memory;

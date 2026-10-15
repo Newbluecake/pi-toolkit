@@ -1,16 +1,23 @@
 // optimize-plan §3.2 / §10 B7 (todo #22 P0-b): withMemoryDirLock — serial
 // exclusion, stale-lock breaking (age + dead-pid), and token-scoped release.
 
-import { mkdtempSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { MemoryError } from "../../src/memory/paths.js";
 import { lockCreate, lockRead } from "../../src/memory/safe-fs.js";
 import { withMemoryDirLock } from "../../src/memory/lock.js";
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function tmp(): string {
-  return mkdtempSync(join(tmpdir(), "mem-lock-"));
+  const dir = mkdtempSync(join(tmpdir(), "mem-lock-"));
+  tmpRoots.push(dir);
+  return dir;
 }
 
 function sleep(ms: number): Promise<void> {

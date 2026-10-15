@@ -3,7 +3,7 @@
  * tests (fake-timer + real-timing) must be green.
  */
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorktreeSampler } from "../../../src/web-hub/agent/worktree-sampler.js";
@@ -236,53 +236,57 @@ describe("createWorktreeSampler — ★ hard deadline (merge gate)", () => {
 
   it("★ real executor + a SIGTERM-ignoring fake git script: the deadline's abort settles the underlying call well under hardDeadlineMs + 250ms, and the process group is actually dead afterward", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-wt-sampler-"));
-    const file = join(dir, "fake-git.mjs");
-    const pidFile = join(dir, "pid");
-    await writeFile(
-      file,
-      `#!/usr/bin/env node\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nprocess.on('SIGTERM', () => {});\nsetInterval(() => {}, 1000);\n`,
-      { mode: 0o755 },
-    );
-    const real = createGitRunner({ gitBinary: file });
-    let resolvedAt: number | undefined;
-    const timed: GitRunner = async (args, opts) => {
-      const r = await real(args, opts);
-      resolvedAt = Date.now();
-      return r;
-    };
-    const { sampler } = base(timed, { hardDeadlineMs: 500 });
-    const started = Date.now();
-    // `cwd` must be a real, existing directory: `scanWorktrees` threads it straight into
-    // `spawn()`'s own `cwd` option, and a nonexistent directory there fails the spawn
-    // immediately (ENOENT) — which would make this test pass for the wrong reason (a fast
-    // spawn error, never actually exercising the deadline/abort path at all; this is exactly
-    // the gap verifier W3 review #4 caught via the pid-liveness check below).
-    sampler.start(dir);
-    const giveUpAt = started + 5_000;
-    while (resolvedAt === undefined && Date.now() < giveUpAt) {
-      await new Promise((r) => setTimeout(r, 5));
-    }
-    expect(resolvedAt).toBeDefined();
-    expect(resolvedAt! - started).toBeLessThan(500 + 250);
-
-    // The deadline settling the sampler's observable result must correspond to the underlying
-    // git process (and its process group) ACTUALLY being killed — not merely the Promise
-    // resolving while the process lingers (verifier W3 review #4).
-    let pidText: string | undefined;
-    const pidDeadline = Date.now() + 2_000;
-    while (pidText === undefined && Date.now() < pidDeadline) {
-      try {
-        pidText = await readFile(pidFile, "utf8");
-      } catch {
+    try {
+      const file = join(dir, "fake-git.mjs");
+      const pidFile = join(dir, "pid");
+      await writeFile(
+        file,
+        `#!/usr/bin/env node\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nprocess.on('SIGTERM', () => {});\nsetInterval(() => {}, 1000);\n`,
+        { mode: 0o755 },
+      );
+      const real = createGitRunner({ gitBinary: file });
+      let resolvedAt: number | undefined;
+      const timed: GitRunner = async (args, opts) => {
+        const r = await real(args, opts);
+        resolvedAt = Date.now();
+        return r;
+      };
+      const { sampler } = base(timed, { hardDeadlineMs: 500 });
+      const started = Date.now();
+      // `cwd` must be a real, existing directory: `scanWorktrees` threads it straight into
+      // `spawn()`'s own `cwd` option, and a nonexistent directory there fails the spawn
+      // immediately (ENOENT) — which would make this test pass for the wrong reason (a fast
+      // spawn error, never actually exercising the deadline/abort path at all; this is exactly
+      // the gap verifier W3 review #4 caught via the pid-liveness check below).
+      sampler.start(dir);
+      const giveUpAt = started + 5_000;
+      while (resolvedAt === undefined && Date.now() < giveUpAt) {
         await new Promise((r) => setTimeout(r, 5));
       }
+      expect(resolvedAt).toBeDefined();
+      expect(resolvedAt! - started).toBeLessThan(500 + 250);
+
+      // The deadline settling the sampler's observable result must correspond to the underlying
+      // git process (and its process group) ACTUALLY being killed — not merely the Promise
+      // resolving while the process lingers (verifier W3 review #4).
+      let pidText: string | undefined;
+      const pidDeadline = Date.now() + 2_000;
+      while (pidText === undefined && Date.now() < pidDeadline) {
+        try {
+          pidText = await readFile(pidFile, "utf8");
+        } catch {
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      }
+      expect(pidText).toBeDefined();
+      const pid = Number(pidText);
+      expect(Number.isInteger(pid)).toBe(true);
+      await waitForDead(pid);
+      expect(isDead(pid)).toBe(true);
+      expect(groupIsDead(pid)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
-    expect(pidText).toBeDefined();
-    const pid = Number(pidText);
-    expect(Number.isInteger(pid)).toBe(true);
-    await waitForDead(pid);
-    expect(isDead(pid)).toBe(true);
-    expect(groupIsDead(pid)).toBe(true);
   }, 8_000);
 
   it("a late (post-deadline) settlement of the zombied scan is discarded, not applied", async () => {

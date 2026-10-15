@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
   symlinkSync,
   utimesSync,
@@ -10,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   assertAllowWrite,
   discoverCCProjects,
@@ -26,8 +27,14 @@ import { MemoryError, memoryDirFor, type MemoryPaths } from "../../src/memory/pa
 
 const NOW = "2026-01-02T03:04:05.000Z";
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function fixture(): { paths: MemoryPaths; cwd: string; dir: string } {
   const root = mkdtempSync(join(tmpdir(), "mem-store-"));
+  tmpRoots.push(root);
   const paths: MemoryPaths = { memoryRoot: join(root, "mem"), ccProjectsRoot: join(root, "cc") };
   const cwd = "/proj/app";
   return { paths, cwd, dir: memoryDirFor(cwd, paths) };

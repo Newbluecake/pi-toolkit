@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -263,8 +263,14 @@ describe("openSelectionView", () => {
   });
 });
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function fixture(): { cwd: string; paths: MemoryPaths; dir: string } {
   const root = mkdtempSync(join(tmpdir(), "tidy-selection-"));
+  tmpRoots.push(root);
   const cwd = join(root, "project");
   const paths = { memoryRoot: join(root, "memory"), ccProjectsRoot: join(root, "cc") };
   const dir = memoryDirFor(cwd, paths);

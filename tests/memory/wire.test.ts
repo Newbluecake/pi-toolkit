@@ -110,6 +110,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  rmSync(tmp, { recursive: true, force: true });
 });
 
 function wire(host: Host, settings: Partial<MemorySettings> = {}) {

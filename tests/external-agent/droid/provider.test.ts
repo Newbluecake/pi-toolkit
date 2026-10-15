@@ -1,7 +1,7 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { ClassifiedError, classifiedInfo } from "../../../src/core/errors.js";
 import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../../src/config/settings.js";
 import { createDroidProvider } from "../../../src/external-agent/droid/provider.js";
@@ -14,8 +14,25 @@ const SETTINGS = { ...DEFAULT_EXTERNAL_AGENTS_SETTINGS.droid, enabled: true };
 const SESSION_ID = "12345678-abcd-4321-9876-abcdef012345";
 const flush = () => new Promise((r) => setImmediate(r));
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function mkTmp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpRoots.push(dir);
+  return dir;
+}
+
+function agentTmp(): string {
+  const dir = mkdtempSync(join(tmpdir(), "droid-agent-"));
+  tmpRoots.push(dir);
+  return dir;
+}
+
 function setup(over: { settings?: typeof SETTINGS; agentDir?: string } = {}) {
-  const agentDir = over.agentDir ?? mkdtempSync(join(tmpdir(), "droid-agent-"));
+  const agentDir = over.agentDir ?? agentTmp();
   const f = makeFakeDeps(agentDir);
   const provider = createDroidProvider(f.deps, () => over.settings ?? SETTINGS);
   return { f, provider, agentDir };
@@ -23,7 +40,7 @@ function setup(over: { settings?: typeof SETTINGS; agentDir?: string } = {}) {
 
 describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   it("spawn argv/cwd/extraEnv/ownerWatchdog + init/update 参数 + transcript 头行 + observeInit", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider, agentDir } = setup();
     f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!)(m, p);
     const handle = await provider.create(makeSpec({ cwd }));
@@ -70,7 +87,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("persist=false ⇒ 不建 transcript、sessionFile undefined", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!)(m, p);
     const handle = await provider.create(makeSpec({ cwd, persist: false }));
@@ -79,7 +96,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("update -32602 Unknown model ⇒ config + 目录候选；terminate(now)；add_user_message 从未发出（S5）", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = (m, p) => {
       if (m === DROID_METHODS.updateSessionSettings)
@@ -107,7 +124,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("生效值 autonomy ≠ high ⇒ fail closed（config）", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!, { autonomy: "medium" })(m, p);
     await expect(provider.create(makeSpec({ cwd }))).rejects.toSatisfy(
@@ -117,7 +134,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("init 静默改模型（S5：echo modelId 不符且 update 也被静默）⇒ fail closed", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = (m, p) => {
       if (m === DROID_METHODS.updateSessionSettings) {
@@ -132,7 +149,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("strict：init 期间入站版本漂移 ⇒ config 致命（acceptance ⑧）", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = (m, p) => {
       if (m === DROID_METHODS.initializeSession) f.rpcs[0]!.drift("9.9.9");
@@ -145,7 +162,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("warn：漂移继续跑 + warnOnce + degraded protocol_drift 进 attach meta", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup({ settings: { ...SETTINGS, protocolCheck: "warn" } });
     f.rpcHandler = (m, p) => {
       if (m === DROID_METHODS.initializeSession) f.rpcs[0]!.drift("9.9.9");
@@ -159,7 +176,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("spawn startup_transient ⇒ 重归类 internal（主会话裁定：runner 无 create 重试循环）", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.spawnError = new ClassifiedError({ kind: "startup_transient", message: "spawn EAGAIN", retryable: true });
     await expect(provider.create(makeSpec({ cwd }))).rejects.toSatisfy((e) => {
@@ -169,7 +186,7 @@ describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   });
 
   it("spawn ENOENT（config）⇒ msgBinaryNotFound 文案", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.spawnError = new ClassifiedError({ kind: "config", message: "spawn droid ENOENT", retryable: false });
     await expect(provider.create(makeSpec({ cwd }))).rejects.toSatisfy(
@@ -192,8 +209,8 @@ describe("droid/provider resume cwd 钉死（acceptance ⑦，S7）", () => {
   });
 
   it("头行 cwd 存在 ⇒ spawn cwd 与 init 参数 cwd 都等于头行 cwd（spec.cwd 故意不同）", async () => {
-    const dirA = mkdtempSync(join(tmpdir(), "droid-cwd-a-"));
-    const dirB = mkdtempSync(join(tmpdir(), "droid-cwd-b-"));
+    const dirA = mkTmp("droid-cwd-a-");
+    const dirB = mkTmp("droid-cwd-b-");
     const { f, provider, agentDir } = setup();
     f.readHeader = () => headerFor(dirA);
     f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!)(m, p);
@@ -216,7 +233,7 @@ describe("droid/provider resume cwd 钉死（acceptance ⑦，S7）", () => {
   });
 
   it("load_session -32004 ⇒ config 失败（文案含原生日志路径）、组杀、不发 add_user_message、不开 transcript", async () => {
-    const dirA = mkdtempSync(join(tmpdir(), "droid-cwd-a-"));
+    const dirA = mkTmp("droid-cwd-a-");
     const { f, provider, agentDir } = setup();
     f.readHeader = () => headerFor(dirA);
     f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!, { loadMissing: true })(m, p);
@@ -284,7 +301,7 @@ describe("droid/provider ownsSessionFile 与 dispose", () => {
   });
 
   it("dispose 幂等，不杀运行中的 run", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!)(m, p);
     await provider.create(makeSpec({ cwd }));
@@ -296,7 +313,7 @@ describe("droid/provider ownsSessionFile 与 dispose", () => {
 
 describe("droid/provider prompt 驱动（端到端假链路）", () => {
   it("create → attach → prompt → 罐头 turn 完成 → usage/lastAssistantText", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = (m, p) => standardRpcHandler(f.rpcs[0]!)(m, p);
     const handle = await provider.create(makeSpec({ cwd }));
@@ -334,7 +351,7 @@ describe("droid/provider prompt 驱动（端到端假链路）", () => {
 
 describe("droid/provider init/update 阶段进程早退 + echo 等待回落（§15 跟踪项，P5）", () => {
   it("init 期间进程早退 ⇒ 立即 failAll（internal），不等 initTimeoutMs", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     f.rpcHandler = undefined; // init 请求永悬（fake-droid exit-during-init 同构）
     const created = provider.create(makeSpec({ cwd }));
@@ -354,7 +371,7 @@ describe("droid/provider init/update 阶段进程早退 + echo 等待回落（§
   });
 
   it("update 后无全量 echo ⇒ requestTimeoutMs 超时回落最新 echo（init result.settings）", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "droid-cwd-"));
+    const cwd = mkTmp("droid-cwd-");
     const { f, provider } = setup();
     // init 应答带全量 settings（不通知）；update 应答 {} 但**不**发 settings_updated。
     f.rpcHandler = (method) => {

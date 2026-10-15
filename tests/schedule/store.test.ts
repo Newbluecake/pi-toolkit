@@ -1,8 +1,13 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createScheduleStore, type ScheduleTask } from "../../src/schedule/store.js";
+
+const tmpRoots: string[] = [];
+afterEach(async () => {
+  for (const d of tmpRoots.splice(0)) await rm(d, { recursive: true, force: true });
+});
 
 const task: ScheduleTask = {
   id: "persisted",
@@ -13,6 +18,7 @@ const task: ScheduleTask = {
 describe("schedule store", () => {
   it("atomically saves and loads schedules", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-schedule-"));
+    tmpRoots.push(dir);
     const path = join(dir, "nested", "schedules.json");
     const store = createScheduleStore(path);
     await store.save([task]);
@@ -22,6 +28,7 @@ describe("schedule store", () => {
 
   it("warns and recovers from malformed JSON", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pi-schedule-bad-"));
+    tmpRoots.push(dir);
     const path = join(dir, "schedules.json");
     const { writeFile } = await import("node:fs/promises");
     await writeFile(path, "not-json");

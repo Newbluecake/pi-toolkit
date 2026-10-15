@@ -3,10 +3,10 @@
  * on a real tmp filesystem - `page()` listing/filtering/sorting, `resolve()` -> `prove()` ->
  * `verifyForSpawn()` -> `snapshot()` -> `verifySnapshot()`, `diag()`, and `dispose()` (X3 #4).
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
 import { HISTORY_DISPOSE_MS } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
 import { createHistoryService } from "../../../../../src/web-hub/hub/spawn/history/service.js";
@@ -45,6 +45,11 @@ beforeEach(() => {
   mkdirSync(join(sessionsDir, "d1"), { recursive: true });
   mkdirSync(join(root, "spawn"), { recursive: true });
   realCwd = mkdtempSync(join(tmpdir(), "pwh-svc-cwd-"));
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(realCwd, { recursive: true, force: true });
 });
 
 describe("createHistoryService.page", () => {

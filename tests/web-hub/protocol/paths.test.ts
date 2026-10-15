@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { chownSync, chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "vitest";
+import { chownSync, chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chmod as realChmod } from "node:fs/promises";
@@ -16,8 +16,15 @@ import {
 
 const SUFFIX = "/.pi/agent/web-hub/hub.sock";
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function tmp(): string {
-  return mkdtempSync(join(tmpdir(), "webhub-paths-"));
+  const dir = mkdtempSync(join(tmpdir(), "webhub-paths-"));
+  tmpRoots.push(dir);
+  return dir;
 }
 
 describe("webHubSpawnFiles", () => {

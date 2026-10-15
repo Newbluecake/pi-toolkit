@@ -143,7 +143,15 @@ async function loopKit(opts: { enabled?: boolean } = {}): Promise<LoopKit> {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   procFd.available = true;
-  for (const c of cleanups.splice(0)) await c();
+  const pending = cleanups.splice(0);
+  for (const c of pending) {
+    try {
+      await c();
+    } catch (err) {
+      // one failing cleanup must not leak the rest of the queue
+      console.warn("cleanup failed during afterEach drain:", err);
+    }
+  }
 });
 
 describe("loopback /api/worktree-graph — the §2.6/§3 matrix", () => {
@@ -203,6 +211,26 @@ async function lanKit(
   opts: { mode?: "on" | "loopback" } = {},
 ): Promise<{ port: number; cookie: Promise<string>; cleanup: Promise<void> }> {
   const dir = mkdtempSync(join(tmpdir(), "pwh-lan-wtg-"));
+  let fe: HttpFrontend | undefined;
+  try {
+    return await lanKitBody(dir, opts, (f) => (fe = f));
+  } catch (err) {
+    // fail-safe: any throw between mkdtemp and the returned cleanup must not leak the temp dir
+    try {
+      await fe?.close();
+    } catch {
+      // best effort — releasing the temp dir matters more
+    }
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+async function lanKitBody(
+  dir: string,
+  opts: { mode?: "on" | "loopback" },
+  onFrontend: (fe: HttpFrontend) => void,
+): Promise<{ port: number; cookie: Promise<string>; cleanup: Promise<void> }> {
   const log = captureLog();
   const clock = { now: () => Date.now() };
   const agents = new Map<string, AgentView>();
@@ -268,6 +296,7 @@ async function lanKit(
     },
     worktreeGraph: routes,
   });
+  onFrontend(fe);
   void lastStatus;
   if (fe.lan === undefined) throw new Error("test bug: no LAN facade");
   const status = await fe.lan.start();
@@ -290,7 +319,7 @@ async function lanKit(
 describe("LAN /api/worktree-graph — the mode gate", () => {
   it('mode "loopback": LAN answers 404 BYTE-IDENTICALLY to not-enabled', async () => {
     const k = await lanKit({ mode: "loopback" });
-    cleanups.push(() => k.cleanup);
+    cleanups.push(() => k.cleanup());
     const cookie = await k.cookie;
     const r = await lanRequest(k.port, { method: "GET", path: gq(), headers: { Cookie: cookie, "X-PWH": "1" } });
     expect(r.status).toBe(404);
@@ -299,7 +328,7 @@ describe("LAN /api/worktree-graph — the mode gate", () => {
 
   it('mode "on": LAN dispatches (CSRF before auth; a scripted admission failure maps through the pipeline)', async () => {
     const k = await lanKit({ mode: "on" });
-    cleanups.push(() => k.cleanup);
+    cleanups.push(() => k.cleanup());
     const cookie = await k.cookie;
     const noPwh = await lanRequest(k.port, { method: "GET", path: gq(), headers: { Cookie: cookie } });
     expect(noPwh.status).toBe(403);

@@ -7,10 +7,10 @@
  * targets `index.ts`'s own dir-open classification rather than `generation.ts`'s already-tested
  * enumeration-time classification, which reuses the identical literal open() path shape).
  */
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
 import { createHistoryService } from "../../../../../src/web-hub/hub/spawn/history/service.js";
 import type { HistoryServiceDeps } from "../../../../../src/web-hub/hub/spawn/history/ports.js";
@@ -56,6 +56,11 @@ beforeEach(() => {
   mkdirSync(join(sessionsDir, "d2"), { recursive: true });
   mkdirSync(join(root, "spawn"), { recursive: true });
   realCwd = mkdtempSync(join(tmpdir(), "pwh-idx-cwd-"));
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(realCwd, { recursive: true, force: true });
 });
 
 describe("pageHistory — dir-open fault classification (Finding 3)", () => {

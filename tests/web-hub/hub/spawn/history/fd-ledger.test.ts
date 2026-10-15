@@ -4,10 +4,10 @@
  * including a real `pinSession`/`snapshotFork` lifecycle proving the counter stays 0 on the
  * pin and temp paths too.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
 import { createHistoryIoGate } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
 import { createFdLedger } from "../../../../../src/web-hub/hub/spawn/history/fd-ledger.js";
@@ -23,6 +23,10 @@ let forkSrcDir: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "pwh-fdl-"));
   forkSrcDir = join(root, "fork-src");
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
 });
 
 describe("createFdLedger", () => {

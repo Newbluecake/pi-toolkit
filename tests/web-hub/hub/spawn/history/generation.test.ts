@@ -3,10 +3,10 @@
  * fd-anchored enumeration, the gen lock's recheck-before-commit discipline, and fd-ledger
  * integration (X3 #1-#3).
  */
-import { mkdirSync, mkdtempSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
 import {
   createHistoryIoGate,
@@ -49,10 +49,18 @@ function seedTree(dirs: number, filesPerDir: number): Set<string> {
   return keys;
 }
 
+const extraTmpDirs: string[] = [];
+
 beforeEach(() => {
+  extraTmpDirs.length = 0;
   root = mkdtempSync(join(tmpdir(), "pwh-gen-"));
   sessionsDir = join(root, "sessions");
   mkdirSync(sessionsDir, { recursive: true });
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+  for (const d of extraTmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 async function drainToCompletion(
@@ -167,6 +175,7 @@ describe("createGenStore — fd anchoring (E8)", () => {
     // such a tiny tree without a slow-fs injection, so this test instead asserts the gen's own
     // dirs[] stays frozen even after the real filesystem changes afterward.
     const outside = mkdtempSync(join(tmpdir(), "pwh-outside-"));
+    extraTmpDirs.push(outside);
     writeFileSync(join(outside, "evil.jsonl"), "x");
     renameSync(join(sessionsDir, "d1"), `${join(sessionsDir, "d1")}.real`);
     symlinkSync(outside, join(sessionsDir, "d1"));
@@ -460,6 +469,7 @@ describe("createGenStore — true mid-generation directory swap (Finding 4)", ()
     // swap the NOT-yet-enumerated directory for a symlink to a foreign tree, strictly AFTER
     // the first advance() call returned (the lease was released above).
     const outside = mkdtempSync(join(tmpdir(), "pwh-outside-"));
+    extraTmpDirs.push(outside);
     writeFileSync(join(outside, "evil.jsonl"), "x");
     renameSync(join(sessionsDir, pendingDirName), `${join(sessionsDir, pendingDirName)}.real`);
     symlinkSync(outside, join(sessionsDir, pendingDirName));

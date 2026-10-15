@@ -2,11 +2,11 @@
  * web-hub session-history plan §4.5.6 (`pin.ts`): fd-anchored resolution, resume preflight, and
  * the path-based restore-preflight pair — all on a REAL tmp filesystem (E5/E8 mechanisms).
  */
-import { linkSync, mkdirSync, mkdtempSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
 import { createHistoryIoGate } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
 import { createFdLedger } from "../../../../../src/web-hub/hub/spawn/history/fd-ledger.js";
@@ -46,11 +46,19 @@ function deps(fs: HistoryFs = defaultHistoryFs(), admission: PinAdmission = crea
   };
 }
 
+const extraTmpDirs: string[] = [];
+
 beforeEach(() => {
+  extraTmpDirs.length = 0;
   root = mkdtempSync(join(tmpdir(), "pwh-pin-"));
   sessionsDir = join(root, "sessions");
   mkdirSync(join(sessionsDir, "d1"), { recursive: true });
   writeFileSync(join(sessionsDir, "d1", "f1.jsonl"), header("sess-aaaa1", "/w/p"));
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+  for (const d of extraTmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 describe("pinSession — happy path and fd anchoring", () => {
@@ -336,6 +344,7 @@ describe("captureSessionPathPin (PD24 / v3.4 X1 — no sessionsRoot requirement)
 
   it("a path OUTSIDE any sessionsRoot concept still succeeds (X1 dropped the ownership check)", () => {
     const customDir = mkdtempSync(join(tmpdir(), "pwh-custom-"));
+    extraTmpDirs.push(customDir);
     mkdirSync(join(customDir, "sub"));
     writeFileSync(join(customDir, "sub", "s.jsonl"), "x");
     expect(capture(join(customDir, "sub", "s.jsonl"), UID).ok).toBe(true);

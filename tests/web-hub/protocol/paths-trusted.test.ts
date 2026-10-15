@@ -5,8 +5,17 @@
  * `paths-private-dir.test.ts` (existing) keep covering everything else in
  * this frozen-face-adjacent file; this file only exercises the P5a additions.
  */
-import { describe, expect, it } from "vitest";
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  chmodSync,
+  chownSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { chmod as realChmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,8 +25,15 @@ import { checkTrustedEntry, packageUiDistDir, webHubUiDir } from "../../../src/w
 const isRoot = process.getuid?.() === 0;
 const realUid = process.getuid?.() ?? 0;
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function tmp(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "webhub-ui-trust-")));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "webhub-ui-trust-")));
+  tmpRoots.push(dir);
+  return dir;
 }
 
 describe("packageUiDistDir", () => {

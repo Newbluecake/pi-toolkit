@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { handleBatchTidyCommand, parseTidyBatchArgs } from "../../src/memory/tidy/batch-command.js";
 import { DEFAULT_TIDY_BATCH_SETTINGS } from "../../src/memory/tidy/batch-settings.js";
@@ -31,8 +31,14 @@ function context(cwd: string, notifications: string[]): ExtensionCommandContext 
     ui: { notify: (message: string) => notifications.push(message) },
   } as unknown as ExtensionCommandContext;
 }
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function fixture(): { cwd: string; paths: MemoryPaths; dir: string } {
   const root = mkdtempSync(join(tmpdir(), "tidy-p3a-"));
+  tmpRoots.push(root);
   const cwd = join(root, "project");
   const paths = { memoryRoot: join(root, "memory"), ccProjectsRoot: join(root, "cc") };
   const dir = memoryDirFor(cwd, paths);

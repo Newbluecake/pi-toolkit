@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -39,8 +39,12 @@ describe("memoryDirFor", () => {
 
   it("paths injection overrides the default root", () => {
     const root = mkdtempSync(join(tmpdir(), "mem-paths-"));
-    const paths: MemoryPaths = { memoryRoot: root, ccProjectsRoot: root };
-    expect(memoryDirFor("/x", paths)).toBe(join(root, "-x"));
+    try {
+      const paths: MemoryPaths = { memoryRoot: root, ccProjectsRoot: root };
+      expect(memoryDirFor("/x", paths)).toBe(join(root, "-x"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -3,7 +3,7 @@
 // only pi surface it touches). No shared mocks; per-test tmpdir + paths
 // injection, never the real ~/.pi/agent/memory.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -23,6 +23,7 @@ interface Fixture {
 
 function fixture(): Fixture {
   const tmp = mkdtempSync(join(tmpdir(), "pi-mem-tool-"));
+  tmpRoots.push(tmp);
   const cwd = join(tmp, "proj");
   mkdirSync(cwd, { recursive: true });
   return { tmp, cwd, paths: { memoryRoot: join(tmp, "mem"), ccProjectsRoot: join(tmp, "cc") } };
@@ -65,8 +66,11 @@ function textOf(result: { content: { type: string; text: string }[] }): string {
   return result.content.map((c) => c.text).join("\n");
 }
 
+const tmpRoots: string[] = [];
+
 afterEach(() => {
   vi.restoreAllMocks();
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 describe("memory tool (§7.5)", () => {

@@ -5,7 +5,7 @@
  * This module is NOT wired into any server yet — the last `describe` block
  * asserts that lazily via a source scan.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -35,8 +35,15 @@ import {
 const realUid = process.getuid?.() ?? 0;
 const EXPECT: UiRootExpect = { version: "1.2.3", protoMajor: 1 };
 
+const tmpRoots: string[] = [];
+afterEach(() => {
+  for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function tmp(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "webhub-ui-root-")));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "webhub-ui-root-")));
+  tmpRoots.push(dir);
+  return dir;
 }
 
 /**
