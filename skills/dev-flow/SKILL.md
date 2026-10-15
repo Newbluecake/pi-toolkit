@@ -161,6 +161,8 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 | **开发实施**           | glm-5.3（zai 订阅有余量时首选）→ sonnet ⇄ gpt-6.1-sol   | kimi-k3（订阅有余量时）→ opus-5.5                  | `subagent_type=general`（非 UI 编码；`general-purpose` 只用于杂项多步任务）                                                                                                                        |
 | **任务验收**           | glm-5.3（订阅有余量时；开发用了 GLM 的包禁派）→ kimi-k3 | deepseek-v4-pro → sonnet                           | `subagent_type=verifier`；必须与开发模型异源；打回后复验优先 resume 原 verifier；**禁派任何 GPT 系模型**（gpt-6.1-sol / gpt-6-astra / gpt-5.6-terra 等，任何线路含 zhipu-pool；2026-10-14 用户令） |
 
+**droid 外部模型（`droid/<model>`，须 `externalAgents.droid.enabled`）**：经 `Agent({model:"droid/<id>"})` 派发，适合**开发实施 / 代码探索**的额外运力。限制：**不能**当 consult 专家、**不能**跑 tidy（只读工具域被拒）；它以完整权限运行（读用户全局 skills/MCP），破坏性任务建议 worktree 隔离；resume 钉原目录（worktree 被清后不可 resume，resume 后模型可能不记得前情，需连续上下文时在新 run 的 prompt 里给全背景）；**验收仍用 pi 模型**（异源，且禁 GPT 系规则照旧）；额度受 Factory standard/core 两池闸门约束（触线会被拒绝派发）。详见 `docs/dev/external-agent/README.md`。
+
 开发双首选（2026-09）：sonnet 与 gpt-6.1-sol 并列，多个开发包并行时按包分摊（gpt-6.1-sol 更便宜、上下文 1.05M）；**gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）**，不派任何 GPT 系。
 
 路由现状（2026-10）：zai 订阅有余量时 GLM 按上方「GLM 订阅优先」规则升为候选阶段首选；kimi-coding / zai 订阅常耗尽，额度耗尽或 L3 预警时回退到按量线（cr-anthropic / cr-response / zhipu-pool）的默认顺序（**验收除外：任何情况下都不回退到 GPT 系**）；GLM 仍在候选内的阶段可改派 `cr-glm/glm-5.3`（同模型、API 按量计费，按表中常规位次用，不升首选），GLM 的异源约束照旧。

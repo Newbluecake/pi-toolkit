@@ -583,6 +583,23 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
 - `src/git/` — pi-free bounded git executor (`run.ts`: hard deadline, process-group kill, stdout/stderr caps,
   unref'd timers) + `git worktree list --porcelain` parse/scan (`worktrees.ts`) + `~` path labels (`path-label.ts`).
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
+- `src/external-agent/` — external agent provider framework, currently one adapter: the virtual provider `droid/<model>`
+  (Factory's `droid` CLI; design `docs/dev/external-agent/{plan,arch}.md`, user guide `docs/dev/external-agent/README.md`).
+  Settings-gated: `externalAgents.droid.enabled` defaults false ⇒ no port/router/probe/disk write and a byte-identical
+  stack/prompt (the always-on checks use only structural evidence: `diag.external`, the `<agentDir>/external-agent/` path).
+  Ports are assembled in `src/stack.ts`; `RoutingSessionDriver` sends `droid/*` models to the droid adapter and everything
+  else to the pi driver. Process model: `droid exec --input-format stream-jsonrpc` child (`process.ts`/`jsonrpc.ts`),
+  wrapped by an `sh` owner-watchdog because D10 measured that closing stdin mid-turn does NOT make droid exit (idle EOF
+  does); `DROID_EXITS_ON_STDIN_EOF=false`, auto-update disabled via child env (strong guarantee is the user's
+  `~/.factory/update-policy.json`). Permissions: `autonomyLevel:"high"` with `autoRejectPermissionRequests:false` and a
+  synchronous `proceed_once` auto-approve (R10: droid also reads the user's global skills/AGENTS.md/MCP). `toolDomain:"readonly"`
+  is refused for droid (consult and tidy can never use it — droid cannot be sandboxed read-only). Resume pins the
+  transcript's header-line cwd (missing ⇒ `config` error, never a fallback; external resume + isolation rejected).
+  Billing: droid usage × the underlying model's pi price (`pricing.ts`; family/consensus matches are `approx`; no match ⇒
+  `unpriced` "all"/"partial", never inferred from costUsd≈0). The model catalog is probed lazily (an empty session is
+  written under `~/.factory/sessions/<probe-cwd slug>/`). Quota: droid's two Factory pools gate spawn (see `src/quota/`).
+  Protocol drift is guarded by a strict/warn check plus `tests/conformance/droid-protocol.test.ts` (real droid, opt-in
+  `PI_TOOLKIT_DROID_CONFORMANCE=1`; run it manually before any pi/droid upgrade).
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
   (design: `docs/dev/quota/`). A window whose `resetAt` has elapsed levels to 0 (`reason:"reset-elapsed"`, HUD `7d 100%·reset`) and bypasses
   the refresh TTL only while the snapshot predates the reset; `quota.repeatS` re-sends at L3 only. Ladder thresholds are per-window
@@ -590,6 +607,10 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   override a single window; the legacy flat `quota.l1Percent/l2Percent/l3Percent` still work and, when set, override BOTH windows
   (back-compat) — window-level fields win over the flat override, which wins over the per-window default. Each window's l1<=l2<=l3
   is clamped independently.
+  **droid pools** (`src/quota/adapters/droid.ts`, plan `docs/dev/external-agent/quota-plan.md`): Factory's standard/core pools are
+  virtual providers `droid-standard`/`droid-core` with a `month` window (`mo`); `droid/<id>` spawns gate on the owning pool
+  (unknown pool ⇒ both must be exhausted), extra-usage blocks unless `quota.droidAllowExtraUsage`, 401/402/403 only warn
+  (HUD `droid auth <code>`); web rows need cap `quota.pools.v1`.
 - `src/sysload/` — load-aware dispatch (`docs/dev/sysload/plan.md` v2.1). Pi-free core except `hook.ts`: `procfs`/`mounts`/`sampler`
   read CPU (incl. PSI), memory, IO pressure and per-mount disk from /proc + statfs under a process-wide IO ledger
   (`io-ledger.ts`, `Symbol.for("pi-subagent:sysload-io")` — the one documented process-global: ≤2 async ops, ≤1 per key, slots
