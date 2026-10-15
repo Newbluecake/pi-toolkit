@@ -4,6 +4,7 @@ import {
   parseMountinfo,
   parsePidStat,
   parsePressure,
+  parseProcCpu,
   parseProcStat,
   parseLoadavg,
 } from "../../src/sysload/procfs.js";
@@ -14,6 +15,14 @@ describe("sysload procfs parsers", () => {
     expect(stat.total).toBe(44);
     expect(stat.idleAll).toBe(25);
     expect(parsePressure("some avg10=42.5 avg60=1 avg300=0 total=1\n")).toEqual({ someAvg10: 42.5 });
+  });
+
+  it("parses per-core lines so the core count is real (cpuN, not only the aggregate)", () => {
+    const entries = parseProcCpu(
+      "cpu 4 0 4 8 0 0 0 0 0 0\ncpu0 1 0 1 2 0 0 0 0 0 0\ncpu1 1 0 1 2 0 0 0 0 0 0\ncpu15 2 0 2 4 0 0 0 0 0 0\nintr 1\n",
+    );
+    expect(entries.map((e) => e.name)).toEqual(["cpu", "cpu0", "cpu1", "cpu15"]);
+    expect(parseProcStat("cpu7 1 0 1 2 0 0 0 0 0 0\n")?.name).toBe("cpu7");
   });
 
   it("rejects impossible memory and load values", () => {

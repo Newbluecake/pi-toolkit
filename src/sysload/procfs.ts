@@ -65,7 +65,7 @@ export function parseProcStat(text: string): ProcCpuCounters | undefined {
   const line = text.split(/\r?\n/, 1)[0]?.trim();
   if (line === undefined) return undefined;
   const fields = line.split(/\s+/);
-  if (fields.length < 9 || !/^cpu(?:\\d+)?$/.test(fields[0] ?? "")) return undefined;
+  if (fields.length < 9 || !/^cpu(?:\d+)?$/.test(fields[0] ?? "")) return undefined;
   const numbers = fields.slice(1, 9).map(Number);
   if (numbers.some((n) => finiteNonNegative(n) === undefined)) return undefined;
   const [user, nice, system, idle, iowait, irq, softirq, steal] = numbers as [
