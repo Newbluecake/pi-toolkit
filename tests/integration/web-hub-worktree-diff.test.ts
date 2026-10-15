@@ -393,7 +393,9 @@ function spyRunner(real: GitRunner = createGitRunner()): RunnerSpy {
 // the in-process harness (preview-e2e shape: real startHub + socket fake agent)
 // ---------------------------------------------------------------------------
 
-const AGENT_PID = 424242;
+// a LIVE pid: the hub's 5s registry tick downs a dead-pid agent ("pid-dead") and every later
+// request then 404s — a fixed fake pid made slow (loaded) runs fail once a tick elapsed.
+const AGENT_PID = process.pid;
 const AGENT_NONCE = "wtdiffe2enonce00";
 const AGENT_KEY = `a${AGENT_PID}-${AGENT_NONCE.slice(0, 6)}`;
 const SESSION = "wtd-e2e-session";

@@ -49,7 +49,9 @@ import { seedLanUser } from "./lan-helpers.js";
 
 /** Fixed fake-agent identity so the registry's derived key (`a<pid>-<nonce6>`) is knowable
  * BEFORE the hub starts — the legacy craft needs it for its meta's agentKey field. */
-const AGENT_PID = 424242;
+// a LIVE pid: the hub's 5s registry tick downs a dead-pid agent ("pid-dead") and every later
+// request then 404s — a fixed fake pid made slow (loaded) runs fail once a tick elapsed.
+const AGENT_PID = process.pid;
 const AGENT_NONCE = "e2enonce0000000000";
 const AGENT_KEY = `a${AGENT_PID}-${AGENT_NONCE.slice(0, 6)}`;
 const AGENT_CAPS = ["ev.v1", "cmd.v1", "upload.v1", "upload.lan.v1"];

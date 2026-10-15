@@ -33,7 +33,9 @@ const SAFE_ENV: NodeJS.ProcessEnv = {
 };
 const hasGit = spawnSync("git", ["--version"], { env: SAFE_ENV, timeout: 5000 }).status === 0;
 const hasProcFd = process.platform === "linux" && existsSync("/proc/self/fd");
-const AGENT_PID = 424242;
+// a LIVE pid: the hub's 5s registry tick downs a dead-pid agent ("pid-dead") and every later
+// request then 404s — a fixed fake pid made slow (loaded) runs fail once a tick elapsed.
+const AGENT_PID = process.pid;
 const NONCE = "wtgraphe2enonce00";
 const AGENT_KEY = `a${AGENT_PID}-${NONCE.slice(0, 6)}`;
 const SESSION = "wtgraph-p6-session";
