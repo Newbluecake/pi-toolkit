@@ -19,7 +19,13 @@ import {
   type ProviderVerdict,
   type WindowVerdict,
 } from "../../src/quota/ladder.js";
-import type { LadderLevel, QuotaProviderId, WindowScope } from "../../src/quota/types.js";
+import type {
+  DroidPoolAdvice,
+  DroidPoolListingEntry,
+  LadderLevel,
+  QuotaProviderId,
+  WindowScope,
+} from "../../src/quota/types.js";
 
 const NOW = 1_000_000;
 /** 02:11 local-time reset anchor — deterministic under any test-runner TZ. */
@@ -193,9 +199,34 @@ describe("pickAlternatives", () => {
       "zai-coding-cn": makeVerdict({ provider: "zai-coding-cn", level: 1, windows: [win("5h", 30, 1)] }),
     };
     const deps = gateDeps((p) => verdicts[p]);
-    // kimi (fresh L3) is excluded; stale zai counts as healthy (R5) and, being a
-    // subscription, keeps pay-per-use cloudrouter out of the list.
+    // kimi (fresh L3) is excluded; stale zai is still selectable (R5: the gate never
+    // blocks on stale) but — 2026-10-15 拍板「no trustworthy data ⇒ the subscription
+    // does not exist」— no longer counts as a subscription, so pay-per-use
+    // cloudrouter is no longer pushed out of the list and the heading loses 订阅优先.
+    expect(pickAlternatives("zai-coding-cn", deps)).toEqual({
+      providers: ["zai", "cloudrouter-anthropic"],
+      subscription: false,
+    });
+  });
+
+  it("a stale provider stays subscription-tier ONLY when explicitly declared (quota.subscriptionProviders)", () => {
+    const verdicts: Record<string, ProviderVerdict> = {
+      zai: makeVerdict({ provider: "zai", level: 3, stale: true, windows: [win("5h", 99, 3)] }),
+      // cloudrouter 无快照（非受管 provider ⇒ tier 2）：否则新鲜窗口数据会把它抬回订阅层。
+    };
+    const deps = {
+      verdictFor: (p: string) => verdicts[p],
+      available: () => CANDIDATES,
+      isSubscription: (p: string) => p === "zai",
+    };
+    // declared stale zai keeps tier 1 (subscription heading, cloudrouter excluded);
+    // without the declaration the same snapshot falls to pay-per-use.
     expect(pickAlternatives("zai-coding-cn", deps)).toEqual({ providers: ["zai"], subscription: true });
+    // 未声明 ⇒ 全体落 tier 2（kimi 无快照、zai stale、cloudrouter 非受管），按注册表序全列。
+    expect(pickAlternatives("zai-coding-cn", { ...deps, isSubscription: () => false })).toEqual({
+      providers: ["kimi-coding", "zai", "cloudrouter-anthropic"],
+      subscription: false,
+    });
   });
 
   it("defaults to the level-3 exclusion line when deps carries no blockAtLevel (hook-side Pick)", () => {
@@ -518,9 +549,18 @@ const PI_VERDICTS: Record<string, ProviderVerdict> = {
   "zai-coding-cn": makeVerdict({ provider: "zai-coding-cn", level: 0, windows: [win("5h", 20, 0)] }),
 };
 
+/** 测试用建议包（stack 接线传的是 QuotaService.poolAlternatives 的真实返回）。 */
+function advice(
+  pool: "core" | "standard",
+  models: readonly string[],
+  listing: DroidPoolListingEntry[] = [],
+): DroidPoolAdvice[] {
+  return [{ pool, models, listing }];
+}
+
 function droidDeps(
   view: QuotaModelView | undefined,
-  over: { poolAlternatives?: (b: string) => readonly string[]; blockAtLevel?: LadderLevel } = {},
+  over: { poolAlternatives?: (b: string) => readonly DroidPoolAdvice[]; blockAtLevel?: LadderLevel } = {},
 ): QuotaGateDeps {
   return {
     verdictFor: (p) => PI_VERDICTS[p],
@@ -540,23 +580,35 @@ function stdView(v: ProviderVerdict | undefined): QuotaModelView {
 
 describe("evaluateQuotaGate — droid pool path", () => {
   it("pool known + standard exhausted ⇒ blocked: head names the pool, core models line precedes the pi-native line", () => {
+    const listing: DroidPoolListingEntry[] = [
+      { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+      { pool: "core", state: "ok", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+    ];
     const verdict = evaluateQuotaGate(
       DROID_MODEL,
       droidDeps(stdView(poolVerdict("droid-standard", 100, 3)), {
-        poolAlternatives: () => ["droid/glm-5.3", "droid/kimi-k3"],
+        poolAlternatives: () => advice("core", ["droid/glm-5.3", "droid/kimi-k3"], listing),
       }),
     );
     expect(verdict?.level).toBe(3);
     const msg = verdict?.message ?? "";
-    expect(msg).toContain("quota gate: droid/claude-opus-5-5（standard 池）的 5h 配额已用尽（100%，");
+    expect(msg).toContain("quota gate: droid/claude-opus-5-5（Standard 池）的 5h 配额已用尽（100%，");
     expect(msg).toContain("02:11 重置），本次 spawn 已快速失败，未消耗任何 run。");
-    const coreIdx = msg.indexOf("优先改用 droid core 池模型：droid/glm-5.3、droid/kimi-k3");
+    const coreIdx = msg.indexOf("优先改用 Droid Core 池模型：droid/glm-5.3、droid/kimi-k3");
+    const listIdx = msg.indexOf("Droid 模型按池：Standard 池（已拦，勿派）：");
     const piIdx = msg.indexOf("改用 pi 原生子 agent");
     expect(coreIdx).toBeGreaterThan(-1);
-    expect(piIdx).toBeGreaterThan(coreIdx); // core 行在前、pi 行在后（评审 #4）
+    expect(listIdx).toBeGreaterThan(coreIdx); // 清单行取代通用括号，跟在推荐行后
+    expect(msg).not.toContain("Factory 托管开源模型");
+    expect(piIdx).toBeGreaterThan(listIdx); // core 行 → 清单 → pi 行（评审 #4 顺序保持）
     expect(msg).toContain("或改用 pi 原生子 agent");
     expect(msg).toContain("quota.gate 设为 false");
-    expect(verdict?.alternatives).toMatchObject({ external: true, models: ["droid/glm-5.3", "droid/kimi-k3"] });
+    expect(verdict?.alternatives).toMatchObject({
+      external: true,
+      models: ["droid/glm-5.3", "droid/kimi-k3"],
+      modelsPool: "core",
+      poolListing: listing,
+    });
     expect(verdict?.alternatives.providers.length).toBeGreaterThan(0);
   });
 
@@ -569,13 +621,28 @@ describe("evaluateQuotaGate — droid pool path", () => {
     expect("models" in (verdict?.alternatives ?? {})).toBe(false);
   });
 
-  it("core pool blocked ⇒ never asks poolAlternatives; pi-only line", () => {
-    const spy = vi.fn(() => ["droid/glm-5.3"]);
+  it("core pool blocked (D7 对称化) ⇒ asks poolAlternatives('droid-core') and recommends Standard models", () => {
+    const spy = vi.fn(() => advice("standard", ["droid/claude-opus-5-5", "droid/gpt-6"]));
     const view: QuotaModelView = { pool: "core", keys: ["droid-core"], verdicts: [poolVerdict("droid-core", 100, 3)] };
     const verdict = evaluateQuotaGate({ provider: "droid", id: "glm-5.3" }, droidDeps(view, { poolAlternatives: spy }));
-    expect(verdict?.message).toContain("（core 池）");
-    expect(spy).not.toHaveBeenCalled();
+    expect(verdict?.message).toContain("（Core 池）");
+    expect(spy).toHaveBeenCalledWith("droid-core");
+    expect(verdict?.message).toContain(
+      "同一 Factory 账户的 Standard 池仍有额度，可改用 Droid Standard 池模型：droid/claude-opus-5-5、droid/gpt-6（Standard 池模型计入 Standard 池额度，不占 Core 池）。",
+    );
+    expect(verdict?.alternatives).toMatchObject({ external: true, modelsPool: "standard" });
+    expect(verdict?.message).toContain("或改用 pi 原生子 agent");
+  });
+
+  it("core pool blocked with NO advice (other pool untrusted/over the line) ⇒ pi-only line, no models key", () => {
+    const view: QuotaModelView = { pool: "core", keys: ["droid-core"], verdicts: [poolVerdict("droid-core", 100, 3)] };
+    const verdict = evaluateQuotaGate(
+      { provider: "droid", id: "glm-5.3" },
+      droidDeps(view, { poolAlternatives: () => [] }),
+    );
+    expect(verdict?.message).toContain("（Core 池）");
     expect("models" in (verdict?.alternatives ?? {})).toBe(false);
+    expect("poolListing" in (verdict?.alternatives ?? {})).toBe(false);
     expect(verdict?.alternatives.external).toBe(true);
     expect(verdict?.message).toContain("改用 pi 原生子 agent");
   });
@@ -599,9 +666,9 @@ describe("evaluateQuotaGate — droid pool path", () => {
     expect(evaluateQuotaGate(DROID_MODEL, droidDeps(mk(std, coreOk)))).toBeUndefined();
     expect(evaluateQuotaGate(DROID_MODEL, droidDeps(mk(coreOk, std)))).toBeUndefined();
     const blocked = evaluateQuotaGate(DROID_MODEL, droidDeps(mk(std, coreHot)));
-    expect(blocked?.message).toContain("计费池未知，standard 与 core 池均已触线");
-    expect(blocked?.message).toContain("standard 池 5h 配额已用尽");
-    expect(blocked?.message).toContain("core 池 5h 配额已用尽");
+    expect(blocked?.message).toContain("计费池未知，Standard 与 Core 池均已触线");
+    expect(blocked?.message).toContain("Standard 池 5h 配额已用尽");
+    expect(blocked?.message).toContain("Core 池 5h 配额已用尽");
     // 池未知时不给 droid 内替代（core 同样触线）。
     expect("models" in (blocked?.alternatives ?? {})).toBe(false);
   });
@@ -652,13 +719,13 @@ describe("evaluateQuotaGate — droid pool path", () => {
       evaluateQuotaGate(
         DROID_MODEL,
         droidDeps(stdView(poolVerdict("droid-standard", 100, 3, { billing: extra })), {
-          poolAlternatives: () => ["droid/glm-5.3"],
+          poolAlternatives: () => advice("core", ["droid/glm-5.3"]),
         }),
       )?.message ?? "";
     const marks = [
       "quota gate:",
       "Factory 超额策略",
-      "优先改用 droid core 池模型",
+      "优先改用 Droid Core 池模型",
       "或改用 pi 原生子 agent",
       "按任务需求选",
       "quota.gate 设为 false",
@@ -679,7 +746,10 @@ describe("evaluateQuotaGate — droid pool path", () => {
     };
     const verdict = evaluateQuotaGate(
       { provider: "zai-coding-cn", id: "glm-5.3" },
-      { ...droidDeps(undefined, { poolAlternatives: () => ["droid/glm-5.3"] }), verdictFor: (p) => verdicts[p] },
+      {
+        ...droidDeps(undefined, { poolAlternatives: () => advice("core", ["droid/glm-5.3"]) }),
+        verdictFor: (p) => verdicts[p],
+      },
     );
     expect(verdict).toBeDefined();
     expect("external" in (verdict?.alternatives ?? {})).toBe(false);
@@ -692,14 +762,26 @@ describe("pickAlternatives — droid decoration", () => {
   const deps = {
     verdictFor: (p: string) => PI_VERDICTS[p],
     available: () => CANDIDATES,
-    poolAlternatives: (b: string) => (b === "droid-standard" ? ["droid/glm-5.3"] : []),
+    poolAlternatives: (b: string) => (b === "droid-standard" ? advice("core", ["droid/glm-5.3"]) : []),
   };
 
-  it("droid-standard blocked ⇒ external + models; droid-core blocked ⇒ external without models", () => {
-    expect(pickAlternatives("droid-standard", deps)).toMatchObject({ external: true, models: ["droid/glm-5.3"] });
+  it("droid-standard blocked ⇒ external + models(+modelsPool); droid-core blocked ⇒ external only when the advice is empty", () => {
+    expect(pickAlternatives("droid-standard", deps)).toMatchObject({
+      external: true,
+      models: ["droid/glm-5.3"],
+      modelsPool: "core",
+    });
     const core = pickAlternatives("droid-core", deps);
     expect(core.external).toBe(true);
     expect("models" in core).toBe(false);
+  });
+
+  it("droid-core blocked with symmetric advice ⇒ standard models ride along (D7 对称化)", () => {
+    const sel = pickAlternatives("droid-core", {
+      ...deps,
+      poolAlternatives: (b) => (b === "droid-core" ? advice("standard", ["droid/gpt-6"]) : []),
+    });
+    expect(sel).toMatchObject({ external: true, models: ["droid/gpt-6"], modelsPool: "standard" });
   });
 
   it("non-droid blocked ⇒ exact legacy shape (no external/models keys) even when poolAlternatives is supplied", () => {
@@ -730,12 +812,12 @@ describe("evaluateQuotaGate / pickAlternatives — pi blocked × droid pool supp
     expect(verdict?.alternatives.droidPools).toEqual(POOLS);
     const msg = verdict?.message ?? "";
     expect(msg).toContain(
-      "有余量的外部 droid 池也可用：droid/glm-5.3、droid/kimi-k3（core 池）；droid/claude-opus-5-5（standard 池）。",
+      "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。",
     );
     expect(msg).toContain("不能当 consult/验收");
     const piIdx = msg.indexOf("替代候选（订阅优先）：kimi-coding。");
     expect(piIdx).toBeGreaterThan(-1);
-    expect(piIdx).toBeLessThan(msg.indexOf("有余量的外部 droid 池也可用"));
+    expect(piIdx).toBeLessThan(msg.indexOf("有余量的外部 Droid 池也可用"));
   });
 
   it("droid supplement empty ⇒ the message is byte-identical to the no-dep legacy gate copy", () => {
@@ -764,12 +846,14 @@ describe("evaluateQuotaGate / pickAlternatives — pi blocked × droid pool supp
       },
     );
     expect(verdict?.message).not.toContain("暂无替代候选");
-    expect(verdict?.message).toContain("有余量的外部 droid 池也可用");
+    expect(verdict?.message).toContain("有余量的外部 Droid 池也可用");
   });
 
   it("external branch (droid pool blocked) ignores droidAlternatives — D7/D8 copy only", () => {
     const verdict = evaluateQuotaGate(DROID_MODEL, {
-      ...droidDeps(stdView(poolVerdict("droid-standard", 100, 3)), { poolAlternatives: () => ["droid/glm-5.3"] }),
+      ...droidDeps(stdView(poolVerdict("droid-standard", 100, 3)), {
+        poolAlternatives: () => advice("core", ["droid/glm-5.3"]),
+      }),
       droidAlternatives: () => POOLS,
     });
     expect(verdict?.message).not.toContain("有余量的外部 droid 池也可用");

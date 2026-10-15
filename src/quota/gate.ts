@@ -23,13 +23,21 @@
 import type { ModelCandidate, ModelRef } from "../config/model-hint.js";
 import type { Millis } from "../core/types.js";
 import { isDemotionFloorOnly, type ProviderVerdict, type WindowVerdict } from "./ladder.js";
-import { isDroidQuotaId, type DroidPoolAlternative, type LadderLevel } from "./types.js";
+import {
+  isDroidQuotaId,
+  type DroidPoolAdvice,
+  type DroidPoolAlternative,
+  type DroidPoolListingEntry,
+  type LadderLevel,
+  type QuotaPoolId,
+} from "./types.js";
 import type { QuotaModelView } from "./service.js";
 import {
   alternativesAdvice,
   demotionFloorClause,
   formatResetAt,
   formatScope,
+  poolLabel,
   quotaLabel,
   type AlternativeSelection,
 } from "./render.js";
@@ -56,8 +64,9 @@ export interface QuotaGateDeps {
    * 返回 undefined ⇒ 该模型不受池管理 ⇒ 走旧路径（字节不变）。
    */
   readonly modelView?: ((model: ModelRef) => QuotaModelView | undefined) | undefined;
-  /** droid 内替代（D7；stack.ts 接 `QuotaService.poolAlternatives`）。 */
-  readonly poolAlternatives?: ((blocked: string) => readonly string[]) | undefined;
+  /** droid 内替代（D7 对称化；stack.ts 接 `QuotaService.poolAlternatives`）：另一池推荐 +
+   * 两池逐池清单（DroidPoolAdvice）。空数组 ⇒ 选中对象形状与旧版一致。 */
+  readonly poolAlternatives?: ((blocked: string) => readonly DroidPoolAdvice[] | undefined) | undefined;
   /**
    * pi provider 被拦时的补充候选（2026-10-15 用户拍板；stack.ts 接
    * `QuotaService.droidAlternatives`）。缺席/返回空 ⇒ 选中对象形状与旧版一致
@@ -114,15 +123,10 @@ function evaluatePooledGate(model: ModelRef, view: QuotaModelView, deps: QuotaGa
     if (v.level < deps.blockAtLevel || v.billing?.gateOpen === true) return undefined;
   }
   const blocked = view.keys[0] ?? "droid-standard";
-  const models =
-    view.keys.length === 1 && blocked === "droid-standard" ? (deps.poolAlternatives?.("droid-standard") ?? []) : [];
+  // D7 对称化：droid 池被拦 ⇒ 建议包（另一池推荐 + 逐池清单）随 selection 透传；
+  // 池未知时另一池必已触线（闸门才拦）⇒ models 自然为空，listing 仍逐池报状态。
   const picked = pickAlternatives(blocked, deps, DEFAULT_ALTERNATIVE_LIMIT);
-  const alternatives: AlternativeSelection = {
-    providers: picked.providers,
-    subscription: picked.subscription,
-    external: true, // D8：pi 订阅行改标题「改用 pi 原生子 agent」
-    ...(models.length > 0 ? { models } : {}),
-  };
+  const alternatives: AlternativeSelection = picked.external === true ? picked : { ...picked, external: true };
   let level: LadderLevel = 0;
   for (const v of verdicts) if (v.level > level) level = v.level;
   return {
@@ -147,13 +151,14 @@ function buildPooledGateMessage(
 ): string {
   const name = `${model.provider}/${model.id}`;
   let head: string;
-  if (view.pool === undefined) {
+  const pool = view.pool === "none" ? undefined : view.pool;
+  if (pool === undefined) {
     head =
-      `quota gate: ${name}（计费池未知，standard 与 core 池均已触线：` +
-      `standard 池 ${windowClause(verdicts[0]!, now)}；core 池 ${windowClause(verdicts[1]!, now)}），` +
+      `quota gate: ${name}（计费池未知，Standard 与 Core 池均已触线：` +
+      `Standard 池 ${windowClause(verdicts[0]!, now)}；Core 池 ${windowClause(verdicts[1]!, now)}），` +
       "本次 spawn 已快速失败，未消耗任何 run。";
   } else {
-    head = `quota gate: ${name}（${view.pool} 池）的 ${windowClause(verdicts[0]!, now)}，本次 spawn 已快速失败，未消耗任何 run。`;
+    head = `quota gate: ${name}（${poolLabel(pool)} 池）的 ${windowClause(verdicts[0]!, now)}，本次 spawn 已快速失败，未消耗任何 run。`;
   }
   const lines: string[] = [head];
   // D6：超额策略为 extraUsage 且未被放行 ⇒ 披露余额与逃生阀（文案、HUD、web 全程可见）。
@@ -175,12 +180,16 @@ function buildPooledGateMessage(
  * （自身或任何 level >= gateLevel 的 provider）一律排除。
  *
  * 订阅优先（2026-09 口径修订）：订阅额度窗口内不用就作废。分三层——
- *   tier 0 受管订阅（带窗口数据，额度可见）
+ *   tier 0 受管订阅（**新鲜**窗口数据，额度可见）
  *   tier 1 声明订阅（`quota.subscriptionProviders`，无额度数据）
  *   tier 2 其余（按量计费/中转）
  * **只要还有任何订阅候选（tier 0/1），就只推荐订阅**，宁可少于 limit 个；订阅
  * 全部耗尽/被排除时才退到 tier 2。旧口径把非受管视作 level 0 / pct 0 排在最前，
  * 等于一有预警就把流量从「已付费的订阅」推向「按 token 计费」的模型。
+ * 2026-10-15 拍板「no trustworthy data ⇒ the subscription does not exist」：
+ * 无 verdict / stale 的 provider 不再凭旧窗口数据进 tier 0——只有显式声明的
+ * `quota.subscriptionProviders` 条目保留 tier 1，其余落 tier 2（service 层对
+ * stale 已直接返回 undefined，这里兑注入桩的防御分支）。
  */
 export function pickAlternatives(
   blocked: string,
@@ -220,9 +229,16 @@ export function pickAlternatives(
       });
       continue;
     }
-    // 无 verdict / stale：有窗口数据的 stale 快照仍是订阅（只是数据旧），归订阅层。
-    const tier = verdict !== undefined && verdict.windows.length > 0 ? 0 : declared(candidate.provider) ? 1 : 2;
-    scored.push({ provider: candidate.provider, tier, level: 0, pct: 0, order: rank });
+    // 无 verdict / stale：数据不可信 ⇒ 不算订阅（2026-10-15 拍板）——只有显式声明
+    // 的 `quota.subscriptionProviders` 条目保留 tier 1，其余按量计费层；
+    // level/pct 仍按 0 参与排序（不构成排除，闸门对 stale 放行 R5）。
+    scored.push({
+      provider: candidate.provider,
+      tier: declared(candidate.provider) ? 1 : 2,
+      level: 0,
+      pct: 0,
+      order: rank,
+    });
   }
   // 有订阅候选 ⇒ 只推荐订阅；否则才退到按量计费。
   const pool = scored.some((s) => s.tier < 2) ? scored.filter((s) => s.tier < 2) : scored;
@@ -230,15 +246,14 @@ export function pickAlternatives(
   const providers = pool.slice(0, cap).map((s) => s.provider);
   const subscription = pool.length > 0 && pool[0]!.tier < 2;
   // droid 池被拦（quota-plan r2 §6，D8）：返回值带 external: true（pi 行改标题
-  // 「改用 pi 原生子 agent」）；droid-standard 且 core 有健康候选时再挂 models。
-  // 非 droid 被拦 ⇒ 对象形状与改动前完全一样（kimi/zai golden 钉住）。
+  // 「改用 pi 原生子 agent」）；另一池有健康候选时再挂 models/modelsPool，逐池清单
+  // 非空时挂 poolListing。非 droid 被拦 ⇒ 对象形状与改动前完全一样（kimi/zai golden 钉住）。
   if (isDroidQuotaId(blocked)) {
-    const models = blocked === "droid-standard" ? (deps.poolAlternatives?.(blocked) ?? []) : [];
     return {
       providers,
       subscription,
       external: true,
-      ...(models.length > 0 ? { models } : {}),
+      ...droidAdviceFields(deps, blocked),
     };
   }
   // 2026-10-15 用户拍板：pi provider 被拦 ⇒ 附上有余量的 droid 池候选（dep 缺席 /
@@ -286,6 +301,29 @@ export function toLadderLevel(value: number): LadderLevel {
 
 /** §6「取前 3」：一次快速失败错误里最多列 3 个替代，多了反而不可读。 */
 const DEFAULT_ALTERNATIVE_LIMIT = 3;
+
+/**
+ * droid 池被拦时的建议包字段（pickAlternatives / evaluatePooledGate 共用）：读
+ * `deps.poolAlternatives` 的首包，展开成 `models`+`modelsPool` / `poolListing` 三个
+ * 可选字段。端口缺席 / 抡异常 / 包全空 ⇒ 无字段（选中对象形状与旧版一致）；
+ * 抢异常由 try/catch 兜底（stack 接线永不抛，这里兑注入桩）。
+ */
+function droidAdviceFields(
+  deps: Pick<QuotaGateDeps, "poolAlternatives">,
+  blocked: string,
+): { models?: readonly string[]; modelsPool?: QuotaPoolId; poolListing?: readonly DroidPoolListingEntry[] } {
+  let advice: DroidPoolAdvice | undefined = undefined;
+  try {
+    advice = (deps.poolAlternatives?.(blocked) ?? [])[0];
+  } catch {
+    advice = undefined;
+  }
+  if (advice === undefined) return {};
+  return {
+    ...(advice.models.length > 0 ? { models: advice.models, modelsPool: advice.pool } : {}),
+    ...(advice.listing.length > 0 ? { poolListing: advice.listing } : {}),
+  };
+}
 
 /**
  * 排除线（plan §6）：任何 `level >= gateLevel` 的 provider 不得入选——推荐

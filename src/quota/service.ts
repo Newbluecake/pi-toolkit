@@ -42,10 +42,15 @@ import { renderQuotaStatus, type QuotaStatusTheme } from "./render.js";
 import {
   DROID_PROVIDER,
   DROID_QUOTA_IDS,
+  isDroidQuotaId,
   isQuotaProviderId,
   type CredentialResolver,
+  type DroidPoolAdvice,
   type DroidPoolAlternative,
+  type DroidPoolListingEntry,
+  type DroidPoolState,
   type FetchJson,
+  type LadderLevel,
   type ProviderAdapter,
   type QuotaPoolId,
   type QuotaPoolPort,
@@ -70,7 +75,12 @@ export interface QuotaModelView {
 }
 
 export interface QuotaService {
-  /** **同步**读缓存判定（spawn 闸门 / hook / HUD 唯一入口）。永不发请求、永不抛。 */
+  /**
+   * **同步**读缓存判定（spawn 闸门 / hook / HUD 唯一入口）。永不发请求、永不抛。
+   * 信任过滤（2026-10-15 终版拍板「数据拿不到就当没有该订阅」）：快照缺席 / stale /
+   * （droid 池）鉴权失败的 provider 一律不可见——`verdicts()` 不含它，`verdictFor()`
+   * 返回 undefined（闸门对 undefined 本就 fail-open，永不因缺数据拦 spawn）。
+   */
   verdicts(now?: Millis): readonly ProviderVerdict[];
   verdictFor(provider: string, now?: Millis): ProviderVerdict | undefined;
   /**
@@ -78,16 +88,18 @@ export interface QuotaService {
    * （非 droid / droid 适配器未构造）⇒ 闸门走旧路径。同步、只读。
    */
   verdictsForModel(model: { provider: string; id: string }, now?: Millis): QuotaModelView | undefined;
-  /** blocked === "droid-standard" 且 core 未被排除 ⇒ ≤limit 个 "droid/<id>"（D7）；其余 ⇒ []。 */
-  poolAlternatives(blocked: string, limit?: number): readonly string[];
+  /** droid 池被拦时的补充候选：另一池无可信数据（缺席 / stale / 鉴权失败）或触闸门线
+   *  ⇒ 不推荐；逐池清单只含可信池。闸门本身仍 fail-open（不因缺数据拦 spawn）。 */
+  poolAlternatives(blocked: string, limit?: number): readonly DroidPoolAdvice[];
   /**
-   * pi provider 被拦/告急时的补充候选（2026-10-15 用户拍板）：有余量的 droid 池模型，
-   * core 池在前、每池 ≤limit 个 `droid/<id>`。池须未 stale、未触闸门线（gate 关闭
-   * 时仍按 L3 排除；触线池即使 gateOpen（花额外余额）也不列——那不是「有余量」）。
-   * 池端口缺席（droid 未启用/未接线）或两池都不可用 ⇒ []，调用方输出字节不变。
+   * pi provider 被拦/告急时的补充候选（2026-10-15 用户拍板）：可信（新鲜快照、无鉴权
+   * 问题）且未触闸门线的 droid 池模型，core 池在前、每池 ≤limit 个 `droid/<id>`
+   * （gate 关闭时仍按 L3 排除；触线池即使 gateOpen（花额外余额）也不列）。无可信
+   * 数据的池不列（终版拍板）。池端口缺席（droid 未启用/未接线）或两池都不可用 ⇒ []，
+   * 调用方输出字节不变。
    */
   droidAlternatives(limit?: number): readonly DroidPoolAlternative[];
-  /** 认证类问题（401/402/403），按 family 去重（D3：不拦 spawn，只显示）。 */
+  /** 恒 []（2026-10-15 终版拍板）：鉴权问题不进任何 UI；适配器仍记录（信任判定用）。 */
   problems(): readonly QuotaProblem[];
   /** fire-and-forget；未过期或在途则空转。永不抛、永不返回被拒 Promise。 */
   refreshIfStale(): void;
@@ -128,6 +140,9 @@ export interface QuotaServiceDeps {
  * 会让它前移一整个窗口（5h / 7d）；1 分钟容差只为吸收两次拉取间的时间戳抖动。
  */
 export const RESET_ADVANCE_TOLERANCE_MS = 60_000;
+
+/** 逐池清单每池最多列多少个模型（2026-10-15 拍板的截断上限，超出写「等 N 个」）。 */
+const DROID_POOL_LISTING_LIMIT = 5;
 
 /** 可疑读数的待确认记录：哪些窗口回落了但没有重置证据。 */
 interface SuspectRead {
@@ -248,10 +263,23 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   const verdictsNow = (now: Millis): readonly ProviderVerdict[] => {
     const out: ProviderVerdict[] = [];
     for (const adapter of deps.adapters) {
-      const verdict = verdictOf(adapter.id, now);
+      const verdict = trustedVerdictOf(adapter.id, now);
       if (verdict !== undefined) out.push(verdict);
     }
     return out;
+  };
+
+  /**
+   * 信任判定出口（2026-10-15 终版拍板：「只要订阅数据拿不到，就当做没有对应的订阅
+   * 套餐」）：快照缺席 / stale /（droid 池）鉴权失败 ⇒ 该 provider 对一切消费面
+   * （注入流 / HUD / web / 闸门判定 / 替代建议）均不可见。闸门对 undefined 本就
+   * fail-open，永不因缺数据拦 spawn；内部刷新节奏仍用原始 verdictOf。
+   */
+  const trustedVerdictOf = (id: QuotaProviderId, now: Millis): ProviderVerdict | undefined => {
+    const verdict = verdictOf(id, now);
+    if (verdict === undefined || verdict.stale) return undefined;
+    if (isDroidQuotaId(id) && droidAuthProblem() !== undefined) return undefined;
+    return verdict;
   };
 
   // Hot providers are refreshed more often independently; an L1 snapshot or a
@@ -268,7 +296,8 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   const writeStatus = (now: Millis): void => {
     if (disposed || deps.setStatus === undefined) return;
     try {
-      deps.setStatus(renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.(), problemsNow()));
+      // 不可信的 provider 在 verdictsNow 里已被过滤；鉴权问题不再进任何 UI（终版拍板）。
+      deps.setStatus(renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.(), []));
     } catch {
       // HUD 不可用不影响数据面。
     }
@@ -352,6 +381,63 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       if (info !== undefined && (info.deprecated === true || info.kind === "router")) return false;
       return true; // 覆盖键在目录里查不到 ⇒ 保留（用户明确意图）
     });
+  };
+
+  /** 闸门线（poolAlternatives / droidAlternatives / 逐池清单共用同一口径）：gate 关 ⇒ 按 L3。 */
+  const gateLine = (): LadderLevel => (settings.gate ? toLadderLevel(settings.gateLevel) : 3);
+
+  /**
+   * 当前 droid 鉴权问题（家族级：两个池适配器共享同一个 401/402/403 记录，一次
+   * 请求同时服务两池，成功解析才清除）。非 undefined ⇒ 两池都视为不可信：不进推荐行，
+   * 也从逐池清单里整池省略（即使还有未过期的旧快照在缓存里）。
+   */
+  const droidAuthProblem = (): QuotaProblem | undefined => {
+    try {
+      return problemsNow().find((p) => p.family === "droid");
+    } catch {
+      return undefined; // 兜注入桩；不可用时退化为仅按快照判读。
+    }
+  };
+
+  /**
+   * 池可推荐判定（2026-10-15 拍板「no trustworthy data ⇒ the subscription does not
+   * exist」）：可信（快照存在、新鲜、无鉴权问题）且等级低于闸门线。缺席 / stale /
+   * 402 / 触线 ⇒ 一律不推荐（闸门本身仍 fail-open，只是推荐行不导它）。
+   */
+  const poolRecommendable = (verdict: ProviderVerdict | undefined): boolean =>
+    poolTrusted(verdict) && verdict.level < gateLine();
+
+  /** 池可信（仅数据面判读，与等级无关；类型谓词：true ⇒ verdict 非空）：不可信的池
+   * 在清单/推荐里整池不可见（终版拍板）。 */
+  const poolTrusted = (verdict: ProviderVerdict | undefined): verdict is ProviderVerdict =>
+    verdict !== undefined && !verdict.stale && droidAuthProblem() === undefined;
+
+  /** 逐池清单状态（仅对可信池调用）：等级 vs 闸门线。 */
+  const poolStateOf = (verdict: ProviderVerdict, line: LadderLevel): DroidPoolState => {
+    if (verdict.level >= line) return "blocked";
+    if (verdict.level >= 1) return "warn";
+    return "ok";
+  };
+
+  /** 逐池清单（2026-10-15 用户要求）：每池 ≤DROID_POOL_LISTING_LIMIT 个候选 + 状态 + 总数；
+   * 零候选池省略；不可信的池（缺席 / stale / 鉴权失败）整池省略——数据拿不到就当没有
+   * 该订阅，不出「无数据」文案。 */
+  const poolListingEntries = (): readonly DroidPoolListingEntry[] => {
+    const line = gateLine();
+    const out: DroidPoolListingEntry[] = [];
+    for (const pool of ["standard", "core"] as const) {
+      const candidates = poolCandidates(pool);
+      if (candidates.length === 0) continue;
+      const verdict = verdictOf(pool === "standard" ? "droid-standard" : "droid-core", clock.now());
+      if (!poolTrusted(verdict)) continue;
+      out.push({
+        pool,
+        state: poolStateOf(verdict, line),
+        total: candidates.length,
+        models: candidates.slice(0, DROID_POOL_LISTING_LIMIT).map((id) => `droid/${id}`),
+      });
+    }
+    return out;
   };
 
   /**
@@ -531,7 +617,7 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     },
     verdictFor(provider, now) {
       const at = now ?? clock.now();
-      return isQuotaProviderId(provider) ? verdictOf(provider, at) : undefined;
+      return isQuotaProviderId(provider) ? trustedVerdictOf(provider, at) : undefined;
     },
     verdictsForModel(model, now) {
       // 非 droid / droid 适配器未构造 ⇒ 不受池管理 ⇒ 闸门走旧路径（undefined）。
@@ -545,21 +631,30 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
           : pool === undefined
             ? DROID_QUOTA_IDS
             : [pool === "standard" ? "droid-standard" : "droid-core"];
-      return { pool, keys, verdicts: keys.map((k) => verdictOf(k, at)) };
+      // 不可信的池（缺席 / stale / 鉴权失败）⇒ undefined ⇒ 闸门 fail-open（行为不变）。
+      return { pool, keys, verdicts: keys.map((k) => trustedVerdictOf(k, at)) };
     },
     poolAlternatives(blocked, limit = 3) {
-      // D7 + 评审 #5：仅 droid-standard 被拦且 core 未被排除时推荐 core 池模型；
-      // 候选加减法见 poolCandidates（与 droidAlternatives 共用）。
-      if (blocked !== "droid-standard") return [];
-      const coreVerdict = verdictOf("droid-core", clock.now());
-      if (coreVerdict !== undefined && !coreVerdict.stale && coreVerdict.level >= 3) return [];
-      return poolCandidates("core")
-        .slice(0, Math.max(0, limit))
-        .map((id) => `droid/${id}`);
+      // D7 对称化（2026-10-15 用户拍板：两个方向都要列）：被拦的是 droid 池 ⇒ 建议包 =
+      // 另一池推荐（无可信数据——快照缺席 / stale / 鉴权失败——或 ≥闸门线 ⇒ models
+      // 空，绝不推荐闸门自己也会拦下/读数不真的池）+ 可信池逐池清单。非 droid /
+      // 建议包全空（models 与 listing 都空）⇒ []，调用方输出与旧版字节一致。
+      if (!isDroidQuotaId(blocked)) return [];
+      const other: QuotaPoolId = blocked === "droid-standard" ? "core" : "standard";
+      const otherVerdict = verdictOf(other === "core" ? "droid-core" : "droid-standard", clock.now());
+      const models = poolRecommendable(otherVerdict)
+        ? poolCandidates(other)
+            .slice(0, Math.max(0, limit))
+            .map((id) => `droid/${id}`)
+        : [];
+      const listing = poolListingEntries();
+      if (models.length === 0 && listing.length === 0) return [];
+      return [{ pool: other, models, listing }];
     },
     droidAlternatives(limit = 3) {
       // 2026-10-15 用户拍板：pi provider 被拦/告急时的补充候选。端口缺席 ⇒ []（droid
-      // 未启用/未接线，调用方输出字节不变）；无快照的池视同可用（闸门 fail-open 同款）。
+      // 未启用/未接线，调用方输出字节不变）；无可信数据的池不列（终版拍板「数据拿不到
+      // 就当没有该订阅」，不再 fail-open 视同可用）。
       let port: QuotaPoolPort | undefined;
       try {
         port = deps.pools?.();
@@ -567,11 +662,10 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
         port = undefined;
       }
       if (port === undefined) return [];
-      const line = settings.gate ? toLadderLevel(settings.gateLevel) : 3;
       const out: DroidPoolAlternative[] = [];
       for (const pool of ["core", "standard"] as const) {
         const verdict = verdictOf(pool === "core" ? "droid-core" : "droid-standard", clock.now());
-        if (verdict !== undefined && (verdict.stale || verdict.level >= line)) continue;
+        if (!poolRecommendable(verdict)) continue;
         const models = poolCandidates(pool)
           .slice(0, Math.max(0, limit))
           .map((id) => `droid/${id}`);
@@ -580,7 +674,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       return out;
     },
     problems() {
-      return problemsNow();
+      // 终版拍板（2026-10-15）：鉴权问题不进任何 UI（HUD/web/通知）——数据拿不到就当
+      // 没有该订阅。适配器的 lastProblem 仍在（信任判定用）+ warnOnce 开发者日志保留。
+      return [];
     },
     refreshIfStale,
     whenIdle() {

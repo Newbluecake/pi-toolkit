@@ -729,30 +729,76 @@ describe("createQuotaHintHook — droid pools", () => {
         pickAlternatives(provider, {
           verdictFor: (p) => pi[p],
           available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
-          poolAlternatives: (b) => (b === "droid-standard" ? ["droid/glm-5.3", "droid/kimi-k3"] : []),
+          poolAlternatives: (b) =>
+            b === "droid-standard"
+              ? [
+                  {
+                    pool: "core",
+                    models: ["droid/glm-5.3", "droid/kimi-k3"],
+                    listing: [
+                      {
+                        pool: "standard",
+                        state: "blocked",
+                        total: 2,
+                        models: ["droid/claude-opus-5-5", "droid/gpt-6"],
+                      },
+                      { pool: "core", state: "ok", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+                    ],
+                  },
+                ]
+              : [],
         }),
     });
     h.hook({}, ctx());
     const content = h.sent[0]?.message.content ?? "";
-    expect(content).toContain("[quota 严重] droid standard 池 5h 已用 100%");
-    expect(content).toContain("优先改用 droid core 池模型：droid/glm-5.3、droid/kimi-k3");
+    expect(content).toContain("[quota 严重] Droid Standard 池 5h 已用 100%");
+    expect(content).toContain("优先改用 Droid Core 池模型：droid/glm-5.3、droid/kimi-k3");
+    expect(content).toContain(
+      "Droid 模型按池：Standard 池（已拦，勿派）：droid/claude-opus-5-5、droid/gpt-6；Core 池（有余量）：droid/glm-5.3、droid/kimi-k3。",
+    );
     expect(content).toContain("或改用 pi 原生子 agent（订阅优先）：kimi-coding");
-    expect(content).toContain("本轮不要把新任务派给 droid standard 池");
+    expect(content).toContain("本轮不要把新任务派给 Droid Standard 池");
   });
 
-  it("droid-core L3: pi-native line only (no droid-internal models)", () => {
+  it("droid-core L3 with healthy Standard advice (D7 对称化): the notice recommends Standard models", () => {
+    const pi: Record<string, ProviderVerdict> = {
+      "kimi-coding": verdict({ provider: "kimi-coding", level: 0, windows: [w("5h", 8, 0, "none")] }),
+    };
+    const h = harness({
+      verdicts: [poolV("droid-core", 100, 3)],
+      alternatives: (provider) =>
+        pickAlternatives(provider, {
+          verdictFor: (p) => pi[p],
+          available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
+          poolAlternatives: (b) =>
+            b === "droid-core"
+              ? [{ pool: "standard", models: ["droid/claude-opus-5-5", "droid/gpt-6"], listing: [] }]
+              : [],
+        }),
+    });
+    h.hook({}, ctx());
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("[quota 严重] Droid Core 池 5h 已用 100%");
+    expect(content).toContain(
+      "同一 Factory 账户的 Standard 池仍有额度，可改用 Droid Standard 池模型：droid/claude-opus-5-5、droid/gpt-6",
+    );
+    expect(content).toContain("或改用 pi 原生子 agent（订阅优先）：kimi-coding");
+  });
+
+  it("droid-core L3 without advice: pi-native line only (no droid-internal models)", () => {
     const h = harness({
       verdicts: [poolV("droid-core", 100, 3)],
       alternatives: (provider) =>
         pickAlternatives(provider, {
           verdictFor: () => undefined,
           available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
-          poolAlternatives: (b) => (b === "droid-standard" ? ["droid/glm-5.3"] : []),
+          poolAlternatives: (b) =>
+            b === "droid-standard" ? [{ pool: "core", models: ["droid/glm-5.3"], listing: [] }] : [],
         }),
     });
     h.hook({}, ctx());
     const content = h.sent[0]?.message.content ?? "";
-    expect(content).toContain("droid core 池");
+    expect(content).toContain("Droid Core 池");
     expect(content).toContain("改用 pi 原生子 agent");
     expect(content).not.toContain("droid/glm-5.3");
   });
@@ -769,8 +815,8 @@ describe("createQuotaHintHook — droid pools", () => {
     h.hook({}, ctx());
     expect(h.sent).toHaveLength(1);
     const content = h.sent[0]?.message.content ?? "";
-    expect(content).toContain("[quota 严重] droid standard 池");
-    expect(content).toContain("[quota 严重] droid core 池");
+    expect(content).toContain("[quota 严重] Droid Standard 池");
+    expect(content).toContain("[quota 严重] Droid Core 池");
     expect(content.match(/本轮不要把新任务派给/g)).toHaveLength(2);
   });
 
@@ -785,8 +831,8 @@ describe("createQuotaHintHook — droid pools", () => {
     expect(h.sent).toHaveLength(1);
     const lines = (h.sent[0]?.message.content ?? "").split("\n");
     expect(lines).toEqual([
-      "[quota] droid standard 池 订阅可用，当前 5h 0%，可正常派单。",
-      "[quota] droid core 池 订阅可用，当前 5h 0%，可正常派单。",
+      "[quota] Droid Standard 池 订阅可用，当前 5h 0%，可正常派单。",
+      "[quota] Droid Core 池 订阅可用，当前 5h 0%，可正常派单。",
     ]);
     expect(h.state.availableAnnounced.has("droid-standard")).toBe(true);
     expect(h.state.availableAnnounced.has("droid-core")).toBe(true);
@@ -811,7 +857,7 @@ describe("createQuotaHintHook — droid pool supplement for blocked pi providers
     expect(content).toContain("[quota 严重] zai-coding-cn");
     const piIdx = content.indexOf("替代候选（订阅优先）：kimi-coding。");
     const droidIdx = content.indexOf(
-      "有余量的外部 droid 池也可用：droid/glm-5.3、droid/kimi-k3（core 池）；droid/claude-opus-5-5（standard 池）。",
+      "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。",
     );
     expect(piIdx).toBeGreaterThan(-1);
     expect(droidIdx).toBeGreaterThan(piIdx);

@@ -1220,62 +1220,136 @@ describe("droid: gateOpen decoration (D6)", () => {
   });
 });
 
-describe("droid: poolAlternatives (§5.6, review #5: addition + subtraction)", () => {
-  it("lists core-pool models as droid/<id> in preferred-first order, capped at the limit (default 3)", () => {
+describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（2026-10-15 拍板）", () => {
+  it("standard 被拦且 core 可信有余量 ⇒ 建议包 = core 推荐 + 两池清单（状态 ok/blocked）", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3"]) });
-    expect(f.service.poolAlternatives("droid-standard")).toEqual(["droid/kimi-k3", "droid/glm-5.3"]); // deprecated filtered
-    expect(f.service.poolAlternatives("droid-standard", 1)).toEqual(["droid/kimi-k3"]);
-    expect(f.service.poolAlternatives("droid-standard", 0)).toEqual([]);
+    await land(f, 100, 10); // std 5h 100% ⇒ L3；core 10% ⇒ L0
+    expect(f.service.poolAlternatives("droid-standard")).toEqual([
+      {
+        pool: "core",
+        models: ["droid/kimi-k3", "droid/glm-5.3"], // 偏好序在前，deprecated 滤除，默认 limit 3
+        listing: [
+          { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+          { pool: "core", state: "ok", total: 2, models: ["droid/kimi-k3", "droid/glm-5.3"] },
+        ],
+      },
+    ]);
+    expect(f.service.poolAlternatives("droid-standard", 1)[0]?.models).toEqual(["droid/kimi-k3"]);
+    expect(f.service.poolAlternatives("droid-standard", 0)[0]?.models).toEqual([]);
   });
 
-  it("only droid-standard has droid-internal alternatives (droid-core / non-droid / unknown ids ⇒ [])", () => {
+  it("D7 对称化：core 被拦且 standard 可信有余量 ⇒ 推荐 standard 模型，清单状态对偶", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort() });
-    expect(f.service.poolAlternatives("droid-core")).toEqual([]);
-    expect(f.service.poolAlternatives("kimi-coding")).toEqual([]);
-    expect(f.service.poolAlternatives("droid")).toEqual([]);
+    await land(f, 10, 100); // core 5h 100% ⇒ L3；std 10% ⇒ L0
+    expect(f.service.poolAlternatives("droid-core")).toEqual([
+      {
+        pool: "standard",
+        models: ["droid/claude-opus-5-5", "droid/gpt-6"],
+        listing: [
+          { pool: "standard", state: "ok", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+          { pool: "core", state: "blocked", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+        ],
+      },
+    ]);
   });
 
-  it("core healthy / core stale / core no snapshot ⇒ still offered; core at L3 ⇒ excluded ⇒ []", async () => {
+  it("另一池只是告急（≥L1 但低于闸门线）⇒ 仍推荐，清单状态标「告急」", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort() });
-    expect(f.service.poolAlternatives("droid-standard")).not.toEqual([]); // no snapshot
-    await land(f, 100, 10);
-    expect(f.service.poolAlternatives("droid-standard")).not.toEqual([]); // healthy
+    await land(f, 100, 80); // core 5h 80% ⇒ L2（< 闸门线 3）⇒ 可推荐但告急
+    expect(f.service.poolAlternatives("droid-standard")[0]?.models).toEqual(["droid/glm-5.3", "droid/kimi-k3"]);
+    expect(f.service.poolAlternatives("droid-standard")[0]?.listing).toEqual([
+      { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+      { pool: "core", state: "warn", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+    ]);
+  });
+
+  it("无可信数据 ⇒ 不推荐（终版拍板取代旧 fail-open）：无快照 / stale / 触线都是空 models；两池都不可信 ⇒ 整包 []（无清单）", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    expect(f.service.poolAlternatives("droid-standard")).toEqual([]); // 无快照：models 与 listing 全空
+    await land(f, 10, 10);
+    expect(f.service.poolAlternatives("droid-standard")[0]?.models).toEqual(["droid/glm-5.3", "droid/kimi-k3"]); // 健康
+    // core 冻结在旧 fetchedAt ⇒ stale ⇒ 不推荐，且从清单里整池消失（只剩 standard 段）。
+    const frozen = f.clock.now();
+    f.core.set(() =>
+      droidSnapshot("droid-core", [{ scope: "5h", usedPct: 5, resetAt: frozen + 10 * 3_600_000 }], frozen),
+    );
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
     f.clock.advance(DEFAULT_SETTINGS.quota.staleAfterMs + 1);
-    expect(f.service.verdictFor("droid-core")?.stale).toBe(true);
-    expect(f.service.poolAlternatives("droid-standard")).not.toEqual([]); // stale ⇒ not excluded
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.service.verdictFor("droid-core")).toBeUndefined(); // stale ⇒ 不可信 ⇒ 不可见
+    const stale = f.service.poolAlternatives("droid-standard")[0];
+    expect(stale?.models).toEqual([]);
+    expect(stale?.listing).toEqual([
+      { pool: "standard", state: "ok", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+    ]);
     const hot = makeDroidFixture({ pools: () => catalogPort() });
     await land(hot, 100, 100);
-    expect(hot.service.poolAlternatives("droid-standard")).toEqual([]); // core L3, fresh
+    expect(hot.service.poolAlternatives("droid-standard")[0]?.models).toEqual([]); // core L3 ⇒ 触线不推荐
+    expect(hot.service.poolAlternatives("droid-standard")[0]?.listing).toHaveLength(2); // 两池都可信，清单仍双池
   });
 
-  it("ADDITION: a model re-judged into core by droidPools appears even though the catalog calls it standard", () => {
-    const f = makeDroidFixture({
-      pools: () => catalogPort(),
-      settings: { droidPools: { "gpt-6": "core" } },
-    });
-    expect(f.service.poolAlternatives("droid-standard", 10)).toEqual(["droid/glm-5.3", "droid/kimi-k3", "droid/gpt-6"]);
+  it("非 droid / 未知 id ⇒ []；另一池触线（gateLevel=2 的 L2）⇒ 不推荐（推荐线与闸门线对齐）", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    await land(f, 10, 10);
+    expect(f.service.poolAlternatives("kimi-coding")).toEqual([]);
+    expect(f.service.poolAlternatives("droid")).toEqual([]);
+    const strict = makeDroidFixture({ pools: () => catalogPort(), settings: { gate: true, gateLevel: 2 } });
+    await land(strict, 100, 80); // core 5h 80% ⇒ L2 ≥ 闸门线 2
+    expect(strict.service.poolAlternatives("droid-standard")[0]?.models).toEqual([]);
+    expect(strict.service.poolAlternatives("droid-standard")[0]?.listing).toEqual([
+      { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+      { pool: "core", state: "blocked", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+    ]);
   });
 
-  it("SUBTRACTION: a catalog core model re-judged OUT of core is removed", () => {
-    const f = makeDroidFixture({
+  it("逐池清单每池 ≤5 个候选，超出写「等 N 个」（N=总数，poolCandidates 偏好序）", async () => {
+    const models = [
+      { id: "std-1", upstreamProvider: "anthropic" },
+      { id: "std-2", upstreamProvider: "openai" },
+      { id: "std-3", upstreamProvider: "google" },
+      { id: "std-4", upstreamProvider: "xai" },
+      { id: "std-5", upstreamProvider: "anthropic" },
+      { id: "std-6", upstreamProvider: "openai" },
+      { id: "std-7", upstreamProvider: "google" },
+      { id: "core-1", upstreamProvider: "factory" },
+    ];
+    const port = createCatalogPoolPort({ provider: "droid", catalog: () => ({ models }) });
+    const f = makeDroidFixture({ pools: () => port });
+    await land(f, 100, 10);
+    expect(f.service.poolAlternatives("droid-standard")[0]?.listing).toEqual([
+      {
+        pool: "standard",
+        state: "blocked",
+        total: 7,
+        models: ["droid/std-1", "droid/std-2", "droid/std-3", "droid/std-4", "droid/std-5"],
+      },
+      { pool: "core", state: "ok", total: 1, models: ["droid/core-1"] },
+    ]);
+  });
+
+  it("§5.6 加减法：droidPools 改判进/出池仍作用于候选（需可信快照才会进推荐/清单）", async () => {
+    const add = makeDroidFixture({ pools: () => catalogPort(), settings: { droidPools: { "gpt-6": "core" } } });
+    await land(add, 100, 10);
+    expect(add.service.poolAlternatives("droid-standard", 10)[0]?.models).toEqual([
+      "droid/glm-5.3",
+      "droid/kimi-k3",
+      "droid/gpt-6",
+    ]);
+    const sub = makeDroidFixture({
       pools: () => catalogPort(),
       settings: { droidPools: { "glm-5.3": "standard", "kimi-k3": "none" } },
     });
-    expect(f.service.poolAlternatives("droid-standard", 10)).toEqual([]);
-  });
-
-  it("override key absent from the catalog is KEPT (explicit user intent), also with no port at all", () => {
-    const withPort = makeDroidFixture({
+    await land(sub, 100, 10);
+    expect(sub.service.poolAlternatives("droid-standard", 10)[0]?.models).toEqual([]); // core 被改判一空
+    const keep = makeDroidFixture({
       pools: () => catalogPort(),
       settings: { droidPools: { "brand-new-core": "core" } },
     });
-    expect(withPort.service.poolAlternatives("droid-standard", 10)).toContain("droid/brand-new-core");
-    const noPort = makeDroidFixture({ settings: { droidPools: { "brand-new-core": "core" } } });
-    expect(noPort.service.poolAlternatives("droid-standard")).toEqual(["droid/brand-new-core"]);
-  });
-
-  it("catalog-flagged deprecated/router models are removed even when droidPools forces them into core; custom: never", () => {
-    const port = createCatalogPoolPort({
+    await land(keep, 100, 10); // 目录外覆盖键：无端口候选也能进加减法
+    expect(keep.service.poolAlternatives("droid-standard", 10)[0]?.models).toContain("droid/brand-new-core");
+    const dead = createCatalogPoolPort({
       provider: "droid",
       catalog: () => ({
         models: [
@@ -1285,23 +1359,27 @@ describe("droid: poolAlternatives (§5.6, review #5: addition + subtraction)", (
         ],
       }),
     });
-    const f = makeDroidFixture({
-      pools: () => port,
-      settings: { droidPools: { dead: "core", auto: "core", "custom:x": "core" } },
-    });
-    expect(f.service.poolAlternatives("droid-standard", 10)).toEqual(["droid/glm-5.3"]);
+    const deadF = makeDroidFixture({ pools: () => dead, settings: { droidPools: { dead: "core", auto: "core" } } });
+    await land(deadF, 100, 10);
+    expect(deadF.service.poolAlternatives("droid-standard", 10)[0]?.models).toEqual(["droid/glm-5.3"]);
+  });
+
+  it("无端口且无快照 ⇒ []（数据拿不到就当没有该订阅，旧 fail-open 候选不再保留）", () => {
+    const f = makeDroidFixture({ settings: { droidPools: { "brand-new-core": "core" } } });
+    expect(f.service.poolAlternatives("droid-standard")).toEqual([]);
+    expect(f.service.droidAlternatives()).toEqual([]);
   });
 });
 
 describe("droid: droidAlternatives — pi-blocked supplement (2026-10-15 拍板)", () => {
-  it("core before standard, preferred order first, per-pool cap (default 3); no snapshot yet ⇒ fail-open listing", async () => {
+  it("core before standard, preferred order first, per-pool cap (default 3); no snapshot yet ⇒ NOT listed (终版拍板取代 fail-open)", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3"]) });
+    expect(f.service.droidAlternatives()).toEqual([]); // 无快照：数据拿不到就当没有该订阅
+    await land(f, 10, 20);
     const expected = [
       { pool: "core", models: ["droid/kimi-k3", "droid/glm-5.3"] }, // 偏好序在前，deprecated 滤除
       { pool: "standard", models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
     ];
-    expect(f.service.droidAlternatives()).toEqual(expected); // 无快照：fail-open（闸门同款）
-    await land(f, 10, 20);
     expect(f.service.droidAlternatives()).toEqual(expected);
     expect(f.service.droidAlternatives(1)).toEqual([
       { pool: "core", models: ["droid/kimi-k3"] },
@@ -1317,7 +1395,7 @@ describe("droid: droidAlternatives — pi-blocked supplement (2026-10-15 拍板)
     expect(f.service.droidAlternatives()).toEqual([{ pool: "core", models: ["droid/glm-5.3", "droid/kimi-k3"] }]);
   });
 
-  it("a stale pool is NOT listed (unlike poolAlternatives' stale tolerance); the fresh pool still is", async () => {
+  it("a stale pool is NOT listed and is invisible to verdictFor; the fresh pool still is", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort() });
     const frozen = f.clock.now();
     f.core.set(() =>
@@ -1335,8 +1413,8 @@ describe("droid: droidAlternatives — pi-blocked supplement (2026-10-15 拍板)
     f.clock.advance(DEFAULT_SETTINGS.quota.staleAfterMs + 1);
     f.service.refreshIfStale(); // std 重拉变新鲜；core 桩冻结在旧 fetchedAt
     await f.service.whenIdle();
-    expect(f.service.verdictFor("droid-core")?.stale).toBe(true);
-    expect(f.service.verdictFor("droid-standard")?.stale).toBe(false);
+    expect(f.service.verdictFor("droid-core")).toBeUndefined(); // stale ⇒ 不可信 ⇒ 不可见
+    expect(f.service.verdictFor("droid-standard")).toBeDefined();
     expect(f.service.droidAlternatives()).toEqual([
       { pool: "standard", models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
     ]);
@@ -1350,16 +1428,10 @@ describe("droid: droidAlternatives — pi-blocked supplement (2026-10-15 拍板)
     await land(off, 100, 100);
     expect(off.service.droidAlternatives()).toEqual([]); // gate 关：L3 仍按拍板排除
   });
-
-  it("no pool port ⇒ [] even with droidPools overrides (contrast: poolAlternatives keeps them)", () => {
-    const f = makeDroidFixture({ settings: { droidPools: { "brand-new-core": "core" } } });
-    expect(f.service.droidAlternatives()).toEqual([]);
-    expect(f.service.poolAlternatives("droid-standard")).toEqual(["droid/brand-new-core"]);
-  });
 });
 
-describe("droid: problems (D3) reach the HUD", () => {
-  it("problems() dedupes by family and swallows a throwing adapter hook", () => {
+describe("droid: 鉴权问题（401/402/403）不可见 + 信任过滤（2026-10-15 终版拍板）", () => {
+  it("problems() 恒 []（适配器仍记录，仅信任判定用；不再进 HUD/web/通知）", () => {
     const clock = new FakeClock(1_000);
     const mk = (id: "droid-standard" | "droid-core", lastProblem: () => QuotaProblem | undefined): ProviderAdapter => ({
       id,
@@ -1381,10 +1453,10 @@ describe("droid: problems (D3) reach the HUD", () => {
       fetchJson: async () => undefined,
       demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now() }),
     });
-    expect(service.problems()).toEqual([{ family: "droid", status: 402 }]);
+    expect(service.problems()).toEqual([]);
   });
 
-  it("a refresh that yields NO snapshot but has a problem still writes the HUD (`quota droid auth 402`)", async () => {
+  it("a refresh that yields NO snapshot but has a problem writes NO HUD segment (no `droid auth 402`)", async () => {
     let problem: QuotaProblem | undefined = undefined;
     const f = makeDroidFixture({ problem: () => problem });
     f.setStatus.mockClear();
@@ -1395,7 +1467,7 @@ describe("droid: problems (D3) reach the HUD", () => {
     f.service.refreshIfStale();
     await f.service.whenIdle();
     expect(f.service.verdicts()).toEqual([]);
-    expect(f.setStatus).toHaveBeenLastCalledWith("quota droid auth 402");
+    expect(f.setStatus).toHaveBeenLastCalledWith(undefined); // 无行、无 auth 段：清占位
   });
 
   it("a problem-free no-snapshot refresh does not touch the HUD", async () => {
@@ -1406,12 +1478,21 @@ describe("droid: problems (D3) reach the HUD", () => {
     expect(f.setStatus).not.toHaveBeenCalled();
   });
 
-  it("problems ride along with snapshots in the merged HUD line", async () => {
-    const f = makeDroidFixture({ problem: () => ({ family: "droid", status: 403 }) });
-    await land(f, 20, 5);
-    const line = f.setStatus.mock.calls.at(-1)?.[0] as string;
-    expect(line).toContain("droid 20%");
-    expect(line).toContain("droid auth 403");
+  it("402/403 hides BOTH pools from the HUD/verdicts/推荐 even with a still-fresh cached snapshot", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort(), problem: () => ({ family: "droid", status: 403 }) });
+    await land(f, 20, 5); // 快照新鲜落地，但适配器报 403 ⇒ family 级不可信
+    expect(f.service.verdicts()).toEqual([]);
+    expect(f.service.verdictFor("droid-standard")).toBeUndefined();
+    expect(f.service.verdictFor("droid-core")).toBeUndefined();
+    expect(f.service.problems()).toEqual([]);
+    expect(f.service.droidAlternatives()).toEqual([]);
+    expect(f.service.poolAlternatives("droid-standard")).toEqual([]); // models 与 listing 全空
+    expect(f.setStatus).toHaveBeenLastCalledWith(undefined); // HUD：无行、无 auth 段
+    // 闸门 fail-open：verdictsForModel 给 undefined ⇒ evaluatePooledGate 放行（不拦）。
+    expect(f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })).toMatchObject({
+      keys: ["droid-standard"],
+      verdicts: [undefined],
+    });
   });
 });
 

@@ -877,8 +877,8 @@ const MARK_THEME = { fg: (color: string, text: string) => `<${color}:${text}>` }
 
 describe("quotaLabel / formatScope(month)", () => {
   it("translates droid virtual ids, leaves every other provider untouched", () => {
-    expect(quotaLabel("droid-standard")).toBe("droid standard 池");
-    expect(quotaLabel("droid-core")).toBe("droid core 池");
+    expect(quotaLabel("droid-standard")).toBe("Droid Standard 池");
+    expect(quotaLabel("droid-core")).toBe("Droid Core 池");
     expect(quotaLabel("zai-coding-cn")).toBe("zai-coding-cn");
     expect(quotaLabel("droid")).toBe("droid");
     expect(formatScope("month")).toBe("mo");
@@ -962,7 +962,7 @@ describe("renderQuotaStatus — droid merged segment (D14)", () => {
 });
 
 describe("alternativesAdvice — external × models (D8)", () => {
-  const MODELS_LINE = "同一 Factory 账户的 core 池仍有额度，优先改用 droid core 池模型：droid/glm-5.3、droid/kimi-k3。";
+  const MODELS_LINE = "同一 Factory 账户的 Core 池仍有额度，优先改用 Droid Core 池模型：droid/glm-5.3、droid/kimi-k3。";
   const sel = (over: Partial<AlternativeSelection>): AlternativeSelection => ({
     providers: [],
     subscription: true,
@@ -978,7 +978,7 @@ describe("alternativesAdvice — external × models (D8)", () => {
     expect(lines).toHaveLength(3);
     expect(lines[0]).toContain(MODELS_LINE);
     expect(lines[1]).toBe(
-      "或改用 pi 原生子 agent（订阅优先）：kimi-coding、zai-coding-cn。注意这会换成 pi 子 agent 运行（不是外部 droid，权限与工具按 pi 的 agent 类型）。",
+      "或改用 pi 原生子 agent（订阅优先）：kimi-coding、zai-coding-cn。注意这会换成 pi 子 agent 运行（不是外部 Droid，权限与工具按 pi 的 agent 类型）。",
     );
     expect(lines[2]).toBe("按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。");
   });
@@ -993,7 +993,7 @@ describe("alternativesAdvice — external × models (D8)", () => {
   it("providers only: the pi line opens with 『改用』 (no 『或』), and swaps the tier phrase when not subscription", () => {
     const sub = alternativesAdvice(sel({ providers: ["kimi-coding"] }));
     expect(sub.startsWith("改用 pi 原生子 agent（订阅优先）：kimi-coding。")).toBe(true);
-    expect(sub).not.toContain("core 池仍有额度");
+    expect(sub).not.toContain("Core 池仍有额度");
     const paid = alternativesAdvice(sel({ providers: ["cloudrouter-anthropic"], subscription: false }));
     expect(paid).toContain("改用 pi 原生子 agent（无可用订阅，按量计费）：cloudrouter-anthropic。");
   });
@@ -1012,9 +1012,116 @@ describe("alternativesAdvice — external × models (D8)", () => {
   });
 });
 
+describe("alternativesAdvice — external × 逐池清单 + 对称推荐（2026-10-15 拍板）", () => {
+  const sel = (over: Partial<AlternativeSelection>): AlternativeSelection => ({
+    providers: [],
+    subscription: true,
+    external: true,
+    ...over,
+  });
+  const STD_BLOCKED = {
+    pool: "standard" as const,
+    state: "blocked" as const,
+    total: 9,
+    models: [
+      "droid/claude-sonnet-5-5",
+      "droid/claude-opus-5-5",
+      "droid/gpt-6.1-sol",
+      "droid/grok-4.2",
+      "droid/gemini-3-pro",
+    ],
+  };
+  const CORE_OK = {
+    pool: "core" as const,
+    state: "ok" as const,
+    total: 3,
+    models: ["droid/glm-5.3", "droid/kimi-k3", "droid/inkling"],
+  };
+  const CORE_BLOCKED = {
+    pool: "core" as const,
+    state: "blocked" as const,
+    total: 3,
+    models: ["droid/glm-5.3", "droid/kimi-k3", "droid/inkling"],
+  };
+  const STD_OK = {
+    pool: "standard" as const,
+    state: "ok" as const,
+    total: 2,
+    models: ["droid/claude-opus-5-5", "droid/gpt-6"],
+  };
+
+  it("standard 被拦 + core 有余量：core 推荐行在前，清单独立成行并取代通用括号；截断写「等 N 个」", () => {
+    const text = alternativesAdvice(
+      sel({
+        models: ["droid/glm-5.3", "droid/kimi-k3", "droid/inkling"],
+        modelsPool: "core",
+        poolListing: [STD_BLOCKED, CORE_OK],
+      }),
+    );
+    const lines = text.split("\n");
+    expect(lines[0]).toBe(
+      "同一 Factory 账户的 Core 池仍有额度，优先改用 Droid Core 池模型：droid/glm-5.3、droid/kimi-k3、droid/inkling。",
+    );
+    expect(lines[1]).toBe(
+      "Droid 模型按池：Standard 池（已拦，勿派）：droid/claude-sonnet-5-5、droid/claude-opus-5-5、droid/gpt-6.1-sol、droid/grok-4.2、droid/gemini-3-pro 等 9 个；Core 池（有余量）：droid/glm-5.3、droid/kimi-k3、droid/inkling。",
+    );
+    expect(text).not.toContain("Factory 托管开源模型"); // 旧括号被清单取代
+  });
+
+  it("core 被拦 + standard 有余量（对称）：推荐 Standard 模型并注明计费入 Standard 池", () => {
+    const text = alternativesAdvice(
+      sel({
+        models: ["droid/claude-opus-5-5", "droid/gpt-6"],
+        modelsPool: "standard",
+        poolListing: [STD_OK, CORE_BLOCKED],
+      }),
+    );
+    const lines = text.split("\n");
+    expect(lines[0]).toBe(
+      "同一 Factory 账户的 Standard 池仍有额度，可改用 Droid Standard 池模型：droid/claude-opus-5-5、droid/gpt-6（Standard 池模型计入 Standard 池额度，不占 Core 池）。",
+    );
+    expect(lines[1]).toBe(
+      "Droid 模型按池：Standard 池（有余量）：droid/claude-opus-5-5、droid/gpt-6；Core 池（已拦，勿派）：droid/glm-5.3、droid/kimi-k3、droid/inkling。",
+    );
+  });
+
+  it("两池都拦：无 droid 推荐行，清单仍在（先于 pi 行）", () => {
+    const text = alternativesAdvice(sel({ poolListing: [STD_BLOCKED, CORE_BLOCKED], providers: ["kimi-coding"] }));
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("Droid 模型按池：Standard 池（已拦，勿派）：");
+    expect(lines[0]).toContain("Core 池（已拦，勿派）：");
+    expect(text).not.toContain("仍有额度");
+    expect(lines[1]).toContain("改用 pi 原生子 agent（订阅优先）：kimi-coding。");
+    expect(lines[2]).toBe("按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。");
+  });
+
+  it("清单缺席（目录未探测）⇒ 通用括号保留，输出与旧版逐字一致", () => {
+    const text = alternativesAdvice(sel({ models: ["droid/glm-5.3"], modelsPool: "core", providers: [] }));
+    expect(text).toBe(
+      "同一 Factory 账户的 Core 池仍有额度，优先改用 Droid Core 池模型：droid/glm-5.3。" +
+        "（Standard 池 = Droid 的 Anthropic/OpenAI/Google/xAI 模型；Core 池 = Factory 托管开源模型）\n" +
+        "按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。",
+    );
+  });
+
+  it("清单为空数组 ⇒ 同样回退到旧括号；modelsPool 缺席按 core（旧输出兼容）", () => {
+    expect(alternativesAdvice(sel({ models: ["droid/glm-5.3"], poolListing: [] }))).toContain("Factory 托管开源模型");
+    expect(alternativesAdvice(sel({ models: ["droid/glm-5.3"] })).split("\n")[0]).toContain(
+      "Core 池仍有额度，优先改用 Droid Core 池模型",
+    );
+  });
+
+  it("告急状态（低于闸门线但 ≥L1）标「告急」；零候选池条目被省略", () => {
+    const text = alternativesAdvice(
+      sel({ poolListing: [{ pool: "core", state: "warn", total: 1, models: ["droid/glm-5.3"] }] }),
+    );
+    expect(text.split("\n")[0]).toBe("Droid 模型按池：Core 池（告急）：droid/glm-5.3。");
+  });
+});
+
 describe("alternativesAdvice — droid pool supplement for blocked pi providers (2026-10-15 拍板)", () => {
   const DROID_LINE =
-    "有余量的外部 droid 池也可用：droid/glm-5.3、droid/kimi-k3（core 池）；droid/claude-opus-5-5（standard 池）。注意：外部 droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。";
+    "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池）；droid/claude-opus-5-5（Standard 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。";
   const POOLS = [
     { pool: "core" as const, models: ["droid/glm-5.3", "droid/kimi-k3"] },
     { pool: "standard" as const, models: ["droid/claude-opus-5-5"] },
@@ -1039,7 +1146,7 @@ describe("alternativesAdvice — droid pool supplement for blocked pi providers 
     expect(text).toBe(
       [
         "暂无 pi provider 替代候选（可检查 pi /model）。",
-        "有余量的外部 droid 池也可用：droid/glm-5.3（core 池）。注意：外部 droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。",
+        "有余量的外部 Droid 池也可用：droid/glm-5.3（Core 池）。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。",
         "按任务需求选；不胜任就按路由表另选合适模型，不必硬凑。",
       ].join("\n"),
     );
@@ -1072,7 +1179,7 @@ describe("alternativesAdvice — droid pool supplement for blocked pi providers 
       external: true,
       droidPools: [{ pool: "core", models: ["droid/glm-5.3"] }],
     });
-    expect(text).not.toContain("有余量的外部 droid 池也可用");
+    expect(text).not.toContain("有余量的外部 Droid 池也可用");
   });
 
   it("merged multi-provider L3 block carries the droid line once when all sections agree; disagreement falls back to per-section", () => {
@@ -1092,7 +1199,7 @@ describe("alternativesAdvice — droid pool supplement for blocked pi providers 
       NOW,
     );
     expect(agree.split("本轮不要把新任务派给").length - 1).toBe(1); // 仍是合并块：禁用句只说一次
-    expect(agree.split("有余量的外部 droid 池也可用").length - 1).toBe(1); // droid 行只说一次
+    expect(agree.split("有余量的外部 Droid 池也可用").length - 1).toBe(1); // droid 行只说一次
     const disagree = buildQuotaMessage(
       [
         {
@@ -1111,7 +1218,7 @@ describe("alternativesAdvice — droid pool supplement for blocked pi providers 
       NOW,
     );
     expect(disagree.split("本轮不要把新任务派给").length - 1).toBe(2); // 回落逐段，宁重复不矛盾
-    expect(disagree).toContain("有余量的外部 droid 池也可用");
+    expect(disagree).toContain("有余量的外部 Droid 池也可用");
   });
 });
 
@@ -1122,16 +1229,16 @@ describe("billing clauses (§7) + merged block fallback", () => {
     pool("droid-standard", [dw("5h", 80, 2, "pct", { resetAt: RESET })], 2, billing);
   const ALT: AlternativeSelection = { providers: ["kimi-coding"], subscription: true, external: true };
   const NOT_OPENED =
-    "Factory 超额策略为 extraUsage（额外余额 $12.34）：standard 池耗尽后 droid 会按量扣额外余额；pi-toolkit 闸门仍按额度拦截（放行需设 quota.droidAllowExtraUsage=true）。";
+    "Factory 超额策略为 extraUsage（额外余额 $12.34）：Standard 池耗尽后 Droid 会按量扣额外余额；pi-toolkit 闸门仍按额度拦截（放行需设 quota.droidAllowExtraUsage=true）。";
   const OPENED =
-    "Factory 超额策略为 extraUsage：继续派会消耗额外余额 $12.34（真钱），闸门不拦截；优先改用 core 池或订阅模型。";
-  const DROID_CORE_CLAUSE = "Factory 超额策略为 droidCore：standard 池耗尽后请改用 core 池模型。";
+    "Factory 超额策略为 extraUsage：继续派会消耗额外余额 $12.34（真钱），闸门不拦截；优先改用 Core 池或订阅模型。";
+  const DROID_CORE_CLAUSE = "Factory 超额策略为 droidCore：Standard 池耗尽后请改用 Core 池模型。";
   const extra = { overage: "extraUsage" as const, extraUsageAllowed: true, extraUsageBalanceCents: 1234 };
 
   it("extraUsage, not opened: clause sits right after the head line; L3 block still promises the gate", () => {
     const text = buildQuotaBlockText(std3(extra), ALT, NOW, quotaLabel("droid-standard"));
     const lines = text.split("\n");
-    expect(lines[0]).toContain("[quota 严重] droid standard 池 5h 已用 100%");
+    expect(lines[0]).toContain("[quota 严重] Droid Standard 池 5h 已用 100%");
     expect(lines[1]).toBe(NOT_OPENED);
     expect(text).toContain("继续派给它会在 spawn 阶段被快速失败拦下");
   });
@@ -1139,7 +1246,7 @@ describe("billing clauses (§7) + merged block fallback", () => {
   it("extraUsage, opened (gateOpen): real-money clause, and L3 no longer promises 『会被拦下』", () => {
     const text = buildQuotaBlockText(std3({ ...extra, gateOpen: true }), ALT, NOW, quotaLabel("droid-standard"));
     expect(text.split("\n")[1]).toBe(OPENED);
-    expect(text).toContain("建议本轮不要把新任务派给 droid standard 池（继续派会花额外余额）。");
+    expect(text).toContain("建议本轮不要把新任务派给 Droid Standard 池（继续派会花额外余额）。");
     expect(text).not.toContain("被快速失败拦下");
     expect(text).not.toContain("会被拦下");
   });
@@ -1164,7 +1271,7 @@ describe("billing clauses (§7) + merged block fallback", () => {
     const monthWarn = buildQuotaWarnText(
       pool("droid-standard", [dw("month", 96, 2, "pct", { resetAt: RESET })], 2),
       NOW,
-      "droid standard 池",
+      "Droid Standard 池",
     );
     expect(monthWarn).toContain("mo 已用 96%（阈值 95%）");
     expect(monthWarn).toContain("到 L3（≥98% 或即将耗尽）");
@@ -1202,13 +1309,13 @@ describe("billing clauses (§7) + merged block fallback", () => {
       NOW,
     );
     expect(mixed).toContain("[quota 严重] zai-coding-cn 5h");
-    expect(mixed).toContain("[quota 严重] droid standard 池 5h");
-    expect(mixed).toContain("优先改用 droid core 池模型：droid/glm-5.3");
+    expect(mixed).toContain("[quota 严重] Droid Standard 池 5h");
+    expect(mixed).toContain("优先改用 Droid Core 池模型：droid/glm-5.3");
     expect(mixed.match(/本轮不要把新任务派给/g)).toHaveLength(2);
   });
 
   it("dedupe/grouping labels use quotaLabel for droid L3 sections", () => {
     const text = buildQuotaMessage([{ verdict: std3({}), alternatives: ALT }], NOW);
-    expect(text).toContain("本轮不要把新任务派给 droid standard 池");
+    expect(text).toContain("本轮不要把新任务派给 Droid Standard 池");
   });
 });

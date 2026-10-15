@@ -403,9 +403,12 @@ describe("quota wiring — droid pools (P7, real-stack e2e since P5)", () => {
     });
     expect(spawned).toMatchObject({ error: { kind: "config", retryable: false } });
     const message = "error" in spawned ? spawned.error.message : "";
-    expect(message).toContain("quota gate: droid/claude-sonnet-5（standard 池）");
+    expect(message).toContain("quota gate: droid/claude-sonnet-5（Standard 池）");
     // fake 目录的 core 池只有 kimi-k3（auto=router、old-model-1=deprecated 已滤）。
-    expect(message).toContain("优先改用 droid core 池模型：droid/kimi-k3");
+    expect(message).toContain("优先改用 Droid Core 池模型：droid/kimi-k3");
+    expect(message).toContain(
+      "Droid 模型按池：Standard 池（已拦，勿派）：droid/gpt-6-luna、droid/claude-sonnet-5；Core 池（有余量）：droid/kimi-k3。",
+    );
     expect(message).toContain("Factory 超额策略为 extraUsage（额外余额 $12.34）");
     expect(message).not.toContain(FACTORY_KEY);
     expect(s.stack.query.list()).toEqual([]);
@@ -476,14 +479,14 @@ describe("quota wiring — droid pools (P7, real-stack e2e since P5)", () => {
   });
 
   it.each([401, 402, 403])(
-    "HTTP %i ⇒ never blocks spawn (D3): one warning, HUD `droid auth`, and no key substring anywhere",
+    "HTTP %i ⇒ never blocks spawn (D3): one warning, invisible pools (no auth chip), and no key substring anywhere",
     async (status) => {
       const h = droidHarness(() => jsonResp({ error: "nope" }, status));
       h.stack.service.refreshIfStale();
       await h.stack.service.whenIdle();
       expect(h.fetchMock).toHaveBeenCalledTimes(1); // 非瞬时错误不重试
       expect(h.stack.service.verdicts()).toEqual([]);
-      expect(h.stack.service.problems()).toEqual([{ family: "droid", status }]);
+      expect(h.stack.service.problems()).toEqual([]); // 终版拍板：鉴权问题不进任何 UI
       // 再刷一轮：同一状态码只告警一次。
       h.clock.advance(DEFAULT_SETTINGS.quota.refreshMs + 1);
       h.stack.service.refreshIfStale();
@@ -492,7 +495,7 @@ describe("quota wiring — droid pools (P7, real-stack e2e since P5)", () => {
       expect(droidWarns).toHaveLength(1);
       expect(droidWarns[0]).toContain(`HTTP ${status}`);
       const hud = h.setStatus.mock.calls.map((c) => c[0] as string | undefined).filter((x) => x !== undefined);
-      expect(hud.at(-1)).toBe(`quota droid auth ${status}`);
+      expect(hud.at(-1)).toBeUndefined(); // 两池不可信 ⇒ 无 HUD 行，也不出 auth 段
       const everything = JSON.stringify([h.warn.mock.calls, h.setStatus.mock.calls, h.stack.service.problems()]);
       expect(everything).not.toContain(FACTORY_KEY);
       expect(everything).not.toContain("fk-live");

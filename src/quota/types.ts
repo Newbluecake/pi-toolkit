@@ -97,6 +97,42 @@ export interface DroidPoolAlternative {
   readonly models: readonly string[];
 }
 
+/**
+ * droid 池逐池清单条目（2026-10-15 用户要求「结合 droid 可用模型，把 standard / core
+ * 各自能用哪些列出来」）：状态相对**闸门线**（`settings.gate ? gateLevel : 3`）判读，
+ * 且仅对**可信**池生成（快照缺席 / stale / 鉴权失败 ⇒ 整池不可见——终版拍板「数据
+ * 拿不到就当没有该订阅」，不出「无数据」文案）。
+ */
+export type DroidPoolState = "ok" | "warn" | "blocked";
+
+export interface DroidPoolListingEntry {
+  readonly pool: QuotaPoolId;
+  /** 有余量（ok，等级低于闸门线）/ 告急（warn，≥L1 但低于闸门线）/ 已拦，勿派
+   * （blocked，≥闸门线）。 */
+  readonly state: DroidPoolState;
+  /** 该池候选总数（截断前，poolCandidates 序）。 */
+  readonly total: number;
+  /** 前 ≤5 个候选（`droid/<id>` 前缀，poolCandidates 偏好序）。 */
+  readonly models: readonly string[];
+}
+
+/**
+ * droid 池被拦时的建议包（D7 对称化）：另一池的推荐模型 + 两池逐池清单。
+ * `models` 为空 ⇒ 不出 droid 推荐行（另一池无快照 / stale / 鉴权失败 / 触线——
+ * 「no trustworthy data ⇒ the subscription does not exist」，2026-10-15 拍板）；
+ * `listing` 为空（两池都无候选，目录未探测/droid 未装）⇒ 渲染层保持旧版通用括号
+ * 注释（输出字节不变）。整包为空 ⇒ 调用方输出与旧版一致。数组外形（0/1 元素）让
+ * stack.ts / index.ts 的现有接线（`?? []` 兜底与纯转发）无需改动即可通过类型检查。
+ */
+export interface DroidPoolAdvice {
+  /** 建议改用的池（被拦池的另一池）。 */
+  readonly pool: QuotaPoolId;
+  /** 另一池 ≤limit 个 `droid/<id>`；无可信数据 / 触线 ⇒ 空。 */
+  readonly models: readonly string[];
+  /** 逐池清单（standard 在前；零候选池与不可信池均被省略）。 */
+  readonly listing: readonly DroidPoolListingEntry[];
+}
+
 /** L0 静默 / L1 提示 / L2 建议 / L3 强烈。数值可比较——provider 级取 max。 */
 export type LadderLevel = 0 | 1 | 2 | 3;
 

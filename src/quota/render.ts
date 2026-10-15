@@ -11,7 +11,15 @@
  * 所以 L3 文案里的「会被 spawn 拦下」承诺永远不会对着陈旧快照说出。
  */
 
-import { isDroidQuotaId, type DroidPoolAlternative, type QuotaProblem, type WindowScope } from "./types.js";
+import {
+  isDroidQuotaId,
+  type DroidPoolListingEntry,
+  type DroidPoolState,
+  type DroidPoolAlternative,
+  type QuotaPoolId,
+  type QuotaProblem,
+  type WindowScope,
+} from "./types.js";
 import type { Millis } from "../core/types.js";
 import {
   DEFAULT_THRESHOLDS_BY_WINDOW,
@@ -29,15 +37,20 @@ export function formatScope(scope: WindowScope): string {
 }
 
 /**
- * 展示标签（D1 虚拟 id 的人性化写法）：droid-standard → "droid standard 池"、
- * droid-core → "droid core 池"；其余 provider 原样返回（kimi/zai 字节不变承诺）。
- * 用于注入块/恢复播报/可用播报/闸门文案的标签位；tick 行与 HUD 段名保留原始 id
- * 的紧凑英文 token（AGENTS.md UI split）。
+ * 展示标签（D1 虚拟 id 的人性化写法；品牌词用户拍板 2026-10-15：正文里写「Droid」、
+ * 池名首字母大写）：droid-standard → "Droid Standard 池"、droid-core → "Droid Core
+ * 池"；其余 provider 原样返回（kimi/zai 字节不变承诺）。用于注入块/恢复播报/可用
+ * 播报/闸门文案的标签位；tick 行与 HUD 段名（紧凑英文 token）保留原始 id 的小写。
  */
 export function quotaLabel(provider: string): string {
-  if (provider === "droid-standard") return "droid standard 池";
-  if (provider === "droid-core") return "droid core 池";
+  if (provider === "droid-standard") return "Droid Standard 池";
+  if (provider === "droid-core") return "Droid Core 池";
   return provider;
+}
+
+/** 池名的正文写法（用户拍板 2026-10-15：首字母大写）；仅用于散文，id/设置键仍是小写。 */
+export function poolLabel(pool: QuotaPoolId): string {
+  return pool === "standard" ? "Standard" : "Core";
 }
 
 /**
@@ -160,8 +173,14 @@ export interface AlternativeSelection {
   readonly providers: readonly string[];
   /** true when the selected pool is tier 0/1 subscription providers. */
   readonly subscription: boolean;
-  /** droid 内替代（D7）：core 池模型（`droid/<id>`），被拦的是 droid-standard 时才出现。 */
+  /** droid 内替代（D7 对称化）：另一池模型（`droid/<id>`），被拦的是 droid 池时才出现。 */
   readonly models?: readonly string[] | undefined;
+  /** `models` 所属池（D7 对称化）：缺席 ⇒ core（旧输出字节兼容）；core ⇒ 「core 池仍有额度，
+   * 优先改用…」，standard ⇒ 「standard 池仍有额度，可改用…（计入 standard 池额度）」。 */
+  readonly modelsPool?: QuotaPoolId | undefined;
+  /** droid 逐池清单（2026-10-15 用户要求：结合可用模型把两池各自能用的列出来）：非空时
+   * 渲染为独立一行并取代旧版通用括号注释；缺席/空 ⇒ 旧括号保留（无目录场景字节不变）。 */
+  readonly poolListing?: readonly DroidPoolListingEntry[] | undefined;
   /** 被拦的是 droid 池 ⇒ providers 行改标题「改用 pi 原生子 agent」（D8 拍板）。 */
   readonly external?: true | undefined;
   /**
@@ -187,9 +206,39 @@ function normalizeAlternatives(input: AlternativeInput): AlternativeSelection {
  */
 function droidPoolAdviceLine(pools: readonly DroidPoolAlternative[] | undefined): string | undefined {
   if (pools === undefined) return undefined;
-  const parts = pools.filter((p) => p.models.length > 0).map((p) => `${p.models.join("、")}（${p.pool} 池）`);
+  const parts = pools
+    .filter((p) => p.models.length > 0)
+    .map((p) => `${p.models.join("、")}（${poolLabel(p.pool)} 池）`);
   if (parts.length === 0) return undefined;
-  return `有余量的外部 droid 池也可用：${parts.join("；")}。注意：外部 droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。`;
+  return `有余量的外部 Droid 池也可用：${parts.join("；")}。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。`;
+}
+
+/** 逐池清单状态文案（中文散文，面向模型的说明块；紧凑读数仍是英文 token）。 */
+const DROID_POOL_STATE_TEXT: Record<DroidPoolState, string> = {
+  ok: "有余量",
+  warn: "告急",
+  blocked: "已拦，勿派",
+};
+
+/**
+ * Droid 逐池清单行（2026-10-15 用户要求「结合 droid 可用模型，把 standard 可以用哪些、
+ * core 可以用哪些模型列出来」）：`Droid 模型按池：Standard 池（已拦，勿派）：a、b 等 N
+ * 个；Core 池（有余量）：x、y。`。每池 ≤5 个候选（poolCandidates 偏好序，超出写
+ * 「等 N 个」，N 为总数）；零候选 / 不可信池省略（终版拍板：数据拿不到就当没有该
+ * 订阅，不出「无数据」文案）；undefined / 全空 ⇒ undefined（旧版通用括号注释保留，
+ * 无目录场景输出字节不变）。
+ */
+function droidPoolListingLine(listing: readonly DroidPoolListingEntry[] | undefined): string | undefined {
+  if (listing === undefined) return undefined;
+  const parts = listing
+    .filter((p) => p.models.length > 0)
+    .map((p) => {
+      const names = p.models.join("、");
+      const suffix = p.total > p.models.length ? ` 等 ${p.total} 个` : "";
+      return `${poolLabel(p.pool)} 池（${DROID_POOL_STATE_TEXT[p.state]}）：${names}${suffix}`;
+    });
+  if (parts.length === 0) return undefined;
+  return `Droid 模型按池：${parts.join("；")}。`;
 }
 
 export function alternativesAdvice(input: AlternativeInput): string {
@@ -206,20 +255,32 @@ export function alternativesAdvice(input: AlternativeInput): string {
     const base = `${heading}：${providers.join("、")}。\n按任务需求选：在这些 provider 下按任务需求选择合适模型；${subscription ? "订阅额度不用会作废；" : ""}不胜任就按路由表另选合适模型，不必硬凑。`;
     return droidLine === undefined ? base : `${base}\n${droidLine}`;
   }
-  // D8（拍板）：droid 池被拦 ⇒ 两类候选都列，core 池优先；pi 行明示执行语义会变。
+  // D8（拍板）：droid 池被拦 ⇒ 两类候选都列，另一池优先；pi 行明示执行语义会变。
+  // D7 对称化（2026-10-15）：被拦的是 core 时同样推荐另一池（standard）的模型；逐池清单
+  // 非空时独立成行、取代旧版通用括号注释（两池模型与状态一目了然）。
   const models = selection.models ?? [];
+  const modelsPool = selection.modelsPool ?? "core";
+  const listingLine = droidPoolListingLine(selection.poolListing);
+  const parenthetical = "（Standard 池 = Droid 的 Anthropic/OpenAI/Google/xAI 模型；Core 池 = Factory 托管开源模型）";
   const lines: string[] = [];
   if (models.length > 0) {
-    lines.push(
-      `同一 Factory 账户的 core 池仍有额度，优先改用 droid core 池模型：${models.join("、")}。` +
-        "（standard 池 = droid 的 Anthropic/OpenAI/Google/xAI 模型；core 池 = Factory 托管开源模型）",
-    );
+    const tail = listingLine === undefined ? parenthetical : "";
+    if (modelsPool === "core") {
+      lines.push(`同一 Factory 账户的 Core 池仍有额度，优先改用 Droid Core 池模型：${models.join("、")}。` + tail);
+    } else {
+      lines.push(
+        `同一 Factory 账户的 Standard 池仍有额度，可改用 Droid Standard 池模型：${models.join("、")}` +
+          `（Standard 池模型计入 Standard 池额度，不占 Core 池）。` +
+          tail,
+      );
+    }
   }
+  if (listingLine !== undefined) lines.push(listingLine);
   if (providers.length > 0) {
     const tier = subscription ? "订阅优先" : "无可用订阅，按量计费";
     lines.push(
       `${models.length > 0 ? "或改" : "改"}用 pi 原生子 agent（${tier}）：${providers.join("、")}。` +
-        "注意这会换成 pi 子 agent 运行（不是外部 droid，权限与工具按 pi 的 agent 类型）。",
+        "注意这会换成 pi 子 agent 运行（不是外部 Droid，权限与工具按 pi 的 agent 类型）。",
     );
   }
   if (lines.length === 0) {
@@ -279,12 +340,12 @@ function billingClause(v: ProviderVerdict): string | undefined {
     const balance = extraUsageText(b.extraUsageBalanceCents);
     if (b.gateOpen === true) {
       // D6 放行后：如实披露「在花真钱」，不再承诺拦截。
-      return `Factory 超额策略为 extraUsage：继续派会消耗额外余额 ${balance}（真钱），闸门不拦截；优先改用 core 池或订阅模型。`;
+      return `Factory 超额策略为 extraUsage：继续派会消耗额外余额 ${balance}（真钱），闸门不拦截；优先改用 Core 池或订阅模型。`;
     }
-    return `Factory 超额策略为 extraUsage（额外余额 ${balance}）：standard 池耗尽后 droid 会按量扣额外余额；pi-toolkit 闸门仍按额度拦截（放行需设 quota.droidAllowExtraUsage=true）。`;
+    return `Factory 超额策略为 extraUsage（额外余额 ${balance}）：Standard 池耗尽后 Droid 会按量扣额外余额；pi-toolkit 闸门仍按额度拦截（放行需设 quota.droidAllowExtraUsage=true）。`;
   }
   if (b.overage === "droidCore") {
-    return "Factory 超额策略为 droidCore：standard 池耗尽后请改用 core 池模型。";
+    return "Factory 超额策略为 droidCore：Standard 池耗尽后请改用 Core 池模型。";
   }
   return undefined;
 }
@@ -497,6 +558,8 @@ function groupSamePool(
       // droid 段的 external/models 随组透传（合并块遇之回落逐段，见 buildMergedBlockText）。
       ...(normalized.external === undefined ? {} : { external: normalized.external }),
       ...(normalized.models === undefined ? {} : { models: normalized.models }),
+      ...(normalized.modelsPool === undefined ? {} : { modelsPool: normalized.modelsPool }),
+      ...(normalized.poolListing === undefined ? {} : { poolListing: normalized.poolListing }),
       ...(normalized.droidPools === undefined ? {} : { droidPools: normalized.droidPools }),
     };
     return {
