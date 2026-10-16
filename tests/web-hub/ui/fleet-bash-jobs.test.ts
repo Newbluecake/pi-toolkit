@@ -111,21 +111,31 @@ describe("FleetBashJobs.vue — 组标题与默认开合", () => {
     expect(wrapper.find(".fleet-bash").attributes("aria-readonly")).toBe("true");
   });
 
-  it("omits zero-count segments; all-terminal ⇒ default collapsed", () => {
-    const wrapper = mountGroup(wire([row({ status: "completed", exitCode: 0 })], { total: 3, running: 0, failed: 0 }));
-    expect(wrapper.find(".bj-sum-text").text()).toBe("Bash · 3 done");
+  it("omits zero-count segments; all-terminal and more than 5 ⇒ default collapsed", () => {
+    const wrapper = mountGroup(wire([row({ status: "completed", exitCode: 0 })], { total: 6, running: 0, failed: 0 }));
+    expect(wrapper.find(".bj-sum-text").text()).toBe("Bash · 6 done");
     expect(wrapper.find(".bj-sum").attributes("aria-expanded")).toBe("false");
     expect(wrapper.find(".bj-list").exists()).toBe(false);
   });
 
+  it("all-terminal but only a few (≤5) ⇒ default expanded (not an empty-looking drawer)", () => {
+    const wrapper = mountGroup(wire([row({ status: "completed", exitCode: 0 })], { total: 3, running: 0, failed: 0 }));
+    expect(wrapper.find(".bj-sum-text").text()).toBe("Bash · 3 done");
+    expect(wrapper.find(".bj-sum").attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find(".bj-list").exists()).toBe(true);
+  });
+
   it("expands and collapses via the summary button (aria-expanded, prose aria-label)", async () => {
+    // a single finished job starts expanded (few ⇒ open); the summary button toggles it
     const wrapper = mountGroup(wire([row({ status: "completed", exitCode: 0 })]));
-    await wrapper.find(".bj-sum").trigger("click");
     expect(wrapper.find(".bj-sum").attributes("aria-expanded")).toBe("true");
     expect(wrapper.find(".bj-sum").attributes("aria-label")).toBe("Background bash jobs: 0 running, 1 done, 0 failed");
     expect(wrapper.findAll(".bj-item")).toHaveLength(1);
     await wrapper.find(".bj-sum").trigger("click");
+    expect(wrapper.find(".bj-sum").attributes("aria-expanded")).toBe("false");
     expect(wrapper.find(".bj-list").exists()).toBe(false);
+    await wrapper.find(".bj-sum").trigger("click");
+    expect(wrapper.findAll(".bj-item")).toHaveLength(1);
   });
 });
 

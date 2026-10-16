@@ -111,12 +111,12 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(child1Details!.text()).toContain("grep call sites");
   });
 
-  it("folds subtrees at depth >= 3 by default and >3 terminal siblings behind Show N Finished Runs", async () => {
+  it("folds subtrees at depth >= 3 by default and, past 5 finished siblings, all but 3 behind Show N Finished Runs", async () => {
     const rows: FleetRowWire[] = [row({ runId: "root", terminal: false })];
     for (let d = 1; d <= 4; d++) {
       rows.push(row({ runId: `n${d}`, parentRunId: d === 1 ? "root" : `n${d - 1}`, terminal: false }));
     }
-    for (let i = 0; i < 5; i++)
+    for (let i = 0; i < 7; i++)
       rows.push(row({ runId: `done${i}`, parentRunId: "root", status: "completed", terminal: true }));
 
     const wrapper = mountTree(rows);
@@ -126,14 +126,23 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(n3).toBeTruthy();
     expect((n3!.element as HTMLDetailsElement).open).toBe(false);
 
-    expect(wrapper.text()).toContain("Show 2 Finished Runs");
+    expect(wrapper.text()).toContain("Show 4 Finished Runs");
     const visibleDoneBefore = wrapper.findAll(".run-name b").filter((b) => b.text().startsWith("done")).length;
     expect(visibleDoneBefore).toBe(3);
 
     await wrapper.get(".run-more").trigger("click");
     const visibleDoneAfter = wrapper.findAll(".run-name b").filter((b) => b.text().startsWith("done")).length;
-    expect(visibleDoneAfter).toBe(5);
-    expect(wrapper.text()).not.toContain("Show 2 Finished Runs");
+    expect(visibleDoneAfter).toBe(7);
+    expect(wrapper.text()).not.toContain("Show 4 Finished Runs");
+  });
+
+  it("a level with only a few (≤5) finished siblings shows them all — no fold button", () => {
+    const rows: FleetRowWire[] = [row({ runId: "root", terminal: false })];
+    for (let i = 0; i < 5; i++)
+      rows.push(row({ runId: `done${i}`, parentRunId: "root", status: "completed", terminal: true }));
+    const wrapper = mountTree(rows);
+    expect(wrapper.findAll(".run-name b").filter((b) => b.text().startsWith("done")).length).toBe(5);
+    expect(wrapper.find(".run-more").exists()).toBe(false);
   });
 
   it("a level with no expandable row renders flat (no chevron column); one branch keeps it for all siblings", () => {

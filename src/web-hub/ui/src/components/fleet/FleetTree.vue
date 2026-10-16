@@ -41,9 +41,14 @@ const { t } = useI18n();
 // per-list fold("Show N Finished Runs")—— 每个实例只管自己这一层兄弟列表
 // ---------------------------------------------------------------------------
 const TERMINAL_FOLD_MAX = 3;
+/** 2026-10-16 user ("agent 或 bash 很少就默认展开，不然显得空空的"): a level with at most this
+ *  many finished siblings shows them all — the fold only kicks in for longer lists. */
+const TERMINAL_FOLD_FEW = 5;
 const expanded = ref(false);
 const terminalCount = computed(() => props.nodes.filter((n) => isTerminalRow(n.row)).length);
-const hiddenCount = computed(() => (expanded.value ? 0 : Math.max(0, terminalCount.value - TERMINAL_FOLD_MAX)));
+const hiddenCount = computed(() =>
+  expanded.value || terminalCount.value <= TERMINAL_FOLD_FEW ? 0 : terminalCount.value - TERMINAL_FOLD_MAX,
+);
 const visible = computed<readonly FleetTreeNode[]>(() => {
   if (expanded.value || hiddenCount.value === 0) return props.nodes;
   let seenTerminal = 0;

@@ -36,8 +36,13 @@ import "../../styles/bash-jobs.css";
 const props = defineProps<FleetBashJobsProps>();
 const { t } = useI18n();
 
-/** 有运行中的任务时默认展开,全终态默认收起(一次性的初始值,不随 wire 后续变化强制开合)。 */
-const open = ref(summaryCounts(props.jobs).running > 0);
+/** 有运行中的任务、或任务总数 ≤ BASH_OPEN_FEW 时默认展开(2026-10-16 用户:「很少就默认展开，不然
+ *  显得空空的」);更多且全终态时默认收起。一次性的初始值,不随 wire 后续变化强制开合。 */
+const BASH_OPEN_FEW = 5;
+const initialCounts = summaryCounts(props.jobs);
+const open = ref(
+  initialCounts.running > 0 || initialCounts.running + initialCounts.failed + initialCounts.done <= BASH_OPEN_FEW,
+);
 /** At most one row's tail is expanded at a time (the wire caps rows at 20 — no fold math needed). */
 const expandedId = ref<string | null>(null);
 
