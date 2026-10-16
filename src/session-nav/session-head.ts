@@ -35,14 +35,28 @@ export interface HeadLimits {
   tailBytes: number;
   /** Maximum acceptable header line length in bytes (default 4 KiB). */
   headerLineBytes: number;
+  /**
+   * Forward-scan ceiling from offset 0 (default 1 MiB). When the head window holds no first
+   * user message (and no child marker), the reader keeps scanning past it — skipping any line
+   * larger than `headBytes` on its prefix alone, never buffering it — up to this many bytes.
+   * pi ≥1.2 records the whole system prompt as an early `role:"system"` message line
+   * (~180 KiB measured 2026-10-16), which pushed the first user message and the auto-title
+   * `session_info` out of the 64 KiB window and left every main-session row 「无标题」.
+   * Values ≤ `headBytes` disable the scan (pre-fix behavior).
+   */
+  scanBytes?: number;
 }
 
-/** Plan §2.2 defaults: head 64 KiB / tail 16 KiB / header line 4 KiB. */
-export const DEFAULT_HEAD_LIMITS: HeadLimits = {
+/** Plan §2.2 defaults: head 64 KiB / tail 16 KiB / header line 4 KiB; forward scan ≤1 MiB. */
+export const DEFAULT_HEAD_LIMITS: Required<HeadLimits> = {
   headBytes: 64 * 1024,
   tailBytes: 16 * 1024,
   headerLineBytes: 4 * 1024,
+  scanBytes: 1024 * 1024,
 };
+
+/** Forward-scan read block (bytes). */
+const SCAN_BLOCK_BYTES = 64 * 1024;
 
 export interface SessionHead {
   id: string;
@@ -58,7 +72,13 @@ export interface SessionHead {
 }
 
 export type HeadResult =
-  { ok: true; head: SessionHead } | { ok: false; invalid: "no-header" | "bad-header" | "too-long-header" };
+  | {
+      ok: true;
+      head: SessionHead;
+      /** Bytes actually read from the fd (head + forward scan + tail) — the caller's IO budget. */
+      readBytes?: number;
+    }
+  | { ok: false; invalid: "no-header" | "bad-header" | "too-long-header" };
 
 export interface FileFact {
   path: string;
@@ -152,12 +172,16 @@ function customTypeOf(line: string): string | undefined {
 function extractUserText(content: unknown): string {
   if (Array.isArray(content)) {
     const parts: string[] = [];
+    let images = 0;
     for (const block of content) {
       if (isPlainObject(block) && block["type"] === "text" && typeof block["text"] === "string") {
         parts.push(block["text"]);
-      }
+      } else if (isPlainObject(block) && block["type"] === "image") images += 1;
     }
-    return parts.join(" ");
+    const text = parts.join(" ");
+    // An image-only first message still deserves a row title (never 「无标题」).
+    if (text.trim() === "" && images > 0) return "[image]";
+    return text;
   }
   if (typeof content === "string") return content;
   return "";
@@ -280,10 +304,11 @@ function readFull(fd: number, buf: Buffer, want: number, position: number): numb
 
 /**
  * Bounded head/tail reader over an already-open fd (never closes it). Reads at most
- * `headBytes` from offset 0 plus, when `size > headBytes`, `tailBytes` from the end.
+ * `headBytes` from offset 0 — extended by the forward scan up to `scanBytes` when no first user
+ * message was found — plus, when the file outgrew what was scanned, `tailBytes` from the end.
  */
 export function readSessionHeadFd(fd: number, size: number, limits?: HeadLimits): HeadResult {
-  const lim: HeadLimits = limits ? { ...DEFAULT_HEAD_LIMITS, ...limits } : DEFAULT_HEAD_LIMITS;
+  const lim: Required<HeadLimits> = limits ? { ...DEFAULT_HEAD_LIMITS, ...limits } : DEFAULT_HEAD_LIMITS;
   if (size <= 0) return { ok: false, invalid: "no-header" };
   const state: HeadState = {
     lineNo: 0,
@@ -328,16 +353,24 @@ export function readSessionHeadFd(fd: number, size: number, limits?: HeadLimits)
     if (isUserMessageLinePrefix(partial)) state.firstMessage = looseExtractText(partial);
   }
 
-  // ── tail window (name / child marker only; only when the file outgrew the head) ──
-  if (size > headLen) {
-    const tailWant = Math.min(lim.tailBytes, size - headLen);
+  // ── forward scan (no first user message in the head window yet) ──────────────
+  let scannedEnd = headLen;
+  if (state.firstMessage === undefined && !state.child && headLen < size && lim.scanBytes > headLen) {
+    scannedEnd = scanForward(fd, size, headLen, head, state, lim);
+  }
+
+  // ── tail window (name / child marker only; only when the file outgrew the scan) ──
+  let readBytes = scannedEnd;
+  if (size > scannedEnd) {
+    const tailWant = Math.min(lim.tailBytes, size - scannedEnd);
+    readBytes += tailWant;
     const tailStart = size - tailWant;
     const tailBuf = Buffer.alloc(tailWant);
     const tailLen = readFull(fd, tailBuf, tailWant, tailStart);
     if (tailLen > 0) {
       let tail = tailBuf.subarray(0, tailLen);
       // The tail window starts mid-line unless it starts at a line boundary we can prove —
-      // only when the head window ended exactly on `\n` AND the windows are adjacent. Dropping
+      // only when the scanned prefix ended exactly on `\n` AND the windows are adjacent. Dropping
       // the leading partial line is always safe (its start is unknown).
       const firstNl = tail.indexOf(0x0a);
       if (firstNl >= 0) {
@@ -360,5 +393,62 @@ export function readSessionHeadFd(fd: number, size: number, limits?: HeadLimits)
   };
   if (state.name !== undefined) headOut.name = state.name;
   if (state.firstMessage !== undefined) headOut.firstMessage = state.firstMessage;
-  return { ok: true, head: headOut };
+  return { ok: true, head: headOut, readBytes };
+}
+
+/**
+ * Continue past the head window until the first user message is found, the scan ceiling
+ * (`lim.scanBytes`) is reached, or EOF. `carry` is the head window's trailing partial line.
+ * A line longer than `lim.headBytes` is decided on its prefix: a user line is loose-extracted
+ * (stop), anything else (e.g. pi's system-prompt message) is skipped to its `\n` without being
+ * buffered or parsed. Every complete line of the block that found the first user message is
+ * still processed, so a `session_info` written right after it (auto-title) is picked up.
+ * Returns the end offset actually read.
+ */
+function scanForward(
+  fd: number,
+  size: number,
+  start: number,
+  carryIn: Buffer,
+  state: HeadState,
+  lim: Required<HeadLimits>,
+): number {
+  const end = Math.min(size, lim.scanBytes);
+  let pos = start;
+  let carry: Buffer = carryIn;
+  let skipping = false;
+  while (pos < end && state.firstMessage === undefined) {
+    const want = Math.min(SCAN_BLOCK_BYTES, end - pos);
+    const block = Buffer.alloc(want);
+    const n = readFull(fd, block, want, pos);
+    if (n <= 0) break;
+    pos += n;
+    let chunk = block.subarray(0, n);
+    if (skipping) {
+      const nl = chunk.indexOf(0x0a);
+      if (nl < 0) continue; // still inside the oversized line
+      chunk = chunk.subarray(nl + 1);
+      skipping = false;
+    }
+    carry = carry.length === 0 ? chunk : Buffer.concat([carry, chunk]);
+    for (;;) {
+      const nl = carry.indexOf(0x0a);
+      if (nl < 0) break;
+      processLine(state, carry.subarray(0, nl).toString("utf8"), false);
+      carry = carry.subarray(nl + 1);
+    }
+    if (state.firstMessage === undefined && carry.length > lim.headBytes) {
+      if (isUserMessageLinePrefix(carry.subarray(0, 256).toString("utf8"))) {
+        state.firstMessage = looseExtractText(carry.toString("utf8"));
+        break;
+      }
+      skipping = true;
+      carry = Buffer.alloc(0);
+    }
+  }
+  if (state.firstMessage === undefined && carry.length > 0) {
+    const partial = carry.toString("utf8");
+    if (isUserMessageLinePrefix(partial)) state.firstMessage = looseExtractText(partial);
+  }
+  return pos;
 }

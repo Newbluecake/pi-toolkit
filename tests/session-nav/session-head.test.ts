@@ -116,8 +116,80 @@ describe("readSessionHeadFd — tail window", () => {
   test("tail lines never contribute firstMessage", async () => {
     const filler = JSON.stringify({ type: "custom", customType: "t:f", data: "y".repeat(1024) }) + "\n";
     const content = `${headerLine("s")}\n` + filler.repeat(80) + `${userLine("late")}\n`;
+    // forward scan disabled (scanBytes ≤ headBytes) ⇒ only the tail window sees the user line.
+    const limits = { ...DEFAULT_HEAD_LIMITS, scanBytes: DEFAULT_HEAD_LIMITS.headBytes };
     await withTempFile(content, (fd, size) => {
-      expect(expectOk(readSessionHeadFd(fd, size)).firstMessage).toBeUndefined();
+      expect(expectOk(readSessionHeadFd(fd, size, limits)).firstMessage).toBeUndefined();
+    });
+  });
+});
+
+describe("readSessionHeadFd — forward scan past the head window", () => {
+  // pi ≥1.2 shape: a ~180 KiB role:"system" message line precedes the first user message and the
+  // auto-title session_info (2026-10-16 field report: every main row showed 「无标题」).
+  function systemLine(bytes: number): string {
+    return JSON.stringify({ type: "message", message: { role: "system", content: "s".repeat(bytes) } });
+  }
+
+  test("an oversized system-prompt line is skipped; first user message and name are found", async () => {
+    const content =
+      [headerLine("s"), systemLine(180 * 1024), userLine("真正的第一句"), nameLine("自动标题")].join("\n") +
+      "\n" +
+      JSON.stringify({ type: "custom", customType: "t:f", data: "y".repeat(1024) })
+        .concat("\n")
+        .repeat(40);
+    await withTempFile(content, (fd, size) => {
+      const r = readSessionHeadFd(fd, size);
+      const head = expectOk(r);
+      expect(head.firstMessage).toBe("真正的第一句");
+      expect(head.name).toBe("自动标题");
+      if (!r.ok) throw new Error("unreachable");
+      expect(r.readBytes).toBeGreaterThan(DEFAULT_HEAD_LIMITS.headBytes);
+      expect(r.readBytes).toBeLessThanOrEqual(size);
+    });
+  });
+
+  test("the scan stops at scanBytes; the tail window still runs past it", async () => {
+    const content =
+      [headerLine("s"), systemLine(600 * 1024), userLine("too far"), nameLine("尾部名")].join("\n") + "\n";
+    const limits = { ...DEFAULT_HEAD_LIMITS, scanBytes: 256 * 1024 };
+    await withTempFile(content, (fd, size) => {
+      const r = readSessionHeadFd(fd, size, limits);
+      const head = expectOk(r);
+      expect(head.firstMessage).toBeUndefined();
+      expect(head.name).toBe("尾部名"); // tail window
+      if (!r.ok) throw new Error("unreachable");
+      expect(r.readBytes).toBeLessThanOrEqual(256 * 1024 + DEFAULT_HEAD_LIMITS.tailBytes);
+    });
+  });
+
+  test("a user line longer than headBytes found by the scan is loose-extracted", async () => {
+    const content = [headerLine("s"), systemLine(100 * 1024), userLine("w".repeat(200 * 1024))].join("\n") + "\n";
+    await withTempFile(content, (fd, size) => {
+      const head = expectOk(readSessionHeadFd(fd, size));
+      expect(head.firstMessage!.startsWith("wwww")).toBe(true);
+    });
+  });
+
+  test("a child marker in the head window disables the scan", async () => {
+    const content = [headerLine("s"), childMarkerLine(), systemLine(180 * 1024), userLine("x")].join("\n") + "\n";
+    await withTempFile(content, (fd, size) => {
+      const r = readSessionHeadFd(fd, size);
+      const head = expectOk(r);
+      expect(head.child).toBe(true);
+      expect(head.firstMessage).toBeUndefined();
+      if (!r.ok) throw new Error("unreachable");
+      expect(r.readBytes).toBe(DEFAULT_HEAD_LIMITS.headBytes + DEFAULT_HEAD_LIMITS.tailBytes);
+    });
+  });
+
+  test("an image-only first user message yields the [image] placeholder", async () => {
+    const line = JSON.stringify({
+      type: "message",
+      message: { role: "user", content: [{ type: "image", data: "AAAA", mimeType: "image/png" }] },
+    });
+    await withTempFile(`${headerLine("s")}\n${line}\n`, (fd, size) => {
+      expect(expectOk(readSessionHeadFd(fd, size)).firstMessage).toBe("[image]");
     });
   });
 });

@@ -5,7 +5,8 @@
  * Never calls pi's `SessionManager.list` (r1 #7): every candidate file is opened through the
  * frozen §2.2 P1 core (`openSessionNoFollow`/`openSessionNoFollowAsync` — O_NOFOLLOW +
  * O_NONBLOCK + O_NOCTTY, regular-file-only, §2.2 "Open discipline") and read with the bounded
- * `readSessionHeadFd` (head ≤64 KiB, header line ≤4 KiB, tail ≤16 KiB only when size > 64 KiB).
+ * `readSessionHeadFd` (head ≤64 KiB, header line ≤4 KiB, tail ≤16 KiB only when size > 64 KiB;
+ * a forward scan ≤1 MiB when the head window holds no first user message — real bytes charged).
  * No message text is ever retained — the generation keeps only id/title/flags plus the
  * `id → FileFact` index the pick path re-validates against (§2.5 b).
  *
@@ -341,7 +342,8 @@ export function createResumeList(deps: ResumeListDeps): ResumeListHandle {
           partial = true; // rows so far are kept
           break;
         }
-        readBytes += Math.min(f.size, HEAD_BYTES) + (f.size > HEAD_BYTES ? TAIL_BYTES : 0);
+        const estimate = Math.min(f.size, HEAD_BYTES) + (f.size > HEAD_BYTES ? TAIL_BYTES : 0);
+        readBytes += estimate;
         if (readBytes > RESUME_BUILD_BYTES) {
           partial = true;
           break;
@@ -356,6 +358,9 @@ export function createResumeList(deps: ResumeListDeps): ResumeListHandle {
           try {
             const r = core.readSessionHeadFd(opened.handle.fd, opened.fact.size);
             if (!r.ok) return;
+            // The head reader may scan past its 64 KiB window (≤1 MiB) to reach the first user
+            // message behind pi's system-prompt line — charge the real bytes to the budget.
+            if (r.readBytes !== undefined && r.readBytes > estimate) readBytes += r.readBytes - estimate;
             const head = r.head;
             if (resolve(head.cwd) !== resolveCwd) return; // shared custom sessionDir (r1 #3)
             if (core.isSubagentSession(f.path, head, index)) return; // D1: dropped entirely

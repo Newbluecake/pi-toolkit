@@ -42,7 +42,7 @@ const en = {
   forkBadge: "⑂",
   liveBadge: "Open in another window",
   liveHint: "This session looks in use elsewhere — click again to switch anyway",
-  noTitle: "Untitled",
+  noTitle: "Empty session",
   // --- D5 (§7 D5-a) ---
   confirmTitle: "Switch to this session?",
   confirmBody: "Its file changed or was written recently — it may be open elsewhere. Switch anyway?",
@@ -86,7 +86,7 @@ const zh: Record<keyof typeof en, string> = {
   forkBadge: "⑂",
   liveBadge: "已在其他窗口打开",
   liveHint: "该会话似乎正在其他窗口使用，再点一次确认切换",
-  noTitle: "无标题",
+  noTitle: "空会话",
   // --- D5（§7 D5-a）---
   confirmTitle: "切换到该会话？",
   confirmBody: "该会话文件最近被写入或有变化，可能正被其他窗口使用。仍要切换吗？",
