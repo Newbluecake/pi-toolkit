@@ -321,8 +321,21 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   system-prompt byte-stability checks): `docs/dev/sysprompt-stable/acceptance.md`.
 - `src/session-nav/` — merged session-nav: `/resume-recent` (48h window, `--all` for full history),
   `/clear`, bare `exit` interception, a pre-submit rewriting editor, and resume-list title
-  cleaning (skill envelopes + `[sub:type]` subagent marks driven by our own `subagent:run`
-  entries, disk-cached under `<agent>/cache/session-nav/`). Post-guard, TUI-only.
+  cleaning (skill envelopes). **web-resume plan §2.1/§2.3 (D1 彻底隐藏)**: subagent sessions are
+  dropped entirely from every resume list — partial progress included — no flag, no toggle, no
+  hidden-count line; the `[sub:type]` retitle path is deleted. A session is sub ⇔ its head carries
+  the line-2 `subagent:child` self-marker (v0.4.0+, checked per displayed row) **or** its path is in
+  the provenance index — the union of every `subagent:run.diag.sessionFile` mark ever scanned in
+  the whole session dir (not just the 48 h window), advanced by a budgeted incremental backfill
+  (≤2 s/≤64 MiB per call, round-robin 8 MiB chunks, append-only ⇒ stale cache is a valid lower
+  bound) under cache v2 `<agent>/cache/session-nav/provenance-v2/<sha256(dir)>.json` (one file per
+  session dir, 0600 atomic, 16 MiB cap; the v1 `subagent-marks.json` is simply ignored). Capacity:
+  20 000 tracked files / 2 048 marks per entry / 512 KiB per entry over ⇒ `capacity`, self-marked
+  children still hidden. Disclosed residuals: a pre-v0.4.0 child whose parent file was deleted is
+  undetectable; on a huge dir the first few opens may still show a pre-v0.4.0 child until the
+  backfill completes once. List pipeline: temp-dir symlink + real pi `SessionManager.list` with a
+  wrapped progress that maps temp→real paths before dropping sub rows (pi 1.2 partials carry
+  temp-dir paths). Post-guard, TUI-only. Design: `docs/dev/web-resume/plan.md`.
 - `src/web-hub/` — browser UI over a per-machine hub daemon (`webHub.enabled`, default off ⇒ zero wiring,
   zero network, zero disk; post-guard, child sessions inert). `protocol/` (frame/key/path contracts shared by
   both sides, incl. `ui-manifest.ts`'s `UiBuildInfo`/`parseUiBuildInfo`/`isAllowedUiPath` — the build-time
@@ -343,8 +356,31 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   origin slash commands with pi-toolkit's own commands captured and echoed back to the browser
   (`wrapCommandApi`, `captured:true` + the output text; a third-party extension's raw-registered command is
   never captured, `captured:false`, terminal-only), version-supersede/`/webhub stop`/`start`/`token rotate`
-  admin flows, and a `hub-state-banner` covering pending/blocked/restarting/stopping. Design:
-  `docs/dev/web-hub/{arch,plan,vue-plan,control-plan}.md`. **UI serving
+  admin flows, and a `hub-state-banner` covering pending/blocked/restarting/stopping. **Web resume
+  (`resume.v1`, web-resume plan §2.4/§2.5/§2.7)**: `status.features` carries `resume.v1` iff control +
+  `webCommands` are on, the session is persisted and `webCommandPolicy.resume` isn't `confirm`/`deny`
+  (old agents never emit it ⇒ old UIs stay byte-identical); the advertised bare `resume` stays deny,
+  `resume __list <json>`/`__pick <json>` are the allowed internal forms (`resume-recent` always deny).
+  `__list` is the ONE thenable builtin (read-only race ≤6 s, `resume:scanning` retryable, ledger strips
+  `data.sessions`) and never calls pi's `SessionManager.list` — a bounded head/tail reader (§2.2 core,
+  O_NOFOLLOW/O_NONBLOCK open discipline) builds a generation (≤5 000 files / ≤5 s / ≤64 MiB / ≤2 000
+  rows / page ≤100 / ≤32 KiB, gen-bound cursor with `reset:true`, cwd-matched, duplicate header ids
+  omitted) retaining no message text. `__pick` is a fully SYNC decision: busy/pending ⇒ `resume:busy`
+  (D4 browse-only), a one-per-process exec claim SHARED with `/new` (`exec:in-flight`), then a ticket
+  bound to source session + target file identity, re-entered via `/webhub __exec resume <nonce>`; every
+  authoritative check (source unchanged, idle, deadline, O_NOFOLLOW dev/ino, header id/cwd/child,
+  provenance, not-current, D5-a: target written <30 s or changed since listed ⇒ `E_CONFIRM_REQUIRED
+resume:active-elsewhere` unless `confirm`) re-runs synchronously at the execution point right before
+  `ctx.switchSession`; a revoked/expired ticket can never switch, late failures are `retryable:false`,
+  exactly one `cmd_late` per armed ticket, and `switchInFlight` refuses web prompts across the window.
+  UI: header 「恢复」 button next to 「清空」 (D7) + dock/input interception, dialog lazy-loaded.
+  Disclosed residual windows: W1 — between the execution-point checks and pi's `SessionManager.open`
+  lie the async `session_before_switch` handlers; a swap there is only detected afterwards
+  (`resume:mismatch`, effect unknown), a swap swapped back is undetectable. W2 — pi never locks
+  session files; an idle session open in a terminal not connected to web is undetectable (D5-a's
+  size/mtime are activity signals, not occupancy proof). Managed rpc sessions use the same path.
+  Design: `docs/dev/web-hub/{arch,plan,vue-plan,control-plan}.md`, `docs/dev/web-resume/plan.md`.
+  **UI serving
   (todo #26 vue-plan.md v2.1 §2.1, P5b)**: `hub/static.ts`'s `createUiServer` resolves a verified root —
   package-bundled `dist/web-hub-ui/` first, else the external, version-pinned
   `~/.pi/agent/web-hub-ui/<hubVersion>/` (`hub/ui-root.ts`'s `resolveUiRoot`/`verifyUiRoot`: symlink/owner/mode/

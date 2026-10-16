@@ -32,12 +32,11 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildSessionContext, createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { PiSessionDriver, SUBAGENT_CHILD_CUSTOM_TYPE } from "../../src/runtime/session-driver.js";
 import type { SessionHandle } from "../../src/runtime/session-driver.js";
 import { createRunFileReader } from "../../src/web-hub/hub/run-file-reader.js";
-import { collectSubagentMarks, markSubagentSessions } from "../../src/session-nav/subagent-sessions.js";
+import { collectSubagentSessions } from "../../src/session-nav/subagent-sessions.js";
 
 const posix = process.platform !== "win32";
 const REPO_ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
@@ -382,7 +381,7 @@ describe.skipIf(!posix)("H0 child-session marker: projection unaffected (M5)", (
     reader.dispose();
   });
 
-  it("session-nav: the marker is not a subagent:run entry — collectSubagentMarks finds none, and [sub:type] titles still apply", async () => {
+  it("session-nav: a real child session is hidden from /resume by its own subagent:child marker", async () => {
     const s = scratch("m5nav");
     redirectEnv(s);
     s.settingsJson(undefined);
@@ -393,25 +392,10 @@ describe.skipIf(!posix)("H0 child-session marker: projection unaffected (M5)", (
       prompt: "nav task",
     });
 
-    const marks = await collectSubagentMarks([file], dirname(file));
-    expect(marks.size).toBe(0); // the child marker itself contributes no mark
-
-    // A main session's subagent:run entry pointing at this child still drives the title
-    // (markSubagentSessions is the pure title function; the child file's contents never enter it).
-    const sessionInfo = {
-      path: file,
-      id: "whatever",
-      cwd: s.cwd,
-      created: new Date(),
-      modified: new Date(),
-      messageCount: 2,
-      firstMessage: "nav task",
-      allMessagesText: "nav task",
-    } as unknown as SessionInfo;
-    const marked = markSubagentSessions(
-      [sessionInfo],
-      new Map([[resolve(file), { agentType: "explorer", label: "scan the repo" }]]),
-    );
-    expect(marked[0]!.firstMessage).toBe("[sub:explorer] scan the repo");
+    // web-resume P1 (fa0e9d6) replaced the [sub:type] title marking with hiding: no main session
+    // in the folder records this child, so it is classified purely by the line-2 self-marker.
+    const filter = await collectSubagentSessions([file], dirname(file));
+    expect(filter.sub.has(resolve(file))).toBe(true);
+    expect(filter.index.has(resolve(file))).toBe(false); // the marker is not a subagent:run entry
   });
 });
