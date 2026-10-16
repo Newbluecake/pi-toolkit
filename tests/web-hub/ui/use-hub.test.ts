@@ -514,6 +514,7 @@ describe("useHub: spawn wiring (web-hub-spawn SP11)", () => {
   function makeSpawnHub() {
     const clock = fakeClock();
     const starts: unknown[] = [];
+    const mkdirs: { path: string; name: string }[] = [];
     const transport: HubTransport = {
       mode: "token",
       start: async () => {},
@@ -531,6 +532,10 @@ describe("useHub: spawn wiring (web-hub-spawn SP11)", () => {
           return { ok: true, data: { spawnId: "sp1", state: "starting" as const, cwd: "/real/p" } };
         },
         stop: async () => ({ ok: true as const, state: "stopping" as const }),
+        mkdir: async (path: string, name: string) => {
+          mkdirs.push({ path, name });
+          return { ok: true as const, path: `${path}/${name}` };
+        },
       },
     };
     const hub = useHub({
@@ -540,8 +545,15 @@ describe("useHub: spawn wiring (web-hub-spawn SP11)", () => {
       clearTimeout: clock.clearTimeout,
       now: clock.now,
     });
-    return { hub, clock, starts };
+    return { hub, clock, starts, mkdirs };
   }
+
+  it("handle.spawn.mkdir forwards to the transport (regression: it was missing, DirPicker's 「创建」 silently did nothing)", async () => {
+    const { hub, mkdirs } = makeSpawnHub();
+    expect(typeof hub.spawn!.mkdir).toBe("function");
+    expect(await hub.spawn!.mkdir!("/home/u/ai", "maintain")).toEqual({ ok: true, path: "/home/u/ai/maintain" });
+    expect(mkdirs).toEqual([{ path: "/home/u/ai", name: "maintain" }]);
+  });
 
   it("handle.spawn is always constructed (list/dirs/start/stop + newSession); a transport without spawn degrades to E_UNSUPPORTED", async () => {
     const t = fakeTransport();

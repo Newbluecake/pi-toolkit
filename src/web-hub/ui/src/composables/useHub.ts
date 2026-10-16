@@ -809,6 +809,9 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // spawn-relaunch: the offline managed card's relaunch call — `createSpawn` already
     // degrades a transport without `relaunch` to `E_UNSUPPORTED`.
     relaunch: (spawnId) => spawnBase.relaunch(spawnId),
+    // spawn-dirmkdir: the DirPicker 「新建文件夹」 call. Was missing here (2026-10-16 field bug):
+    // DirPicker read `hub.spawn.mkdir` as undefined and returned silently — no request, no error.
+    mkdir: (path, name) => spawnBase.mkdir(path, name),
     newSession,
   };
 
