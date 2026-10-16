@@ -259,3 +259,16 @@ function parseCore(v: string): [number, number, number] {
  * (the 1.1 → 1.2 minor bump is fleet F0's alone, see PROTO above).
  */
 export const WTGRAPH_HUB_CAP = "wtgraph.v1";
+
+/**
+ * web-hub-version plan §2 (V0 frozen surface): the hub cap advertising the version-info
+ * endpoint (`GET /api/version`, `protocol/version-info.ts`). Declared UNCONDITIONALLY on BOTH
+ * hub cap surfaces via `extraHubCaps` (V1's `hub.ts` wires it into `HubInfo.caps` /
+ * `hello_ack.caps`) — there is no settings gate (plan D3). A browser that doesn't see it never
+ * requests the endpoint (V2's `useVersionInfo` parks at `unsupported`) and the version panel
+ * degrades to the hub-frame-only sections; an old browser ignores the unknown cap string. In
+ * V0 the constant alone is INERT — nothing folds it into any caps array yet. Like every cap
+ * above it adds no agent↔hub frames and no SSE event, so no PROTO bump (same §2.3 rule; the
+ * 1.1 → 1.2 minor bump is fleet F0's alone, see PROTO above).
+ */
+export const VERSION_HUB_CAP = "version.v1";

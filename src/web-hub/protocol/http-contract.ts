@@ -140,6 +140,12 @@ export interface AgentCard {
   state: "live" | "stale";
   pluginVersion: string;
   outdated: boolean;
+  /** web-hub-version plan §2 (V0 frozen face): the agent's own `buildId`
+   *  (`<version>@<git %h>[*]`, as announced in its hello). V1's `hub/registry.ts` copies it
+   *  through from the record; absent on pre-feature agents — V2's `agent-drift` finding (§4)
+   *  degrades to 无法验证 without it, exactly like every other optional card field. UX gating
+   *  only, same pattern as `pluginVersion`/`outdated`; never a security boundary. */
+  buildId?: string;
   session?: SessionInfo;
   status?: StatusInfo;
   prompts: SnapshotReplyBody["prompts"];

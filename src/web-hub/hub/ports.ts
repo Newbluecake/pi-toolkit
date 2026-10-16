@@ -52,6 +52,7 @@ import type {
   RunHistoryPayload,
 } from "../protocol/run-transcript.js";
 import type { HubSpawnConfig, SpawnsPayload } from "../protocol/spawn.js";
+import type { CommitRef, HubUiBuildWire, VersionInfoWire } from "../protocol/version-info.js";
 import type { PROTO } from "../protocol/version.js";
 import type { Scope } from "./lifecycle.js";
 import type { ReqDeadline } from "./req-deadline.js";
@@ -588,6 +589,18 @@ export interface HubInfo {
   supersedeBlocked?: "stopped" | "unknown";
   /** web-hub-avatar plan v2.1 §4.1: per-hub avatar generation and digest. */
   avatar?: AvatarInfo;
+  /** web-hub-version plan §2 (V0 frozen face): identity of the UI root the hub is CURRENTLY
+   *  serving (`HubUiBuildWire` — assets are the verified index.html's `/assets/*` references,
+   * a content-hash bundle fingerprint). Present only while the UI root state is `ok`; set by
+   * V1's `hub.ts` through `FrontendDeps.onUiServed` (undefined when no root is servable) and
+   * re-broadcast via a `hub` frame. Optional so every pre-V1 assembly keeps compiling and the
+   * wire stays byte-identical until then. */
+  ui?: HubUiBuildWire;
+  /** web-hub-version plan §2 (V0 frozen face): the disk HEAD first observed after hub start
+   * (`captureBootHead`, §3.5 — one shot, silent on failure). NOT a guarantee about the loaded
+   * code (§10 residual: a `git pull` racing hub start can go unnoticed); V2's
+   * `hub-disk-changed` finding compares it against a live `/api/version` snapshot. */
+  bootHead?: CommitRef;
 }
 
 export interface CommandRouter {
@@ -699,6 +712,18 @@ export interface FrontendDeps {
    * `/api/privacy/verify` 404s (LAN included), byte-identical to not-enabled, and no `privacy`
    * SSE frame is ever sent. */
   privacy?: PrivacyRoutes;
+  /** web-hub-version plan §2 (V0 frozen face): the version-info service
+   * (`hub/version-info.ts`'s `createVersionInfoService`, V1 §3.5 — constructed and disposed by
+   * `hub.ts`, never holds the UiServer). Optional so test doubles and pre-V1 assemblies keep
+   * compiling — when absent, `GET /api/version` answers exactly as today (loopback 401/404,
+   * LAN 404, §3.9's fallback matrix) and `VERSION_HUB_CAP` is never consumed. */
+  version?: VersionInfoPort;
+  /** web-hub-version plan §2 (V0 frozen face): V1's `hub.ts` hands this to the UI-server layer
+   * so `refreshFor()`'s independent `rootGeneration + assets` dedup (§3.6, R2 #2/#5 — NOT the
+   * `statusSignature` dedup behind `onStatus`) can update `HubInfo.ui` + re-broadcast a `hub`
+   * frame whenever the SERVED bundle identity actually changes; `undefined` means no servable
+   * root (delete `info.ui`). Mirrors `onUiStatus`'s role for `hubJson.patchUi`. */
+  onUiServed?: (ui: HubUiBuildWire | undefined) => void;
 }
 
 export interface HttpFrontend {
@@ -877,4 +902,30 @@ export interface WorktreeGraphRoutes {
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
   /** Idempotent; aborts every active request and single-flight Gl execution ("hub-close"), ≤1 s. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-version plan §2 (V0 frozen surface): the version-info port + outcome. Declared here
+// for the same reason as `PreviewRoutes` above — `FrontendDeps.version` needs the type before
+// `hub/version-info.ts` exists from ports.ts's perspective. V1 implements
+// `createVersionInfoService` against this shape; a member-signature refinement must come back
+// through ports.ts review (same rule as the W1 port freeze at the top of this file).
+// ---------------------------------------------------------------------------
+
+/** `VersionInfoPort.snapshot()` outcome: `data` is a fully validated `VersionInfoWire` (the
+ *  service builds it server-side from `parseVersionInfoWire`-compatible shapes — the HTTP
+ *  layer serializes it verbatim). Failures are transport-level only: `E_BUSY` ⇒ the 8-waiter
+ *  single-flight cap is exhausted (V1's http.ts maps it to 503), `E_DEADLINE` ⇒ the request's
+ *  own budget expired before the round settled (504). Section-level failures ride INSIDE a
+ *  `data` response as `repo.error`/`changelog.error` and the 10s fail cache — they never fail
+ *  the call. */
+export type VersionInfoOutcome = { ok: true; data: VersionInfoWire } | { ok: false; code: "E_BUSY" | "E_DEADLINE" };
+
+/** web-hub-version plan §3.5: the single-flight version-info service. `signal` is the
+ *  REQUESTER's disconnect signal — aborting it only detaches that waiter from the shared
+ *  round (never cancels the computation; the slot stays held until uncancellable IO really
+ *  settles, §3.5 lifecycle). One round at a time, ≤8 waiters, success cached 30s / failed
+ *  sections 10s (`VERSION_LIMITS`). */
+export interface VersionInfoPort {
+  snapshot(signal: AbortSignal): Promise<VersionInfoOutcome>;
 }
