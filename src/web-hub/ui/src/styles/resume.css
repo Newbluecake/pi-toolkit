@@ -5,12 +5,13 @@
  * reusing the shared primitives (.input/.btn/.chip) plus PickerSheet's sheet chrome.
  *
  * Layout: `.picker-scrim` (flex, align-items:flex-end) centers the sheet with
- * `align-items:center` + auto side margins once the viewport exceeds the 640px cap
+ * `align-items:center` + `justify-content:center` once the viewport exceeds the 640px cap
  * (§2.6 "≤640 px via PickerSheet.vue").
  */
 
 .resume-scrim {
   align-items: center;
+  justify-content: center; /* horizontal centering on wide viewports (sheet is 100% wide ≤640px) */
 }
 
 .resume-sheet,
