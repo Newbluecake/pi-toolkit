@@ -2,15 +2,15 @@
 
 **中文** | [English](README.en.md)
 
-[pi](https://github.com/earendil-works/pi) 的工具箱扩展：旗舰是一套**零卡死 subagent 系统**（`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`），外加九个可按需开关的日常基础设施模块——项目记忆、HUD footer、`web_search`、任务工具、`ask_user`、飞书通知、bash 自动转后台、会话导航、`/goal` 目标循环。单一安装入口，统一 settings 门控。
+[pi](https://github.com/earendil-works/pi) 的工具箱扩展。旗舰是一套**零卡死 subagent 系统**（`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`），外加一组可按需开关的日常模块：项目记忆、上下文交接与缓存保活、额度与负载感知、bash 自动转后台、任务工具、`/goal`、飞书通知，以及可选的浏览器控制面（Web Hub）。单一安装入口，统一 settings 门控。
 
 ## 核心特点
 
-1. **零卡死保证** — 每个 subagent run 都是一条带分相 deadline 的纯状态机：1Hz 看门狗触发超时，升级阶梯（cancel → steer → abort → dispose）物理回收资源，杀不掉的登记为 orphan 绝不遗忘。**每个 run 必然到达终态**——模型 API 中途停滞、工具调用永不返回、session 拒绝退出，这些"spawn + await"封装看不见的失败方式在这里都有明确的死法和善后。
-2. **全程可观测** — run 活跃期间，编辑器上方常驻实时 **agent tree**：相位、在途工具、模型流式尾部、实时费用，一目了然；`/agent status` 给出逐 run 的完整工具时间线。
-3. **结果必达** — 完成通知走持久化、可确认的投递管线（staged → delivered → consumed）：主会话不收就一直挂着，发不出去有 10 分钟硬兜底，绝不静默丢失。
-4. **派完即走** — 主会话的 `Agent` 调用一律后台运行，立即返回 run_id，完成通知驱动下一步（可在同一条消息里并行派发多个）；bash 命令超过阈值自动转后台（默认 290 秒，刻意低于 5 分钟 prompt 缓存 TTL）。
-5. **工具箱，不是单体** — 除 subagent 核心外每个模块都可独立开关（`hud.enabled`、`memory.enabled`、`webSearch.enabled`……），装一个包，按需取用。
+1. **零卡死** — 每个 subagent run 是一条带分相 deadline 的纯状态机：1Hz 看门狗触发超时，升级阶梯（cancel → steer → abort → dispose）回收资源，杀不掉的登记为 orphan。每个 run 必然到达终态。
+2. **可观测** — 编辑器上方常驻实时 agent tree（相位、在途工具、流式尾部、实时费用）；`/agent status` 给出逐 run 的工具时间线；Web Hub 里同样可见。
+3. **结果必达** — 完成通知走持久化、可确认的投递管线，不会静默丢失。
+4. **派完即走** — 主会话的 `Agent` 和 `SubagentWorkflow` 一律后台运行，立即返回 id，完成通知驱动下一步；bash 命令超过阈值（默认 290 秒）自动转后台，进程不杀。
+5. **工具箱，不是单体** — 除 subagent 核心外，每个模块都能独立开关，装一个包按需取用。
 
 ## 安装
 
@@ -32,231 +32,103 @@ pi install .
 
 总 zip 可直接作为本地 pi 扩展安装（本地路径方式，不参与 `pi update`）。Web UI 另有 `pi-toolkit-web-ui-<version>.zip` 附件：手工解压到 `~/.pi/agent/`，即可安装到 `~/.pi/agent/web-hub-ui/<version>/`，无需重启 hub。
 
-## Subagent 系统
+## 模块总览
 
-- **`Agent` 工具** — 发起有边界的 subagent run：`description`、`prompt`、`subagent_type`，可选 `model` 覆盖（严格 `provider/id` 或模糊 hint 如 `sonnet`、`kimi-k3`）、`resume`（续跑已结束的会话）、`isolation: "worktree"`（每个 run 一个 git worktree）、`timeout_s`（显式总预算，1–604800 秒；与默认预算同享宽限/延长规则：到点先进宽限并通知，可用 `extend_subagent_timeout` 延长，总寿命默认 ≤ 2× timeout_s；`extend.enabled=false` 时回到硬顶）、`schema`（结构化输出，经 schema 校验）。主会话的 `Agent` **一律后台运行**：立即返回 run_id，终态时推送完成通知（不再有前台阻塞模式与 `run_in_background` 参数）；子 agent 里注入的嵌套 `Agent` 保持默认阻塞、可选 `run_in_background`（子会话是 print 模式，本轮结束即 run 结束，等不到通知）。
-- **`get_subagent_result`** — 完成通知到达后取结果；默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞（兜底用）。也接受 `SubagentWorkflow` 的工作流 ID（`wf_…`）。
-- **`steer_subagent`** — 向运行中的子 agent 发送追加指令。
-- **`abort_subagent`** — 停止运行中的子 agent；对终态 run 幂等。传工作流 ID（`wf_…`）则停止整个后台工作流及其全部子 run。
-- **`extend_subagent_timeout`** — 延长运行中 run 的总超时（次数与硬天花板双上限；`extend_s` 上限 7 天）。默认预算与模型面显式 `timeout_s` 的 run 同样可延长：到点先进续跑宽限并通知主会话，宽限内可延长，宽限耗尽未处理才终止；程序派生 fixed 预算的 run（workflow 子 run、consult、/goal 验证、RPC）不能延长。也接受工作流 ID（`wf_…`、唯一前缀或脚本 `meta.name`）：延长整个后台工作流（显式 `timeout_s` 的工作流同样可宽限/延长）；工作流的子 run 钉在所属工作流的硬顶上，不能单独延长（工具会提示改延长所属工作流）。
-- **`set_model`** — 运行中切换模型（下一次 LLM 调用生效，不打断当前 turn）：缺省切自己，也可按 run_id / 前缀 / label 切运行中的子 agent；可选 `thinking` 档位；切换写入 transcript，resume 后沿用。
-- **Agent 类型** — 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义并注入系统提示词；frontmatter `model:` 支持严格 id 或模糊 hint。
-- **`@mention` 引导** — 编辑器输入 `@<label> <消息>`，可引导运行中的子 agent，或复活已结束的。
-- **成本核算** — 每个 run 的用量汇入会话总计；`/agent costs` 查看明细。
+详细用法在 [`docs/guide/`](docs/guide/)（中文）；内部设计在 [`docs/dev/`](docs/dev/)。
 
-### SubagentWorkflow
-
-沙箱化 JS 编排（`agent()` / `parallel()` / `pipeline()` / `phase()`），带独立 wall-clock 预算、runaway 检测和可回放 journal。默认关闭（`workflow.enabled`）。
-
-工作流**一律后台运行**：调用立即返回工作流 ID（`wf_…`），到达终态时向主会话推送一条完成通知（名称、状态、结果摘要（受 `resultMaxChars` 截断）、花费）。用 `get_subagent_result(run_id: "wf_…")` 查看进度或取完整结果（ID、唯一前缀或脚本 `meta.name` 均可），用 `abort_subagent` 停止。超出并发上限的 `agent()` 调用按 FIFO 排队而不是失败（工作流停止或时间耗尽时排队中的调用解析为 `null`，派发失败则 reject）。每个工作流仍受「总预算 + 宽限」约束（默认预算与显式 `timeout_s` 到点都先宽限并通知，可用 `extend_subagent_timeout` 延长，总寿命默认 ≤ 2×），必达终态；会话关闭 / `/reload` 时运行中的工作流会被停止，其通知持久化到会话里、在下一次加载该会话时补发一次。设计见 [docs/dev/workflow-background/plan.md](docs/dev/workflow-background/plan.md)、[docs/dev/workflow-agent-queue/plan.md](docs/dev/workflow-agent-queue/plan.md)。
-
-### Agent tree
-
-```
-● 4 active Agents · $0.92
-  后端实现 surface 截断 #6b7201c9 general-purpose 🔧工具 3m32s $0.91
-  TaskUpdate→edit✗→read→edit×3 ▸edit src/core/quota-bucket.ts
-  ↳ 并行检索候选实现 #c3d4e5f6 explore 🔧工具 48s
-    bash ▸grep monthlyQuota
-  修订方案:月额度纳入调度 #81ab2a94 Plan kimi-k3 🧠思考 6s $0.0021
-  » 调度模块需要支持月额度,我倾向于在 quota-bucket 里加一个 monthly 窗口
-✓ 单元测试补齐 #0718293a test completed 40s $0.11
-```
-
-- 头部 bullet 取全场最严重的高亮色，显示活跃数与实时花费。
-- 每个 run 一行主行：标签、`#id`、类型、模型、人性化相位（`🧠思考` / `🔧工具` / `♻重试2/3` / `⏸排队` / `🗜压缩` / `⏹停止中`）、耗时、费用；嵌套 run 缩进在父级下方（`↳`），workflow 渲染为 `⚙` 组头。
-- 工具调用或思考中时追加**活动行**：近期工具轨迹 + 高亮的在途 `▸工具`，或模型流式文本的 `»` 尾部。并行工具调用的状态同样准确。
-- 高亮：`!` 黄 = 空闲超过 idle 预算一半；`✗` 红 = 停止中或超过总 deadline。终态行按驻留时间淡出，通知发不出去时最多保留 10 分钟硬兜底。
-
-### 定时任务
-
-session 启动时从 `~/.pi/agent/pi-subagent-schedules.json` 加载，到点自动发起 subagent run（走正常的 slot 队列与防卡死看管）：
-
-```json
-[
-  {
-    "id": "nightly-review",
-    "schedule": { "kind": "cron", "expression": "0 3 * * *" },
-    "request": { "type": "general", "prompt": "审查昨晚的提交并汇报风险", "label": "nightly-review" }
-  }
-]
-```
-
-- `schedule.kind`：`"cron"`（五段表达式）/ `"interval"`（`intervalMs`）/ `"once"`（`at` 为 ISO 时间，触发后自动移除）
-- `request` 与 `Agent` 工具的 spawn 参数同构（`runId` 除外）
-- 启动时已过期的任务不补跑；编辑文件后 `/reload` 生效
-
-## 项目记忆（memory）
-
-Claude Code 风格的 cwd-keyed 被动记忆：每个会话自动把当前项目的 memory（`~/.pi/agent/memory/<cwd-slug>/*.md`）注入 system prompt——不需要任何 skill 调用，子 agent 会话同样生效。
-
-- **预算感知注入**：全部文件索引（≤15 条）+ 最新 3 个文件内联全文（4KB UTF-8 字节预算），超出的只留索引；空目录不注入（不白烧 token）；注入块尾部带哨兵注释防重复注入；结果按目录指纹缓存。
-- **`memory` 工具** — 模型可调用：`list` 查看；`write` / `append` 自主沉淀跨会话记忆（目录围栏 + 文件名白名单 + 双字节上限 + 0600；写入自动带 `source: agent` 溯源，注入时加"数据非指令"围栏行）。**子会话默认只读**（`memory.allowWriteInChildSessions` 放开）。
-- **frontmatter `pin: true`** — 让重要文件永远留在内联区，不被 mtime 挤出去。
-- **`/mem` 命令** — `list` / `path` / `import [--force] [slug|all]`：一键把 `~/.claude/projects/*/memory/` 复制到 pi 侧（幂等、0600、CC 原件不动）。
-- **`memory.freezeInjectionAfterWrite`** — 写入后冻结本会话注入块（默认关）：长会话中频繁写 memory 时避免 prompt 缓存前缀反复失效。
-
-## 工具箱模块
-
-- **HUD footer** — 安装即接管 pi 底部 footer（`hud.enabled: false` 一键还原）。显示 pwd/git 分支与工作树、token/费用统计（含 subagent 实时费用）、上下文用量、模型与 thinking 档位、LLM 计时与生成速率。
-- **`web_search` 工具** — Codex / SerpAPI / Bocha / Tavily 四供应商自动 failover（网络错误/超时/429/5xx 指数退避后切换），主会话与子会话均可用；凭证见「配置」。
-- **任务工具** — `TaskCreate` / `TaskList` / `TaskGet` / `TaskUpdate` / `TaskDelete` + 编辑器上方的任务 widget + `/tasklist` 面板，状态持久化在会话文件里（fork/resume 无损恢复）。
-- **`ask_user` 工具** — 交互式澄清：结构化多选问题（≤4 题批量），TUI/RPC 均支持；多问题缺 header 时自动从问题文本派生标签页标题（超长截断、派生撞车自动加后缀，显式重复 header 仍拒绝；单问题只做 trim/截断，不会凭空补 header）；仅主会话可用（子 agent 会话是 print 模式，注册了也只能返回 headless 错误，因此不对子会话注册）。
-- **飞书通知** — `@notify` 关键词、`/watch`、`/feishu-test` 与结果/汇总/心跳/等待输入卡片（被动触发，无 AI 主动调用面）。完成类通知默认等后台 subagent 与后台 bash 全部空闲才发（`requireBackgroundIdle`，忙时抑制不补发）。
-- **会话导航** — `/resume` 默认只扫最近 48 小时（Tab / `--all` 全量），skill 会话标题清洗、subagent 会话标注 `[sub:类型]`；`/clear` 开新会话；裸 `exit` 直接退出。
-- **`/goal` 目标循环** — 给一个目标和结束条件，每轮结束自动评估并续跑直到达成或撞线（详见下文）。
-- **cache TTL** — `/cache-ttl on|off|auto` 即时切换 Anthropic prompt cache 的 TTL 处理（`on` 显式强制 `ttl: "1h"`，`off` 移除 TTL 覆写，`auto` 跟随 pi/env），`/cache-ttl save` 持久化。保活 ping 保留窗口预算与 transient 故障恢复；预算耗尽只停止 ping，不自动升级 1h。
-- **额度感知派单（quota）** — 拉取 GLM / Kimi 订阅额度（TTL 缓存、零周期定时器），turn_end 阶梯预警（L1 `[quota]` tick 行 → L2 回退链降位建议 → L3 禁用建议），spawn 阶段对超额 provider 快速失败（陈旧快照只提示不阻断），HUD 带状态行；降位标记持久化到 `~/.pi/agent/quota-state.json`，`quota.*` settings 可关，设计见 `docs/dev/quota/`。
-- **system prompt 稳定化** — 三段动态内容（项目记忆 / agent 类型 / 可用模型）折叠成冻结快照折叠进开头，真实变化改走对话尾部的更新消息，不再让开头字节每轮变化而使整段 prompt cache 失效；通知唤醒轮（`triggerTurn`）默认回放最近一次用户轮的开头，消除「用户轮/唤醒轮」两条前缀交替失效的问题。`systemPrompt.mode`（`stable`/`live`/`legacy`）、`systemPrompt.wakeReplay`、`systemPrompt.adoptForeignForcedPrompt` 三键可调；**回滚到今天的逐字节行为**：`{ "systemPrompt": { "mode": "legacy", "wakeReplay": false } }`。设计见 `docs/dev/sysprompt-stable/plan.md`，手工验收见 `docs/dev/sysprompt-stable/acceptance.md`。
-- **Web Hub 浏览器控制面**（`webHub.enabled`，默认关） — 一台机一个 hub 守护进程，`/webhub open` 开浏览器看会话列表/详情/转录（P1 只读）；**P2 控制面**（`docs/dev/web-hub/control-plan.md`）进一步支持网页发消息/steer/abort、子 agent 操作（`steer_subagent`/`abort_subagent`）、`ask_user` 双通道作答（网页/终端竞速，失败方 409）、斜杠命令（pi-toolkit 自己的命令输出会回显到网页，第三方命令只在终端弹框）、`token rotate`/`stop`/`start` 管理命令、以及高低版本接入同一 hub 时的版本替换（顶栏升级提醒，不乒乓）。LAN 直连/反代理 HTTPS 见 `docs/dev/web-hub/lan-plan.md`。安全设计与完整命令表见 `docs/dev/web-hub/{arch,control-plan}.md`。
-
-## bash 自动转后台
-
-默认开启（仅 POSIX）：以同名方式覆盖 pi 内置 `bash` 工具，短命令行为与内置**逐字节一致**（前台路径直接复用 pi 自己的实现）。只有跑过阈值的命令改变行为：调用提前返回 `job_id`，**进程不杀**、输出继续落日志，退出时以 `bash-job:notification` 注入完成通知（带输出尾巴，并触发新 turn）。明知是长命令可直接传 `run_in_background: true`。
-
-`bash_job` 工具管理这些 job（`job_id` 支持唯一前缀）：`status`（状态 + 日志尾部 + 路径）/ `wait`（有界阻塞，默认 30s 硬顶 120s）/ `kill`（杀整个进程组，幂等 + pid 复用防护）/ `list`。**没有 `output` 动作**——日志就是 `~/.pi/agent/bash-jobs/<sessionId>/<job>.log` 普通文件，`read`/`tail`/`grep` 直接分析比任何工具参数都灵活。
-
-| 键                                  | 默认                     | 含义                                                                              |
-| ----------------------------------- | ------------------------ | --------------------------------------------------------------------------------- |
-| `bashJobs.autoBackgroundS`          | `290`                    | 前台 bash 超过该时长转后台；`0` = 整个功能关闭（内置 bash 零变化）                |
-| `bashJobs.maxLogBytes`              | `10485760`               | 单 job 日志上限；写满停写标记截断，**进程继续跑**                                 |
-| `bashJobs.maxBackgroundJobs`        | `8`                      | 并发后台 job 上限                                                                 |
-| `bashJobs.retentionS`               | `86400`                  | 终态 job 的 JSON/日志保留时长；`<=0` 关闭清理                                     |
-| `bashJobs.shutdownPolicy`           | `"keep"`                 | pi 真退出时对仍在跑的 job：`keep` / `kill`；reload/new/resume/fork 一律保留       |
-| `bashJobs.dir`                      | `~/.pi/agent/bash-jobs`  | job 状态与日志的 root（按 `<sessionId>/` 分层）                                   |
-| `bashJobs.shellPath`                | `$SHELL`(白名单)→ `bash` | 执行命令的 shell（`$SHELL` 仅 basename ∈ {bash, zsh, sh} 时采用）                 |
-| `bashJobs.timeoutGraceS`            | `60`                     | 已转后台的 job 到达显式 `timeout` 时的宽限时长；`0` = 关宽限（到点直接杀）        |
-| `bashJobs.maxExtensions`            | `3`                      | `bash_job(action:"extend")` 可用的最大续期次数；`0` = 禁 extend（D-6 → 也无宽限） |
-| `bashJobs.maxTimeoutFactor`         | `3`                      | 宽限+续期的硬上限 = 原 `timeout` 的几倍；`1` = 零 headroom（不可续、无宽限）      |
-| `bashJobs.childSessions`            | `true`                   | 子（subagent）会话是否注册自己的 `bash`/`bash_job`；`false` = 完全不注册、不授权  |
-| `bashJobs.childSettleHold`          | `true`                   | 子会话收尾时若仍有非终态后台 job，是否提醒并推迟结束（而不是直接结束并杀掉它们）  |
-| `bashJobs.childSettleHoldMaxRounds` | `0`                      | 收尾提醒轮数上限；`0` = 根据 run 自己的截止/续期预算自动推导（有限，见方案 §3.5） |
-
-行为要点：
-
-- **win32 不覆盖**：无进程组语义，内置 `bash` 原样保留。
-- **目录清理**：session 启动时扫一次，之后每次新建 job 时最多每 10 分钟再扫一次（不新增定时器）。只碰 `.json` / `.log` / `.tmp` 三种后缀，非终态 job 永不删。
-- **敏感输出会落盘**（0600/0700，与 session 文件同威胁模型），直到 `retentionS` 过期——仍应重定向敏感输出。
-- **日志自洽**：进程终态时日志尾部追加一行结论（形如 `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s`），`tail -3` 即知结局；写满 `maxLogBytes` 也照样追加。
-- **重启/reload 后收养**：仍在跑的 job 在下一个 session 被重新接管并继续通知；pid 归属无法确认的 job 只标记不杀。
-- **job 级到期宽限 + 续期**（仅已转后台且带显式 `timeout` 的 job）：到期先进入 `timeoutGraceS` 宽限并提醒（主会话 `bash-job:timeout` 消息 + TUI），谁调用 bash 谁决定用 `bash_job(action:"extend", job_id, extend_s)` 续命；总长度不超 `maxTimeoutFactor` 倍、最多续 `maxExtensions` 次。子（subagent）会话多一层收尾行为：若轮到结束时仍有非终态后台 job（`childSettleHold`），会被有界轮数地提醒而非立即结束，直到 job 结束或轮预算耗尽（`childSettleHoldMaxRounds`）；run 结束时强制封存并杀全部未结束的 job，退出行与收尾过的 job 都会进终态通知。设计见 [`docs/dev/bash-timeout-grace/plan.md`](docs/dev/bash-timeout-grace/plan.md)。
-
-## /goal 目标驱动持续运行
-
-```
-/goal 修复 issue #42 并补测试 --until-cmd "npm test" --max-turns 15
-/goal 完成订单模块重构 --until "npm run build 通过且旧 api 目录已删除" --budget-tokens 2000000
-/goal                  # 查看状态
-/goal pause | resume | clear
-```
-
-- **判定器两种可叠加**（AND 语义）：`--until-cmd` 每轮跑确定性命令（exit 0 通过，零模型成本先行短路）；`--until "自然语言条件"` 由独立 verifier subagent 评估（默认 `claude-sonnet-5`，与干活模型隔离，只读取证 + schema 结构化提交），未达成时其差距说明注入为下轮指引。
-- **刹车系统**：轮数（默认 20）、token/成本预算、时长（默认 120 分钟）。撞线后注入终止报告指令让 agent 总结进展与卡点，不静默消失。
-- **急停**：Ctrl+C 中断自动暂停 goal（不续跑），`/goal resume` 恢复。
-- **持久化**：goal 随会话文件走，崩溃/`/reload` 后读回并**降级为 paused**（绝不自动续跑）。
-- 运行期间状态栏显示 `🎯 goal 3/20`；goal 运行期间模型被禁止调用 `ask_user`。
-
-## Message fabric
-
-subagent 之间的可选 fire-and-forget 消息协议（`"fabric": { "enabled": true }` + `/reload`）。`message_agent` 支持三种 kind：`progress`（进展）、`finding`（发现）、`directive`（指令）；返回值表示消息是否进入投递队列，而不是目标已收到。消息沿 agent tree 的边路由，由发送方类型的 `can_message` frontmatter 门控关系（`parent`/`child`/`ancestor`/`descendant`/`sibling`/`self`，默认仅 `parent`）。平级消息是不可信输入，接收方应按外部建议重新验证。配额、TTL、死信、root 背压等完整设置见 [`docs/dev/subagent-push/subagent-push-plan.md`](docs/dev/subagent-push/subagent-push-plan.md)。
-
-## 防卡死架构
-
-每个 run 都是一条纯状态机（`src/core/state-machine.ts`），由会话事件驱动：
-
-```
-queue_wait → resolve_config → session_create → extension_bind
-  → prompt_dispatch → model_turn ⇄ tool_exec (⇄ retry_backoff, compaction)
-  → settled        (超时/停止:→ abort_grace → reap → settled)
-```
-
-1. **信号**：每个会话事件（文本增量、工具 start/end/update、retry、compaction）都刷新 `lastEventAt`。空闲 = `now - lastEventAt`——正在流式输出的模型、有心跳的工具永远不算"卡住"。
-2. **Deadline**：每个相位挂独立计时器——启动 30s、首事件 120s、模型 turn 空闲 240s、单工具 600s、压缩 300s、总计 30min（全部可配）。`EventWatchdog` 以 1Hz tick 派发 `deadline_fired`。
-3. **升级**：运行中相位超时 → `cancel_signal` + `soft_steer`（"wrap up now"，给 agent 体面收尾的机会）→ 10s abort 宽限 → 强制 abort。若仍失败，`EscalatingReaper` 逐级爬升 L0 cancel → L1 steer → L2 requestAbort → L3 dispose（强杀进程句柄）→ 仍杀不掉的登记为 **orphan**，绝不遗忘。
-
-重试有独立的 backoff 相位，不会误触 idle 计时器；并行工具调用让 run 停留在 `tool_exec` 直到**最后一个**兄弟调用结束。
-
-## 配置
-
-用户配置：`~/.pi/agent/pi-subagent.json`（文件名沿用历史名称；文件缺失/格式错误一律用默认值，绝不抛错）。
-
-`/agent settings` 打开**交互式设置编辑器**（↑↓ 选择、回车编辑、空格切换布尔、`r` 重置默认、Esc 关闭，改动即时落盘）；脚本场景用 `/agent settings list` / `set <key> <value>` / `reset <key>`，`/agent budget` 是限定到 `budget.*` 的别名。
-
-**所有时间字段以整数秒配置**（键名以 `S` 结尾）；旧版毫秒键（`*Ms`）首次加载时自动迁移。
-
-```jsonc
-{
-  "concurrencyLimit": 6,
-  "fleetWidget": true, // 编辑器上方的 agent tree
-  "maxNestedDepth": 2, // 子 agent 再 spawn 子 agent 的深度上限
-  "resultMaxChars": 8000, // 结果文本上限；0 不限，live 生效
-  "worktree": { "enabled": false },
-  "memory": { "enabled": true }, // 项目记忆（注入 + memory 工具 + /mem）
-  "hud": { "enabled": true }, // HUD footer；false 还原 pi 内置 footer
-  "webSearch": { "enabled": true }, // web_search 工具
-  "todo": { "enabled": true }, // Task* 任务工具 + /tasklist
-  "askUser": { "enabled": true }, // ask_user 交互提问
-  "feishuNotify": { "enabled": true }, // 飞书通知卡片（仅主会话）
-  "sessionNav": { "enabled": true }, // 会话导航增强
-  "workflow": { "enabled": false },
-  "goal": { "enabled": true }, // /goal（maxTurns/maxMinutes/budget*/verifier* 等子键可调）
-  "budget": {
-    "idleS": 240, // 模型 turn 静默多久算超时
-    "modelTurnS": 900, // 单轮模型调用硬上限
-    "toolS": 600, // 单次工具调用上限
-    "totalS": 1800, // 整个 run 的上限
-    // … queueWaitS, startupS, bindS, firstEventS, compactionS,
-    //   abortGraceS, steerS, reapS, startupRetries, retrySlackS
-  },
-}
-```
-
-**`web_search` 的供应商凭证在另一处**：环境变量，或 `~/.config/pi/web-search.env`（建议 0600）：`CODEX_SEARCH_API_KEY` + `CODEX_SEARCH_BASE_URL`（可选 `CODEX_SEARCH_MODEL`、`CODEX_SEARCH_TLS_INSECURE`）、`SERPAPI_API_KEY`、`BOCHA_API_KEY`、`TAVILY_API_KEY`，至少配一家；`PI_WEB_SEARCH_ENV_FILE` 可覆盖该路径。
+| 模块                      | 说明                                                                                                                                                      | 指南                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Subagent 工具             | `Agent` / `get_subagent_result` / `steer_subagent` / `abort_subagent` / `extend_subagent_timeout` / `set_model`，后台运行、可延长超时、可 worktree 隔离。 | [subagents](docs/guide/subagents.md#工具)                        |
+| Agent tree                | 编辑器上方的实时 subagent 树：相位、工具轨迹、费用、超时高亮。                                                                                            | [subagents](docs/guide/subagents.md#agent-tree)                  |
+| SubagentWorkflow          | 沙箱化 JS 编排（`agent()` / `parallel()` / `pipeline()`），后台运行，带 journal 回放。默认关闭。                                                          | [subagents](docs/guide/subagents.md#subagentworkflow)            |
+| 定时任务                  | 从 JSON 文件加载 cron / interval / once 任务，到点自动派发 subagent。                                                                                     | [subagents](docs/guide/subagents.md#定时任务)                    |
+| 防卡死架构                | 分相 deadline、升级阶梯、orphan 登记、持久化通知投递。                                                                                                    | [subagents](docs/guide/subagents.md#防卡死架构)                  |
+| Message fabric            | subagent 间沿 agent tree 的 fire-and-forget 消息（`message_agent`）。默认关闭。                                                                           | [subagents](docs/guide/subagents.md#message-fabric)              |
+| consult 专家咨询          | 子 agent 在一轮内同步咨询已结束的专家 run 或主会话（`consult`）。                                                                                         | [subagents](docs/guide/subagents.md#consult-专家咨询)            |
+| 外部 droid agent          | 把 Factory droid 当作 `droid/<model>` 虚拟 provider 派发，带模型白名单与额度闸门。默认关闭。                                                              | [subagents](docs/guide/subagents.md#外部-droid-agent)            |
+| 项目记忆                  | cwd 为键的被动记忆，分层注入 + `memory` 工具 + `/mem doctor` / `tidy`。                                                                                   | [memory](docs/guide/memory.md)                                   |
+| bash 自动转后台           | 覆盖内置 `bash`：长命令转后台不杀，`bash_job` 管理，宽限与续期。                                                                                          | [bash](docs/guide/bash.md)                                       |
+| 上下文交接与用量提示      | `switch_context` / `compact_context`，用量阶梯提示与强制线。                                                                                              | [context](docs/guide/context.md#switch_context--compact_context) |
+| cache TTL 与保活          | Anthropic prompt cache 的 TTL 模式与保活 ping，带熔断与证据层。                                                                                           | [context](docs/guide/context.md#cache-ttl-与保活)                |
+| system prompt 稳定化      | 动态段落折叠成冻结快照，变化走尾部更新消息，保住缓存前缀。                                                                                                | [context](docs/guide/context.md#system-prompt-稳定化)            |
+| 日期注入                  | 首轮、跨日和长闲置后给模型注入 `[date]`。                                                                                                                 | [context](docs/guide/context.md#date-日期注入)                   |
+| 额度感知                  | GLM / Kimi 订阅与 droid Standard / Core 池额度：阶梯预警、派发闸门、Core→Standard 回落。                                                                  | [quota-load](docs/guide/quota-load.md#额度感知quota)             |
+| 负载感知                  | CPU / 内存 / IO / 磁盘采样，本机繁忙时暂缓新派发。                                                                                                        | [quota-load](docs/guide/quota-load.md#负载感知派单load)          |
+| 任务工具                  | `TaskCreate` 等五个工具 + widget + `/tasklist`，完成项折叠与自动归档。                                                                                    | [tools](docs/guide/tools.md#任务工具todo)                        |
+| `/goal`                   | 目标驱动循环：确定性命令或 verifier subagent 判定，带轮数 / 预算 / 时长刹车。                                                                             | [tools](docs/guide/tools.md#goal-目标循环)                       |
+| `ask_user` / `web_search` | 结构化交互提问；四供应商 failover 的联网搜索。                                                                                                            | [tools](docs/guide/tools.md#ask_user)                            |
+| HUD footer                | 接管 pi 底部 footer：git、token / 费用、上下文、额度 / 负载。                                                                                             | [tools](docs/guide/tools.md#hud-footer)                          |
+| 飞书通知                  | 被动触发的结果 / 汇总 / 心跳卡片（`@notify`、`/watch`）。                                                                                                 | [tools](docs/guide/tools.md#飞书通知)                            |
+| 会话导航                  | `/resume-recent`、`/clear`、裸 `exit`，会话标题清洗。                                                                                                     | [tools](docs/guide/tools.md#会话导航)                            |
+| topic-switch              | 新请求与当前会话无关且缓存已冷时，建议开新会话。                                                                                                          | [tools](docs/guide/tools.md#topic-switch)                        |
+| 自动标题 / 延迟 `/reload` | 小模型生成会话标题；有 subagent 在跑时延后 `/reload`。                                                                                                    | [tools](docs/guide/tools.md#自动标题)                            |
+| Web Hub（可选）           | 浏览器查看与控制会话：网页发消息、`ask_user` 竞速、托管会话与恢复、预览、worktree diff / 图、LAN 密码、隐私锁。                                           | [web-hub](docs/guide/web-hub.md)                                 |
+| 从独立插件迁移            | 旧插件的卸载与残留识别。                                                                                                                                  | [migration](docs/guide/migration.md)                             |
 
 ## 命令
 
-| 命令                    | 内容                                                                           |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `/agent status`         | 所有非终态 run 的诊断：相位、最近事件、空闲时长、孤儿 session                  |
-| `/agent status <runId>` | 单个 run 的完整工具时间线                                                      |
-| `/agent costs`          | 按花费降序的逐 run 明细                                                        |
-| `/agent settings`       | 交互式设置编辑器                                                               |
-| `/task <任务描述>`      | 启动一个后台 general-purpose subagent 执行任务；主会话会收到启动记录与完成通知 |
-| `/mem`                  | 项目记忆：`list` / `path` / `import [--force] [slug\|all]`                     |
-| `/tasklist`             | 任务列表面板（`/tasklist clear` 清空）                                         |
-| `/goal`                 | 目标驱动循环（status / pause / resume / clear）                                |
-| `/watch`                | 标记本会话，每次任务结束都通知飞书                                             |
-| `/pi-hud-refresh`       | git fetch 并刷新 HUD footer                                                    |
-| `/cache-ttl`            | prompt cache TTL 模式（on/off/auto/save）                                      |
-| `/resume-recent`        | 恢复最近 48 小时的会话（`--all` 全量；裸输 `resume` 等效）                     |
-| `/clear`                | 开新会话（裸输 `clear` 等效）                                                  |
+| 命令                                                                      | 内容                                                                                    |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `/agent`（`status [runId]` / `costs` / `settings` / `budget` / `reload`） | 运行诊断、费用明细、设置编辑器、延迟 reload                                             |
+| `/task <描述>`                                                            | 启动一个后台 general-purpose subagent                                                   |
+| `/goal`                                                                   | 目标循环（`status` / `pause` / `resume` / `clear`）                                     |
+| `/mem`                                                                    | 项目记忆：`list` / `path` / `import` / `doctor` / `tidy` / `restore`                    |
+| `/tasklist`                                                               | 任务面板（`clear` 清空）                                                                |
+| `/cache-ttl`                                                              | `on` / `off` / `auto` / `save` / `keepalive on\|off\|reset` / `status` / `probe`        |
+| `/topic-switch`                                                           | 查看状态（`status`），`last [--send]` 取回上次截留的请求                                |
+| `/webhub`                                                                 | `status` / `open` / `restart` / `stop` / `start` / `token rotate` / `passwd` / `unlock` |
+| `/watch`                                                                  | 本会话每次任务结束都通知飞书                                                            |
+| `/feishu-test`                                                            | 发送飞书测试卡片                                                                        |
+| `/pi-hud-refresh`                                                         | `git fetch` 并刷新 HUD                                                                  |
+| `/resume-recent`                                                          | 恢复最近 48 小时的会话（`--all` 全量）                                                  |
+| `/clear`                                                                  | 开新会话                                                                                |
 
-## 从独立插件迁移
+## 配置
 
-下列独立插件已逐一融合进本包。迁移 = **卸载旧包 + 升级本包 + `/reload`**：
+用户配置文件：`~/.pi/agent/pi-subagent.json`（沿用历史文件名；缺失或格式错误一律用默认值，不抛错）。
 
-- `@getpipher/armory-memory` → `pi remove` 即可，memory 数据（`~/.pi/agent/memory/**`）零迁移生效。
-- `@bluecake/pi-ask-user` → `pi uninstall`；飞书配置 `~/.pi/agent/feishu-notify.json` 原样保留。
-- pi-hud / web-search / pi-claude-todo / session-nav 等散装扩展 → 删除 `~/.pi/agent/extensions/` 下的对应文件/目录。
+- `/agent settings` 打开交互式编辑器（↑↓ 选择、回车编辑、空格切换布尔、`r` 重置默认，改动即时落盘）；脚本场景用 `/agent settings list` / `set <key> <value>` / `reset <key>`。
+- **所有时间字段以整数秒配置**（键名以 `S` 结尾，如 `budget.idleS`）；旧版毫秒键（`*Ms`）首次加载时自动迁移。
+- 各模块的详细键与默认值见对应指南。
 
-**残留识别**：pi 对重名命令会加后缀——看到 `/mem:1` `/mem:2`、`/tasklist:1` `/tasklist:2` 而**裸命令消失**，即说明旧插件仍在加载；同名工具则是 first-wins 静默遮蔽（看工具 description 是否含新能力即可判定生效方）。
+顶层启用开关（括号内为默认值）：
+
+```jsonc
+{
+  "workflow": { "enabled": false }, // SubagentWorkflow
+  "fabric": { "enabled": false }, // message_agent
+  "worktree": { "enabled": false }, // isolation: "worktree"
+  "memory": { "enabled": true },
+  "hud": { "enabled": true },
+  "webSearch": { "enabled": true },
+  "todo": { "enabled": true },
+  "askUser": { "enabled": true },
+  "feishuNotify": { "enabled": true },
+  "sessionNav": { "enabled": true },
+  "goal": { "enabled": true },
+  "consult": { "enabled": true },
+  "quota": { "enabled": true },
+  "load": { "enabled": true },
+  "topicSwitch": { "enabled": true },
+  "date": { "enabled": true },
+  "externalAgents": { "droid": { "enabled": false } },
+  "webHub": { "enabled": false },
+}
+```
+
+`web_search` 的供应商凭证在另一处，见 [tools 指南](docs/guide/tools.md#web_search)。
 
 ## 开发
 
 ```sh
 npm install
 npm run build        # tsc → dist/
-npm test             # vitest：2600+ 测试——状态机迁移矩阵、
-                     # 带种子的属性不变量、组件渲染……
+npm test             # vitest：17,000+ 测试（状态机迁移矩阵、属性不变量、组件渲染……）
 npm run typecheck
 npm run format
 ```
 
-版本化 pre-commit hook（对暂存文件跑 prettier）：`git config core.hooksPath .githooks`
-
-目录结构：`core/` 纯状态机 + deadline（无 I/O）· `runtime/` 看门狗、会话驱动、回收器 · `service/` spawn/query/registry · `tools/` 面向 LLM 的工具面 · `ui/` agent-tree 视图 + 设置编辑器 · `workflow/` 沙箱编排器 · `memory/` 项目记忆 · `fabric/` 消息 fabric · `goal/` 目标循环 · `bash/` bash 自动后台 · `delivery/` 通知投递管线 · `hud|web-search|todo|ask-user|feishu-notify|session-nav|compact-hint|context-switch|cache-ttl/` 工具箱模块 · `sysprompt/` + `prompt-sections/` system prompt 稳定化 hub · `adapters/` 面向 pi 的胶水层。
-
-Node.js ≥ 22（用了 `fs.globSync`）。
+Node.js ≥ 22。版本化 pre-commit hook（对暂存文件跑 prettier）：`git config core.hooksPath .githooks`。仓库结构与各子系统的设计约束见 [AGENTS.md](AGENTS.md)，逐功能的设计文档在 [`docs/dev/`](docs/dev/)。
 
 ## License
 

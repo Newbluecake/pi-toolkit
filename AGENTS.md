@@ -44,7 +44,7 @@ its headless error there and is therefore not registered in child sessions at al
 ```sh
 npm install          # dev setup (Node >= 22, enforced by engines + CI)
 npm run build        # tsc -p tsconfig.build.json → dist/
-npm test             # vitest run — 1800+ tests; must stay green
+npm test             # vitest run — 17,000+ tests; must stay green
 npm run typecheck    # tsc --noEmit (strict; see tsconfig flags)
 npm run format       # prettier --write .
 npm run format:check # CI gate
