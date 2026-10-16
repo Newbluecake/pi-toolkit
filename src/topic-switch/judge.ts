@@ -2,7 +2,8 @@
  * topic-switch · cheap-model relevance judge (plan.md §P1 "judge.ts", arch §5).
  *
  * Pi-free: the LLM call itself is a `JudgePort` (P3b binds it to
- * `ctx.modelRegistry.complete`, title 先例). `judgeRelevance` owns the hard
+ * `ctx.modelRegistry.streamSimple` with `reasoning: JUDGE_REASONING`, falling back to
+ * `complete` on registries without it). `judgeRelevance` owns the hard
  * timeout: an internal AbortController driven by BOTH the external signal and
  * the clock timer, plus an outer `withDeadline(timeoutMs+500)` backstop for
  * providers that ignore abort. A late result after abort/timeout is discarded.
@@ -15,9 +16,13 @@ import type { Clock, TimerHandle } from "../core/clock.js";
 /** D3 翻转点：配置模型与 title 模型都不可用时是否回退会话模型（唯一一处定义）。 */
 export const JUDGE_SESSION_MODEL_FALLBACK: boolean = true;
 
-/** 2026-10-16 64→512：64 时 glm-5.3-flash（推理模型）的思考吃光额度，20–33% 调用空回复或截断 JSON，
- *  线上回落到更偏 related 的后备模型；512 时失败归零（评测 docs/dev/topic-switch/judge-eval/）。 */
-export const JUDGE_MAX_TOKENS = 512;
+/** 2026-10-16 64→1024：64 时 glm-5.3-flash（推理模型）的思考吃光额度，20–33% 调用空回复或截断 JSON，
+ *  线上回落到更偏 related 的后备模型；512 时 glm 失败归零，deepseek-flash@minimal 仍 3/24 截断 ⇒ 1024。 */
+export const JUDGE_MAX_TOKENS = 1024;
+
+/** 判断调用的思考等级（2026-10-16 用户：速度优先于准确）：minimal 下 deepseek-flash 88%、中位 ~1.8s；
+ *  1024 token 余量避免 minimal 思考 + JSON 在 512 时偶发截断（实测 512 下 3/24 失败）。 */
+export const JUDGE_REASONING = "minimal" as const;
 
 /** prompt 组装上限（frozen；码点截断）。 */
 export const JUDGE_LIMITS = Object.freeze({
@@ -181,7 +186,7 @@ export type JudgeVerdict =
   | { kind: "ok"; related: boolean; confidence: number; ms: number }
   | { kind: "timeout" | "error" | "parse-error" | "aborted" | "no-model"; ms: number };
 
-/** P3b 绑定到 `modelRegistry.complete(model, {systemPrompt, messages}, {signal, maxTokens})`。 */
+/** P3b 绑定到 `modelRegistry.streamSimple(model, {systemPrompt, messages}, {signal, maxTokens, reasoning})`（无则 `complete`）。 */
 export interface JudgePort {
   complete(systemPrompt: string, userPrompt: string, signal: AbortSignal): Promise<string>;
 }

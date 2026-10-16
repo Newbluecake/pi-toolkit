@@ -6,8 +6,9 @@
  * `label: true | false` — true = the judge SHOULD answer related), runs every case
  * through `buildJudgePrompt(input, variant)` × {v1, v2} against a list of models,
  * exactly like the live judge (`ModelRuntime` built from `~/.pi/agent`
- * auth.json/models.json — the same registry pi itself uses; `complete(model,
- * {systemPrompt, messages}, {maxTokens: JUDGE_MAX_TOKENS, signal})`), parses with the
+ * auth.json/models.json — the same registry pi itself uses; by default `completeSimple(model,
+ * {systemPrompt, messages}, {maxTokens: JUDGE_MAX_TOKENS, reasoning: JUDGE_REASONING, signal})`,
+ * the same provider-neutral options as the live streamSimple call), parses with the
  * real `parseJudgeReply`, bounded concurrency (default 3) + per-call timeout.
  *
  * Prints a per model × variant accuracy table (false-related = missed suggestion,
@@ -28,6 +29,7 @@ import { join } from "node:path";
 import {
   JUDGE_CRITERION_VARIANTS,
   JUDGE_MAX_TOKENS,
+  JUDGE_REASONING,
   buildJudgePrompt,
   parseJudgeReply,
 } from "../../../src/topic-switch/judge.ts";
@@ -37,19 +39,27 @@ const OUT_DIR = resolve(SCRIPT_DIR, "../../../docs/dev/topic-switch/judge-eval")
 const DEFAULT_MODELS = "zai-coding-cn/glm-5.3-flash,deepseek/deepseek-flash";
 
 function parseArgs(argv) {
-  const out = { input: "", models: DEFAULT_MODELS, variants: "v1,v2", concurrency: 3, timeoutMs: 30_000 };
+  const out = {
+    input: "",
+    models: DEFAULT_MODELS,
+    variants: "v1,v2",
+    concurrency: 3,
+    timeoutMs: 30_000,
+    reasoning: JUDGE_REASONING,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--models") out.models = argv[++i] ?? out.models;
     else if (a === "--variants") out.variants = argv[++i] ?? out.variants;
     else if (a === "--concurrency") out.concurrency = Number.parseInt(argv[++i] ?? "", 10) || out.concurrency;
+    else if (a === "--reasoning") out.reasoning = argv[++i];
     else if (a === "--max-tokens") out.maxTokens = Number.parseInt(argv[++i] ?? "", 10) || out.maxTokens;
     else if (a === "--timeout-ms") out.timeoutMs = Number.parseInt(argv[++i] ?? "", 10) || out.timeoutMs;
     else if (!out.input) out.input = a;
   }
   if (!out.input) {
     console.error(
-      "usage: run.mjs <labelled.jsonl> [--models a/b,c/d] [--variants v1,v2] [--concurrency N] [--timeout-ms Ms] [--max-tokens N]",
+      "usage: run.mjs <labelled.jsonl> [--models a/b,c/d] [--variants v1,v2] [--concurrency N] [--timeout-ms Ms] [--max-tokens N] [--reasoning minimal|low|off|default]",
     );
     process.exit(2);
   }
@@ -73,11 +83,17 @@ async function callJudge(runtime, model, variant, input, timeoutMs) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const message = await runtime.complete(
-      model,
-      { systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
-      { signal: ac.signal, maxTokens: args.maxTokens ?? JUDGE_MAX_TOKENS },
-    );
+    const ctx = { systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] };
+    const base = { signal: ac.signal, maxTokens: args.maxTokens ?? JUDGE_MAX_TOKENS };
+    // --reasoning <level|off|default>: provider-neutral thinking level via completeSimple, like the
+    // live judge (default JUDGE_REASONING); "default" = plain complete() without a level.
+    const message =
+      args.reasoning === "default"
+        ? await runtime.complete(model, ctx, base)
+        : await runtime.completeSimple(model, ctx, {
+            ...base,
+            ...(args.reasoning === "off" ? {} : { reasoning: args.reasoning }),
+          });
     const text = assistantText(message);
     const parsed = parseJudgeReply(text);
     if (parsed === undefined) return { ms: Date.now() - started, error: `parse-error: ${text.slice(0, 120)}` };

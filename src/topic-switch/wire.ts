@@ -42,6 +42,7 @@ import { evaluateSyncGates, type PricedEstimate } from "./gate.js";
 import { buildBranchView, clearWatchdog, fullPayload, type HoldRuntime } from "./hold.js";
 import {
   JUDGE_MAX_TOKENS,
+  JUDGE_REASONING,
   judgeModelChain,
   judgeWithFailover,
   type JudgeAttempt,
@@ -479,11 +480,26 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
         ref,
         port: {
           complete: async (systemPrompt, userPrompt, signal) => {
-            const message = await ctx.modelRegistry.complete(
-              boundModel,
-              { systemPrompt, messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
-              { signal, maxTokens: JUDGE_MAX_TOKENS },
-            );
+            const context = {
+              systemPrompt,
+              messages: [{ role: "user" as const, content: userPrompt, timestamp: Date.now() }],
+            };
+            // 2026-10-16 (user: speed over accuracy): provider-neutral `reasoning: JUDGE_REASONING`
+            // through streamSimple — `complete` takes provider-specific options only. Registries
+            // without streamSimple (older hosts / test doubles) keep the plain complete path.
+            const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+              streamSimple?: (typeof ctx.modelRegistry)["streamSimple"];
+            };
+            const message =
+              typeof registry.streamSimple === "function"
+                ? await registry
+                    .streamSimple(boundModel, context, {
+                      signal,
+                      maxTokens: JUDGE_MAX_TOKENS,
+                      reasoning: JUDGE_REASONING,
+                    })
+                    .result()
+                : await ctx.modelRegistry.complete(boundModel, context, { signal, maxTokens: JUDGE_MAX_TOKENS });
             return assistantMessageText(message);
           },
         },

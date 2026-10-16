@@ -3,6 +3,7 @@ import { FakeClock } from "../../src/core/clock.js";
 import { wireTopicSwitch, type TopicSwitchDeps } from "../../src/topic-switch/wire.js";
 import { DEFAULT_TOPIC_SWITCH_SETTINGS, type TopicSwitchSettings } from "../../src/topic-switch/settings.js";
 import { ENTRY_TYPE } from "../../src/topic-switch/records.js";
+import { JUDGE_MAX_TOKENS, JUDGE_REASONING } from "../../src/topic-switch/judge.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -1157,6 +1158,48 @@ describe("wireTopicSwitch: judge model chain with runtime failover", () => {
       (e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "outcome",
     );
     expect(outcomes.map((e) => (e.data as { outcome?: string }).outcome)).toEqual(["declined"]);
+  });
+
+  it("prefers streamSimple with reasoning=minimal (JUDGE_REASONING) and JUDGE_MAX_TOKENS when the registry has it", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    wireTopicSwitch(pi as never, failoverDeps(clock));
+    const streamOpts: unknown[] = [];
+    const selectCalls: string[] = [];
+    const ctx = makeCtx({
+      modelRegistry: {
+        find: (p: string, id: string) => (p === "x" && id === "one" ? { provider: p, id } : undefined),
+        complete: () => Promise.reject(new Error("complete must not be used when streamSimple exists")),
+        streamSimple: (_model: unknown, _context: unknown, opts: unknown) => {
+          streamOpts.push(opts);
+          return {
+            result: () =>
+              Promise.resolve({
+                content: [{ type: "text", text: '{"related":false,"confidence":0.9}' }],
+                errorMessage: undefined,
+              }),
+          };
+        },
+      } as FakeCtx["modelRegistry"],
+      ui: {
+        setStatus: () => {},
+        notify: () => {},
+        setEditorText: () => {},
+        select: (title: string, options: string[]) => {
+          selectCalls.push(title);
+          return Promise.resolve(options[1]);
+        },
+      },
+    });
+    pi.ctx = ctx;
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, ctx);
+    for (let i = 0; i < 8; i += 1) await flush();
+    expect(streamOpts).toHaveLength(1);
+    expect(streamOpts[0]).toMatchObject({ reasoning: JUDGE_REASONING, maxTokens: JUDGE_MAX_TOKENS });
+    expect(JUDGE_REASONING).toBe("minimal");
+    expect(selectCalls).toHaveLength(1); // the streamSimple verdict drove the confirm dialog
+    clock.advance(2_000);
+    await flush();
   });
 
   it("status shows the configured chain, the model that answered, and per-model failure counts", async () => {

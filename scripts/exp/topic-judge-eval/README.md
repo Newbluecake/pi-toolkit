@@ -6,7 +6,9 @@ topic-switch 从不建议换会话。目的：对比 `v1`（现行判据）与 `
 `src/topic-switch/judge.ts` 的 `buildJudgePrompt(i, "v2")`）在真实历史请求上的准确率。
 
 **线上现状（2026-10-16 起）**：评测后用户拍板，线上默认判据切到 `v2`（`JUDGE_DEFAULT_VARIANT`），
-`JUDGE_MAX_TOKENS` 64→512（64 时 glm-5.3-flash 20–33% 调用空回复/截断）。`v1` 保留供对比。
+判断调用走 `streamSimple` + `reasoning: "minimal"`（`JUDGE_REASONING`），`JUDGE_MAX_TOKENS` 64→1024；
+用户设置的判断模型顺序改为 deepseek-flash → glm-5.3-flash（速度优先）。`v1` 保留供对比。
+`run.mjs` 默认与线上一致（`--reasoning minimal`、`--max-tokens` 默认 1024）。
 默认输出落在 `docs/dev/topic-switch/judge-eval/`；本轮标注集 `labelled.jsonl`（24 条）。
 
 ## 1. extract.mjs — 从 session 文件抽数取候选
@@ -46,12 +48,13 @@ npx tsx scripts/exp/topic-judge-eval/extract.mjs <文件或目录...> --out <pat
 ```sh
 npx tsx scripts/exp/topic-judge-eval/run.mjs <labelled.jsonl> \
   [--models zai-coding-cn/glm-5.3-flash,deepseek/deepseek-flash] \
-  [--variants v1,v2] [--concurrency 3] [--timeout-ms 30000] [--max-tokens 512]
+  [--variants v1,v2] [--concurrency 3] [--timeout-ms 30000] [--max-tokens 1024] [--reasoning minimal|low|off|default]
 ```
 
 - 模型注册/鉴权与 live 完全一致：`ModelRuntime.create({authPath/modelsPath:
-~/.pi/agent})`（pi 自己的注册表），`complete(model, {systemPrompt, messages},
-{maxTokens: JUDGE_MAX_TOKENS, signal})`，回复用真实 `parseJudgeReply` 解析。
+~/.pi/agent})`（pi 自己的注册表），默认 `completeSimple(model, {systemPrompt, messages},
+{maxTokens: JUDGE_MAX_TOKENS, reasoning: JUDGE_REASONING, signal})`（与线上 streamSimple 同一套
+  provider-neutral 选项；`--reasoning default` 改走不带等级的 `complete`），回复用真实 `parseJudgeReply` 解析。
 - 单次调用失败/超时/解析失败记为 `{error}`，绝不让整轮崩掉（解析失败即线上 `judge-parse`
   的同款行为：`JUDGE_MAX_TOKENS=64` 下截断 JSON 是真实会发生的）。
 - 汇总表：每 model × variant 的 accuracy、`false-rel`（该建议换会话却答 related = 漏报）、
@@ -85,3 +88,15 @@ glm v2 @512 延迟 p50 2.4s / p90 4.4s。注意评测用 30s/次超时，而线�
 `min(剩余, max(1500, ceil(judgeTimeoutMs/2)))` = 3s：约 1/3 的 glm 调用会在线上超时回落
 deepseek-flash（v2 下 75–79%），所以线上实际准确率介于两行之间。表中数字取自当天终端输出；
 `results-*.json` 每次运行覆盖、不入库（.gitignore）。
+
+## 2026-10-16 思考等级对比（v2，24 条，用户：速度优先于准确）
+
+| 模型 + reasoning               | 准确率 | 误报 | p50      | p90      |
+| ------------------------------ | ------ | ---- | -------- | -------- |
+| glm-5.3-flash 默认（complete） | 79–83% | 0–1  | 2.4s     | 4.4s     |
+| glm-5.3-flash off              | 79–88% | 0–1  | 2.0–2.7s | 3.5–5.8s |
+| glm-5.3-flash minimal          | 92%    | 0    | 2.5s     | 4.7s     |
+| deepseek-flash off             | 63%    | 0    | 0.67s    | 0.9s     |
+| deepseek-flash minimal @1024   | 88%    | 0    | 1.6–1.9s | 3.4–4.0s |
+
+glm 降思考不提速（线路延迟主导）；deepseek-flash@minimal 是速度/准确的折中 ⇒ 排第一。

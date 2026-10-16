@@ -65,7 +65,7 @@ const INPUT: JudgeInput = {
 describe("constants", () => {
   it("D3 toggle and frozen limits (plan §P1)", () => {
     expect(JUDGE_SESSION_MODEL_FALLBACK).toBe(true);
-    expect(JUDGE_MAX_TOKENS).toBe(512);
+    expect(JUDGE_MAX_TOKENS).toBe(1024);
     expect(Object.isFrozen(JUDGE_LIMITS)).toBe(true);
     expect(JUDGE_LIMITS.requestChars).toBe(2000);
   });
