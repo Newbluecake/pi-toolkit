@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-16
+
+### Added
+
+- **external-agent**: treat externalAgents.droid.models as an allowlist (`d24a933`)
+- **web-hub**: collapse finished and archived tasks in the web todo panel (`1a08300`)
+- **todo**: collapse finished tasks and archive them automatically (`9327dcf`)
+- **web-hub**: shrink the quota pill in tiers and show details on hover (`3937277`)
+- **date**: include the time of day and re-inject after 3h idle (`8ae3080`)
+- **tools**: let steer_subagent ask the subagent to reply (`94f85d5`)
+- **quota**: list Droid models per pool and hide subscriptions without data (`8611406`)
+- **web-hub**: count running bash commands in the fleet badge and session cards (`d2637ca`)
+
+### Fixed
+
+- **quota**: let droid core models fall back to the Standard pool (`9f801af`)
+- **cache-ttl**: give failed keepalive pings room to retry (`55a84e3`)
+- **web-hub**: open files from an expanded subfolder at the right path (`ff9ad77`)
+- **web-hub**: truncate the quota pill mid-text instead of blanking a group (`0f77422`)
+
+### Tests
+
+- cap the vitest fork pool at 8 workers (`2acadf5`)
+- **workflow**: bound real-worker waits by the registry's own settle bound (`1638012`)
+
+Stats: 8 feat, 4 fix, 2 test
+
 ## [0.5.4] - 2026-10-15
 
 ### Added
@@ -566,7 +593,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.1...v0.5.2
