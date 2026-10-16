@@ -872,13 +872,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     controlEnabled: () => settings.control !== false,
     now,
     send: (frame) => conn?.send(frame),
+    // Never throws (each step isolated): commands.ts sends the cmd_result / cmd_late frame
+    // right AFTER onChanged(), so a throw here (e.g. a stale ctx after a real session switch)
+    // would silently drop the reply — web-resume P4 conformance C2.
     onChanged: () => {
-      publishStatus();
-      publishCtl();
+      safe(() => publishStatus(), undefined);
+      safe(() => publishCtl(), undefined);
       // commands.ts's own hold-buffer mutations (prompt held 0→1, recall 1→0, dispatch/return)
       // bypass the driver's publish callback, so the `web held N` marker refreshes here too —
       // setStatusLine's text dedupe makes this a no-op for every unrelated ledger mutation.
-      refreshStatusLine();
+      safe(() => refreshStatusLine(), undefined);
     },
     setTimer: (ms, fn) => {
       const t = setTimeout(fn, ms);
@@ -923,9 +926,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           }
         },
         publish: () => {
-          publishStatus();
-          publishCtl();
-          refreshStatusLine();
+          // same never-throw isolation as onChanged (stale ctx after a real session switch)
+          safe(() => publishStatus(), undefined);
+          safe(() => publishCtl(), undefined);
+          safe(() => refreshStatusLine(), undefined);
         },
         now,
         setRefTimer: (ms, fn) => {
@@ -1750,9 +1754,18 @@ export function statusLineText(
   }
 }
 
+/** Never throws: after a real session replacement (web resume / `/new`) the closure's `ctx` is
+ *  stale and pi's guarded `ctx.ui` getter THROWS — that used to abort `onChanged()` before a
+ *  `__pick`'s `cmd_late` frame was sent (web-resume P4 conformance C2). Stale ⇒ no theme. */
 function readStatusTheme(c: unknown): WebHubStatusTheme | undefined {
-  const theme = (c as { ui?: { theme?: unknown } } | undefined)?.ui?.theme;
-  return typeof (theme as WebHubStatusTheme | undefined)?.fg === "function" ? (theme as WebHubStatusTheme) : undefined;
+  try {
+    const theme = (c as { ui?: { theme?: unknown } } | undefined)?.ui?.theme;
+    return typeof (theme as WebHubStatusTheme | undefined)?.fg === "function"
+      ? (theme as WebHubStatusTheme)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function hubUrl(paths: HubPaths, conn: HubConnection | undefined): { url: string } | { hint: string } {

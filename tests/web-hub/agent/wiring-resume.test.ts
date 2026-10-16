@@ -133,6 +133,17 @@ describe("wireWebHub — resume wiring (§2.4/§2.5/§2.7)", () => {
     const { pi, fire, sentUserMessages } = fakePi();
     const control = wireWebHub(pi, deps());
     const { ctx } = sessionCtxOf(layout);
+    // Like real pi: after a session replacement the old ctx's guarded `ui` getter THROWS
+    // (web-resume P4 conformance C2 — that throw used to drop the pick's cmd_late).
+    let stale = false;
+    const liveUi = (ctx as { ui?: unknown }).ui;
+    Object.defineProperty(ctx, "ui", {
+      configurable: true,
+      get() {
+        if (stale) throw new Error("This extension ctx is stale after session replacement or reload");
+        return liveUi;
+      },
+    });
     fire("session_start", { type: "session_start", reason: "startup" }, ctx);
     await waitUntil(() => hub!.all().some((f) => f.t === "hello"));
     const helloFrame = hub!.all().find((f) => f.t === "hello") as Extract<AgentFrame, { t: "hello" }>;
@@ -181,6 +192,7 @@ describe("wireWebHub — resume wiring (§2.4/§2.5/§2.7)", () => {
       cwd,
       switchSession: async (path: string, opts: { withSession?: (c: unknown) => Promise<void> }) => {
         switchCalls.push(path);
+        stale = true; // the session was replaced: the first activation's ctx is now stale
         await opts.withSession?.({ sessionManager: { getSessionId: () => "t1", getSessionFile: () => path } });
         return {};
       },
