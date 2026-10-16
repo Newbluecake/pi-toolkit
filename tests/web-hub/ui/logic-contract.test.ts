@@ -236,3 +236,14 @@ describe("web/contract.js API.privacyVerify/privacyLock (web-hub-privacy plan v2
     expect(web.API.privacyLock).toBe("/api/privacy/lock");
   });
 });
+
+// web-hub-version plan §5.1 (V2): `API.versionInfo` is the frozen V0 protocol module's
+// `VERSION_INFO_PATH` (same reference, not a copy) — V1's hub routes mount the same constant,
+// so the browser client and the hub can never disagree about `/api/version`.
+describe("web/contract.js API.versionInfo (web-hub-version plan, V2)", () => {
+  it("is the protocol module's frozen VERSION_INFO_PATH (same reference, not a copy)", async () => {
+    const versionProto = await import("../../../src/web-hub/protocol/version-info.js");
+    expect(web.API.versionInfo).toBe(versionProto.VERSION_INFO_PATH);
+    expect(web.API.versionInfo).toBe("/api/version");
+  });
+});

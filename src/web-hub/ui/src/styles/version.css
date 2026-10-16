@@ -1,0 +1,318 @@
+/**
+ * web-hub-version plan §5.2 (V2): the version chip, its dots, the desktop popover and the
+ * version panel (both the popover body and the settings card's embedded form share these
+ * rules — same panel, two shells). Imported by `shell/VersionHost.vue` (first-screen through
+ * TopBar); the `.version-anchor` visibility rules live in `shell.css` next to the base
+ * `.topbar-meta` ones, NOT here (single-source cascade for the <1025px hidden state).
+ *
+ * Colour language: warn findings use `--c-warning`, info dots/flags `--c-info`, unknown
+ * states stay muted gray (§4「无法验证」从不点亮).
+ */
+
+/* ------------------------------------------------------------------ chip + dots */
+.version-chip {
+  appearance: none;
+  background: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  align-items: center;
+  gap: var(--sp-1, 4px);
+  border-radius: var(--r-sm);
+}
+
+.version-chip:hover {
+  color: var(--c-text-2);
+}
+
+.version-chip:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}
+
+.version-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.version-dot[data-level="warn"] {
+  background: var(--c-warning);
+}
+
+.version-dot[data-level="info"] {
+  background: var(--c-info);
+}
+
+/* The gear's mirror dot (§5.2): the chip is CSS-hidden below 1025px, so the gear carries the
+ * dot there instead. Hidden on ≥1025px (the chip dot is the visible one) — never both. */
+.version-dot-gear {
+  display: none;
+}
+
+@media (max-width: 1024px) {
+  .version-dot-gear {
+    display: inline-block;
+  }
+}
+
+/* ------------------------------------------------------------------ desktop popover */
+.version-pop {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40; /* same popover tier as `.settings-panel` */
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - var(--topbar-h) - 24px);
+  overflow: hidden;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  outline: none;
+}
+
+.version-pop-head {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  flex: none;
+}
+
+.version-pop-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.version-pop-body {
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+
+/* ------------------------------------------------------------------ panel (shared) */
+.version-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.version-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.version-h {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--c-text-2);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.version-status {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-3);
+}
+
+.version-status[data-status="differ"] {
+  color: var(--c-warning);
+  border-color: var(--c-warning);
+}
+
+.version-status[data-status="older"],
+.version-status[data-status="newer"] {
+  color: var(--c-info);
+  border-color: var(--c-info);
+}
+
+.version-ok {
+  margin: 0;
+  color: var(--c-text-3);
+}
+
+.version-findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.version-finding {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  border-left: 3px solid var(--c-border);
+}
+
+.version-finding[data-level="warn"] {
+  border-left-color: var(--c-warning);
+  background: var(--c-warning-soft);
+}
+
+.version-finding[data-level="info"] {
+  border-left-color: var(--c-info);
+  background: var(--c-info-soft);
+}
+
+.version-finding[data-level="none"] {
+  color: var(--c-text-3);
+}
+
+.version-finding-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.version-finding-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+}
+
+.version-summary {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
+.version-kv {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) 1fr;
+  gap: var(--sp-1) var(--sp-2);
+  margin: 0;
+}
+
+.version-kv > dt {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  align-self: baseline;
+}
+
+.version-kv > dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.version-mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fs-xs);
+}
+
+.version-muted {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.version-flag {
+  display: inline-block;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  border-radius: var(--r-sm);
+  color: var(--c-warning);
+  background: var(--c-warning-soft);
+}
+
+.version-assets {
+  list-style: none;
+  margin: var(--sp-1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.version-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.version-error > p {
+  margin: 0;
+}
+
+.version-load-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+}
+
+.version-load-error > p {
+  margin: 0;
+}
+
+.version-details {
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.version-details > summary {
+  cursor: pointer;
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.version-commits {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+}
+
+.version-commits > li {
+  overflow-wrap: anywhere;
+}
+
+.version-changelog {
+  margin-top: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.version-changelog-title {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-sm);
+}
+
+/* ------------------------------------------------------------------ embedded (settings card) */
+.version-embedded {
+  min-width: 0;
+}
+
+/* The embedded form rides inside the settings card — slightly tighter spacing so the mobile
+ * sheet keeps a sane height with sections 1–4 expanded (5/6 are collapsed <details>). */
+.version-embedded .version-panel {
+  gap: var(--sp-2);
+}

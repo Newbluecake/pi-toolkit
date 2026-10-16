@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mount } from "@vue/test-utils";
+import { ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SettingsOverlay from "../../../src/web-hub/ui/src/components/shell/SettingsOverlay.vue";
+import SettingsView from "../../../src/web-hub/ui/src/components/shell/SettingsView.vue";
+import { VERSION_CTX } from "../../../src/web-hub/ui/src/composables/useVersionInfo.js";
 
 /**
  * `shell/SettingsOverlay.vue` (floating settings panel, revised 2026-10 field report): desktop
@@ -301,5 +304,86 @@ describe("SettingsOverlay desktop panel width (default-model plan F1 A1)", () =>
     expect(modelsCss).toMatch(/\.model-chip--card\s*\{/);
     expect(modelsCss).toMatch(/\.model-chip-label\s*\{[^}]*text-overflow:\s*ellipsis/);
     expect(modelsCss).toMatch(/\.model-panel--fixed\s*\{[^}]*position:\s*fixed/);
+  });
+});
+
+// web-hub-version plan §5.2/§5.3 + 2026-10-16 D4 refinement (V2): the settings popup's 「版本」
+// card — the version info lives INLINE inside the settings dialog (both the desktop popover and
+// the mobile sheet render SettingsView, so both get it), sections 5/6 collapsed as <details>,
+// and the endpoint is requested only when the dialog (i.e. the embedded panel) mounts — sharing
+// TopBar's VERSION_CTX single flight.
+describe("SettingsOverlay — inline 「版本」 card (web-hub-version V2, D4)", () => {
+  it("renders the version card with the embedded panel inside the desktop popover; 5/6 are collapsed <details>", async () => {
+    stubMatchMedia(false);
+    const handle = {
+      phase: ref("ok"),
+      snapshot: ref({
+        v: 1,
+        checkedAt: 1,
+        hub: { pid: 1, startedAt: 1 },
+        repo: {
+          head: { commit: "aaaaaaa111111", time: 1 },
+          packageVersion: "0.5.5",
+          lastTag: "v0.5.4",
+          commits: [{ commit: "aaaaaaa111111", time: 1, subject: "feat: x" }],
+          commitsTotal: 1,
+        },
+        changelog: { sections: [{ title: "0.5.5", markdown: "* one" }] },
+      }),
+      match: ref({ tabStale: false, findings: [], dot: null, dirty: false }),
+      refresh: vi.fn(),
+      dispose: () => {},
+    };
+    const anchorEl = document.createElement("button");
+    const wrapper = mount(SettingsOverlay, {
+      props: { anchorEl },
+      global: { provide: { [VERSION_CTX as symbol]: handle } },
+      attachTo: document.body,
+    });
+    expect(wrapper.find('[role="dialog"][aria-labelledby="settings-panel-title"] .version-embedded').exists()).toBe(
+      true,
+    );
+    // sections 1–4 expanded, 5/6 collapsed <details> (the lazy panel needs a few macro-tasks)
+    await vi.waitFor(
+      () => {
+        if (wrapper.findAll(".version-embedded details").length !== 2) throw new Error("panel not ready");
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    const details = wrapper.findAll(".version-embedded details");
+    expect(details.every((d) => (d.element as HTMLDetailsElement).open === false)).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("the embedded panel requests the endpoint only when the dialog mounts (VERSION_CTX single flight)", async () => {
+    stubMatchMedia(false);
+    const refresh = vi.fn();
+    const handle = {
+      phase: ref("idle"),
+      snapshot: ref(undefined),
+      match: ref({ tabStale: false, findings: [], dot: null, dirty: false }),
+      refresh,
+      dispose: () => {},
+    };
+    const anchorEl = document.createElement("button");
+    const closed = mount(SettingsView, {
+      global: { provide: { [VERSION_CTX as symbol]: handle } },
+    });
+    closed.unmount(); // mounted-then-unmounted without waiting: no lazy load ⇒ no request yet
+    expect(refresh).toHaveBeenCalledTimes(0);
+
+    const wrapper = mount(SettingsOverlay, {
+      props: { anchorEl },
+      global: { provide: { [VERSION_CTX as symbol]: handle } },
+      attachTo: document.body,
+    });
+    await vi.waitFor(
+      () => {
+        if (refresh.mock.calls.length < 1) throw new Error("panel not mounted yet");
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    expect(refresh).toHaveBeenCalledTimes(1); // once per panel mount — the shared single flight
+    wrapper.unmount();
   });
 });

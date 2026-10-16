@@ -20,7 +20,7 @@
  * timeout the outcome is `E_DEADLINE{effect:"unknown"}` — never auto re-executed, the
  * queryOnly flow (§3.4) decides.
  */
-import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
+import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS, VERSION_INFO_CLIENT_TIMEOUT_MS } from "./contract.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
   PREVIEW_CHUNK_QUERY,
@@ -46,6 +46,7 @@ import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 import { historyOutcomeFromResponse } from "./sessionHistory.ts";
 import { LOAD_TOP_BODY_MAX_BYTES, LOAD_TOP_CLIENT_TIMEOUT_MS, parseLoadTopWire } from "./load.js";
+import { parseVersionInfoWire, VERSION_LIMITS } from "@protocol/version-info.ts";
 import { AVATAR_DELETE_PATH, AVATAR_PATH } from "@protocol/avatar.ts";
 import { validateAvatarPng } from "@protocol/avatar-png.ts";
 
@@ -1493,6 +1494,37 @@ export function createClient(deps) {
   }
 
   // -------------------------------------------------------------------------
+  // web-hub-version plan §5.1 (V2): `GET /api/version`
+  // -------------------------------------------------------------------------
+
+  /**
+   * `GET /api/version` (V0's frozen `VERSION_INFO_PATH`, mirrored into `API.versionInfo`) —
+   * the version/compat snapshot for the version chip + panel. Same capped-JSON GET flow as
+   * `loadTop` above with the plan's own knobs: body cap `VERSION_LIMITS.bodyBytes` (§8's
+   * ≤64 KiB response budget — the hub already trims to it) and a client deadline padded above
+   * the endpoint's server-side wall clock (hub budget 4s + the parallel `ui.probe()` wait;
+   * LAN rides `deriveBudget(8000, …)` — `VERSION_INFO_CLIENT_TIMEOUT_MS` below covers both).
+   * `parseVersionInfoWire` (V0, imported — never re-implemented) is the contract gate; a 401
+   * rides `withRelogin` (silent re-login + replay, GET ⇒ side-effect free) exactly like
+   * `loadTop`.
+   * @param {any} [signal]
+   * @returns {Promise<any>}
+   */
+  async function versionInfo(signal) {
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const r = await wtdiffGet(
+      API.versionInfo,
+      VERSION_LIMITS.bodyBytes,
+      parseVersionInfoWire,
+      signal,
+      VERSION_INFO_CLIENT_TIMEOUT_MS,
+    );
+    return r.ok ? { ok: true, data: r.value } : r;
+  }
+
+  // -------------------------------------------------------------------------
   // custom-avatar endpoints (web-hub-avatar plan v2.1 §2.1/§5, package C)
   // -------------------------------------------------------------------------
 
@@ -1752,6 +1784,7 @@ export function createClient(deps) {
     worktreeDiff,
     worktreeGraph,
     loadTop,
+    versionInfo,
     avatar,
     privacy,
     close() {

@@ -21,6 +21,7 @@ import type {
   CmdOutcome,
   HubTransport,
   LoadTopOutcome,
+  VersionInfoOutcome,
   PreviewDownloadOutcome,
   PreviewOutcome,
   PreviewProbeOutcome,
@@ -230,6 +231,10 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
     // same final-E_AUTH rule as worktreeGraph/preview above (a GET, replayed once by the
     // client's `withRelogin` on a 401).
     loadTop: (signal) => withAuthNotice(deps, () => client.loadTop(signal) as Promise<LoadTopOutcome>),
+    // web-hub-version plan §5.1 (V2): thin cast over the logic client's `versionInfo` — same
+    // final-E_AUTH rule as loadTop above (a GET, replayed once by the client's `withRelogin`
+    // on a 401; a final E_AUTH means the stored token is dead).
+    versionInfo: (signal) => withAuthNotice(deps, () => client.versionInfo(signal) as Promise<VersionInfoOutcome>),
     // web-hub-avatar plan v2.1 §5 (package C): GET is safe to replay through the client's
     // token relogin path; writes are deliberately one-shot and never replayed.
     avatar: {

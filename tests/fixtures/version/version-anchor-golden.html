@@ -1,0 +1,16 @@
+<!--
+  SCRIPTED fixture — web-hub-version plan §5.3 (V2): the new `.version-anchor` subtree of
+  TopBar, byte-pinned separately from the historical topbar-no-quota baseline (which the
+  quota tests compare against only after the audited scoped normalization restores the old
+  `.topbar-meta` span shape). Captured by mounting the CURRENT working-tree TopBar.vue with
+    props = { conn: "open", hubVersion: null, canSignOut: false }
+  (no HUB_CTX — dot list empty, version popover unmounted). Audit the rendered shape before
+  trusting a regenerated copy; the historical baseline fixture stays UNTOUCHED.
+
+  HEAD commit at capture time: 926b370309397e356bc8e508788fe1afcb566644
+
+  Regenerate:
+
+      UPDATE_VERSION_GOLDEN=1 npx vitest run tests/web-hub/ui/quota-pill.test.ts
+-->
+<span class="version-anchor"><button type="button" class="topbar-meta version-chip" translate="no" aria-haspopup="dialog" aria-expanded="false" aria-controls="version-panel" title="Version &amp; compatibility">ui 0.0.0-test@0123456 · 01-02 11:04</button><!--v-if--></span>

@@ -14,6 +14,7 @@ import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type { AvatarDeleteOutcome, AvatarFetchOutcome, AvatarWriteOutcome } from "@protocol/avatar.js";
 import type { LoadTopWire } from "@protocol/messages.js";
+import type { VersionInfoWire } from "@protocol/version-info.js";
 import type {
   ForkReason,
   HistoryLiveWire,
@@ -148,6 +149,12 @@ export interface HubTransport {
    * `worktreeDiff`/`worktreeGraph` above. Both real adapters always provide it (implemented by
    * P4's `transport/{token,password}.ts`, not this P0 declaration). */
   loadTop?(signal?: AbortSignal): Promise<LoadTopOutcome>;
+  /** web-hub-version plan §5.1 (V2): `GET /api/version` — the version/compat snapshot for the
+   * version chip + panel. Optional per the frozen-transport convention (test fakes / future
+   * transports may omit it); `useVersionInfo` treats a missing method exactly like a missing
+   * `version.v1` cap (phase `unsupported`, never any request — I8: old-hub DOM stays
+   * byte-identical). Both real adapters always provide it. */
+  versionInfo?(signal?: AbortSignal): Promise<VersionInfoOutcome>;
 }
 
 /**
@@ -157,6 +164,15 @@ export interface HubTransport {
  */
 export type LoadTopOutcome =
   | { readonly ok: true; readonly data: LoadTopWire }
+  | { readonly ok: false; readonly error: string; readonly status?: number };
+
+/** web-hub-version plan §5.1 (V2): `GET /api/version`'s outcome — same two-half shape as
+ * `LoadTopOutcome` above (`status` 0 for client-local codes: `E_NETWORK`/`E_DEADLINE`/
+ * `E_ABORT`; the hub's 503 `E_BUSY` / 504 `E_DEADLINE` ride verbatim as HTTP-status errors).
+ * NOTE: deliberately NOT V0's hub-port `VersionInfoOutcome` (`{ok:false; code:"E_BUSY"|…}`)
+ * — this is the browser-side transport convention, same as every other endpoint here. */
+export type VersionInfoOutcome =
+  | { readonly ok: true; readonly data: VersionInfoWire }
   | { readonly ok: false; readonly error: string; readonly status?: number };
 
 /** `@logic/password-client.js`'s `login()` return shape (JSDoc-documented there; mirrored here). */

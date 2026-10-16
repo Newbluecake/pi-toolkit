@@ -43,6 +43,43 @@ function quota(providers: QuotaWire["providers"], at = 1_000): QuotaWire {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const TOPBAR_REL_PATH = "src/web-hub/ui/src/components/shell/TopBar.vue";
 const FIXTURE_PATH = resolve(REPO_ROOT, "tests/fixtures/quota/topbar-no-quota-golden.html");
+const VERSION_ANCHOR_FIXTURE_PATH = resolve(REPO_ROOT, "tests/fixtures/version/version-anchor-golden.html");
+
+/**
+ * web-hub-version plan §5.3 (V2): the AUDITED, SCOPED normalization applied before the
+ * byte-for-byte comparison against the historical baseline — the ONLY DOM this feature changed
+ * outside its own additions is the ui meta: `<span class="topbar-meta" translate="no">…</span>`
+ * became `<span class="version-anchor"><button class="topbar-meta version-chip" …>…</button>
+ * <!--v-if--></span>`. This restores the old span (same visible text — the button interpolates
+ * the exact same `t("shell.uiBuild")` string), leaving every OTHER byte of the TopBar DOM
+ * pinned exactly as the fixture captured it. Deliberately string-based (no DOMParser — that is
+ * on source-scan's banned list for UI sources, and parsing/serializing would re-quote
+ * attributes and break byte-identity anyway); the anchor's shape is fully determined by
+ * TopBar.vue's template: one button, then 0..n dot spans (self-closing pairs), then the
+ * VersionHost `<!--v-if-->` comment, then the anchor's own `</span>`.
+ */
+function normalizeVersionAnchor(html: string): string {
+  const open = '<span class="version-anchor">';
+  const start = html.indexOf(open);
+  if (start === -1) return html; // pre-V2 shape (or uiStamp absent) — nothing to normalize
+  const btnStart = html.indexOf("<button", start);
+  if (btnStart === -1) return html;
+  const btnEnd = html.indexOf("</button>", btnStart);
+  if (btnEnd === -1) return html;
+  const textStart = html.indexOf(">", btnStart) + 1;
+  const firstTag = html.indexOf("<", textStart); // first dot span, or </button> when dotless
+  const text = html.slice(textStart, firstTag === -1 ? btnEnd : firstTag);
+  const anchorClose = html.indexOf("</span>", btnEnd + "</button>".length);
+  if (anchorClose === -1) return html;
+  const end = anchorClose + "</span>".length;
+  return html.slice(0, start) + `<span class="topbar-meta" translate="no">${text}</span>` + html.slice(end);
+}
+
+/** §5.3: the current `.version-anchor` subtree, captured for the SEPARATE version golden. */
+function captureVersionAnchor(wrapper: { element: HTMLElement }): string {
+  const anchor = wrapper.element.querySelector(".version-anchor");
+  return anchor === null ? "" : anchor.outerHTML;
+}
 
 /** Strips the fixture's leading `<!-- ... -->` audit-trail header, keeping only the captured
  *  HTML payload (the header documents generation method/HEAD commit for humans — see the fixture
@@ -120,7 +157,7 @@ describe("TopBar: no quota data ⇒ byte-identical DOM (quota-web plan D7's no-d
 
   it("with no HUB_CTX injected at all (unit-test precedent) — identical to the pre-feature baseline", () => {
     const wrapper = m(mount(TopBar, { props: baseProps }));
-    expect(wrapper.element.outerHTML).toBe(GOLDEN);
+    expect(normalizeVersionAnchor(wrapper.element.outerHTML)).toBe(GOLDEN);
   });
 
   it("with a live hub whose agents carry no quota wire — identical to the pre-feature baseline", () => {
@@ -131,13 +168,50 @@ describe("TopBar: no quota data ⇒ byte-identical DOM (quota-web plan D7's no-d
       } as unknown as HubState) as HubHandle["state"],
     };
     const wrapper = m(mount(TopBar, { props: baseProps, global: { provide: { [HUB_CTX as symbol]: hub } } }));
-    expect(wrapper.element.outerHTML).toBe(GOLDEN);
+    expect(normalizeVersionAnchor(wrapper.element.outerHTML)).toBe(GOLDEN);
   });
 
   it("no .q-pill node exists in either case", () => {
     const wrapper = m(mount(TopBar, { props: baseProps }));
     expect(wrapper.find(".q-pill").exists()).toBe(false);
   });
+
+  // web-hub-version plan §5.3 (V2): the NEW subtree gets its own, separately audited golden —
+  // `tests/fixtures/version/version-anchor-golden.html`, byte-pinned here. Captured with the
+  // same baseProps/no-hub state as the baseline tests (dotList empty ⇒ no dot spans, host
+  // unmounted ⇒ the `<!--v-if-->` comment is part of the pinned shape). Opt-in scripted
+  // regeneration: `UPDATE_VERSION_GOLDEN=1 npx vitest run tests/web-hub/ui/quota-pill.test.ts`.
+  if (process.env.UPDATE_VERSION_GOLDEN === "1") {
+    it("regenerates the version-anchor golden fixture (opt-in, UPDATE_VERSION_GOLDEN=1)", async () => {
+      const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT }).toString().trim();
+      const wrapper = mount(TopBar, { props: baseProps });
+      const anchorHtml = captureVersionAnchor(wrapper);
+      wrapper.unmount();
+      const header =
+        "<!--\n" +
+        "  SCRIPTED fixture — web-hub-version plan §5.3 (V2): the new `.version-anchor` subtree of\n" +
+        "  TopBar, byte-pinned separately from the historical topbar-no-quota baseline (which the\n" +
+        "  quota tests compare against only after the audited scoped normalization restores the old\n" +
+        "  `.topbar-meta` span shape). Captured by mounting the CURRENT working-tree TopBar.vue with\n" +
+        '    props = { conn: "open", hubVersion: null, canSignOut: false }\n' +
+        "  (no HUB_CTX — dot list empty, version popover unmounted). Audit the rendered shape before\n" +
+        "  trusting a regenerated copy; the historical baseline fixture stays UNTOUCHED.\n\n" +
+        "  HEAD commit at capture time: " +
+        headSha +
+        "\n\n" +
+        "  Regenerate:\n\n" +
+        "      UPDATE_VERSION_GOLDEN=1 npx vitest run tests/web-hub/ui/quota-pill.test.ts\n" +
+        "-->\n";
+      writeFileSync(VERSION_ANCHOR_FIXTURE_PATH, header + anchorHtml + "\n");
+    });
+  } else {
+    it("the .version-anchor subtree matches its own audited golden byte-for-byte", () => {
+      const raw = readFileSync(VERSION_ANCHOR_FIXTURE_PATH, "utf8");
+      const golden = raw.replace(/^<!--[\s\S]*?-->\n/, "").replace(/\n$/, "");
+      const wrapper = m(mount(TopBar, { props: baseProps }));
+      expect(captureVersionAnchor(wrapper)).toBe(golden);
+    });
+  }
 });
 
 describe("TopBar: D5 freshest-session hoist", () => {

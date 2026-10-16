@@ -25,7 +25,6 @@ const detail = {
   waitingMore: "(+{n} more)",
   staleBanner: "Stale — no recent heartbeat. Data may be out of date.",
   offlineBanner: "Offline — the pi process exited. Showing the last known transcript.",
-  versionMismatch: "UI built at {c1}, hub is {c2} — consider rebuilding with npm run build:web.",
   loadingHistory: "Loading history…",
   dockLong: "· reply from the terminal",
   latest: "Latest",

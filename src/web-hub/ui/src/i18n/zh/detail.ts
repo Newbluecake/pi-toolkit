@@ -28,7 +28,6 @@ const detail = {
   waitingMore: "（+{n} 更多）",
   staleBanner: "过期 — 无最近心跳，数据可能已过期。",
   offlineBanner: "离线 — pi 进程已退出，正在显示最后已知的记录。",
-  versionMismatch: "界面构建于 {c1}，hub 为 {c2} — 建议重新运行 npm run build:web。",
   loadingHistory: "正在加载历史记录…",
   dockLong: "· 请在终端中回复",
   latest: "最新",

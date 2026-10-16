@@ -6,11 +6,14 @@ import TopBar from "../../../src/web-hub/ui/src/components/shell/TopBar.vue";
 
 /** Top-bar build stamps (`logic/build-stamp.js` + `TopBar.vue`, user request 2026-09-28). */
 describe("build-stamp logic", () => {
-  it("shortCommit takes the part after @, strips -dirty, truncates to 7", () => {
+  it("shortCommit takes the part after @, strips BOTH -dirty and * (hub buildId dirty form, web-hub-version §5.1), truncates to 7", () => {
     expect(shortCommit("0.2.1@6451c63abc12")).toBe("6451c63");
     expect(shortCommit("0.2.1@6451c63abc12-dirty")).toBe("6451c63");
+    expect(shortCommit("0.5.5@33a89f1abc12*")).toBe("33a89f1"); // pre-V2 bug: `*` failed the hex test ⇒ null
     expect(shortCommit("31baeb3fb1fe")).toBe("31baeb3");
+    expect(shortCommit("31baeb3fb1fe*")).toBe("31baeb3");
     expect(shortCommit("unknown")).toBe(null);
+    expect(shortCommit("nogit")).toBe(null);
     expect(shortCommit(undefined)).toBe(null);
     expect(shortCommit("0.2.1")).toBe(null);
   });
@@ -51,5 +54,17 @@ describe("TopBar build stamps", () => {
     const metas = wrapper.findAll(".topbar-meta").map((m) => m.text());
     expect(metas.some((m) => m.startsWith("hub "))).toBe(false);
     expect(metas.some((m) => m.startsWith("ui 0.0.0-test@"))).toBe(true);
+  });
+
+  // web-hub-version plan §5.2/§5.3 (V2): the meta is a chip BUTTON now (inside
+  // `.version-anchor`), wired for the version popover.
+  it("the ui meta is a BUTTON (version chip) with dialog semantics, clean state ⇒ zero dots", () => {
+    const wrapper = mount(TopBar, { props: baseProps });
+    const chip = wrapper.get(".topbar-meta");
+    expect(chip.element.tagName).toBe("BUTTON");
+    expect(chip.classes()).toContain("version-chip");
+    expect(chip.attributes("aria-haspopup")).toBe("dialog");
+    expect(wrapper.get(".version-anchor").exists()).toBe(true);
+    expect(wrapper.findAll(".version-dot")).toEqual([]); // 0/1-item v-for: zero nodes when clean
   });
 });

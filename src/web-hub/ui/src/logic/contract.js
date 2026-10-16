@@ -31,6 +31,7 @@ import {
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
 import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "@protocol/worktree-diff.ts";
 import { WTGRAPH_PATH } from "@protocol/worktree-graph.ts";
+import { VERSION_INFO_PATH } from "@protocol/version-info.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "@protocol/privacy.ts";
 
@@ -99,6 +100,11 @@ export const API = Object.freeze({
   // sysload plan §7.1/§7.3 (package P4): the on-demand top-process endpoint, imported from
   // `protocol/http-contract.ts` — same anti-drift rule as the wtgraph/wtdiff paths above.
   loadTop: LOAD_TOP_PATH,
+  // web-hub-version plan §5.1 (V2): `GET /api/version` — imported from the frozen V0 protocol
+  // module (same anti-drift rule as every other protocol-defined path above; V1's hub routes
+  // mount the same constant, so the two can never disagree). `tests/web-hub/ui/logic-contract.test.ts`
+  // pins it against `VERSION_INFO_PATH`.
+  versionInfo: VERSION_INFO_PATH,
   // web-hub-privacy plan v2.1 (P1): the privacy-lock endpoints, imported from
   // `protocol/privacy.ts` — same anti-drift rule. `privacyVerify` is LAN-only (the hub 404s it
   // on loopback; P2's lock screen renders the click-to-confirm variant there instead);
@@ -125,3 +131,11 @@ export const SILENCE_MS = 45_000;
 
 /** `/api/history` page size cap enforced by the hub. */
 export const HISTORY_LIMIT_MAX = 400;
+
+/** web-hub-version plan §5.1 (V2): `GET /api/version` client deadline — padded above the
+ * endpoint's server-side wall clock (hub-side snapshot budget 4s + the parallel `ui.probe()`
+ * wait; LAN rides `deriveBudget(8000, …)`), same "pad above the server" convention as
+ * `LOAD_TOP_CLIENT_TIMEOUT_MS` (5s for a 1.5s endpoint). The response body cap is V0's
+ * `VERSION_LIMITS.bodyBytes` (64 KiB, §8), imported by the clients from
+ * `@protocol/version-info.ts` directly. */
+export const VERSION_INFO_CLIENT_TIMEOUT_MS = 15_000;

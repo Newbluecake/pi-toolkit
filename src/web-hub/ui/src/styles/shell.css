@@ -167,6 +167,16 @@
   min-width: 0;
 }
 
+/* web-hub-version plan §5.2 (V2): the meta became a chip BUTTON inside this anchor wrapper.
+ * The anchor carries the <1025px hidden state (and the min-width chain the button's ellipsis
+ * needs as a nested flex child); the ≥1025px reveal below targets BOTH the anchor and the
+ * chip, so the base `.topbar-meta { display: none }` above never leaks into wide viewports.
+ * All other version styles live in `styles/version.css` (imported by `VersionHost.vue`). */
+.version-anchor {
+  display: none;
+  min-width: 0;
+}
+
 .topbar .chip {
   display: none;
 }
@@ -354,9 +364,12 @@
 }
 
 /* version metas are desktop-only (2026-10-05 user field report: crowded on phones/tablets) —
- * the full hub/ui stamps stay available via the brand's title tooltip. */
+ * the full hub/ui stamps stay available via the brand's title tooltip. web-hub-version plan
+ * §5.2 (V2): the rule moved from `.topbar-meta` to the `.version-anchor` wrapper (the chip
+ * button keeps the hidden-by-default `.topbar-meta` base above). */
 @media (min-width: 1025px) {
-  .topbar-meta {
+  .version-anchor,
+  .version-anchor .topbar-meta {
     display: inline-flex;
   }
 }

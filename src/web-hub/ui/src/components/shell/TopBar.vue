@@ -44,7 +44,7 @@
        the way they already flow through this component).
 -->
 <script setup lang="ts">
-import { computed, inject, onMounted, onUnmounted, ref } from "vue";
+import { computed, inject, onMounted, onUnmounted, provide, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import LangMenu from "./LangMenu.vue";
@@ -55,6 +55,8 @@ import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
 import { parseRouteHash } from "../../composables/useHashRoute.js";
 import { useMedia } from "../../composables/useMedia.js";
 import SettingsOverlay from "./SettingsOverlay.vue";
+import VersionHost from "./VersionHost.vue";
+import { useVersionInfo, VERSION_CTX } from "../../composables/useVersionInfo.js";
 import QuotaPill from "../quota/QuotaPill.vue";
 import { freshestQuota } from "@logic/quota.js";
 import LoadPill from "../load/LoadPill.vue";
@@ -152,6 +154,31 @@ function onClose(): void {
 
 onMounted(() => window.addEventListener("hashchange", onHashChange));
 onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
+
+// web-hub-version plan §5.2 (V2): the version chip + its dot. ONE useVersionInfo instance per
+// TopBar, PROVIDED as VERSION_CTX — the popover and the settings 「版本」 card share its
+// single-flight fetch (D4: 共用单飞，不重复请求). The dot list uses the same 0/1-item `v-for`
+// trick as `quotaList` above: `match.dot` is null for 无法验证/无发现, so a clean TopBar
+// contributes ZERO extra DOM nodes (the quota golden pin stays intact; §5.3's scoped
+// normalization only has to restore the old `.topbar-meta` span shape — note the template's
+// DOM comments around it stay byte-identical, which is why the V2 notes live HERE and not in
+// a new template comment). The gear button mirrors the same dot below 1025px, where the chip
+// itself is CSS-hidden (`.version-dot-gear`, version.css) — same 0/1-item trick.
+const versionInfo = useVersionInfo({ hub });
+provide(VERSION_CTX, versionInfo);
+onUnmounted(() => versionInfo.dispose());
+const versionOpen = ref(false);
+const versionChipEl = ref<HTMLButtonElement | null>(null);
+const dotList = computed(() => {
+  const d = versionInfo.match.value.dot;
+  return d === null ? [] : [d];
+});
+function onVersionToggle(): void {
+  versionOpen.value = !versionOpen.value;
+}
+function onVersionClose(): void {
+  versionOpen.value = false;
+}
 </script>
 
 <template>
@@ -198,7 +225,23 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 
     <!-- 2026-10-06: only the frontend (ui) version shows in the bar; the hub version stays in
          the brand's title tooltip. -->
-    <span v-if="uiStamp" class="topbar-meta" translate="no">{{ t("shell.uiBuild", { v: uiStamp }) }}</span>
+    <span v-if="uiStamp" class="version-anchor">
+      <button
+        ref="versionChipEl"
+        type="button"
+        class="topbar-meta version-chip"
+        translate="no"
+        aria-haspopup="dialog"
+        :aria-expanded="versionOpen"
+        aria-controls="version-panel"
+        :title="t('version.chipTitle')"
+        @click="onVersionToggle"
+      >
+        {{ t("shell.uiBuild", { v: uiStamp })
+        }}<span v-for="lv in dotList" :key="'vdot'" class="version-dot" :data-level="lv"></span>
+      </button>
+      <VersionHost v-if="versionOpen" :anchor-el="versionChipEl" @close="onVersionClose" />
+    </span>
     <button
       v-if="controlOn"
       class="chip control-chip"
@@ -229,6 +272,7 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
         @click="onToggle"
       >
         <AppIcon name="gear" />
+        <span v-for="lv in dotList" :key="'gdot'" class="version-dot version-dot-gear" :data-level="lv"></span>
       </button>
       <SettingsOverlay
         v-if="open"

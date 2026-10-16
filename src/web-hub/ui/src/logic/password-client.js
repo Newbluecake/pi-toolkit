@@ -37,7 +37,7 @@
  *   password-mode 401 means the cookie session is gone and is surfaced as `E_AUTH` (the
  *   `transport/password.ts` wrapper maps it to `onConn("auth")` via REST_AUTH_PATHS).
  */
-import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS } from "./contract.js";
+import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS, VERSION_INFO_CLIENT_TIMEOUT_MS } from "./contract.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
   PREVIEW_CHUNK_QUERY,
@@ -63,6 +63,7 @@ import { checkPreviewHeaders, previewOutcomeFromResponse } from "./preview.js";
 import { parseProbeResults } from "./previewProbe.js";
 import { historyOutcomeFromResponse } from "./sessionHistory.ts";
 import { LOAD_TOP_BODY_MAX_BYTES, LOAD_TOP_CLIENT_TIMEOUT_MS, parseLoadTopWire } from "./load.js";
+import { parseVersionInfoWire, VERSION_LIMITS } from "@protocol/version-info.ts";
 import { AVATAR_DELETE_PATH, AVATAR_PATH } from "@protocol/avatar.ts";
 import { validateAvatarPng } from "@protocol/avatar-png.ts";
 
@@ -1742,6 +1743,31 @@ export function createPasswordClient(deps) {
   }
 
   // -------------------------------------------------------------------------
+  // web-hub-version plan §5.1 (V2): `GET /api/version` — same flow as token.ts's sibling
+  // (independently duplicated, same discipline this file already applies to every other
+  // endpoint pair above). 401 ⇒ onConn("auth") is reported by transport/password.ts's fetch
+  // wrapper (`REST_AUTH_PATHS` has an exact-match entry for `API.versionInfo`), never here.
+  // -------------------------------------------------------------------------
+
+  /**
+   * @param {any} [signal]
+   * @returns {Promise<any>}
+   */
+  async function versionInfo(signal) {
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const r = await wtdiffGet(
+      API.versionInfo,
+      VERSION_LIMITS.bodyBytes,
+      parseVersionInfoWire,
+      signal,
+      VERSION_INFO_CLIENT_TIMEOUT_MS,
+    );
+    return r.ok ? { ok: true, data: r.value } : r;
+  }
+
+  // -------------------------------------------------------------------------
   // custom-avatar endpoints (web-hub-avatar plan v2.1 §2.1/§5, package C)
   // -------------------------------------------------------------------------
 
@@ -1926,6 +1952,7 @@ export function createPasswordClient(deps) {
     worktreeDiff,
     worktreeGraph,
     loadTop,
+    versionInfo,
     avatar,
     privacy,
     close() {
