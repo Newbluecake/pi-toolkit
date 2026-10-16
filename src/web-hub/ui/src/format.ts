@@ -67,3 +67,11 @@ export function formatNumber(n: number | null | undefined, locale = "en-US"): st
   if (typeof n !== "number" || !Number.isFinite(n)) return "—";
   return new Intl.NumberFormat(locale).format(n);
 }
+
+/** Token counts in thousands (2026-10-16 user: "用 k 省掉后面 3 个 0"): `141,041` → `141k`,
+ * `1,000,000` → `1,000k`; below 1,000 the plain locale number; `—` when unknown. */
+export function formatKTokens(n: number | null | undefined, locale = "en-US"): string {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+  if (Math.abs(n) < 1000) return formatNumber(n, locale);
+  return `${new Intl.NumberFormat(locale).format(Math.round(n / 1000))}k`;
+}

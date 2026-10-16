@@ -3,6 +3,7 @@ import {
   clip,
   formatDateTime,
   formatDuration,
+  formatKTokens,
   formatNumber,
   formatPercent,
   formatUsd,
@@ -76,6 +77,21 @@ describe("format (vue-plan.md v2.1 §3.1, §3.6, §5.2 — P1)", () => {
     it("formatNumber: locale-grouped", () => {
       expect(formatNumber(null)).toBe("—");
       expect(formatNumber(1234)).toBe("1,234");
+    });
+  });
+
+  describe("formatKTokens: thousands with a k suffix", () => {
+    it("drops the last three digits, rounding", () => {
+      expect(formatKTokens(141_041)).toBe("141k");
+      expect(formatKTokens(1_000_000)).toBe("1,000k");
+      expect(formatKTokens(124_600)).toBe("125k");
+      expect(formatKTokens(999_600)).toBe("1,000k");
+    });
+    it("small or unknown values", () => {
+      expect(formatKTokens(512)).toBe("512");
+      expect(formatKTokens(0)).toBe("0");
+      expect(formatKTokens(undefined)).toBe("—");
+      expect(formatKTokens(Number.NaN)).toBe("—");
     });
   });
 

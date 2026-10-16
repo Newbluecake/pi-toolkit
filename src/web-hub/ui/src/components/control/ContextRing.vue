@@ -7,7 +7,7 @@
   control.css's `:has(.model-switcher):not(.has-text)` tier). Clicking toggles an UPWARD
   details panel (the composer hugs the screen's bottom edge — same orientation as the retired
   DeliverSwitch menu) carrying the full former header metrics: context % + used/total tokens,
-  cost, and the sub-agent cost aside (read-only; `formatUsd`/`formatPercent`/`formatNumber`
+  cost, and the sub-agent cost aside (read-only; `formatUsd`/`formatPercent`/`formatKTokens`
   throughout).
 
   MERGED STOP (2026-10 user request "把 stop 图标放到上下文比例圆圈中"): while the agent is
@@ -36,7 +36,7 @@
 import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import { useArmedConfirm } from "../../composables/useArmedConfirm.js";
 import { useI18n } from "../../composables/useI18n.js";
-import { formatNumber, formatPercent, formatUsd, localeFor } from "../../format.js";
+import { formatKTokens, formatPercent, formatUsd, localeFor } from "../../format.js";
 import type { ContextRingEmits, ContextRingProps } from "../../contracts.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import StopButton from "./StopButton.vue";
@@ -188,7 +188,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
         <dd>
           <span class="num">{{ formatPercent(percent, locale) }}</span>
           <span v-if="tokens !== undefined && window_ !== undefined" class="aside"
-            >{{ formatNumber(tokens, locale) }} / {{ formatNumber(window_, locale) }}</span
+            >{{ formatKTokens(tokens, locale) }} / {{ formatKTokens(window_, locale) }}</span
           >
         </dd>
       </div>

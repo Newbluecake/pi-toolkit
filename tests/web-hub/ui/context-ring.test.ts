@@ -100,7 +100,7 @@ describe("ContextRing.vue — details panel", () => {
     expect(btn.attributes("aria-expanded")).toBe("true");
     const panel = wrapper.get(".ctx-ring-panel");
     expect(panel.text()).toContain("62%");
-    expect(panel.text()).toContain("124,000 / 200,000");
+    expect(panel.text()).toContain("124k / 200k"); // thousands, "k" suffix (2026-10-16)
     expect(panel.text()).toContain("$195.54");
     expect(panel.text()).toContain("$36.17"); // sub-agent cost aside
     await btn.trigger("click");
