@@ -308,7 +308,7 @@ describe("D07 — frontmatter structural errors", () => {
         file("bad.md", {
           metaErrors: [
             'status "nope" is not one of active|stale|archived',
-            "description exceeds 160B",
+            "description exceeds 300B",
             "frontmatter exceeds 40 lines / 2048B — treated as invalid",
           ],
         }),

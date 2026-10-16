@@ -4,6 +4,8 @@
 // spawn request's `schema`, so this text never needs to spell the schema
 // out — it only needs to state the RULES the schema can't express).
 
+import { MAX_DESCRIPTION_BYTES, MAX_READ_WHEN_BYTES } from "../meta.js";
+
 export interface TidyPromptFile {
   name: string;
   body: string;
@@ -61,6 +63,11 @@ export function buildTidyPrompt(input: TidyPromptInput): string {
   for (const r of RULES) lines.push(`- ${r}`);
   lines.push(`- \`core.md\`'s final content must be ≤ ${String(input.coreBytes)} bytes (UTF-8).`);
   lines.push(`- Any other file's final content must be ≤ ${String(input.topicMaxBytes)} bytes (UTF-8).`);
+  lines.push(
+    `- Frontmatter byte limits: \`description\` ≤ ${String(MAX_DESCRIPTION_BYTES)} bytes (≈${String(
+      MAX_DESCRIPTION_BYTES / 3,
+    )} Chinese characters) and \`read_when\` ≤ ${String(MAX_READ_WHEN_BYTES)} bytes — single line each; longer values are auto-truncated at apply time.`,
+  );
   const flagged = input.oversized ?? [];
   if (input.topicWarnBytes !== undefined && flagged.length > 0) {
     lines.push(

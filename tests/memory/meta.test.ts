@@ -5,9 +5,13 @@ import { describe, expect, it } from "vitest";
 import {
   descriptionOrHeading,
   firstHeading,
+  isMetaLengthOverage,
+  MAX_DESCRIPTION_BYTES,
+  MAX_READ_WHEN_BYTES,
   parseMemoryMeta,
   splitReadWhen,
   splitSections,
+  truncateMetaField,
 } from "../../src/memory/meta.js";
 import { DRIFT_HEADER } from "../../src/memory/store.js";
 
@@ -108,6 +112,54 @@ describe("parseMemoryMeta", () => {
   it("an invalid topic falls back to the filename-derived default", () => {
     const { meta } = parseMemoryMeta("---\ntopic: NOT VALID\n---\n\nbody", "fallback-name");
     expect(meta.topic).toBe("fallback-name");
+  });
+});
+
+describe("description/read_when byte limits (2026-10-16: 160B → 300B)", () => {
+  it("the constants are the single source of truth: description 300B, read_when 240B", () => {
+    expect(MAX_DESCRIPTION_BYTES).toBe(300);
+    expect(MAX_READ_WHEN_BYTES).toBe(240);
+  });
+
+  it("a ~200-byte Chinese description passes validation (was over the old 160B limit)", () => {
+    const desc = "配".repeat(66); // 66 × 3B = 198B
+    expect(Buffer.byteLength(desc, "utf8")).toBe(198);
+    const { errors, meta } = parseMemoryMeta(`---\ndescription: ${desc}\n---\n\n# t\n`, "t");
+    expect(errors).toEqual([]);
+    expect(meta.description).toBe(desc);
+  });
+
+  it("a >300B description still errors, with the NEW number in the message (doctor D07 text)", () => {
+    const raw = `---\ndescription: ${"长".repeat(101)}\n---\n\n# t\n`; // 303B
+    const { errors } = parseMemoryMeta(raw, "t");
+    expect(errors).toEqual(["description exceeds 300B"]);
+  });
+
+  it("read_when keeps its 240B limit", () => {
+    const { errors } = parseMemoryMeta(`---\nread_when: ${"读".repeat(81)}\n---\n\n# t\n`, "t"); // 243B
+    expect(errors).toEqual(["read_when exceeds 240B"]);
+  });
+
+  it("truncateMetaField cuts at a code-point boundary and appends … only when it fits", () => {
+    // 5 CJK chars = 15B. Cap 12B ⇒ 4 chars fill it exactly — no … fits
+    expect(truncateMetaField("啊啊啊啊啊", 12)).toBe("啊啊啊啊");
+    // cap 10/11B ⇒ 3 chars (9B); … needs 3B more ⇒ doesn't fit either
+    expect(truncateMetaField("啊啊啊啊啊", 10)).toBe("啊啊啊");
+    expect(truncateMetaField("啊啊啊啊啊", 11)).toBe("啊啊啊");
+    // narrow prefix + wide next codepoint ⇒ 3B slack at the cut ⇒ … fits
+    expect(truncateMetaField("abc😀😀", 6)).toBe("abc…");
+    // never splits a surrogate pair: 2 emoji = 8B; cap 6B ⇒ first emoji only, no …
+    expect(truncateMetaField("😀😀", 6)).toBe("😀");
+    // at/under the limit: returned verbatim, no ellipsis
+    expect(truncateMetaField("abc", 3)).toBe("abc");
+    expect(truncateMetaField("abcd", 10)).toBe("abcd");
+  });
+
+  it("isMetaLengthOverage matches exactly the two overage messages", () => {
+    expect(isMetaLengthOverage("description exceeds 300B")).toBe(true);
+    expect(isMetaLengthOverage("read_when exceeds 240B")).toBe(true);
+    expect(isMetaLengthOverage('status "x" is not one of active|stale|archived')).toBe(false);
+    expect(isMetaLengthOverage("frontmatter exceeds 40 lines / 2048B — treated as invalid")).toBe(false);
   });
 });
 

@@ -6,8 +6,14 @@
 // Apply).
 
 import { isV2Name } from "../safe-fs.js";
-import { parseMemoryMeta } from "../meta.js";
-import { stripFrontmatter } from "../frontmatter.js";
+import {
+  isMetaLengthOverage,
+  MAX_DESCRIPTION_BYTES,
+  MAX_READ_WHEN_BYTES,
+  parseMemoryMeta,
+  truncateMetaField,
+} from "../meta.js";
+import { stripFrontmatter, upsertFrontmatterFields } from "../frontmatter.js";
 import { TIDY_MAX_FILES } from "../contracts.js";
 import type { TidyProposal, TidyProposalFile } from "../contracts.js";
 import type { TidySnapshotFile } from "./snapshot.js";
@@ -26,8 +32,15 @@ export interface TidyFileFlag {
    *  source, over a hard byte cap, or invalid frontmatter) — view/edit-only. */
   canApply: boolean;
   /** Short annotation for the per-file confirm title, e.g. "hand-written —
-   *  suggestion only", "3 lines unaccounted", "412B over the 1600B core cap". */
+   *  suggestion only", "3 lines unaccounted", "412B over the 1600B core cap",
+   *  "description truncated to 300B" (2026-10-16). */
   note?: string;
+  /** 2026-10-16: proposed content whose ONLY frontmatter problem was an
+   *  over-limit description/read_when, with those fields truncated at a
+   *  UTF-8 code-point boundary. Callers MUST use this instead of the
+   *  proposal's raw `content` for diff/preview and apply — the size and
+   * conservation checks below already ran against it. */
+  normalizedContent?: string;
 }
 
 export interface TidyValidationResult {
@@ -126,6 +139,35 @@ function effectiveName(f: TidyProposalFile): string {
   return f.action === "rename" && f.newName ? f.newName : f.name;
 }
 
+interface FrontmatterNormalize {
+  content: string;
+  notes: string[];
+}
+
+/** 2026-10-16 user ruling: a proposed file whose ONLY frontmatter problem is
+ *  description/read_when over its byte limit is NOT rejected — the offending
+ *  field is truncated to the limit (meta.ts's constants) at a UTF-8
+ *  code-point boundary, "…" appended when it still fits. Returns undefined
+ *  when nothing needed truncating, or when the re-parsed result still isn't
+ *  clean (then the original error keeps blocking, unchanged). */
+function normalizeFrontmatterOverage(content: string, fallbackTopic: string): FrontmatterNormalize | undefined {
+  const first = parseMemoryMeta(content, fallbackTopic);
+  if (first.errors.length === 0 || !first.errors.every(isMetaLengthOverage)) return undefined;
+  const fields: Record<string, string> = {};
+  const notes: string[] = [];
+  if (first.errors.some((m) => m.startsWith("description")) && first.meta.description !== undefined) {
+    fields.description = truncateMetaField(first.meta.description, MAX_DESCRIPTION_BYTES);
+    notes.push(`description truncated to ${String(MAX_DESCRIPTION_BYTES)}B`);
+  }
+  if (first.errors.some((m) => m.startsWith("read_when")) && first.meta.readWhen !== undefined) {
+    fields.read_when = truncateMetaField(first.meta.readWhen, MAX_READ_WHEN_BYTES);
+    notes.push(`read_when truncated to ${String(MAX_READ_WHEN_BYTES)}B`);
+  }
+  const normalized = upsertFrontmatterFields(content, fields);
+  if (parseMemoryMeta(normalized, fallbackTopic).errors.length > 0) return undefined;
+  return { content: normalized, notes };
+}
+
 export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateContext): TidyValidationResult {
   const issues: TidyValidationIssue[] = [];
 
@@ -192,7 +234,22 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
     newNames.set(eff, f.name);
   }
 
-  const allOutputContent = proposal.files.map((f) => f.content).filter((c): c is string => c !== undefined);
+  const allOutputContent: string[] = [];
+  // 2026-10-16: frontmatter length-overage normalize pass — every content
+  // check below (frontmatter validity, byte caps, content conservation) and,
+  // via fileFlags[].normalizedContent, the caller's diff/apply path see the
+  // TRUNCATED content, never the over-limit original.
+  const normalized = new Map<string, FrontmatterNormalize>();
+  for (const f of proposal.files) {
+    if (f.content === undefined) continue;
+    const n = normalizeFrontmatterOverage(f.content, effectiveName(f).replace(/\.md$/, ""));
+    if (n) normalized.set(f.name, n);
+  }
+  const contentOf = (f: TidyProposalFile): string | undefined => normalized.get(f.name)?.content ?? f.content;
+  for (const f of proposal.files) {
+    const c = contentOf(f);
+    if (c !== undefined) allOutputContent.push(c);
+  }
   // §2.1: `core.md` wins primary-core outright. When the proposal itself
   // produces a core.md (the migration-mode case), a pinned legacy primary
   // (e.g. `pitfalls.md` with `pin: true`) stops being primary after apply and
@@ -214,15 +271,19 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
     }
 
     if (f.content !== undefined) {
-      const { errors } = parseMemoryMeta(f.content, effectiveName(f).replace(/\.md$/, ""));
+      // inside this guard f.content is a string, so the ?? always lands on it
+      const effContent = normalized.get(f.name)?.content ?? f.content;
+      const norm = normalized.get(f.name);
+      const { errors } = parseMemoryMeta(effContent, effectiveName(f).replace(/\.md$/, ""));
       if (errors.length > 0) {
         canApply = false;
         notes.push(`invalid frontmatter: ${errors[0] ?? ""}`);
       }
+      if (norm) notes.push(...norm.notes);
       const eff = effectiveName(f);
       const isCore = eff === "core.md" || (orig?.isPrimaryCore === true && !proposalProducesCore);
       const cap = isCore ? ctx.coreBytes : ctx.topicMaxBytes;
-      const size = Buffer.byteLength(f.content, "utf8");
+      const size = Buffer.byteLength(effContent, "utf8");
       if (size > cap) {
         canApply = false;
         notes.push(`${String(size - cap)}B over the ${String(cap)}B ${isCore ? "core" : "topic"} cap`);
@@ -237,10 +298,12 @@ export function validateTidyProposal(proposal: TidyProposal, ctx: TidyValidateCo
       }
     }
 
+    const normEntry = normalized.get(f.name);
     fileFlags.set(f.name, {
       unaccountedLines,
       canApply,
       ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
+      ...(normEntry ? { normalizedContent: normEntry.content } : {}),
     });
   }
 

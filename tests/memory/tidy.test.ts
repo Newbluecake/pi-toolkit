@@ -17,6 +17,7 @@ import {
 } from "./helpers/fixture-dir.js";
 import { snapshotMemoryDir } from "../../src/memory/tidy/snapshot.js";
 import { validateTidyProposal } from "../../src/memory/tidy/validate.js";
+import { parseMemoryMeta } from "../../src/memory/meta.js";
 import { renderTidyDiff } from "../../src/memory/tidy/diff.js";
 import { planFrontmatterBackfill } from "../../src/memory/tidy/frontmatter.js";
 import { applyTidy } from "../../src/memory/tidy/apply.js";
@@ -243,6 +244,93 @@ describe("validateTidyProposal (§7.3 step 5)", () => {
     const res = validateTidyProposal(proposal, { original, ...baseCtx });
     expect(res.fileFlags.get("a.md")?.canApply).toBe(false);
     expect(res.fileFlags.get("a.md")?.note).toMatch(/frontmatter/);
+  });
+
+  // ───────── 2026-10-16: frontmatter length-overage auto-truncation ─────────
+
+  it("a 400-byte description is truncated (≤300B, valid code points), stays applicable, and carries the note", () => {
+    const original = new Map<string, any>([
+      [
+        "a.md",
+        {
+          name: "a.md",
+          body: "---\ndescription: old\n---\n\n# a\nbody line\n",
+          handWritten: false,
+          isPrimaryCore: false,
+        },
+      ],
+    ]);
+    const longDesc = "好".repeat(134); // 402 bytes
+    expect(Buffer.byteLength(longDesc, "utf8")).toBe(402);
+    const content = `---\ndescription: ${longDesc}\nread_when: a\n---\n\n# a\nbody line\n`;
+    const proposal: TidyProposal = {
+      files: [{ name: "a.md", action: "rewrite", content, reason: "r" }],
+      dropped: [],
+    };
+    const res = validateTidyProposal(proposal, { original, ...baseCtx });
+    const flag = res.fileFlags.get("a.md");
+    expect(flag?.canApply).toBe(true);
+    expect(flag?.note).toContain("description truncated to 300B");
+    expect(flag?.note).not.toContain("read_when");
+    const normalized = flag?.normalizedContent;
+    expect(normalized).toBeDefined();
+    const { errors, meta } = parseMemoryMeta(normalized!, "a");
+    expect(errors).toEqual([]);
+    // 100 CJK chars = exactly 300B — the cut lands on the boundary, so no … fits
+    expect(Buffer.byteLength(meta.description ?? "", "utf8")).toBe(300);
+    // frontmatter-only field edit: conservation must NOT trip
+    expect(flag?.unaccountedLines).toBe(0);
+    // the size check saw the normalized content (well under the topic cap)
+    expect(flag?.note).not.toMatch(/cap/);
+  });
+
+  it("a 300-byte read_when is truncated to 240B with its own note", () => {
+    const original = new Map<string, any>([
+      [
+        "a.md",
+        { name: "a.md", body: "---\nread_when: old\n---\n\n# a\nbody\n", handWritten: false, isPrimaryCore: false },
+      ],
+    ]);
+    const content = `---\ndescription: fine\nread_when: ${"读".repeat(100)}\n---\n\n# a\nbody\n`; // 300B
+    const res = validateTidyProposal(
+      { files: [{ name: "a.md", action: "rewrite", content, reason: "r" }], dropped: [] },
+      { original, ...baseCtx },
+    );
+    const flag = res.fileFlags.get("a.md");
+    expect(flag?.canApply).toBe(true);
+    expect(flag?.note).toContain("read_when truncated to 240B");
+    const { errors, meta } = parseMemoryMeta(flag?.normalizedContent ?? "", "a");
+    expect(errors).toEqual([]);
+    expect(Buffer.byteLength(meta.readWhen ?? "", "utf8")).toBeLessThanOrEqual(240);
+  });
+
+  it("both fields over-limit ⇒ both truncated, notes joined", () => {
+    const content = `---\ndescription: ${"好".repeat(134)}\nread_when: ${"读".repeat(100)}\n---\n\n# a\n`;
+    const res = validateTidyProposal(
+      { files: [{ name: "a.md", action: "create", content, reason: "r" }], dropped: [] },
+      { original: new Map(), ...baseCtx },
+    );
+    const flag = res.fileFlags.get("a.md");
+    expect(flag?.canApply).toBe(true);
+    expect(flag?.note).toBe("description truncated to 300B; read_when truncated to 240B");
+    expect(parseMemoryMeta(flag?.normalizedContent ?? "", "a").errors).toEqual([]);
+  });
+
+  it("an over-limit description PLUS another frontmatter error still blocks", () => {
+    const original = new Map<string, any>([
+      ["a.md", { name: "a.md", body: "# a\n", handWritten: false, isPrimaryCore: false }],
+    ]);
+    const content = `---\ndescription: ${"好".repeat(134)}\nstatus: nope\n---\n\n# a\n`;
+    const res = validateTidyProposal(
+      { files: [{ name: "a.md", action: "rewrite", content, reason: "r" }], dropped: [] },
+      { original, ...baseCtx },
+    );
+    const flag = res.fileFlags.get("a.md");
+    expect(flag?.canApply).toBe(false);
+    // parseMemoryMeta reports the description overage first — the point is
+    // that the pair is NOT overage-only, so the file keeps blocking
+    expect(flag?.note).toMatch(/invalid frontmatter: description exceeds 300B/);
+    expect(flag?.normalizedContent).toBeUndefined();
   });
 
   it("D04 split (2026-10-16): a 16 kB topic file split into three ≤ warn-threshold files passes validation whole", () => {
@@ -727,6 +815,51 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
     expect(readFileSync(join(fx.memDir, ".backup", id!, "a.md"), "utf8")).toContain("original");
     expect(readFileSync(join(fx.memDir, ".backup", id!, "b.md"), "utf8")).toContain("original");
     expect(fp.spawnReqs[0]).toMatchObject({ toolDomain: "readonly", expectAck: true, suppressDelivery: true });
+  });
+
+  it("2026-10-16: an over-limit description in the proposal is auto-truncated — title notes it, disk gets the normalized content", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(
+      fx.memDir,
+      "a.md",
+      "---\ndescription: short\nread_when: a\nsource: agent\n---\n\n# a\nkeep me\n",
+      "2026-09-01T00:00:00.000Z",
+    );
+    const fp = makeFakePort();
+    const longDesc = "好".repeat(134); // 402B — over the 300B limit
+    const proposal = {
+      files: [
+        {
+          name: "a.md",
+          action: "rewrite",
+          content: `---\ndescription: ${longDesc}\nread_when: a\n---\n\n# a\nkeep me\n`,
+          reason: "cleanup",
+        },
+      ],
+      dropped: [],
+    };
+    fp.settle(
+      makeOutcome({
+        status: "completed",
+        structuredResult: proposal,
+        usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, costUsd: 0.12 },
+      }),
+    );
+    const { ui, selectCalls } = makeUi({ confirm: [true], select: ["Apply"] });
+    const ctx = makeCtx(fx.cwd, ui);
+    await handleMemTidyCommand("tidy", "", ctx, baseDeps(fp, { paths: fx.paths }));
+    // the confirm title carried the truncation note, and Apply was offered first
+    expect(selectCalls[0]?.title).toContain("description truncated to 300B");
+    expect(selectCalls[0]?.options[0]).toBe("Apply");
+    // what actually landed on disk is the truncated description — pure CJK
+    // cuts at exactly 100 chars × 3B = 300B (boundary-exact ⇒ no …), body conserved
+    const landed = readFileSync(join(fx.memDir, "a.md"), "utf8");
+    const { errors, meta } = parseMemoryMeta(landed, "a");
+    expect(errors).toEqual([]);
+    expect(meta.description).toBe("好".repeat(100));
+    expect(Buffer.byteLength(meta.description ?? "", "utf8")).toBe(300);
+    expect(landed).toContain("keep me");
+    expect(landed).not.toContain(longDesc);
   });
 
   it("K1: Skip leaves the file untouched", async () => {

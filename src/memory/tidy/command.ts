@@ -414,6 +414,16 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
     maxOutputBytes: settings.tidy.maxOutputBytes,
   };
   let vres: TidyValidationResult = validateTidyProposal(workingProposal(), validateCtx);
+  // 2026-10-16: adopt any frontmatter length-overage normalize immediately —
+  // the confirm loop's title/diff and the eventual applyTidy must see the
+  // truncated content (validation already sized/conserved exactly it).
+  const adoptNormalized = (res: TidyValidationResult): void => {
+    for (const f of working) {
+      const nc = res.fileFlags.get(f.name)?.normalizedContent;
+      if (nc !== undefined) f.content = nc;
+    }
+  };
+  adoptNormalized(vres);
   if (!vres.ok) {
     ctx.ui.notify(`tidy proposal invalid: ${vres.issues.map((i) => i.message).join("; ")} — zero writes`, "warning");
     return;
@@ -447,6 +457,7 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
         if (edited === undefined) continue;
         f.content = edited;
         vres = validateTidyProposal(workingProposal(), validateCtx);
+        adoptNormalized(vres);
         flag = vres.fileFlags.get(f.name);
         if (flag && !flag.canApply) {
           // still not applyable — say why, then re-show the menu (title carries the note too)

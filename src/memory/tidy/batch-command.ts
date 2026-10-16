@@ -739,10 +739,22 @@ export async function normalizeBatches(
       ctx.ui.notify(`batch ${batch.index} discarded: invalid proposal`, "warning");
       continue;
     }
+    // 2026-10-16: adopt frontmatter length-overage truncation before the
+    // confirm/apply so the batch writes the normalized content (validate's
+    // size/conservation checks already ran against it).
+    let truncatedFields = 0;
+    for (const f of proposal.files) {
+      const nc = checked.fileFlags.get(f.name)?.normalizedContent;
+      if (nc !== undefined && nc !== f.content) {
+        f.content = nc;
+        truncatedFields++;
+      }
+    }
     const targets = proposal.files.filter((f) => f.action !== "keep");
+    const truncNote = truncatedFields > 0 ? ` · ${String(truncatedFields)} over-limit field(s) auto-truncated` : "";
     const choice = await withDialog(timing ?? newBatchTiming(), (signal) =>
       ctx.ui.select(
-        `Batch ${batch.index}: review ${targets.length} suggestion(s)`,
+        `Batch ${batch.index}: review ${targets.length} suggestion(s)${truncNote}`,
         [`Apply suggested (${targets.length})`, "View diff…", "Discard all"],
         { signal },
       ),

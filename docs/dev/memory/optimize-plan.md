@@ -526,7 +526,7 @@ source: agent
 
 | 键            | 约束                                                                 | 缺失默认                            | 体检                                                                        |
 | ------------- | -------------------------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------- |
-| `description` | 单行；≤160B（超出索引裁剪）                                          | 首个 `# ` 标题 → `(no description)` | topic / extra pinned 缺失 D06 warn；**primary core 不要求**；>160B D07 info |
+| `description` | 单行；≤300B（2026-10-16 由 160B 上调；索引渲染仍按 110B 裁剪）       | 首个 `# ` 标题 → `(no description)` | topic / extra pinned 缺失 D06 warn；**primary core 不要求**；>300B D07 info |
 | `read_when`   | `;` 或 `；` 分隔关键词；≤240B                                        | 无（索引不出 `when:`）              | topic 缺失 D06 info；core / pinned 不要求                                   |
 | `topic`       | `[a-z0-9-]{1,48}`                                                    | 文件名去 `.md`                      | 重复 topic D11 warn                                                         |
 | `status`      | `active` \| `stale` \| `archived`                                    | `active`                            | 非枚举：写入拒绝 / 体检 D07 error                                           |
@@ -535,6 +535,8 @@ source: agent
 | `source`      | `agent` ⇒ fence 且可被覆盖/删除；其它/缺失 = 手写                    | 手写                                | —                                                                           |
 
 决策 8 附加条件落地：core 与 topic 规则分开——primary core 永远内联（或整节内联），不需要 description/read_when；topic 只能靠索引被发现，缺 description 是 warn、缺 read_when 是 info；都只提示不拒写。
+
+> 2026-10-16：`description` 上限 160B→300B（≈100 个中文字符），索引行渲染仍按 110B 截断；tidy 提案中超限的 `description`/`read_when` 不再整文件判不可应用——validate 归一化为按 UTF-8 码点边界截断后的内容（确认 UI 标注 `description truncated to 300B`，apply/守恒/尺寸检查均以截断后内容为准），tidy 提示词也已声明字节上限。
 
 **parser 约束**：沿用 `parseFrontmatter` 行级规则（必须是文件第一行 `---`；`key: value` 单行；非 kv 行容忍跳过；重复键后者胜），`frontmatter.ts` 现有函数不改。新增 `src/memory/meta.ts`：去掉值两端成对的 `"`/`'`；frontmatter 超过 40 行或 2KB ⇒ 视为无效（D07 error），防止头部读取越界；`read_when` 切词 `readWhenTerms: string[]`（T5 预留）；`splitSections` 识别代码围栏。不引入 YAML 依赖。
 

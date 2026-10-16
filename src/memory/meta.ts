@@ -14,8 +14,36 @@ const TOPIC_RE = /^[a-z0-9-]{1,48}$/;
 const STATUSES: readonly MemoryStatus[] = ["active", "stale", "archived"];
 const MAX_FRONTMATTER_LINES = 40;
 const MAX_FRONTMATTER_BYTES = 2048;
-const MAX_DESCRIPTION_BYTES = 160;
-const MAX_READ_WHEN_BYTES = 240;
+// 2026-10-16 user ruling: 160B → 300B (≈100 CJK chars). Single source of
+// truth — every surface (doctor D07 text, tidy prompt/validation, docs) reads
+// these constants. The tiered index still renders its own 110B cut.
+export const MAX_DESCRIPTION_BYTES = 300;
+export const MAX_READ_WHEN_BYTES = 240;
+
+/** Truncate a single-line frontmatter field value to `maxBytes` UTF-8 bytes
+ *  at a code-point boundary (never splits a surrogate pair), appending "…"
+ *  only when it still fits — tidy's apply-time normalize for over-limit
+ *  description/read_when (2026-10-16). */
+export function truncateMetaField(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let out = "";
+  let bytes = 0;
+  for (const ch of value) {
+    const b = Buffer.byteLength(ch, "utf8");
+    if (bytes + b > maxBytes) break;
+    out += ch;
+    bytes += b;
+  }
+  if (bytes + Buffer.byteLength("…", "utf8") <= maxBytes) out += "…";
+  return out;
+}
+
+/** True iff `message` is one of `parseMemoryMeta`'s pure length-overage
+ *  errors (`description exceeds NB` / `read_when exceeds NB`) — the only
+ *  frontmatter problems tidy may auto-truncate instead of rejecting. */
+export function isMetaLengthOverage(message: string): boolean {
+  return /^(description|read_when) exceeds \d+B$/.test(message);
+}
 
 /** Strip one layer of matching `"…"` / `'…'` quotes (frontmatter values are
  *  otherwise taken verbatim by `parseFrontmatter`). */
