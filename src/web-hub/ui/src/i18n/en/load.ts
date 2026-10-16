@@ -43,6 +43,7 @@ const load = {
   topRetry: "Retry",
   retryAfter: "retry in {n}s",
   updatedAgo: "updated {ago} ago",
+  updatedJustNow: "live",
   sinceDuration: "since {duration}",
   footerThresholds:
     "Colour thresholds come from the load.* settings read at hub start; change them, then /webhub restart",

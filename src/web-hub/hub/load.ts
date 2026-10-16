@@ -13,6 +13,7 @@ import { sampleOnce } from "../../sysload/sampler.js";
 import { scanTop } from "../../sysload/top.js";
 import { createLoadTracker, type LoadTracker } from "../../sysload/tracker.js";
 import { loadFingerprint, projectLoadWire, projectTop } from "../../sysload/wire.js";
+import type { LoadVerdict } from "../../sysload/types.js";
 import type { LoadTopWire, LoadWire } from "../protocol/messages.js";
 import type { HubLoadConfig, HubLog } from "./ports.js";
 
@@ -227,9 +228,19 @@ export function createHubLoad(config: HubLoadConfig, deps: HubLoadDeps): HubLoad
   let topFlight: Promise<LoadTopWire> | undefined;
   let topWaiters = 0;
 
+  // Overall-level "held since" (LoadCard's 「已持续」): the tracker only keeps per-metric
+  // `levelSinceMono`, so the hub anchors the overall level itself — first sample, then every
+  // overall-level change. Before this, `sinceAgoMs` was `sample.mono - verdict.mono` ≡ 0.
+  let overallLevel: LoadVerdict["level"] | undefined;
+  let overallSinceMono = 0;
+
   const publish = (sample: Awaited<ReturnType<typeof sampleOnce>>["sample"]): void => {
     const verdict = tracker.verdict(sample.mono, sample.at);
-    const wire = projectLoadWire(verdict, settings, sample.mono, sample.at, sample);
+    if (verdict.level !== overallLevel) {
+      overallLevel = verdict.level;
+      overallSinceMono = sample.mono;
+    }
+    const wire = projectLoadWire(verdict, settings, sample.mono, sample.at, sample, overallSinceMono);
     const fingerprint = loadFingerprint(wire);
     if (latestFingerprint === fingerprint && mono() - publishedAt < normalized.sampleIntervalMs * 3) return;
     latestWire = wire;

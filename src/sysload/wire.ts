@@ -13,8 +13,11 @@ export function projectLoadWire(
   now = verdict.mono,
   at = verdict.at,
   sample?: LoadSample,
+  /** mono() when the OVERALL level last changed (caller-tracked — the tracker keeps per-metric
+   * `levelSinceMono` only). Omitted ⇒ legacy `now - verdict.mono` (≈0 for a fresh verdict). */
+  levelSinceMono?: number,
 ): LoadWire {
-  const sinceAgoMs = finiteElapsed(now - verdict.mono);
+  const sinceAgoMs = finiteElapsed(now - (levelSinceMono ?? verdict.mono));
   const disks = verdict.metrics.disk.slice(0, 2).map((disk) => {
     const reading = sample?.disks.find((candidate) => candidate.label === disk.label)?.reading;
     const value = reading?.kind === "ok" ? reading.value : undefined;

@@ -81,10 +81,17 @@ function onPointerDown(ev: PointerEvent): void {
 const level = computed(() => levelRank(props.load.level));
 const levelToken = computed(() => props.load.level.toUpperCase());
 
-const updatedAgoText = computed(() => {
+/** 2026-10-16 field report 「一直显示 0s 前更新」: frames arrive every sample interval (or, on an
+ *  unchanged fingerprint, every third one) while the pill only re-ticks every 5s, so a healthy
+ *  feed always read "0s–4s ago". Until the frame nears the pill's own 4×interval staleness line
+ *  the card just says 「实时」; only a lagging feed shows its age. */
+const updatedText = computed(() => {
   if (typeof props.receivedAt !== "number") return undefined;
   const ms = props.now - props.receivedAt;
-  return ms < 0 ? undefined : fmtDurationShort(ms);
+  if (ms < 0) return undefined;
+  const interval = Number.isFinite(props.load.intervalMs) && props.load.intervalMs > 0 ? props.load.intervalMs : 5_000;
+  if (ms < interval * 4) return t("load.updatedJustNow");
+  return t("load.updatedAgo", { ago: fmtDurationShort(ms) });
 });
 
 /** How long the OVERALL level has held (receive-time anchored, §10 包注 P0·M9) — rendered next
@@ -150,7 +157,7 @@ const byRssRows = computed(() => rows(topData.value?.byRss, "rss"));
         {{ t("load.title") }}
         <span class="ld-level-badge" :data-level="level">{{ levelToken }}</span>
       </span>
-      <span v-if="updatedAgoText" class="ld-card-updated">{{ t("load.updatedAgo", { ago: updatedAgoText }) }}</span>
+      <span v-if="updatedText" class="ld-card-updated">{{ updatedText }}</span>
     </div>
     <div v-if="sinceText" class="ld-card-since">{{ t("load.sinceDuration", { duration: sinceText }) }}</div>
 

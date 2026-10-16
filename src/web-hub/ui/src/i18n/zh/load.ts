@@ -35,6 +35,7 @@ const load = {
   topRetry: "重试",
   retryAfter: "{n} 秒后重试",
   updatedAgo: "{ago} 前更新",
+  updatedJustNow: "实时",
   sinceDuration: "已持续 {duration}",
   footerThresholds: "颜色分级阈值来自 hub 启动时的 load.* 设置，修改后需 /webhub restart",
   bannerPaused: "负载过高，已暂停派发新子 agent",

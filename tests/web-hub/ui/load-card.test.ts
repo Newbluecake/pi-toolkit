@@ -332,3 +332,32 @@ describe("LoadCard.vue — zh labels (2026-10 user ruling)", () => {
     expect(wrapper.text()).toContain("CPU busy");
   });
 });
+
+describe("LoadCard.vue — freshness label (2026-10-16 「一直显示 0s 前更新」)", () => {
+  function mountAt(receivedAt: number, now: number) {
+    return m(mount(LoadCard, { props: { load: load(), receivedAt, now, anchorEl: null } }));
+  }
+
+  it("within four sample intervals ⇒ 「实时」 instead of a 0s age (unchanged frames repeat every 3rd)", () => {
+    setLangOverride("zh");
+    const text = mountAt(10_000, 10_000 + 19_999)
+      .find(".ld-card-updated")
+      .text();
+    expect(text).toBe("实时");
+  });
+
+  it("a lagging feed shows its age", () => {
+    setLangOverride("zh");
+    expect(
+      mountAt(10_000, 10_000 + 25_000)
+        .find(".ld-card-updated")
+        .text(),
+    ).toBe("25s 前更新");
+    setLangOverride("en");
+    expect(
+      mountAt(10_000, 10_000 + 25_000)
+        .find(".ld-card-updated")
+        .text(),
+    ).toBe("updated 25s ago");
+  });
+});
