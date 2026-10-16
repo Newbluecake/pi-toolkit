@@ -23,9 +23,20 @@
  * browse panel can create inside a `~`-rooted listing it is currently showing; `~user/...`
  * stays unexpanded and fails the absolute-path gate.
  *
+ * Post-create mode (user ruling 2026-10-16 「可以和终端一样是 775」): the hub daemon runs
+ * under umask 0o077 (main.ts §1.3.1), which masks a plain `mkdir` down to 0o700 while the
+ * user's own terminal would create 0o775 — so an optional `dirMode` (hub.ts derives
+ * `0o777 & ~childUmask`, the USER's pre-hub umask) is applied AFTER a successful create via
+ * fd-pinned fchmod (open `O_NOFOLLOW|O_DIRECTORY`, then `FileHandle.chmod`). The step is
+ * best-effort: ANY chmod failure (errno, deadline, busy) keeps the created directory and the
+ * `ok:true` reply — a created folder never turns into an error — with a warn (the file's
+ * existing `{ error: String(err) }` style; the path is no secret here, the 200 body echoes it).
+ * Absent `dirMode` ⇒ zero extra fs calls, byte-identical pre-feature behavior.
+ *
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
-import { mkdir, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, realpath } from "node:fs/promises";
 import { normalizePreviewPath, validatePreviewPath } from "../../protocol/preview.js";
 import { isValidMkdirName } from "../../protocol/spawn.js";
 import type { HubLog } from "../ports.js";
@@ -40,6 +51,8 @@ export interface MkdirFs {
   realpath(p: string): Promise<string>;
   /** Non-recursive create; rejects with an errno Error (EEXIST/ENOENT/ENOTDIR/…). */
   mkdir(p: string): Promise<void>;
+  /** fd-pinned chmod WITHOUT following symlinks (the post-create mode step — see header). */
+  chmodDir(p: string, mode: number): Promise<void>;
 }
 
 export interface MkdirServiceDeps {
@@ -53,6 +66,10 @@ export interface MkdirServiceDeps {
   now(): number;
   /** per-step cap override; defaults to `PREVIEW_FS_STEP_MS` (exposed for fast tests only). */
   stepCapMs?: number;
+  /** Post-create directory mode (user ruling 2026-10-16): applied via fd-pinned fchmod after
+   * a successful create, best-effort (failure ⇒ warn, still `ok:true`). hub.ts passes
+   * `0o777 & ~childUmask`; undefined ⇒ today's umask-masked mkdir behavior, zero extra fs. */
+  dirMode?: number;
 }
 
 export type MkdirResult =
@@ -74,6 +91,18 @@ function errCodeOf(err: unknown): string | undefined {
     return err.code;
   }
   return undefined;
+}
+
+/** fd-pinned chmod WITHOUT following symlinks: open the directory itself
+ * (`O_NOFOLLOW|O_DIRECTORY` — a path swapped to a symlink between mkdir and here can never
+ * redirect the mode change at another target) and fchmod the FD. */
+async function chmodDirReal(p: string, mode: number): Promise<void> {
+  const fh = await open(p, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    await fh.chmod(mode);
+  } finally {
+    await fh.close();
+  }
 }
 
 /** fs failure → wire result (the mkdir-flavored subset of `fs.ts`'s `mapFsError` table, plus
@@ -108,9 +137,15 @@ function mapMkdirError(err: unknown): Extract<MkdirResult, { ok: false }> {
 }
 
 export function createMkdirService(deps: MkdirServiceDeps): MkdirService {
+  const dirMode = deps.dirMode;
   // plain named imports only (the hub/spawn/** zero-`as` contract bans even import aliases) —
   // the arrows keep the property names from shadowing them.
-  const fs: MkdirFs = { realpath: (p) => realpath(p), mkdir: (p) => mkdir(p), ...deps.fs };
+  const fs: MkdirFs = {
+    realpath: (p) => realpath(p),
+    mkdir: (p) => mkdir(p),
+    chmodDir: (p, mode) => chmodDirReal(p, mode),
+    ...deps.fs,
+  };
 
   return {
     async mkdir(parentRaw, name, deadline): Promise<MkdirResult> {
@@ -148,6 +183,20 @@ export function createMkdirService(deps: MkdirServiceDeps): MkdirService {
 
         // -- step 6: non-recursive create ------------------------------------------------------
         await step(() => fs.mkdir(child));
+
+        // -- step 7: post-create mode (user ruling 2026-10-16, header above) -------------------
+        // `mkdir`'s own mode is masked by the HUB's 0o077 umask (0o700 where the user's terminal
+        // would make 0o775), so the user's umask-derived `dirMode` is applied explicitly. The
+        // const keeps the undefined-narrowing valid inside the step closure. Best-effort: any
+        // failure (errno/deadline/busy) keeps the directory and still answers ok:true — a
+        // created folder must never turn into an error reply (warn, the file's existing style).
+        if (dirMode !== undefined) {
+          try {
+            await step(() => fs.chmodDir(child, dirMode));
+          } catch (err) {
+            deps.log.warn("web-hub mkdir: dir mode apply failed", { error: String(err) });
+          }
+        }
         return { ok: true, path: child };
       } catch (err) {
         const mapped = mapMkdirError(err);

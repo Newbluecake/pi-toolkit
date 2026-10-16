@@ -1022,6 +1022,10 @@ export async function startHub(
         tracker: createPreviewIoTracker(),
         log,
         now,
+        // 2026-10-16 用户拍板（「新建文件夹」可以和终端一样是 775）: the hub's own 0o077 umask must
+        // not mask web-created folders — main.ts's captured pre-hub umask becomes the explicit
+        // post-create mode (best-effort inside the service: failure ⇒ warn, still ok:true).
+        ...(deps.childUmask === undefined ? {} : { dirMode: 0o777 & ~deps.childUmask }),
       });
       spawnRoutes = createSpawnRoutes({
         supervisor: spawnSup,
