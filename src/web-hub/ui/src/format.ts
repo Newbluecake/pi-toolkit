@@ -68,10 +68,13 @@ export function formatNumber(n: number | null | undefined, locale = "en-US"): st
   return new Intl.NumberFormat(locale).format(n);
 }
 
-/** Token counts in thousands (2026-10-16 user: "用 k 省掉后面 3 个 0"): `141,041` → `141k`,
- * `1,000,000` → `1,000k`; below 1,000 the plain locale number; `—` when unknown. */
+/** Compact token counts (2026-10-16 user: "用 k 省掉后面 3 个 0"; "到了 1m 就是 1m，不要用 1,000k"):
+ * `141,041` → `141k`, `1,000,000` → `1m`, `1,048,576` → `1.05m`; below 1,000 the plain locale
+ * number; `—` when unknown. Anything that would round to 1,000k switches to m. */
 export function formatKTokens(n: number | null | undefined, locale = "en-US"): string {
   if (typeof n !== "number" || !Number.isFinite(n)) return "—";
   if (Math.abs(n) < 1000) return formatNumber(n, locale);
-  return `${new Intl.NumberFormat(locale).format(Math.round(n / 1000))}k`;
+  const k = Math.round(n / 1000);
+  if (Math.abs(k) < 1000) return `${new Intl.NumberFormat(locale).format(k)}k`;
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(n / 1_000_000)}m`;
 }
