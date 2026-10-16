@@ -121,6 +121,16 @@ function modelShortOf(row: FleetRowWire): string {
   const slash = m.lastIndexOf("/");
   return slash >= 0 ? m.slice(slash + 1) : m;
 }
+/** 2026-10-16 user 「provider 信息还是应该展示出来，按屏幕宽度压缩展示」: the `provider` half of
+ *  `provider/id` (empty when the ref carries none). Rendered as its own muted span before the
+ *  model so fleet.css can compress it per container width (full on wide rows, ellipsized on
+ *  narrow ones) while the model id keeps priority; the full ref stays in the `title`. */
+function modelProviderOf(row: FleetRowWire): string {
+  const m = row.model;
+  if (typeof m !== "string" || m === "") return "";
+  const slash = m.lastIndexOf("/");
+  return slash > 0 ? m.slice(0, slash) : "";
+}
 /** M-B2 (thinking-level visibility): the row's effective thinking level as a
  * small muted `·<level>` token next to the model. Empty string = unknown →
  * renders nothing (no dangling `·`). English token only (compact marker rule). */
@@ -180,6 +190,14 @@ function toggleActions(runId: string): void {
             ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
           >
           <span class="run-nums">
+            <span
+              v-if="modelProviderOf(rowOf(node))"
+              class="model-provider"
+              translate="no"
+              :title="String(rowOf(node).model ?? '')"
+              ><span class="model-provider-name">{{ modelProviderOf(rowOf(node)) }}</span
+              >/</span
+            >
             <span
               v-if="modelShortOf(rowOf(node))"
               class="model"
@@ -244,6 +262,14 @@ function toggleActions(runId: string): void {
           ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
         >
         <span class="run-nums">
+          <span
+            v-if="modelProviderOf(rowOf(node))"
+            class="model-provider"
+            translate="no"
+            :title="String(rowOf(node).model ?? '')"
+            ><span class="model-provider-name">{{ modelProviderOf(rowOf(node)) }}</span
+            >/</span
+          >
           <span
             v-if="modelShortOf(rowOf(node))"
             class="model"

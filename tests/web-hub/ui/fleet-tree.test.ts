@@ -217,6 +217,30 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(plain.find(".run-nums .model-thinking").exists()).toBe(false);
     expect(plain.get(".run-nums .model").text()).toBe("glm-5.3");
   });
+
+  it("2026-10-16: the provider renders before the model (`zai/` + `glm-5.3`); a bare id renders no provider", () => {
+    const wrapper = mountTree([
+      row({ runId: "withprov", model: "cr-anthropic/claude-opus-5-5" }),
+      row({ runId: "bare", model: "glm-5.3" }),
+    ]);
+    const withProv = wrapper.findAll(".run").find((r) => r.text().includes("withprov"))!;
+    const bare = wrapper.findAll(".run").find((r) => r.text().includes("bare"))!;
+    expect(withProv.get(".run-nums .model-provider-name").text()).toBe("cr-anthropic");
+    expect(withProv.get(".run-nums .model-provider").text()).toBe("cr-anthropic/");
+    expect(withProv.get(".run-nums .model-provider").attributes("title")).toBe("cr-anthropic/claude-opus-5-5");
+    expect(withProv.get(".run-nums .model").text()).toBe("claude-opus-5-5");
+    expect(bare.find(".run-nums .model-provider").exists()).toBe(false);
+  });
+
+  it("provider compression tiers live in fleet.css (18ch wide, 10ch <600px, 6ch <480px)", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/fleet.css"),
+      "utf8",
+    );
+    expect(css).toMatch(/\.run-nums \.model-provider \{[^}]*max-width:\s*18ch/);
+    expect(css).toMatch(/@container \(max-width: 599px\) \{[\s\S]*?\.run-nums \.model-provider \{\s*max-width:\s*10ch/);
+    expect(css).toMatch(/@container \(max-width: 479px\) \{[\s\S]*?\.run-nums \.model-provider \{\s*max-width:\s*6ch/);
+  });
 });
 
 describe("FleetTree.vue — run-open 按钮(§6.3 FLEET_SELECT)", () => {
