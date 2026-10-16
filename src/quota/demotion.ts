@@ -8,6 +8,10 @@
  *
  *   { "version": 1, "demotions": { "zai-coding-cn": { level, markedAt, expiresAt } } }
  *
+ * 2026-10-15 后继包：本文件与 baseline store（`baseline.ts`）共享，落盘时保留
+ * 未知顶层键（读改写，不整体覆盖）——`baselines` 等其它 store 的组不会被 demotion
+ * 的 flush 抹掉。
+ *
  * - 原子写：tmp + rename（照抄 loadSettingsFromFile 的 `${path}.${pid}.tmp`
  *   手法）；内容未变则不落盘（write-through + no-op 检测）。
  * - 文件损坏 / 不可读 ⇒ 视为空表（静默，R6/§5.3 ③）；目录不可写 ⇒ 内存态
@@ -64,6 +68,9 @@ function parseRecord(provider: string, raw: unknown): DemotionRecord | undefined
 
 export function createDemotionStore(options: DemotionStoreOptions): DemotionStore {
   const records = new Map<string, DemotionRecord>();
+  /** 同文件其它 store 的顶层键（version / demotions 除外，如 baselines），落盘时
+   * 原样保留——quota-state.json 是两个 store 共享的文件（2026-10-15 拍板后继包）。 */
+  let extras: Record<string, unknown> = {};
   let loaded = false;
   let lastWritten: string | undefined = undefined;
   let warnedWrite = false;
@@ -76,7 +83,8 @@ export function createDemotionStore(options: DemotionStoreOptions): DemotionStor
     }
   };
 
-  /** 序列化当前有效表（flush 时顺手剪掉已过期记录，保持文件干净）。 */
+  /** 序列化当前有效表（flush 时顺手剪掉已过期记录，保持文件干净）；保留同文件里
+   * 其它 store 的顶层键（读改写，不整体覆盖）。 */
   const serialize = (): string => {
     const demotions: Record<string, { level: number; markedAt: number; expiresAt: number }> = {};
     const now = options.now();
@@ -85,10 +93,30 @@ export function createDemotionStore(options: DemotionStoreOptions): DemotionStor
       if (record === undefined || record.expiresAt <= now) continue;
       demotions[provider] = { level: record.level, markedAt: record.markedAt, expiresAt: record.expiresAt };
     }
-    return `${JSON.stringify({ version: 1, demotions }, null, 2)}\n`;
+    return `${JSON.stringify({ version: 1, ...extras, demotions }, null, 2)}\n`;
+  };
+
+  /** flush 前重读文件，吸收同文件其它 store（baselines，baseline.ts）的最新落盘——
+   *  两 store 在同一进程内交错 flush 时，加载期捕获的 extras 快照已过期（读改写；
+   *  读失败 ⇒ 维持已捕获的 extras）。 */
+  const refreshExtras = (): void => {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(options.path, "utf8"));
+      if (isRecord(parsed)) {
+        const next: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          if (key === "version" || key === "demotions") continue;
+          next[key] = value;
+        }
+        extras = next;
+      }
+    } catch {
+      // 不存在 / 损坏 / 不可读 ⇒ 维持当前 extras。
+    }
   };
 
   const flush = (): void => {
+    refreshExtras();
     const payload = serialize();
     if (payload === lastWritten) return; // 内容未变则不落盘
     try {
@@ -117,10 +145,16 @@ export function createDemotionStore(options: DemotionStoreOptions): DemotionStor
     loaded = true;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(options.path, "utf8"));
-      if (isRecord(parsed) && isRecord(parsed.demotions)) {
-        for (const [provider, entry] of Object.entries(parsed.demotions)) {
-          const record = parseRecord(provider, entry);
-          if (record !== undefined) records.set(provider, record);
+      if (isRecord(parsed)) {
+        for (const [key, value] of Object.entries(parsed)) {
+          if (key === "version" || key === "demotions") continue;
+          extras[key] = value;
+        }
+        if (isRecord(parsed.demotions)) {
+          for (const [provider, entry] of Object.entries(parsed.demotions)) {
+            const record = parseRecord(provider, entry);
+            if (record !== undefined) records.set(provider, record);
+          }
         }
       }
     } catch {

@@ -28,6 +28,7 @@
 import type { Clock } from "../core/clock.js";
 import type { QuotaSettings } from "../config/settings.js";
 import type { Millis } from "../core/types.js";
+import type { BaselineStore } from "./baseline.js";
 import type { DemotionStore } from "./demotion.js";
 import { toLadderLevel } from "./gate.js";
 import { forecast, pushSample, type BurnSample } from "./forecast.js";
@@ -64,8 +65,11 @@ import type { CatalogModelLike } from "./pools.js";
 
 /**
  * `verdictsForModel` 的返回（quota-plan r2 §2.4）：按模型所属计费池解析出的判定视图。
- * 池已知 ⇒ keys 为对应单个虚拟 id；未知 ⇒ 两个池（D5：两池都触线才拦）；
- * `"none"`（BYOK 不计费）⇒ 空 keys（闸门放行）。
+ * - standard ⇒ keys 为 `["droid-standard"]`（Standard 模型不能反向使用 Core 池额度）。
+ * - core ⇒ keys 为 `["droid-core", "droid-standard"]`：Factory 实测（2026-10-16 拍板）
+ *   Core 池额度耗尽后 Core 模型会**回落计入 Standard 池额度**继续跑，所以闸门需要
+ *   两池都触线才拦——keys[0] 恒为模型自身所属池（闸门把它当 blocked 名）。
+ * - 未知 ⇒ 两个池（D5：两池都触线才拦）；`"none"`（BYOK 不计费）⇒ 空 keys（闸门放行）。
  */
 export interface QuotaModelView {
   readonly pool: QuotaPoolId | "none" | undefined;
@@ -116,6 +120,9 @@ export interface QuotaServiceDeps {
   readonly credentials: CredentialResolver;
   readonly fetchJson: FetchJson;
   readonly demotions: DemotionStore;
+  /** 可选：持久化「最后接受读数」基线（同 quota-state.json；2026-10-15 现场事件后继包）。
+   * 缺席 ⇒ 可疑读数防护退化为只比对内存上一份快照（改动前行为，旧测试兼容）。 */
+  readonly baselines?: BaselineStore | undefined;
   /** HUD 一行；不可用时省略（子会话/print 模式）。 */
   readonly setStatus?: ((text: string | undefined) => void) | undefined;
   /** HUD 主题（ctx.ui.theme 的结构子集）；旧 pi / 非 TUI 时 undefined ⇒ 纯文本。 */
@@ -423,9 +430,19 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   const poolTrusted = (verdict: ProviderVerdict | undefined): verdict is ProviderVerdict =>
     verdict !== undefined && !verdict.stale && droidAuthProblem() === undefined;
 
-  /** 逐池清单状态（仅对可信池调用）：等级 vs 闸门线。 */
-  const poolStateOf = (verdict: ProviderVerdict, line: LadderLevel): DroidPoolState => {
-    if (verdict.level >= line) return "blocked";
+  /** 逐池清单状态（仅对可信池调用）：等级 vs 闸门线；core 触线但 Standard 池仍有
+   *  可信余量 ⇒ "fallback"（Core 模型按回落规则计入 Standard 池额度，可照常派发，
+   *  2026-10-16 实测定界——不是「已拦，勿派」）。 */
+  const poolStateOf = (
+    verdict: ProviderVerdict,
+    line: LadderLevel,
+    pool: QuotaPoolId,
+    stdOpen: boolean,
+  ): DroidPoolState => {
+    if (verdict.level >= line) {
+      if (pool === "core" && stdOpen) return "fallback";
+      return "blocked";
+    }
     if (verdict.level >= 1) return "warn";
     return "ok";
   };
@@ -435,6 +452,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
    * 该订阅，不出「无数据」文案。 */
   const poolListingEntries = (): readonly DroidPoolListingEntry[] => {
     const line = gateLine();
+    // Standard 池回落开放位（仅 core 池状态用）：可信且未触闸门线。
+    const stdForFallback = verdictOf("droid-standard", clock.now());
+    const stdOpen = poolTrusted(stdForFallback) && stdForFallback.level < line;
     const out: DroidPoolListingEntry[] = [];
     for (const pool of ["standard", "core"] as const) {
       const candidates = poolCandidates(pool);
@@ -443,12 +463,50 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       if (!poolTrusted(verdict)) continue;
       out.push({
         pool,
-        state: poolStateOf(verdict, line),
+        state: poolStateOf(verdict, line, pool, stdOpen),
         total: candidates.length,
         models: candidates.slice(0, DROID_POOL_LISTING_LIMIT).map((id) => `droid/${id}`),
       });
     }
     return out;
+  };
+
+  /** 持久化基线 → 比较用伪快照（仅 windows + fetchedAt 参与 classifyDrop，不进展示）；
+   *  过旧（TTL）/ 缺席 / store 缺席 ⇒ undefined。永不抛。 */
+  const persistedBaselineOf = (id: QuotaProviderId, at: Millis): QuotaSnapshot | undefined => {
+    if (deps.baselines === undefined) return undefined;
+    try {
+      const baseline = deps.baselines.get(id, at);
+      if (baseline === undefined) return undefined;
+      return { provider: id, kind: "windows", windows: baseline.windows, fetchedAt: baseline.fetchedAt };
+    } catch {
+      return undefined; // store 契约永不抛；兑注入桩。
+    }
+  };
+
+  /**
+   * 全零防护（P3，2026-10-15 现场：core 三窗口全 0% 而真实 7d 100%/mo 98%）：
+   * 读数所有窗口都 0% 而比较基线存在未过期、未前移的 >0 窗口 ⇒ 垃圾读数——回落
+   * 一律按可疑处理，重复出现**不再**构成「服务端提前重置」的二次确认；只有重置
+   * 证据（旧 resetAt 已过 / resetAt 前移 ≥容差）或非全零读数才能放行。部分回落
+   * 不受此规则影响（照旧两次确认）。
+   */
+  const isAllZeroSuspicious = (snapshot: QuotaSnapshot, prev: QuotaSnapshot | undefined): boolean => {
+    if (prev === undefined || snapshot.windows.length === 0) return false;
+    if (!snapshot.windows.every((w) => w.usedPct <= 0)) return false;
+    return prev.windows.some((old) => {
+      if (old.usedPct <= 0) return false;
+      if (old.resetAt !== undefined && snapshot.fetchedAt >= old.resetAt) return false; // 已过期 ⇒ 合法重置
+      const next = snapshot.windows.find((w) => w.scope === old.scope);
+      if (
+        old.resetAt !== undefined &&
+        next?.resetAt !== undefined &&
+        next.resetAt - old.resetAt >= RESET_ADVANCE_TOLERANCE_MS
+      ) {
+        return false; // resetAt 前移 ⇒ 合法重置证据
+      }
+      return true; // 有一个未过期且未前移的 >0 窗口 ⇒ 全零可疑
+    });
   };
 
   /**
@@ -458,10 +516,13 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
   const applySnapshot = (snapshot: QuotaSnapshot): void => {
     const id = snapshot.provider;
     const now = clock.now();
-    const prev = snapshots.get(id);
+    // 比较基线：内存上一份快照，缺席时（/reload / pi 重启后的第一读）用持久化的
+    // 最后接受读数播种（P2）——只用于 classifyDrop 比对，不用于展示。
+    const prev = snapshots.get(id) ?? persistedBaselineOf(id, snapshot.fetchedAt);
     const pending = suspects.get(id);
     const resetScopes = new Set<WindowScope>();
     const unverified = new Set<WindowScope>(); // 本次无证据回落的全部窗口（含被二次确认者）
+    const allZeroSuspicious = isAllZeroSuspicious(snapshot, prev);
     let rejected = false;
     const drops: string[] = [];
     if (prev !== undefined) {
@@ -474,7 +535,8 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
           unverified.add(w.scope);
           drops.push(`${w.scope} ${Math.round(old?.usedPct ?? 0)}%→${Math.round(w.usedPct)}%`);
           // 两次确认：上一条被拒读数也报了这个窗口的回落 ⇒ 认定服务端提前重置。
-          if (pending?.scopes.has(w.scope) === true) resetScopes.add(w.scope);
+          // 全零可疑时禁用（P3）——重复垃圾不得当作提前重置，也不得据此清降位。
+          if (!allZeroSuspicious && pending?.scopes.has(w.scope) === true) resetScopes.add(w.scope);
           else rejected = true;
         }
       }
@@ -490,6 +552,19 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     }
     suspects.delete(id);
     snapshots.set(id, snapshot);
+    // P1：持久化「最后接受读数」基线（store 内部 no-op：windows 未变 ⇒ 不落盘）。
+    try {
+      deps.baselines?.set(id, {
+        fetchedAt: snapshot.fetchedAt,
+        windows: snapshot.windows.map((w) => ({
+          scope: w.scope,
+          usedPct: w.usedPct,
+          ...(w.resetAt === undefined ? {} : { resetAt: w.resetAt }),
+        })),
+      });
+    } catch {
+      // 基线 store 契约永不抛；兑注入桩——基线失败不影响数据面。
+    }
     if (resetScopes.size > 0) {
       // §5.3 ②：有证据的观测重置 ⇒ 清降位（同一次落地里若别的窗口仍在 L3，下面会当场重新降位）。
       try {
@@ -528,12 +603,20 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       const recovered = verdictOf(id, now);
       if (recovered !== undefined) {
         try {
+          // 镜像 evaluateQuotaGate 的阻断条件（快照刚落地 ⇒ 非 stale）。droid-core 的
+          // 回落语义（2026-10-16）：Standard 池仍有可信余量（或 gateOpen）⇒ Core 模型
+          // 不会被闸门拦下（Core 耗尽后回落计费入 Standard），gateBlocked 如实为 false。
+          let gateBlocked = settings.gate && recovered.level >= toLadderLevel(settings.gateLevel);
+          if (gateBlocked && id === "droid-core") {
+            const std = trustedVerdictOf("droid-standard", now);
+            const line = toLadderLevel(settings.gateLevel);
+            if (std !== undefined && (std.level < line || std.billing?.gateOpen === true)) gateBlocked = false;
+          }
           deps.onObservedReset({
             provider: id,
             resetScopes: new Set(resetScopes),
             verdict: recovered,
-            // 镜像 evaluateQuotaGate 的阻断条件（快照刚落地 ⇒ 非 stale）。
-            gateBlocked: settings.gate && recovered.level >= toLadderLevel(settings.gateLevel),
+            gateBlocked,
             at: now,
           });
         } catch (error) {
@@ -636,13 +719,16 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       if (!deps.adapters.some((a) => a.id === "droid-standard" || a.id === "droid-core")) return undefined;
       const at = now ?? clock.now();
       const pool = poolFor(model.id);
+      // core ⇒ [droid-core, droid-standard]（回落语义，见 QuotaModelView）；
+      // 不可信的池（缺席 / stale / 鉴权失败）⇒ undefined ⇒ 闸门 fail-open（行为不变）。
       const keys: readonly QuotaProviderId[] =
         pool === "none"
           ? []
           : pool === undefined
             ? DROID_QUOTA_IDS
-            : [pool === "standard" ? "droid-standard" : "droid-core"];
-      // 不可信的池（缺席 / stale / 鉴权失败）⇒ undefined ⇒ 闸门 fail-open（行为不变）。
+            : pool === "standard"
+              ? ["droid-standard"]
+              : ["droid-core", "droid-standard"];
       return { pool, keys, verdicts: keys.map((k) => trustedVerdictOf(k, at)) };
     },
     poolAlternatives(blocked, limit = 3) {
@@ -659,6 +745,12 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
             .map((id) => `droid/${id}`)
         : [];
       const listing = poolListingEntries();
+      // 回落开放（2026-10-16 实测定界）：被拦的是 core 且 Standard 池仍有可信余量 ⇒
+      // Core 模型按回落规则计入 Standard 池额度、闸门放行；建议包带 coreFallback，
+      // 即使 models/listing 全空也返回（渲染层据此把 L3 文案换成回落说明）。
+      if (blocked === "droid-core" && poolRecommendable(otherVerdict)) {
+        return [{ pool: other, models, listing, coreFallback: true }];
+      }
       if (models.length === 0 && listing.length === 0) return [];
       return [{ pool: other, models, listing }];
     },
@@ -674,13 +766,20 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       }
       if (port === undefined) return [];
       const out: DroidPoolAlternative[] = [];
+      const stdVerdict = verdictOf("droid-standard", clock.now());
       for (const pool of ["core", "standard"] as const) {
         const verdict = verdictOf(pool === "core" ? "droid-core" : "droid-standard", clock.now());
-        if (!poolRecommendable(verdict)) continue;
+        if (!poolTrusted(verdict)) continue;
+        const hasRoom = verdict.level < gateLine();
+        // core 回落（2026-10-16 实测定界）：Core 池触线但 Standard 池仍有可信余量 ⇒
+        // Core 模型按回落规则计入 Standard 池额度，仍可推荐（带 fallback 标注）。
+        // Standard 池模型不能反向使用 Core 池额度 ⇒ standard 池触线即不推荐。
+        const coreFallback = pool === "core" && !hasRoom && poolRecommendable(stdVerdict);
+        if (!hasRoom && !coreFallback) continue;
         const models = poolCandidates(pool)
           .slice(0, Math.max(0, limit))
           .map((id) => `droid/${id}`);
-        if (models.length > 0) out.push({ pool, models });
+        if (models.length > 0) out.push({ pool, models, ...(coreFallback ? { fallback: true } : {}) });
       }
       return out;
     },

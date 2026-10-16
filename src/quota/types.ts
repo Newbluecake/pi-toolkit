@@ -101,6 +101,10 @@ export interface QuotaPoolPort {
 export interface DroidPoolAlternative {
   readonly pool: QuotaPoolId;
   readonly models: readonly string[];
+  /** Core 池自身已触线、按回落规则计入 Standard 池额度（Standard 池仍有可信余量）
+   * 时为 true（2026-10-16 实测定界）；Standard 池模型不能反向使用 Core 池额度，
+   * standard 池条目永不带此标记。 */
+  readonly fallback?: true | undefined;
 }
 
 /**
@@ -109,12 +113,14 @@ export interface DroidPoolAlternative {
  * 且仅对**可信**池生成（快照缺席 / stale / 鉴权失败 ⇒ 整池不可见——终版拍板「数据
  * 拿不到就当没有该订阅」，不出「无数据」文案）。
  */
-export type DroidPoolState = "ok" | "warn" | "blocked";
+export type DroidPoolState = "ok" | "warn" | "blocked" | "fallback";
 
 export interface DroidPoolListingEntry {
   readonly pool: QuotaPoolId;
   /** 有余量（ok，等级低于闸门线）/ 告急（warn，≥L1 但低于闸门线）/ 已拦，勿派
-   * （blocked，≥闸门线）。 */
+   * （blocked，≥闸门线）/ 额度尽，回落 Standard 计费（fallback：仅 core 池——自身
+   * ≥闸门线但 Standard 池仍有可信余量，Core 模型按 Factory 回落规则计入 Standard
+   * 池额度，可照常派发，2026-10-16 实测定界）。 */
   readonly state: DroidPoolState;
   /** 该池候选总数（截断前，poolCandidates 序）。 */
   readonly total: number;
@@ -137,6 +143,10 @@ export interface DroidPoolAdvice {
   readonly models: readonly string[];
   /** 逐池清单（standard 在前；零候选池与不可信池均被省略）。 */
   readonly listing: readonly DroidPoolListingEntry[];
+  /** 仅 blocked === "droid-core" 时可出现：Core 池自身触线但 Standard 池仍有可信
+   * 余量 ⇒ Core 模型按回落规则计入 Standard 池额度、闸门放行（2026-10-16 实测
+   * 定界）。渲染层据此把 L3 文案从「禁用」换成「回落计费说明」。 */
+  readonly coreFallback?: true | undefined;
 }
 
 /** L0 静默 / L1 提示 / L2 建议 / L3 强烈。数值可比较——provider 级取 max。 */

@@ -1233,6 +1233,8 @@ describe("billing clauses (§7) + merged block fallback", () => {
   const OPENED =
     "Factory 超额策略为 extraUsage：继续派会消耗额外余额 $12.34（真钱），闸门不拦截；优先改用 Core 池或订阅模型。";
   const DROID_CORE_CLAUSE = "Factory 超额策略为 droidCore：Standard 池耗尽后请改用 Core 池模型。";
+  const CORE_FALLBACK_CLAUSE =
+    "Factory 计费规则：Core 池额度耗尽后，Core 池模型回落计入 Standard 池额度继续跑（Standard 池模型不能反向使用 Core 池额度）。";
   const extra = { overage: "extraUsage" as const, extraUsageAllowed: true, extraUsageBalanceCents: 1234 };
 
   it("extraUsage, not opened: clause sits right after the head line; L3 block still promises the gate", () => {
@@ -1258,11 +1260,14 @@ describe("billing clauses (§7) + merged block fallback", () => {
     expect(block.split("\n")[1]).toBe(DROID_CORE_CLAUSE);
   });
 
-  it("overage `off`, or a core-pool verdict ⇒ no billing clause at all", () => {
+  it("overage `off` ⇒ no billing clause; a core-pool verdict carries the FALLBACK rule clause (2026-10-16 回落)", () => {
     expect(buildQuotaBlockText(std3({ overage: "off" }), ALT, NOW)).not.toContain("Factory 超额策略");
     const coreV = pool("droid-core", [dw("5h", 100, 3, "exhausted")], 3, extra);
-    expect(buildQuotaBlockText(coreV, ALT, NOW)).not.toContain("Factory 超额策略");
-    expect(buildQuotaWarnText(pool("droid-core", [dw("5h", 80, 2)], 2, extra), NOW)).not.toContain("Factory 超额策略");
+    const block = buildQuotaBlockText(coreV, ALT, NOW);
+    expect(block).not.toContain("Factory 超额策略");
+    expect(block.split("\n")[1]).toBe(CORE_FALLBACK_CLAUSE);
+    const warn = buildQuotaWarnText(pool("droid-core", [dw("5h", 80, 2)], 2, extra), NOW);
+    expect(warn.split("\n")[1]).toBe(CORE_FALLBACK_CLAUSE);
   });
 
   it("L2 warn: extraUsage clause, and the L3 threshold quoted for a month window is the month default (98)", () => {
@@ -1317,5 +1322,91 @@ describe("billing clauses (§7) + merged block fallback", () => {
   it("dedupe/grouping labels use quotaLabel for droid L3 sections", () => {
     const text = buildQuotaMessage([{ verdict: std3({}), alternatives: ALT }], NOW);
     expect(text).toContain("本轮不要把新任务派给 Droid Standard 池");
+  });
+});
+
+// 2026-10-16 回落实测定界：Core 池额度耗尽后 Core 模型按 Factory 规则回落计入
+// Standard 池额度继续跑（Standard 模型不能反向使用 Core 池额度）——文案不再把
+// 「Core 池触线」当成「Core 模型不可用」。
+describe("core fallback notices (2026-10-16 回落)", () => {
+  const ALT_FALLBACK: AlternativeSelection = {
+    providers: ["kimi-coding"],
+    subscription: true,
+    external: true,
+    models: ["droid/claude-opus-5-5", "droid/gpt-6"],
+    modelsPool: "standard",
+    poolListing: [
+      { pool: "standard", state: "ok", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+      { pool: "core", state: "fallback", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+    ],
+    coreFallback: true,
+  };
+  const coreL3 = pool("droid-core", [dw("week", 100, 3, "exhausted", { resetAt: RESET })], 3);
+
+  it("L3 block with coreFallback: no disable line — explains fallback billing, core readings stay in the head", () => {
+    const text = buildQuotaBlockText(coreL3, ALT_FALLBACK, NOW, quotaLabel("droid-core"));
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("[quota 严重] Droid Core 池 7d 已用 100%（窗口 02:11 重置）。");
+    expect(lines[1]).toBe(
+      "Core 池额度已用尽：Core 池模型仍可照常派发，按 Factory 计费规则回落计入 Standard 池额度（Standard 池模型不能反向使用 Core 池额度），会额外消耗 Standard 池余量。",
+    );
+    expect(lines[2]).toBe(
+      "Droid 模型按池：Standard 池（有余量）：droid/claude-opus-5-5、droid/gpt-6；Core 池（额度尽，回落 Standard 计费）：droid/glm-5.3、droid/kimi-k3。",
+    );
+    expect(text).not.toContain("本轮不要把新任务派给");
+    expect(text).not.toContain("改用 pi 原生子 agent"); // 不诱导换执行语义
+  });
+
+  it("L3 block WITHOUT coreFallback (standard also over the line): disable line + gate promise stay", () => {
+    const { coreFallback: _drop, ...rest } = ALT_FALLBACK;
+    const text = buildQuotaBlockText(coreL3, rest, NOW, quotaLabel("droid-core"));
+    expect(text).toContain("本轮不要把新任务派给 Droid Core 池");
+    expect(text).toContain("继续派给它会在 spawn 阶段被快速失败拦下");
+  });
+
+  it("floor-only core demotion with coreFallback: no 『新任务优先考虑其它订阅模型』", () => {
+    const UNTIL = new Date(2026, 0, 18, 9, 6, 0).getTime();
+    const floorCore: ProviderVerdict = {
+      ...pool("droid-core", [dw("5h", 0, 0, "none"), dw("week", 0, 0, "none")], 2),
+      demoted: true,
+      demotedUntil: UNTIL,
+    };
+    const text = buildQuotaWarnText(floorCore, NOW, quotaLabel("droid-core"), ALT_FALLBACK);
+    expect(text.split("\n")[0]).toBe(
+      "[quota 预警] Droid Core 池 仍在降位期（此前额度告急触发降位，预计 1/18 09:06 解除），最新读数（5h 0% · 7d 0%）与降位矛盾，可能是上游返回的残缺数据，已按降位处理。",
+    );
+    expect(text.split("\n")[1]).toBe(
+      "Core 池模型不受此降位影响：Core 池额度耗尽后按 Factory 计费规则回落计入 Standard 池额度，照常派发即可（会额外消耗 Standard 池余量）。",
+    );
+    expect(text).not.toContain("新任务优先考虑其它订阅模型");
+  });
+
+  it("pool listing renders the fallback state as 『额度尽，回落 Standard 计费』", () => {
+    const text = alternativesAdvice({
+      providers: [],
+      subscription: true,
+      external: true,
+      poolListing: [
+        { pool: "standard", state: "ok", total: 1, models: ["droid/gpt-6"] },
+        { pool: "core", state: "fallback", total: 1, models: ["droid/glm-5.3"] },
+      ],
+    });
+    expect(text.split("\n")[0]).toBe(
+      "Droid 模型按池：Standard 池（有余量）：droid/gpt-6；Core 池（额度尽，回落 Standard 计费）：droid/glm-5.3。",
+    );
+  });
+
+  it("pi-blocked supplement line marks fallback core pools", () => {
+    const text = alternativesAdvice({
+      providers: ["kimi-coding"],
+      subscription: true,
+      droidPools: [
+        { pool: "core", models: ["droid/glm-5.3", "droid/kimi-k3"], fallback: true },
+        { pool: "standard", models: ["droid/claude-opus-5-5"] },
+      ],
+    });
+    expect(text).toContain(
+      "有余量的外部 Droid 池也可用：droid/glm-5.3、droid/kimi-k3（Core 池，回落 Standard 计费）；droid/claude-opus-5-5（Standard 池）。",
+    );
   });
 });

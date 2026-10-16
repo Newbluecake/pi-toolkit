@@ -760,19 +760,41 @@ describe("createQuotaHintHook — droid pools", () => {
     expect(content).toContain("本轮不要把新任务派给 Droid Standard 池");
   });
 
-  it("droid-core L3 with healthy Standard advice (D7 对称化): the notice recommends Standard models", () => {
+  it("droid-core L3 with Standard healthy (回落开放): the notice explains fallback billing instead of disabling core", () => {
     const pi: Record<string, ProviderVerdict> = {
       "kimi-coding": verdict({ provider: "kimi-coding", level: 0, windows: [w("5h", 8, 0, "none")] }),
     };
+    // 真实接线（QuotaService.poolAlternatives）在 Standard 池有余量时给出 coreFallback；
+    // droid-core 的 verdict 恒带 billing（适配器保证），测试同构。
     const h = harness({
-      verdicts: [poolV("droid-core", 100, 3)],
+      verdicts: [
+        poolV("droid-core", 100, 3, {
+          billing: {
+            kind: "factory",
+            pool: "core",
+            overage: "droidCore",
+            extraUsageAllowed: false,
+            extraUsageBalanceCents: 0,
+          },
+        }),
+      ],
       alternatives: (provider) =>
         pickAlternatives(provider, {
           verdictFor: (p) => pi[p],
           available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
           poolAlternatives: (b) =>
             b === "droid-core"
-              ? [{ pool: "standard", models: ["droid/claude-opus-5-5", "droid/gpt-6"], listing: [] }]
+              ? [
+                  {
+                    pool: "standard",
+                    models: ["droid/claude-opus-5-5", "droid/gpt-6"],
+                    listing: [
+                      { pool: "standard", state: "ok", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+                      { pool: "core", state: "fallback", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+                    ],
+                    coreFallback: true,
+                  },
+                ]
               : [],
         }),
     });
@@ -780,9 +802,41 @@ describe("createQuotaHintHook — droid pools", () => {
     const content = h.sent[0]?.message.content ?? "";
     expect(content).toContain("[quota 严重] Droid Core 池 5h 已用 100%");
     expect(content).toContain(
-      "同一 Factory 账户的 Standard 池仍有额度，可改用 Droid Standard 池模型：droid/claude-opus-5-5、droid/gpt-6",
+      "Core 池额度已用尽：Core 池模型仍可照常派发，按 Factory 计费规则回落计入 Standard 池额度",
     );
-    expect(content).toContain("或改用 pi 原生子 agent（订阅优先）：kimi-coding");
+    expect(content).toContain("Core 池（额度尽，回落 Standard 计费）：droid/glm-5.3、droid/kimi-k3");
+    expect(content).not.toContain("本轮不要把新任务派给");
+    expect(content).not.toContain("改用 pi 原生子 agent"); // 不诱导换执行语义
+  });
+
+  it("droid-core L3 without coreFallback (both pools exhausted, advice empty): disable line + pi-native fallback", () => {
+    const pi: Record<string, ProviderVerdict> = {
+      "kimi-coding": verdict({ provider: "kimi-coding", level: 0, windows: [w("5h", 8, 0, "none")] }),
+    };
+    const h = harness({
+      verdicts: [
+        poolV("droid-core", 100, 3, {
+          billing: {
+            kind: "factory",
+            pool: "core",
+            overage: "droidCore",
+            extraUsageAllowed: false,
+            extraUsageBalanceCents: 0,
+          },
+        }),
+      ],
+      alternatives: (provider) =>
+        pickAlternatives(provider, {
+          verdictFor: (p) => pi[p],
+          available: () => [{ provider: "kimi-coding", id: "kimi-k3" }],
+          poolAlternatives: (b) => (b === "droid-core" ? [] : []),
+        }),
+    });
+    h.hook({}, ctx());
+    const content = h.sent[0]?.message.content ?? "";
+    expect(content).toContain("本轮不要把新任务派给 Droid Core 池");
+    expect(content).toContain("继续派给它会在 spawn 阶段被快速失败拦下");
+    expect(content).toContain("改用 pi 原生子 agent");
   });
 
   it("droid-core L3 without advice: pi-native line only (no droid-internal models)", () => {

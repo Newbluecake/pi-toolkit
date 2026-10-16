@@ -108,8 +108,10 @@ export function evaluateQuotaGate(model: ModelRef, deps: QuotaGateDeps): QuotaGa
 }
 
 /**
- * droid 池闸门（quota-plan r2 §6，D5 拍板）：池已知 ⇒ 只看该池；池未知 ⇒ 两个池
- * 都触线才拦；任一池无快照/陈旧 ⇒ 放行（fail-open）。`billing.gateOpen === true`
+ * droid 池闸门（quota-plan r2 §6，D5 拍板；2026-10-16 回落修订）：standard 池 ⇒ 只看
+ * 该池；core 池 ⇒ view 携 [droid-core, droid-standard] 两池（Factory 实测：Core 池额度
+ * 耗尽后 Core 模型回落计入 Standard 池额度继续跑）⇒ 两池都触线才拦；池未知 ⇒ 两个池
+ * 都触线才拦；任一所需池无快照/陈旧 ⇒ 放行（fail-open）。`billing.gateOpen === true`
  * （quota.droidAllowExtraUsage，D6）的池不算触线。
  */
 function evaluatePooledGate(model: ModelRef, view: QuotaModelView, deps: QuotaGateDeps): QuotaGateVerdict | undefined {
@@ -156,6 +158,13 @@ function buildPooledGateMessage(
     head =
       `quota gate: ${name}（计费池未知，Standard 与 Core 池均已触线：` +
       `Standard 池 ${windowClause(verdicts[0]!, now)}；Core 池 ${windowClause(verdicts[1]!, now)}），` +
+      "本次 spawn 已快速失败，未消耗任何 run。";
+  } else if (pool === "core" && verdicts.length > 1) {
+    // 回落语义（2026-10-16 实测定界）：Core 模型只有 Core 与 Standard 两池都触线才会
+    // 被拦——首行同时给出回落计费池（Standard）的读数。
+    head =
+      `quota gate: ${name}（Core 池）的 ${windowClause(verdicts[0]!, now)}，` +
+      `回落计费的 Standard 池也已触线：${windowClause(verdicts[1]!, now)}，` +
       "本次 spawn 已快速失败，未消耗任何 run。";
   } else {
     head = `quota gate: ${name}（${poolLabel(pool)} 池）的 ${windowClause(verdicts[0]!, now)}，本次 spawn 已快速失败，未消耗任何 run。`;
@@ -304,14 +313,20 @@ const DEFAULT_ALTERNATIVE_LIMIT = 3;
 
 /**
  * droid 池被拦时的建议包字段（pickAlternatives / evaluatePooledGate 共用）：读
- * `deps.poolAlternatives` 的首包，展开成 `models`+`modelsPool` / `poolListing` 三个
- * 可选字段。端口缺席 / 抡异常 / 包全空 ⇒ 无字段（选中对象形状与旧版一致）；
+ * `deps.poolAlternatives` 的首包，展开成 `models`+`modelsPool` / `poolListing` /
+ * `coreFallback`（core 回落开放，2026-10-16）四个可选字段。端口缺席 / 抢异常 / 包
+ * 全空 ⇒ 无字段（选中对象形状与旧版一致）；
  * 抢异常由 try/catch 兜底（stack 接线永不抛，这里兑注入桩）。
  */
 function droidAdviceFields(
   deps: Pick<QuotaGateDeps, "poolAlternatives">,
   blocked: string,
-): { models?: readonly string[]; modelsPool?: QuotaPoolId; poolListing?: readonly DroidPoolListingEntry[] } {
+): {
+  models?: readonly string[];
+  modelsPool?: QuotaPoolId;
+  poolListing?: readonly DroidPoolListingEntry[];
+  coreFallback?: true;
+} {
   let advice: DroidPoolAdvice | undefined = undefined;
   try {
     advice = (deps.poolAlternatives?.(blocked) ?? [])[0];
@@ -322,6 +337,7 @@ function droidAdviceFields(
   return {
     ...(advice.models.length > 0 ? { models: advice.models, modelsPool: advice.pool } : {}),
     ...(advice.listing.length > 0 ? { poolListing: advice.listing } : {}),
+    ...(advice.coreFallback === true ? { coreFallback: true } : {}),
   };
 }
 

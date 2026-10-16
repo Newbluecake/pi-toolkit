@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_SETTINGS, type QuotaSettings } from "../../src/config/settings.js";
 import { createDemotionStore, type DemotionStore } from "../../src/quota/demotion.js";
+import { createBaselineStore } from "../../src/quota/baseline.js";
 import { createQuotaService, type QuotaService } from "../../src/quota/service.js";
 import { alternativesAdvice } from "../../src/quota/render.js";
 import { createDroidAdapters } from "../../src/quota/adapters/droid.js";
@@ -417,20 +418,68 @@ describe("createQuotaService anomaly guard (drops need reset evidence)", () => {
     expect(f.service.verdictFor("zai-coding-cn")?.windows[0]?.etaMs).toBe(2_520_000);
   });
 
-  it("accepts the drop when the next read (one refresh later) repeats it — server-side early reset", async () => {
+  it("accepts a repeated PARTIAL drop (one refresh later) — server-side early reset keeps two-confirmation", async () => {
     const f = makeFixture();
     await kimiExhausted(f);
+    f.clock.advance(REFRESH);
+    const partial = (): QuotaSnapshot =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 0 },
+          { scope: "week", usedPct: 12 },
+        ],
+        f.clock.now(),
+      );
+    await land(f, f.kimi, partial);
+    expect(f.service.verdictFor("kimi-coding")?.level).toBe(3); // 第一次：拒收
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, partial);
+    const v = f.service.verdictFor("kimi-coding");
+    expect(v?.fetchedAt).toBe(f.clock.now());
+    expect(v?.windows.map((w) => w.usedPct)).toEqual([0, 12]);
+    expect(v?.level).toBe(0);
+    expect(v?.demoted).toBe(false);
+    expect(f.demotions.get("kimi-coding", f.clock.now())).toBeUndefined();
+  });
+
+  it("P3 全零防护：重复全零读数不构成二次确认（2026-10-15 droid 现场：三窗口全 0%）", async () => {
+    const f = makeFixture();
+    const { t0 } = await kimiExhausted(f);
     f.clock.advance(REFRESH);
     await land(f, f.kimi, zeroed(f));
     expect(f.service.verdictFor("kimi-coding")?.level).toBe(3); // 第一次：拒收
     f.clock.advance(REFRESH);
-    await land(f, f.kimi, zeroed(f));
+    await land(f, f.kimi, zeroed(f)); // 第二次同样全零 ⇒ 仍拒收（不得当作提前重置）
+    const v = f.service.verdictFor("kimi-coding");
+    expect(v?.fetchedAt).toBe(t0); // 快照未被替换
+    expect(v?.windows.map((w) => w.usedPct)).toEqual([0, 100]);
+    expect(v?.demoted).toBe(true);
+    expect(f.demotions.get("kimi-coding", f.clock.now())?.level).toBe(3); // 降位不清
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed(f)); // 第三次还是全零 ⇒ 依旧拒收
+    expect(f.service.verdictFor("kimi-coding")?.fetchedAt).toBe(t0);
+  });
+
+  it("P3 全零防护：非全零读数落地即恢复正常（回落语义之外无压制）", async () => {
+    const f = makeFixture();
+    await kimiExhausted(f);
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, zeroed(f)); // 全零垃圾
+    f.clock.advance(REFRESH);
+    await land(f, f.kimi, () =>
+      windowsSnapshot(
+        "kimi-coding",
+        [
+          { scope: "5h", usedPct: 2 },
+          { scope: "week", usedPct: 60 },
+        ],
+        f.clock.now(),
+      ),
+    ); // 服务端恢复：正常读数直接接受
     const v = f.service.verdictFor("kimi-coding");
     expect(v?.fetchedAt).toBe(f.clock.now());
-    expect(v?.windows.map((w) => w.usedPct)).toEqual([0, 0]);
-    expect(v?.level).toBe(0);
-    expect(v?.demoted).toBe(false);
-    expect(f.demotions.get("kimi-coding", f.clock.now())).toBeUndefined();
+    expect(v?.windows.map((w) => w.usedPct)).toEqual([2, 60]);
   });
 
   it("a normal read in between discards the pending suspect — a later anomaly is rejected afresh", async () => {
@@ -561,17 +610,18 @@ describe("createQuotaService recovery events (observed reset → onObservedReset
     expect(e.at).toBe(f.clock.now());
   });
 
-  it("a suspect read emits nothing; only the confirming second read emits (two-confirmation reset)", async () => {
+  it("a suspect read emits nothing; only the confirming second read emits (two-confirmation, partial drop)", async () => {
     const f = makeFixture();
     const t0 = f.clock.now();
     const r5h = t0 + 3 * HOUR;
     const rWeek = t0 + 90 * HOUR;
+    // 非全零的部分回落（week 100→12）：两次确认语义照旧（全零回落见 P3 用例）。
     const zeroed = (): QuotaSnapshot =>
       windowsSnapshot(
         "kimi-coding",
         [
           { scope: "5h", usedPct: 0 },
-          { scope: "week", usedPct: 0 },
+          { scope: "week", usedPct: 12 },
         ],
         f.clock.now(),
       );
@@ -1131,17 +1181,25 @@ describe("droid: verdictsForModel (§2.4/§5.5)", () => {
     expect(legacy.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })).toBeUndefined();
   });
 
-  it("known pool ⇒ a single virtual key with an aligned verdict (undefined while no snapshot)", async () => {
+  it("known pool ⇒ aligned verdicts (undefined while no snapshot); standard keeps ONE key, core carries BOTH (回落)", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort() });
     const before = f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" });
     expect(before).toMatchObject({ pool: "standard", keys: ["droid-standard"], verdicts: [undefined] });
     await land(f, 100, 10);
     const std = f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" });
-    expect(std?.keys).toEqual(["droid-standard"]);
+    expect(std?.keys).toEqual(["droid-standard"]); // Standard 模型不能反向使用 Core 池额度
     expect(std?.verdicts[0]).toMatchObject({ provider: "droid-standard", level: 3 });
+    // 回落语义（2026-10-16 实测定界）：Core 模型耗尽后计入 Standard 池额度 ⇒ 闸门
+    // 需两池判定，keys = [droid-core, droid-standard]（自身池在前）。
     const core = f.service.verdictsForModel({ provider: "droid", id: "glm-5.3" });
-    expect(core).toMatchObject({ pool: "core", keys: ["droid-core"] });
+    expect(core).toMatchObject({ pool: "core", keys: ["droid-core", "droid-standard"] });
     expect(core?.verdicts[0]).toMatchObject({ provider: "droid-core", level: 0 });
+    expect(core?.verdicts[1]).toMatchObject({ provider: "droid-standard", level: 3 });
+    const coreBefore = makeDroidFixture({ pools: () => catalogPort() }).service.verdictsForModel({
+      provider: "droid",
+      id: "glm-5.3",
+    });
+    expect(coreBefore?.verdicts).toEqual([undefined, undefined]); // 无快照（fail-open 消费方自判）
   });
 
   it("unknown pool ⇒ both pools in standard→core order; port absent ⇒ unknown too", async () => {
@@ -1175,7 +1233,10 @@ describe("droid: verdictsForModel (§2.4/§5.5)", () => {
       settings: { droidPools: { "glm-5.3": "standard", "claude-opus-5-5": "core", "inkling-x": "none" } },
     });
     expect(f.service.verdictsForModel({ provider: "droid", id: "glm-5.3" })?.keys).toEqual(["droid-standard"]);
-    expect(f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })?.keys).toEqual(["droid-core"]);
+    expect(f.service.verdictsForModel({ provider: "droid", id: "claude-opus-5-5" })?.keys).toEqual([
+      "droid-core",
+      "droid-standard",
+    ]);
     expect(f.service.verdictsForModel({ provider: "droid", id: "inkling-x" })?.keys).toEqual([]);
   });
 
@@ -1241,7 +1302,7 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
     expect(f.service.poolAlternatives("droid-standard", 0)[0]?.models).toEqual([]);
   });
 
-  it("D7 对称化：core 被拦且 standard 可信有余量 ⇒ 推荐 standard 模型，清单状态对偶", async () => {
+  it("D7 对称化（2026-10-16 回落修订）：core 被拦且 standard 可信有余量 ⇒ coreFallback 标记 + 清单状态 fallback", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort() });
     await land(f, 10, 100); // core 5h 100% ⇒ L3；std 10% ⇒ L0
     expect(f.service.poolAlternatives("droid-core")).toEqual([
@@ -1250,8 +1311,10 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
         models: ["droid/claude-opus-5-5", "droid/gpt-6"],
         listing: [
           { pool: "standard", state: "ok", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
-          { pool: "core", state: "blocked", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
+          // core 触线但 Standard 池有余量 ⇒ 「额度尽，回落 Standard 计费」，不是 blocked
+          { pool: "core", state: "fallback", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
         ],
+        coreFallback: true,
       },
     ]);
   });
@@ -1577,11 +1640,11 @@ describe("droid: allowlist mode（2026-10-16 拍板：非空 externalAgents.droi
     // 名单外覆盖键（brand-new-core / 目录内 inkling）不再进推荐，但 poolOf 判定照常（闸门口径不变）。
     expect(f.service.verdictsForModel({ provider: "droid", id: "brand-new-core" })).toMatchObject({
       pool: "core",
-      keys: ["droid-core"],
+      keys: ["droid-core", "droid-standard"],
     });
     expect(f.service.verdictsForModel({ provider: "droid", id: "inkling" })).toMatchObject({
       pool: "core",
-      keys: ["droid-core"],
+      keys: ["droid-core", "droid-standard"],
     });
   });
 
@@ -1650,5 +1713,244 @@ describe("droid: per-virtual-id isolation (rings, demotion, dispose)", () => {
       level: 1,
       reason: "pct",
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-10-16 回落实测定界：Core 池额度耗尽后 Core 模型按 Factory 规则回落计入
+// Standard 池额度继续跑（Standard 模型不能反向使用 Core 池额度）。
+// ─────────────────────────────────────────────────────────────────────────────
+describe("droid: core 回落（2026-10-16 实测定界）", () => {
+  it("droidAlternatives: core 触线但 Standard 有余 ⇒ core 池仍入选并带 fallback 标注", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    await land(f, 20, 100); // std 20% ⇒ 有余；core 100% ⇒ L3
+    expect(f.service.droidAlternatives()).toEqual([
+      { pool: "core", models: ["droid/glm-5.3", "droid/kimi-k3"], fallback: true },
+      { pool: "standard", models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
+    ]);
+    // 白名单（externalAgents.droid.models）模式：只出名单内 id，不回添目录模型
+    const listed = makeDroidFixture({ pools: () => catalogPort(["kimi-k3", "claude-opus-5-5"]) });
+    await land(listed, 20, 100);
+    expect(listed.service.droidAlternatives()).toEqual([
+      { pool: "core", models: ["droid/kimi-k3"], fallback: true },
+      { pool: "standard", models: ["droid/claude-opus-5-5"] },
+    ]);
+  });
+
+  it("droidAlternatives: core 触线且 Standard 也触线 ⇒ 两池都不列；core 有余 ⇒ 不带 fallback 标注", async () => {
+    const both = makeDroidFixture({ pools: () => catalogPort() });
+    await land(both, 100, 100);
+    expect(both.service.droidAlternatives()).toEqual([]);
+    const coreOk = makeDroidFixture({ pools: () => catalogPort() });
+    await land(coreOk, 100, 10);
+    expect(coreOk.service.droidAlternatives()).toEqual([{ pool: "core", models: ["droid/glm-5.3", "droid/kimi-k3"] }]);
+  });
+
+  it("poolAlternatives('droid-standard')：另一池 core 触线 ⇒ 不推荐（标准模型无回落；core 有余才推荐）", async () => {
+    const f = makeDroidFixture({ pools: () => catalogPort() });
+    await land(f, 100, 100);
+    expect(f.service.poolAlternatives("droid-standard")[0]?.models).toEqual([]);
+    const coreRoom = makeDroidFixture({ pools: () => catalogPort() });
+    await land(coreRoom, 100, 10);
+    expect(coreRoom.service.poolAlternatives("droid-standard")[0]?.models).toEqual(["droid/glm-5.3", "droid/kimi-k3"]);
+    expect(coreRoom.service.poolAlternatives("droid-standard")[0]?.coreFallback).toBeUndefined();
+  });
+
+  it("观测重置事件的 gateBlocked 对 droid-core 镜像回落语义：Standard 有余 ⇒ false（即使 core 仍 L3）", async () => {
+    const events: QuotaRecoveryEvent[] = [];
+    const clock = new FakeClock(1_000);
+    const settings: QuotaSettings = { ...DEFAULT_SETTINGS.quota };
+    const std = stubAdapter("droid-standard");
+    const core = stubAdapter("droid-core");
+    const demotions = createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now() });
+    const service = createQuotaService({
+      settings,
+      clock,
+      adapters: [std.adapter, core.adapter],
+      credentials: () => "factory-key",
+      fetchJson: async () => undefined,
+      demotions,
+      pools: () => catalogPort(),
+      onObservedReset: (event) => events.push(event),
+    });
+    const t0 = clock.now();
+    const r5h = t0 + 3 * 3_600_000;
+    const rWeek = t0 + 90 * 3_600_000;
+    core.set(() =>
+      droidSnapshot(
+        "droid-core",
+        [
+          { scope: "5h", usedPct: 100, resetAt: r5h },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        clock.now(),
+      ),
+    );
+    std.set(() => droidSnapshot("droid-standard", [{ scope: "5h", usedPct: 20, resetAt: rWeek }], clock.now()));
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(events).toHaveLength(0);
+    clock.advance(4 * 3_600_000); // 越过 5h resetAt
+    core.set(() =>
+      droidSnapshot(
+        "droid-core",
+        [
+          { scope: "5h", usedPct: 5, resetAt: r5h + 5 * 3_600_000 },
+          { scope: "week", usedPct: 100, resetAt: rWeek },
+        ],
+        clock.now(),
+      ),
+    );
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(events).toHaveLength(1);
+    const e = events[0];
+    expect(e?.provider).toBe("droid-core");
+    expect([...(e?.resetScopes ?? [])]).toEqual(["5h"]);
+    expect(e?.verdict.level).toBe(3); // week 仍耗尽
+    expect(e?.gateBlocked).toBe(false); // Standard 有余 ⇒ Core 模型不会被拦（回落）
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-10-15 现场事件后继包：可疑读数检测必须跨重启存活（持久化基线播种 classifyDrop；
+// 展示仍只来自新鲜且被接受的快照——基线本身绝不上屏）。
+// ─────────────────────────────────────────────────────────────────────────────
+describe("baseline persistence: suspicious readings survive restarts (2026-10-15 后继包)", () => {
+  const HOUR_MS = 3_600_000;
+  const REFRESH_MS = DEFAULT_SETTINGS.quota.refreshMs; // REFRESH 常量在上方 describe 闭包内，这里自取
+  /** kimi 单 provider 服务；path 共享 ⇒ demotions + baselines 都跨「重启」存活。 */
+  const mkService = (statePath: string, startAt: number) => {
+    const clock = new FakeClock(startAt);
+    const kimi = stubAdapter("kimi-coding");
+    const demotions = createDemotionStore({ path: statePath, now: () => clock.now() });
+    const baselines = createBaselineStore({ path: statePath, now: () => clock.now() });
+    const service = createQuotaService({
+      settings: { ...DEFAULT_SETTINGS.quota },
+      clock,
+      adapters: [kimi.adapter],
+      credentials: () => "sk-test",
+      fetchJson: async () => undefined,
+      demotions,
+      baselines,
+    });
+    return { clock, kimi, demotions, service };
+  };
+  const kimiSnap = (at: number, windows: readonly { scope: "5h" | "week"; usedPct: number; resetAt?: number }[]) =>
+    windowsSnapshot("kimi-coding", windows, at);
+
+  async function landExhausted(f: ReturnType<typeof mkService>): Promise<{ r5h: number; rWeek: number; t0: number }> {
+    const t0 = f.clock.now();
+    const r5h = t0 + 3 * HOUR_MS;
+    const rWeek = t0 + 90 * HOUR_MS;
+    f.kimi.set(() =>
+      kimiSnap(f.clock.now(), [
+        { scope: "5h", usedPct: 0, resetAt: r5h },
+        { scope: "week", usedPct: 100, resetAt: rWeek },
+      ]),
+    );
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    return { r5h, rWeek, t0 };
+  }
+
+  it("重启后第一份全零垃圾读数被拒（改动前会直接当真）；重复全零仍被拒、降位不清", async () => {
+    const statePath = join(dir, "restart.json");
+    const a = mkService(statePath, 1_000);
+    const { rWeek, t0 } = await landExhausted(a);
+    expect(a.demotions.get("kimi-coding", a.clock.now())).toMatchObject({ level: 3, expiresAt: rWeek });
+
+    // 「重启」：全新 service + store 实例，同一路径；端点返回全零垃圾（2026-10-15 现场）。
+    const b = mkService(statePath, t0 + REFRESH_MS);
+    const garbage = () =>
+      kimiSnap(b.clock.now(), [
+        { scope: "5h", usedPct: 0 },
+        { scope: "week", usedPct: 0 },
+      ]);
+    b.kimi.set(garbage);
+    b.service.refreshIfStale();
+    await b.service.whenIdle();
+    expect(b.service.verdictFor("kimi-coding")).toBeUndefined(); // 拒收 ⇒ 不展示、不判定
+    expect(b.demotions.get("kimi-coding", b.clock.now())?.level).toBe(3);
+    b.clock.advance(REFRESH_MS);
+    b.service.refreshIfStale();
+    await b.service.whenIdle(); // 第二次重复全零 ⇒ 仍拒收（不得当作提前重置）
+    expect(b.service.verdictFor("kimi-coding")).toBeUndefined();
+    expect(b.demotions.get("kimi-coding", b.clock.now())?.level).toBe(3);
+
+    // 对照：同路径、无 baselines dep（改动前行为）⇒ 第一份垃圾直接当真。
+    const legacy = (() => {
+      const clock = new FakeClock(t0 + REFRESH_MS);
+      const kimi = stubAdapter("kimi-coding");
+      const demotions = createDemotionStore({ path: join(dir, "legacy.json"), now: () => clock.now() });
+      const service = createQuotaService({
+        settings: { ...DEFAULT_SETTINGS.quota },
+        clock,
+        adapters: [kimi.adapter],
+        credentials: () => "sk-test",
+        fetchJson: async () => undefined,
+        demotions,
+      });
+      kimi.set(garbage);
+      return { service, refresh: () => service.refreshIfStale(), idle: () => service.whenIdle() };
+    })();
+    legacy.refresh();
+    await legacy.idle();
+    expect(legacy.service.verdictFor("kimi-coding")?.windows.map((w) => w.usedPct)).toEqual([0, 0]);
+  });
+
+  it("重启后基线只用于比对不上屏：正常读数照常展示；基线过旧（>7d）⇒ 退化为改动前行为", async () => {
+    const statePath = join(dir, "fresh.json");
+    const a = mkService(statePath, 1_000);
+    await landExhausted(a);
+    // 正常读数（非全零、回落 < 迟滞阈值）⇒ 接受并展示（比对基线没有把展示面卡死）。
+    const b = mkService(statePath, 1_000 + REFRESH_MS);
+    b.kimi.set(() =>
+      kimiSnap(b.clock.now(), [
+        { scope: "5h", usedPct: 4, resetAt: 1_000 + 3 * HOUR_MS },
+        { scope: "week", usedPct: 98, resetAt: 1_000 + 90 * HOUR_MS }, // 100→98 < 迟滞 5pp ⇒ 正常波动
+      ]),
+    );
+    b.service.refreshIfStale();
+    await b.service.whenIdle();
+    expect(b.service.verdictFor("kimi-coding")?.windows.map((w) => w.usedPct)).toEqual([4, 98]);
+
+    // 基线过旧：垃圾全零被接受（fail-open，与改动前一致——不能永久压制）。
+    const stalePath = join(dir, "stale-baseline.json");
+    const c1 = mkService(stalePath, 1_000);
+    await landExhausted(c1);
+    const c2 = mkService(stalePath, 1_000 + 8 * 24 * HOUR_MS); // > BASELINE_TTL_MS
+    c2.kimi.set(() =>
+      kimiSnap(c2.clock.now(), [
+        { scope: "5h", usedPct: 0 },
+        { scope: "week", usedPct: 0 },
+      ]),
+    );
+    c2.service.refreshIfStale();
+    await c2.service.whenIdle();
+    expect(c2.service.verdictFor("kimi-coding")).toBeDefined();
+  });
+
+  it("重启后合法重置（旧 resetAt 已过）⇒ 全零读数带证据被接受并清降位", async () => {
+    const statePath = join(dir, "reset.json");
+    const a = mkService(statePath, 1_000);
+    const { r5h, rWeek } = await landExhausted(a);
+    expect(a.demotions.get("kimi-coding", a.clock.now())).toBeDefined();
+    const at = 1_000 + 91 * HOUR_MS; // 越过 week 重置时刻（基线仍在 7d TTL 内）
+    expect(at).toBeLessThan(1_000 + 7 * 24 * HOUR_MS);
+    const b = mkService(statePath, at);
+    expect(r5h).toBeGreaterThan(0);
+    b.kimi.set(() =>
+      kimiSnap(b.clock.now(), [
+        { scope: "5h", usedPct: 0 },
+        { scope: "week", usedPct: 0 },
+      ]),
+    );
+    b.service.refreshIfStale();
+    await b.service.whenIdle();
+    const v = b.service.verdictFor("kimi-coding");
+    expect(v?.windows.map((w) => w.usedPct)).toEqual([0, 0]); // 有证据 ⇒ 接受
+    expect(b.demotions.get("kimi-coding", b.clock.now())).toBeUndefined(); // 观测重置 ⇒ 清降位
+    expect(rWeek).toBeGreaterThan(0);
   });
 });

@@ -189,6 +189,12 @@ export interface AlternativeSelection {
    * 不读它（D7/D8 文案不变）。
    */
   readonly droidPools?: readonly DroidPoolAlternative[] | undefined;
+  /**
+   * core 回落开放（2026-10-16 实测定界）：droid-core 的判定/告急文案携带此标记时，
+   * Core 池额度虽尽但 Standard 池仍有可信余量，Core 模型按回落规则计入 Standard 池
+   * 额度、可照常派发 ⇒ L3/降位期文案**不再禁用**，改为回落计费说明。
+   */
+  readonly coreFallback?: true | undefined;
 }
 
 export type AlternativeInput = AlternativeSelection | readonly string[];
@@ -208,16 +214,21 @@ function droidPoolAdviceLine(pools: readonly DroidPoolAlternative[] | undefined)
   if (pools === undefined) return undefined;
   const parts = pools
     .filter((p) => p.models.length > 0)
-    .map((p) => `${p.models.join("、")}（${poolLabel(p.pool)} 池）`);
+    .map(
+      (p) => `${p.models.join("、")}（${poolLabel(p.pool)} 池${p.fallback === true ? "，回落 Standard 计费" : ""}）`,
+    );
   if (parts.length === 0) return undefined;
   return `有余量的外部 Droid 池也可用：${parts.join("；")}。注意：外部 Droid 以完整权限运行（不是 pi 子 agent），不能当 consult/验收。`;
 }
 
-/** 逐池清单状态文案（中文散文，面向模型的说明块；紧凑读数仍是英文 token）。 */
+/** 逐池清单状态文案（中文散文，面向模型的说明块；紧凑读数仍是英文 token）。
+ * fallback（仅 core 池，2026-10-16 实测定界）：自身额度尽但按 Factory 回落规则
+ * 计入 Standard 池额度，可照常派发——不是「告急/已拦」。 */
 const DROID_POOL_STATE_TEXT: Record<DroidPoolState, string> = {
   ok: "有余量",
   warn: "告急",
   blocked: "已拦，勿派",
+  fallback: "额度尽，回落 Standard 计费",
 };
 
 /**
@@ -335,7 +346,13 @@ function extraUsageText(cents: number): string {
  */
 function billingClause(v: ProviderVerdict): string | undefined {
   const b = v.billing;
-  if (b === undefined || b.pool !== "standard") return undefined;
+  if (b === undefined) return undefined;
+  // Core 池（2026-10-16 实测定界）：静态回落规则说明——L2 预警块也带，让模型在
+  // Core 池耗尽前就知道耗尽后的计费去向（Standard 池模型不能反向使用 Core 池额度）。
+  if (b.pool === "core") {
+    return "Factory 计费规则：Core 池额度耗尽后，Core 池模型回落计入 Standard 池额度继续跑（Standard 池模型不能反向使用 Core 池额度）。";
+  }
+  if (b.pool !== "standard") return undefined;
   if (b.overage === "extraUsage") {
     const balance = extraUsageText(b.extraUsageBalanceCents);
     if (b.gateOpen === true) {
@@ -372,6 +389,11 @@ export function buildQuotaWarnText(
     // 等级只来自降位地板：挑用量最高的窗口讲「已用 0% … 派单不变」是误导（2026-09-24 kimi
     // 现场：7d 实际仍耗尽）。如实说明降位状态；不承诺闸门行为（地板 L2 是否被拦取决于
     // quota.gateLevel，闸门拦下时用同一句 demotionFloorClause 解释）。
+    // core 池回落开放（2026-10-16）：Core 模型不受 Core 池降位影响（耗尽后回落计入
+    // Standard 池额度），不再建议改派其它订阅模型。
+    if (v.billing?.pool === "core" && normalizeAlternatives(alternatives).coreFallback === true) {
+      return `[quota 预警] ${label} ${demotionFloorClause(v, now)}。\nCore 池模型不受此降位影响：Core 池额度耗尽后按 Factory 计费规则回落计入 Standard 池额度，照常派发即可（会额外消耗 Standard 池余量）。`;
+    }
     return `[quota 预警] ${label} ${demotionFloorClause(v, now)}。\n新任务优先考虑其它订阅模型；若仍派给它，可能因额度耗尽失败。${alternativesAdvice(alternatives)}`;
   }
   const w = triggerWindow(v);
@@ -406,6 +428,20 @@ export function buildQuotaBlockText(
   now: Millis,
   label: string = v.provider,
 ): string {
+  // core 回落开放（2026-10-16 实测定界）：Core 池额度尽但 Standard 池仍有可信余量 ⇒
+  // Core 模型照常可派（回落计入 Standard 池额度，闸门不拦）——不禁用、不推荐改派，
+  // 只说明回落计费；逐池清单（如有）跟在后面展示两池状态。读数照常保留在首行。
+  const selection = normalizeAlternatives(alternatives);
+  if (v.billing?.pool === "core" && selection.coreFallback === true) {
+    const lines = [`${quotaBlockHead(v, now, label)}。`];
+    lines.push(
+      "Core 池额度已用尽：Core 池模型仍可照常派发，按 Factory 计费规则回落计入 Standard 池额度" +
+        "（Standard 池模型不能反向使用 Core 池额度），会额外消耗 Standard 池余量。",
+    );
+    const listingLine = droidPoolListingLine(selection.poolListing);
+    if (listingLine !== undefined) lines.push(listingLine);
+    return lines.join("\n");
+  }
   // D6 放行（gateOpen）：不再承诺「会被拦下」，改为如实劝阻（继续派会花额外余额）。
   const gateOpen = v.billing?.pool === "standard" && v.billing.overage === "extraUsage" && v.billing.gateOpen === true;
   const body = gateOpen
@@ -561,6 +597,7 @@ function groupSamePool(
       ...(normalized.modelsPool === undefined ? {} : { modelsPool: normalized.modelsPool }),
       ...(normalized.poolListing === undefined ? {} : { poolListing: normalized.poolListing }),
       ...(normalized.droidPools === undefined ? {} : { droidPools: normalized.droidPools }),
+      ...(normalized.coreFallback === undefined ? {} : { coreFallback: normalized.coreFallback }),
     };
     return {
       section: { verdict: section.verdict, alternatives },

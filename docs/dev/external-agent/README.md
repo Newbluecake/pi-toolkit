@@ -41,7 +41,8 @@ pi-toolkit 可以把 [Factory droid](https://factory.ai) 当作虚拟 provider `
 
 Factory 额度是 standard / core 两个池，窗口为 month（HUD 紧凑标记 `mo`）。
 
-- `droid/<id>` 派发会查所属池：触线则拒绝；池无法判定时两池都触线才拦。
+- `droid/<id>` 派发会查所属池。**core 池模型有回落计费**（2026-10-16 实测确认）：Core 池额度耗尽后自动计入 Standard 池额度继续跑，所以 core 模型只有 Core 与 Standard **两池都触线**才被拒；standard 池模型不能反向使用 Core 池额度，触线即拒。池无法判定时同样是两池都触线才拦。
+- Core 池触线而 Standard 有余时，通知与逐池清单写「额度尽，回落 Standard 计费」并照常允许派发 Core 模型（不禁用、不劝改派）；两池都尽才写「已拦，勿派」。
 - extra usage（超额付费）默认**拦截**；`quota.droidAllowExtraUsage=true` 才放行，余额会披露。
 - 认证类错误（401/402/403）**只告警不拦截**，HUD 显示 `droid auth <code>`。
 - `quota.providers` 白名单含 `droid` 才查询（默认已含）。web 端需 hub 通告 cap `quota.pools.v1`。

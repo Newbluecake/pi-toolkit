@@ -18,6 +18,7 @@ import type { Clock } from "../core/clock.js";
 import type { QuotaSettings } from "../config/settings.js";
 import { ADAPTERS, selectAdapters } from "./adapters/index.js";
 import { createDroidAdapters, type DroidAdapterPair } from "./adapters/droid.js";
+import { createBaselineStore, type BaselineStore } from "./baseline.js";
 import { createCredentialResolver } from "./credentials.js";
 import { createDemotionStore, type DemotionRecord, type DemotionStore } from "./demotion.js";
 import { createFetchJson } from "./http.js";
@@ -135,6 +136,13 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     now: () => clock.now(),
     ...(warn === undefined ? {} : { warn }),
   });
+  // 可疑读数基线（2026-10-15 现场事件后继包）：与 demotions 共享 quota-state.json，
+  // 两个 store 各自保留对方顶层键（读改写）；重启后基线播种 classifyDrop 的比对。
+  const baselines = createBaselineStore({
+    path: statePath,
+    now: () => clock.now(),
+    ...(warn === undefined ? {} : { warn }),
+  });
 
   // 额度恢复播报的接缝（service 经事件、hook 层凭闩锁判断）：hintState 与 service
   // 同在此构造，收件箱与 latches 同生命周期；「曾播报」语义与 Minor 1/2 回滚都留在
@@ -162,6 +170,7 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     credentials,
     fetchJson,
     demotions,
+    baselines,
     onObservedReset: pushRecovery,
     ...(droidPools === undefined ? {} : { pools: droidPools }),
     ...(input.setStatus === undefined ? {} : { setStatus: input.setStatus }),
@@ -178,6 +187,7 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
 }
 
 export type {
+  BaselineStore,
   DemotionRecord,
   DemotionStore,
   LadderLevel,
@@ -196,6 +206,7 @@ export type {
 export {
   ADAPTERS,
   QUOTA_CUSTOM_TYPE,
+  createBaselineStore,
   createCredentialResolver,
   createDemotionStore,
   createDroidAdapters,

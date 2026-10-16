@@ -611,9 +611,16 @@ command|switch_session`, idempotent by cmdId, a process-level command ledger in 
   (back-compat) — window-level fields win over the flat override, which wins over the per-window default. Each window's l1<=l2<=l3
   is clamped independently.
   **droid pools** (`src/quota/adapters/droid.ts`, plan `docs/dev/external-agent/quota-plan.md`): Factory's standard/core pools are
-  virtual providers `droid-standard`/`droid-core` with a `month` window (`mo`); `droid/<id>` spawns gate on the owning pool
-  (unknown pool ⇒ both must be exhausted), extra-usage blocks unless `quota.droidAllowExtraUsage`, 401/402/403 only warn
-  (HUD `droid auth <code>`); web rows need cap `quota.pools.v1`.
+  virtual providers `droid-standard`/`droid-core` with a `month` window (`mo`); `droid/<id>` spawns gate on the owning pool with the
+  **core→standard fallback** (2026-10-16 user-confirmed live: core-pool models keep running, billed against standard quota, once core
+  is exhausted — `verdictsForModel` returns `["droid-core","droid-standard"]` keys so a core model is blocked only when BOTH pools are
+  at the block level; standard models never fall back; unknown pool ⇒ both must be exhausted), notices/listings say 「额度尽，回落
+  Standard 计费」 (pool state `"fallback"`) instead of 告急/已拦 while standard has room, extra-usage blocks unless
+  `quota.droidAllowExtraUsage`, 401/402/403 only warn (HUD `droid auth <code>`); web rows need cap `quota.pools.v1`. Suspicious-reading
+  detection survives restarts: `baseline.ts` persists each provider's last ACCEPTED reading into the same `quota-state.json`
+  (`baselines` key; both stores read-modify-write so neither flush clobbers the other's group) and seeds `classifyDrop` after a
+  restart — display/verdicts still need a fresh accepted snapshot; an all-zero reading against a non-elapsed >0 baseline is never
+  confirmed as a reset by repetition (only reset evidence or a non-all-zero read accepts).
 - `src/sysload/` — load-aware dispatch (`docs/dev/sysload/plan.md` v2.1). Pi-free core except `hook.ts`: `procfs`/`mounts`/`sampler`
   read CPU (incl. PSI), memory, IO pressure and per-mount disk from /proc + statfs under a process-wide IO ledger
   (`io-ledger.ts`, `Symbol.for("pi-subagent:sysload-io")` — the one documented process-global: ≤2 async ops, ≤1 per key, slots
