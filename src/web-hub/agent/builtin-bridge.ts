@@ -33,7 +33,13 @@ import { effectivePolicy, resolveCommandPolicy, type CommandPolicy } from "./com
 import type { CommandCapturePort } from "./command-capture.js";
 
 export interface BuiltinBridge {
-  execute(frame: CmdFrame): CmdResultBody;
+  /** web-resume plan §2.4: may return a Promise ONLY for the `resume __list` read path — every
+   *  other op stays a plain synchronous result (pinned by commands.test.ts; R4). The caller
+   *  (`commands.ts handleCommand`) races a thenable against the frame deadline. */
+  execute(frame: CmdFrame): CmdResultBody | Promise<CmdResultBody>;
+  /** web-resume plan §2.4: `true` for the `resume __list` read — the caller stores the ledger
+   *  result with `data.sessions` stripped and writes NO origin notify for it. */
+  isQuiet(frame: CmdFrame): boolean;
 }
 
 export interface BuiltinBridgeDeps {
@@ -60,8 +66,21 @@ export interface BuiltinBridgeDeps {
    * `WebHubControl.internalExec`). Without it, `randomNonce()` below is generated but never
    * registered anywhere `internalExec` can verify it against — `/new` would always report
    * `completion:"unknown"` while never actually switching the session (acc32-B4).
+   *
+   * web-resume plan §2.5 step 3: the nonce slot is now backed by the single per-process EXEC
+   * CLAIM shared with the resume ticket — returning `undefined` means the claim is held (a
+   * resume pick is in flight, or a live `/new` nonce is still armed) and the dispatch must
+   * refuse with `E_COMMAND_DENIED exec:in-flight` instead of silently overwriting it.
    */
-  armExec?(op: string): string;
+  armExec?(op: string): string | undefined;
+  /** web-resume plan §2.4/§2.5: the `resume` builtin's two web subcommand forms. Called only
+   *  after policy already allowed `__list`/`__pick` (everything else about `resume` is deny,
+   * §2.7). `__list` may settle as a Promise (bounded read); `__pick` is fully synchronous. */
+  resume?(
+    frame: CmdFrame,
+    cmd: CmdArgs & { op: "command" },
+    ctx: ExtensionContext,
+  ): CmdResultBody | Promise<CmdResultBody>;
 }
 
 const ARGS_MAX_BYTES = 16 * 1024;
@@ -105,6 +124,15 @@ function okResult(data: CmdData): CmdResultBody {
 
 function commandArgs(frame: CmdFrame): (CmdArgs & { op: "command" }) | undefined {
   return frame.cmd.op === "command" ? frame.cmd : undefined;
+}
+
+/** web-resume plan §2.4: the read-only quiet marker — `resume __list` produces no terminal
+ *  notify and its ledger entry never retains `data.sessions`. Purely structural (never throws,
+ *  never reads ctx), so the caller may consult it on every path including timeouts. */
+function isResumeListArgs(cmd: CmdArgs & { op: "command" }): boolean {
+  if (cmd.name !== "resume") return false;
+  const first = cmd.args.trim().split(/\s+/)[0];
+  return first === "__list";
 }
 
 function confirmMessage(name: string, args: string, kind: "extension" | "template" | "builtin"): string {
@@ -213,7 +241,7 @@ function dispatchBuiltin(
   ctx: ExtensionContext,
   frame: CmdFrame,
   cmd: CmdArgs & { op: "command" },
-): CmdResultBody {
+): CmdResultBody | Promise<CmdResultBody> {
   switch (cmd.name) {
     case "session":
       return okResult({
@@ -301,9 +329,12 @@ function dispatchBuiltin(
     }
     case "new": {
       if (deps.pi === undefined) return errResult("E_UNSUPPORTED", false, "none");
-      const nonce = deps.armExec !== undefined ? deps.armExec("new") : randomNonce();
+      // web-resume plan §2.5 step 3: `undefined` ⇔ the shared exec claim is held (a resume
+      // ticket in flight, or a not-yet-consumed `/new` nonce) — refuse instead of overwriting.
+      const armed = deps.armExec !== undefined ? deps.armExec("new") : randomNonce();
+      if (armed === undefined) return errResult("E_COMMAND_DENIED", false, "none", "exec:in-flight");
       try {
-        deps.pi.sendUserMessage(`/webhub __exec new ${nonce}`, {
+        deps.pi.sendUserMessage(`/webhub __exec new ${armed}`, {
           expandPromptTemplates: true,
           deliverAs: "followUp",
         });
@@ -311,6 +342,13 @@ function dispatchBuiltin(
         return errResult("E_STALE_CTX", true, "none");
       }
       return okResult({ op: "command", kind: "builtin", completion: "unknown" });
+    }
+    case "resume": {
+      // web-resume plan §2.4/§2.5 — policy has already allowed only the `__list`/`__pick`
+      // forms; without the resume port wired (older wiring, or tests) the deny is the honest
+      // answer (the feature signal `resume.v1` is off in exactly the same conditions).
+      if (deps.resume === undefined) return errResult("E_COMMAND_DENIED", false, "none");
+      return deps.resume(frame, cmd, ctx);
     }
     case "reload": {
       if (deps.pi === undefined) return errResult("E_UNSUPPORTED", false, "none");
@@ -328,7 +366,7 @@ function dispatchBuiltin(
 
 export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge {
   return {
-    execute(frame: CmdFrame): CmdResultBody {
+    execute(frame: CmdFrame): CmdResultBody | Promise<CmdResultBody> {
       const cmd = commandArgs(frame);
       if (cmd === undefined) return errResult("E_UNSUPPORTED", false, "none");
       if (!/^[A-Za-z0-9:_.-]{1,64}$/.test(cmd.name))
@@ -367,6 +405,10 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
         case "builtin":
           return dispatchBuiltin(deps, ctx, frame, cmd);
       }
+    },
+    isQuiet(frame: CmdFrame): boolean {
+      const cmd = commandArgs(frame);
+      return cmd !== undefined && isResumeListArgs(cmd);
     },
   };
 }

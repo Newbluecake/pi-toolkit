@@ -53,6 +53,7 @@ function makeHarness(
   const compaction = { manualCompacting: false };
   const builtinBridge: BuiltinBridge = {
     execute: vi.fn(() => ({ ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "none" })),
+    isQuiet: () => false, // web-resume §2.4: only the real bridge marks `resume __list` quiet
   };
   const originEntry = {
     appendOrigin: vi.fn(),

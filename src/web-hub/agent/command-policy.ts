@@ -81,6 +81,18 @@ function builtinPolicyFor(name: string, hasArgs: boolean): PolicyDecision | unde
 }
 
 function builtinPolicy(name: string, args: string): PolicyDecision | undefined {
+  // web-resume plan §2.7: the ADVERTISED bare `resume` stays deny (old UIs unchanged — the
+  // commands slot advertises the no-args form, which keeps resolving to the deny below), but
+  // the web resume dialog's two subcommand forms (`resume __list …` / `resume __pick …`) are
+  // allowed through the builtin bridge. Busy never changes this decision (no `policyBusy`):
+  // D4 (忙时可看不可切) is enforced INSIDE the bridge — `__list` serves while busy, `__pick`
+  // replies `E_COMMAND_DENIED resume:busy`. Overrides win outright via `resolveCommandPolicy`
+  // above, so `webHub.webCommandPolicy.resume = "confirm" | "deny"` gates both forms (and the
+  // §2.7 feature signal turns off with them).
+  if (name === "resume") {
+    const first = tokenize(args)[0];
+    return first === "__list" || first === "__pick" ? { policy: "allow" } : { policy: "deny" };
+  }
   return builtinPolicyFor(name, args.trim() !== "");
 }
 

@@ -34,12 +34,14 @@ import type { PromptGatePort, WebPromptRelease } from "./prompt-gate.js";
 import { parseMention, routeMention, type MentionRouteDeps } from "../../mention/mention.js";
 import type { MentionResultData } from "../protocol/messages.js";
 import type {
+  CmdArgs,
   CmdData,
   CmdErrorCode,
   CmdFrame,
   CmdLateFrame,
   CmdOp,
   CmdOrigin,
+  CmdResultBody,
   CmdResultFrame,
 } from "../protocol/messages.js";
 
@@ -81,6 +83,12 @@ export interface CommandHandlerDeps {
   promptGate?: () => PromptGatePort | undefined;
   /** Late-bound shared TUI/web mention router. Absent preserves legacy prompt handling. */
   mention?: () => MentionRouteDeps | undefined;
+  /** web-resume plan §2.5 step c: true while a resume switch sits between its execution-point
+   *  checks and its post-switch verification — web `prompt` ops are refused with `E_STALE_CTX`
+   *  retryable effect none while set, so nothing is dispatched into a session being replaced
+   *  (the web half of the `session_before_switch` window). Absent ⇒ the check never runs
+   *  (byte-identical to the pre-feature path). */
+  switchInFlight?: () => boolean;
 }
 
 export interface InputEventLike {
@@ -131,6 +139,8 @@ const PROMPT_IDLE_STARTED_MS = 10_000;
 const PROMPT_QUEUED_TIMEOUT_MS = 10 * 60_000;
 const PROMPT_MAX_BYTES = 48 * 1024;
 const STEER_TEXT_MAX_BYTES = 16 * 1024;
+/** web-resume plan §2.4: the thenable-read race for the ONE async builtin (`resume __list`). */
+const RESUME_LIST_RACE_MS = 6_000;
 
 function byteLen(s: string): number {
   return Buffer.byteLength(s, "utf8");
@@ -247,6 +257,11 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     if (deps.compactionState.manualCompacting) {
       return settleAndReply(frame, errResult("E_BUSY_COMPACTING", true, "none"));
+    }
+    // web-resume plan §2.5 step c: a resume switch is tearing this session down right now — the
+    // prompt has NOT been delivered (checked before any dispatch), so effect stays none.
+    if (deps.switchInFlight?.() === true) {
+      return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
     }
     // Mention routing deliberately precedes topic-switch and steer-recall hold. The input is
     // already admitted above, and routeMention uses the same registry/steer/resume/fabric/note
@@ -699,32 +714,82 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     if (frame.cmd.op !== "command") return;
     const cmd = frame.cmd;
     if (!beginOrReply(frame)) return;
-    let result: LedgerResult;
+    // web-resume plan §2.4: `__list` is the one quiet read — no terminal origin notify, and the
+    // ledger entry never retains the list payload.
+    let quiet = false;
+    try {
+      quiet = deps.builtinBridge.isQuiet(frame);
+    } catch {
+      quiet = false;
+    }
+    let result: CmdResultBody | Promise<CmdResultBody>;
     try {
       result = deps.builtinBridge.execute(frame);
     } catch {
-      result = errResult("E_UNSUPPORTED", false, "none");
+      settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+      return;
     }
-    settleAndReply(frame, result);
-    if (result.ok) {
-      // acc32-B5 (revised per verifier r_29729WTC): plan §0.2/U6 requires a terminal notify for
-      // EVERY successful non-prompt write op, third-party commands included — the earlier fix
-      // that skipped our own notify entirely for an UNCAPTURED extension command (a third
-      // party's, run synchronously inside `builtinBridge.execute()` above) restored that
-      // command's own notify visibility but silently dropped ours, which the plan does not
-      // allow. Both notifies now always fire; for the uncaptured-extension case specifically we
-      // pass `avoidStatusMerge: true` so ours doesn't silently overwrite the command's own
-      // `ctx.ui.notify(...)` call that just landed in the same pi `showStatus()` merge slot (see
-      // `OriginEntryPort.notify`'s doc comment for the underlying pi pitfall) — the only place a
-      // third-party command's output was ever visible at all, since `captured:false` means the
-      // web side never gets it either. Ordinary (own/captured/template) commands keep the plain
-      // style: there is no immediately-preceding foreign notify to protect against.
-      const uncapturedExtension =
-        result.data.op === "command" && result.data.kind === "extension" && result.data.captured !== true;
-      const ctx = deps.getCtx();
-      if (ctx !== undefined) {
-        deps.originEntry.notify(ctx, `/${cmd.name}`, frame.origin, { avoidStatusMerge: uncapturedExtension });
-      }
+    if (typeof (result as { then?: unknown }).then === "function" && (result as { then?: unknown }).then !== null) {
+      // web-resume plan §2.4 — reads only: race the thenable against the frame deadline
+      // (unref'd via the caller's setTimer seam), settle exactly once. A timeout is
+      // `E_DEADLINE` retryable effect none (`resume:scanning`) — no side effect exists, so the
+      // F9 same-id re-execution is harmless; a late completion after the timeout is dropped
+      // (the retryable/none ledger entry was deleted, the UI retries with a new id).
+      const ms = Math.min(RESUME_LIST_RACE_MS, opTotal(frame));
+      let settled = false;
+      const timer = deps.setTimer(ms, () => {
+        if (settled) return;
+        settled = true;
+        settleAndReply(frame, errResult("E_DEADLINE", true, "none", "resume:scanning"));
+      });
+      void Promise.resolve(result).then(
+        (body) => {
+          if (settled) return;
+          settled = true;
+          timer.cancel();
+          settleCommandResult(frame, body, quiet);
+          notifyCommandSuccess(frame, cmd, body, quiet);
+        },
+        () => {
+          if (settled) return;
+          settled = true;
+          timer.cancel();
+          settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+        },
+      );
+      return;
+    }
+    settleCommandResult(frame, result as CmdResultBody, quiet);
+    notifyCommandSuccess(frame, cmd, result as CmdResultBody, quiet);
+  }
+
+  /** §2.4: settle (stripping `data.sessions` for the quiet `__list` read) + reply in full. */
+  function settleCommandResult(frame: CmdFrame, body: CmdResultBody, quiet: boolean): void {
+    if (quiet && body.ok && body.data.op === "command") {
+      const stripped = { ...body.data } as Partial<typeof body.data>;
+      delete stripped.sessions;
+      const ledgerResult: LedgerResult = { ok: true, data: stripped as typeof body.data };
+      deps.ledger.settle(frame.id, ledgerResult, deps.now());
+      deps.onChanged();
+      deps.send(toResultFrame(frame, body));
+      return;
+    }
+    settleAndReply(frame, body);
+  }
+
+  /** acc32-B5: a terminal origin notify for every successful non-quiet non-prompt write op. */
+  function notifyCommandSuccess(
+    frame: CmdFrame,
+    cmd: CmdArgs & { op: "command" },
+    result: CmdResultBody,
+    quiet: boolean,
+  ): void {
+    if (!result.ok || quiet) return;
+    const uncapturedExtension =
+      result.data.op === "command" && result.data.kind === "extension" && result.data.captured !== true;
+    const ctx = deps.getCtx();
+    if (ctx !== undefined) {
+      deps.originEntry.notify(ctx, `/${cmd.name}`, frame.origin, { avoidStatusMerge: uncapturedExtension });
     }
   }
 

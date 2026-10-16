@@ -16,7 +16,6 @@
  *     `bye{handover}`, the new one reconnects with the same agentId / new epoch.
  * An activate without a matching session_start takes no connection.
  */
-import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +31,7 @@ import type { HubSpawnConfig } from "../protocol/spawn.js";
 import { PREVIEW_DEFAULT_MODE, type PreviewMode } from "../protocol/preview.js";
 import {
   FORWARDED_EVENTS,
+  RESUME_FEATURE_V1,
   type AgentKind,
   type LanInfoPayload,
   type LanReqFrame,
@@ -93,6 +93,8 @@ import { createHoldDriver, type HoldDriver, type TurnEndLike } from "./hold-driv
 import type { PromptGatePort } from "./prompt-gate.js";
 import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool-timing.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
+import { createExecGate, createResumeExec } from "./resume-exec.js";
+import { createResumeList, defaultResumeCore } from "./resume-list.js";
 import { classifyCommand, listSlashCommands } from "./slash.js";
 import { modelsFingerprint, projectModels } from "./models.js";
 import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js";
@@ -386,22 +388,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   let statusText: string | undefined;
   let buildInfo: Promise<{ pluginVersion: string; buildId: string }> | undefined;
   let launcher: LauncherPlan | { error: string } | undefined;
-  // §4.6 "/webhub __exec": one-shot, 5s-TTL nonce armed by the builtin bridge's `/new` dispatch
-  // and consumed by `internalExec` below (acc32-B4 — this closure slot never existed before, so
-  // the stub always returned E_UNSUPPORTED regardless of what nonce the terminal typed back in).
-  let pendingExec: { op: string; nonce: string; expiresAt: number } | undefined;
-  const EXEC_NONCE_TTL_MS = 5_000;
-  const armExec = (op: string): string => {
-    const nonce = randomBytes(16).toString("hex");
-    pendingExec = { op, nonce, expiresAt: now() + EXEC_NONCE_TTL_MS };
-    return nonce;
-  };
-  const takeExec = (op: string, nonce: string): boolean => {
-    const p = pendingExec;
-    if (p === undefined || p.op !== op || p.nonce !== nonce || now() > p.expiresAt) return false;
-    pendingExec = undefined;
-    return true;
-  };
+  // §4.6 "/webhub __exec" + web-resume plan §2.5 step 3: the ONE per-process exec claim.
+  // `/new`'s one-shot 5 s-TTL nonce (the former closure-scoped `pendingExec` slot, acc32-B4) and
+  // the resume ticket share it: `armExec` now returns `undefined` while the claim is held (the
+  // bridge refuses with `E_COMMAND_DENIED exec:in-flight` instead of silently overwriting), and
+  // `internalExec` below routes each op through its own consumer. An expired `/new` nonce is
+  // dropped lazily by the gate itself.
+  const execGate = createExecGate({ now });
 
   const tap = createEventTap(
     (e, droppable) => {
@@ -577,8 +570,36 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // Late-bound: the bridge is constructed before the command handler (which it needs for the
   // §4.6/D22 async-completion channel), so sendLate goes through this ref. Before the handler
   // exists (or after a settle raced ahead) the late frame is simply dropped — bounded, and the
-  // ledger already carries `completion:"unknown"` from the immediate reply.
+  // ledger already carries `completion:"unknown"` from the immediate reply. The web-resume pick
+  // path (§2.5 d) shares the same channel for its exactly-one late result.
   const bridgeLate: { current?: BuiltinBridgeDeps["sendLate"] } = {};
+  // web-resume plan §2.4/§2.5: the agent-side session-list handle and the switch-path handle —
+  // both closure-local (per-activate; no module-scope state), both fed from the frozen §2.2 P1
+  // core (`defaultResumeCore()` — resume-list.ts is the P1 modules' only import site here).
+  const resumeList = createResumeList({
+    getSessionDir: () => safe(() => ctx?.sessionManager.getSessionDir() ?? "", ""),
+    cwd: () => safe(() => ctx?.cwd ?? "", ""),
+    currentSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    now,
+    core: defaultResumeCore(),
+  });
+  const resumeExec = createResumeExec({
+    sendUserMessage: (text, options) => {
+      pi.sendUserMessage(text, options);
+    },
+    getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    getSessionFile: () => safe(() => ctx?.sessionManager.getSessionFile(), undefined),
+    now,
+    lists: resumeList,
+    gate: execGate,
+    core: defaultResumeCore(),
+    setTimer: (ms, fn) => {
+      const t = setTimeout(fn, ms);
+      t.unref(); // §2.5 step 7: the revoke timer must never wedge `pi -p`
+      return { cancel: () => clearTimeout(t) };
+    },
+    sendLate: (frame, result) => bridgeLate.current?.(frame, result),
+  });
   const builtinBridge = createBuiltinBridge({
     pi,
     getCtx: () => ctx,
@@ -587,7 +608,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     capture: () => commandCapture,
     overrides: () => deps.settings.webCommandPolicy,
     sendLate: (frame, result) => bridgeLate.current?.(frame, result),
-    armExec,
+    armExec: (op) => (op === "new" ? execGate.armNew() : undefined),
+    resume: (frame, cmd, bridgeCtx) => {
+      const first = cmd.args.trim().split(/\s+/)[0];
+      return first === "__list" ? resumeList.list(frame, cmd) : resumeExec.pick(frame, cmd, bridgeCtx);
+    },
   });
   registerOriginEntryRenderer(pi);
   // tool-duration plan: the TUI must render NOTHING for the per-turn timing entries (the
@@ -634,6 +659,23 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     setStatusLine(statusLineText(v, readStatusTheme(ctx), { held: holdDriver?.heldCount() ?? 0 }));
   };
 
+  /** web-resume plan §2.7: `resume.v1` iff the control plane and the `command` op surface are
+   *  both on, the session is persisted (`getSessionFile()` defined), and `webCommandPolicy.resume`
+   *  is absent or `"allow"` (`"confirm"`/`"deny"` ⇒ feature off — §2.7's documented rule; the
+   *  extra `webCommands !== false` conjunct keeps the signal conservative: a hub without
+   * `command.v1` can never reach the resume ops at all, so advertising the feature there would
+   * only surface a guaranteed failure). Old agents never emit `features`, so a new UI against an
+   *  old agent degrades to no intercept / no button (§2.8 row 1). */
+  const resumeFeatures = (): string[] | undefined => {
+    if (settings.control === false || settings.webCommands === false) return undefined;
+    const pol = deps.settings.webCommandPolicy?.resume;
+    if (pol !== undefined && pol !== "allow") return undefined;
+    const x = ctx;
+    if (x === undefined) return undefined;
+    const file = safe(() => x.sessionManager.getSessionFile(), undefined);
+    return file === undefined ? undefined : [RESUME_FEATURE_V1];
+  };
+
   const publishStatus = (): void => {
     const c = conn;
     const x = ctx;
@@ -660,6 +702,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         : undefined,
       deps.load?.port,
       deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
+      resumeFeatures,
     );
     lastLeaf = s.leafId;
     c.setSlot("status", { t: "status", ...s });
@@ -852,6 +895,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // be constructed after the handler it dispatches through (no temporal-dead-zone cycle).
     // `owner` (Y4/Y7.3) scopes every ledger lookup this handler makes to THIS module instance.
     ...(holdOn ? { hold: () => holdDriver, owner: MODULE_INSTANCE } : {}),
+    // web-resume plan §2.5 step c: web prompts are refused (E_STALE_CTX, effect none) while a
+    // resume switch is between its execution-point checks and its post-switch verification.
+    switchInFlight: () => resumeExec.switchInFlight(),
   });
   bridgeLate.current = (frame, result) => commandHandler.handleBridgeLate(frame, result);
 
@@ -979,6 +1025,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             undefined,
             deps.load?.port,
             deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
+            resumeFeatures,
           ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
@@ -1235,6 +1282,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // returned; the NEXT activation's `onSessionStart`/`adopt` is the defensive backstop).
     holdDriver?.onSessionShutdown(reasonOf(event));
     commandHandler.onSessionBoundary();
+    // web-resume plan §2.5 (session boundary) + §2.4 (fence): revoke still-ARMED pick tickets
+    // (our own switch is already past `armed`, so a reason:"resume" shutdown is a no-op for the
+    // ticket) and abort in-flight list builds — a build finishing under the old epoch is
+    // discarded before it can install a gen.
+    resumeExec.onSessionBoundary();
+    resumeList.onShutdown();
     dialogBridge.detachAll();
     tap.dispose();
     // §4.4 (F2 verifier P1): session replacement is a RESET, not a kill — /new・/resume・/fork
@@ -1552,15 +1605,26 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         .filter((p) => p.length > 0);
       const op = parts[0];
       const nonce = parts[1];
-      if (op !== "new" || nonce === undefined || !takeExec(op, nonce)) {
-        return { ok: false, code: "E_UNSUPPORTED" };
+      if (op === "new") {
+        if (nonce === undefined || !execGate.consumeNew(nonce)) {
+          return { ok: false, code: "E_UNSUPPORTED" };
+        }
+        try {
+          await (ctx as ExtensionCommandContext).newSession();
+        } catch {
+          return { ok: false, code: "E_UNSUPPORTED" };
+        }
+        return { ok: true };
       }
-      try {
-        await (ctx as ExtensionCommandContext).newSession();
-      } catch {
-        return { ok: false, code: "E_UNSUPPORTED" };
+      if (op === "resume") {
+        // web-resume plan §2.5 a–d: `true` ⇔ the nonce matched an ARMED ticket (a legit
+        // re-entry — every outcome rides the cmd_late channel / the sync bridge reply); `false`
+        // ⇔ unknown/expired/revoked nonce, surfaced as the terminal warning like `/new`.
+        if (nonce === undefined) return { ok: false, code: "E_UNSUPPORTED" };
+        const ran = await resumeExec.internalExecResume(nonce, ctx as ExtensionCommandContext);
+        return ran ? { ok: true } : { ok: false, code: "E_UNSUPPORTED" };
       }
-      return { ok: true };
+      return { ok: false, code: "E_UNSUPPORTED" };
     },
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
     admin,

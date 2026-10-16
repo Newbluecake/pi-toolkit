@@ -20,6 +20,7 @@ import type {
   StatusInfo,
   WorktreesWire,
 } from "../protocol/messages.js";
+import { STATUS_FEATURES_MAX_CHARS, STATUS_FEATURES_MAX_ITEMS } from "../protocol/messages.js";
 import type { EventTap } from "./event-tap.js";
 import type { QueueMirror } from "./queue-mirror.js";
 import type { TodoWire } from "../protocol/messages.js";
@@ -45,6 +46,7 @@ export function readStatus(
   held?: () => { items: HeldItemWire[]; rev: number; epoch: string } | undefined,
   load?: () => LoadPort | undefined,
   cacheKeepalive?: () => CacheKeepaliveWire | undefined,
+  features?: () => string[] | undefined,
 ): StatusInfo {
   const status: StatusInfo = {
     leafId: safe(() => ctx.sessionManager.getLeafId(), null),
@@ -135,6 +137,19 @@ export function readStatus(
         const since = verdict.gatingSinceMono;
         status.loadGate = projectLoadGate(verdict, since === undefined ? undefined : Math.max(0, verdict.mono - since));
       }
+    }
+  }
+  // web-resume plan §2.7: positive capability tokens (`resume.v1`) — absent ⇔ the caller wired
+  // no features closure (feature off in every gated condition), or it returned nothing for the
+  // current session. Bounded ≤32 × ≤64 chars, clipped here as a defensive backstop on top of the
+  // schema. Sampled in the same call as busy/leafId so a stale gate can never advertise a token.
+  if (features !== undefined) {
+    const tokens = safe(() => features(), undefined);
+    if (tokens !== undefined && tokens.length > 0) {
+      status.features = tokens
+        .filter((t) => typeof t === "string" && t.length >= 1)
+        .slice(0, STATUS_FEATURES_MAX_ITEMS)
+        .map((t) => t.slice(0, STATUS_FEATURES_MAX_CHARS));
     }
   }
   return status;

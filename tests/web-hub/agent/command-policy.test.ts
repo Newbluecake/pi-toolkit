@@ -195,3 +195,44 @@ describe("effectivePolicy", () => {
     expect(effectivePolicy({ policy: "allow", policyBusy: "confirm" }, true)).toBe("confirm");
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-resume plan §2.7 — the `resume` builtin's args-aware allow + the alias rules.
+// ---------------------------------------------------------------------------
+describe("resolveCommandPolicy — web-resume resume forms (§2.7)", () => {
+  it("the ADVERTISED bare `resume` (no args) stays deny — old UIs unchanged", () => {
+    expect(resolve("resume", "", "builtin")).toEqual({ policy: "deny" });
+    expect(resolve("resume", "whatever", "builtin")).toEqual({ policy: "deny" });
+  });
+
+  it("`resume __list` / `resume __pick` are allowed through the builtin bridge", () => {
+    expect(resolve("resume", '__list {"scope":"recent"}', "builtin")).toEqual({ policy: "allow" });
+    expect(resolve("resume", '__pick {"id":"x","gen":"0123456789abcdef"}', "builtin")).toEqual({
+      policy: "allow",
+    });
+  });
+
+  it("no busy split: D4 (忙时可看不可切) is enforced inside the bridge, not the policy", () => {
+    const decision = resolve("resume", '__list {"scope":"all"}', "builtin");
+    expect(effectivePolicy(decision, true)).toBe("allow");
+  });
+
+  it("webCommandPolicy.resume wins outright over the __list/__pick allow (§2.7 override rule)", () => {
+    expect(
+      resolveCommandPolicy({
+        name: "resume",
+        args: '__list {"scope":"all"}',
+        kind: "builtin",
+        overrides: { resume: "deny" },
+      }),
+    ).toEqual({ policy: "deny" });
+    expect(
+      resolveCommandPolicy({ name: "resume", args: "__pick {}", kind: "builtin", overrides: { resume: "confirm" } }),
+    ).toEqual({ policy: "confirm" });
+  });
+
+  it("`resume-recent` stays deny for every web form — the new UI never sends it", () => {
+    expect(resolve("resume-recent", "", "extension")).toEqual({ policy: "deny" });
+    expect(resolve("resume-recent", "--all", "extension")).toEqual({ policy: "deny" });
+  });
+});

@@ -438,3 +438,82 @@ describe("execute — builtin dispatch (§4.6 builtin row)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-resume plan §2.4/§2.5 — the `resume` builtin's two web forms through the bridge, the
+// claim-aware armExec, and isQuiet.
+// ---------------------------------------------------------------------------
+describe("execute — web-resume resume forms (§2.4/§2.5)", () => {
+  it("expect mismatch rejects with E_SESSION_CHANGED before the resume port is ever consulted", () => {
+    const resume = vi.fn();
+    const { ctx } = fakeCtx({ sessionId: "sess-1" });
+    const bridge = createBuiltinBridge(baseDeps({ getCtx: () => ctx, getSessionId: () => "sess-1", resume }));
+    const out = bridge.execute(
+      frame("resume", '__pick {"id":"x","gen":"0123456789abcdef"}', {
+        cmd: {
+          op: "command",
+          name: "resume",
+          args: '__pick {"id":"x","gen":"0123456789abcdef"}',
+          expect: { sessionId: "other" },
+        },
+      }),
+    );
+    expect(out).toMatchObject({ ok: false, code: "E_SESSION_CHANGED" });
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("policy denies everything but __list/__pick, so the resume port never sees another form", () => {
+    const resume = vi.fn();
+    const bridge = createBuiltinBridge(baseDeps({ resume }));
+    const out = bridge.execute(frame("resume", ""));
+    expect(out).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("without the resume port wired the deny is the honest answer (feature signal is off too)", () => {
+    const bridge = createBuiltinBridge(baseDeps({}));
+    expect(bridge.execute(frame("resume", '__list {"scope":"recent"}'))).toMatchObject({
+      ok: false,
+      code: "E_COMMAND_DENIED",
+    });
+  });
+
+  it("delegates __list/__pick to the resume port with the ctx, passing a Promise through verbatim", () => {
+    const pending = { ok: true, data: { op: "command", kind: "builtin", completion: "sync" as const } };
+    const resume = vi.fn((_frame: CmdFrame, _cmd: CmdArgs & { op: "command" }, _ctx: unknown) =>
+      Promise.resolve(pending),
+    );
+    const { ctx } = fakeCtx();
+    const bridge = createBuiltinBridge(baseDeps({ getCtx: () => ctx, resume }));
+    const out = bridge.execute(frame("resume", '__list {"scope":"recent"}'));
+    expect(out instanceof Promise).toBe(true);
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume.mock.calls[0]![2]).toBe(ctx);
+  });
+
+  it("an override `resume: deny` blocks even __list (§2.7 override rule)", () => {
+    const resume = vi.fn();
+    const bridge = createBuiltinBridge(baseDeps({ resume, overrides: () => ({ resume: "deny" }) }));
+    expect(bridge.execute(frame("resume", '__list {"scope":"recent"}'))).toMatchObject({
+      ok: false,
+      code: "E_COMMAND_DENIED",
+    });
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("/new with a held exec claim ⇒ E_COMMAND_DENIED exec:in-flight, no message sent (§2.5 step 3)", () => {
+    const { pi, sent } = fakePi();
+    const bridge = createBuiltinBridge(baseDeps({ pi, armExec: () => undefined }));
+    const out = bridge.execute(frame("new", "", {}, true)); // the clear button bakes confirm:true in
+    expect(out).toMatchObject({ ok: false, code: "E_COMMAND_DENIED", message: "exec:in-flight" });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("isQuiet marks exactly the `resume __list` form", () => {
+    const bridge = createBuiltinBridge(baseDeps({}));
+    expect(bridge.isQuiet(frame("resume", '__list {"scope":"all"}'))).toBe(true);
+    expect(bridge.isQuiet(frame("resume", '__pick {"id":"x","gen":"0123456789abcdef"}'))).toBe(false);
+    expect(bridge.isQuiet(frame("resume", ""))).toBe(false);
+    expect(bridge.isQuiet(frame("new", ""))).toBe(false);
+  });
+});

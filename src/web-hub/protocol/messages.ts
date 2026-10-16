@@ -561,6 +561,10 @@ export interface StatusInfo {
    *  sessionId); a mismatched scope is dropped without comparing revs (epochs are random, not
    *  ordered). Present iff `held` present. */
   heldEpoch?: string;
+  /** web-resume plan §2.7: positive capability tokens ("resume.v1") — absent ⇔ no web-resume
+   *  feature on this agent. Bounded ≤32 entries × ≤64 chars; a strictly optional field, so an
+   *  old hub's open StatusInfoSchema forwards it verbatim and an old UI ignores it (F9). */
+  features?: string[];
 }
 
 export interface FleetRowWire {
@@ -702,6 +706,44 @@ export interface CommandOutputWire {
   needsTerminal?: true;
 }
 export type PromptDelivery = "observed" | "unobserved" | "held";
+// ---------------------------------------------------------------------------
+// web-resume plan §2.4 (FROZEN wire shape): the agent-side session list for the web
+// resume dialog, riding the existing `command` op's success payload as an optional
+// `sessions` field on the `command` variant of `CmdData`. Types only — `CmdDataSchema`
+// stays `Type.Unknown()`, an old hub forwards it verbatim (F9), no proto bump, no cap.
+// Never on the wire: paths, cwd, message text.
+// ---------------------------------------------------------------------------
+export interface ResumeSessionRowWire {
+  id: string;
+  title: string;
+  titleSource: "name" | "first" | "none";
+  modifiedMs: number;
+  current?: true;
+  forked?: true;
+}
+export interface ResumeSessionsWire {
+  v: 1;
+  scope: "recent" | "all";
+  windowHours: 48;
+  q?: string;
+  gen: string;
+  total: number;
+  rows: ResumeSessionRowWire[];
+  next?: string; /*cursor*/
+  reset?: true;
+  partial?: true;
+  truncated?: true;
+  ambiguous?: number;
+  provenance: "complete" | "partial" | "capacity";
+  builtAt: number;
+}
+/** web-resume plan §2.7: the one `StatusInfo.features` token this version emits. Old agents
+ *  never send `features` at all, so its presence is a positive capability signal. */
+export const RESUME_FEATURE_V1 = "resume.v1";
+/** §2.7 bounds: `features` is bounded ≤32 entries × ≤64 chars (schema-enforced, and clipped
+ *  again agent-side before it is ever set). */
+export const STATUS_FEATURES_MAX_ITEMS = 32;
+export const STATUS_FEATURES_MAX_CHARS = 64;
 /** Result of agent-side @mention routing. This is additive to the prompt result so older
  * hubs/UIs continue to accept and ignore it. */
 export type MentionResultData =
@@ -726,6 +768,10 @@ export type CmdData =
       completion: "sync" | "async" | "unknown" | "timeout";
       captured?: boolean;
       output?: CommandOutputWire;
+      /** web-resume plan §2.4: present only on the `resume __list` builtin's success payload —
+       *  the page of the session list (never paths/cwd/message text). Not retained in the
+       *  agent's command ledger (stripped at settle) nor in any origin notify. */
+      sessions?: ResumeSessionsWire;
     }
   | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody }
   | RecallResultData;
@@ -1362,6 +1408,13 @@ const StatusInfoSchema = Type.Object({
   held: Type.Optional(Type.Array(HeldItemSchema, { maxItems: 32 })),
   heldRev: Type.Optional(Type.Integer({ minimum: 0 })),
   heldEpoch: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+  // web-resume plan §2.7: optional capability tokens. Strictly optional + bounded — a frame
+  // without it decodes exactly as before (pinned by tests against the pre-change schema shape).
+  features: Type.Optional(
+    Type.Array(Type.String({ minLength: 1, maxLength: STATUS_FEATURES_MAX_CHARS }), {
+      maxItems: STATUS_FEATURES_MAX_ITEMS,
+    }),
+  ),
 });
 
 const FleetRowSchema = Type.Object({
