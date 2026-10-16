@@ -88,6 +88,12 @@ const detail = {
   // 之前，永不动这里。
   todoCompletedHidden: "已完成 {n} 项",
   todoArchived: "已归档 {n} 项",
+  // Web /clear 快捷按钮（2026-10 用户需求）：详情头部的「清空」——同一 pi 进程内新建会话，
+  // 直接携带确认发送内置 /new（全程无任何确认弹窗）。追加在文件末尾——其它包插在
+  // `todoCompletedHidden` 之前，永不动这里。
+  clearAria: "清空",
+  clearTitle: "新会话（/clear）",
+  clearFailed: "新会话启动失败（{code}）",
 } satisfies Messages<typeof en>;
 
 export default detail;

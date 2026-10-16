@@ -91,6 +91,12 @@ const detail = {
   // `todoCompletedHidden`, never here.
   todoCompletedHidden: "✓ {n} done",
   todoArchived: "{n} archived",
+  // Web /clear quick button (2026-10 user request): the detail header's 「清空」 — starts a new
+  // session in the same pi process via builtin /new with confirm baked in (no dialog anywhere).
+  // Appended at the file's end — another package inserts before `todoCompletedHidden`, never here.
+  clearAria: "Clear",
+  clearTitle: "New session (/clear)",
+  clearFailed: "Couldn't start a new session ({code})",
 } satisfies Record<string, string>;
 
 export default detail;

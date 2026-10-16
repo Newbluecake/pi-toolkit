@@ -45,7 +45,7 @@ import { useDetailHeadCollapse } from "../../composables/useDetailHeadCollapse.j
 import { browserLocalStorage } from "../shell/themeStorage.js";
 import { managedFor, restoringKeys } from "../../logic/spawn.js";
 import type { DetailHeaderEmits, DetailHeaderProps } from "../../contracts.js";
-import { HUB_CTX } from "../control/controlContext.js";
+import { CONTROL_VIEW, HUB_CTX } from "../control/controlContext.js";
 import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 import { SIDEBAR_DRAWER } from "../shell/sidebarDrawer.js";
 import "../../styles/spawn.css";
@@ -209,6 +209,52 @@ function onStopKeydown(ev: KeyboardEvent): void {
 
 onUnmounted(disarmStop);
 
+// ---------------------------------------------------------------------------
+// Web `/clear` quick button (2026-10 user request): starts a NEW session in the SAME pi
+// process — the web twin of the TUI's /clear (= session-nav's alias for builtin /new). It
+// rides the EXISTING command path end to end: `runCommand(agentKey, "new", "",
+// { confirm: true })` through `useControl` → hub cmd → `builtin-bridge.ts`'s `/new` →
+// `/webhub __exec new <nonce>` → `ctx.newSession()`. The confirm flag is baked in up front
+// (the user's explicit 「无需二次确认」), so the dock's E_CONFIRM_REQUIRED/CommandConfirm flow
+// never engages and NO confirmation dialog exists anywhere in this button's flow. Gating is
+// the composer's exact slash-command surface (`CONTROL_VIEW.enabled` — hub cmd.v1 ∧ card
+// control ∧ live — plus `commandsEnabled`, the agent's `command.v1` slot). Deliberately NOT
+// disabled while busy: builtin `new` has no `policyBusy` (command-policy.ts) and the bridge
+// dispatches with `deliverAs:"followUp"`, so a busy agent queues it exactly like typing
+// /new in the composer. In-flight disable is the local `clearing` ref (double-submit guard;
+// the optimistic queue row is the ctl item `useControl` already dispatches). A wire failure
+// surfaces as this header's one-line role=alert note (the stop-session error's
+// `.spawn-stop-note` pattern — no new dialog); success needs no work here: the agentKey
+// stays constant and state.js's `applySession` clears + resyncs the same agent's transcript,
+// which is precisely the session-switch plan's follow behavior.
+// ---------------------------------------------------------------------------
+const controlView = inject(CONTROL_VIEW, null);
+const clearUsable = computed(
+  () =>
+    controlView !== null &&
+    controlView.control !== null &&
+    controlView.enabled.value &&
+    controlView.commandsEnabled.value,
+);
+const clearing = ref(false);
+const clearError = ref<string | null>(null);
+
+async function onClear(): Promise<void> {
+  const view = controlView;
+  const c = view?.control ?? null;
+  if (view === null || c === null || clearing.value || !clearUsable.value) return;
+  clearing.value = true;
+  clearError.value = null;
+  try {
+    const outcome = await c.runCommand(view.agentKey, "new", "", { confirm: true });
+    if (!outcome.ok) clearError.value = outcome.error ?? "E_FAILED";
+  } catch {
+    clearError.value = "E_NETWORK";
+  } finally {
+    clearing.value = false;
+  }
+}
+
 /** One-time first-prompt notice: keyed by spawnId, dismissed per record (一次性). */
 const fpNotice = computed(() => {
   const flow = hub?.spawn?.newSession.flow.value;
@@ -290,6 +336,21 @@ function onToggleHeadInfo(): void {
         </button>
       </h2>
       <StatusPill :state="visual" :label="statusLabel" />
+      <!-- Web /clear quick button (2026-10): new session in the same pi process via builtin
+           /new with confirm baked in — no confirmation dialog anywhere in this flow. Rendered
+           only on the composer's slash-command surface (control ∧ live ∧ command.v1 slot);
+           never busy-gated (see the script block above). -->
+      <button
+        v-if="clearUsable"
+        class="detail-clear-btn"
+        type="button"
+        :disabled="clearing"
+        :title="t('detail.clearTitle')"
+        :aria-label="t('detail.clearAria')"
+        @click="void onClear()"
+      >
+        <AppIcon :name="clearing ? 'loader' : 'sparkle'" class="icon" :class="{ spin: clearing }" />
+      </button>
       <!-- web-hub-privacy P2: 隐私标记 (unmarked → persistent mark) vs 立即锁定 (marked +
            viewing → view relock) — the two names never mix (plan v2.1 N1 命名分离). -->
       <button
@@ -370,6 +431,9 @@ function onToggleHeadInfo(): void {
     </p>
     <p v-if="stopError" class="spawn-stop-note" role="alert">
       {{ t("spawn.stopSessionFailed", { code: stopError }) }}
+    </p>
+    <p v-if="clearError" class="spawn-stop-note" role="alert">
+      {{ t("detail.clearFailed", { code: clearError }) }}
     </p>
     <p v-if="fpNoticeVisible && fpNotice" class="spawn-fp-note" role="status">
       {{ t("spawn.fpRefilled", { state: fpNotice.state }) }}
