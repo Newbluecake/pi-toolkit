@@ -13,10 +13,20 @@
   MERGED STOP (2026-10 user request "把 stop 图标放到上下文比例圆圈中"): while the agent is
   BUSY the ring's ENTIRE zone becomes the two-step stop button — the arc keeps showing context
   usage around a centered stop icon, but nothing else may intercept taps inside the zone (stop
-  wins: the details panel neither opens nor survives `busy` flipping true). The armed grammar
+  wins: no click-to-pin, and any open panel — pin or hover peek — drops the instant `busy`
+  flips true). The armed grammar
   is StopButton's exactly (4s auto-revert, Esc reverts, `aria-live`, queue note when
   `queueCount > 0`) via the shared `useArmedConfirm` composable; armed turns icon + arc danger.
   While IDLE there is no stop affordance at all — the ring is today's details toggle.
+
+  HOVER PEEK (2026-10-16 user request 「这个展示做成 hover 展示吧」): a hover-capable pointer
+  resting ~150ms on the ring zone opens the details panel as a non-pinned PEEK — QuotaPill's
+  popover grammar (no focus steal; closes ~200ms after the pointer leaves BOTH the ring zone
+  and the panel, so ring→panel traversal keeps it open; a transiting pointer never flashes
+  it; touch/coarse pointers never peek). Click still PINS exactly as before (pinned survives
+  pointer-leave; Esc / outside click / clicking again close it, Esc refocuses the trigger —
+  touch + keyboard path unchanged). The peek is read-only and allowed while BUSY too (it sits
+  above the ring and never intercepts the stop button), but ARMED hides it (armed copy wins).
 
   Data arrives via the inject-only `DETAIL_METRICS` channel (`AgentDetail` provides it — the
   frozen `ComposerProps` stay untouched). No provider (dashboard, read-only dock) ⇒ the ring
@@ -36,6 +46,7 @@
 import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import { useArmedConfirm } from "../../composables/useArmedConfirm.js";
 import { useI18n } from "../../composables/useI18n.js";
+import { useMedia } from "../../composables/useMedia.js";
 import { formatKTokens, formatPercent, formatUsd, localeFor } from "../../format.js";
 import type { ContextRingEmits, ContextRingProps } from "../../contracts.js";
 import AppIcon from "../../icons/AppIcon.vue";
@@ -102,13 +113,74 @@ const queueNote = computed(() =>
   armed.value && props.queueCount > 0 ? t("control.stopQueueNote", { n: props.queueCount }) : "",
 );
 
-const open = ref(false);
+/* ------------------- details panel: click-pinned + hover peek (2026-10-16) ------------------- */
+
+/** Hover-capable pointer (desktop): gates the hover-peek panel — touch/coarse pointers never
+ *  auto-open on hover (same `(hover: hover) and (pointer: fine)` gate as QuotaPill's popover). */
+const hoverFine = useMedia(window, "(hover: hover) and (pointer: fine)").matches;
+
+/** Click-pinned open (today's only open state pre-2026-10-16; the touch + keyboard path). */
+const pinned = ref(false);
+/** Hover "peek" open (hover-capable pointers only): same panel, non-pinned — closes ~200ms
+ *  after the pointer leaves BOTH the ring zone and the panel, never steals focus, and a click
+ *  on top of it simply pins it. Hidden while the merged stop is ARMED (armed copy wins). */
+const peek = ref(false);
+const open = computed(() => pinned.value || (peek.value && !armed.value));
+
 const root = ref<HTMLElement | null>(null);
 const trigger_ = ref<HTMLButtonElement | null>(null);
 
+let hoverIn: ReturnType<typeof setTimeout> | undefined;
+let hoverOut: ReturnType<typeof setTimeout> | undefined;
+
+/** Cancel any pending peek-close (pointer re-entered the ring zone or the panel). */
+function stopPeekClose(): void {
+  if (hoverOut !== undefined) {
+    clearTimeout(hoverOut);
+    hoverOut = undefined;
+  }
+}
+
+/** ~150ms rest before the peek opens (a pointer merely transiting the ring must not flash the
+ *  panel). Bound to the ring ZONE (the root span — busy stop button included, so the busy
+ *  peek works) and to the panel itself; while busy this only ever peeks (read-only), never
+ *  pins — pinning stays an idle-trigger-only click path. */
+function onZoneEnter(): void {
+  stopPeekClose();
+  if (!hoverFine.value || open.value) return;
+  hoverIn = setTimeout(() => {
+    hoverIn = undefined;
+    peek.value = true;
+  }, 150);
+}
+
+/** ~200ms close grace: covers the ring→panel traversal gap; cancelled by re-entering either. */
+function schedulePeekClose(): void {
+  stopPeekClose();
+  hoverOut = setTimeout(() => {
+    hoverOut = undefined;
+    peek.value = false;
+  }, 200);
+}
+
+/** Leaving the ring zone OR the panel: close the peek unless a click pinned it. */
+function onZoneLeave(): void {
+  if (hoverIn !== undefined) {
+    clearTimeout(hoverIn);
+    hoverIn = undefined;
+  }
+  if (!pinned.value && peek.value) schedulePeekClose();
+}
+
+/** Click on the idle trigger: toggles a PIN on top of any peek (QuotaPill's `onToggle`). */
+function onToggle(): void {
+  pinned.value = !pinned.value;
+  peek.value = false;
+}
+
 function closePanel(refocus: boolean): void {
-  if (!open.value) return;
-  open.value = false;
+  pinned.value = false;
+  peek.value = false;
   if (refocus) trigger_.value?.focus();
 }
 
@@ -119,8 +191,9 @@ function onKeydown(ev: KeyboardEvent): void {
   }
 }
 
-// Stop wins the zone: `busy` flipping true force-closes the details panel (it must not compete
-// with the stop button for taps); `busy` flipping false drops any pending armed state.
+// Stop wins the zone: `busy` flipping true force-closes the details panel — pin AND hover
+// peek alike (it must not compete with the stop button for taps); `busy` flipping false drops
+// any pending armed state.
 watch(
   () => props.busy,
   (v) => {
@@ -138,13 +211,26 @@ watch(open, (v) => {
   if (v) document.addEventListener("click", onDocClick, true);
   else document.removeEventListener("click", onDocClick, true);
 });
-onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
+onBeforeUnmount(() => {
+  document.removeEventListener("click", onDocClick, true);
+  if (hoverIn !== undefined) clearTimeout(hoverIn);
+  if (hoverOut !== undefined) clearTimeout(hoverOut);
+});
 </script>
 
 <template>
-  <span v-if="showZone" ref="root" class="ctx-ring" :data-tone="tone" :data-stop="busy || undefined">
+  <span
+    v-if="showZone"
+    ref="root"
+    class="ctx-ring"
+    :data-tone="tone"
+    :data-stop="busy || undefined"
+    @mouseenter="onZoneEnter"
+    @mouseleave="onZoneLeave"
+  >
     <!-- Busy: the ring's ENTIRE hit zone is the two-step stop button (stop wins — this button
-         carries no panel toggle and the panel below can't be open). The arc keeps rendering
+         carries no panel toggle; the panel below can only be a read-only hover PEEK, never
+         click-pinned, and never intercepts this button's taps). The arc keeps rendering
          around the centered icon so context usage stays visible. -->
     <button
       v-if="busy"
@@ -164,7 +250,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       </svg>
       <AppIcon name="stop" class="ctx-ring-stop-icon" />
     </button>
-    <!-- Idle: today's details toggle, unchanged — no stop affordance. -->
+    <!-- Idle: the details toggle — click pins (hover peeks, see HOVER PEEK); no stop affordance. -->
     <button
       v-else
       ref="trigger_"
@@ -172,7 +258,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
       class="ctx-ring-btn"
       :aria-expanded="open"
       :aria-label="ariaLabel"
-      @click="open = !open"
+      @click="onToggle"
       @keydown="onKeydown"
     >
       <svg class="ctx-ring-svg" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
@@ -182,7 +268,14 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick, true));
     </button>
     <span v-if="armed" class="stop-live sr-only" role="status">{{ t("control.stopArmed") }}</span>
     <span v-if="queueNote" class="ctx-ring-stop-note" role="note">{{ queueNote }}</span>
-    <dl v-if="open" class="ctx-ring-panel" :aria-label="t('control.contextRingPanelAria')" @keydown="onKeydown">
+    <dl
+      v-if="open"
+      class="ctx-ring-panel"
+      :aria-label="t('control.contextRingPanelAria')"
+      @keydown="onKeydown"
+      @mouseenter="onZoneEnter"
+      @mouseleave="onZoneLeave"
+    >
       <div class="ctx-ring-row">
         <dt>{{ t("detail.contextLabel") }}</dt>
         <dd>

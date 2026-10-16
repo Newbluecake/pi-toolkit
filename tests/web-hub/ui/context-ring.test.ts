@@ -3,11 +3,14 @@
  * `control/ContextRing.vue` (2026-10-05, user 现场拍板): the context metric's new home — an SVG
  * progress ring inside the composer textarea's right edge, fed by the inject-only
  * `DETAIL_METRICS` channel (`AgentDetail` provides). No provider / no contextUsage ⇒ renders
- * nothing. Click toggles the upward details panel (context % + tokens, cost, sub-agent cost);
- * Esc / outside click close it.
+ * nothing. Click toggles (pins) the upward details panel (context % + tokens, cost, sub-agent
+ * cost); Esc / outside click close it. Since 2026-10-16 (「这个展示做成 hover 展示吧」) a
+ * hover-capable pointer resting on the ring zone PEEKS the same panel (~150ms open, ~200ms
+ * close after leaving both zone and panel) — same grammar/timings as QuotaPill's popover,
+ * verified here with the same matchMedia stubbing trick.
  */
 import { flushPromises, mount } from "@vue/test-utils";
-import { computed } from "vue";
+import { computed, nextTick } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ContextRing from "../../../src/web-hub/ui/src/components/control/ContextRing.vue";
 import {
@@ -48,6 +51,7 @@ function mountRing(m?: DetailMetricsView, props?: { busy?: boolean; queueCount?:
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   for (const w of mounted.splice(0)) w.unmount();
 });
 
@@ -225,5 +229,152 @@ describe("ContextRing.vue — merged stop mode (2026-10 user request: stop 图�
     expect(wrapper.find(".ctx-ring-stop-btn").exists()).toBe(false);
     expect(wrapper.find(".stop-btn").exists()).toBe(false);
     expect(wrapper.get(".ctx-ring").attributes("data-stop")).toBeUndefined();
+  });
+});
+
+describe("ContextRing.vue — hover peek (2026-10-16 「这个展示做成 hover 展示吧」)", () => {
+  /** Same matchMedia stub shape as the QuotaPill peek tests (`quota-pill-tiers.test.ts`): only
+   *  the exact `(hover: hover) and (pointer: fine)` query ever matches — coarse/touch matches
+   *  nothing, so the peek gate stays closed. */
+  function stubHoverMedia(hover: boolean): void {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: hover && query === "(hover: hover) and (pointer: fine)",
+      media: query,
+      addEventListener: (): void => {},
+      removeEventListener: (): void => {},
+    }));
+  }
+
+  function mountHoverable(m?: DetailMetricsView, props?: { busy?: boolean; queueCount?: number }) {
+    vi.useFakeTimers();
+    stubHoverMedia(true);
+    return mountRing(m, props);
+  }
+
+  it("~150ms rest opens the panel as a peek (aria flips, focus untouched); ~200ms after leaving the zone it closes", async () => {
+    const wrapper = mountHoverable(metrics({}));
+    const ring = wrapper.get(".ctx-ring");
+    const btn = wrapper.get(".ctx-ring-btn");
+    await ring.trigger("mouseenter");
+    vi.advanceTimersByTime(149);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false); // not yet — rest not elapsed
+    vi.advanceTimersByTime(1);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    expect(btn.attributes("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(document.body); // peek: no focus steal
+    await ring.trigger("mouseleave");
+    vi.advanceTimersByTime(199);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true); // still inside the grace
+    vi.advanceTimersByTime(1);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+    expect(btn.attributes("aria-expanded")).toBe("false");
+  });
+
+  it("a pointer merely transiting the zone (leave before 150ms) never flashes the panel", async () => {
+    const wrapper = mountHoverable(metrics({}));
+    const ring = wrapper.get(".ctx-ring");
+    await ring.trigger("mouseenter");
+    vi.advanceTimersByTime(80);
+    await ring.trigger("mouseleave");
+    vi.advanceTimersByTime(1000);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+  });
+
+  it("ring→panel traversal inside the 200ms grace keeps the peek open; leaving the panel closes it", async () => {
+    const wrapper = mountHoverable(metrics({}));
+    const ring = wrapper.get(".ctx-ring");
+    await ring.trigger("mouseenter");
+    vi.advanceTimersByTime(150);
+    await ring.trigger("mouseleave"); // crossing the gap above the ring
+    vi.advanceTimersByTime(100);
+    await wrapper.get(".ctx-ring-panel").trigger("mouseenter"); // inside the panel — cancels
+    vi.advanceTimersByTime(500);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    await wrapper.get(".ctx-ring-panel").trigger("mouseleave");
+    vi.advanceTimersByTime(200);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+  });
+
+  it("coarse/touch pointers never peek (the hover-capable query alone gates it)", async () => {
+    vi.useFakeTimers();
+    stubHoverMedia(false);
+    const wrapper = mountRing(metrics({}));
+    await wrapper.get(".ctx-ring").trigger("mouseenter");
+    vi.advanceTimersByTime(1000);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+  });
+
+  it("a click pins on top of the peek: the panel survives pointer-leave; Esc closes+refocuses; outside click still closes", async () => {
+    const wrapper = mountHoverable(metrics({}));
+    const ring = wrapper.get(".ctx-ring");
+    const btn = wrapper.get(".ctx-ring-btn");
+    await ring.trigger("mouseenter");
+    vi.advanceTimersByTime(150);
+    await btn.trigger("click"); // pin on top of the peek
+    await ring.trigger("mouseleave");
+    vi.advanceTimersByTime(1000);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true); // pinned survives leave
+    await btn.trigger("keydown", { key: "Escape" });
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+    expect(document.activeElement).toBe(btn.element); // Esc refocuses the trigger
+    await btn.trigger("click"); // re-open pinned (no hover this time)
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+  });
+
+  it("busy: hover peeks (read-only) and the panel does not intercept the stop button — arm+confirm still emits stop", async () => {
+    const wrapper = mountHoverable(metrics({}), { busy: true });
+    await wrapper.get(".ctx-ring").trigger("mouseenter");
+    vi.advanceTimersByTime(150);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true); // peek allowed while busy
+    const stop = wrapper.get(".ctx-ring-stop-btn");
+    await stop.trigger("click"); // arm
+    await stop.trigger("click"); // confirm — the panel never intercepted the tap
+    expect(wrapper.emitted("stop")).toHaveLength(1);
+  });
+
+  it("busy: ARMED hides the peek (armed copy wins)", async () => {
+    const wrapper = mountHoverable(metrics({}), { busy: true });
+    await wrapper.get(".ctx-ring").trigger("mouseenter");
+    vi.advanceTimersByTime(150);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    await wrapper.get(".ctx-ring-stop-btn").trigger("click"); // arm
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false); // armed wins
+    expect(wrapper.find(".stop-live").exists()).toBe(true); // the armed announcement is the overlay now
+  });
+
+  it("busy: still no click-to-pin — arming (and its 4s auto-revert) never opens the panel", async () => {
+    const wrapper = mountHoverable(metrics({}), { busy: true });
+    await wrapper.get(".ctx-ring-stop-btn").trigger("click"); // arm
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+    vi.advanceTimersByTime(4100); // armed auto-reverts
+    await nextTick();
+    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+  });
+
+  it("busy flipping true also drops an open hover peek (stop wins the zone)", async () => {
+    const wrapper = mountHoverable(metrics({}), { busy: false });
+    await wrapper.get(".ctx-ring").trigger("mouseenter");
+    vi.advanceTimersByTime(150);
+    await nextTick();
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
+    await wrapper.setProps({ busy: true });
+    expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
+    expect(wrapper.get(".ctx-ring-stop-btn").exists()).toBe(true);
   });
 });
