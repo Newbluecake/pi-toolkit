@@ -42,6 +42,7 @@ import { dirname, extname } from "node:path";
 import { gzipSync } from "node:zlib";
 import { PROTO } from "../protocol/version.js";
 import { isAllowedUiPath } from "../protocol/ui-manifest.js";
+import type { HubUiBuildWire } from "../protocol/version-info.js";
 import { detectUiLang, renderUnbuiltPage } from "./unbuilt.js";
 import {
   createUiRootService,
@@ -112,7 +113,18 @@ export interface UiServer {
   refresh(): Promise<UiStatus>;
   /** Last known status, or the `unbuilt`/empty-candidates shape before the first resolve. */
   status(): UiStatus;
+  /**
+   * web-hub-version plan §3.6/§3.9: `refreshFor("/")` — the full redeploy-probe chain
+   * (`logStatus → onStatus`, `onServed`) without serving anything. Cross-request single-flight:
+   * one in-flight promise, ≤ `PROBE_WAITERS` joined callers (beyond ⇒ rejects `Error("E_BUSY")`);
+   * the slot is held until the underlying lstat/resolve really settles, no matter how many
+   * callers gave up waiting. Rejects only with `E_BUSY`.
+   */
+  probe(): Promise<UiStatus>;
 }
+
+/** Max callers joined onto one in-flight `probe()`. */
+export const PROBE_WAITERS = 8;
 
 export interface CreateUiServerOptions {
   readonly candidates: readonly UiCandidatePlan[];
@@ -126,6 +138,10 @@ export interface CreateUiServerOptions {
    * refresh 也会触发一次）——`hub.ts` 接到后 `hubJson.patchUi(status)`，与 `LanFrontendDeps.onStatus`
    * 对 `LanStatus` 的做法完全对称。 */
   readonly onStatus?: (status: UiStatus) => void;
+  /** web-hub-version plan §3.6 (R2 #2/#5): fires whenever the SERVED bundle identity changes —
+   * independent `rootGeneration + assets` dedup, OUTSIDE `logStatus`'s `statusSignature` dedup
+   * (which ignores assets). `undefined` = no servable root. The first resolve fires it once. */
+  readonly onServed?: (ui: HubUiBuildWire | undefined) => void;
 }
 
 const UNBUILT_STATUS: UiStatus = { state: "unbuilt", candidates: [] };
@@ -159,6 +175,11 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
   });
 
   let lastLoggedSignature: string | undefined;
+  let servedSignature: string | undefined;
+  let rootGeneration = 0;
+  let lastRootInfo: VerifiedUiRoot["info"] | undefined;
+  const assetsCache = new WeakMap<VerifiedUiRoot["info"], string[]>();
+  let probeFlight: { promise: Promise<UiStatus>; waiters: number } | undefined;
 
   /** Per-root serving variants, keyed by the verified root's `info` object identity and rebuilt
    * only when a redeploy produces a fresh `info` (same generation logic the pre-gzip `indexCache`
@@ -188,6 +209,67 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
       }
     }
     opts.onStatus?.(status);
+  }
+
+  /** `/assets/*` references of the verified index.html, validated against both the allow-list and
+   * the manifest (so only really served, hash-verified paths count); sorted, ≤4. */
+  function assetsOf(root: VerifiedUiRoot): string[] {
+    const cached = assetsCache.get(root.info);
+    if (cached !== undefined) return cached;
+    const html = (root.files.get("index.html")?.bytes ?? Buffer.alloc(0)).toString("utf8");
+    const found = new Set<string>();
+    for (const m of html.matchAll(/(?:src|href)="\/(assets\/[^"?#\s]+)"/g)) {
+      const rel = m[1]!;
+      if (isAllowedUiPath(rel) && root.files.has(rel)) found.add(`/${rel}`);
+    }
+    const out = [...found].sort().slice(0, 4);
+    assetsCache.set(root.info, out);
+    return out;
+  }
+
+  function notifyServed(result: { readonly root?: VerifiedUiRoot | undefined }): void {
+    const root = result.root;
+    if (root !== undefined && root.info !== lastRootInfo) rootGeneration++;
+    lastRootInfo = root?.info;
+    const wire: HubUiBuildWire | undefined =
+      root === undefined
+        ? undefined
+        : {
+            source: root.kind,
+            version: root.info.version,
+            commit: root.info.commit,
+            builtAt: root.info.builtAt,
+            assets: assetsOf(root),
+          };
+    const sig = wire === undefined ? "none" : `${rootGeneration}|${wire.assets.join(",")}`;
+    if (sig === servedSignature) return;
+    servedSignature = sig;
+    opts.onServed?.(wire);
+  }
+
+  async function refreshFor(urlPath: string): Promise<Awaited<ReturnType<typeof svc.maybeRefresh>>> {
+    const result = await svc.maybeRefresh(urlPath);
+    logStatus(result.status);
+    notifyServed(result);
+    return result;
+  }
+
+  function probe(): Promise<UiStatus> {
+    if (probeFlight !== undefined) {
+      if (probeFlight.waiters >= PROBE_WAITERS) return Promise.reject(new Error("E_BUSY"));
+      probeFlight.waiters++;
+      return probeFlight.promise;
+    }
+    const flight: { promise: Promise<UiStatus>; waiters: number } = {
+      waiters: 1,
+      promise: refreshFor("/")
+        .then((r) => r.status)
+        .finally(() => {
+          if (probeFlight === flight) probeFlight = undefined;
+        }),
+    };
+    probeFlight = flight;
+    return flight.promise;
   }
 
   function substituteAuthMode(bytes: Buffer, authMode: "token" | "password"): Buffer {
@@ -243,8 +325,7 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
     res: ServerResponse,
     o: { readonly authMode: "token" | "password"; readonly acceptLanguage?: string; readonly acceptEncoding?: string },
   ): Promise<boolean> {
-    const result = await svc.maybeRefresh(urlPath);
-    logStatus(result.status);
+    const result = await refreshFor(urlPath);
     const rel = uiRelPath(urlPath);
 
     if (result.root === undefined) {
@@ -310,9 +391,10 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
   async function refresh(): Promise<UiStatus> {
     const result = await svc.resolve();
     logStatus(result.status);
+    notifyServed(result);
     if (result.root !== undefined) variantsOf(result.root); // compress-once at startup (hub.ts awaits refresh() before serving)
     return result.status;
   }
 
-  return { serve, refresh, status: () => svc.status() ?? UNBUILT_STATUS };
+  return { serve, refresh, probe, status: () => svc.status() ?? UNBUILT_STATUS };
 }

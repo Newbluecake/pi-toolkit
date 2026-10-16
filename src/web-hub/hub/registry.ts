@@ -190,6 +190,8 @@ export function createRegistry(deps: {
       state: r.phase === "stale" ? "stale" : "live",
       pluginVersion: r.pluginVersion,
       outdated: deps.hubVersion !== undefined && compareVersions(r.pluginVersion, deps.hubVersion) < 0,
+      // web-hub-version plan §3.8: the agent's own buildId (UX-only, same as pluginVersion).
+      buildId: r.buildId,
       prompts: r.prompts.map((p) => ({ ...p })),
       control: r.caps.includes("cmd.v1"),
       epoch: r.epoch,

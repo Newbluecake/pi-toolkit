@@ -109,6 +109,10 @@ export async function startLan(
      * assembly, incl. the shared login limiter) and wires `FrontendDeps.privacy` — omitted keeps
      * both `/api/privacy/*` paths at their byte-identical not-enabled 404s. */
     privacy?: boolean;
+    /** web-hub-version plan §3.9: the version-info port (and optionally a UI server whose
+     * `probe()` the route awaits) — omitted keeps `GET /api/version` at the not-enabled matrix. */
+    version?: import("../../../src/web-hub/hub/ports.js").VersionInfoPort;
+    ui?: import("../../../src/web-hub/hub/static.js").UiServer;
   } = {},
 ): Promise<LanHarness> {
   const dir = mkdtempSync(join(tmpdir(), "pwh-lan-"));
@@ -204,6 +208,8 @@ export async function startLan(
       ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
       ...(opts.agentRemove === undefined ? {} : { agentRemove: opts.agentRemove }),
       ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
+      ...(opts.version === undefined ? {} : { version: opts.version }),
+      ...(opts.ui === undefined ? {} : { ui: opts.ui }),
     });
     fe = feCreated;
 

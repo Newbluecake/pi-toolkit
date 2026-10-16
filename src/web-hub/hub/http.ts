@@ -82,6 +82,7 @@ import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutc
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
+import { VERSION_INFO_PATH, VERSION_LIMITS } from "../protocol/version-info.js";
 import { AVATAR_DELETE_PATH, AVATAR_PATH, AVATAR_STORE_MIN_MS } from "../protocol/avatar.js";
 import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "../protocol/privacy.js";
 import type { SpawnsPayload } from "../protocol/spawn.js";
@@ -124,6 +125,7 @@ import type {
   ListenerKind,
   FileSearchRoutes,
   PreviewRoutes,
+  VersionInfoPort,
   PreviewAuthHandled,
   PreviewAuthResult,
   PrivacyRouteIo,
@@ -1068,6 +1070,8 @@ export interface LanRuntime {
   privacy?: PrivacyRoutes | undefined;
   /** sysload P3: shared hub activation for the LAN-equal-width top endpoint. */
   load?: HubLoadService;
+  /** web-hub-version plan §3.9: same service as the loopback listener's; absent ⇒ route not mounted. */
+  versionInfo?: VersionInfoPort | undefined;
 }
 
 async function serveLoadTop(
@@ -1107,6 +1111,55 @@ async function serveLoadTop(
       req.off("close", onClose);
       res.off("close", onClose);
     }
+  }
+}
+
+/**
+ * web-hub-version plan §3.9: `GET /api/version` — shared by both listeners (authentication and
+ * the `X-PWH` check already happened). Rate limit → parallel [UI redeploy probe, snapshot] →
+ * respond. A probe `E_BUSY` ⇒ 503; a probe that merely times out is ignored (the snapshot is
+ * still correct, only `HubInfo.ui` may lag); snapshot `E_BUSY` ⇒ 503, `E_DEADLINE` ⇒ 504. All
+ * error answers are `no-store`; the 200 body is the service's `VersionInfoWire` verbatim.
+ */
+async function serveVersionInfo(
+  version: VersionInfoPort,
+  ui: UiServer,
+  req: IncomingMessage,
+  res: ServerResponse,
+  bucket: string,
+  limiter: CmdLimit,
+): Promise<void> {
+  const admitted = limiter.admit(bucket, 3, 1_000);
+  if (!admitted.ok) {
+    sendJson(res, 429, { error: "E_RATE" }, { "Retry-After": String(Math.ceil(admitted.retryAfterMs / 1000)) });
+    return;
+  }
+  const ac = new AbortController();
+  const onClose = (): void => ac.abort();
+  req.once("aborted", onClose);
+  req.once("close", onClose);
+  res.once("close", onClose);
+  const noStore = { "Cache-Control": "no-store" };
+  try {
+    const probeP: Promise<"busy" | "ok"> = withDeadline(ui.probe(), VERSION_LIMITS.requestMs).then(
+      () => "ok" as const,
+      (err: unknown) => (err instanceof Error && err.message === "E_BUSY" ? ("busy" as const) : ("ok" as const)),
+    );
+    const [probe, outcome] = await Promise.all([probeP, version.snapshot(ac.signal)]);
+    if (ac.signal.aborted) return;
+    if (probe === "busy" || (!outcome.ok && outcome.code === "E_BUSY")) {
+      sendJson(res, 503, { error: "E_BUSY" }, noStore);
+    } else if (!outcome.ok) {
+      sendJson(res, 504, { error: "E_DEADLINE" }, noStore);
+    } else {
+      sendJson(res, 200, outcome.data, noStore);
+    }
+  } catch {
+    if (!ac.signal.aborted) sendJson(res, 500, { error: "E_INTERNAL" }, noStore);
+  } finally {
+    req.off("aborted", onClose);
+    req.off("close", onClose);
+    res.off("close", onClose);
   }
 }
 
@@ -1427,6 +1480,24 @@ async function handleLanRequestInner(
     const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
     if (session === undefined) return;
     return serveLoadTop(rt.load, req, res, `lan:u${session.userId}:load-top`, rt.cmdLimit ?? createCmdLimit(rt.now));
+  }
+
+  // web-hub-version plan §3.9: `GET /api/version` — LAN, same width as loopback (D3). Absent
+  // `versionInfo` ⇒ falls through to the original 404/401 matrix.
+  if (rt.versionInfo !== undefined && method === "GET" && path === VERSION_INFO_PATH) {
+    if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
+    const authDeadlineMs = deriveBudget(8_000, LAN_AUTH_CAP_MS, VERSION_LIMITS.requestMs);
+    const authFailure: { code?: string } = {};
+    const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+    if (session === undefined) return;
+    return serveVersionInfo(
+      rt.versionInfo,
+      rt.ui,
+      req,
+      res,
+      `lan:u${session.userId}:version`,
+      rt.cmdLimit ?? createCmdLimit(rt.now),
+    );
   }
 
   // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — dispatched at the same spot
@@ -2549,6 +2620,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       hubVersion: config.pluginVersion,
       log,
       ...(deps.onUiStatus === undefined ? {} : { onStatus: deps.onUiStatus }),
+      ...(deps.onUiServed === undefined ? {} : { onServed: deps.onUiServed }),
     } satisfies CreateUiServerOptions);
   let server: Server | undefined;
   let port = 0;
@@ -2631,6 +2703,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       rejectAudit429,
       spawn: deps.spawn,
       preview: deps.preview,
+      versionInfo: deps.version,
       avatar: deps.avatar,
       /** web-hub-privacy plan v2.1 (P1): same instance as the loopback listener's (or undefined
        * when `webHub.privacy` is off — both `/api/privacy/*` paths then keep their 404s). */
@@ -2887,6 +2960,13 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
       const principal = readCookie(req.headers.cookie, SESSION_COOKIE) ?? normalizePeerIp(req.socket.remoteAddress);
       return serveLoadTop(load, req, res, `loopback:${principal}:load-top`, cmdLimit);
+    }
+    // web-hub-version plan §3.9: `GET /api/version` — absent service ⇒ original matrix.
+    if (deps.version !== undefined && method === "GET" && path === VERSION_INFO_PATH) {
+      if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
+      if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
+      const principal = readCookie(req.headers.cookie, SESSION_COOKIE) ?? normalizePeerIp(req.socket.remoteAddress);
+      return serveVersionInfo(deps.version, ui, req, res, `loopback:${principal}:version`, cmdLimit);
     }
     // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — same insertion point as the
     // spawn branch above (after headless, before the method branches). Absent ⇒ falls through

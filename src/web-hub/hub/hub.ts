@@ -27,6 +27,7 @@ import {
   resolveHubPaths,
   webHubSpawnFiles,
   webHubUploadsDir,
+  packageRootDir,
   type HubPaths,
   type SocketIdentity,
 } from "../protocol/paths.js";
@@ -54,7 +55,10 @@ import {
   SPAWN_HISTORY_HUB_CAP,
   AVATAR_HUB_CAP,
   PRIVACY_HUB_CAP,
+  VERSION_HUB_CAP,
 } from "../protocol/version.js";
+import type { HubUiBuildWire } from "../protocol/version-info.js";
+import { createVersionInfoService } from "./version-info.js";
 import { createAdminHandler, recoverRotateIntent, type RotateRecoveryOutcome } from "./admin.js";
 import { createAgentServer } from "./agent-server.js";
 import { createAgentRemoveService } from "./agent-remove.js";
@@ -346,6 +350,9 @@ export async function startHub(
     // caps stay byte-identical to pre-feature (§5).
     const spawnPlatform = config.spawn === undefined ? undefined : probePlatform(deps.spawnSeams?.probe);
     const extraHubCaps: readonly string[] = [
+      // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
+      // always constructed, so the cap and the route can never disagree.
+      VERSION_HUB_CAP,
       ...(config.spawn === undefined
         ? []
         : [
@@ -439,6 +446,9 @@ export async function startHub(
     let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined = undefined;
     let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined = undefined;
     let lanDeps: LanFrontendDeps | undefined = undefined;
+    // web-hub-version plan §3.7: assigned just before the frontend is built; close() may run
+    // earlier (admin close during startup), hence `?.` there.
+    let versionService: ReturnType<typeof createVersionInfoService> | undefined = undefined;
     let agentServer: ReturnType<typeof createAgentServer> | undefined = undefined;
     let fe: HttpFrontend = {
       listen: async () => ({ port: 0 }),
@@ -447,6 +457,7 @@ export async function startHub(
       ui: {
         serve: async () => false,
         refresh: async () => ({ state: "unbuilt", candidates: [] }),
+        probe: async () => ({ state: "unbuilt", candidates: [] }),
         status: () => ({ state: "unbuilt", candidates: [] }),
       },
     };
@@ -1209,6 +1220,22 @@ export async function startHub(
         now,
       });
     }
+    // web-hub-version plan §3.5/§3.7: the version-info service (no resident timers; `dispose`d
+    // on both teardown paths) and the served-UI identity sink (`HubInfo.ui` + one `hub` frame
+    // per real change; `onUiStatus → hubJson.patchUi` below stays untouched).
+    versionService = createVersionInfoService({
+      pkgRoot: packageRootDir(),
+      info,
+      now,
+      log,
+      publish: () => {
+        if (closing === undefined) registry.publish({ type: "hub" });
+      },
+    });
+    const versionSvc = versionService;
+    cleanup.push(async () => versionSvc.dispose());
+    const sameUi = (a: HubUiBuildWire | undefined, b: HubUiBuildWire | undefined): boolean =>
+      a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b));
     fe = frontend({
       config,
       paths,
@@ -1219,6 +1246,13 @@ export async function startHub(
       info: () => info,
       now,
       onUiStatus: (s) => hubJson.patchUi(s),
+      version: versionSvc,
+      onUiServed: (next) => {
+        if (sameUi(info.ui, next)) return;
+        if (next === undefined) delete info.ui;
+        else info.ui = next;
+        if (closing === undefined) registry.publish({ type: "hub" });
+      },
       // §6.1 (C0 P0 fix): constructed here so the frontend factory can reach it via
       // `FrontendDeps.commands` — today's stub always answers `E_UNSUPPORTED` and is never read
       // §6.1 (C3): the real command router — hub-side idempotent LRU, agent-capability
@@ -1536,6 +1570,9 @@ export async function startHub(
     }); // ⑦
 
     clearTimeout(startTimer); // startup complete; further cancellation is close()'s job
+    // web-hub-version plan §3.5: one-shot, silent-on-failure boot HEAD observation (git, bounded,
+    // aborted by dispose); broadcasts one `hub` frame when it lands.
+    versionService.captureBootHead();
     if (fe.lan !== undefined && !lanBlockedByRotate) {
       // Review fix (LC, plan §1.4/§3, W3 acceptance item 1/3): `LanFacade.start()` is bounded by
       // its own `LAN_START_DEADLINE_MS` and always *resolves* with a correctly classified
@@ -1650,6 +1687,7 @@ export async function startHub(
         if (supersedeTimer !== undefined) clearInterval(supersedeTimer);
         stopFence();
         idle.stop();
+        versionService?.dispose();
         if (tick !== undefined) clearInterval(tick);
         if (rotateScan !== undefined) clearInterval(rotateScan);
         if (uploadInflightTick !== undefined) clearInterval(uploadInflightTick);

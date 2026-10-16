@@ -186,6 +186,14 @@ describe("registry register / frames", () => {
     expect(h.reg.get(b.agentKey)?.outdated).toBe(false);
   });
 
+  it("card.buildId is the agent's own hello buildId (web-hub-version §3.8), refreshed on a reclaiming hello", () => {
+    const h = harness();
+    const { agentKey } = h.reg.register(hello({ buildId: "0.5.5@abc1234*" }), fakeConn());
+    expect(h.reg.get(agentKey)?.buildId).toBe("0.5.5@abc1234*");
+    h.reg.register(hello({ buildId: "0.5.5@def5678" }), fakeConn());
+    expect(h.reg.get(agentKey)?.buildId).toBe("0.5.5@def5678");
+  });
+
   it("session/status/fleet/ev/gap update the record and are broadcast; re-sent session adds gap", () => {
     const h = harness();
     const { agentKey } = h.reg.register(hello(), fakeConn());

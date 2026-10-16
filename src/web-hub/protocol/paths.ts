@@ -172,6 +172,16 @@ export function packageUiDistDir(): string {
 }
 
 /**
+ * web-hub-version plan §3.1: the package root (`<packageRoot>/`, with a trailing slash stripped
+ * by `fileURLToPath`'s normal form). Same derivation as `packageUiDistDir` — three levels up from
+ * this file; `hub/version-info.ts` reads CHANGELOG.md / package.json / git from here.
+ */
+export function packageRootDir(): string {
+  const p = fileURLToPath(new URL("../../../", import.meta.url));
+  return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
+}
+
+/**
  * `<home>/.pi/agent/web-hub-ui` — the external UI root (vue-plan.md §2.1 candidate 2,
  * P5a). Version-specific subdirectories (`<webHubUiDir(home)>/<hubVersion>/`) are
  * populated by hand (release zip unpacked by the user) or by
