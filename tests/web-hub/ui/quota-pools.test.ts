@@ -238,19 +238,35 @@ describe("QuotaCard: droid", () => {
     const rows = card.findAll(".q-prov");
     expect(rows.map((r) => r.get(".q-name").text())).toEqual(["Droid Std", "Droid Core"]);
     expect(rows[0]!.findAll(".q-scope").map((x) => x.text())).toEqual(["5h", "week", "month"]);
-    expect(rows[0]!.get(".q-overage").text()).toBe("Overage: switch to core pool");
+    expect(rows[0]!.get(".q-overage").text()).toBe("Overage policy: Std → Core");
+    expect(rows[0]!.get(".q-overage").classes()).not.toContain("q-overage-dead");
     expect(rows[1]!.find(".q-overage").exists()).toBe(false);
   });
   it("extraUsage badge with balance + allowed badge when gateOpen; zh text", async () => {
     const q = wire([std([w("month", 10, 0)], { overage: "extraUsage", extraUsageBalanceCents: 1234, gateOpen: true })]);
     const en = await openCard(q);
     expect(en.findAll(".q-overage").map((x) => x.text())).toEqual([
-      "Overage: extra usage ($12.34)",
+      "Overage policy: extra usage ($12.34)",
       "extra usage allowed",
     ]);
     const zh = await openCard(q, "zh");
-    expect(zh.findAll(".q-overage").map((x) => x.text())).toEqual(["超额：额外余额（$12.34）", "已允许花额外余额"]);
+    expect(zh.findAll(".q-overage").map((x) => x.text())).toEqual([
+      "超额策略：扣额外余额（$12.34）",
+      "已允许花额外余额",
+    ]);
     expect(zh.find(".q-scope").text()).toBe("月");
+  });
+  it("droidCore policy with the core pool exhausted ⇒ dimmed badge saying Core is used up (en/zh)", async () => {
+    const q = wire([
+      std([w("week", 56, 0)], { overage: "droidCore", extraUsageBalanceCents: 0 }),
+      core([w("week", 100, 3)]),
+    ]);
+    const en = await openCard(q);
+    const badge = en.get(".q-overage");
+    expect(badge.text()).toBe("Overage policy: Std → Core (Core exhausted)");
+    expect(badge.classes()).toContain("q-overage-dead");
+    const zh = await openCard(q, "zh");
+    expect(zh.get(".q-overage").text()).toBe("超额策略：Std 用尽转 Core（Core 已用尽）");
   });
   it("overage off ⇒ no badge; no gateOpen ⇒ no allowed badge", async () => {
     const off = await openCard(wire([std([w("5h", 1, 0)], { overage: "off", extraUsageBalanceCents: 0 })]));

@@ -316,6 +316,12 @@
   border: 1px solid var(--c-border);
 }
 
+/* droidCore policy while the core pool itself is exhausted: nothing left to fall back to */
+.q-badge.q-overage.q-overage-dead {
+  color: var(--c-text-3);
+  border-style: dashed;
+}
+
 /* P7w: droid billing API auth problem. The pill chip rides `.q-seg[data-level="2"]` (orange dot);
  * the text itself stays at the normal segment colour. */
 .q-seg.q-problem .q-seg-text {

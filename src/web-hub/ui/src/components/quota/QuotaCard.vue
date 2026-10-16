@@ -46,7 +46,9 @@ type CardBadge =
   | { kind: "demoted"; until: number }
   | { kind: "stale"; provider: QuotaProviderWire }
   // P7w (D20): droid-standard overage policy / "extra usage allowed" (gateOpen).
-  | { kind: "overage"; billing: NonNullable<QuotaProviderWire["billing"]> }
+  // 2026-10-16 user: worded as a POLICY (not a current state); `coreExhausted` dims the
+  // droidCore variant when the core pool has no room left to absorb a Standard overage.
+  | { kind: "overage"; billing: NonNullable<QuotaProviderWire["billing"]>; coreExhausted: boolean }
   | { kind: "allowed" };
 
 /** One rendered provider row. GLM merge (2026-10-14 user ruling, `glmPair` — same rule as
@@ -71,6 +73,12 @@ function finiteDemoted(provs: QuotaProviderWire[]): number | undefined {
     .map((x) => x.demotedUntil)
     .filter((x): x is number => x !== undefined && Number.isFinite(x))
     .sort((a, b) => a - b)[0];
+}
+
+/** droid-core has a window at 100% (a reset-elapsed window is already leveled to 0 upstream). */
+function coreExhausted(providers: QuotaProviderWire[]): boolean {
+  const core = providers.find((x) => x.id === "droid-core");
+  return core !== undefined && core.windows.some((w) => Number.isFinite(w.usedPct) && w.usedPct >= 100);
 }
 
 function cardRows(providers: QuotaProviderWire[]): CardRow[] {
@@ -103,7 +111,7 @@ function cardRows(providers: QuotaProviderWire[]): CardRow[] {
       badges.push({ kind: "stale", provider: p });
     }
     if (p.id === "droid-standard" && p.billing !== undefined && p.billing.overage !== "off") {
-      badges.push({ kind: "overage", billing: p.billing });
+      badges.push({ kind: "overage", billing: p.billing, coreExhausted: coreExhausted(providers) });
       if (p.billing.gateOpen === true && p.billing.overage === "extraUsage") badges.push({ kind: "allowed" });
     }
     rows.push({
@@ -168,7 +176,8 @@ function badgeText(b: CardBadge): string {
     return t("quota.demotedBadgeUntil", { clock });
   }
   if (b.kind === "overage") {
-    if (b.billing.overage === "droidCore") return t("quota.overageCore");
+    if (b.billing.overage === "droidCore")
+      return t(b.coreExhausted ? "quota.overageCoreExhausted" : "quota.overageCore");
     const amount = fmtCents(b.billing.extraUsageBalanceCents) ?? "$0.00";
     return t("quota.overageExtra", { amount });
   }
@@ -181,6 +190,7 @@ function badgeKey(b: CardBadge): string {
 }
 
 function badgeClass(b: CardBadge): string {
+  if (b.kind === "overage" && b.billing.overage === "droidCore" && b.coreExhausted) return "q-overage q-overage-dead";
   return b.kind === "demoted" ? "q-demoted" : b.kind === "stale" ? "q-stale" : "q-overage";
 }
 

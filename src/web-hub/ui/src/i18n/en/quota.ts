@@ -41,8 +41,9 @@ const quota = {
   "provider.droid-standard": "Droid Std",
   "provider.droid-core": "Droid Core",
   scopeMonth: "month",
-  overageCore: "Overage: switch to core pool",
-  overageExtra: "Overage: extra usage ({amount})",
+  overageCore: "Overage policy: Std → Core",
+  overageCoreExhausted: "Overage policy: Std → Core (Core exhausted)",
+  overageExtra: "Overage policy: extra usage ({amount})",
   overageAllowed: "extra usage allowed",
   authProblem:
     "Droid quota unavailable: Factory billing API returned HTTP {status} — check FACTORY_API_KEY and restart pi",
