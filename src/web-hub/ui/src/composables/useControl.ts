@@ -257,6 +257,11 @@ export function createControl(
         return outcome;
       });
     },
+    /** web-resume §2.6 (P3): read-only command query — fresh id + `expect`, NO optimistic
+     * `ctl_send`, NO `remember` (the response is consumed immediately; a retry is a NEW
+     * id by construction, matching §2.4's "UI retries ≤4× with new ids"). */
+    queryCommand: (agentKey, name, args) =>
+      transport.command({ agentKey, id: newCmdId(), op: "command", name, args, ...expectFor(agentKey) }),
     /** §3.4/§3.5: queryOnly — ask the agent ledger for the outcome of `id`, never re-execute. */
     query: async (agentKey, id) => {
       const stored = requests.get(keyOf(agentKey, id));

@@ -105,13 +105,22 @@ const EXTERNAL_URL_ALLOWLIST: RegExp[] = [
 // before (+1,161 B, incl. the verifier R1/R2 per-tier data-face on the measurer clones) — after byte-level trims (single cssText probe write, index-based tier
 // scan, shared hover handlers) the remaining ~1.1 KB is intrinsic to the spec (hysteresis and
 // the cap probe are required behaviour, not fat), so the minimum 1 KiB bump it is.
-const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 255 * 1024;
-const LAZY_JS_BUDGET_GZIP_BYTES = 42 * 1024;
+// 2026-10-16 (web-resume, user-approved 255→256 KiB): typing `resume` / the header 「恢复」 button
+// opens an in-process session switcher. The dialog, its state machine, wire validators, its 27-key
+// i18n dictionary and styles are all lazy (≈6.3 KB gz chunk); the eager remainder (+671 B gz:
+// intent parse, resume.v1 feature check, composer gate/palette, header button, dock intercept,
+// lazy host) is needed before the dialog can open. Measured 261,681 B vs 261,010 B before.
+// Same day the user ruled to stop per-feature budget bumps altogether: 512 KiB gz is now a
+// coarse regression alarm (≈2× the current size), not a per-feature squeeze target.
+const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 512 * 1024;
+// 2026-10-16 user ruling ("免得反复折腾"): lazy JS and CSS follow the first-screen rule — roughly 2× headroom,
+// coarse regression alarms only.
+const LAZY_JS_BUDGET_GZIP_BYTES = 128 * 1024;
 // CSS (one file, cssCodeSplit:false ⇒ all of it is first-screen): the 25 KiB set in vue-plan v2.1
 // was as empirical as the old JS total. 2026-10-11 (user: don't spend effort squeezing gzip bytes)
 // it follows the same rule as the first-screen JS budget — measured 25,615 B gz × 1.10 rounded up
 // to a whole KiB = 28 KiB — so it stays a regression alarm instead of a per-feature chore.
-const CSS_BUDGET_GZIP_BYTES = 28 * 1024;
+const CSS_BUDGET_GZIP_BYTES = 64 * 1024;
 
 export type JsAssetClassification = {
   firstScreen: Set<string>;

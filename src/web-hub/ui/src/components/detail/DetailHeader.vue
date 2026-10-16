@@ -50,6 +50,7 @@ import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
 import { SIDEBAR_DRAWER } from "../shell/sidebarDrawer.js";
 import "../../styles/spawn.css";
 import { cardOf, sessionOf, statusOf } from "./agentViews.js";
+import { resumeAvailable, RESUME_DIALOG } from "@logic/resume.js";
 import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
 import TodoPanel from "./TodoPanel.vue";
@@ -239,6 +240,15 @@ const clearUsable = computed(
 const clearing = ref(false);
 const clearError = ref<string | null>(null);
 
+// ---------------------------------------------------------------------------
+// web-resume plan v2 §2.6 D7 (P3) — the 「恢复」 button right after 「清空」: same gating as
+// the clear button (CONTROL_VIEW.enabled ∧ commandsEnabled) plus the resume.v1 feature
+// signal (§2.7), deliberately NOT busy-gated (D4: while busy the LIST stays browsable —
+// only its rows go disabled inside the dialog). Opens the same lazy ResumeDialog.
+// ---------------------------------------------------------------------------
+const resumeHost = inject(RESUME_DIALOG, null);
+const resumeUsable = computed(() => clearUsable.value && resumeAvailable(status.value));
+
 async function onClear(): Promise<void> {
   const view = controlView;
   const c = view?.control ?? null;
@@ -350,6 +360,18 @@ function onToggleHeadInfo(): void {
         @click="void onClear()"
       >
         <AppIcon :name="clearing ? 'loader' : 'sparkle'" class="icon" :class="{ spin: clearing }" />
+      </button>
+      <!-- web-resume §2.6 D7 (P3): 「恢复」 opens the resume picker — clear-button gating +
+           resume.v1; never busy-gated (D4: busy ⇒ list browsable, rows not switchable). -->
+      <button
+        v-if="resumeUsable"
+        class="detail-resume-btn"
+        type="button"
+        :title="t('resume.openTitle')"
+        :aria-label="t('resume.openTitle')"
+        @click="resumeHost?.open({ scope: 'recent' })"
+      >
+        <AppIcon name="clock" class="icon" />
       </button>
       <!-- web-hub-privacy P2: 隐私标记 (unmarked → persistent mark) vs 立即锁定 (marked +
            viewing → view relock) — the two names never mix (plan v2.1 N1 命名分离). -->

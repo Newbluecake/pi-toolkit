@@ -113,12 +113,13 @@
   background: var(--c-surface-2);
 }
 
-/* Web /clear quick button (2026-10 user request): 32px icon-only ghost in the titlebar,
+/* Web /clear and 「恢复」 (web-resume D7) quick buttons (2026-10 user request): 32px icon-only ghost in the titlebar,
  * same grammar as spawn.css's `.spawn-stop-btn` (variant-A) but a NEUTRAL tint — it starts a
  * new session in the same pi process (builtin /new, confirm baked in), it destroys nothing.
  * flex:none keeps the titlebar's `min-width:0` shrinking chain intact (the title yields, the
  * button never does); the coarse-pointer ≥44px house rule mirrors stop button A's block. */
-.detail-clear-btn {
+.detail-clear-btn,
+.detail-resume-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -137,19 +138,23 @@
 }
 
 .detail-clear-btn:hover:not(:disabled),
-.detail-clear-btn:focus-visible {
+.detail-clear-btn:focus-visible,
+.detail-resume-btn:hover:not(:disabled),
+.detail-resume-btn:focus-visible {
   background: var(--c-surface-2);
   color: var(--c-text-2);
 }
 
-.detail-clear-btn:disabled {
+.detail-clear-btn:disabled,
+.detail-resume-btn:disabled {
   cursor: default;
   opacity: 0.6;
 }
 
 @media (pointer: coarse) {
   /* house rule: every new interactive target ≥44px on coarse pointers (2026-10 stop button A) */
-  .detail-clear-btn {
+  .detail-clear-btn,
+  .detail-resume-btn {
     min-width: 44px;
     min-height: 44px;
   }

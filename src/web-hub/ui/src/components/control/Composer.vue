@@ -104,6 +104,7 @@ import {
   mentionTargets,
 } from "@logic/mention.js";
 import { canSendWithAttachments, classifyPaste, uploadAvailability } from "@logic/upload.js";
+import { decoratePalette, resumeAvailable } from "@logic/resume.js";
 import { buildFileSearchUrl, parseFileSearchResults } from "@logic/file-mention.js";
 import { API } from "@logic/contract.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -158,7 +159,21 @@ const commandsEnabled = computed(() => view?.commandsEnabled.value === true);
 const sending = computed(() => view?.sending.value === true);
 
 const slash = computed(() => parseSlash(text.value));
-const commandMode = computed(() => slash.value !== undefined && commandsEnabled.value && !sendAsText.value);
+// web-resume §2.6 (P3): while the agent advertises resume.v1 (§2.7), the slash resume forms
+// are intercepted client-side (DetailDock.onSend's FIRST line) and never sent as commands —
+// so they must not be command-routed here either (the advertised policy is deny, §2.7, and a
+// denied command cannot pass §3.2's gate). Bare `resume` needs nothing here: it is plain
+// text and already passes; with attachments the composed text stops matching the intent
+// regex, so the “empty tray” half of the gate rule falls out structurally.
+const resumeOn = computed(() => resumeAvailable(view?.agent.value.status));
+const resumeSlash = computed(() => {
+  const s = slash.value;
+  if (s === undefined || !commandsEnabled.value || !resumeOn.value) return false;
+  return s.name === "resume" || s.name === "resume-recent";
+});
+const commandMode = computed(
+  () => slash.value !== undefined && commandsEnabled.value && !sendAsText.value && !resumeSlash.value,
+);
 
 // ---------------------------------------------------------------------------
 // @mention completion (web-hub task #11) + @文件补全 (file-mention)
@@ -360,15 +375,29 @@ function mentionKeydown(ev: KeyboardEvent): boolean {
 const policy = computed(() =>
   commandMode.value && slash.value ? commandPolicyFor([...commands.value], slash.value.name, busy.value) : null,
 );
-const paletteOpen = computed(() => commandMode.value && slash.value !== undefined);
+// §2.6 decoratePalette: the /resume + /resume-recent rows render RUNNABLE with the
+// 「恢复会话」 description while available (the agent advertises them deny for old UIs).
+// The decoration rides BOTH surfaces: the `commands` prop (CommandPalette re-derives its
+// rendered rows through matchCommandRows internally) and the composer's own keyboard rows.
+const paletteCommands = computed(
+  () =>
+    decoratePalette(
+      [...commands.value] as unknown as readonly import("@logic/resume.js").PaletteRowLike[],
+      resumeOn.value ? t("resume.paletteDesc") : null,
+    ) as unknown as readonly Record<string, unknown>[],
+);
+const paletteRows = computed(() => {
+  if (slash.value === undefined || !commandsEnabled.value || sendAsText.value) return [];
+  // Matching over the DECORATED slot rows keeps the keyboard half and the rendered palette
+  // one computation apart (matchCommandRows re-derives policy from the same array).
+  return matchCommandRows([...paletteCommands.value], slash.value.name, busy.value);
+});
+const paletteOpen = computed(
+  () => slash.value !== undefined && commandsEnabled.value && (commandMode.value || resumeSlash.value),
+);
 
 // --- command-palette keyboard model (2026-10 user request, see file header) ----------------
 
-/** Rows the palette WOULD render — same shared matcher (`matchCommandRows`), so Tab completes
- * exactly the highlighted row and aria-activedescendant points at a real option id. */
-const paletteRows = computed(() =>
-  commandMode.value && slash.value ? matchCommandRows([...commands.value], slash.value.name, busy.value) : [],
-);
 const paletteId = useId(); // listbox root id; option ids are `<paletteId>-opt-<index>` (CommandPalette mirrors)
 /** Highlight index (raw state; `paletteActiveIndex` is the clamped view of it). */
 const paletteActive = ref(0);
@@ -575,20 +604,28 @@ function traySourceOf(id: string): unknown {
  * `commandsEnabled`, deliberately NOT `sendAsText`) so the gate's command-policy / 16 KiB args
  * checks see exactly the text DetailDock would execute. */
 function sendGate() {
-  return canSendWithAttachments({
+  const g = canSendWithAttachments({
     enabled: props.enabled,
     sending: sending.value,
     text: text.value,
     attachments: [...trayItems.value],
-    commandRouted: slash.value !== undefined && commandsEnabled.value,
-    // DetailDock re-derives the policy from the ROUTED text (sendAsText only changes composer
-    // display), so the gate must see the same answer — `policy` (display-scoped) would report
-    // null for a sendAsText-escaped "/allow-command" and block a send v1 allowed.
+    // web-resume §2.6: the slash resume forms are intercepted client-side (never sent), so
+    // they are NOT command-routed — the advertised deny must not block them at the gate.
+    // DetailDock still re-derives the policy from the ROUTED text (sendAsText only changes
+    // composer display), so the non-resume branches keep seeing exactly the routed answer.
+    commandRouted: slash.value !== undefined && commandsEnabled.value && !resumeSlash.value,
     policy:
-      slash.value !== undefined && commandsEnabled.value
+      slash.value !== undefined && commandsEnabled.value && !resumeSlash.value
         ? commandPolicyFor([...commands.value], slash.value.name, busy.value)
         : policy.value,
   });
+  // §2.6 "intent ∧ available ∧ empty tray": with attachments the composed text stops
+  // matching the intent (bare form) — the slash form would still pass as plain text, so it
+  // is blocked explicitly here; the hint line reuses upload.gateBlocked.
+  if (g.ok && resumeSlash.value && trayItems.value.length > 0) {
+    return { ok: false as const, reason: "attachment-block" as const };
+  }
+  return g;
 }
 const gate = computed(sendGate);
 
@@ -720,7 +757,7 @@ watch(
   <div ref="rootEl" class="composer" :class="{ 'cmd-mode': commandMode }" @paste="onPaste">
     <CommandPalette
       v-if="paletteVisible && slash"
-      :commands="commands"
+      :commands="paletteCommands"
       :query="slash.name"
       :busy="busy"
       :active="paletteActiveIndex"

@@ -33,8 +33,9 @@
   defensive agent-key watcher re-reads it.
 -->
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, provide, ref, watch } from "vue";
+import { computed, defineAsyncComponent, inject, onBeforeUnmount, provide, ref, watch } from "vue";
 import { holdAvailable, heldRowMode, isWebSentMessage, mergeQueue, newCmdId } from "@logic/control.js";
+import { RESUME_DIALOG, type ResumeScope } from "@logic/resume.js";
 import { restoringKeys } from "../../logic/spawn.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
@@ -191,6 +192,22 @@ watch(
 function isWebMessage(timestamp: number | undefined): boolean {
   return isWebSentMessage(props.agent.ctl, timestamp);
 }
+
+// --- resume dialog host (web-resume §2.6, P3) -------------------------------------------------------
+// The D7 「恢复」 surface: `DetailHeader`'s button and `DetailDock`'s onSend intercept inject
+// `RESUME_DIALOG` and call `open({scope})`; the dialog itself is a LAZY chunk
+// (`defineAsyncComponent`) that mounts only on first open — the always-loaded half is just
+// this provide + the `v-if` below. It lives INSIDE AgentDetail, so a privacy relock (which
+// replaces the detail pane, F10) unmounts it with everything else.
+const ResumeDialog = defineAsyncComponent(() => import("../control/ResumeDialog.vue"));
+const resumeOpen = ref(false);
+const resumeScope = ref<ResumeScope>("recent");
+provide(RESUME_DIALOG, {
+  open(intent) {
+    resumeScope.value = intent.scope;
+    resumeOpen.value = true;
+  },
+});
 
 const controlView: ControlView = {
   // 2026-10-07 回归加固：agentKey 必须是 getter 而非 setup 时一次性求值的普通字段——
@@ -586,6 +603,10 @@ function onCloseDrawer(): void {
           @update:following="onUpdateFollowing"
           @jump="onJump"
         />
+
+        <!-- web-resume §2.6 (P3): the lazy resume picker — mounted on first open, teleported
+             to <body> by PickerSheet; unmounts with AgentDetail (privacy relock, F10). -->
+        <ResumeDialog v-if="resumeOpen" :scope="resumeScope" @close="resumeOpen = false" />
       </div>
 
       <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(树上的 FleetActions 需要它);

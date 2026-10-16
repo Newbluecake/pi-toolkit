@@ -1,0 +1,303 @@
+/*
+ * ResumeDialog styles (web-resume plan v2 §2.6, package P3). Imported by the LAZY
+ * ResumeDialog chunk, but `cssCodeSplit:false` folds every stylesheet into the single
+ * first-screen CSS file — so this file is on the CSS budget and stays deliberately small,
+ * reusing the shared primitives (.input/.btn/.chip) plus PickerSheet's sheet chrome.
+ *
+ * Layout: `.picker-scrim` (flex, align-items:flex-end) centers the sheet with
+ * `align-items:center` + auto side margins once the viewport exceeds the 640px cap
+ * (§2.6 "≤640 px via PickerSheet.vue").
+ */
+
+.resume-scrim {
+  align-items: center;
+}
+
+.resume-sheet,
+.resume-dialog {
+  min-width: 0;
+}
+
+.resume-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+}
+
+@media (min-width: 641px) {
+  .picker-scrim.resume-scrim .picker-sheet {
+    width: min(640px, calc(100vw - 32px));
+    max-height: min(70vh, 560px);
+    border: 1px solid var(--c-border);
+    border-radius: 12px;
+    box-shadow: 0 12px 36px rgb(19 32 38 / 0.22);
+  }
+}
+
+/* --- header / search -------------------------------------------------- */
+
+.resume-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 10px 12px 6px;
+}
+
+.resume-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.resume-searchrow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 12px 8px;
+}
+
+.resume-search {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--c-text-3);
+}
+
+.resume-search .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.resume-seg {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.resume-seg button {
+  min-height: 27px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+
+.resume-seg button[aria-pressed="true"] {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.resume-seg button:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+/* --- banners / confirm -------------------------------------------------- */
+
+.resume-busy {
+  margin: 0 12px 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+}
+
+.resume-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 12px 6px;
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+}
+
+.resume-notice .btn {
+  margin-left: auto;
+}
+
+.resume-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 12px;
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+}
+
+.resume-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 8px 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--c-danger, var(--c-border));
+  border-radius: var(--r-sm);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+}
+
+.resume-confirm {
+  margin: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.resume-confirm-title {
+  margin: 0 0 4px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.resume-confirm-body {
+  margin: 0 0 8px;
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+}
+
+.resume-confirm-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+/* --- list --------------------------------------------------------------- */
+
+.resume-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  border-top: 1px solid var(--c-border);
+  padding: 0 6px;
+}
+
+.resume-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  width: 100%;
+  min-height: 44px; /* §2.6: rows ≥44px */
+  padding: 8px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--c-border);
+  background: transparent;
+  text-align: start;
+  cursor: pointer;
+}
+
+.resume-row:last-child {
+  border-bottom: 0;
+}
+
+.resume-row:hover:not(:disabled),
+.resume-row.active:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.resume-row:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.resume-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.resume-row.armed {
+  border-left: 3px solid var(--c-focus);
+  padding-left: 5px;
+}
+
+.resume-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.resume-row-title {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+}
+
+.resume-row-badges {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.resume-row-badges .chip-live {
+  color: var(--c-warning-text);
+}
+
+.resume-row-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.resume-row-hint {
+  flex-basis: 100%;
+  color: var(--c-warning-text);
+  font-size: var(--fs-2xs);
+}
+
+.resume-empty {
+  margin: 12px;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+/* --- footer ------------------------------------------------------------- */
+
+.resume-foot {
+  border-top: 1px solid var(--c-border);
+  padding: 6px 12px calc(6px + env(safe-area-inset-bottom));
+}
+
+.resume-foot-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 24px;
+}
+
+.resume-foot-status {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  min-width: 0;
+}
+
+.resume-note {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}
+
+.resume-d5 {
+  margin: 4px 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+}

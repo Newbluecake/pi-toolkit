@@ -395,6 +395,12 @@ export interface ControlHandle {
   // BEFORE the wire round-trip settles (web-model-switch plan v2 §5.2 #6, same precedent as
   // `answerDialog`'s id above / AgentDetail.vue's `trackOwnDialogCmdId`).
   runCommand(agentKey: string, name: string, args: string, opts?: { confirm?: true; id?: string }): Promise<CmdOutcome>;
+  /** web-resume plan §2.6 (P3): a NON-optimistic read-only command query — `transport.command`
+   * with a FRESH id and `expect`, never `ctl_send`/`remember` (no queue row, nothing to
+   * query/retry later). Used by `useResume` for the resume `__list` reads. Optional per the
+   * frozen-handle convention (component-level fakes may omit it — `useResume` then surfaces
+   * an unsupported error instead of sending anything). */
+  queryCommand?(agentKey: string, name: string, args: string): Promise<CmdOutcome>;
   query(agentKey: string, id: string): Promise<CmdOutcome>;
   retry(agentKey: string, id: string): Promise<CmdOutcome>;
   discard(agentKey: string, id: string): void;

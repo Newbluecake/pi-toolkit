@@ -29,6 +29,7 @@
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref, watch } from "vue";
 import { commandPolicyFor, parseSlash, validRecallText } from "@logic/control.js";
+import { parseResumeIntent, resumeAvailable, RESUME_DIALOG } from "@logic/resume.js";
 import { clientImageBudget, previewScopeOf } from "@logic/preview.js";
 import {
   expandPromptWithFiles,
@@ -55,6 +56,10 @@ const { t } = useI18n();
 const view = inject(CONTROL_VIEW, null);
 const hub = inject(HUB_CTX, null);
 const env = inject(CONTROL_ENV, null);
+// web-resume §2.6 (P3): the dialog host AgentDetail provides — absent in standalone mounts
+// (tests / future hosts), in which case an intercepted intent simply has nowhere to go and
+// falls through to the normal prompt path.
+const resumeHost = inject(RESUME_DIALOG, null);
 
 const ctlEnabled = computed(() =>
   view !== null ? view.enabled.value : props.control != null && props.readonlyReason === undefined,
@@ -215,6 +220,15 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
   const c = handle();
   const key = agentKey();
   if (!c || key === null) return;
+  // web-resume §2.6 — the FIRST line: a resume intent on a resume.v1 agent opens the dialog
+  // instead of sending anything (both the bare `resume`… forms and the slash forms, whose
+  // command routing is excluded upstream in Composer.vue's `resumeSlash`). Unavailable
+  // (old agent / policy deny) or host-less (standalone mount) keeps today's routing.
+  const intent = parseResumeIntent(text);
+  if (intent !== null && resumeHost !== null && resumeAvailable(view?.agent.value.status)) {
+    resumeHost.open(intent);
+    return;
+  }
   const slash = parseSlash(text);
   const commands = view?.commands.value ?? [];
   const commandMode = slash !== undefined && (view?.commandsEnabled.value ?? false);
