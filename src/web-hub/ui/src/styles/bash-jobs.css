@@ -21,6 +21,13 @@
   border-top: 1px solid var(--c-border);
 }
 
+/* No sub-agent rows above (FleetDrawer's `treeEmpty`): the drawer header's bottom border already
+ * separates the group — drop the divider and gap instead of drawing a double line (2026-10-16). */
+.fleet-bash.fleet-bash-solo {
+  margin-top: 0;
+  border-top: none;
+}
+
 /* 2026-10-15 user ruling: in the fleet drawer the bash group title is a peer section header
  * of the drawer's "Agents" title, so it takes `.drawer-title`'s type (fs-sm / semibold /
  * body color) instead of the muted fs-xs summary-row grammar; icon + chevron stay muted. */

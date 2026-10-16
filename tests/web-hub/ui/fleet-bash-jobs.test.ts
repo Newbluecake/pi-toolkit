@@ -430,6 +430,23 @@ describe("FleetDrawer — 「bash」分组(树视图末尾,agent 树之后)", ()
     expect(items[1]?.find(".bj-status").attributes("data-kind")).toBe("failed");
   });
 
+  it("no sub-agent rows ⇒ the group drops its top divider (no double line under the header)", () => {
+    const solo = mountDrawer(
+      drawerAgent({ fleet: [], status: { busy: false, pending: false, bashJobs: wire([row()]) } }),
+    );
+    expect(solo.find(".fleet-bash").classes()).toContain("fleet-bash-solo");
+    const withAgents = mountDrawer(drawerAgent({ status: { busy: false, pending: false, bashJobs: wire([row()]) } }));
+    expect(withAgents.find(".fleet-bash").classes()).not.toContain("fleet-bash-solo");
+    const omittedOnly = mountDrawer(
+      drawerAgent({
+        fleet: [],
+        fleetOmitted: { active: 0, terminal: 3 },
+        status: { busy: false, pending: false, bashJobs: wire([row()]) },
+      }),
+    );
+    expect(omittedOnly.find(".fleet-bash").classes()).not.toContain("fleet-bash-solo");
+  });
+
   it("no wire / zero rows / legacy agent without the field ⇒ no group (与现状一致)", () => {
     const legacy = mountDrawer(drawerAgent({ status: { busy: false, pending: false } }));
     expect(legacy.find(".fleet-bash").exists()).toBe(false);

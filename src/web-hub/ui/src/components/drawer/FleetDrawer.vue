@@ -142,6 +142,13 @@ const rootEl = ref<HTMLElement | null>(null);
 const rows = computed(() => props.agent.fleet as unknown as readonly FleetRowWire[]);
 const treeNodes = computed(() => buildFleetTree(rows.value));
 const orphans = computed(() => orphanRunIds(rows.value));
+/* 2026-10-16 user ("红框部分感觉有点丑"): with no sub-agent rows (and no omitted counts) the
+ * tree renders nothing, so the bash group's own top divider would sit right under the
+ * header's bottom border — a double line around an empty gap. Solo ⇒ no divider. */
+const treeEmpty = computed(() => {
+  const om = props.agent.fleetOmitted;
+  return treeNodes.value.length === 0 && !((om?.active ?? 0) > 0 || (om?.terminal ?? 0) > 0);
+});
 const selectedRunId = computed(() => props.agent.runSel ?? null);
 
 // 2026-10-15 bash→fleet 迁移(用户拍板 L1):主会话后台 bash 任务作为树视图末尾的独立
@@ -292,7 +299,7 @@ watch(
       <div class="tree-scroll">
         <FleetTree :nodes="treeNodes" :now="now" :orphans="orphans" :omitted="agent.fleetOmitted" />
         <!-- 2026-10-15:子 agent 树之后的独立 bash 分组(无任务/无字段 ⇒ 不渲染)。 -->
-        <FleetBashJobs v-if="bashJobs" :jobs="bashJobs" :now="now" />
+        <FleetBashJobs v-if="bashJobs" :class="{ 'fleet-bash-solo': treeEmpty }" :jobs="bashJobs" :now="now" />
       </div>
     </template>
   </aside>
