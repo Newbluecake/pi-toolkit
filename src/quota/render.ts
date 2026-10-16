@@ -223,10 +223,10 @@ function droidPoolAdviceLine(pools: readonly DroidPoolAlternative[] | undefined)
 
 /** 逐池清单状态文案（中文散文，面向模型的说明块；紧凑读数仍是英文 token）。
  * fallback（仅 core 池，2026-10-16 实测定界）：自身额度尽但按 Factory 回落规则
- * 计入 Standard 池额度，可照常派发——不是「告急/已拦」。 */
+ * 计入 Standard 池额度，可照常派发——不是「预警/已拦」。 */
 const DROID_POOL_STATE_TEXT: Record<DroidPoolState, string> = {
   ok: "有余量",
-  warn: "告急",
+  warn: "预警",
   blocked: "已拦，勿派",
   fallback: "额度尽，回落 Standard 计费",
 };

@@ -1319,9 +1319,9 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
     ]);
   });
 
-  it("另一池只是告急（≥L1 但低于闸门线）⇒ 仍推荐，清单状态标「告急」", async () => {
+  it("另一池只是告急（≥L1 但低于闸门线）⇒ 仍推荐，清单状态标「预警」", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort() });
-    await land(f, 100, 80); // core 5h 80% ⇒ L2（< 闸门线 3）⇒ 可推荐但告急
+    await land(f, 100, 80); // core 5h 80% ⇒ L2（< 闸门线 3）⇒ 可推荐但预警
     expect(f.service.poolAlternatives("droid-standard")[0]?.models).toEqual(["droid/glm-5.3", "droid/kimi-k3"]);
     expect(f.service.poolAlternatives("droid-standard")[0]?.listing).toEqual([
       { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },

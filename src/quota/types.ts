@@ -117,7 +117,7 @@ export type DroidPoolState = "ok" | "warn" | "blocked" | "fallback";
 
 export interface DroidPoolListingEntry {
   readonly pool: QuotaPoolId;
-  /** 有余量（ok，等级低于闸门线）/ 告急（warn，≥L1 但低于闸门线）/ 已拦，勿派
+  /** 有余量（ok，等级低于闸门线）/ 预警（warn，≥L1 但低于闸门线）/ 已拦，勿派
    * （blocked，≥闸门线）/ 额度尽，回落 Standard 计费（fallback：仅 core 池——自身
    * ≥闸门线但 Standard 池仍有可信余量，Core 模型按 Factory 回落规则计入 Standard
    * 池额度，可照常派发，2026-10-16 实测定界）。 */

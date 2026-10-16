@@ -1111,11 +1111,11 @@ describe("alternativesAdvice — external × 逐池清单 + 对称推荐（2026-
     );
   });
 
-  it("告急状态（低于闸门线但 ≥L1）标「告急」；零候选池条目被省略", () => {
+  it("预警状态（低于闸门线但 ≥L1）标「预警」；零候选池条目被省略", () => {
     const text = alternativesAdvice(
       sel({ poolListing: [{ pool: "core", state: "warn", total: 1, models: ["droid/glm-5.3"] }] }),
     );
-    expect(text.split("\n")[0]).toBe("Droid 模型按池：Core 池（告急）：droid/glm-5.3。");
+    expect(text.split("\n")[0]).toBe("Droid 模型按池：Core 池（预警）：droid/glm-5.3。");
   });
 });
 
