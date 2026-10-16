@@ -7,3 +7,6 @@ coverage/
 *.tsbuildinfo
 /release/
 /.preview-scratch/
+
+# topic-switch judge eval run outputs (overwritten per run)
+docs/dev/topic-switch/judge-eval/results-*.json

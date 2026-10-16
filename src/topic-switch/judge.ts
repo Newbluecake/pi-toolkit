@@ -15,7 +15,9 @@ import type { Clock, TimerHandle } from "../core/clock.js";
 /** D3 翻转点：配置模型与 title 模型都不可用时是否回退会话模型（唯一一处定义）。 */
 export const JUDGE_SESSION_MODEL_FALLBACK: boolean = true;
 
-export const JUDGE_MAX_TOKENS = 64;
+/** 2026-10-16 64→512：64 时 glm-5.3-flash（推理模型）的思考吃光额度，20–33% 调用空回复或截断 JSON，
+ *  线上回落到更偏 related 的后备模型；512 时失败归零（评测 docs/dev/topic-switch/judge-eval/）。 */
+export const JUDGE_MAX_TOKENS = 512;
 
 /** prompt 组装上限（frozen；码点截断）。 */
 export const JUDGE_LIMITS = Object.freeze({
@@ -67,6 +69,15 @@ export interface JudgeInput {
   imageCount: number;
 }
 
+/**
+ * 判据变体（评测 `scripts/exp/topic-judge-eval/`）：`v2` = 线上默认（2026-10-16 起，见
+ * `JUDGE_DEFAULT_VARIANT`）——只有「答好必须依赖本会话自身状态」才算 related，仅同一仓库/
+ * 模块/功能域不算；`v1` = 原判据（字节不变），只保留供离线对比。
+ */
+export const JUDGE_CRITERION_VARIANTS: readonly ["v1", "v2"] = Object.freeze(["v1", "v2"] as const);
+
+export type JudgeCriterionVariant = (typeof JUDGE_CRITERION_VARIANTS)[number];
+
 /** 码点截断（UTF-16 slice 会切碎代理对）。 */
 function clip(text: string, maxChars: number): string {
   let out = "";
@@ -79,8 +90,30 @@ function clip(text: string, maxChars: number): string {
   return out;
 }
 
-/** 判定 prompt（≤2k 输入 token 量级）：system 定标准，user 分块给证据。 */
-export function buildJudgePrompt(i: JudgeInput): { systemPrompt: string; userPrompt: string } {
+/** v1 现行判据（字节冻结：线上行为与既有测试都锚定在这段文本上）。 */
+const JUDGE_SYSTEM_PROMPT_V1 =
+  "判断 NEW REQUEST 是否延续 CURRENT CONVERSATION。只要它引用、依赖或明显受益于先前上下文（同一任务、同一文件或功能、" +
+  "后续、修先前的产出），就判 related=true。只有完全自足、不需要那些上下文的新任务才判 false。拿不准就判 true。" +
+  '只输出 JSON：{"related":bool,"confidence":0..1}';
+
+/** v2 候选判据（2026-10-16 用户报告：长单仓会话里 v1 几乎全 related）。 */
+const JUDGE_SYSTEM_PROMPT_V2 =
+  "判断 NEW REQUEST 是否必须依赖本会话自身的状态才能答好——即一个能读仓库文件与项目记忆的全新会话答不了或答不好。" +
+  "只有当它引用或延续本会话刚产生的结果或改动（如「刚才/上面/这个/再/继续/还是不行」）、正在进行或悬而未决的工作、" +
+  "正在讨论中的决策、对本会话产出的跟进或修复时，才判 related=true。" +
+  "仅是同一仓库、同一模块、同一功能域或同一主题不算 related——全新会话读代码和项目记忆即可答好。" +
+  "只有确实拿不准是否需要会话内状态时才判 true。" +
+  '只输出 JSON：{"related":bool,"confidence":0..1}';
+
+/** 线上判据（2026-10-16 用户拍板切 v2：24 条人工标注评测，glm v2+512 准确率 79–83% vs v1 63–74%，
+ *  漏报 9→4、误报 0–1；v1 保留供 scripts/exp/topic-judge-eval 对比）。 */
+export const JUDGE_DEFAULT_VARIANT: JudgeCriterionVariant = "v2";
+
+/** 判定 prompt（≤2k 输入 token 量级）：system 定标准，user 分块给证据。variant 只换 system 判据，证据块逐字节相同。 */
+export function buildJudgePrompt(
+  i: JudgeInput,
+  variant: JudgeCriterionVariant = JUDGE_DEFAULT_VARIANT,
+): { systemPrompt: string; userPrompt: string } {
   const blocks: string[] = [];
   if (typeof i.sessionName === "string" && i.sessionName.trim() !== "") {
     blocks.push(`Session title: ${clip(i.sessionName.trim(), JUDGE_LIMITS.lastAssistantChars)}`);
@@ -100,10 +133,7 @@ export function buildJudgePrompt(i: JudgeInput): { systemPrompt: string; userPro
   const imageNote = i.imageCount > 0 ? ` [${i.imageCount} images attached]` : "";
   blocks.push(`NEW REQUEST:\n${request}${imageNote}`);
   return {
-    systemPrompt:
-      "判断 NEW REQUEST 是否延续 CURRENT CONVERSATION。只要它引用、依赖或明显受益于先前上下文（同一任务、同一文件或功能、" +
-      "后续、修先前的产出），就判 related=true。只有完全自足、不需要那些上下文的新任务才判 false。拿不准就判 true。" +
-      '只输出 JSON：{"related":bool,"confidence":0..1}',
+    systemPrompt: variant === "v2" ? JUDGE_SYSTEM_PROMPT_V2 : JUDGE_SYSTEM_PROMPT_V1,
     userPrompt: blocks.join("\n\n"),
   };
 }

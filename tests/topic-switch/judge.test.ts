@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Clock, TimerHandle } from "../../src/core/clock.js";
 import {
   JUDGE_ATTEMPT_FLOOR_MS,
+  JUDGE_CRITERION_VARIANTS,
   JUDGE_LIMITS,
+  JUDGE_DEFAULT_VARIANT,
   JUDGE_MAX_TOKENS,
   JUDGE_SESSION_MODEL_FALLBACK,
   buildJudgePrompt,
@@ -63,7 +65,7 @@ const INPUT: JudgeInput = {
 describe("constants", () => {
   it("D3 toggle and frozen limits (plan §P1)", () => {
     expect(JUDGE_SESSION_MODEL_FALLBACK).toBe(true);
-    expect(JUDGE_MAX_TOKENS).toBe(64);
+    expect(JUDGE_MAX_TOKENS).toBe(512);
     expect(Object.isFrozen(JUDGE_LIMITS)).toBe(true);
     expect(JUDGE_LIMITS.requestChars).toBe(2000);
   });
@@ -150,6 +152,36 @@ describe("buildJudgePrompt", () => {
     const astral = "😀".repeat(JUDGE_LIMITS.recentUserMessageChars + 5);
     const { userPrompt: up2 } = buildJudgePrompt({ recentUserMessages: [astral], request: "x", imageCount: 0 });
     expect(up2).not.toContain("\uFFFD");
+  });
+});
+
+describe("buildJudgePrompt criterion variants (v2)", () => {
+  it("exports exactly [v1, v2], frozen", () => {
+    expect(JUDGE_CRITERION_VARIANTS).toEqual(["v1", "v2"]);
+    expect(Object.isFrozen(JUDGE_CRITERION_VARIANTS)).toBe(true);
+  });
+
+  it("default call is the v2 criterion (system + user identical to explicit v2)", () => {
+    expect(JUDGE_DEFAULT_VARIANT).toBe("v2");
+    expect(buildJudgePrompt(INPUT)).toEqual(buildJudgePrompt(INPUT, "v2"));
+    expect(buildJudgePrompt(INPUT, "v2").systemPrompt).not.toBe(buildJudgePrompt(INPUT, "v1").systemPrompt);
+  });
+
+  it("v2 system prompt carries the conversation-state criterion + same JSON contract", () => {
+    const { systemPrompt } = buildJudgePrompt(INPUT, "v2");
+    // 判据核心：全新会话（仓库文件 + 项目记忆）答不了才算 related
+    for (const phrase of ["全新会话", "项目记忆", "刚才", "继续", "同一仓库", "不算 related", "拿不准"]) {
+      expect(systemPrompt).toContain(phrase);
+    }
+    // 输出契约与 v1 完全一致
+    expect(systemPrompt).toContain('只输出 JSON：{"related":bool,"confidence":0..1}');
+    expect(buildJudgePrompt(INPUT, "v1").systemPrompt).toContain('只输出 JSON：{"related":bool,"confidence":0..1}');
+  });
+
+  it("v2 evidence/request blocks are byte-identical to v1 (only the system prompt differs)", () => {
+    for (const input of [INPUT, { recentUserMessages: [], request: "新任务", imageCount: 0 }]) {
+      expect(buildJudgePrompt(input, "v2").userPrompt).toBe(buildJudgePrompt(input, "v1").userPrompt);
+    }
   });
 });
 

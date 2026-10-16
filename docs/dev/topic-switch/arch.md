@@ -230,7 +230,7 @@ export type JudgeVerdict =
 export interface JudgePort {
   complete(systemPrompt: string, userPrompt: string, signal: AbortSignal): Promise<string>;
 }
-export function buildJudgePrompt(i: JudgeInput): { systemPrompt: string; userPrompt: string };
+export function buildJudgePrompt(i: JudgeInput, variant?: "v1" | "v2"): { systemPrompt: string; userPrompt: string }; // 默认 v2（2026-10-16）
 export function parseJudgeReply(text: string): { related: boolean; confidence: number } | undefined;
 export function judgeRelevance(port: JudgePort, i: JudgeInput, timeoutMs: number, clock: Clock): Promise<JudgeVerdict>;
 ```

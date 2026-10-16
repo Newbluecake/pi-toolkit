@@ -234,7 +234,7 @@ export function estimateNextRequestUsd(i: {
 ### judge.ts（arch §5 不变，补）
 
 `JUDGE_SESSION_MODEL_FALLBACK`（D3）；`judgeModelChain({configured,title,session}) → readonly {provider,id,origin}[]`（strict 解析、去重、保序）；
-`JUDGE_MAX_TOKENS=64`；`JUDGE_LIMITS`（frozen）；`buildJudgePrompt`、`parseJudgeReply`（首个平衡 `{…}`、related boolean、confidence finite→clamp）；
+`JUDGE_MAX_TOKENS=512`（2026-10-16 由 64 调大：推理型判断模型 64 时 20–33% 空回复/截断）；`JUDGE_LIMITS`（frozen）；`buildJudgePrompt`、`parseJudgeReply`（首个平衡 `{…}`、related boolean、confidence finite→clamp）；
 `judgeRelevance(port, input, timeoutMs, clock, signal: AbortSignal)`：内部 `AbortController` 同时受外部 `signal` 与超时驱动，外层 `withDeadline(timeoutMs+500)`；
 结果 `ok|timeout|error|parse-error|aborted`。只有 `ok && related===false && confidence ≥ minConfidence` 视为「无关」。
 
