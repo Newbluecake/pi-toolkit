@@ -1,7 +1,8 @@
 // Ported from the standalone session-nav extension
 // (~/.pi/agent/extensions/session-nav/, author is this repository's user) —
 // 会话导航增强。Behavior, command names and interception semantics are
-// preserved verbatim.
+// preserved verbatim, except the subagent-session handling reworked by the
+// web-resume plan §2.3 (P1, D1 彻底隐藏).
 //
 // 功能：
 // - /clear            开始新会话（/new 的别名）；直接输入 `clear` 回车效果相同
@@ -13,8 +14,11 @@
 // - exit              直接输入 `exit` 回车退出 pi
 // - resume 列表标题清洗：skill 启动的会话剥掉 `<skill …>整篇 SKILL.md</skill>` 信封，
 //                     显示为 `[dev-flow] 真实输入`（见 skill-titles.ts）
-// - 主/sub 会话区分：扫描主会话里的 subagent:run 条目（diag.sessionFile），
-//                     subagent 会话显示为 `[sub:verifier] 派单描述`（见 subagent-sessions.ts）
+// - sub 会话彻底隐藏（D1，web-resume plan §2.1/§2.3）：`subagent:child` 自标记或
+//     provenance 索引（整个会话目录的 subagent:run 反向索引，缓存 v2 + 增量回填）
+//     命中的会话在 partial 进度与最终列表里整行丢弃——没有 `--sub` flag、没有开关、
+//     没有隐藏计数行；旧的 `[sub:type]` 改标题路径已删除。已知盲区（AGENTS.md）：
+//     v0.4.0 之前创建且父会话文件已删除的子会话；超大目录回填完成前的最初几次打开。
 //
 // Entry contract: `wireSessionNav(pi)` registers the `resume-recent` / `clear`
 // commands, the bare `exit` input interception, and the SessionNavEditor
@@ -28,9 +32,8 @@
 // handler keeps its own `ctx.mode !== "tui"` early return.
 //
 // String constants kept verbatim: commands `resume-recent`, `clear`; the
-// 48-hour window; cache path `<agent>/cache/session-nav/subagent-marks.json`;
-// `[skill名]` / `[sub:type]` title formats. No timers — nothing to unref;
-// the marks cache write is fire-and-forget by design.
+// 48-hour window. No timers — nothing to unref; the provenance cache write is
+// fire-and-forget by design.
 
 import {
   CustomEditor,
@@ -39,9 +42,11 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { resolve } from "node:path";
 import { listRecentSessions, type SessionListProgress } from "./recent-sessions.js";
 import { cleanSkillTitles } from "./skill-titles.js";
-import { collectSubagentMarks, listSessionFiles, markSubagentSessions } from "./subagent-sessions.js";
+import { collectSubagentSessions, listSessionFiles } from "./subagent-sessions.js";
+import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 
 const RECENT_SESSION_HOURS = 48;
 
@@ -100,15 +105,32 @@ export function wireSessionNav(pi: ExtensionAPI): void {
 
       const loadAll = args.trim() === "--all";
       const sessionDir = ctx.sessionManager.getSessionDir();
-      const allLoader = async (onProgress?: SessionListProgress) => {
-        const sessions = await SessionManager.list(ctx.cwd, sessionDir, onProgress).then(cleanSkillTitles);
-        const marks = await collectSubagentMarks(await listSessionFiles(sessionDir), sessionDir);
-        return markSubagentSessions(sessions, marks);
+      // §2.3 pipeline: ① candidates → ② provenance advance + bounded head reads (sub set) →
+      // ③ SessionManager.list with a progress wrapper that drops sub rows (partial list too)
+      // → ④ cleanSkillTitles → ⑤ final sub filter. The selector's AbortSignal is threaded
+      // through every step.
+      const allLoader = async (onProgress?: SessionListProgress, signal?: AbortSignal): Promise<SessionInfo[]> => {
+        const candidates = await listSessionFiles(sessionDir);
+        const { sub } = await collectSubagentSessions(candidates, sessionDir, { signal });
+        const wrappedProgress: SessionListProgress = (loaded, total, partialSessions) => {
+          if (partialSessions === undefined) {
+            onProgress?.(loaded, total);
+            return;
+          }
+          onProgress?.(
+            loaded,
+            total,
+            partialSessions.filter((session) => !sub.has(resolve(session.path))),
+          );
+        };
+        const sessions = await SessionManager.list(ctx.cwd, sessionDir, wrappedProgress, signal);
+        const cleaned = await cleanSkillTitles(sessions);
+        return cleaned.filter((session) => !sub.has(resolve(session.path)));
       };
       const recentLoader = loadAll
         ? allLoader
-        : (onProgress?: SessionListProgress) =>
-            listRecentSessions(ctx.cwd, sessionDir, RECENT_SESSION_HOURS, onProgress);
+        : (onProgress?: SessionListProgress, signal?: AbortSignal) =>
+            listRecentSessions(ctx.cwd, sessionDir, RECENT_SESSION_HOURS, onProgress, signal);
 
       const selectedPath = await ctx.ui.custom<string | null>(
         (tui, _theme, keybindings, done) =>

@@ -1,169 +1,124 @@
-// Ported behavior tests for src/session-nav/subagent-sessions.ts — fakes are
-// inline (no cross-package helpers). markSubagentSessions is pure;
-// collectSubagentMarks runs against a temp dir with fake session jsonl files
-// and exercises the on-disk mtime+size cache.
+// web-resume plan §4 P1: `collectSubagentSessions` — the §2.3 step-② sub set over candidate
+// files (provenance index + per-candidate `subagent:child` head read, ≤16 concurrency), and
+// `listSessionFiles`. The old collectSubagentMarks/markSubagentSessions (v1 cache + `[sub:*]`
+// retitle) are gone per D1 — those suites were replaced by provenance.test.ts.
 
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { utimes } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import type { SessionInfo } from "@earendil-works/pi-coding-agent";
+import { beforeEach, afterEach, describe, expect, test } from "vitest";
 import {
-  collectSubagentMarks,
+  collectSubagentSessions,
+  HEAD_SCAN_CONCURRENCY,
   listSessionFiles,
-  markSubagentSessions,
-  type SubagentMark,
 } from "../../src/session-nav/subagent-sessions.js";
+import {
+  childMarkerLine,
+  dropLayout,
+  headerLine,
+  makeLayout,
+  nameLine,
+  runMarkLine,
+  userLine,
+  type Layout,
+} from "./helpers.js";
 
-function fakeSession(overrides: Partial<SessionInfo>): SessionInfo {
-  return {
-    path: "/tmp/session-nav-fake.jsonl",
-    id: "fake",
-    cwd: "/tmp",
-    created: new Date(),
-    modified: new Date(),
-    messageCount: 1,
-    firstMessage: "原标题",
-    allMessagesText: "原标题",
-    ...overrides,
-  };
+let layout: Layout;
+beforeEach(async () => {
+  layout = await makeLayout();
+});
+afterEach(async () => {
+  await dropLayout(layout);
+});
+
+async function writeSession(name: string, lines: string[]): Promise<string> {
+  const { writeFile } = await import("node:fs/promises");
+  const path = join(layout.sessionDir, name);
+  await writeFile(path, lines.join("\n") + "\n", "utf8");
+  return path;
 }
 
-describe("markSubagentSessions", () => {
-  test("replaces the title with `[sub:type] label` when the run has a label", () => {
-    const session = fakeSession({ path: "/tmp/child.jsonl", firstMessage: "截断的 subagent prompt…" });
-    const marks = new Map<string, SubagentMark>([
-      [resolve("/tmp/child.jsonl"), { agentType: "verifier", label: "派单描述" }],
-    ]);
-    const [marked] = markSubagentSessions([session], marks);
-    expect(marked?.firstMessage).toBe("[sub:verifier] 派单描述");
-  });
-
-  test("prefixes the original title when the run has no label", () => {
-    const session = fakeSession({ path: "/tmp/child.jsonl", firstMessage: "原标题" });
-    const withType = markSubagentSessions(
-      [session],
-      new Map([[resolve("/tmp/child.jsonl"), { agentType: "verifier" }]]),
-    );
-    expect(withType[0]?.firstMessage).toBe("[sub:verifier] 原标题");
-    const withoutType = markSubagentSessions([session], new Map([[resolve("/tmp/child.jsonl"), {}]]));
-    expect(withoutType[0]?.firstMessage).toBe("[sub] 原标题");
-  });
-
-  test("renamed sessions (name set) are left untouched", () => {
-    const session = fakeSession({
-      path: "/tmp/child.jsonl",
-      name: "用户改的名",
-      firstMessage: "原标题",
+describe("collectSubagentSessions", () => {
+  test("self-marker (line 2) classifies a child with no parent mark at all", async () => {
+    const child = await writeSession("child.jsonl", [headerLine("c1"), childMarkerLine(), userLine("任务")]);
+    const main = await writeSession("main.jsonl", [headerLine("m1"), userLine("hi")]);
+    const { sub } = await collectSubagentSessions([child, main], layout.sessionDir, {
+      budget: { ms: 0, bytes: 0 }, // index cannot help — only the head read may classify
     });
-    const marks = new Map<string, SubagentMark>([
-      [resolve("/tmp/child.jsonl"), { agentType: "verifier", label: "派单描述" }],
-    ]);
-    const [marked] = markSubagentSessions([session], marks);
-    expect(marked).toBe(session);
+    expect(sub.has(resolve(child))).toBe(true);
+    expect(sub.has(resolve(main))).toBe(false);
   });
 
-  test("returns the input array unchanged when there are no marks", () => {
-    const sessions = [fakeSession({})];
-    expect(markSubagentSessions(sessions, new Map())).toBe(sessions);
+  test("provenance hit classifies a marker-less child (and skips its head read)", async () => {
+    const child = await writeSession("child.jsonl", [headerLine("c1")]); // pre-v0.4.0 shape
+    await writeSession("parent.jsonl", [headerLine("p1"), runMarkLine(child)]);
+    // First call builds the index; second proves the classification is index-sourced.
+    await collectSubagentSessions([join(layout.sessionDir, "parent.jsonl")], layout.sessionDir);
+    const { sub } = await collectSubagentSessions([child], layout.sessionDir, {
+      budget: { ms: 0, bytes: 0 },
+    });
+    expect(sub.has(resolve(child))).toBe(true);
+  });
+
+  test("a renamed (session_info.name) child is still filtered — identity, not title", async () => {
+    const child = await writeSession("child.jsonl", [headerLine("c1"), childMarkerLine(), nameLine("用户改名")]);
+    const { sub } = await collectSubagentSessions([child], layout.sessionDir, {
+      budget: { ms: 0, bytes: 0 },
+    });
+    expect(sub.has(resolve(child))).toBe(true);
+  });
+
+  test("unparseable/missing candidates are skipped without throwing", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    const garbage = join(layout.sessionDir, "garbage.jsonl");
+    await writeFile(garbage, "not json at all\n", "utf8");
+    const main = await writeSession("main.jsonl", [headerLine("m1")]);
+    const { sub } = await collectSubagentSessions(
+      [garbage, main, join(layout.sessionDir, "gone.jsonl")],
+      layout.sessionDir,
+      { budget: { ms: 2_000, bytes: 1024 * 1024 } },
+    );
+    expect(sub.size).toBe(0);
+  });
+
+  test("an aborted signal returns promptly with a partial answer", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const child = await writeSession("child.jsonl", [headerLine("c1"), childMarkerLine()]);
+    const { sub } = await collectSubagentSessions([child], layout.sessionDir, { signal: controller.signal });
+    expect(sub.size).toBe(0); // head reads never ran; no throw
+  });
+
+  test("HEAD_SCAN_CONCURRENCY is 16 (§2.3)", () => {
+    expect(HEAD_SCAN_CONCURRENCY).toBe(16);
+  });
+
+  test("candidate order does not matter for the resulting set", async () => {
+    const a = await writeSession("a.jsonl", [headerLine("a"), childMarkerLine()]);
+    const b = await writeSession("b.jsonl", [headerLine("b"), childMarkerLine()]);
+    const forward = await collectSubagentSessions([a, b], layout.sessionDir, { budget: { ms: 0, bytes: 0 } });
+    const backward = await collectSubagentSessions([b, a], layout.sessionDir, { budget: { ms: 0, bytes: 0 } });
+    expect([...forward.sub].sort()).toEqual([...backward.sub].sort());
   });
 });
 
-describe("collectSubagentMarks", () => {
-  let root: string;
-  let agentDir: string;
-  let sessionDir: string;
-
-  beforeEach(async () => {
-    // 布局对齐真实结构：<agent>/sessions/--cwd--/*.jsonl，
-    // 缓存落 <agent>/cache/session-nav/subagent-marks.json
-    root = await mkdtemp(join(tmpdir(), "session-nav-test-"));
-    agentDir = join(root, "agent");
-    sessionDir = join(agentDir, "sessions", "--cwd--");
-    await mkdir(sessionDir, { recursive: true });
+describe("listSessionFiles", () => {
+  test("lists .jsonl files resolved; ignores other names and a missing dir", async () => {
+    await writeSession("one.jsonl", [headerLine("1")]);
+    await writeSession("two.jsonl", [headerLine("2")]);
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(join(layout.sessionDir, "note.txt"), "x", "utf8");
+    const files = await listSessionFiles(layout.sessionDir);
+    expect(files.sort()).toEqual([
+      resolve(join(layout.sessionDir, "one.jsonl")),
+      resolve(join(layout.sessionDir, "two.jsonl")),
+    ]);
+    expect(await listSessionFiles(join(layout.root, "missing"))).toEqual([]);
   });
 
-  afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
-  });
-
-  function runEntry(diag: Record<string, unknown>): string {
-    return JSON.stringify({ type: "custom", customType: "subagent:run", data: { diag } });
-  }
-
-  test("extracts marks, tolerates dirty lines, and writes the cache file", async () => {
-    const childPath = join(sessionDir, "child.jsonl");
-    await writeFile(childPath, "", "utf8");
-    const mainPath = join(sessionDir, "main.jsonl");
-    await writeFile(
-      mainPath,
-      [
-        '{"type":"session"}',
-        // 脏行：粗筛命中但 JSON 不合法，必须被容忍
-        '{"customType":"subagent:run", broken json',
-        // 错误 type：粗筛命中但被类型检查丢弃
-        JSON.stringify({ type: "message", customType: "subagent:run", data: { diag: { sessionFile: "/nope" } } }),
-        runEntry({ sessionFile: childPath, agentType: "verifier", label: "派单描述" }),
-      ].join("\n") + "\n",
-      "utf8",
-    );
-    // 无 subagent:run 条目的普通会话
-    await writeFile(join(sessionDir, "plain.jsonl"), '{"type":"session"}\n', "utf8");
-
-    const files = await listSessionFiles(sessionDir);
-    expect(files.sort()).toEqual([childPath, mainPath, join(sessionDir, "plain.jsonl")].map((p) => resolve(p)).sort());
-
-    const marks = await collectSubagentMarks(files, sessionDir);
-    expect(marks.get(resolve(childPath))).toEqual({ agentType: "verifier", label: "派单描述" });
-    expect(marks.size).toBe(1);
-
-    // 缓存文件按约定路径生成
-    const cacheFile = join(agentDir, "cache", "session-nav", "subagent-marks.json");
-    const cache = JSON.parse(await readFile(cacheFile, "utf8")) as {
-      version: number;
-      files: Record<string, { marks: unknown[] }>;
-    };
-    expect(cache.version).toBe(1);
-    expect(Object.keys(cache.files)).toContain(resolve(mainPath));
-
-    // 第二次调用命中缓存，结果一致
-    const cached = await collectSubagentMarks(files, sessionDir);
-    expect(cached.get(resolve(childPath))).toEqual({ agentType: "verifier", label: "派单描述" });
-    expect(cached.size).toBe(1);
-  });
-
-  test("run-persistence plan D6: a non-terminal journal entry + its terminal entry yield one identical mark; journal-only runs are marked too", async () => {
-    const childPath = join(sessionDir, "child.jsonl");
-    const crashedPath = join(sessionDir, "crashed.jsonl");
-    await writeFile(childPath, "", "utf8");
-    await writeFile(crashedPath, "", "utf8");
-    const journalLine = (diag: Record<string, unknown>) =>
-      JSON.stringify({
-        type: "custom",
-        customType: "subagent:run",
-        data: { status: "starting", journal: { kind: "session_created" }, diag },
-      });
-    const mainPath = join(sessionDir, "main.jsonl");
-    await writeFile(
-      mainPath,
-      [
-        '{"type":"session"}',
-        journalLine({ sessionFile: childPath, agentType: "verifier", label: "派单描述" }),
-        runEntry({ sessionFile: childPath, agentType: "verifier", label: "派单描述" }),
-        journalLine({ sessionFile: crashedPath, agentType: "explorer", label: "崩溃前" }),
-      ].join("\n") + "\n",
-      "utf8",
-    );
-    const marks = await collectSubagentMarks([mainPath, childPath, crashedPath], sessionDir);
-    expect(marks.get(resolve(childPath))).toEqual({ agentType: "verifier", label: "派单描述" });
-    expect(marks.get(resolve(crashedPath))).toEqual({ agentType: "explorer", label: "崩溃前" });
-    expect(marks.size).toBe(2);
-  });
-
-  test("returns an empty map when no file contains subagent:run entries", async () => {
-    const mainPath = join(sessionDir, "main.jsonl");
-    await writeFile(mainPath, '{"type":"session"}\n{"type":"message"}\n', "utf8");
-    const marks = await collectSubagentMarks([mainPath], sessionDir);
-    expect(marks.size).toBe(0);
+  test("old files are still candidates for the --all loader (no window filter here)", async () => {
+    const path = await writeSession("ancient.jsonl", [headerLine("a")]);
+    const t = new Date(Date.now() - 400 * 24 * 3600 * 1000);
+    await utimes(path, t, t);
+    expect(await listSessionFiles(layout.sessionDir)).toEqual([resolve(path)]);
   });
 });
