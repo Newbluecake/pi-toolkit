@@ -40,6 +40,9 @@ const transcript = {
   "tool.diffEdit": "Edit {i}/{m}",
   "tool.diffFold": "… {n} rows omitted",
   "tool.diffExpand": "Expand",
+  "tool.viewRendered": "Rendered",
+  "tool.viewSource": "Source",
+  "tool.viewToggleLabel": "Markdown view mode",
 } satisfies Record<string, string>;
 
 export default transcript;

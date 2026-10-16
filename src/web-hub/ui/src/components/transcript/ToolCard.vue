@@ -32,6 +32,7 @@ import { useTicker, type TickerHandle } from "../../composables/useTicker.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import PathText from "../preview/PathText.vue";
 import ClampToggle from "./ClampToggle.vue";
+import MarkdownView from "./MarkdownView.vue";
 import { tailLines } from "./tail-lines.js";
 
 const props = defineProps<ToolCardProps>();
@@ -39,6 +40,23 @@ const { t } = useI18n();
 
 const TOOL_STATE_ICON = { pending: "clock", running: "loader", done: "check", error: "x" } as const;
 const TOOL_STATE_ATTR = { pending: "pending", running: "running", done: "done", error: "failed" } as const;
+
+/* --- markdown-rendered tool results (2026-10 用户需求「get_subagent_result 渲染 markdown」) ------------
+ * Tools listed here (NAME only; `Agent` and friends may join later) get their FINISHED result
+ * rendered through the assistant messages' own `MarkdownView.vue` pipeline (allow-listed AST,
+ * no v-html, PathText path refs, GFM tables in their own horizontal scroller) instead of the
+ * raw `<pre>`. Only the done-state result qualifies — running `partial`, error results and the
+ * Input/live sections stay plain forever. `showMdSource` is per-card local state (same grammar
+ * as the preview dialog's md/source toggle), default rendered; the raw text is always one
+ * click away and remains what the source `<pre>` shows (CodeBlock's copy inside the rendered
+ * view already copies its raw fenced text). */
+const MD_RESULT_TOOLS: ReadonlySet<string> = new Set(["get_subagent_result"]);
+
+const resultAsMd = computed(
+  () =>
+    props.view.state === "done" && MD_RESULT_TOOLS.has(props.view.toolName) && typeof props.view.result === "string",
+);
+const showMdSource = ref(false);
 
 const icon = computed(() => TOOL_STATE_ICON[props.view.state]);
 const dataSt = computed(() => TOOL_STATE_ATTR[props.view.state]);
@@ -156,10 +174,17 @@ const diffBox = ref<HTMLElement | null>(null);
 const inputPre = ref<HTMLElement | null>(null);
 const partialPre = ref<HTMLElement | null>(null);
 const resultPre = ref<HTMLElement | null>(null);
+const resultMd = ref<HTMLElement | null>(null);
 const diffClamp = useCoarseClamp(() => diffBox.value, [() => editDiff.value, () => expandedHunks.value]);
 const inputClamp = useCoarseClamp(() => inputPre.value, [() => argsText.value]);
 const partialClamp = useCoarseClamp(() => partialPre.value, [() => displayedPartial.value]);
-const resultClamp = useCoarseClamp(() => resultPre.value, [() => props.view.result]);
+/* The result region's target follows the rendered/source flip: exactly one of the two nodes
+ * exists at a time (v-if/v-else), and the mode flip is a reactive source so the clamp
+ * re-measures the freshly mounted node. */
+const resultClamp = useCoarseClamp(
+  () => resultPre.value ?? resultMd.value,
+  [() => props.view.result, () => showMdSource.value],
+);
 </script>
 
 <template>
@@ -242,8 +267,25 @@ const resultClamp = useCoarseClamp(() => resultPre.value, [() => props.view.resu
       <div v-if="view.result !== undefined" class="tool-section" :class="{ 'is-error': view.state === 'error' }">
         <div class="tool-label">
           {{ view.state === "error" ? t("transcript.tool.result") : t("transcript.tool.output") }}
+          <div v-if="resultAsMd" class="tool-md-toggle" role="group" :aria-label="t('transcript.tool.viewToggleLabel')">
+            <button type="button" class="tool-md-btn" :aria-pressed="!showMdSource" @click="showMdSource = false">
+              {{ t("transcript.tool.viewRendered") }}
+            </button>
+            <button type="button" class="tool-md-btn" :aria-pressed="showMdSource" @click="showMdSource = true">
+              {{ t("transcript.tool.viewSource") }}
+            </button>
+          </div>
         </div>
-        <pre ref="resultPre" class="pre" :data-cc="resultClamp.dataCc" translate="no" tabindex="0">{{
+        <div
+          v-if="resultAsMd && !showMdSource"
+          ref="resultMd"
+          class="tool-md"
+          :data-cc="resultClamp.dataCc"
+          tabindex="0"
+        >
+          <MarkdownView :text="view.result" />
+        </div>
+        <pre v-else ref="resultPre" class="pre" :data-cc="resultClamp.dataCc" translate="no" tabindex="0">{{
           view.result
         }}</pre>
         <ClampToggle :clamp="resultClamp" />

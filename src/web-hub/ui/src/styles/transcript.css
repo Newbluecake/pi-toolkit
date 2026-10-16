@@ -564,6 +564,57 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   font-size: var(--fs-xs);
 }
 
+/* Markdown-rendered tool output (ToolCard.vue's `MD_RESULT_TOOLS`): the same shared `.md`
+   typography as assistant messages (MarkdownView is untouched), held in the same 280px cap /
+   coarse-clamp grammar as the plain `.pre`. The wrapper owns the vertical cap only — GFM
+   tables keep their own horizontal scroller (`.md-table-wrap`), exactly like in messages. */
+.tool-section .tool-md {
+  max-height: 280px;
+  overflow: auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+
+.tool-section .tool-md:focus-visible {
+  outline-offset: -2px;
+}
+
+/* rendered/source segmented control in the Output label row (same grammar as the preview
+   dialog's `.preview-toggle`); `text-transform`/`letter-spacing` undo `.tool-label`'s
+   uppercase micro-caption so the buttons read as controls, not labels. */
+.tool-md-toggle {
+  display: inline-flex;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.tool-md-btn {
+  padding: 2px var(--sp-2);
+  background: var(--c-surface);
+  border: 0;
+  color: var(--c-text-2);
+  font-size: var(--fs-2xs);
+  text-transform: none;
+  letter-spacing: normal;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.tool-md-btn + .tool-md-btn {
+  border-left: 1px solid var(--c-border);
+}
+
+.tool-md-btn[aria-pressed="true"] {
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+  font-weight: var(--fw-semibold);
+}
+
+.tool-md-btn:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
 .tool-section.is-error .pre {
   color: var(--c-danger);
   background: var(--c-danger-soft);
@@ -839,9 +890,12 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
    * on desktop (fine pointer) and on content that fits under the cap, so this whole block is
    * inert there. The thinking/tool/diff regions wrap long lines (`pre-wrap` +
    * `overflow-wrap: anywhere`), so clamping `overflow` never takes away a horizontal pan;
-   * code blocks are the one deliberate exception — see their own rule group below. */
+   * code blocks are the one deliberate exception — see their own rule group below. The
+   * markdown-rendered tool result (`.tool-md`) wraps the same way (`overflow-wrap: anywhere`
+   * via `.md`), with its GFM tables panning inside their own `.md-table-wrap`. */
   .thinking-text[data-cc="clamped"],
   .tool-section .pre[data-cc="clamped"],
+  .tool-section .tool-md[data-cc="clamped"],
   .diff[data-cc="clamped"] {
     position: relative; /* the fade ::after's containing block */
     overflow: hidden;
@@ -849,6 +903,7 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 
   .thinking-text[data-cc="clamped"]::after,
   .tool-section .pre[data-cc="clamped"]::after,
+  .tool-section .tool-md[data-cc="clamped"]::after,
   .diff[data-cc="clamped"]::after {
     content: "";
     position: absolute;
@@ -863,6 +918,7 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   /* the tool-card regions sit on the `.tool` card surface; the error variant's pre carries
    * its own danger tint the fade must blend into */
   .tool-section .pre[data-cc="clamped"]::after,
+  .tool-section .tool-md[data-cc="clamped"]::after,
   .diff[data-cc="clamped"]::after {
     background: linear-gradient(to bottom, transparent, var(--c-surface));
   }
@@ -873,6 +929,7 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 
   .thinking-text[data-cc="expanded"],
   .tool-section .pre[data-cc="expanded"],
+  .tool-section .tool-md[data-cc="expanded"],
   .diff[data-cc="expanded"] {
     max-height: none;
   }

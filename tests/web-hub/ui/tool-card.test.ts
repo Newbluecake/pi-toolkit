@@ -270,3 +270,131 @@ describe("ToolCard.vue — edit diff view", () => {
     expect(hunk().get(".diff-row").get(".diff-text").text()).toBe("line-0");
   });
 });
+
+/**
+ * Markdown-rendered tool results (2026-10「get_subagent_result 渲染 markdown」): only tools in
+ * `ToolCard.vue`'s `MD_RESULT_TOOLS` allow-list get their DONE string result rendered through
+ * the assistant pipeline (`MarkdownView.vue` — heading downgrade, GFM tables, CodeBlock with
+ * its raw-copy button); everything else (other tools, error results, running partials, the
+ * Input section) keeps the plain `<pre>` byte-identically. The rendered/source toggle is
+ * per-card local state, default rendered, and the source mode always shows the raw text.
+ */
+describe("ToolCard.vue — markdown-rendered results (MD_RESULT_TOOLS)", () => {
+  const mdResult = [
+    "# Run report",
+    "",
+    "| model | runs | cost |",
+    "| --- | --: | --- |",
+    "| kimi | 3 | $0.42 |",
+    "",
+    "- fixed `foo.ts`",
+    "",
+    "```ts",
+    "const answer = 42;",
+    "```",
+  ].join("\n");
+
+  function mdCard(v: Partial<ToolView> & Pick<ToolView, "toolCallId" | "toolName" | "state">) {
+    return mount(ToolCard, { props: { view: view(v) } });
+  }
+
+  it("done get_subagent_result renders heading/table/code as elements, not raw text", () => {
+    const wrapper = mdCard({ toolCallId: "m1", toolName: "get_subagent_result", state: "done", result: mdResult });
+    const md = wrapper.get(".tool-md");
+    // markdown `#` downgrades to h3..h6 inside the transcript (ui-design.md §12)
+    expect(md.find("h3").text()).toBe("Run report");
+    const table = md.get("table.md-table");
+    expect(table.findAll("th").map((c) => c.text())).toEqual(["model", "runs", "cost"]);
+    expect(table.findAll("td").map((c) => c.text())).toEqual(["kimi", "3", "$0.42"]);
+    expect(table.get("td:nth-child(2)").classes()).toContain("md-tr"); // `--:` right-align
+    // the result section carries no plain pre; the raw pipes/headings are NOT visible as text
+    expect(wrapper.find(".tool-section .pre").exists()).toBe(false);
+    expect(md.find(".md-list li").text()).toContain("fixed");
+  });
+
+  it("a fenced code block inside the rendered result keeps CodeBlock's raw copy source", () => {
+    const wrapper = mdCard({ toolCallId: "m2", toolName: "get_subagent_result", state: "done", result: mdResult });
+    const pre = wrapper.get(".tool-md .codeblock pre");
+    expect(pre.text()).toBe("const answer = 42;"); // CodeBlock's copy button copies exactly this raw text
+    expect(wrapper.find(".tool-md .codeblock button").exists()).toBe(true);
+  });
+
+  it("other done tools stay plain text with no toggle, even for markdown-looking results", () => {
+    for (const toolName of ["bash", "read", "Agent"]) {
+      const wrapper = mdCard({ toolCallId: "m3", toolName, state: "done", result: mdResult });
+      expect(wrapper.find(".tool-md").exists(), toolName).toBe(false);
+      expect(wrapper.find(".tool-md-toggle").exists(), toolName).toBe(false);
+      const pres = wrapper.findAll(".tool-section .pre");
+      expect(
+        pres.some((p) => p.text().includes("| model | runs | cost |")),
+        toolName,
+      ).toBe(true);
+    }
+  });
+
+  it("toggle switches rendered → source (raw text) and back; default is rendered", async () => {
+    const wrapper = mdCard({ toolCallId: "m4", toolName: "get_subagent_result", state: "done", result: mdResult });
+    const toggle = wrapper.get(".tool-md-toggle");
+    expect(toggle.attributes("role")).toBe("group");
+    const [renderedBtn, sourceBtn] = toggle.findAll("button");
+    expect(renderedBtn.text()).toBe("Rendered");
+    expect(sourceBtn.text()).toBe("Source");
+    expect(renderedBtn.attributes("aria-pressed")).toBe("true");
+    expect(sourceBtn.attributes("aria-pressed")).toBe("false");
+
+    await sourceBtn.trigger("click");
+    expect(wrapper.find(".tool-md").exists()).toBe(false);
+    const pre = wrapper.get(".tool-section .pre");
+    expect(pre.text()).toBe(mdResult); // the RAW markdown, byte-for-byte
+    expect(pre.attributes("translate")).toBe("no");
+    expect(wrapper.findAll(".tool-md-toggle button")[0]!.attributes("aria-pressed")).toBe("false");
+    expect(wrapper.findAll(".tool-md-toggle button")[1]!.attributes("aria-pressed")).toBe("true");
+
+    await wrapper.findAll(".tool-md-toggle button")[0]!.trigger("click");
+    expect(wrapper.find(".tool-md").exists()).toBe(true);
+  });
+
+  it("toggle state is per-card local (two cards do not share it)", async () => {
+    const a = mdCard({ toolCallId: "m5a", toolName: "get_subagent_result", state: "done", result: mdResult });
+    const b = mdCard({ toolCallId: "m5b", toolName: "get_subagent_result", state: "done", result: mdResult });
+    await a.findAll(".tool-md-toggle button")[1]!.trigger("click");
+    expect(a.find(".tool-md").exists()).toBe(false);
+    expect(b.find(".tool-md").exists()).toBe(true);
+  });
+
+  it("error result and running partial of get_subagent_result stay plain, no toggle", () => {
+    const err = mdCard({ toolCallId: "m6", toolName: "get_subagent_result", state: "error", result: "# boom" });
+    expect(err.get(".tool-section").classes()).toContain("is-error");
+    expect(err.get(".tool-section .pre").text()).toBe("# boom");
+    expect(err.find(".tool-md").exists()).toBe(false);
+    expect(err.find(".tool-md-toggle").exists()).toBe(false);
+
+    const run = mdCard({
+      toolCallId: "m7",
+      toolName: "get_subagent_result",
+      state: "running",
+      partial: "| a | b |\n| - | - |",
+    });
+    expect(run.get(".tool-section .pre").text()).toContain("| a | b |");
+    expect(run.find(".tool-md").exists()).toBe(false);
+    expect(run.find(".tool-md-toggle").exists()).toBe(false);
+  });
+
+  it("Input/args section of a markdown tool stays the plain PathText pre", () => {
+    const wrapper = mdCard({
+      toolCallId: "m8",
+      toolName: "get_subagent_result",
+      state: "done",
+      args: { run_id: "run-42" },
+      result: mdResult,
+    });
+    const pres = wrapper.findAll("pre");
+    // two pres total: the args pre (Input section) + CodeBlock's pre INSIDE the md container —
+    // the result section itself is never a pre
+    expect(pres.length).toBe(2);
+    expect(pres[0]!.text()).toContain("run-42");
+    expect(pres[0]!.classes()).toContain("pre");
+    expect(pres[1]!.text()).toBe("const answer = 42;");
+    expect(pres[1]!.element.closest(".tool-md")).not.toBeNull();
+  });
+});

@@ -43,6 +43,9 @@ const transcript = {
   "tool.diffEdit": "编辑 {i}/{m}",
   "tool.diffFold": "… 已省略 {n} 行",
   "tool.diffExpand": "展开",
+  "tool.viewRendered": "渲染",
+  "tool.viewSource": "源码",
+  "tool.viewToggleLabel": "Markdown 显示方式",
 } satisfies Messages<typeof en>;
 
 export default transcript;
