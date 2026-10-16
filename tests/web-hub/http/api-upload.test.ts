@@ -1439,15 +1439,27 @@ describe("hard gate 4 — close paths (plan §2.6 #13)", () => {
     writeFileSync(join(orphanDir, "left.bin.part"), "partial");
     const { hub } = await startHubWithUploads(home, { recover: false });
     await waitFor(() => !existsSync(orphanDir), 10_000);
-    // §5.4: the startup recovery wrote a recover-phase audit line through the hub log
-    const lines = readFileSync(hub.paths.logFile, "utf8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l) as Record<string, unknown>);
-    const recoverLines = lines.filter((l) => l["audit"] === "upload" && l["phase"] === "recover");
-    expect(recoverLines.some((l) => l["reason"] === "orphan-part" && l["ok"] === true && l["op"] === "sweep")).toBe(
-      true,
-    );
+    // §5.4: the startup recovery wrote a recover-phase audit line through the hub log. The audit
+    // line lands AFTER the async rm resolves (an await boundary sits between them), so wait for
+    // the line itself rather than reading the log the instant the dir disappears — that race
+    // flaked whenever hub startup had other concurrent work (e.g. the version bootHead git probe).
+    const sweptLine = (): boolean =>
+      existsSync(hub.paths.logFile) &&
+      readFileSync(hub.paths.logFile, "utf8")
+        .trim()
+        .split("\n")
+        .filter((l) => l !== "")
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .some(
+          (l) =>
+            l["audit"] === "upload" &&
+            l["phase"] === "recover" &&
+            l["reason"] === "orphan-part" &&
+            l["ok"] === true &&
+            l["op"] === "sweep",
+        );
+    await waitFor(sweptLine, 10_000);
+    expect(sweptLine()).toBe(true);
   });
 });
 
