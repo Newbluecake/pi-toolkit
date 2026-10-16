@@ -579,6 +579,7 @@ export async function normalizeBatches(
   memorySettings: {
     coreBytes: number;
     topicMaxBytes: number;
+    topicWarnBytes: number;
     maxInputBytes: number;
     maxOutputBytes: number;
     agentType: string;
@@ -620,6 +621,10 @@ export async function normalizeBatches(
       migrationMode: false,
       coreBytes: memorySettings.coreBytes,
       topicMaxBytes: memorySettings.topicMaxBytes,
+      topicWarnBytes: memorySettings.topicWarnBytes,
+      oversized: files
+        .filter((f) => f.size > memorySettings.topicWarnBytes)
+        .map((f) => ({ name: f.name, bytes: f.size })),
       batch: {
         index: batch.index,
         total: plan.batches.length,
@@ -778,6 +783,7 @@ export interface BatchCommandDeps {
     };
     coreBytes: number;
     topicMaxBytes: number;
+    topicWarnBytes: number;
   };
   port?: TidyPort;
   onAfterWrite?: (cwd: string) => void;
@@ -900,6 +906,7 @@ export async function handleBatchTidyCommand(
           ...deps.settings.tidy,
           coreBytes: deps.settings.coreBytes,
           topicMaxBytes: deps.settings.topicMaxBytes,
+          topicWarnBytes: deps.settings.topicWarnBytes,
           ...(deps.paths === undefined ? {} : { paths: deps.paths }),
         },
         deps.settings.tidy.batch.totalTimeoutMs,

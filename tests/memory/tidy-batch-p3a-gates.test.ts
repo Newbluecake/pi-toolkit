@@ -275,6 +275,38 @@ describe("P3a gate coverage", () => {
     now.mockRestore();
   });
 
+  it("D04 coupling (2026-10-16): a batch prompt names files over topicWarnBytes and demands the split", async () => {
+    const fx = fixture();
+    const lines = Array.from(
+      { length: 300 },
+      (_, i) => `pitfall rule ${String(i).padStart(3, "0")} — re-check the caller first`,
+    );
+    writeAgent(fx.dir, "pitfalls.md", `# Pitfalls\n\n${lines.join("\n")}`);
+    writeAgent(fx.dir, "core.md", "# Core\n");
+    const child = fakePort([result()]);
+    const ui = uiScript({ select: (_title, values) => values.at(-1) });
+    await normalizeBatches(
+      modelContext(fx.cwd, ui.ui),
+      (await import("../../src/memory/tidy/snapshot.js")).snapshotMemoryDir(fx.cwd, { paths: fx.paths }),
+      child.port,
+      fx.cwd,
+      batchSettings(),
+      {
+        ...normalizeSettings().tidy,
+        coreBytes: 1600,
+        topicMaxBytes: 16_384,
+        topicWarnBytes: 8192,
+      },
+      Date.now() + 120_000,
+    );
+    expect(child.requests).toHaveLength(1);
+    const prompt = String((child.requests[0] as { prompt?: string }).prompt ?? "");
+    expect(prompt).toContain("8192-byte warn threshold (doctor D04)");
+    expect(prompt).toContain("Over the warn threshold now: pitfalls.md (");
+    // the primary core is never flagged (D04 is a non-core finding)
+    expect(prompt).not.toContain("threshold now: core.md");
+  });
+
   it("major: UI_TOTAL_MS is shared across phase-3 dialogs", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(0);
     const fx = fixture();

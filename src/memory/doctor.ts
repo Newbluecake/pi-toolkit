@@ -270,6 +270,19 @@ function degradeDetail(render: TieredRenderResult): string {
   return parts.length > 0 ? ` (${parts.join("; ")})` : "";
 }
 
+/** D09's L1 detail (2026-10-16): how many index candidates ended up in the
+ * `also:` name-only tail instead of a full index line. The candidate total
+ * mirrors `renderTiered`'s candidate list (topic files + demoted pinned + a
+ * fully-excluded primary); a pure L1 has no demotions, so this is normally
+ * just `topics − fullIndexLines`. Returns "" when everything got a full
+ * line (L1 caused solely by e.g. an archived-only tail or a core-profile
+ * render). */
+function nameOnlyDetail(render: TieredRenderResult, topicCount: number): string {
+  const candidateTotal = topicCount + render.demotedPinned.length + (primaryFullyExcluded(render) ? 1 : 0);
+  const nameOnly = Math.max(0, candidateTotal - render.fullIndexLines);
+  return nameOnly > 0 ? ` (${String(nameOnly)} topic(s) listed by name only — still openable via memory view)` : "";
+}
+
 // ───────────────────────────── sort ─────────────────────────────
 
 function sortFindings(findings: readonly DoctorFinding[]): DoctorFinding[] {
@@ -345,6 +358,9 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
   }
 
   const byTopic = new Map<string, string[]>();
+  // Non-archived topic files (the tiered renderer's full-index-line
+  // candidates, minus demoted primary/pinned) — used by D09's L1 detail.
+  let topicCount = 0;
 
   for (const f of files) {
     const isPrimary = f.name === primary;
@@ -352,6 +368,7 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
     const isArchived = f.meta.status === "archived";
     const isExtraPinned = isPin && !isPrimary && !isArchived;
     const isTopic = !isPin && !isPrimary && !isArchived;
+    if (isTopic) topicCount++;
 
     const topicList = byTopic.get(f.meta.topic);
     if (topicList) topicList.push(f.name);
@@ -514,12 +531,17 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
     // layout:legacy the injected block is the legacy renderer's inline form
     // — these levels describe nothing real there, so the rule sits out
     // entirely (review: legacy libraries must not get newly-false D09s).
+    // L1 (some candidates listed by name only in the `also:` line) is BENIGN
+    // — every file is still listed and openable, and splitting large files
+    // (D04's advice) makes it MORE likely — so it reports as info with the
+    // name-only count, not a warn that contradicts D04's fix hint.
     if (layoutTiered) {
       if (r.level > 0 && r.level < 5) {
+        const l1 = r.level === 1;
         findings.push({
           id: "D09",
-          severity: "warn",
-          message: `Memory block degraded to L${r.level}${degradeDetail(r)}.`,
+          severity: l1 ? "info" : "warn",
+          message: `Memory block degraded to L${r.level}${l1 ? nameOnlyDetail(r, topicCount) : degradeDetail(r)}.`,
         });
       } else if (r.level === 5) {
         findings.push({

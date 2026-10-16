@@ -283,12 +283,20 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
     isPrimaryCore: f.isPrimaryCore,
     handWritten: f.handWritten,
   }));
+  // Doctor D04's findings among the targets (non-primary files over
+  // topicWarnBytes) — same whole-file-byte semantics as runDoctor, so the
+  // model actually learns about the split hint /mem doctor gives the user.
+  const oversized = snap.files
+    .filter((f) => !f.isPrimaryCore && f.size > settings.topicWarnBytes)
+    .map((f) => ({ name: f.name, bytes: f.size }));
   const prompt = buildTidyPrompt({
     cwd,
     files: promptFiles,
     migrationMode,
     coreBytes: settings.coreBytes,
     topicMaxBytes: settings.topicMaxBytes,
+    topicWarnBytes: settings.topicWarnBytes,
+    oversized,
   });
   const promptBytes = Buffer.byteLength(prompt, "utf8");
 

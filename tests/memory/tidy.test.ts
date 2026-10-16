@@ -244,6 +244,51 @@ describe("validateTidyProposal (§7.3 step 5)", () => {
     expect(res.fileFlags.get("a.md")?.canApply).toBe(false);
     expect(res.fileFlags.get("a.md")?.note).toMatch(/frontmatter/);
   });
+
+  it("D04 split (2026-10-16): a 16 kB topic file split into three ≤ warn-threshold files passes validation whole", () => {
+    // 300 unique body lines ⇒ ~16 kB original (over topicWarnBytes 8192,
+    // under topicMaxBytes 16384 — exactly the state doctor D04 warns about).
+    const lines = Array.from(
+      { length: 300 },
+      (_, i) => `pitfall rule ${String(i).padStart(3, "0")} — re-check the caller first`,
+    );
+    const body = `---\nsource: agent\n---\n\n# Pitfalls\n\n${lines.join("\n")}\n`;
+    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(8192);
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(16384);
+    const original = new Map<string, any>([
+      ["pitfalls.md", { name: "pitfalls.md", body, handWritten: false, isPrimaryCore: false }],
+    ]);
+    const chunk = (n: number, slice: string[], h1: string): string =>
+      `---\nsource: agent\ntopic: pitfalls\ndescription: pitfalls part ${String(n)}\nread_when: editing part ${String(n)}\n---\n\n${h1}\n\n${slice.join("\n")}\n`;
+    const parts = [
+      // part 1 keeps the original H1 verbatim so the heading line survives too
+      chunk(1, lines.slice(0, 100), "# Pitfalls"),
+      chunk(2, lines.slice(100, 200), "# Pitfalls 2"),
+      chunk(3, lines.slice(200, 300), "# Pitfalls 3"),
+    ];
+    for (const p of parts) expect(Buffer.byteLength(p, "utf8")).toBeLessThanOrEqual(8192);
+    const proposal: TidyProposal = {
+      files: [
+        { name: "pitfalls.md", action: "delete", reason: "split over the 8192B warn threshold (D04)" },
+        { name: "pitfalls-1.md", action: "create", content: parts[0]!, reason: "split part 1" },
+        { name: "pitfalls-2.md", action: "create", content: parts[1]!, reason: "split part 2" },
+        { name: "pitfalls-3.md", action: "create", content: parts[2]!, reason: "split part 3" },
+      ],
+      dropped: [],
+    };
+    const res = validateTidyProposal(proposal, {
+      original,
+      coreBytes: 1600,
+      topicMaxBytes: 16384,
+      maxOutputBytes: 65536,
+      existingNames: new Set(["pitfalls.md"]),
+    });
+    expect(res.ok).toBe(true);
+    expect(res.issues).toHaveLength(0);
+    expect(res.fileFlags.get("pitfalls.md")?.unaccountedLines).toBe(0);
+    for (const n of ["pitfalls-1.md", "pitfalls-2.md", "pitfalls-3.md"])
+      expect(res.fileFlags.get(n)?.canApply).toBe(true);
+  });
 });
 
 // ───────────────────────────── diff.ts ─────────────────────────────
@@ -874,6 +919,43 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
     expect(fp.spawnReqs[0]?.toolDomain).toBe("readonly");
     expect(fp.spawnReqs[0]?.isolation).toBeUndefined();
     expect(fp.spawnReqs[0]?.type).toBe("custom-with-bash");
+  });
+
+  it("D04 coupling (2026-10-16): an oversized target file puts the split rule + its name in the spawn prompt", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(fx.memDir, "core.md", "---\nsource: agent\n---\n\n# Core\nrule\n", "2026-09-01T00:00:00.000Z");
+    const lines = Array.from(
+      { length: 300 },
+      (_, i) => `pitfall rule ${String(i).padStart(3, "0")} — re-check the caller first`,
+    );
+    writeMemAt(
+      fx.memDir,
+      "pitfalls.md",
+      `---\nsource: agent\n---\n\n# Pitfalls\n\n${lines.join("\n")}\n`,
+      "2026-09-01T00:00:00.000Z",
+    );
+    const fp = makeFakePort();
+    fp.settle(makeOutcome({ status: "failed", error: { kind: "internal", message: "x", retryable: false } as any }));
+    const { ui } = makeUi({ confirm: [true] });
+    await handleMemTidyCommand("tidy", "", makeCtx(fx.cwd, ui), baseDeps(fp, { paths: fx.paths }));
+    const prompt = String(fp.spawnReqs[0]?.prompt ?? "");
+    expect(prompt).toContain("8192-byte warn threshold (doctor D04)");
+    expect(prompt).toContain("Over the warn threshold now: pitfalls.md (");
+    // the oversized file IS a tidy target (included whole in the prompt)
+    expect(prompt).toContain("### pitfalls.md");
+  });
+
+  it("D04 coupling: nothing over the warn threshold ⇒ the prompt carries no split rule at all", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(fx.memDir, "core.md", "---\nsource: agent\n---\n\n# Core\nrule\n", "2026-09-01T00:00:00.000Z");
+    writeMemAt(fx.memDir, "topic.md", "---\nsource: agent\n---\n\n# Topic\nnote\n", "2026-09-01T00:00:00.000Z");
+    const fp = makeFakePort();
+    fp.settle(makeOutcome({ status: "failed", error: { kind: "internal", message: "x", retryable: false } as any }));
+    const { ui } = makeUi({ confirm: [true] });
+    await handleMemTidyCommand("tidy", "", makeCtx(fx.cwd, ui), baseDeps(fp, { paths: fx.paths }));
+    const prompt = String(fp.spawnReqs[0]?.prompt ?? "");
+    expect(prompt).not.toContain("doctor D04");
+    expect(prompt).not.toContain("warn threshold");
   });
 
   it("K3: cap watcher aborts a run that exceeds the cost cap mid-flight", async () => {

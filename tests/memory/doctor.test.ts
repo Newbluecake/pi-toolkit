@@ -359,11 +359,25 @@ describe("D08 — stale", () => {
 });
 
 describe("D09 — block degradation level", () => {
-  it("positive: L1 -> warn", () => {
-    const f = findingsOf(snap([file("core.md")], { render: render({ level: 1 }) }), "D09");
+  it("positive: L1 -> info with the name-only count (benign: everything is still listed and openable)", () => {
+    // 9 topics, 3 full index lines ⇒ 6 name-only.
+    const files = [file("core.md"), ...Array.from({ length: 9 }, (_, i) => file(`topic-${String(i)}.md`))];
+    const f = findingsOf(snap(files, { render: render({ level: 1, fullIndexLines: 3 }) }), "D09");
     expect(f).toHaveLength(1);
-    expect(f[0]?.severity).toBe("warn");
+    expect(f[0]?.severity).toBe("info");
     expect(f[0]?.message).toContain("L1");
+    expect(f[0]?.message).toContain("6 topic(s) listed by name only");
+  });
+  it("positive: L1 with everything fully indexed stays info without a count (archived-only tail case)", () => {
+    const f = findingsOf(
+      snap([file("core.md"), file("a.md")], {
+        render: render({ level: 1, fullIndexLines: 1, tailKind: "archived-only" }),
+      }),
+      "D09",
+    );
+    expect(f).toHaveLength(1);
+    expect(f[0]?.severity).toBe("info");
+    expect(f[0]?.message).not.toContain("listed by name only");
   });
   it("positive: L2 -> warn", () => {
     const f = findingsOf(snap([file("core.md")], { render: render({ level: 2, omittedSections: ["s1"] }) }), "D09");
@@ -394,12 +408,15 @@ describe("D09 — block degradation level", () => {
   });
   it("positive (F2): no primary core — D09 is no longer gated out (index-only L1 still reports)", () => {
     const f = findingsOf(
-      snap([file("MEMORY.md", { size: 9000 }), file("topic-a.md")], { render: render({ level: 1 }) }),
+      snap([file("MEMORY.md", { size: 9000 }), file("topic-a.md")], {
+        render: render({ level: 1, fullIndexLines: 0 }),
+      }),
       "D09",
     );
     expect(f).toHaveLength(1);
-    expect(f[0]?.severity).toBe("warn");
+    expect(f[0]?.severity).toBe("info");
     expect(f[0]?.message).toContain("L1");
+    expect(f[0]?.message).toContain("listed by name only");
   });
   it("negative (F2): no primary + L0 render stays silent", () => {
     expect(findingsOf(snap([file("topic-a.md")], { render: render({ level: 0 }) }), "D09")).toHaveLength(0);

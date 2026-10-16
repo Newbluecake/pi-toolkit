@@ -21,6 +21,13 @@ export interface TidyPromptInput {
   migrationMode: boolean;
   coreBytes: number;
   topicMaxBytes: number;
+  /** Doctor D04's warn threshold (`memory.topicWarnBytes`). Present together
+   *  with a non-empty `oversized` ⇒ the prompt gains the split rule below;
+   *  absent (or nothing flagged) ⇒ legacy prompt bytes, byte-identical. */
+  topicWarnBytes?: number;
+  /** Doctor D04's findings among THIS prompt's target files (name +
+   *  whole-file bytes, over `topicWarnBytes`). */
+  oversized?: readonly { name: string; bytes: number }[];
 }
 
 const RULES = [
@@ -54,6 +61,17 @@ export function buildTidyPrompt(input: TidyPromptInput): string {
   for (const r of RULES) lines.push(`- ${r}`);
   lines.push(`- \`core.md\`'s final content must be ≤ ${String(input.coreBytes)} bytes (UTF-8).`);
   lines.push(`- Any other file's final content must be ≤ ${String(input.topicMaxBytes)} bytes (UTF-8).`);
+  const flagged = input.oversized ?? [];
+  if (input.topicWarnBytes !== undefined && flagged.length > 0) {
+    lines.push(
+      `- Files over the ${String(input.topicWarnBytes)}-byte warn threshold (doctor D04) should be split into focused ` +
+        `topic files: propose action "create" for each new file (each ≤ ${String(input.topicWarnBytes)} bytes, each with ` +
+        'frontmatter description/read_when/topic) plus a "rewrite" or "delete" of the original. Content conservation ' +
+        "still applies across the split — every accounted line of the original must survive in some output file or be " +
+        "listed in `dropped[]`.",
+    );
+    lines.push(`- Over the warn threshold now: ${flagged.map((f) => `${f.name} (${String(f.bytes)}B)`).join(", ")}.`);
+  }
   if (input.migrationMode) {
     lines.push("");
     lines.push("Migration mode (no core.md exists yet):");
