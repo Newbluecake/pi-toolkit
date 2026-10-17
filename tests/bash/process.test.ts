@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import {
   ALLOWED_SHELL_BASENAMES,
   createProcessPort,
+  defaultShellConfig,
   probePid,
   readProcStartTime,
   resolveShell,
@@ -55,25 +56,72 @@ async function until(predicate: () => boolean, timeoutMs = 5_000): Promise<boole
   return predicate();
 }
 
-describe("resolveShell", () => {
-  it("prefers an explicit shellPath and always uses -c", () => {
-    expect(resolveShell("/opt/weird/fish", "/bin/bash")).toEqual({ shell: "/opt/weird/fish", args: ["-c"] });
+describe("resolveShell (2026-10-17 revision: explicit → pi shellPath → pi's default chain; $SHELL never read)", () => {
+  it("pins the allow-list itself (explicit zsh stays legal; fish/nu stay out)", () => {
+    expect([...ALLOWED_SHELL_BASENAMES].sort()).toEqual(["bash", "sh", "zsh"]);
   });
 
-  it("accepts whitelisted $SHELL basenames", () => {
-    for (const name of ALLOWED_SHELL_BASENAMES) {
-      expect(resolveShell(undefined, `/usr/local/bin/${name}`)).toEqual({
-        shell: `/usr/local/bin/${name}`,
-        args: ["-c"],
-      });
+  it("prefers an explicit allow-listed shellPath and always uses -c", () => {
+    expect(resolveShell("/opt/custom/bin/bash", "/bin/zsh")).toEqual({
+      shell: "/opt/custom/bin/bash",
+      args: ["-c"],
+    });
+  });
+
+  it("an explicit zsh path is still allowed (both settings sources)", () => {
+    expect(resolveShell("/opt/custom/bin/zsh", "/bin/bash")).toEqual({ shell: "/opt/custom/bin/zsh", args: ["-c"] });
+    expect(resolveShell(undefined, "/opt/custom/bin/zsh")).toEqual({
+      shell: "/opt/custom/bin/zsh",
+      args: ["-c"],
+    });
+  });
+
+  it("falls through to pi's shellPath when the explicit one is absent/blank/allow-list-rejected", () => {
+    expect(resolveShell(undefined, "/opt/pi/bash")).toEqual({ shell: "/opt/pi/bash", args: ["-c"] });
+    expect(resolveShell("   ", "/opt/pi/bash")).toEqual({ shell: "/opt/pi/bash", args: ["-c"] });
+    expect(resolveShell("/opt/weird/fish", "/opt/pi/bash")).toEqual({ shell: "/opt/pi/bash", args: ["-c"] });
+  });
+
+  it("rejects non-allow-listed basenames from BOTH settings sources (fallback, not error)", () => {
+    expect(resolveShell("/bin/fish", "/usr/bin/nu")).not.toEqual({ shell: "/bin/fish", args: ["-c"] });
+    expect(resolveShell("/bin/fish", "/usr/bin/nu")).not.toEqual({ shell: "/usr/bin/nu", args: ["-c"] });
+    expect(resolveShell(undefined, "/usr/bin/nu")).not.toEqual({ shell: "/usr/bin/nu", args: ["-c"] });
+  });
+
+  it("resolves pi's default chain when neither settings source yields a shell", () => {
+    if (posix) {
+      // /bin/bash exists on every supported POSIX image; the injected-deps
+      // matrix in the defaultShellConfig describe pins the full ladder.
+      const config = resolveShell();
+      expect(["/bin/bash", "sh"]).toContain(config.shell);
+      expect(config.args).toEqual(["-c"]);
     }
   });
+});
 
-  it("falls back to bash for non-whitelisted shells, empty values and missing input", () => {
-    expect(resolveShell(undefined, "/bin/fish")).toEqual({ shell: "bash", args: ["-c"] });
-    expect(resolveShell(undefined, "/usr/bin/nu")).toEqual({ shell: "bash", args: ["-c"] });
-    expect(resolveShell(undefined, undefined)).toEqual({ shell: "bash", args: ["-c"] });
-    expect(resolveShell("   ", "  ")).toEqual({ shell: "bash", args: ["-c"] });
+describe("defaultShellConfig (mirrors pi's getShellConfig Unix branch, dist/utils/shell.js)", () => {
+  it("1. /bin/bash when it exists", () => {
+    expect(defaultShellConfig({ exists: (p) => p === "/bin/bash", which: () => "/usr/bin/bash" })).toEqual({
+      shell: "/bin/bash",
+      args: ["-c"],
+    });
+  });
+
+  it("2. then bash on PATH via which", () => {
+    expect(
+      defaultShellConfig({ exists: () => false, which: (n) => (n === "bash" ? "/usr/bin/bash" : undefined) }),
+    ).toEqual({ shell: "/usr/bin/bash", args: ["-c"] });
+  });
+
+  it("3. then sh — never $SHELL, never zsh by default", () => {
+    expect(defaultShellConfig({ exists: () => false, which: () => undefined })).toEqual({
+      shell: "sh",
+      args: ["-c"],
+    });
+  });
+
+  it("real machine: /bin/bash on Linux", () => {
+    if (linux) expect(defaultShellConfig()).toEqual({ shell: "/bin/bash", args: ["-c"] });
   });
 });
 
@@ -197,7 +245,10 @@ describe.skipIf(!posix)("createProcessPort (POSIX)", () => {
   });
 
   it("rejects when the shell or cwd does not exist (spawn error, not a hang)", async () => {
-    const missingShell = createProcessPort({ shellPath: "/nonexistent/shell-xyz" });
+    // Allow-listed basename (bash) but nonexistent file: the explicit path is
+    // honoured, so the spawn's own ENOENT surfaces (2026-10-17 revision —
+    // fail-soft at spawn, never a throw at resolve time).
+    const missingShell = createProcessPort({ shellPath: "/nonexistent/bash" });
     await expect(missingShell.spawnJob("echo hi", process.cwd())).rejects.toThrow(/ENOENT/);
 
     port = createProcessPort();
@@ -331,16 +382,33 @@ describe.skipIf(!posix)("createProcessPort (POSIX)", () => {
     expect(await until(() => !port.probePid(job.pid))).toBe(true);
   });
 
-  it("falls back to bash when $SHELL is not whitelisted", async () => {
-    process.env.SHELL = "/bin/fish";
+  it("ignores $SHELL entirely (2026-10-17 revision)", async () => {
+    // Basename `zsh` would have been honoured pre-revision; the path does not
+    // exist, so honouring it would reject the spawn with ENOENT. Ignored ⇒ the
+    // command runs under the default chain's bash.
+    process.env.SHELL = "/definitely/not/installed/zsh";
     port = createProcessPort();
     const job = await launch('echo "shell=${BASH_VERSION:+bash}"');
     const streams = collect(job);
     const { exit } = await job.drainedPromise;
     expect(exit.exitCode).toBe(0);
-    // Only bash defines BASH_VERSION; fish would never have been able to run
-    // this command at all (and is not installed in CI).
+    // Only bash defines BASH_VERSION (zsh/fish never would).
     expect(streams.out()).toContain("shell=bash");
+  });
+
+  it("spawns through piShellPath (allow-listed basename) even with $SHELL set", async () => {
+    process.env.SHELL = "/bin/fish"; // must not matter
+    port = createProcessPort({ piShellPath: "/bin/bash" });
+    const job = await launch("echo via-pi-shell");
+    const streams = collect(job);
+    const { exit } = await job.drainedPromise;
+    expect(exit.exitCode).toBe(0);
+    expect(streams.out()).toContain("via-pi-shell");
+  });
+
+  it("a bogus allow-listed piShellPath surfaces as the spawn's own error (fail-soft, no throw at resolve)", async () => {
+    port = createProcessPort({ piShellPath: "/definitely/not/installed/bash" });
+    await expect(launch("echo nope")).rejects.toThrow();
   });
 
   it("checkPidOwnership: alive for our own child, dead once it exits", async () => {

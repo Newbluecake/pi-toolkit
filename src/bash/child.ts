@@ -16,6 +16,7 @@ import { formatDuration } from "../core/format.js";
 import { createBashJobManager, type BashJobManager, type KillJobResult } from "./manager.js";
 import { createJobStore } from "./job-store.js";
 import { createProcessPort } from "./process.js";
+import { readPiShellSettings, type PiShellSettings } from "./pi-shell.js";
 import { sanitizeSessionDirName } from "./session-dirs.js";
 import { isTerminalJobStatus, previewCommand, type JobId, type JobRecord } from "./types.js";
 import {
@@ -205,6 +206,13 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
   const warn = opts.warn ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
   const registry: ChildBashRegistry = getChildBashRegistry();
   const config = opts.settings.bashJobs;
+  // 2026-10-17 shell-resolution revision: pi's own `shellPath` /
+  // `shellCommandPrefix`, read once per child session on its first bash /
+  // bash_job call from that session's OWN cwd (`ctx.cwd`). Child sessions run
+  // in-process, so `process.cwd()` is the parent pi's cwd — wrong for a
+  // worktree-isolated or explicit-cwd child whose project `.pi/settings.json`
+  // differs.
+  let piShell: PiShellSettings | undefined;
 
   let manager: BashJobManager | undefined;
   let sessionId = "";
@@ -242,6 +250,7 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
    */
   function ensureManager(ctx: ExtensionContext): BashJobManager | undefined {
     if (manager) return manager;
+    piShell ??= readPiShellSettings(typeof ctx.cwd === "string" && ctx.cwd !== "" ? ctx.cwd : process.cwd());
     let sid: string;
     try {
       sid = (ctx.sessionManager as { getSessionId?: () => string } | undefined)?.getSessionId?.() ?? "";
@@ -264,6 +273,7 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
       .catch(() => undefined);
     const processPort = createProcessPort({
       ...(config.shellPath !== undefined ? { shellPath: config.shellPath } : {}),
+      ...(piShell?.shellPath !== undefined ? { piShellPath: piShell.shellPath } : {}),
       drainTimeoutMs: config.drainTimeoutMs,
     });
     const m = createBashJobManager({
@@ -327,6 +337,10 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
       createBashTool({
         manager: () => manager,
         autoBackgroundMs: () => config.autoBackgroundMs,
+        // 2026-10-17 revision: pi's `shellCommandPrefix`, same honouring as
+        // pi's built-in bash tool (the main session reads it off the stack;
+        // a child reads it once per wire — same cadence as `config`).
+        commandPrefix: () => piShell?.shellCommandPrefix,
         host: () => registry.hostView(sessionId),
         toolBudgetMs: () => opts.settings.budget.toolMs,
         deadline: () => ({

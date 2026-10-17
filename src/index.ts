@@ -630,6 +630,10 @@ export default function activate(rawPi: ExtensionAPI): void {
       createBashTool({
         manager: forwardBashJobs(holder),
         autoBackgroundMs: () => settings.bashJobs.autoBackgroundMs,
+        // 2026-10-17 shell-resolution revision: pi's `shellCommandPrefix`,
+        // honoured exactly like pi's built-in bash tool (`${prefix}\n${command}`)
+        // — read off the current stack (rebuilt per session_start, non-live).
+        commandPrefix: () => holder.current?.bashShell?.shellCommandPrefix,
         // P5b: without this the main session's `timeoutGraceMs`/`maxExtensions`/
         // `maxTimeoutFactor` settings never reach the tool surface (the
         // description suffix stays off even when the manager's own

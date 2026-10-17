@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { basename } from "node:path";
 import type { Readable } from "node:stream";
@@ -107,8 +107,16 @@ export interface ProcessPort {
 }
 
 export interface ProcessPortOptions {
-  /** Explicit shell (`settings.bashJobs.shellPath`). Wins over `$SHELL`. */
+  /** Explicit shell (`settings.bashJobs.shellPath`). Wins over pi's `shellPath`. */
   shellPath?: string;
+  /**
+   * pi's own `shellPath` setting (`~`-expanded, project over global — read
+   * through pi's `SettingsManager` by the pi-facing callers). Consulted after
+   * the explicit one. 2026-10-17 revision: `$SHELL` is no longer consulted —
+   * pi's built-in bash tool never reads it either, and `$SHELL=/bin/zsh` made
+   * model-written bash syntax run under zsh.
+   */
+  piShellPath?: string;
   /** Default SIGTERM → SIGKILL window. */
   graceMs?: Millis;
   /** Liveness poll cadence inside the grace window. */
@@ -121,7 +129,9 @@ export interface ShellConfig {
   readonly args: readonly string[];
 }
 
-/** §3.3: only these `$SHELL` basenames are honoured; all take `-c`. */
+/** §3.3 + 2026-10-17 revision: only these basenames are honoured for the
+ * EXPLICIT settings paths (`bashJobs.shellPath`, pi's own `shellPath`); all
+ * take `-c`. `$SHELL` is no longer consulted. */
 export const ALLOWED_SHELL_BASENAMES: ReadonlySet<string> = new Set(["bash", "zsh", "sh"]);
 
 export const DEFAULT_KILL_GRACE_MS = 2_000;
@@ -132,23 +142,72 @@ const DEFAULT_KILL_POLL_MS = 50;
  */
 const EXIT_STDIO_GRACE_MS = 100;
 
+/** Injectable probes for `defaultShellConfig`, so the ladder is unit-testable. */
+export interface DefaultShellDeps {
+  exists?: (path: string) => boolean;
+  which?: (executable: string) => string | undefined;
+}
+
+/** `allowedShell`: non-empty AND basename ∈ `ALLOWED_SHELL_BASENAMES`. */
+function allowedShell(candidate: string | undefined): string | undefined {
+  if (candidate === undefined || candidate.trim().length === 0) return undefined;
+  return ALLOWED_SHELL_BASENAMES.has(basename(candidate)) ? candidate : undefined;
+}
+
 /**
- * Resolve the shell: explicit `shellPath` → `$SHELL` (whitelisted basename) →
- * `"bash"`. Pure, so the fallback ladder is directly testable.
- *
- * Deliberate divergence from pi's `getShellConfig` (which probes Git Bash /
- * `/bin/bash` / `sh` and supports the legacy WSL stdin transport): the tool is
- * named `bash` and bash semantics are the contract, so exotic shells
- * (fish, nushell) fall back to bash instead of being used with `-c`.
+ * pi's own default chain, mirrored from `getShellConfig`'s Unix branch
+ * (`dist/utils/shell.js`): `/bin/bash` (existsSync) → `bash` on PATH
+ * (`which bash`) → `sh`. Re-resolved per spawn, exactly like pi's
+ * `createLocalShellOperations` re-runs `getShellConfig` on every exec. The
+ * win32 branch (Git Bash probing) is unreachable — the whole bash feature is
+ * POSIX-only (`bashJobsEnabled`).
  */
-export function resolveShell(shellPath?: string, envShell?: string): ShellConfig {
-  if (shellPath !== undefined && shellPath.trim().length > 0) {
-    return { shell: shellPath, args: ["-c"] };
+export function defaultShellConfig(deps: DefaultShellDeps = {}): ShellConfig {
+  const exists = deps.exists ?? ((path: string) => existsSync(path));
+  const which = deps.which ?? whichExecutable;
+  if (exists("/bin/bash")) return { shell: "/bin/bash", args: ["-c"] };
+  const bashOnPath = which("bash");
+  if (bashOnPath !== undefined) return { shell: bashOnPath, args: ["-c"] };
+  return { shell: "sh", args: ["-c"] };
+}
+
+/** pi's `findExecutableOnPath`, Unix branch, replicated (bounded `which`). */
+function whichExecutable(executable: string): string | undefined {
+  try {
+    const result = spawnSync("which", [executable], { encoding: "utf-8", timeout: 5_000 });
+    if (result.status === 0 && result.stdout) {
+      const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
+      if (firstMatch) return firstMatch;
+    }
+  } catch {
+    /* ignore — mirrors pi */
   }
-  if (envShell !== undefined && envShell.trim().length > 0 && ALLOWED_SHELL_BASENAMES.has(basename(envShell))) {
-    return { shell: envShell, args: ["-c"] };
-  }
-  return { shell: "bash", args: ["-c"] };
+  return undefined;
+}
+
+/**
+ * Resolve the shell (2026-10-17 revision, mirrors pi's built-in bash tool):
+ * explicit `bashJobs.shellPath` → pi's own `shellPath` setting → pi's default
+ * chain (`defaultShellConfig`). Both explicit settings paths go through the
+ * basename allow-list, so exotic shells (fish, nushell) fall through to the
+ * next step instead of being used with `-c` (the tool is named `bash`; bash
+ * semantics are the contract — an explicit zsh path is still allowed).
+ * `$SHELL` is deliberately NOT consulted (user report: `$SHELL=/bin/zsh` ran
+ * model-written bash syntax under zsh — `no matches found`, array/
+ * word-splitting differences — while pi's own bash tool defaults to bash).
+ *
+ * Divergence from pi's `getShellConfig`, kept deliberately: pi checks
+ * `existsSync` on a custom `shellPath` and THROWS when missing; we fail
+ * softer — a missing-but-allow-listed path surfaces as the spawn's own
+ * ENOENT error (`staged → failed`), never a broken session. The explicit
+ * ladder above the default chain is pure, so it stays directly testable.
+ */
+export function resolveShell(shellPath?: string, piShellPath?: string): ShellConfig {
+  const explicit = allowedShell(shellPath);
+  if (explicit !== undefined) return { shell: explicit, args: ["-c"] };
+  const fromPi = allowedShell(piShellPath);
+  if (fromPi !== undefined) return { shell: fromPi, args: ["-c"] };
+  return defaultShellConfig();
 }
 
 function isPosix(): boolean {
@@ -393,9 +452,10 @@ export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort
   const pollMs = options.killPollMs ?? DEFAULT_KILL_POLL_MS;
 
   async function spawnJob(command: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<SpawnedJob> {
-    // `$SHELL` is read per call: the extension re-activates in-process and the
-    // environment is not ours to snapshot at module load.
-    const { shell, args } = resolveShell(options.shellPath, process.env.SHELL);
+    // 2026-10-17 revision: resolved per call from the injected settings
+    // (explicit `bashJobs.shellPath` → pi's `shellPath` → pi's default
+    // chain); `$SHELL` is no longer consulted.
+    const { shell, args } = resolveShell(options.shellPath, options.piShellPath);
     const child = spawn(shell, [...args, command], {
       cwd,
       // POSIX: detached makes the child a process-group leader (pgid === pid),

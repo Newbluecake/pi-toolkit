@@ -474,6 +474,42 @@ this call still applies and will kill the process.
 文件域交叉：仅 status.ts（S1 改 SPECS、S7 改渲染）与 stack.ts/index.ts（全部归 S6
 一人），派工时 S1 与 S7 不并行或先后合入。
 
+## 修订（2026-10-17）：shell 解析对齐 pi 内建 bash（$SHELL 不再读取）
+
+**背景（用户报告）**：`$SHELL=/bin/zsh` 时，模型写的 bash 语法跑在 zsh 下——未匹配
+通配符报 `no matches found`、数组/分词语义漂移。而 pi 自己的内建 bash 工具默认用
+bash（`dist/utils/shell.js` `getShellConfig`：显式 `shellPath` → Unix 分支
+`/bin/bash`（existsSync）→ `which bash` → `sh`；从不读 `$SHELL`）。
+
+**新解析链**（`src/bash/process.ts` `resolveShell`，纯函数 ladder + 默认链）：
+
+1. `settings.bashJobs.shellPath`（显式优先，不变）；
+2. **pi 自己的 `shellPath`**（`SettingsManager.getShellPath()`：`~` 展开、
+   项目覆盖全局，读法与 `src/runtime/session-driver.ts` 一致；新文件
+   `src/bash/pi-shell.ts`）；
+3. pi 的默认链：`/bin/bash` → `which bash` → `sh`（逐字节镜像
+   `getShellConfig` 的 Unix 分支；每次 spawn 重解析，与 pi 每次 exec 重解析一致）。
+
+**$SHELL 不再参与**。basename 白名单（bash/zsh/sh，`ALLOWED_SHELL_BASENAMES`）
+改为约束两个显式 settings 路径（含显式 zsh 仍合法）；fish/nushell 等奇异 shell
+一律落入下一级而非以 `-c` 使用。与 pi 的一个刻意分歧：pi 对不存在的自定义
+`shellPath` 直接 throw，本插件降级为 spawn 自身的 ENOENT（`staged → failed`），
+绝不炸会话构建。
+
+**`shellCommandPrefix` 同步对齐**：pi 的 `createShellToolDefinition` 对每条命令做
+`` `${prefix}\n${command}` ``（内建 bash 工具与 `!`/`!!` 同享）。覆盖工具把该 prefix
+透传给内层 `createBashToolDefinition`，由 pi 自己的 execute 前置——前景、自动后台、
+显式 `run_in_background` 全部生效（job 记录的是实际运行的带 prefix 命令）。
+
+**读取时机**：主会话在 stack 构建时读一次（session_start，非 live，存于
+`Stack.bashShell`，index.ts 的工具注册经 getter 取 prefix）；子会话在
+`wireChildBashJobs`（= activate）读一次，与现有 `bashJobs` 设置同节奏。两处
+processPort（主 manager + 恢复端口）均注入 `piShellPath`。
+
+测试：`tests/bash/process.test.ts`（新 ladder + `$SHELL` 忽略 + spawn 级回归）、
+`tests/bash/pi-shell.test.ts`（新增）、`tests/tools/bash-tool.test.ts`（prefix
+前置，前景/后台/passthrough）。
+
 ## Session isolation follow-up
 
 后台 bash job 的实现细节已由 [bash-jobs-session-isolation/plan.md](../bash-jobs-session-isolation/plan.md) 定稿并实施：存储 root 按 session 分层，支持进程内句柄交接、冷启动孤儿收养、flat 迁移和死 session GC。

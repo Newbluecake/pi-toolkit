@@ -606,6 +606,84 @@ describe("bash override tool — auto-background", () => {
     expect(zero.content[0]).toEqual({ type: "text", text: "zero\n" });
     expect(harness.port.spawns).toHaveLength(0);
   });
+
+  // ── 2026-10-17 shell-resolution revision: pi's shellCommandPrefix ──────
+
+  it("prepends pi's shellCommandPrefix to foreground spawns (\`${prefix}\\n${command}\`)", async () => {
+    const harness = await makeHarness();
+    harness.port.script = (proc) => proc.exit({ exitCode: 0, signal: null });
+    const tool = createBashTool({
+      manager: () => harness.manager,
+      autoBackgroundMs: () => HUGE_THRESHOLD_MS,
+      commandPrefix: () => "export CI=1",
+      warn: (message) => harness.warnings.push(message),
+    });
+    await tool.execute("call-1", { command: "echo hi" }, undefined, undefined, harness.ctx);
+    expect(harness.port.spawns).toHaveLength(1);
+    // pi's own inner execute does the prepending before our operations.exec.
+    expect(harness.port.spawns[0]?.command).toBe("export CI=1\necho hi");
+  });
+
+  it("prepends the prefix to explicit background spawns too (the job runs the prefixed command)", async () => {
+    const harness = await makeHarness();
+    harness.port.script = (proc) => proc.write("bg\n");
+    const tool = createBashTool({
+      manager: () => harness.manager,
+      autoBackgroundMs: () => HUGE_THRESHOLD_MS,
+      commandPrefix: () => "shopt -s expand_aliases",
+      warn: (message) => harness.warnings.push(message),
+    });
+    const result = await tool.execute(
+      "call-1",
+      { command: "ll", run_in_background: true },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect((result.details as BashBackgroundDetails).background).toBe(true);
+    expect(harness.port.spawns).toHaveLength(1);
+    expect(harness.port.spawns[0]?.command).toBe("shopt -s expand_aliases\nll");
+  });
+
+  it("honours the prefix on the feature-off passthrough exactly like pi's built-in bash", async () => {
+    const harness = await makeHarness();
+    const offTool = createBashTool({
+      manager: () => undefined,
+      autoBackgroundMs: () => 120_000,
+      commandPrefix: () => "export PI_TOOLKIT_PREFIX_PROBE=42",
+    });
+    // Real execution through pi's local operations (the passthrough test
+    // above already relies on that): the prefix rides as its own line, so the
+    // assignment lands in the same shell as the command.
+    const result = await offTool.execute(
+      "call-1",
+      { command: "echo probe=$PI_TOOLKIT_PREFIX_PROBE" },
+      undefined,
+      undefined,
+      harness.ctx,
+    );
+    expect(result.content[0]).toEqual({ type: "text", text: "probe=42\n" });
+    expect(harness.port.spawns).toHaveLength(0);
+  });
+
+  it("no commandPrefix dep (or a throwing getter) → commands pass through unprefixed", async () => {
+    const harness = await makeHarness();
+    harness.port.script = (proc) => proc.exit({ exitCode: 0, signal: null });
+    const tool = toolFor(harness, HUGE_THRESHOLD_MS);
+    await tool.execute("call-1", { command: "echo hi" }, undefined, undefined, harness.ctx);
+    expect(harness.port.spawns[0]?.command).toBe("echo hi");
+
+    const throwing = createBashTool({
+      manager: () => harness.manager,
+      autoBackgroundMs: () => HUGE_THRESHOLD_MS,
+      commandPrefix: () => {
+        throw new Error("boom");
+      },
+      warn: (message) => harness.warnings.push(message),
+    });
+    await throwing.execute("call-2", { command: "echo two" }, undefined, undefined, harness.ctx);
+    expect(harness.port.spawns[1]?.command).toBe("echo two");
+  });
 });
 
 // ── T15 (bash-timeout-grace §3.6): two-layer race, R, latch ────────────────

@@ -255,7 +255,7 @@ export interface BashJobsSettings {
   shutdownPolicy: "keep" | "kill";
   /** Job state/log root; each session uses a sanitized child directory. */
   dir?: string;
-  /** Shell used to run job commands; defaults to the $SHELL whitelist → bash (§3.3) when unset. */
+  /** Shell used to run job commands. 2026-10-17 revision: when unset, the resolution mirrors pi's built-in bash tool — pi's own `shellPath` setting (`~`-expanded, project over global) → pi's default chain (/bin/bash → bash on PATH → sh); `$SHELL` is never consulted. Allow-listed basenames (bash/zsh/sh) apply to both explicit paths. */
   shellPath?: string;
   /** bash-timeout-grace §5.1 (U1): subagent/child sessions get the bash override + `bash_job` tool registered. Default true; `false` = child sessions stay on today's behavior (no auto-background, no bash_job, no settle hold). */
   childSessions: boolean;

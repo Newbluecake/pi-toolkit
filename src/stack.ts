@@ -35,6 +35,7 @@ import {
   sweepHandoffRemnants,
 } from "./bash/session-dirs.js";
 import { createProcessPort } from "./bash/process.js";
+import { readPiShellSettings, type PiShellSettings } from "./bash/pi-shell.js";
 import { isTerminalJobStatus, previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
 import { getChildBashRegistry, declareHostBashViewCapability, type HostRunView } from "./bash/child-registry.js";
@@ -652,6 +653,7 @@ function buildBashJobManager(
   ctx: ExtensionContext,
   settings: AgentSettings,
   send?: SendMessageFn,
+  piShell: PiShellSettings = {},
 ): BashJobManager {
   const sendCompletionNotice: SendMessageFn = send ?? ((message, options) => pi.sendMessage(message, options));
   const config = settings.bashJobs;
@@ -669,6 +671,9 @@ function buildBashJobManager(
     .catch(() => undefined);
   const processPort = createProcessPort({
     ...(config.shellPath !== undefined ? { shellPath: config.shellPath } : {}),
+    // 2026-10-17 revision: pi's own `shellPath` sits between the explicit
+    // setting and pi's default chain in the resolution ladder.
+    ...(piShell.shellPath !== undefined ? { piShellPath: piShell.shellPath } : {}),
     drainTimeoutMs: config.drainTimeoutMs,
   });
   // Late-bound: `notify` needs the manager it is being constructed with (to
@@ -945,6 +950,16 @@ export interface Stack {
   fleetWidget?: FleetWidgetController;
   /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
   bashJobs?: BashJobManager;
+  /**
+   * 2026-10-17 shell-resolution revision: pi's own `shellPath` /
+   * `shellCommandPrefix` for this stack (read once per build, non-live).
+   * `shellPath` feeds the process ports' resolution ladder
+   * (`bashJobs.shellPath` → this → pi's default chain); `shellCommandPrefix`
+   * is honoured by the bash override exactly like pi's built-in bash tool
+   * (`${prefix}\n${command}` — index.ts reads it through this field). Absent
+   * iff `bashJobs` itself is absent.
+   */
+  bashShell?: PiShellSettings;
   /**
    * bash-timeout-grace plan §2.5 step 4/6 (P5): this stack's recovery/cleanup
    * dual-timer handle (absent iff `bashJobs` itself is absent). `dispose()`
@@ -2419,8 +2434,13 @@ export function buildSessionStack(
   previousUsageBroadcaster = usageBroadcaster;
   // D5: build the manager before the widget so its synchronous first frame can
   // receive the manager-bound list/tail closures below.
+  // 2026-10-17 shell-resolution revision: pi's `shellPath`/
+  // `shellCommandPrefix` are read once per stack build (session_start,
+  // non-live) — `bashShell` reaches index.ts's tool registration for the
+  // prefix, and `piShellPath` feeds every process port below.
+  const piShell = readPiShellSettings(ctx.cwd);
   const bashJobs = bashJobsEnabled(settings)
-    ? buildBashJobManager(pi, ctx, settings, (message, options) => sendCompletion("bash", message, options))
+    ? buildBashJobManager(pi, ctx, settings, (message, options) => sendCompletion("bash", message, options), piShell)
     : undefined;
   previousBashJobs = bashJobs;
 
@@ -2621,6 +2641,7 @@ export function buildSessionStack(
     const selfDirName = sanitizeSessionDirName(currentSessionId(ctx));
     const processPort = createProcessPort({
       ...(settings.bashJobs.shellPath !== undefined ? { shellPath: settings.bashJobs.shellPath } : {}),
+      ...(piShell.shellPath !== undefined ? { piShellPath: piShell.shellPath } : {}),
       drainTimeoutMs: settings.bashJobs.drainTimeoutMs,
     });
     const dirOptions = {
@@ -2839,7 +2860,7 @@ export function buildSessionStack(
     hostBashViewCapability: { dispose: hostBashViewCapabilityRelease },
     backgroundCompletions,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
-    ...(bashJobs ? { bashJobs } : {}),
+    ...(bashJobs ? { bashJobs, bashShell: piShell } : {}),
     ...(bashJobRecovery ? { bashJobRecovery } : {}),
     ...(keepalive ? { keepalive } : {}),
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),

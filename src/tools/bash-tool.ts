@@ -149,6 +149,16 @@ export interface BashToolDeps {
    */
   diag?: (message: string) => void;
   /**
+   * pi's `shellCommandPrefix` (2026-10-17 revision): pi's built-in bash tool
+   * prepends it to every command (`${prefix}\n${command}` inside
+   * `createShellToolDefinition`), so the override honours it identically —
+   * foreground AND background jobs (the prefix is prepended by pi's own inner
+   * execute before our `operations.exec` ever sees the command). Getter so the
+   * main session reads it off the current stack (rebuilt per session_start,
+   * non-live); absent/empty ⇒ no prefix, byte-identical to today.
+   */
+  commandPrefix?: () => string | undefined;
+  /**
    * §2.6/§5.2 deadline switch for the description suffix. Absent or disabled ⇒
    * the description is byte-identical to today's (golden fixture).
    */
@@ -353,15 +363,17 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const manager = deps.manager();
       const thresholdMs = safeThreshold(deps, warn);
+      const commandPrefix = safeCommandPrefix(deps);
       const innerParams: InnerParams = {
         command: params.command,
         ...(params.timeout !== undefined ? { timeout: params.timeout } : {}),
       };
 
       // §2.6 / feature-off (threshold 0, or no session stack behind the
-      // holder): nothing to manage, so run pi's tool untouched.
+      // holder): nothing to manage, so run pi's tool untouched — still with
+      // pi's `shellCommandPrefix` honoured (pi's built-in tool would apply it).
       if (!manager || thresholdMs <= 0) {
-        const passthrough = createBashToolDefinition(ctx.cwd);
+        const passthrough = createBashToolDefinition(ctx.cwd, commandPrefix === undefined ? {} : { commandPrefix });
         return runInner(passthrough, toolCallId, innerParams, signal, onUpdate, ctx);
       }
 
@@ -451,7 +463,16 @@ export function createBashTool(deps: BashToolDeps): ToolDefinition<typeof BashTo
       const operations: BashOperations = {
         exec: (command, cwd, options) => execViaManager(manager, state, command, cwd, options),
       };
-      const inner = createBashToolDefinition(ctx.cwd, { operations });
+      const inner = createBashToolDefinition(
+        ctx.cwd,
+        // 2026-10-17 revision: pi's own execute prepends the prefix before our
+        // operations.exec — so foreground, auto-background and explicit
+        // background spawns all run the prefixed command.
+        {
+          operations,
+          ...(commandPrefix === undefined ? {} : { commandPrefix }),
+        },
+      );
       const gatedUpdate = onUpdate
         ? (update: Parameters<NonNullable<typeof onUpdate>>[0]) => {
             if (forwardUpdates) onUpdate(update);
@@ -878,6 +899,15 @@ function safeThreshold(deps: BashToolDeps, warn: (message: string) => void): num
   } catch (error) {
     warn(`bash auto-background threshold unavailable (feature disabled for this call): ${String(error)}`);
     return 0;
+  }
+}
+
+function safeCommandPrefix(deps: BashToolDeps): string | undefined {
+  try {
+    const value = deps.commandPrefix?.();
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  } catch {
+    return undefined;
   }
 }
 
