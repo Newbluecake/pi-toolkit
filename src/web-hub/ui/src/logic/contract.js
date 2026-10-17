@@ -29,6 +29,7 @@ import {
   SSE_EVENTS as PROTOCOL_SSE_EVENTS,
 } from "@protocol/http-contract.ts";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "@protocol/preview.ts";
+import { PREVIEW_HTML_CAP_PATH } from "@protocol/preview-html.ts";
 import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "@protocol/worktree-diff.ts";
 import { WTGRAPH_PATH } from "@protocol/worktree-graph.ts";
 import { VERSION_INFO_PATH } from "@protocol/version-info.ts";
@@ -86,6 +87,11 @@ export const API = Object.freeze({
   preview: PREVIEW_PATH,
   // web-hub-preview 2026-10-07 修订: the batch existence-probe endpoint — same anti-drift rule.
   previewProbe: PREVIEW_PROBE_PATH,
+  // web-hub-html-preview plan v2 §2.1 (P0): the HTML-capability mint endpoint — imported
+  // from `protocol/preview-html.ts` (same anti-drift rule as the preview paths above; the
+  // hub's P1b routes mount the same constant, so the two can never disagree). P2's
+  // `htmlCapPost` clients are the first consumers.
+  previewHtmlCap: PREVIEW_HTML_CAP_PATH,
   // worktree-diff plan v3.1 §1.2/§4.6 (package D4): the two file-diff endpoints, imported from
   // `protocol/worktree-diff.ts` — same anti-drift rule as the preview paths above (the hub's
   // D3 routes and this object can never disagree). `tests/web-hub/ui/logic-contract.test.ts`

@@ -198,7 +198,18 @@ export interface PreviewChangedBody {
   error: "E_PREVIEW_CHANGED";
 }
 
-export type PreviewDenyReason = "outside" | "root-too-broad" | "virtual-fs" | "denylist" | "unreadable";
+/**
+ * web-hub-html-preview plan v2 §2.1-⑤/§2.3-⑤ (P0): the union gains the two HTML-mint-only
+ * refusals — `"upload"` (the entry lives in the upload store, `cls:"upload"` ⇒ 403; v1
+ * non-goal「HTML attachments from the upload store」) and `"dir-too-broad"` (D2: the HTML
+ * file's bound directory is exactly `/`, `$HOME` literal+canonical, the agent dir or the
+ * uploads root ⇒ source view only). Both ride the SAME 403 `E_PREVIEW_DENIED` body shape and
+ * are emitted only by the future `handleHtmlCap`/`pv-admit` paths — an ordinary preview never
+ * produces them and no consumer switches exhaustively on this union (the UI folds `reason`
+ * through verbatim).
+ */
+export type PreviewDenyReason =
+  "outside" | "root-too-broad" | "virtual-fs" | "denylist" | "unreadable" | "upload" | "dir-too-broad";
 export type PreviewUnsupportedReason = "binary" | "not-regular" | "dims-unknown";
 
 // ---------------------------------------------------------------------------

@@ -482,6 +482,12 @@ export interface PreviewPathScope {
    *  stream (`chunk=1` opt-in, D2). Absent cap ⇒ absent key (pre-chunk hubs keep scopes
    *  byte-identical). */
   readonly chunks?: true;
+  /** web-hub-html-preview plan v2 §5 (P0): `preview.html.v1` — the sandboxed HTML-entry
+   *  render capability (dialog render/source toggle + `/pvw` new tab, both layers bound to
+   *  the protocol's `PV_SANDBOX`). Only-add-when-present like every cap flag above:
+   *  `previewScopeOf` adds the key iff the hub caps carry it, so a pre-feature hub's scopes
+   *  stay byte-identical and `.html` paths keep rendering as plain source. */
+  readonly html?: true;
 }
 
 /** plan §3.2's UI-side state machine (state lives in `usePreview`, App-level — never in the

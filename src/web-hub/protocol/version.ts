@@ -272,3 +272,19 @@ export const WTGRAPH_HUB_CAP = "wtgraph.v1";
  * 1.1 → 1.2 minor bump is fleet F0's alone, see PROTO above).
  */
 export const VERSION_HUB_CAP = "version.v1";
+
+/**
+ * web-hub-html-preview plan v2 §4/§6 P0 (frozen surface): the hub cap advertising the
+ * sandboxed HTML-entry preview feature set — `POST /api/preview/html-cap` (capability mint),
+ * `GET /pv/<cap>/<rel>` (sandboxed subresource serving) and `GET /pvw/<cap>` (script-free
+ * new-tab wrapper). Declared only when `config.preview` exists AND the `/proc/self/fd` probe
+ * passed (`htmlEnabled` — dir-fd anchoring is /proc-bound, fail-closed), folded into
+ * `extraHubCaps` on BOTH cap surfaces by P1b's `hub.ts`; LAN width rides
+ * `PREVIEW_LAN_HUB_CAP` (mode `"loopback"` ⇒ LAN mint + `/pv` + `/pvw` all 404). A browser
+ * that doesn't see it never mints — `.html` entries stay a plain text/source preview,
+ * byte-identical to today; an old browser facing a new hub just ignores the string. In P0
+ * the constant alone is INERT — nothing folds it into any caps array yet. Like every cap
+ * above it adds no agent↔hub frames and no SSE event (§4「No frames ⇒ no PROTO bump」), so
+ * the 1.1 → 1.2 minor bump remains fleet F0's alone (see PROTO above).
+ */
+export const PREVIEW_HTML_HUB_CAP = "preview.html.v1";

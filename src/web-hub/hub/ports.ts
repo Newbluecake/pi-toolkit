@@ -751,6 +751,18 @@ export type FrontendFactory = (deps: FrontendDeps) => HttpFrontend;
 export interface PreviewAuthResult {
   ip: string;
   user?: string;
+  /** web-hub-html-preview plan v2 §2.1-② (P0 frozen face): the session tag a minted HTML
+   * capability binds to for revocation — loopback `hashSid(pwh_sid)`, LAN `session.sidHash`
+   * (both opaque strings; the §2.4 logout hooks select on it). Optional: pre-feature
+   * authorize closures and test doubles never set it, and only the future `handleHtmlCap`
+   * ever reads it. */
+  sidTag?: string;
+  /** web-hub-html-preview plan v2 §2.1-②/§R1-1 (P0 frozen face): LAN only — the authenticated
+   * session's numeric user id (same field and meaning as `PrivacyAuthResult.userId` below),
+   * the selector the real passwd commit path (`admin.ts handlePasswd` →
+   * `lanFacade.revoke({userId})`) revokes HTML caps on. Optional for the same reason as
+   * `sidTag`. */
+  userId?: number;
 }
 
 /** `authorize()` already sent its own error response (401/etc.); `code` is mirror-back only. */
@@ -771,6 +783,39 @@ export interface PreviewRouteIo {
   authorize(deadline: ReqDeadline): Promise<PreviewAuthResult | PreviewAuthHandled>;
   sendJson: (res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>) => void;
 }
+
+// ---------------------------------------------------------------------------
+// web-hub-html-preview plan v2 §2.3/§2.4 (P0 frozen face): the auth-free `/pv*` request io
+// and the revocation selector/reason `PreviewRoutes.revokeHtmlCaps` (below) is frozen
+// against. Declared here for the same reason as `PreviewRoutes` itself — `hub/http.ts`'s
+// (P1b's) dispatch points and `hub/preview/pv-routes.ts` compile against this shape in a
+// later package; a member-signature refinement must come back through ports.ts review.
+// ---------------------------------------------------------------------------
+
+/**
+ * What `hub/http.ts` injects into every `/pv/*` / `/pvw/*` dispatch, one instance per request
+ * per listener. Deliberately NOT `PreviewRouteIo`: I1 (§1) forbids `/pv*` from ever touching
+ * `authorize`/`sendJson` — the capability is the only credential — so the serve paths get only
+ * what they need: the listener + peer ip (audit / per-request limits) and `origin`, the
+ * expected origin the cap was minted under (`lookup` binds listener+origin, §2.2 — a cap
+ * minted through origin A never serves a request arriving via origin B).
+ */
+export interface PvIo {
+  listener: "loopback" | "lan";
+  ip: string;
+  origin: string;
+}
+
+/**
+ * §2.2/§2.4: what a revocation selects — exactly one of a session tag (either logout path), a
+ * LAN user id (the passwd commit path), a whole listener (LAN rotate / loopback
+ * `revokeAllSse`), or every cap (hub dispose).
+ */
+export type PvRevokeSelector =
+  { readonly sidTag: string } | { readonly userId: number } | { readonly listener: "loopback" | "lan" } | "all";
+
+/** §2.4's four hook sites, folded into the cap-end audit line (`end:"revoked"`). */
+export type PvRevokeReason = "logout" | "passwd" | "rotate" | "close";
 
 /** The frontend surface for the avatar endpoints (A0 frozen face; H implements it). */
 export interface AvatarRoutes {
@@ -797,6 +842,28 @@ export interface PreviewRoutes {
    * ≤8 KiB; `dirs:true` makes directories answer `"dir"`), answer `{results:[{kind}]}`
    * (`PreviewProbeKind` per entry) in request order. */
   handleProbe(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** web-hub-html-preview plan v2 §2.1 (P0 frozen face, P1b implements):
+   * `POST /api/preview/html-cap?agentKey=&sessionId=` — mint ONE path-shaped capability for an
+   * admitted HTML entry (body `PreviewHtmlCapRequestBody`, answer `PreviewHtmlCapResponseBody`,
+   * both from `protocol/preview-html.ts`). Same CSRF gate + listener matrix as `handleProbe`
+   * (LAN only `mode === "on"`). Optional per the frozen-surface convention — absent (html
+   * disabled / pre-P1b hub) ⇒ the dispatch sites never route it, everything else stays
+   * byte-identical. */
+  handleHtmlCap?(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** plan v2 §2.3: `GET /pv/<cap>/<rel>` — `rest` is the RAW (percent-encoded) remainder after
+   * `PV_PREFIX` (`"<cap>/<rel>"`); the route itself runs the cap grammar, the rel parser and
+   * the fd-anchored admission — io is the auth-free `PvIo` (I1: never calls `authorize`).
+   * Non-GET ⇒ 404; the query string is already dropped by the dispatch. */
+  servePv?(req: IncomingMessage, res: ServerResponse, rest: string, io: PvIo): Promise<void>;
+  /** plan v2 §2.3/§3.2: `GET /pvw/<cap>` — the fixed script-free new-tab wrapper page holding
+   * the same sandboxed iframe; `rest` is the raw remainder after `PVW_PREFIX`. */
+  serveWrapper?(req: IncomingMessage, res: ServerResponse, rest: string, io: PvIo): Promise<void>;
+  /** plan v2 §2.4: the revocation hooks (both logout paths, the LAN facade `revoke`/`revokeAll`
+   * — the real passwd commit path —, loopback `revokeAllSse`, and `dispose` ⇒ `"all"`).
+   * Synchronous by design: the P1a store aborts in-flight requests + queued waiters
+   * immediately and closes the held dir fd once in-flight use drains (refcount), so no caller
+   * ever awaits it. Optional ⇒ the hooks are simply not wired. */
+  revokeHtmlCaps?(sel: PvRevokeSelector, reason: PvRevokeReason): void;
   /** Idempotent; aborts every active request ("hub-close") and single-flight verify task. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
 }

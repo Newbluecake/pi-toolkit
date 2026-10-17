@@ -8,6 +8,7 @@
  * 78dd76b was: password client missing `subscribe`/`page`).
  */
 import type { PreviewDims, PreviewDirListing, PreviewImageMime, PreviewProbeKind } from "@protocol/preview.js";
+import type { PreviewHtmlCapResponseBody } from "@protocol/preview-html.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
 import type { WtGraphPayload } from "@protocol/worktree-graph.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
@@ -622,6 +623,16 @@ export interface PreviewTransport {
     },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<PreviewProbeOutcome>;
+  /** web-hub-html-preview plan v2 §2.1/§5 (P0 frozen face, P2's clients implement):
+   * `POST /api/preview/html-cap?agentKey=&sessionId=` — mint ONE path-shaped capability for an
+   * admitted HTML entry (body `{path}`, answer `PreviewHtmlCapResponseBody` — the protocol's
+   * own type, see `PreviewHtmlCapOutcome`). `probePost` skeleton: 8 s deadline, no POST
+   * replay. Optional per the frozen-transport convention — the UI gates on the
+   * `preview.html.v1` cap anyway; both real adapters provide it from P2 on. */
+  htmlCap?(
+    req: { readonly agentKey: string; readonly sessionId: string; readonly path: string },
+    opts: { readonly signal: AbortSignal },
+  ): Promise<PreviewHtmlCapOutcome>;
 }
 
 /**
@@ -637,6 +648,24 @@ export interface PreviewTransport {
 export type PreviewProbeOutcome =
   | { readonly ok: true; readonly results: ReadonlyArray<PreviewProbeKind> }
   | { readonly ok: false; readonly status: number; readonly error: string; readonly retryAfterS?: number };
+
+// ---------------------------------------------------------------------------
+// web-hub-html-preview plan v2 §5 (P0 frozen face) — the HTML-capability mint outcome
+// ---------------------------------------------------------------------------
+
+/**
+ * plan v2 §5's frozen mint outcome. The success half IS the protocol's
+ * `PreviewHtmlCapResponseBody` (never a hand mirror — the same anti-drift rule as
+ * `PreviewProbeKind` above); the error half keeps the wire body's `reason` verbatim so a 403
+ * `E_PREVIEW_DENIED{reason:"dir-too-broad"|"upload"}` reaches `PreviewHtml.vue`'s
+ * source-switch decision unchanged (§5: mint 403 ⇒ prose note + switch to source).
+ * `status` is 0 for client-local codes (`E_ABORT`/`E_DEADLINE`/`E_NETWORK`/`E_BAD_RESPONSE`).
+ * Deliberately NO `retryAfterS`: the plan's frozen shape carries none (the UI retries
+ * 429/503 on its own cadence, §5).
+ */
+export type PreviewHtmlCapOutcome =
+  | (PreviewHtmlCapResponseBody & { readonly ok: true })
+  | { readonly ok: false; readonly status: number; readonly error: string; readonly reason?: string };
 
 // ---------------------------------------------------------------------------
 // web-hub-avatar plan v2.1 §5 — the fixed avatar transport surface
