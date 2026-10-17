@@ -43,6 +43,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** Narrow (<1025px) desktop-popover form: only the 1024px query matches — the version card's gate. */
+function stubNarrow(): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query === "(max-width: 1024px)",
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+}
+
 describe("SettingsOverlay.vue — desktop popover", () => {
   it("renders a non-modal role=dialog panel labelled by the settings title, not the mobile sheet", () => {
     const anchorEl = document.createElement("button");
@@ -313,8 +323,8 @@ describe("SettingsOverlay desktop panel width (default-model plan F1 A1)", () =>
 // and the endpoint is requested only when the dialog (i.e. the embedded panel) mounts — sharing
 // TopBar's VERSION_CTX single flight.
 describe("SettingsOverlay — inline 「版本」 card (web-hub-version V2, D4)", () => {
-  it("renders the version card with the embedded panel inside the desktop popover; 5/6 are collapsed <details>", async () => {
-    stubMatchMedia(false);
+  it("narrow (<1025px): renders the version card with the embedded panel; 5/6 are collapsed <details>", async () => {
+    stubNarrow();
     const handle = {
       phase: ref("ok"),
       snapshot: ref({
@@ -356,7 +366,7 @@ describe("SettingsOverlay — inline 「版本」 card (web-hub-version V2, D4)"
   });
 
   it("the embedded panel requests the endpoint only when the dialog mounts (VERSION_CTX single flight)", async () => {
-    stubMatchMedia(false);
+    stubNarrow();
     const refresh = vi.fn();
     const handle = {
       phase: ref("idle"),
@@ -384,6 +394,27 @@ describe("SettingsOverlay — inline 「版本」 card (web-hub-version V2, D4)"
       { timeout: 4000, interval: 10 },
     );
     expect(refresh).toHaveBeenCalledTimes(1); // once per panel mount — the shared single flight
+    wrapper.unmount();
+  });
+
+  it("desktop (≥1025px): no version card in settings and no request — the top-bar chip is the entry", async () => {
+    stubMatchMedia(false);
+    const refresh = vi.fn();
+    const handle = {
+      phase: ref("idle"),
+      snapshot: ref(undefined),
+      match: ref({ tabStale: false, findings: [], dot: null, dirty: false }),
+      refresh,
+      dispose: () => {},
+    };
+    const wrapper = mount(SettingsOverlay, {
+      props: { anchorEl: document.createElement("button") },
+      global: { provide: { [VERSION_CTX as symbol]: handle } },
+      attachTo: document.body,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(wrapper.find(".version-embedded").exists()).toBe(false);
+    expect(refresh).toHaveBeenCalledTimes(0);
     wrapper.unmount();
   });
 });

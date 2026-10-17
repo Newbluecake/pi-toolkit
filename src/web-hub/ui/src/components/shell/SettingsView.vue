@@ -61,11 +61,16 @@ import { HUB_CTX } from "../control/controlContext.js";
 import SettingsModelPicker from "./SettingsModelPicker.vue";
 import SettingsAvatarCard from "./SettingsAvatarCard.vue";
 import VersionHost from "./VersionHost.vue";
+import { useMedia } from "../../composables/useMedia.js";
 import type { ThemePref } from "../../types.js";
 import "../../styles/settings.css";
 
 const { t } = useI18n();
 const emit = defineEmits<{ close: [] }>();
+/** 2026-10-17 user 「设置里的版本信息只在手机模式（窄屏）才放，电脑模式放 topbar 就行」: the
+ *  inline 「版本」 card only mounts below 1025px — where the top-bar version chip is hidden. On
+ *  desktop the chip's popover is the only entry (and nothing is fetched from settings). */
+const narrow = useMedia(window, "(max-width: 1024px)").matches;
 
 const theme = useTheme({
   storage: browserLocalStorage(),
@@ -231,14 +236,15 @@ function onModelSelect(value: string): void {
       </header>
 
       <!-- web-hub-version plan §5.2 + 2026-10-16 D4 refinement: the 「版本」 card — the version
-           info lives INLINE inside the settings dialog (mobile sheet AND desktop popover alike;
+           info lives INLINE inside the settings dialog on NARROW screens only (<1025px, 2026-10-17 user —
+           desktop uses the top-bar chip popover);
            there is no "close settings, open a sheet" flow). It embeds the SAME lazily loaded
            VersionPanel through VersionHost (`embedded` — no popover shell of its own); the
            fetch fires when this card mounts (i.e. when the settings dialog opens) and shares
            TopBar's `VERSION_CTX` single flight with the popover, so nothing is requested twice.
            Rendered unconditionally: without the `version.v1` cap the panel itself degrades to
            the one-line 「hub 版本过旧」 hint (§6 — old hubs see the card, never a request). -->
-      <section class="settings-card settings-card-wide" :aria-label="t('version.settingsSection')">
+      <section v-if="narrow" class="settings-card settings-card-wide" :aria-label="t('version.settingsSection')">
         <h2 class="settings-h">{{ t("version.settingsSection") }}</h2>
         <VersionHost embedded />
       </section>
