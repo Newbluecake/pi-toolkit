@@ -44,6 +44,10 @@ const props = defineProps<{ load: LoadWire | undefined; receivedAt: number | und
 const { t } = useI18n();
 
 const mobile = useMedia(window, "(max-width: 480px)").matches;
+/** Hover-capable pointer (desktop): gates the hover-peek popover — phones/tablets never
+ *  auto-open on hover. Same gate as `QuotaPill` (2026-10-17 user 「sysload 也改为 hover 悬停展开，
+ *  参考 quota」). */
+const hoverFine = useMedia(window, "(hover: hover) and (pointer: fine)").matches;
 
 // Re-derives staleness/elapsed off the browser's OWN clock on a light tick — a snapshot that
 // stops arriving (hub died, feature turned off mid-session) must still go stale on schedule,
@@ -56,6 +60,8 @@ onMounted(() => {
   }, 5_000);
 });
 onUnmounted(() => {
+  if (hoverIn !== undefined) clearTimeout(hoverIn);
+  if (hoverOut !== undefined) clearTimeout(hoverOut);
   if (timer !== undefined) clearInterval(timer);
 });
 
@@ -76,14 +82,55 @@ const shownSegs = computed((): PillSeg[] => {
   return worst === undefined ? [] : [worst];
 });
 
-const open = ref(false);
 const btnEl = ref<HTMLButtonElement | null>(null);
 
+/* --------------------------------------------------------- popover: pinned + hover peek
+ * Mirrors `QuotaPill` exactly: click pins; on hover-capable pointers a ~150ms hover opens a
+ * non-pinned "peek" (no focus move — `LoadCard` `peek`), closing ~200ms after the pointer leaves
+ * BOTH the pill and the card; a click on top of a peek pins it. */
+const pinned = ref(false);
+const peek = ref(false);
+const open = computed(() => pinned.value || peek.value);
+
+let hoverIn: ReturnType<typeof setTimeout> | undefined;
+let hoverOut: ReturnType<typeof setTimeout> | undefined;
+
 function onToggle(): void {
-  open.value = !open.value;
+  pinned.value = !pinned.value;
+  peek.value = false;
 }
 function onClose(): void {
-  open.value = false;
+  pinned.value = false;
+  peek.value = false;
+}
+function stopPeekClose(): void {
+  if (hoverOut !== undefined) {
+    clearTimeout(hoverOut);
+    hoverOut = undefined;
+  }
+}
+/** Bound to both the pill's and the card's mouseenter: opens after ~150ms, or (card already
+ *  open) just cancels a pending close. */
+function onPillEnter(): void {
+  stopPeekClose();
+  if (!hoverFine.value || mobile.value || open.value) return;
+  hoverIn = setTimeout(() => {
+    hoverIn = undefined;
+    peek.value = true;
+  }, 150);
+}
+function onPillLeave(): void {
+  if (hoverIn !== undefined) {
+    clearTimeout(hoverIn);
+    hoverIn = undefined;
+  }
+  if (!pinned.value && peek.value) {
+    stopPeekClose();
+    hoverOut = setTimeout(() => {
+      hoverOut = undefined;
+      peek.value = false;
+    }, 200);
+  }
 }
 
 const ariaLabel = computed(() => {
@@ -106,6 +153,8 @@ const ariaLabel = computed(() => {
       :aria-label="ariaLabel"
       :title="ariaLabel"
       @click="onToggle"
+      @mouseenter="onPillEnter"
+      @mouseleave="onPillLeave"
     >
       <span class="ld-dot" aria-hidden="true"></span>
       <template v-for="(seg, i) in shownSegs" :key="seg.key">
@@ -119,7 +168,10 @@ const ariaLabel = computed(() => {
       :received-at="receivedAt"
       :now="nowTick"
       :anchor-el="btnEl"
+      :peek="peek"
       @close="onClose"
+      @mouseenter="onPillEnter"
+      @mouseleave="onPillLeave"
     />
   </span>
 </template>

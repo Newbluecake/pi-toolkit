@@ -35,11 +35,15 @@ const props = defineProps<{
   receivedAt: number | undefined;
   now: number;
   anchorEl: HTMLElement | null;
+  /** Hover-peek mount (LoadPill, QuotaCard precedent): never steals focus on mount nor returns
+   *  it on close — the pointer never asked for focus. Mount-time snapshot on purpose. */
+  peek?: boolean;
 }>();
 const emit = defineEmits<{ close: [] }>();
 const { t } = useI18n();
 
 const hub = inject(HUB_CTX, null);
+const wasPeek = props.peek === true;
 
 // §7.1/§10 (package P4): `LoadCard.vue` is one of the components guaranteed to receive the REAL
 // `useHub()` object (App.vue's sole construction site) through `HUB_CTX` — same precedent as
@@ -54,12 +58,12 @@ onMounted(async () => {
   document.addEventListener("keydown", onKeydown, true);
   document.addEventListener("pointerdown", onPointerDown, true);
   await nextTick();
-  panelEl.value?.focus();
+  if (!wasPeek) panelEl.value?.focus();
 });
 onUnmounted(() => {
   document.removeEventListener("keydown", onKeydown, true);
   document.removeEventListener("pointerdown", onPointerDown, true);
-  props.anchorEl?.focus();
+  if (!wasPeek) props.anchorEl?.focus();
 });
 
 const panelEl = ref<HTMLElement | null>(null);
