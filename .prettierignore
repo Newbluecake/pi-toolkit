@@ -19,3 +19,4 @@ tests/fixtures/memory/current-5-migrated/
 
 # golden fixtures are byte-exact pins — prettier must never reformat them
 tests/fixtures/quota/
+tests/fixtures/version/
