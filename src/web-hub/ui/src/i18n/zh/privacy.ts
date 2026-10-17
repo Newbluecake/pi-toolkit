@@ -13,6 +13,8 @@ const privacy = {
   markAria: "将此会话标记为隐私会话",
   lockNow: "立即锁定",
   lockNowAria: "立即回锁此会话的视图",
+  markLabel: "隐私",
+  lockLabel: "锁定",
   screenTitle: "此会话已设为隐私",
   screenBody:
     "解锁查看前，其会话内容与各面板保持隐藏。解锁仅对本次查看有效：切走、长时间无操作或标签页隐藏时都会立即回锁。",

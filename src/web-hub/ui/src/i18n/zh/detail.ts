@@ -91,6 +91,7 @@ const detail = {
   // 直接携带确认发送内置 /new（全程无任何确认弹窗）。追加在文件末尾——其它包插在
   // `todoCompletedHidden` 之前，永不动这里。
   clearAria: "清空",
+  clearLabel: "清空",
   clearTitle: "新会话（/clear）",
   clearFailed: "新会话启动失败（{code}）",
 } satisfies Messages<typeof en>;

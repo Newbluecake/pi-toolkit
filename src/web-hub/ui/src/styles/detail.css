@@ -49,6 +49,7 @@
 }
 
 .detail-titlebar {
+  container: detail-titlebar / inline-size; /* head-btn labels collapse by the bar's own width */
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -157,6 +158,84 @@
   .detail-resume-btn {
     min-width: 44px;
     min-height: 44px;
+  }
+}
+
+/* 2026-10-17 「图标右侧加点文字,空间不够才只显示图标」: clear / resume / privacy get a visible
+ * label in the StatusPill's grammar (same font-size/weight, icon gap, pill radius; 24px ≈ the
+ * pill's 22px + 1px borders-free padding). The label is aria-hidden — aria-label/title stay
+ * the accessible name. Below 560px of titlebar width (title keeps ≳200px beside pill +
+ * 3 labeled buttons + stop button) the labels drop and the 32px icon-only buttons return.
+ * Selector is `.detail-titlebar`-prefixed so it also beats `.btn`/`.btn-ghost` (privacy). */
+.detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) {
+  width: auto;
+  min-height: calc(24px * var(--fs-scale, 1));
+  padding: 1px 4px;
+  gap: 6px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* 2026-10-17 「按钮间的距离可以缩小二分之一」: label-to-next-icon distance was 8 (padding) + 8
+ * (bar gap) + 8 (padding) = 24px; 4px padding and a −4px margin between adjacent labeled
+ * buttons bring it to 12px. The icon-only tier below resets the margin. */
+.detail-titlebar
+  :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn)
+  + :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) {
+  margin-left: -4px;
+}
+
+.detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) .icon {
+  width: calc(14px * var(--fs-scale, 1));
+  height: calc(14px * var(--fs-scale, 1));
+}
+
+.detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn):hover:not(:disabled),
+.detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn):focus-visible {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+}
+
+@container detail-titlebar (max-width: 559px) {
+  .head-btn-label {
+    display: none;
+  }
+
+  .detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) {
+    width: 32px;
+    min-height: 32px;
+    padding: 0;
+    gap: 0;
+    border-radius: var(--r-sm);
+  }
+
+  .detail-titlebar
+    :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn)
+    + :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) {
+    margin-left: 0;
+  }
+
+  .detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) .icon {
+    width: calc(16px * var(--fs-scale, 1));
+    height: calc(16px * var(--fs-scale, 1));
+  }
+}
+
+@media (pointer: coarse) {
+  .detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) {
+    min-height: 44px;
+  }
+
+  @container detail-titlebar (max-width: 559px) {
+    .detail-titlebar :is(.detail-clear-btn, .detail-resume-btn, .privacy-head-btn) {
+      min-width: 44px;
+    }
   }
 }
 

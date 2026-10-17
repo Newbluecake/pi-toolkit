@@ -406,6 +406,9 @@ describe("回锁四路 (four relock paths)", () => {
     const btn = m.wrapper.find(".privacy-head-btn");
     expect(btn.exists()).toBe(true);
     expect(btn.attributes("aria-label")).toBe("Relock this session's view immediately");
+    expect(btn.attributes("title")).toBe("Lock now");
+    expect(btn.get(".head-btn-label").text()).toBe("Lock"); // marked ⇒ 「锁定」 label
+    expect(btn.get(".head-btn-label").attributes("aria-hidden")).toBe("true");
     await btn.trigger("click");
     await flushPromises();
     expect(m.wrapper.find(".privacy-lock").exists()).toBe(true);
@@ -558,6 +561,7 @@ describe("命名分离 (「隐私标记」 vs 「立即锁定」)", () => {
     expect(headBtn.exists()).toBe(true);
     expect(headBtn.attributes("aria-label")).toBe("Mark this session as private");
     expect(headBtn.attributes("title")).toBe("Mark private");
+    expect(headBtn.get(".head-btn-label").text()).toBe("Private"); // unmarked ⇒ 「隐私」 label
     // mark it → broadcast → now viewing a marked session ⇒ the SAME button becomes 「立即锁定」
     await headBtn.trigger("click");
     await flushPromises();

@@ -278,6 +278,8 @@ describe("DetailHeader D7 button gating (clear-button pattern + resume.v1)", () 
     const { w, open } = mountHeader(["resume.v1"]);
     const btn = w.find(".detail-resume-btn");
     expect(btn.exists()).toBe(true);
+    expect(btn.get(".head-btn-label").text()).toBe("恢复"); // visible label; aria-label unchanged
+    expect(btn.get(".head-btn-label").attributes("aria-hidden")).toBe("true");
     await btn.trigger("click");
     expect(open).toHaveBeenCalledWith({ scope: "recent" });
   });

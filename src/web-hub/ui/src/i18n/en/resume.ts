@@ -11,6 +11,8 @@
 const resume = {
   // D7 header button, next to 「清空」 — same gating as clear + the resume.v1 feature.
   openTitle: "Resume session",
+  /** Visible short label next to the header button icon (collapses to icon-only when narrow). */
+  openLabel: "Resume",
   // §2.6 decoratePalette — shown on the /resume + /resume-recent palette rows.
   paletteDesc: "Resume a session (switch in this process)",
 } satisfies Record<string, string>;

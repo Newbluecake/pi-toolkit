@@ -10,6 +10,7 @@ import type en from "../en/resume.js";
 
 const resume = {
   openTitle: "恢复会话",
+  openLabel: "恢复",
   paletteDesc: "恢复会话（在本进程内切换）",
 } satisfies Record<keyof typeof en, string>;
 

@@ -10,6 +10,7 @@
  */
 import { mount, flushPromises } from "@vue/test-utils";
 import { computed, ref } from "vue";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import DetailHeader from "../../../src/web-hub/ui/src/components/detail/DetailHeader.vue";
 import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
@@ -117,6 +118,24 @@ function mountHeader(control: ControlHandle, over: ViewOver = {}, provideView = 
 }
 
 describe("DetailHeader.vue — web /clear quick button", () => {
+  it("visible label next to the icon; aria-label/title stay the accessible name; CSS collapses it by container width", () => {
+    const w = mountHeader(fakeControl().control);
+    const label = w.get(".detail-clear-btn .head-btn-label");
+    expect(label.text()).toBe("Clear");
+    expect(label.attributes("aria-hidden")).toBe("true");
+    expect(w.get(".detail-clear-btn").attributes("aria-label")).toBe("Clear");
+    const css = readFileSync("src/web-hub/ui/src/styles/detail.css", "utf8");
+    expect(css).toMatch(/\.detail-titlebar\s*\{[^}]*container:\s*detail-titlebar \/ inline-size/);
+    expect(css).toMatch(
+      /@container detail-titlebar \(max-width: 559px\)\s*\{\s*\.head-btn-label\s*\{\s*display: none;/,
+    );
+    expect(MESSAGES.zh.resume.openLabel).toBe("恢复");
+    expect(MESSAGES.zh.privacy.markLabel).toBe("隐私");
+    expect(MESSAGES.zh.privacy.lockLabel).toBe("锁定");
+    expect(MESSAGES.zh.detail.clearAria).toBe("清空");
+    expect(MESSAGES.zh.detail.clearLabel).toBe("清空");
+  });
+
   it("click ⇒ exactly one runCommand('new', '', { confirm: true }) — the dialog-free path", async () => {
     const { control, runs } = fakeControl();
     const w = mountHeader(control);

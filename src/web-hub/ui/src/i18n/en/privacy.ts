@@ -18,6 +18,9 @@ const privacy = {
   /** Header button while viewing an unlocked marked session: relock the VIEW (no request). */
   lockNow: "Lock now",
   lockNowAria: "Relock this session's view immediately",
+  /** Visible short labels on the header button (unmarked / marked). */
+  markLabel: "Private",
+  lockLabel: "Lock",
   /** Lock screen (replaces the whole AgentDetail subtree while locked). */
   screenTitle: "This session is private",
   screenBody:

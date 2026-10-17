@@ -94,6 +94,7 @@ const detail = {
   // session in the same pi process via builtin /new with confirm baked in (no dialog anywhere).
   // Appended at the file's end — another package inserts before `todoCompletedHidden`, never here.
   clearAria: "Clear",
+  clearLabel: "Clear",
   clearTitle: "New session (/clear)",
   clearFailed: "Couldn't start a new session ({code})",
 } satisfies Record<string, string>;

@@ -360,6 +360,7 @@ function onToggleHeadInfo(): void {
         @click="void onClear()"
       >
         <AppIcon :name="clearing ? 'loader' : 'sparkle'" class="icon" :class="{ spin: clearing }" />
+        <span class="head-btn-label" aria-hidden="true">{{ t("detail.clearLabel") }}</span>
       </button>
       <!-- web-resume §2.6 D7 (P3): 「恢复」 opens the resume picker — clear-button gating +
            resume.v1; never busy-gated (D4: busy ⇒ list browsable, rows not switchable). -->
@@ -372,6 +373,7 @@ function onToggleHeadInfo(): void {
         @click="resumeHost?.open({ scope: 'recent' })"
       >
         <AppIcon name="clock" class="icon" />
+        <span class="head-btn-label" aria-hidden="true">{{ t("resume.openLabel") }}</span>
       </button>
       <!-- web-hub-privacy P2: 隐私标记 (unmarked → persistent mark) vs 立即锁定 (marked +
            viewing → view relock) — the two names never mix (plan v2.1 N1 命名分离). -->
@@ -384,6 +386,9 @@ function onToggleHeadInfo(): void {
         @click="onPrivacyClick"
       >
         <AppIcon name="lock" class="icon" />
+        <span class="head-btn-label" aria-hidden="true">{{
+          privacyMarked ? t("privacy.lockLabel") : t("privacy.markLabel")
+        }}</span>
       </button>
       <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
         t("spawn.badgeRestoring")
