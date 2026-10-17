@@ -32,6 +32,7 @@ import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import FleetActions from "./FleetActions.vue";
 import { FLEET_STATE_ICON, fleetStateSpins } from "./state-icon.js";
+import { typeBadge, shortModelLabel } from "@logic/fleetRow.js";
 import { fleetActivity, isTerminalRow, FLEET_SELECT } from "./summary.js";
 
 const props = withDefaults(defineProps<FleetTreeProps>(), { depth: 0 });
@@ -109,8 +110,12 @@ function rowOf(node: FleetTreeNode): FleetRowWire {
 function nameOf(row: FleetRowWire): string {
   return clip(String(row.label ?? row.type ?? row.runId), 60);
 }
-function typeChipOf(row: FleetRowWire): string {
+function typeOf(row: FleetRowWire): string {
   return typeof row.type === "string" && row.type !== "" ? row.type : "";
+}
+function badgeOf(row: FleetRowWire): { letter: string; tone: number } | null {
+  const t = typeOf(row);
+  return t === "" ? null : typeBadge(t);
 }
 function phaseOf(row: FleetRowWire): string {
   return String(row.phaseLabel ?? row.status ?? "");
@@ -119,7 +124,7 @@ function modelShortOf(row: FleetRowWire): string {
   const m = row.model;
   if (typeof m !== "string" || m === "") return "";
   const slash = m.lastIndexOf("/");
-  return slash >= 0 ? m.slice(slash + 1) : m;
+  return shortModelLabel(slash >= 0 ? m.slice(slash + 1) : m);
 }
 /** 2026-10-16 user 「provider 信息还是应该展示出来，按屏幕宽度压缩展示」: the `provider` half of
  *  `provider/id` (empty when the ref carries none). Rendered as its own muted span before the
@@ -137,6 +142,9 @@ function modelProviderOf(row: FleetRowWire): string {
 function thinkingTokenOf(row: FleetRowWire): string {
   const t = row.thinking;
   return typeof t === "string" && t !== "" ? `·${t}` : "";
+}
+function modelBlockOf(row: FleetRowWire): boolean {
+  return modelShortOf(row) !== "" || thinkingTokenOf(row) !== "";
 }
 function costLabelOf(row: FleetRowWire): string {
   return typeof row.costUsd === "number" ? formatUsd(row.costUsd) : "—";
@@ -171,6 +179,16 @@ function toggleActions(runId: string): void {
               :name="FLEET_STATE_ICON[fleetRowVisualState(rowOf(node))]"
               :class="{ icon: true, spin: fleetStateSpins(fleetRowVisualState(rowOf(node))) }"
           /></span>
+          <span
+            v-if="badgeOf(rowOf(node))"
+            class="run-type"
+            role="img"
+            translate="no"
+            :data-tone="badgeOf(rowOf(node))!.tone"
+            :title="typeOf(rowOf(node))"
+            :aria-label="typeOf(rowOf(node))"
+            >{{ badgeOf(rowOf(node))!.letter }}</span
+          >
           <span class="run-name">
             <button
               v-if="sel?.canOpen.value"
@@ -182,14 +200,11 @@ function toggleActions(runId: string): void {
             </button>
             <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
             <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
-            <span v-if="typeChipOf(rowOf(node))" class="chip" translate="no" :title="typeChipOf(rowOf(node))">{{
-              typeChipOf(rowOf(node))
-            }}</span>
           </span>
           <span v-if="fleetActivity(rowOf(node))" class="run-activity"
             ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
           >
-          <span class="run-nums">
+          <span v-if="modelBlockOf(rowOf(node))" class="run-model">
             <span
               v-if="modelProviderOf(rowOf(node))"
               class="model-provider"
@@ -208,9 +223,9 @@ function toggleActions(runId: string): void {
             <span v-if="thinkingTokenOf(rowOf(node))" class="model-thinking" translate="no">{{
               thinkingTokenOf(rowOf(node))
             }}</span>
-            <span class="time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
-            <span class="cost">{{ costLabelOf(rowOf(node)) }}</span>
           </span>
+          <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
+          <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>
           <button
             v-if="actionsAvailable(rowOf(node))"
             class="btn btn-ghost btn-xs run-actions-toggle"
@@ -243,6 +258,16 @@ function toggleActions(runId: string): void {
             :name="FLEET_STATE_ICON[fleetRowVisualState(rowOf(node))]"
             :class="{ icon: true, spin: fleetStateSpins(fleetRowVisualState(rowOf(node))) }"
         /></span>
+        <span
+          v-if="badgeOf(rowOf(node))"
+          class="run-type"
+          role="img"
+          translate="no"
+          :data-tone="badgeOf(rowOf(node))!.tone"
+          :title="typeOf(rowOf(node))"
+          :aria-label="typeOf(rowOf(node))"
+          >{{ badgeOf(rowOf(node))!.letter }}</span
+        >
         <span class="run-name">
           <button
             v-if="sel?.canOpen.value"
@@ -254,14 +279,11 @@ function toggleActions(runId: string): void {
           </button>
           <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
           <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
-          <span v-if="typeChipOf(rowOf(node))" class="chip" translate="no" :title="typeChipOf(rowOf(node))">{{
-            typeChipOf(rowOf(node))
-          }}</span>
         </span>
         <span v-if="fleetActivity(rowOf(node))" class="run-activity"
           ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
         >
-        <span class="run-nums">
+        <span v-if="modelBlockOf(rowOf(node))" class="run-model">
           <span
             v-if="modelProviderOf(rowOf(node))"
             class="model-provider"
@@ -280,9 +302,9 @@ function toggleActions(runId: string): void {
           <span v-if="thinkingTokenOf(rowOf(node))" class="model-thinking" translate="no">{{
             thinkingTokenOf(rowOf(node))
           }}</span>
-          <span class="time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
-          <span class="cost">{{ costLabelOf(rowOf(node)) }}</span>
         </span>
+        <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
+        <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>
         <button
           v-if="actionsAvailable(rowOf(node))"
           class="btn btn-ghost btn-xs run-actions-toggle"

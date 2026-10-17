@@ -102,14 +102,20 @@
   display: none;
 }
 
+/* "variant C" row (2026-10-17 user pick). Line 1: [chev] icon · type badge · name · model block ·
+ * elapsed · toggle. Line 2: activity (spans badge..model) · cost under the time column. The name
+ * column has a floor so it is the LAST thing to truncate; the model block (`minmax(0,auto)`)
+ * gives way first (provider, then model); time/cost are never truncated. Base grid has no chev
+ * column; the chev tiers below add it. */
 .run {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
   grid-template-areas:
-    "icon name nums toggle"
-    ". activity activity .";
+    "icon badge name model time toggle"
+    ". activity activity activity cost .";
   align-items: center;
   column-gap: var(--sp-2);
+  row-gap: 1px;
   min-height: 44px;
   padding: 6px var(--sp-2);
   border-radius: var(--r-sm);
@@ -174,7 +180,7 @@ details[open] > summary.run .chev {
 }
 
 /* chip(类型徽标/孤儿徽标)可收缩:窄容器里 name 列被压到比 chip 还窄时,`flex: none` 会让 chip
- * 溢出自己的格子、叠到右侧 `.run-nums` 的模型名上(2026-10 手机现场重叠反馈的根因)。改为
+ * 溢出自己的格子、叠到右侧 `.run-model` 的模型名上(2026-10 手机现场重叠反馈的根因)。改为
  * `flex: 0 1 auto` + `min-width: 0` + ellipsis:空间不足时 chip 与 label 一起截断,任何宽度下
  * 都结构性不可能叠字;极窄容器另由 @container 加 max-width 兜底(见文件尾)。 */
 .run-name .chip {
@@ -243,21 +249,66 @@ details[open] > summary.run .chev {
   font-weight: var(--fw-semibold);
 }
 
-.run-nums {
-  grid-area: nums;
+/* Type badge: small square letter (first letter of the agent type), deterministic tone per
+ * type (`typeBadge` in logic/fleetRow.ts). White on mid-dark fills — readable in light and dark. */
+.run-type {
+  grid-area: badge;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--tb, #475569);
+  color: #fff;
+  font-size: 10px;
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  user-select: none;
+}
+
+.run-type[data-tone="0"] {
+  --tb: #4f63c9;
+}
+.run-type[data-tone="1"] {
+  --tb: #2b8059;
+}
+.run-type[data-tone="2"] {
+  --tb: #a0691a;
+}
+.run-type[data-tone="3"] {
+  --tb: #0e7490;
+}
+.run-type[data-tone="4"] {
+  --tb: #7c3aed;
+}
+.run-type[data-tone="5"] {
+  --tb: #be185d;
+}
+.run-type[data-tone="6"] {
+  --tb: #c2410c;
+}
+.run-type[data-tone="7"] {
+  --tb: #4d7c0f;
+}
+.run-type[data-tone="8"] {
+  --tb: #475569;
+}
+.run-type[data-tone="9"] {
+  --tb: #0f766e;
+}
+
+.run-model {
+  grid-area: model;
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
   min-width: 0;
   color: var(--c-text-3);
   font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-/* 模型名是 nums 里唯一可伸缩的项:空间不足时截断省略(time/cost 是短数字,永远完整可读)。
- * 模板在 `<span class="model">` 上挂了完整 model 串的 `title`,截断后 hover/长按仍能看到全名。 */
-.run-nums .model {
+/* model id ellipsizes after the provider; the full ref is in the span's `title`. */
+.run-model .model {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -265,45 +316,48 @@ details[open] > summary.run .chev {
   font-family: var(--font-mono);
 }
 
-/* 2026-10-16 user 「provider 信息还是应该展示出来，按屏幕宽度压缩展示」: the provider half of the
- * model ref sits right before the model id (the negative margin cancels `.run-nums`'s gap so it
- * reads `cr-anthropic/claude-opus-5-5`). It shrinks FIRST (flex-shrink 3 vs the model's 1) and is
- * capped per width tier — 18ch on wide rows, 10ch in containers <600px, 6ch <480px — ellipsizing
- * only the provider name and keeping the `/`. The full ref is in the span's `title`. */
-.run-nums .model-provider {
+/* provider half of the ref: shrinks FIRST (flex-shrink 3 vs the model's 1), capped per width tier
+ * — 18ch wide, 10ch in containers <600px, 6ch <480px — ellipsizing only the name, keeping `/`. */
+.run-model .model-provider {
   display: inline-flex;
   flex: 0 3 auto;
   min-width: 0;
   max-width: 18ch;
-  margin-right: calc(-1 * var(--sp-3));
   font-family: var(--font-mono);
   color: var(--c-text-3);
 }
 
-.run-nums .model-provider-name {
+.run-model .model-provider-name {
   min-width: 2ch;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* M-B2(思考级别可见性):紧随模型名的 `·high` 小令牌 —— 永不截断(短枚举词),不参与
- * 模型名的收缩;未知级别时模板压根不渲染本节点。淡色令牌与 time/cost 同族,而非 model
- * 的截断省略族。 */
-.run-nums .model-thinking {
+/* `·high` glued to the model; never truncated. */
+.run-model .model-thinking {
   flex: none;
   color: var(--c-text-3);
   font-family: var(--font-mono);
 }
 
-.run-nums .time {
-  flex: none;
+.run-time {
+  grid-area: time;
+  min-width: 44px;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
-.run-nums .cost {
-  min-width: 52px;
-  text-align: right;
+.run-cost {
+  grid-area: cost;
   color: var(--c-text-2);
   font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
 /* 「⋯」行内操作按钮:显式占一个 grid 列,不靠自动布局(auto-placement 落进哪个空格要看模板,
@@ -407,10 +461,10 @@ details[open] > summary.run .chev {
   }
 
   .run {
-    grid-template-columns: 18px 20px minmax(0, 1fr) auto auto;
+    grid-template-columns: 18px 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
     grid-template-areas:
-      "chev icon name nums toggle"
-      ". . activity activity .";
+      "chev icon badge name model time toggle"
+      ". . activity activity activity cost .";
   }
 
   .run .chev {
@@ -449,10 +503,10 @@ details[open] > summary.run .chev {
  * docked/overlay 可能回退到旧的挤压表现)。 */
 @container (max-width: 599px) {
   .run {
-    grid-template-columns: 18px 20px minmax(0, 1fr) auto auto;
+    grid-template-columns: 18px 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
     grid-template-areas:
-      "chev icon name nums toggle"
-      ". . activity activity .";
+      "chev icon badge name model time toggle"
+      ". . activity activity activity cost .";
     min-height: 44px;
     padding: 6px var(--sp-2);
   }
@@ -461,52 +515,41 @@ details[open] > summary.run .chev {
     display: block;
   }
 
-  .run-nums .model-provider {
+  .run-model .model-provider {
     max-width: 10ch;
   }
 }
 
-/* 容器实际内联尺寸 <480px 时,name+chip+nums(model+time+cost) 一行放不下:nums 仅自身就要
- * ~200px,加上 chev/icon/缩进后 name 列被压到小于 chip 宽 —— 360–479px 正是真实抽屉的主战场
- * (docked clamp(360,30vw,520) 的下段、overlay min(420px,85%)、360–430px 手机全屏抽屉),旧的
- * <360px 阈值完全覆盖不到这个区间,是 2026-10 手机重叠反馈久治不愈的漏洞。布局降级为三行:
- * 第一行 icon+name+toggle(name 拿整行宽),nums 整体挪第二行,activity 第三行 —— 行与行之间
- * 由网格轨道隔开,不可能重叠;行内截断由上面的 chip/model 收缩规则兜底。 */
+/* Container <480px: line 1 = icon · badge · name · time · toggle; line 2 = model block · cost;
+ * line 3 = activity. Rows are separated by grid tracks, so nothing can overlap; truncation is
+ * handled by the shrink rules above. */
 @container (max-width: 479px) {
   .run {
-    grid-template-columns: 18px 20px minmax(0, 1fr) auto;
+    grid-template-columns: 18px 20px 16px minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "chev icon name toggle"
-      ". . nums nums"
-      ". . activity activity";
-  }
-
-  .run-nums {
-    justify-content: flex-start;
+      "chev icon badge name time toggle"
+      ". . . model cost ."
+      ". . . activity activity .";
   }
 
   .run-name .chip {
     max-width: 72px;
   }
 
-  .run-nums .model-provider {
+  .run-model .model-provider {
     max-width: 6ch;
   }
 }
 
 /* ================================================================ flat level (no expandable row)
- * 2026-10-09 现场「agent list 左侧的空白有点太宽」: every row reserved an 18px chevron column
- * (≥481px viewports and every container ≤599px) even when no sibling had children, leaving a
- * blank strip before the status icon on phones AND desktop. FleetTree marks such a level
- * `.tree-flat`; its rows drop the chevron column at every breakpoint. Selectors are
- * `.tree-flat > li > .run` (higher specificity than the plain `.run` tiers above) and keep the
- * same viewport → container order, so the container tiers still win on narrow drawers. Leaf rows
- * only (`> li > .run`): an expandable row is never inside a flat level by definition. */
+ * A level without any expandable row drops the chevron column at every breakpoint
+ * (`.tree-flat > li > .run`, higher specificity than the plain `.run` tiers, same viewport →
+ * container order so narrow drawers still win). */
 .tree-flat > li > .run {
-  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
   grid-template-areas:
-    "icon name nums toggle"
-    ". activity activity .";
+    "icon badge name model time toggle"
+    ". activity activity activity cost .";
 }
 
 .tree-flat > li > .run .chev {
@@ -515,19 +558,19 @@ details[open] > summary.run .chev {
 
 @container (max-width: 599px) {
   .tree-flat > li > .run {
-    grid-template-columns: 20px minmax(0, 1fr) auto auto;
+    grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
     grid-template-areas:
-      "icon name nums toggle"
-      ". activity activity .";
+      "icon badge name model time toggle"
+      ". activity activity activity cost .";
   }
 }
 
 @container (max-width: 479px) {
   .tree-flat > li > .run {
-    grid-template-columns: 20px minmax(0, 1fr) auto;
+    grid-template-columns: 20px 16px minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "icon name toggle"
-      ". nums nums"
-      ". activity activity";
+      "icon badge name time toggle"
+      ". . model cost ."
+      ". . activity activity .";
   }
 }

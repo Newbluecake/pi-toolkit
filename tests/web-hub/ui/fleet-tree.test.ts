@@ -172,7 +172,7 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
       wrapper
         .findAll(".run")
         .find((r) => r.text().includes(name))!
-        .get(".run-nums .time")
+        .get(".run-time")
         .text();
     expect(timeOf("live")).toBe("5s");
     expect(timeOf("done")).toBe("9s");
@@ -211,11 +211,11 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     ]);
     const leveled = wrapper.findAll(".run").find((r) => r.text().includes("leveled"))!;
     const plain = wrapper.findAll(".run").find((r) => r.text().includes("plain"))!;
-    expect(leveled.get(".run-nums .model").text()).toBe("glm-5.3");
-    expect(leveled.get(".run-nums .model-thinking").text()).toBe("·high");
+    expect(leveled.get(".run-model .model").text()).toBe("glm-5.3");
+    expect(leveled.get(".run-model .model-thinking").text()).toBe("·high");
     // unknown level → the token node is absent entirely (no dangling `·`)
-    expect(plain.find(".run-nums .model-thinking").exists()).toBe(false);
-    expect(plain.get(".run-nums .model").text()).toBe("glm-5.3");
+    expect(plain.find(".run-model .model-thinking").exists()).toBe(false);
+    expect(plain.get(".run-model .model").text()).toBe("glm-5.3");
   });
 
   it("2026-10-16: the provider renders before the model (`zai/` + `glm-5.3`); a bare id renders no provider", () => {
@@ -225,11 +225,11 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     ]);
     const withProv = wrapper.findAll(".run").find((r) => r.text().includes("withprov"))!;
     const bare = wrapper.findAll(".run").find((r) => r.text().includes("bare"))!;
-    expect(withProv.get(".run-nums .model-provider-name").text()).toBe("cr-anthropic");
-    expect(withProv.get(".run-nums .model-provider").text()).toBe("cr-anthropic/");
-    expect(withProv.get(".run-nums .model-provider").attributes("title")).toBe("cr-anthropic/claude-opus-5-5");
-    expect(withProv.get(".run-nums .model").text()).toBe("claude-opus-5-5");
-    expect(bare.find(".run-nums .model-provider").exists()).toBe(false);
+    expect(withProv.get(".run-model .model-provider-name").text()).toBe("cr-anthropic");
+    expect(withProv.get(".run-model .model-provider").text()).toBe("cr-anthropic/");
+    expect(withProv.get(".run-model .model-provider").attributes("title")).toBe("cr-anthropic/claude-opus-5-5");
+    expect(withProv.get(".run-model .model").text()).toBe("opus-5.5");
+    expect(bare.find(".run-model .model-provider").exists()).toBe(false);
   });
 
   it("provider compression tiers live in fleet.css (18ch wide, 10ch <600px, 6ch <480px)", () => {
@@ -237,9 +237,11 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
       resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/fleet.css"),
       "utf8",
     );
-    expect(css).toMatch(/\.run-nums \.model-provider \{[^}]*max-width:\s*18ch/);
-    expect(css).toMatch(/@container \(max-width: 599px\) \{[\s\S]*?\.run-nums \.model-provider \{\s*max-width:\s*10ch/);
-    expect(css).toMatch(/@container \(max-width: 479px\) \{[\s\S]*?\.run-nums \.model-provider \{\s*max-width:\s*6ch/);
+    expect(css).toMatch(/\.run-model \.model-provider \{[^}]*max-width:\s*18ch/);
+    expect(css).toMatch(
+      /@container \(max-width: 599px\) \{[\s\S]*?\.run-model \.model-provider \{\s*max-width:\s*10ch/,
+    );
+    expect(css).toMatch(/@container \(max-width: 479px\) \{[\s\S]*?\.run-model \.model-provider \{\s*max-width:\s*6ch/);
   });
 });
 
@@ -269,6 +271,17 @@ describe("FleetTree.vue — run-open 按钮(§6.3 FLEET_SELECT)", () => {
       { [FLEET_SELECT as symbol]: { select: () => {}, canOpen: computed(() => false) } },
     );
     expect(closed.find(".run-open").exists()).toBe(false);
+  });
+});
+
+describe("FleetTree.vue — type badge (variant C)", () => {
+  it("renders a letter badge with full type in title + aria-label instead of a text chip", () => {
+    const wrapper = mountTree([row({ runId: "b1", type: "verifier" })]);
+    const badge = wrapper.get(".run-type");
+    expect(badge.text()).toBe("V");
+    expect(badge.attributes("title")).toBe("verifier");
+    expect(badge.attributes("aria-label")).toBe("verifier");
+    expect(wrapper.find(".run-name .chip:not(.chip-orphan)").exists()).toBe(false);
   });
 });
 
@@ -436,19 +449,19 @@ describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场
   });
 
   it("模型名可截断(time/cost 不可收缩,永远完整)", () => {
-    const model = rule(".run-nums .model");
+    const model = rule(".run-model .model");
     expect(model).toMatch(/min-width:\s*0/);
     expect(model).toMatch(/text-overflow:\s*ellipsis/);
-    expect(rule(".run-nums .time")).toMatch(/flex:\s*none/);
-    expect(rule(".run-nums")).toMatch(/min-width:\s*0/);
+    expect(rule(".run-time")).toMatch(/white-space:\s*nowrap/);
+    expect(rule(".run-model")).toMatch(/min-width:\s*0/);
   });
 
-  it("容器 <480px 时 nums(model/time/cost) 挪到第二行,activity 第三行(真实抽屉全在 360–559px)", () => {
+  it("容器 <480px 时 model+cost 挪到第二行,activity 第三行(真实抽屉全在 360–559px)", () => {
     const m = /@container\s*\(max-width:\s*479px\)\s*\{([\s\S]*)\}\s*$/.exec(css);
     expect(m).not.toBeNull();
     const block = m![1]!;
     expect(block).toMatch(
-      /grid-template-areas:[^;]*"chev icon name toggle"[^;]*"\. \. nums nums"[^;]*"\. \. activity activity"/,
+      /grid-template-areas:[^;]*"chev icon badge name time toggle"[^;]*"\. \. \. model cost \."[^;]*"\. \. \. activity activity \."/,
     );
     // 旧的 <360px 阈值覆盖不到 docked/overlay/手机全屏抽屉,不得回退
     expect(css).not.toMatch(/@container\s*\(max-width:\s*359px\)/);
@@ -456,23 +469,23 @@ describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场
 
   it("思考/活动预览行(.run-activity):单行 nowrap + ellipsis + min-width:0,与费用/时间分行不相交", () => {
     const r = rule(".run-activity");
-    expect(r).toMatch(/grid-area:\s*activity/); // 独占网格行,不与 nums 同轨道
+    expect(r).toMatch(/grid-area:\s*activity/); // 独占网格行,不与 model 同轨道
     expect(r).toMatch(/min-width:\s*0/);
     expect(r).toMatch(/overflow:\s*hidden/);
     expect(r).toMatch(/text-overflow:\s*ellipsis/);
     expect(r).toMatch(/white-space:\s*nowrap/);
-    // <480px 档的 grid-template-areas 必须把 activity 与 nums 放在不同行(上一用例已钉模板,
+    // <480px 档的 grid-template-areas 必须把 activity 与 model 放在不同行(上一用例已钉模板,
     // 这里再钉一遍行数:模板字符串里恰好三行,activity 在最后一行)
     const m = /@container\s*\(max-width:\s*479px\)\s*\{([\s\S]*)\}\s*$/.exec(css);
     const areas = /grid-template-areas:\s*([^;]+);/.exec(m![1]!)?.[1] ?? "";
     const lines = [...areas.matchAll(/"[^"]+"/g)].map((x) => x[0]);
     expect(lines.length).toBe(3);
     expect(lines[2]).toContain("activity");
-    expect(lines[2]).not.toContain("nums");
+    expect(lines[2]).not.toContain("model");
   });
 
   it("行内元素不靠绝对定位/负 margin 排布(叠字禁令)", () => {
-    for (const sel of [".run-name", ".run-nums", ".run-activity", ".run-name .chip", ".run-nums .model"]) {
+    for (const sel of [".run-name", ".run-model", ".run-activity", ".run-name .chip", ".run-model .model"]) {
       const r = rule(sel);
       expect(r).not.toMatch(/position:\s*absolute/);
       expect(r).not.toMatch(/margin(-\w+)?:\s*-/);
