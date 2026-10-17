@@ -192,6 +192,7 @@ export function projectFleet(
     if (r.usage !== undefined) row.costUsd = r.usage.costUsd;
     if (r.toolTrail !== undefined) row.toolTrail = r.toolTrail;
     if (r.streamLine !== undefined) row.streamLine = r.streamLine;
+    if (byId.get(r.runId)?.diag.consultOf !== undefined) row.consult = true;
     return row;
   }) as FleetProjection;
   // fleet-drawer §4.4/#12: rows the 64-active/8-terminal caps dropped, so the browser can

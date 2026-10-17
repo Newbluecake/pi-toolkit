@@ -69,6 +69,7 @@ function richState(over: Partial<RunDiagnostics> = {}): RunState {
     experts: { refs: [{ runId: "r_e1", label: "plan", agentType: "architect" }], granted: true },
     dispatchMeta: { lane: "L2", packageId: "pkg-1", feature: "auth", abArm: "experts" },
     schemaPreset: "verdict/v1",
+    consultOf: { askerRunId: "r_asker" as NonNullable<NonNullable<RunDiagnostics["consultOf"]>["askerRunId"]> },
     consults: {
       calls: 2,
       byResult: { completed: 1, bad_ref: 1 },
@@ -122,6 +123,7 @@ const RETAINED = [
   "experts",
   "dispatchMeta",
   "schemaPreset",
+  "consultOf",
   "consults",
   "escalation",
   "degraded",

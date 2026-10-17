@@ -782,6 +782,7 @@ export function reduce(
           : { experts: { ...input.meta.experts, refs: capExpertRefs(input.meta.experts.refs) } }),
         ...(input.meta?.dispatchMeta === undefined ? {} : { dispatchMeta: input.meta.dispatchMeta }),
         ...(input.meta?.schemaPreset === undefined ? {} : { schemaPreset: input.meta.schemaPreset }),
+        ...(input.meta?.consultOf === undefined ? {} : { consultOf: input.meta.consultOf }),
         // §2.7：策略是 run 的持久事实，enqueued 写一次，此后永不改写；缺席
         // （旧入口/直接构造的 RunInput）不写字段，读侧走中性文案。
         ...(input.timeoutPolicy === undefined ? {} : { timeoutPolicy: input.timeoutPolicy }),

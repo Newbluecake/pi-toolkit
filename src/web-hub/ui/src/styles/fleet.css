@@ -87,11 +87,32 @@
   list-style: none;
 }
 
+/* Nested-level alignment (2026-10-17): a child's status icon (20px box) is centred on the PARENT
+ * row's type badge (16px box). Row geometry: padding --tree-pad, [chev 18px + gap] (only in the
+ * chev tiers: viewport >=481 / container <=599; --tree-chev is 0 otherwise), icon 20px, gap, badge.
+ *   parent badge left  = pad + chev + 20 + gap
+ *   child icon left    = ul-offset + pad + (child level non-flat ? chev : 0)
+ *   ul-offset          = parent badge left - 2 (centre the 20px icon on the 16px badge) - pad - child chev
+ * => non-flat child level: offset = 20 + gap - 2; flat child level (.tree-flat, no chev column):
+ * offset = chev + 20 + gap - 2. The offset is margin-left + 1px border + padding-left; the guide
+ * line sits under the parent's status icon centre for flat levels and under the parent's chevron
+ * centre for non-flat ones (a non-flat level's offset is too small to reach the icon centre). */
+.tree {
+  --tree-pad: var(--sp-2);
+  --tree-gap: var(--sp-2);
+  --tree-chev: 0px;
+}
+
 .tree ul {
   position: relative;
-  margin-left: 10px;
-  padding-left: 8px;
+  margin-left: calc(var(--tree-pad) + 9px);
+  padding-left: calc(20px + var(--tree-gap) - 2px - var(--tree-pad) - 9px - 1px);
   border-left: 1px solid var(--c-border);
+}
+
+.tree ul.tree-flat {
+  margin-left: calc(var(--tree-pad) + var(--tree-chev) + 10px);
+  padding-left: calc(var(--tree-chev) + 20px + var(--tree-gap) - 2px - var(--tree-pad) - var(--tree-chev) - 10px - 1px);
 }
 
 .tree details > summary {
@@ -455,9 +476,8 @@ details[open] > summary.run .chev {
 
 /* ================================================================ tablet 481–1024 (viewport) */
 @media (min-width: 481px) {
-  .tree ul {
-    margin-left: 21px;
-    padding-left: 12px;
+  .tree {
+    --tree-chev: calc(18px + var(--tree-gap));
   }
 
   .run {
@@ -502,6 +522,10 @@ details[open] > summary.run .chev {
  * ——不支持容器查询的旧浏览器优雅退化回上面的 viewport 档(功能仍可用,只是窄 viewport 下的
  * docked/overlay 可能回退到旧的挤压表现)。 */
 @container (max-width: 599px) {
+  .tree {
+    --tree-chev: calc(18px + var(--tree-gap));
+  }
+
   .run {
     grid-template-columns: 18px 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
     grid-template-areas:

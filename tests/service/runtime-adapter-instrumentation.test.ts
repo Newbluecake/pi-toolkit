@@ -124,6 +124,22 @@ describe("runtime-adapter: consult A/B diag instrumentation (P1b)", () => {
     expect(consultFactory).toHaveBeenCalled();
   });
 
+  it("mirrors the display-only consult marker into diag.consultOf (web fleet rows read it, never the label prefix)", async () => {
+    const clock = new FakeClock();
+    const store = new MemoryRunStore();
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, { driver, store });
+    await runner.run(spec({ forkSessionFrom: "/s/expert.jsonl", parentRunId: "r_asker" }));
+    expect(store.get("r1")?.diag.consultOf).toEqual({ askerRunId: "r_asker" });
+    // a plain run never carries the marker
+    await runner.run(spec({}, "r2"));
+    expect(store.get("r2")?.diag.consultOf).toBeUndefined();
+  });
+
   it("records granted:false when the whitelist reached a non-readonly run but the consult tool was withheld (consult disabled)", async () => {
     const clock = new FakeClock();
     const store = new MemoryRunStore();

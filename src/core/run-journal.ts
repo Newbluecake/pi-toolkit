@@ -79,6 +79,7 @@ const JOURNAL_DIAG_FIELDS = [
   "experts",
   "dispatchMeta",
   "schemaPreset",
+  "consultOf",
   "consults",
   "external",
 ] as const satisfies readonly (keyof RunDiagnostics)[];

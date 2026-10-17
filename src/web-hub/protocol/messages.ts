@@ -585,6 +585,10 @@ export interface FleetRowWire {
   costUsd?: number;
   toolTrail?: string;
   streamLine?: string;
+  /** Consult-run marker (append-only, no proto bump): `true` iff the run carries the runtime's
+   *  display-only `diag.consultOf`. Absent ⇔ not a consult run or an old agent (UI falls back to
+   *  the generic phase-only line-2 slot). */
+  consult?: true;
   highlight: "none" | "warn" | "crit";
   terminal: boolean;
 }
@@ -1435,6 +1439,7 @@ const FleetRowSchema = Type.Object({
   costUsd: Type.Optional(Type.Number()),
   toolTrail: Type.Optional(Type.String()),
   streamLine: Type.Optional(Type.String()),
+  consult: Type.Optional(Type.Literal(true)),
   highlight: Type.Union([Type.Literal("none"), Type.Literal("warn"), Type.Literal("crit")]),
   terminal: Type.Boolean(),
 });

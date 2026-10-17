@@ -120,6 +120,16 @@ function badgeOf(row: FleetRowWire): { letter: string; tone: number } | null {
 function phaseOf(row: FleetRowWire): string {
   return String(row.phaseLabel ?? row.status ?? "");
 }
+/** Line-2 slot is always rendered: live activity, else (consult runs only — `row.consult`, never the
+ *  `consult-` label prefix) a short consult note; any other row without activity shows the phase only. */
+function activityOf(row: FleetRowWire): string {
+  const act = fleetActivity(row);
+  if (act !== "" || row.consult !== true) return act;
+  if (row.status === "completed") return t("fleet.consultDone");
+  if (row.status === "failed" || row.status === "timed_out" || row.status === "aborted")
+    return t("fleet.consultIncomplete");
+  return t("fleet.consultRunning");
+}
 function modelShortOf(row: FleetRowWire): string {
   const m = row.model;
   if (typeof m !== "string" || m === "") return "";
@@ -201,8 +211,8 @@ function toggleActions(runId: string): void {
             <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
             <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
           </span>
-          <span v-if="fleetActivity(rowOf(node))" class="run-activity"
-            ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
+          <span class="run-activity"
+            ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node)) }}</span
           >
           <span v-if="modelBlockOf(rowOf(node))" class="run-model">
             <span
@@ -280,8 +290,8 @@ function toggleActions(runId: string): void {
           <b v-else translate="no">{{ nameOf(rowOf(node)) }}</b>
           <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
         </span>
-        <span v-if="fleetActivity(rowOf(node))" class="run-activity"
-          ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ fleetActivity(rowOf(node)) }}</span
+        <span class="run-activity"
+          ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node)) }}</span
         >
         <span v-if="modelBlockOf(rowOf(node))" class="run-model">
           <span

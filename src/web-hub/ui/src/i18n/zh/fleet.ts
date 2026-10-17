@@ -13,6 +13,9 @@ const fleet = {
   totalCost: "共 {n} 个 · {cost}",
   showFinished: "显示已完成的 {n} 个",
   treeLabel: "Agents",
+  consultDone: "咨询已回答",
+  consultIncomplete: "咨询未完成",
+  consultRunning: "咨询中",
 } satisfies Messages<typeof en>;
 
 export default fleet;

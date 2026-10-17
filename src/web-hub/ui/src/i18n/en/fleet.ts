@@ -9,6 +9,9 @@ const fleet = {
   totalCost: "{n} total · {cost}",
   showFinished: "Show {n} Finished Runs",
   treeLabel: "Agents",
+  consultDone: "Consult answered",
+  consultIncomplete: "Consult incomplete",
+  consultRunning: "Consulting",
 } satisfies Record<string, string>;
 
 export default fleet;

@@ -210,6 +210,14 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     expect("thinking" in long[0]!).toBe(false);
   });
 
+  it("projects diag.consultOf as the optional `consult:true` marker; absent stays absent", () => {
+    const c = snap({ diag: diag({ ...snap().diag, consultOf: { askerRunId: "parent-1" } }) });
+    expect(projectFleet([c], 5_000)[0]!.consult).toBe(true);
+    const empty = snap({ diag: diag({ ...snap().diag, consultOf: {} }) });
+    expect(projectFleet([empty], 5_000)[0]!.consult).toBe(true);
+    expect("consult" in projectFleet([snap()], 5_000)[0]!).toBe(false);
+  });
+
   it("per-second jitter (elapsed/phase ages, live tool duration, thinking frame) does not change the fingerprint", () => {
     const thinking = snap({ phase: "model_turn", diag: { ...snap().diag, phase: "model_turn" } });
     const a = fleetFingerprint(projectFleet([snap(), thinking], 5_000));

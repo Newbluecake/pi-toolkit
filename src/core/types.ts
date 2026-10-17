@@ -1184,6 +1184,12 @@ export interface RunDiagnostics {
    */
   schemaPreset?: SchemaPresetId;
   /**
+   * Display-only consult marker mirrored from `RunDisplayMeta.consultOf`
+   * (write-once at enqueue). Present iff this run is a consult run; lets views
+   * badge it without parsing the `consult-` label prefix.
+   */
+  consultOf?: { askerRunId?: RunId };
+  /**
    * consult A/B instrumentation plan (§5 P1a §2): per-run rollup of every
    * `consult` tool call observed via `tool_end`'s `consult` fact (folded by
    * `foldConsultCall`, computed strictly before `toolTrailPatch`'s
