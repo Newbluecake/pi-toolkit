@@ -51,6 +51,12 @@ export interface HubRecord {
    * 标记集清空）。load 只发生在启动时，所以只随首个 write() 落地，无需 patch 方法。
    * 形状定义在 `protocol/privacy.ts`（agent 侧同样要读，不能放 hub/ 里）。 */
   privacy?: PrivacyHubStatus;
+  /** web-hub-proxy plan v2 §5 (X1c): port-proxy summary for `/webhub status`. Written ONLY when
+   * `config.proxy` exists (off ⇒ key absent, hub.json byte-identical). `portsStore` mirrors
+   * `ProxyService.status()` (`broken` ⇒ every open answers 503 `ports-store`); re-synced from
+   * the hub's 5s tick through a full `write()` of the in-memory record. State only — no targets,
+   * hosts or principals (hub.json is read by any same-uid process). */
+  proxy?: { portsStore: "ok" | "broken" };
 }
 
 export interface HubJsonWriter {

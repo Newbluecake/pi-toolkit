@@ -200,6 +200,9 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
   // line decides the level exactly like lan/ui above (`privacy=on` ⇒ info, warnings ⇒ warning).
   const privacyLines = control.privacy.statusLines();
   notifyAll(ctx, privacyLines, privacyLines[0]?.startsWith("privacy=on") ? "info" : "warning");
+  // web-hub-proxy plan v2 §5 (X1c): port-proxy lines (silent when off; `proxy: on …` ⇒ info).
+  const proxyLines = control.proxy?.statusLines() ?? [];
+  notifyAll(ctx, proxyLines, proxyLines[0]?.startsWith("proxy: on") ? "info" : "warning");
 }
 
 async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {

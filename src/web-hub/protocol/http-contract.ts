@@ -125,6 +125,10 @@ export const API_ERRORS = [
   // web-hub spawn-relaunch: the relaunch target's session file is gone/unusable — refusal,
   // record untouched (body carries reason: "session-missing" | "session-invalid").
   "E_SPAWN_GONE", // 410
+  // web-hub-proxy plan v2 §3.8 (X1c): port-proxy refusals (tail-append, append-only). Body carries
+  // reason: `ProxyDenyReason` (+ `ProxyUnavailableExtraReason` for E_PROXY_UNAVAILABLE).
+  "E_PROXY_DENIED", // 400/403 — target grammar / address-class refusal
+  "E_PROXY_UNAVAILABLE", // 409/503 — reverse-proxy mint, ports store, port busy, closing, DNS timeout
 ] as const;
 
 /** LAN SSE `event: auth` payload (revoke / expiry — §4.2). */

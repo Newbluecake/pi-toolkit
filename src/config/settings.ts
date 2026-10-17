@@ -38,12 +38,8 @@ export interface WebHubProxySettings {
   portRange: string;
   maxProxies: number;
 }
-/**
- * The agent-side `WebHubSettings` (owned by `web-hub/agent/index.ts`, outside X0's file domain)
- * widened with the proxy block. X1c folds `proxy?` into the agent interface and drops this
- * intersection — until then every consumer still sees a structurally compatible type.
- */
-export type WebHubSettings = AgentWebHubSettings & { proxy?: WebHubProxySettings };
+/** The agent-side `WebHubSettings` (owned by `web-hub/agent/index.ts`; `proxy?` is folded in there, X1c). */
+export type WebHubSettings = AgentWebHubSettings;
 export type { WebHubLanSettings, WebHubSpawnSettings };
 // web-hub LAN (S1-W3 LI, lan-plan.md §9.1): host-token / origin classification is W1-frozen and
 // shared by every layer that needs to agree on what counts as a valid host — settings validation
@@ -2733,6 +2729,29 @@ export function loadWebHubLanSettingsWarnings(path: string = defaultSettingsPath
     return { invalidExtraHosts, proxyMismatch };
   } catch {
     return empty;
+  }
+}
+
+/**
+ * `webHub.proxy` parse warnings (`port-range-invalid` / `port-range-overlap` / `max-proxies-invalid`)
+ * for `/webhub status` (web-hub-proxy plan v2 §5, X1c) — same read-only, never-migrates, defaults
+ * on any failure contract as {@link loadWebHubLanSettingsWarnings}: `parseWebHubProxyBlock` itself
+ * RETURNS its warnings (so repeated settings parses never spam logs) but `AgentSettings` keeps only
+ * the effective values, so the diagnostic is recomputed from the raw block once per activate.
+ */
+export function loadWebHubProxyWarnings(path: string = defaultSettingsPath()): WebHubProxyWarning[] {
+  try {
+    if (!existsSync(path)) return [];
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    const webHubRaw = (parsed as Record<string, unknown>).webHub;
+    if (webHubRaw === null || typeof webHubRaw !== "object" || Array.isArray(webHubRaw)) return [];
+    const record = webHubRaw as Record<string, unknown>;
+    const resolvedPort = resolveWebHubPort(record);
+    const lanParsed = parseWebHubLanBlock(record.lan, resolvedPort);
+    return parseWebHubProxyBlock(record.proxy, resolvedPort, lanParsed.lan.port).warnings;
+  } catch {
+    return [];
   }
 }
 

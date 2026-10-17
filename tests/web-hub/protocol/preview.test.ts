@@ -119,7 +119,10 @@ describe("protocol/preview — API_ERRORS tail (§4.1: four E_PREVIEW_* after E_
     expect(API_ERRORS[launcher + 9]).toBe("E_AVATAR_UNSUPPORTED");
     // spawn-relaunch: E_SPAWN_GONE (410, relaunch target's session file gone) is the next tail append.
     expect(API_ERRORS[launcher + 10]).toBe("E_SPAWN_GONE");
-    expect(API_ERRORS[launcher + 11]).toBeUndefined(); // nothing sneaks in after them
+    // web-hub-proxy plan v2 §3.8 (X1c): E_PROXY_DENIED / E_PROXY_UNAVAILABLE are the next tail append.
+    expect(API_ERRORS[launcher + 11]).toBe("E_PROXY_DENIED");
+    expect(API_ERRORS[launcher + 12]).toBe("E_PROXY_UNAVAILABLE");
+    expect(API_ERRORS[launcher + 13]).toBeUndefined(); // nothing sneaks in after them
   });
 
   it("contains each preview code exactly once (no reordering, no duplicates)", () => {

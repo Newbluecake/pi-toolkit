@@ -100,6 +100,7 @@ import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
 import { PREVIEW_HTML_CAP_PATH, PV_PREFIX, PVW_PREFIX } from "../protocol/preview-html.js";
 import { VERSION_INFO_PATH, VERSION_LIMITS } from "../protocol/version-info.js";
 import { AVATAR_DELETE_PATH, AVATAR_PATH, AVATAR_STORE_MIN_MS } from "../protocol/avatar.js";
+import { PROXY_LIST_PATH, PROXY_OPEN_PATH, PROXY_STOP_PATH } from "../protocol/proxy.js";
 import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "../protocol/privacy.js";
 import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
@@ -147,6 +148,8 @@ import type {
   PreviewAuthResult,
   PrivacyRouteIo,
   PrivacyRoutes,
+  ProxyRouteIo,
+  ProxyRoutes,
   WorktreeDiffRoutes,
   WorktreeGraphRoutes,
   RegistryView,
@@ -224,6 +227,15 @@ const LAN_SSE_EXPIRY_BATCH_DEADLINE_MS = 20_000;
 // defensively rather than silently truncating it.
 const ABS_EXPIRY_MAX_DELAY_MS = 2_147_483_647;
 
+/** Host part of a Host header / host key without the port; keeps an IPv6 literal's brackets
+ * (`[::1]:7878` ⇒ `[::1]`, `127.0.0.1:7878` ⇒ `127.0.0.1`). */
+function proxyBrowserHost(host: string): string {
+  if (host.startsWith("[")) {
+    const end = host.indexOf("]");
+    return end === -1 ? "" : host.slice(0, end + 1);
+  }
+  return host.split(":")[0] ?? "";
+}
 function toAbortError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason;
   return reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : "web-hub: aborted");
@@ -292,6 +304,7 @@ function statusFor(code: string): number {
       return 401;
     case "E_CSRF":
     case "E_SPAWN_DENIED": // web-hub-spawn arch §8.2: policy/platform refusal, no record created
+    case "E_PROXY_DENIED": // web-hub-proxy §3.8: address-class refusal (the route answers its own 400s explicitly)
       return 403;
     case "E_NOT_FOUND":
       return 404;
@@ -304,6 +317,7 @@ function statusFor(code: string): number {
     case "E_LIMIT": // web-hub-spawn arch §6.5: resource limits exhausted ⇒ 409
       return 409;
     case "E_LAUNCHER": // web-hub-spawn arch §6.5: launcher/persist/reaper/breaker ⇒ 503
+    case "E_PROXY_UNAVAILABLE": // web-hub-proxy §3.8: ports store / busy / closing (409 reverse-proxy is explicit)
       return 503;
     case "E_NOT_IMPLEMENTED":
       return 501;
@@ -1041,6 +1055,10 @@ export interface LanRuntime {
   /** §4.1 (XA): `pwh_lan` candidate cap. Absent/1 ⇒ first-value, byte-identical to pre-XA;
    * `LAN_COOKIE_MAX` only when the frontend's `multiCandidateAuth` option is on. */
   lanCookieMax?: number;
+  /** web-hub-proxy plan §4.3/§3.8 (X1c): the proxy route frontend + the `/api` cross-site gate
+   * (P4). Both absent ⇒ the LAN `/api` matrix is byte-identical to a hub without the feature. */
+  proxy?: ProxyRoutes;
+  crossSiteGate?: boolean;
   routes: RouteSet;
   lanSse: SseHub;
   ui: UiServer;
@@ -1538,6 +1556,10 @@ async function handleLanRequestInner(
 
   res.setHeader("Cache-Control", "no-store");
 
+  // web-hub-proxy plan §4.3 (P4, X1c): armed only when the proxy is wired. After the OPTIONS 404
+  // above (no ACAO either way), before any cookie is read.
+  if (rt.crossSiteGate === true && !apiCrossSiteOk(req, ctx.externalOrigin)) throw new HttpError(403, "E_CSRF");
+
   // web-hub-spawn plan §SP9 (arch §8.2): `/api/headless*` — dispatched before the generic
   // method branches, exactly like the `/api/cmd`/`/api/upload` branches below, and gated on the
   // spawn frontend's own LAN-policy verdict (`publicPayload("lan")` is undefined when
@@ -1562,6 +1584,35 @@ async function handleLanRequestInner(
       sendError,
       HttpError,
     });
+  }
+
+  // web-hub-proxy plan §3.8 (X1c): `/api/proxy*` — dispatched right after headless on the LAN
+  // face too (present only when the proxy is wired, which implies `config.lan` here). The route
+  // owns CSRF/auth/bucket; a trusted-reverse-proxy mint is refused inside it (409
+  // `reverse-proxy`). `false` ⇒ not a proxy route/method ⇒ the original matrix below.
+  if (rt.proxy !== undefined && isProxyApiPath(path)) {
+    const proxyIo: ProxyRouteIo = {
+      listener: "lan",
+      expectedOrigin: ctx.externalOrigin,
+      browserHost: proxyBrowserHost(ctx.hostKey),
+      viaTrustedProxy: ctx.viaTrustedProxy,
+      strictCsrfOk: () => strictCsrfOk(req, ctx.externalOrigin),
+      xPwhOk: () => req.headers["x-pwh"] === "1",
+      resolveIdentity: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, LAN_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) {
+          const code = authFailure.code;
+          return { ok: false, code: code === "E_RATE" || code === "E_DB" ? code : "E_AUTH" };
+        }
+        return { ok: true, id: session.identity };
+      },
+      readJson,
+      sendJson,
+      sendError,
+    };
+    if (await rt.proxy.handle(req, res, method, path, proxyIo)) return;
   }
 
   // sysload plan §7.1/§7.3 (web-hub-load LAN-budget fix): `GET /api/load/top` — dispatched at
@@ -2267,6 +2318,35 @@ function strictCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
   return true;
 }
 
+/**
+ * web-hub-proxy plan v2 §4.3 (P4): the hub `/api` cross-site gate, armed ONLY when the proxy is
+ * wired. A proxied page's origin is same-site with the hub (ports are ignored by schemeful site),
+ * so a `SameSite=Strict` hub cookie IS attached to its requests; this refuses them by metadata:
+ *  - `Sec-Fetch-Site` present and ∉ {`same-origin`, `none`} ⇒ refuse;
+ *  - `Origin` present and its canonical form ≠ the listener origin (`null` included) ⇒ refuse;
+ *  - both absent (old engines, CLI) ⇒ pass.
+ * Runs after the `OPTIONS` short-circuit (OPTIONS keeps its exact 404, no ACAO) and before any
+ * cookie is read. Exported for the T-A1 unit matrix.
+ */
+export function apiCrossSiteOk(req: IncomingMessage, expectedOrigin: string): boolean {
+  const sfs = req.headers["sec-fetch-site"];
+  if (typeof sfs === "string") {
+    const v = sfs.toLowerCase();
+    if (v !== "same-origin" && v !== "none") return false;
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    const parsed = parseOrigin(origin);
+    if (parsed === undefined) return false;
+    if (canonicalOrigin(parsed.scheme, parsed.hostKey) !== expectedOrigin) return false;
+  }
+  return true;
+}
+
+function isProxyApiPath(path: string): boolean {
+  return path === PROXY_OPEN_PATH || path === PROXY_LIST_PATH || path === PROXY_STOP_PATH;
+}
+
 /** web-hub-upload plan §5.2: chunk-endpoint CSRF — identical to `strictCsrfOk` except the
  * Content-Type must be `application/octet-stream` (chunk bodies are raw bytes). Neither
  * octet-stream nor `X-PWH` is CORS-safelisted, so a cross-origin request must preflight, and the
@@ -2700,7 +2780,7 @@ function buildLanStatus(
  * promote it): `multiCandidateAuth` (default off) is the switch the proxy package flips to turn on
  * the multi-candidate duplicate-cookie path of §4.1 (loopback max 8, LAN max 3, conflict ⇒ 401
  * `cookie-conflict`). Off ⇒ first-value, byte-identical to pre-XA. */
-export type FrontendIdentityDeps = FrontendDeps & { multiCandidateAuth?: boolean };
+export type FrontendIdentityDeps = FrontendDeps & { multiCandidateAuth?: boolean; crossSiteGate?: boolean };
 
 export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
   const { config, registry, bus, history, log, now } = deps;
@@ -2710,7 +2790,16 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // direct `revokeHtmlCaps` call is a 1:1, in-place, same-order `authRevoke.emit`. The proxy
   // package attaches its own subscriber through the `subscribeAuthRevoke` extra at the bottom.
   const authRevoke = createAuthRevokeBus(log);
-  const multiCandidateAuth = (deps as FrontendIdentityDeps).multiCandidateAuth === true;
+  // X1c: wiring the proxy routes (`deps.proxy`, present only when `config.proxy` exists) is what
+  // arms BOTH the multi-candidate cookie path (§4.1) and the `/api` cross-site gate (§4.3 P4);
+  // the explicit flags exist for tests that arm one without the routes. Neither armed ⇒ the
+  // frontend is byte-identical to a hub without the feature.
+  const proxyRoutes = deps.proxy;
+  const multiCandidateAuth = (deps as FrontendIdentityDeps).multiCandidateAuth === true || proxyRoutes !== undefined;
+  const crossSiteGate = (deps as FrontendIdentityDeps).crossSiteGate === true || proxyRoutes !== undefined;
+  // Live LAN host allow-list for the proxy listeners (§3.4): `undefined` whenever the LAN listener
+  // is down/closed, so a runtime LAN teardown drops LAN hosts to 421 on the proxy ports.
+  let lanHostSnapshot: () => HostSnapshot | undefined = () => undefined;
   const loopbackCookieMax = multiCandidateAuth ? LOOPBACK_COOKIE_MAX : 1;
   const sse = createSseHub({ now });
   // \u00a76.7.1 (C8): bumped by `bumpLanRevokeGen()` (duck-typed extra below, called from
@@ -2867,6 +2956,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       preview: deps.preview,
       authRevoke,
       lanCookieMax: multiCandidateAuth ? LAN_COOKIE_MAX : 1,
+      ...(proxyRoutes === undefined ? {} : { proxy: proxyRoutes }),
+      ...(crossSiteGate ? { crossSiteGate: true } : {}),
       versionInfo: deps.version,
       avatar: deps.avatar,
       /** web-hub-privacy plan v2.1 (P1): same instance as the loopback listener's (or undefined
@@ -2893,6 +2984,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     };
     const connGuard = createConnGuard();
     let handle: LanListenerHandle | undefined;
+    lanHostSnapshot = () => (lanClosed ? undefined : handle?.current());
     let gen = 0;
     let status: LanStatus = { state: "starting" };
     let lastRecomputeAt = 0;
@@ -3119,6 +3211,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     query: URLSearchParams,
   ): Promise<void> {
     res.setHeader("Cache-Control", "no-store");
+    // web-hub-proxy plan §4.3 (P4, X1c): armed only when the proxy is wired. OPTIONS keeps its
+    // exact legacy 404 (no ACAO) — the gate never answers it. Runs before any cookie is read.
+    if (
+      crossSiteGate &&
+      method !== "OPTIONS" &&
+      !apiCrossSiteOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""))
+    ) {
+      throw new HttpError(403, "E_CSRF");
+    }
     // web-hub-spawn plan §SP9 (arch §8.2): `/api/headless*` routes own their whole pipeline
     // (strict CSRF → auth → policy → body → admit → confirm → re-auth → sync start) through
     // the injected io below — the same helpers the cmd/dialog branch uses, one instance per
@@ -3141,6 +3242,27 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         sendError,
         HttpError,
       });
+    }
+    // web-hub-proxy plan §3.8 (X1c): `/api/proxy*` — after headless, same spot as the LAN branch.
+    // Absent routes ⇒ the original matrix. `handle` returns false for a non-matching method.
+    if (proxyRoutes !== undefined && isProxyApiPath(path)) {
+      const proxyIo: ProxyRouteIo = {
+        listener: "loopback",
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        browserHost: proxyBrowserHost((req.headers.host ?? "").toLowerCase()),
+        viaTrustedProxy: false,
+        strictCsrfOk: () =>
+          strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
+        xPwhOk: () => req.headers["x-pwh"] === "1",
+        resolveIdentity: async () => {
+          const identity = authorizeLoopback(req, res); // answers 401 / cookie-conflict itself
+          return identity === undefined ? { ok: false, code: "E_AUTH" } : { ok: true, id: identity };
+        },
+        readJson,
+        sendJson,
+        sendError,
+      };
+      if (await proxyRoutes.handle(req, res, method, path, proxyIo)) return;
     }
     // sysload P3: auth and CSRF hygiene happen before the shared on-demand scan.
     if (load !== undefined && method === "GET" && path === LOAD_TOP_PATH) {
@@ -3576,6 +3698,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     /** XA §4.2: attach a revocation subscriber (the proxy package's duck-typed hook; returns the
      * unsubscribe). Subscribers run synchronously, in subscription order, exception-isolated. */
     subscribeAuthRevoke: (fn: Parameters<AuthRevokeBus["subscribe"]>[0]) => authRevoke.subscribe(fn),
+    /** web-hub-proxy §3.4 (X1c): the LIVE LAN host allow-list (`undefined` ⇒ LAN down) — read per
+     * request by the proxy listeners, never captured. */
+    lanHostSnapshot: () => lanHostSnapshot(),
     bumpLanRevokeGen: () => {
       lanRevokeGen++;
     },

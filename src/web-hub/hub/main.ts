@@ -26,6 +26,7 @@ import { createHttpFrontend } from "./http.js";
 import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
 import { parseHubSpawnConfig } from "./spawn/config.js";
 import { normalizeHubLoadConfig } from "./load.js";
+import { normalizeHubProxyConfig } from "./proxy/config.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
 
@@ -147,6 +148,27 @@ async function main(): Promise<void> {
       }
     } else {
       config = { ...config, load };
+    }
+  }
+  // web-hub-proxy plan v2 §5 (X1c): config.proxy is one feature gate — a malformed value, or a
+  // range overlapping the hub/LAN port (second line of the port-collision veto), drops the
+  // WHOLE key: no service, routes, caps, /api cross-site gate or disk; the hub keeps running.
+  if (config.proxy !== undefined) {
+    const rawProxy = config.proxy;
+    const normalized = normalizeHubProxyConfig(rawProxy, {
+      hubPort: config.port,
+      ...(config.lan === undefined ? {} : { lanPort: config.lan.port }),
+    });
+    if (!normalized.ok) {
+      const { proxy: _drop, ...rest } = config;
+      config = rest;
+      try {
+        process.stderr.write(`web-hub main: dropping config.proxy: ${normalized.detail}\n`);
+      } catch {
+        /* stderr may be ignored */
+      }
+    } else {
+      config = { ...config, proxy: normalized.proxy };
     }
   }
   startDeps.childUmask = inheritedUmask;

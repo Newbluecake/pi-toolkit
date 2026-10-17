@@ -9,11 +9,18 @@ import {
   deriveBudget,
   FORWARD_MIN_REMAINING_MS,
   LAN_AUTH_CAP_MS,
+  LAN_AUTH_RESERVE_MS,
   REGISTRY_WAIT_GRACE_MS,
   REGISTRY_WAIT_RESERVE_MS,
   WRITE_TOTAL_MS,
 } from "../../../src/web-hub/hub/req-deadline.js";
 import { LAN_REQUEST_TIMEOUT_MS } from "../../../src/web-hub/hub/http.js";
+import {
+  PROXY_CLOSE_DEADLINE_MS,
+  PROXY_DNS_TIMEOUT_MS,
+  PROXY_LISTEN_TIMEOUT_MS,
+} from "../../../src/web-hub/protocol/proxy.js";
+import { PROXY_CLIENT_TIMEOUT_MS } from "../../../src/web-hub/ui/src/logic/contract.js";
 import {
   AVATAR_AUTH_CAP_MS,
   AVATAR_DELETE_MIN_MS,
@@ -133,5 +140,28 @@ describe("web-hub-preview plan v3 §3.1/§6 (PV3): preview budget nesting", () =
       await import("../../../src/web-hub/protocol/preview.js");
     expect(PREVIEW_ADMIT_TOTAL_MS + PREVIEW_STREAM_MS.lan).toBeLessThanOrEqual(PREVIEW_CLIENT_TIMEOUT_MS);
     expect(PREVIEW_VERIFY_MS).toBeLessThanOrEqual(PREVIEW_STREAM_MS.lan);
+  });
+});
+
+describe("web-hub-proxy X1c: POST /api/proxy/open budget nesting (plan §3.4/§3.8)", () => {
+  // routes.ts hands `resolveIdentity` a fresh WRITE_TOTAL_MS ReqDeadline; the service then spends
+  // DNS (2 s gate) + listen (2 s) + the durable ports.json persist (2 s, internal to ports-map)
+  // before it can mint. The whole chain must fit inside the UI client's deadline.
+  const PERSIST_MS = 2_000; // ports-map's write deadline (internal; pinned by ports-map.test.ts)
+
+  it("LAN auth keeps its full cap under the proxy route's WRITE_TOTAL_MS budget (same derivation as /api/cmd)", () => {
+    expect(deriveBudget(WRITE_TOTAL_MS, LAN_AUTH_CAP_MS, LAN_AUTH_RESERVE_MS)).toBe(LAN_AUTH_CAP_MS);
+    // the OLD hazard: an 8 s route budget would have squeezed auth to 1 s
+    expect(deriveBudget(8_000, LAN_AUTH_CAP_MS, LAN_AUTH_RESERVE_MS)).toBeLessThan(LAN_AUTH_CAP_MS);
+  });
+
+  it("auth cap + worst-case service work + the revocation re-resolve fit inside the UI client deadline", () => {
+    const service = PROXY_DNS_TIMEOUT_MS + PROXY_LISTEN_TIMEOUT_MS + PERSIST_MS;
+    expect(LAN_AUTH_CAP_MS + service).toBeLessThanOrEqual(WRITE_TOTAL_MS);
+    expect(WRITE_TOTAL_MS).toBeLessThanOrEqual(PROXY_CLIENT_TIMEOUT_MS);
+  });
+
+  it("the service's own close bound fits the hub's per-step cap", () => {
+    expect(PROXY_CLOSE_DEADLINE_MS).toBeLessThanOrEqual(3_000); // hub.ts STEP_DEADLINE_MS
   });
 });

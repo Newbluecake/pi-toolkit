@@ -57,6 +57,8 @@ import {
   AVATAR_HUB_CAP,
   PRIVACY_HUB_CAP,
   VERSION_HUB_CAP,
+  PROXY_HUB_CAP,
+  PROXY_LAN_HUB_CAP,
 } from "../protocol/version.js";
 import type { HubUiBuildWire } from "../protocol/version-info.js";
 import { createVersionInfoService } from "./version-info.js";
@@ -98,6 +100,9 @@ import type { PreviewDenyContext } from "./preview/admit.js";
 import { createMkdirService } from "./spawn/mkdir.js";
 import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
 import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
+import { proxyErrCode } from "./proxy/audit.js";
+import { createProxyRoutes } from "./proxy/routes.js";
+import { createProxyService } from "./proxy/service.js";
 import { hubLoadProbe, LOAD_HUB_CAP, normalizeHubLoadConfig } from "./load.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createSpawnStore } from "./spawn/store.js";
@@ -122,8 +127,10 @@ import type {
   HubConfig,
   HubInfo,
   HubLog,
+  HostSnapshot,
   LanAssembly,
   LanFrontendDeps,
+  ProxyService,
 } from "./ports.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
@@ -145,6 +152,8 @@ type HttpFrontendExt = HttpFrontend & {
   /** web-hub-proxy §4.2 (XA): attach a synchronous auth-revocation subscriber (the proxy
    * service's hook, wired by a later package only when `config.proxy`); returns the unsubscribe. */
   subscribeAuthRevoke?(fn: (ev: AuthRevokeEvent) => void): () => void;
+  /** web-hub-proxy §3.4 (X1c): the LIVE LAN host allow-list (`undefined` ⇒ LAN down). */
+  lanHostSnapshot?(): HostSnapshot | undefined;
 };
 type LanFacadeExt = NonNullable<HttpFrontend["lan"]> & { revokeAll?(): number };
 
@@ -416,6 +425,11 @@ export async function startHub(
       ...(config.load !== undefined && normalizeHubLoadConfig(config.load) !== undefined && hubLoadProbe()
         ? [LOAD_HUB_CAP]
         : []),
+      // web-hub-proxy plan v2 §5 (X1c): `proxy.v1` iff `config.proxy`; `proxy.lan.v1` iff
+      // `config.proxy && config.lan` (Q2 — LAN reach follows the LAN config, STATIC like
+      // `privacy.v1`: it never follows whether the LAN listener actually came up). Both cap
+      // surfaces share this one array. Tail-appended: proxy off ⇒ caps byte-identical.
+      ...(config.proxy === undefined ? [] : [PROXY_HUB_CAP, ...(config.lan === undefined ? [] : [PROXY_LAN_HUB_CAP])]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;
@@ -462,6 +476,13 @@ export async function startHub(
     // web-hub-version plan §3.7: assigned just before the frontend is built; close() may run
     // earlier (admin close during startup), hence `?.` there.
     let versionService: ReturnType<typeof createVersionInfoService> | undefined = undefined;
+    // web-hub-proxy (X1c): declared with the other early bindings — `close()` is a hoisted
+    // function that can run (admin close during startup) before the assembly point below.
+    // Constructed ONLY when `config.proxy` exists, AFTER `fe.listen()` (it needs the real ports).
+    let proxyService: ProxyService | undefined = undefined;
+    let unsubscribeProxyRevoke: () => void = () => {};
+    const proxyRoutes =
+      config.proxy === undefined ? undefined : createProxyRoutes({ service: () => proxyService, log, now });
     let agentServer: ReturnType<typeof createAgentServer> | undefined = undefined;
     let fe: HttpFrontend = {
       listen: async () => ({ port: 0 }),
@@ -1284,6 +1305,7 @@ export async function startHub(
       ...(previewRoutes === undefined ? {} : { preview: previewRoutes }),
       ...(worktreeDiffRoutes === undefined ? {} : { worktreeDiff: worktreeDiffRoutes }),
       ...(worktreeGraphRoutes === undefined ? {} : { worktreeGraph: worktreeGraphRoutes }),
+      ...(proxyRoutes === undefined ? {} : { proxy: proxyRoutes }),
       ...(lanDeps === undefined ? {} : { lan: lanDeps }),
       // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
       // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
@@ -1518,6 +1540,43 @@ export async function startHub(
     httpPort = (await startupStep(fe.listen({ signal: startup.signal }), () => fe.close())).port; // ⑥
     startup.signal.throwIfAborted();
 
+    // web-hub-proxy plan v2 §3.4/§12 (X1c): the service needs the ACTUAL bound ports (the
+    // loopback listener falls back to a random port on EADDRINUSE), so it is built only now.
+    // Every failure path from here on — and every normal close — awaits `dispose()` (cleanup
+    // entry pushed right after construction; reverse order ⇒ it runs BEFORE `fe.close()`).
+    // A construction failure degrades to "proxy unavailable" (routes answer 503 `closing`), it
+    // never fails the hub; an aborted startup rethrows so the late service is disposed.
+    if (config.proxy !== undefined) {
+      try {
+        const created = await startupStep(
+          createProxyService({
+            config: config.proxy,
+            stateDir: paths.stateDir,
+            hubPort: httpPort,
+            ...(config.lan === undefined ? {} : { lanPort: config.lan.port }),
+            lan: config.lan !== undefined,
+            lanHostSnapshot: () => (fe as HttpFrontendExt).lanHostSnapshot?.(),
+            log,
+            now,
+          }),
+          (late) => late.dispose(),
+        );
+        proxyService = created;
+        cleanup.push(() => created.dispose());
+        // §4.2: the service's revocation hook rides the frontend's bus; unsubscribed on close.
+        const unsubscribe = (fe as HttpFrontendExt).subscribeAuthRevoke?.((ev) => created.revoke(ev));
+        if (unsubscribe !== undefined) {
+          unsubscribeProxyRevoke = unsubscribe;
+          cleanup.push(async () => unsubscribe());
+        }
+      } catch (err) {
+        if (startup.signal.aborted) throw err;
+        // code only — an fs/DNS error message can carry paths (plan §7: never log such text)
+        log.error("web-hub proxy: service construction failed (proxy unavailable)", { code: proxyErrCode(err) });
+      }
+      startup.signal.throwIfAborted();
+    }
+
     // vue-plan.md v2.1 §2.1（P5b）："启动：hub 在写 hub.json 前 await ui.refresh()（≤3s，超时按未构建
     // 上报、后台继续）" — `refresh()` itself is single-flight and bounded by `UI_ROOT_RESOLVE_TIMEOUT_MS`
     // (ui-root.ts), so this can never itself blow the hub's own `HUB_START_DEADLINE_MS` budget. This
@@ -1565,6 +1624,14 @@ export async function startHub(
     // byte-identical to a hub without the feature).
     const initialPrivacy =
       config.privacy === true && privacyStore !== undefined ? { degraded: privacyStore.degraded } : undefined;
+    // web-hub-proxy (X1c): `/webhub status` reads the ports-store state from hub.json. Key absent
+    // when the proxy is off (hub.json byte-identical); `unavailable` construction ⇒ no key either.
+    const proxyStatusOf = (): HubRecord["proxy"] | undefined => {
+      const st = proxyService?.status?.();
+      return st === undefined ? undefined : { portsStore: st.portsStore };
+    };
+    let lastProxyPortsStore = proxyStatusOf()?.portsStore;
+    const initialProxy = proxyStatusOf();
     const identity = await startupStep(identityFields());
     // No await separates this gate from hub.json and the running log publication.
     if (closing !== undefined) return await closedResult();
@@ -1582,6 +1649,7 @@ export async function startHub(
       ...(initialLan === undefined ? {} : { lan: initialLan }),
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),
+      ...(initialProxy === undefined ? {} : { proxy: initialProxy }),
       ui: initialUi,
     }); // ⑦
 
@@ -1619,6 +1687,16 @@ export async function startHub(
       // web-hub-spawn plan §SP10: ride the same 5s tick to re-sync hub.json's `spawn` summary
       // (pure in-memory compare; the file is only rewritten when the value actually changed).
       syncSpawnStatus();
+      // web-hub-proxy (X1c): a runtime persist failure latches the ports store `broken`; mirror it
+      // into hub.json (pure in-memory compare, rewritten only on a real change).
+      const proxySt = proxyStatusOf();
+      if (proxySt !== undefined && proxySt.portsStore !== lastProxyPortsStore) {
+        const cur = hubJson.current();
+        if (cur !== undefined) {
+          lastProxyPortsStore = proxySt.portsStore;
+          hubJson.write({ ...cur, proxy: proxySt });
+        }
+      }
     }, REGISTRY_TICK_MS);
     tick.unref();
 
@@ -1673,7 +1751,8 @@ export async function startHub(
     idle = createIdleMonitor({
       counts: () => ({
         agents: Math.max(agentServer?.connectionCount() ?? 0, registry.list().length),
-        sse: fe.clientCount(),
+        // web-hub-proxy §3.4 (X1c): a working proxy tab (open sockets) keeps the hub alive.
+        sse: fe.clientCount() + (proxyService?.activeConnections() ?? 0),
         // web-hub-spawn plan §SP10 (arch §7.8 "idle 自退"): a live managed child keeps the
         // hub alive — the absolute lifetime deadline (§6.5 maxLifetimeMinutes) is the backstop.
         headless: spawnSup?.liveCount() ?? 0,
@@ -1744,6 +1823,11 @@ export async function startHub(
         // stops accepting — same bounded/idempotent contract.
         if (worktreeGraphRoutes !== undefined) await bounded(worktreeGraphRoutes.dispose("close", deadline));
         if (avatarRoutes !== undefined) await bounded(avatarRoutes.dispose("close", deadline));
+        // web-hub-proxy §3.4 (X1c): unsubscribe the revocation hook, then the irreversible
+        // closing fence (destroys every proxied socket, closes the proxy listeners) — BEFORE the
+        // HTTP face stops accepting, bounded, idempotent (shares the startup-failure promise).
+        unsubscribeProxyRevoke();
+        if (proxyService !== undefined) await bounded(proxyService.dispose());
         await bounded(fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files

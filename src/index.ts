@@ -15,6 +15,7 @@ import {
   defaultSettingsPath,
   loadSettingsFromFile,
   loadWebHubLanSettingsWarnings,
+  loadWebHubProxyWarnings,
   persistSettingOverride,
   readSettingsNoMigrate,
   type AgentSettings,
@@ -1034,8 +1035,12 @@ export default function activate(rawPi: ExtensionAPI): void {
   // network and zero disk (asserted by tests/integration/web-hub-disabled).
   if (settings.webHub.enabled) {
     const webHubRef: { current?: WebHubControl } = {};
+    // web-hub-proxy (X1c): raw-block parse warnings for `/webhub status`, captured once at activate
+    // (non-live, like `lanSettingsWarnings` below) and only when the proxy is enabled at all.
+    const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
     webHubRef.current = wireWebHub(pi, {
       settings: settings.webHub,
+      proxyWarnings: () => proxyWarnings,
       fleet: () => holder.current?.query.list() ?? [],
       query: () => holder.current?.query,
       mention: () =>

@@ -22,13 +22,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LoadPort } from "../../sysload/types.js";
-import type { LoadSettings } from "../../config/settings.js";
+import type { LoadSettings, WebHubProxySettings, WebHubProxyWarning } from "../../config/settings.js";
 import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } from "../../core/types.js";
 import { isTerminalStatus } from "../../core/status.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
 import type { HubSpawnConfig } from "../protocol/spawn.js";
 import { PREVIEW_DEFAULT_MODE, type PreviewMode } from "../protocol/preview.js";
+import { PROXY_PORTS_FILE_NAME, PROXY_STATE_DIR_NAME, parseProxyPortRange } from "../protocol/proxy.js";
 import {
   FORWARDED_EVENTS,
   RESUME_FEATURE_V1,
@@ -61,6 +62,7 @@ import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
 import { formatPrivacyStatusLines } from "./privacy-status.js";
+import { formatProxyStatusLines, type ProxyHubStatus } from "./proxy-status.js";
 import { packageUiDistDir } from "../protocol/paths.js";
 import type { UiStatus } from "../hub/ui-root.js";
 import type { PrivacyHubStatus } from "../protocol/privacy.js";
@@ -188,6 +190,11 @@ export interface WebHubSettings {
   /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，
    * `PI_WEBHUB_CONFIG` 与 spawn 合入前深相等（arch §8.2 未启用矩阵）。 */
   spawn?: WebHubSpawnSettings;
+  /** web-hub-proxy plan v2 §5 (X0 declared it on `config/settings.ts`, X1c folds it in here):
+   * `enabled:false` (default) or `control:false` ⇒ `HubConfig.proxy` is never constructed and the
+   * hub stays byte-identical. Non-live (captured at activate; change → /reload, /webhub restart).
+   * LAN reach is NOT a leaf: it follows `lan` (Q2). */
+  proxy?: WebHubProxySettings;
 } // I 在 settings.ts `import type` 并 re-export（D 不改 settings.ts）
 
 export type StopResult =
@@ -216,6 +223,10 @@ export interface WebHubDeps {
   /** D14/§3.1: whether `askUser.enabled` in the host settings — gates `dialog.v1` broadcast
    * alongside `settings.remoteAskUser`. Unset ⇒ treated as enabled (D10 default-on posture). */
   askUserEnabled?: () => boolean;
+  /** web-hub-proxy plan v2 §5 (X1c): `parseWebHubProxyBlock`'s warnings from the raw settings
+   * file (`config/settings.ts`'s `loadWebHubProxyWarnings`, captured once at activate like
+   * `lanSettingsWarnings`). Unset ⇒ none. */
+  proxyWarnings?: () => readonly WebHubProxyWarning[];
   /** P1 fix (#32 C12 review): the same `Set<string>` `wrapCommandApi`'s `registerCommand` proxy
    * writes real toolkit command names into, handed straight through to `createCommandCapture` so
    * `owns()`/`settleArm()` answer from true registration state, not from `arm()` history. */
@@ -329,6 +340,11 @@ export interface WebHubControl {
   };
   /** web-hub-privacy plan v2.1（P3）：隐私锁状态行，同样直接读 `hub.json`（无需 admin socket）。 */
   privacy: {
+    statusLines(): string[];
+  };
+  /** web-hub-proxy plan v2 §5 (X1c): port-proxy status lines. Optional so pre-feature
+   * `WebHubControl` doubles keep compiling; `/webhub status` prints nothing when absent. */
+  proxy?: {
     statusLines(): string[];
   };
 }
@@ -1150,6 +1166,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // web-hub-privacy plan v2.1 (P1): feature-off is key absence (same wire-level pattern as
     // avatar); NOT coupled to `control` (it gates a view plane, not the control plane).
     if (settings.privacy === true) config.privacy = true;
+    // web-hub-proxy plan v2 §5 (X1c): feature-off is key ABSENCE (default off; coupled to
+    // `control`, it is a control-plane feature). The range crosses the wire as the `[lo, hi]`
+    // tuple; an unparsable range (cannot happen after `parseWebHubProxyBlock`, but hand-built
+    // settings objects exist in tests) omits the whole key rather than inventing a default.
+    if (settings.proxy?.enabled === true && settings.control !== false) {
+      const portRange = parseProxyPortRange(settings.proxy.portRange);
+      if (portRange !== undefined) config.proxy = { portRange, maxProxies: settings.proxy.maxProxies };
+    }
     return config;
   };
 
@@ -1412,6 +1436,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lan?: LanStatus;
     ui?: UiStatus;
     privacy?: PrivacyHubStatus;
+    proxy?: ProxyHubStatus;
   }
 
   const readHubJsonRecord = (): HubJsonSnapshot | undefined => {
@@ -1429,6 +1454,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (isStructurallyUiStatus(parsed.ui)) rec.ui = parsed.ui as UiStatus;
       // privacy (plan v2.1 P3): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyPrivacyStatus(parsed.privacy)) rec.privacy = parsed.privacy;
+      // proxy (plan v2 §5 X1c): same structural-only treatment — malformed ⇒ absent.
+      if (isStructurallyProxyStatus(parsed.proxy)) rec.proxy = parsed.proxy;
       return rec;
     } catch {
       return undefined;
@@ -1452,6 +1479,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       );
     }
     return false;
+  }
+
+  /** proxy 字段的同型结构校验（web-hub-proxy X1c）——只查 `formatProxyStatusLines` 会读的字段。 */
+  function isStructurallyProxyStatus(v: unknown): v is ProxyHubStatus {
+    if (v === null || typeof v !== "object") return false;
+    const o = v as Record<string, unknown>;
+    return o.portsStore === "ok" || o.portsStore === "broken";
   }
 
   /** privacy 字段的同型结构校验（plan v2.1 P3）——只查 `formatPrivacyStatusLines` 会读的字段。 */
@@ -1489,6 +1523,19 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     return formatPrivacyStatusLines(rec?.privacy, {
       settingsEnabled: settings.privacy === true,
       hasHubRecord: rec !== undefined,
+    });
+  };
+
+  /** web-hub-proxy plan v2 §5 (X1c): port-proxy status lines, straight off `hub.json`. */
+  const proxyStatusLines = (): string[] => {
+    const rec = readHubJsonRecord();
+    return formatProxyStatusLines(rec?.proxy, {
+      settings: settings.proxy,
+      lan: settings.lan?.enabled === true,
+      control: settings.control !== false,
+      warnings: deps.proxyWarnings?.() ?? [],
+      hasHubRecord: rec !== undefined,
+      portsFile: join(paths.stateDir, PROXY_STATE_DIR_NAME, PROXY_PORTS_FILE_NAME),
     });
   };
 
@@ -1646,6 +1693,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     privacy: {
       statusLines: privacyStatusLines,
+    },
+    proxy: {
+      statusLines: proxyStatusLines,
     },
   };
 }
