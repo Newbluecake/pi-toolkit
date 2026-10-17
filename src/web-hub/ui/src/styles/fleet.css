@@ -124,8 +124,14 @@
  * gives way first (provider, then model); time/cost are never truncated. Base grid has no chev
  * column — the expand chevron of a summary row is inline after the name. */
 .run {
+  /* 2026-10-17 「模型名称不是靠右对齐的吗」: time (line 1) and cost (line 2) share the last column;
+   * an `auto` track sized to each row's own content (19m44s vs 2m, $0.4785 vs $1.57) made every
+   * row's model block end at a different x. A shared floor wide enough for the common cases
+   * (`59m59s`, `$0.4785`, `$12.34`) keeps the column — and so the model block's right edge —
+   * identical across rows; longer values still grow the track rather than truncate. */
+  --run-num-w: 4.75em;
   display: grid;
-  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto;
+  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) minmax(var(--run-num-w), auto);
   grid-template-areas:
     "icon badge name model time"
     ". activity activity activity cost";
@@ -322,6 +328,7 @@ details[open] > summary.run .chev {
 
 .run-model {
   grid-area: model;
+  justify-self: end;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -514,7 +521,7 @@ details[open] > summary.run .chev {
  * handled by the shrink rules above. */
 @container (max-width: 479px) {
   .run {
-    grid-template-columns: 20px 16px minmax(0, 1fr) auto;
+    grid-template-columns: 20px 16px minmax(0, 1fr) minmax(var(--run-num-w), auto);
     grid-template-areas:
       "icon badge name time"
       ". . model cost"
@@ -523,6 +530,10 @@ details[open] > summary.run .chev {
 
   .run-name .chip {
     max-width: 72px;
+  }
+
+  .run-model {
+    justify-self: start;
   }
 
   .run-model .model-provider {
