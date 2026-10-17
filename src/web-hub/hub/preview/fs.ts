@@ -70,6 +70,13 @@ export const PREVIEW_READ_FLAGS =
   fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOCTTY ?? 0);
 
 /**
+ * web-hub-html-preview plan v2 §2.1-6 (P1a): `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` — the held
+ * directory fd of an HTML capability (`WTDIFF_DIR_OPEN_FLAGS` / `HISTORY_DIR_OPEN_FLAGS`
+ * precedent). Lives here because `fs.ts` is the only preview module allowed `node:fs*`.
+ */
+export const PV_DIR_OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+
+/**
  * §4.5.3: the single-flight hash task re-opens the file through its own fd — `/proc/self/fd/N`
  * is a *magic* symlink the kernel resolves to a fresh, fully independent open file description,
  * so `O_NOFOLLOW` must NOT be set here (it would ELOOP on the procfs symlink). Plain `O_RDONLY`

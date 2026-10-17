@@ -949,3 +949,156 @@ describe("stream: chunked text", () => {
     expect(headIdx).toBeGreaterThan(verifyIdx);
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-html-preview plan v2 T-H4 (P1a): `streamRawBody` extraction + the pv flow
+// ---------------------------------------------------------------------------
+
+describe("stream: streamRawBody extraction (download byte-identical) + pv flow", () => {
+  const PV_HEADERS = {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+  };
+
+  function pvSrc(
+    fh: PreviewHandle,
+    size: number,
+    over: { beforeHead?: () => boolean; io?: import("../../../../src/web-hub/hub/preview/stream.js").PvStreamIo } = {},
+  ) {
+    const calls = { run: 0, close: 0 };
+    const io = over.io ?? {
+      run: <T>(op: () => Promise<T>) => (calls.run++, op()),
+      close: (op: () => Promise<void>) => (calls.close++, op().catch(() => undefined)),
+    };
+    return {
+      calls,
+      src: {
+        fh,
+        size,
+        sniff: { kind: "binary" as const },
+        sample: Buffer.alloc(0),
+        pv: { headers: { ...PV_HEADERS }, beforeHead: over.beforeHead ?? (() => true), io },
+      },
+    };
+  }
+
+  it("download headers are byte-identical, exact key order and values", async () => {
+    const content = Buffer.alloc(10, 1);
+    const sink = new FakeSink();
+    const out = await readAndStream(
+      {
+        fh: new FakeHandle(content),
+        size: 10,
+        sniff: { kind: "binary" as const },
+        sample: Buffer.alloc(0),
+        download: { filename: "报告 (1).zip" },
+      },
+      sink,
+      opts(),
+    );
+    expect(out).toEqual({ ok: true, bytes: 10, truncated: false });
+    expect(Object.entries(sink.head!.headers)).toEqual([
+      ["Content-Type", "application/octet-stream"],
+      ["Content-Length", "10"],
+      [PREVIEW_HDR.kind, "download"],
+      [PREVIEW_HDR.size, "10"],
+      [
+        "Content-Disposition",
+        "attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A%20%2528%2531%2529.zip".replace("%2528%2531%2529", "%281%29"),
+      ],
+      ["X-Content-Type-Options", "nosniff"],
+      ["Cross-Origin-Resource-Policy", "same-origin"],
+    ]);
+  });
+
+  it("pv: streams byte-exact under the caller headers, Content-Length forced, no preview metadata", async () => {
+    const content = Buffer.alloc(200 * KIB + 7, 0x41);
+    const sink = new FakeSink();
+    const { src, calls } = pvSrc(new FakeHandle(content), content.length);
+    const out = await readAndStream(src, sink, opts());
+    expect(out).toEqual({ ok: true, bytes: content.length, truncated: false });
+    expect(sink.head?.status).toBe(200);
+    expect(sink.head?.headers).toEqual({ ...PV_HEADERS, "Content-Length": String(content.length) });
+    expect(Object.keys(sink.head!.headers).some((k) => k.startsWith("X-PWH-Preview"))).toBe(false);
+    expect(sink.body().equals(content)).toBe(true);
+    expect(sink.ended).toBe(true);
+    expect(calls.run).toBeGreaterThan(3); // pre-stat + reads + post-stat all via the gate
+    expect(calls.close).toBe(1);
+  });
+
+  it("pv: beforeHead() false ⇒ not-live, nothing written, handle still closed via io.close", async () => {
+    const fh = new FakeHandle(Buffer.from("abc"));
+    const sink = new FakeSink();
+    const { src, calls } = pvSrc(fh, 3, { beforeHead: () => false });
+    const out = await readAndStream(src, sink, opts());
+    expect(out).toEqual({ ok: false, reason: "not-live", headersSent: false });
+    expect(sink.head).toBeUndefined();
+    expect(sink.destroyed).toBe(false);
+    expect(fh.closeCount).toBe(1);
+    expect(calls.close).toBe(1);
+  });
+
+  it("pv: beforeHead is evaluated synchronously right before writeHead (flip after pre-stat is seen)", async () => {
+    let live = true;
+    const fh = new FakeHandle(Buffer.from("abc"));
+    const origStat = fh.stat.bind(fh);
+    fh.stat = async () => {
+      const s = await origStat();
+      live = false; // revoked while the pre-stat was in flight
+      return s;
+    };
+    const sink = new FakeSink();
+    const { src } = pvSrc(fh, 3, { beforeHead: () => live });
+    expect(await readAndStream(src, sink, opts())).toMatchObject({ ok: false, reason: "not-live", headersSent: false });
+    expect(sink.head).toBeUndefined();
+  });
+
+  it("pv: revoke mid-stream (signal abort) destroys the response, body short of Content-Length", async () => {
+    const content = Buffer.alloc(512 * KIB, 0x42);
+    const ctl = new AbortController();
+    class AbortingHandle extends FakeHandle {
+      read(buf: Buffer, off: number, len: number, pos: number) {
+        if (this.readCalls === 2) ctl.abort("pv-revoked");
+        return super.read(buf, off, len, pos);
+      }
+    }
+    const sink = new FakeSink();
+    const { src } = pvSrc(new AbortingHandle(content), content.length);
+    const out = await readAndStream(src, sink, opts({ signal: ctl.signal }));
+    expect(out).toMatchObject({ ok: false, reason: "client-abort", headersSent: true });
+    expect(sink.destroyed).toBe(true);
+    expect(sink.bytes).toBeLessThan(content.length);
+  });
+
+  it("pv: a file that changes while streaming ⇒ identity-changed destroy", async () => {
+    const content = Buffer.alloc(300 * KIB, 0x43);
+    const fh = new FakeHandle(content);
+    let n = 0;
+    const origStat = fh.stat.bind(fh);
+    fh.stat = async () => {
+      const s = await origStat();
+      n += 1;
+      return n >= 2 ? { ...s, ctimeMs: s.ctimeMs + 5 } : s;
+    };
+    const sink = new FakeSink();
+    const { src } = pvSrc(fh, content.length);
+    expect(await readAndStream(src, sink, opts())).toMatchObject({ ok: false, reason: "identity-changed" });
+    expect(sink.destroyed).toBe(true);
+  });
+
+  it("pv: an io gate that rejects busy fails pre-head (headers never sent)", async () => {
+    const fh = new FakeHandle(Buffer.from("abc"));
+    const sink = new FakeSink();
+    const { src } = pvSrc(fh, 3, {
+      io: {
+        run: () => Promise.reject(Object.assign(new Error("busy"), { name: "PreviewIoError", ioFail: "busy" })),
+        close: (op) => op(),
+      },
+    });
+    const out = await readAndStream(src, sink, opts());
+    expect(out.ok).toBe(false);
+    expect(sink.head).toBeUndefined();
+  });
+});

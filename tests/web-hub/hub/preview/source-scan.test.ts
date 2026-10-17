@@ -40,6 +40,13 @@ const KERNEL_FILES = [
   "tilde.ts",
   // chunked-plan §3.1: the identity-token derivation (pure, node:crypto only — no fs)
   "ident.ts",
+  // web-hub-html-preview plan v2 §6 P1a: the HTML-preview hub pure layer — same rules (no
+  // node:fs*, no readFile(); fs ops arrive through the injected PreviewFs / PV IO gate)
+  "pv-path.ts",
+  "pv-mime.ts",
+  "pv-io.ts",
+  "html-cap.ts",
+  "pv-admit.ts",
 ] as const;
 
 /** dir-plan §2.4 rule 2's whitelist: files outside tests/ allowed to reference NO_TRACKER

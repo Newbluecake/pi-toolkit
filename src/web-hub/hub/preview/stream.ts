@@ -35,7 +35,7 @@
 import { createHash } from "node:crypto";
 import { PREVIEW_HDR, PREVIEW_VERIFY_MS } from "../../protocol/preview.js";
 import { acceptsGzip, GZIP_MIN_BYTES, gzipAsync } from "../gzip.js";
-import { isPreviewIoError, racePreviewIo } from "./fs.js";
+import { isPreviewIoError, PreviewIoError, racePreviewIo } from "./fs.js";
 import type { PreviewIoTracker } from "./fs.js";
 import { previewIdentOf } from "./ident.js";
 import type { PreviewHandle } from "./admit.js";
@@ -69,7 +69,10 @@ export type StreamFailReason =
   /** chunked-plan §3.2 (r2 #4): the chunked branch's OWN pre-race tracker check tripping —
    * the ONLY source of this reason (`racePreviewIo` never produces it; `classify` has no
    * branch for it), mapped 503 `E_BUSY` + `Retry-After: 1` by the routes. */
-  | "busy";
+  | "busy"
+  /** web-hub-html-preview plan v2 §2.3-⑦: `pv.beforeHead()` said the capability is no longer
+   *  live — pre-head only (nothing written), mapped 404 by the `/pv` route. */
+  | "not-live";
 
 export type StreamOutcome =
   | { ok: true; bytes: number; truncated: boolean; verify?: "hashed" | "cached" | "joined" }
@@ -77,6 +80,17 @@ export type StreamOutcome =
 
 /** §3.1 ⑨ read size; the sniff sample (≤64 KiB) is reused as the first streamed chunk. */
 const STREAM_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * web-hub-html-preview plan v2 §2.5/§2.3-⑦ (P1a): the `/pv` flow's IO seam. Structural so this
+ * module never imports `pv-io.ts` — `PvIoGate` satisfies it. Every `fh.stat`/`fh.read` of a pv
+ * response runs through `run` (the 2-slot physical quota, slot held until the op really
+ * settles) and the final handle close through `close` (bounded, never rejects).
+ */
+export interface PvStreamIo {
+  run<T>(op: () => Promise<T>, o: { deadlineAt: number; signal?: AbortSignal | undefined }): Promise<T>;
+  close(op: () => Promise<void>): Promise<void>;
+}
 
 interface StreamSrc {
   fh: PreviewHandle;
@@ -98,6 +112,12 @@ interface StreamSrc {
    *  `ident` the echo to prove the file is the one the client started from (absent on the
    *  first chunk), `ceiling` the hub hard cap (the read length never crosses it). */
   chunk?: { offset: number; ident?: string; ceiling: number };
+  /** web-hub-html-preview plan v2 §2.3-⑦: present ⇒ the PV flow — raw bytes under the
+   *  caller-built `headers` (the response header table of §3.1; `Content-Length` is forced to
+   *  `size`), `beforeHead()` evaluated synchronously right before `writeHead` (false ⇒
+   *  `not-live`, pre-head), every fs op through `io`. No sniff/kind gate; `sample` is ignored
+   *  and `verify` must be absent. */
+  pv?: { headers: Record<string, string>; beforeHead(): boolean; io: PvStreamIo };
 }
 
 interface StreamOpts {
@@ -133,6 +153,9 @@ interface FlowCtx {
   fail(reason: StreamFailReason): StreamOutcome;
   classify(err: unknown): StreamFailReason;
   race<T>(p: Promise<T>): Promise<T>;
+  /** an fs op started lazily: plain flows = `race(lazy())` (byte-identical to before); the pv
+   *  flow routes it through the PV IO gate. */
+  step<T>(lazy: () => Promise<T>): Promise<T>;
   writeChunk(chunk: Buffer): Promise<void>;
 }
 
@@ -176,10 +199,18 @@ export function readAndStream(src: StreamSrc, sink: PreviewSink, opts: StreamOpt
   const writeChunk = async (chunk: Buffer): Promise<void> => {
     if (!sink.write(chunk)) await race(sink.waitDrain(opts.signal));
   };
-  const ctx: FlowCtx = { src, sink, opts, deadlineAt, state, fail, classify, race, writeChunk };
+  const pvIo = src.pv?.io;
+  const step = <T>(lazy: () => Promise<T>): Promise<T> => {
+    if (pvIo === undefined) return race(lazy());
+    // pv: an aborted request (revoke / client gone) never starts another fs op
+    if (opts.signal.aborted) return Promise.reject(new PreviewIoError("abort", "signal aborted before pv fs step"));
+    return pvIo.run(lazy, { deadlineAt, signal: opts.signal });
+  };
+  const ctx: FlowCtx = { src, sink, opts, deadlineAt, state, fail, classify, race, step, writeChunk };
 
   return (async (): Promise<StreamOutcome> => {
     try {
+      if (src.pv !== undefined) return await streamPv(ctx);
       if (src.download !== undefined) return await streamDownload(ctx);
       if (src.sniff.kind === "image") return await streamImage(ctx);
       if (src.chunk !== undefined) return await streamChunkedText(ctx);
@@ -188,7 +219,8 @@ export function readAndStream(src: StreamSrc, sink: PreviewSink, opts: StreamOpt
       return fail(classify(err));
     } finally {
       // §3.1 ⑩: this function owns the handle — closed on success, failure and abort alike
-      await src.fh.close().catch(() => undefined);
+      if (pvIo !== undefined) await pvIo.close(() => src.fh.close());
+      else await src.fh.close().catch(() => undefined);
     }
   })();
 }
@@ -212,12 +244,9 @@ function encodeFilenameStar(name: string): string {
 }
 
 async function streamDownload(ctx: FlowCtx): Promise<StreamOutcome> {
-  const { src, sink, opts, state, fail, race, writeChunk } = ctx;
-  if (src.download === undefined) return fail("io"); // unreachable — dispatch guard
-
-  const pre = await race(src.fh.stat());
-
-  const headers: Record<string, string> = {
+  const { src } = ctx;
+  if (src.download === undefined) return ctx.fail("io"); // unreachable — dispatch guard
+  return streamRawBody(ctx, {
     "Content-Type": "application/octet-stream",
     "Content-Length": String(src.size),
     [PREVIEW_HDR.kind]: "download",
@@ -225,7 +254,30 @@ async function streamDownload(ctx: FlowCtx): Promise<StreamOutcome> {
     "Content-Disposition": `attachment; filename*=UTF-8''${encodeFilenameStar(src.download.filename)}`,
     "X-Content-Type-Options": "nosniff",
     "Cross-Origin-Resource-Policy": "same-origin",
-  };
+  });
+}
+
+/** web-hub-html-preview plan v2 §2.3-⑦: the `/pv` flow — the raw-body kernel under the
+ *  caller's header table (`Content-Length` forced to the admitted size). */
+async function streamPv(ctx: FlowCtx): Promise<StreamOutcome> {
+  const { src } = ctx;
+  if (src.pv === undefined) return ctx.fail("io"); // unreachable — dispatch guard
+  return streamRawBody(ctx, { ...src.pv.headers, "Content-Length": String(src.size) });
+}
+
+/**
+ * The raw-bytes kernel shared by the download flow and the pv flow (extracted from
+ * `streamDownload`, plan v2 §6 P1a): pre-stat → (pv only: `beforeHead()` gate) → head with the
+ * given `headers` → held-back-last-chunk read loop (+ streaming sha256 when `src.verify`) →
+ * post-stat identity/hash checks → last chunk → end. Download behaviour is byte-identical.
+ */
+async function streamRawBody(ctx: FlowCtx, headers: Record<string, string>): Promise<StreamOutcome> {
+  const { src, sink, opts, state, fail, step, race, writeChunk } = ctx;
+
+  const pre = await step(() => src.fh.stat());
+
+  // §2.3-⑦: revoked/expired between admission and the head ⇒ nothing is written
+  if (src.pv !== undefined && !src.pv.beforeHead()) return fail("not-live");
   sink.writeHead(200, headers);
   state.headSent = true;
 
@@ -242,7 +294,7 @@ async function streamDownload(ctx: FlowCtx): Promise<StreamOutcome> {
   const chunk = Buffer.allocUnsafe(STREAM_CHUNK_BYTES);
   while (pos < src.size) {
     const want = Math.min(chunk.length, src.size - pos);
-    const { bytesRead } = await race(src.fh.read(chunk, 0, want, pos));
+    const { bytesRead } = await step(() => src.fh.read(chunk, 0, want, pos));
     if (bytesRead === 0) return fail("shrunk"); // EOF before `size` bytes — file shrank
     if (pending !== undefined) await writeChunk(pending); // more data existed ⇒ pending was not final
     const fresh = chunk.subarray(0, bytesRead);
@@ -251,7 +303,7 @@ async function streamDownload(ctx: FlowCtx): Promise<StreamOutcome> {
     pos += bytesRead;
   }
 
-  const post = await race(src.fh.stat());
+  const post = await step(() => src.fh.stat());
   if (hasher !== undefined && src.verify !== undefined && hasher.digest("hex") !== src.verify.sha256) {
     return fail("hash-mismatch"); // destroy: body ends short of Content-Length
   }
