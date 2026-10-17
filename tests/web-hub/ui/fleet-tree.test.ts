@@ -145,21 +145,20 @@ describe("FleetTree.vue(承接 FleetPanel/FleetNode 的树行为)", () => {
     expect(wrapper.find(".run-more").exists()).toBe(false);
   });
 
-  it("a level with no expandable row renders flat (no chevron column); one branch keeps it for all siblings", () => {
-    const flatTree = mount(FleetTree, {
-      props: { nodes: buildFleetTree([row({ runId: "a" }), row({ runId: "b" })]), now: 0 },
-    });
-    expect(flatTree.get("ul.tree").classes()).toContain("tree-flat");
-
-    const branchy = mount(FleetTree, {
+  it("no chevron column: the chevron is an inline aria-hidden icon after the name, only on summary rows", () => {
+    const wrapper = mount(FleetTree, {
       props: {
         nodes: buildFleetTree([row({ runId: "p" }), row({ runId: "leaf" }), row({ runId: "kid", parentRunId: "p" })]),
         now: 0,
       },
     });
-    const levels = branchy.findAll("ul.tree");
-    expect(levels[0]!.classes()).not.toContain("tree-flat"); // p has a child ⇒ siblings keep the column
-    expect(levels[1]!.classes()).toContain("tree-flat"); // the nested level holds only a leaf
+    expect(wrapper.find("ul.tree-flat").exists()).toBe(false);
+    const sum = wrapper.get("summary.run");
+    const chev = sum.get(".run-name .chev");
+    expect(chev.attributes("aria-hidden")).toBe("true");
+    expect(sum.element.children[0]!.classList.contains("chev")).toBe(false); // not a leading grid cell
+    // leaf rows (div.run) have no chevron placeholder at all
+    expect(wrapper.findAll("div.run .chev").length).toBe(0);
   });
 
   it("ticks elapsed time locally for non-terminal rows between frames, freezes terminal rows", async () => {
@@ -390,6 +389,22 @@ describe("FleetTree.vue — FleetActions 接缝(control-plan §7.4,承接自 Fle
     const noCtx = mountTree([row({ runId: "r_live", terminal: false })]);
     expect(noCtx.find(".run-actions-toggle").exists()).toBe(false);
   });
+
+  it("终态行(和无 ctx 行)渲染同宽占位:aria-hidden、不可聚焦、非按钮 ⇒ time/cost 列对齐", () => {
+    const wrapper = mountTree(
+      [row({ runId: "r_live", terminal: false }), row({ runId: "r_done", terminal: true, status: "completed" })],
+      {},
+      { [CONTROL_CTX as symbol]: { agentKey: "agent-a", control: NOOP_CONTROL, enabled: true } },
+    );
+    const runs = wrapper.findAll(".run");
+    expect(runs.length).toBe(2);
+    expect(runs[0]!.find(".run-actions-slot").exists()).toBe(false);
+    const slot = runs[1]!.get(".run-actions-slot");
+    expect(slot.element.tagName).toBe("SPAN");
+    expect(slot.attributes("aria-hidden")).toBe("true");
+    expect(slot.attributes("tabindex")).toBeUndefined();
+    expect(slot.text()).toBe("");
+  });
 });
 
 describe("fleet/summary.ts 纯函数", () => {
@@ -482,12 +497,27 @@ describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场
     expect(rule(".run-model")).toMatch(/min-width:\s*0/);
   });
 
+  it("no chev column in any template; toggle track is the fixed --run-toggle-w everywhere", () => {
+    expect(css).not.toMatch(/"chev /);
+    expect(css).not.toMatch(/--tree-chev|tree-flat/);
+    expect(css).toMatch(/\.run-actions-toggle,\s*\.run-actions-slot\s*\{[^}]*width:\s*var\(--run-toggle-w\)/);
+    const tracks = [...css.matchAll(/grid-template-columns:\s*([^;]+);/g)].map((x) => x[1]!);
+    const runTracks = tracks.filter((t) => t.includes("--run-toggle-w") || /\bauto auto$/.test(t));
+    expect(runTracks.length).toBe(2); // base + <480px container
+    for (const t of runTracks) expect(t).toMatch(/var\(--run-toggle-w\)$/);
+  });
+
+  it("inline chevron after the name rotates open (same transition as before)", () => {
+    expect(rule(".run .chev")).toMatch(/transition:\s*transform var\(--dur-base\) var\(--ease-out\)/);
+    expect(css).toMatch(/details\[open\] > summary\.run \.chev\s*\{[^}]*rotate\(90deg\)/);
+  });
+
   it("容器 <480px 时 model+cost 挪到第二行,activity 第三行(真实抽屉全在 360–559px)", () => {
     const m = /@container\s*\(max-width:\s*479px\)\s*\{([\s\S]*)\}\s*$/.exec(css);
     expect(m).not.toBeNull();
     const block = m![1]!;
     expect(block).toMatch(
-      /grid-template-areas:[^;]*"chev icon badge name time toggle"[^;]*"\. \. \. model cost \."[^;]*"\. \. \. activity activity \."/,
+      /grid-template-areas:[^;]*"icon badge name time toggle"[^;]*"\. \. model cost \."[^;]*"\. \. activity activity \."/,
     );
     // 旧的 <360px 阈值覆盖不到 docked/overlay/手机全屏抽屉,不得回退
     expect(css).not.toMatch(/@container\s*\(max-width:\s*359px\)/);

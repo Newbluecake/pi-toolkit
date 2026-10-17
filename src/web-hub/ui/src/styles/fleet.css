@@ -87,32 +87,27 @@
   list-style: none;
 }
 
-/* Nested-level alignment (2026-10-17): a child's status icon (20px box) is centred on the PARENT
- * row's type badge (16px box). Row geometry: padding --tree-pad, [chev 18px + gap] (only in the
- * chev tiers: viewport >=481 / container <=599; --tree-chev is 0 otherwise), icon 20px, gap, badge.
- *   parent badge left  = pad + chev + 20 + gap
- *   child icon left    = ul-offset + pad + (child level non-flat ? chev : 0)
- *   ul-offset          = parent badge left - 2 (centre the 20px icon on the 16px badge) - pad - child chev
- * => non-flat child level: offset = 20 + gap - 2; flat child level (.tree-flat, no chev column):
- * offset = chev + 20 + gap - 2. The offset is margin-left + 1px border + padding-left; the guide
- * line sits under the parent's status icon centre for flat levels and under the parent's chevron
- * centre for non-flat ones (a non-flat level's offset is too small to reach the icon centre). */
+/* Nested-level alignment (2026-10-17, no chevron column): a child's status icon (20px box) is
+ * centred on the PARENT row's type badge (16px box). Row geometry is identical at every tier, flat
+ * or not: padding-left --tree-pad, icon 20px, gap, badge 16px.
+ *   parent badge left  = pad + 20 + gap            (badge centre = that + 8)
+ *   child icon left    = ul-offset + pad           (icon centre = that + 10)
+ *   => ul-offset = 20 + gap - 2 = gap + 18  (margin-left + 1px border + padding-left)
+ * The guide line (the border) sits at margin-left = pad + 9 => x-centre pad + 9.5, i.e. under the
+ * parent's status icon centre (pad + 10) within half a pixel. --tree-pad is 3px, not the row's old
+ * 8px: it puts a top-level status glyph (13px, centred in the 20px box ⇒ left = 8 + pad + 3.5 = 14.5)
+ * at the same x as the bash rows' 16px glyphs below (styles/bash-jobs.css: tree-scroll 8 + list 6 -
+ * row margin 6 + row padding 6 = 14): left edges 0.5px apart, centres 1px apart. */
 .tree {
-  --tree-pad: var(--sp-2);
+  --tree-pad: 3px;
   --tree-gap: var(--sp-2);
-  --tree-chev: 0px;
 }
 
 .tree ul {
   position: relative;
   margin-left: calc(var(--tree-pad) + 9px);
-  padding-left: calc(20px + var(--tree-gap) - 2px - var(--tree-pad) - 9px - 1px);
+  padding-left: calc(18px + var(--tree-gap) - var(--tree-pad) - 9px - 1px);
   border-left: 1px solid var(--c-border);
-}
-
-.tree ul.tree-flat {
-  margin-left: calc(var(--tree-pad) + var(--tree-chev) + 10px);
-  padding-left: calc(var(--tree-chev) + 20px + var(--tree-gap) - 2px - var(--tree-pad) - var(--tree-chev) - 10px - 1px);
 }
 
 .tree details > summary {
@@ -123,14 +118,16 @@
   display: none;
 }
 
-/* "variant C" row (2026-10-17 user pick). Line 1: [chev] icon · type badge · name · model block ·
- * elapsed · toggle. Line 2: activity (spans badge..model) · cost under the time column. The name
+/* "variant C" row (2026-10-17 user pick). Line 1: icon · type badge · name [chev] · model block ·
+ * elapsed · toggle (fixed-width column; terminal rows render an empty placeholder so time/cost
+ * align across every row). Line 2: activity (spans badge..model) · cost under the time column. The name
  * column has a floor so it is the LAST thing to truncate; the model block (`minmax(0,auto)`)
  * gives way first (provider, then model); time/cost are never truncated. Base grid has no chev
- * column; the chev tiers below add it. */
+ * column — the expand chevron of a summary row is inline after the name. */
 .run {
+  --run-toggle-w: 32px;
   display: grid;
-  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
+  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto var(--run-toggle-w);
   grid-template-areas:
     "icon badge name model time toggle"
     ". activity activity activity cost .";
@@ -138,7 +135,7 @@
   column-gap: var(--sp-2);
   row-gap: 1px;
   min-height: 44px;
-  padding: 6px var(--sp-2);
+  padding: 6px var(--sp-2) 6px var(--tree-pad);
   border-radius: var(--r-sm);
   font-size: var(--fs-sm);
 }
@@ -151,11 +148,18 @@ summary.run {
   background: var(--c-surface-2);
 }
 
+/* Decorative inline chevron right after the name (summary rows only; aria-hidden). */
 .run .chev {
-  grid-area: chev;
-  display: none;
+  flex: none;
+  width: 12px;
+  height: 12px;
   color: var(--c-text-3);
   transition: transform var(--dur-base) var(--ease-out);
+}
+
+summary.run .run-name b,
+summary.run .run-open {
+  flex: 0 1 auto;
 }
 
 details[open] > summary.run .chev {
@@ -383,9 +387,28 @@ details[open] > summary.run .chev {
 
 /* 「⋯」行内操作按钮:显式占一个 grid 列,不靠自动布局(auto-placement 落进哪个空格要看模板,
  * 容易和 nums/activity 的隐式空格撞在一起)。每档模板都把它放在行尾同一个 `toggle` 区域。 */
-.run-actions-toggle {
+.run-actions-toggle,
+.run-actions-slot {
   grid-area: toggle;
   justify-self: end;
+  width: var(--run-toggle-w);
+  min-width: 0;
+  padding-inline: 0;
+}
+
+.run-actions-slot {
+  display: block;
+  min-height: 1px;
+}
+
+@media (pointer: coarse) {
+  .run {
+    --run-toggle-w: 44px;
+  }
+
+  .run-actions-toggle {
+    min-width: var(--run-toggle-w);
+  }
 }
 
 .run.is-terminal .run-name b,
@@ -474,34 +497,16 @@ details[open] > summary.run .chev {
   }
 }
 
-/* ================================================================ tablet 481–1024 (viewport) */
-@media (min-width: 481px) {
-  .tree {
-    --tree-chev: calc(18px + var(--tree-gap));
-  }
-
-  .run {
-    grid-template-columns: 18px 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
-    grid-template-areas:
-      "chev icon badge name model time toggle"
-      ". . activity activity activity cost .";
-  }
-
-  .run .chev {
-    display: block;
-  }
-}
-
 /* ================================================================ desktop >1024 (viewport)
  * 2026-10-16 user request 「电脑端 agent tree 也展示为两行，类似手机模式，未来展示的内容会更丰富」:
- * desktop no longer collapses to the old single-line "chev icon name activity nums toggle" grid —
+ * desktop no longer collapses to the old single-line "icon name activity nums toggle" grid —
  * it keeps the tablet two-line layout (identity + nums on line 1, activity on its own full-width
  * line 2), with a slightly tighter fine-pointer row height. Line 2 is the slot future per-run
  * detail grows into. */
 @media (min-width: 1025px) {
   .run {
     min-height: 40px;
-    padding: 4px var(--sp-2);
+    padding: 4px var(--sp-2) 4px var(--tree-pad);
   }
 }
 
@@ -522,21 +527,9 @@ details[open] > summary.run .chev {
  * ——不支持容器查询的旧浏览器优雅退化回上面的 viewport 档(功能仍可用,只是窄 viewport 下的
  * docked/overlay 可能回退到旧的挤压表现)。 */
 @container (max-width: 599px) {
-  .tree {
-    --tree-chev: calc(18px + var(--tree-gap));
-  }
-
   .run {
-    grid-template-columns: 18px 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
-    grid-template-areas:
-      "chev icon badge name model time toggle"
-      ". . activity activity activity cost .";
     min-height: 44px;
-    padding: 6px var(--sp-2);
-  }
-
-  .run .chev {
-    display: block;
+    padding: 6px var(--sp-2) 6px var(--tree-pad);
   }
 
   .run-model .model-provider {
@@ -549,11 +542,11 @@ details[open] > summary.run .chev {
  * handled by the shrink rules above. */
 @container (max-width: 479px) {
   .run {
-    grid-template-columns: 18px 20px 16px minmax(0, 1fr) auto auto;
+    grid-template-columns: 20px 16px minmax(0, 1fr) auto var(--run-toggle-w);
     grid-template-areas:
-      "chev icon badge name time toggle"
-      ". . . model cost ."
-      ". . . activity activity .";
+      "icon badge name time toggle"
+      ". . model cost ."
+      ". . activity activity .";
   }
 
   .run-name .chip {
@@ -562,39 +555,5 @@ details[open] > summary.run .chev {
 
   .run-model .model-provider {
     max-width: 6ch;
-  }
-}
-
-/* ================================================================ flat level (no expandable row)
- * A level without any expandable row drops the chevron column at every breakpoint
- * (`.tree-flat > li > .run`, higher specificity than the plain `.run` tiers, same viewport →
- * container order so narrow drawers still win). */
-.tree-flat > li > .run {
-  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
-  grid-template-areas:
-    "icon badge name model time toggle"
-    ". activity activity activity cost .";
-}
-
-.tree-flat > li > .run .chev {
-  display: none;
-}
-
-@container (max-width: 599px) {
-  .tree-flat > li > .run {
-    grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) auto auto;
-    grid-template-areas:
-      "icon badge name model time toggle"
-      ". activity activity activity cost .";
-  }
-}
-
-@container (max-width: 479px) {
-  .tree-flat > li > .run {
-    grid-template-columns: 20px 16px minmax(0, 1fr) auto auto;
-    grid-template-areas:
-      "icon badge name time toggle"
-      ". . model cost ."
-      ". . activity activity .";
   }
 }
