@@ -30,7 +30,7 @@
   「替换当前会话（/new）」 behind an inline two-step confirm bar. `pendingRows` of the SSE
   `spawns` slot render as `SpawnRow` placeholders above the list (also with 0 agents); a local,
   memory-only dismissed set powers their 「关闭」. No dedicated result UI for `/new`: one inline
-  ok/err line (same convention as `FleetActions.vue`'s `note`), not a toast.
+  ok/err line, not a toast.
 
   Rename entry (web-hub-rename plan): `RenameButton.vue`, a sibling of `AgentCard` exactly like
   `RemoveButton` below — `toRow`'s `rename` field precomputes `@logic/control.js`'s

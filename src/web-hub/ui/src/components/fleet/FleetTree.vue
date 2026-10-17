@@ -12,7 +12,7 @@
   - 孤儿行(父 run 不在投影行内、被 `fleetTree` 提升为根)带「父 run 未列出」chip
     (`orphans` 集合由 FleetDrawer 用 `orphanRunIds(rows)` 算好传下来,只在根层级判定)。
   - 根层级底部渲染「另有 N 个运行中/已结束未列出」(fleet 帧 `omitted`,§3.2/#12)。
-  - 「⋯」行内 Steer/Stop(CONTROL_CTX → FleetActions)原样保留。
+  - 2026-10-17 用户裁定:行内「⋯」Steer/Stop 面板整体移除(改为输入框 @mention 子 agent 做 steer、问主会话做 stop)。
 
   非终态行的 elapsed 在 fleet 帧之间随共享 `now` 本地走时:旧实现靠 FleetNode 实例(keyed
   by runId)持有 per-row baseline;这里每行不再是独立组件,baseline 改由本组件内一个以
@@ -28,9 +28,7 @@ import "../../styles/fleet.css";
 import { formatDuration, formatUsd, clip } from "../../format.js";
 import { fleetRowVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
-import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
-import FleetActions from "./FleetActions.vue";
 import { FLEET_STATE_ICON, fleetStateSpins } from "./state-icon.js";
 import { typeBadge, shortModelLabel } from "@logic/fleetRow.js";
 import { fleetActivity, isTerminalRow, FLEET_SELECT } from "./summary.js";
@@ -96,7 +94,6 @@ function displayElapsedMs(row: FleetRowWire): number {
 // row 渲染辅助(原 FleetNode 的 computed,按行调用)
 // ---------------------------------------------------------------------------
 const sel = inject(FLEET_SELECT, null);
-const controlCtx = inject(CONTROL_CTX, null);
 
 function rowOf(node: FleetTreeNode): FleetRowWire {
   return node.row as unknown as FleetRowWire;
@@ -159,17 +156,6 @@ function highlightOf(row: FleetRowWire): "warn" | "crit" | undefined {
 function isOrphan(row: FleetRowWire): boolean {
   return props.orphans?.has(String(row.runId)) === true;
 }
-function actionsAvailable(row: FleetRowWire): boolean {
-  return controlCtx !== null && controlCtx.enabled && row.terminal !== true;
-}
-
-// 「⋯」行内动作面板的展开状态:旧实现是 FleetNode 实例上的一个 ref(每行一份)。这里每行共享
-// 本实例,用一个 openRunId 保持「同时至多展开一行」(旧行为下行间互不影响,但同一时刻展开
-// 多行没有实际用途;单开语义更简单,而且行 keyed by runId,切换行自动收起旧面板)。
-const actionsOpenRunId = ref<string | null>(null);
-function toggleActions(runId: string): void {
-  actionsOpenRunId.value = actionsOpenRunId.value === runId ? null : runId;
-}
 </script>
 
 <template>
@@ -230,24 +216,7 @@ function toggleActions(runId: string): void {
           </span>
           <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
           <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>
-          <button
-            v-if="actionsAvailable(rowOf(node))"
-            class="btn btn-ghost btn-xs run-actions-toggle"
-            type="button"
-            :aria-expanded="actionsOpenRunId === String(rowOf(node).runId)"
-            :aria-label="t('control.fleetActionsAria')"
-            @click.stop.prevent="toggleActions(String(rowOf(node).runId))"
-          >
-            &#x2026;
-          </button>
-          <span v-else class="run-actions-slot" aria-hidden="true"></span>
         </summary>
-        <FleetActions
-          v-if="actionsOpenRunId === String(rowOf(node).runId) && actionsAvailable(rowOf(node))"
-          :agent-key="controlCtx!.agentKey"
-          :run-id="String(rowOf(node).runId)"
-          :enabled="true"
-        />
         <FleetTree :nodes="node.children" :depth="depth + 1" :now="now" />
       </details>
       <div
@@ -309,26 +278,7 @@ function toggleActions(runId: string): void {
         </span>
         <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
         <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>
-        <button
-          v-if="actionsAvailable(rowOf(node))"
-          class="btn btn-ghost btn-xs run-actions-toggle"
-          type="button"
-          :aria-expanded="actionsOpenRunId === String(rowOf(node).runId)"
-          :aria-label="t('control.fleetActionsAria')"
-          @click="toggleActions(String(rowOf(node).runId))"
-        >
-          &#x2026;
-        </button>
-        <span v-else class="run-actions-slot" aria-hidden="true"></span>
       </div>
-      <FleetActions
-        v-if="
-          node.children.length === 0 && actionsOpenRunId === String(rowOf(node).runId) && actionsAvailable(rowOf(node))
-        "
-        :agent-key="controlCtx!.agentKey"
-        :run-id="String(rowOf(node).runId)"
-        :enabled="true"
-      />
     </li>
   </ul>
   <button v-if="hiddenCount > 0" class="btn btn-ghost run-more" type="button" @click="expanded = true">

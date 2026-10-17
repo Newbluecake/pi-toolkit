@@ -89,7 +89,7 @@ export function useFleetDrawerOpen(mode: Readonly<Ref<FleetDrawerMode>>): FleetD
  * 1. 只有本组件注册文档级监听,且仅在 `mode !== "docked" && open` 时(watch + onCleanup
  *    动态注册/移除,卸载时随之移除 —— 不调 transport,run 订阅只归 useHub 管,§6.4 #7):
  *    `document` 的 **bubble** 阶段 keydown,overlay 模式下再加 pointerdown。
- * 2. 事件顺序:元素级处理器(如 FleetActions 的 Esc 解除武装会 stopPropagation)先执行,
+ * 2. 事件顺序:元素级处理器(若有 stopPropagation 的 Esc 处理)先执行,
  *    抽屉收不到是期望行为;抽屉处理后 preventDefault + stopPropagation,window 上
  *    DashboardView 的 defaultPrevented 守卫是双保险。
  * 3. Esc 规则链:非 Escape / isComposing / defaultPrevented / 目标是 input|textarea|select

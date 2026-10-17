@@ -209,22 +209,8 @@ describe("U2/U3: Esc 规则链(§6.4 #2/#3,overlay 模式)", () => {
     return wrapper;
   }
 
-  it("已武装的 Stop 上按 Esc ⇒ 解除武装、抽屉不关闭;再按一次 ⇒ 关闭", async () => {
+  it("overlay 模式下 Esc 关闭抽屉", async () => {
     await openOverlayDrawer();
-    // 展开 r_1 的行内动作并武装 Stop(FleetActions 的元素级 Esc 处理器 stopPropagation,
-    // 抽屉的 document 监听收不到 —— §6.4 #2 的期望行为)
-    document.querySelector<HTMLElement>(".run-actions-toggle")!.click();
-    await nextTick();
-    const stopBtn = document.querySelector<HTMLElement>(".stop-btn")!;
-    stopBtn.click();
-    await nextTick();
-    expect(stopBtn.dataset["armed"]).toBe("true");
-
-    escOn(stopBtn);
-    await nextTick();
-    expect(stopBtn.dataset["armed"]).toBeUndefined(); // 解除武装
-    expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true); // 抽屉不动
-
     escOn(document);
     await nextTick();
     expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(false);
@@ -261,16 +247,6 @@ describe("U2/U3: Esc 规则链(§6.4 #2/#3,overlay 模式)", () => {
   it("isComposing 的 Esc 不关闭抽屉", async () => {
     await openOverlayDrawer();
     escOn(document, { isComposing: true });
-    await nextTick();
-    expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true);
-  });
-
-  it("焦点在 input 里按 Esc 不关闭抽屉(文本输入豁免)", async () => {
-    await openOverlayDrawer();
-    document.querySelector<HTMLElement>(".run-actions-toggle")!.click();
-    await nextTick();
-    const input = document.querySelector<HTMLElement>(".fleet-steer-input")!;
-    escOn(input);
     await nextTick();
     expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true);
   });

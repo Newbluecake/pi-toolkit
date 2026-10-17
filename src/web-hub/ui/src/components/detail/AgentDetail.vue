@@ -5,8 +5,8 @@
 
   Control-plane additions (C5):
   - Injects `HUB_CTX` (App.vue-provided HubHandle) and provides the frozen `CONTROL_CTX`
-    ({agentKey, control, enabled} — for `FleetActions`, plan §7.4's explicit provide/inject
-    seam) plus C5's richer `CONTROL_VIEW` (reactive agent/busy/commands/queue/web-badge) for
+    ({agentKey, control, enabled} — consumed by the Composer's draft persistence; the fleet
+    row actions it was first added for were removed 2026-10-17) plus C5's richer `CONTROL_VIEW` (reactive agent/busy/commands/queue/web-badge) for
     `DetailDock`/`Composer`/`AskUserForm`. The frozen `AgentDetailProps` has no hub field, and
     the frozen `DetailDockEmits` has no send/stop/retry/discard — inject is the only channel
     that touches neither frozen surface.
@@ -24,8 +24,8 @@
   (`useFleetDrawerMode`, ≥1280 docked / 768–1279 overlay / ≤767 fullscreen) and the open state
   (`useFleetDrawerOpen` — docked 的持久化物理上写在 FleetDrawer.vue 里,overlay/fullscreen
   每次挂载关闭),并把 `<main class="detail">` 重排成 `.detail-split`(主栏 `.detail-main`
-  + `FleetDrawer`)。FleetDrawer 位于本组件 provide 的 CONTROL_CTX 作用域内(§6.1),树里的
-  FleetActions 才能拿到控制面上下文。关闭抽屉时若有选中 run,一并 `selectRun(null)` 退订
+  + `FleetDrawer`)。FleetDrawer 位于本组件 provide 的 CONTROL_CTX 作用域内(§6.1;树里的行内动作
+  已于 2026-10-17 移除,现由 Composer 草稿持久化消费)。关闭抽屉时若有选中 run,一并 `selectRun(null)` 退订
   (「没人看就不推」,§2);run 订阅的 transport 归 useHub 管,组件只走 HubHandle。
 
   Scroll-position memory (docs/dev/web-hub-session-switch/plan.md §1.4 — E1-6): the following
@@ -241,9 +241,10 @@ const detailMetrics: DetailMetricsView = {
   subagentCostUsd: computed(() => statusOf(props.agent)?.subagentCostUsd),
 };
 provide(DETAIL_METRICS, detailMetrics);
-// Frozen seam for FleetActions (plan §7.4): only provided when a ControlHandle exists —
+// Frozen CONTROL_CTX seam (plan §7.4; consumer today: Composer draft persistence — the fleet
+// row actions were removed 2026-10-17): only provided when a ControlHandle exists —
 // `useHub` creates it synchronously, so a null here means a control-less hub for the whole
-// mount. FleetActions treats a missing inject as "don't render" (component test pins this).
+// mount; consumers treat a missing inject as "no control".
 if (control.value !== null) {
   provide(CONTROL_CTX, {
     get agentKey() {
@@ -609,7 +610,7 @@ function onCloseDrawer(): void {
         <ResumeDialog v-if="resumeOpen" :scope="resumeScope" @close="resumeOpen = false" />
       </div>
 
-      <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(树上的 FleetActions 需要它);
+      <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(原为树上的行内动作,2026-10-17 已移除);
            v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
       <FleetDrawer

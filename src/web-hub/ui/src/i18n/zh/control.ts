@@ -119,8 +119,6 @@ const control = {
   dockReadonlyAgent: "此 pi 的 pi-toolkit 不支持网页控制——请更新并 /reload",
   dockReadonlyOffline: "Agent 离线",
 
-  fleetActionsAria: "子 agent 操作",
-
   mentionAria: "提及与文件",
   mentionZone: "子 agent",
   fileZone: "文件",

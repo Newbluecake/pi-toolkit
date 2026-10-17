@@ -131,9 +131,6 @@ const control = {
   dockReadonlyAgent: "This pi's pi-toolkit doesn't support web control — update and /reload",
   dockReadonlyOffline: "Agent offline",
 
-  // --- fleet inline sub-agent actions (§7.4) ---
-  fleetActionsAria: "Sub-agent actions",
-
   // --- @mention completion (task #11) + @文件补全 (file-mention) ---
   mentionAria: "Mentions and files",
   mentionZone: "Sub-agents",

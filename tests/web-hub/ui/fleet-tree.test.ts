@@ -14,7 +14,6 @@ import {
   runTranscriptAvailable,
   FLEET_SELECT,
 } from "../../../src/web-hub/ui/src/components/fleet/summary.js";
-import { CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.js";
 import type { FleetRowWire } from "../../../src/web-hub/protocol/messages.js";
 
 /**
@@ -358,52 +357,23 @@ describe("FleetTree.vue — 「另有 N 个未列出」(U9,§3.2/#12)", () => {
   });
 });
 
-describe("FleetTree.vue — FleetActions 接缝(control-plan §7.4,承接自 FleetNode)", () => {
-  const NOOP_CONTROL = {
-    sendPrompt: () => Promise.resolve({ ok: true as const }),
-    abort: () => Promise.resolve({ ok: true as const }),
-    steerSub: () => Promise.resolve({ ok: true as const }),
-    stopSub: () => Promise.resolve({ ok: true as const }),
-    answerDialog: () => Promise.resolve({ ok: true as const }),
-    cancelDialog: () => Promise.resolve({ ok: true as const }),
-    runCommand: () => Promise.resolve({ ok: true as const }),
-    query: () => Promise.resolve({ ok: true as const }),
-    retry: () => Promise.resolve({ ok: true as const }),
-    discard: () => {},
-    draft: () => "",
-    setDraft: () => {},
-  };
-
-  it("非终态行 + CONTROL_CTX ⇒ ⋯ 展开 FleetActions;终态行和无 inject 不显示", async () => {
-    const wrapper = mountTree(
-      [row({ runId: "r_live", terminal: false }), row({ runId: "r_done", terminal: true, status: "completed" })],
-      {},
-      { [CONTROL_CTX as symbol]: { agentKey: "agent-a", control: NOOP_CONTROL, enabled: true } },
-    );
-    const toggles = wrapper.findAll(".run-actions-toggle");
-    expect(toggles.length).toBe(1); // 只有非终态行
-    await toggles[0]!.trigger("click");
-    expect(wrapper.find(".fleet-actions").exists()).toBe(true);
-    expect(wrapper.find(".fleet-steer-input").exists()).toBe(true);
-
-    const noCtx = mountTree([row({ runId: "r_live", terminal: false })]);
-    expect(noCtx.find(".run-actions-toggle").exists()).toBe(false);
-  });
-
-  it("终态行(和无 ctx 行)渲染同宽占位:aria-hidden、不可聚焦、非按钮 ⇒ time/cost 列对齐", () => {
-    const wrapper = mountTree(
-      [row({ runId: "r_live", terminal: false }), row({ runId: "r_done", terminal: true, status: "completed" })],
-      {},
-      { [CONTROL_CTX as symbol]: { agentKey: "agent-a", control: NOOP_CONTROL, enabled: true } },
-    );
+describe("FleetTree.vue — 无行内操作(2026-10-17 用户裁定移除 ⋯ / Steer / Stop)", () => {
+  it("运行中/终态行都不渲染操作按钮或占位,time/cost 是行尾最后的 grid 区域", () => {
+    const wrapper = mountTree([
+      row({ runId: "r_live", terminal: false }),
+      row({ runId: "r_done", terminal: true, status: "completed" }),
+    ]);
     const runs = wrapper.findAll(".run");
     expect(runs.length).toBe(2);
-    expect(runs[0]!.find(".run-actions-slot").exists()).toBe(false);
-    const slot = runs[1]!.get(".run-actions-slot");
-    expect(slot.element.tagName).toBe("SPAN");
-    expect(slot.attributes("aria-hidden")).toBe("true");
-    expect(slot.attributes("tabindex")).toBeUndefined();
-    expect(slot.text()).toBe("");
+    expect(wrapper.find(".run-actions-toggle").exists()).toBe(false);
+    expect(wrapper.find(".run-actions-slot").exists()).toBe(false);
+    expect(wrapper.find(".fleet-actions").exists()).toBe(false);
+    for (const r of runs) {
+      expect(r.find("button.run-actions-toggle").exists()).toBe(false);
+      const last = r.element.lastElementChild!;
+      expect(last.classList.contains("run-cost")).toBe(true);
+      expect(last.previousElementSibling!.classList.contains("run-time")).toBe(true);
+    }
   });
 });
 
@@ -497,14 +467,17 @@ describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场
     expect(rule(".run-model")).toMatch(/min-width:\s*0/);
   });
 
-  it("no chev column in any template; toggle track is the fixed --run-toggle-w everywhere", () => {
+  it("no chev/toggle column in any template; time and cost are the last grid areas", () => {
     expect(css).not.toMatch(/"chev /);
     expect(css).not.toMatch(/--tree-chev|tree-flat/);
-    expect(css).toMatch(/\.run-actions-toggle,\s*\.run-actions-slot\s*\{[^}]*width:\s*var\(--run-toggle-w\)/);
-    const tracks = [...css.matchAll(/grid-template-columns:\s*([^;]+);/g)].map((x) => x[1]!);
-    const runTracks = tracks.filter((t) => t.includes("--run-toggle-w") || /\bauto auto$/.test(t));
-    expect(runTracks.length).toBe(2); // base + <480px container
-    for (const t of runTracks) expect(t).toMatch(/var\(--run-toggle-w\)$/);
+    expect(css).not.toMatch(/run-toggle-w|run-actions-(toggle|slot)/);
+    const areas = [...css.matchAll(/grid-template-areas:((?:\s*"[^"]*")+)\s*;/g)].map((x) => x[1]!);
+    expect(areas.length).toBeGreaterThanOrEqual(2);
+    for (const a of areas) {
+      const lines = [...a.matchAll(/"([^"]*)"/g)].map((x) => x[1]!.trim().split(/\s+/));
+      expect(lines.some((l) => l.includes("toggle"))).toBe(false);
+      expect(lines[0]!.at(-1)).toBe("time");
+    }
   });
 
   it("inline chevron after the name rotates open (same transition as before)", () => {
@@ -517,7 +490,7 @@ describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场
     expect(m).not.toBeNull();
     const block = m![1]!;
     expect(block).toMatch(
-      /grid-template-areas:[^;]*"icon badge name time toggle"[^;]*"\. \. model cost \."[^;]*"\. \. activity activity \."/,
+      /grid-template-areas:[^;]*"icon badge name time"[^;]*"\. \. model cost"[^;]*"\. \. activity activity"/,
     );
     // 旧的 <360px 阈值覆盖不到 docked/overlay/手机全屏抽屉,不得回退
     expect(css).not.toMatch(/@container\s*\(max-width:\s*359px\)/);

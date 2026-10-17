@@ -889,3 +889,5 @@ F0 ─┬─► F2 ───┼───┴──────────┐
 - 子 run transcript 内搜索。
 - 已从 agent registry 驱逐的历史 run：返回 `unknown_run`。以后要做可以接入 consult 的 expert-index（`consult/expert-index.ts`）。
 - 对 `rememberAgents:false` 的 run 在内存中保留 final snapshot：不做，理由见 §3.6。
+
+> **2026-10-17 更新**：fleet 行内「⋯」+ `FleetActions`（Steer…/Stop）已整体移除；子 agent 交互改为输入框 @mention（steer）或询问主会话（stop）。本文以下描述的该行内面板为历史设计。

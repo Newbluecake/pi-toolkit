@@ -218,11 +218,6 @@ export interface AskUserFormEmits {
 export interface AskUserQuestionProps {
   readonly question: unknown;
 }
-export interface FleetActionsProps {
-  readonly agentKey: string;
-  readonly runId: string;
-  readonly enabled: boolean;
-}
 export interface DetailDockProps {
   readonly following: boolean;
   readonly newCount: number;

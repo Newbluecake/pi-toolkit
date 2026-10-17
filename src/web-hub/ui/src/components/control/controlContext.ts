@@ -16,8 +16,9 @@
  *   `ControlHandle` through this channel directly instead of emitting up.
  *
  * `CONTROL_CTX` (the FROZEN key from `composables/useControl.ts`, `{agentKey, control,
- * enabled}`) is separately provided by AgentDetail for `FleetActions` — plan §7.4's explicit
- * provide/inject seam for sub-agent ops, kept byte-identical to its frozen shape.
+ * enabled}`) is separately provided by AgentDetail — plan §7.4's explicit provide/inject seam,
+ * kept byte-identical to its frozen shape (consumer today: the Composer's draft persistence; the
+ * fleet row actions it was introduced for were removed 2026-10-17).
  */
 import type { ComputedRef, InjectionKey, Ref } from "vue";
 import type { AgentState, ControlHandle, HubHandle } from "../../types.js";
