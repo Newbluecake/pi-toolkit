@@ -28,6 +28,11 @@ body {
   font-size: var(--fs-md);
   line-height: var(--lh-body);
   -webkit-font-smoothing: antialiased;
+  /* 2026-10-17 field report 「markdown 渲染斜体字不清晰」: CJK fonts ship no italic face, so the
+   * browser fakes one by slanting the glyphs (blurry, especially in mono code comments). Never
+   * synthesize italics: Latin text whose font has a real italic face still italicizes, CJK stays
+   * upright and crisp. Inherited everywhere (code comments, markdown em, diff markers). */
+  font-synthesis-style: none;
   -webkit-tap-highlight-color: transparent;
 }
 
