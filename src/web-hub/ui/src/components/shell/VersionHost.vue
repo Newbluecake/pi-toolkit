@@ -1,21 +1,25 @@
 <!--
-  web-hub-version plan §5.2 (V2) + the 2026-10-16 D4 refinement: the mount point for the
-  version panel, used in TWO modes:
+  web-hub-version plan §5.2 (V2) + the 2026-10-16 D4 refinement + R1 rework (2026-10-17 user
+  real-browser check): the mount point for the version panel, used in TWO modes:
 
-  - popover (default): the desktop (≥1025px) non-modal `role="dialog"` opened by TopBar's
-    version chip. Esc calls `preventDefault()` then closes, an outside `pointerdown` closes
-    (with the SettingsOverlay P1 fix: `preventDefault()` so the browser's synchronous
-    focus-steal default action can't race the focus-return below), focus moves into the panel
-    on open and back to the anchor chip on close — the exact lifecycle
-    `shell/SettingsOverlay.vue`'s desktop branch already uses. Below 1025px the chip itself is
-    CSS-hidden, so this branch is unreachable there by construction; a mid-session shrink
-    across the breakpoint simply keeps the open popover until closed (no geometry math, the
-    panel is CSS-anchored under `.version-anchor`).
+  - popover (default): a QuotaCard/LoadCard-class popover card — non-modal `role="dialog"`, CSS
+    -anchored directly under the top-bar version chip (`.version-anchor` is its positioned
+    ancestor, same `.q-anchor`/`.q-card` geometry in version.css). Esc `preventDefault()`s then
+    closes, an outside `pointerdown` closes (with the SettingsOverlay P1 fix: `preventDefault()`
+    so the browser's synchronous focus-steal default can't race the focus-return below), focus
+    moves into the card on open and back to the chip on close — EXCEPT under `peek` (R1: the
+    hover variant TopBar mounts on `(hover:hover) and (pointer:fine)` pointers): a peek mount
+    neither takes nor "returns" focus, exactly `QuotaCard.vue`'s `wasPeek` mount-snapshot rule
+    (the pointer never asked for focus, so focus must not move).
   - `embedded`: no popover/sheet shell at all — just the lazily loaded panel. This is the mode
     the settings popup's 「版本」 card renders (`SettingsView.vue`, D4: the version info lives
-    INLINE inside the settings dialog on every viewport; there is no "close settings then open
-    a sheet" flow). The card and the popover share the ONE `useVersionInfo` instance
-    (`VERSION_CTX`, provided by TopBar), so their fetches ride the same single flight.
+    INLINE inside the settings dialog on every viewport). The card and the popover share the
+    ONE `useVersionInfo` instance (`VERSION_CTX`, provided by TopBar), so their fetches ride
+    the same single flight.
+
+  The open/hover state machine (pinned + peek) deliberately lives in TopBar next to the CHIP
+    (QuotaPill's own pill/card split: the pill owns toggle/hover, the card owns dismissal) —
+    this component receives `peek` only as a mount-time focus directive.
 
   The panel itself is a LAZY chunk (`defineAsyncComponent`, 8s timeout): the first-screen cost
   of the feature stays the chip + this host + `VersionLoadError`. On timeout/loader failure the
@@ -30,12 +34,18 @@ import VersionLoadError from "./VersionLoadError.vue";
 import { VERSION_CTX } from "../../composables/useVersionInfo.js";
 import "../../styles/version.css";
 
-const props = withDefaults(defineProps<{ anchorEl?: HTMLElement | null; embedded?: boolean }>(), {
+const props = withDefaults(defineProps<{ anchorEl?: HTMLElement | null; embedded?: boolean; peek?: boolean }>(), {
   anchorEl: null,
   embedded: false,
+  peek: false,
 });
 const emit = defineEmits<{ close: [] }>();
 const { t } = useI18n();
+
+/** R1 rework: mount-time snapshot, NOT reactive-on-purpose — QuotaCard's `wasPeek` rule
+ *  verbatim (a hover-peek mount neither steals focus on mount nor "returns" it on close;
+ *  a click-pin on top of a live peek keeps the snapshot, which is exactly right). */
+const wasPeek = props.peek === true;
 
 const handle = inject(VERSION_CTX, null);
 
@@ -82,14 +92,14 @@ onMounted(async () => {
   document.addEventListener("keydown", onKeydown, true);
   document.addEventListener("pointerdown", onPointerDown, true);
   await nextTick();
-  panelEl.value?.focus();
+  if (!wasPeek) panelEl.value?.focus();
 });
 
 onUnmounted(() => {
   if (props.embedded) return;
   document.removeEventListener("keydown", onKeydown, true);
   document.removeEventListener("pointerdown", onPointerDown, true);
-  props.anchorEl?.focus();
+  if (!wasPeek) props.anchorEl?.focus();
 });
 </script>
 

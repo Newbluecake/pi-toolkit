@@ -167,18 +167,66 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 const versionInfo = useVersionInfo({ hub });
 provide(VERSION_CTX, versionInfo);
 onUnmounted(() => versionInfo.dispose());
-const versionOpen = ref(false);
 const versionChipEl = ref<HTMLButtonElement | null>(null);
 const dotList = computed(() => {
   const d = versionInfo.match.value.dot;
   return d === null ? [] : [d];
 });
+
+/* R1 rework (2026-10-17 user real-browser check): the version popover opens like QuotaPill's
+ * QuotaCard / LoadPill's LoadCard — click = PINNED open, plus a hover PEEK on hover-capable
+ * pointers only. QuotaPill's exact state machine, duplicated inline the same way LoadPill
+ * duplicates it (there is no shared composable to import — the pattern lives in each pill):
+ * ~150ms enter delay (a pointer transiting the bar must not flash the card), ~200ms close
+ * grace covering the chip→card traversal gap, the CARD's own mouseenter cancels a pending
+ * close (bindings fall through onto VersionHost's root), phones never auto-open on hover. */
+const versionPinned = ref(false);
+const versionPeek = ref(false);
+const versionOpen = computed(() => versionPinned.value || versionPeek.value);
+const hoverFine = useMedia(window, "(hover: hover) and (pointer: fine)").matches;
+let versionHoverIn: ReturnType<typeof setTimeout> | undefined;
+let versionHoverOut: ReturnType<typeof setTimeout> | undefined;
+
 function onVersionToggle(): void {
-  versionOpen.value = !versionOpen.value;
+  versionPinned.value = !versionPinned.value;
+  versionPeek.value = false;
 }
 function onVersionClose(): void {
-  versionOpen.value = false;
+  versionPinned.value = false;
+  versionPeek.value = false;
 }
+function stopPeekClose(): void {
+  if (versionHoverOut !== undefined) {
+    clearTimeout(versionHoverOut);
+    versionHoverOut = undefined;
+  }
+}
+function onChipEnter(): void {
+  stopPeekClose();
+  if (!hoverFine.value || phone.value || versionOpen.value) return;
+  versionHoverIn = setTimeout(() => {
+    versionHoverIn = undefined;
+    versionPeek.value = true;
+  }, 150);
+}
+function schedulePeekClose(): void {
+  stopPeekClose();
+  versionHoverOut = setTimeout(() => {
+    versionHoverOut = undefined;
+    versionPeek.value = false;
+  }, 200);
+}
+function onChipLeave(): void {
+  if (versionHoverIn !== undefined) {
+    clearTimeout(versionHoverIn);
+    versionHoverIn = undefined;
+  }
+  if (!versionPinned.value && versionPeek.value) schedulePeekClose();
+}
+onUnmounted(() => {
+  if (versionHoverIn !== undefined) clearTimeout(versionHoverIn);
+  if (versionHoverOut !== undefined) clearTimeout(versionHoverOut);
+});
 </script>
 
 <template>
@@ -236,11 +284,20 @@ function onVersionClose(): void {
         aria-controls="version-panel"
         :title="t('version.chipTitle')"
         @click="onVersionToggle"
+        @mouseenter="onChipEnter"
+        @mouseleave="onChipLeave"
       >
         {{ t("shell.uiBuild", { v: uiStamp })
         }}<span v-for="lv in dotList" :key="'vdot'" class="version-dot" :data-level="lv"></span>
       </button>
-      <VersionHost v-if="versionOpen" :anchor-el="versionChipEl" @close="onVersionClose" />
+      <VersionHost
+        v-if="versionOpen"
+        :anchor-el="versionChipEl"
+        :peek="versionPeek"
+        @close="onVersionClose"
+        @mouseenter="onChipEnter"
+        @mouseleave="onChipLeave"
+      />
     </span>
     <button
       v-if="controlOn"

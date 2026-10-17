@@ -85,7 +85,14 @@ const FINDING_TEXT_KEYS: Readonly<Record<string, string>> = {
 const findings = computed(() => match.value?.findings ?? []);
 const dirty = computed(() => match.value?.dirty === true);
 const commandsOf = (code: string): readonly string[] => FINDING_COMMANDS[code] ?? [];
-const textKeyOf = (code: string): string => FINDING_TEXT_KEYS[code] ?? "version.findingUnknown";
+/** R1 rework bug 2: NEVER build i18n keys by string interpolation — the lookup below is a
+ *  static map (the old `` `version.sessionStatus.${x}` `` rendered the raw key: the i18n files
+ *  define FLAT `sessionStatusSame`/… keys). `ui-drift` also words by its actual comparison
+ *  reference (R1 #4): repo.head ⇒ 「与仓库 HEAD 不一致」, otherwise the hub's own commit. */
+const textKeyOf = (f: { code: string; ref?: string | undefined }): string => {
+  if (f.code === "ui-drift") return f.ref === "repo" ? "version.findingUiDrift" : "version.findingUiDriftHub";
+  return FINDING_TEXT_KEYS[f.code] ?? "version.findingUnknown";
+};
 const summary = computed(() => match.value?.summary ?? { older: 0, newer: 0, drift: 0 });
 const hasSummary = computed(() => summary.value.older + summary.value.newer + summary.value.drift > 0);
 
@@ -103,6 +110,12 @@ const tabDirty = UI_BUILD.commit.endsWith("-dirty");
 const tabAssetList: readonly string[] = tabAssets(document) ?? [];
 const hubUi = computed(() => match.value?.hubUi ?? null);
 const uiStatus = computed(() => match.value?.uiStatus ?? "unknown");
+const capOn = computed(() => match.value?.cap === true);
+/** R1 rework #3: an ABSENT `hub.ui` means different things — with the cap present the hub
+ *  truly has no servable UI root (ui-unservable's wording); WITHOUT the cap (an old hub never
+ *  restarted) the field's absence proves nothing, so the row says 无法验证， not 「无可服务的
+ *  UI 根」（plan §4/§6）. */
+const servedNoneKey = computed(() => (capOn.value ? "version.uiServedNone" : "version.uiServedUnverifiable"));
 const uiStatusKey = computed(() =>
   uiStatus.value === "same"
     ? "version.statusSame"
@@ -151,7 +164,14 @@ const sessionCard = computed<Record<string, unknown> | undefined>(() => {
   return s?.agents.get(k)?.card;
 });
 const sessionStatus = computed(() => match.value?.sessionStatus ?? "unknown");
-const sessionStatusKey = computed(() => `version.sessionStatus.${sessionStatus.value}`);
+const SESSION_STATUS_KEYS: Readonly<Record<string, string>> = {
+  same: "version.sessionStatusSame",
+  older: "version.sessionStatusOlder",
+  newer: "version.sessionStatusNewer",
+  differ: "version.sessionStatusDiffer",
+  unknown: "version.sessionStatusUnknown",
+};
+const sessionStatusKey = computed(() => SESSION_STATUS_KEYS[sessionStatus.value] ?? "version.sessionStatusUnknown");
 const sessionPlugin = computed(() => strOf(sessionCard.value?.["pluginVersion"]));
 const sessionBuildId = computed(() => strOf(sessionCard.value?.["buildId"]));
 
@@ -168,7 +188,19 @@ const repoError = computed(() => {
   const r = snapshot.value?.repo;
   return r !== undefined && "error" in r ? (r.error as string) : undefined;
 });
-const repoErrorKey = computed(() => `version.sectionError.${repoError.value ?? "unavailable"}`);
+/** R1 rework bug 2 (same fix): the section-error keys are FLAT camelCase — a template-literal
+ *  `` `version.sectionError.${x}` `` rendered the raw key. Static map, shared by the repo and
+ *  changelog sections. */
+const SECTION_ERROR_KEYS: Readonly<Record<string, string>> = {
+  timeout: "version.sectionErrorTimeout",
+  unavailable: "version.sectionErrorUnavailable",
+  "git-too-old": "version.sectionErrorGitTooOld",
+  "too-large": "version.sectionErrorTooLarge",
+  missing: "version.sectionErrorMissing",
+};
+const sectionErrorKey = (e: string | undefined): string =>
+  SECTION_ERROR_KEYS[e ?? "unavailable"] ?? "version.sectionErrorUnavailable";
+const repoErrorKey = computed(() => sectionErrorKey(repoError.value));
 const repoHead = computed(() => repo.value?.head);
 const repoHeadText = computed(() => (repoHead.value === undefined ? null : bootHeadTextOf(repoHead.value)));
 const repoHeadTime = computed(() =>
@@ -212,7 +244,7 @@ function strOf(v: unknown): string | undefined {
       <p v-if="findings.length === 0 && !dirty" class="version-ok">{{ t("version.allConsistent") }}</p>
       <ul v-else class="version-findings">
         <li v-for="f in findings" :key="f.code" class="version-finding" :data-level="f.level">
-          <span class="version-finding-text">{{ t(textKeyOf(f.code)) }}</span>
+          <span class="version-finding-text">{{ t(textKeyOf(f)) }}</span>
           <span class="version-finding-actions">
             <button v-if="f.code === 'tab-stale'" type="button" class="btn btn-ghost" @click="onRefreshPage">
               {{ t("version.refreshPage") }}
@@ -255,7 +287,7 @@ function strOf(v: unknown): string | undefined {
               <li v-for="a in hubUi.assets" :key="a" class="version-mono" translate="no">{{ a }}</li>
             </ul>
           </template>
-          <span v-else class="version-muted">{{ t("version.uiServedNone") }}</span>
+          <span v-else class="version-muted">{{ t(servedNoneKey) }}</span>
         </dd>
       </dl>
     </section>
@@ -361,9 +393,7 @@ function strOf(v: unknown): string | undefined {
           <p class="version-muted">{{ t("version.error") }}</p>
           <button type="button" class="btn btn-ghost" @click="onRetrySnapshot">{{ t("version.retry") }}</button>
         </div>
-        <p v-else-if="changelogError !== undefined" class="version-muted">
-          {{ t(`version.sectionError.${changelogError}`) }}
-        </p>
+        <p v-else-if="changelogError !== undefined" class="version-muted">{{ t(sectionErrorKey(changelogError)) }}</p>
         <details v-else-if="changelogSections.length > 0" class="version-details">
           <summary class="version-mono" translate="no">{{ changelogSummaryTitle }}</summary>
           <!-- MarkdownView is the repo's v-html-free renderer — the ONLY markdown surface here -->

@@ -80,3 +80,45 @@ $ timeout 300 npm run build:web && timeout 120 npm run check:web
 - **§8 真机验收**（tmux：各 finding 出现/消失、`tab-stale` 刷新语义、481–1024 设置卡、旧 hub 降级）属 V3 集成包，未在本包执行。
 - `ui-unservable`/`tab-stale` 依赖 V1 的 `hub.ui` 广播与 `/api/version` 端点真联调（V3）。
 - 未跑全仓 `npm test`（17k+ 测试，非本包门禁且 V1 并行改动中共享套件；本包门禁 = ui 套件 + typecheck + build:web + check:web，全绿）。
+
+## R1 rework（2026-10-17 用户真机检查后返工，基于 79a4aa3，未提交）
+
+用户 hub 仍是旧 hub（未重启、无 `version.v1`）；按四项问题返工：
+
+### 1. 弹出方式对齐 QuotaPill/QuotaCard + LoadPill/LoadCard
+
+- **`TopBar.vue`**：chip 侧照 `QuotaPill.vue` 的 pinned+peek 状态机逐行复刻（无共享组合式可引，LoadPill 也是同样内联复刻）：`versionPinned`/`versionPeek`，`open = pinned || peek`；点击 = 切换 pinned 并清 peek；hover peek 仅 `(hover: hover) and (pointer: fine)` 且非 ≤480px——~150ms 进入延迟、~200ms 关闭宽限，卡片 `mouseenter` 取消待关闭（listener 经 attrs 落到 VersionHost 根元素）、`mouseleave` 重新排程；卸载时清理两个定时器。按钮新增的只有事件绑定，渲染 DOM 逐字节不变（quota 金样与 version-anchor 金样均未重抓、仍全过）。
+- **`VersionHost.vue`**：新增 `peek` prop + QuotaCard 的 `wasPeek` 挂载快照语义——peek 挂载不取焦点、卸载不「归还」焦点；点击固定挂载才 focus-in/focus-return。Esc `preventDefault` + 外部 pointerdown（排除锚点、`preventDefault` 防焦点抢占）不变。
+- **CSS**：`shell.css` `.version-anchor` 加 `position: relative`（成为卡片的定位祖先，同 `.q-anchor`/`.ld-anchor`）；`version.css` `.version-pop` 重写为 QuotaCard/LoadCard 卡片几何——`position:absolute; top:calc(100% + 6px); left:0; z-index:30`、`--r-md`/`--sp-3`/surface/shadow-3、`max-height + overflow-y:auto`（原来是右锚 `right:0` 的 560px 浮层，视觉与层级都不同）。设置卡内联（embedded）模式不变；懒加载 VersionPanel + errorComponent 不变。
+- pin-on-top-of-peek 不重挂载（QuotaPill 原语义），焦点不因 pin 移动——按复用模式原样保留并测试钉住。
+
+### 2. i18n 原始键泄漏（bug）
+
+`VersionPanel.vue` 三处模板字符串拼键全部改为静态映射：`version.sessionStatus.${x}` → `SESSION_STATUS_KEYS`（i18n 定义的是扁平 `sessionStatusSame` 等）；**同类排查又发现两处**——`version.sectionError.${x}` → `SECTION_ERROR_KEYS`（同样拼错，repo/changelog 分段错误文案此前也会渲染原始键）。新增 27 键 × en/zh 双语解析测试（`t(key) !== key` 且非空），覆盖 sessionStatus×5、status×3、sectionError×5、finding 文案×10、uiServedNone/uiServedUnverifiable。
+
+### 3. 旧 hub 的「hub 正在服务」行
+
+`hub.ui` 缺失按 cap 分流：有 cap ⇒ 「无（无可服务的 UI 根）」（ui-unservable 证据文案）；无 cap（旧 hub）⇒ 新键 `uiServedUnverifiable`「无法验证（hub 版本过旧）」（en: "unverifiable (hub is older — no version info)"）。两条路径均有面板测试。
+
+### 4. ui-drift 按实际参照物措辞
+
+`version-match.js` 的 ui-drift finding 新增 `ref: "repo" | "hub"`（比较右操作数来源：repo.head vs hub 自身 commit）。面板按 ref 选词：repo ⇒ 「UI 构建与仓库 HEAD 不一致…」（原文案）；hub ⇒ 新键 `findingUiDriftHub`「UI 构建与 hub 构建 commit 不一致（暂无仓库信息），可尝试重新构建 UI」。matcher 与面板双层测试各覆盖两分支。
+
+### 自验输出（真实命令与结果）
+
+```
+$ npx prettier --write <changed 10 files>   # 全部完成（多文件 unchanged）
+
+$ timeout 280 npm run typecheck
+# 零输出 = 通过（一次 exactOptionalPropertyTypes 报错已修：textKeyOf 参数 ref?: string | undefined）
+
+$ timeout 580 npx vitest run tests/web-hub/ui
+ Test Files  180 passed (180)
+      Tests  4259 passed (4259)        # R1 前为 179/4219，+40 用例（hover/peek×5、措辞×4、i18n×27、ref 断言等）
+
+$ timeout 300 npm run build:web && timeout 120 npm run check:web
+✓ built in 5.12s     （VersionPanel-DmbXYGOm.js 12.28 kB）
+✓ check:web — dist/web-hub-ui/ OK (16 files, first-screen JS 270271B gz/524288B, lazy JS 41621B gz/131072B, CSS 29246B gz/65536B)
+```
+
+金样：`topbar-no-quota-golden.html` 与 `version-anchor-golden.html` 均未重抓、逐字节仍然通过（改动只加了事件绑定与 CSS，closed 态 DOM 不变）。范围外零触碰（并行 P2 html-preview 的 preview/logic/transport/i18n 文件未动）；未提交。

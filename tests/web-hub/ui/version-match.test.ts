@@ -236,11 +236,12 @@ describe("version-match §4 rows", () => {
 
   // ---------------------------------------------------------------- ui-drift
   it("ui-drift: served/tab commit vs (repo.head ?? hubCommit) differ ⇒ info; suppressed by tab-stale; unknown commits ⇒ unverifiable", () => {
-    // hub.ui.commit aaaaaaa vs repo.head bbbbbbb
+    // hub.ui.commit aaaaaaa vs repo.head bbbbbbb — the REPO supplied the reference (R1 #4)
     const r = match({
       snapshot: snapshot({ repo: { ...snapshot().repo, head: { commit: "bbbbbbb222222", time: 2 } } }),
     });
     expect(codes(r)).toContain("ui-drift");
+    expect(r.findings.find((f) => f.code === "ui-drift")?.ref).toBe("repo");
 
     // same ⇒ gone
     const same = match({ snapshot: snapshot() });
@@ -270,6 +271,7 @@ describe("version-match §4 rows", () => {
       hub: hubFrame({ ui: { ...hubFrame().ui, commit: "ddddddd444444" }, bootHead: undefined }),
     });
     expect(codes(differ)).toContain("ui-drift");
+    expect(differ.findings.find((f) => f.code === "ui-drift")?.ref).toBe("hub"); // R1 #4: hub-commit reference
   });
 
   // ---------------------------------------------------------------- agent rows

@@ -174,6 +174,10 @@
  * All other version styles live in `styles/version.css` (imported by `VersionHost.vue`). */
 .version-anchor {
   display: none;
+  /* R1 rework: `position: relative` makes the anchor the positioned ancestor of the version
+   * card — the same `.q-anchor`/`.ld-anchor` geometry the quota/load popovers use (the card
+   * CSS-anchors `top: calc(100% + 6px); left: 0` under it in version.css). */
+  position: relative;
   min-width: 0;
 }
 

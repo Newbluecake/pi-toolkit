@@ -61,41 +61,42 @@
   }
 }
 
-/* ------------------------------------------------------------------ desktop popover */
+/* ------------------------------------------------------------------ desktop popover card
+ * R1 rework: QuotaCard/LoadCard geometry verbatim — CSS-anchored directly under the chip
+ * (`.version-anchor` is the positioned ancestor, shell.css), NOT a right-aligned floating
+ * panel: absolute, top offset 6px, left 0, z-index 30 (the same popover tier), the shared
+ * card look (border, --r-md, surface, shadow-3, --sp-3 padding) and a scroll cap so a long
+ * changelog can never push the card past the viewport. */
 .version-pop {
   position: absolute;
-  top: calc(100% + 10px);
-  right: 0;
-  z-index: 40; /* same popover tier as `.settings-panel` */
-  display: flex;
-  flex-direction: column;
-  width: min(560px, calc(100vw - 32px));
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: 480px;
+  max-width: calc(100vw - 24px);
   max-height: calc(100dvh - var(--topbar-h) - 24px);
-  overflow: hidden;
+  overflow-y: auto;
+  padding: var(--sp-3);
   background: var(--c-surface);
   border: 1px solid var(--c-border);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-md);
   box-shadow: var(--shadow-3);
   outline: none;
 }
 
 .version-pop-head {
-  display: flex;
-  align-items: center;
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--c-border);
-  flex: none;
+  margin: 0 0 var(--sp-2);
 }
 
 .version-pop-title {
   margin: 0;
-  font-size: var(--fs-md);
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
 }
 
 .version-pop-body {
-  overflow-y: auto;
-  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  display: block;
 }
 
 /* ------------------------------------------------------------------ panel (shared) */

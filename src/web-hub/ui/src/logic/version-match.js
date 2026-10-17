@@ -36,6 +36,10 @@ import { compareCommit, normalizeCommit } from "@protocol/version-info.ts";
  * @typedef {object} VersionMatchFinding
  * @property {string} code   one of the §4 table codes above
  * @property {"warn" | "info"} level
+ * @property {"repo" | "hub" | undefined} ref  R1 rework: `ui-drift` only — WHICH side provided
+ *   the comparison's right operand (`repo.head` vs the hub's own commit): the panel words the
+ *   suggestion by the actual reference (「与仓库 HEAD 不一致」 vs 「与 hub 构建 commit 不一致」),
+ *   never claiming a repo comparison that didn't happen (old hub, no snapshot).
  */
 
 /**
@@ -233,11 +237,23 @@ export function versionMatch(input) {
 
   // ui-drift: suppressed by tab-stale (the fingerprint is strictly better evidence); the
   // served-side commit wins the tab's own (what the hub ships is what a refresh would get).
+  // R1 rework: remember WHICH reference the right operand came from — repo.head when the
+  // snapshot supplied it, otherwise the hub's own commit (bootHead ?? buildId).
   let uiDrift = false;
+  let uiDriftRef;
   if (!tabStale) {
     const left = hubUi !== null ? hubUi.commit : str(uiBuild["commit"]);
-    const right = repoHead !== null ? repoHead.commit : hubCommit;
-    if (left !== undefined && right !== undefined && compareCommit(left, right) === "differ") uiDrift = true;
+    if (repoHead !== null) {
+      if (left !== undefined && compareCommit(left, repoHead.commit) === "differ") {
+        uiDrift = true;
+        uiDriftRef = "repo";
+      }
+    } else if (hubCommit !== undefined) {
+      if (left !== undefined && compareCommit(left, hubCommit) === "differ") {
+        uiDrift = true;
+        uiDriftRef = "hub";
+      }
+    }
   }
 
   const agentOlder = card !== undefined && card["outdated"] === true;
@@ -288,7 +304,7 @@ export function versionMatch(input) {
   if (uiUnservable) findings.push({ code: "ui-unservable", level: "warn" });
   if (hubDiskChanged) findings.push({ code: "hub-disk-changed", level: "info" });
   if (hubOlder) findings.push({ code: "hub-older", level: "info" });
-  if (uiDrift) findings.push({ code: "ui-drift", level: "info" });
+  if (uiDrift) findings.push({ code: "ui-drift", level: "info", ref: uiDriftRef });
   if (agentOlder) findings.push({ code: "agent-older", level: "info" });
   if (agentNewer) findings.push({ code: "agent-newer", level: "info" });
   if (agentDrift) findings.push({ code: "agent-drift", level: "info" });

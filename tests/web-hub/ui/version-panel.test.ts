@@ -19,6 +19,7 @@ import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlC
 import { VERSION_CTX } from "../../../src/web-hub/ui/src/composables/useVersionInfo.js";
 import { useVersionInfo } from "../../../src/web-hub/ui/src/composables/useVersionInfo.js";
 import type { HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
+import { MESSAGES } from "../../../src/web-hub/ui/src/i18n/index.js";
 
 vi.stubGlobal("matchMedia", (query: string) => ({
   matches: false,
@@ -27,12 +28,31 @@ vi.stubGlobal("matchMedia", (query: string) => ({
   removeEventListener: () => {},
 }));
 
+/** R1 rework: per-test media override for the hover-peek tests — `(hover: hover) and
+ *  (pointer: fine)` and/or `(max-width: 480px)`; call `stubMedia({})` to restore the
+ *  all-false default the rest of this file assumes. */
+function stubMedia(opts: { hover?: boolean; phone?: boolean }): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches:
+      query === "(hover: hover) and (pointer: fine)"
+        ? opts.hover === true
+        : query === "(max-width: 480px)"
+          ? opts.phone === true
+          : false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+}
+
 const mounted: Array<ReturnType<typeof mount>> = [];
 function m<T>(wrapper: T): T {
   mounted.push(wrapper as unknown as ReturnType<typeof mount>);
   return wrapper;
 }
 afterEach(() => {
+  vi.useRealTimers();
+  stubMedia({}); // restore the all-false default media before the next test
   for (const w of mounted.splice(0)) w.unmount();
 });
 
@@ -192,20 +212,22 @@ describe("TopBar: version chip + dots", () => {
   });
 });
 
-describe("VersionPanel (popover body)", () => {
-  async function openPanel(handle: HubHandle) {
-    const wrapper = m(
-      mount(TopBar, {
-        props: { conn: "open", hubVersion: null, canSignOut: false },
-        global: { provide: { [HUB_CTX as symbol]: handle } },
-        attachTo: document.body,
-      }),
-    );
-    await wrapper.get(".version-chip").trigger("click");
-    await panelReady(wrapper);
-    return wrapper;
-  }
+/** Click-pins the version popover open (panel chunk awaited) — shared by the section tests
+ *  below and the R1 rework blocks at the end of this file. */
+async function openPanel(handle: HubHandle) {
+  const wrapper = m(
+    mount(TopBar, {
+      props: { conn: "open", hubVersion: null, canSignOut: false },
+      global: { provide: { [HUB_CTX as symbol]: handle } },
+      attachTo: document.body,
+    }),
+  );
+  await wrapper.get(".version-chip").trigger("click");
+  await panelReady(wrapper);
+  return wrapper;
+}
 
+describe("VersionPanel (popover body)", () => {
   it("renders all six sections in order; repo/changelog are collapsed <details>; changelog rides MarkdownView", async () => {
     const frame = capHub();
     const versionInfo = vi.fn(async () => ({ ok: true, data: wire(frame) }));
@@ -303,5 +325,239 @@ describe("VersionPanel (popover body)", () => {
     const commits = wrapper.findAll(".version-pop details")[0]!;
     expect(commits.text()).toContain("feat: x");
     expect(commits.find(".md").exists()).toBe(false); // commits are NOT markdown
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R1 rework (2026-10-17 user real-browser check): the popover behaves like QuotaPill's
+// QuotaCard / LoadPill's LoadCard — click = pinned, hover peek on hover-capable pointers only
+// (~150ms enter delay, ~200ms delayed close, card mouseenter keeps it open, phones never),
+// peek never steals focus, pin does. Fake timers drive the delays; only the card SHELL
+// (.version-pop, mounted synchronously with VersionHost) is asserted — the lazy panel chunk
+// needs real macro-tasks and is covered by the tests above.
+// ---------------------------------------------------------------------------
+describe("R1: version popover = QuotaPill-style pinned + hover peek", () => {
+  const baseProps = { conn: "open", hubVersion: null, canSignOut: false } as const;
+
+  function mountBar() {
+    const { handle } = rig(capHub());
+    const wrapper = m(
+      mount(TopBar, {
+        props: baseProps,
+        global: { provide: { [HUB_CTX as symbol]: handle } },
+        attachTo: document.body,
+      }),
+    );
+    return { wrapper, chip: wrapper.get(".version-chip") };
+  }
+
+  it("hover: 150ms enter delay opens the peek; leaving closes it after the ~200ms grace", async () => {
+    vi.useFakeTimers();
+    stubMedia({ hover: true });
+    const { wrapper, chip } = mountBar();
+    await chip.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(149);
+    expect(wrapper.find(".version-pop").exists()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(wrapper.find(".version-pop").exists()).toBe(true);
+    expect(chip.attributes("aria-expanded")).toBe("true");
+    await chip.trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(150);
+    expect(wrapper.find(".version-pop").exists()).toBe(true); // inside the close grace
+    await vi.advanceTimersByTimeAsync(60);
+    expect(wrapper.find(".version-pop").exists()).toBe(false);
+    expect(chip.attributes("aria-expanded")).toBe("false");
+  });
+
+  it("hover: the CARD's mouseenter cancels the pending close (chip→card traversal)", async () => {
+    vi.useFakeTimers();
+    stubMedia({ hover: true });
+    const { wrapper, chip } = mountBar();
+    await chip.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(150);
+    expect(wrapper.find(".version-pop").exists()).toBe(true);
+    await chip.trigger("mouseleave");
+    await wrapper.get(".version-pop").trigger("mouseenter"); // pointer now over the card
+    await vi.advanceTimersByTimeAsync(500);
+    expect(wrapper.find(".version-pop").exists()).toBe(true); // close cancelled
+    await wrapper.get(".version-pop").trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(wrapper.find(".version-pop").exists()).toBe(false);
+  });
+
+  it("a click on top of a live peek PINS it (mouseleave no longer closes; a second click closes)", async () => {
+    vi.useFakeTimers();
+    stubMedia({ hover: true });
+    const { wrapper, chip } = mountBar();
+    await chip.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(150);
+    expect(wrapper.find(".version-pop").exists()).toBe(true);
+    await chip.trigger("click"); // pin
+    await chip.trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(wrapper.find(".version-pop").exists()).toBe(true); // pinned survives the leave
+    await chip.trigger("click"); // unpin
+    expect(wrapper.find(".version-pop").exists()).toBe(false);
+  });
+
+  it("phones never auto-open on hover; hover-incapable pointers never peek either", async () => {
+    vi.useFakeTimers();
+    stubMedia({ hover: true, phone: true });
+    const a = mountBar();
+    await a.chip.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(a.wrapper.find(".version-pop").exists()).toBe(false);
+
+    stubMedia({ hover: false });
+    const b = mountBar();
+    await b.chip.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(b.wrapper.find(".version-pop").exists()).toBe(false);
+  });
+
+  it("a peek mount does NOT move focus; a fresh pinned (clicked-from-closed) mount focuses the card", async () => {
+    vi.useFakeTimers();
+    stubMedia({ hover: true });
+    document.body.focus();
+    const { wrapper, chip } = mountBar();
+    await chip.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(150);
+    const card = wrapper.get(".version-pop");
+    expect(document.activeElement).not.toBe(card.element); // QuotaCard's wasPeek rule
+    // pin-on-top-of-peek keeps the SAME mount (QuotaPill's toggle flips pinned/peek without a
+    // remount), so focus still has not moved — that is the reused pattern's own behavior.
+    await chip.trigger("click");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(wrapper.find(".version-pop").exists()).toBe(true);
+    expect(document.activeElement).not.toBe(wrapper.get(".version-pop").element);
+    // close, then a fresh CLICK-pin from the closed state mounts with wasPeek=false ⇒ focus-in.
+    await chip.trigger("click");
+    await vi.advanceTimersByTimeAsync(250); // let any pending peek timers drain
+    expect(wrapper.find(".version-pop").exists()).toBe(false);
+    stubMedia({ hover: false });
+    const pinned = mountBar();
+    await pinned.chip.trigger("click");
+    await vi.waitFor(
+      () => {
+        if (document.activeElement !== pinned.wrapper.get(".version-pop").element) throw new Error("focus not moved");
+      },
+      { timeout: 2000, interval: 10 },
+    );
+  });
+});
+
+// R1 rework #3: an absent `hub.ui` is 「无可服务的 UI 根」ONLY with the cap; on an old hub
+// (no `version.v1`) the absence proves nothing and the row must say 无法验证（hub 版本过旧）.
+describe("R1: 「hub 正在服务」 row wording by cap", () => {
+  async function servedText(hubFrame: Record<string, unknown>) {
+    const versionInfo = vi.fn(async () => ({
+      ok: true,
+      data: { v: 1, checkedAt: 1, hub: { pid: hubFrame["pid"], startedAt: hubFrame["startedAt"] } },
+    }));
+    const { handle } = rig(hubFrame, versionInfo);
+    const wrapper = await openPanel(handle);
+    const uiSection = wrapper.findAll(".version-pop .version-section").find((s) => s.text().includes("Served by hub"))!;
+    return uiSection.text();
+  }
+
+  it("old hub (no cap, no ui) ⇒ 无法验证（hub 版本过旧） — NOT 「无可服务的 UI 根」", async () => {
+    const text = await servedText(capHub({ caps: [], ui: undefined, bootHead: undefined }));
+    expect(text).toContain("unverifiable");
+    expect(text).toContain("older");
+    expect(text).not.toContain("no servable UI root");
+  });
+
+  it("cap present but ui absent ⇒ 无可服务的 UI 根 (the ui-unservable evidence wording)", async () => {
+    const text = await servedText(capHub({ ui: undefined }));
+    expect(text).toContain("no servable UI root");
+  });
+});
+
+// R1 rework #4: the ui-drift suggestion words by the reference the comparison ACTUALLY used —
+// repo.head (「与仓库 HEAD 不一致」) only when the snapshot supplied it; otherwise the hub's
+// own buildId commit (「与 hub 构建 commit 不一致」).
+describe("R1: ui-drift wording by comparison reference", () => {
+  it("no snapshot ⇒ the hub-commit reference wording, never 「repository HEAD」", async () => {
+    const frame = capHub({
+      ui: { ...capHub().ui, commit: "ddddddd444444" },
+      bootHead: undefined,
+    });
+    const versionInfo = vi.fn(async () => ({
+      ok: true,
+      data: { v: 1, checkedAt: 1, hub: { pid: frame["pid"], startedAt: frame["startedAt"] } },
+    }));
+    const { handle } = rig(frame, versionInfo);
+    const wrapper = await openPanel(handle);
+    const row = wrapper.get(".version-finding[data-level='info']");
+    expect(row.text()).toContain("hub's own build commit");
+    expect(row.text()).not.toContain("repository HEAD");
+  });
+
+  it("with a repo snapshot ⇒ the repository HEAD wording", async () => {
+    const frame = capHub({ bootHead: { commit: "aaaaaaa111111", time: 1 } });
+    const versionInfo = vi.fn(async () => ({
+      ok: true,
+      data: {
+        v: 1,
+        checkedAt: 1,
+        hub: { pid: frame["pid"], startedAt: frame["startedAt"] },
+        repo: { head: { commit: "bbbbbbb222222", time: 2 }, packageVersion: "0.5.5" },
+      },
+    }));
+    const { handle } = rig(frame, versionInfo);
+    const wrapper = await openPanel(handle);
+    const rows = wrapper
+      .findAll(".version-finding")
+      .map((r) => r.text())
+      .join("\n");
+    expect(rows).toContain("The UI build differs from the repository HEAD");
+  });
+});
+
+// R1 rework #2: every key family the version surfaces look up must resolve in BOTH locales —
+// the bug class is "template-literal key building misses the flat i18n definition" (the session
+// status badge rendered `version.sessionStatus.unknown` raw). Static-map coverage here; the
+// maps themselves live in VersionPanel.vue (asserted above through rendering).
+describe("R1: every version i18n key resolves in zh and en (no raw-key leaks)", () => {
+  const KEYS = [
+    "version.chipTitle",
+    "version.sessionStatusSame",
+    "version.sessionStatusOlder",
+    "version.sessionStatusNewer",
+    "version.sessionStatusDiffer",
+    "version.sessionStatusUnknown",
+    "version.statusSame",
+    "version.statusDiffer",
+    "version.statusUnknown",
+    "version.sectionErrorTimeout",
+    "version.sectionErrorUnavailable",
+    "version.sectionErrorGitTooOld",
+    "version.sectionErrorTooLarge",
+    "version.sectionErrorMissing",
+    "version.findingTabStale",
+    "version.findingUiUnservable",
+    "version.findingHubDiskChanged",
+    "version.findingHubOlder",
+    "version.findingUiDrift",
+    "version.findingUiDriftHub",
+    "version.findingAgentOlder",
+    "version.findingAgentNewer",
+    "version.findingAgentDrift",
+    "version.findingDirty",
+    "version.findingUnknown",
+    "version.uiServedNone",
+    "version.uiServedUnverifiable",
+  ];
+
+  it.each(KEYS)("key %s exists in en and zh with a real translation", (key) => {
+    const [ns, leaf] = key.split(".");
+    for (const lang of ["en", "zh"] as const) {
+      const dict = (MESSAGES[lang] as Record<string, Record<string, string>>)[ns!];
+      expect(dict, `${lang}:${ns}`).toBeDefined();
+      const raw = dict?.[leaf!];
+      expect(typeof raw).toBe("string");
+      expect(raw).not.toBe(key); // a raw-key fallback IS the bug
+      expect(raw!.length).toBeGreaterThan(0);
+    }
   });
 });

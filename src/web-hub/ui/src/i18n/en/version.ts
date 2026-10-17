@@ -36,6 +36,8 @@ export default {
   findingHubDiskChanged: "The repository on disk changed after the hub started.",
   findingHubOlder: "The hub is older than the package version on disk.",
   findingUiDrift: "The UI build differs from the repository HEAD — rebuilding the UI may help.",
+  findingUiDriftHub:
+    "The UI build differs from the hub's own build commit (no repository info available) — rebuilding the UI may help.",
   findingAgentOlder:
     "The selected session runs an older plugin version; /reload updates it (or relaunch it from the session list).",
   findingAgentNewer: "The selected session runs a newer plugin version than the hub.",
@@ -54,6 +56,7 @@ export default {
   uiTabAssets: "assets",
   uiServed: "Served by hub",
   uiServedNone: "none (no servable UI root)",
+  uiServedUnverifiable: "unverifiable (hub is older — no version info)",
   hubVersionLabel: "version",
   hubBuildLabel: "buildId",
   hubBootHeadLabel: "boot HEAD",
