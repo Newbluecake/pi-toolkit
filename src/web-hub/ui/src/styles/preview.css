@@ -807,3 +807,107 @@ button.preview-dir-row:focus-visible {
   padding: 0 var(--sp-1);
   font-size: var(--fs-xs);
 }
+
+/* ---------------------------------------- sandboxed HTML render (web-hub-html-preview plan v2 §5, P2) */
+/* The rendered half of an HTML-entry preview: action bar (new tab / stale hint / reload),
+ * the sandboxed iframe, its overlay spinner, and the standing sandbox note. */
+.preview-html {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.preview-html-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+}
+
+.preview-html-open {
+  color: var(--c-primary);
+  font-size: var(--fs-xs);
+  text-decoration: none;
+}
+
+.preview-html-open:hover,
+.preview-html-open:focus-visible {
+  text-decoration: underline;
+}
+
+.preview-html-stale {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.preview-html-reload {
+  padding: 2px var(--sp-2);
+}
+
+.preview-html-expired {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+  font-size: var(--fs-xs);
+}
+
+.preview-html-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+/* §5 sizing: desktop clamp, full-viewport-minus-header on mobile. The white background
+ * keeps a page's own body background from flashing through the rounded container. */
+.preview-html-frame {
+  display: block;
+  width: 100%;
+  height: clamp(320px, 72vh, 1400px);
+  border: 0;
+  background: #fff;
+}
+
+.preview-html-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+.preview-html-note {
+  margin: var(--sp-1) 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.preview-html-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+}
+
+.preview-html-error .preview-md-note {
+  flex: 1;
+}
+
+@media (max-width: 767px) {
+  .preview-html-frame {
+    height: calc(100dvh - var(--preview-header-h, 96px));
+  }
+}

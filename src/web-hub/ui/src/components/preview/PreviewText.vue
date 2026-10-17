@@ -31,17 +31,36 @@
   Never `content-visibility` (#11 Aw Snap) — source-scan pins it.
 -->
 <script setup lang="ts">
-import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  inject,
+  markRaw,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { resolveFileLang } from "@logic/highlight.js";
 import { createAnsiStripper, stripAnsi } from "@logic/ansi.js";
 import { parseMarkdown } from "@logic/markdown.js";
-import { countMdNodes, isMarkdownPath, prepareMarkdownPreview, PREVIEW_MD_NODE_MAX } from "@logic/preview.js";
+import {
+  countMdNodes,
+  isHtmlPath,
+  isMarkdownPath,
+  prepareMarkdownPreview,
+  PREVIEW_MD_NODE_MAX,
+} from "@logic/preview.js";
 import { createMarkdownSegmenter, createSourceSegmenter } from "@logic/previewStream.js";
 import CopyButton from "../detail/CopyButton.vue";
 import MdBlock from "../transcript/MdBlock.vue";
 import type { MdNode } from "../transcript/markdown-types.js";
 import HighlightedCode from "../shared/HighlightedCode.vue";
+import { HUB_CTX } from "../control/controlContext.js";
+import { PREVIEW_CTX } from "./previewContext.js";
 import type { PreviewTextStream } from "../../types.js";
 
 type SourceSegment = ReturnType<ReturnType<typeof createSourceSegmenter>["push"]>[number];
@@ -72,6 +91,56 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 const highlightLang = computed(() => resolveFileLang(props.filename ?? ""));
+
+// --- sandboxed HTML render (web-hub-html-preview plan v2 §5, package P2) ------------------
+// Lazy by design (§5 budget: the lazy JS budget is a 128 KiB gz TOTAL) — PreviewHtml and its
+// mint/iframe machinery never enter the first-screen bundle. Absent cap / absent transport /
+// non-`.html` path ⇒ `htmlOn` false ⇒ zero DOM change (plain source view, byte-identical).
+const PreviewHtml = defineAsyncComponent(() => import("./PreviewHtml.vue"));
+const previewCtx = inject(PREVIEW_CTX, null);
+const hub = inject(HUB_CTX, null);
+const isHtml = computed(() => isHtmlPath(props.path ?? props.filename ?? ""));
+const scope = computed(() => previewCtx?.handle.scope.value ?? null);
+const htmlOn = computed(() => isHtml.value && scope.value?.html === true && hub?.preview?.htmlCap !== undefined);
+/** The mint session pair — the scope is stable for an open dialog's lifetime (a scope change
+ *  closes it), exactly like PreviewHost's download derivation. */
+const htmlAgent = computed(() =>
+  htmlOn.value && scope.value !== null ? { agentKey: scope.value.agentKey, sessionId: scope.value.sessionId } : null,
+);
+/** A mint failure carries a one-line reason in the SOURCE view (403 dir-too-broad/upload ⇒ the
+ *  prose note; anything else ⇒ the generic line); 429/5xx/network/deadline add a retry that
+ *  flips back to rendered (remounting PreviewHtml ⇒ a fresh mint). */
+const htmlDenied = ref<{ status: number; error: string; reason?: string } | null>(null);
+const htmlRendered = computed(() => htmlAgent.value !== null && mode.value === "rendered");
+const htmlNoteText = computed(() => {
+  const err = htmlDenied.value;
+  if (err === null) return "";
+  if (err.reason === "dir-too-broad") return t("preview.htmlDenied.dirTooBroad");
+  if (err.reason === "upload") return t("preview.htmlDenied.upload");
+  return t("preview.htmlMintFailed", { code: err.error });
+});
+const htmlRetryable = computed(() => {
+  const err = htmlDenied.value;
+  if (err === null) return false;
+  return err.status === 429 || err.status >= 500 || err.error === "E_NETWORK" || err.error === "E_DEADLINE";
+});
+function onHtmlMintError(err: { status: number; error: string; reason?: string }): void {
+  htmlDenied.value = err;
+  mode.value = "source"; // §5: mint failure ⇒ fall back to source with a one-line reason
+}
+function retryHtml(): void {
+  htmlDenied.value = null;
+  mode.value = "rendered"; // remounts PreviewHtml ⇒ re-mint
+}
+/** The shared toggle handler: switching (back) to rendered clears a stale html mint-failure
+ *  note — the re-mount is itself the retry. */
+function onToggle(m: "rendered" | "source"): void {
+  mode.value = m;
+  if (m === "rendered" && htmlOn.value) htmlDenied.value = null;
+}
+/** B3 aria-pressed: md follows the complexity-capped effectiveMode; html follows `mode`
+ *  directly (no AST budget — the browser renders it, not the whitelist parser). */
+const pressedRendered = computed(() => (isMd.value ? effectiveMode.value === "rendered" : mode.value === "rendered"));
 
 // --- markdown mode (B1–B7) -------------------------------------------------------------
 const isMd = computed(() => isMarkdownPath(props.path ?? props.filename ?? ""));
@@ -274,9 +343,27 @@ watch(streamState, (st) => {
       }}</span>
     </p>
     <p v-if="mdTooComplex" class="preview-md-note" role="note">{{ t("preview.mdTooComplex") }}</p>
-    <!-- chunked stream: append-only segments + a 1px sentinel inside the scroll container -->
+    <!-- web-hub-html-preview §5: a failed html mint keeps the source view usable and explains
+         itself in one line (403 dir-too-broad/upload ⇒ the prose variant); retryable errors
+         get a retry that flips back to rendered (remount ⇒ re-mint). -->
+    <p v-if="htmlOn && htmlDenied !== null" class="preview-md-note" role="note">
+      <span>{{ htmlNoteText }}</span>
+      <button v-if="htmlRetryable" type="button" class="preview-stream-btn" @click="retryHtml">
+        {{ t("preview.retry") }}
+      </button>
+    </p>
+    <!-- chunked stream: append-only segments + a 1px sentinel inside the scroll container.
+         An html entry in rendered mode shows the sandboxed iframe instead (the iframe fetches
+         its own copy; the stream only feeds the SOURCE view + copy value). -->
     <template v-if="stream">
-      <div v-if="effectiveMode === 'rendered'" ref="scrollEl" class="preview-md md preview-stream" tabindex="0">
+      <PreviewHtml
+        v-if="htmlRendered"
+        :agent-key="htmlAgent!.agentKey"
+        :session-id="htmlAgent!.sessionId"
+        :path="path ?? filename ?? ''"
+        @mint-error="onHtmlMintError"
+      />
+      <div v-else-if="effectiveMode === 'rendered'" ref="scrollEl" class="preview-md md preview-stream" tabindex="0">
         <div v-for="seg in mdSegs" :key="seg.id" class="preview-seg">
           <template v-if="seg.kind === 'md'"><MdBlock :nodes="seg.nodes as MdNode[]" /></template
           ><template v-else
@@ -293,8 +380,18 @@ watch(streamState, (st) => {
       </div>
     </template>
     <template v-else>
+      <!-- rendered html: the sandboxed iframe (web-hub-html-preview §5) — lazy PreviewHtml -->
+      <PreviewHtml
+        v-if="htmlRendered"
+        :agent-key="htmlAgent!.agentKey"
+        :session-id="htmlAgent!.sessionId"
+        :path="path ?? filename ?? ''"
+        @mint-error="onHtmlMintError"
+      />
       <!-- rendered: `preview-md md` — `md` pulls in transcript.css's shared markdown typography -->
-      <div v-if="effectiveMode === 'rendered'" class="preview-md md" tabindex="0"><MdBlock :nodes="mdNodes!" /></div>
+      <div v-else-if="effectiveMode === 'rendered'" class="preview-md md" tabindex="0">
+        <MdBlock :nodes="mdNodes!" />
+      </div>
       <pre
         v-else
         class="preview-text-body"
@@ -337,27 +434,22 @@ watch(streamState, (st) => {
         {{ t("preview.streamRetry") }}
       </button>
       <div
-        v-if="isMd"
+        v-if="isMd || htmlOn"
         class="preview-toggle"
         role="group"
-        :aria-label="t('preview.viewToggleLabel')"
+        :aria-label="isMd ? t('preview.viewToggleLabel') : t('preview.htmlToggleLabel')"
         :title="mdTooComplex ? t('preview.mdTooComplex') : undefined"
       >
         <button
           type="button"
           class="preview-toggle-btn"
-          :aria-pressed="effectiveMode === 'rendered'"
+          :aria-pressed="pressedRendered"
           :disabled="mdTooComplex"
-          @click="mode = 'rendered'"
+          @click="onToggle('rendered')"
         >
           {{ t("preview.viewRendered") }}
         </button>
-        <button
-          type="button"
-          class="preview-toggle-btn"
-          :aria-pressed="effectiveMode === 'source'"
-          @click="mode = 'source'"
-        >
+        <button type="button" class="preview-toggle-btn" :aria-pressed="!pressedRendered" @click="onToggle('source')">
           {{ t("preview.viewSource") }}
         </button>
       </div>

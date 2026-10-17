@@ -84,6 +84,18 @@ const preview = {
   download: "Download",
   downloadFailed: "Download failed — retry.",
   unsupportedDownload: "This file type cannot be previewed — you can download it instead.",
+  // web-hub-html-preview plan v2 §5 (P2): the sandboxed HTML-entry render view. Prose copy
+  // only — no new compact inline markers join the HUD/badge vocabulary.
+  htmlToggleLabel: "HTML view mode",
+  htmlOpenTab: "Open in new tab",
+  htmlMaybeStale: "The preview may have expired — refresh if the page fails to load.",
+  htmlExpired: "The link has expired — reload to keep viewing.",
+  htmlReload: "Reload",
+  htmlLoadingSlow: "Still loading…",
+  htmlNote: "Page scripts run sandboxed: external network and files in this directory are reachable; the hub is not.",
+  htmlMintFailed: "Rendered preview unavailable ({code}) — showing source instead.",
+  "htmlDenied.dirTooBroad": "This file's directory is too broad (root / home) — source view only.",
+  "htmlDenied.upload": "HTML from the upload store cannot be rendered — source view only.",
 } satisfies Record<string, string>;
 
 export default preview;

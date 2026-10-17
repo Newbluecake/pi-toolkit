@@ -13,6 +13,7 @@ import {
   countMdNodes,
   findPathRefs,
   formatPreviewBytes,
+  isHtmlPath,
   isMarkdownPath,
   parentPreviewPath,
   parsePreviewDims,
@@ -531,6 +532,42 @@ describe("logic/preview.js previewScopeOf — the §4.6 truth table", () => {
         session: { sessionId: "s1" },
       }),
     ).toEqual({ agentKey: "A", sessionId: "s1", cwd: null, uploads: true });
+  });
+});
+
+describe("logic/preview.js — html scope (web-hub-html-preview plan v2 §5, package P2)", () => {
+  const session = { sessionId: "s1", cwd: "/x" };
+
+  it("previewScopeOf adds `html` ONLY when the caps carry preview.html.v1 (only-add-when-present)", () => {
+    expect(
+      previewScopeOf({ mode: "token", hubCaps: ["preview.v1"], hasTransport: true, agentKey: "A", session }),
+    ).not.toHaveProperty("html");
+    expect(
+      previewScopeOf({
+        mode: "token",
+        hubCaps: ["preview.v1", "preview.html.v1"],
+        hasTransport: true,
+        agentKey: "A",
+        session,
+      }),
+    ).toEqual({ agentKey: "A", sessionId: "s1", cwd: "/x", uploads: true, html: true });
+  });
+
+  it("scopeKeyOf appends `|html` only when the flag is present (cap change invalidates the scope)", () => {
+    const base = { agentKey: "A", sessionId: "s1", cwd: "/x", uploads: true };
+    expect(scopeKeyOf(base)).toBe("A|s1|/x");
+    expect(scopeKeyOf({ ...base, html: true })).toBe("A|s1|/x|html");
+  });
+
+  it("isHtmlPath mirrors the protocol's isHtmlEntryPath: .html/.htm case-insensitive, .xhtml/no-ext false", () => {
+    expect(isHtmlPath("/a/b/index.html")).toBe(true);
+    expect(isHtmlPath("/a/b/INDEX.HTML")).toBe(true);
+    expect(isHtmlPath("/a/b/x.htm")).toBe(true);
+    expect(isHtmlPath("/a/b/x.HtMl")).toBe(true);
+    expect(isHtmlPath("/a/b/page.xhtml")).toBe(false);
+    expect(isHtmlPath("/a/b/noext")).toBe(false);
+    expect(isHtmlPath("")).toBe(false);
+    expect(isHtmlPath(null as unknown)).toBe(false);
   });
 });
 

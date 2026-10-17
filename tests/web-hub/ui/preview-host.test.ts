@@ -1081,3 +1081,81 @@ describe("PreviewHost.vue — chunked preview (P2b)", () => {
     expect(reopen).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// web-hub-html-preview plan v2 §5 (P2): the html text phase holds the panel tall — the
+// rendered iframe is clamp(320px,72vh,1400px), so toggling rendered⇄source (or the mint
+// spinner between them) must not move the header buttons (the dir-phase `is-hold-tall`
+// mechanism). Gated on scope.html AND the transport's htmlCap: an absent cap keeps a
+// `.html` preview byte-identical (no class flip).
+// ---------------------------------------------------------------------------
+describe("PreviewHost.vue — html text phase holds the panel height (web-hub-html-preview §5)", () => {
+  const TEXT_VIEW = { phase: "text", path: "/p/index.html", text: "<p>x</p>", truncated: false, size: 8 };
+
+  function rigHtml(html: boolean, htmlCap: boolean) {
+    const view = ref(TEXT_VIEW as unknown as PreviewView) as Ref<PreviewView>;
+    const handle: PreviewHandle = {
+      view,
+      scope: ref(
+        html
+          ? ({ agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true, html: true } as never)
+          : ({ agentKey: "A", sessionId: "s1", cwd: "/p", uploads: true } as never),
+      ) as Ref<never>,
+      open: vi.fn(),
+      close: vi.fn(),
+      retry: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const hub = {
+      state: ref({ selected: "A", agents: new Map(), hub: { caps: ["preview.v1"] } }),
+      preview: {
+        fetch: () => Promise.resolve({ ok: true, kind: "text", text: "x", truncated: false, size: 1 }),
+        ...(htmlCap
+          ? {
+              htmlCap: () =>
+                Promise.resolve({
+                  ok: true,
+                  url: "/pv/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.html",
+                  openUrl: "/pvw/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  idleMs: 900_000,
+                  hardRemainingMs: 3_600_000,
+                }),
+            }
+          : {}),
+      },
+      dispatch: () => {},
+    };
+    mountWithHub({ handle, plaintext: false }, hub);
+    return view;
+  }
+
+  it("cap present ⇒ is-hold-tall from the very first html text phase", async () => {
+    rigHtml(true, true);
+    await tick();
+    const panel = document.querySelector(".preview-panel") as HTMLElement | null;
+    expect(panel!.classList.contains("is-hold-tall")).toBe(true);
+  });
+
+  it("cap absent (no scope.html or no transport htmlCap) ⇒ no class flip (pre-feature DOM)", async () => {
+    rigHtml(false, true);
+    await tick();
+    let panel = document.querySelector(".preview-panel") as HTMLElement | null;
+    expect(panel!.classList.contains("is-hold-tall")).toBe(false);
+    document.body.innerHTML = "";
+    rigHtml(true, false);
+    await tick();
+    panel = document.querySelector(".preview-panel") as HTMLElement | null;
+    expect(panel!.classList.contains("is-hold-tall")).toBe(false);
+  });
+
+  it("a non-html text phase never triggers the hold, cap or not", async () => {
+    const view = rigHtml(true, true);
+    // holdTall only ever SETS (the dir rule); a fresh open is what resets it.
+    view.value = { phase: "closed" } as PreviewView;
+    await tick();
+    view.value = { phase: "text", path: "/p/x.log", text: "y", truncated: false, size: 1 } as PreviewView;
+    await tick();
+    const panel = document.querySelector(".preview-panel") as HTMLElement | null;
+    expect(panel!.classList.contains("is-hold-tall")).toBe(false);
+  });
+});

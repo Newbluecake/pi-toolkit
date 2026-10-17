@@ -17,6 +17,7 @@ import type {
   VersionInfoOutcome,
   PasswordTransport,
   PreviewDownloadOutcome,
+  PreviewHtmlCapOutcome,
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
@@ -206,6 +207,10 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // preview-download: GET /api/preview?download=1 — same wrapper rule (the
       // `isRestAuthEndpoint` `/api/preview` prefix covers it); parity pinned by the shared suite.
       download: (req, opts) => client.preview.download(req, opts) as Promise<PreviewDownloadOutcome>,
+      // web-hub-html-preview plan v2 §5 (P2): POST /api/preview/html-cap — same wrapper rule
+      // (the `isRestAuthEndpoint` `/api/preview` prefix covers the mint path); parity pinned
+      // by the shared suite. One-shot by design in the client (a mint is not idempotent).
+      htmlCap: (req, opts) => client.preview.htmlCap(req, opts) as Promise<PreviewHtmlCapOutcome>,
     } satisfies PreviewTransport,
     worktreeDiff: {
       // worktree-diff plan v3.1 §4.6 (D4): thin casts over the logic client's wtdiff namespace.

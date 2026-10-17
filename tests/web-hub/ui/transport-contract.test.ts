@@ -1508,6 +1508,109 @@ describe("password transport: preview() 401 (one-shot — the cookie session is 
 });
 
 // ---------------------------------------------------------------------------
+// web-hub-html-preview plan v2 §2.1/§5 (package P2): the html-capability mint — same suite
+// both modes (T-U3's transport-parity half). One-shot POST by design: a mint is NOT
+// idempotent (§0 non-goals: every mint is a new cap), so NO 401 replay exists on either
+// adapter — the token client skips `withRelogin` and the password client was one-shot
+// already; the deadline is the hub's own 8 s mint budget (`PREVIEW_ADMIT_TOTAL_MS`).
+// ---------------------------------------------------------------------------
+const HTML_CAP_REQ = { agentKey: "A", sessionId: "s1", path: "/srv/site/index.html" };
+const HTML_CAP_URL = "/api/preview/html-cap?agentKey=A&sessionId=s1";
+const HTML_CAP_BODY = {
+  url: "/pv/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.html",
+  openUrl: "/pvw/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  idleMs: 900_000,
+  hardRemainingMs: 3_600_000,
+};
+
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: htmlCap (web-hub-html-preview §2.1/§5)", (_mode, make) => {
+  it("implements htmlCap on every adapter", () => {
+    expect(typeof make(async () => resp(200)).transport.preview?.htmlCap).toBe("function");
+  });
+
+  it("POST /api/preview/html-cap with X-PWH:1 + the verbatim {path} body; the 200 body rides as the ok half", async () => {
+    const h = make(async () => resp(200, HTML_CAP_BODY));
+    const out = await h.transport.preview!.htmlCap!(HTML_CAP_REQ, { signal: new AbortController().signal });
+    const call = h.fetchCalls.find((c) => c.url === HTML_CAP_URL);
+    expect(call).toBeDefined();
+    expect(call!.init.method).toBe("POST");
+    expect(call!.init.headers).toMatchObject({ "Content-Type": "application/json", "X-PWH": "1" });
+    expect(JSON.parse(call!.init.body as string)).toEqual({ path: "/srv/site/index.html" });
+    expect(out).toEqual({ ok: true, ...HTML_CAP_BODY });
+  });
+
+  it("a malformed 200 body (bad prefixes / non-finite TTLs) ⇒ local E_BAD_RESPONSE, status 0", async () => {
+    for (const bad of [
+      { ...HTML_CAP_BODY, url: "https://evil.example/x.html" },
+      { ...HTML_CAP_BODY, openUrl: "/pv/x" },
+      { ...HTML_CAP_BODY, idleMs: Number.POSITIVE_INFINITY },
+      { ...HTML_CAP_BODY, hardRemainingMs: "soon" },
+      { url: "/pv/a/b.html" },
+    ]) {
+      const h = make(async () => resp(200, bad));
+      expect(await h.transport.preview!.htmlCap!(HTML_CAP_REQ, { signal: new AbortController().signal })).toEqual({
+        ok: false,
+        status: 0,
+        error: "E_BAD_RESPONSE",
+      });
+    }
+  });
+
+  it("403 E_PREVIEW_DENIED keeps its reason verbatim (dir-too-broad / upload drive the source switch)", async () => {
+    const h = make(async () => resp(403, { error: "E_PREVIEW_DENIED", reason: "dir-too-broad" }));
+    expect(await h.transport.preview!.htmlCap!(HTML_CAP_REQ, { signal: new AbortController().signal })).toEqual({
+      ok: false,
+      status: 403,
+      error: "E_PREVIEW_DENIED",
+      reason: "dir-too-broad",
+    });
+  });
+
+  it("429 folds Retry-After into retryAfterS (§2.1 CSRF/rate surface, preview-namespace rule)", async () => {
+    const h = make(async () => resp(429, { error: "E_RATE" }, { "Retry-After": "7" }));
+    expect(await h.transport.preview!.htmlCap!(HTML_CAP_REQ, { signal: new AbortController().signal })).toEqual({
+      ok: false,
+      status: 429,
+      error: "E_RATE",
+      retryAfterS: 7,
+    });
+  });
+
+  it("8 s deadline (PREVIEW_ADMIT_TOTAL_MS): a hung fetch ⇒ E_DEADLINE, exactly one attempt", async () => {
+    const h = make(() => new Promise(() => {}));
+    const p = h.transport.preview!.htmlCap!(HTML_CAP_REQ, { signal: new AbortController().signal });
+    h.clock.advance(8_000);
+    expect(await p).toEqual({ ok: false, status: 0, error: "E_DEADLINE" });
+    expect(h.fetchCalls.filter((c) => c.url === HTML_CAP_URL)).toHaveLength(1);
+  });
+
+  it("a pre-aborted signal never issues the request at all", async () => {
+    const h = make(async () => resp(200, HTML_CAP_BODY));
+    const ac = new AbortController();
+    ac.abort();
+    expect(await h.transport.preview!.htmlCap!(HTML_CAP_REQ, { signal: ac.signal })).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_ABORT",
+    });
+    expect(h.fetchCalls.filter((c) => c.url === HTML_CAP_URL)).toHaveLength(0);
+  });
+
+  it("a 401 is NEVER replayed (mint is not idempotent): exactly one fetch attempt + exactly one onConn('auth')", async () => {
+    const h = make(async (url) => (url === HTML_CAP_URL ? resp(401, { error: "E_AUTH" }) : resp(200)));
+    const out = await h.transport.preview!.htmlCap!(HTML_CAP_REQ, { signal: new AbortController().signal });
+    expect(out).toEqual({ ok: false, status: 401, error: "E_AUTH" });
+    // token mode has a login endpoint + a stored-token relogin path — the NO-replay rule is
+    // the whole point; password mode was one-shot already. Both report auth exactly once.
+    expect(h.fetchCalls.filter((c) => c.url === HTML_CAP_URL)).toHaveLength(1);
+    expect(h.onConnCalls.filter((c) => c === "auth")).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // web-hub-preview 2026-10-07 修订「先探测后标记」: the probe method — same suite both modes.
 // Wire shape pinned against `hub/preview/probe.ts` + `routes.ts`'s handleProbe: POST
 // `${PREVIEW_PROBE_PATH}?agentKey&sessionId` with `{paths:[…]}` JSON + `X-PWH:"1"`, 200 body

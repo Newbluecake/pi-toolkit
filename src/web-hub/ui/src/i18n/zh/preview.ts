@@ -87,6 +87,18 @@ const preview = {
   download: "下载",
   downloadFailed: "下载失败 — 请重试。",
   unsupportedDownload: "该文件类型不支持预览 — 可直接下载。",
+  // web-hub-html-preview 计划 v2 §5（P2）：沙箱 HTML 入口预览。散文文案（zh）；紧凑标记
+  // （徽标/状态后缀）一律不在此处新增。
+  htmlToggleLabel: "HTML 显示方式",
+  htmlOpenTab: "新标签页打开",
+  htmlMaybeStale: "预览可能已过期 — 页面若加载失败，可刷新。",
+  htmlExpired: "链接已过期，刷新以继续加载。",
+  htmlReload: "重新加载",
+  htmlLoadingSlow: "仍在加载…",
+  htmlNote: "页面脚本在沙箱中运行，可访问外网与本目录文件，无法访问 hub。",
+  htmlMintFailed: "无法建立渲染预览（{code}）——已切换为源码显示。",
+  "htmlDenied.dirTooBroad": "该文件所在目录范围过大（根 / 家目录等），仅能以源码查看。",
+  "htmlDenied.upload": "上传存储中的 HTML 不支持渲染，仅能以源码查看。",
 } satisfies Messages<typeof en>;
 
 export default preview;

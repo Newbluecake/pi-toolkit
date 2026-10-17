@@ -120,6 +120,19 @@ describe("PreviewText.vue — markdown (dir-plan §4.1, PM package)", () => {
     }
   });
 
+  // web-hub-html-preview plan v2 §5 (P2): without PREVIEW_CTX/`html` cap a `.html` entry is
+  // exactly this shape too — the render/source toggle, the iframe and the mint call are all
+  // cap-gated (T-U2's no-cap half; the cap-present half lives in preview-html.test.ts).
+  it("an .html path without the html cap keeps the same plain-source DOM (no toggle, no mint)", () => {
+    const wrapper = mount(PreviewText, {
+      props: { text: "<p>plain</p>", truncated: false, filename: "index.html", path: "/p/index.html" },
+    });
+    expect(wrapper.find(".preview-toggle").exists()).toBe(false);
+    expect(wrapper.find(".preview-html").exists()).toBe(false);
+    expect(wrapper.get("pre.preview-text-body").text()).toBe("<p>plain</p>");
+    expect(wrapper.findAll("button")).toHaveLength(1); // just the copy button
+  });
+
   it("a truncated md drops its incomplete final line and shows the render-specific note", async () => {
     const wrapper = mount(PreviewText, {
       props: { text: "# Hi\nhalf lin", truncated: true, sizeLabel: "256.0 KiB", filename: "a.md", path: "/p/a.md" },

@@ -25,7 +25,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, provide, ref, watch } from "vue";
-import { childPreviewPath, clientImageBudget, parentPreviewPath } from "@logic/preview.js";
+import { childPreviewPath, clientImageBudget, isHtmlPath, parentPreviewPath } from "@logic/preview.js";
 import type { PreviewDirEntry } from "@protocol/preview.js";
 import { PREVIEW_DOWNLOAD_HUB_CAP } from "@protocol/version.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
@@ -79,6 +79,29 @@ watch(
 );
 const backDisabled = computed(() => nav.value === null || nav.value.stackDepth.value === 0);
 const upDisabled = computed(() => parentPreviewPath(path.value) === null);
+
+/** web-hub-html-preview plan v2 §5 (P2): an HTML entry in the text phase renders the tall
+ *  (`clamp(320px,72vh,1400px)`) sandboxed iframe — hold the panel tall through the SAME dir-
+ *  phase mechanism so toggling rendered⇄source (or a mint spinner) never moves the header
+ *  buttons. Gated on the cap AND the transport method: an absent cap keeps a `.html` preview
+ *  byte-identical to today (no class flip, same heights). Never resets by itself — like the
+ *  dir rule, only `closed` does (a taller-then-shorter dialog is the accepted trade-off). */
+const htmlHoldTall = computed(() => {
+  const v = view.value;
+  return (
+    v.phase === "text" &&
+    isHtmlPath(path.value) &&
+    ctx?.handle.scope.value?.html === true &&
+    hub?.preview?.htmlCap !== undefined
+  );
+});
+watch(
+  htmlHoldTall,
+  (on) => {
+    if (on) holdTall.value = true;
+  },
+  { immediate: true },
+);
 
 // §4.1/P3 (B6): the dialog's subtree re-provides PREVIEW_CTX with `open` mapped to
 // `navigate` — an in-dialog path ref click drills down (history push) instead of restarting

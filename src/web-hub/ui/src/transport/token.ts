@@ -23,6 +23,7 @@ import type {
   LoadTopOutcome,
   VersionInfoOutcome,
   PreviewDownloadOutcome,
+  PreviewHtmlCapOutcome,
   PreviewOutcome,
   PreviewProbeOutcome,
   PreviewTransport,
@@ -204,6 +205,12 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // client's `withRelogin` replay is side-effect free).
       download: (req, opts) =>
         withAuthNotice(deps, () => client.preview.download(req, opts) as Promise<PreviewDownloadOutcome>),
+      // web-hub-html-preview plan v2 §5 (P2): POST /api/preview/html-cap — same final-E_AUTH
+      // rule, but NO replay exists to fold in: the client's htmlCapPost is deliberately
+      // one-shot (a mint is not idempotent), so this is the single 401 observation point and
+      // `withAuthNotice` (never withRelogin) is exactly the right wrapper.
+      htmlCap: (req, opts) =>
+        withAuthNotice(deps, () => client.preview.htmlCap(req, opts) as Promise<PreviewHtmlCapOutcome>),
     } satisfies PreviewTransport,
     worktreeDiff: {
       // worktree-diff plan v3.1 §4.6 (D4): thin casts over the logic client's wtdiff

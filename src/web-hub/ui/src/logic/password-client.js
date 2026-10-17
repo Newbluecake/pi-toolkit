@@ -41,6 +41,7 @@ import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS, VERSION_INFO_CLIENT_TIM
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
   PREVIEW_CHUNK_QUERY,
+  PREVIEW_ADMIT_TOTAL_MS,
   PREVIEW_CLIENT_TIMEOUT_MS,
   PREVIEW_DIR_BODY_MAX_BYTES,
   PREVIEW_DOWNLOAD_CLIENT_TIMEOUT_MS,
@@ -1410,6 +1411,111 @@ export function createPasswordClient(deps) {
   }
 
   /**
+   * web-hub-html-preview plan v2 §2.1/§5 (P2): `POST /api/preview/html-cap?agentKey=&sessionId=` —
+   * the password-mode twin of the token client's `htmlCapPost` (§4.6's shared-wire rule:
+   * `transport-contract.test.ts` pins the two identical). One-shot like the rest of this
+   * client — a mint is NOT idempotent (§0: every mint is a new cap), so nothing retries; a
+   * 401 is a lost cookie session, reported by `transport/password.ts`'s fetch wrapper via
+   * `isRestAuthEndpoint` (its `/api/preview` prefix covers the mint path). 8 s deadline
+   * (`PREVIEW_ADMIT_TOTAL_MS`, the hub's own mint budget); the 200 body is the protocol's
+   * `PreviewHtmlCapResponseBody`, structurally validated (`url` `/pv/`-prefixed, `openUrl`
+   * `/pvw/`-prefixed, `idleMs`/`hardRemainingMs` finite ≥ 0) — any deviation ⇒ local
+   * `E_BAD_RESPONSE`. Non-200 bodies ride `previewOutcomeFromResponse` (a 403
+   * `E_PREVIEW_DENIED{reason}` keeps its `reason` verbatim).
+   * @param {{ agentKey: string, sessionId: string, path: string }} req
+   * @param {{ signal?: any }} [opts]
+   * @returns {Promise<any>}
+   */
+  async function htmlCapPost(req, opts) {
+    const signal = opts !== undefined ? opts.signal : undefined;
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      return { ok: false, status: 0, error: "E_ABORT" };
+    }
+    const url = `${API.previewHtmlCap}?agentKey=${encodeURIComponent(req.agentKey)}&sessionId=${encodeURIComponent(req.sessionId)}`;
+    const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
+    const ac = AC ? new AC() : undefined;
+    let expired = false;
+    /** @type {any} */
+    let deadlineTimer = null;
+    /** @type {Promise<never>} */
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = timer(() => {
+        expired = true;
+        ac?.abort();
+        reject(new Error("E_DEADLINE"));
+      }, PREVIEW_ADMIT_TOTAL_MS);
+    });
+    /** @type {(() => void) | null} */
+    let onExternalAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onExternalAbort = () => ac?.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    /** Fetch-level failure ⇒ local code (status 0). @param {unknown} e */
+    const fromError = (e) => {
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      if (expired || (e instanceof Error && e.message === "E_DEADLINE"))
+        return { ok: false, status: 0, error: "E_DEADLINE" };
+      return { ok: false, status: 0, error: "E_NETWORK" };
+    };
+    try {
+      /** @type {any} */
+      let r;
+      try {
+        r = await Promise.race([
+          deps.fetch(url, {
+            credentials: "same-origin",
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-PWH": "1" },
+            body: JSON.stringify({ path: req.path }),
+            ...(ac ? { signal: ac.signal } : {}),
+          }),
+          deadline,
+        ]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (!r.ok) {
+        const o = await previewOutcomeFromResponse(r);
+        /** @type {any} */
+        const out = { ok: false, status: o.status, error: o.error };
+        if (typeof o.reason === "string") out.reason = o.reason;
+        if (typeof o.retryAfterS === "number") out.retryAfterS = o.retryAfterS;
+        return out;
+      }
+      /** @type {any} */
+      let body;
+      try {
+        body = await Promise.race([r.json(), deadline]);
+      } catch (e) {
+        return fromError(e);
+      }
+      if (signal && signal.aborted === true) return { ok: false, status: 0, error: "E_ABORT" };
+      const b = body !== null && typeof body === "object" ? body : {};
+      if (
+        typeof b.url !== "string" ||
+        !b.url.startsWith("/pv/") ||
+        typeof b.openUrl !== "string" ||
+        !b.openUrl.startsWith("/pvw/") ||
+        typeof b.idleMs !== "number" ||
+        !Number.isFinite(b.idleMs) ||
+        b.idleMs < 0 ||
+        typeof b.hardRemainingMs !== "number" ||
+        !Number.isFinite(b.hardRemainingMs) ||
+        b.hardRemainingMs < 0
+      ) {
+        return { ok: false, status: 0, error: "E_BAD_RESPONSE" };
+      }
+      return { ok: true, url: b.url, openUrl: b.openUrl, idleMs: b.idleMs, hardRemainingMs: b.hardRemainingMs };
+    } finally {
+      deps.clearTimeout(deadlineTimer);
+      if (onExternalAbort !== null && signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
+    }
+  }
+
+  /**
    * preview-download: `GET /api/preview?download=1` — the SAME wire behavior as the token
    * client's `previewDownload` (`transport-contract.test.ts` pins the two identical),
    * one-shot like the rest of this client (a 401 is reported by the
@@ -1497,7 +1603,7 @@ export function createPasswordClient(deps) {
     }
   }
 
-  const preview = { fetch: previewFetch, probe: probePost, download: previewDownload };
+  const preview = { fetch: previewFetch, probe: probePost, download: previewDownload, htmlCap: htmlCapPost };
 
   // -------------------------------------------------------------------------
   // worktree-diff endpoints (worktree-diff plan v3.1 §1.2/§4.6, package D4)

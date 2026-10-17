@@ -91,12 +91,14 @@ import {
   validatePreviewIdent,
   validatePreviewPath,
 } from "@protocol/preview.ts";
+import { isHtmlEntryPath } from "@protocol/preview-html.ts";
 import {
   PREVIEW_ABS_HUB_CAP,
   PREVIEW_CHUNK_HUB_CAP,
   PREVIEW_DIR_HUB_CAP,
   PREVIEW_DOWNLOAD_HUB_CAP,
   PREVIEW_HUB_CAP,
+  PREVIEW_HTML_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
   PREVIEW_TILDE_HUB_CAP,
 } from "@protocol/version.ts";
@@ -105,12 +107,24 @@ import {
  * recognition; re-exported for existing importers. `PREVIEW_DOWNLOAD_HUB_CAP`
  * (preview-download) gates the probe's `files:true` opt-in — re-exported the same way.
  * chunked-plan §2.1 (P2a): `PREVIEW_CHUNK_HUB_CAP` gates the chunked continuation protocol
- * (D2 — without it the UI never sends `chunk=1`). */
-export { PREVIEW_TILDE_HUB_CAP, PREVIEW_DOWNLOAD_HUB_CAP, PREVIEW_CHUNK_HUB_CAP };
+ * (D2 — without it the UI never sends `chunk=1`). web-hub-html-preview plan v2 §5 (P2):
+ * `PREVIEW_HTML_HUB_CAP` gates the sandboxed HTML-entry render — re-exported for the
+ * components the same way. */
+export { PREVIEW_TILDE_HUB_CAP, PREVIEW_DOWNLOAD_HUB_CAP, PREVIEW_CHUNK_HUB_CAP, PREVIEW_HTML_HUB_CAP };
+
+/**
+ * web-hub-html-preview plan v2 §5: the UI-side HTML-entry predicate — a thin re-export of the
+ * protocol's own `isHtmlEntryPath` (P0 frozen surface: final segment ends `.html`/`.htm`,
+ * case-insensitive, `.xhtml` deliberately out) under the plan's `isHtmlPath` name, so the
+ * preview components never each re-derive the suffix test. An `.html` path stays in the TEXT
+ * phase (`GET /api/preview` unchanged); the render capability is purely additive on top.
+ * @param {string} p
+ */
+export const isHtmlPath = isHtmlEntryPath;
 
 /**
  * @typedef {{ agentKey: string, sessionId: string, cwd: string | null, uploads: boolean,
- *   abs?: true, dirs?: true, tilde?: true, files?: true, chunks?: true }} PathScope
+ *   abs?: true, dirs?: true, tilde?: true, files?: true, chunks?: true, html?: true }} PathScope
  * @typedef {{ kind: "text", text: string }
  *   | { kind: "ref", text: string, path: string, alt?: { text: string, path: string }, line?: number, col?: number }} PathSegment
  * @typedef {{ w: number, h: number }} PreviewDimsT
@@ -798,6 +812,10 @@ export function scopeKeyOf(scope) {
   if (scope.dirs === true) key += "|dir";
   if (scope.tilde === true) key += "|tilde";
   if (scope.files === true) key += "|file"; // preview-download — same invalidation rule as |dir
+  // web-hub-html-preview §5: `|html` joins the same way — a cap change (hub upgrade mid-session)
+  // invalidates the scope and closes any open preview, exactly like |dir/|file. Only appended
+  // when the cap is present, so pre-feature scopes keep their byte-identical key.
+  if (scope.html === true) key += "|html";
   return key;
 }
 
@@ -866,6 +884,11 @@ export function previewScopeOf(p) {
   // response stays byte-identical and no stream is ever built). Absent cap ⇒ absent key, the
   // same only-add-when-present rule as `abs`/`dirs`.
   if (caps.includes(PREVIEW_CHUNK_HUB_CAP)) scope.chunks = true;
+  // web-hub-html-preview plan v2 §5: `preview.html.v1` adds `html` — the text phase may offer
+  // the sandboxed rendered view (render/source toggle + `/pvw` new tab). Only-add-when-present
+  // like every cap flag above: a pre-feature hub's scopes stay deep-equal to before and
+  // `.html` paths keep rendering as plain source (byte-identical DOM).
+  if (caps.includes(PREVIEW_HTML_HUB_CAP)) scope.html = true;
   return scope;
 }
 
