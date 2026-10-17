@@ -42,6 +42,7 @@
 - **steer 撤回**（`webHub.steerRecall`，默认 `true`）：忙时发出的 steer / 追加消息先暂存，下一次队列清空前可在浏览器里撤回并改写。
 - 附件上传（`webHub.uploads`：`on` = 本机 + LAN，`loopback`，`off`；默认 `on`），整页拖放；上传的附件可被同一会话的查看者预览。
 - 高低版本 pi-toolkit 接入同一 hub 时自动版本替换，顶栏给升级提醒，不会来回切换。
+- **版本面板**：点击顶栏版本号，弹出 hub / 各会话后端的版本与提交、最近变更（CHANGELOG），以及网页 UI 与后端是否匹配；不一致时版本号旁亮小圆点，面板给出刷新页面或重建 UI 的命令。窄屏在设置页显示同一张卡片。
 - 会话切换保活：浏览器保留最近 K 个会话的订阅（本地偏好 `pwh_keepalive`，默认 3，`1` = 旧的单槽行为），切回时保留滚动位置。
 
 ## 托管会话（spawn）
@@ -62,7 +63,18 @@
 
 - 准入是"上传 + 任意绝对路径"：经认证的用户（LAN 也包括）可读 hub 进程 uid 能读且不在**凭据黑名单**里的任何文件，并浏览目录。这个范围是明确接受的单用户信任模型；黑名单只是尽力而为，不是白名单。
 - `"loopback"`：LAN 侧该端点不存在（与 `off` 在 LAN 上字节一致），本机仍可预览。
+- **HTML 渲染预览**：`.html` 文件可在「HTML 显示方式」里切换为渲染，或在新标签页打开。页面脚本在沙箱里运行（独立的不透明来源，拿不到 hub 的登录），可以访问外网和**同目录及子目录**的相对资源（CSS / JS / 图片）；所在目录过大（`/`、家目录、agent 目录）或位于上传存储里的 HTML 只能看源码。每次渲染用一次性能力链接，闲置 15 分钟 / 最长 60 分钟过期，登出、改密码、轮换 token 时立即失效。
 - 改动非 live：`/reload` 后 `/webhub restart`。
+
+## 本机端口代理
+
+`webHub.proxy.enabled`（默认 `false`）：在浏览器里打开 hub 所在机器（或其内网）上的 HTTP 服务，例如 `127.0.0.1:23434` 上的开发服务器、Jupyter、NAS 管理页。
+
+- 入口：顶栏「打开本机端口」对话框输入 `host:port` 或 http 地址；消息里出现的回环 / 内网地址链接也能直接点开。只允许回环与内网地址。
+- hub 为每个目标开一个专用代理端口（`webHub.proxy.portRange`，默认 `7900-7949`；`maxProxies` 默认 8），目标与端口的绑定是永久的，hub 重启后同一目标仍是同一端口。局域网访问开启时代理端口也在局域网监听，否则只在本机。
+- 安全：通过一次性链接进入后换成该端口专属的代理会话 Cookie（闲置 2 小时、最长 12 小时且不超过 hub 登录本身）；hub 的登录 Cookie 永远不会转发给上游，上游也清不掉 hub 的登录；写请求与 WebSocket 必须来自代理页面本身；登出、改密码、轮换 token 会同时关闭所有代理会话。支持 HTTP 和 WebSocket（HMR、Jupyter 内核等）。
+- 注意：同一主机下不同代理端口上的**应用自己的 Cookie** 可能互相可见（浏览器按主机而不是端口隔离 Cookie）；经 SSH 隧道访问 hub 时需同时转发代理端口范围；经反向代理访问 hub 时不支持。
+- 改动非 live：`/reload` 后 `/webhub restart`；`/webhub status` 显示代理状态与端口范围告警。真实浏览器验收步骤见 [acceptance](../dev/web-hub-proxy/acceptance.md)。
 
 ## 局域网访问与密码
 
@@ -79,4 +91,4 @@
 
 ## 设计文档
 
-[arch](../dev/web-hub/arch.md) · [control-plan](../dev/web-hub/control-plan.md) · [lan-plan](../dev/web-hub/lan-plan.md) · [vue-plan](../dev/web-hub/vue-plan.md) · [spawn](../dev/web-hub-spawn/) · [restore](../dev/web-hub-spawn-restore/plan.md) · [session-history](../dev/web-hub-session-history/plan.md) · [preview](../dev/web-hub-preview/) · [worktree-diff](../dev/worktree-diff/plan.md) · [worktree-graph](../dev/worktree-graph/plan.md) · [bash-jobs-panel](../dev/web-hub/bash-jobs-panel-plan.md) · [keepalive 面板](../dev/cache-ttl-keepalive/webhub-plan.md) · [privacy](../dev/web-hub-privacy/plan.md) · [avatar](../dev/web-hub-avatar/plan.md)
+[arch](../dev/web-hub/arch.md) · [control-plan](../dev/web-hub/control-plan.md) · [lan-plan](../dev/web-hub/lan-plan.md) · [vue-plan](../dev/web-hub/vue-plan.md) · [spawn](../dev/web-hub-spawn/) · [restore](../dev/web-hub-spawn-restore/plan.md) · [session-history](../dev/web-hub-session-history/plan.md) · [preview](../dev/web-hub-preview/) · [html-preview](../dev/web-hub-html-preview/plan.md) · [proxy](../dev/web-hub-proxy/plan.md) · [worktree-diff](../dev/worktree-diff/plan.md) · [worktree-graph](../dev/worktree-graph/plan.md) · [bash-jobs-panel](../dev/web-hub/bash-jobs-panel-plan.md) · [keepalive 面板](../dev/cache-ttl-keepalive/webhub-plan.md) · [privacy](../dev/web-hub-privacy/plan.md) · [avatar](../dev/web-hub-avatar/plan.md)

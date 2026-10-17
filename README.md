@@ -62,7 +62,7 @@ pi install .
 | 会话导航                  | `/resume-recent`、`/clear`、裸 `exit`，会话标题清洗。                                                                                                     | [tools](docs/guide/tools.md#会话导航)                            |
 | topic-switch              | 新请求与当前会话无关且缓存已冷时，建议开新会话。                                                                                                          | [tools](docs/guide/tools.md#topic-switch)                        |
 | 自动标题 / 延迟 `/reload` | 小模型生成会话标题；有 subagent 在跑时延后 `/reload`。                                                                                                    | [tools](docs/guide/tools.md#自动标题)                            |
-| Web Hub（可选）           | 浏览器查看与控制会话：网页发消息、`ask_user` 竞速、托管会话与恢复、预览、worktree diff / 图、LAN 密码、隐私锁。                                           | [web-hub](docs/guide/web-hub.md)                                 |
+| Web Hub（可选）           | 浏览器查看与控制会话：网页发消息、`ask_user` 竞速、托管会话与恢复、文件 / HTML 沙箱预览、本机端口代理、worktree diff / 图、版本面板、LAN 密码、隐私锁。   | [web-hub](docs/guide/web-hub.md)                                 |
 | 从独立插件迁移            | 旧插件的卸载与残留识别。                                                                                                                                  | [migration](docs/guide/migration.md)                             |
 
 ## 命令
