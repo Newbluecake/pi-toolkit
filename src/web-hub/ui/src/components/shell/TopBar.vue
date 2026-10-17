@@ -44,7 +44,7 @@
        the way they already flow through this component).
 -->
 <script setup lang="ts">
-import { computed, inject, onMounted, onUnmounted, provide, ref } from "vue";
+import { computed, defineAsyncComponent, inject, onMounted, onUnmounted, provide, ref } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import LangMenu from "./LangMenu.vue";
@@ -60,6 +60,7 @@ import { useVersionInfo, VERSION_CTX } from "../../composables/useVersionInfo.js
 import QuotaPill from "../quota/QuotaPill.vue";
 import { freshestQuota } from "@logic/quota.js";
 import LoadPill from "../load/LoadPill.vue";
+import { useProxyOpen } from "../../composables/useProxyOpen.js";
 
 const props = defineProps<TopBarProps>();
 const emit = defineEmits<TopBarEmits>();
@@ -171,6 +172,23 @@ const versionChipEl = ref<HTMLButtonElement | null>(null);
 const dotList = computed(() => {
   const d = versionInfo.match.value.dot;
   return d === null ? [] : [d];
+});
+
+/* web-hub-proxy plan v2 §8 (X2): ONE entry 「打开本机端口」, visible iff the hub advertises the proxy
+ * cap AND the transport implements it (`useProxyOpen().scope`). Same 0/1-item `v-for` trick as
+ * `quotaList` — no scope ⇒ ZERO extra DOM nodes (no `<!--v-if-->` anchor), so the TopBar stays
+ * byte-identical on a hub without the feature. The dialog is a lazy chunk (first-screen budget);
+ * a failed chunk load simply closes the dialog again. */
+const proxyHandle = useProxyOpen();
+const proxyList = computed(() => (proxyHandle.scope.value === null ? [] : [proxyHandle.scope.value]));
+const proxyOpen = ref(false);
+const ProxyDialog = defineAsyncComponent({
+  loader: () =>
+    import("../proxy/ProxyDialog.vue").catch((e: unknown) => {
+      proxyOpen.value = false;
+      throw e;
+    }),
+  timeout: 8000,
 });
 
 /* R1 rework (2026-10-17 user real-browser check): the version popover opens like QuotaPill's
@@ -313,6 +331,22 @@ onUnmounted(() => {
     <span v-else class="chip readonly-chip"><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span>
 
     <span class="topbar-spacer"></span>
+
+    <template v-for="sc in proxyList" :key="'proxy'">
+      <button
+        type="button"
+        class="btn btn-ghost btn-icon proxy-entry"
+        :data-lan="sc.lan ? 'true' : 'false'"
+        :aria-label="t('proxy.openBtn')"
+        :title="t('proxy.openBtnTitle')"
+        aria-haspopup="dialog"
+        :aria-expanded="proxyOpen"
+        @click="proxyOpen = true"
+      >
+        <AppIcon name="unplug" />
+      </button>
+      <ProxyDialog v-if="proxyOpen" @close="proxyOpen = false" />
+    </template>
 
     <LangMenu v-if="!phone" />
 

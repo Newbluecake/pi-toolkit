@@ -21,9 +21,13 @@
   composable. Without `probe` the legacy always-clickable behavior is byte-identical.
 -->
 <script setup lang="ts">
-import { computed, inject, watch } from "vue";
+import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import { findPathRefs, pathRefOfCode } from "@logic/preview.js";
+import { findProxyUrlRefs, isProxyableHref } from "@logic/proxy.js";
+import { useI18n } from "../../composables/useI18n.js";
+import { useProxyOpen } from "../../composables/useProxyOpen.js";
 import { PATH_REFERENCES_SUSPENDED, PREVIEW_CTX } from "./previewContext.js";
+import "../../styles/proxy.css";
 
 const props = defineProps<{
   readonly text: string;
@@ -37,6 +41,76 @@ const ctx = inject(PREVIEW_CTX, null);
 const suspended = inject(PATH_REFERENCES_SUSPENDED, null);
 
 const scope = computed(() => ctx?.handle.scope.value ?? null);
+
+/* web-hub-proxy plan v2 §8 (X2): local / private-LAN `http://` URLs become 「open via proxy」
+ * affordances — only with the hub's proxy cap (no scope ⇒ every branch below is untouched and
+ * the DOM is identical). Independent of the preview scope; suppressed while streaming / noRefs. */
+const { t } = useI18n();
+const proxy = useProxyOpen();
+const proxyActive = computed(() => proxy.scope.value !== null && props.noRefs !== true && suspended?.value !== true);
+const NOTE_MS = 8000;
+const note = ref<{ href: string; key: string | null; url: string | null } | null>(null);
+const noteList = computed(() => (note.value === null ? [] : [note.value]));
+let noteTimer: ReturnType<typeof setTimeout> | undefined;
+
+function clearNote(): void {
+  if (noteTimer !== undefined) clearTimeout(noteTimer);
+  noteTimer = undefined;
+  note.value = null;
+}
+
+/** MUST run synchronously inside the click handler: `proxy.open` calls `window.open` before awaiting. */
+function openProxy(href: string): void {
+  clearNote();
+  void proxy.open(href).then(() => {
+    const key = proxy.errorKey.value;
+    const url = proxy.fallbackUrl.value;
+    if (key === null && url === null) return;
+    note.value = { href, key, url };
+    noteTimer = setTimeout(clearNote, NOTE_MS);
+  });
+}
+onBeforeUnmount(() => {
+  clearNote();
+  proxy.clear();
+});
+
+function onProxyKeydown(ev: KeyboardEvent, href: string): void {
+  if (ev.key === "Enter" || ev.key === " ") {
+    ev.preventDefault();
+    openProxy(href);
+  }
+}
+
+type PSeg =
+  | { kind: "text"; text: string }
+  | { kind: "ref"; text: string; path: string }
+  | { kind: "proxy"; text: string; href: string };
+/** Path-ref segments (or one plain segment) with their text parts split on proxy URLs; `null` when
+ * no URL matched at all (⇒ the legacy rendering, byte-identical). */
+const proxySegments = computed<PSeg[] | null>(() => {
+  if (!proxyActive.value || props.code === true) return null;
+  const base: Segments = plain.value ? [{ kind: "text", text: props.text }] : renderedSegments.value;
+  let found = false;
+  const out: PSeg[] = [];
+  for (const seg of base) {
+    if (seg.kind !== "text") {
+      out.push(seg as PSeg);
+      continue;
+    }
+    for (const p of findProxyUrlRefs(seg.text)) {
+      if (p.kind === "ref") {
+        found = true;
+        out.push({ kind: "proxy", text: p.text, href: p.href });
+      } else out.push({ kind: "text", text: p.text });
+    }
+  }
+  return found ? out : null;
+});
+/** Inline code that is exactly one proxyable URL (`` `http://127.0.0.1:3000` ``). */
+const codeProxyHref = computed(() =>
+  props.code === true && proxyActive.value && isProxyableHref(props.text) ? props.text : null,
+);
 
 /** The §4.6 DOM-equivalence condition: any of these ⇒ render exactly like today. */
 const plain = computed(
@@ -126,6 +200,16 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
     @keydown="onRefKeydown($event, codeRef.path)"
     >{{ text }}</code
   >
+  <code
+    v-else-if="codeProxyHref !== null"
+    class="md-code proxy-ref"
+    role="button"
+    tabindex="0"
+    :title="t('proxy.refTitle')"
+    @click="openProxy(codeProxyHref)"
+    @keydown="onProxyKeydown($event, codeProxyHref)"
+    >{{ text }}</code
+  >
   <code v-else-if="code === true" class="md-code"
     ><template v-for="(seg, i) in renderedSegments" :key="i"
       ><span
@@ -139,6 +223,30 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
       ><template v-else>{{ seg.text }}</template></template
     ><template v-if="renderedSegments.length === 0">{{ text }}</template></code
   >
+  <template v-else-if="proxySegments !== null">
+    <template v-for="(seg, i) in proxySegments" :key="i">
+      <span
+        v-if="seg.kind === 'proxy'"
+        class="proxy-ref"
+        role="button"
+        tabindex="0"
+        :title="t('proxy.refTitle')"
+        @click="openProxy(seg.href)"
+        @keydown="onProxyKeydown($event, seg.href)"
+        >{{ seg.text }}</span
+      >
+      <span
+        v-else-if="seg.kind === 'ref' && clickable(seg.path)"
+        class="path-ref"
+        role="button"
+        tabindex="0"
+        @click="openPath(seg.path)"
+        @keydown="onRefKeydown($event, seg.path)"
+        >{{ seg.text }}</span
+      >
+      <template v-else>{{ seg.text }}</template>
+    </template>
+  </template>
   <template v-else-if="plain || segments === null">{{ text }}</template>
   <template v-else>
     <template v-for="(seg, i) in renderedSegments" :key="i">
@@ -154,4 +262,11 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
       <template v-else>{{ seg.text }}</template>
     </template>
   </template>
+  <span v-for="n in noteList" :key="'proxy-note'" class="proxy-ref-note" role="status"
+    ><template v-if="n.key !== null">{{ t(n.key) }}</template
+    ><template v-else-if="n.url !== null"
+      >{{ t("proxy.blockedNote") }}
+      <a :href="n.url" target="_blank" rel="noopener noreferrer">{{ t("proxy.blockedLink") }}</a></template
+    ></span
+  >
 </template>

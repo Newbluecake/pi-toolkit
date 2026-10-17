@@ -37,7 +37,22 @@
  *   password-mode 401 means the cookie session is gone and is surfaced as `E_AUTH` (the
  *   `transport/password.ts` wrapper maps it to `onConn("auth")` via REST_AUTH_PATHS).
  */
-import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS, VERSION_INFO_CLIENT_TIMEOUT_MS } from "./contract.js";
+import {
+  API,
+  HISTORY_LIMIT_MAX,
+  PROXY_CLIENT_TIMEOUT_MS,
+  SILENCE_MS,
+  SSE_EVENTS,
+  VERSION_INFO_CLIENT_TIMEOUT_MS,
+} from "./contract.js";
+import {
+  PROXY_LIST_BODY_MAX_BYTES,
+  PROXY_OPEN_BODY_MAX_BYTES,
+  parseProxyList,
+  parseProxyOpen,
+  parseProxyStop,
+  proxyFetch,
+} from "./proxy.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
   PREVIEW_CHUNK_QUERY,
@@ -2031,6 +2046,44 @@ export function createPasswordClient(deps) {
     lock: (req) => privacyPost(API.privacyLock, req),
   };
 
+  // -------------------------------------------------------------------------
+  // web-hub-proxy plan v2 §3.8/§8 (X2): the three proxy endpoints — one-shot calls, no relogin
+  // dance (a 401 is a lost cookie session, reported by transport/password.ts's fetch wrapper
+  // via `REST_AUTH_PATHS` exact-match entries — never inside the client).
+  // -------------------------------------------------------------------------
+  /** @param {string} path @param {unknown} body @param {(raw: unknown) => any} parse @param {number} max @param {any} [signal] */
+  function proxyPost(path, body, parse, max, signal) {
+    return proxyFetch(
+      () =>
+        request(
+          path,
+          { method: "POST", headers: { "Content-Type": "application/json", "X-PWH": "1" }, body: JSON.stringify(body) },
+          PROXY_CLIENT_TIMEOUT_MS,
+          signal,
+        ),
+      parse,
+      max,
+      signal,
+    );
+  }
+  const proxy = {
+    /** @param {{ target: string }} req @param {{ signal?: any }} [opts] */
+    open: (req, opts) =>
+      proxyPost(API.proxyOpen, { target: req.target }, parseProxyOpen, PROXY_OPEN_BODY_MAX_BYTES, opts?.signal),
+    /** @param {{ signal?: any }} [opts] */
+    list: (opts) =>
+      proxyFetch(
+        () =>
+          request(API.proxyList, { method: "GET", headers: { "X-PWH": "1" } }, PROXY_CLIENT_TIMEOUT_MS, opts?.signal),
+        parseProxyList,
+        PROXY_LIST_BODY_MAX_BYTES,
+        opts?.signal,
+      ),
+    /** @param {string} instanceId @param {{ signal?: any }} [opts] */
+    stop: (instanceId, opts) =>
+      proxyPost(API.proxyStop, { instanceId }, parseProxyStop, PROXY_OPEN_BODY_MAX_BYTES, opts?.signal),
+  };
+
   return {
     /** Clear a stray `#t=` (never read/sent in password mode), fetch session info, then open the stream. */
     async start() {
@@ -2061,6 +2114,7 @@ export function createPasswordClient(deps) {
     versionInfo,
     avatar,
     privacy,
+    proxy,
     close() {
       closed = true;
       closeStream();

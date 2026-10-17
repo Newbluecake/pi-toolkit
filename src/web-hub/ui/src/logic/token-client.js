@@ -20,7 +20,22 @@
  * timeout the outcome is `E_DEADLINE{effect:"unknown"}` — never auto re-executed, the
  * queryOnly flow (§3.4) decides.
  */
-import { API, HISTORY_LIMIT_MAX, SILENCE_MS, SSE_EVENTS, VERSION_INFO_CLIENT_TIMEOUT_MS } from "./contract.js";
+import {
+  API,
+  HISTORY_LIMIT_MAX,
+  PROXY_CLIENT_TIMEOUT_MS,
+  SILENCE_MS,
+  SSE_EVENTS,
+  VERSION_INFO_CLIENT_TIMEOUT_MS,
+} from "./contract.js";
+import {
+  PROXY_LIST_BODY_MAX_BYTES,
+  PROXY_OPEN_BODY_MAX_BYTES,
+  parseProxyList,
+  parseProxyOpen,
+  parseProxyStop,
+  proxyFetch,
+} from "./proxy.js";
 import { outcomeFromError, outcomeFromResponse } from "./control.js";
 import {
   PREVIEW_CHUNK_QUERY,
@@ -1793,6 +1808,41 @@ export function createClient(deps) {
     lock: (req) => privacyPost(API.privacyLock, req),
   };
 
+  // -------------------------------------------------------------------------
+  // web-hub-proxy plan v2 §3.8/§8 (X2): `POST /api/proxy/open` · `GET /api/proxy` ·
+  // `POST /api/proxy/stop`. Every call is one request through `withRelogin` (a 401 means the
+  // request was never processed, so the replay after a silent re-login is safe); the response
+  // is folded by `proxyFetch` and gated by the `parseProxy*` contract parsers.
+  // -------------------------------------------------------------------------
+  /** @param {string} path @param {unknown} body @param {(raw: unknown) => any} parse @param {number} max @param {any} [signal] */
+  function proxyPost(path, body, parse, max, signal) {
+    return proxyFetch(
+      () => withRelogin(() => postRaw(path, body, PROXY_CLIENT_TIMEOUT_MS, signal)),
+      parse,
+      max,
+      signal,
+    );
+  }
+  const proxy = {
+    /** @param {{ target: string }} req @param {{ signal?: any }} [opts] */
+    open: (req, opts) =>
+      proxyPost(API.proxyOpen, { target: req.target }, parseProxyOpen, PROXY_OPEN_BODY_MAX_BYTES, opts?.signal),
+    /** @param {{ signal?: any }} [opts] */
+    list: (opts) =>
+      proxyFetch(
+        () =>
+          withRelogin(() =>
+            request(API.proxyList, { method: "GET", headers: { "X-PWH": "1" } }, PROXY_CLIENT_TIMEOUT_MS, opts?.signal),
+          ),
+        parseProxyList,
+        PROXY_LIST_BODY_MAX_BYTES,
+        opts?.signal,
+      ),
+    /** @param {string} instanceId @param {{ signal?: any }} [opts] */
+    stop: (instanceId, opts) =>
+      proxyPost(API.proxyStop, { instanceId }, parseProxyStop, PROXY_OPEN_BODY_MAX_BYTES, opts?.signal),
+  };
+
   return {
     /** Log in from the URL fragment (if any), then open the single SSE stream. */
     async start() {
@@ -1900,6 +1950,7 @@ export function createClient(deps) {
     versionInfo,
     avatar,
     privacy,
+    proxy,
     close() {
       closed = true;
       if (watchdog !== null) deps.clearTimeout(watchdog);

@@ -29,6 +29,10 @@ import type {
   PreviewTransport,
   PrivacyOutcome,
   PrivacyTransport,
+  ProxyListFetchOutcome,
+  ProxyOpenFetchOutcome,
+  ProxyStopFetchOutcome,
+  ProxyTransport,
   RemoveAgentOutcome,
   RemoveTarget,
   Result,
@@ -259,5 +263,13 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       verify: (password) => withAuthNotice(deps, () => client.privacy.verify(password) as Promise<PrivacyOutcome>),
       lock: (req) => withAuthNotice(deps, () => client.privacy.lock(req) as Promise<PrivacyOutcome>),
     } satisfies PrivacyTransport,
+    // web-hub-proxy plan v2 §8 (X2): thin casts over the logic client's `proxy` namespace — same
+    // final-E_AUTH rule as privacy above (the client replays once through `withRelogin` on a
+    // 401). Error bodies (`E_PROXY_DENIED{reason}` etc.) ride verbatim; never retried here.
+    proxy: {
+      open: (req, opts) => withAuthNotice(deps, () => client.proxy.open(req, opts) as Promise<ProxyOpenFetchOutcome>),
+      list: (opts) => withAuthNotice(deps, () => client.proxy.list(opts) as Promise<ProxyListFetchOutcome>),
+      stop: (id, opts) => withAuthNotice(deps, () => client.proxy.stop(id, opts) as Promise<ProxyStopFetchOutcome>),
+    } satisfies ProxyTransport,
   } satisfies HubTransport;
 }

@@ -23,6 +23,10 @@ import type {
   PreviewTransport,
   PrivacyOutcome,
   PrivacyTransport,
+  ProxyListFetchOutcome,
+  ProxyOpenFetchOutcome,
+  ProxyStopFetchOutcome,
+  ProxyTransport,
   RemoveAgentOutcome,
   RemoveTarget,
   Result,
@@ -98,6 +102,11 @@ const REST_AUTH_PATHS: ReadonlySet<string> = new Set([
   // a lost cookie session — exact-match entries like `agentRemove`/`loadTop` above.
   API.privacyVerify,
   API.privacyLock,
+  // web-hub-proxy plan v2 §8 (X2): the three proxy endpoints have no query params — exact-match
+  // entries (`/api/proxy` must NOT become a prefix rule, it would swallow unrelated paths).
+  API.proxyOpen,
+  API.proxyList,
+  API.proxyStop,
 ]);
 
 function isRestAuthEndpoint(url: string): boolean {
@@ -251,5 +260,13 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       verify: (password) => client.privacy.verify(password) as Promise<PrivacyOutcome>,
       lock: (req) => client.privacy.lock(req) as Promise<PrivacyOutcome>,
     } satisfies PrivacyTransport,
+    // web-hub-proxy plan v2 §8 (X2): thin casts over the logic client's `proxy` namespace. 401 ⇒
+    // onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has exact-match
+    // entries for the three proxy paths) — never inside the client, so nothing double-fires.
+    proxy: {
+      open: (req, opts) => client.proxy.open(req, opts) as Promise<ProxyOpenFetchOutcome>,
+      list: (opts) => client.proxy.list(opts) as Promise<ProxyListFetchOutcome>,
+      stop: (id, opts) => client.proxy.stop(id, opts) as Promise<ProxyStopFetchOutcome>,
+    } satisfies ProxyTransport,
   } satisfies PasswordTransport;
 }

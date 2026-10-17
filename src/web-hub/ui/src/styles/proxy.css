@@ -1,0 +1,33 @@
+/*
+ * proxy.css — web-hub-proxy plan v2 §8 (package X2), first-screen part: the clickable local /
+ * private URL affordance in messages (`.proxy-ref`, mirrors `.path-ref`) and its inline status
+ * note. Rendered ONLY when the hub advertises the proxy cap. Token-driven only.
+ */
+.proxy-ref {
+  color: var(--c-primary);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  border-radius: var(--r-xs);
+  overflow-wrap: anywhere;
+}
+
+.proxy-ref:hover {
+  background: var(--c-primary-soft);
+  text-decoration-style: solid;
+}
+
+.proxy-ref:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.proxy-ref-note {
+  margin-inline-start: var(--sp-1);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
+.proxy-ref-note a {
+  color: var(--c-primary);
+}
