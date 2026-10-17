@@ -72,13 +72,28 @@ import type {
   FleetRowWire,
 } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
-import { createAuth, readCookie, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
+import { createAuth, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
+import {
+  clearingSetCookies,
+  cookieCandidates,
+  COOKIE_CONFLICT_REASON,
+  LAN_COOKIE_MAX,
+  lanIdentity,
+  lanRecordValid,
+  loopbackIdentity,
+  LOOPBACK_COOKIE_MAX,
+  resolveCookieIdentity,
+  type AuthIdentity,
+  type IdentityResult,
+  type LanSessionResult,
+} from "./auth-identity.js";
+import { createAuthRevokeBus, type AuthRevokeBus } from "./auth-revoke.js";
 import { auditControl, auditUpload, type UploadHttpMetrics } from "./audit.js";
 import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import { createConnGuard } from "./conn-guard.js";
 import { createFileSearchRoutes, FILE_SEARCH_AUTH_RESERVE_MS, FILE_SEARCH_PATH } from "./file-search.js";
 import type { AgentRemoveFrontendPort, AgentRemoveIo } from "./agent-remove.js";
-import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
+import { formatLanCookie, hashSid, LAN_SESSION_COOKIE, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
@@ -1019,6 +1034,13 @@ function createRouteSet(
 
 export interface LanRuntime {
   lan: LanFrontendDeps;
+  /** web-hub-proxy plan §4.2 (XA): the frontend-wide auth revocation bus (same instance as the
+   * loopback listener's) — every LAN revoke site `emit`s here instead of calling the preview
+   * hook directly. */
+  authRevoke: AuthRevokeBus;
+  /** §4.1 (XA): `pwh_lan` candidate cap. Absent/1 ⇒ first-value, byte-identical to pre-XA;
+   * `LAN_COOKIE_MAX` only when the frontend's `multiCandidateAuth` option is on. */
+  lanCookieMax?: number;
   routes: RouteSet;
   lanSse: SseHub;
   ui: UiServer;
@@ -1298,12 +1320,31 @@ function clearAbsoluteExpiry(rt: LanRuntime, clientId: string): void {
   rt.absoluteExpiryTimers.delete(clientId);
 }
 
-interface LanSessionResult {
-  userId: number;
-  epoch: number;
-  sidHash: string;
-  /** §4.2 review fix (LC #1): threaded through so `/api/events` can arm `scheduleAbsoluteExpiry`. */
-  absoluteExpiresAt: number;
+/** What `requireLanSession` resolves to: the historical fields every route consumer reads, plus
+ * the single `AuthIdentity` (§4.1) built from the SAME resolution — nothing re-parses the cookie. */
+interface LanAuthed extends LanSessionResult {
+  identity: AuthIdentity;
+}
+
+/** Thrown from inside the candidate validator to abort the whole resolution with a terminal error
+ * (429 busy / 503 db) — fail closed, never "try the next candidate". */
+class LanAuthFailure extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super(code);
+  }
+}
+
+/** web-hub-proxy §4.1: the 401 `cookie-conflict` answer (loopback + LAN). `Set-Cookie` clearing
+ * lines are BEST-EFFORT (a shadow cookie with a non-segment Path or a parent Domain is not named);
+ * the body's `reason` lets the UI show its manual-recovery copy. */
+function sendCookieConflict(res: ServerResponse, req: IncomingMessage, cookieName: string, secure: boolean): void {
+  if (res.headersSent || res.destroyed) return;
+  const lines = clearingSetCookies(cookieName, req.url ?? "/", req.headers.host, { secure });
+  res.setHeader("Set-Cookie", lines);
+  sendJson(res, 401, { error: "E_AUTH", reason: COOKIE_CONFLICT_REASON });
 }
 
 /** §2.5 step 5's "需要会话" gate: per-clientIP inflight quota → (for `/api/events`) SSE
@@ -1330,7 +1371,7 @@ async function requireLanSession(
    * audit line — this function keeps sending the response itself either way, this is purely an
    * out-param for audit correlation. */
   authFailure?: { code?: string },
-): Promise<LanSessionResult | undefined> {
+): Promise<LanAuthed | undefined> {
   const fail = (status: number, code: string): undefined => {
     if (authFailure !== undefined) authFailure.code = code;
     sendError(res, status, code);
@@ -1351,45 +1392,68 @@ async function requireLanSession(
   res.once("close", release);
   res.once("finish", release);
 
-  const sid = readLanCookie(req.headers.cookie);
-  if (sid === undefined) {
-    release();
-    return fail(401, "E_AUTH");
-  }
-  const sidHash = hashSid(sid);
-
-  if (isSseRoute) {
-    const perSid = rt.lanSse.list().filter((c) => c.auth?.sidHash === sidHash).length;
-    if (rt.lanSse.count() >= LAN_SSE_GLOBAL_CAP || perSid >= LAN_SSE_PER_SID_CAP) {
-      release();
-      return fail(429, "E_RATE");
-    }
-  }
-
-  const touched = sharedTouchSession(rt, sidHash);
-  let rec: LanSessionRecord | undefined;
-  if (touched === "busy") {
-    release();
-    return fail(429, "E_RATE");
-  }
+  // §4.1 (XA): the ONE resolution of `pwh_lan`. `max === 1` (default) is the legacy first-value
+  // path — same checks, same order, same IPC as before (no cookie ⇒ 401 before anything else; SSE
+  // caps before `touchSession`; busy/db/deadline ⇒ the same 429/503; expired/origin ⇒ 401).
+  const resolveStarted = Date.now();
+  let resolution;
   try {
-    rec = authDeadlineMs === undefined ? await touched : await raceDeadline(touched, authDeadlineMs);
+    resolution = await resolveCookieIdentity(
+      req.headers.cookie,
+      LAN_SESSION_COOKIE,
+      rt.lanCookieMax ?? 1,
+      async (sid, index) => {
+        const sidHash = hashSid(sid);
+        if (isSseRoute) {
+          const perSid = rt.lanSse.list().filter((c) => c.auth?.sidHash === sidHash).length;
+          if (rt.lanSse.count() >= LAN_SSE_GLOBAL_CAP || perSid >= LAN_SSE_PER_SID_CAP) {
+            throw new LanAuthFailure(429, "E_RATE");
+          }
+        }
+        const touched = sharedTouchSession(rt, sidHash);
+        if (touched === "busy") throw new LanAuthFailure(429, "E_RATE");
+        let rec: LanSessionRecord | undefined;
+        try {
+          // one shared budget across candidates: the first gets the full `authDeadlineMs`
+          rec =
+            authDeadlineMs === undefined
+              ? await touched
+              : await raceDeadline(
+                  touched,
+                  index === 0 ? authDeadlineMs : Math.max(1, authDeadlineMs - (Date.now() - resolveStarted)),
+                );
+        } catch (err) {
+          rt.log.error("web-hub lan http: touchSession failed", { error: String(err) });
+          throw new LanAuthFailure(503, "E_DB");
+        }
+        if (rec === undefined || !lanRecordValid(rec, rt.now(), ctx.externalOrigin)) return undefined;
+        return { rec, sidHash };
+      },
+    );
   } catch (err) {
     release();
-    rt.log.error("web-hub lan http: touchSession failed", { error: String(err) });
-    return fail(503, "E_DB");
+    if (err instanceof LanAuthFailure) return fail(err.status, err.code);
+    throw err;
   }
-  if (rec === undefined) {
+  if (resolution.kind === "conflict") {
+    release();
+    if (authFailure !== undefined) authFailure.code = "E_AUTH";
+    sendCookieConflict(res, req, LAN_SESSION_COOKIE, ctx.scheme === "https");
+    return undefined;
+  }
+  if (resolution.kind === "none") {
     release();
     return fail(401, "E_AUTH");
   }
-  const expired = rt.now() >= Math.min(rec.expiresAt, rec.absoluteExpiresAt);
-  if (expired || rec.boundOrigin !== ctx.externalOrigin) {
-    release();
-    return fail(401, "E_AUTH");
-  }
+  const { rec, sidHash } = resolution.rec;
   lease.enterAuthed();
-  return { userId: rec.userId, epoch: rec.epoch, sidHash, absoluteExpiresAt: rec.absoluteExpiresAt };
+  const lan: LanSessionResult = {
+    userId: rec.userId,
+    epoch: rec.epoch,
+    sidHash,
+    absoluteExpiresAt: rec.absoluteExpiresAt,
+  };
+  return { ...lan, identity: lanIdentity(lan, rec) };
 }
 
 function csrfOkLan(req: IncomingMessage, ctx: RequestContext): boolean {
@@ -1513,7 +1577,13 @@ async function handleLanRequestInner(
     const authFailure: { code?: string } = {};
     const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
     if (session === undefined) return;
-    return serveLoadTop(rt.load, req, res, `lan:u${session.userId}:load-top`, rt.cmdLimit ?? createCmdLimit(rt.now));
+    return serveLoadTop(
+      rt.load,
+      req,
+      res,
+      `lan:${session.identity.principal}:load-top`,
+      rt.cmdLimit ?? createCmdLimit(rt.now),
+    );
   }
 
   // web-hub-version plan §3.9: `GET /api/version` — LAN, same width as loopback (D3). Absent
@@ -1529,7 +1599,7 @@ async function handleLanRequestInner(
       rt.ui,
       req,
       res,
-      `lan:u${session.userId}:version`,
+      `lan:${session.identity.principal}:version`,
       rt.cmdLimit ?? createCmdLimit(rt.now),
     );
   }
@@ -1596,7 +1666,13 @@ async function handleLanRequestInner(
         const authFailure: { code?: string } = {};
         const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
         if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
-        return { ip: ctx.clientIp, user: `u${session.userId}`, sidTag: session.sidHash, userId: session.userId };
+        const id = session.identity;
+        return {
+          ip: ctx.clientIp,
+          user: id.principal,
+          sidTag: id.sidTag,
+          ...(id.userId === undefined ? {} : { userId: id.userId }),
+        };
       },
       sendJson,
     });
@@ -1866,17 +1942,21 @@ async function handleLanRequestInner(
       return;
     }
     if (path === "/api/logout") {
-      const sid = readLanCookie(req.headers.cookie);
-      if (sid !== undefined) {
+      // §4.1 (XA): logout targets come from the same cookie module as authentication — legacy
+      // (max 1) = the first `pwh_lan` value, whether or not it is still a valid session; in
+      // multi-candidate mode every distinct candidate is logged out (a logout must never be
+      // refused by a conflict).
+      for (const sid of cookieCandidates(req.headers.cookie, LAN_SESSION_COOKIE, rt.lanCookieMax ?? 1).values) {
         const sidHash = hashSid(sid);
         // web-hub-html-preview plan v2 §2.4: this session's HTML capabilities die with it —
         // revoked BEFORE the awaited delete (a logout never leaves a window where the caps
         // outlive the intent) and again after it (a mint whose authorize ran inside that window
-        // still carries `sidHash`; the second bump catches it).
-        rt.preview?.revokeHtmlCaps?.({ sidTag: sidHash }, "logout");
+        // still carries `sidHash`; the second bump catches it). Bus emits (XA §4.2), same
+        // positions/order as the former direct hook calls.
+        rt.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
         try {
           await rt.lan.store.deleteSession(sidHash);
-          rt.preview?.revokeHtmlCaps?.({ sidTag: sidHash }, "logout");
+          rt.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
           rt.lanSse.revoke((c) => c.auth?.sidHash === sidHash, "revoked");
         } catch (err) {
           rt.log.error("web-hub lan http: logout deleteSession failed", { error: String(err) });
@@ -2616,9 +2696,22 @@ function buildLanStatus(
   };
 }
 
+/** `FrontendDeps` plus the XA identity option (kept off the frozen `ports.ts` surface — X0/X1c may
+ * promote it): `multiCandidateAuth` (default off) is the switch the proxy package flips to turn on
+ * the multi-candidate duplicate-cookie path of §4.1 (loopback max 8, LAN max 3, conflict ⇒ 401
+ * `cookie-conflict`). Off ⇒ first-value, byte-identical to pre-XA. */
+export type FrontendIdentityDeps = FrontendDeps & { multiCandidateAuth?: boolean };
+
 export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
   const { config, registry, bus, history, log, now } = deps;
   const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
+  // web-hub-proxy plan §4.1/§4.2 (XA): the auth revocation bus + the multi-candidate cookie switch.
+  // The HTML preview subscribes UNCONDITIONALLY (independent of any proxy setting); every former
+  // direct `revokeHtmlCaps` call is a 1:1, in-place, same-order `authRevoke.emit`. The proxy
+  // package attaches its own subscriber through the `subscribeAuthRevoke` extra at the bottom.
+  const authRevoke = createAuthRevokeBus(log);
+  const multiCandidateAuth = (deps as FrontendIdentityDeps).multiCandidateAuth === true;
+  const loopbackCookieMax = multiCandidateAuth ? LOOPBACK_COOKIE_MAX : 1;
   const sse = createSseHub({ now });
   // \u00a76.7.1 (C8): bumped by `bumpLanRevokeGen()` (duck-typed extra below, called from
   // `admin.ts`'s `handleRotateToken`/recovery-scan callers) and read back by the LAN write-path's
@@ -2637,6 +2730,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // keeps its legacy replies (401/404 per the §4.7 not-enabled matrix) and no `X-PWH-Preview-*`
   // header is ever sent, byte-identical to pre-PV3.
   const previewRoutes = deps.preview;
+  // XA §4.2: HTML preview is subscribed UNCONDITIONALLY (whether or not a proxy exists); the method
+  // is resolved at emit time so a wrapped/absent hook behaves exactly like the former direct call.
+  authRevoke.subscribe((ev) => previewRoutes?.revokeHtmlCaps?.(ev.sel, ev.reason));
   // web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend —
   // absent ⇒ `POST /api/agents/remove` keeps its legacy reply (404, not-enabled), byte-identical.
   const agentRemoveRoutes = deps.agentRemove;
@@ -2769,6 +2865,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       rejectAudit429,
       spawn: deps.spawn,
       preview: deps.preview,
+      authRevoke,
+      lanCookieMax: multiCandidateAuth ? LAN_COOKIE_MAX : 1,
       versionInfo: deps.version,
       avatar: deps.avatar,
       /** web-hub-privacy plan v2.1 (P1): same instance as the loopback listener's (or undefined
@@ -2916,16 +3014,16 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         // web-hub-html-preview plan v2 §2.4: the real passwd commit path (`admin.ts handlePasswd`
         // → `store.setPassword` → `deps.lan()?.revoke({userId})`) — capability revocation rides
         // the same call as the SSE revoke.
-        previewRoutes?.revokeHtmlCaps?.(
-          "sidHash" in target ? { sidTag: target.sidHash } : { userId: target.userId },
-          "sidHash" in target ? "logout" : "passwd",
-        );
+        authRevoke.emit({
+          sel: "sidHash" in target ? { sidTag: target.sidHash } : { userId: target.userId },
+          reason: "sidHash" in target ? "logout" : "passwd",
+        });
         const pred: (c: SseClient) => boolean =
           "sidHash" in target ? (c) => c.auth?.sidHash === target.sidHash : (c) => c.auth?.userId === target.userId;
         return lanSse.revoke(pred, "revoked");
       },
       revokeAll(): number {
-        previewRoutes?.revokeHtmlCaps?.({ listener: "lan" }, "rotate");
+        authRevoke.emit({ sel: { listener: "lan" }, reason: "rotate" });
         return lanSse.revoke(() => true, "revoked");
       },
     };
@@ -2994,6 +3092,25 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     routes.openEvents(req, res);
   }
 
+  // web-hub-proxy §4.1 (XA): the single loopback identity resolution. Every executing
+  // `auth.check` site below goes through `authorizeLoopback`, which answers 401 itself (plain
+  // `E_AUTH`, or the `cookie-conflict` body + best-effort clearing `Set-Cookie`s in
+  // multi-candidate mode) and otherwise hands back the identity that authenticated.
+  function resolveLoopbackIdentity(req: IncomingMessage): IdentityResult {
+    const r = auth.resolve(req.headers.cookie, now(), { maxCandidates: loopbackCookieMax });
+    if (!r.ok)
+      return r.conflict === true ? { ok: false, code: "E_AUTH", conflict: true } : { ok: false, code: "E_AUTH" };
+    return { ok: true, id: loopbackIdentity(r) };
+  }
+
+  function authorizeLoopback(req: IncomingMessage, res: ServerResponse): AuthIdentity | undefined {
+    const r = resolveLoopbackIdentity(req);
+    if (r.ok) return r.id;
+    if (r.conflict === true) sendCookieConflict(res, req, SESSION_COOKIE, false);
+    else sendError(res, 401, "E_AUTH");
+    return undefined;
+  }
+
   async function handleApi(
     req: IncomingMessage,
     res: ServerResponse,
@@ -3016,10 +3133,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         strictCsrfOk: () =>
           strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         readJson,
@@ -3031,16 +3145,16 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     // sysload P3: auth and CSRF hygiene happen before the shared on-demand scan.
     if (load !== undefined && method === "GET" && path === LOAD_TOP_PATH) {
       if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
-      if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
-      const principal = readCookie(req.headers.cookie, SESSION_COOKIE) ?? normalizePeerIp(req.socket.remoteAddress);
-      return serveLoadTop(load, req, res, `loopback:${principal}:load-top`, cmdLimit);
+      const identity = authorizeLoopback(req, res);
+      if (identity === undefined) return;
+      return serveLoadTop(load, req, res, `loopback:${identity.principal}:load-top`, cmdLimit);
     }
     // web-hub-version plan §3.9: `GET /api/version` — absent service ⇒ original matrix.
     if (deps.version !== undefined && method === "GET" && path === VERSION_INFO_PATH) {
       if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
-      if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
-      const principal = readCookie(req.headers.cookie, SESSION_COOKIE) ?? normalizePeerIp(req.socket.remoteAddress);
-      return serveVersionInfo(deps.version, ui, req, res, `loopback:${principal}:version`, cmdLimit);
+      const identity = authorizeLoopback(req, res);
+      if (identity === undefined) return;
+      return serveVersionInfo(deps.version, ui, req, res, `loopback:${identity.principal}:version`, cmdLimit);
     }
     // web-hub-preview plan v3 §4.5/§4.7 (PV3): `GET /api/preview` — same insertion point as the
     // spawn branch above (after headless, before the method branches). Absent ⇒ falls through
@@ -3053,10 +3167,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
@@ -3071,10 +3182,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
@@ -3089,15 +3197,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
-          const sid = readCookie(req.headers.cookie, SESSION_COOKIE);
-          return {
-            ip: normalizePeerIp(req.socket.remoteAddress),
-            ...(sid === undefined ? {} : { sidTag: hashSid(sid) }),
-          };
+          // XA §4.1: the sidTag comes from the identity that actually authenticated (no cookie re-read).
+          const identity = authorizeLoopback(req, res);
+          if (identity === undefined) return { handled: true, code: "E_AUTH" };
+          return { ip: normalizePeerIp(req.socket.remoteAddress), sidTag: identity.sidTag };
         },
         sendJson,
       });
@@ -3111,10 +3214,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
@@ -3134,10 +3234,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
         authorize: async (): Promise<PreviewAuthResult | PreviewAuthHandled> => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
@@ -3156,10 +3253,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
         authorize: async (): Promise<PreviewAuthResult | PreviewAuthHandled> => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
@@ -3175,10 +3269,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         strictCsrfOk: () =>
           strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         readJson,
@@ -3201,10 +3292,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ip: normalizePeerIp(req.socket.remoteAddress),
         expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         sendJson,
@@ -3222,10 +3310,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         strictCsrfOk: () =>
           strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
         authorize: async () => {
-          if (!auth.check(req.headers.cookie, now())) {
-            sendError(res, 401, "E_AUTH");
-            return { handled: true, code: "E_AUTH" };
-          }
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
         readJson,
@@ -3242,10 +3327,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           strictCsrfOk: () =>
             strictCsrfOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "")),
           authorize: async (_deadline) => {
-            if (!auth.check(req.headers.cookie, now())) {
-              sendError(res, 401, "E_AUTH");
-              return { handled: true, code: "E_AUTH" };
-            }
+            if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
             return { ip: normalizePeerIp(req.socket.remoteAddress) };
           },
           registry,
@@ -3267,10 +3349,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           ip: normalizePeerIp(req.socket.remoteAddress),
           csrfOk: (kind) => (kind === "chunk" ? uploadCsrfOk(req, expectedOrigin) : strictCsrfOk(req, expectedOrigin)),
           authorize: async (_deadline) => {
-            if (!auth.check(req.headers.cookie, now())) {
-              sendError(res, 401, "E_AUTH");
-              return { handled: true, code: "E_AUTH" };
-            }
+            if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
             return { ip: normalizePeerIp(req.socket.remoteAddress) };
           },
           registry,
@@ -3302,11 +3381,13 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         return;
       }
       if (path === "/api/logout") {
-        const sid = readCookie(req.headers.cookie, SESSION_COOKIE);
-        if (sid !== undefined) {
+        // XA §4.1: logout targets come from the one cookie module — legacy (max 1) = the first
+        // `pwh_sid` value (valid or not, exactly as before); multi-candidate mode logs out every
+        // distinct candidate (a logout is never refused by a conflict).
+        for (const sid of cookieCandidates(req.headers.cookie, SESSION_COOKIE, loopbackCookieMax).values) {
           auth.logout(sid);
           // web-hub-html-preview plan v2 §2.4: this session's HTML capabilities die with it.
-          previewRoutes?.revokeHtmlCaps?.({ sidTag: hashSid(sid) }, "logout");
+          authRevoke.emit({ sel: { sidTag: hashSid(sid) }, reason: "logout" });
         }
         sendJson(
           res,
@@ -3316,7 +3397,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         );
         return;
       }
-      if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
+      if (authorizeLoopback(req, res) === undefined) return;
       if (path === "/api/subscribe") return routes.subscribe(body, res);
       if (path === "/api/unsubscribe") return routes.unsubscribe(body, res);
       // fleet-drawer plan §3.4/§5.4 (F4): run-transcript subscribe/unsubscribe — same CSRF /
@@ -3327,7 +3408,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       throw new HttpError(404, "E_NOT_FOUND");
     }
     if (method === "GET") {
-      if (!auth.check(req.headers.cookie, now())) throw new HttpError(401, "E_AUTH");
+      if (authorizeLoopback(req, res) === undefined) return;
       if (path === "/api/events") return openEvents(req, res);
       if (path === "/api/history") return routes.historyPage(query, res);
       if (path === "/api/run/history") return routes.runHistoryPage(query, res); // F4: same session gate as /api/history
@@ -3489,9 +3570,12 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     revokeAllSse: () => {
       // web-hub-html-preview plan v2 §2.4: token rotate (`revokeLoopbackSse`) also ends every
       // loopback-minted HTML capability.
-      previewRoutes?.revokeHtmlCaps?.({ listener: "loopback" }, "rotate");
+      authRevoke.emit({ sel: { listener: "loopback" }, reason: "rotate" });
       return sse.revoke(() => true, "revoked");
     },
+    /** XA §4.2: attach a revocation subscriber (the proxy package's duck-typed hook; returns the
+     * unsubscribe). Subscribers run synchronously, in subscription order, exception-isolated. */
+    subscribeAuthRevoke: (fn: Parameters<AuthRevokeBus["subscribe"]>[0]) => authRevoke.subscribe(fn),
     bumpLanRevokeGen: () => {
       lanRevokeGen++;
     },

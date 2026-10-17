@@ -16,6 +16,8 @@ import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual } from "nod
 import { chmodSync, closeSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import type { HubLog } from "./ports.js";
+import { resolveCookieIdentitySync } from "./auth-identity.js";
+import { hashSid } from "./sid-hash.js";
 import { cleanupTokenTemps, replaceTokenAtomic } from "../protocol/token-file.js";
 
 export interface Auth {
@@ -27,6 +29,18 @@ export interface Auth {
   revokeAllSessions(): number;
   authGen(): number;
   login(candidate: unknown, now: number): { ok: true; sid: string } | { ok: false; code: "E_AUTH" | "E_RATE" };
+  /**
+   * The single loopback session resolution (web-hub-proxy plan §4.1): `check` is `resolve().ok`.
+   * Slides the 12 h expiry of the ONE chosen session only. `maxCandidates` (default 1 ⇒ first
+   * `pwh_sid` value, byte-identical to the pre-XA behaviour) > 1 enables the multi-candidate
+   * path: one distinct valid sid ⇒ used, ≥ 2 distinct valid or too many candidates ⇒
+   * `{ ok:false, conflict:true }` (nothing slides).
+   */
+  resolve(
+    cookieHeader: string | undefined,
+    now: number,
+    opts?: { maxCandidates?: number },
+  ): { ok: true; sid: string; sidTag: string; expiresAt: number } | { ok: false; conflict?: true };
   check(cookieHeader: string | undefined, now: number): boolean;
   logout(sid: string): void;
 }
@@ -39,18 +53,9 @@ const MAX_SESSIONS = 1024;
 const MIN_TOKEN_CHARS = 16;
 const MAX_CANDIDATE_CHARS = 1024;
 
-/** Extract one cookie value from a `Cookie:` header (first match wins). */
-export function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
-  if (cookieHeader === undefined || cookieHeader.length === 0) return undefined;
-  for (const part of cookieHeader.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq < 0) continue;
-    if (part.slice(0, eq).trim() !== name) continue;
-    const value = part.slice(eq + 1).trim();
-    return value.length > 0 ? value : undefined;
-  }
-  return undefined;
-}
+// `readCookie` moved to `auth-identity.ts` (the only cookie parser in `hub/`); re-exported so
+// existing importers keep working.
+export { readCookie } from "./auth-identity.js";
 
 function sha256(s: string): Buffer {
   return createHash("sha256").update(s, "utf8").digest();
@@ -171,24 +176,36 @@ export function createAuth(opts: { tokenFile: string; randomBytes?: (n: number) 
     return { ok: true, sid };
   }
 
-  function check(cookieHeader: string | undefined, now: number): boolean {
-    const sid = readCookie(cookieHeader, SESSION_COOKIE);
-    if (sid === undefined) return false;
-    const exp = sessions.get(sid);
-    if (exp === undefined) return false;
-    if (exp <= now) {
-      sessions.delete(sid);
-      return false;
-    }
+  function resolve(
+    cookieHeader: string | undefined,
+    now: number,
+    opts?: { maxCandidates?: number },
+  ): { ok: true; sid: string; sidTag: string; expiresAt: number } | { ok: false; conflict?: true } {
+    const r = resolveCookieIdentitySync(cookieHeader, SESSION_COOKIE, opts?.maxCandidates ?? 1, (sid) => {
+      const exp = sessions.get(sid);
+      if (exp === undefined) return undefined;
+      if (exp <= now) {
+        sessions.delete(sid);
+        return undefined;
+      }
+      return exp;
+    });
+    if (r.kind === "conflict") return { ok: false, conflict: true };
+    if (r.kind === "none") return { ok: false };
     // sliding expiry: re-insert so Map order tracks recency for the size cap
-    sessions.delete(sid);
-    sessions.set(sid, now + SESSION_TTL_MS);
-    return true;
+    const expiresAt = now + SESSION_TTL_MS;
+    sessions.delete(r.value);
+    sessions.set(r.value, expiresAt);
+    return { ok: true, sid: r.value, sidTag: hashSid(r.value), expiresAt };
+  }
+
+  function check(cookieHeader: string | undefined, now: number): boolean {
+    return resolve(cookieHeader, now).ok;
   }
 
   function logout(sid: string): void {
     sessions.delete(sid);
   }
 
-  return { token, reload, rotateToken, revokeAllSessions, authGen: () => generation, login, check, logout };
+  return { token, reload, rotateToken, revokeAllSessions, authGen: () => generation, login, resolve, check, logout };
 }

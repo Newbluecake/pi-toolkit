@@ -130,6 +130,7 @@ import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
+import type { AuthRevokeEvent } from "./auth-revoke.js";
 import type { LanStore } from "./lan-store.js";
 
 /**
@@ -141,6 +142,9 @@ type HttpFrontendExt = HttpFrontend & {
   auth?: Auth;
   revokeAllSse?(): number;
   bumpLanRevokeGen?(): void;
+  /** web-hub-proxy §4.2 (XA): attach a synchronous auth-revocation subscriber (the proxy
+   * service's hook, wired by a later package only when `config.proxy`); returns the unsubscribe. */
+  subscribeAuthRevoke?(fn: (ev: AuthRevokeEvent) => void): () => void;
 };
 type LanFacadeExt = NonNullable<HttpFrontend["lan"]> & { revokeAll?(): number };
 

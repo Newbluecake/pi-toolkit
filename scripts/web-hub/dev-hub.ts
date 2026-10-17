@@ -11,7 +11,7 @@
  * canonicalization, used to mirror the real LAN CSRF gate — `csrfOkLan` — for password mode) and
  * — for `--mode token` only — the real `hub/auth.ts` bearer-token exchange (the actual mechanism,
  * not a re-implementation of it). Password mode mirrors the real *LAN* password auth surface
- * (`hub/lan-auth.ts`'s `LAN_SESSION_COOKIE`/`formatLanCookie`/`readLanCookie` — cookie name
+ * (`hub/lan-auth.ts`'s `LAN_SESSION_COOKIE`/`formatLanCookie` + `auth.ts`'s `readCookie` — cookie name
  * `pwh_lan`, distinct from token mode's loopback `pwh_sid`) with a deliberately simpler *fake*
  * credential check: a single fixed in-memory pair plus a `--login-error` escape hatch to force any
  * of the real error responses on demand (there is no KDF/db/rate-limit queue to model here).
@@ -78,7 +78,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createAuth, readCookie, SESSION_COOKIE } from "../../src/web-hub/hub/auth.js";
 import { CSP } from "../../src/web-hub/hub/http.js";
-import { formatLanCookie, LAN_SESSION_COOKIE, readLanCookie } from "../../src/web-hub/hub/lan-auth.js";
+import { formatLanCookie, LAN_SESSION_COOKIE } from "../../src/web-hub/hub/lan-auth.js";
 import { createSseHub, type SseClient, type SseEventName, type SseHub } from "../../src/web-hub/hub/sse.js";
 import { createUiServer, type UiServer } from "../../src/web-hub/hub/static.js";
 import { canonicalOrigin, parseOrigin } from "../../src/web-hub/protocol/lan.js";
@@ -1117,7 +1117,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
   const pwSessions = new Map<string, number>(); // sid -> expiresAt
 
   function pwCheck(cookieHeader: string | undefined): boolean {
-    const sid = readLanCookie(cookieHeader);
+    const sid = readCookie(cookieHeader, LAN_SESSION_COOKIE);
     if (sid === undefined) return false;
     const exp = pwSessions.get(sid);
     if (exp === undefined || exp <= Date.now()) return false;
@@ -1999,7 +1999,7 @@ export async function createDevHub(opts: DevHubOptions): Promise<DevHubHandle> {
             { "Set-Cookie": `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` },
           );
         } else {
-          const sid = readLanCookie(req.headers.cookie);
+          const sid = readCookie(req.headers.cookie, LAN_SESSION_COOKIE);
           if (sid !== undefined) pwSessions.delete(sid);
           sendJson(res, 200, { ok: true }, { "Set-Cookie": formatLanCookie("", { secure: false, clear: true }) });
         }

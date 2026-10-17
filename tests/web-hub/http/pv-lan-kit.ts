@@ -9,6 +9,7 @@ import { vi } from "vitest";
 import { fakeKdf, fakeLanStore } from "../contract/fakes.js";
 import { createAdminHandler } from "../../../src/web-hub/hub/admin.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
+import type { AuthRevokeEvent } from "../../../src/web-hub/hub/auth-revoke.js";
 import { createKdfAdmission } from "../../../src/web-hub/hub/kdf-admission.js";
 import { createScope } from "../../../src/web-hub/hub/lifecycle.js";
 import { createHostsPort } from "../../../src/web-hub/hub/net-hosts.js";
@@ -25,7 +26,11 @@ import { lanPostJson, lanRequest, seedLanUser, type RawResponse } from "./lan-he
 import { AGENT, SESSION, copyPvSite } from "./pv-kit.js";
 
 export interface Lan {
-  fe: HttpFrontend & { auth: { check: (...a: never[]) => boolean }; revokeAllSse(): number };
+  fe: HttpFrontend & {
+    auth: { check: (...a: never[]) => boolean };
+    revokeAllSse(): number;
+    subscribeAuthRevoke(fn: (ev: AuthRevokeEvent) => void): () => void;
+  };
   lanPort: number;
   loopPort: number;
   site: string;
@@ -70,6 +75,8 @@ export async function startLanPv(
     html?: boolean;
     wrapRoutes?: (r: PreviewRoutes) => PreviewRoutes;
     wrapLog?: (l: ReturnType<typeof captureLog>) => HubLog;
+    /** web-hub-proxy XA: flip the frontend's multi-candidate duplicate-cookie option (default off). */
+    multiCandidateAuth?: boolean;
   } = {},
 ): Promise<Lan> {
   const dir = mkdtempSync(join(tmpdir(), "pwh-lan-pvhtml-"));
@@ -136,6 +143,8 @@ export async function startLanPv(
     now,
     lan: { cfg, store: lanStore, kdf, limiter, admission, hosts, scope, onStatus: () => undefined },
     ...(routes === undefined ? {} : { preview: routes }),
+    // `multiCandidateAuth` is deliberately off the frozen FrontendDeps surface (FrontendIdentityDeps)
+    ...(opts.multiCandidateAuth === true ? ({ multiCandidateAuth: true } as object) : {}),
   }) as Lan["fe"];
   const loopPort = (await fe.listen()).port;
   if (fe.lan === undefined) throw new Error("fe.lan missing");

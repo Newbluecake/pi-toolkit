@@ -12,13 +12,14 @@
  * (`hub/auth.ts`), so the two auth domains never collide (§6.4).
  */
 import { timingSafeEqual } from "node:crypto";
-import { readCookie } from "./auth.js";
+import { lanRecordValid, resolveCookieIdentity, type CookieResolution } from "./auth-identity.js";
 import { validateKdfParams } from "./kdf.js";
 import { hashSid } from "./sid-hash.js";
 import type {
   KdfAdmissionPort,
   KdfParams,
   KdfPort,
+  LanSessionRecord,
   LanStorePort,
   LanUserRecord,
   LoginLimiterPort,
@@ -37,10 +38,6 @@ export function formatLanCookie(value: string, opts: { secure: boolean; clear?: 
   const base = `${LAN_SESSION_COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/`;
   const secureAttr = opts.secure ? "; Secure" : "";
   return opts.clear === true ? `${base}${secureAttr}; Max-Age=0` : `${base}${secureAttr}`;
-}
-
-export function readLanCookie(cookieHeader: string | undefined): string | undefined {
-  return readCookie(cookieHeader, LAN_SESSION_COOKIE);
 }
 
 // Fixed dummy scrypt params for the "no such user" branch (§5.1 "没有用户时用 dummy 记录") — a
@@ -236,26 +233,44 @@ export interface LanSessionCheck {
   userId: number;
   epoch: number;
   sidHash: string;
+  /** The raw store record's absolute ceiling — together with `expiresAt` the parent expiry. */
+  absoluteExpiresAt: number;
 }
 
 /**
- * `touchSession` + the main-thread re-checks §4.2 requires: expiry (both the sliding and
- * absolute deadlines) and origin binding (§2.4/§6.4 — `bound_origin === ctx.externalOrigin`,
- * otherwise 401 *without* touching the session record).
+ * The single LAN session resolution used by `checkLanSession` (web-hub-proxy plan §4.1): resolves
+ * the `pwh_lan` cookie ONCE through `resolveCookieIdentity` — `touchSession` + the main-thread
+ * re-checks §4.2 requires: expiry (both the sliding and absolute deadlines) and origin binding
+ * (§2.4/§6.4 — `bound_origin === ctx.externalOrigin`, otherwise invalid *without* touching the
+ * session record). `maxCandidates` (default 1 ⇒ first cookie value, byte-identical to pre-XA) > 1
+ * enables the multi-candidate path (≤ one `touchSession` per distinct candidate).
  */
+export function resolveLanSession(
+  cookieHeader: string | undefined,
+  ctx: Pick<RequestContext, "externalOrigin">,
+  store: Pick<LanStorePort, "touchSession">,
+  now: number,
+  opts?: PortOptions & { maxCandidates?: number },
+): Promise<CookieResolution<{ rec: LanSessionRecord; sidHash: string }>> {
+  const portOpts: PortOptions | undefined = opts?.signal === undefined ? undefined : { signal: opts.signal };
+  return resolveCookieIdentity(cookieHeader, LAN_SESSION_COOKIE, opts?.maxCandidates ?? 1, async (sid) => {
+    const sidHash = hashSid(sid);
+    const rec = await store.touchSession(sidHash, now, portOpts);
+    if (rec === undefined || !lanRecordValid(rec, now, ctx.externalOrigin)) return undefined;
+    return { rec, sidHash };
+  });
+}
+
+/** Legacy shape of `resolveLanSession`: a conflict (multi-candidate mode only) is "not authenticated". */
 export async function checkLanSession(
   cookieHeader: string | undefined,
   ctx: RequestContext,
   store: LanStorePort,
   now: number,
-  opts?: PortOptions,
+  opts?: PortOptions & { maxCandidates?: number },
 ): Promise<LanSessionCheck | undefined> {
-  const sid = readLanCookie(cookieHeader);
-  if (sid === undefined) return undefined;
-  const sidHash = hashSid(sid);
-  const rec = await store.touchSession(sidHash, now, opts);
-  if (rec === undefined) return undefined;
-  if (now >= Math.min(rec.expiresAt, rec.absoluteExpiresAt)) return undefined;
-  if (rec.boundOrigin !== ctx.externalOrigin) return undefined;
-  return { userId: rec.userId, epoch: rec.epoch, sidHash };
+  const r = await resolveLanSession(cookieHeader, ctx, store, now, opts);
+  if (r.kind !== "one") return undefined;
+  const { rec, sidHash } = r.rec;
+  return { userId: rec.userId, epoch: rec.epoch, sidHash, absoluteExpiresAt: rec.absoluteExpiresAt };
 }
