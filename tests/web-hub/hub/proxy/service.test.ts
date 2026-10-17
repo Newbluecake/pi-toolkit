@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import { createProxyPortsMap } from "../../../../src/web-hub/hub/proxy/ports-map.js";
 import { readFile, readdir } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { engine, identity, listen, waitFor } from "./engine-helpers.js";
+import { engine, freeRange, identity, listen, waitFor } from "./engine-helpers.js";
 import { deferred, manualClock, flush } from "./helpers.js";
 import {
   PROXY_LISTEN_TIMEOUT_MS,
@@ -331,5 +331,113 @@ describe("T-H7 lifecycle", () => {
     clock.advance(PROXY_SWEEP_INTERVAL_MS);
     await flush();
     expect(env.service.status!().instances).toBe(0);
+  });
+  it("follow-up: proxy range excludes the bound upstream and neighbor probes, including explicit ranges", async () => {
+    env = await engine();
+    for (let i = 0; i < 24; i++) {
+      const range = await freeRange([env.up.port]);
+      expect(env.up.port < range[0] - 1 || env.up.port > range[1] + 1).toBe(true);
+    }
+    expect(env.up.port < env.range[0] - 1 || env.up.port > env.range[1] + 1).toBe(true);
+    expect((await env.open()).target.port).toBe(env.up.port);
+    const range = env.range;
+    await env.close();
+    env = await engine({ config: { portRange: range, maxProxies: 8 } });
+    expect(env.range).toEqual(range);
+    expect(env.up.port < range[0] - 1 || env.up.port > range[1] + 1).toBe(true);
+    expect((await env.open()).target.port).toBe(env.up.port);
+  });
+  it.each(["stale-first", "valid-first"])(
+    "follow-up: shared new target keeps the valid opener alive (%s)",
+    async (order) => {
+      const entered = deferred<void>();
+      const allow = deferred<void>();
+      env = await engine({
+        listen: async (s, p, h) => {
+          entered.resolve();
+          await allow.promise;
+          await listen(s, p, h);
+        },
+      });
+      const stale = identity(51),
+        valid = identity(52);
+      const oldSeq = env.service.currentSeq();
+      env.service.revoke({ sel: { sidTag: stale.sidTag }, reason: "logout" });
+      const newSeq = env.service.currentSeq();
+      const target = `127.0.0.1:${env.up.port}`;
+      const startStale = () => env.service.open(stale, target, "127.0.0.1", oldSeq);
+      const startValid = () => env.service.open(valid, target, "127.0.0.1", newSeq);
+      const calls = order === "stale-first" ? [startStale(), startValid()] : [startValid(), startStale()];
+      await entered.promise;
+      allow.resolve();
+      const results = await Promise.all(calls);
+      const bad = results[order === "stale-first" ? 0 : 1]!;
+      const good = results[order === "stale-first" ? 1 : 0]!;
+      expect(bad).toMatchObject({ ok: false, status: 503, reason: "closing", retryable: true });
+      expect(good.ok).toBe(true);
+      if (!good.ok) throw new Error("valid opener refused");
+      expect(env.service.status!()).toMatchObject({ instances: 1, reserved: 0 });
+      const { cookie } = await env.enter(good.result);
+      expect((await env.http(good.result.origin, { headers: { Cookie: cookie } })).status).toBe(200);
+      expect(env.servers.filter((s) => s.listening)).toHaveLength(1);
+      expect(env.logs.filter((x) => (x as unknown[])[0] === "proxy-end")).toHaveLength(0);
+    },
+  );
+  it("follow-up: all failed shared openers still close the ungranted instance", async () => {
+    const entered = deferred<void>();
+    const allow = deferred<void>();
+    env = await engine({
+      listen: async (s, p, h) => {
+        entered.resolve();
+        await allow.promise;
+        await listen(s, p, h);
+      },
+    });
+    const a = identity(51),
+      b = identity(52);
+    const seq = env.service.currentSeq();
+    env.service.revoke({ sel: "all", reason: "rotate" });
+    const target = `127.0.0.1:${env.up.port}`;
+    const calls = [env.service.open(a, target, "127.0.0.1", seq), env.service.open(b, target, "127.0.0.1", seq)];
+    await entered.promise;
+    allow.resolve();
+    expect((await Promise.all(calls)).every((r) => !r.ok)).toBe(true);
+    expect(env.service.status!()).toMatchObject({ instances: 0, reserved: 0 });
+    expect(env.servers.every((s) => !s.listening)).toBe(true);
+  });
+  it("follow-up: no-instance denials throttle by canonical target, never URL/path/query", async () => {
+    const clock = manualClock();
+    env = await engine({ now: clock.now, timer: clock.timer });
+    for (const target of ["http://8.8.8.8:80/a?secret=a", "[::ffff:808:808]:80", "http://8.8.8.8:80/b?secret=b"]) {
+      expect(await env.service.open(identity(), target, "127.0.0.1", 0)).toMatchObject({ reason: "public" });
+    }
+    const opens = () => env.logs.filter((x) => (x as unknown[])[0] === "proxy-open");
+    expect(opens()).toHaveLength(1);
+    await env.service.open(identity(), "9.9.9.9:80", "127.0.0.1", 0);
+    expect(opens()).toHaveLength(2);
+    clock.advance(60000);
+    await env.service.open(identity(), "8.8.8.8:80", "127.0.0.1", 0);
+    expect(opens()).toHaveLength(3);
+    expect(JSON.stringify(env.logs)).not.toContain("secret=");
+    expect(env.service.status!()).toMatchObject({ instances: 0, reserved: 0 });
+  });
+  it("follow-up: thrown DNS seam uses frozen dns-failed instead of claiming service closing", async () => {
+    env = await engine({
+      dns: {
+        inflight: false,
+        resolve() {
+          throw new Error("never log exception-secret");
+        },
+      },
+    });
+    expect(await env.service.open(identity(), "app.local:80", "127.0.0.1", 0)).toEqual({
+      ok: false,
+      status: 400,
+      error: "E_PROXY_DENIED",
+      reason: "dns-failed",
+    });
+    expect(env.service.status!()).toMatchObject({ instances: 0, reserved: 0 });
+    expect(JSON.stringify(env.logs)).not.toContain("exception-secret");
+    expect((await env.open()).target.port).toBe(env.up.port);
   });
 });

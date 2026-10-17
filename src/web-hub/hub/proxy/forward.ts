@@ -124,7 +124,15 @@ export function createProxyForwarder(deps: ProxyForwardDeps): ProxyForwarder {
   const timer = deps.timer ?? systemProxyTimer;
   const agent = new Agent(PROXY_AGENT_OPTIONS);
   const cancels = new Set<() => void>();
-  const bySocket = new Map<Socket, { jobs: Set<() => void>; close(): void }>();
+  const bySocket = new Map<
+    Socket,
+    {
+      jobs: Set<() => void>;
+      incomplete: Set<() => void>;
+      close(): void;
+      end(): void;
+    }
+  >();
   let closing = false;
   return {
     agent,
@@ -144,10 +152,14 @@ export function createProxyForwarder(deps: ProxyForwardDeps): ProxyForwarder {
         res.off("close", cancel);
         res.off("finish", cancel);
         req.off("aborted", cancel);
+        req.off("close", clientEnded);
         const rec = bySocket.get(req.socket);
         rec?.jobs.delete(cancel);
+        rec?.incomplete.delete(clientEnded);
         if (rec?.jobs.size === 0) {
           req.socket.off("close", rec.close);
+          req.socket.off("error", rec.close);
+          req.socket.off("end", rec.end);
           bySocket.delete(req.socket);
         }
       };
@@ -164,23 +176,40 @@ export function createProxyForwarder(deps: ProxyForwardDeps): ProxyForwarder {
           res.destroy();
         },
       };
+      // IncomingMessage.close also fires after a normally completed request body.
+      // A half-close/req close is cancellation only if that body is incomplete.
+      const clientEnded = () => {
+        if (!req.complete) cancel();
+      };
       cancels.add(cancel);
       let socketRec = bySocket.get(req.socket);
       if (!socketRec) {
         const jobs = new Set<() => void>();
+        const incomplete = new Set<() => void>();
         socketRec = {
           jobs,
+          incomplete,
           close() {
             for (const job of [...jobs]) job();
+          },
+          end() {
+            for (const job of [...incomplete]) job();
           },
         };
         bySocket.set(req.socket, socketRec);
         req.socket.once("close", socketRec.close);
+        req.socket.once("error", socketRec.close);
+        req.socket.once("end", socketRec.end);
       }
       socketRec.jobs.add(cancel);
+      socketRec.incomplete.add(clientEnded);
       res.on("close", cancel);
       res.on("finish", cancel);
       req.on("aborted", cancel);
+      req.on("close", clientEnded);
+      // These are real client signals, not an inference from upstream backpressure.
+      // If unread TCP bytes hide FIN while paused, the existing listener idle timeout
+      // remains the fallback. Do not drain/discard bytes or time out a live slow upload.
       if (!deps.sessions.attach(gate.session, revoker)) {
         revoker.destroy();
         return;

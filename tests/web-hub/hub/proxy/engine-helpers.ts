@@ -27,20 +27,42 @@ export async function listen(server: Server, port: number, host: string) {
   server.unref();
   await once(server, "listening");
 }
-export async function freeRange(): Promise<[number, number]> {
-  // Each harness uses a random kernel-assigned base, not shared fixed test ports.
-  const probe = createServer();
-  probe.listen(0, "127.0.0.1");
-  probe.unref();
-  await once(probe, "listening");
-  const port = (probe.address() as { port: number }).port;
-  await new Promise<void>((resolve) => probe.close(() => resolve()));
-  return [port, port + 15];
+export async function freeRange(exclude: readonly number[] = []): Promise<[number, number]> {
+  // An ephemeral base can sit immediately below an already-bound upstream. Exclude its
+  // whole candidate range (plus one guard port for tests that probe target port ±1).
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1");
+    probe.unref();
+    await once(probe, "listening");
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    if (port + 16 > 65535 || exclude.some((n) => n >= port - 1 && n <= port + 16)) continue;
+    return [port, port + 15];
+  }
+  throw new Error("no disjoint test port range");
 }
 export async function engine(overrides: Partial<ProxyServiceDeps> = {}) {
-  const up = await proxyUpstream();
+  let up = await proxyUpstream();
+  // Some callers supply a fixed range (e.g. a prebuilt ports-map seam); in that case
+  // re-pick the upstream instead of silently changing their map's configured range.
+  for (
+    let attempt = 0;
+    overrides.config && up.port >= overrides.config.portRange[0] - 1 && up.port <= overrides.config.portRange[1] + 1;
+    attempt++
+  ) {
+    await up.close();
+    if (attempt >= 63) throw new Error("no disjoint test upstream port");
+    up = await proxyUpstream();
+  }
+  let range: [number, number];
+  try {
+    range = overrides.config?.portRange ?? (await freeRange([up.port]));
+  } catch (err) {
+    await up.close();
+    throw err;
+  }
   const dir = await mkdtemp(join(tmpdir(), "pwh-proxy-engine-"));
-  const range = await freeRange();
   const servers: Server[] = [];
   const clients = new Set<Socket>();
   const accepted = new Set<Socket>();

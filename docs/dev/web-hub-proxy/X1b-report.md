@@ -302,3 +302,213 @@ All matched files use Prettier code style!
 privacy-lock UI tests), in addition to the already-known `docs/dev/feishu-bot/` work. None were
 written or reverted by this package; the main session was notified to attribute them. This report
 lists only X1b-owned delivery files. No commit was created.
+
+## Follow-up — verifier findings after accepted commit `72c3d86` (2026-10-17)
+
+No commit created. Only the six files below belong to this follow-up; X1c wiring and other
+concurrent changes were neither edited nor reverted. **Exported service API: unchanged, no
+additions.** The test helper alone gains optional `freeRange(exclude: readonly number[] = [])`.
+
+### Changed files (absolute paths)
+
+- `/home/bluecake/ai/pi-toolkit/src/web-hub/hub/proxy/service.ts`
+- `/home/bluecake/ai/pi-toolkit/src/web-hub/hub/proxy/forward.ts`
+- `/home/bluecake/ai/pi-toolkit/tests/web-hub/hub/proxy/engine-helpers.ts`
+- `/home/bluecake/ai/pi-toolkit/tests/web-hub/hub/proxy/service.test.ts`
+- `/home/bluecake/ai/pi-toolkit/tests/web-hub/hub/proxy/forward.test.ts`
+- `/home/bluecake/ai/pi-toolkit/docs/dev/web-hub-proxy/X1b-report.md`
+
+### Findings and disposition
+
+1. **Port-range flake fixed.** Choose a random proxy range only after the upstream is bound;
+   exclude its port and one neighboring guard port on either side. An explicitly supplied range
+   is preserved and the upstream is re-picked instead when necessary. Both searches have a
+   bounded retry count and close rejected listeners. Regressions check repeated random ranges
+   and an explicit-range engine can actually open its own upstream.
+2. **Shared mint cleanup race fixed.** A per-logical-target opener count includes every caller
+   awaiting the shared creation, independent of its capacity reservation. A failed mint only
+   stops an ungranted, socket-free instance when it is the last opener. Each caller decrements
+   in `finally`; no new exported state. Tests cover stale-first and valid-first call orders:
+   stale A gets retryable 503, valid B enters and forwards through the surviving instance. A
+   separate all-stale case still closes the ungranted instance without leaking capacity.
+3. **REJECTED and superseded by the signal-only rework below.** The initial drain-stall
+   implementation was not an acceptable fix: it also killed live slow uploads. Listening for raw
+   socket close alone cannot observe FIN hidden behind unread TCP bytes while backpressure
+   pauses the source. A private 1000ms uninterrupted upstream-write-backpressure budget now
+   cancels/destroys the upstream and paused inbound request; drain, finish and cancellation
+   clear it. It uses the existing unref'd scheduler and frozen 504 status, no new protocol reason
+   or setting. Real regression: declared 1GiB POST, ~17MiB client write, upstream `req.pause()`,
+   asserted paused proxy TCP socket, then client destroy. Admission returns to zero, the proxy
+   socket is destroyed and the Agent has no active sockets within 1250ms of abort. Full test
+   duration across the final runs was ~1.02–1.19s including setup. **Trade-off:** a live client
+   whose upstream remains continuously write-backpressured for 1s is also failed/closed; the
+   guard intentionally bounds stalls rather than claiming to distinguish a hidden peer FIN.
+4. **No-instance refusal throttling fixed.** Audit receives a stable canonical target key, not
+   an undefined instance id. Paths/queries cannot rotate it; mapped-v6 literal aliases fold to
+   the same IPv4 key. For X1a parse-time denials (which return only a reason), a separate
+   authority-only URL projection is used strictly for throttling, never admission. Credentials,
+   paths and queries never enter that key or emitted fields. Tests assert one denial per same
+   target/window, a different target logs independently, and expiry permits another log.
+5. **Failure mapping:** a synchronously throwing/rejecting DNS seam now returns frozen
+   `400 E_PROXY_DENIED{dns-failed}`, with no exception text logged. **Frozen limitation retained:**
+   X1a `ports.bind` collapses non-EADDRINUSE listener errors such as EACCES into `port-busy`, and
+   the frozen reason set has no accurate generic listener/bind failure reason. Calling it
+   `ports-store`, `listen-timeout`, or `closing` would also be false. Per the instruction, neither
+   X0/X1a nor the outcome union was widened; the existing `port-busy` fallback remains for that
+   case and would require a separately approved frozen-interface change to distinguish.
+
+### Self-verification
+
+- `timeout 900 npx vitest run tests/web-hub/hub/proxy`, **five consecutive final runs passed**:
+  **11 files / 336 tests each** (seven added regression cases; no stubbed always-pass assertions).
+- `timeout 280 npm run typecheck` was attempted twice while X1c was writing. It was blocked by
+  concurrent files, not this follow-up; first `hub/hub.ts(153,23): TS2304 Cannot find name
+'HostSnapshot'`, then `agent/index.ts(1522,40): TS2339 Property 'proxy' does not exist on type
+'HubJsonSnapshot'`. Those files were left to X1c. The chained build did not start after those
+  failures. As instructed by the main session, no waiting for X1c and no claim of a final green
+  full `npm run typecheck`/build is made here.
+- Requested source-only check was then run:
+
+  ```sh
+  timeout 280 npx tsc --noEmit -p tsconfig.json 2>&1 | grep -E 'hub/proxy/(service|forward)|tests/web-hub/hub/proxy'
+  ```
+
+  The compiler itself exited **0** on that later tree; grep exited **1** (no matches), with
+  **zero own-file diagnostic lines**. Normal tsconfig scope does not include these runtime
+  tests; their real behavior is checked by the five Vitest runs.
+
+- Own-file Prettier check and scoped `git diff --check` results are recorded below. No wiring
+  file or frozen contract edit was made by this follow-up.
+
+Captured final run summaries (from the actual command log):
+
+```text
+=== X1b follow-up proxy gate run 1 ===
+ Test Files  11 passed (11)
+      Tests  336 passed (336)
+   Duration  12.73s (transform 795ms, setup 503ms, collect 1.83s, tests 13.12s, environment 2ms, prepare 634ms)
+=== X1b follow-up proxy gate run 2 ===
+ Test Files  11 passed (11)
+      Tests  336 passed (336)
+   Duration  12.90s (transform 788ms, setup 495ms, collect 1.78s, tests 13.30s, environment 2ms, prepare 607ms)
+=== X1b follow-up proxy gate run 3 ===
+ Test Files  11 passed (11)
+      Tests  336 passed (336)
+   Duration  12.88s (transform 770ms, setup 405ms, collect 1.71s, tests 13.26s, environment 2ms, prepare 621ms)
+=== X1b follow-up proxy gate run 4 ===
+ Test Files  11 passed (11)
+      Tests  336 passed (336)
+   Duration  12.74s (transform 777ms, setup 383ms, collect 1.74s, tests 13.15s, environment 2ms, prepare 607ms)
+=== X1b follow-up proxy gate run 5 ===
+ Test Files  11 passed (11)
+      Tests  336 passed (336)
+   Duration  12.73s (transform 859ms, setup 400ms, collect 1.82s, tests 13.12s, environment 2ms, prepare 609ms)
+```
+
+Own-file formatting/hygiene commands above exited 0:
+
+```text
+Checking formatting...
+All matched files use Prettier code style!
+```
+
+`git diff --check -- <the six follow-up files>` produced no output (exit 0).
+
+### Follow-up rework — finding #3, signal-only cancellation (2026-10-17 16:05 ruling)
+
+The previous #3 change was rejected: its 1s backpressure inference sent 504/ECONNRESET to a
+**live** uploader when the upstream paused for 3s. That criterion and `UPLOAD_DRAIN_STALL_MS`
+have now been removed entirely. The earlier five-green-runs record did not cover that live slow
+upstream and is **not** acceptance evidence for the rejected implementation.
+
+**Only three files changed in this rework:**
+
+- `/home/bluecake/ai/pi-toolkit/src/web-hub/hub/proxy/forward.ts`
+- `/home/bluecake/ai/pi-toolkit/tests/web-hub/hub/proxy/forward.test.ts`
+- `/home/bluecake/ai/pi-toolkit/docs/dev/web-hub-proxy/X1b-report.md`
+
+No service/exported API change, no frozen contract or X1c file edit, and no commit. Accepted
+follow-ups #1/#2/#4/#5 remain untouched.
+
+**Implementation / main-session choice:** keep ordinary signal-based cancellation; do **not**
+implement an overflow buffer. Cancel upstream work on real request `aborted`, incomplete request
+`close`, or physical socket `close`/`error`/incomplete-body `end`. A normally completed request's
+`close` or a completed-body half-close is not mistaken for abandonment while awaiting its reply.
+There is no upstream-drain timer, no early 504 based on slowness, and no reading/discarding upload
+bytes to try to surface FIN. The existing connect/head/idle/session limits are unchanged.
+
+**Explicit residual (accepted ruling, not claimed fixed promptly):** if the client disappears
+while the upstream is paused and unread bytes fill the TCP/stream buffers, the proxy cannot see
+FIN until those bytes can be read. The request may retain its admission slot/upstream socket
+until the existing **120000ms client socket idle timeout** destroys that socket (subject to normal
+event-loop scheduling). Memory remains bounded by the existing pipeline/socket HWMs plus in-flight
+chunks/kernel buffers; no overflow buffer or unbounded accumulation is added. This is not a claim
+of ≤1s disconnect detection in that state. A live upload is not killed merely for 1s backpressure.
+
+**Real regression evidence:**
+
+- Live 40MiB POST, actual upstream `req.pause()` for 3000ms then `req.resume()`: returns **200**,
+  fixture counter and returned body both report **41943040 bytes**. Client pumping obeys drain;
+  there is no whole-body proxy buffer. Final run durations for this test: 3.07–3.10s, no 504 or
+  ECONNRESET. The resume timer is real and unref'd, and cleaned up in `finally`.
+- Declared 1GiB POST with ~17MiB client write, actual paused upstream and asserted paused proxy
+  TCP socket: after client destroy, the slot is still occupied (hidden FIN). The test asserts the
+  ordinary 120000ms socket idle configuration, **injects 100ms on that same idle path**, observes
+  its real timeout event, and asserts proxy socket destruction, zero admission slots, and no
+  active Agent sockets. This replaces the rejected prompt-abort/backpressure-deadline assertion.
+  Every listener/socket is cleaned up; the earlier header/large-body/backpressure tests stay green.
+
+**Self-verification:**
+
+```sh
+timeout 280 npm run typecheck
+timeout 280 npm run build
+for run in 1 2 3 4 5; do
+  timeout 900 npx vitest run tests/web-hub/hub/proxy || exit $?
+done
+npx prettier --check src/web-hub/hub/proxy/forward.ts tests/web-hub/hub/proxy/forward.test.ts docs/dev/web-hub-proxy/X1b-report.md
+```
+
+Typecheck/build **passed (exit 0)** on the concurrently evolving tree. Proxy suites passed
+**five consecutive runs, 12 files / 352 tests each**. That count includes X1c's concurrently added
+15 route tests; they were not authored/modified here. This rework replaces one old test and adds
+one live-upload regression (net +1 case). Captured outputs:
+
+```text
+> pi-toolkit@0.5.5 typecheck
+> tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.typecheck.json && vue-tsc --noEmit -p src/web-hub/ui/tsconfig.json
+
+
+> pi-toolkit@0.5.5 build
+> tsc -p tsconfig.build.json
+```
+
+```text
+=== X1b signal-only upload gate run 1 ===
+ Test Files  12 passed (12)
+      Tests  352 passed (352)
+   Duration  14.91s (transform 886ms, setup 490ms, collect 1.86s, tests 15.32s, environment 2ms, prepare 697ms)
+=== X1b signal-only upload gate run 2 ===
+ Test Files  12 passed (12)
+      Tests  352 passed (352)
+   Duration  15.07s (transform 836ms, setup 520ms, collect 1.75s, tests 15.52s, environment 2ms, prepare 709ms)
+=== X1b signal-only upload gate run 3 ===
+ Test Files  12 passed (12)
+      Tests  352 passed (352)
+   Duration  14.78s (transform 885ms, setup 489ms, collect 1.81s, tests 15.16s, environment 2ms, prepare 711ms)
+=== X1b signal-only upload gate run 4 ===
+ Test Files  12 passed (12)
+      Tests  352 passed (352)
+   Duration  14.93s (transform 898ms, setup 552ms, collect 1.91s, tests 15.34s, environment 2ms, prepare 648ms)
+=== X1b signal-only upload gate run 5 ===
+ Test Files  12 passed (12)
+      Tests  352 passed (352)
+   Duration  15.07s (transform 858ms, setup 388ms, collect 1.74s, tests 15.51s, environment 2ms, prepare 661ms)
+```
+
+Rework own-file Prettier and scoped `git diff --check` both exited 0:
+
+```text
+Checking formatting...
+All matched files use Prettier code style!
+```

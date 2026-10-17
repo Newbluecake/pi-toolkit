@@ -37,7 +37,7 @@ import {
 import { createProxyPortsMap, type ProxyPortsMap } from "./ports-map.js";
 import { createProxySessionStore } from "./sessions.js";
 import { createProxyAudit, type ProxyAudit } from "./audit.js";
-import { parseProxyTarget, proxyTargetKey } from "./target.js";
+import { canonicalAddr, parseProxyTarget, proxyTargetKey } from "./target.js";
 import { createProxyListener, type ProxyListener } from "./listener.js";
 import { createProxyAdmission, type ProxyTraffic } from "./forward.js";
 
@@ -111,7 +111,19 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
   const timer = deps.timer ?? systemProxyTimer;
   const ports =
     deps.portsMap ?? createProxyPortsMap({ stateDir: deps.stateDir, range: deps.config.portRange, fs, now, timer });
-  const dns = deps.dns ?? createProxyDnsGate({ lookup, timer });
+  const dnsSource = deps.dns ?? createProxyDnsGate({ lookup, timer });
+  const dns: ProxyDnsGate = {
+    get inflight() {
+      return dnsSource.inflight;
+    },
+    async resolve(host) {
+      try {
+        return await dnsSource.resolve(host);
+      } catch {
+        return { ok: false, reason: "dns-failed" };
+      }
+    },
+  };
   const audit = deps.audit ?? createProxyAudit(deps.log, now);
   const sessionCounts = new Map<string, ProxyTraffic>();
   const sessionTraffic = (session: import("./sessions.js").ProxySession): ProxyTraffic => {
@@ -133,6 +145,8 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
   const wsBudget = { active: 0 };
   const instances = new Map<string, Instance>();
   const pending = new Map<string, Promise<Instance | ProxyOpenFailure>>();
+  // Includes every caller awaiting the shared creation, not just its capacity owner.
+  const openers = new Map<string, number>();
   const creations = new Set<Creation>();
   const reservations = new Map<string, number>();
   const closingInstances = new Set<Promise<void>>();
@@ -159,6 +173,7 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
     sessions.revoke({ sel: { instanceId: inst.id }, reason: "close" });
     audit.end({ instanceId: inst.id, end, ...inst.traffic });
     audit.forget(inst.id);
+    audit.forget(inst.logicalKey);
     if (instances.size === 0) {
       cancelSweep();
       sweepArmed = false;
@@ -310,20 +325,36 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
     revokedSince: (seq0, id) => sessions.revokedSince(seq0, id),
     async open(identity, target, browserHost, seq0): Promise<ProxyOpenOutcome> {
       let inst: Instance | undefined;
+      const parsed = parseProxyTarget(target);
+      // Stable even before an instance exists; paths/queries must not defeat denial throttling.
+      // This key is throttle state only and is never emitted as an audit field.
+      // X1a also fences literals during parse and returns only a reason on denial. Recover
+      // an authority for throttling ONLY (never admission); URL credentials/path/query are
+      // discarded, and the same canonical IP function folds mapped-v6 aliases together.
+      const deniedAuthority = () => {
+        try {
+          const u = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(target) ? target : `http://${target}`);
+          return `denied|${canonicalAddr(u.hostname)?.key ?? u.hostname.toLowerCase()}|${u.port || "80"}`;
+        } catch {
+          return "invalid-target";
+        }
+      };
+      const denialKey = !parsed.ok
+        ? deniedAuthority()
+        : parsed.target.address === undefined
+          ? `dns|${parsed.target.hostHeader}`
+          : proxyTargetKey(parsed.target.address, parsed.target);
       const failure = (fail: ProxyOpenFailure): ProxyOpenFailure => {
-        audit.open({ ok: false, reason: fail.reason, identity }, inst?.id);
+        audit.open({ ok: false, reason: fail.reason, identity }, denialKey);
         return fail;
       };
       if (closing) return failure(unavailable("closing"));
       if (ports.status() !== "ok") return failure(deny("ports-store"));
-      const parsed = parseProxyTarget(target);
       if (!parsed.ok) return failure(deny(parsed.reason));
-      // Main-session ruling: canonical literal aliases share a logical key BEFORE any await.
-      // Hostnames use their canonical virtual-host authority until the one-time DNS pin exists.
-      const logicalKey =
-        parsed.target.address === undefined
-          ? `dns|${parsed.target.hostHeader}`
-          : proxyTargetKey(parsed.target.address, parsed.target);
+      // Main-session ruling: literal aliases and unresolved canonical hostname authorities
+      // share a logical key BEFORE any await, so reopens consume no new reservation.
+      const logicalKey = denialKey;
+      openers.set(logicalKey, (openers.get(logicalKey) ?? 0) + 1);
       inst = [...instances.values()].find((i) => i.logicalKey === logicalKey && !i.closing);
       try {
         if (!inst) {
@@ -387,7 +418,8 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
           nextPath: parsed.target.nextPath,
         });
         if (!code.ok) {
-          if (inst.grants === 0 && inst.listener.sockets.size === 0) await stopInstance(inst, "close");
+          if (inst.grants === 0 && inst.listener.sockets.size === 0 && openers.get(logicalKey) === 1)
+            await stopInstance(inst, "close");
           if ("kind" in code) return failure({ ...unavailable("closing"), retryable: true } as ProxyOpenFailure);
           return failure(code);
         }
@@ -415,6 +447,10 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
         };
       } catch {
         return failure({ ...unavailable("closing"), retryable: true } as ProxyOpenFailure);
+      } finally {
+        const left = (openers.get(logicalKey) ?? 1) - 1;
+        if (left === 0) openers.delete(logicalKey);
+        else openers.set(logicalKey, left);
       }
     },
     list(identity) {

@@ -1,15 +1,20 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { request } from "node:http";
+import { createServer, request, type IncomingMessage } from "node:http";
+import type { Socket } from "node:net";
 import { once } from "node:events";
-import { createProxyAdmission } from "../../../../src/web-hub/hub/proxy/forward.js";
+import { createProxyAdmission, createProxyForwarder } from "../../../../src/web-hub/hub/proxy/forward.js";
 import {
   PROXY_QUEUE_WAIT_MS,
   PROXY_HEAD_TIMEOUT_MS,
   PROXY_REQUEST_BODY_MAX_BYTES,
   PROXY_STREAM_HWM_BYTES,
+  PROXY_SOCKET_TIMEOUT_MS,
 } from "../../../../src/web-hub/protocol/proxy.js";
-import { engine, waitFor } from "./engine-helpers.js";
+import { engine, identity, listen, waitFor } from "./engine-helpers.js";
 import { manualClock } from "./helpers.js";
+import { resolveProxyTarget } from "../../../../src/web-hub/hub/proxy/dns-gate.js";
+import { createProxySessionStore } from "../../../../src/web-hub/hub/proxy/sessions.js";
+import { sendProxyResponse } from "../../../../src/web-hub/hub/proxy/listener.js";
 
 let env: Awaited<ReturnType<typeof engine>>;
 afterEach(async () => {
@@ -208,4 +213,173 @@ describe("T-H4 HTTP budgets", () => {
     expect(env.up.requests[0]!.bytes).toBeLessThanOrEqual(PROXY_REQUEST_BODY_MAX_BYTES);
     await waitFor(() => env.up.sockets.size === 0);
   }, 15000);
+  it("follow-up rework: live 40MiB upload survives a 3s upstream read pause and delivers every byte", async () => {
+    env = await engine();
+    const opened = await env.open();
+    const { cookie } = await env.enter(opened);
+    let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+    let paused = false,
+      resumed = false;
+    let pausedAt = 0;
+    env.up.server.on("request", (req) => {
+      if (req.url !== "/sink") return;
+      req.pause();
+      paused = true;
+      pausedAt = Date.now();
+      resumeTimer = setTimeout(() => {
+        resumed = true;
+        req.resume();
+      }, 3000);
+      resumeTimer.unref();
+    });
+    const total = 40 * 1024 * 1024;
+    const u = new URL(opened.origin);
+    let upload: ReturnType<typeof request> | undefined;
+    try {
+      const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        upload = request(
+          {
+            host: "127.0.0.1",
+            port: Number(u.port),
+            path: "/sink",
+            method: "POST",
+            agent: false,
+            headers: { Cookie: cookie, "Content-Length": String(total) },
+          },
+          (res) => {
+            let body = "";
+            res.on("data", (chunk) => {
+              body += chunk.toString();
+            });
+            res.on("error", reject);
+            res.on("end", () => resolve({ status: res.statusCode!, body }));
+          },
+        );
+        const req = upload;
+        req.on("socket", (socket) => {
+          env.clients.add(socket);
+          socket.unref();
+          socket.on("close", () => env.clients.delete(socket));
+        });
+        req.on("error", reject);
+        let sent = 0;
+        const chunk = Buffer.alloc(PROXY_STREAM_HWM_BYTES, 0x61);
+        const pump = () => {
+          while (!req.destroyed && sent < total) {
+            sent += chunk.length;
+            if (!req.write(chunk)) {
+              req.once("drain", pump);
+              return;
+            }
+          }
+          if (!req.destroyed) req.end();
+        };
+        pump();
+      });
+      expect(paused).toBe(true);
+      expect(resumed).toBe(true);
+      expect(Date.now() - pausedAt).toBeGreaterThanOrEqual(2900);
+      expect(result.status).toBe(200);
+      expect(JSON.parse(result.body).bytes).toBe(total);
+      expect(env.up.requests).toHaveLength(1);
+      expect(env.up.requests[0]!.bytes).toBe(total);
+    } finally {
+      if (resumeTimer) clearTimeout(resumeTimer);
+      upload?.destroy();
+    }
+  }, 15000);
+  it("follow-up rework: hidden client FIN releases the paused upload via the existing socket idle path", async () => {
+    env = await engine();
+    // Extend the real fixture in this test only; no read stubs or fake requests.
+    env.up.server.on("request", (req) => {
+      if (req.url === "/hang") req.pause();
+    });
+    const sessions = createProxySessionStore({ now: Date.now });
+    const minted = sessions.mintCode(0, identity(), {
+      instanceId: "paused-upload",
+      origin: "http://local",
+      nextPath: "/",
+    });
+    if (!minted.ok) throw new Error("mint failed");
+    const exchanged = sessions.exchange(minted.code, "paused-upload", "http://local");
+    if (!exchanged.ok) throw new Error("exchange failed");
+    const pinned = await resolveProxyTarget(
+      `127.0.0.1:${env.up.port}`,
+      {
+        inflight: false,
+        resolve: async () => {
+          throw new Error("unexpected DNS");
+        },
+      },
+      { hubPort: 1, proxyRange: env.range, localAddresses: [] },
+    );
+    if (!pinned.ok) throw new Error("pin failed");
+    const admission = createProxyAdmission();
+    const traffic = { reqs: 0, bytesUp: 0, bytesDown: 0, ws: 0 };
+    const forward = createProxyForwarder({
+      instanceId: "paused-upload",
+      pinned: pinned.pinned,
+      sessions,
+      sessionTraffic: () => traffic,
+      admission,
+      traffic,
+      reply: sendProxyResponse,
+      now: Date.now,
+    });
+    let incoming: IncomingMessage | undefined;
+    const server = createServer((req, res) => {
+      incoming = req;
+      forward.handle(req, res, {
+        origin: "http://local",
+        browserHost: "local",
+        session: exchanged.rec,
+        traffic: { reqs: 0, bytesUp: 0, bytesDown: 0, ws: 0 },
+      });
+    });
+    const sockets = new Set<Socket>();
+    let idleFired = false;
+    server.on("connection", (s) => {
+      sockets.add(s);
+      s.unref();
+      // Same existing HTTP idle fallback as the real proxy listener, not a new upload
+      // timeout; shorten only this socket later so the regression needn't wait 120s.
+      s.setTimeout(PROXY_SOCKET_TIMEOUT_MS, () => {
+        idleFired = true;
+        s.destroy();
+      });
+      s.on("close", () => sockets.delete(s));
+    });
+    let client: Socket | undefined;
+    try {
+      await listen(server, 0, "127.0.0.1");
+      client = await env.raw((server.address() as { port: number }).port);
+      client.write("POST /hang HTTP/1.1\r\nHost: local\r\nContent-Length: 1073741824\r\n\r\n");
+      // Leave the large write pending rather than waiting for drain: a stopped upstream
+      // intentionally cannot accept the entire declared body (the real failure scenario).
+      client.write(Buffer.alloc(17 * 1024 * 1024, 0x61));
+      await waitFor(() => incoming?.socket.isPaused() === true && admission.stats().active === 1 && env.up.held === 1);
+      expect(incoming!.complete).toBe(false);
+      const upstreamSockets = Object.values(forward.agent.sockets).flat();
+      expect(upstreamSockets).toHaveLength(1);
+      expect(incoming!.socket.timeout).toBe(120000);
+      const at = Date.now();
+      client.destroy();
+      expect(admission.stats().active).toBe(1); // FIN is hidden behind unread upload bytes.
+      incoming!.socket.setTimeout(100); // injected short value for the existing idle path
+      await waitFor(() => admission.stats().active === 0 && incoming!.socket.destroyed, 1250);
+      expect(idleFired).toBe(true);
+      expect(Date.now() - at).toBeGreaterThanOrEqual(80);
+      expect(Date.now() - at).toBeLessThan(1250);
+      expect(upstreamSockets.every((s) => s!.destroyed)).toBe(true);
+      expect(admission.stats()).toEqual({ active: 0, queued: 0 });
+      expect(Object.values(forward.agent.sockets).flat()).toHaveLength(0);
+    } finally {
+      client?.destroy();
+      forward.close();
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      for (const socket of sockets) socket.destroy();
+      await closed;
+    }
+  }, 5000);
 });
