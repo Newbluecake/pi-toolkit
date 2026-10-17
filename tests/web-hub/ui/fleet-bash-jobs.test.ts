@@ -172,8 +172,8 @@ describe("FleetBashJobs.vue — rows (拍板 ③: 状态语义 + 行底色,与 a
     expect(cmd.text()).toBe(long);
     expect(cmd.attributes("title")).toBe(long);
     expect(cmd.attributes("translate")).toBe("no");
-    expect(item.find(".bj-status").text()).toBe("failed");
-    expect(item.find(".bj-status").attributes("data-kind")).toBe("failed");
+    // variant C: `exit 17` already says failed ⇒ no redundant status text
+    expect(item.find(".bj-status").exists()).toBe(false);
     expect(item.find(".bj-exit").text()).toBe("exit 17");
     expect(item.find(".bj-chip").text()).toBe("grace");
     expect(item.find(".bj-elapsed").text()).toBe("1m05s");
@@ -252,6 +252,37 @@ describe("FleetBashJobs.vue — rows (拍板 ③: 状态语义 + 行底色,与 a
     expect(wrapper.findAll("button").every((b) => !b.classes().includes("copy-btn"))).toBe(true);
     // the only buttons are the summary toggle and the per-row tail toggles
     for (const b of wrapper.findAll(".bj-list button")) expect(b.classes()).toContain("bj-row");
+  });
+});
+
+describe("FleetBashJobs.vue — variant C de-shelled rows", () => {
+  it("shows the core command + cwd/timeout labels; title keeps the full command; running shows no status text", async () => {
+    const full = "cd /home/u/ai/pi-toolkit && timeout 600 sh -c 'npx vitest run'";
+    const wrapper = await mountGroupOpen(wire([row({ cmd: full })]));
+    const item = wrapper.find(".bj-item");
+    expect(item.find(".bj-cmd").text()).toBe("npx vitest run");
+    expect(item.find(".bj-cmd").attributes("title")).toBe(full);
+    expect(item.find(".bj-cwd").text()).toBe("…/ai/pi-toolkit");
+    expect(item.find(".bj-cwd").attributes("title")).toBe("/home/u/ai/pi-toolkit");
+    expect(item.find(".bj-wrap").text()).toBe("timeout 600");
+    expect(item.find(".bj-status").exists()).toBe(false);
+    expect(item.find(".bj-exit").exists()).toBe(false);
+    await item.find(".bj-row").trigger("click");
+  });
+
+  it("timeout shows status + grace; done exit 0 shows nothing", async () => {
+    const wrapper = await mountGroupOpen(
+      wire([
+        row({ id: "t1", status: "timed_out", exitCode: 124, grace: true }),
+        row({ id: "d1", status: "completed", exitCode: 0 }),
+      ]),
+    );
+    const [a, b] = wrapper.findAll(".bj-item");
+    expect(a?.find(".bj-status").text()).toBe("timeout");
+    expect(a?.find(".bj-exit").exists()).toBe(false);
+    expect(a?.find(".bj-chip").text()).toBe("grace");
+    expect(b?.find(".bj-status").exists()).toBe(false);
+    expect(b?.find(".bj-exit").exists()).toBe(false);
   });
 });
 
@@ -435,7 +466,8 @@ describe("FleetDrawer — 「bash」分组(树视图末尾,agent 树之后)", ()
     );
     const items = wrapper.findAll(".bj-item");
     expect(items[0]?.attributes("data-status")).toBe("running");
-    expect(items[0]?.find(".bj-status").attributes("data-kind")).toBe("running");
+    expect(items[0]?.find(".bj-ico").attributes("data-kind")).toBe("running");
+    expect(items[0]?.find(".bj-status").exists()).toBe(false); // the icon says it
     expect(items[1]?.attributes("data-status")).toBe("timeout");
     expect(items[1]?.find(".bj-status").attributes("data-kind")).toBe("failed");
   });

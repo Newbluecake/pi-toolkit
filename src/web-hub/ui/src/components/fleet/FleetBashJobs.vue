@@ -31,6 +31,7 @@ import { formatDuration } from "../../format.js";
 import type { BashJobRowWire, BashJobsWire } from "@protocol/messages.js";
 import type { FleetBashJobsProps } from "../../contracts.js";
 import { formatBytes, statusToken, summaryCounts, tailFreshness, type TailFreshness } from "../detail/bashJobsView.js";
+import { deshellCmd, type DeshelledCmd } from "../../logic/bashCmd.js";
 import "../../styles/bash-jobs.css";
 
 const props = defineProps<FleetBashJobsProps>();
@@ -97,6 +98,22 @@ function shortId(row: BashJobRowWire): string {
   return String(row.id).slice(0, 8);
 }
 
+/** Row line 1 shows the de-shelled core command; title/expansion keep the full redacted one. */
+function shell(row: BashJobRowWire): DeshelledCmd {
+  return deshellCmd(row.cmd);
+}
+
+/** Status text only when the icon does not already say it (running / done) and `exit N` does not. */
+function showStatus(row: BashJobRowWire): boolean {
+  const tok = statusToken(row);
+  if (tok.kind === "running" || tok.kind === "done") return false;
+  return !(tok.text === "failed" && showExit(row));
+}
+
+function showExit(row: BashJobRowWire): boolean {
+  return typeof row.exitCode === "number" && row.exitCode !== 0 && statusToken(row).text !== "timeout";
+}
+
 function bytesLabel(row: BashJobRowWire): string {
   return formatBytes(row.logBytes) + (row.logTruncated === true ? "+" : "");
 }
@@ -150,18 +167,26 @@ function toggleRow(row: BashJobRowWire): void {
             :class="{ spin: statusToken(row).spin }"
             :data-kind="statusToken(row).kind"
           />
-          <span class="bj-id" translate="no">{{ shortId(row) }}</span>
-          <span class="bj-cmd" translate="no" :title="row.cmd">{{ row.cmd }}</span>
-          <span class="bj-status" :data-kind="statusToken(row).kind">{{ statusToken(row).text }}</span>
-          <span v-if="row.exitCode !== null" class="bj-exit num">{{
-            t("detail.bashJobsExit", { n: row.exitCode })
-          }}</span>
-          <span v-if="row.grace === true" class="bj-chip">{{ t("detail.bashJobsGrace") }}</span>
+          <span class="bj-cmd" translate="no" :title="row.cmd">{{ shell(row).cmd }}</span>
           <span class="bj-elapsed num">{{ displayElapsed(row) }}</span>
+          <span class="bj-l2">
+            <span v-if="shell(row).cwd !== undefined" class="bj-cwd" translate="no" :title="shell(row).cwdFull">{{
+              shell(row).cwd
+            }}</span>
+            <span v-if="shell(row).timeout !== undefined" class="bj-wrap" translate="no">{{ shell(row).timeout }}</span>
+            <span class="bj-id" translate="no">{{ shortId(row) }}</span>
+            <span v-if="showStatus(row)" class="bj-status" :data-kind="statusToken(row).kind">{{
+              statusToken(row).text
+            }}</span>
+            <span v-if="showExit(row)" class="bj-exit num">{{
+              t("detail.bashJobsExit", { n: row.exitCode ?? 0 })
+            }}</span>
+            <span v-if="row.grace === true" class="bj-chip">{{ t("detail.bashJobsGrace") }}</span>
+            <span v-if="freshnessText(row) !== null" class="bj-fresh" :data-kind="freshnessOf(row).kind">{{
+              freshnessText(row)
+            }}</span>
+          </span>
           <span class="bj-bytes num">{{ bytesLabel(row) }}</span>
-          <span v-if="freshnessText(row) !== null" class="bj-fresh" :data-kind="freshnessOf(row).kind">{{
-            freshnessText(row)
-          }}</span>
         </button>
         <!-- full redacted command (plain text) — the row itself ellipsizes it -->
         <div v-if="expandedId === row.id && row.tail !== undefined" class="bj-cmd-full" translate="no">

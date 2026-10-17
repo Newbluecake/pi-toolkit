@@ -112,14 +112,18 @@
 /* The whole row is the tail toggle (rows without a tail are disabled buttons — same grid,
  * no dead click target). Button reset mirrors `.bj-sum`. */
 .bj-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "ico cmd tr"
+    ". l2 br";
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
+  column-gap: var(--sp-2);
+  row-gap: 1px;
   width: 100%;
   min-width: 0;
-  min-height: 32px;
-  padding: 3px 6px;
+  min-height: 38px;
+  padding: 4px 6px;
   margin: 0 -6px;
   border: 0;
   border-radius: var(--r-sm);
@@ -142,6 +146,7 @@
 }
 
 .bj-ico {
+  grid-area: ico;
   flex: none;
   color: var(--c-text-3);
 }
@@ -190,14 +195,54 @@
  * then pushed status/exit/elapsed/bytes onto a THIRD line while short commands stayed one-line).
  * The full redacted command shows in the expanded block (`.bj-cmd-full`) and in `title`. */
 .bj-cmd {
-  flex: 1 1 0;
+  grid-area: cmd;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
-  color: var(--c-text-2);
+  font-weight: 500;
+  color: var(--c-text);
+}
+
+/* Line 2 (variant C): muted labels; one line, clipped (overflow hidden). */
+.bj-l2 {
+  grid-area: l2;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.bj-cwd {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--c-surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+}
+
+.bj-wrap {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--c-text-3);
+}
+
+.bj-wrap::before {
+  content: "⏱ ";
 }
 
 .bj-status {
@@ -222,7 +267,7 @@
 .bj-exit {
   flex: none;
   font-size: var(--fs-xs);
-  color: var(--c-text-3);
+  color: var(--st-failed);
 }
 
 .bj-chip {
@@ -243,9 +288,18 @@
   white-space: nowrap;
 }
 
+.bj-elapsed {
+  grid-area: tr;
+}
+
+.bj-bytes {
+  grid-area: br;
+}
+
 .bj-elapsed,
 .bj-bytes {
   flex: none;
+  white-space: nowrap;
   /* fixed-width, right-aligned meta columns so rows line up like a table */
   min-width: 6ch;
   text-align: right;
@@ -302,23 +356,20 @@
   font-size: var(--fs-xs);
 }
 
-/* ≤480px (same reflow ruling as `.wt-label`): the command drops to its own full-width line
- * in smaller muted type so a long redacted command never overflows the panel; DOM order
- * stays untouched (the cmd is simply ordered last and given a full flex-basis). */
-@media (max-width: 480px) {
-  /* the row's own command line already wraps in full here — no duplicate in the expansion */
-  .bj-cmd-full {
-    display: none;
+/* Narrow (<480px CONTAINER — the drawer's `.tree-scroll` is an inline-size container; a docked
+ * or overlay drawer is narrow on a wide viewport, so a viewport media query would never fire
+ * there): same two lines (they already fit). When line 2 overflows the id goes first (lowest
+ * priority: ordered last, it wraps onto a clipped second flex line), then the cwd chip
+ * shrinks/ellipsizes. The expansion keeps the full command (the row only ellipsizes). */
+@container (max-width: 479px) {
+  .bj-l2 {
+    flex-wrap: wrap;
+    max-height: calc(20px * var(--fs-scale, 1));
+    row-gap: var(--sp-2);
   }
 
-  .bj-cmd {
-    order: 10;
-    flex-basis: 100%;
-    padding-left: calc(16px + var(--sp-2)); /* aligns under the id column */
-    white-space: normal;
-    overflow-wrap: anywhere;
-    font-size: var(--fs-2xs);
-    color: var(--c-text-3);
+  .bj-id {
+    order: 9;
   }
 }
 
