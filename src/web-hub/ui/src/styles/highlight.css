@@ -72,12 +72,13 @@
 /* ---------------------------------------------------------------- class → variable map */
 /* Groups mirror Prism's common token types (several ids per group keeps the map small). */
 
+/* 2026-10-17 user 「参考 GitHub」: comments are distinguished by color only — no italic (CJK has
+ * no italic face, and a mixed upright-CJK / italic-Latin line read as uneven). */
 .tok-comment,
 .tok-prolog,
 .tok-doctype,
 .tok-cdata {
   color: var(--tok-comment);
-  font-style: italic;
 }
 
 .tok-keyword,
