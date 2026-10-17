@@ -417,6 +417,29 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     "webHub.spawn.lanConfirm",
     "web-hub spawn: require a per-spawn confirmation for LAN-originated session starts (default on; off = LAN behaves like loopback's known-dir pass-through; change: /reload then /webhub restart)",
   ),
+  // web-hub-proxy plan v2 §5 (X0): at most three leaves, all non-live (captured at activate;
+  // change: /reload then /webhub restart). LAN reach follows webHub.lan — no proxy LAN switch;
+  // TTLs are fixed constants in protocol/proxy.ts. portRange is validated at load time by
+  // parseWebHubProxyBlock (an invalid / overlapping / >256-port range falls back to the default
+  // with a warning) — the editor itself only requires a non-empty string, like webHub.nodeLoader.
+  "webHub.proxy.enabled": bool(
+    "webHub.proxy.enabled",
+    "web-hub: browser access to local/LAN HTTP services through per-port proxy listeners (default off ⇒ zero wiring/network/disk; LAN reach follows webHub.lan; change: /reload then /webhub restart)",
+  ),
+  "webHub.proxy.portRange": {
+    kind: "string",
+    path: "webHub.proxy.portRange",
+    description:
+      "web-hub proxy: listener port range <lo>-<hi> (default 7900-7949; at most 256 ports within 1024-65535, must not overlap webHub.port / webHub.lan.port; invalid ⇒ default; change: /reload then /webhub restart)",
+  },
+  "webHub.proxy.maxProxies": {
+    ...count(
+      "webHub.proxy.maxProxies",
+      1,
+      "web-hub proxy: cap on concurrent proxies, 1-16 (default 8; change: /reload then /webhub restart)",
+    ),
+    max: 16,
+  } as SettingSpec,
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "date.enabled": bool(
     "date.enabled",

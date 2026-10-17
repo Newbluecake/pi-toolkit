@@ -19,6 +19,14 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
 import type { AvatarInfo, AvatarPath } from "../protocol/avatar.js";
+import type {
+  ProxyCapReason,
+  ProxyDenyReason,
+  ProxyLimitReason,
+  ProxyListResponse,
+  ProxyOpenResult,
+  ProxyUnavailableExtraReason,
+} from "../protocol/proxy.js";
 import type { HostTokenRejectReason, LanOffReason, LanStatus } from "../protocol/lan.js";
 import type {
   AgentId,
@@ -42,6 +50,8 @@ import type {
 } from "../protocol/messages.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { AgentRemoveFrontendPort } from "./agent-remove.js";
+import type { AuthIdentity, IdentityResult } from "./auth-identity.js";
+import type { AuthRevokeEvent } from "./auth-revoke.js";
 import type {
   RunEndFrame,
   RunEvFrame,
@@ -401,6 +411,23 @@ export interface HubConfig {
    * pi's settings change later (§3/§7.2 — "singleton 保留到 restart"); `hub/main.ts`'s
    * `normalizeHubLoadConfig` (P3) re-validates and drops the whole key on anything malformed. */
   load?: HubLoadConfig;
+  /** web-hub-proxy plan v2 §5 (X0 frozen face): the port-proxy policy, present ONLY when
+   * `webHub.proxy.enabled ∧ control !== false` (X1c's `buildHubConfig` omits the key otherwise —
+   * the key's absence IS the wire-level off: no service, routes, caps, `/api` cross-site gate or
+   * disk, byte-identical hub). LAN reach is NOT a field here: it is derived from `config.lan`
+   * (Q2 — the proxy has no LAN switch of its own). `hub/main.ts`'s `normalizeHubProxyConfig`
+   * drops the whole key when malformed. */
+  proxy?: HubProxyConfig;
+}
+
+/**
+ * web-hub-proxy plan v2 §5: `HubConfig.proxy`. `portRange` is the inclusive `[lo, hi]` tuple
+ * (`parseProxyPortRange`'s output; ≤ `PROXY_PORT_RANGE_MAX_SPAN` ports, never overlapping the hub
+ * or LAN port), `maxProxies` is 1..16.
+ */
+export interface HubProxyConfig {
+  portRange: [number, number];
+  maxProxies: number;
 }
 
 /**
@@ -724,6 +751,12 @@ export interface FrontendDeps {
    * frame whenever the SERVED bundle identity actually changes; `undefined` means no servable
    * root (delete `info.ui`). Mirrors `onUiStatus`'s role for `hubJson.patchUi`. */
   onUiServed?: (ui: HubUiBuildWire | undefined) => void;
+  /** web-hub-proxy plan v2 §3.8/§12 (X0 frozen face): the proxy route frontend (X1c's
+   * `createProxyRoutes`), constructed by `hub.ts` only when `config.proxy` exists. Optional so
+   * test doubles and pre-X1c assemblies keep compiling — when absent, `/api/proxy*` answers
+   * exactly as today (404 on both listeners) and no `/api` cross-site gate or multi-candidate
+   * cookie mode is ever armed. */
+  proxy?: ProxyRoutes;
 }
 
 export interface HttpFrontend {
@@ -969,6 +1002,112 @@ export interface WorktreeGraphRoutes {
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
   /** Idempotent; aborts every active request and single-flight Gl execution ("hub-close"), ≤1 s. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-proxy plan v2 §3.4/§3.8/§4.1/§4.2 (X0 frozen surface): the proxy service + route
+// frontend. Declared here for the same reason as `PreviewRoutes` — `FrontendDeps.proxy` needs
+// the types before `hub/proxy/{service,routes}.ts` exist from ports.ts's perspective. The
+// identity / revocation types live in `auth-identity.ts` / `auth-revoke.ts` (package XA) and are
+// re-exported from here; a member-signature refinement must come back through ports.ts review.
+// ---------------------------------------------------------------------------
+
+export type { AuthIdentity, IdentityResult } from "./auth-identity.js";
+export type { AuthRevokeEvent } from "./auth-revoke.js";
+
+/** A refused `ProxyService.open`: the wire status + error code + reason (`protocol/proxy.ts`'s
+ * `PROXY_REASON_RESPONSE` fixes the pairing for `ProxyDenyReason`s; the other branches are the
+ * `proxies` limit, the §3.2 code/session caps and the closing/gap/listen-timeout availability
+ * reasons). `retryable` mirrors §3.2's "503 retryable" (tombstone gap). */
+export type ProxyOpenFailure =
+  | { ok: false; status: 400 | 403; error: "E_PROXY_DENIED"; reason: ProxyDenyReason }
+  | {
+      ok: false;
+      status: 409 | 503;
+      error: "E_PROXY_UNAVAILABLE";
+      reason: ProxyDenyReason | ProxyUnavailableExtraReason;
+      retryable?: boolean;
+    }
+  | { ok: false; status: 409; error: "E_LIMIT"; reason: ProxyLimitReason }
+  | { ok: false; status: 429; error: "E_RATE"; reason: ProxyCapReason };
+
+export type ProxyOpenOutcome = { ok: true; result: ProxyOpenResult } | ProxyOpenFailure;
+
+/** `ProxyService.stop` outcome (404 ⇔ unknown instance, or not stoppable by this identity). */
+export type ProxyStopOutcome = { ok: true } | { ok: false; code: "E_NOT_FOUND" };
+
+/** `ProxyService.status()` — read-only, for `/webhub status` (`agent/proxy-status.ts`). */
+export interface ProxyServiceStatus {
+  instances: number;
+  reserved: number;
+  /** `broken` ⇒ every `open` answers 503 `E_PROXY_UNAVAILABLE{ports-store}` (plan §3.3). */
+  portsStore: "ok" | "broken";
+}
+
+/**
+ * The hub-side proxy service (`hub/proxy/service.ts`, X1b). One instance per hub, constructed
+ * after `frontend.listen()` (it needs the real bound ports) with `lanHostSnapshot:
+ * () => HostSnapshot | undefined` as a construction dependency (live LAN host allow-list).
+ */
+export interface ProxyService {
+  /** The current revocation sequence — `http.ts` captures `seq0` from here BEFORE it calls
+   * `resolveIdentity` (plan §3.2 / seq0-before-authorize). */
+  currentSeq(): number;
+  /** `true` ⇔ a revocation matching `identity` happened after `seq0`; `"gap"` ⇔ `seq0` is older
+   * than the oldest retained tombstone (fail closed ⇒ 503 retryable `revocation-gap`). */
+  revokedSince(seq0: number, identity: AuthIdentity): boolean | "gap";
+  /** §3.4 `open`: closing fence → reservation → parse+fence/DNS → single-flight → port bind +
+   * listen → code. `browserHost` is the host part the browser used (loopback: request Host;
+   * LAN direct: `ctx.hostKey`). The routes refuse a trusted-reverse-proxy mint (409
+   * `reverse-proxy`) BEFORE calling this. */
+  open(identity: AuthIdentity, target: string, browserHost: string, seq0: number): Promise<ProxyOpenOutcome>;
+  /** §3.8 `GET /api/proxy`: every live instance + the policy block (`mine` is per `identity`). */
+  list(identity: AuthIdentity): ProxyListResponse;
+  /** §3.4 `stop`: allowed for the owner principal or any loopback principal. */
+  stop(instanceId: string, identity: AuthIdentity): Promise<ProxyStopOutcome>;
+  /** §4.2: the auth-revocation bus subscriber (wired by `hub.ts` via the frontend's duck-typed
+   * `subscribeAuthRevoke` extra, only when `config.proxy`). */
+  revoke(ev: AuthRevokeEvent): void;
+  /** §3.4: open proxied connections — added to the idle monitor's `sse` count. */
+  activeConnections(): number;
+  /** Optional, `/webhub status` only. */
+  status?(): ProxyServiceStatus;
+  /** §3.4 closing fence — irreversible, idempotent, bounded by the hub's 2 s close deadline;
+   * also called on every `startHub` failure path after construction. */
+  dispose(): Promise<void>;
+}
+
+/** What `hub/http.ts` injects into every proxy-route dispatch (one per request per listener;
+ * mirrors `PreviewRouteIo`/`SpawnRouteIo`). `resolveIdentity` is the listener's single
+ * identity-resolution API (§4.1) — the route never touches `Cookie`. */
+export interface ProxyRouteIo {
+  listener: "loopback" | "lan";
+  expectedOrigin: string;
+  /** Host part the browser addressed this request with (loopback: request Host's host part;
+   * LAN direct: `ctx.hostKey`'s host part). */
+  browserHost: string;
+  /** LAN only: the request arrived through the trusted reverse proxy ⇒ open/stop answer 409
+   * `reverse-proxy` (plan §3.4/§6). Always `false` on loopback. */
+  viaTrustedProxy: boolean;
+  /** Per-listener CSRF gates: `strictCsrfOk` (POST routes; Origin mandatory) / `X-PWH: 1`
+   * present (`GET /api/proxy`). */
+  strictCsrfOk(): boolean;
+  xPwhOk(): boolean;
+  resolveIdentity(deadline: ReqDeadline): Promise<IdentityResult>;
+  readJson(req: IncomingMessage, maxBytes?: number, maxMs?: number): Promise<unknown>;
+  sendJson: (res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>) => void;
+  sendError(res: ServerResponse, status: number, code: string, message?: string): void;
+}
+
+/**
+ * The proxy route frontend (`hub/proxy/routes.ts`, X1c) — one `handle`, like the headless/avatar
+ * routes. Returns `false` when `method`+`path` is not one of the three proxy routes
+ * (`protocol/proxy.ts`'s `PROXY_OPEN_PATH` / `PROXY_LIST_PATH` / `PROXY_STOP_PATH`), so the
+ * original 404 still applies; `true` once it has answered. The route owns CSRF, auth, the
+ * per-principal bucket and audit; it never throws.
+ */
+export interface ProxyRoutes {
+  handle(req: IncomingMessage, res: ServerResponse, method: string, path: string, io: ProxyRouteIo): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------

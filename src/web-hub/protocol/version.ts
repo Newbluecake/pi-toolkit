@@ -288,3 +288,18 @@ export const VERSION_HUB_CAP = "version.v1";
  * the 1.1 → 1.2 minor bump remains fleet F0's alone (see PROTO above).
  */
 export const PREVIEW_HTML_HUB_CAP = "preview.html.v1";
+
+/**
+ * web-hub-proxy plan v2 §5 (X0 frozen surface): the two hub caps advertising the port-proxy
+ * feature set — `POST /api/proxy/open`, `GET /api/proxy`, `POST /api/proxy/stop`
+ * (`protocol/proxy.ts`). `PROXY_HUB_CAP` is declared iff `config.proxy` exists
+ * (`webHub.proxy.enabled` ∧ `control !== false`); `PROXY_LAN_HUB_CAP` iff `config.proxy &&
+ * config.lan` (Q2: LAN reach follows `webHub.lan`, there is no separate LAN switch). Both fold
+ * into `extraHubCaps` on BOTH cap surfaces (`HubInfo.caps` / `hello_ack.caps`) in X1c — in X0
+ * the constants alone are INERT, nothing folds them into any caps array yet. A browser that
+ * doesn't see them renders zero proxy UI (token auth looks for `proxy.v1`, password auth for
+ * `proxy.lan.v1`, §8); an old browser just ignores the unknown strings. No frames, no SSE event
+ * ⇒ no PROTO bump (same §2.3 rule as every cap above).
+ */
+export const PROXY_HUB_CAP = "proxy.v1";
+export const PROXY_LAN_HUB_CAP = "proxy.lan.v1";

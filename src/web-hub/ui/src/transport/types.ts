@@ -16,6 +16,7 @@ import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type { AvatarDeleteOutcome, AvatarFetchOutcome, AvatarWriteOutcome } from "@protocol/avatar.js";
 import type { LoadTopWire } from "@protocol/messages.js";
 import type { VersionInfoWire } from "@protocol/version-info.js";
+import type { ProxyListResponse, ProxyOpenRequestBody, ProxyOpenResult, ProxyStopResponse } from "@protocol/proxy.js";
 import type {
   ForkReason,
   HistoryLiveWire,
@@ -156,6 +157,12 @@ export interface HubTransport {
    * `version.v1` cap (phase `unsupported`, never any request — I8: old-hub DOM stays
    * byte-identical). Both real adapters always provide it. */
   versionInfo?(signal?: AbortSignal): Promise<VersionInfoOutcome>;
+  /** web-hub-proxy plan v2 §3.8/§8 (X0 frozen face, X2's `transport/{token,password}.ts`
+   * implement): `POST /api/proxy/open` · `GET /api/proxy` · `POST /api/proxy/stop`. Optional per
+   * the frozen-transport convention (test fakes / future transports may omit it) — `proxyScopeOf`
+   * yields `null` without it (and without the `proxy.v1`/`proxy.lan.v1` cap) and the UI renders
+   * zero proxy affordances, byte-identical to today. Both real adapters provide it from X2 on. */
+  readonly proxy?: ProxyTransport;
 }
 
 /**
@@ -786,4 +793,36 @@ export interface WorktreeGraphTransport {
     req: WtDiffScope & { readonly wt: string },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<WtDiffOutcome<WtGraphPayload>>;
+}
+
+// ---------------------------------------------------------------------------
+// web-hub-proxy plan v2 §3.8/§8 (X0 frozen face) — the port-proxy transport surface
+// ---------------------------------------------------------------------------
+
+/** Shared error half of the three proxy outcomes: `error` is the wire code verbatim
+ * (`E_PROXY_DENIED`/`E_PROXY_UNAVAILABLE`/`E_LIMIT`/`E_RATE`/`E_AUTH`/…), `reason` the wire
+ * `reason` verbatim (a `ProxyDenyReason` / limit / cap / `cookie-conflict` literal — the UI maps
+ * it over the closed sets in `protocol/proxy.ts`), `retryAfterS` folded from `Retry-After`.
+ * `status` is 0 for client-local codes (`E_ABORT`/`E_DEADLINE`/`E_NETWORK`/`E_BAD_RESPONSE`). */
+export interface ProxyFetchError {
+  readonly ok: false;
+  readonly status: number;
+  readonly error: string;
+  readonly reason?: string;
+  readonly retryAfterS?: number;
+}
+
+/** The success half IS the protocol's body (never a hand mirror — same anti-drift rule as
+ * `PreviewHtmlCapOutcome`). */
+export type ProxyOpenFetchOutcome = (ProxyOpenResult & { readonly ok: true }) | ProxyFetchError;
+export type ProxyListFetchOutcome = (ProxyListResponse & { readonly ok: true }) | ProxyFetchError;
+export type ProxyStopFetchOutcome = (ProxyStopResponse & { readonly ok: true }) | ProxyFetchError;
+
+export interface ProxyTransport {
+  /** `POST /api/proxy/open` (X-PWH + JSON; body ≤ 2 KiB). No POST replay on failure. */
+  open(req: ProxyOpenRequestBody, opts?: { readonly signal?: AbortSignal }): Promise<ProxyOpenFetchOutcome>;
+  /** `GET /api/proxy` — fetched when the dialog opens and after each action (no polling). */
+  list(opts?: { readonly signal?: AbortSignal }): Promise<ProxyListFetchOutcome>;
+  /** `POST /api/proxy/stop` — `{instanceId}` ⇒ 200 `{ok:true}` · 404. */
+  stop(instanceId: string, opts?: { readonly signal?: AbortSignal }): Promise<ProxyStopFetchOutcome>;
 }

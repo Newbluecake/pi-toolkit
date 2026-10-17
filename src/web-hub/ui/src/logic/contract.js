@@ -35,6 +35,14 @@ import { WTGRAPH_PATH } from "@protocol/worktree-graph.ts";
 import { VERSION_INFO_PATH } from "@protocol/version-info.ts";
 import { UPLOAD_ABORT_PATH, UPLOAD_BEGIN_PATH, UPLOAD_CHUNK_PATH, UPLOAD_COMMIT_PATH } from "@protocol/upload.ts";
 import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "@protocol/privacy.ts";
+import {
+  PROXY_COOKIE_CONFLICT_REASON,
+  PROXY_DENY_REASONS,
+  PROXY_LIST_PATH,
+  PROXY_OPEN_PATH,
+  PROXY_STOP_PATH,
+} from "@protocol/proxy.ts";
+import { PROXY_HUB_CAP, PROXY_LAN_HUB_CAP } from "@protocol/version.ts";
 
 /** SSE `event:` names pushed by the hub (order irrelevant, set must match) — same array as
  * `protocol/http-contract.ts`'s `SSE_EVENTS`, not a copy. */
@@ -117,6 +125,14 @@ export const API = Object.freeze({
   // `privacyLock` rides both listeners. `tests/web-hub/ui/logic-contract.test.ts` pins both.
   privacyVerify: PRIVACY_VERIFY_PATH,
   privacyLock: PRIVACY_LOCK_PATH,
+  // web-hub-proxy plan v2 §3.8/§8 (X0): the three port-proxy endpoints, imported from
+  // `protocol/proxy.ts` — same anti-drift rule as the preview/wtdiff paths above (X1c's hub
+  // routes mount the same constants, so the two can never disagree). X2's `useProxyOpen` /
+  // `ProxyDialog` / transports are the first consumers. `tests/web-hub/ui/logic-contract.test.ts`
+  // pins them against the protocol constants.
+  proxyOpen: PROXY_OPEN_PATH,
+  proxyList: PROXY_LIST_PATH,
+  proxyStop: PROXY_STOP_PATH,
   // @文件补全 (file-mention): the composer's file-search endpoint. Hand-written literal, NOT
   // imported from `hub/file-search.ts` — that module is hub-side (imports `node:fs*`) and must
   // never reach the browser bundle; `tests/web-hub/ui/logic-file-mention.test.ts` pins this
@@ -145,3 +161,21 @@ export const HISTORY_LIMIT_MAX = 400;
  * `VERSION_LIMITS.bodyBytes` (64 KiB, §8), imported by the clients from
  * `@protocol/version-info.ts` directly. */
 export const VERSION_INFO_CLIENT_TIMEOUT_MS = 15_000;
+
+/** web-hub-proxy plan v2 §5/§8 (X0): the two hub caps `proxyScopeOf(caps, transport)` keys off —
+ * `proxy.v1` for token auth (loopback), `proxy.lan.v1` for password auth (LAN). Same constants
+ * the hub folds into `extraHubCaps` (imported, not copied). */
+export const PROXY_CAPS = Object.freeze({ token: PROXY_HUB_CAP, password: PROXY_LAN_HUB_CAP });
+
+/** web-hub-proxy plan v2 §3.8 (X0): the closed `E_PROXY_DENIED`/`E_PROXY_UNAVAILABLE` reason set
+ * the open-flow toast maps over — the SAME array as `protocol/proxy.ts`'s, not a copy. */
+export const PROXY_DENY_REASON_SET = Object.freeze(PROXY_DENY_REASONS);
+
+/** web-hub-proxy plan v2 §4.1 (X0): the 401 `E_AUTH` `reason` that selects the 「检测到重复的登录
+ * Cookie…」 recovery copy (a parity copy of the hub constant, imported from the protocol module). */
+export const PROXY_COOKIE_CONFLICT = PROXY_COOKIE_CONFLICT_REASON;
+
+/** web-hub-proxy plan v2 §8 (X0 decision): `POST /api/proxy/open` client deadline — padded above the
+ * server's worst case (DNS 2 s + listen 2 s + ports persist 2 s + queueing), same "pad above the
+ * server" convention as `VERSION_INFO_CLIENT_TIMEOUT_MS`. List/stop reuse it. */
+export const PROXY_CLIENT_TIMEOUT_MS = 15_000;

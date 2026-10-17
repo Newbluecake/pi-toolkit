@@ -20,9 +20,31 @@ import {
 } from "../memory/tidy/batch-settings.js";
 // web-hub (plan 包 I): the settings type is owned by package D; `import type`
 // only, so this pre-guard module never loads the web-hub runtime graph.
-import type { WebHubLanSettings, WebHubSettings, WebHubSpawnSettings } from "../web-hub/agent/index.js";
+import type {
+  WebHubLanSettings,
+  WebHubSettings as AgentWebHubSettings,
+  WebHubSpawnSettings,
+} from "../web-hub/agent/index.js";
 import type { WebHubLanSettingsWarnings } from "../commands/webhub.js";
-export type { WebHubSettings, WebHubLanSettings, WebHubSpawnSettings };
+
+/**
+ * web-hub-proxy plan v2 §5 (X0): `webHub.proxy` — at most three leaves, non-live (captured at
+ * activate; change → `/reload` then `/webhub restart`). Off by default; LAN reach follows
+ * `webHub.lan` (Q2), there is no proxy LAN switch. `portRange` is stored as the canonical
+ * `"<lo>-<hi>"` text (`protocol/proxy.ts` grammar); TTLs are fixed constants there, not settings.
+ */
+export interface WebHubProxySettings {
+  enabled: boolean;
+  portRange: string;
+  maxProxies: number;
+}
+/**
+ * The agent-side `WebHubSettings` (owned by `web-hub/agent/index.ts`, outside X0's file domain)
+ * widened with the proxy block. X1c folds `proxy?` into the agent interface and drops this
+ * intersection — until then every consumer still sees a structurally compatible type.
+ */
+export type WebHubSettings = AgentWebHubSettings & { proxy?: WebHubProxySettings };
+export type { WebHubLanSettings, WebHubSpawnSettings };
 // web-hub LAN (S1-W3 LI, lan-plan.md §9.1): host-token / origin classification is W1-frozen and
 // shared by every layer that needs to agree on what counts as a valid host — settings validation
 // (here, L16 第一处) is one of those layers, alongside `hub/main.ts`'s `parseHubLanConfig` (L16
@@ -924,6 +946,19 @@ export const DEFAULT_WEBHUB_LAN_SETTINGS: WebHubLanSettings = {
 };
 
 /**
+ * `webHub.proxy.*` defaults (web-hub-proxy plan v2 §0/§5): off by default ⇒ `HubConfig.proxy` is
+ * never constructed and the hub is byte-identical. The literals mirror `protocol/proxy.ts`
+ * (`PROXY_DEFAULT_PORT_RANGE_TEXT` / `PROXY_DEFAULT_MAX_PROXIES`) — this module may not
+ * value-import it (`tests/web-hub/boundary.test.ts` freezes its import closure), so
+ * `tests/web-hub/protocol/proxy.test.ts` pins the two copies equal.
+ */
+export const DEFAULT_WEBHUB_PROXY_SETTINGS: WebHubProxySettings = {
+  enabled: false,
+  portRange: "7900-7949",
+  maxProxies: 8,
+};
+
+/**
  * `webHub.spawn.*` defaults（web-hub-spawn arch v2 §6.2 / plan §SP2）：与 lan 块同为非 live——
  * activate 时捕快照，改动需 `/reload` 后再 `/webhub restart` 才到达运行中的 hub（它们只随
  * `PI_WEBHUB_CONFIG` 传输）。默认 `enabled:false` ⇒ `HubConfig.spawn` 不被构造（arch §8.2
@@ -1132,6 +1167,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     load: true,
     lan: DEFAULT_WEBHUB_LAN_SETTINGS,
     spawn: DEFAULT_WEBHUB_SPAWN_SETTINGS,
+    // web-hub-proxy plan v2 §5 (X0): off by default, non-live.
+    proxy: DEFAULT_WEBHUB_PROXY_SETTINGS,
   },
   webSearch: { enabled: true },
   date: { enabled: true },
@@ -2009,11 +2046,17 @@ function resolveWebHubPort(record: Record<string, unknown>): number {
 export function parseWebHubSettings(input: unknown): WebHubSettings {
   const defaults = DEFAULT_SETTINGS.webHub;
   if (!input || typeof input !== "object" || Array.isArray(input))
-    return { ...defaults, lan: { ...defaults.lan! }, spawn: parseWebHubSpawnBlock(undefined) };
+    return {
+      ...defaults,
+      lan: { ...defaults.lan! },
+      spawn: parseWebHubSpawnBlock(undefined),
+      proxy: { ...DEFAULT_WEBHUB_PROXY_SETTINGS },
+    };
   const record = input as Record<string, unknown>;
   const idle = record.idleExitMinutes;
   const nodeLoader = record.nodeLoader;
   const resolvedPort = resolveWebHubPort(record);
+  const lanParsed = parseWebHubLanBlock(record.lan, resolvedPort);
   const policy: Record<string, "allow" | "confirm" | "deny"> = {};
   let rawPolicy: unknown = record.webCommandPolicy;
   if (typeof rawPolicy === "string") {
@@ -2054,8 +2097,9 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     quota: typeof record.quota === "boolean" ? record.quota : (defaults.quota ?? true),
     // sysload plan §6.1: boolean only, anything else falls back to the default `true`.
     load: typeof record.load === "boolean" ? record.load : (defaults.load ?? true),
-    lan: parseWebHubLanBlock(record.lan, resolvedPort).lan,
+    lan: lanParsed.lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
+    proxy: parseWebHubProxyBlock(record.proxy, resolvedPort, lanParsed.lan.port).proxy,
   };
 }
 
@@ -2115,6 +2159,76 @@ export function parseWebHubSpawnBlock(input: unknown): WebHubSpawnSettings {
     history: typeof record.history === "boolean" ? record.history : defaults.history,
     lanConfirm: typeof record.lanConfirm === "boolean" ? record.lanConfirm : defaults.lanConfirm,
   };
+}
+
+/** `parseWebHubProxyBlock` warning codes (web-hub-proxy plan v2 §5 "default + warning"). */
+export type WebHubProxyWarning = "port-range-invalid" | "port-range-overlap" | "max-proxies-invalid";
+
+export interface WebHubProxyParseResult {
+  proxy: WebHubProxySettings;
+  /** Every field that fell back to its default, for status-line consumers (`/webhub status`). */
+  warnings: WebHubProxyWarning[];
+}
+
+/**
+ * `webHub.proxy` block parse (web-hub-proxy plan v2 §5; `parseWebHubLanBlock` style — never
+ * throws, field-by-field fallback, pure so repeated calls never spam logs; warnings are RETURNED):
+ * - `enabled`: a real boolean, else `false`;
+ * - `portRange`: `"<lo>-<hi>"` (decimal, no leading zero, lo ≤ hi, ports 1024..65535, span ≤ 256)
+ *   that overlaps neither the resolved hub port nor the LAN port ⇒ stored canonically; anything
+ *   else ⇒ the default range + a warning. `webHubPort` 0 (ephemeral) never overlaps — the real
+ *   bound port is the engine's runtime `self-port` rule. If the DEFAULT range itself overlaps,
+ *   the hub's second-line check (X1c) is the veto, same as `lan.port`'s default collision;
+ * - `maxProxies`: an integer in 1..16, else 8 + a warning.
+ * The range grammar is a parity copy of `protocol/proxy.ts`'s `parseProxyPortRange` (see
+ * `DEFAULT_WEBHUB_PROXY_SETTINGS`' note); `tests/web-hub/protocol/proxy.test.ts` pins parity.
+ */
+export function parseWebHubProxyBlock(input: unknown, webHubPort: number, lanPort: number): WebHubProxyParseResult {
+  const defaults = DEFAULT_WEBHUB_PROXY_SETTINGS;
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { proxy: { ...defaults }, warnings: [] };
+  }
+  const record = input as Record<string, unknown>;
+  const warnings: WebHubProxyWarning[] = [];
+
+  let portRange = defaults.portRange;
+  if (record.portRange !== undefined) {
+    const range = parseProxyPortRangeText(record.portRange);
+    if (range === undefined) {
+      warnings.push("port-range-invalid");
+    } else if ([webHubPort, lanPort].some((port) => port > 0 && port >= range[0] && port <= range[1])) {
+      warnings.push("port-range-overlap");
+    } else {
+      portRange = `${String(range[0])}-${String(range[1])}`;
+    }
+  }
+
+  let maxProxies = defaults.maxProxies;
+  if (record.maxProxies !== undefined) {
+    const raw = record.maxProxies;
+    if (typeof raw === "number" && Number.isInteger(raw) && raw >= 1 && raw <= 16) maxProxies = raw;
+    else warnings.push("max-proxies-invalid");
+  }
+
+  return {
+    proxy: {
+      enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
+      portRange,
+      maxProxies,
+    },
+    warnings,
+  };
+}
+
+/** Parity copy of `protocol/proxy.ts`'s `parseProxyPortRange` (see `parseWebHubProxyBlock`). */
+function parseProxyPortRangeText(text: unknown): [number, number] | undefined {
+  if (typeof text !== "string") return undefined;
+  const m = /^([1-9]\d{0,4})-([1-9]\d{0,4})$/.exec(text.trim());
+  if (m === null) return undefined;
+  const lo = Number(m[1]);
+  const hi = Number(m[2]);
+  if (lo > hi || lo < 1024 || hi > 65_535 || hi - lo + 1 > 256) return undefined;
+  return [lo, hi];
 }
 
 /** arch §6.2 数值域的容错读取：有限数 ⇒ 取整后钳进 [min,max]；其余（字符串/NaN/Infinity/缺失）回落默认。 */

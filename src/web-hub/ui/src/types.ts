@@ -19,6 +19,7 @@ import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
 import type { FleetRowWire, LoadGateWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
+import type { ProxyListItem, ProxyPolicyWire } from "@protocol/proxy.js";
 import type { PreviewProbeHandle } from "./composables/usePreviewProbe.js";
 import type {
   ConnState,
@@ -837,3 +838,26 @@ export type Route =
 
 /** §3.9 — three-state theme preference persisted under the `pwh_theme` localStorage key. */
 export type ThemePref = "system" | "light" | "dark";
+
+// ---------------------------------------------------------------------------
+// web-hub-proxy plan v2 §8 (X0 frozen face) — port-proxy view models
+// ---------------------------------------------------------------------------
+
+/** Mirrors `@logic/proxy.js`'s (X2) `proxyScopeOf(caps, transport)` result: `null` (no scope ⇒
+ * identical DOM, zero proxy affordances) or a scope. `lan` ⇔ the scope came from
+ * `proxy.lan.v1` (password auth) rather than `proxy.v1` (token auth) — it selects which
+ * address classes the URL recognizer (`findProxyUrlRefs`) may linkify and the dialog's LAN copy. */
+export interface ProxyScope {
+  readonly lan: boolean;
+}
+
+/** The `ProxyDialog` list state (§8: fetched when the dialog opens and after each action, never polled). */
+export type ProxyListView =
+  | { readonly phase: "idle" }
+  | { readonly phase: "loading" }
+  | {
+      readonly phase: "ready";
+      readonly items: readonly ProxyListItem[];
+      readonly policy: ProxyPolicyWire;
+    }
+  | { readonly phase: "error"; readonly status: number; readonly error: string; readonly reason?: string };

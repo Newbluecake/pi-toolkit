@@ -23,6 +23,7 @@ import {
 const defaults = DEFAULT_SETTINGS.webHub;
 const lanDefaults = defaults.lan!;
 const spawnDefaults = defaults.spawn!;
+const proxyDefaults = defaults.proxy!;
 
 describe("web-hub settings", () => {
   it("pins the defaults (plan 包 I: 5 keys, enabled=false; W3-LI 例外：补 lan 五键默认值; v2.1 control-plane: control/remoteAskUser/webCommands default true, webCommandPolicy {}; web-hub-spawn §SP2: 补 spawn 九键默认值（session-history §3.7 P-cfg +history）; web-hub-steer-recall §4.2: steerRecall default true（arch §11 Q1）)", () => {
@@ -58,6 +59,8 @@ describe("web-hub settings", () => {
         history: true,
         lanConfirm: true,
       },
+      // web-hub-proxy plan v2 §5 (X0): off by default.
+      proxy: { enabled: false, portRange: "7900-7949", maxProxies: 8 },
     });
   });
 
@@ -128,6 +131,7 @@ describe("web-hub settings", () => {
       load: true,
       lan: lanDefaults,
       spawn: spawnDefaults,
+      proxy: proxyDefaults,
     });
     expect(parseWebHubSettings({ enabled: true, port: -1 })).toEqual({ ...defaults, enabled: true });
   });
