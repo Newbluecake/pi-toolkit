@@ -538,6 +538,26 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   commits, merge rows dimmed, full-oid worktree HEAD rings and ≤4 lanes at mobile width.
   Design: `docs/dev/worktree-graph/plan.md`; device checklist:
   `docs/dev/worktree-graph/acceptance.md`.
+  **Local-service proxy (web-hub-proxy plan v2 + §R1/§R2, `webHub.proxy.{enabled,portRange,maxProxies}`, default off;
+  non-live — `/reload` then `/webhub restart`)**: lets the browser open a service listening on the hub machine (e.g.
+  `127.0.0.1:23434`) through a per-target hub listener in `portRange` (default `7900-7949`, max 8 instances, LAN bind iff
+  `webHub.lan` is on). `HubConfig.proxy` exists only when enabled ∧ `control !== false`; key absence IS off (no service, routes,
+  caps, `/api` cross-site gate, multi-candidate cookies or disk — hub byte-identical). `hub/main.ts` re-validates via
+  `hub/proxy/config.ts` and drops the key on a malformed value or a range overlapping `webHub.port`/`webHub.lan.port`.
+  `hub.ts` builds `createProxyService` AFTER `fe.listen()` with the ACTUAL bound ports and a LIVE `lanHostSnapshot`, awaits
+  `dispose()` on close and on every later startup failure, subscribes `service.revoke` to the auth-revocation bus
+  (`hub/auth-revoke.ts`; logout/password change/token rotate kill proxy sessions), counts proxied sockets toward idle and
+  mirrors `portsStore` into `hub.json.proxy`. Routes (`hub/proxy/routes.ts`: `POST /api/proxy/open`, `GET /api/proxy`,
+  `POST /api/proxy/stop`) capture `seq0` before identity resolution, refuse the trusted reverse proxy (409 `reverse-proxy`)
+  and re-resolve identity on a retryable `closing` (stale ⇒ 401). Caps `proxy.v1` / `proxy.lan.v1` (iff `config.lan`) are
+  static. Engine invariants (`hub/proxy/{listener,forward,ws,service}.ts`): permanent fail-closed port↔target binding
+  (`ports-map`), pinned resolved IP (never re-resolved, redirects never followed — `Location` rewrite only), one-time code ⇒
+  `SameSite=Lax` gate cookie (idle 2 h, hard min(12 h, parent login)), strict Host/Origin checks, unsafe methods and WS
+  require Origin = the proxy origin BEFORE any upstream dial, hub cookies / `pwh_*` Set-Cookie / Clear-Site-Data never cross,
+  bounded queues/backpressure (an upload is cancelled only on a real client close — a slow upstream never kills a live
+  upload; residual: a hidden FIN behind full buffers waits for the 120 s idle timeout), audit lines carry no
+  path/query/cookie/code. Design: `docs/dev/web-hub-proxy/plan.md`; package reports `{XA,X0,X1a,X1b,X1c,X2,X3}-report.md`;
+  real-browser gate `docs/dev/web-hub-proxy/acceptance.md`.
   **Avatar (web-hub-avatar plan v2.1, `webHub.avatar`, default on)**: the hub stores one validated PNG at
   `hub/avatar/{fs,store,validate,routes}.ts`, assembles it through `hub.ts`, and dispatches the three
   `/api/avatar*` endpoints on both authenticated listeners via `hub/http.ts`; `avatar.v1` is advertised only

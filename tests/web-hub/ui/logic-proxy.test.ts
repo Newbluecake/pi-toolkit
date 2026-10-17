@@ -18,6 +18,7 @@ import {
 import { API, PROXY_CAPS, PROXY_DENY_REASON_SET } from "../../../src/web-hub/ui/src/logic/contract.js";
 import { MESSAGES } from "../../../src/web-hub/ui/src/i18n/index.js";
 import { createClient } from "../../../src/web-hub/ui/src/logic/token-client.js";
+import { createPasswordClient } from "../../../src/web-hub/ui/src/logic/password-client.js";
 import {
   PROXY_LIST_PATH,
   PROXY_OPEN_PATH,
@@ -215,7 +216,12 @@ describe("user-facing copy of every outcome", () => {
   });
 });
 
-describe("T-U5 API.* + token client proxy namespace", () => {
+// Run the SAME wire/error assertions against both independent implementations. In particular,
+// password-client's private proxyPost must not drift from the token client's POST contract.
+describe.each([
+  ["token", createClient],
+  ["password", createPasswordClient],
+] as const)("T-U5 API.* + %s client proxy namespace", (_mode, create) => {
   it("API paths are the protocol constants", () => {
     expect(API.proxyOpen).toBe(PROXY_OPEN_PATH);
     expect(API.proxyList).toBe(PROXY_LIST_PATH);
@@ -233,7 +239,7 @@ describe("T-U5 API.* + token client proxy namespace", () => {
     };
   }
   function make(fetch: ReturnType<typeof vi.fn>) {
-    return createClient({
+    return create({
       fetch,
       EventSource: class {} as never,
       storage: { getItem: () => null, setItem() {}, removeItem() {} },
@@ -260,8 +266,10 @@ describe("T-U5 API.* + token client proxy namespace", () => {
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("/api/proxy/open");
     expect(init.method).toBe("POST");
-    expect((init.headers as Record<string, string>)["X-PWH"]).toBe("1");
+    expect(init.credentials).toBe("same-origin");
+    expect(init.headers).toMatchObject({ "X-PWH": "1", "Content-Type": "application/json" });
     expect(JSON.parse(init.body as string)).toEqual({ target: "localhost:3000" });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("open: error bodies ride verbatim (error/reason/retryAfterS/status)", async () => {
@@ -299,11 +307,78 @@ describe("T-U5 API.* + token client proxy namespace", () => {
     expect(await c.proxy.list()).toEqual({ ...list, ok: true });
     const [lu, li] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect([lu, li.method, (li.headers as Record<string, string>)["X-PWH"]]).toEqual(["/api/proxy", "GET", "1"]);
+    expect(li.credentials).toBe("same-origin");
+    expect(li.body).toBeUndefined();
     expect(await c.proxy.stop("inst_12345678")).toEqual({ ok: true });
     const [su, si] = fetch.mock.calls[1] as unknown as [string, RequestInit];
     expect(su).toBe("/api/proxy/stop");
+    expect(si.method).toBe("POST");
+    expect(si.credentials).toBe("same-origin");
+    expect(si.headers).toMatchObject({ "X-PWH": "1", "Content-Type": "application/json" });
     expect(JSON.parse(si.body as string)).toEqual({ instanceId: "inst_12345678" });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
+
+  // open/list/stop each traverse their real client entrypoint, not just proxyFetch in isolation.
+  const operations = ["open", "list", "stop"] as const;
+  function call(c: ReturnType<typeof make>, op: (typeof operations)[number], opts?: { signal: AbortSignal }) {
+    if (op === "open") return c.proxy.open({ target: "localhost:3000" }, opts);
+    if (op === "stop") return c.proxy.stop("inst_12345678", opts);
+    return c.proxy.list(opts);
+  }
+
+  it.each(operations)(
+    "%s: denial, unavailable, conflict and fallback errors keep their status/reason/retry",
+    async (op) => {
+      for (const [status, body, headers, expected] of [
+        [403, { error: "E_PROXY_DENIED", reason: "public" }, {}, { error: "E_PROXY_DENIED", reason: "public" }],
+        [
+          503,
+          { error: "E_PROXY_UNAVAILABLE", reason: "closing" },
+          { "Retry-After": "2" },
+          { error: "E_PROXY_UNAVAILABLE", reason: "closing", retryAfterS: 2 },
+        ],
+        [401, { error: "E_AUTH", reason: "cookie-conflict" }, {}, { error: "E_AUTH", reason: "cookie-conflict" }],
+        [429, { error: "E_RATE" }, { "Retry-After": "3" }, { error: "E_RATE", retryAfterS: 3 }],
+        [401, {}, {}, { error: "E_AUTH" }],
+        [500, {}, { "Retry-After": "not-a-number" }, { error: "HTTP 500" }],
+      ] as const) {
+        const fetch = vi.fn(async () => res(status, body, headers));
+        expect(await call(make(fetch), op)).toEqual({ ok: false, status, ...expected });
+        expect(fetch).toHaveBeenCalledTimes(1); // never silently retry a failed mint/stop or LAN login
+      }
+    },
+  );
+
+  it.each(operations)(
+    "%s: malformed success/network/pre-abort map to local errors; pre-abort never sends",
+    async (op) => {
+      expect(await call(make(vi.fn(async () => res(200, { nope: 1 }))), op)).toEqual({
+        ok: false,
+        status: 0,
+        error: "E_BAD_RESPONSE",
+      });
+      expect(
+        await call(
+          make(
+            vi.fn(async () => {
+              throw new TypeError("offline");
+            }),
+          ),
+          op,
+        ),
+      ).toEqual({
+        ok: false,
+        status: 0,
+        error: "E_NETWORK",
+      });
+      const fetch = vi.fn();
+      const ac = new AbortController();
+      ac.abort();
+      expect(await call(make(fetch), op, { signal: ac.signal })).toEqual({ ok: false, status: 0, error: "E_ABORT" });
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("proxyFetch caps the body", async () => {
     const big = { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(100) };
