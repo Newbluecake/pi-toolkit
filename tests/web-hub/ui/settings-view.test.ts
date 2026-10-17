@@ -813,17 +813,19 @@ describe("SettingsView.vue — default model card (select-only picker, 2026-10 r
   });
 
   it("crossing the 640px boundary while open swaps sheet ⇄ fixed panel (switcher parity)", async () => {
-    const mqListeners: Array<() => void> = [];
+    // Listeners get a real-shaped event: `useMedia` (e.g. SettingsView's narrow-screen gate for the
+    // version card, 2026-10-17) reads `ev.matches`, so a bare `fn()` would throw.
+    const mqListeners: Array<(ev: { matches: boolean }) => void> = [];
     const mq = {
       matches: false,
       media: "(max-width: 640px)",
       onchange: null,
       addListener: () => {},
       removeListener: () => {},
-      addEventListener: (_t: string, fn: () => void) => {
+      addEventListener: (_t: string, fn: (ev: { matches: boolean }) => void) => {
         mqListeners.push(fn);
       },
-      removeEventListener: (_t: string, fn: () => void) => {
+      removeEventListener: (_t: string, fn: (ev: { matches: boolean }) => void) => {
         const i = mqListeners.indexOf(fn);
         if (i >= 0) mqListeners.splice(i, 1);
       },
@@ -839,13 +841,13 @@ describe("SettingsView.vue — default model card (select-only picker, 2026-10 r
       expect(desktopPanel()).not.toBeNull();
 
       mq.matches = true;
-      for (const fn of [...mqListeners]) fn();
+      for (const fn of [...mqListeners]) fn({ matches: mq.matches });
       await flush();
       expect(desktopPanel()).toBeNull();
       expect(document.body.querySelector(".picker-sheet")).not.toBeNull();
 
       mq.matches = false;
-      for (const fn of [...mqListeners]) fn();
+      for (const fn of [...mqListeners]) fn({ matches: mq.matches });
       await flush();
       expect(desktopPanel()).not.toBeNull();
       expect(document.body.querySelector(".picker-sheet")).toBeNull();
