@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>/pv popup probe</title>
+  </head>
+  <body>
+    <p>popup probe — this window must have inherited the sandbox (G9).</p>
+    <script>
+      (function () {
+        "use strict";
+        var cookieThrew = false;
+        try {
+          var v = document.cookie; // eslint-disable-line no-unused-vars
+        } catch (e) {
+          cookieThrew = true;
+        }
+        var openerThrewOrNull = false;
+        try {
+          if (window.opener === null) {
+            openerThrewOrNull = true;
+          } else {
+            var t = window.opener.document.title; // eslint-disable-line no-unused-vars
+          }
+        } catch (e) {
+          openerThrewOrNull = true;
+        }
+        var stillSandboxed = cookieThrew; // cookie access throwing IS the sandbox proof
+        try {
+          window.opener.postMessage(
+            {
+              __pvPopupProbe: {
+                cookieThrew: cookieThrew,
+                openerThrewOrNull: openerThrewOrNull,
+                stillSandboxed: stillSandboxed,
+              },
+            },
+            "*",
+          );
+        } catch (e) {
+          /* could not report — the parent probe times out and reports so */
+        }
+        setTimeout(function () {
+          try {
+            window.close();
+          } catch (e) {
+            /* not closable — harmless */
+          }
+        }, 400);
+      })();
+    </script>
+  </body>
+</html>

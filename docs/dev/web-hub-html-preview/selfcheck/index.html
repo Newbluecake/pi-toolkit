@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>/pv sandbox self-check</title>
+    <link rel="stylesheet" href="selfcheck.css" />
+    <!-- This page is meant to be previewed through a minted /pv/<cap>/index.html capability URL
+         (docs/dev/web-hub-html-preview plan §9). Every probe below reports PASS/FAIL for the
+         isolation invariants I1–I4 + F2/F3; the wrapper (/pvw/<cap> or the dialog iframe) must
+         never grant more. window.__pvSelfcheck (bottom <pre>) is what the CDP driver reads. -->
+  </head>
+  <body>
+    <h1>/pv sandbox self-check</h1>
+    <p class="meta">url: <code id="self-url"></code> · origin: <code id="self-origin"></code></p>
+    <table id="report">
+      <thead>
+        <tr>
+          <th>probe</th>
+          <th>expected (G-row)</th>
+          <th>got</th>
+          <th>result</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="verdict" class="pending">running…</p>
+    <iframe name="form-sink" id="form-sink" title="form POST sink"></iframe>
+    <!-- The CDP driver / manual checker reads this JSON after `done: true`. -->
+    <pre id="json"></pre>
+    <script src="selfcheck.js"></script>
+  </body>
+</html>

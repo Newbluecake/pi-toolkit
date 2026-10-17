@@ -1,0 +1,90 @@
+/* /pv sandbox self-check (web-hub-html-preview plan §9) — loaded RELATIVELY on purpose:
+   if this stylesheet applies, F2's "own directory + subdirectories" serving works. */
+:root {
+  --ok: #0a7d33;
+  --bad: #b3261e;
+  --dim: #666;
+}
+
+body {
+  font:
+    14px/1.5 system-ui,
+    sans-serif;
+  color: #222;
+  margin: 16px;
+  /* probe "cssApplied": this background only shows when selfcheck.css actually loaded */
+  background: #fbfbf9;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 4px;
+}
+
+.meta {
+  color: var(--dim);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+#report {
+  border-collapse: collapse;
+  margin: 12px 0;
+}
+
+#report th,
+#report td {
+  border: 1px solid #ccc;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 13px;
+}
+
+#report code,
+#json {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+#verdict {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+#verdict.pass {
+  color: var(--ok);
+}
+
+#verdict.fail {
+  color: var(--bad);
+}
+
+#verdict.pending {
+  color: var(--dim);
+  font-weight: 400;
+}
+
+td.result-pass {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+td.result-fail {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+#form-sink {
+  display: none;
+}
+
+#json {
+  background: #f2f2ef;
+  border: 1px solid #ddd;
+  padding: 8px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}

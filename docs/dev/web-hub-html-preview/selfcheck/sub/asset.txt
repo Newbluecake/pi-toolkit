@@ -1,0 +1,3 @@
+pv-selfcheck-sub-asset v1 — a file in a SUBDIRECTORY of the bound directory.
+The F2 probe fetches this RELATIVE path and expects exactly these bytes (status 200).
+If you can read this through a minted /pv capability, subdirectory serving works.
