@@ -48,13 +48,22 @@ import {
   type PreviewDirListing,
   type PreviewProbeResponseBody,
 } from "../../protocol/preview.js";
+import {
+  PV_IDLE_TTL_MS,
+  PV_PREFIX,
+  PVW_PREFIX,
+  isHtmlEntryPath,
+  type PreviewHtmlCapResponseBody,
+} from "../../protocol/preview-html.js";
 import { auditPreview } from "../audit.js";
 import { createCmdLimit, type CmdLimit } from "../cmd-limit.js";
-import type { HubLog, PreviewRouteIo, PreviewRoutes, RegistryView } from "../ports.js";
+import type { HubLog, PreviewRouteIo, PreviewRoutes, PvIo, RegistryView } from "../ports.js";
 import { createReqDeadline, type ReqDeadline } from "../req-deadline.js";
 import type { UploadStore } from "../uploads.js";
 import {
   createFsAdmitter,
+  denyListHit,
+  isVirtualFsPath,
   type FsAdmitter,
   type PreviewDenyContext,
   type PreviewFs,
@@ -63,6 +72,9 @@ import {
 import { boundedClose, createPreviewIoTracker, defaultPreviewFs, previewFsStep, type PreviewIoTracker } from "./fs.js";
 import { listPreviewDir } from "./dir.js";
 import { openAdmittedPath, type Opened } from "./open.js";
+import { dirTooBroad, pinPvDir, pvFailOf } from "./pv-admit.js";
+import { createPvRoutes, readHtmlCapBody, type PreviewHtmlDeps, type PvRoutes } from "./pv-routes.js";
+import { errCode } from "./pv-path.js";
 import { readProbeBody, runPreviewProbe } from "./probe.js";
 import { expandTildePath } from "./tilde.js";
 import { needsMoreForDims, sniff, type SniffResult } from "./sniff.js";
@@ -228,6 +240,11 @@ export interface PreviewRoutesDeps {
    * share it). The seam exists so tests can drive the chunked branch's `busy` fast-fail
    * (503 `E_BUSY` + Retry-After) with a scripted tracker; production never passes it. */
   tracker?: PreviewIoTracker | undefined;
+  /** web-hub-html-preview plan v2 §4 (P1b): present ⇒ the HTML-preview surface is attached
+   * (`handleHtmlCap`/`servePv`/`serveWrapper`/`revokeHtmlCaps`); `hub.ts` passes it only when
+   * `/proc/self/fd` is available. Absent ⇒ the four members do not exist and every existing
+   * route behaves byte-identically. The fields are test seams (scripted fs/gate/limits). */
+  html?: PreviewHtmlDeps | undefined;
 }
 
 /** §1.3 typed probe sender — `io.sendJson`'s `body: unknown` cannot catch a hub↔UI drift, this
@@ -1016,20 +1033,418 @@ export function createPreviewRoutes(deps: PreviewRoutesDeps): PreviewRoutes {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // web-hub-html-preview plan v2 §2.1 (P1b): `POST /api/preview/html-cap` — mint one capability.
+  // The serve side (`/pv`, `/pvw`, queue, revocation) lives in `pv-routes.ts`; the mint stays
+  // here because it shares this closure's limiter / in-flight caps / admitter / audit key.
+  // -------------------------------------------------------------------------
+
+  const pv: PvRoutes | undefined =
+    deps.html === undefined
+      ? undefined
+      : createPvRoutes({ log, now, denyCtx: deps.denyCtx, html: deps.html, makeSink: resSink, verifier });
+
+  /** D2's refused uploads roots: the real root(s) in literal AND canonical form (the mint's
+   * `boundDir` is a realpath, so a symlinked uploads dir must be matched canonically too).
+   * Cached only once every realpath resolved (a not-yet-created dir is retried next mint). */
+  let uploadsRootsCache: readonly string[] | undefined;
+  const resolveUploadsRoots = async (deadlineAt: number, signal: AbortSignal): Promise<readonly string[]> => {
+    if (uploadsRootsCache !== undefined) return uploadsRootsCache;
+    const literal = deps.html?.uploadsRoots ?? [uploadsRoot];
+    const out = new Set<string>(literal);
+    let complete = true;
+    const fs: PreviewFs = { ...defaultPreviewFs(), ...deps.html?.fs };
+    for (const root of literal) {
+      try {
+        out.add(await pv!.gate.run(() => fs.realpath(root), { deadlineAt, signal }));
+      } catch {
+        complete = false;
+      }
+    }
+    const roots = [...out];
+    if (complete) uploadsRootsCache = roots;
+    return roots;
+  };
+
+  const MINT_AUDIT_KEYS = [
+    "listener",
+    "ip",
+    "user",
+    "agentKey",
+    "cls",
+    "ok",
+    "code",
+    "reason",
+    "ms",
+    "ext",
+    "pathTag",
+    "capTag",
+  ] as const;
+
+  async function handleHtmlCap(
+    req: IncomingMessage,
+    res: ServerResponse,
+    query: URLSearchParams,
+    io: PreviewRouteIo,
+  ): Promise<void> {
+    const pvr = pv as PvRoutes; // attached only when `pv` exists
+    const ctl = new AbortController();
+    const signal = ctl.signal;
+    const entry: ActiveRequest = { ctl, done: Promise.resolve() };
+    active.add(entry);
+    res.once("close", () => {
+      if (!res.writableFinished) ctl.abort("client-abort");
+    });
+    const startedAt = now();
+    const acc: {
+      listener: "loopback" | "lan";
+      ip: string;
+      user?: string | undefined;
+      agentKey?: string | undefined;
+      cls?: "upload" | "cwd" | "abs" | undefined;
+      ok: boolean;
+      code?: string | undefined;
+      reason?: string | undefined;
+      ms?: number | undefined;
+      ext?: string | undefined;
+      pathTag?: string | undefined;
+      capTag?: string | undefined;
+    } = { listener: io.listener, ip: io.ip, ok: false };
+    let slotTaken = false;
+    let principal = "";
+    let skipAudit = false;
+    let entryFh: PreviewHandle | undefined;
+    const closeEntry = async (): Promise<void> => {
+      const fh = entryFh;
+      if (fh === undefined) return;
+      entryFh = undefined;
+      await boundedClose(() => fh.close(), { now, tracker, log });
+    };
+
+    entry.done = (async (): Promise<void> => {
+      const send = (code: string, body: unknown, headers?: Record<string, string>): void => {
+        io.sendJson(res, PREVIEW_STATUS[code] ?? 500, body, headers);
+      };
+      const sendFail = (f: { status: number; code: string; reason?: string | undefined }): void => {
+        acc.code = f.code;
+        acc.reason = f.reason;
+        io.sendJson(
+          res,
+          f.status,
+          f.reason === undefined ? { error: f.code } : { error: f.code, reason: f.reason },
+          f.status === 503 ? { "Retry-After": "1" } : undefined,
+        );
+      };
+      const abortAnswer = (): boolean => {
+        if (signal.aborted) {
+          acc.code = "E_ABORT";
+          acc.reason = signal.reason === "hub-close" ? "hub-close" : "client-abort";
+          if (signal.reason === "hub-close") send("E_HUB_RESTARTING", { error: "E_HUB_RESTARTING" });
+          return true;
+        }
+        return false;
+      };
+
+      // ⓪ closing
+      if (closing || pvr.isClosing()) {
+        acc.code = "E_HUB_RESTARTING";
+        send("E_HUB_RESTARTING", { error: "E_HUB_RESTARTING" });
+        return;
+      }
+      // ① CSRF (X-PWH + same-origin) and a JSON body — BEFORE auth, like probe
+      const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+      if (!previewCsrfOk(req, io.expectedOrigin) || ct !== "application/json") {
+        acc.code = "E_CSRF";
+        send("E_CSRF", { error: "E_CSRF" });
+        return;
+      }
+      // R2 #2: the revoke sequence is captured BEFORE `authorize` is called — authorize is
+      // async, so a logout/passwd landing after its session lookup resolved but before this
+      // coroutine resumes must still count against this mint.
+      const seq0 = pvr.store.revokeSeq();
+      const r = createReqDeadline(now, PREVIEW_ADMIT_TOTAL_MS);
+      const authed = await io.authorize(r);
+      if ("handled" in authed) {
+        acc.code = authed.code;
+        return;
+      }
+      acc.user = authed.user;
+      principal = `${io.listener}:${authed.user ?? "token"}`;
+
+      // ② params + body + path
+      const agentKey = query.get("agentKey") ?? "";
+      const sessionId = query.get("sessionId") ?? "";
+      if (!AGENT_KEY_RE.test(agentKey) || !SESSION_ID_RE.test(sessionId)) {
+        acc.code = "E_BAD_REQUEST";
+        send("E_BAD_REQUEST", { error: "E_BAD_REQUEST" });
+        return;
+      }
+      acc.agentKey = agentKey;
+      const body = await readHtmlCapBody(req);
+      if (!body.ok) {
+        acc.code = body.code;
+        acc.reason = body.reason;
+        io.sendJson(res, body.status, { error: body.code, reason: body.reason });
+        return;
+      }
+      const path = normalizePreviewPath(expandTildePath(body.path, deps.denyCtx.homes[0] ?? ""));
+      if (!validatePreviewPath(path, { minSegments: 1 }) || !isHtmlEntryPath(path)) {
+        acc.code = "E_BAD_REQUEST";
+        acc.reason = "path";
+        send("E_BAD_REQUEST", { error: "E_BAD_REQUEST", reason: "path" });
+        return;
+      }
+      acc.pathTag = pathTagOf(path);
+      acc.ext = extOf(path);
+
+      // ③ preview bucket (1 token, the SAME `${principal}:preview` line) + in-flight caps
+      const admitted = limit.admit(`${principal}:preview`, PREVIEW_BUCKET_CAPACITY, PREVIEW_BUCKET_REFILL_MS);
+      if (!admitted.ok) {
+        const throttleKey = `preview:${principal}`;
+        const t = now();
+        const last = rateAuditedAt.get(throttleKey);
+        if (last !== undefined && t - last < RATE_AUDIT_WINDOW_MS) skipAudit = true;
+        else rateAuditedAt.set(throttleKey, t);
+        acc.code = "E_RATE";
+        send(
+          "E_RATE",
+          { error: "E_RATE" },
+          { "Retry-After": String(Math.max(1, Math.ceil(admitted.retryAfterMs / 1000))) },
+        );
+        return;
+      }
+      const mine = inflightByPrincipal.get(principal) ?? 0;
+      if (mine >= PREVIEW_INFLIGHT_PER_PRINCIPAL || inflightGlobal >= PREVIEW_INFLIGHT_GLOBAL) {
+        acc.code = "E_BUSY";
+        acc.reason = "inflight";
+        send("E_BUSY", { error: "E_BUSY" }, { "Retry-After": "1" });
+        return;
+      }
+      slotTaken = true;
+      inflightByPrincipal.set(principal, mine + 1);
+      inflightGlobal += 1;
+
+      // ④ session visibility; an upload-class path is refused BEFORE any open (v1 non-goal)
+      const view = registry.get(agentKey);
+      if (view === undefined) {
+        acc.code = "E_NOT_FOUND";
+        send("E_NOT_FOUND", { error: "E_NOT_FOUND" });
+        return;
+      }
+      const session = view.session;
+      if (session === undefined || session.sessionId !== sessionId) {
+        acc.code = "E_SESSION_CHANGED";
+        send("E_SESSION_CHANGED", { error: "E_SESSION_CHANGED" });
+        return;
+      }
+      acc.cls = path.startsWith(`${uploadsRoot}/`)
+        ? "upload"
+        : path === session.cwd || path.startsWith(`${session.cwd}/`)
+          ? "cwd"
+          : "abs";
+      if (acc.cls === "upload") {
+        sendFail({ status: 403, code: "E_PREVIEW_DENIED", reason: "upload" });
+        return;
+      }
+
+      // ⑤–⑦ the shared admission chain (the ONE copy of "may this request read this path")
+      const op = await openAdmittedPath(
+        { uploadsRoot, registry, uploads: undefined, admitter, log },
+        { agentKey, sessionId, path, listener: io.listener, principal },
+        r,
+        signal,
+      );
+      if (!op.ok) {
+        if (op.abort === true) {
+          abortAnswer();
+          return;
+        }
+        acc.code = op.code;
+        acc.reason = op.reason;
+        if (op.busy === true) {
+          acc.reason = "store";
+          send("E_BUSY", { error: "E_BUSY" }, { "Retry-After": "1" });
+          return;
+        }
+        io.sendJson(
+          res,
+          PREVIEW_STATUS[op.code] ?? 500,
+          op.reason === undefined ? { error: op.code } : { error: op.code, reason: op.reason },
+        );
+        return;
+      }
+      entryFh = op.opened.fh; // ownership: closed by `closeEntry` (below / finally)
+      if (abortAnswer()) return;
+      const entryRp = op.opened.realpath;
+      if (op.opened.cls === "upload" || entryRp === undefined) {
+        sendFail({ status: 403, code: "E_PREVIEW_DENIED", reason: "upload" });
+        return;
+      }
+
+      // ⑤ bound dir + entry identity
+      const fstat = await pvr.gate
+        .run(() => (entryFh as PreviewHandle).stat(), { deadlineAt: r.at, signal })
+        .then(
+          (st) => ({ ok: true as const, st }),
+          (err: unknown) => ({ ok: false as const, fail: pvFailOf(err) }),
+        );
+      if (!fstat.ok) {
+        if (fstat.fail.status === 0) abortAnswer();
+        else sendFail(fstat.fail);
+        return;
+      }
+      const slash = entryRp.lastIndexOf("/");
+      const boundDir = slash <= 0 ? "/" : entryRp.slice(0, slash);
+      const entryName = entryRp.slice(slash + 1);
+      // D2 (+ check #1: the REAL uploads roots) and check #2: the denylist on the bound dir itself
+      const uploadsRoots = await resolveUploadsRoots(r.at, signal);
+      if (abortAnswer()) return;
+      if (dirTooBroad(boundDir, deps.denyCtx, uploadsRoots)) {
+        sendFail({ status: 403, code: "E_PREVIEW_DENIED", reason: "dir-too-broad" });
+        return;
+      }
+      if (denyListHit(boundDir, deps.denyCtx)) {
+        sendFail({ status: 403, code: "E_PREVIEW_DENIED", reason: "denylist" });
+        return;
+      }
+      if (isVirtualFsPath(boundDir)) {
+        sendFail({ status: 403, code: "E_PREVIEW_DENIED", reason: "virtual-fs" });
+        return;
+      }
+
+      // ⑥ dir pin (all through the PV IO gate); then the entry fh is no longer needed
+      const pin = await pinPvDir(pvr.admitDeps, {
+        boundDir,
+        entry: entryName,
+        entryDev: fstat.st.dev,
+        entryIno: fstat.st.ino,
+        deadlineAt: r.at,
+        signal,
+      });
+      await closeEntry();
+      if (!pin.ok) {
+        if (pin.status === 0) abortAnswer();
+        else sendFail(pin);
+        return;
+      }
+
+      // the pinned directory's own identity (recorded on the cap) — one more gated step; the
+      // sync check-then-insert below must come AFTER every await
+      const dstat = await pvr.gate
+        .run(() => pin.dirFh.stat(), { deadlineAt: r.at, signal })
+        .then(
+          (st) => ({ ok: true as const, st }),
+          (err: unknown) => ({ ok: false as const, fail: pvFailOf(err) }),
+        );
+      if (!dstat.ok) {
+        await pvr.gate.close(() => pin.dirFh.close());
+        if (dstat.fail.status === 0) abortAnswer();
+        else sendFail(dstat.fail);
+        return;
+      }
+
+      // ⑦ revocation re-check + insert: ONE synchronous check-then-insert (`mintChecked`,
+      // same tick — no await between the `seq0` comparison and the store insert)
+      const dead = closing || pvr.isClosing() || signal.aborted;
+      const minted = dead
+        ? undefined
+        : pvr.store.mintChecked(seq0, {
+            principal,
+            listener: io.listener,
+            origin: io.expectedOrigin,
+            sidTag: authed.sidTag,
+            userId: authed.userId,
+            dirFh: pin.dirFh,
+            dirPath: boundDir,
+            dirDev: dstat.st.dev,
+            dirIno: dstat.st.ino,
+            entry: entryName,
+          });
+      if (minted === undefined || !minted.ok) {
+        await pvr.gate.close(() => pin.dirFh.close());
+        if (minted === undefined) {
+          if (!abortAnswer()) {
+            acc.code = "E_HUB_RESTARTING";
+            send("E_HUB_RESTARTING", { error: "E_HUB_RESTARTING" });
+          }
+        } else if (minted.reason === "revoked") {
+          acc.code = "E_AUTH";
+          acc.reason = "revoked";
+          send("E_AUTH", { error: "E_AUTH" });
+        } else {
+          acc.code = "E_BUSY";
+          acc.reason = "tombstone-gap";
+          send("E_BUSY", { error: "E_BUSY" }, { "Retry-After": "1" });
+        }
+        return;
+      }
+      const rec = minted.rec;
+      acc.ok = true;
+      acc.capTag = rec.capTag;
+      const answer: PreviewHtmlCapResponseBody = {
+        url: `${PV_PREFIX}${rec.cap}/${encodeURIComponent(rec.entry)}`,
+        openUrl: `${PVW_PREFIX}${rec.cap}`,
+        idleMs: pvr.idleMs > 0 ? pvr.idleMs : PV_IDLE_TTL_MS,
+        hardRemainingMs: Math.max(0, rec.hardAt - now()),
+      };
+      io.sendJson(res, 200, answer, { "Cache-Control": "no-store" });
+    })().catch((err: unknown) => {
+      acc.code = "E_INTERNAL";
+      log.error("preview html-cap route: unexpected pipeline failure", { code: errCode(err) });
+      if (!res.headersSent && !res.destroyed) io.sendJson(res, 500, { error: "E_INTERNAL" });
+      else res.destroy();
+    });
+
+    try {
+      await entry.done;
+    } finally {
+      await closeEntry();
+      if (slotTaken) {
+        inflightGlobal = Math.max(0, inflightGlobal - 1);
+        const left = (inflightByPrincipal.get(principal) ?? 1) - 1;
+        if (left <= 0) inflightByPrincipal.delete(principal);
+        else inflightByPrincipal.set(principal, left);
+      }
+      active.delete(entry);
+      acc.ms = now() - startedAt;
+      if (!skipAudit) {
+        const out: Record<string, unknown> = { audit: "preview", kind: "html-cap" };
+        const raw = acc as unknown as Record<string, unknown>;
+        for (const k of MINT_AUDIT_KEYS) if (raw[k] !== undefined) out[k] = raw[k];
+        log.info("preview html-cap", out);
+      }
+    }
+  }
+
   const routes: PreviewRoutes = {
     mode,
     handle,
     handleProbe,
+    ...(pv === undefined
+      ? {}
+      : {
+          handleHtmlCap,
+          servePv: (req: IncomingMessage, res: ServerResponse, rest: string, io: PvIo) =>
+            pv.servePv(req, res, rest, io),
+          serveWrapper: (req: IncomingMessage, res: ServerResponse, rest: string, io: PvIo) =>
+            pv.serveWrapper(req, res, rest, io),
+          revokeHtmlCaps: (sel: Parameters<PvRoutes["revoke"]>[0], reason: Parameters<PvRoutes["revoke"]>[1]) =>
+            pv.revoke(sel, reason),
+        }),
     dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void> {
       if (disposePromise !== undefined) return disposePromise; // 幂等，两路径共用同一个 promise
       closing = true;
       const waitMs = Math.max(0, Math.min(PREVIEW_DISPOSE_WAIT_MS, deadline.remaining()));
       disposePromise = (async (): Promise<void> => {
         verifier.dispose(); // aborts every single-flight task (§4.5.3)
+        // HTML preview: synchronous revoke-all (leases aborted, waiters cancelled), then the
+        // bounded wait for in-flight /pv requests runs concurrently with the mint wait below.
+        const pvDone = pv?.dispose(waitMs);
         for (const e of [...active]) e.ctl.abort("hub-close");
         if (active.size > 0) {
           await Promise.race([Promise.allSettled([...active].map((e) => e.done)), unrefDelay(waitMs)]);
         }
+        if (pvDone !== undefined) await pvDone;
       })();
       disposePromise.catch(() => undefined);
       return disposePromise;

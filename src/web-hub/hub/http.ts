@@ -82,6 +82,7 @@ import { formatLanCookie, hashSid, readLanCookie, runLanLogin, type LanLoginOutc
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
+import { PREVIEW_HTML_CAP_PATH, PV_PREFIX, PVW_PREFIX } from "../protocol/preview-html.js";
 import { VERSION_INFO_PATH, VERSION_LIMITS } from "../protocol/version-info.js";
 import { AVATAR_DELETE_PATH, AVATAR_PATH, AVATAR_STORE_MIN_MS } from "../protocol/avatar.js";
 import { PRIVACY_LOCK_PATH, PRIVACY_VERIFY_PATH } from "../protocol/privacy.js";
@@ -90,6 +91,7 @@ import { handleUploadRequest } from "./upload-http.js";
 import { sendJsonNegotiated } from "./gzip.js";
 import type { PinToken, UploadStore } from "./uploads.js";
 import type { SpawnFrontendPort } from "./spawn/ports.js";
+import { errCode, isPvLogUrl, redactLogUrl } from "./preview/pv-path.js";
 import { PREVIEW_AUTH_RESERVE_MS } from "./preview/routes.js";
 import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
@@ -315,6 +317,18 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+/**
+ * web-hub-html-preview plan v2 §2.6: the three HTTP fallback error logs used to carry the raw
+ * `req.url` + `String(err)`. For `/pv/<cap>/…` and `/pvw/<cap>` the URL IS the credential and an
+ * fs error message carries paths, so those two fields are redacted (`/pv/[redacted]`, error code
+ * only). Every other URL keeps the exact original fields.
+ */
+function requestFailedFields(req: IncomingMessage, err: unknown): { url: string | undefined; error: string } {
+  const url = req.url;
+  if (url !== undefined && isPvLogUrl(url)) return { url: redactLogUrl(url), error: errCode(err) };
+  return { url, error: String(err) };
 }
 
 function setSecurityHeaders(res: ServerResponse): void {
@@ -590,7 +604,7 @@ export function createLanTransport(ctx: LanTransportCtx): LanTransport {
           return;
         }
         ctx.handleRequest(req, res, result, lease).catch((err: unknown) => {
-          ctx.log.error("web-hub lan http: request failed", { url: req.url, error: String(err) });
+          ctx.log.error("web-hub lan http: request failed", requestFailedFields(req, err));
           if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
           else res.destroy();
         });
@@ -1424,6 +1438,26 @@ async function handleLanRequestInner(
 
   if (path !== "/api" && !path.startsWith("/api/")) {
     if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
+    // web-hub-html-preview plan v2 §4 (P1b): `/pv/<cap>/<rel>` and `/pvw/<cap>` — capability-
+    // authenticated (I1: no cookie, no `requireLanSession`), dispatched before the static
+    // fallback and gated `mode === "on"` + the methods being attached; otherwise this falls
+    // through to `ui.serve` ⇒ the original 404, byte-identical. `path` is query-stripped.
+    if (rt.preview !== undefined && rt.preview.mode === "on") {
+      if (rt.preview.servePv !== undefined && path.startsWith(PV_PREFIX)) {
+        return rt.preview.servePv(req, res, path.slice(PV_PREFIX.length), {
+          listener: "lan",
+          ip: ctx.clientIp,
+          origin: ctx.externalOrigin,
+        });
+      }
+      if (rt.preview.serveWrapper !== undefined && path.startsWith(PVW_PREFIX)) {
+        return rt.preview.serveWrapper(req, res, path.slice(PVW_PREFIX.length), {
+          listener: "lan",
+          ip: ctx.clientIp,
+          origin: ctx.externalOrigin,
+        });
+      }
+    }
     const acceptLanguage = req.headers["accept-language"];
     const acceptEncoding = req.headers["accept-encoding"];
     if (
@@ -1537,6 +1571,32 @@ async function handleLanRequestInner(
         const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
         if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
         return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      sendJson,
+    });
+  }
+
+  // web-hub-html-preview plan v2 §2.1/§4 (P1b): `POST /api/preview/html-cap` — dispatched beside
+  // the probe branch with the IDENTICAL gate (`mode === "on"`; the method only exists when the
+  // HTML surface is attached). The authorize segment additionally surfaces the session tag and
+  // user id the minted capability binds to for revocation.
+  if (
+    rt.preview !== undefined &&
+    rt.preview.mode === "on" &&
+    rt.preview.handleHtmlCap !== undefined &&
+    method === "POST" &&
+    path === PREVIEW_HTML_CAP_PATH
+  ) {
+    return rt.preview.handleHtmlCap(req, res, query, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, PREVIEW_AUTH_RESERVE_MS);
+        const authFailure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, authFailure);
+        if (session === undefined) return { handled: true, code: authFailure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}`, sidTag: session.sidHash, userId: session.userId };
       },
       sendJson,
     });
@@ -1809,8 +1869,14 @@ async function handleLanRequestInner(
       const sid = readLanCookie(req.headers.cookie);
       if (sid !== undefined) {
         const sidHash = hashSid(sid);
+        // web-hub-html-preview plan v2 §2.4: this session's HTML capabilities die with it —
+        // revoked BEFORE the awaited delete (a logout never leaves a window where the caps
+        // outlive the intent) and again after it (a mint whose authorize ran inside that window
+        // still carries `sidHash`; the second bump catches it).
+        rt.preview?.revokeHtmlCaps?.({ sidTag: sidHash }, "logout");
         try {
           await rt.lan.store.deleteSession(sidHash);
+          rt.preview?.revokeHtmlCaps?.({ sidTag: sidHash }, "logout");
           rt.lanSse.revoke((c) => c.auth?.sidHash === sidHash, "revoked");
         } catch (err) {
           rt.log.error("web-hub lan http: logout deleteSession failed", { error: String(err) });
@@ -1896,7 +1962,7 @@ function handleLanRequest(
       sendError(res, err.status, err.code, err.message === err.code ? undefined : err.message);
       return;
     }
-    rt.log.error("web-hub lan http: request failed", { url: req.url, error: String(err) });
+    rt.log.error("web-hub lan http: request failed", requestFailedFields(req, err));
     if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
     else res.destroy();
   });
@@ -2847,11 +2913,19 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         await handle?.close();
       },
       revoke(target: { sidHash: string } | { userId: number }): number {
+        // web-hub-html-preview plan v2 §2.4: the real passwd commit path (`admin.ts handlePasswd`
+        // → `store.setPassword` → `deps.lan()?.revoke({userId})`) — capability revocation rides
+        // the same call as the SSE revoke.
+        previewRoutes?.revokeHtmlCaps?.(
+          "sidHash" in target ? { sidTag: target.sidHash } : { userId: target.userId },
+          "sidHash" in target ? "logout" : "passwd",
+        );
         const pred: (c: SseClient) => boolean =
           "sidHash" in target ? (c) => c.auth?.sidHash === target.sidHash : (c) => c.auth?.userId === target.userId;
         return lanSse.revoke(pred, "revoked");
       },
       revokeAll(): number {
+        previewRoutes?.revokeHtmlCaps?.({ listener: "lan" }, "rotate");
         return lanSse.revoke(() => true, "revoked");
       },
     };
@@ -3002,6 +3076,28 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
             return { handled: true, code: "E_AUTH" };
           }
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        sendJson,
+      });
+    }
+    // web-hub-html-preview plan v2 §2.1/§4 (P1b): `POST /api/preview/html-cap` — beside the probe
+    // branch (loopback answers whenever the HTML surface is attached). The authorize segment is
+    // the same sync cookie lookup, plus the session tag the capability binds to for revocation.
+    if (previewRoutes?.handleHtmlCap !== undefined && method === "POST" && path === PREVIEW_HTML_CAP_PATH) {
+      return previewRoutes.handleHtmlCap(req, res, query, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+        authorize: async () => {
+          if (!auth.check(req.headers.cookie, now())) {
+            sendError(res, 401, "E_AUTH");
+            return { handled: true, code: "E_AUTH" };
+          }
+          const sid = readCookie(req.headers.cookie, SESSION_COOKIE);
+          return {
+            ip: normalizePeerIp(req.socket.remoteAddress),
+            ...(sid === undefined ? {} : { sidTag: hashSid(sid) }),
+          };
         },
         sendJson,
       });
@@ -3207,7 +3303,11 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       }
       if (path === "/api/logout") {
         const sid = readCookie(req.headers.cookie, SESSION_COOKIE);
-        if (sid !== undefined) auth.logout(sid);
+        if (sid !== undefined) {
+          auth.logout(sid);
+          // web-hub-html-preview plan v2 §2.4: this session's HTML capabilities die with it.
+          previewRoutes?.revokeHtmlCaps?.({ sidTag: hashSid(sid) }, "logout");
+        }
         sendJson(
           res,
           200,
@@ -3249,6 +3349,24 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       sendJson(res, 200, { ok: true, version: deps.info().version }, { "Cache-Control": "no-store" });
       return;
     }
+    // web-hub-html-preview plan v2 §4 (P1b): `/pv/<cap>/<rel>` + `/pvw/<cap>` — after
+    // `allowedHost` and the `/api` branch, before the static fallback (`isAllowedUiPath` never
+    // admits these prefixes). I1: capability-only — no cookie read, no `auth.check`. `path` is
+    // query-stripped. Absent (html disabled) ⇒ falls through to `ui.serve` ⇒ the original 404.
+    if (previewRoutes?.servePv !== undefined && path.startsWith(PV_PREFIX)) {
+      return previewRoutes.servePv(req, res, path.slice(PV_PREFIX.length), {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        origin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+      });
+    }
+    if (previewRoutes?.serveWrapper !== undefined && path.startsWith(PVW_PREFIX)) {
+      return previewRoutes.serveWrapper(req, res, path.slice(PVW_PREFIX.length), {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        origin: canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+      });
+    }
     const acceptLanguage = req.headers["accept-language"];
     const acceptEncoding = req.headers["accept-encoding"];
     if (
@@ -3272,7 +3390,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         sendError(res, err.status, err.code, err.message === err.code ? undefined : err.message);
         return;
       }
-      log.error("web-hub http: request failed", { url: req.url, error: String(err) });
+      log.error("web-hub http: request failed", requestFailedFields(req, err));
       if (!res.headersSent) sendError(res, 500, "E_INTERNAL");
       else res.destroy();
     });
@@ -3368,7 +3486,12 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // the frozen `HttpFrontend` shape — every other caller of this factory stays byte-identical.
   return Object.assign(frontend, {
     auth,
-    revokeAllSse: () => sse.revoke(() => true, "revoked"),
+    revokeAllSse: () => {
+      // web-hub-html-preview plan v2 §2.4: token rotate (`revokeLoopbackSse`) also ends every
+      // loopback-minted HTML capability.
+      previewRoutes?.revokeHtmlCaps?.({ listener: "loopback" }, "rotate");
+      return sse.revoke(() => true, "revoked");
+    },
     bumpLanRevokeGen: () => {
       lanRevokeGen++;
     },

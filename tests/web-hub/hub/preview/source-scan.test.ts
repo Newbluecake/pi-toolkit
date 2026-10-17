@@ -43,6 +43,7 @@ const KERNEL_FILES = [
   // web-hub-html-preview plan v2 §6 P1a: the HTML-preview hub pure layer — same rules (no
   // node:fs*, no readFile(); fs ops arrive through the injected PreviewFs / PV IO gate)
   "pv-path.ts",
+  "pv-routes.ts",
   "pv-mime.ts",
   "pv-io.ts",
   "html-cap.ts",

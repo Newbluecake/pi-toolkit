@@ -20,12 +20,14 @@ import {
   PRIVACY_HUB_CAP,
   PREVIEW_HUB_CAP,
   PREVIEW_LAN_HUB_CAP,
+  PREVIEW_HTML_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import { config, connectClient, hello, tmpDirs, waitFor } from "./helpers.js";
 import { fakeConn, recordBus } from "./helpers.js";
 import { createRegistry } from "../../../src/web-hub/hub/registry.js";
 import { memLog } from "./helpers.js";
+import { previewProcFdAvailable } from "../../../src/web-hub/hub/preview/fs.js";
 
 /**
  * fleet-drawer plan §8.4 (#5): the THREE-WAY capability coexistence test — upload, spawn and
@@ -337,5 +339,62 @@ describe("wtdiff.v1 cap coexistence (worktree-diff D3, §1.6)", () => {
     const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
     expect(ack["caps"]).not.toContain(WTDIFF_HUB_CAP);
     c.sock.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// web-hub-html-preview plan v2 §4 (T-H11, P1b): preview.html.v1 rides the preview gate + the
+// /proc probe on BOTH cap surfaces, and the HTML route surface is attached iff the cap is.
+// ---------------------------------------------------------------------------
+
+describe("preview.html.v1 cap coexistence (web-hub-html-preview, T-H11)", () => {
+  async function surfaces(preview: "on" | "loopback" | undefined): Promise<{
+    browser: string[];
+    agent: string[];
+    htmlAttached: boolean;
+    lanCap: boolean;
+  }> {
+    const home = tmp.make("wh-coexist-html-");
+    const fe = fakeFrontend();
+    const hub = await startHub(config({ home, port: 0, ...(preview === undefined ? {} : { preview }) }), fe.factory, {
+      uid: process.getuid?.() ?? 0,
+    });
+    if ("exists" in hub) throw new Error("unexpected exists");
+    hubs.push(hub);
+    const c = await connectClient(hub.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    const agent = [...(ack["caps"] as string[])];
+    c.sock.destroy();
+    const p = fe.deps[0]!.preview;
+    return {
+      browser: [...hub.info.caps],
+      agent,
+      htmlAttached:
+        p?.handleHtmlCap !== undefined &&
+        p.servePv !== undefined &&
+        p.serveWrapper !== undefined &&
+        p.revokeHtmlCaps !== undefined,
+      lanCap: hub.info.caps.includes(PREVIEW_LAN_HUB_CAP),
+    };
+  }
+
+  it.each(["on", "loopback"] as const)(
+    "preview %s: cap on BOTH surfaces (set-equal) iff /proc, and the routes are attached iff the cap",
+    async (mode) => {
+      const r = await surfaces(mode);
+      expect([...r.browser].sort()).toEqual([...r.agent].sort());
+      expect(r.browser.includes(PREVIEW_HTML_HUB_CAP)).toBe(previewProcFdAvailable());
+      expect(r.htmlAttached).toBe(previewProcFdAvailable());
+      // LAN width rides preview.lan.v1 (mode on only) — the html cap has no LAN twin of its own
+      expect(r.lanCap).toBe(mode === "on");
+    },
+  );
+
+  it("preview off (default): no html cap on either surface, no preview routes at all", async () => {
+    const r = await surfaces(undefined);
+    expect(r.browser).not.toContain(PREVIEW_HTML_HUB_CAP);
+    expect(r.agent).not.toContain(PREVIEW_HTML_HUB_CAP);
+    expect(r.htmlAttached).toBe(false);
   });
 });

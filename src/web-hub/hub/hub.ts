@@ -50,6 +50,7 @@ import {
   PREVIEW_DIR_HUB_CAP,
   PREVIEW_DOWNLOAD_HUB_CAP,
   PREVIEW_CHUNK_HUB_CAP,
+  PREVIEW_HTML_HUB_CAP,
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
   SPAWN_HISTORY_HUB_CAP,
@@ -349,6 +350,9 @@ export async function startHub(
     // value now, so the cap and the fail-closed supervisor can never disagree. Absent/off ⇒
     // caps stay byte-identical to pre-feature (§5).
     const spawnPlatform = config.spawn === undefined ? undefined : probePlatform(deps.spawnSeams?.probe);
+    // web-hub-html-preview plan v2 §4: ONE value read by the cap declaration below AND the
+    // `createPreviewRoutes({ html })` attachment further down, so they can never disagree.
+    const htmlEnabled = config.preview !== undefined && previewProcFdAvailable();
     const extraHubCaps: readonly string[] = [
       // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
       // always constructed, so the cap and the route can never disagree.
@@ -387,6 +391,11 @@ export async function startHub(
             // (「与 wtdiff 同门」— same `config.preview` existence AND /proc probe); LAN availability
             // rides `PREVIEW_LAN_HUB_CAP` below, same width as preview/wtdiff (§0.2 Q1).
             ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP] : []),
+            // web-hub-html-preview plan v2 §4 (P1b): `preview.html.v1` rides the SAME
+            // `config.preview` gate AND the /proc probe (`htmlEnabled` — dir-fd anchoring is
+            // /proc-bound, fail-closed); both cap surfaces share this one array. LAN width rides
+            // `preview.lan.v1` below (mode `loopback` ⇒ LAN mint + /pv + /pvw 404).
+            ...(htmlEnabled ? [PREVIEW_HTML_HUB_CAP] : []),
           ]),
       ...(config.preview === "on" ? [PREVIEW_LAN_HUB_CAP] : []),
       // web-hub-avatar plan v2.1 §4.2: the one hub-declared cap is carried through
@@ -1138,6 +1147,9 @@ export async function startHub(
             }),
         log,
         now,
+        // web-hub-html-preview plan v2 §4: the HTML surface (mint/serve/wrapper/revoke) is
+        // attached only under `htmlEnabled`; absent ⇒ every existing route is byte-identical.
+        ...(htmlEnabled ? { html: {} } : {}),
       });
       // dir-plan v3.1 §2.9 (P1a): ONE stable WARN per hub process when preview runs as root —
       // OS permission checks no longer bound what preview could read, only the denylist does
