@@ -1117,6 +1117,57 @@ describe("alternativesAdvice — external × 逐池清单 + 对称推荐（2026-
     );
     expect(text.split("\n")[0]).toBe("Droid 模型按池：Core 池（预警）：droid/glm-5.3。");
   });
+
+  it("adds the binding reading and local reset time to pool states", () => {
+    const tomorrow = new Date(2026, 0, 16, 18, 58).getTime();
+    const later = new Date(2026, 0, 21, 15, 48).getTime();
+    const text = alternativesAdvice(
+      sel({
+        poolListing: [
+          { ...STD_OK, reading: { scope: "week", usedPct: 56, resetAt: tomorrow } },
+          { ...CORE_OK, state: "warn", reading: { scope: "week", usedPct: 82, resetAt: later } },
+        ],
+      }),
+      NOW,
+    );
+    expect(text.split("\n")[0]).toBe(
+      "Droid 模型按池：Standard 池（有余量，周 56%，1/16 18:58 重置）：droid/claude-opus-5-5、droid/gpt-6；Core 池（预警，周 82%，1/21 15:48 重置）：droid/glm-5.3、droid/kimi-k3、droid/inkling。",
+    );
+  });
+
+  it.each([
+    ["5h", "5 小时"],
+    ["week", "周"],
+    ["month", "月"],
+  ] as const)("shows %s readings and an honest unknown reset time", (scope, label) => {
+    const text = alternativesAdvice(sel({ poolListing: [{ ...CORE_OK, reading: { scope, usedPct: 28.4 } }] }), NOW);
+    expect(text).toContain(`Core 池（有余量，${label} 28%，未知重置时间）`);
+  });
+
+  it("uses the notice clock for same-day blocked and fallback pool resets", () => {
+    const listing = [
+      { ...STD_BLOCKED, reading: { scope: "5h" as const, usedPct: 100, resetAt: RESET } },
+      { ...CORE_OK, state: "fallback" as const, reading: { scope: "month" as const, usedPct: 100, resetAt: RESET } },
+    ];
+    const v = verdict({
+      provider: "droid-core",
+      level: 3,
+      billing: {
+        kind: "factory",
+        pool: "core",
+        overage: "off",
+        extraUsageAllowed: false,
+        extraUsageBalanceCents: 0,
+      },
+      windows: [w("5h", 100, 3, "exhausted", { resetAt: RESET })],
+    });
+    const text = buildQuotaBlockText(v, sel({ poolListing: listing, coreFallback: true }), NOW);
+    expect(text).toContain("Standard 池（已拦，勿派，5 小时 100%，02:11 重置）");
+    expect(text).toContain("Core 池（额度尽，回落 Standard 计费，月 100%，02:11 重置）");
+    expect(buildQuotaBlockText(v, sel({ poolListing: listing }), NOW)).toContain(
+      "Standard 池（已拦，勿派，5 小时 100%，02:11 重置）",
+    );
+  });
 });
 
 describe("alternativesAdvice — droid pool supplement for blocked pi providers (2026-10-15 拍板)", () => {

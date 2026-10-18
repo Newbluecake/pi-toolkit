@@ -24,6 +24,7 @@ import type { Millis } from "../core/types.js";
 import {
   DEFAULT_THRESHOLDS_BY_WINDOW,
   isDemotionFloorOnly,
+  triggerWindow,
   type ProviderVerdict,
   type QuotaRecoveryEvent,
   type WindowVerdict,
@@ -143,17 +144,6 @@ export function buildQuotaTickText(verdicts: readonly ProviderVerdict[], now: Mi
   return `[quota] ${rows.map((v) => renderProviderLine(v, now)).join(" | ")}`;
 }
 
-/** 触发窗口：等级最高者（并列取 usedPct 更高者）。 */
-function triggerWindow(v: ProviderVerdict): WindowVerdict | undefined {
-  let best: WindowVerdict | undefined = undefined;
-  for (const w of v.windows) {
-    if (best === undefined || w.level > best.level || (w.level === best.level && w.usedPct > best.usedPct)) {
-      best = w;
-    }
-  }
-  return best;
-}
-
 /**
  * 阈值文案取该窗口的仓库默认（quota-plan「阶梯阈值按窗口区分」：5h 50/75/90、
  * week 50/95/98）；ProviderVerdict 不携带运行时阈值——见偏差记录，仅在
@@ -233,26 +223,34 @@ const DROID_POOL_STATE_TEXT: Record<DroidPoolState, string> = {
 
 /**
  * Droid 逐池清单行（2026-10-15 用户要求「结合 droid 可用模型，把 standard 可以用哪些、
- * core 可以用哪些模型列出来」）：`Droid 模型按池：Standard 池（已拦，勿派）：a、b 等 N
- * 个；Core 池（有余量）：x、y。`。每池 ≤5 个候选（poolCandidates 偏好序，超出写
+ * core 可以用哪些模型列出来」）：`Droid 模型按池：Standard 池（已拦，勿派，周 100%，
+ * 10/21 15:48 重置）：a、b 等 N 个；Core 池（有余量，月 28%，… 重置）：x、y。`。
+ * 每池 ≤5 个候选（poolCandidates 偏好序，超出写
  * 「等 N 个」，N 为总数）；零候选 / 不可信池省略（终版拍板：数据拿不到就当没有该
  * 订阅，不出「无数据」文案）；undefined / 全空 ⇒ undefined（旧版通用括号注释保留，
  * 无目录场景输出字节不变）。
  */
-function droidPoolListingLine(listing: readonly DroidPoolListingEntry[] | undefined): string | undefined {
+function droidPoolListingLine(listing: readonly DroidPoolListingEntry[] | undefined, now: Millis): string | undefined {
   if (listing === undefined) return undefined;
   const parts = listing
     .filter((p) => p.models.length > 0)
     .map((p) => {
       const names = p.models.join("、");
       const suffix = p.total > p.models.length ? ` 等 ${p.total} 个` : "";
-      return `${poolLabel(p.pool)} 池（${DROID_POOL_STATE_TEXT[p.state]}）：${names}${suffix}`;
+      let state = DROID_POOL_STATE_TEXT[p.state];
+      if (p.reading !== undefined) {
+        const { scope, usedPct, resetAt } = p.reading;
+        const scopeText = scope === "week" ? "周" : scope === "month" ? "月" : "5 小时";
+        const reset = formatResetAt(resetAt, now);
+        state += `，${scopeText} ${pctOf(usedPct)}%，${reset === "未知" ? "未知重置时间" : `${reset} 重置`}`;
+      }
+      return `${poolLabel(p.pool)} 池（${state}）：${names}${suffix}`;
     });
   if (parts.length === 0) return undefined;
   return `Droid 模型按池：${parts.join("；")}。`;
 }
 
-export function alternativesAdvice(input: AlternativeInput): string {
+export function alternativesAdvice(input: AlternativeInput, now: Millis = Date.now()): string {
   const selection = normalizeAlternatives(input);
   const { providers, subscription } = selection;
   if (selection.external !== true) {
@@ -271,7 +269,7 @@ export function alternativesAdvice(input: AlternativeInput): string {
   // 非空时独立成行、取代旧版通用括号注释（两池模型与状态一目了然）。
   const models = selection.models ?? [];
   const modelsPool = selection.modelsPool ?? "core";
-  const listingLine = droidPoolListingLine(selection.poolListing);
+  const listingLine = droidPoolListingLine(selection.poolListing, now);
   const parenthetical = "（Standard 池 = Droid 的 Anthropic/OpenAI/Google/xAI 模型；Core 池 = Factory 托管开源模型）";
   const lines: string[] = [];
   if (models.length > 0) {
@@ -306,9 +304,9 @@ export function alternativesAdvice(input: AlternativeInput): string {
  * 放在替代候选之后写「该 provider」时，最近的先行词是候选（如 zai），读起来像
  * 候选会被拦（2026-09 现场反馈）。
  */
-function directUseText(provider: string, alternatives: AlternativeInput, plural = false): string {
+function directUseText(provider: string, alternatives: AlternativeInput, now: Millis, plural = false): string {
   const promise = plural ? GATE_PROMISE.replace("派给它", "派给它们") : GATE_PROMISE;
-  return `本轮不要把新任务派给 ${provider}（${promise}）。\n${alternativesAdvice(alternatives)}`;
+  return `本轮不要把新任务派给 ${provider}（${promise}）。\n${alternativesAdvice(alternatives, now)}`;
 }
 
 /** 已耗尽的窗口没有「还剩多久耗尽」可言——ETA 子句只给未耗尽窗口。 */
@@ -394,7 +392,7 @@ export function buildQuotaWarnText(
     if (v.billing?.pool === "core" && normalizeAlternatives(alternatives).coreFallback === true) {
       return `[quota 预警] ${label} ${demotionFloorClause(v, now)}。\nCore 池模型不受此降位影响：Core 池额度耗尽后按 Factory 计费规则回落计入 Standard 池额度，照常派发即可（会额外消耗 Standard 池余量）。`;
     }
-    return `[quota 预警] ${label} ${demotionFloorClause(v, now)}。\n新任务优先考虑其它订阅模型；若仍派给它，可能因额度耗尽失败。${alternativesAdvice(alternatives)}`;
+    return `[quota 预警] ${label} ${demotionFloorClause(v, now)}。\n新任务优先考虑其它订阅模型；若仍派给它，可能因额度耗尽失败。${alternativesAdvice(alternatives, now)}`;
   }
   const w = triggerWindow(v);
   let head: string;
@@ -438,15 +436,15 @@ export function buildQuotaBlockText(
       "Core 池额度已用尽：Core 池模型仍可照常派发，按 Factory 计费规则回落计入 Standard 池额度" +
         "（Standard 池模型不能反向使用 Core 池额度），会额外消耗 Standard 池余量。",
     );
-    const listingLine = droidPoolListingLine(selection.poolListing);
+    const listingLine = droidPoolListingLine(selection.poolListing, now);
     if (listingLine !== undefined) lines.push(listingLine);
     return lines.join("\n");
   }
   // D6 放行（gateOpen）：不再承诺「会被拦下」，改为如实劝阻（继续派会花额外余额）。
   const gateOpen = v.billing?.pool === "standard" && v.billing.overage === "extraUsage" && v.billing.gateOpen === true;
   const body = gateOpen
-    ? `建议本轮不要把新任务派给 ${label}（继续派会花额外余额）。\n${alternativesAdvice(alternatives)}`
-    : directUseText(label, alternatives);
+    ? `建议本轮不要把新任务派给 ${label}（继续派会花额外余额）。\n${alternativesAdvice(alternatives, now)}`
+    : directUseText(label, alternatives, now);
   return withBillingClause(`${quotaBlockHead(v, now, label)}。\n${body}`, billingClause(v));
 }
 
@@ -496,7 +494,7 @@ function buildMergedBlockText(
   if (providers.length === 0 && normalized.some((n) => n.providers.length > 0)) return undefined;
   const heads = entries.map((e) => `${quotaBlockHead(e.section.verdict, now, e.label)}。`);
   const labels = entries.map((e) => e.label).join("、");
-  return `${heads.join("\n")}\n${directUseText(labels, { providers, subscription, ...((droidPools?.length ?? 0) > 0 ? { droidPools } : {}) }, true)}`;
+  return `${heads.join("\n")}\n${directUseText(labels, { providers, subscription, ...((droidPools?.length ?? 0) > 0 ? { droidPools } : {}) }, now, true)}`;
 }
 
 /**

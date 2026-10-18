@@ -28,7 +28,8 @@ export interface LadderThresholds {
   readonly forecastBeforeReset?: boolean | undefined;
 }
 
-export type LadderReason = "none" | "pct" | "forecast-before-reset" | "forecast-eta" | "exhausted" | "reset-elapsed";
+export type LadderReason =
+  "none" | "pct" | "under-pace" | "forecast-before-reset" | "forecast-eta" | "exhausted" | "reset-elapsed";
 
 export interface WindowVerdict {
   readonly scope: WindowScope;
@@ -83,6 +84,13 @@ export const DEFAULT_THRESHOLDS_BY_WINDOW: Readonly<Record<WindowScope, LadderTh
   month: { l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000, forecastBeforeReset: false },
 };
 
+// 适配器只提供 resetAt，未保留起点/月长；month 用 30 天估算，未知 scope 不推断。
+const WINDOW_LENGTH_MS: Readonly<Partial<Record<WindowScope, Millis>>> = {
+  "5h": 5 * 3_600_000,
+  week: 7 * 24 * 3_600_000,
+  month: 30 * 24 * 3_600_000,
+};
+
 /** `providerVerdict` 的 thresholds 入参：单一阈值（沿用旧调用方）或按 scope 解析的函数。 */
 export type LadderThresholdsInput = LadderThresholds | ((scope: WindowScope) => LadderThresholds);
 
@@ -135,12 +143,21 @@ export function windowLevel(
 
   // 2) 百分比网格
   let level: LadderLevel = pct >= thresholds.l3 ? 3 : pct >= thresholds.l2 ? 2 : pct >= thresholds.l1 ? 1 : 0;
-  const pctReason: LadderReason = level > 0 ? "pct" : "none";
+  let reason: LadderReason = level > 0 ? "pct" : "none";
+  // 仅 L1 按窗口进度静默：低于/等于均匀消耗进度的余量不应劝退。
+  // L2/L3 与硬耗尽不降级；后面的速率预测仍可把此窗口重新抬到 L2/L3。
+  const windowLength = WINDOW_LENGTH_MS[window.scope];
+  if (level === 1 && window.resetAt !== undefined && Number.isFinite(window.resetAt) && windowLength !== undefined) {
+    const elapsedPct = ((now - (window.resetAt - windowLength)) / windowLength) * 100;
+    if (pct <= elapsedPct) {
+      level = 0;
+      reason = "under-pace";
+    }
+  }
 
   // 3) 速率预测（「提前」的关键，可以把 60% 抬到 L2）。反向不降级：90% 且马上
   //    重置的窗口仍按 90% 报 —— 降级会让它在重置前 1 分钟被判 L0，随后被真实
   //    429 打脸（plan §5.2 显式锁死）。
-  let reason: LadderReason = pctReason;
   if (etaMs !== undefined && etaMs >= 0) {
     if (etaMs < thresholds.l3EtaMs && level < 3) {
       // 3a) ETA 短于硬线 ⇒ L3（无论重置多远）
@@ -167,6 +184,17 @@ export function windowLevel(
     ...(window.resetAt === undefined ? {} : { resetAt: window.resetAt }),
     ...(etaMs === undefined ? {} : { etaMs }),
   };
+}
+
+/** 主导窗口：等级最高者（并列取 usedPct 更高者，全部 L0 时同样适用）。 */
+export function triggerWindow(v: ProviderVerdict): WindowVerdict | undefined {
+  let best: WindowVerdict | undefined;
+  for (const w of v.windows) {
+    if (best === undefined || w.level > best.level || (w.level === best.level && w.usedPct > best.usedPct)) {
+      best = w;
+    }
+  }
+  return best;
 }
 
 /** provider 级聚合（plan §5.3）：max(windows) ∪ demotion 地板（降位标记把等级钉在 >= 2）。 */

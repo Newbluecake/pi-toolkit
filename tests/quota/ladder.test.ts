@@ -9,7 +9,7 @@ import {
   providerVerdict,
   windowLevel,
 } from "../../src/quota/ladder.js";
-import type { QuotaWindowsSnapshot } from "../../src/quota/types.js";
+import type { QuotaWindowsSnapshot, WindowScope } from "../../src/quota/types.js";
 
 const NOW = 1_000_000;
 const HOUR = 3_600_000;
@@ -77,6 +77,79 @@ describe("windowLevel", () => {
   it("ignores negative etaMs", () => {
     const v = windowLevel(win(62, NOW + 3 * HOUR), { now: NOW, etaMs: -5, thresholds: DEFAULT_THRESHOLDS });
     expect(v).toMatchObject({ level: 1, reason: "pct" });
+  });
+});
+
+describe("windowLevel pace-aware L1", () => {
+  const WEEK = 7 * 24 * HOUR;
+
+  it.each([
+    [87, 0, "under-pace"],
+    [56, 0, "under-pace"],
+    [30, 1, "pct"],
+  ] as const)("grades week 56%% at %i%% elapsed as L%i / %s", (elapsedPct, level, reason) => {
+    expect(
+      windowLevel(
+        { scope: "week", usedPct: 56, resetAt: NOW + WEEK * (1 - elapsedPct / 100) },
+        { now: NOW, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW.week },
+      ),
+    ).toMatchObject({ level, reason, usedPct: 56 });
+  });
+
+  it.each([
+    ["5h", 5 * HOUR],
+    ["week", WEEK],
+    ["month", 30 * 24 * HOUR],
+  ] as const)("uses the %s duration for pace without suppressing early-window L1", (scope, duration) => {
+    for (const [remaining, level] of [
+      [0.1, 0],
+      [0.7, 1],
+      [1.1, 1],
+    ] as const) {
+      expect(
+        windowLevel(
+          { scope, usedPct: 56, resetAt: NOW + duration * remaining },
+          { now: NOW, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW[scope] },
+        ),
+      ).toMatchObject({ level, reason: level === 0 ? "under-pace" : "pct" });
+    }
+  });
+
+  it("still raises an under-pace 60% window to L2 for exhaustion before reset and L3 for short ETA", () => {
+    const window = { scope: "week" as const, usedPct: 60, resetAt: NOW + WEEK * 0.13 };
+    expect(windowLevel(window, { now: NOW, etaMs: HOUR, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW.week })).toMatchObject(
+      { level: 2, reason: "forecast-before-reset" },
+    );
+    expect(
+      windowLevel(window, { now: NOW, etaMs: 60_000, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW.week }),
+    ).toMatchObject({ level: 3, reason: "forecast-eta" });
+  });
+
+  it.each([
+    ["5h", 96, 3],
+    ["week", 96, 2],
+    ["month", 96, 2],
+    ["week", 99, 3],
+    ["week", 100, 3],
+  ] as const)("does not suppress %s %i%% at nearly 100%% elapsed (L%i)", (scope, usedPct, level) => {
+    expect(
+      windowLevel({ scope, usedPct, resetAt: NOW + 1 }, { now: NOW, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW[scope] }),
+    ).toMatchObject({ level, reason: usedPct === 100 ? "exhausted" : "pct" });
+  });
+
+  it.each([undefined, Number.NaN, Number.POSITIVE_INFINITY])("keeps L1 when resetAt is %s", (resetAt) => {
+    expect(
+      windowLevel({ scope: "week", usedPct: 56, resetAt }, { now: NOW, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW.week }),
+    ).toMatchObject({ level: 1, reason: "pct" });
+  });
+
+  it("keeps L1 when the window duration is unknown", () => {
+    expect(
+      windowLevel(
+        { scope: "unknown" as WindowScope, usedPct: 56, resetAt: NOW + HOUR },
+        { now: NOW, thresholds: DEFAULT_THRESHOLDS },
+      ),
+    ).toMatchObject({ level: 1, reason: "pct" });
   });
 });
 
@@ -360,7 +433,7 @@ describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
       [98, 3],
     ];
     for (const [pct, level] of cases) {
-      expect(windowLevel(monthWin(pct, NOW + 10 * HOUR), { now: NOW, thresholds: month })).toMatchObject({
+      expect(windowLevel(monthWin(pct), { now: NOW, thresholds: month })).toMatchObject({
         scope: "month",
         level,
       });
@@ -370,7 +443,7 @@ describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
   it("forecastBeforeReset:false does NOT raise 62% to L2 (the same inputs DO raise it when the flag is absent)", () => {
     const input = { now: NOW, etaMs: HOUR };
     const off = windowLevel(monthWin(62, NOW + 3 * HOUR), { ...input, thresholds: month });
-    expect(off).toMatchObject({ level: 1, reason: "pct" });
+    expect(off).toMatchObject({ level: 0, reason: "under-pace" });
     const on = windowLevel(monthWin(62, NOW + 3 * HOUR), {
       ...input,
       thresholds: { ...month, forecastBeforeReset: true },
@@ -401,7 +474,7 @@ describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
       demoted: false,
     });
     expect(v.windows.find((x) => x.scope === "5h")).toMatchObject({ level: 2, reason: "forecast-before-reset" });
-    expect(v.windows.find((x) => x.scope === "month")).toMatchObject({ level: 1, reason: "pct" });
+    expect(v.windows.find((x) => x.scope === "month")).toMatchObject({ level: 0, reason: "under-pace" });
     expect(v.level).toBe(2);
   });
 });

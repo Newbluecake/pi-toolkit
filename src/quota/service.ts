@@ -34,6 +34,7 @@ import { toLadderLevel } from "./gate.js";
 import { forecast, pushSample, type BurnSample } from "./forecast.js";
 import {
   providerVerdict,
+  triggerWindow,
   QUOTA_HYSTERESIS_PCT,
   type LadderThresholds,
   type ProviderVerdict,
@@ -461,11 +462,21 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       if (candidates.length === 0) continue;
       const verdict = verdictOf(pool === "standard" ? "droid-standard" : "droid-core", clock.now());
       if (!poolTrusted(verdict)) continue;
+      const binding = triggerWindow(verdict);
       out.push({
         pool,
         state: poolStateOf(verdict, line, pool, stdOpen),
         total: candidates.length,
         models: candidates.slice(0, DROID_POOL_LISTING_LIMIT).map((id) => `droid/${id}`),
+        ...(binding === undefined
+          ? {}
+          : {
+              reading: {
+                scope: binding.scope,
+                usedPct: binding.usedPct,
+                ...(binding.resetAt === undefined ? {} : { resetAt: binding.resetAt }),
+              },
+            }),
       });
     }
     return out;

@@ -16,6 +16,8 @@ import {
   scopeLabel,
 } from "../../../src/web-hub/ui/src/logic/quota.js";
 import type { QuotaWire } from "../../../src/web-hub/protocol/messages.js";
+import { DEFAULT_THRESHOLDS_BY_WINDOW, providerVerdict } from "../../../src/quota/ladder.js";
+import { projectQuota } from "../../../src/web-hub/agent/quota-sampler.js";
 
 const NOW = Date.UTC(2026, 9, 14, 4, 0, 0); // 12:00 Asia/Shanghai
 const H = 3_600_000;
@@ -78,6 +80,35 @@ function mountPill(q: QuotaWire, lang: "en" | "zh" = "en", mobile = false, phone
 }
 
 describe("logic: droid pools", () => {
+  it("renders a real under-pace verdict through the unchanged quota wire", () => {
+    const resetAt = NOW + 7 * 24 * H * 0.13;
+    const verdict = providerVerdict(
+      {
+        provider: "droid-standard",
+        kind: "windows",
+        fetchedAt: NOW,
+        windows: [
+          { scope: "week", usedPct: 56, resetAt },
+          { scope: "month", usedPct: 28, resetAt: NOW + 10 * 24 * H },
+        ],
+      },
+      {
+        now: NOW,
+        thresholds: (scope) => DEFAULT_THRESHOLDS_BY_WINDOW[scope],
+        staleAfterMs: H,
+        etaOf: () => undefined,
+        demoted: false,
+      },
+    );
+    const quota = projectQuota([verdict], NOW, { pools: true })!;
+    expect(quota.providers[0]?.windows[0]).toEqual({ scope: "week", usedPct: 56, level: 0, resetAt });
+    expect(pillGroups(quota)[0]).toMatchObject({ level: 0, available: true, scope: "week", usedPct: 56 });
+    const wrapper = mountPill(quota);
+    expect(wrapper.text()).toContain("56%");
+    expect(wrapper.text()).not.toContain("⚠");
+    wrapper.unmount();
+  });
+
   it("scopeLabel / fmtCents", () => {
     expect(scopeLabel("month")).toBe("mo");
     expect(fmtCents(1234)).toBe("$12.34");

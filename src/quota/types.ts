@@ -126,6 +126,8 @@ export interface DroidPoolListingEntry {
   readonly total: number;
   /** 前 ≤5 个候选（`droid/<id>` 前缀，poolCandidates 偏好序）。 */
   readonly models: readonly string[];
+  /** 主导窗口读数（等级最高，并列取用量最高）；旧调用方缺席时保留原文案。仅内部建议包，不上 web wire。 */
+  readonly reading?: QuotaWindow | undefined;
 }
 
 /**

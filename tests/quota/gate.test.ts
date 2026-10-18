@@ -579,6 +579,26 @@ function stdView(v: ProviderVerdict | undefined): QuotaModelView {
 }
 
 describe("evaluateQuotaGate — droid pool path", () => {
+  it("uses the gate clock for pool-list reset readings", () => {
+    const listing: DroidPoolListingEntry[] = [
+      {
+        pool: "standard",
+        state: "blocked",
+        total: 1,
+        models: ["droid/gpt-6"],
+        reading: { scope: "5h", usedPct: 100, resetAt: RESET_0211 },
+      },
+    ];
+    const deps = droidDeps(stdView(poolVerdict("droid-standard", 100, 3)), {
+      poolAlternatives: () => advice("core", [], listing),
+    });
+    const result = evaluateQuotaGate(DROID_MODEL, {
+      ...deps,
+      now: new Date(2026, 0, 1, 1, 0).getTime(),
+    });
+    expect(result?.message).toContain("Standard 池（已拦，勿派，5 小时 100%，02:11 重置）");
+  });
+
   it("pool known + standard exhausted ⇒ blocked: head names the pool, core models line precedes the pi-native line", () => {
     const listing: DroidPoolListingEntry[] = [
       { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },

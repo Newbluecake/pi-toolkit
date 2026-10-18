@@ -178,7 +178,7 @@ function buildPooledGateMessage(
         "pi-toolkit 默认不代你花额外余额；确需继续，在 settings 文件把 quota.droidAllowExtraUsage 设为 true。",
     );
   }
-  lines.push(alternativesAdvice(alternatives));
+  lines.push(alternativesAdvice(alternatives, now));
   lines.push("（在 settings 文件里把 quota.gate 设为 false 可关闭本闸门。）");
   return lines.join("\n");
 }
@@ -412,7 +412,7 @@ function buildGateMessage(
   const label = quotaLabel(provider); // kimi/zai 原样返回（字节不变）；droid 虚拟 id 翻译为「droid xx 池」
   const altLine =
     alternatives.providers.length > 0 || alternatives.external === true || (alternatives.droidPools?.length ?? 0) > 0
-      ? alternativesAdvice(alternatives)
+      ? alternativesAdvice(alternatives, now)
       : "暂无替代候选，按路由表另选合适模型（可检查 pi /model；窗口重置后自动恢复）。";
   return (
     `quota gate: ${label}${isDemotionFloorOnly(verdict) ? " " : " 的 "}${windowClause(verdict, now)}，本次 spawn 已快速失败，未消耗任何 run。\n` +

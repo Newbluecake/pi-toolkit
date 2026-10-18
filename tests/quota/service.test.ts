@@ -11,7 +11,7 @@ import { DEFAULT_SETTINGS, type QuotaSettings } from "../../src/config/settings.
 import { createDemotionStore, type DemotionStore } from "../../src/quota/demotion.js";
 import { createBaselineStore } from "../../src/quota/baseline.js";
 import { createQuotaService, type QuotaService } from "../../src/quota/service.js";
-import { alternativesAdvice } from "../../src/quota/render.js";
+import { alternativesAdvice, formatResetAt } from "../../src/quota/render.js";
 import { createDroidAdapters } from "../../src/quota/adapters/droid.js";
 import { createCatalogPoolPort } from "../../src/quota/pools.js";
 import type { QuotaRecoveryEvent } from "../../src/quota/ladder.js";
@@ -1283,12 +1283,60 @@ describe("droid: gateOpen decoration (D6)", () => {
 });
 
 describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（2026-10-15 拍板）", () => {
+  it.each([
+    [87, 8, 56, 0, "week", 56],
+    [30, 8, 56, 1, "week", 56],
+    [30, 75, 90, 2, "5h", 75],
+    [30, 80, 96, 2, "week", 96],
+  ] as const)(
+    "binds the highest-level then highest-pct reading (elapsed=%i, 5h=%i, week=%i)",
+    async (elapsedPct, fiveHourPct, weekPct, level, bindingScope, bindingPct) => {
+      const f = makeDroidFixture({ pools: () => catalogPort() });
+      const now = f.clock.now();
+      const resets = {
+        "5h": now + 3 * 3_600_000,
+        week: now + 7 * 86_400_000 * (1 - elapsedPct / 100),
+        month: now + 10 * 86_400_000,
+      };
+      f.std.set(() =>
+        droidSnapshot(
+          "droid-standard",
+          [
+            { scope: "5h", usedPct: fiveHourPct, resetAt: resets["5h"] },
+            { scope: "week", usedPct: weekPct, resetAt: resets.week },
+            { scope: "month", usedPct: 28, resetAt: resets.month },
+          ],
+          now,
+        ),
+      );
+      f.service.refreshIfStale();
+      await f.service.whenIdle();
+      expect(f.service.verdictFor("droid-standard")?.level).toBe(level);
+      const listing = f.service.poolAlternatives("droid-core")[0]?.listing;
+      expect(listing).toEqual([
+        {
+          pool: "standard",
+          state: level === 0 ? "ok" : "warn",
+          total: 2,
+          models: ["droid/claude-opus-5-5", "droid/gpt-6"],
+          reading: { scope: bindingScope, usedPct: bindingPct, resetAt: resets[bindingScope] },
+        },
+      ]);
+      const text = alternativesAdvice({ providers: [], subscription: true, external: true, poolListing: listing }, now);
+      const scope = bindingScope === "week" ? "周" : "5 小时";
+      expect(text).toContain(
+        `Standard 池（${level === 0 ? "有余量" : "预警"}，${scope} ${bindingPct}%，${formatResetAt(resets[bindingScope], now)} 重置）`,
+      );
+      f.service.dispose();
+    },
+  );
+
   it("standard 被拦且 core 可信有余量 ⇒ 建议包 = core 推荐 + 两池清单（状态 ok/blocked）", async () => {
     // preferred 非空 = 白名单（2026-10-16 拍板）：把两池的目录模型都写进名单，保持本用例
     // 「两池都有候选」的意图；core 配置序 kimi-k3 在前。名单外模型（如有）不再出现。
     const f = makeDroidFixture({ pools: () => catalogPort(["kimi-k3", "glm-5.3", "claude-opus-5-5", "gpt-6"]) });
     await land(f, 100, 10); // std 5h 100% ⇒ L3；core 10% ⇒ L0
-    expect(f.service.poolAlternatives("droid-standard")).toEqual([
+    expect(f.service.poolAlternatives("droid-standard")).toMatchObject([
       {
         pool: "core",
         models: ["droid/kimi-k3", "droid/glm-5.3"], // 偏好序在前，deprecated 滤除，默认 limit 3
@@ -1305,7 +1353,7 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
   it("D7 对称化（2026-10-16 回落修订）：core 被拦且 standard 可信有余量 ⇒ coreFallback 标记 + 清单状态 fallback", async () => {
     const f = makeDroidFixture({ pools: () => catalogPort() });
     await land(f, 10, 100); // core 5h 100% ⇒ L3；std 10% ⇒ L0
-    expect(f.service.poolAlternatives("droid-core")).toEqual([
+    expect(f.service.poolAlternatives("droid-core")).toMatchObject([
       {
         pool: "standard",
         models: ["droid/claude-opus-5-5", "droid/gpt-6"],
@@ -1323,7 +1371,7 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
     const f = makeDroidFixture({ pools: () => catalogPort() });
     await land(f, 100, 80); // core 5h 80% ⇒ L2（< 闸门线 3）⇒ 可推荐但预警
     expect(f.service.poolAlternatives("droid-standard")[0]?.models).toEqual(["droid/glm-5.3", "droid/kimi-k3"]);
-    expect(f.service.poolAlternatives("droid-standard")[0]?.listing).toEqual([
+    expect(f.service.poolAlternatives("droid-standard")[0]?.listing).toMatchObject([
       { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
       { pool: "core", state: "warn", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
     ]);
@@ -1347,7 +1395,7 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
     expect(f.service.verdictFor("droid-core")).toBeUndefined(); // stale ⇒ 不可信 ⇒ 不可见
     const stale = f.service.poolAlternatives("droid-standard")[0];
     expect(stale?.models).toEqual([]);
-    expect(stale?.listing).toEqual([
+    expect(stale?.listing).toMatchObject([
       { pool: "standard", state: "ok", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
     ]);
     const hot = makeDroidFixture({ pools: () => catalogPort() });
@@ -1364,7 +1412,7 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
     const strict = makeDroidFixture({ pools: () => catalogPort(), settings: { gate: true, gateLevel: 2 } });
     await land(strict, 100, 80); // core 5h 80% ⇒ L2 ≥ 闸门线 2
     expect(strict.service.poolAlternatives("droid-standard")[0]?.models).toEqual([]);
-    expect(strict.service.poolAlternatives("droid-standard")[0]?.listing).toEqual([
+    expect(strict.service.poolAlternatives("droid-standard")[0]?.listing).toMatchObject([
       { pool: "standard", state: "blocked", total: 2, models: ["droid/claude-opus-5-5", "droid/gpt-6"] },
       { pool: "core", state: "blocked", total: 2, models: ["droid/glm-5.3", "droid/kimi-k3"] },
     ]);
@@ -1384,7 +1432,7 @@ describe("droid: poolAlternatives — D7 对称化建议包 + 逐池清单（202
     const port = createCatalogPoolPort({ provider: "droid", catalog: () => ({ models }) });
     const f = makeDroidFixture({ pools: () => port });
     await land(f, 100, 10);
-    expect(f.service.poolAlternatives("droid-standard")[0]?.listing).toEqual([
+    expect(f.service.poolAlternatives("droid-standard")[0]?.listing).toMatchObject([
       {
         pool: "standard",
         state: "blocked",
@@ -1579,7 +1627,7 @@ describe("droid: allowlist mode（2026-10-16 拍板：非空 externalAgents.droi
     const f = makeDroidFixture({ pools: () => widePort(["kimi-k3"]) });
     await land(f, 100, 10); // std L3 被拦；core L0 有余量
     const advice = f.service.poolAlternatives("droid-standard");
-    expect(advice).toEqual([
+    expect(advice).toMatchObject([
       {
         pool: "core",
         models: ["droid/kimi-k3"], // glm-5.3 未配置 ⇒ 不推；inkling/mistral-large-4 名单外 ⇒ 不推
@@ -1620,8 +1668,13 @@ describe("droid: allowlist mode（2026-10-16 拍板：非空 externalAgents.droi
     expect(coreEntry).toMatchObject({ state: "ok", total: 6 });
     expect(coreEntry.models).toHaveLength(5);
     expect(coreEntry.models).not.toContain("droid/inkling");
-    const text = alternativesAdvice({ providers: [], subscription: true, external: true, poolListing: listing });
-    expect(text).toContain("Core 池（有余量）：");
+    const text = alternativesAdvice(
+      { providers: [], subscription: true, external: true, poolListing: listing },
+      f.clock.now(),
+    );
+    expect(text).toContain(
+      `Core 池（有余量，5 小时 10%，${formatResetAt(f.clock.now() + 3_600_000, f.clock.now())} 重置）：`,
+    );
     expect(text).toContain("等 6 个");
     expect(text).not.toContain("inkling");
     expect(text).not.toContain("mistral-large-4");
@@ -1710,8 +1763,8 @@ describe("droid: per-virtual-id isolation (rings, demotion, dispose)", () => {
     // 5%/10min slope (ETA ~70min, well before reset) would exhaust long before `reset` — a 5h/week window would be raised to L2.
     expect(f.service.verdictFor("droid-standard")?.windows[0]).toMatchObject({
       scope: "month",
-      level: 1,
-      reason: "pct",
+      level: 0,
+      reason: "under-pace",
     });
   });
 });
