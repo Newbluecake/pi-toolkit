@@ -266,7 +266,7 @@ describe("/cache-ttl getArgumentCompletions", () => {
         .getArgumentCompletions("")!
         .map((i: any) => i.value)
         .sort(),
-    ).toEqual(["auto", "keepalive", "off", "on", "probe", "save", "status"]);
+    ).toEqual(["auto", "keepalive", "measure", "off", "on", "probe", "save", "status"]);
     expect(cmd.getArgumentCompletions("ad")!.map((i: any) => i.value)).toEqual([]);
   });
 

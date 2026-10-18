@@ -183,7 +183,7 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   uncommitted). All rejection reasons fold into `diag.contextSwitches.rejected[]` (FIFO cap 5),
   readable from `get_subagent_result`.
 - `src/cache-ttl/` — prompt-cache TTL modes `auto`/`on`/`off`, status-bar indicator,
-  persisted settings override, and `/cache-ttl`. Auto follows pi/env; on explicitly forces 1h;
+  persisted settings override, and `/cache-ttl`; main-session-only `/cache-ttl measure` measures TTL/read renewal over Anthropic or OpenAI with a 17-request hard cap, revocable process claim and bounded async result store (`docs/dev/cache-ttl-keepalive/measure-plan.md`). Auto follows pi/env; on explicitly forces 1h;
   off strips the TTL override. No automatic 1h upgrades remain (user decision 2026-10-11).
   Copilot (`github-copilot`) is token-billed and is no longer provider-denied (2026-10-18 user ruling);
   only Anthropic-messages API requests remain eligible, subject to every normal safety/budget gate.

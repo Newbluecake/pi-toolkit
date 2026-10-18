@@ -236,3 +236,38 @@ describe("resolveCommandPolicy — web-resume resume forms (§2.7)", () => {
     expect(resolve("resume-recent", "--all", "extension")).toEqual({ policy: "deny" });
   });
 });
+
+// measure-plan r4 P4 — APPEND ONLY: raw parser preserves model case and malformed forms stay confirmed.
+describe("cache-ttl measure web policy", () => {
+  it.each([
+    "measure status",
+    "MeAsUrE STATUS",
+    "measure --estimate",
+    "measure CaseProvider/CaseModel --LONG --estimate",
+    "measure --estimate --yes",
+  ])("allows read-only %s", (args) => {
+    expect(resolve("cache-ttl", args, "extension")).toEqual({ policy: "allow" });
+  });
+  it.each([
+    "measure",
+    "measure --yes",
+    "measure cancel",
+    "measure --long --yes",
+    "measure status --estimate",
+    "measure --estimate --estimate",
+    "measure --unknown",
+    "measure WrongModel --estimate",
+  ])("confirms mutating or malformed %s", (args) => {
+    expect(resolve("cache-ttl", args, "extension")).toEqual({ policy: "confirm" });
+  });
+  it("explicit user policy overrides the default measure rules", () => {
+    expect(
+      resolveCommandPolicy({
+        name: "cache-ttl",
+        args: "measure --estimate",
+        kind: "extension",
+        overrides: { "cache-ttl": "deny" },
+      }),
+    ).toEqual({ policy: "deny" });
+  });
+});

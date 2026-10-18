@@ -10,6 +10,8 @@
  * overrides (`policyBusy`, today only `/compact`) are resolved by the caller via
  * `effectivePolicy()` once it knows whether the agent is idle.
  */
+import { parseMeasureArgs } from "../../cache-ttl/measure-args.js";
+
 export type CommandPolicy = "allow" | "confirm" | "deny";
 export type CommandKind = "extension" | "template" | "skill" | "builtin";
 
@@ -150,6 +152,15 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   // (or persisted) state. `keepalive reset` also clears economic breakers (proven-write) — confirm.
   "cache-ttl"(tokens) {
     const sub = tokens[0];
+    if (sub?.toLowerCase() === "measure") {
+      const parsed = parseMeasureArgs(tokens);
+      return {
+        policy:
+          parsed.ok && (parsed.command === "status" || (parsed.command === "start" && parsed.estimate))
+            ? "allow"
+            : "confirm",
+      };
+    }
     if (sub === undefined || sub === "status") return { policy: "allow" };
     return { policy: "confirm" };
   },

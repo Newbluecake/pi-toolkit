@@ -81,9 +81,28 @@ export function writePrice(
 
 /** `R(n)`: n tokens read from cache. */
 export const readPrice = (price: MeasurePriceFn, n: number): number | undefined => price({ ...zero(), cacheRead: n });
-/** `O`: `outputTokens` billed as output. */
-export const outputPrice = (price: MeasurePriceFn, outputTokens: number): number | undefined =>
-  price({ ...zero(), output: outputTokens });
+/** `O`: output priced at the SAME total prompt tier as its request, never at prompt=0 by accident. */
+export function outputPrice(
+  price: MeasurePriceFn,
+  outputTokens: number,
+  prompt: PriceTokens = zero(),
+): number | undefined {
+  const without = price({ ...prompt, output: 0 });
+  const withOutput = price({ ...prompt, output: outputTokens });
+  // Remove subtraction noise (e.g. 0.000015000000000001) without changing meaningful list-price precision.
+  return without === undefined || withOutput === undefined
+    ? undefined
+    : Math.max(0, Number((withOutput - without).toPrecision(12)));
+}
+
+function writePrompt(price: MeasurePriceFn, n: number, api: MeasureApi, retention: RequestedRetention): PriceTokens {
+  const parts = {
+    ...zero(),
+    cacheWrite: n,
+    ...(api === "anthropic-messages" && retention === "long" ? { cacheWrite1h: n } : {}),
+  };
+  return price(parts) !== undefined ? parts : { ...zero(), input: n };
+}
 
 const add = (...xs: Array<number | undefined>): number | undefined => {
   let sum = 0;
@@ -106,7 +125,8 @@ export function estimateCost(
 ): CostEstimate {
   const base = { pBound: tokens.pBound, requestCap: REQUEST_BUDGET.total, conditions: CONDITIONS };
   if (price === undefined) return { typicalUsd: null, conditionalWorstUsd: null, ...base };
-  const O = outputPrice(price, OUTPUT_CAP[api]);
+  const O = outputPrice(price, OUTPUT_CAP[api], writePrompt(price, tokens.mid, api, retention));
+  const oBound = outputPrice(price, OUTPUT_CAP[api], writePrompt(price, tokens.pBound, api, retention));
   const wMid = writePrice(price, tokens.mid, api, retention);
   const rMid = readPrice(price, tokens.mid);
   const wBound = writePrice(price, tokens.pBound, api, retention);
@@ -114,7 +134,7 @@ export function estimateCost(
     wMid === undefined || rMid === undefined || O === undefined
       ? undefined
       : REQUEST_BUDGET.writes * wMid + 7 * rMid + 13 * O;
-  const worst = wBound === undefined || O === undefined ? undefined : REQUEST_BUDGET.total * (wBound + O);
+  const worst = wBound === undefined || oBound === undefined ? undefined : REQUEST_BUDGET.total * (wBound + oBound);
   return { typicalUsd: typical ?? null, conditionalWorstUsd: worst ?? null, ...base };
 }
 
@@ -248,7 +268,7 @@ export function accountRequestCost(input: CostRequestInput): CostAccount {
   if (usage === undefined) {
     // sent but no usable usage at all: nothing known, the conditional bound is the unknown range
     const w = writePrice(price, input.pBound, api, retention);
-    const o = outputPrice(price, input.outputCap);
+    const o = outputPrice(price, input.outputCap, writePrompt(price, input.pBound, api, retention));
     return {
       knownUsd: 0,
       unknownUsd: rangeOf(add(w, o)),
@@ -272,7 +292,7 @@ export function accountRequestCost(input: CostRequestInput): CostAccount {
   };
   for (const item of items) {
     if (item === "output") {
-      addHi(outputPrice(price, input.outputCap));
+      addHi(outputPrice(price, input.outputCap, tokens));
     } else if (item === "write1h-split") {
       // known holds W at the short-write rate; the premium is the 1h rate on the same tokens
       const { cacheWrite1h: _reported, ...noSplit } = tokens;
@@ -283,12 +303,12 @@ export function accountRequestCost(input: CostRequestInput): CostAccount {
     } else if (item === "write") {
       // OpenAI without cache_write_tokens: the uncached input is in `known` at the input price
       const uncached = Math.max(0, usage.P - usage.C);
-      const asWrite = price({ ...zero(), cacheWrite: uncached });
-      const asInput = price({ ...zero(), input: uncached });
+      const asWrite = price({ ...zero(), cacheRead: usage.C, cacheWrite: uncached });
+      const asInput = price({ ...zero(), cacheRead: usage.C, input: uncached });
       addHi(asWrite === undefined || asInput === undefined ? 0 : Math.max(0, asWrite - asInput));
     } else {
       const w = writePrice(price, input.pBound, api, retention);
-      addHi(add(w, outputPrice(price, input.outputCap)));
+      addHi(add(w, outputPrice(price, input.outputCap, writePrompt(price, input.pBound, api, retention))));
     }
   }
   return {

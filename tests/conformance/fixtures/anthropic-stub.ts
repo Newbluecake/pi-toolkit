@@ -35,7 +35,7 @@ export interface StubUsage {
  */
 export type StubDirective =
   /** Answer with a non-2xx Anthropic-shaped JSON error (e.g. the strict-tools 400). */
-  | { kind: "error"; status: number; type?: string; message: string }
+  | { kind: "error"; status: number; type?: string; message: string; headers?: Record<string, string> }
   /** Accept the request and never send any response bytes. */
   | { kind: "hang" }
   /** Send an accepted SSE response, then drop the connection before message_start (A3). */
@@ -205,7 +205,7 @@ export class AnthropicStub {
         const index = this.requests.length - 1;
         const directive = await options.respond?.(request, index);
         if (directive?.kind === "error") {
-          res.writeHead(directive.status, { "content-type": "application/json" });
+          res.writeHead(directive.status, { "content-type": "application/json", ...directive.headers });
           res.end(
             JSON.stringify({
               type: "error",

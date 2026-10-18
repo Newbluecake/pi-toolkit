@@ -231,6 +231,8 @@ export interface MeasureStore extends MeasureStorePort {
   /** Resolves when the writer loop of THIS instance is idle (test/diagnostic helper; never rejects). */
   flush(): Promise<void>;
   readonly filePath: string;
+  /** Bounded read-only status listing; never guesses the authenticated route key. */
+  readRoutes(): Promise<readonly MeasureRouteRecord[]>;
 }
 
 type Raced<T> = { timedOut: false; value: T } | { timedOut: true };
@@ -386,6 +388,13 @@ export function createMeasureStore(options: MeasureStoreOptions = {}): MeasureSt
         kick();
       } catch {
         /* never throws */
+      }
+    },
+    async readRoutes() {
+      try {
+        return (await readFile(false))?.routes ?? [];
+      } catch {
+        return [];
       }
     },
     async readRoute(key) {

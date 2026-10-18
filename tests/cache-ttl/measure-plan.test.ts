@@ -192,8 +192,8 @@ describe("cost estimate (§4.3)", () => {
     const flat = estimateCost(priced(SONNET), ANTH, "short");
     const jumped = estimateCost(tiered, ANTH, "short");
     expect(jumped.typicalUsd).toBeCloseTo(flat.typicalUsd!, 10);
-    // W(P_bound) pays the multiplier, the 1-token output term does not
-    expect(jumped.conditionalWorstUsd).toBeCloseTo(17 * (2 * ((P_BOUND_TOKENS * 3.75) / 1e6) + 15 / 1e6), 10);
+    // Both the prompt AND output of that request pay the P_bound tier (measure-plan §4.3).
+    expect(jumped.conditionalWorstUsd).toBeCloseTo(17 * 2 * ((P_BOUND_TOKENS * 3.75 + 15) / 1e6), 10);
   });
 
   it("a missing rate makes only the dependent figure unknown", () => {

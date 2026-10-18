@@ -27,6 +27,7 @@ import { observeUsageIntoEvidence, type ProviderEvidenceStore } from "./provider
 import { PROBE_TOTAL_TIMEOUT_MS, runCacheProbe, type ProbeResult } from "./probe.js";
 import { assessWarmth, MAX_TTL_MS, type CacheWarmth, type WarmthEvidence } from "./warmth.js";
 import type { CacheKeepaliveService, KeepalivePort } from "../service/cache-keepalive.js";
+import { wireMeasureCommand, type MeasureCommandDeps } from "./measure-command.js";
 
 // Moved to ./usage-ledger.js — re-exported so
 // any external importer of this module keeps working.
@@ -52,6 +53,8 @@ export interface CacheTtlDeps {
   evidence?: ProviderEvidenceStore | undefined;
   /** O4: injectable fetch for `/cache-ttl probe` (tests); defaults to `globalThis.fetch`. */
   probeFetch?: typeof fetch | undefined;
+  /** Measurement wiring seams; production uses the main-session registry, process claim and agent-dir store. */
+  measurement?: MeasureCommandDeps;
 }
 
 /**
@@ -538,6 +541,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   let lastSent: LastSent | undefined;
 
   wireCacheEvents(pi, deps);
+  const measurement = wireMeasureCommand(pi, deps.measurement);
 
   pi.on("session_start", async (_event, ctx) => {
     lastSent = undefined;
@@ -606,14 +610,17 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     if (port) port.noteRequest(captureRequest(cloned as RecordValue, ctx, sessionId, port, prefixFromLedger(ledger)));
     return cloned as RecordValue;
   });
-  const USAGE = "usage: /cache-ttl on | off | auto | save | keepalive on|off|reset | status | probe";
+  const USAGE =
+    "usage: /cache-ttl on | off | auto | save | keepalive on|off|reset | status | probe | measure [<provider>/<id>] [--long] [--estimate] [--yes] | measure status|cancel";
   pi.registerCommand("cache-ttl", {
-    description: "Toggle Anthropic prompt-cache TTL: /cache-ttl [on|off|auto|save|keepalive on|off|reset|status|probe]",
+    description: "Prompt-cache TTL: /cache-ttl [on|off|auto|save|keepalive on|off|reset|status|probe|measure]",
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
         const tokens = a.split(/\s+/).filter(Boolean);
         const partial = a.endsWith(" ") || a === "" ? "" : (tokens[tokens.length - 1] ?? "");
+        if (tokens[0]?.toLowerCase() === "measure" && (tokens.length > 1 || /\s$/.test(a)))
+          return measurement.completions(a);
         if (tokens[0] === "keepalive" && (tokens.length > 1 || a.endsWith(" "))) {
           return ["on", "off", "reset"]
             .filter((v) => v.startsWith(partial))
@@ -627,12 +634,18 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           { value: "keepalive", label: "keepalive", description: "保活开关（on|off|reset）" },
           { value: "status", label: "status", description: "查看保活状态" },
           { value: "probe", label: "probe", description: "线路体检（≤3 个真实计费请求，30s 预算）" },
+          { value: "measure", label: "measure", description: "测量缓存 TTL 与读取续期（最多 17 个真实计费请求）" },
         ].filter((item) => item.value.startsWith(partial));
       } catch {
         return [];
       }
     },
     handler: async (args, ctx) => {
+      // Measure model refs are case-sensitive; branch BEFORE the legacy lowercasing.
+      if (args.trim().split(/\s+/)[0]?.toLowerCase() === "measure") {
+        await measurement.handle(args, ctx);
+        return;
+      }
       const arg = args.trim().toLowerCase();
       const [head, ...rest] = arg.split(/\s+/).filter(Boolean);
 
@@ -686,6 +699,9 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
         if (port) lines.push(...renderKeepaliveReportLines(port.report()));
         if (lines.length === 0)
           lines.push("keepalive service unavailable (no active session, or cacheTtl.keepalive=false)");
+        const measurementLine = await measurement.statusLine(ctx);
+        if (measurementLine === undefined) return; // session changed while the bounded status read was pending
+        lines.push(measurementLine);
         const note = legacyCapNote(settings.cacheTtl);
         if (note !== undefined) lines.push(note);
         ctx.ui.notify(lines.join("\n"), "info");

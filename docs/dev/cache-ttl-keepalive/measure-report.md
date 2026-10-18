@@ -271,3 +271,94 @@ Remaining: independent P2 verification, P4 command/runner binding and its end-to
 - Completions accepts Moonshot-style `choices[0].usage` when top-level usage is missing/null, preserving top-level precedence. OpenAI null details containers now mean missing cache details (`missing-cached` without an alias), while a null cached counter remains `not-integer`.
 - Added real-SDK regression cases for large attribution, both alias-bearing choice fallbacks and precedence, plus null-details reader cases and Anthropic projection. Updated the existing P1 byte-cap fixture from an unknown metadata key to a retained counter key so it still genuinely tests the cap. P4 cache-key/forbiddenKeys wiring, frozen types and P3 source/tests were untouched. No commit.
 - Final verification: `timeout 280 npm run typecheck` and `timeout 280 npm run build` both exit 0. Required `timeout 600 npx vitest run tests/cache-ttl tests/conformance/measure-openai-build.test.ts tests/conformance/keepalive-pipeline.test.ts tests/integration/keepalive-pipeline-service.test.ts` exits 0: **37 files / 1162 tests passed**, start 23:52:37, duration 9.48s. Prettier check on all five changed TypeScript/test paths plus this report passes; `git diff --check` exits 0.
+
+## P4
+
+Implemented the main-session command assembly and final end-to-end package against P1 `92230b0`, P2 `b48cb47`, and P3 `91994be`. No commit, settings change, consumer activation, or live-provider measurement was performed. The plan author (`r_SWZCCGNF`) was consulted for design intent on persisted route status and tiered pricing, not for an implementation verdict.
+
+### Files / assembly
+
+- `src/cache-ttl/measure-command.ts` (new) — model/auth/capability/context admission, one frozen plan, estimate and 60s abortable confirmation, prepare-before-await claim ownership, real pipeline binding, actual-params validation, typed raw-usage reading, registry `calculateCost` adapter, progress/final text, cancellation and generation-fenced status.
+- `src/cache-ttl/cache-ttl.ts` — raw `measure` branch before lowercasing, help/completions, measurement status line and late-read shutdown fence.
+- `src/web-hub/agent/command-policy.ts` — `parseMeasureArgs` drives read-only status/estimate allow vs start/cancel/malformed confirm; existing explicit overrides still win.
+- `tests/cache-ttl/measure-command.test.ts` (new, 34 cases) — admission/claim/dialog/lifecycle, OpenAI key and forbidden-budget binding, fake-build protected-param refusal, tiered cost accounting, raw branch/completions, post-guard child exclusion and real Node headless natural exit.
+- `tests/conformance/measure-build.test.ts` (new, 13 cases) — real ModelRegistry + Anthropic SDK + local AnthropicStub: exact OAuth and byte-identical replay; managed adaptive effort with cap 1; actual Anthropic sampling behaviour; unsupported long; real 307 Location not followed; nonce replacement; route change; shutdown/physical draining/late UI fences; frozen P_bound boundaries and real relay-like injected baselines.
+- `tests/integration/cache-ttl-measure.test.ts` (new, 9 cases) — real command/runner/store/registry/SDK with per-nonce FakeClock lifetimes: renewing and write-anchored policies, LRU k=3, detectable/undetectable backend splits, rate-limit pool exhaustion, request cap, actual renewal geometry/deadline margins, shifted slot-5 control anchor, persistence/status/hints and web policy rows.
+- `tests/web-hub/agent/command-policy.test.ts` — append-only measurement cases (14).
+- `AGENTS.md:185` — one cache-ttl paragraph sentence documenting the command's main-only scope, cap, claim and store.
+- This report — appended P4 section.
+
+No measurement command is registered in child sessions: `src/index.ts:236` returns on HOST_KEY before `wireCacheTtl` at line 313. The new command also refuses non-interactive/print (`hasUI !== true`) before model resolution, timers or disk access; a real Node child test proves natural exit. No new settings were added. Measurement requests use `ModelRegistry.streamSimple` directly, not the session request hooks, keepalive ledger/HUD or native CacheWarmer.
+
+### Small P1–P3 / existing-fixture corrections
+
+P1/P2 production modules and both frozen type files were not changed by P4. Two P3 integration fixes were necessary and confirmed as intended by the plan author:
+
+| File:line                                             | Change / reason                                                                                                                                                                                         |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/cache-ttl/measure-plan.ts:85`                    | Price output as the difference of quotes at the same total prompt tier, not an output-only quote at prompt=0; stabilise floating subtraction noise without meaningful list-price loss.                  |
+| `src/cache-ttl/measure-plan.ts:129`                   | Typical output uses T_mid's tier; conditional-worst/lost-usage output uses P_bound's tier.                                                                                                              |
+| `src/cache-ttl/measure-plan.ts:293`                   | Unknown output for a reported request uses that request's actual prompt breakdown/tier.                                                                                                                 |
+| `src/cache-ttl/measure-plan.ts:306`                   | Unknown OpenAI write premium retains the cached baseline in both quotes, so a large cached prefix cannot incorrectly select the lower tier.                                                             |
+| `src/cache-ttl/measure-store.ts:235,393`              | Add `readRoutes()` only to the concrete store, reusing its existing capped/deadline-bounded, non-quarantining read path; do not guess an authenticated key from model.baseUrl or widen the frozen port. |
+| `tests/cache-ttl/measure-plan.test.ts:195`            | Correct the old assertion explicitly assuming output stayed at the base tier; §4.3 requires output and prompt at the same request tier.                                                                 |
+| `tests/cache-ttl/cache-ttl.test.ts:269`               | Add the newly required `measure` completion to the existing exact expected list.                                                                                                                        |
+| `tests/conformance/fixtures/anthropic-stub.ts:37,208` | Add an optional headers field to the existing error directive, preserving defaults, so the 307 conformance case has an actual Location target and can prove it was not followed.                        |
+
+No P3 runner/claim/actions/classification/renewal/prefix/args behaviour was changed. Per-nonce lifetime/LRU policies use the stub's existing scripted reply callback, not a widening of its default cache behaviour.
+
+### Explicit plan-text deviation: Anthropic sampling
+
+The main session ruled that validators must inspect **only ACTUAL final params**. In installed pi-ai 1.2, `dist/api/anthropic-messages.js:437–440` takes `built.params` into onPayload; unlike the OpenAI builders, it never Object.assigns samplingParams into those params (`buildParams` at line 890). Therefore configured Anthropic sampling max_tokens/tools/budget thinking are silently ignored by this installed provider and do not reach the wire. The §9 P4 "sampling overrides ⇒ zero POSTs" Anthropic case is a byte-level fact test instead: such configuration still sends cap 1, no tools and no budget thinking, with the wire exactly equal to the validated built payload after the SDK's beta-header extraction. Separate fake-build command unit cases prove that ACTUAL params carrying a large cap/tools/enabled budget thinking are refused with zero base fetches. No sampling overlay was added, and harmless ignored model settings are not refused. OpenAI actual sampling-override conformance remains covered by P2.
+
+### Lifecycle / route / reporting details
+
+- A preparing claim exists before any auth/dialog await. Confirmation is raced against the injected unref'd clock and an AbortSignal; every subsequent action checks the original epoch/session/token. All session_shutdown reasons revoke preparing or cancel running work immediately, never awaiting IO or persistence.
+- `MeasureSendFn` forwards build vs replay, fixed caps/retention, liveness guard, signal, route closure, expectWireModel and every run-wide expectRouteKey. Validator expectations add configured forbiddenKeys; Completions rejects a present key differing from the clamped prefix sessionId. An effective tier cannot silently change between builds in one run.
+- Renewal's official-origin basis comes from the actual wrapped-fetch request URL, not a guessed model/auth base URL. Persisted status lists redacted labelled routes and explicitly says they are not verified as the current authenticated route.
+- Progress/status report estimates and save state but no running spend; only the final notice and result file carry known/unreported cost. Results show per-gap verdicts, observed-load labels, expiry-or-eviction wording, detectable backend mismatches and the undetectable-split residual, never a false renewal claim. Copyable promptCache hints do not configure pi and warn when read renewal is unproven.
+
+### Verification
+
+`timeout 280 npm run typecheck` — exit 0 (`tsc` source + contract + `vue-tsc`).
+
+`timeout 280 npm run build` — exit 0 (`tsc -p tsconfig.build.json`).
+
+`timeout 600 npx vitest run tests/cache-ttl tests/conformance tests/integration/cache-ttl-measure.test.ts tests/integration/cache-keepalive.test.ts tests/integration/keepalive-pipeline-service.test.ts tests/web-hub/agent` — exit 0:
+
+```text
+ Test Files  127 passed (127)
+      Tests  2603 passed | 17 skipped (2620)
+   Start at  00:23:31
+   Duration  105.31s (transform 7.86s, setup 2.13s, collect 45.24s, tests 290.45s, environment 22ms, prepare 6.89s)
+```
+
+The required full `timeout 900 npm test` is recorded below after completion. Log files are `/tmp/p4-measure-target.log` and `/tmp/p4-measure-full.log` (test output only, no live credentials).
+
+### Real-machine acceptance / remaining gate G-c
+
+No real endpoint was contacted. After explicit user budget approval:
+
+1. In an interactive **main** session, select a real managed-effort Anthropic route (`supportsMidConvoEffort:true`) and an OAuth-authenticated Anthropic route (one route may cover both). Run `/cache-ttl measure Provider/Model --estimate` first; review both estimates, conditional C1/C2/C3 assumptions, the hard 17-request cap and the 80-minute deadline.
+2. Only after approving that run's spend, run `/cache-ttl measure Provider/Model --yes` (or omit --yes and accept the 60s local dialog). Keep max_tokens exactly 1: do not raise it if the real managed-effort provider rejects adaptive thinking with that cap. OAuth acceptance must use the real login/token path; the validator requires the exact stock leading identity, not arbitrary extra text. A rejecting endpoint is an honest failed acceptance, not permission to relax the validator.
+3. Check `/cache-ttl measure status`, the labelled route/effective tier, write/control results, per-gap hit/miss table, save state and final known/unreported cost. Misses must say expiry-or-eviction, no TTL ceiling; renewal is true with its basis/assumptions or unknown, never a v1 false. Leave the session alive for the experiment; /reload, /new, /resume, fork or exit must cancel it. Do not expose auth headers/tokens in acceptance notes.
+4. Repeat the estimate/approval/run on one real openai-responses route. Compare only as an empirical sanity check against `protocol-probe-results.md` (cr-response previously hit at 6 min and missed by 11 min; renewal may honestly be unknown(pair-ineligible)). A long-retention run is a separate opt-in spend: estimate with --long first, confirm effective tier/Anthropic landed1h and never silently downgrade/promote the requested tier.
+   Notes: a full run needs the main session to stay open for up to ~80 minutes (the hard deadline); the user can keep
+   working in it. Results are stored in `<agentDir>/cache-ttl-measurements.json` (default
+   `~/.pi/agent/cache-ttl-measurements.json`, mode 0600, one latest record per route); deleting that file clears every
+   learned result.
+
+5. Do not automatically apply the copyable models.json hint or alter keepalive cadence. P5 consumers remain separate; an unknown renewal result is not evidence that a native 90%-TTL warmer can renew the entry.
+
+### P4 final full-suite output
+
+`timeout 900 npm test` — **exit 0**, after the final typecheck/build/owned-file formatting gates:
+
+```text
+ Test Files  1149 passed (1149)
+      Tests  21943 passed | 22 skipped (21965)
+   Start at  00:27:28
+   Duration  243.47s (transform 26.52s, setup 14.81s, collect 250.83s, tests 1400.37s, environment 25.60s, prepare 60.92s)
+```
+
+The existing skipped conformance cases were not enabled or altered. No new P4 test is skipped. The full suite's expected failure-path stderr did not produce any failed test. Prettier on the thirteen changed code/test/AGENTS paths printed `All matched files use Prettier code style!`; the appended report is checked as well. `git diff --check` exits 0. The full command's outer gate log is `/home/bluecake/.pi/agent/bash-jobs/01a14f77-c871-77e8-9185-0fd4654dbc0f/b_636FZK55.log`.
