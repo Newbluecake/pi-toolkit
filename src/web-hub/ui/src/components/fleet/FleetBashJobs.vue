@@ -32,6 +32,7 @@ import type { BashJobRowWire, BashJobsWire } from "@protocol/messages.js";
 import type { FleetBashJobsProps } from "../../contracts.js";
 import { formatBytes, statusToken, summaryCounts, tailFreshness, type TailFreshness } from "../detail/bashJobsView.js";
 import { deshellCmd, type DeshelledCmd } from "../../logic/bashCmd.js";
+import { formatTimeRange, type TimeRangeLabel } from "../../logic/timeRange.js";
 import "../../styles/bash-jobs.css";
 
 const props = defineProps<FleetBashJobsProps>();
@@ -118,6 +119,11 @@ function bytesLabel(row: BashJobRowWire): string {
   return formatBytes(row.logBytes) + (row.logTruncated === true ? "+" : "");
 }
 
+/** Start/end token from the row's `createdAt`/`endedAt` (missing createdAt ⇒ null ⇒ no token). */
+function timeRangeOf(row: BashJobRowWire): TimeRangeLabel | null {
+  return formatTimeRange(row.createdAt, row.endedAt);
+}
+
 function freshnessOf(row: BashJobRowWire): TailFreshness {
   return tailFreshness(row, props.jobs.sampledAt);
 }
@@ -187,6 +193,9 @@ function toggleRow(row: BashJobRowWire): void {
             }}</span>
           </span>
           <span class="bj-bytes num">{{ bytesLabel(row) }}</span>
+          <span v-if="timeRangeOf(row)" class="bj-meta" translate="no" :title="timeRangeOf(row)!.title">{{
+            timeRangeOf(row)!.text
+          }}</span>
         </button>
         <!-- full redacted command (plain text) — the row itself ellipsizes it -->
         <div v-if="expandedId === row.id && row.tail !== undefined" class="bj-cmd-full" translate="no">

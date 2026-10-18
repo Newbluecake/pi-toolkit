@@ -31,6 +31,7 @@ import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { FLEET_STATE_ICON, fleetStateSpins } from "./state-icon.js";
 import { typeBadge, shortModelLabel } from "@logic/fleetRow.js";
+import { formatTimeRange, type TimeRangeLabel } from "@logic/timeRange.js";
 import { fleetActivity, isTerminalRow, FLEET_SELECT } from "./summary.js";
 
 const props = withDefaults(defineProps<FleetTreeProps>(), { depth: 0 });
@@ -155,6 +156,10 @@ function cacheMarkOf(row: FleetRowWire): string {
 function modelBlockOf(row: FleetRowWire): boolean {
   return modelShortOf(row) !== "" || thinkingTokenOf(row) !== "";
 }
+/** Start/end token (`startedAt`/`endedAt` are append-only wire fields; absent ⇒ null ⇒ no token). */
+function timeRangeOf(row: FleetRowWire): TimeRangeLabel | null {
+  return formatTimeRange(row.startedAt, row.endedAt);
+}
 function costLabelOf(row: FleetRowWire): string {
   return typeof row.costUsd === "number" ? formatUsd(row.costUsd) : "—";
 }
@@ -227,6 +232,13 @@ function isOrphan(row: FleetRowWire): boolean {
           </span>
           <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
           <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>
+          <span
+            v-if="timeRangeOf(rowOf(node))"
+            class="run-meta"
+            translate="no"
+            :title="timeRangeOf(rowOf(node))!.title"
+            >{{ timeRangeOf(rowOf(node))!.text }}</span
+          >
         </summary>
         <FleetTree :nodes="node.children" :depth="depth + 1" :now="now" />
       </details>
@@ -292,6 +304,13 @@ function isOrphan(row: FleetRowWire): boolean {
         </span>
         <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
         <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>
+        <span
+          v-if="timeRangeOf(rowOf(node))"
+          class="run-meta"
+          translate="no"
+          :title="timeRangeOf(rowOf(node))!.title"
+          >{{ timeRangeOf(rowOf(node))!.text }}</span
+        >
       </div>
     </li>
   </ul>

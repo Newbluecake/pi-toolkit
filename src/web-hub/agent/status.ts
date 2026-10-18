@@ -228,6 +228,17 @@ export function projectFleet(
       highlight: r.highlight,
       terminal: r.terminal,
     };
+    // Start/end wall-clock stamps (append-only optional wire fields): the same instants
+    // `elapsedMs` is measured between (fleet-panel `toRow`), so the browser can show
+    // `start → end`. Non-finite stamps are dropped field-only; endedAt only on terminal rows.
+    const src = byId.get(r.runId);
+    if (src !== undefined && Number.isFinite(src.diag.createdAt)) {
+      row.startedAt = src.diag.createdAt;
+      if (r.terminal) {
+        const end = src.diag.settledAt ?? src.updatedAt;
+        if (Number.isFinite(end)) row.endedAt = end;
+      }
+    }
     if (r.label !== undefined) row.label = r.label;
     if (r.type !== undefined) row.type = r.type;
     if (r.model !== undefined) row.model = r.model;

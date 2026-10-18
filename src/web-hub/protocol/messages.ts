@@ -584,6 +584,14 @@ export interface FleetRowWire {
   parentRunId?: string;
   elapsedMs: number;
   phaseMs: number;
+  /** Run start (append-only optional field — no proto bump): agent-clock epoch ms of the run
+   *  record's `diag.createdAt`, the same base `elapsedMs` is measured from. Absent ⇔ unknown /
+   *  old agent; the UI then renders no start-time token. */
+  startedAt?: number;
+  /** Run end (append-only optional field — no proto bump): agent-clock epoch ms the run reached
+   *  its terminal state (`diag.settledAt ?? updatedAt`, the instant `elapsedMs` freezes at).
+   *  Present only on terminal rows; absent while running or unknown. */
+  endedAt?: number;
   costUsd?: number;
   toolTrail?: string;
   streamLine?: string;

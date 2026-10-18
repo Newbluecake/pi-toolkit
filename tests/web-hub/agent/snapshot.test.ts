@@ -218,6 +218,54 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     expect("consult" in projectFleet([snap()], 5_000)[0]!).toBe(false);
   });
 
+  it("projects startedAt (diag.createdAt) on every row and endedAt only on terminal rows; absent stays absent", () => {
+    const running = snap({ diag: diag({ ...snap().diag, createdAt: 1_000 }) });
+    const r = projectFleet([running], 5_000)[0]!;
+    expect(r.startedAt).toBe(1_000);
+    expect("endedAt" in r).toBe(false);
+    // terminal: endedAt = diag.settledAt (the instant elapsedMs freezes at)
+    const done = snap({
+      status: "completed",
+      phase: "settled",
+      updatedAt: 9_000,
+      diag: diag({ ...snap().diag, createdAt: 1_000, settledAt: 4_000 }),
+    });
+    const d = projectFleet([done], 20_000)[0]!;
+    expect(d).toMatchObject({ startedAt: 1_000, endedAt: 4_000, elapsedMs: 3_000, terminal: true });
+    // no settledAt ⇒ falls back to the snapshot's updatedAt, like elapsedMs does
+    const noSettle = snap({
+      status: "failed",
+      phase: "settled",
+      updatedAt: 9_000,
+      diag: diag({ ...snap().diag, createdAt: 1_000 }),
+    });
+    expect(projectFleet([noSettle], 20_000)[0]).toMatchObject({ startedAt: 1_000, endedAt: 9_000, elapsedMs: 8_000 });
+    // non-finite stamps are dropped field-only; the row itself still projects
+    const bad = snap({ diag: diag({ ...snap().diag, createdAt: Number.NaN }) });
+    const b = projectFleet([bad], 5_000);
+    expect(b).toHaveLength(1);
+    expect("startedAt" in b[0]!).toBe(false);
+    expect("endedAt" in b[0]!).toBe(false);
+  });
+
+  it("startedAt/endedAt are stable across ticks (fingerprint unchanged) but flip when the run ends", () => {
+    const live = snap({ diag: diag({ ...snap().diag, createdAt: 1_000 }) });
+    expect(fleetFingerprint(projectFleet([live], 5_000))).toBe(fleetFingerprint(projectFleet([live], 65_000)));
+    const ended = snap({
+      status: "completed",
+      phase: "settled",
+      diag: diag({ ...snap().diag, createdAt: 1_000, settledAt: 4_000 }),
+    });
+    const endedLater = snap({
+      status: "completed",
+      phase: "settled",
+      diag: diag({ ...snap().diag, createdAt: 1_000, settledAt: 5_000 }),
+    });
+    expect(fleetFingerprint(projectFleet([ended], 9_000))).not.toBe(
+      fleetFingerprint(projectFleet([endedLater], 9_000)),
+    );
+  });
+
   it("per-second jitter (elapsed/phase ages, live tool duration, thinking frame) does not change the fingerprint", () => {
     const thinking = snap({ phase: "model_turn", diag: { ...snap().diag, phase: "model_turn" } });
     const a = fleetFingerprint(projectFleet([snap(), thinking], 5_000));

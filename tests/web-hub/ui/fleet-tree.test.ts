@@ -504,13 +504,16 @@ describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场
     expect(r).toMatch(/text-overflow:\s*ellipsis/);
     expect(r).toMatch(/white-space:\s*nowrap/);
     // <480px 档的 grid-template-areas 必须把 activity 与 model 放在不同行(上一用例已钉模板,
-    // 这里再钉一遍行数:模板字符串里恰好三行,activity 在最后一行)
+    // 这里再钉一遍行数:模板字符串里恰好四行 —— activity 在第三行,起止时间 token(meta,
+    // 2026-10-18 用户拍板 C)独占最后一行)
     const m = /@container\s*\(max-width:\s*479px\)\s*\{([\s\S]*)\}\s*$/.exec(css);
     const areas = /grid-template-areas:\s*([^;]+);/.exec(m![1]!)?.[1] ?? "";
     const lines = [...areas.matchAll(/"[^"]+"/g)].map((x) => x[0]);
-    expect(lines.length).toBe(3);
+    expect(lines.length).toBe(4);
     expect(lines[2]).toContain("activity");
     expect(lines[2]).not.toContain("model");
+    expect(lines[3]).toContain("meta");
+    expect(lines[3]).not.toContain("activity");
   });
 
   it("行内元素不靠绝对定位/负 margin 排布(叠字禁令)", () => {
@@ -519,5 +522,63 @@ describe("fleet.css 窄容器防叠字规则(2026-10 手机抽屉行重叠现场
       expect(r).not.toMatch(/position:\s*absolute/);
       expect(r).not.toMatch(/margin(-\w+)?:\s*-/);
     }
+  });
+});
+
+describe("FleetTree start/end time token (2026-10-18 user pick C)", () => {
+  const T0 = Date.parse("2026-10-18T22:41:05+08:00");
+  const mountRows = (rows: FleetRowWire[]) => mount(FleetTree, { props: { nodes: buildFleetTree(rows), now: 0 } });
+
+  it("running row: start-only token + tooltip; finished rows add the end (same-day HH:MM / cross-day full)", () => {
+    const w = mountRows([
+      row({ runId: "r-run", startedAt: T0 }),
+      row({
+        runId: "r-done",
+        status: "completed",
+        terminal: true,
+        startedAt: T0,
+        endedAt: Date.parse("2026-10-18T22:47:17+08:00"),
+      }),
+      row({
+        runId: "r-cross",
+        status: "failed",
+        terminal: true,
+        startedAt: Date.parse("2026-10-17T23:58:40+08:00"),
+        endedAt: Date.parse("2026-10-18T00:12:40+08:00"),
+      }),
+    ]);
+    const metas = w.findAll(".run-meta");
+    expect(metas).toHaveLength(3);
+    // zone-independent assertions: shape + tooltip structure (exact text is pinned in logic-time-range)
+    expect(metas[0]!.text()).toMatch(/^\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
+    expect(metas[0]!.attributes("title")).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(metas[0]!.attributes("translate")).toBe("no");
+    expect(metas[1]!.text()).toMatch(/^\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2} → \d{2}:\d{2}$/);
+    expect(metas[1]!.attributes("title")).toMatch(/^[\d-]+ [\d:]+ → [\d-]+ [\d:]+$/);
+    expect(metas[2]!.text()).toMatch(/^\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2} → \d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
+  });
+
+  it("absent when startedAt is missing (old agent) — no token, nothing else changes", () => {
+    const w = mountRows([row({ runId: "r-old" }), row({ runId: "r-old2", terminal: true, endedAt: T0 })]);
+    expect(w.find(".run-meta").exists()).toBe(false);
+    expect(w.findAll(".run-time")).toHaveLength(2);
+  });
+
+  it("renders on summary rows (rows with children) too", () => {
+    const w = mountRows([row({ runId: "p", startedAt: T0 }), row({ runId: "c", parentRunId: "p", startedAt: T0 })]);
+    expect(w.findAll(".run-meta")).toHaveLength(2);
+    expect(w.find("summary.run .run-meta").exists()).toBe(true);
+  });
+
+  it("CSS: token sits under the numeric column and falls back to its own line below 480px container", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/fleet.css"),
+      "utf8",
+    );
+    expect(css).toMatch(/\.run-meta\s*\{[^}]*grid-area:\s*meta;[^}]*justify-self:\s*end;/s);
+    expect(css).toMatch(
+      /@container \(max-width: 479px\)[\s\S]*?\. \. meta meta"[\s\S]*?\.run-meta\s*\{[^}]*justify-self:\s*start;/,
+    );
+    expect(css).toMatch(/\. \. \. meta meta"/);
   });
 });

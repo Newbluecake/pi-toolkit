@@ -57,9 +57,13 @@ export function formatPercent(n: number | null | undefined, locale = "en-US"): s
 }
 
 /** Epoch-ms → a locale-formatted date+time; `—` when unknown. */
-export function formatDateTime(ms: number | null | undefined, locale = "en-US"): string {
+export function formatDateTime(ms: number | null | undefined, locale = "en-US", timeZone?: string): string {
   if (typeof ms !== "number" || !Number.isFinite(ms)) return "—";
-  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(ms));
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+    ...(timeZone !== undefined ? { timeZone } : {}),
+  }).format(new Date(ms));
 }
 
 /** Locale-grouped integer/decimal formatting (token counts etc.); `—` when unknown. */

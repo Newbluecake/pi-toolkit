@@ -18,6 +18,9 @@
  * - FleetSummaryBar:徽标计入运行中的 bash(2026-10-15 用户再次拍板);无子 agent 但有
  *   bash 任务时入口按钮仍出现,aria-label 保留 agent/bash 分项小计。
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FleetBashJobs from "../../../src/web-hub/ui/src/components/fleet/FleetBashJobs.vue";
@@ -587,5 +590,65 @@ describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次�
     const rows = [fleetRow("r_1")] as never[];
     const wrapper = mount(FleetSummaryBar, { props: { rows, open: false } });
     expect(wrapper.find(".fleet-summary-bar").attributes("aria-label")).not.toContain("bash");
+  });
+});
+
+describe("FleetBashJobs start/end time token (2026-10-18 user pick C)", () => {
+  const T0 = Date.parse("2026-10-18T22:44:03+08:00");
+
+  it("running row: start only; terminal rows add endedAt (same-day HH:MM)", async () => {
+    const w = await mountGroupOpen(
+      wire([
+        row({ id: "job-run00001", createdAt: T0 }),
+        row({
+          id: "job-done0001",
+          status: "exited",
+          exitCode: 0,
+          createdAt: T0,
+          endedAt: Date.parse("2026-10-18T22:44:45+08:00"),
+          elapsedMs: 42_000,
+        }),
+      ]),
+    );
+    const metas = w.findAll(".bj-meta");
+    expect(metas).toHaveLength(2);
+    expect(metas[0]!.text()).toMatch(/^\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
+    expect(metas[0]!.attributes("title")).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(metas[1]!.text()).toMatch(/^\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2} → \d{2}:\d{2}$/);
+    expect(metas[1]!.attributes("title")).toMatch(/^[\d-]+ [\d:]+ → [\d-]+ [\d:]+$/);
+  });
+
+  it("cross-day finished row shows the full date on both sides", async () => {
+    const w = await mountGroupOpen(
+      wire([
+        row({
+          status: "exited",
+          exitCode: 0,
+          createdAt: Date.parse("2026-10-17T23:59:41+08:00"),
+          endedAt: Date.parse("2026-10-18T00:00:19+08:00"),
+        }),
+      ]),
+    );
+    expect(w.find(".bj-meta").text()).toMatch(
+      /^\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2} → \d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/,
+    );
+  });
+
+  it("absent when createdAt is missing (malformed/old row) — no token", async () => {
+    const bad = { ...row(), createdAt: undefined } as unknown as BashJobRowWire;
+    const w = await mountGroupOpen(wire([bad]));
+    expect(w.find(".bj-meta").exists()).toBe(false);
+    expect(w.find(".bj-elapsed").exists()).toBe(true);
+  });
+
+  it("CSS: token under the elapsed/bytes column, own line below 480px container", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/bash-jobs.css"),
+      "utf8",
+    );
+    expect(css).toMatch(/\.bj-meta\s*\{[^}]*grid-area:\s*meta;[^}]*justify-self:\s*end;/s);
+    expect(css).toMatch(
+      /@container \(max-width: 479px\)[\s\S]*?\. meta meta"[\s\S]*?\.bj-meta\s*\{[^}]*justify-self:\s*start;/,
+    );
   });
 });

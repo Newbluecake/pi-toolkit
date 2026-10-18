@@ -100,10 +100,13 @@ describe("projectFleet consult cache fields (§5.3 U)", () => {
     const row = rows[0]! as FleetRowWire;
     expect("cacheMark" in row).toBe(false);
     expect("consultCache" in row).toBe(false);
-    // and the wire row equals the exact pre-feature key set
+    // and the wire row equals the exact base key set (consult fields absent). `startedAt`
+    // (append-only start stamp, 2026-10-18) is part of every row's base set; `endedAt` only
+    // appears on terminal rows, so a running row carries none.
     expect(Object.keys(row).sort()).toEqual(
-      ["elapsedMs", "highlight", "phaseLabel", "phaseMs", "runId", "status", "terminal"].sort(),
+      ["elapsedMs", "highlight", "phaseLabel", "phaseMs", "runId", "startedAt", "status", "terminal"].sort(),
     );
+    expect("endedAt" in row).toBe(false);
   });
 
   it("malformed persisted values degrade instead of poisoning the row", () => {

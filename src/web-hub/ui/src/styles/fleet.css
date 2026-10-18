@@ -134,7 +134,8 @@
   grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) minmax(var(--run-num-w), auto);
   grid-template-areas:
     "icon badge name model time"
-    ". activity activity activity cost";
+    ". activity activity activity cost"
+    ". . . meta meta";
   align-items: center;
   column-gap: var(--sp-2);
   row-gap: 1px;
@@ -390,6 +391,23 @@ details[open] > summary.run .chev {
   white-space: nowrap;
 }
 
+/* Start/end time token (2026-10-18 user pick): muted, right-aligned under the elapsed/cost numeric
+ * column on wide containers; the <480px container block below moves it to its own line. Text is
+ * `formatTimeRange` (logic/timeRange.ts), full date-times in the `title`. */
+.run-meta {
+  grid-area: meta;
+  justify-self: end;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .run.is-terminal .run-name b,
 .run.is-terminal .run-activity {
   color: var(--c-text-3);
@@ -525,7 +543,14 @@ details[open] > summary.run .chev {
     grid-template-areas:
       "icon badge name time"
       ". . model cost"
-      ". . activity activity";
+      ". . activity activity"
+      ". . meta meta";
+  }
+
+  /* below ~479px the start/end token drops to its own full-width muted line (left-aligned) */
+  .run-meta {
+    justify-self: start;
+    text-align: left;
   }
 
   .run-name .chip {

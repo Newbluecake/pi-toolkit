@@ -116,7 +116,8 @@
   grid-template-columns: 16px minmax(0, 1fr) auto;
   grid-template-areas:
     "ico cmd tr"
-    ". l2 br";
+    ". l2 br"
+    ". . meta";
   align-items: center;
   column-gap: var(--sp-2);
   row-gap: 1px;
@@ -296,6 +297,22 @@
   grid-area: br;
 }
 
+/* Start/end time token (2026-10-18 user pick): right-aligned under the elapsed/bytes column;
+ * the <480px container block below gives it its own full-width left-aligned line. */
+.bj-meta {
+  grid-area: meta;
+  justify-self: end;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+}
+
 .bj-elapsed,
 .bj-bytes {
   flex: none;
@@ -362,6 +379,18 @@
  * priority: ordered last, it wraps onto a clipped second flex line), then the cwd chip
  * shrinks/ellipsizes. The expansion keeps the full command (the row only ellipsizes). */
 @container (max-width: 479px) {
+  .bj-row {
+    grid-template-areas:
+      "ico cmd tr"
+      ". l2 br"
+      ". meta meta";
+  }
+
+  .bj-meta {
+    justify-self: start;
+    text-align: left;
+  }
+
   .bj-l2 {
     flex-wrap: wrap;
     max-height: calc(20px * var(--fs-scale, 1));
