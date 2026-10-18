@@ -543,6 +543,33 @@ describe("wireWebHub — runtx wire plumbing (F2)", () => {
     await waitUntil(() => control.status().state === "live", 3_000, "live");
   }
 
+  it("terminal consult diagnostics reach the optional file-missing fallback over the real wire", async () => {
+    const query = fakeQuery({
+      get: () => ({
+        status: "completed",
+        diag: {
+          sessionFile: "/tmp/consult-gone.jsonl",
+          finalLeafId: "leaf-1",
+          consultOf: { askerRunId: RUN },
+          taskPrompt: "READ-ONLY CONSULT MODE\nAllowed tools: read\n\nQuestion:\nWhy?",
+          text: "Because.",
+          textFinal: true,
+        },
+      }),
+    });
+    await connectRuntx(query);
+    hub!.send(hub!.conns[0]!, { t: "run_tx_req", rid: "consult-q", runId: RUN, limit: 50, maxBytes: 1 << 20 });
+    await waitUntil(() => hub!.all().some((f) => f.t === "run_tx_reply"));
+    expect(hub!.all().find((f) => f.t === "run_tx_reply")).toMatchObject({
+      ok: true,
+      source: "file",
+      consultFallback: [
+        { message: { role: "user", content: "Why?", consultSummary: true } },
+        { message: { role: "assistant", content: "Because.", consultSummary: true } },
+      ],
+    });
+  });
+
   it("terminal run ⇒ deterministic source:file reply (sessionFile + finalLeafId)", async () => {
     const query = fakeQuery({
       get: () => ({ status: "completed", diag: { sessionFile: "/tmp/run.jsonl", finalLeafId: "leaf-1" } }),

@@ -41,6 +41,12 @@ provide(CONTROL_VIEW, null as unknown as ControlView);
 provide(AVATAR_CTX, null as unknown as AvatarHandle);
 
 const tx = computed(() => props.agent.runTx ?? null);
+// WireMessage is intentionally open; display-only metadata survives the normal entry reducer.
+const consultSummary = computed(() => tx.value?.items.some((item) => item.message?.consultSummary === true) === true);
+const consultPrompt = computed(() => {
+  const message = tx.value?.items.find((item) => typeof item.message?.consultPrompt === "string")?.message;
+  return typeof message?.consultPrompt === "string" ? message.consultPrompt : "";
+});
 
 const txSource = computed<TranscriptSource | null>(() => {
   const cur = tx.value;
@@ -121,6 +127,13 @@ const hasFooter = computed(
 
 <template>
   <div class="run-tx">
+    <aside v-if="consultSummary" class="run-tx-consult" role="note">
+      {{ t("drawer.consultSummary") }}
+      <details v-if="consultPrompt">
+        <summary>{{ t("drawer.consultFullPrompt") }}</summary>
+        <pre>{{ consultPrompt }}</pre>
+      </details>
+    </aside>
     <Transcript
       v-if="txSource !== null"
       :agent="txSource"

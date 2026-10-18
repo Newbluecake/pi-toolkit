@@ -11,6 +11,8 @@ const drawer = {
   close: "关闭 Agents 抽屉",
   backToTree: "Agents",
   runTranscriptAria: "子 Agent 对话",
+  consultSummary: "咨询会话文件已回收，仅显示问题与回答。",
+  consultFullPrompt: "完整咨询提示词",
   parentMissing: "父 run 未列出",
   omittedActive: "另有 {n} 个运行中未列出",
   omittedTerminal: "另有 {n} 个已结束未列出",

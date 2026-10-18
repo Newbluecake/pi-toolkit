@@ -345,7 +345,20 @@ export function createRunTranscriptService(deps: {
         maxBytes: RUN_TX.maxBytes,
         deadlineAt: now() + RUN_TX.reqDeadlineMs,
       });
-      if (!r.ok) throw readerHubError(r.reason);
+      if (!r.ok) {
+        if (r.reason !== "file_missing" || reply.consultFallback === undefined) throw readerHubError(r.reason);
+        const all = reply.consultFallback;
+        const head = opts.before === undefined ? all.length : all.findIndex((e) => e.id === opts.before);
+        if (head < 0) throw readerHubError("leaf_missing");
+        const start = Math.max(0, head - opts.limit);
+        const page = all.slice(start, head);
+        return capRunPayload(
+          page,
+          RUN_TX.maxBytes,
+          (entries) => filePayload(agentKey, runId, entries, start > 0, reply.status, { original: page }),
+          frameOf,
+        );
+      }
       return capRunPayload(
         r.entries,
         RUN_TX.maxBytes,

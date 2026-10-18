@@ -162,6 +162,20 @@
   min-height: 0;
 }
 
+.run-tx-consult {
+  flex: none;
+  max-height: 30%;
+  overflow: auto;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.run-tx-consult pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* 迷你「↓ 最新」按钮(主区的在 DetailDock 里,抽屉自己带一个) */
 .run-tx-latest {
   position: absolute;

@@ -2,6 +2,8 @@
 import { mount } from "@vue/test-utils";
 import { nextTick, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { consultTranscript } from "../../../src/web-hub/agent/consult-transcript.js";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDetail.vue";
 import RunTranscript from "../../../src/web-hub/ui/src/components/drawer/RunTranscript.vue";
 import RunHeader from "../../../src/web-hub/ui/src/components/drawer/RunHeader.vue";
@@ -22,6 +24,7 @@ import type { FleetRowWire } from "../../../src/web-hub/protocol/messages.js";
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   for (const w of mounted.splice(0)) w.unmount();
+  resetLangForTests();
   vi.unstubAllGlobals();
   document.body.innerHTML = "";
 });
@@ -351,5 +354,38 @@ describe("RunTranscript 页脚其余状态(§6.5/§6.6)", () => {
     mounted.push(wrapper);
     expect(wrapper.find(".badge-web").exists()).toBe(false);
     expect(wrapper.text()).toContain("run-msg");
+  });
+});
+
+describe("reclaimed consult Q&A", () => {
+  it.each([
+    ["en", "The consult session file was reclaimed; only the question and answer are shown.", "Full consult prompt"],
+    ["zh", "咨询会话文件已回收，仅显示问题与回答。", "完整咨询提示词"],
+  ] as const)("renders the question, answer and collapsed original prompt in %s", async (lang, note, summary) => {
+    setLangOverride(lang, null);
+    const prompt = "READ-ONLY CONSULT MODE\nAllowed tools: read\n\nQuestion:\nWhere? <script>alert(1)</script>";
+    const agent = agentState({
+      terminal: true,
+      live: false,
+      runEntries: consultTranscript({ consultOf: {}, taskPrompt: prompt, text: "Here is the answer." }),
+    });
+    const w = mount(RunTranscript, { props: { agent, now: 5000 } });
+    mounted.push(w);
+    await nextTick();
+    expect(w.find('[role="note"]').text()).toContain(note);
+    expect(w.find("summary").text()).toBe(summary);
+    expect(w.find("details").attributes("open")).toBeUndefined();
+    expect(w.find("pre").text()).toBe(prompt);
+    expect(w.find(".msg-user .bubble").text()).toBe("Where? <script>alert(1)</script>");
+    expect(w.text()).toContain("Here is the answer.");
+    expect(w.find("script").exists()).toBe(false);
+    expect(w.text()).not.toContain("E_NOT_FOUND");
+  });
+
+  it("leaves normal transcripts without a reclamation note or full-prompt control", () => {
+    const w = mount(RunTranscript, { props: { agent: agentState({ terminal: true }), now: 5000 } });
+    mounted.push(w);
+    expect(w.find('[role="note"]').exists()).toBe(false);
+    expect(w.find("details").exists()).toBe(false);
   });
 });

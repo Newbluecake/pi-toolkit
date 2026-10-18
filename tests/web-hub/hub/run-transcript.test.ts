@@ -7,6 +7,7 @@ import { RUN_TX } from "../../../src/web-hub/protocol/run-transcript.js";
 import { projectSessionEntry } from "../../../src/web-hub/protocol/keys.js";
 import type { HubEvent, RunSink, RunTranscriptService } from "../../../src/web-hub/hub/ports.js";
 import { HubError, createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
+import { consultTranscript } from "../../../src/web-hub/agent/consult-transcript.js";
 import { createRunTranscriptService } from "../../../src/web-hub/hub/run-transcript.js";
 import { createRunFileReader } from "../../../src/web-hub/hub/run-file-reader.js";
 import { formatSseFrame } from "../../../src/web-hub/hub/sse.js";
@@ -399,6 +400,57 @@ describe("snapshot / page payloads (§5.2 reply branches)", () => {
     expect(json).not.toContain(file);
     expect(json).not.toContain("sessionFile");
     expect(json).not.toContain("finalLeafId");
+  });
+
+  it("missing consult file uses Q&A, including terminal semantics, pagination and path hygiene", async () => {
+    const c = ctx();
+    const fallback = consultTranscript({
+      consultOf: {},
+      taskPrompt: "READ-ONLY CONSULT MODE\n\nQuestion:\nQuestion",
+      text: "Answer",
+    })!;
+    const reply: ReplyBuilder = (req) =>
+      ({ ...fileReply("/nonexistent/consult.jsonl", "leaf")(req), consultFallback: fallback }) as AgentFrame;
+    c.replies.push(reply);
+    const p = await c.svc.snapshot(c.agentKey, RUN, "loopback");
+    expect(p).toMatchObject({
+      entries: fallback,
+      terminal: true,
+      live: false,
+      source: "file",
+      fromSeq: 0,
+      hasMore: false,
+      status: "completed",
+    });
+    expect(JSON.stringify(p)).not.toContain("/nonexistent/consult.jsonl");
+    expect(JSON.stringify(p)).not.toContain("finalLeafId");
+    c.replies.push(reply);
+    const page = await c.svc.page(c.agentKey, RUN, "consult-answer", 1, "loopback");
+    expect(page.entries).toEqual([fallback[0]]);
+    expect(page.hasMore).toBe(false);
+    c.replies.push(reply);
+    await expect(c.svc.page(c.agentKey, RUN, "bogus", 1, "loopback")).rejects.toMatchObject({
+      code: "E_NOT_FOUND",
+      message: "leaf_missing",
+    });
+  });
+
+  it("consult fallback never replaces an existing file or hides a leaf mismatch", async () => {
+    const c = ctx();
+    const raws = chainRaw("consult", 2);
+    const file = writeJsonl("consult-present.jsonl", raws.map(line).join(""));
+    const fallback = consultTranscript({ consultOf: {}, taskPrompt: "q", text: "a" })!;
+    const reply =
+      (leaf: string): ReplyBuilder =>
+      (req) =>
+        ({ ...fileReply(file, leaf)(req), consultFallback: fallback }) as AgentFrame;
+    c.replies.push(reply("consult1"));
+    expect((await c.svc.snapshot(c.agentKey, RUN, "loopback")).entries).toEqual(walkExpected(raws, "consult1"));
+    c.replies.push(reply("missing-leaf"));
+    await expect(c.svc.snapshot(c.agentKey, RUN, "loopback")).rejects.toMatchObject({
+      code: "E_NOT_FOUND",
+      message: "leaf_missing",
+    });
   });
 
   it("file reply: leaf not in the file ⇒ leaf_missing; missing file ⇒ file_missing", async () => {

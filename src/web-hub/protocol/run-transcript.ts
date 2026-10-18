@@ -170,6 +170,8 @@ export type RunTxReplyFrame =
       status: string;
       sessionFile: string;
       finalLeafId: string;
+      /** Consult-only Q&A, used exclusively when the disposable fork file is missing. */
+      consultFallback?: WireEntry[];
     }
   | {
       t: "run_tx_reply";
@@ -385,6 +387,7 @@ const RunTxReplyFileSchema = Type.Object(
     status: Type.String(),
     sessionFile: Type.String(),
     finalLeafId: Type.String(),
+    consultFallback: Type.Optional(Type.Array(RunWireEntrySchema)),
   },
   { additionalProperties: false },
 );

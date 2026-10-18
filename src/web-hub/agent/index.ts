@@ -57,7 +57,8 @@ import {
   type BindingPort,
   type HubConnection,
 } from "./connection.js";
-import { createRunTranscripts, type RunTranscriptPort } from "./run-transcript.js";
+import type { ConsultTranscriptDiagnostics } from "./consult-transcript.js";
+import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
@@ -203,7 +204,11 @@ export type StopResult =
   | { ok: false; reason: "already_terminal"; status: string }
   | { ok: false; reason: "stop_failed"; escalatedTo: "L2" | "L3" | "L4" };
 export interface QueryControlPort {
-  get(runId: string): { status: string; diag?: { sessionFile?: string; finalLeafId?: string } } | undefined;
+  get(
+    runId: string,
+  ):
+    | { status: string; diag?: ConsultTranscriptDiagnostics & { sessionFile?: string; finalLeafId?: string } }
+    | undefined;
   steer(runId: string, text: string): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }>;
   stop(runId: string, cause: "user_stop"): Promise<StopResult>;
   /** fleet-drawer §4.4 (F2): live-run branch peek for transcript snapshots — a structural
@@ -556,10 +561,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       info: (runId) => {
         const s = q.get(runId);
         if (s === undefined) return undefined;
-        const info: { status: string; terminal: boolean; sessionFile?: string; finalLeafId?: string } = {
+        const info: RunTxRunInfo = {
           status: s.status,
           terminal: isTerminalStatus(s.status as RunStatus),
         };
+        if (s.diag !== undefined) info.diag = s.diag;
         if (s.diag?.sessionFile !== undefined) info.sessionFile = s.diag.sessionFile;
         if (s.diag?.finalLeafId !== undefined) info.finalLeafId = s.diag.finalLeafId;
         return info;
