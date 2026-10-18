@@ -7,6 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-18
+
+### Added
+
+- **tools**: show the subagent's name next to its run id in tool cards and results (`133ad02`)
+- **consult**: cache anchor at the end of expert history and follow-up consult threads (B, C) (`05dc95e`)
+- **feishu-bot**: inbound events, sender admission, session routing and durable requests (F6) (`be3d342`)
+- **consult**: show consult cache warm/cold and hit share in the agent tree, results and web record (U) (`815e6da`)
+- **feishu-bot**: reply rendering, byte-budgeted splitting and a durable outbox (F7) (`1dc8d14`)
+- **consult**: analyze consult cache results, warm/cold prediction accuracy and follow-up threads (F) (`ed63341`)
+- **web-hub**: install-as-app entry in settings, iOS home-screen icon and a PWA install guide (`81e362d`)
+- **consult**: record cache anchor, follow-up thread and warm/cold result fields on consult runs (A) (`73554a3`)
+- **feishu-bot**: QR registration, credential store and durable bot state (F4) (`8924a0e`)
+- **feishu-bot**: /webhub feishu admin commands, terminal QR code and settings entries (F9) (`af78c0a`)
+- **feishu-bot**: bounded HTTP client, tenant token cache and API wrappers (F2) (`439ca54`)
+- **feishu-bot**: long-connection frame codec and fragment reassembly (F1) (`96a586f`)
+- **feishu-bot**: protocol constants, fsb frames and feishuBot settings (F0) (`e508b7b`)
+- **feishu-bot**: real-tenant probe script (F-probe) (`807a8a5`)
+- **web-hub**: wire the local-service proxy into the hub (X1c) (`36f1ec4`)
+- **web-hub**: local-service proxy hub engine (X1b) (`72c3d86`)
+- **web-hub**: detail header buttons show text labels (清空 / 恢复 / 隐私 · 锁定) (`5e5b2d8`)
+- **web-hub**: local-service proxy core — target fence, sessions, port map, header filters (`8f5a495`)
+- **web-hub**: drop the agent-tree row actions (… / Steer / Stop) (`78f7fa1`)
+- **web-hub**: local-service proxy UI — 「打开本机端口」 dialog and proxy links (`df9b3a4`)
+- **web-hub**: agent tree expand arrow moves after the name, rows align with bash jobs (`e5fcba7`)
+- **web-hub**: consult rows get a status note and nested rows align with their parent (`0be16cb`)
+- **web-hub**: local-service proxy settings and frozen protocol surface (`cfcc845`)
+- **web-hub**: two-line bash job rows with de-shelled commands (`1e626b8`)
+- **web-hub**: roomier agent tree rows — letter type badge, short model names, cost on line 2 (`25a8c46`)
+- **web-hub**: HTML preview routes — mint, /pv subresources, /pvw wrapper, revocation (`f1a4e43`)
+- **web-hub**: HTML preview UI — sandboxed render/source toggle and new-tab open (`cd4fcab`)
+- **web-hub**: HTML preview hub core — capability store, fd-anchored admission, PV IO quota (`f02dc9e`)
+- **web-hub**: sysload pill opens on hover like the quota pill (`c5736f7`)
+- **web-hub**: HTML preview frozen surface (preview.html.v1 cap, /pv capability types) (`1cebe4e`)
+- **web-hub**: clickable version chip with backend versions, changelog and mismatch dot (`79a4aa3`)
+- **web-hub**: GET /api/version — hub, served UI, repo HEAD and changelog (`9e6cde4`)
+- **web-hub**: version panel frozen surface (version.v1 cap, /api/version wire types) (`926b370`)
+- **web-hub**: agent tree rows show the model's provider, compressed by width (`2f8ee3b`)
+- **web-hub**: desktop agent tree uses the two-line row layout like mobile (`ab9155e`)
+- **web-hub**: expand short agent and bash lists in the agents drawer by default (`dc21746`)
+- **web-hub**: show the context details on hover (`3cf535d`)
+- **web-hub**: show context token counts in thousands (`309bdf2`)
+- **web-hub**: resume past sessions from the web UI (`3e9cb68`)
+- **web-hub**: let a web session list and switch to past sessions in place (`44fff86`)
+- **session-nav**: hide subagent sessions from the resume list (`fa0e9d6`)
+- **web-hub**: render get_subagent_result output as Markdown (`852e15d`)
+- **web-hub**: add a one-tap clear button to the session header (`d1b4b37`)
+
+### Fixed
+
+- **consult**: tighten follow-up thread admission and keep the OAuth anchor baseline (`2c1fc12`)
+- **web-hub**: render relative markdown links as clickable previews instead of raw syntax (`5eb0d4e`)
+- **web-hub**: make bare http(s) URLs in messages clickable (`78f45c4`)
+- **external-agent**: show droid the JSON Schema it must answer with (`ec41b95`)
+- **web-hub**: show a consult's question and answer when its session file is gone (`2287435`)
+- **consult**: raise the default answer limit from 2000 to 6000 characters (`5a0f8e0`)
+- **web-hub**: proxy engine follow-ups (shared-open race, upload cancel, log throttling) (`66ac97d`)
+- **web-hub**: agent tree model names right-align across rows (`aab9894`)
+- **bash**: run the bash tool with bash like pi does, not $SHELL (`09b1ded`)
+- **web-hub**: settings shows the version card on narrow screens only (`153c64f`)
+- **web-hub**: version popover opens like the quota card, with hover peek (`afed823`)
+- **web-hub**: no synthesized italics, so CJK in comments and em stays crisp (`7c859af`)
+- **web-hub**: load card shows how long the level held and 「实时」 when fresh (`046aaa6`)
+- **web-hub**: resume list shows real titles instead of 「无标题」 (`d005962`)
+- **web-hub**: center the resume dialog horizontally on wide viewports (`901b12e`)
+- **memory**: allow 300-byte descriptions and trim over-long ones in /mem tidy (`c36fc76`)
+- **memory**: let /mem tidy split files that /mem doctor flags as too large (`0118001`)
+- **topic-switch**: suggest a new session when a request no longer needs this conversation (`1f2ffec`)
+- **web-hub**: word the Droid overage badge as a policy and flag when Core is used up (`801388d`)
+- **web-hub**: create web folders with your own umask, like a terminal (`33a89f1`)
+- **web-hub**: no double divider in the agents drawer when only bash jobs are listed (`7ef4cae`)
+- **web-hub**: report the web resume result after the session actually switches (`39c81c7`)
+- **web-hub**: show a million context tokens as 1m, not 1,000k (`28ac0d5`)
+- **web-hub**: make the folder picker's create button actually create the folder (`2ccb2fa`)
+- **quota**: label a pool past its first warning line as 预警, not 告急 (`f62b793`)
+
+### Changed
+
+- **web-hub**: extract managed-session creation into startFresh (F5) (`74c4263`)
+- **web-hub**: resolve hub login cookies once and fan out revocations on a bus (`b9832b6`)
+- **topic-switch**: judge relevance with minimal thinking for a faster answer (`f15b975`)
+
+### Documentation
+
+- **cache-ttl**: plan for a price-derived keepalive ping cap (`3702613`)
+- **dev-flow**: replace the mandatory dev-clarify step with lightweight ask_user clarification (`7d603b3`)
+- **dev-flow**: use deepseek-flash instead of deepseek-v4-pro as the fallback verifier (`4d4f926`)
+- **consult**: plan for cache reuse across consults, follow-up threads, warm/cold display and expert keepalive (`6c2e5ac`)
+- **feishu-bot**: record first real-tenant probe results; probe no longer marks a late topic reply as V8 failure (`15c9a06`)
+- Web Hub guide covers the local-port proxy, HTML preview and version panel (`3728b6e`)
+- **feishu-bot**: Feishu bot plan v2 (two review rounds + §R2), research notes (`c657268`)
+- **web-hub**: local-service proxy plan v2 (approved) (`801c3a0`)
+- **skills**: slim dev-flow down to rules and move evidence into references (`a0d2392`)
+- turn the README into an overview and move details into guides (`b4a12e0`)
+
+### Tests
+
+- **consult**: production-chain conformance for cache anchors and follow-up threads (E1) (`0c09b77`)
+- **consult**: live probe confirms the expert-history cache anchor, per-request replay and keepalive pings (P0) (`2edeacb`)
+- **web-hub**: proxy end-to-end test against a real hub process + browser acceptance checklist (X3) (`ead2315`)
+- **web-hub**: HTML preview starvation suite, browser self-check page and acceptance guide (`c0a9d5f`)
+- **web-hub**: settings-view media mock passes a real event to listeners (`bc5041e`)
+- **web-hub**: wait for the upload recover audit line instead of racing it (`de6a278`)
+- **web-resume**: pin web resume against a real pi and document it (`194dfa7`)
+
+### Chores
+
+- **web-hub**: code comments are color-only, no italic (GitHub style) (`bb2a195`)
+- **web-hub**: keep the version-anchor golden out of prettier (`5f7f227`)
+
+Stats: 43 feat, 25 fix, 3 refactor/perf, 10 docs, 7 test, 2 chore
+
 ## [0.5.5] - 2026-10-16
 
 ### Added
@@ -593,7 +705,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.2...v0.5.3
