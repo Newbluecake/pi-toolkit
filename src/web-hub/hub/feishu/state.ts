@@ -811,6 +811,12 @@ export interface FeishuState {
   /** `reset`: delete `state.json` (+ `.bak`, tmp) by exact path and return to `unloaded`. */
   destroy(): Promise<{ ok: true } | { ok: false; reason: "io" }>;
   dispose(): void;
+  /**
+   * Resolves once the group-commit writer loop has no write in flight (never rejects). After `dispose()`
+   * the writer starts nothing new, so `dispose(); await whenIdle()` quiesces the writer — a shutdown/test
+   * helper. It does not track `load()`'s `.bak` copy or `repair()`; callers await those themselves.
+   */
+  whenIdle(): Promise<void>;
 
   readonly appId: string | undefined;
   readonly tenant: {
@@ -1095,6 +1101,9 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
               if (!dir.ok) throw new Error(dir.check);
               dirReady = true;
             }
+            // dispose() landed while the dir step was in flight: an in-flight atomic write may finish,
+            // but a NEW one must never start after dispose
+            if (disposed) return;
             await writeFileAtomicPrivate(fs, path, bytes);
           } catch {
             return fail("write");
@@ -1454,6 +1463,14 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
       retryTimer = undefined;
       failWaiters();
     },
+
+    whenIdle: () =>
+      writing === undefined
+        ? Promise.resolve()
+        : writing.then(
+            () => {},
+            () => {},
+          ),
 
     get appId() {
       return appId;

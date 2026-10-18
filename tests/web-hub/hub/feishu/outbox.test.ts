@@ -47,13 +47,18 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "feishu-outbox-"));
 });
 const live: Array<{ state?: FeishuState; outbox?: FeishuOutbox }> = [];
-afterEach(() => {
+afterEach(async () => {
+  const states: FeishuState[] = [];
   for (const l of live.splice(0)) {
     l.outbox?.dispose();
     l.state?.dispose();
+    if (l.state) states.push(l.state);
   }
-  // a disposed state may still have one atomic write (tmp + rename) in flight; retry ENOTEMPTY
-  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  // a disposed state may still have ONE atomic write (unlink/open/write/rename chain) in flight, and the
+  // synchronous rmSync below blocks the event loop so it can never be out-waited by rm retries: wait for
+  // the writer to go idle (dispose guarantees nothing new starts), then remove the dir exactly once.
+  await Promise.all(states.map((s) => s.whenIdle()));
+  rmSync(root, { recursive: true, force: true });
 });
 
 interface Rig {
@@ -155,6 +160,8 @@ async function mkRig(
     await rig.state.commit();
     rig.outbox.dispose();
     rig.state.dispose();
+    // the old state's last atomic write must be finished before the new one touches the same files
+    await rig.state.whenIdle();
     await build(over ?? (opts.policy ? { policy: opts.policy } : undefined), true);
     await settle(20);
   };

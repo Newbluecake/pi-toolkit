@@ -54,10 +54,13 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "feishu-state-"));
   dir = join(root, "feishu-bot");
 });
-afterEach(() => {
-  for (const s of open.splice(0)) s.dispose();
-  // a disposed state may still have one atomic write (tmp + rename) in flight; retry ENOTEMPTY
-  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+afterEach(async () => {
+  const states = open.splice(0);
+  for (const s of states) s.dispose();
+  // a disposed state may still have ONE atomic write in flight; rmSync blocks the event loop so rm
+  // retries cannot out-wait it — wait for the writer to go idle (nothing new can start after dispose)
+  await Promise.all(states.map((s) => s.whenIdle()));
+  rmSync(root, { recursive: true, force: true });
 });
 
 function wrapFs(overrides: Partial<FeishuFs>): FeishuFs {
@@ -346,6 +349,10 @@ describe("group commit (§2.4)", () => {
     await settle(5);
     hang.clock.advance(1_000);
     expect(await p).toBe(false);
+    // its writer never settles by design, so whenIdle() would never resolve: opt this rig out of afterEach's wait
+    hang.s.dispose();
+    const i = open.indexOf(hang.s);
+    if (i >= 0) open.splice(i, 1);
   });
 
   it("dispose() leaves no timers and fails pending waiters", async () => {
@@ -355,6 +362,94 @@ describe("group commit (§2.4)", () => {
     r.s.dispose();
     expect(await p).toBe(false);
     expect(r.clock.pending()).toBe(0);
+  });
+
+  describe("dispose() stops all future writes (an in-flight atomic write may finish, none may START)", () => {
+    function gate(): { wait: Promise<void>; open: () => void } {
+      let open!: () => void;
+      const wait = new Promise<void>((r) => {
+        open = r;
+      });
+      return { wait, open };
+    }
+
+    it("dispose while the dir step is in flight ⇒ the write never starts; whenIdle() resolves", async () => {
+      const g = gate();
+      let opens = 0;
+      let inMkdir = false;
+      const r = await mk({
+        fs: wrapFs({
+          mkdir: async (p, m) => {
+            inMkdir = true;
+            await g.wait;
+            return realFeishuFs.mkdir(p, m);
+          },
+          openWriteExcl: (p, m) => {
+            opens += 1;
+            return realFeishuFs.openWriteExcl(p, m);
+          },
+        }),
+      });
+      r.s.dedup.add("e:a");
+      const committed = r.s.commit();
+      r.clock.advance(FEISHU_ACK.groupCommitMs); // the writer starts and parks inside the (gated) mkdir
+      await until(() => inMkdir); // the writer is parked inside the dir step
+      r.s.dispose();
+      g.open();
+      await r.s.whenIdle();
+      expect(await committed).toBe(false);
+      expect(opens).toBe(0);
+      expect(existsSync(statePath())).toBe(false);
+      expect(existsSync(`${statePath()}.tmp`)).toBe(false);
+    });
+
+    it("dispose while a write is in flight and more data is dirty ⇒ that write finishes, no second one starts, no retry timer", async () => {
+      const g = gate();
+      let opens = 0;
+      const r = await mk({
+        fs: wrapFs({
+          openWriteExcl: async (p, m) => {
+            opens += 1;
+            await g.wait;
+            return realFeishuFs.openWriteExcl(p, m);
+          },
+        }),
+      });
+      r.s.dedup.add("e:first");
+      void r.s.commit();
+      r.clock.advance(FEISHU_ACK.groupCommitMs);
+      await until(() => opens === 1); // real I/O (mkdir/unlink) precedes it: the first write parks in flight
+      r.s.dedup.add("e:second"); // dirty again ⇒ the writer loop WOULD iterate once more
+      r.s.dispose();
+      g.open();
+      await r.s.whenIdle();
+      expect(opens).toBe(1);
+      expect(r.clock.pending()).toBe(0);
+      expect(readdirSync(dir)).toEqual([FEISHU_STATE_FILE]); // the in-flight write landed atomically, tmp gone
+      expect(Object.keys(raw()["dedup"] as object)).toEqual(["e:first"]); // the post-dispose mutation never hit disk
+    });
+
+    it("mutate + commit + flush after dispose never touch the disk", async () => {
+      let opens = 0;
+      const r = await mk({
+        fs: wrapFs({
+          openWriteExcl: (p, m) => {
+            opens += 1;
+            return realFeishuFs.openWriteExcl(p, m);
+          },
+        }),
+      });
+      r.s.dispose();
+      r.s.dedup.add("e:late");
+      const c = r.s.commit();
+      const f = r.s.flush(1_000);
+      r.clock.advance(FEISHU_ACK.groupCommitMs);
+      r.clock.advance(1_000);
+      await Promise.all([c, f]);
+      await r.s.whenIdle();
+      expect(opens).toBe(0);
+      expect(existsSync(dir)).toBe(false);
+    });
   });
 
   it("a duplicate must be re-committed before its ACK: has() is memory, commit() is the evidence", async () => {
