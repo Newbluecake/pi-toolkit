@@ -56,7 +56,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const s of open.splice(0)) s.dispose();
-  rmSync(root, { recursive: true, force: true });
+  // a disposed state may still have one atomic write (tmp + rename) in flight; retry ENOTEMPTY
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 function wrapFs(overrides: Partial<FeishuFs>): FeishuFs {

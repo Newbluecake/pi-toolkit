@@ -52,7 +52,8 @@ afterEach(() => {
     l.outbox?.dispose();
     l.state?.dispose();
   }
-  rmSync(root, { recursive: true, force: true });
+  // a disposed state may still have one atomic write (tmp + rename) in flight; retry ENOTEMPTY
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 interface Rig {
