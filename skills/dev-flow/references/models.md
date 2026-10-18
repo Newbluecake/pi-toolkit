@@ -7,15 +7,15 @@ SKILL.md 的「阶段→模型」表只给首选/回退；本文件是精确 ID�
 
 `Agent` 的 `model` 必须用完整 `provider/modelId`；模糊别名会被 `subagent-model-hints` 扩展 block。
 
-| 别名            | 精确 ID（按优先级）                                                                                                                                                                                                                                                     |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| sonnet          | `cr-anthropic/claude-sonnet-5-5` → `cr-anthropic/claude-sonnet-5`（2026-10-10 起 5.5 为首选，$3/$15 暂按 5 填；5.5 报错时降回 5 续跑）                                                                                                                                  |
-| kimi-k3         | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`（有订阅额度时按此顺序，失败按序回退）                                                                                                                                                                      |
-| glm-5.3         | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）→ `cr-glm/glm-5.3`（**API 按量计费备线**：两条订阅线报错/429/额度耗尽时换它续跑，不参与订阅优先升首选；走 openai-completions，单价暂按智谱官方 $1.4/$4.4，待核实） |
-| opus-5.5        | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                             |
-| fable           | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                            |
-| gpt-6.1-sol     | `copilot-response/gpt-6.1-sol`（**唯一渠道**，2026-10-15 用户令；报错/429/额度耗尽时按阶段回退链换模型，传输中断时 resume 重试；**禁止用于验收**）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5×                                                 |
-| deepseek-v4-pro | `deepseek/deepseek-v4-pro`（验收次选；与 Claude/GLM/Kimi 系异源）                                                                                                                                                                                                       |
+| 别名           | 精确 ID（按优先级）                                                                                                                                                                                                                                                     |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sonnet         | `cr-anthropic/claude-sonnet-5-5` → `cr-anthropic/claude-sonnet-5`（2026-10-10 起 5.5 为首选，$3/$15 暂按 5 填；5.5 报错时降回 5 续跑）                                                                                                                                  |
+| kimi-k3        | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`（有订阅额度时按此顺序，失败按序回退）                                                                                                                                                                      |
+| glm-5.3        | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）→ `cr-glm/glm-5.3`（**API 按量计费备线**：两条订阅线报错/429/额度耗尽时换它续跑，不参与订阅优先升首选；走 openai-completions，单价暂按智谱官方 $1.4/$4.4，待核实） |
+| opus-5.5       | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                             |
+| fable          | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                            |
+| gpt-6.1-sol    | `copilot-response/gpt-6.1-sol`（**唯一渠道**，2026-10-15 用户令；报错/429/额度耗尽时按阶段回退链换模型，传输中断时 resume 重试；**禁止用于验收**）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5×                                                 |
+| deepseek-flash | `deepseek/deepseek-flash`（验收次选，2026-10-18 起替代 deepseek-v4-pro；与 Claude/GLM/Kimi 系异源）                                                                                                                                                                     |
 
 ## 疑难升级阶梯（fable 闸门）
 
@@ -43,7 +43,7 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
   gpt-6.1-sol 开发的包（开发双首选，2026-09：与 sonnet 并列，多包并行时按包分摊——更便宜、上下文 1.05M），
   验收改派 Claude 系（sonnet）。
 - **异源**：评审模型 ≠ 方案模型；验收模型 ≠ 开发模型，走回退链时跳过与被评对象同系的模型。开发用了 GLM 的包，
-  验收不得再派 GLM（改 kimi-k3 / deepseek-v4-pro / Claude 系）；droid 底层是 GLM 的开发包同理。
+  验收不得再派 GLM（改 kimi-k3 / deepseek-flash / Claude 系）；droid 底层是 GLM 的开发包同理。
 - **别因「列表里没有」静默换模型**：系统提示的可用模型列表优先取会话的 scoped models（pi settings 的
   `enabledModels`），没列进去的模型照样已注册、照样能派。按本表精确 ID 直接派，派发被拒才按回退链降级并明说原因
   （2026-10-10 教训：看列表没有就换模型顶替，单日传输失败 4 次）。
@@ -58,7 +58,7 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 - 其余 [quota] 给出的替代只是**候选**（按订阅优先排序）：额度层不知道任务需求，先判断候选是否胜任本阶段，
   胜任就优先用订阅，不胜任就按阶段表另选，不为用额度而硬凑。额度行不存在时按表中默认顺序。
 - **kimi**：kimi-coding / zai 订阅常耗尽；额度耗尽或 L3 预警时回退按量线（cr-anthropic 等）默认顺序。
-  **验证模型订阅将尽**（如 kimi 7d ≥80%）时，验收优先 deepseek-v4-pro。
+  **验证模型订阅将尽**（如 kimi 7d ≥80%）时，验收优先 deepseek-flash。
 - GLM 仍在候选内的阶段可改派 `cr-glm/glm-5.3`（同模型、API 按量计费，按表中常规位次用，不升首选）。
 
 ### droid 订阅线（`droid/<model>`，须 `externalAgents.droid.enabled`；2026-10-15 用户拍板进路由表）
@@ -97,3 +97,4 @@ Factory 订阅额度不用也作废。[quota] 行显示 droid 池有余量（未
 | 2026-10-14 | 验收禁 GPT 系；安全拒绝与传输错误分开处理                                |
 | 2026-10-15 | gpt-6.1-sol 仅 copilot 渠道；移除 cr-response/zhipu-pool；droid 进路由表 |
 | 2026-10-16 | L1 加异源 verifier；验证模型订阅将尽优先 deepseek-v4-pro（见 SKILL.md）  |
+| 2026-10-18 | 验收次选 deepseek-v4-pro → deepseek-flash（用户要求）                    |
