@@ -197,12 +197,23 @@ describe("logic/markdown.js — §4.2 linearization benchmarks (256 KiB corpus)"
     // Absolute bound — the plan's median-of-3 estimator, batched so one sample is real work.
     const median256 = medianPerParse(() => parseMarkdown(s256), 4);
     // Growth bound — interleaved min pair (see interleavedMinPair for why not two medians).
-    const { t64, t256 } = interleavedMinPair(
-      () => parseMarkdown(s64),
-      () => parseMarkdown(s256),
-      12,
-      4,
-    );
+    // CPU contention (full-suite load, shared CI runners) can inflate one size's samples
+    // for a whole measurement window, so a single window may cross the 8x line for a perfectly
+    // linear parser (seen: 23.2/2.1). A genuinely super-linear parser (quadratic ⇒ ~16x for
+    // this 4x size step, and far worse on the pathological shapes) exceeds the bound in EVERY
+    // window, so the gate asserts on the best ratio over up to 3 independent windows.
+    let best = { t64: 1, t256: Infinity };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const pair = interleavedMinPair(
+        () => parseMarkdown(s64),
+        () => parseMarkdown(s256),
+        12,
+        4,
+      );
+      if (pair.t256 / pair.t64 < best.t256 / best.t64) best = pair;
+      if (best.t256 / best.t64 <= 8) break;
+    }
+    const { t64, t256 } = best;
     expect(median256, `256 KiB median ${median256.toFixed(2)} ms`).toBeLessThanOrEqual(200);
     expect(t256 / t64, `ratio ${t256.toFixed(2)}/${t64.toFixed(2)}`).toBeLessThanOrEqual(8);
   });

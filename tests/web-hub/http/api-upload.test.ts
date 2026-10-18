@@ -1415,7 +1415,9 @@ describe("hard gate 4 — close paths (plan §2.6 #13)", () => {
     // store.recover()` wiring (hub.ts) has to run the startup scan automatically.
     const { hub, store } = await startHubWithUploads(home, { recover: false });
     void hub;
-    await waitFor(() => !existsSync(orphanDir), 10_000);
+    // The orphan sweep and the committed-index rebuild are separate steps of the same async
+    // recover(); wait for BOTH, otherwise the stats below race the rebuild.
+    await waitFor(() => !existsSync(orphanDir) && store.stats().committedFiles === 1, 10_000);
     expect(readFileSync(keep.path)).toEqual(content);
     expect(store.stats().committedFiles).toBe(1);
     expect(store.stats().committedBytes).toBe(content.length); // quota rebuilt

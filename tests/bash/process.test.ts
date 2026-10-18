@@ -324,13 +324,16 @@ describe.skipIf(!posix)("createProcessPort (POSIX)", () => {
     // busy every 50ms for ~2s. Before the exit/drain split this wedged the
     // job in "running" until the writer stopped; a 100ms-only idle cutoff
     // (no re-arm) would silently truncate the tail instead.
+    // t0 BEFORE launch: under load the spawn/launch await can itself take long, and the writer's
+    // ~2s clock starts at spawn — measuring from after launch made the lower bound flaky.
+    const t0 = Date.now();
     const job = await launch("(i=0; while [ $i -lt 40 ]; do echo tick; i=$((i+1)); sleep 0.05; done &) ; exit 0");
     const streams = collect(job);
-    const t0 = Date.now();
+    const tLaunched = Date.now();
 
     const exit = await job.processExitPromise;
     expect(exit.exitCode).toBe(0);
-    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(Date.now() - tLaunched).toBeLessThan(1_000);
 
     // The writer is still going: drained must not have settled yet.
     const drainedEarly = await Promise.race([

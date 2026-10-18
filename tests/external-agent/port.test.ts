@@ -4,7 +4,7 @@
  * 目录数据经真 CatalogStore 磁盘缓存注入（catalogCachePath 落 JSON）——port 内部组装的是
  * 真 droid provider，snapshot() 惰性读缓存，不需要起任何进程。
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -118,10 +118,15 @@ describe("createExternalAgentsPort", () => {
   });
 
   it("strict 目录漂移 ⇒ msgProtocolDrift；warn ⇒ 放行", () => {
+    // Hermetic: the drift check only runs once the binary resolves, so point at a fake executable
+    // instead of relying on a locally installed `droid` (absent on CI runners).
+    const fakeBin = join(tmp, "fake-droid");
+    writeFileSync(fakeBin, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeBin, 0o755);
     seedCatalog({ ...CATALOG, drift: { expected: "1.264.0", actual: "9.9.9" } });
-    const strict = makePort({}, settings());
+    const strict = makePort({}, settings({ binary: fakeBin }));
     expect(strict.r!.port.unavailableReason("droid")).toBe(msgProtocolDrift("9.9.9", "1.264.0"));
-    const warn = makePort({}, settings({ protocolCheck: "warn" }));
+    const warn = makePort({}, settings({ binary: fakeBin, protocolCheck: "warn" }));
     expect(warn.r!.port.unavailableReason("droid")).toBeUndefined();
   });
 

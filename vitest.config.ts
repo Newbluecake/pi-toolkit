@@ -19,6 +19,7 @@ export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts", "tests/**/*.test-d.ts"],
     environment: "node",
+    globalSetup: ["./tests/setup/global-tz.ts"],
     setupFiles: ["./tests/setup/sandbox-home.ts"],
     testTimeout: 10_000,
     // 2026-10-15: cap the fork pool at 8. On a 16-core box the default (cores − 1 = 15) was no

@@ -291,7 +291,10 @@ describe("ask-user background interrupt: stack wiring (P2-2)", () => {
           host.sent.some((m) => m.message.customType === "subagent:workflow-notification"),
           "live notice",
         ).toBe(true),
-      { timeout: 10_000 },
+      // The workflow boots a real worker thread; under full-suite load that start-up alone can
+      // exceed vitest's 10 s default, so the wait AND the test get explicit headroom (the wait
+      // stays below the test timeout so a real hang reports "live notice", not a bare timeout).
+      { timeout: 40_000 },
     );
     expect(stack.workflow.runs.get(view.workflowId)?.status).not.toBe("running");
     expect(events).toHaveLength(1);
@@ -339,7 +342,7 @@ describe("ask-user background interrupt: stack wiring (P2-2)", () => {
     ).toBe(true);
     expect(events2).toHaveLength(0);
     expect(stack2.backgroundCompletions.pendingTokens()).toBe(0);
-  });
+  }, 60_000);
 });
 
 describe("ask-user background interrupt: teardown (P2-3, 评审 #7)", () => {

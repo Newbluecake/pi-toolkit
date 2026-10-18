@@ -313,7 +313,9 @@ describe("SessionHistoryDialog: list basics", () => {
 
 describe("SessionHistoryDialog: search + kind", () => {
   it("debounces the search 350ms (Enter commits immediately)", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Pure fake timers (no shouldAdvanceTime): real wall-clock drift under load must not be able
+    // to push the clock past the 349/350 ms boundary this test pins.
+    vi.useFakeTimers();
     const h = harness({ history: [{ ok: true, page: historyPage() }] });
     mountDialog(h);
     await flushPromises();
