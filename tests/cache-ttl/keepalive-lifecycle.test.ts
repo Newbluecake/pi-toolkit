@@ -449,16 +449,57 @@ describe("cache-keepalive service — UI-prompt episode budget", () => {
     expect(service.report().lastSkip).toBe("ui-prompt-expired");
   });
 
-  it("background work keeps arming past 60 min regardless of the prompt", () => {
+  it("background time does not count: prompt 30 min → bg 3 h → bg ends ⇒ another full hour", () => {
+    let busy = false;
+    const { service, clock } = harness({ backgroundBusy: () => busy });
+    service.noteUiPromptStart("s1", service.instanceId); // prompt-only clock starts
+    clock.advance(HOUR / 2);
+    expect(service.report().armed).toBe(true);
+    busy = true; // subagent starts
+    expect(service.report().armed).toBe(true); // sample clears the prompt-only clock
+    clock.advance(3 * HOUR);
+    expect(service.report().armed).toBe(true);
+    busy = false; // subagent ends, prompt still unanswered
+    expect(service.report().armed).toBe(true); // clock restarts now
+    clock.advance(HOUR - 1);
+    expect(service.report().armed).toBe(true);
+    clock.advance(1);
+    expect(service.report().armed).toBe(false);
+  });
+
+  it("prompt opened while background busy only starts counting once background ends", () => {
     let busy = true;
     const { service, clock } = harness({ backgroundBusy: () => busy });
     service.noteUiPromptStart("s1", service.instanceId);
-    clock.advance(HOUR + 120_000);
-    expect(service.report().armed).toBe(true);
+    clock.advance(2 * HOUR);
     busy = false;
-    expect(service.report().armed).toBe(false); // episode already > 60 min
-    busy = true;
     expect(service.report().armed).toBe(true);
+    clock.advance(HOUR);
+    expect(service.report().armed).toBe(false);
+  });
+
+  it("after expiry, prompt end + new work resumes pings", async () => {
+    const { service, clock, ctx } = harness({ backgroundBusy: () => false });
+    ctx.model.cost.cacheWrite = 60 * ctx.model.cost.cacheRead;
+    service.noteUiPromptStart("s1", service.instanceId);
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    for (let t = 0; t < HOUR + 120_000; t += 60_000) {
+      clock.advance(60_000);
+      await flush();
+    }
+    expect(service.report().lastSkip).toBe("ui-prompt-expired");
+    service.noteUiPromptEnd("s1", service.instanceId);
+    service.noteToolStart("s1", service.instanceId); // new work
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    for (let t = 0; t < 10 * 60_000; t += 30_000) {
+      clock.advance(30_000);
+      await flush();
+    }
+    expect(service.report().armed).toBe(true);
+    expect(service.report().lastSkip).not.toBe("ui-prompt-expired");
+    expect(service.report().window.pings).toBeGreaterThan(0);
   });
 
   it("a new prompt episode restarts the 60 min budget; prompt end clears it", () => {

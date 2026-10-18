@@ -91,6 +91,9 @@ interface KeepaliveModelInfo {
   promptCache?: Record<string, unknown> | undefined;
 }
 
+/** Max time a pending UI prompt, as the ONLY thing keeping keepalive armed, keeps the cache warm — nobody may answer for hours. Time while background work runs does not count. */
+export const UI_PROMPT_KEEPALIVE_MAX_MS = 60 * 60_000;
+
 /**
  * Ping retry policy (user requirement, 2026-09-26 — see docs/dev/cache-ttl-keepalive/plan.md's
  * appended "ping 重试" section). Only outcomes where the server provably did NOT process the
@@ -99,9 +102,6 @@ interface KeepaliveModelInfo {
  * is wrong", and never `accepted-then-lost`, which got a 200 and may already have been billed).
  * Two retries max (three attempts total), backed off 2s then 5s.
  */
-/** Max time one blocking UI-prompt episode (nothing else running) keeps the cache warm — nobody may answer for hours. */
-export const UI_PROMPT_KEEPALIVE_MAX_MS = 60 * 60_000;
-
 const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
 /**
  * r2 (2026-10-14, plan.md "ping 重试 r2"): retry until the cache window runs out — 2s → 5s → 10s
@@ -335,8 +335,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private lockedAuthHeaderKeys: string | undefined;
   private activeTools = 0;
   private uiPrompts = 0;
-  /** Clock time the current UI-prompt episode began (`uiPrompts` 0→1); undefined while no prompt is pending. */
-  private uiPromptEpisodeStart: Millis | undefined;
+  /** Clock time we entered "prompt pending ∧ ¬backgroundBusy" (sampled at tick/report/prompt start); undefined otherwise. */
+  private promptOnlySince: Millis | undefined;
   private window: WindowState = createInitialWindowState();
   private session: SessionTotals;
   private dropped = { sessionMismatch: 0, instanceMismatch: 0, epochMismatch: 0 };
@@ -550,29 +550,29 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   }
 
   private armed(): boolean {
-    try {
-      if (this.deps.backgroundBusy()) return true;
-      if (this.uiPromptExpired()) return false;
-      return this.activeTools > 0 || this.uiPrompts > 0;
-    } catch {
-      return false;
-    }
+    return this.sampleArming().armed;
   }
 
   /**
-   * A user-facing prompt (ask_user's `ctx.ui.custom`, any `ctx.ui.*` prompt — pi emits
-   * `ui_prompt_start/end` for all of them) has been pending for `UI_PROMPT_KEEPALIVE_MAX_MS` with no
-   * background work: stop keeping the cache warm (nobody may answer for hours). Background work
-   * (`backgroundBusy()`) always wins and is checked by the caller first.
+   * One consistent sample of the arming state (call once per tick and reuse). Maintains
+   * `promptOnlySince`: set when entering "prompt pending ∧ ¬backgroundBusy", cleared when either
+   * stops. The prompt expires `UI_PROMPT_KEEPALIVE_MAX_MS` after that moment — background work
+   * always arms and its duration never counts toward the budget.
    */
-  private uiPromptExpired(): boolean {
-    if (this.uiPrompts <= 0 || this.uiPromptEpisodeStart === undefined) return false;
+  private sampleArming(): { armed: boolean; uiPromptExpired: boolean } {
     try {
-      if (this.deps.backgroundBusy()) return false;
+      const busy = this.deps.backgroundBusy();
+      if (busy || this.uiPrompts <= 0) {
+        this.promptOnlySince = undefined;
+        return { armed: busy || this.activeTools > 0 || this.uiPrompts > 0, uiPromptExpired: false };
+      }
+      const now = this.clock.now();
+      if (this.promptOnlySince === undefined) this.promptOnlySince = now;
+      if (now - this.promptOnlySince >= UI_PROMPT_KEEPALIVE_MAX_MS) return { armed: false, uiPromptExpired: true };
+      return { armed: true, uiPromptExpired: false };
     } catch {
-      return false;
+      return { armed: false, uiPromptExpired: false };
     }
-    return this.clock.now() - this.uiPromptEpisodeStart >= UI_PROMPT_KEEPALIVE_MAX_MS;
   }
 
   /**
@@ -823,11 +823,12 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     if (this.disposed) return;
     const now = this.clock.now();
     const capture = this.window.capture;
+    const arming = this.sampleArming();
     const result = evaluateTick({
       now,
       mode: this.safeMode(),
-      armed: this.armed(),
-      uiPromptExpired: this.uiPromptExpired(),
+      armed: arming.armed,
+      uiPromptExpired: arming.uiPromptExpired,
       config: this.config(),
       session: this.session,
       window: this.window,
@@ -1406,22 +1407,22 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
   noteUiPromptStart(sessionId: string, instance: string): void {
     if (!this.accept(sessionId, instance)) return;
-    if (this.uiPrompts === 0) this.uiPromptEpisodeStart = this.clock.now();
     this.uiPrompts += 1;
+    this.sampleArming();
     if (this.timer === undefined) this.arm();
   }
 
   noteUiPromptEnd(sessionId: string, instance: string): void {
     if (!this.accept(sessionId, instance)) return;
     this.uiPrompts = Math.max(0, this.uiPrompts - 1);
-    if (this.uiPrompts === 0) this.uiPromptEpisodeStart = undefined;
+    if (this.uiPrompts === 0) this.promptOnlySince = undefined;
   }
 
   noteAgentSettled(sessionId: string, instance: string): void {
     if (!this.accept(sessionId, instance)) return;
     this.activeTools = 0;
     this.uiPrompts = 0;
-    this.uiPromptEpisodeStart = undefined;
+    this.promptOnlySince = undefined;
   }
 
   noteUsageCacheRead(sessionId: string, instance: string): void {
