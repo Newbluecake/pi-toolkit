@@ -46,7 +46,7 @@
  *
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { auditSpawn } from "../audit.js";
 import type { CmdLimit } from "../cmd-limit.js";
@@ -87,6 +87,7 @@ import {
 } from "../../protocol/session-history.js";
 import type { ForkSnapshot, HistoryListQuery, HistoryService, OccupancyProof, SessionPin } from "./history/ports.js";
 import type { DirService } from "./dirs.js";
+import { createSpawnIdempotency, intentDigest, startFresh, type FreshSpawnOutcome, type SpawnIntent } from "./entry.js";
 import type { FirstPromptForwarder } from "./first-prompt.js";
 import type { MkdirService } from "./mkdir.js";
 import type { SpawnPrefs } from "./prefs.js";
@@ -106,8 +107,8 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Idempotency LRU: entries per hub / freshness window (plan §SP9: 256 条 / 10 分钟). */
-export const SPAWN_IDEMPOTENCY_MAX = 256;
-export const SPAWN_IDEMPOTENCY_TTL_MS = 600_000;
+export { SPAWN_IDEMPOTENCY_MAX, SPAWN_IDEMPOTENCY_TTL_MS, intentDigest } from "./entry.js";
+export type { SpawnIntent } from "./entry.js";
 /** `GET` endpoints' shared read bucket (arch §6.5: 读端点 10/1s). */
 const SPAWN_READ_CAPACITY = 10;
 const SPAWN_READ_REFILL_MS = 1_000;
@@ -191,28 +192,6 @@ export interface SpawnPrivacyPort {
   setLocked(sessionId: string, locked: boolean): Promise<void>;
 }
 
-interface IdemEntry {
-  spawnId: string;
-  digest: string;
-  at: number;
-}
-
-/** The parsed intent everything downstream (LRU digest, admit, start) is built from. */
-export interface SpawnIntent {
-  id: string;
-  cwd: string;
-  confirmed: boolean;
-  expectCwd: string | undefined;
-  /** default-model plan §3 ①: the request's tri-state, verbatim — `undefined` (absent) vs `""`
-   *  (explicit pi default) vs a parsed `provider/id` are THREE different intents. */
-  model: string | undefined;
-  /** session-history plan §3.3/§4.6.2: present iff the body carried a `session` ref (only ever
-   *  parsed when `historyOn`); `mode` is normalized here — absent ⇒ `"resume"` (the hub decides
-   *  whether occupancy forces a fork via the 409 `session-open` round-trip, PD10'). */
-  session: { key: string; id: string; mode: "resume" | "fork" } | undefined;
-  firstPrompt: { text: string; deliver: "steer" | "followUp" } | undefined;
-}
-
 const HEADLESS_STOP_PREFIX = "/api/headless/";
 const HEADLESS_STOP_SUFFIX = "/stop";
 
@@ -220,30 +199,6 @@ function matchStopPath(path: string): string | undefined {
   if (!path.startsWith(HEADLESS_STOP_PREFIX) || !path.endsWith(HEADLESS_STOP_SUFFIX)) return undefined;
   const id = path.slice(HEADLESS_STOP_PREFIX.length, path.length - HEADLESS_STOP_SUFFIX.length);
   return SPAWN_ID_RE.test(id) ? id : undefined;
-}
-
-/** sha256 over a canonical (fixed-key-order) rendering of the intent. `confirm`/`expectCwd`
- *  are excluded (plan §SP9: "只多 confirm 视为同一意图"); `model` joins ONLY when present
- *  (default-model plan §3 ①) — a request without it hashes byte-identically to pre-feature,
- *  so old digests (and their LRU entries) keep hitting across a hub upgrade. `session` joins
- *  ONLY when present (session-history plan §4.6.6: different key/id/mode ⇒ a different digest
- *  — a request without `session` hashes byte-identically to pre-feature too). */
-export function intentDigest(intent: SpawnIntent): string {
-  const parts: string[] = [`"cwd":${JSON.stringify(intent.cwd)}`];
-  if (intent.model !== undefined) parts.push(`"model":${JSON.stringify(intent.model)}`);
-  if (intent.session !== undefined) {
-    const s = intent.session;
-    parts.push(
-      `"session":{"key":${JSON.stringify(s.key)},"id":${JSON.stringify(s.id)},"mode":${JSON.stringify(s.mode)}}`,
-    );
-  }
-  const fp = intent.firstPrompt;
-  if (fp !== undefined) {
-    parts.push(`"firstPrompt":{"deliver":${JSON.stringify(fp.deliver)},"text":${JSON.stringify(fp.text)}}`);
-  }
-  return createHash("sha256")
-    .update(`{${parts.join(",")}}`)
-    .digest("hex");
 }
 
 /** HttpError-shaped test without `as` (source-scan contract). */
@@ -270,29 +225,8 @@ function occupancyAuditFields(p: OccupancyProof): {
 export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   const { supervisor, dirs, firstPrompt, prefs, cfg, limit, log, now } = deps;
   const historyOn = cfg.history === true && deps.history !== undefined;
-  const idem = new Map<string, IdemEntry>();
-
-  // ------------------------------------------------------------- idempotency LRU
-
-  function idemGet(key: string): IdemEntry | undefined {
-    const hit = idem.get(key);
-    if (hit === undefined) return undefined;
-    if (now() - hit.at > SPAWN_IDEMPOTENCY_TTL_MS) {
-      idem.delete(key);
-      return undefined;
-    }
-    return hit;
-  }
-
-  function idemPut(key: string, spawnId: string, digest: string): void {
-    idem.delete(key); // refresh insertion order so eviction below always drops the OLDEST
-    idem.set(key, { spawnId, digest, at: now() });
-    while (idem.size > SPAWN_IDEMPOTENCY_MAX) {
-      const oldest = idem.keys().next();
-      if (oldest.done === true) break;
-      idem.delete(oldest.value);
-    }
-  }
+  const idempotency = createSpawnIdempotency(now);
+  const { get: idemGet, put: idemPut } = idempotency;
 
   // ------------------------------------------------------------- audit (arch §6.6)
 
@@ -705,6 +639,58 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
               deliver: body.firstPrompt.deliver ?? "followUp",
             },
     };
+    if (intent.session === undefined) {
+      const { session: _session, ...freshIntent } = intent;
+      const principal = spawnPrincipal(ownerOf(intent.id));
+      const rateCapacity = Math.max(1, Math.min(60, cfg.ratePerMinute));
+      await startFresh(freshIntent, {
+        principal,
+        owner: ownerOf(intent.id),
+        origin: {
+          listener: io.listener,
+          ip: auth.ip,
+          ...(auth.user === undefined ? {} : { user: auth.user }),
+          reqId: intent.id,
+        },
+        policy,
+        rate: {
+          bucket: `${principal}:spawn`,
+          capacity: rateCapacity,
+          refillMs: Math.ceil(SPAWN_RATE_WINDOW_MS / rateCapacity),
+          onReject: () =>
+            rateAudit(io, auth, `spawn:${principal}`, { endpoint: "spawn", reqId: intent.id, code: "E_RATE" }),
+        },
+        limit,
+        idempotency,
+        dirs,
+        supervisor,
+        firstPrompt,
+        prefs,
+        registerTimeoutS: cfg.registerTimeoutS,
+        deadline: reqDeadline,
+        now,
+        audit: (record) => auditSpawn(log, record),
+        reauthorize: async () => {
+          const stillAuthed = await io.authorize(reqDeadline);
+          if ("handled" in stillAuthed) {
+            rejectAudit(io, { ip: io.ip }, { endpoint: "spawn", code: stillAuthed.code, reqId: intent.id });
+            return { ok: false, code: stillAuthed.code, handled: true };
+          }
+          return {
+            ok: true,
+            origin: {
+              listener: io.listener,
+              ip: stillAuthed.ip,
+              reqId: intent.id,
+              ...(stillAuthed.user === undefined ? {} : { user: stillAuthed.user }),
+            },
+          };
+        },
+        onResult: (outcome) => sendFreshOutcome(io, res, outcome),
+      });
+      return;
+    }
+
     const principal = spawnPrincipal(ownerOf(intent.id));
     const idemKey = `${principal}|${intent.id}`;
     const digest = intentDigest(intent);
@@ -801,121 +787,37 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       );
       return;
     }
+  }
 
-    const admitted = await dirs.admit(intent.cwd, policy.scope, createReqDeadline(now, admitMs));
-    if (!admitted.ok) {
-      rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: "E_DIR" });
-      io.sendJson(res, 400, { error: "E_DIR", reason: admitted.reason });
-      return;
+  /** Transport mapping only; the synchronous sink keeps auth2 → HTTP head zero-await. */
+  function sendFreshOutcome(io: SpawnRouteIo, res: ServerResponse, outcome: FreshSpawnOutcome): void {
+    switch (outcome.kind) {
+      case "accepted":
+        io.sendJson(res, 202, outcome.value);
+        return;
+      case "confirm":
+        io.sendJson(res, 409, {
+          error: "E_CONFIRM_REQUIRED",
+          resolvedCwd: outcome.resolvedCwd,
+          reason: outcome.reason,
+        });
+        return;
+      case "rate-limited":
+        sendRateLimited(io, res, outcome.retryAfterMs);
+        return;
+      case "unauthorized":
+        return; // authorize already sent the HTTP denial
+      case "refused":
+        if (outcome.code === "E_BAD_REQUEST") {
+          io.sendJson(res, 409, {
+            error: outcome.code,
+            ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+            ...(outcome.message === undefined ? {} : { message: outcome.message }),
+          });
+        } else {
+          sendStartResult(io, res, { ...outcome, ok: false });
+        }
     }
-
-    // gate 9 — confirmation (arch §6.3/D8: confirm binds expectCwd=realpath, stateless)
-    const needConfirm = policy.confirm === "always" || (policy.confirm === "unknown-dir" && !admitted.known);
-    const confirmBound = intent.confirmed && intent.expectCwd === admitted.realpath;
-    if (needConfirm && !confirmBound) {
-      // plan §SP9: "409 确认不写 LRU" — nothing idempotent happened yet
-      rejectAudit(io, auth, {
-        endpoint: "spawn",
-        reqId: intent.id,
-        cwd: admitted.realpath,
-        known: admitted.known,
-        confirmed: false,
-        code: "E_CONFIRM_REQUIRED",
-      });
-      io.sendJson(res, 409, {
-        error: "E_CONFIRM_REQUIRED",
-        resolvedCwd: admitted.realpath,
-        reason: intent.confirmed ? "changed" : policy.confirm,
-      });
-      return;
-    }
-
-    // gate 10 — second authorize (logout/rotate raced the body read; the sync stretch follows
-    // immediately, so nothing can move between this check and the 202)
-    const stillAuthed = await authorizeOrAudit(io, reqDeadline, "spawn", intent.id);
-    if (stillAuthed === undefined) return;
-
-    // default-model plan §3 ②: the EFFECTIVE model resolves HERE — after the second authorize,
-    // before gate 11's fork, all synchronous (`prefs.get()` is a memory read; no await can
-    // interpose). Tri-state: body value > hub preference > "" (pi's own default). A dup hit
-    // above already returned, so a preference change after admission never rewrites a record.
-    const effectiveModel = intent.model !== undefined ? intent.model : (prefs.get() ?? "");
-
-    // gate 11 — supervisor.start(): limits + intent persist + fork, fully synchronous
-    const spawnId = randomBytes(12).toString("base64url");
-    const startReq: AdmittedRequest = {
-      spawnId,
-      admitted: { realpath: admitted.realpath, dev: admitted.dev, ino: admitted.ino, known: admitted.known },
-      owner: ownerOf(intent.id),
-      ...(effectiveModel === "" ? {} : { model: effectiveModel }),
-      ...(intent.firstPrompt === undefined
-        ? {}
-        : {
-            firstPrompt: {
-              textLen: Buffer.byteLength(intent.firstPrompt.text, "utf8"),
-              deliver: intent.firstPrompt.deliver,
-            },
-          }),
-    };
-    const result = supervisor.start(startReq, reqDeadline);
-    if (!result.ok) {
-      // map every reject to its own audit line (limits carry their own numbers)
-      rejectAudit(io, stillAuthed, {
-        endpoint: "spawn",
-        reqId: intent.id,
-        cwd: admitted.realpath,
-        known: admitted.known,
-        ...(needConfirm ? { confirmed: true } : {}),
-        ...(result.code === "E_LIMIT"
-          ? { limit: result.limit ?? "global", active: result.active, max: result.max }
-          : {}),
-        code: result.code,
-      });
-      sendStartResult(io, res, result);
-      return;
-    }
-
-    // 202 — the record exists (①); hand the first-prompt BODY to the forwarder (memory only)
-    if (intent.firstPrompt !== undefined) {
-      firstPrompt.accept(
-        spawnId,
-        intent.firstPrompt,
-        {
-          listener: io.listener,
-          ip: auth.ip,
-          ...(auth.user === undefined ? {} : { user: auth.user }),
-          reqId: intent.id,
-        },
-        now() + cfg.registerTimeoutS * 1000 + FIRST_PROMPT_GRACE_MS,
-      );
-    }
-    idemPut(idemKey, spawnId, digest);
-    auditSpawn(log, {
-      audit: "spawn",
-      phase: "request",
-      endpoint: "spawn",
-      reqId: intent.id,
-      listener: io.listener,
-      ip: auth.ip,
-      ...(auth.user === undefined ? {} : { user: auth.user }),
-      spawnId,
-      cwd: admitted.realpath, // arch §6.6's sanctioned realpath exception (取证需要)
-      known: admitted.known,
-      confirmed: needConfirm ? true : false,
-      ...(intent.firstPrompt === undefined
-        ? {}
-        : { firstPrompt: "pending", textLen: Buffer.byteLength(intent.firstPrompt.text, "utf8") }),
-      ...(effectiveModel === "" ? {} : { model: effectiveModel }),
-    });
-    io.sendJson(res, 202, {
-      spawnId,
-      state: "starting",
-      cwd: admitted.realpath,
-      // default-model plan §3 ②: the EFFECTIVE value the child was forked with; absent ⇒ pi
-      // default (no --model on the argv).
-      ...(effectiveModel === "" ? {} : { model: effectiveModel }),
-      ...(intent.firstPrompt === undefined ? {} : { firstPrompt: "accepted" }),
-    });
   }
 
   // ------------------------------------------------------------- POST /api/headless (session branch)

@@ -20,3 +20,6 @@ tests/fixtures/memory/current-5-migrated/
 # golden fixtures are byte-exact pins — prettier must never reformat them
 tests/fixtures/quota/
 tests/fixtures/version/
+
+# F5: immutable pre-extraction HTTP/audit byte snapshots
+tests/fixtures/feishu-spawn-http-golden.json

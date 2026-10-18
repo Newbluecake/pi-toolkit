@@ -564,3 +564,16 @@ unaffected).
 | 14   | partially | R2-g      |
 | 17   | partially | R2-f      |
 | 19   | partially | R2-h      |
+
+**R2-i (2026-10-18, main-session ruling, from F1 upstream check).** Non-event data frames (e.g. `type=card`) are **not ACKed**,
+matching pinned node-sdk b188be6 and the F-probe observation — this supersedes §2.3's "non-event data ⇒ ACK 200". Event headers:
+last value wins; control `type` header: first wins; a duplicate fragment `seq` replaces the stored bytes (upstream
+data-cache behaviour), still bounded by the chunk caps. F1 stays pure (codec + reassembly); ACK routing and undecodable
+handling are F3's.
+
+**R2-j (2026-10-18, main-session ruling, from F5 verification).** (1) With the default `feishuBot.spawnScope: "known"`,
+`/new <dir>` on an unknown directory is **refused** with an explanation (「该目录不在已知目录中：先在终端/网页打开过它，或把
+feishuBot.spawnScope 设为 roots」); the realpath confirm card exists only under `roots` (where `dirs.admit` returns
+`known:false`). (2) The Feishu bot's supervisor principal must not be forgeable by a LAN username: FA forbids `:` in LAN
+usernames (passwd/admin validation; existing users are unaffected unless they already contain `:`, which `/webhub status`
+then flags), so `lan:feishu:<gen>:<openId>` can only come from the bot.
