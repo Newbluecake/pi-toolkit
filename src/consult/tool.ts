@@ -2,7 +2,11 @@ import { existsSync, statSync } from "node:fs";
 import { Type, type Static } from "@sinclair/typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
+  AnchorIdentity,
+  ConsultCacheDiagnostics,
   ConsultExpertRef,
+  ConsultThreadRef,
+  ConsultWarmPrediction,
   ErrorInfo,
   ExpertRequestSnapshot,
   RunDiagnostics,
@@ -13,7 +17,11 @@ import type {
   SpawnRequest,
 } from "../core/types.js";
 import type { ConsultSettings } from "../config/settings.js";
-import { CONSULT_NOT_IN_WHITELIST_MARK, CONSULT_OUTCOMES } from "../core/consult-summary.js";
+import {
+  CONSULT_NOT_IN_WHITELIST_MARK,
+  CONSULT_OUTCOMES,
+  classifyConsultCacheResult,
+} from "../core/consult-summary.js";
 import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
 import { toPiToolUsage } from "../tools/usage.js";
@@ -31,6 +39,9 @@ import {
 import { getConsultGuard } from "./preserve-guard.js";
 import { createCapWatcher, type ConsultCapReason } from "./watcher.js";
 import type { MainSessionFacts, MainSessionFactsProvider } from "./main-facts.js";
+import type { ConsultThreads, ThreadHead, ThreadLease, ThreadReason } from "./threads.js";
+import { snapDigestOf, type AnchorLedger } from "./anchor-ledger.js";
+import type { AnchorObservation } from "./anchor.js";
 
 /**
  * "consult" — in-turn synchronous ask of a finished expert run
@@ -56,8 +67,17 @@ export const ConsultToolParams = Type.Object({
   }),
   question: Type.String({
     description:
-      "The question, self-contained. The expert sees its own history plus this question (nothing from your session).",
+      "The question, self-contained. The expert sees its own history plus this question (nothing from your session). " +
+      "Consecutive consults of the same expert from this run form a thread: the expert also sees your earlier " +
+      "questions and its full answers (the first line of each result says exactly what it saw).",
   }),
+  fresh: Type.Optional(
+    Type.Boolean({
+      description:
+        "Set true to drop this run's thread with the expert and ask from the expert's original session " +
+        "(earlier consult Q/A are not seen and not retained). Default false.",
+    }),
+  ),
 });
 export type ConsultToolParams = Static<typeof ConsultToolParams>;
 
@@ -261,6 +281,27 @@ export interface ConsultDeps {
    * the real provider in production).
    */
   mainSessionFacts?: MainSessionFactsProvider;
+  /** cache-thread plan §4: follow-up thread registry (wireConsult closure). Absent ⇒ legacy one-shot consults. */
+  threads?: ConsultThreads;
+  /** cache-thread plan §5.1: proven-touch ledger used for the pre-consult warm/cold prediction. */
+  anchorLedger?: AnchorLedger;
+  /** Trusted anchor observation of a consult run (default: the process prefix-probe record). */
+  anchorOf?: (consultRunId: RunId) => AnchorObservation | undefined;
+  /** pi-ai api of a model route (prediction needs `anthropic-messages`); absent ⇒ prediction `unknown`. */
+  routeApi?: (model: { provider: string; id: string }) => string | undefined;
+  /** Take-once per-fork display metadata handed to the runtime adapter (enqueue meta; Q1 ruling). */
+  displayMeta?: {
+    put(forkPath: string, meta: ConsultDisplayMeta): void;
+    drop(forkPath: string): void;
+  };
+  /** Time source (tests); default Date.now. */
+  now?: () => number;
+}
+
+/** What the adapter folds into the consult run's own diag at enqueue (A's frozen RunDisplayMeta fields). */
+export interface ConsultDisplayMeta {
+  consultCache: Pick<ConsultCacheDiagnostics, "v" | "predicted">;
+  consultThread?: ConsultThreadRef;
 }
 
 /** `details.outcome` vocabulary of the consult tool result (§4.1 error table). */
@@ -493,6 +534,19 @@ export interface ConsultCacheProbeContext {
   expertSettledAt?: number;
   guardCounters?: ConsultGuardCounters;
   registry?: PrefixProbeRegistry;
+  /** The consult's thread lease and the dispatch-time prediction — ONE fact projected onto the probe. */
+  thread?: ThreadLease;
+  predicted?: ConsultWarmPrediction;
+}
+
+/** Projection of a lease onto the asker-side probe's `thread` slot (same fact as the consult run's own diag.consultThread). */
+export function threadProbeOf(lease: ThreadLease): NonNullable<ConsultCacheProbe["thread"]> {
+  return {
+    id: lease.threadId,
+    seq: lease.seq,
+    mode: lease.mode,
+    ...(lease.reason === undefined ? {} : { reason: lease.reason }),
+  };
 }
 
 function finiteNonNegative(value: unknown): number | undefined {
@@ -610,7 +664,25 @@ export function buildCacheProbe(ctx: ConsultCacheProbeContext): ConsultCacheProb
       ...(keepalivePingUsd === undefined ? {} : { keepalivePingUsd }),
       ...(hitRatio === undefined ? {} : { hitRatio }),
       ...(blocked === undefined ? {} : { blocked }),
+      ...(ctx.thread === undefined ? {} : { thread: threadProbeOf(ctx.thread) }),
+      ...(ctx.predicted === undefined ? {} : { warm: ctx.predicted }),
     };
+    const anchorObs = consultRecord?.first?.anchor ?? consultRecord?.anchor;
+    if (consultRecord !== undefined) {
+      probe.anchor =
+        anchorObs === undefined
+          ? { state: "n/a" }
+          : {
+              state: anchorObs.state,
+              ...(anchorObs.identity?.ttl ? { ttl: anchorObs.identity.ttl } : {}),
+              ...(anchorObs.degraded ? { degraded: true as const } : {}),
+            };
+      probe.cacheResult = classifyConsultCacheResult(
+        provenRequest(consultRecord)?.usage,
+        anchorObs?.state ?? "n/a",
+        anchorObs?.degraded ? true : undefined,
+      );
+    }
     return probe;
   } catch {
     if (consultRecord !== undefined) consultRecord.probeErrors = (consultRecord.probeErrors ?? 0) + 1;
@@ -627,6 +699,8 @@ export function buildCacheProbe(ctx: ConsultCacheProbeContext): ConsultCacheProb
               predicted: ctx.consultDiagnostics.consultIdentityPrediction,
             }),
       },
+      ...(ctx.thread === undefined ? {} : { thread: threadProbeOf(ctx.thread) }),
+      ...(ctx.predicted === undefined ? {} : { warm: ctx.predicted }),
     };
   }
 }
@@ -662,7 +736,113 @@ export function estimateFirstRequestUsd(tokens: number, price: { input: number; 
   return (tokens * Math.max(price.input, price.cacheWrite)) / 1e6;
 }
 
+/** Opaque identity of the expert's original session file (size + mtime); a change means it was resumed/rewritten. */
+function sourceKeyOf(path: string): string | undefined {
+  try {
+    const st = statSync(path);
+    return `${st.size}:${Math.floor(st.mtimeMs)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * First line of a thread-aware result (plan §4.5): says truthfully what the
+ * expert saw and whether this answer is retained. Six forms; the `m = 0`
+ * variant of the branch form avoids the nonsensical "thread #0".
+ */
+export function threadFirstLine(lease: ThreadLease): string {
+  const m = lease.retained;
+  switch (lease.mode) {
+    case "continued":
+      return `[consult thread ${lease.threadId} #${lease.seq} — the expert sees your previous ${m} question(s) and its full answers]`;
+    case "new":
+      return "[new consult thread — no earlier Q/A with this expert]";
+    case "fresh":
+      return "[fresh consult (fresh:true) — earlier Q/A in this thread were dropped and will not be retained]";
+    case "reset":
+      return `[thread reset (${lease.reason ?? "identity"}) — the expert does NOT see your earlier questions]`;
+    case "pending":
+      return `[previous answer not yet retained — the expert sees up to #${m} only]`;
+    case "branch":
+      return m > 0
+        ? `[parallel branch — the expert sees thread #${m}; this answer will NOT be kept for follow-ups]`
+        : "[parallel branch — the expert sees no earlier Q/A in this thread; this answer will NOT be kept for follow-ups]";
+  }
+}
+
+/** Truncation hint that depends on whether the answer will be retained in the thread (plan §4.5). */
+export function threadTruncationNote(maxAnswerChars: number, retained: boolean): string {
+  return retained
+    ? `⚠ answer truncated at ${maxAnswerChars} chars; it will be kept in this consult thread once this consult closes — consult again (e.g. "continue from where you were cut off") to get the rest.`
+    : `⚠ answer truncated at ${maxAnswerChars} chars; this answer is not retained — ask a narrower follow-up.`;
+}
+
+/** The request that may serve as evidence: `firstSuccessful`, else `first` unless it is known to have failed. */
+export function provenRequest(record: RunPrefixRecord | undefined): RunPrefixRecord["first"] {
+  if (record === undefined) return undefined;
+  if (record.firstSuccessful !== undefined) return record.firstSuccessful;
+  return record.first?.responseOk === false ? undefined : record.first;
+}
+
 export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof ConsultToolParams> {
+  const probeRegistry = (): PrefixProbeRegistry => deps.prefixProbeRegistry ?? getPrefixProbeRegistry();
+  /** Trusted anchor fact of a consult run: injected seam first, else the process prefix-probe record (package B). */
+  const readAnchor = (consultRunId: RunId): AnchorObservation | undefined => {
+    try {
+      if (deps.anchorOf !== undefined) return deps.anchorOf(consultRunId);
+      const record = probeRegistry().get(consultRunId);
+      // B: `anchorIdentityValid === false` ⇒ the final body drifted from the verified baseline after hooks —
+      // treat the anchor as absent (never a thread base, never warm-proof evidence).
+      if (record?.first?.anchorIdentityValid === false) return undefined;
+      // A failed/superseded first attempt with no successful one never proves the placement landed.
+      if (record?.first !== undefined && provenRequest(record) === undefined) return undefined;
+      return record?.first?.anchor ?? record?.anchor;
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * §5.1: record a PROVEN touch — a real request that carried a verified anchor and whose first
+   * response covered ≥90 % of the expert's measured request size. Time = request START.
+   */
+  const noteLedgerTouch = (p: {
+    isMain: boolean;
+    ref: ConsultExpertRef;
+    snapshot?: ExpertRequestSnapshot;
+    snapDigest?: string;
+    model?: { provider: string; id: string };
+    consultRunId: RunId;
+    anchorObs: AnchorObservation | undefined;
+  }): void => {
+    try {
+      const ledger = deps.anchorLedger;
+      const obs = p.anchorObs;
+      if (ledger === undefined || p.isMain || p.snapshot === undefined || p.snapDigest === undefined) return;
+      if (p.model === undefined || obs === undefined || obs.identity === undefined) return;
+      if (obs.state !== "added" && obs.state !== "relocated") return;
+      // B: prefer the first SUCCESSFUL request; a failed/superseded first attempt (responseOk === false) with
+      // no successful one is no evidence at all (strict-tool fallback may fire onPayload twice).
+      const first = provenRequest(probeRegistry().get(p.consultRunId));
+      const usage = first?.usage;
+      const last = p.snapshot.lastRequestUsage;
+      if (first === undefined || usage === undefined || last === undefined) return;
+      if (first.anchorIdentityValid === false) return; // identity drift ⇒ same as an absent anchor
+      const baseLB = last.input + last.cacheRead + last.cacheWrite;
+      if (!(baseLB > 0) || usage.cacheRead + usage.cacheWrite < 0.9 * baseLB) return;
+      ledger.noteTouch({
+        expertRunId: p.ref.runId,
+        route: { provider: p.model.provider, model: p.model.id },
+        snapDigest: p.snapDigest,
+        anchor: obs.state,
+        ...(obs.degraded === true ? { degraded: true } : {}),
+        touchedAt: first.startedAt,
+        ...(obs.identity.ttl === "1h" ? { ttl1h: true } : {}),
+      });
+    } catch {
+      /* diagnostics only — never affects the consult result */
+    }
+  };
   return {
     name: "consult",
     label: "Consult",
@@ -716,6 +896,10 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           } satisfies ConsultToolDetails,
         };
       }
+      // cache-thread plan: per-call thread state, released in the single `finally` below.
+      let lease: ThreadLease | undefined;
+      let forkPath: string | undefined;
+      let forkSettled = false;
       try {
         // ③ Liveness re-check (§4.5): runId live non-terminal, OR any running
         // run holding the same sessionFile (covers `Agent({resume})`
@@ -906,29 +1090,58 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         // header cwd to its own worktree (`forceCwd:true`) instead of the
         // usual two-level resolution against the expert's original cwd.
         const forkOpts = asker.isolated ? { forceCwd: true as const } : undefined;
-        const fork =
-          isMain && deps.forkStore.forkMainSession
-            ? deps.forkStore.forkMainSession(sessionFile, asker.cwd, forkOpts)
-            : deps.forkStore.forkExpertSession(sessionFile, asker.cwd, forkOpts);
-        if (!fork.ok) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Expert "${expertName(ref)}" could not be consulted: could not fork the expert's session: ${fork.reason}. Fall back to your own investigation.`,
-              },
-            ],
-            details: {
-              expertRunId: ref.runId,
-              ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
-              outcome: "unavailable",
-            } satisfies ConsultToolDetails,
-          };
-        }
-        // C2 snapshot reconstruction happens after the fork and before spawn.
-        // Main intentionally remains the documented Q1 read-only exception.
+        // cache-thread plan §4: the cwd is resolved once, from the expert's ORIGINAL session
+        // (a head fork's header already carries the same resolution).
+        const cwd = asker.isolated ? asker.cwd : (deps.forkStore.resolveForkCwd?.(sessionFile, asker.cwd) ?? asker.cwd);
+        const threads = isMain ? undefined : deps.threads;
+        const sourceKey = isMain ? undefined : sourceKeyOf(sessionFile);
+        // §4.6: head-based admission. Context at 75 %, first request estimated as a conservative
+        // COLD write (head.tokens × max(input, write)) per the user ruling; the original session
+        // already passed both gates above, so a failure here resets the thread, never nacks.
+        const headGuard = (head: Readonly<ThreadHead>): ThreadReason | undefined => {
+          const window =
+            liveContext?.contextWindow ??
+            (ref.contextTokens !== undefined && ref.contextPercent != null && ref.contextPercent > 0
+              ? (ref.contextTokens / ref.contextPercent) * 100
+              : undefined);
+          const percent =
+            head.percent ?? (window !== undefined && head.tokens > 0 ? (head.tokens / window) * 100 : undefined);
+          if (percent != null && percent >= CONSULT_MAX_CONTEXT_PERCENT) return "context";
+          if (head.tokens > 0 && model !== undefined && s.maxFirstRequestUsd > 0) {
+            const price = deps.priceOf(model, head.tokens);
+            if (price !== undefined && estimateFirstRequestUsd(head.tokens, price) > s.maxFirstRequestUsd)
+              return "cost";
+          }
+          return undefined;
+        };
+        let fork: ForkExpertSessionResult = { ok: false, reason: "not forked" };
         let consultSnapshot: ExpertRequestSnapshot | undefined;
-        if (!isMain) {
+        let snapDigest: string | undefined;
+        // At most two rounds: round 2 only happens after a loadout-identity mismatch on a thread
+        // head (plan §4.1 reason `identity`), forcing a reset from the original session.
+        for (let round = 0; round < 2; round++) {
+          if (lease !== undefined) {
+            threads?.finish(lease);
+            lease = undefined;
+          }
+          lease = threads?.begin({
+            askerRunId: deps.selfRunId,
+            expertRunId: ref.runId,
+            originalFile: sessionFile,
+            ...(sourceKey === undefined ? {} : { sourceKey }),
+            ...(params.fresh === true ? { fresh: true } : {}),
+            ...(round === 1 ? { forceReset: "identity" as const } : {}),
+            headGuard,
+          });
+          const forkSource = lease?.sourceFile ?? sessionFile;
+          fork =
+            isMain && deps.forkStore.forkMainSession
+              ? deps.forkStore.forkMainSession(sessionFile, asker.cwd, forkOpts)
+              : deps.forkStore.forkExpertSession(forkSource, asker.cwd, forkOpts);
+          if (!fork.ok) break;
+          // C2 snapshot reconstruction happens after the fork and before spawn.
+          // Main intentionally remains the documented Q1 read-only exception.
+          if (isMain) break;
           const scanned = deps.forkStore.scanExpertSnapshot(fork.path);
           if (!scanned.ok) {
             deps.forkStore.removeForkFile(fork.path);
@@ -945,6 +1158,46 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
             };
           }
           consultSnapshot = scanned.snapshot;
+          snapDigest = snapDigestOf({
+            tools: consultSnapshot.tools,
+            systemSections: consultSnapshot.systemSections,
+            cwd,
+            ...(sourceKey === undefined ? {} : { sourceKey }),
+          });
+          if (lease === undefined || threads === undefined || threads.noteDigest(lease, snapDigest)) break;
+          // The loadout drifted from this thread's first request: never continue on a different prefix.
+          deps.forkStore.removeForkFile(fork.path);
+          consultSnapshot = undefined;
+          fork = { ok: false, reason: "thread identity mismatch" };
+        }
+        if (!fork.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Expert "${expertName(ref)}" could not be consulted: could not fork the expert's session: ${fork.reason}. Fall back to your own investigation.`,
+              },
+            ],
+            details: {
+              expertRunId: ref.runId,
+              ...(ref.label !== undefined ? { expertLabel: ref.label } : {}),
+              outcome: "unavailable",
+            } satisfies ConsultToolDetails,
+          };
+        }
+        forkPath = fork.path;
+        // Continued/pending/branch consults start from a head, whose tokens drive the estimate.
+        if (lease?.head !== undefined && lease.head.tokens > 0 && model !== undefined) {
+          const price = deps.priceOf(model, lease.head.tokens);
+          if (price !== undefined) {
+            const est = estimateFirstRequestUsd(lease.head.tokens, price);
+            costEstimateUsd = est;
+            if (s.maxCostUsd > 0 && est > 0) {
+              const remaining = s.maxCostUsd - est;
+              budgetNote = remaining < est;
+              turnBudgetHint = Math.max(1, Math.floor(remaining / est) + 1);
+            }
+          }
         }
         const promptLists = consultSnapshot === undefined ? undefined : consultPromptLists(consultSnapshot);
         const spawnModel = consultSnapshot?.model ?? model;
@@ -953,18 +1206,44 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         // to `resolveForkCwd` at all. An unisolated asker keeps the §5.1
         // two-level rule unchanged: the expert's header cwd when it still
         // exists (preserved worktrees), else the asker's cwd.
-        const cwd = asker.isolated ? asker.cwd : (deps.forkStore.resolveForkCwd?.(sessionFile, asker.cwd) ?? asker.cwd);
+        const consultPrompt = buildConsultPrompt({
+          question,
+          maxAnswerChars: s.maxAnswerChars,
+          budgetNote,
+          isMain,
+          // A head-sourced consult (continued / pending / branch) is follow-up #(retained+1).
+          ...(lease?.head === undefined ? {} : { followUp: lease.retained + 1 }),
+          ...(promptLists === undefined ? {} : promptLists),
+        });
+        // §5.1 + R2-4: ONE dispatch-time fact — the prediction and the thread position — is both
+        // written to the consult run's own diag (take-once, keyed by the fork path, folded by the
+        // adapter at enqueue) and projected onto the asker-side probe below. EVERY consult run
+        // gets `predicted` (main / no evidence / OAuth ⇒ `{state:"unknown"}`), never absent.
+        const settledForPredict = live?.diag.settledAt ?? deps.expertSettledAt?.(ref.runId);
+        const routeApi = spawnModel === undefined || isMain ? undefined : deps.routeApi?.(spawnModel);
+        const predicted: ConsultWarmPrediction = deps.anchorLedger?.predict({
+          isMain,
+          expertRunId: ref.runId,
+          ...(spawnModel === undefined || isMain
+            ? {}
+            : { route: { provider: spawnModel.provider, model: spawnModel.id } }),
+          ...(routeApi === undefined ? {} : { api: routeApi }),
+          ...(snapDigest === undefined ? {} : { snapDigest }),
+          ...(lease?.head !== undefined && lease.base === undefined ? { followUpWithoutBase: true } : {}),
+          ...(typeof settledForPredict === "number" ? { settledAt: settledForPredict } : {}),
+        }) ?? { state: "unknown", reason: isMain ? "main" : "no-evidence" };
+        deps.displayMeta?.put(fork.path, {
+          consultCache: { v: 1, predicted },
+          ...(lease === undefined ? {} : { consultThread: { threadId: lease.threadId, seq: lease.seq } }),
+        });
+        if (lease !== undefined) threads?.openFork(lease, fork.path);
         let started: { runId: RunId; label?: string } | { error: ErrorInfo };
         try {
           started = await deps.port.spawn({
             type: ref.agentType,
-            prompt: buildConsultPrompt({
-              question,
-              maxAnswerChars: s.maxAnswerChars,
-              budgetNote,
-              isMain,
-              ...(promptLists === undefined ? {} : promptLists),
-            }),
+            prompt: consultPrompt,
+            // Host-side anchor placement handoff (NOT_THREADED A type; consumed by package B).
+            consultAnchor: { prompt: consultPrompt, ...(lease?.base === undefined ? {} : { base: lease.base }) },
             label: consultRunLabel(expertName(ref)),
             ...(spawnModel !== undefined ? { modelOverride: spawnModel } : {}),
             ...(consultSnapshot === undefined ? {} : { consultSnapshot }),
@@ -981,6 +1260,8 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           // it here and now (no race possible, §4.1 error table last row).
           const message = e instanceof Error ? e.message : String(e);
           deps.forkStore.removeForkFile(fork.path);
+          if (lease !== undefined) threads?.abandonFork(lease, fork.path);
+          deps.displayMeta?.drop(fork.path);
           const preserve = preserveFailure(message);
           const probe = earlyCacheProbe(ref, preserve?.outcome ?? "unavailable", preserve?.code, consultSnapshot);
           return {
@@ -1003,6 +1284,8 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         }
         if ("error" in started) {
           deps.forkStore.removeForkFile(fork.path);
+          if (lease !== undefined) threads?.abandonFork(lease, fork.path);
+          deps.displayMeta?.drop(fork.path);
           const preserve = preserveFailure(started.error.message);
           const probe = earlyCacheProbe(ref, preserve?.outcome ?? "unavailable", preserve?.code, consultSnapshot);
           return {
@@ -1057,7 +1340,51 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         const guardCounters = settledGuardCounters ?? getConsultGuard(outcome.runId)?.counters();
         const effectiveOutcome: ConsultOutcome = guardCounters?.terminated ? "blocked_cap" : outcomeTag;
         const settledAt = deps.expertSettledAt?.(ref.runId);
+        const hasAnswerText = outcome.text !== undefined && outcome.text.trim().length > 0;
+        // §4.2 ②: eligible to become the thread head only for a clean, completed, non-empty answer.
+        const eligible =
+          lease?.keep === true &&
+          outcome.status === "completed" &&
+          effectiveOutcome === "completed" &&
+          preserve === undefined &&
+          hasAnswerText;
+        const anchorObs = readAnchor(outcome.runId);
+        if (lease !== undefined && threads !== undefined) {
+          const record = probeRegistry().get(outcome.runId);
+          const lastReq = record?.requests?.filter((r) => r.usage !== undefined).at(-1)?.usage;
+          const ctxUsage = outcome.diag.contextUsage;
+          const tokens =
+            ctxUsage?.tokens ??
+            (lastReq === undefined
+              ? undefined
+              : lastReq.input + lastReq.cacheRead + lastReq.cacheWrite + lastReq.output);
+          const base: AnchorIdentity | undefined =
+            (anchorObs?.state === "added" || anchorObs?.state === "relocated") &&
+            anchorObs.degraded !== true &&
+            anchorObs.identity !== undefined
+              ? anchorObs.identity
+              : undefined;
+          forkSettled = true;
+          threads.settle(fork.path, {
+            eligible,
+            consultRunId: outcome.runId,
+            ...(tokens === undefined ? {} : { tokens }),
+            ...(ctxUsage === undefined ? {} : { percent: ctxUsage.percent }),
+            ...(base === undefined ? {} : { base }),
+          });
+        }
+        noteLedgerTouch({
+          isMain,
+          ref,
+          ...(consultSnapshot === undefined ? {} : { snapshot: consultSnapshot }),
+          ...(snapDigest === undefined ? {} : { snapDigest }),
+          ...(spawnModel === undefined ? {} : { model: spawnModel }),
+          consultRunId: outcome.runId,
+          anchorObs,
+        });
         const cacheProbe = buildCacheProbe({
+          ...(lease === undefined ? {} : { thread: lease }),
+          predicted,
           ref,
           ...(consultSnapshot === undefined ? {} : { snapshot: consultSnapshot }),
           outcome: effectiveOutcome,
@@ -1106,10 +1433,18 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           // 12 follow-up consults — the model was never told it got a partial
           // answer or how to get the rest. Keep the cap itself (plan §4.1);
           // just say so explicitly.
-          const text = truncated.truncated
+          const legacyText = truncated.truncated
             ? `${truncated.text}\n\n⚠ answer truncated at ${s.maxAnswerChars} chars; ask a narrower follow-up ` +
               `(reference a specific item or range) instead of re-asking the whole question.`
             : truncated.text;
+          const text =
+            lease === undefined
+              ? legacyText
+              : `${threadFirstLine(lease)}\n\n${
+                  truncated.truncated
+                    ? `${truncated.text}\n\n${threadTruncationNote(s.maxAnswerChars, eligible)}`
+                    : truncated.text
+                }`;
           return {
             content: [{ type: "text" as const, text }],
             ...usage,
@@ -1144,7 +1479,7 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           content: [
             {
               type: "text" as const,
-              text: `${truncated.text}\n\n⚠ partial answer — consult ended early (${humanReason(outcome, capReason, s)}).${truncationNote}`,
+              text: `${lease === undefined ? "" : `${threadFirstLine(lease)}\n\n`}${truncated.text}\n\n⚠ partial answer — consult ended early (${humanReason(outcome, capReason, s)}).${truncationNote}`,
             },
           ],
           ...usage,
@@ -1159,6 +1494,12 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
         // Rejection paths above return through here too — the gate is always
         // released (T-2: "nack 后并发计数已释放").
         deps.inflight.release(deps.selfRunId);
+        if (lease !== undefined && deps.threads !== undefined) {
+          // An aborted/throwing call never judged its answer: it must not stay a pending candidate.
+          if (forkPath !== undefined && !forkSettled) deps.threads.settle(forkPath, { eligible: false });
+          deps.threads.finish(lease);
+        }
+        if (forkPath !== undefined) deps.displayMeta?.drop(forkPath);
       }
     },
   };

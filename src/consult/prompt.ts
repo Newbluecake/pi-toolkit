@@ -13,6 +13,8 @@ export function buildConsultPrompt(opts: {
   maxAnswerChars: number;
   budgetNote: boolean;
   isMain?: boolean;
+  /** Follow-up number n (≥2) of a continued consult thread; adds one line after the R2 header. */
+  followUp?: number;
   allowed?: readonly string[];
   disabled?: readonly string[];
 }): string {
@@ -36,6 +38,11 @@ export function buildConsultPrompt(opts: {
         "(bash/edit/write/Agent/... from your history are unavailable). Prefer not to call tools unless the",
         "answer strictly requires a fresh environment fact.",
       ];
+  if (opts.followUp !== undefined && opts.followUp >= 2) {
+    lines.push(
+      `This is follow-up #${opts.followUp} in this consult thread; your earlier answers above are complete even if the asker saw them truncated.`,
+    );
+  }
   if (opts.isMain) {
     lines.push(
       "You are the host main session, consulted by one of your own subagents. Answer only the decisions,",

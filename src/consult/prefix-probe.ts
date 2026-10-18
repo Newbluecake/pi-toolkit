@@ -1,13 +1,26 @@
 import { createHash } from "node:crypto";
 import { PROVIDER_PREFIX_FIELDS, type PayloadPrefixComparison, type ProviderPrefixField } from "./preserve-identity.js";
 import { registerConsultGuard } from "./preserve-guard.js";
+import {
+  anchorIdentityMatches,
+  compareMessageBreakpoints,
+  messageBreakpointShape,
+  withoutCacheControl,
+  type AnchorObservation,
+  type MessageBreakpointShape,
+} from "./anchor.js";
 export type { PayloadPrefixComparison, ProviderPrefixField } from "./preserve-identity.js";
 
 /** A request observation retained by the process-local consult probe. */
 export interface PrefixRequestRecord {
+  anchor?: AnchorObservation;
+  anchorIdentityValid?: boolean;
+  messageBreakpointShape?: MessageBreakpointShape;
   seq: number;
   startedAt: number;
   endedAt?: number;
+  /** False for errored/aborted attempts; these never consume the first cache metric. */
+  responseOk?: boolean;
   fieldHashes: Partial<Record<ProviderPrefixField, string>>;
   messageHashes?: string[];
   /** Breakpoints relative to the request's last user/tool-result message. */
@@ -21,17 +34,23 @@ export interface PrefixRequestRecord {
 }
 
 export interface RunPrefixRecord {
+  /** First request anchor fact, including its verified baseline identity. */
+  anchor?: AnchorObservation;
   runId: string;
   api?: string;
   provider?: string;
   model?: string;
   first?: PrefixRequestRecord;
+  /** First successful response attempt (first remains the first wire observation). */
+  firstSuccessful?: PrefixRequestRecord;
   latest?: PrefixRequestRecord;
   /** Present only for C2 consult runs; ordinary child runs retain first/latest only. */
   requests?: PrefixRequestRecord[];
   /** Hashing is diagnostic-only; probe failures never affect the provider request. */
   probeErrors?: number;
 }
+
+export type PrefixProbeCleanup = (() => void) & { readonly record?: RunPrefixRecord };
 
 export interface PrefixProbeRegistry {
   get(runId: string): RunPrefixRecord | undefined;
@@ -86,17 +105,6 @@ function stableJson(value: unknown): string {
 
 function hashJson(value: unknown): string {
   return createHash("sha256").update(stableJson(value), "utf8").digest("hex");
-}
-
-function withoutCacheControl(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutCacheControl);
-  if (value === null || typeof value !== "object") return value;
-  const copy: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (key === "cache_control") continue;
-    copy[key] = withoutCacheControl(child);
-  }
-  return copy;
 }
 
 function cacheControlAt(value: unknown): unknown {
@@ -158,6 +166,8 @@ function recordFieldHashes(
 ): void {
   if (payload === null || typeof payload !== "object") return;
   const object = payload as Record<string, unknown>;
+  if (record.anchor?.state === "added" || record.anchor?.state === "relocated")
+    record.anchorIdentityValid = anchorIdentityMatches(payload, record.anchor.identity);
   for (const field of PROVIDER_PREFIX_FIELDS) {
     if (field === "messages" && !includeMessages) continue;
     const value = object[field];
@@ -170,6 +180,8 @@ function recordFieldHashes(
   }
   if (includeMessages) {
     try {
+      const shape = messageBreakpointShape(object.messages);
+      if (shape !== undefined) record.messageBreakpointShape = shape;
       const details = messageDetails(object.messages);
       if (details.hashes !== undefined) record.messageHashes = details.hashes;
       if (details.breakpoints !== undefined) record.breakpoints = details.breakpoints;
@@ -221,7 +233,11 @@ class ProbeState {
   unsub: (() => void) | undefined;
   closed = false;
 
-  constructor(record: RunPrefixRecord, consult: boolean) {
+  constructor(
+    record: RunPrefixRecord,
+    consult: boolean,
+    readonly anchor?: () => AnchorObservation | undefined,
+  ) {
     this.record = record;
     this.consult = consult;
   }
@@ -240,6 +256,9 @@ class ProbeState {
       startedAt,
       fieldHashes: {},
     };
+    const anchor = this.anchor?.();
+    if (anchor !== undefined) request.anchor = anchor;
+    if (this.record.first === undefined && anchor !== undefined) this.record.anchor = anchor;
     recordFieldHashes(payload, request, this, this.consult);
     const previous = this.consult ? this.record.requests?.[0] : this.record.first;
     if (previous && !equalHash(previous.fieldHashes.tools, request.fieldHashes.tools)) request.toolsDrift = true;
@@ -250,7 +269,13 @@ class ProbeState {
     if (this.record.first === undefined) this.record.first = request;
     if (this.consult) this.record.requests?.push(request);
     this.record.latest = request;
-    this.pending.push(request);
+    // A session has one provider request in flight. Strict-tool fallback may
+    // call onPayload again without an intervening assistant/error event; its
+    // superseded wire attempt must not steal the final response's usage.
+    if (this.consult) {
+      for (const superseded of this.pending) superseded.responseOk = false;
+      this.pending = [request];
+    } else this.pending.push(request);
     if (!this.consult) this.latestBody = { record: request, payload };
   }
 
@@ -262,11 +287,13 @@ class ProbeState {
       return;
     }
     if (e.type !== "message_end" || e.message === null || typeof e.message !== "object") return;
-    const message = e.message as { role?: unknown; usage?: unknown };
+    const message = e.message as { role?: unknown; usage?: unknown; stopReason?: unknown };
     if (message.role !== "assistant") return;
     const request = this.pending.shift();
     if (request === undefined) return;
     request.endedAt = Date.now();
+    request.responseOk = message.stopReason !== "error" && message.stopReason !== "aborted";
+    if (request.responseOk && this.record.firstSuccessful === undefined) this.record.firstSuccessful = request;
     const usage = message.usage;
     if (usage === null || typeof usage !== "object") return;
     const u = usage as Record<string, unknown>;
@@ -316,18 +343,22 @@ function recordFor(runId: string, consult: boolean): RunPrefixRecord {
  * The returned cleanup is idempotent and releases the only retained latest
  * payload reference.
  */
-export function installPrefixProbe(sessionValue: unknown, specValue?: unknown): () => void {
+export function installPrefixProbe(
+  sessionValue: unknown,
+  specValue?: unknown,
+  anchor?: () => AnchorObservation | undefined,
+): PrefixProbeCleanup {
   const session = sessionValue as PrefixProbeSession | null | undefined;
   const agent = session?.agent;
   if (!agent || typeof agent !== "object") return () => undefined;
-  const spec = specValue as { runId?: unknown; consultGuard?: unknown } | undefined;
+  const spec = specValue as { runId?: unknown; consultGuard?: unknown; forkSessionFrom?: unknown } | undefined;
   // The main fallback is defensive only; the runner always supplies newRunId().
   const runId = typeof spec?.runId === "string" && spec.runId.length > 0 ? spec.runId : "main";
-  const consult = spec?.consultGuard !== undefined;
+  const consult = spec?.consultGuard !== undefined || typeof spec?.forkSessionFrom === "string";
   const record = recordFor(runId, consult);
   if (consult && spec?.consultGuard !== null && typeof spec?.consultGuard === "object")
     registerConsultGuard(runId, spec.consultGuard as import("../core/types.js").ConsultGuard);
-  const state = new ProbeState(record, consult);
+  const state = new ProbeState(record, consult, anchor);
   const original = agent.onPayload;
   agent.onPayload = async function (payload: unknown, model: unknown): Promise<unknown> {
     const startedAt = Date.now();
@@ -358,7 +389,7 @@ export function installPrefixProbe(sessionValue: unknown, specValue?: unknown): 
       state.error();
     }
   }
-  return () => state.close();
+  return Object.assign(() => state.close(), { record });
 }
 
 function equalHash(left: string | undefined, right: string | undefined): boolean {
@@ -366,6 +397,15 @@ function equalHash(left: string | undefined, right: string | undefined): boolean
 }
 
 function breakpointComparison(expert: PrefixRequestRecord, consult: PrefixRequestRecord): boolean {
+  if (
+    (consult.anchor?.state === "added" || consult.anchor?.state === "relocated") &&
+    consult.anchorIdentityValid !== true
+  )
+    return false;
+  if (expert.messageBreakpointShape && consult.messageBreakpointShape)
+    return compareMessageBreakpoints(expert.messageBreakpointShape, consult.messageBreakpointShape, consult.anchor);
+  // Backward compatibility for callers retaining old records (no absolute coordinates).
+  if (consult.anchor?.state === "added" || consult.anchor?.state === "relocated") return false;
   if (expert.breakpointsValid !== true || consult.breakpointsValid !== true) return false;
   const left = expert.breakpointTtls ?? [];
   const right = consult.breakpointTtls ?? [];

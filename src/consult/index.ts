@@ -24,6 +24,9 @@ import {
 } from "./tool.js";
 import type { MainSessionFactsProvider } from "./main-facts.js";
 import { releaseConsultGuard } from "./preserve-guard.js";
+import { createConsultThreads, type ConsultThreads } from "./threads.js";
+import { createAnchorLedger, type AnchorLedger } from "./anchor-ledger.js";
+import type { ConsultDisplayMeta } from "./tool.js";
 
 /**
  * consult assembly (docs/dev/consult/plan.md §6 C-11): everything mutable
@@ -60,8 +63,24 @@ export interface ConsultWiring {
   ): ToolDefinition | undefined;
   /** Fork-dir TTL sweep (stack calls it synchronously at build; no timer is ever created). */
   sweep(): void;
-  /** Runner/adapter physical-reap callback — deletes the fork copy, consult-dir scoped, idempotent (§4.4). */
-  onReaped(runId: RunId, forkSessionFrom?: string): void;
+  /**
+   * Runner/adapter physical-reap callback — deletes the fork copy, consult-dir scoped, idempotent (§4.4).
+   * `info.disposed` is the R2-1 seal proof: only a positively disposed session can let a thread retain
+   * its fork file instead of deleting it; absent/false ⇒ delete (legacy behaviour).
+   */
+  onReaped(runId: RunId, forkSessionFrom?: string, info?: { disposed: boolean }): void;
+  /** Take-once display metadata for a consult run keyed by its fork path (runtime-adapter `consultDisplayMeta` dep). */
+  takeDisplayMeta(forkSessionFrom: string): ConsultDisplayMeta | undefined;
+  /** Follow-up threads (cache-thread plan §4) — exposed for lifecycle wiring and tests. */
+  readonly threads: ConsultThreads;
+  /** Proven-touch ledger behind the pre-consult warm/cold prediction (§5.1). */
+  readonly anchorLedger: AnchorLedger;
+  /**
+   * §7: idempotent teardown — closes threads (deletes every head and reaped candidate; late callbacks only
+   * delete), clears the ledger and pending metadata. Called from session_shutdown, the session_start
+   * defensive cleanup and the next `buildSessionStack`. Never throws; no timers exist to cancel.
+   */
+  close(): void;
   /** Stack onSnapshot tap → cap-watcher fan-out (no timer; purely snapshot-driven). */
   dispatchSnapshot(snapshot: RunSnapshot): void;
 }
@@ -102,6 +121,11 @@ export interface WireConsultDeps {
    * external (byte-identical pre-feature behavior — review #7).
    */
   isExternalProvider?: (provider: string) => boolean;
+  /** pi-ai api of a model route (warm/cold prediction needs `anthropic-messages`). */
+  routeApi?: (model: { provider: string; id: string }) => string | undefined;
+  /** Test seams: time source and epoch id. */
+  now?: () => number;
+  epoch?: string;
 }
 
 const TERMINAL = new Set(["completed", "failed", "timed_out", "aborted"]);
@@ -180,6 +204,8 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
   const owned = new Set<RunId>();
   const watchers = new Map<RunId, Set<(snapshot: RunSnapshot) => void>>();
   const dispatchSnapshot = (snapshot: RunSnapshot): void => {
+    // R2-2: an asker reaching a terminal state closes its threads (gen+1, heads deleted).
+    if (TERMINAL.has(snapshot.status)) threads.onRunTerminal(snapshot.runId);
     const set = watchers.get(snapshot.runId);
     if (set === undefined) return;
     for (const cb of [...set]) {
@@ -193,6 +219,44 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
     }
   };
   const port = createConsultSpawnPort({ spawnService: deps.spawnService, owned, watchers });
+
+  // ── cache-thread plan: threads + prediction ledger + take-once display meta (closure state only).
+  const now = deps.now ?? Date.now;
+  const epoch = deps.epoch ?? `ce_${now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const threads = createConsultThreads({
+    epoch,
+    now,
+    fs: {
+      size(path) {
+        try {
+          const st = statSync(path);
+          return st.isFile() ? st.size : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      remove(path) {
+        // Defense in depth, same scope check as onReaped: only files this subsystem owns.
+        if (!isUnderDir(consultDir, path)) return;
+        try {
+          forkStore.removeForkFile(path);
+        } catch {
+          /* idempotent cleanup never throws */
+        }
+      },
+    },
+  });
+  const anchorLedger = createAnchorLedger({ now });
+  const pendingMeta = new Map<string, ConsultDisplayMeta>();
+  const displayMeta = {
+    put(forkPath: string, meta: ConsultDisplayMeta): void {
+      pendingMeta.set(forkPath, meta);
+    },
+    drop(forkPath: string): void {
+      pendingMeta.delete(forkPath);
+    },
+  };
+  let closed = false;
 
   // ── Dispatch-time resolution (§4.2/§4.5): live (query) ∪ index, same
   // label across sources with different runIds → ambiguous throw.
@@ -429,6 +493,11 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
         inflight,
         settings,
         mainSessionFacts: mainFacts,
+        threads,
+        anchorLedger,
+        displayMeta,
+        now,
+        ...(deps.routeApi === undefined ? {} : { routeApi: deps.routeApi }),
       });
     },
     sweep() {
@@ -440,11 +509,34 @@ export function wireConsult(deps: WireConsultDeps): ConsultWiring {
         );
       }
     },
-    onReaped(runId, forkSessionFrom) {
+    takeDisplayMeta(forkSessionFrom) {
+      const meta = pendingMeta.get(forkSessionFrom);
+      pendingMeta.delete(forkSessionFrom);
+      return meta;
+    },
+    threads,
+    anchorLedger,
+    close() {
+      if (closed) return;
+      closed = true;
+      try {
+        threads.close();
+      } catch (err) {
+        console.warn(
+          `[pi-subagent] consult thread close failed (ignored): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      anchorLedger.close();
+      pendingMeta.clear();
+    },
+    onReaped(runId, forkSessionFrom, info) {
       releaseConsultGuard(runId);
       if (forkSessionFrom === undefined) return; // not a consult run
       // Defense in depth: only ever delete files the consult subsystem owns.
       if (!isUnderDir(consultDir, forkSessionFrom)) return;
+      // R2-1: a thread may retain the file ONLY when the session is proven disposed; a retained
+      // head is never deleted here, not even by a duplicate callback.
+      if (threads.onReaped(forkSessionFrom, info) === "keep") return;
       try {
         forkStore.removeForkFile(forkSessionFrom); // ENOENT-silent ⇒ idempotent
       } catch (err) {

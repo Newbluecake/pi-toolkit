@@ -715,3 +715,33 @@ describe("consult fork-store: checkForkConsistency oversized regime (§16 rule 5
     expect(checkForkConsistency(file, { maxBytes: 4096 })).toEqual({ ok: true });
   });
 });
+
+describe("consult fork-store: thread head chain (cache-thread plan §4.2)", () => {
+  it("a follow-up fork of a retained head carries the previous question + answer; head and original stay untouched", () => {
+    const src = realExpertSession("explorer");
+    const dir = tempDir();
+    const first = forkExpertSession(src.file, "/fallback/cwd", dir);
+    if (!first.ok) throw new Error(first.reason);
+    // The consult run appended Q1/A1 to its fork, then the session was disposed (= sealed head).
+    const q1 = SessionManager.open(first.path);
+    q1.appendMessage({ role: "user", content: [{ type: "text", text: "CONSULT-Q1" }] });
+    q1.appendMessage({ role: "assistant", content: [{ type: "text", text: "CONSULT-A1" }] });
+    const headHash = sha256(first.path);
+    const originalHash = sha256(src.file);
+
+    const second = forkExpertSession(first.path, "/fallback/cwd", dir);
+    if (!second.ok) throw new Error(second.reason);
+    expect(second.path).not.toBe(first.path);
+    const texts = readFileSync(second.path, "utf8");
+    expect(texts).toContain("CONSULT-Q1");
+    expect(texts).toContain("CONSULT-A1");
+    expect(texts).toContain("expert answer");
+    expect(readHeader(second.path)["parentSession"]).toBe(resolve(first.path));
+    expect(sha256(first.path)).toBe(headHash); // the head is only ever read (single writer = the new fork)
+    expect(sha256(src.file)).toBe(originalHash);
+    // removeForkFile stays scoped to the consult dir and idempotent (heads are deleted through it)
+    expect(removeForkFile(first.path, dir)).toBe(true);
+    expect(removeForkFile(first.path, dir)).toBe(false);
+    expect(removeForkFile(src.file, dir)).toBe(false); // outside the consult dir
+  });
+});

@@ -54,3 +54,33 @@ describe("consult prompt R2", () => {
     expect(prompt).not.toContain("READ-ONLY CONSULT MODE");
   });
 });
+
+describe("consult prompt follow-up line (cache-thread plan §4.5)", () => {
+  const FOLLOW =
+    "This is follow-up #3 in this consult thread; your earlier answers above are complete even if the asker saw them truncated.";
+  const base = { question: "next?", maxAnswerChars: 500, budgetNote: false, ...consultPromptLists(snapshot(["read"])) };
+
+  it("inserts exactly one line after the R2 header and before `\\nQuestion:\\n`; without followUp the bytes are unchanged", () => {
+    const plain = buildConsultPrompt(base);
+    const withFollow = buildConsultPrompt({ ...base, followUp: 3 });
+    expect(withFollow).toBe(plain.replace("\n\nQuestion:\n", `\n${FOLLOW}\n\nQuestion:\n`));
+    expect(withFollow.startsWith("READ-ONLY CONSULT MODE\n")).toBe(true);
+    expect(withFollow.indexOf(FOLLOW)).toBeLessThan(withFollow.indexOf("\nQuestion:\n"));
+    expect(withFollow.slice(withFollow.indexOf("\nQuestion:\n") + "\nQuestion:\n".length)).toBe("next?");
+  });
+
+  it("followUp < 2 or absent adds nothing; the budget note still comes last", () => {
+    expect(buildConsultPrompt({ ...base, followUp: 1 })).toBe(buildConsultPrompt(base));
+    const withBudget = buildConsultPrompt({ ...base, budgetNote: true, followUp: 2 });
+    expect(withBudget.endsWith("do not call tools.")).toBe(true);
+    expect(withBudget).toContain("This is follow-up #2");
+  });
+
+  it("d2's transcript parser still extracts exactly the question from a follow-up prompt", async () => {
+    const { consultTranscript } = await import("../../src/web-hub/agent/consult-transcript.js");
+    const prompt = buildConsultPrompt({ ...base, followUp: 2 });
+    const entries = consultTranscript({ consultOf: {}, taskPrompt: prompt, text: "the answer" } as never);
+    const first = entries?.[0] as { message: { content: string } };
+    expect(first.message.content).toBe("next?");
+  });
+});

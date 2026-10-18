@@ -285,10 +285,16 @@ export interface RunnerDeps {
    * session `sealBeforeTerminal` never reached (e.g. a late-arrival session
    * created outside the normal handle lifecycle); additive parameter,
    * existing wiring that ignores the third argument is unaffected.
+   * `info.disposed` (consult cache-thread plan R2-1) is the seal proof: true
+   * only when the session was positively disposed — the reaper reported
+   * `disposed:true` with nothing unkillable, or a late-arrival session went
+   * through `disposeLate`. A reap rejection / `disposed:false` / unkillable
+   * orphan reports false (the file may still be written). Callers that ignore
+   * the argument are unaffected.
    * Implementations must be idempotent, synchronous and non-throwing (a
    * throw is swallowed and only loses the cleanup).
    */
-  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string) => void;
+  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string, info?: { disposed: boolean }) => void;
 }
 export interface Runner {
   run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome>;
@@ -860,7 +866,7 @@ export class RuntimeRunner implements Runner {
           this.d.reaper.disposeLate(req.runId, gen, h); // sync
           // 迟到会话的写入（appendThinkingLevelChange 等）已在 createP resolve
           // 前完成；dispose 后再回调删除（幂等，覆盖 _persist 重生残片）。
-          this.notifyReaped(req, h.sessionId);
+          this.notifyReaped(req, h.sessionId, undefined, true);
         });
         createP = undefined;
         dispatch({
@@ -1162,7 +1168,7 @@ export class RuntimeRunner implements Runner {
         try {
           this.d.driver.onLateArrival(createP, (h) => {
             this.d.reaper.disposeLate(req.runId, gen, h);
-            this.notifyReaped(req, h.sessionId); // same ordering guarantee as the guard-failure path above
+            this.notifyReaped(req, h.sessionId, undefined, true); // same ordering guarantee as the guard-failure path above
           });
         } catch (e) {
           this.d.onExtensionError?.("onLateArrival", req.runId, e instanceof Error ? e.message : String(e));
@@ -1203,6 +1209,7 @@ export class RuntimeRunner implements Runner {
             req,
             handle?.sessionId,
             reaped !== undefined && reaped.unkillable.length > 0 ? undefined : liveSessionFile,
+            reaped !== undefined && reaped.disposed === true && reaped.unkillable.length === 0,
           ),
         );
       const dEntry = this.dispatchers.get(req.runId);
@@ -1222,11 +1229,16 @@ export class RuntimeRunner implements Runner {
     }
   }
   /** consult (§4.4): post-reap cleanup seam. Swallows everything — a cleanup callback must never affect the runner. */
-  private notifyReaped(req: ResolvedSpawnRequest, sessionId?: string, liveSessionFile?: string) {
+  private notifyReaped(
+    req: ResolvedSpawnRequest,
+    sessionId?: string,
+    liveSessionFile?: string,
+    disposed: boolean = false,
+  ) {
     // run-persistence plan D8: release this run's live child-session mark.
     if (liveSessionFile !== undefined) releaseLiveSessionFile(liveSessionFile, req.runId);
     try {
-      this.d.onReaped?.(req.runId, req.forkSessionFrom, sessionId);
+      this.d.onReaped?.(req.runId, req.forkSessionFrom, sessionId, { disposed });
     } catch {
       /* 清理回调不得影响 runner */
     }

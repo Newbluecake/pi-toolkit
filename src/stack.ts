@@ -259,6 +259,14 @@ let previousHostBashViewCapabilityRelease: (() => void) | undefined;
  * session_shutdown，覆盖 /reload 重建新模块的情形）。
  */
 let previousExternal: { dispose(): void } | undefined;
+/**
+ * consult cache-thread plan §7 (③): the previous stack's consult wiring — its follow-up thread heads
+ * (retained fork files), prediction ledger and pending display metadata are closed at the top of the
+ * next same-module build. The OTHER paths are index.ts's `session_shutdown` and the `session_start`
+ * defensive cleanup (they cover the fresh-module `/reload`, which resets this variable). `close()` is
+ * idempotent, so the three paths can never double-delete.
+ */
+let previousConsult: { close(): void } | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -1533,6 +1541,9 @@ export function buildSessionStack(
   previousHostBashViewCapabilityRelease = undefined;
   previousExternal?.dispose();
   previousExternal = undefined;
+  // consult cache-thread plan §7 (③): close the old closure's threads BEFORE this build's fork-dir sweep.
+  previousConsult?.close();
+  previousConsult = undefined;
 
   if (loadHintState !== undefined) {
     loadHintState.latches.clear();
@@ -2102,8 +2113,10 @@ export function buildSessionStack(
       if (!consultRef.current) throw new Error("consult is not wired yet");
       return consultRef.current.resolveExperts(refs);
     },
-    onReaped: (runId, forkSessionFrom, sessionId) => {
-      consultRef.current?.onReaped(runId, forkSessionFrom);
+    // consult cache-thread plan (Q1 ruling (d)): take-once enqueue metadata (prediction + thread position).
+    consultDisplayMeta: (forkSessionFrom) => consultRef.current?.takeDisplayMeta(forkSessionFrom),
+    onReaped: (runId, forkSessionFrom, sessionId, info) => {
+      consultRef.current?.onReaped(runId, forkSessionFrom, info);
       // bash-timeout-grace plan §3.2 (P5): defensive fan-out — `sealAndKill`
       // is idempotent, so this is a no-op for the (normal) case where
       // `sealBeforeTerminal` already sealed the session; it only matters for
@@ -2417,11 +2430,21 @@ export function buildSessionStack(
     consultDir: consultSessionDir(),
     prefetchedEntries,
     mainSessionFacts: () => mainSessionFactsFrom(ctx),
+    // cache-thread plan §5.1: the warm/cold prediction needs the route's pi-ai api.
+    routeApi: (m) => {
+      try {
+        const api = ctx.modelRegistry.find(m.provider, m.id)?.api;
+        return typeof api === "string" ? api : undefined;
+      } catch {
+        return undefined;
+      }
+    },
     // external-agent plan §5.4/§5.5（P5）：仅在端口存在时注入 provider-claim 谓词
     //（评审 #7：关闭态下第三项判定缺席 ⇒ 字节一致）。
     ...(externalPort !== undefined ? { isExternalProvider: (p: string) => externalPort.port.owns(p) } : {}),
   });
   consultRef.current = consult;
+  previousConsult = consult;
   // M9: created early — the fleet widget below lists in-flight workflows.
   const workflowActivity = createWorkflowActivityRegistry();
   // M-E: live usage broadcaster (channel "subagent:usage", 1Hz while active).

@@ -4,6 +4,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { getSystemMessageText } from "@earendil-works/pi-ai";
 import type {
+  ConsultCacheResult,
   ConsultIdentityPrediction,
   ContextUsageInfo,
   DriverEvent,
@@ -15,9 +16,10 @@ import type {
   UsageDelta,
 } from "../core/types.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
-import { classifyConsultToolEnd } from "../core/consult-summary.js";
+import { classifyConsultCacheResult, classifyConsultToolEnd } from "../core/consult-summary.js";
 import { readHeaderCwd } from "../consult/fork-store.js";
-import { installPrefixProbe } from "../consult/prefix-probe.js";
+import { installConsultAnchor } from "../consult/anchor.js";
+import { installPrefixProbe, type PrefixProbeCleanup } from "../consult/prefix-probe.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
 
@@ -492,20 +494,59 @@ export function toolSourcesOf(session: AgentSession): ReadonlyMap<string, string
   }
 }
 
+/** Anchor is installed inside the probe, and only on resumed consult forks. */
+function installConsultProbes(session: AgentSession, spec: SessionSpec): PrefixProbeCleanup {
+  const anchor =
+    isConsultForkSpec(spec) && spec.consultAnchor !== undefined
+      ? installConsultAnchor(session, spec.consultAnchor)
+      : undefined;
+  const disposeProbe = installPrefixProbe(session, spec, anchor?.current);
+  return Object.assign(
+    () => {
+      disposeProbe();
+      anchor?.close();
+    },
+    disposeProbe.record ? { record: disposeProbe.record } : {},
+  );
+}
+function firstConsultCache(
+  spec: SessionSpec,
+  probe: PrefixProbeCleanup,
+): (() => ConsultCacheResult | undefined) | undefined {
+  if (!isConsultForkSpec(spec)) return undefined;
+  return () => {
+    const request = probe.record?.firstSuccessful;
+    if (!request || request.endedAt === undefined) return undefined;
+    return classifyConsultCacheResult(
+      request.usage,
+      request.anchor?.state ?? "n/a",
+      request.anchorIdentityValid === false ? true : request.anchor?.degraded,
+    );
+  };
+}
+
 class PiSessionHandle implements SessionHandle {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly killableHandles = new Set<KillableHandle>();
   readonly consultIdentityPrediction?: ConsultIdentityPrediction;
+  private consultCacheEmitted = false;
   constructor(
     public readonly session: AgentSession,
     readonly childExtensionMissing: boolean = false,
     private readonly disposePrefixProbe: () => void = () => undefined,
     consultIdentityPrediction?: ConsultIdentityPrediction,
+    private readonly consultCacheFirst?: () => ConsultCacheResult | undefined,
   ) {
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
     if (consultIdentityPrediction !== undefined) this.consultIdentityPrediction = consultIdentityPrediction;
+  }
+  takeConsultCacheFirst(): ConsultCacheResult | undefined {
+    if (this.consultCacheEmitted) return undefined;
+    const result = this.consultCacheFirst?.();
+    if (result) this.consultCacheEmitted = true;
+    return result;
   }
   measureInputBudget(prompt: string): { preBytes: number; preTokens: number } {
     const byteLength = (value: string) => Buffer.byteLength(value, "utf8");
@@ -766,7 +807,7 @@ export type ModelResolver = (provider: string, id: string) => unknown | undefine
  * the child session changes (extensions, skills, AGENTS.md, APPEND_SYSTEM).
  */
 export async function toCreateOptions(spec: SessionSpec, cwd: string): Promise<Record<string, unknown>> {
-  const { systemPrompt, ...rest } = spec;
+  const { systemPrompt, consultAnchor: _consultAnchor, ...rest } = spec;
   if (!systemPrompt) return rest;
   const agentDir = rest.agentDir ?? getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -856,11 +897,13 @@ export class PiSessionDriver implements SessionDriver {
           createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]),
         )
         .then(({ session }) => {
-          const disposePrefixProbe = installPrefixProbe(session, resolved);
+          const disposePrefixProbe = installConsultProbes(session, resolved);
           return new PiSessionHandle(
             session,
             computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
             disposePrefixProbe,
+            undefined,
+            firstConsultCache(resolved, disposePrefixProbe),
           );
         });
     }
@@ -868,9 +911,9 @@ export class PiSessionDriver implements SessionDriver {
     // Consult C2 must fail closed after createAgentSession has allocated an AgentSession,
     // but before bind() or the first prompt. The driver owns this cleanup window because the
     // runner's late-arrival hook only sees successfully resolved handles.
-    const { consultGuard: _consultGuard, consultSnapshot, ...piSpec } = resolved;
+    const { consultGuard: _consultGuard, consultSnapshot, consultAnchor: _consultAnchor, ...piSpec } = resolved;
     let created: AgentSession | undefined;
-    let disposePrefixProbe: (() => void) | undefined;
+    let disposePrefixProbe: PrefixProbeCleanup | undefined;
     let disposed = false;
     const disposeOnce = () => {
       if (disposed || !created) return;
@@ -890,7 +933,7 @@ export class PiSessionDriver implements SessionDriver {
       .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
       .then(({ session }) => {
         created = session;
-        disposePrefixProbe = installPrefixProbe(session, resolved);
+        disposePrefixProbe = installConsultProbes(session, resolved);
         let verdict: ReturnType<typeof guard.preflight> | undefined;
         try {
           verdict = guard.preflight(session);
@@ -923,6 +966,7 @@ export class PiSessionDriver implements SessionDriver {
           computeChildExtensionMissing(activationBefore, isConsultForkSpec(spec)),
           disposePrefixProbe,
           consultIdentityPrediction,
+          firstConsultCache(resolved, disposePrefixProbe),
         );
       })
       .catch((error: unknown) => {
@@ -942,6 +986,16 @@ export class PiSessionDriver implements SessionDriver {
       const mapped = mapEvent(event);
       if (!mapped) return;
       onEvent(mapped);
+      // The probe subscribed before bind, so it has already paired the first
+      // provider request with this assistant's usage. No cumulative/ping usage.
+      if (
+        mapped.t === "message_end" &&
+        (event as { message?: { role?: unknown } }).message?.role === "assistant" &&
+        h instanceof PiSessionHandle
+      ) {
+        const first = h.takeConsultCacheFirst();
+        if (first) onEvent({ t: "consult_cache_first", result: first });
+      }
       // child-context-switch plan P0 (§2.3.1): pi's own compaction failing is
       // ALSO surfaced as a dedicated best-effort diagnostic event (in addition
       // to the `compaction_end{failed:true}` flag above), carrying the raw

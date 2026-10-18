@@ -266,6 +266,8 @@ function harness(
     /** D10 (workflow-worktree plan §2): drives the asker cwd cell's `isolated` flag. */
     isolated?: boolean;
     selfCwd?: string;
+    /** cache-thread plan: extra ConsultDeps (threads / anchorLedger / displayMeta / anchorOf / routeApi / now). */
+    extra?: Partial<import("../../src/consult/tool.js").ConsultDeps>;
   } = {},
 ): Harness {
   const port = opts.port ?? new FakePort();
@@ -297,6 +299,7 @@ function harness(
     settings: () => settings,
     ...(opts.mainSessionFacts !== undefined ? { mainSessionFacts: opts.mainSessionFacts } : {}),
     ...(opts.prefixProbeRegistry !== undefined ? { prefixProbeRegistry: opts.prefixProbeRegistry } : {}),
+    ...(opts.extra ?? {}),
   });
   return {
     tool,
@@ -320,9 +323,10 @@ type ToolResult = {
 
 // ── schema (review-1 #20) ──────────────────────────────────────────────────
 
-describe("consult tool: schema carries only expert/question", () => {
-  it("has exactly the two model-facing fields", () => {
-    expect(Object.keys(ConsultToolParams.properties).sort()).toEqual(["expert", "question"]);
+describe("consult tool: schema carries only expert/question/fresh", () => {
+  it("has exactly the three model-facing fields (fresh is optional, cache-thread plan user ruling)", () => {
+    expect(Object.keys(ConsultToolParams.properties).sort()).toEqual(["expert", "fresh", "question"]);
+    expect(ConsultToolParams.required).toEqual(["expert", "question"]);
   });
 });
 
@@ -689,7 +693,7 @@ describe("consult tool: success surface (T-3)", () => {
     const controller = new AbortController();
     await exec(h, "explorer", "why?", controller.signal);
     const req = h.port.spawnCalls[0]!;
-    expect(Object.keys(ConsultToolParams.properties).length).toBe(2); // schema still minimal
+    expect(Object.keys(ConsultToolParams.properties).length).toBe(3); // schema still minimal
     expect(req.expectAck).toBe(true);
     expect(req.forkSessionFrom).toBe(FORK_PATH);
     expect(req.parentRunId).toBe(SELF_RUN_ID);
@@ -1194,5 +1198,532 @@ describe("consultRunLabel", () => {
   it("falls back to consult-<rand4> when there is no usable name", () => {
     expect(consultRunLabel()).toMatch(/^consult-[a-z0-9]{4}$/);
     expect(consultRunLabel("()")).toMatch(/^consult-[a-z0-9]{4}$/);
+  });
+});
+
+// ── cache-thread plan (package C): threads, first lines, predicted, ledger ─────
+
+import { createConsultThreads } from "../../src/consult/threads.js";
+import { createAnchorLedger } from "../../src/consult/anchor-ledger.js";
+import type { ConsultDisplayMeta } from "../../src/consult/tool.js";
+import type { AnchorIdentity } from "../../src/core/types.js";
+import type { AnchorObservation } from "../../src/consult/anchor.js";
+import type { RunPrefixRecord } from "../../src/consult/prefix-probe.js";
+
+const MiB = 1024 * 1024;
+const CAPTURED_IDENTITY: AnchorIdentity = {
+  k: 9,
+  block: 1,
+  blockType: "text",
+  blockHash: "bh",
+  prefixHash: "ph",
+  systemHash: "sh",
+  toolsHash: "th",
+  route: { provider: "acme", model: "bigmodel", api: "anthropic-messages" },
+  ttl: "",
+};
+
+function threadHarness(
+  opts: {
+    ref?: ConsultExpertRef;
+    anchor?: AnchorObservation | undefined;
+    firstValid?: boolean;
+    now?: () => number;
+    tokens?: number;
+    price?: { input: number; cacheWrite: number } | undefined;
+    settings?: Partial<ConsultSettings>;
+    scanVariants?: Array<ExpertSnapshotScanResult | undefined>;
+    firstUsage?: { input: number; cacheRead: number; cacheWrite: number };
+    /** B follow-up: `first.responseOk` and an optional later successful attempt. */
+    firstResponseOk?: boolean;
+    firstSuccessfulUsage?: { input: number; cacheRead: number; cacheWrite: number };
+  } = {},
+) {
+  let t = 5_000_000;
+  const now = opts.now ?? (() => t);
+  const sizes = new Map<string, number>([[expertSessionFile, 2 * MiB]]);
+  const removedByThreads: string[] = [];
+  const threads = createConsultThreads({
+    epoch: "ce_tool",
+    now,
+    fs: {
+      size: (p) => sizes.get(p),
+      remove: (p) => {
+        removedByThreads.push(p);
+        sizes.delete(p);
+      },
+    },
+  });
+  const ledger = createAnchorLedger({ now });
+  const metas = new Map<string, ConsultDisplayMeta>();
+  const metaLog: Array<{ path: string; meta: ConsultDisplayMeta }> = [];
+  let forkSeq = 0;
+  const forkSources: string[] = [];
+  const removed: string[] = [];
+  let scanCalls = 0;
+  const defaultScan: ExpertSnapshotScanResult = {
+    ok: true as const,
+    snapshot: {
+      tools: [{ name: "read", description: "read", parameters: { type: "object" } }],
+      systemSections: {},
+      sourceSessionId: "s_expert",
+      model: { provider: "acme", id: "bigmodel" },
+      lastRequestUsage: { input: 10, cacheRead: 100_000, cacheWrite: 0 },
+    },
+  };
+  const store: ConsultForkStore = {
+    forkExpertSession: (source) => {
+      forkSources.push(source);
+      const path = `/cache/consult-sessions/fork-${++forkSeq}.jsonl`;
+      sizes.set(path, 1 * MiB);
+      return { ok: true, path };
+    },
+    removeForkFile: (p) => {
+      removed.push(p);
+    },
+    scanExpertSnapshot: () => {
+      const v = opts.scanVariants?.[scanCalls];
+      scanCalls += 1;
+      return v ?? defaultScan;
+    },
+  };
+  const registryRecord = (): RunPrefixRecord => ({
+    runId: "r_CONSULT1",
+    ...(opts.firstSuccessfulUsage === undefined
+      ? {}
+      : {
+          firstSuccessful: {
+            seq: 2,
+            startedAt: now() - 1500,
+            endedAt: now() - 500,
+            fieldHashes: {},
+            responseOk: true,
+            ...(opts.anchor === undefined ? {} : { anchor: opts.anchor }),
+            usage: { ...opts.firstSuccessfulUsage, output: 20, costUsd: 0.3 },
+          },
+        }),
+    ...(opts.anchor === undefined ? {} : { anchor: opts.anchor }),
+    first: {
+      seq: 1,
+      startedAt: now() - 2000,
+      endedAt: now() - 1000,
+      fieldHashes: {},
+      ...(opts.anchor === undefined ? {} : { anchor: opts.anchor }),
+      ...(opts.firstValid === undefined ? {} : { anchorIdentityValid: opts.firstValid }),
+      ...(opts.firstResponseOk === undefined ? {} : { responseOk: opts.firstResponseOk }),
+      usage: {
+        ...(opts.firstUsage ?? { input: 5, cacheRead: 0, cacheWrite: 100_000 }),
+        output: 20,
+        costUsd: 0.3,
+      },
+    },
+  });
+  const port = new FakePort();
+  const outcomeWithCtx = (text: string): RunOutcome => {
+    const o = completedOutcome(text);
+    return {
+      ...o,
+      diag: { ...o.diag, contextUsage: { tokens: opts.tokens ?? 5000, contextWindow: 200_000, percent: 2.5 } },
+    };
+  };
+  port.outcome = outcomeWithCtx("answer one");
+  const h = harness({
+    port,
+    fork: { store, calls: [], mainCalls: [], removed, resolveForkCwdCalls: () => 0 },
+    ref: opts.ref ?? ref(),
+    ...(opts.settings === undefined ? {} : { settings: opts.settings }),
+    prefixProbeRegistry: { get: (id) => (id === "r_CONSULT1" ? registryRecord() : undefined) },
+    extra: {
+      threads,
+      anchorLedger: ledger,
+      routeApi: () => "anthropic-messages",
+      displayMeta: {
+        put: (path, meta) => {
+          metas.set(path, meta);
+          metaLog.push({ path, meta });
+        },
+        drop: (path) => {
+          metas.delete(path);
+        },
+      },
+      ...(opts.anchor === undefined ? {} : {}),
+      now,
+    },
+  });
+  if (opts.price !== undefined || "price" in opts) h.priceOf.mockImplementation(() => opts.price);
+  const call = (params: { question?: string; fresh?: boolean; expert?: string } = {}) =>
+    h.tool.execute(
+      "call-t",
+      {
+        expert: params.expert ?? "explorer",
+        question: params.question ?? "Q?",
+        ...(params.fresh ? { fresh: true } : {}),
+      },
+      undefined,
+      undefined,
+      undefined as never,
+    ) as Promise<ToolResult>;
+  return {
+    h,
+    port,
+    threads,
+    ledger,
+    sizes,
+    metas,
+    metaLog,
+    forkSources,
+    removed,
+    removedByThreads,
+    call,
+    advance: (ms: number) => {
+      t += ms;
+    },
+    setOutcome: (text: string, status: RunOutcome["status"] = "completed") => {
+      port.outcome = status === "completed" ? outcomeWithCtx(text) : outcome(status, text);
+    },
+    reap: (index: number, disposed = true) => {
+      const path = `/cache/consult-sessions/fork-${index}.jsonl`;
+      return threads.onReaped(path, { disposed });
+    },
+  };
+}
+
+const firstLine = (r: ToolResult): string => r.content[0]!.text.split("\n")[0]!;
+
+describe("consult threads through the tool (cache-thread plan §4.5/§5.1)", () => {
+  const goodAnchor: AnchorObservation = { state: "added", identity: CAPTURED_IDENTITY };
+
+  it("first consult: `new thread` first line, forks the original, predicted+thread meta written ONCE keyed by fork path", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    const r = await e.call();
+    expect(firstLine(r)).toBe("[new consult thread — no earlier Q/A with this expert]");
+    expect(r.content[0]!.text).toContain("answer one");
+    expect(e.forkSources).toEqual([expertSessionFile]);
+    const logged = e.metaLog[0]!;
+    expect(logged.path).toBe("/cache/consult-sessions/fork-1.jsonl");
+    expect(logged.meta.consultCache.v).toBe(1);
+    expect(logged.meta.consultCache.predicted.state).toBe("unknown");
+    const probeThread = (r.details.cacheProbe as { thread: { id: string; seq: number; mode: string } }).thread;
+    // ONE fact, two projections (A hand-off): consult-run meta === asker probe
+    expect(logged.meta.consultThread).toEqual({ threadId: probeThread.id, seq: probeThread.seq });
+    expect(probeThread.mode).toBe("new");
+    // the spawn request carries the host anchor spec with the EXACT prompt text and no base on a new thread
+    const req = e.port.spawnCalls[0]!;
+    expect(req.consultAnchor).toEqual({ prompt: req.prompt });
+    // the take-once entry is dropped by the tool's finally if the adapter never took it
+    expect(e.metas.size).toBe(0);
+  });
+
+  it("every consult run gets `predicted`: main, no evidence and OAuth-style all yield {state:'unknown'}", async () => {
+    // main: never a thread, never a first line
+    const m = threadHarness({
+      ref: mainRef(),
+      settings: {},
+    });
+    const mh = harness({
+      ref: mainRef(),
+      mainSessionFacts: () => ({
+        sessionFile: expertSessionFile,
+        model: { provider: "acme", id: "bigmodel" },
+        contextTokens: 1000,
+        contextPercent: 1,
+      }),
+      extra: {
+        threads: m.threads,
+        anchorLedger: m.ledger,
+        displayMeta: { put: (p, meta) => m.metaLog.push({ path: p, meta }), drop: () => undefined },
+      },
+    });
+    const mr = (await mh.tool.execute(
+      "c",
+      { expert: "main", question: "q" },
+      undefined,
+      undefined,
+      undefined as never,
+    )) as ToolResult;
+    expect(mr.content[0]!.text).not.toMatch(/^\[/);
+    expect(m.metaLog).toHaveLength(1);
+    expect(m.metaLog[0]!.meta.consultCache.predicted).toEqual({ state: "unknown", reason: "main" });
+    expect(m.metaLog[0]!.meta.consultThread).toBeUndefined();
+    expect(m.threads.views()).toEqual([]); // main never builds a thread
+    expect(mr.details.outcome).toBe("completed");
+    expect((mr.details.cacheProbe as { warm: unknown }).warm).toEqual({ state: "unknown", reason: "main" });
+
+    // no ledger wired (legacy deps) still writes unknown
+    const metaLog: ConsultDisplayMeta[] = [];
+    const bare = harness({
+      extra: { displayMeta: { put: (_p, meta) => metaLog.push(meta), drop: () => undefined } },
+    });
+    await exec(bare);
+    expect(metaLog[0]!.consultCache.predicted.state).toBe("unknown");
+
+    // OAuth-degraded earlier touch ⇒ unknown(degraded-anchor)
+    const o = threadHarness({ anchor: { state: "relocated", identity: CAPTURED_IDENTITY, degraded: true } });
+    await o.call({ question: "one" });
+    o.reap(1);
+    await o.call({ question: "two" });
+    expect(o.metaLog[1]!.meta.consultCache.predicted).toMatchObject({ state: "unknown" });
+  });
+
+  it("follow-up after a sealed answer: continued #2, forks the head, prompt has the follow-up line, base is passed", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call({ question: "first" });
+    expect(e.reap(1)).toBe("keep"); // sealed + eligible ⇒ promoted
+    e.setOutcome("answer two");
+    const r2 = await e.call({ question: "second" });
+    const id = (e.metaLog[0]!.meta.consultThread as { threadId: string }).threadId;
+    expect(firstLine(r2)).toBe(
+      `[consult thread ${id} #2 — the expert sees your previous 1 question(s) and its full answers]`,
+    );
+    expect(e.forkSources).toEqual([expertSessionFile, "/cache/consult-sessions/fork-1.jsonl"]);
+    const req2 = e.port.spawnCalls[1]!;
+    expect(req2.prompt).toContain(
+      "This is follow-up #2 in this consult thread; your earlier answers above are complete",
+    );
+    expect(req2.prompt.indexOf("This is follow-up #2")).toBeLessThan(req2.prompt.indexOf("\nQuestion:\n"));
+    expect(req2.prompt.startsWith("READ-ONLY CONSULT MODE\n")).toBe(true);
+    expect(req2.consultAnchor).toEqual({ prompt: req2.prompt, base: CAPTURED_IDENTITY });
+    expect(e.metaLog[1]!.meta.consultThread).toEqual({ threadId: id, seq: 2 });
+  });
+
+  it("answer not sealed yet ⇒ `previous answer not yet retained` and the unsealed file is never forked", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call();
+    const r2 = await e.call(); // fork-1 not reaped yet
+    expect(firstLine(r2)).toBe("[previous answer not yet retained — the expert sees up to #0 only]");
+    expect(e.forkSources).toEqual([expertSessionFile, expertSessionFile]);
+    expect(e.threads.views()[0]!.headFile).toBeUndefined();
+  });
+
+  it("a disposed:false reap never promotes: the next consult is a new thread again", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call();
+    expect(e.reap(1, false)).toBe("delete");
+    const r2 = await e.call();
+    expect(firstLine(r2)).toBe("[new consult thread — no earlier Q/A with this expert]");
+  });
+
+  it("fresh:true drops the thread and says so; its answer is the new thread's #1", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call();
+    e.reap(1);
+    const r = await e.call({ fresh: true });
+    expect(firstLine(r)).toBe(
+      "[fresh consult (fresh:true) — earlier Q/A in this thread were dropped and will not be retained]",
+    );
+    expect(e.forkSources[1]).toBe(expertSessionFile);
+    expect(e.removedByThreads).toContain("/cache/consult-sessions/fork-1.jsonl");
+    e.reap(2);
+    expect(e.threads.views()[0]!.seq).toBe(1);
+    expect(e.threads.views()[0]!.headFile).toBe("/cache/consult-sessions/fork-2.jsonl");
+  });
+
+  it("head context ≥75% ⇒ reset(context): forks the original, honest first line", async () => {
+    const e = threadHarness({ anchor: goodAnchor, tokens: 160_000 });
+    await e.call();
+    e.reap(1);
+    // head.percent = 2.5 from diag in the helper; force via a high percent outcome
+    e.port.outcome = {
+      ...completedOutcome("big"),
+      diag: {
+        ...completedOutcome("big").diag,
+        contextUsage: { tokens: 160_000, contextWindow: 200_000, percent: 80 },
+      },
+    };
+    await e.call(); // #2 consult continues (head tokens were from #1 = 160k, percent 2.5) …
+    e.reap(2);
+    const r = await e.call(); // … now the head carries percent 80
+    expect(firstLine(r)).toBe("[thread reset (context) — the expert does NOT see your earlier questions]");
+    expect(e.forkSources.at(-1)).toBe(expertSessionFile);
+  });
+
+  it("head first-request cost is estimated as a conservative COLD write ⇒ reset(cost) when over maxFirstRequestUsd", async () => {
+    // price: input 3, write 5 $/M; head 100k tokens ⇒ 0.5$; cap 0.4$
+    const e = threadHarness({
+      anchor: goodAnchor,
+      tokens: 100_000,
+      settings: { maxFirstRequestUsd: 0.4 },
+      ref: ref({ contextTokens: 10_000 }), // the original (10k ⇒ $0.05) passes the existing gate
+    });
+    await e.call();
+    e.reap(1);
+    const r = await e.call();
+    expect(firstLine(r)).toBe("[thread reset (cost) — the expert does NOT see your earlier questions]");
+  });
+
+  it("a concurrent second consult is a parallel branch (not kept)", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call();
+    e.reap(1);
+    // hold #2 in flight, ask #3 meanwhile
+    let release!: () => void;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const origWait = e.port.waitOutcome.bind(e.port);
+    let n = 0;
+    e.port.waitOutcome = async (id) => {
+      n += 1;
+      if (n === 1) await gate;
+      return origWait(id);
+    };
+    const p2 = e.call({ question: "two" });
+    await new Promise((r) => setTimeout(r, 0));
+    const r3 = await e.call({ question: "three" });
+    expect(firstLine(r3)).toBe(
+      `[parallel branch — the expert sees thread #1; this answer will NOT be kept for follow-ups]`,
+    );
+    release();
+    await p2;
+  });
+
+  it("truncation notes depend on retention: kept in the thread vs not retained", async () => {
+    const long = "x".repeat(300);
+    const e = threadHarness({ anchor: goodAnchor, settings: { maxAnswerChars: 100 } });
+    e.setOutcome(long);
+    const kept = await e.call();
+    expect(kept.content[0]!.text).toContain(
+      '⚠ answer truncated at 100 chars; it will be kept in this consult thread once this consult closes — consult again (e.g. "continue from where you were cut off") to get the rest.',
+    );
+    // while #1 is unsealed, #2 is `pending` ⇒ not retained
+    const notKept = await e.call();
+    expect(notKept.content[0]!.text).toContain(
+      "⚠ answer truncated at 100 chars; this answer is not retained — ask a narrower follow-up.",
+    );
+    expect(notKept.details.truncated).toBe(true);
+  });
+
+  it("only a clean completed answer is eligible: a failed consult never becomes the head", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    e.setOutcome("partial text", "failed");
+    await e.call();
+    e.reap(1);
+    expect(e.threads.views()[0]!.headFile).toBeUndefined();
+    expect(e.threads.stats().promotions).toBe(0);
+  });
+
+  it("spawn admission failure releases the lease and removes the pending metadata; the thread can continue", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    e.port.spawnShouldThrow = new Error("admission boom");
+    await e.call();
+    expect(e.removed).toContain("/cache/consult-sessions/fork-1.jsonl");
+    expect(e.metas.size).toBe(0);
+    e.port.spawnShouldThrow = undefined;
+    const r = await e.call();
+    expect(firstLine(r)).toBe("[new consult thread — no earlier Q/A with this expert]");
+    expect(e.threads.views()[0]!.busy).toBe(false);
+  });
+
+  it("loadout drift on a thread head ⇒ identity reset from the original (never continue on a different prefix)", async () => {
+    const otherSnapshot: ExpertSnapshotScanResult = {
+      ok: true,
+      snapshot: {
+        tools: [{ name: "read", description: "CHANGED", parameters: { type: "object" } }],
+        systemSections: {},
+        sourceSessionId: "s_expert",
+        model: { provider: "acme", id: "bigmodel" },
+        lastRequestUsage: { input: 10, cacheRead: 100_000, cacheWrite: 0 },
+      },
+    };
+    // scan #1 (first consult) default; scan #2 (follow-up from the head) drifted; scan #3 (retry) default
+    const e = threadHarness({ anchor: goodAnchor, scanVariants: [undefined, otherSnapshot, undefined] });
+    await e.call();
+    e.reap(1);
+    const r = await e.call();
+    expect(firstLine(r)).toBe("[thread reset (identity) — the expert does NOT see your earlier questions]");
+    expect(e.forkSources).toEqual([expertSessionFile, "/cache/consult-sessions/fork-1.jsonl", expertSessionFile]);
+    expect(e.removed).toContain("/cache/consult-sessions/fork-2.jsonl"); // drifted copy deleted
+  });
+});
+
+describe("anchor ledger + prediction through the tool (§5.1)", () => {
+  const goodAnchor: AnchorObservation = { state: "added", identity: CAPTURED_IDENTITY };
+
+  it("a proven touch makes the NEXT consult (even a first consult by another asker) predicted warm, bound to request START", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call();
+    expect(e.ledger.size()).toBe(1);
+    e.advance(30_000);
+    // a fresh thread for the same expert ⇒ same route/digest ⇒ warm
+    await e.call({ fresh: true });
+    const predicted = e.metaLog[1]!.meta.consultCache.predicted;
+    expect(predicted.state).toBe("warm");
+    expect(predicted.evidence?.source).toBe("anchor-ledger");
+    // touch time = first.startedAt (now−2000 at the time of the call), not dispatch time
+    expect(predicted.evidence?.lastProvenTouchAt).toBe(5_000_000 - 2000);
+  });
+
+  it("the warm window expires: > TTL later the prediction is cold", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call();
+    e.advance(5 * 60_000 + 1000);
+    await e.call({ fresh: true });
+    expect(e.metaLog[1]!.meta.consultCache.predicted.state).toBe("cold");
+  });
+
+  it("no touch when the anchor is skipped / absent, usage is too small, or identity drifted (anchorIdentityValid === false)", async () => {
+    for (const variant of [
+      { anchor: { state: "skipped:shape" } as AnchorObservation },
+      { anchor: undefined },
+      { anchor: goodAnchor, firstUsage: { input: 5, cacheRead: 100, cacheWrite: 100 } }, // < 0.9 × 100010
+      { anchor: goodAnchor, firstValid: false },
+    ]) {
+      const e = threadHarness(variant);
+      await e.call();
+      expect(e.ledger.size()).toBe(0);
+    }
+  });
+
+  it("a failed/superseded first attempt (responseOk === false) proves nothing; a later firstSuccessful does", async () => {
+    // failed first attempt, no successful one ⇒ no warm proof and an n/a cacheResult (usage of a failed attempt is untrusted)
+    const failed = threadHarness({ anchor: goodAnchor, firstResponseOk: false });
+    const r = await failed.call();
+    expect(failed.ledger.size()).toBe(0);
+    failed.reap(1);
+    await failed.call();
+    // …and the failed attempt's anchor is never stored as the thread base either
+    expect(failed.port.spawnCalls[1]!.consultAnchor?.base).toBeUndefined();
+    expect((r.details.cacheProbe as { cacheResult: { label: string } }).cacheResult.label).toBe("n/a");
+
+    // strict-tool fallback: attempt 1 superseded, attempt 2 succeeded ⇒ evidence comes from firstSuccessful
+    const retried = threadHarness({
+      anchor: goodAnchor,
+      firstResponseOk: false,
+      firstUsage: { input: 1, cacheRead: 0, cacheWrite: 0 }, // would never qualify
+      firstSuccessfulUsage: { input: 2, cacheRead: 99_000, cacheWrite: 1_000 },
+    });
+    const r2 = await retried.call();
+    expect(retried.ledger.size()).toBe(1);
+    expect((r2.details.cacheProbe as { cacheResult: { label: string } }).cacheResult.label).toBe("hit");
+    retried.advance(1000);
+    await retried.call({ fresh: true });
+    expect(retried.metaLog[1]!.meta.consultCache.predicted.evidence?.lastProvenTouchAt).toBe(5_000_000 - 1500);
+
+    // an unmarked first (responseOk undefined, legacy record) still counts
+    const legacy = threadHarness({ anchor: goodAnchor });
+    await legacy.call();
+    expect(legacy.ledger.size()).toBe(1);
+  });
+
+  it("a drifted baseline is also never stored as a thread base", async () => {
+    const e = threadHarness({ anchor: goodAnchor, firstValid: false });
+    await e.call();
+    e.reap(1);
+    await e.call();
+    expect(e.port.spawnCalls[1]!.consultAnchor).toEqual({ prompt: e.port.spawnCalls[1]!.prompt }); // no base
+    expect(e.metaLog[1]!.meta.consultCache.predicted).toMatchObject({ state: "unknown", reason: "degraded-anchor" });
+  });
+
+  it("probe carries anchor + cacheResult (v1 metric) + warm from the same prediction", async () => {
+    const e = threadHarness({ anchor: goodAnchor, firstUsage: { input: 2, cacheRead: 99_000, cacheWrite: 1_000 } });
+    const r = await e.call();
+    const probe = r.details.cacheProbe as {
+      anchor: { state: string };
+      cacheResult: { label: string; v: number; anchor: string };
+      warm: { state: string };
+    };
+    expect(probe.anchor.state).toBe("added");
+    expect(probe.cacheResult).toMatchObject({ v: 1, label: "hit", anchor: "added" });
+    expect(probe.warm).toEqual(e.metaLog[0]!.meta.consultCache.predicted);
   });
 });

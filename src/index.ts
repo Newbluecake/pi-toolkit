@@ -863,6 +863,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.rpc.close();
       holder.current.fabric?.dispose();
       holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
+      holder.current.consult.close(); // consult cache-thread plan §7 (②): retained thread heads + ledger (idempotent)
     }
     await types.reload();
     const stack = buildSessionStack(
@@ -911,6 +912,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     // blinks off/on at the combined tick rate, worse with every reload.
     stack.fleetWidget?.dispose();
     stack.keepalive?.dispose();
+    // consult cache-thread plan §7 (①): FIRST path — delete every retained thread head and clear the ledger
+    // before the drain below; any consult still settling arrives at a closed registry and can only delete.
+    // pi's /reload sends reason "reload" through here before re-importing the extension.
+    stack.consult.close();
     stack.quota?.dispose();
     stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
     stack.load?.dispose();

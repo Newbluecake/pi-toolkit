@@ -207,3 +207,136 @@ describe("consult prefix probe", () => {
     expect(JSON.stringify(registry.get("fifo-prefix-64"))).not.toContain("never-store-64");
   });
 });
+
+describe("anchor state comparison equivalence (raw body and stored hashes)", () => {
+  it("uses one fixture table for added/relocated/skipped and rejects every extra coordinate/ttl drift", async () => {
+    const { resolveAnchor } = await import("../../src/consult/anchor.js");
+    const model = { api: "anthropic-messages", provider: "test", id: "model" };
+    const cc = { type: "ephemeral", ttl: "5m" };
+    const expert: Record<string, any> = {
+      model: "model",
+      system: [{ type: "text", text: "system", cache_control: cc }],
+      tools: [{ name: "read", cache_control: cc }],
+      messages: [{ role: "user", content: [{ type: "text", text: "history", cache_control: cc }] }],
+    };
+    const baseline = {
+      ...expert,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "history" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "thought", signature: "sig" },
+            { type: "text", text: "answer" },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "question", cache_control: cc }] },
+      ],
+    };
+    const added = resolveAnchor(baseline, { prompt: "question" }, model);
+    const oauth = { ...baseline, system: [{ type: "text", text: "oauth", cache_control: cc }, ...baseline.system] };
+    const relocated = resolveAnchor(oauth, { prompt: "question" }, model);
+    const change = (body: unknown, fn: (p: any) => void): any => {
+      const clone = structuredClone(body);
+      fn(clone);
+      return clone;
+    };
+    const fixtures = [
+      { name: "added", body: added.payload, anchor: added, expected: true },
+      { name: "relocated", body: relocated.payload, anchor: relocated, expected: true },
+      { name: "skipped", body: baseline, anchor: { state: "skipped:limit" as const }, expected: true },
+      { name: "untrusted assistant marker", body: added.payload, anchor: undefined, expected: false },
+      { name: "missing anchor", body: baseline, anchor: added, expected: false },
+      {
+        name: "extra point",
+        body: change(added.payload, (p) => {
+          p.messages[0].content[0].cache_control = cc;
+        }),
+        anchor: added,
+        expected: false,
+      },
+      {
+        name: "wrong anchor coordinate",
+        body: change(added.payload, (p) => {
+          p.messages[1].content[0].cache_control = p.messages[1].content[1].cache_control;
+          delete p.messages[1].content[1].cache_control;
+        }),
+        anchor: added,
+        expected: false,
+      },
+      {
+        name: "anchor ttl mismatch",
+        body: change(added.payload, (p) => {
+          p.messages[1].content[1].cache_control.ttl = "1h";
+        }),
+        anchor: added,
+        expected: false,
+      },
+      {
+        name: "last ttl mismatch",
+        body: change(added.payload, (p) => {
+          p.messages[2].content[0].cache_control.ttl = "1h";
+        }),
+        anchor: added,
+        expected: false,
+      },
+      {
+        name: "relocated kept last",
+        body: change(relocated.payload, (p) => {
+          p.messages[2].content[0].cache_control = cc;
+        }),
+        anchor: relocated,
+        expected: false,
+      },
+      {
+        name: "added missing last",
+        body: change(added.payload, (p) => {
+          delete p.messages[2].content[0].cache_control;
+        }),
+        anchor: added,
+        expected: false,
+      },
+      {
+        name: "changed anchor text after inner hook",
+        body: change(added.payload, (p) => {
+          p.messages[1].content[1].text = "tampered";
+        }),
+        anchor: added,
+        expected: false,
+      },
+      {
+        name: "changed thinking signature after inner hook",
+        body: change(added.payload, (p) => {
+          p.messages[1].content[0].signature = "tampered";
+        }),
+        anchor: added,
+        expected: false,
+      },
+      {
+        name: "changed prefix content",
+        body: change(added.payload, (p) => {
+          p.messages[0].content[0].text = "changed";
+        }),
+        anchor: added,
+        expected: false,
+      },
+    ];
+    for (const fixture of fixtures) {
+      const e = fixture.anchor?.state === "relocated" ? { ...expert, system: oauth.system } : expert;
+      const session = fakeSession();
+      const cleanup = installPrefixProbe(
+        session,
+        { runId: `anchor-state-${fixture.name}`, consultGuard: {} },
+        () => fixture.anchor,
+      );
+      await (session.agent.onPayload as Function)(fixture.body, model);
+      const record = getPrefixProbeRegistry().get(`anchor-state-${fixture.name}`)!;
+      const expertRecord = await capture(`anchor-expert-${fixture.name}`, e, false);
+      const raw = comparePayloadPrefix(e, fixture.body as Record<string, unknown>, fixture.anchor);
+      expect(raw.messages, fixture.name).toBe(fixture.expected);
+      expect(compareRecordedPrefix(expertRecord, record.first!), fixture.name).toEqual(raw);
+      expect(record.anchor).toEqual(fixture.anchor);
+      cleanup();
+    }
+  });
+});

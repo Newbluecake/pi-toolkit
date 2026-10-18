@@ -146,3 +146,22 @@ describe("consult preserve identity", () => {
     expect(comparePayloadPrefix(expert, { ...consult, tools: [{ name: "write" }] }).tools).toBe(false);
   });
 });
+
+it("does not widen the frozen provider field list for anchors", async () => {
+  const { PROVIDER_PREFIX_FIELDS } = await import("../../src/consult/preserve-identity.js");
+  expect(PROVIDER_PREFIX_FIELDS).toEqual([
+    "model",
+    "messages",
+    "max_tokens",
+    "stream",
+    "betas",
+    "system",
+    "temperature",
+    "tools",
+    "thinking",
+    "output_config",
+    "metadata",
+    "tool_choice",
+    "fallbacks",
+  ]);
+});

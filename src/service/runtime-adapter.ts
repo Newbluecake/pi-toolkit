@@ -4,7 +4,9 @@ import { applyStructuredOutputPolicy, validateAgainstSchema } from "../core/json
 import { validateVerdictV1Semantics } from "../core/verdict-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
+  ConsultCacheDiagnostics,
   ConsultExpertRef,
+  ConsultThreadRef,
   DeadlineNotice,
   ErrorInfo,
   LifecycleEvent,
@@ -162,7 +164,17 @@ export interface RuntimeAdapterDeps {
    * those never reach the runner's own finally, so the fork copy would leak
    * to the 24h sweep without this second call site. Must be idempotent.
    */
-  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string) => void;
+  onReaped?: (runId: RunId, forkSessionFrom?: string, sessionId?: string, info?: { disposed: boolean }) => void;
+  /**
+   * consult cache-thread plan (package C, Q1 ruling (d)): take-once display
+   * metadata for a consult run, keyed by its `forkSessionFrom` path (unique,
+   * generated before spawn). Evaluated exactly once per run when the enqueue
+   * displayMeta is built. Absent ⇒ byte-identical to the pre-feature adapter.
+   */
+  consultDisplayMeta?: (
+    forkSessionFrom: string,
+  ) =>
+    { consultCache?: Pick<ConsultCacheDiagnostics, "v" | "predicted">; consultThread?: ConsultThreadRef } | undefined;
   /**
    * bash-timeout-grace plan §3.2 (P5 wiring of the P0b-frozen `RunnerDeps`
    * field): forwarded verbatim to `RunnerDeps.sealSession` — `sealBeforeTerminal`
@@ -1152,9 +1164,17 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // (the `prompt` field on SessionSpec itself is always overridden by
         // the request's own prompt on the next line regardless).
         const { promptNotes, ...sessionFields } = sessionSpec;
+        const consultMeta =
+          isConsultRun && spec.request.forkSessionFrom !== undefined
+            ? deps.consultDisplayMeta?.(spec.request.forkSessionFrom)
+            : undefined;
         const req: ResolvedSpawnRequest = {
           runId: spec.runId,
           ...sessionFields,
+          // NOT_THREADED host-only anchor: opt in explicitly, never inherited on resume.
+          ...(isConsultRun && spec.request.consultAnchor !== undefined
+            ? { consultAnchor: spec.request.consultAnchor }
+            : {}),
           // consult §5.4 B-4: a consult run's prompt is the consult question
           // verbatim — buildPrompt's agent-type prefix (the whole task
           // instruction of the expert's type) is already in the fork's
@@ -1212,6 +1232,8 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                   },
                 }
               : {}),
+            ...(consultMeta?.consultCache === undefined ? {} : { consultCache: consultMeta.consultCache }),
+            ...(consultMeta?.consultThread === undefined ? {} : { consultThread: consultMeta.consultThread }),
           },
         };
         runnerEntered = true;

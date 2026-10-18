@@ -1,5 +1,12 @@
 import { getCurrentTools, getToolStateChanges, toToolDeclaration } from "@earendil-works/pi-ai";
 import type { ConsultGuardPreflight, ExpertRequestSnapshot, ToolDeclaration } from "../core/types.js";
+import {
+  anchorIdentityMatches,
+  compareMessageBreakpoints,
+  messageBreakpointShape,
+  withoutCacheControl,
+  type AnchorObservation,
+} from "./anchor.js";
 import { CONSULT_READONLY_TOOLS } from "../runtime/tool-scope.js";
 
 /** Provider-visible fields frozen by consult-preserve v3.1. */
@@ -171,65 +178,10 @@ function equal(left: unknown, right: unknown): boolean {
   return stableValue(left) === stableValue(right);
 }
 
-function withoutCacheControl(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutCacheControl);
-  if (value === null || typeof value !== "object") return value;
-  const object = value as Record<string, unknown>;
-  const copy: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(object)) {
-    if (key === "cache_control") continue;
-    copy[key] = withoutCacheControl(child);
-  }
-  return copy;
-}
-
-interface BreakpointShape {
-  valid: boolean;
-  ttls: unknown[];
-}
-
-/**
- * Anthropic moves the ephemeral breakpoint to the newest user/tool-result
- * message when a consult appends its question. Compare that rule relatively,
- * rather than comparing the absolute message indexes (which necessarily shift
- * after the appended assistant/user pair).
- */
-function breakpointShape(messages: unknown): BreakpointShape {
-  if (!Array.isArray(messages)) return { valid: false, ttls: [] };
-  let lastUserOrToolResult = -1;
-  messages.forEach((message, index) => {
-    if (message !== null && typeof message === "object") {
-      const role = (message as { role?: unknown }).role;
-      if (role === "user" || role === "tool_result") lastUserOrToolResult = index;
-    }
-  });
-  const ttls: unknown[] = [];
-  let valid = true;
-  messages.forEach((message, messageIndex) => {
-    if (message === null || typeof message !== "object") return;
-    const content = (message as { content?: unknown }).content;
-    if (!Array.isArray(content)) return;
-    content.forEach((block) => {
-      if (block === null || typeof block !== "object") return;
-      const cacheControl = (block as { cache_control?: unknown }).cache_control;
-      if (cacheControl === undefined) return;
-      if (messageIndex !== lastUserOrToolResult) valid = false;
-      const ttl =
-        cacheControl !== null && typeof cacheControl === "object" ? (cacheControl as { ttl?: unknown }).ttl : undefined;
-      ttls.push(ttl);
-    });
-  });
-  return { valid, ttls };
-}
-
-function messagePrefix(expert: unknown, consult: unknown): boolean {
+function messagePrefix(expert: unknown, consult: unknown, anchor?: AnchorObservation): boolean {
   if (!Array.isArray(expert) || !Array.isArray(consult) || consult.length < expert.length) return false;
-  const expertBreakpoints = breakpointShape(expert);
-  const consultBreakpoints = breakpointShape(consult);
   return (
-    expertBreakpoints.valid &&
-    consultBreakpoints.valid &&
-    equal(expertBreakpoints.ttls, consultBreakpoints.ttls) &&
+    compareMessageBreakpoints(messageBreakpointShape(expert), messageBreakpointShape(consult), anchor) &&
     expert.every((message, index) => equal(withoutCacheControl(message), withoutCacheControl(consult[index])))
   );
 }
@@ -257,6 +209,7 @@ export interface PayloadPrefixComparison {
 export function comparePayloadPrefix(
   expert: Record<string, unknown>,
   consult: Record<string, unknown>,
+  anchor?: AnchorObservation,
 ): PayloadPrefixComparison {
   const optionalEqual = (name: string) => {
     const left = expert[name];
@@ -265,7 +218,9 @@ export function comparePayloadPrefix(
   };
   return {
     model: equal(expert.model, consult.model),
-    messages: messagePrefix(expert.messages, consult.messages),
+    messages:
+      messagePrefix(expert.messages, consult.messages, anchor) &&
+      ((anchor?.state !== "added" && anchor?.state !== "relocated") || anchorIdentityMatches(consult, anchor.identity)),
     tools: equal(expert.tools, consult.tools),
     system: equal(expert.system, consult.system),
     thinking: optionalEqual("thinking"),

@@ -337,13 +337,65 @@ describe("consult integration: concurrency (§9 T-14)", () => {
     const [f1, f2] = resumeCalls.map((c) => c.file!);
     expect(f1).not.toBe(f2); // each consult forks its own copy
 
+    // cache-thread plan §4.5: every answer now leads with a truthful thread line (`new` vs `parallel branch`).
+    const body = (text: string): string => text.replace(/^\[[^\n]*\]\n\n/, "");
     const expectedTexts = new Set([`answer for ${f1}`, `answer for ${f2}`]);
-    expect(expectedTexts.has(r1.content[0]!.text)).toBe(true);
-    expect(expectedTexts.has(r2.content[0]!.text)).toBe(true);
-    expect(r1.content[0]!.text).not.toBe(r2.content[0]!.text);
+    expect(expectedTexts.has(body(r1.content[0]!.text))).toBe(true);
+    expect(expectedTexts.has(body(r2.content[0]!.text))).toBe(true);
+    expect(body(r1.content[0]!.text)).not.toBe(body(r2.content[0]!.text));
+    const lines = [r1, r2].map((r) => r.content[0]!.text.split("\n")[0]!).sort();
+    expect(lines[0]).toMatch(/^\[new consult thread /);
+    expect(lines[1]).toMatch(/^\[parallel branch /);
 
     expect(sha256(expert.file)).toBe(beforeHash); // F2 holds under concurrency too
-    await waitUntil(() => resumeCalls.every((c) => !existsSync(c.file!)));
+    // The branch fork is deleted once reaped; the thread's kept answer is promoted to the retained head
+    // (production chain: runner onReaped{disposed:true} → wireConsult → threads) and survives until close().
+    await waitUntil(() => resumeCalls.filter((c) => existsSync(c.file!)).length === 1);
+    stack.consult.close();
+    expect(resumeCalls.every((c) => !existsSync(c.file!))).toBe(true);
+  });
+});
+
+describe("consult integration: follow-up thread through the production chain (cache-thread plan C12/R2-5)", () => {
+  it("consult #2 forks the sealed head of consult #1; the head is replaced on promotion and deleted at close()", async () => {
+    const expert = realExpertSession("threadexpert");
+    const { calls } = spyOnDriver({
+      onResume: async (file) => fakeHandle({ sessionFile: file, getLastAssistantText: () => `answer for ${file}` }),
+    });
+    const h = harness();
+    const stack = buildSessionStack(h.pi, h.ctx, settings(), types, []);
+    const expertRef: ConsultExpertRef = { runId: "r_EXPERT1", sessionFile: expert.file, agentType: "explorer" };
+    const spawned = await stack.spawn.spawn({
+      type: "dispatcher",
+      prompt: "consult twice",
+      consultExperts: [expertRef],
+    });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+    await waitUntil(() => calls.some((c) => c.kind === "create"));
+    const tool = findConsultTool(calls.find((c) => c.kind === "create")!.spec);
+
+    const r1 = await tool.execute("call-1", { expert: "r_EXPERT1", question: "q1" });
+    expect(r1.content[0]!.text.split("\n")[0]).toMatch(/^\[new consult thread /);
+    const first = calls.filter((c) => c.kind === "resume")[0]!.file!;
+    // sealed (runner reap → disposed:true) + eligible ⇒ promoted to head and NOT deleted
+    await waitUntil(() => stack.consult.threads.views()[0]?.headFile === first);
+    expect(existsSync(first)).toBe(true);
+
+    const r2 = await tool.execute("call-2", { expert: "r_EXPERT1", question: "q2" });
+    const threadId = stack.consult.threads.views()[0]!.id;
+    expect(r2.content[0]!.text.split("\n")[0]).toBe(
+      `[consult thread ${threadId} #2 — the expert sees your previous 1 question(s) and its full answers]`,
+    );
+    const second = calls.filter((c) => c.kind === "resume")[1]!.file!;
+    expect(second).not.toBe(first);
+    const header = JSON.parse(readFileSync(second, "utf8").split("\n", 1)[0]!) as { parentSession?: string };
+    expect(header.parentSession).toBe(first); // forked from the retained head, not the original expert file
+    await waitUntil(() => stack.consult.threads.views()[0]?.headFile === second);
+    expect(existsSync(first)).toBe(false); // old head deleted on promotion
+    expect(existsSync(second)).toBe(true);
+
+    stack.consult.close();
+    expect(existsSync(second)).toBe(false);
   });
 });
 
