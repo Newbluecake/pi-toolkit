@@ -1,6 +1,6 @@
-# Feishu F-probe 租户事实记录（待真人运行）
+# Feishu F-probe 租户事实记录
 
-状态：**未进行真实租户测试，V1–V12 全部待填**。这是结果模板，不是已通过的验收报告。
+状态：**2026-10-18 首轮真实租户运行完成**（用户执行，主会话据脱敏报告填写）。V7（P4 跨连接重投）与 V12 尚未取得观察，见文末放行决定。
 
 ## 如何运行
 
@@ -57,109 +57,75 @@ P4 会故意不 ACK 并打开两条连接；P8 会用内存中的随机错误 se
 
 ## 运行上下文
 
-- 日期 / 飞书品牌 / 租户：待填（勿贴租户标识原文）
-- App / 客户端版本：待填（勿贴 app_secret）
-- 报告文件名（可多个）：待填
-- 是否全新 PersonalAgent、控制台是否改过配置：待填
-- 全局默认状态是否保持到首次 P3/P5：待填
-- 未测试 / 跳过 / 超时的项：待填
+- 日期 / 飞书品牌：2026-10-18，`feishu`（大陆飞书）；全新 PersonalAgent（P1 扫码注册），控制台未改配置。
+- 报告：`report-2026-10-18T04-01-55-723Z.json`（P1 pass）、`report-2026-10-18T04-03-04-478Z.json`（P2–P8；P1/P4 跳过）。
+- 全局默认状态保持到首次 P3/P5：是（未手动开启订阅/权限）。
+- 未测：P4（V7）跳过；P8 的第二用户子检查跳过（V12）。
 
 ## V1 — PersonalAgent bootstrap / 长连接（P2）
 
-- 结论：待填
-- bootstrap HTTP / API code：待填
-- WS host（**不贴 URL/query**）及需冻结的后缀：待填
-- ClientConfig（PingInterval / ReconnectCount / ReconnectInterval / ReconnectNonce）：待填
-- ping / pong 计数、pong 配置：待填
+- 结论：**pass**。bootstrap HTTP 200 / code 0。
+- WS host：`msg-frontier.feishu.cn`（冻结后缀 `.feishu.cn`）。
+- ClientConfig：PingInterval 90、ReconnectCount −1（不限次）、ReconnectInterval 90、ReconnectNonce 25；pong 回带同一配置。
+- ping 1 / pong 1（P2）；P7 的长连接 6 分钟内 pong 稳定、按 90 s 节奏。
 
 ## V2a — 默认 `im.message.receive_v1`（P3）
 
-- 结论：待填
-- 是否默认配置、是否收到 owner 私聊：待填
-- envelope 字段与 schema：待填（仅字段名/脱敏报告）
-- 若需控制台开关，具体开关及重测报告：待填
+- 结论：**pass**，默认即订阅，无需控制台开关。owner 私聊收到。
+- envelope：`schema:"2.0"`，header `{event_id, token, create_time, event_type, tenant_key, app_id}`；sender `{sender_id{open_id,union_id,user_id:null}, sender_type:"user", tenant_key}`；message `{chat_id, chat_type:"p2p", content, create_time, message_id, message_type, update_time}`。`user_id` 为 null（无通讯录权限），身份一律用 open_id。
+- 另观察到 `im.chat.member.bot.added_v1`（机器人被拉进群）也默认投递。
 
 ## V2b — 默认 `card.action.trigger`（P5）
 
-- 结论：待填
-- 默认状态下回调是否到达 / operator/context/app/tenant 是否一致：待填
-- 回调 ACK 是否发送、客户端结果：待填
-- 若需控制台开关，路径/名称（如 事件与回调→回调配置→card.action.trigger）及修改前后结果：待填
+- 结论：**pass**，默认投递，无需控制台开关；schema 2.0 `behaviors:[{type:"callback"}]` 按钮回调到达。
+- 回调 envelope：header 同上（`event_type:"card.action.trigger"`，`create_time` 16 位 = 微秒）；event `{operator{tenant_key,open_id,union_id}, token, action{value, tag}, host:"im_message", context{open_message_id, open_chat_id}}`；header/operator 的 app_id、tenant_key 一致（§R2-e 一致性检查可行）。
+- ACK `{code:200}` 被接受（未见重投）。
 
 ## V3 — 默认权限（P6 / P7）
 
-- Typing reaction 添加 / 删除，HTTP/API code：待填
-- 图片上传 / 发送：待填
-- 文件上传 / 发送：待填
-- 用户图片资源下载 / 字节数：待填
-- 用户文件资源下载 / 字节数：待填
-- 群 @ 消息及 mentions：待填
-- 失败 reason / 提取的缺失 scopes：待填
-- 额外授予的权限名称 / 是否发布新版本：待填
+- 结论：**pass**，默认 scope 全够：reaction 增删、图片上传并发送、文件上传并发送、下载用户发来的图片（200 KB）和文件（4.85 MB）、群内 @ 收到 mentions。无 scope 拒绝。
 
 ## V4 — 入群 / 话题群（P7）
 
-- 普通群可添加机器人、@ 消息可达：待填
-- 话题群可添加机器人、话题内 @ 消息可达：待填
-- thread_id 是否存在（仅哈希）：待填
+- 结论：**pass**。机器人可被拉进普通群，@ 消息到达（mentions 含机器人自身 open_id）；话题内消息带 `thread_id`、`root_id`、`parent_id`。
 
 ## V5 — schema-2.0 卡片 PATCH（P5）
 
-- 无 `config.update_multi`：发送 / PATCH HTTP/API code / 客户端更新效果：待填
-- `config.update_multi:true`：发送 / PATCH HTTP/API code / 客户端更新效果：待填
-- 结论（是否必需 update_multi）：待填
+- 结论：**pass**。卡片 PATCH 在 `update_multi` 为 false 与 true 时**都成功**（响应 `{}`）——单人卡片不必强制 `update_multi`；多人可见卡片仍按计划带上。
 
 ## V6 — ACK / payload_encoding（P2 / P3）
 
-- 接收到的 payload_encoding / payload_type：待填
-- ACK 是否发送，回显 SeqID / LogID / service / method / headers / 6/7/9 + biz_rt：待填
-- ACK payload `{"code":200}` 的服务端/客户端接受证据：待填
-- 观察窗口及是否重复：待填
-- 注意：WebSocket.send 成功不等于服务端确认，有限窗口无重投不能证明 ACK 被永久接受。
+- 结论：**pass**。ACK 帧（回显 headers + `biz_rt`，payload `{"code":200}`）被接受，窗口内无重复投递；`payload_encoding` 实测为空串，payload 直接是 UTF-8 JSON。
+- 帧 headers 实测还带 `x_frontier_recieved_time`、`x_frontier_arriverate`、`instance_id`、`trace_id`（未知 header 按计划忽略）。
 
 ## V7 — 不 ACK 跨连接重投 / 双连接（P4）
 
-- 初始事件 ACK=false、关闭后重新 bootstrap 建立新连接：待填
-- 是否收到相同 event/message ID 的重投、延迟：待填
-- 观察窗口 / 未能确认的 horizon：待填
-- 双连接 A/B 分别收到多少条、是否同消息重复：待填
-- 是否另有客户端干扰 / 连接数限制：待填
-- 结论与对 §2.4/§5.4/§5.8 的影响：待填（负面或不确定结果不得直接放行 F3）
+- 结论：**未测（P4 跳过）**。需补跑：`node scripts/dev/feishu-probe.ts --reuse --steps P4 --timeout 300`。
 
 ## V8 — 普通群 `reply_in_thread`（P7）
 
-- HTTP/API code：待填
-- 是否创建新话题（客户端观察）：待填
-- 响应 thread_id、关联话题内后续消息 thread_id（仅哈希）：待填
-- `groupRootTopics` 是否可启用：待填
+- 结论：**pass（据证据人工判定；探针自动标成 fail 是探针缺陷）**。对普通群 @ 消息调用 `/messages/:id/reply` 且 `reply_in_thread:true`：HTTP 200 / code 0，响应**直接返回 `thread_id`**（及 root_id/parent_id）；随后用户在该话题里的 @ 回复携带**同一个** `thread_id`，证明话题已建立且可绑定。
+- 探针缺陷：等待「在话题里回复」的提示超时（用户回复晚于 90 s 窗口）抛出的异常被 catch 记成 V8 fail；补救不影响结论（后续 topic-group 阶段收到的正是该话题里的消息）。
+- 对计划的影响：`groupRootTopics`（普通群 @ 自动开话题并绑定）可以启用，binding 直接取 reply 响应里的 `thread_id`。
 
 ## V9 — `Typing` emoji_type（P6）
 
-- 添加 / 删除 API code：待填
-- 是否存在、客户端可见效果：待填
+- 结论：**pass**，`Typing` 存在，添加 / 移除成功。
 
 ## V10 — `create_time` 单位（P3）
 
-- 原始数值 / 接收时刻毫秒：待填
-- 推断 seconds / milliseconds / microseconds / unknown：待填
-- 推断是否与客户端发送时刻相符：待填（脚本只在距接收时刻一天内推断，不盲猜）
+- 结论：消息事件 `create_time` 为 **13 位毫秒**（与本地接收时间差约 0.5 s）；卡片回调 header 的 `create_time` 为 **16 位微秒**——stale 规则按位数归一化。
 
 ## V11 — 错误凭据（P8）
 
-- bootstrap HTTP / API code：待填
-- tenant_access_token HTTP / API code：待填
-- 与 §2.1 514 / 403 / 1000040350 / 1 / 1000040343 的映射区别：待填
-- 正确凭据文件是否保持未变：待填
+- 结论：**pass**。错误 secret：bootstrap HTTP 200 + `code 1000040345`；`tenant_access_token` 接口 HTTP 200 + `code 10014`。两者都映射为 `auth_failed`（连同计划已列的 514/10003）。
 
 ## V12 — 非创建者可见性（P8）
 
-- 第二位用户能否搜索 / 打开应用：待填
-- 是否收到第二位用户私聊（非 owner、app/tenant 一致）：待填
-- 是否改过可见范围 / 权限 / 是否同租户：待填
-- 对 allow 文档的影响：待填
+- 结论：**未测**（第二用户子检查跳过）。只影响「allow 白名单」文档措辞，不阻塞开发。
 
 ## 开发放行 / 裁剪决定
 
-- V# 依赖仍未验证的包：待填
-- 需要修改计划后才能继续的项：待填
-- 由用户确认的裁剪及原因：待填
+- V1–V6、V8–V11 已取得正向观察：§2 协议、§4 身份、§6 卡片/PATCH、§7 文件、§5.2 群话题（含普通群自动开话题）按计划实现。
+- **V7 未知**：F3（连接器 / 持久化 ACK 策略）开工前须补跑 P4；在此之前 F0–F2 等不依赖重投语义的包可先行。
+- V12 未知：不阻塞；`allow` 文档暂写「其他用户能否看到个人应用以实际为准」。

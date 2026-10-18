@@ -640,36 +640,55 @@ export async function P7(p: Probe): Promise<void> {
       const m = message(e);
       p.fact("V4", "pass", { phase: "plain-group", received: true, mentions: m.mentions });
       p.fact("V3", m.mentions?.length ? "pass" : "unknown", { phase: "group-at", mentions: m.mentions });
+      let reply: any;
       try {
-        const reply = await p.api(`/open-apis/im/v1/messages/${encodeURIComponent(m.message_id)}/reply`, "POST", {
+        reply = await p.api(`/open-apis/im/v1/messages/${encodeURIComponent(m.message_id)}/reply`, "POST", {
           msg_type: "text",
           content: JSON.stringify({ text: "pi-toolkit 探针：reply_in_thread 测试" }),
           reply_in_thread: true,
           uuid: randomUUID(),
         });
-        const follow = await receiveOwner(
-          p,
-          c,
-          "打开刚创建的话题，在其中 @机器人 回复一条消息",
-          (e) =>
-            message(e).chat_type === "group" &&
-            message(e).chat_id === m.chat_id &&
-            (message(e).root_id === m.message_id ||
-              message(e).parent_id === reply?.message_id ||
-              (!!reply?.thread_id && message(e).thread_id === reply.thread_id)),
+      } catch (error) {
+        // Only a failed reply API call means reply_in_thread does not work; a later prompt
+        // timeout (user answered the follow-up late) must not be recorded as a V8 failure.
+        p.fact("V8", "fail", { reply_in_thread: false });
+        throw error;
+      }
+      {
+        // A late answer (prompt-timeout / no follow event) only weakens the evidence; it never
+        // turns a successful reply_in_thread into a failure. Ctrl-C still propagates.
+        const tolerate = async <T>(f: () => Promise<T>): Promise<T | undefined> => {
+          try {
+            return await f();
+          } catch (error) {
+            if (error instanceof Unknown) return undefined;
+            throw error;
+          }
+        };
+        const follow = await tolerate(() =>
+          receiveOwner(
+            p,
+            c,
+            "打开刚创建的话题，在其中 @机器人 回复一条消息",
+            (e) =>
+              message(e).chat_type === "group" &&
+              message(e).chat_id === m.chat_id &&
+              (message(e).root_id === m.message_id ||
+                message(e).parent_id === reply?.message_id ||
+                (!!reply?.thread_id && message(e).thread_id === reply.thread_id)),
+          ),
         );
         const threadId = reply?.thread_id || (follow && message(follow).thread_id);
-        const visible = await p.ask("飞书客户端是否新建了话题？y=是 / n=否 / 回车=不确定");
-        p.fact("V8", threadId && visible === "y" ? "pass" : "unknown", {
+        const visible = await tolerate(() => p.ask("飞书客户端是否新建了话题？y=是 / n=否 / 回车=不确定"));
+        const followInThread = !!follow && !!reply?.thread_id && message(follow).thread_id === reply.thread_id;
+        p.fact("V8", threadId && (visible === "y" || followInThread) ? "pass" : "unknown", {
           reply,
           responseThreadId: reply?.thread_id,
           thread_id: threadId ?? null,
           topicCreatedObserved: visible === "y",
+          followInThread,
           followMessage: follow ? message(follow) : null,
         });
-      } catch (error) {
-        p.fact("V8", "fail", { reply_in_thread: false });
-        throw error;
       }
     });
     await sub(p, "topic-group", async () => {
