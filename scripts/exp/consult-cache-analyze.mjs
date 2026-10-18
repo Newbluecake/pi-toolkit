@@ -28,6 +28,8 @@ const USAGE = `usage: node scripts/exp/consult-cache-analyze.mjs [options]
   --until YYYY-MM-DD  only runs with diag.createdAt < that UTC midnight (exclusive)
   --retro           retro mode: reconstruct expert-settle -> consumer-dispatch gaps
                     from historical subagent:run (no cacheProbes available today)
+  --follow-gaps     compute per-thread follow-up gaps (consecutive consult gap vs
+                    cache outcome, from consult-run diag.consultCache/consultThread)
   --json            print the full analysis object as JSON (deterministic)
 `;
 
@@ -43,6 +45,7 @@ const opts = {
   since: null,
   until: null,
   retro: false,
+  followGaps: false,
   json: false,
 };
 for (let i = 0; i < args.length; i++) {
@@ -50,6 +53,8 @@ for (let i = 0; i < args.length; i++) {
   const next = args[i + 1];
   if (arg === "--retro") {
     opts.retro = true;
+  } else if (arg === "--follow-gaps") {
+    opts.followGaps = true;
   } else if (arg === "--json") {
     opts.json = true;
   } else if (arg === "--help" || arg === "-h") {
@@ -120,6 +125,7 @@ const analysis = analyzeConsultCache(chosen, {
   retro: opts.retro,
   since: opts.since,
   until: opts.until,
+  followGaps: opts.followGaps,
   scan: { files: files.length, runEntries, malformedEntries },
 });
 

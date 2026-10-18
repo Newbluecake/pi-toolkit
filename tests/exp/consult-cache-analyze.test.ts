@@ -10,16 +10,21 @@ import {
   GO_NET_MIN_WEEKLY_USD,
   GO_RENEWABLE_MIN_SHARE,
   analyzeConsultCache,
+  cacheResultOf,
   dedupeRuns,
+  extractConsultCacheEvents,
   gapBucket,
   hitRatioOf,
+  mergeConsultCacheEvents,
   parseSessionText,
   predictedSummary,
+  predictionOf,
   preflightReason,
   preflightState,
   probeCostUsd,
   reconstructGaps,
   renderReport,
+  threadOf,
 } from "../../scripts/exp/consult-cache-lib.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -275,6 +280,108 @@ describe("consult-cache-analyze: retro mode over retro.jsonl", () => {
   });
 });
 
+/* ----------------------------------------------- cacheResult v1 + threads ---- */
+
+describe("consult-cache-analyze: cacheResult v1 / prediction / threads / follow-gaps", () => {
+  const { chosen, scan } = loadFile("cache-result.jsonl");
+
+  const analyze = () => analyzeConsultCache(chosen, { scan }) as Analysis;
+  const analyzeFg = () => analyzeConsultCache(chosen, { scan, followGaps: true }) as Analysis;
+
+  it("normalizes v1 cacheResult and rejects unknown versions", () => {
+    expect(cacheResultOf({ v: 1, readShare: 0.96, label: "hit", anchor: "added" })).toEqual({
+      v: 1,
+      readShare: 0.96,
+      label: "hit",
+      anchor: "added",
+    });
+    expect(cacheResultOf({ v: 1, readShare: null, label: "n/a", anchor: "n/a" })).toEqual({
+      v: 1,
+      readShare: null,
+      label: "n/a",
+      anchor: "n/a",
+    });
+    expect(cacheResultOf({ v: 2, readShare: 0.9, label: "hit", anchor: "added" })).toBeNull();
+    expect(cacheResultOf(undefined)).toBeNull();
+  });
+
+  it("normalizes predictions and thread refs (probe {id,seq} vs run {threadId,seq})", () => {
+    expect(predictionOf({ state: "warm", reason: "proven-touch" })).toEqual({ state: "warm", reason: "proven-touch" });
+    expect(predictionOf({ state: "bogus" })).toBeNull();
+    expect(threadOf({ id: "th1", seq: 2 })).toEqual({ id: "th1", seq: 2 });
+    expect(threadOf({ threadId: "th1", seq: 2 })).toEqual({ id: "th1", seq: 2 });
+    expect(threadOf({ id: "th1" })).toBeNull();
+    expect(threadOf({ id: "th1", seq: 0 })).toBeNull();
+  });
+
+  it("reads v1 cacheResult from both sources, dedupes by thread id+seq, and skips unknown versions", () => {
+    const a = analyze();
+    expect(a.cacheResult.byLabel).toEqual({ hit: 3, partial: 1, miss: 3, "n/a": 1 });
+    expect(a.cacheResult.bySource).toEqual({ probe: 2, run: 6 });
+    expect(a.cacheResult.unknownVersion).toBe(1);
+    expect(a.cacheResult.readShare.n).toBe(7);
+    expect(a.cacheResult.readShare.median).toBeCloseTo(0.5, 9);
+    expect(a.cacheResult.readShare.p90).toBeCloseTo(0.924, 9);
+    expect(a.cacheResult.readShare.min).toBeCloseTo(0.05, 9);
+    expect(a.cacheResult.readShare.max).toBeCloseTo(0.96, 9);
+  });
+
+  it("builds the prediction accuracy matrix (predicted × actual)", () => {
+    const p = analyze().prediction;
+    expect(p.byPredicted.warm).toEqual({ n: 2, byLabel: { hit: 1, partial: 1, miss: 0, "n/a": 0 } });
+    expect(p.byPredicted.cold).toEqual({ n: 3, byLabel: { hit: 1, partial: 0, miss: 2, "n/a": 0 } });
+    expect(p.byPredicted.unknown).toEqual({ n: 3, byLabel: { hit: 1, partial: 0, miss: 1, "n/a": 1 } });
+    expect(p.predictedWithoutResult).toEqual({ warm: 1, cold: 1, unknown: 0 });
+  });
+
+  it("groups threads: seq 1 vs follow-ups and per-seq cost/readShare", () => {
+    const t = analyze().threads;
+    expect(t.n).toBe(8);
+    expect(t.threadCount).toBe(5);
+    expect(t.seq1.n).toBe(5);
+    expect(t.seq1.costUsd).toBeCloseTo(0.16, 9);
+    expect(t.seq1.readShare).toEqual({ n: 3, median: 0.9 });
+    expect(t.followUp.n).toBe(3);
+    expect(t.followUp.costUsd).toBeCloseTo(0.13, 9);
+    expect(t.followUp.readShare.n).toBe(2);
+    expect(t.followUp.readShare.median).toBeCloseTo(0.3, 9);
+    expect(t.bySeq.map((s) => [s.seq, s.n])).toEqual([
+      [1, 5],
+      [2, 2],
+      [3, 1],
+    ]);
+    expect(t.bySeq[0].costUsd).toBeCloseTo(0.16, 9);
+    expect(t.bySeq[1].costUsd).toBeCloseTo(0.05, 9);
+    expect(t.bySeq[2].costUsd).toBeCloseTo(0.08, 9);
+    expect(t.bySeq[0].readShare).toEqual({ n: 3, median: 0.9 });
+    expect(t.bySeq[1].readShare).toEqual({ n: 1, median: 0.5 });
+    expect(t.bySeq[2].readShare).toEqual({ n: 1, median: 0.1 });
+    expect(t.byThread.map((b) => [b.id, b.n, b.seqMax])).toEqual([
+      ["th1", 3, 3],
+      ["th2", 2, 2],
+      ["th3", 1, 1],
+      ["th4", 1, 1],
+      ["thX", 1, 1],
+    ]);
+    expect(t.byThread.map((b) => b.costUsd)).toEqual([0.16, 0.08, 0.01, 0.02, 0.02]);
+  });
+
+  it("followGaps is null by default and computed under --follow-gaps", () => {
+    expect(analyze().followGaps).toBeNull();
+    const fg = analyzeFg().followGaps;
+    expect(fg.n).toBe(3);
+    expect(fg.byBucket.within425).toEqual({ n: 1, byLabel: { hit: 0, partial: 1, miss: 0, "n/a": 0 } });
+    expect(fg.byBucket._425_15).toEqual({ n: 1, byLabel: { hit: 0, partial: 0, miss: 0, "n/a": 1 } });
+    expect(fg.byBucket._15_45).toEqual({ n: 1, byLabel: { hit: 0, partial: 0, miss: 1, "n/a": 0 } });
+    expect(fg.byBucket.over45).toEqual({ n: 0, byLabel: { hit: 0, partial: 0, miss: 0, "n/a": 0 } });
+    expect(fg.samples).toEqual([
+      { threadId: "th1", seq: 2, gapMs: 180000, label: "partial", source: "run" },
+      { threadId: "th1", seq: 3, gapMs: 1020000, label: "miss", source: "run" },
+      { threadId: "th2", seq: 2, gapMs: 600000, label: "n/a", source: "run" },
+    ]);
+  });
+});
+
 /* ------------------------------------------------------------------ CLI ---- */
 
 describe("consult-cache-analyze.mjs CLI", () => {
@@ -313,6 +420,25 @@ describe("consult-cache-analyze.mjs CLI", () => {
     expect(out).toContain("consult cache analysis (retro)");
     expect(out).toContain("consult calls (retro reconstruction)");
     expect(out).toContain("n/a (requires cacheProbes; not available in retro mode)");
+  });
+
+  it("--follow-gaps --json equals the in-lib follow-gaps analysis over all files", () => {
+    const { chosen, scan } = loadAllFixtures();
+    const combined = analyzeConsultCache(chosen, { scan, followGaps: true });
+    const stdout = runCli(["--dir", FIXTURES, "--follow-gaps", "--json"]);
+    expect(JSON.parse(stdout)).toEqual(combined);
+  });
+
+  it("renders the new sections in the human report, gated on --follow-gaps", () => {
+    const withFlag = runCli(["--dir", FIXTURES, "--follow-gaps"]);
+    expect(withFlag).toContain("cacheResult v1:");
+    expect(withFlag).toContain("prediction accuracy (predicted × actual):");
+    expect(withFlag).toContain("threads:");
+    expect(withFlag).toContain("follow-gaps (consecutive consult gap vs cache outcome):");
+    const withoutFlag = runCli(["--dir", FIXTURES]);
+    expect(withoutFlag).toContain("cacheResult v1:");
+    expect(withoutFlag).toContain("prediction accuracy (predicted × actual):");
+    expect(withoutFlag).not.toContain("follow-gaps");
   });
 
   it("supports --since and rejects bad arguments", () => {

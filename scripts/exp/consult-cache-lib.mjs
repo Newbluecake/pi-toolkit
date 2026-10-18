@@ -435,6 +435,14 @@ export function analyzeConsultCache(chosen, opts = {}) {
   // 7. §11 保活 go/no-go 四项指标
   const keepalive = computeKeepalive({ probes, retroGaps, totalRequestCostUsd, coldCostUsd, warmCostUsd, retro });
 
+  // 8. cacheResult v1 / 预判 / 线程 / follow-gaps（cache-thread-plan.md §5.2 / §10 F 行；缺字段或未知版本健壮跳过）
+  const { runEvents, probeEvents, unknownVersion } = extractConsultCacheEvents(inWindow);
+  const cacheEvents = mergeConsultCacheEvents(probeEvents, runEvents);
+  const cacheResult = computeCacheResult(cacheEvents, unknownVersion);
+  const prediction = computePrediction(cacheEvents);
+  const threads = computeThreads(cacheEvents);
+  const followGaps = opts.followGaps === true ? computeFollowGaps(cacheEvents) : null;
+
   return {
     mode: retro ? "retro" : "probe",
     window: { since, until },
@@ -470,6 +478,10 @@ export function analyzeConsultCache(chosen, opts = {}) {
       unknownToolCalls: retro ? 0 : blockedExtras.unknownToolCalls,
     },
     keepalive,
+    cacheResult,
+    prediction,
+    threads,
+    followGaps,
   };
 }
 
@@ -575,6 +587,299 @@ function computeKeepalive({ probes, retroGaps, totalRequestCostUsd, coldCostUsd,
   };
 }
 
+/* --------------------------------------------------- cacheResult v1 --- */
+
+const CACHE_RESULT_LABELS = ["hit", "partial", "miss", "n/a"];
+const PREDICTION_STATES = ["warm", "cold", "unknown"];
+
+function emptyLabels() {
+  return { hit: 0, partial: 0, miss: 0, "n/a": 0 };
+}
+
+function labelBucketOf(event) {
+  return event.cacheResult ? event.cacheResult.label : "n/a";
+}
+
+/** 只统计非 null 的 readShare（n/a 的事件不计入分布，但 label 分布里计为 n/a）。 */
+function readShareStats(events) {
+  const values = events
+    .map((e) => e.cacheResult?.readShare)
+    .filter((v) => v !== null && v !== undefined)
+    .sort((a, b) => a - b);
+  return {
+    n: values.length,
+    median: median(values),
+    p90: percentile(values, 0.9),
+    min: values.length > 0 ? values[0] : null,
+    max: values.length > 0 ? values[values.length - 1] : null,
+  };
+}
+
+/**
+ * 归一化一个 cacheResult：只接受 `v === 1`（§5.2 冻结 metric 版本），未知/缺失版本返回 null。
+ * label 优先取记录值，缺省时从 readShare 回推（阈值 0.80 / 0.20）。
+ */
+export function cacheResultOf(value) {
+  if (!isObject(value) || value.v !== 1) return null;
+  const readShare = typeof value.readShare === "number" && Number.isFinite(value.readShare) ? value.readShare : null;
+  const label = CACHE_RESULT_LABELS.includes(value.label)
+    ? value.label
+    : readShare === null
+      ? "n/a"
+      : readShare >= 0.8
+        ? "hit"
+        : readShare >= 0.2
+          ? "partial"
+          : "miss";
+  return {
+    v: 1,
+    readShare,
+    label,
+    anchor: typeof value.anchor === "string" && value.anchor !== "" ? value.anchor : "n/a",
+    ...(value.degraded === true ? { degraded: true } : {}),
+  };
+}
+
+/** 归一化请教前预判（warm/cold/unknown），非三态或缺失返回 null。 */
+export function predictionOf(value) {
+  if (!isObject(value)) return null;
+  const state = PREDICTION_STATES.includes(value.state) ? value.state : null;
+  if (state === null) return null;
+  return { state, ...(typeof value.reason === "string" && value.reason !== "" ? { reason: value.reason } : {}) };
+}
+
+/**
+ * 归一化线程引用：probe 键 `{id,seq}`，run 自身键 `{threadId,seq}`（§R2-4 / A-report §7）。
+ * 两者都缺或 seq < 1 ⇒ null。
+ */
+export function threadOf(value) {
+  if (!isObject(value)) return null;
+  const id =
+    (typeof value.id === "string" && value.id !== "" ? value.id : null) ??
+    (typeof value.threadId === "string" && value.threadId !== "" ? value.threadId : null);
+  const seq = num(value.seq);
+  if (id === null || seq === undefined || seq < 1) return null;
+  return {
+    id,
+    seq,
+    ...(typeof value.mode === "string" && value.mode !== "" ? { mode: value.mode } : {}),
+    ...(typeof value.reason === "string" && value.reason !== "" ? { reason: value.reason } : {}),
+  };
+}
+
+/**
+ * 从两个源收集 consult 缓存事件：
+ *  - run 源：consult fork run 自身的 `diag.consultCache.{predicted,first}` + `diag.consultThread`（权威，含 createdAt）。
+ *  - probe 源：asker 的 `diag.consults.cacheProbes[]` 的 `{cacheResult,warm,thread}`。
+ * `first.at` 是 `consult_cache_first` 事件的派发时刻，不是请求开始（A-report §8），此处不把它当请求时间用。
+ * 未知 metric 版本（v !== 1）计入 unknownVersion 并从事件里剔除。
+ */
+export function extractConsultCacheEvents(chosen) {
+  const runEvents = [];
+  const probeEvents = [];
+  let unknownVersion = 0;
+  for (const { snapshot, path } of chosen.values()) {
+    const createdAt = num(snapshot.diag?.createdAt);
+    const consultCache = snapshot.diag?.consultCache;
+    if (isObject(consultCache)) {
+      const firstRaw = consultCache.first;
+      const cacheResult = cacheResultOf(firstRaw);
+      if (isObject(firstRaw) && typeof firstRaw.v === "number" && cacheResult === null) unknownVersion++;
+      runEvents.push({
+        source: "run",
+        runId: snapshot.runId,
+        path,
+        createdAt,
+        settledAt: num(snapshot.diag?.settledAt),
+        predicted: predictionOf(consultCache.predicted),
+        cacheResult,
+        thread: threadOf(snapshot.diag?.consultThread),
+        costUsd: num(snapshot.diag?.usage?.costUsd),
+      });
+    }
+    const cacheProbes = snapshot.diag?.consults?.cacheProbes;
+    if (Array.isArray(cacheProbes)) {
+      for (const probe of cacheProbes) {
+        if (!isObject(probe)) continue;
+        if (probe.cacheResult === undefined && probe.warm === undefined && probe.thread === undefined) continue;
+        const cacheResult = cacheResultOf(probe.cacheResult);
+        if (isObject(probe.cacheResult) && typeof probe.cacheResult.v === "number" && cacheResult === null) {
+          unknownVersion++;
+        }
+        probeEvents.push({
+          source: "probe",
+          runId: snapshot.runId,
+          path,
+          createdAt,
+          expertRunId: typeof probe.expertRunId === "string" ? probe.expertRunId : undefined,
+          predicted: predictionOf(probe.warm),
+          cacheResult,
+          thread: threadOf(probe.thread),
+          costUsd: probeCostUsd(probe),
+          gapSettleMs: num(probe.gapSettleMs),
+        });
+      }
+    }
+  }
+  return { runEvents, probeEvents, unknownVersion };
+}
+
+/**
+ * 合并两个源的事件（同一 consult 的「一个事实、两份投影」去重）：run 源是权威；
+ * probe 事件若与某个 run 事件共享同一 `(thread.id, seq)` 即视为重复被丢弃，否则保留。
+ * 无线程（thread 缺失）的事件不跨源去重（旧数据既无 cacheResult 也无线程，不会因此重复计入）。
+ */
+export function mergeConsultCacheEvents(probeEvents, runEvents) {
+  const runThreads = new Set();
+  for (const e of runEvents) {
+    if (e.thread) runThreads.add(`${e.thread.id}\u0000${e.thread.seq}`);
+  }
+  const events = [...runEvents];
+  for (const e of probeEvents) {
+    const dup = e.thread && runThreads.has(`${e.thread.id}\u0000${e.thread.seq}`);
+    if (!dup) events.push(e);
+  }
+  return events;
+}
+
+function computeCacheResult(events, unknownVersion) {
+  const withResult = events.filter((e) => e.cacheResult !== null);
+  const byLabel = emptyLabels();
+  const bySource = { probe: 0, run: 0 };
+  for (const e of withResult) {
+    byLabel[labelBucketOf(e)]++;
+    bySource[e.source]++;
+  }
+  return { byLabel, readShare: readShareStats(withResult), bySource, unknownVersion };
+}
+
+function computePrediction(events) {
+  const byPredicted = {};
+  const predictedWithoutResult = { warm: 0, cold: 0, unknown: 0 };
+  for (const state of PREDICTION_STATES) {
+    byPredicted[state] = { n: 0, byLabel: emptyLabels() };
+  }
+  for (const e of events) {
+    const state = e.predicted?.state;
+    if (state === undefined) continue;
+    if (e.cacheResult === null) {
+      predictedWithoutResult[state]++;
+      continue;
+    }
+    byPredicted[state].n++;
+    byPredicted[state].byLabel[labelBucketOf(e)]++;
+  }
+  return { byPredicted, predictedWithoutResult };
+}
+
+function computeThreads(events) {
+  const withThread = events.filter((e) => e.thread !== null);
+  const seq1RS = [];
+  const followUpRS = [];
+  const bySeqMap = new Map();
+  const byThreadMap = new Map();
+  let seq1N = 0;
+  let seq1Cost = 0;
+  let followUpN = 0;
+  let followUpCost = 0;
+  for (const e of withThread) {
+    const seq = e.thread.seq;
+    const cost = num(e.costUsd) ?? 0;
+    const rs = e.cacheResult?.readShare;
+    if (seq === 1) {
+      seq1N++;
+      seq1Cost += cost;
+      seq1RS.push(rs);
+    } else {
+      followUpN++;
+      followUpCost += cost;
+      followUpRS.push(rs);
+    }
+    let s = bySeqMap.get(seq);
+    if (s === undefined) {
+      s = { seq, n: 0, costUsd: 0, readShare: [] };
+      bySeqMap.set(seq, s);
+    }
+    s.n++;
+    s.costUsd += cost;
+    s.readShare.push(rs);
+    let t = byThreadMap.get(e.thread.id);
+    if (t === undefined) {
+      t = { id: e.thread.id, n: 0, seqMax: 0, costUsd: 0 };
+      byThreadMap.set(e.thread.id, t);
+    }
+    t.n++;
+    t.costUsd += cost;
+    if (seq > t.seqMax) t.seqMax = seq;
+  }
+  const rsMedian = (values) => {
+    const sorted = values.filter((v) => v !== null && v !== undefined).sort((a, b) => a - b);
+    return { n: sorted.length, median: median(sorted) };
+  };
+  const bySeq = [...bySeqMap.values()]
+    .sort((a, b) => a.seq - b.seq)
+    .map((s) => ({ seq: s.seq, n: s.n, costUsd: s.costUsd, readShare: rsMedian(s.readShare) }));
+  const byThread = [...byThreadMap.values()]
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((t) => ({ id: t.id, n: t.n, seqMax: t.seqMax, costUsd: t.costUsd }));
+  return {
+    n: withThread.length,
+    threadCount: byThread.length,
+    seq1: { n: seq1N, costUsd: seq1Cost, readShare: rsMedian(seq1RS) },
+    followUp: { n: followUpN, costUsd: followUpCost, readShare: rsMedian(followUpRS) },
+    bySeq,
+    byThread,
+  };
+}
+
+/**
+ * `--follow-gaps`：同一线程内相邻 consult 的间隔 vs 后一次 consult 的缓存结局（§6.2 校准 H 用）。
+ * 时间取 consult fork run 的 diag.createdAt（派发时刻，非 first.at —— 见 A-report §8）。
+ * 仅对线程内按 seq 升序相邻、且双方都有 createdAt 的事件对采样。
+ */
+function computeFollowGaps(events) {
+  const byThread = new Map();
+  for (const e of events) {
+    if (e.thread === null || e.createdAt === undefined) continue;
+    const arr = byThread.get(e.thread.id) ?? [];
+    arr.push(e);
+    byThread.set(e.thread.id, arr);
+  }
+  const samples = [];
+  for (const arr of byThread.values()) {
+    arr.sort(
+      (a, b) =>
+        a.thread.seq - b.thread.seq ||
+        a.createdAt - b.createdAt ||
+        (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0),
+    );
+    for (let i = 1; i < arr.length; i++) {
+      const prev = arr[i - 1];
+      const cur = arr[i];
+      const gap = cur.createdAt - prev.createdAt;
+      if (!Number.isFinite(gap) || gap < 0) continue;
+      samples.push({
+        threadId: cur.thread.id,
+        seq: cur.thread.seq,
+        gapMs: gap,
+        label: cur.cacheResult?.label ?? "n/a",
+        source: cur.source,
+      });
+    }
+  }
+  samples.sort((a, b) => (a.threadId < b.threadId ? -1 : a.threadId > b.threadId ? 1 : a.seq - b.seq));
+  const byBucket = {};
+  for (const key of ["within425", "_425_15", "_15_45", "over45", "unknown"]) {
+    byBucket[key] = { n: 0, byLabel: emptyLabels() };
+  }
+  for (const s of samples) {
+    const bucket = gapBucket(s.gapMs);
+    byBucket[bucket].n++;
+    byBucket[bucket].byLabel[s.label]++;
+  }
+  return { n: samples.length, byBucket, samples };
+}
+
 /* ---------------------------------------------------------------- report --- */
 
 function pct(value) {
@@ -671,6 +976,44 @@ export function renderReport(analysis) {
       for (const r of analysis.requests) {
         lines.push(
           `  ${r.runId} req#${r.index} read=${r.cacheRead ?? "—"} write=${r.cacheWrite ?? "—"} out=${r.output ?? "—"} cost=${usd(r.costUsd)}${r.toolsDrift ? " toolsDrift" : ""}`,
+        );
+      }
+    }
+    lines.push("");
+  }
+
+  if (analysis.mode === "probe") {
+    const cr = analysis.cacheResult;
+    lines.push(
+      `cacheResult v1: hit ${cr.byLabel.hit} · partial ${cr.byLabel.partial} · miss ${cr.byLabel.miss} · n/a ${cr.byLabel["n/a"]}` +
+        ` (probe ${cr.bySource.probe} · run ${cr.bySource.run} · skippedUnknownVersion ${cr.unknownVersion})`,
+    );
+    lines.push(
+      `  readShare: n=${cr.readShare.n} median ${cr.readShare.median === null ? "—" : cr.readShare.median.toFixed(3)} p90 ${cr.readShare.p90 === null ? "—" : cr.readShare.p90.toFixed(3)}`,
+    );
+    lines.push(`prediction accuracy (predicted × actual):`);
+    for (const state of ["warm", "cold", "unknown"]) {
+      const p = analysis.prediction.byPredicted[state];
+      const without = analysis.prediction.predictedWithoutResult[state];
+      lines.push(
+        `  ${state}: n=${p.n} hit=${p.byLabel.hit} partial=${p.byLabel.partial} miss=${p.byLabel.miss} n/a=${p.byLabel["n/a"]}${without > 0 ? ` (${without} without result)` : ""}`,
+      );
+    }
+    const th = analysis.threads;
+    lines.push(
+      `threads: ${th.threadCount} thread(s) · ${th.n} event(s) · seq1 ${th.seq1.n}/${usd(th.seq1.costUsd)} · follow-up ${th.followUp.n}/${usd(th.followUp.costUsd)}`,
+    );
+    for (const s of th.bySeq) {
+      lines.push(
+        `  seq ${s.seq}: n=${s.n} cost=${usd(s.costUsd)} readShare median ${s.readShare.median === null ? "—" : s.readShare.median.toFixed(3)} (n=${s.readShare.n})`,
+      );
+    }
+    if (analysis.followGaps !== null) {
+      const fg = analysis.followGaps;
+      lines.push(`follow-gaps (consecutive consult gap vs cache outcome): ${fg.n} gap(s)`);
+      for (const [bucket, cell] of Object.entries(fg.byBucket)) {
+        lines.push(
+          `  ${bucketLabel(bucket)}: n=${cell.n} hit=${cell.byLabel.hit} partial=${cell.byLabel.partial} miss=${cell.byLabel.miss} n/a=${cell.byLabel["n/a"]}`,
         );
       }
     }
