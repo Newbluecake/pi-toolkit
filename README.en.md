@@ -109,7 +109,7 @@ Detailed guides live in [`docs/guide/`](docs/guide/) and are **written in Chines
 User settings file: `~/.pi/agent/pi-subagent.json` (historical file name kept; a missing or malformed file falls back to defaults and never throws).
 
 - `/agent settings` opens an interactive editor (↑↓ select, Enter edit, Space toggle booleans, `r` reset to default; changes persist immediately). For scripts use `/agent settings list` / `set <key> <value>` / `reset <key>`.
-- **All time fields are integer seconds** (keys end in `S`, e.g. `budget.idleS`); legacy millisecond keys (`*Ms`) are migrated on first load.
+- **Time fields normally use integer seconds** (keys end in `S`, e.g. `budget.idleS`); legacy millisecond keys are migrated on first load. Exception: `feishuBot.debounceMs` below remains in milliseconds and is not migrated.
 - Per-module keys and defaults are in the matching guide (Chinese).
 
 Top-level enable switches (defaults in the comments):
@@ -134,10 +134,28 @@ Top-level enable switches (defaults in the comments):
   "date": { "enabled": true },
   "externalAgents": { "droid": { "enabled": false } },
   "webHub": { "enabled": false },
+  "feishuBot": { "enabled": false }, // Feishu bot; requires Web Hub control
 }
 ```
 
 `web_search` provider credentials live elsewhere; see the [tools guide](docs/guide/tools.md#web_search) (Chinese).
+
+### Feishu bot settings (optional)
+
+These are **top-level** `feishuBot.*` keys in `pi-subagent.json`, not `webHub.feishuBot`. Changes require `/reload` then `/webhub restart`. Requires `webHub.enabled:true` and control enabled. [Setup, commands and security](docs/dev/feishu-bot/README.md) · [real-tenant checklist](docs/dev/feishu-bot/acceptance.md) (Chinese). **One app connects to one hub**; concurrent connections split events.
+
+| Key                             | Default   | Meaning                                                                              |
+| ------------------------------- | --------- | ------------------------------------------------------------------------------------ |
+| `feishuBot.enabled`             | `false`   | Enable bot (owner-only by default).                                                  |
+| `feishuBot.allowGroups`         | `true`    | Accept group @bot messages.                                                          |
+| `feishuBot.groupRootTopics`     | `false`   | Open an unbound topic from a group-root @; then explicitly /use or /new.             |
+| `feishuBot.notify`              | `"bound"` | bound / off; proactive done/failed/waiting for bound sessions.                       |
+| `feishuBot.spawnScope`          | `"known"` | known refuses unknown dirs; roots requires path confirmation. /new also needs spawn. |
+| `feishuBot.debounceMs`          | `1500`    | 0–10000 **milliseconds**; JSON-only, not in the TUI editor.                          |
+| `feishuBot.staleMessageS`       | `300`     | 30–3600 seconds; refuse stale requests.                                              |
+| `feishuBot.files.outbound`      | `"auto"`  | auto / buttons / off; auto only for attributed p2p cwd images.                       |
+| `feishuBot.files.inbound`       | `true`    | Accept inbound image/file attachments.                                               |
+| `feishuBot.files.maxInboundMiB` | `30`      | Parses 1–100 MiB; effective ceiling is 30 MiB with shared upload limits.             |
 
 ## Development
 

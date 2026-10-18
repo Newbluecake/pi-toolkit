@@ -388,6 +388,22 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   session files; an idle session open in a terminal not connected to web is undetectable (D5-a's
   size/mtime are activity signals, not occupancy proof). Managed rpc sessions use the same path.
   Design: `docs/dev/web-hub/{arch,plan,vue-plan,control-plan}.md`, `docs/dev/web-resume/plan.md`.
+  **Feishu bot (feishu-bot plan v2 + §R2/rulings, F0–F10)**: `hub/feishu/*` under
+  `src/web-hub/` owns the zero-dependency native-fetch/WebSocket pbbp2 long connection, durable
+  receive-before-ACK, requests/bindings/dialogs/files/outbox and owner-only-by-default admission.
+  Top-level `feishuBot.enabled` requires `webHub.enabled` + control; non-live (`/reload` then
+  `/webhub restart`). `HubConfig.feishuBot` key absent ⇒ byte-identical legacy hub: no bot
+  service/network/disk/idle count or `fsb.v1` (shared cap fold on both surfaces). One app ↔ one
+  hub/active connection — V7 proved two connections SPLIT events. `bot.stop()` is FIRST in every
+  cleanup path, with bounded stop/dispose before registry/uploads/spawn/HTTP teardown. Local-TUI-only
+  `/webhub feishu setup|status|cancel|allow|deny|repair|reset` uses `fsb_req`/`fsb_res` on the trusted
+  agent socket (no web/LAN admin); the hub ledger's private branded `fsb:<gen>:<openId>` namespace
+  cannot be selected by ordinary origin fields. Reply proof requires token anchor → settle on one
+  uninterrupted stream; restart/reconnect/gap ⇒ unattributed, never snapshot backfill or automatic
+  redispatch. Gates: `tests/web-hub/{hub/feishu,hub/hub-feishu.test.ts}` + caps/idle/cleanup tests,
+  `tests/integration/web-hub-feishu-bot.test.ts` (real child hub + fake Feishu/fake-pi), typecheck/build.
+  Design/user/tenant gates: `docs/dev/feishu-bot/{plan,README,acceptance,probe-results,F10-report}.md`;
+  V12 non-creator visibility and real client card/form behavior still need tenant acceptance.
   **UI serving
   (todo #26 vue-plan.md v2.1 §2.1, P5b)**: `hub/static.ts`'s `createUiServer` resolves a verified root —
   package-bundled `dist/web-hub-ui/` first, else the external, version-pinned

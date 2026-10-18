@@ -109,7 +109,7 @@ pi install .
 用户配置文件：`~/.pi/agent/pi-subagent.json`（沿用历史文件名；缺失或格式错误一律用默认值，不抛错）。
 
 - `/agent settings` 打开交互式编辑器（↑↓ 选择、回车编辑、空格切换布尔、`r` 重置默认，改动即时落盘）；脚本场景用 `/agent settings list` / `set <key> <value>` / `reset <key>`。
-- **所有时间字段以整数秒配置**（键名以 `S` 结尾，如 `budget.idleS`）；旧版毫秒键（`*Ms`）首次加载时自动迁移。
+- **时间字段通常以整数秒配置**（键名以 `S` 结尾，如 `budget.idleS`）；旧版毫秒键首次加载时自动迁移。例外：下表 `feishuBot.debounceMs` 保持毫秒，不迁移。
 - 各模块的详细键与默认值见对应指南。
 
 顶层启用开关（括号内为默认值）：
@@ -134,10 +134,28 @@ pi install .
   "date": { "enabled": true },
   "externalAgents": { "droid": { "enabled": false } },
   "webHub": { "enabled": false },
+  "feishuBot": { "enabled": false }, // 飞书机器人；依赖 Web Hub 控制面
 }
 ```
 
 `web_search` 的供应商凭证在另一处，见 [tools 指南](docs/guide/tools.md#web_search)。
+
+### 飞书机器人设置（可选）
+
+以下为 `pi-subagent.json` 的**顶层** `feishuBot.*`（不是 `webHub.feishuBot`）；改动后 `/reload` → `/webhub restart`，还需 `webHub.enabled:true` 与控制面开启。[配置/命令/安全说明](docs/dev/feishu-bot/README.md) · [真租户验收](docs/dev/feishu-bot/acceptance.md)。**一个应用只连接一个 hub**，双连接会分流事件。
+
+| 键                              | 默认值    | 含义                                                      |
+| ------------------------------- | --------- | --------------------------------------------------------- |
+| `feishuBot.enabled`             | `false`   | 总开关，默认仅 owner 可用。                               |
+| `feishuBot.allowGroups`         | `true`    | 接收群内 @ 请求。                                         |
+| `feishuBot.groupRootTopics`     | `false`   | 群根 @ 时开未绑定话题，随后显式 /use 或 /new。            |
+| `feishuBot.notify`              | `"bound"` | bound / off，已绑定会话的主动 done/failed/waiting 提醒。  |
+| `feishuBot.spawnScope`          | `"known"` | known 拒绝未知目录；roots 经路径确认；/new 另需 spawn。   |
+| `feishuBot.debounceMs`          | `1500`    | 0–10000 **毫秒**；JSON-only，不在 TUI 设置编辑器展示。    |
+| `feishuBot.staleMessageS`       | `300`     | 30–3600 秒，拒绝过旧请求。                                |
+| `feishuBot.files.outbound`      | `"auto"`  | auto / buttons / off；仅归属明确的私聊 cwd 图片自动发送。 |
+| `feishuBot.files.inbound`       | `true`    | 接收入站图片/文件附件。                                   |
+| `feishuBot.files.maxInboundMiB` | `30`      | 解析范围 1–100 MiB，实际仍受共享上传的 30 MiB 上限约束。  |
 
 ## 开发
 
