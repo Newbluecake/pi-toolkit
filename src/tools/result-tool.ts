@@ -27,6 +27,8 @@ import {
 } from "./result-text.js";
 import type { ExternalRunMeta, RunExitFacts } from "../core/types.js";
 import type { ContextSwitchDiag, CompactionFailureRecord } from "../core/types.js";
+import type { ConsultCacheDiagnostics, ConsultThreadRef } from "../core/types.js";
+import { formatConsultCacheLine } from "../core/consult-cache-marker.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
 import {
   buildWorkflowProgressLines,
@@ -524,6 +526,8 @@ function formatOutcome(
       childExtensionMissing?: true;
       schemaPreset?: SchemaPresetId;
       external?: ExternalRunMeta;
+      consultCache?: ConsultCacheDiagnostics;
+      consultThread?: ConsultThreadRef;
     };
   },
   maxChars = 0,
@@ -557,12 +561,17 @@ function formatOutcome(
   // external-agent plan §3.4 (P4c): external provider identity/pricing line
   // (undefined for every pi run ⇒ the suffix stays byte-identical).
   const externalText = formatExternal(outcome.diag?.external);
+  // cache-thread plan §5.3 (U): the consult section — prediction, measured
+  // first-request result, anchor state, thread. undefined for every run
+  // without the fields (the common case ⇒ byte-identical result text).
+  const consultCacheText = formatConsultCacheLine(outcome.diag);
   const exitSuffix = [
     externalText,
     exitFactsText,
     contextSwitchesText,
     compactionFailureText,
     childExtensionMissingText,
+    consultCacheText,
   ]
     .filter((line): line is string => line !== undefined)
     .map((line) => `\n\n${line}`)

@@ -47,6 +47,20 @@ const consultPrompt = computed(() => {
   const message = tx.value?.items.find((item) => typeof item.message?.consultPrompt === "string")?.message;
   return typeof message?.consultPrompt === "string" ? message.consultPrompt : "";
 });
+/** cache-thread plan §5.3 (U): the consult run's warm/cold compact marker
+ *  (`t#2 warm·hit 96%`). Two sources, same token: the `consultMark` custom
+ *  field on the consult-fallback question entry (agent diag projected at
+ *  request time — authoritative, survives the fork file being reclaimed) or,
+ *  when the file-backed transcript renders instead, the fleet row's
+ *  `cacheMark` (`runTx.lastRow`). Empty string = no facts → renders nothing
+ *  (byte-identical for runs without the fields). English compact tokens only
+ *  (UI text split). */
+const consultMark = computed(() => {
+  const fromItems = tx.value?.items.find((item) => typeof item.message?.consultMark === "string")?.message;
+  if (typeof fromItems?.consultMark === "string" && fromItems.consultMark !== "") return fromItems.consultMark;
+  const fromRow = tx.value?.lastRow?.cacheMark;
+  return typeof fromRow === "string" ? fromRow : "";
+});
 
 const txSource = computed<TranscriptSource | null>(() => {
   const cur = tx.value;
@@ -127,8 +141,9 @@ const hasFooter = computed(
 
 <template>
   <div class="run-tx">
-    <aside v-if="consultSummary" class="run-tx-consult" role="note">
-      {{ t("drawer.consultSummary") }}
+    <aside v-if="consultSummary || consultMark !== ''" class="run-tx-consult" role="note">
+      <template v-if="consultSummary">{{ t("drawer.consultSummary") }}</template>
+      <span v-if="consultMark !== ''" class="run-tx-cachemark" translate="no">{{ consultMark }}</span>
       <details v-if="consultPrompt">
         <summary>{{ t("drawer.consultFullPrompt") }}</summary>
         <pre>{{ consultPrompt }}</pre>

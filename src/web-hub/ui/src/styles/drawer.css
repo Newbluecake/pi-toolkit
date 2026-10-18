@@ -171,6 +171,13 @@
   font-size: var(--fs-xs);
 }
 
+/* consult cache marker (cache-thread plan §5.3): its own line under the fallback note. */
+.run-tx-cachemark {
+  display: block;
+  margin-top: var(--sp-1);
+  font-family: var(--font-mono);
+}
+
 .run-tx-consult pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

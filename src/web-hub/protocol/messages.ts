@@ -591,8 +591,30 @@ export interface FleetRowWire {
    *  display-only `diag.consultOf`. Absent ⇔ not a consult run or an old agent (UI falls back to
    *  the generic phase-only line-2 slot). */
   consult?: true;
+  /** cache-thread plan §5.3 (U): the consult run's warm/cold compact marker
+   *  (`t#2 warm·hit 96%`), precomputed agent-side from diag.consultCache /
+   *  diag.consultThread. Append-only optional field — no proto bump; absent ⇔
+   *  no consult cache facts (old agents / non-consult runs) and the UI renders
+   *  nothing. English compact tokens only (UI text split). */
+  cacheMark?: string;
+  /** Same plan §5.3: the structured facts behind `cacheMark` (append-only,
+   *  optional — mirrors diag.consultCache minus timestamps/evidence) for
+   *  detail surfaces; `state` is the pre-consult prediction, `first` the
+   *  measured first-request cache result. */
+  consultCache?: FleetRowConsultCacheWire;
   highlight: "none" | "warn" | "crit";
   terminal: boolean;
+}
+
+/** Wire mirror of the frozen `ConsultCacheDiagnostics` display subset (§5.3 U). */
+export interface FleetRowConsultCacheWire {
+  state: "warm" | "cold" | "unknown";
+  first?: {
+    label: "hit" | "partial" | "miss" | "n/a";
+    readShare: number | null;
+    anchor?: string;
+    degraded?: true;
+  };
 }
 
 /**
@@ -750,6 +772,10 @@ export const RESUME_FEATURE_V1 = "resume.v1";
  *  again agent-side before it is ever set). */
 export const STATUS_FEATURES_MAX_ITEMS = 32;
 export const STATUS_FEATURES_MAX_CHARS = 64;
+/** cache-thread plan §5.3 (U): hard cap on a fleet row's consult cache mark
+ *  (`t#2 warm·hit 96%·degraded` — ~30 chars at the extremes). The agent-side
+ *  projection drops anything longer instead of failing the fleet frame. */
+export const FLEET_CACHE_MARK_MAX = 64;
 /** Result of agent-side @mention routing. This is additive to the prompt result so older
  * hubs/UIs continue to accept and ignore it. */
 export type MentionResultData =
@@ -1444,6 +1470,23 @@ const FleetRowSchema = Type.Object({
   toolTrail: Type.Optional(Type.String()),
   streamLine: Type.Optional(Type.String()),
   consult: Type.Optional(Type.Literal(true)),
+  // cache-thread plan §5.3 (U): append-only optional display fields. Same
+  // lenient posture as `thinking` — never the reason a fleet frame fails to
+  // decode; the agent-side projection drops empty/oversized values instead.
+  cacheMark: Type.Optional(Type.String({ maxLength: FLEET_CACHE_MARK_MAX })),
+  consultCache: Type.Optional(
+    Type.Object({
+      state: Type.Union([Type.Literal("warm"), Type.Literal("cold"), Type.Literal("unknown")]),
+      first: Type.Optional(
+        Type.Object({
+          label: Type.Union([Type.Literal("hit"), Type.Literal("partial"), Type.Literal("miss"), Type.Literal("n/a")]),
+          readShare: Type.Union([Type.Number(), Type.Null()]),
+          anchor: Type.Optional(Type.String({ maxLength: 64 })),
+          degraded: Type.Optional(Type.Literal(true)),
+        }),
+      ),
+    }),
+  ),
   highlight: Type.Union([Type.Literal("none"), Type.Literal("warn"), Type.Literal("crit")]),
   terminal: Type.Boolean(),
 });

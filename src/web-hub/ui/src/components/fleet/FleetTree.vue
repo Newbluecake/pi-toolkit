@@ -144,6 +144,14 @@ function thinkingTokenOf(row: FleetRowWire): string {
   const t = row.thinking;
   return typeof t === "string" && t !== "" ? `·${t}` : "";
 }
+/** cache-thread plan §5.3 (U): the consult run's warm/cold compact marker
+ *  (`t#2 warm·hit 96%`), precomputed agent-side (fleet row `cacheMark`).
+ *  Empty string = no facts → renders nothing. English compact tokens only
+ *  (UI text split); `translate="no"` keeps browser auto-translate off it. */
+function cacheMarkOf(row: FleetRowWire): string {
+  const m = row.cacheMark;
+  return typeof m === "string" && m !== "" ? m : "";
+}
 function modelBlockOf(row: FleetRowWire): boolean {
   return modelShortOf(row) !== "" || thinkingTokenOf(row) !== "";
 }
@@ -192,7 +200,10 @@ function isOrphan(row: FleetRowWire): boolean {
             <AppIcon name="chev-right" class="icon icon-sm chev" aria-hidden="true" />
           </span>
           <span class="run-activity"
-            ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node)) }}</span
+            ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node))
+            }}<span v-if="cacheMarkOf(rowOf(node))" class="run-cachemark" translate="no">
+              · {{ cacheMarkOf(rowOf(node)) }}</span
+            ></span
           >
           <span v-if="modelBlockOf(rowOf(node))" class="run-model">
             <span
@@ -254,7 +265,10 @@ function isOrphan(row: FleetRowWire): boolean {
           <span v-if="isOrphan(rowOf(node))" class="chip chip-orphan">{{ t("drawer.parentMissing") }}</span>
         </span>
         <span class="run-activity"
-          ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node)) }}</span
+          ><span class="phase">{{ phaseOf(rowOf(node)) }}</span> {{ activityOf(rowOf(node))
+          }}<span v-if="cacheMarkOf(rowOf(node))" class="run-cachemark" translate="no">
+            · {{ cacheMarkOf(rowOf(node)) }}</span
+          ></span
         >
         <span v-if="modelBlockOf(rowOf(node))" class="run-model">
           <span

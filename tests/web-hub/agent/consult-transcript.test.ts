@@ -47,3 +47,37 @@ describe("consult transcript reconstruction", () => {
     expect(consultTranscript({ consultOf: {}, taskPrompt: "q", text: "x".repeat(RUN_TX.maxBytes) })).toBeUndefined();
   });
 });
+
+describe("consult transcript cache mark (cache-thread plan §5.3 U)", () => {
+  it("attaches the compact marker to the question entry as a custom message field", () => {
+    const entries = consultTranscript({
+      consultOf: { askerRunId: "r_ABCDEFGH" },
+      taskPrompt: "question",
+      text: "answer",
+      consultCache: { v: 1, predicted: { state: "warm" } },
+      consultThread: { threadId: "c7k9q2mx", seq: 2 },
+    });
+    expect(entries?.[0]?.message?.consultMark).toBe("t#2 warm·…");
+    expect(entries?.[1]?.message?.consultMark).toBeUndefined(); // answer stays untouched
+  });
+
+  it("carries the measured result once the first response landed", () => {
+    const entries = consultTranscript({
+      consultOf: {},
+      taskPrompt: "q",
+      text: "a",
+      consultCache: {
+        v: 1,
+        predicted: { state: "unknown" },
+        first: { v: 1, readShare: 0.235, label: "partial", anchor: "added", at: 5 },
+      },
+    });
+    expect(entries?.[0]?.message?.consultMark).toBe("?·partial 24%");
+  });
+
+  it("entries without cache facts stay byte-identical (no consultMark key)", () => {
+    const entries = consultTranscript({ consultOf: {}, taskPrompt: "q", text: "a" });
+    expect(entries?.[0]?.message).toEqual({ role: "user", content: "q", consultSummary: true, consultPrompt: "q" });
+    expect("consultMark" in (entries?.[0]?.message ?? {})).toBe(false);
+  });
+});

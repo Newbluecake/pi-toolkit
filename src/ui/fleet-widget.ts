@@ -317,9 +317,14 @@ function widgetRowMain(
   // X1: worktree isolation marker (⎇ wt / ⎇ branch / ⎇ kept / ⎇ clean) —
   // identity-adjacent, so it sits right after the agent type.
   const wt = worktreeMarker(row.worktree);
+  // cache-thread plan §5.3 (U): the consult run's warm/cold compact marker
+  // (`t#2 warm·hit 96%`) rides next to the identity fields (type/worktree) —
+  // English tokens only; undefined = no field at all (byte-identical row).
+  const cc = row.consultCacheMark;
   const fields: Array<{ name: string; value: string }> = [
     { name: "type", value: row.type ?? "·" },
     ...(wt === undefined ? [] : [{ name: "wt", value: wt }]),
+    ...(cc === undefined ? [] : [{ name: "cc", value: cc }]),
     ...(modelWithLevel !== undefined ? [{ name: "model", value: modelWithLevel }] : []),
     { name: "phase", value: fixed },
     // deadline sits with phase ("is this run healthy?"), ahead of the resource
@@ -341,7 +346,10 @@ function widgetRowMain(
   // Try the complete row first. Only after each field tier is exhausted may
   // the label be shortened; label and phase are the final identity signal.
   if (!fits()) {
-    drop("type");
+    // The consult cache mark is the most auxiliary field — first to go when
+    // the row gets tight (identity/model/phase always outrank it).
+    drop("cc");
+    if (!fits()) drop("type");
     if (!fits() && modelField) {
       if (modelCanShorten) shown.set("model", modelBaseWithLevel!);
       if (!fits()) drop("model");
@@ -406,10 +414,18 @@ function widgetTerminalDetail(row: FleetRow, width: number): string {
   const suffix = [row.status, formatDuration(row.elapsedMs)];
   if (row.contextUsage) suffix.push(formatContextUsage(row.contextUsage));
   if (row.usage) suffix.push(formatWidgetCost(row.usage.costUsd, row.usage.unpriced));
+  // cache-thread plan §5.3 (U): the settle/linger line keeps the consult
+  // marker — for a finished consult this is the only place the measured
+  // `warm·hit 96%` value was ever visible in the TUI.
+  // It still yields before the label gets truncated: when even the model-less
+  // row would not fit with the marker, the marker is dropped first.
   const candidates = [modelWithLevel, modelBaseWithLevel, undefined];
-  const fits = (candidate: string | undefined, labelText: string) =>
-    visibleWidth([labelText, type, wt, candidate, ...suffix].filter(Boolean).join(" ")) <= width;
-  const chosen = candidates.find((candidate) => fits(candidate, label));
+  const fitsWith = (sfx: readonly string[], candidate: string | undefined) =>
+    visibleWidth([label, type, wt, candidate, ...sfx].filter(Boolean).join(" ")) <= width;
+  if (row.consultCacheMark !== undefined && candidates.some((c) => fitsWith([...suffix, row.consultCacheMark!], c))) {
+    suffix.push(row.consultCacheMark);
+  }
+  const chosen = candidates.find((candidate) => fitsWith(suffix, candidate));
   const modelWidth = visibleWidth([type, wt, chosen, ...suffix].filter(Boolean).join(" "));
   const labelWidth = Math.max(1, width - modelWidth - 1);
   const finalLabel = visibleWidth(label) > labelWidth ? truncateToWidth(label, labelWidth) : label;
