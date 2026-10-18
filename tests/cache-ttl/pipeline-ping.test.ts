@@ -725,3 +725,87 @@ describe("sendPipelinePing — bounded provider-pipeline replay", () => {
     }
   });
 });
+
+// P1 measurement regression: full pre-measurement outcome shapes, not partial matches.
+// APPEND ONLY — keepalive must never acquire a `measured` key when measurement is absent.
+describe("keepalive without measurement — exact legacy outcomes", () => {
+  const legacyDiag = {
+    baseFetchCalls: 1,
+    onPayloadCalls: 1,
+    sawMessageStart: false,
+    explicitSuccess: false,
+    piStopReason: undefined,
+    httpStatus: 200,
+    bodyBytes: 0,
+    wireHeaderNames: ["content-type", "x-api-key"],
+    deadlineHit: false,
+    durationMs: 0,
+  };
+  it("deep-equals the complete legacy usage result and leaves fetch redirect options untouched", async () => {
+    const h = harness();
+    const result = await sendPipelinePing(h.input);
+    expect(result.outcome).toEqual({
+      kind: "usage",
+      usage: { inputTokens: 12, outputTokens: 1, cacheRead: 1234, cacheWrite: 20, cacheWrite1h: 15 },
+      diag: { ...legacyDiag, sawMessageStart: true, bodyBytes: encoder.encode(messageStart()).length },
+    });
+    expect(vi.mocked(h.fetchImpl).mock.calls[0]![1]).not.toHaveProperty("redirect");
+    await result.settled;
+  });
+  it.each([400, 429, 503])("deep-equals the complete legacy HTTP %s result", async (status) => {
+    const h = harness(
+      {},
+      vi.fn(async () => new Response("rejected", { status })),
+    );
+    const result = await sendPipelinePing(h.input);
+    expect(result.outcome).toEqual({
+      kind: "http",
+      status,
+      diag: { ...legacyDiag, httpStatus: status, bodyBytes: 8, piStopReason: "error" },
+    });
+    await result.settled;
+  });
+  it("deep-equals network, malformed and accepted-then-lost shapes without annexes", async () => {
+    const network = harness(
+      {},
+      vi.fn(async () => {
+        throw new TypeError("private error");
+      }),
+    );
+    const failed = await sendPipelinePing(network.input);
+    expect(failed.outcome).toEqual({
+      kind: "network",
+      error: "TypeError",
+      diag: { ...legacyDiag, httpStatus: undefined },
+    });
+    await failed.settled;
+    const malformed = harness(
+      {},
+      vi.fn(async () => new Response(null)),
+    );
+    const missing = await sendPipelinePing(malformed.input);
+    expect(missing.outcome).toEqual({ kind: "malformed", diag: legacyDiag });
+    await missing.settled;
+    const empty = harness(
+      {},
+      vi.fn(async () => new Response("")),
+    );
+    const lost = await sendPipelinePing(empty.input);
+    expect(lost.outcome).toEqual({
+      kind: "accepted-then-lost",
+      diag: { ...legacyDiag, explicitSuccess: true, piStopReason: "stop" },
+    });
+    await lost.settled;
+  });
+  it("deep-equals pre-admission refusal and never registers measurement build options", async () => {
+    const h = harness();
+    const result = await sendPipelinePing({ ...h.input, guard: () => false });
+    expect(result.outcome).toEqual({
+      kind: "not-sent",
+      reason: "guard",
+      diag: { ...legacyDiag, baseFetchCalls: 0, onPayloadCalls: 0, httpStatus: undefined, wireHeaderNames: [] },
+    });
+    expect(h.streamSimple).not.toHaveBeenCalled();
+    await result.settled;
+  });
+});

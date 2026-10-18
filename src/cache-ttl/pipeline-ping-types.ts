@@ -6,6 +6,10 @@
  * implementation module's internals. Neither package edits this file; a change here is a plan revision.
  *
  * Types only: this module has no runtime code.
+ *
+ * Revision (measure-plan.md r4 §6, package M0): ADDITIVE measurement-only types — `PipelineWireProfile`,
+ * `PipelineMeasurementInput` (optional `PipelinePingInput.measurement`) and `PipelineMeasured` (optional `measured` on
+ * every `PipelineOutcome` variant). Absent ⇒ the keepalive contract above is unchanged.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -18,6 +22,85 @@ export type PipelinePingRegistry = Pick<ExtensionContext["modelRegistry"], "stre
 
 /** The chat model handed to `streamSimple` — the current `ctx.model` (already fingerprint-checked by the service). */
 export type PipelinePingModel = Parameters<PipelinePingRegistry["streamSimple"]>[0];
+
+/**
+ * Measurement-only (measure-plan.md r4 §6): the pi-ai `Context` handed to `streamSimple` in build mode. Keepalive
+ * never uses it (its transport keeps the fixed one-message placeholder context).
+ */
+export type PipelinePingContext = Parameters<PipelinePingRegistry["streamSimple"]>[1];
+
+/**
+ * Measurement-only (measure-plan.md r4 §2/§6): the wire protocols `/cache-ttl measure` supports. Selects the api
+ * gate, the endpoint path suffix (`/v1/messages` · `/responses` · `/chat/completions`) and the terminal usage frame.
+ * Keepalive never sets it; its behaviour stays the implicit `"anthropic-messages"` path.
+ */
+export type PipelineWireProfile = "anthropic-messages" | "openai-responses" | "openai-completions";
+
+/** Measurement-only route identity computed by the transport for the request URL it is about to send (plan §6). */
+export interface PipelineMeasureRouteKey {
+  /** `sha256:<hex>` digest over api, normalised origin, path minus suffix, sorted query, wire model, effective tier. */
+  key: string;
+  /** Redacted, display-only label (host + ≤ 2 path segments; token-like segments and query values ⇒ `…`). */
+  label: string;
+}
+
+/**
+ * Measurement-only input block (measure-plan.md r4 §6). ABSENT for every keepalive ping, in which case the transport
+ * behaves byte-for-byte as before (reader, outcome kinds and diag semantics unchanged). When present:
+ *   - api gate `model.api === profile`, per-profile path suffix, base fetch with `redirect: "manual"` (3xx ⇒ an `http`
+ *     outcome, never followed);
+ *   - every request computes the route key of its actual URL via `routeKey` and, when `expectRouteKey` is set,
+ *     refuses (`not-sent{capability}`) on a mismatch — likewise when the wire body `model` differs from the expected one;
+ *   - the terminal usage frame of `profile` ends the request and its raw `usage` object is cloned into
+ *     `measured.rawUsage` (≤ `MEASURE_RAW_USAGE_MAX_BYTES`); OpenAI profiles run to completion;
+ *   - `measured.sentAt` is recorded right before the base fetch, `measured.headersAt` at response headers.
+ */
+export interface PipelineMeasurementInput {
+  profile: PipelineWireProfile;
+  /**
+   * Build mode (writes, plan §3.3/§6): pi builds the params from `context`; the FIRST `onPayload` calls `validate` on
+   * the final params. A non-`undefined` result is a rejection code ⇒ `onPayload` throws ⇒ no fetch ⇒
+   * `not-sent{capability}` with `measured.rejection`. Accepted ⇒ `measured.builtBody = structuredClone(params)` and
+   * `onPayload` returns `undefined` (pi sends its own params). `PipelinePingInput.body` is ignored in build mode.
+   * Replays (controls, probes, renewal) omit `build` and send `body` (the earlier `builtBody`) verbatim.
+   */
+  build?: {
+    context: PipelinePingContext;
+    maxTokens: number;
+    cacheRetention: "short" | "long";
+    validate: (params: Record<string, unknown>) => string | undefined;
+  };
+  /**
+   * Route key of the request URL. Supplied by the measurement runner (it binds api + effective tier, the latter known
+   * from the validated build). A throw is treated as a capability failure (`not-sent{capability}`).
+   */
+  routeKey: (requestUrl: string) => PipelineMeasureRouteKey;
+  /** Run-wide route key fixed by the first valid write (plan §5.1); absent only for that first write. */
+  expectRouteKey?: string;
+  /** Expected wire `model` of the request body (plan §6); mismatch ⇒ `not-sent{capability}`. */
+  expectWireModel: string;
+}
+
+/** Measurement-only outcome annex (plan §6). Present only when the input carried `measurement`. */
+export interface PipelineMeasured {
+  /** Build-mode validator rejection code (`not-sent{capability}` only). */
+  rejection?: string;
+  /** Route mismatch detected before the base fetch (`not-sent{capability}` only). */
+  routeMismatch?: true;
+  /** Deep clone of the pi-built params accepted by `validate` (build mode only). */
+  builtBody?: Record<string, unknown>;
+  /** Bounded clone of the terminal frame's raw `usage` object, uninterpreted (the measurement reader parses it). */
+  rawUsage?: unknown;
+  /** Route key / label of the URL actually sent (or refused). */
+  routeKey?: string;
+  routeLabel?: string;
+  /** `clock.now()` immediately before the base fetch (the only time a request is "sent"). */
+  sentAt?: Millis;
+  /** `clock.now()` when the response headers arrived. */
+  headersAt?: Millis;
+  /** HTTP `Location` header was present on a 3xx (value never recorded). */
+  redirected?: true;
+}
 
 /**
  * Header-source literal for keepalive ping diagnostics when the ping went through pi's provider pipeline. Lives here
@@ -59,6 +142,8 @@ export interface PipelinePingInput {
   signal?: AbortSignal;
   /** Test seam: replaces the base `fetch` behind the transport's own fetch wrapper. Production: `globalThis.fetch`. */
   fetchImpl?: typeof fetch;
+  /** Measurement-only block (measure-plan.md r4 §6). Keepalive never sets it. */
+  measurement?: PipelineMeasurementInput;
 }
 
 /** Why a ping never reached the base fetch (zero network; the service refunds the budget). */
@@ -101,20 +186,22 @@ export interface PipelineDiag {
 /**
  * Logical outcome of one pipeline ping. Every variant except `not-sent` means the base fetch WAS invoked (the request
  * may have reached the server). The sent kinds mirror `UsageScanOutcome` 1:1 so `classifyUsage` and the existing
- * retry/breaker classification apply unchanged.
+ * retry/breaker classification apply unchanged. `measured` is set only for measurement requests (plan §6) — keepalive
+ * outcomes never carry it. For the `anthropic-messages` measurement profile the `usage` variant still carries the
+ * keepalive projection in `usage`; measurement code must read `measured.rawUsage` instead (strict reader, plan §5.2).
  */
 export type PipelineOutcome =
-  | { kind: "not-sent"; reason: PipelineNotSentReason; diag: PipelineDiag }
+  | { kind: "not-sent"; reason: PipelineNotSentReason; diag: PipelineDiag; measured?: PipelineMeasured }
   /** `usage === undefined` ⇔ `message_start` carried no usage object. */
-  | { kind: "usage"; usage: RawScannedUsage | undefined; diag: PipelineDiag }
+  | { kind: "usage"; usage: RawScannedUsage | undefined; diag: PipelineDiag; measured?: PipelineMeasured }
   /** Any non-2xx HTTP status. */
-  | { kind: "http"; status: number; diag: PipelineDiag }
+  | { kind: "http"; status: number; diag: PipelineDiag; measured?: PipelineMeasured }
   /** 2xx received, then end/error/deadline before `message_start`. */
-  | { kind: "accepted-then-lost"; diag: PipelineDiag }
+  | { kind: "accepted-then-lost"; diag: PipelineDiag; measured?: PipelineMeasured }
   /** Base fetch rejected, or D/abort hit before response headers; `error` = sanitized descriptor (name/code only). */
-  | { kind: "network"; error?: string; diag: PipelineDiag }
+  | { kind: "network"; error?: string; diag: PipelineDiag; measured?: PipelineMeasured }
   /** No body, or the 64 KiB scan cap was hit before `message_start`. */
-  | { kind: "malformed"; diag: PipelineDiag };
+  | { kind: "malformed"; diag: PipelineDiag; measured?: PipelineMeasured };
 
 /** The subset of {@link PipelineOutcome} in which the base fetch was invoked. */
 export type SentPipelineOutcome = Exclude<PipelineOutcome, { kind: "not-sent" }>;

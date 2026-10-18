@@ -7,7 +7,10 @@ import {
   networkErrorDescriptor,
   rawUsageFrom,
 } from "./ping-client.js";
+import { MEASURE_RAW_USAGE_MAX_BYTES, VALIDATOR_LIMITS } from "./measure-types.js";
+import { measureEndpointSuffix } from "./measure-route.js";
 import type {
+  PipelineMeasured,
   PipelineDiag,
   PipelineNotSentReason,
   PipelineOutcome,
@@ -18,7 +21,8 @@ import type {
 type Outcome = PipelineOutcome extends infer T ? (T extends PipelineOutcome ? Omit<T, "diag"> : never) : never;
 
 export const sendPipelinePing: SendPipelinePing = async (input) => {
-  const { clock } = input;
+  const { clock, measurement } = input;
+  const measured: PipelineMeasured | undefined = measurement ? {} : undefined;
   const startedAt = clock.now();
   const controller = new AbortController();
   const diag: PipelineDiag = {
@@ -93,7 +97,10 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
     controller.abort();
     cancelBody();
     // Diagnostics are a logical-time snapshot, never mutated by late physical completion.
-    resolveResult({ outcome: { ...outcome, diag: { ...diag } } as PipelineOutcome, settled });
+    resolveResult({
+      outcome: { ...outcome, diag: { ...diag }, ...(measured ? { measured: { ...measured } } : {}) } as PipelineOutcome,
+      settled,
+    });
     maybeSettled();
   }
   function onAbort(): void {
@@ -143,10 +150,18 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
   function boundResponse(response: Response): Response {
     diag.httpStatus = response.status;
     if (!response.body) {
-      if (response.ok) finish({ kind: "malformed" });
+      if (measurement && response.status >= 300 && response.status < 400) {
+        measured!.redirected = true;
+        finish({ kind: "http", status: response.status });
+      } else if (response.ok) finish({ kind: "malformed" });
       return response;
     }
     upstream = response.body.getReader();
+    if (measurement && response.status >= 300 && response.status < 400) {
+      measured!.redirected = true;
+      finish({ kind: "http", status: response.status });
+      return response;
+    }
     const reader = upstream;
     const limit = response.ok ? PING_SCAN_LIMIT_BYTES : HTTP_ERROR_BODY_CAP_BYTES;
     const body = new ReadableStream<Uint8Array>(
@@ -183,29 +198,79 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
     );
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   }
+  async function readRequestBody(request: Request): Promise<unknown> {
+    const reader = request.clone().body?.getReader();
+    if (!reader) return undefined;
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    let closed = false;
+    try {
+      for (;;) {
+        const step = await raceAbort(track(reader.read()));
+        if (step.done) {
+          closed = true;
+          break;
+        }
+        bytes += step.value.byteLength;
+        if (bytes > VALIDATOR_LIMITS.maxSerializedBytes) return undefined;
+        chunks.push(step.value);
+      }
+      return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    } finally {
+      if (!closed) {
+        try {
+          track(Promise.resolve(reader.cancel()));
+        } catch {
+          /* physical cancellation already settled */
+        }
+      }
+      reader.releaseLock();
+    }
+  }
   const wrappedFetch: typeof fetch = async (request, init) => {
     guard();
     if (diag.baseFetchCalls !== 0) throw new Error("keepalive second fetch blocked");
     const url = new URL(typeof request === "string" ? request : request instanceof URL ? request.href : request.url);
     const method = init?.method ?? (request instanceof Request ? request.method : "GET");
-    // The Anthropic SDK supplies the serialized JSON in init.body. Refuse unfamiliar shapes
-    // rather than reading an arbitrary Request body (which could itself hang before admission).
+    // Keepalive only accepts the Anthropic SDK's serialized init.body. Measurement additionally
+    // accepts Request bodies, read under the same deadline/physical ledger and a byte cap.
     let wireBody: unknown;
     try {
-      wireBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      wireBody =
+        typeof init?.body === "string"
+          ? JSON.parse(init.body)
+          : measurement && request instanceof Request && init?.body === undefined
+            ? await track(readRequestBody(request))
+            : undefined;
     } catch {
       // An invalid provider request is a capability failure, not a network send.
     }
     if (
       diag.onPayloadCalls !== 1 ||
       method.toUpperCase() !== "POST" ||
-      !url.pathname.endsWith("/v1/messages") ||
+      !url.pathname.endsWith(measurement ? measureEndpointSuffix(measurement.profile) : "/v1/messages") ||
       !isRecord(wireBody) ||
       typeof wireBody.model !== "string" ||
-      wireBody.model !== input.body.model
+      wireBody.model !== (measurement ? measurement.expectWireModel : input.body.model)
     ) {
       notSentReason = "capability";
+      if (measurement && isRecord(wireBody) && wireBody.model !== measurement.expectWireModel)
+        measured!.routeMismatch = true;
       throw new Error("keepalive provider request mismatch");
+    }
+    if (measurement) {
+      try {
+        const route = measurement.routeKey(url.href);
+        measured!.routeKey = route.key;
+        measured!.routeLabel = route.label;
+        if (measurement.expectRouteKey !== undefined && route.key !== measurement.expectRouteKey) {
+          measured!.routeMismatch = true;
+          throw new Error("measurement route mismatch");
+        }
+      } catch {
+        notSentReason = "capability";
+        throw new Error("measurement route unavailable");
+      }
     }
     const headers = new Headers(init?.headers ?? (request instanceof Request ? request.headers : undefined));
     diag.wireHeaderNames = [...headers.keys()].map((name) => name.toLowerCase()).sort();
@@ -217,14 +282,20 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
     guard(); // immediately before the ONLY base-fetch invocation
     let baseFetch: Promise<Response>;
     try {
+      // Re-wrap Request inputs as well: their own redirect mode must not survive measurement.
+      const baseRequest =
+        measurement && request instanceof Request ? new Request(request, { ...init, redirect: "manual" }) : request;
+      const baseInit = measurement ? { ...init, redirect: "manual" as const } : init;
+      if (measured) measured.sentAt = clock.now();
       diag.baseFetchCalls += 1;
-      baseFetch = Promise.resolve((input.fetchImpl ?? globalThis.fetch)(request, init));
+      baseFetch = Promise.resolve((input.fetchImpl ?? globalThis.fetch)(baseRequest, baseInit));
     } catch (error) {
       finish(fallback(error));
       throw error;
     }
     const physicalFetch = track(
       baseFetch.then((response) => {
+        if (measured && !logicalDone) measured.headersAt = clock.now();
         if (logicalDone) {
           upstream = response.body?.getReader();
           cancelBody();
@@ -256,15 +327,18 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
       guard();
       if (
         input.model.provider === "github-copilot" ||
-        input.model.api !== "anthropic-messages" ||
+        input.model.api !== (measurement?.profile ?? "anthropic-messages") ||
         typeof input.registry.streamSimple !== "function"
       ) {
         finish({ kind: "not-sent", reason: "capability" });
       } else {
         const stream = input.registry.streamSimple(
           input.model,
-          { messages: [{ role: "user", content: "keepalive", timestamp: clock.now() }] },
+          measurement?.build?.context ?? { messages: [{ role: "user", content: "keepalive", timestamp: clock.now() }] },
           {
+            ...(measurement?.build
+              ? { maxTokens: measurement.build.maxTokens, cacheRetention: measurement.build.cacheRetention }
+              : {}),
             maxRetries: 0,
             sessionId: input.sessionId,
             signal: controller.signal,
@@ -274,16 +348,38 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
               guard();
               return headers;
             },
-            onPayload: () => {
+            onPayload: (params) => {
               diag.onPayloadCalls += 1;
               guard();
               if (diag.onPayloadCalls > 1) throw new Error("keepalive second payload blocked");
+              if (measurement?.build) {
+                notSentReason = "capability";
+                if (!isRecord(params)) {
+                  measured!.rejection = "extra-input";
+                  throw new Error("measurement payload is not an object");
+                }
+                const rejection = measurement.build.validate(params);
+                if (rejection !== undefined) {
+                  measured!.rejection = rejection;
+                  throw new Error("measurement payload rejected");
+                }
+                measured!.builtBody = structuredClone(params);
+                notSentReason = undefined;
+                return undefined;
+              }
               return input.body;
             },
             onProviderStreamEvent: (event) => {
               if (!logicalDone && clock.now() >= input.deadlineAt) onDeadline();
+              // P2 adds OpenAI terminal frames here; measurement profiles never consume an
+              // Anthropic-shaped event from a different API.
+              if (measurement && measurement.profile !== "anthropic-messages") return;
               if (logicalDone || diag.baseFetchCalls === 0 || !isMessageStartEvent(event)) return;
               diag.sawMessageStart = true;
+              if (measured && isRecord(event.message)) {
+                const raw = cloneRawUsage(event.message.usage);
+                if (raw !== undefined) measured.rawUsage = raw;
+              }
               finish({ kind: "usage", usage: rawUsageFrom(event) });
             },
           },
@@ -310,6 +406,19 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
   }
   return result;
 };
+
+function cloneRawUsage(value: unknown): unknown {
+  if (!isRecord(value)) return undefined;
+  try {
+    const clone: unknown = structuredClone(value);
+    const serialized = JSON.stringify(clone);
+    return serialized !== undefined && Buffer.byteLength(serialized, "utf8") <= MEASURE_RAW_USAGE_MAX_BYTES
+      ? clone
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
