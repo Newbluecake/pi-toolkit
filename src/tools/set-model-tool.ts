@@ -7,6 +7,7 @@ import { THINKING_LEVELS, type SetModelOutcome } from "../core/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { MSG_SET_MODEL_ON_EXTERNAL, MSG_SET_MODEL_TO_EXTERNAL } from "../external-agent/messages.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
+import { cleanLabel, runRefDetails, titleForHandle } from "./run-ref.js";
 
 /**
  * "set_model" — switch the model used from the next LLM call onward, either
@@ -85,6 +86,8 @@ export interface SetModelToolDeps {
   available?: () => readonly { provider: string; id: string; name?: string }[];
   /** run_id / unique prefix / label resolution (host form). */
   resolveRun?: (handle: string) => ResolveRunResult;
+  /** Optional: effective label of a run (human name shown next to the run id). */
+  labelOf?: (runId: string) => string | undefined;
   /** Clock for the host-path deadline (m2); defaults to systemClock, tests inject FakeClock. */
   clock?: Clock;
   /**
@@ -130,6 +133,7 @@ function successResult(
   model: { provider: string; id: string },
   effectiveThinking: string | undefined,
   desired: string | undefined,
+  label?: string,
 ) {
   return {
     content: [
@@ -143,6 +147,7 @@ function successResult(
     details: {
       ok: true,
       target: detailsTarget,
+      ...(detailsTarget !== "self" && label !== undefined ? runRefDetails(detailsTarget, label) : {}),
       model,
       ...(effectiveThinking === undefined ? {} : { thinking: effectiveThinking }),
     },
@@ -157,7 +162,9 @@ function mapRunOutcome(
   outcome: SetModelOutcome,
   requestedThinking: string | undefined,
   externalRunTarget: boolean,
+  label?: string,
 ) {
+  const who = label === undefined ? `run ${textTarget}` : textTarget;
   if (outcome.ok)
     return successResult(
       textTarget,
@@ -165,11 +172,12 @@ function mapRunOutcome(
       outcome.model,
       outcome.thinking,
       requestedThinking ?? outcome.thinking,
+      label,
     );
   switch (outcome.reason) {
     case "not_running":
       throw new Error(
-        `run ${textTarget} is not currently running; a terminal run's model can only be chosen when you spawn ` +
+        `${who} is not currently running; a terminal run's model can only be chosen when you spawn ` +
           "(Agent(model: …)) or resume it",
       );
     case "unknown_model":
@@ -177,10 +185,10 @@ function mapRunOutcome(
         `unknown model: ${outcome.detail} (not available in this installation — check the provider auth)`,
       );
     case "rejected":
-      throw new Error(`run ${textTarget} refused the model switch: ${outcome.detail}`);
+      throw new Error(`${who} refused the model switch: ${outcome.detail}`);
     case "timeout":
       throw new Error(
-        `model switch for run ${textTarget} timed out after ${SET_MODEL_TIMEOUT_MS / 1000}s; the session may still be on the previous model`,
+        `model switch for ${who} timed out after ${SET_MODEL_TIMEOUT_MS / 1000}s; the session may still be on the previous model`,
       );
     case "unsupported":
       // external-agent plan §5.4 (P4b): an external (droid) run never exposes
@@ -214,7 +222,7 @@ export function createSetModelTool(deps: SetModelToolDeps): ToolDefinition<typeo
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const title = theme.fg("toolTitle", theme.bold(`Set Model: ${args?.model ?? "…"}`));
       const meta = [
-        `target: ${args?.run_id === undefined || args.run_id === "self" ? "self" : args.run_id}`,
+        `target: ${args?.run_id === undefined || args.run_id === "self" ? "self" : titleForHandle(args.run_id, { resolveRun: deps.resolveRun, get: (id) => ({ diag: { label: deps.labelOf?.(id) } }) as never })}`,
         ...(args?.thinking ? [`thinking: ${args.thinking}`] : []),
       ].join("  ·  ");
       text.setText(`${title}\n${theme.fg("muted", meta)}`);
@@ -294,7 +302,15 @@ export function createSetModelTool(deps: SetModelToolDeps): ToolDefinition<typeo
       if (resolved && !resolved.ok) throw new Error(resolved.error);
       const runId = resolved?.ok ? resolved.runId : rawTarget!;
       const outcome = await deps.runs!.setModel(runId, ref, opts);
-      return mapRunOutcome(rawTarget!, runId, outcome, thinking, deps.externalOwns !== undefined);
+      const label = cleanLabel(deps.labelOf?.(runId));
+      return mapRunOutcome(
+        label === undefined ? rawTarget! : `${label} (run_id: ${runId})`,
+        runId,
+        outcome,
+        thinking,
+        deps.externalOwns !== undefined,
+        label,
+      );
     },
   } satisfies ToolDefinition<typeof SetModelParams>;
 }

@@ -15,7 +15,8 @@ import { resultText } from "./state.js";
  * @typedef {{ toolCallId: string, toolName: string, args: unknown,
  *   state: "running" | "done" | "error" | "pending",
  *   partial?: string, result?: string, truncated?: boolean,
- *   durationMs?: number, runningSince?: number }} ToolView
+ *   durationMs?: number, runningSince?: number,
+ *   runRef?: { runId: string, label?: string } }} ToolView
  */
 
 const SUMMARY_KEYS = ["command", "path", "file_path", "pattern", "query", "url", "description", "prompt"];
@@ -44,6 +45,37 @@ export function safeJson(v, pretty) {
 }
 
 /**
+ * Subagent-tool result `details` → `{runId,label?}` (append-only optional; the agent side adds
+ * it for steer/abort/extend/set_model/get_subagent_result). Anything malformed ⇒ undefined.
+ * @param {any} src  toolResult message or live result (`{ details }`)
+ * @returns {{ runId: string, label?: string } | undefined}
+ */
+/** Tools whose result `details` carry the resolved run (`{runId,label}`) for the header. */
+export const RUN_REF_TOOLS = new Set([
+  "steer_subagent",
+  "abort_subagent",
+  "extend_subagent_timeout",
+  "get_subagent_result",
+  "set_model",
+]);
+
+/** Header text for a card whose run is known: `label (run_id: r_x)`; no label ⇒ undefined (raw args stay). */
+export function runRefHeader(view) {
+  const rr = view?.runRef;
+  if (!rr || rr.label === undefined) return undefined;
+  return `${rr.label} (run_id: ${rr.runId})`;
+}
+
+export function runRefOf(src) {
+  const d = src?.details;
+  if (!d || typeof d !== "object") return undefined;
+  const runId = d.runId;
+  if (typeof runId !== "string" || runId === "") return undefined;
+  const label = typeof d.label === "string" ? d.label.replace(/\s+/g, " ").trim() : "";
+  return label === "" ? { runId } : { runId, label: label.length > 48 ? `${label.slice(0, 47)}…` : label };
+}
+
+/**
  * Build a ToolView from a transcript toolCall block + optional toolResult
  * message + optional live tool state (from `tool_execution_*`) + the optional
  * toolCallId → durationMs map (tool-duration plan: live `tool_execution_end.durationMs`
@@ -64,10 +96,14 @@ export function toolView(call, resultMsg, live, durations) {
     view.state = resultMsg.isError === true ? "error" : "done";
     view.result = resultText(resultMsg);
     if (resultMsg.truncated === true) view.truncated = true;
+    const rr = RUN_REF_TOOLS.has(toolName) ? runRefOf(resultMsg) : undefined;
+    if (rr) view.runRef = rr;
   } else if (live) {
     if (live.done) {
       view.state = live.isError ? "error" : "done";
       view.result = resultText(live.result);
+      const rr = RUN_REF_TOOLS.has(toolName) ? runRefOf(live.result) : undefined;
+      if (rr) view.runRef = rr;
     } else {
       view.state = "running";
       // browser-clock receipt: the ticking chip computes elapsed against a local ticker's now

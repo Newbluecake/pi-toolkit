@@ -398,3 +398,34 @@ describe("ToolCard.vue — markdown-rendered results (MD_RESULT_TOOLS)", () => {
     expect(pres[1]!.element.closest(".tool-md")).not.toBeNull();
   });
 });
+
+describe("ToolCard.vue — subagent run label header", () => {
+  it("shows `label (run_id: …)` when the result details carry a label; raw args otherwise", () => {
+    const withLabel = mount(ToolCard, {
+      props: {
+        view: view({
+          toolCallId: "9",
+          toolName: "steer_subagent",
+          state: "done",
+          args: { run_id: "dev-x", text: "go" },
+          result: "Sent follow-up instruction to dev-x (run_id: r_ABC).",
+          runRef: { runId: "r_ABC", label: "dev-x" },
+        }),
+      },
+    });
+    expect(withLabel.get(".tool-args").text()).toBe("dev-x (run_id: r_ABC)");
+    const bare = mount(ToolCard, {
+      props: {
+        view: view({
+          toolCallId: "10",
+          toolName: "steer_subagent",
+          state: "done",
+          args: { run_id: "r_ABC", text: "go" },
+          runRef: { runId: "r_ABC" },
+        }),
+      },
+    });
+    expect(bare.get(".tool-args").text()).toContain("r_ABC");
+    expect(bare.get(".tool-args").text()).not.toContain("run_id: r_ABC)");
+  });
+});

@@ -30,6 +30,7 @@ import type { ContextSwitchDiag, CompactionFailureRecord } from "../core/types.j
 import type { ConsultCacheDiagnostics, ConsultThreadRef } from "../core/types.js";
 import { formatConsultCacheLine } from "../core/consult-cache-marker.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
+import { labelOfRun, labelOfSnapshot, runRefText, titleForHandle } from "./run-ref.js";
 import {
   buildWorkflowProgressLines,
   formatWorkflowResultText,
@@ -286,7 +287,12 @@ export function createResultTool(deps: {
      */
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const title = theme.fg("toolTitle", theme.bold(`Get Subagent Result: ${args?.run_id ?? "…"}`));
+      const title = theme.fg(
+        "toolTitle",
+        theme.bold(
+          `Get Subagent Result: ${titleForHandle(args?.run_id, { resolveRun: deps.resolveRun, get: (id) => deps.query.get(id) })}`,
+        ),
+      );
       const meta = args?.wait
         ? `wait (budget: ${args.wait_ms !== undefined ? formatDuration(args.wait_ms) : "default"})`
         : undefined;
@@ -384,7 +390,7 @@ export function createResultTool(deps: {
         const text = snapshot.outcome
           ? formatOutcome(snapshot.outcome, maxChars)
           : [
-              `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
+              `${labelOfSnapshot(snapshot) === undefined ? `Run ${runId}` : runRefText(runId, snapshot.diag.label)} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
               ...buildProgressLines(snapshot, Date.now()),
             ].join("\n");
         if (snapshot.outcome) {
@@ -398,12 +404,12 @@ export function createResultTool(deps: {
             runId,
             status: snapshot.status,
             usage: snapshot.diag.usage,
+            ...(snapshot.diag.label !== undefined ? { label: snapshot.diag.label } : {}),
             ...(snapshot.outcome
               ? {
                   durationMs: snapshot.outcome.durationMs,
                   // Presentation stats for renderResult + history replay (M-D).
                   summary: formatOutcomeSummary(snapshot.outcome),
-                  ...(snapshot.diag.label !== undefined ? { label: snapshot.diag.label } : {}),
                 }
               : {}),
             ...(snapshot.outcome ? truncationDetails(snapshot.outcome, maxChars) : {}),
@@ -424,7 +430,7 @@ export function createResultTool(deps: {
         const budget = formatDuration(params.wait_ms ?? DEFAULT_WAIT_MS);
         const snap = deps.query.get(runId);
         const lines = [
-          `⏳ waiting for ${runId} · ${formatDuration(now - startedAt)} / ${budget}`,
+          `⏳ waiting for ${labelOfSnapshot(snap) === undefined ? runId : runRefText(runId, snap?.diag.label)} · ${formatDuration(now - startedAt)} / ${budget}`,
           ...(snap && !snap.outcome ? buildProgressLines(snap, now) : []),
         ];
         onUpdate({
@@ -450,7 +456,9 @@ export function createResultTool(deps: {
       }
       if (!waited.ok) {
         if (waited.reason === "wait_timeout") {
-          throw new Error(waitTimeoutMessage(runId, waitMs, waitStreak.timeout(runId, waitMs)));
+          throw new Error(
+            waitTimeoutMessage(runId, waitMs, waitStreak.timeout(runId, waitMs), "run", labelOfRun(deps.query, runId)),
+          );
         }
         throw new Error(waited.reason === "unknown_run" ? `unknown run_id: ${params.run_id}` : "wait was aborted");
       }
@@ -489,8 +497,10 @@ function waitTimeoutMessage(
   waitMs: number,
   streak: TimeoutStreakResult,
   noun: "run" | "workflow" = "run",
+  label?: string,
 ): string {
-  const base = `wait timed out after ${formatDuration(waitMs)}; ${noun} ${runId} is still going.`;
+  const ref = label === undefined ? `${noun} ${runId}` : runRefText(runId, label);
+  const base = `wait timed out after ${formatDuration(waitMs)}; ${ref} is still going.`;
   const directions =
     "Either retry with a larger wait_ms if blocking is genuinely necessary, or — preferred — end your " +
     `turn (or do other work) and let the ${noun}'s completion notification arrive.`;

@@ -24,7 +24,7 @@
 import { computed, onUnmounted, ref, watch } from "vue";
 import { buildEditDiff, foldRows } from "@logic/diff.js";
 import { formatDuration } from "@logic/duration.js";
-import { safeJson, summarizeArgs } from "@logic/tools.js";
+import { runRefHeader, safeJson, summarizeArgs } from "@logic/tools.js";
 import type { ToolCardProps } from "../../contracts.js";
 import { useCoarseClamp } from "../../composables/useCoarseClamp.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -193,7 +193,7 @@ const resultClamp = useCoarseClamp(
       <span v-if="view.state === 'running'" class="tool-progress" aria-hidden="true"></span>
       <span class="run-icon"><AppIcon :name="icon" :class="{ spin: spins }" /></span>
       <span class="tool-name" translate="no">{{ view.toolName }}</span>
-      <span class="tool-args" translate="no">{{ summarizeArgs(view.args) }}</span>
+      <span class="tool-args" translate="no">{{ runRefHeader(view) ?? summarizeArgs(view.args) }}</span>
       <span v-if="view.truncated" class="badge badge-trunc" :title="t('transcript.truncatedTitle')">{{
         t("transcript.truncated")
       }}</span>

@@ -550,6 +550,7 @@ export default function activate(rawPi: ExtensionAPI): void {
         ? { externalOwns: (p: string) => holder.current?.external?.owns(p) === true }
         : {}),
       resolveRun: forwardResolveRun(holder),
+      labelOf: (runId) => holder.current?.query.get(runId)?.diag.label,
     }),
   );
   pi.registerTool(

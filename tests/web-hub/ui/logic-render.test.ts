@@ -177,3 +177,29 @@ describe("transcript/messageText", () => {
     expect(messageText(null)).toBe("");
   });
 });
+
+describe("toolView runRef (subagent tool result details)", () => {
+  const call = (name: string) => ({ id: "c1", name, arguments: { run_id: "x" } });
+  it("lifts {runId,label} from toolResult details for subagent tools only", () => {
+    const res = {
+      toolCallId: "c1",
+      content: [{ type: "text", text: "ok" }],
+      details: { runId: "r_1", label: "  my  agent " },
+    };
+    expect(toolView(call("steer_subagent"), res).runRef).toEqual({ runId: "r_1", label: "my agent" });
+    expect(toolView(call("read"), res).runRef).toBeUndefined();
+  });
+  it("lifts from a live finished result; ignores malformed / label-less details", () => {
+    const live = {
+      toolCallId: "c1",
+      toolName: "abort_subagent",
+      done: true,
+      result: { content: [], details: { runId: "r_2" } },
+    };
+    expect(toolView(call("abort_subagent"), undefined, live).runRef).toEqual({ runId: "r_2" });
+    expect(
+      toolView(call("abort_subagent"), { toolCallId: "c1", content: [], details: { runId: 5 } }).runRef,
+    ).toBeUndefined();
+    expect(toolView(call("abort_subagent"), { toolCallId: "c1", content: [] }).runRef).toBeUndefined();
+  });
+});

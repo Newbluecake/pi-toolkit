@@ -755,6 +755,8 @@ export interface ToolView {
   /** Tool-duration plan: browser-clock epoch ms for RUNNING cards (ticking elapsed); absent =
    *  unknown (no chip until it finishes). */
   readonly runningSince?: number;
+  /** Resolved subagent run from the tool result `details` ({runId,label?}); absent = show raw args. */
+  readonly runRef?: { readonly runId: string; readonly label?: string };
 }
 
 /** ui-design.md §3.2's run/agent state vocabulary — one shared enum for cards, pills, fleet rows and tool cards. */

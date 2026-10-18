@@ -3,6 +3,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
+import { labelOfRun, labelOfSnapshot, runRefDetails, runRefText, titleForHandle } from "./run-ref.js";
 
 /** steer reply modes (see SteerToolParams.reply). */
 export type SteerReply = "none" | "ack" | "report";
@@ -78,7 +79,12 @@ export function createSteerTool(deps: {
     /** Same rationale as get_subagent_result's renderCall: show *which* run is being steered and a preview of the instruction, not a bare tool name. */
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const title = theme.fg("toolTitle", theme.bold(`Steer Subagent: ${args?.run_id ?? "…"}`));
+      const title = theme.fg(
+        "toolTitle",
+        theme.bold(
+          `Steer Subagent: ${titleForHandle(args?.run_id, { resolveRun: deps.resolveRun, get: (id) => deps.query.get(id) })}`,
+        ),
+      );
       const preview = args?.text?.replace(/\s+/g, " ").trim();
       const clipped = preview && preview.length > 80 ? `${preview.slice(0, 79)}…` : preview;
       text.setText(clipped ? `${title}\n${theme.fg("muted", clipped)}` : title);
@@ -113,7 +119,9 @@ export function createSteerTool(deps: {
           text = frameSteerReply(params.text, reply);
         }
       }
+      const label = labelOfRun(deps.query, runId);
       const result = await deps.query.steer(runId, text);
+      const who = label === undefined ? `run ${params.run_id}` : runRefText(runId, label);
       if (!result.ok) {
         // A TERMINAL run is the common not_running case a caller can actually
         // act on: keep today's error shape, but point at the resume path
@@ -123,15 +131,15 @@ export function createSteerTool(deps: {
         const reason =
           result.reason === "not_running"
             ? status !== undefined && TERMINAL_STATUSES.has(status)
-              ? `run ${params.run_id} is not currently running (status: ${status}); ` +
+              ? `${who} is not currently running (status: ${status}); ` +
                 `it has finished and cannot be steered — use Agent({ resume: "${params.run_id}" }) to continue its session in a new run instead`
-              : `run ${params.run_id} is not currently running`
+              : `${who} is not currently running`
             : result.reason === "steer_timeout"
-              ? `steer to run ${params.run_id} timed out`
-              : `run ${params.run_id} rejected the steer: ${result.detail ?? "unknown reason"}`;
+              ? `steer to ${who} timed out`
+              : `${who} rejected the steer: ${result.detail ?? "unknown reason"}`;
         throw new Error(reason);
       }
-      const base = `Sent follow-up instruction to run ${runId}.`;
+      const base = `Sent follow-up instruction to ${runRefText(runId, label)}.`;
       const resultText = framed
         ? `${base} reply=${reply}: the subagent will send ONE message_agent reply (to "root", kind "finding") after its next turn — ` +
           `it arrives in your context as a subagent:fabric message and wakes you, so end your turn now instead of waiting or polling.`
@@ -141,10 +149,10 @@ export function createSteerTool(deps: {
       return {
         content: [{ type: "text" as const, text: resultText }],
         details: framed
-          ? { ok: true, runId, reply, replyFramed: true }
+          ? { ok: true, ...runRefDetails(runId, label), reply, replyFramed: true }
           : reply !== "none"
-            ? { ok: true, runId, reply, replyFramed: false }
-            : { ok: true, runId },
+            ? { ok: true, ...runRefDetails(runId, label), reply, replyFramed: false }
+            : { ok: true, ...runRefDetails(runId, label) },
       };
     },
   } satisfies ToolDefinition<typeof SteerToolParams>;

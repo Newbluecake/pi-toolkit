@@ -4,6 +4,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
 import { resolveToolTarget, type WorkflowQueryPort } from "./workflow-target.js";
+import { labelOfRun, labelOfSnapshot, runRefDetails, runRefText, titleForHandle } from "./run-ref.js";
 import type { BackgroundWorkflowView } from "../workflow/background.js";
 
 export const AbortToolParams = Type.Object({
@@ -59,7 +60,12 @@ export function createAbortTool(deps: {
     parameters: AbortToolParams,
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const title = theme.fg("toolTitle", theme.bold(`Abort Subagent: ${args?.run_id ?? "…"}`));
+      const title = theme.fg(
+        "toolTitle",
+        theme.bold(
+          `Abort Subagent: ${titleForHandle(args?.run_id, { resolveRun: deps.resolveRun, get: (id) => deps.query.get(id) })}`,
+        ),
+      );
       const reason = previewReason(args?.reason);
       text.setText(reason ? `${title}\n${theme.fg("muted", reason)}` : title);
       return text;
@@ -96,17 +102,19 @@ export function createAbortTool(deps: {
         throw new Error(`unknown workflow id: ${params.run_id}`);
       }
       const runId = target.runId;
+      const label = labelOfRun(deps.query, runId);
+      const who = runRefText(runId, label);
       const result = await deps.query.stop(runId, "user_stop");
       if (result.ok) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `Abort requested for run ${runId} (escalation: ${result.escalatedTo}). Use get_subagent_result(run_id: "${runId}", wait: true) to wait for its terminal state.`,
+              text: `Abort requested for ${who} (escalation: ${result.escalatedTo}). Use get_subagent_result(run_id: "${runId}", wait: true) to wait for its terminal state.`,
             },
           ],
           details: {
-            runId,
+            ...runRefDetails(runId, label),
             ok: true,
             escalatedTo: result.escalatedTo,
             ...(previewReason(params.reason) ? { reason: previewReason(params.reason) } : {}),
@@ -118,14 +126,14 @@ export function createAbortTool(deps: {
           content: [
             {
               type: "text" as const,
-              text: `run ${runId} has already reached a terminal state ("${result.status}"); nothing to abort`,
+              text: `${who} has already reached a terminal state ("${result.status}"); nothing to abort`,
             },
           ],
-          details: { runId, alreadyTerminal: true, status: result.status },
+          details: { ...runRefDetails(runId, label), alreadyTerminal: true, status: result.status },
         };
       }
       if (result.reason === "unknown_run") throw new Error(`unknown run_id: ${params.run_id}`);
-      throw new Error(`failed to abort run ${runId} (escalation: ${result.escalatedTo})`);
+      throw new Error(`failed to abort ${who} (escalation: ${result.escalatedTo})`);
     },
   } satisfies ToolDefinition<typeof AbortToolParams>;
 }

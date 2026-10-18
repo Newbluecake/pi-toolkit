@@ -8,6 +8,7 @@ import type { ResolveRunResult } from "../service/resolve-target.js";
 import type { BackgroundWorkflowView } from "../workflow/background.js";
 import type { WorkflowExtendOutcome } from "../workflow/deadline.js";
 import { resolveToolTarget, WORKFLOW_ID_PREFIX, type WorkflowQueryPort } from "./workflow-target.js";
+import { labelOfRun, labelOfSnapshot, runRefDetails, titleForHandle } from "./run-ref.js";
 
 /**
  * timeout-notify (arch §4) + agent-explicit-timeout-extend (§3.5/§5.2): extend
@@ -62,6 +63,9 @@ function previewReason(reason?: string): string | undefined {
 }
 
 const short = (runId: string) => runId.slice(0, 8);
+/** `run r_x` without a label, `label (run_id: r_x)` with one (short id, same as before). */
+const shortRef = (runId: string, label: string | undefined) =>
+  label === undefined ? `run ${short(runId)}` : `${label} (run_id: ${short(runId)})`;
 const readResultHint = (runId: string) => `get_subagent_result(run_id: "${short(runId)}")`;
 const respawnHint = "or abort_subagent and respawn with a larger timeout_s";
 
@@ -77,7 +81,7 @@ function rejectionMessage(
   now: Millis,
 ): string {
   const runId = snapshot?.runId;
-  const name = runId === undefined ? "the run" : `run ${short(runId)}`;
+  const name = runId === undefined ? "the run" : shortRef(runId, labelOfSnapshot(snapshot));
   switch (result.reason) {
     case "unknown_run":
       return `unknown run: no live or recorded run matches that id. List runs with /agent status, then retry with an exact run_id, a unique prefix, or a label.`;
@@ -237,7 +241,12 @@ export function createExtendTimeoutTool(deps: {
     parameters: ExtendTimeoutParams,
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      const title = theme.fg("toolTitle", theme.bold(`Extend Subagent Timeout: ${args?.run_id ?? "…"}`));
+      const title = theme.fg(
+        "toolTitle",
+        theme.bold(
+          `Extend Subagent Timeout: ${titleForHandle(args?.run_id, { resolveRun: deps.resolveRun, get: (id) => deps.query.get(id) })}`,
+        ),
+      );
       const amount = typeof args?.extend_s === "number" ? `+${formatDuration(args.extend_s * 1000)}` : undefined;
       const reason = previewReason(args?.reason);
       const detail = [amount, reason].filter((v) => v !== undefined).join(" · ");
@@ -295,7 +304,7 @@ export function createExtendTimeoutTool(deps: {
       if (!result.ok) throw new Error(rejectionMessage(result, deps.query.get(runId), at));
       const total = result.extensionsUsed + result.extensionsRemaining;
       let text =
-        `Extended run ${short(runId)} by ${formatDuration(result.grantedMs)} ` +
+        `Extended ${shortRef(runId, labelOfRun(deps.query, runId))} by ${formatDuration(result.grantedMs)} ` +
         `(requested ${formatDuration(result.requestedMs)}${result.clamped ? ", clamped by its hard ceiling" : ""}). ` +
         `New deadline in ${formatDuration(Math.max(0, result.deadlineAt - at))}. ` +
         `${result.extensionsRemaining} of ${total} extensions left; ` +
@@ -312,7 +321,10 @@ export function createExtendTimeoutTool(deps: {
         text += " Note: this run has not started yet; its queue-wait timeout is unaffected.";
       return {
         content: [{ type: "text" as const, text }],
-        details: result,
+        details:
+          labelOfRun(deps.query, runId) === undefined
+            ? result
+            : { ...result, ...runRefDetails(runId, labelOfRun(deps.query, runId)) },
       };
     },
   } satisfies ToolDefinition<typeof ExtendTimeoutParams>;
