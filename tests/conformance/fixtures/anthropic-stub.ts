@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import type { Socket } from "node:net";
 
 export interface StubRequest {
   body: string;
@@ -27,7 +28,22 @@ export interface StubUsage {
   cache_creation_input_tokens: number;
 }
 
+/**
+ * Per-request transport script (checked BEFORE `reply`). `undefined` ⇒ the normal 200 SSE reply.
+ * Every request is appended to `requests` (headers + raw body) before its directive runs, so a 400 /
+ * stalled POST is still visible in the POST log.
+ */
+export type StubDirective =
+  /** Answer with a non-2xx Anthropic-shaped JSON error (e.g. the strict-tools 400). */
+  | { kind: "error"; status: number; type?: string; message: string }
+  /** Accept the request and never send any response bytes. */
+  | { kind: "hang" }
+  /** Send 200 SSE headers (+ optional partial body, e.g. a newline-less flood) and never end. */
+  | { kind: "stall-after-headers"; chunk?: string };
+
 export interface AnthropicStubOptions {
+  /** Scriptable failures/stalls per request index; see {@link StubDirective}. */
+  respond?: (request: StubRequest, index: number) => StubDirective | undefined | Promise<StubDirective | undefined>;
   reply?: (request: StubRequest, index: number) => StubReply | Promise<StubReply>;
   /** Deterministic, local-only cache: prefix bytes, explicit writes and <=20-block lookback reads.
    * Not a claim about Anthropic minimum lengths, billing, TTL survival or relay behaviour. */
@@ -108,6 +124,7 @@ export class AnthropicStub {
   private readonly reply: (request: StubRequest, index: number) => StubReply | Promise<StubReply>;
   private listening: Promise<void>;
   private readonly cache = new Map<string, number>();
+  private readonly sockets = new Set<Socket>();
 
   private cacheUsage(body: Record<string, unknown>): StubUsage {
     const clean = (value: unknown): unknown => {
@@ -184,6 +201,28 @@ export class AnthropicStub {
         };
         this.requests.push(request);
         const index = this.requests.length - 1;
+        const directive = await options.respond?.(request, index);
+        if (directive?.kind === "error") {
+          res.writeHead(directive.status, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              type: "error",
+              error: { type: directive.type ?? "invalid_request_error", message: directive.message },
+            }),
+          );
+          return;
+        }
+        if (directive?.kind === "hang") return;
+        if (directive?.kind === "stall-after-headers") {
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            connection: "keep-alive",
+            "cache-control": "no-cache",
+          });
+          res.flushHeaders();
+          if (directive.chunk !== undefined) res.write(directive.chunk);
+          return;
+        }
         const scripted = await this.reply(request, index);
         const usage = { ...(options.promptCache ? this.cacheUsage(json) : DEFAULT_USAGE), ...scripted.usage };
         request.responseUsage = usage;
@@ -196,6 +235,10 @@ export class AnthropicStub {
         });
         res.end(streamFor(reply, model, index));
       });
+    });
+    this.server.on("connection", (socket: Socket) => {
+      this.sockets.add(socket);
+      socket.once("close", () => this.sockets.delete(socket));
     });
     this.listening = new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);
@@ -224,6 +267,8 @@ export class AnthropicStub {
   }
 
   async close(): Promise<void> {
+    // Stalled/hung scripted requests never end on their own; drop their sockets so close() settles.
+    for (const socket of this.sockets) socket.destroy();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 }
