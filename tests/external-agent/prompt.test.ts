@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { renderFirstMessage } from "../../src/external-agent/prompt.js";
-import type { ExternalContextBlock } from "../../src/core/types.js";
+import { SCHEMA_INLINE_MAX_BYTES, renderFirstMessage } from "../../src/external-agent/prompt.js";
+import type { ExternalContextBlock, JsonSchema } from "../../src/core/types.js";
 
 const blocks = (...b: ExternalContextBlock[]): readonly ExternalContextBlock[] => b;
 
@@ -75,6 +75,55 @@ describe("renderFirstMessage (external-agent plan §2.12/§4.8)", () => {
     expect(parts).toHaveLength(2);
     expect(parts[0]).toContain("```json");
     expect(parts[1]).toBe("t");
+  });
+
+  it("inlines the schema body as compact JSON in the instruction (droid has no StructuredOutput tool)", () => {
+    const schema: JsonSchema = {
+      type: "object",
+      required: ["verdict", "blockers", "report"],
+      properties: { verdict: { type: "string", enum: ["pass", "reject"] } },
+    };
+    const out = renderFirstMessage({ contextBlocks: [], schema, text: "t" });
+    expect(out).toBe(
+      "End your final answer with a single ```json fenced block containing your structured result as JSON " +
+        `matching this JSON Schema: ${JSON.stringify(schema)}; nothing may follow the block.\n\nt`,
+    );
+  });
+
+  it("inlines a schema whose serialized size is exactly the byte limit (boundary is inclusive)", () => {
+    const wrapper = JSON.stringify({ type: "object", description: "" }).length;
+    const fill = SCHEMA_INLINE_MAX_BYTES - wrapper;
+    expect(fill).toBeGreaterThan(0);
+    const schema: JsonSchema = { type: "object", description: "x".repeat(fill) };
+    const out = renderFirstMessage({ contextBlocks: [], schema, text: "t" });
+    expect(Buffer.byteLength(JSON.stringify(schema), "utf8")).toBe(SCHEMA_INLINE_MAX_BYTES);
+    expect(out).toContain(`matching this JSON Schema: ${JSON.stringify(schema)};`);
+  });
+
+  it("oversized schema degrades to an omission note (never throws, no truncated JSON)", () => {
+    const schema: JsonSchema = { type: "object", description: "x".repeat(SCHEMA_INLINE_MAX_BYTES) };
+    const serialized = JSON.stringify(schema);
+    expect(Buffer.byteLength(serialized, "utf8")).toBeGreaterThan(SCHEMA_INLINE_MAX_BYTES);
+    const out = renderFirstMessage({ contextBlocks: [], schema, text: "t" });
+    expect(out).toBe(
+      "End your final answer with a single ```json fenced block containing your structured result as JSON; " +
+        "nothing may follow the block. " +
+        `(The JSON Schema for the structured result was omitted because its serialized form is ` +
+        `${Buffer.byteLength(serialized, "utf8")} bytes, over the ${SCHEMA_INLINE_MAX_BYTES}-byte inline limit.)\n\nt`,
+    );
+    expect(out).not.toContain("matching this JSON Schema:");
+    expect(out.length).toBeLessThan(1000);
+  });
+
+  it("unserializable schema (circular) degrades to an omission note instead of throwing", () => {
+    const schema = { type: "object" } as { [k: string]: unknown };
+    schema.self = schema;
+    const out = renderFirstMessage({ contextBlocks: [], schema, text: "t" });
+    expect(out).toBe(
+      "End your final answer with a single ```json fenced block containing your structured result as JSON; " +
+        "nothing may follow the block. " +
+        "(The JSON Schema for the structured result was omitted because it could not be serialized.)\n\nt",
+    );
   });
 
   it("empty/whitespace blocks are skipped without leaving blank segments", () => {
