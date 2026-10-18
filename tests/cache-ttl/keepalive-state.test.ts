@@ -414,6 +414,20 @@ describe("evaluateTick — short-circuit ladder", () => {
     expect(result.decision).toEqual({ kind: "skip", reason: "not-armed", terminal: false });
   });
 
+  it("#12 not armed because the UI-prompt budget ran out ⇒ ui-prompt-expired, non-terminal", () => {
+    const result = evaluateTick({
+      now: 1000,
+      mode: "tui",
+      armed: false,
+      uiPromptExpired: true,
+      config: config(),
+      session: baseSession(),
+      window: armedWindow(),
+      currentFingerprint: fingerprint(),
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "ui-prompt-expired", terminal: false });
+  });
+
   it("#13 cache-expired boundary: margin-1 still pings, exactly at margin is terminal cache-expired", () => {
     const window = armedWindow({ aliveUntil: ASSUMED_TTL_MS, nextPingAt: 0 });
     const justBefore = evaluateTick({

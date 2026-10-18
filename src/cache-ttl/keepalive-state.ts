@@ -606,6 +606,8 @@ export type TickSkipReason =
   | "request-in-flight"
   | "ping-in-flight"
   | "not-armed"
+  /** A user-facing prompt has been pending (with nothing else running) for `UI_PROMPT_KEEPALIVE_MAX_MS` — nobody may answer for a long time. Non-terminal: re-arms once the prompt ends / background work starts. */
+  | "ui-prompt-expired"
   | "cache-expired"
   | "budget-exhausted"
   /** child-ka-core: per-run proven-hit cap (`config.maxSessionPings`) reached — pure, checked in `evaluateTick`. */
@@ -677,6 +679,8 @@ export interface EvaluateTickInput {
   /** `ctx.mode` (only `"tui"`/`"rpc"` can plausibly resume a long-idle session, G2). */
   mode: string;
   armed: boolean;
+  /** Service-layer verdict: `armed` is false specifically because the UI-prompt episode budget ran out (refines the skip reason only). */
+  uiPromptExpired?: boolean;
   config: KeepaliveConfig;
   session: SessionTotals;
   window: WindowState;
@@ -782,7 +786,7 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   // #11
   if (window.pingInFlight) return skip("ping-in-flight", false);
   // #12 — G8
-  if (!armed) return skip("not-armed", false);
+  if (!armed) return skip(input.uiPromptExpired === true ? "ui-prompt-expired" : "not-armed", false);
   // #13 — most important: the cache is presumed dead, pinging now would be a full write.
   if (window.aliveUntil !== undefined && now >= window.aliveUntil - TTL_SAFETY_MARGIN_MS) {
     return skip("cache-expired", true);

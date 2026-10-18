@@ -4,6 +4,7 @@ import {
   createCacheKeepaliveService,
   type CacheKeepaliveDeps,
   type CacheKeepaliveService,
+  UI_PROMPT_KEEPALIVE_MAX_MS,
 } from "../../src/service/cache-keepalive.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 import {
@@ -421,6 +422,79 @@ describe("cache-keepalive service — armed signals", () => {
     service.noteUiPromptStart("s1", service.instanceId);
     service.noteAgentSettled("s1", service.instanceId);
     expect(service.report().armed).toBe(false);
+  });
+});
+
+describe("cache-keepalive service — UI-prompt episode budget", () => {
+  const HOUR = UI_PROMPT_KEEPALIVE_MAX_MS;
+  it("constant is 60 minutes", () => expect(HOUR).toBe(3_600_000));
+
+  it("prompt-only arming expires at 60 min with skip reason ui-prompt-expired", async () => {
+    const { service, clock, ctx } = harness({ backgroundBusy: () => false });
+    ctx.model.cost.cacheWrite = 60 * ctx.model.cost.cacheRead; // generous ping budget so the 60 min cap is what ends arming
+    service.noteToolStart("s1", service.instanceId); // ask_user is itself a tool
+    service.noteUiPromptStart("s1", service.instanceId);
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    // keepalive pings keep the window alive while the prompt is pending
+    for (let t = 0; t < HOUR - 60_000; t += 60_000) {
+      clock.advance(60_000);
+      await flush();
+    }
+    expect(service.report().armed).toBe(true);
+    clock.advance(60_000);
+    expect(service.report().armed).toBe(false);
+    clock.advance(30_000); // a tick runs
+    await flush();
+    expect(service.report().lastSkip).toBe("ui-prompt-expired");
+  });
+
+  it("background work keeps arming past 60 min regardless of the prompt", () => {
+    let busy = true;
+    const { service, clock } = harness({ backgroundBusy: () => busy });
+    service.noteUiPromptStart("s1", service.instanceId);
+    clock.advance(HOUR + 120_000);
+    expect(service.report().armed).toBe(true);
+    busy = false;
+    expect(service.report().armed).toBe(false); // episode already > 60 min
+    busy = true;
+    expect(service.report().armed).toBe(true);
+  });
+
+  it("a new prompt episode restarts the 60 min budget; prompt end clears it", () => {
+    const { service, clock } = harness({ backgroundBusy: () => false });
+    service.noteUiPromptStart("s1", service.instanceId);
+    clock.advance(HOUR - 60_000);
+    service.noteUiPromptEnd("s1", service.instanceId);
+    expect(service.report().armed).toBe(false);
+    clock.advance(10 * 60_000);
+    service.noteUiPromptStart("s1", service.instanceId);
+    clock.advance(HOUR - 1);
+    expect(service.report().armed).toBe(true);
+    clock.advance(1);
+    expect(service.report().armed).toBe(false);
+    service.noteUiPromptEnd("s1", service.instanceId);
+    service.noteToolStart("s1", service.instanceId); // fresh work re-arms normally
+    expect(service.report().armed).toBe(true);
+  });
+
+  it("activeTools-only (no prompt) is unaffected by the 60 min budget", () => {
+    const { service, clock } = harness({ backgroundBusy: () => false });
+    service.noteToolStart("s1", service.instanceId);
+    clock.advance(HOUR * 3);
+    expect(service.report().armed).toBe(true);
+  });
+
+  it("nested prompts keep one episode; agent_settled resets it", () => {
+    const { service, clock } = harness({ backgroundBusy: () => false });
+    service.noteUiPromptStart("s1", service.instanceId);
+    clock.advance(HOUR / 2);
+    service.noteUiPromptStart("s1", service.instanceId);
+    clock.advance(HOUR / 2);
+    expect(service.report().armed).toBe(false);
+    service.noteAgentSettled("s1", service.instanceId);
+    service.noteUiPromptStart("s1", service.instanceId);
+    expect(service.report().armed).toBe(true);
   });
 });
 

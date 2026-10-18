@@ -99,6 +99,9 @@ interface KeepaliveModelInfo {
  * is wrong", and never `accepted-then-lost`, which got a 200 and may already have been billed).
  * Two retries max (three attempts total), backed off 2s then 5s.
  */
+/** Max time one blocking UI-prompt episode (nothing else running) keeps the cache warm — nobody may answer for hours. */
+export const UI_PROMPT_KEEPALIVE_MAX_MS = 60 * 60_000;
+
 const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
 /**
  * r2 (2026-10-14, plan.md "ping 重试 r2"): retry until the cache window runs out — 2s → 5s → 10s
@@ -332,6 +335,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private lockedAuthHeaderKeys: string | undefined;
   private activeTools = 0;
   private uiPrompts = 0;
+  /** Clock time the current UI-prompt episode began (`uiPrompts` 0→1); undefined while no prompt is pending. */
+  private uiPromptEpisodeStart: Millis | undefined;
   private window: WindowState = createInitialWindowState();
   private session: SessionTotals;
   private dropped = { sessionMismatch: 0, instanceMismatch: 0, epochMismatch: 0 };
@@ -546,10 +551,28 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
   private armed(): boolean {
     try {
-      return this.deps.backgroundBusy() || this.activeTools > 0 || this.uiPrompts > 0;
+      if (this.deps.backgroundBusy()) return true;
+      if (this.uiPromptExpired()) return false;
+      return this.activeTools > 0 || this.uiPrompts > 0;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * A user-facing prompt (ask_user's `ctx.ui.custom`, any `ctx.ui.*` prompt — pi emits
+   * `ui_prompt_start/end` for all of them) has been pending for `UI_PROMPT_KEEPALIVE_MAX_MS` with no
+   * background work: stop keeping the cache warm (nobody may answer for hours). Background work
+   * (`backgroundBusy()`) always wins and is checked by the caller first.
+   */
+  private uiPromptExpired(): boolean {
+    if (this.uiPrompts <= 0 || this.uiPromptEpisodeStart === undefined) return false;
+    try {
+      if (this.deps.backgroundBusy()) return false;
+    } catch {
+      return false;
+    }
+    return this.clock.now() - this.uiPromptEpisodeStart >= UI_PROMPT_KEEPALIVE_MAX_MS;
   }
 
   /**
@@ -804,6 +827,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       now,
       mode: this.safeMode(),
       armed: this.armed(),
+      uiPromptExpired: this.uiPromptExpired(),
       config: this.config(),
       session: this.session,
       window: this.window,
@@ -1382,6 +1406,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
   noteUiPromptStart(sessionId: string, instance: string): void {
     if (!this.accept(sessionId, instance)) return;
+    if (this.uiPrompts === 0) this.uiPromptEpisodeStart = this.clock.now();
     this.uiPrompts += 1;
     if (this.timer === undefined) this.arm();
   }
@@ -1389,12 +1414,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   noteUiPromptEnd(sessionId: string, instance: string): void {
     if (!this.accept(sessionId, instance)) return;
     this.uiPrompts = Math.max(0, this.uiPrompts - 1);
+    if (this.uiPrompts === 0) this.uiPromptEpisodeStart = undefined;
   }
 
   noteAgentSettled(sessionId: string, instance: string): void {
     if (!this.accept(sessionId, instance)) return;
     this.activeTools = 0;
     this.uiPrompts = 0;
+    this.uiPromptEpisodeStart = undefined;
   }
 
   noteUsageCacheRead(sessionId: string, instance: string): void {
