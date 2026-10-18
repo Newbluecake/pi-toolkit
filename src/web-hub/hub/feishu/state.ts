@@ -96,6 +96,7 @@ export const REQUEST_STATES = [
   "unattributed",
   "revoked",
   "expired",
+  "merged",
 ] as const;
 export type RequestState = (typeof REQUEST_STATES)[number];
 export const TERMINAL_REQUEST_STATES: readonly RequestState[] = [
@@ -105,6 +106,7 @@ export const TERMINAL_REQUEST_STATES: readonly RequestState[] = [
   "unattributed",
   "revoked",
   "expired",
+  "merged",
 ];
 export function isTerminalRequestState(state: RequestState): boolean {
   return TERMINAL_REQUEST_STATES.includes(state);
@@ -112,7 +114,7 @@ export function isTerminalRequestState(state: RequestState): boolean {
 
 /** Legal §5.4 transitions (terminal states have none). */
 export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly RequestState[]>> = {
-  received: ["dispatching", "rejected", "revoked", "expired"],
+  received: ["dispatching", "rejected", "revoked", "expired", "merged"],
   dispatching: ["accepted", "rejected", "uncertain"],
   accepted: ["replied", "reply-failed", "unattributed", "expired", "rejected"],
   uncertain: ["accepted", "rejected", "replied", "reply-failed", "unattributed", "expired"],
@@ -122,6 +124,7 @@ export const REQUEST_TRANSITIONS: Readonly<Record<RequestState, readonly Request
   unattributed: [],
   revoked: [],
   expired: [],
+  merged: [],
 };
 
 /** §R2-c durable payload: deleted on any terminal state. */
@@ -142,6 +145,11 @@ export interface FeishuRequestRecord {
   state: RequestState;
   createdAt: number;
   stateAt: number;
+  /** F6: normalized platform time; absent legacy records are never executed. */
+  sourceCreatedAt?: number;
+  /** F6: frozen installation/tenant fence (not inferred on recovery). */
+  installGen?: number;
+  tenantKey?: string;
   // frozen at batch close (§5.4 / R1 #9)
   sessionId: string;
   bindingKey: string;
@@ -164,14 +172,18 @@ export interface FeishuRequestRecord {
   code?: string;
   /** Typing reaction id (to remove it) */
   reactionId?: string;
+  /** Terminal singleton retired into this deterministic batch (F6 ruling). */
+  mergedBatchId?: string;
 }
 
 export type NewRequestInput = Omit<
   FeishuRequestRecord,
-  "state" | "createdAt" | "stateAt" | "payload" | "agentKey" | "dispatchedAt" | "code" | "reactionId"
+  "state" | "createdAt" | "stateAt" | "payload" | "agentKey" | "dispatchedAt" | "code" | "reactionId" | "mergedBatchId"
 > & { payload: RequestPayload };
 
 export interface RequestPatch {
+  /** Only legal on a received → merged transition. */
+  mergedBatchId?: string;
   agentKey?: string;
   dispatchedAt?: number;
   code?: string;
@@ -244,6 +256,8 @@ export interface FeishuApproval {
   askedAt: number;
   expiresAt: number;
   nonce?: string;
+  /** F6: persist the pair for restart-safe idempotent card attachment. */
+  ignoreNonce?: string;
   cardMessageId?: string;
 }
 
@@ -354,6 +368,10 @@ const REQUEST_KEYS = [
   "dispatchedAt",
   "code",
   "reactionId",
+  "mergedBatchId",
+  "sourceCreatedAt",
+  "installGen",
+  "tenantKey",
 ] as const;
 
 function parsePayload(raw: unknown): RequestPayload | undefined {
@@ -391,6 +409,13 @@ function parseRequest(key: string, raw: unknown): FeishuRequestRecord | undefine
   if (r["dispatchedAt"] !== undefined && !isNat(r["dispatchedAt"])) return undefined;
   if (r["code"] !== undefined && !isText(r["code"], CODE_MAX)) return undefined;
   if (r["reactionId"] !== undefined && !isText(r["reactionId"], ID_MAX)) return undefined;
+  if (r["sourceCreatedAt"] !== undefined && !isNat(r["sourceCreatedAt"])) return undefined;
+  if (r["installGen"] !== undefined && !isNat(r["installGen"])) return undefined;
+  if (r["tenantKey"] !== undefined && (typeof r["tenantKey"] !== "string" || !TENANT_KEY_RE.test(r["tenantKey"])))
+    return undefined;
+  if (state === "merged") {
+    if (typeof r["mergedBatchId"] !== "string" || !HEX64_RE.test(r["mergedBatchId"])) return undefined;
+  } else if (r["mergedBatchId"] !== undefined) return undefined;
   const terminal = isTerminalRequestState(state as RequestState);
   let payload: RequestPayload | undefined;
   if (r["payload"] !== undefined) {
@@ -422,6 +447,10 @@ function parseRequest(key: string, raw: unknown): FeishuRequestRecord | undefine
   if (r["dispatchedAt"] !== undefined) out.dispatchedAt = r["dispatchedAt"] as number;
   if (r["code"] !== undefined) out.code = r["code"] as string;
   if (r["reactionId"] !== undefined) out.reactionId = r["reactionId"] as string;
+  if (r["sourceCreatedAt"] !== undefined) out.sourceCreatedAt = r["sourceCreatedAt"] as number;
+  if (r["installGen"] !== undefined) out.installGen = r["installGen"] as number;
+  if (r["tenantKey"] !== undefined) out.tenantKey = r["tenantKey"] as string;
+  if (r["mergedBatchId"] !== undefined) out.mergedBatchId = r["mergedBatchId"] as string;
   return out;
 }
 
@@ -540,6 +569,7 @@ const APPROVAL_KEYS = [
   "askedAt",
   "expiresAt",
   "nonce",
+  "ignoreNonce",
   "cardMessageId",
 ] as const;
 function parseApproval(key: string, raw: unknown): FeishuApproval | undefined {
@@ -550,6 +580,11 @@ function parseApproval(key: string, raw: unknown): FeishuApproval | undefined {
   if (!isNat(raw["askedAt"]) || !isNat(raw["expiresAt"])) return undefined;
   if (raw["nonce"] !== undefined && (typeof raw["nonce"] !== "string" || !FEISHU_NONCE_RE.test(raw["nonce"])))
     return undefined;
+  if (
+    raw["ignoreNonce"] !== undefined &&
+    (typeof raw["ignoreNonce"] !== "string" || !FEISHU_NONCE_RE.test(raw["ignoreNonce"]))
+  )
+    return undefined;
   if (raw["cardMessageId"] !== undefined && !isText(raw["cardMessageId"], ID_MAX)) return undefined;
   const out: FeishuApproval = {
     senderOpenId: key,
@@ -559,6 +594,7 @@ function parseApproval(key: string, raw: unknown): FeishuApproval | undefined {
     expiresAt: raw["expiresAt"],
   };
   if (raw["nonce"] !== undefined) out.nonce = raw["nonce"] as string;
+  if (raw["ignoreNonce"] !== undefined) out.ignoreNonce = raw["ignoreNonce"] as string;
   if (raw["cardMessageId"] !== undefined) out.cardMessageId = raw["cardMessageId"] as string;
   return out;
 }
@@ -851,7 +887,7 @@ export interface FeishuState {
     ask(senderOpenId: string, senderDisplay: string): Admit<FeishuApproval>;
     get(senderOpenId: string): FeishuApproval | undefined;
     list(): FeishuApproval[];
-    attach(senderOpenId: string, card: { nonce?: string; cardMessageId?: string }): boolean;
+    attach(senderOpenId: string, card: { nonce?: string; ignoreNonce?: string; cardMessageId?: string }): boolean;
     /** `allowed` removes the entry (the sender is allow-listed now); `ignored` keeps it as the 24 h gate. */
     resolve(senderOpenId: string, outcome: "allowed" | "ignored"): boolean;
     readonly size: number;
@@ -1270,6 +1306,10 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
 
   function applyPatch(rec: FeishuRequestRecord, patch: RequestPatch | undefined): boolean {
     if (patch === undefined) return true;
+    if (patch.mergedBatchId !== undefined) {
+      if (!HEX64_RE.test(patch.mergedBatchId)) return false;
+      rec.mergedBatchId = patch.mergedBatchId;
+    }
     if (patch.agentKey !== undefined) {
       if (!isText(patch.agentKey, ID_MAX)) return false;
       rec.agentKey = patch.agentKey;
@@ -1533,6 +1573,7 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
         if (!REQUEST_TRANSITIONS[cur.state].includes(to)) return { ok: false, reason: "illegal" };
         const next = clone(cur);
         if (!applyPatch(next, patch)) return { ok: false, reason: "invalid" };
+        if ((to === "merged") !== (next.mergedBatchId !== undefined)) return { ok: false, reason: "invalid" };
         next.state = to;
         next.stateAt = clock.now();
         const wasTerminal = isTerminalRequestState(cur.state);
@@ -1554,7 +1595,7 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
         const cur = requests.get(id);
         if (cur === undefined) return false;
         const next = clone(cur);
-        if (!applyPatch(next, patch)) return false;
+        if (patch.mergedBatchId !== undefined || !applyPatch(next, patch)) return false;
         requests.set(id, next);
         touch();
         return true;
@@ -1774,6 +1815,7 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
         const next = parseApproval(senderOpenId, {
           ...cur,
           ...(card.nonce !== undefined ? { nonce: card.nonce } : {}),
+          ...(card.ignoreNonce !== undefined ? { ignoreNonce: card.ignoreNonce } : {}),
           ...(card.cardMessageId !== undefined ? { cardMessageId: card.cardMessageId } : {}),
         });
         if (next === undefined) return false;
@@ -1789,6 +1831,7 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
         else {
           const next: FeishuApproval = { ...cur, state: "ignored" };
           delete next.nonce;
+          delete next.ignoreNonce;
           approvals.set(senderOpenId, next);
         }
         touch();

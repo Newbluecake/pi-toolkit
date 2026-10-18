@@ -565,10 +565,15 @@ describe("requests (§5.4 + §R2-c)", () => {
           unattributed: ["dispatching", "accepted", "unattributed"],
           revoked: ["revoked"],
           expired: ["expired"],
+          merged: ["merged"],
         };
-        for (const step of path[from]!) expect(s.requests.transition(id, step as never).ok).toBe(true);
+        for (const step of path[from]!)
+          expect(
+            s.requests.transition(id, step as never, step === "merged" ? { mergedBatchId: hex("batch") } : undefined)
+              .ok,
+          ).toBe(true);
         const legal = REQUEST_TRANSITIONS[from].includes(to);
-        const res = s.requests.transition(id, to);
+        const res = s.requests.transition(id, to, to === "merged" ? { mergedBatchId: hex("batch") } : undefined);
         expect([from, to, res.ok]).toEqual([from, to, legal]);
         if (!res.ok) expect(res.reason).toBe("illegal");
       }
@@ -1388,5 +1393,106 @@ describe("crash matrix (kill points)", () => {
     expect(boot.s.nonces.size).toBe(0);
     expect(await durable(boot)).toBe(true);
     expect(raw()["dedup"]).toEqual({});
+  });
+});
+
+describe("F6 additive frozen context and merged terminal metadata (user ruling)", () => {
+  it("round-trips source time/install/tenant and merged destination; merged drops payload and frees a slot", async () => {
+    const r = await mk();
+    const input = reqInput("member", { sourceCreatedAt: r.clock.now() - 500, installGen: 42, tenantKey: "tenant_1" });
+    expect(r.s.requests.receive(input).ok).toBe(true);
+    expect(r.s.requests.transition(input.id, "merged")).toEqual({ ok: false, reason: "invalid" });
+    expect(r.s.requests.transition(input.id, "merged", { mergedBatchId: "bad" })).toEqual({
+      ok: false,
+      reason: "invalid",
+    });
+    expect(r.s.requests.get(input.id)?.state).toBe("received");
+    expect(r.s.requests.transition(input.id, "merged", { mergedBatchId: hex("batch") }).ok).toBe(true);
+    expect(r.s.requests.nonTerminal).toBe(0);
+    expect(r.s.requests.terminal).toBe(1);
+    expect(r.s.requests.get(input.id)).toMatchObject({
+      state: "merged",
+      mergedBatchId: hex("batch"),
+      sourceCreatedAt: input.sourceCreatedAt,
+      installGen: 42,
+      tenantKey: "tenant_1",
+    });
+    expect(r.s.requests.get(input.id)?.payload).toBeUndefined();
+    expect(await durable(r)).toBe(true);
+    const boot = await mk({ clock: r.clock });
+    expect(boot.s.requests.get(input.id)).toEqual(r.s.requests.get(input.id));
+    expect(boot.s.requests.transition(input.id, "accepted")).toEqual({ ok: false, reason: "illegal" });
+    r.clock.advance(FEISHU_CAPS.terminalTtlMs + 1);
+    expect(boot.s.sweep()).toBe(1);
+  });
+
+  it("optional context keeps legacy files parseable; malformed context is refused", async () => {
+    const r = await mk();
+    expect(r.s.requests.receive(reqInput("legacy")).ok).toBe(true);
+    for (const patch of [
+      { sourceCreatedAt: -1 },
+      { sourceCreatedAt: Infinity },
+      { installGen: 1.5 },
+      { tenantKey: "bad tenant" },
+    ]) {
+      expect(r.s.requests.receive({ ...reqInput(JSON.stringify(patch)), ...patch })).toEqual({
+        ok: false,
+        refused: "invalid",
+      });
+    }
+    expect(r.s.requests.patch(cmdId("legacy"), { mergedBatchId: hex("batch") })).toBe(false);
+    expect(r.s.requests.transition(cmdId("legacy"), "dispatching", { mergedBatchId: hex("batch") })).toEqual({
+      ok: false,
+      reason: "invalid",
+    });
+    expect(await durable(r)).toBe(true);
+    const boot = await mk({ clock: r.clock });
+    expect(boot.s.requests.get(cmdId("legacy"))?.sourceCreatedAt).toBeUndefined();
+  });
+
+  it.each(["missing-destination", "bad-destination", "nonmerged-destination", "bad-time", "bad-gen", "bad-tenant"])(
+    "corrupt %s fails closed on reload",
+    async (variant) => {
+      const r = await mk();
+      const input = reqInput("member");
+      r.s.requests.receive(input);
+      r.s.requests.transition(input.id, "merged", { mergedBatchId: hex("batch") });
+      await durable(r);
+      const doc = JSON.parse(readFileSync(statePath(), "utf8"));
+      const record = doc.requests[input.id];
+      if (variant === "missing-destination") delete record.mergedBatchId;
+      if (variant === "bad-destination") record.mergedBatchId = "bad";
+      if (variant === "nonmerged-destination") record.state = "expired";
+      if (variant === "bad-time") record.sourceCreatedAt = -1;
+      if (variant === "bad-gen") record.installGen = "1";
+      if (variant === "bad-tenant") record.tenantKey = "bad tenant";
+      writeFileSync(statePath(), JSON.stringify(doc), { mode: 0o600 });
+      const boot = await mk({ clock: r.clock });
+      expect(boot.s.phase()).toBe("corrupt");
+      expect(boot.s.connectorMayStart()).toBe(false);
+    },
+  );
+});
+
+describe("F6 rework: persistent approval nonce pair", () => {
+  it("round-trips the ignore nonce, rejects a malformed one, and clears both on decision", async () => {
+    const r = await mk();
+    r.s.approvals.ask("ou_stranger", "Stranger");
+    expect(
+      r.s.approvals.attach("ou_stranger", { nonce: "a".repeat(22), ignoreNonce: "bad", cardMessageId: "card" }),
+    ).toBe(false);
+    expect(
+      r.s.approvals.attach("ou_stranger", {
+        nonce: "a".repeat(22),
+        ignoreNonce: "b".repeat(22),
+        cardMessageId: "card",
+      }),
+    ).toBe(true);
+    await durable(r);
+    const boot = await mk({ clock: r.clock });
+    expect(boot.s.approvals.get("ou_stranger")).toMatchObject({ nonce: "a".repeat(22), ignoreNonce: "b".repeat(22) });
+    boot.s.approvals.resolve("ou_stranger", "ignored");
+    expect(boot.s.approvals.get("ou_stranger")?.nonce).toBeUndefined();
+    expect(boot.s.approvals.get("ou_stranger")?.ignoreNonce).toBeUndefined();
   });
 });
