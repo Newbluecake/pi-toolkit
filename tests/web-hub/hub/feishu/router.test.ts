@@ -21,8 +21,8 @@ describe("F6 command grammar", () => {
     ["/new /repo first message\nnext line", { op: "new", cwd: "/repo", firstPrompt: "first message\nnext line" }],
     ['/new "/space dir" hello', { op: "new", cwd: "/space dir", firstPrompt: "hello" }],
     ["/file /abs path", { op: "file", path: "/abs path" }],
-    ["/unknown", { op: "help" }],
-    ["/List", { op: "help" }],
+    ["/unknown", { op: "help", unknown: "/unknown" }],
+    ["/List", { op: "help", unknown: "/List" }],
     ["/list args", { op: "help" }],
     ["/list\nbody", { op: "help" }],
     ["/new", { op: "help" }],
@@ -253,5 +253,28 @@ describe("F6 routing intents and bindings", () => {
     } finally {
       router.dispose();
     }
+  });
+});
+
+describe("F8 command-help ruling", () => {
+  it.each([
+    ["/help", { op: "help" }],
+    ["/xxx extra", { op: "help", unknown: "/xxx" }],
+    ["/", { op: "help", unknown: "/" }],
+    ["/home/me/file.txt 帮我看看", { op: "prompt", text: "/home/me/file.txt 帮我看看" }],
+    ["请看 /home/x", { op: "prompt", text: "请看 /home/x" }],
+    ["请看\n/home/x", { op: "prompt", text: "请看\n/home/x" }],
+    ["请看\n/unknown", { op: "prompt", text: "请看\n/unknown" }],
+    [" /help", { op: "prompt", text: " /help" }],
+  ])("first line only: %s", (text, expected) => expect(parseFeishuCommand(text as string)).toEqual(expected));
+  it("group-root /help does not require a bound topic", async () => {
+    const r = await f6Rig();
+    const m = normalizedMessage("group-help", "/help");
+    m.chatType = "group";
+    const prepared = await r.router.prepare(m, r.identity);
+    await r.state.commit();
+    prepared.durable?.();
+    expect(r.intents.at(-1)).toMatchObject({ type: "notice", code: "help" });
+    expect(r.request).not.toHaveBeenCalled();
   });
 });

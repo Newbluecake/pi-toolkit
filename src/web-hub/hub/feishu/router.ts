@@ -9,7 +9,8 @@ import type { FeishuBinding, FeishuState, RequestPayload } from "./state.js";
 
 export type FeishuCommand =
   | { op: "prompt"; text: string }
-  | { op: "list" | "cur" | "unbind" | "help" }
+  | { op: "list" | "cur" | "unbind" }
+  | { op: "help"; unknown?: string }
   | { op: "use"; selector: string }
   | { op: "new"; cwd: string; firstPrompt: string }
   | { op: "file"; path: string };
@@ -19,6 +20,9 @@ export function parseFeishuCommand(text: string): FeishuCommand {
   const newline = text.indexOf("\n");
   const first = newline < 0 ? text : text.slice(0, newline);
   const tail = newline < 0 ? "" : text.slice(newline + 1);
+  const token = first.split(/\s/, 1)[0] ?? first;
+  // Main-session ruling: /home/me/file.txt is a path-like prompt, not a bot command.
+  if (token.indexOf("/", 1) >= 0) return { op: "prompt", text };
   if (["/list", "/cur", "/unbind", "/help"].includes(first) && !tail.trim())
     return { op: first.slice(1) as "list" | "cur" | "unbind" | "help" };
   if (first.startsWith("/use ") && first.slice(5).trim() && !tail.trim())
@@ -46,10 +50,12 @@ export function parseFeishuCommand(text: string): FeishuCommand {
     if (cwd && Buffer.byteLength(cwd) <= 4_096 && !/[\p{Cc}\p{Cf}]/u.test(cwd))
       return { op: "new", cwd, firstPrompt: [rest, tail].filter(Boolean).join("\n") };
   }
-  return { op: "help" }; // Unknown slash commands MUST NEVER reach the agent.
+  return ["/list", "/use", "/cur", "/new", "/unbind", "/file", "/help"].includes(token)
+    ? { op: "help" }
+    : { op: "help", unknown: token.slice(0, 64) }; // Unknown commands NEVER reach pi.
 }
 export type FeishuRouterIntent =
-  | { type: "notice"; message: FeishuMessage; code: string }
+  | { type: "notice"; message: FeishuMessage; code: string; unknownCommand?: string }
   | { type: "list"; message: FeishuMessage; generation: number; rows: FeishuSessionRow[] }
   | { type: "current"; message: FeishuMessage; binding: FeishuBinding | undefined; rows: FeishuSessionRow[] }
   | { type: "bound"; message: FeishuMessage; binding: FeishuBinding }
@@ -88,12 +94,13 @@ export function createFeishuRouter(deps: FeishuRouterDeps) {
       let readyId: string | undefined;
       const key = feishuBindingKey(message.chatType, message.chatId, message.threadId);
       const command = parseFeishuCommand(message.text);
-      const notice = (code: string) => {
-        intents.push({ type: "notice", message, code });
+      const notice = (code: string, unknownCommand?: string) => {
+        intents.push({ type: "notice", message, code, ...(unknownCommand ? { unknownCommand } : {}) });
       };
       if (!state.allowList.has(identity.senderOpenId) || state.tenant.get() !== identity.tenantKey)
         return { drop: true };
       if (command.op === "prompt" && message.messageType === "text" && !command.text.trim()) notice("usage");
+      else if (command.op === "help") notice("help", command.unknown);
       else if (key === undefined) {
         if (deps.groupRootTopics) intents.push({ type: "open-topic", message, identity });
         else notice("use-topic");
@@ -121,8 +128,7 @@ export function createFeishuRouter(deps: FeishuRouterDeps) {
       else if (command.op === "unbind") {
         state.bindings.remove(key);
         notice("unbound");
-      } else if (command.op === "help") notice("help");
-      else if (command.op === "new")
+      } else if (command.op === "new")
         intents.push({
           type: "new",
           message,

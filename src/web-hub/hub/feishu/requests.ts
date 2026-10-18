@@ -228,9 +228,12 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
           cmd: { op: "prompt", deliver: "followUp", expect: { sessionId: record.sessionId }, text },
         });
       } catch {
+        if (disposed) return;
         await uncertain(id, "router-threw");
         return;
       }
+      // F8: a stopped/reset installation must not mutate its successor from a late router result.
+      if (disposed) return;
       if (queryOnly) {
         if (!outcome.ok || !outcome.result.ok) {
           await uncertain(
