@@ -75,7 +75,6 @@ afterAll(() => {
 const CHILD_SWITCH_NEW_EVENTS = ["context"];
 const CHILD_KEEPALIVE_NEW_EVENTS = [
   "before_provider_request",
-  "before_provider_headers",
   "message_end",
   "thinking_level_select",
   "session_compact_failed",

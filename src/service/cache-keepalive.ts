@@ -4,14 +4,16 @@
  * Owns everything pi-facing about the keepalive feature: the self-arming
  * timer (`systemClock.setTimer`, already unref'd — AGENTS.md's "ref'd timers
  * wedge `pi -p`" rule), session/instance identity guards (I-K6/I-K9), the
- * window-generation guard (I-K8), the auth resolution + actual HTTP ping,
- * and the proven-hit-only breaker bookkeeping (I-K7). Constructed once per
+ * window-generation guard (I-K8), the ping dispatch through pi's own provider
+ * pipeline (capture-pairing-plan r7: auth + headers are resolved by pi at ping
+ * time, via the injected `SendPipelinePing`), and the proven-hit-only breaker
+ * bookkeeping (I-K7). Constructed once per
  * `buildSessionStack` call and disposed at the top of the next build /
  * `session_shutdown` (see src/stack.ts and src/index.ts).
  *
  * Pure decision logic lives in ../cache-ttl/keepalive-state.ts and
  * ../cache-ttl/ping-client.ts — this file only wires them to a live clock,
- * `fetch`, and the pi `ExtensionContext`.
+ * the pipeline transport, and the pi `ExtensionContext`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -58,13 +60,15 @@ import {
   type TickSkipReason,
   type WindowState,
 } from "../cache-ttl/keepalive-state.js";
-import {
-  buildPingRequest,
-  preparePingPayload,
-  sendKeepalivePing,
-  stripCacheControlTtl,
-  type PingOutcome,
-} from "../cache-ttl/ping-client.js";
+import { classifyUsage, preparePingPayload, stripCacheControlTtl, type PingOutcome } from "../cache-ttl/ping-client.js";
+import type {
+  PipelineHeaderSource,
+  PipelineOutcome,
+  PipelinePingModel,
+  SendPipelinePing,
+} from "../cache-ttl/pipeline-ping-types.js";
+import { sendPipelinePing } from "../cache-ttl/pipeline-ping.js";
+import { probeKeepaliveTransport } from "../adapters/pi-compat.js";
 import type { ProviderEvidenceStore } from "../cache-ttl/provider-evidence.js";
 import type { ChildKeepaliveLedger, Lease } from "../cache-ttl/ping-ledger.js";
 import type { CacheTtlSettings } from "../config/settings.js";
@@ -116,6 +120,31 @@ function pingRetryDelayMs(attempt: number): Millis {
   return PING_RETRY_DELAYS_MS[attempt - 1] ?? PING_RETRY_STEADY_DELAY_MS;
 }
 
+/** r7 §3.3: one unref'd hard deadline D = min(now + 20 s, aliveUntil − TTL_SAFETY_MARGIN_MS) covers a whole attempt. */
+const PING_TRANSPORT_DEADLINE_MS: Millis = 20_000;
+
+/**
+ * r7 §3.3 outcome mapping: the sent variants of `PipelineOutcome` mirror `UsageScanOutcome` 1:1, so the existing
+ * `classifyUsage` / retry / breaker classification applies unchanged. `not-sent` has no `PingOutcome` (zero network:
+ * the caller refunds), hence `undefined`.
+ */
+function pipelineToPingOutcome(outcome: PipelineOutcome): PingOutcome | undefined {
+  switch (outcome.kind) {
+    case "not-sent":
+      return undefined;
+    case "usage":
+      return classifyUsage(outcome.usage);
+    case "http":
+      return { kind: "http", status: outcome.status };
+    case "network":
+      return outcome.error !== undefined ? { kind: "network", error: outcome.error } : { kind: "network" };
+    case "accepted-then-lost":
+      return { kind: "accepted-then-lost" };
+    case "malformed":
+      return { kind: "malformed" };
+  }
+}
+
 function isRetryablePingOutcome(outcome: PingOutcome): boolean {
   if (outcome.kind === "network") return true;
   if (outcome.kind === "http") return RETRYABLE_HTTP_STATUSES.has(outcome.status);
@@ -155,6 +184,20 @@ const EMPTY_FINGERPRINT: CaptureFingerprint = {
   toolsDigest: "",
   messageCount: 0,
 };
+
+/** Diag for a transport that failed unexpectedly before producing a result (defensive; the sender never rejects). */
+const EMPTY_PIPELINE_DIAG = {
+  baseFetchCalls: 0,
+  onPayloadCalls: 0,
+  sawMessageStart: false,
+  explicitSuccess: false,
+  piStopReason: undefined,
+  httpStatus: undefined,
+  bodyBytes: 0,
+  wireHeaderNames: [],
+  deadlineHit: false,
+  durationMs: 0 as Millis,
+} as const;
 
 /** plan.md §2.3: the KeepalivePort interface `src/cache-ttl/cache-ttl.ts` (activate-level, pi-free-ish) talks to. */
 export interface KeepalivePort {
@@ -223,7 +266,14 @@ export interface CacheKeepaliveDeps {
   backgroundBusy: () => boolean;
   /** I-K9: whether `self` is still the holder's current instance (stack.ts passes `(self) => holder.current?.keepalive === self`). */
   isCurrent: (self: CacheKeepaliveService) => boolean;
+  /** Test seam forwarded to the pipeline transport's base fetch (`PipelinePingInput.fetchImpl`). Production: unset. */
   fetchImpl?: typeof fetch;
+  /**
+   * The pipeline transport (capture-pairing-plan r7, package A1: `src/cache-ttl/pipeline-ping.ts`'s
+   * `sendPipelinePing`). Absent ⇒ the production A1 transport; tests inject a fake. The sender never rejects and
+   * resolves by `deadlineAt`.
+   */
+  sendPipelinePing?: SendPipelinePing;
   appendEntry?: (customType: string, data: unknown) => void;
   emit?: (channel: string, payload: unknown) => void;
   // -- child-ka-core (docs/dev/child-context-switch/plan.md §2.4/§7 P1) -------
@@ -258,8 +308,6 @@ export interface CacheKeepaliveDeps {
   processBudgetUsd?: number;
   /** Process-wide concurrent-ping slot cap, passed to `pingLedger.tryAcquire` on every call. Only meaningful together with `pingLedger`. */
   maxConcurrentPings?: number;
-  /** Races the auth-resolution await against this timeout (ms); on timeout the reservation/budget are refunded/released and nothing is counted — the request never left. Absent (main session) ⇒ unbounded (today's behavior). */
-  authTimeoutMs?: number;
   /** `audit()` additionally carries `costUsd`/`budgetChargeUsd`/`runSpentUsd`/`processSpentUsd24h` fields. Default false — the main session's audit entries stay byte-identical. */
   reportCost?: boolean;
   /** `false` ⇒ never call `ctx.ui.setStatus` (child sessions have no status bar to write). Default true (main session unaffected). */
@@ -330,9 +378,19 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private abortController: AbortController | undefined;
   /** Ping-retry backoff wait (user requirement 2026-09-26) — cleared/resolved by `dispose()` so a pending retry never wedges past teardown. */
   private pendingRetry: { timer: TimerHandle; resolve: () => void } | undefined;
-  /** child-ka-core: pending `withTimeout` auth-race timer, so `dispose()` can reject it immediately (same convention as `pendingRetry`). */
-  private pendingAuthTimeout: { timer: TimerHandle; reject: () => void } | undefined;
-  private lockedAuthHeaderKeys: string | undefined;
+  /**
+   * r7 §3.4: activation-only disable (`transport-unsupported`). Deliberately OUTSIDE `SessionTotals`: `audit()`'s
+   * session snapshot and `readBackKeepaliveSessionState` never see it, so `/reload` (a fresh service) forgets it
+   * while real breakers survive.
+   */
+  private activationDisabled: { reason: string; at: Millis } | undefined;
+  /**
+   * r7 §3.3 physical IO: number of pipeline transports whose `settled` promise has not resolved yet. A ping's
+   * LOGICAL outcome (≤ D) is known long before pi's stream, the base fetch and the body cancel have all finished;
+   * while any is pending `evaluateTick` skips `io-busy` and retries refuse to start. A transport that never
+   * settles keeps this > 0 until dispose (fail closed).
+   */
+  private ioPending = 0;
   private activeTools = 0;
   private uiPrompts = 0;
   /** Clock time we entered "prompt pending ∧ ¬backgroundBusy" (sampled at tick/report/prompt start); undefined otherwise. */
@@ -349,6 +407,12 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private runSpentUsd: number;
   /** child-ka-core: the ledger lease currently held for an in-flight ping, if any — `dispose()`'s defensive backstop settles it if `runPing`'s own `finally` somehow never ran. */
   private currentLease: Lease | undefined;
+  /**
+   * Leases whose `settle` this instance already issued (exactly-once ownership, A3 gate G8): both `runPing`'s
+   * outer `finally` and `dispose()`'s backstop may race to settle the same lease — whichever gets there first
+   * owns it, the other is a no-op. Never holds anything alive (weak).
+   */
+  private readonly settledLeases = new WeakSet<Lease>();
   /** O3: the route of the most recent capture (fingerprint provider + wire modelId) — kept past `capture` clearing so dispose-time accounting still knows which route this session ran on. */
   private lastRoute: { provider: string; modelId: string } | undefined;
   /** Line (provider/ctxModelId/baseUrl) of the most recent capture — the precise attribution source for a settled success. */
@@ -366,6 +430,15 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.instanceId = `${deps.sessionId}#${this.clock.now()}#${randomUUID().slice(0, 8)}`;
     this.session = deps.restoredState ?? createInitialSessionTotals();
     this.runSpentUsd = Math.max(0, deps.runSpentSeedUsd ?? 0);
+    // r7 §3.4 capability probe (structural, activation-only): missing facade ⇒ keepalive off, cleanly.
+    let registry: unknown;
+    try {
+      registry = deps.ctx.modelRegistry;
+    } catch {
+      registry = undefined;
+    }
+    const probe = probeKeepaliveTransport({ registry });
+    if (!probe.ok) this.activationDisabled = { reason: probe.reason, at: this.clock.now() };
   }
 
   // -- I-K6 + I-K9: unified entry guard ------------------------------------
@@ -599,7 +672,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       api: model?.api ?? "",
       ctxModelId: model?.id ?? "",
       baseUrl: model?.baseUrl ?? "",
-      authHeaderKeys: this.lockedAuthHeaderKeys ?? capture.fingerprint.authHeaderKeys,
+      // INERT (r7 §3.4): auth resolves inside pi's pipeline at ping time — nothing to lock, never a drift source.
+      authHeaderKeys: capture.fingerprint.authHeaderKeys,
     };
   }
 
@@ -669,51 +743,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.pendingRetry = undefined;
     this.clock.clearTimer(timer);
     resolve();
-  }
-
-  /**
-   * child-ka-core (plan.md §2.4): races `promise` against `ms` using the
-   * injected `Clock` (never a bare `setTimeout` — must be driven by
-   * `FakeClock` in tests and stay unref'd in production). On timeout the
-   * caller sees a rejection and treats it exactly like an auth failure
-   * (refund the reservation, count nothing — the request never left).
-   * `dispose()` rejects any pending wait immediately, same convention as
-   * `cancelPendingRetry`, so a disposed service never leaves a stray timer.
-   */
-  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const timer = this.clock.setTimer(ms, () => {
-        if (settled) return;
-        settled = true;
-        this.pendingAuthTimeout = undefined;
-        reject(new Error("cache-keepalive: auth resolution timed out"));
-      });
-      this.pendingAuthTimeout = {
-        timer,
-        reject: () => {
-          if (settled) return;
-          settled = true;
-          reject(new Error("cache-keepalive: disposed while waiting for auth"));
-        },
-      };
-      promise.then(
-        (value) => {
-          if (settled) return;
-          settled = true;
-          this.clock.clearTimer(timer);
-          this.pendingAuthTimeout = undefined;
-          resolve(value);
-        },
-        (error) => {
-          if (settled) return;
-          settled = true;
-          this.clock.clearTimer(timer);
-          this.pendingAuthTimeout = undefined;
-          reject(error);
-        },
-      );
-    });
   }
 
   // -- timer (UsageBroadcaster self-arming/self-stopping pattern) ---------
@@ -834,6 +863,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       window: this.window,
       currentFingerprint: capture ? this.currentFingerprintFor(capture) : EMPTY_FINGERPRINT,
       nativeWarmerActive: this.safeNativeWarmerActive(),
+      ioBusy: this.ioPending > 0,
+      activationDisabled: this.activationDisabled !== undefined,
       // O2 follow-up (gate #7 分流): resolve the route's 1h landing evidence at tick time.
       // Store absent ⇒ undefined ⇒ legacy skip (byte-identical); store present but no record /
       // read failure ⇒ false ⇒ the ttl-1h window falls through to a stripped 5m ping (I6).
@@ -916,6 +947,86 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     }
   }
 
+  /** Settle `lease` at most once per lease (see `settledLeases`); never throws. */
+  private settleLeaseOnce(lease: Lease, chargeUsd: number): void {
+    if (this.settledLeases.has(lease)) return;
+    this.settledLeases.add(lease);
+    try {
+      lease.settle(this.clock.now(), chargeUsd);
+    } catch {
+      // best-effort — a ledger fault must never break the scheduler or dispose.
+    }
+  }
+
+  /** Activation-only disable (r7 §3.4): never touches `session`, so nothing about it is persisted. */
+  private latchActivationDisabled(reason: string, detail?: string): void {
+    if (this.activationDisabled !== undefined) return;
+    this.activationDisabled = { reason, at: this.clock.now() };
+    this.lastSkip = "activation-disabled";
+    this.audit("activation-disabled", { reason, ...(detail !== undefined ? { detail } : {}) });
+    this.clearExactTimer();
+    this.publishVisibility();
+  }
+
+  /**
+   * One transport attempt. Marks the physical IO busy from the call until the result's `settled` promise resolves
+   * (r7 §3.3) — independent of how early the logical outcome arrives. The sender contract is "never rejects", but a
+   * defect must not wedge the ping: a throw is `not-sent{provider-error}` (zero network ⇒ refund) and releases busy.
+   */
+  private async dispatchPing(
+    sender: SendPipelinePing,
+    body: Readonly<Record<string, unknown>>,
+    capture: CapturedRequest,
+    pingEpoch: number,
+    deadlineAt: Millis,
+    controller: AbortController,
+  ): Promise<PipelineOutcome> {
+    this.ioPending += 1;
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      this.ioPending = Math.max(0, this.ioPending - 1);
+    };
+    try {
+      const result = await sender({
+        registry: this.deps.ctx.modelRegistry,
+        model: this.safeModel() as unknown as PipelinePingModel,
+        sessionId: capture.sessionId,
+        body,
+        clock: this.clock,
+        deadlineAt,
+        guard: () => !this.disposed && this.window.windowEpoch === pingEpoch,
+        signal: controller.signal,
+        ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+      });
+      result.settled.then(release, release);
+      return result.outcome;
+    } catch {
+      release();
+      return { kind: "not-sent", reason: "provider-error", diag: EMPTY_PIPELINE_DIAG };
+    }
+  }
+
+  /**
+   * r7 §3.4 runtime capability diagnosis: latch `transport-unsupported` ONLY on an explicit success — pi's own
+   * result settled as `stop`/`length`/`toolUse` (`diag.explicitSuccess`), not aborted by us, and either the base
+   * fetch was never called (A1 reports that as `not-sent{capability}`) or pi never delivered the raw `message_start`
+   * event (the adapter ignored our `fetch` / `onProviderStreamEvent` options). Usage presence is never evidence;
+   * auth failures, epoch cancels, `malformed`, `http` and every other `not-sent` reason never latch, and an
+   * `accepted-then-lost` outcome never latches by itself — the one exception is the explicit-success shape above
+   * (pi reported success but our raw-event hook saw no `message_start`), which means the adapter ignored
+   * `onProviderStreamEvent`, so it fails closed whatever the outcome kind.
+   */
+  private diagnoseTransport(sent: PipelineOutcome, controller: AbortController): void {
+    // A `not-sent` carries an explicit success only as `capability` (pi finished successfully without ever calling
+    // our base fetch); every other not-sent reason (auth/guard/deadline/aborted/provider-error) never latches.
+    if (sent.kind === "not-sent" && sent.reason !== "capability") return;
+    const d = sent.diag;
+    if (!d.explicitSuccess || controller.signal.aborted || d.deadlineHit) return;
+    if (d.baseFetchCalls === 0 || !d.sawMessageStart) this.latchActivationDisabled("transport-unsupported", "runtime");
+  }
+
   private async runPing(pingEpoch: number, capture: CapturedRequest, lease?: Lease): Promise<void> {
     // child-ka-core: every exit path below — including every existing early
     // `return` — must settle the lease exactly once with whatever charge was
@@ -935,39 +1046,13 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         return;
       }
 
-      let auth: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
-      try {
-        const authPromise = this.deps.ctx.modelRegistry.getApiKeyAndHeaders(model as never);
-        auth =
-          this.deps.authTimeoutMs !== undefined
-            ? await this.withTimeout(authPromise, this.deps.authTimeoutMs)
-            : await authPromise;
-      } catch {
-        // Covers both a genuine auth rejection AND our own `withTimeout` timeout
-        // (child-ka-core, plan.md §2.4's `authTimeoutMs`) — either way the request
-        // never left this process, so refund and count nothing (plan.md §8.4).
-        refundBudget();
-        return;
-      }
-      // I-K8: await return point #1.
-      if (!this.sameEpoch(pingEpoch)) return;
+      // r7 §3.4: no auth preflight, no auth-key fingerprint lock — pi resolves auth inside its own pipeline at
+      // ping time (a failure there is a zero-network `not-sent{auth}` ⇒ refund below).
+      const sender = this.deps.sendPipelinePing ?? sendPipelinePing;
 
-      if (!auth.ok) {
-        refundBudget();
-        return; // request never left — not counted as unproven (plan.md §8.4).
-      }
-
-      const headerKeys = Object.keys(auth.headers ?? {})
-        .sort()
-        .join(",");
-      if (this.lockedAuthHeaderKeys === undefined) this.lockedAuthHeaderKeys = headerKeys;
-
-      // G7 (M4): safety-critical fingerprint recheck now that auth is resolved.
-      // M1 fix: refund BEFORE invalidating — `invalidateReducer` bumps windowEpoch,
-      // and `refundBudget`'s own `sameEpoch` guard requires the *old* epoch to
-      // still match. Invalidating first made the refund unreachable (dead code),
-      // permanently leaking `pingInFlight: true` and an already-spent `pings`
-      // unit for a request that never left this process.
+      // G7 (M4): safety-critical fingerprint recheck. M1 fix: refund BEFORE invalidating —
+      // `invalidateReducer` bumps windowEpoch, and `refundBudget`'s own `sameEpoch` guard requires the *old*
+      // epoch to still match.
       const currentFp = this.currentFingerprintFor(capture);
       const diff = compareFingerprint(capture.fingerprint, currentFp);
       if (diff !== undefined) {
@@ -979,7 +1064,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         return;
       }
 
-      // m2: re-check the TTL margin after the (possibly slow) auth await.
+      // m2: re-check the TTL margin before dispatch.
       const now = this.clock.now();
       if (this.window.aliveUntil !== undefined && now >= this.window.aliveUntil - TTL_SAFETY_MARGIN_MS) {
         refundBudget();
@@ -995,7 +1080,6 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // Reachable since the gate #7 分流 (2026-10-12): evidence-less ttl-1h captures fall
       // through to here. `stripCacheControlTtl` is copy-on-write (the capture is shared state)
       // and fingerprint-neutral (ttl values were never fingerprinted — breakpoint paths were).
-      // See ping-client.ts's doc comment.
       const pingBody =
         capture.shape.ttl1h === true &&
         this.deps.evidence?.hasWrite1hEvidence(
@@ -1008,34 +1092,18 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // O2 follow-up: distinguish a "ttl-1h ⇒ 5m 放行" ping from an ordinary 5m ping in the
       // audit trail / `/cache-ttl status` (copy-on-write ⇒ identity change exactly when stripped).
       const ttlStripped = pingBody !== body;
-      const authHeaders: Record<string, string> = {};
-      for (const [key, value] of Object.entries(auth.headers ?? {})) {
-        if (typeof value === "string") authHeaders[key] = value;
-      }
-      // Root-cause fix: replay the request's VERBATIM captured headers
-      // (`capture.headers`, from `before_provider_headers` — see `cache-ttl.ts`)
-      // and only fill in auth keys that are entirely missing from that capture.
-      // No more hand-assembled/hardcoded headers here (see `buildPingRequest`'s
-      // doc comment for why that was the actual bug).
-      const baseUrl = auth.baseUrl ?? model.baseUrl;
-      const { request, headerSource, filledAuthKeys } = buildPingRequest(pingBody, baseUrl, capture.headers, {
-        ...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
-        headers: authHeaders,
-      });
-      // Diagnostics captured up front (before the network call) so every audit
-      // entry below — proven or unproven — carries the same "why did/didn't this
-      // ping land" facts, instead of only a bare kind/counter (the original gap
-      // that forced session-file archaeology to diagnose the real-environment
-      // failure this fix addresses).
+      // Diagnostics captured up front so every audit entry below — proven or unproven — carries the same
+      // "why did/didn't this ping land" facts. Headers are pi's own pipeline output now (names only, never values,
+      // are visible to the transport's diag), so there is nothing to diff against a capture.
+      const headerSource: PipelineHeaderSource = "pipeline";
       const diagnostics = {
         elapsedSinceCaptureMs: this.clock.now() - capture.capturedAt,
         prefixTokens: capture.prefix.tokens,
         prefixSource: capture.prefix.source,
         headerSource,
-        // Key NAMES only — never values, which may carry secrets (auth tokens etc.).
-        headerKeyDiff: filledAuthKeys,
+        headerKeyDiff: [] as string[],
         model: model.id,
-        baseUrl,
+        baseUrl: model.baseUrl,
         ...(ttlStripped ? { ttlStripped: true } : {}),
       };
 
@@ -1047,42 +1115,61 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // have billed a write. Retries until the window's TTL margin runs out, backed off by
       // `PING_RETRY_DELAYS_MS` then a constant 30s; every await return point re-checks `sameEpoch` (I-K8 —
       // covers epoch bump from a real request / invalidate / dispose in one guard) and
-      // silently abandons (no proven/unproven counting at all) on mismatch. The whole
-      // sequence is also bounded by the window's remaining TTL margin: a retry that
-      // would land past `aliveUntil - TTL_SAFETY_MARGIN_MS` is skipped and the LAST
-      // outcome is used as final instead.
+      // silently abandons (no proven/unproven counting at all) on mismatch. Each retry is one NEW transport
+      // (r7 §3.4) and refuses to start while the previous one's physical IO is unsettled (`io-busy`).
       let outcome: PingOutcome | undefined;
       let attempts = 0;
       const firstAttemptAt = this.clock.now();
       for (;;) {
-        attempts += 1;
         const attemptStartedAt = this.clock.now();
-        const controller = new AbortController();
-        this.abortController = controller;
-        try {
-          outcome = await sendKeepalivePing(request, {
-            ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
-            signal: controller.signal,
-          });
-        } finally {
+        const aliveUntil = this.window.aliveUntil;
+        const deadlineAt = Math.min(
+          attemptStartedAt + PING_TRANSPORT_DEADLINE_MS,
+          aliveUntil !== undefined ? aliveUntil - TTL_SAFETY_MARGIN_MS : Number.POSITIVE_INFINITY,
+        ) as Millis;
+        let sent: PipelineOutcome | undefined;
+        let controller: AbortController | undefined;
+        if (deadlineAt > attemptStartedAt) {
+          attempts += 1;
+          controller = new AbortController();
+          this.abortController = controller;
+          sent = await this.dispatchPing(sender, pingBody, capture, pingEpoch, deadlineAt, controller);
           if (this.abortController === controller) this.abortController = undefined;
         }
 
-        // 2026-10-16 field-evidence follow-up: per-attempt wall time (retry-window analysis
-        // needs "how long did one attempt take" — the field failures were ~13s attempts that
-        // left <2s of the old 45s margin) plus, for `network`, a short sanitized error
-        // descriptor (`networkErrorDescriptor` — name/code only, never URLs/headers/bodies).
-        this.audit("ping-attempt", {
-          attempt: attempts,
-          outcomeKind: outcome.kind,
-          durationMs: this.clock.now() - attemptStartedAt,
-          ...(outcome.kind === "network" && outcome.error !== undefined ? { error: outcome.error } : {}),
-        });
+        // 2026-10-16 field-evidence follow-up: per-attempt wall time plus, for `network`, a short sanitized
+        // error descriptor (name/code only, never URLs/headers/bodies).
+        const classified = sent !== undefined ? pipelineToPingOutcome(sent) : undefined;
+        if (sent !== undefined) {
+          this.audit("ping-attempt", {
+            attempt: attempts,
+            outcomeKind: classified?.kind ?? "not-sent",
+            ...(sent.kind === "not-sent" ? { notSentReason: sent.reason } : {}),
+            durationMs: this.clock.now() - attemptStartedAt,
+            ...(sent.kind === "network" && sent.error !== undefined ? { error: sent.error } : {}),
+          });
+        }
 
         // I-K8: await return point — the one that matters most (§7.5 "abort 与迟到返回").
         if (!this.sameEpoch(pingEpoch)) return;
 
+        if (sent !== undefined && controller !== undefined) this.diagnoseTransport(sent, controller);
+
+        if (sent === undefined || sent.kind === "not-sent") {
+          // Zero network for THIS attempt. First attempt ⇒ refund the whole ping (the request never left);
+          // a retry attempt ⇒ finalize with the previous attempt's (unproven) outcome.
+          if (outcome === undefined) {
+            refundBudget();
+            this.publishVisibility();
+            return;
+          }
+          if (sent !== undefined) attempts -= 1; // a not-sent retry is not an attempt that reached the wire
+          break;
+        }
+        outcome = classified!;
+
         if (outcome.kind === "proven-hit" || !isRetryablePingOutcome(outcome)) break;
+        if (this.activationDisabled !== undefined) break;
         if (this.window.aliveUntil === undefined && attempts >= PING_MAX_ATTEMPTS_UNKNOWN_WINDOW) break;
 
         const delayMs = pingRetryDelayMs(attempts);
@@ -1104,7 +1191,10 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         // reclaimed by another instance means the slot is no longer ours — stop retrying (never
         // re-acquire) and finalize with the last outcome; charge stays by outcome kind.
         if (lease && !lease.renew(this.clock.now())) break;
+        // r7 §3.3: a retry needs the previous transport's physical IO fully settled (never two in flight).
+        if (this.ioPending > 0) break;
       }
+      if (outcome === undefined) return; // unreachable: the not-sent branch above returns first
 
       if (outcome.kind === "proven-hit") {
         const applied = onProvenHit(this.window, this.session, pingEpoch, outcome, this.config().intervalMs);
@@ -1206,7 +1296,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       this.publishVisibility();
     } finally {
       if (lease) {
-        lease.settle(this.clock.now(), chargeUsd);
+        this.settleLeaseOnce(lease, chargeUsd);
         if (this.currentLease === lease) this.currentLease = undefined;
       }
     }
@@ -1360,6 +1450,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           ? lineKeyOf({ provider: model.provider, ctxModelId: model.id, baseUrl: model.baseUrl })?.key
           : undefined,
       now: this.clock.now(),
+      activationDisabled: this.activationDisabled,
+      ioBusy: this.ioPending > 0,
     };
   }
 
@@ -1486,27 +1578,15 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     }
     this.abortController = undefined;
     this.cancelPendingRetry();
-    if (this.pendingAuthTimeout) {
-      const { timer, reject } = this.pendingAuthTimeout;
-      this.pendingAuthTimeout = undefined;
-      this.clock.clearTimer(timer);
-      try {
-        reject();
-      } catch {
-        // best-effort.
-      }
-    }
     // child-ka-core: defensive backstop — `runPing`'s own `finally` should
     // already have settled this (its abort/reject above ultimately unwinds
     // through the same try/finally), but a lease left held past dispose must
     // never linger and count against the process-wide concurrency cap.
     if (this.currentLease) {
-      try {
-        this.currentLease.settle(this.clock.now(), 0);
-      } catch {
-        // best-effort.
-      }
+      // Take-and-clear: dispose owns this lease unless `runPing`'s `finally` already settled it (then no-op).
+      const lease = this.currentLease;
       this.currentLease = undefined;
+      this.settleLeaseOnce(lease, 0);
     }
     if (this.deps.statusBar !== false) safeSetStatus(this.deps.ctx, undefined);
   }

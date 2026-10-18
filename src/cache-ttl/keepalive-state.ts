@@ -18,6 +18,7 @@
 
 import type { Millis } from "../core/types.js";
 import type { PingHeaderSource, PingOutcome } from "./ping-client.js";
+import type { PipelineHeaderSource } from "./pipeline-ping-types.js";
 
 // ---------------------------------------------------------------------------
 // Constants (plan.md §6.1/§6.2/§7.5/§10.1 — safety knobs, deliberately not
@@ -128,7 +129,12 @@ export interface CaptureFingerprint {
   /** `ctx.model.id` at capture time. */
   ctxModelId: string;
   baseUrl: string;
-  /** Sorted, comma-joined auth header *keys* (never values) — locked in after the first ping resolves auth. */
+  /**
+   * INERT (capture-pairing-plan r7 §3.4): always `""` on both sides of the comparison. It used to be locked to the
+   * real auth header keys by the first ping while captures carried `""`, which was an immediate `fingerprint-drift`.
+   * Auth now resolves inside pi's own provider pipeline at ping time, so there is nothing to lock. The field stays
+   * in the shape (persisted audit entries / fingerprint comparisons) but can never differ.
+   */
   authHeaderKeys: string;
   breakpointPath: string;
   thinkingDigest: string;
@@ -151,22 +157,16 @@ export interface FingerprintContextInput {
 export type PrefixEstimate = { tokens: number; source: "usage" } | { tokens: 0; source: "unknown" };
 
 /**
- * plan.md §2.3: what `before_provider_request` + `before_provider_headers`
- * together capture for one real request.
- *
- * `headers` (root-cause fix): the VERBATIM header snapshot taken from the
- * `before_provider_headers` hook for this exact request (null-valued
- * deletions already filtered out) — never hand-reassembled. Pairing these
- * two hooks' captures for the same request is `cache-ttl.ts`'s
- * responsibility (see its `pendingCapture` slot); a `CapturedRequest` only
- * ever reaches this far once both halves are known.
+ * plan.md §2.3 + capture-pairing-plan r7 §3.1: what `before_provider_request` (P) captures for one real request —
+ * the payload only. The request headers are NOT captured any more: pi 1.2 fires `before_provider_headers` BEFORE P,
+ * so the old P→H pairing was wrong, and the ping now goes through pi's own provider pipeline (auth + headers are
+ * resolved by pi at ping time, `src/cache-ttl/pipeline-ping.ts`).
  */
 export interface CapturedRequest {
   sessionId: string;
   /** I-K9: the service instance id that captured this request. */
   instance: string;
   payload: Record<string, unknown>;
-  headers: Record<string, string>;
   fingerprint: CaptureFingerprint;
   shape: PayloadShape;
   prefix: PrefixEstimate;
@@ -605,6 +605,22 @@ export type TickSkipReason =
   | "prefix-too-small"
   | "request-in-flight"
   | "ping-in-flight"
+  /**
+   * capture-pairing-plan r7 §3.3: the previous ping's PHYSICAL IO (base fetch, upstream body cancel, pi's stream
+   * result) has not all settled yet — even though its logical outcome (≤ deadline) is long known. Non-terminal;
+   * a never-settling socket keeps this skip until dispose (fail closed).
+   */
+  | "io-busy"
+  /**
+   * The route's provider replays through a pi pipeline branch this transport cannot reproduce (`github-copilot`
+   * derives X-Initiator/vision headers from the transformed context; virtual models are never sent). Terminal.
+   */
+  | "provider-unsupported"
+  /**
+   * Activation-only disable (service field `activationDisabled`, e.g. `transport-unsupported`): terminal for this
+   * service instance, never persisted — `/reload` rebuilds the service and forgets it.
+   */
+  | "activation-disabled"
   | "not-armed"
   /** A user-facing prompt has been pending (with nothing else running) for `UI_PROMPT_KEEPALIVE_MAX_MS` — nobody may answer for a long time. Non-terminal: re-arms once the prompt ends / background work starts. */
   | "ui-prompt-expired"
@@ -707,6 +723,21 @@ export interface EvaluateTickInput {
    * Absent/false ⇒ today's behavior.
    */
   nativeWarmerActive?: boolean;
+  /**
+   * capture-pairing-plan r7 §3.3: the service's physical-IO flag — a previous ping's transport has not fully settled.
+   * Absent/false ⇒ legacy behaviour.
+   */
+  ioBusy?: boolean;
+  /**
+   * capture-pairing-plan r7 §3.4: an activation-only disable the service holds OUTSIDE `SessionTotals` (so it can
+   * never be persisted by `audit()` nor restored by `readBackKeepaliveSessionState`).
+   */
+  activationDisabled?: boolean;
+}
+
+/** Providers/APIs whose pi pipeline branch the replay transport cannot reproduce (r7 §3.4 "Copilot"). */
+export function isProviderUnsupported(fp: Pick<CaptureFingerprint, "provider" | "api">): boolean {
+  return fp.provider === "github-copilot" || fp.api === "pi-virtual";
 }
 
 export interface TickResult {
@@ -725,6 +756,8 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
 
   // #1
   if (!config.enabled) return skip("disabled", true);
+  // #1.5 — activation-only disable (outside SessionTotals; r7 §3.4).
+  if (input.activationDisabled === true) return skip("activation-disabled", true);
   // #2 — I-K7: session-level breaker, never reset by a real request.
   if (session.disabled !== undefined) return skip("session-disabled", true);
   // #2.5 — child-ka-core: per-run proven-hit cap across all windows, independent of
@@ -751,6 +784,9 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   // #4.5 — child-ka-core: pi's own native CacheWarmer already handles this
   // model/route (declares `promptCache`) — pinging too would double-warm it.
   if (nativeWarmerActive === true) return skip("native-warmer", true);
+  // #4.7 — r7 §3.4: `github-copilot` / virtual models can't be replayed through the stub-context transport.
+  // (Copilot-BILLED custom provider ids are unaffected — pi branches only on `provider === "github-copilot"`.)
+  if (isProviderUnsupported(capture.fingerprint)) return skip("provider-unsupported", true);
   // #5 — G3. Copilot is token-billed too (2026-10-18 user ruling): API semantics,
   // not the provider name, determine eligibility; every remaining safety/budget gate still applies.
   if (capture.fingerprint.api !== ANTHROPIC_MESSAGES_API) {
@@ -783,6 +819,8 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   }
   // #10
   if (window.requestInFlight) return skip("request-in-flight", false);
+  // #10.5 — r7 §3.3: a previous ping's physical IO is still unsettled (never overlap two transports).
+  if (input.ioBusy === true) return skip("io-busy", false);
   // #11
   if (window.pingInFlight) return skip("ping-in-flight", false);
   // #12 — G8
@@ -1590,6 +1628,13 @@ export interface KeepaliveReport {
   currentLineKey?: string | undefined;
   /** `clock.now()` at report time (for cooldown display). */
   now?: Millis | undefined;
+  /**
+   * r7 §3.4: the service's activation-only disable (e.g. `transport-unsupported`), kept outside `session`
+   * so it is never persisted. `undefined` ⇒ not activation-disabled.
+   */
+  activationDisabled?: { reason: string; at: Millis } | undefined;
+  /** r7 §3.3: a previous ping's physical IO is still unsettled (`io-busy`). */
+  ioBusy?: boolean | undefined;
 }
 
 /** See `KeepaliveReport.lastPingDiagnostics`. */
@@ -1602,7 +1647,7 @@ export interface KeepalivePingDiagnostics {
   prefixSource: "usage" | "unknown";
   cacheReadInputTokens: number | undefined;
   cacheCreationInputTokens: number | undefined;
-  headerSource: PingHeaderSource;
+  headerSource: PingHeaderSource | PipelineHeaderSource;
   /** Key NAMES only (never values) that were absent from the capture and filled from auth fallback. */
   headerKeyDiff: string[];
   model: string;
@@ -1727,6 +1772,9 @@ export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegme
     const status = d.reason === "http" && d.httpStatus !== undefined ? ` ${d.httpStatus}` : "";
     return { text: `ping off:${d.reason}${status} ×${session.pings}`, state: "disabled" };
   }
+  if (report.activationDisabled !== undefined) {
+    return { text: `ping off:${report.activationDisabled.reason} ×${session.pings}`, state: "disabled" };
+  }
   {
     const cur = report.currentLineKey !== undefined ? session.lineStates[report.currentLineKey] : undefined;
     const rec =
@@ -1838,6 +1886,14 @@ export function isKeepaliveWindowEnded(window: WindowState): boolean {
   );
 }
 
+/**
+ * capture-pairing-plan r7 §3.4 (user ruling 6): the residual-risk note shown whenever keepalive is enabled. Pings
+ * replay through pi's provider pipeline, so headers that OTHER extensions add in `before_provider_headers` are not
+ * replayed. The wording deliberately claims no bound on the unknown cost.
+ */
+export const KEEPALIVE_EXTENSION_HEADER_NOTE =
+  "note: headers added by other extensions are not replayed — if they steer routing/cache, pings may write to another backend; keepalive stops for this session once a current-epoch proven-write is observed";
+
 /** Multi-line `/cache-ttl status` body (plan.md §9.4's required field list). */
 export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
   const { config, window, session, dropped } = report;
@@ -1899,6 +1955,10 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
   lines.push(
     session.disabled !== undefined ? `disabled: ${session.disabled.reason} @ ${session.disabled.at}` : "not disabled",
   );
+  if (report.activationDisabled !== undefined) {
+    lines.push(`activation disabled: ${report.activationDisabled.reason} @ ${report.activationDisabled.at}`);
+  }
+  if (report.ioBusy === true) lines.push("io: busy (a previous ping's transport has not fully settled)");
   lines.push(
     `dropped: sessionMismatch=${dropped.sessionMismatch} instanceMismatch=${dropped.instanceMismatch} epochMismatch=${dropped.epochMismatch}`,
   );
@@ -1907,5 +1967,6 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
     const t = report.lastTerminalSkip;
     lines.push(`terminal skip: ${t.reason} @ ${t.at} (window #${t.windowEpoch})`);
   }
+  if (report.enabled) lines.push(KEEPALIVE_EXTENSION_HEADER_NOTE);
   return lines;
 }

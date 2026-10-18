@@ -5,6 +5,7 @@ import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS, parseCacheTtlSettings, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
+import { fakePiStreamSimple } from "../cache-ttl/fake-pipeline.js";
 
 let homeSandbox: ReturnType<typeof sandboxHome> | undefined;
 beforeEach(() => {
@@ -103,6 +104,8 @@ function fakeCtx(overrides: Record<string, unknown> = {}): ExtensionContext {
       getAvailable: () => [],
       find: () => undefined,
       getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "sk-ant-api-x", headers: {} }),
+      // r7: pings replay through pi's provider pipeline — a faithful fake `streamSimple` drives the REAL transport.
+      streamSimple: fakePiStreamSimple().streamSimple,
     },
     model: {
       provider: "anthropic",
@@ -159,22 +162,8 @@ describe("cache keepalive — real buildSessionStack + wireCacheTtl", () => {
       wireCacheTtl(pi, settings, { keepalive: () => holder.current?.keepalive });
 
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      // Root-cause fix under test: the payload capture alone is NOT enough to
-      // ping — it must be paired with the matching `before_provider_headers`
-      // snapshot for the SAME request before `noteRequest` ever fires.
-      expect(stack.keepalive?.report().window.capture).toBeUndefined();
-      await emit(
-        "before_provider_headers",
-        {
-          type: "before_provider_headers",
-          headers: {
-            "content-type": "application/json",
-            "anthropic-beta": "real-gateway-beta",
-            "x-router-hint": "route-7",
-          },
-        },
-        ctx,
-      );
+      // r7 §3.1: the payload alone is committed immediately (pi fires before_provider_headers BEFORE this hook, so
+      // there is nothing to pair); no before_provider_headers handler exists at all.
       expect(stack.keepalive?.report().window.capture).toBeDefined();
 
       stack.keepalive?.noteRequestSettled("session-under-test", stack.keepalive.instanceId);
@@ -194,13 +183,8 @@ describe("cache keepalive — real buildSessionStack + wireCacheTtl", () => {
       const body = JSON.parse(pingInit.body as string);
       expect(body.max_tokens).toBe(1);
       expect(body.messages).toEqual(ephemeralPayload().messages); // byte-for-byte replay
-      // Root-cause fix under test: the captured headers are replayed VERBATIM
-      // (no hand-assembled baseline, no hardcoded anthropic-beta) — a gateway-
-      // specific header set by the real request must survive into the ping.
-      const pingHeaders = pingInit.headers as Record<string, string>;
-      expect(pingHeaders["anthropic-beta"]).toBe("real-gateway-beta");
-      expect(pingHeaders["x-router-hint"]).toBe("route-7");
-      expect(pingHeaders["content-type"]).toBe("application/json");
+      // The wire carries pi's own pipeline output (the fake provider adds its standard headers), not captured ones.
+      expect(pingInit.headers).toMatchObject({ "content-type": "application/json" });
       expect(stack.keepalive?.report().session.pings).toBe(1);
     } finally {
       vi.useRealTimers();

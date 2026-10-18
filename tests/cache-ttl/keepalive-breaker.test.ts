@@ -30,7 +30,7 @@ import {
   type SessionTotals,
   type WindowState,
 } from "../../src/cache-ttl/keepalive-state.js";
-import { createCacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService } from "./fake-pipeline.js";
 import { createProviderEvidenceStore } from "../../src/cache-ttl/provider-evidence.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 
@@ -54,7 +54,6 @@ const cap = (f: Partial<CaptureFingerprint> = {}): CapturedRequest => ({
   sessionId: "s1",
   instance: "i",
   payload: { model: "k3", messages: [{ role: "user", content: "hi" }], max_tokens: 100, stream: true },
-  headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
   fingerprint: fp(f),
   shape: { ephemeralBreakpoints: 1, ttl1h: false, hasThinking: false, maxTokens: 10 },
   prefix: { tokens: 30_000, source: "usage" },
@@ -470,7 +469,6 @@ function svc(opts: { status?: () => number } = {}) {
     api: "anthropic-messages",
     id: "k3",
     baseUrl: "https://api.kimi.com/coding",
-    headers: {},
     cost: { cacheRead: 0.3, tiers: [] },
   };
   const ctx = {

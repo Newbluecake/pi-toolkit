@@ -13,7 +13,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentSettings } from "../config/settings.js";
 import { CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE } from "../runtime/session-driver.js";
-import { createRequestCapture, captureRequest, settledRouteOf, type CapturedRequestBase } from "./cache-ttl.js";
+import { captureRequest, settledRouteOf } from "./cache-ttl.js";
 import { getProviderEvidenceStore, observeUsageIntoEvidence } from "./provider-evidence.js";
 import { getChildKeepaliveLedger } from "./ping-ledger.js";
 import { getChildKeepaliveDisposeRegistry } from "./child-registry.js";
@@ -21,9 +21,6 @@ import { getChildBashRegistry } from "../bash/child-registry.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "../service/cache-keepalive.js";
 import { realRequestInputTokens, type InvalidateReason } from "./keepalive-state.js";
 import { prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
-
-/** Child keepalive's own auth timeout (plan §2.4): bounds the whole ping sequence at ~97s. */
-const CHILD_AUTH_TIMEOUT_MS = 30_000;
 
 export interface ChildKeepaliveHandle {
   /** `src/context-switch/child.ts` calls this right after committing a boundary-draft switch
@@ -68,7 +65,6 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
   if (!cfg.keepalive || !cfg.childKeepalive) return undefined;
 
   let service: CacheKeepaliveService | undefined;
-  let capture: ReturnType<typeof createRequestCapture> | undefined;
   let disposed = false;
 
   function ensureService(ctx: ExtensionContext): CacheKeepaliveService | undefined {
@@ -91,13 +87,11 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
       runSpentSeedUsd: seedRunSpentUsd(ctx),
       processBudgetUsd: cfg.childKeepaliveProcessBudgetUsd,
       maxConcurrentPings: cfg.childKeepaliveMaxConcurrent,
-      authTimeoutMs: CHILD_AUTH_TIMEOUT_MS,
       reportCost: true,
       statusBar: false,
       appendEntry: (customType, data) => pi.appendEntry(customType, data),
     });
     service = svc;
-    capture = createRequestCapture(svc);
     // P1 review fix (todo #30 follow-up, §3.3/§3.9): this run's own runId, read from the bash
     // registry's host view (attached by `onSessionSeen` well before this lazily-built service
     // ever registers — same ordering invariant `ChildBashRegistry` itself relies on). Lets
@@ -125,8 +119,7 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
   pi.on("before_provider_request", (event, ctx) => {
     if (disposed) return undefined;
     const svc = ensureService(ctx);
-    if (!svc || !capture) return undefined;
-    capture.clear();
+    if (!svc) return undefined;
     if (!isObjectRecord(event.payload) || !Array.isArray(event.payload["messages"])) {
       svc.invalidate("payload-shape");
       return undefined;
@@ -142,18 +135,9 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
     }
     const sessionId = safeSessionId(ctx);
     const ledger = readLatestAssistantUsage(ctx);
-    const base: CapturedRequestBase = captureRequest(
-      cloned as Record<string, unknown>,
-      ctx,
-      sessionId,
-      svc,
-      prefixFromLedger(ledger),
-    );
-    capture.stage(base);
+    // Payload-only capture, committed immediately (capture-pairing-plan r7 §3.1; a strict-tools P′ replaces it).
+    svc.noteRequest(captureRequest(cloned as Record<string, unknown>, ctx, sessionId, svc, prefixFromLedger(ledger)));
     return undefined;
-  });
-  pi.on("before_provider_headers", (event) => {
-    capture?.consumeHeaders(event.headers);
   });
 
   pi.on("tool_execution_start", (_event, ctx) => {

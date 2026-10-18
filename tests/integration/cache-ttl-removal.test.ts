@@ -7,7 +7,8 @@ import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
 import { readBackKeepaliveSessionState } from "../../src/cache-ttl/keepalive-state.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import { FakeClock } from "../../src/core/clock.js";
-import { createCacheKeepaliveService, type CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { type CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService } from "../cache-ttl/fake-pipeline.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -131,7 +132,6 @@ describe("cache TTL removal integration", () => {
     try {
       const w = wiring(ctx, service);
       expect(w.fire("before_provider_request", { payload: payload() })).toBeUndefined();
-      w.fire("before_provider_headers", { headers: { "content-type": "application/json" } });
       w.fire("message_end", { message: { role: "assistant", usage: { input: 1 }, stopReason: "stop" } });
       clock.advance(240_000);
       await flush();
@@ -145,7 +145,6 @@ describe("cache TTL removal integration", () => {
       const request = payload();
       expect(w.fire("before_provider_request", { payload: request })).toBeUndefined();
       expect(request.messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral" });
-      w.fire("before_provider_headers", { headers: { "content-type": "application/json" } });
       expect(service.report().window.pings).toBe(0);
       expect(service.report().window.capture?.shape.ttl1h).toBe(false);
     } finally {
@@ -185,7 +184,6 @@ describe("dynamic cap main response usage wiring", () => {
         [150_000, 1],
       ]) {
         w.fire("before_provider_request", { payload: payload() });
-        w.fire("before_provider_headers", { headers: {} });
         expect(svc.report().config.maxPingsReason).toBe("tier-uncertain");
         w.fire("message_end", {
           message: {

@@ -16,7 +16,9 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import { createCacheKeepaliveService, type CacheKeepaliveDeps } from "../../src/service/cache-keepalive.js";
+import { type CacheKeepaliveDeps } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService, diagOf } from "./fake-pipeline.js";
+import type { SendPipelinePing } from "../../src/cache-ttl/pipeline-ping-types.js";
 import { createChildKeepaliveLedger, type ChildKeepaliveLedger } from "../../src/cache-ttl/ping-ledger.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 import type { CapturedRequest } from "../../src/cache-ttl/keepalive-state.js";
@@ -147,7 +149,6 @@ function capture(overrides: Partial<CapturedRequest> = {}, instance: string, tok
     sessionId,
     instance,
     payload: { model: "claude-child", messages: [{ role: "user", content: "hi" }], max_tokens: 100, stream: true },
-    headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
     fingerprint: {
       sessionId,
       provider: "anthropic",
@@ -201,7 +202,6 @@ function harness(
     allowHeadless: true,
     reportCost: true,
     statusBar: false,
-    authTimeoutMs: 30_000,
     ...overrides,
   });
   self = service;
@@ -379,25 +379,37 @@ describe("child keepalive — T-K3b: lease held across retries denies a concurre
     expect(acquired.ok).toBe(true);
   });
 
-  it("auth hang: authTimeoutMs (30s) refunds the budget and releases the lease — the request never left", async () => {
+  it("auth hang inside the pipeline: the transport's own deadline D (20s) settles it as not-sent{deadline} — budget refunded and the lease released, the request never left", async () => {
     const clock = new FakeClock(0);
     const ledger = createChildKeepaliveLedger();
-    const a = harness(
-      clock,
-      "sA",
-      { pingLedger: ledger, maxConcurrentPings: 1, runBudgetUsd: 100, processBudgetUsd: 100 },
-      { modelRegistry: { getApiKeyAndHeaders: () => new Promise<never>(() => {}) } }, // never resolves
-    );
+    // A stuck pipeline auth: nothing resolves until the transport's hard deadline fires (frozen contract: the
+    // returned promise resolves by `deadlineAt`, armed via the injected clock).
+    const hung: SendPipelinePing = (input) =>
+      new Promise((resolve) => {
+        clock.setTimer(input.deadlineAt - clock.now(), () =>
+          resolve({
+            outcome: { kind: "not-sent", reason: "deadline", diag: diagOf({ baseFetchCalls: 0, onPayloadCalls: 0 }) },
+            settled: Promise.resolve(),
+          }),
+        );
+      });
+    const a = harness(clock, "sA", {
+      pingLedger: ledger,
+      maxConcurrentPings: 1,
+      runBudgetUsd: 100,
+      processBudgetUsd: 100,
+      sendPipelinePing: hung,
+    });
     arm(a);
     clock.advance(240_000);
     await flush();
-    expect(ledger.activeCount()).toBe(1); // slot held, waiting on auth
+    expect(ledger.activeCount()).toBe(1); // slot held, waiting on the pipeline
     expect(a.service.report().window.pings).toBe(1); // budget spent up front (onPingStarted)
 
-    clock.advance(30_000); // authTimeoutMs fires
+    clock.advance(20_000); // D fires
     await flush();
 
-    expect(ledger.activeCount()).toBe(0); // released
+    expect(ledger.activeCount()).toBe(0); // released on the not-sent path too
     expect(a.service.report().window.pings).toBe(0); // refunded — never counted as unproven
     expect(a.service.report().session.unprovenTotal).toBe(0);
   });

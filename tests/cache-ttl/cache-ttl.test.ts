@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createInitialSessionTotals, createInitialWindowState } from "../../src/cache-ttl/keepalive-state.js";
+import {
+  KEEPALIVE_EXTENSION_HEADER_NOTE,
+  createInitialSessionTotals,
+  createInitialWindowState,
+} from "../../src/cache-ttl/keepalive-state.js";
 import { wireCacheTtl, legacyCapNote } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS, loadSettings, parseCacheTtlSettings } from "../../src/config/settings.js";
 import type { KeepalivePort } from "../../src/service/cache-keepalive.js";
@@ -67,87 +71,70 @@ function ephemeralPayload() {
   };
 }
 
-describe("keepalive header/payload capture pairing (root-cause fix)", () => {
-  it("pairs a payload capture with its matching headers snapshot and calls noteRequest exactly once", () => {
+describe("keepalive payload-only capture (capture-pairing-plan r7 §3.1)", () => {
+  it("commits the capture IMMEDIATELY from before_provider_request alone (pi fires before_provider_headers BEFORE it) — no headers hook is registered at all", () => {
     const { hooks, ctx, port } = setupWithPort();
+    expect(hooks.has("before_provider_headers")).toBe(false);
     hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx);
-    expect(port.noteRequest).not.toHaveBeenCalled();
-    hooks.get("before_provider_headers")!(
-      {
-        type: "before_provider_headers",
-        headers: { "content-type": "application/json", "anthropic-beta": "real-beta" },
-      },
-      ctx,
-    );
     expect(port.noteRequest).toHaveBeenCalledTimes(1);
     const captured = (port.noteRequest as ReturnType<typeof vi.fn>).mock.calls[0]![0];
-    expect(captured.headers).toEqual({ "content-type": "application/json", "anthropic-beta": "real-beta" });
+    expect(captured.sessionId).toBe("s1");
+    expect(captured.instance).toBe("inst-1");
+    expect(captured.payload).toEqual(ephemeralPayload());
+    expect("headers" in captured).toBe(false); // CapturedRequest.headers is gone
+    expect(captured.fingerprint.authHeaderKeys).toBe(""); // inert
   });
 
-  it("filters out null-valued header deletions from the snapshot before pairing", () => {
+  it("every request is captured: two consecutive requests ⇒ two captures, the second one replaces the first (a strict-tools P′ replaces P)", () => {
     const { hooks, ctx, port } = setupWithPort();
     hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx);
-    hooks.get("before_provider_headers")!(
-      { type: "before_provider_headers", headers: { "content-type": "application/json", "x-deleted": null } },
-      ctx,
-    );
-    const captured = (port.noteRequest as ReturnType<typeof vi.fn>).mock.calls[0]![0];
-    expect(captured.headers).toEqual({ "content-type": "application/json" });
-    expect("x-deleted" in captured.headers).toBe(false);
+    const strict = { ...ephemeralPayload(), tools: [{ name: "t", strict: true }] };
+    hooks.get("before_provider_request")!({ payload: strict }, ctx);
+    expect(port.noteRequest).toHaveBeenCalledTimes(2);
+    const calls = (port.noteRequest as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0]![0].payload.tools).toBeUndefined();
+    expect(calls[1]![0].payload.tools).toEqual([{ name: "t", strict: true }]);
   });
 
-  it("payload-only half-capture: headers never arrive — never pings (noteRequest never called)", () => {
+  it("a valid capture is never discarded by a later request's shape failure path (no payload-time clear of a good capture)", () => {
     const { hooks, ctx, port } = setupWithPort();
     hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx);
-    // No before_provider_headers ever fires for this request.
-    expect(port.noteRequest).not.toHaveBeenCalled();
-  });
-
-  it("headers-only half-capture: headers arrive with no matching pending payload — never pings", () => {
-    const { hooks, ctx, port } = setupWithPort();
-    // No before_provider_request preceded this — e.g. keepalive was off when the payload was captured.
-    hooks.get("before_provider_headers")!(
-      { type: "before_provider_headers", headers: { "content-type": "application/json" } },
-      ctx,
-    );
-    expect(port.noteRequest).not.toHaveBeenCalled();
-  });
-
-  it("a second before_provider_request before headers arrive discards the first (never a stale cross-request pairing)", () => {
-    const { hooks, ctx, port } = setupWithPort();
-    hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx);
-    // Second request starts before the first ever got its headers.
-    hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx);
-    hooks.get("before_provider_headers")!({ type: "before_provider_headers", headers: { "x-request": "second" } }, ctx);
+    hooks.get("before_provider_request")!({ payload: { not: "a messages payload" } }, ctx);
     expect(port.noteRequest).toHaveBeenCalledTimes(1);
-    const captured = (port.noteRequest as ReturnType<typeof vi.fn>).mock.calls[0]![0];
-    expect(captured.headers).toEqual({ "x-request": "second" });
+    expect(port.invalidate).toHaveBeenCalledWith("payload-shape", "s1", "inst-1");
   });
 
-  it("a half-capture with keepalive disabled at request time never pairs even if re-enabled before headers arrive", () => {
+  it("the captured payload is a private clone: later mutation of pi's live payload never reaches the capture", () => {
+    const { hooks, ctx, port } = setupWithPort();
+    const live = ephemeralPayload();
+    hooks.get("before_provider_request")!({ payload: live }, ctx);
+    live.max_tokens = 1;
+    const captured = (port.noteRequest as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(captured.payload.max_tokens).toBe(512);
+  });
+
+  it("mode on: the capture is taken AFTER the 1h rewrite, so it reflects the bytes actually sent", () => {
+    const { hooks, ctx, port } = setupWithPort("on");
+    const result: any = hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx);
+    expect(result.messages[0].content[0].cache_control.ttl).toBe("1h");
+    const captured = (port.noteRequest as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(captured.shape.ttl1h).toBe(true);
+    expect(captured.payload.messages[0].content[0].cache_control.ttl).toBe("1h");
+  });
+
+  it("no keepalive port (disabled) ⇒ nothing captured and nothing throws", () => {
     const hooks = new Map<string, (event: any, ctx: any) => unknown>();
     const pi = {
-      on: (name: string, handler: any) => hooks.set(name, handler),
+      on: (n: string, h: any) => hooks.set(n, h),
       registerCommand: () => undefined,
     } as unknown as ExtensionAPI;
-    let port: KeepalivePort | undefined;
     const ctx = {
       ui: { notify: vi.fn(), setStatus: vi.fn() },
       sessionManager: { getSessionId: () => "s1" },
       model: { provider: "anthropic", api: "anthropic-messages", id: "claude-x", baseUrl: "https://api.anthropic.com" },
     } as unknown as ExtensionContext;
-    wireCacheTtl(
-      pi,
-      { ...DEFAULT_SETTINGS, cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, mode: "auto" } },
-      { keepalive: () => port },
-    );
-    hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx); // port undefined here
-    port = fakePort();
-    hooks.get("before_provider_headers")!(
-      { type: "before_provider_headers", headers: { "content-type": "application/json" } },
-      ctx,
-    );
-    expect(port.noteRequest).not.toHaveBeenCalled();
+    wireCacheTtl(pi, { ...DEFAULT_SETTINGS, cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, mode: "auto" } }, {});
+    expect(() => hooks.get("before_provider_request")!({ payload: ephemeralPayload() }, ctx)).not.toThrow();
   });
 });
 
@@ -408,9 +395,50 @@ describe("legacy cap note with a live report", () => {
     await commands.get("cache-ttl").handler("status", ctx);
     const text = vi.mocked(ctx.ui.notify).mock.calls[0]![0];
     expect(text).toContain("cap: 48/window (priced)");
-    expect(text.indexOf("note: ")).toBeGreaterThan(text.indexOf("cap:"));
+    expect(text.indexOf("note: cacheTtl.keepaliveMaxPings")).toBeGreaterThan(text.indexOf("cap:"));
     expect(text).toContain(legacyCapNote(cfg));
     expect(text).toContain("legacy value: 0");
+  });
+});
+
+describe("/cache-ttl status — ruling-6 residual note (extension-added headers are not replayed)", () => {
+  function statusText(enabled: boolean): Promise<string> {
+    const commands = new Map<string, any>();
+    const pi = {
+      on: () => undefined,
+      registerCommand: (n: string, c: any) => commands.set(n, c),
+    } as unknown as ExtensionAPI;
+    const port = fakePort({
+      report: () => ({
+        enabled,
+        armed: false,
+        config: { enabled, intervalMs: 240_000, maxPings: 11, minPrefixTokens: 20_000 },
+        window: createInitialWindowState(),
+        session: createInitialSessionTotals(),
+        costUsd: undefined,
+        dropped: { sessionMismatch: 0, instanceMismatch: 0, epochMismatch: 0 },
+        lastSkip: undefined,
+        prefixSource: undefined,
+        supportsLongCacheRetention: true,
+        lastPingDiagnostics: undefined,
+      }),
+    });
+    const ctx = { ui: { notify: vi.fn(), setStatus: vi.fn() } } as unknown as ExtensionContext;
+    wireCacheTtl(pi, { ...DEFAULT_SETTINGS }, { keepalive: () => port as any });
+    return Promise.resolve(commands.get("cache-ttl").handler("status", ctx)).then(
+      () => vi.mocked(ctx.ui.notify).mock.calls[0]![0] as string,
+    );
+  }
+
+  it("is shown whenever keepalive is enabled, with the observed-only wording (no one-ping bound claimed)", async () => {
+    const text = await statusText(true);
+    expect(text).toContain(KEEPALIVE_EXTENSION_HEADER_NOTE);
+    expect(text).toContain("keepalive stops for this session once a current-epoch proven-write is observed");
+    expect(text).not.toMatch(/at most one|only one ping|bounded to one/i);
+  });
+
+  it("is absent when keepalive is off", async () => {
+    expect(await statusText(false)).not.toContain("headers added by other extensions");
   });
 });
 

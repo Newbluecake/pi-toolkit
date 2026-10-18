@@ -34,8 +34,8 @@ import type { Millis } from "../core/types.js";
 export const CHILD_KEEPALIVE_LEDGER_KEY = Symbol.for("pi-subagent:child-keepalive-ledger");
 
 /**
- * Worst-case single ping ATTEMPT duration (plan.md §2.4): auth await ≤
- * `authTimeoutMs` (30s) + one HTTP attempt's 20s hard timeout + backoff. A full retry
+ * Worst-case single ping ATTEMPT duration (plan.md §2.4; capture-pairing r7 §3.4): one pipeline ping's
+ * 20s hard deadline (auth + fetch + read, resolved inside pi's provider pipeline) + backoff. A full retry
  * sequence can run longer (retries continue until `aliveUntil − TTL_SAFETY_MARGIN_MS`,
  * up to ~45s past the ping at the default interval, more with 1h captures) — the holder
  * keeps the lease alive by renewing it before every retry (`lease.renew`), so this

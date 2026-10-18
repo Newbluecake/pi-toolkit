@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ASSUMED_TTL_MS,
+  KEEPALIVE_EXTENSION_HEADER_NOTE,
+  isProviderUnsupported,
+  KEEPALIVE_AUDIT_CUSTOM_TYPE,
   TTL_SAFETY_MARGIN_MS,
   UNPROVEN_STREAK_LIMIT,
   UNPROVEN_TOTAL_LIMIT,
@@ -22,6 +25,7 @@ import {
   onRequestSettled,
   onSuccessfulRealRequest,
   onUnproven,
+  pingSegmentParts,
   readBackKeepaliveSessionState,
   renderCacheStatus,
   renderKeepaliveReportLines,
@@ -60,7 +64,6 @@ function captured(overrides: Partial<CapturedRequest> = {}): CapturedRequest {
     sessionId: "s1",
     instance: "inst-1",
     payload: { messages: [], stream: true },
-    headers: { "content-type": "application/json" },
     fingerprint: fingerprint(),
     shape: { ephemeralBreakpoints: 1, ttl1h: false, hasThinking: false, maxTokens: 4096 },
     prefix: { tokens: 25_000, source: "usage" },
@@ -173,7 +176,7 @@ describe("evaluateTick — short-circuit ladder", () => {
   });
 
   it.each(["anthropic-messages", "openai-completions"])(
-    "#5 token-billed github-copilot obeys API gating (%s)",
+    "#4.7 github-copilot is a terminal provider-unsupported skip regardless of API (%s)",
     (api) => {
       const fp = fingerprint({ provider: "github-copilot", api });
       const window = armedWindow({ capture: captured({ fingerprint: fp }) });
@@ -186,11 +189,70 @@ describe("evaluateTick — short-circuit ladder", () => {
         window,
         currentFingerprint: fp,
       });
-      expect(result.decision).toEqual(
-        api === "anthropic-messages" ? { kind: "ping" } : { kind: "skip", reason: "not-anthropic", terminal: true },
-      );
+      expect(result.decision).toEqual({ kind: "skip", reason: "provider-unsupported", terminal: true });
     },
   );
+
+  it("#4.7 a virtual model (api pi-virtual) is provider-unsupported; a Copilot-billed custom provider id is not", () => {
+    const virtual = fingerprint({ provider: "pi-router", api: "pi-virtual" });
+    const base = { now: 240_000, mode: "tui", armed: true, config: config(), session: baseSession() };
+    expect(
+      evaluateTick({
+        ...base,
+        window: armedWindow({ capture: captured({ fingerprint: virtual }) }),
+        currentFingerprint: virtual,
+      }).decision,
+    ).toEqual({ kind: "skip", reason: "provider-unsupported", terminal: true });
+    expect(isProviderUnsupported(fingerprint({ provider: "copilot-anthropic" }))).toBe(false);
+    const custom = fingerprint({ provider: "copilot-anthropic" });
+    expect(
+      evaluateTick({
+        ...base,
+        window: armedWindow({ capture: captured({ fingerprint: custom }) }),
+        currentFingerprint: custom,
+      }).decision,
+    ).toEqual({ kind: "ping" });
+  });
+
+  it("#1.5 activationDisabled is a terminal activation-disabled skip, evaluated before any session breaker, with no persisted trace", () => {
+    const window = armedWindow({ capture: captured() });
+    const result = evaluateTick({
+      now: 240_000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession({ disabled: { reason: "proven-write", at: 1 as never } }),
+      window,
+      currentFingerprint: fingerprint(),
+      activationDisabled: true,
+    });
+    expect(result.decision).toEqual({ kind: "skip", reason: "activation-disabled", terminal: true });
+  });
+
+  it("#10.5 io-busy is a NON-terminal skip, ahead of ping-in-flight; ioBusy false/absent is legacy behaviour", () => {
+    const base = {
+      now: 240_000,
+      mode: "tui",
+      armed: true,
+      config: config(),
+      session: baseSession(),
+      currentFingerprint: fingerprint(),
+    };
+    const window = armedWindow({ capture: captured(), pingInFlight: true });
+    expect(evaluateTick({ ...base, window, ioBusy: true }).decision).toEqual({
+      kind: "skip",
+      reason: "io-busy",
+      terminal: false,
+    });
+    expect(evaluateTick({ ...base, window }).decision).toEqual({
+      kind: "skip",
+      reason: "ping-in-flight",
+      terminal: false,
+    });
+    expect(evaluateTick({ ...base, window: armedWindow({ capture: captured() }), ioBusy: false }).decision).toEqual({
+      kind: "ping",
+    });
+  });
 
   it("#6 no cache_control breakpoints ⇒ no-cache-control", () => {
     const window = armedWindow({
@@ -1583,5 +1645,62 @@ describe("r_FFWC8SBT — report distinguishes fresh and invalidated windows", ()
   it("an old config without a fallback reason uses unpriced", () => {
     const r = report({ config: config({ maxPingsSource: "fallback" }) });
     expect(renderKeepaliveReportLines(r)[1]).toContain("cap: 11/window (fallback: unpriced)");
+  });
+});
+
+describe("r7 §3.4 — ruling-6 residual note, activation-disabled report, never persisted", () => {
+  it("renderKeepaliveReportLines carries the observed-only residual note whenever keepalive is enabled (and only then)", () => {
+    const on = renderKeepaliveReportLines(report({ enabled: true }));
+    expect(on).toContain(KEEPALIVE_EXTENSION_HEADER_NOTE);
+    expect(KEEPALIVE_EXTENSION_HEADER_NOTE).toBe(
+      "note: headers added by other extensions are not replayed — if they steer routing/cache, pings may write to another backend; keepalive stops for this session once a current-epoch proven-write is observed",
+    );
+    // wording must NOT claim the unknown cost is bounded to one ping
+    expect(KEEPALIVE_EXTENSION_HEADER_NOTE).not.toMatch(/one ping|at most one|single ping/i);
+    expect(renderKeepaliveReportLines(report({ enabled: false }))).not.toContain(KEEPALIVE_EXTENSION_HEADER_NOTE);
+  });
+
+  it("report lines + status segment surface an activation disable; the pipeline header source renders", () => {
+    const r = report({ activationDisabled: { reason: "transport-unsupported", at: 7 as never } });
+    expect(renderKeepaliveReportLines(r).join("\n")).toContain("activation disabled: transport-unsupported @ 7");
+    expect(pingSegmentParts(r)).toMatchObject({ state: "disabled" });
+    expect(pingSegmentParts(r)?.text).toContain("transport-unsupported");
+    const d = report({
+      lastPingDiagnostics: {
+        at: 5 as never,
+        outcomeKind: "proven-hit",
+        elapsedSinceCaptureMs: 1,
+        prefixTokens: 1,
+        prefixSource: "usage",
+        cacheReadInputTokens: 1,
+        cacheCreationInputTokens: 0,
+        headerSource: "pipeline",
+        headerKeyDiff: [],
+        model: "m",
+        baseUrl: "u",
+      },
+    });
+    expect(renderKeepaliveReportLines(d).join("\n")).toContain("headers: pipeline");
+  });
+
+  it("an activation-only disable lives outside SessionTotals: a persisted session snapshot never carries it, readBack ignores it", () => {
+    const branch = [
+      {
+        type: "custom",
+        customType: KEEPALIVE_AUDIT_CUSTOM_TYPE,
+        data: {
+          kind: "x",
+          session: {
+            ...baseSession({ provenWrites: 1 }),
+            disabled: null,
+            activationDisabled: { reason: "transport-unsupported", at: 1 },
+          },
+        },
+      },
+    ];
+    const restored = readBackKeepaliveSessionState(branch);
+    expect(restored?.provenWrites).toBe(1);
+    expect(restored?.disabled).toBeUndefined();
+    expect("activationDisabled" in (restored as object)).toBe(false);
   });
 });

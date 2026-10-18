@@ -38,6 +38,8 @@ export type StubDirective =
   | { kind: "error"; status: number; type?: string; message: string }
   /** Accept the request and never send any response bytes. */
   | { kind: "hang" }
+  /** Send an accepted SSE response, then drop the connection before message_start (A3). */
+  | { kind: "drop-after-headers" }
   /** Send 200 SSE headers (+ optional partial body, e.g. a newline-less flood) and never end. */
   | { kind: "stall-after-headers"; chunk?: string };
 
@@ -213,6 +215,13 @@ export class AnthropicStub {
           return;
         }
         if (directive?.kind === "hang") return;
+        if (directive?.kind === "drop-after-headers") {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.flushHeaders();
+          // A partial SSE comment ensures the client has received the 200 before the close.
+          res.write(": accepted\n", () => res.destroy());
+          return;
+        }
         if (directive?.kind === "stall-after-headers") {
           res.writeHead(200, {
             "content-type": "text/event-stream",

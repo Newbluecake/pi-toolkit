@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import {
-  createCacheKeepaliveService,
   type CacheKeepaliveDeps,
   type CacheKeepaliveService,
   UI_PROMPT_KEEPALIVE_MAX_MS,
 } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService, diagOf, fakeSender } from "./fake-pipeline.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 import {
   readBackKeepaliveSessionState,
@@ -112,7 +112,6 @@ function capture(overrides: Partial<CapturedRequest> = {}, instance: string, tok
     sessionId: "s1",
     instance,
     payload: { model: "claude-x", messages: [{ role: "user", content: "hi" }], max_tokens: 100, stream: true },
-    headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
     fingerprint: {
       sessionId: "s1",
       provider: "anthropic",
@@ -564,7 +563,7 @@ describe("cache-keepalive service — audit diagnostics (root-cause fix follow-u
   it("a proven-hit audit entry carries the elapsed time, prefix info, header source, and raw cache token counts", async () => {
     const fetchImpl = provenHitFetch();
     const { service, clock, appendEntry } = harness({ fetchImpl });
-    service.noteRequest(capture({ headers: { "content-type": "application/json" } }, service.instanceId, 30_000));
+    service.noteRequest(capture({}, service.instanceId, 30_000));
     service.noteRequestSettled("s1", service.instanceId);
     clock.advance(240_000);
     await flush();
@@ -580,8 +579,8 @@ describe("cache-keepalive service — audit diagnostics (root-cause fix follow-u
     expect(data.prefixSource).toBe("usage");
     expect(data.cacheReadInputTokens).toBe(500); // from provenHitFetch's message_start usage
     expect(data.cacheCreationInputTokens).toBe(0);
-    expect(data.headerSource).toBe("captured+auth-filled"); // default fakeCtx auth resolves apiKey "sk-ant-api-x", filled into x-api-key
-    expect(data.headerKeyDiff).toEqual(["x-api-key"]);
+    expect(data.headerSource).toBe("pipeline"); // headers are pi's own pipeline output now (r7)
+    expect(data.headerKeyDiff).toEqual([]);
     expect(data.model).toBe("claude-x");
     expect(data.baseUrl).toBe("https://api.anthropic.com");
   });
@@ -607,16 +606,15 @@ describe("cache-keepalive service — audit diagnostics (root-cause fix follow-u
     expect(data.disabled).toBe(true); // a single proven-write disables the session (I-K7)
   });
 
-  it("headerSource flips to 'captured+auth-filled' and headerKeyDiff lists only the filled key names (never values)", async () => {
+  it("never leaks credentials into the audit trail: audit entries carry header SOURCE only, no auth material at all", async () => {
     const fetchImpl = provenHitFetch();
     const { service, clock, ctx, appendEntry } = harness({ fetchImpl });
-    (ctx.modelRegistry.getApiKeyAndHeaders as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ctx.modelRegistry.getApiKeyAndHeaders.mockResolvedValue({
       ok: true,
       apiKey: "sk-ant-api-secret-value",
-      headers: {},
+      headers: { "x-api-key": "sk-ant-api-secret-value" },
     });
-    // Capture had no authorization/x-api-key at all — auth fallback must fill x-api-key.
-    service.noteRequest(capture({ headers: { "content-type": "application/json" } }, service.instanceId));
+    service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
     clock.advance(240_000);
     await flush();
@@ -625,10 +623,12 @@ describe("cache-keepalive service — audit diagnostics (root-cause fix follow-u
       ([, data]: [string, any]) => data.kind === "proven-hit",
     );
     const [, data] = entry as [string, Record<string, unknown>];
-    expect(data.headerSource).toBe("captured+auth-filled");
-    expect(data.headerKeyDiff).toEqual(["x-api-key"]);
-    // Never leak the secret value into the audit trail.
-    expect(JSON.stringify(data)).not.toContain("sk-ant-api-secret-value");
+    expect(data.headerSource).toBe("pipeline");
+    expect(JSON.stringify((appendEntry as ReturnType<typeof vi.fn>).mock.calls)).not.toContain(
+      "sk-ant-api-secret-value",
+    );
+    // r7 §3.4: the service never resolves auth itself any more (pi's pipeline does, inside the transport).
+    expect(ctx.modelRegistry.getApiKeyAndHeaders).not.toHaveBeenCalled();
   });
 });
 
@@ -647,99 +647,124 @@ function hangingRejectFetch(): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
-describe("cache-keepalive service — no-auth and m2 TTL-margin re-check never spend the budget", () => {
-  it("no-auth: refunds the budget and never calls fetch", async () => {
-    const fetchImpl = vi.fn();
-    const { service, clock, ctx } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    (ctx.modelRegistry.getApiKeyAndHeaders as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ok: false,
-      error: "no key",
-    });
+describe("cache-keepalive service — not-sent outcomes never spend the budget (r7 outcome mapping)", () => {
+  it.each(["auth", "guard", "deadline", "aborted", "capability", "provider-error"] as const)(
+    "not-sent{%s}: refunds the budget (pings 0, pingInFlight cleared) and is never counted as unproven",
+    async (reason) => {
+      const sender = fakeSender(undefined, {
+        scripted: () => ({ kind: "not-sent", reason, diag: diagOf({ baseFetchCalls: 0, onPayloadCalls: 0 }) }),
+      });
+      const { service, clock, appendEntry } = harness({ sendPipelinePing: sender.send });
+      service.noteRequest(capture({}, service.instanceId));
+      service.noteRequestSettled("s1", service.instanceId);
+      clock.advance(240_000);
+      await flush();
+      expect(sender.calls).toHaveLength(1);
+      const report = service.report();
+      expect(report.window.pings).toBe(0); // refunded
+      expect(report.window.pingInFlight).toBe(false);
+      expect(report.session.unprovenTotal).toBe(0); // never counted as unproven
+      expect(report.session.disabled).toBeUndefined();
+      expect(report.window.capture).toBeDefined(); // the window survives; the next tick tries again
+      expect(report.activationDisabled).toBeUndefined(); // a not-sent never latches transport-unsupported
+      const attempt = (appendEntry as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([, data]: [string, any]) => data.kind === "ping-attempt",
+      );
+      expect((attempt as [string, Record<string, unknown>])[1]).toMatchObject({
+        outcomeKind: "not-sent",
+        notSentReason: reason,
+      });
+    },
+  );
+
+  it("the service never resolves auth itself and sends the capture body through the injected sender with its live guard", async () => {
+    const sender = fakeSender(provenHitFetch());
+    const { service, clock, ctx } = harness({ sendPipelinePing: sender.send });
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
     clock.advance(240_000);
     await flush();
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(service.report().window.pings).toBe(0); // refunded
-    expect(service.report().session.unprovenTotal).toBe(0); // never counted as unproven
+    expect(ctx.modelRegistry.getApiKeyAndHeaders).not.toHaveBeenCalled();
+    const input = sender.calls[0]!;
+    expect(input.sessionId).toBe("s1");
+    expect(input.registry).toBe(ctx.modelRegistry);
+    expect(input.model).toBe(ctx.model);
+    expect(input.body.max_tokens).toBe(1); // preparePingPayload
+    expect(input.clock).toBe(clock);
+    expect(input.deadlineAt).toBeLessThanOrEqual(240_000 + 20_000);
+    expect(input.deadlineAt).toBeGreaterThan(240_000);
+    expect(input.signal?.aborted).toBe(false);
+    // The guard tracks the window epoch: a real request after dispatch flips it false.
+    expect(input.guard()).toBe(true); // same window epoch, not disposed
+    service.noteRequest(capture({}, service.instanceId, 31_000)); // a real request bumps the epoch
+    expect(input.guard()).toBe(false);
+  });
+
+  it("the transport deadline is min(now+20s, aliveUntil − margin): a late attempt near the cache expiry gets the shorter deadline", async () => {
+    const sender = fakeSender(undefined, {
+      scripted: () => ({ kind: "network", diag: diagOf({ baseFetchCalls: 1 }) }),
+    });
+    const { service, clock } = harness({ sendPipelinePing: sender.send });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000);
+    await flush();
+    // aliveUntil = 300_000, margin 15_000 ⇒ cutoff 285_000; first attempt at 240_000 ⇒ min(260_000, 285_000)
+    expect(sender.calls[0]!.deadlineAt).toBe(260_000);
+    // Retries at 242s, 247s, 257s ⇒ the 257s attempt: min(277_000, 285_000)=277_000; 277s would not fit (+20s).
+    clock.advance(2_000);
+    await flush();
+    expect(sender.calls[1]!.deadlineAt).toBe(262_000);
   });
 });
 
-describe("cache-keepalive service — M1 fingerprint-drift-after-auth refund (validation report Blocker M1)", () => {
-  it("model drift discovered after auth resolves: refunds the budget (pingInFlight cleared, pings not leaked), still invalidates, fetch never called, not counted as unproven", async () => {
-    const fetchImpl = vi.fn();
-    const { service, clock, ctx } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    (ctx.modelRegistry.getApiKeyAndHeaders as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      // Simulate the model changing out from under us while the auth await is pending.
-      // Real auth resolution is never synchronous (network/keychain I/O) — the mutation
-      // must land AFTER an actual await, not as a side effect of merely CALLING the mock,
-      // otherwise it becomes visible to a synchronously-coincident tick (todo #28's exact
-      // timer can legitimately fire in the same batch as the periodic one at this interval).
-      await Promise.resolve();
-      (ctx.model as { id: string }).id = "claude-drifted";
-      return { ok: true, apiKey: "sk-ant-api-x", headers: {} };
-    });
+describe("cache-keepalive service — drift is caught at the tick (no ping is ever dispatched on a drifted route)", () => {
+  it("model drift: invalidates without dispatching anything, not counted as unproven", async () => {
+    const sender = fakeSender();
+    const { service, clock, ctx } = harness({ sendPipelinePing: sender.send });
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
+    (ctx.model as { id: string }).id = "claude-drifted";
     clock.advance(240_000);
     await flush();
-
-    expect(fetchImpl).not.toHaveBeenCalled(); // HTTP never left this process
-    const report = service.report();
-    expect(report.window.pingInFlight).toBe(false); // M1: must not leak in-flight forever
-    expect(report.window.pings).toBe(0); // M1: the pre-spent budget unit must be refunded
-    expect(report.window.capture).toBeUndefined(); // invalidated (drift)
-    expect(report.session.unprovenTotal).toBe(0); // never counted against the breaker
-    expect(report.session.consecutiveUnproven).toBe(0);
-    expect(report.session.disabled).toBeUndefined();
-  });
-
-  it("baseUrl drift discovered after auth resolves: same refund + invalidate guarantee", async () => {
-    const fetchImpl = vi.fn();
-    const { service, clock, ctx } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    (ctx.modelRegistry.getApiKeyAndHeaders as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      await Promise.resolve(); // see the model-drift test's comment above
-      (ctx.model as { baseUrl: string }).baseUrl = "https://drifted.example.com";
-      return { ok: true, apiKey: "sk-ant-api-x", headers: {} };
-    });
-    service.noteRequest(capture({}, service.instanceId));
-    service.noteRequestSettled("s1", service.instanceId);
-    clock.advance(240_000);
-    await flush();
-
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(sender.calls).toHaveLength(0);
     const report = service.report();
     expect(report.window.pingInFlight).toBe(false);
     expect(report.window.pings).toBe(0);
-    expect(report.window.capture).toBeUndefined();
+    expect(report.window.capture).toBeUndefined(); // invalidated (drift)
     expect(report.session.unprovenTotal).toBe(0);
+    expect(report.session.disabled).toBeUndefined();
   });
 
-  it("auth header-keys drift discovered right as auth resolves (locked-in value diverges from the captured placeholder): same refund + invalidate guarantee", async () => {
-    // `buildFingerprintContext` always captures `authHeaderKeys: ""` (real headers are unknown
-    // until auth resolves) — the first successful auth response's header keys get locked in and
-    // compared against that captured placeholder. Non-empty headers surface a same-shape drift
-    // to `compareFingerprint`'s `authHeaderKeys` field, exercising the M1 refund-then-invalidate
-    // order for this field too.
-    const fetchImpl = vi.fn();
-    const { service, clock, ctx } = harness({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    (ctx.modelRegistry.getApiKeyAndHeaders as ReturnType<typeof vi.fn>).mockResolvedValue({
+  it("baseUrl drift: same guarantee", async () => {
+    const sender = fakeSender();
+    const { service, clock, ctx } = harness({ sendPipelinePing: sender.send });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    (ctx.model as { baseUrl: string }).baseUrl = "https://drifted.example.com";
+    clock.advance(240_000);
+    await flush();
+    expect(sender.calls).toHaveLength(0);
+    expect(service.report().window.capture).toBeUndefined();
+    expect(service.report().session.unprovenTotal).toBe(0);
+  });
+
+  it("authHeaderKeys is inert: auth/provider headers never cause a fingerprint drift, so providers with auth/model headers ping (the pre-r7 bug: immediate drift ⇒ zero pings)", async () => {
+    const sender = fakeSender(provenHitFetch());
+    const { service, clock, ctx } = harness({ sendPipelinePing: sender.send });
+    (ctx.model as { headers?: Record<string, string> }).headers = { "x-custom-routing": "team-a" };
+    ctx.modelRegistry.getApiKeyAndHeaders.mockResolvedValue({
       ok: true,
       apiKey: "sk-ant-api-x",
-      headers: { "x-api-key": "abc" },
+      headers: { "x-api-key": "abc", "x-extra": "1" },
     });
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
     clock.advance(240_000);
     await flush();
-
-    const report = service.report();
-    expect(fetchImpl).not.toHaveBeenCalled(); // never reached sendKeepalivePing
-    expect(report.window.pingInFlight).toBe(false); // M1: not leaked
-    expect(report.window.pings).toBe(0); // M1: refunded, not leaked at 1
-    expect(report.window.capture).toBeUndefined(); // invalidated (authHeaderKeys drift)
-    expect(report.session.pings).toBe(0);
-    expect(report.session.unprovenTotal).toBe(0); // never counted against the breaker
+    expect(sender.calls).toHaveLength(1);
+    expect(service.report().session.pings).toBe(1);
+    expect(service.report().window.capture).toBeDefined();
   });
 });
 
@@ -1133,12 +1158,33 @@ describe("r_FFWC8SBT — unknown no-capture tier and Copilot billing", () => {
     expect(renderKeepaliveReportLines(service.report())[1]).toContain("cap: 11/window (fallback: tier-uncertain)");
     service.dispose();
   });
-  it("token-billed Copilot sends an Anthropic ping with the ordinary registry-derived cap", async () => {
+  it("github-copilot is a TERMINAL provider-unsupported skip (X-Initiator/vision headers come from the transformed context): zero dispatches", async () => {
     const fetchImpl = provenHitFetch();
-    const { service, ctx, clock } = harness({ fetchImpl });
+    const { service, ctx, clock, appendEntry } = harness({ fetchImpl });
     ctx.model.provider = "github-copilot";
     const c = capture({}, service.instanceId);
     c.fingerprint.provider = "github-copilot";
+    service.noteRequest(c);
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000);
+    await flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    const report = service.report();
+    expect(report.lastSkip).toBe("provider-unsupported");
+    expect(report.lastTerminalSkip?.reason).toBe("provider-unsupported");
+    expect(report.session.disabled).toBeUndefined(); // a skip, not a persisted breaker
+    expect(clock.pendingTimers).toBe(0); // terminal: no more re-arming
+    expect(
+      (appendEntry as ReturnType<typeof vi.fn>).mock.calls.some(([, d]: [string, any]) => d.kind === "terminal-skip"),
+    ).toBe(true);
+    service.dispose();
+  });
+  it("a Copilot-BILLED custom provider id (copilot-*) is unaffected: pi branches only on provider === 'github-copilot'", async () => {
+    const fetchImpl = provenHitFetch();
+    const { service, ctx, clock } = harness({ fetchImpl });
+    ctx.model.provider = "copilot-anthropic";
+    const c = capture({}, service.instanceId);
+    c.fingerprint.provider = "copilot-anthropic";
     service.noteRequest(c);
     service.noteRequestSettled("s1", service.instanceId);
     expect(service.report().config).toMatchObject({ maxPings: 11, maxPingsSource: "priced" });
@@ -1146,7 +1192,6 @@ describe("r_FFWC8SBT — unknown no-capture tier and Copilot billing", () => {
     await flush();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(service.report().session.pings).toBe(1);
-    expect(service.report().lastSkip).not.toBe("not-anthropic");
     service.dispose();
   });
 });

@@ -71,8 +71,8 @@ export type PingOutcome =
   | { kind: "network"; error?: string } // fetch itself failed / aborted before receiving a response
   | { kind: "malformed" }; // no body, or scanned 64KB without seeing message_start
 
-const PING_SCAN_LIMIT_BYTES = 64 * 1024;
-const HTTP_ERROR_BODY_CAP_BYTES = 2048;
+export const PING_SCAN_LIMIT_BYTES = 64 * 1024;
+export const HTTP_ERROR_BODY_CAP_BYTES = 2048;
 const DEFAULT_PING_TIMEOUT_MS = 20_000;
 
 const OAUTH_TOKEN_MARKER = "sk-ant-oat";
@@ -314,7 +314,7 @@ interface AnthropicMessageStartEvent {
   message?: { usage?: Record<string, unknown> };
 }
 
-function isMessageStartEvent(value: unknown): value is AnthropicMessageStartEvent {
+export function isMessageStartEvent(value: unknown): value is AnthropicMessageStartEvent {
   return isObjectRecord(value) && value.type === "message_start";
 }
 
@@ -323,7 +323,7 @@ function finiteOr(value: unknown, fallback: number): number {
 }
 
 /** Project pi-ai's wire usage shape (`cache_creation.ephemeral_1h_input_tokens` split included) onto `RawScannedUsage`. */
-function rawUsageFrom(event: AnthropicMessageStartEvent): RawScannedUsage | undefined {
+export function rawUsageFrom(event: AnthropicMessageStartEvent): RawScannedUsage | undefined {
   const usage = event.message?.usage;
   if (!usage) return undefined;
   const creation = isObjectRecord(usage.cache_creation) ? usage.cache_creation : undefined;
@@ -338,7 +338,7 @@ function rawUsageFrom(event: AnthropicMessageStartEvent): RawScannedUsage | unde
 }
 
 /** Classify scanned usage into the keepalive proven/unproven verdict (I-K7). */
-function classifyUsage(usage: RawScannedUsage | undefined): PingOutcome {
+export function classifyUsage(usage: RawScannedUsage | undefined): PingOutcome {
   if (!usage) return { kind: "no-usage" };
   if (usage.cacheRead > 0 && usage.cacheWrite === 0) {
     return { kind: "proven-hit", cacheReadTokens: usage.cacheRead, inputTokens: usage.inputTokens };

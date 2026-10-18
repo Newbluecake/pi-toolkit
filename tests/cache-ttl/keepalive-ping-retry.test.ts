@@ -11,11 +11,8 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import {
-  createCacheKeepaliveService,
-  type CacheKeepaliveDeps,
-  type CacheKeepaliveService,
-} from "../../src/service/cache-keepalive.js";
+import { type CacheKeepaliveDeps, type CacheKeepaliveService } from "../../src/service/cache-keepalive.js";
+import { createCacheKeepaliveService } from "./fake-pipeline.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
 import { renderKeepaliveReportLines } from "../../src/cache-ttl/keepalive-state.js";
 import type { CapturedRequest } from "../../src/cache-ttl/keepalive-state.js";
@@ -138,7 +135,6 @@ function capture(overrides: Partial<CapturedRequest> = {}, instance: string, tok
     sessionId: "s1",
     instance,
     payload: { model: "claude-x", messages: [{ role: "user", content: "hi" }], max_tokens: 100, stream: true },
-    headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
     fingerprint: {
       sessionId: "s1",
       provider: "anthropic",

@@ -187,7 +187,17 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   off strips the TTL override. No automatic 1h upgrades remain (user decision 2026-10-11).
   Copilot (`github-copilot`) is token-billed and is no longer provider-denied (2026-10-18 user ruling);
   only Anthropic-messages API requests remain eligible, subject to every normal safety/budget gate.
-  Keepalive replays captured payloads and verbatim headers under bounded ping budgets,
+  Keepalive captures only the provider payload of each real request (pi's `onPayload`; a strict-tools
+  fallback's second payload replaces the first) and replays it through pi's own provider pipeline
+  (`src/cache-ttl/pipeline-ping.ts` → `ModelRegistry.streamSimple` with a wrapped fetch, one 20 s deadline over
+  auth+fetch+read, at most one POST, cancel fired never awaited), so auth and headers are resolved by pi exactly
+  as for a real request (plan `docs/dev/cache-ttl-keepalive/capture-pairing-plan.md` r7). The capability probe
+  lives in `src/adapters/pi-compat.ts` and fails closed (`transport-unsupported`, non-persisted
+  `activationDisabled`, forgotten on `/reload`); pi's built-in `github-copilot` provider is
+  `provider-unsupported` for technical reasons (custom copilot-* providers are not); extension-added request
+  headers are not detected (user ruling 6, noted in `/cache-ttl status`); a ping whose transport has not
+  physically settled holds `io-busy` (no retry/next ping), and each child ping-ledger lease settles exactly once.
+  Pings run under bounded ping budgets,
   fingerprint/session/epoch guards, and unref'd timers (service in `src/service/cache-keepalive.ts`).
   A single ping retries until the cache window runs out (2s→5s→10s→20s→30s then constant 30s, bounded by
   `aliveUntil − TTL_SAFETY_MARGIN_MS`; 3 attempts when `aliveUntil` is unknown; retryable = network + HTTP

@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { wireChildKeepalive } from "../../src/cache-ttl/child.js";
 import { getChildKeepaliveDisposeRegistry } from "../../src/cache-ttl/child-registry.js";
 import { getChildKeepaliveLedger } from "../../src/cache-ttl/ping-ledger.js";
+import { fakePiStreamSimple } from "../cache-ttl/fake-pipeline.js";
 import { DEFAULT_SETTINGS, parseCacheTtlSettings, type AgentSettings } from "../../src/config/settings.js";
 
 /**
@@ -88,6 +89,8 @@ function fakeCtx(sessionId: string, overrides: Record<string, unknown> = {}): Ex
       getAvailable: () => [],
       find: () => undefined,
       getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "sk-ant-api-x", headers: {} }),
+      // r7: pings replay through pi's provider pipeline — a faithful fake `streamSimple` drives the REAL transport.
+      streamSimple: fakePiStreamSimple().streamSimple,
     },
     model: {
       provider: "anthropic",
@@ -141,7 +144,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
       expect(handle).toBeDefined();
 
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("turn_end", {}, ctx); // noteRequestSettled (mirrors cache-keepalive.test.ts's own sequence)
       await emit("tool_execution_start", {}, ctx); // arms (backgroundBusy is always false for child sessions)
 
@@ -188,7 +190,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     try {
       wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("turn_end", {}, ctx);
       await emit("tool_execution_start", {}, ctx);
 
@@ -199,10 +200,9 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
       expect(capturedSignal?.aborted).toBe(false);
 
       // A REAL request arrives (a new tool call's model round-trip) while that ping is still
-      // pending — `noteRequest` (wired via `before_provider_headers` → `consumeHeaders`) must
+      // pending — `noteRequest` (committed straight from `before_provider_request`) must
       // abort it rather than let both race.
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await flush(10);
 
       expect(capturedSignal?.aborted).toBe(true);
@@ -228,7 +228,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     try {
       wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("tool_execution_start", {}, ctx);
       await emit("agent_settled", {}, ctx); // one prompt == one settle for a child session
 
@@ -255,7 +254,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     try {
       const handle = wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       handle?.noteContextSwitch();
       // No assertion API is exposed on the handle beyond the side effect itself not throwing —
       // the underlying reducer behavior (invalidate clears `window.capture`) is unit-tested
@@ -278,7 +276,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     try {
       wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("tool_execution_start", {}, ctx); // arms
       await emit("tool_execution_end", {}, ctx); // immediately disarms again — no tool is running anymore.
 
@@ -303,7 +300,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     try {
       wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("tool_execution_start", {}, ctx);
 
       // NOW simulate pi invalidating the extension ctx mid-flight (any property read throws
@@ -342,7 +338,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     try {
       wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("turn_end", {}, ctx); // establishes the baseline the tick measures elapsed time against.
       await emit("tool_execution_start", {}, ctx); // stays armed for the whole run — one continuous window, no request settles.
 
@@ -376,7 +371,6 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     try {
       wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("turn_end", {}, ctx);
       await emit("tool_execution_start", {}, ctx);
 
@@ -438,7 +432,6 @@ describe("child keepalive ledger (T-K9): unpriced model never pings", () => {
     try {
       wireChildKeepalive(pi, settings);
       await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
-      await emit("before_provider_headers", { headers: { "content-type": "application/json" } }, ctx);
       await emit("tool_execution_start", {}, ctx);
       await vi.advanceTimersByTimeAsync(400_000);
       await flush();

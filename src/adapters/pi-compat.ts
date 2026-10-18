@@ -271,3 +271,39 @@ export function readBeforeAgentStartTrigger(event: unknown): BeforeAgentStartTri
   if (e.messageType !== undefined && e.messageType !== "user") return { kind: "unknown" };
   return typeof e.prompt === "string" ? { kind: "user", prompt: e.prompt } : { kind: "unknown" };
 }
+
+/**
+ * Keepalive replay transport capability (capture-pairing-plan r7 §3.4): structural probe, never a version
+ * comparison (I14). The keepalive ping goes through pi's own provider pipeline —
+ * `ctx.modelRegistry.streamSimple(model, context, { fetch, onProviderStreamEvent, onPayload, transformHeaders })` —
+ * so the only statically observable requirement is that the registry facade exposes `streamSimple` as a function.
+ * Whether the concrete provider adapter honours the `fetch` option and the raw `onProviderStreamEvent` callback is
+ * adapter-owned ("Adapter support is explicit; unsupported adapters do not invoke it") and not observable without a
+ * request: that half is covered at runtime by the service's explicit-success diagnosis. The optional `declared`
+ * flags let a caller that DOES know (a transport self-description, a test) report either half as missing.
+ *
+ * `ok:false` ⇒ the service activation-disables keepalive as `transport-unsupported` (never persisted).
+ */
+export interface KeepaliveTransportProbeInput {
+  /** `ctx.modelRegistry` (anything; read structurally). */
+  registry: unknown;
+  /** `false` ⇒ that replay option is known to be unsupported. `undefined` ⇒ not statically knowable (treated as present). */
+  declared?: { fetchOption?: boolean | undefined; rawEventCallback?: boolean | undefined } | undefined;
+}
+
+export type KeepaliveTransportProbeResult =
+  { ok: true } | { ok: false; reason: "transport-unsupported"; missing: readonly string[] };
+
+export function probeKeepaliveTransport(input: KeepaliveTransportProbeInput): KeepaliveTransportProbeResult {
+  const missing: string[] = [];
+  let streamSimple: unknown;
+  try {
+    streamSimple = (input.registry as { streamSimple?: unknown } | null | undefined)?.streamSimple;
+  } catch {
+    streamSimple = undefined; // a stale/poisoned registry getter is a missing capability, not a crash.
+  }
+  if (typeof streamSimple !== "function") missing.push("modelRegistry.streamSimple");
+  if (input.declared?.fetchOption === false) missing.push("streamSimple.fetch option");
+  if (input.declared?.rawEventCallback === false) missing.push("streamSimple.onProviderStreamEvent");
+  return missing.length > 0 ? { ok: false, reason: "transport-unsupported", missing } : { ok: true };
+}

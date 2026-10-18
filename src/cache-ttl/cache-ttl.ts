@@ -386,29 +386,24 @@ function buildFingerprintContext(ctx: ExtensionContext, sessionId: string): Fing
     api: model?.api ?? "",
     ctxModelId: model?.id ?? "",
     baseUrl: model?.baseUrl ?? "",
-    // Locked in by the service after the first ping resolves real auth (plan.md §3.3) — capture-time is always "".
+    // INERT (capture-pairing-plan r7 §3.4): always "" on both the capture and the service's tick-time side.
     authHeaderKeys: "",
   };
 }
 
 /**
- * The `headers` field is deliberately absent here — it isn't known yet at
- * `before_provider_request` time (see `RequestCapture` below). Callers must
- * only turn this into a real `CapturedRequest` once the paired
- * `before_provider_headers` snapshot has arrived. Exported (child-ka-core,
- * plan.md §2.4) so `src/cache-ttl/child.ts` (a later package) can reuse the
- * identical shape.
+ * Builds the `CapturedRequest` for one `before_provider_request` (P). Payload-only capture (capture-pairing-plan
+ * r7 §3.1): the request headers are not captured — pings replay through pi's own provider pipeline, which resolves
+ * auth and headers itself. Exported (child-ka-core, plan.md §2.4) so `src/cache-ttl/child.ts` reuses the identical
+ * shape.
  */
-export type CapturedRequestBase = Omit<CapturedRequest, "headers">;
-
-/** Exported (child-ka-core, plan.md §2.4) for reuse by the future child-session capture wiring — see `CapturedRequestBase`'s doc comment. */
 export function captureRequest(
   payload: RecordValue,
   ctx: ExtensionContext,
   sessionId: string,
   port: KeepalivePort,
   prefix: PrefixEstimate,
-): CapturedRequestBase {
+): CapturedRequest {
   return {
     sessionId,
     instance: port.instanceId,
@@ -418,46 +413,6 @@ export function captureRequest(
     prefix,
     capturedAt: Date.now(),
   };
-}
-
-/**
- * Pairing state for the two-hook capture (root-cause fix, plan.md §7.3
- * follow-up; extracted into a reusable helper for child-ka-core, plan.md
- * §2.4 — "capture helper 抽取"): `before_provider_request` fires first and
- * knows the payload; `before_provider_headers` fires shortly after, for the
- * exact same HTTP call, and knows the verbatim headers pi is about to send.
- * Neither half is useful to the keepalive service alone — a payload-only
- * capture has no headers to replay (the original bug), and a headers-only
- * capture has no request to replay them with.
- *
- * Pairing strategy: a single mutable slot INSIDE the returned object (one
- * instance per host session, exactly like the old inline `pendingCapture`
- * closure variable it replaces — no behavior change, verified by
- * `cache-ttl.test.ts`). The caller's `before_provider_request` handler must
- * call `clear()` first, unconditionally, before possibly calling `stage()` —
- * so a previous half-capture whose `before_provider_headers` never arrived
- * (e.g. the previous request errored out before reaching the HTTP stage) is
- * discarded rather than incorrectly paired with a *different* request's
- * headers. `consumeHeaders()` always consumes (reads-and-clears) the slot
- * exactly once: if it's empty (no matching stage — e.g. keepalive was
- * disabled when the payload capture ran, or the payload was
- * invalid/uncloneable), the headers are simply dropped with no ping
- * capture. This relies on pi firing the two hooks strictly sequentially for
- * one request (payload assembled, then headers assembled, then the HTTP
- * call) with no interleaving from a second in-flight request on the same
- * session — true for a single agent loop's one in-flight LLM call at a time.
- *
- * `port` is fixed at construction (mirrors the old code's per-request `const
- * port = deps.keepalive?.()` read — the caller re-creates a `RequestCapture`
- * whenever the port identity changes, e.g. after a stack rebuild).
- */
-export interface RequestCapture {
-  /** `before_provider_request`: stage a (possibly already-rewritten) capture, replacing any previous not-yet-paired stage. */
-  stage(base: CapturedRequestBase): void;
-  /** `before_provider_request`, error/no-port paths: discard without staging (nothing to pair). */
-  clear(): void;
-  /** `before_provider_headers`: consume (read-and-clear) the staged base and, if present, pair it with these headers and forward to `port.noteRequest`. */
-  consumeHeaders(headers: unknown): void;
 }
 
 /** Status-only migration: presence, including invalid/zero, NEVER affects the cap or switch. */
@@ -473,29 +428,6 @@ export function settledRouteOf(message: unknown): { provider: string; modelId: s
   return typeof m?.provider === "string" && m.provider !== "" && typeof m.model === "string" && m.model !== ""
     ? { provider: m.provider, modelId: m.model }
     : undefined;
-}
-
-export function createRequestCapture(port: KeepalivePort): RequestCapture {
-  let pending: CapturedRequestBase | undefined;
-  return {
-    stage(base) {
-      pending = base;
-    },
-    clear() {
-      pending = undefined;
-    },
-    consumeHeaders(headers) {
-      const base = pending;
-      pending = undefined;
-      if (!base) return; // headers with no matching stage — half-capture, never ping (see doc comment above).
-      if (!isObjectRecord(headers)) return;
-      const snapshot: Record<string, string> = {};
-      for (const [key, value] of Object.entries(headers)) {
-        if (typeof value === "string") snapshot[key] = value;
-      }
-      port.noteRequest({ ...base, headers: snapshot });
-    },
-  };
 }
 
 /**
@@ -603,8 +535,6 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   let persisted = mode;
   let dirty = false;
   const persist = deps.persist ?? ((value) => persistSettingOverride("cacheTtl.mode", value, defaultSettingsPath()));
-  let capturePort: KeepalivePort | undefined;
-  let capture: RequestCapture | undefined;
   let lastSent: LastSent | undefined;
 
   wireCacheEvents(pi, deps);
@@ -617,12 +547,6 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     const port = deps.keepalive?.();
     port?.syncModeState(mode, dirty);
     const sessionId = readSessionId(ctx);
-    if (port !== capturePort) {
-      capturePort = port;
-      capture = port ? createRequestCapture(port) : undefined;
-    }
-    // Drop a half-capture whose matching headers never arrived.
-    capture?.clear();
     if (!isObjectRecord(event.payload) || !Array.isArray(event.payload.messages)) {
       port?.invalidate("payload-shape", sessionId, port.instanceId);
       return undefined;
@@ -659,7 +583,8 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           port.invalidate("clone-failed", sessionId, port.instanceId);
           return undefined;
         }
-        capture?.stage(captureRequest(cloned as RecordValue, ctx, sessionId, port, prefixFromLedger(ledger)));
+        // Payload-only capture, committed immediately (a strict-tools P′ replaces it).
+        port.noteRequest(captureRequest(cloned as RecordValue, ctx, sessionId, port, prefixFromLedger(ledger)));
       }
       return undefined;
     }
@@ -678,19 +603,8 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
     // Capture AFTER the rewrite (order is load-bearing): `inspectPayload(cloned)`
     // reflects the bytes actually sent, which is how keepalive gate #7 sees the
     // 1h write and suspends pinging for this window.
-    if (port) capture?.stage(captureRequest(cloned as RecordValue, ctx, sessionId, port, prefixFromLedger(ledger)));
+    if (port) port.noteRequest(captureRequest(cloned as RecordValue, ctx, sessionId, port, prefixFromLedger(ledger)));
     return cloned as RecordValue;
-  });
-  // Second half of the pairing (root-cause fix): fires shortly after
-  // `before_provider_request`, for the SAME HTTP call, with the verbatim
-  // headers pi is about to send. Consumes (reads-and-clears) the staged
-  // capture exactly once, regardless of outcome, so a leftover slot can never
-  // bleed into a later request. `event.headers` is `Record<string, string |
-  // null>` (`null` deletes a header per pi's contract) — only string values
-  // survive into the snapshot handed to the keepalive service (see
-  // `RequestCapture.consumeHeaders`).
-  pi.on("before_provider_headers", (event) => {
-    capture?.consumeHeaders(event.headers);
   });
   const USAGE = "usage: /cache-ttl on | off | auto | save | keepalive on|off|reset | status | probe";
   pi.registerCommand("cache-ttl", {
