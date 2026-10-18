@@ -1,4 +1,14 @@
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +27,7 @@ import { comparePayloadPrefix, preflight, PROVIDER_PREFIX_FIELDS } from "../../s
 import {
   blockedToolReason,
   createConsultGuard,
+  getConsultGuard,
   installNestedCallBlock,
   NESTED_TOOL_CALL_REASON,
 } from "../../src/consult/preserve-guard.js";
@@ -25,10 +36,46 @@ import { compareRecordedPrefix, getPrefixProbeRegistry, installPrefixProbe } fro
 import { createPermissiveGuard } from "./fixtures/permissive-guard.js";
 import { AnthropicStub, type StubReply, type StubRequest } from "./fixtures/anthropic-stub.js";
 
+import activate from "../../src/index.js";
+import type { SessionHandle } from "../../src/runtime/session-driver.js";
+import { PiSessionDriver } from "../../src/runtime/session-driver.js";
+import type { Stack } from "../../src/stack.js";
+import { isLiveSessionFile } from "../../src/core/live-session-files.js";
+import { consultCacheMarkerOfDiag } from "../../src/core/consult-cache-marker.js";
+import { scanExpertSnapshot } from "../../src/consult/fork-store.js";
+import {
+  productionConsultHost,
+  lastUserText,
+  wireMessages,
+  messageMarkers,
+  allMarkerCount,
+  stripMessageMarkers,
+} from "./fixtures/consult-production.js";
+
+// Observe the real assembly's result. No hand-built wiring or mock driver is
+// involved in the E1 gates; every wrapped function runs its production body.
+const production = vi.hoisted(() => ({ stacks: [] as Stack[] }));
+vi.mock("../../src/stack.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/stack.js")>();
+  return {
+    ...actual,
+    buildSessionStack: (...args: Parameters<typeof actual.buildSessionStack>) => {
+      const stack = actual.buildSessionStack(...args);
+      production.stacks.push(stack);
+      return stack;
+    },
+  };
+});
+
+const productionCleanups: Array<() => Promise<void>> = [];
 const scratchDirs: string[] = [];
 const stubs: AnthropicStub[] = [];
 
 afterEach(async () => {
+  for (const cleanup of productionCleanups.splice(0)) await cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  production.stacks.length = 0;
   for (const stub of stubs.splice(0)) await stub.close();
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -145,8 +192,8 @@ async function seedConsult(
   return { expert, consult, guard, snapshot, manager };
 }
 
-describe("consult preserve conformance — real pi 1.0.2 + Anthropic Messages boundary", () => {
-  it("C1: compares the raw expert-last and consult-first provider prefixes", async () => {
+describe("consult preserve conformance — real pi + Anthropic Messages boundary (supplementary guard checks)", () => {
+  it("C1 supplementary: compares the hand-forked raw expert-last and consult-first provider prefixes", async () => {
     const stub = await AnthropicStub.start({
       reply: (_request, index): StubReply => ({ kind: "text", text: `reply-${index}` }),
     });
@@ -418,4 +465,494 @@ describe("consult preserve conformance — real pi 1.0.2 + Anthropic Messages bo
     expect(prompt).toContain("why does this fail?");
     expect(prompt).not.toContain("system");
   });
+});
+
+function sha(value: unknown): string {
+  return createHash("sha256")
+    .update(JSON.stringify(value) ?? "undefined")
+    .digest("hex");
+}
+
+function assertProbeMatchesBody(
+  record: NonNullable<ReturnType<ReturnType<typeof getPrefixProbeRegistry>["get"]>>["first"],
+  body: Record<string, unknown>,
+) {
+  expect(record).toBeDefined();
+  expect(Object.keys(record!.fieldHashes).sort()).toEqual(Object.keys(body).sort());
+  for (const [key, hash] of Object.entries(record!.fieldHashes)) {
+    if (key === "messages") {
+      expect(hash).toBe(sha(stripMessageMarkers(body.messages)));
+      continue;
+    }
+    expect(hash, `raw ${key} hash`).toBe(sha(body[key]));
+  }
+  expect(record!.messageHashes).toEqual(wireMessages(body).map((message) => sha(stripMessageMarkers(message))));
+}
+
+async function productionHost(stub: AnthropicStub, options: { oauth?: boolean; inject?: boolean } = {}) {
+  const host = await productionConsultHost(stub, activate, () => production.stacks.at(-1)!, options);
+  scratchDirs.push(host.cwd);
+  productionCleanups.push(host.shutdown);
+  return host;
+}
+
+describe("E1 production install chain — activate / stack / SpawnService / consult / real session-driver", () => {
+  for (const oauth of [false, true]) {
+    it(
+      oauth
+        ? "C11: OAuth relocated first, limit follow-up and honest degraded projection"
+        : "C1 + C12: anchored C2-preserved threads retain full A1, replay the anchor, warm-hit #2, fresh #1 and close",
+      async () => {
+        const fullAnswer = `E1 full answer beginning\n${"complete answer detail ".repeat(50)} E1 mid retained sentinel ${"complete answer detail ".repeat(50)}\nE1 full answer END`;
+        const consultBodies: StubRequest[] = [];
+        const askerBodies: StubRequest[] = [];
+        let askerTurn = 0;
+        let onAskerRequest: ((turn: number) => void) | undefined;
+        let release!: () => void;
+        const endGate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        productionCleanups.push(async () => {
+          release();
+        });
+        const stub = await AnthropicStub.start({
+          promptCache: true,
+          reply: async (request): Promise<StubReply> => {
+            const text = lastUserText(request.json);
+
+            if (text.includes("\nQuestion:\nE1-Q")) {
+              consultBodies.push(request);
+              return {
+                kind: "text",
+                text: consultBodies.length === 1 ? fullAnswer : `E1 answer ${consultBodies.length}`,
+              };
+            }
+            if (text.includes("E1-H")) return { kind: "text", text: "E1 expert completed its investigation" };
+            if (!JSON.stringify(request.json.messages).includes("E1-ASK"))
+              return { kind: "text", text: "host notice acknowledged" };
+            askerBodies.push(request);
+            const n = ++askerTurn;
+            onAskerRequest?.(n);
+            if (n <= (oauth ? 2 : 3))
+              return {
+                kind: "tool",
+                calls: [
+                  {
+                    name: "consult",
+                    input: { expert: "e1-expert", question: `E1-Q${n}`, ...(n === 3 ? { fresh: true } : {}) },
+                  },
+                ],
+              };
+            await endGate; // keep the REAL asker alive so terminal cleanup cannot hide close() leaks
+            return { kind: "text", text: "E1 asker done" };
+          },
+        });
+        stubs.push(stub);
+        const host = await productionHost(stub, { oauth });
+        const expertId = await host.dispatch("expert", `E1-H ${"stable expert history ".repeat(2_000)}`);
+        const expertOutcome = await host.outcome(expertId);
+        expect(expertOutcome.status).toBe("completed");
+        expect(expertOutcome.diag.childExtensionMissing).toBeUndefined();
+        const expertBody = stub.requests.at(-1)!.json;
+        const expertRecord = getPrefixProbeRegistry().get(expertId)!;
+        const expertFile = expertOutcome.diag.sessionFile!;
+        const expertBytes = readFileSync(expertFile, "utf8");
+        const sourceSnapshot = scanExpertSnapshot(expertFile);
+        expect(sourceSnapshot.ok).toBe(true);
+
+        // Observe physical disposal without replacing it. The registry must not
+        // expose this fork as a head either before or immediately after dispose;
+        // only the later onReaped(disposed:true) + eligible join can promote it.
+        const disposal: Array<{ file: string; before: boolean; after: boolean; returned: boolean }> = [];
+        const originalResume = PiSessionDriver.prototype.resume;
+        const sessions: Array<{ file: string; shadowNames: string[]; guardInstalled: boolean }> = [];
+        vi.spyOn(PiSessionDriver.prototype, "resume").mockImplementation(async function (file, spec) {
+          const handle = await originalResume.call(this, file, spec);
+          if (spec.consultGuard) {
+            const session = (
+              handle as unknown as { session: Awaited<ReturnType<typeof createAgentSession>>["session"] }
+            ).session;
+            sessions.push({
+              file,
+              shadowNames: ["set_model", "Agent"].filter((name) => Object.isFrozen(session.getToolDefinition(name))),
+              guardInstalled: typeof session.agent.beforeToolCall === "function",
+            });
+            const dispose = handle.dispose.bind(handle);
+            handle.dispose = () => {
+              const before = host.stack.consult!.threads.isHead(file);
+              const report = dispose();
+              disposal.push({
+                file,
+                before,
+                after: host.stack.consult!.threads.isHead(file),
+                returned: report.returned,
+              });
+              return report;
+            };
+          }
+          return handle;
+        });
+        const reaps: Array<{ file: string; disposed: boolean | undefined }> = [];
+        const onReaped = host.stack.consult!.onReaped;
+        vi.spyOn(host.stack.consult!, "onReaped").mockImplementation((id, file, info) => {
+          if (file) reaps.push({ file, disposed: info?.disposed });
+          return onReaped(id, file, info);
+        });
+        const checkpoints: Array<{ turn: number; files: boolean[]; head?: string; entries?: unknown[] }> = [];
+        onAskerRequest = (turn) => {
+          if (turn < 2) return;
+          const head = host.stack.consult!.threads.views()[0]?.headFile;
+          checkpoints.push({
+            turn,
+            files: sessions.map(({ file }) => existsSync(file)),
+            ...(head === undefined ? {} : { head, entries: SessionManager.open(head).getEntries() }),
+          });
+        };
+        const askerId = await host.dispatch("asker", "E1-ASK consult the expert in order", [expertId]);
+        await expect
+          .poll(() => host.stack.query.get(askerId)?.diag.consults?.calls, { timeout: 30_000 })
+          .toBe(oauth ? 2 : 3);
+        await expect.poll(() => askerBodies.length, { timeout: 10_000 }).toBe(oauth ? 3 : 4);
+        const asker = host.stack.query.get(askerId)!;
+        const probes = asker.diag.consults!.cacheProbes!;
+        expect(probes).toHaveLength(oauth ? 2 : 3);
+        const runs = host.stack.query
+          .list()
+          .filter((run) => run.diag.consultOf !== undefined)
+          .sort((a, b) => a.diag.consultThread!.seq - b.diag.consultThread!.seq);
+        const byId = new Map(runs.map((run) => [run.runId, run]));
+        const records = consultBodies.map((request) => {
+          const found = runs.find(
+            (run) =>
+              getPrefixProbeRegistry().get(run.runId)?.first?.fieldHashes.messages ===
+              sha(stripMessageMarkers(request.json.messages)),
+          );
+          if (!found) throw new Error("no production run probe for raw body");
+          return { run: found, record: getPrefixProbeRegistry().get(found.runId)! };
+        });
+        expect(records).toHaveLength(oauth ? 2 : 3);
+        expect(byId.size).toBe(records.length);
+        const consultCost = records.reduce((sum, { run }) => sum + (run.diag.usage?.costUsd ?? 0), 0);
+        expect(consultCost).toBeGreaterThan(0);
+        expect(asker.diag.consults!.costUsd).toBeCloseTo(consultCost, 8);
+        expect(asker.diag.usage!.costUsd).toBeGreaterThanOrEqual(consultCost);
+        for (const [index, { run, record }] of records.entries()) {
+          const body = consultBodies[index]!.json;
+          assertDocumentedFields(body);
+          // Anthropic SDK moves params.betas into the HTTP header (not JSON).
+          const beta = consultBodies[index]!.headers["anthropic-beta"];
+          assertProbeMatchesBody(record.first, {
+            ...body,
+            ...(typeof beta === "string" ? { betas: beta.split(",") } : {}),
+          });
+          expect(record.firstSuccessful).toBe(record.first);
+          expect(record.first?.responseOk).toBe(true);
+          const usage = consultBodies[index]!.responseUsage!;
+          expect(record.first?.usage).toMatchObject({
+            input: usage.input_tokens,
+            output: usage.output_tokens,
+            cacheRead: usage.cache_read_input_tokens,
+            cacheWrite: usage.cache_creation_input_tokens,
+          });
+          expect(record.probeErrors ?? 0).toBe(0);
+          const raw = comparePayloadPrefix(expertBody, body, record.first?.anchor);
+          expect(compareRecordedPrefix(expertRecord.latest!, record.first!)).toEqual(raw);
+          expect(raw).toMatchObject({ model: true, tools: true, system: true, thinking: true, messages: true });
+          expect(run.status).toBe("completed");
+          expect(run.diag.consultCache?.first?.anchor).toBe(record.first?.anchor?.state);
+          expect(run.diag.consultCache?.first?.label).toBe("hit");
+          expect(run.diag.consultCache?.first?.readShare).toBeCloseTo(
+            record.first!.usage!.cacheRead /
+              (record.first!.usage!.input + record.first!.usage!.cacheRead + record.first!.usage!.cacheWrite),
+          );
+          expect(run.diag.consultThread).toEqual({
+            threadId: probes[index]!.thread!.id,
+            seq: probes[index]!.thread!.seq,
+          });
+          expect(run.diag.consultCache?.predicted).toEqual(probes[index]!.warm);
+          expect(run.diag.consultCache?.first).toMatchObject(probes[index]!.cacheResult!);
+        }
+        const first = records[0]!;
+        const second = records[1]!;
+        const anchor = first.record.first!.anchor!;
+        expect(anchor.state).toBe(oauth ? "relocated" : "added");
+        const identity = anchor.identity!;
+        const control = { type: "ephemeral" };
+        const firstLast = wireMessages(consultBodies[0]!.json).length - 1;
+        expect(messageMarkers(consultBodies[0]!.json)).toEqual([
+          { m: identity.k - 1, b: identity.block, control },
+          ...(oauth
+            ? []
+            : [{ m: firstLast, b: wireMessages(consultBodies[0]!.json)[firstLast]!.content.length - 1, control }]),
+        ]);
+        expect(allMarkerCount(consultBodies[0]!.json)).toBe(4);
+        expect(second.record.first?.anchor?.state).toBe(oauth ? "skipped:limit" : "added");
+        const secondMessages = wireMessages(consultBodies[1]!.json);
+        expect(stripMessageMarkers(secondMessages.slice(0, -2))).toEqual(
+          stripMessageMarkers(wireMessages(consultBodies[0]!.json)),
+        );
+        expect(secondMessages.at(-2)).toEqual({ role: "assistant", content: [{ type: "text", text: fullAnswer }] });
+        expect(lastUserText(consultBodies[1]!.json)).toContain("This is follow-up #2");
+        expect(lastUserText(consultBodies[1]!.json)).toContain("\nQuestion:\nE1-Q2");
+        expect(second.run.diag.consultThread).toEqual({ threadId: first.run.diag.consultThread!.threadId, seq: 2 });
+        const secondLast = secondMessages.length - 1;
+        expect(messageMarkers(consultBodies[1]!.json)).toEqual([
+          ...(oauth ? [] : [{ m: identity.k - 1, b: identity.block, control }]),
+          { m: secondLast, b: secondMessages[secondLast]!.content.length - 1, control },
+        ]);
+        // The caller saw a truncated answer, but the next fork saw every byte.
+        const firstResult = JSON.stringify(askerBodies[1]!.json.messages);
+        expect(firstResult).toContain("answer truncated at 500 chars");
+        expect(firstResult).not.toContain("E1 mid retained sentinel");
+        expect(firstResult).toContain("new consult thread");
+        expect(JSON.stringify(askerBodies[2]!.json.messages)).toContain("previous 1 question(s)");
+        expect(sessions).toHaveLength(records.length);
+        expect(sessions.every((item) => item.guardInstalled)).toBe(true);
+        expect(sessions.map((item) => item.shadowNames)).toEqual(records.map(() => ["set_model", "Agent"]));
+        expect(disposal).toHaveLength(records.length);
+        expect(disposal.every((item) => !item.before && !item.after && item.returned)).toBe(true);
+        expect(reaps.map((item) => item.disposed)).toEqual(records.map(() => true));
+        expect(host.stack.consult!.threads.stats().promotions).toBe(records.length);
+        expect(checkpoints[0]).toMatchObject({ turn: 2, files: [true], head: first.run.diag.sessionFile });
+        expect(checkpoints[1]).toMatchObject({ turn: 3, files: [false, true], head: second.run.diag.sessionFile });
+        const originalEntries = SessionManager.open(expertFile).getEntries();
+        const appended = checkpoints[0]!.entries!.slice(originalEntries.length) as Array<{
+          type: string;
+          customType?: string;
+          message: { role: string; content: unknown };
+        }>;
+        expect(appended.map((entry) => [entry.type, entry.customType, entry.message?.role])).toEqual([
+          ["custom", "subagent:prompt-sections", undefined],
+          ["message", undefined, "user"],
+          ["message", undefined, "assistant"],
+        ]);
+        expect(appended[2]!.message.content).toEqual([{ type: "text", text: fullAnswer }]);
+        expect(existsSync(first.run.diag.sessionFile!)).toBe(false);
+        const headFile = host.stack.consult!.threads.views()[0]!.headFile!;
+        expect(existsSync(headFile)).toBe(true);
+        const headSnapshot = scanExpertSnapshot(headFile);
+        expect(headSnapshot.ok).toBe(true);
+        if (!sourceSnapshot.ok || !headSnapshot.ok) throw new Error("production loadout snapshot missing");
+        expect(headSnapshot.snapshot.tools).toEqual(sourceSnapshot.snapshot.tools);
+        expect(headSnapshot.snapshot.systemSections).toEqual(sourceSnapshot.snapshot.systemSections);
+        expect(readFileSync(expertFile, "utf8")).toBe(expertBytes);
+        if (oauth) {
+          expect(second.run.diag.consultCache?.predicted.state).toBe("unknown");
+          expect(consultCacheMarkerOfDiag(first.run.diag)).toContain("degraded");
+          expect(consultCacheMarkerOfDiag(second.run.diag)).toContain("degraded");
+          expect(allMarkerCount(consultBodies[1]!.json)).toBe(4);
+          expect(second.run.diag.consultCache?.predicted.reason).toBe("degraded-anchor");
+        } else {
+          expect(second.record.first?.anchor?.identity).toEqual(identity);
+          expect(second.run.diag.consultCache?.predicted).toMatchObject({
+            state: "warm",
+            evidence: { source: "anchor-ledger", ttlMs: 300_000, lastProvenTouchAt: first.record.first!.startedAt },
+          });
+          expect(consultCacheMarkerOfDiag(second.run.diag)).toMatch(/^t#2 warm·hit \d+%$/);
+          expect(host.stack.consult!.anchorLedger.size()).toBe(1);
+          const fresh = records[2]!;
+          expect(fresh.run.diag.consultThread?.seq).toBe(1);
+          expect(fresh.run.diag.consultThread?.threadId).not.toBe(first.run.diag.consultThread!.threadId);
+          expect(probes[2]!.thread?.mode).toBe("fresh");
+          expect(lastUserText(consultBodies[2]!.json)).not.toContain("follow-up");
+          expect(JSON.stringify(consultBodies[2]!.json)).not.toContain(fullAnswer);
+          expect(stripMessageMarkers(wireMessages(consultBodies[2]!.json).slice(0, -1))).toEqual(
+            stripMessageMarkers(wireMessages(consultBodies[0]!.json).slice(0, -1)),
+          );
+          expect(JSON.stringify(askerBodies[3]!.json.messages)).toContain("fresh consult (fresh:true)");
+          expect(existsSync(second.run.diag.sessionFile!)).toBe(false);
+        }
+        // Production shutdown invokes close before abort/drain. Captured HTTP
+        // replies remain pending, proving cleanup is not an asker-terminal side effect.
+        await host.shutdown();
+        release();
+        expect(host.stack.consult!.threads.stats()).toMatchObject({ closed: true, heads: 0, forks: 0, usedBytes: 0 });
+        expect(host.stack.consult!.threads.views()).toEqual([]);
+        expect(host.stack.consult!.anchorLedger.size()).toBe(0);
+        for (const { run } of records) expect(getConsultGuard(run.runId)).toBeUndefined();
+        expect(readdirSync(join(host.agentDir, "cache", "consult-sessions"))).toEqual([]);
+        expect(host.errors).toEqual([]);
+      },
+      60_000,
+    );
+  }
+
+  it("C1 shape fallback: a real before_agent_start message makes the anchor skipped:shape, never an error", async () => {
+    let consultBody: StubRequest | undefined;
+    let askerTurn = 0;
+    const stub = await AnthropicStub.start({
+      promptCache: true,
+      reply(request) {
+        const text = lastUserText(request.json);
+        const messages = JSON.stringify(request.json.messages);
+        if (messages.includes("READ-ONLY CONSULT MODE") && messages.includes("E1-Q-shape")) {
+          consultBody = request;
+          return { kind: "text", text: "E1 shape consult answered normally" };
+        }
+        if (text.includes("E1-H")) return { kind: "text", text: "E1 expert history ready" };
+        if (messages.includes("E1-ASK") && ++askerTurn === 1)
+          return { kind: "tool", calls: [{ name: "consult", input: { expert: "e1-expert", question: "E1-Q-shape" } }] };
+        return { kind: "text", text: "E1 finished" };
+      },
+    });
+    stubs.push(stub);
+    const host = await productionHost(stub, { inject: true });
+    const expertId = await host.dispatch("expert", `E1-H ${"shape stable history ".repeat(1_000)}`);
+    expect((await host.outcome(expertId)).status).toBe("completed");
+    const expertBody = stub.requests.find((request) => lastUserText(request.json).includes("E1-H"))!.json;
+    const askerId = await host.dispatch("asker", "E1-ASK one shape consult", [expertId]);
+    const asker = await host.outcome(askerId);
+    expect(asker.status).toBe("completed");
+    expect(asker.diag.consults).toMatchObject({ calls: 1, byResult: { completed: 1 } });
+    const consult = host.stack.query.list().find((run) => run.diag.consultOf !== undefined)!;
+    expect(consult.status).toBe("completed");
+    const record = getPrefixProbeRegistry().get(consult.runId)!;
+    expect(record.first?.anchor).toEqual({ state: "skipped:shape" });
+    expect(record.first?.responseOk).toBe(true);
+    expect(record.probeErrors ?? 0).toBe(0);
+    expect(consult.diag.consultCache?.first).toMatchObject({ anchor: "skipped:shape", label: "hit" });
+    const body = consultBody!.json;
+    expect(JSON.stringify(body.messages)).toContain("E1 injected before_agent_start message");
+    const messages = wireMessages(body);
+    expect(messageMarkers(body)).toEqual([
+      { m: messages.length - 1, b: messages.at(-1)!.content.length - 1, control: { type: "ephemeral" } },
+    ]);
+    expect(allMarkerCount(body)).toBe(3);
+    const comparison = comparePayloadPrefix(expertBody, body, record.first?.anchor);
+    expect(comparison).toMatchObject({ model: true, tools: true, system: true, thinking: true, messages: true });
+    expect(compareRecordedPrefix(getPrefixProbeRegistry().get(expertId)!.latest!, record.first!)).toEqual(comparison);
+    assertProbeMatchesBody(record.first, body);
+    expect(host.stack.consult!.anchorLedger.size()).toBe(0);
+    await host.shutdown();
+    expect(host.errors).toEqual([]);
+  }, 45_000);
+
+  it("C2 production supplement: the installed guard blocks builtin writes and adapter shadows without spawning", async () => {
+    let marker = "";
+    let askerTurn = 0;
+    let consultTurn = 0;
+    const stub = await AnthropicStub.start({
+      promptCache: true,
+      reply(request) {
+        const text = lastUserText(request.json);
+        const messages = JSON.stringify(request.json.messages);
+        if (messages.includes("READ-ONLY CONSULT MODE") && messages.includes("E1-Q-guard")) {
+          if (++consultTurn === 1)
+            return {
+              kind: "tool",
+              calls: [
+                { name: "write", input: { path: marker, content: "must not be written" } },
+                {
+                  name: "Agent",
+                  input: {
+                    subagent_type: "e1-expert",
+                    description: "forbidden spawn",
+                    prompt: "forbidden nested spawn",
+                  },
+                },
+                { name: "set_model", input: { model: "anthropic-stub/claude-conformance" } },
+              ],
+            };
+          return { kind: "text", text: "E1 answered after one refused batch" };
+        }
+        if (text.includes("E1-H")) return { kind: "text", text: "E1 expert ready" };
+        if (messages.includes("E1-ASK") && ++askerTurn === 1)
+          return { kind: "tool", calls: [{ name: "consult", input: { expert: "e1-expert", question: "E1-Q-guard" } }] };
+        return { kind: "text", text: "E1 done" };
+      },
+    });
+    stubs.push(stub);
+    const host = await productionHost(stub);
+    marker = join(host.cwd, "forbidden-write.txt");
+    const expertId = await host.dispatch("expert", "E1-H guard expert");
+    expect((await host.outcome(expertId)).status).toBe("completed");
+    const askerId = await host.dispatch("asker", "E1-ASK guard consult", [expertId]);
+    const asker = await host.outcome(askerId);
+    expect(asker.status).toBe("completed");
+    expect(consultTurn).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+    expect(host.stack.query.list()).toHaveLength(3); // expert + asker + consult, never a nested Agent run
+    const probe = asker.diag.consults!.cacheProbes![0]!;
+    expect(probe.outcome).toBe("completed");
+    expect(probe.blocked).toMatchObject({ calls: 3, batches: 1, terminated: false });
+    const consult = host.stack.query.list().find((run) => run.diag.consultOf !== undefined)!;
+    const record = getPrefixProbeRegistry().get(consult.runId)!;
+    expect(record.requests?.map((request) => request.anchor?.state)).toEqual(["added", "added"]);
+    const requests = stub.requests.filter((request) =>
+      JSON.stringify(request.json.messages).includes("READ-ONLY CONSULT MODE"),
+    );
+    const results = wireMessages(requests[1]!.json).at(-1)!.content;
+    expect(results).toHaveLength(3);
+    expect(
+      results.every(
+        (block) =>
+          block.type === "tool_result" &&
+          block.is_error === true &&
+          String(block.content).includes("disabled in this read-only consult"),
+      ),
+    ).toBe(true);
+    expect(consult.diag.consultCache?.first?.at).toBeDefined();
+    await host.shutdown();
+    expect(host.errors).toEqual([]);
+  }, 45_000);
+
+  for (const oauth of [false, true])
+    it(`C14: ordinary create and resume preserve native payload references/bytes and last-only breakpoints (OAuth=${oauth})`, async () => {
+      const stub = await AnthropicStub.start({ reply: () => ({ kind: "text", text: "E1 ordinary response" }) });
+      stubs.push(stub);
+      const host = await productionHost(stub, { oauth });
+      const observed: Array<{ kind: string; same: boolean; before: string; after: string }> = [];
+      const observe = (handle: SessionHandle, kind: string) => {
+        const session = (handle as unknown as { session: Awaited<ReturnType<typeof createAgentSession>>["session"] })
+          .session;
+        const original = session.agent.onPayload!;
+        session.agent.onPayload = async (payload, selectedModel) => {
+          const before = JSON.stringify(payload);
+          const returned = await original(payload, selectedModel);
+          const effective = returned ?? payload;
+          observed.push({ kind, same: payload === effective, before, after: JSON.stringify(effective) });
+          return returned;
+        };
+        return handle;
+      };
+      const create = PiSessionDriver.prototype.create;
+      const resume = PiSessionDriver.prototype.resume;
+      vi.spyOn(PiSessionDriver.prototype, "create").mockImplementation(async function (spec) {
+        return observe(await create.call(this, spec), "create");
+      });
+      vi.spyOn(PiSessionDriver.prototype, "resume").mockImplementation(async function (file, spec) {
+        return observe(await resume.call(this, file, spec), "resume");
+      });
+      const firstId = await host.dispatch("expert", "E1 ordinary first");
+      const first = await host.outcome(firstId);
+      expect(first.status).toBe("completed");
+      await expect.poll(() => isLiveSessionFile(first.diag.sessionFile!), { timeout: 10_000 }).toBe(false);
+      const secondId = await host.dispatch("expert", "E1 ordinary resumed", undefined, firstId);
+      const second = await host.outcome(secondId);
+      expect(second.status).toBe("completed");
+      expect(observed.map((value) => value.kind)).toEqual(["create", "resume"]);
+      for (const [index, value] of observed.entries()) {
+        expect(value.same).toBe(true);
+        expect(value.after).toBe(value.before);
+        const native = JSON.parse(value.before) as Record<string, unknown>;
+        // SDK projects betas into a header after onPayload. Every other byte
+        // reaches the local HTTP boundary untouched by toolkit instrumentation.
+        const { betas, ...httpBody } = native;
+        const wire = stub.requests.find((request) => JSON.stringify(request.json) === JSON.stringify(httpBody));
+        expect(wire).toBeDefined();
+        expect(wire!.body).toBe(JSON.stringify(httpBody));
+        if (betas !== undefined) expect(wire!.headers["anthropic-beta"]).toBe((betas as string[]).join(","));
+        const messages = wireMessages(native);
+        expect(messageMarkers(native)).toEqual([
+          { m: messages.length - 1, b: messages.at(-1)!.content.length - 1, control: { type: "ephemeral" } },
+        ]);
+        expect(allMarkerCount(native)).toBe(oauth ? 4 : 3);
+        const run = index === 0 ? first : second;
+        expect(run.diag).not.toHaveProperty("consultCache");
+        expect(run.diag).not.toHaveProperty("consultThread");
+        expect(getPrefixProbeRegistry().get(run.runId)?.anchor).toBeUndefined();
+      }
+      await host.shutdown();
+      expect(host.errors).toEqual([]);
+    }, 45_000);
 });

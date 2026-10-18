@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 
 export interface StubRequest {
@@ -6,6 +7,7 @@ export interface StubRequest {
   headers: IncomingHttpHeaders;
   method?: string;
   url?: string;
+  responseUsage?: StubUsage;
 }
 
 export type StubReply =
@@ -26,7 +28,10 @@ export interface StubUsage {
 }
 
 export interface AnthropicStubOptions {
-  reply?: (request: StubRequest, index: number) => StubReply;
+  reply?: (request: StubRequest, index: number) => StubReply | Promise<StubReply>;
+  /** Deterministic, local-only cache: prefix bytes, explicit writes and <=20-block lookback reads.
+   * Not a claim about Anthropic minimum lengths, billing, TTL survival or relay behaviour. */
+  promptCache?: boolean;
 }
 
 const DEFAULT_USAGE: StubUsage = {
@@ -100,15 +105,64 @@ function streamFor(reply: StubReply, model: string, index: number): string {
 export class AnthropicStub {
   readonly requests: StubRequest[] = [];
   private readonly server: Server;
-  private readonly reply: (request: StubRequest, index: number) => StubReply;
+  private readonly reply: (request: StubRequest, index: number) => StubReply | Promise<StubReply>;
   private listening: Promise<void>;
+  private readonly cache = new Map<string, number>();
+
+  private cacheUsage(body: Record<string, unknown>): StubUsage {
+    const clean = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(clean);
+      if (value && typeof value === "object")
+        return Object.fromEntries(
+          Object.entries(value)
+            .filter(([key]) => key !== "cache_control")
+            .map(([key, v]) => [key, clean(v)]),
+        );
+      return value;
+    };
+    // Include role/message boundaries as well as block bytes. Keep cache_control
+    // out of the identity, exactly as relative breakpoint comparison does.
+    const prefix: unknown[] = [body.model];
+    const blocks: Array<{ key: string; tokens: number; marked: boolean }> = [];
+    const add = (kind: string, value: Record<string, unknown>) => {
+      prefix.push([kind, clean(value)]);
+      const bytes = JSON.stringify(prefix);
+      blocks.push({
+        key: createHash("sha256").update(bytes).digest("hex"),
+        tokens: Math.ceil(bytes.length / 4),
+        marked: value.cache_control !== undefined,
+      });
+    };
+    for (const tool of (body.tools ?? []) as Record<string, unknown>[]) add("tool", tool);
+    for (const system of (body.system ?? []) as Record<string, unknown>[]) add("system", system);
+    for (const message of (body.messages ?? []) as Array<{ role: string; content: Record<string, unknown>[] }>) {
+      prefix.push(["role", message.role]);
+      for (const block of message.content) add("message", block);
+    }
+    let read = 0;
+    let cachedThrough = 0;
+    blocks.forEach((block, index) => {
+      if (!block.marked) return;
+      cachedThrough = block.tokens;
+      for (const candidate of blocks.slice(Math.max(0, index - 19), index + 1))
+        read = Math.max(read, this.cache.get(candidate.key) ?? 0);
+    });
+    for (const block of blocks) if (block.marked) this.cache.set(block.key, block.tokens);
+    const total = blocks.at(-1)?.tokens ?? 0;
+    return {
+      input_tokens: Math.max(0, total - cachedThrough),
+      output_tokens: 10,
+      cache_read_input_tokens: read,
+      cache_creation_input_tokens: Math.max(0, cachedThrough - read),
+    };
+  }
 
   private constructor(options: AnthropicStubOptions = {}) {
     this.reply = options.reply ?? (() => ({ kind: "text", text: "stub answer" }));
     this.server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on("data", (chunk: Buffer) => chunks.push(chunk));
-      req.on("end", () => {
+      req.on("end", async () => {
         const body = Buffer.concat(chunks).toString("utf8");
         let json: Record<string, unknown>;
         try {
@@ -129,14 +183,18 @@ export class AnthropicStub {
           ...(req.url === undefined ? {} : { url: req.url }),
         };
         this.requests.push(request);
-        const reply = this.reply(request, this.requests.length - 1);
+        const index = this.requests.length - 1;
+        const scripted = await this.reply(request, index);
+        const usage = { ...(options.promptCache ? this.cacheUsage(json) : DEFAULT_USAGE), ...scripted.usage };
+        request.responseUsage = usage;
+        const reply = { ...scripted, usage };
         const model = typeof json.model === "string" ? json.model : "stub-model";
         res.writeHead(200, {
           "content-type": "text/event-stream",
           connection: "keep-alive",
           "cache-control": "no-cache",
         });
-        res.end(streamFor(reply, model, this.requests.length - 1));
+        res.end(streamFor(reply, model, index));
       });
     });
     this.listening = new Promise<void>((resolve, reject) => {
