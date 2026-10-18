@@ -4,7 +4,28 @@
 
 [pi](https://github.com/earendil-works/pi) 的工具箱扩展。旗舰是一套**零卡死 subagent 系统**（`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`），外加一组可按需开关的日常模块：项目记忆、上下文交接与缓存保活、额度与负载感知、bash 自动转后台、任务工具、`/goal`、飞书通知，以及可选的浏览器控制面（Web Hub）。单一安装入口，统一 settings 门控。
 
+<p align="center">
+  <img src="docs/images/hero-web-desktop.png" alt="Web UI：会话列表、对话与代理树" width="100%">
+  <br>
+  <sub>Web UI：会话列表、对话、代理树（阶段 / 成本 / consult 缓存命中）与订阅额度一屏可见</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/web-desktop-dark.png" alt="Web UI 深色主题" height="320">
+  <img src="docs/images/web-mobile-list.png" alt="手机端会话列表" height="320">
+  <img src="docs/images/web-mobile-chat.png" alt="手机端对话" height="320">
+  <img src="docs/images/web-mobile-agents.png" alt="手机端代理抽屉" height="320">
+  <br>
+  <sub>深色主题 · 手机端（会话列表 / 对话 / 代理抽屉）</sub>
+</p>
+
 ## 核心特点
+
+<p align="center">
+  <img src="docs/images/tui-agent-tree.png" alt="终端中的代理树小组件与 HUD 页脚" width="100%">
+  <br>
+  <sub>终端内：代理树小组件 + HUD 页脚</sub>
+</p>
 
 1. **零卡死** — 每个 subagent run 是一条带分相 deadline 的纯状态机：1Hz 看门狗触发超时，升级阶梯（cancel → steer → abort → dispose）回收资源，杀不掉的登记为 orphan。每个 run 必然到达终态。
 2. **可观测** — 编辑器上方常驻实时 agent tree（相位、在途工具、流式尾部、实时费用）；`/agent status` 给出逐 run 的工具时间线；Web Hub 里同样可见。

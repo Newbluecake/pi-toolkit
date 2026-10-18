@@ -4,7 +4,28 @@
 
 A toolbox extension for [pi](https://github.com/earendil-works/pi). The flagship is a **zero-hang subagent system** (`Agent` / `get_subagent_result` / `steer_subagent` / `SubagentWorkflow`), plus a set of everyday modules you can toggle independently: project memory, context handoff and cache keepalive, quota and load awareness, bash auto-backgrounding, task tools, `/goal`, Feishu notifications, and an optional browser control plane (Web Hub). One install entry, one settings gate.
 
+<p align="center">
+  <img src="docs/images/hero-web-desktop-en.png" alt="Web UI: sessions, transcript and agent tree" width="100%">
+  <br>
+  <sub>Web UI: sessions, transcript, agent tree (phases / cost / consult cache hit) and subscription quota in one view</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/web-desktop-dark.png" alt="Web UI dark theme" height="320">
+  <img src="docs/images/web-mobile-list.png" alt="Mobile session list" height="320">
+  <img src="docs/images/web-mobile-chat.png" alt="Mobile chat" height="320">
+  <img src="docs/images/web-mobile-agents.png" alt="Mobile agent drawer" height="320">
+  <br>
+  <sub>Dark theme · mobile (sessions / chat / agent drawer)</sub>
+</p>
+
 ## Core properties
+
+<p align="center">
+  <img src="docs/images/tui-agent-tree.png" alt="Agent-tree widget and HUD footer in the terminal" width="100%">
+  <br>
+  <sub>In the terminal: agent-tree widget + HUD footer</sub>
+</p>
 
 1. **Zero-hang** — every subagent run is a pure state machine with per-phase deadlines: a 1Hz watchdog fires them, an escalation ladder (cancel → steer → abort → dispose) reclaims resources, and anything that still refuses to die is registered as an orphan. Every run reaches a terminal state.
 2. **Observable** — a live agent tree sits above the editor (phase, in-flight tool, streaming tail, real-time cost); `/agent status` gives a per-run tool timeline; Web Hub shows the same.
