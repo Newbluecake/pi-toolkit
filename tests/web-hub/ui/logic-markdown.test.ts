@@ -465,7 +465,8 @@ describe("markdown scanMarkdownTail (chunked-plan §4.3.2, §4.3.5)", () => {
     const whole = parseMarkdown(doc);
     const joined = [...parseMarkdown(doc.slice(0, cut)), ...parseMarkdown(doc.slice(cut))];
     expect(joined).toEqual(whole);
-    expect(JSON.stringify(whole)).not.toContain('"link"');
+    // `[a][r]` itself stays literal; the bare URL in the definition line autolinks on its own.
+    expect(JSON.stringify(whole[0])).not.toContain('"link"');
   });
 
   it("property (§4.3.1): every reported cut splits the parse EXACTLY (seeded corpus)", () => {
@@ -487,5 +488,87 @@ describe("markdown scanMarkdownTail (chunked-plan §4.3.2, §4.3.5)", () => {
       const joined = parts.flatMap((p) => parseMarkdown(p));
       expect(JSON.parse(JSON.stringify(joined))).toEqual(JSON.parse(JSON.stringify(parseMarkdown(doc))));
     }
+  });
+
+  describe("bare-URL autolink", () => {
+    type N = { type: string; href?: string; text?: string; children?: N[] };
+    const para = (md: string): N[] => {
+      const blocks = JSON.parse(JSON.stringify(parseMarkdown(md))) as Array<{ children?: N[] }>;
+      return blocks[0]?.children ?? [];
+    };
+    const flat = (ns: N[]): N[] => ns.flatMap((n) => [n, ...flat(n.children ?? [])]);
+    const hrefs = (md: string): string[] =>
+      flat(para(md))
+        .filter((n) => n.type === "link")
+        .map((n) => n.href ?? "");
+
+    it("links a bare URL alone, with text children equal to the href", () => {
+      expect(para("http://127.0.0.1:23434/")).toEqual([
+        {
+          type: "link",
+          href: "http://127.0.0.1:23434/",
+          children: [{ type: "text", text: "http://127.0.0.1:23434/" }],
+        },
+      ]);
+    });
+    it("links inside a sentence and case-insensitively", () => {
+      expect(hrefs("open http://a/b now")).toEqual(["http://a/b"]);
+      expect(hrefs("open HTTPS://A/B now")).toEqual(["HTTPS://A/B"]);
+      expect(hrefs('(http://a/b) <http://c/d> "http://e/f"')).toEqual(["http://a/b", "http://c/d", "http://e/f"]);
+    });
+    it("trims trailing ASCII punctuation", () => {
+      expect(hrefs("see http://a/b.")).toEqual(["http://a/b"]);
+      expect(hrefs("see http://a/b, then")).toEqual(["http://a/b"]);
+      expect(hrefs("see http://a/b?!")).toEqual(["http://a/b"]);
+      expect(hrefs("see http://a/b.),")).toEqual(["http://a/b"]);
+    });
+    it("stops at CJK punctuation and links after CJK text", () => {
+      expect(hrefs("地址：http://a/b，然后")).toEqual(["http://a/b"]);
+      expect(hrefs("访问http://a/b。")).toEqual(["http://a/b"]);
+      expect(hrefs("（http://a/b）")).toEqual(["http://a/b"]);
+    });
+    it("keeps balanced parens, trims an unbalanced trailing one", () => {
+      expect(hrefs("https://en.wikipedia.org/wiki/Foo_(bar)")).toEqual(["https://en.wikipedia.org/wiki/Foo_(bar)"]);
+      expect(hrefs("(see https://en.wikipedia.org/wiki/Foo_(bar))")).toEqual([
+        "https://en.wikipedia.org/wiki/Foo_(bar)",
+      ]);
+      expect(hrefs("(see http://a/b)")).toEqual(["http://a/b"]);
+    });
+    it("needs a word start and at least one char after ://", () => {
+      expect(hrefs("xhttp://a/b")).toEqual([]);
+      expect(hrefs("9http://a/b")).toEqual([]);
+      expect(hrefs("http://")).toEqual([]);
+      expect(hrefs("http://.")).toEqual([]);
+    });
+    it("never links inside inline or fenced code", () => {
+      expect(hrefs("run `http://a/b` now")).toEqual([]);
+      expect(hrefs("``x http://a/b``")).toEqual([]);
+      const fenced = JSON.stringify(parseMarkdown("```\nhttp://a/b\n```"));
+      expect(fenced).not.toContain('"link"');
+    });
+    it("does not double-link explicit links or their visible text", () => {
+      expect(hrefs("[docs](http://a/b)")).toEqual(["http://a/b"]);
+      expect(hrefs("[http://a/b](http://c/d)")).toEqual(["http://c/d"]);
+      expect(hrefs("[**http://a/b**](http://c/d)")).toEqual(["http://c/d"]);
+    });
+    it("never links javascript:/data: schemes", () => {
+      expect(hrefs("javascript:alert(1) data:text/html,x")).toEqual([]);
+      expect(hrefs("xjavascript://http")).toEqual([]);
+    });
+    it("works inside emphasis and is not broken by underscores", () => {
+      const strong = para("**http://a/b**");
+      expect(strong).toHaveLength(1);
+      expect(strong[0]!.type).toBe("strong");
+      expect(hrefs("**http://a/b**")).toEqual(["http://a/b"]);
+      expect(hrefs("*see http://a/b*")).toEqual(["http://a/b"]);
+      expect(hrefs("~~http://a/b~~")).toEqual(["http://a/b"]);
+      expect(hrefs("http://a/b_c_d and _x_")).toEqual(["http://a/b_c_d"]);
+      expect(hrefs("http://a/b_c_d")).toEqual(["http://a/b_c_d"]);
+    });
+    it("caps an overlong URL at 2048 body chars", () => {
+      const got = hrefs("http://" + "a".repeat(5000));
+      expect(got).toHaveLength(1);
+      expect(got[0]!.length).toBe(7 + 2048);
+    });
   });
 });

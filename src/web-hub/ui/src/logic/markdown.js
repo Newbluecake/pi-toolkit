@@ -37,6 +37,11 @@ const QUOTE_RE = /^ {0,3}>[ \t]?(.*)$/;
 const TASK_RE = /^\[([ xX])\][ \t]+(.*)$/;
 const DELIM_CELL_RE = /^:?-+:?$/;
 const LINK_RE = /^\[([^\[\]\n]{0,1000})\]\(\s*([^()\s]{1,2048})(?:\s+"[^"\n]{0,200}")?\s*\)/;
+// GFM-style bare-URL autolink. Body stops at whitespace, `<>` and CJK full-width punctuation;
+// bounded (scheme + 2048) so one attempt is O(1) and attempts only start at `h`/`H` word starts.
+const AUTOLINK_RE = /^https?:\/\/[^\s<>，。；：！？、）》」』】（《「『【“”‘’…〉〕]{1,2048}/i;
+const AUTOLINK_PREV_RE = /[\s(<[{"'\u2E80-\u9FFF\uAC00-\uD7AF\u3000-\u303F\uFF00-\uFFEF]/;
+const AUTOLINK_TRAIL = ".,;:!?'\"*_~";
 const SAFE_HREF_RE = /^https?:\/\/[^\s]+$/i;
 const MAX_DEPTH = 6;
 const MAX_QUOTE_DEPTH = 10;
@@ -333,11 +338,43 @@ function isDelimRow(line) {
 }
 
 /**
+ * Bare-URL candidate at `src[i]` (caller guarantees a word start) → trimmed URL or "".
+ * @param {string} src @param {number} i
+ */
+function matchAutolink(src, i) {
+  const m = AUTOLINK_RE.exec(src.slice(i, i + 2060));
+  if (!m) return "";
+  const raw = m[0];
+  const minLen = raw.indexOf("://") + 4;
+  // Paren balance counted ONCE (trimming only ever removes trailing chars), so a run of
+  // trailing `)` costs O(n) instead of a recount per char.
+  let open = 0;
+  let close = 0;
+  for (const ch of raw) {
+    if (ch === "(") open++;
+    else if (ch === ")") close++;
+  }
+  let end = raw.length;
+  while (end >= minLen) {
+    const last = raw[end - 1] ?? "";
+    if (AUTOLINK_TRAIL.includes(last)) {
+      end--;
+    } else if (last === ")" && close > open) {
+      end--;
+      close--;
+    } else break;
+  }
+  const url = raw.slice(0, end);
+  return url.length >= minLen && isSafeHref(url) ? url : "";
+}
+
+/**
  * @param {string} src
  * @param {number} depth
+ * @param {boolean} [inLink] inside an explicit link's text — never autolink there
  * @returns {Inline[]}
  */
-function parseInline(src, depth) {
+function parseInline(src, depth, inLink = false) {
   /** @type {Inline[]} */
   const out = [];
   let buf = "";
@@ -397,7 +434,7 @@ function parseInline(src, depth) {
         const end = findClose(src, i + 2, "~~", noClose);
         if (end > i + 2) {
           flush();
-          out.push({ type: "del", children: parseInline(src.slice(i + 2, end), depth + 1) });
+          out.push({ type: "del", children: parseInline(src.slice(i + 2, end), depth + 1, inLink) });
           i = end + 2;
           continue;
         }
@@ -416,7 +453,7 @@ function parseInline(src, depth) {
         const end = findClose(src, i + mark.length, mark, noClose);
         if (end > i + mark.length) {
           flush();
-          const children = parseInline(src.slice(i + mark.length, end), depth + 1);
+          const children = parseInline(src.slice(i + mark.length, end), depth + 1, inLink);
           out.push(dbl ? { type: "strong", children } : { type: "em", children });
           i = end + mark.length;
           continue;
@@ -432,11 +469,20 @@ function parseInline(src, depth) {
         flush();
         const href = m[2] ?? "";
         if (isSafeHref(href) && depth < MAX_DEPTH) {
-          out.push({ type: "link", href, children: parseInline(m[1] ?? "", depth + 1) });
+          out.push({ type: "link", href, children: parseInline(m[1] ?? "", depth + 1, true) });
         } else {
           out.push({ type: "text", text: m[0] }); // javascript:/data:/relative ⇒ literal text
         }
         i += m[0].length;
+        continue;
+      }
+    }
+    if ((c === "h" || c === "H") && !inLink && (i === 0 || AUTOLINK_PREV_RE.test(src[i - 1] ?? ""))) {
+      const url = matchAutolink(src, i);
+      if (url !== "") {
+        flush();
+        out.push({ type: "link", href: url, children: [{ type: "text", text: url }] });
+        i += url.length;
         continue;
       }
     }
