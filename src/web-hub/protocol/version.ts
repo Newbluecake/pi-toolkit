@@ -303,3 +303,16 @@ export const PREVIEW_HTML_HUB_CAP = "preview.html.v1";
  */
 export const PROXY_HUB_CAP = "proxy.v1";
 export const PROXY_LAN_HUB_CAP = "proxy.lan.v1";
+
+/**
+ * feishu-bot plan §9 (F0 frozen surface): the hub cap advertising the Feishu-bot admin channel —
+ * the `fsb_req` (agent→hub) / `fsb_res` (hub→agent) frames behind `/webhub feishu …`
+ * (`protocol/feishu.ts`). Declared iff `config.feishuBot` exists (`feishuBot.enabled` ∧
+ * `webHub.enabled` ∧ `webHub.control !== false`; key absence = off), folded into `extraHubCaps` on
+ * BOTH cap surfaces (`HubInfo.caps` / `hello_ack.caps`, kept byte-identical; pinned by caps-coexist)
+ * by FA — in F0 the constant alone is INERT, nothing folds it into any caps array yet. The agent
+ * sends `fsb_req` only when `hello_ack.caps ∋ fsb.v1`; an old hub simply never sees the frames and an
+ * old agent ignores the unknown cap string. It adds frame TYPES but they are new, optional and only
+ * ever sent under the cap, so there is no PROTO bump (same §2.3 「只加帧不改」 rule as `lan_req`).
+ */
+export const FSB_HUB_CAP = "fsb.v1";

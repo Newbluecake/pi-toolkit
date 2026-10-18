@@ -38,6 +38,29 @@ export interface WebHubProxySettings {
   portRange: string;
   maxProxies: number;
 }
+/**
+ * feishu-bot plan v2 §9 (F0): the TOP-LEVEL `feishuBot` block (not under `webHub`) — non-live, captured
+ * at activate (change → `/reload` then `/webhub restart`). Off by default ⇒ `buildHubConfig` never writes
+ * `HubConfig.feishuBot` and the hub/agent stay byte-identical. The block only takes effect when
+ * `webHub.enabled` ∧ `webHub.control !== false` too (FA's gate). `staleMessageS` is stored in SECONDS
+ * (file key = internal key; deliberately NOT a `TIME_SETTING_MS_PATHS` entry), `debounceMs` in ms —
+ * the plan's names verbatim. Keepalive is not a leaf (Q1 fixed it).
+ */
+export interface FeishuBotSettings {
+  enabled: boolean;
+  allowGroups: boolean;
+  /** V8-confirmed: a group @-bot outside a topic opens + binds a topic */
+  groupRootTopics: boolean;
+  notify: "bound" | "off";
+  spawnScope: "known" | "roots";
+  debounceMs: number;
+  staleMessageS: number;
+  files: {
+    outbound: "auto" | "buttons" | "off";
+    inbound: boolean;
+    maxInboundMiB: number;
+  };
+}
 /** The agent-side `WebHubSettings` (owned by `web-hub/agent/index.ts`; `proxy?` is folded in there, X1c). */
 export type WebHubSettings = AgentWebHubSettings;
 export type { WebHubLanSettings, WebHubSpawnSettings };
@@ -709,6 +732,8 @@ export interface AgentSettings {
   topicSwitch: TopicSwitchSettings;
   /** 外部 agent（external-agent plan §2.8）：droid 执行后端。默认关闭 ⇒ 零接线、零行为变化。 */
   externalAgents: ExternalAgentsSettings;
+  /** 飞书机器人（feishu-bot plan v2 §9）：hub 侧长连接 bot。默认关闭 ⇒ 零接线、零行为变化。 */
+  feishuBot: FeishuBotSettings;
 }
 
 /** Simple on/off settings group shared by the merged plugins (webSearch / todo). */
@@ -952,6 +977,23 @@ export const DEFAULT_WEBHUB_PROXY_SETTINGS: WebHubProxySettings = {
   enabled: false,
   portRange: "7900-7949",
   maxProxies: 8,
+};
+
+/**
+ * `feishuBot.*` defaults (feishu-bot plan v2 §9): off by default ⇒ nothing is wired. Literal mirrors of
+ * `protocol/feishu.ts`'s `FEISHU_BOT_DEFAULTS` / `FEISHU_BOT_RANGES` (this module may not value-import
+ * it — `tests/web-hub/boundary.test.ts` freezes its import closure), pinned equal by
+ * `tests/web-hub/protocol/feishu.test.ts`.
+ */
+export const DEFAULT_FEISHU_BOT_SETTINGS: FeishuBotSettings = {
+  enabled: false,
+  allowGroups: true,
+  groupRootTopics: false,
+  notify: "bound",
+  spawnScope: "known",
+  debounceMs: 1_500,
+  staleMessageS: 300,
+  files: { outbound: "auto", inbound: true, maxInboundMiB: 30 },
 };
 
 /**
@@ -1229,6 +1271,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   },
   topicSwitch: { ...DEFAULT_TOPIC_SWITCH_SETTINGS },
   externalAgents: { droid: { ...DEFAULT_EXTERNAL_AGENTS_SETTINGS.droid } },
+  feishuBot: { ...DEFAULT_FEISHU_BOT_SETTINGS, files: { ...DEFAULT_FEISHU_BOT_SETTINGS.files } },
 };
 /** Parse the optional `agent` settings block (L1). Field-by-field fallback to defaults, never throws. */
 export function parseAgentDispatchSettings(input: unknown): AgentDispatchSettings {
@@ -1458,6 +1501,7 @@ export function loadSettings(source: unknown): AgentSettings {
     title: parseTitleSettings(value.title),
     topicSwitch: parseTopicSwitchSettings(value.topicSwitch),
     externalAgents: parseExternalAgentsSettings(value.externalAgents),
+    feishuBot: parseFeishuBotBlock(value.feishuBot).feishuBot,
   });
 }
 
@@ -2228,6 +2272,121 @@ function parseProxyPortRangeText(text: unknown): [number, number] | undefined {
   return [lo, hi];
 }
 
+/** `parseFeishuBotBlock` warning codes: one per leaf that fell back (`-invalid`) or was clamped (`-clamped`). */
+export type FeishuBotWarning =
+  | "block-invalid"
+  | "enabled-invalid"
+  | "allow-groups-invalid"
+  | "group-root-topics-invalid"
+  | "notify-invalid"
+  | "spawn-scope-invalid"
+  | "debounce-invalid"
+  | "debounce-clamped"
+  | "stale-invalid"
+  | "stale-clamped"
+  | "files-invalid"
+  | "files-outbound-invalid"
+  | "files-inbound-invalid"
+  | "files-max-inbound-invalid"
+  | "files-max-inbound-clamped";
+
+export interface FeishuBotParseResult {
+  feishuBot: FeishuBotSettings;
+  /** Every leaf that fell back to its default or was clamped, for `/webhub feishu status` (returned, never logged). */
+  warnings: FeishuBotWarning[];
+}
+
+/**
+ * Top-level `feishuBot` block parse (feishu-bot plan v2 §9; `parseWebHubProxyBlock` style — never
+ * throws, field-by-field, pure so repeated calls never spam logs; warnings are RETURNED):
+ * - booleans / enums (`notify` bound|off, `spawnScope` known|roots, `files.outbound` auto|buttons|off):
+ *   a wrong type or unknown value ⇒ the default + `<leaf>-invalid`;
+ * - numbers (`debounceMs` 0–10 000, `staleMessageS` 30–3 600, `files.maxInboundMiB` 1–100): a non-finite or
+ *   non-number ⇒ default + `-invalid`; a finite number is rounded then CLAMPED into range (+ `-clamped`
+ *   when it changed) — the hub-side normalizer then only ever sees in-range values;
+ * - a non-object block ⇒ all defaults (+ `block-invalid` when it is present but not an object).
+ * Literal mirror of `protocol/feishu.ts`'s ranges (see `DEFAULT_FEISHU_BOT_SETTINGS`' note).
+ */
+export function parseFeishuBotBlock(input: unknown): FeishuBotParseResult {
+  const d = DEFAULT_FEISHU_BOT_SETTINGS;
+  const defaults = (): FeishuBotSettings => ({ ...d, files: { ...d.files } });
+  if (input === undefined || input === null) return { feishuBot: defaults(), warnings: [] };
+  if (typeof input !== "object" || Array.isArray(input)) return { feishuBot: defaults(), warnings: ["block-invalid"] };
+  const r = input as Record<string, unknown>;
+  const warnings: FeishuBotWarning[] = [];
+
+  const bool = (raw: unknown, fallback: boolean, code: FeishuBotWarning): boolean => {
+    if (raw === undefined) return fallback;
+    if (typeof raw === "boolean") return raw;
+    warnings.push(code);
+    return fallback;
+  };
+  const choice = <T extends string>(raw: unknown, allowed: readonly T[], fallback: T, code: FeishuBotWarning): T => {
+    if (raw === undefined) return fallback;
+    if (typeof raw === "string" && (allowed as readonly string[]).includes(raw)) return raw as T;
+    warnings.push(code);
+    return fallback;
+  };
+  const num = (
+    raw: unknown,
+    min: number,
+    max: number,
+    fallback: number,
+    invalid: FeishuBotWarning,
+    clamped: FeishuBotWarning,
+  ): number => {
+    if (raw === undefined) return fallback;
+    if (typeof raw !== "number" || !Number.isFinite(raw)) {
+      warnings.push(invalid);
+      return fallback;
+    }
+    const rounded = Math.round(raw);
+    const bounded = Math.min(max, Math.max(min, rounded));
+    if (bounded !== raw) warnings.push(clamped);
+    return bounded;
+  };
+
+  const filesRaw = r.files;
+  let filesRecord: Record<string, unknown> = {};
+  if (filesRaw !== undefined) {
+    if (filesRaw !== null && typeof filesRaw === "object" && !Array.isArray(filesRaw)) {
+      filesRecord = filesRaw as Record<string, unknown>;
+    } else {
+      warnings.push("files-invalid");
+    }
+  }
+
+  return {
+    feishuBot: {
+      enabled: bool(r.enabled, d.enabled, "enabled-invalid"),
+      allowGroups: bool(r.allowGroups, d.allowGroups, "allow-groups-invalid"),
+      groupRootTopics: bool(r.groupRootTopics, d.groupRootTopics, "group-root-topics-invalid"),
+      notify: choice(r.notify, ["bound", "off"] as const, d.notify, "notify-invalid"),
+      spawnScope: choice(r.spawnScope, ["known", "roots"] as const, d.spawnScope, "spawn-scope-invalid"),
+      debounceMs: num(r.debounceMs, 0, 10_000, d.debounceMs, "debounce-invalid", "debounce-clamped"),
+      staleMessageS: num(r.staleMessageS, 30, 3_600, d.staleMessageS, "stale-invalid", "stale-clamped"),
+      files: {
+        outbound: choice(
+          filesRecord.outbound,
+          ["auto", "buttons", "off"] as const,
+          d.files.outbound,
+          "files-outbound-invalid",
+        ),
+        inbound: bool(filesRecord.inbound, d.files.inbound, "files-inbound-invalid"),
+        maxInboundMiB: num(
+          filesRecord.maxInboundMiB,
+          1,
+          100,
+          d.files.maxInboundMiB,
+          "files-max-inbound-invalid",
+          "files-max-inbound-clamped",
+        ),
+      },
+    },
+    warnings,
+  };
+}
+
 /** arch §6.2 数值域的容错读取：有限数 ⇒ 取整后钳进 [min,max]；其余（字符串/NaN/Infinity/缺失）回落默认。 */
 function clampSpawnInt(raw: unknown, min: number, max: number, fallback: number): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
@@ -2751,6 +2910,22 @@ export function loadWebHubProxyWarnings(path: string = defaultSettingsPath()): W
     const resolvedPort = resolveWebHubPort(record);
     const lanParsed = parseWebHubLanBlock(record.lan, resolvedPort);
     return parseWebHubProxyBlock(record.proxy, resolvedPort, lanParsed.lan.port).warnings;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `feishuBot` parse warnings for `/webhub feishu status` (feishu-bot plan v2 §9) — same read-only,
+ * never-migrates, `[]` on any failure contract as {@link loadWebHubProxyWarnings}: the effective
+ * values live in `AgentSettings.feishuBot`, the diagnostic is recomputed from the raw block.
+ */
+export function loadFeishuBotWarnings(path: string = defaultSettingsPath()): FeishuBotWarning[] {
+  try {
+    if (!existsSync(path)) return [];
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    return parseFeishuBotBlock((parsed as Record<string, unknown>).feishuBot).warnings;
   } catch {
     return [];
   }
