@@ -73,11 +73,11 @@ describe("date core formatting", () => {
     expect(dateChanged(src.dateKey(AT_SHANGHAI_SAME_DAY), src.dateKey(AT_SHANGHAI_NEXT_DAY))).toBe(true);
   });
 
-  it("DATE_REINJECT_IDLE_MS is exactly 3 hours", () => {
-    expect(DATE_REINJECT_IDLE_MS).toBe(3 * 60 * 60 * 1000);
+  it("DATE_REINJECT_IDLE_MS is exactly 1 hour", () => {
+    expect(DATE_REINJECT_IDLE_MS).toBe(60 * 60 * 1000);
   });
 
-  it("idleReinjectDue: unknown baseline never due; <3h not due; ≥3h due; clock rewind not due", () => {
+  it("idleReinjectDue: unknown baseline never due; <1h not due; ≥1h due; clock rewind not due", () => {
     const t = AT_SHANGHAI_SAME_DAY;
     expect(idleReinjectDue(undefined, t)).toBe(false);
     expect(idleReinjectDue(t, t + DATE_REINJECT_IDLE_MS - 1)).toBe(false);

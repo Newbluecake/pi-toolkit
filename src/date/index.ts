@@ -7,7 +7,7 @@
  * 2. 之后**仅在跨日时**再注入：turn_end 检查（模型连续运行跨过午夜 ⇒ 下一次
  *    模型请求前注入，不等下一条用户消息）与 before_agent_start 检查（新一轮
  *    开始时已跨日）共用同一去重状态，同一日期至多注入一次；
- * 3. 闲置重注入：before_agent_start 时同日但距上次注入 ≥3h（墙钟，
+ * 3. 闲置重注入：before_agent_start 时同日但距上次注入 ≥1h（墙钟，
  *    core 的 `DATE_REINJECT_IDLE_MS`，无新设置）⇒ 再注入一次当前日期+时刻
  *    （kind `"idle"`，裸标记）。turn_end **不做**闲置注入（运行中的 agent
  *    循环里不加）。上次注入时刻未知（旧条目缺 `details.at`）⇒ 不触发（规则 1
@@ -131,10 +131,10 @@ export function wireDate(pi: ExtensionAPI, opts: DateWireOpts): void {
     const at = now();
     const key = source.dateKey(at);
     const crossDay = dateChanged(lastInjected, key);
-    // 闲置重注入：同日、非首轮、上次注入时刻已知且距今 ≥3h（时钟回拨 ⇒ 负差值 ⇒ 不触发）。
+    // 闲置重注入：同日、非首轮、上次注入时刻已知且距今 ≥1h（时钟回拨 ⇒ 负差值 ⇒ 不触发）。
     const idleDue = !firstTurnPending && !crossDay && idleReinjectDue(lastInjectedAt, at);
     // 首轮规则：firstTurnPending 时无条件注入（恢复后同日也注入一次）；之后仅
-    // 跨日或闲置 ≥3h 注入，其余同日不注入。
+    // 跨日或闲置 ≥1h 注入，其余同日不注入。
     if (!firstTurnPending && !crossDay && !idleDue) return undefined;
     firstTurnPending = false;
     lastInjected = key;

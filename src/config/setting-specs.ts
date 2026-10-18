@@ -443,7 +443,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   "webSearch.enabled": bool("webSearch.enabled", "Merged web_search tool (Codex/SerpAPI/Bocha/Tavily failover)"),
   "date.enabled": bool(
     "date.enabled",
-    "Inject the current date and time ([date] YYYY-MM-DD Ddd HH:MM (TZ) marker) on a session's first turn, when the day rolls over, and on a new turn after 3h without an injection (main + child sessions)",
+    "Inject the current date and time ([date] YYYY-MM-DD Ddd HH:MM (TZ) marker) on a session's first turn, when the day rolls over, and on a new turn after 1h without an injection (main + child sessions)",
   ),
   "todo.enabled": bool("todo.enabled", "Merged task tools (TaskCreate/List/Get/Update/Delete + /tasklist widget)"),
   // Main-session todo staleness nudge (todo-nudge plan): all four keys are

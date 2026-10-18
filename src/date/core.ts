@@ -3,7 +3,7 @@
  *
  * pi 的系统提示不含日期，模型在跨天长对话里不知道「今天」是哪天。本模块以
  * **消息**（而非系统提示）形式注入当前日期+时刻：首轮一次 + 跨日各一次 + 同日闲置
- * ≥3h 的 before_agent_start 重注入一次，内容形如
+ * ≥1h 的 before_agent_start 重注入一次，内容形如
  * `[date] 2026-10-15 Thu 22:30 (Asia/Shanghai)`（紧凑英文标记；跨日那条追加一句
  * 极短中文说明 + 时刻语义）。不改系统提示 —— sysprompt-stable 的冻结快照保 prompt 缓存，
  * 注入走 before_agent_start 的 message / sendMessage 通道。
@@ -25,11 +25,11 @@ export const CROSS_DAY_NOTE = "当前日期已变更";
 export const TIME_AS_OF_NOTE = "时间为注入时刻";
 
 /**
- * 闲置重注入阈值（用户拍板）：before_agent_start 时距上次注入 ≥3h（墙钟）
+ * 闲置重注入阈值（用户拍板；2026-10-18 由 3h 缩短为 1h）：before_agent_start 时距上次注入 ≥1h（墙钟）
  * 则同日也再注入一次当前日期+时刻。运行中（turn_end）不做闲置注入。
  * 常量放 core（无新设置项）。
  */
-export const DATE_REINJECT_IDLE_MS = 3 * 60 * 60 * 1000;
+export const DATE_REINJECT_IDLE_MS = 60 * 60 * 1000;
 
 export type TimeZoneLabel =
   { readonly kind: "iana"; readonly id: string } | { readonly kind: "offset"; readonly label: string };

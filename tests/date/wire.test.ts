@@ -10,9 +10,9 @@ const MARKER_DAY1 = `[date] 2026-10-15 Thu 18:00 (${TZ})`;
 /** 2026-10-16 10:00 (Asia/Shanghai)——跨过午夜。 */
 const T_DAY2 = Date.UTC(2026, 9, 16, 2, 0, 0);
 const MARKER_DAY2 = `[date] 2026-10-16 Fri 10:00 (${TZ})`;
-/** 同日 21:00（首轮后恰 3h，闲置重注入边界）。 */
+/** 同日 19:00（首轮后恰 1h，闲置重注入边界）。 */
 const T_DAY1_IDLE = T_DAY1 + DATE_REINJECT_IDLE_MS;
-const MARKER_DAY1_IDLE = `[date] 2026-10-15 Thu 21:00 (${TZ})`;
+const MARKER_DAY1_IDLE = `[date] 2026-10-15 Thu 19:00 (${TZ})`;
 
 interface SentCall {
   message: { customType: string; content: string; display: boolean; details: unknown };
@@ -82,7 +82,7 @@ describe("date wire", () => {
       display: false,
       details: { date: "2026-10-15", kind: "first", at: T_DAY1 },
     });
-    // 同日且 <3h 的第二轮：不重复注入。
+    // 同日且 <1h 的第二轮：不重复注入。
     expect(fire(pi, "before_agent_start", ctx())).toBeUndefined();
     expect(pi.sent).toHaveLength(0);
     t = T_DAY1 + 60_000;
@@ -133,29 +133,29 @@ describe("date wire", () => {
     expect(pi.sent).toHaveLength(0);
   });
 
-  it("reinjects date+time on a new turn after ≥3h idle on the same day (kind idle, bare marker)", () => {
+  it("reinjects date+time on a new turn after ≥1h idle on the same day (kind idle, bare marker)", () => {
     const pi = mockPi();
     let t = T_DAY1;
     wireDate(pi.pi, { enabled: true, now: () => t, timeZone: TZ });
     fire(pi, "before_agent_start", ctx()); // 首轮 18:00
-    t = T_DAY1_IDLE; // 同日 21:00，恰 3h 边界 ⇒ 注入
+    t = T_DAY1_IDLE; // 同日 19:00，恰 1h 边界 ⇒ 注入
     const idle = fire(pi, "before_agent_start", ctx()) as {
       message: { content: string; details: { date: string; kind: string; at: number } };
     };
     expect(idle.message.content).toBe(MARKER_DAY1_IDLE);
     expect(idle.message.details).toEqual({ date: "2026-10-15", kind: "idle", at: T_DAY1_IDLE });
     expect(pi.sent).toHaveLength(0); // 走 message 返回值，不走 sendMessage
-    // 闲置注入重置基线：再过 2h 的新一轮不注入。
-    t = T_DAY1_IDLE + 2 * 60 * 60 * 1000;
+    // 闲置注入重置基线：再过 30 分钟的新一轮不注入。
+    t = T_DAY1_IDLE + 30 * 60 * 1000;
     expect(fire(pi, "before_agent_start", ctx())).toBeUndefined();
   });
 
-  it("does not reinject on the same day within 3h", () => {
+  it("does not reinject on the same day within 1h", () => {
     const pi = mockPi();
     let t = T_DAY1;
     wireDate(pi.pi, { enabled: true, now: () => t, timeZone: TZ });
     fire(pi, "before_agent_start", ctx());
-    t = T_DAY1 + 2 * 60 * 60 * 1000; // 2h：不注入
+    t = T_DAY1 + 30 * 60 * 1000; // 30 分钟：不注入
     expect(fire(pi, "before_agent_start", ctx())).toBeUndefined();
     t = T_DAY1_IDLE - 1; // 差 1ms：不注入
     expect(fire(pi, "before_agent_start", ctx())).toBeUndefined();
@@ -346,10 +346,10 @@ describe("date wire", () => {
     t = T_DAY2 + 30 * 60 * 1000;
     const cross = fire(pi, "before_agent_start", ctx()) as { message: { content: string; details: { kind: string } } };
     expect(cross.message.details.kind).toBe("cross-day");
-    // 跨日注入后 at=T_DAY2+30m；2h 内同日不注入。
-    t = T_DAY2 + 2 * 60 * 60 * 1000 + 30 * 60 * 1000;
+    // 跨日注入后 at=T_DAY2+30m；1h 内同日不注入。
+    t = T_DAY2 + 30 * 60 * 1000 + 30 * 60 * 1000;
     expect(fire(pi, "before_agent_start", ctx())).toBeUndefined();
-    // ≥3h 后同日注入 idle。
+    // ≥1h 后同日注入 idle。
     t = T_DAY2 + 30 * 60 * 1000 + DATE_REINJECT_IDLE_MS;
     const idle = fire(pi, "before_agent_start", ctx()) as { message: { details: { kind: string } } };
     expect(idle.message.details.kind).toBe("idle");
