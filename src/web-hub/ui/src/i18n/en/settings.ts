@@ -45,6 +45,27 @@ const settings = {
     "Hiding the warnings changes nothing about the transport — traffic on this network stays unencrypted and readable by others.",
   plainWarnShow: "Show warnings (default)",
   plainWarnHide: "Hide warnings",
+  // 2026-10-18 PWA 「Install as app」 card — the beforeinstallprompt capture
+  // (composables/useInstallPrompt.ts) + pure derive (logic/pwaInstall.ts) drive which row
+  // renders: installed status / install button / per-platform guidance. The chrome://flags
+  // URL and the Enabled token stay English in both languages (AGENTS.md UI-text split);
+  // prose translates. `installInsecureSteps` mentions the origin chip rendered separately.
+  installSection: "Install as app",
+  installHint:
+    "Add the hub to your home screen / desktop and run it like a native app. There is no service worker on purpose — data is live, so the hub must be reachable when the app starts.",
+  installInstalled: "Installed — already running as a standalone app.",
+  installBtn: "Install",
+  installInstalling: "Installing…",
+  installDismissed: "Dismissed — you can install anytime from here.",
+  installIosHint: "Open this page in Safari, tap the Share button, then “Add to Home Screen”.",
+  installInsecureHint:
+    "The full standalone install needs a secure context (HTTPS, or a loopback address such as localhost / 127.0.0.1) — this page arrived over plain HTTP, so the browser hides its install entry. Whitelist the origin below once, or reach the hub through an HTTPS reverse proxy:",
+  installInsecureSteps:
+    "Open chrome://flags/#unsafely-treat-insecure-origin-as-secure in this browser, add the origin below, set it to Enabled, relaunch — then come back and install.",
+  installOriginLabel: "Origin to whitelist",
+  installDesktopHint: "Click the install icon at the right end of the address bar, or menu → Install (Chrome / Edge).",
+  installAndroidHint: "Browser menu ⋮ → Install app / Add to Home screen.",
+  installGenericHint: "Look for “Install” or “Add to Home screen” in your browser's menu (support varies).",
   // default-model plan F1 — the 「新建会话默认模型」 card (2026-10 select-only rework: the
   // free-text input/datalist is gone; a switcher-styled picker chip + listbox selects from
   // the known list, with 「跟随 pi 默认」 as a list row). 2026-10-12: `defaultModelPlaceholder`

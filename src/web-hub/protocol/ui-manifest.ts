@@ -46,7 +46,8 @@ const COMMIT_UNKNOWN = "unknown";
 const COMMIT_RE = /^[0-9a-f]{12}(-dirty)?$|^unknown$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 /** Toplevel files that ship without going through `assets/` (theme bootstrap, favicon, the SPA
- * shell, and the 2026-10-07 Android-PWA set: install manifest + PNG icons). */
+ * shell, and the 2026-10-07 Android-PWA set: install manifest + PNG icons — plus the 2026-10-18
+ * iOS `apple-touch-icon` the same set needs). */
 const TOP_LEVEL_ALLOW = new Set([
   "index.html",
   "theme-init.js",
@@ -55,6 +56,7 @@ const TOP_LEVEL_ALLOW = new Set([
   "icon-192.png",
   "icon-512.png",
   "icon-maskable-512.png",
+  "apple-touch-icon.png",
 ]);
 /** `assets/<name>.<ext>` — Vite's hashed output naming (`index-<hash>.js` etc.). */
 const ASSET_RE = /^assets\/[A-Za-z0-9._-]+\.(js|css|svg)$/;

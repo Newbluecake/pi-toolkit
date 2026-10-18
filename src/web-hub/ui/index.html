@@ -14,6 +14,16 @@
          chrome://flags/#unsafely-treat-insecure-origin-as-secure. -->
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- iOS home-screen install (2026-10-18): same no-service-worker rationale as above — the
+         data is live, caching would fight the hub's version-supersede checks. apple-touch-icon
+         is pre-flattened onto the teal (iOS composites transparency onto black); status bar
+         `black` matches the dark theme (#0d1417) — `black-translucent` would push content
+         under the clock, and only the bottom/left/right safe-areas are padded today. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Pi" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <title>pi web-hub</title>
     <script src="/theme-init.js"></script>
   </head>

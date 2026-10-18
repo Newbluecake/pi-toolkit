@@ -190,7 +190,42 @@
   font-size: var(--fs-sm);
 }
 
+/* 2026-10-18 PWA 「安装为应用」 card: the install-button row (button + outcome note side by
+ * side on desktop, wrapped on narrow widths) and the insecure-origin whitelist chip row
+ * (code chip + copy button; the chip ellipsizes a long origin instead of overflowing the
+ * card — CopyButton already carries its own coarse-pointer target). */
+.settings-install-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.settings-install-origin {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.settings-install-origin-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
 @media (pointer: coarse) {
+  .settings-install-row .btn {
+    min-height: 44px;
+  }
   .settings-model-picker .model-chip {
     min-height: 44px;
   }

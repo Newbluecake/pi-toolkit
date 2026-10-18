@@ -5,7 +5,13 @@
 import { createApp } from "vue";
 import App from "./App.vue";
 import { detectLang } from "./composables/useI18n.js";
+// 2026-10-18 PWA 「安装为应用」: Chromium fires beforeinstallprompt before any settings panel
+// opens — the capture listener must be on the window BEFORE mount for the settings card to
+// ever see the event (useInstallPrompt.ts holds it; preventDefault keeps the mini-infobar down).
+import { wireInstallPromptCapture } from "./composables/useInstallPrompt.js";
 import "./styles/tokens.css";
+
+wireInstallPromptCapture(window);
 
 // 2026-10-05 field report: the static `lang="en"` made mobile Edge/Chrome offer its translation
 // bar on every visit (the UI is actually Chinese for zh users). Point `lang` at the detected UI

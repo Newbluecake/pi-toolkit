@@ -61,6 +61,9 @@ import { HUB_CTX } from "../control/controlContext.js";
 import SettingsModelPicker from "./SettingsModelPicker.vue";
 import SettingsAvatarCard from "./SettingsAvatarCard.vue";
 import VersionHost from "./VersionHost.vue";
+import CopyButton from "../detail/CopyButton.vue";
+import { useInstallPrompt } from "../../composables/useInstallPrompt.js";
+import type { InstallGuidance } from "../../logic/pwaInstall.js";
 import { useMedia } from "../../composables/useMedia.js";
 import type { ThemePref } from "../../types.js";
 import "../../styles/settings.css";
@@ -217,6 +220,26 @@ async function saveDefaultModel(value: string): Promise<void> {
 function onModelSelect(value: string): void {
   void saveDefaultModel(value);
 }
+
+// ---------------------------------------------------------------------------
+// 2026-10-18 「安装为应用」 card (PWA install guidance): the boot-time capture
+// (`wireInstallPromptCapture` in main.ts) + `logic/pwaInstall.ts`'s pure derive decide the
+// row — installed status / install button / per-platform steps. iOS Safari never fires
+// beforeinstallprompt, so the card doubles as the Share → Add-to-Home-Screen guide; plain-HTTP
+// (non-secure-context) pages get the chrome://flags origin-whitelist steps with a copyable
+// origin chip. UA sniffing only picks prose (logic module's contract), never gates function.
+// ---------------------------------------------------------------------------
+const install = useInstallPrompt(window);
+const INSTALL_GUIDANCE_KEYS: Readonly<Record<InstallGuidance, string>> = {
+  "ios-safari": "settings.installIosHint",
+  "insecure-origin": "settings.installInsecureHint",
+  "desktop-chromium": "settings.installDesktopHint",
+  "android-menu": "settings.installAndroidHint",
+  generic: "settings.installGenericHint",
+};
+function onInstall(): void {
+  void install.install();
+}
 </script>
 
 <template>
@@ -368,6 +391,44 @@ function onModelSelect(value: string): void {
               <AppIcon v-if="motion.pref.value === opt.value" name="check" class="icon-sm settings-option-check" />
             </button>
           </div>
+        </section>
+
+        <!-- 2026-10-18 PWA 「安装为应用」：三态卡片（logic/pwaInstall.ts 的推导序）——已安装
+             状态行 / 安装按钮（含 userChoice 回显）/ 分平台指引（iOS 分享 → 添加到主屏幕；
+             纯 HTTP 页面给 chrome://flags 来源加白步骤 + 可复制来源 chip；桌面 Chromium
+             地址栏安装图标；其余菜单提示）。与其它卡片同构：settings-note 散文 + 宽卡。 -->
+        <section class="settings-card settings-card-wide" :aria-label="t('settings.installSection')">
+          <h2 class="settings-h">{{ t("settings.installSection") }}</h2>
+          <p class="settings-note">{{ t("settings.installHint") }}</p>
+          <p v-if="install.state.value.kind === 'standalone'" class="settings-note" role="status">
+            {{ t("settings.installInstalled") }}
+          </p>
+          <template v-else>
+            <div v-if="install.state.value.kind === 'prompt'" class="settings-install-row">
+              <button type="button" class="btn btn-primary" @click="onInstall">
+                {{ t("settings.installBtn") }}
+              </button>
+            </div>
+            <template v-else>
+              <p class="settings-note">{{ t(INSTALL_GUIDANCE_KEYS[install.state.value.guidance]) }}</p>
+              <template v-if="install.state.value.guidance === 'insecure-origin'">
+                <p class="settings-note">{{ t("settings.installInsecureSteps") }}</p>
+                <div class="settings-install-origin">
+                  <code class="settings-install-origin-chip">{{ install.state.value.origin }}</code>
+                  <CopyButton :value="install.state.value.origin" :label="t('settings.installOriginLabel')" />
+                </div>
+              </template>
+            </template>
+            <!-- outcome feedback lives OUTSIDE the prompt branch on purpose: consuming the
+                 one-shot event already swaps the row to guidance, and the userChoice echo
+                 (accepted/dismissed) must survive that swap to be seen at all. -->
+            <p v-if="install.outcome.value === 'accepted'" class="settings-note" role="status">
+              {{ t("settings.installInstalling") }}
+            </p>
+            <p v-else-if="install.outcome.value === 'dismissed'" class="settings-note" role="status">
+              {{ t("settings.installDismissed") }}
+            </p>
+          </template>
         </section>
 
         <section

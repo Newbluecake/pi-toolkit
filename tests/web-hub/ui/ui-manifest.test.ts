@@ -29,6 +29,7 @@ describe("isAllowedUiPath", () => {
     "icon-192.png",
     "icon-512.png",
     "icon-maskable-512.png",
+    "apple-touch-icon.png",
     "assets/index-abcd1234.js",
     "assets/index-ABCDEF12.css",
     "assets/icon-12345678.svg",

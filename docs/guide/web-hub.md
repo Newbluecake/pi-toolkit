@@ -82,7 +82,20 @@
 
 - `webHub.lan.extraHosts`：额外允许的 Host；`trustProxyFrom` / `externalOrigins`：前置可信反向代理做 HTTPS 终止时使用（均为逗号分隔字符串）。
 - 登录会话存 SQLite，运行在可被 SIGKILL 的子进程里；用 `/webhub passwd` 设置密码、`/webhub unlock` 解锁。
-- **安装为 PWA**：UI 带 `manifest.webmanifest`（无 service worker，数据是实时的）。Chrome 的完整独立安装要求安全上下文；纯 HTTP 的局域网地址需要在 `chrome://flags/#unsafely-treat-insecure-origin-as-secure` 把该来源加入白名单一次，或者走 HTTPS 反向代理。
+- **安装到手机 / 桌面**：见下文[「安装到手机 / 桌面（PWA）」](#安装到手机--桌面pwa)。
+
+## 安装到手机 / 桌面（PWA）
+
+UI 自带 `manifest.webmanifest` 与全套图标（含 iOS 的 `apple-touch-icon`），可以安装成独立应用（手机主屏幕 / 桌面）。**特意没有 service worker**——数据是实时的，不缓存页面；应用启动时需要 hub 可达——hub 不在线时打开只会看到浏览器自己的连接错误页（没有离线缓存，也就不会显示旧数据）。
+
+- 入口：设置面板（顶栏齿轮，手机端为设置底部弹层）中的**「安装为应用」**。已安装（独立窗口运行）时显示「已安装」；浏览器提供安装事件时直接给安装按钮，否则给出当前平台的操作步骤。
+- **Android Chrome（HTTPS / 本机回环地址 `localhost`、`127.0.0.1`）**：Chrome 通常会自己弹出安装提示；设置面板里也有安装按钮。
+- **Android / 桌面 Chrome（纯 HTTP 局域网地址）**：完整安装要求安全上下文（HTTPS，或 `localhost` / `127.0.0.1` 这类本机回环地址——回环地址无需加白），纯 HTTP 访问时浏览器不提供安装入口。两种办法：
+  1. 在同一浏览器打开 `chrome://flags/#unsafely-treat-insecure-origin-as-secure`，把当前来源（如 `http://192.168.1.10:7879`，设置面板里可一键复制）加入列表、设为 **Enabled**，重启浏览器——之后该地址会被当作安全上下文，可正常安装；
+  2. 或者给 hub 配 HTTPS 反向代理（配合 `webHub.lan.trustProxyFrom` / `externalOrigins`），用 https 地址访问。
+- **iOS Safari**：Safari 不提供安装按钮——**分享 → 「添加到主屏幕」**即可全屏运行。
+- **桌面 Chrome / Edge**：地址栏右侧的安装图标，或菜单 → 安装。
+- 其它浏览器：菜单里的「安装 / 添加到主屏幕」（支持情况因浏览器而异）。
 
 ## 隐私锁与头像
 
