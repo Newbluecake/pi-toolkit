@@ -36,6 +36,30 @@ import {
   formatProxyMismatchLine,
   type UiMode,
 } from "../web-hub/agent/lan-status.js";
+// feishu-bot plan v2 §9/§10/§R2-e (F9): the TUI-only Feishu bot admin surface.
+import {
+  callFsb,
+  coexistenceWarningLines,
+  defaultFeishuAdminPort,
+  detectFeishuNotifyCoexistence,
+  formatAllowResultLine,
+  formatFeishuStatusLines,
+  formatFsbRefusal,
+  formatFsbTransportFailure,
+  feishuStatusLevel,
+  feishuStatusProseLines,
+  isFsbAllowData,
+  isFsbInfoData,
+  runFeishuSetupFlow,
+  FSB_CALL_WIDE_DEADLINE_MS,
+  type FeishuAdminPort,
+  type FeishuNotifyCoexistence,
+  type FeishuSetupUi,
+} from "../web-hub/agent/feishu-admin.js";
+import { newAdminRid } from "../web-hub/agent/connection.js";
+import { FEISHU_OPEN_ID_RE } from "../web-hub/protocol/feishu.js";
+import { loadFeishuBotWarnings, type FeishuBotWarning } from "../config/settings.js";
+import { renderQr } from "./qr-render.js";
 import type { LanInfoPayload } from "../web-hub/protocol/messages.js";
 import type { InvalidHostToken } from "../web-hub/protocol/lan.js";
 
@@ -61,9 +85,25 @@ export interface WebHubCommandDeps {
   now?: () => number;
   /** See `WebHubLanSettingsWarnings`'s docstring. */
   lanSettingsWarnings?: () => WebHubLanSettingsWarnings;
+  /**
+   * F9 (feishu-bot plan §9): override seam for the fsb connection port. Default:
+   * `defaultFeishuAdminPort()` — lazily read per call off `currentConnection()`, so no wiring
+   * is needed and `/reload`-replaced connections are picked up. FA may pass its own adapter
+   * here (see docs/dev/feishu-bot/F9-report.md's wiring hand-off).
+   */
+  feishuPort?: () => FeishuAdminPort | undefined;
+  /** F9: `feishuBot.*` parse warnings for `/webhub feishu status` (default `loadFeishuBotWarnings`). */
+  feishuSettingsWarnings?: () => FeishuBotWarning[];
+  /** F9: feishu-notify coexistence probe (default `detectFeishuNotifyCoexistence`). */
+  feishuCoexistence?: () => FeishuNotifyCoexistence;
+  /** F9: setup-poll sleep seam (default `unrefSleep`; tests inject an instant clock). */
+  feishuSleep?: (ms: number) => Promise<void>;
 }
 
-const USAGE = "用法：/webhub [status|open|passwd|unlock|restart|stop|start|token rotate]";
+const USAGE = "用法：/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>]";
+
+const FEISHU_USAGE =
+  "用法：/webhub feishu <setup [--replace] | status | cancel | allow <open_id> | deny <open_id> | repair | reset>（仅 TUI）";
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
   try {
@@ -331,7 +371,262 @@ async function runTokenRotate(ctx: ExtensionCommandContext, control: WebHubContr
   notify(ctx, message, level);
 }
 
-const SUBCOMMANDS = new Set(["status", "open", "passwd", "unlock", "restart", "stop", "start", "token"]);
+// ------------------------------------------------------------------ /webhub feishu (F9)
+
+/** TUI widget key for the persistent setup QR (cleared on every flow exit). */
+const FEISHU_QR_WIDGET_KEY = "webhub-feishu-qr";
+
+const FEISHU_OPS = ["setup", "status", "cancel", "allow", "deny", "repair", "reset"] as const;
+
+const FEISHU_OP_DESCRIPTIONS: Record<string, string> = {
+  setup: "扫码注册飞书机器人（设备流；--replace 替换现有凭据）",
+  "setup --replace": "替换现有凭据（需确认）",
+  status: "查看机器人状态/计数/白名单",
+  cancel: "取消进行中的注册",
+  allow: "把 open_id 加入白名单",
+  deny: "把 open_id 移出白名单并撤销其未决工作",
+  repair: "修复损坏的状态（保留凭据，需确认）",
+  reset: "删除凭据与状态（需确认）",
+};
+
+/** 每个设置告警码 → 一句中文短语（§9/F0 的 FeishuBotWarning 全集）。 */
+const FEISHU_WARNING_PHRASES: Record<FeishuBotWarning, string> = {
+  "block-invalid": "feishuBot 块不是对象，已整体回退默认",
+  "enabled-invalid": "enabled 类型应为布尔，已回退默认",
+  "allow-groups-invalid": "allowGroups 类型应为布尔，已回退默认",
+  "group-root-topics-invalid": "groupRootTopics 类型应为布尔，已回退默认",
+  "notify-invalid": "notify 取值应为 bound|off，已回退默认",
+  "spawn-scope-invalid": "spawnScope 取值应为 known|roots，已回退默认",
+  "debounce-invalid": "debounceMs 类型应为数字，已回退默认",
+  "debounce-clamped": "debounceMs 超出 0–10000，已收敛到边界值",
+  "stale-invalid": "staleMessageS 类型应为数字，已回退默认",
+  "stale-clamped": "staleMessageS 超出 30–3600，已收敛到边界值",
+  "files-invalid": "files 块不是对象，已回退默认",
+  "files-outbound-invalid": "files.outbound 取值应为 auto|buttons|off，已回退默认",
+  "files-inbound-invalid": "files.inbound 类型应为布尔，已回退默认",
+  "files-max-inbound-invalid": "files.maxInboundMiB 类型应为数字，已回退默认",
+  "files-max-inbound-clamped": "files.maxInboundMiB 超出 1–100，已收敛到边界值",
+};
+
+/** `/webhub feishu status` 的设置告警行（无告警 ⇒ undefined）。 */
+export function formatFeishuSettingsWarningLine(warnings: readonly FeishuBotWarning[]): string | undefined {
+  if (warnings.length === 0) return undefined;
+  const parts = warnings.map((w) => FEISHU_WARNING_PHRASES[w]);
+  return `feishuBot 设置告警：${parts.join("；")}。修改 ~/.pi/agent/pi-subagent.json 后 /reload（再 /webhub restart）生效。`;
+}
+
+/** unref'd sleep：轮询循环绝不 pin 住进程（pi -p 不可被 ref'd timer 卡死）。 */
+function unrefSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref();
+  });
+}
+
+/** QR 展示面：TUI widget（持久可见）；不可用时逐行 notify 兑底。 */
+function feishuSetupUi(ctx: ExtensionCommandContext): FeishuSetupUi {
+  return {
+    notify: (message, level) => notify(ctx, message, level),
+    showQr: (lines) => {
+      try {
+        ctx.ui.setWidget(FEISHU_QR_WIDGET_KEY, [...lines]);
+      } catch {
+        for (const line of lines) notify(ctx, line);
+      }
+    },
+    clearQr: () => {
+      try {
+        ctx.ui.setWidget(FEISHU_QR_WIDGET_KEY, undefined);
+      } catch {
+        /* best effort */
+      }
+    },
+  };
+}
+
+function feishuPortOf(deps: WebHubCommandDeps): FeishuAdminPort | undefined {
+  try {
+    return deps.feishuPort?.() ?? defaultFeishuAdminPort();
+  } catch {
+    return undefined;
+  }
+}
+
+async function confirmFeishu(ctx: ExtensionCommandContext, title: string, message: string): Promise<boolean> {
+  try {
+    return await ctx.ui.confirm(title, message);
+  } catch {
+    return false;
+  }
+}
+
+async function runFeishuStatus(
+  ctx: ExtensionCommandContext,
+  deps: WebHubCommandDeps,
+  port: FeishuAdminPort,
+): Promise<void> {
+  const res = await callFsb(port, { t: "fsb_req", rid: newAdminRid(), op: "info" });
+  if (!res.ok) {
+    const f = res.reason === "refused" ? formatFsbRefusal(res.code, res.message) : formatFsbTransportFailure(res);
+    notify(ctx, f.message, f.level);
+    return;
+  }
+  if (!isFsbInfoData(res.data)) {
+    notify(ctx, "hub 返回了意外的信息形状（非 status 视图）。", "error");
+    return;
+  }
+  const info = res.data;
+  const level = feishuStatusLevel(info);
+  notifyAll(ctx, formatFeishuStatusLines(info, (deps.now ?? Date.now)()), level);
+  notifyAll(ctx, feishuStatusProseLines(info), level);
+  const warnings = (() => {
+    try {
+      return (deps.feishuSettingsWarnings ?? loadFeishuBotWarnings)();
+    } catch {
+      return [] as FeishuBotWarning[];
+    }
+  })();
+  const settingsLine = formatFeishuSettingsWarningLine(warnings);
+  if (settingsLine !== undefined) notify(ctx, settingsLine, "warning");
+  notifyAll(ctx, coexistenceWarningLines((deps.feishuCoexistence ?? detectFeishuNotifyCoexistence)()), "warning");
+}
+
+/** §9 TUI 确认文案（破坏性/替换性操作）；确认通过才携带 confirm:true 发帧。 */
+async function runFeishu(
+  ctx: ExtensionCommandContext,
+  deps: WebHubCommandDeps,
+  tokens: readonly string[],
+): Promise<void> {
+  if (ctx.mode !== "tui") {
+    notify(ctx, "/webhub feishu 仅支持在 TUI 中执行（v1 无 web/LAN 管理面）。", "warning");
+    return;
+  }
+  const op = tokens[1];
+  if (op === undefined) {
+    notify(ctx, FEISHU_USAGE, "warning");
+    return;
+  }
+  if (!FEISHU_OPS.includes(op as (typeof FEISHU_OPS)[number])) {
+    notify(ctx, FEISHU_USAGE, "warning");
+    return;
+  }
+  const rest = tokens.slice(2);
+  const port = feishuPortOf(deps);
+  if (port === undefined) {
+    notify(ctx, formatFsbTransportFailure({ reason: "no-hub", message: "" }).message, "warning");
+    return;
+  }
+  switch (op) {
+    case "setup": {
+      let replace = false;
+      if (rest.length === 1 && rest[0] === "--replace") replace = true;
+      else if (rest.length > 0) {
+        notify(ctx, "用法：/webhub feishu setup [--replace]", "warning");
+        return;
+      }
+      if (replace) {
+        const ok = await confirmFeishu(
+          ctx,
+          "feishu setup --replace",
+          "将替换现有飞书机器人凭据：旧凭据保持可用，直到新注册成功并接管。继续？",
+        );
+        if (!ok) {
+          notify(ctx, "已取消：未发送任何请求。", "info");
+          return;
+        }
+      }
+      await runFeishuSetupFlow(
+        {
+          port,
+          ui: feishuSetupUi(ctx),
+          renderQr,
+          now: deps.now ?? Date.now,
+          sleep: deps.feishuSleep ?? unrefSleep,
+        },
+        { replace },
+      );
+      return;
+    }
+    case "status": {
+      if (rest.length > 0) {
+        notify(ctx, "/webhub feishu status 不接受任何参数。", "warning");
+        return;
+      }
+      await runFeishuStatus(ctx, deps, port);
+      return;
+    }
+    case "cancel": {
+      if (rest.length > 0) {
+        notify(ctx, "/webhub feishu cancel 不接受任何参数。", "warning");
+        return;
+      }
+      const res = await callFsb(port, { t: "fsb_req", rid: newAdminRid(), op: "setup_cancel" });
+      if (!res.ok) {
+        const f = res.reason === "refused" ? formatFsbRefusal(res.code, res.message) : formatFsbTransportFailure(res);
+        notify(ctx, f.message, f.level);
+        return;
+      }
+      notify(ctx, "已请求取消：注册代际已被栅栏，晚到的轮询结果会被丢弃，不会写入凭据。", "info");
+      return;
+    }
+    case "allow":
+    case "deny": {
+      const openId = rest[0];
+      if (rest.length !== 1 || openId === undefined || !FEISHU_OPEN_ID_RE.test(openId)) {
+        notify(ctx, `用法：/webhub feishu ${op} <open_id>（ou_ 开头的飞书用户 id）`, "warning");
+        return;
+      }
+      const res = await callFsb(port, { t: "fsb_req", rid: newAdminRid(), op, openId });
+      if (!res.ok) {
+        const f = res.reason === "refused" ? formatFsbRefusal(res.code, res.message) : formatFsbTransportFailure(res);
+        notify(ctx, f.message, f.level);
+        return;
+      }
+      if (!isFsbAllowData(res.data)) {
+        notify(ctx, "hub 返回了意外的信息形状（非 allow 视图）。", "error");
+        return;
+      }
+      notify(ctx, formatAllowResultLine(res.data, op), "info");
+      return;
+    }
+    case "repair":
+    case "reset": {
+      if (rest.length > 0) {
+        notify(ctx, `/webhub feishu ${op} 不接受任何参数。`, "warning");
+        return;
+      }
+      const copy =
+        op === "repair"
+          ? "将重建机器人状态（保留凭据）：清空去重/请求/绑定，重新播种白名单（owner），并在下一个 owner 事件重新固定租户。继续？"
+          : "将删除凭据与全部状态并断开机器人（之后请在飞书开放平台删除对应应用）。继续？";
+      const ok = await confirmFeishu(ctx, `feishu ${op}`, copy);
+      if (!ok) {
+        notify(ctx, "已取消：未发送任何请求。", "info");
+        return;
+      }
+      const res = await callFsb(
+        port,
+        { t: "fsb_req", rid: newAdminRid(), op, confirm: true },
+        FSB_CALL_WIDE_DEADLINE_MS,
+      );
+      if (!res.ok) {
+        const f = res.reason === "refused" ? formatFsbRefusal(res.code, res.message) : formatFsbTransportFailure(res);
+        notify(ctx, f.message, f.level);
+        return;
+      }
+      notify(
+        ctx,
+        op === "repair"
+          ? "修复完成：状态已重建（凭据保留，白名单已用 owner 重新播种；连接器将重新启动）。"
+          : "已重置：凭据与状态已删除、连接已断开。请在飞书开放平台删除对应应用；hub 空闲退出策略恢复原状。",
+        "info",
+      );
+      return;
+    }
+  }
+}
+
+const SUBCOMMANDS = new Set(["status", "open", "passwd", "unlock", "restart", "stop", "start", "token", "feishu"]);
 
 /** 子命令集合的唯一来源是上面的 SUBCOMMANDS（补全从这里派生，避免漂移）。 */
 const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
@@ -343,15 +638,50 @@ const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
   stop: "停止 hub（写机器级 stop 标记，抵制自动拉起）",
   start: "删除 stop 标记并拉起 hub",
   token: "token 相关管理（rotate）",
+  feishu: "飞书机器人管理：setup/status/cancel/allow/deny/repair/reset（仅 TUI）",
 };
 
 export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
       "web-hub 浏览器 UI：/webhub status 查看状态；/webhub open 打开浏览器；" +
-      "/webhub passwd|unlock|restart 管理局域网访问（LAN，plan §9.3）。",
+      "/webhub passwd|unlock|restart 管理局域网访问（LAN，plan §9.3）；" +
+      "/webhub feishu 管理飞书机器人（仅 TUI，feishu-bot plan §9）。",
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
+        // F9: `/webhub feishu <op>` completes the op vocabulary (and setup's --replace).
+        // A trailing space means the user finished the previous token — trim() would erase
+        // that boundary, so tokenize on trimStart/trimEnd separately.
+        const trimmed = argumentPrefix.trimStart();
+        const tokens = trimmed.trimEnd().split(/\s+/);
+        const cursorOpen = /\s$/.test(trimmed);
+        if (tokens[0] === "feishu" && (tokens.length > 1 || cursorOpen)) {
+          if (!cursorOpen) {
+            // completing a partially-typed token
+            if (tokens.length === 2)
+              return FEISHU_OPS.filter((op) => op.startsWith(tokens[1] ?? "")).map((op) => ({
+                value: op,
+                label: op,
+                description: FEISHU_OP_DESCRIPTIONS[op] ?? "",
+              }));
+            if (tokens.length === 3 && tokens[1] === "setup" && "--replace".startsWith(tokens[2] ?? ""))
+              return [
+                {
+                  value: "--replace",
+                  label: "--replace",
+                  description: FEISHU_OP_DESCRIPTIONS["setup --replace"] ?? "",
+                },
+              ];
+            return [];
+          }
+          if (tokens.length === 1)
+            return FEISHU_OPS.map((op) => ({ value: op, label: op, description: FEISHU_OP_DESCRIPTIONS[op] ?? "" }));
+          if (tokens.length === 2 && tokens[1] === "setup")
+            return [
+              { value: "--replace", label: "--replace", description: FEISHU_OP_DESCRIPTIONS["setup --replace"] ?? "" },
+            ];
+          return [];
+        }
         const prefix = argumentPrefix.trim();
         return [...SUBCOMMANDS]
           .filter((value) => value.startsWith(prefix))
@@ -411,6 +741,14 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
           return;
         case "token":
           await runTokenRotate(ctx, control);
+          return;
+        case "feishu":
+          try {
+            await runFeishu(ctx, deps, tokens);
+          } catch (err) {
+            // a command handler must never reject: surface and move on (zero-hang discipline)
+            notify(ctx, `/webhub feishu 执行出错：${err instanceof Error ? err.message : String(err)}`, "error");
+          }
           return;
         default:
           await runStatus(ctx, control, deps);

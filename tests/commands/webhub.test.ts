@@ -166,7 +166,9 @@ describe("/webhub command", () => {
   it("unknown subcommand ⇒ usage warning", async () => {
     const notes = await run("bogus", { control: control() });
     expect(notes[0]!.level).toBe("warning");
-    expect(notes[0]!.message).toContain("/webhub [status|open|passwd|unlock|restart|stop|start|token rotate]");
+    expect(notes[0]!.message).toContain(
+      "/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>]",
+    );
   });
 });
 
@@ -327,6 +329,7 @@ describe("getArgumentCompletions", () => {
   it("returns all subcommands for an empty prefix", () => {
     const items = cmd().getArgumentCompletions!("")!;
     expect(items!.map((i) => i.value).sort()).toEqual([
+      "feishu",
       "open",
       "passwd",
       "restart",

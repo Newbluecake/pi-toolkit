@@ -1119,6 +1119,62 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["strict", "warn"],
     "Droid protocol version check: strict = fail the provider on mismatch, warn = degrade and continue",
   ),
+  // feishu-bot plan v2 §9 (F9, entries suggested by F0): the TUI-editable `feishuBot.*` leaves.
+  // All non-live — every description says "change: /reload then /webhub restart".
+  // `feishuBot.staleMessageS` keeps its plan name and is deliberately NOT a `time:true` spec —
+  // F0 did not register it in TIME_SETTING_MS_PATHS (the live field holds seconds, no ms
+  // conversion, the settings file is never rewritten), so stored domain = live domain.
+  // `feishuBot.debounceMs` is JSON-ONLY (externalAgents.droid.* pattern): the shared spec-table
+  // invariant (tests/ui/settings-editor.test.ts: no exposed key ends in "Ms") means a
+  // milliseconds storage key cannot enter the editor without an out-of-domain test change —
+  // edit it directly in pi-subagent.json. See docs/dev/feishu-bot/F9-report.md.
+  "feishuBot.enabled": bool(
+    "feishuBot.enabled",
+    "Feishu bot: enable the hub-side bot (change: /reload then /webhub restart)",
+  ),
+  "feishuBot.allowGroups": bool(
+    "feishuBot.allowGroups",
+    "Feishu bot: answer @-mentions inside group topics (change: /reload then /webhub restart)",
+  ),
+  "feishuBot.groupRootTopics": bool(
+    "feishuBot.groupRootTopics",
+    "Feishu bot: bind plain group @-messages by auto-creating a topic (change: /reload then /webhub restart)",
+  ),
+  "feishuBot.notify": choice(
+    "feishuBot.notify",
+    ["bound", "off"],
+    "Feishu bot: proactive done/failed/waiting notices for bound sessions (change: /reload then /webhub restart)",
+  ),
+  "feishuBot.spawnScope": choice(
+    "feishuBot.spawnScope",
+    ["known", "roots"],
+    "Feishu bot: directories /new may spawn sessions in (change: /reload then /webhub restart)",
+  ),
+  "feishuBot.staleMessageS": {
+    ...count(
+      "feishuBot.staleMessageS",
+      30,
+      "Feishu bot: messages older than this many seconds are not executed, 30-3600 (change: /reload then /webhub restart)",
+    ),
+    max: 3_600,
+  } as SettingSpec,
+  "feishuBot.files.outbound": choice(
+    "feishuBot.files.outbound",
+    ["auto", "buttons", "off"],
+    "Feishu bot: sending reply files - auto images in p2p, gated buttons, or off (change: /reload then /webhub restart)",
+  ),
+  "feishuBot.files.inbound": bool(
+    "feishuBot.files.inbound",
+    "Feishu bot: accept image/file attachments from chats (change: /reload then /webhub restart)",
+  ),
+  "feishuBot.files.maxInboundMiB": {
+    ...count(
+      "feishuBot.files.maxInboundMiB",
+      1,
+      "Feishu bot: max inbound file size in MiB, 1-100 (change: /reload then /webhub restart)",
+    ),
+    max: 100,
+  } as SettingSpec,
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */
