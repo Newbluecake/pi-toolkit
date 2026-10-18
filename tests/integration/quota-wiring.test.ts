@@ -407,7 +407,7 @@ describe("quota wiring — droid pools (P7, real-stack e2e since P5)", () => {
     // fake 目录的 core 池只有 kimi-k3（auto=router、old-model-1=deprecated 已滤）。
     expect(message).toContain("优先改用 Droid Core 池模型：droid/kimi-k3");
     expect(message).toContain(
-      "Droid 模型按池：Standard 池（已拦，勿派）：droid/gpt-6-luna、droid/claude-sonnet-5；Core 池（有余量）：droid/kimi-k3。",
+      "Droid 模型按池：Standard 池（已拦，勿派，5 小时 100%，1/1 08:00 重置）：droid/gpt-6-luna、droid/claude-sonnet-5；Core 池（有余量，周 2%，1/1 08:00 重置）：droid/kimi-k3。",
     );
     expect(message).toContain("Factory 超额策略为 extraUsage（额外余额 $12.34）");
     expect(message).not.toContain(FACTORY_KEY);
