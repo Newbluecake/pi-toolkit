@@ -1046,6 +1046,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
     webHubRef.current = wireWebHub(pi, {
       settings: settings.webHub,
+      feishuBot: settings.feishuBot,
       proxyWarnings: () => proxyWarnings,
       fleet: () => holder.current?.query.list() ?? [],
       query: () => holder.current?.query,

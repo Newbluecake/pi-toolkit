@@ -165,3 +165,16 @@ describe("web-hub-proxy X1c: POST /api/proxy/open budget nesting (plan §3.4/§3
     expect(PROXY_CLOSE_DEADLINE_MS).toBeLessThanOrEqual(3_000); // hub.ts STEP_DEADLINE_MS
   });
 });
+
+describe("FA bot shutdown nesting", () => {
+  it("shared 6s stop plus margin nests in enabled close and crash deadlines, legacy budgets unchanged", async () => {
+    const { HUB_CLOSE_DEADLINE_MS, FEISHU_STOP_RESERVE_MS } = await import("../../../src/web-hub/hub/hub.js");
+    const { FEISHU_SHUTDOWN_BUDGET_MS } = await import("../../../src/web-hub/protocol/feishu.js");
+    const stopMs = Object.values(FEISHU_SHUTDOWN_BUDGET_MS).reduce((sum, ms) => sum + ms, 0);
+    expect(stopMs).toBe(6_000);
+    expect(FEISHU_STOP_RESERVE_MS).toBe(6_500);
+    expect(stopMs).toBeLessThan(FEISHU_STOP_RESERVE_MS);
+    expect(HUB_CLOSE_DEADLINE_MS).toBe(10_000);
+    expect(3_000 + FEISHU_STOP_RESERVE_MS - 500 - FEISHU_STOP_RESERVE_MS).toBe(2_500);
+  });
+});

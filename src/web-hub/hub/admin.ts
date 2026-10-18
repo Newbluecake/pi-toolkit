@@ -182,14 +182,18 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     const store = deps.store();
     const kdf = deps.kdf();
     if (!deps.hasLan() || store === undefined || kdf === undefined) return noLan(rid, "passwd", meta);
-    if (username.trim().length === 0 || password.length < MIN_LAN_PASSWORD_LENGTH) {
+    if (
+      username.trim().length === 0 ||
+      (username.includes(":") && (await store.getUser(username)) === undefined) ||
+      password.length < MIN_LAN_PASSWORD_LENGTH
+    ) {
       audit("passwd", { ok: false, code: "E_BAD_REQUEST" }, meta);
       return {
         t: "lan_res",
         rid,
         ok: false,
         code: "E_BAD_REQUEST",
-        message: `username must be non-empty and password must be at least ${MIN_LAN_PASSWORD_LENGTH} characters`,
+        message: `username must be non-empty and must not contain :; password must be at least ${MIN_LAN_PASSWORD_LENGTH} characters`,
       };
     }
     const params = defaultKdfParams();

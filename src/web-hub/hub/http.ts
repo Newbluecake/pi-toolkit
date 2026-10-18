@@ -2808,7 +2808,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   let lanRevokeGen = 0;
   // §6.5 (C3): one shared token-bucket limiter for every write endpoint on both listeners
   // (bucket keys already carry the listener label, so there is no cross-listener bleed-through).
-  const cmdLimit = createCmdLimit(now);
+  // FA: production ALWAYS takes the root-owned instance, also used by Feishu. The fallback
+  // preserves standalone frontend callers that have no bot/composition root.
+  const cmdLimit = deps.cmdLimit ?? createCmdLimit(now);
   // C3 P1 fix (§6.4): shared 429-audit throttle map for both listeners, same lifetime as `cmdLimit`.
   const rejectAudit429 = new Map<string, number>();
   // web-hub-spawn plan §SP9 (arch §4.1/§8.2): the managed-spawn route frontend — absent ⇒

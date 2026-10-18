@@ -1,6 +1,7 @@
 /** F6 §4.1. The only Feishu path to CommandRouter.request; no await between live checks and request. */
 import { FEISHU_RATE_LIMITS } from "../../protocol/feishu.js";
 import type { CmdArgs, CmdFrame, CmdResultFrame } from "../../protocol/messages.js";
+import { createFeishuCommandOrigin } from "../commands.js";
 import type { CmdLimit } from "../cmd-limit.js";
 import type { CommandRouter } from "../ports.js";
 import type { FeishuSessions } from "./sessions.js";
@@ -94,7 +95,7 @@ export function createFeishuAdmission(deps: FeishuAdmissionDeps) {
       if (input.expectedAgentKey !== undefined && route.agentKey !== input.expectedAgentKey)
         return { ok: false, code: "agent-changed" };
       if (deps.commands.inflight() >= 32) return { ok: false, code: "E_RATE" };
-      const origin = { listener: "lan" as const, ip: "feishu", user: `feishu:${input.senderOpenId}`, reqId: input.id };
+      const origin = createFeishuCommandOrigin(input.installGen, input.senderOpenId, input.id);
       const dup = deps.commands.peekIdempotent?.(origin, route.agentKey, input.id, cmd) !== undefined;
       if (!dup) {
         const buckets: Array<[string, number, number]> = [

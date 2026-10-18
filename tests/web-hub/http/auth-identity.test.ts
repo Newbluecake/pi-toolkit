@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLEAR_COOKIE_MAX_PREFIXES,
+  lanIdentity,
   clearingSetCookies,
   cookieCandidates,
   pathPrefixes,
@@ -403,4 +404,16 @@ describe("HTTP behaviour — multi-candidate option ON", () => {
     expect((await lanRequest(l.lanPort, { path: "/api/session", headers: { Cookie: c1 } })).status).toBe(401);
     expect((await lanRequest(l.lanPort, { path: "/api/session", headers: { Cookie: c2 } })).status).toBe(401);
   });
+});
+
+it("R2-j LAN user-id principals cannot collide with bot principals, regardless of username", () => {
+  for (const username of ["admin", "alice", "feishu:1:ou_x", "feishu%3A1%3Aou_x"]) {
+    const user = { username, id: 1 };
+    const id = lanIdentity(
+      { userId: user.id, epoch: 1, sidHash: "hash", absoluteExpiresAt: 100 },
+      { expiresAt: 90, absoluteExpiresAt: 100 },
+    );
+    expect(id.principal).toBe("u1");
+    expect(`lan:${id.principal}`).not.toBe("lan:feishu:1:ou_x");
+  }
 });

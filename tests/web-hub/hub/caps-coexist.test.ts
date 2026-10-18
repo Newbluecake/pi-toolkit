@@ -463,3 +463,40 @@ describe("preview.html.v1 cap coexistence (web-hub-html-preview, T-H11)", () => 
     expect(r.htmlAttached).toBe(false);
   });
 });
+
+describe("FA optional bot cap coexists with avatar/privacy/proxy", () => {
+  it.each([0, 1, 2, 3, 4, 5, 6, 7])(
+    "optional feature mask %i: both cap surfaces differ ONLY by fsb.v1",
+    async (mask) => {
+      const { normalizeFeishuBotHubConfig, FEISHU_BOT_DEFAULTS } =
+        await import("../../../src/web-hub/protocol/feishu.js");
+      const { FSB_HUB_CAP } = await import("../../../src/web-hub/protocol/version.js");
+      const optional = {
+        ...(mask & 1 ? { avatar: true as const } : {}),
+        ...(mask & 2 ? { privacy: true as const } : {}),
+        ...(mask & 4 ? { proxy: { portRange: [30000, 30010] as [number, number], maxProxies: 1 } } : {}),
+      };
+      const capSets: string[][] = [];
+      for (const enabled of [false, true]) {
+        const result = await startHub(
+          config({
+            home: tmp.make("wh-fa-caps-"),
+            ...optional,
+            ...(enabled ? { feishuBot: normalizeFeishuBotHubConfig(FEISHU_BOT_DEFAULTS)! } : {}),
+          }),
+          fakeFrontend().factory,
+        );
+        if ("exists" in result) throw new Error("hub unavailable");
+        hubs.push(result);
+        const client = await connectClient(result.paths.socketPath);
+        client.send(hello());
+        const ack = await client.waitFrame((f) => f.t === "hello_ack");
+        client.sock.destroy();
+        expect(ack.caps).toEqual(result.info.caps);
+        expect(result.info.caps.includes(FSB_HUB_CAP)).toBe(enabled);
+        capSets.push(result.info.caps.filter((cap) => cap !== FSB_HUB_CAP));
+      }
+      expect(capSets[0]).toEqual(capSets[1]);
+    },
+  );
+});

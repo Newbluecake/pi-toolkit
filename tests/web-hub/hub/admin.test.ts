@@ -267,3 +267,33 @@ describe("createAdminHandler (plan §8)", () => {
     });
   });
 });
+
+it("R2-j rejects colon-containing new usernames before KDF/store mutation", async () => {
+  const store = fakeLanStore();
+  const kdf = fakeKdf();
+  const { deps } = baseDeps({ store: () => store, kdf: () => kdf });
+  const res = await createAdminHandler(deps).handleLanReq(
+    { t: "lan_req", rid: "colon", op: "passwd", username: "feishu:1:ou_x", password: "correct-horse" },
+    { agentKey: "local" },
+  );
+  expect(res).toMatchObject({
+    ok: false,
+    code: "E_BAD_REQUEST",
+    message: expect.stringContaining("must not contain :"),
+  });
+  expect(await store.getUser("feishu:1:ou_x")).toBeUndefined();
+});
+
+it("existing colon-named LAN users can still rotate their password; no forced rename/delete", async () => {
+  const store = fakeLanStore();
+  seedAdmin(store);
+  const original = (await store.getUser("admin"))!;
+  store.seedUser({ ...original, id: 2, username: "feishu:1:ou_x" });
+  const { deps } = baseDeps({ store: () => store, kdf: () => fakeKdf() });
+  const res = await createAdminHandler(deps).handleLanReq(
+    { t: "lan_req", rid: "legacy", op: "passwd", username: "feishu:1:ou_x", password: "correct-horse" },
+    { agentKey: "local" },
+  );
+  expect(res).toMatchObject({ ok: true });
+  expect((await store.getUser("feishu:1:ou_x"))?.id).toBe(2);
+});

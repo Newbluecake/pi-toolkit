@@ -144,8 +144,10 @@ Synchronously, immediately before every dispatch (also for retries/recovered wor
    (30/1 s) + `feishu:<openId>:cmd` (10/3 s) + `feishu:global` (60/min) + `feishu:cb` (callbacks, 20/min);
 5. session resolution unambiguous (§5.1).
    Failure ⇒ refused, recorded on the request, never retried automatically. The synthetic origin
-   `{listener:"lan", ip:"feishu", user:"feishu:"+openId, reqId}` is **attribution only** — no decision anywhere reads it (test pins
-   this; `LABEL_RE` in `protocol/lan.ts:56` forbids `:` so `lan:feishu:*` principals never collide with real LAN users).
+   `{listener:"lan", ip:"feishu", user:"feishu:"+openId, reqId}` has **wire attribution fields only**, never authorization authority.
+   **FA verifier follow-up (§R2-k)**: command-ledger identity is instead selected by a trusted, private, hub-local origin brand
+   with top-level principal `fsb:<installGen>:<openId>`; LAN derivation remains `lan:<origin.user>`. No username-grammar or
+   numeric session-principal assumption is used to prove command-ledger isolation. The brand never crosses JSON.
 
 ### 4.2 Identity rules
 
@@ -577,3 +579,18 @@ feishuBot.spawnScope 设为 roots」); the realpath confirm card exists only und
 `known:false`). (2) The Feishu bot's supervisor principal must not be forgeable by a LAN username: FA forbids `:` in LAN
 usernames (passwd/admin validation; existing users are unaffected unless they already contain `:`, which `/webhub status`
 then flags), so `lan:feishu:<gen>:<openId>` can only come from the bot.
+
+**R2-k (2026-10-18, main-session ruling after FA verifier r_5V38H7WY).** R2-j's command-ledger collision premise needs a
+separate structural fix: numeric `lanIdentity().principal = u<id>` is NOT the same thing as the command router's
+`lan:<origin.user>` idempotency principal. A legacy username such as `feishu:ou_x` must not share a ledger namespace with the
+bot. FA uses `createFeishuCommandOrigin` to attach a private non-enumerable Symbol brand, read only by the HUB router's
+`request` and `peekIdempotent` before serialization, yielding top-level `fsb:<installGen>:<openId>`. The ordinary origin fields
+remain attribution only and serialize unchanged; HTTP/JSON cannot supply the brand. LAN principal derivation is unchanged.
+No escaping, login/first-user warnings, DB enumeration or automatic migration is introduced; new colon-username creation is
+still refused, existing users can rotate their passwords. This supersedes R2-j's warning/username-grammar explanation for
+command-ledger isolation. Agent-side keying and command-id evidence are recorded in FA-report.md's verifier follow-up.
+
+The same follow-up ruling accepts the existing agent process ledger's **cmdId-only** key: agent commands/ledger/index do not
+derive an identity key from origin fields. Hashed bot ids and random browser ids have negligible accidental collision risk;
+a LAN caller deliberately reusing a bot id is an authenticated user acting against their own bot (accepted T1/U1 threat
+class). Structural cmdId disjointness is not required; F6/F8 id generators and agent wire/ledger code remain unchanged.

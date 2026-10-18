@@ -38,6 +38,7 @@ import {
   TODO_ARCHIVE_HUB_CAPS,
   protoCompatible,
 } from "../protocol/version.js";
+import type { FsbReqFrame, FsbResFrame } from "../protocol/feishu.js";
 import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
@@ -65,6 +66,8 @@ export function createAgentServer(
      * absent — never omitted, since agent-side D14 slot gating treats a missing `caps` as a
      * pre-P2 hub. */
     admin?: AdminHandler;
+    /** Trusted local agent socket only; never exposed on HTTP/LAN or the event bus. */
+    feishuAdmin?: (frame: FsbReqFrame) => Promise<FsbResFrame>;
     /** C8/C10: scan rotate.intent on every successful hello. */
     onHello?: () => void;
     /** spawn-restore §9.3: when set, a `shutdown{reason:"restart"}` ack carries the hub's
@@ -207,6 +210,24 @@ export function createAgentServer(
       }
       // §8.1: same-uid admin frames never reach the registry, the bus, or this file's own
       // per-frame logging — dispatched to `admin.ts` instead (which owns the audit log line).
+      if (frame.t === "fsb_req") {
+        if (config.feishuBot !== undefined && deps.feishuAdmin !== undefined) {
+          void deps
+            .feishuAdmin(frame)
+            .then(write, () =>
+              write({ t: "fsb_res", rid: frame.rid, ok: false, code: "E_FSB_STATE", message: "机器人状态不可用" }),
+            );
+        } else {
+          write({
+            t: "fsb_res",
+            rid: frame.rid,
+            ok: false,
+            code: "E_FSB_STATE",
+            message: "飞书机器人未启用或尚不可用",
+          });
+        }
+        return;
+      }
       if (frame.t === "lan_req") {
         if (deps.admin !== undefined) {
           deps.admin

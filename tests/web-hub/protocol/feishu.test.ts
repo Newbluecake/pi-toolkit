@@ -99,11 +99,10 @@ describe("identifiers", () => {
     expect(FEISHU_OPEN_ID_RE.test(`ou_${"a".repeat(65)}`)).toBe(false);
   });
 
-  it("FSB_HUB_CAP is not folded into any hub cap surface yet (inert until FA)", () => {
+  it("FA advertises fsb.v1 only from the config-key conditional shared hub cap fold", () => {
     const root = fileURLToPath(new URL("../../../src/web-hub/", import.meta.url));
-    for (const f of ["hub/hub.ts", "hub/agent-server.ts"]) {
-      expect(readFileSync(root + f, "utf8")).not.toContain("FSB_HUB_CAP");
-    }
+    expect(readFileSync(root + "hub/hub.ts", "utf8")).toContain("config.feishuBot === undefined ? [] : [FSB_HUB_CAP]");
+    expect(readFileSync(root + "hub/agent-server.ts", "utf8")).toContain("...(deps.extraHubCaps ?? [])");
   });
 });
 

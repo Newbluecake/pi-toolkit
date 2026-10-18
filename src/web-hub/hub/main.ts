@@ -20,6 +20,7 @@
  */
 import { resolveHubPaths } from "../protocol/paths.js";
 import { normalizeHubPreviewMode } from "../protocol/preview.js";
+import { normalizeFeishuBotHubConfig } from "../protocol/feishu.js";
 import { HUB_COMM, setProcessComm } from "./comm.js";
 import { installProcessHandlers, startHub, type StartHubDeps } from "./hub.js";
 import { createHttpFrontend } from "./http.js";
@@ -170,6 +171,18 @@ async function main(): Promise<void> {
     } else {
       config = { ...config, proxy: normalized.proxy };
     }
+  }
+  if (config.feishuBot !== undefined) {
+    const feishuBot = normalizeFeishuBotHubConfig(config.feishuBot);
+    if (feishuBot === undefined) {
+      const { feishuBot: _drop, ...rest } = config;
+      config = rest;
+      try {
+        process.stderr.write("web-hub main: dropping malformed config.feishuBot\n");
+      } catch {
+        /* ignored */
+      }
+    } else config = { ...config, feishuBot };
   }
   startDeps.childUmask = inheritedUmask;
 

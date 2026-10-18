@@ -103,3 +103,29 @@ describe("createHubLog", () => {
     expect(() => log.info("x")).not.toThrow();
   });
 });
+
+describe("FA credential keepalive idle component", () => {
+  it("configured/auth-failed bot alone holds the hub; reset starts the normal idle countdown", () => {
+    vi.useFakeTimers();
+    try {
+      let bot = 1;
+      const onIdle = vi.fn();
+      const monitor = createIdleMonitor({
+        counts: () => ({ agents: 0, sse: 0, headless: 0, bot }),
+        idleMs: 60_000,
+        now: Date.now,
+        onIdle,
+      });
+      vi.advanceTimersByTime(300_000);
+      expect(onIdle).not.toHaveBeenCalled();
+      bot = 0;
+      vi.advanceTimersByTime(30_000);
+      expect(onIdle).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(30_000);
+      expect(onIdle).toHaveBeenCalledTimes(1);
+      monitor.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

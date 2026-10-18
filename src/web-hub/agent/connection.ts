@@ -43,6 +43,7 @@ import type {
   LanResFrame,
   SessionInfo,
 } from "../protocol/messages.js";
+import type { FsbReqFrame, FsbResFrame } from "../protocol/feishu.js";
 import { decodeHubFrame, LIMITS, TIMING } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import type { HubPaths } from "../protocol/paths.js";
@@ -139,6 +140,7 @@ export interface HubConnection {
    * (unref'd); every pending request rejects when the link tears down (§11 LE
    * row: "连接关闭时全部 reject").
    */
+  request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
   /** Capabilities from the current live link's `hello_ack.caps` (empty until live, or if the hub omitted it). */
   readonly caps: readonly string[];
@@ -257,7 +259,11 @@ class Connection implements HubConnection {
   private helloCaps: readonly string[] = [];
   private readonly pending = new Map<
     string,
-    { resolve: (f: LanResFrame | HubCtlAckFrame) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+    {
+      resolve: (f: LanResFrame | HubCtlAckFrame | FsbResFrame) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+    }
   >();
 
   private connectTimer: NodeJS.Timeout | undefined;
@@ -384,14 +390,19 @@ class Connection implements HubConnection {
     return this.helloCaps;
   }
 
-  request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame> {
+  request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
+  request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
+  request(
+    frame: LanReqFrame | HubCtlFrame | FsbReqFrame,
+    requiredCap: string,
+  ): Promise<LanResFrame | HubCtlAckFrame | FsbResFrame> {
     return new Promise((resolve, reject) => {
       if (this.link !== "live" || !this.helloCaps.includes(requiredCap)) {
         reject(new Error(`E_NO_CAP: ${requiredCap}`));
         return;
       }
       const rid = frame.rid;
-      const timer = unrefTimer(ADMIN_REQUEST_TIMEOUT_MS, () => {
+      const timer = unrefTimer(frame.t === "fsb_req" ? 12_000 : ADMIN_REQUEST_TIMEOUT_MS, () => {
         this.pending.delete(rid);
         reject(new Error("E_TIMEOUT: admin request timed out"));
       });
@@ -587,6 +598,7 @@ class Connection implements HubConnection {
         return;
       case "pong":
         return;
+      case "fsb_res":
       case "lan_res":
       case "hub_ctl_ack": {
         const p = this.pending.get(frame.rid);

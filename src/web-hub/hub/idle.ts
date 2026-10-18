@@ -7,7 +7,7 @@
 export const DEFAULT_IDLE_CHECK_MS = 30_000;
 
 export function createIdleMonitor(opts: {
-  counts: () => { agents: number; sse: number; headless: number };
+  counts: () => { agents: number; sse: number; headless: number; bot?: number };
   idleMs: number;
   checkMs?: number;
   now: () => number;
@@ -21,7 +21,7 @@ export function createIdleMonitor(opts: {
     let busy = true;
     try {
       const c = opts.counts();
-      busy = c.agents > 0 || c.sse > 0 || c.headless > 0;
+      busy = c.agents > 0 || c.sse > 0 || c.headless > 0 || (c.bot ?? 0) > 0;
     } catch {
       busy = true; // a failing probe must never trigger an exit
     }

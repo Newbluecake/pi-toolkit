@@ -22,7 +22,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LoadPort } from "../../sysload/types.js";
-import type { LoadSettings, WebHubProxySettings, WebHubProxyWarning } from "../../config/settings.js";
+import type {
+  FeishuBotSettings,
+  LoadSettings,
+  WebHubProxySettings,
+  WebHubProxyWarning,
+} from "../../config/settings.js";
 import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } from "../../core/types.js";
 import { isTerminalStatus } from "../../core/status.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
@@ -219,6 +224,8 @@ export interface QueryControlPort {
   observe?(runId: string, l: RunObserverListener): ObserveRunResult;
 }
 export interface WebHubDeps {
+  /** Top-level, non-live settings; only buildHubConfig consumes it. */
+  feishuBot?: FeishuBotSettings;
   settings: WebHubSettings;
   fleet: () => readonly RunSnapshot[];
   query?: () => QueryControlPort | undefined; // I: () => holder.current?.query.list() ?? []
@@ -1179,6 +1186,18 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     if (settings.proxy?.enabled === true && settings.control !== false) {
       const portRange = parseProxyPortRange(settings.proxy.portRange);
       if (portRange !== undefined) config.proxy = { portRange, maxProxies: settings.proxy.maxProxies };
+    }
+    const bot = deps.feishuBot;
+    if (settings.enabled && settings.control !== false && bot?.enabled === true) {
+      config.feishuBot = {
+        allowGroups: bot.allowGroups,
+        groupRootTopics: bot.groupRootTopics,
+        notify: bot.notify,
+        spawnScope: bot.spawnScope,
+        debounceMs: bot.debounceMs,
+        staleMessageS: bot.staleMessageS,
+        files: { ...bot.files },
+      };
     }
     return config;
   };

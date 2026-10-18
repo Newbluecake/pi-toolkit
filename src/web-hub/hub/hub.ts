@@ -59,6 +59,7 @@ import {
   VERSION_HUB_CAP,
   PROXY_HUB_CAP,
   PROXY_LAN_HUB_CAP,
+  FSB_HUB_CAP,
 } from "../protocol/version.js";
 import type { HubUiBuildWire } from "../protocol/version-info.js";
 import { createVersionInfoService } from "./version-info.js";
@@ -96,7 +97,16 @@ import type { AvatarRoutes } from "./ports.js";
 import { auditAvatar } from "./audit.js";
 import { readBody } from "./http.js";
 import { createPreviewIoTracker, previewProcFdAvailable, resolvePreviewDenyContext } from "./preview/fs.js";
-import type { PreviewDenyContext } from "./preview/admit.js";
+import { createFsAdmitter, type FsAdmitter, type PreviewDenyContext } from "./preview/admit.js";
+import { FEISHU_SHUTDOWN_BUDGET_MS, type FsbReqFrame } from "../protocol/feishu.js";
+import {
+  createFeishuBotService,
+  type FeishuBotService,
+  type FeishuBotServiceDeps,
+  type FeishuSpawnPort,
+} from "./feishu/service.js";
+import type { FeishuIdleEvidence } from "./feishu/notify.js";
+import { isTerminalSpawnState } from "./spawn/store.js";
 import { createMkdirService } from "./spawn/mkdir.js";
 import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
 import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
@@ -131,6 +141,7 @@ import type {
   LanAssembly,
   LanFrontendDeps,
   ProxyService,
+  HubEvent,
 } from "./ports.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
@@ -166,8 +177,8 @@ export interface RunningHub {
   lanStatus(): LanStatus | undefined;
   /** web-hub-spawn plan §SP10 (arch §7.6, review #4): optional per-call absolute deadline.
    * The default (`HUB_CLOSE_DEADLINE_MS`) covers every legacy caller; `installProcessHandlers`'
-   * crash path passes a 2.5s deadline so the spawn subsystem's graded shutdown (wait budget 0 ⇒
-   * immediate SIGTERM + one synchronous persist) happens before the 3s hard exit. */
+   * crash path passes a 2.5s deadline (plus FA's bot-stop reservation when enabled), so the
+   * spawn subsystem's graded shutdown happens before the matching hard exit. */
   close(reason: string, opts?: { deadline?: ReqDeadline }): Promise<void>;
   readonly closed: Promise<string>;
 }
@@ -188,6 +199,8 @@ export const ROTATE_SCAN_MS = 10_000;
 export const HUB_START_DEADLINE_MS = 20_000;
 /** Overall shutdown budget (§3.1); individual steps still use the smaller `STEP_DEADLINE_MS`. */
 export const HUB_CLOSE_DEADLINE_MS = 10_000;
+/** F8's shared 6s business/transport budget plus scheduler margin, added only when enabled. */
+export const FEISHU_STOP_RESERVE_MS = Object.values(FEISHU_SHUTDOWN_BUDGET_MS).reduce((sum, ms) => sum + ms, 0) + 500;
 /** Per-step bound for cleanup/close steps; kept separate from the crash-only hard exit in `installProcessHandlers`. */
 const STEP_DEADLINE_MS = 3_000;
 /** session-history plan v3.3 W3: the hub-side cap on `HistoryService.dispose()` — dispose's own
@@ -258,6 +271,10 @@ export interface StartHubDeps {
    * hub-side git command through (D15). Default: the real `createGitRunner()`; tests inject a
    * scripted fake so no git process is ever spawned. */
   gitRunner?: GitRunner;
+  /** Programmatic-only fake HTTP/WS seams; main.ts never supplies them. Ignored when off. */
+  feishuSeams?: Pick<FeishuBotServiceDeps, "clock" | "fetch" | "webSocket" | "fs"> & {
+    wrapService?(service: FeishuBotService, deps: FeishuBotServiceDeps): FeishuBotService;
+  };
 }
 
 export async function startHub(
@@ -289,6 +306,31 @@ export async function startHub(
   const rootScope: Scope = createScope({ log, now }); // ③ hub-lifetime scope
   const cleanup: Array<() => Promise<void>> = []; // executed in reverse on failure, each bounded
   let closing: Promise<void> | undefined = undefined;
+  let bot: FeishuBotService | undefined;
+  let botCleanup: Promise<void> | undefined;
+  // Shared by rollback and close. Call stop synchronously FIRST; dispose cancels setup in
+  // parallel, not as another 2s tail after the 6s stop budget.
+  function stopBot(): Promise<void> {
+    if (botCleanup !== undefined) return botCleanup;
+    if (bot === undefined) return Promise.resolve();
+    let stopped: Promise<void> = Promise.resolve();
+    let disposed: Promise<void> = Promise.resolve();
+    try {
+      stopped = bot.stop(); // Still the first cleanup call, even if an implementation throws.
+    } catch {
+      log.error("web-hub feishu: stop threw; continuing bounded cleanup");
+    }
+    try {
+      disposed = bot.dispose(); // A throwing stop must not skip the independent final fence.
+    } catch {
+      log.error("web-hub feishu: dispose threw; continuing bounded cleanup");
+    }
+    botCleanup = bounded(
+      Promise.allSettled([stopped, disposed]).then(() => {}),
+      FEISHU_STOP_RESERVE_MS,
+    );
+    return botCleanup;
+  }
   let resolveClosed: (reason: string) => void = () => {};
   const closed = new Promise<string>((resolve) => {
     resolveClosed = resolve;
@@ -430,6 +472,7 @@ export async function startHub(
       // `privacy.v1`: it never follows whether the LAN listener actually came up). Both cap
       // surfaces share this one array. Tail-appended: proxy off ⇒ caps byte-identical.
       ...(config.proxy === undefined ? [] : [PROXY_HUB_CAP, ...(config.lan === undefined ? [] : [PROXY_LAN_HUB_CAP])]),
+      ...(config.feishuBot === undefined ? [] : [FSB_HUB_CAP]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;
@@ -464,6 +507,7 @@ export async function startHub(
     // even when preview itself is off (the preview block below reuses the resolved value
     // instead of resolving twice). `undefined` when neither feature is on.
     let previewDenyCtx: PreviewDenyContext | undefined = undefined;
+    let botPreview: FsAdmitter | undefined;
     // web-hub-privacy plan v2.1 (P1): DECLARED here with every other early assembly binding —
     // `close()` reads it (the write-chain drain below) and can run BEFORE the assembly point
     // further down ever executes (a `let` at the assembly point would be a TDZ throw in that
@@ -495,6 +539,9 @@ export async function startHub(
         status: () => ({ state: "unbuilt", candidates: [] }),
       },
     };
+    let botOnHello: ((key: string) => void) | undefined;
+    const botDialogSlots =
+      config.feishuBot === undefined ? undefined : new Map<string, Extract<HubEvent, { type: "dialogs" }>>();
     const registry = createRegistry({
       now,
       log,
@@ -505,6 +552,8 @@ export async function startHub(
       // replacement that ends its own session with the stdin EOF; it only records a
       // `hint:"newer-plugin"` on the spawn record instead.
       onVersion: (pluginVersion, agentKey) => {
+        botDialogSlots?.delete(agentKey);
+        botOnHello?.(agentKey); // EVERY reconnect, even same epoch/caps, breaks attribution proof.
         if (spawnSup?.isManaged(agentKey) === true) {
           spawnSup.noteVersion(agentKey, pluginVersion);
           return;
@@ -513,6 +562,14 @@ export async function startHub(
       },
       onTick: () => supersede?.tick(),
     });
+    const unsubscribeBotSlots =
+      botDialogSlots === undefined
+        ? () => {}
+        : registry.bus.subscribe((e) => {
+            if (e.type === "dialogs") botDialogSlots.set(e.agentKey, e);
+            else if (e.type === "agent_down" || e.type === "agent_stale") botDialogSlots.delete(e.agentKey);
+          });
+    cleanup.push(async () => unsubscribeBotSlots());
     const history = createHistoryService({ registry, log });
     cleanup.push(async () => history.dispose());
     // fleet-drawer plan §5.2/§5.3 (F3b): the run-transcript service + its F3a file reader —
@@ -694,6 +751,19 @@ export async function startHub(
       httpPort: () => httpPort,
       admin,
       extraHubCaps,
+      ...(config.feishuBot === undefined
+        ? {}
+        : {
+            feishuAdmin: (frame: FsbReqFrame) =>
+              bot?.admin(frame) ??
+              Promise.resolve({
+                t: "fsb_res" as const,
+                rid: frame.rid,
+                ok: false as const,
+                code: "E_FSB_STATE",
+                message: "机器人正在启动或关闭",
+              }),
+          }),
       onHello: () => recoverRotateOnHello?.(),
       restoreCount: () => spawnSup?.restoreCandidateCount() ?? 0,
     });
@@ -847,6 +917,8 @@ export async function startHub(
     }
 
     const commandRouter = createCommandRouter({ registry, log, now });
+    const cmdLimit = createCmdLimit(now); // ONE HTTP + Feishu admission limiter (same agent bucket).
+    let botSpawn: FeishuSpawnPort | undefined;
     // ---------------------------------------------------------------------
     // web-hub-spawn plan §SP10 (arch §4.1/§7): the managed-spawn assembly — the ONLY place
     // SP1–SP9's parts meet. Everything below runs only when `config.spawn` exists (feature
@@ -1091,6 +1163,27 @@ export async function startHub(
         // dependency is available exactly when the feature is on (off ⇒ byte-identical).
         ...(privacyStore === undefined ? {} : { privacy: privacyStore }),
       });
+      if (config.feishuBot !== undefined) {
+        botSpawn = {
+          dirs: spawnDirs,
+          supervisor: spawnSup,
+          firstPrompt: firstPromptFwd,
+          prefs: spawnPrefs,
+          registerTimeoutS: spawnCfg.registerTimeoutS,
+          restore: spawnCfg.restore === true,
+          relaunch: (...args) => spawnSup!.relaunch(...args),
+          lookup: (id) => {
+            const record = spawnSup!.records().find((r) => r.spawnId === id);
+            return record === undefined
+              ? undefined
+              : {
+                  ...(record.agentKey === undefined ? {} : { agentKey: record.agentKey }),
+                  ...(record.sessionId === undefined ? {} : { sessionId: record.sessionId }),
+                  terminal: isTerminalSpawnState(record.state),
+                };
+          },
+        };
+      }
       // SP13 (SP10 acceptance leftover P3): the shutdown entry itself is pushed AFTER the
       // frontend's own cleanup entry further below — reverse-order release then runs it BEFORE
       // `fe.close()`, the same domain-first order the runtime `close()` path uses (arch §7.6:
@@ -1158,9 +1251,19 @@ export async function startHub(
           ),
         ));
       startup.signal.throwIfAborted();
+      previewDenyCtx = denyCtx;
+      const sharedPreview =
+        config.feishuBot === undefined
+          ? undefined
+          : (() => {
+              const tracker = createPreviewIoTracker();
+              botPreview = createFsAdmitter({ denyCtx, tracker, log, now });
+              return { tracker, admitter: botPreview };
+            })();
       previewRoutes = createPreviewRoutes({
         mode: config.preview,
         denyCtx,
+        ...sharedPreview,
         uploadsRoot: webHubUploadsDir(config.home),
         registry,
         ...(uploads === undefined
@@ -1215,6 +1318,126 @@ export async function startHub(
           now,
         });
       }
+    }
+    if (config.feishuBot !== undefined) {
+      // Outbound file admission always uses the preview safety chain, even with the browser
+      // preview UI disabled. No raw-fs fallback and no bot-local upload store.
+      previewDenyCtx ??= await startupStep(
+        resolvePreviewDenyContext(
+          { home: config.home, agentDir: process.env["PI_CODING_AGENT_DIR"] ?? `${config.home}/.pi/agent` },
+          { tracker: createPreviewIoTracker(), now, log, signal: startup.signal },
+        ),
+      );
+      startup.signal.throwIfAborted();
+      const evidence = new Map<string, { statusAt?: number; fleetAt?: number; fleet?: FeishuIdleEvidence["fleet"] }>();
+      const { wrapService: _wrapService, ...platformSeams } = deps.feishuSeams ?? {};
+      const botDeps: FeishuBotServiceDeps = {
+        stateDir: paths.stateDir,
+        config: config.feishuBot,
+        limit: cmdLimit,
+        commands: commandRouter,
+        sessions: {
+          views: () =>
+            registry.list().flatMap((a) =>
+              a.session === undefined
+                ? []
+                : [
+                    {
+                      sessionId: a.session.sessionId,
+                      agentKey: a.agentKey,
+                      cwd: a.cwd,
+                      ...(a.session.name === undefined ? {} : { name: a.session.name }),
+                      live: registry.isConnected(a.agentKey),
+                      mode: a.kind,
+                      state: !a.control
+                        ? ("read-only" as const)
+                        : a.prompts.length > 0
+                          ? ("waiting" as const)
+                          : a.status?.busy
+                            ? ("busy" as const)
+                            : ("idle" as const),
+                    },
+                  ],
+            ),
+          managed: () =>
+            (spawnSup?.records() ?? []).flatMap((r) =>
+              r.sessionId === undefined ? [] : [{ sessionId: r.sessionId, cwd: r.cwd }],
+            ),
+        },
+        events: {
+          subscribe: (listener) => {
+            botOnHello = (key) => {
+              evidence.delete(key);
+              listener({ type: "agent_up", agentKey: key });
+            };
+            const unsubscribe = registry.bus.subscribe((e) => {
+              if (e.type === "agent_up" || e.type === "agent_down" || e.type === "agent_stale" || e.type === "gap") {
+                evidence.delete(e.type === "agent_up" ? e.agent.agentKey : e.agentKey);
+              }
+              if (e.type === "status" || e.type === "fleet") {
+                const sample = evidence.get(e.agentKey) ?? {};
+                if (e.type === "status") sample.statusAt = now();
+                else {
+                  sample.fleetAt = now();
+                  sample.fleet = {
+                    complete: e.omitted === undefined || (e.omitted.active === 0 && e.omitted.terminal === 0),
+                    terminal: e.runs.map((r) => r.terminal === true),
+                  };
+                }
+                evidence.set(e.agentKey, sample);
+              }
+              switch (e.type) {
+                case "agent_up":
+                  listener({ type: "agent_up", agentKey: e.agent.agentKey });
+                  break;
+                case "ev":
+                case "ctl":
+                case "session":
+                case "dialogs":
+                case "gap":
+                case "agent_down":
+                case "agent_stale":
+                case "spawns":
+                case "status":
+                case "fleet":
+                  listener(e);
+                  break;
+              }
+            });
+            return () => {
+              botOnHello = undefined;
+              unsubscribe();
+            };
+          },
+          dialogs: () =>
+            [...(botDialogSlots?.values() ?? [])]
+              .filter((slot) => registry.isConnected(slot.agentKey))
+              .map(({ type: _type, ...slot }) => slot),
+        },
+        ...(uploads === undefined ? {} : { uploads }),
+        preview:
+          botPreview ?? createFsAdmitter({ denyCtx: previewDenyCtx, tracker: createPreviewIoTracker(), now, log }),
+        ...(botSpawn === undefined ? {} : { spawn: botSpawn }),
+        idleEvidence: (key) => {
+          const sample = evidence.get(key),
+            bash = registry.get(key)?.status?.bashJobs;
+          if (sample?.statusAt === undefined || sample.fleetAt === undefined || bash === undefined) return undefined;
+          return {
+            at: Math.min(sample.statusAt, sample.fleetAt, bash.sampledAt),
+            fleet: sample.fleet,
+            bash: { complete: (bash.omitted ?? 0) === 0 && bash.total === bash.rows.length, running: bash.running },
+          };
+        },
+        // Startup recovery may render a notice before listen() binds. Empty selects F8's
+        // honest "web 会话页面" fallback instead of persisting an unusable port-0 URL.
+        link: (key) => (httpPort === 0 ? "" : `http://127.0.0.1:${httpPort}/#/agent/${encodeURIComponent(key)}`),
+        log: (event) => log.info("web-hub feishu:", event),
+        ...platformSeams,
+      };
+      const created = createFeishuBotService(botDeps);
+      bot = deps.feishuSeams?.wrapService?.(created, botDeps) ?? created;
+      await startupStep(bot.start());
+      startup.signal.throwIfAborted();
     }
     // web-hub-delete-session plan v2 §2.9: the removal route frontend is wired UNCONDITIONALLY
     // (unlike spawn/preview/upload) — deleting an offline/stale TUI card never depended on
@@ -1296,6 +1519,7 @@ export async function startHub(
       // admission, effect classification, queryOnly, drain — replacing C0's always-`E_UNSUPPORTED`
       // stub. `registry` (constructed above) is the same instance the agent socket layer feeds.
       commands: commandRouter,
+      cmdLimit,
       uploadMetrics,
       agentRemove: agentRemoveService,
       ...(avatarRoutes === undefined ? {} : { avatar: avatarRoutes }),
@@ -1426,6 +1650,7 @@ export async function startHub(
       audit: (op, fields) => log.info("web-hub admin op", { audit: "admin", op, ...fields }),
       log,
       restart: async ({ nextVersion, forced, openDialogs, inflightAtDrain }) => {
+        if (bot !== undefined) await stopBot(); // also precedes forced command-router drain.
         info.state = "restarting";
         info.nextVersion = nextVersion;
         info.supersedePending = true;
@@ -1756,6 +1981,7 @@ export async function startHub(
         // web-hub-spawn plan §SP10 (arch §7.8 "idle 自退"): a live managed child keeps the
         // hub alive — the absolute lifetime deadline (§6.5 maxLifetimeMinutes) is the backstop.
         headless: spawnSup?.liveCount() ?? 0,
+        ...(bot === undefined ? {} : { bot: bot.keepalive() ? 1 : 0 }),
       }),
       idleMs: Math.max(1, config.idleExitMinutes) * 60_000,
       now,
@@ -1769,11 +1995,15 @@ export async function startHub(
       if (closing !== undefined) return closing;
       // web-hub-spawn plan §SP10 (arch §7.6, review #4): one absolute deadline per close call —
       // the default covers every legacy caller; `installProcessHandlers`' crash path passes a
-      // 2.5s one so the spawn subsystem degrades to "wait 0, SIGTERM now, persist once" before
-      // the 3s hard exit. Individual steps below still carry their own `bounded()` STEP caps.
-      const deadline: ReqDeadline = opts?.deadline ?? createReqDeadline(now, HUB_CLOSE_DEADLINE_MS);
+      // legacy 2.5s one PLUS the bot-stop reservation when enabled. Bot shutdown runs FIRST;
+      // individual later steps still carry their own `bounded()` STEP caps.
+      const closeBudget = HUB_CLOSE_DEADLINE_MS + (config.feishuBot === undefined ? 0 : FEISHU_STOP_RESERVE_MS);
+      const deadline: ReqDeadline = opts?.deadline ?? createReqDeadline(now, closeBudget);
       // Publish the once-promise before any abort listener can re-enter close().
+      const botStopped = stopBot();
       const inner = Promise.resolve().then(async (): Promise<void> => {
+        await botStopped; // FIRST cleanup operation: connector must stop ACKing before any teardown.
+        unsubscribeBotSlots();
         log.info("hub closing", { reason });
         unsubscribeSupersedeOnDialogs();
         unsubscribeDbRestart();
@@ -1851,7 +2081,7 @@ export async function startHub(
         log.close();
         resolveClosed(reason);
       });
-      closing = withDeadline(inner, HUB_CLOSE_DEADLINE_MS).catch((err: unknown) => {
+      closing = withDeadline(inner, closeBudget).catch((err: unknown) => {
         log.error("web-hub: hub close exceeded deadline", { error: String(err) });
         process.exit(1);
       });
@@ -1873,6 +2103,7 @@ export async function startHub(
   } catch (err) {
     clearTimeout(startTimer);
     if (closing !== undefined) return await closedResult();
+    await stopBot(); // FIRST on startup failure too, before abort-triggered resource teardown.
     startup.abort(err);
     for (const step of cleanup.reverse()) await bounded(step()); // ⑧ reverse-order release of created resources
     await bounded(rootScope.dispose());
@@ -1893,15 +2124,14 @@ export function installProcessHandlers(hub: RunningHub, log: HubLog): () => void
   };
   const onCrash = (err: unknown): void => {
     log.error("uncaught exception", { error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
-    // Crash-only hard exit stays at 3s (not unified with HUB_CLOSE_DEADLINE_MS, plan v8 §15.7 #6):
-    // process state is untrusted after an uncaughtException, so a fast respawn beats a full cleanup.
-    // web-hub-spawn plan §SP10 (arch §7.6 "uncaughtException" row): hand close() a 2.5s deadline —
-    // the spawn subsystem's wait budget derives to 0, so it SIGTERMs the children immediately
-    // and still flushes spawns.json once (sync, in-memory) before the hard exit below.
-    const force = setTimeout(() => process.exit(1), STEP_DEADLINE_MS);
+    // Legacy crash budget remains 3s / 2.5s for graded spawn shutdown. FA reserves the
+    // bot's 6s shared stop + 0.5s margin FIRST on enabled hubs, before that legacy budget.
+    // Never let the old 3s hard exit cut across durable receive/outbox shutdown.
+    const crashBudget = STEP_DEADLINE_MS + (hub.info.caps.includes(FSB_HUB_CAP) ? FEISHU_STOP_RESERVE_MS : 0);
+    const force = setTimeout(() => process.exit(1), crashBudget);
     force.unref();
     void hub
-      .close("crash", { deadline: createReqDeadline(Date.now, STEP_DEADLINE_MS - 500) })
+      .close("crash", { deadline: createReqDeadline(Date.now, crashBudget - 500) })
       .finally(() => process.exit(1));
   };
   const onRejection = (reason: unknown): void => {

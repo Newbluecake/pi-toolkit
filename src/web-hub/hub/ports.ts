@@ -42,12 +42,15 @@ import type {
   DialogWire,
   CtlItemWire,
   FleetRowWire,
+  FleetOmitted,
   SessionInfo,
   StatusInfo,
   WireEntry,
   WireEvent,
   LoadWire,
 } from "../protocol/messages.js";
+import type { FeishuBotHubConfig } from "../protocol/feishu.js";
+import type { CmdLimit } from "./cmd-limit.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { AgentRemoveFrontendPort } from "./agent-remove.js";
 import type { AuthIdentity, IdentityResult } from "./auth-identity.js";
@@ -418,6 +421,8 @@ export interface HubConfig {
    * (Q2 — the proxy has no LAN switch of its own). `hub/main.ts`'s `normalizeHubProxyConfig`
    * drops the whole key when malformed. */
   proxy?: HubProxyConfig;
+  /** Feishu bot: absence is off; credentials never cross this config boundary. */
+  feishuBot?: FeishuBotHubConfig;
 }
 
 /**
@@ -484,7 +489,7 @@ export type HubEvent =
   | { type: "session"; agentKey: string; session: SessionInfo }
   | { type: "ev"; agentKey: string; seq: number; e: WireEvent }
   | { type: "status"; agentKey: string; status: StatusInfo }
-  | { type: "fleet"; agentKey: string; runs: FleetRowWire[] }
+  | { type: "fleet"; agentKey: string; runs: FleetRowWire[]; omitted?: FleetOmitted }
   | { type: "prompt"; agentKey: string; prompts: AgentCard["prompts"] }
   | { type: "gap"; agentKey: string; fromSeq: number }
   | { type: "append"; agentKey: string; entries: WireEntry[] }
@@ -673,6 +678,8 @@ export interface FrontendDeps {
    * 501/404 unchanged) byte-identical — `hub.ts`'s `startHub` constructs the C0 stub and passes
    * it through unconditionally (zero visible change: reading this key is opt-in for the factory). */
   commands?: CommandRouter;
+  /** The composition root owns ONE limiter, shared with the Feishu admission path. */
+  cmdLimit?: CmdLimit;
   /** web-hub-upload plan §2/§6 (U3): the hub's upload store (`hub/uploads.ts`, U2), constructed
    * and closed by `hub.ts`. Optional so test doubles and pre-U3 assemblies keep compiling — when
    * absent (or store construction failed in `hub.ts`), `/api/upload/*` answers 501

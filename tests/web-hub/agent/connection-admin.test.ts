@@ -138,3 +138,27 @@ describe("connection admin request()/caps (plan §8.1; LE)", () => {
     expect(conn.caps).toEqual(["ctl.v1", "lan.v1"]);
   });
 });
+
+describe("FA fsb transport correlation", () => {
+  it("no fsb cap means no write, even on an otherwise live connection", async () => {
+    const { conn, sock } = liveFake(["ctl.v1"]);
+    const before = sock.written.length;
+    await expect(conn.request({ t: "fsb_req", rid: "fb", op: "info" }, "fsb.v1")).rejects.toThrow("E_NO_CAP");
+    expect(sock.written.length).toBe(before);
+  });
+  it("fsb_res matches its pending rid and the wider deadline permits the bot's 6s stop", async () => {
+    const { conn, sock } = liveFake(["fsb.v1"]);
+    const request = conn.request({ t: "fsb_req", rid: "fb", op: "reset", confirm: true }, "fsb.v1");
+    await vi.advanceTimersByTimeAsync(6_500);
+    sock.hub({ t: "fsb_res", rid: "other", ok: false, code: "E_FSB_STATE", message: "ignored" });
+    sock.hub({ t: "fsb_res", rid: "fb", ok: true });
+    await expect(request).resolves.toEqual({ t: "fsb_res", rid: "fb", ok: true });
+  });
+  it("connection loss rejects fsb requests instead of leaving them to hang", async () => {
+    const { conn } = liveFake(["fsb.v1"]);
+    const request = conn.request({ t: "fsb_req", rid: "fb", op: "info" }, "fsb.v1");
+    const rejected = expect(request).rejects.toThrow(/E_CLOSED|E_CONN_LOST/);
+    conn.close("test");
+    await rejected;
+  });
+});

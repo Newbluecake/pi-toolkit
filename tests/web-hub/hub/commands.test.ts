@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { CmdFrame, CmdOrigin } from "../../../src/web-hub/protocol/messages.js";
-import { createCommandRouter } from "../../../src/web-hub/hub/commands.js";
+import { createCommandRouter, createFeishuCommandOrigin } from "../../../src/web-hub/hub/commands.js";
 import { createRegistry } from "../../../src/web-hub/hub/registry.js";
 import { fakeConn, hello, memLog } from "./helpers.js";
 
@@ -523,3 +524,65 @@ describe("commands router: peekIdempotent digest check (C3 re-review Blocker #2,
 });
 
 void vi; // referenced for future fake-timer extensions without an unused-import lint churn
+
+describe("FA follow-up: Feishu command-ledger principal isolation", () => {
+  it("legacy LAN username feishu:ou_x and bot ou_x keep independent entries for the SAME agent/id", async () => {
+    const h = harness();
+    const lanOrigin = origin({ listener: "lan", ip: "feishu", user: "feishu:ou_x" });
+    const botOrigin = createFeishuCommandOrigin(1, "ou_x", lanOrigin.reqId);
+    // The wire attribution is intentionally identical; only trusted in-process admission
+    // can brand an origin for the separate top-level fsb:<gen>:<openId> ledger namespace.
+    expect(JSON.parse(JSON.stringify(botOrigin))).toEqual(lanOrigin);
+    const lanFrame = promptFrame({ origin: lanOrigin });
+    const lan = h.router.request(lanFrame, h.agentKey);
+    replyLatest(h, { ok: true, data: { op: "prompt", delivery: "observed" } });
+    await expect(lan).resolves.toMatchObject({ ok: true });
+    expect(h.router.peekIdempotent(botOrigin, h.agentKey, lanFrame.id, lanFrame.cmd)).toBeUndefined();
+    const botFrame = promptFrame({ origin: botOrigin, cmd: { op: "prompt", text: "bot body", deliver: "followUp" } });
+    const bot = h.router.request(botFrame, h.agentKey);
+    expect(h.conn.sent.filter((f) => f.t === "cmd")).toHaveLength(2);
+    replyLatest(h, { ok: true, data: { op: "prompt", delivery: "observed" } });
+    await expect(bot).resolves.toMatchObject({ ok: true });
+    await expect(h.router.request(lanFrame, h.agentKey)).resolves.toMatchObject({ ok: true, dup: true });
+    await expect(h.router.request(botFrame, h.agentKey)).resolves.toMatchObject({ ok: true, dup: true });
+    expect(h.conn.sent.filter((f) => f.t === "cmd")).toHaveLength(2);
+    expect(
+      h.router.peekIdempotent(createFeishuCommandOrigin(2, "ou_x", "next"), h.agentKey, botFrame.id, botFrame.cmd),
+    ).toBeUndefined();
+  });
+  it("an HTTP/JSON origin or a chosen LAN username cannot supply the private bot brand", async () => {
+    const h = harness();
+    const botOrigin = createFeishuCommandOrigin(1, "ou_x", "request");
+    const frame = promptFrame({ origin: botOrigin });
+    const pending = h.router.request(frame, h.agentKey);
+    replyLatest(h, { ok: true, data: { op: "prompt", delivery: "observed" } });
+    await pending;
+    for (const fake of [
+      JSON.parse(JSON.stringify(botOrigin)),
+      origin({ listener: "lan", user: "fsb:1:ou_x" }),
+      origin({ listener: "lan", user: "feishu:ou_x" }),
+    ]) {
+      expect(h.router.peekIdempotent(fake, h.agentKey, frame.id, frame.cmd)).toBeUndefined();
+    }
+  });
+});
+
+it("origin-derived ledger keys stay hub-only and are computed before registry serialization", () => {
+  const hub = readFileSync(new URL("../../../src/web-hub/hub/commands.ts", import.meta.url), "utf8");
+  // Exactly the request + peek call sites derive origin principals. Both live here, not in
+  // the serialized frame, and the request key is established before either forward path.
+  expect(hub.match(/principalOf\(/g)).toHaveLength(3); // declaration + request + peek
+  expect(hub).toContain("const principal = principalOf(frame.origin)");
+  expect(hub).toContain("`${principalOf(origin)}|${agentKey}|${id}`");
+  expect(hub.indexOf("const principal = principalOf(frame.origin)")).toBeLessThan(
+    hub.indexOf("const entry: LruEntry =", hub.indexOf("async request(")),
+  );
+  const agentCommands = readFileSync(new URL("../../../src/web-hub/agent/commands.ts", import.meta.url), "utf8");
+  const agentLedger = readFileSync(new URL("../../../src/web-hub/agent/ledger.ts", import.meta.url), "utf8");
+  const agentIndex = readFileSync(new URL("../../../src/web-hub/agent/index.ts", import.meta.url), "utf8");
+  expect(agentCommands).toContain("deps.ledger.begin(frame.id,");
+  expect(agentLedger).toContain("bag.entries.get(id)");
+  expect(agentLedger).not.toMatch(/origin\.(?:user|listener)/);
+  expect(agentIndex).toContain("createCommandLedger()");
+  expect(agentIndex).not.toMatch(/origin\.(?:user|listener)/);
+});

@@ -83,7 +83,26 @@ function digestOf(cmd: CmdArgs): string {
   return createHash("sha256").update(stableStringify(cmd)).digest("hex");
 }
 
+// A private, non-wire brand: HTTP/JSON origins can never opt into the bot ledger namespace.
+// No mutable module state, protocol widening, or change to LAN identity derivation is needed.
+const FEISHU_LEDGER_PRINCIPAL = Symbol("feishu command ledger principal");
+type FeishuCommandOrigin = CmdOrigin & { readonly [FEISHU_LEDGER_PRINCIPAL]: string };
+
+/** F6 admission alone constructs the trusted hub-internal origin. The ordinary wire fields
+ * remain attribution only; the non-enumerable brand never reaches the agent or audit JSON. */
+export function createFeishuCommandOrigin(installGen: number, openId: string, reqId: string): CmdOrigin {
+  return Object.freeze(
+    Object.defineProperty(
+      { listener: "lan" as const, ip: "feishu", user: `feishu:${openId}`, reqId },
+      FEISHU_LEDGER_PRINCIPAL,
+      { value: `fsb:${installGen}:${openId}` },
+    ),
+  );
+}
+
 function principalOf(origin: CmdOrigin): string {
+  const botPrincipal = (origin as Partial<FeishuCommandOrigin>)[FEISHU_LEDGER_PRINCIPAL];
+  if (botPrincipal !== undefined) return botPrincipal;
   return origin.listener === "loopback" ? "token" : `lan:${origin.user ?? "?"}`;
 }
 

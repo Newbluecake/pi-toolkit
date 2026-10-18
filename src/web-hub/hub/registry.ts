@@ -52,6 +52,8 @@ export interface Registry extends RegistryView {
   /** plan §3.5 (D17): hub-internal `Rec.linkGen`, incremented on every register()/reclaim; not
    * part of the frozen `AgentView` surface (audit/log field only). */
   getLinkGen(agentKey: string): number | undefined;
+  /** Current socket, not the retained claiming/stale card. No I/O. */
+  isConnected(agentKey: string): boolean;
   /** plan §3.2/§3.5 (C3): post-construction hook -- `hub/commands.ts`'s router is built *from*
    * a `Registry` instance, so it cannot be one of `createRegistry()`'s own constructor deps
    * (that would be circular); this lets it register for late-arriving `cmd_result` (no matching
@@ -304,6 +306,11 @@ export function createRegistry(deps: {
       return r === undefined ? undefined : view(r);
     },
 
+    isConnected(agentKey) {
+      const r = records.get(agentKey);
+      return r?.phase === "live" && r.conn !== undefined;
+    },
+
     getCaps(agentKey) {
       return records.get(agentKey)?.caps;
     },
@@ -466,7 +473,12 @@ export function createRegistry(deps: {
         }
         case "fleet":
           r.fleet = frame.runs;
-          publish({ type: "fleet", agentKey, runs: frame.runs });
+          publish({
+            type: "fleet",
+            agentKey,
+            runs: frame.runs,
+            ...(frame.omitted === undefined ? {} : { omitted: frame.omitted }),
+          });
           return;
         case "gap":
           publish({ type: "gap", agentKey, fromSeq: frame.fromSeq });
