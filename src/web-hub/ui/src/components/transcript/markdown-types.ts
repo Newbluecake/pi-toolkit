@@ -15,7 +15,16 @@ export type Inline =
   | { readonly type: "strong"; readonly children: readonly Inline[] }
   | { readonly type: "em"; readonly children: readonly Inline[] }
   | { readonly type: "del"; readonly children: readonly Inline[] }
-  | { readonly type: "link"; readonly href: string; readonly children: readonly Inline[] };
+  | { readonly type: "link"; readonly href: string; readonly children: readonly Inline[] }
+  /** Relative / absolute-path link target — the UI resolves it (`mdLinkPath.ts`) and opens the preview. */
+  | {
+      readonly type: "pathlink";
+      readonly target: string;
+      readonly children: readonly Inline[];
+      readonly raw: string;
+    }
+  /** Any other non-http(s) target (mailto:/javascript:/#frag/…): link text only, never clickable. */
+  | { readonly type: "textlink"; readonly children: readonly Inline[]; readonly raw: string };
 
 export type MdNode =
   | { readonly type: "code_block"; readonly lang: string; readonly text: string }

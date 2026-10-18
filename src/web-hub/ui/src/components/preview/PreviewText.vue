@@ -39,6 +39,7 @@ import {
   nextTick,
   onBeforeUnmount,
   onMounted,
+  provide,
   ref,
   shallowRef,
   watch,
@@ -60,7 +61,8 @@ import MdBlock from "../transcript/MdBlock.vue";
 import type { MdNode } from "../transcript/markdown-types.js";
 import HighlightedCode from "../shared/HighlightedCode.vue";
 import { HUB_CTX } from "../control/controlContext.js";
-import { PREVIEW_CTX } from "./previewContext.js";
+import { PREVIEW_BASE_DIR, PREVIEW_CTX } from "./previewContext.js";
+import { dirOfPreviewPath } from "@logic/mdLinkPath.js";
 import type { PreviewTextStream } from "../../types.js";
 
 type SourceSegment = ReturnType<ReturnType<typeof createSourceSegmenter>["push"]>[number];
@@ -98,6 +100,11 @@ const highlightLang = computed(() => resolveFileLang(props.filename ?? ""));
 // non-`.html` path ⇒ `htmlOn` false ⇒ zero DOM change (plain source view, byte-identical).
 const PreviewHtml = defineAsyncComponent(() => import("./PreviewHtml.vue"));
 const previewCtx = inject(PREVIEW_CTX, null);
+// Relative markdown links in the rendered view resolve against the previewed file's directory.
+provide(
+  PREVIEW_BASE_DIR,
+  computed(() => dirOfPreviewPath(props.path ?? "")),
+);
 const hub = inject(HUB_CTX, null);
 const isHtml = computed(() => isHtmlPath(props.path ?? props.filename ?? ""));
 const scope = computed(() => previewCtx?.handle.scope.value ?? null);

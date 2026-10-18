@@ -570,7 +570,7 @@ export interface PreviewHandle {
   /** The §4.6 scope derivation (`null` ⇒ no path is clickable). */
   readonly scope: Readonly<Ref<PreviewPathScope | null>>;
   /** closed/any ⇒ loading (a no-op without a scope); aborts whatever was in flight. */
-  open(ref: { readonly path: string }): void;
+  open(ref: { readonly path: string; readonly dir?: true }): void;
   /** Any ⇒ closed; aborts the in-flight fetch (§3.2 作用域失效 uses the same path). */
   close(): void;
   /** error(retryable) ⇒ re-open the same path; a no-op in every other phase. */

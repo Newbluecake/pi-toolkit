@@ -20,21 +20,45 @@
   link as-is and shows its prose reason in an inline status note after it.
 -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, inject, onBeforeUnmount, ref } from "vue";
+import { resolveMdLinkTarget } from "@logic/mdLinkPath.js";
 import { isProxyableHref } from "@logic/proxy.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useProxyOpen } from "../../composables/useProxyOpen.js";
 import PathText from "../preview/PathText.vue";
+import { PATH_REFERENCES_SUSPENDED, PREVIEW_BASE_DIR, PREVIEW_CTX } from "../preview/previewContext.js";
 import type { Inline } from "./markdown-types.js";
 import "../../styles/proxy.css";
 
-defineProps<{
+const props = defineProps<{
   readonly nodes: readonly Inline[];
   /** Force plain rendering for this subtree (link text — the anchor owns the interaction). */
   readonly noRefs?: boolean | undefined;
 }>();
 
 const { t } = useI18n();
+const previewCtx = inject(PREVIEW_CTX, null);
+const previewBase = inject(PREVIEW_BASE_DIR, null);
+/** §4.6 流式抑制 — the same TxAssistant streaming flag PathText consumes: a still-streaming
+ * message renders link text only; links become clickable once it settles. */
+const suspended = inject(PATH_REFERENCES_SUSPENDED, null);
+
+/** `[t](../x.md)` ⇒ resolved request path (file preview: the file's dir; transcript: scope.cwd),
+ * or `null` ⇒ text only. `props.noRefs` and the streaming suspension also mute it. */
+function pathLinkOf(target: string): { path: string; dir: boolean } | null {
+  if (props.noRefs === true || suspended?.value === true) return null;
+  const scope = previewCtx?.handle.scope.value ?? null;
+  return resolveMdLinkTarget(target, previewBase?.value ?? null, scope);
+}
+function openPathLink(r: { path: string; dir: boolean }): void {
+  previewCtx?.handle.open(r.dir ? { path: r.path, dir: true } : { path: r.path });
+}
+function onPathLinkKeydown(ev: KeyboardEvent, r: { path: string; dir: boolean }): void {
+  if (ev.key === "Enter" || ev.key === " ") {
+    ev.preventDefault();
+    openPathLink(r);
+  }
+}
 const proxy = useProxyOpen();
 const hasProxy = computed(() => proxy.scope.value !== null);
 const note = ref<{ href: string; key: string | null; url: string | null } | null>(null);
@@ -87,6 +111,19 @@ function onLinkClick(ev: MouseEvent, href: string): void {
       @click="onLinkClick($event, n.href)"
       ><MdInline :nodes="n.children" :no-refs="true"
     /></a>
+    <template v-else-if="n.type === 'pathlink'">
+      <span
+        v-if="pathLinkOf(n.target) !== null"
+        class="path-ref"
+        role="button"
+        tabindex="0"
+        @click="openPathLink(pathLinkOf(n.target)!)"
+        @keydown="onPathLinkKeydown($event, pathLinkOf(n.target)!)"
+        ><MdInline :nodes="n.children" :no-refs="true"
+      /></span>
+      <MdInline v-else :nodes="n.children" :no-refs="true" />
+    </template>
+    <MdInline v-else-if="n.type === 'textlink'" :nodes="n.children" :no-refs="true" />
   </template>
   <span v-for="x in noteList" :key="'proxy-note'" class="proxy-ref-note" role="status"
     ><template v-if="x.key !== null">{{ t(x.key) }}</template

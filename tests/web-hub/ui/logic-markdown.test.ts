@@ -28,6 +28,34 @@ describe("markdown whitelist (parser level)", () => {
     }
   });
 
+  it("non-http link targets become pathlink/textlink nodes, never raw `[..](..)` text", () => {
+    const inl = (md: string) => (parseMarkdown(md)[0] as { children: any[] }).children;
+    const plain = (n: any): string => (n.children ?? []).map((c: any) => c.text ?? plain(c)).join("");
+    for (const t of ["../dev/web-hub/arch.md", "./x.md", "x/y.md", "/abs/x.md", "a.md?x=1#h", "../dir/"]) {
+      const n = inl(`see [arch](${t}) ok`)[1];
+      expect(n).toMatchObject({ type: "pathlink", target: t });
+      expect(plain(n)).toBe("arch");
+    }
+    for (const t of [
+      "mailto:a@b.c",
+      "javascript:alert",
+      "data:text/html,x",
+      "tel:123",
+      "#frag",
+      "?q=1",
+      "//evil.com/x",
+    ]) {
+      const n = inl(`[t](${t})`)[0];
+      expect(n).toMatchObject({ type: "textlink" });
+      expect(plain(n)).toBe("t");
+    }
+    const n = inl("[**bold** and `c`](./a.md)")[0];
+    expect(n.type).toBe("pathlink");
+    expect(n.children.map((c: any) => c.type)).toEqual(["strong", "text", "code"]);
+    // http(s) unchanged
+    expect(inl("[a](https://e.com/x)")[0]).toMatchObject({ type: "link", href: "https://e.com/x" });
+  });
+
   it("isSafeHref: only http(s) URLs pass", () => {
     expect(isSafeHref("https://example.com/a?b=1")).toBe(true);
     expect(isSafeHref("http://h/y")).toBe(true);

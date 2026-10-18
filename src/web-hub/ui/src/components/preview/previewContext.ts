@@ -28,3 +28,10 @@ export const PREVIEW_CTX: InjectionKey<PreviewContext> = Symbol("web-hub-preview
 export const PATH_REFERENCES_SUSPENDED: InjectionKey<Readonly<Ref<boolean>>> = Symbol(
   "web-hub-path-references-suspended",
 );
+
+/**
+ * Base directory for resolving RELATIVE markdown link targets inside a file preview
+ * (`PreviewText` provides the previewed file's directory). Absent / `null` ⇒ the session cwd
+ * (`scope.cwd`) — the same base relative path chips use in transcript messages.
+ */
+export const PREVIEW_BASE_DIR: InjectionKey<Readonly<Ref<string | null>>> = Symbol("web-hub-preview-base-dir");

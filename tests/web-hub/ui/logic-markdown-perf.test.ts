@@ -17,6 +17,23 @@ import { parseMarkdown as parseMarkdownRef } from "./fixtures/markdown-ref.js";
  *    ratio measurement out of timer noise.
  */
 
+/**
+ * The live parser now emits `pathlink`/`textlink` where the frozen ref emitted the literal source
+ * as a text node (relative / non-http link targets). Each new node carries `raw` = that exact
+ * source slice, so mapping it back to `{type:"text", text: raw}` must reproduce the ref byte for
+ * byte — everything else stays strictly equal.
+ */
+function legacyShape(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(legacyShape);
+  if (v !== null && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    if ((o.type === "pathlink" || o.type === "textlink") && typeof o.raw === "string")
+      return { type: "text", text: o.raw };
+    return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, legacyShape(x)]));
+  }
+  return v;
+}
+
 /** mulberry32 — deterministic PRNG (same discipline as logic-preview.test.ts). */
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -149,14 +166,14 @@ describe("logic/markdown.js — §4.2 differential (live ≡ frozen reference)",
       for (let k = 0; k < len; k++) s += pieces[Math.floor(rand() * pieces.length)];
       const actual = parseMarkdown(s);
       const expected = parseMarkdownRef(s);
-      expect(actual, `case #${c} input=${JSON.stringify(s)}`).toEqual(expected);
+      expect(legacyShape(actual), `case #${c} input=${JSON.stringify(s)}`).toEqual(expected);
     }
   });
 
   it("every pathological shape deep-equals the reference at 8 KiB", () => {
     for (const [name, build] of PATHOLOGICAL) {
       const s = build(8 * KIB);
-      expect(parseMarkdown(s), name).toEqual(parseMarkdownRef(s));
+      expect(legacyShape(parseMarkdown(s)), name).toEqual(parseMarkdownRef(s));
     }
   });
 

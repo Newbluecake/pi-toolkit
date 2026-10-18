@@ -18,7 +18,9 @@
  * @typedef {{ type: "text", text: string } | { type: "code", text: string }
  *   | { type: "strong", children: Inline[] } | { type: "em", children: Inline[] }
  *   | { type: "del", children: Inline[] }
- *   | { type: "link", href: string, children: Inline[] }} Inline
+ *   | { type: "link", href: string, children: Inline[] }
+ *   | { type: "pathlink", target: string, children: Inline[], raw: string }
+ *   | { type: "textlink", children: Inline[], raw: string }} Inline
  * @typedef {{ type: "code_block", lang: string, text: string }
  *   | { type: "paragraph", children: Inline[] }
  *   | { type: "heading", level: number, children: Inline[] }
@@ -77,6 +79,18 @@ export function markdownFenceMarker(line) {
   if (typeof line !== "string") return null;
   const fence = FENCE_RE.exec(line);
   return fence === null ? null : /** @type {string} */ (fence[1]);
+}
+
+/**
+ * A markdown link target that names a filesystem path (relative `./x` `../x` `x/y.md`, or
+ * absolute `/x`): no URI scheme, not protocol-relative `//host`, not a pure `#frag` / `?query`.
+ * Pure shape check — resolution against a base directory happens in the UI (`mdLinkPath.ts`).
+ * @param {string} href
+ */
+export function isPathLinkTarget(href) {
+  if (href === "" || href.startsWith("#") || href.startsWith("?") || href.startsWith("//")) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) return false;
+  return true;
 }
 
 /** @param {string} href */
@@ -470,8 +484,16 @@ function parseInline(src, depth, inLink = false) {
         const href = m[2] ?? "";
         if (isSafeHref(href) && depth < MAX_DEPTH) {
           out.push({ type: "link", href, children: parseInline(m[1] ?? "", depth + 1, true) });
+        } else if (depth < MAX_DEPTH) {
+          // Non-http(s) target: never a native <a>, never the raw `[..](..)` syntax. A relative /
+          // absolute-path target ⇒ `pathlink` (the UI resolves it + opens the preview); any other
+          // scheme / pure `#frag` / `?query` / `//host` ⇒ `textlink` (children only). `raw` is the
+          // source slice (kept for the frozen-reference differential comparison; never rendered).
+          const children = parseInline(m[1] ?? "", depth + 1, true);
+          if (isPathLinkTarget(href)) out.push({ type: "pathlink", target: href, children, raw: m[0] });
+          else out.push({ type: "textlink", children, raw: m[0] });
         } else {
-          out.push({ type: "text", text: m[0] }); // javascript:/data:/relative ⇒ literal text
+          out.push({ type: "text", text: m[0] }); // depth cap ⇒ literal text
         }
         i += m[0].length;
         continue;
