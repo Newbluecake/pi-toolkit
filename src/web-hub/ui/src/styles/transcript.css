@@ -490,6 +490,14 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   stroke-width: 2;
 }
 
+.tool-line {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
 .tool-name {
   flex: none;
   font-family: var(--font-mono);

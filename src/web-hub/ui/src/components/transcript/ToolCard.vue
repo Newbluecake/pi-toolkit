@@ -192,15 +192,19 @@ const resultClamp = useCoarseClamp(
     <summary class="tool-head">
       <span v-if="view.state === 'running'" class="tool-progress" aria-hidden="true"></span>
       <span class="run-icon"><AppIcon :name="icon" :class="{ spin: spins }" /></span>
-      <span class="tool-name" translate="no">{{ view.toolName }}</span>
-      <span class="tool-args" translate="no">{{ runRefHeader(view) ?? summarizeArgs(view.args) }}</span>
-      <span v-if="view.truncated" class="badge badge-trunc" :title="t('transcript.truncatedTitle')">{{
-        t("transcript.truncated")
-      }}</span>
-      <span v-if="endLabel" class="tool-end"
-        ><span>{{ endLabel }}</span></span
-      >
-      <span v-if="durText" class="tool-dur" translate="no">{{ durText }}</span>
+      <!-- One baseline-aligned text row: name (sm) and args/meta (xs) share a baseline instead of
+           each being vertically centred on its own line box (which left them ~1px apart). -->
+      <span class="tool-line">
+        <span class="tool-name" translate="no">{{ view.toolName }}</span>
+        <span class="tool-args" translate="no">{{ runRefHeader(view) ?? summarizeArgs(view.args) }}</span>
+        <span v-if="view.truncated" class="badge badge-trunc" :title="t('transcript.truncatedTitle')">{{
+          t("transcript.truncated")
+        }}</span>
+        <span v-if="endLabel" class="tool-end"
+          ><span>{{ endLabel }}</span></span
+        >
+        <span v-if="durText" class="tool-dur" translate="no">{{ durText }}</span>
+      </span>
       <AppIcon name="chev-right" class="icon icon-sm chev" />
     </summary>
     <div v-if="hasBody" class="tool-body">
