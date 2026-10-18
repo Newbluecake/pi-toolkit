@@ -103,7 +103,7 @@ subagent 之间的可选 fire-and-forget 消息：`"fabric": { "enabled": true }
 
 - `experts` 在派发时解析为已验证的 runId；保留 id `"main"` 表示咨询宿主主会话（读当前会话快照，走只读工具表）。
 - 已结束专家的咨询沿用其最后记录的工具集与模型，使请求前缀字节一致、尽量命中专家的 prompt cache；只读由 `preserve-guard` 在调用前拦截，不靠工具表。无法证明可复现时直接拒绝（不发请求）。
-- 限额：`consult.timeoutS`（600）、`maxTurns`（3）、`maxFirstRequestUsd`（2）、`maxCostUsd`（4）、`maxConcurrent`（2）、`maxAnswerChars`（2000）。
+- 限额：`consult.timeoutS`（600）、`maxTurns`（3）、`maxFirstRequestUsd`（2）、`maxCostUsd`（4）、`maxConcurrent`（2）、`maxAnswerChars`（6000）。
 - 主会话本身不注册 `consult`；workflow 的 `agent({ experts })` 也可用。
 
 设计：[consult plan](../dev/consult/plan.md)、[expert-keepalive-plan](../dev/consult/expert-keepalive-plan.md)。

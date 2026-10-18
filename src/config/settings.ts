@@ -374,7 +374,7 @@ export interface ConsultSettings {
   enabled: boolean;
   /** 请教 run 的固定截止（budgetOverride.totalMs 且无 timeoutPolicy ⇒ 解析为 fixed，maxTotalFactor=1，无宽限无延长）。Default 150s。 */
   timeoutMs: number;
-  /** 回答截断上限（同时写进问题 prompt 的指令）。Default 2000。 */
+  /** 回答截断上限（同时写进问题 prompt 的指令）。Default 6000。 */
   maxAnswerChars: number;
   /** 轮次上限：第 maxTurns+1 个 turn 开始时 abort（turn 边界判定）。Default 3。 */
   maxTurns: number;
@@ -1129,7 +1129,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     enabled: true,
     // 默认 10min（2026-10-04 用户调整，原 150s 对真实专家咨询偏紧）。
     timeoutMs: 600_000,
-    maxAnswerChars: 2_000,
+    // 2026-10-18 用户裁定：2000 截断过紧（真实回答被截半），放宽到 6000。
+    maxAnswerChars: 6_000,
     maxTurns: 3,
     maxFirstRequestUsd: 2,
     maxCostUsd: 4,

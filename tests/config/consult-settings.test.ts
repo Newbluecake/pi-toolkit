@@ -14,7 +14,7 @@ describe("consult settings (plan §4.6, package A frozen surface)", () => {
     expect(defaults).toEqual({
       enabled: true,
       timeoutMs: 600_000,
-      maxAnswerChars: 2_000,
+      maxAnswerChars: 6_000,
       maxTurns: 3,
       maxFirstRequestUsd: 2,
       maxCostUsd: 4,

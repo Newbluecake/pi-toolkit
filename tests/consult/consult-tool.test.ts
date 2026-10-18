@@ -661,7 +661,7 @@ describe("consult tool: nack surface (T-2)", () => {
 describe("consult tool: success surface (T-3)", () => {
   it("returns truncated text + usage + details; marker keeps head+tail and never points at the session file", async () => {
     const h = harness();
-    h.port.outcome = completedOutcome("A".repeat(3000));
+    h.port.outcome = completedOutcome("A".repeat(9000));
     const result = (await exec(h)) as ToolResult;
     expect(result.details.outcome).toBe("completed");
     expect(result.details.truncated).toBe(true);
