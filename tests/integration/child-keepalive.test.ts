@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { wireChildKeepalive } from "../../src/cache-ttl/child.js";
 import { getChildKeepaliveDisposeRegistry } from "../../src/cache-ttl/child-registry.js";
 import { getChildKeepaliveLedger } from "../../src/cache-ttl/ping-ledger.js";
-import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, parseCacheTtlSettings, type AgentSettings } from "../../src/config/settings.js";
 
 /**
  * child-context-switch plan.md §7 P3 — T-K6/T-K7/T-K8 (integration): `wireChildKeepalive`
@@ -67,7 +67,7 @@ function fakePi() {
 }
 
 function fakeCtx(sessionId: string, overrides: Record<string, unknown> = {}): ExtensionContext {
-  return {
+  const ctx = {
     cwd: process.cwd(),
     mode: "print",
     hasUI: false,
@@ -100,6 +100,10 @@ function fakeCtx(sessionId: string, overrides: Record<string, unknown> = {}): Ex
     ui: { notify: vi.fn(), setStatus: vi.fn() },
     ...overrides,
   } as unknown as ExtensionContext;
+  ctx.modelRegistry.find = vi.fn((provider: string, id: string) =>
+    ctx.model?.provider === provider && ctx.model.id === id ? ctx.model : undefined,
+  );
+  return ctx;
 }
 
 function ephemeralPayload() {
@@ -324,14 +328,13 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     }
   });
 
-  it("honors the per-window ping cap (default 11, `cacheTtl.keepaliveMaxPings`) within one continuous window (T-K3)", async () => {
+  it("honors the price-derived per-window ping cap (11) within one continuous window (T-K3)", async () => {
     const fetchImpl = provenHitFetch();
     const originalFetch = globalThis.fetch;
     (globalThis as { fetch: typeof fetch }).fetch = fetchImpl as unknown as typeof fetch;
     vi.useFakeTimers();
     const sessionId = "child-session-window-cap";
     const ctx = fakeCtx(sessionId);
-    expect(DEFAULT_SETTINGS.cacheTtl.keepaliveMaxPings).toBe(11);
     // Generous run/process $ budgets — isolates the PER-WINDOW cap from the $ gates T-K9
     // already covers exhaustively with this same fakeCtx()'s (deliberately pricy) cost fields.
     const settings = settingsWith({ childKeepaliveRunBudgetUsd: 1000, childKeepaliveProcessBudgetUsd: 1000 });
@@ -362,10 +365,11 @@ describe("child keepalive wiring (T-K6/T-K7): real ping, cost folded into the ch
     vi.useFakeTimers();
     const sessionId = "child-session-run-cap";
     const ctx = fakeCtx(sessionId);
+    // Fable's 48/window leaves the unchanged 24/run as the binding limit.
+    ctx.model!.cost = { input: 1, output: 5, cacheRead: 0.025, cacheWrite: 1.25 };
     const settings = settingsWith({
       childKeepaliveRunBudgetUsd: 1000,
       childKeepaliveProcessBudgetUsd: 1000,
-      keepaliveMaxPings: 100, // well above the 24-per-run cap, so it never binds first.
     });
     expect(DEFAULT_SETTINGS.cacheTtl.childKeepaliveMaxPingsPerRun).toBe(24);
     const { pi, emit } = fakePi();
@@ -441,6 +445,54 @@ describe("child keepalive ledger (T-K9): unpriced model never pings", () => {
       expect(fetchImpl).not.toHaveBeenCalled();
     } finally {
       (globalThis as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+});
+
+describe("legacy zero and tier usage in child wiring", () => {
+  it("old zero still registers; same-response full input crosses multiple tiers", async () => {
+    const cfg = parseCacheTtlSettings({ keepalive: true, keepaliveMaxPings: 0 });
+    const settings = { ...DEFAULT_SETTINGS, cacheTtl: cfg };
+    const ctx = fakeCtx("child-tier-usage");
+    ctx.model!.cost = {
+      input: 1,
+      output: 5,
+      cacheRead: 0.3,
+      cacheWrite: 3.75,
+      tiers: [
+        { inputTokensAbove: 40_000, cacheRead: 0.025, cacheWrite: 1.25 },
+        { inputTokensAbove: 100_000, cacheRead: 1, cacheWrite: 3 },
+      ],
+    } as never;
+    const { pi, emit, appended, handlers } = fakePi();
+    const fetchImpl = provenHitFetch();
+    vi.stubGlobal("fetch", fetchImpl);
+    vi.useFakeTimers();
+    try {
+      expect(wireChildKeepalive(pi, settings)).toBeDefined();
+      expect(handlers.has("before_provider_request")).toBe(true);
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      await emit("before_provider_headers", { headers: {} }, ctx);
+      await emit(
+        "message_end",
+        {
+          message: {
+            role: "assistant",
+            provider: "anthropic",
+            model: "claude-x",
+            usage: { input: 150_000, cacheRead: 30_000, cacheWrite: 0 },
+          },
+        },
+        ctx,
+      );
+      await emit("tool_execution_start", {}, ctx);
+      for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(240_000);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const terminal = appended.map((e) => e.data as Record<string, unknown>).find((d) => d.kind === "terminal-skip");
+      expect(terminal).toMatchObject({ cap: 1, capSource: "priced", reason: "budget-exhausted" });
+    } finally {
+      getChildKeepaliveDisposeRegistry().disposeSession("child-tier-usage");
+      vi.unstubAllGlobals();
     }
   });
 });

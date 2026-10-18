@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
+import { createInitialSessionTotals, createInitialWindowState } from "../../src/cache-ttl/keepalive-state.js";
+import { wireCacheTtl, legacyCapNote } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS, loadSettings, parseCacheTtlSettings } from "../../src/config/settings.js";
 import type { KeepalivePort } from "../../src/service/cache-keepalive.js";
 
@@ -340,5 +341,125 @@ describe("/cache-ttl keepalive reset", () => {
     await c.go();
     expect(c.notify.mock.calls[0]![0]).toContain("keepalive service unavailable");
     expect(c.notify.mock.calls[0]![1]).toBe("warning");
+  });
+});
+
+describe("legacy cap status note only (R2-5)", () => {
+  it.each([{ keepaliveMaxPings: 5 }, { keepaliveMaxPings: 0 }, { keepaliveMaxPings: "x" }, {}])(
+    "shows presence/value only on status, with unavailable service (%j)",
+    async (raw) => {
+      const cfg = parseCacheTtlSettings({ keepalive: false, ...raw });
+      const hooks = new Map<string, any>();
+      const commands = new Map<string, any>();
+      const pi = {
+        on: (name: string, fn: any) => hooks.set(name, fn),
+        registerCommand: (name: string, cmd: any) => commands.set(name, cmd),
+      } as unknown as ExtensionAPI;
+      const ctx = { ui: { notify: vi.fn(), setStatus: vi.fn() } } as unknown as ExtensionContext;
+      wireCacheTtl(pi, { ...DEFAULT_SETTINGS, cacheTtl: cfg });
+      await hooks.get("session_start")({}, ctx);
+      expect(ctx.ui.notify).not.toHaveBeenCalled();
+      await commands.get("cache-ttl").handler("status", ctx);
+      const text = vi.mocked(ctx.ui.notify).mock.calls[0]![0];
+      expect(text).toContain("service unavailable");
+      if ("keepaliveMaxPings" in raw) {
+        expect(text).toContain(
+          'note: cacheTtl.keepaliveMaxPings is deprecated and ignored — the per-window cap now comes from the model\'s cache prices; use "cacheTtl.keepalive": false to turn keepalive off, and remove the old key',
+        );
+        expect(text).toContain(
+          `legacy value: ${typeof raw.keepaliveMaxPings === "number" ? raw.keepaliveMaxPings : "(invalid)"}`,
+        );
+      } else {
+        expect(text).not.toContain("deprecated");
+        expect(legacyCapNote(cfg)).toBeUndefined();
+      }
+    },
+  );
+});
+
+describe("legacy cap note with a live report", () => {
+  it("appends the identical note AFTER the cap report and never notifies on startup", async () => {
+    const hooks = new Map<string, any>();
+    const commands = new Map<string, any>();
+    const pi = {
+      on: (name: string, fn: any) => hooks.set(name, fn),
+      registerCommand: (name: string, cmd: any) => commands.set(name, cmd),
+    } as unknown as ExtensionAPI;
+    const cfg = parseCacheTtlSettings({ keepalive: true, keepaliveMaxPings: 0 });
+    const port = fakePort({
+      report: () => ({
+        enabled: true,
+        armed: false,
+        config: { enabled: true, intervalMs: 240_000, maxPings: 48, maxPingsSource: "priced", minPrefixTokens: 20_000 },
+        window: createInitialWindowState(),
+        session: createInitialSessionTotals(),
+        costUsd: undefined,
+        dropped: { sessionMismatch: 0, instanceMismatch: 0, epochMismatch: 0 },
+        lastSkip: undefined,
+        prefixSource: undefined,
+        supportsLongCacheRetention: true,
+        lastPingDiagnostics: undefined,
+      }),
+    });
+    const ctx = { ui: { notify: vi.fn(), setStatus: vi.fn() } } as unknown as ExtensionContext;
+    wireCacheTtl(pi, { ...DEFAULT_SETTINGS, cacheTtl: cfg }, { keepalive: () => port as any });
+    await hooks.get("session_start")({}, ctx);
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
+    await commands.get("cache-ttl").handler("status", ctx);
+    const text = vi.mocked(ctx.ui.notify).mock.calls[0]![0];
+    expect(text).toContain("cap: 48/window (priced)");
+    expect(text.indexOf("note: ")).toBeGreaterThan(text.indexOf("cap:"));
+    expect(text).toContain(legacyCapNote(cfg));
+    expect(text).toContain("legacy value: 0");
+  });
+});
+
+describe("r_FFWC8SBT — main-session real usage forwarding", () => {
+  it.each(["message_end", "turn_end"])("%s forwards this response's FULL input (not ledger/prefix/output)", (event) => {
+    const { hooks, ctx, port } = setupWithPort();
+    const message = {
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-x",
+      stopReason: "stop",
+      usage: { input: 25_000, cacheRead: 30_000, cacheWrite: 17, output: 9_000_000 },
+    };
+    // Deliberately contradictory prior ledger data must never be used by this forwarding hook.
+    Object.assign(ctx.sessionManager, {
+      getEntries: () => [
+        { type: "message", message: { role: "assistant", usage: { input: 1, cacheRead: 2, cacheWrite: 3 } } },
+      ],
+    });
+    hooks.get(event)!({ message }, ctx);
+    expect(port.noteRequestSettled).toHaveBeenCalledTimes(1);
+    expect(port.noteRequestSettled).toHaveBeenCalledWith(
+      "s1",
+      "inst-1",
+      true,
+      { provider: "anthropic", modelId: "claude-x" },
+      55_017,
+    );
+  });
+  it.each(["message_end", "turn_end"])("%s does not invent full input from partial usage", (event) => {
+    const { hooks, ctx, port } = setupWithPort();
+    hooks.get(event)!(
+      {
+        message: {
+          role: "assistant",
+          provider: "anthropic",
+          model: "claude-x",
+          usage: { cacheRead: 30_000, cacheWrite: 0 },
+        },
+      },
+      ctx,
+    );
+    expect(port.noteRequestSettled).toHaveBeenCalledTimes(1);
+    expect(port.noteRequestSettled).toHaveBeenCalledWith(
+      "s1",
+      "inst-1",
+      true,
+      { provider: "anthropic", modelId: "claude-x" },
+      undefined,
+    );
   });
 });

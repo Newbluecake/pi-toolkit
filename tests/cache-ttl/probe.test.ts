@@ -193,7 +193,6 @@ function settingsWith(mode: "auto" | "on" | "off"): AgentSettings {
       mode,
       keepalive: true,
       keepaliveIntervalMs: 240_000,
-      keepaliveMaxPings: 11,
       keepaliveMinPrefixTokens: 20_000,
     },
   } as unknown as AgentSettings;

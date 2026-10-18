@@ -97,7 +97,6 @@ const SETTINGS: CacheTtlSettings = {
   mode: "auto",
   keepalive: true,
   keepaliveIntervalMs: 240_000,
-  keepaliveMaxPings: 11,
   keepaliveMinPrefixTokens: 20_000,
 };
 

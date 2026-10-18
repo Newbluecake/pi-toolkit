@@ -78,6 +78,8 @@ Anthropic「cache read 免费刷新 TTL」的特性给缓存续命。
 
 ### 0.3 成本模型（M1 修订：三种基准分列，不混用）
 
+> **Superseded (2026-10-18)**：本节旧固定 11/窗口推导由 [`dynamic-cap-plan.md`](dynamic-cap-plan.md) §0/§10/§R2 覆盖：按捕获模型缓存价与该真实请求完整输入 usage 选整档，严格不盈利等号规则，cap 钳到 0–96；未知回退 11 无盈利性证明。只比较缓存前缀预算，不含未缓存输入/输出，绝非总成本保证。
+
 设 P = **可复用前缀**的 token 数。所有数字都以「P 的倍数」表示，**基准是同一场景下
 最终那次真实请求本来也要付的东西**，三种情景分别算：
 
@@ -608,6 +610,8 @@ invalidate(w, reason): w.capture = undefined; w.windowEpoch += 1;
 
 ### 5.4 门控（问题 4，“净省钱才 ping”）
 
+> **Superseded (2026-10-18 用户裁定，r_FFWC8SBT 后收口)**：下表 G4 的 Copilot 排除已取消：`github-copilot` 现按 token 计费，不再按 provider 名称拒绝。空 `PING_DENY_PROVIDERS` 常量及判定已删除（§10.1 的旧常量清单也不再适用）；仍只允许 `anthropic-messages`，并保留缓存断点、指纹、存活期、计数/美元预算与熔断各门。动态 cap 展示的后续收口：从未开窗显示旧 `0/max (idle)`，仅 capture 已失效且有 epoch/ping 历史的窗口显示 `ended`；fallback 显实际短原因（无价格用 `unpriced`）；分档模型在完整真实响应 usage 未知时（含无 capture）一律 `tier-uncertain`。详见 [`dynamic-cap-report.md`](dynamic-cap-report.md) 的 “Follow-ups after r_FFWC8SBT”。
+
 | 门                        | 判据                                                                                  | 理由 / 备选                                                                                                                                               |
 | ------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | G1 设置开关               | `settings.cacheTtl.keepalive`（+ `/cache-ttl keepalive off` 的进程内覆盖）            | 默认 **true**（用户维持）                                                                                                                                 |
@@ -638,6 +642,8 @@ invalidate(w, reason): w.capture = undefined; w.windowEpoch += 1;
   （auth 可能走网络刷新 OAuth），不通过就放弃本次（不计 unproven，因为请求从未发出）。
 
 ### 6.2 预算 = 11 次 / 窗口
+
+> **Superseded (2026-10-18)**：本节旧固定 11/窗口推导由 [`dynamic-cap-plan.md`](dynamic-cap-plan.md) §0/§10/§R2 覆盖：按捕获模型缓存价与该真实请求完整输入 usage 选整档，严格不盈利等号规则，cap 钳到 0–96；未知回退 11 无盈利性证明。只比较缓存前缀预算，不含未缓存输入/输出，绝非总成本保证。
 
 - `0.1 × 11 + 0.1 = 1.2P` ≈ `1.25P`（情景 A）⇒ 11 次是不亏的最大整数（§0.3 判据 1）。
 - 11 × 4 分钟 ≈ **44 分钟**覆盖。第 12 次开始亏，硬顶取 11。
@@ -985,6 +991,8 @@ onPingStarted(now)
 ## 10. 设置项（问题 6）
 
 ### 10.1 四个 spec（2026-10-11 移除升级开关）
+
+> **Superseded (2026-10-18)**：本设置表中的 `keepaliveMaxPings` 已彻底移除，所有旧值（含 0、非法值）忽略；只在 `/cache-ttl status` 提示废弃及原值/`(invalid)`，无启动通知。关闭用 `cacheTtl.keepalive:false`。动态 cap 无可配覆盖值，详见 [`dynamic-cap-plan.md`](dynamic-cap-plan.md) §2.3/§R2。
 
 | 键（存储/展示）                     | 内部字段                   | 类型          | 默认           | 说明                                                 |
 | ----------------------------------- | -------------------------- | ------------- | -------------- | ---------------------------------------------------- |

@@ -131,7 +131,24 @@ const lastPingAge = computed(() => {
   });
 });
 
-const windowText = computed(() => `${props.keepalive.window?.pings ?? 0}/${props.keepalive.window?.max ?? 0}`);
+const windowText = computed(() =>
+  props.keepalive.window?.ended === true
+    ? "ended"
+    : `${props.keepalive.window?.pings ?? 0}/${props.keepalive.window?.max ?? 0}`,
+);
+const windowCapTitle = computed(() => {
+  if (props.keepalive.window?.ended) return undefined;
+  switch (props.keepalive.window?.maxSource) {
+    case "priced":
+      return "Prefix budget from model cache read/write prices";
+    case "clamped":
+      return "Price-derived prefix budget clamped to 96";
+    case "fallback":
+      return "Unpriced fallback 11; no profitability proof";
+    default:
+      return undefined;
+  }
+});
 const sessionPings = computed(() => props.keepalive.session?.pings ?? 0);
 const cacheReadText = computed(() => formatTokenCount(props.keepalive.session?.cacheReadTokens ?? 0));
 const costText = computed(() => formatCacheCost(props.keepalive.session?.costUsd));
@@ -213,7 +230,7 @@ function lineChips(row: KeepaliveLineRow): string[] {
         <div>
           <dt>{{ t("cacheKeepalive.rowWindow") }}</dt>
           <dd>
-            <span class="ck-token" translate="no">{{ windowText }}</span>
+            <span class="ck-token" translate="no" :title="windowCapTitle">{{ windowText }}</span>
           </dd>
         </div>
         <div>

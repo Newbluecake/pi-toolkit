@@ -172,19 +172,25 @@ describe("evaluateTick — short-circuit ladder", () => {
     expect(result.decision).toEqual({ kind: "skip", reason: "not-anthropic", terminal: true });
   });
 
-  it("#5 denylisted provider (github-copilot) is rejected", () => {
-    const window = armedWindow({ capture: captured({ fingerprint: fingerprint({ provider: "github-copilot" }) }) });
-    const result = evaluateTick({
-      now: 1000,
-      mode: "tui",
-      armed: true,
-      config: config(),
-      session: baseSession(),
-      window,
-      currentFingerprint: fingerprint({ provider: "github-copilot" }),
-    });
-    expect(result.decision).toEqual({ kind: "skip", reason: "not-anthropic", terminal: true });
-  });
+  it.each(["anthropic-messages", "openai-completions"])(
+    "#5 token-billed github-copilot obeys API gating (%s)",
+    (api) => {
+      const fp = fingerprint({ provider: "github-copilot", api });
+      const window = armedWindow({ capture: captured({ fingerprint: fp }) });
+      const result = evaluateTick({
+        now: 240_000,
+        mode: "tui",
+        armed: true,
+        config: config(),
+        session: baseSession(),
+        window,
+        currentFingerprint: fp,
+      });
+      expect(result.decision).toEqual(
+        api === "anthropic-messages" ? { kind: "ping" } : { kind: "skip", reason: "not-anthropic", terminal: true },
+      );
+    },
+  );
 
   it("#6 no cache_control breakpoints ⇒ no-cache-control", () => {
     const window = armedWindow({
@@ -1502,5 +1508,66 @@ describe("cacheWriteCostUsd (child-ka-core, mirrors cacheReadCostUsd's tier sele
   it("a tier missing cacheWrite falls back to the base rate for that tier boundary", () => {
     const cost = { cacheWrite: 12.5, tiers: [{ inputTokensAbove: 272_000, cacheRead: 2 }] }; // no cacheWrite on the tier
     expect(cacheWriteCostUsd(cost, 300_000)).toBeCloseTo(3.75, 6); // still the base 12.5 rate
+  });
+});
+
+describe("dynamic cap report text and ended windows", () => {
+  it.each([
+    [{ maxPings: 48, maxPingsSource: "priced" }, "cap: 48/window (priced)"],
+    [{ maxPings: 96, maxPingsSource: "clamped", maxPingsRaw: 2000 }, "cap: 96/window (clamped from 2000)"],
+    [{ maxPings: 96, maxPingsSource: "clamped", maxPingsRaw: 2 ** 54 }, "cap: 96/window (clamped)"],
+    [
+      { maxPings: 11, maxPingsSource: "fallback", maxPingsReason: "tier-uncertain" },
+      "cap: 11/window (fallback: tier-uncertain)",
+    ],
+    [{ maxPings: 11 }, "cap: 11/window ·"],
+  ])("source display %j", (over, text) => {
+    const r = report({ config: config(over as Partial<KeepaliveConfig>) });
+    expect(renderKeepaliveReportLines(r)[1]).toContain(text);
+  });
+  it("invalidated old 20-ping window never reads as 20/11 capped", () => {
+    const r = report({
+      window: armedWindow({ capture: undefined, pings: 20 }),
+      session: baseSession({ pings: 20, cacheReadTokens: 450_000 }),
+      costUsd: 0.12,
+    });
+    expect(renderCacheStatus({ mode: "auto", dirty: false, report: r })).toBe("ping Σ20 · 450k · ≈$0.12");
+    expect(renderKeepaliveReportLines(r)).toContain("window: ended (Σ20 pings)");
+    expect(renderKeepaliveReportLines(r).join("\n")).not.toContain("20/11");
+  });
+});
+
+describe("r_FFWC8SBT — report distinguishes fresh and invalidated windows", () => {
+  it("a never-opened window keeps the original zero/maximum idle text", () => {
+    const r = report({ window: createInitialWindowState(), session: baseSession(), armed: false });
+    expect(renderKeepaliveReportLines(r)).toContain("window: 0/11 (idle)");
+    expect(renderKeepaliveReportLines(r).join("\n")).not.toContain("ended");
+  });
+  it.each([
+    { windowEpoch: 1, pings: 0 },
+    { windowEpoch: 0, pings: 20 },
+  ])("an invalidated or previously active window is ended (%j)", (history) => {
+    const r = report({
+      window: { ...createInitialWindowState(), ...history },
+      session: baseSession({ pings: history.pings }),
+    });
+    expect(renderKeepaliveReportLines(r)).toContain(`window: ended (Σ${history.pings} pings)`);
+  });
+  it.each([
+    "unpriced",
+    "no-read",
+    "no-write",
+    "write-le-read",
+    "non-finite",
+    "tier-uncertain",
+    "tier-incomplete",
+    "wire-model-unmapped",
+  ])("fallback renders its real reason: %s", (reason) => {
+    const r = report({ config: config({ maxPingsSource: "fallback", maxPingsReason: reason }) });
+    expect(renderKeepaliveReportLines(r)[1]).toContain(`cap: 11/window (fallback: ${reason})`);
+  });
+  it("an old config without a fallback reason uses unpriced", () => {
+    const r = report({ config: config({ maxPingsSource: "fallback" }) });
+    expect(renderKeepaliveReportLines(r)[1]).toContain("cap: 11/window (fallback: unpriced)");
   });
 });

@@ -9,6 +9,7 @@ import {
   createInitialWindowState,
   renderCacheStatus,
   type KeepaliveReport,
+  type CapturedRequest,
   type LineState,
   type SessionTotals,
   type WindowState,
@@ -35,7 +36,30 @@ const line = (o: Partial<LineState> = {}): LineState => ({
   updatedAt: NOW - 1000,
   ...o,
 });
-const win = (o: Partial<WindowState> = {}): WindowState => ({ ...createInitialWindowState(), ...o });
+const capture: CapturedRequest = {
+  sessionId: "s",
+  instance: "i",
+  payload: {},
+  headers: {},
+  capturedAt: 0,
+  fingerprint: {
+    sessionId: "s",
+    provider: "p",
+    api: "anthropic-messages",
+    modelId: "m",
+    ctxModelId: "m",
+    baseUrl: "https://x",
+    authHeaderKeys: "",
+    breakpointPath: "",
+    thinkingDigest: "",
+    systemDigest: "",
+    toolsDigest: "",
+    messageCount: 0,
+  },
+  shape: { ephemeralBreakpoints: 1, ttl1h: false, hasThinking: false, maxTokens: 1 },
+  prefix: { tokens: 30_000, source: "usage" },
+};
+const win = (o: Partial<WindowState> = {}): WindowState => ({ ...createInitialWindowState(), capture, ...o });
 function report(over: Partial<KeepaliveReport> = {}, session: Partial<SessionTotals> = {}): KeepaliveReport {
   return {
     enabled: true,
@@ -309,5 +333,59 @@ describe("fingerprint", () => {
     expect(cacheKeepaliveFingerprint(proj(input(base, "on")))).not.toBe(f0);
     expect(cacheKeepaliveFingerprint(proj(input(report({ armed: true }, { pings: 3 }))))).toBe(f0);
     expect(cacheKeepaliveFingerprint(proj(input(base), NOW + 12345))).toBe(f0); // `at` excluded
+  });
+});
+
+describe("dynamic cap optional wire fields", () => {
+  it.each(["priced", "clamped", "fallback"] as const)("passes maxSource=%s without a protocol bump", (maxSource) => {
+    const r = report();
+    r.config.maxPingsSource = maxSource;
+    const w = proj(input(r, "on"))!;
+    expect(w.window).toEqual({ pings: 0, max: 11, maxSource });
+    expect(w.v).toBe(1);
+    expect(Value.Check(CacheKeepaliveWireSchema, w)).toBe(true);
+  });
+  it("invalidated 20-ping window + new max 11 shows ended, never 20/11 capped", () => {
+    const r = report(
+      { window: win({ capture: undefined, pings: 20 }), costUsd: 0.12 },
+      { pings: 20, cacheReadTokens: 450_000 },
+    );
+    r.config.maxPingsSource = "fallback";
+    const w = proj(input(r))!;
+    expect(w.window).toEqual({ pings: 20, max: 11, maxSource: "fallback", ended: true });
+    expect(w.ping).toEqual({ state: "active", text: "ping Σ20 · 450k · ≈$0.12" });
+    expect(JSON.stringify(w)).not.toContain("20/11");
+    expect(Value.Check(CacheKeepaliveWireSchema, w)).toBe(true);
+  });
+  it("old agents need neither field; unproven stop is still miss, not ended", () => {
+    const w = proj(
+      input(report({ window: win({ capture: undefined, lastStopReason: "network", pings: 1 }) }, { pings: 1 })),
+    )!;
+    expect(w.window).not.toHaveProperty("maxSource");
+    expect(w.window).not.toHaveProperty("ended");
+    expect(w.ping?.text).toBe("ping miss:network");
+    expect(Value.Check(CacheKeepaliveWireSchema, w)).toBe(true);
+  });
+});
+
+describe("r_FFWC8SBT — only previously invalidated windows project ended", () => {
+  it("never-opened windows omit ended, even when mode/off or disabled makes them visible", () => {
+    for (const i of [
+      input(report({ window: createInitialWindowState() }), "on"),
+      input(report({ window: createInitialWindowState(), enabled: false })),
+    ]) {
+      const wire = proj(i)!;
+      expect(wire).toBeDefined();
+      expect(wire.window).toEqual({ pings: 0, max: 11 });
+      expect(wire.window).not.toHaveProperty("ended");
+      expect(Value.Check(CacheKeepaliveWireSchema, wire)).toBe(true);
+    }
+  });
+  it.each([
+    { windowEpoch: 1, pings: 0 },
+    { windowEpoch: 0, pings: 20 },
+  ])("invalidated/history window projects ended (%j)", (history) => {
+    const wire = proj(input(report({ window: { ...createInitialWindowState(), ...history } }), "on"))!;
+    expect(wire.window.ended).toBe(true);
   });
 });

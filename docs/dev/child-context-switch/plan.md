@@ -585,3 +585,7 @@ unknown ──L0 ok──▶ static-ok ──L1 ok──▶ observed ──L2 ok
 - 核对子会话 fleet/HUD 成本是否包含 keepalive ping 费用（`subagent:cache-keepalive` custom 条目的 `costUsd` 是否折进 run 的 `usage.costUsd`）。
 - 验证 `cacheTtl.childKeepalive=false` / `compact.childSessions=false` 时子会话零新增注册、零审计写入、零网络（对照 §4「关闭时的验收口径」）。
 - 验证跨 `/reload` 能力状态保留（不重新从 `unknown` 走一遍），以及主会话 `/reload` 时在途子 run 的 keepalive ping 被 abort 后 lease 正常释放（不残留占用）。
+
+## Supersede note — dynamic window caps (2026-10-18)
+
+旧固定 11/窗口与 `cacheTtl.keepaliveMaxPings` 配置说明由 [`dynamic-cap-plan.md`](../cache-ttl-keepalive/dynamic-cap-plan.md) §0/§10/§R2 覆盖。主/子窗口统一按捕获模型缓存价推算前缀读预算（完整真实请求 usage 选整档），cap=0–96；未知回退 11 无盈利性证明，不含未缓存输入/输出。旧键含 0/非法值均忽略，仅 status 提示，不发启动通知；24/run、并发和美元闸不变。Web `window.max` 为动态值，可选追加 `maxSource` 与 `ended`；失效窗口折叠行只显累计，展开行显 `ended`，旧端缺字段保留原格式，无协议版本升级。

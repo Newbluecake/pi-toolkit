@@ -65,8 +65,6 @@ export const MAX_SAFE_KEEPALIVE_INTERVAL_MS: Millis = 240_000;
 export const UNPROVEN_STREAK_LIMIT = 2;
 /** I-K7: cumulative (non-consecutive) unproven pings before the whole session is disabled. */
 export const UNPROVEN_TOTAL_LIMIT = 3;
-/** G4: providers billed per-request rather than per-token — ping cost model doesn't hold. */
-export const PING_DENY_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot"]);
 /** G3: only Anthropic's Messages API has cache_control / free-read-refresh semantics. */
 export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 /** G2: only these run modes can plausibly resume a long-idle session. */
@@ -569,6 +567,9 @@ export interface KeepaliveConfig {
   enabled: boolean;
   intervalMs: Millis;
   maxPings: number;
+  maxPingsSource?: WindowCap["source"];
+  maxPingsRaw?: number;
+  maxPingsReason?: string;
   minPrefixTokens: number;
   /**
    * child-ka-core (plan.md §2.4/§3): additionally allow `mode === "print"`
@@ -746,8 +747,9 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
   // #4.5 — child-ka-core: pi's own native CacheWarmer already handles this
   // model/route (declares `promptCache`) — pinging too would double-warm it.
   if (nativeWarmerActive === true) return skip("native-warmer", true);
-  // #5 — G3 + G4
-  if (capture.fingerprint.api !== ANTHROPIC_MESSAGES_API || PING_DENY_PROVIDERS.has(capture.fingerprint.provider)) {
+  // #5 — G3. Copilot is token-billed too (2026-10-18 user ruling): API semantics,
+  // not the provider name, determine eligibility; every remaining safety/budget gate still applies.
+  if (capture.fingerprint.api !== ANTHROPIC_MESSAGES_API) {
     return skip("not-anthropic", true);
   }
   // #6 — G5
@@ -1112,6 +1114,18 @@ export function isSuccessfulRealRequest(message: unknown): boolean {
   );
 }
 
+/** Full input of THIS real response, never the previous response's cached-prefix lower bound.
+ * Missing fields are unknown, not zero: tier selection must not guess across a threshold.
+ */
+export function realRequestInputTokens(message: unknown): number | undefined {
+  if (!isSuccessfulRealRequest(message)) return undefined;
+  const usage = (message as { usage: Record<string, unknown> }).usage;
+  const values = [usage.input, usage.cacheRead, usage.cacheWrite];
+  if (!values.every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0)) return undefined;
+  const total = (values as number[]).reduce((sum, n) => sum + n, 0);
+  return Number.isFinite(total) ? total : undefined;
+}
+
 export function isTransientUnproven(kind: UnprovenKind, httpStatus?: number): boolean {
   if (kind === "network" || kind === "accepted-then-lost" || kind === "malformed") return true;
   if (kind !== "http" || httpStatus === undefined) return false;
@@ -1424,6 +1438,61 @@ export interface KeepaliveCostModel {
   tiers?: KeepaliveCostTier[];
 }
 
+export const FALLBACK_WINDOW_CAP = 11;
+export const WINDOW_CAP_CEILING = 96;
+
+export interface WindowCap {
+  cap: number;
+  source: "priced" | "clamped" | "fallback";
+  rawCap?: number;
+  reason?: string;
+}
+
+/** pi-ai calculateCost replaces the WHOLE rate object, strictly above a threshold.
+ * Unlike the legacy dollar estimators below, never mix a tier's W/R with base fields.
+ */
+export function pickRateTier(cost: KeepaliveCostModel, inputTokens: number): KeepaliveCostModel | KeepaliveCostTier {
+  let rates: KeepaliveCostModel | KeepaliveCostTier = cost;
+  let threshold = -1;
+  for (const tier of cost.tiers ?? []) {
+    if (inputTokens > tier.inputTokensAbove && tier.inputTokensAbove > threshold) {
+      rates = tier;
+      threshold = tier.inputTokensAbove;
+    }
+  }
+  return rates;
+}
+
+/** Prefix-read budget ONLY, not a bound on total cost (uncached input/output are excluded).
+ * R2: inputTokens is the window-opening real response's input+cacheRead+cacheWrite;
+ * no usage + tiered model => unknown. No tiers => base price needs no usage.
+ * Fallback 11 is historical and has NO profitability proof.
+ */
+export function computeWindowCap(cost: KeepaliveCostModel | undefined, inputTokens?: number): WindowCap {
+  const fallback = (reason: string): WindowCap => ({ cap: FALLBACK_WINDOW_CAP, source: "fallback", reason });
+  if (!cost) return fallback("unpriced");
+  const tiered = (cost.tiers?.length ?? 0) > 0;
+  if (tiered && (inputTokens === undefined || !Number.isFinite(inputTokens) || inputTokens < 0))
+    return fallback("tier-uncertain");
+  const rates = pickRateTier(cost, inputTokens ?? 0);
+  const r = rates.cacheRead;
+  const w = rates.cacheWrite;
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+  if (rates !== cost && (!finite(r) || !finite(w))) return fallback("tier-incomplete");
+  if (!finite(r) || r <= 0) return fallback("no-read");
+  if (!finite(w) || w <= 0) return fallback("no-write");
+  if (w <= r) return fallback("write-le-read");
+  const q = w / r;
+  if (!Number.isFinite(q)) return fallback("non-finite");
+  const rounded = Math.round(q);
+  const integer = Math.abs(q - rounded) <= 4 * Number.EPSILON * Math.max(1, Math.abs(q));
+  const raw = (integer ? rounded : Math.ceil(q)) - 2;
+  if (!Number.isFinite(raw)) return fallback("non-finite");
+  return raw > WINDOW_CAP_CEILING
+    ? { cap: WINDOW_CAP_CEILING, source: "clamped", rawCap: raw }
+    : { cap: Math.max(0, raw), source: "priced" };
+}
+
 /** Shared tier-selection walk (highest `inputTokensAbove` strictly below `tokens`) used by both `cacheReadCostUsd` and `cacheWriteCostUsd` — mirrors pi-ai `models.js`'s `calculateCost`. */
 function tieredRate(
   cost: KeepaliveCostModel,
@@ -1674,7 +1743,7 @@ export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegme
       return parts;
     }
   }
-  if (window.pings > 0 && window.pings >= config.maxPings)
+  if (window.capture !== undefined && window.pings > 0 && window.pings >= config.maxPings)
     return { text: `ping ${window.pings}/${config.maxPings} capped`, state: "capped" };
   // "miss", not "paused" (2026-10-16 rename): a window-level stop is NOT a session pause —
   // never-processed transients don't pause the session anymore (r2), the next real request
@@ -1682,6 +1751,11 @@ export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegme
   // enum, frozen in webhub-plan §0.5 and pinned by both sides' tests).
   if (window.lastStopReason !== undefined) return { text: `ping miss:${window.lastStopReason}`, state: "paused" };
   if (session.pings === 0 && window.pings === 0) return undefined;
+  if (window.capture === undefined)
+    return {
+      text: `ping Σ${session.pings} · ${formatTokenCount(session.cacheReadTokens)} · ${formatCost(report.costUsd)}`,
+      state: "active",
+    };
   const cumulative = session.pings > window.pings ? ` Σ${session.pings}` : "";
   return {
     text: `ping ${window.pings}/${config.maxPings}${cumulative} · ${formatTokenCount(session.cacheReadTokens)} · ${formatCost(report.costUsd)}`,
@@ -1753,15 +1827,35 @@ function colorizeSegment(segment: CacheStatusSegment, theme: CacheStatusTheme): 
   return theme.fg(color, segment.text);
 }
 
+/** A fresh never-opened window is not "ended". Share this distinction with the web projection. */
+export function isKeepaliveWindowEnded(window: WindowState): boolean {
+  return (
+    window.capture === undefined && window.lastStopReason === undefined && (window.windowEpoch > 0 || window.pings > 0)
+  );
+}
+
 /** Multi-line `/cache-ttl status` body (plan.md §9.4's required field list). */
 export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
   const { config, window, session, dropped } = report;
+  const source = config.maxPingsSource;
+  const capSuffix =
+    source === undefined
+      ? ""
+      : source === "fallback"
+        ? ` (fallback: ${config.maxPingsReason ?? "unpriced"})`
+        : source === "clamped" && Number.isSafeInteger(config.maxPingsRaw)
+          ? ` (clamped from ${config.maxPingsRaw})`
+          : ` (${source})`;
   const lines: string[] = [];
   lines.push(`enabled: ${report.enabled ? "on" : "off"}`);
   lines.push(
-    `interval: ${Math.round(config.intervalMs / 1000)}s · cap: ${config.maxPings}/window · min prefix: ${config.minPrefixTokens} tok`,
+    `interval: ${Math.round(config.intervalMs / 1000)}s · cap: ${config.maxPings}/window${capSuffix} · min prefix: ${config.minPrefixTokens} tok`,
   );
-  lines.push(`window: ${window.pings}/${config.maxPings} (${report.armed ? "armed" : "idle"})`);
+  lines.push(
+    isKeepaliveWindowEnded(window)
+      ? `window: ended (Σ${session.pings} pings)`
+      : `window: ${window.pings}/${config.maxPings} (${report.armed ? "armed" : "idle"})`,
+  );
   lines.push(
     `session: ${session.pings} ping · cache-read ${formatTokenCount(session.cacheReadTokens)} tok · cost ${formatCost(report.costUsd)}`,
   );

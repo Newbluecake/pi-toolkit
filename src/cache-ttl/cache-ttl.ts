@@ -4,6 +4,7 @@ import {
   persistSettingOverride,
   type AgentSettings,
   type CacheTtlMode,
+  type CacheTtlSettings,
 } from "../config/settings.js";
 import {
   buildFingerprint,
@@ -12,6 +13,7 @@ import {
   readCacheStatusTheme,
   renderKeepaliveReportLines,
   isSuccessfulRealRequest,
+  realRequestInputTokens,
   cacheReadCostUsd,
   cacheWriteCostUsd,
   type CacheDisplayMode,
@@ -458,8 +460,15 @@ export interface RequestCapture {
   consumeHeaders(headers: unknown): void;
 }
 
+/** Status-only migration: presence, including invalid/zero, NEVER affects the cap or switch. */
+export function legacyCapNote(settings: CacheTtlSettings): string | undefined {
+  const value = settings.legacyKeepaliveMaxPings;
+  if (value === undefined) return undefined;
+  return `note: cacheTtl.keepaliveMaxPings is deprecated and ignored — the per-window cap now comes from the model's cache prices; use "cacheTtl.keepalive": false to turn keepalive off, and remove the old key\nlegacy value: ${value === "invalid" ? "(invalid)" : value}`;
+}
+
 /** Route (provider + model id) of a settled assistant message; undefined when either is missing. */
-function settledRouteOf(message: unknown): { provider: string; modelId: string } | undefined {
+export function settledRouteOf(message: unknown): { provider: string; modelId: string } | undefined {
   const m = message as { provider?: unknown; model?: unknown } | null | undefined;
   return typeof m?.provider === "string" && m.provider !== "" && typeof m.model === "string" && m.model !== ""
     ? { provider: m.provider, modelId: m.model }
@@ -537,6 +546,7 @@ function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
         ka.instanceId,
         isSuccessfulRealRequest(event.message),
         settledRouteOf(event.message),
+        realRequestInputTokens(event.message),
       );
     // O1/O3 evidence observation (mode-independent, user ruling 2026-10-12 — see
     // `observeUsageIntoEvidence`'s doc comment): fold this message's usage into the provider-
@@ -563,6 +573,7 @@ function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
         ka.instanceId,
         isSuccessfulRealRequest(event.message),
         settledRouteOf(event.message),
+        realRequestInputTokens(event.message),
       );
   });
   pi.on("agent_end", (_event, ctx) => {
@@ -759,10 +770,10 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
         const port = deps.keepalive?.();
         const lines: string[] = [];
         if (port) lines.push(...renderKeepaliveReportLines(port.report()));
-        if (lines.length === 0) {
-          ctx.ui.notify("keepalive service unavailable (no active session, or cacheTtl.keepalive=false)", "info");
-          return;
-        }
+        if (lines.length === 0)
+          lines.push("keepalive service unavailable (no active session, or cacheTtl.keepalive=false)");
+        const note = legacyCapNote(settings.cacheTtl);
+        if (note !== undefined) lines.push(note);
         ctx.ui.notify(lines.join("\n"), "info");
         return;
       }

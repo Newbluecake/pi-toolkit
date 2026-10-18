@@ -8,7 +8,6 @@ describe("cache-ttl keepalive settings", () => {
       mode: "auto",
       keepalive: true,
       keepaliveIntervalMs: 240_000,
-      keepaliveMaxPings: 11,
       keepaliveMinPrefixTokens: 20_000,
       childKeepalive: true,
       childKeepaliveMaxPingsPerRun: 24,
@@ -26,7 +25,6 @@ describe("cache-ttl keepalive settings", () => {
       parseCacheTtlSettings({
         keepalive: "nope",
         keepaliveIntervalMs: "nope",
-        keepaliveMaxPings: -1,
         keepaliveMinPrefixTokens: NaN,
       }),
     ).toEqual(DEFAULT_SETTINGS.cacheTtl);
@@ -37,14 +35,12 @@ describe("cache-ttl keepalive settings", () => {
       parseCacheTtlSettings({
         keepalive: false,
         keepaliveIntervalMs: 120_000,
-        keepaliveMaxPings: 5,
         keepaliveMinPrefixTokens: 5_000,
       }),
     ).toEqual({
       mode: "auto",
       keepalive: false,
       keepaliveIntervalMs: 120_000,
-      keepaliveMaxPings: 5,
       keepaliveMinPrefixTokens: 5_000,
       childKeepalive: true,
       childKeepaliveMaxPingsPerRun: 24,
@@ -84,7 +80,7 @@ describe("cache-ttl keepalive settings", () => {
     expect(loaded.cacheTtl.keepaliveIntervalMs).toBe(90_000);
   });
 
-  it("registers the 4 keepalive SETTING_SPECS entries", () => {
+  it("registers only the 3 surviving keepalive SETTING_SPECS entries", () => {
     expect(SETTING_SPECS["cacheTtl.keepalive"]).toMatchObject({ kind: "boolean", path: "cacheTtl.keepalive" });
     expect(SETTING_SPECS["cacheTtl.keepaliveIntervalS"]).toMatchObject({
       kind: "number",
@@ -93,10 +89,8 @@ describe("cache-ttl keepalive settings", () => {
       min: 60,
       max: 240,
     });
-    expect(SETTING_SPECS["cacheTtl.keepaliveMaxPings"]).toMatchObject({
-      kind: "number",
-      path: "cacheTtl.keepaliveMaxPings",
-    });
+    expect(SETTING_SPECS["cacheTtl.keepaliveMaxPings"]).toBeUndefined();
+    expect(Object.values(SETTING_SPECS).some((s) => s.path === "cacheTtl.keepaliveMaxPings")).toBe(false);
     expect(SETTING_SPECS["cacheTtl.keepaliveMinPrefixTokens"]).toMatchObject({
       kind: "number",
       path: "cacheTtl.keepaliveMinPrefixTokens",
@@ -202,5 +196,34 @@ describe("cache-ttl removed settings migration", () => {
     ).toBe(90_000);
     expect(SETTING_SPECS["cacheTtl.mode"]).toMatchObject({ kind: "enum", values: ["auto", "on", "off"] });
     expect(SETTING_SPECS["cacheTtl.keepaliveUpgradeAfterBudget"]).toBeUndefined();
+  });
+});
+
+describe("removed keepaliveMaxPings — status-only four-state migration", () => {
+  it.each([5, 0, -1, "x", NaN, Infinity, null, undefined])(
+    "ignores present legacy value %s without warning",
+    (value) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const raw = { keepalive: true, keepaliveMaxPings: value };
+        const expected = {
+          ...DEFAULT_SETTINGS.cacheTtl,
+          legacyKeepaliveMaxPings: typeof value === "number" && Number.isFinite(value) ? value : "invalid",
+        };
+        for (let i = 0; i < 3; i++) {
+          expect(parseCacheTtlSettings(raw)).toEqual(expected);
+          expect(loadSettings({ cacheTtl: raw }).cacheTtl).toEqual(expected);
+        }
+        expect(parseCacheTtlSettings({ ...raw, keepalive: false }).keepalive).toBe(false);
+        expect(expected).not.toHaveProperty("keepaliveMaxPings");
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+  it("absent legacy key stays absent", () => {
+    expect(parseCacheTtlSettings({})).toEqual(DEFAULT_SETTINGS.cacheTtl);
+    expect(parseCacheTtlSettings({})).not.toHaveProperty("legacyKeepaliveMaxPings");
   });
 });

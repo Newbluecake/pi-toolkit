@@ -185,6 +185,8 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
 - `src/cache-ttl/` — prompt-cache TTL modes `auto`/`on`/`off`, status-bar indicator,
   persisted settings override, and `/cache-ttl`. Auto follows pi/env; on explicitly forces 1h;
   off strips the TTL override. No automatic 1h upgrades remain (user decision 2026-10-11).
+  Copilot (`github-copilot`) is token-billed and is no longer provider-denied (2026-10-18 user ruling);
+  only Anthropic-messages API requests remain eligible, subject to every normal safety/budget gate.
   Keepalive replays captured payloads and verbatim headers under bounded ping budgets,
   fingerprint/session/epoch guards, and unref'd timers (service in `src/service/cache-keepalive.ts`).
   A single ping retries until the cache window runs out (2s→5s→10s→20s→30s then constant 30s, bounded by
@@ -200,7 +202,13 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   manually clears every breaker (design: `docs/dev/cache-ttl-keepalive/breaker-recovery-plan.md`).
   Design: `docs/dev/cache-ttl-keepalive/plan.md`. **Child-session keepalive** (child-context-switch
   plan §2.4, `src/cache-ttl/child.ts` + `child-registry.ts`): capture-only (never rewrites the
-  outgoing payload); limits 11/window · 24/run · 4 concurrent · $1.5/run · $10/24h process-rolling
+  outgoing payload); per-window cap uses the CAPTURED payload model's registry-mapped cache
+  prices (whole tier from that real response's full input usage; missing tier usage ⇒ fallback 11),
+  clamped to 0–96 (`clamped` above 96); this budgets the cache PREFIX only, not uncached input/output,
+  and fallback 11 has no profitability proof. The removed `cacheTtl.keepaliveMaxPings` key (even 0)
+  is ignored, with a status-only deprecation note (never session_start notify); turn off with
+  `cacheTtl.keepalive:false` then `/reload` (master wiring is non-live). Other child limits stay
+  24/run · 4 concurrent · $1.5/run · $10/24h process-rolling
   (`ping-ledger.ts`), no price info ⇒ no ping (`usd-unpriced`); ping cost folds into the child run's
   own `usage.costUsd` (fleet/HUD visible); disposed on `agent_settled` and defensively via the
   registry's `onReaped`. **`warmth.ts`** (topic-switch plan P2): a pi-free, never-throwing

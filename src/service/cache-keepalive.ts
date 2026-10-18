@@ -23,6 +23,10 @@ import {
   cacheReadCostUsd,
   cacheWriteCostUsd,
   compareFingerprint,
+  computeWindowCap,
+  FALLBACK_WINDOW_CAP,
+  type WindowCap,
+  type KeepaliveCostModel,
   createInitialSessionTotals,
   createInitialWindowState,
   evaluateTick,
@@ -159,6 +163,7 @@ export interface KeepalivePort {
     instance: string,
     successful?: boolean,
     settledRoute?: { provider: string; modelId: string },
+    inputTokens?: number,
   ): void;
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void;
   report(): KeepaliveReport;
@@ -270,6 +275,27 @@ export interface CacheKeepaliveDeps {
   evidence?: ProviderEvidenceStore | undefined;
 }
 
+/** The wire model must be CERTAINLY mapped to this exact route. Anthropic normally sends
+ * payload.model === model.id; aliases not registered under that exact id fall back, never guess.
+ */
+export function resolveCapModel(
+  registry: Pick<ExtensionContext["modelRegistry"], "find"> | undefined,
+  fp: Pick<CaptureFingerprint, "provider" | "modelId" | "api" | "baseUrl">,
+): Pick<KeepaliveModelInfo, "cost"> | undefined {
+  try {
+    const model = registry?.find(fp.provider, fp.modelId);
+    if (!model || model.api !== fp.api || model.baseUrl !== fp.baseUrl) return undefined;
+    // Snapshot rates, including whole tiers: a models.json refresh (even in-place) must not
+    // reprice a capture between its request hook and its response's usage arriving.
+    const cost = model.cost;
+    return {
+      cost: cost ? { ...cost, ...(cost.tiers ? { tiers: cost.tiers.map((tier) => ({ ...tier })) } : {}) } : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function safeSetStatus(ctx: ExtensionContext, text: string | undefined): void {
   try {
     // Merged status key (task's UI cleanup): the ping/window/session segment
@@ -362,12 +388,52 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     return true;
   }
 
+  /** One snapshot per capture: models.json changes never retroactively reprice an open window.
+   * Usage arrives later, from that capture's OWN real response; only the cap is then recomputed.
+   */
+  private capMemo:
+    { capture: CapturedRequest; cost: KeepaliveCostModel | undefined; mapped: boolean; cap: WindowCap } | undefined;
+
+  private windowCap(): WindowCap {
+    const capture = this.window.capture;
+    if (capture !== undefined && this.capMemo?.capture === capture) return this.capMemo.cap;
+    if (capture === undefined) this.capMemo = undefined;
+    let mapped: ReturnType<typeof resolveCapModel>;
+    try {
+      const model = capture === undefined ? this.safeModel() : undefined;
+      const fp =
+        capture?.fingerprint ??
+        (model
+          ? {
+              provider: model.provider,
+              modelId: model.id,
+              api: model.api,
+              baseUrl: model.baseUrl,
+            }
+          : undefined);
+      mapped = fp ? resolveCapModel(this.deps.ctx.modelRegistry, fp) : undefined;
+    } catch {
+      // ctx/registry can be stale, just like safeModel(). Unknown prices are not a crash.
+    }
+    const cap: WindowCap = mapped
+      ? // No capture means no window-opening real response usage either. Tiered models
+        // must stay tier-uncertain here, not promise a base-tier price before the request.
+        computeWindowCap(mapped.cost)
+      : { cap: FALLBACK_WINDOW_CAP, source: "fallback", reason: "wire-model-unmapped" };
+    if (capture !== undefined) this.capMemo = { capture, cost: mapped?.cost, mapped: mapped !== undefined, cap };
+    return cap;
+  }
+
   private config(): KeepaliveConfig {
     const s = this.deps.settings;
+    const cap = this.windowCap();
     return {
       enabled: this.enabledOverride ?? s.keepalive,
       intervalMs: s.keepaliveIntervalMs,
-      maxPings: s.keepaliveMaxPings,
+      maxPings: cap.cap,
+      maxPingsSource: cap.source,
+      ...(cap.rawCap !== undefined ? { maxPingsRaw: cap.rawCap } : {}),
+      ...(cap.reason !== undefined ? { maxPingsReason: cap.reason } : {}),
       minPrefixTokens: s.keepaliveMinPrefixTokens,
       ...(this.deps.allowHeadless !== undefined ? { allowHeadless: this.deps.allowHeadless } : {}),
       ...(this.deps.maxSessionPings !== undefined ? { maxSessionPings: this.deps.maxSessionPings } : {}),
@@ -716,7 +782,18 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     if (this.terminalSkipAuditedEpoch === this.window.windowEpoch) return;
     this.terminalSkipAuditedEpoch = this.window.windowEpoch;
     this.lastTerminalSkip = { reason, at: this.clock.now(), windowEpoch: this.window.windowEpoch };
-    this.audit("terminal-skip", { reason });
+    const cap = this.windowCap();
+    this.audit("terminal-skip", {
+      reason,
+      ...(reason === "budget-exhausted"
+        ? {
+            cap: cap.cap,
+            capSource: cap.source,
+            ...(cap.rawCap !== undefined ? { capRaw: cap.rawCap } : {}),
+            ...(cap.reason !== undefined ? { capReason: cap.reason } : {}),
+          }
+        : {}),
+    });
   }
 
   private onTick(): void {
@@ -748,6 +825,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.window = result.window;
     switch (result.decision.kind) {
       case "invalidate":
+        this.capMemo = undefined;
         this.lastSkip = undefined;
         this.audit("invalidate", { reason: result.decision.reason });
         this.syncExactTimer(); // todo #28: capture just got cleared — cancel any pending exact timer.
@@ -1161,8 +1239,26 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     instance: string,
     successful = false,
     settledRoute?: { provider: string; modelId: string },
+    inputTokens?: number,
   ): void {
     if (!this.accept(sessionId, instance)) return;
+    const capture = this.window.capture;
+    // One in-flight real request per session (same contract as the payload/header pair).
+    // Only its own assistant response can supply tier usage; no latest-ledger scan, no prior usage.
+    if (
+      this.window.requestInFlight &&
+      capture !== undefined &&
+      settledRoute !== undefined &&
+      settledRoute.provider === capture.fingerprint.provider &&
+      settledRoute.modelId === capture.fingerprint.ctxModelId &&
+      inputTokens !== undefined &&
+      Number.isFinite(inputTokens) &&
+      inputTokens >= 0
+    ) {
+      this.windowCap(); // pin the mapping before recomputing against the just-arrived usage
+      if (this.capMemo?.capture === capture && this.capMemo.mapped)
+        this.capMemo.cap = computeWindowCap(this.capMemo.cost, inputTokens);
+    }
     this.window = onRequestSettled(this.window);
     const line = successful && settledRoute !== undefined ? this.resolveSettledLine(settledRoute) : undefined;
     const nextSession = this.deps.recoverTransientFailures
@@ -1215,6 +1311,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     const inst = instance ?? this.instanceId;
     if (!this.accept(sid, inst)) return;
     this.window = invalidateReducer(this.window, reason);
+    this.capMemo = undefined;
     this.syncExactTimer();
   }
 
@@ -1350,6 +1447,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     if (this.disposed) return;
     this.accountNoCacheValueSession();
     this.disposed = true;
+    this.capMemo = undefined;
     if (this.timer) this.clock.clearTimer(this.timer);
     this.timer = undefined;
     this.clearExactTimer();

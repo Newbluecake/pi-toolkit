@@ -529,3 +529,7 @@ export function cacheKeepaliveWireBytes(wire: CacheKeepaliveWire): number;
 - P-B：`CacheKeepalivePanel` 改用 `defineAsyncComponent` 懒加载，以守住首屏体积预算（原方案为静态引入）。
 - 超过 16 行上限被截断的行也计入 `omitted`（原方案仅统计预算削减）。
 - `httpStatus` 断言放在 `tests/cache-ttl/keepalive-ping-retry.test.ts`（原方案放在别处的 service 测试）。
+
+## Supersede note — dynamic window caps (2026-10-18)
+
+旧固定 11/窗口与 `cacheTtl.keepaliveMaxPings` 配置说明由 [`dynamic-cap-plan.md`](dynamic-cap-plan.md) §0/§10/§R2 覆盖。主/子窗口统一按捕获模型缓存价推算前缀读预算（完整真实请求 usage 选整档），cap=0–96；未知回退 11 无盈利性证明，不含未缓存输入/输出。旧键含 0/非法值均忽略，仅 status 提示，不发启动通知；24/run、并发和美元闸不变。Web `window.max` 为动态值，可选追加 `maxSource` 与 `ended`；失效窗口折叠行只显累计，展开行显 `ended`，旧端缺字段保留原格式，无协议版本升级。

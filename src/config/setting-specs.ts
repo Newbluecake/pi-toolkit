@@ -720,11 +720,6 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description:
       "Interval between keepalive pings (max 240s: longer intervals can never ping before the 5m TTL safety margin)",
   }),
-  "cacheTtl.keepaliveMaxPings": count(
-    "cacheTtl.keepaliveMaxPings",
-    0,
-    "Hard cap on keepalive pings per window; 0 disables",
-  ),
   "cacheTtl.keepaliveMinPrefixTokens": count(
     "cacheTtl.keepaliveMinPrefixTokens",
     0,

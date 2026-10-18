@@ -53,7 +53,7 @@ function wiring(ctx: ExtensionContext, keepalive?: CacheKeepaliveService) {
 }
 
 function context(manager: SessionManager): ExtensionContext {
-  return {
+  const ctx = {
     mode: "tui",
     sessionManager: manager,
     model: {
@@ -61,11 +61,14 @@ function context(manager: SessionManager): ExtensionContext {
       api: "anthropic-messages",
       id: "claude-x",
       baseUrl: "https://api.anthropic.com",
-      cost: { cacheRead: 0.3 },
+      cost: { cacheRead: 0.3, cacheWrite: 0.9 },
     },
     modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key", headers: {} }) },
     ui: { setStatus: vi.fn(), notify: vi.fn() },
   } as unknown as ExtensionContext;
+  ctx.modelRegistry.find = (provider, id) =>
+    ctx.model?.provider === provider && ctx.model.id === id ? ctx.model : undefined;
+  return ctx;
 }
 
 async function flush() {
@@ -120,7 +123,7 @@ describe("cache TTL removal integration", () => {
       clock,
       ctx,
       sessionId: manager.getSessionId(),
-      settings: { ...DEFAULT_SETTINGS.cacheTtl, keepaliveMaxPings: 1 },
+      settings: { ...DEFAULT_SETTINGS.cacheTtl },
       backgroundBusy: () => true,
       isCurrent: (self) => self === service,
       fetchImpl,
@@ -147,6 +150,55 @@ describe("cache TTL removal integration", () => {
       expect(service.report().window.capture?.shape.ttl1h).toBe(false);
     } finally {
       service.dispose();
+    }
+  });
+});
+
+describe("dynamic cap main response usage wiring", () => {
+  it("uses the actual window response, not the older ledger usage, across tier thresholds", () => {
+    const manager = session();
+    const ctx = context(manager);
+    ctx.model!.cost = {
+      input: 1,
+      output: 5,
+      cacheRead: 0.3,
+      cacheWrite: 3.75,
+      tiers: [
+        { inputTokensAbove: 40_000, cacheRead: 0.025, cacheWrite: 1.25 },
+        { inputTokensAbove: 100_000, cacheRead: 1, cacheWrite: 3 },
+      ],
+    } as never;
+    const clock = new FakeClock(0);
+    let svc: CacheKeepaliveService | undefined;
+    svc = createCacheKeepaliveService({
+      clock,
+      ctx,
+      sessionId: manager.getSessionId(),
+      settings: DEFAULT_SETTINGS.cacheTtl,
+      backgroundBusy: () => true,
+      isCurrent: (s) => s === svc,
+    });
+    try {
+      const w = wiring(ctx, svc);
+      for (const [input, expected] of [
+        [25_000, 48],
+        [150_000, 1],
+      ]) {
+        w.fire("before_provider_request", { payload: payload() });
+        w.fire("before_provider_headers", { headers: {} });
+        expect(svc.report().config.maxPingsReason).toBe("tier-uncertain");
+        w.fire("message_end", {
+          message: {
+            role: "assistant",
+            provider: "anthropic",
+            model: "claude-x",
+            usage: { input, cacheRead: 30_000, cacheWrite: 0 },
+          },
+        });
+        expect(svc.report().config).toMatchObject({ maxPings: expected, maxPingsSource: "priced" });
+      }
+    } finally {
+      svc.dispose();
     }
   });
 });

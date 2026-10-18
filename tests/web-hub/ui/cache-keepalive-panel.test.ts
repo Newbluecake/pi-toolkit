@@ -334,3 +334,42 @@ describe("CacheKeepalivePanel.vue — ticker discipline (§4.2: 30s, only while 
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe("dynamic cap ended window", () => {
+  it("expanded row shows ended, not the previous 20/new 11 ratio", async () => {
+    const wrapper = await openPanel(
+      wire({
+        window: { pings: 20, max: 11, maxSource: "fallback", ended: true },
+        ping: { text: "ping Σ20 · 450k · ≈$0.12", state: "active" },
+      }),
+    );
+    expect(wrapper.find(".ck-kv").text()).toContain("ended");
+    expect(wrapper.text()).not.toContain("20/11");
+    expect(wrapper.text()).not.toContain("capped");
+    wrapper.unmount();
+  });
+  it("missing ended (old agent) preserves n/max; explicit false also preserves it", async () => {
+    for (const window of [
+      { pings: 3, max: 48 },
+      { pings: 3, max: 48, ended: false },
+    ]) {
+      const wrapper = await openPanel(wire({ window }));
+      expect(wrapper.find(".ck-kv").text()).toContain("3/48");
+      expect(wrapper.find(".ck-kv").text()).not.toContain("ended");
+      wrapper.unmount();
+    }
+  });
+});
+
+describe("dynamic cap source hints", () => {
+  it.each([
+    ["priced", "Prefix budget from model cache read/write prices"],
+    ["clamped", "Price-derived prefix budget clamped to 96"],
+    ["fallback", "Unpriced fallback 11; no profitability proof"],
+  ])("%s has an English title without changing the ratio", async (maxSource, title) => {
+    const wrapper = await openPanel(wire({ window: { pings: 3, max: 48, maxSource } }));
+    const token = wrapper.findAll(".ck-kv .ck-token").find((t) => t.text() === "3/48");
+    expect(token?.attributes("title")).toBe(title);
+    wrapper.unmount();
+  });
+});

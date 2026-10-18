@@ -9,6 +9,7 @@ import {
   MAX_LINE_STATES,
   buildCacheStatusSnapshot,
   isTransientUnproven,
+  isKeepaliveWindowEnded,
   pingSegmentParts,
   type CacheDisplayMode,
   type KeepaliveReport,
@@ -110,6 +111,8 @@ export function projectCacheKeepalive(
     },
     lines: [],
   };
+  if (report.config.maxPingsSource !== undefined) wire.window.maxSource = report.config.maxPingsSource;
+  if (isKeepaliveWindowEnded(report.window)) wire.window.ended = true;
   if (dirty) wire.dirty = true;
   const modeSeg = snapshot.segments.find((x) => x.kind === "mode");
   if (modeSeg !== undefined) wire.modeText = clip(modeSeg.text, TEXT_MAX_BYTES);

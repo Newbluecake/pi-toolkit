@@ -13,13 +13,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentSettings } from "../config/settings.js";
 import { CHILD_CACHE_KEEPALIVE_CUSTOM_TYPE } from "../runtime/session-driver.js";
-import { createRequestCapture, captureRequest, type CapturedRequestBase } from "./cache-ttl.js";
+import { createRequestCapture, captureRequest, settledRouteOf, type CapturedRequestBase } from "./cache-ttl.js";
 import { getProviderEvidenceStore, observeUsageIntoEvidence } from "./provider-evidence.js";
 import { getChildKeepaliveLedger } from "./ping-ledger.js";
 import { getChildKeepaliveDisposeRegistry } from "./child-registry.js";
 import { getChildBashRegistry } from "../bash/child-registry.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "../service/cache-keepalive.js";
-import type { InvalidateReason } from "./keepalive-state.js";
+import { realRequestInputTokens, type InvalidateReason } from "./keepalive-state.js";
 import { prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
 
 /** Child keepalive's own auth timeout (plan §2.4): bounds the whole ping sequence at ~97s. */
@@ -164,10 +164,16 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
     const svc = ensureService(ctx);
     svc?.noteToolEnd(safeSessionId(ctx), svc.instanceId);
   });
-  pi.on("message_end", (_event, ctx) => {
+  pi.on("message_end", (event, ctx) => {
     const svc = ensureService(ctx);
     if (!svc) return undefined;
-    svc.noteRequestSettled(safeSessionId(ctx), svc.instanceId);
+    svc.noteRequestSettled(
+      safeSessionId(ctx),
+      svc.instanceId,
+      false,
+      settledRouteOf(event.message),
+      realRequestInputTokens(event.message),
+    );
     // O1/O3 evidence observation, same as the main session's message_end hook
     // (cache-ttl.ts): fold this message's usage into the shared evidence store and forward a
     // cache-read sighting to the service's O3 accounting.
@@ -181,9 +187,15 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
     if (observed.cacheReadObserved) svc.noteUsageCacheRead(safeSessionId(ctx), svc.instanceId);
     return undefined;
   });
-  pi.on("turn_end", (_event, ctx) => {
+  pi.on("turn_end", (event, ctx) => {
     const svc = ensureService(ctx);
-    svc?.noteRequestSettled(safeSessionId(ctx), svc.instanceId);
+    svc?.noteRequestSettled(
+      safeSessionId(ctx),
+      svc.instanceId,
+      false,
+      settledRouteOf(event.message),
+      realRequestInputTokens(event.message),
+    );
   });
   pi.on("agent_end", (_event, ctx) => {
     const svc = ensureService(ctx);

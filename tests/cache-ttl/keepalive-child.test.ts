@@ -103,7 +103,6 @@ const BASE_SETTINGS: CacheTtlSettings = {
   mode: "auto",
   keepalive: true,
   keepaliveIntervalMs: 240_000,
-  keepaliveMaxPings: 11,
   keepaliveMinPrefixTokens: 20_000,
   childKeepalive: true,
   childKeepaliveMaxPingsPerRun: 24,
@@ -118,7 +117,7 @@ const OPUS5_COST = { cacheRead: 0.5, cacheWrite: 6.25 };
 const ASTRA_COST = { cacheRead: 2, cacheWrite: 25 };
 
 function fakeCtx(overrides: Record<string, unknown> = {}) {
-  return {
+  const ctx = {
     ui: { setStatus: vi.fn() },
     mode: "print", // child (subagent) sessions run headless
     model: {
@@ -130,11 +129,16 @@ function fakeCtx(overrides: Record<string, unknown> = {}) {
       cost: OPUS5_COST,
     },
     modelRegistry: {
+      find: vi.fn(),
       getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "sk-ant-api-x", headers: {} }),
     },
     sessionManager: { getSessionId: () => "s1" },
     ...overrides,
   };
+  ctx.modelRegistry.find?.mockImplementation((provider: string, id: string) =>
+    provider === ctx.model.provider && id === ctx.model.id ? ctx.model : undefined,
+  );
+  return ctx;
 }
 
 function capture(overrides: Partial<CapturedRequest> = {}, instance: string, tokens = 270_000): CapturedRequest {
@@ -163,6 +167,10 @@ function capture(overrides: Partial<CapturedRequest> = {}, instance: string, tok
     capturedAt: 0,
     ...overrides,
   };
+  ctx.modelRegistry.find?.mockImplementation((provider: string, id: string) =>
+    provider === ctx.model.provider && id === ctx.model.id ? ctx.model : undefined,
+  );
+  return ctx;
 }
 
 interface Harness {
@@ -695,9 +703,8 @@ describe("child keepalive — T-K9: worst-case budget behavior", () => {
       runBudgetUsd: 1.5,
       processBudgetUsd: 100,
       fetchImpl,
-      // Raise the WINDOW cap so it never interferes — this test is only about the $ run budget.
-      settings: { ...BASE_SETTINGS, keepaliveMaxPings: 1_000 },
     });
+    a.ctx.model.cost = { cacheRead: OPUS5_COST.cacheRead, cacheWrite: 52 * OPUS5_COST.cacheRead };
     arm(a);
 
     let pingsBeforeStop = 0;
@@ -763,10 +770,12 @@ describe("child keepalive — T-K9: worst-case budget behavior", () => {
       runBudgetUsd: 100, // large enough that only the PROCESS budget is ever the limiting factor
       processBudgetUsd,
       fetchImpl: provenHitFetch(tokens),
-      settings: { ...BASE_SETTINGS, keepaliveMaxPings: 1_000 }, // window cap out of the way — this test is only about the process ledger
     };
     const instances = ["sA", "sB", "sC", "sD"].map((sid) => harness(clock, sid, common));
-    for (const h of instances) arm(h, tokens);
+    for (const h of instances) {
+      h.ctx.model.cost = { cacheRead: OPUS5_COST.cacheRead, cacheWrite: 52 * OPUS5_COST.cacheRead };
+      arm(h, tokens);
+    }
 
     // Round 1: all FOUR are admitted in the same tick (proves the slot cap really is 4, not
     // serialized down to 1) and settle before the next tick — activeCount() drains back to 0.
@@ -885,7 +894,8 @@ describe("child keepalive — todo #28: precise nextPingAt timer", () => {
 
   it("terminal-skip diagnostic: exactly one jsonl audit entry per window (child sessions have no /cache-ttl status to read `report().lastTerminalSkip` from — the audit trail is their only observable record)", async () => {
     const clock = new FakeClock(0);
-    const h = harness(clock, "s1", { settings: { ...BASE_SETTINGS, keepaliveMaxPings: 1 } });
+    const h = harness(clock, "s1");
+    h.ctx.model.cost = { cacheRead: OPUS5_COST.cacheRead, cacheWrite: 3 * OPUS5_COST.cacheRead };
     const sid = getSid(h);
     arm(h);
     clock.advance(240_000);
@@ -903,5 +913,92 @@ describe("child keepalive — todo #28: precise nextPingAt timer", () => {
     );
     expect(terminalAudits).toHaveLength(1);
     expect((terminalAudits[0]![1] as { reason?: string }).reason).toBe("budget-exhausted");
+  });
+});
+
+describe("dynamic cap admission matrix (plan §6)", () => {
+  it.each([
+    ["main missing price", false, undefined, "anthropic-messages", false, 11, "fallback", 1, undefined],
+    ["child missing read", true, { cacheWrite: 3.75 }, "anthropic-messages", false, 11, "fallback", 0, "usd-unpriced"],
+    [
+      "child zero read",
+      true,
+      { cacheRead: 0, cacheWrite: 3.75 },
+      "anthropic-messages",
+      false,
+      11,
+      "fallback",
+      0,
+      "usd-unpriced",
+    ],
+    ["child missing write", true, { cacheRead: 0.3 }, "anthropic-messages", false, 11, "fallback", 1, undefined],
+    [
+      "child zero write (kimi)",
+      true,
+      { cacheRead: 0.3, cacheWrite: 0 },
+      "anthropic-messages",
+      false,
+      11,
+      "fallback",
+      1,
+      undefined,
+    ],
+    [
+      "child write <= read",
+      true,
+      { cacheRead: 0.3, cacheWrite: 0.3 },
+      "anthropic-messages",
+      false,
+      11,
+      "fallback",
+      1,
+      undefined,
+    ],
+    ["non-Anthropic", false, OPUS5_COST, "openai-completions", false, 11, "priced", 0, "not-anthropic"],
+    ["native warmer", true, OPUS5_COST, "anthropic-messages", true, 11, "priced", 0, "native-warmer"],
+    [
+      "Anthropic priced",
+      true,
+      { cacheRead: 0.3, cacheWrite: 3.75 },
+      "anthropic-messages",
+      false,
+      11,
+      "priced",
+      1,
+      undefined,
+    ],
+    [
+      "Fable priced",
+      true,
+      { cacheRead: 0.025, cacheWrite: 1.25 },
+      "anthropic-messages",
+      false,
+      48,
+      "priced",
+      1,
+      undefined,
+    ],
+  ])("%s", async (_name, child, cost, api, nativeWarmer, max, source, requests, reason) => {
+    const clock = new FakeClock(0);
+    const fetchImpl = provenHitFetch();
+    const h = harness(clock, "s1", {
+      fetchImpl,
+      ...(child ? { pingLedger: createChildKeepaliveLedger(), runBudgetUsd: 1000, processBudgetUsd: 1000 } : {}),
+    });
+    h.ctx.mode = "tui";
+    h.ctx.model.cost = cost as never;
+    h.ctx.model.api = api as string;
+    if (nativeWarmer) Object.assign(h.ctx.model, { promptCache: { short: {} } });
+    const c = capture({}, h.service.instanceId);
+    c.fingerprint.api = api as string;
+    h.service.noteToolStart("s1", h.service.instanceId);
+    h.service.noteRequest(c);
+    h.service.noteRequestSettled("s1", h.service.instanceId);
+    expect(h.service.report().config).toMatchObject({ maxPings: max, maxPingsSource: source });
+    clock.advance(240_000);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(requests as number);
+    if (reason !== undefined) expect(h.service.report().lastSkip).toBe(reason);
+    h.service.dispose();
   });
 });

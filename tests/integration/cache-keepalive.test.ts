@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildSessionStack } from "../../src/stack.js";
 import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
-import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, parseCacheTtlSettings, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
 
@@ -127,7 +127,7 @@ function settingsWith(overrides: Partial<AgentSettings["cacheTtl"]> = {}): Agent
   return {
     ...DEFAULT_SETTINGS,
     fleetWidget: false,
-    cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, keepalive: true, keepaliveMaxPings: 11, ...overrides },
+    cacheTtl: { ...DEFAULT_SETTINGS.cacheTtl, keepalive: true, ...overrides },
   };
 }
 
@@ -286,5 +286,20 @@ describe("cache keepalive — real buildSessionStack + wireCacheTtl", () => {
     expect(stack.keepalive?.report().dropped.sessionMismatch).toBeGreaterThanOrEqual(1);
 
     stack.keepalive?.dispose();
+  });
+});
+
+describe("legacy zero cap does not disable stack assembly", () => {
+  it("builds the real keepalive service from keepalive:true + old zero", () => {
+    const { pi } = fakePi();
+    const settings = { ...settingsWith(), cacheTtl: parseCacheTtlSettings({ keepalive: true, keepaliveMaxPings: 0 }) };
+    const stack = buildSessionStack(pi, fakeCtx(), settings, emptyTypes, []);
+    try {
+      expect(stack.keepalive).toBeDefined();
+      expect(stack.keepalive!.report().enabled).toBe(true);
+      expect(stack.keepalive!.report().config.maxPings).toBe(11);
+    } finally {
+      stack.keepalive?.dispose();
+    }
   });
 });

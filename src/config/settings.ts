@@ -365,8 +365,10 @@ export interface CacheTtlSettings {
    *  相对 `ASSUMED_TTL_MS − TTL_SAFETY_MARGIN_MS` 只剩负余量，永远到不了 evaluateTick 的 #15，
    *  一律在 #13 被判 cache-expired，即配置了也永不 ping；todo #15 真机验收复查时发现，2026-09-27）。 */
   keepaliveIntervalMs: number;
-  /** 每窗口硬上限；0 = 关闭。Default 11。 */
-  keepaliveMaxPings: number;
+  /** Status-only migration note: finite legacy value, or "invalid" when the removed key exists.
+   * Never controls keepalive or the dynamically priced cap; absent unless the old key is present.
+   */
+  readonly legacyKeepaliveMaxPings?: number | "invalid";
   /** 前缀实测下界门槛（tokens）。Default 20000。 */
   keepaliveMinPrefixTokens: number;
   /** child-ka-core（docs/dev/child-context-switch/plan.md §2.4/§4）：子会话保活总开关。
@@ -1098,7 +1100,6 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     mode: "auto",
     keepalive: true,
     keepaliveIntervalMs: 240_000,
-    keepaliveMaxPings: 11,
     keepaliveMinPrefixTokens: 20_000,
     childKeepalive: true,
     childKeepaliveMaxPingsPerRun: 24,
@@ -1620,7 +1621,14 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
       60_000,
       MAX_SAFE_KEEPALIVE_INTERVAL_MS,
     ),
-    keepaliveMaxPings: num(value.keepaliveMaxPings, defaults.keepaliveMaxPings, 0, Number.MAX_SAFE_INTEGER),
+    ...(Object.prototype.hasOwnProperty.call(value, "keepaliveMaxPings")
+      ? {
+          legacyKeepaliveMaxPings:
+            typeof value.keepaliveMaxPings === "number" && Number.isFinite(value.keepaliveMaxPings)
+              ? value.keepaliveMaxPings
+              : ("invalid" as const),
+        }
+      : {}),
     keepaliveMinPrefixTokens: num(
       value.keepaliveMinPrefixTokens,
       defaults.keepaliveMinPrefixTokens,

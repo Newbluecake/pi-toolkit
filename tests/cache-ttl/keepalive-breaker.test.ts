@@ -294,7 +294,7 @@ describe("rendering", () => {
   const report = (session: SessionTotals, extra: Partial<KeepaliveReport> = {}): KeepaliveReport => ({
     enabled: true,
     armed: true,
-    window: createInitialWindowState(),
+    window: win(),
     session,
     config: { enabled: true, intervalMs: 240_000, maxPings: 11, minPrefixTokens: 20_000 },
     costUsd: undefined,
@@ -460,7 +460,6 @@ const SETTINGS: CacheTtlSettings = {
   mode: "auto",
   keepalive: true,
   keepaliveIntervalMs: 240_000,
-  keepaliveMaxPings: 11,
   keepaliveMinPrefixTokens: 20_000,
 };
 
@@ -606,7 +605,7 @@ describe("pingSegmentParts", () => {
   const mkReport = (session: SessionTotals, extra: Partial<KeepaliveReport> = {}): KeepaliveReport => ({
     enabled: true,
     armed: true,
-    window: createInitialWindowState(),
+    window: win(),
     session,
     config: { enabled: true, intervalMs: 240_000, maxPings: 11, minPrefixTokens: 20_000 },
     costUsd: undefined,
@@ -638,7 +637,7 @@ describe("pingSegmentParts", () => {
     const base = createInitialSessionTotals();
     const disabled = { ...base, pings: 7, disabled: { reason: "http", at: 5, httpStatus: 403 } };
     const disabledNoCode = { ...base, pings: 3, disabled: { reason: "no-usage", at: 5 } };
-    const win = (w: Partial<WindowState>) => ({ ...createInitialWindowState(), ...w });
+    const win = (w: Partial<WindowState>) => ({ ...createInitialWindowState(), capture: cap(), ...w });
     return [
       ["undefined report", undefined as never, undefined, undefined],
       ["nothing yet", mkReport(base), undefined, undefined],

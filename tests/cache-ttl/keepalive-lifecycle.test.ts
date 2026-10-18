@@ -6,7 +6,11 @@ import {
   type CacheKeepaliveService,
 } from "../../src/service/cache-keepalive.js";
 import type { CacheTtlSettings } from "../../src/config/settings.js";
-import { readBackKeepaliveSessionState, type CapturedRequest } from "../../src/cache-ttl/keepalive-state.js";
+import {
+  readBackKeepaliveSessionState,
+  renderKeepaliveReportLines,
+  type CapturedRequest,
+} from "../../src/cache-ttl/keepalive-state.js";
 
 const encoder = new TextEncoder();
 
@@ -74,12 +78,11 @@ const SETTINGS: CacheTtlSettings = {
   mode: "auto",
   keepalive: true,
   keepaliveIntervalMs: 240_000,
-  keepaliveMaxPings: 11,
   keepaliveMinPrefixTokens: 20_000,
 };
 
 function fakeCtx(overrides: Record<string, unknown> = {}) {
-  return {
+  const ctx = {
     ui: { setStatus: vi.fn() },
     mode: "tui",
     model: {
@@ -88,14 +91,19 @@ function fakeCtx(overrides: Record<string, unknown> = {}) {
       id: "claude-x",
       baseUrl: "https://api.anthropic.com",
       headers: {},
-      cost: { cacheRead: 0.3, tiers: [] },
+      cost: { cacheRead: 0.3, cacheWrite: 3.75, tiers: [] },
     },
     modelRegistry: {
+      find: vi.fn(),
       getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "sk-ant-api-x", headers: {} }),
     },
     sessionManager: { getSessionId: () => "s1" },
     ...overrides,
   };
+  ctx.modelRegistry.find?.mockImplementation((provider: string, id: string) =>
+    provider === ctx.model.provider && id === ctx.model.id ? ctx.model : undefined,
+  );
+  return ctx;
 }
 
 function capture(overrides: Partial<CapturedRequest> = {}, instance: string, tokens = 30_000): CapturedRequest {
@@ -123,6 +131,10 @@ function capture(overrides: Partial<CapturedRequest> = {}, instance: string, tok
     capturedAt: 0,
     ...overrides,
   };
+  ctx.modelRegistry.find?.mockImplementation((provider: string, id: string) =>
+    provider === ctx.model.provider && id === ctx.model.id ? ctx.model : undefined,
+  );
+  return ctx;
 }
 
 function harness(overrides: Partial<CacheKeepaliveDeps> = {}, ctxOverrides: Record<string, unknown> = {}) {
@@ -415,10 +427,10 @@ describe("cache-keepalive service — armed signals", () => {
 describe("cache-keepalive service — budget", () => {
   it("stops at maxPings without scheduling any automatic upgrade", async () => {
     const fetchImpl = provenHitFetch();
-    const { service, clock } = harness({
+    const { service, clock, ctx } = harness({
       fetchImpl,
-      settings: { ...SETTINGS, keepaliveMaxPings: 1 },
     });
+    ctx.model.cost.cacheWrite = 3 * ctx.model.cost.cacheRead;
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
     clock.advance(240_000);
@@ -777,7 +789,8 @@ describe("cache-keepalive service — todo #28 P1: setEnabled(false) cancels the
 // sessions' only observable trail, since they have no interactive status command).
 describe("cache-keepalive service — todo #28: terminal-skip diagnostic (once per window)", () => {
   it("records exactly one audit entry + report field per window even when the terminal skip re-fires across several re-arms", async () => {
-    const { service, clock, appendEntry } = harness({ settings: { ...SETTINGS, keepaliveMaxPings: 1 } });
+    const { service, clock, appendEntry, ctx } = harness();
+    ctx.model.cost.cacheWrite = 3 * ctx.model.cost.cacheRead;
     service.noteRequest(capture({}, service.instanceId));
     service.noteRequestSettled("s1", service.instanceId);
     clock.advance(240_000);
@@ -825,5 +838,200 @@ describe("cache-keepalive service — todo #28: terminal-skip diagnostic (once p
     );
     expect(terminalAudits).toHaveLength(0);
     expect(service.report().lastTerminalSkip).toBeUndefined();
+  });
+});
+
+describe("dynamic cap — captured model mapping and response usage", () => {
+  it("prices wire model B, not ctx model A; memoizes until a new capture", () => {
+    const { service, ctx } = harness();
+    const b = { ...ctx.model, id: "wire-b", cost: { cacheRead: 0.025, cacheWrite: 1.25 } };
+    ctx.modelRegistry.find.mockImplementation((provider, id) =>
+      provider === b.provider && id === b.id ? b : undefined,
+    );
+    const c = capture({ payload: { model: "wire-b", messages: [], stream: true } }, service.instanceId);
+    c.fingerprint.modelId = "wire-b";
+    service.noteRequest(c);
+    expect(service.report().config).toMatchObject({ maxPings: 48, maxPingsSource: "priced" });
+    ctx.modelRegistry.find.mockClear();
+    ctx.modelRegistry.find.mockReturnValue({ ...b, cost: { cacheRead: 1, cacheWrite: 3 } });
+    for (let i = 0; i < 5; i++) expect(service.report().config.maxPings).toBe(48);
+    expect(ctx.modelRegistry.find).not.toHaveBeenCalled();
+    service.noteRequest({ ...c });
+    expect(service.report().config.maxPings).toBe(1);
+    service.dispose();
+  });
+
+  it.each(["missing", "throws", "unregistered", "baseUrl", "api"])("uncertain mapping (%s) falls back", (kind) => {
+    const { service, ctx } = harness();
+    const c = capture({}, service.instanceId);
+    c.fingerprint.modelId = "wire-b";
+    if (kind === "missing") ctx.modelRegistry.find = undefined as never;
+    else if (kind === "throws")
+      ctx.modelRegistry.find.mockImplementation(() => {
+        throw new Error("stale registry");
+      });
+    else if (kind === "unregistered") ctx.modelRegistry.find.mockReturnValue(undefined);
+    else ctx.modelRegistry.find.mockReturnValue({ ...ctx.model, id: "wire-b", [kind]: "different" });
+    service.noteRequest(c);
+    expect(service.report().config).toMatchObject({
+      maxPings: 11,
+      maxPingsSource: "fallback",
+      maxPingsReason: "wire-model-unmapped",
+    });
+    service.dispose();
+  });
+
+  it("uses only this real response's full input, pins prices, and ignores duplicate settle usage", () => {
+    const { service, ctx } = harness();
+    ctx.model.cost = {
+      cacheRead: 0.3,
+      cacheWrite: 3.75,
+      tiers: [
+        { inputTokensAbove: 40_000, cacheRead: 0.025, cacheWrite: 1.25 },
+        { inputTokensAbove: 100_000, cacheRead: 1, cacheWrite: 3 },
+      ],
+    } as never;
+    // No capture: a tiered model cannot promise a base-tier cap before the real response.
+    expect(service.report().config).toMatchObject({
+      maxPings: 11,
+      maxPingsSource: "fallback",
+      maxPingsReason: "tier-uncertain",
+    });
+    expect(renderKeepaliveReportLines(service.report())[1]).toContain("cap: 11/window (fallback: tier-uncertain)");
+    service.noteRequest(capture({}, service.instanceId, 30_000));
+    expect(service.report().config).toMatchObject({
+      maxPings: 11,
+      maxPingsSource: "fallback",
+      maxPingsReason: "tier-uncertain",
+    });
+    ctx.modelRegistry.find.mockClear();
+    // Even an in-place registry edit after capture must not change this window's prices.
+    (ctx.model.cost as any).tiers[0].cacheWrite = 3;
+    service.noteRequestSettled("s1", service.instanceId, true, { provider: "anthropic", modelId: "claude-x" }, 55_000);
+    expect(service.report().config).toMatchObject({ maxPings: 48, maxPingsSource: "priced" });
+    expect(ctx.modelRegistry.find).not.toHaveBeenCalled();
+    service.noteRequestSettled("s1", service.instanceId, true, { provider: "anthropic", modelId: "claude-x" }, 180_000);
+    expect(service.report().config.maxPings).toBe(48);
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId, true, { provider: "anthropic", modelId: "claude-x" }, 180_000);
+    expect(service.report().config.maxPings).toBe(1);
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId, true, { provider: "wrong", modelId: "claude-x" }, 180_000);
+    expect(service.report().config.maxPingsReason).toBe("tier-uncertain");
+    service.dispose();
+  });
+
+  it("drift ends the old window, and a new capture recomputes for the new model", () => {
+    const { service, ctx, clock } = harness();
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    ctx.model.id = "new-model";
+    ctx.model.cost = { cacheRead: 0.025, cacheWrite: 1.25, tiers: [] };
+    clock.advance(240_000);
+    expect(service.report().window.capture).toBeUndefined();
+    const c = capture({}, service.instanceId);
+    c.fingerprint.ctxModelId = c.fingerprint.modelId = "new-model";
+    service.noteRequest(c);
+    expect(service.report().config).toMatchObject({ maxPings: 48, maxPingsSource: "priced" });
+    service.dispose();
+  });
+
+  it("cap zero emits no network; terminal audit carries priced cap metadata", async () => {
+    const fetchImpl = provenHitFetch();
+    const { service, ctx, clock, appendEntry } = harness({ fetchImpl });
+    ctx.model.cost = { cacheRead: 1, cacheWrite: 2, tiers: [] };
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    clock.advance(240_000);
+    await flush();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(service.report().lastSkip).toBe("budget-exhausted");
+    expect(appendEntry).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ kind: "terminal-skip", cap: 0, capSource: "priced" }),
+    );
+    service.dispose();
+  });
+});
+
+describe("dynamic cap terminal audit metadata", () => {
+  it("clamped cap 96 carries raw cap when gate #14 exhausts the window", async () => {
+    const fetchImpl = provenHitFetch();
+    const { service, ctx, clock, appendEntry } = harness({ fetchImpl });
+    ctx.model.cost = { cacheRead: 1, cacheWrite: 2002, tiers: [] };
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    for (let i = 0; i < 97; i++) {
+      clock.advance(240_000);
+      await flush();
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(96);
+    expect(service.report().config).toMatchObject({ maxPings: 96, maxPingsSource: "clamped", maxPingsRaw: 2000 });
+    expect(appendEntry).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ kind: "terminal-skip", cap: 96, capSource: "clamped", capRaw: 2000 }),
+    );
+    service.dispose();
+  });
+  it("unknown mapping fallback audit carries its reason at budget exhaustion", async () => {
+    const { service, ctx, clock, appendEntry } = harness();
+    ctx.modelRegistry.find = undefined as never;
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId);
+    for (let i = 0; i < 12; i++) {
+      clock.advance(240_000);
+      await flush();
+    }
+    expect(service.report().session.pings).toBe(11);
+    expect(appendEntry).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        kind: "terminal-skip",
+        cap: 11,
+        capSource: "fallback",
+        capReason: "wire-model-unmapped",
+      }),
+    );
+    service.dispose();
+  });
+});
+
+describe("r_FFWC8SBT — unknown no-capture tier and Copilot billing", () => {
+  it("no-capture non-tiered models remain priced; tiered models are uncertain again after invalidation", () => {
+    const { service, ctx } = harness();
+    expect(service.report().config).toMatchObject({ maxPings: 11, maxPingsSource: "priced" });
+    ctx.model.cost = {
+      cacheRead: 0.3,
+      cacheWrite: 3.75,
+      tiers: [{ inputTokensAbove: 40_000, cacheRead: 0.025, cacheWrite: 1.25 }],
+    } as never;
+    expect(service.report().config).toMatchObject({
+      maxPings: 11,
+      maxPingsSource: "fallback",
+      maxPingsReason: "tier-uncertain",
+    });
+    service.noteRequest(capture({}, service.instanceId));
+    service.noteRequestSettled("s1", service.instanceId, true, { provider: "anthropic", modelId: "claude-x" }, 55_000);
+    expect(service.report().config).toMatchObject({ maxPings: 48, maxPingsSource: "priced" });
+    service.invalidate("model-select");
+    expect(service.report().window.capture).toBeUndefined();
+    expect(renderKeepaliveReportLines(service.report())[1]).toContain("cap: 11/window (fallback: tier-uncertain)");
+    service.dispose();
+  });
+  it("token-billed Copilot sends an Anthropic ping with the ordinary registry-derived cap", async () => {
+    const fetchImpl = provenHitFetch();
+    const { service, ctx, clock } = harness({ fetchImpl });
+    ctx.model.provider = "github-copilot";
+    const c = capture({}, service.instanceId);
+    c.fingerprint.provider = "github-copilot";
+    service.noteRequest(c);
+    service.noteRequestSettled("s1", service.instanceId);
+    expect(service.report().config).toMatchObject({ maxPings: 11, maxPingsSource: "priced" });
+    clock.advance(240_000);
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(service.report().session.pings).toBe(1);
+    expect(service.report().lastSkip).not.toBe("not-anthropic");
+    service.dispose();
   });
 });

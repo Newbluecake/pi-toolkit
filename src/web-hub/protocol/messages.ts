@@ -497,7 +497,7 @@ export interface CacheKeepaliveWire {
   enabled: boolean;
   modeText?: string;
   ping?: { text: string; state: string; retryAt?: number; tail?: string };
-  window: { pings: number; max: number };
+  window: { pings: number; max: number; maxSource?: string; ended?: boolean };
   session: {
     pings: number;
     cacheReadTokens: number;
@@ -1380,7 +1380,15 @@ export const CacheKeepaliveWireSchema = Type.Object(
         { additionalProperties: true },
       ),
     ),
-    window: Type.Object({ pings: Type.Number(), max: Type.Number() }, { additionalProperties: true }),
+    window: Type.Object(
+      {
+        pings: Type.Number(),
+        max: Type.Number(),
+        maxSource: Type.Optional(Type.String()),
+        ended: Type.Optional(Type.Boolean()),
+      },
+      { additionalProperties: true },
+    ),
     session: Type.Object(
       {
         pings: Type.Number(),
