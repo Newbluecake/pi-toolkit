@@ -863,10 +863,11 @@ export class RuntimeRunner implements Runner {
       const created = await this.guard(createP, createBudget.ms, cancel, "create");
       if (!created.ok) {
         this.d.driver.onLateArrival(createP, (h) => {
-          this.d.reaper.disposeLate(req.runId, gen, h); // sync
+          const late = this.d.reaper.disposeLate(req.runId, gen, h); // sync
           // 迟到会话的写入（appendThinkingLevelChange 等）已在 createP resolve
           // 前完成；dispose 后再回调删除（幂等，覆盖 _persist 重生残片）。
-          this.notifyReaped(req, h.sessionId, undefined, true);
+          // R2-1：seal 证明取 dispose 的真实结论（未返回 / 有 unkillable ⇒ false）。
+          this.notifyReaped(req, h.sessionId, undefined, late?.disposed === true);
         });
         createP = undefined;
         dispatch({
@@ -1167,8 +1168,9 @@ export class RuntimeRunner implements Runner {
         // exactly like a throwing onReaped/beforeReap.
         try {
           this.d.driver.onLateArrival(createP, (h) => {
-            this.d.reaper.disposeLate(req.runId, gen, h);
-            this.notifyReaped(req, h.sessionId, undefined, true); // same ordering guarantee as the guard-failure path above
+            const late = this.d.reaper.disposeLate(req.runId, gen, h);
+            // same ordering + real-verdict guarantee as the guard-failure path above
+            this.notifyReaped(req, h.sessionId, undefined, late?.disposed === true);
           });
         } catch (e) {
           this.d.onExtensionError?.("onLateArrival", req.runId, e instanceof Error ? e.message : String(e));

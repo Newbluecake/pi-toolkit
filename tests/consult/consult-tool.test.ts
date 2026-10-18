@@ -1209,6 +1209,7 @@ import type { ConsultDisplayMeta } from "../../src/consult/tool.js";
 import type { AnchorIdentity } from "../../src/core/types.js";
 import type { AnchorObservation } from "../../src/consult/anchor.js";
 import type { RunPrefixRecord } from "../../src/consult/prefix-probe.js";
+import { resolveAnchor } from "../../src/consult/anchor.js";
 
 const MiB = 1024 * 1024;
 const CAPTURED_IDENTITY: AnchorIdentity = {
@@ -1490,7 +1491,9 @@ describe("consult threads through the tool (cache-thread plan §4.5/§5.1)", () 
     const e = threadHarness({ anchor: goodAnchor });
     await e.call();
     const r2 = await e.call(); // fork-1 not reaped yet
-    expect(firstLine(r2)).toBe("[previous answer not yet retained — the expert sees up to #0 only]");
+    expect(firstLine(r2)).toBe(
+      "[previous answer not yet retained — the expert sees no earlier Q/A in this thread yet]",
+    );
     expect(e.forkSources).toEqual([expertSessionFile, expertSessionFile]);
     expect(e.threads.views()[0]!.headFile).toBeUndefined();
   });
@@ -1575,6 +1578,78 @@ describe("consult threads through the tool (cache-thread plan §4.5/§5.1)", () 
     );
     release();
     await p2;
+  });
+
+  /** Hold consult #2 in flight (gate), run `during` (a concurrent branch), then release #2. */
+  async function withInFlightSecond(
+    e: ReturnType<typeof threadHarness>,
+    during: () => Promise<ToolResult>,
+  ): Promise<ToolResult> {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const origWait = e.port.waitOutcome.bind(e.port);
+    let n = 0;
+    e.port.waitOutcome = async (id) => {
+      n += 1;
+      if (n === 1) await gate;
+      return origWait(id);
+    };
+    const p2 = e.call({ question: "two" });
+    await new Promise((r) => setTimeout(r, 0));
+    const branch = await during();
+    release();
+    await p2;
+    return branch;
+  }
+
+  it("a branch consult runs the SAME head admission: over the cold-write cost line ⇒ original session + truthful reset(cost) line (follow-up r_38A7HG4K #1)", async () => {
+    const e = threadHarness({
+      anchor: goodAnchor,
+      tokens: 100_000, // head 100k ⇒ conservative cold write $0.50
+      ref: ref({ contextTokens: 10_000 }), // the original session ($0.05) passes the existing gate
+    });
+    await e.call(); // #1 under the default (lenient) cap
+    e.reap(1);
+    const before = e.forkSources.length;
+    // #2 is admitted as a continued consult; while it is in flight the cap drops below the head's cold-write cost,
+    // so the concurrent #3 (a branch) must NOT slip past the preflight.
+    const branch = await withInFlightSecond(e, () => {
+      e.h.settings.maxFirstRequestUsd = 0.4;
+      return e.call({ question: "three" });
+    });
+    expect(firstLine(branch)).toBe("[thread reset (cost) — the expert does NOT see your earlier questions]");
+    expect(e.forkSources.slice(before)).toEqual(["/cache/consult-sessions/fork-1.jsonl", expertSessionFile]);
+    expect(branch.content[0]!.text).not.toContain("sees thread #");
+    expect(e.threads.views().length).toBe(1); // the writer's thread survives the side lease
+  });
+
+  it("branch with the head file gone ⇒ original session + truthful reset(identity) line (follow-up #3)", async () => {
+    const e = threadHarness({ anchor: goodAnchor });
+    await e.call();
+    e.reap(1);
+    const before = e.forkSources.length;
+    const branch = await withInFlightSecond(e, async () => {
+      e.sizes.delete("/cache/consult-sessions/fork-1.jsonl"); // head vanished while #2 is in flight
+      return e.call({ question: "three" });
+    });
+    expect(firstLine(branch)).toBe("[thread reset (identity) — the expert does NOT see your earlier questions]");
+    expect(e.forkSources[before + 1]).toBe(expertSessionFile);
+    expect(branch.content[0]!.text).not.toContain("sees thread #");
+    // the thread itself (its writer #2) was NOT dropped by the side lease
+    expect(e.threads.views().length).toBe(1);
+  });
+
+  it("partial answers use the plan's 'not retained' truncation wording when a thread lease exists (follow-up #5)", async () => {
+    const e = threadHarness({ anchor: goodAnchor, settings: { maxAnswerChars: 100 } });
+    e.setOutcome("y".repeat(300), "failed");
+    const r = await e.call();
+    expect(r.content[0]!.text).toContain("⚠ partial answer");
+    expect(r.content[0]!.text).toContain(
+      "⚠ answer truncated at 100 chars; this answer is not retained — ask a narrower follow-up.",
+    );
+    expect(r.content[0]!.text).not.toContain("ask a narrower follow-up.\n⚠");
   });
 
   it("truncation notes depend on retention: kept in the thread vs not retained", async () => {
@@ -1703,6 +1778,75 @@ describe("anchor ledger + prediction through the tool (§5.1)", () => {
     const legacy = threadHarness({ anchor: goodAnchor });
     await legacy.call();
     expect(legacy.ledger.size()).toBe(1);
+  });
+
+  it("OAuth follow-up (E1 blocker): a relocated+degraded first anchor still yields a base, so the follow-up is skipped:limit with pi's marker intact", async () => {
+    const model = { provider: "acme", id: "bigmodel", api: "anthropic-messages" };
+    const cc = { type: "ephemeral" };
+    const sys = [
+      { type: "text", text: "You are Claude Code.", cache_control: cc },
+      { type: "text", text: "SYS", cache_control: cc },
+    ];
+    const tools = [{ name: "read", description: "r", input_schema: { type: "object" }, cache_control: cc }];
+    const history = [
+      { role: "user", content: [{ type: "text", text: "expert task" }] },
+      { role: "assistant", content: [{ type: "text", text: "expert answer" }] },
+    ];
+    const withMarker = (text: string) => ({ role: "user", content: [{ type: "text", text, cache_control: cc }] });
+    // consult #1 on an OAuth 4-breakpoint route: system(1) + system(2) + tools + last message = 4 ⇒ must relocate
+    const p1 = "Q1 prompt";
+    const body1 = { system: sys, tools, messages: [...history, withMarker(p1)] };
+    const d1 = resolveAnchor(body1, { prompt: p1 }, model, { first: true });
+    expect(d1).toMatchObject({ state: "relocated", degraded: true });
+    if (d1.state !== "relocated") throw new Error("setup: expected relocated");
+
+    const e = threadHarness({ anchor: { state: "relocated", identity: d1.identity, degraded: true } });
+    await e.call({ question: "q1" });
+    e.reap(1);
+    await e.call({ question: "q2" });
+    const spec2 = e.port.spawnCalls[1]!.consultAnchor!;
+    expect(spec2.base).toEqual(d1.identity); // retained despite degraded
+
+    // consult #2's real wire body: history + Q1 + A1 + Q2 with pi's four default breakpoints again
+    const unmarked = (role: string, text: string) => ({ role, content: [{ type: "text", text }] });
+    const body2 = {
+      system: sys,
+      tools,
+      messages: [...history, unmarked("user", p1), unmarked("assistant", "A1"), withMarker(spec2.prompt)],
+    };
+    // Without a base (the pre-fix behaviour) the same body would be treated as a fresh first request and relocated:
+    expect(resolveAnchor(body2, { prompt: spec2.prompt }, model, { first: true }).state).toBe("relocated");
+    const d2 = resolveAnchor(body2, spec2, model, { first: true });
+    expect(d2.state).toBe("skipped:limit");
+    expect(d2.payload).toEqual(body2); // pi's last-message marker untouched, nothing relocated
+    const last = (d2.payload as typeof body2).messages.at(-1)!;
+    expect(last.content[0]).toHaveProperty("cache_control");
+  });
+
+  it("the base is NOT retained for identity drift or a failed/superseded first attempt (degraded or not)", async () => {
+    const degradedAnchor: AnchorObservation = { state: "relocated", identity: CAPTURED_IDENTITY, degraded: true };
+    for (const variant of [{ firstValid: false }, { firstResponseOk: false }]) {
+      const e = threadHarness({ anchor: degradedAnchor, ...variant });
+      await e.call();
+      e.reap(1);
+      await e.call();
+      expect(e.port.spawnCalls[1]!.consultAnchor?.base).toBeUndefined();
+    }
+    const ok = threadHarness({ anchor: degradedAnchor });
+    await ok.call();
+    ok.reap(1);
+    await ok.call();
+    expect(ok.port.spawnCalls[1]!.consultAnchor?.base).toEqual(CAPTURED_IDENTITY);
+    // …but a degraded anchor still never counts as warm-proof evidence (plan §3.4: OAuth predicts unknown)
+    expect(
+      ok.ledger.predict({
+        expertRunId: "r_EXPERT1",
+        api: "anthropic-messages",
+        route: { provider: "acme", model: "bigmodel" },
+        snapDigest: "x",
+      }).state,
+    ).not.toBe("warm");
+    expect(ok.metaLog[1]!.meta.consultCache.predicted).toMatchObject({ state: "unknown", reason: "degraded-anchor" });
   });
 
   it("a drifted baseline is also never stored as a thread base", async () => {

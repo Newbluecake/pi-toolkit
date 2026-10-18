@@ -763,7 +763,9 @@ export function threadFirstLine(lease: ThreadLease): string {
     case "reset":
       return `[thread reset (${lease.reason ?? "identity"}) — the expert does NOT see your earlier questions]`;
     case "pending":
-      return `[previous answer not yet retained — the expert sees up to #${m} only]`;
+      return m > 0
+        ? `[previous answer not yet retained — the expert sees up to #${m} only]`
+        : "[previous answer not yet retained — the expert sees no earlier Q/A in this thread yet]";
     case "branch":
       return m > 0
         ? `[parallel branch — the expert sees thread #${m}; this answer will NOT be kept for follow-ups]`
@@ -796,8 +798,10 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
       // treat the anchor as absent (never a thread base, never warm-proof evidence).
       if (record?.first?.anchorIdentityValid === false) return undefined;
       // A failed/superseded first attempt with no successful one never proves the placement landed.
-      if (record?.first !== undefined && provenRequest(record) === undefined) return undefined;
-      return record?.first?.anchor ?? record?.anchor;
+      const proven = provenRequest(record);
+      if (record?.first !== undefined && proven === undefined) return undefined;
+      if (proven?.anchorIdentityValid === false) return undefined;
+      return proven?.anchor ?? record?.first?.anchor ?? record?.anchor;
     } catch {
       return undefined;
     }
@@ -1358,10 +1362,13 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
             (lastReq === undefined
               ? undefined
               : lastReq.input + lastReq.cacheRead + lastReq.cacheWrite + lastReq.output);
+          // E1 blocker (OAuth): the base is the trusted IDENTITY of the history end, retained whenever the
+          // head's first successful request placed an anchor with a valid identity — `degraded`/`relocated`
+          // only describe the breakpoint budget. With a base present, anchor.ts's resolveAnchor turns a
+          // would-be relocation on a follow-up into `skipped:limit`, so pi's last-message marker stays.
+          // readAnchor already yields undefined for identity drift or a failed/superseded attempt.
           const base: AnchorIdentity | undefined =
-            (anchorObs?.state === "added" || anchorObs?.state === "relocated") &&
-            anchorObs.degraded !== true &&
-            anchorObs.identity !== undefined
+            (anchorObs?.state === "added" || anchorObs?.state === "relocated") && anchorObs.identity !== undefined
               ? anchorObs.identity
               : undefined;
           forkSettled = true;
@@ -1472,8 +1479,11 @@ export function createConsultTool(deps: ConsultDeps): ToolDefinition<typeof Cons
           };
         }
         const truncated = truncateResultText(outcome.text!, s.maxAnswerChars);
+        // A partial answer is never retained in a thread: with a thread lease use the plan's "not retained" form.
         const truncationNote = truncated.truncated
-          ? ` answer truncated at ${s.maxAnswerChars} chars; ask a narrower follow-up.`
+          ? lease === undefined
+            ? ` answer truncated at ${s.maxAnswerChars} chars; ask a narrower follow-up.`
+            : `\n${threadTruncationNote(s.maxAnswerChars, false)}`
           : "";
         return {
           content: [

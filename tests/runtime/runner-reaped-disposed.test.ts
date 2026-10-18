@@ -53,7 +53,7 @@ const drain = async (ticks = 80): Promise<void> => {
   for (let i = 0; i < ticks; i++) await Promise.resolve();
 };
 
-function setup(driver: SessionDriver, opts: { reapRejects?: boolean } = {}) {
+function setup(driver: SessionDriver, opts: { reapRejects?: boolean; voidDisposeLate?: boolean } = {}) {
   const clock = new FakeClock();
   const calls: Array<{ runId: string; fork?: string; info?: { disposed: boolean } }> = [];
   const real = new EscalatingReaper(clock);
@@ -61,7 +61,11 @@ function setup(driver: SessionDriver, opts: { reapRejects?: boolean } = {}) {
     registry: real.registry,
     abortReap: (runId, gen) => real.abortReap(runId, gen),
     reap: opts.reapRejects ? () => Promise.reject(new Error("reap exploded")) : (input) => real.reap(input),
-    disposeLate: (runId, gen, h) => real.disposeLate(runId, gen, h),
+    disposeLate: opts.voidDisposeLate
+      ? (runId, gen, h) => {
+          real.disposeLate(runId, gen, h);
+        }
+      : (runId, gen, h) => real.disposeLate(runId, gen, h),
   };
   const d: RunnerDeps = {
     clock,
@@ -165,6 +169,58 @@ describe("RunnerDeps.onReaped { disposed } (R2-1)", () => {
     lateResolve(handle({ sessionFile: "/c/f6.jsonl" }));
     await drain();
     expect(t.calls.map((c) => c.info?.disposed)).toEqual([false, true]);
+  });
+
+  it("a late session whose dispose never returned ⇒ disposed:false (follow-up r_38A7HG4K #2: no hard-coded true)", async () => {
+    for (const dispose of [
+      () => ({ returned: false, killed: 0, unkillable: [] }),
+      () => ({ returned: true, killed: 0, unkillable: [{ kind: "bash", id: "j" }] }),
+    ]) {
+      let lateResolve: (h: SessionHandle) => void = () => undefined;
+      const lateP = new Promise<SessionHandle>((r) => {
+        lateResolve = r;
+      });
+      const t = setup(
+        base({
+          resume: () => lateP,
+          onLateArrival(p, cb) {
+            p.then(cb, () => undefined);
+          },
+        }),
+      );
+      const run = t.runner.run({ runId: "r8", prompt: "q", forkSessionFrom: "/c/f8.jsonl" }, budget);
+      await drain();
+      t.clock.advance(11);
+      await run;
+      await drain();
+      lateResolve(handle({ sessionFile: "/c/f8.jsonl", dispose }));
+      await drain();
+      expect(t.calls.map((c) => c.info?.disposed)).toEqual([false, false]);
+    }
+  });
+
+  it("a reaper whose disposeLate returns no verdict is treated as not proven (disposed:false)", async () => {
+    let lateResolve: (h: SessionHandle) => void = () => undefined;
+    const lateP = new Promise<SessionHandle>((r) => {
+      lateResolve = r;
+    });
+    const t = setup(
+      base({
+        resume: () => lateP,
+        onLateArrival(p, cb) {
+          p.then(cb, () => undefined);
+        },
+      }),
+      { voidDisposeLate: true },
+    );
+    const run = t.runner.run({ runId: "r9", prompt: "q", forkSessionFrom: "/c/f9.jsonl" }, budget);
+    await drain();
+    t.clock.advance(11);
+    await run;
+    await drain();
+    lateResolve(handle({ sessionFile: "/c/f9.jsonl" }));
+    await drain();
+    expect(t.calls.map((c) => c.info?.disposed)).toEqual([false, false]);
   });
 
   it("non-fork runs still call onReaped with forkSessionFrom undefined (4th arg is simply extra)", async () => {

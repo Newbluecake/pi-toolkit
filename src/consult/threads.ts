@@ -90,7 +90,7 @@ export interface SettleParams {
   tokens?: number;
   percent?: number | null;
   consultRunId?: RunId;
-  /** Baseline identity learned from the consult's first wire request (added|relocated, not degraded). */
+  /** Trusted identity of the history end learned from the consult's first successful wire request (added|relocated, valid identity; `degraded` is irrelevant — it only reflects the breakpoint budget). */
   base?: AnchorIdentity;
 }
 
@@ -343,9 +343,11 @@ export function createConsultThreads(deps: ThreadsDeps): ConsultThreads {
       sourceFile: string;
       head?: ThreadHead | undefined;
       reserved: number;
+      /** Override: a side lease that fell back to the original session sees NO retained answers. */
+      retained?: number;
     },
   ): ThreadLease {
-    const retained = thread.seq;
+    const retained = p.retained ?? thread.seq;
     const lease: ThreadLease = {
       threadId: thread.id,
       epoch,
@@ -367,6 +369,52 @@ export function createConsultThreads(deps: ThreadsDeps): ConsultThreads {
     return lease;
   }
 
+  /**
+   * Non-keeping lease on a thread that already has a writer: `branch` (writer in flight) or `pending` (previous
+   * answer not yet sealed). The head is used only when it passes the SAME admission as a continued consult
+   * (identity, size, context/cost guard, budget pre-check); otherwise the consult is forked from the original
+   * session and the lease says so truthfully (`reset` + reason, retained 0). The thread itself is never dropped
+   * here — its writer is still running.
+   */
+  function sideLease(thread: Thread, params: BeginParams, mode: "branch" | "pending"): ThreadLease {
+    const head = thread.head;
+    let reason: ThreadReason | undefined;
+    let headBytes: number | undefined;
+    if (head !== undefined) {
+      headBytes = fs.size(head.file);
+      if (params.sourceKey !== undefined && thread.sourceKey !== undefined && thread.sourceKey !== params.sourceKey)
+        reason = "identity";
+      else if (headBytes === undefined) reason = "identity";
+      else if (headBytes > maxSource) reason = "size";
+      else reason = params.headGuard?.(head);
+      if (reason === undefined && !makeRoom(headBytes!, thread)) reason = "budget";
+      if (reason === undefined) {
+        return makeLease(thread, { mode, keep: false, sourceFile: head.file, head, reserved: headBytes! });
+      }
+    }
+    const originalBytes = fs.size(params.originalFile) ?? 0;
+    if (originalBytes > maxSource) reason = "size";
+    else makeRoom(originalBytes, thread);
+    if (reason === undefined) {
+      // No head yet: the expert sees only its original session — truthful as branch/pending with retained 0.
+      return makeLease(thread, {
+        mode,
+        keep: false,
+        sourceFile: params.originalFile,
+        reserved: originalBytes,
+        retained: 0,
+      });
+    }
+    return makeLease(thread, {
+      mode: "reset",
+      reason,
+      keep: false,
+      sourceFile: params.originalFile,
+      reserved: originalBytes,
+      retained: 0,
+    });
+  }
+
   function begin(params: BeginParams): ThreadLease | undefined {
     if (closed) return undefined;
     sweepIdle();
@@ -383,20 +431,7 @@ export function createConsultThreads(deps: ThreadsDeps): ConsultThreads {
 
     if (thread !== undefined && thread.busy !== undefined) {
       // Single writer: a second concurrent consult is a branch off the retained head, never kept.
-      const head = thread.head;
-      const headBytes = head === undefined ? undefined : fs.size(head.file);
-      // Fall back to the original session when the head file vanished.
-      const useHead = head !== undefined && headBytes !== undefined && headBytes <= maxSource;
-      const file = useHead ? head.file : params.originalFile;
-      const reserved = (useHead ? headBytes : fs.size(file)) ?? 0;
-      makeRoom(reserved, thread);
-      return makeLease(thread, {
-        mode: "branch",
-        keep: false,
-        sourceFile: file,
-        head: useHead ? head : undefined,
-        reserved,
-      });
+      return sideLease(thread, params, "branch");
     }
 
     if (thread !== undefined && reset === undefined) {
@@ -419,18 +454,18 @@ export function createConsultThreads(deps: ThreadsDeps): ConsultThreads {
 
     if (thread !== undefined) {
       // Open thread, idle writer. An unresolved candidate means the previous answer is not retained yet.
+      if (thread.candidate !== undefined) return sideLease(thread, params, "pending");
       const head = thread.head;
-      const pending = thread.candidate !== undefined;
       const reserved = (head === undefined ? fs.size(params.originalFile) : (fs.size(head.file) ?? head.bytes)) ?? 0;
-      if (!makeRoom(reserved, thread) && !pending) {
+      if (!makeRoom(reserved, thread)) {
         // Cannot hold another copy: degrade to a one-off (not kept); the thread is dropped.
         dropThread(thread);
         thread = undefined;
         reset = "budget";
       } else {
         return makeLease(thread, {
-          mode: pending ? "pending" : head === undefined ? "new" : "continued",
-          keep: !pending,
+          mode: head === undefined ? "new" : "continued",
+          keep: true,
           sourceFile: head?.file ?? params.originalFile,
           head,
           reserved,

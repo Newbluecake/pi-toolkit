@@ -319,6 +319,120 @@ describe("threads: pending / branch / reset / fresh", () => {
   });
 });
 
+describe("threads: side leases (branch/pending) run the head admission (follow-up r_38A7HG4K)", () => {
+  /** A thread with a promoted head (/f/1) and a keep-writer (/f/2) in flight ⇒ the next begin is a branch. */
+  function branchSetup(limits?: Parameters<typeof makeEnv>[0]) {
+    const env = makeEnv(limits);
+    ensureOriginal(env);
+    promote(env, "/f/1", { size: 2 * MiB });
+    env.sizes.set("/f/2", MiB);
+    const writer = env.threads.begin(params())!;
+    env.threads.openFork(writer, "/f/2");
+    return { env, writer };
+  }
+
+  it.each([
+    ["context", { headGuard: () => "context" as const }],
+    ["cost", { headGuard: () => "cost" as const }],
+  ])(
+    "branch over the %s line ⇒ original session + reset(%s), retained 0; the writer's thread survives",
+    (reason, extra) => {
+      const { env, writer } = branchSetup();
+      const lease = env.threads.begin(params(extra))!;
+      expect(lease).toMatchObject({ mode: "reset", reason, keep: false, retained: 0, seq: 1, sourceFile: ORIGINAL });
+      expect(lease.head).toBeUndefined();
+      expect(lease.base).toBeUndefined();
+      expect(env.threads.views()).toHaveLength(1);
+      expect(env.threads.views()[0]!.headFile).toBe("/f/1"); // head untouched
+      env.threads.finish(lease);
+      // the writer still promotes normally afterwards
+      env.threads.settle("/f/2", { eligible: true, tokens: 1 });
+      env.threads.finish(writer);
+      env.threads.onReaped("/f/2", { disposed: true });
+      expect(env.threads.views()[0]!.headFile).toBe("/f/2");
+    },
+  );
+
+  it("a branch that passes the guard still forks the head (mode branch, retained = head seq)", () => {
+    const { env } = branchSetup();
+    const lease = env.threads.begin(params({ headGuard: () => undefined }))!;
+    expect(lease).toMatchObject({ mode: "branch", keep: false, retained: 1, seq: 2, sourceFile: "/f/1" });
+    env.threads.finish(lease);
+  });
+
+  it("branch with the head file gone ⇒ truthful reset(identity) from the original (follow-up #3)", () => {
+    const { env } = branchSetup();
+    env.sizes.delete("/f/1");
+    const lease = env.threads.begin(params())!;
+    expect(lease).toMatchObject({ mode: "reset", reason: "identity", retained: 0, sourceFile: ORIGINAL });
+    env.threads.finish(lease);
+  });
+
+  it("branch when the original session signature changed ⇒ reset(identity); oversized head ⇒ reset(size)", () => {
+    const a = makeEnv();
+    ensureOriginal(a);
+    promote(a, "/f/1", { begin: { sourceKey: "1:1" } });
+    const w = a.threads.begin(params({ sourceKey: "1:1" }))!;
+    a.sizes.set("/f/2", MiB);
+    a.threads.openFork(w, "/f/2");
+    const l = a.threads.begin(params({ sourceKey: "1:2" }))!;
+    expect(l).toMatchObject({ mode: "reset", reason: "identity" });
+
+    const { env } = branchSetup({ maxSourceBytes: 10 * MiB });
+    env.sizes.set("/f/1", 11 * MiB);
+    const big = env.threads.begin(params())!;
+    expect(big).toMatchObject({ mode: "reset", reason: "size", sourceFile: ORIGINAL });
+  });
+
+  it("branch with no head yet stays an honest branch with retained 0 from the original (no fake reset)", () => {
+    const env = makeEnv();
+    ensureOriginal(env);
+    const writer = env.threads.begin(params())!;
+    const lease = env.threads.begin(params())!;
+    expect(lease).toMatchObject({ mode: "branch", retained: 0, seq: 1, sourceFile: ORIGINAL });
+    expect(lease.reason).toBeUndefined();
+    env.threads.finish(lease);
+    env.threads.finish(writer);
+  });
+
+  it("pending runs the head budget pre-check: over budget ⇒ original session + reset(budget) (follow-up #4)", () => {
+    const env = makeEnv({ budgetBytes: 9 * MiB });
+    ensureOriginal(env, 1 * MiB);
+    promote(env, "/f/1", { size: 4 * MiB });
+    // #2 finished (settled) but not sealed ⇒ candidate pending; its 3 MiB copy + head 4 MiB (+4 MiB reserved for the writer) already fill 9 MiB
+    env.sizes.set("/f/2", 3 * MiB);
+    const writer = env.threads.begin(params())!;
+    env.threads.openFork(writer, "/f/2");
+    env.threads.settle("/f/2", { eligible: true, tokens: 1 });
+    env.threads.finish(writer);
+    const lease = env.threads.begin(params())!;
+    expect(lease).toMatchObject({ mode: "reset", reason: "budget", keep: false, retained: 0, sourceFile: ORIGINAL });
+    env.threads.finish(lease);
+  });
+
+  it("pending with no head and a fitting original keeps the honest pending form (retained 0)", () => {
+    const env = makeEnv();
+    ensureOriginal(env);
+    env.sizes.set("/f/1", MiB);
+    const writer = env.threads.begin(params())!;
+    env.threads.openFork(writer, "/f/1");
+    env.threads.settle("/f/1", { eligible: true, tokens: 1 });
+    env.threads.finish(writer);
+    const lease = env.threads.begin(params())!;
+    expect(lease).toMatchObject({ mode: "pending", retained: 0, seq: 1, keep: false, sourceFile: ORIGINAL });
+    env.threads.finish(lease);
+  });
+
+  it("side leases never create or drop thread records (no gen bump on the writer's thread)", () => {
+    const { env, writer } = branchSetup();
+    const gen = env.threads.views()[0]!.gen;
+    const l = env.threads.begin(params({ headGuard: () => "context" }))!;
+    env.threads.finish(l);
+    expect(env.threads.views()[0]!.gen).toBe(gen);
+    env.threads.finish(writer);
+  });
+});
+
 describe("threads: generation fence + epoch + close (R2-2, §4.3)", () => {
   it("asker terminal closes the thread: a late sealed+eligible result only deletes, never revives it", () => {
     const env = makeEnv();

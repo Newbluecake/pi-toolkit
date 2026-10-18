@@ -74,7 +74,12 @@ export interface ReapResult {
 export interface Reaper {
   reap(input: ReapInput): Promise<ReapResult>;
   abortReap(runId: RunId, generation: number, reason: string): void;
-  disposeLate(runId: RunId, generation: number, h: SessionHandle): void;
+  /**
+   * Dispose a late-arriving session. Returns the real dispose verdict (cache-thread plan R2-1 follow-up):
+   * `disposed` is true only when `dispose()` returned with nothing unkillable. A reaper that returns nothing
+   * is treated by the runner as "not proven" (disposed:false).
+   */
+  disposeLate(runId: RunId, generation: number, h: SessionHandle): { disposed: boolean } | void;
   readonly registry: OrphanRegistry;
 }
 const info = (e: unknown) => ({
@@ -164,9 +169,10 @@ export class EscalatingReaper implements Reaper {
   abortReap(runId: RunId, generation: number) {
     this.active.get(`${runId}:${generation}`)?.abort();
   }
-  disposeLate(runId: RunId, generation: number, h: SessionHandle) {
+  disposeLate(runId: RunId, generation: number, h: SessionHandle): { disposed: boolean } {
     const r = h.dispose();
-    if (r.returned && !r.unkillable.length) this.registry.recordLateRecovered(runId, generation);
+    const disposed = r.returned && !r.unkillable.length;
+    if (disposed) this.registry.recordLateRecovered(runId, generation);
     else
       this.registry.register({
         runId,
@@ -177,6 +183,7 @@ export class EscalatingReaper implements Reaper {
         unkillable: [...r.unkillable],
         lateArrival: true,
       });
+    return { disposed };
   }
 }
 function bounded<T>(p: Promise<T>, ms: number, clock: Clock, signal: AbortSignal) {
