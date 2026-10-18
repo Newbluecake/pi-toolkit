@@ -11,6 +11,7 @@ import { MEASURE_RAW_USAGE_MAX_BYTES, VALIDATOR_LIMITS } from "./measure-types.j
 import { measureEndpointSuffix } from "./measure-route.js";
 import type {
   PipelineMeasured,
+  PipelineWireProfile,
   PipelineDiag,
   PipelineNotSentReason,
   PipelineOutcome,
@@ -49,6 +50,7 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
   let upstream: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let upstreamClosed = false;
   let cancelStarted = false;
+  let sawOpenAiUsageFrame = false;
 
   // A late fetch can introduce a body cancel AFTER the logical outcome. Its cleanup is registered
   // before the fetch is released from this ledger, so `settled` cannot resolve in the intervening gap.
@@ -371,13 +373,30 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
             },
             onProviderStreamEvent: (event) => {
               if (!logicalDone && clock.now() >= input.deadlineAt) onDeadline();
-              // P2 adds OpenAI terminal frames here; measurement profiles never consume an
-              // Anthropic-shaped event from a different API.
-              if (measurement && measurement.profile !== "anthropic-messages") return;
+              if (measurement && measurement.profile !== "anthropic-messages") {
+                if (logicalDone || diag.baseFetchCalls === 0 || !isRecord(event)) return;
+                const responses = measurement.profile === "openai-responses";
+                const usage = responses
+                  ? isRecord(event.response)
+                    ? event.response.usage
+                    : undefined
+                  : completionUsageFrom(event);
+                const terminal = responses
+                  ? event.type === "response.completed" || event.type === "response.incomplete"
+                  : usage !== undefined && usage !== null;
+                if (!terminal) return;
+                sawOpenAiUsageFrame = true;
+                const raw = cloneRawUsage(usage, measurement.profile);
+                if (raw !== undefined) measured!.rawUsage = raw;
+                else delete measured!.rawUsage;
+                // OpenAI usage arrives at completion, not the first event. Let pi consume the
+                // terminal frame and finish the stream; never abort on created/delta/finish_reason.
+                return;
+              }
               if (logicalDone || diag.baseFetchCalls === 0 || !isMessageStartEvent(event)) return;
               diag.sawMessageStart = true;
               if (measured && isRecord(event.message)) {
-                const raw = cloneRawUsage(event.message.usage);
+                const raw = cloneRawUsage(event.message.usage, "anthropic-messages");
                 if (raw !== undefined) measured.rawUsage = raw;
               }
               finish({ kind: "usage", usage: rawUsageFrom(event) });
@@ -392,7 +411,7 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
             diag.explicitSuccess =
               !controller.signal.aborted && ["stop", "length", "toolUse"].includes(message.stopReason);
             if (diag.explicitSuccess && diag.baseFetchCalls === 0) notSentReason = "capability";
-            finish(fallback());
+            finish(sawOpenAiUsageFrame ? { kind: "usage", usage: undefined } : fallback());
           },
           (error: unknown) => finish(fallback(error)),
         );
@@ -407,10 +426,47 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
   return result;
 };
 
-function cloneRawUsage(value: unknown): unknown {
+function completionUsageFrom(event: Record<string, unknown>): unknown {
+  const choice = Array.isArray(event.choices) ? event.choices[0] : undefined;
+  return event.usage ?? (isRecord(choice) ? choice.usage : undefined);
+}
+
+function cloneRawUsage(value: unknown, profile: PipelineWireProfile): unknown {
   if (!isRecord(value)) return undefined;
   try {
-    const clone: unknown = structuredClone(value);
+    // Relays can attach huge attribution blobs to usage. Keep only the counters consumed by
+    // the strict reader BEFORE cloning/capping; metadata must not erase otherwise valid evidence.
+    const projected =
+      profile === "anthropic-messages"
+        ? projectCounters(value, [
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "output_tokens",
+          ])
+        : profile === "openai-responses"
+          ? projectCounters(value, ["input_tokens", "output_tokens"])
+          : projectCounters(value, ["prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "cached_tokens"]);
+    const nestedKey =
+      profile === "anthropic-messages"
+        ? "cache_creation"
+        : profile === "openai-responses"
+          ? "input_tokens_details"
+          : "prompt_tokens_details";
+    if (Object.hasOwn(value, nestedKey)) {
+      const nested = value[nestedKey];
+      projected[nestedKey] = isRecord(nested)
+        ? projectCounters(
+            nested,
+            profile === "anthropic-messages"
+              ? ["ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"]
+              : ["cached_tokens", "cache_write_tokens"],
+          )
+        : Array.isArray(nested)
+          ? []
+          : projectCounter(nested);
+    }
+    const clone: unknown = structuredClone(projected);
     const serialized = JSON.stringify(clone);
     return serialized !== undefined && Buffer.byteLength(serialized, "utf8") <= MEASURE_RAW_USAGE_MAX_BYTES
       ? clone
@@ -418,6 +474,17 @@ function cloneRawUsage(value: unknown): unknown {
   } catch {
     return undefined;
   }
+}
+
+function projectCounters(value: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const projected: Record<string, unknown> = {};
+  for (const key of keys) if (Object.hasOwn(value, key)) projected[key] = projectCounter(value[key]);
+  return projected;
+}
+function projectCounter(value: unknown): unknown {
+  // Preserve invalid scalar counters too: the strict reader, not this projection, decides
+  // validity. Non-leaf values become null (still invalid), never a missing/zero counter.
+  return value === null || ["number", "string", "boolean", "undefined"].includes(typeof value) ? value : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

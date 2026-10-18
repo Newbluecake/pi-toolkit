@@ -36,7 +36,11 @@ export function measureRouteKey(input: MeasureRouteInput): PipelineMeasureRouteK
   const key = `sha256:${createHash("sha256")
     .update(JSON.stringify([input.api, origin, path, query, input.wireModel, input.effectiveTier]))
     .digest("hex")}`;
-  const segments = path.split("/").filter(Boolean).slice(0, 2).map(redactSegment);
+  const segments = path
+    .split("/")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((segment) => redactSegment(segment, true));
   const queryLabel = query.length
     ? `?${[...new Set(query.map(([name]) => redactSegment(name)))].map((name) => `${name}=…`).join("&")}`
     : "";
@@ -49,16 +53,21 @@ export function measureRouteKey(input: MeasureRouteInput): PipelineMeasureRouteK
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
-function redactSegment(raw: string): string {
+function redactSegment(raw: string, commonWordOnly = false): string {
   let value: string;
   try {
     value = decodeURIComponent(raw);
   } catch {
     return "…";
   }
-  // Deliberately conservative: long/opaque IDs, credential-looking tokens, escaped separators,
-  // control chars and unfamiliar punctuation are not useful display names.
-  return value.length > 23 ||
+  // Path labels are allowlisted short common route words, not guessed from entropy: pure
+  // letters can be API tokens too. Identity still hashes EVERY unredacted path/query byte.
+  const common =
+    /^(?:v\d{1,2}|api|openai|anthropic|proxy|relay|gateway|models|chat|completions|responses|messages|base|test|beta|public|private|service|services|llm|ai)$/i.test(
+      value,
+    );
+  return value.length >= 16 ||
+    (commonWordOnly && !common) ||
     (value.length >= 12 && /[a-z]/i.test(value) && /\d/.test(value)) ||
     /[a-f\d]{12,}|(?:sk|key|token|secret|bearer)[-_]|[^a-z\d._~-]/i.test(value)
     ? "…"

@@ -239,6 +239,13 @@ export interface PayloadExpectation {
   managedEffort: boolean;
   /** Responses: `clamp(sessionId)` the built `prompt_cache_key` must equal. */
   promptCacheKey?: string;
+  /**
+   * Extra top-level param names the built payload must NOT carry, beyond the validator's own protected set —
+   * e.g. the model's configured `compat.thinkingTokenBudgetField` (an opaque custom budget key the validator can't
+   * otherwise tell apart from a tolerated unknown sampling key, ruling 12). Filled by P4 from the model's compat;
+   * absent/empty ⇒ only the built-in protected set applies. A hit refuses with the closest existing code.
+   */
+  forbiddenKeys?: readonly string[];
 }
 
 export type PayloadVerdict =

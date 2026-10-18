@@ -17,20 +17,57 @@ export function readMeasureUsage(
     case "anthropic-messages":
       return readAnthropicUsage(rawUsage, requestedRetention);
     case "openai-responses":
-    case "openai-completions": {
-      const unsupported = readOpenAiUsage(profile, rawUsage);
-      // P2 replaces this explicit unsupported dispatch with the per-profile strict readers.
-      void unsupported;
-      return invalid("no-terminal-frame");
-    }
+    case "openai-completions":
+      return readOpenAiUsage(profile, rawUsage);
   }
 }
 
-function readOpenAiUsage(
-  profile: "openai-responses" | "openai-completions",
-  _rawUsage: unknown,
-): { kind: "unsupported"; profile: typeof profile } {
-  return { kind: "unsupported", profile };
+function readOpenAiUsage(profile: "openai-responses" | "openai-completions", raw: unknown): UsageReading {
+  if (!isRecord(raw)) return invalid("no-terminal-frame");
+  const responses = profile === "openai-responses";
+  const details = responses ? raw.input_tokens_details : raw.prompt_tokens_details;
+  // A null details container means the provider did not report details, not an invalid
+  // numeric counter. Completions may still provide a top-level cache-read alias.
+  if (details !== undefined && details !== null && !isRecord(details)) return invalid("not-integer");
+  const P = responses ? raw.input_tokens : raw.prompt_tokens;
+  const cached = isRecord(details) ? details.cached_tokens : undefined;
+  // First PRESENT, never first truthy: an explicit 0 is evidence; an invalid first alias
+  // must not be hidden by a later valid alias.
+  const C = responses
+    ? cached
+    : cached !== undefined
+      ? cached
+      : raw.prompt_cache_hit_tokens !== undefined
+        ? raw.prompt_cache_hit_tokens
+        : raw.cached_tokens;
+  const W = isRecord(details) ? details.cache_write_tokens : undefined;
+  const output = responses ? raw.output_tokens : raw.completion_tokens;
+  const counters = [P, C, W, output, cached, ...(responses ? [] : [raw.prompt_cache_hit_tokens, raw.cached_tokens])];
+  for (const value of counters) {
+    if (value === undefined) continue;
+    if (typeof value === "number" && value < 0) return invalid("negative");
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) return invalid("not-integer");
+  }
+  if (P === undefined) return invalid("missing-prompt");
+  if (C === undefined) return invalid("missing-cached");
+  const prompt = P as number;
+  const read = C as number;
+  const write = W as number | undefined;
+  if (read > prompt) return invalid("cached-exceeds-prompt");
+  if (write !== undefined && write > prompt - read) return invalid("cached-plus-write-exceeds-prompt");
+  const items: BillingItem[] = [];
+  if (output === undefined) items.push("output");
+  if (write === undefined) items.push("write");
+  return {
+    usage: {
+      P: prompt,
+      C: read,
+      ...(write === undefined ? {} : { W: write }),
+      ...(output === undefined ? {} : { output: output as number }),
+    },
+    cacheEvidence: { kind: "valid" },
+    billing: items.length ? { kind: "unknown", items } : { kind: "complete" },
+  };
 }
 
 function readAnthropicUsage(raw: unknown, retention: RequestedRetention): UsageReading {

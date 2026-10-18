@@ -455,9 +455,9 @@ describe("measurement pipeline mode — additive Anthropic transport", () => {
     await result.settled;
   });
   it("clones raw usage only within the 4KiB UTF-8 boundary", async () => {
-    const overhead = Buffer.byteLength(JSON.stringify({ extra: "" }));
+    const overhead = Buffer.byteLength(JSON.stringify({ input_tokens: "" }));
     for (const extraBytes of [MEASURE_RAW_USAGE_MAX_BYTES - overhead, MEASURE_RAW_USAGE_MAX_BYTES - overhead + 1]) {
-      const value = { extra: "x".repeat(extraBytes) };
+      const value = { input_tokens: "x".repeat(extraBytes) };
       const h = harness(
         {},
         vi.fn(async () => new Response(eventText(value))),
@@ -469,6 +469,26 @@ describe("measurement pipeline mode — additive Anthropic transport", () => {
       else expect(result.outcome.measured).not.toHaveProperty("rawUsage");
       await result.settled;
     }
+  });
+  it("projects Anthropic counters and the 1h split before capping 10KiB attribution metadata", async () => {
+    const counters = {
+      ...raw,
+      output_tokens: 0,
+      cache_creation: { ephemeral_1h_input_tokens: 20, ephemeral_5m_input_tokens: 0 },
+    };
+    const value = {
+      ...counters,
+      attribution: "x".repeat(10240),
+      cache_creation: { ...counters.cache_creation, attribution: "x".repeat(10240) },
+    };
+    const h = harness(
+      {},
+      vi.fn(async () => new Response(eventText(value))),
+    );
+    const result = await sendPipelinePing(h.input);
+    expect(result.outcome).toMatchObject({ kind: "usage", measured: { rawUsage: counters } });
+    expect(result.outcome.measured!.rawUsage).toEqual(counters);
+    await result.settled;
   });
   it("a stalled fetch returns by deadline but settled still waits for fetch, cancel and pi", async () => {
     const response = deferred<Response>();

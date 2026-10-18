@@ -17,29 +17,135 @@ export function validateMeasurePayload(
     if (params.stream !== true) return refuse("not-streaming");
     if (hasAny(params, ["tools", "tool_choice", "functions"])) return refuse("tools");
     if (params.n !== undefined && params.n !== 1) return refuse("n");
+    if (hasForbiddenKey(params, expect.forbiddenKeys ?? [])) return refuse("thinking");
     switch (profile) {
       case "anthropic-messages":
         return validateAnthropicPayload(params, expect);
       case "openai-responses":
-      case "openai-completions": {
-        const unsupported = validateOpenAiPayload(profile, params, expect);
-        // P2 replaces this explicit unsupported dispatch with the per-profile validators.
-        void unsupported;
-        return { ok: false, code: "extra-input", detail: "unsupported profile" };
-      }
+      case "openai-completions":
+        return validateOpenAiPayload(profile, params, expect);
     }
   } catch {
-    // Circular/unserialisable/otherwise unfamiliar params cannot authorize a paid request.
+    // Circular/unserialisable params cannot authorize a paid request. The frozen rejection
+    // vocabulary has no serialization-invalid code; retain too-large for this admission failure.
     return refuse("too-large");
   }
 }
 
 function validateOpenAiPayload(
   profile: "openai-responses" | "openai-completions",
-  _params: Record<string, unknown>,
-  _expect: PayloadExpectation,
-): { kind: "unsupported"; profile: typeof profile } {
-  return { kind: "unsupported", profile };
+  p: Record<string, unknown>,
+  expect: PayloadExpectation,
+): PayloadVerdict {
+  const responses = profile === "openai-responses";
+  const capKeys = responses ? ["max_output_tokens"] : ["max_tokens", "max_completion_tokens"];
+  if (hasAny(p, responses ? ["max_tokens", "max_completion_tokens"] : ["max_output_tokens"]))
+    return refuse("conflicting-output-caps");
+  const caps = capKeys.filter((key) => p[key] !== undefined).map((key) => p[key]);
+  if (!caps.length) return refuse("no-output-cap");
+  if (
+    caps.some((cap) => !Number.isInteger(cap) || cap !== OUTPUT_CAP[profile]) ||
+    expect.outputCap !== OUTPUT_CAP[profile]
+  )
+    return refuse(caps.length > 1 ? "conflicting-output-caps" : "bad-output-cap");
+  if (p.service_tier !== undefined && !["auto", "default"].includes(p.service_tier as string))
+    return refuse("billing-tier");
+  if (responses ? p.store !== false : p.store !== undefined && p.store !== false) return refuse("store");
+  if (hasAny(p, ["instructions", "prompt", "system"]) || hasAny(p, responses ? ["messages"] : ["input"]))
+    return refuse("extra-input");
+  if (responses) {
+    if (hasAny(p, ["previous_response_id", "conversation", "background"])) return refuse("server-state");
+    if (typeof expect.promptCacheKey !== "string" || p.prompt_cache_key !== expect.promptCacheKey)
+      return refuse("prompt-cache-key");
+  } else {
+    if (!isRecord(p.stream_options) || p.stream_options.include_usage !== true) return refuse("no-stream-usage");
+    if (hasThinkingBudget(p)) return refuse("thinking");
+    if (
+      hasAny(p, ["audio", "prediction", "web_search_options"]) ||
+      (Array.isArray(p.modalities) && p.modalities.includes("audio"))
+    )
+      return refuse("server-billed");
+  }
+  const input = responses ? p.input : p.messages;
+  if (!Array.isArray(input) || !input.length) return refuse("missing-synthetic-content");
+  if (input.length !== 2) return refuse("extra-input");
+  for (const [index, message] of input.entries()) {
+    if (
+      !isRecord(message) ||
+      !onlyKeys(message, responses ? ["role", "content", "type"] : ["role", "content"]) ||
+      (responses && message.type !== undefined && message.type !== "message") ||
+      (index === 0 ? !["system", "developer"].includes(message.role as string) : message.role !== "user")
+    )
+      return refuse("extra-input");
+    const texts = openAiTextParts(message.content, responses);
+    if (!texts || texts.length !== 1 || texts[0] !== (index === 0 ? expect.expectedSystem : expect.expectedUser))
+      return refuse("extra-input");
+    // Compat cache markers are stock constructions, but cannot silently promote a short run.
+    if (Array.isArray(message.content))
+      for (const part of message.content) {
+        if (
+          isRecord(part) &&
+          part.cache_control !== undefined &&
+          (!validCacheControl(part.cache_control) ||
+            (expect.requestedRetention === "short" && part.cache_control.ttl === "1h"))
+        )
+          return refuse("no-cache-control");
+      }
+  }
+  const retention = p.prompt_cache_retention;
+  const options = responses ? p.prompt_cache_options : undefined;
+  if (
+    (retention !== undefined && retention !== "24h") ||
+    (options !== undefined && (!isRecord(options) || !onlyKeys(options, ["ttl"]) || options.ttl !== "30m")) ||
+    (retention !== undefined && options !== undefined)
+  )
+    return refuse("no-cache-control");
+  const tier = retention === "24h" ? "retention-24h" : options !== undefined ? "explicit-30m" : "auto";
+  if (expect.requestedRetention === "long" && tier === "auto") return refuse("long-unsupported");
+  if (expect.requestedRetention === "short" && tier !== "auto") return refuse("no-cache-control");
+  return { ok: true, effectiveTier: tier };
+}
+
+function openAiTextParts(value: unknown, responses: boolean): string[] | undefined {
+  if (typeof value === "string") return [value];
+  if (!Array.isArray(value)) return undefined;
+  const texts: string[] = [];
+  for (const part of value) {
+    if (
+      !isRecord(part) ||
+      part.type !== (responses ? "input_text" : "text") ||
+      typeof part.text !== "string" ||
+      !onlyKeys(part, responses ? ["type", "text"] : ["type", "text", "cache_control"])
+    )
+      return undefined;
+    texts.push(part.text);
+  }
+  return texts;
+}
+
+function hasForbiddenKey(params: Record<string, unknown>, keys: readonly string[]): boolean {
+  // pi-ai's thinkingTokenBudgetField is Object.assign'd at the top level. Also refuse
+  // nested forms used by compatible providers without widening the unknown-key policy.
+  return (
+    hasAny(params, keys) ||
+    ["thinking", "reasoning"].some((name) => {
+      const value = params[name];
+      return isRecord(value) && hasAny(value, keys);
+    })
+  );
+}
+
+function hasThinkingBudget(value: Record<string, unknown>): boolean {
+  for (const [key, item] of Object.entries(value)) {
+    if (/(?:thinking|reasoning).*(?:budget|tokens)|budget.*(?:thinking|reasoning)/i.test(key)) return true;
+    if (
+      ["thinking", "reasoning", "chat_template_kwargs", "chat_template_args"].includes(key) &&
+      isRecord(item) &&
+      (hasThinkingBudget(item) || Object.keys(item).some((name) => /budget|max_tokens/i.test(name)))
+    )
+      return true;
+  }
+  return false;
 }
 
 function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExpectation): PayloadVerdict {
@@ -100,6 +206,7 @@ function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExp
   if (!validCacheControl(control)) return refuse("no-cache-control");
   const long = control.ttl === "1h";
   if (expect.requestedRetention === "long" && !long) return refuse("long-unsupported");
+  if (expect.requestedRetention === "short" && long) return refuse("no-cache-control");
   // Mixed system/user TTLs cannot be represented honestly by one effective tier.
   for (const block of Array.isArray(p.system) ? p.system : []) {
     if (
