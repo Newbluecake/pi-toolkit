@@ -28,7 +28,7 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 
 ## 禁用与限制
 
-- 禁止承载 `dev-clarify`、方案确认等用户交互闸门；workflow 启动后跑到结束，不能中途等用户。
+- 禁止承载需求澄清、方案确认等用户交互闸门；workflow 启动后跑到结束，不能中途等用户。
 - 禁止顺序 `await agent()` 冒充并行；并行必须 `parallel()` / `pipeline()`。
 - **`agent(prompt, opts)` 严格校验，只认 `label` / `agentType` / `phase` / `fullResult` / `model` / `thinking` /
   `isolation` / `experts` 这八个键**：任何其它键（含拼写变体，如 `effort`/`subagent_type`/`schema`/`resume`/

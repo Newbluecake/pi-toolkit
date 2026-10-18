@@ -98,3 +98,4 @@ Factory 订阅额度不用也作废。[quota] 行显示 droid 池有余量（未
 | 2026-10-15 | gpt-6.1-sol 仅 copilot 渠道；移除 cr-response/zhipu-pool；droid 进路由表 |
 | 2026-10-16 | L1 加异源 verifier；验证模型订阅将尽优先 deepseek-v4-pro（见 SKILL.md）  |
 | 2026-10-18 | 验收次选 deepseek-v4-pro → deepseek-flash（用户要求）                    |
+| 2026-10-18 | 第 0 步改为主会话 ask_user 轻量澄清；dev-clarify 降为可选（用户要求）    |
