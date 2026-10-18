@@ -860,8 +860,22 @@ update the matrix/property tests in lockstep. Integration tests live in `tests/i
 
 ## Releasing
 
-Releases are cut from `master` by `scripts/release/release.sh <version>` (adapted from
-`~/ai/claude2api`'s release flow), and only when the user explicitly asks for one:
+Releases are cut by `scripts/release/release.sh <version>` (copied from `~/ai/claude2api`'s
+dev/main release flow; `main` there is `master` here), and only when the user explicitly asks for one:
+
+- **Branch strategy (铁律)**: day-to-day development happens on `dev`. A **patch** release is cut
+  directly on `dev` (release commit + tag on dev, no merge into `master` first). A **minor/major**
+  release must first merge `dev` into `master` via PR, then the release commit + tag are made on
+  `master`; releasing minor/major on `dev` is forbidden. Before releasing, pull the target branch and
+  confirm the commits to release are on it; the tag must be on the release branch's ancestor chain.
+  The script derives the bump kind from the requested version vs the latest tag and enforces this
+  (up-to-date check, ancestor check and push all use the release branch). Consequence: `master` only
+  advances on minor/major, so `pi install git:` users on the default branch get patches only at the
+  next minor. After a minor/major, sync dev (`git switch dev && git merge --ff-only master`) — the
+  script only prints this reminder.
+- **Transition rule**: while neither a local `dev` nor `origin/dev` exists, a patch release from
+  `master` is allowed with a WARN (create dev afterwards: `git switch -c dev && git push -u origin dev`);
+  once dev exists the strict rules above apply.
 
 - **Version bump rule**: default **patch** — fix/refactor/perf/chore/docs/test/ci are always patch;
   **minor** only after at least 50 `feat` commits accumulated since the latest existing `vX.Y.0` tag
@@ -872,9 +886,9 @@ Releases are cut from `master` by `scripts/release/release.sh <version>` (adapte
   (anything already under `[Unreleased]` is merged in) and updates the compare links. Commit
   subjects/bodies therefore ARE the changelog — write them for users. Do not hand-edit released
   sections either; to change the output, change the script.
-- **Flow**: on `master`, clean tree, up to date with `origin/master` ⇒ sync `package.json` /
+- **Flow**: on the release branch (`dev` for patch, `master` for minor/major), clean tree, up to date with `origin/<branch>` ⇒ sync `package.json` /
   `package-lock.json` ⇒ generate CHANGELOG ⇒ `format:check` → `typecheck` → `build` →
   `build:web` + `check:web` → `test` (any failure aborts before commit/tag) ⇒ commit
-  `chore(release): bump version to vX.Y.Z` ⇒ annotated tag carrying the section ⇒ push ⇒
+  `chore(release): bump version to vX.Y.Z` ⇒ annotated tag carrying the section (verified on the branch's ancestor chain) ⇒ push branch + tag ⇒
   `scripts/release/package.sh` (zips + sha256 + notes) ⇒ `gh release create`. Flags: `--dry-run`,
   `--changelog`, `--skip-tests` (emergency only), `--skip-push`, `--skip-publish`.

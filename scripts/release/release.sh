@@ -2,12 +2,21 @@
 #
 # scripts/release/release.sh — pi-toolkit one-shot release script
 #
-# Single-branch flow (pi-toolkit only ever releases from `master`; there is
-# no dev/main split here — see docs/dev or AGENTS.md "发版与部署" if that
-# ever changes):
+# Two-branch flow (copied from ~/ai/claude2api; there `main`, here `master`):
+#   - day-to-day development happens on `dev`
+#   - PATCH   -> released directly on `dev` (release commit + tag on dev, no
+#                merge into master first)
+#   - MINOR / MAJOR -> `dev` must first be merged into `master` via PR; the
+#                release commit + tag are then made on `master`. Releasing a
+#                minor/major on `dev` is forbidden.
+#   - the tag must end up on the release branch's ancestor chain, and the
+#     release branch must be up to date with origin/<branch> before releasing.
+#   - TRANSITION rule: while neither a local `dev` nor `origin/dev` exists, a
+#     patch release from `master` is allowed (WARN). Once dev exists the strict
+#     rules apply.
 #
 #   sync version -> generate CHANGELOG section -> pre-release checks ->
-#   commit "chore(release): ..." -> annotated tag -> push master + tag ->
+#   commit "chore(release): ..." -> annotated tag -> push <branch> + tag ->
 #   scripts/release/package.sh <version> -> gh release create
 #
 # Usage:
@@ -23,13 +32,16 @@
 #                   build/build:web). Emergency use only — normal releases
 #                   must not use this.
 #   --skip-push     Commit + tag locally but do not push, package or publish.
-#   --skip-publish  Push master + tag but skip scripts/release/package.sh and
+#   --skip-publish  Push <branch> + tag but skip scripts/release/package.sh and
 #                   `gh release create`.
 #
 # What it does:
-#   1. Preflight — must be on `master`, working tree clean (dry-run: warn
-#      instead of abort), local master up to date with origin/master (no
-#      unpulled commits), target tag must not already exist.
+#   1. Preflight — bump kind (patch/minor/major, version vs latest tag)
+#      selects the release branch: patch -> `dev`, minor/major -> `master`
+#      (transition: patch from `master` OK with a WARN while no dev exists).
+#      Working tree clean (dry-run: warn instead of abort), local release
+#      branch up to date with origin/<branch> (no unpulled commits), target
+#      tag must not already exist.
 #   2. Prints a suggested semver bump level (see rule below) and WARNs
 #      (non-blocking) if the version you passed differs.
 #   3. Syncs package.json + package-lock.json `.version` (and the lockfile's
@@ -49,8 +61,10 @@
 #   7. Commits `chore(release): bump version to vX.Y.Z` (exact paths only,
 #      never `git add -A`), creates an annotated tag whose message is the
 #      version's CHANGELOG section, and verifies the tag is an ancestor of
-#      `master`.
-#   8. Pushes `master` and the tag (unless --skip-push).
+#      the release branch.
+#   8. Pushes the release branch and the tag (unless --skip-push). After a
+#      minor/major on master it prints a reminder to sync dev (never pushes
+#      dev itself).
 #   9. Runs scripts/release/package.sh <version> and `gh release create`
 #      (unless --skip-push or --skip-publish).
 #
@@ -122,9 +136,43 @@ info "Today: $TODAY"
 info "[1/9] Preflight checks"
 
 CURRENT_BRANCH=$(git branch --show-current)
-[[ "$CURRENT_BRANCH" == "master" ]] \
-  || die "Must release from 'master' (currently on '$CURRENT_BRANCH')"
-ok "On master"
+RELEASE_BRANCH="$CURRENT_BRANCH"
+
+# Bump kind of the requested version vs the latest existing tag.
+BUMP_KIND="patch"
+PRE_LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+if [[ -n "$PRE_LATEST_TAG" ]]; then
+  IFS=. read -r preM prem _prep <<< "${PRE_LATEST_TAG#v}"
+  IFS=. read -r reqM reqm _reqp <<< "${VERSION%%-*}"
+  [[ $reqM -gt $preM ]] && BUMP_KIND="major"
+  [[ $reqM -eq $preM && $reqm -gt ${prem%%-*} ]] && BUMP_KIND="minor"
+fi
+info "Requested $TAG is a $BUMP_KIND bump (vs ${PRE_LATEST_TAG:-no prior tag})"
+
+HAS_DEV=0
+if git rev-parse --verify -q refs/heads/dev >/dev/null \
+  || git rev-parse --verify -q refs/remotes/origin/dev >/dev/null; then
+  HAS_DEV=1
+fi
+
+if [[ "$BUMP_KIND" == "patch" ]]; then
+  if [[ "$CURRENT_BRANCH" == "dev" ]]; then
+    ok "Patch release on dev"
+  elif [[ "$CURRENT_BRANCH" == "master" && $HAS_DEV -eq 0 ]]; then
+    warn "dev branch not created yet — transitional release from master; create dev after this release: git switch -c dev && git push -u origin dev"
+  elif [[ "$CURRENT_BRANCH" == "master" ]]; then
+    die "Patch releases must be cut on 'dev', not 'master' (dev exists). Switch: git switch dev && git pull --ff-only"
+  else
+    die "Must release a patch from 'dev' (currently on '$CURRENT_BRANCH')"
+  fi
+else
+  if [[ "$CURRENT_BRANCH" == "dev" ]]; then
+    die "Must not release a $BUMP_KIND on 'dev': merge dev into master via PR first, then release from 'master'"
+  elif [[ "$CURRENT_BRANCH" != "master" ]]; then
+    die "Must release a $BUMP_KIND from 'master' (currently on '$CURRENT_BRANCH')"
+  fi
+  ok "$BUMP_KIND release on master"
+fi
 
 if [[ -n "$(git status --porcelain)" ]]; then
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -143,20 +191,20 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
 fi
 ok "Tag $TAG does not exist yet"
 
-# Make sure local master isn't behind origin/master. A missing remote-tracking
-# ref (e.g. a throwaway test fixture with no remote) is a WARN, not an abort,
-# so --dry-run stays usable without network access.
-if git rev-parse --verify -q origin/master >/dev/null; then
+# Make sure the local release branch isn't behind origin/<branch>. A missing
+# remote-tracking ref (e.g. a throwaway test fixture with no remote) is a WARN,
+# not an abort, so --dry-run stays usable without network access.
+if git rev-parse --verify -q "origin/$RELEASE_BRANCH" >/dev/null; then
   if [[ $DRY_RUN -eq 0 ]]; then
-    git fetch origin master --quiet || warn "git fetch origin master failed, using last-known origin/master"
+    git fetch origin "$RELEASE_BRANCH" --quiet || warn "git fetch origin $RELEASE_BRANCH failed, using last-known origin/$RELEASE_BRANCH"
   fi
-  BEHIND=$(git rev-list --count HEAD..origin/master 2>/dev/null || echo 0)
+  BEHIND=$(git rev-list --count "HEAD..origin/$RELEASE_BRANCH" 2>/dev/null || echo 0)
   if [[ "$BEHIND" -gt 0 ]]; then
-    die "master is $BEHIND commit(s) behind origin/master — run 'git pull --ff-only' first"
+    die "$RELEASE_BRANCH is $BEHIND commit(s) behind origin/$RELEASE_BRANCH — run 'git pull --ff-only' first"
   fi
-  ok "master is up to date with origin/master (or ahead)"
+  ok "$RELEASE_BRANCH is up to date with origin/$RELEASE_BRANCH (or ahead)"
 else
-  warn "No origin/master remote-tracking ref found, skipping up-to-date check"
+  warn "No origin/$RELEASE_BRANCH remote-tracking ref found, skipping up-to-date check"
 fi
 
 # ─── Step 2: bump level suggestion ───────────────────────────────────────────
@@ -541,9 +589,9 @@ else
 $CHANGELOG_BODY"
   ok "Commit + tag $TAG created"
 
-  git merge-base --is-ancestor "$TAG" master \
-    || die "Tag $TAG is not an ancestor of master (should be impossible — report this)"
-  ok "Verified $TAG is an ancestor of master"
+  git merge-base --is-ancestor "$TAG" "$RELEASE_BRANCH" \
+    || die "Tag $TAG is not an ancestor of $RELEASE_BRANCH (should be impossible — report this)"
+  ok "Verified $TAG is an ancestor of $RELEASE_BRANCH"
 fi
 
 # ─── Step 7: push ─────────────────────────────────────────────────────────────
@@ -551,7 +599,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   warn "[7/9] Dry-run — skipping push"
 elif [[ $SKIP_PUSH -eq 1 ]]; then
   warn "[7/9] Skipped push (--skip-push). Commit + tag are local only. Manual next steps:
-    git push origin master && git push origin $TAG
+    git push origin $RELEASE_BRANCH && git push origin $TAG
     scripts/release/package.sh $VERSION
     gh release create $TAG release/pi-toolkit-${VERSION}.zip release/pi-toolkit-${VERSION}.zip.sha256 release/pi-toolkit-web-ui-${VERSION}.zip release/pi-toolkit-web-ui-${VERSION}.zip.sha256 --title $TAG --notes-file release/CHANGELOG-${VERSION}.md"
 else
@@ -566,8 +614,12 @@ else
     $RESUME_PUBLISH"
   ok "Pushed $CURRENT_BRANCH and $TAG"
 
-  git merge-base --is-ancestor "$TAG" "origin/master" \
-    || warn "Local check only — could not verify $TAG against origin/master (non-fatal)"
+  git merge-base --is-ancestor "$TAG" "origin/$RELEASE_BRANCH" \
+    || warn "Local check only — could not verify $TAG against origin/$RELEASE_BRANCH (non-fatal)"
+
+  if [[ "$RELEASE_BRANCH" == "master" && $HAS_DEV -eq 1 ]]; then
+    warn "Reminder: sync dev so it contains the release commit: git switch dev && git merge --ff-only master && git push origin dev"
+  fi
 
   # ─── Step 8: package + publish ──────────────────────────────────────────
   if [[ $SKIP_PUBLISH -eq 1 ]]; then

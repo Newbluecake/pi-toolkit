@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 // release-script.test.ts exercises scripts/release/release.sh against a disposable,
 // fully isolated git repo fixture. It NEVER touches this real repo's git state, tags
 // or remote: every repo under test lives under a mkdtemp() directory, has no
-// `origin` remote configured (so the "up to date with origin/master" check warns
+// `origin` remote configured (so the "up to date with origin/<branch>" check warns
 // and continues instead of hitting the network), and every test uses --dry-run or
 // --changelog / --skip-push so no `git push` or `gh` call is ever reached — there is
 // nothing to stub.
@@ -305,12 +305,104 @@ describe("scripts/release/release.sh", () => {
     expect(stdout).toMatch(/already exists/);
   });
 
-  it("aborts when not on master", () => {
+  it("aborts a patch on a feature branch", () => {
     const dir = makeFixture();
     git(dir, "checkout", "-q", "-b", "feature/x");
     const { status, stdout } = run(dir, ["0.1.1", "--dry-run", "--skip-tests"]);
     expect(status).not.toBe(0);
-    expect(stdout).toMatch(/Must release from 'master'/);
+    expect(stdout).toMatch(/Must release a patch from 'dev'/);
+  });
+
+  it("aborts a minor on a feature branch", () => {
+    const dir = makeFixture();
+    git(dir, "checkout", "-q", "-b", "feature/x");
+    const { status, stdout } = run(dir, ["0.2.0", "--dry-run", "--skip-tests"]);
+    expect(status).not.toBe(0);
+    expect(stdout).toMatch(/Must release a minor from 'master'/);
+  });
+
+  describe("dev/master branch rules", () => {
+    it("allows a patch on dev", () => {
+      const dir = makeFixture();
+      git(dir, "checkout", "-q", "-b", "dev");
+      const { status, stdout } = run(dir, ["0.1.1", "--dry-run", "--skip-tests"]);
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/Patch release on dev/);
+      expect(stdout).not.toMatch(/transitional/);
+    });
+
+    it("rejects a patch on master once dev exists", () => {
+      const dir = makeFixture();
+      git(dir, "branch", "dev");
+      const { status, stdout } = run(dir, ["0.1.1", "--dry-run", "--skip-tests"]);
+      expect(status).not.toBe(0);
+      expect(stdout).toMatch(/Patch releases must be cut on 'dev'/);
+    });
+
+    it("rejects a patch on master when only origin/dev exists", () => {
+      const dir = makeFixture();
+      git(dir, "update-ref", "refs/remotes/origin/dev", "HEAD");
+      const { status, stdout } = run(dir, ["0.1.1", "--dry-run", "--skip-tests"]);
+      expect(status).not.toBe(0);
+      expect(stdout).toMatch(/Patch releases must be cut on 'dev'/);
+    });
+
+    it("allows a patch on master with a transition WARN when no dev exists", () => {
+      const dir = makeFixture();
+      const { status, stdout } = run(dir, ["0.1.1", "--dry-run", "--skip-tests"]);
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/dev branch not created yet — transitional release from master/);
+      expect(stdout).toMatch(/git switch -c dev && git push -u origin dev/);
+    });
+
+    it.each(["0.2.0", "1.0.0"])("rejects minor/major %s on dev", (version) => {
+      const dir = makeFixture();
+      git(dir, "checkout", "-q", "-b", "dev");
+      const { status, stdout } = run(dir, [version, "--dry-run", "--skip-tests"]);
+      expect(status).not.toBe(0);
+      expect(stdout).toMatch(/Must not release a (minor|major) on 'dev'/);
+    });
+
+    it.each([
+      ["0.2.0", "minor"],
+      ["1.0.0", "major"],
+    ])("allows %s (%s) on master even when dev exists", (version, kind) => {
+      const dir = makeFixture();
+      git(dir, "branch", "dev");
+      const { status, stdout } = run(dir, [version, "--dry-run", "--skip-tests"]);
+      expect(status).toBe(0);
+      expect(stdout).toMatch(new RegExp(`${kind} release on master`));
+    });
+
+    it("patch on dev: tag lands on dev's ancestor chain and master is untouched", () => {
+      const dir = makeFixture();
+      git(dir, "checkout", "-q", "-b", "dev");
+      commitEmpty(dir, "fix(widgets): fix widget overflow");
+      const masterBefore = git(dir, "rev-parse", "master").trim();
+      const { status, stdout } = run(dir, ["0.1.1", "--skip-tests", "--skip-push"]);
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/Verified v0\.1\.1 is an ancestor of dev/);
+      expect(() => git(dir, "merge-base", "--is-ancestor", "v0.1.1", "dev")).not.toThrow();
+      expect(() => git(dir, "merge-base", "--is-ancestor", "v0.1.1", "master")).toThrow();
+      expect(git(dir, "rev-parse", "master").trim()).toBe(masterBefore);
+      expect(stdout).toMatch(/git push origin dev && git push origin v0\.1\.1/);
+    });
+
+    it("minor on master: ancestor check names master", () => {
+      const dir = makeFixture();
+      git(dir, "branch", "dev");
+      const { status, stdout } = run(dir, ["0.2.0", "--skip-tests", "--skip-push"]);
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/Verified v0\.2\.0 is an ancestor of master/);
+      expect(() => git(dir, "merge-base", "--is-ancestor", "v0.2.0", "master")).not.toThrow();
+    });
+
+    it("up-to-date check targets origin/<release branch>", () => {
+      const dir = makeFixture();
+      git(dir, "checkout", "-q", "-b", "dev");
+      const { stdout } = run(dir, ["0.1.1", "--dry-run", "--skip-tests"]);
+      expect(stdout).toMatch(/No origin\/dev remote-tracking ref found/);
+    });
   });
 
   it("full flow with --skip-tests --skip-push commits and tags locally, never touching a remote", () => {
