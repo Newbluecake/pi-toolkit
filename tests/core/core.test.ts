@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { cacheResult, consultMeta } from "./consult-cache-fixtures.js";
 import {
   clampSpanMs,
   DEFAULT_BUDGET,
@@ -1358,6 +1359,71 @@ describe("executable transition matrix (§4.4.1)", () => {
     for (const phase of RUN_PHASES) expect(Object.keys(MATRIX[phase])).toHaveLength(14);
   });
 
+  // consult cache/thread §5.3: an additional session_event row, not a new
+  // RunInput kind. Exercise every phase with/without prediction and every
+  // terminal status; the base 168-cell lifecycle matrix stays unchanged.
+  it.each(RUN_PHASES)("consult_cache_first/%s: write-once diag-only or explicit no-op", (phase) => {
+    for (const predicted of [false, true]) {
+      const original = fixture(phase);
+      const before = predicted ? { ...original, diag: { ...original.diag, ...consultMeta() } } : original;
+      const event: RunInput = {
+        kind: "session_event",
+        at: 42,
+        event: { t: "consult_cache_first", result: cacheResult() },
+      };
+      const result = reduce(before, { generation: before.generation, input: event }, budget);
+      expect(result.effects).toEqual([]);
+      if (isTerminalStatus(before.status) || !predicted) {
+        expect(result.state).toBe(before);
+      } else {
+        expect(result.state).toEqual({
+          ...before,
+          diag: { ...before.diag, consultCache: { ...before.diag.consultCache!, first: { ...cacheResult(), at: 42 } } },
+        });
+      }
+      // Second result never overwrites the first or refreshes liveness.
+      const again = reduce(
+        result.state,
+        {
+          generation: before.generation,
+          input: {
+            ...event,
+            at: 43,
+            event: {
+              t: "consult_cache_first",
+              result: { v: 1, label: "miss", readShare: 0, anchor: "skipped:identity" },
+            },
+          },
+        },
+        budget,
+      );
+      expect(again.state).toBe(result.state);
+      expect(again.effects).toEqual([]);
+    }
+  });
+
+  it.each(["completed", "failed", "timed_out", "aborted"] as const)(
+    "consult_cache_first/%s leaves both terminal diag and outcome untouched",
+    (status) => {
+      const settled = fixture("settled");
+      const before = { ...settled, status, diag: { ...settled.diag, ...consultMeta() } };
+      const result = reduce(
+        before,
+        {
+          generation: before.generation,
+          input: {
+            kind: "session_event",
+            at: 42,
+            event: { t: "consult_cache_first", result: cacheResult() },
+          },
+        },
+        budget,
+      );
+      expect(result.state).toBe(before);
+      expect(result.effects).toEqual([]);
+    },
+  );
+
   it("covers P-RT dispatch_measure as a diag-only transition in every phase", () => {
     for (const phase of RUN_PHASES) {
       const before = fixture(phase);
@@ -1853,6 +1919,7 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
           "turn_end",
           "message_end",
           "context_usage",
+          "consult_cache_first",
           "tool_start",
           "tool_end",
           "tool_update",
@@ -1907,6 +1974,8 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
             return { kind, at, event: { t: "switch_capability", reason: "l1-event-shape" } };
           case "context_switch_rejected":
             return { kind, at, event: { t: "context_switch_rejected", reason: "unpersisted" } };
+          case "consult_cache_first":
+            return { kind, at, event: { t: "consult_cache_first", result: cacheResult() } };
           case "context_usage":
             return {
               kind,

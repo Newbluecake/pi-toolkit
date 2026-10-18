@@ -334,6 +334,75 @@ export interface ConsultIdentityPrediction {
   forcedPrompt?: boolean;
 }
 
+/** Trusted host-side anchor identity (consult cache/thread plan §3.2). Never persisted in diag. */
+export interface AnchorIdentity {
+  /** Expert history message count in the converted provider payload. */
+  k: number;
+  /** Anchor block index in messages[k - 1]. */
+  block: number;
+  blockType: "text" | "tool_use" | "tool_result" | "image";
+  /** sha256 of the anchor block without cache_control. */
+  blockHash: string;
+  /** sha256 of messages[0..k - 1] without cache_control. */
+  prefixHash: string;
+  systemHash: string;
+  toolsHash: string;
+  route: { provider: string; model: string; api: string };
+  /** Inherited breakpoint ttl; empty string means the default 5m. */
+  ttl: string | "";
+}
+
+/** Internal, per-consult handoff. Never serialized, inherited on resume, or appended to a child prompt. */
+export interface ConsultAnchorSpec {
+  /** Exact host-generated user message appended for this consult. */
+  prompt: string;
+  /** Original expert baseline, reused and revalidated for thread follow-ups. */
+  base?: AnchorIdentity;
+}
+
+/** Known skip reasons are shape/block/identity/limit; open for future diagnostic reasons. */
+export type ConsultAnchorStatus = "added" | "relocated" | "n/a" | `skipped:${string}`;
+
+/** Frozen first-request cache metric (§5.2); independent of the consult's execution outcome. */
+export interface ConsultCacheResult {
+  v: 1;
+  /** cacheRead / (cacheRead + cacheWrite + input); null when no usable first request exists. */
+  readShare: number | null;
+  /** hit >= 0.80; partial >= 0.20 and < 0.80; miss < 0.20; n/a for null. */
+  label: "hit" | "partial" | "miss" | "n/a";
+  anchor: ConsultAnchorStatus;
+  /** OAuth breakpoint limit or unverified M4 path: baseline hits are not promised. */
+  degraded?: true;
+}
+
+/** Pre-consult prediction, not a post-response cache result (§5.1). */
+export interface ConsultWarmPrediction {
+  state: "warm" | "cold" | "unknown";
+  reason?: string;
+  /** Identity/route matching stays in the ledger; persist only bounded, non-secret evidence facts. */
+  evidence?: {
+    source: "anchor-ledger" | "keepalive" | "expert-settle";
+    ttlMs: Millis;
+    /** Request START time of the last response-proven touch, never its completion time. */
+    lastProvenTouchAt?: Millis;
+    settledAt?: Millis;
+  };
+}
+
+/** Consult run's own dispatch-time thread association (R2-4), independent of the asker's FIFO. */
+export interface ConsultThreadRef {
+  threadId: string;
+  /** 1-based position in the thread. */
+  seq: number;
+}
+
+/** Consult run's own cache facts; prediction and first response are each written once (§5.3). */
+export interface ConsultCacheDiagnostics {
+  v: 1;
+  predicted: ConsultWarmPrediction;
+  first?: ConsultCacheResult & { at: Millis };
+}
+
 export interface SpawnRequest {
   /** Dispatch-time input budget; the runtime measures both its coarse preflight and final provider payload. */
   inputBudget?: InputBudget;
@@ -425,6 +494,8 @@ export interface SpawnRequest {
   deadlineAt?: Millis;
   /** C2 consult: immutable snapshot of the expert request used to build the consult session. */
   consultSnapshot?: ExpertRequestSnapshot;
+  /** Adapter-only consult anchor handoff (NOT_THREADED); never part of child prompts or resume inheritance. */
+  consultAnchor?: ConsultAnchorSpec;
   /**
    * F7 (consult plan §4.3): expert whitelist already resolved at dispatch
    * time by the Agent tool. The runtime adapter injects the `consult` tool
@@ -545,6 +616,10 @@ export interface RunDisplayMeta {
    * display-only and user-visible, so prefixes are not a reliable signal).
    */
   consultOf?: { askerRunId?: RunId };
+  /** §5.3: prediction only at enqueue; the first-response slot is owned exclusively by the driver event. */
+  consultCache?: Pick<ConsultCacheDiagnostics, "v" | "predicted">;
+  /** R2-4: written once on this consult run, not reconstructed from the asker's probe ring. */
+  consultThread?: ConsultThreadRef;
   /**
    * consult A/B instrumentation plan (§2/§3, review §8 minor — fixed existence
    * condition): present iff the run was DISPATCHED with a non-empty expert
@@ -722,6 +797,8 @@ export type DriverEvent =
        */
       absorbedRunIds?: readonly string[];
     }
+  /** §5.3: first assistant response paired with request usage. Diag-only, generation-checked, write-once. */
+  | { t: "consult_cache_first"; result: ConsultCacheResult }
   | { t: "context_usage"; usage: ContextUsageInfo }
   | { t: "tool_start"; toolCallId: string; toolName: string; argsPreview?: string }
   | {
@@ -1189,6 +1266,10 @@ export interface RunDiagnostics {
    * badge it without parsing the `consult-` label prefix.
    */
   consultOf?: { askerRunId?: RunId };
+  /** §5.3: enqueue-time prediction + write-once first-response cache metric; absent when unused. */
+  consultCache?: ConsultCacheDiagnostics;
+  /** R2-4: this consult run's own immutable thread association. */
+  consultThread?: ConsultThreadRef;
   /**
    * consult A/B instrumentation plan (§5 P1a §2): per-run rollup of every
    * `consult` tool call observed via `tool_end`'s `consult` fact (folded by
@@ -1512,6 +1593,8 @@ export interface RunState {
  * the original SpawnRequest and the DeadlineBudget.
  */
 export interface SessionSpec {
+  /** Internal consult anchor handoff; only consult forks consume it. Never serialized or exposed to tools. */
+  consultAnchor?: ConsultAnchorSpec;
   /** C2 consult guard; intentionally non-serializable and never threaded as a SpawnRequest field. */
   consultGuard?: ConsultGuard;
   /** Internal C2 handoff from the adapter to the driver; never serialized or exposed to tools. */

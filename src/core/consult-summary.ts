@@ -5,6 +5,8 @@
  * depend on `src/consult/` (core stays the dependency sink, not a source).
  */
 
+import type { ConsultAnchorStatus, ConsultCacheResult, ConsultWarmPrediction, UsageDelta } from "./types.js";
+
 /** `details.outcome` vocabulary the consult tool itself can report (src/consult/tool.ts's `ConsultOutcome`). */
 export const CONSULT_OUTCOMES = [
   "completed",
@@ -97,6 +99,41 @@ export interface ConsultCacheProbe {
   };
   disallowedInvalidCalls?: number;
   unknownToolCalls?: number;
+  /** Placement observation only. Trusted baseline hashes remain in the process-local prefix record. */
+  anchor?: { state: ConsultAnchorStatus; ttl?: string; degraded?: true };
+  thread?: {
+    id: string;
+    seq: number;
+    mode?: "continued" | "new" | "fresh" | "reset" | "pending" | "branch";
+    reason?: "context" | "cost" | "size" | "budget" | "seq-cap" | "identity";
+  };
+  cacheResult?: ConsultCacheResult;
+  /** Prediction at consult START, not a conclusion inferred from requests[]. */
+  warm?: ConsultWarmPrediction & { pingsSince?: number; pingUsdSince?: number };
+}
+
+/**
+ * Frozen v1 cache metric (§5.2). Call with the first real provider request,
+ * never cumulative run usage (which can include keepalive pings). Missing,
+ * zero-total or unusable token counters provide no cache evidence.
+ */
+export function classifyConsultCacheResult(
+  first: Pick<UsageDelta, "input" | "cacheRead" | "cacheWrite"> | undefined,
+  anchor: ConsultAnchorStatus,
+  degraded?: true,
+): ConsultCacheResult {
+  const counters = first === undefined ? [] : [first.cacheRead, first.cacheWrite, first.input];
+  const total = counters.reduce((sum, n) => sum + n, 0);
+  const usable =
+    counters.length === 3 && counters.every((n) => Number.isFinite(n) && n >= 0) && Number.isFinite(total) && total > 0;
+  const readShare = usable ? first!.cacheRead / total : null;
+  return {
+    v: 1,
+    readShare,
+    label: readShare === null ? "n/a" : readShare >= 0.8 ? "hit" : readShare >= 0.2 ? "partial" : "miss",
+    anchor,
+    ...(degraded === undefined ? {} : { degraded }),
+  };
 }
 
 /** The persisted FIFO ring used for consult cache probes. */

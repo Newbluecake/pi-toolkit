@@ -713,6 +713,22 @@ export function reduce(
     return terminal(state.status)
       ? { state, effects: [] }
       : { state: { ...state, diag: { ...state.diag, finalLeafId: input.event.leafId } }, effects: [] };
+  // consult cache/thread plan §5.3: the dispatch-time prediction must already
+  // exist. Do not manufacture consult diagnostics for ordinary/old runs. Like
+  // final_leaf this is generation-checked and ignored after terminal; unlike
+  // final_leaf the first metric is write-once. No liveness, phase, deadline,
+  // usage or effect changes (the accompanying message_end owns those).
+  if (input.kind === "session_event" && input.event.t === "consult_cache_first") {
+    const cache = state.diag.consultCache;
+    if (terminal(state.status) || cache === undefined || cache.first !== undefined) return { state, effects: [] };
+    return {
+      state: {
+        ...state,
+        diag: { ...state.diag, consultCache: { ...cache, first: { ...input.event.result, at: input.at } } },
+      },
+      effects: [],
+    };
+  }
   // effect_failed is a recovery protocol, including after settlement. It must
   // run before the terminal read-only update so terminal effects can recover.
   if (input.kind === "effect_failed") return handleEffectFailed(state, input);
@@ -783,6 +799,12 @@ export function reduce(
         ...(input.meta?.dispatchMeta === undefined ? {} : { dispatchMeta: input.meta.dispatchMeta }),
         ...(input.meta?.schemaPreset === undefined ? {} : { schemaPreset: input.meta.schemaPreset }),
         ...(input.meta?.consultOf === undefined ? {} : { consultOf: input.meta.consultOf }),
+        // §5.3 / R2-4: consult run's own write-once facts; ordinary runs stay byte-identical.
+        // Project prediction explicitly: even an untyped producer cannot seed the driver-owned first slot.
+        ...(input.meta?.consultCache === undefined
+          ? {}
+          : { consultCache: { v: input.meta.consultCache.v, predicted: input.meta.consultCache.predicted } }),
+        ...(input.meta?.consultThread === undefined ? {} : { consultThread: input.meta.consultThread }),
         // §2.7：策略是 run 的持久事实，enqueued 写一次，此后永不改写；缺席
         // （旧入口/直接构造的 RunInput）不写字段，读侧走中性文案。
         ...(input.timeoutPolicy === undefined ? {} : { timeoutPolicy: input.timeoutPolicy }),

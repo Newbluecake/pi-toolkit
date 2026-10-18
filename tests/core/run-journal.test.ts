@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { cacheDiagnostics, cacheProbe, consultMeta } from "./consult-cache-fixtures.js";
 import {
   interruptedFromJournal,
   JOURNAL_TASK_PROMPT_CAP,
@@ -70,6 +71,8 @@ function richState(over: Partial<RunDiagnostics> = {}): RunState {
     dispatchMeta: { lane: "L2", packageId: "pkg-1", feature: "auth", abArm: "experts" },
     schemaPreset: "verdict/v1",
     consultOf: { askerRunId: "r_asker" as NonNullable<NonNullable<RunDiagnostics["consultOf"]>["askerRunId"]> },
+    consultCache: cacheDiagnostics(),
+    consultThread: consultMeta().consultThread!,
     consults: {
       calls: 2,
       byResult: { completed: 1, bad_ref: 1 },
@@ -81,6 +84,7 @@ function richState(over: Partial<RunDiagnostics> = {}): RunState {
       maxLatencyMs: 300,
       latencyUnknown: 1,
       byExpert: { r_e1: 2 },
+      cacheProbes: [cacheProbe()],
     },
     ...over,
   };
@@ -124,6 +128,8 @@ const RETAINED = [
   "dispatchMeta",
   "schemaPreset",
   "consultOf",
+  "consultCache",
+  "consultThread",
   "consults",
   "escalation",
   "degraded",
@@ -274,6 +280,8 @@ describe("journalSnapshotFromState: consult A/B instrumentation fields (plan §5
     expect(snap.diag.dispatchMeta).toEqual(state.diag.dispatchMeta);
     expect(snap.diag.schemaPreset).toBe("verdict/v1");
     expect(snap.diag.consults).toEqual(state.diag.consults);
+    expect(snap.diag.consultCache).toEqual(state.diag.consultCache);
+    expect(snap.diag.consultThread).toEqual(state.diag.consultThread);
     // M-B2 (thinking-level visibility): same verbatim passthrough as `model` —
     // the level survives the journal so a restart/reload keeps rendering it.
     expect(snap.diag.thinkingLevel).toBe("high");
@@ -292,12 +300,16 @@ describe("journalSnapshotFromState: consult A/B instrumentation fields (plan §5
       dispatchMeta: undefined,
       schemaPreset: undefined,
       consults: undefined,
+      consultCache: undefined,
+      consultThread: undefined,
     });
     const snap = journalSnapshotFromState(bare, 2_000, { kind: "session_created" });
     expect(snap.diag).not.toHaveProperty("experts");
     expect(snap.diag).not.toHaveProperty("dispatchMeta");
     expect(snap.diag).not.toHaveProperty("schemaPreset");
     expect(snap.diag).not.toHaveProperty("consults");
+    expect(snap.diag).not.toHaveProperty("consultCache");
+    expect(snap.diag).not.toHaveProperty("consultThread");
   });
 
   it("interruptedFromJournal carries dispatchMeta (and the other three) through to the seeded terminal snapshot — a resume from it can inherit dispatchMeta", () => {
@@ -307,6 +319,8 @@ describe("journalSnapshotFromState: consult A/B instrumentation fields (plan §5
     expect(out.diag.experts).toEqual(snap.diag.experts);
     expect(out.diag.schemaPreset).toBe("verdict/v1");
     expect(out.diag.consults).toEqual(snap.diag.consults);
+    expect(out.diag.consultCache).toEqual(snap.diag.consultCache);
+    expect(out.diag.consultThread).toEqual(snap.diag.consultThread);
     // Also reachable through outcome.diag — the surface a resume's D3 inheritance reads.
     expect(out.outcome!.diag.dispatchMeta).toEqual(out.diag.dispatchMeta);
   });

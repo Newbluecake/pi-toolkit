@@ -76,6 +76,37 @@ describe("threadThroughRequestFields", () => {
     expect(resolved.forkSessionFrom).toBe("/tmp/consult/fork-1.jsonl");
   });
 
+  it.each(["fork", "resume"] as const)("consultAnchor is NOT_THREADED for %s and never changes the prompt", (mode) => {
+    const req: SpawnRequest = {
+      type: "explorer",
+      prompt: "host-generated consult question",
+      consultAnchor: {
+        prompt: "anchor-only-secret-sentinel",
+        base: {
+          k: 4,
+          block: 1,
+          blockType: "text",
+          blockHash: "block-hash",
+          prefixHash: "prefix-hash",
+          systemHash: "system-hash",
+          toolsHash: "tools-hash",
+          route: { provider: "cr-anthropic", model: "claude-sonnet-5", api: "anthropic-messages" },
+          ttl: "1h",
+        },
+      },
+      ...(mode === "fork" ? { forkSessionFrom: "/tmp/fork.jsonl" } : { resumeFrom: "r_old" }),
+    };
+    const before = JSON.stringify(req);
+    const out = threadThroughRequestFields(req);
+    expect(out).toEqual(mode === "fork" ? { forkSessionFrom: "/tmp/fork.jsonl" } : { resumeFrom: "r_old" });
+    expect(out).not.toHaveProperty("consultAnchor");
+    expect(out).not.toHaveProperty("prompt");
+    expect(JSON.stringify(out)).not.toContain("anchor-only-secret-sentinel");
+    expect(JSON.stringify(out)).not.toContain("prefix-hash");
+    expect(JSON.stringify(req)).toBe(before);
+    expect(req.prompt).toBe("host-generated consult question");
+  });
+
   it("P0-r (todo #22 optimize-plan §7.0 point 5): toolDomain is consumed by the runtime adapter, never threaded verbatim", () => {
     const req: SpawnRequest = { type: "Plan", prompt: "tidy", toolDomain: "readonly" };
     const out = threadThroughRequestFields(req);

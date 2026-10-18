@@ -80,6 +80,10 @@ const JOURNAL_DIAG_FIELDS = [
   "dispatchMeta",
   "schemaPreset",
   "consultOf",
+  // Cache/thread plan §5.3 / R2-4: same persistence surfaces as other consult
+  // diag. Tombstones intentionally omit these display-only facts (user ruling 2026-10-18).
+  "consultCache",
+  "consultThread",
   "consults",
   "external",
 ] as const satisfies readonly (keyof RunDiagnostics)[];

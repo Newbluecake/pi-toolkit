@@ -57,6 +57,7 @@ const NOT_THREADED = [
   "schema", // consumed by the adapter to inject the StructuredOutput tool
   "consultExperts", // consumed by the adapter to decide whether to inject the consult tool (already-resolved refs)
   "consultSnapshot", // consumed by the adapter to construct a C2 consult session; never threaded or serialized
+  "consultAnchor", // adapter -> SessionSpec only; never in child prompts, runner requests, or resume inheritance
   "poolFullPolicy", // consumed entirely by spawn() admission (L1) — decided and resolved before start()/RunnerSpec ever exist
   // sysload plan §6.2: consumed entirely by spawn() admission (same point/reason as
   // poolFullPolicy above) — the load gate either rejects admission outright or lets the

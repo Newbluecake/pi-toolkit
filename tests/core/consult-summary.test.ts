@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendConsultCacheProbe,
   classifyConsultToolEnd,
+  classifyConsultCacheResult,
   CONSULT_CACHE_PROBES_CAP,
   CONSULT_NOT_IN_WHITELIST_MARK,
   CONSULT_OUTCOMES,
@@ -10,6 +11,8 @@ import {
   type ConsultCallFact,
   type ConsultSummary,
 } from "../../src/core/consult-summary.js";
+
+import { cacheProbe } from "./consult-cache-fixtures.js";
 
 function okResult(details: Record<string, unknown>): unknown {
   return { content: [{ type: "text", text: "answer" }], details };
@@ -217,5 +220,122 @@ describe("ConsultCacheProbe bounded FIFO ring (consult C2 §4.1)", () => {
     expect(first.cacheProbes).toHaveLength(1);
     expect(first.blockedCalls).toBe(2);
     expect(first.identityFailures).toEqual({ "tool-definition:read": 1 });
+  });
+});
+
+describe("consult cache/thread Phase 1 metric and probe fold", () => {
+  it.each([
+    [80, 10, 10, "hit", 0.8],
+    [79, 11, 10, "partial", 0.79],
+    [20, 70, 10, "partial", 0.2],
+    [19, 71, 10, "miss", 0.19],
+    [0, 90, 10, "miss", 0],
+    [100, 0, 0, "hit", 1],
+    // F0 baseline: only system/tools hit, not a full-prefix hit.
+    [64_186, 208_497, 0, "partial", 64_186 / 272_683],
+  ] as const)("cacheRead=%s cacheWrite=%s input=%s -> %s", (cacheRead, cacheWrite, input, label, readShare) => {
+    expect(classifyConsultCacheResult({ input, cacheRead, cacheWrite }, "added")).toEqual({
+      v: 1,
+      label,
+      readShare,
+      anchor: "added",
+    });
+  });
+
+  it("no first request or a zero denominator is n/a (never miss)", () => {
+    for (const first of [undefined, { input: 0, cacheRead: 0, cacheWrite: 0 }]) {
+      expect(classifyConsultCacheResult(first, "n/a")).toEqual({
+        v: 1,
+        label: "n/a",
+        readShare: null,
+        anchor: "n/a",
+      });
+    }
+  });
+
+  it("invalid counters cannot produce NaN, Infinity or a fabricated read share", () => {
+    for (const invalid of [NaN, Infinity, -Infinity, -1]) {
+      for (const key of ["input", "cacheRead", "cacheWrite"] as const) {
+        expect(
+          classifyConsultCacheResult({ input: 1, cacheRead: 1, cacheWrite: 1, [key]: invalid }, "skipped:shape"),
+        ).toEqual({
+          v: 1,
+          label: "n/a",
+          readShare: null,
+          anchor: "skipped:shape",
+        });
+      }
+    }
+    expect(
+      classifyConsultCacheResult({ input: Number.MAX_VALUE, cacheRead: Number.MAX_VALUE, cacheWrite: 1 }, "added")
+        .readShare,
+    ).toBeNull();
+  });
+
+  it("degraded and anchor state are orthogonal to the observed metric", () => {
+    for (const anchor of [
+      "added",
+      "relocated",
+      "n/a",
+      "skipped:shape",
+      "skipped:block",
+      "skipped:identity",
+      "skipped:limit",
+    ] as const) {
+      const r = classifyConsultCacheResult({ input: 0, cacheRead: 99, cacheWrite: 1 }, anchor, true);
+      expect(r).toEqual({ v: 1, label: "hit", readShare: 0.99, anchor, degraded: true });
+    }
+    expect(classifyConsultCacheResult(undefined, "n/a")).not.toHaveProperty("degraded");
+  });
+
+  it("classifies and folds anchor/thread/cacheResult/warm intact without confusing execution outcome", () => {
+    const probe = cacheProbe();
+    // A request can complete successfully while missing the cache, or fail after a hit.
+    probe.cacheResult = { v: 1, label: "miss", readShare: 0.1, anchor: "relocated", degraded: true };
+    probe.anchor = { state: "relocated", degraded: true };
+    probe.thread = { id: "ct_reset", seq: 1, mode: "reset", reason: "context" };
+    probe.warm = {
+      state: "cold",
+      reason: "expired",
+      evidence: { source: "expert-settle", ttlMs: 300_000, settledAt: 0 },
+    };
+    const saved = structuredClone(probe);
+    const fact = classifyConsultToolEnd(
+      false,
+      okResult({ outcome: "completed", expertRunId: "r_expert", cacheProbe: probe }),
+    );
+    const summary = foldConsultCall(undefined, fact, 30);
+    expect(fact.result).toBe("completed");
+    expect(summary.byResult).toEqual({ completed: 1 });
+    expect(summary.cacheProbes).toEqual([saved]);
+    expect(probe).toEqual(saved);
+    const withoutProbe = foldConsultCall(summary, { result: "busy" }, 2);
+    expect(withoutProbe.cacheProbes).toEqual([saved]);
+    expect(summary.calls).toBe(1);
+    const ring = Array.from({ length: 10 }, (_, i) => cacheProbe(i + 1)).reduce(
+      (s, p) => foldConsultCacheProbe(s, p),
+      withoutProbe,
+    );
+    expect(ring.cacheProbes!.map((p) => p.thread!.seq)).toEqual([3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(
+      ring.cacheProbes!.every(
+        (p) => p.anchor?.state === "added" && p.warm?.state === "warm" && p.cacheResult?.label === "hit",
+      ),
+    ).toBe(true);
+    expect(ring.cacheProbes![0]!.hitRatio).toBe(0.99); // old metric stays independent
+  });
+
+  it("old probes and summaries never gain new optional keys", () => {
+    const probe = {
+      expertRunId: "r_old",
+      outcome: "completed" as const,
+      identity: { preflight: "pass" as const, expertTools: 1 },
+    };
+    const fact = classifyConsultToolEnd(false, okResult({ outcome: "completed", cacheProbe: probe }));
+    const summary = foldConsultCall(undefined, fact, 1);
+    expect(summary.cacheProbes).toEqual([probe]);
+    for (const key of ["anchor", "thread", "cacheResult", "warm"])
+      expect(summary.cacheProbes![0]).not.toHaveProperty(key);
+    expect(foldConsultCall(undefined, { result: "completed" }, 1)).not.toHaveProperty("cacheProbes");
   });
 });
