@@ -317,11 +317,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     if (disposed || deps.setStatus === undefined) return;
     try {
       // 不可信的 provider 在 verdictsNow 里已被过滤；鉴权问题不再进任何 UI（终版拍板）。
-      // droid 凭据缺失（2026-10-19 拍板）：无池读数时渲染 `droid no-key` 段，如实说明
-      // 余额探测不可用——不编造读数。
-      deps.setStatus(
-        renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.(), [], droidCredentialMissingNow()),
-      );
+      // droid 凭据缺失不展示（2026-10-19 新拍板）：无 key 是常态（CLI 走 OAuth），不编造读数；
+      // 诊断信息保留在 `/agent status`（droidCredentialMissing 仍对外暴露）。
+      deps.setStatus(renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.(), []));
     } catch {
       // HUD 不可用不影响数据面。
     }
@@ -718,9 +716,8 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
           } catch {
             hasProblem = false;
           }
-          // 2026-10-19 拍板：droid 凭据缺失（resolver 刚 miss）也要写一次 HUD——
-          // 否则无快照路径永不更新状态行，`droid no-key` 段出不来。
-          if (hasProblem || (isDroidQuotaId(id) && droidCredentialMissingNow())) writeStatus(clock.now());
+          // 2026-10-19 新拍板：droid 凭据缺失不再驱动 HUD 写入（no-key 段已撤销）。
+          if (hasProblem) writeStatus(clock.now());
           return;
         }
         try {

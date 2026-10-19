@@ -790,11 +790,9 @@ function droidSegment(
  * 段（主题版 warning 色）；只有 problems、没有 verdict 时整行为 `quota droid auth
  * <code>`。没有 droid、没有 problems ⇒ 完全走旧代码路径（字节不变）。
  *
- * droid 凭据缺失（2026-10-19 用户拍板）：`droidKeyMissing === true`（droid 池受管
- * 但 auth.json / FACTORY_API_KEY 都没有）且当前没有任何 droid 池读数时追加紧凑
- * 英文段 `droid no-key`（HUD 约定，主题版 warning 色）——池保持 unknown、不编造
- * 读数，状态行如实说明原因；有池读数（快照仍在新鲜期内）时不追加。凭据缺失
- * 且无其它段时整行为 `quota droid no-key`。
+ * droid 凭据缺失（2026-10-19 初版拍板渲染 `droid no-key`，同日新拍板撤销）：用户特意删掉
+ * API key 走 droid CLI 的 OAuth 登录——无 key 是常态，HUD 不再当作异常展示；池保持
+ * unknown、不编造读数，无读数时整行照旧 undefined。诊断信息保留在 `/agent status`。
  */
 export function renderQuotaStatus(
   verdicts: readonly ProviderVerdict[],
@@ -802,12 +800,10 @@ export function renderQuotaStatus(
   refreshMs: Millis,
   theme?: QuotaStatusTheme | undefined,
   problems?: readonly QuotaProblem[] | undefined,
-  droidKeyMissing?: boolean | undefined,
 ): string | undefined {
   const rows = dedupeVerdicts(verdicts);
   const activeProblems = problems === undefined ? [] : problems;
-  const keyMissing = droidKeyMissing === true;
-  if (rows.length === 0 && activeProblems.length === 0 && !keyMissing) return undefined;
+  if (rows.length === 0 && activeProblems.length === 0) return undefined;
   let maxAge = 0;
   for (const v of rows) maxAge = Math.max(maxAge, now - v.fetchedAt);
   const joiner = theme === undefined ? " · " : theme.fg("dim", " · ");
@@ -821,10 +817,6 @@ export function renderQuotaStatus(
   if (std !== undefined || core !== undefined) segments.push(droidSegment(std, core, now, theme));
   for (const p of activeProblems) {
     segments.push(theme === undefined ? `droid auth ${p.status}` : theme.fg("warning", `droid auth ${p.status}`));
-  }
-  // 凭据缺失披露（2026-10-19 拍板）：有池读数时读数本身就是状态，不再追加 no-key。
-  if (keyMissing && std === undefined && core === undefined) {
-    segments.push(theme === undefined ? "droid no-key" : theme.fg("warning", "droid no-key"));
   }
   let line = `${theme === undefined ? "quota" : theme.fg("dim", "quota")} ${segments.join(joiner)}`;
   if (maxAge > refreshMs) {

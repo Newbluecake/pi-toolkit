@@ -960,25 +960,13 @@ describe("renderQuotaStatus — droid merged segment (D14)", () => {
     expect(renderQuotaStatus([a, b], NOW, 600_000)).toBe("quota droid 10% core 10%");
   });
 
-  it("droidKeyMissing (2026-10-19 ruling): `droid no-key` segment when no pool readings exist", () => {
-    // 无读数 + 凭据缺失 ⇒ 整行就是 `quota droid no-key`（不编造数字）。
-    expect(renderQuotaStatus([], NOW, 600_000, undefined, [], true)).toBe("quota droid no-key");
-    expect(renderQuotaStatus([], NOW, 600_000, MARK_THEME, [], true)).toBe("<dim:quota> <warning:droid no-key>");
-    // kimi/zai 读数在前，no-key 段追加在后。
-    const kimi = verdict({ provider: "kimi-coding", windows: [w("5h", 8, 0), w("week", 100, 3, "reset-elapsed")] });
-    expect(renderQuotaStatus([kimi], NOW, 600_000, undefined, [], true)).toBe(
-      "quota kimi 8%/100%·reset · droid no-key",
-    );
-  });
-
-  it("droidKeyMissing does not append `no-key` while pool readings are present, and absent flag keeps legacy bytes", () => {
-    expect(renderQuotaStatus([std, core], NOW, 600_000, undefined, [], true)).toBe(
-      "quota droid 12%/40%/mo 5% core 0%/2%/mo 1%",
-    );
-    expect(renderQuotaStatus([std], NOW, 600_000, undefined, [], true)).toBe("quota droid 12%/40%/mo 5%");
-    // flag 缺席 / false ⇒ 旧行为字节不变（空输入仍返回 undefined）。
-    expect(renderQuotaStatus([], NOW, 600_000, undefined, [], false)).toBeUndefined();
+  it("droid 凭据缺失不展示（2026-10-19 新拍板，撤销 no-key 段）：无读数 ⇒ undefined，有读数 ⇒ 只渲染读数", () => {
     expect(renderQuotaStatus([], NOW, 600_000)).toBeUndefined();
+    expect(renderQuotaStatus([], NOW, 600_000, MARK_THEME)).toBeUndefined();
+    const kimi = verdict({ provider: "kimi-coding", windows: [w("5h", 8, 0), w("week", 100, 3, "reset-elapsed")] });
+    expect(renderQuotaStatus([kimi], NOW, 600_000)).toBe("quota kimi 8%/100%·reset");
+    expect(renderQuotaStatus([std, core], NOW, 600_000)).toBe("quota droid 12%/40%/mo 5% core 0%/2%/mo 1%");
+    expect(renderQuotaStatus([std], NOW, 600_000)).toBe("quota droid 12%/40%/mo 5%");
   });
 });
 

@@ -1112,15 +1112,15 @@ describe("droid credential-missing disclosure (2026-10-19 ruling)", () => {
     return { clock, service, credentials, fetchJson, setStatus };
   }
 
-  it("missing key + managed droid pools ⇒ HUD shows `quota droid no-key`, pools stay unknown, no fabricated numbers", async () => {
+  it("missing key + managed droid pools ⇒ HUD 不展示（新拍板）, pools stay unknown, no fabricated numbers", async () => {
     const f = missingKeyFixture(() => true);
     expect(f.service.droidCredentialMissing()).toBe(true);
     f.service.refreshIfStale();
     await f.service.whenIdle();
     // 无 key ⇒ 适配器不发请求（AdapterDeps 契约）。
     expect(f.fetchJson).not.toHaveBeenCalled();
-    // 无快照路径也写一次 HUD：`droid no-key` 段如实说明余额探测不可用。
-    expect(f.setStatus).toHaveBeenLastCalledWith("quota droid no-key");
+    // 新拍板：凭据缺失不渲染任何 HUD 段（诊断信息在 `/agent status`）。
+    expect(f.setStatus.mock.calls.every((c) => c[0] === undefined)).toBe(true);
     // 池保持 unknown：判定面无任何 verdict、不拦 spawn（fail-open）。
     expect(f.service.verdicts()).toEqual([]);
     expect(f.service.verdictFor("droid-standard")).toBeUndefined();
@@ -1182,7 +1182,7 @@ describe("droid credential-missing disclosure (2026-10-19 ruling)", () => {
     f.service.dispose();
   });
 
-  it("a real snapshot clears the segment again (readings beat the no-key marker)", async () => {
+  it("a real snapshot renders the readings normally (凭据缺失与读数渲染互不影响)", async () => {
     const clock = new FakeClock(1_000);
     const std = stubAdapter("droid-standard");
     std.set(() => droidSnapshot("droid-standard", [{ scope: "5h", usedPct: 10 }], clock.now()));
@@ -1201,7 +1201,7 @@ describe("droid credential-missing disclosure (2026-10-19 ruling)", () => {
     });
     service.refreshIfStale();
     await service.whenIdle();
-    expect(setStatus).toHaveBeenLastCalledWith("quota droid 10%"); // 读数在 ⇒ 无 no-key 段
+    expect(setStatus).toHaveBeenLastCalledWith("quota droid 10%"); // 有读数 ⇒ 照常渲染
     service.dispose();
   });
 });
