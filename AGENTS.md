@@ -441,6 +441,25 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   host allow-list + optional trusted-reverse-proxy origin (`webHub.lan.{trustProxyFrom,externalOrigins}`) for
   HTTPS termination, SQLite-backed sessions in a SIGKILL-able child process, and `/webhub passwd|unlock|restart`
   — design: `docs/dev/web-hub/lan-plan.md`.
+  **LAN security (lan-security plan r2)**: `hub/client-allow.ts` supplies ONE hub-owned client-IP allow guard
+  (`webHub.lan.allowClients` IP/CIDR csv; empty = unrestricted, all-invalid = deny-all) to LAN HTTP and every proxy listener (explicit
+  inert guard without LAN; a missing configured guard is never a fallback). `hub/lan-login.ts` owns the sole checked
+  session completion (`complete()` — the only `createSessionChecked` caller), with epoch/factor-generation CAS and
+  bounded cancellation/late-insert cleanup for password/TOTP/recovery/Feishu approval. Enrolled accounts require a
+  second factor from a new IP (30 d history; unusable trusted-proxy XFF stays new); pending challenges are never
+  sessions. `hub/lan-sessions.ts` lists/revokes ≤32 LAN sessions with one 10 s revoke deadline and the shared
+  auth-revoke fan-out to proxy HTTP+WS, HTML caps and SSE; nullable `session_meta.method` migrates additively (legacy
+  reads as password) and the settings card is cap+password gated, disabling all actions during a revoke.
+  `/webhub 2fa` is trusted-local TUI-only (masked setup, bounded secret widgets, independent of web command policy;
+  web prompt-op auth-admin text is refused too); admin repair preserves B's actual db-invalid detail. Feishu approval
+  uses the live owner, sibling nonces/gen/tenant binding and a stable runtime delegate; security alerts share
+  notify's budget and are settings-gated. `lan.2fa.v1` / `lan.sessions.v1` are advertised on both surfaces iff
+  `config.lan` is configured (not the assembled store state — the 2fa cap is needed for repair while the store is
+  off); fresh password index bytes carry only a public `data-lan-caps` bootstrap for the login UI (off/token bytes
+  unchanged); G's approval polling survives method switches and is cancelled on abandonment. Gates: fake+SQLite
+  contracts, real revoke consumers, real-socket Q15 enrollment, LAN-P5 real child hub × SQLite × fake Feishu callback
+  integration, `tests/web-hub/http/lan-rollout.test.ts` (startHub-level activation). Design / evidence:
+  `docs/dev/web-hub/{lan-security-plan,lan-security-P0-surfaces,lan-security-DEFG-integration-report}.md`.
   **Managed spawn (S1, `webHub.spawn.enabled`, default off; Linux-only, fail-closed platform probe)**: the hub
   itself forks `pi --mode rpc` children in user-chosen directories (`known ∪ roots` admission, loopback-only
   by default — `spawn.lan` off/known/roots) via `/api/headless*` + the `spawns` SSE event (Public projection;
