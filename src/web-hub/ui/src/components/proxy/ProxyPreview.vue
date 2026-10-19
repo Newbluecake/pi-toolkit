@@ -81,7 +81,7 @@ function clearSlowTimer(): void {
 }
 
 watch(
-  () => (view.value.phase === "ready" ? view.value.gen : null),
+  () => (view.value.phase === "ready" ? `${view.value.gen}:${view.value.nonce}` : null),
   (g) => {
     frameLoaded.value = false;
     frameSlow.value = false;
@@ -239,12 +239,16 @@ function onKeydown(ev: KeyboardEvent): void {
           </div>
           <div v-else-if="view.phase === 'ready'" class="proxy-preview-stage">
             <!-- §2.5 (D5): PROXY_FRAME_SANDBOX — never allow-top-navigation*, NEVER
-                 `credentialless` (it would drop the Lax gate cookie). Keyed by gen, never
-                 re-parented; src is the hub's one-time enter URL, used unmodified. -->
+                 `credentialless` (it would drop the Lax gate cookie). Keyed by gen+nonce (an
+                 in-place reload remounts the frame even when the URL is unchanged), never
+                 re-parented; the initial src is the hub's one-time enter URL, used unmodified,
+                 a reload's src is `<origin>` + the initial target's path+query (no new code, no
+                 POST — an expired gate session shows the proxy's 401 page in the frame and the
+                 user re-opens the dialog). -->
             <iframe
-              :key="view.gen"
+              :key="`${view.gen}:${view.nonce}`"
               class="proxy-preview-frame"
-              :src="view.enterUrl"
+              :src="view.frameUrl"
               :sandbox="PROXY_FRAME_SANDBOX"
               referrerpolicy="no-referrer"
               :allow="PROXY_FRAME_ALLOW"

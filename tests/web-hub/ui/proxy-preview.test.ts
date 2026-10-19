@@ -136,20 +136,26 @@ describe("useProxyPreview — state machine (§4.3)", () => {
     expect(handle.view.value.phase).toBe("closed"); // the late resolve stays dropped
   });
 
-  it("reload() re-opens the current href with a fresh request and a new generation", async () => {
+  it("reload() in ready navigates the frame IN PLACE (no POST, no new code; 2026-10-19 ruling)", async () => {
     const { handle, proxy } = makeHandle();
-    handle.open("http://127.0.0.1:3000/a");
+    handle.open("http://127.0.0.1:3000/ui?tab=a");
     await flushPromises();
+    expect(handle.view.value).toMatchObject({ phase: "ready", frameUrl: ENTER, nonce: 0 });
     const gen1 = (handle.view.value as { gen: number }).gen;
     handle.reload();
-    expect(proxy.open).toHaveBeenCalledTimes(2);
-    expect(proxy.open.mock.calls[1]![0]).toEqual({ target: "http://127.0.0.1:3000/a" });
-    expect(handle.view.value.phase).toBe("opening");
-    await flushPromises();
-    expect((handle.view.value as { gen: number }).gen).toBeGreaterThan(gen1);
+    expect(proxy.open).toHaveBeenCalledTimes(1); // the open token bucket is NOT touched
+    expect(handle.view.value).toMatchObject({
+      phase: "ready",
+      gen: gen1, // gen only moves for real opens
+      nonce: 1,
+      frameUrl: `${ORIGIN}/ui?tab=a`, // origin + the initial target's path+query
+    });
+    handle.reload();
+    expect(proxy.open).toHaveBeenCalledTimes(1);
+    expect(handle.view.value).toMatchObject({ phase: "ready", nonce: 2, frameUrl: `${ORIGIN}/ui?tab=a` });
   });
 
-  it("a hub refusal maps to the error phase with the prose key", async () => {
+  it("reload() in error keeps calling open(href) (fresh one-time code)", async () => {
     const proxy = fakeProxy();
     proxy.open.mockResolvedValueOnce({ ok: false, status: 403, error: "E_PROXY_DENIED", reason: "public" } as never);
     const { handle } = makeHandle(CAPS_FRAME, proxy);
@@ -158,6 +164,20 @@ describe("useProxyPreview — state machine (§4.3)", () => {
     expect(handle.view.value).toMatchObject({ phase: "error", key: "proxy.reason.public" });
     handle.reload(); // retry from error re-opens
     expect(proxy.open).toHaveBeenCalledTimes(2);
+    expect(proxy.open.mock.calls[1]![0]).toEqual({ target: "http://127.0.0.1:3000/a" });
+  });
+
+  it("proxyFrameReloadUrl: the mount guard rejects a same-origin (hub) reload target and non-http hrefs", async () => {
+    const { proxyFrameReloadUrl } = await import("../../../src/web-hub/ui/src/composables/useProxyPreview.js");
+    const page = "http://192.168.1.10:9000";
+    expect(proxyFrameReloadUrl(ORIGIN, "http://127.0.0.1:3000/ui?tab=a", page)).toBe(`${ORIGIN}/ui?tab=a`);
+    expect(proxyFrameReloadUrl(ORIGIN, "http://127.0.0.1:3000", page)).toBe(`${ORIGIN}/`);
+    // same-origin to the hub page ⇒ rejected (the frame must never navigate onto the hub itself)
+    expect(proxyFrameReloadUrl(page, "http://127.0.0.1:3000/ui", page)).toBeNull();
+    // the constructed URL must stay on the open result's origin, and http only
+    expect(proxyFrameReloadUrl(ORIGIN, "https://127.0.0.1:3000/ui", page)).toBeNull();
+    expect(proxyFrameReloadUrl(ORIGIN, "not a url", page)).toBeNull();
+    expect(proxyFrameReloadUrl(ORIGIN, "http://127.0.0.1:3000/ui", null)).toBeNull(); // unknown page origin: closed
   });
 
   it("an off-contract or same-origin enter URL never reaches ready (§2.5 mount guard)", async () => {
@@ -416,7 +436,7 @@ describe("ProxyPreview.vue — rendering", () => {
     expect(overlay()).toBeNull();
   });
 
-  it("header buttons carry aria-label + title tooltips; reload mints a fresh code", async () => {
+  it("header buttons carry aria-label + title tooltips; reload remounts the frame in place (no POST)", async () => {
     const proxy = fakeProxy();
     const { handle } = makeHandle(CAPS_FRAME, proxy);
     mountDialog(CAPS_FRAME, proxy, handle);
@@ -426,9 +446,13 @@ describe("ProxyPreview.vue — rendering", () => {
       expect(btn.getAttribute("aria-label")).toBeTruthy();
       expect(btn.getAttribute("title")).toBe(btn.getAttribute("aria-label"));
     }
+    const before = frame();
+    expect(before!.getAttribute("src")).toBe(ENTER);
     document.querySelector<HTMLButtonElement>(".proxy-preview-reload")!.click();
-    await flushPromises();
-    expect(proxy.open).toHaveBeenCalledTimes(2);
-    expect(proxy.open.mock.calls[1]![0]).toEqual({ target: "http://127.0.0.1:3000/ui" });
+    await nextTick();
+    expect(proxy.open).toHaveBeenCalledTimes(1); // zero additional opens (token-bucket ruling)
+    const after = frame();
+    expect(after).not.toBe(before); // remounted via the nonce in :key
+    expect(after!.getAttribute("src")).toBe(`${ORIGIN}/ui`); // origin + the initial target's path
   });
 });

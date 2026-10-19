@@ -359,3 +359,19 @@ fixtures 路由：`/plain` 无限制；`/xfo` `X-Frame-Options: DENY`；`/fa` CS
 ## 与 plan 的偏差
 
 - plan §10.3 提到的 `proxy-probe.html` 未提供；本清单用浏览器控制台片段 + `tests/fixtures/proxy-upstream.ts` 等价替代（见 X3-report.md）。
+
+#### 18-R1 实测记录（2026-10-19，Edge 155 / Windows，LAN `http://192.168.31.25:7879`，VPN 内网，deveye 驱动）
+
+| 项                                                | 结果                            | 备注                                                                                                                                          |
+| ------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 18A-1 `/plain` 对话框内渲染                       | ✅ rendered                     | enter 303 在 iframe 内完成；iframe sandbox/allow 与常量一致                                                                                   |
+| 18A-2 `/cookie` 写入 + 重进被上游读到；`/ws` echo | ✅                              | `/form` POST 未在框内点按（跨源 iframe 无法合成点击），由单测覆盖                                                                             |
+| 18A-3 同一目标 20× 快速开关                       | ⚠️ 部分                         | 无 `reason:sessions`（会话复用生效）；但每 ~0.6 s 一次时撞上**打开路由的每用户令牌桶**（容量 10，+1/6 s，`E_RATE` 无 reason）。人工节奏不触发 |
+| 18A-4 「新标签打开」                              | ✅                              | 新标签直达 `/plain`；弹窗拦截兜底由单测覆盖                                                                                                   |
+| 18A-5 iOS Safari / 18A-6 旧 hub 档位              | — 未测                          | 旧 hub 档位由单测钉死                                                                                                                         |
+| 18B-1 `/xfo` `/fa` 对话框内                       | ✅ refused                      | 常驻提示可见                                                                                                                                  |
+| 18B-2 同站异端口嵌 proxy 404 / `/xfo` / `/plain`  | ✅ refused / refused / rendered | `/plain` 为既有残余（上游未设限制），记录不判失败                                                                                             |
+| 18B-4 同站异端口嵌 hub                            | ✅ refused                      |                                                                                                                                               |
+| 18B-5 `/probe`                                    | ✅                              | 框内表单 POST `/api/proxy/open` → 403；带凭据 fetch `/api/version`、`/api/proxy` 不可读；EventSource/img 失败                                 |
+| 18B-6 `/bust`                                     | ✅                              | hub 标签页未跳走                                                                                                                              |
+| 18B-3 跨站嵌入、18B-7 `/popup`、18B-8 代理错误页  | — 未测                          |                                                                                                                                               |

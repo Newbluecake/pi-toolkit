@@ -32,6 +32,12 @@ export type ProxyPreviewView =
       readonly gen: number;
       readonly origin: string;
       readonly enterUrl: string;
+      /** The iframe's CURRENT src: the one-time enter URL on first mount, `origin + the initial
+       * target's path+query` after an in-place reload (the cross-origin frame's own location is
+       * unknowable, so a reload always returns to the link's original path). */
+      readonly frameUrl: string;
+      /** Bumped per in-place reload so the iframe remounts even when the URL is unchanged. */
+      readonly nonce: number;
     }
   | { readonly phase: "error"; readonly href: string; readonly gen: number; readonly key: string };
 
@@ -60,6 +66,22 @@ function capsOf(hub: unknown): unknown {
   return hub !== null && typeof hub === "object" ? (hub as { caps?: unknown }).caps : undefined;
 }
 
+/** Pure form of the in-place reload mount guard (exported for tests): `null` unless `href` is
+ * http AND the constructed `origin + pathname + search` URL stays on EXACTLY the open result's
+ * proxy origin AND that origin is not the hub page's own. */
+export function proxyFrameReloadUrl(origin: string, href: string, pageOrigin: string | null): string | null {
+  if (pageOrigin === null) return null;
+  try {
+    const u = new URL(href);
+    if (u.protocol !== "http:") return null;
+    const url = `${origin}${u.pathname}${u.search}`;
+    const o = new URL(url).origin;
+    return o === origin && o !== pageOrigin ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 export function useProxyPreview(opts: UseProxyPreviewOptions): ProxyPreviewHandle {
   const view = ref<ProxyPreviewView>({ phase: "closed" }) as Ref<ProxyPreviewView>;
 
@@ -84,11 +106,15 @@ export function useProxyPreview(opts: UseProxyPreviewOptions): ProxyPreviewHandl
 
   /** §2.5 mount guard: the framed origin must differ from the hub page's. Fails CLOSED when
    * the page origin cannot be determined or the URL does not parse. */
+  function pageOrigin(): string | null {
+    return opts.locationOrigin ?? (typeof window === "undefined" ? null : window.location.origin);
+  }
+
   function enterIsSameOrigin(enterUrl: string): boolean {
-    const pageOrigin = opts.locationOrigin ?? (typeof window === "undefined" ? null : window.location.origin);
-    if (pageOrigin === null) return true;
+    const page = pageOrigin();
+    if (page === null) return true;
     try {
-      return new URL(enterUrl).origin === pageOrigin;
+      return new URL(enterUrl).origin === page;
     } catch {
       return true;
     }
@@ -96,6 +122,17 @@ export function useProxyPreview(opts: UseProxyPreviewOptions): ProxyPreviewHandl
 
   function fail(href: string, myGen: number, error: ProxyFetchError): void {
     view.value = { phase: "error", href, gen: myGen, key: proxyErrorKey(error) };
+  }
+
+  /** The in-place reload URL (2026-10-19 user ruling: 重新加载 in `ready` must NOT burn the
+   * `/api/proxy/open` token bucket — 10 burst, +1/6 s): `<origin> + the normalized href's
+   * pathname+search`, riding the EXISTING gate session cookie — no new code, no POST. The
+   * mount guard mirrors the enter guard: http only, origin must be exactly the open result's
+   * proxy origin (by construction — re-checked), never the hub page's own origin. If the gate
+   * session expired in the meantime, the frame simply shows the proxy's 401 page and the user
+   * re-opens the dialog (a fresh code is minted then) — no automatic recovery here. */
+  function reloadTargetOf(origin: string, href: string): string | null {
+    return proxyFrameReloadUrl(origin, href, pageOrigin());
   }
 
   function open(href: string): void {
@@ -120,7 +157,15 @@ export function useProxyPreview(opts: UseProxyPreviewOptions): ProxyPreviewHandl
           fail(href, myGen, { ok: false, status: 0, error: "E_BAD_RESPONSE" });
           return;
         }
-        view.value = { phase: "ready", href, gen: myGen, origin: out.origin, enterUrl: out.enterUrl };
+        view.value = {
+          phase: "ready",
+          href,
+          gen: myGen,
+          origin: out.origin,
+          enterUrl: out.enterUrl,
+          frameUrl: out.enterUrl,
+          nonce: 0,
+        };
       },
       () => {
         if (myGen !== gen) return;
@@ -132,6 +177,19 @@ export function useProxyPreview(opts: UseProxyPreviewOptions): ProxyPreviewHandl
 
   function reload(): void {
     const cur = view.value;
+    // 2026-10-19 user ruling: in `ready` the frame is navigated IN PLACE (open's per-user
+    // token bucket is 10 burst +1/6 s — rapid reloads must not hit 「操作太频繁」). A guard
+    // failure degrades to the error phase (no POST, no automatic navigation). In
+    // `error`/`opening` reload keeps calling open(href) (which mints a fresh one-time code).
+    if (cur.phase === "ready") {
+      const target = reloadTargetOf(cur.origin, cur.href);
+      if (target === null) {
+        fail(cur.href, cur.gen, { ok: false, status: 0, error: "E_BAD_RESPONSE" });
+        return;
+      }
+      view.value = { ...cur, frameUrl: target, nonce: cur.nonce + 1 };
+      return;
+    }
     if (cur.phase !== "closed") open(cur.href);
   }
 
