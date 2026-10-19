@@ -135,6 +135,7 @@ export function renderMeasureResult(
     `read renewal: ${record.renewal?.renewsOnRead ?? "unknown"}${record.renewal?.reason ? `(${record.renewal.reason})` : ""}${record.renewal?.basis ? ` · ${record.renewal.basis}` : ""}`,
   );
   if (record.renewal?.assumptions) lines.push(`renewal assumptions: ${record.renewal.assumptions.join("; ")}`);
+  if (record.httpError) lines.push(`http-${record.httpError.status}: ${record.httpError.message}`);
   if (record.statusReason === "bound-exceeded") {
     const detail = record.boundExceeded;
     if (detail)
@@ -171,6 +172,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
   let pendingAbort: AbortController | undefined;
   let last: { record: MeasureRunRecord; route: MeasureRouteIdentity | undefined; plan: ExecutionPlan } | undefined;
   let plan: ExecutionPlan | undefined;
+  let shutdownFooter: { epoch: number; generation: number; sessionId: string; ctx: ExtensionContext } | undefined;
 
   const sessionId = (ctx: ExtensionContext): string => {
     try {
@@ -229,7 +231,16 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
     run = undefined;
     token = undefined;
     plan = undefined;
-    if (ctx ?? context) status((ctx ?? context)!, undefined);
+    if (ctx ?? context) {
+      const footerCtx = (ctx ?? context)!;
+      if (claim?.state === "draining") {
+        shutdownFooter = { epoch, generation: claim.generation, sessionId: sessionId(footerCtx), ctx: footerCtx };
+        status(footerCtx, "ttl-measure io-pending");
+      } else {
+        shutdownFooter = undefined;
+        status(footerCtx, undefined);
+      }
+    }
   }
   pi.on("session_shutdown", (event, ctx) => {
     const reason: MeasureCancelReason =
@@ -251,6 +262,10 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
     session = sessionId(ctx);
     context = ctx;
     last = undefined;
+    if (shutdownFooter && claim?.state === "draining") {
+      shutdownFooter = { epoch, generation: claim.generation, sessionId: session, ctx };
+      status(ctx, "ttl-measure io-pending");
+    } else shutdownFooter = undefined;
   });
 
   async function statusData(
@@ -320,7 +335,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
             const snapshot = run.snapshot();
             lines.push(
               `route: ${snapshot.label}`,
-              `last successful save: ${getStore().lastSavedAt === undefined ? "never" : new Date(getStore().lastSavedAt!).toISOString()}`,
+              `last successful save: ${snapshot.lastSavedAt === undefined ? "never (this run)" : new Date(snapshot.lastSavedAt).toISOString()}`,
             );
             const rows = await getStore().readRoutes();
             if (!current(e, id, ctx)) return;
@@ -356,7 +371,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
             }
           }
           lines.push(
-            `last successful save: ${getStore().lastSavedAt === undefined ? "unknown in this process" : new Date(getStore().lastSavedAt!).toISOString()} · persistence ${getStore().persistState}`,
+            `last successful save (process writer): ${getStore().lastSavedAt === undefined ? "unknown in this process" : new Date(getStore().lastSavedAt!).toISOString()} · persistence ${getStore().persistState}`,
           );
           notify(ctx, lines.join("\n"));
         } catch {
@@ -466,16 +481,16 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
         if (!owned()) return;
         plan = frozen;
         const persist = getStore();
-        // Responses has a stock minimal-effort SimpleStreamOptions path. Off/omitted can
+        // Responses has a stock low-effort SimpleStreamOptions path. Off/omitted can
         // become effort:none, which some relays reject. Keep vendor-specific Completions
-        // thinking formats unchanged; they can enable budgets/template flags at minimal.
+        // thinking formats unchanged; they can enable budgets/template flags at low.
         const reasoningLevel =
-          api === "openai-responses" && model.reasoning ? clampThinkingLevel(model, "minimal") : undefined;
+          api === "openai-responses" && model.reasoning ? clampThinkingLevel(model, "low") : undefined;
         const mappedEffort =
           reasoningLevel && reasoningLevel !== "off"
             ? (model.thinkingLevelMap?.[reasoningLevel] ?? reasoningLevel)
             : undefined;
-        const minimalReasoning = typeof mappedEffort === "string" ? mappedEffort : undefined;
+        const lowReasoning = typeof mappedEffort === "string" ? mappedEffort : undefined;
         const send: MeasureSendFn = (request) =>
           (deps.transport ?? sendPipelinePing)({
             registry: ctx.modelRegistry,
@@ -498,7 +513,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
                       ...request.build,
                       maxTokens: frozen.outputCap,
                       cacheRetention: frozen.requestedRetention,
-                      ...(minimalReasoning ? { reasoning: "minimal" as const } : {}),
+                      ...(lowReasoning ? { reasoning: "low" as const } : {}),
                     },
                   }
                 : {}),
@@ -507,6 +522,23 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
         const compat = model.compat as
           { thinkingTokenBudgetField?: string; supportsMidConvoEffort?: boolean } | undefined;
         let checkedTier: import("./measure-types.js").EffectiveTier | undefined;
+        const refreshTerminalStatus = () => {
+          // Physical IO can settle AFTER done/claim release; owns(token) is then false.
+          // Generation fencing prevents an old settlement from clearing a newer run's footer.
+          if (current(e, id, ctx) && c.generation === mine.owner.generation && c.state === "free")
+            status(ctx, undefined);
+          const pending = shutdownFooter;
+          if (
+            pending &&
+            pending.epoch === epoch &&
+            pending.generation === c.generation &&
+            pending.sessionId === sessionId(pending.ctx) &&
+            c.state === "free"
+          ) {
+            status(pending.ctx, undefined);
+            shutdownFooter = undefined;
+          }
+        };
         const runnerDeps: MeasureRunnerDeps = {
           plan: frozen,
           token: mine,
@@ -520,7 +552,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
             const verdict = validateMeasurePayload(api, params, {
               ...expect,
               ...(compat?.thinkingTokenBudgetField ? { forbiddenKeys: [compat.thinkingTokenBudgetField] } : {}),
-              ...(minimalReasoning ? { reasoningEffort: minimalReasoning } : {}),
+              ...(lowReasoning ? { reasoningEffort: lowReasoning } : {}),
             });
             if (!verdict.ok) return verdict;
             if (
@@ -544,6 +576,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
             promptCacheKeyFor: (sid) => Array.from(sid).slice(0, 64).join(""),
           },
           versions: { piVersion: PI_VERSION },
+          onPhysicalSettled: refreshTerminalStatus,
           onProgress: (p) => {
             if (owned()) status(ctx, progressLine(p, clock.now()));
           },
@@ -556,7 +589,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
               [
                 ...renderMeasureResult(record, route, true),
                 ...formatPlanLines(frozen),
-                `last successful save: ${persist.lastSavedAt === undefined ? "never" : new Date(persist.lastSavedAt).toISOString()} · persistence ${persist.persistState}`,
+                `last successful save: ${persist.lastSavedAtFor(frozen.runId) === undefined ? "never (this run)" : new Date(persist.lastSavedAtFor(frozen.runId)!).toISOString()} · persistence ${persist.persistState}`,
               ].join("\n"),
               record.status === "failed" ? "warning" : "info",
             );
@@ -570,6 +603,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
             token = undefined;
             plan = undefined;
             if (c.state === "draining") status(ctx, "ttl-measure io-pending");
+            else refreshTerminalStatus();
           }
         });
       } catch {

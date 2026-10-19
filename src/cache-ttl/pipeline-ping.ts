@@ -6,6 +6,7 @@ import {
   isMessageStartEvent,
   networkErrorDescriptor,
   rawUsageFrom,
+  redactSecrets,
 } from "./ping-client.js";
 import { MEASURE_RAW_USAGE_MAX_BYTES, VALIDATOR_LIMITS } from "./measure-types.js";
 import { measureEndpointSuffix } from "./measure-route.js";
@@ -51,6 +52,7 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
   let upstreamClosed = false;
   let cancelStarted = false;
   let sawOpenAiUsageFrame = false;
+  let authSecrets: string[] = []; // local-only, never included in diagnostics
 
   // A late fetch can introduce a body cancel AFTER the logical outcome. Its cleanup is registered
   // before the fetch is released from this ledger, so `settled` cannot resolve in the intervening gap.
@@ -166,11 +168,19 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
     }
     const reader = upstream;
     const limit = response.ok ? PING_SCAN_LIMIT_BYTES : HTTP_ERROR_BODY_CAP_BYTES;
+    const errorChunks: Uint8Array[] = [];
+    const captureError = () => {
+      if (measurement && response.status === 400 && !logicalDone) {
+        const excerpt = providerErrorExcerpt(Buffer.concat(errorChunks).toString("utf8"), authSecrets);
+        if (excerpt) measured!.httpError = excerpt;
+      }
+    };
     const body = new ReadableStream<Uint8Array>(
       {
         async pull(sink) {
           try {
             if (diag.bodyBytes >= limit) {
+              captureError();
               if (response.ok) finish({ kind: "malformed" });
               cancelBody();
               sink.close();
@@ -178,12 +188,17 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
             }
             const step = await raceAbort(track(reader.read()));
             if (step.done) {
+              captureError();
               upstreamClosed = true;
               sink.close();
               return;
             }
             const chunk = step.value.subarray(0, limit - diag.bodyBytes);
             diag.bodyBytes += chunk.byteLength;
+            if (measurement && response.status === 400) {
+              errorChunks.push(chunk.slice());
+              captureError();
+            }
             sink.enqueue(chunk);
           } catch (error) {
             cancelBody();
@@ -276,6 +291,12 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
     }
     const headers = new Headers(init?.headers ?? (request instanceof Request ? request.headers : undefined));
     diag.wireHeaderNames = [...headers.keys()].map((name) => name.toLowerCase()).sort();
+    if (measurement)
+      authSecrets = [...headers].flatMap(([name, value]) =>
+        /authorization|api[-_]?key|token|cookie|secret/i.test(name)
+          ? [value, value.replace(/^(?:Bearer|Basic)\s+/i, "")]
+          : [],
+      );
     const fetchSignal = init?.signal ?? (request instanceof Request ? request.signal : undefined);
     if (fetchSignal?.aborted) {
       notSentReason = "aborted";
@@ -429,6 +450,39 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
   }
   return result;
 };
+
+function providerErrorExcerpt(body: string, secrets: readonly string[]): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!isRecord(parsed)) return undefined;
+    const message =
+      isRecord(parsed.error) && typeof parsed.error.message === "string"
+        ? parsed.error.message
+        : typeof parsed.message === "string"
+          ? parsed.message
+          : typeof parsed.detail === "string"
+            ? parsed.detail
+            : undefined;
+    if (!message) return undefined;
+    // Pick ONLY the provider's message, never other JSON fields/headers. Redact before
+    // truncating so a credential straddling the 160-char cut cannot leak a partial token.
+    const clean = redactSecrets(message, secrets)
+      .replace(/https?:\/\/[^\s<>"']+/gi, "[URL]")
+      .replace(/\b(?:sk-|sess-|gh[pousr]_)[a-z\d_-]+/gi, "[REDACTED]")
+      .replace(/\b(?:Bearer|Basic)\s+[^\s,;"']+/gi, "[REDACTED]")
+      .replace(
+        /\b(?:authorization|x-api-key|api[_-]?key|key|token|secret|password)\s*["']?\s*[=:]\s*["']?[^\s,;"']+/gi,
+        "[REDACTED]",
+      )
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return Array.from(clean).slice(0, 160).join("") || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function completionUsageFrom(event: Record<string, unknown>): unknown {
   const choice = Array.isArray(event.choices) ? event.choices[0] : undefined;

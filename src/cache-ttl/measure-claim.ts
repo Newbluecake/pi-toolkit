@@ -39,6 +39,8 @@ import {
 export interface MeasurePersistSlot {
   state: MeasurePersistState;
   lastSavedAt: Millis | undefined;
+  /** Successful-save times by run; optional for a claim created before a /reload upgrade. */
+  savedRuns?: Map<string, Millis>;
   /** When the slot became a zombie (a step missed its deadline); persists are skipped from then on. */
   zombieSince: Millis | undefined;
   /** A write is in flight (owned by exactly one writer loop, whichever activation started it). */

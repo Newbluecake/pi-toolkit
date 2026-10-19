@@ -285,6 +285,10 @@ describe("/cache-ttl getArgumentCompletions", () => {
         .map((i: any) => i.value)
         .sort(),
     ).toEqual(["keepalive off", "keepalive on"]);
+    // applyCompletion replaces the whole argument prefix with value: applying "on" at the
+    // second position must yield `/cache-ttl keepalive on` byte-for-byte.
+    const on = cmd.getArgumentCompletions("keepalive o")!.find((i: any) => i.label === "on")!;
+    expect(`/cache-ttl ${on.value}`).toBe("/cache-ttl keepalive on");
   });
 
   it("unknown prefix returns empty and never throws", () => {

@@ -95,7 +95,11 @@ export interface MeasureRunnerDeps {
   send: MeasureSendFn;
   clock: Clock;
   /** Fire-and-forget persistence; the runner never awaits it. */
-  persist: Pick<MeasureStorePort, "persist" | "lastSavedAt">;
+  persist: Pick<MeasureStorePort, "persist" | "lastSavedAt"> & {
+    lastSavedAtFor?: (runId: string) => Millis | undefined;
+  };
+  /** Called after the physical ledger settles; may run after logical completion (caller generation-fences UI). */
+  onPhysicalSettled?: () => void;
   /** Progress callback (status line). Called synchronously, try/catch-wrapped, owner-fenced. */
   onProgress(progress: MeasureProgress): void;
   /** Final callback (notify). Called once, try/catch-wrapped, owner-fenced, before the claim is released. */
@@ -150,6 +154,7 @@ interface Done {
   builtBody?: Record<string, unknown>;
   routeKey?: string;
   routeLabel?: string;
+  httpError?: { status: number; message: string };
   /** The run ended (cancel / deadline / stale owner) while this request was pending or before it started. */
   aborted?: true;
   /** Refused by the cap (nothing sent). */
@@ -163,6 +168,13 @@ const FINAL_VERDICTS = new Set<TtlSampleRecord["verdict"]>(["hit", "miss", "skip
 export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
   const { plan, token, claim, send, clock } = deps;
   const startedAt = clock.now();
+  const previousSave = deps.persist.lastSavedAt;
+  const runSavedAt = () =>
+    deps.persist.lastSavedAtFor
+      ? deps.persist.lastSavedAtFor(plan.runId)
+      : deps.persist.lastSavedAt !== previousSave && (deps.persist.lastSavedAt ?? -Infinity) >= startedAt
+        ? deps.persist.lastSavedAt
+        : undefined;
   const hardMs = deps.hardDeadlineMs ?? MEASURE_TIMING.hardDeadlineMs;
   const hardAt = startedAt + hardMs;
   const slots: SlotState[] = plan.slots.map((p) => ({
@@ -179,6 +191,7 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
   let record: MeasureRunRecord | undefined;
   let statusNow: MeasureRunStatus = "running";
   let boundExceeded: MeasureBoundExceeded | undefined;
+  let httpError: MeasureRunRecord["httpError"];
   let sent = 0;
   let possiblyBilled = 0;
   let replacementsLeft = REQUEST_BUDGET.replacements;
@@ -259,6 +272,7 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
       status,
       ...(reason !== undefined ? { statusReason: reason } : {}),
       ...(boundExceeded !== undefined ? { boundExceeded } : {}),
+      ...(httpError !== undefined ? { httpError } : {}),
       startedAt,
       ...(finalRun ? { finishedAt: clock.now() } : {}),
       load: { prefixes: written.length, ownTokens: written.reduce((n, s) => n + s.baseline!.S, 0) },
@@ -287,7 +301,7 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
         : {}),
       sent,
       cost: sumCosts(costs),
-      ...(deps.persist.lastSavedAt !== undefined ? { lastSavedAt: deps.persist.lastSavedAt } : {}),
+      ...(runSavedAt() !== undefined ? { lastSavedAt: runSavedAt()! } : {}),
       physicalPending: claim.physicalPending,
     };
   };
@@ -339,7 +353,8 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
             status === "no-cache" ||
             status === "control-inconclusive" ||
             status === "inconclusive" ||
-            boundExceeded !== undefined;
+            boundExceeded !== undefined ||
+            httpError !== undefined;
           if (measuredSomething) deps.persist.persist(route, "latest", final);
           deps.persist.persist(route, "inProgress", null);
         }
@@ -509,6 +524,11 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
         fired = true;
         ownPending = Math.max(0, ownPending - 1);
         claim.ioSettled();
+        try {
+          deps.onPhysicalSettled?.();
+        } catch {
+          /* diagnostics never affect physical settlement */
+        }
         if (ownPending === 0) {
           const ws = idleWaiters;
           idleWaiters = [];
@@ -600,6 +620,9 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
       ...(m?.builtBody !== undefined ? { builtBody: m.builtBody } : {}),
       ...(m?.routeKey !== undefined ? { routeKey: m.routeKey } : {}),
       ...(m?.routeLabel !== undefined ? { routeLabel: m.routeLabel } : {}),
+      ...(outcome.kind === "http" && outcome.status === 400 && m?.httpError
+        ? { httpError: { status: outcome.status, message: m.httpError } }
+        : {}),
     });
   }
 
@@ -628,15 +651,10 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
         }),
       );
     }
+    if (d.sent && d.httpError !== undefined) httpError = d.httpError;
     const condition = d.sent ? boundBroken(d.usage, plan.tokens.pBound, OUTPUT_ALLOWANCE_TOKENS[plan.api]) : undefined;
-    if (condition !== undefined && d.usage !== undefined) {
-      boundExceeded = {
-        condition,
-        observed: condition === "C1" ? d.usage.P : d.usage.output!,
-        limit: condition === "C1" ? plan.tokens.pBound : OUTPUT_ALLOWANCE_TOKENS[plan.api],
-      };
-      // A first-write bound failure happens before the ordinary anchor sets route identity.
-      // Preserve its diagnostic record against the actual validated/sent route, too.
+    if (condition !== undefined || d.httpError !== undefined) {
+      // Preserve a first-write HTTP/bound failure against its actual sent route too.
       if (route === undefined && d.routeKey !== undefined) {
         routeKey = d.routeKey;
         routeLabel = d.routeLabel ?? plan.wireModel;
@@ -649,6 +667,13 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
           effectiveTier: effectiveTier ?? "auto",
         };
       }
+    }
+    if (condition !== undefined && d.usage !== undefined) {
+      boundExceeded = {
+        condition,
+        observed: condition === "C1" ? d.usage.P : d.usage.output!,
+        limit: condition === "C1" ? plan.tokens.pBound : OUTPUT_ALLOWANCE_TOKENS[plan.api],
+      };
       fail("bound-exceeded");
     }
     return d;

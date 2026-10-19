@@ -291,6 +291,13 @@ describe("cache TTL measurement end-to-end cache policies", () => {
     expect(touches[2]!.at - touches[0]!.at).toBe(TTL_GAPS_MS[5] + 30000);
     expect(record.ttl.lowerMs).toBe(TTL_GAPS_MS[5]);
     expect(record.ttl.reachedMaxGap).toBe(true);
+    expect(h.claim.state).toBe("free");
+    expect(
+      vi
+        .mocked(h.ctx.ui.setStatus)
+        .mock.calls.filter(([key]) => key === "cache-ttl-measure")
+        .at(-1),
+    ).toEqual(["cache-ttl-measure", undefined]);
     vi.mocked(h.ctx.ui.notify).mockClear();
     await h.command("status");
     expect(h.text()).toContain("learned ttl short ≥61m");
@@ -314,6 +321,14 @@ describe("cache TTL measurement end-to-end cache policies", () => {
     const text = readFileSync(h.store.filePath, "utf8");
     expect(text).not.toContain("measure-integration");
     expect(text).toContain("sha256:");
+    h.clock.advance(600000);
+    vi.mocked(h.ctx.ui.setStatus).mockClear();
+    await h.command("measure --yes");
+    const initial = vi
+      .mocked(h.ctx.ui.setStatus)
+      .mock.calls.find(([key, text]) => key === "cache-ttl-measure" && text?.includes("running 0/6"));
+    expect(initial?.[1]).toContain("not saved yet");
+    expect(initial?.[1]).not.toContain("saved 10m ago");
   });
   it("web rows preserve start/cancel confirmation and permit status/estimate only", () => {
     for (const args of ["measure status", "measure --estimate", "measure CaseProvider/CaseModel --long --estimate"])

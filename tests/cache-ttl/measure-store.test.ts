@@ -174,6 +174,23 @@ describe("path + atomic 0600 write", () => {
     ]);
   });
 
+  it("attributes save times to the committed run only, including across /reload stores", async () => {
+    const { store, clock, slot } = mk();
+    const old = run(1),
+      next = run(2);
+    store.persist(route(1), "latest", old);
+    await store.flush();
+    expect(store.lastSavedAtFor(old.runId)).toBe(NOW);
+    clock.advance(600000);
+    const reloaded = createMeasureStore({ filePath: file, clock, slot });
+    expect(reloaded.lastSavedAt).toBe(NOW);
+    expect(reloaded.lastSavedAtFor(next.runId)).toBeUndefined();
+    reloaded.persist(route(1), "inProgress", next);
+    expect(reloaded.lastSavedAtFor(next.runId)).toBeUndefined(); // intent is NOT a successful save
+    await reloaded.flush();
+    expect(store.lastSavedAtFor(old.runId)).toBe(NOW);
+    expect(store.lastSavedAtFor(next.runId)).toBe(NOW + 600000);
+  });
   it("never throws, even when the directory cannot be created (state returns to idle, nothing saved)", async () => {
     fs.writeFileSync(path.join(dir, "agent"), "i am a file, not a directory");
     const { store } = mk();
@@ -181,11 +198,13 @@ describe("path + atomic 0600 write", () => {
     await store.flush();
     expect(store.persistState).toBe("idle");
     expect(store.lastSavedAt).toBeUndefined();
+    expect(store.lastSavedAtFor(run(1).runId)).toBeUndefined();
     // a later persist after the obstacle is gone works again
     fs.rmSync(path.join(dir, "agent"));
     store.persist(route(1), "latest", run(1));
     await store.flush();
     expect(store.lastSavedAt).toBe(NOW);
+    expect(store.lastSavedAtFor(run(1).runId)).toBe(NOW);
   });
 });
 

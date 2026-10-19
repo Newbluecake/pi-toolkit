@@ -233,6 +233,8 @@ export interface MeasureStore extends MeasureStorePort {
   readonly filePath: string;
   /** Bounded read-only status listing; never guesses the authenticated route key. */
   readRoutes(): Promise<readonly MeasureRouteRecord[]>;
+  /** Only a successfully written batch containing this run can supply its save timestamp. */
+  lastSavedAtFor(runId: string): Millis | undefined;
 }
 
 type Raced<T> = { timedOut: false; value: T } | { timedOut: true };
@@ -242,6 +244,7 @@ export function createMeasureStore(options: MeasureStoreOptions = {}): MeasureSt
   const clock = options.clock ?? systemClock;
   const fs: MeasureStoreFs = options.fs ?? (fsp as unknown as MeasureStoreFs);
   const slot = options.slot ?? getMeasureClaim().persistSlot;
+  const savedRuns = (slot.savedRuns ??= new Map<string, Millis>());
   const tmpSuffix = options.tmpSuffix ?? (() => `${process.pid}.${Math.random().toString(36).slice(2, 10)}`);
   const stepMs = MEASURE_STORE_LIMITS.persistStepDeadlineMs;
   let loop: Promise<void> | undefined;
@@ -356,7 +359,13 @@ export function createMeasureStore(options: MeasureStoreOptions = {}): MeasureSt
           goZombie();
           return;
         }
-        if (result === "ok") slot.lastSavedAt = clock.now();
+        if (result === "ok") {
+          const at = clock.now();
+          slot.lastSavedAt = at;
+          for (const update of batch) if (update.run) savedRuns.set(update.run.runId, at);
+          // Same bound as two records per retained route; no unbounded process history.
+          while (savedRuns.size > MEASURE_STORE_LIMITS.routeCap * 2) savedRuns.delete(savedRuns.keys().next().value!);
+        }
         // "failed": swallowed — the next snapshot of the run replaces it anyway
       }
     } finally {
@@ -377,6 +386,9 @@ export function createMeasureStore(options: MeasureStoreOptions = {}): MeasureSt
     filePath,
     get persistState(): MeasurePersistState {
       return slot.state;
+    },
+    lastSavedAtFor(runId) {
+      return savedRuns.get(runId);
     },
     get lastSavedAt(): Millis | undefined {
       return slot.lastSavedAt;

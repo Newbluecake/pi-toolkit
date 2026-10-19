@@ -69,7 +69,7 @@ export interface PipelineMeasurementInput {
     maxTokens: number;
     cacheRetention: "short" | "long";
     /** Build-only low-effort Responses measurement; absent for keepalive and replay bodies. */
-    reasoning?: "minimal";
+    reasoning?: "low";
     validate: (params: Record<string, unknown>) => string | undefined;
   };
   /**
@@ -102,6 +102,8 @@ export interface PipelineMeasured {
   headersAt?: Millis;
   /** HTTP `Location` header was present on a 3xx (value never recorded). */
   redirected?: true;
+  /** Measurement-only, redacted ≤160-character provider message from a bounded HTTP 400 JSON body. */
+  httpError?: string;
 }
 
 /**

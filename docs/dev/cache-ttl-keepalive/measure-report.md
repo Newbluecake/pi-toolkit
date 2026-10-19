@@ -388,3 +388,46 @@ Verification:
 ```
 
 Prettier check on all fourteen changed code/test files and this report passes; `git diff --check` exits 0. Test log: `/tmp/measure-c2-target.log`. The requested real cr-response rerun still needs the main session's approval; these regressions use real local registry/builders with fake SSE only.
+
+### Fix: live round 2
+
+Known fail-safe outcome (verifier follow-up): `clampThinkingLevel(model, "low")` can return `off` when the model's supported-level map disables thinking. The command deliberately leaves the build reasoning option unset in that case; pi may emit its default no-reasoning/`none` request. A copilot-style endpoint can reject that with HTTP400: the run sends exactly one request, stops honestly, and shows/persists the redacted provider excerpt. This is accepted behaviour, not a reason to force an unsupported effort or retry/raise a cap.
+
+- **Responses effort:** request `reasoning:"low"` instead of `minimal` for reasoning-capable Responses models. The option still passes through pi's `clampThinkingLevel` and the model's thinkingLevelMap; the actual-params validator expects that exact mapped stock construction. Real registry tests cover a no-map relay fixture rejecting anything except low, a low→medium model mapping, unchanged wire max_output_tokens=16, and byte-identical replay. Completions/Anthropic effort and wire caps are unchanged. The earlier C2 allowance (64/512/512) remains unchanged.
+- **HTTP400 diagnosis:** the existing bounded error-body path extracts only JSON `error.message`, `message` or string `detail`, never other fields or response headers. Before the 160-character cap, it scrubs request auth-header literals (kept local only), credential/key assignments, bearer/basic values, token-shaped strings, URLs and terminal controls. The optional measurement annex carries only the resulting excerpt; the runner persists `{httpError:{status:400,message}}` against the actual sent route even for a first-write failure. Final notice and measure status display `http-400: <excerpt>`; the compact footer remains English tokens, without provider prose. Missing/malformed or over-cap JSON cannot introduce raw fallback bodies. A real registry/SDK fake-400 regression verifies the final notice, saved record and fresh-activation status, ≤160 characters and absence of test keys/URL credentials/headers.
+- **Footer root cause/fix:** `started.done` could set `io-pending` while the claim was draining, but no event refreshed the status after `ioSettled` freed it. A runner callback now fires synchronously AFTER the physical ledger settles; the command clears the footer only when the original session/activation epoch and claim generation still match and the claim is free. Already-settled completion also explicitly clears the footer. There is no polling, interval or added timer, and late old-session callbacks cannot clear a newer run.
+- **Save-time root cause/fix:** `store.lastSavedAt` belonged to the process-wide writer, not the current run. The concrete store now attributes successful write acknowledgments to runId via `lastSavedAtFor(runId)`; it records no timestamp merely for a persist intent, and keeps at most 128 run times (two records per retained-route cap), shared across reload stores. Runner progress and run-specific final/status text use that timestamp. A new run starts `not saved yet`, never the prior run's `saved 10m ago`. Old minimal test ports retain a conservative fallback which hides their pre-run timestamp. The global writer timestamp is retained for explicitly process-level historical status.
+
+Changed files: `measure-command.ts`, `measure-types.ts`, `pipeline-ping-types.ts`, `pipeline-ping.ts`, `measure-runner.ts`, `measure-store.ts`, `measure-claim.ts`, their focused command/store/conformance/integration tests and this appended report. Tests exercise completed-but-physically-pending final IO, footer clearing with zero pending timers, a new run after a ten-minute gap, concrete-store success/failure save attribution and reload sharing. No commit, live endpoint request, keepalive scheduling change, or changes to the running independent acceptance instance.
+
+Final verification:
+
+- `timeout 280 npm run typecheck` — exit 0.
+- `timeout 280 npm run build` — exit 0.
+- `timeout 600 npx vitest run tests/cache-ttl tests/conformance/measure-build.test.ts tests/conformance/measure-openai-build.test.ts tests/integration/cache-ttl-measure.test.ts` — exit 0:
+
+```text
+ Test Files  38 passed (38)
+      Tests  1215 passed (1215)
+   Start at  10:06:14
+   Duration  4.08s (transform 2.03s, setup 706ms, collect 9.14s, tests 6.45s, environment 7ms, prepare 2.15s)
+```
+
+Prettier check on the eleven changed code/test files and this report passes; `git diff --check` exits 0. Log: `/tmp/measure-round2-target.log`. Real copilot-response acceptance should be re-run by the main session after approval; no provider call was made here.
+
+Verifier follow-up (`verify-round-2-live-fixes`, `r_C3BJE82J`): the round-2 section above is present and now explicitly includes the accepted off-clamp outcome. Added the two missing lifecycle tests in `tests/cache-ttl/measure-command.test.ts`: a captured old-generation physical-settlement callback performs no status write during a newer run or after that newer generation frees its claim; shutdown mid-IO retains `io-pending` until physical settlement, then clears the marker without a completion notice or polling timer. The latter exposed one small production gap in `src/cache-ttl/measure-command.ts`: shutdown previously cleared the footer immediately. It now retains a pending marker tied to shutdown epoch/session/generation, which only the corresponding settlement may clear; a same-activation session replacement rebinds that marker to the new context while still draining. Other round-2 changes/files are listed above. No new effort behaviour, no commit, and no live provider call.
+
+Follow-up verification:
+
+- `timeout 280 npm run typecheck` — exit 0.
+- `timeout 280 npm run build` — exit 0.
+- `timeout 120 npx vitest run tests/cache-ttl/measure-command.test.ts tests/cache-ttl/measure-runner.test.ts tests/cache-ttl/measure-store.test.ts tests/conformance/measure-openai-build.test.ts tests/conformance/measure-build.test.ts tests/integration/cache-ttl-measure.test.ts` — exit 0:
+
+```text
+ Test Files  6 passed (6)
+      Tests  227 passed (227)
+   Start at  10:11:10
+   Duration  2.80s (transform 816ms, setup 227ms, collect 4.06s, tests 5.02s, environment 1ms, prepare 322ms)
+```
+
+Prettier check on all round-2 changed code/test files and this report passes; `git diff --check` exits 0. Follow-up output: `/tmp/measure-round2-followup.log`.

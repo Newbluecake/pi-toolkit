@@ -158,7 +158,7 @@ async function environment(
       .join(""),
   };
   const customBudgetKey = model!.compat?.thinkingTokenBudgetField;
-  const level = profile === "openai-responses" && model!.reasoning ? clampThinkingLevel(model!, "minimal") : undefined;
+  const level = profile === "openai-responses" && model!.reasoning ? clampThinkingLevel(model!, "low") : undefined;
   if (level && level !== "off") expectation.reasoningEffort = model!.thinkingLevelMap?.[level] ?? level;
   if (customBudgetKey) expectation.forbiddenKeys = [customBudgetKey];
   let tier: EffectiveTier = "auto";
@@ -189,7 +189,7 @@ async function environment(
         maxTokens: OUTPUT_CAP[profile],
         cacheRetention: options.long ? "long" : "short",
         validate,
-        ...(expectation.reasoningEffort ? { reasoning: "minimal" } : {}),
+        ...(expectation.reasoningEffort ? { reasoning: "low" } : {}),
       },
     },
   };
@@ -628,12 +628,12 @@ describe("OpenAI profile-specific real builder conformance", () => {
 });
 
 describe("live C2 allowance and lowest Responses effort regression", () => {
-  it("real Responses builder accepts exact minimal reasoning with wire max_output_tokens still 16", async () => {
+  it("real Responses builder accepts exact low reasoning with wire max_output_tokens still 16", async () => {
     const h = await environment("openai-responses", { reasoning: true });
     const result = await sendPipelinePing(h.input);
     expect(result.outcome.kind).toBe("usage");
     const built = result.outcome.measured!.builtBody!;
-    expect(built.reasoning).toEqual({ effort: "minimal", summary: "auto" });
+    expect(built.reasoning).toEqual({ effort: "low", summary: "auto" });
     expect(built.include).toEqual(["reasoning.encrypted_content"]);
     expect(built.max_output_tokens).toBe(16);
     await result.settled;
@@ -644,15 +644,15 @@ describe("live C2 allowance and lowest Responses effort regression", () => {
     expect(vi.mocked(h.baseFetch).mock.calls[1]![1]!.body).toBe(vi.mocked(h.baseFetch).mock.calls[0]![1]!.body);
     await replay.settled;
   });
-  it("minimal clamps to the lowest supported effort when the model disables minimal", async () => {
-    const h = await environment("openai-responses", { reasoning: true, thinkingLevelMap: { minimal: null } });
+  it("low uses the model thinkingLevelMap exactly", async () => {
+    const h = await environment("openai-responses", { reasoning: true, thinkingLevelMap: { low: "medium" } });
     const result = await sendPipelinePing(h.input);
     expect(result.outcome.kind).toBe("usage");
-    expect(result.outcome.measured!.builtBody!.reasoning).toEqual({ effort: "low", summary: "auto" });
+    expect(result.outcome.measured!.builtBody!.reasoning).toEqual({ effort: "medium", summary: "auto" });
     expect(result.outcome.measured!.builtBody!.max_output_tokens).toBe(16);
     await result.settled;
   });
-  it("sampling cannot replace the requested minimal effort with high effort", async () => {
+  it("sampling cannot replace the requested low effort with high effort", async () => {
     await expectRefusal(
       "openai-responses",
       { reasoning: true, samplingParams: { reasoning: { effort: "high", summary: "auto" } } },
@@ -701,7 +701,7 @@ describe("live C2 allowance and lowest Responses effort regression", () => {
         expect(h.baseFetch).toHaveBeenCalledTimes(output > 512 ? 1 : 6);
         const wire = JSON.parse(vi.mocked(h.baseFetch).mock.calls[0]![1]!.body as string);
         expect(wire.max_output_tokens).toBe(16);
-        expect(wire.reasoning).toEqual({ effort: "minimal", summary: "auto" });
+        expect(wire.reasoning).toEqual({ effort: "low", summary: "auto" });
         const notices = () =>
           vi
             .mocked(ctx.ui.notify)
@@ -726,4 +726,94 @@ describe("live C2 allowance and lowest Responses effort regression", () => {
       }
     },
   );
+});
+
+describe("live round 2 — low effort and redacted provider rejection", () => {
+  it("a no-map reasoning model uses low, never minimal/none, against a rejecting relay fixture", async () => {
+    const baseFetch = vi.fn<typeof fetch>(async (_request, init) => {
+      const params = JSON.parse(init!.body as string);
+      if (params.reasoning.effort !== "low")
+        return new Response(
+          JSON.stringify({ error: { message: "Unsupported effort; supported: low, medium, high" } }),
+          { status: 400 },
+        );
+      return new Response(responseFrame());
+    });
+    const h = await environment("openai-responses", { reasoning: true }, baseFetch);
+    expect(h.model.thinkingLevelMap).toBeUndefined();
+    const result = await sendPipelinePing(h.input);
+    expect(result.outcome.kind).toBe("usage");
+    expect(JSON.parse(baseFetch.mock.calls[0]![1]!.body as string).reasoning).toEqual({
+      effort: "low",
+      summary: "auto",
+    });
+    await result.settled;
+  });
+  it("HTTP400 message is bounded/redacted in the notice, saved record and reloaded status", async () => {
+    const message =
+      `Unsupported parameter: future_flag. sk-synthetic-fixture Bearer made-up-private-token https://user:password@relay.invalid/?api_key=private-query api_key="another-private-key" ` +
+      "details ".repeat(40);
+    const h = await environment(
+      "openai-responses",
+      { reasoning: true },
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { message }, headers: { authorization: "must-not-be-copied" } }), {
+            status: 400,
+          }),
+      ),
+    );
+    const claim = createMeasureClaim();
+    const store = createMeasureStore({
+      filePath: join(h.root, "measurement-errors.json"),
+      clock: h.clock,
+      slot: claim.persistSlot,
+    });
+    const hooks = new Map<string, (event: unknown, ctx: unknown) => void>();
+    const pi = {
+      on(name: string, handler: any) {
+        hooks.set(name, handler);
+      },
+    } as unknown as ExtensionAPI;
+    const port = wireMeasureCommand(pi, { clock: h.clock, claim, store, fetchImpl: h.baseFetch });
+    const ctx = {
+      model: h.model,
+      modelRegistry: h.registry,
+      hasUI: true,
+      sessionManager: { getSessionId: () => "rejected-measure" },
+      ui: { notify: vi.fn(), setStatus: vi.fn() },
+    } as unknown as ExtensionContext;
+    await port.handle("measure --yes", ctx);
+    await until(() => claim.state === "free");
+    await store.flush();
+    const record = (await store.readRoutes())[0]!.latest!;
+    const error = record.httpError!;
+    expect(record.statusReason).toBe("http-400");
+    expect(record.requests.sent).toBe(1);
+    expect(error.status).toBe(400);
+    expect(error.message).toContain("Unsupported parameter: future_flag.");
+    expect(Array.from(error.message).length).toBeLessThanOrEqual(160);
+    expect(error.message).toContain("[REDACTED]");
+    const text = () =>
+      vi
+        .mocked(ctx.ui.notify)
+        .mock.calls.map(([s]) => s)
+        .join("\n");
+    expect(text()).toContain(`http-400: ${error.message}`);
+    for (const secret of [
+      "sk-synthetic-fixture",
+      "made-up-private-token",
+      "private-query",
+      "another-private-key",
+      "must-not-be-copied",
+      "user:password",
+    ])
+      expect(JSON.stringify(record)).not.toContain(secret);
+    hooks.get("session_shutdown")?.({ reason: "reload" }, ctx);
+    vi.mocked(ctx.ui.notify).mockClear();
+    const fresh = wireMeasureCommand({ on() {} } as unknown as ExtensionAPI, { clock: h.clock, claim, store });
+    await fresh.handle("measure status", ctx);
+    expect(text()).toContain(`http-400: ${error.message}`);
+    expect(h.baseFetch).toHaveBeenCalledTimes(1);
+  });
 });

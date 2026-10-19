@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { FakeClock } from "../../src/core/clock.js";
 import { wireMeasureCommand, measurePriceFor, renderMeasureResult } from "../../src/cache-ttl/measure-command.js";
 import { createMeasureClaim } from "../../src/cache-ttl/measure-claim.js";
+import * as measurementRunner from "../../src/cache-ttl/measure-runner.js";
 import { wireCacheTtl } from "../../src/cache-ttl/cache-ttl.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import { accountRequestCost, estimateCost } from "../../src/cache-ttl/measure-plan.js";
@@ -40,10 +41,14 @@ const model: PipelinePingModel = {
 };
 function memoStore(clock: FakeClock): MeasureStore {
   const records = new Map<string, MeasureRouteRecord>();
+  const saves = new Map<string, number>();
   let savedAt: number | undefined;
   return {
     filePath: "/test/cache-ttl-measurements.json",
     persistState: "idle",
+    lastSavedAtFor(runId) {
+      return saves.get(runId);
+    },
     get lastSavedAt() {
       return savedAt;
     },
@@ -52,6 +57,7 @@ function memoStore(clock: FakeClock): MeasureStore {
       entry[slot] = record ? structuredClone(record) : null;
       records.set(route.key, entry);
       savedAt = clock.now();
+      if (record) saves.set(record.runId, savedAt);
     },
     async flush() {},
     async readRoutes() {
@@ -111,7 +117,7 @@ function transportFixture(patch: Record<string, unknown> = {}, output = 1) {
               max_output_tokens: 16,
               ...(build.reasoning
                 ? {
-                    reasoning: { effort: input.model.thinkingLevelMap?.minimal ?? "minimal", summary: "auto" },
+                    reasoning: { effort: input.model.thinkingLevelMap?.low ?? "low", summary: "auto" },
                     include: ["reasoning.encrypted_content"],
                   }
                 : {}),
@@ -327,14 +333,14 @@ describe("measure command admission and lifecycle", () => {
       await flush();
     },
   );
-  it("live Responses reasoning output 32 proceeds, sends wire cap 16 and requests minimal effort", async () => {
+  it("live Responses reasoning output 32 proceeds, sends wire cap 16 and requests low effort", async () => {
     const h = setup({ transport: transportFixture({}, 32) });
     (h.ctx as any).model = { ...model, api: "openai-responses", reasoning: true };
     await h.port.handle("measure --yes", h.ctx);
     await flush();
     expect(h.claim.current()?.sent).toBe(6);
     const first = vi.mocked(h.transport).mock.calls[0]![0];
-    expect(first.measurement?.build).toMatchObject({ maxTokens: 16, reasoning: "minimal" });
+    expect(first.measurement?.build).toMatchObject({ maxTokens: 16, reasoning: "low" });
     expect(h.text()).not.toContain("bound-exceeded");
     expect(h.text()).toContain("C2 output ≤ 512 token(s) (wire cap 16)");
     await h.port.handle("measure cancel", h.ctx);
@@ -443,6 +449,112 @@ describe("measure command admission and lifecycle", () => {
     await h.port.handle("measure cancel", h.ctx);
     await flush();
     expect(h.claim.state).toBe("free");
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+  it("completed footer clears when the final physical IO settles (no polling timer)", async () => {
+    const physical = deferred<void>();
+    const normal = transportFixture();
+    let calls = 0;
+    const transport = vi.fn<SendPipelinePing>(async (input) => {
+      const result = await normal(input);
+      return ++calls === 13 ? { ...result, settled: physical.promise } : result;
+    });
+    const h = setup({ transport });
+    const start = h.clock.now();
+    await h.port.handle("measure --yes", h.ctx);
+    await flush();
+    for (const offset of [30000, 180000, 360000, 660000, 1260000, 1860000, 3690000]) {
+      h.clock.advance(start + offset - h.clock.now());
+      await flush();
+    }
+    expect(h.text()).toContain("ttl-measure complete");
+    expect(h.claim.state).toBe("draining");
+    expect(vi.mocked(h.ctx.ui.setStatus).mock.calls.at(-1)).toEqual(["cache-ttl-measure", "ttl-measure io-pending"]);
+    physical.resolve();
+    await flush();
+    expect(h.claim.state).toBe("free");
+    expect(vi.mocked(h.ctx.ui.setStatus).mock.calls.at(-1)).toEqual(["cache-ttl-measure", undefined]);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+  it("a new run's initial footer never reuses the previous run's save time", async () => {
+    const h = setup();
+    await h.port.handle("measure --yes", h.ctx);
+    await flush();
+    expect(h.store.lastSavedAt).toBeDefined();
+    await h.port.handle("measure cancel", h.ctx);
+    await flush();
+    h.clock.advance(600000);
+    vi.mocked(h.ctx.ui.setStatus).mockClear();
+    await h.port.handle("measure --yes", h.ctx);
+    await flush();
+    const initial = vi.mocked(h.ctx.ui.setStatus).mock.calls.find(([, text]) => text?.includes("running 0/6"));
+    expect(initial?.[1]).toContain("not saved yet");
+    expect(vi.mocked(h.ctx.ui.setStatus).mock.calls.some(([, text]) => text?.includes("saved 10m ago"))).toBe(false);
+    await h.port.handle("measure cancel", h.ctx);
+    await flush();
+  });
+  it("a stale-generation IO-settle callback cannot clear a newer run's footer", async () => {
+    const start = measurementRunner.startMeasurement;
+    const callbacks: Array<(() => void) | undefined> = [];
+    const spy = vi.spyOn(measurementRunner, "startMeasurement").mockImplementation((deps) => {
+      callbacks.push(deps.onPhysicalSettled);
+      return start(deps);
+    });
+    const h = setup();
+    try {
+      await h.port.handle("measure --yes", h.ctx);
+      await flush();
+      const oldGeneration = h.claim.generation,
+        stale = callbacks[0]!;
+      expect(stale).toBeTypeOf("function");
+      await h.port.handle("measure cancel", h.ctx);
+      await flush();
+      await h.port.handle("measure --yes", h.ctx);
+      await flush();
+      expect(h.claim.generation).toBeGreaterThan(oldGeneration);
+      expect(h.claim.state).toBe("running");
+      const runningFooter = vi.mocked(h.ctx.ui.setStatus).mock.calls.at(-1);
+      expect(runningFooter?.[1]).toContain("ttl-measure running");
+      const runningWrites = vi.mocked(h.ctx.ui.setStatus).mock.calls.length;
+      stale();
+      await flush();
+      expect(h.ctx.ui.setStatus).toHaveBeenCalledTimes(runningWrites);
+      expect(vi.mocked(h.ctx.ui.setStatus).mock.calls.at(-1)).toEqual(runningFooter);
+      // Even when the newer claim becomes free (same session/epoch), the old generation
+      // must not write the status key again. This specifically pins the generation fence.
+      await h.port.handle("measure cancel", h.ctx);
+      await flush();
+      const terminalWrites = vi.mocked(h.ctx.ui.setStatus).mock.calls.length;
+      expect(h.claim.state).toBe("free");
+      stale();
+      await flush();
+      expect(h.ctx.ui.setStatus).toHaveBeenCalledTimes(terminalWrites);
+    } finally {
+      await h.port.handle("measure cancel", h.ctx);
+      spy.mockRestore();
+    }
+  });
+  it("shutdown mid-IO keeps the footer io-pending until the physical ledger settles", async () => {
+    const physical = deferred<void>(),
+      normal = transportFixture();
+    const h = setup({ transport: async (input) => ({ ...(await normal(input)), settled: physical.promise }) });
+    await h.port.handle("measure --yes", h.ctx);
+    await flush();
+    expect(h.claim.physicalPending).toBe(1);
+    h.fire("session_shutdown", { reason: "reload" });
+    await flush();
+    expect(h.claim.state).toBe("draining");
+    expect(vi.mocked(h.ctx.ui.setStatus).mock.calls.at(-1)).toEqual(["cache-ttl-measure", "ttl-measure io-pending"]);
+    h.clock.advance(600000);
+    await flush();
+    expect(h.claim.state).toBe("draining");
+    expect(vi.mocked(h.ctx.ui.setStatus).mock.calls.at(-1)?.[1]).toContain("io-pending");
+    const notices = vi.mocked(h.ctx.ui.notify).mock.calls.length;
+    physical.resolve();
+    await flush();
+    expect(h.claim.state).toBe("free");
+    expect(vi.mocked(h.ctx.ui.setStatus).mock.calls.at(-1)).toEqual(["cache-ttl-measure", undefined]);
+    expect(h.ctx.ui.notify).toHaveBeenCalledTimes(notices);
     expect(h.clock.pendingTimers).toBe(0);
   });
   it("stalled physical IO survives shutdown/re-activation as busy(io-pending), without old UI callbacks", async () => {

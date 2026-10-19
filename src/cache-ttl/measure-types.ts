@@ -253,7 +253,7 @@ export interface PayloadExpectation {
    * absent/empty ⇒ only the built-in protected set applies. A hit refuses with the closest existing code.
    */
   forbiddenKeys?: readonly string[];
-  /** Measurement requested minimal Responses reasoning; require this exact mapped stock effort on the wire. */
+  /** Measurement requested low Responses reasoning; require this exact mapped stock effort on the wire. */
   reasoningEffort?: string;
 }
 
@@ -583,6 +583,8 @@ export interface MeasureRunRecord {
   statusReason?: MeasureStatusReason;
   /** Actual condition/value that stopped the run; absent in older persisted records. */
   boundExceeded?: MeasureBoundExceeded;
+  /** Redacted provider error excerpt; never headers or a raw response body. */
+  httpError?: { status: number; message: string };
   startedAt: Millis;
   finishedAt?: Millis;
   load: { prefixes: number; ownTokens: number };
