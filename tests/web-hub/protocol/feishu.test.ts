@@ -421,6 +421,14 @@ describe("frozen limits (plan §2.3/§2.4/§3/§5.8/§R2-f)", () => {
       debounceBufferChats: 64,
       askDrafts: 32,
       askDraftTtlMs: 1_800_000,
+      // session-card (`/list` switch card, session-card-plan §1)
+      listCardMaxButtons: 8,
+      listCardMaxRows: 40,
+      listButtonLabelMax: 36,
+      listCardsOpenGlobal: 16,
+      listCardsOpenPerOperator: 4,
+      noncesReservedForOthers: 128,
+      listCardPatchIoMax: 8,
     });
     expect(FEISHU_RECEIVED_BODY_MAX_BYTES).toBe(16_384);
   });
