@@ -470,6 +470,7 @@ describe("r_FFWC8SBT — main-session real usage forwarding", () => {
       true,
       { provider: "anthropic", modelId: "claude-x" },
       55_017,
+      true,
     );
   });
   it.each(["message_end", "turn_end"])("%s does not invent full input from partial usage", (event) => {
@@ -492,6 +493,33 @@ describe("r_FFWC8SBT — main-session real usage forwarding", () => {
       true,
       { provider: "anthropic", modelId: "claude-x" },
       undefined,
+      true,
     );
   });
+  it.each(["message_end", "turn_end"])(
+    "%s forwards cacheUsage=false when the response reports no cache read/write",
+    (event) => {
+      const { hooks, ctx, port } = setupWithPort();
+      hooks.get(event)!(
+        {
+          message: {
+            role: "assistant",
+            provider: "anthropic",
+            model: "claude-x",
+            stopReason: "stop",
+            usage: { input: 100, output: 5, cacheRead: 0, cacheWrite: 0 },
+          },
+        },
+        ctx,
+      );
+      expect(port.noteRequestSettled).toHaveBeenCalledWith(
+        "s1",
+        "inst-1",
+        true,
+        { provider: "anthropic", modelId: "claude-x" },
+        100,
+        false,
+      );
+    },
+  );
 });

@@ -231,7 +231,7 @@ export interface SessionTotals {
   /** Transient-only breaker counters; the real-request recovery path clears these. */
   transientConsecutiveUnproven: number;
   transientUnprovenTotal: number;
-  /** Non-transient breaker counters; these remain session-permanent. */
+  /** Non-transient breaker counters; now driven only by legacy snapshots (http and no-usage are line-level; proven-write is `provenWrites`). */
   nonTransientConsecutiveUnproven: number;
   nonTransientUnprovenTotal: number;
   /**
@@ -273,6 +273,15 @@ export interface SessionTotals {
    * Old snapshots lack it and read back as `{}`.
    */
   lineStates: Readonly<Record<string, LineState>>;
+  /**
+   * Line-level `no-usage` breaker (2026-10-20 ruling, breaker-recovery-plan.md "no-usage per-line, no
+   * cooldown"): a 200 ping response without cache usage trips the SAME line key after the usual
+   * per-line thresholds. Kept apart from `lineStates` so an HTTP breaker (cooldown/backoff) and a
+   * no-usage breaker on one line never share counters. Never feeds `nonTransient*` / `disabled`.
+   * Cleared immediately (no cooldown) by a same-line real success that reports cache usage.
+   * Old snapshots lack it and read back as `{}` (a legacy `disabled{no-usage}` migrates into the wildcard).
+   */
+  noUsageStates: Readonly<Record<string, LineState>>;
 }
 
 /** Reserved key: a legacy / unresolvable-line http breaker; any successful real request resets it, no cooldown. */
@@ -338,9 +347,16 @@ export function isLineOpen(session: SessionTotals, key: string): boolean {
   return session.lineStates[key]?.open === true || session.lineStates[LINE_KEY_WILDCARD]?.open === true;
 }
 
+/** Is the line's (or the wildcard's) no-usage breaker open? */
+export function isNoUsageOpen(session: SessionTotals, key: string): boolean {
+  return session.noUsageStates[key]?.open === true || session.noUsageStates[LINE_KEY_WILDCARD]?.open === true;
+}
+
+/** Open breakers of both kinds (http lines + no-usage lines). */
 export function countOpenLines(session: SessionTotals): number {
   let n = 0;
   for (const rec of Object.values(session.lineStates)) if (rec.open) n += 1;
+  for (const rec of Object.values(session.noUsageStates)) if (rec.open) n += 1;
   return n;
 }
 
@@ -374,6 +390,7 @@ export function createInitialSessionTotals(): SessionTotals {
     discardedWindows: 0,
     discardedPings: 0,
     lineStates: {},
+    noUsageStates: {},
   };
 }
 
@@ -506,6 +523,7 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
         }
       }
       if ("lineStates" in snapshot) next.lineStates = sanitizeLineStates(snapshot.lineStates);
+      if ("noUsageStates" in snapshot) next.noUsageStates = sanitizeLineStates(snapshot.noUsageStates);
       lastLacksLineStates = !("lineStates" in snapshot);
       if ("lastUnproven" in snapshot) {
         const last = record(snapshot.lastUnproven);
@@ -546,6 +564,29 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
         nonTransientConsecutiveUnproven: 0,
         nonTransientUnprovenTotal: 0,
         lineStates: { ...restored.lineStates, [LINE_KEY_WILDCARD]: rec },
+      };
+    }
+    // 2026-10-20 migration (idempotent): a legacy permanent session-level `disabled{no-usage}` becomes a
+    // wildcard no-usage line breaker that the next usage-reporting real success clears. The new code
+    // never writes `disabled.reason === "no-usage"`, so every such record is legacy by construction.
+    if (restored !== undefined && restored.disabled?.reason === "no-usage") {
+      const d = restored.disabled;
+      const rec: LineState = {
+        label: "unknown line (legacy)",
+        consecutive: 0,
+        total: 0,
+        open: true,
+        openedAt: d.at,
+        trips: 1,
+        resetEligibleAt: d.at,
+        updatedAt: d.at,
+      };
+      restored = {
+        ...restored,
+        disabled: undefined,
+        nonTransientConsecutiveUnproven: 0,
+        nonTransientUnprovenTotal: 0,
+        noUsageStates: { ...restored.noUsageStates, [LINE_KEY_WILDCARD]: rec },
       };
     }
     // #29 r2 migration (idempotent): a legacy `disabled{transient:true}` pause is lifted on read-back.
@@ -595,6 +636,7 @@ export type TickSkipReason =
   | "disabled"
   | "session-disabled"
   | "line-disabled"
+  | "line-no-usage"
   | "no-capture"
   | "mode"
   | "not-anthropic"
@@ -774,6 +816,12 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
     const line = lineKeyOf(capture.fingerprint);
     if (line !== undefined ? isLineOpen(session, line.key) : session.lineStates[LINE_KEY_WILDCARD]?.open === true) {
       return skip("line-disabled", true);
+    }
+    // #3.6 — line-level no-usage breaker (same line key; lifts on a usage-reporting same-line real success).
+    if (
+      line !== undefined ? isNoUsageOpen(session, line.key) : session.noUsageStates[LINE_KEY_WILDCARD]?.open === true
+    ) {
+      return skip("line-no-usage", true);
     }
   }
   // #4 — G2. child-ka-core: `allowHeadless` additionally allows "print" (a child
@@ -1190,7 +1238,7 @@ function isPermanentThresholdMet(session: SessionTotals): boolean {
 export function onSuccessfulRealRequest(
   session: SessionTotals,
   successful: boolean,
-  options?: { line: LineRef | undefined; now: Millis },
+  options?: { line: LineRef | undefined; now: Millis; cacheUsage?: boolean },
 ): SessionTotals {
   if (!successful) return session;
   let next = session;
@@ -1225,8 +1273,32 @@ export function onSuccessfulRealRequest(
       };
     }
     if (changed !== undefined) next = { ...next, lineStates: changed };
+    // no-usage breaker: NO cooldown, but only a response that itself reported cache usage
+    // (cacheRead > 0 or cacheWrite > 0) proves the line reports usage again.
+    if (options.cacheUsage === true) {
+      const nu = next.noUsageStates;
+      let nuChanged: Record<string, LineState> | undefined;
+      if (nu[LINE_KEY_WILDCARD]?.open === true) {
+        nuChanged = { ...nu };
+        delete nuChanged[LINE_KEY_WILDCARD];
+      }
+      const nuKey = options.line?.key;
+      if (nuKey !== undefined && nu[nuKey]?.open === true) {
+        nuChanged = nuChanged ?? { ...nu };
+        delete nuChanged[nuKey];
+      }
+      if (nuChanged !== undefined) next = { ...next, noUsageStates: nuChanged };
+    }
   }
   return next;
+}
+
+/** Did this successful real response itself report cache usage (cache read > 0 or cache write > 0)? */
+export function realRequestReportedCacheUsage(message: unknown): boolean {
+  if (!isSuccessfulRealRequest(message)) return false;
+  const usage = (message as { usage: Record<string, unknown> }).usage;
+  const positive = (n: unknown): boolean => typeof n === "number" && Number.isFinite(n) && n > 0;
+  return positive(usage.cacheRead) || positive(usage.cacheWrite);
 }
 
 export interface BreakerResetSummary {
@@ -1249,6 +1321,7 @@ export function resetAllBreakers(session: SessionTotals): { session: SessionTota
       unprovenTotal: 0,
       provenWrites: 0,
       lineStates: {},
+      noUsageStates: {},
     },
     summary: {
       sessionDisabled: session.disabled?.reason,
@@ -1315,6 +1388,12 @@ export function onProvenHit(
     delete rest[hitKey];
     newSession.lineStates = rest;
   }
+  const hitNu = session.noUsageStates[hitKey];
+  if (hitNu !== undefined && !hitNu.open) {
+    const rest = { ...session.noUsageStates };
+    delete rest[hitKey];
+    newSession.noUsageStates = rest;
+  }
   return { applied: true, window: newWindow, session: newSession };
 }
 
@@ -1342,6 +1421,37 @@ export function onUnproven(
     lastStopReason: kind,
   };
   const transient = isTransientUnproven(kind, httpStatus);
+  if (kind === "no-usage") {
+    // Line-level path (2026-10-20 ruling): same per-line thresholds as an HTTP rejection, but no
+    // backoff and never session-level — touches neither session.nonTransient* nor session.disabled.
+    const key = lineRef?.key ?? LINE_KEY_WILDCARD;
+    const label = lineRef?.label ?? "unknown line";
+    const rec = session.noUsageStates[key];
+    let noUsageStates: Record<string, LineState>;
+    if (rec?.open === true) {
+      noUsageStates = { ...session.noUsageStates, [key]: { ...rec, updatedAt: now } };
+    } else {
+      const base: LineState = rec ?? { label, consecutive: 0, total: 0, open: false, trips: 0, updatedAt: now };
+      const consecutive = base.consecutive + 1;
+      const total = base.total + 1;
+      let next: LineState = { ...base, label, consecutive, total, updatedAt: now };
+      if (consecutive >= UNPROVEN_STREAK_LIMIT || total >= UNPROVEN_TOTAL_LIMIT) {
+        next = { ...next, open: true, openedAt: now, trips: 1, resetEligibleAt: now };
+      }
+      noUsageStates = capLineStates({ ...session.noUsageStates, [key]: next });
+    }
+    return {
+      applied: true,
+      window: newWindow,
+      session: {
+        ...session,
+        unprovenTotal: session.unprovenTotal + 1,
+        consecutiveUnproven: session.consecutiveUnproven + 1,
+        lastUnproven: { kind, at: now },
+        noUsageStates,
+      },
+    };
+  }
   if (kind === "http" && !transient) {
     // Line-level path: a rejected (non-transient http) ping is zero-billing; never touches
     // session.nonTransient* / session.disabled.
@@ -1428,16 +1538,22 @@ export function onUnproven(
         : { reason: kind, at: now, transient: true as const, ...statusExtra }
       : session.disabled;
   let lineStatesAfter = session.lineStates;
+  let noUsageAfter = session.noUsageStates;
   if (transient) {
     const tk = lineRef?.key ?? LINE_KEY_WILDCARD;
     const trec = session.lineStates[tk];
     if (trec !== undefined && !trec.open && trec.consecutive !== 0) {
       lineStatesAfter = { ...session.lineStates, [tk]: { ...trec, consecutive: 0 } };
     }
+    const nrec = session.noUsageStates[tk];
+    if (nrec !== undefined && !nrec.open && nrec.consecutive !== 0) {
+      noUsageAfter = { ...session.noUsageStates, [tk]: { ...nrec, consecutive: 0 } };
+    }
   }
   const newSession: SessionTotals = {
     ...session,
     lineStates: lineStatesAfter,
+    noUsageStates: noUsageAfter,
     unprovenTotal,
     consecutiveUnproven,
     provenWrites,
@@ -1794,6 +1910,11 @@ export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegme
       if (rec.trips >= 2) parts.tail = `·t${rec.trips}`;
       return parts;
     }
+    // Current line's no-usage breaker (no cooldown ⇒ no retry/tail suffix; lifts on a real response with cache usage).
+    const nu = report.currentLineKey !== undefined ? session.noUsageStates[report.currentLineKey] : undefined;
+    if (nu?.open === true || session.noUsageStates[LINE_KEY_WILDCARD]?.open === true) {
+      return { text: "ping off:no-usage", state: "line-off" };
+    }
   }
   if (window.capture !== undefined && window.pings > 0 && window.pings >= config.maxPings)
     return { text: `ping ${window.pings}/${config.maxPings} capped`, state: "capped" };
@@ -1946,6 +2067,12 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
         : "";
     lines.push(
       `line off: ${rec.label} · http${rec.status !== undefined ? ` ${rec.status}` : ""} · trips ${rec.trips}${eligible}`,
+    );
+  }
+  for (const rec of Object.values(session.noUsageStates)) {
+    if (!rec.open) continue;
+    lines.push(
+      `line off: ${rec.label} · no-usage · per-line, lifts on the next real response that reports cache usage (no cooldown)`,
     );
   }
   const armedHistory = Object.values(session.lineStates).filter(

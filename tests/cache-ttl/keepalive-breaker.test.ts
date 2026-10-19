@@ -99,11 +99,7 @@ describe("line breaker state machine", () => {
     expect(s.nonTransientUnprovenTotal).toBe(0);
   });
 
-  it("no-usage / proven-write keep the permanent session path", () => {
-    let s = createInitialSessionTotals();
-    s = onUnproven(win(), s, 1, "no-usage", 1 as never).session;
-    s = onUnproven(win(), s, 1, "no-usage", 2 as never).session;
-    expect(s.disabled?.reason).toBe("no-usage");
+  it("proven-write keeps the permanent session path (no-usage is line-level: see the no-usage describe)", () => {
     const w = onUnproven(win(), createInitialSessionTotals(), 1, "proven-write", 1 as never).session;
     expect(w.disabled?.reason).toBe("proven-write");
     expect(Object.keys(w.lineStates)).toEqual([]);
@@ -386,9 +382,9 @@ describe("persistence / migration", () => {
     const lifted = readBackKeepaliveSessionState([entry({ disabled: { reason: "http", at: 1, transient: true } })])!;
     expect(lifted.disabled).toBeUndefined();
     expect(lifted.lineStates).toEqual({});
-    expect(readBackKeepaliveSessionState([entry({ disabled: { reason: "no-usage", at: 1 } })])!.disabled?.reason).toBe(
-      "no-usage",
-    );
+    expect(
+      readBackKeepaliveSessionState([entry({ disabled: { reason: "proven-write", at: 1 } })])!.disabled?.reason,
+    ).toBe("proven-write");
     const migrated = readBackKeepaliveSessionState([entry({ disabled: { reason: "http", at: 3 } })])!;
     const again = readBackKeepaliveSessionState([
       entry({ ...migrated, disabled: migrated.disabled ?? null, lastUnproven: null }),

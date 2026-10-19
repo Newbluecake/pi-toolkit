@@ -14,6 +14,7 @@ import {
   renderKeepaliveReportLines,
   isSuccessfulRealRequest,
   realRequestInputTokens,
+  realRequestReportedCacheUsage,
   cacheReadCostUsd,
   cacheWriteCostUsd,
   type CacheDisplayMode,
@@ -482,6 +483,7 @@ function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
         isSuccessfulRealRequest(event.message),
         settledRouteOf(event.message),
         realRequestInputTokens(event.message),
+        realRequestReportedCacheUsage(event.message),
       );
     // O1/O3 evidence observation (mode-independent, user ruling 2026-10-12 — see
     // `observeUsageIntoEvidence`'s doc comment): fold this message's usage into the provider-
@@ -509,6 +511,7 @@ function wireCacheEvents(pi: ExtensionAPI, deps: CacheTtlDeps): void {
         isSuccessfulRealRequest(event.message),
         settledRouteOf(event.message),
         realRequestInputTokens(event.message),
+        realRequestReportedCacheUsage(event.message),
       );
   });
   pi.on("agent_end", (_event, ctx) => {

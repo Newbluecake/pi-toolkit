@@ -210,6 +210,7 @@ export interface KeepalivePort {
     successful?: boolean,
     settledRoute?: { provider: string; modelId: string },
     inputTokens?: number,
+    cacheUsage?: boolean,
   ): void;
   invalidate(reason: InvalidateReason, sessionId?: string, instance?: string): void;
   report(): KeepaliveReport;
@@ -1355,6 +1356,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     successful = false,
     settledRoute?: { provider: string; modelId: string },
     inputTokens?: number,
+    cacheUsage?: boolean,
   ): void {
     if (!this.accept(sessionId, instance)) return;
     const capture = this.window.capture;
@@ -1377,7 +1379,11 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     this.window = onRequestSettled(this.window);
     const line = successful && settledRoute !== undefined ? this.resolveSettledLine(settledRoute) : undefined;
     const nextSession = this.deps.recoverTransientFailures
-      ? onSuccessfulRealRequest(this.session, successful, { line, now: this.clock.now() })
+      ? onSuccessfulRealRequest(this.session, successful, {
+          line,
+          now: this.clock.now(),
+          cacheUsage: cacheUsage === true,
+        })
       : this.session;
     if (nextSession !== this.session) {
       const lineReset = countOpenLines(nextSession) < countOpenLines(this.session);

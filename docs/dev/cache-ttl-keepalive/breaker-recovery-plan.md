@@ -549,3 +549,23 @@ line armed: 2 closed record(s) with history                                     
 | #8 Nit：`sameStatus` 伪码歧义                           | **采纳**：`rec` 为变更前快照，先比后写，禁止读 `next.status`；T-S10 钉住                                            | §3.1 `onUnproven` 步骤 1/3/4；§11 T-S10                                                                                                     |
 | #9 Nit：evidence 回执 scope                             | **采纳**：回执写 `evidence(no-cache-value, current line only)` 并说明 `/cache-ttl status` 同样标注                  | §8 文案                                                                                                                                     |
 | #10 Nit：T-C 区间过宽                                   | **采纳**：收窄为仅「非瞬态 4xx ⇒ `session.disabled`」用例，明列不要动的用例；child 测试保持条件式                   | §11 T-C                                                                                                                                     |
+
+## 用户拍板 2026-10-20：no-usage 线路化、无冷却（推翻 D2）
+
+用户裁决：`no-usage`（200 但无 usage / 双 0）熔断必须在 (a) 会话切换模型/线路、(b) 同线路真实请求成功 时恢复，**且无任何冷却**。
+推翻 D2「no-usage 保持会话级永久」。实现口径：
+
+- **线路级**：`SessionTotals.noUsageStates`（`Record<lineKey, LineState>`，与 HTTP 的 `lineStates` 分表，避免同线路两类计数/退避互相污染）。
+  线路键沿用 `lineKeyOf`（provider+baseUrl+ctxModelId；不可得 ⇒ 通配 `"*"`）；阈值沿用 `UNPROVEN_STREAK_LIMIT`（连续）/
+  `UNPROVEN_TOTAL_LIMIT`（累计）；瞬态失败打断 `consecutive`，该线路 proven-hit 删除未 open 记录。熔断打开时 `trips=1`、
+  `resetEligibleAt=now`（无退避）。**不再**写 `session.disabled` / `nonTransient*`，故别的线路照常 ping；`evaluateTick` 新增终局 skip `line-no-usage`。
+- **恢复（无冷却）**：`onSuccessfulRealRequest(..., { line, now, cacheUsage })`——仅当该次成功真实响应本身报告了缓存用量
+  （`cacheRead>0 || cacheWrite>0`，`realRequestReportedCacheUsage`，由 `cache-ttl.ts` 的 `message_end`/`turn_end` 经
+  `noteRequestSettled` 第 6 参传入）才立即删除同线路（或通配）no-usage 记录；成功但无用量 ⇒ 保持熔断（返回同一引用）。
+  切到别的线路 ⇒ 该线路无记录 ⇒ 恢复 ping；切回 ⇒ 仍熔断，直到那里一次带用量的真实成功。恢复后服务 `syncExactTimer()+arm()` 重新武装当前窗口（与 HTTP 线路复位同路径，审计 `line-reset`）。
+- **不变**：`proven-write` 仍是永久会话级禁用（`provenWrites`/`disabled`）；evidence `no-cache-value` 熔断不变；HTTP 线路熔断的冷却/退避不变。
+- **迁移**：旧快照 `disabled{reason:"no-usage"}`（永久）读回时迁移为通配 no-usage 熔断（`trips=1`，清零 `nonTransient*`），下一次带用量的真实成功即解除；迁移幂等（新代码永不再写 `disabled.reason==="no-usage"`）。`/cache-ttl keepalive reset` 同时清空 `noUsageStates`（计入 summary.openLines）。
+- **展示**：当前线路（或通配）no-usage 打开 ⇒ 状态栏 `ping off:no-usage`（`PingSegmentState` 仍为 `line-off`，无 `·retry`/`·tN`）；
+  `/cache-ttl status` 增行 `line off: <label> · no-usage · per-line, lifts on the next real response that reports cache usage (no cooldown)`。
+- **已披露残余**：(1) no-usage 的 200 响应可能已计费（与 4xx 不同），线路化后每条线路最多再花 2–3 个 ping 才熔断，且每次带用量的真实成功后会重新计数——这是用户明确接受的取舍；
+  (2) web-hub 的 `lineRows` 线路列表暂不展示 no-usage 行（线路 wire 无 reason 字段，append-only 契约未改），仅通过状态段 `ping off:no-usage` 可见。

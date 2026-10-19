@@ -204,8 +204,13 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   408/429/500/502/503/504/529; r2 2026-10-14). Never-processed transients (network / retryable HTTP) no longer
   pause the session — the next window retries afresh (legacy `disabled{transient:true}` snapshots are lifted on
   read-back); only possibly-billed transients (accepted-then-lost / malformed) still use the streak/total
-  limits, cleared by a successful real response. Proven writes and
-  non-transient breaker trips (`no-usage`) remain permanent; `/reload` restores the branch's breaker state.
+  limits, cleared by a successful real response. Proven writes remain a permanent session-level disable;
+  `/reload` restores the branch's breaker state. `no-usage` (200 without cache usage) is line-level too
+  (`session.noUsageStates`, same line key and per-line streak/total thresholds, never `session.disabled`; user
+  ruling 2026-10-20): it lifts with NO cooldown on a same-line real success whose response reported cache usage
+  (read>0 or write>0 — a success without usage leaves it tripped), another line keeps pinging, a model switch
+  resumes, switching back stays tripped until such a success; HUD `ping off:no-usage`; a legacy persisted
+  `disabled{no-usage}` migrates to a wildcard no-usage breaker.
   Non-transient HTTP rejections (4xx, zero-billing) are line-level (`session.lineStates`, key =
   provider+baseUrl+model): a same-line successful real request resets them (backoff 30m×2^(n-2) on repeat,
   cap 24h; legacy session-level http disables migrate to a wildcard breaker), and `/cache-ttl keepalive reset`

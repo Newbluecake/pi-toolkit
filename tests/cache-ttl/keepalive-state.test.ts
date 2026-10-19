@@ -688,17 +688,17 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     expect(result.session.disabled).toEqual({ reason: "proven-write", at: 100 });
   });
 
-  it(`${UNPROVEN_STREAK_LIMIT} consecutive unproven results disable the session`, () => {
-    let window = armedWindow({ windowEpoch: 1 });
+  it(`${UNPROVEN_STREAK_LIMIT} consecutive no-usage results open the LINE breaker, never session.disabled (2026-10-20)`, () => {
     let session = baseSession();
     for (let i = 0; i < UNPROVEN_STREAK_LIMIT; i++) {
-      const result = onUnproven(window, session, 1, "no-usage", 100 + i);
-      session = result.session;
-      window = result.window;
-      if (i < UNPROVEN_STREAK_LIMIT - 1) expect(session.disabled).toBeUndefined();
+      // fresh armed window each time: the line key comes from the window's capture (a stopped window has none).
+      session = onUnproven(armedWindow({ windowEpoch: 1 }), session, 1, "no-usage", 100 + i).session;
+      expect(session.disabled).toBeUndefined();
+      expect(Object.values(session.noUsageStates).some((r) => r.open)).toBe(i === UNPROVEN_STREAK_LIMIT - 1);
     }
     expect(session.consecutiveUnproven).toBe(UNPROVEN_STREAK_LIMIT);
-    expect(session.disabled).toEqual({ reason: "no-usage", at: 100 + UNPROVEN_STREAK_LIMIT - 1 });
+    expect(session.nonTransientConsecutiveUnproven).toBe(0);
+    expect(session.nonTransientUnprovenTotal).toBe(0);
   });
 
   it(`${UNPROVEN_TOTAL_LIMIT} cumulative (non-consecutive) unproven results disable the session`, () => {
@@ -871,8 +871,8 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     // #29 r2 migration: a legacy transient pause is lifted on read-back (and idempotently so).
     expect(transient?.disabled).toBeUndefined();
     expect(transient?.transientUnprovenTotal).toBe(0);
-    const permanent = readBackKeepaliveSessionState([snapshot({ reason: "no-usage", at: 11 })]);
-    expect(permanent?.disabled).toEqual({ reason: "no-usage", at: 11 });
+    const permanent = readBackKeepaliveSessionState([snapshot({ reason: "proven-write", at: 11 })]);
+    expect(permanent?.disabled).toEqual({ reason: "proven-write", at: 11 });
   });
 
   it("preserves a valid httpStatus through snapshot read-back and drops invalid ones", () => {

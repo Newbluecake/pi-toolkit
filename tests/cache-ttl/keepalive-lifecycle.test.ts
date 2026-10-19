@@ -304,7 +304,7 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
     expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1); // never pings again
   });
 
-  it("disables after two consecutive unproven results, closed by an intervening real request", async () => {
+  it("opens the no-usage LINE breaker (not session.disabled) after two consecutive unproven results, closed by an intervening real request", async () => {
     const fetchImpl = noUsageFetch();
     const { service, clock } = harness({ fetchImpl });
     service.noteRequest(capture({}, service.instanceId));
@@ -319,7 +319,8 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
     clock.advance(240_000);
     await flush();
     expect(service.report().session.consecutiveUnproven).toBe(2);
-    expect(service.report().session.disabled?.reason).toBe("no-usage");
+    expect(service.report().session.disabled).toBeUndefined();
+    expect(Object.values(service.report().session.noUsageStates).filter((r) => r.open)).toHaveLength(1);
   });
 
   it("recovers a transient disable only after a successful real response, then pings the next idle window", async () => {

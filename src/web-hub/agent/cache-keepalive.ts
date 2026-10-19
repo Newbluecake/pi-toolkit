@@ -88,6 +88,7 @@ export function projectCacheKeepalive(
     report.enabled &&
     snapshot.segments.length === 0 &&
     Object.keys(s.lineStates).length === 0 &&
+    Object.keys(s.noUsageStates).length === 0 &&
     s.disabled === undefined &&
     s.lastUnproven === undefined &&
     report.lastPingDiagnostics === undefined &&
