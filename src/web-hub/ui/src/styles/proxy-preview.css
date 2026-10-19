@@ -1,0 +1,278 @@
+/*
+ * proxy-preview.css — link-preview plan §4.3 (package LP3): the in-page proxy preview dialog.
+ * Layout: approved variant A of pwh-preview/proxy-preview.html — a single-row header
+ * (icon + typed target + muted 「经由 <proxy origin>」 + icon buttons), a thin muted standing
+ * hint bar under it while `ready`, and the iframe body. Tokens/primitives only; the overlay/
+ * panel/focus styling mirrors preview.css (`PreviewHost.vue`). Rendered ONLY with the hub's
+ * `proxy.frame.v1` cap — without it the component never mounts (App.vue `v-if` on the phase).
+ *
+ * Stacking: z-index 60, same contract as `.preview-overlay` (drawer scrim 30 · popovers 40 ·
+ * back-to-top 50 — the dialog is modal above all; ProxyDialog stays at 70 and never stacks
+ * with this dialog in practice).
+ */
+
+.proxy-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: var(--c-scrim);
+}
+
+/* §4.3 sizing: min(1280px, 96vw) × min(90vh, 1000px). */
+.proxy-preview-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(1280px, 96vw);
+  height: min(90vh, 1000px);
+  overflow: hidden;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3);
+  outline: none;
+}
+
+/* ---------------------------------------------------------------- header (variant A) */
+.proxy-preview-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 48px;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  flex: none;
+}
+
+.proxy-preview-header-icon {
+  flex: none;
+  color: var(--c-text-3);
+}
+
+/* One wrapper for both text runs: a row on desktop (target capped, origin takes the slack),
+ * a column on ≤767px (mockup §4 — a plain row would push ✕ off-screen). */
+.proxy-preview-headtext {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.proxy-preview-target {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.proxy-preview-origin {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.proxy-preview-via {
+  font-family: var(--font-sans);
+}
+
+.proxy-preview-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* 新标签打开 ↗ — the stock arrow-up icon turned 45° (IconSprite has no external-link glyph). */
+.proxy-preview-open-tab .icon {
+  transform: rotate(45deg);
+}
+
+/* ------------------------------------------------------- tab-open fallback / error note */
+.proxy-preview-note {
+  flex: none;
+  margin: 0;
+  padding: 6px var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.proxy-preview-note a {
+  color: var(--c-primary);
+}
+
+/* ------------------------------------------------------- standing hint bar (ready only) */
+.proxy-preview-hint {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 6px var(--sp-3);
+  background: var(--c-sunken);
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.proxy-preview-hint .icon {
+  flex: none;
+  color: var(--c-info);
+}
+
+/* ---------------------------------------------------------------- body + frame */
+.proxy-preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.proxy-preview-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.proxy-preview-frame {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  background: var(--c-surface);
+}
+
+.proxy-preview-frame-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  background: var(--c-surface);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+.proxy-preview-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+}
+
+.proxy-preview-spinner {
+  font-size: 24px;
+  color: var(--c-primary);
+}
+
+/* ---------------------------------------------------------------- error state */
+.proxy-preview-error {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-4);
+  text-align: center;
+}
+
+.proxy-preview-error-icon {
+  font-size: 32px;
+  color: var(--c-danger);
+  margin-bottom: var(--sp-1);
+}
+
+.proxy-preview-error-title {
+  margin: 0;
+  color: var(--c-text);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+
+.proxy-preview-error-detail {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+  max-width: 56ch;
+}
+
+.proxy-preview-error-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+
+.proxy-preview-original {
+  color: var(--c-primary);
+  font-size: var(--fs-sm);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------- coarse pointers */
+@media (pointer: coarse) {
+  /* 44px header targets (Apple HIG / the mockup's phone frame rule). */
+  .proxy-preview-header .btn-icon {
+    width: 44px;
+    min-height: 44px;
+    font-size: 17px;
+  }
+}
+
+/* ---------------------------------------------------------------- mobile (≤767px) */
+@media (max-width: 767px) {
+  .proxy-preview-overlay {
+    padding: 0;
+  }
+
+  .proxy-preview-panel {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .proxy-preview-headtext {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1px;
+  }
+
+  .proxy-preview-target {
+    max-width: 100%;
+    font-size: var(--fs-xs);
+  }
+
+  .proxy-preview-origin {
+    font-size: var(--fs-2xs);
+  }
+}

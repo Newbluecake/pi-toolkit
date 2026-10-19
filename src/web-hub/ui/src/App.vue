@@ -14,7 +14,7 @@
   mis-parsed as an agent key.
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import "./styles/base.css";
 import "./styles/primitives.css";
 import "./styles/notices.css";
@@ -49,6 +49,7 @@ import TopBar from "./components/shell/TopBar.vue";
 import PreviewHost from "./components/preview/PreviewHost.vue";
 import { AVATAR_CTX } from "./components/transcript/avatarContext.js";
 import { PREVIEW_CTX } from "./components/preview/previewContext.js";
+import { PROXY_PREVIEW_CTX } from "./components/proxy/proxyPreviewContext.js";
 import { createAnnouncer } from "./composables/useAnnouncer.js";
 import { useAvatar } from "./composables/useAvatar.js";
 import { useHashRoute } from "./composables/useHashRoute.js";
@@ -59,6 +60,7 @@ import { useMedia } from "./composables/useMedia.js";
 import { useMotionPref } from "./composables/useMotionPref.js";
 import { usePasswordAuth } from "./composables/usePasswordAuth.js";
 import { usePreview } from "./composables/usePreview.js";
+import { useProxyPreview } from "./composables/useProxyPreview.js";
 import { useTheme } from "./composables/useTheme.js";
 import { createTokenTransport } from "./transport/token.js";
 import type { HubTransport, TransportHooks } from "./transport/types.js";
@@ -110,6 +112,7 @@ const announcer = createAnnouncer({
 let hub: ReturnType<typeof useHub> | undefined;
 let passwordAuth: ReturnType<typeof usePasswordAuth> | undefined;
 let hashRoute: ReturnType<typeof useHashRoute> | undefined;
+let proxyPreview: ReturnType<typeof useProxyPreview> | undefined;
 
 if (authMode !== "unknown") {
   hashRoute = useHashRoute(window);
@@ -196,7 +199,31 @@ if (authMode !== "unknown") {
     handle: preview,
     plaintext: authMode === "password" && window.location.protocol === "http:",
   });
+
+  // link-preview plan §4.3 (LP3): the App-level in-page proxy preview. `scope` is the FRAME
+  // scope (LP0's `proxy.frame.v1` cap on top of the X2 proxy scope) — without the cap `open()`
+  // is a no-op and PathText/MdInline keep the new-tab flow (§4.1 tiers stay byte-identical).
+  // The host is a lazy chunk, mounted only once a preview is actually requested (below).
+  proxyPreview = useProxyPreview({
+    proxy: hub.transport.proxy,
+    state: hub.state,
+    mode: authMode,
+  });
+  provide(PROXY_PREVIEW_CTX, { handle: proxyPreview });
 }
+
+/* LP3: mount the lazy dialog chunk only when a preview is actually open — a hub without
+ * `proxy.frame.v1` (or a session that never clicks a proxy link) never pays the download. A
+ * failed chunk load closes the dialog again (TopBar's ProxyDialog precedent). */
+const ProxyPreviewHost = defineAsyncComponent({
+  loader: () =>
+    import("./components/proxy/ProxyPreview.vue").catch((e: unknown) => {
+      proxyPreview?.close();
+      throw e;
+    }),
+  timeout: 8000,
+});
+const proxyPreviewActive = computed(() => proxyPreview !== undefined && proxyPreview.view.value.phase !== "closed");
 
 const route = hashRoute?.route;
 const conn = computed<ConnState>(() => hub?.state.value.conn ?? "connecting");
@@ -359,6 +386,7 @@ onUnmounted(() => {
          names a session whose uploads are available. -->
     <PageDropZone v-if="route" :route="route" />
     <PreviewHost />
+    <ProxyPreviewHost v-if="proxyPreviewActive" />
   </template>
   <p v-if="authMode !== 'unknown'" ref="announcerEl" class="sr-only" role="status" aria-live="polite"></p>
 </template>

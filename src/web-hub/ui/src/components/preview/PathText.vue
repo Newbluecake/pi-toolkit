@@ -23,9 +23,10 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import { findPathRefs, pathRefOfCode } from "@logic/preview.js";
-import { findProxyUrlRefs, isProxyableHref } from "@logic/proxy.js";
+import { findProxyUrlRefs, normalizeProxyHref } from "@logic/proxy.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useProxyOpen } from "../../composables/useProxyOpen.js";
+import { PROXY_PREVIEW_CTX } from "../proxy/proxyPreviewContext.js";
 import { PATH_REFERENCES_SUSPENDED, PREVIEW_CTX } from "./previewContext.js";
 import "../../styles/proxy.css";
 
@@ -47,6 +48,8 @@ const scope = computed(() => ctx?.handle.scope.value ?? null);
  * the DOM is identical). Independent of the preview scope; suppressed while streaming / noRefs. */
 const { t } = useI18n();
 const proxy = useProxyOpen();
+/** LP3: the App-level in-page preview (absent ⇒ the X2 new-tab flow everywhere below). */
+const proxyPreview = inject(PROXY_PREVIEW_CTX, null);
 const proxyActive = computed(() => proxy.scope.value !== null && props.noRefs !== true && suspended?.value !== true);
 const NOTE_MS = 8000;
 const note = ref<{ href: string; key: string | null; url: string | null } | null>(null);
@@ -60,7 +63,17 @@ function clearNote(): void {
 }
 
 /** MUST run synchronously inside the click handler: `proxy.open` calls `window.open` before awaiting. */
-function openProxy(href: string): void {
+function openProxy(href: string, ev?: MouseEvent): void {
+  // link-preview §4.1 (LP3, tier 3): with the frame cap a PLAIN click / Enter / Space opens
+  // the in-page dialog (no `window.open` on that path — popup blockers don't apply, so the
+  // handler no longer needs to be synchronous). Ctrl/Meta-click keeps the X2 new-tab flow
+  // (D8/ruling 4); no PROXY_PREVIEW_CTX at all ⇒ new-tab as well (§4.3).
+  const frame = proxyPreview?.handle ?? null;
+  if (frame !== null && frame.scope.value !== null && (ev === undefined || (!ev.ctrlKey && !ev.metaKey))) {
+    clearNote();
+    frame.open(href);
+    return;
+  }
   clearNote();
   void proxy.open(href).then(() => {
     const key = proxy.errorKey.value;
@@ -107,9 +120,13 @@ const proxySegments = computed<PSeg[] | null>(() => {
   }
   return found ? out : null;
 });
-/** Inline code that is exactly one proxyable URL (`` `http://127.0.0.1:3000` ``). */
+/** Inline code that is exactly one proxyable URL (`` `http://127.0.0.1:3000` ``). §4.2 (r2
+ * review #1): the value sent to the hub is the LP2-NORMALIZED href (`127.0.0.1:3000/ui` ⇒
+ * `http://127.0.0.1:3000/ui`, port-less `http://127.0.0.1/` ⇒ `http://127.0.0.1:80/`) — the
+ * same string every flow (dialog / new tab / legacy) POSTs as `{target}`; the template keeps
+ * displaying the raw text. */
 const codeProxyHref = computed(() =>
-  props.code === true && proxyActive.value && isProxyableHref(props.text) ? props.text : null,
+  props.code === true && proxyActive.value ? normalizeProxyHref(props.text) : null,
 );
 
 /** The §4.6 DOM-equivalence condition: any of these ⇒ render exactly like today. */
@@ -206,7 +223,7 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
     role="button"
     tabindex="0"
     :title="t('proxy.refTitle')"
-    @click="openProxy(codeProxyHref)"
+    @click="openProxy(codeProxyHref, $event)"
     @keydown="onProxyKeydown($event, codeProxyHref)"
     >{{ text }}</code
   >
@@ -231,7 +248,7 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
         role="button"
         tabindex="0"
         :title="t('proxy.refTitle')"
-        @click="openProxy(seg.href)"
+        @click="openProxy(seg.href, $event)"
         @keydown="onProxyKeydown($event, seg.href)"
         >{{ seg.text }}</span
       >
@@ -263,7 +280,11 @@ function onRefKeydown(ev: KeyboardEvent, path: string): void {
     </template>
   </template>
   <span v-for="n in noteList" :key="'proxy-note'" class="proxy-ref-note" role="status"
-    ><template v-if="n.key !== null">{{ t(n.key) }}</template
+    ><template v-if="n.key !== null"
+      >{{ t(n.key) }}
+      <!-- D9: a hub refusal always offers the original link as a native anchor (never an
+           automatic navigation). -->
+      <a :href="n.href" target="_blank" rel="noopener noreferrer">{{ t("proxy.preview.openOriginal") }} ↗</a></template
     ><template v-else-if="n.url !== null"
       >{{ t("proxy.blockedNote") }}
       <a :href="n.url" target="_blank" rel="noopener noreferrer">{{ t("proxy.blockedLink") }}</a></template

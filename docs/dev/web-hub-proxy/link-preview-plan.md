@@ -372,3 +372,11 @@ Hostname recognition (ruling 3; hostnames stay TopBar-dialog input only); rewrit
 r2 re-review (r_PPSQ0DDF): 7 closed, 1 partially, no Blocker. Closed by the main session (no third round): #6 — the
 `reply` binding in `listener.ts:81` is replaced by an adapter that passes `undefined` as `body` and the policy 5th (§2.2);
 the forwarder error-response assertions in §6 stay.
+
+## 12. Implementation deviations (LP3 verification, main-session accepted)
+
+- The dialog header shows the **normalized** target (what is actually opened, e.g. `http://127.0.0.1:80/`), not the raw typed
+  text; the full value is in the `title` tooltip.
+- Icons reuse the existing sprite (`arrow-up` rotated 45° for 「新标签打开」); dialog CSS ships in the main stylesheet
+  (`cssCodeSplit:false`), only the JS chunk is lazy; the proxy origin line appears only in `ready` (known only after `open`).
+- The standing hint does not mention the Esc-inside-frame limitation (approved copy kept).

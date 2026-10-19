@@ -74,6 +74,19 @@ const proxy = {
   network: "hub 未能及时响应，请检查连接后重试。",
   aborted: "已取消。",
   error: "代理请求失败。",
+  /* link-preview plan §4.3 (LP3)：页内代理预览对话框（`proxy.preview.*`）。 */
+  "preview.dialogLabel": "代理预览",
+  "preview.frameTitle": "代理应用预览",
+  "preview.via": "经由 ",
+  "preview.reload": "重新加载",
+  "preview.openTab": "新标签打开",
+  "preview.close": "关闭",
+  "preview.opening": "正在打开代理预览…",
+  "preview.stillLoading": "仍在加载…",
+  "preview.hint": "若内容空白或拒绝显示，可能是该应用禁止被嵌入 — 请用新标签打开；浏览器后退会先在内嵌页面内后退。",
+  "preview.errorTitle": "无法打开代理预览",
+  "preview.retry": "重试",
+  "preview.openOriginal": "直接打开原链接",
 } satisfies Messages<typeof en>;
 
 export default proxy;

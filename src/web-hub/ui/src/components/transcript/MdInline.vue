@@ -22,11 +22,12 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, ref } from "vue";
 import { resolveMdLinkTarget } from "@logic/mdLinkPath.js";
-import { isProxyableHref } from "@logic/proxy.js";
+import { isProxyableHref, normalizeProxyHref } from "@logic/proxy.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useProxyOpen } from "../../composables/useProxyOpen.js";
 import PathText from "../preview/PathText.vue";
 import { PATH_REFERENCES_SUSPENDED, PREVIEW_BASE_DIR, PREVIEW_CTX } from "../preview/previewContext.js";
+import { PROXY_PREVIEW_CTX } from "../proxy/proxyPreviewContext.js";
 import type { Inline } from "./markdown-types.js";
 import "../../styles/proxy.css";
 
@@ -60,6 +61,8 @@ function onPathLinkKeydown(ev: KeyboardEvent, r: { path: string; dir: boolean })
   }
 }
 const proxy = useProxyOpen();
+/** LP3 (link-preview §4.3): the App-level in-page preview — absent ⇒ the X2 new-tab flow. */
+const proxyPreview = inject(PROXY_PREVIEW_CTX, null);
 const hasProxy = computed(() => proxy.scope.value !== null);
 const note = ref<{ href: string; key: string | null; url: string | null } | null>(null);
 const noteList = computed(() => (note.value === null ? [] : [note.value]));
@@ -81,11 +84,22 @@ function proxyLink(href: string): boolean {
 
 function onLinkClick(ev: MouseEvent, href: string): void {
   if (!proxyLink(href)) return;
+  // Modified clicks (ctrl/meta/shift/alt, middle button) keep the browser's native behaviour.
   if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+  // §4.2: the anchor `href` attribute stays original; the hub POST uses the normalized form.
+  const normalized = normalizeProxyHref(href);
+  if (normalized === null) return;
   ev.preventDefault();
+  // §4.1 tier 3: with the frame cap a plain click opens the in-page dialog (no window.open
+  // on this path, so popup blockers don't apply).
+  const frame = proxyPreview?.handle ?? null;
+  if (frame !== null && frame.scope.value !== null) {
+    frame.open(normalized);
+    return;
+  }
   clearNote();
   // synchronous part of `open` = window.open inside this click handler
-  void proxy.open(href).then(() => {
+  void proxy.open(normalized).then(() => {
     const key = proxy.errorKey.value;
     const url = proxy.fallbackUrl.value;
     if (key === null && url === null) return;
@@ -126,7 +140,11 @@ function onLinkClick(ev: MouseEvent, href: string): void {
     <MdInline v-else-if="n.type === 'textlink'" :nodes="n.children" :no-refs="true" />
   </template>
   <span v-for="x in noteList" :key="'proxy-note'" class="proxy-ref-note" role="status"
-    ><template v-if="x.key !== null">{{ t(x.key) }}</template
+    ><template v-if="x.key !== null"
+      >{{ t(x.key) }}
+      <!-- D9: a hub refusal always offers the original link as a native anchor (never an
+           automatic navigation). -->
+      <a :href="x.href" target="_blank" rel="noopener noreferrer">{{ t("proxy.preview.openOriginal") }} ↗</a></template
     ><template v-else-if="x.url !== null"
       >{{ t("proxy.blockedNote") }}
       <a :href="x.url" target="_blank" rel="noopener noreferrer">{{ t("proxy.blockedLink") }}</a></template

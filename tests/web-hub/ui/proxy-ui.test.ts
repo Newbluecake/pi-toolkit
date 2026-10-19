@@ -13,6 +13,8 @@ import ProxyDialog from "../../../src/web-hub/ui/src/components/proxy/ProxyDialo
 import { CONTROL_ENV, HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { PATH_REFERENCES_SUSPENDED } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
 import { openProxyTab } from "../../../src/web-hub/ui/src/composables/useProxyOpen.js";
+import { PROXY_PREVIEW_CTX } from "../../../src/web-hub/ui/src/components/proxy/proxyPreviewContext.js";
+import { useProxyPreview } from "../../../src/web-hub/ui/src/composables/useProxyPreview.js";
 import type { ProxyTransport } from "../../../src/web-hub/ui/src/transport/types.js";
 
 const ENTER = "http://127.0.0.1:7900/__pwh_proxy__/enter?c=" + "C".repeat(43);
@@ -440,5 +442,261 @@ describe("T-U4 ProxyDialog", () => {
     await w.get(".proxy-scrim").trigger("keydown", { key: "Escape" });
     expect(w.emitted("close")).toBeTruthy();
     w.unmount();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// link-preview plan (LP3): §4.1 compatibility tiers + §4.2 normalized POST targets
+// ---------------------------------------------------------------------------
+const CAPS_FRAME = ["proxy.v1", "proxy.frame.v1"];
+
+/** A real LP3 handle (frame scope derived from the caps) on top of the fake transport. */
+function frameHandle(caps: string[], proxy: ProxyTransport) {
+  const state = ref({ hub: { caps }, agents: new Map(), selected: "a1", conn: "open" });
+  return useProxyPreview({ proxy, state, mode: "token" });
+}
+
+function provideFrame(caps: string[], proxy: ProxyTransport, handle: ReturnType<typeof useProxyPreview> | null) {
+  const base = provideOf(hubOf(caps, proxy));
+  return handle === null ? base : { ...base, [PROXY_PREVIEW_CTX as symbol]: { handle } };
+}
+
+describe("LP3 §4.1 tiers — PathText", () => {
+  it("tier 2 (proxy cap, NO proxy.frame.v1): click keeps the new-tab flow with the normalized target", async () => {
+    const proxy = fakeProxy();
+    const { tab, win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const handle = frameHandle(["proxy.v1"], proxy); // real handle, but its frame scope is null
+    expect(handle.scope.value).toBeNull();
+    const w = mount(PathText, {
+      props: { text: "open 127.0.0.1:3000/ui?tab=a now" },
+      global: { provide: provideFrame(["proxy.v1"], proxy, handle) },
+    });
+    await w.get("span.proxy-ref").trigger("click");
+    await flushPromises();
+    expect(handle.view.value.phase).toBe("closed"); // no dialog without the frame cap
+    expect(win.open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(proxy.open).toHaveBeenCalledWith({ target: "http://127.0.0.1:3000/ui?tab=a" }, undefined);
+    expect(tab.location.replace).toHaveBeenCalledWith(ENTER); // enter URL used unmodified
+    w.unmount();
+  });
+
+  it("tier 3 (proxy.frame.v1): a plain click / Enter opens the dialog, POSTing path+query verbatim; no window.open", async () => {
+    const proxy = fakeProxy();
+    const { win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const handle = frameHandle(CAPS_FRAME, proxy);
+    expect(handle.scope.value).not.toBeNull();
+    const w = mount(PathText, {
+      props: { text: "open 127.0.0.1:3000/ui?tab=a now" },
+      global: { provide: provideFrame(CAPS_FRAME, proxy, handle) },
+    });
+    // dispatch synchronously (trigger() awaits a tick, by which time the fake transport has
+    // already resolved to `ready`).
+    w.get("span.proxy-ref").element.dispatchEvent(
+      new MouseEvent("click", { cancelable: true, bubbles: true, button: 0 }),
+    );
+    expect(handle.view.value).toMatchObject({ phase: "opening", href: "http://127.0.0.1:3000/ui?tab=a" });
+    expect(proxy.open).toHaveBeenCalledTimes(1);
+    expect(proxy.open.mock.calls[0]![0]).toEqual({ target: "http://127.0.0.1:3000/ui?tab=a" });
+    expect(win.open).not.toHaveBeenCalled(); // the dialog path never opens a tab
+    await flushPromises();
+    expect(handle.view.value).toMatchObject({ phase: "ready", enterUrl: ENTER });
+    w.unmount();
+  });
+
+  it("tier 3 Enter/Space also open the dialog; Ctrl/Meta-click keeps the new-tab flow (D8)", async () => {
+    const proxy = fakeProxy();
+    const { tab, win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const handle = frameHandle(CAPS_FRAME, proxy);
+    const w = mount(PathText, {
+      props: { text: "see http://127.0.0.1:3000/x" },
+      global: { provide: provideFrame(CAPS_FRAME, proxy, handle) },
+    });
+    w.get("span.proxy-ref").element.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", cancelable: true, bubbles: true }),
+    );
+    expect(handle.view.value.phase).toBe("opening");
+    await flushPromises();
+    expect(handle.view.value.phase).toBe("ready");
+    handle.close();
+
+    // Ctrl-click ⇒ the X2 new-tab flow, same normalized target.
+    w.get("span.proxy-ref").element.dispatchEvent(
+      new MouseEvent("click", { cancelable: true, bubbles: true, button: 0, ctrlKey: true }),
+    );
+    await flushPromises();
+    expect(win.open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(proxy.open).toHaveBeenCalledTimes(2);
+    expect(proxy.open.mock.calls[1]![0]).toEqual({ target: "http://127.0.0.1:3000/x" });
+    expect(tab.location.replace).toHaveBeenCalledWith(ENTER);
+    expect(handle.view.value.phase).toBe("closed");
+    w.unmount();
+  });
+
+  it("tier 3 wiring absent (no PROXY_PREVIEW_CTX): the frame cap alone stays on the new-tab flow", async () => {
+    const proxy = fakeProxy();
+    const { win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const w = mount(PathText, {
+      props: { text: "see http://127.0.0.1:3000/x" },
+      global: { provide: provideOf(hubOf(CAPS_FRAME, proxy)) }, // §4.3: absent ctx ⇒ new tab
+    });
+    await w.get("span.proxy-ref").trigger("click");
+    await flushPromises();
+    expect(win.open).toHaveBeenCalled();
+    expect(proxy.open).toHaveBeenCalledWith({ target: "http://127.0.0.1:3000/x" }, undefined);
+    w.unmount();
+  });
+
+  it("inline code POSTs the normalized target in every flow: `127.0.0.1:3000/ui` and `http://127.0.0.1/`", async () => {
+    // new-tab / legacy flow (tier 2): the §4.2 fix — the raw text used to be POSTed as-is.
+    const proxy = fakeProxy();
+    const { win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const w = mount(PathText, {
+      props: { text: "127.0.0.1:3000/ui", code: true },
+      global: { provide: provideOf(hubOf(["proxy.v1"], proxy)) },
+    });
+    await w.get("code.md-code.proxy-ref").trigger("click");
+    await flushPromises();
+    expect(proxy.open).toHaveBeenCalledWith({ target: "http://127.0.0.1:3000/ui" }, undefined);
+    w.unmount();
+
+    const w2 = mount(PathText, {
+      props: { text: "http://127.0.0.1/", code: true },
+      global: { provide: provideOf(hubOf(["proxy.v1"], proxy)) },
+    });
+    await w2.get("code.md-code.proxy-ref").trigger("click");
+    await flushPromises();
+    expect(proxy.open).toHaveBeenLastCalledWith({ target: "http://127.0.0.1:80/" }, undefined);
+    w2.unmount();
+
+    // dialog flow (tier 3): same normalization into handle.open.
+    const proxy3 = fakeProxy();
+    const handle = frameHandle(CAPS_FRAME, proxy3);
+    const w3 = mount(PathText, {
+      props: { text: "127.0.0.1:3000/ui", code: true },
+      global: { provide: provideFrame(CAPS_FRAME, proxy3, handle) },
+    });
+    await w3.get("code.md-code.proxy-ref").trigger("click");
+    expect(proxy3.open.mock.calls[0]![0]).toEqual({ target: "http://127.0.0.1:3000/ui" });
+    await flushPromises();
+    expect(handle.view.value.phase).toBe("ready");
+    w3.unmount();
+  });
+});
+
+describe("LP3 §4.1 tiers — MdInline", () => {
+  const nodes = [{ type: "link", href: "http://127.0.0.1:3000/x", children: [{ type: "text", text: "demo" }] }];
+
+  it("tier 2: plain click POSTs the normalized href through the new-tab flow", async () => {
+    const proxy = fakeProxy();
+    const { tab, win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const w = mount(MdInline, {
+      props: { nodes: nodes as never },
+      global: { provide: provideOf(hubOf(["proxy.v1"], proxy)) },
+    });
+    expect(clickPrevented(w.get("a").element)).toBe(true);
+    await flushPromises();
+    expect(proxy.open).toHaveBeenCalledWith({ target: "http://127.0.0.1:3000/x" }, undefined);
+    expect(tab.location.replace).toHaveBeenCalledWith(ENTER);
+    w.unmount();
+  });
+
+  it("tier 3: a plain click opens the dialog; modified clicks stay native", async () => {
+    const proxy = fakeProxy();
+    const { win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const handle = frameHandle(CAPS_FRAME, proxy);
+    const w = mount(MdInline, {
+      props: { nodes: nodes as never },
+      global: { provide: provideFrame(CAPS_FRAME, proxy, handle) },
+    });
+    const a = w.get("a");
+    expect(a.attributes("href")).toBe("http://127.0.0.1:3000/x"); // the attribute stays original
+    expect(clickPrevented(a.element, { ctrlKey: true })).toBe(false); // native modified click
+    expect(proxy.open).not.toHaveBeenCalled();
+
+    expect(clickPrevented(a.element)).toBe(true);
+    expect(proxy.open.mock.calls[0]![0]).toEqual({ target: "http://127.0.0.1:3000/x" });
+    expect(win.open).not.toHaveBeenCalled();
+    await flushPromises();
+    expect(handle.view.value).toMatchObject({ phase: "ready", href: "http://127.0.0.1:3000/x", enterUrl: ENTER });
+    w.unmount();
+  });
+});
+
+describe("LP3 D9 — inline refusal notes carry the original-link anchor", () => {
+  const refusal = () =>
+    fakeProxy({
+      open: vi.fn(async () => ({ ok: false, status: 403, error: "E_PROXY_DENIED", reason: "public" })) as never,
+    });
+
+  it("PathText plain text: a hub refusal note anchors the normalized href (exact target/rel, no auto-navigation)", async () => {
+    const proxy = refusal();
+    const { tab, win } = fakeWin();
+    vi.stubGlobal("open", win.open);
+    const w = mount(PathText, {
+      props: { text: "see 127.0.0.1:3000/ui now" },
+      global: { provide: provideOf(hubOf(["proxy.v1"], proxy)) },
+    });
+    await w.get("span.proxy-ref").trigger("click");
+    await flushPromises();
+    const a = w.get(".proxy-ref-note a");
+    expect(a.attributes("href")).toBe("http://127.0.0.1:3000/ui");
+    expect(a.attributes("target")).toBe("_blank");
+    expect(a.attributes("rel")).toBe("noopener noreferrer");
+    expect(tab.location.replace).not.toHaveBeenCalled(); // never an automatic navigation
+    w.unmount();
+  });
+
+  it("PathText inline code: the refusal note anchors the NORMALIZED href (`127.0.0.1:3000/ui` ⇒ `http://127.0.0.1:3000/ui`)", async () => {
+    const proxy = refusal();
+    vi.stubGlobal("open", fakeWin().win.open);
+    const w = mount(PathText, {
+      props: { text: "127.0.0.1:3000/ui", code: true },
+      global: { provide: provideOf(hubOf(["proxy.v1"], proxy)) },
+    });
+    await w.get("code.md-code.proxy-ref").trigger("click");
+    await flushPromises();
+    const a = w.get(".proxy-ref-note a");
+    expect(a.attributes("href")).toBe("http://127.0.0.1:3000/ui");
+    expect(a.attributes("target")).toBe("_blank");
+    expect(a.attributes("rel")).toBe("noopener noreferrer");
+    w.unmount();
+  });
+
+  it("MdInline: the refusal note anchors the link's normalized href; the blocked-popup branch is unchanged", async () => {
+    const nodes = [{ type: "link", href: "http://127.0.0.1:3000/x", children: [{ type: "text", text: "demo" }] }];
+    const proxy = refusal();
+    vi.stubGlobal("open", fakeWin().win.open);
+    const w = mount(MdInline, {
+      props: { nodes: nodes as never },
+      global: { provide: provideOf(hubOf(["proxy.v1"], proxy)) },
+    });
+    expect(clickPrevented(w.get("a").element)).toBe(true);
+    await flushPromises();
+    const a = w.get(".proxy-ref-note a");
+    expect(a.attributes("href")).toBe("http://127.0.0.1:3000/x");
+    expect(a.attributes("target")).toBe("_blank");
+    expect(a.attributes("rel")).toBe("noopener noreferrer");
+    w.unmount();
+
+    // blocked-popup branch (url !== null): still the one-time enter URL, no D9 anchor swap.
+    const proxy2 = fakeProxy();
+    vi.stubGlobal("open", fakeWin(true).win.open);
+    const w2 = mount(MdInline, {
+      props: { nodes: nodes as never },
+      global: { provide: provideOf(hubOf(["proxy.v1"], proxy2)) },
+    });
+    expect(clickPrevented(w2.get("a").element)).toBe(true);
+    await flushPromises();
+    const note = w2.get(".proxy-ref-note");
+    expect(note.findAll("a")).toHaveLength(1);
+    expect(note.get("a").attributes("href")).toBe(ENTER);
+    w2.unmount();
   });
 });

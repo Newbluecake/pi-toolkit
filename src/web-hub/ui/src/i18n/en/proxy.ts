@@ -79,6 +79,20 @@ const proxy = {
   network: "The hub did not answer in time. Check the connection and try again.",
   aborted: "Cancelled.",
   error: "The proxy request failed.",
+  /* link-preview plan §4.3 (LP3): the in-page preview dialog (`proxy.preview.*`). */
+  "preview.dialogLabel": "Proxy preview",
+  "preview.frameTitle": "Proxied app preview",
+  "preview.via": "via ",
+  "preview.reload": "Reload",
+  "preview.openTab": "Open in new tab",
+  "preview.close": "Close",
+  "preview.opening": "Opening the proxy preview…",
+  "preview.stillLoading": "Still loading…",
+  "preview.hint":
+    "If the content is blank or refuses to display, the app may forbid being embedded — use Open in new tab; the browser Back key walks back inside the embedded page first.",
+  "preview.errorTitle": "Could not open the proxy preview",
+  "preview.retry": "Retry",
+  "preview.openOriginal": "Open the original link directly",
 } satisfies Record<string, string>;
 
 export default proxy;
