@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createLoginLimiter, RATE_LIMIT } from "../../../src/web-hub/hub/ratelimit.js";
+import type { SecurityEvent } from "../../../src/web-hub/hub/security-events.js";
 
 function clock(start = 0): { now(): number; advance(ms: number): void } {
   let t = start;
@@ -104,5 +105,60 @@ describe("createLoginLimiter (plan §6.2)", () => {
     const l = createLoginLimiter({ now: c.now });
     expect(l.admit("1.2.3.4")).toEqual({ ok: true }); // admit alone never taints
     expect(l.isFresh("1.2.3.4")).toBe(true);
+  });
+});
+
+describe("createLoginLimiter security-event emits (LAN security r2 §4.2)", () => {
+  it("emits login-lockout exactly once, on the transition into backoff", () => {
+    const c = clock();
+    const events: SecurityEvent[] = [];
+    const l = createLoginLimiter({ now: c.now, onEvent: (e) => events.push(e) });
+    for (let i = 0; i < 6; i++) l.fail("1.2.3.4");
+    const lockouts = events.filter((e) => e.type === "login-lockout");
+    expect(lockouts).toHaveLength(1);
+    expect(lockouts[0]).toMatchObject({ type: "login-lockout", ip: "1.2.3.4", failures: 6, lockMs: 30_000 });
+    // further failures on the same IP while locked do not re-emit
+    l.fail("1.2.3.4");
+    expect(events.filter((e) => e.type === "login-lockout")).toHaveLength(1);
+  });
+
+  it("emits login-tightened once on the false→true transition", () => {
+    const c = clock();
+    const events: SecurityEvent[] = [];
+    const l = createLoginLimiter({ now: c.now, onEvent: (e) => events.push(e) });
+    for (let i = 0; i < 51; i++) l.fail(`attacker-${i}`);
+    expect(events.filter((e) => e.type === "login-tightened")).toHaveLength(1);
+  });
+
+  it("emits login-saturated once while the taint cap is exhausted", () => {
+    const c = clock();
+    const events: SecurityEvent[] = [];
+    const l = createLoginLimiter({ now: c.now, onEvent: (e) => events.push(e) });
+    for (let i = 0; i < RATE_LIMIT.taintCap; i++) l.fail(`ip-${i}`);
+    expect(l.admit("never-seen")).toMatchObject({ saturated: true });
+    expect(events.filter((e) => e.type === "login-saturated")).toHaveLength(1);
+    // still saturated, but the latch prevents a duplicate emit
+    l.admit("never-seen-2");
+    expect(events.filter((e) => e.type === "login-saturated")).toHaveLength(1);
+  });
+
+  it("saturated latch is sticky until unlock() (a normal admit does not re-arm it)", () => {
+    const c = clock();
+    const events: SecurityEvent[] = [];
+    const l = createLoginLimiter({ now: c.now, onEvent: (e) => events.push(e) });
+    for (let i = 0; i < RATE_LIMIT.taintCap; i++) l.fail(`ip-${i}`);
+    expect(l.admit("never-seen")).toMatchObject({ saturated: true });
+    expect(events.filter((e) => e.type === "login-saturated")).toHaveLength(1);
+    // free one taint slot and admit normally (a buggy latch reset would re-arm the emit here)
+    l.succeed("ip-0");
+    expect(l.admit("ip-0")).toEqual({ ok: true });
+    l.fail("ip-0"); // refill to re-saturate
+    expect(l.admit("never-seen-2")).toMatchObject({ saturated: true });
+    expect(events.filter((e) => e.type === "login-saturated")).toHaveLength(1);
+    // unlock() clears the latch; a fresh saturation emits again
+    l.unlock();
+    for (let i = 0; i < RATE_LIMIT.taintCap; i++) l.fail(`re-${i}`);
+    expect(l.admit("never-seen-3")).toMatchObject({ saturated: true });
+    expect(events.filter((e) => e.type === "login-saturated")).toHaveLength(2);
   });
 });

@@ -8,6 +8,7 @@ import { realFeishuFs } from "../../../../src/web-hub/hub/feishu/credentials.js"
 import type { CmdFrame, CmdResultFrame } from "../../../../src/web-hub/protocol/messages.js";
 import { createFsAdmitter, denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
 import { createPreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
+import { createSecurityEventBus } from "../../../../src/web-hub/hub/security-events.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -629,5 +630,29 @@ describe("F8 /list session-switch card (session-card-plan r3)", () => {
     restarted.send(messageEnvelope("list-2", "/list"));
     await eventually(() => expect(hung.sent.length).toBeGreaterThan(0));
     void pick;
+  });
+});
+
+describe("F8 LAN security wiring (§4.3)", () => {
+  it("subscribes the security bus iff securityAlerts, pages the owner, and unsubscribes on stop", async () => {
+    const bus = createSecurityEventBus({ error: () => {} });
+    const r = await rig({ security: bus }, { securityAlerts: true });
+    bus.emit({ type: "passwd" });
+    // coalesce window (5s) then the owner notice flushes through the outbox
+    await eventually(() => expect(sentContent(r)).toContain("密码已修改"), 8_000);
+    await r.service.stop();
+    const before = sentContent(r);
+    bus.emit({ type: "passwd" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(sentContent(r)).toBe(before);
+  });
+
+  it("leaves the security bus inert when securityAlerts is off", async () => {
+    const bus = createSecurityEventBus({ error: () => {} });
+    const r = await rig({ security: bus }, { securityAlerts: false });
+    bus.emit({ type: "passwd" });
+    // Wait past the coalesce window: with the notifier unsubscribed, nothing ever pages the owner.
+    await new Promise((resolve) => setTimeout(resolve, 5_600));
+    expect(sentContent(r)).not.toContain("密码已修改");
   });
 });

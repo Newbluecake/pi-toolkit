@@ -1,9 +1,9 @@
 /** F8 notices: owner health + conservative proactive completion (R2-h). No listener/timer. */
-import { FEISHU_NOTIFY_LIMITS } from "../../protocol/feishu.js";
 import type { FeishuState, FeishuBinding } from "./state.js";
 import type { OutboxTarget } from "./outbox.js";
 import { renderNotice } from "./render.js";
 import { feishuKey } from "./runtime.js";
+import { createNoticeBudget, type NoticeBudget } from "./security.js";
 
 export interface FeishuIdleEvidence {
   at: number;
@@ -17,6 +17,8 @@ export interface FeishuNotifyDeps {
   enabled: boolean;
   label(sessionId: string): string;
   target(binding: FeishuBinding): OutboxTarget | undefined;
+  /** Shared per-runtime budget (one instance shared with security); omitted ⇒ a private one. */
+  budget?: NoticeBudget;
   send(input: {
     target: OutboxTarget;
     message: { msgType: "text" | "interactive"; content: string };
@@ -36,22 +38,11 @@ export function feishuBackgroundIdle(evidence: FeishuIdleEvidence | undefined, n
   );
 }
 export function createFeishuNotify(deps: FeishuNotifyDeps) {
-  const last = new Map<string, number>();
-  let windowAt = deps.now(),
-    count = 0,
-    disposed = false;
+  const budget = deps.budget ?? createNoticeBudget({ now: deps.now });
+  let disposed = false;
   function reserve(key: string, gap: number): boolean {
     if (disposed) return false;
-    const now = deps.now();
-    if (now - windowAt >= 60_000) {
-      windowAt = now;
-      count = 0;
-    }
-    if (count >= FEISHU_NOTIFY_LIMITS.globalPerMin || now - (last.get(key) ?? -Infinity) < gap) return false;
-    if (!last.has(key) && last.size >= 1_024) return false;
-    count++;
-    last.set(key, now);
-    return true;
+    return budget.reserve(key, gap);
   }
   return {
     /**
@@ -108,7 +99,8 @@ export function createFeishuNotify(deps: FeishuNotifyDeps) {
     },
     dispose() {
       disposed = true;
-      last.clear();
+      // Only the budget WE created is ours to dispose; a shared budget belongs to the service.
+      if (deps.budget === undefined) budget.dispose();
     },
   };
 }

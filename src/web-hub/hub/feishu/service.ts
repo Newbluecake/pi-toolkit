@@ -48,8 +48,16 @@ import { createFeishuDialogs } from "./dialogs.js";
 import { createFeishuSessionCard } from "./session-card.js";
 import { createFeishuFiles, feishuFileCandidates, type FeishuFilesDeps } from "./files.js";
 import { createFeishuNotify, type FeishuIdleEvidence } from "./notify.js";
+import {
+  createFeishuSecurity,
+  createLoginApprovalPort,
+  createNoticeBudget,
+  parseApprovalTarget,
+  type FeishuLoginApproval,
+} from "./security.js";
 import { bounded, createFeishuWork, feishuKey, messageText, object } from "./runtime.js";
 import type { FeishuState, FeishuBinding, FeishuRequestRecord, FeishuNonce } from "./state.js";
+import type { SecurityEventBus } from "../security-events.js";
 
 /** Exact structural projection of the existing hub bus; no hub assembly types cross this port. */
 export type FeishuServiceEvent =
@@ -84,6 +92,10 @@ export interface FeishuBotServiceDeps {
   idleEvidence?(agentKey: string): FeishuIdleEvidence | undefined;
   /** Authenticated web session link (no token/query credentials). */
   link?(agentKey: string): string;
+  /** LAN security r2 §4.3: the hub security bus. Absent ⇒ no security alerts. */
+  security?: SecurityEventBus;
+  /** LAN security r2 §5.7: the login core's approval-decision sink. Absent ⇒ decisions are dropped. */
+  onApprovalDecision?(challengeId: string, allowed: boolean, gen: number): void;
   onStatus?(status: FsbInfoData): void;
   log?(event: {
     event: string;
@@ -135,6 +147,27 @@ const simpleCard = (text: string, buttons: Array<{ label: string; n: string }> =
       ],
     },
   });
+
+/** §5.7 login-approval card: user/IP/device + approve/deny buttons, then a status line. */
+function loginApprovalCard(
+  info: { user: string; ip: string; device: string },
+  state: "pending" | "approved" | "denied" | "expired",
+  nonces?: { approve: string; deny: string },
+): string {
+  const status = state === "approved" ? "已批准" : state === "denied" ? "已拒绝" : state === "expired" ? "已失效" : "";
+  const text =
+    state === "pending"
+      ? `登录审批请求\n用户：${info.user}\nIP：${info.ip}\n设备：${info.device}\n请在 2 分钟内批准或拒绝。`
+      : `登录审批：${status}`;
+  const buttons =
+    nonces !== undefined
+      ? [
+          { label: "批准", n: nonces.approve },
+          { label: "拒绝", n: nonces.deny },
+        ]
+      : [];
+  return simpleCard(text, buttons);
+}
 export function createFeishuBotService(deps: FeishuBotServiceDeps) {
   const clock = deps.clock ?? systemFeishuClock;
   const dir = join(deps.stateDir, "feishu-bot");
@@ -405,6 +438,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         publish();
       },
     });
+    const budget = createNoticeBudget(clock);
     const notify = createFeishuNotify({
       state,
       now: clock.now,
@@ -413,6 +447,54 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       label,
       target: bindingTarget,
       send: outbox.enqueueNotice,
+      budget,
+    });
+    // LAN security r2 §4.3: high-risk alerts, one shared budget with notify. Subscribes the hub
+    // security bus; absent bus or `securityAlerts:false` ⇒ inert (and `undefined`).
+    const security =
+      deps.config.securityAlerts === true && deps.security !== undefined
+        ? createFeishuSecurity({
+            security: deps.security,
+            clock,
+            owner: () => credentials.current()?.ownerOpenId,
+            budget,
+            send: outbox.enqueueNotice,
+          })
+        : undefined;
+    // LAN security r2 §5.7: the Feishu login-approval port (per runtime — it needs the live work slot
+    // and the outbox). `patchCard` re-renders the full card from the original info we keep keyed by
+    // messageId, so the approve/deny patch still shows user/IP/device.
+    const approvalCards = new Map<string, { user: string; ip: string; device: string }>();
+    const approval = createLoginApprovalPort({
+      state,
+      clock,
+      work,
+      installation: () => {
+        const c = credentials.current();
+        const tenantKey = state.tenant.get();
+        return c !== undefined && tenantKey !== undefined
+          ? { gen: c.gen, ownerOpenId: c.ownerOpenId, tenantKey }
+          : undefined;
+      },
+      sendCard: async (input) => {
+        if (!active) return undefined;
+        const id = `la${randomBytes(9).toString("base64url")}`;
+        const sent = await sendCard(
+          id,
+          { scope: "p2p", via: "send", receiveIdType: "open_id", receiveId: input.owner },
+          loginApprovalCard(input, "pending"),
+          input.owner,
+        );
+        if (sent === undefined) return undefined;
+        approvalCards.set(sent.messageId, { user: input.user, ip: input.ip, device: input.device });
+        return { chatId: sent.chatId, messageId: sent.messageId };
+      },
+      patchCard: async (messageId, cardState, nonces) => {
+        const info = approvalCards.get(messageId) ?? { user: "", ip: "", device: "" };
+        if (cardState !== "pending") approvalCards.delete(messageId);
+        return patch(messageId, loginApprovalCard(info, cardState, nonces));
+      },
+      onDecision: deps.onApprovalDecision ?? (() => {}),
     });
     function capability(name: FeishuCapabilityName, ok: boolean) {
       caps[name] = ok ? "ok" : "denied";
@@ -1273,7 +1355,23 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       } else {
         capability("cardCallback", true);
         const { record, identity, eventId, action } = intent;
-        if (record.action === "dialog") await dialogs.callback(record, identity, eventId, action);
+        if (record.action === "login-approve" || record.action === "login-deny") {
+          // §5.7 callback: the nonce is already redeemed by inbound's chain; E rechecks install +
+          // owner + sibling nonce, then notifies the core. Ignored unless the challenge is live.
+          const parsed = parseApprovalTarget(record.target);
+          if (parsed !== undefined) {
+            const install = installation();
+            if (install?.active) {
+              approval.onDecision({
+                challengeId: parsed.challengeId,
+                allowed: record.action === "login-approve",
+                gen: parsed.gen,
+                operatorOpenId: identity.senderOpenId,
+                installGen: install.gen,
+              });
+            }
+          }
+        } else if (record.action === "dialog") await dialogs.callback(record, identity, eventId, action);
         else if (record.action === "resend") {
           const result = requests.resend(record.target, eventId, identity);
           if (result.ok && (await state.commit())) requests.release(result.value.id);
@@ -1436,6 +1534,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       requests,
       files,
       notify,
+      security,
+      approval,
       sessionCard,
       get authFailed() {
         return authFailed;
@@ -1505,7 +1605,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         sessions.clear();
         runs.dispose();
         files.dispose();
+        security?.dispose();
+        approval.dispose();
         notify.dispose();
+        budget.dispose();
         for (const w of sendWaiters.values()) {
           clock.clearTimeout(w.timer);
           w.resolve(undefined);
@@ -1718,10 +1821,19 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       adminBusy = false;
     }
   }
+  // Stable per-service approval delegate: routes to the CURRENT runtime's port (which holds the
+  // live work slot / outbox / sendCard / patchCard), and answers "unavailable" while stopped.
+  const approval: FeishuLoginApproval = {
+    request: (c) => (runtime !== undefined ? runtime.approval.request(c) : Promise.resolve("unavailable" as const)),
+    close: (challengeId, why) => runtime?.approval.close(challengeId, why),
+    onDecision: (input) => runtime?.approval.onDecision(input),
+    dispose: () => runtime?.approval.dispose(),
+  };
   return {
     start,
     stop,
     admin,
+    approval,
     snapshot: info,
     keepalive: () => credentials.status() === "loaded" || credentials.status() === "unsafe",
     dispose(): Promise<void> {

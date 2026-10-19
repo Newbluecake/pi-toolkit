@@ -5,6 +5,7 @@
  * first-prompt handoff and idempotency commit. No assembly, HTTP objects or module state.
  */
 import { createHash, randomBytes } from "node:crypto";
+import { basename, dirname } from "node:path";
 import type { CmdOrigin } from "../../protocol/messages.js";
 import {
   FIRST_PROMPT_GRACE_MS,
@@ -145,6 +146,18 @@ export interface FreshSpawnContext {
   /** Optional synchronous sink: HTTP MUST send here, not after awaiting startFresh, to keep
    * its zero-await auth2 → start → firstPrompt → LRU → audit → 202 stretch intact. */
   onResult?(outcome: FreshSpawnOutcome): void;
+  /** LAN security r2 §4.2 (E): called on the accepted fresh-spawn path only (never the dup path).
+   * `routes.ts` passes it only for the LAN listener; the Feishu bot origin never sets it. */
+  onAccepted?(info: { ip: string; user?: string; dirTail?: string }): void;
+}
+
+/** §4.2 (Q9): the last two path segments of a cwd, or `undefined` when there are none. */
+export function dirTailOf(cwd: string): string | undefined {
+  const tail = basename(cwd);
+  if (tail === "" || tail === "/" || tail === ".") return undefined;
+  const parent = basename(dirname(cwd));
+  if (parent === "" || parent === "/" || parent === ".") return tail;
+  return `${parent}/${tail}`;
 }
 
 export async function startFresh(intent: FreshSpawnIntent, ctx: FreshSpawnContext): Promise<FreshSpawnOutcome> {
@@ -308,6 +321,12 @@ export async function startFresh(intent: FreshSpawnIntent, ctx: FreshSpawnContex
   });
   // `start` normally returns starting; a synchronous fake/adapter may already know live coords.
   const rec = supervisor.records().find((r) => r.spawnId === spawnId);
+  const dirTail = dirTailOf(admitted.realpath);
+  ctx.onAccepted?.({
+    ip: origin.ip,
+    ...(origin.user === undefined ? {} : { user: origin.user }),
+    ...(dirTail === undefined ? {} : { dirTail }),
+  });
   return finish({
     kind: "accepted",
     value: {

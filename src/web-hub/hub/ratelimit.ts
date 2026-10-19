@@ -17,6 +17,7 @@
  * as "fresh" (§6.2's less-restrictive category) when the method is absent.
  */
 import type { LoginLimiterPort } from "./ports.js";
+import type { SecurityEvent } from "./security-events.js";
 
 export interface LoginLimiter extends LoginLimiterPort {
   /** Not in `tainted` (§6.2 "新鲜 = 不在 tainted 中"). Exposed for `kdf-admission.ts`'s fair
@@ -49,12 +50,16 @@ interface BackoffEntry {
   lastFailAt: number;
 }
 
-export function createLoginLimiter(deps: { now: () => number }): LoginLimiter {
-  const { now } = deps;
+export function createLoginLimiter(deps: {
+  now: () => number;
+  onEvent?: (event: SecurityEvent) => void;
+}): LoginLimiter {
+  const { now, onEvent } = deps;
   const backoff = new Map<string, BackoffEntry>(); // insertion order ≈ age, capped at 4096
   const tainted = new Map<string, number>(); // ip → expiresAt (24h), capped at 4096, never evicted
   const globalFailures: number[] = []; // recent failure timestamps, pruned to the 10-min window
   let tightened = false;
+  let saturated = false;
 
   function pruneGlobal(t: number): void {
     while (globalFailures.length > 0 && t - globalFailures[0]! >= RATE_LIMIT.globalWindowMs) globalFailures.shift();
@@ -81,8 +86,11 @@ export function createLoginLimiter(deps: { now: () => number }): LoginLimiter {
       return { ok: false, retryAfterMs: entry.lockedUntil - t };
     }
     if (!tainted.has(clientIp) && tainted.size >= RATE_LIMIT.taintCap) {
+      if (!saturated) onEvent?.({ type: "login-saturated" });
+      saturated = true;
       return { ok: false, retryAfterMs: RATE_LIMIT.saturatedRetryAfterMs, saturated: true };
     }
+    // The latch stays sticky until unlock(); a normal admit must not re-arm it.
     return { ok: true };
   }
 
@@ -107,11 +115,16 @@ export function createLoginLimiter(deps: { now: () => number }): LoginLimiter {
     }
     globalFailures.push(t);
     pruneGlobal(t);
-    if (globalFailures.length > RATE_LIMIT.tightenAboveFailures) tightened = true;
-    else if (globalFailures.length < RATE_LIMIT.loosenBelowFailures) tightened = false;
+    if (globalFailures.length > RATE_LIMIT.tightenAboveFailures) {
+      if (!tightened) onEvent?.({ type: "login-tightened" });
+      tightened = true;
+    } else if (globalFailures.length < RATE_LIMIT.loosenBelowFailures) {
+      tightened = false;
+    }
 
     evictOldestBackoffIfFull(clientIp);
     const entry = backoff.get(clientIp) ?? { failCount: 0, lockedUntil: 0, lastFailAt: t };
+    const wasLocked = entry.lockedUntil > t;
     entry.failCount++;
     entry.lastFailAt = t;
     const freeFailures = tightened ? RATE_LIMIT.freeFailuresTightened : RATE_LIMIT.freeFailuresNormal;
@@ -123,6 +136,10 @@ export function createLoginLimiter(deps: { now: () => number }): LoginLimiter {
       entry.lockedUntil = t;
     }
     backoff.set(clientIp, entry);
+    // Transition only: fire once when this IP first enters backoff.
+    if (!wasLocked && entry.lockedUntil > t) {
+      onEvent?.({ type: "login-lockout", ip: clientIp, failures: entry.failCount, lockMs: entry.lockedUntil - t });
+    }
   }
 
   function succeed(clientIp: string): void {
@@ -135,6 +152,7 @@ export function createLoginLimiter(deps: { now: () => number }): LoginLimiter {
     tainted.clear();
     globalFailures.length = 0;
     tightened = false;
+    saturated = false;
   }
 
   return { admit, fail, succeed, unlock, isFresh, isTightened };

@@ -41,6 +41,7 @@ import {
   PROXY_STOP_PATH,
 } from "../../protocol/proxy.js";
 import type { AuthIdentity, HubLog, ProxyOpenFailure, ProxyRouteIo, ProxyRoutes, ProxyService } from "../ports.js";
+import type { SecurityEventBus } from "../security-events.js";
 import { createReqDeadline, WRITE_TOTAL_MS } from "../req-deadline.js";
 import { createProxyAudit, proxyErrCode } from "./audit.js";
 
@@ -51,6 +52,8 @@ export interface ProxyRoutesDeps {
   service(): ProxyService | undefined;
   readonly log: Pick<HubLog, "info">;
   readonly now?: () => number;
+  /** LAN security r2 §4.2 (E): the hub security bus. Absent ⇒ no proxy-open alerts. */
+  readonly security?: SecurityEventBus;
 }
 
 /** Per-principal open/stop bucket entries kept at most (no timers: pruned lazily on insert). */
@@ -167,7 +170,18 @@ export function createProxyRoutes(deps: ProxyRoutesDeps): ProxyRoutes {
     if (svc === undefined)
       return sendFailure(io, res, { ok: false, status: 503, error: "E_PROXY_UNAVAILABLE", reason: "closing" });
     const outcome = await svc.open(identity, target, io.browserHost, seq0);
-    if (outcome.ok) return io.sendJson(res, 200, outcome.result);
+    if (outcome.ok) {
+      // LAN security r2 §4.2: alert only for LAN-origin opens; host/port from the reported target.
+      if (io.listener === "lan" && io.ip !== undefined) {
+        deps.security?.emit({
+          type: "proxy-open",
+          ip: io.ip,
+          host: outcome.result.target.host,
+          port: outcome.result.target.port,
+        });
+      }
+      return io.sendJson(res, 200, outcome.result);
+    }
     if (
       outcome.status === 503 &&
       outcome.error === "E_PROXY_UNAVAILABLE" &&

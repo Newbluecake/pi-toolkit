@@ -90,11 +90,19 @@ import {
 import type { ForkSnapshot, HistoryListQuery, HistoryService, OccupancyProof, SessionPin } from "./history/ports.js";
 import type { CreatedDirsStore } from "./created-dirs.js";
 import type { DirService } from "./dirs.js";
-import { createSpawnIdempotency, intentDigest, startFresh, type FreshSpawnOutcome, type SpawnIntent } from "./entry.js";
+import {
+  createSpawnIdempotency,
+  dirTailOf,
+  intentDigest,
+  startFresh,
+  type FreshSpawnOutcome,
+  type SpawnIntent,
+} from "./entry.js";
 import type { FirstPromptForwarder } from "./first-prompt.js";
 import type { MkdirService } from "./mkdir.js";
 import type { SpawnPrefs } from "./prefs.js";
 import type { SpawnFrontendPort, SpawnRouteIo } from "./ports.js";
+import type { SecurityEventBus } from "../security-events.js";
 import { toPublicPayload, toViewer } from "./project.js";
 import {
   lanScopeCap,
@@ -183,6 +191,8 @@ export interface SpawnRoutesDeps {
   /** created-dirs plan r2 §3/§5: where a successful mkdir INSIDE `roots` is recorded as a known
    *  spawn dir (source ④). Absent ⇒ no recording and today's `{ok,path}` reply byte-for-byte. */
   createdDirs?: Pick<CreatedDirsStore, "add">;
+  /** LAN security r2 §4.2 (E): the hub security bus. Absent ⇒ no lan-spawn alerts. */
+  security?: SecurityEventBus;
   /** web-hub-privacy plan v2.1 (P1, 「Fork 继承」): the hub-side privacy-lock store. Injected
    *  by hub.ts only when `webHub.privacy` is on; absent ⇒ fork inheritance is skipped entirely
    *  (byte-identical to pre-feature). When present, a fork whose SOURCE session is locked
@@ -230,10 +240,27 @@ function occupancyAuditFields(p: OccupancyProof): {
 }
 
 export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
-  const { supervisor, dirs, firstPrompt, prefs, cfg, limit, log, now } = deps;
+  const { supervisor, dirs, firstPrompt, prefs, cfg, limit, log, now, security } = deps;
   const historyOn = cfg.history === true && deps.history !== undefined;
   const idempotency = createSpawnIdempotency(now);
   const { get: idemGet, put: idemPut } = idempotency;
+
+  /** LAN security r2 §4.2: emit a lan-spawn event (no-op without the bus). */
+  function emitLanSpawn(info: {
+    ip: string;
+    user?: string;
+    mode: "new" | "resume" | "fork" | "relaunch";
+    dirTail?: string;
+  }): void {
+    if (security === undefined) return;
+    security.emit({
+      type: "lan-spawn",
+      ip: info.ip,
+      ...(info.user === undefined ? {} : { user: info.user }),
+      mode: info.mode,
+      ...(info.dirTail === undefined ? {} : { dirTail: info.dirTail }),
+    });
+  }
 
   // ------------------------------------------------------------- audit (arch §6.6)
 
@@ -715,6 +742,17 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
           };
         },
         onResult: (outcome) => sendFreshOutcome(io, res, outcome, notAllowedDetail),
+        ...(io.listener === "lan"
+          ? {
+              onAccepted: (info) =>
+                emitLanSpawn({
+                  ip: info.ip,
+                  ...(info.user === undefined ? {} : { user: info.user }),
+                  mode: "new",
+                  ...(info.dirTail === undefined ? {} : { dirTail: info.dirTail }),
+                }),
+            }
+          : {}),
       });
       return;
     }
@@ -1141,6 +1179,15 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
         session: { mode: sessionArgv.mode, id: sessionArgv.newId ?? sessionArgv.id },
         ...(intent.firstPrompt === undefined ? {} : { firstPrompt: "accepted" }),
       });
+      if (io.listener === "lan") {
+        const dirTail = dirTailOf(admitted.realpath);
+        emitLanSpawn({
+          ip: auth.ip,
+          ...(auth.user === undefined ? {} : { user: auth.user }),
+          mode: sessionArgv.mode,
+          ...(dirTail === undefined ? {} : { dirTail }),
+        });
+      }
     } finally {
       pin.release();
     }
@@ -1477,6 +1524,17 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       ...(r.dup ? { dup: true } : {}),
     });
     io.sendJson(res, 202, { spawnId, state: r.state, ...(r.dup ? { dup: true } : {}) });
+    // LAN security r2 §4.2: only a real relaunch alerts; an idempotent replay never does.
+    if (!r.dup && io.listener === "lan") {
+      const rec = supervisor.records().find((record) => record.spawnId === spawnId);
+      const dirTail = rec?.cwd === undefined ? undefined : dirTailOf(rec.cwd);
+      emitLanSpawn({
+        ip: auth.ip,
+        ...(auth.user === undefined ? {} : { user: auth.user }),
+        mode: "relaunch",
+        ...(dirTail === undefined ? {} : { dirTail }),
+      });
+    }
   }
 
   // ------------------------------------------------------------- POST /api/headless/:id/stop
