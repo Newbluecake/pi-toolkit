@@ -298,11 +298,61 @@ PY
 - 最后设置 `webHub.proxy.enabled=false`，`/reload` + `/webhub restart`。
   **预期：** 不再有 proxy 状态行/cap/UI 入口，新 API 为 404，无代理监听；已有磁盘绑定文件不要求被删除。恢复希望保留的配置，停止临时 HTTP/WS/IdP/fixture 服务，清除测试 Cookie，删除**自己创建的精确临时目录**。
 
+### 18. [阻塞] 页内链接预览（`proxy.frame.v1`，link-preview-plan.md §7）
+
+依据：`link-preview-plan.md` §0 D1–D9、§2、§7。本节验证「对话框 iframe 嵌入代理源」的浏览器行为：同站 Cookie、framing 头策略、沙箱隔离。自动测试不能代替这些结论。
+
+**前置条件**
+
+- 已完成步骤 1（proxy 开启，`/webhub status` 无警告）；hub 带 `proxy.frame.v1`（以对话框实际弹出为准；旧 hub 档见 18A.6）。
+- 已登录并持有**有效的 gate 会话**：先经对话框打开过目标并停留数分钟。**不要在刚登出后执行**，否则 401 会被误记为「被拦截」。
+- 每次运行记录：浏览器 + **精确版本**、OS、访问方式（`127.0.0.1` / `localhost` / VPN 下的 LAN IP）；Safari 另记**观察到可用的最低版本**（plan R1：`frame-src http://*:<port>`）。
+- 浏览器矩阵：桌面 Chrome、桌面 Firefox、iOS Safari（LAN）；18A.2 的隐私模式见下。
+
+**启动 fixtures**（hub 所在机器；默认仅回环，**不要用日用服务代替**）：
+
+```sh
+# 回环（默认）：upstream :8998，foreign :8999
+node scripts/dev/proxy-frame-fixtures.mjs --port 8998 --foreign-port 8999
+# 经 LAN/VPN 访问（显式放开 0.0.0.0，用完即停）：
+node scripts/dev/proxy-frame-fixtures.mjs --lan
+```
+
+随后在 hub 页面粘贴或发送 `http://127.0.0.1:8998/plain`（以及 `/xfo`、`/fa`、`/probe?hub=http://H:<hub端口>`、`/bust`、`/popup`、`/cookie`、`/form`、`/ws`）作为消息文本打开预览；foreign 页：`http://H:8999/frame?src=<被嵌入URL>`。`H` 为浏览器访问 hub 所用的主机名，须与 foreign/代理同主机（同站）。结束按 Ctrl-C 停掉 fixtures，并清理测试 Cookie。
+
+fixtures 路由：`/plain` 无限制；`/xfo` `X-Frame-Options: DENY`；`/fa` CSP `frame-ancestors 'none'`；`/probe` 在框内对 hub 发 credentialed fetch（`/api/version`、`/api/proxy`）、form POST `/api/proxy/open`、`EventSource /api/events`、`<img src=/api/events>` 并把结果打印在页面上；`/bust` 尝试 `top.location=`；`/popup` `window.open`；`/cookie` 设置/读取 Cookie；`/form` 同源 POST；`/ws` WebSocket echo。foreign 的 `/frame` 只在页面上报告 iframe `load` 事件——**refused 也会触发 load，必须以框内实际渲染为准**。
+
+#### 18A 正向 / 兼容（阻塞）
+
+| #     | 操作                                                                                                                                          | 预期                                                                                                                    | 浏览器+版本 | OS  | 访问方式 | 结果 rendered/refused/401 | 备注 |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | --- | -------- | ------------------------- | ---- |
+| 18A.1 | 对话框打开 `/plain`                                                                                                                           | enter 流程在框内完成并渲染；DevTools → Application 可见 `pwh_px_<port>` Cookie                                          |             |     |          |                           |      |
+| 18A.2 | `/cookie` 设置后框内刷新；`/form` 提交；`/ws` 页显示 `echo`。再分别在 Chrome「阻止第三方 Cookie」、Firefox ETP Strict、Safari 默认 ITP 下重复 | Cookie 值保持；POST 成功（页面显示 `round-trip ok`，`Sec-Fetch-Site: same-origin`）；WS 收到 echo；三种隐私模式结果相同 |             |     |          |                           |      |
+| 18A.3 | 同一目标 20 次：打开 / 关闭 / 框内刷新 / 「新标签打开」，期间保持一个 `/ws` 标签                                                              | 从不出现 `proxy.rate`/`429 sessions`；`/ws` 标签保持连接（复用 gate 会话，plan §3）                                     |             |     |          |                           |      |
+| 18A.4 | 浏览器拦截弹窗后点「新标签打开」                                                                                                              | fallback 链接可用                                                                                                       |             |     |          |                           |      |
+| 18A.5 | iOS Safari：全屏、关闭按钮、Back 行为                                                                                                         | ≤767px 全屏；关闭按钮可用；Back 先走框内历史，关闭 iframe 后恢复                                                        |             |     |          |                           |      |
+| 18A.6 | 旧 hub 档（无 `proxy.frame.v1`：用旧版 hub 或从 caps 去掉）                                                                                   | 点击走新标签流程，新识别格式同样新标签打开，不出现对话框                                                                |             |     |          |                           |      |
+
+#### 18B 负向矩阵（阻塞；每项结果记 rendered / refused / 401）
+
+| #     | 操作                                                                                                        | 预期                                                                                                                             | 浏览器+版本 | OS  | 访问方式 | 结果 rendered/refused/401 | 备注 |
+| ----- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------- | --- | -------- | ------------------------- | ---- |
+| 18B.1 | 对话框打开 `/xfo`、`/fa`；另 `curl -I` 代理 URL（有效会话 Cookie）                                          | 两者 **refused**，标准提示可见；`curl -I` 显示 XFO/CSP **原样透传**（D2）                                                        |             |     |          |                           |      |
+| 18B.2 | foreign `http://H:8999/frame?src=` 嵌 `http://H:79xx/__pwh_proxy__/x`（404 页）；再嵌 `/xfo`；再嵌 `/plain` | 404 页 **refused**；`/xfo` **refused**；`/plain` **rendered**——该残余在无本功能时已存在（上游未限制），**记录，不判失败**        |             |     |          |                           |      |
+| 18B.3 | 跨站页（`http://127.0.0.2:8999` 或另一 LAN IP 上的 foreign）嵌代理 URL                                      | Cookie 不发送，401 页 **refused**                                                                                                |             |     |          |                           |      |
+| 18B.4 | foreign 嵌 hub：`/frame?src=http://H:<hub端口>/`                                                            | **refused**（XFO `DENY` / `frame-ancestors 'none'`）                                                                             |             |     |          |                           |      |
+| 18B.5 | 对话框内打开 `/probe?hub=http://H:<hub端口>`                                                                | 与本文 §8 A 组一致：fetch/EventSource/form 为 403 `E_CSRF` 或不可读（**看 Network 状态码**）、img 失败；无 `pwh_*` Cookie 被发送 |             |     |          |                           |      |
+| 18B.6 | 对话框内打开 `/bust`                                                                                        | hub 标签**不跳转**；页面显示 `top.location=` 被阻止                                                                              |             |     |          |                           |      |
+| 18B.7 | 对话框内打开 `/popup` 并点按钮                                                                              | 打开一个**未沙箱**标签（文档化：沙箱不是恶意应用沙箱，`allow-popups-to-escape-sandbox`）                                         |             |     |          |                           |      |
+| 18B.8 | 有效会话下，框内：复用已消费 enter 链接（410）、`/__pwh_proxy__/x`（404）、停掉 upstream 后刷新（502）      | 三种 proxy 生成页均 **rendered** 其文字（D3 `frame-ancestors 'self' <hub origins>`）                                             |             |     |          |                           |      |
+
+**通过标准：** 18A 全部 rendered/可用，18B.1–18B.4、18B.6 为 refused/未跳转，18B.5 同 §8，18B.7/18B.8 如预期。任何偏差立即保留复现并停止放行；18B.2 的 `/plain` 残余与 18B.7 的未沙箱弹窗是已披露边界，只记录。
+
 ## 结果模板
 
-| 步骤                                | 浏览器/模式                                | PASS / FAIL / 未执行及原因 | 脱敏证据 |
-| ----------------------------------- | ------------------------------------------ | -------------------------- | -------- |
-| 1–17（分别填写，不合并成一个 PASS） | Chrome / Firefox / iOS Safari LAN / B组CLI |                            |          |
+| 步骤                                                                | 浏览器/模式                                | PASS / FAIL / 未执行及原因 | 脱敏证据 |
+| ------------------------------------------------------------------- | ------------------------------------------ | -------------------------- | -------- |
+| 1–18（分别填写，不合并成一个 PASS；18 使用其自带的 18A/18B 记录列） | Chrome / Firefox / iOS Safari LAN / B组CLI |                            |          |
 
 **当前状态：待用户执行。** 自动 T-I1 和 UI 契约测试的结果记在 `X3-report.md`，不作为本表的浏览器 PASS。
 

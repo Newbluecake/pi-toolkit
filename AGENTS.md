@@ -593,6 +593,16 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   upload; residual: a hidden FIN behind full buffers waits for the 120 s idle timeout), audit lines carry no
   path/query/cookie/code. Design: `docs/dev/web-hub-proxy/plan.md`; package reports `{XA,X0,X1a,X1b,X1c,X2,X3}-report.md`;
   real-browser gate `docs/dev/web-hub-proxy/acceptance.md`.
+  **In-page link preview (link-preview plan r2, `docs/dev/web-hub-proxy/link-preview-plan.md`)**: cap `proxy.frame.v1` is
+  declared iff `config.proxy`; only with it does a click on a recognized link open a lazy-loaded in-page dialog iframing the proxy
+  origin (older hubs keep the new-tab flow). The hub UI CSP gains `frame-src 'self' http://*:<p>` limited to the configured
+  `portRange` (proxy off ⇒ CSP byte-identical); hub XFO/`frame-ancestors 'none'` stay. Proxy-generated pages (enter 303 and every
+  error page answered after Host validation) are frameable by the hub origin(s) only via a per-request `ProxyReplyPolicy`; an
+  invalid Host (421), the `closing` 503 and WS rejects keep the strict headers, and **upstream framing headers
+  (`X-Frame-Options`/`frame-ancestors`) pass through untouched (user ruling D2)** — a no-embed app shows refused in the dialog,
+  with 「新标签打开」 always offered. Enter reuses the browser's live same-identity gate session (no new session / `Set-Cookie`,
+  caps unchanged, nothing evicted), so repeated opens never hit `429 sessions`. Browser gate: `acceptance.md` §18, fixtures
+  `scripts/dev/proxy-frame-fixtures.mjs`.
   **Avatar (web-hub-avatar plan v2.1, `webHub.avatar`, default on)**: the hub stores one validated PNG at
   `hub/avatar/{fs,store,validate,routes}.ts`, assembles it through `hub.ts`, and dispatches the three
   `/api/avatar*` endpoints on both authenticated listeners via `hub/http.ts`; `avatar.v1` is advertised only
