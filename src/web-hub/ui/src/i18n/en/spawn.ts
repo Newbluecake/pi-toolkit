@@ -66,6 +66,16 @@ const spawn = {
   mkdirErrNoParent: "The parent directory does not exist.",
   mkdirErrTimeout: "The hub did not answer in time — retry.",
   mkdirErrNetwork: "Network error — retry.",
+  // created-dirs plan r2 §4: mkdir success acknowledgments (a persistent role=status line
+  // under the cwd input). `mkdirAckSelected` — the new folder became the cwd input's value
+  // and the browse panel closed; `mkdirAckCreated` — a LATE success (the user moved on while
+  // the request was in flight: never overwrites the input, never re-opens the panel);
+  // `mkdirAckUnregistered` — selected, but the hub did not mark it `known` (outside the
+  // spawn roots or a pre-feature hub) and this is a plaintext LAN connection.
+  mkdirAckSelected: "Created and chosen as the start directory: {path}",
+  mkdirAckCreated: "Folder created: {path}",
+  mkdirAckUnregistered:
+    "Created and filled in {path}, but the hub did not register it as a startable directory (it may be outside the spawn roots) — starting there may be refused over this plaintext LAN connection.",
   pickerSubmit: "Start",
   pickerSubmitting: "Starting…",
   pickerAwaiting: "Waiting for the session to come up…",
@@ -81,6 +91,12 @@ const spawn = {
 
   // --- DirPicker error kinds (NewSessionFailKind, plan §3.2) ---
   errDir: "The directory was rejected — pick a recent or allowed directory",
+  // created-dirs plan r2 §4: cause-specific E_DIR lines (the LAN-only `detail` field).
+  errDirPlaintextLan:
+    "Directory rejected — a plaintext-HTTP LAN connection can only start in known directories: ones pi has run in, or folders created with 「New folder」 inside an allowed root. To use any directory under a root: open the hub from this machine (loopback), or through a trusted HTTPS reverse proxy.",
+  errDirLanKnown:
+    "Directory rejected — this hub's LAN access only allows known directories (ones pi has run in, or folders created inside an allowed root).",
+  errDirOutsideRoots: "Directory rejected — it is neither inside an allowed root nor a known directory.",
   errDenied: "Spawning is not allowed on this hub right now",
   errLimit: "Process limit reached — stop a session or wait for one to exit",
   errRate: "Too many spawn requests — retry in a moment",

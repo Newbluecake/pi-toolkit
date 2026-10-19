@@ -59,6 +59,11 @@ const spawn = {
   mkdirErrNoParent: "父目录不存在。",
   mkdirErrTimeout: "hub 未及时应答 — 请重试。",
   mkdirErrNetwork: "网络错误 — 请重试。",
+  // created-dirs plan r2 §4: 新建文件夹成功确认（cwd 输入框下方的常驻 role=status 行）
+  mkdirAckSelected: "已新建并选为启动目录：{path}",
+  mkdirAckCreated: "已新建文件夹：{path}",
+  mkdirAckUnregistered:
+    "已新建并填入 {path}；但 hub 未把它登记为可启动目录（可能不在 spawn 根目录内），此明文 LAN 连接下启动可能被拒绝。",
   pickerSubmit: "启动",
   pickerSubmitting: "正在启动…",
   pickerAwaiting: "正在等待会话上线…",
@@ -72,6 +77,11 @@ const spawn = {
   fpDelivered: "fp: delivered",
 
   errDir: "目录被拒绝 — 请选择最近目录或允许的目录",
+  // created-dirs plan r2 §4: 按 E_DIR detail 区分的原因文案（仅 LAN 侦听器下发 detail）
+  errDirPlaintextLan:
+    "目录被拒绝 — 明文 HTTP 的 LAN 连接只能在已知目录启动：pi 运行过的目录，或在允许的根目录内用「新建文件夹」创建的文件夹。要使用任意根目录：改用本机（loopback）访问，或经受信任的 HTTPS 反向代理访问。",
+  errDirLanKnown: "目录被拒绝 — 此 hub 的 LAN 访问只允许已知目录（pi 运行过的目录，或在允许的根目录内新建的文件夹）。",
+  errDirOutsideRoots: "目录被拒绝 — 它既不在允许的根目录内，也不是已知目录。",
   errDenied: "此 hub 当前不允许新建会话",
   errLimit: "进程数已达上限 — 请停止一个会话或等待其退出",
   errRate: "请求过于频繁 — 稍后重试",

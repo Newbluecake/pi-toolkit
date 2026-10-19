@@ -608,6 +608,9 @@ export function createClient(deps) {
     if (ra !== undefined) out.retryAfterS = ra;
     if (typeof b.resolvedCwd === "string") out.resolvedCwd = b.resolvedCwd;
     if (typeof b.reason === "string") out.reason = b.reason;
+    // created-dirs plan r2 §4: the LAN-only E_DIR cause (additive — a pre-feature hub
+    // simply never sends it; unknown values ride through, the UI maps/falls back).
+    if (typeof b.detail === "string") out.detail = b.detail;
     return out;
   }
 
@@ -779,7 +782,13 @@ export function createClient(deps) {
           return err;
         }
         const d = out.data;
-        return { ok: true, path: typeof d.path === "string" ? d.path : "" };
+        // created-dirs plan r2 §4: `known:true` (created inside the spawn roots ⇒ already a
+        // known spawn dir) rides only when the hub sent exactly that.
+        return {
+          ok: true,
+          path: typeof d.path === "string" ? d.path : "",
+          ...(d.known === true ? { known: true } : {}),
+        };
       } catch (e) {
         const { retryable: _retryable, ...rest } = spawnFromError(e);
         return rest;

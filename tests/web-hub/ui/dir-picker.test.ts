@@ -295,6 +295,34 @@ describe("DirPicker.vue (SP12)", () => {
     expect(h.starts[1]!.id).not.toBe(h.starts[0]!.id);
     expect(h.starts[1]!.cwd).toBe("/home/u/keepme");
   });
+
+  it("E_DIR `detail` (created-dirs r2 §4) selects the cause-specific copy; absent/unknown ⇒ the generic errDir", async () => {
+    const cases: ReadonlyArray<{ detail: string | undefined; expect: string }> = [
+      { detail: "plaintext-lan", expect: "plaintext-HTTP LAN connection can only start in known directories" },
+      { detail: "lan-known", expect: "LAN access only allows known directories" },
+      { detail: "outside-roots", expect: "neither inside an allowed root nor a known directory" },
+      // loopback / pre-feature hub: no detail ⇒ the generic line
+      { detail: undefined, expect: "The directory was rejected — pick a recent or allowed directory" },
+      // forward-compat: an unknown future value also falls back to the generic line
+      { detail: "future-cause", expect: "The directory was rejected — pick a recent or allowed directory" },
+    ];
+    for (const c of cases) {
+      const outcome: SpawnOutcome = {
+        ok: false,
+        error: "E_DIR",
+        reason: "not-allowed",
+        retryable: false,
+        // (the `as` covers the deliberate forward-compat lie in the last case)
+        ...(c.detail === undefined ? {} : { detail: c.detail as "plaintext-lan" }),
+      };
+      const h = harness({ start: async () => outcome });
+      mountPicker(h);
+      await flushPromises();
+      const idx = qa(".spawn-picker").length - 1;
+      await click(qa(".spawn-picker-actions .btn-primary")[idx]!);
+      expect(qa(".spawn-picker-error")[idx]!.textContent).toContain(c.expect);
+    }
+  });
 });
 
 describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () => {
@@ -479,15 +507,37 @@ describe("DirPicker.vue — 目录浏览器 + 新建文件夹 (spawn-dirbrowse/-
 
   function browseHarness(
     preview: (req: { agentKey: string; sessionId: string; path: string; dir?: true }) => Promise<unknown>,
-    opts: { caps?: string[]; mkdir?: (path: string, name: string) => Promise<unknown> } = {},
+    opts: {
+      caps?: string[];
+      mkdir?: (path: string, name: string) => Promise<unknown>;
+      recent?: DirEntryWire[];
+    } = {},
   ) {
     return harness({
       start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }),
       caps: opts.caps ?? DIR_CAPS,
       withSession: true,
       preview,
+      ...(opts.recent === undefined ? {} : { recent: opts.recent }),
       ...(opts.mkdir === undefined ? {} : { mkdir: opts.mkdir }),
     });
+  }
+
+  /** created-dirs r2 §4 (#9): a manually-driven mkdir — every call parks until `resolve`. */
+  function deferredMkdir() {
+    const waiting: Array<{ path: string; name: string; settle: (out: unknown) => void }> = [];
+    return {
+      mkdir: (path: string, name: string) =>
+        new Promise<unknown>((settle) => {
+          waiting.push({ path, name, settle });
+        }),
+      pending: () => waiting.length,
+      resolve(out: unknown): void {
+        const w = waiting.shift();
+        if (w === undefined) throw new Error("no parked mkdir");
+        w.settle(out);
+      },
+    };
   }
 
   it("no preview.dir.v1 cap ⇒ the 「浏览」 toggle never renders", async () => {
@@ -622,21 +672,10 @@ describe("DirPicker.vue — 目录浏览器 + 新建文件夹 (spawn-dirbrowse/-
     expect(q(".spawn-browse .spawn-picker-error").textContent).toContain("does not support directory browsing");
   });
 
-  it("「新建文件夹」: inline form → mkdir(browsePath, name) → success refreshes the listing", async () => {
-    let created = false;
-    const h = browseHarness(
-      async () => ({
-        ok: true,
-        kind: "dir",
-        listing: listing(created ? [{ name: "fresh", type: "dir" }] : []),
-      }),
-      {
-        mkdir: async () => {
-          created = true;
-          return { ok: true, path: "/home/u/proj/fresh" };
-        },
-      },
-    );
+  it("「新建文件夹」 success ⇒ SELECTS the folder: cwd input filled, panel closed, persistent ack (created-dirs r2 §4)", async () => {
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }), {
+      mkdir: async () => ({ ok: true, path: "/home/u/proj/fresh", known: true }),
+    });
     mountPicker(h, { prefillCwd: "/home/u/proj" });
     await flushPromises();
     await click(q(".spawn-browse-toggle"));
@@ -646,10 +685,162 @@ describe("DirPicker.vue — 目录浏览器 + 新建文件夹 (spawn-dirbrowse/-
     await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
     await click(q(".spawn-mkdir-form .btn-primary"));
     expect(h.mkdirCalls).toEqual([{ path: "/home/u/proj", name: "fresh" }]);
-    // success ⇒ the current directory reloads and the new folder is drillable
-    expect(h.previewCalls).toHaveLength(2);
-    expect(q(".spawn-browse-row").textContent).toContain("fresh");
-    expect(document.body.querySelector(".spawn-mkdir-form")).toBeNull(); // form closed
+    // select: the input is filled, the panel closed, NO listing refresh (no drill-in anymore)
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj/fresh");
+    expect(document.body.querySelector(".spawn-browse")).toBeNull();
+    expect(h.previewCalls).toHaveLength(1);
+    const ack = q(".spawn-mkdir-ack");
+    expect(ack.getAttribute("role")).toBe("status");
+    expect(ack.textContent).toContain("Created and chosen as the start directory: /home/u/proj/fresh");
+    // the ack clears as soon as the cwd diverges from the created path
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/elsewhere");
+    expect(document.body.querySelector(".spawn-mkdir-ack")).toBeNull();
+  });
+
+  it("mkdir success WITHOUT `known` on plaintext LAN ⇒ still selected, but the ack warns spawning may be refused", async () => {
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }), {
+      mkdir: async () => ({ ok: true, path: "/home/u/proj/fresh" }), // no `known` — old hub or outside roots
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj", plaintext: true });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj/fresh");
+    expect(document.body.querySelector(".spawn-browse")).toBeNull();
+    expect(q(".spawn-mkdir-ack").textContent).toContain("may be refused over this plaintext LAN connection");
+  });
+
+  it("mkdir success WITHOUT `known` but NOT plaintext LAN ⇒ the plain selected ack (no warning)", async () => {
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }), {
+      mkdir: async () => ({ ok: true, path: "/home/u/proj/fresh" }),
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" }); // plaintext prop absent
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(q(".spawn-mkdir-ack").textContent).toContain("Created and chosen as the start directory");
+    expect(q(".spawn-mkdir-ack").textContent).not.toContain("may be refused");
+  });
+
+  it("editing the cwd while mkdir is pending ⇒ the late success never overwrites it (「已新建文件夹」 ack only, panel stays open)", async () => {
+    const d = deferredMkdir();
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([{ name: "sub", type: "dir" }]) }), {
+      mkdir: d.mkdir,
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(d.pending()).toBe(1);
+
+    await setValue(q<HTMLInputElement>("#spawn-cwd"), "/home/u/edited"); // user moved on mid-flight
+    d.resolve({ ok: true, path: "/home/u/proj/fresh", known: true });
+    await flushPromises();
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/edited"); // never overwritten
+    expect(document.body.querySelector(".spawn-browse")).not.toBeNull(); // panel NOT closed
+    expect(q(".spawn-mkdir-ack").textContent).toContain("Folder created: /home/u/proj/fresh");
+  });
+
+  it("picking recent dir B while mkdir is pending ⇒ the late success keeps B (ackCreated only)", async () => {
+    const d = deferredMkdir();
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }), {
+      mkdir: d.mkdir,
+      recent: [{ cwd: "/home/u/beta", label: "beta", at: 1000 }],
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(d.pending()).toBe(1);
+
+    await click(q(".spawn-recent-btn")); // pick B mid-flight
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/beta");
+    d.resolve({ ok: true, path: "/home/u/proj/fresh", known: true });
+    await flushPromises();
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/beta"); // B survives
+    expect(q(".spawn-mkdir-ack").textContent).toContain("Folder created: /home/u/proj/fresh");
+  });
+
+  it("closing the panel while mkdir is pending ⇒ the late success never re-opens it (ackCreated only)", async () => {
+    const d = deferredMkdir();
+    const h = browseHarness(async () => ({ ok: true, kind: "dir", listing: listing([]) }), {
+      mkdir: d.mkdir,
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(d.pending()).toBe(1);
+
+    await click(q(".spawn-browse-toggle")); // close the panel mid-flight
+    expect(document.body.querySelector(".spawn-browse")).toBeNull();
+    d.resolve({ ok: true, path: "/home/u/proj/fresh", known: true });
+    await flushPromises();
+    expect(document.body.querySelector(".spawn-browse")).toBeNull(); // stays closed
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj"); // untouched
+    expect(q(".spawn-mkdir-ack").textContent).toContain("Folder created: /home/u/proj/fresh");
+  });
+
+  it("navigating while mkdir is pending supersedes it: the older success is ackCreated-only, a stale ERROR is dropped", async () => {
+    const d = deferredMkdir();
+    const h = browseHarness(
+      async (req) =>
+        req.path === "/home/u/proj/sub"
+          ? { ok: true, kind: "dir", listing: listing([{ name: "deep", type: "dir" }]) }
+          : { ok: true, kind: "dir", listing: listing([{ name: "sub", type: "dir" }]) },
+      { mkdir: d.mkdir },
+    );
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-browse-toggle"));
+    await click(q(".spawn-mkdir-open"));
+    await setValue(q<HTMLInputElement>(".spawn-mkdir-input"), "fresh");
+    await click(q(".spawn-mkdir-form .btn-primary"));
+    expect(d.pending()).toBe(1);
+
+    await click(q("button.spawn-browse-row")); // drill into sub — the mkdir's intent is stale now
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj/sub");
+    d.resolve({ ok: true, path: "/home/u/proj/fresh", known: true });
+    await flushPromises();
+    // the older request resolving after the newer navigation: selection ignored
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj"); // untouched
+    expect(q(".spawn-browse-path").textContent).toBe("/home/u/proj/sub"); // panel where the user left it
+    expect(q(".spawn-mkdir-ack").textContent).toContain("Folder created: /home/u/proj/fresh");
+
+    // a stale ERROR is dropped silently (no error line, no state damage).
+    // (picker 1's mkdir form is still open — the stale success touches nothing — so close
+    // it first to keep the per-picker indexes below aligned.)
+    await click(q(".spawn-mkdir-form .btn-ghost"));
+    const d2 = deferredMkdir();
+    const h2 = browseHarness(
+      async () => ({ ok: true, kind: "dir", listing: listing([{ name: "sub", type: "dir" }]) }),
+      {
+        mkdir: d2.mkdir,
+      },
+    );
+    mountPicker(h2, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    const panel2 = qa(".spawn-picker")[1]!;
+    await click(panel2.querySelector<HTMLElement>(".spawn-browse-toggle")!);
+    await click(panel2.querySelector<HTMLElement>(".spawn-mkdir-open")!);
+    await setValue(panel2.querySelector<HTMLInputElement>(".spawn-mkdir-input")!, "taken");
+    await click(panel2.querySelector<HTMLElement>(".spawn-mkdir-form .btn-primary")!);
+    expect(d2.pending()).toBe(1);
+    await click(panel2.querySelector<HTMLElement>("button.spawn-browse-row")!); // supersede via navigation
+    d2.resolve({ ok: false, error: "E_CONFLICT", reason: "exists", status: 409 });
+    await flushPromises();
+    expect(qa(".spawn-mkdir-error")).toHaveLength(0); // dropped, not rendered
+    expect(qa(".spawn-mkdir-ack")).toHaveLength(1); // only the FIRST picker's ack
   });
 
   it("mkdir failure shows the classified line and keeps the form open (exists / invalid name)", async () => {

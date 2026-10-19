@@ -6,7 +6,10 @@
   its own (spawn-dirbrowse/-dirmkdir, 2026-10 user 拍板: the optional first-prompt textarea is
   GONE — the flow layer's `fp:*` mechanism stays for flows that carry one; and the cwd field
   gains an in-dialog directory BROWSER riding the existing read-only `GET /api/preview?dir=1`
-  listing endpoint, plus a 「新建文件夹」 inline form riding the NEW `POST /api/headless/mkdir`):
+  listing endpoint, plus a 「新建文件夹」 inline form riding the NEW `POST /api/headless/mkdir`
+  — created-dirs plan r2 §4: a successful mkdir SELECTS the created folder (fills the cwd
+  input + closes the panel) with a persistent ack line, guarded by an operation generation
+  so a late answer never overwrites a newer choice):
 
   - `idle` — the form: cwd input (prefilled with the selected agent's cwd or `~`) + the 「浏览」
     toggle (only when the hub declares `preview.dir.v1` AND the preview transport exists), the
@@ -299,6 +302,8 @@ const followBusy = ref(false);
 let followTimer: ReturnType<typeof setTimeout> | null = null;
 
 watch(cwd, () => {
+  // created-dirs r2 §4: the mkdir ack clears as soon as the cwd diverges from the created path
+  if (mkdirAck.value !== null && cwd.value !== mkdirAck.value.path) mkdirAck.value = null;
   if (!browseOpen.value) return; // panel closed ⇒ no follow (also the anti-loop guard)
   if (followTimer !== null) clearTimeout(followTimer);
   followTimer = setTimeout(() => {
@@ -320,6 +325,7 @@ function browseToggle(): void {
     browseClose();
     return;
   }
+  mkdirSeq += 1; // a fresh browsing session supersedes any in-flight mkdir
   browseOpen.value = true;
   followHint.value = false;
   mkdirCancel();
@@ -330,6 +336,7 @@ function browseToggle(): void {
 }
 
 function browseClose(): void {
+  mkdirSeq += 1; // created-dirs r2 §4 (#9): a closed panel is never re-opened by a late mkdir
   browseOpen.value = false;
   followHint.value = false;
   followBusy.value = false;
@@ -346,6 +353,7 @@ function browseClose(): void {
 function browseInto(name: string): void {
   const child = childPreviewPath(browsePath.value, name);
   if (child === null) return; // a name that can't join stays inert (defensive — protocol already shape-checks)
+  mkdirSeq += 1; // navigation supersedes an in-flight mkdir's select-intent
   followHint.value = false;
   void browseLoad(child);
 }
@@ -353,6 +361,7 @@ function browseInto(name: string): void {
 function browseUp(): void {
   const parent = browseParent.value;
   if (parent === null) return;
+  mkdirSeq += 1; // same supersede rule as browseInto
   followHint.value = false;
   void browseLoad(parent);
 }
@@ -363,12 +372,24 @@ function browseChoose(): void {
   browseClose();
 }
 
-// --- 「新建文件夹」 (spawn-dirmkdir): inline form in the panel header; a successful create
-// refreshes the current listing so the new folder is immediately drillable. ---------------
+// --- 「新建文件夹」 (spawn-dirmkdir + created-dirs plan r2 §4): inline form in the panel
+// header. A successful create SELECTS the new folder — fills the cwd input, closes the
+// browse panel (one click from 启动; intent in a _spawn_ picker is "start there", and the
+// close-first order keeps the follow watcher silent) — and shows a persistent role=status
+// ack under the cwd input (`mkdirAck*`; the plaintext-LAN `!known` variant warns that
+// spawning there may be refused). The operation generation below (r1 #9) guarantees a LATE
+// answer never overwrites a newer cwd/choice and never re-opens a closed panel: it only
+// announces 「已新建文件夹：{path}」.
 const mkdirOpen = ref(false);
 const mkdirName = ref("");
 const mkdirBusy = ref(false);
 const mkdirErrorKey = ref<string | null>(null);
+/** The persistent mkdir success ack under the cwd input (`spawn.mkdirAck*` + {path}). */
+const mkdirAck = ref<{ readonly key: string; readonly path: string } | null>(null);
+/** Operation generation (created-dirs r1 #9): bumped on every mkdirConfirm start,
+ *  mkdirCancel, browseClose, browseInto/Up/Toggle — an answer whose captured seq no longer
+ *  matches is stale. */
+let mkdirSeq = 0;
 
 function mkdirStart(): void {
   mkdirOpen.value = true;
@@ -377,6 +398,7 @@ function mkdirStart(): void {
 }
 
 function mkdirCancel(): void {
+  mkdirSeq += 1; // any in-flight mkdir's answer is now stale
   mkdirOpen.value = false;
   mkdirName.value = "";
   mkdirBusy.value = false;
@@ -408,14 +430,32 @@ async function mkdirConfirm(): Promise<void> {
   }
   mkdirBusy.value = true;
   mkdirErrorKey.value = null;
-  const out = await mkdir(browsePath.value, name);
+  // created-dirs r2 §4 (#9): capture the operation generation + the intent snapshot — a
+  // late answer may only act when nothing moved underneath it.
+  const seq = ++mkdirSeq;
+  const cwdAtStart = cwd.value;
+  const pathAtStart = browsePath.value;
+  const out = await mkdir(pathAtStart, name);
   mkdirBusy.value = false;
   if (!out.ok) {
+    if (seq !== mkdirSeq) return; // a stale operation's error is dropped entirely
     mkdirErrorKey.value = classifyMkdirError(out);
     return;
   }
-  mkdirCancel();
-  await browseLoad(browsePath.value); // refresh — the new folder appears, ready to drill into
+  if (seq === mkdirSeq && browseOpen.value && cwd.value === cwdAtStart && browsePath.value === pathAtStart) {
+    // fresh ⇒ select: fill the cwd input with the created path + close the panel (the
+    // 「选择此目录」 path), then ack. `browseClose` bumps the seq — the request has settled.
+    cwd.value = out.path;
+    browseClose();
+    mkdirAck.value =
+      out.known !== true && props.plaintext === true
+        ? { key: "spawn.mkdirAckUnregistered", path: out.path }
+        : { key: "spawn.mkdirAckSelected", path: out.path };
+    return;
+  }
+  // stale/late success: announce the creation only — never overwrite a newer cwd, never
+  // re-open a closed panel.
+  mkdirAck.value = { key: "spawn.mkdirAckCreated", path: out.path };
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +524,7 @@ const submitBtn = ref<HTMLButtonElement | null>(null);
 function onSubmit(): void {
   const ns = newSession.value;
   if (ns === null || submitDisabled.value) return;
+  mkdirAck.value = null; // a submit consumes/dismisses the mkdir ack
   // 2026-10-12 拍板: no `model` field — the hub applies its default-model preference.
   const input: NewSessionInput = {
     cwd: cwd.value.trim(),
@@ -517,6 +558,14 @@ const HINT_KEYS: Record<string, string> = {
   "model-rejected": "spawn.hintModelRejected", // F2/D5: pi refused the model at boot
 };
 
+/** created-dirs plan r2 §4: the LAN-only `E_DIR` `detail` values → their cause-specific
+ *  copy (unknown values fall through to the generic `spawn.errDir`). */
+const ERR_DIR_DETAIL_KEYS: Record<string, string> = {
+  "plaintext-lan": "spawn.errDirPlaintextLan",
+  "lan-known": "spawn.errDirLanKnown",
+  "outside-roots": "spawn.errDirOutsideRoots",
+};
+
 const failure = computed(() => {
   const f = flow.value;
   return f.phase === "failed" ? f : null;
@@ -524,6 +573,12 @@ const failure = computed(() => {
 const failureText = computed(() => {
   const f = failure.value;
   if (f === null) return null;
+  // created-dirs r2 §4: a LAN E_DIR carries its cause (`detail`) — render the specific line;
+  // loopback / a pre-feature hub / an unknown value fall back to the generic errDir.
+  if (f.kind === "dir" && f.detail !== undefined) {
+    const detailKey = ERR_DIR_DETAIL_KEYS[f.detail];
+    if (detailKey !== undefined) return t(detailKey);
+  }
   const key = ERR_KEYS[f.kind] ?? "spawn.errNetwork";
   return t(key);
 });
@@ -548,6 +603,7 @@ function onRetry(): void {
 function onCancelOrClose(): void {
   const f = flow.value;
   if (f.phase === "confirming") newSession.value?.cancel();
+  mkdirAck.value = null; // closing dismisses the mkdir ack
   emit("close");
 }
 
@@ -656,6 +712,11 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
                 <AppIcon name="folder" class="icon-sm" />{{ t("spawn.pickerBrowse") }}
               </button>
             </div>
+            <!-- created-dirs r2 §4: persistent mkdir success ack (selected / created-only /
+                 unregistered-on-plaintext-LAN); clears when the cwd diverges, on submit/close -->
+            <p v-if="mkdirAck !== null" class="spawn-picker-status spawn-mkdir-ack" role="status">
+              {{ t(mkdirAck.key, { path: mkdirAck.path }) }}
+            </p>
           </div>
 
           <div v-if="browseOpen" class="spawn-browse" :aria-label="t('spawn.pickerBrowse')">

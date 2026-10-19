@@ -31,6 +31,7 @@ import type {
 import type {
   RemoveAgentOutcome,
   RemoveTarget,
+  SpawnDirRejectDetail,
   SpawnDirsOutcome,
   SpawnListOutcome,
   SpawnOutcome,
@@ -683,6 +684,10 @@ export type NewSessionFlow =
       readonly hint?: string;
       readonly code?: string;
       readonly retryAfterS?: number;
+      /** created-dirs plan r2 §4: the LAN-only `E_DIR` cause, present only for
+       * `kind === "dir"` on a hub that sends it — the DirPicker maps it to the
+       * cause-specific `spawn.errDir*` copy (absent ⇒ the generic `spawn.errDir`). */
+      readonly detail?: SpawnDirRejectDetail;
       readonly reqId?: string;
       readonly spawnId?: string;
       readonly agentKey?: string;

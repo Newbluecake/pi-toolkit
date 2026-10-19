@@ -233,6 +233,11 @@ export type SpawnOutcome =
       /** 409 `E_CONFIRM_REQUIRED` (arch §6.3): the admitted realpath to echo back as `expectCwd`. */
       readonly resolvedCwd?: string;
       readonly reason?: string;
+      /** created-dirs plan r2 §4 (additive, LAN listener only): the cause of a 400
+       * `E_DIR{reason:"not-allowed"}` — which admission wall stopped the spawn. Absent on
+       * loopback and on pre-feature hubs ⇒ the UI falls back to the generic `spawn.errDir`
+       * line; an unrecognized value does the same (forward-compatible). */
+      readonly detail?: SpawnDirRejectDetail;
       /** session-history plan §3.6 (409 `E_CONFIRM_REQUIRED{reason:"session-open"}`): why the
        * hub insists on a fork + why it could not establish "no occupancy detected". Riding
        * the outcome (not just the flow) keeps `useNewSession`'s confirming phase lossless. */
@@ -275,6 +280,10 @@ export type SpawnPrefsOutcome =
 export type SpawnDirsOutcome =
   | { readonly ok: true; readonly recent: readonly DirEntryWire[]; readonly partial?: true }
   | { readonly ok: false; readonly error: string; readonly status: number };
+
+/** created-dirs plan r2 §4's frozen wire values for {@link SpawnOutcome}'s `detail` — the
+ * hub sends them on the LAN listener only (loopback `E_DIR` stays byte-identical). */
+export type SpawnDirRejectDetail = "plaintext-lan" | "lan-known" | "outside-roots";
 
 export type SpawnStopOutcome =
   { readonly ok: true; readonly state: SpawnState } | { readonly ok: false; readonly error: string };
@@ -332,7 +341,15 @@ export type SpawnHistoryOutcome =
  * `"not-directory"` / `"permission"` / `"readonly"` / …) for the DirPicker's classified
  * error line, `status` 0 for client-local codes (same convention as the other outcomes). */
 export type SpawnMkdirOutcome =
-  | { readonly ok: true; readonly path: string }
+  | {
+      readonly ok: true;
+      readonly path: string;
+      /** created-dirs plan r2 §3/§4 (additive): the hub recorded the created folder as a
+       * KNOWN spawn dir (it sat inside `webHub.spawn.roots`). Absent on pre-feature hubs and
+       * on out-of-roots creates ⇒ a plaintext-LAN picker warns that spawning there may be
+       * refused. */
+      readonly known?: true;
+    }
   | {
       readonly ok: false;
       readonly error: string;

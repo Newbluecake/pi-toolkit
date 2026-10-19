@@ -332,6 +332,33 @@ describe("useNewSession (plan §3.2 — #15 hard gate)", () => {
     expect(h.flow()).toMatchObject({ phase: "awaiting", spawnId: "sp2" });
   });
 
+  it("created-dirs r2 §4: the LAN-only E_DIR `detail` rides failed{kind:dir}; other kinds never carry it", async () => {
+    const h = make();
+    h.setStartImpl(async () => ({
+      ok: false,
+      error: "E_DIR",
+      reason: "not-allowed",
+      detail: "plaintext-lan",
+      retryable: false,
+    }));
+    await h.ns.submit(input());
+    expect(h.flow()).toMatchObject({ phase: "failed", kind: "dir", detail: "plaintext-lan" });
+
+    // pre-feature hub (no detail) ⇒ the field stays absent (the picker falls back to errDir)
+    const h2 = make();
+    h2.setStartImpl(async () => ({ ok: false, error: "E_DIR", message: "not a directory", retryable: false }));
+    await h2.ns.submit(input());
+    expect(h2.flow()).toMatchObject({ phase: "failed", kind: "dir" });
+    expect(h2.flow()).not.toHaveProperty("detail");
+
+    // a non-dir failure carrying a stray detail must not pass it through
+    const h3 = make();
+    h3.setStartImpl(async () => ({ ok: false, error: "E_LIMIT", detail: "plaintext-lan", retryable: false }));
+    await h3.ns.submit(input());
+    expect(h3.flow()).toMatchObject({ phase: "failed", kind: "limit" });
+    expect(h3.flow()).not.toHaveProperty("detail");
+  });
+
   it("another tab's record (origin.reqId not mine) never navigates this tab", async () => {
     const h = make();
     await h.ns.submit(input());

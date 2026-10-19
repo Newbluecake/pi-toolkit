@@ -854,6 +854,42 @@ describe.each([
     });
   });
 
+  it("mkdir(): created-dirs r2 §4 — a 200 carrying `known:true` rides it verbatim; without it the field is absent", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless/mkdir" ? resp(200, { ok: true, path: "/r/fresh", known: true }) : resp(200),
+    );
+    expect(await h.transport.spawn!.mkdir!("/r", "fresh")).toEqual({ ok: true, path: "/r/fresh", known: true });
+    const h2 = make(async (url) =>
+      url === "/api/headless/mkdir" ? resp(200, { ok: true, path: "/r/fresh" }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.mkdir!("/r", "fresh")).toEqual({ ok: true, path: "/r/fresh" });
+  });
+
+  it("start(): the LAN-only E_DIR `detail` rides the error half (created-dirs r2 §4); absent ⇒ the field is omitted", async () => {
+    const h = make(async (url) =>
+      url === "/api/headless"
+        ? resp(400, { error: "E_DIR", reason: "not-allowed", detail: "plaintext-lan" })
+        : resp(200),
+    );
+    expect(await h.transport.spawn!.start(startBody)).toEqual({
+      ok: false,
+      error: "E_DIR",
+      retryable: false,
+      reason: "not-allowed",
+      detail: "plaintext-lan",
+    });
+    // pre-feature hub / loopback: no detail ⇒ byte-identical legacy shape
+    const h2 = make(async (url) =>
+      url === "/api/headless" ? resp(400, { error: "E_DIR", reason: "not-allowed" }) : resp(200),
+    );
+    expect(await h2.transport.spawn!.start(startBody)).toEqual({
+      ok: false,
+      error: "E_DIR",
+      retryable: false,
+      reason: "not-allowed",
+    });
+  });
+
   it('list(): GET /api/headless with X-PWH:"1"; 200 {policy, items} rides as {policy, items}', async () => {
     const h = make(async (url) =>
       url === "/api/headless" ? resp(200, { policy: { allowed: true }, items: [{ spawnId: "sp1" }] }) : resp(200),
