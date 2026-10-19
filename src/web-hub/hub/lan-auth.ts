@@ -65,7 +65,7 @@ export interface LanLoginDeps {
  * user runs the DUMMY params so the timing profile never discloses user existence), and a
  * constant-time compare. Caller owns the KDF admission slot (acquire/release) and the limiter
  * accounting. */
-async function kdfMatches(
+export async function kdfMatches(
   user: LanUserRecord | undefined,
   password: string,
   deps: LanLoginDeps,
