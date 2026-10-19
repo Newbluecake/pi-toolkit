@@ -1033,4 +1033,40 @@ describe("session-card rendering", () => {
     const content = String(r.sentCards.at(-1)?.card ?? r.notices.at(-1)?.text);
     expect(content.length).toBeGreaterThan(0);
   });
+  it("marks the bound session: ✅ in text rows and card rows, primary button", () => {
+    const rows = makeSessions(AB).rows();
+    expect(renderListText(rows, AB[0]!.sessionId)).toContain("✅");
+    expect(renderListText(rows, AB[0]!.sessionId).split("\n")[0]).toContain("✅");
+    expect(renderListText(rows, AB[1]!.sessionId!).split("\n")[0]).not.toContain("✅");
+    const buttons: { sessionId: string; nonce: string; label: string }[] = AB.map((v) => ({
+      sessionId: v.sessionId,
+      nonce: `n-${v.sessionId}`,
+      label: v.name,
+    }));
+    const card = JSON.parse(renderListCard(rows, buttons, AB[1]!.sessionId)!) as {
+      body: { elements: { tag: string; content?: string; text?: { content: string }; type?: string }[] };
+    };
+    const md = card.body.elements[0]!.content!;
+    expect(md.split("\n")[1]).toContain("✅"); // second row is the bound one
+    expect(md).toContain("\n\n切换会话："); // blank line separates the list from the hint (Feishu merges them otherwise)
+    const bound = card.body.elements.find((e) => e.tag === "button" && e.text?.content === AB[1]!.name)!;
+    const other = card.body.elements.find((e) => e.tag === "button" && e.text?.content === AB[0]!.name)!;
+    expect(bound.type).toBe("primary");
+    expect(other.type).toBeUndefined();
+  });
+  it("the marker moves on the refresh PATCH after a successful click", async () => {
+    const r = rig(AB);
+    await r.list();
+    await r.flush();
+    r.click("session-b", "e-mark");
+    await r.flush();
+    const card = JSON.parse(r.patches.at(-1)!.card) as {
+      body: { elements: { tag: string; content?: string; text?: { content: string }; type?: string }[] };
+    };
+    const md = card.body.elements[0]!.content!;
+    expect(md.split("\n").find((l) => l.includes("sessio") && l.includes("✅"))).toContain("session-b".slice(0, 6));
+    const primary = card.body.elements.filter((e) => e.tag === "button" && e.type === "primary");
+    expect(primary).toHaveLength(1);
+    expect(primary[0]!.text?.content).toContain("session-b".slice(0, 6));
+  });
 });

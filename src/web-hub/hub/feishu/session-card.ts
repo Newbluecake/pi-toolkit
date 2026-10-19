@@ -108,9 +108,13 @@ const truncateCp = (s: string, max: number): string => {
   return chars.length <= max ? s : chars.slice(0, Math.max(0, max)).join("");
 };
 
-/** The pre-card plain text list, byte-identical to the legacy `/list` reply (D2: text is the base). */
-export function renderListText(rows: readonly FeishuSessionRow[]): string {
-  return rows.map((r, i) => `${i + 1}. ${r.label} [${r.state}/${r.mode}]`).join("\n") || "没有可用会话";
+/** The pre-card plain text list (D2: text is the base). The bound session is marked ✅. */
+export function renderListText(rows: readonly FeishuSessionRow[], currentSessionId?: string): string {
+  return (
+    rows
+      .map((r, i) => `${i + 1}. ${r.label} [${r.state}/${r.mode}]${r.sessionId === currentSessionId ? " ✅" : ""}`)
+      .join("\n") || "没有可用会话"
+  );
 }
 
 const CLICKABLE = new Set(["busy", "idle", "waiting"]);
@@ -129,7 +133,7 @@ export function listButtonLabel(row: FeishuSessionRow): string {
   return `${name}${suffix}`;
 }
 
-function cardJson(content: string, buttons: readonly ListCardButton[]): string {
+function cardJson(content: string, buttons: readonly ListCardButton[], currentSessionId?: string): string {
   return JSON.stringify({
     schema: "2.0",
     config: { update_multi: true },
@@ -139,6 +143,8 @@ function cardJson(content: string, buttons: readonly ListCardButton[]): string {
         ...buttons.map((b) => ({
           tag: "button",
           text: { tag: "plain_text", content: b.label },
+          // The bound session's button is highlighted.
+          ...(b.sessionId === currentSessionId ? { type: "primary" } : {}),
           behaviors: [{ type: "callback", value: { n: b.nonce } }],
         })),
       ],
@@ -154,15 +160,23 @@ function cardJson(content: string, buttons: readonly ListCardButton[]): string {
 export function renderListCard(
   rows: readonly FeishuSessionRow[],
   buttons: readonly ListCardButton[],
+  currentSessionId?: string,
 ): string | undefined {
   const build = (lineCap: number): string => {
     const shown = rows.slice(0, Math.min(lineCap, FEISHU_CAPS.listCardMaxRows));
-    const lines = shown.map((r, i) => `${i + 1}. ${truncateCp(r.name, 16)} · ${r.sessionId.slice(0, 6)} · ${r.state}`);
-    if (rows.length > shown.length) lines.push(`另有 ${rows.length - shown.length} 个未显示`);
+    const lines = shown.map(
+      (r, i) =>
+        `${i + 1}. ${truncateCp(r.name, 16)} · ${r.sessionId.slice(0, 6)} · ${r.state}${r.sessionId === currentSessionId ? " ✅" : ""}`,
+    );
+    const hints: string[] = [];
+    if (rows.length > shown.length) hints.push(`另有 ${rows.length - shown.length} 个未显示`);
     if (rows.filter(isClickable).length > FEISHU_CAPS.listCardMaxButtons)
-      lines.push(`更多会话：/use <sid6> 或 /use <序号>`);
-    if (rows.length > 0) lines.push(`切换会话：点击按钮，或 /use <序号|sid前缀|名称>`);
-    return cardJson(lines.join("\n") || "没有可用会话", buttons);
+      hints.push(`更多会话：/use <sid6> 或 /use <序号>`);
+    if (rows.length > 0) hints.push(`切换会话：点击按钮，或 /use <序号|sid前缀|名称>`);
+    // Blank line before the hint block: Feishu markdown merges a plain line right after an ordered
+    // list item INTO that item (live-acceptance 2026-10-19: the hint fused with the last row).
+    if (hints.length > 0) lines.push("", ...hints);
+    return cardJson(lines.join("\n") || "没有可用会话", buttons, currentSessionId);
   };
   let card = build(FEISHU_CAPS.listCardMaxRows);
   if (Buffer.byteLength(card) > FEISHU_REPLY_LIMITS.maxCardBytes) card = build(20);
@@ -333,6 +347,9 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
       if (evicted !== undefined) ctls.delete(evicted);
     }
   }
+
+  /** The session currently bound to the card's chat/topic (undefined when unbound). */
+  const currentSid = (key: string): string | undefined => deps.state.bindings.get(key)?.sessionId ?? undefined;
 
   function buttonsOf(ctl: Ctl): ListCardButton[] {
     const rows = deps.sessions.rows();
@@ -890,7 +907,7 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
       )
       .catch(() => {});
     if (disposed || ctl.revoked || ctl.state !== "open") return;
-    const card = renderListCard(deps.sessions.rows(), buttonsOf(ctl));
+    const card = renderListCard(deps.sessions.rows(), buttonsOf(ctl), currentSid(ctl.key));
     if (card === undefined) {
       await handlePatchFailure(ctl, { effect: "none" });
       return;
@@ -910,7 +927,7 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
       await deps
         .notice(
           input.target,
-          renderListText(input.rows),
+          renderListText(input.rows, currentSid(key)),
           m.chatId,
           `fx${feishuKey(`listtext:${input.generation}:${m.messageId}`)}`,
         )
@@ -972,7 +989,7 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
       markClosed(oldCtl);
     }
     if (disposed || !mine()) return;
-    const card = renderListCard(input.rows, []);
+    const card = renderListCard(input.rows, [], currentSid(key));
     if (card === undefined) {
       releaseSlot();
       await textDegrade();
@@ -1060,7 +1077,7 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
       clock.clearTimeout(ctl.expiryTimer);
       return;
     }
-    const full = renderListCard(deps.sessions.rows(), buttonsOf(ctl));
+    const full = renderListCard(deps.sessions.rows(), buttonsOf(ctl), currentSid(ctl.key));
     if (full === undefined) {
       await handlePatchFailure(ctl, { effect: "none" });
       return;
@@ -1180,7 +1197,7 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
             mode: "rpc",
             state: "offline",
           });
-      const card = renderListCard(displayRows, buttonsOf(ctl));
+      const card = renderListCard(displayRows, buttonsOf(ctl), currentSid(ctl.key));
       if (card === undefined) {
         await handlePatchFailure(ctl, { effect: "none" });
         continue;
