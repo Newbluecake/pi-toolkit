@@ -11,7 +11,7 @@ import {
   slotBaselineOf,
 } from "../../src/cache-ttl/measure-classify.js";
 import {
-  OUTPUT_CAP,
+  OUTPUT_ALLOWANCE_TOKENS,
   P_BOUND_TOKENS,
   TTL_GAPS_MS,
   type SlotBaseline,
@@ -87,17 +87,30 @@ describe("classifyRead (§5.3)", () => {
 });
 
 describe("bound guard (G-a: frozen P_bound−1 / = / +1)", () => {
-  const cap = OUTPUT_CAP["anthropic-messages"];
+  const cap = OUTPUT_ALLOWANCE_TOKENS["anthropic-messages"];
   it("P_bound−1 and P_bound are within the bound, P_bound+1 breaks C1", () => {
     expect(boundBroken({ P: P_BOUND_TOKENS - 1, C: 0 }, P_BOUND_TOKENS, cap)).toBeUndefined();
     expect(boundBroken({ P: P_BOUND_TOKENS, C: 0 }, P_BOUND_TOKENS, cap)).toBeUndefined();
     expect(boundBroken({ P: P_BOUND_TOKENS + 1, C: 0 }, P_BOUND_TOKENS, cap)).toBe("C1");
   });
-  it("output above the cap breaks C2 (cap itself is fine, absent output is fine)", () => {
+  it("output above the allowance breaks C2 (allowance itself is fine, absent output is fine)", () => {
     expect(boundBroken({ P: 100, C: 0, output: cap }, P_BOUND_TOKENS, cap)).toBeUndefined();
     expect(boundBroken({ P: 100, C: 0, output: cap + 1 }, P_BOUND_TOKENS, cap)).toBe("C2");
     expect(boundBroken({ P: 100, C: 0 }, P_BOUND_TOKENS, cap)).toBeUndefined();
     expect(boundBroken(undefined, P_BOUND_TOKENS, cap)).toBeUndefined();
+  });
+  it.each(["anthropic-messages", "openai-completions", "openai-responses"] as const)(
+    "%s C2 uses the per-profile allowance, never the wire cap",
+    (api) => {
+      const allowance = OUTPUT_ALLOWANCE_TOKENS[api];
+      expect(boundBroken({ P: 100, C: 0, output: allowance }, P_BOUND_TOKENS, allowance)).toBeUndefined();
+      expect(boundBroken({ P: 100, C: 0, output: allowance + 1 }, P_BOUND_TOKENS, allowance)).toBe("C2");
+    },
+  );
+  it("live Responses output 32 (including reasoning) is well within its 512-token allowance", () => {
+    expect(
+      boundBroken({ P: 14287, C: 0, output: 32 }, P_BOUND_TOKENS, OUTPUT_ALLOWANCE_TOKENS["openai-responses"]),
+    ).toBeUndefined();
   });
   it("a real ~19.2k baseline fixture (cr-response: 15k own + 4.2k injected) is inside the bound with ~1.7k room", () => {
     const P = 15_000 + 4_224;

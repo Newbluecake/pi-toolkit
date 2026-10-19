@@ -362,3 +362,29 @@ No real endpoint was contacted. After explicit user budget approval:
 ```
 
 The existing skipped conformance cases were not enabled or altered. No new P4 test is skipped. The full suite's expected failure-path stderr did not produce any failed test. Prettier on the thirteen changed code/test/AGENTS paths printed `All matched files use Prettier code style!`; the appended report is checked as well. `git diff --check` exits 0. The full command's outer gate log is `/home/bluecake/.pi/agent/bash-jobs/01a14f77-c871-77e8-9185-0fd4654dbc0f/b_636FZK55.log`.
+
+### Fix: C2 output allowance (live finding)
+
+User acceptance on cr-response/gpt-6.1-sol reported 32 output tokens (25 reasoning tokens) for a max_output_tokens=16 request. The wire cap is a request hint, not a reliable bound on relay-reported reasoning-inclusive output. This fix keeps `OUTPUT_CAP` **1 / 1 / 16**, validator cap checks and C1/P_bound unchanged, and adds frozen `OUTPUT_ALLOWANCE_TOKENS` **64 / 512 / 512** (Anthropic / Completions / Responses).
+
+- `measure-classify.ts` / `measure-runner.ts`: C2 compares observed output to the per-profile allowance, not the wire cap. Output 32 and exactly 512 on Responses continue normally; 513 stops after one request. C1 still rejects P_bound+1 exactly as before.
+- `measure-plan.ts`: conditional worst prices the output allowance at the same P_bound prompt tier; missing-output/lost-usage accounting also uses the allowance so unreported cost cannot be understated. Typical cost keeps the wire-cap assumption and is unchanged. Printed conditions distinguish `C2 output ≤ 512 token(s) (wire cap 16)`. The Sonnet-class short conditional worst changes from about $1.33 to $1.35; neither prompt budget nor request-count cap changes.
+- `MeasureRunRecord.boundExceeded` additively records `{ condition, observed, limit }`. Final notice and measure status render compact English diagnostics such as `C2 output 513 > 512` or `C1 prompt 20914 > 20913`. First-write failures now retain the actual sent route and persist the diagnostic record, instead of losing the result before the ordinary write anchor was established. Older records without details still render safely. Other failure-persistence semantics are unchanged.
+- Reasoning investigation: pi-ai 1.2 `openai-responses.js:177–188` supports SimpleStreamOptions `reasoning:"minimal"`, uses `clampThinkingLevel` and maps the requested effort into the stock `{ reasoning:{effort,summary:"auto"}, include:["reasoning.encrypted_content"] }` construction at lines 266–276. P4 uses that option for Responses reasoning-capable models, with the real model's supported level/mapping; an off-only model leaves it unset. The validator requires the exact mapped effort, summary and encrypted-content include when this path is requested; sampling cannot promote it to high effort or add a thinking budget. Build-only optional transport `reasoning` and validator-expectation `reasoningEffort` fields carry this request; replay remains byte-identical and never rebuilds/raises caps. Real registry tests cover minimal and clamping to low when minimal is disabled. Completions is deliberately unchanged: its vendor-specific minimal paths (`openai-completions.js:622–725`) can enable thinking/template flags and budget fields; there is no single clean stock construction across those compat profiles to apply in this focused fix. No promise is made that a relay honours minimal effort or its wire cap.
+
+Changed source: `measure-types.ts`, `pipeline-ping-types.ts`, `pipeline-ping.ts`, `measure-classify.ts`, `measure-plan.ts`, `measure-runner.ts`, `measure-command.ts`, `measure-payload.ts`. Deliberately updated allowance/tier/cost expectations in `measure-classify.test.ts`, `measure-plan.test.ts`, `measure-command.test.ts`, `measure-runner.test.ts`; added actual-registry output32/512/513, minimal/clamp/replay and diagnostic-persistence assertions in `measure-openai-build.test.ts` and `measure-build.test.ts`. No unrelated assertions were relaxed. No live endpoint contacted and no commit created; the running Anthropic acceptance instance was not touched.
+
+Verification:
+
+- `timeout 280 npm run typecheck` — exit 0 (`tsc` source + contract + `vue-tsc`).
+- `timeout 280 npm run build` — exit 0.
+- `timeout 600 npx vitest run tests/cache-ttl tests/conformance/measure-build.test.ts tests/conformance/measure-openai-build.test.ts tests/integration/cache-ttl-measure.test.ts` — exit 0:
+
+```text
+ Test Files  38 passed (38)
+      Tests  1210 passed (1210)
+   Start at  09:37:34
+   Duration  4.15s (transform 1.99s, setup 742ms, collect 9.18s, tests 6.78s, environment 7ms, prepare 2.12s)
+```
+
+Prettier check on all fourteen changed code/test files and this report passes; `git diff --check` exits 0. Test log: `/tmp/measure-c2-target.log`. The requested real cr-response rerun still needs the main session's approval; these regressions use real local registry/builders with fake SSE only.

@@ -47,6 +47,7 @@ import {
   CONTROL_SLOT,
   MEASURE_TIMING,
   REQUEST_BUDGET,
+  OUTPUT_ALLOWANCE_TOKENS,
   RENEWAL,
   type CostAccount,
   type ControlRecord,
@@ -56,6 +57,7 @@ import {
   type Landed1h,
   type MeasureAction,
   type MeasureApi,
+  type MeasureBoundExceeded,
   type MeasureCancelReason,
   type MeasureClaim,
   type MeasureClaimToken,
@@ -176,6 +178,7 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
   let ended = false;
   let record: MeasureRunRecord | undefined;
   let statusNow: MeasureRunStatus = "running";
+  let boundExceeded: MeasureBoundExceeded | undefined;
   let sent = 0;
   let possiblyBilled = 0;
   let replacementsLeft = REQUEST_BUDGET.replacements;
@@ -255,6 +258,7 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
       runId: plan.runId,
       status,
       ...(reason !== undefined ? { statusReason: reason } : {}),
+      ...(boundExceeded !== undefined ? { boundExceeded } : {}),
       startedAt,
       ...(finalRun ? { finishedAt: clock.now() } : {}),
       load: { prefixes: written.length, ownTokens: written.reduce((n, s) => n + s.baseline!.S, 0) },
@@ -334,7 +338,8 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
             status === "partial" ||
             status === "no-cache" ||
             status === "control-inconclusive" ||
-            status === "inconclusive";
+            status === "inconclusive" ||
+            boundExceeded !== undefined;
           if (measuredSomething) deps.persist.persist(route, "latest", final);
           deps.persist.persist(route, "inProgress", null);
         }
@@ -623,7 +628,27 @@ export function startMeasurement(deps: MeasureRunnerDeps): MeasureRunHandle {
         }),
       );
     }
-    if (d.sent && boundBroken(d.usage, plan.tokens.pBound, plan.outputCap) !== undefined) {
+    const condition = d.sent ? boundBroken(d.usage, plan.tokens.pBound, OUTPUT_ALLOWANCE_TOKENS[plan.api]) : undefined;
+    if (condition !== undefined && d.usage !== undefined) {
+      boundExceeded = {
+        condition,
+        observed: condition === "C1" ? d.usage.P : d.usage.output!,
+        limit: condition === "C1" ? plan.tokens.pBound : OUTPUT_ALLOWANCE_TOKENS[plan.api],
+      };
+      // A first-write bound failure happens before the ordinary anchor sets route identity.
+      // Preserve its diagnostic record against the actual validated/sent route, too.
+      if (route === undefined && d.routeKey !== undefined) {
+        routeKey = d.routeKey;
+        routeLabel = d.routeLabel ?? plan.wireModel;
+        route = {
+          key: routeKey,
+          label: routeLabel,
+          api: plan.api,
+          wireModel: plan.wireModel,
+          requestedRetention: plan.requestedRetention,
+          effectiveTier: effectiveTier ?? "auto",
+        };
+      }
       fail("bound-exceeded");
     }
     return d;

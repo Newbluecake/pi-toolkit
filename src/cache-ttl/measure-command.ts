@@ -1,7 +1,7 @@
 /** Main-session-only `/cache-ttl measure` assembly (measure-plan.md r4 §1/§7). No provider requests via session hooks. */
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { calculateCost, type Usage } from "@earendil-works/pi-ai";
+import { calculateCost, clampThinkingLevel, type Usage } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
   VERSION as PI_VERSION,
@@ -135,8 +135,14 @@ export function renderMeasureResult(
     `read renewal: ${record.renewal?.renewsOnRead ?? "unknown"}${record.renewal?.reason ? `(${record.renewal.reason})` : ""}${record.renewal?.basis ? ` · ${record.renewal.basis}` : ""}`,
   );
   if (record.renewal?.assumptions) lines.push(`renewal assumptions: ${record.renewal.assumptions.join("; ")}`);
-  if (record.statusReason === "bound-exceeded")
+  if (record.statusReason === "bound-exceeded") {
+    const detail = record.boundExceeded;
+    if (detail)
+      lines.push(
+        `${detail.condition} ${detail.condition === "C1" ? "prompt" : "output"} ${detail.observed} > ${detail.limit}`,
+      );
     lines.push("The stated conditional cost bound did not hold; stopped before the next send.");
+  }
   lines.push(
     "Residual: same-size backend/key splits can be undetectable; a miss may be eviction, not expiry. No negative renewal conclusion is proven.",
   );
@@ -460,6 +466,16 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
         if (!owned()) return;
         plan = frozen;
         const persist = getStore();
+        // Responses has a stock minimal-effort SimpleStreamOptions path. Off/omitted can
+        // become effort:none, which some relays reject. Keep vendor-specific Completions
+        // thinking formats unchanged; they can enable budgets/template flags at minimal.
+        const reasoningLevel =
+          api === "openai-responses" && model.reasoning ? clampThinkingLevel(model, "minimal") : undefined;
+        const mappedEffort =
+          reasoningLevel && reasoningLevel !== "off"
+            ? (model.thinkingLevelMap?.[reasoningLevel] ?? reasoningLevel)
+            : undefined;
+        const minimalReasoning = typeof mappedEffort === "string" ? mappedEffort : undefined;
         const send: MeasureSendFn = (request) =>
           (deps.transport ?? sendPipelinePing)({
             registry: ctx.modelRegistry,
@@ -478,7 +494,12 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
               ...(request.expectRouteKey !== undefined ? { expectRouteKey: request.expectRouteKey } : {}),
               ...(request.build
                 ? {
-                    build: { ...request.build, maxTokens: frozen.outputCap, cacheRetention: frozen.requestedRetention },
+                    build: {
+                      ...request.build,
+                      maxTokens: frozen.outputCap,
+                      cacheRetention: frozen.requestedRetention,
+                      ...(minimalReasoning ? { reasoning: "minimal" as const } : {}),
+                    },
                   }
                 : {}),
             },
@@ -499,6 +520,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
             const verdict = validateMeasurePayload(api, params, {
               ...expect,
               ...(compat?.thinkingTokenBudgetField ? { forbiddenKeys: [compat.thinkingTokenBudgetField] } : {}),
+              ...(minimalReasoning ? { reasoningEffort: minimalReasoning } : {}),
             });
             if (!verdict.ok) return verdict;
             if (

@@ -68,6 +68,8 @@ export interface PipelineMeasurementInput {
     context: PipelinePingContext;
     maxTokens: number;
     cacheRetention: "short" | "long";
+    /** Build-only low-effort Responses measurement; absent for keepalive and replay bodies. */
+    reasoning?: "minimal";
     validate: (params: Record<string, unknown>) => string | undefined;
   };
   /**

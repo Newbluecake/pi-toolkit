@@ -49,11 +49,11 @@ export function classifyRead(baseline: SlotBaseline, read: MeasureUsage): Classi
 export function boundBroken(
   usage: MeasureUsage | undefined,
   pBound: number,
-  outputCap: number,
+  outputAllowance: number,
 ): "C1" | "C2" | undefined {
   if (usage === undefined) return undefined;
   if (usage.P > pBound) return "C1";
-  if (usage.output !== undefined && usage.output > outputCap) return "C2";
+  if (usage.output !== undefined && usage.output > outputAllowance) return "C2";
   return undefined;
 }
 

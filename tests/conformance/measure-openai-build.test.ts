@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { wireMeasureCommand } from "../../src/cache-ttl/measure-command.js";
+import { createMeasureClaim } from "../../src/cache-ttl/measure-claim.js";
+import { createMeasureStore } from "../../src/cache-ttl/measure-store.js";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { FakeClock } from "../../src/core/clock.js";
 import { sendPipelinePing } from "../../src/cache-ttl/pipeline-ping.js";
 import { validateMeasurePayload } from "../../src/cache-ttl/measure-payload.js";
@@ -88,6 +93,7 @@ async function environment(
     chatGpt?: boolean;
     long?: boolean;
     session?: string;
+    thinkingLevelMap?: Record<string, string | null>;
   } = {},
   fetchImpl?: typeof fetch,
 ) {
@@ -114,6 +120,7 @@ async function environment(
               name: "measurement fixture",
               api: profile,
               reasoning: options.reasoning ?? false,
+              ...(options.thinkingLevelMap ? { thinkingLevelMap: options.thinkingLevelMap } : {}),
               input: ["text"],
               contextWindow: 200000,
               maxTokens: 4096,
@@ -151,6 +158,8 @@ async function environment(
       .join(""),
   };
   const customBudgetKey = model!.compat?.thinkingTokenBudgetField;
+  const level = profile === "openai-responses" && model!.reasoning ? clampThinkingLevel(model!, "minimal") : undefined;
+  if (level && level !== "off") expectation.reasoningEffort = model!.thinkingLevelMap?.[level] ?? level;
   if (customBudgetKey) expectation.forbiddenKeys = [customBudgetKey];
   let tier: EffectiveTier = "auto";
   const validate = vi.fn((params: Record<string, unknown>) => {
@@ -175,10 +184,16 @@ async function environment(
       profile,
       expectWireModel: id,
       routeKey: (url) => measureRouteKey({ api: profile, url, wireModel: id, effectiveTier: tier }),
-      build: { context, maxTokens: OUTPUT_CAP[profile], cacheRetention: options.long ? "long" : "short", validate },
+      build: {
+        context,
+        maxTokens: OUTPUT_CAP[profile],
+        cacheRetention: options.long ? "long" : "short",
+        validate,
+        ...(expectation.reasoningEffort ? { reasoning: "minimal" } : {}),
+      },
     },
   };
-  return { input, baseFetch, clock, validate, model: model!, registry, expectation };
+  return { input, baseFetch, clock, validate, model: model!, registry, expectation, root };
 }
 async function expectRefusal(profile: Profile, options: Parameters<typeof environment>[1], code: PayloadRejectionCode) {
   const h = await environment(profile, options);
@@ -610,4 +625,105 @@ describe("OpenAI profile-specific real builder conformance", () => {
     expect(result.outcome.measured!.builtBody!.prompt_cache_retention).toBe("24h");
     await result.settled;
   });
+});
+
+describe("live C2 allowance and lowest Responses effort regression", () => {
+  it("real Responses builder accepts exact minimal reasoning with wire max_output_tokens still 16", async () => {
+    const h = await environment("openai-responses", { reasoning: true });
+    const result = await sendPipelinePing(h.input);
+    expect(result.outcome.kind).toBe("usage");
+    const built = result.outcome.measured!.builtBody!;
+    expect(built.reasoning).toEqual({ effort: "minimal", summary: "auto" });
+    expect(built.include).toEqual(["reasoning.encrypted_content"]);
+    expect(built.max_output_tokens).toBe(16);
+    await result.settled;
+    const measurement = { ...h.input.measurement! };
+    delete measurement.build;
+    const replay = await sendPipelinePing({ ...h.input, body: built, measurement });
+    expect(replay.outcome.kind).toBe("usage");
+    expect(vi.mocked(h.baseFetch).mock.calls[1]![1]!.body).toBe(vi.mocked(h.baseFetch).mock.calls[0]![1]!.body);
+    await replay.settled;
+  });
+  it("minimal clamps to the lowest supported effort when the model disables minimal", async () => {
+    const h = await environment("openai-responses", { reasoning: true, thinkingLevelMap: { minimal: null } });
+    const result = await sendPipelinePing(h.input);
+    expect(result.outcome.kind).toBe("usage");
+    expect(result.outcome.measured!.builtBody!.reasoning).toEqual({ effort: "low", summary: "auto" });
+    expect(result.outcome.measured!.builtBody!.max_output_tokens).toBe(16);
+    await result.settled;
+  });
+  it("sampling cannot replace the requested minimal effort with high effort", async () => {
+    await expectRefusal(
+      "openai-responses",
+      { reasoning: true, samplingParams: { reasoning: { effort: "high", summary: "auto" } } },
+      "thinking",
+    );
+  });
+  it.each([32, 512, 513])(
+    "real registry command usage output=%i respects the allowance, not the wire cap",
+    async (output) => {
+      const usage = {
+        input_tokens: 14287,
+        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 14287 },
+        output_tokens: output,
+        output_tokens_details: { reasoning_tokens: 25 },
+      };
+      const h = await environment(
+        "openai-responses",
+        { reasoning: true },
+        vi.fn(async () => new Response(responseFrame("response.completed", usage))),
+      );
+      const claim = createMeasureClaim();
+      const store = createMeasureStore({
+        filePath: join(h.root, "measurement-result.json"),
+        clock: h.clock,
+        slot: claim.persistSlot,
+      });
+      const hooks = new Map<string, (event: unknown, ctx: unknown) => void>();
+      const port = wireMeasureCommand(
+        {
+          on(name: string, fn: any) {
+            hooks.set(name, fn);
+          },
+        } as unknown as ExtensionAPI,
+        { clock: h.clock, claim, store, fetchImpl: h.baseFetch },
+      );
+      const ctx = {
+        model: h.model,
+        modelRegistry: h.registry,
+        hasUI: true,
+        sessionManager: { getSessionId: () => "live-C2" },
+        ui: { notify: vi.fn(), setStatus: vi.fn() },
+      } as unknown as ExtensionContext;
+      await port.handle("measure --yes", ctx);
+      try {
+        await until(() => (output > 512 ? claim.state === "free" : claim.current()?.sent === 6));
+        expect(h.baseFetch).toHaveBeenCalledTimes(output > 512 ? 1 : 6);
+        const wire = JSON.parse(vi.mocked(h.baseFetch).mock.calls[0]![1]!.body as string);
+        expect(wire.max_output_tokens).toBe(16);
+        expect(wire.reasoning).toEqual({ effort: "minimal", summary: "auto" });
+        const notices = () =>
+          vi
+            .mocked(ctx.ui.notify)
+            .mock.calls.map(([text]) => text)
+            .join("\n");
+        if (output > 512) {
+          expect(notices()).toContain("C2 output 513 > 512");
+          await store.flush();
+          const saved = (await store.readRoutes())[0]!.latest!;
+          expect(saved.boundExceeded).toEqual({ condition: "C2", observed: 513, limit: 512 });
+          expect(saved.requests.sent).toBe(1);
+          vi.mocked(ctx.ui.notify).mockClear();
+          await port.handle("measure status", ctx);
+          expect(notices()).toContain("C2 output 513 > 512");
+        } else {
+          expect(notices()).not.toContain("bound-exceeded");
+          expect(claim.current()?.sent).toBe(6);
+        }
+      } finally {
+        hooks.get("session_shutdown")?.({ reason: "quit" }, ctx);
+        await store.flush();
+      }
+    },
+  );
 });

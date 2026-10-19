@@ -16,6 +16,7 @@ import {
   INJECTION_ALLOWANCE_TOKENS,
   MEASURE_TIMING,
   OUTPUT_CAP,
+  OUTPUT_ALLOWANCE_TOKENS,
   PREFIX_CHARS,
   REQUEST_BUDGET,
   SLOT_COUNT,
@@ -115,7 +116,8 @@ const add = (...xs: Array<number | undefined>): number | undefined => {
 
 /**
  * §4.3: typical = `6·W(T_mid) + 7·R(T_mid) + 13·O` (all hits, one control, no boundary); conditional worst =
- * `17·(W(P_bound) + O)` priced at the tier `P_bound` falls into. Either figure is `null` when a needed rate is missing.
+ * `17·(W(P_bound) + O_allowance)` priced at the tier `P_bound` falls into; typical O still uses the wire cap.
+ * Either figure is `null` when a needed rate is missing.
  */
 export function estimateCost(
   price: MeasurePriceFn | undefined,
@@ -126,7 +128,7 @@ export function estimateCost(
   const base = { pBound: tokens.pBound, requestCap: REQUEST_BUDGET.total, conditions: CONDITIONS };
   if (price === undefined) return { typicalUsd: null, conditionalWorstUsd: null, ...base };
   const O = outputPrice(price, OUTPUT_CAP[api], writePrompt(price, tokens.mid, api, retention));
-  const oBound = outputPrice(price, OUTPUT_CAP[api], writePrompt(price, tokens.pBound, api, retention));
+  const oBound = outputPrice(price, OUTPUT_ALLOWANCE_TOKENS[api], writePrompt(price, tokens.pBound, api, retention));
   const wMid = writePrice(price, tokens.mid, api, retention);
   const rMid = readPrice(price, tokens.mid);
   const wBound = writePrice(price, tokens.pBound, api, retention);
@@ -183,7 +185,7 @@ export function formatPlanLines(plan: ExecutionPlan): string[] {
       `${b.probes} TTL probes + ${b.renewal} renewal read; max duration ${MEASURE_TIMING.hardDeadlineMs / 60_000} min`,
     `cost: typical ${usd(plan.estimate.typicalUsd)}; worst case ${usd(plan.estimate.conditionalWorstUsd)} ` +
       `ONLY IF ${plan.estimate.conditions.join(", ")} hold (C1 each prompt ≤ ${plan.estimate.pBound} tokens, ` +
-      `C2 output ≤ ${plan.outputCap} token(s), C3 list prices without relay surcharge); a run stops when C1 or C2 breaks`,
+      `C2 output ≤ ${OUTPUT_ALLOWANCE_TOKENS[plan.api]} token(s) (wire cap ${plan.outputCap}), C3 list prices without relay surcharge); a run stops when C1 or C2 breaks`,
   ];
 }
 
@@ -241,6 +243,7 @@ export function sumCosts(accounts: readonly CostAccount[]): CostAccount {
 export interface CostRequestInput {
   api: MeasureApi;
   requestedRetention: RequestedRetention;
+  /** Wire cap only; unreported output is cost-bounded by OUTPUT_ALLOWANCE_TOKENS[api]. */
   outputCap: number;
   /** `undefined` ⇒ the request was never sent (zero cost). */
   sent: boolean;
@@ -254,13 +257,14 @@ const rangeOf = (hi: number | undefined): CostRange | null => (hi === undefined 
 /**
  * Per request: `knownUsd` = every component the provider reported (uncached input `P − C − W`, cached read `C`,
  * write `W` incl. the 1h part when the split is reported, output when reported), priced at THIS request's own tier;
- * `unknownUsd` = only the unreported components (output not observed ⇒ `[0, cap·out]`; Anthropic long without the 1h
+ * `unknownUsd` = only the unreported components (output not observed ⇒ `[0, allowance·out]`; Anthropic long without the 1h
  * split ⇒ `[0, W@1h − W@5m]`; OpenAI without `cache_write_tokens` ⇒ `[0, (cacheWrite − input)·(P − C)]`; a sent request
  * without any usage ⇒ `[0, W(P_bound) + O]`, conditional).
  */
 export function accountRequestCost(input: CostRequestInput): CostAccount {
   if (!input.sent) return ZERO_COST;
   const { price, api, requestedRetention: retention } = input;
+  const outputAllowance = OUTPUT_ALLOWANCE_TOKENS[api];
   if (price === undefined) {
     return { knownUsd: null, unknownUsd: null, unknownItems: unknownItemsOf(input.reading, true) };
   }
@@ -268,7 +272,7 @@ export function accountRequestCost(input: CostRequestInput): CostAccount {
   if (usage === undefined) {
     // sent but no usable usage at all: nothing known, the conditional bound is the unknown range
     const w = writePrice(price, input.pBound, api, retention);
-    const o = outputPrice(price, input.outputCap, writePrompt(price, input.pBound, api, retention));
+    const o = outputPrice(price, outputAllowance, writePrompt(price, input.pBound, api, retention));
     return {
       knownUsd: 0,
       unknownUsd: rangeOf(add(w, o)),
@@ -292,7 +296,7 @@ export function accountRequestCost(input: CostRequestInput): CostAccount {
   };
   for (const item of items) {
     if (item === "output") {
-      addHi(outputPrice(price, input.outputCap, tokens));
+      addHi(outputPrice(price, outputAllowance, tokens));
     } else if (item === "write1h-split") {
       // known holds W at the short-write rate; the premium is the 1h rate on the same tokens
       const { cacheWrite1h: _reported, ...noSplit } = tokens;
@@ -308,7 +312,7 @@ export function accountRequestCost(input: CostRequestInput): CostAccount {
       addHi(asWrite === undefined || asInput === undefined ? 0 : Math.max(0, asWrite - asInput));
     } else {
       const w = writePrice(price, input.pBound, api, retention);
-      addHi(add(w, outputPrice(price, input.outputCap, writePrompt(price, input.pBound, api, retention))));
+      addHi(add(w, outputPrice(price, outputAllowance, writePrompt(price, input.pBound, api, retention))));
     }
   }
   return {

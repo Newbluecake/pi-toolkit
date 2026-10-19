@@ -6,6 +6,7 @@ import { startMeasurement, type MeasureRunnerDeps } from "../../src/cache-ttl/me
 import type { PipelineDiag, PipelineOutcome, PipelinePingResult } from "../../src/cache-ttl/pipeline-ping-types.js";
 import {
   OUTPUT_CAP,
+  OUTPUT_ALLOWANCE_TOKENS,
   P_BOUND_TOKENS,
   REQUEST_BUDGET,
   TTL_GAPS_MS,
@@ -1077,18 +1078,34 @@ describe("runner — first-write gate and the runtime bound guard", () => {
     expect(r.record).toMatchObject({ status: "failed", statusReason: "bound-exceeded" });
   });
 
-  it("observed output above the cap breaks C2 ⇒ failed(bound-exceeded); at the cap it is fine", async () => {
-    const cap = OUTPUT_CAP["anthropic-messages"];
+  it("observed output above the allowance breaks C2; the wire cap is unchanged", async () => {
+    const cap = OUTPUT_ALLOWANCE_TOKENS["anthropic-messages"];
     const bad = await run({
       ttlMs: Number.POSITIVE_INFINITY,
       script: ({ kind, kindN }) => (kind === "probe" && kindN === 2 ? { usage: { output: cap + 1 } } : undefined),
     });
-    expect(bad.record).toMatchObject({ status: "failed", statusReason: "bound-exceeded" });
+    expect(bad.record).toMatchObject({
+      status: "failed",
+      statusReason: "bound-exceeded",
+      boundExceeded: { condition: "C2", observed: cap + 1, limit: cap },
+    });
     const ok = await run({
       ttlMs: Number.POSITIVE_INFINITY,
       script: ({ kind, kindN }) => (kind === "probe" && kindN === 2 ? { usage: { output: cap } } : undefined),
     });
     expect(ok.record.status).toBe("complete");
+  });
+  it("live Responses output=32 survives writes, controls and probes with unchanged wire cap 16", async () => {
+    const r = await run({ api: "openai-responses", ttlMs: Infinity, script: () => ({ usage: { output: 32 } }) });
+    expect(r.record.status).toBe("complete");
+    expect(r.record.requests.sent).toBe(13);
+    expect(r.record.boundExceeded).toBeUndefined();
+    expect(r.w.deps.plan.outputCap).toBe(16);
+  });
+  it("first-write C1 failure records the actual prompt observed and preserves its route diagnostic", async () => {
+    const r = await run({ script: () => ({ usage: { P: P_BOUND_TOKENS + 1 } }) });
+    expect(r.record.boundExceeded).toEqual({ condition: "C1", observed: P_BOUND_TOKENS + 1, limit: P_BOUND_TOKENS });
+    expect(r.record.requests.sent).toBe(1);
   });
 });
 
@@ -1364,7 +1381,7 @@ describe("runner — cost accounting, landed1h, persistence, progress", () => {
     const read = (15_000 * 0.3) / 1e6;
     expect(record.cost.knownUsd).toBeCloseTo(6 * write + 7 * read, 10);
     expect(record.cost.unknownUsd![0]).toBe(0);
-    expect(record.cost.unknownUsd![1]).toBeCloseTo((13 * 15) / 1e6, 10);
+    expect(record.cost.unknownUsd![1]).toBeCloseTo((13 * OUTPUT_ALLOWANCE_TOKENS["anthropic-messages"] * 15) / 1e6, 10);
     expect(record.cost.unknownItems).toEqual(["output×13"]);
     expect(record.cost.estimate).toBe(w.deps.plan.estimate);
     expect(record.cost.estimate.requestCap).toBe(17);

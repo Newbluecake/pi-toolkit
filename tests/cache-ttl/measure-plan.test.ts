@@ -19,6 +19,7 @@ import {
   INJECTION_ALLOWANCE_TOKENS,
   MEASURE_TIMING,
   OUTPUT_CAP,
+  OUTPUT_ALLOWANCE_TOKENS,
   PREFIX_CHARS,
   P_BOUND_TOKENS,
   REQUEST_BUDGET,
@@ -135,7 +136,7 @@ describe("execution plan", () => {
     expect(text).toContain("hard request cap 17");
     expect(text).toContain("3/6/11/21/31/61");
     expect(text).toMatch(/typical ≈ \$0\.37/);
-    expect(text).toMatch(/worst case ≈ \$1\.33/);
+    expect(text).toMatch(/worst case ≈ \$1\.35/);
     expect(text).toContain("C1, C2, C3");
     expect(text).toMatch(/ONE declared boundary renewal read/);
     const confirm = formatConfirmText(plan);
@@ -153,7 +154,7 @@ describe("execution plan", () => {
 });
 
 describe("cost estimate (§4.3)", () => {
-  it("Sonnet-class example: typical ≈ $0.37, conditional worst ≈ $1.33", () => {
+  it("Sonnet-class example: typical ≈ $0.37, conditional worst ≈ $1.35", () => {
     const e = estimateCost(priced(SONNET), ANTH, "short");
     // 6·W(15000) + 7·R(15000) + 13·O(1)
     const w = (15_000 * 3.75) / 1e6;
@@ -162,10 +163,13 @@ describe("cost estimate (§4.3)", () => {
     expect(e.typicalUsd).toBeCloseTo(6 * w + 7 * r + 13 * o, 10);
     expect(e.typicalUsd!).toBeGreaterThan(0.36);
     expect(e.typicalUsd!).toBeLessThan(0.38);
-    // 17·(W(P_bound) + O)
-    expect(e.conditionalWorstUsd).toBeCloseTo(17 * ((P_BOUND_TOKENS * 3.75) / 1e6 + o), 10);
-    expect(e.conditionalWorstUsd!).toBeGreaterThan(1.32);
-    expect(e.conditionalWorstUsd!).toBeLessThan(1.34);
+    // 17·(W(P_bound) + O_allowance), while typical O keeps the wire cap
+    expect(e.conditionalWorstUsd).toBeCloseTo(
+      17 * ((P_BOUND_TOKENS * 3.75 + OUTPUT_ALLOWANCE_TOKENS[ANTH] * 15) / 1e6),
+      10,
+    );
+    expect(e.conditionalWorstUsd!).toBeGreaterThan(1.34);
+    expect(e.conditionalWorstUsd!).toBeLessThan(1.36);
   });
 
   it("long Anthropic prices the write at the 1h rate (2× input)", () => {
@@ -193,9 +197,36 @@ describe("cost estimate (§4.3)", () => {
     const jumped = estimateCost(tiered, ANTH, "short");
     expect(jumped.typicalUsd).toBeCloseTo(flat.typicalUsd!, 10);
     // Both the prompt AND output of that request pay the P_bound tier (measure-plan §4.3).
-    expect(jumped.conditionalWorstUsd).toBeCloseTo(17 * 2 * ((P_BOUND_TOKENS * 3.75 + 15) / 1e6), 10);
+    expect(jumped.conditionalWorstUsd).toBeCloseTo(
+      17 * 2 * ((P_BOUND_TOKENS * 3.75 + OUTPUT_ALLOWANCE_TOKENS[ANTH] * 15) / 1e6),
+      10,
+    );
   });
 
+  it.each(["anthropic-messages", "openai-completions", "openai-responses"] as const)(
+    "%s worst-case prices the C2 allowance while keeping the wire cap and C1 frozen",
+    (api) => {
+      const plan = buildExecutionPlan({
+        runId: "m",
+        api,
+        wireModel: "test",
+        requestedRetention: "short",
+        price: priced(SONNET),
+      });
+      expect(plan.outputCap).toBe(OUTPUT_CAP[api]);
+      expect(plan.tokens.pBound).toBe(P_BOUND_TOKENS);
+      expect(plan.estimate.conditionalWorstUsd).toBeCloseTo(
+        (17 * (P_BOUND_TOKENS * 3.75 + OUTPUT_ALLOWANCE_TOKENS[api] * 15)) / 1e6,
+        10,
+      );
+      expect(plan.estimate.typicalUsd).toBeCloseTo(
+        (6 * 15000 * 3.75 + 7 * 15000 * 0.3 + 13 * OUTPUT_CAP[api] * 15) / 1e6,
+        10,
+      );
+      const text = formatPlanLines(plan).join("\n");
+      expect(text).toContain(`C2 output ≤ ${OUTPUT_ALLOWANCE_TOKENS[api]} token(s) (wire cap ${OUTPUT_CAP[api]})`);
+    },
+  );
   it("a missing rate makes only the dependent figure unknown", () => {
     const noRead = estimateCost(priced({ ...SONNET, cacheRead: undefined }), ANTH, "short");
     expect(noRead.typicalUsd).toBeNull();
@@ -214,7 +245,7 @@ describe("cost accounting (§4.3) — known vs unreported, never 'actual cost'",
     // uncached input = 19000 − 4000 − 10000 = 5000
     const expected = (5_000 * 3 + 4_000 * 0.3 + 10_000 * 3.75) / 1e6;
     expect(acc.knownUsd).toBeCloseTo(expected, 12);
-    expect(acc.unknownUsd).toEqual([0, 15 / 1e6]);
+    expect(acc.unknownUsd).toEqual([0, (OUTPUT_ALLOWANCE_TOKENS[ANTH] * 15) / 1e6]);
     expect(acc.unknownItems).toEqual(["output×1"]);
   });
 
@@ -234,7 +265,7 @@ describe("cost accounting (§4.3) — known vs unreported, never 'actual cost'",
     expect(acc.knownUsd).toBeCloseTo((15_000 * 3.75) / 1e6, 12);
     const premium = (15_000 * (6 - 3.75)) / 1e6;
     expect(acc.unknownUsd![0]).toBe(0);
-    expect(acc.unknownUsd![1]).toBeCloseTo(premium + 15 / 1e6, 12);
+    expect(acc.unknownUsd![1]).toBeCloseTo(premium + (OUTPUT_ALLOWANCE_TOKENS[ANTH] * 15) / 1e6, 12);
     expect([...acc.unknownItems].sort()).toEqual(["output×1", "write1h-split×1"]);
   });
 
@@ -277,7 +308,7 @@ describe("cost accounting (§4.3) — known vs unreported, never 'actual cost'",
 
   it("a sent request without usable usage: known 0, unknown [0, W(P_bound) + O] (conditional)", () => {
     const acc = accountRequestCost({ ...base, price });
-    const hi = (P_BOUND_TOKENS * 3.75 + 15) / 1e6;
+    const hi = (P_BOUND_TOKENS * 3.75 + OUTPUT_ALLOWANCE_TOKENS[ANTH] * 15) / 1e6;
     expect(acc.knownUsd).toBe(0);
     expect(acc.unknownUsd![0]).toBe(0);
     expect(acc.unknownUsd![1]).toBeCloseTo(hi, 12);
@@ -317,7 +348,7 @@ describe("cost accounting (§4.3) — known vs unreported, never 'actual cost'",
   it("report wording: 'known ≈ $x; unreported components $lo–$hi (N items)'", () => {
     const a = accountRequestCost({ ...base, price, reading: valid({ P: 15_000, C: 0, W: 15_000 }, ["output"]) });
     const line = formatCost(sumCosts([a, a]));
-    expect(line).toMatch(/^known ≈ \$0\.1125; unreported components \$0\.0000–\$0\.0000 \(2 items\)$/);
+    expect(line).toMatch(/^known ≈ \$0\.1125; unreported components \$0\.0000–\$0\.0019 \(2 items\)$/);
     expect(formatCost({ knownUsd: null, unknownUsd: null, unknownItems: [] })).toBe("cost unknown (unpriced route)");
     expect(line).not.toMatch(/actual/i);
   });

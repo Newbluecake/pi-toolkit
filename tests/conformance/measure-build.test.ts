@@ -363,6 +363,15 @@ describe("measure P4 real Anthropic build conformance", () => {
         await h.drive();
         expect(h.stub.requests).toHaveLength(1);
         expect(h.text()).toContain("failed(bound-exceeded)");
+        expect(h.text()).toContain(`C1 prompt ${P_BOUND_TOKENS + 1} > ${P_BOUND_TOKENS}`);
+        await h.store.flush();
+        expect((await h.store.readRoutes())[0]!.latest!.boundExceeded).toEqual({
+          condition: "C1",
+          observed: P_BOUND_TOKENS + 1,
+          limit: P_BOUND_TOKENS,
+        });
+        await h.port.handle("measure status", h.ctx);
+        expect(h.text()).toContain(`C1 prompt ${P_BOUND_TOKENS + 1} > ${P_BOUND_TOKENS}`);
         expect(h.text()).toContain("cost bound did not hold");
       } else {
         await until(

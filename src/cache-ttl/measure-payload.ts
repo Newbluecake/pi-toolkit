@@ -54,6 +54,17 @@ function validateOpenAiPayload(
   if (hasAny(p, ["instructions", "prompt", "system"]) || hasAny(p, responses ? ["messages"] : ["input"]))
     return refuse("extra-input");
   if (responses) {
+    if (
+      expect.reasoningEffort !== undefined &&
+      (!isRecord(p.reasoning) ||
+        !onlyKeys(p.reasoning, ["effort", "summary"]) ||
+        p.reasoning.effort !== expect.reasoningEffort ||
+        p.reasoning.summary !== "auto" ||
+        !Array.isArray(p.include) ||
+        p.include.length !== 1 ||
+        p.include[0] !== "reasoning.encrypted_content")
+    )
+      return refuse("thinking");
     if (hasAny(p, ["previous_response_id", "conversation", "background"])) return refuse("server-state");
     if (typeof expect.promptCacheKey !== "string" || p.prompt_cache_key !== expect.promptCacheKey)
       return refuse("prompt-cache-key");

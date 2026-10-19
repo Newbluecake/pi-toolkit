@@ -14,7 +14,7 @@ import type {
   PipelinePingModel,
   SendPipelinePing,
 } from "../../src/cache-ttl/pipeline-ping-types.js";
-import { P_BOUND_TOKENS, type MeasureRouteRecord } from "../../src/cache-ttl/measure-types.js";
+import { P_BOUND_TOKENS, OUTPUT_ALLOWANCE_TOKENS, type MeasureRouteRecord } from "../../src/cache-ttl/measure-types.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -65,7 +65,7 @@ function memoStore(clock: FakeClock): MeasureStore {
     },
   };
 }
-function transportFixture(patch: Record<string, unknown> = {}) {
+function transportFixture(patch: Record<string, unknown> = {}, output = 1) {
   const sessions = new Set<string>();
   return vi.fn<SendPipelinePing>(async (input) => {
     const m = input.measurement!;
@@ -109,6 +109,12 @@ function transportFixture(patch: Record<string, unknown> = {}) {
               ...common,
               store: false,
               max_output_tokens: 16,
+              ...(build.reasoning
+                ? {
+                    reasoning: { effort: input.model.thinkingLevelMap?.minimal ?? "minimal", summary: "auto" },
+                    include: ["reasoning.encrypted_content"],
+                  }
+                : {}),
               input: [
                 { role: "system", content: build.context.systemPrompt },
                 { role: "user", content: [{ type: "input_text", text: user?.content }] },
@@ -172,12 +178,12 @@ function transportFixture(patch: Record<string, unknown> = {}) {
                 ? {
                     input_tokens: 15000,
                     input_tokens_details: { cached_tokens: hit ? 15000 : 0, cache_write_tokens: hit ? 0 : 15000 },
-                    output_tokens: 1,
+                    output_tokens: output,
                   }
                 : {
                     prompt_tokens: 15000,
                     prompt_tokens_details: { cached_tokens: hit ? 15000 : 0, cache_write_tokens: hit ? 0 : 15000 },
-                    completion_tokens: 1,
+                    completion_tokens: output,
                   },
         },
       },
@@ -321,6 +327,36 @@ describe("measure command admission and lifecycle", () => {
       await flush();
     },
   );
+  it("live Responses reasoning output 32 proceeds, sends wire cap 16 and requests minimal effort", async () => {
+    const h = setup({ transport: transportFixture({}, 32) });
+    (h.ctx as any).model = { ...model, api: "openai-responses", reasoning: true };
+    await h.port.handle("measure --yes", h.ctx);
+    await flush();
+    expect(h.claim.current()?.sent).toBe(6);
+    const first = vi.mocked(h.transport).mock.calls[0]![0];
+    expect(first.measurement?.build).toMatchObject({ maxTokens: 16, reasoning: "minimal" });
+    expect(h.text()).not.toContain("bound-exceeded");
+    expect(h.text()).toContain("C2 output ≤ 512 token(s) (wire cap 16)");
+    await h.port.handle("measure cancel", h.ctx);
+    await flush();
+  });
+  it("C2 output above allowance is named in final notice, stored first-write record and saved status", async () => {
+    const h = setup({ transport: transportFixture({}, 513) });
+    (h.ctx as any).model = { ...model, api: "openai-responses" };
+    await h.port.handle("measure --yes", h.ctx);
+    await flush();
+    expect(h.text()).toContain("C2 output 513 > 512");
+    expect(h.text()).toContain("failed(bound-exceeded)");
+    expect(h.transport).toHaveBeenCalledTimes(1);
+    const saved = (await h.store.readRoutes())[0]!.latest!;
+    expect(saved.boundExceeded).toEqual({ condition: "C2", observed: 513, limit: 512 });
+    expect(saved.requests.sent).toBe(1);
+    vi.mocked(h.ctx.ui.notify).mockClear();
+    // A new activation reads the diagnostic, not an in-memory last-result shortcut.
+    const fresh = setup({ store: h.store, claim: h.claim, clock: h.clock });
+    await fresh.port.handle("measure status", fresh.ctx);
+    expect(fresh.text()).toContain("C2 output 513 > 512");
+  });
   it("P4 rejects a sampled Completions cache key that differs from this prefix", async () => {
     const h = setup({ transport: transportFixture({ prompt_cache_key: "wrong-prefix" }) });
     (h.ctx as any).model = { ...model, api: "openai-completions" };
@@ -488,7 +524,10 @@ describe("registry calculateCost adapter and tier integration fixes", () => {
       12,
     );
     const estimate = estimateCost(price, "anthropic-messages", "short");
-    expect(estimate.conditionalWorstUsd).toBeCloseTo((17 * (P_BOUND_TOKENS * 7.5 + 30)) / 1e6, 10);
+    expect(estimate.conditionalWorstUsd).toBeCloseTo(
+      (17 * (P_BOUND_TOKENS * 7.5 + OUTPUT_ALLOWANCE_TOKENS["anthropic-messages"] * 30)) / 1e6,
+      10,
+    );
     const cost = accountRequestCost({
       api: "anthropic-messages",
       requestedRetention: "short",
@@ -502,7 +541,7 @@ describe("registry calculateCost adapter and tier integration fixes", () => {
         billing: { kind: "unknown", items: ["output"] },
       },
     });
-    expect(cost.unknownUsd?.[1]).toBeCloseTo(30 / 1e6, 12);
+    expect(cost.unknownUsd?.[1]).toBeCloseTo((OUTPUT_ALLOWANCE_TOKENS["anthropic-messages"] * 30) / 1e6, 12);
     const writePremium = accountRequestCost({
       api: "openai-responses",
       requestedRetention: "short",

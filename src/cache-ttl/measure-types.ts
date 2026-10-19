@@ -48,6 +48,13 @@ export const OUTPUT_CAP = {
   "openai-responses": 16,
 } as const satisfies Record<MeasureApi, number>;
 
+/** Live C2 allowance for provider-reported output (including reasoning), NOT the wire max-token cap. */
+export const OUTPUT_ALLOWANCE_TOKENS = {
+  "anthropic-messages": 64,
+  "openai-completions": 512,
+  "openai-responses": 512,
+} as const satisfies Record<MeasureApi, number>;
+
 /** §3.1: filler length of the synthetic prefix (≈ 15k tokens of log-shaped filler). */
 export const PREFIX_CHARS = 37_500 as const;
 /** §3.1: chars-per-token estimates for the filler (lo = chars/4, mid = chars/2.5, hi = chars/2.3). Estimates, not bounds. */
@@ -246,6 +253,8 @@ export interface PayloadExpectation {
    * absent/empty ⇒ only the built-in protected set applies. A hit refuses with the closest existing code.
    */
   forbiddenKeys?: readonly string[];
+  /** Measurement requested minimal Responses reasoning; require this exact mapped stock effort on the wire. */
+  reasoningEffort?: string;
 }
 
 export type PayloadVerdict =
@@ -562,10 +571,18 @@ export interface MeasureRouteIdentity {
   effectiveTier: EffectiveTier;
 }
 
+export interface MeasureBoundExceeded {
+  condition: "C1" | "C2";
+  observed: number;
+  limit: number;
+}
+
 export interface MeasureRunRecord {
   runId: string;
   status: MeasureRunStatus;
   statusReason?: MeasureStatusReason;
+  /** Actual condition/value that stopped the run; absent in older persisted records. */
+  boundExceeded?: MeasureBoundExceeded;
   startedAt: Millis;
   finishedAt?: Millis;
   load: { prefixes: number; ownTokens: number };

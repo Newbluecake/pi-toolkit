@@ -339,7 +339,11 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
           measurement?.build?.context ?? { messages: [{ role: "user", content: "keepalive", timestamp: clock.now() }] },
           {
             ...(measurement?.build
-              ? { maxTokens: measurement.build.maxTokens, cacheRetention: measurement.build.cacheRetention }
+              ? {
+                  maxTokens: measurement.build.maxTokens,
+                  cacheRetention: measurement.build.cacheRetention,
+                  ...(measurement.build.reasoning ? { reasoning: measurement.build.reasoning } : {}),
+                }
               : {}),
             maxRetries: 0,
             sessionId: input.sessionId,
