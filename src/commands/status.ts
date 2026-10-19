@@ -103,6 +103,12 @@ export interface StatusCommandDeps {
   admittedRunIds?: () => readonly string[];
   /** sysload §2/Q7: live session gate summary, omitted when the feature is off. */
   load?: () => { level: string; gating: boolean } | undefined;
+  /**
+   * quota droid 池凭据缺失披露（2026-10-19 用户拍板）：droid CLI 已登录（~/.factory
+   * 存在）时缺 FACTORY_API_KEY 不再打 WARN，改在状态面如实披露「余额探测不可用」。
+   * 缺席 / 返回 undefined ⇒ 不渲染（旧输出字节不变）。
+   */
+  quota?: () => { readonly droidKeyMissing: boolean } | undefined;
 }
 
 /**
@@ -628,6 +634,14 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.childSwitch) lines.push(renderChildSwitchLine(deps.childSwitch()));
   const load = deps.load?.();
   if (load !== undefined) lines.push(`Load: ${load.level}${load.gating ? " · gated" : " · open"}`);
+  // quota droid 凭据缺失披露（2026-10-19 拍板）：池读数缺失期间不编造数字，闸门面
+  // 对 droid 池保持 fail-open（spawn 不拦截）；droid CLI 自身（OAuth）不受影响。
+  const quota = deps.quota?.();
+  if (quota?.droidKeyMissing === true) {
+    lines.push(
+      "Quota: droid 余额探测不可用（无 FACTORY_API_KEY）— Standard/Core 池读数缺失；spawn 闸门对 droid 池保持 fail-open（不拦截），droid CLI 自身运行不受影响",
+    );
+  }
   return lines.join("\n");
 }
 

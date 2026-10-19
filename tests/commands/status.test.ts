@@ -110,6 +110,26 @@ describe("X9 status usage rendering", () => {
   });
 });
 
+describe("quota droid credential-missing disclosure (2026-10-19 ruling)", () => {
+  it("renders the droid probe-unavailable line when the port reports a missing key", () => {
+    const d = deps([snapshot()]) as Record<string, unknown>;
+    d.quota = () => ({ droidKeyMissing: true });
+    const text = renderStatus(d as never);
+    expect(text).toContain("Quota: droid 余额探测不可用（无 FACTORY_API_KEY）");
+    expect(text).toContain("fail-open");
+  });
+
+  it("omits the line when the port is absent, undefined, or reports no missing key", () => {
+    expect(renderStatus(deps([snapshot()]) as never)).not.toContain("余额探测不可用");
+    const d1 = deps([snapshot()]) as Record<string, unknown>;
+    d1.quota = () => undefined;
+    expect(renderStatus(d1 as never)).not.toContain("余额探测不可用");
+    const d2 = deps([snapshot()]) as Record<string, unknown>;
+    d2.quota = () => ({ droidKeyMissing: false });
+    expect(renderStatus(d2 as never)).not.toContain("余额探测不可用");
+  });
+});
+
 describe("child-context-switch plan.md §3.1: /agent status childSwitch line", () => {
   it("renders the capability state when the port is wired", () => {
     const d = deps([snapshot()]) as Record<string, unknown>;

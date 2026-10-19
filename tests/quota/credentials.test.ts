@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import * as childProcess from "node:child_process";
-import { createCredentialResolver, ENV_FALLBACK } from "../../src/quota/credentials.js";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createCredentialResolver, droidCliLoginPresent, ENV_FALLBACK } from "../../src/quota/credentials.js";
 
 // 安全红线回归护栏：整个测试文件模块图里的 node:child_process 都被换成
 // spy —— credentials.ts 若（现在或将来）真去 exec 命令型 key，这里立刻爆红。
@@ -104,7 +107,12 @@ describe("createCredentialResolver", () => {
     // 两个 id 只告警一次（warnKey 合并），文案里的 provider 名写 `droid`；
     // kimi/zai 的键与文案不受影响。
     const warnings: string[] = [];
-    const missing = makeResolver(undefined, {}, (m) => warnings.push(m));
+    const missing = createCredentialResolver({
+      readCredential: () => undefined,
+      env: {},
+      warn: (m) => warnings.push(m),
+      droidCliLogin: () => false, // ~/.factory 不存在 ⇒ 保留 WARN
+    });
     expect(missing("droid-standard")).toBeUndefined();
     expect(missing("droid-core")).toBeUndefined();
     expect(missing("droid-standard")).toBeUndefined();
@@ -112,5 +120,134 @@ describe("createCredentialResolver", () => {
     expect(warnings[0]).toContain('"droid"');
     expect(warnings[0]).toContain("FACTORY_API_KEY");
     expect(warnings[0]).not.toContain("droid-standard");
+  });
+});
+
+describe("droid CLI login state (2026-10-19 ruling: no WARN when ~/.factory exists)", () => {
+  it("suppresses the WARN when the droid CLI has its own login state (~/.factory present)", () => {
+    const warnings: string[] = [];
+    const resolve = createCredentialResolver({
+      readCredential: () => undefined,
+      env: {},
+      warn: (m) => warnings.push(m),
+      droidCliLogin: () => true,
+    });
+    expect(resolve("droid-standard")).toBeUndefined();
+    expect(resolve("droid-core")).toBeUndefined();
+    expect(resolve("droid-standard")).toBeUndefined();
+    expect(warnings).toHaveLength(0); // 无 WARN——余额探测不可用只走状态面
+    // 状态面：凭据缺失标记如实置位（HUD/status 据此显示「余额探测不可用」）。
+    expect(resolve.droidKeyMissing()).toBe(true);
+  });
+
+  it("keeps the WARN when ~/.factory does NOT exist (droid not set up at all)", () => {
+    const warnings: string[] = [];
+    const resolve = createCredentialResolver({
+      readCredential: () => undefined,
+      env: {},
+      warn: (m) => warnings.push(m),
+      droidCliLogin: () => false,
+    });
+    expect(resolve("droid-standard")).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"droid"');
+    expect(resolve.droidKeyMissing()).toBe(true); // WARN 与状态标记不互斥
+  });
+
+  it("warns again if the CLI login state disappears later (checked fresh on every miss)", () => {
+    const warnings: string[] = [];
+    let loggedIn = true;
+    const resolve = createCredentialResolver({
+      readCredential: () => undefined,
+      env: {},
+      warn: (m) => warnings.push(m),
+      droidCliLogin: () => loggedIn,
+    });
+    expect(resolve("droid-standard")).toBeUndefined();
+    expect(warnings).toHaveLength(0);
+    loggedIn = false; // ~/.factory 后来被删 ⇒ 回到 WARN 路径（仍只打一次）
+    expect(resolve("droid-standard")).toBeUndefined();
+    expect(resolve("droid-core")).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("a later credential hit clears droidKeyMissing", () => {
+    let key: string | undefined = undefined;
+    const resolve = createCredentialResolver({
+      readCredential: () => undefined,
+      env: {
+        get FACTORY_API_KEY() {
+          return key;
+        },
+      } as Record<string, string | undefined>,
+      droidCliLogin: () => true,
+    });
+    expect(resolve("droid-standard")).toBeUndefined();
+    expect(resolve.droidKeyMissing()).toBe(true);
+    key = "fk-later";
+    expect(resolve("droid-standard")).toBe("fk-later");
+    expect(resolve.droidKeyMissing()).toBe(false);
+  });
+
+  it("a throwing droidCliLogin stub is treated as 'not logged in' (WARN path, never throws)", () => {
+    const warnings: string[] = [];
+    const resolve = createCredentialResolver({
+      readCredential: () => undefined,
+      env: {},
+      warn: (m) => warnings.push(m),
+      droidCliLogin: () => {
+        throw new Error("fs broken");
+      },
+    });
+    expect(() => resolve("droid-core")).not.toThrow();
+    expect(resolve("droid-core")).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("kimi/zai warnings are untouched by the droid CLI login state", () => {
+    const warnings: string[] = [];
+    const resolve = createCredentialResolver({
+      readCredential: () => undefined,
+      env: {},
+      warn: (m) => warnings.push(m),
+      droidCliLogin: () => true, // droid 已登录也不影响 kimi/zai 的 WARN
+    });
+    expect(resolve("kimi-coding")).toBeUndefined();
+    expect(resolve("zai")).toBeUndefined();
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain('"kimi-coding"');
+    expect(warnings[1]).toContain('"zai"');
+    // kimi/zai 的 miss 不置 droid 标记。
+    expect(resolve.droidKeyMissing()).toBe(false);
+  });
+
+  it("droidKeyMissing starts false and only tracks droid pool misses", () => {
+    const resolve = makeResolver(undefined, {});
+    expect(resolve.droidKeyMissing()).toBe(false);
+    expect(resolve("zai-coding-cn")).toBeUndefined();
+    expect(resolve.droidKeyMissing()).toBe(false);
+  });
+});
+
+describe("droidCliLoginPresent (default probe)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function fakeHome(withFactory: boolean): string {
+    const home = mkdtempSync(join(tmpdir(), "pi-quota-home-"));
+    dirs.push(home);
+    if (withFactory) mkdirSync(join(home, ".factory"));
+    vi.stubEnv("HOME", home); // os.homedir() 在 POSIX 上每次读 $HOME
+    return home;
+  }
+
+  it("true when ~/.factory exists, false when it does not, never throws", () => {
+    fakeHome(true);
+    expect(droidCliLoginPresent()).toBe(true);
+    fakeHome(false);
+    expect(droidCliLoginPresent()).toBe(false);
   });
 });

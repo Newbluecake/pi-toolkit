@@ -1090,6 +1090,122 @@ describe("droid: isActive gating (D11)", () => {
   });
 });
 
+describe("droid credential-missing disclosure (2026-10-19 ruling)", () => {
+  function missingKeyFixture(missing: () => boolean) {
+    const clock = new FakeClock(1_000);
+    const pair = createDroidAdapters({ isActive: () => true });
+    const credentials = vi.fn(() => undefined); // 无 auth.json / FACTORY_API_KEY
+    const fetchJson = vi.fn(async () => undefined);
+    const setStatus = vi.fn();
+    const warn = vi.fn();
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [pair.standard, pair.core],
+      credentials,
+      fetchJson,
+      demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn }),
+      setStatus,
+      warn,
+      droidCredentialMissing: missing,
+    });
+    return { clock, service, credentials, fetchJson, setStatus };
+  }
+
+  it("missing key + managed droid pools ⇒ HUD shows `quota droid no-key`, pools stay unknown, no fabricated numbers", async () => {
+    const f = missingKeyFixture(() => true);
+    expect(f.service.droidCredentialMissing()).toBe(true);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    // 无 key ⇒ 适配器不发请求（AdapterDeps 契约）。
+    expect(f.fetchJson).not.toHaveBeenCalled();
+    // 无快照路径也写一次 HUD：`droid no-key` 段如实说明余额探测不可用。
+    expect(f.setStatus).toHaveBeenLastCalledWith("quota droid no-key");
+    // 池保持 unknown：判定面无任何 verdict、不拦 spawn（fail-open）。
+    expect(f.service.verdicts()).toEqual([]);
+    expect(f.service.verdictFor("droid-standard")).toBeUndefined();
+    f.service.dispose();
+  });
+
+  it("dep absent ⇒ droidCredentialMissing() false and the status line stays legacy", async () => {
+    const clock = new FakeClock(1_000);
+    const pair = createDroidAdapters({ isActive: () => true });
+    const setStatus = vi.fn();
+    const warn = vi.fn();
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [pair.standard, pair.core],
+      credentials: () => undefined,
+      fetchJson: async () => undefined,
+      demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn }),
+      setStatus,
+      warn,
+    });
+    expect(service.droidCredentialMissing()).toBe(false);
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(setStatus.mock.calls.every((c) => c[0] === undefined)).toBe(true); // 无 no-key 段
+    service.dispose();
+  });
+
+  it("no droid adapters ⇒ the flag never surfaces (kimi/zai-only stacks stay byte-identical)", async () => {
+    const clock = new FakeClock(1_000);
+    const setStatus = vi.fn();
+    const warn = vi.fn();
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [stubAdapter("zai-coding-cn").adapter],
+      credentials: () => undefined,
+      fetchJson: async () => undefined,
+      demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn }),
+      setStatus,
+      warn,
+      droidCredentialMissing: () => true, // 不受管 ⇒ droidManaged 闸门拦下
+    });
+    expect(service.droidCredentialMissing()).toBe(false);
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(setStatus.mock.calls.every((c) => c[0] === undefined)).toBe(true);
+    service.dispose();
+  });
+
+  it("a throwing droidCredentialMissing stub degrades to false (never throws)", async () => {
+    const f = missingKeyFixture(() => {
+      throw new Error("broken stub");
+    });
+    expect(f.service.droidCredentialMissing()).toBe(false);
+    f.service.refreshIfStale();
+    await f.service.whenIdle();
+    expect(f.setStatus.mock.calls.every((c) => c[0] === undefined)).toBe(true);
+    f.service.dispose();
+  });
+
+  it("a real snapshot clears the segment again (readings beat the no-key marker)", async () => {
+    const clock = new FakeClock(1_000);
+    const std = stubAdapter("droid-standard");
+    std.set(() => droidSnapshot("droid-standard", [{ scope: "5h", usedPct: 10 }], clock.now()));
+    const setStatus = vi.fn();
+    const warn = vi.fn();
+    const service = createQuotaService({
+      settings: DEFAULT_SETTINGS.quota,
+      clock,
+      adapters: [std.adapter],
+      credentials: () => undefined,
+      fetchJson: async () => undefined,
+      demotions: createDemotionStore({ path: join(dir, "quota-state.json"), now: () => clock.now(), warn }),
+      setStatus,
+      warn,
+      droidCredentialMissing: () => true,
+    });
+    service.refreshIfStale();
+    await service.whenIdle();
+    expect(setStatus).toHaveBeenLastCalledWith("quota droid 10%"); // 读数在 ⇒ 无 no-key 段
+    service.dispose();
+  });
+});
+
 describe("droid: one request per refresh pass (R6, slow pool rides the fast pool's request)", () => {
   function realFixture() {
     const clock = new FakeClock(1_000);

@@ -106,6 +106,12 @@ export interface QuotaService {
   droidAlternatives(limit?: number): readonly DroidPoolAlternative[];
   /** 恒 []（2026-10-15 终版拍板）：鉴权问题不进任何 UI；适配器仍记录（信任判定用）。 */
   problems(): readonly QuotaProblem[];
+  /**
+   * droid 池受管且凭据缺失（auth.json / FACTORY_API_KEY 都没有）⇒ true（2026-10-19
+   * 用户拍板：droid CLI 已登录时缺 key 不打 WARN，由状态面披露「余额探测不可用」）。
+   * 同步、只读、永不抛；droid 适配器未构造 ⇒ 恒 false。
+   */
+  droidCredentialMissing(): boolean;
   /** fire-and-forget；未过期或在途则空转。永不抛、永不返回被拒 Promise。 */
   refreshIfStale(): void;
   /** 仅测试：等待当前所有在途刷新落地。 */
@@ -129,6 +135,12 @@ export interface QuotaServiceDeps {
   /** HUD 主题（ctx.ui.theme 的结构子集）；旧 pi / 非 TUI 时 undefined ⇒ 纯文本。 */
   readonly theme?: (() => QuotaStatusTheme | undefined) | undefined;
   readonly warn?: ((message: string) => void) | undefined;
+  /**
+   * droid 池凭据缺失探测（2026-10-19 拍板）：由 credentials resolver 的状态面供给
+   *（`droidKeyMissing`）。缺席 ⇒ 视为不缺（旧行为字节不变）。仅在 droid 适配器
+   * 受管时生效（droidManaged 闸门）。
+   */
+  readonly droidCredentialMissing?: (() => boolean) | undefined;
   /**
    * 晚绑定池端口（P5 经 createCatalogPoolPort 供给；quota-plan r2 §2.1）。缺席 ⇒
    * droid 模型的池恒未知（D5 fail-open）。端口 getter 返回 undefined 时同样退化。
@@ -305,9 +317,24 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
     if (disposed || deps.setStatus === undefined) return;
     try {
       // 不可信的 provider 在 verdictsNow 里已被过滤；鉴权问题不再进任何 UI（终版拍板）。
-      deps.setStatus(renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.(), []));
+      // droid 凭据缺失（2026-10-19 拍板）：无池读数时渲染 `droid no-key` 段，如实说明
+      // 余额探测不可用——不编造读数。
+      deps.setStatus(
+        renderQuotaStatus(verdictsNow(now), now, settings.refreshMs, deps.theme?.(), [], droidCredentialMissingNow()),
+      );
     } catch {
       // HUD 不可用不影响数据面。
+    }
+  };
+
+  /** droid 池受管（适配器在列）且凭据缺失 ⇒ true；注入桩异常吞掉。 */
+  const droidManaged = deps.adapters.some((a) => isDroidQuotaId(a.id));
+  const droidCredentialMissingNow = (): boolean => {
+    if (!droidManaged) return false;
+    try {
+      return deps.droidCredentialMissing?.() === true;
+    } catch {
+      return false; // 端口契约永不抛；兜注入桩。
     }
   };
 
@@ -691,7 +718,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
           } catch {
             hasProblem = false;
           }
-          if (hasProblem) writeStatus(clock.now());
+          // 2026-10-19 拍板：droid 凭据缺失（resolver 刚 miss）也要写一次 HUD——
+          // 否则无快照路径永不更新状态行，`droid no-key` 段出不来。
+          if (hasProblem || (isDroidQuotaId(id) && droidCredentialMissingNow())) writeStatus(clock.now());
           return;
         }
         try {
@@ -798,6 +827,9 @@ export function createQuotaService(deps: QuotaServiceDeps): QuotaService {
       // 终版拍板（2026-10-15）：鉴权问题不进任何 UI（HUD/web/通知）——数据拿不到就当
       // 没有该订阅。适配器的 lastProblem 仍在（信任判定用）+ warnOnce 开发者日志保留。
       return [];
+    },
+    droidCredentialMissing() {
+      return droidCredentialMissingNow();
     },
     refreshIfStale,
     whenIdle() {

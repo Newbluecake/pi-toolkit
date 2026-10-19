@@ -172,6 +172,8 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
     demotions,
     baselines,
     onObservedReset: pushRecovery,
+    // droid 凭据缺失披露（2026-10-19 拍板）：resolver 状态面 → service → HUD/status。
+    droidCredentialMissing: credentials.droidKeyMissing,
     ...(droidPools === undefined ? {} : { pools: droidPools }),
     ...(input.setStatus === undefined ? {} : { setStatus: input.setStatus }),
     ...(input.theme === undefined ? {} : { theme: input.theme }),
@@ -219,3 +221,5 @@ export { createCatalogPoolPort, derivePool } from "./pools.js";
 export type { CatalogModelLike, CatalogPoolPort } from "./pools.js";
 export { DROID_PROVIDER, DROID_QUOTA_IDS, isDroidQuotaId } from "./types.js";
 export type { DroidQuotaProviderId, QuotaPoolId, QuotaBillingInfo } from "./types.js";
+export { droidCliLoginPresent } from "./credentials.js";
+export type { DroidCredentialState } from "./credentials.js";

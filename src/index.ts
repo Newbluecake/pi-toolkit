@@ -763,6 +763,13 @@ export default function activate(rawPi: ExtensionAPI): void {
         const verdict = port.verdict();
         return verdict.level === "unknown" ? undefined : { level: verdict.level, gating: verdict.gating };
       },
+      // quota droid 凭据缺失披露（2026-10-19 用户拍板）：只读当前 stack 的 QuotaService；
+      // quota 关闭 / stack 未建 ⇒ undefined ⇒ /agent status 不渲染该行。
+      quota: () => {
+        const q = holder.current?.quota;
+        if (q === undefined) return undefined;
+        return { droidKeyMissing: q.droidCredentialMissing() };
+      },
       // compact-hint 动态阈值（§10.3，P1-11）：经 holder 读当前会话（/reload 后自然指向新 stack）。
       // facts() 只读快照 compactHint 的 force/reserve 配置；窗口由命令时点的 ctx.getContextUsage 给。
       dynamic: {
