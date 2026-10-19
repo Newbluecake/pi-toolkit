@@ -90,7 +90,7 @@ metadata:
 | **方案制定**                | opus-5.5                                             | sonnet（简单方案）                     | `Plan`                                                                                                           |
 | **复杂任务方案 / 疑难攻坚** | opus-5.5                                             | gpt-6.1-sol                            | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable                                            |
 | **前端开发**                | glm-5.3（订阅）→ droid 订阅线 → sonnet               | opus-5.5（视觉/疑难）→ kimi-k3（订阅） | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）                                         |
-| **方案评审**                | gpt-6.1-sol（`copilot-response/`）                   | glm-5.3（订阅）→ kimi-k3               | `reviewer`；必须与方案模型异源                                                                                   |
+| **方案评审**                | gpt-6.1-sol（`copilot-response/` → `cr-response/`）  | glm-5.3（订阅）→ kimi-k3               | `reviewer`；必须与方案模型异源                                                                                   |
 | **开发实施**                | glm-5.3（订阅）→ droid 订阅线 → sonnet ⇄ gpt-6.1-sol | kimi-k3（订阅）→ opus-5.5              | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-6.1-sol 并列，多包按包分摊                              |
 | **任务验收**                | glm-5.3（订阅；开发用了 GLM 的包禁派）→ kimi-k3      | deepseek-flash → sonnet                | `verifier`；异源；**禁任何 GPT 系**；kimi 订阅将尽（≥80%）优先 deepseek-flash；打回后复验优先 resume 原 verifier |
 

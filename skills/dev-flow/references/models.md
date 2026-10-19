@@ -7,15 +7,15 @@ SKILL.md 的「阶段→模型」表只给首选/回退；本文件是精确 ID�
 
 `Agent` 的 `model` 必须用完整 `provider/modelId`；模糊别名会被 `subagent-model-hints` 扩展 block。
 
-| 别名           | 精确 ID（按优先级）                                                                                                                                                                                                                                                     |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| sonnet         | `cr-anthropic/claude-sonnet-5-5` → `cr-anthropic/claude-sonnet-5`（2026-10-10 起 5.5 为首选，$3/$15 暂按 5 填；5.5 报错时降回 5 续跑）                                                                                                                                  |
-| kimi-k3        | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`（有订阅额度时按此顺序，失败按序回退）                                                                                                                                                                      |
-| glm-5.3        | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）→ `cr-glm/glm-5.3`（**API 按量计费备线**：两条订阅线报错/429/额度耗尽时换它续跑，不参与订阅优先升首选；走 openai-completions，单价暂按智谱官方 $1.4/$4.4，待核实） |
-| opus-5.5       | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                             |
-| fable          | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                            |
-| gpt-6.1-sol    | `copilot-response/gpt-6.1-sol`（**唯一渠道**，2026-10-15 用户令；报错/429/额度耗尽时按阶段回退链换模型，传输中断时 resume 重试；**禁止用于验收**）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5×                                                 |
-| deepseek-flash | `deepseek/deepseek-flash`（验收次选，2026-10-18 起替代 deepseek-v4-pro；与 Claude/GLM/Kimi 系异源）                                                                                                                                                                     |
+| 别名           | 精确 ID（按优先级）                                                                                                                                                                                                                                                                                   |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sonnet         | `cr-anthropic/claude-sonnet-5-5` → `cr-anthropic/claude-sonnet-5`（2026-10-10 起 5.5 为首选，$3/$15 暂按 5 填；5.5 报错时降回 5 续跑）                                                                                                                                                                |
+| kimi-k3        | `kimi-coding/k3-256k` → `kimi-coding/k3` → `cr-kimi/kimi-k3`（有订阅额度时按此顺序，失败按序回退）                                                                                                                                                                                                    |
+| glm-5.3        | `zai-coding-cn/glm-5.3` → `zai/glm-5.3`（**订阅线；有余量时在候选阶段升为首选**，见下方订阅优先规则）→ `cr-glm/glm-5.3`（**API 按量计费备线**：两条订阅线报错/429/额度耗尽时换它续跑，不参与订阅优先升首选；走 openai-completions，单价暂按智谱官方 $1.4/$4.4，待核实）                               |
+| opus-5.5       | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                                                           |
+| fable          | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                                                          |
+| gpt-6.1-sol    | `copilot-response/gpt-6.1-sol` → `cr-response/gpt-6.1-sol`（2026-10-19 起 cr-response 恢复可用：copilot 报错/429/额度耗尽先换 cr-response 同模型续跑，两线都不行再按阶段回退链换模型；传输中断时 resume 重试；**禁止用于验收**）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5× |
+| deepseek-flash | `deepseek/deepseek-flash`（验收次选，2026-10-18 起替代 deepseek-v4-pro；与 Claude/GLM/Kimi 系异源）                                                                                                                                                                                                   |
 
 ## 疑难升级阶梯（fable 闸门）
 
@@ -37,8 +37,9 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 ## 渠道与独立性规则
 
 - **gpt-6.1-sol 是评审首选**：与 Claude 系的方案/开发模型天然异源，保证评审独立；实测评审质量好。
-  只走 copilot 渠道 `copilot-response/gpt-6.1-sol`。2026-10-15 用户令：dev-flow 不再使用 cr-response /
-  zhipu-pool 线路，gpt-6-astra / gpt-5.6-terra 同时移出路由表。
+  首选 copilot 渠道 `copilot-response/gpt-6.1-sol`，备线 `cr-response/gpt-6.1-sol`（同价，2026-10-19 用户令恢复
+  cr-response；cr-response 不接受 reasoning `minimal`/`none`，最低用 `low`）。zhipu-pool 仍不使用；gpt-6-astra /
+  gpt-5.6-terra / gpt-5.6-luna / gpt-5.5 虽可调用，但未分配 dev-flow 角色，不进路由表。
 - **验收禁用任何 GPT 系**（gpt-6.1-sol 等，任何线路；2026-10-14 用户令），任何情况下都不回退到 GPT 系。
   gpt-6.1-sol 开发的包（开发双首选，2026-09：与 sonnet 并列，多包并行时按包分摊——更便宜、上下文 1.05M），
   验收改派 Claude 系（sonnet）。
@@ -98,4 +99,5 @@ Factory 订阅额度不用也作废。[quota] 行显示 droid 池有余量（未
 | 2026-10-15 | gpt-6.1-sol 仅 copilot 渠道；移除 cr-response/zhipu-pool；droid 进路由表 |
 | 2026-10-16 | L1 加异源 verifier；验证模型订阅将尽优先 deepseek-v4-pro（见 SKILL.md）  |
 | 2026-10-18 | 验收次选 deepseek-v4-pro → deepseek-flash（用户要求）                    |
+| 2026-10-19 | cr-response 恢复：gpt-6.1-sol 备线 `cr-response/gpt-6.1-sol`             |
 | 2026-10-18 | 第 0 步改为主会话 ask_user 轻量澄清；dev-clarify 降为可选（用户要求）    |
