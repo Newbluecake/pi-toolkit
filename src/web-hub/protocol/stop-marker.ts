@@ -13,11 +13,14 @@ import {
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
+export const RESTART_FENCE_TTL_MS = 60_000;
+
 export interface StopMarker {
   v: 1;
   at: number;
   pid: number;
   by: string;
+  fence?: "restart";
 }
 export type StopMarkerRead =
   { state: "absent" } | { state: "stopped"; at?: number } | { state: "unknown"; code: string };
@@ -68,6 +71,14 @@ export function readStopMarkerSync(file: string): StopMarkerRead {
     // Presence is the stop intent. Corrupt content remains stopped, per §6.7.2.
     try {
       const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      if (
+        raw.fence === "restart" &&
+        typeof raw.at === "number" &&
+        Number.isFinite(raw.at) &&
+        Date.now() - raw.at > RESTART_FENCE_TTL_MS
+      ) {
+        return { state: "absent" };
+      }
       return { state: "stopped", ...(typeof raw.at === "number" ? { at: raw.at } : {}) };
     } catch {
       return { state: "stopped" };
@@ -98,4 +109,18 @@ export function removeStopMarkerSync(file: string): void {
 }
 export async function removeStopMarker(file: string): Promise<void> {
   removeStopMarkerSync(file);
+}
+
+/** Best-effort cleanup; a later stop or another issuer's fence takes precedence. */
+export function removeRestartFenceSync(file: string, fence: Pick<StopMarker, "pid" | "at">): void {
+  try {
+    const st = lstatSync(file);
+    if (!st.isFile() || st.uid !== (process.getuid?.() ?? st.uid)) return;
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    if (raw.fence === "restart" && raw.pid === fence.pid && raw.at === fence.at) {
+      removeStopMarkerSync(file);
+    }
+  } catch {
+    /* best effort */
+  }
 }

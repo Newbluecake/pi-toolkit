@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   SUPERSEDE_DEFAULT_MAX_WAIT_MS,
@@ -6,7 +9,11 @@ import {
   createSupersede,
   supersedeWaitMs,
 } from "../../../src/web-hub/hub/supersede.js";
-import type { StopMarkerRead } from "../../../src/web-hub/protocol/stop-marker.js";
+import {
+  RESTART_FENCE_TTL_MS,
+  writeStopMarkerSync,
+  type StopMarkerRead,
+} from "../../../src/web-hub/protocol/stop-marker.js";
 
 function harness() {
   let now = 1_000;
@@ -123,6 +130,36 @@ describe("hub supersede controller (C10)", () => {
     expect(h.restart).toHaveBeenCalledWith(
       expect.objectContaining({ forced: true, openDialogs: [{ agentKey: "a1", count: 1 }] }),
     );
+  });
+
+  it("a real restart fence pauses replacement only until its expiry", () => {
+    const dir = mkdtempSync(join(tmpdir(), "supersede-fence-"));
+    const stopFile = join(dir, "stopped");
+    const at = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(at);
+    const restart = vi.fn();
+    const ctl = createSupersede({
+      hubVersion: "1.0.0",
+      now: () => Date.now(),
+      stopFile,
+      openDialogs: () => [],
+      inflight: () => 0,
+      restart,
+    });
+    try {
+      writeStopMarkerSync(stopFile, { v: 1, at, pid: process.pid, by: "agent", fence: "restart" });
+      ctl.observe("2.0.0");
+      expect(ctl.state()?.blocked).toBe("stopped");
+      expect(restart).not.toHaveBeenCalled();
+      clock.mockReturnValue(at + RESTART_FENCE_TTL_MS + 1);
+      ctl.tick();
+      expect(restart).toHaveBeenCalledTimes(1);
+      expect(ctl.state()?.blocked).toBeUndefined();
+    } finally {
+      ctl.dispose();
+      clock.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("clamps the override to 10s..30min and defaults invalid values", () => {

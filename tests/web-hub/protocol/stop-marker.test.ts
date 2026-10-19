@@ -1,11 +1,13 @@
 // plan §6.7.2 — stop-marker 三态分类矩阵（C8）。
 
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  RESTART_FENCE_TTL_MS,
   readStopMarkerSync,
+  removeRestartFenceSync,
   removeStopMarkerSync,
   writeStopMarkerSync,
 } from "../../../src/web-hub/protocol/stop-marker.js";
@@ -19,6 +21,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -80,6 +83,45 @@ describe("readStopMarkerSync: three-state classification matrix", () => {
     const res = readStopMarkerSync(bogus);
     expect(res.state).toBe("unknown");
     expect((res as { code: string }).code).toBe("ENOTDIR");
+  });
+});
+
+describe("restart fences", () => {
+  it.each([0, RESTART_FENCE_TTL_MS, RESTART_FENCE_TTL_MS + 1])("classifies a fence aged %i ms", (age) => {
+    const now = 1_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    writeStopMarkerSync(file, { v: 1, at: now - age, pid: process.pid, by: "agent", fence: "restart" });
+    expect(RESTART_FENCE_TTL_MS).toBe(60_000);
+    expect(readStopMarkerSync(file)).toEqual(
+      age > RESTART_FENCE_TTL_MS ? { state: "absent" } : { state: "stopped", at: now - age },
+    );
+    // Expiry is classification only, not a destructive read.
+    expect(JSON.parse(readFileSync(file, "utf8")).fence).toBe("restart");
+  });
+
+  it("tolerates extra fields and never expires a plain stop or an unknown fence tag", () => {
+    for (const extra of [{}, { fence: "other" }]) {
+      writeFileSync(file, JSON.stringify({ v: 1, at: 1, pid: process.pid, by: "agent", extra: true, ...extra }));
+      expect(readStopMarkerSync(file)).toEqual({ state: "stopped", at: 1 });
+    }
+  });
+
+  it.each([undefined, "old", null])("does not expire a fence with an invalid timestamp: %s", (at) => {
+    writeFileSync(file, JSON.stringify({ fence: "restart", at }));
+    expect(readStopMarkerSync(file)).toEqual({ state: "stopped" });
+  });
+
+  it("removes only the matching pid, timestamp and restart tag, even after expiry", () => {
+    const fence = { v: 1 as const, at: 1, pid: process.pid, by: "agent", fence: "restart" as const };
+    for (const replacement of [{ pid: process.pid + 1 }, { at: 2 }, { fence: undefined }]) {
+      writeFileSync(file, JSON.stringify({ ...fence, ...replacement }));
+      const before = readFileSync(file, "utf8");
+      removeRestartFenceSync(file, fence);
+      expect(readFileSync(file, "utf8")).toBe(before);
+    }
+    writeStopMarkerSync(file, fence);
+    removeRestartFenceSync(file, fence);
+    expect(readStopMarkerSync(file)).toEqual({ state: "absent" });
   });
 });
 

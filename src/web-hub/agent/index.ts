@@ -46,6 +46,12 @@ import {
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
 import {
+  readStopMarkerSync,
+  writeStopMarkerSync,
+  removeRestartFenceSync,
+  type StopMarker,
+} from "../protocol/stop-marker.js";
+import {
   UPLOAD_AGENT_CAPS,
   RUNTX_AGENT_CAPS,
   HOLD_AGENT_CAPS,
@@ -1628,14 +1634,40 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
   };
 
-  const restart = (): Promise<RestartOutcome> => {
-    // web-hub-spawn-restore plan D13/§10.5: an explicit restart overrides an earlier `/webhub
-    // stop`'s one-shot restore veto — removed BEFORE the hub_ctl goes out (failure: best-effort).
-    clearRestoreVetoSync(paths.stateDir);
-    return restartHubWithDeps();
+  const restart = async (): Promise<RestartOutcome> => {
+    const stoppedFile = paths.stoppedFile ?? join(paths.stateDir, "stopped");
+    let fence: StopMarker | undefined;
+    if (readStopMarkerSync(stoppedFile).state === "absent") {
+      const marker: StopMarker = { v: 1, at: now(), pid: process.pid, by: "agent", fence: "restart" };
+      try {
+        writeStopMarkerSync(stoppedFile, marker);
+        fence = marker;
+      } catch {
+        /* best effort: retain the legacy restart path */
+      }
+    }
+    const removeFence = (): void => {
+      if (fence !== undefined) removeRestartFenceSync(stoppedFile, fence);
+    };
+    try {
+      // D13: explicit restart clears the one-shot restore veto before shutdown.
+      clearRestoreVetoSync(paths.stateDir);
+      if (fence === undefined) return await restartHubWithDeps();
+      return await restartHubWithDeps(async () => {
+        const plan = resolveLauncher();
+        if ("error" in plan) return;
+        const info = await getBuildInfo();
+        const config = buildHubConfig(info);
+        // Keep other sessions fenced through async build-info resolution.
+        removeFence();
+        spawnHub(plan, hubMainPath, config, deps.spawnImpl);
+      });
+    } finally {
+      removeFence();
+    }
   };
 
-  const restartHubWithDeps = (): Promise<RestartOutcome> =>
+  const restartHubWithDeps = (spawn: () => void | Promise<void> = respawnSoon): Promise<RestartOutcome> =>
     restartHub({
       isLiveWithCap: (cap) => conn?.status().state === "live" && (conn?.caps.includes(cap) ?? false),
       request: async (frame, cap) => {
@@ -1661,7 +1693,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           /* already gone — nothing to signal */
         }
       },
-      spawn: respawnSoon,
+      spawn,
       now,
     });
 

@@ -48,8 +48,8 @@ export interface RestartDeps {
   /** Race-window re-check right before signalling (plan §8.2: "发信号前重新读一次 starttime 比对"). */
   readStartTicksNow: (pid: number) => Promise<number | undefined>;
   kill: (pid: number, signal: NodeJS.Signals) => void;
-  /** Fire-and-forget hub spawn (reuses the same launcher path as auto-start). */
-  spawn: () => void;
+  /** Await launcher preparation, not hub startup, so restart-fence cleanup cannot race it. */
+  spawn: () => void | Promise<void>;
   now: () => number;
 }
 
@@ -157,7 +157,7 @@ export async function restartHub(deps: RestartDeps): Promise<RestartOutcome> {
       const pid = record?.pid;
       const exited = pid === undefined ? true : await waitExit(deps, pid);
       if (exited) {
-        deps.spawn();
+        await deps.spawn();
         const rc = ack.restoreCount;
         return rc !== undefined && rc > 0 ? { kind: "restarted", restoreCount: rc } : { kind: "restarted" };
       }

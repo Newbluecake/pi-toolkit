@@ -290,7 +290,7 @@ describe("web-hub-spawn-restore D13: /webhub restart clears the veto BEFORE rest
   it("agent/index.ts's restart() calls clearRestoreVetoSync(paths.stateDir) ahead of the hub_ctl path", async () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync("src/web-hub/agent/index.ts", "utf8");
-    const m = /const restart = \(\): Promise<RestartOutcome> => \{([\s\S]*?)\n  \};/.exec(src);
+    const m = /const restart = (?:async )?\(\): Promise<RestartOutcome> => \{([\s\S]*?)\n  \};/.exec(src);
     expect(m).not.toBeNull();
     const body = m![1]!;
     expect(body.indexOf("clearRestoreVetoSync(paths.stateDir)")).toBeGreaterThanOrEqual(0);
