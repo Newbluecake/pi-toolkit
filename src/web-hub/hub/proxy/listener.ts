@@ -1,7 +1,7 @@
 /** Isolated proxy origin listener: direct Host/conn guard, one-time entry and cookie gate (§3.5). */
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import type { Socket } from "node:net";
-import type { ConnLease, HostSnapshot } from "../ports.js";
+import type { ClientAllowGuard, ConnLease, HostSnapshot } from "../ports.js";
 import { createConnGuard } from "../conn-guard.js";
 import { canonicalHostKey } from "../../protocol/lan.js";
 import { clearingSetCookies, resolveCookieIdentitySync, PROXY_GATE_COOKIE_MAX } from "../auth-identity.js";
@@ -74,6 +74,13 @@ export interface ProxyListenerDeps extends Omit<ProxyForwardDeps, "reply"> {
   lanHostSnapshot(): HostSnapshot | undefined;
   budget: ProxyWsBudget;
   onRequest(): void;
+  /**
+   * LAN client allowlist (LAN security §2.3 #3). REQUIRED on purpose — no optional chaining anywhere:
+   * a forgotten wire is a compile error, never a silently-open listener. Callers that have no
+   * allowlist pass an inactive guard (`createClientAllowGuard({})`), which admits everything.
+   * Enforced in the `connection` hook, i.e. before both `request` and `upgrade`.
+   */
+  clientAllow: ClientAllowGuard;
 }
 export interface ProxyListener {
   readonly server: Server;
@@ -120,6 +127,12 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
   server.on("connection", (socket) => {
     socket.unref();
     if (closing) {
+      socket.destroy();
+      return;
+    }
+    // Allowlist first: a denied peer gets no bytes and never takes a connection-guard lease.
+    // Proxy origins are never behind a trusted reverse proxy (`viaTrustedProxy: false` below).
+    if (!deps.clientAllow.admitPeer(socket.remoteAddress ?? "", false)) {
       socket.destroy();
       return;
     }

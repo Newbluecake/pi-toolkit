@@ -14,6 +14,8 @@
  *    taken effect yet — non-live — or `hub/main.ts` dropped a malformed / port-overlapping
  *    `config.proxy`) ⇒ one warning;
  *  - `portsStore: "broken"` ⇒ the prose recovery note (plan §3.3: never auto-cleared; manual only);
+ *  - LAN + `allowlistActive` ⇒ the first line gains the English marker ` · allowlist` (proxy listeners
+ *    share the hub's client allowlist);
  *  - every `parseWebHubProxyBlock` warning ⇒ one prose line naming the fallback.
  * Compact inline markers stay English (`proxy: on · lan · 7900-7949 · max 8`); prose blocks Chinese.
  */
@@ -37,6 +39,12 @@ export interface FormatProxyStatusOptions {
   readonly hasHubRecord: boolean;
   /** Absolute path of `<stateDir>/proxy/ports.json`, for the recovery note. */
   readonly portsFile: string;
+  /**
+   * LAN security §2.3 #3: the hub's client allowlist is active (`LanStatus.on.allowClients` present) —
+   * every proxy listener enforces it at connection level (denied peers get no bytes). Absent/false ⇒
+   * output byte-identical to before.
+   */
+  readonly allowlistActive?: boolean;
 }
 
 const WARNING_TEXT: Readonly<Record<WebHubProxyWarning, string>> = {
@@ -52,7 +60,10 @@ export function formatProxyStatusLines(proxy: ProxyHubStatus | undefined, o: For
   if (!o.control) {
     return ["warning：webHub.proxy.enabled=true 但 webHub.control=false，端口代理未启用（它属于控制面）。"];
   }
-  const lines = [`proxy: on · ${o.lan ? "lan" : "loopback"} · ${s.portRange} · max ${String(s.maxProxies)}`];
+  const lines = [
+    `proxy: on · ${o.lan ? "lan" : "loopback"} · ${s.portRange} · max ${String(s.maxProxies)}` +
+      (o.lan && o.allowlistActive === true ? " · allowlist" : ""),
+  ];
   for (const w of o.warnings) lines.push(WARNING_TEXT[w]);
   if (proxy === undefined) {
     if (o.hasHubRecord) {

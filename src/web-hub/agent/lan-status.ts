@@ -14,7 +14,12 @@
  * plaintext itself may be rendered, keyed on `mode`.
  */
 import type { HostTokenRejectReason, InvalidHostToken, LanStatus } from "../protocol/lan.js";
+import type { InvalidClientCidr } from "../protocol/client-allow.js";
+import type { TfaResData } from "../protocol/lan-2fa.js";
 import type { LanInfoPayload } from "../protocol/messages.js";
+
+/** `tfa_req status`'s success payload (F fetches it, I passes it in; optional everywhere). */
+export type TfaStatus = Extract<TfaResData, { kind: "status" }>;
 
 export type UiMode = "tui" | "rpc" | "print" | "json";
 
@@ -59,6 +64,67 @@ export function formatProxyMismatchLine(): string {
   return "忽略代理配置：trustProxyFrom 与 externalOrigins 必须同时设置。";
 }
 
+/** `webHub.lan.allowClients` 中被丢弃的非法项（settings 层结果，LAN security §1）——单行合并列出。 */
+export function formatInvalidAllowClientsLine(tokens: readonly InvalidClientCidr[]): string | undefined {
+  if (tokens.length === 0) return undefined;
+  const parts = tokens.map((t) => `${oneLine(t.token)}（${t.reason === "limit" ? "超出 64 项上限" : "格式无效"}）`);
+  return `忽略无效的 allowClients：${parts.join("、")}。`;
+}
+
+/** Token text comes from the settings file: keep it on one line and bounded. */
+function oneLine(text: string): string {
+  const flat = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return flat.length > 64 ? `${flat.slice(0, 64)}…` : flat;
+}
+
+const ALLOWLIST_SHOWN_MAX = 8;
+
+/** LAN security §2.4: allowlist lines (compact English marker + Chinese prose for deny-all). */
+function allowClientsLines(a: NonNullable<Extract<LanStatus, { state: "on" }>["allowClients"]>): string[] {
+  const lines: string[] = [];
+  const shown = a.entries.slice(0, ALLOWLIST_SHOWN_MAX).join(", ");
+  const more = a.entries.length > ALLOWLIST_SHOWN_MAX ? ` (+${a.entries.length - ALLOWLIST_SHOWN_MAX})` : "";
+  let marker = a.denyAll === true || a.entries.length === 0 ? "allowlist: deny-all" : `allowlist: ${shown}${more}`;
+  if (a.denied !== undefined) {
+    marker += ` · denied ${a.denied.total} · last ${formatLocalMinute(a.denied.lastAt)} ${oneLine(a.denied.lastIp)}`;
+  }
+  lines.push(marker);
+  if (a.denyAll === true || a.entries.length === 0) {
+    lines.push(
+      "警告：webHub.lan.allowClients 已配置但没有任何有效项，局域网入口现在拒绝所有非本机客户端（deny-all）。请修正后 /reload 并 /webhub restart。",
+    );
+  } else if (a.denied !== undefined) {
+    lines.push("被拒绝的客户端连接会被静默断开（不返回任何内容）；本机回环地址始终放行。");
+  }
+  return lines;
+}
+
+/** `2fa=…` segment (LAN security §6; `undefined` ⇒ not fetched ⇒ no segment at all). */
+export function formatTfaSegment(tfa: TfaStatus | undefined): string | undefined {
+  if (tfa === undefined) return undefined;
+  if (tfa.state === "inconsistent") return "2fa=inconsistent";
+  const factors = [...(tfa.totp ? ["totp"] : []), ...(tfa.feishu ? ["feishu"] : [])];
+  if (tfa.state === "none" || factors.length === 0) return "2fa=off";
+  return `2fa=${factors.join("+")}（恢复码剩 ${tfa.recoveryLeft}）`;
+}
+
+const TFA_REPAIR_HINT = "/webhub 2fa repair --confirm";
+
+function tfaRepairLines(tfa: TfaStatus | undefined): string[] {
+  if (tfa === undefined) return [];
+  if (tfa.repairNeeded !== undefined) {
+    return [
+      `警告：2FA 数据需要修复（${oneLine(tfa.repairNeeded)}）。执行 ${TFA_REPAIR_HINT}（会清空 2FA，之后请立即重新 enroll）。`,
+    ];
+  }
+  if (tfa.state === "inconsistent") {
+    return [
+      `警告：2FA 数据不一致，来自新 IP 的登录会失败。执行 ${TFA_REPAIR_HINT}（会清空 2FA，之后请立即重新 enroll）。`,
+    ];
+  }
+  return [];
+}
+
 function proxyLine(proxy: { trustedFrom: string[]; externalOrigins: string[] }): string {
   return (
     `代理：采信 ${proxy.trustedFrom.join("、")} 的 X-Forwarded-*；对外 ${proxy.externalOrigins.join("、")}。` +
@@ -88,14 +154,20 @@ function warningLine(w: string, counts: LanLimiterCounts | undefined): string | 
 }
 
 /** `LanStatus.state === "on"` → lines (main line + omitted + proxy + warnings), one entry per line. */
-export function formatLanOnLines(status: Extract<LanStatus, { state: "on" }>, counts?: LanLimiterCounts): string[] {
+export function formatLanOnLines(
+  status: Extract<LanStatus, { state: "on" }>,
+  counts?: LanLimiterCounts,
+  tfa?: TfaStatus,
+): string[] {
   const lines: string[] = [];
   const first = status.hosts[0];
   const extra = status.hosts.length - 1;
   const suffix = extra > 0 ? ` (+${extra} 个地址，/webhub open 查看)` : "";
   const url = first !== undefined ? `http://${first}:${status.port}/` : `(无可用地址):${status.port}`;
   const plaintextWarning = status.warnings.includes("plaintext") ? `  ${warningLine("plaintext", counts)}` : "";
-  lines.push(`lan=on ${url}${suffix}${plaintextWarning}`);
+  const tfaSegment = formatTfaSegment(tfa);
+  lines.push(`lan=on ${url}${suffix}${tfaSegment !== undefined ? ` ${tfaSegment}` : ""}${plaintextWarning}`);
+  if (status.allowClients !== undefined) lines.push(...allowClientsLines(status.allowClients));
   for (const o of status.omitted) lines.push(hostRejectLine(o.host, o.reason));
   if (status.proxy !== undefined) lines.push(proxyLine(status.proxy));
   for (const w of status.warnings) {
@@ -103,6 +175,12 @@ export function formatLanOnLines(status: Extract<LanStatus, { state: "on" }>, co
     const line = warningLine(w, counts);
     if (line !== undefined) lines.push(line);
   }
+  if (status.loginIpsRebuiltAt !== undefined) {
+    lines.push(
+      `提示：登录 IP 历史（login_ips）已损坏并重建为空（${formatLocalMinute(status.loginIpsRebuiltAt)}），所有 IP 暂按新 IP 处理，已启用 2FA 的账号下次登录都需要第二因素。`,
+    );
+  }
+  lines.push(...tfaRepairLines(tfa));
   return lines;
 }
 
@@ -112,8 +190,14 @@ export function formatLanOffLine(status: Extract<LanStatus, { state: "off" }>, p
   switch (status.reason) {
     case "sqlite-unavailable":
       return "未开启：当前运行时没有 node:sqlite（需要 Node ≥22.13）。";
-    case "db-invalid":
+    case "db-invalid": {
+      const tfaDetail = /^(?:db-invalid:)?(2fa-at-v1|2fa-schema|2fa-missing-row)$/.exec(detail)?.[1];
+      if (tfaDetail !== undefined) {
+        // 2FA tables are security data: never suggest moving hub.db away (that would silently drop 2FA).
+        return `未开启：hub.db 的 2FA 数据无法使用（db-invalid:${tfaDetail}）。为避免把「已启用 2FA」误当成「未启用」，局域网入口保持关闭；执行 ${TFA_REPAIR_HINT} 清空并重建 2FA 表（之后请立即重新 enroll），然后 /webhub restart。`;
+      }
       return `未开启：hub.db 无法使用（${detail}）。把 ${paths.dbFile} 移走后执行 /webhub restart 会重建（生成新的初始密码，旧会话失效）。`;
+    }
     case "db-unavailable":
       return "未开启：数据库子进程在 10 分钟内连续失败 4 次，局域网入口已关闭。详见 hub.log；执行 /webhub restart 重试。";
     case "db-too-large":
@@ -164,6 +248,8 @@ export function formatLanStatusLines(
     hubPid?: number;
     paths: LanStatusPaths;
     counts?: LanLimiterCounts;
+    /** `tfa_req status` result (LAN security §6); absent ⇒ no `2fa=` segment. */
+    tfa?: TfaStatus;
   },
 ): string[] {
   const lines: string[] = [];
@@ -178,7 +264,7 @@ export function formatLanStatusLines(
     lines.push("lan=starting…");
     return lines;
   }
-  if (status.state === "on") return formatLanOnLines(status, opts.counts);
+  if (status.state === "on") return formatLanOnLines(status, opts.counts, opts.tfa);
   return [formatLanOffLine(status, opts.paths)];
 }
 

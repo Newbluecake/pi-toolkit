@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import type { Server } from "node:http";
 import type {
   AuthIdentity,
+  ClientAllowGuard,
   HostSnapshot,
   HubProxyConfig,
   HubLog,
@@ -39,6 +40,7 @@ import { createProxySessionStore } from "./sessions.js";
 import { createProxyAudit, type ProxyAudit } from "./audit.js";
 import { canonicalAddr, parseProxyTarget, proxyTargetKey } from "./target.js";
 import { createProxyListener, type ProxyListener } from "./listener.js";
+import { createClientAllowGuard, tagClientAllowGuard } from "../client-allow.js";
 import { createProxyAdmission, type ProxyTraffic } from "./forward.js";
 
 export interface ProxyServiceDeps {
@@ -58,6 +60,12 @@ export interface ProxyServiceDeps {
   readonly audit?: ProxyAudit;
   readonly localAddresses?: () => readonly string[];
   readonly listen?: (server: Server, port: number, host: string) => Promise<void>;
+  /**
+   * The hub's shared LAN client allowlist guard (LAN security §2.3 #3). Every proxy listener
+   * enforces it at connection level. Absent ⇒ an inactive guard (admits everything) — kept optional
+   * only so pre-wiring callers still compile; the integrator should always pass the shared guard.
+   */
+  readonly clientAllow?: ClientAllowGuard;
 }
 interface Instance {
   logicalKey: string;
@@ -125,6 +133,8 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
     },
   };
   const audit = deps.audit ?? createProxyAudit(deps.log, now);
+  // One guard for every proxy listener: the shared hub guard tagged "proxy" for audit, or an inactive one.
+  const clientAllow = tagClientAllowGuard(deps.clientAllow ?? createClientAllowGuard({}), "proxy");
   const sessionCounts = new Map<string, ProxyTraffic>();
   const sessionTraffic = (session: import("./sessions.js").ProxySession): ProxyTraffic => {
     let counts = sessionCounts.get(session.sidHash);
@@ -231,6 +241,7 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
           now,
           timer,
           budget: wsBudget,
+          clientAllow,
           onRequest() {
             lastRequestAt = now();
             const inst = instances.get(pinned.key);
