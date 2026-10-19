@@ -162,3 +162,23 @@ describe("FA fsb transport correlation", () => {
     await rejected;
   });
 });
+
+describe("LAN-F tfa transport correlation", () => {
+  it("old hub ⇒ no tfa_req bytes; new hub routes only the matching rid; close rejects outstanding", async () => {
+    const { conn, sock } = liveFake(["lan.v1"]);
+    const before = sock.written.length;
+    await expect(conn.request({ t: "tfa_req", rid: "no-cap", op: "status" }, "lan.2fa.v1")).rejects.toThrow("E_NO_CAP");
+    expect(sock.written.length).toBe(before);
+    conn.close("test");
+    resetGlobals();
+    const n = liveFake(["lan.2fa.v1"]);
+    const pending = n.conn.request({ t: "tfa_req", rid: "factor", op: "status" }, "lan.2fa.v1");
+    const data = { kind: "status", state: "none", totp: false, feishu: false, recoveryLeft: 0, knownIps: 0 };
+    n.sock.hub({ t: "tfa_res", rid: "other", ok: true, data });
+    n.sock.hub({ t: "tfa_res", rid: "factor", ok: true, data });
+    await expect(pending).resolves.toMatchObject({ t: "tfa_res", rid: "factor", ok: true, data });
+    const dying = n.conn.request({ t: "tfa_req", rid: "dying", op: "status" }, "lan.2fa.v1");
+    n.conn.close("test");
+    await expect(dying).rejects.toThrow("E_CLOSED");
+  });
+});

@@ -1,3 +1,6 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { totpCode } from "../../../src/web-hub/hub/totp.js";
+import { NEW_IP_WINDOW_MS } from "../../../src/web-hub/protocol/lan-2fa.js";
 /**
  * `startHub` \u2192 `defaultLanAssembly` \u2192 `admin.ts` end-to-end wiring (plan
  * \u00a71.4, \u00a78, \u00a78.3, \u00a75.2 \u2014 S1-W3 LD \u5305). Uses a *fake* `HttpFrontend` (own
@@ -493,3 +496,60 @@ skipIfNoSqlite(
     }, 20_000);
   },
 );
+
+skipIfNoSqlite("LAN-F real socket + SQLite enrollment (Q15 joint gate)", () => {
+  it("routes tfa frames; missing Feishu owner fails closed; first TOTP enrollment forgets login_ips without kicking live sessions", async () => {
+    const home = tmp.make("wh-lan-tfa-");
+    const fe = fakeFrontendWithLan();
+    const sink: { store?: LanStore } = {};
+    const hub = await startHub(
+      { ...config({ home }), lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } },
+      fe,
+      { uid: process.getuid?.() ?? 0, lanAssembly: capturingAssembly(sink) },
+    );
+    if ("exists" in hub) throw Error("unexpected exists");
+    hubs.push(hub);
+    const c = await client(hub.paths.socketPath);
+    c.send(hello());
+    await c.waitFrame((f) => f.t === "hello_ack");
+    const store = sink.store!;
+    const user = (await store.initialInfo())!;
+    const row = (await store.getUser(user.username))!;
+    const at = Date.now();
+    await store.noteLoginIp("192.0.2.8", at);
+    const session = await store.createSessionChecked({
+      userId: row.id,
+      expectedEpoch: row.epoch,
+      expectedFactorGen: 0,
+      boundOrigin: "http://lan",
+      createdIp: "192.0.2.8",
+      now: at,
+    });
+    expect(session.ok).toBe(true);
+    const call = async (rid: string, op: Record<string, unknown>) => {
+      c.send({ t: "tfa_req", rid, ...op });
+      return c.waitFrame((f) => f.t === "tfa_res" && f.rid === rid);
+    };
+    expect(await call("missing-owner", { op: "feishu", on: true })).toMatchObject({ ok: false, code: "E_NO_FEISHU" });
+    const begin = await call("begin", { op: "totp_begin" });
+    expect(begin.ok).toBe(true);
+    const b32 = (begin.data as { secretB32: string }).secretB32;
+    let bits = "";
+    for (const ch of b32) bits += "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(ch).toString(2).padStart(5, "0");
+    const secret = Uint8Array.from(bits.match(/.{8}/g) ?? [], (b) => parseInt(b, 2));
+    const code = totpCode(secret, Math.floor(Date.now() / 30000), {
+      hmacSha1: (key, msg) => createHmac("sha1", key).update(msg).digest(),
+      timingSafeEqual,
+    });
+    const confirm = await call("confirm", { op: "totp_confirm", code });
+    expect(confirm).toMatchObject({ ok: true, data: { kind: "totp_confirm", recoveryCodes: expect.any(Array) } });
+    expect((confirm.data as { recoveryCodes: string[] }).recoveryCodes).toHaveLength(10);
+    expect(await store.knownIpCount(Date.now(), NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.listSessions(row.id, Date.now())).toHaveLength(1);
+    expect(await call("status", { op: "status" })).toMatchObject({
+      ok: true,
+      data: { kind: "status", state: "enrolled", knownIps: 0, totp: true },
+    });
+    expect(JSON.stringify(JSON.parse(readFileSync(hub.paths.hubJson, "utf8")))).not.toContain(b32);
+  });
+});

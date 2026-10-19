@@ -153,7 +153,7 @@ import { createRegistry } from "./registry.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
 import type { AuthRevokeEvent } from "./auth-revoke.js";
-import type { LanStore } from "./lan-store.js";
+import { repairLan2fa, type LanStore } from "./lan-store.js";
 
 /**
  * §6.7.1 (C8) — the duck-typed extras `http.ts`'s `createHttpFrontend` attaches beyond the
@@ -622,6 +622,11 @@ export async function startHub(
     const admin = createAdminHandler({
       log,
       hasLan: () => config.lan !== undefined,
+      // Routing lands now; cap remains staged until G and final production gate pass.
+      advertiseTfa: false,
+      emit: (e) => security?.emit(e),
+      repair2fa: () => repairLan2fa({ dbFile: paths.dbFile, log }),
+      feishuOwner: () => bot?.snapshot().owner !== undefined,
       store: () => lanDeps?.store,
       kdf: () => lanDeps?.kdf,
       limiter: () => lanDeps?.limiter,

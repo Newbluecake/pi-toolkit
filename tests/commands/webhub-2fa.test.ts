@@ -9,8 +9,16 @@
  * refusal output carries no secret. Plus the enroll/feishu/recovery/reset/forget-ips/repair
  * flows, codes-printed-once, and the old-hub cap gate.
  */
-import { describe, expect, it } from "vitest";
-import type { ExtensionCommandContext, ExtensionMode } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
+import { createCommandCaptureEngine, wrapCommandApi } from "../../src/web-hub/agent/command-capture.js";
+import { resolveCommandPolicy } from "../../src/web-hub/agent/command-policy.js";
+import { createWebHubCommand } from "../../src/commands/webhub.js";
+import type {
+  ExtensionAPI,
+  RegisteredCommand,
+  ExtensionCommandContext,
+  ExtensionMode,
+} from "@earendil-works/pi-coding-agent";
 import {
   fetchTfaStatus,
   formatTfaError,
@@ -130,14 +138,45 @@ describe("/webhub 2fa — TUI-only gate (r1 #4, §5.8)", () => {
     }
   });
 
-  it("policy override cannot weaken the gate: a web-claimed ctx is refused regardless of policy", async () => {
-    // command-policy.ts's `webhub: allow` only decides whether the web may INVOKE the command;
-    // the captured ctx it produces is still `mode:"tui"` + `webInvocation:true` — and this gate
-    // keys off exactly that marker, never the policy verdict.
-    const h = harness(ENROLL_SCRIPT, { code: "123456" });
-    await runTwofaCommand("enroll", fakeCtx("tui", true), h.deps);
-    expect(h.sent).toEqual([]);
-    expect(h.notes[0]?.level).toBe("warning");
+  it("REAL captured context + webhub:allow override still refuses every secret command before frames/widgets", async () => {
+    for (const sub of SECRET_SUBCOMMANDS) {
+      const args = `2fa ${sub}`;
+      expect(
+        resolveCommandPolicy({ name: "webhub", args, kind: "extension", overrides: { webhub: "allow" } }).policy,
+      ).toBe("allow");
+      const capture = createCommandCaptureEngine();
+      let registered!: Omit<RegisteredCommand, "name" | "sourceInfo">;
+      const raw = {
+        registerCommand: (_name: string, cmd: typeof registered) => {
+          registered = cmd;
+        },
+      } as unknown as ExtensionAPI;
+      const pi = wrapCommandApi(raw, () => capture);
+      const request = vi.fn();
+      pi.registerCommand(
+        "webhub",
+        createWebHubCommand({ control: () => ({}) as never, twofaPort: () => ({ hasCap: () => true, request }) }),
+      );
+      capture.registerOwned("webhub");
+      capture.arm({
+        cmdId: "test",
+        reqId: "req",
+        name: "webhub",
+        args,
+        origin: { listener: "lan", ip: "192.0.2.1", reqId: "req" },
+        deadlineAt: Date.now() + 8000,
+      });
+      const widget = vi.fn();
+      const ctx = { mode: "tui", ui: { notify: vi.fn(), setWidget: widget } } as unknown as ExtensionCommandContext;
+      await registered.handler(args, ctx);
+      expect(request, sub).not.toHaveBeenCalled();
+      expect(widget, sub).not.toHaveBeenCalled();
+      const out = JSON.stringify(capture.outputFor("test"));
+      expect(out, sub).toContain("仅允许在本地 TUI");
+      expect(out).not.toContain(SECRET_B32);
+      expect(out).not.toContain("otpauth:");
+      for (const code of RECOVERY_CODES) expect(out).not.toContain(code);
+    }
   });
 
   it("non-TUI modes (rpc/print/json) ⇒ refused before any frame", async () => {
@@ -403,5 +442,35 @@ describe("status fetch/format helpers (§6, P0 addendum item 2)", () => {
     expect(formatTfaError("E_UNSUPPORTED", "hub 版本过旧，请 /webhub restart")).toContain("hub 版本过旧");
     expect(formatTfaError("E_2FA_CODE", "the code did not match")).toContain("验证码不正确");
     expect(formatTfaError("E_WHATEVER", "raw hub message")).toContain("raw hub message");
+  });
+});
+
+describe("LAN-F actual command secret display", () => {
+  it("renders recovery codes once via a local widget (not notify), then clears it after bounded TTL", async () => {
+    vi.useFakeTimers();
+    try {
+      const notes: string[] = [];
+      const setWidget = vi.fn();
+      const request = vi.fn(async (f: TfaReqFrame) =>
+        okData({ kind: "recovery_regen", recoveryCodes: RECOVERY_CODES }, f.rid),
+      );
+      const command = createWebHubCommand({
+        control: () => ({}) as never,
+        twofaPort: () => ({ hasCap: () => true, request }),
+      });
+      const ctx = {
+        mode: "tui",
+        ui: { notify: (text: string) => notes.push(text), setWidget },
+      } as unknown as ExtensionCommandContext;
+      await command.handler("2fa recovery", ctx);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(setWidget).toHaveBeenCalledTimes(1);
+      expect(setWidget.mock.calls[0]![1]).toEqual([expect.stringContaining("仅显示一次"), ...RECOVERY_CODES]);
+      expect(notes.join(" ")).not.toContain(RECOVERY_CODES[0]);
+      await vi.advanceTimersByTimeAsync(300000);
+      expect(setWidget).toHaveBeenLastCalledWith(setWidget.mock.calls[0]![0], undefined);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

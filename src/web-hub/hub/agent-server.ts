@@ -228,6 +228,16 @@ export function createAgentServer(
         }
         return;
       }
+      if (frame.t === "tfa_req") {
+        if (deps.admin !== undefined) {
+          deps.admin
+            .handleTfaReq(frame, { agentKey, ...(agentPid === undefined ? {} : { agentPid }) })
+            .then(write, (err: unknown) =>
+              log.error("web-hub agent-server: admin tfa_req handler rejected", { error: String(err) }),
+            );
+        }
+        return;
+      }
       if (frame.t === "lan_req") {
         if (deps.admin !== undefined) {
           deps.admin

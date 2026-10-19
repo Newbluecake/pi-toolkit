@@ -167,7 +167,7 @@ describe("/webhub command", () => {
     const notes = await run("bogus", { control: control() });
     expect(notes[0]!.level).toBe("warning");
     expect(notes[0]!.message).toContain(
-      "/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>]",
+      "/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>|2fa <op>]",
     );
   });
 });
@@ -329,6 +329,7 @@ describe("getArgumentCompletions", () => {
   it("returns all subcommands for an empty prefix", () => {
     const items = cmd().getArgumentCompletions!("")!;
     expect(items!.map((i) => i.value).sort()).toEqual([
+      "2fa",
       "feishu",
       "open",
       "passwd",

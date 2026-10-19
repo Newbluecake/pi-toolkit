@@ -143,6 +143,16 @@ describe("admin tfa_req ops (§5.8)", () => {
     expect(res.data).toMatchObject({ state: "enrolled", totp: true, feishu: false, recoveryLeft: 10, knownIps: 1 });
   });
 
+  it.each(["2fa-at-v1", "2fa-schema", "2fa-missing-row"])(
+    "status uses B's actual open refusal detail with LAN store off: %s",
+    async (detail) => {
+      const h = harness({ store: () => undefined, lanStatus: () => ({ state: "off", reason: "db-invalid", detail }) });
+      const res = await h.call({ op: "status" });
+      expectValid(res);
+      expect(res).toMatchObject({ ok: true, data: { kind: "status", state: "inconsistent", repairNeeded: detail } });
+    },
+  );
+
   it("totp_begin ⇒ secret stays inside the response variant; second begin without replace ⇒ E_2FA_ENROLLED", async () => {
     const h = harness({}, { totpStep: totpStepOk });
     seedAdmin(h.store);
@@ -189,15 +199,7 @@ describe("admin tfa_req ops (§5.8)", () => {
     const h = harness({}, { totpStep: totpStepOk });
     seedAdmin(h.store);
     const { codes } = await enrollTotp(h);
-    // The P0 fake always regenerates; B's real store answers `recoveryCodes: []` when a set
-    // already exists (P0 addendum #4). Model that contract here with a narrow wrapper.
-    const preserving = new Proxy(h.store, {
-      get(target, key, receiver) {
-        if (key === "commitTotp") return async () => ({ ok: true as const, recoveryCodes: [] as string[] });
-        return Reflect.get(target, key, receiver) as unknown;
-      },
-    });
-    h.deps.store = () => preserving;
+    // Explicitly test the preserved-recovery response variant (fake and SQLite now both preserve it).
     await h.call({ op: "totp_begin", replace: true, rid: "e1" });
     const res = await h.call({ op: "totp_confirm", code: "123456", rid: "e2" });
     expectValid(res);
@@ -226,7 +228,7 @@ describe("admin tfa_req ops (§5.8)", () => {
     expect(h.emitted).toHaveLength(2);
   });
 
-  it("feishu on refused without a bot owner; dep absent ⇒ unchecked (legacy callers)", async () => {
+  it("feishu on refused without a bot owner; dep absent ⇒ fail closed", async () => {
     const refused = harness({ feishuOwner: () => false });
     seedAdmin(refused.store);
     const res = await refused.call({ op: "feishu", on: true });
@@ -238,7 +240,7 @@ describe("admin tfa_req ops (§5.8)", () => {
     seedAdmin(legacy.store);
     const ok = await legacy.call({ op: "feishu", on: true });
     expectValid(ok);
-    expect(ok.ok).toBe(true);
+    expect(ok).toMatchObject({ ok: false, code: "E_NO_FEISHU" });
   });
 
   it("recovery_regen ⇒ new set, old codes die; not enrolled ⇒ E_2FA_NONE", async () => {

@@ -1189,6 +1189,7 @@ export interface Lan2faState {
   feishu: boolean;
   recoveryLeft: number;
   factorGen: number;
+  repairNeeded?: string;
 }
 export type LanFactorVerdict =
   { ok: true; recoveryLeft?: number } | { ok: false; reason: "bad" | "replay" | "stale" | "none" };

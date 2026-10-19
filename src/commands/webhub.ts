@@ -29,7 +29,11 @@ import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works
 import { Container, Text, type Component } from "@earendil-works/pi-tui";
 import type { LanAdminResult, WebHubControl, WebHubStatusView } from "../web-hub/agent/index.js";
 import type { RotateOutcome, StartOutcome, StopOutcome } from "../web-hub/agent/admin-cmds.js";
-import { formatPasswdOutcomeMessage, type PasswdOutcome } from "../web-hub/agent/passwd-prompt.js";
+import {
+  MaskedInputComponent,
+  formatPasswdOutcomeMessage,
+  type PasswdOutcome,
+} from "../web-hub/agent/passwd-prompt.js";
 import type { RestartOutcome } from "../web-hub/agent/restart.js";
 import {
   formatInitialPasswordLines,
@@ -58,7 +62,9 @@ import {
   type FeishuNotifyCoexistence,
   type FeishuSetupUi,
 } from "../web-hub/agent/feishu-admin.js";
-import { newAdminRid } from "../web-hub/agent/connection.js";
+import { currentConnection, newAdminRid } from "../web-hub/agent/connection.js";
+import { fetchTfaStatus, runTwofaCommand, type TwofaCommandDeps } from "../web-hub/agent/twofa-cmd.js";
+import { isWebInvocation } from "../web-hub/agent/command-capture.js";
 import { FEISHU_OPEN_ID_RE } from "../web-hub/protocol/feishu.js";
 import { loadFeishuBotWarnings, type FeishuBotWarning } from "../config/settings.js";
 import { renderQr } from "./qr-render.js";
@@ -96,6 +102,8 @@ export interface WebHubCommandDeps {
    * here (see docs/dev/feishu-bot/F9-report.md's wiring hand-off).
    */
   feishuPort?: () => FeishuAdminPort | undefined;
+  /** Per-invocation test port; production resolves the current cap-gated socket. */
+  twofaPort?: () => Pick<TwofaCommandDeps, "hasCap" | "request"> | undefined;
   /** F9: `feishuBot.*` parse warnings for `/webhub feishu status` (default `loadFeishuBotWarnings`). */
   feishuSettingsWarnings?: () => FeishuBotWarning[];
   /** F9: feishu-notify coexistence probe (default `detectFeishuNotifyCoexistence`). */
@@ -104,7 +112,7 @@ export interface WebHubCommandDeps {
   feishuSleep?: (ms: number) => Promise<void>;
 }
 
-const USAGE = "用法：/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>]";
+const USAGE = "用法：/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>|2fa <op>]";
 
 const FEISHU_USAGE =
   "用法：/webhub feishu <setup [--replace] | status | cancel | allow <open_id> | deny <open_id> | repair | reset>（仅 TUI）";
@@ -224,9 +232,49 @@ function defaultOpen(url: string, onError: (message: string) => void): void {
   }
 }
 
+function makeTwofaDeps(ctx: ExtensionCommandContext, deps: WebHubCommandDeps): TwofaCommandDeps {
+  const port = deps.twofaPort?.() ?? currentConnection();
+  // Each invocation owns its widget and bounded lifetime; no shared state across /reload.
+  const key = `webhub-2fa-${newAdminRid()}`;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
+  const showSecrets = (lines: string[]): void => {
+    if (ctx.mode !== "tui" || isWebInvocation(ctx)) return;
+    if (expiry !== undefined) clearTimeout(expiry);
+    ctx.ui.setWidget(key, lines);
+    expiry = setTimeout(() => {
+      ctx.ui.setWidget(key, undefined);
+    }, 5 * 60_000);
+    expiry.unref();
+  };
+  return {
+    hasCap: (cap) => port !== undefined && ("hasCap" in port ? port.hasCap(cap) : port.caps.includes(cap)),
+    request: (frame, cap) => (port === undefined ? Promise.reject(new Error("hub 不在线")) : port.request(frame, cap)),
+    promptCode: (title) =>
+      ctx.ui.custom<string | undefined>((tui, _theme, _kb, done) => new MaskedInputComponent(title, tui, done)),
+    showEnrollment: ({ otpauthUri, secretB32 }) => {
+      let qr: string;
+      try {
+        qr = renderQr(otpauthUri);
+      } catch {
+        qr = otpauthUri;
+      }
+      showSecrets([...qr.split("\n"), `手动输入（base32）：${secretB32}`, "密钥仅在本地显示，5 分钟后自动隐藏。"]);
+    },
+    showRecoveryCodes: (codes) => showSecrets(["恢复码（仅显示一次，请妥善保存；5 分钟后自动隐藏）：", ...codes]),
+    hasFeishuOwner: async () => {
+      const fsb = feishuPortOf(deps);
+      if (fsb === undefined || !fsb.live) return false;
+      const res = await callFsb(fsb, { t: "fsb_req", rid: newAdminRid(), op: "info" });
+      return res.ok && isFsbInfoData(res.data) && res.data.owner !== undefined;
+    },
+    notify: (message, level) => notify(ctx, message, level),
+  };
+}
+
 async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {
   notify(ctx, formatStatus(control.status(), control.url()), "info");
-  const lanLines = control.lan.statusLines();
+  const tfa = await fetchTfaStatus(makeTwofaDeps(ctx, deps));
+  const lanLines = control.lan.statusLines(tfa);
   notifyAll(ctx, lanLines, lanLines[0]?.startsWith("lan=on") ? "info" : "warning");
   const warnings = deps.lanSettingsWarnings?.();
   if (warnings !== undefined) {
@@ -279,7 +327,7 @@ async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, dep
 }
 
 async function runPasswd(ctx: ExtensionCommandContext, control: WebHubControl): Promise<void> {
-  if (ctx.mode !== "tui") {
+  if (ctx.mode !== "tui" || isWebInvocation(ctx)) {
     notify(ctx, "/webhub passwd 仅支持在 TUI 中执行。", "warning");
     return;
   }
@@ -684,13 +732,25 @@ async function runFeishu(
   }
 }
 
-const SUBCOMMANDS = new Set(["status", "open", "passwd", "unlock", "restart", "stop", "start", "token", "feishu"]);
+const SUBCOMMANDS = new Set([
+  "status",
+  "open",
+  "passwd",
+  "unlock",
+  "restart",
+  "stop",
+  "start",
+  "token",
+  "feishu",
+  "2fa",
+]);
 
 /** 子命令集合的唯一来源是上面的 SUBCOMMANDS（补全从这里派生，避免漂移）。 */
 const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
   status: "查看 web-hub 状态（默认）",
   open: "打开浏览器 UI",
   passwd: "设置局域网访问密码（仅 TUI）",
+  "2fa": "局域网二次验证：status/enroll/feishu/recovery/reset/forget-ips/repair（除 status 外仅 TUI）",
   unlock: "清空登录限流",
   restart: "重启 hub",
   stop: "停止 hub（写机器级 stop 标记，抵制自动拉起）",
@@ -783,6 +843,13 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
       switch (sub) {
         case "open":
           await runOpen(ctx, control, deps);
+          return;
+        case "2fa":
+          try {
+            await runTwofaCommand(tokens.slice(1).join(" "), ctx, makeTwofaDeps(ctx, deps));
+          } catch {
+            notify(ctx, "二次验证操作失败；请检查 hub 连接后重试。", "error");
+          }
           return;
         case "passwd":
           await runPasswd(ctx, control);

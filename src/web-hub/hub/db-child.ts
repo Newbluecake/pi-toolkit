@@ -170,6 +170,7 @@ function factorState(userId) {
   const listed = enrolledIds(db).includes(userId);
   const inconsistent = row ? (!factorRowValid(row) || listed !== hasFactors(row)) : listed;
   return { state: inconsistent ? 'inconsistent' : hasFactors(row) ? 'enrolled' : 'none',
+    ...(inconsistent ? {repairNeeded:'2fa-missing-row'} : {}),
     totp: !!row?.totp_secret, feishu: row?.feishu === 1,
     recoveryLeft: row ? db.prepare('SELECT count(*) AS n FROM recovery_codes WHERE user_id=? AND used_at IS NULL').get(userId).n : 0,
     factorGen: row?.factor_gen ?? 0 };

@@ -209,6 +209,24 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
   }
 
   async function handleTfaStatus(rid: string): Promise<TfaResFrame> {
+    const status = deps.lanStatus?.();
+    if (status?.state === "off" && status.reason === "db-invalid" && status.detail?.startsWith("2fa-")) {
+      auditTfa("status", true);
+      return {
+        t: "tfa_res",
+        rid,
+        ok: true,
+        data: {
+          kind: "status",
+          state: "inconsistent",
+          totp: false,
+          feishu: false,
+          recoveryLeft: 0,
+          knownIps: 0,
+          repairNeeded: status.detail,
+        },
+      };
+    }
     const g = await requireLanUser(rid, "status");
     if (!g.ok) return g.res;
     const st = await g.store.get2faState(g.user.id);
@@ -225,7 +243,7 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
         feishu: st.feishu,
         recoveryLeft: st.recoveryLeft,
         knownIps,
-        ...(st.state === "inconsistent" ? { repairNeeded: "2fa-missing-row" } : {}),
+        ...(st.repairNeeded === undefined ? {} : { repairNeeded: st.repairNeeded }),
       },
     };
   }
@@ -286,7 +304,7 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
   async function handleTfaFeishu(rid: string, on: boolean): Promise<TfaResFrame> {
     const g = await requireLanUser(rid, "feishu");
     if (!g.ok) return g.res;
-    if (on && deps.feishuOwner !== undefined && !deps.feishuOwner()) {
+    if (on && deps.feishuOwner?.() !== true) {
       return tfaFail(rid, "feishu", "E_NO_FEISHU", "no confirmed Feishu bot owner");
     }
     const r = await g.store.setFeishu2fa({ userId: g.user.id, on, now: now() });

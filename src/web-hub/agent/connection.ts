@@ -43,6 +43,7 @@ import type {
   LanResFrame,
   SessionInfo,
 } from "../protocol/messages.js";
+import type { TfaReqFrame, TfaResFrame } from "../protocol/lan-2fa.js";
 import type { FsbReqFrame, FsbResFrame } from "../protocol/feishu.js";
 import { decodeHubFrame, LIMITS, TIMING } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
@@ -140,6 +141,7 @@ export interface HubConnection {
    * (unref'd); every pending request rejects when the link tears down (§11 LE
    * row: "连接关闭时全部 reject").
    */
+  request(frame: TfaReqFrame, requiredCap: string): Promise<TfaResFrame>;
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
   /** Capabilities from the current live link's `hello_ack.caps` (empty until live, or if the hub omitted it). */
@@ -260,7 +262,7 @@ class Connection implements HubConnection {
   private readonly pending = new Map<
     string,
     {
-      resolve: (f: LanResFrame | HubCtlAckFrame | FsbResFrame) => void;
+      resolve: (f: LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame) => void;
       reject: (err: Error) => void;
       timer: NodeJS.Timeout;
     }
@@ -390,12 +392,13 @@ class Connection implements HubConnection {
     return this.helloCaps;
   }
 
+  request(frame: TfaReqFrame, requiredCap: string): Promise<TfaResFrame>;
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
   request(
-    frame: LanReqFrame | HubCtlFrame | FsbReqFrame,
+    frame: LanReqFrame | HubCtlFrame | FsbReqFrame | TfaReqFrame,
     requiredCap: string,
-  ): Promise<LanResFrame | HubCtlAckFrame | FsbResFrame> {
+  ): Promise<LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame> {
     return new Promise((resolve, reject) => {
       if (this.link !== "live" || !this.helloCaps.includes(requiredCap)) {
         reject(new Error(`E_NO_CAP: ${requiredCap}`));
@@ -598,6 +601,7 @@ class Connection implements HubConnection {
         return;
       case "pong":
         return;
+      case "tfa_res":
       case "fsb_res":
       case "lan_res":
       case "hub_ctl_ack": {

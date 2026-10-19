@@ -347,7 +347,7 @@ export interface WebHubControl {
   lan: {
     /** LAN status lines for `/webhub status` (plan §9.3), read straight from `hub.json` on disk
      * — works even when the admin socket isn't live. */
-    statusLines(): string[];
+    statusLines(tfa?: import("./lan-status.js").TfaStatus): string[];
     /** Raw `lan_req{op:"info"}` result; callers decide how to render `initialPassword` (never here —
      * see `lan-status.ts`'s `formatInitialPasswordLines`, keyed on UI mode). */
     info(): Promise<LanAdminResult<LanInfoPayload | undefined>>;
@@ -1550,13 +1550,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   /** §9.3 LAN status lines, straight off `hub.json` — no admin RPC needed. */
-  const lanStatusLines = (): string[] => {
+  const lanStatusLines = (tfa?: import("./lan-status.js").TfaStatus): string[] => {
     const rec = readHubJsonRecord();
     const lanPaths: LanStatusPaths = { dbFile: paths.dbFile, lanPortSetting: settings.lan?.port ?? 0 };
     return formatLanStatusLines(rec?.lan, {
       settingsEnabled: settings.lan?.enabled === true,
       ...(rec?.pid !== undefined ? { hubPid: rec.pid } : {}),
       paths: lanPaths,
+      ...(tfa === undefined ? {} : { tfa }),
     });
   };
 
