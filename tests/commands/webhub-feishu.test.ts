@@ -7,6 +7,7 @@ import {
   createWebHubCommand,
   formatFeishuSettingsWarningLine,
   PI_WIDGET_MAX_LINES,
+  QR_WIDGET_MIN_ROWS,
   qrFitsWidget,
 } from "../../src/commands/webhub.js";
 import type { FeishuAdminPort, FeishuNotifyCoexistence } from "../../src/web-hub/agent/feishu-admin.js";
@@ -17,14 +18,16 @@ interface FakeCtx {
   notes: Array<{ message: string; level: string }>;
   confirms: Array<{ title: string; message: string }>;
   setConfirm(answer: boolean): void;
-  widgetHistory: Array<[string, string[] | undefined]>;
+  /** content is the string[] path, a component factory, or undefined (clear). */
+  widgetHistory: Array<[string, unknown]>;
 }
 
-function fakeCtx(mode = "tui", confirmAnswer = true): FakeCtx {
+function fakeCtx(mode = "tui", confirmAnswer = true, opts: { widgetThrow?: number } = {}): FakeCtx {
   const notes: FakeCtx["notes"] = [];
   const confirms: FakeCtx["confirms"] = [];
   const widgetHistory: FakeCtx["widgetHistory"] = [];
   let answer = confirmAnswer;
+  let widgetCalls = 0;
   const ctx = {
     mode,
     ui: {
@@ -33,7 +36,9 @@ function fakeCtx(mode = "tui", confirmAnswer = true): FakeCtx {
         confirms.push({ title, message });
         return answer;
       },
-      setWidget: (key: string, content: string[] | undefined) => {
+      setWidget: (key: string, content: unknown) => {
+        widgetCalls += 1;
+        if (widgetCalls <= (opts.widgetThrow ?? 0)) throw new Error("setWidget unavailable");
         widgetHistory.push([key, content]);
       },
     },
@@ -108,9 +113,10 @@ async function run(
     warnings?: string[];
     coexistence?: FeishuNotifyCoexistence;
     now?: () => number;
+    widgetThrow?: number;
   } = {},
 ): Promise<{ notes: Array<{ message: string; level: string }>; c: FakeCtx }> {
-  const c = fakeCtx(opts.mode ?? "tui", opts.confirm ?? true);
+  const c = fakeCtx(opts.mode ?? "tui", opts.confirm ?? true, { widgetThrow: opts.widgetThrow });
   const cmd = createWebHubCommand({
     control: () => fakeControl(),
     feishuPort: () => opts.port,
@@ -295,20 +301,19 @@ describe("/webhub feishu repair|reset (TUI confirm required)", () => {
   });
 });
 
-describe("qrFitsWidget (pi widget cap fallback decision)", () => {
-  it("pins pi's array-content widget cap at 10 lines", () => {
-    // InteractiveMode.MAX_WIDGET_LINES in pi-coding-agent 1.2.0; beyond ⇒ "… (widget truncated)".
+describe("qrFitsWidget (terminal-rows gate for the QR widget)", () => {
+  it("pins pi's string-array widget cap at 10 lines (why the component factory is used)", () => {
+    // InteractiveMode.MAX_WIDGET_LINES in pi-coding-agent 1.2.0; string[] beyond ⇒ "… (widget truncated)".
     expect(PI_WIDGET_MAX_LINES).toBe(10);
   });
 
-  it("accepts only blocks within the cap AND the terminal rows", () => {
-    expect(qrFitsWidget(PI_WIDGET_MAX_LINES, 24)).toBe(true);
-    expect(qrFitsWidget(1, 24)).toBe(true);
-    expect(qrFitsWidget(PI_WIDGET_MAX_LINES + 1, 40)).toBe(false); // over the cap
-    expect(qrFitsWidget(19, 40)).toBe(false); // the realistic setup QR
-    expect(qrFitsWidget(10, 12)).toBe(false); // fits the cap but squeezes chat/editor to nothing
-    expect(qrFitsWidget(10, undefined)).toBe(true); // non-TTY probe ⇒ assume fit
-    expect(qrFitsWidget(10, 0)).toBe(true); // unknown rows ⇒ assume fit
+  it("the component-factory widget is uncapped — only absurdly short terminals fall back to notify", () => {
+    expect(qrFitsWidget(24)).toBe(true); // realistic 80×24
+    expect(qrFitsWidget(QR_WIDGET_MIN_ROWS)).toBe(true);
+    expect(qrFitsWidget(QR_WIDGET_MIN_ROWS - 1)).toBe(false);
+    expect(qrFitsWidget(5)).toBe(false);
+    expect(qrFitsWidget(undefined)).toBe(true); // non-TTY probe ⇒ assume fit
+    expect(qrFitsWidget(0)).toBe(true); // unknown rows ⇒ assume fit
   });
 });
 
@@ -330,31 +335,54 @@ describe("/webhub feishu setup", () => {
     });
   }
 
-  it("plain setup: no confirm dialog, begin without replace, QR notified whole (19 lines > widget cap 10)", async () => {
+  /** Invoke a captured component factory and render the component, returning its lines. */
+  function renderWidgetFactory(factory: unknown, width = 80): string[] {
+    expect(typeof factory).toBe("function");
+    const component = (factory as () => { render(w: number): string[] })();
+    return component.render(width);
+  }
+
+  it("plain setup: no confirm dialog, begin without replace, QR rides the UNcapped component-factory widget", async () => {
     const p = setupPort(["pending0", "done"]);
     const { notes, c } = await run("feishu setup", { port: p.port });
     expect(c.confirms).toHaveLength(0);
     expect(p.sent[0]).toEqual({ t: "fsb_req", rid: expect.any(String), op: "setup_begin" });
-    // the 19-line QR exceeds pi's widget cap (10) ⇒ no widget content, one multi-line notify
+    // the 19-line QR exceeds pi's string-array widget cap (10) ⇒ component factory, then cleared
     const shown = c.widgetHistory.filter(([k]) => k === "webhub-feishu-qr");
-    expect(shown.length).toBeGreaterThanOrEqual(1);
-    expect(shown.every(([, content]) => content === undefined)).toBe(true);
-    const qrNote = notes.find((n) => n.message.includes("\n") && n.message.includes("█"));
-    expect(qrNote).toBeDefined();
-    const qrLines = qrNote!.message.split("\n");
-    expect(qrLines.length).toBeGreaterThan(10);
-    expect(qrLines.every((l) => /^[█▀▄ ]+$/.test(l))).toBe(true);
+    expect(shown.length).toBeGreaterThanOrEqual(2);
+    const rendered = renderWidgetFactory(shown[0]![1]);
+    expect(rendered.length).toBeGreaterThan(PI_WIDGET_MAX_LINES); // full QR, no truncation marker
+    expect(rendered.some((l) => l.includes("widget truncated"))).toBe(false);
+    expect(rendered.every((l) => /^[█▀▄ ]+$/.test(l))).toBe(true); // Text pads with spaces only
+    expect(rendered.some((l) => l.includes("█") && l.includes(" "))).toBe(true); // real QR content
+    expect(shown.at(-1)![1]).toBeUndefined();
     expect(notes.some((n) => n.message === pendingView.qrUrl)).toBe(true);
     expect(notes.at(-1)!.message).toContain("配置完成");
   });
 
+  it("factory throw ⇒ string-array widget; both throw ⇒ single multi-line notify", async () => {
+    // first setWidget call (factory) throws ⇒ second call carries the raw string[]
+    const p1 = setupPort(["pending0", "done"]);
+    const { c: c1 } = await run("feishu setup", { port: p1.port, widgetThrow: 1 });
+    const shown1 = c1.widgetHistory.filter(([k]) => k === "webhub-feishu-qr");
+    expect(Array.isArray(shown1[0]![1])).toBe(true);
+    expect((shown1[0]![1] as string[]).every((l) => /^[█▀▄ ]+$/.test(l))).toBe(true);
+
+    // both widget forms throw ⇒ ONE multi-line notify (pi merges consecutive notifies)
+    const p2 = setupPort(["pending0", "done"]);
+    const { c: c2, notes } = await run("feishu setup", { port: p2.port, widgetThrow: 99 });
+    expect(c2.widgetHistory.filter(([k]) => k === "webhub-feishu-qr")).toHaveLength(0);
+    const qrNotes = notes.filter((n) => n.message.includes("\n") && n.message.includes("█"));
+    expect(qrNotes).toHaveLength(1);
+    expect(qrNotes[0]!.message.split("\n").every((l) => /^[█▀▄ ]+$/.test(l))).toBe(true);
+  });
+
   it("the widget is cleared after the flow ends (clearQr → setWidget undefined)", async () => {
     const p = setupPort(["pending0", "expired"]);
-    const { c, notes } = await run("feishu setup", { port: p.port });
+    const { c } = await run("feishu setup", { port: p.port });
     const shown = c.widgetHistory.filter(([k]) => k === "webhub-feishu-qr");
+    expect(typeof shown[0]![1]).toBe("function");
     expect(shown.at(-1)![1]).toBeUndefined();
-    // QR still surfaced via the notify fallback
-    expect(notes.some((n) => n.message.split("\n").length > 10)).toBe(true);
   });
 
   it("--replace asks the TUI confirm and only then sends replace+confirm", async () => {

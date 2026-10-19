@@ -48,21 +48,22 @@ describe("renderQr", () => {
     expect(() => renderQr("x".repeat(2_954))).toThrow("qr-too-large");
   });
 
-  it("even the smallest QR exceeds pi's widget line cap — the notify fallback is mandatory", () => {
-    // v1 (21 modules + quiet zone 4) ⇒ ceil(29/2) = 15 lines; pi's MAX_WIDGET_LINES is 10.
+  it("even the smallest QR exceeds pi's string-array widget cap — the component factory is mandatory", () => {
+    // v1 (21 modules + quiet zone 4) ⇒ ceil(29/2) = 15 lines; pi's MAX_WIDGET_LINES (string[]
+    // content only) is 10, so showQr uses the uncapped component-factory setWidget overload.
     const minimal = renderQr("A").split("\n");
     expect(minimal.length).toBe(15);
     expect(minimal.length).toBeGreaterThan(PI_WIDGET_MAX_LINES);
-    expect(qrFitsWidget(minimal.length, 24)).toBe(false);
+    expect(qrFitsWidget(24)).toBe(true); // uncapped component path hosts it on a normal terminal
   });
 
-  it("a realistic decorated setup URL renders ~23 lines, far beyond the widget cap", () => {
+  it("a realistic decorated setup URL renders ~23 lines, far beyond the string-array cap", () => {
     // decorateQrUrl shape: launcher URL + user_code + from=sdk&tp=sdk&source=pi-toolkit&name=pi@<host>
     const url =
       "https://open.feishu.cn/page/launcher?user_code=AB12CD34&from=sdk&tp=sdk&source=pi-toolkit&name=pi@devbox";
     const lines = renderQr(url).split("\n");
     expect(lines.length).toBe(23); // v5 (37 modules + quiet zone 4) ⇒ ceil(45/2) = 23
     expect(lines.length).toBeGreaterThan(PI_WIDGET_MAX_LINES);
-    expect(qrFitsWidget(lines.length, 24)).toBe(false);
+    expect(qrFitsWidget(24)).toBe(true);
   });
 });

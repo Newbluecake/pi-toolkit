@@ -26,6 +26,7 @@
  */
 import { spawn } from "node:child_process";
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import { Container, Text, type Component } from "@earendil-works/pi-tui";
 import type { LanAdminResult, WebHubControl, WebHubStatusView } from "../web-hub/agent/index.js";
 import type { RotateOutcome, StartOutcome, StopOutcome } from "../web-hub/agent/admin-cmds.js";
 import { formatPasswdOutcomeMessage, type PasswdOutcome } from "../web-hub/agent/passwd-prompt.js";
@@ -377,24 +378,38 @@ async function runTokenRotate(ctx: ExtensionCommandContext, control: WebHubContr
 const FEISHU_QR_WIDGET_KEY = "webhub-feishu-qr";
 
 /**
- * pi's TUI caps array-content widgets at 10 lines (`InteractiveMode.MAX_WIDGET_LINES`,
+ * pi's TUI caps ARRAY-content widgets at 10 lines (`InteractiveMode.MAX_WIDGET_LINES`,
  * pi-coding-agent 1.2.0 interactive-mode.js) — anything beyond is dropped with
  * "… (widget truncated)". Even the smallest possible QR (v1, 21 modules + the four-module
- * quiet zone) renders 15 half-block lines, and a real decorated feishu setup URL lands at
- * 19–25, so a QR can never ride the widget without being cut unscannable: above the cap (or on
- * a terminal too short to host the block) the caller falls back to the transcript.
+ * quiet zone) renders 15 half-block lines and a real decorated feishu setup URL lands at
+ * 19–25, so the string-array overload can never host a scannable QR. The COMPONENT-FACTORY
+ * overload (`setWidget(key, (tui, theme) => Component)`, types.d.ts:102) is uncapped and is
+ * what showQr uses; this constant remains only as the documented reason the array overload
+ * is merely a mid-fallback.
  */
 export const PI_WIDGET_MAX_LINES = 10;
-/** Rows kept for chat + editor + footer when judging whether a widget block fits the screen. */
-const WIDGET_CHROME_RESERVE_ROWS = 8;
+/** Below this many terminal rows the QR widget would eat the whole screen ⇒ notify fallback. */
+export const QR_WIDGET_MIN_ROWS = 8;
 
 /**
- * Whether a `lineCount`-row block can be shown through `ctx.ui.setWidget` whole (not truncated,
- * not squeezing the chat to nothing). Unknown/zero terminal rows (non-TTY probes) assume fit.
+ * Whether the terminal can host the QR as a persistent widget at all. The component-factory
+ * widget is uncapped, so the line count no longer gates anything — only an absurdly short
+ * terminal (fewer than {@link QR_WIDGET_MIN_ROWS} rows) falls back to the transcript notify.
+ * Unknown/zero rows (non-TTY probes) assume fit.
  */
-export function qrFitsWidget(lineCount: number, terminalRows: number | undefined): boolean {
-  if (lineCount > PI_WIDGET_MAX_LINES) return false;
-  return terminalRows === undefined || terminalRows <= 0 || terminalRows >= lineCount + WIDGET_CHROME_RESERVE_ROWS;
+export function qrFitsWidget(terminalRows: number | undefined): boolean {
+  return terminalRows === undefined || terminalRows <= 0 || terminalRows >= QR_WIDGET_MIN_ROWS;
+}
+
+/**
+ * The QR as an uncapped pi-tui component: a Container with one `Text(line, 1, 0)` per QR row —
+ * the exact wrapper pi itself applies to string-array widgets, minus the MAX_WIDGET_LINES clamp
+ * and the truncation marker.
+ */
+function qrWidgetComponent(lines: readonly string[]): Component {
+  const container = new Container();
+  for (const line of lines) container.addChild(new Text(line, 1, 0));
+  return container;
 }
 
 const FEISHU_OPS = ["setup", "status", "cancel", "allow", "deny", "repair", "reset"] as const;
@@ -444,13 +459,24 @@ function unrefSleep(ms: number): Promise<void> {
   });
 }
 
-/** QR 展示面：能完整放下时用 TUI widget（持久可见），放不下时单条多行 notify 兑底（pi 会把连续 notify 合并成最后一行，逐行发会只剩一行码）。 */
+/**
+ * QR 展示面：组件工厂 widget（pi 只对 string[] 内容截断到 MAX_WIDGET_LINES=10，组件不受限），
+ * 三重兑底——组件工厂抛错 ⇒ string[] widget ⇒ 单条多行 notify（pi 会把连续 notify 合并成最后一行，
+ * 逐行发会只剩一行码）；终端行数低于 QR_WIDGET_MIN_ROWS 时直接走 notify。
+ */
 function feishuSetupUi(ctx: ExtensionCommandContext): FeishuSetupUi {
+  const notifyQr = (lines: readonly string[]): void => notify(ctx, lines.join("\n"));
   return {
     notify: (message, level) => notify(ctx, message, level),
     showQr: (lines) => {
       const rows = typeof process.stdout.rows === "number" ? process.stdout.rows : undefined;
-      if (qrFitsWidget(lines.length, rows)) {
+      if (qrFitsWidget(rows)) {
+        try {
+          ctx.ui.setWidget(FEISHU_QR_WIDGET_KEY, () => qrWidgetComponent(lines));
+          return;
+        } catch {
+          /* fall through to the string-array widget */
+        }
         try {
           ctx.ui.setWidget(FEISHU_QR_WIDGET_KEY, [...lines]);
           return;
@@ -458,7 +484,7 @@ function feishuSetupUi(ctx: ExtensionCommandContext): FeishuSetupUi {
           /* fall through to the notify fallback */
         }
       }
-      notify(ctx, lines.join("\n"));
+      notifyQr(lines);
     },
     clearQr: () => {
       try {
