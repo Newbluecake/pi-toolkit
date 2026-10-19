@@ -58,7 +58,9 @@ export function feishuResources(message: FeishuMessage): Resource[] {
     if (!r) return;
     const image = r["image_key"],
       file = r["file_key"];
-    if (typeof image === "string") result.push({ key: image, type: "image", name: "image.png" });
+    // A media tag's image_key is just the video cover thumbnail (Feishu docs) — never fetch it.
+    if (typeof image === "string" && r["tag"] !== "media")
+      result.push({ key: image, type: "image", name: "image.png" });
     if (typeof file === "string" && result.length < 20)
       result.push({
         key: file,
@@ -87,6 +89,35 @@ export function feishuFileCandidates(text: string): string[] {
   for (const m of text.slice(0, 1_000_000).matchAll(/`([^`\n]+)`|(?:^|\s)((?:~\/|\/)[^\s<>`"']+)/g))
     add((m[1] ?? m[2] ?? "").replace(/[),;。]+$/, ""));
   return found;
+}
+/** Explicit extension → MIME map for inbound attachments. Never content-sniffed; unknown extensions
+ * stay "unknown type". Every value satisfies protocol/upload.ts's normalizeMime RFC-token grammar. */
+const FEISHU_MIME_BY_EXT: Record<string, string> = {
+  md: "text/markdown",
+  markdown: "text/markdown",
+  txt: "text/plain",
+  log: "text/plain",
+  json: "application/json",
+  csv: "text/csv",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  pdf: "application/pdf",
+  zip: "application/zip",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  webm: "video/webm",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  m4a: "audio/mp4",
+  ogg: "audio/ogg",
+};
+export function feishuMimeForName(name: string): string | undefined {
+  const match = /\.([A-Za-z0-9]{1,16})$/.exec(name);
+  return match ? FEISHU_MIME_BY_EXT[match[1]!.toLowerCase()] : undefined;
 }
 export function feishuImage(bytes: Uint8Array): boolean {
   const b = Buffer.from(bytes);
@@ -148,7 +179,8 @@ export function createFeishuFiles(deps: FeishuFilesDeps) {
     const uploads = deps.uploads;
     if (!uploads) throw new Error("uploads-off");
     const p = principal(identity),
-      id = randomBytes(16).toString("hex");
+      id = randomBytes(16).toString("hex"),
+      mime = feishuMimeForName(name);
     let fh: Awaited<ReturnType<typeof open>> | undefined;
     try {
       await bounded(
@@ -160,6 +192,7 @@ export function createFeishuFiles(deps: FeishuFilesDeps) {
             id,
             name: sanitizeUploadName(name),
             size,
+            ...(mime !== undefined ? { mime } : {}),
           },
           { at: deadline },
         ),

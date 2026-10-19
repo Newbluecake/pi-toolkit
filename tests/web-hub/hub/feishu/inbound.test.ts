@@ -7,6 +7,7 @@ import {
   decodeFeishuEvent,
   FeishuDropCache,
   FEISHU_INBOUND_TRANSIENT,
+  FEISHU_POST_LIMITS,
 } from "../../../../src/web-hub/hub/feishu/inbound.js";
 
 afterEach(cleanupF6);
@@ -458,5 +459,130 @@ describe("F6 identity, dedup and ACK barrier", () => {
     expect(r.health).toContainEqual({ degraded: true, reason: "pending-full" });
     r.clock.advance(FEISHU_INBOUND_TRANSIENT.pendingTtlMs);
     expect(r.inbound.stats().pending).toBe(0);
+  });
+});
+describe("F6 post rich-text decode", () => {
+  const postEnvelope = (id: string, content: unknown, options: Parameters<typeof messageEnvelope>[2] = {}) => {
+    const e: any = messageEnvelope(id, "", options);
+    e.event.message.message_type = "post";
+    e.event.message.content = typeof content === "string" ? content : JSON.stringify(content);
+    return e;
+  };
+  it("extracts title, paragraphs, links; at/img/media/emotion contribute no text", () => {
+    const e = postEnvelope("post-full", {
+      zh_cn: {
+        title: "我是一个标题",
+        content: [
+          [
+            { tag: "text", text: "第一行 :" },
+            { tag: "a", href: "http://www.feishu.cn", text: "超链接" },
+            { tag: "at", user_id: "ou_x", user_name: "tom" },
+          ],
+          [{ tag: "img", image_key: "img_1" }],
+          [
+            { tag: "text", text: "第二行:" },
+            { tag: "text", text: "文本测试" },
+          ],
+          [{ tag: "media", file_key: "file_v2_1", image_key: "img_cover" }],
+          [{ tag: "emotion", emoji_type: "SMILE" }],
+        ],
+      },
+    });
+    const msg = decodeFeishuEvent(e, "cli_test");
+    expect(msg).toMatchObject({ kind: "message", message: { messageType: "post" } });
+    if (msg.kind !== "message") throw new Error("expected message");
+    expect(msg.message.text).toBe("我是一个标题\n\n第一行 :超链接 (http://www.feishu.cn)\n第二行:文本测试");
+    // The raw parsed content stays available for file/image extraction.
+    expect(msg.message.content).toMatchObject({ zh_cn: { title: "我是一个标题" } });
+  });
+  it("a renders href-only / text-only / identical text=href without duplication; no title, no blank head", () => {
+    const e = postEnvelope("post-links", {
+      zh_cn: {
+        content: [
+          [
+            { tag: "a", href: "https://a.example" },
+            { tag: "a", text: "display" },
+            { tag: "a", href: "https://b.example", text: "https://b.example" },
+            { tag: "a" },
+          ],
+        ],
+      },
+    });
+    const msg = decodeFeishuEvent(e, "cli_test");
+    if (msg.kind !== "message") throw new Error("expected message");
+    expect(msg.message.text).toBe("https://a.exampledisplayhttps://b.example");
+  });
+  it("prefers zh_cn over en_us, falls back to en_us, then to the first other locale", () => {
+    const both = postEnvelope("post-both", {
+      en_us: { content: [[{ tag: "text", text: "EN" }]] },
+      zh_cn: { content: [[{ tag: "text", text: "中文" }]] },
+    });
+    const msg = decodeFeishuEvent(both, "cli_test");
+    if (msg.kind !== "message") throw new Error("expected message");
+    expect(msg.message.text).toBe("中文");
+    const en = postEnvelope("post-en", { en_us: { content: [[{ tag: "text", text: "EN only" }]] } });
+    const enMsg = decodeFeishuEvent(en, "cli_test");
+    if (enMsg.kind !== "message") throw new Error("expected message");
+    expect(enMsg.message.text).toBe("EN only");
+    const other = postEnvelope("post-ja", { ja_jp: { content: [[{ tag: "text", text: "日本語" }]] } });
+    const otherMsg = decodeFeishuEvent(other, "cli_test");
+    if (otherMsg.kind !== "message") throw new Error("expected message");
+    expect(otherMsg.message.text).toBe("日本語");
+  });
+  it("post text drives /command detection exactly like plain text", async () => {
+    const r = await f6Rig();
+    const e = postEnvelope("post-cmd", { zh_cn: { content: [[{ tag: "text", text: "/use One" }]] } });
+    const result = await r.inbound.handle(e);
+    expect(result).toEqual({ ack: true, reason: "received" });
+    expect(r.intents).toContainEqual(expect.objectContaining({ type: "bound" }));
+    expect(r.request).not.toHaveBeenCalled();
+  });
+  it("group post strips bot mention placeholders and trims like text messages", () => {
+    const e = postEnvelope(
+      "post-group",
+      {
+        zh_cn: {
+          content: [
+            [
+              { tag: "at", user_id: "@_user_1" },
+              { tag: "text", text: "  hello post  " },
+            ],
+          ],
+        },
+      },
+      { chatType: "group", mentions: true },
+    );
+    const msg = decodeFeishuEvent(e, "cli_test");
+    if (msg.kind !== "message") throw new Error("expected message");
+    expect(msg.message.text).toBe("hello post");
+  });
+  it.each([
+    ["no-locale", {}],
+    ["locale-not-object", { zh_cn: "broken" }],
+    ["content-not-array", { zh_cn: { content: "broken" } }],
+    ["paragraph-not-array", { zh_cn: { content: [{ tag: "text", text: "x" }] } }],
+    ["tag-not-object", { zh_cn: { content: [["text"]] } }],
+    ["text-tag-without-text", { zh_cn: { content: [[{ tag: "text" }]] } }],
+    ["a-href-wrong-type", { zh_cn: { content: [[{ tag: "a", href: 7 }]] } }],
+    ["title-wrong-type", { zh_cn: { title: 7, content: [] } }],
+    ["oversized-title", { zh_cn: { title: "t".repeat(64 * 1024 + 1), content: [] } }],
+  ])("drops malformed post %s as content-invalid", async (label, content) => {
+    const r = await f6Rig();
+    const result = await r.inbound.handle(postEnvelope(`post-bad-${label}`, content));
+    expect(result).toEqual({ ack: true, reason: "content-invalid" });
+    expect(r.request).not.toHaveBeenCalled();
+    expect(r.intents).toEqual([]);
+  });
+  it("drops a post beyond structural caps without reading unbounded input", () => {
+    const many = Array.from({ length: FEISHU_POST_LIMITS.paragraphs + 1 }, () => [{ tag: "text", text: "x" }]);
+    expect(decodeFeishuEvent(postEnvelope("post-many", { zh_cn: { content: many } }), "cli_test")).toMatchObject({
+      kind: "drop",
+      reason: "content-invalid",
+    });
+    const tags = Array.from({ length: FEISHU_POST_LIMITS.tags + 1 }, () => ({ tag: "text", text: "x" }));
+    expect(decodeFeishuEvent(postEnvelope("post-tags", { zh_cn: { content: [tags] } }), "cli_test")).toMatchObject({
+      kind: "drop",
+      reason: "content-invalid",
+    });
   });
 });

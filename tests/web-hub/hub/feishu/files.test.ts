@@ -6,6 +6,8 @@ import {
   createFeishuFiles,
   feishuImage,
   feishuFileCandidates,
+  feishuMimeForName,
+  feishuResources,
   type FeishuUploadPort,
 } from "../../../../src/web-hub/hub/feishu/files.js";
 import { createFeishuHttp } from "../../../../src/web-hub/hub/feishu/http.js";
@@ -15,6 +17,7 @@ import { createFakeFeishu } from "../../../fixtures/feishu/fake-http.js";
 import { normalizedMessage, messageEnvelope } from "../../../fixtures/feishu/f6.js";
 import { f8Rig, eventually, sentContent } from "../../../fixtures/feishu/f8.js";
 import { createFsAdmitter, denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
+import { normalizeMime } from "../../../../src/web-hub/protocol/upload.js";
 import { createPreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
 import type { BeginParams } from "../../../../src/web-hub/hub/uploads.js";
 const cleanup: Array<() => Promise<void>> = [];
@@ -205,5 +208,97 @@ describe("F8 files", () => {
     await eventually(() => expect(r.fake.sent.some((s) => s.body["msg_type"] === "image")).toBe(true));
     expect(storage.settled).toContain("referenced");
     expect(storage.principals.every((p) => p === `feishu:${r.service.snapshot().gen}:ou_owner`)).toBe(true);
+  });
+});
+describe("F8 post resources and inbound mime", () => {
+  it("post img/media tags resolve resources; a media cover image_key is never fetched", async () => {
+    const m = normalizedMessage("post-res", "看附件");
+    m.messageType = "post";
+    m.content = {
+      zh_cn: {
+        title: "",
+        content: [
+          [{ tag: "text", text: "看附件" }],
+          [{ tag: "img", image_key: "post-pic" }],
+          [{ tag: "media", file_key: "post-clip", image_key: "post-cover", file_name: "clip.mp4" }],
+        ],
+      },
+    };
+    expect(feishuResources(m)).toEqual([
+      { key: "post-pic", type: "image", name: "image.png" },
+      { key: "post-clip", type: "file", name: "clip.mp4" },
+    ]);
+    const r = await standalone();
+    r.fake.resources.set("post-pic", { bytes: png });
+    r.fake.resources.set("post-clip", { bytes: Buffer.from("video-bytes") });
+    r.fake.resources.set("post-cover", { bytes: png });
+    const payload = await r.files.prepare(m, m.text, { installGen: 7, tenantKey: "tenant", senderOpenId: "ou_owner" });
+    expect(payload.uploadIds).toHaveLength(2);
+    expect(payload.body).toContain("看附件");
+    expect(payload.body).toContain("[web-hub attachments]");
+    expect(r.fake.calls.filter((c) => c.path.includes("/resources/post-cover"))).toEqual([]);
+  });
+  it("extension map: known text/image/archive types, unknown stays undefined, case folded", () => {
+    expect(feishuMimeForName("notes.md")).toBe("text/markdown");
+    expect(feishuMimeForName("notes.markdown")).toBe("text/markdown");
+    expect(feishuMimeForName("a.txt")).toBe("text/plain");
+    expect(feishuMimeForName("a.log")).toBe("text/plain");
+    expect(feishuMimeForName("a.json")).toBe("application/json");
+    expect(feishuMimeForName("a.csv")).toBe("text/csv");
+    expect(feishuMimeForName("p.PNG")).toBe("image/png");
+    expect(feishuMimeForName("p.jpg")).toBe("image/jpeg");
+    expect(feishuMimeForName("p.jpeg")).toBe("image/jpeg");
+    expect(feishuMimeForName("p.gif")).toBe("image/gif");
+    expect(feishuMimeForName("p.webp")).toBe("image/webp");
+    expect(feishuMimeForName("d.pdf")).toBe("application/pdf");
+    expect(feishuMimeForName("z.zip")).toBe("application/zip");
+    expect(feishuMimeForName("v.mp4")).toBe("video/mp4");
+    expect(feishuMimeForName("archive.bin")).toBeUndefined();
+    expect(feishuMimeForName("noext")).toBeUndefined();
+    expect(feishuMimeForName("dot.")).toBeUndefined();
+    // Every mapped value satisfies the wire grammar normalizeMime enforces.
+    for (const name of [
+      "a.md",
+      "a.markdown",
+      "a.txt",
+      "a.log",
+      "a.json",
+      "a.csv",
+      "a.png",
+      "a.jpg",
+      "a.jpeg",
+      "a.gif",
+      "a.webp",
+      "a.svg",
+      "a.pdf",
+      "a.zip",
+      "a.mp4",
+      "a.mov",
+      "a.webm",
+      "a.mp3",
+      "a.wav",
+      "a.m4a",
+      "a.ogg",
+    ])
+      expect(normalizeMime(feishuMimeForName(name))).toBe(feishuMimeForName(name));
+  });
+  it("begin carries the extension-derived mime; unknown extension passes none", async () => {
+    const r = await standalone();
+    r.fake.resources.set("md-file", { bytes: Buffer.from("# hi") });
+    const m = normalizedMessage("mime-md", "看这个");
+    m.messageType = "file";
+    m.content = { file_key: "md-file", file_name: "notes.md" };
+    await r.files.prepare(m, m.text, { installGen: 7, tenantKey: "tenant", senderOpenId: "ou_owner" });
+    expect(vi.mocked(r.port.begin).mock.calls[0]![0]).toMatchObject({ mime: "text/markdown" });
+    r.fake.resources.set("bin-file", { bytes: Buffer.from("bin") });
+    const b = normalizedMessage("mime-bin", "");
+    b.messageType = "file";
+    b.content = { file_key: "bin-file", file_name: "payload.bin" };
+    await r.files.prepare(b, b.text, { installGen: 7, tenantKey: "tenant", senderOpenId: "ou_owner" });
+    expect(vi.mocked(r.port.begin).mock.calls[1]![0]).not.toHaveProperty("mime");
+    // A staged long text is markdown-named message.txt ⇒ text/plain.
+    const long = normalizedMessage("mime-long", "中".repeat(10_000));
+    await r.files.prepare(long, long.text, { installGen: 7, tenantKey: "tenant", senderOpenId: "ou_owner" });
+    expect(vi.mocked(r.port.begin).mock.calls[2]![0]).toMatchObject({ mime: "text/plain" });
   });
 });

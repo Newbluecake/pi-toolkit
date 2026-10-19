@@ -532,6 +532,45 @@ describe("F10 Feishu bot — real hub child assembly", () => {
     expect(sent.calls.find((c) => c.path === "/open-apis/im/v1/images")?.form.file.size).toBe(png.length);
   }, 30_000);
 
+  it("FB5c: post rich text keeps its text and media file; derived mime reaches the attachment block", async () => {
+    const h = await boot(),
+      a = await h.agent();
+    await h.bind();
+    const md = Buffer.from("# notes\nhello post");
+    await h.rpc("resource", { key: "in-post-file", bytes: [...md], contentType: "application/octet-stream" });
+    await h.rpc("resource", { key: "in-post-cover", bytes: [...md], contentType: "image/png" });
+    const raw = messageEnvelope("in-post", "", { createdAt: String(Date.now()) });
+    raw.event.message.message_type = "post";
+    raw.event.message.content = JSON.stringify({
+      zh_cn: {
+        title: "",
+        content: [
+          [
+            { tag: "text", text: "看附件 " },
+            { tag: "a", text: "链接", href: "https://example.com/x" },
+          ],
+          [{ tag: "media", file_key: "in-post-file", image_key: "in-post-cover", file_name: "notes.md" }],
+        ],
+      },
+    });
+    await h.rpc("send", { raw });
+    const f = await a.command();
+    if (f.cmd.op !== "prompt") throw new Error("expected post prompt");
+    expect(f.cmd.text).toContain("看附件 链接 (https://example.com/x)");
+    expect(f.cmd.text).toContain("[web-hub attachments]");
+    const attachment = parseAttachmentBlock(f.cmd.text)?.[0];
+    expect(attachment).toBeDefined();
+    expect(attachment!.mime).toBe("text/markdown");
+    expect(readFileSync(attachment!.path)).toEqual(md);
+    // The media cover thumbnail is never downloaded; only the file resource is fetched.
+    const downloads = (await h.inspect()).calls.filter((c) => c.path.includes("/resources/"));
+    expect(downloads.map((c) => c.path)).toEqual([expect.stringContaining("/resources/in-post-file")]);
+    const request = h.disk().requests[f.id];
+    expect(request.payload.uploadIds).toHaveLength(1);
+    await a.finish(f, "post round trip done");
+    await h.sent("post round trip done");
+  }, 30_000);
+
   it("FB7/FB8: real WS drop redelivery dedups; restart never redispatches accepted work or snapshot-backfills", async () => {
     const h = await boot(),
       a = await h.agent();

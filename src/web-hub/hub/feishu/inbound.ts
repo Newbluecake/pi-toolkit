@@ -97,6 +97,67 @@ const str = (v: unknown, max = 256): v is string =>
 const tenant = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(v);
 const eventId = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_.:-]{1,100}$/.test(v);
 
+/** Structural bounds for post rich text (the raw payload is already bounded by chunk transport caps). */
+export const FEISHU_POST_LIMITS = { locales: 16, paragraphs: 256, tags: 256, textBytes: 64 * 1024 } as const;
+const POST_LOCALE_PREFERENCE: readonly string[] = ["zh_cn", "zh-CN", "en_us", "en-US"];
+
+/**
+ * message_type "post" content (`{<locale>: {title?, content: [[tag…]]}}`) → plain text; `undefined` = malformed
+ * (caller drops content-invalid), never throws. Extraction rules:
+ * - locale: first of zh_cn/zh-CN/en_us/en-US present, else the first remaining locale key (≤16 keys scanned);
+ *   a present-but-malformed preferred locale is a drop, never a silent fall-through;
+ * - `title`, when a non-empty string, becomes the first line (one blank line before the body);
+ * - paragraphs join with "\n"; tags inside a paragraph concatenate directly; empty paragraphs are dropped;
+ * - `text` → its text (required string); `a` → display text, else href, else `text (href)` when both differ;
+ * - `at`/`img`/`media`/`emotion`/unknown tags contribute NOTHING (mention keys are stripped by the caller,
+ *   exactly like text messages; files/images are extracted separately by files.ts);
+ * - consequence: a post with a non-empty title can never start with a `/command`, same as any leading text.
+ */
+export function feishuPostText(content: Record<string, unknown>): string | undefined {
+  const keys = Object.keys(content).slice(0, FEISHU_POST_LIMITS.locales);
+  const ordered = [
+    ...POST_LOCALE_PREFERENCE.filter((k) => keys.includes(k)),
+    ...keys.filter((k) => !POST_LOCALE_PREFERENCE.includes(k)),
+  ];
+  const boundedText = (v: unknown): v is string =>
+    typeof v === "string" && Buffer.byteLength(v) <= FEISHU_POST_LIMITS.textBytes;
+  for (const key of ordered) {
+    const locale = rec(content[key]);
+    if (locale === undefined) continue;
+    const title = locale["title"],
+      paragraphs = locale["content"];
+    if (title !== undefined && !boundedText(title)) return undefined;
+    if (!Array.isArray(paragraphs) || paragraphs.length > FEISHU_POST_LIMITS.paragraphs) return undefined;
+    const lines: string[] = [];
+    for (const paragraph of paragraphs) {
+      if (!Array.isArray(paragraph) || paragraph.length > FEISHU_POST_LIMITS.tags) return undefined;
+      let line = "";
+      for (const value of paragraph) {
+        const tag = rec(value);
+        if (tag === undefined || typeof tag["tag"] !== "string") return undefined;
+        if (tag["tag"] === "text") {
+          if (!boundedText(tag["text"])) return undefined;
+          line += tag["text"];
+        } else if (tag["tag"] === "a") {
+          if (
+            (tag["text"] !== undefined && !boundedText(tag["text"])) ||
+            (tag["href"] !== undefined && !boundedText(tag["href"]))
+          )
+            return undefined;
+          const text = typeof tag["text"] === "string" ? tag["text"] : "",
+            href = typeof tag["href"] === "string" ? tag["href"] : "";
+          line += text !== "" && href !== "" && text !== href ? `${text} (${href})` : text || href;
+        }
+      }
+      if (line !== "") lines.push(line);
+    }
+    const body = lines.join("\n");
+    const head = typeof title === "string" && title.trim() !== "" ? title : "";
+    return [head, body].filter((s) => s !== "").join("\n\n");
+  }
+  return undefined;
+}
+
 export type FeishuDecodedEvent =
   | { kind: "message"; message: FeishuMessage }
   | { kind: "callback"; callback: FeishuCallback }
@@ -164,7 +225,12 @@ export function decodeFeishuEvent(raw: unknown, appId: string): FeishuDecodedEve
         });
       }
     }
-    let text = typeof content["text"] === "string" ? content["text"] : "";
+    let text: string;
+    if (message["message_type"] === "post") {
+      const extracted = feishuPostText(content);
+      if (extracted === undefined) return drop("content-invalid");
+      text = extracted;
+    } else text = typeof content["text"] === "string" ? content["text"] : "";
     for (const m of mentions) text = text.split(m.key).join("");
     text = text.replace(/@_user_\d+/g, "");
     if (mentions.length > 0) text = text.trim();

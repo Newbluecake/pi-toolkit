@@ -199,6 +199,15 @@ list generation kept 10 min) · `/use <n|sid-prefix|name>` · `/cur` · `/new <d
 · `/help`. `//text` sends literal `/text`; unknown `/x` ⇒ help, never forwarded. Unbound binding + plain message ⇒ "no session
 bound — /list then /use"; the message is not held.
 
+Post (rich text) messages (live-acceptance fix, 2026-10-19): `inbound.ts`'s `feishuPostText` extracts plain text from
+`content.<locale>.{title,content:[[tag…]]}` before the command grammar runs, so `/use` etc. work identically in a post.
+Rules: locale preference zh_cn → zh-CN → en_us → en-US → first other key (a present-but-malformed preferred locale is a
+`content-invalid` drop, never a fall-through); a non-empty `title` becomes the first line (so a titled post can never start
+with a command, same as any leading text); paragraphs join with `\n`, tags concatenate, empty (img/media-only) paragraphs are
+dropped; `text` → text (required string), `a` → display text else href else `text (href)` when both differ, `at`/`img`/
+`media`/`emotion`/unknown tags contribute nothing (mention stripping is unchanged). Structural caps: ≤16 locales scanned,
+≤256 paragraphs, ≤256 tags/paragraph, ≤64 KiB per text/href/title — violations drop as `content-invalid`.
+
 ### 5.4 Durable request states (R1 #1/#2) — `state.json.requests`
 
 > **See §R2-c** (full durable payload, budget check before ACK).
@@ -317,7 +326,10 @@ Image/file/media/audio messages and `post` `img`/`media`: `downloadResource` str
 then uploaded with a known size; staging file deleted after commit or failure, swept at boot. One storage principal
 `feishu:<installGen>:<openId>` for `begin`/`chunk`/`commit`/`abort`/`pinForPrompt`; bucket `bucketFor({sessionId, agentKey})`;
 names via `sanitizeUploadName`; attachment block via `formatAttachmentBlock` (agent unchanged). Failures noted in the reply,
-`uploads.abort` on partials.
+`uploads.abort` on partials. Inbound mime (2026-10-19): `begin` carries `feishuMimeForName(name)` — a small explicit
+extension map (md/markdown/txt/log/json/csv, png/jpg/jpeg/gif/webp/svg, pdf, zip, mp4/mov/webm, mp3/wav/m4a/ogg), never
+content-sniffed, unknown extensions pass no mime (attachment shows "unknown type"); every value satisfies `normalizeMime`.
+A `media` tag's `image_key` is the video cover thumbnail and is never downloaded.
 
 ### 7.2 Outbound (Q3 + R-16)
 
