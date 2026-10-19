@@ -79,6 +79,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../sysload/types.js",
     "../topic-switch/settings.js",
     "../web-hub/protocol/lan.js",
+    // LAN security P0: browser-safe, import-free shared CIDR parser.
+    "../web-hub/protocol/client-allow.js",
     // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
     "./model-hint.js",
     "./time-units.js",

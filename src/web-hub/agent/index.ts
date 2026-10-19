@@ -118,6 +118,10 @@ import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import type { MentionRouteDeps } from "../../mention/mention.js";
 
 export interface WebHubLanSettings {
+  /** P0 additions optional for older programmatic callers; settings parser supplies defaults. */
+  allowClients?: string[];
+  allowClientsDenyAll?: true;
+  sessionIdleMinutes?: number;
   enabled: boolean;
   port: number;
   extraHosts: string[];

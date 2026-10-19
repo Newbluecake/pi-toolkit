@@ -19,6 +19,7 @@ const defaults = DEFAULT_FEISHU_BOT_SETTINGS;
 describe("feishuBot settings: defaults", () => {
   it("pins the §9 defaults (off by default)", () => {
     expect(defaults).toEqual({
+      securityAlerts: true,
       enabled: false,
       allowGroups: true,
       groupRootTopics: false,
@@ -66,6 +67,7 @@ describe("feishuBot settings: parsing", () => {
     });
     expect(parsed.warnings).toEqual([]);
     expect(parsed.feishuBot).toEqual({
+      securityAlerts: true,
       enabled: true,
       allowGroups: false,
       groupRootTopics: true,
@@ -215,5 +217,19 @@ describe("loadFeishuBotWarnings", () => {
     expect(loadFeishuBotWarnings(path)).toEqual([]);
     put({ feishuBot: 5 });
     expect(loadFeishuBotWarnings(path)).toEqual(["block-invalid"]);
+  });
+});
+
+describe("LAN security P0 securityAlerts", () => {
+  it("defaults true, accepts only bool, warns on wrong type", () => {
+    expect(parseFeishuBotBlock({}).feishuBot.securityAlerts).toBe(true);
+    expect(parseFeishuBotBlock({ securityAlerts: false })).toMatchObject({
+      feishuBot: { securityAlerts: false },
+      warnings: [],
+    });
+    expect(parseFeishuBotBlock({ securityAlerts: "false" })).toMatchObject({
+      feishuBot: { securityAlerts: true },
+      warnings: ["security-alerts-invalid"],
+    });
   });
 });

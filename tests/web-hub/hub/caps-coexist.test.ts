@@ -24,6 +24,8 @@ import {
   PROXY_HUB_CAP,
   PROXY_LAN_HUB_CAP,
   PROXY_FRAME_HUB_CAP,
+  LAN_2FA_HUB_CAP,
+  LAN_SESSIONS_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import { config, connectClient, hello, tmpDirs, waitFor } from "./helpers.js";
@@ -120,6 +122,9 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     c.sock.destroy();
 
     expect(browserCaps).toEqual(agentCaps); // the two surfaces never drift (§3.1 invariant)
+    // P0 declarations alone never advertise an unwired feature.
+    expect(browserCaps).not.toContain(LAN_2FA_HUB_CAP);
+    expect(browserCaps).not.toContain(LAN_SESSIONS_HUB_CAP);
     for (const cap of [
       ...P2_HUB_CAPS,
       ...UPLOAD_HUB_CAPS,
@@ -191,6 +196,11 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
       c.send(hello());
       const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
       c.sock.destroy();
+      // Also pinned with config.lan present: I has not wired either P0 feature yet.
+      for (const surface of [r.info.caps, ack["caps"] as string[]]) {
+        expect(surface).not.toContain(LAN_2FA_HUB_CAP);
+        expect(surface).not.toContain(LAN_SESSIONS_HUB_CAP);
+      }
       return { browser: [...r.info.caps], agent: [...(ack["caps"] as string[])] };
     };
     const proxy = { portRange: [7900, 7949] as [number, number], maxProxies: 8 };

@@ -23,6 +23,9 @@ import type {
   KdfAdmissionPort,
   KdfPort,
   LanSessionRecord,
+  LanSessionListRecord,
+  Lan2faState,
+  PortOptions,
   LanStorePort,
   LanUserRecord,
   LanUserSummary,
@@ -30,6 +33,8 @@ import type {
 } from "../../../src/web-hub/hub/ports.js";
 import type { FirstPromptRouterPort, SpawnRegistryPort } from "../../../src/web-hub/hub/spawn/ports.js";
 import type { CmdFrame, CmdResultBody, CmdResultFrame } from "../../../src/web-hub/protocol/messages.js";
+import { LAN_2FA_LIMITS, NEW_IP_WINDOW_MS, normalizeRecoveryCode } from "../../../src/web-hub/protocol/lan-2fa.js";
+import { hashSid } from "../../../src/web-hub/hub/sid-hash.js";
 import { canonicalHostKey } from "../../../src/web-hub/protocol/lan.js";
 
 export interface FakeLanStore extends LanStorePort {
@@ -50,9 +55,70 @@ export interface FakeLanStore extends LanStorePort {
   simulateUnavailable(): void;
 }
 
-export function fakeLanStore(): FakeLanStore {
+export interface FakeLanStoreOptions {
+  idleMs?: number;
+  /** Deterministic verifier seam; absent => rejects every TOTP (never an always-pass stub). */
+  totpStep?: (secretB32: string, code: string, now: number) => number | undefined;
+  /** Before the atomic op, for races/deadlines. An abort AFTER dispatch does not cancel the op. */
+  beforeOp?: (op: keyof LanStorePort) => Promise<void>;
+}
+export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
   const users = new Map<string, LanUserRecord>();
-  const sessions = new Map<string, LanSessionRecord>();
+  const sessions = new Map<string, LanSessionListRecord>();
+  const ips = new Map<string, { firstAt: number; lastAt: number }>();
+  interface Factor {
+    gen: number;
+    totpSecret?: string;
+    lastStep?: number;
+    feishu: boolean;
+    salt: string;
+    codes: Map<string, number | undefined>;
+  }
+  const factors = new Map<number, Factor>();
+  const pending = new Map<number, { secret: string; expiresAt: number; gen: number }>();
+  const idleMs = options.idleMs ?? 12 * 3_600_000;
+  function digest(s: string): string {
+    return createHash("sha256").update(s).digest("hex");
+  }
+  function freshFactor(): Factor {
+    return { gen: 0, feishu: false, salt: randomBytes(16).toString("hex"), codes: new Map() };
+  }
+  function enrolled(f: Factor | undefined): boolean {
+    return !!f && (!!f.totpSecret || f.feishu);
+  }
+  function recovery(f: Factor): string[] {
+    f.salt = randomBytes(16).toString("hex");
+    f.codes.clear();
+    const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    const codes = new Set<string>();
+    while (codes.size < 10) codes.add([...randomBytes(12)].map((b) => alphabet[b & 31]!).join(""));
+    for (const code of codes) f.codes.set(digest(f.salt + code), undefined);
+    return [...codes];
+  }
+  function addSession(input: {
+    userId: number;
+    epoch: number;
+    boundOrigin: string;
+    createdIp: string;
+    now: number;
+    ua?: string;
+  }) {
+    const sid = randomBytes(24).toString("base64url");
+    const sidHash = hashSid(sid);
+    sessions.set(sidHash, {
+      userId: input.userId,
+      epoch: input.epoch,
+      boundOrigin: input.boundOrigin,
+      sidHash,
+      createdAt: input.now,
+      lastSeenAt: input.now,
+      createdIp: input.createdIp,
+      expiresAt: input.now + idleMs,
+      absoluteExpiresAt: input.now + 7 * 24 * 3_600_000,
+      ...(input.ua === undefined ? {} : { ua: input.ua.slice(0, 512) }),
+    });
+    return { sid };
+  }
   let nextUserId = 1;
   const unavailableListeners = new Set<(reason: "db-unavailable") => void>();
 
@@ -61,7 +127,7 @@ export function fakeLanStore(): FakeLanStore {
     return undefined;
   }
 
-  return {
+  const store: FakeLanStore = {
     usersByUsername: users,
     sessionsBySidHash: sessions,
     seedUser: (user) => {
@@ -103,22 +169,168 @@ export function fakeLanStore(): FakeLanStore {
     },
 
     async createSession(input) {
-      // §6.4: only the hash is ever persisted; the *raw* id is generated here and returned once
-      // (for the caller to set as the `pwh_lan` cookie) — the store itself never sees it again.
-      const sid = randomBytes(24).toString("base64url");
-      const sidHash = createHash("sha256").update(sid).digest("base64url");
-      sessions.set(sidHash, {
-        userId: input.userId,
-        epoch: input.epoch,
-        boundOrigin: input.boundOrigin,
-        expiresAt: input.now + 12 * 3_600_000,
-        absoluteExpiresAt: input.now + 7 * 24 * 3_600_000,
-      });
-      return { sid };
+      return addSession(input);
     },
-
-    async touchSession(sidHash) {
-      return sessions.get(sidHash);
+    async createSessionChecked(input) {
+      const user = userById(input.userId);
+      if (
+        !user ||
+        user.epoch !== input.expectedEpoch ||
+        (factors.get(input.userId)?.gen ?? 0) !== input.expectedFactorGen
+      )
+        return { ok: false, reason: "stale" };
+      const { sid } = addSession({ ...input, epoch: input.expectedEpoch });
+      const live = [...sessions.values()]
+        .filter(
+          (s) =>
+            s.userId === input.userId &&
+            s.expiresAt > input.now &&
+            s.absoluteExpiresAt > input.now &&
+            s.lastSeenAt > input.now - idleMs,
+        )
+        .sort((a, b) => a.lastSeenAt - b.lastSeenAt);
+      const evicted = live.slice(0, Math.max(0, live.length - 32)).map((s) => s.sidHash);
+      for (const hash of evicted) sessions.delete(hash);
+      return { ok: true, sid, evicted };
+    },
+    async listSessions(userId, now) {
+      return [...sessions.values()]
+        .filter(
+          (s) => s.userId === userId && s.expiresAt > now && s.absoluteExpiresAt > now && s.lastSeenAt > now - idleMs,
+        )
+        .map((s) => ({ ...s }));
+    },
+    async deleteSessionsExcept(userId, keepSidHash) {
+      const hashes = [...sessions]
+        .filter(([hash, s]) => s.userId === userId && hash !== keepSidHash)
+        .map(([hash]) => hash);
+      const deleted = hashes.slice(0, 64);
+      for (const hash of deleted) sessions.delete(hash);
+      return { deleted, more: hashes.length > 64 };
+    },
+    async noteLoginIp(ip, now) {
+      const old = ips.get(ip);
+      const wasKnown = old !== undefined && old.lastAt > now - NEW_IP_WINDOW_MS;
+      ips.delete(ip);
+      ips.set(ip, { firstAt: old?.firstAt ?? now, lastAt: now });
+      if (ips.size > 256) ips.delete(ips.keys().next().value!);
+      return { wasKnown };
+    },
+    async isKnownIp(ip, now, windowMs) {
+      const row = ips.get(ip);
+      return row !== undefined && row.lastAt > now - windowMs;
+    },
+    async knownIpCount(now, windowMs) {
+      return [...ips.values()].filter((v) => v.lastAt > now - windowMs).length;
+    },
+    async forgetLoginIps() {
+      ips.clear();
+      for (const factor of factors.values()) factor.gen++;
+    },
+    async get2faState(userId): Promise<Lan2faState> {
+      const f = factors.get(userId);
+      return {
+        state: enrolled(f) ? "enrolled" : "none",
+        totp: !!f?.totpSecret,
+        feishu: f?.feishu ?? false,
+        recoveryLeft: f ? [...f.codes.values()].filter((v) => v === undefined).length : 0,
+        factorGen: f?.gen ?? 0,
+      };
+    },
+    async beginTotp(input) {
+      const f = factors.get(input.userId);
+      if (f?.totpSecret && !input.replace) throw new Error("E_2FA_ENROLLED");
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+      const secret = [...randomBytes(32)].map((b) => alphabet[b & 31]!).join("");
+      pending.set(input.userId, { secret, expiresAt: input.now + LAN_2FA_LIMITS.challengeMs, gen: f?.gen ?? 0 });
+      return { secretB32: secret, otpauthUri: `otpauth://totp/pi-webhub?secret=${secret}&issuer=pi-webhub` };
+    },
+    async commitTotp(input) {
+      const p = pending.get(input.userId),
+        f = factors.get(input.userId) ?? freshFactor();
+      if (!p || p.expiresAt <= input.now) return { ok: false, reason: "none" };
+      if (input.expectedGen !== f.gen || p.gen !== f.gen) return { ok: false, reason: "stale" };
+      const step = options.totpStep?.(p.secret, input.code, input.now);
+      if (step === undefined || !/^[0-9]{6}$/.test(input.code)) return { ok: false, reason: "bad" };
+      const first = !enrolled(f);
+      f.totpSecret = p.secret;
+      f.lastStep = step;
+      f.gen++;
+      factors.set(input.userId, f);
+      pending.delete(input.userId);
+      if (first) ips.clear();
+      return { ok: true, recoveryCodes: recovery(f) };
+    },
+    async verifyTotp(input) {
+      const f = factors.get(input.userId);
+      if ((f?.gen ?? 0) !== input.expectedGen) return { ok: false, reason: "stale" };
+      if (!f?.totpSecret) return { ok: false, reason: "none" };
+      const step = options.totpStep?.(f.totpSecret, input.code, input.now);
+      if (step === undefined || !/^[0-9]{6}$/.test(input.code)) return { ok: false, reason: "bad" };
+      if (step <= (f.lastStep ?? -1)) return { ok: false, reason: "replay" };
+      f.lastStep = step;
+      return { ok: true };
+    },
+    async consumeRecovery(input) {
+      const f = factors.get(input.userId);
+      if ((f?.gen ?? 0) !== input.expectedGen) return { ok: false, reason: "stale" };
+      if (!enrolled(f) || !f) return { ok: false, reason: "none" };
+      const code = normalizeRecoveryCode(input.code),
+        hash = code === undefined ? "" : digest(f.salt + code);
+      if (!f.codes.has(hash)) return { ok: false, reason: "bad" };
+      if (f.codes.get(hash) !== undefined) return { ok: false, reason: "replay" };
+      f.codes.set(hash, input.now);
+      return { ok: true, recoveryLeft: [...f.codes.values()].filter((v) => v === undefined).length };
+    },
+    async setFeishu2fa(input) {
+      const f = factors.get(input.userId) ?? freshFactor(),
+        first = !enrolled(f) && input.on;
+      f.feishu = input.on;
+      f.gen++;
+      if (!enrolled(f)) f.codes.clear();
+      factors.set(input.userId, f);
+      if (first) {
+        ips.clear();
+        return { recoveryCodes: recovery(f) };
+      }
+      return {};
+    },
+    async regenRecovery(userId) {
+      const f = factors.get(userId);
+      if (!f || !enrolled(f)) throw new Error("E_2FA_NONE");
+      f.gen++;
+      return { recoveryCodes: recovery(f) };
+    },
+    async reset2fa(userId) {
+      const f = freshFactor();
+      f.gen = (factors.get(userId)?.gen ?? 0) + 1;
+      factors.set(userId, f);
+      pending.delete(userId);
+    },
+    async touchSession(sidHash, now, opts) {
+      const s = sessions.get(sidHash),
+        u = s ? userById(s.userId) : undefined;
+      if (
+        !s ||
+        !u ||
+        s.epoch !== u.epoch ||
+        s.expiresAt <= now ||
+        s.absoluteExpiresAt <= now ||
+        s.lastSeenAt <= now - idleMs
+      )
+        return undefined;
+      if (now - s.lastSeenAt >= 60_000) {
+        s.lastSeenAt = now;
+        s.expiresAt = Math.min(now + idleMs, s.absoluteExpiresAt);
+        if (opts?.ip !== undefined) s.lastIp = opts.ip;
+      }
+      return {
+        userId: s.userId,
+        epoch: s.epoch,
+        boundOrigin: s.boundOrigin,
+        expiresAt: s.expiresAt,
+        absoluteExpiresAt: s.absoluteExpiresAt,
+      };
     },
 
     async deleteSession(sidHash) {
@@ -132,6 +344,7 @@ export function fakeLanStore(): FakeLanStore {
     async setPassword(input) {
       const existing = users.get(input.username);
       const now = Date.now();
+      if (existing) for (const [hash, s] of sessions) if (s.userId === existing.id) sessions.delete(hash);
       users.set(input.username, {
         id: existing?.id ?? nextUserId++,
         username: input.username,
@@ -163,7 +376,56 @@ export function fakeLanStore(): FakeLanStore {
       return n;
     },
   };
+  if (options.beforeOp) {
+    const before = options.beforeOp;
+    // Test-only proxy preserves all typed signatures and gives C deadline/race latches.
+    return new Proxy(store, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver) as unknown;
+        if (
+          typeof key !== "string" ||
+          typeof value !== "function" ||
+          !securityFakeOps.includes(key as keyof LanStorePort)
+        )
+          return value;
+        return async (...args: unknown[]) => {
+          const opts = args.at(-1) as PortOptions | undefined;
+          if (opts?.signal?.aborted) throw new Error("E_ABORTED");
+          await before(key as keyof LanStorePort);
+          return Reflect.apply(value, target, args);
+        };
+      },
+    });
+  }
+  return store;
 }
+const securityFakeOps: readonly (keyof LanStorePort)[] = [
+  "getUser",
+  "getUserSummary",
+  "initialInfo",
+  "createSession",
+  "touchSession",
+  "deleteSession",
+  "deleteAllSessions",
+  "setPassword",
+  "markInitialLogin",
+  "purgeExpired",
+  "createSessionChecked",
+  "listSessions",
+  "deleteSessionsExcept",
+  "noteLoginIp",
+  "isKnownIp",
+  "knownIpCount",
+  "get2faState",
+  "verifyTotp",
+  "consumeRecovery",
+  "beginTotp",
+  "commitTotp",
+  "setFeishu2fa",
+  "regenRecovery",
+  "reset2fa",
+  "forgetLoginIps",
+];
 
 /** Real scrypt under the hood (fast test params are the caller's job via `KdfParams`). */
 export function fakeKdf(): KdfPort {

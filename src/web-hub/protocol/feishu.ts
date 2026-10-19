@@ -664,6 +664,7 @@ export const FEISHU_BOT_DEFAULTS = {
   enabled: false,
   allowGroups: true,
   groupRootTopics: false,
+  securityAlerts: true,
   notify: "bound",
   spawnScope: "known",
   debounceMs: 1_500,
@@ -684,6 +685,8 @@ export const FEISHU_BOT_RANGES = {
  * Keepalive is not a leaf (Q1 fixed it).
  */
 export interface FeishuBotHubConfig {
+  /** Absent is false; P0 does not forward the settings default into this wire yet. */
+  securityAlerts?: boolean;
   allowGroups: boolean;
   groupRootTopics: boolean;
   notify: FeishuNotifyMode;
@@ -719,6 +722,7 @@ export function normalizeFeishuBotHubConfig(input: unknown): FeishuBotHubConfig 
   if (files === null || typeof files !== "object" || Array.isArray(files)) return undefined;
   const f = files as Record<string, unknown>;
   const rg = FEISHU_BOT_RANGES;
+  if (r["securityAlerts"] !== undefined && typeof r["securityAlerts"] !== "boolean") return undefined;
   if (typeof r["allowGroups"] !== "boolean" || typeof r["groupRootTopics"] !== "boolean") return undefined;
   if (!oneOf(r["notify"], FEISHU_NOTIFY_MODES) || !oneOf(r["spawnScope"], FEISHU_SPAWN_SCOPES)) return undefined;
   if (!isInt(r["debounceMs"], rg.debounceMs.min, rg.debounceMs.max)) return undefined;
@@ -726,6 +730,7 @@ export function normalizeFeishuBotHubConfig(input: unknown): FeishuBotHubConfig 
   if (!oneOf(f["outbound"], FEISHU_FILE_OUTBOUND_MODES) || typeof f["inbound"] !== "boolean") return undefined;
   if (!isInt(f["maxInboundMiB"], rg.maxInboundMiB.min, rg.maxInboundMiB.max)) return undefined;
   return {
+    ...(r["securityAlerts"] === undefined ? {} : { securityAlerts: r["securityAlerts"] as boolean }),
     allowGroups: r["allowGroups"],
     groupRootTopics: r["groupRootTopics"],
     notify: r["notify"],

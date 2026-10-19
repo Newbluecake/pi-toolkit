@@ -27,6 +27,8 @@ import {
 import type { LanStatus } from "./lan.js";
 // feishu-bot plan §9 (F0): `fsb_req`/`fsb_res` schemas + types live in protocol/feishu.ts; only folded in here.
 import { type FsbReqFrame, FsbReqSchema, type FsbResFrame, FsbResSchema } from "./feishu.js";
+import { type TfaReqFrame, TfaReqSchema, type TfaResFrame, TfaResSchema } from "./lan-2fa.js";
+export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
 
 // ---------------------------------------------------------------------------
 // data types
@@ -980,7 +982,8 @@ export type AgentFrame =
   | RunEndFrame
   | LanReqFrame
   | HubCtlFrame
-  | FsbReqFrame;
+  | FsbReqFrame
+  | TfaReqFrame;
 
 // ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
 
@@ -1039,7 +1042,8 @@ export type HubFrame =
   | { t: "pong"; ts: number }
   | LanResFrame
   | HubCtlAckFrame
-  | FsbResFrame;
+  | FsbResFrame
+  | TfaResFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -2069,6 +2073,7 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   lan_req: LanReqSchema,
   hub_ctl: HubCtlSchema,
   fsb_req: FsbReqSchema,
+  tfa_req: TfaReqSchema,
   cmd_result: CmdResultSchema,
   cmd_late: CmdLateSchema,
   dialogs: DialogsSchema,
@@ -2096,6 +2101,7 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   lan_res: LanResSchema,
   hub_ctl_ack: HubCtlAckSchema,
   fsb_res: FsbResSchema,
+  tfa_res: TfaResSchema,
 };
 
 // ---------------------------------------------------------------------------

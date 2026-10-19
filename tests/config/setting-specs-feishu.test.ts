@@ -18,6 +18,7 @@ import {
 
 const EXPOSED = [
   "feishuBot.enabled",
+  "feishuBot.securityAlerts",
   "feishuBot.allowGroups",
   "feishuBot.groupRootTopics",
   "feishuBot.notify",
@@ -29,7 +30,7 @@ const EXPOSED = [
 ] as const;
 
 describe("setting-specs feishuBot (F9)", () => {
-  it("exposes exactly the nine editor-compatible F0-suggested leaves", () => {
+  it("exposes the nine F0 leaves plus LAN security P0 securityAlerts", () => {
     for (const key of EXPOSED) {
       expect(settingKeys(), key).toContain(key);
       expect(isKnownSettingKey(key), key).toBe(true);

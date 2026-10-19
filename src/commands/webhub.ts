@@ -63,6 +63,7 @@ import { loadFeishuBotWarnings, type FeishuBotWarning } from "../config/settings
 import { renderQr } from "./qr-render.js";
 import type { LanInfoPayload } from "../web-hub/protocol/messages.js";
 import type { InvalidHostToken } from "../web-hub/protocol/lan.js";
+import type { InvalidClientCidr } from "../web-hub/protocol/client-allow.js";
 
 /**
  * Settings-level LAN validation warnings (plan §9.1/§2.4: `webHub.lan.extraHosts` 的非法项、
@@ -75,6 +76,7 @@ import type { InvalidHostToken } from "../web-hub/protocol/lan.js";
  * config zeroed) regardless of whether this snapshot is wired for display.
  */
 export interface WebHubLanSettingsWarnings {
+  invalidAllowClients: readonly InvalidClientCidr[];
   invalidExtraHosts: readonly InvalidHostToken[];
   proxyMismatch: boolean;
 }
@@ -429,6 +431,7 @@ const FEISHU_OP_DESCRIPTIONS: Record<string, string> = {
 const FEISHU_WARNING_PHRASES: Record<FeishuBotWarning, string> = {
   "block-invalid": "feishuBot 块不是对象，已整体回退默认",
   "enabled-invalid": "enabled 类型应为布尔，已回退默认",
+  "security-alerts-invalid": "securityAlerts 类型应为布尔，已回退默认",
   "allow-groups-invalid": "allowGroups 类型应为布尔，已回退默认",
   "group-root-topics-invalid": "groupRootTopics 类型应为布尔，已回退默认",
   "notify-invalid": "notify 取值应为 bound|off，已回退默认",

@@ -27,7 +27,7 @@ import type {
   ProxyOpenResult,
   ProxyUnavailableExtraReason,
 } from "../protocol/proxy.js";
-import type { HostTokenRejectReason, LanOffReason, LanStatus } from "../protocol/lan.js";
+import type { ClientAllowSnapshot, HostTokenRejectReason, LanOffReason, LanStatus } from "../protocol/lan.js";
 import type {
   AgentId,
   CmdArgs,
@@ -54,7 +54,7 @@ import type { CmdLimit } from "./cmd-limit.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { AgentRemoveFrontendPort } from "./agent-remove.js";
 import type { AuthIdentity, IdentityResult } from "./auth-identity.js";
-import type { AuthRevokeEvent } from "./auth-revoke.js";
+import type { AuthRevokeBus, AuthRevokeEvent } from "./auth-revoke.js";
 import type {
   RunEndFrame,
   RunEvFrame,
@@ -75,6 +75,9 @@ import type { UiStatus } from "./ui-root.js";
 import type { UploadStore } from "./uploads.js";
 import type { UploadHttpMetrics } from "./audit.js";
 
+import type { LanFactorBody, LanLoginResponse } from "../protocol/lan-2fa.js";
+import type { SecurityEventBus } from "./security-events.js";
+
 export type { LanOffReason, LanStatus } from "../protocol/lan.js";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +87,10 @@ export type { LanOffReason, LanStatus } from "../protocol/lan.js";
 export type ListenerKind = "loopback" | "lan";
 
 export interface HubLanConfig {
+  /** Absent = unrestricted; present [] = explicit deny-all. Canonical CIDRs only, ≤64. */
+  allowClients?: string[];
+  /** Absent = 720 min. 5–10080 min, integral milliseconds. */
+  sessionIdleMs?: number;
   port: number; // ≠ config.port
   extraHosts: string[]; // 已通过 classifyHostToken（env 解析再校验一次）
   trustProxyFrom: string[]; // IPv4 字面量；空 ⇒ 不解析任何转发头
@@ -94,6 +101,10 @@ export interface RequestContext {
   readonly kind: ListenerKind;
   readonly peerIp: string; // socket 对端（去 ::ffff:）
   readonly viaTrustedProxy: boolean; // peerIp ∈ trustProxyFrom
+  /** P0 additive compatibility: absent means UNUSABLE, never trusted XFF. I sets on wiring. */
+  readonly xffUsable?: boolean;
+  /** I supplies the request UA for cancel's binding check (no LoginIo on that entry). */
+  readonly ua?: string;
   readonly clientIp: string; // 直连 = peerIp；经代理 = XFF 链上第一个不受信任的地址（解析失败 ⇒ peerIp）
   readonly scheme: "http" | "https"; // 直连恒 http；经代理恒 https（XFP 非 https ⇒ 400，不会构造出 ctx）
   readonly hostKey: string; // canonicalHostKey（小写、显式端口）
@@ -128,6 +139,8 @@ export interface LanAssembly {
     now: () => number;
     scope: Scope;
     onStatus(s: LanStatus): void;
+    /** Optional until I wires E's transition-only limiter events. */
+    security?: SecurityEventBus;
   }): Promise<LanFrontendDeps>;
 }
 
@@ -301,7 +314,7 @@ export interface LanUserSummary {
   initialPasswordInUse: boolean;
 }
 
-export interface LanStorePort {
+export interface LanStorePort extends LanSecurityStorePort {
   getUser(username: string, opts?: PortOptions): Promise<LanUserRecord | undefined>;
   /**
    * 审查修复 #5（v2）: backs `GET /api/session` (§7) — the endpoint only has a
@@ -327,7 +340,11 @@ export interface LanStorePort {
     input: { userId: number; epoch: number; boundOrigin: string; createdIp: string; now: number },
     opts?: PortOptions,
   ): Promise<{ sid: string }>;
-  touchSession(sidHash: string, now: number, opts?: PortOptions): Promise<LanSessionRecord | undefined>;
+  touchSession(
+    sidHash: string,
+    now: number,
+    opts?: PortOptions & { ip?: string },
+  ): Promise<LanSessionRecord | undefined>;
   deleteSession(sidHash: string, opts?: PortOptions): Promise<void>;
   deleteAllSessions(userId: number, opts?: PortOptions): Promise<void>;
   setPassword(
@@ -1088,6 +1105,8 @@ export interface ProxyService {
  * mirrors `PreviewRouteIo`/`SpawnRouteIo`). `resolveIdentity` is the listener's single
  * identity-resolution API (§4.1) — the route never touches `Cookie`. */
 export interface ProxyRouteIo {
+  /** LAN security P0: I supplies ctx.clientIp when wiring E; absent on legacy callers. */
+  ip?: string;
   listener: "loopback" | "lan";
   expectedOrigin: string;
   /** Host part the browser addressed this request with (loopback: request Host's host part;
@@ -1141,4 +1160,161 @@ export type VersionInfoOutcome = { ok: true; data: VersionInfoWire } | { ok: fal
  *  sections 10s (`VERSION_LIMITS`). */
 export interface VersionInfoPort {
   snapshot(signal: AbortSignal): Promise<VersionInfoOutcome>;
+}
+
+// LAN security r2 P0. Required ops: B replaces the explicit throwing production stubs.
+export interface LanSessionListRecord extends LanSessionRecord {
+  /** Internal only; D derives the public id with publicSessionId(). */
+  sidHash: string;
+  createdAt: number;
+  lastSeenAt: number;
+  createdIp: string;
+  lastIp?: string;
+  ua?: string;
+}
+export interface Lan2faState {
+  state: "none" | "enrolled" | "inconsistent";
+  totp: boolean;
+  feishu: boolean;
+  recoveryLeft: number;
+  factorGen: number;
+}
+export type LanFactorVerdict =
+  { ok: true; recoveryLeft?: number } | { ok: false; reason: "bad" | "replay" | "stale" | "none" };
+export interface CreateSessionCheckedInput {
+  userId: number;
+  expectedEpoch: number;
+  expectedFactorGen: number;
+  boundOrigin: string;
+  createdIp: string;
+  ua?: string;
+  now: number;
+}
+export type CreateSessionCheckedResult = { ok: true; sid: string; evicted: string[] } | { ok: false; reason: "stale" };
+/** All security ops are required and accept per-request cancellation. Never return an enrolled secret. */
+export interface LanSecurityStorePort {
+  createSessionChecked(input: CreateSessionCheckedInput, opts?: PortOptions): Promise<CreateSessionCheckedResult>;
+  listSessions(userId: number, now: number, opts?: PortOptions): Promise<LanSessionListRecord[]>;
+  deleteSessionsExcept(
+    userId: number,
+    keepSidHash: string,
+    opts?: PortOptions,
+  ): Promise<{ deleted: string[]; more: boolean }>;
+  noteLoginIp(ip: string, now: number, opts?: PortOptions): Promise<{ wasKnown: boolean }>;
+  isKnownIp(ip: string, now: number, windowMs: number, opts?: PortOptions): Promise<boolean>;
+  knownIpCount(now: number, windowMs: number, opts?: PortOptions): Promise<number>;
+  get2faState(userId: number, opts?: PortOptions): Promise<Lan2faState>;
+  verifyTotp(
+    input: { userId: number; code: string; expectedGen: number; now: number },
+    opts?: PortOptions,
+  ): Promise<LanFactorVerdict>;
+  consumeRecovery(
+    input: { userId: number; code: string; expectedGen: number; now: number },
+    opts?: PortOptions,
+  ): Promise<LanFactorVerdict>;
+  /** Pending secret stays in the child; replace must be explicit. Five-minute pending TTL. */
+  beginTotp(
+    input: { userId: number; replace?: boolean; now: number },
+    opts?: PortOptions,
+  ): Promise<{ otpauthUri: string; secretB32: string }>;
+  commitTotp(
+    input: { userId: number; code: string; expectedGen: number; now: number },
+    opts?: PortOptions,
+  ): Promise<{ ok: true; recoveryCodes: string[] } | { ok: false; reason: "bad" | "stale" | "none" }>;
+  /** First Feishu-only enrollment returns recoveryCodes; later toggles don't regenerate. */
+  setFeishu2fa(
+    input: { userId: number; on: boolean; now: number },
+    opts?: PortOptions,
+  ): Promise<{ recoveryCodes?: string[] }>;
+  regenRecovery(userId: number, now: number, opts?: PortOptions): Promise<{ recoveryCodes: string[] }>;
+  reset2fa(userId: number, now: number, opts?: PortOptions): Promise<void>;
+  forgetLoginIps(opts?: PortOptions): Promise<void>;
+}
+
+export interface ClientAllowBurst {
+  count: number;
+  ips: readonly string[];
+  lastIp: string;
+}
+export interface ClientAllowGuard {
+  readonly active: boolean;
+  admitPeer(peerIp: string, trustedProxyPeer: boolean): boolean;
+  admitForwarded(input: { clientIp: string; xffUsable: boolean }): boolean;
+  snapshot(): ClientAllowSnapshot;
+  onBurst(fn: (burst: ClientAllowBurst) => void): () => void;
+}
+export type LoginApprovalCloseReason =
+  "success" | "cancel" | "deny" | "expire" | "evict" | "revoked" | "attempts" | "deadline" | "client-gone" | "dispose";
+export interface LoginApprovalPort {
+  request(c: {
+    challengeId: string;
+    gen: number;
+    ip: string;
+    device: string;
+    user: string;
+    expiresAt: number;
+  }): Promise<"sent" | "unavailable">;
+  close(challengeId: string, why: LoginApprovalCloseReason): void;
+}
+/** One per request. Aborted/client gone before INSERT must prevent a session; after it must revoke. */
+export interface LoginIo {
+  ua: string;
+  signal: AbortSignal;
+  responseOpen(): boolean;
+  onAdmitted?(): void;
+}
+/** Register after ONCE on finish BEFORE sending headers/body; never run it on close. */
+export interface LoginReply {
+  status: number;
+  body: LanLoginResponse;
+  headers?: Record<string, string | string[]>;
+  after?: () => Promise<void>;
+}
+export interface LanLoginCore {
+  passwordLogin(ctx: RequestContext, body: unknown, ua: string, io: LoginIo): Promise<LoginReply>;
+  submitFactor(token: string, body: LanFactorBody, ctx: RequestContext, io: LoginIo): Promise<LoginReply>;
+  waitApproval(token: string, ctx: RequestContext, io: LoginIo): Promise<LoginReply>;
+  cancel(token: string, ctx: RequestContext): void;
+  onApprovalDecision(challengeId: string, allowed: boolean, gen: number): void;
+  onRevoke(ev: AuthRevokeEvent): void;
+  dispose(): void;
+}
+export interface LanLoginCoreDeps {
+  store: LanStorePort;
+  kdf: KdfPort;
+  limiter: LoginLimiterPort & { isFresh?(ip: string): boolean };
+  admission: KdfAdmissionPort;
+  approval: LoginApprovalPort;
+  security: SecurityEventBus;
+  authRevoke: AuthRevokeBus;
+  revokeSse(sidHash: string): void;
+  now(): number;
+  log: HubLog;
+}
+export interface LanSessionsAuth {
+  userId: number;
+  sidHash: string;
+  user: string;
+}
+export interface LanSessionsIo {
+  listener: ListenerKind;
+  ip: string;
+  xPwhOk(): boolean;
+  csrfOkLan(): boolean;
+  requireLanSession(deadline: ReqDeadline): Promise<LanSessionsAuth | { handled: true }>;
+  readJson(req: IncomingMessage, maxBytes?: number, maxMs?: number): Promise<unknown>;
+  sendJson(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>): void;
+  clearCookie(res: ServerResponse): void;
+}
+export interface LanSessionsRoutes {
+  handle(req: IncomingMessage, res: ServerResponse, method: string, path: string, io: LanSessionsIo): Promise<boolean>;
+  dispose(): void;
+}
+export interface LanSessionsDeps {
+  store: LanStorePort;
+  idleMs: number;
+  now(): number;
+  log: HubLog;
+  authRevoke: AuthRevokeBus;
+  revokeSse(sidHash: string): void;
 }

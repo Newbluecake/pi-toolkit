@@ -47,6 +47,7 @@ export interface WebHubProxySettings {
  * the plan's names verbatim. Keepalive is not a leaf (Q1 fixed it).
  */
 export interface FeishuBotSettings {
+  securityAlerts?: boolean;
   enabled: boolean;
   allowGroups: boolean;
   /** V8-confirmed: a group @-bot outside a topic opens + binds a topic */
@@ -69,6 +70,7 @@ export type { WebHubLanSettings, WebHubSpawnSettings };
 // (here, L16 第一处) is one of those layers, alongside `hub/main.ts`'s `parseHubLanConfig` (L16
 // 第二处) and the request pipeline. Pure functions only, no pi import, no side effects.
 import { canonicalOrigin, classifyHostToken, parseOrigin, type InvalidHostToken } from "../web-hub/protocol/lan.js";
+import { parseClientCidr, CLIENT_ALLOW_MAX, type InvalidClientCidr } from "../web-hub/protocol/client-allow.js";
 // quota (阶梯阈值按窗口区分): WindowScope is a zero-pi-import type from src/quota/types.ts
 // (plan 分层纪律) —— type-only import, no runtime dependency on the quota module graph.
 import type { QuotaPoolId, WindowScope } from "../quota/types.js";
@@ -966,6 +968,8 @@ export const DEFAULT_WEBHUB_LAN_SETTINGS: WebHubLanSettings = {
   extraHosts: [],
   trustProxyFrom: [],
   externalOrigins: [],
+  allowClients: [],
+  sessionIdleMinutes: 720,
 };
 
 /**
@@ -991,6 +995,7 @@ export const DEFAULT_FEISHU_BOT_SETTINGS: FeishuBotSettings = {
   enabled: false,
   allowGroups: true,
   groupRootTopics: false,
+  securityAlerts: true,
   notify: "bound",
   spawnScope: "known",
   debounceMs: 1_500,
@@ -2284,6 +2289,7 @@ function parseProxyPortRangeText(text: unknown): [number, number] | undefined {
 export type FeishuBotWarning =
   | "block-invalid"
   | "enabled-invalid"
+  | "security-alerts-invalid"
   | "allow-groups-invalid"
   | "group-root-topics-invalid"
   | "notify-invalid"
@@ -2367,6 +2373,7 @@ export function parseFeishuBotBlock(input: unknown): FeishuBotParseResult {
   return {
     feishuBot: {
       enabled: bool(r.enabled, d.enabled, "enabled-invalid"),
+      securityAlerts: bool(r.securityAlerts, d.securityAlerts ?? true, "security-alerts-invalid"),
       allowGroups: bool(r.allowGroups, d.allowGroups, "allow-groups-invalid"),
       groupRootTopics: bool(r.groupRootTopics, d.groupRootTopics, "group-root-topics-invalid"),
       notify: choice(r.notify, ["bound", "off"] as const, d.notify, "notify-invalid"),
@@ -2451,10 +2458,44 @@ function validateExternalOrigins(raw: unknown): string[] {
   return out;
 }
 
+/** Fail closed even for non-string configured values. Empty CSV/array alone is inactive.
+ * Keep the first 64 distinct valid entries; overflow tokens are reported, never silently trusted. */
+function parseAllowClients(raw: unknown): { entries: string[]; invalid: InvalidClientCidr[]; denyAll: boolean } {
+  const values: unknown[] =
+    typeof raw === "string"
+      ? raw.split(",")
+      : Array.isArray(raw)
+        ? raw.flatMap((v) => (typeof v === "string" ? v.split(",") : [v]))
+        : raw === undefined
+          ? []
+          : [raw];
+  const entries: string[] = [];
+  const invalid: InvalidClientCidr[] = [];
+  let configured = false;
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() === "") continue;
+    configured = true;
+    // JSON-valid objects may shadow toString/valueOf; never execute them for diagnostics.
+    const token =
+      typeof value === "string"
+        ? value.trim()
+        : value === null || typeof value === "number" || typeof value === "boolean"
+          ? String(value)
+          : `<${typeof value}>`;
+    const canonical = typeof value === "string" ? parseClientCidr(token) : undefined;
+    if (canonical === undefined) invalid.push({ token, reason: "syntax" });
+    else if (entries.includes(canonical)) continue;
+    else if (entries.length >= CLIENT_ALLOW_MAX) invalid.push({ token, reason: "limit" });
+    else entries.push(canonical);
+  }
+  return { entries, invalid, denyAll: configured && entries.length === 0 };
+}
+
 export interface WebHubLanParseResult {
   lan: WebHubLanSettings;
   /** §9.1: settings 解析时被丢弃的 `extraHosts` 项（status 列出，never `bad-config`）。 */
   invalidExtraHosts: InvalidHostToken[];
+  invalidAllowClients: InvalidClientCidr[];
   /** §2.4: `trustProxyFrom`/`externalOrigins` 只设了其中一半 ⇒ 两者都被清空（fail-closed）。 */
   proxyMismatch: boolean;
 }
@@ -2467,7 +2508,7 @@ export interface WebHubLanParseResult {
 export function parseWebHubLanBlock(input: unknown, webHubPort: number): WebHubLanParseResult {
   const defaults = DEFAULT_WEBHUB_LAN_SETTINGS;
   if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return { lan: { ...defaults }, invalidExtraHosts: [], proxyMismatch: false };
+    return { lan: { ...defaults }, invalidExtraHosts: [], invalidAllowClients: [], proxyMismatch: false };
   }
   const record = input as Record<string, unknown>;
   const enabled = typeof record.enabled === "boolean" ? record.enabled : defaults.enabled;
@@ -2478,6 +2519,8 @@ export function parseWebHubLanBlock(input: unknown, webHubPort: number): WebHubL
       : defaults.port;
   if (port === webHubPort) port = defaults.port; // §9.1: 必须与 webHub.port 不同；碰撞回退默认（若默认亦碰撞，hub 层的 checkLanPortConflict 否决）
   const { hosts: extraHosts, invalid: invalidExtraHosts } = validateExtraHosts(record.extraHosts);
+  const { entries: allowClients, invalid: invalidAllowClients, denyAll } = parseAllowClients(record.allowClients);
+  const sessionIdleMinutes = clampSpawnInt(record.sessionIdleMinutes, 5, 10080, 720);
   let trustProxyFrom = validateTrustProxyFrom(record.trustProxyFrom);
   let externalOrigins = validateExternalOrigins(record.externalOrigins);
   let proxyMismatch = false;
@@ -2487,7 +2530,17 @@ export function parseWebHubLanBlock(input: unknown, webHubPort: number): WebHubL
     proxyMismatch = true;
   }
   return {
-    lan: { enabled, port, extraHosts, trustProxyFrom, externalOrigins },
+    lan: {
+      enabled,
+      port,
+      extraHosts,
+      trustProxyFrom,
+      externalOrigins,
+      allowClients,
+      sessionIdleMinutes,
+      ...(denyAll ? { allowClientsDenyAll: true as const } : {}),
+    },
+    invalidAllowClients,
     invalidExtraHosts,
     proxyMismatch,
   };
@@ -2502,9 +2555,9 @@ export function parseWebHubLanBlock(input: unknown, webHubPort: number): WebHubL
 export function parseWebHubLanValidation(
   input: unknown,
   webHubPort: number,
-): { invalidExtraHosts: InvalidHostToken[]; proxyMismatch: boolean } {
-  const { invalidExtraHosts, proxyMismatch } = parseWebHubLanBlock(input, webHubPort);
-  return { invalidExtraHosts, proxyMismatch };
+): { invalidExtraHosts: InvalidHostToken[]; invalidAllowClients: InvalidClientCidr[]; proxyMismatch: boolean } {
+  const { invalidExtraHosts, invalidAllowClients, proxyMismatch } = parseWebHubLanBlock(input, webHubPort);
+  return { invalidExtraHosts, invalidAllowClients, proxyMismatch };
 }
 
 /** Parse the optional deferred-reload settings block (parseCacheTtlSettings 同款容错, never throws). */
@@ -2885,7 +2938,7 @@ export function readSettingsNoMigrate(path: string = defaultSettingsPath()): Age
  * one diagnostic snapshot).
  */
 export function loadWebHubLanSettingsWarnings(path: string = defaultSettingsPath()): WebHubLanSettingsWarnings {
-  const empty: WebHubLanSettingsWarnings = { invalidExtraHosts: [], proxyMismatch: false };
+  const empty: WebHubLanSettingsWarnings = { invalidExtraHosts: [], invalidAllowClients: [], proxyMismatch: false };
   try {
     if (!existsSync(path)) return empty;
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -2893,8 +2946,11 @@ export function loadWebHubLanSettingsWarnings(path: string = defaultSettingsPath
     const webHubRaw = (parsed as Record<string, unknown>).webHub;
     if (webHubRaw === null || typeof webHubRaw !== "object" || Array.isArray(webHubRaw)) return empty;
     const record = webHubRaw as Record<string, unknown>;
-    const { invalidExtraHosts, proxyMismatch } = parseWebHubLanValidation(record.lan, resolveWebHubPort(record));
-    return { invalidExtraHosts, proxyMismatch };
+    const { invalidExtraHosts, invalidAllowClients, proxyMismatch } = parseWebHubLanValidation(
+      record.lan,
+      resolveWebHubPort(record),
+    );
+    return { invalidExtraHosts, invalidAllowClients, proxyMismatch };
   } catch {
     return empty;
   }

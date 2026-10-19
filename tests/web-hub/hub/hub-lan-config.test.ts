@@ -210,3 +210,31 @@ describe("startHub: lanConfigError / lanAssembly stub (plan §1.4.2, §1.4.3, co
   // assertion). An *unrecognized* `lanAssembly.build()` rejection (e.g. an injected stub)
   // still fails `startHub` the same way — covered by `hub-lan.test.ts`'s equivalent case.
 });
+
+describe("LAN security P0 hub revalidation", () => {
+  const base = { port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
+  it("keeps absent additions byte-identical; preserves explicit deny-all", () => {
+    expect(parseHubLanConfig(base)).toEqual({ ok: true, lan: base });
+    expect(parseHubLanConfig({ ...base, allowClients: [] })).toEqual({ ok: true, lan: { ...base, allowClients: [] } });
+    expect(
+      parseHubLanConfig({ ...base, allowClients: ["192.168.32.38/32", "::1/128"], sessionIdleMs: 300000 }),
+    ).toMatchObject({ ok: true, lan: { sessionIdleMs: 300000 } });
+  });
+  it("refuses noncanonical and oversized allowlists", () => {
+    for (const allowClients of [
+      null,
+      "1.2.3.4",
+      ["bad"],
+      ["1.2.3.4"],
+      ["1.2.3.4/24"],
+      ["::ffff:1.2.3.4/128"],
+      Array(65).fill("::1/128"),
+    ])
+      expect(parseHubLanConfig({ ...base, allowClients })).toMatchObject({ ok: false });
+  });
+  it("refuses invalid idleMs without clamping it at the hub boundary", () => {
+    for (const sessionIdleMs of [null, "300000", NaN, Infinity, 299999, 10080 * 60000 + 1, 300000.5])
+      expect(parseHubLanConfig({ ...base, sessionIdleMs })).toMatchObject({ ok: false });
+    expect(parseHubLanConfig({ ...base, sessionIdleMs: 10080 * 60000 })).toMatchObject({ ok: true });
+  });
+});

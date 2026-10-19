@@ -611,3 +611,19 @@ describe("settings ⇄ protocol parity (settings.ts cannot import protocol/feish
     expect(DEFAULT_FEISHU_BOT_SETTINGS.staleMessageS).toBe(300);
   });
 });
+
+describe("LAN security P0 Feishu wire compatibility", () => {
+  const { enabled: _enabled, securityAlerts: _securityAlerts, ...legacy } = FEISHU_BOT_DEFAULTS;
+  it("omits absent securityAlerts (means false), validates explicit booleans", () => {
+    expect(normalizeFeishuBotHubConfig(legacy)).toEqual(legacy);
+    expect(normalizeFeishuBotHubConfig({ ...legacy, securityAlerts: false })).toEqual({
+      ...legacy,
+      securityAlerts: false,
+    });
+    expect(normalizeFeishuBotHubConfig({ ...legacy, securityAlerts: true })).toEqual({
+      ...legacy,
+      securityAlerts: true,
+    });
+    expect(normalizeFeishuBotHubConfig({ ...legacy, securityAlerts: "true" })).toBeUndefined();
+  });
+});

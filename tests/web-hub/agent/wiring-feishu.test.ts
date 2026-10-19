@@ -70,9 +70,11 @@ describe("FA buildHubConfig top-level feishuBot gate", () => {
   });
   it("enabled passes exactly normalized public leaves, never enabled or secrets", async () => {
     const cfg = await spawnedConfig(SETTINGS, { ...DEFAULT_FEISHU_BOT_SETTINGS, enabled: true });
-    const { enabled: _enabled, ...expected } = DEFAULT_FEISHU_BOT_SETTINGS;
+    // P0 declares securityAlerts but deliberately leaves its forwarding to I/E wiring.
+    const { enabled: _enabled, securityAlerts: _securityAlerts, ...expected } = DEFAULT_FEISHU_BOT_SETTINGS;
     expect(cfg.feishuBot).toEqual(expected);
     expect(cfg.feishuBot).not.toHaveProperty("enabled");
+    expect(cfg.feishuBot).not.toHaveProperty("securityAlerts");
   });
   it("control:false omits the entire key even if bot enabled", async () => {
     const cfg = await spawnedConfig({ ...SETTINGS, control: false }, { ...DEFAULT_FEISHU_BOT_SETTINGS, enabled: true });

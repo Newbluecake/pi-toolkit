@@ -15,3 +15,11 @@ import { createHash } from "node:crypto";
 export function hashSid(sid: string): string {
   return createHash("sha256").update(sid).digest("base64url");
 }
+
+/** LAN security §3.2: public, domain-separated id. Raw sidHash never crosses HTTP. */
+export function publicSessionId(sidHash: string): string {
+  return createHash("sha256")
+    .update("pwh-lan-sess\0" + sidHash)
+    .digest("base64url")
+    .slice(0, 16);
+}

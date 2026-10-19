@@ -320,3 +320,8 @@ export const PROXY_LAN_HUB_CAP = "proxy.lan.v1";
  * ever sent under the cap, so there is no PROTO bump (same §2.3 「只加帧不改」 rule as `lan_req`).
  */
 export const FSB_HUB_CAP = "fsb.v1";
+
+/** LAN security P0: declared ONLY. I advertises these on both cap surfaces after wiring.
+ * Optional new frames are cap-gated, so PROTO stays unchanged (same as fsb_req/res). */
+export const LAN_2FA_HUB_CAP = "lan.2fa.v1";
+export const LAN_SESSIONS_HUB_CAP = "lan.sessions.v1";

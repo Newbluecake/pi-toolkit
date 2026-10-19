@@ -45,6 +45,8 @@ import { createDbClient, type DbClient, type DbClientDeps } from "./db-client.js
 import type { HubLog, LanSessionRecord, LanStorePort, LanUserRecord, LanUserSummary, PortOptions } from "./ports.js";
 import { hashSid as sharedHashSid } from "./sid-hash.js";
 
+import { unimplementedLanSecurityStore } from "./lan-security-stubs.js";
+
 const execFileP = promisify(execFile);
 
 /** P1's original literal, kept as the fallback whenever `os.userInfo()` can't produce a usable
@@ -71,6 +73,8 @@ export interface LanStore extends LanStorePort {
 
 export interface CreateLanStoreDeps {
   dbFile: string;
+  /** P0 declaration only; B consumes this when implementing idle enforcement. */
+  idleMs?: number;
   log: HubLog;
   now?: () => number;
   /** Test-only: forces script test-hook compilation + smaller timings. Never
@@ -143,6 +147,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   }
 
   const store: LanStore = {
+    ...unimplementedLanSecurityStore(),
     async getUser(username, opts) {
       const raw = await dbClient.call<RawUser | undefined>("getUser", { username }, opts);
       return raw === undefined || raw === null ? undefined : decodeUser(raw);
@@ -394,3 +399,14 @@ function sha256Base64Url(sid: string): string {
 }
 
 export type { DbClient };
+
+/** LAN security P0 B↔F maintenance seam. Must work with NO resident store (LAN off).
+ * B implements bounded file-check + repair-2fa maintenance, preserving v2 and auditing only op/ok. */
+export type RepairLan2faResult = { ok: true } | { ok: false; reason: LanOffReason; detail?: string };
+export async function repairLan2fa(_deps: {
+  dbFile: string;
+  log: HubLog;
+  signal?: AbortSignal;
+}): Promise<RepairLan2faResult> {
+  throw new Error("LAN security P0: 2FA repair not implemented");
+}

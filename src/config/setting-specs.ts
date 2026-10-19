@@ -331,6 +331,18 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     integer: true,
     description: "web-hub LAN: HTTP port bound to 0.0.0.0 (must differ from webHub.port)",
   },
+  "webHub.lan.allowClients": csvString(
+    "webHub.lan.allowClients",
+    "web-hub LAN: client IP/CIDR allowlist; empty is unrestricted, all-invalid denies all (/reload then /webhub restart)",
+  ),
+  "webHub.lan.sessionIdleMinutes": {
+    kind: "number",
+    path: "webHub.lan.sessionIdleMinutes",
+    min: 5,
+    max: 10080,
+    integer: true,
+    description: "web-hub LAN: session idle timeout in minutes (/reload then /webhub restart)",
+  },
   "webHub.lan.extraHosts": csvString(
     "webHub.lan.extraHosts",
     "web-hub LAN: extra host names / IPv4 literals to allow-list, comma-separated",
@@ -1123,6 +1135,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   // invariant (tests/ui/settings-editor.test.ts: no exposed key ends in "Ms") means a
   // milliseconds storage key cannot enter the editor without an out-of-domain test change —
   // edit it directly in pi-subagent.json. See docs/dev/feishu-bot/F9-report.md.
+  "feishuBot.securityAlerts": bool(
+    "feishuBot.securityAlerts",
+    "Feishu bot: high-risk LAN security alerts (default on; change: /reload then /webhub restart)",
+  ),
   "feishuBot.enabled": bool(
     "feishuBot.enabled",
     "Feishu bot: enable the hub-side bot (change: /reload then /webhub restart)",

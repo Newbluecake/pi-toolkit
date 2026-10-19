@@ -231,5 +231,17 @@ export type LanStatus =
       omitted: { host: string; reason: HostTokenRejectReason }[];
       proxy?: { trustedFrom: string[]; externalOrigins: string[] };
       warnings: string[];
+      /** LAN security §2.4. Absent until the guard is wired. */
+      allowClients?: ClientAllowSnapshot;
+      /** LAN security §3.1/§6: set (epoch ms) when the store found `login_ips` unusable and rebuilt it empty
+       *  at open (every IP is new again). Absent otherwise / until wired. */
+      loginIpsRebuiltAt?: number;
     }
   | { state: "off"; reason: LanOffReason; detail?: string };
+
+/** Guard status only — no per-IP map or unbounded denial history crosses the wire. */
+export interface ClientAllowSnapshot {
+  entries: string[];
+  denyAll?: true;
+  denied?: { total: number; lastAt: number; lastIp: string };
+}

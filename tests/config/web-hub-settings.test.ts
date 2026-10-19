@@ -45,7 +45,15 @@ describe("web-hub settings", () => {
       subagentTranscript: "all",
       quota: true,
       load: true,
-      lan: { enabled: false, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
+      lan: {
+        enabled: false,
+        port: 7879,
+        extraHosts: [],
+        trustProxyFrom: [],
+        externalOrigins: [],
+        allowClients: [],
+        sessionIdleMinutes: 720,
+      },
       spawn: {
         enabled: false,
         roots: [],
@@ -275,7 +283,11 @@ describe("web-hub settings", () => {
       ]);
       expect(v.proxyMismatch).toBe(true); // trustProxyFrom set, externalOrigins empty
 
-      expect(parseWebHubLanValidation({}, 7878)).toEqual({ invalidExtraHosts: [], proxyMismatch: false });
+      expect(parseWebHubLanValidation({}, 7878)).toEqual({
+        invalidAllowClients: [],
+        invalidExtraHosts: [],
+        proxyMismatch: false,
+      });
     });
 
     describe("loadWebHubLanSettingsWarnings (LI wiring: src/index.ts → createWebHubCommand)", () => {
@@ -296,6 +308,7 @@ describe("web-hub settings", () => {
           "utf8",
         );
         expect(loadWebHubLanSettingsWarnings(path)).toEqual({
+          invalidAllowClients: [],
           invalidExtraHosts: [
             { token: "dev", reason: "denylisted" },
             { token: "202507220006", reason: "numeric" },
@@ -305,7 +318,7 @@ describe("web-hub settings", () => {
       });
 
       it("defaults to empty warnings for a missing file, malformed JSON, or a missing/malformed webHub block", () => {
-        const empty = { invalidExtraHosts: [], proxyMismatch: false };
+        const empty = { invalidAllowClients: [], invalidExtraHosts: [], proxyMismatch: false };
         expect(loadWebHubLanSettingsWarnings(path)).toEqual(empty); // file doesn't exist
         writeFileSync(path, "not json", "utf8");
         expect(loadWebHubLanSettingsWarnings(path)).toEqual(empty);
@@ -323,13 +336,19 @@ describe("web-hub settings", () => {
         );
         // lan.port === webHub.port ⇒ parseWebHubLanBlock falls back lan.port to its own default
         // internally; only trustProxyFrom-without-externalOrigins should surface as a warning here.
-        expect(loadWebHubLanSettingsWarnings(path)).toEqual({ invalidExtraHosts: [], proxyMismatch: true });
+        expect(loadWebHubLanSettingsWarnings(path)).toEqual({
+          invalidAllowClients: [],
+          invalidExtraHosts: [],
+          proxyMismatch: true,
+        });
       });
     });
 
     it("loadSettings round-trips webHub.lan through the top-level parser", () => {
       const s = loadSettings({ webHub: { lan: { enabled: true, port: 9001, extraHosts: "a.local" } } });
       expect(s.webHub.lan).toEqual({
+        allowClients: [],
+        sessionIdleMinutes: 720,
         enabled: true,
         port: 9001,
         extraHosts: ["a.local"],
@@ -836,5 +855,64 @@ describe("webHub.subagentTranscript (web-hub-fleet-drawer plan §4.4, F2)", () =
     expect(spec.live).toBeUndefined();
     expect(spec).toMatchObject({ kind: "enum", path: "webHub.subagentTranscript", values: ["all", "loopback", "off"] });
     expect(defaultOf(spec)).toBe("all");
+  });
+});
+
+describe("LAN security P0 settings", () => {
+  it("canonicalizes CSV/arrays with mapped CIDRs; no mutation; deduplicates", () => {
+    const raw = { allowClients: ["192.168.32.38/24, ::ffff:c0a8:2026/120", "2001:DB8::1/32", "bad"] };
+    const result = parseWebHubSettings({ lan: raw }).lan!;
+    expect(result.allowClients).toEqual(["192.168.32.0/24", "2001:db8::/32"]);
+    expect(result).not.toHaveProperty("allowClientsDenyAll");
+    expect(raw.allowClients).toHaveLength(3);
+    expect(parseWebHubLanValidation(raw, 7878).invalidAllowClients).toEqual([{ token: "bad", reason: "syntax" }]);
+  });
+  it("empty is inactive, but every configured-invalid shape denies all", () => {
+    for (const allowClients of [undefined, "", [], [" ", ""], ", ,"]) {
+      const lan = parseWebHubSettings({ lan: { allowClients } }).lan!;
+      expect(lan.allowClients).toEqual([]);
+      expect(lan.allowClientsDenyAll).toBeUndefined();
+    }
+    for (const allowClients of ["bad", ["bad"], 42, [42], null, [{ toString: null }]]) {
+      const lan = parseWebHubSettings({ lan: { allowClients } }).lan!;
+      expect(lan.allowClients).toEqual([]);
+      expect(lan.allowClientsDenyAll).toBe(true);
+      expect(parseWebHubLanValidation({ allowClients }, 7878).invalidAllowClients).toHaveLength(1);
+    }
+  });
+  it("admits at most 64 distinct CIDRs and reports overflow", () => {
+    const allowClients = Array.from({ length: 65 }, (_, i) => `10.0.0.${i}`);
+    const lan = parseWebHubSettings({ lan: { allowClients } }).lan!;
+    expect(lan.allowClients).toHaveLength(64);
+    expect(lan.allowClients?.at(-1)).toBe("10.0.0.63/32");
+    expect(parseWebHubLanValidation({ allowClients }, 7878).invalidAllowClients).toEqual([
+      { token: "10.0.0.64", reason: "limit" },
+    ]);
+  });
+  it.each([
+    [undefined, 720],
+    ["5", 720],
+    [NaN, 720],
+    [Infinity, 720],
+    [-1, 5],
+    [5, 5],
+    [5.6, 6],
+    [10081, 10080],
+    [10080, 10080],
+  ])("idle %s → %s", (sessionIdleMinutes, expected) => {
+    expect(parseWebHubSettings({ lan: { sessionIdleMinutes } }).lan?.sessionIdleMinutes).toBe(expected);
+  });
+  it("exposes non-live specs in the existing editor vocabulary", () => {
+    expect(SETTING_SPECS["webHub.lan.allowClients"]).toMatchObject({ kind: "string", csv: true });
+    expect(defaultOf(SETTING_SPECS["webHub.lan.sessionIdleMinutes"]!)).toBe(720);
+    expect(parseSettingValue(SETTING_SPECS["webHub.lan.sessionIdleMinutes"]!, "4").ok).toBe(false);
+    expect(parseSettingValue(SETTING_SPECS["webHub.lan.sessionIdleMinutes"]!, "5")).toMatchObject({
+      ok: true,
+      stored: 5,
+      live: 5,
+    });
+    expect(parseSettingValue(SETTING_SPECS["webHub.lan.allowClients"]!, "192.168.1.2, ::1")).toMatchObject({
+      ok: true,
+    });
   });
 });

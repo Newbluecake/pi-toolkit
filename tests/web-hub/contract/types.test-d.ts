@@ -190,7 +190,9 @@ describe("types.test-d.ts (plan §11 typecheck contract)", () => {
   // optional AbortSignal (deadline *values* stay each port's own implementation detail).
   it("KdfAdmissionPort.acquire and LanStorePort's request-level ops accept opts?: PortOptions", () => {
     expectTypeOf<Parameters<KdfAdmissionPort["acquire"]>[2]>().toEqualTypeOf<PortOptions | undefined>();
-    expectTypeOf<Parameters<LanStorePort["touchSession"]>[2]>().toEqualTypeOf<PortOptions | undefined>();
+    expectTypeOf<Parameters<LanStorePort["touchSession"]>[2]>().toEqualTypeOf<
+      (PortOptions & { ip?: string }) | undefined
+    >();
     expectTypeOf<Parameters<LanStorePort["getUser"]>[1]>().toEqualTypeOf<PortOptions | undefined>();
     expectTypeOf<PortOptions>().toHaveProperty("signal");
     expectTypeOf<PortOptions["signal"]>().toEqualTypeOf<AbortSignal | undefined>();
@@ -765,5 +767,40 @@ describe("types.test-d.ts (worktree-graph plan v2 §4.4 P4 transport surface)", 
   it("HubTransport.worktreeGraph is optional (frozen-transport convention; fakes may omit it)", () => {
     expectTypeOf<HubTransport["worktreeGraph"]>().toEqualTypeOf<WorktreeGraphTransport | undefined>();
     expectTypeOf<Omit<HubTransport, "worktreeGraph">>().toMatchTypeOf<HubTransport>();
+  });
+});
+
+// LAN security P0 compiler-checked seams (not substitutes for the behavioral tests).
+import type {
+  ClientAllowGuard,
+  CreateSessionCheckedResult,
+  Lan2faState,
+  LanLoginCore,
+  LoginApprovalPort,
+  LoginIo,
+  LoginReply,
+  LanSessionsRoutes,
+} from "../../../src/web-hub/hub/ports.js";
+import type { TfaReqFrame, TfaResFrame } from "../../../src/web-hub/protocol/lan-2fa.js";
+import type { FakeLanStore } from "./fakes.js";
+describe("LAN security P0 types", () => {
+  it("freezes required new store operations, generation/epoch CAS and full fake", () => {
+    expectTypeOf<FakeLanStore>().toMatchTypeOf<LanStorePort>();
+    expectTypeOf<
+      Awaited<ReturnType<LanStorePort["createSessionChecked"]>>
+    >().toEqualTypeOf<CreateSessionCheckedResult>();
+    expectTypeOf<Parameters<LanStorePort["createSessionChecked"]>[0]>().toHaveProperty("expectedEpoch");
+    expectTypeOf<Parameters<LanStorePort["createSessionChecked"]>[0]>().toHaveProperty("expectedFactorGen");
+    expectTypeOf<Lan2faState>().not.toHaveProperty("secretB32");
+    expectTypeOf<Lan2faState>().not.toHaveProperty("totpSecret");
+  });
+  it("freezes core, approval, guard and dispatch surfaces", () => {
+    expectTypeOf<Parameters<LanLoginCore["submitFactor"]>[3]>().toEqualTypeOf<LoginIo>();
+    expectTypeOf<ReturnType<LanLoginCore["waitApproval"]>>().toEqualTypeOf<Promise<LoginReply>>();
+    expectTypeOf<ReturnType<LoginApprovalPort["request"]>>().toEqualTypeOf<Promise<"sent" | "unavailable">>();
+    expectTypeOf<ReturnType<ClientAllowGuard["admitForwarded"]>>().toEqualTypeOf<boolean>();
+    expectTypeOf<ReturnType<LanSessionsRoutes["handle"]>>().toEqualTypeOf<Promise<boolean>>();
+    expectTypeOf<TfaReqFrame>().toMatchTypeOf<AgentFrame>();
+    expectTypeOf<TfaResFrame>().toMatchTypeOf<HubFrame>();
   });
 });

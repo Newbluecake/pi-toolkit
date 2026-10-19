@@ -689,3 +689,59 @@ export function auditPrivacy(log: { info(msg: string, data?: object): void }, re
   }
   log.info("privacy", out);
 }
+
+// LAN security r2 §8. Explicit runtime picks, including for untyped callers.
+export interface ClientDenyAuditRecord {
+  listener: "lan" | "proxy";
+  ip: string;
+  via: "peer" | "forwarded";
+  reason: "not-allowed" | "invalid-ip" | "xff-unusable" | "overflow";
+  suppressed: number;
+}
+export const CLIENT_DENY_AUDIT_KEYS = ["listener", "ip", "via", "reason", "suppressed"] as const;
+export interface LanSessionAuditRecord {
+  op: "list" | "revoke" | "others";
+  ip: string;
+  user?: string;
+  ok: boolean;
+  code?: string;
+  n?: number;
+  complete?: boolean;
+  self?: boolean;
+}
+export const LAN_SESSION_AUDIT_KEYS = ["op", "ip", "user", "ok", "code", "n", "complete", "self"] as const;
+export interface Lan2faAuditRecord {
+  phase: "gate" | "challenge" | "verify" | "complete" | "dead" | "admin";
+  method?: "password" | "totp" | "recovery" | "feishu";
+  ip?: string;
+  user?: string;
+  ok: boolean;
+  /** Outcome code, NEVER the user-entered OTP/recovery code. */
+  code?: string;
+  reason?: string;
+  left?: number;
+  ms?: number;
+  op?: string;
+}
+export const LAN_2FA_AUDIT_KEYS = ["phase", "method", "ip", "user", "ok", "code", "reason", "left", "ms"] as const;
+function auditLanSecurity(
+  log: { info(msg: string, data?: object): void },
+  channel: string,
+  record: object,
+  keys: readonly string[],
+): void {
+  const raw = record as Record<string, unknown>;
+  const out: Record<string, unknown> = { audit: channel };
+  for (const key of keys) if (raw[key] !== undefined) out[key] = raw[key];
+  log.info(channel, out);
+}
+export function auditClientDeny(log: { info(msg: string, data?: object): void }, record: ClientDenyAuditRecord): void {
+  auditLanSecurity(log, "client-deny", record, CLIENT_DENY_AUDIT_KEYS);
+}
+export function auditLanSession(log: { info(msg: string, data?: object): void }, record: LanSessionAuditRecord): void {
+  auditLanSecurity(log, "lan-session", record, LAN_SESSION_AUDIT_KEYS);
+}
+export function auditLan2fa(log: { info(msg: string, data?: object): void }, record: Lan2faAuditRecord): void {
+  if (record.phase === "admin") auditLanSecurity(log, "lan-2fa", record, ["op", "ok"]);
+  else auditLanSecurity(log, "lan-2fa", record, LAN_2FA_AUDIT_KEYS);
+}

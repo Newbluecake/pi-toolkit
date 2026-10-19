@@ -12,6 +12,7 @@
  */
 import { canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
 import type { HubLanConfig } from "./ports.js";
+import { parseClientCidr, CLIENT_ALLOW_MAX } from "../protocol/client-allow.js";
 
 function stringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : undefined;
@@ -77,7 +78,38 @@ export function parseHubLanConfig(raw: unknown): { ok: true; lan: HubLanConfig }
     return { ok: false, detail: "trustProxyFrom/externalOrigins: proxy-config-mismatch" };
   }
 
-  return { ok: true, lan: { port, extraHosts, trustProxyFrom, externalOrigins } };
+  let allowClients: string[] | undefined;
+  if (obj["allowClients"] !== undefined) {
+    allowClients = stringArray(obj["allowClients"]);
+    if (
+      allowClients === undefined ||
+      allowClients.length > CLIENT_ALLOW_MAX ||
+      allowClients.some((c) => parseClientCidr(c) !== c)
+    ) {
+      return { ok: false, detail: "allowClients: must be ≤64 canonical CIDRs" };
+    }
+  }
+  const sessionIdleMs = obj["sessionIdleMs"];
+  if (
+    sessionIdleMs !== undefined &&
+    (typeof sessionIdleMs !== "number" ||
+      !Number.isInteger(sessionIdleMs) ||
+      sessionIdleMs < 5 * 60_000 ||
+      sessionIdleMs > 10080 * 60_000)
+  ) {
+    return { ok: false, detail: "sessionIdleMs: out of range" };
+  }
+  return {
+    ok: true,
+    lan: {
+      port,
+      extraHosts,
+      trustProxyFrom,
+      externalOrigins,
+      ...(allowClients === undefined ? {} : { allowClients: [...allowClients] }),
+      ...(sessionIdleMs === undefined ? {} : { sessionIdleMs: sessionIdleMs as number }),
+    },
+  };
 }
 
 /**
