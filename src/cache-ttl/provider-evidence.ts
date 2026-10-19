@@ -18,6 +18,9 @@
  *     read was ever observed ( pings all read 0 AND no real request read
  *     either). At `NO_CACHE_VALUE_STREAK_LIMIT` the route is fused off; any
  *     observed `cacheRead > 0` resets it immediately.
+ *   - `lateUsageAt` — learned "late-usage" route (plan.md 2026-10-20): a keepalive ping saw 0/0
+ *     at `message_start` and the NEXT real request on the route reported a cache read, so the
+ *     relay reports cache stats only in `message_delta`. Rolling 30d TTL, rate-limited refresh.
  *   - `probe` / `probedAt` — the last `/cache-ttl probe` verdict (O4).
  *
  * Failure direction (topic-switch I6, same everywhere here): every read
@@ -71,6 +74,8 @@ export interface ProviderRouteEvidence {
   write1hLandedAt?: Millis;
   probedAt?: Millis;
   probe?: ProviderRouteProbe;
+  /** Learned late-usage flag: when it was (last) observed — see `ProviderEvidenceStore.hasLateUsageEvidence`. */
+  lateUsageAt?: Millis;
   /** O3: consecutive sessions with active keepalive but zero observed cache reads. */
   zeroReadSessions: number;
   /** O3: set when the streak reached `NO_CACHE_VALUE_STREAK_LIMIT` (the trip time). Cleared by any cache read. */
@@ -88,6 +93,13 @@ export interface ProviderEvidenceStore {
   noteZeroReadSession(provider: string, modelId: string, now: Millis): void;
   /** O3: any observed `cacheRead > 0` (real request usage or a proven-hit ping) resets the breaker immediately. */
   noteCacheRead(provider: string, modelId: string, now: Millis): void;
+  /**
+   * Learned late-usage route: a ping saw 0/0 at `message_start` and the next real request read cache > 0
+   * (cache stats arrive only in `message_delta`). Within the rolling TTL.
+   */
+  hasLateUsageEvidence(provider: string, modelId: string, now: Millis): boolean;
+  /** Record the learned late-usage flag (refresh rate-limited like the 1h-landing flag). */
+  noteLateUsage(provider: string, modelId: string, now: Millis): void;
   /** User manual reset: clear this route's no-cache-value streak + breaker (no fabricated cacheRead evidence; write1h/probe untouched). */
   resetNoCacheValue(provider: string, modelId: string, now: Millis): void;
   /** O4: record a probe verdict (also feeds write1h/noCacheValue evidence per its findings). */
@@ -98,6 +110,7 @@ export interface ProviderEvidenceStore {
 
 interface RouteRecordRaw {
   write1hLandedAt?: unknown;
+  lateUsageAt?: unknown;
   probedAt?: unknown;
   probe?: unknown;
   zeroReadSessions?: unknown;
@@ -135,6 +148,8 @@ function sanitizeRoute(value: unknown): ProviderRouteEvidence | undefined {
   const out: ProviderRouteEvidence = { zeroReadSessions: 0 };
   const write1hLandedAt = finiteMs(raw.write1hLandedAt);
   if (write1hLandedAt !== undefined) out.write1hLandedAt = write1hLandedAt;
+  const lateUsageAt = finiteMs(raw.lateUsageAt);
+  if (lateUsageAt !== undefined) out.lateUsageAt = lateUsageAt;
   const probedAt = finiteMs(raw.probedAt);
   if (probedAt !== undefined) out.probedAt = probedAt;
   const probe = sanitizeProbe(raw.probe);
@@ -149,7 +164,7 @@ function sanitizeRoute(value: unknown): ProviderRouteEvidence | undefined {
 /** Latest activity timestamp of a record, or `undefined` when it has none (for TTL pruning and FIFO eviction). */
 function latestActivity(route: ProviderRouteEvidence): Millis | undefined {
   let latest: Millis | undefined;
-  for (const t of [route.write1hLandedAt, route.probedAt, route.noCacheValueSince] as const) {
+  for (const t of [route.write1hLandedAt, route.lateUsageAt, route.probedAt, route.noCacheValueSince] as const) {
     if (t !== undefined && (latest === undefined || t > latest)) latest = t;
   }
   return latest;
@@ -265,6 +280,28 @@ class ProviderEvidenceStoreImpl implements ProviderEvidenceStore {
           return false; // daily-refresh rate limit — see WRITE1H_REFRESH_MIN_INTERVAL_MS.
         }
         route.write1hLandedAt = now;
+        return true;
+      });
+    } catch {
+      // never throws.
+    }
+  }
+
+  hasLateUsageEvidence(provider: string, modelId: string, now: Millis): boolean {
+    try {
+      const route = this.get(provider, modelId);
+      if (route?.lateUsageAt === undefined) return false;
+      return now - route.lateUsageAt < PROVIDER_EVIDENCE_TTL_MS;
+    } catch {
+      return false;
+    }
+  }
+
+  noteLateUsage(provider: string, modelId: string, now: Millis): void {
+    try {
+      this.mutate(provider, modelId, now, (route) => {
+        if (route.lateUsageAt !== undefined && now - route.lateUsageAt < WRITE1H_REFRESH_MIN_INTERVAL_MS) return false;
+        route.lateUsageAt = now;
         return true;
       });
     } catch {

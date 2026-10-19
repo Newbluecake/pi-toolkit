@@ -1586,6 +1586,8 @@ export interface KeepaliveCostTier {
   cacheRead?: number;
   /** child-ka-core: mirrors pi-ai's per-tier cache-WRITE rate (models.json's `tiers[].cacheWrite`). */
   cacheWrite?: number;
+  /** pi-ai's per-tier OUTPUT rate ($ per million tokens) — only the late-usage ping cost estimate reads it. */
+  output?: number;
 }
 
 /** Minimal structural echo of pi-ai's `Model["cost"]` shape (models.js `calculateCost`). */
@@ -1593,6 +1595,8 @@ export interface KeepaliveCostModel {
   cacheRead?: number;
   /** child-ka-core: pi-ai's cache-WRITE rate (models.json's `cost.cacheWrite`, $ per million tokens). */
   cacheWrite?: number;
+  /** pi-ai's OUTPUT rate ($ per million tokens) — only the late-usage ping cost estimate reads it. */
+  output?: number;
   tiers?: KeepaliveCostTier[];
 }
 
@@ -1697,6 +1701,22 @@ export function cacheWriteCostUsd(cost: KeepaliveCostModel | undefined, tokens: 
   return (rate / 1_000_000) * tokens;
 }
 
+/**
+ * Late-usage pings (plan.md 2026-10-20): the ping's own output tokens (≤ `LATE_USAGE_PING_MAX_TOKENS`) are billed.
+ * Same tier selection as the other estimators, applied to the OUTPUT rate; `tierTokens` is the request's input size
+ * (prefix) that selects the pi-ai rate tier. `undefined` (never `0`) when the rate is unknown/zero.
+ */
+export function outputCostUsd(
+  cost: KeepaliveCostModel | undefined,
+  outputTokens: number,
+  tierTokens: number,
+): number | undefined {
+  if (!cost || outputTokens <= 0) return undefined;
+  const rate = tieredRate(cost, tierTokens, cost.output, (t) => t.output);
+  if (rate === undefined || rate === 0) return undefined;
+  return (rate / 1_000_000) * outputTokens;
+}
+
 // ---------------------------------------------------------------------------
 // Status bar + `/cache-ttl status` text (plan.md §9.1/§9.4)
 // ---------------------------------------------------------------------------
@@ -1751,6 +1771,11 @@ export interface KeepaliveReport {
   activationDisabled?: { reason: string; at: Millis } | undefined;
   /** r7 §3.3: a previous ping's physical IO is still unsettled (`io-busy`). */
   ioBusy?: boolean | undefined;
+  /**
+   * Late-usage line facts for the CURRENT line (plan.md 2026-10-20): `seeded` (baseUrl host in the seed list) or
+   * `learned` (provider-evidence flag). `undefined` ⇒ an ordinary line.
+   */
+  lateUsage?: "seeded" | "learned" | undefined;
 }
 
 /** See `KeepaliveReport.lastPingDiagnostics`. */
@@ -1787,6 +1812,10 @@ export interface KeepalivePingDiagnostics {
    * audit trail and `/cache-ttl status`.
    */
   ttlStripped?: boolean | undefined;
+  /** Late-usage ping (replayed with clamped `max_tokens`, read until `message_delta`). */
+  lateUsage?: boolean | undefined;
+  /** Which stream event supplied the classified usage (`message_start` | `message_delta`). */
+  usageSource?: "message_start" | "message_delta" | undefined;
   /**
    * Wall time from the FIRST HTTP attempt's send to the final outcome settling — the whole
    * retry sequence, not just the last attempt (per-attempt times live in the service's
@@ -2052,10 +2081,12 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
     const headerDiff = d.headerKeyDiff.length > 0 ? ` (filled: ${d.headerKeyDiff.join(",")})` : "";
     const attemptsSuffix = d.attempts !== undefined ? ` · attempts=${d.attempts}` : "";
     const ttlSuffix = d.ttlStripped === true ? " · ttl-stripped(1h→5m)" : "";
+    const usageSuffix = d.usageSource !== undefined ? ` · usage=${d.usageSource}` : "";
     lines.push(
-      `last ping: ${d.outcomeKind} @ ${d.at} · +${d.elapsedSinceCaptureMs}ms since capture · prefix ${d.prefixTokens}tok (${d.prefixSource}) · cache_read=${d.cacheReadInputTokens ?? "n/a"} cache_creation=${d.cacheCreationInputTokens ?? "n/a"} · headers: ${d.headerSource}${headerDiff} · model=${d.model} · baseUrl=${d.baseUrl}${attemptsSuffix}${ttlSuffix}`,
+      `last ping: ${d.outcomeKind} @ ${d.at} · +${d.elapsedSinceCaptureMs}ms since capture · prefix ${d.prefixTokens}tok (${d.prefixSource}) · cache_read=${d.cacheReadInputTokens ?? "n/a"} cache_creation=${d.cacheCreationInputTokens ?? "n/a"} · headers: ${d.headerSource}${headerDiff} · model=${d.model} · baseUrl=${d.baseUrl}${attemptsSuffix}${ttlSuffix}${usageSuffix}`,
     );
   }
+  if (report.lateUsage !== undefined) lines.push(`late-usage: ${report.lateUsage}`);
   lines.push(
     `breaker: unprovenTotal=${session.unprovenTotal} consecutiveUnproven=${session.consecutiveUnproven} provenWrites=${session.provenWrites}`,
   );

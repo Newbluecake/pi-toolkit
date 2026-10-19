@@ -1394,3 +1394,49 @@ passed / 2 skipped）均绿。
 - 租约续期（主会话裁定）：子会话 ping 的账本租约（`CHILD_PING_LEASE_MS`=150s）在每次重试等待结束、发出下一次尝试前
   `lease.renew(now)` 续到 `now + 150s`；续期失败（租约已被他人回收）即放弃后续重试、以最后一次结果终局，不抢回槽位，
   并发上限永不突破；计费仍按结果类别（never-processed 计 $0）。
+
+## late-usage lines（2026-10-20 实测 + 实现）
+
+**问题**：kimi-coding/k3（Anthropic-messages 端点 `https://api.kimi.com/coding`）只在流末尾的
+`message_delta.usage` 里报告缓存数；`message_start.usage` 几乎总是
+`cache_read_input_tokens:0, cache_creation_input_tokens:0, input_tokens:<全量>`。保活 ping 在
+`message_start` 就取消，于是每次 kimi ping 都被判 `no-usage`，尽管缓存实际命中并续期（ping 后紧接的真实 k3
+请求 cacheRead ≈ 整个前缀）。
+
+**实测**（~9.4k token 前缀，脚本 `~/tmp/kimi-stream-probe.mjs`、`~/tmp/kimi-ping-variants*.mjs`）：
+
+- 同 payload、仅把 `max_tokens` 降到 2/4/8/16（thinking 参数不变，连 `thinking:{type:"enabled",budget_tokens:1024}`
+  配 max_tokens 4 也被接受）：缓存命中，数字在 `message_delta`（`cache_read_input_tokens:9386, input_tokens:0,
+output_tokens:<=max_tokens>`），耗时约 1–2 s。
+- `max_tokens:1` 被 kimi 特殊处理：input 计数不同（9300），**不**读缓存 —— 永远不要用 1。
+- 改 thinking（`{type:"disabled"}`）会改变缓存 key（独立命名空间）—— 永远不要动 thinking。
+- 有一次（共 2 次里）`message_start` 自己就带了 read —— 两种情形都要处理。
+
+**实现**（`src/cache-ttl/late-usage.ts` + 接线）：
+
+1. late-usage 线判定（`CacheKeepaliveServiceImpl.lateUsageReason`）：`seeded` = baseUrl 主机在
+   `LATE_USAGE_SEED_HOSTS`（精确匹配，目前仅 `api.kimi.com`）；`learned` = provider-evidence 在该 route
+   （provider+modelId）上记录了 `lateUsageAt`（滚动 30d TTL、每日刷新限频、纳入既有 200 route FIFO / 0600 /
+   fail-silent 规则；store 缺席 ⇒ 仅 seed）。
+2. 学习：非 late 线上一次 ping 的 `message_start` 带 usage 对象且 cacheRead=cacheWrite=0（`no-usage`），随后该
+   route 上**下一个**真实请求报告 `cacheRead>0`（`noteUsageCacheRead`）⇒ `noteLateUsage` + audit
+   `late-usage-learned`；其间出现一个成功但无缓存用量的真实请求则清除怀疑（单槽位，下次 ping 覆盖）。
+3. ping 形态：`prepareLatePingPayload` —— 字节级原样重放，**仅** `max_tokens` 夹到
+   `LATE_USAGE_PING_MAX_TOKENS = 4`（捕获值更大才夹；<2 抬到 2，永不为 1；缺失/非数字不动；thinking 不动）。
+   传输层（`sendPipelinePing({ lateUsage:true })`）在 `message_start` 已证明命中/写入时立即判定并取消（现行
+   行为）；否则继续读到第一个带 `usage` 的 `message_delta`（Anthropic 语义：delta 的非空计数覆盖 start，即
+   pi-ai 同款合并）或 `message_stop`（无 delta ⇒ 用 start 数字 ⇒ `no-usage`）。仍是单个 20 s 总 deadline（
+   auth+fetch+read）、至多一次 POST、取消只发起不等待；late 模式扫描上限 64 KiB → 256 KiB
+   （`LATE_USAGE_SCAN_LIMIT_BYTES`，仅 late；超限 ⇒ `malformed`）。非 late 线逐字节不变（有测试钉住：
+   `max_tokens:1`/legacy 取消点/64 KiB 上限/audit 键集不含 `usageSource`、`lateUsage`）。
+4. 计费：late ping 自身的输出 token（≤4）计入估算 —— delta 报告了 output 就按报告值（上限 max_tokens），否则按
+   max_tokens 上界；`outputCostUsd`（`keepalive-state.ts`，同 `tieredRate` 分档）× 前缀 token 选档；并入
+   proven-hit 的 `costUsd`/`budgetChargeUsd`、可能已计费的未证实结果的保守上界，以及子会话 `childPingGate` 的
+   admission 估价。未知输出价 ⇒ 加 0（不阻塞）。
+5. 可见性：`/cache-ttl status` 在当前线是 late-usage 时输出 `late-usage: seeded|learned`，late ping 的
+   `last ping:` 行带 `usage=message_start|message_delta`；late ping 的 audit（`proven-hit`/`unproven`）带
+   `usageSource` 与 `lateUsage:true`。web 保活面板只投影熔断线（无"当前线事实"列表），未改线协议。
+
+坑/边界：学习信号有"真实读缓存本来就会发生"的混杂（ping 并非因），代价仅是 ≤4 输出 token + 更长读取；
+`sendKeepalivePing`/`postAndScanUsage`（裸 fetch 路径，仅 probe/遗留测试使用）未改，late 语义只在 pipeline
+传输上实现。

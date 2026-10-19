@@ -16,6 +16,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Clock } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import type { RawScannedUsage } from "./ping-client.js";
+import type { UsageSource } from "./late-usage.js";
 
 /** The only registry capability the transport uses (pi's `ModelRegistry.streamSimple` facade, plan §3.2). */
 export type PipelinePingRegistry = Pick<ExtensionContext["modelRegistry"], "streamSimple">;
@@ -148,6 +149,12 @@ export interface PipelinePingInput {
   fetchImpl?: typeof fetch;
   /** Measurement-only block (measure-plan.md r4 §6). Keepalive never sets it. */
   measurement?: PipelineMeasurementInput;
+  /**
+   * Late-usage line (plan.md 2026-10-20 "late-usage lines"): keep reading past a non-proving `message_start` until the
+   * first `message_delta` carrying `usage` (or `message_stop`), under a larger bounded scan cap. Absent/false ⇒ the
+   * legacy cancel-at-`message_start` behaviour, byte-identical. Ignored when `measurement` is set.
+   */
+  lateUsage?: boolean;
 }
 
 /** Why a ping never reached the base fetch (zero network; the service refunds the budget). */
@@ -197,7 +204,14 @@ export interface PipelineDiag {
 export type PipelineOutcome =
   | { kind: "not-sent"; reason: PipelineNotSentReason; diag: PipelineDiag; measured?: PipelineMeasured }
   /** `usage === undefined` ⇔ `message_start` carried no usage object. */
-  | { kind: "usage"; usage: RawScannedUsage | undefined; diag: PipelineDiag; measured?: PipelineMeasured }
+  | {
+      kind: "usage";
+      usage: RawScannedUsage | undefined;
+      /** Present only on late-usage pings (`PipelinePingInput.lateUsage`); absent ⇒ `message_start`. */
+      usageSource?: UsageSource;
+      diag: PipelineDiag;
+      measured?: PipelineMeasured;
+    }
   /** Any non-2xx HTTP status. */
   | { kind: "http"; status: number; diag: PipelineDiag; measured?: PipelineMeasured }
   /** 2xx received, then end/error/deadline before `message_start`. */

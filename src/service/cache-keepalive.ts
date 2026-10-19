@@ -23,6 +23,7 @@ import {
   TICK_INTERVAL_MS,
   TTL_SAFETY_MARGIN_MS,
   cacheReadCostUsd,
+  outputCostUsd,
   cacheWriteCostUsd,
   compareFingerprint,
   computeWindowCap,
@@ -68,6 +69,13 @@ import type {
   SendPipelinePing,
 } from "../cache-ttl/pipeline-ping-types.js";
 import { sendPipelinePing } from "../cache-ttl/pipeline-ping.js";
+import {
+  LATE_USAGE_PING_MAX_TOKENS,
+  isSeededLateUsageBaseUrl,
+  prepareLatePingPayload,
+  type LateUsageReason,
+  type UsageSource,
+} from "../cache-ttl/late-usage.js";
 import { probeKeepaliveTransport } from "../adapters/pi-compat.js";
 import type { ProviderEvidenceStore } from "../cache-ttl/provider-evidence.js";
 import type { ChildKeepaliveLedger, Lease } from "../cache-ttl/ping-ledger.js";
@@ -86,7 +94,9 @@ interface KeepaliveModelInfo {
         cacheRead?: number;
         /** child-ka-core: pi-ai's cache-WRITE rate ($ per million tokens), used to charge `proven-write` / possibly-billed unproven outcomes against the child $ budgets. */
         cacheWrite?: number;
-        tiers?: { inputTokensAbove: number; cacheRead?: number; cacheWrite?: number }[];
+        /** late-usage pings only: pi-ai's OUTPUT rate ($ per million tokens) for the ping's own ≤4 output tokens. */
+        output?: number;
+        tiers?: { inputTokensAbove: number; cacheRead?: number; cacheWrite?: number; output?: number }[];
       }
     | undefined;
   /** Anthropic-messages compat flag (pi's own default is `true` when unset). See `report()`'s `supportsLongCacheRetention`. */
@@ -416,6 +426,13 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private readonly settledLeases = new WeakSet<Lease>();
   /** O3: the route of the most recent capture (fingerprint provider + wire modelId) — kept past `capture` clearing so dispose-time accounting still knows which route this session ran on. */
   private lastRoute: { provider: string; modelId: string } | undefined;
+  /**
+   * Late-usage learning (plan.md 2026-10-20): the last ping on this route saw a usage object at `message_start`
+   * with cache read = write = 0 (not a late-usage ping). If the NEXT real request on the route reports a cache read
+   * (`noteUsageCacheRead`), the route is persisted as `learned` late-usage; a next successful real request WITHOUT
+   * cache usage clears the suspicion. Single slot, overwritten by the next ping.
+   */
+  private lateLearnPending: { provider: string; modelId: string } | undefined;
   /** Line (provider/ctxModelId/baseUrl) of the most recent capture — the precise attribution source for a settled success. */
   private inflightLine: { provider: string; ctxModelId: string; baseUrl: string } | undefined;
   /** Dedup for `line-reset-skipped` audits (bounded). */
@@ -547,6 +564,24 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   }
 
   /**
+   * Late-usage line detection (plan.md 2026-10-20): `seeded` — the baseUrl host is in `LATE_USAGE_SEED_HOSTS`;
+   * `learned` — provider-evidence recorded a ping 0/0 at `message_start` followed by a real cache read on this route.
+   * Store absent ⇒ seed-only. Never throws.
+   */
+  private lateUsageReason(
+    route: { provider: string; modelId: string; baseUrl: string },
+    now: Millis,
+  ): LateUsageReason | undefined {
+    try {
+      if (isSeededLateUsageBaseUrl(route.baseUrl)) return "seeded";
+      if (this.deps.evidence?.hasLateUsageEvidence(route.provider, route.modelId, now) === true) return "learned";
+    } catch {
+      // best-effort — an evidence fault is "ordinary line".
+    }
+    return undefined;
+  }
+
+  /**
    * child-ka-core (plan.md §2.4): the extra child-only admission checks run
    * AFTER `evaluateTick` has already decided "ping" — they need the model's
    * cost data and the process-wide ledger, neither of which the pure
@@ -558,6 +593,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   private childPingGate(
     capture: CapturedRequest,
     now: Millis,
+    lateUsage = false,
   ):
     | { allow: true; estimateUsd: number | undefined; lease: Lease | undefined }
     | { allow: false; reason: TickSkipReason; terminal: boolean; estimateUsd: number | undefined } {
@@ -565,7 +601,13 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     if (!ledger) return { allow: true, estimateUsd: undefined, lease: undefined };
 
     const model = this.safeModel();
-    const estimateUsd = cacheReadCostUsd(model?.cost, capture.prefix.tokens);
+    const readUsd = cacheReadCostUsd(model?.cost, capture.prefix.tokens);
+    // Late-usage pings also bill their ≤4 output tokens (unknown output rate ⇒ 0, never blocks).
+    const estimateUsd =
+      readUsd === undefined
+        ? undefined
+        : readUsd +
+          (lateUsage ? (outputCostUsd(model?.cost, LATE_USAGE_PING_MAX_TOKENS, capture.prefix.tokens) ?? 0) : 0);
     if (estimateUsd === undefined) {
       return { allow: false, reason: "usd-unpriced", terminal: true, estimateUsd: undefined };
     }
@@ -615,12 +657,14 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     outcome: PingOutcome,
     capture: CapturedRequest,
     model: KeepaliveModelInfo | undefined,
+    outputUsd = 0,
   ): number {
-    if (outcome.kind === "proven-hit") return cacheReadCostUsd(model?.cost, outcome.cacheReadTokens) ?? 0;
-    if (outcome.kind === "proven-write") return cacheWriteCostUsd(model?.cost, outcome.cacheWriteTokens) ?? 0;
+    if (outcome.kind === "proven-hit") return (cacheReadCostUsd(model?.cost, outcome.cacheReadTokens) ?? 0) + outputUsd;
+    if (outcome.kind === "proven-write")
+      return (cacheWriteCostUsd(model?.cost, outcome.cacheWriteTokens) ?? 0) + outputUsd;
     if (isNeverProcessedOutcome(outcome)) return 0;
     // "possibly billed" (accepted-then-lost, malformed): conservative upper bound.
-    return cacheWriteCostUsd(model?.cost, capture.prefix.tokens) ?? 0;
+    return (cacheWriteCostUsd(model?.cost, capture.prefix.tokens) ?? 0) + outputUsd;
   }
 
   private armed(): boolean {
@@ -916,7 +960,18 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           this.publishVisibility();
           return;
         }
-        const gate = this.childPingGate(capture!, now);
+        const gate = this.childPingGate(
+          capture!,
+          now,
+          this.lateUsageReason(
+            {
+              provider: capture!.fingerprint.provider,
+              modelId: capture!.fingerprint.modelId,
+              baseUrl: capture!.fingerprint.baseUrl,
+            },
+            now,
+          ) !== undefined,
+        );
         if (!gate.allow) {
           this.lastSkip = gate.reason;
           if (
@@ -981,6 +1036,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
     pingEpoch: number,
     deadlineAt: Millis,
     controller: AbortController,
+    lateUsage = false,
   ): Promise<PipelineOutcome> {
     this.ioPending += 1;
     let released = false;
@@ -1000,6 +1056,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         guard: () => !this.disposed && this.window.windowEpoch === pingEpoch,
         signal: controller.signal,
         ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+        ...(lateUsage ? { lateUsage: true } : {}),
       });
       result.settled.then(release, release);
       return result.outcome;
@@ -1072,7 +1129,18 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         return;
       }
 
-      const body = preparePingPayload(capture.payload);
+      // Late-usage lines (plan.md 2026-10-20): replay verbatim except `max_tokens` ≤ 4 (never 1; thinking
+      // untouched) and read until `message_delta.usage`. Ordinary lines keep `preparePingPayload` byte-for-byte.
+      const lateReason = this.lateUsageReason(
+        {
+          provider: capture.fingerprint.provider,
+          modelId: capture.fingerprint.modelId,
+          baseUrl: capture.fingerprint.baseUrl,
+        },
+        this.clock.now(),
+      );
+      const lateUsage = lateReason !== undefined;
+      const body = lateUsage ? prepareLatePingPayload(capture.payload) : preparePingPayload(capture.payload);
       // O2 (provider-evidence TTL gating): if the captured payload carries a `ttl:"1h"` write
       // intent, keep it ONLY when this route has a proven 1h landing on record — otherwise strip
       // `ttl` (and nothing else) so the replay degrades to a plain 5m ephemeral ping. On a
@@ -1106,6 +1174,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         model: model.id,
         baseUrl: model.baseUrl,
         ...(ttlStripped ? { ttlStripped: true } : {}),
+        ...(lateUsage ? { lateUsage: true } : {}),
       };
 
       // Ping retry (user requirement 2026-09-26, docs/dev/cache-ttl-keepalive/plan.md
@@ -1119,6 +1188,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       // silently abandons (no proven/unproven counting at all) on mismatch. Each retry is one NEW transport
       // (r7 §3.4) and refuses to start while the previous one's physical IO is unsettled (`io-busy`).
       let outcome: PingOutcome | undefined;
+      // The transport outcome behind `outcome` (usage numbers / source for the audit, cost and late-usage learning).
+      let lastUsageSent: Extract<PipelineOutcome, { kind: "usage" }> | undefined;
       let attempts = 0;
       const firstAttemptAt = this.clock.now();
       for (;;) {
@@ -1134,7 +1205,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           attempts += 1;
           controller = new AbortController();
           this.abortController = controller;
-          sent = await this.dispatchPing(sender, pingBody, capture, pingEpoch, deadlineAt, controller);
+          sent = await this.dispatchPing(sender, pingBody, capture, pingEpoch, deadlineAt, controller, lateUsage);
           if (this.abortController === controller) this.abortController = undefined;
         }
 
@@ -1168,6 +1239,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           break;
         }
         outcome = classified!;
+        lastUsageSent = sent.kind === "usage" ? sent : undefined;
 
         if (outcome.kind === "proven-hit" || !isRetryablePingOutcome(outcome)) break;
         if (this.activationDisabled !== undefined) break;
@@ -1197,6 +1269,24 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       }
       if (outcome === undefined) return; // unreachable: the not-sent branch above returns first
 
+      // Which stream event supplied the classified usage (absent for non-usage outcomes). A transport outcome
+      // without `usageSource` is the legacy cancel-at-`message_start` path.
+      const usageSource: UsageSource | undefined =
+        lastUsageSent !== undefined ? (lastUsageSent.usageSource ?? "message_start") : undefined;
+      // Late-usage pings bill their own (≤ max_tokens) output tokens: the reported count when `message_delta`
+      // supplied it, else the max_tokens upper bound (the stream was cut before the final count arrived).
+      let pingOutputUsd = 0;
+      if (lateUsage) {
+        const maxTokens =
+          typeof pingBody.max_tokens === "number" && Number.isFinite(pingBody.max_tokens)
+            ? Math.min(pingBody.max_tokens, LATE_USAGE_PING_MAX_TOKENS)
+            : LATE_USAGE_PING_MAX_TOKENS;
+        const reported = usageSource === "message_delta" ? lastUsageSent?.usage?.outputTokens : undefined;
+        const outputTokens =
+          reported !== undefined && Number.isFinite(reported) ? Math.max(0, Math.min(reported, maxTokens)) : maxTokens;
+        pingOutputUsd = outputCostUsd(model.cost, outputTokens, capture.prefix.tokens) ?? 0;
+      }
+
       if (outcome.kind === "proven-hit") {
         const applied = onProvenHit(this.window, this.session, pingEpoch, outcome, this.config().intervalMs);
         if (applied.applied) {
@@ -1218,19 +1308,23 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
             cacheReadInputTokens: outcome.cacheReadTokens,
             cacheCreationInputTokens: 0,
             attempts,
+            ...(lateUsage && usageSource !== undefined ? { usageSource } : {}),
           };
           // child-ka-core: charge/report only once the epoch check above has
           // confirmed this result still belongs to the current window.
-          chargeUsd = this.budgetChargeForOutcome(outcome, capture, model);
+          this.lateLearnPending = undefined; // a proven hit at message_start/delta: nothing left to learn
+          chargeUsd = this.budgetChargeForOutcome(outcome, capture, model, pingOutputUsd);
           this.runSpentUsd += chargeUsd;
+          const readUsd = cacheReadCostUsd(model.cost, outcome.cacheReadTokens);
           const costFields = this.deps.reportCost
             ? {
-                costUsd: cacheReadCostUsd(model.cost, outcome.cacheReadTokens),
+                costUsd: readUsd === undefined && pingOutputUsd === 0 ? undefined : (readUsd ?? 0) + pingOutputUsd,
                 ...this.budgetFields(chargeUsd, this.clock.now()),
               }
             : {};
           this.audit("proven-hit", {
             ...diagnostics,
+            ...(lateUsage && usageSource !== undefined ? { usageSource } : {}),
             cacheReadTokens: outcome.cacheReadTokens,
             cacheReadInputTokens: outcome.cacheReadTokens,
             cacheCreationInputTokens: 0,
@@ -1267,13 +1361,31 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
             durationMs: unprovenDurationMs,
             ...(outcome.kind === "network" && outcome.error !== undefined ? { error: outcome.error } : {}),
             ...(outcome.kind === "http" ? { httpStatus: sanitizeHttpStatus(outcome.status) } : {}),
+            ...(lateUsage && usageSource !== undefined ? { usageSource } : {}),
           };
-          chargeUsd = this.budgetChargeForOutcome(outcome, capture, model);
+          // Late-usage learning: an ordinary (message_start-only) ping that saw a usage object with 0/0. If the next
+          // real request on this route reads cache, `noteUsageCacheRead` persists the route as late-usage.
+          const startUsage = lastUsageSent?.usage;
+          this.lateLearnPending =
+            !lateUsage &&
+            this.deps.evidence !== undefined &&
+            outcome.kind === "no-usage" &&
+            startUsage !== undefined &&
+            startUsage.cacheRead === 0 &&
+            startUsage.cacheWrite === 0
+              ? { provider: capture.fingerprint.provider, modelId: capture.fingerprint.modelId }
+              : undefined;
+          chargeUsd = this.budgetChargeForOutcome(outcome, capture, model, pingOutputUsd);
           this.runSpentUsd += chargeUsd;
           const costFields = this.deps.reportCost
             ? {
                 ...(outcome.kind === "proven-write"
-                  ? { costUsd: cacheWriteCostUsd(model.cost, outcome.cacheWriteTokens) }
+                  ? {
+                      costUsd: provenWriteCostUsd(
+                        cacheWriteCostUsd(model.cost, outcome.cacheWriteTokens),
+                        pingOutputUsd,
+                      ),
+                    }
                   : {}),
                 ...this.budgetFields(chargeUsd, this.clock.now()),
               }
@@ -1281,6 +1393,7 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           this.audit("unproven", {
             ...diagnostics,
             unprovenKind: outcome.kind,
+            ...(lateUsage && usageSource !== undefined ? { usageSource } : {}),
             disabled: applied.session.disabled !== undefined,
             lineOpen: countOpenLines(applied.session) > 0,
             ...(captureLine !== undefined ? { lineKey: captureLine.key } : {}),
@@ -1377,6 +1490,8 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
         this.capMemo.cap = computeWindowCap(this.capMemo.cost, inputTokens);
     }
     this.window = onRequestSettled(this.window);
+    // Late-usage learning: a successful real request that reported NO cache usage is not the signal we wait for.
+    if (successful && cacheUsage !== true) this.lateLearnPending = undefined;
     const line = successful && settledRoute !== undefined ? this.resolveSettledLine(settledRoute) : undefined;
     const nextSession = this.deps.recoverTransientFailures
       ? onSuccessfulRealRequest(this.session, successful, {
@@ -1458,6 +1573,19 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
       now: this.clock.now(),
       activationDisabled: this.activationDisabled,
       ioBusy: this.ioPending > 0,
+      lateUsage:
+        model !== undefined
+          ? this.lateUsageReason(
+              {
+                provider: model.provider,
+                // Same key the ping/learning path uses (wire model id of the live capture), so a
+                // fallback-model turn never shows a late-usage state the next ping won't apply.
+                modelId: this.window.capture?.fingerprint.modelId ?? model.id,
+                baseUrl: model.baseUrl,
+              },
+              this.clock.now(),
+            )
+          : undefined,
     };
   }
 
@@ -1526,6 +1654,22 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
   noteUsageCacheRead(sessionId: string, instance: string): void {
     if (!this.accept(sessionId, instance)) return;
     this.observedCacheRead = true;
+    // Late-usage learning: the previous ping saw 0/0 at message_start, yet this real request read cache ⇒ the relay
+    // reports cache stats late. Persist the route flag (store absent ⇒ the pending slot is never set).
+    const pending = this.lateLearnPending;
+    if (pending !== undefined) {
+      this.lateLearnPending = undefined;
+      const route = this.lastRoute;
+      if (route !== undefined && route.provider === pending.provider && route.modelId === pending.modelId) {
+        try {
+          this.deps.evidence?.noteLateUsage(pending.provider, pending.modelId, this.clock.now());
+          this.audit("late-usage-learned", { provider: pending.provider, modelId: pending.modelId });
+          this.publishVisibility();
+        } catch {
+          // evidence is best-effort.
+        }
+      }
+    }
     // O3: the route provably reads cache again — lift a session-local no-cache-value latch
     // immediately ("任一请求观察到 cacheRead>0 立即复位"). Other disable reasons stay sticky.
     if (this.session.disabled?.reason === "no-cache-value") {
@@ -1600,4 +1744,9 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
 
 export function createCacheKeepaliveService(deps: CacheKeepaliveDeps): CacheKeepaliveService {
   return new CacheKeepaliveServiceImpl(deps);
+}
+
+/** proven-write report cost: the write plus a late-usage ping's output tokens; unknown when neither is priced (M5). */
+function provenWriteCostUsd(writeUsd: number | undefined, outputUsd: number): number | undefined {
+  return writeUsd === undefined && outputUsd === 0 ? undefined : (writeUsd ?? 0) + outputUsd;
 }

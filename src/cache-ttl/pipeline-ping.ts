@@ -8,6 +8,7 @@ import {
   rawUsageFrom,
   redactSecrets,
 } from "./ping-client.js";
+import { LATE_USAGE_SCAN_LIMIT_BYTES, createLateUsageScanner } from "./late-usage.js";
 import { MEASURE_RAW_USAGE_MAX_BYTES, VALIDATOR_LIMITS } from "./measure-types.js";
 import { measureEndpointSuffix } from "./measure-route.js";
 import type {
@@ -53,6 +54,8 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
   let cancelStarted = false;
   let sawOpenAiUsageFrame = false;
   let authSecrets: string[] = []; // local-only, never included in diagnostics
+  // Late-usage keepalive pings only (never measurement): read past a non-proving message_start.
+  const lateScanner = input.lateUsage === true && !measurement ? createLateUsageScanner() : undefined;
 
   // A late fetch can introduce a body cancel AFTER the logical outcome. Its cleanup is registered
   // before the fetch is released from this ledger, so `settled` cannot resolve in the intervening gap.
@@ -167,7 +170,11 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
       return response;
     }
     const reader = upstream;
-    const limit = response.ok ? PING_SCAN_LIMIT_BYTES : HTTP_ERROR_BODY_CAP_BYTES;
+    const limit = response.ok
+      ? lateScanner !== undefined
+        ? LATE_USAGE_SCAN_LIMIT_BYTES
+        : PING_SCAN_LIMIT_BYTES
+      : HTTP_ERROR_BODY_CAP_BYTES;
     const errorChunks: Uint8Array[] = [];
     const captureError = () => {
       if (measurement && response.status === 400 && !logicalDone) {
@@ -416,6 +423,13 @@ export const sendPipelinePing: SendPipelinePing = async (input) => {
                 else delete measured!.rawUsage;
                 // OpenAI usage arrives at completion, not the first event. Let pi consume the
                 // terminal frame and finish the stream; never abort on created/delta/finish_reason.
+                return;
+              }
+              if (lateScanner !== undefined) {
+                if (logicalDone || diag.baseFetchCalls === 0) return;
+                if (isMessageStartEvent(event)) diag.sawMessageStart = true;
+                const done = lateScanner.feed(event);
+                if (done !== undefined) finish({ kind: "usage", usage: done.usage, usageSource: done.source });
                 return;
               }
               if (logicalDone || diag.baseFetchCalls === 0 || !isMessageStartEvent(event)) return;

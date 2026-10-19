@@ -312,7 +312,10 @@ describe("cache-keepalive service — O3 no-cache-value breaker", () => {
     await driveOnePing(service, clock);
     service.noteUsageCacheRead("s1", service.instanceId);
     service.dispose();
-    expect(store.readRoute("anthropic", "claude-x", 999_000)).toBeUndefined();
+    // No zero-read session is counted. (Late-usage learning: the 0/0 ping followed by a real cache read
+    // also records the route's `lateUsageAt` — see keepalive-late-usage.test.ts.)
+    expect(store.readRoute("anthropic", "claude-x", 999_000)?.zeroReadSessions ?? 0).toBe(0);
+    expect(store.isNoCacheValue("anthropic", "claude-x", 999_000)).toBe(false);
   });
 
   it("noteUsageCacheRead lifts a session-local no-cache-value latch immediately", async () => {

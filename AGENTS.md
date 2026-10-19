@@ -232,6 +232,13 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   keepalive touch (`provenCacheReadAt()`). `mode`/`lastSent`/1h-write traces only raise the bar
   for PROVING cold (Anthropic's 1h max TTL) and pick `nextWriteTtl`; anything unprovable is
   `unknown` (topic-switch's gate 3a treats that as "don't ask", same I6 fail-open direction).
+  **Late-usage lines (2026-10-20, plan.md 「late-usage lines」)**: relays that report cache stats only in the stream's final
+  `message_delta.usage` (measured: kimi-coding/k3, `api.kimi.com`; `message_start` shows 0/0 even on a hit) are either seeded by
+  baseUrl host (`LATE_USAGE_SEED_HOSTS` in `late-usage.ts`) or learned (a 0/0 ping followed by a real `cacheRead>0` sets a
+  persisted `lateUsageAt` on the route in provider-evidence). Their ping replays the capture byte-for-byte except `max_tokens`
+  clamped to 4 (never 1 — kimi special-cases it and skips the cache; thinking is never touched — it keys the cache), reads
+  until the first `message_delta` with usage under the same single 20 s deadline (scan cap 256 KiB for this mode only), bills its
+  ≤4 output tokens, and `/cache-ttl status` shows `late-usage: seeded|learned`; non-late lines stay byte-identical.
   **Provider evidence layer (2026-10-12, plan v3 — ten-line probe measurements)**: `provider-evidence.ts`
   (pi-free, `~/.pi/agent/cache-provider-evidence.json`, 0600/atomic/1MiB cap/30d rolling TTL/200-route
   FIFO/fail-silent) records per provider+model whether 1h writes ever LANDED (relay collapse is real:
