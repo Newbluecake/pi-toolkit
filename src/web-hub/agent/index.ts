@@ -88,7 +88,7 @@ import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createWorktreeSampler } from "./worktree-sampler.js";
 import { bashJobsLightFingerprint, bashJobsRowSignature, projectBashJobs, selectJobs } from "./bash-jobs.js";
 import { createBashJobsSampler, type BashJobsSource } from "./bash-jobs-sampler.js";
-import type { BashJobsWire, TodoWire } from "../protocol/messages.js";
+import type { BashJobsWire, TodoWire, WireEvent } from "../protocol/messages.js";
 import { projectTodo, todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
 import { projectQuota, quotaFingerprint } from "./quota-sampler.js";
@@ -430,6 +430,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // dropped lazily by the gate itself.
   const execGate = createExecGate({ now });
 
+  const attributePromptRef: { current: (e: WireEvent) => WireEvent } = { current: (e) => e };
   const tap = createEventTap(
     (e, droppable) => {
       const c = conn;
@@ -444,11 +445,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         return { cancel: () => clearTimeout(t) };
       },
       currentSeq: () => conn?.seq ?? 0,
-      // C0 frozen call-site slot (plan §12.3): identity no-op until C2 wires the real dialog-
-      // correlation logic into `event-tap.ts`. Pre-adding this key here — rather than leaving C2
-      // to add it during W2 — keeps C1's (this file's own owner from W2) and C2's parallel edits
-      // to non-overlapping keys of this same options object.
-      attributePrompt: (e) => e,
+      // Late-bound to the dialog bridge created further down (`dialogBridge`): a ui_prompt_start
+      // for a prompt that has an open remote dialog record carries that record's `dialogId`.
+      // Without it the hub sees an unattributed prompt — the web UI shows an extra "blocked on
+      // dialog" banner and the Feishu bot sends a redundant "waiting: 请到 web/终端查看" notice on
+      // top of the dialog card (the C0 slot had been left as an identity no-op).
+      attributePrompt: (e) => attributePromptRef.current(e),
     },
   );
 
@@ -1011,6 +1013,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // in dialogs.ts while the connected hub lacks `dialog.bg.v1` (empty until hello_ack lands).
     hubCaps: () => conn?.caps ?? [],
   });
+  attributePromptRef.current = dialogBridge.attributePrompt;
   const binding: BindingPort = {
     onCmd: (frame) => {
       // dialog_answer/dialog_cancel are routed straight to the dialog bridge (C2's `dialogs.ts`) —

@@ -255,6 +255,29 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
     expect(claimed).toMatchObject({ kind: "answer" });
   });
 
+  it("a ui_prompt_start for an open remote dialog carries its dialogId (attribution wired; no unattributed waiting prompt)", async () => {
+    const { control, fire } = await connectFullCaps();
+    const session = control.askUserRemote()!.open({
+      toolCallId: "tool-attr",
+      questions: [{ question: "Q", header: "Q", options: [{ label: "A" }, { label: "B" }], allowOther: true }],
+      allowCancel: true,
+    });
+    expect(session).toBeDefined();
+    await waitUntil(() => hub!.all().some((f) => f.t === "dialogs" && f.open.length > 0));
+    const opened = hub!.all().find((f) => f.t === "dialogs" && f.open.length > 0) as Extract<
+      AgentFrame,
+      { t: "dialogs" }
+    >;
+    const { ctx } = fakeCtx({ mode: "tui" });
+    fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" }, ctx);
+    await waitUntil(() => hub!.all().some((f) => f.t === "ev" && f.e.type === "ui_prompt_start"));
+    const ev = hub!.all().find((f) => f.t === "ev" && f.e.type === "ui_prompt_start") as Extract<
+      AgentFrame,
+      { t: "ev" }
+    >;
+    expect(ev.e["dialogId"]).toBe(opened.open[0]!.dialogId);
+  });
+
   it("/new's `/webhub __exec` nonce round-trips through internalExec and calls ctx.newSession() (acc32-B4)", async () => {
     const { control, sentUserMessages } = await connectFullCaps();
     hub!.send(hub!.conns[0]!, cmdFrame("cmd0000000000003", { op: "command", name: "new", args: "", confirm: true }));
