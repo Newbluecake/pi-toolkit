@@ -117,7 +117,7 @@
   grid-template-areas:
     "ico cmd tr"
     ". l2 br"
-    ". . meta";
+    ". meta meta";
   align-items: center;
   column-gap: var(--sp-2);
   row-gap: 1px;
