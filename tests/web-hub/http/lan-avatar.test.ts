@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 import { mkdirSync, readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -130,7 +131,17 @@ async function setup(cfgOverrides: Partial<HubLanConfig> = {}, withAvatar = true
   const fe = createHttpFrontend({
     ...deps,
     ...(avatar === undefined ? {} : { avatar }),
-    lan: { cfg, store, kdf, limiter, admission, hosts, scope, onStatus: (next) => (status = next) },
+    lan: {
+      clientAllow: createClientAllowGuard({}),
+      cfg,
+      store,
+      kdf,
+      limiter,
+      admission,
+      hosts,
+      scope,
+      onStatus: (next) => (status = next),
+    },
   });
   const loopbackPort = (await fe.listen()).port;
   if (fe.lan === undefined) throw new Error("LAN facade missing");

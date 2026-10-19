@@ -50,6 +50,10 @@ describe("LAN-I login core HTTP integration", () => {
         { type: "login-success", ip: "127.0.0.1", method: "password", device: "Linux · Firefox", newIp: false },
       ]);
       expect(h.store.sessionsBySidHash.size).toBe(2);
+      expect(await h.store.listSessions(1, h.clock.now())).toMatchObject([
+        { method: "password" },
+        { method: "password" },
+      ]);
     } finally {
       await h.cleanup();
     }
@@ -83,6 +87,7 @@ describe("LAN-I login core HTTP integration", () => {
       ]);
       expect(events.filter((e) => e.type === "recovery-used")).toEqual([{ type: "recovery-used", left: 9 }]);
       expect(h.store.sessionsBySidHash.size).toBe(1);
+      expect(await h.store.listSessions(1, h.clock.now())).toMatchObject([{ method: "recovery" }]);
     } finally {
       await h.cleanup();
     }

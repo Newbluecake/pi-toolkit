@@ -95,6 +95,8 @@ import { createFileSearchRoutes, FILE_SEARCH_AUTH_RESERVE_MS, FILE_SEARCH_PATH }
 import type { AgentRemoveFrontendPort, AgentRemoveIo } from "./agent-remove.js";
 import { formatLanCookie, hashSid, LAN_SESSION_COOKIE } from "./lan-auth.js";
 import { Value } from "@sinclair/typebox/value";
+import { createLanSessionsRoutes } from "./lan-sessions.js";
+import type { LanSessionsRoutes } from "./ports.js";
 import { createLanLoginCore } from "./lan-login.js";
 import { createSecurityEventBus } from "./security-events.js";
 import {
@@ -558,7 +560,7 @@ function buildLanContext(
 // §1.4.4) free of any module with its own exported test surface beyond what it re-exports; the
 // canonical, tested implementation lives in `hub/proxy.ts` (`resolveProxy`) and this delegates to
 // it byte-for-byte (kept as a thin re-export, not a duplicate) — see below.
-import { createClientAllowGuard, tagClientAllowGuard } from "./client-allow.js";
+import { tagClientAllowGuard } from "./client-allow.js";
 import type { ClientAllowGuard } from "./ports.js";
 import { resolveProxy as resolveProxyLocal } from "./proxy.js";
 
@@ -1086,6 +1088,7 @@ function createRouteSet(
 
 export interface LanRuntime {
   loginCore?: LanLoginCore;
+  sessions?: LanSessionsRoutes;
   csp: string;
   lan: LanFrontendDeps;
   /** web-hub-proxy plan §4.2 (XA): the frontend-wide auth revocation bus (same instance as the
@@ -1769,6 +1772,27 @@ async function handleLanRequestInner(
     };
     if (await rt.proxy.handle(req, res, method, path, proxyIo)) return;
   }
+
+  if (
+    rt.sessions !== undefined &&
+    (await rt.sessions.handle(req, res, method, path, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      xPwhOk: () => req.headers["x-pwh"] === "1",
+      csrfOkLan: () => csrfOkLan(req, ctx),
+      requireLanSession: async (deadline) => {
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, deadline.remaining());
+        return session === undefined
+          ? { handled: true }
+          : { userId: session.userId, sidHash: session.identity.sidTag, user: `u${session.userId}` };
+      },
+      readJson,
+      sendJson,
+      clearCookie: (res) =>
+        res.setHeader("Set-Cookie", formatLanCookie("", { secure: ctx.scheme === "https", clear: true })),
+    }))
+  )
+    return;
 
   // sysload plan §7.1/§7.3 (web-hub-load LAN-budget fix): `GET /api/load/top` — dispatched at
   // the same spot as the spawn/preview branches (after headless, before the method branches).
@@ -3021,15 +3045,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   let lanRunSink: RunSink | undefined;
   if (deps.lan !== undefined) {
     const lan = deps.lan;
-    const clientAllow = tagClientAllowGuard(
-      lan.clientAllow ??
-        createClientAllowGuard({
-          ...(lan.cfg.allowClients === undefined ? {} : { entries: lan.cfg.allowClients }),
-          log,
-          now,
-        }),
-      "lan",
-    );
+    if (lan.clientAllow === undefined) throw new Error("web-hub: LAN client guard is required");
+    const clientAllow = tagClientAllowGuard(lan.clientAllow, "lan");
     const lanSse = createSseHub({ now });
     lanSseRef = lanSse;
     const lanRoutes = createRouteSet(lanSse, {
@@ -3125,6 +3142,17 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         rt.markKdfInvalid();
       },
     });
+    rt.sessions = createLanSessionsRoutes({
+      store: lan.store,
+      idleMs: lan.cfg.sessionIdleMs ?? 720 * 60_000,
+      now,
+      log,
+      authRevoke,
+      revokeSse: (hash) => {
+        lanSse.revoke((c) => c.auth?.sidHash === hash, "revoked");
+      },
+    });
+    lan.scope.defer(() => rt.sessions?.dispose());
     rt.loginCore = loginCore;
     const offLoginRevoke = authRevoke.subscribe((ev) => loginCore.onRevoke(ev));
     lan.scope.defer(() => {
@@ -3268,6 +3296,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         inFlightStartAborts.clear();
         offLoginRevoke();
         loginCore.dispose();
+        rt.sessions?.dispose();
         unsubscribeLanBus();
         lanSse.closeAll();
         rt.sidInflight.clear();

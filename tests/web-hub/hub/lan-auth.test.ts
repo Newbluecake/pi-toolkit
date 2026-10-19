@@ -1,5 +1,5 @@
 /**
- * `runLanLogin` (plan §6.1, `hub/lan-auth.ts`, LC) unit tests that don't need a real HTTP
+ * `login` (plan §6.1, `hub/lan-auth.ts`, LC) unit tests that don't need a real HTTP
  * server — LC review fixes (lan-plan.md §15.9 #2/#4): the 429 `kind` discriminator that
  * `hub/http.ts` uses to pick `E_RATE` vs. the new `E_LOCKED`, and the §5.1 "读取校验" corrupt-KDF
  * -params fail-closed path. `tests/web-hub/http/lan-login.test.ts` / `lan-password-client.test.ts`
@@ -8,7 +8,37 @@
  */
 import { describe, expect, it } from "vitest";
 import { scryptSync } from "node:crypto";
-import { runLanLogin } from "../../../src/web-hub/hub/lan-auth.js";
+import { createLanLoginCore } from "../../../src/web-hub/hub/lan-login.js";
+import { createAuthRevokeBus } from "../../../src/web-hub/hub/auth-revoke.js";
+import { createSecurityEventBus } from "../../../src/web-hub/hub/security-events.js";
+import type { LanLoginCoreDeps } from "../../../src/web-hub/hub/ports.js";
+import { memLog } from "./helpers.js";
+async function login(
+  ctx: RequestContext,
+  body: unknown,
+  deps: Pick<LanLoginCoreDeps, "store" | "kdf" | "limiter" | "admission" | "onCorruptKdfParams">,
+  now: number,
+) {
+  const log = memLog();
+  const core = createLanLoginCore({
+    ...deps,
+    approval: { request: async () => "unavailable", close() {} },
+    security: createSecurityEventBus(log),
+    authRevoke: createAuthRevokeBus(log),
+    revokeSse() {},
+    log,
+    now: () => now,
+  });
+  try {
+    return await core.passwordLogin(ctx, body, "", {
+      ua: "",
+      signal: new AbortController().signal,
+      responseOpen: () => true,
+    });
+  } finally {
+    core.dispose();
+  }
+}
 import { fakeKdf, fakeLanStore, fakeLoginLimiter, type FakeLanStore } from "../contract/fakes.js";
 import type { KdfAdmissionPort, LoginLimiterPort, RequestContext } from "../../../src/web-hub/hub/ports.js";
 
@@ -59,7 +89,7 @@ function alwaysAdmits(): KdfAdmissionPort {
   return { acquire: async () => ({ ok: true, release: () => {} }) };
 }
 
-describe("runLanLogin 429 discriminator (plan §6.2; LC review fix, lan-plan.md §15.9 #4)", () => {
+describe("login 429 discriminator (plan §6.2; LC review fix, lan-plan.md §15.9 #4)", () => {
   it('an ordinary per-IP backoff lockout (limiter.admit fails, not saturated) is kind:"backoff"', async () => {
     const store = fakeLanStore();
     seedUser(store, "alice", "correct-horse-battery");
@@ -69,13 +99,13 @@ describe("runLanLogin 429 discriminator (plan §6.2; LC review fix, lan-plan.md 
       succeed: () => {},
       unlock: () => {},
     };
-    const outcome = await runLanLogin(
+    const outcome = await login(
       ctx(),
       { username: "alice", password: "wrong" },
       { store, kdf: fakeKdf(), limiter, admission: alwaysAdmits() },
       Date.now(),
     );
-    expect(outcome).toMatchObject({ status: 429, kind: "backoff", retryAfterMs: 30_000 });
+    expect(outcome).toMatchObject({ status: 429, body: { error: "E_LOCKED", retryAfterMs: 30_000 } });
     expect(outcome).not.toHaveProperty("saturated");
   });
 
@@ -87,13 +117,13 @@ describe("runLanLogin 429 discriminator (plan §6.2; LC review fix, lan-plan.md 
       succeed: () => {},
       unlock: () => {},
     };
-    const outcome = await runLanLogin(
+    const outcome = await login(
       ctx(),
       { username: "alice", password: "wrong" },
       { store, kdf: fakeKdf(), limiter, admission: alwaysAdmits() },
       Date.now(),
     );
-    expect(outcome).toMatchObject({ status: 429, kind: "backoff", saturated: true, retryAfterMs: 60_000 });
+    expect(outcome).toMatchObject({ status: 429, body: { error: "E_RATE", saturated: true, retryAfterMs: 60_000 } });
   });
 
   it('the KDF fair-scheduling admission queue rejecting (capacity/timeout) is kind:"admission"', async () => {
@@ -103,22 +133,22 @@ describe("runLanLogin 429 discriminator (plan §6.2; LC review fix, lan-plan.md 
     const admission: KdfAdmissionPort = {
       acquire: async () => ({ ok: false, retryAfterMs: 2_000 }),
     };
-    const outcome = await runLanLogin(
+    const outcome = await login(
       ctx(),
       { username: "alice", password: "correct-horse-battery" },
       { store, kdf: fakeKdf(), limiter, admission },
       Date.now(),
     );
-    expect(outcome).toEqual({ status: 429, kind: "admission", retryAfterMs: 2_000 });
+    expect(outcome).toMatchObject({ status: 429, body: { error: "E_RATE", retryAfterMs: 2_000 } });
   });
 });
 
-describe('runLanLogin corrupt KDF params (plan §5.1 "读取校验"; LC review fix, lan-plan.md §15.9 #2)', () => {
+describe('login corrupt KDF params (plan §5.1 "读取校验"; LC review fix, lan-plan.md §15.9 #2)', () => {
   it("a stored user with n out of range fails closed (401), never runs scrypt with the corrupt params, and reports onCorruptKdfParams tagged for db-invalid:kdf logging", async () => {
     const store = fakeLanStore();
     seedUser(store, "alice", "correct-horse-battery", { n: 12_345 /* not a power of 2 */ });
     const seenReasons: Array<{ username: string; reason: string }> = [];
-    const outcome = await runLanLogin(
+    const outcome = await login(
       ctx(),
       { username: "alice", password: "correct-horse-battery" },
       {
@@ -130,7 +160,7 @@ describe('runLanLogin corrupt KDF params (plan §5.1 "读取校验"; LC review f
       },
       Date.now(),
     );
-    expect(outcome).toEqual({ status: 401 });
+    expect(outcome).toMatchObject({ status: 401, body: { error: "E_AUTH" } });
     expect(seenReasons).toHaveLength(1);
     expect(seenReasons[0]!.username).toBe("alice");
     expect(seenReasons[0]!.reason).toMatch(/n=12345/);
@@ -148,7 +178,7 @@ describe('runLanLogin corrupt KDF params (plan §5.1 "读取校验"; LC review f
         return new Uint8Array(32);
       },
     };
-    await runLanLogin(
+    await login(
       ctx(),
       { username: "alice", password: "correct-horse-battery" },
       { store, kdf, limiter: fakeLoginLimiter(), admission: alwaysAdmits() },

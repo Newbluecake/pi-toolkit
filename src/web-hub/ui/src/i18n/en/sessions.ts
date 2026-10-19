@@ -1,5 +1,10 @@
 /** LAN security r2 §3.2 (package D): 「登录会话」 settings card. zh mirror: ../zh/sessions.ts. */
 const sessions = {
+  colMethod: "Verification method",
+  methodPassword: "Password",
+  methodTotp: "Authenticator (TOTP)",
+  methodFeishu: "Feishu approval",
+  methodRecovery: "Recovery code",
   title: "Login sessions",
   hint: "Devices signed in on this LAN. A session expires after {idle} minutes without activity or {days} days after sign-in.",
   currentDevice: "This device",

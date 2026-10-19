@@ -13,6 +13,7 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeKdf, fakeLanStore, type FakeLanStore } from "../contract/fakes.js";
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { createScope } from "../../../src/web-hub/hub/lifecycle.js";
 import { createHostsPort } from "../../../src/web-hub/hub/net-hosts.js";
@@ -207,6 +208,9 @@ export async function startLan(
       info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
       now: clock.now,
       lan: {
+        clientAllow: createClientAllowGuard({
+          ...(cfg.allowClients === undefined ? {} : { entries: cfg.allowClients }),
+        }),
         cfg,
         store,
         kdf,

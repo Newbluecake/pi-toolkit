@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../../src/web-hub/hub/client-allow.js";
 import { request, type Server, type IncomingHttpHeaders } from "node:http";
 import { connect, createServer, type Socket } from "node:net";
 import { once } from "node:events";
@@ -70,7 +71,7 @@ export async function engine(overrides: Partial<ProxyServiceDeps> = {}) {
   let service: ProxyService;
   try {
     service = await createProxyService({
-      clientAllow: undefined,
+      clientAllow: createClientAllowGuard({}),
       config: { maxProxies: 8, portRange: range },
       stateDir: dir,
       hubPort: 1,

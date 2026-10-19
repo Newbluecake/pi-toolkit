@@ -15,7 +15,7 @@ wire (ms since epoch); 最近活跃 is relative (「刚刚」/「n 分钟前」/
 ticker) and 登录时间 absolute via the shared `formatDateTime`.
 -->
 <script setup lang="ts">
-import { computed, onUnmounted } from "vue";
+import { computed, onUnmounted, ref } from "vue";
 import type { LanSessionWire } from "@protocol/lan-sessions.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useArmedConfirm } from "../../composables/useArmedConfirm.js";
@@ -49,7 +49,17 @@ const loading = computed(() => phase.value === "idle" || phase.value === "loadin
  * (or a post-revote re-list); without one it was the initial load. */
 const loadFailed = computed(() => phase.value === "error" && snapshot.value === undefined);
 const revokeFailed = computed(() => phase.value === "error" && snapshot.value !== undefined);
-const working = computed(() => loading.value);
+const revoking = ref(false);
+const working = computed(() => loading.value || revoking.value);
+async function revoke(body: Parameters<LanSessionsHandle["revoke"]>[0]): Promise<void> {
+  if (working.value) return;
+  revoking.value = true;
+  try {
+    await props.sessions.revoke(body);
+  } finally {
+    revoking.value = false;
+  }
+}
 /** A revoke-others that already succeeded leaves exactly one session (this device). */
 const canRevokeOthers = computed(() => (snapshot.value?.sessions.length ?? 0) > 1);
 
@@ -70,11 +80,11 @@ function relativeActive(ms: number): string {
 }
 
 const revokeOthers = useArmedConfirm(() => {
-  void props.sessions.revoke({ others: true });
+  void revoke({ others: true });
 });
 
 function onRevoke(id: string): void {
-  void props.sessions.revoke({ id });
+  void revoke({ id });
 }
 function onRefresh(): void {
   void props.sessions.refresh();
@@ -131,6 +141,12 @@ function onRefresh(): void {
             <dd class="sess-mono">{{ s.lastIp ?? s.createdIp }}</dd>
             <dt>{{ t("sessions.colLogin") }}</dt>
             <dd>{{ absoluteTime(s.createdAt) }}</dd>
+            <dt>{{ t("sessions.colMethod") }}</dt>
+            <dd>
+              {{
+                t(`sessions.method${(s.method ?? "password")[0]!.toUpperCase()}${(s.method ?? "password").slice(1)}`)
+              }}
+            </dd>
             <dt>{{ t("sessions.colActive") }}</dt>
             <dd>{{ relativeActive(s.lastSeenAt) }}</dd>
           </dl>

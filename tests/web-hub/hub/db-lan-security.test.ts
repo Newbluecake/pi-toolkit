@@ -157,6 +157,20 @@ suite("LAN security open/check/migrate and explicit repair", () => {
     expect(sql((db) => db.prepare("SELECT name FROM sqlite_master WHERE name='twofa'").get())).toBeUndefined();
   });
 
+  it("additively migrates legacy metadata, retaining UA/IP and treating legacy sessions as password", async () => {
+    const hash = await session();
+    await store.close();
+    sql((db) => db.exec("ALTER TABLE session_meta DROP COLUMN method"));
+    await open();
+    expect(await store.listSessions(1, now)).toMatchObject([
+      { sidHash: hash, ua: "browser", lastIp: "192.0.2.5", method: "password" },
+    ]);
+    expect(sql((db) => db.prepare("SELECT method FROM session_meta").get()?.method)).toBe("password");
+    await store.close();
+    await open();
+    expect(await store.listSessions(1, now)).toMatchObject([{ method: "password", ua: "browser" }]);
+  });
+
   it.each(["missing", "malformed"])("rebuilds %s auxiliary metadata without deleting sessions", async (kind) => {
     const hash = await session();
     await store.close();

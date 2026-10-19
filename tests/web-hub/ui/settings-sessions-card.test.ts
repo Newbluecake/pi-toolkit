@@ -259,3 +259,45 @@ describe("SettingsSessionsCard", () => {
     expect(wrapper.html()).not.toContain("<img src=x");
   });
 });
+
+describe("LAN-D integration follow-ups", () => {
+  it("shows method metadata, legacy password fallback and disables every action during revoke", async () => {
+    const { deps } = scriptedDeps({
+      listResult: async () =>
+        snap([
+          session({ id: "A".repeat(16), current: true }),
+          session({ id: "B".repeat(16), method: "totp" }),
+          session({ id: "C".repeat(16), method: "feishu" }),
+          session({ id: "D".repeat(16), method: "recovery" }),
+        ]),
+    });
+    let finish!: (r: LanSessionRevokeResponse) => void;
+    deps.revoke = vi.fn(
+      () =>
+        new Promise((r) => {
+          finish = r;
+        }),
+    );
+    const { wrapper, sessions } = mountCard(deps);
+    await flush();
+    expect(
+      wrapper
+        .findAll(".session-card-meta dd")
+        .map((e) => e.text())
+        .join(" "),
+    ).toMatch(/密码|Password/);
+    expect(wrapper.text()).toMatch(/TOTP/);
+    expect(wrapper.text()).toMatch(/飞书|Feishu/);
+    expect(wrapper.text()).toMatch(/恢复码|Recovery/);
+    const button = wrapper.find(".session-card-top button");
+    await button.trigger("click");
+    await button.trigger("click");
+    expect(deps.revoke).toHaveBeenCalledTimes(1);
+    expect(wrapper.findAll("button").every((e) => e.attributes("disabled") !== undefined)).toBe(true);
+    finish({ ok: true, revoked: 1, complete: true });
+    await flush();
+    expect(button.attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+    sessions.dispose();
+  });
+});

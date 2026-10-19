@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 /**
  * worktree-graph plan v2 §2.6/§3 (P2, real HTTP frontend): same matrix discipline as
  * `api-worktree-diff.test.ts`:
@@ -285,6 +286,7 @@ async function lanKitBody(
     info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: 1, proto: PROTO }),
     now: clock.now,
     lan: {
+      clientAllow: createClientAllowGuard({}),
       cfg,
       store: lanStore,
       kdf: fakeKdf(),

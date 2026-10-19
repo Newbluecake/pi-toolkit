@@ -59,6 +59,11 @@ import { SPAWN_HUB_CAP } from "@protocol/version.js";
 import { PRIVACY_HUB_CAP } from "@protocol/version.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import SettingsModelPicker from "./SettingsModelPicker.vue";
+import SettingsSessionsCard from "./SettingsSessionsCard.vue";
+import { useLanSessions } from "../../composables/useLanSessions.js";
+import { LAN_SESSIONS_PATH, LAN_SESSIONS_REVOKE_PATH } from "@protocol/lan-sessions.js";
+import type { LanSessionsResponse, LanSessionRevokeResponse } from "@protocol/lan-sessions.js";
+import "../../styles/sessions.css";
 import SettingsAvatarCard from "./SettingsAvatarCard.vue";
 import VersionHost from "./VersionHost.vue";
 import CopyButton from "../detail/CopyButton.vue";
@@ -162,6 +167,23 @@ const spawn = hub?.spawn;
 const hubCaps = computed<unknown>(() => {
   const h = hub?.state.value.hub;
   return h !== null && h !== undefined && typeof h === "object" ? (h as { caps?: unknown }).caps : undefined;
+});
+async function sessionsRequest<T>(path: string, signal: AbortSignal, body?: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    credentials: "same-origin",
+    signal,
+    headers: { "X-PWH": "1", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (!response.ok) throw new Error("E_HTTP");
+  return (await response.json()) as T;
+}
+const lanSessions = useLanSessions({
+  enabled: () =>
+    controlEnv?.authMode === "password" && Array.isArray(hubCaps.value) && hubCaps.value.includes("lan.sessions.v1"),
+  list: (signal) => sessionsRequest<LanSessionsResponse>(LAN_SESSIONS_PATH, signal),
+  revoke: (body, signal) => sessionsRequest<LanSessionRevokeResponse>(LAN_SESSIONS_REVOKE_PATH, signal, body),
 });
 /** No `spawn.v1` ⇒ the whole card is absent (the hub has no managed sessions at all). */
 const spawnCap = computed(() => Array.isArray(hubCaps.value) && hubCaps.value.includes(SPAWN_HUB_CAP));
@@ -274,6 +296,7 @@ function onInstall(): void {
 
       <div class="settings-grid">
         <SettingsAvatarCard />
+        <SettingsSessionsCard :sessions="lanSessions" />
         <section class="settings-card" :aria-label="t('settings.themeSection')">
           <h2 class="settings-h">{{ t("settings.themeSection") }}</h2>
           <div class="settings-options" role="radiogroup" :aria-label="t('settings.themeSection')">

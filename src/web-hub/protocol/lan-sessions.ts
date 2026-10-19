@@ -13,6 +13,9 @@ export const LanSessionWireSchema = Type.Object(
   {
     id: Type.String({ pattern: LAN_SESSION_PUBLIC_ID_RE.source }),
     current: Type.Boolean(),
+    method: Type.Optional(
+      Type.Union([Type.Literal("password"), Type.Literal("totp"), Type.Literal("feishu"), Type.Literal("recovery")]),
+    ),
     createdAt: time,
     lastSeenAt: time,
     expiresAt: time,

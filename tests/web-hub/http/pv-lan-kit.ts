@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 /**
  * Shared LAN + loopback harness for the web-hub HTML preview tests (a REAL LAN listener in
  * lan-helpers' assembly shape next to the loopback one, one `createHttpFrontend`).
@@ -141,7 +142,17 @@ export async function startLanPv(
     log,
     info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: now(), proto: PROTO }),
     now,
-    lan: { cfg, store: lanStore, kdf, limiter, admission, hosts, scope, onStatus: () => undefined },
+    lan: {
+      clientAllow: createClientAllowGuard({}),
+      cfg,
+      store: lanStore,
+      kdf,
+      limiter,
+      admission,
+      hosts,
+      scope,
+      onStatus: () => undefined,
+    },
     ...(routes === undefined ? {} : { preview: routes }),
     // `multiCandidateAuth` is deliberately off the frozen FrontendDeps surface (FrontendIdentityDeps)
     ...(opts.multiCandidateAuth === true ? ({ multiCandidateAuth: true } as object) : {}),

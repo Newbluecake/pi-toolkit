@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 /**
  * web-hub content-preview — PV3 LAN HTTP tests (plan v3 §4.7 LAN rows + §6 PV3 acceptance).
  *
@@ -186,7 +187,17 @@ async function startHarness(
     log,
     info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
     now: clock.now,
-    lan: { cfg, store: lanStore, kdf, limiter, admission, hosts, scope, onStatus: (s) => (lastStatus = s) },
+    lan: {
+      clientAllow: createClientAllowGuard({}),
+      cfg,
+      store: lanStore,
+      kdf,
+      limiter,
+      admission,
+      hosts,
+      scope,
+      onStatus: (s) => (lastStatus = s),
+    },
     ...(routes === undefined ? {} : { preview: routes }),
   });
   if (fe.lan === undefined) throw new Error("test bug: fe.lan not constructed");

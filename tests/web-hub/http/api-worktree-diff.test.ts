@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 /**
  * worktree-diff plan §2.2/§5 D3 (D6's mode gate at the REAL HTTP frontend):
  * - loopback rows: not-enabled fallback byte-identical (401 unauth / 404 authed), CSRF 403,
@@ -329,6 +330,7 @@ async function lanKitBody(
     info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: 1, proto: PROTO }),
     now: clock.now,
     lan: {
+      clientAllow: createClientAllowGuard({}),
       cfg,
       store: lanStore,
       kdf: fakeKdf(),

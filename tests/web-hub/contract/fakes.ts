@@ -102,6 +102,7 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
     createdIp: string;
     now: number;
     ua?: string;
+    method?: "password" | "totp" | "feishu" | "recovery";
   }) {
     const sid = randomBytes(24).toString("base64url");
     const sidHash = hashSid(sid);
@@ -113,6 +114,7 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       createdAt: input.now,
       lastSeenAt: input.now,
       createdIp: input.createdIp,
+      method: input.method ?? "password",
       expiresAt: input.now + idleMs,
       absoluteExpiresAt: input.now + 7 * 24 * 3_600_000,
       ...(input.ua === undefined ? {} : { ua: input.ua.slice(0, 512) }),

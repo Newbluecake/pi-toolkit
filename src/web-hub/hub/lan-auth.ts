@@ -5,8 +5,7 @@
  * request handler calls in here) into the exact sequence §6.1 describes:
  * `limiter.admit` (saturation + per-IP backoff) → KDF fair-scheduling
  * admission → `kdf.run` → constant-work comparison → `finally` release →
- * success: `store.createSession` + `limiter.succeed`; failure:
- * `limiter.fail` + 401 (no reason disclosed, §6.1).
+ * Login completion now lives exclusively in `lan-login.ts` (checked insertion).
  *
  * Cookie: `pwh_lan` — distinct name and store from loopback's `pwh_sid`
  * (`hub/auth.ts`), so the two auth domains never collide (§6.4).
@@ -88,84 +87,6 @@ export async function kdfMatches(
   );
 }
 
-export type LanLoginOutcome =
-  | { status: 200; cookie: string; initialPasswordInUse: boolean }
-  | { status: 401 }
-  | {
-      status: 429;
-      retryAfterMs: number;
-      saturated?: boolean;
-      /** LC review fix (lan-plan.md §15.9 #4): which gate produced this 429, so `http.ts` can pick
-       * an `error` tag the frontend actually differentiates on (§10) — `"backoff"` (§6.2 per-IP
-       * lockout, incl. its `saturated` sub-case) is a punitive lock the client must NOT auto-retry
-       * without a user-visible countdown; `"admission"` (§6.2 KDF fair-scheduling queue full /
-       * 20s wait timeout) is a transient capacity signal that is safe to auto-retry. */
-      kind: "backoff" | "admission";
-    };
-
-function isNonEmptyString(v: unknown): v is string {
-  return typeof v === "string" && v.length > 0;
-}
-
-/** Runs the full §6.1 login pipeline; `now`/`opts.signal` are threaded through to every port
- * call. Never throws for a "normal" bad-credentials outcome — only a port itself rejecting
- * (e.g. `E_DB`) propagates, which the caller (`http.ts`) maps to 503 per §2.5. */
-export async function runLanLogin(
-  ctx: RequestContext,
-  body: unknown,
-  deps: LanLoginDeps,
-  now: number,
-  opts?: { signal?: AbortSignal; onAdmitted?: () => void },
-): Promise<LanLoginOutcome> {
-  const admitResult = deps.limiter.admit(ctx.clientIp);
-  if (!admitResult.ok) {
-    return {
-      status: 429,
-      retryAfterMs: admitResult.retryAfterMs,
-      kind: "backoff",
-      ...(admitResult.saturated === true ? { saturated: true as const } : {}),
-    };
-  }
-
-  const rawUsername =
-    body !== null && typeof body === "object" ? (body as Record<string, unknown>).username : undefined;
-  const rawPassword =
-    body !== null && typeof body === "object" ? (body as Record<string, unknown>).password : undefined;
-  const username = isNonEmptyString(rawUsername) ? rawUsername : undefined;
-  const password = isNonEmptyString(rawPassword) ? rawPassword : "";
-  const fresh = deps.limiter.isFresh?.(ctx.clientIp) ?? true;
-
-  const admission = await deps.admission.acquire(ctx.clientIp, fresh, opts);
-  if (!admission.ok) return { status: 429, retryAfterMs: admission.retryAfterMs, kind: "admission" };
-  opts?.onAdmitted?.();
-  try {
-    const user = username === undefined ? undefined : await deps.store.getUser(username, opts);
-    // §5.1 "读取校验" (LC review fix, lan-plan.md §15.9 #2) lives inside `kdfMatches` now —
-    // shared with the privacy-verify pipeline below; behavior unchanged (corrupt ⇒ dummy run +
-    // `onCorruptKdfParams` + mismatch).
-    if (!(await kdfMatches(user, password, deps, opts))) {
-      deps.limiter.fail(ctx.clientIp);
-      return { status: 401 };
-    }
-    if (user === undefined) {
-      // Unreachable in practice (kdfMatches already returns false for an unknown user); kept as
-      // a defensive narrowing so the session below is never created without a record.
-      deps.limiter.fail(ctx.clientIp);
-      return { status: 401 };
-    }
-    const session = await deps.store.createSession(
-      { userId: user.id, epoch: user.epoch, boundOrigin: ctx.externalOrigin, createdIp: ctx.clientIp, now },
-      opts,
-    );
-    deps.limiter.succeed(ctx.clientIp);
-    const initialPasswordInUse = user.initialPassword !== undefined;
-    if (initialPasswordInUse) await deps.store.markInitialLogin(user.username, ctx.clientIp, now, opts);
-    return { status: 200, cookie: session.sid, initialPasswordInUse };
-  } finally {
-    admission.release();
-  }
-}
-
 // ---------------------------------------------------------------------------
 // web-hub-privacy plan v2.1「校验管线」(P1): stateless password re-verification for an
 // ALREADY-authenticated LAN session (view-unlock + LAN-side unlock of a privacy mark).
@@ -177,13 +98,13 @@ export type LanVerifyOutcome =
       status: 429;
       retryAfterMs: number;
       saturated?: boolean;
-      /** Same split as `LanLoginOutcome`'s 429 (backoff lockout vs KDF admission queue) — the
+      /** Same split as the login core's 429 (backoff lockout vs KDF admission queue) — the
        * route maps it to the same `E_LOCKED`/`E_RATE` wire codes the login handler uses. */
       kind: "backoff" | "admission";
     };
 
 /**
- * Extracted from `runLanLogin` (plan「接口」评审 #3): verify the CURRENT session user's LAN
+ * Shared with the checked login core (plan「接口」评审 #3): verify the CURRENT session user's LAN
  * password — 会话取 userId → `getUserSummary(userId)` 取 username → `getUser` → 共用 KDF
  * admission → 比对. Deliberate differences from login:
  *

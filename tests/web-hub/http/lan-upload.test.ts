@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 /**
  * web-hub-upload plan §6 U3 — LAN `/api/upload/*` routes: the 1 MiB chunk tier, the
  * `upload.lan.v1` capability gate, LAN CSRF (`uploadCsrfOk`), cross-principal isolation (#9) and
@@ -150,7 +151,17 @@ async function startLanUpload(opts: { router?: FakeRouter } = {}): Promise<LanUp
     log,
     info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
     now: clock.now,
-    lan: { cfg, store: lanStore, kdf, limiter, admission, hosts, scope, onStatus: (s) => (lastStatus = s) },
+    lan: {
+      clientAllow: createClientAllowGuard({}),
+      cfg,
+      store: lanStore,
+      kdf,
+      limiter,
+      admission,
+      hosts,
+      scope,
+      onStatus: (s) => (lastStatus = s),
+    },
     uploads: store,
     ...(opts.router === undefined ? {} : { commands: opts.router }),
   });

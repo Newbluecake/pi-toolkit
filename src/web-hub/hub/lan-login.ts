@@ -333,6 +333,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
               boundOrigin: ctx.externalOrigin,
               createdIp: ctx.clientIp,
               ua: ua.slice(0, 512),
+              method,
               now: deps.now(),
             },
             opts,

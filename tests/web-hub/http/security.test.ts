@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { Server as NetServer, connect, createServer as createNetServer } from "node:net";
 import { dirname } from "node:path";
@@ -363,6 +364,7 @@ describe("LP1 hub frame-src (link-preview §2.4)", () => {
           ...deps,
           config,
           lan: {
+            clientAllow: createClientAllowGuard({}),
             cfg: { port: lanPort, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
             store: fakeLanStore(),
             kdf: fakeKdf(),

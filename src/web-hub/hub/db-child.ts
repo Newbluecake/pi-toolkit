@@ -91,8 +91,7 @@ function dropNamedTable(db, table) {
   const row = db.prepare("SELECT type FROM sqlite_master WHERE name=? AND type IN ('table','view')").get(table);
   if (row) db.exec('DROP ' + (row.type === 'view' ? 'VIEW ' : 'TABLE ') + table);
 }
-function tableMatches(db, table) {
-  const specs = securityColumns[table];
+function tableMatches(db, table, specs = securityColumns[table]) {
   const cols = db.prepare('PRAGMA table_info(' + table + ')').all();
   if (cols.length !== specs.length) return false;
   for (const [name, type, notnull, pk] of specs) {
@@ -240,7 +239,7 @@ function insertSession(args, checked) {
       inserted = stmtInsertSession.run(unb64(args.sidHash), args.userId, args.epoch, args.boundOrigin, args.now, args.now, Math.min(args.now + args.idleMs, args.now + 7*86400000), args.now + 7*86400000, args.createdIp).changes;
     }
     if (!inserted) return {ok:false, reason:'stale'};
-    db.prepare('INSERT INTO session_meta(sid_hash,user_agent,last_ip) VALUES(?,?,?)').run(unb64(args.sidHash), safeUa(args.ua), args.createdIp);
+    db.prepare('INSERT INTO session_meta(sid_hash,user_agent,last_ip,method) VALUES(?,?,?,?)').run(unb64(args.sidHash), safeUa(args.ua), args.createdIp, args.method || 'password');
     return {ok:true, evicted:trimUserSessions(args.userId)};
   });
 }
@@ -248,8 +247,8 @@ function handleSecurity(op, args) {
   switch (op) {
     case 'createSessionChecked': return insertSession(args, true);
     case 'listSessions': {
-      return db.prepare('SELECT s.*, m.user_agent, m.last_ip FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN session_meta m ON m.sid_hash=s.sid_hash WHERE s.user_id=? AND s.epoch=u.epoch AND s.expires_at>? AND s.absolute_expires_at>? AND s.last_seen_at>? ORDER BY s.last_seen_at DESC, s.rowid DESC LIMIT 32')
-        .all(args.userId, args.now, args.now, args.now - args.idleMs).map(r => ({sidHash:hashWire(r.sid_hash), userId:r.user_id, epoch:r.epoch, boundOrigin:r.bound_origin, createdAt:r.created_at, lastSeenAt:r.last_seen_at, expiresAt:r.expires_at, absoluteExpiresAt:r.absolute_expires_at, createdIp:r.created_ip,
+      return db.prepare('SELECT s.*, m.user_agent, m.last_ip, m.method FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN session_meta m ON m.sid_hash=s.sid_hash WHERE s.user_id=? AND s.epoch=u.epoch AND s.expires_at>? AND s.absolute_expires_at>? AND s.last_seen_at>? ORDER BY s.last_seen_at DESC, s.rowid DESC LIMIT 32')
+        .all(args.userId, args.now, args.now, args.now - args.idleMs).map(r => ({sidHash:hashWire(r.sid_hash), userId:r.user_id, epoch:r.epoch, boundOrigin:r.bound_origin, createdAt:r.created_at, lastSeenAt:r.last_seen_at, expiresAt:r.expires_at, absoluteExpiresAt:r.absolute_expires_at, createdIp:r.created_ip, method:r.method || 'password',
           ...(r.last_ip === null ? {} : {lastIp:r.last_ip}), ...(r.user_agent === null ? {} : {ua:safeUa(r.user_agent)})}));
     }
     case 'deleteSessionsExcept': return tx(db, () => {
@@ -688,6 +687,11 @@ function run() {
       }
       let loginIpsRebuilt = false;
       tx(db, () => {
+        // Preserve existing device metadata through this additive migration.
+        if (tableMatches(db, 'session_meta', securityColumns.session_meta.filter(c => c[0] !== 'method'))) {
+          db.exec('ALTER TABLE session_meta ADD COLUMN method TEXT');
+          db.exec("UPDATE session_meta SET method='password'");
+        }
         if (!tableMatches(db, 'session_meta')) {
           dropNamedTable(db, 'session_meta');
           db.exec(${JSON.stringify(SESSION_META_SQL)});

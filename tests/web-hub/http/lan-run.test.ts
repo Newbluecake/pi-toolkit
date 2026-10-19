@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 /**
  * fleet-drawer plan §9 F4 acceptance (LAN half): the L-gating matrix's LAN rows at the HTTP
  * layer — L1 (all caps ⇒ usable), L4/L6 (missing `runtx.lan.v1` / no caps ⇒ 409 E_UNSUPPORTED),
@@ -143,6 +144,7 @@ async function startLanRun(opts: { caps?: string[] } = {}): Promise<LanRunHub> {
     info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: now(), proto: PROTO }),
     now,
     lan: {
+      clientAllow: createClientAllowGuard({}),
       cfg: { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
       store,
       kdf,

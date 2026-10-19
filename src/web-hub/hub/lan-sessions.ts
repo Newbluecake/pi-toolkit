@@ -119,6 +119,7 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
       expiresAt: rec.expiresAt,
       absoluteExpiresAt: rec.absoluteExpiresAt,
       createdIp: rec.createdIp,
+      ...(rec.method === undefined ? {} : { method: rec.method }),
       ...(rec.lastIp === undefined ? {} : { lastIp: rec.lastIp }),
       ...(rec.ua === undefined ? {} : { ua: rec.ua }),
     };

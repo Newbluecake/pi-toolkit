@@ -1,0 +1,55 @@
+/* LAN login sessions: approved per-device 1B layout, responsive inside settings. */
+.sessions-meta,
+.session-card-top,
+.sess-device {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.sessions-meta .settings-h {
+  margin: 0;
+}
+.sessions-refresh {
+  margin-left: auto;
+}
+.sessions-cards {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 0.75rem;
+}
+.session-card {
+  border: 1px solid var(--c-border);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  min-width: 0;
+}
+.session-card--current {
+  border-color: var(--c-accent);
+}
+.session-card-top {
+  flex-wrap: wrap;
+}
+.sess-device {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.session-card-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.35rem 0.75rem;
+  font-size: 0.85em;
+}
+.session-card-meta dt {
+  color: var(--c-muted);
+}
+.session-card-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.sess-mono {
+  font-family: var(--font-mono);
+}
+.sessions-foot {
+  margin-top: 0.75rem;
+}

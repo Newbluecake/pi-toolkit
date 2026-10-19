@@ -93,6 +93,15 @@ for (const kind of ["fake", "sqlite"] as const)
       expect(await store.touchSession(hashes[32]!, at + 300032)).toBeUndefined();
     });
 
+    it.each(["password", "totp", "feishu", "recovery"] as const)(
+      "persists the satisfied login method: %s",
+      async (method) => {
+        const made = await store.createSessionChecked({ ...input(), method, ua: "test-browser" });
+        expect(made.ok).toBe(true);
+        expect(await store.listSessions(userId, at)).toMatchObject([{ method, ua: "test-browser" }]);
+      },
+    );
+
     it("first enrollment clears history; recovery is single use; generation survives reset", async () => {
       await store.noteLoginIp("192.0.2.1", at);
       expect(await store.isKnownIp("192.0.2.1", at, NEW_IP_WINDOW_MS)).toBe(true);

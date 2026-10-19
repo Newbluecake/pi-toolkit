@@ -1809,11 +1809,11 @@ export async function startHub(
         const created = await startupStep(
           createProxyService({
             config: config.proxy,
-            clientAllow,
+            lan: config.lan !== undefined,
+            clientAllow: clientAllow ?? createClientAllowGuard({}),
             stateDir: paths.stateDir,
             hubPort: httpPort,
             ...(config.lan === undefined ? {} : { lanPort: config.lan.port }),
-            lan: config.lan !== undefined,
             lanHostSnapshot: () => (fe as HttpFrontendExt).lanHostSnapshot?.(),
             log,
             now,

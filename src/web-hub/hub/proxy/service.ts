@@ -40,16 +40,15 @@ import { createProxySessionStore } from "./sessions.js";
 import { createProxyAudit, type ProxyAudit } from "./audit.js";
 import { canonicalAddr, parseProxyTarget, proxyTargetKey } from "./target.js";
 import { createProxyListener, type ProxyListener } from "./listener.js";
-import { createClientAllowGuard, tagClientAllowGuard } from "../client-allow.js";
+import { tagClientAllowGuard } from "../client-allow.js";
 import { createProxyAdmission, type ProxyTraffic } from "./forward.js";
 
-export interface ProxyServiceDeps {
+interface ProxyServiceCommonDeps {
   readonly config: HubProxyConfig;
   readonly stateDir: string;
   readonly hubPort: number;
   readonly lanPort?: number;
   /** Q2: presence of the hub's LAN config, not a user-controlled separate proxy switch. */
-  readonly lan: boolean;
   lanHostSnapshot(): HostSnapshot | undefined;
   readonly log: Pick<HubLog, "info">;
   readonly now?: () => number;
@@ -62,10 +61,13 @@ export interface ProxyServiceDeps {
   readonly listen?: (server: Server, port: number, host: string) => Promise<void>;
   /**
    * The hub's shared LAN client allowlist guard (LAN security §2.3 #3). Every proxy listener
-   * enforces it at connection level. Required plumbing: undefined is used ONLY by loopback-only
-   * hubs (no LAN config); configured LAN hubs always pass their one shared guard.
+   * enforces it at connection level. Required even when inactive. Configured LAN hubs always pass their one shared guard;
+   * loopback-only proxy hubs pass an explicit inert guard (never synthesized by this service).
    */
-  readonly clientAllow: ClientAllowGuard | undefined;
+}
+export interface ProxyServiceDeps extends ProxyServiceCommonDeps {
+  readonly lan: boolean;
+  readonly clientAllow: ClientAllowGuard;
 }
 interface Instance {
   logicalKey: string;
@@ -134,7 +136,7 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
   };
   const audit = deps.audit ?? createProxyAudit(deps.log, now);
   // One guard for every proxy listener: the shared hub guard tagged "proxy" for audit, or an inactive one.
-  const clientAllow = tagClientAllowGuard(deps.clientAllow ?? createClientAllowGuard({}), "proxy");
+  const clientAllow = tagClientAllowGuard(deps.clientAllow, "proxy");
   const sessionCounts = new Map<string, ProxyTraffic>();
   const sessionTraffic = (session: import("./sessions.js").ProxySession): ProxyTraffic => {
     let counts = sessionCounts.get(session.sidHash);

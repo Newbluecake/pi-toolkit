@@ -132,7 +132,7 @@ export const SCHEMA_V1_FOREIGN_KEYS: Readonly<
 /** LAN security side tables are disposable; trust history rebuilds fail closed. */
 export const SESSION_META_SQL = `CREATE TABLE session_meta (
   sid_hash BLOB PRIMARY KEY REFERENCES sessions(sid_hash) ON DELETE CASCADE,
-  user_agent TEXT, last_ip TEXT) STRICT`;
+  user_agent TEXT, last_ip TEXT, method TEXT) STRICT`;
 export const LOGIN_IPS_SQL = `CREATE TABLE login_ips (
   ip TEXT PRIMARY KEY, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL) STRICT`;
 
@@ -155,6 +155,7 @@ export const LAN_SECURITY_COLUMNS = {
     ["sid_hash", "BLOB", 1, 1],
     ["user_agent", "TEXT", 0, 0],
     ["last_ip", "TEXT", 0, 0],
+    ["method", "TEXT", 0, 0],
   ],
   login_ips: [
     ["ip", "TEXT", 1, 1],

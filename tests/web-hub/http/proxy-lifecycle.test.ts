@@ -94,7 +94,7 @@ describe("construction", () => {
     expect(d.hubPort).toBe(h.hub.httpPort);
     expect(d.hubPort).not.toBe(h.configured.port);
     expect(d.lan).toBe(false);
-    expect(d.clientAllow).toBeUndefined(); // loopback-only hub constructs no LAN guard
+    expect(d.clientAllow.active).toBe(false); // explicit inert guard for loopback-only proxy
     expect("lanPort" in d).toBe(false);
     expect(d.config).toEqual({ portRange: h.range, maxProxies: 3 });
     expect(d.stateDir).toBe(h.stateDir);

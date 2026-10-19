@@ -1178,6 +1178,7 @@ export interface LanSessionListRecord extends LanSessionRecord {
   createdIp: string;
   lastIp?: string;
   ua?: string;
+  method?: "password" | "totp" | "feishu" | "recovery";
 }
 export interface Lan2faState {
   state: "none" | "enrolled" | "inconsistent";
@@ -1192,6 +1193,7 @@ export interface CreateSessionCheckedInput {
   userId: number;
   expectedEpoch: number;
   expectedFactorGen: number;
+  method?: "password" | "totp" | "feishu" | "recovery";
   boundOrigin: string;
   createdIp: string;
   ua?: string;

@@ -4,6 +4,11 @@ type Messages<T> = { [K in keyof T]: string };
 
 /** LAN security r2 §3.2 (package D): 「登录会话」设置卡片中文文案，键位与 en/sessions.ts 一一对应。 */
 const sessions = {
+  colMethod: "验证方式",
+  methodPassword: "密码",
+  methodTotp: "验证器（TOTP）",
+  methodFeishu: "飞书审批",
+  methodRecovery: "恢复码",
   title: "登录会话",
   hint: "当前 LAN 上的登录设备。会话闲置 {idle} 分钟或登录满 {days} 天后自动失效。",
   currentDevice: "本设备",
