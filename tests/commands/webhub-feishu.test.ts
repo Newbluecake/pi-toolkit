@@ -3,7 +3,12 @@
 
 import { describe, expect, it } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { createWebHubCommand, formatFeishuSettingsWarningLine } from "../../src/commands/webhub.js";
+import {
+  createWebHubCommand,
+  formatFeishuSettingsWarningLine,
+  PI_WIDGET_MAX_LINES,
+  qrFitsWidget,
+} from "../../src/commands/webhub.js";
 import type { FeishuAdminPort, FeishuNotifyCoexistence } from "../../src/web-hub/agent/feishu-admin.js";
 import type { FsbResFrame } from "../../src/web-hub/protocol/feishu.js";
 
@@ -290,6 +295,23 @@ describe("/webhub feishu repair|reset (TUI confirm required)", () => {
   });
 });
 
+describe("qrFitsWidget (pi widget cap fallback decision)", () => {
+  it("pins pi's array-content widget cap at 10 lines", () => {
+    // InteractiveMode.MAX_WIDGET_LINES in pi-coding-agent 1.2.0; beyond ⇒ "… (widget truncated)".
+    expect(PI_WIDGET_MAX_LINES).toBe(10);
+  });
+
+  it("accepts only blocks within the cap AND the terminal rows", () => {
+    expect(qrFitsWidget(PI_WIDGET_MAX_LINES, 24)).toBe(true);
+    expect(qrFitsWidget(1, 24)).toBe(true);
+    expect(qrFitsWidget(PI_WIDGET_MAX_LINES + 1, 40)).toBe(false); // over the cap
+    expect(qrFitsWidget(19, 40)).toBe(false); // the realistic setup QR
+    expect(qrFitsWidget(10, 12)).toBe(false); // fits the cap but squeezes chat/editor to nothing
+    expect(qrFitsWidget(10, undefined)).toBe(true); // non-TTY probe ⇒ assume fit
+    expect(qrFitsWidget(10, 0)).toBe(true); // unknown rows ⇒ assume fit
+  });
+});
+
 describe("/webhub feishu setup", () => {
   const pendingView = {
     phase: "pending",
@@ -308,29 +330,31 @@ describe("/webhub feishu setup", () => {
     });
   }
 
-  it("plain setup: no confirm dialog, begin without replace, QR widget shown then cleared", async () => {
+  it("plain setup: no confirm dialog, begin without replace, QR notified whole (19 lines > widget cap 10)", async () => {
     const p = setupPort(["pending0", "done"]);
     const { notes, c } = await run("feishu setup", { port: p.port });
     expect(c.confirms).toHaveLength(0);
     expect(p.sent[0]).toEqual({ t: "fsb_req", rid: expect.any(String), op: "setup_begin" });
-    // a real rendered QR from src/commands/qr-render.ts rides the widget, then it is cleared
+    // the 19-line QR exceeds pi's widget cap (10) ⇒ no widget content, one multi-line notify
     const shown = c.widgetHistory.filter(([k]) => k === "webhub-feishu-qr");
-    expect(shown.length).toBeGreaterThanOrEqual(2);
-    const qr = shown[0]![1];
-    expect(qr).toBeDefined();
-    expect(qr!.length).toBeGreaterThan(10);
-    expect(qr!.every((l) => /^[█▀▄ ]+$/.test(l))).toBe(true);
-    expect(shown.at(-1)![1]).toBeUndefined();
+    expect(shown.length).toBeGreaterThanOrEqual(1);
+    expect(shown.every(([, content]) => content === undefined)).toBe(true);
+    const qrNote = notes.find((n) => n.message.includes("\n") && n.message.includes("█"));
+    expect(qrNote).toBeDefined();
+    const qrLines = qrNote!.message.split("\n");
+    expect(qrLines.length).toBeGreaterThan(10);
+    expect(qrLines.every((l) => /^[█▀▄ ]+$/.test(l))).toBe(true);
     expect(notes.some((n) => n.message === pendingView.qrUrl)).toBe(true);
     expect(notes.at(-1)!.message).toContain("配置完成");
   });
 
   it("the widget is cleared after the flow ends (clearQr → setWidget undefined)", async () => {
     const p = setupPort(["pending0", "expired"]);
-    const { c } = await run("feishu setup", { port: p.port });
+    const { c, notes } = await run("feishu setup", { port: p.port });
     const shown = c.widgetHistory.filter(([k]) => k === "webhub-feishu-qr");
-    expect(shown[0]![1]).toBeDefined();
     expect(shown.at(-1)![1]).toBeUndefined();
+    // QR still surfaced via the notify fallback
+    expect(notes.some((n) => n.message.split("\n").length > 10)).toBe(true);
   });
 
   it("--replace asks the TUI confirm and only then sends replace+confirm", async () => {

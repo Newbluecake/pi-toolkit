@@ -376,6 +376,27 @@ async function runTokenRotate(ctx: ExtensionCommandContext, control: WebHubContr
 /** TUI widget key for the persistent setup QR (cleared on every flow exit). */
 const FEISHU_QR_WIDGET_KEY = "webhub-feishu-qr";
 
+/**
+ * pi's TUI caps array-content widgets at 10 lines (`InteractiveMode.MAX_WIDGET_LINES`,
+ * pi-coding-agent 1.2.0 interactive-mode.js) — anything beyond is dropped with
+ * "… (widget truncated)". Even the smallest possible QR (v1, 21 modules + the four-module
+ * quiet zone) renders 15 half-block lines, and a real decorated feishu setup URL lands at
+ * 19–25, so a QR can never ride the widget without being cut unscannable: above the cap (or on
+ * a terminal too short to host the block) the caller falls back to the transcript.
+ */
+export const PI_WIDGET_MAX_LINES = 10;
+/** Rows kept for chat + editor + footer when judging whether a widget block fits the screen. */
+const WIDGET_CHROME_RESERVE_ROWS = 8;
+
+/**
+ * Whether a `lineCount`-row block can be shown through `ctx.ui.setWidget` whole (not truncated,
+ * not squeezing the chat to nothing). Unknown/zero terminal rows (non-TTY probes) assume fit.
+ */
+export function qrFitsWidget(lineCount: number, terminalRows: number | undefined): boolean {
+  if (lineCount > PI_WIDGET_MAX_LINES) return false;
+  return terminalRows === undefined || terminalRows <= 0 || terminalRows >= lineCount + WIDGET_CHROME_RESERVE_ROWS;
+}
+
 const FEISHU_OPS = ["setup", "status", "cancel", "allow", "deny", "repair", "reset"] as const;
 
 const FEISHU_OP_DESCRIPTIONS: Record<string, string> = {
@@ -423,16 +444,21 @@ function unrefSleep(ms: number): Promise<void> {
   });
 }
 
-/** QR 展示面：TUI widget（持久可见）；不可用时逐行 notify 兑底。 */
+/** QR 展示面：能完整放下时用 TUI widget（持久可见），放不下时单条多行 notify 兑底（pi 会把连续 notify 合并成最后一行，逐行发会只剩一行码）。 */
 function feishuSetupUi(ctx: ExtensionCommandContext): FeishuSetupUi {
   return {
     notify: (message, level) => notify(ctx, message, level),
     showQr: (lines) => {
-      try {
-        ctx.ui.setWidget(FEISHU_QR_WIDGET_KEY, [...lines]);
-      } catch {
-        for (const line of lines) notify(ctx, line);
+      const rows = typeof process.stdout.rows === "number" ? process.stdout.rows : undefined;
+      if (qrFitsWidget(lines.length, rows)) {
+        try {
+          ctx.ui.setWidget(FEISHU_QR_WIDGET_KEY, [...lines]);
+          return;
+        } catch {
+          /* fall through to the notify fallback */
+        }
       }
+      notify(ctx, lines.join("\n"));
     },
     clearQr: () => {
       try {

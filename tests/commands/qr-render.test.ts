@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { renderQr } from "../../src/commands/qr-render.js";
+import { PI_WIDGET_MAX_LINES, qrFitsWidget } from "../../src/commands/webhub.js";
 
 const GLYPH_RE = /^[█▀▄ ]+$/;
 
@@ -45,5 +46,23 @@ describe("renderQr", () => {
 
   it("propagates qr-too-large for oversized payloads (caller must catch and fall back to the URL)", () => {
     expect(() => renderQr("x".repeat(2_954))).toThrow("qr-too-large");
+  });
+
+  it("even the smallest QR exceeds pi's widget line cap — the notify fallback is mandatory", () => {
+    // v1 (21 modules + quiet zone 4) ⇒ ceil(29/2) = 15 lines; pi's MAX_WIDGET_LINES is 10.
+    const minimal = renderQr("A").split("\n");
+    expect(minimal.length).toBe(15);
+    expect(minimal.length).toBeGreaterThan(PI_WIDGET_MAX_LINES);
+    expect(qrFitsWidget(minimal.length, 24)).toBe(false);
+  });
+
+  it("a realistic decorated setup URL renders ~23 lines, far beyond the widget cap", () => {
+    // decorateQrUrl shape: launcher URL + user_code + from=sdk&tp=sdk&source=pi-toolkit&name=pi@<host>
+    const url =
+      "https://open.feishu.cn/page/launcher?user_code=AB12CD34&from=sdk&tp=sdk&source=pi-toolkit&name=pi@devbox";
+    const lines = renderQr(url).split("\n");
+    expect(lines.length).toBe(23); // v5 (37 modules + quiet zone 4) ⇒ ceil(45/2) = 23
+    expect(lines.length).toBeGreaterThan(PI_WIDGET_MAX_LINES);
+    expect(qrFitsWidget(lines.length, 24)).toBe(false);
   });
 });
