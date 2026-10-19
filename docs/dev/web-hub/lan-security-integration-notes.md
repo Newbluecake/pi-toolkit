@@ -6,8 +6,8 @@ Each package's own wiring request: `docs/dev/web-hub/lan-security-wiring-<PKG>.m
 
 ## From A (verified pass)
 
-- Make `ProxyServiceDeps.clientAllow` required once wired; wire the guard into BOTH listener kinds (I1); write
-  `tests/web-hub/http/lan-allowlist.test.ts` (needs http.ts wiring). Guard listener tag via `forListener()` / `tagClientAllowGuard()`.
+- **Closed (LAN-I/A):** `ProxyServiceDeps.clientAllow` is required (undefined only without LAN); one shared guard reaches BOTH listener kinds (I1); added
+  `tests/web-hub/http/lan-allowlist.test.ts` (no bytes/no lease; one keepalive allowed→denied→missing XFF). Listener tags use `forListener()` / `tagClientAllowGuard()`.
 
 ## From B (verified conditional pass)
 

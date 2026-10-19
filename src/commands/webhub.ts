@@ -34,6 +34,7 @@ import type { RestartOutcome } from "../web-hub/agent/restart.js";
 import {
   formatInitialPasswordLines,
   formatInvalidExtraHostsLine,
+  formatInvalidAllowClientsLine,
   formatProxyMismatchLine,
   type UiMode,
 } from "../web-hub/agent/lan-status.js";
@@ -231,6 +232,8 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
   if (warnings !== undefined) {
     const invalidLine = formatInvalidExtraHostsLine(warnings.invalidExtraHosts);
     if (invalidLine !== undefined) notify(ctx, invalidLine, "warning");
+    const allowLine = formatInvalidAllowClientsLine(warnings.invalidAllowClients ?? []);
+    if (allowLine !== undefined) notify(ctx, allowLine, "warning");
     if (warnings.proxyMismatch) notify(ctx, formatProxyMismatchLine(), "warning");
   }
   const infoRes = await control.lan.info();

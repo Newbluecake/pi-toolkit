@@ -114,6 +114,8 @@ import { createWorktreeDiffRoutes } from "./worktree-diff/routes.js";
 import { createWorktreeGraphRoutes } from "./worktree-graph/routes.js";
 import { proxyErrCode } from "./proxy/audit.js";
 import { createProxyRoutes } from "./proxy/routes.js";
+import { createClientAllowGuard } from "./client-allow.js";
+import { createSecurityEventBus } from "./security-events.js";
 import { createProxyService } from "./proxy/service.js";
 import { hubLoadProbe, LOAD_HUB_CAP, normalizeHubLoadConfig } from "./load.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
@@ -796,6 +798,21 @@ export async function startHub(
     // `LanAssemblyOffError` is `defaultLanAssembly`'s (LD's own file) way of saying exactly that;
     // any other rejection (a real bug, an injected test double's `E_NOT_IMPLEMENTED:LD`, …) still
     // propagates to this function's own outer `catch` below and fails `startHub` as before.
+    const security = config.lan === undefined ? undefined : createSecurityEventBus(log);
+    const clientAllow =
+      config.lan === undefined
+        ? undefined
+        : createClientAllowGuard({
+            ...(config.lan.allowClients === undefined ? {} : { entries: config.lan.allowClients }),
+            log,
+            now,
+          });
+    if (clientAllow !== undefined && security !== undefined) {
+      const off = clientAllow.onBurst((b) =>
+        security.emit({ type: "allowlist-burst", count: b.count, ips: [...b.ips], lastIp: b.lastIp }),
+      );
+      cleanup.push(async () => off());
+    }
     let lanAssemblyOff: { reason: LanOffReason; detail?: string } | undefined;
     let kdfInFlight = 0;
     if (config.lan !== undefined) {
@@ -812,6 +829,7 @@ export async function startHub(
         lanDeps = await startupStep(
           (deps.lanAssembly ?? defaultLanAssembly).build({
             cfg: config.lan,
+            ...(security === undefined ? {} : { security }),
             paths,
             log,
             now,
@@ -836,6 +854,7 @@ export async function startHub(
       }
     }
     if (lanDeps !== undefined) {
+      if (clientAllow !== undefined) lanDeps.clientAllow = clientAllow;
       const dbRestartStore = lanDeps.store as Partial<LanStore>;
       if (typeof dbRestartStore.onRestartNeeded === "function") {
         unsubscribeDbRestart = dbRestartStore.onRestartNeeded(requestDbSelfRestart);
@@ -1786,6 +1805,7 @@ export async function startHub(
         const created = await startupStep(
           createProxyService({
             config: config.proxy,
+            clientAllow,
             stateDir: paths.stateDir,
             hubPort: httpPort,
             ...(config.lan === undefined ? {} : { lanPort: config.lan.port }),

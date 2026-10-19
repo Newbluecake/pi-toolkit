@@ -530,6 +530,10 @@ function buildLanContext(
     kind: "lan",
     peerIp,
     viaTrustedProxy: resolution.viaTrustedProxy,
+    xffUsable: !resolution.warnings.some(
+      (w) => w === "xff-missing" || w === "xff-malformed" || w === "xff-all-trusted",
+    ),
+    ua: req.headers["user-agent"] ?? "",
     clientIp: resolution.clientIp,
     scheme: resolution.scheme,
     hostKey,
@@ -542,6 +546,8 @@ function buildLanContext(
 // §1.4.4) free of any module with its own exported test surface beyond what it re-exports; the
 // canonical, tested implementation lives in `hub/proxy.ts` (`resolveProxy`) and this delegates to
 // it byte-for-byte (kept as a thin re-export, not a duplicate) — see below.
+import { createClientAllowGuard, tagClientAllowGuard } from "./client-allow.js";
+import type { ClientAllowGuard } from "./ports.js";
 import { resolveProxy as resolveProxyLocal } from "./proxy.js";
 
 /**
@@ -580,6 +586,7 @@ export function buildContext(
 
 /** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` is now frozen in `hub/ports.ts` (review fix #9). */
 export interface LanTransportCtx {
+  clientAllow: ClientAllowGuard;
   csp?: string;
   handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext, lease: ConnLease): Promise<void>;
   log: HubLog;
@@ -609,9 +616,13 @@ export function createLanTransport(ctx: LanTransportCtx): LanTransport {
       srv.keepAliveTimeout = LAN_KEEPALIVE_TIMEOUT_MS;
       srv.on("clientError", (_err, socket) => socket.destroy());
       srv.on("connection", (socket: SocketWithLease) => {
-        socket.unref();
         const peerIp = normalizePeerIp(socket.remoteAddress);
         const viaTrustedProxy = snapshot.trustProxyFrom.has(peerIp);
+        if (!ctx.clientAllow.admitPeer(peerIp, viaTrustedProxy)) {
+          socket.destroy();
+          return;
+        }
+        socket.unref();
         const lease = ctx.connGuard.admit({ peerIp, viaTrustedProxy, onEvict: () => socket.destroy() });
         if (lease === undefined) {
           socket.destroy();
@@ -637,6 +648,14 @@ export function createLanTransport(ctx: LanTransportCtx): LanTransport {
           }
           setSecurityHeaders(res, ctx.csp);
           sendError(res, result.reject, result.code, result.detail);
+          return;
+        }
+        if (
+          result.viaTrustedProxy &&
+          !ctx.clientAllow.admitForwarded({ clientIp: result.clientIp, xffUsable: result.xffUsable === true })
+        ) {
+          setSecurityHeaders(res, ctx.csp);
+          sendError(res, 403, "E_CLIENT");
           return;
         }
         ctx.handleRequest(req, res, result, lease).catch((err: unknown) => {
@@ -2919,6 +2938,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   let lanRunSink: RunSink | undefined;
   if (deps.lan !== undefined) {
     const lan = deps.lan;
+    const clientAllow = tagClientAllowGuard(
+      lan.clientAllow ??
+        createClientAllowGuard({
+          ...(lan.cfg.allowClients === undefined ? {} : { entries: lan.cfg.allowClients }),
+          log,
+          now,
+        }),
+      "lan",
+    );
     const lanSse = createSseHub({ now });
     lanSseRef = lanSse;
     const lanRoutes = createRouteSet(lanSse, {
@@ -2990,7 +3018,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         if (kdfInvalidWarning) return;
         kdfInvalidWarning = true;
         if (handle === undefined) return;
-        status = buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings());
+        status = withAllowlist(buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings()));
         lan.onStatus(status);
       },
     };
@@ -3012,6 +3040,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     let startGen = 0;
     const inFlightStartAborts = new Set<AbortController>();
 
+    function withAllowlist(s: LanStatus): LanStatus {
+      return s.state === "on" && clientAllow.active ? { ...s, allowClients: clientAllow.snapshot() } : s;
+    }
+
     function extraWarnings(): string[] {
       return kdfInvalidWarning ? ["db-invalid:kdf"] : [];
     }
@@ -3027,11 +3059,12 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       gen++;
       const swapped: HostSnapshot = { ...next, gen };
       handle.swap(swapped);
-      status = buildLanStatus(lan.cfg, swapped, handle.port, extraWarnings());
+      status = withAllowlist(buildLanStatus(lan.cfg, swapped, handle.port, extraWarnings()));
       lan.onStatus(status);
     }
 
     const transport = createLanTransport({
+      clientAllow,
       csp,
       log,
       connGuard,
@@ -3074,7 +3107,21 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
             return status;
           }
           handle = bound;
-          status = buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings());
+          status = withAllowlist(buildLanStatus(lan.cfg, handle.current(), handle.port, extraWarnings()));
+          if (clientAllow.active) {
+            // One unref'd trailing tick coalesces denies from BOTH listener kinds; scope owns cleanup.
+            lan.scope.timer(
+              () => {
+                if (lanClosed || status.state !== "on") return;
+                const next = withAllowlist(status);
+                if (JSON.stringify(next) === JSON.stringify(status)) return;
+                status = next;
+                lan.onStatus(status);
+              },
+              30_000,
+              true,
+            );
+          }
           lan.scope.timer(() => recompute(true), LAN_TICK_MS, true);
           lan.scope.timer(
             () => {

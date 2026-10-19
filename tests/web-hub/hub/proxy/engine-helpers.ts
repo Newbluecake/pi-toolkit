@@ -70,6 +70,7 @@ export async function engine(overrides: Partial<ProxyServiceDeps> = {}) {
   let service: ProxyService;
   try {
     service = await createProxyService({
+      clientAllow: undefined,
       config: { maxProxies: 8, portRange: range },
       stateDir: dir,
       hubPort: 1,

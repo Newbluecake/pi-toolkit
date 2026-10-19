@@ -1156,6 +1156,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         trustProxyFrom: settings.lan.trustProxyFrom,
         externalOrigins: settings.lan.externalOrigins,
       };
+      if (settings.lan.allowClientsDenyAll === true) lan.allowClients = [];
+      else if (settings.lan.allowClients !== undefined && settings.lan.allowClients.length > 0)
+        lan.allowClients = settings.lan.allowClients;
       config.lan = lan;
     }
     // web-hub-spawn §SP2: only an explicitly enabled spawn block reaches the hub — `undefined`
@@ -1574,6 +1577,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       warnings: deps.proxyWarnings?.() ?? [],
       hasHubRecord: rec !== undefined,
       portsFile: join(paths.stateDir, PROXY_STATE_DIR_NAME, PROXY_PORTS_FILE_NAME),
+      allowlistActive: rec?.lan?.state === "on" && rec.lan.allowClients !== undefined,
     });
   };
 

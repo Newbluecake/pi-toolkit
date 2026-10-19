@@ -62,10 +62,10 @@ export interface ProxyServiceDeps {
   readonly listen?: (server: Server, port: number, host: string) => Promise<void>;
   /**
    * The hub's shared LAN client allowlist guard (LAN security §2.3 #3). Every proxy listener
-   * enforces it at connection level. Absent ⇒ an inactive guard (admits everything) — kept optional
-   * only so pre-wiring callers still compile; the integrator should always pass the shared guard.
+   * enforces it at connection level. Required plumbing: undefined is used ONLY by loopback-only
+   * hubs (no LAN config); configured LAN hubs always pass their one shared guard.
    */
-  readonly clientAllow?: ClientAllowGuard;
+  readonly clientAllow: ClientAllowGuard | undefined;
 }
 interface Instance {
   logicalKey: string;

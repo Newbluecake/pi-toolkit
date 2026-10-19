@@ -113,6 +113,8 @@ export interface RequestContext {
 }
 
 export interface LanFrontendDeps {
+  /** Shared hub-owned allowlist; omitted only by legacy test assemblies. */
+  clientAllow?: ClientAllowGuard;
   cfg: HubLanConfig;
   store: LanStorePort; // §4
   kdf: KdfPort; // §5.1
