@@ -278,6 +278,21 @@
   justify-content: flex-start;
 }
 
+/* 2026-10-20 phone field report (「设置按钮离代理转发按钮太远 / 离屏幕边缘太近」): at ≤480px
+ * the sign-out button is gone from the DOM, so the -sp-3 pull above only shoved the gear's
+ * 44px box past the bar's 4px right padding (glyph ~14px from the edge). On phones the gear
+ * keeps its own box (glyph ~26px from the edge) and the proxy entry eats the flex gap toward
+ * it instead, so the two glyphs sit one hit box apart like the rest of the cluster. */
+@media (max-width: 480px) {
+  .topbar .settings-anchor {
+    margin-right: 0;
+  }
+
+  .topbar .proxy-entry {
+    margin-right: calc(-1 * var(--sp-3));
+  }
+}
+
 /* 2026-10-06 field report ("登出按钮比设置按钮小"): on phones the label is hidden anyway —
  * make the sign-out button the same square icon button as the gear (44px coarse hit box).
  * 2026-10 phone-declutter plan C superseded this block: the language menu and sign-out button
