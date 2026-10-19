@@ -219,6 +219,7 @@ export function webHubSpawnFiles(stateDir: string): {
   prefsJson: string;
   restoreVeto: string;
   forkSrcDir: string;
+  createdDirsJson: string;
 } {
   return {
     spawnsJson: `${stateDir}/spawns.json`,
@@ -230,6 +231,8 @@ export function webHubSpawnFiles(stateDir: string): {
     // web-hub session-history plan §3.4: hub-owned 0700 dir for fork snapshots ONLY — never
     // inside sessionsRoot (PD12); never a session pi itself resolves.
     forkSrcDir: `${stateDir}/spawn/fork-src`,
+    // created-dirs plan r2 §1: source ④'s private 0600 envelope (not a stderr log).
+    createdDirsJson: `${stateDir}/spawn/created-dirs.json`,
   };
 }
 

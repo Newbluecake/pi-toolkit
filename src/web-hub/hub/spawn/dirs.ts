@@ -7,9 +7,10 @@
  * ② session-file headers under `<agentDir>/sessions` (newest `.jsonl` per session dir, modified
  * within 30 days, `cwd` read from the first line's ≤4 KiB head), ③ the spawn history the caller
  * injects. Every candidate is realpath'd and kept only if it still is a directory; entries are
- * ordered by last-activity descending and capped at `KNOWN_DIR_LIMIT` (50) — the capped list is
- * BOTH what `GET /api/headless/dirs` returns and the membership set `admit` tests against, so
- * the UI's recent list and the admission verdict can never disagree. The scan caches for
+ * ordered by last-activity descending and capped at `KNOWN_DIR_LIMIT` (50). Source ④ (hub-created
+ * dirs) has its OWN bounded set/cache/budget: authorization unions both sets, while the merged
+ * recent display alone is capped at 50. Every displayed entry has standing; created entries
+ * never evict a legacy authorization. The legacy scan caches for
  * `KNOWN_CACHE_MS`, is single-flight, and is bounded by `min(KNOWN_SCAN_BUDGET_MS, deadline
  * remaining)`; when the budget runs out mid-scan the partial result is returned (`partial:true`)
  * and — for `admit` — acts fail-closed: a directory not in the (possibly partial) set simply is
@@ -30,7 +31,7 @@
  * `as`-free by contract (plan SP7 source scan), so all narrowing here is type guards +
  * `in`-narrowing.
  */
-import { closeSync, constants, fstatSync, openSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readlinkSync } from "node:fs";
 import { access, open, readdir, realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { SPAWN_CWD_MAX_BYTES } from "../../protocol/spawn.js";
@@ -38,6 +39,8 @@ import type { DirEntryWire } from "../../protocol/spawn.js";
 import { raceDeadline } from "../req-deadline.js";
 import type { ReqDeadline } from "../req-deadline.js";
 import type { SpawnRegistryPort } from "./ports.js";
+import { CREATED_DIRS_TTL_MS } from "./created-dirs.js";
+import type { CreatedDirRecord } from "./created-dirs.js";
 
 // ---------------------------------------------------------------------------
 // tunables (arch §4.5 — every number the scan/admit budgets are built from)
@@ -47,6 +50,9 @@ import type { SpawnRegistryPort } from "./ports.js";
 export const KNOWN_CACHE_MS = 60_000;
 /** Hard cap of one full known-directories scan (`min(this, deadline remaining)`). */
 export const KNOWN_SCAN_BUDGET_MS = 2_000;
+/** Source ④ has an independent budget and retries partial results sooner. */
+export const CREATED_SCAN_BUDGET_MS = 1_000;
+export const CREATED_PARTIAL_CACHE_MS = 5_000;
 /** Max entries returned / membership-tested (`GET /api/headless/dirs`'s `recent`). */
 export const KNOWN_DIR_LIMIT = 50;
 /** Session dirs whose newest `.jsonl` is older than this fall out of source ②. */
@@ -83,6 +89,7 @@ export interface DirFs {
   openSync(path: string, flags: number): number;
   fstatSync(fd: number): DirStat;
   closeSync(fd: number): void;
+  readlinkSync(path: string): string;
 }
 
 /** Real-filesystem defaults; tests wrap/count/delay individual methods on top of this. */
@@ -115,6 +122,7 @@ export const defaultDirFs: DirFs = {
   openSync: (path, flags) => openSync(path, flags),
   fstatSync: (fd) => fstatSync(fd),
   closeSync: (fd) => closeSync(fd),
+  readlinkSync: (path) => readlinkSync(path),
 };
 
 // ---------------------------------------------------------------------------
@@ -130,7 +138,8 @@ export type AdmitRejection =
 
 /** `admit`'s verdict: on success carries the pinned identity fork will re-verify. */
 export type AdmitResult =
-  { ok: true; realpath: string; dev: number; ino: number; known: boolean } | { ok: false; reason: AdmitRejection };
+  | { ok: true; realpath: string; dev: number; ino: number; known: boolean; viaCreated?: true }
+  | { ok: false; reason: AdmitRejection };
 
 /**
  * `pinSync`'s verdict: `changed` = a directory still sits at the path but it is a DIFFERENT one
@@ -148,6 +157,8 @@ export interface DirServiceDeps {
   /** SP7's store records, projected to just what ordering needs. */
   spawnHistory: () => readonly { cwd: string; updatedAt: number }[];
   now: () => number;
+  /** Absent ⇒ no source-④ work or additional fs calls. */
+  createdDirs?: () => readonly CreatedDirRecord[];
   fs?: Partial<DirFs>;
 }
 
@@ -167,7 +178,11 @@ export interface DirService {
     deadline: ReqDeadline,
     opts?: { sessionBacked?: true },
   ): Promise<AdmitResult>;
-  pinSync(admitted: { realpath: string; dev: number; ino: number }): PinResult;
+  /** Fresh roots through source ④'s one-physical-op resolver. Busy/timeout ⇒ false. */
+  insideRoots(path: string, deadline: ReqDeadline): Promise<boolean>;
+  /** Only source ④ is invalidated — never the legacy membership/cache. */
+  invalidate(): void;
+  pinSync(admitted: { realpath: string; dev: number; ino: number }, opts?: { canonical?: true }): PinResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +268,124 @@ export function createDirService(deps: DirServiceDeps): DirService {
 
   let cache: ScanState | undefined;
   let inflight: Promise<ScanState> | undefined;
+
+  interface CreatedIdentity {
+    dev: number;
+    ino: number;
+    createdAt: number;
+    expiresAt: number;
+  }
+  interface CreatedState {
+    map: ReadonlyMap<string, CreatedIdentity>;
+    partial: boolean;
+    at: number;
+    gen: number;
+  }
+  let createdCache: CreatedState | undefined;
+  let createdInflight: { gen: number; promise: Promise<CreatedState> } | undefined;
+  let createdGen = 0;
+  // Released only on PHYSICAL settlement, not when the caller's deadline wins. A hung root
+  // can consume at most one libuv thread, across invalidation, scans and insideRoots alike.
+  let resolverBusy = false;
+
+  async function resolveCreated<T>(lazy: () => Promise<T>, left: () => number): Promise<T> {
+    if (resolverBusy || left() <= 0) throw new Error("E_DEADLINE");
+    resolverBusy = true;
+    const physical = Promise.resolve().then(lazy);
+    const settled = physical.then(
+      (value) => {
+        resolverBusy = false;
+        return value;
+      },
+      (err: unknown) => {
+        resolverBusy = false;
+        throw err;
+      },
+    );
+    return raceDeadline(settled, Math.max(0, left()));
+  }
+
+  async function resolveRoots(left: () => number): Promise<string[]> {
+    const roots: string[] = [];
+    for (const raw of deps.roots) {
+      const expanded = expandTilde(raw, deps.home);
+      if (!expanded.startsWith("/") || expanded.includes("\0")) continue;
+      try {
+        roots.push(await resolveCreated(() => fs.realpath(expanded), left));
+      } catch (err) {
+        if (isDeadlineError(err)) throw err;
+        // A missing/unreadable root matches nothing; other roots may still work.
+      }
+    }
+    return roots;
+  }
+
+  async function insideRoots(path: string, deadline: ReqDeadline): Promise<boolean> {
+    if (resolverBusy) return false;
+    const at = deps.now() + Math.max(0, Math.min(CREATED_SCAN_BUDGET_MS, deadline.remaining()));
+    try {
+      const roots = await resolveRoots(() => at - deps.now());
+      return roots.some((root) => withinRoot(root, path));
+    } catch {
+      return false;
+    }
+  }
+
+  async function scanCreated(budgetMs: number, gen: number): Promise<CreatedState> {
+    const map = new Map<string, CreatedIdentity>();
+    let partial = false;
+    const result = (): CreatedState => ({ map, partial, at: deps.now(), gen });
+    if (resolverBusy || budgetMs <= 0) {
+      partial = true;
+      return result();
+    }
+    const at = deps.now() + budgetMs;
+    const left = (): number => at - deps.now();
+    try {
+      // Snapshot once; roots resolved once per scan, never per entry.
+      const records = deps.createdDirs?.() ?? [];
+      const roots = await resolveRoots(left);
+      for (const rec of records) {
+        const expiresAt = rec.createdAt + CREATED_DIRS_TTL_MS;
+        if (deps.now() >= expiresAt || !roots.some((root) => withinRoot(root, rec.path))) continue;
+        try {
+          const rp = await resolveCreated(() => fs.realpath(rec.path), left);
+          if (rp !== rec.path) continue;
+          const st = await resolveCreated(() => fs.stat(rp), left);
+          if (st.isDirectory() && st.dev === rec.dev && st.ino === rec.ino) {
+            map.set(rp, { dev: rec.dev, ino: rec.ino, createdAt: rec.createdAt, expiresAt });
+          }
+        } catch (err) {
+          if (isDeadlineError(err)) throw err;
+        }
+      }
+    } catch {
+      partial = true;
+    }
+    return result();
+  }
+
+  async function currentCreated(deadline: ReqDeadline): Promise<CreatedState> {
+    const ttl = createdCache?.partial ? CREATED_PARTIAL_CACHE_MS : KNOWN_CACHE_MS;
+    if (createdCache !== undefined && deps.now() - createdCache.at < ttl) return createdCache;
+    if (createdInflight?.gen === createdGen) return createdInflight.promise;
+    const gen = createdGen;
+    const started = scanCreated(Math.max(0, Math.min(CREATED_SCAN_BUDGET_MS, deadline.remaining())), gen);
+    const flight = { gen, promise: started };
+    createdInflight = flight;
+    try {
+      const st = await started;
+      if (createdGen === gen) createdCache = st;
+      return st;
+    } finally {
+      if (createdInflight === flight) createdInflight = undefined;
+    }
+  }
+
+  function invalidate(): void {
+    createdCache = undefined;
+    createdGen++;
+  }
 
   /** Cache-if-fresh, single-flight, else scan with `min(KNOWN_SCAN_BUDGET_MS, remaining)`. */
   async function currentScan(deadline: ReqDeadline): Promise<ScanState> {
@@ -371,8 +504,21 @@ export function createDirService(deps: DirServiceDeps): DirService {
   }
 
   async function known(deadline: ReqDeadline): Promise<{ entries: readonly DirEntryWire[]; partial: boolean }> {
-    const st = await currentScan(deadline);
-    return { entries: st.entries, partial: st.partial };
+    if (deps.createdDirs === undefined) {
+      const st = await currentScan(deadline);
+      return { entries: st.entries, partial: st.partial };
+    }
+    const [legacy, created] = await Promise.all([currentScan(deadline), currentCreated(deadline)]);
+    const merged = new Map(legacy.entries.map((e) => [e.cwd, e]));
+    for (const [path, rec] of created.gen === createdGen ? created.map : []) {
+      if (deps.now() >= rec.expiresAt) continue;
+      const prev = merged.get(path);
+      if (prev === undefined || prev.at < rec.createdAt) {
+        merged.set(path, { cwd: path, label: basename(path), at: rec.createdAt });
+      }
+    }
+    const entries = [...merged.values()].sort((a, b) => b.at - a.at).slice(0, KNOWN_DIR_LIMIT);
+    return { entries, partial: legacy.partial || created.partial || created.gen !== createdGen };
   }
 
   async function admit(
@@ -420,8 +566,25 @@ export function createDirService(deps: DirServiceDeps): DirService {
     }
 
     // Step 3 — known membership (shared cache/scan; a partial scan is fail-closed).
-    const scanState = await currentScan(deadline);
+    const legacy = currentScan(deadline);
+    const created = deps.createdDirs === undefined ? undefined : currentCreated(deadline);
+    const scanState = await legacy;
     if (scanState.knownSet.has(rp)) return { ok: true, realpath: rp, dev: st.dev, ino: st.ino, known: true };
+    if (created !== undefined) {
+      const createdState = await created;
+      const rec = createdState.gen === createdGen ? createdState.map.get(rp) : undefined;
+      if (
+        rec !== undefined &&
+        deps.now() < rec.expiresAt &&
+        rec.dev === st.dev &&
+        rec.ino === st.ino &&
+        (await insideRoots(rp, deadline)) &&
+        deps.now() < rec.expiresAt &&
+        createdState.gen === createdGen
+      ) {
+        return { ok: true, realpath: rp, dev: st.dev, ino: st.ino, known: true, viaCreated: true };
+      }
+    }
 
     // Step 4 — roots (scope "roots" only): each root realpath'd NOW, segment-aligned.
     if (scope === "roots") {
@@ -448,7 +611,7 @@ export function createDirService(deps: DirServiceDeps): DirService {
     }
   }
 
-  function pinSync(admitted: { realpath: string; dev: number; ino: number }): PinResult {
+  function pinSync(admitted: { realpath: string; dev: number; ino: number }, opts?: { canonical?: true }): PinResult {
     let fd: number;
     try {
       fd = fs.openSync(admitted.realpath, constants.O_RDONLY | constants.O_DIRECTORY);
@@ -462,12 +625,19 @@ export function createDirService(deps: DirServiceDeps): DirService {
         closeQuiet(fd);
         return { ok: false, reason: "changed" };
       }
-      return { ok: true, fd, cwdArg: `/proc/self/fd/${String(fd)}` };
+      const cwdArg = `/proc/self/fd/${String(fd)}`;
+      // Identity alone misses a move + symlink back to the SAME inode (including parent swaps).
+      // Kernel readlink on this opened fd must reproduce the admitted canonical path exactly.
+      if (opts?.canonical === true && fs.readlinkSync(cwdArg) !== admitted.realpath) {
+        closeQuiet(fd);
+        return { ok: false, reason: "changed" };
+      }
+      return { ok: true, fd, cwdArg };
     } catch {
       closeQuiet(fd);
       return { ok: false, reason: "changed" };
     }
   }
 
-  return { known, admit, pinSync };
+  return { known, admit, pinSync, insideRoots, invalidate };
 }

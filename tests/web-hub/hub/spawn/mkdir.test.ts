@@ -170,3 +170,104 @@ describe("createMkdirService — post-create mode (2026-10-16 ruling)", () => {
     expect(log?.lines.filter((l) => l.level === "warn")).toHaveLength(1);
   });
 });
+
+describe("createMkdirService — source ④ identity opt-in", () => {
+  it("real identify returns dev/ino of the created child after chmod", async () => {
+    if (tmpRoot === undefined) throw new Error("fixture missing");
+    const parent = join(tmpRoot, "identity-parent");
+    mkdirSync(parent);
+    const svc = createMkdirService(baseDeps({ identify: true, dirMode: 0o775 }));
+    const r = await svc.mkdir(parent, "fresh", deadline());
+    const st = statSync(join(parent, "fresh"));
+    expect(r).toEqual({ ok: true, path: join(parent, "fresh"), identity: { dev: st.dev, ino: st.ino } });
+    expect(st.mode & 0o777).toBe(0o775);
+  });
+
+  it("identify runs once on resolved child, after the optional mode step", async () => {
+    const { fs, calls } = fakeFs();
+    const steps: string[] = [];
+    const svc = createMkdirService(
+      baseDeps({
+        identify: true,
+        dirMode: 0o775,
+        fs: {
+          ...fs,
+          realpath: async () => "/srv/resolved",
+          chmodDir: async () => {
+            steps.push("chmod");
+          },
+          identify: async (p) => {
+            steps.push(`identify:${p}`);
+            return { dev: 12, ino: 34 };
+          },
+        },
+      }),
+    );
+    expect(await svc.mkdir("/srv/link", "new", deadline())).toEqual({
+      ok: true,
+      path: "/srv/resolved/new",
+      identity: { dev: 12, ino: 34 },
+    });
+    expect(calls).toEqual([{ kind: "mkdir", p: "/srv/resolved/new" }]);
+    expect(steps).toEqual(["chmod", "identify:/srv/resolved/new"]);
+  });
+
+  it("identify absent: exact old call sequence, no identity property", async () => {
+    const { fs, calls } = fakeFs();
+    const svc = createMkdirService(
+      baseDeps({
+        fs: {
+          ...fs,
+          identify: async () => {
+            throw new Error("must not run");
+          },
+        },
+      }),
+    );
+    expect(await svc.mkdir("/srv/data", "plain", deadline())).toEqual({ ok: true, path: "/srv/data/plain" });
+    expect(calls).toEqual([
+      { kind: "realpath", p: "/srv/data" },
+      { kind: "mkdir", p: "/srv/data/plain" },
+    ]);
+    expect(log?.lines).toEqual([]);
+  });
+
+  it.each(["EACCES", "ELOOP", "E_DEADLINE"])("identify %s ⇒ still ok without identity + warn", async (code) => {
+    const { fs } = fakeFs();
+    const svc = createMkdirService(
+      baseDeps({
+        identify: true,
+        fs: {
+          ...fs,
+          identify: async () => {
+            throw errnoError(code);
+          },
+        },
+      }),
+    );
+    expect(await svc.mkdir("/srv/data", "unregistered", deadline())).toEqual({
+      ok: true,
+      path: "/srv/data/unregistered",
+    });
+    expect(log?.lines.filter((l) => l.level === "warn")).toHaveLength(1);
+  });
+
+  it("never-settling identify is bounded and returns mkdir success without identity", async () => {
+    const { fs } = fakeFs();
+    const svc = createMkdirService(
+      baseDeps({
+        identify: true,
+        stepCapMs: 30,
+        fs: {
+          ...fs,
+          identify: () => new Promise<{ dev: number; ino: number }>(() => {}),
+        },
+      }),
+    );
+    expect(await svc.mkdir("/srv/data", "slow-identify", deadline())).toEqual({
+      ok: true,
+      path: "/srv/data/slow-identify",
+    });
+    expect(log?.lines.filter((l) => l.level === "warn")).toHaveLength(1);
+  });
+});

@@ -53,6 +53,8 @@ export interface MkdirFs {
   mkdir(p: string): Promise<void>;
   /** fd-pinned chmod WITHOUT following symlinks (the post-create mode step — see header). */
   chmodDir(p: string, mode: number): Promise<void>;
+  /** Open O_RDONLY|O_DIRECTORY|O_NOFOLLOW, fstat, close (one bounded step). */
+  identify(p: string): Promise<{ dev: number; ino: number }>;
 }
 
 export interface MkdirServiceDeps {
@@ -70,10 +72,16 @@ export interface MkdirServiceDeps {
    * a successful create, best-effort (failure ⇒ warn, still `ok:true`). hub.ts passes
    * `0o777 & ~childUmask`; undefined ⇒ today's umask-masked mkdir behavior, zero extra fs. */
   dirMode?: number;
+  /** Source ④ opt-in; absent ⇒ exactly the old fs call sequence. */
+  identify?: true;
 }
 
 export type MkdirResult =
-  | { ok: true; /** the created directory's RESOLVED absolute path */ path: string }
+  | {
+      ok: true;
+      /** the created directory's RESOLVED absolute path */ path: string;
+      identity?: { dev: number; ino: number };
+    }
   | { ok: false; status: number; code: string; reason?: string };
 
 export interface MkdirService {
@@ -100,6 +108,17 @@ async function chmodDirReal(p: string, mode: number): Promise<void> {
   const fh = await open(p, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     await fh.chmod(mode);
+  } finally {
+    await fh.close();
+  }
+}
+
+/** Identity is captured from the child FD, never through a second path stat. */
+async function identifyReal(p: string): Promise<{ dev: number; ino: number }> {
+  const fh = await open(p, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const st = await fh.stat();
+    return { dev: st.dev, ino: st.ino };
   } finally {
     await fh.close();
   }
@@ -144,6 +163,7 @@ export function createMkdirService(deps: MkdirServiceDeps): MkdirService {
     realpath: (p) => realpath(p),
     mkdir: (p) => mkdir(p),
     chmodDir: (p, mode) => chmodDirReal(p, mode),
+    identify: (p) => identifyReal(p),
     ...deps.fs,
   };
 
@@ -195,6 +215,16 @@ export function createMkdirService(deps: MkdirServiceDeps): MkdirService {
             await step(() => fs.chmodDir(child, dirMode));
           } catch (err) {
             deps.log.warn("web-hub mkdir: dir mode apply failed", { error: String(err) });
+          }
+        }
+        if (deps.identify === true) {
+          try {
+            const identity = await step(() => fs.identify(child));
+            return { ok: true, path: child, identity };
+          } catch (err) {
+            // The directory was already created: registration is best effort, never turn
+            // identity/busy/deadline failure into an erroneous mkdir failure.
+            deps.log.warn("web-hub mkdir: identity capture failed", { error: String(err) });
           }
         }
         return { ok: true, path: child };

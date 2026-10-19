@@ -32,6 +32,7 @@ import type { FakeSpawnRegistry } from "../../contract/fakes.js";
 import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import {
   ADMIT_REALPATH_BUDGET_MS,
+  CREATED_PARTIAL_CACHE_MS,
   KNOWN_CACHE_MS,
   KNOWN_DIR_LIMIT,
   KNOWN_SESSION_MAX_AGE_MS,
@@ -41,6 +42,7 @@ import {
   withinRoot,
 } from "../../../../src/web-hub/hub/spawn/dirs.js";
 import type { DirFs } from "../../../../src/web-hub/hub/spawn/dirs.js";
+import { CREATED_DIRS_TTL_MS, type CreatedDirRecord } from "../../../../src/web-hub/hub/spawn/created-dirs.js";
 import type { SpawnRegistryPort } from "../../../../src/web-hub/hub/spawn/ports.js";
 
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -76,6 +78,7 @@ interface SvcOpts {
   spawnHistory?: () => readonly { cwd: string; updatedAt: number }[];
   now?: () => number;
   fs?: Partial<DirFs>;
+  createdDirs?: () => readonly CreatedDirRecord[];
 }
 
 function makeSvc(opts: SvcOpts = {}) {
@@ -88,6 +91,7 @@ function makeSvc(opts: SvcOpts = {}) {
     spawnHistory: opts.spawnHistory ?? (() => []),
     now: opts.now ?? realNow,
     fs: opts.fs,
+    ...(opts.createdDirs === undefined ? {} : { createdDirs: opts.createdDirs }),
   });
   return { service, registry };
 }
@@ -678,5 +682,414 @@ describe("pinSync (arch §4.2/#7)", () => {
     } finally {
       closeSync(pin.fd); // caller-owned fd, closed after spawn per the contract
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// created-dirs plan r2: independent source ④, union authorization + canonical pin
+// ---------------------------------------------------------------------------
+function createdRecord(path: string, at = realNow()): CreatedDirRecord {
+  const st = statSync(path);
+  return { path: realpathSync(path), dev: st.dev, ino: st.ino, createdAt: at, by: { listener: "lan" } };
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+describe("source ④: created dirs", () => {
+  it("admits a created dir under known with known:true/viaCreated, and resolves roots only once per scan", async () => {
+    const base = mkdirp(join(root, "created-known"));
+    const dirs = [mkdirp(join(base, "a")), mkdirp(join(base, "b"))];
+    let rootReads = 0;
+    const { service } = makeSvc({
+      roots: [base],
+      createdDirs: () => dirs.map((d) => createdRecord(d)),
+      fs: {
+        realpath: (p) => {
+          if (p === base) rootReads++;
+          return defaultDirFs.realpath(p);
+        },
+      },
+    });
+    const known = await service.known(dl());
+    expect(known.entries.map((e) => e.cwd).sort()).toEqual(dirs);
+    expect(known.partial).toBe(false);
+    expect(rootReads).toBe(1);
+    expect(await service.admit(dirs[0]!, "known", dl())).toMatchObject({ ok: true, known: true, viaCreated: true });
+    expect(rootReads).toBe(2); // cached source + freshly resolved roots at admit
+  });
+
+  it.each(["outside", "empty-roots", "missing-root"])("%s matches nothing in source ④", async (kind) => {
+    const dir = mkdirp(join(root, `created-${kind}`));
+    const roots = kind === "empty-roots" ? [] : [kind === "missing-root" ? join(root, "root-absent") : home];
+    const { service } = makeSvc({ roots, createdDirs: () => [createdRecord(dir)] });
+    expect((await service.known(dl())).entries).toEqual([]);
+    expect(await service.admit(dir, "known", dl())).toEqual({ ok: false, reason: "not-allowed" });
+  });
+
+  it.each([false, true])(
+    "scan/cached-admit reject replaced, symlinked, deleted, and root-changed dirs (cached=%s)",
+    async (cached) => {
+      for (const kind of ["replaced", "symlink", "deleted", "root-changed"]) {
+        const base = mkdirp(join(root, `created-${String(cached)}-${kind}`));
+        const dir = mkdirp(join(base, "child"));
+        const rec = createdRecord(dir);
+        const roots = [base];
+        const { service } = makeSvc({ roots, createdDirs: () => [rec] });
+        if (cached) expect((await service.known(dl())).entries.map((e) => e.cwd)).toEqual([dir]);
+        if (kind === "root-changed") roots[0] = home;
+        else if (kind === "deleted") rmSync(dir, { recursive: true });
+        else {
+          renameSync(dir, `${dir}-moved`);
+          if (kind === "replaced") mkdirSync(dir);
+          else symlinkSync(`${dir}-moved`, dir);
+        }
+        expect(await service.admit(dir, "known", dl())).toEqual({
+          ok: false,
+          reason: kind === "deleted" ? "not-found" : "not-allowed",
+        });
+        if (!cached) expect((await service.known(dl())).entries).toEqual([]);
+      }
+    },
+  );
+
+  it("fresh root resolution rejects a changed root symlink even while source cache is warm", async () => {
+    const base = mkdirp(join(root, "created-root-target"));
+    const dir = mkdirp(join(base, "child"));
+    const link = join(root, "created-root-link");
+    symlinkSync(base, link);
+    const { service } = makeSvc({ roots: [link], createdDirs: () => [createdRecord(dir)] });
+    await service.known(dl());
+    rmSync(link);
+    symlinkSync(home, link);
+    expect(await service.admit(dir, "known", dl())).toEqual({ ok: false, reason: "not-allowed" });
+  });
+
+  it("50 legacy + 50 created: every legacy stays admitted while display alone is capped at 50", async () => {
+    const base = mkdirp(join(root, "created-union"));
+    const legacy = Array.from({ length: 50 }, (_, i) => mkdirp(join(base, `legacy-${i}`)));
+    const created = Array.from({ length: 50 }, (_, i) => createdRecord(mkdirp(join(base, `new-${i}`))));
+    const { service } = makeSvc({
+      roots: [base],
+      spawnHistory: () => legacy.map((cwd, i) => ({ cwd, updatedAt: i })),
+      createdDirs: () => created,
+    });
+    const known = await service.known(dl(5_000));
+    expect(known.entries).toHaveLength(50);
+    expect(known.entries.every((e) => e.cwd.includes("/new-"))).toBe(true);
+    for (const cwd of legacy) expect(await service.admit(cwd, "known", dl())).toMatchObject({ ok: true, known: true });
+    for (const rec of created)
+      expect(await service.admit(rec.path, "known", dl())).toMatchObject({ ok: true, known: true, viaCreated: true });
+  });
+
+  it("expiry on cached admit is checked without rescan (and does not leak into recent)", async () => {
+    const base = mkdirp(join(root, "created-expiry"));
+    const dir = mkdirp(join(base, "child"));
+    let t = realNow();
+    const rec = createdRecord(dir, t - CREATED_DIRS_TTL_MS + 1_000);
+    let scans = 0;
+    const { service } = makeSvc({
+      roots: [base],
+      now: () => t,
+      createdDirs: () => {
+        scans++;
+        return [rec];
+      },
+    });
+    expect(await service.admit(dir, "known", dl())).toMatchObject({ ok: true, viaCreated: true });
+    t += 1_000;
+    expect(await service.admit(dir, "known", dl())).toEqual({ ok: false, reason: "not-allowed" });
+    expect((await service.known(dl())).entries).toEqual([]);
+    expect(scans).toBe(1);
+  });
+
+  it("invalidate refreshes only source ④, never legacy cache; concurrent callers share the scan", async () => {
+    const base = mkdirp(join(root, "created-invalidate"));
+    const a = mkdirp(join(base, "a"));
+    const b = mkdirp(join(base, "b"));
+    let records = [createdRecord(a)];
+    let sourceReads = 0;
+    let legacyReads = 0;
+    const { service } = makeSvc({
+      roots: [base],
+      createdDirs: () => {
+        sourceReads++;
+        return records;
+      },
+      fs: {
+        readdirDirs: async () => {
+          legacyReads++;
+          return [];
+        },
+      },
+    });
+    const [one, two] = await Promise.all([service.known(dl()), service.known(dl())]);
+    expect(one).toEqual(two);
+    expect(sourceReads).toBe(1);
+    records = [createdRecord(b)];
+    expect((await service.known(dl())).entries.map((e) => e.cwd)).toEqual([a]);
+    service.invalidate();
+    expect((await service.known(dl())).entries.map((e) => e.cwd)).toEqual([b]);
+    expect(legacyReads).toBe(1);
+    expect(sourceReads).toBe(2);
+  });
+
+  it("an invalidated inflight old generation is neither joined nor cached", async () => {
+    const base = mkdirp(join(root, "created-generation"));
+    const a = mkdirp(join(base, "a"));
+    const b = mkdirp(join(base, "b"));
+    let records = [createdRecord(a)];
+    const gate = deferred<string>();
+    const entered = deferred<void>();
+    let rootReads = 0;
+    let sourceReads = 0;
+    let t = realNow();
+    const { service } = makeSvc({
+      roots: [base],
+      now: () => t,
+      createdDirs: () => {
+        sourceReads++;
+        return records;
+      },
+      fs: {
+        realpath: (p) => {
+          if (p === base && ++rootReads === 1) {
+            entered.resolve();
+            return gate.promise;
+          }
+          return defaultDirFs.realpath(p);
+        },
+      },
+    });
+    const old = service.known(dl());
+    await entered.promise;
+    service.invalidate();
+    records = [createdRecord(b)];
+    const newer = await service.known(dl()); // busy ⇒ empty partial, not joined to old generation
+    expect(newer).toEqual({ entries: [], partial: true });
+    gate.resolve(base);
+    expect((await old).entries).toEqual([]); // stale scan cannot publish standing either
+    expect((await service.known(dl())).entries).toEqual([]); // old completion cannot overwrite newer cache
+    t += CREATED_PARTIAL_CACHE_MS;
+    expect((await service.known(dl())).entries.map((e) => e.cwd)).toEqual([b]);
+    expect(sourceReads).toBe(2); // initial scan and post-partial retry only
+  });
+
+  it("one hung root: legacy admits do not wait, retries after 5s never start a second physical ④ op", async () => {
+    const base = mkdirp(join(root, "created-zombie"));
+    const dir = mkdirp(join(base, "child"));
+    const legacy = mkdirp(join(root, "legacy-with-zombie"));
+    let t = realNow();
+    let active = 0;
+    let maxActive = 0;
+    let rootReads = 0;
+    const { service } = makeSvc({
+      roots: [base],
+      now: () => t,
+      spawnHistory: () => [{ cwd: legacy, updatedAt: t }],
+      createdDirs: () => [createdRecord(dir, t)],
+      fs: {
+        realpath: (p) => {
+          if (p !== base) return defaultDirFs.realpath(p);
+          rootReads++;
+          maxActive = Math.max(maxActive, ++active);
+          return new Promise<string>(() => {});
+        },
+      },
+    });
+    expect(await service.admit(legacy, "known", dl(100))).toMatchObject({ ok: true, known: true });
+    const partial = await service.known(dl(150));
+    expect(partial.partial).toBe(true);
+    expect(partial.entries.map((e) => e.cwd)).toEqual([legacy]);
+    expect(await service.insideRoots(dir, dl())).toBe(false);
+    t += CREATED_PARTIAL_CACHE_MS;
+    expect((await service.known(dl())).partial).toBe(true);
+    expect(await service.admit(dir, "known", dl())).toEqual({ ok: false, reason: "not-allowed" });
+    expect(rootReads).toBe(1);
+    expect(maxActive).toBe(1);
+  });
+
+  it("independent budget: a hung legacy scan cannot prevent source ④ from being scanned concurrently", async () => {
+    const base = mkdirp(join(root, "created-independent"));
+    const dir = mkdirp(join(base, "child"));
+    let sourceReads = 0;
+    const { service } = makeSvc({
+      roots: [base],
+      createdDirs: () => {
+        sourceReads++;
+        return [createdRecord(dir)];
+      },
+      fs: {
+        readdirDirs: () => new Promise<string[]>(() => {}),
+      },
+    });
+    const result = await service.known(dl(80));
+    expect(result.partial).toBe(true);
+    expect(result.entries.map((e) => e.cwd)).toEqual([dir]);
+    expect(sourceReads).toBe(1);
+  });
+
+  it("createdDirs absent: exact legacy fs call log, including roots and pin without readlink", async () => {
+    const calls: string[] = [];
+    const dir = "/allowed/child";
+    const st = { dev: 1, ino: 2, mtimeMs: 0, isDirectory: () => true };
+    const { service } = makeSvc({
+      roots: ["/allowed"],
+      fs: {
+        realpath: async (p) => {
+          calls.push(`realpath:${p}`);
+          return p;
+        },
+        stat: async (p) => {
+          calls.push(`stat:${p}`);
+          return st;
+        },
+        access: async (p) => {
+          calls.push(`access:${p}`);
+        },
+        readdirDirs: async () => {
+          calls.push("readdirDirs:sessions");
+          return [];
+        },
+        openSync: (p) => {
+          calls.push(`open:${p}`);
+          return 17;
+        },
+        fstatSync: (fd) => {
+          calls.push(`fstat:${fd}`);
+          return st;
+        },
+        closeSync: (fd) => {
+          calls.push(`close:${fd}`);
+        },
+        readlinkSync: (p) => {
+          calls.push(`readlink:${p}`);
+          return dir;
+        },
+      },
+    });
+    const admitted = await service.admit(dir, "roots", dl());
+    expect(admitted).toEqual({ ok: true, realpath: dir, dev: 1, ino: 2, known: false });
+    if (!admitted.ok) throw new Error("missing admission");
+    expect(service.pinSync(admitted)).toEqual({ ok: true, fd: 17, cwdArg: "/proc/self/fd/17" });
+    await service.known(dl());
+    expect(calls).toEqual([
+      "realpath:/allowed/child",
+      "stat:/allowed/child",
+      "access:/allowed/child",
+      "readdirDirs:sessions",
+      "realpath:/allowed",
+      "open:/allowed/child",
+      "fstat:17",
+    ]);
+  });
+});
+
+describe.skipIf(!isLinux)("pinSync canonical (created-only fresh starts)", () => {
+  it.each(["directory", "parent"])(
+    "detects %s moved outside roots + symlink back, while legacy pin stays unchanged",
+    async (kind) => {
+      const base = mkdirp(join(root, `canonical-${kind}`));
+      const parent = mkdirp(join(base, "parent"));
+      const dir = mkdirp(join(parent, "child"));
+      const { service } = makeSvc({ roots: [base], createdDirs: () => [createdRecord(dir)] });
+      const admitted = await service.admit(dir, "known", dl());
+      if (!admitted.ok) throw new Error("admission failed");
+      const moved = join(root, `canonical-${kind}-moved`);
+      const src = kind === "parent" ? parent : dir;
+      renameSync(src, moved);
+      symlinkSync(moved, src);
+      expect(service.pinSync(admitted, { canonical: true })).toEqual({ ok: false, reason: "changed" });
+      const legacy = service.pinSync(admitted);
+      expect(legacy.ok).toBe(true);
+      if (legacy.ok) closeSync(legacy.fd);
+    },
+  );
+
+  it("plain canonical pin succeeds and readlink errors/mismatch close the fd", async () => {
+    const dir = mkdirp(join(root, "canonical-plain"));
+    const { service } = makeSvc();
+    const st = statSync(dir);
+    const admitted = { realpath: dir, dev: st.dev, ino: st.ino };
+    const pin = service.pinSync(admitted, { canonical: true });
+    expect(pin.ok).toBe(true);
+    if (pin.ok) closeSync(pin.fd);
+    for (const failure of ["throw", "deleted"]) {
+      let closed = false;
+      const { service: bad } = makeSvc({
+        fs: {
+          readlinkSync: () => {
+            if (failure === "throw") throw new Error("no procfs");
+            return `${dir} (deleted)`;
+          },
+          closeSync: (fd) => {
+            closed = true;
+            closeSync(fd);
+          },
+        },
+      });
+      expect(bad.pinSync(admitted, { canonical: true })).toEqual({ ok: false, reason: "changed" });
+      expect(closed).toBe(true);
+    }
+  });
+});
+
+describe("source ④: late completion boundaries", () => {
+  it("a timed-out root releases only on physical settle; partial cache retries at 5s", async () => {
+    const base = mkdirp(join(root, "created-late-root"));
+    const dir = mkdirp(join(base, "child"));
+    const gate = deferred<string>();
+    let t = realNow();
+    let rootReads = 0;
+    const { service } = makeSvc({
+      roots: [base],
+      now: () => t,
+      createdDirs: () => [createdRecord(dir, t)],
+      fs: {
+        realpath: (p) => {
+          if (p === base && ++rootReads === 1) return gate.promise;
+          return defaultDirFs.realpath(p);
+        },
+      },
+    });
+    expect(await service.known(dl(30))).toEqual({ entries: [], partial: true });
+    expect(rootReads).toBe(1);
+    gate.resolve(base);
+    await gate.promise;
+    await Promise.resolve();
+    expect(await service.known(dl())).toEqual({ entries: [], partial: true });
+    t += CREATED_PARTIAL_CACHE_MS;
+    const retry = await service.known(dl());
+    expect(retry.partial).toBe(false);
+    expect(retry.entries.map((e) => e.cwd)).toEqual([dir]);
+    expect(rootReads).toBe(2);
+  });
+
+  it.each(["expiry", "invalidate"])("%s while fresh roots resolve cannot grant stale cached standing", async (kind) => {
+    const base = mkdirp(join(root, `created-admit-${kind}`));
+    const dir = mkdirp(join(base, "child"));
+    let t = realNow();
+    const rec = createdRecord(dir, t - CREATED_DIRS_TTL_MS + 1_000);
+    let rootReads = 0;
+    const { service } = makeSvc({
+      roots: [base],
+      now: () => t,
+      createdDirs: () => [rec],
+      fs: {
+        realpath: async (p) => {
+          if (p === base && ++rootReads === 2) {
+            if (kind === "expiry") t += 1_000;
+            else service.invalidate();
+          }
+          return defaultDirFs.realpath(p);
+        },
+      },
+    });
+    await service.known(dl());
+    expect(await service.admit(dir, "known", dl())).toEqual({ ok: false, reason: "not-allowed" });
   });
 });

@@ -37,6 +37,7 @@ describe("webHubSpawnFiles", () => {
       restoreVeto: "/home/u/.pi/agent/web-hub/spawn/restore.veto",
       // session-history plan §3.4 (PD12): hub-owned 0700 fork-snapshot dir
       forkSrcDir: "/home/u/.pi/agent/web-hub/spawn/fork-src",
+      createdDirsJson: "/home/u/.pi/agent/web-hub/spawn/created-dirs.json",
     });
     // the prefs file sits in the SAME stateDir webHubStateDir resolves — never re-derived
     expect(webHubSpawnFiles(webHubStateDir("/home/u")).prefsJson).toBe("/home/u/.pi/agent/web-hub/spawn-prefs.json");
