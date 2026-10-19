@@ -31,3 +31,10 @@ Each package's own wiring request: `docs/dev/web-hub/lan-security-wiring-<PKG>.m
   `/webhub passwd`).
 - Show QR / recovery codes via a widget rather than notify (truncation).
 - `repairNeeded` detail should come from B's real detail, not the fixed "2fa-missing-row".
+
+## Phase-1 integration verify follow-ups (r_9KH8R9H2, conditional pass, 2026-10-20)
+
+- Before flipping `secondFactorEnabled` (hub.ts:~861) add a real startHub-level regression test for the production gate (not only the frontend `=== true` default).
+- `proxy/service.ts:68,137`: make `clientAllow` required whenever `lan` is configured (drop the `| undefined` + inactive fallback); same for the `http.ts:~3025` `lan.clientAllow ?? createClientAllowGuard(...)` fallback.
+- Delete the dead legacy `runLanLogin` (+ its `store.createSession` call) in `lan-auth.ts` and its test-only callers, or document why it stays.
+- G (login UI) ships its styles as `src/web-hub/ui/src/styles/login-2fa.css` (no `<style>` blocks in .vue — source-scan gate): import it from `App.vue` next to `login.css`; mounting rules for `cancelSecondFactor()` live in `docs/dev/web-hub/lan-security-wiring-G.md`.
