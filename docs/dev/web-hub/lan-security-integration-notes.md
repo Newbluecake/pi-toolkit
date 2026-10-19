@@ -15,9 +15,10 @@ Each package's own wiring request: `docs/dev/web-hub/lan-security-wiring-<PKG>.m
 - **Closed (LAN-I/B):** Fake store parity: `tests/web-hub/contract/fakes.ts` `commitTotp` returns `recoveryCodes: []` when a set exists (addendum #4), including an exhausted set; shared fake + real SQLite contract suite added.
 - **Deferred (optional, outside wiring):** repair when the DB file is missing; self-eviction edge in the 32-session trim. No change to B's verified implementation in this phase.
 
-## From C (conditional pass, rework in progress)
+## From C (verified rework merged, LAN-I wired)
 
-- Schema-validate `body.method` before calling the core; `after()` only on response finish.
+- **Closed (LAN-I/C):** Strict `LanFactorBodySchema` validation (after recovery normalization) precedes `core.submitFactor`; response finish registers/executes `after()` exactly once, never close. Core owns all checked completions and the frontend subscribes/unsubscribes the revoke bus.
+- **Staged intentionally:** production `hub.ts` forces internal `secondFactorEnabled:false` until E/F/G + capability advertising land. An enrolled user's new-IP password login still completes (with real factor generation CAS); factor endpoints return 404. No new settings or capability activation. Tests enable the internal frontend seam only, never configuration/env.
 
 ## From F (verified conditional pass)
 

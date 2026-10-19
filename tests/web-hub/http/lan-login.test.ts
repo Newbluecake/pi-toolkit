@@ -157,7 +157,8 @@ describe("LAN login pipeline (plan §6.1, §6.4)", () => {
         throw new Error("boom");
       };
       const r = await lanPostJson(h.port, "/api/login", { username: "alice", password: "x" });
-      expect(r.status).toBe(500);
+      expect(r.status).toBe(503);
+      expect(JSON.parse(r.body)).toEqual({ error: "E_DB" });
       expect(calls).toBe(1);
       h.store.getUser = original;
       // the pipeline must not be wedged: a subsequent, well-formed login still works.

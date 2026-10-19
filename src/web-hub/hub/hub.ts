@@ -855,6 +855,10 @@ export async function startHub(
     }
     if (lanDeps !== undefined) {
       if (clientAllow !== undefined) lanDeps.clientAllow = clientAllow;
+      if (security !== undefined) lanDeps.security = security;
+      // Rollout gate: no factor challenge until E/F/G + advertised UI capability land together.
+      // Not configurable through settings/env, including for an already-enrolled database.
+      lanDeps.secondFactorEnabled = false;
       const dbRestartStore = lanDeps.store as Partial<LanStore>;
       if (typeof dbRestartStore.onRestartNeeded === "function") {
         unsubscribeDbRestart = dbRestartStore.onRestartNeeded(requestDbSelfRestart);

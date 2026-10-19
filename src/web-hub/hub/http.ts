@@ -93,7 +93,19 @@ import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import { createConnGuard } from "./conn-guard.js";
 import { createFileSearchRoutes, FILE_SEARCH_AUTH_RESERVE_MS, FILE_SEARCH_PATH } from "./file-search.js";
 import type { AgentRemoveFrontendPort, AgentRemoveIo } from "./agent-remove.js";
-import { formatLanCookie, hashSid, LAN_SESSION_COOKIE, runLanLogin, type LanLoginOutcome } from "./lan-auth.js";
+import { formatLanCookie, hashSid, LAN_SESSION_COOKIE } from "./lan-auth.js";
+import { Value } from "@sinclair/typebox/value";
+import { createLanLoginCore } from "./lan-login.js";
+import { createSecurityEventBus } from "./security-events.js";
+import {
+  LAN_2FA_COOKIE,
+  LAN_2FA_PATH,
+  LAN_2FA_WAIT_PATH,
+  LAN_2FA_CANCEL_PATH,
+  LanFactorBodySchema,
+  normalizeRecoveryCode,
+} from "../protocol/lan-2fa.js";
+import type { LanLoginCore, LoginIo, LoginReply } from "./ports.js";
 import { sameHostKeys } from "./net-hosts.js";
 import { UPLOAD_CHUNK_PATH, UPLOAD_TOTAL_MS } from "../protocol/upload.js";
 import { PREVIEW_PATH, PREVIEW_PROBE_PATH } from "../protocol/preview.js";
@@ -1073,6 +1085,7 @@ function createRouteSet(
 // ---------------------------------------------------------------------------
 
 export interface LanRuntime {
+  loginCore?: LanLoginCore;
   csp: string;
   lan: LanFrontendDeps;
   /** web-hub-proxy plan §4.2 (XA): the frontend-wide auth revocation bus (same instance as the
@@ -1528,6 +1541,105 @@ function isHeadlessPath(path: string): boolean {
   return path === "/api/headless" || path.startsWith("/api/headless/");
 }
 
+/** C's post-success work belongs to response finish, NEVER response close. */
+export function writeLanLoginReply(
+  result: LoginReply,
+  res: ServerResponse,
+  io: LoginIo,
+  lease: ConnLease,
+  abort: () => void,
+  log: HubLog,
+): void {
+  if (io.signal.aborted || !io.responseOpen()) {
+    abort();
+    lease.leaveLoginPending();
+    return;
+  }
+  if (result.after !== undefined) {
+    const after = result.after;
+    res.once("finish", () => {
+      void after().catch(() => log.error("web-hub lan login: after failed"));
+    });
+  }
+  if (result.status === 200 && "ok" in result.body) lease.enterAuthed();
+  else lease.leaveLoginPending();
+  // Node preserves arrays here (session + cleared challenge cookie); do not comma-join them.
+  for (const [name, value] of Object.entries(result.headers ?? {})) res.setHeader(name, value);
+  sendJson(res, result.status, result.body);
+}
+
+async function handleLanLogin(
+  rt: LanRuntime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RequestContext,
+  lease: ConnLease,
+  path: string,
+): Promise<void> {
+  const core = rt.loginCore;
+  if (core === undefined) throw new HttpError(503, "E_DB");
+  const controller = new AbortController();
+  let finished = false;
+  const abort = () => controller.abort();
+  const cleanup = () => {
+    req.off("aborted", abort);
+    res.off("close", close);
+  };
+  const close = () => {
+    if (!finished) abort();
+    cleanup();
+  };
+  req.once("aborted", abort);
+  res.once("close", close);
+  res.once("finish", () => {
+    finished = true;
+    cleanup();
+  });
+  // Ordinary IncomingMessage.close/end is a successfully read body, NOT client cancellation.
+  const io: LoginIo = {
+    ua: req.headers["user-agent"] ?? "",
+    signal: controller.signal,
+    responseOpen: () => !res.destroyed && !res.writableEnded,
+    onAdmitted: () => lease.enterLoginPending(),
+  };
+  try {
+    let result: LoginReply;
+    if (path === "/api/login") {
+      const body = await readJson(req, LAN_LOGIN_BODY_BYTES);
+      result = await core.passwordLogin(ctx, body, io.ua, io);
+    } else {
+      const token = cookieCandidates(req.headers.cookie, LAN_2FA_COOKIE, 1).values[0] ?? "";
+      lease.enterLoginPending();
+      if (path === LAN_2FA_WAIT_PATH) result = await core.waitApproval(token, ctx, io);
+      else if (path === LAN_2FA_CANCEL_PATH) {
+        core.cancel(token, ctx);
+        result = {
+          status: 200,
+          body: { ok: true },
+          headers: {
+            "Set-Cookie": `${LAN_2FA_COOKIE}=; HttpOnly; SameSite=Strict; Path=/api/login; Max-Age=0${ctx.scheme === "https" ? "; Secure" : ""}`,
+          },
+        };
+      } else {
+        const body = await readJson(req, LAN_LOGIN_BODY_BYTES);
+        // Strict schema validation precedes core admission/budget accounting. Never cast method.
+        const code = field(body, "code");
+        const normalized =
+          field(body, "method") === "recovery" && typeof code === "string"
+            ? { ...(body as Record<string, unknown>), code: normalizeRecoveryCode(code) }
+            : body;
+        if (!Value.Check(LanFactorBodySchema, normalized)) throw new HttpError(400, "E_BAD_REQUEST");
+        result = await core.submitFactor(token, normalized, ctx, io);
+      }
+    }
+    writeLanLoginReply(result, res, io, lease, abort, rt.log);
+  } catch (err) {
+    abort();
+    lease.leaveLoginPending();
+    throw err;
+  }
+}
+
 async function handleLanRequestInner(
   rt: LanRuntime,
   req: IncomingMessage,
@@ -1543,6 +1655,12 @@ async function handleLanRequestInner(
   const method = (req.method ?? "GET").toUpperCase();
 
   if (method === "OPTIONS") throw new HttpError(404, "E_NOT_FOUND");
+  if (
+    rt.lan.secondFactorEnabled !== true &&
+    (path === LAN_2FA_PATH || path === LAN_2FA_WAIT_PATH || path === LAN_2FA_CANCEL_PATH)
+  ) {
+    throw new HttpError(404, "E_NOT_FOUND");
+  }
 
   if (path === "/healthz") {
     if (method !== "GET" && method !== "HEAD") throw new HttpError(404, "E_NOT_FOUND");
@@ -1971,62 +2089,11 @@ async function handleLanRequestInner(
       });
     }
     if (!csrfOkLan(req, ctx)) throw new HttpError(403, "E_CSRF");
-    if (path === "/api/login") {
-      const body = await readJson(req, LAN_LOGIN_BODY_BYTES);
-      let outcome: LanLoginOutcome;
-      try {
-        outcome = await runLanLogin(
-          ctx,
-          body,
-          {
-            store: rt.lan.store,
-            kdf: rt.lan.kdf,
-            limiter: rt.lan.limiter,
-            admission: rt.lan.admission,
-            onCorruptKdfParams: (username, reason) => {
-              rt.log.error("web-hub lan http: corrupt kdf params (db-invalid:kdf)", { username, reason });
-              rt.markKdfInvalid();
-            },
-          },
-          rt.now(),
-          { onAdmitted: () => lease.enterLoginPending() },
-        );
-      } catch (err) {
-        // §6.3's class table (review fix, lan-plan.md §15.9 #1): every login-pending request must
-        // end by promoting to `authed` or falling back to the evictable `unauth` category — a
-        // store/KDF exception (e.g. a db timeout) is a terminal path too, not just 200/401/429.
-        lease.leaveLoginPending();
-        throw err;
-      }
-      if (outcome.status === 200) {
-        lease.enterAuthed();
-        sendJson(
-          res,
-          200,
-          // plan §10's wire field is `initialPassword` (review fix, lan-plan.md §15.9 #5) — this
-          // handler previously sent `initialPasswordInUse`, which the frontend never reads.
-          { ok: true, initialPassword: outcome.initialPasswordInUse },
-          { "Set-Cookie": formatLanCookie(outcome.cookie, { secure: ctx.scheme === "https" }) },
-        );
-      } else if (outcome.status === 429) {
-        lease.leaveLoginPending();
-        sendJson(
-          res,
-          429,
-          {
-            // review fix (lan-plan.md §15.9 #4): only the KDF fair-scheduling admission queue (safe
-            // to auto-retry) and the saturation sub-case (§6.2's own literal wire shape) get
-            // `E_RATE`; an ordinary per-IP backoff lockout gets the new `E_LOCKED` so the frontend's
-            // countdown-without-auto-retry branch (§10) is actually reachable.
-            error: outcome.kind === "admission" || outcome.saturated === true ? "E_RATE" : "E_LOCKED",
-            ...(outcome.saturated === true ? { saturated: true } : {}),
-          },
-          { "Retry-After": String(Math.ceil(outcome.retryAfterMs / 1000)) },
-        );
-      } else {
-        lease.leaveLoginPending();
-        sendError(res, 401, "E_AUTH");
-      }
+    if (
+      path === "/api/login" ||
+      (rt.lan.secondFactorEnabled === true && (path === LAN_2FA_PATH || path === LAN_2FA_CANCEL_PATH))
+    ) {
+      await handleLanLogin(rt, req, res, ctx, lease, path);
       return;
     }
     if (path === "/api/logout") {
@@ -2071,6 +2138,11 @@ async function handleLanRequestInner(
   }
 
   if (method === "GET") {
+    if (path === LAN_2FA_WAIT_PATH && rt.lan.secondFactorEnabled === true) {
+      if (req.headers["x-pwh"] !== "1") throw new HttpError(403, "E_CSRF");
+      await handleLanLogin(rt, req, res, ctx, lease, path);
+      return;
+    }
     if (path === "/api/session") {
       const session = await requireLanSession(rt, req, res, ctx, false, lease);
       if (session === undefined) return;
@@ -3034,6 +3106,31 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         lan.onStatus(status);
       },
     };
+    const loginCore = createLanLoginCore({
+      store: lan.store,
+      kdf: lan.kdf,
+      limiter: lan.limiter,
+      admission: lan.admission,
+      secondFactorEnabled: lan.secondFactorEnabled === true,
+      approval: { request: async () => "unavailable", close() {} },
+      security: lan.security ?? createSecurityEventBus(log),
+      authRevoke,
+      revokeSse: (hash) => {
+        lanSse.revoke((c) => c.auth?.sidHash === hash, "revoked");
+      },
+      now,
+      log,
+      onCorruptKdfParams: (username, reason) => {
+        log.error("web-hub lan http: corrupt kdf params (db-invalid:kdf)", { username, reason });
+        rt.markKdfInvalid();
+      },
+    });
+    rt.loginCore = loginCore;
+    const offLoginRevoke = authRevoke.subscribe((ev) => loginCore.onRevoke(ev));
+    lan.scope.defer(() => {
+      offLoginRevoke();
+      loginCore.dispose();
+    });
     const connGuard = createConnGuard();
     let handle: LanListenerHandle | undefined;
     lanHostSnapshot = () => (lanClosed ? undefined : handle?.current());
@@ -3169,6 +3266,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         // `srv.close()`.
         for (const c of inFlightStartAborts) c.abort(new Error("web-hub: LAN closed"));
         inFlightStartAborts.clear();
+        offLoginRevoke();
+        loginCore.dispose();
         unsubscribeLanBus();
         lanSse.closeAll();
         rt.sidInflight.clear();

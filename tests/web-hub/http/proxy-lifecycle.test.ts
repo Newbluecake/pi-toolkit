@@ -94,6 +94,7 @@ describe("construction", () => {
     expect(d.hubPort).toBe(h.hub.httpPort);
     expect(d.hubPort).not.toBe(h.configured.port);
     expect(d.lan).toBe(false);
+    expect(d.clientAllow).toBeUndefined(); // loopback-only hub constructs no LAN guard
     expect("lanPort" in d).toBe(false);
     expect(d.config).toEqual({ portRange: h.range, maxProxies: 3 });
     expect(d.stateDir).toBe(h.stateDir);
@@ -105,6 +106,9 @@ describe("construction", () => {
     const lp = await h.lanPort();
     const d = state.deps[0]!;
     expect(d.lan).toBe(true);
+    expect(d.clientAllow).toBeDefined();
+    expect(d.clientAllow).toBe(h.deps.lan!.clientAllow); // I1: ONE guard for both listener kinds
+    expect(h.deps.lan!.secondFactorEnabled).toBe(false); // not a user-reachable config switch
     expect(d.lanPort).toBe(h.configured.lan!.port);
     expect(d.lanPort).toBe(lp);
     const snap = d.lanHostSnapshot() as { hostKeys: ReadonlySet<string> } | undefined;

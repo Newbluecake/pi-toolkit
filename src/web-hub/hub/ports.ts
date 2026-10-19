@@ -117,6 +117,9 @@ export interface LanFrontendDeps {
   clientAllow?: ClientAllowGuard;
   /** Open-time history repair notice; never inferred from a missing account. */
   loginIpsRebuiltAt?: number;
+  security?: SecurityEventBus;
+  /** Internal rollout gate, NOT a setting. Production stays false until E/F/G and caps land. */
+  secondFactorEnabled?: boolean;
   cfg: HubLanConfig;
   store: LanStorePort; // §4
   kdf: KdfPort; // §5.1
@@ -1284,6 +1287,9 @@ export interface LanLoginCore {
   dispose(): void;
 }
 export interface LanLoginCoreDeps {
+  /** false keeps password completion usable until the second-factor UI is integrated. */
+  secondFactorEnabled?: boolean;
+  onCorruptKdfParams?: (username: string, reason: string) => void;
   store: LanStorePort;
   kdf: KdfPort;
   limiter: LoginLimiterPort & { isFresh?(ip: string): boolean };

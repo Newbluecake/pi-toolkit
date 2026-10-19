@@ -615,7 +615,11 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
             return kdfMatches(
               run.user,
               password,
-              { ...deps, onCorruptKdfParams: () => deps.log.error("web-hub lan login: corrupt kdf params") },
+              {
+                ...deps,
+                onCorruptKdfParams:
+                  deps.onCorruptKdfParams ?? (() => deps.log.error("web-hub lan login: corrupt kdf params")),
+              },
               opts,
             ).finally(release);
           });
@@ -640,7 +644,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
         if (factor.state === "inconsistent") return error(503, "E_DB");
         if (run.revoked || disposed) return error(401, "E_AUTH");
         auditLan2fa(deps.log, { phase: "gate", method: "password", ip: ctx.clientIp, user: user.username, ok: true });
-        if (factor.state === "enrolled" && !knownAtGate)
+        if (deps.secondFactorEnabled !== false && factor.state === "enrolled" && !knownAtGate)
           return await newChallenge(user, factor, ctx, ua, knownAtGate, io, deadline, run);
         return await complete(user, factor.factorGen, "password", ctx, ua, knownAtGate, io, deadline, undefined, run);
       } catch (err) {

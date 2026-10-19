@@ -77,6 +77,9 @@ async function freePort(): Promise<number> {
 export async function startLan(
   opts: {
     cfg?: Partial<HubLanConfig>;
+    /** Programmatic-only rollout seam; production hub explicitly forces false until E/F/G. */
+    secondFactorEnabled?: boolean;
+    security?: import("../../../src/web-hub/hub/security-events.js").SecurityEventBus;
     clock?: FakeClock;
     /** Review fix (LC, plan §1.4/§3, W3 acceptance item 1): set `false` to get the harness back
      * *before* `fe.lan.start()` is called, so a test can control the timing of `start()`/`close()`
@@ -203,7 +206,18 @@ export async function startLan(
       log,
       info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
       now: clock.now,
-      lan: { cfg, store, kdf, limiter, admission, hosts, scope: scopeCreated, onStatus: (s) => (lastStatus = s) },
+      lan: {
+        cfg,
+        store,
+        kdf,
+        limiter,
+        admission,
+        hosts,
+        scope: scopeCreated,
+        onStatus: (s) => (lastStatus = s),
+        ...(opts.secondFactorEnabled === undefined ? {} : { secondFactorEnabled: opts.secondFactorEnabled }),
+        ...(opts.security === undefined ? {} : { security: opts.security }),
+      },
       ...(opts.commands === undefined ? {} : { commands: opts.commands }),
       ...(opts.spawn === undefined ? {} : { spawn: opts.spawn }),
       ...(opts.agentRemove === undefined ? {} : { agentRemove: opts.agentRemove }),
