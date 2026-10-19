@@ -445,6 +445,7 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   `tests/integration/web-hub-headless.test.ts` (H1–H8 hard gates, real hub
   child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.test.ts` (real pi) are the
   S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`.
+  **Created dirs (created-dirs plan r2)**: a folder made through `POST /api/headless/mkdir` inside `spawn.roots` is recorded (`hub/spawn/created-dirs.ts`, `<stateDir>/spawn/created-dirs.json`) as known source ④ — fully `known:true` (skips the unknown-dir confirm; `lan:"known"`/Feishu `spawnScope:"known"` widen the same way; LAN `confirm:"always"` unchanged), admission re-checks TTL/identity/fresh roots and the fresh-start pin adds `{canonical:true}`; plaintext-LAN scope cap stays (accepted cookie-sniff residual, arch §6.1); LAN-only `E_DIR{not-allowed}.detail` (`plaintext-lan|lan-known|outside-roots`, loopback byte-identical). Design: `docs/dev/web-hub-spawn/created-dirs-plan.md`; golden deltas: `created-dirs-golden-delta.md`.
   **Restore across hub restarts (`webHub.spawn.restore`, default true, only under `spawn.enabled`)**: a
   graceful restart / crash re-forks every recoverable managed session on the new hub as kill-old-then-fork
   (`--session <file>` or `--session-id <id>`, never `--model`), same spawnId, new agentKey carrying

@@ -91,6 +91,7 @@ import {
   type FirstPromptState,
   type HubSpawnConfig,
   type RestoreFailure,
+  type SpawnDirRejectDetail,
   type SpawnEndReason,
   type SpawnPolicyWire,
   type SpawnRecordPublic,
@@ -215,7 +216,7 @@ export interface AdmittedRequest {
   /** Routes generate it (SPAWN_ID_RE-shaped); the supervisor never invents ids. */
   spawnId: string;
   /** `dirs.admit()`'s success result — pinSync re-verifies dev/ino at fork time. */
-  admitted: { realpath: string; dev: number; ino: number; known: boolean };
+  admitted: { realpath: string; dev: number; ino: number; known: boolean; viaCreated?: true };
   owner: StoredOwner;
   /** default-model plan D2/§3 ②: the EFFECTIVE `provider/id` (body value, else the hub
    *  preference, both resolved by the routes in the post-second-authorize sync stretch);
@@ -242,6 +243,22 @@ export type StartResult =
       max?: number;
       retryAfterS?: number;
     };
+
+/**
+ * created-dirs plan r2 §4: the single source of truth for the LAN scope cap that `policy()`
+ * applies and the routes explain (LAN-only `E_DIR` `detail`). `lan:"known"` caps every LAN
+ * connection; `lan:"roots"` caps a plaintext direct connection (http, not via a trusted proxy);
+ * otherwise (incl. `lan:"off"`, which never reaches a LAN route) there is no cap.
+ */
+export function lanScopeCap(
+  cfgLan: HubSpawnConfig["lan"],
+  scheme: "http" | "https",
+  viaTrustedProxy: boolean,
+): SpawnDirRejectDetail | undefined {
+  if (cfgLan === "known") return "lan-known";
+  if (cfgLan === "roots" && scheme === "http" && !viaTrustedProxy) return "plaintext-lan";
+  return undefined;
+}
 
 /** arch §6.0: a principal is `${listener}:${user ?? "token"}` — limits and audits charge it. */
 export function spawnPrincipal(owner: StoredOwner): string {
@@ -1792,7 +1809,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     }
 
     // ② pin cwd (TOCTOU re-check)
-    const pin = dirs.pinSync({ realpath: rec.cwd, dev: rec.dev, ino: rec.ino });
+    // created-dirs plan r2 §2: a hub-created dir was admitted only by its canonical path inside a
+    // root, so its fresh-start pin also proves the opened inode still lives at that path. Every
+    // other fresh start (and every restore/relaunch pin) keeps the exact one-arg call.
+    const pinTarget = { realpath: rec.cwd, dev: rec.dev, ino: rec.ino };
+    const pin =
+      req.admitted.viaCreated === true ? dirs.pinSync(pinTarget, { canonical: true }) : dirs.pinSync(pinTarget);
     if (!pin.ok) {
       // Review re-run #5: ONE terminal entry point — finalizeTerminal drives the audit, the
       // pushes, the retention trim AND the SP8 onTerminal bridge (never_live), so the
@@ -2671,7 +2693,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       scope:
         listener === "loopback"
           ? ("roots" as const)
-          : cfg.lan === "roots" && !(scheme === "http" && !viaTrustedProxy)
+          : cfg.lan === "roots" && lanScopeCap(cfg.lan, scheme, viaTrustedProxy) === undefined
             ? ("roots" as const)
             : ("known" as const),
       max: cfg.maxProcesses,

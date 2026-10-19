@@ -246,7 +246,13 @@ export async function startFresh(intent: FreshSpawnIntent, ctx: FreshSpawnContex
   const spawnId = randomBytes(12).toString("base64url");
   const startReq: AdmittedRequest = {
     spawnId,
-    admitted: { realpath: admitted.realpath, dev: admitted.dev, ino: admitted.ino, known: admitted.known },
+    admitted: {
+      realpath: admitted.realpath,
+      dev: admitted.dev,
+      ino: admitted.ino,
+      known: admitted.known,
+      ...(admitted.viaCreated === true ? { viaCreated: true as const } : {}),
+    },
     owner: ctx.owner,
     ...(effectiveModel === "" ? {} : { model: effectiveModel }),
     ...(intent.firstPrompt === undefined

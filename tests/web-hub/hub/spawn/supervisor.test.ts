@@ -26,6 +26,7 @@ import type {
 import type { LauncherFs } from "../../../../src/web-hub/hub/spawn/launcher-check.js";
 import {
   createSpawnSupervisor,
+  lanScopeCap,
   MODEL_VERDICT_GRACE_MS,
   type AdmittedRequest,
   type SpawnAuditRecord,
@@ -270,20 +271,27 @@ function fakeReaper(order: string[]): FakeReaper {
 
 interface FakeDirs {
   pinResult: { ok: true; fd: number; cwdArg: string } | { ok: false; reason: "changed" | "gone" };
+  /** created-dirs plan r2: every pinSync call's args (opts present only when the caller passed them). */
+  pinCalls: Array<{ realpath: string; opts?: { canonical?: true } }>;
   port: DirService;
 }
 
 function fakeDirs(order: string[]): FakeDirs {
   let pinResult: FakeDirs["pinResult"] = { ok: true, fd: 7, cwdArg: "/proc/self/fd/7" };
+  const pinCalls: FakeDirs["pinCalls"] = [];
   const port = {
     known: async () => ({ entries: [], partial: false }),
     admit: async () => ({ ok: false, reason: "not-allowed" }),
-    pinSync: (_a: { realpath: string; dev: number; ino: number }) => {
+    insideRoots: async () => false,
+    invalidate: () => {},
+    pinSync: (a: { realpath: string; dev: number; ino: number }, opts?: { canonical?: true }) => {
       order.push("pinSync");
+      pinCalls.push({ realpath: a.realpath, ...(opts === undefined ? {} : { opts }) });
       return pinResult;
     },
   } satisfies DirService;
   return {
+    pinCalls,
     get pinResult() {
       return pinResult;
     },
@@ -1378,6 +1386,87 @@ describe("supervisor surface: noteVersion, records, busy/live counts, spawns pus
     expect(lanPlain).toMatchObject({ scope: "known" }); // plaintext direct is capped to known
     const otherPrincipal = h.sup.policy("lan:bob", "lan", "https", true);
     expect(otherPrincipal.activeMine).toBe(0);
+  });
+
+  it("lanScopeCap (created-dirs plan r2 §4): the one cap decision policy() and the routes share", () => {
+    const rows: Array<[HubSpawnConfig["lan"], "http" | "https", boolean, string | undefined]> = [
+      ["known", "http", false, "lan-known"],
+      ["known", "https", true, "lan-known"],
+      ["known", "http", true, "lan-known"],
+      ["known", "https", false, "lan-known"],
+      ["roots", "http", false, "plaintext-lan"],
+      ["roots", "http", true, undefined],
+      ["roots", "https", false, undefined],
+      ["roots", "https", true, undefined],
+      ["off", "http", false, undefined],
+      ["off", "https", true, undefined],
+    ];
+    for (const [lan, scheme, proxy, want] of rows) {
+      expect(lanScopeCap(lan, scheme, proxy), `${lan}/${scheme}/proxy=${String(proxy)}`).toBe(want);
+    }
+  });
+
+  it("policy() scope/confirm are UNCHANGED for every (listener, scheme, proxy, lan, lanConfirm) cell", async () => {
+    // The pre-refactor expression, spelled out independently of lanScopeCap.
+    const legacyScope = (
+      listener: "loopback" | "lan",
+      lan: HubSpawnConfig["lan"],
+      scheme: "http" | "https",
+      proxy: boolean,
+    ): "roots" | "known" =>
+      listener === "loopback" ? "roots" : lan === "roots" && !(scheme === "http" && !proxy) ? "roots" : "known";
+    for (const lan of ["off", "known", "roots"] as const) {
+      for (const lanConfirm of [undefined, true, false]) {
+        const h = makeHarness({
+          cfg: baseCfg({ lan, ...(lanConfirm === undefined ? {} : { lanConfirm }) }),
+        });
+        await h.sup.init(deadline());
+        for (const listener of ["loopback", "lan"] as const) {
+          for (const scheme of ["http", "https"] as const) {
+            for (const proxy of [false, true]) {
+              const p = h.sup.policy("p:x", listener, scheme, proxy);
+              const cell = `${lan}/${String(lanConfirm)}/${listener}/${scheme}/${String(proxy)}`;
+              expect(p.scope, cell).toBe(legacyScope(listener, lan, scheme, proxy));
+              expect(p.confirm, cell).toBe(listener === "lan" && lanConfirm !== false ? "always" : "unknown-dir");
+            }
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("created-dirs plan r2 §2: viaCreated ⇒ canonical fresh pin", () => {
+  it("a viaCreated admit pins with {canonical:true}; a plain admit keeps the exact one-arg call", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    const created = req({ admitted: { realpath: REALPATH, dev: 9, ino: 99, known: true, viaCreated: true } });
+    expect(h.sup.start(created, deadline()).ok).toBe(true);
+    const plain = req();
+    expect(h.sup.start(plain, deadline()).ok).toBe(true);
+    expect(h.dirs.pinCalls).toEqual([{ realpath: REALPATH, opts: { canonical: true } }, { realpath: REALPATH }]);
+  });
+
+  it("a canonical pin that reports `changed` fails the record E_DIR{changed} exactly like a plain pin miss", async () => {
+    const h = makeHarness();
+    await h.sup.init(deadline());
+    h.dirs.pinResult = { ok: false, reason: "changed" };
+    const r = h.sup.start(
+      req({ admitted: { realpath: REALPATH, dev: 9, ino: 99, known: true, viaCreated: true } }),
+      deadline(),
+    );
+    expect(r).toMatchObject({ ok: false, code: "E_DIR", reason: "changed" });
+    expect(rec0(h)?.state).toBe("failed");
+  });
+
+  it("restore re-fork pins WITHOUT canonical (it never re-proves created-dir standing)", async () => {
+    const kit = restoreKit();
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [liveStored()]);
+    await kit.h.sup.init(deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec0(kit.h)?.restore?.attempts).toBe(1); // the restore fork really ran
+    expect(kit.h.dirs.pinCalls).toEqual([{ realpath: REALPATH }]);
   });
 });
 

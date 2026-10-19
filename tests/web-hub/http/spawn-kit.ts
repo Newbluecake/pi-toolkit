@@ -9,6 +9,7 @@
 import { createCmdLimit } from "../../../src/web-hub/hub/cmd-limit.js";
 import type { HubLog } from "../../../src/web-hub/hub/ports.js";
 import { createSpawnRoutes, type SpawnPrivacyPort } from "../../../src/web-hub/hub/spawn/routes.js";
+import type { CreatedDirsStore } from "../../../src/web-hub/hub/spawn/created-dirs.js";
 import type { AdmitResult, DirService } from "../../../src/web-hub/hub/spawn/dirs.js";
 import type { FirstPromptForwarder, FirstPromptStateView } from "../../../src/web-hub/hub/spawn/first-prompt.js";
 import type { MkdirService } from "../../../src/web-hub/hub/spawn/mkdir.js";
@@ -259,6 +260,12 @@ export interface FakeDirs extends DirService {
   knownEntries: DirEntryWire[];
   knownPartial: boolean;
   setAdmitResult(result: AdmitResult | ((raw: string, scope: "known" | "roots") => AdmitResult)): void;
+  /** created-dirs plan r2: `pinSync`'s call log (opts present only when the caller passed them). */
+  pinCalls: Array<{ realpath: string; opts?: { canonical?: true } }>;
+  insideRootsCalls: string[];
+  invalidateCalls: number;
+  /** Answer of the fake `insideRoots` (default false — no roots known to a fake). */
+  insideRootsResult: boolean;
 }
 
 export function fakeDirs(): FakeDirs {
@@ -270,12 +277,25 @@ export function fakeDirs(): FakeDirs {
     ino: 22,
     known: true,
   });
+  const pinCalls: FakeDirs["pinCalls"] = [];
+  const insideRootsCalls: string[] = [];
   return {
     admitCalls,
+    pinCalls,
+    insideRootsCalls,
+    invalidateCalls: 0,
+    insideRootsResult: false,
     knownEntries: [],
     knownPartial: false,
     setAdmitResult(resultOrFn) {
       admitFn = typeof resultOrFn === "function" ? resultOrFn : () => resultOrFn;
+    },
+    async insideRoots(path) {
+      insideRootsCalls.push(path);
+      return this.insideRootsResult;
+    },
+    invalidate() {
+      this.invalidateCalls += 1;
     },
     async known() {
       return { entries: this.knownEntries, partial: this.knownPartial };
@@ -284,7 +304,8 @@ export function fakeDirs(): FakeDirs {
       admitCalls.push({ raw, scope, ...(opts?.sessionBacked === true ? { sessionBacked: true } : {}) });
       return admitFn(raw, scope);
     },
-    pinSync() {
+    pinSync(admitted, opts) {
+      pinCalls.push({ realpath: admitted.realpath, ...(opts === undefined ? {} : { opts }) });
       return { ok: true, fd: 9, cwdArg: "/proc/self/fd/9" };
     },
   };
@@ -597,6 +618,14 @@ export interface SpawnKit {
   mkdir?: MkdirService;
 }
 
+/** created-dirs plan r2 §6: the options bag that swaps in a REAL `DirService` / created-dirs
+ *  store behind the otherwise-fake kit (the fake supervisor/first-prompt stay). Omitted ⇒
+ *  byte-identical to the pre-feature kit. */
+export interface SpawnKitReal {
+  dirs?: DirService;
+  createdDirs?: Pick<CreatedDirsStore, "add">;
+}
+
 export const KIT_CFG: HubSpawnConfig = {
   roots: [],
   maxProcesses: 4,
@@ -621,6 +650,7 @@ export function spawnKit(
   history?: FakeHistoryService,
   mkdir?: MkdirService,
   privacy?: SpawnPrivacyPort,
+  real?: SpawnKitReal,
 ): SpawnKit {
   const supervisor = fakeSpawnSupervisor();
   const dirs = fakeDirs();
@@ -629,7 +659,7 @@ export function spawnKit(
   const full: HubSpawnConfig = { ...KIT_CFG, ...cfg };
   const spawn = createSpawnRoutes({
     supervisor,
-    dirs,
+    dirs: real?.dirs ?? dirs,
     firstPrompt,
     prefs,
     cfg: full,
@@ -640,6 +670,7 @@ export function spawnKit(
     ...(mkdir === undefined ? {} : { mkdir }),
     ...(history === undefined ? {} : { history }),
     ...(privacy === undefined ? {} : { privacy }),
+    ...(real?.createdDirs === undefined ? {} : { createdDirs: real.createdDirs }),
   });
   return {
     supervisor,

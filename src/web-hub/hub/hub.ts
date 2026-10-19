@@ -82,6 +82,7 @@ import { createRunFileReader } from "./run-file-reader.js";
 import { createRunTranscriptService } from "./run-transcript.js";
 import { probePlatform, type PlatformProbeDeps } from "./spawn/config.js";
 import { createDirService } from "./spawn/dirs.js";
+import { createCreatedDirsStore } from "./spawn/created-dirs.js";
 import { createFirstPromptForwarder, type FirstPromptForwarder } from "./spawn/first-prompt.js";
 import type { SpawnFrontendPort } from "./spawn/ports.js";
 import { createReaper, type Reaper } from "./spawn/reaper.js";
@@ -936,6 +937,9 @@ export async function startHub(
       // by POST /api/headless/prefs. `close()` is a no-op by design (no pending writes), so it
       // needs no cleanup entry.
       const spawnPrefs = createSpawnPrefs({ file: spawnFiles.prefsJson, log });
+      // created-dirs plan r2 §5: source ④ — folders made through the hub's mkdir inside
+      // `spawn.roots`. Sync single-writer store, loaded once here; no cleanup entry (no timers).
+      const createdDirsStore = createCreatedDirsStore({ file: spawnFiles.createdDirsJson, log, now });
       const platform = spawnPlatform ?? probePlatform(deps.spawnSeams?.probe);
       // session-history plan §4.8 step 1: the effective history switch — the config flag AND the
       // platform probe. Everything history-related below (service, sessionPathPin, forkSrcDir,
@@ -973,6 +977,7 @@ export async function startHub(
         registry,
         spawnHistory: () => spawnSup?.records() ?? [],
         now,
+        createdDirs: () => createdDirsStore.list(),
       });
       firstPromptFwd = createFirstPromptForwarder({
         router: commandRouter,
@@ -1139,6 +1144,7 @@ export async function startHub(
         tracker: createPreviewIoTracker(),
         log,
         now,
+        identify: true,
         // 2026-10-16 用户拍板（「新建文件夹」可以和终端一样是 775）: the hub's own 0o077 umask must
         // not mask web-created folders — main.ts's captured pre-hub umask becomes the explicit
         // post-create mode (best-effort inside the service: failure ⇒ warn, still ok:true).
@@ -1155,6 +1161,7 @@ export async function startHub(
         log,
         now,
         mkdir: mkdirSvc,
+        createdDirs: createdDirsStore,
         // session-history plan §4.8: `historyOn` already required it — absent keeps the route
         // surface byte-identical to history-off (P-route's §5 gate reads `deps.history`).
         ...(spawnHistory === undefined ? {} : { history: spawnHistory }),

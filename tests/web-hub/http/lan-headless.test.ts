@@ -205,7 +205,8 @@ describe("LAN scope threading (arch §6.4: roots capped to known on plaintext di
       { Cookie: cookie },
     );
     expect(res.status).toBe(400);
-    expect(JSON.parse(res.body)).toEqual({ error: "E_DIR", reason: "not-allowed" });
+    // created-dirs plan r2 §4: LAN-only `detail` names the plaintext cap (loopback stays bare)
+    expect(JSON.parse(res.body)).toEqual({ error: "E_DIR", reason: "not-allowed", detail: "plaintext-lan" });
     // the policy call saw the DIRECT plaintext transport
     expect(kit.supervisor.policyCalls.at(-1)).toMatchObject({
       listener: "lan",

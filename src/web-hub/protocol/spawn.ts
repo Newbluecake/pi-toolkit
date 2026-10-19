@@ -569,6 +569,20 @@ export const MkdirRequestSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** created-dirs plan r2 §4: why a LAN `400 E_DIR{reason:"not-allowed"}` was refused — present
+ *  ONLY on the LAN listener (loopback E_DIR stays byte-identical). `plaintext-lan` = `lan:"roots"`
+ *  capped to `known` on a plaintext direct connection; `lan-known` = `lan:"known"`;
+ *  `outside-roots` = roots scope applied and the dir is neither under a root nor known. */
+export type SpawnDirRejectDetail = "plaintext-lan" | "lan-known" | "outside-roots";
+
+/** `200` reply of POST /api/headless/mkdir. `known: true` only when the hub recorded the new
+ *  folder as a known spawn dir (inside `roots`); absent ⇒ today's `{ok,path}` byte-for-byte. */
+export interface MkdirResponseBody {
+  ok: true;
+  path: string;
+  known?: true;
+}
+
 export type MkdirError = "not-an-object" | "schema" | "name-invalid" | "path-invalid";
 
 /**

@@ -72,6 +72,8 @@ import {
   parseSpawnPrefsRequest,
   parseSpawnRequestBody,
   type HubSpawnConfig,
+  type MkdirResponseBody,
+  type SpawnDirRejectDetail,
   type SpawnPolicyWire,
 } from "../../protocol/spawn.js";
 import {
@@ -86,6 +88,7 @@ import {
   type ProofGap,
 } from "../../protocol/session-history.js";
 import type { ForkSnapshot, HistoryListQuery, HistoryService, OccupancyProof, SessionPin } from "./history/ports.js";
+import type { CreatedDirsStore } from "./created-dirs.js";
 import type { DirService } from "./dirs.js";
 import { createSpawnIdempotency, intentDigest, startFresh, type FreshSpawnOutcome, type SpawnIntent } from "./entry.js";
 import type { FirstPromptForwarder } from "./first-prompt.js";
@@ -94,6 +97,7 @@ import type { SpawnPrefs } from "./prefs.js";
 import type { SpawnFrontendPort, SpawnRouteIo } from "./ports.js";
 import { toPublicPayload, toViewer } from "./project.js";
 import {
+  lanScopeCap,
   spawnPrincipal,
   type AdmittedRequest,
   type AdmittedSessionRequest,
@@ -176,6 +180,9 @@ export interface SpawnRoutesDeps {
    *  Injected by hub.ts whenever spawn is enabled (its admission reuses preview's deny chain);
    *  absent ⇒ the route is byte-identical to an unknown path (404), same `historyOn` pattern. */
   mkdir?: MkdirService;
+  /** created-dirs plan r2 §3/§5: where a successful mkdir INSIDE `roots` is recorded as a known
+   *  spawn dir (source ④). Absent ⇒ no recording and today's `{ok,path}` reply byte-for-byte. */
+  createdDirs?: Pick<CreatedDirsStore, "add">;
   /** web-hub-privacy plan v2.1 (P1, 「Fork 继承」): the hub-side privacy-lock store. Injected
    *  by hub.ts only when `webHub.privacy` is on; absent ⇒ fork inheritance is skipped entirely
    *  (byte-identical to pre-feature). When present, a fork whose SOURCE session is locked
@@ -328,7 +335,12 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   }
 
   /** StartResult → reply; returns true when the reply was sent from here (E_DIR included). */
-  function sendStartResult(io: SpawnRouteIo, res: ServerResponse, r: StartResult): boolean {
+  function sendStartResult(
+    io: SpawnRouteIo,
+    res: ServerResponse,
+    r: StartResult,
+    notAllowedDetail?: SpawnDirRejectDetail,
+  ): boolean {
     if (r.ok) return false;
     switch (r.code) {
       case "E_LIMIT":
@@ -341,7 +353,15 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
         sendSpawnDenied(io, res, r.reason ?? "denied");
         return true;
       case "E_DIR":
-        io.sendJson(res, 400, { error: "E_DIR", reason: r.reason ?? "not-allowed" });
+        io.sendJson(res, 400, {
+          error: "E_DIR",
+          reason: r.reason ?? "not-allowed",
+          // created-dirs plan r2 §4: LAN-only explanation of a scope refusal (undefined ⇒ the
+          // legacy body byte-for-byte — loopback, other reasons, or a cap we cannot name).
+          ...((r.reason ?? "not-allowed") === "not-allowed" && notAllowedDetail !== undefined
+            ? { detail: notAllowedDetail }
+            : {}),
+        });
         return true;
       case "E_DEADLINE":
         io.sendError(res, 504, "E_DEADLINE");
@@ -641,6 +661,14 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
     };
     if (intent.session === undefined) {
       const { session: _session, ...freshIntent } = intent;
+      // created-dirs plan r2 §4: LAN listener only; roots scope ⇒ the dir missed every root,
+      // known scope ⇒ the supervisor's own cap helper names why (same function `policy()` uses).
+      const notAllowedDetail: SpawnDirRejectDetail | undefined =
+        io.listener !== "lan"
+          ? undefined
+          : policy.scope === "roots"
+            ? "outside-roots"
+            : lanScopeCap(cfg.lan, io.scheme, io.viaTrustedProxy);
       const principal = spawnPrincipal(ownerOf(intent.id));
       const rateCapacity = Math.max(1, Math.min(60, cfg.ratePerMinute));
       await startFresh(freshIntent, {
@@ -686,7 +714,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
             },
           };
         },
-        onResult: (outcome) => sendFreshOutcome(io, res, outcome),
+        onResult: (outcome) => sendFreshOutcome(io, res, outcome, notAllowedDetail),
       });
       return;
     }
@@ -790,7 +818,12 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
   }
 
   /** Transport mapping only; the synchronous sink keeps auth2 → HTTP head zero-await. */
-  function sendFreshOutcome(io: SpawnRouteIo, res: ServerResponse, outcome: FreshSpawnOutcome): void {
+  function sendFreshOutcome(
+    io: SpawnRouteIo,
+    res: ServerResponse,
+    outcome: FreshSpawnOutcome,
+    notAllowedDetail?: SpawnDirRejectDetail,
+  ): void {
     switch (outcome.kind) {
       case "accepted":
         io.sendJson(res, 202, outcome.value);
@@ -815,7 +848,7 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
             ...(outcome.message === undefined ? {} : { message: outcome.message }),
           });
         } else {
-          sendStartResult(io, res, { ...outcome, ok: false });
+          sendStartResult(io, res, { ...outcome, ok: false }, notAllowedDetail);
         }
     }
   }
@@ -1298,6 +1331,23 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       );
       return;
     }
+    // created-dirs plan r2 §3: a folder created INSIDE `roots` becomes a known spawn dir. Not
+    // recorded (today's reply byte-for-byte) when no store is wired, the identity capture failed,
+    // the path is outside every freshly-resolved root, or the store write failed (warn only).
+    let recorded = false;
+    if (deps.createdDirs !== undefined && r.identity !== undefined && (await dirs.insideRoots(r.path, reqDeadline))) {
+      const added = deps.createdDirs.add(
+        { path: r.path, dev: r.identity.dev, ino: r.identity.ino },
+        { listener: io.listener, ...(auth.user === undefined ? {} : { user: auth.user }) },
+      );
+      if (added.ok) {
+        recorded = true;
+        // Only source ④ is invalidated; the next admit/known rescans it (fail-closed meanwhile).
+        dirs.invalidate();
+      } else {
+        log.warn("web-hub mkdir: created-dir record failed", { code: added.code });
+      }
+    }
     auditSpawn(log, {
       audit: "spawn",
       phase: "request",
@@ -1305,8 +1355,10 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       listener: io.listener,
       ip: auth.ip,
       ...(auth.user === undefined ? {} : { user: auth.user }),
+      ...(recorded ? { known: true } : {}),
     });
-    io.sendJson(res, 200, { ok: true, path: r.path });
+    const reply: MkdirResponseBody = { ok: true, path: r.path, ...(recorded ? { known: true as const } : {}) };
+    io.sendJson(res, 200, reply);
   }
 
   // ------------------------------------------------------------- POST /api/headless/relaunch (spawn-relaunch)
