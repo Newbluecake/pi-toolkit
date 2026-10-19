@@ -425,6 +425,7 @@ describe("completions", () => {
   it("lists feishu among the top-level subcommands", () => {
     const items = cmd().getArgumentCompletions!("")!;
     expect(items.map((i) => i.value).sort()).toEqual([
+      "2fa",
       "feishu",
       "open",
       "passwd",
