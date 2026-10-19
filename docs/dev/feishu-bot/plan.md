@@ -201,6 +201,7 @@ bound — /list then /use"; the message is not held.
 
 Post (rich text) messages (live-acceptance fix, 2026-10-19): `inbound.ts`'s `feishuPostText` extracts plain text from
 `content.<locale>.{title,content:[[tag…]]}` before the command grammar runs, so `/use` etc. work identically in a post.
+The desktop client also sends a FLAT shape (no locale wrapper: `{title, content:[[…]]}`, live-accepted 2026-10-19) — it decodes with the same rules; a flat `content` that isn't the paragraph array still drops.
 Rules: locale preference zh_cn → zh-CN → en_us → en-US → first other key (a present-but-malformed preferred locale is a
 `content-invalid` drop, never a fall-through); a non-empty `title` becomes the first line (so a titled post can never start
 with a command, same as any leading text); paragraphs join with `\n`, tags concatenate, empty (img/media-only) paragraphs are
