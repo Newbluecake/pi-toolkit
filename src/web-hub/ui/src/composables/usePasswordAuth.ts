@@ -11,9 +11,10 @@
  * needs, so both composables end up sharing exactly one `PasswordTransport` instance without
  * either one constructing it standalone.
  */
-import { ref, type Ref } from "vue";
+import { ref, shallowRef, type Ref } from "vue";
 import { createPasswordTransport, type PasswordTransportDeps } from "../transport/password.js";
 import type { PasswordTransport, TransportHooks } from "../transport/types.js";
+import type { Lan2faChallenge, LanFactorBody } from "@protocol/lan-2fa.js";
 import type { LoginErrorView } from "../types.js";
 
 /** Everything `@logic/password-client.js`'s `ClientDeps` needs *except* the six hook fields this
@@ -29,6 +30,8 @@ export interface UsePasswordAuthOptions<TTimer = ReturnType<typeof setTimeout>> 
   clearTimeout(handle: TTimer): void;
   /** `location.protocol === "http:"` — drives the plaintext-HTTP safety banner. Default `false`. */
   plaintext?: boolean;
+  /** Pre-auth static bootstrap from the hub's advertised LAN capability. */
+  secondFactorEnabled?: () => boolean;
 }
 
 export interface UsePasswordAuthHandle {
@@ -36,6 +39,12 @@ export interface UsePasswordAuthHandle {
   readonly error: Readonly<Ref<LoginErrorView | null>>;
   readonly initialPasswordHint: Readonly<Ref<boolean>>;
   readonly plaintext: boolean;
+  readonly challenge: Readonly<Ref<Lan2faChallenge | null>>;
+  readonly attemptsLeft: Readonly<Ref<number | undefined>>;
+  readonly lockedUntil: Readonly<Ref<number | undefined>>;
+  submitSecondFactor(body: LanFactorBody): Promise<void>;
+  waitApproval(): Promise<void>;
+  cancelSecondFactor(): Promise<void>;
   /** Pass straight as `useHub`'s `createTransport` option. */
   createTransport(hooks: TransportHooks): PasswordTransport;
   submit(payload: { username: string; password: string }): Promise<void>;
@@ -58,6 +67,90 @@ export function usePasswordAuth<TTimer = ReturnType<typeof setTimeout>>(
   const error = ref<LoginErrorView | null>(null);
   const initialPasswordHint = ref(false);
   const plaintext = opts.plaintext ?? false;
+  const challenge = shallowRef<Lan2faChallenge | null>(null);
+  const attemptsLeft = ref<number | undefined>();
+  const lockedUntil = ref<number | undefined>();
+  let generation = 0;
+  let disposed = false;
+  let waitingFor: Lan2faChallenge | null = null;
+  let cancelling: Promise<void> | undefined;
+  function clearChallenge(): void {
+    generation++;
+    challenge.value = null;
+    attemptsLeft.value = undefined;
+    lockedUntil.value = undefined;
+    busy.value = false;
+  }
+  function success(initialPassword: boolean): void {
+    clearChallenge();
+    error.value = null;
+    if (initialPassword) initialPasswordHint.value = true;
+  }
+  function cancelSecondFactor(): Promise<void> {
+    const active = challenge.value !== null;
+    clearChallenge();
+    if (!active || transport === undefined) return cancelling ?? Promise.resolve();
+    // Drain the old cancel before another password request can mint a new cookie challenge.
+    const current = transport
+      .cancelSecondFactor()
+      .catch(() => {})
+      .then(() => {});
+    cancelling = current;
+    void current.finally(() => {
+      if (cancelling === current) cancelling = undefined;
+    });
+    return current;
+  }
+  async function restart(key: string): Promise<void> {
+    await cancelSecondFactor();
+    if (!disposed) error.value = view(key, { min: 5 });
+  }
+  async function waitApproval(): Promise<void> {
+    const ch = challenge.value;
+    if (disposed || transport === undefined || ch === null || ch.feishu !== "sent" || waitingFor === ch) return;
+    waitingFor = ch;
+    const mine = generation;
+    try {
+      const res = await transport.waitApproval(ch);
+      if (disposed || mine !== generation) return;
+      if (res.ok) success(res.initialPassword);
+      else if (res.state !== "cancelled") await restart(`login.2fa.${res.state === "error" ? "failed" : res.state}`);
+    } catch {
+      if (!disposed && mine === generation) await restart("errors.network");
+    } finally {
+      if (waitingFor === ch) waitingFor = null;
+    }
+  }
+  async function submitSecondFactor(body: LanFactorBody): Promise<void> {
+    if (disposed || !transport || !challenge.value || busy.value) return;
+    const mine = generation;
+    busy.value = true;
+    error.value = null;
+    try {
+      const res = await transport.submitSecondFactor(body);
+      if (disposed || mine !== generation) return;
+      busy.value = false;
+      if (res.ok) {
+        success(res.initialPassword);
+        return;
+      }
+      if (res.error === "E_2FA_CODE") attemptsLeft.value = res.attemptsLeft;
+      else if (res.error === "E_2FA_METHOD_LOCKED") lockedUntil.value = opts.deps.now() + (res.retryAfterMs ?? 0);
+      else if (res.error === "E_LOCKED") {
+        busy.value = true;
+        runCountdown(Math.ceil((res.retryAfterMs ?? 1000) / 1000));
+      } else if (res.error === "E_2FA_EXPIRED" || res.error === "E_2FA_USED") await restart("login.2fa.expired");
+      else
+        error.value = view(
+          res.error === "network" || res.error === "E_NETWORK" ? "errors.network" : "login.2fa.failed",
+        );
+    } catch {
+      if (!disposed && mine === generation) {
+        busy.value = false;
+        error.value = view("errors.network");
+      }
+    }
+  }
 
   let transport: PasswordTransport | undefined;
   let countdownTimer: TTimer | null = null;
@@ -93,7 +186,12 @@ export function usePasswordAuth<TTimer = ReturnType<typeof setTimeout>>(
       ...opts.deps,
       onMessage: hooks.onMessage,
       onConn: (c) => {
-        if (c === "open") error.value = null;
+        if (c === "open") {
+          // A stream can open before the completion promise settles. This is login success,
+          // not an abandoned challenge; never cancel it from LoginView's unmount hook.
+          if (challenge.value !== null) clearChallenge();
+          error.value = null;
+        }
         hooks.onConn(c);
       },
       onAuthEvent: (reason) => {
@@ -114,11 +212,15 @@ export function usePasswordAuth<TTimer = ReturnType<typeof setTimeout>>(
   }
 
   async function submit(payload: { username: string; password: string }): Promise<void> {
-    if (!transport) return;
+    if (!transport || disposed) return;
+    if (challenge.value !== null || cancelling !== undefined) await cancelSecondFactor();
+    if (disposed) return;
     stopCountdown();
     error.value = null;
     busy.value = true;
+    const mine = ++generation;
     const res = await transport.login(payload.username, payload.password);
+    if (disposed || mine !== generation) return;
     if (res.ok) {
       error.value = null;
       busy.value = false;
@@ -126,6 +228,16 @@ export function usePasswordAuth<TTimer = ReturnType<typeof setTimeout>>(
       return;
     }
     switch (res.kind) {
+      case "second-factor":
+        busy.value = false;
+        challenge.value = res.challenge;
+        if (opts.secondFactorEnabled?.() !== true) {
+          await restart("errors.unknown");
+          return;
+        }
+        // Start even while the TOTP/recovery panel is visible; method switches never stop it.
+        if (res.challenge.feishu === "sent") void waitApproval();
+        return;
       case "throttled":
         runCountdown(res.retryAfterS); // stays busy until the countdown re-enables the form
         return;
@@ -165,10 +277,18 @@ export function usePasswordAuth<TTimer = ReturnType<typeof setTimeout>>(
     error,
     initialPasswordHint,
     plaintext,
+    challenge,
+    attemptsLeft,
+    lockedUntil,
+    submitSecondFactor,
+    waitApproval,
+    cancelSecondFactor,
     createTransport,
     submit,
     signOut,
     dispose() {
+      disposed = true;
+      void cancelSecondFactor();
       stopCountdown();
     },
   };

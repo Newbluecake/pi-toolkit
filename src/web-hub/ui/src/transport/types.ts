@@ -7,6 +7,7 @@
  * adapters so the two transports can never silently diverge again (the exact regression class
  * 78dd76b was: password client missing `subscribe`/`page`).
  */
+import type { Lan2faChallenge, LanFactorBody } from "@protocol/lan-2fa.js";
 import type { PreviewDims, PreviewDirListing, PreviewImageMime, PreviewProbeKind } from "@protocol/preview.js";
 import type { PreviewHtmlCapResponseBody } from "@protocol/preview-html.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
@@ -188,12 +189,22 @@ export type LoginResult =
   | { readonly ok: true; readonly initialPassword: boolean }
   | { readonly ok: false; readonly kind: "invalid" | "not-allowed" | "network" | "busy-exhausted" }
   | { readonly ok: false; readonly kind: "saturated" | "throttled"; readonly retryAfterS: number }
-  | { readonly ok: false; readonly kind: "unknown"; readonly status: number };
+  | { readonly ok: false; readonly kind: "unknown"; readonly status: number }
+  | { readonly ok: false; readonly kind: "second-factor"; readonly challenge: Lan2faChallenge };
 
+export type FactorSubmitResult =
+  { ok: true; initialPassword: boolean } | { ok: false; error: string; attemptsLeft?: number; retryAfterMs?: number };
+export type FactorWaitResult =
+  | { ok: true; initialPassword: boolean }
+  | { ok: false; state: "denied" | "expired" | "cancelled" }
+  | { ok: false; state: "error"; error: string };
 export interface PasswordTransport extends HubTransport {
   readonly mode: "password";
   login(username: string, password: string): Promise<LoginResult>;
   logout(): Promise<void>;
+  submitSecondFactor(body: LanFactorBody): Promise<FactorSubmitResult>;
+  waitApproval(challenge: Lan2faChallenge): Promise<FactorWaitResult>;
+  cancelSecondFactor(): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 // ---------------------------------------------------------------------------

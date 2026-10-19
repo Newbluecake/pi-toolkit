@@ -5,7 +5,9 @@
   matching the legacy `render/login.js` behavior `tests/web-hub/ui/login-view.test.ts` pins).
 -->
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, onUnmounted } from "vue";
+import LoginSecondFactor from "./LoginSecondFactor.vue";
+import { useTicker } from "../../composables/useTicker.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
@@ -17,6 +19,18 @@ import { browserLocalStorage } from "./themeStorage.js";
 const props = defineProps<LoginViewProps>();
 const emit = defineEmits<LoginViewEmits>();
 const { t } = useI18n();
+const factorVisible = computed(() => props.secondFactorEnabled === true && props.challenge != null);
+const ticker = useTicker({
+  doc: document,
+  win: window,
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (h) => window.clearTimeout(h),
+  now: () => Date.now(),
+});
+onUnmounted(() => {
+  ticker.dispose();
+  if (factorVisible.value) emit("factorCancel");
+});
 
 // `pwh_hide_plaintext_warn` (explicit browser opt-out, set from the authenticated settings
 // panel — localStorage survives the sign-out) gates the plaintext-HTTP sign-in banner.
@@ -61,7 +75,22 @@ function onSubmit(): void {
 
 <template>
   <main class="login-page">
-    <div class="login-card">
+    <template v-if="factorVisible && challenge">
+      <LoginSecondFactor
+        :challenge="challenge"
+        :busy="busy"
+        :now="ticker.now.value"
+        v-bind="{
+          ...(attemptsLeft === undefined ? {} : { attemptsLeft }),
+          ...(lockedUntil === undefined ? {} : { lockedUntil }),
+        }"
+        @submit="emit('factorSubmit', $event)"
+        @wait="emit('factorWait')"
+        @cancel="emit('factorCancel')"
+      />
+      <p v-if="errorText" class="form-error" role="alert">{{ errorText }}</p>
+    </template>
+    <div v-else class="login-card">
       <div class="login-brand">
         <span class="brand-mark" aria-hidden="true"><AppIcon name="logo" /></span>
         <h1 translate="no">pi web-hub</h1>

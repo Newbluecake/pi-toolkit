@@ -105,6 +105,7 @@ export interface UiServer {
     res: ServerResponse,
     opts: {
       readonly authMode: "token" | "password";
+      readonly lan2fa?: boolean;
       readonly acceptLanguage?: string;
       readonly acceptEncoding?: string;
     },
@@ -190,8 +191,10 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
     readonly info: VerifiedUiRoot["info"];
     readonly indexToken: Buffer;
     readonly indexPassword: Buffer;
+    readonly indexPassword2fa: Buffer;
     readonly gzipIndexToken: Buffer;
     readonly gzipIndexPassword: Buffer;
+    readonly gzipIndexPassword2fa: Buffer;
     readonly gzipFiles: ReadonlyMap<string, Buffer>;
   }
   let variants: UiRootVariants | undefined;
@@ -272,10 +275,13 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
     return flight.promise;
   }
 
-  function substituteAuthMode(bytes: Buffer, authMode: "token" | "password"): Buffer {
+  function substituteAuthMode(bytes: Buffer, authMode: "token" | "password", lan2fa = false): Buffer {
     const text = bytes.toString("utf8");
     const body = text.includes(AUTH_MODE_PLACEHOLDER)
-      ? text.replace(AUTH_MODE_PLACEHOLDER, `data-auth-mode="${authMode}"`)
+      ? text.replace(
+          AUTH_MODE_PLACEHOLDER,
+          `data-auth-mode="${authMode}"${authMode === "password" && lan2fa ? ' data-lan-caps="lan.2fa.v1"' : ""}`,
+        )
       : text;
     return Buffer.from(body, "utf8");
   }
@@ -295,8 +301,10 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
       info: root.info,
       indexToken,
       indexPassword,
+      indexPassword2fa: substituteAuthMode(bytes, "password", true),
       gzipIndexToken: gzipSync(indexToken),
       gzipIndexPassword: gzipSync(indexPassword),
+      gzipIndexPassword2fa: gzipSync(substituteAuthMode(bytes, "password", true)),
       gzipFiles,
     };
     variants = built;
@@ -323,7 +331,12 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
   async function serve(
     urlPath: string,
     res: ServerResponse,
-    o: { readonly authMode: "token" | "password"; readonly acceptLanguage?: string; readonly acceptEncoding?: string },
+    o: {
+      readonly authMode: "token" | "password";
+      readonly lan2fa?: boolean;
+      readonly acceptLanguage?: string;
+      readonly acceptEncoding?: string;
+    },
   ): Promise<boolean> {
     const result = await refreshFor(urlPath);
     const rel = uiRelPath(urlPath);
@@ -363,10 +376,14 @@ export function createUiServer(opts: CreateUiServerOptions): UiServer {
         gzipped
           ? o.authMode === "token"
             ? v.gzipIndexToken
-            : v.gzipIndexPassword
+            : o.lan2fa === true
+              ? v.gzipIndexPassword2fa
+              : v.gzipIndexPassword
           : o.authMode === "token"
             ? v.indexToken
-            : v.indexPassword,
+            : o.lan2fa === true
+              ? v.indexPassword2fa
+              : v.indexPassword,
         CONTENT_TYPES[".html"]!,
         "no-cache",
         gzipped ? { "Content-Encoding": "gzip", Vary: "Accept-Encoding" } : undefined,

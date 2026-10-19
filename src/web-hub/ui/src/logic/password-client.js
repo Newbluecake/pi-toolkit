@@ -2422,11 +2422,7 @@ export function createPasswordClient(deps) {
       void fetchSessionInfo();
       if (!closed) openStream();
     },
-    // Type-erased at this boundary: the honest union (incl. `{kind:"second-factor"}`) is on the
-    // `login` function's own JSDoc, but `transport/types.ts`'s frozen `LoginResult` (I-owned,
-    // not in package G's allowlist) has no second-factor variant yet — I widens it when mounting
-    // (docs/dev/web-hub/lan-security-wiring-G.md §1). Runtime behavior is unaffected.
-    login: /** @type {any} */ (login),
+    login,
     logout,
     submitSecondFactor,
     waitApproval,

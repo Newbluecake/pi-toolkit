@@ -23,6 +23,7 @@ import "./styles/agents.css";
 import "./styles/detail.css";
 import "./styles/dock.css";
 import "./styles/login.css";
+import "./styles/login-2fa.css";
 import "./styles/states.css";
 // #32 C5 (control-plan.md v2.1 §7.4/§7.6): control-plane + ask_user dialog styles.
 import "./styles/control.css";
@@ -74,6 +75,9 @@ function detectAuthMode(): AuthMode {
 }
 
 const authMode = detectAuthMode();
+// Authenticated SSE caps do not exist on a fresh login. The hub injects this one public
+// pre-auth cap into password-mode index bytes only; old hubs omit it ⇒ byte-identical form.
+const secondFactorEnabled = authMode === "password" && document.documentElement.dataset["lanCaps"] === "lan.2fa.v1";
 const { t } = useI18n();
 
 // Boot-time theme assert (classes + meta theme-color; `public/theme-init.js` already applied
@@ -135,6 +139,7 @@ if (authMode !== "unknown") {
       },
       ...sharedTimers,
       plaintext: window.location.protocol === "http:",
+      secondFactorEnabled: () => secondFactorEnabled,
     });
     createTransport = passwordAuth.createTransport;
   } else {
@@ -377,6 +382,15 @@ onUnmounted(() => {
       :busy="passwordAuth!.busy.value"
       :error="passwordAuth!.error.value"
       :initial-password-hint="passwordAuth!.initialPasswordHint.value"
+      :second-factor-enabled="secondFactorEnabled"
+      :challenge="passwordAuth!.challenge.value"
+      v-bind="{
+        ...(passwordAuth!.attemptsLeft.value === undefined ? {} : { attemptsLeft: passwordAuth!.attemptsLeft.value }),
+        ...(passwordAuth!.lockedUntil.value === undefined ? {} : { lockedUntil: passwordAuth!.lockedUntil.value }),
+      }"
+      @factor-submit="passwordAuth!.submitSecondFactor($event)"
+      @factor-wait="passwordAuth!.waitApproval()"
+      @factor-cancel="passwordAuth!.cancelSecondFactor()"
       @submit="onSubmit"
     />
     <TokenGate v-else reason="token-invalid" />

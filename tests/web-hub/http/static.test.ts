@@ -197,6 +197,18 @@ describe("createUiServer: a verified root", () => {
     expect(pw.body).toContain('data-auth-mode="password"');
   });
 
+  it("pre-auth LAN 2FA cap marker is password-only, explicit opt-in; off index bytes unchanged", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    const old = await bodyOf((res) => ui.serve("/", res, { authMode: "password" }));
+    const off = await bodyOf((res) => ui.serve("/", res, { authMode: "password", lan2fa: false }));
+    const on = await bodyOf((res) => ui.serve("/", res, { authMode: "password", lan2fa: true }));
+    const token = await bodyOf((res) => ui.serve("/", res, { authMode: "token", lan2fa: true }));
+    expect(off).toBe(old);
+    expect(off).not.toContain("data-lan-caps");
+    expect(on).toBe(old.replace('data-auth-mode="password"', 'data-auth-mode="password" data-lan-caps="lan.2fa.v1"'));
+    expect(token).not.toContain("data-lan-caps");
+  });
+
   it("hashed assets get the immutable cache header; theme-init.js / favicon.svg / index.html get no-cache", async () => {
     const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
     const asset = await responseOf(async (res) => ui.serve("/assets/index-abcd1234.js", res, { authMode: "token" }));
@@ -364,6 +376,14 @@ describe("createUiServer: gzip negotiation (compress once per root, negotiate pe
     const text = gunzipSync(body).toString("utf8");
     expect(text).toContain('data-auth-mode="password"');
     expect(text).not.toContain("__AUTH_MODE__");
+  });
+
+  it("gzip carries the identical opt-in LAN 2FA bootstrap", async () => {
+    const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+    const identity = await responseOfServe(ui, "/", { authMode: "password", lan2fa: true });
+    const compressed = await responseOfServe(ui, "/", { authMode: "password", lan2fa: true, acceptEncoding: "gzip" });
+    expect(gunzipSync(compressed.body)).toEqual(identity.body);
+    expect(identity.body.toString()).toContain('data-lan-caps="lan.2fa.v1"');
   });
 
   it("refresh() (the hub-startup entry) pre-builds the gzip variants — the first served request is already compressed", async () => {

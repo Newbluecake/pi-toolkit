@@ -168,6 +168,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     command: (req) => client.command(req) as Promise<CmdOutcome>,
     dialog: (req) => client.dialog(req) as Promise<CmdOutcome>,
     login: (username, password) => client.login(username, password),
+    submitSecondFactor: (body) => client.submitSecondFactor(body),
+    waitApproval: (challenge) => client.waitApproval(challenge),
+    cancelSecondFactor: () => client.cancelSecondFactor(),
     logout: () => client.logout(),
     upload: {
       // U4b (web-hub-upload plan §1.2): thin casts over the logic client's upload namespace.

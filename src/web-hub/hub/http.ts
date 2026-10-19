@@ -1109,6 +1109,7 @@ export interface LanRuntime {
   ui: UiServer;
   now: () => number;
   version: () => string;
+  hubCaps?: readonly string[];
   log: HubLog;
   clientInflight: Map<string, number>;
   sidInflight: Map<string, { promise: Promise<LanSessionRecord | undefined>; waiters: number }>;
@@ -1703,6 +1704,7 @@ async function handleLanRequestInner(
     if (
       !(await rt.ui.serve(path, res, {
         authMode: "password",
+        ...(rt.lan.secondFactorEnabled === true && rt.hubCaps?.includes("lan.2fa.v1") ? { lan2fa: true } : {}),
         ...(typeof acceptLanguage === "string" ? { acceptLanguage } : {}),
         ...(typeof acceptEncoding === "string" ? { acceptEncoding } : {}),
       }))
@@ -3084,6 +3086,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       ui,
       now,
       version: () => deps.info().version,
+      ...(deps.info().caps === undefined ? {} : { hubCaps: deps.info().caps }),
       log,
       clientInflight: new Map(),
       sidInflight: new Map(),

@@ -5,6 +5,7 @@
  * signature drift between a component and whatever calls it is a `vue-tsc` compile error, not
  * a runtime surprise. Components with no emits only get a `*Props` interface.
  */
+import type { Lan2faChallenge, LanFactorBody } from "@protocol/lan-2fa.js";
 import type { AgentCard, HistoryPayload } from "@protocol/http-contract.js";
 import type { BashJobsWire, FleetRowWire, SessionInfo as WireSessionInfo } from "@protocol/messages.js";
 import type { IconName } from "./icons/names.js";
@@ -31,6 +32,10 @@ export type { HistoryPayload };
 // ---------------------------------------------------------------------------
 
 export interface LoginViewProps {
+  readonly secondFactorEnabled?: boolean;
+  readonly challenge?: Lan2faChallenge | null;
+  readonly attemptsLeft?: number;
+  readonly lockedUntil?: number;
   readonly plaintext: boolean;
   readonly busy: boolean;
   readonly error: LoginErrorView | null;
@@ -38,6 +43,9 @@ export interface LoginViewProps {
 }
 export interface LoginViewEmits {
   submit: [payload: { username: string; password: string }];
+  factorSubmit: [body: LanFactorBody];
+  factorWait: [];
+  factorCancel: [];
 }
 
 export interface TokenGateProps {
