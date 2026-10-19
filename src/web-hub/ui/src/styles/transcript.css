@@ -100,11 +100,6 @@
   white-space: nowrap;
 }
 
-.tx-date-note {
-  opacity: 0.8;
-  text-align: center;
-}
-
 details.tx-divider-wrap > summary {
   list-style: none;
   cursor: pointer;

@@ -1,7 +1,7 @@
 <!--
   The injected `[date]` message (src/date) as a centered dashed divider — the date-separator
-  idiom of chat apps (date-marker plan, layout A): `2026-10-19 周一 14:12 · Asia/Shanghai` with a
-  muted note by injection kind below. Plain text interpolation only (never `v-html`). Entries
+  idiom of chat apps (date-marker plan, layout A): `2026-10-19 周一 14:12 · Asia/Shanghai`, nothing else (the per-kind
+  note line was removed on user request 2026-10-19). Plain text interpolation only (never `v-html`). Entries
   that cannot be parsed never reach this component (entries.ts falls back to TxCustom).
 -->
 <script setup lang="ts">
@@ -16,18 +16,6 @@ const WEEKDAYS = new Set(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
 const weekday = computed(() =>
   WEEKDAYS.has(props.marker.weekday) ? t(`transcript.dateWeek${props.marker.weekday}`) : props.marker.weekday,
 );
-const note = computed(() => {
-  switch (props.marker.kind) {
-    case "first":
-      return t("transcript.dateKindFirst");
-    case "cross-day":
-      return t("transcript.dateKindCrossDay");
-    case "idle":
-      return t("transcript.dateKindIdle");
-    default:
-      return "";
-  }
-});
 </script>
 
 <template>
@@ -37,6 +25,5 @@ const note = computed(() => {
         >{{ marker.date }} {{ weekday }} {{ marker.time }} · {{ marker.zone }}</span
       >
     </div>
-    <div v-if="note" class="tx-date-note">{{ note }}</div>
   </div>
 </template>

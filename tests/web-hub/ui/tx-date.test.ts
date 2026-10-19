@@ -80,22 +80,16 @@ describe("TxDate component", () => {
     return mount(TxDate, { props: { marker: { ...base, weekday, kind } } });
   };
 
-  it("zh: weekday localized, note per kind", () => {
-    const text = (kind: "first" | "cross-day" | "idle") => render("zh", kind).text();
-    expect(text("idle")).toBe("2026-10-19 周一 14:12 · Asia/Shanghai闲置 1h 后重新告知模型当前时间");
-    expect(text("cross-day")).toContain("已跨日");
-    expect(text("first")).toContain("会话开始");
+  it("renders only the date line for every kind (no note row)", () => {
+    for (const kind of ["first", "cross-day", "idle", "unknown"] as const) {
+      const w = render("zh", kind);
+      expect(w.text()).toBe("2026-10-19 周一 14:12 · Asia/Shanghai");
+      expect(w.find(".tx-date-note").exists()).toBe(false);
+    }
+    expect(render("en", "idle").find(".tx-date-text").text()).toBe("2026-10-19 Mon 14:12 · Asia/Shanghai");
     resetLangForTests();
   });
-  it("en: weekday kept, note per kind", () => {
-    const w = render("en", "idle");
-    expect(w.find(".tx-date-text").text()).toBe("2026-10-19 Mon 14:12 · Asia/Shanghai");
-    expect(w.find(".tx-date-note").text()).toBe("idle 1h+ — model told the current time again");
-    expect(render("en", "cross-day").find(".tx-date-note").text()).toContain("new day");
-    expect(render("en", "first").find(".tx-date-note").text()).toContain("session started");
-    resetLangForTests();
-  });
-  it("unknown kind renders no note; unknown weekday token is shown raw; plain text only", () => {
+  it("unknown weekday token is shown raw; plain text only", () => {
     const w = render("en", "unknown", "Xyz");
     expect(w.find(".tx-date-note").exists()).toBe(false);
     expect(w.find(".tx-date-text").text()).toContain("Xyz");
@@ -105,13 +99,7 @@ describe("TxDate component", () => {
 });
 
 describe("transcript i18n date keys", () => {
-  const keys = [
-    "dateAriaLabel",
-    "dateKindFirst",
-    "dateKindCrossDay",
-    "dateKindIdle",
-    ...["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `dateWeek${d}`),
-  ];
+  const keys = ["dateAriaLabel", ...["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `dateWeek${d}`)];
   it("exist, non-empty, in both languages", () => {
     for (const lang of ["en", "zh"] as const) {
       const ns = (MESSAGES[lang] as Record<string, Record<string, string>>).transcript!;
