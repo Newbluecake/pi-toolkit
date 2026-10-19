@@ -114,3 +114,18 @@ I alone owns `hub/{http,hub,main,lan-assembly,agent-server,ports,audit}.ts`, `pr
    `admission.acquire`'s fresh flag, preserving the existing fair scheduling of the login KDF queue; it must still work when
    `isFresh` is absent. An `inconsistent` 2FA state answering 503 even for known IPs is accepted (fail-closed; factorGen is needed
    for the CAS).
+
+## Phase-2 authorized additive integration amendments (2026-10-20)
+
+- User ruling (D follow-up): `session_meta.method TEXT` is nullable and additively migrated (no table drop for the exact
+  legacy shape). Existing metadata rows are set to `password`; missing/null legacy metadata also projects as `password`.
+  `CreateSessionCheckedInput.method?`, `LanSessionListRecord.method?` and strict `LanSessionWire.method?` accept ONLY
+  `password|totp|feishu|recovery`; C's sole `complete()` caller writes the satisfied method. D renders a zh/en method row.
+- `Lan2faState.repairNeeded?` carries B's runtime diagnosis; admin also uses the exact open-path `LanStatus.off.detail`
+  while the store is unavailable, rather than fabricating `2fa-missing-row` for every failure.
+- `LanFrontendDeps.approval?` and `onLoginCore?(core|undefined)` bind the Feishu runtime delegate to the frontend's
+  per-LAN core without a module-scope ref; registration is cleared on facade/scope disposal.
+- Fresh password pages have no authenticated SSE cap snapshot. `UiServer.serve`'s optional `lan2fa` bootstrap is set ONLY
+  when the internal production factor gate AND advertised `lan.2fa.v1` both hold. The verified index auth-mode substitution
+  then adds `data-lan-caps="lan.2fa.v1"` on password HTML only (gzip included); absence/off/token preserve old bytes.
+  This is public feature information, never a secret, identity or auth bypass. App gates LoginView from that marker.

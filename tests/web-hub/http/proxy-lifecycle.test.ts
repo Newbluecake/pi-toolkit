@@ -108,7 +108,7 @@ describe("construction", () => {
     expect(d.lan).toBe(true);
     expect(d.clientAllow).toBeDefined();
     expect(d.clientAllow).toBe(h.deps.lan!.clientAllow); // I1: ONE guard for both listener kinds
-    expect(h.deps.lan!.secondFactorEnabled).toBe(false); // not a user-reachable config switch
+    expect(h.deps.lan!.secondFactorEnabled).toBe(true); // not a user-reachable config switch
     expect(d.lanPort).toBe(h.configured.lan!.port);
     expect(d.lanPort).toBe(lp);
     const snap = d.lanHostSnapshot() as { hostKeys: ReadonlySet<string> } | undefined;

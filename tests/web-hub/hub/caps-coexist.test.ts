@@ -196,10 +196,10 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
       c.send(hello());
       const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
       c.sock.destroy();
-      // Also pinned with config.lan present: I has not wired either P0 feature yet.
+      // Both completed LAN features are static iff LAN is configured.
       for (const surface of [r.info.caps, ack["caps"] as string[]]) {
-        expect(surface).not.toContain(LAN_2FA_HUB_CAP);
-        expect(surface).not.toContain(LAN_SESSIONS_HUB_CAP);
+        expect(surface.includes(LAN_2FA_HUB_CAP)).toBe(over.lan !== undefined);
+        expect(surface.includes(LAN_SESSIONS_HUB_CAP)).toBe(over.lan !== undefined);
       }
       return { browser: [...r.info.caps], agent: [...(ack["caps"] as string[])] };
     };

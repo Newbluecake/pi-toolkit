@@ -104,6 +104,12 @@ describe("LAN security HTTP contracts", () => {
     };
     const list = { idleMinutes: 720, absoluteDays: 7, max: 32, sessions: Array(32).fill(row) };
     expect(Value.Check(LanSessionsResponseSchema, list)).toBe(true);
+    for (const method of ["password", "totp", "feishu", "recovery"]) {
+      expect(Value.Check(LanSessionsResponseSchema, { ...list, sessions: [{ ...row, method }] })).toBe(true);
+    }
+    for (const method of [null, "unknown", 1]) {
+      expect(Value.Check(LanSessionsResponseSchema, { ...list, sessions: [{ ...row, method }] })).toBe(false);
+    }
     expect(Value.Check(LanSessionsResponseSchema, { ...list, sessions: Array(33).fill(row) })).toBe(false);
     expect(Value.Check(LanSessionsResponseSchema, { ...list, sessions: [{ ...row, sidHash: "private" }] })).toBe(false);
     expect(Value.Check(LanSessionRevokeBodySchema, { id })).toBe(true);

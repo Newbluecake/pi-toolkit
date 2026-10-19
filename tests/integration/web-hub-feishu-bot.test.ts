@@ -1,3 +1,9 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { totpCode } from "../../src/web-hub/hub/totp.js";
+import { lanPostJson, lanRequest } from "../web-hub/http/lan-helpers.js";
+import { freeTcpPort } from "../web-hub/http/proxy-kit.js";
+import type { SecurityEvent } from "../../src/web-hub/hub/security-events.js";
+import type { TfaResFrame } from "../../src/web-hub/protocol/lan-2fa.js";
 /** F10: REAL child-process startHub + HTTP frontend, native WebSocket over the F3 local
  * RFC6455 fake, F2 HTTP fake, real Unix agent socket/router/stores/uploads/spawn supervisor.
  * Only the external Feishu transports and the agent are fake. main.ts intentionally has no
@@ -49,7 +55,11 @@ if (cfg.feishuBot) {
     if (!saved.ok) throw new Error("fixture credentials: " + saved.reason);
   }
 }
-const hub = await startHub(cfg, createHttpFrontend, {feishuSeams: {
+const securityEvents = [];
+const hub = await startHub(cfg, (deps) => {
+  deps.lan?.security?.subscribe((e) => securityEvents.push(e));
+  return createHttpFrontend(deps);
+}, {feishuSeams: {
   fetch: fake.fetch,
   // Destination admission still validates the real wss URL before this transport seam.
   webSocket: () => new WebSocket(ws.url)
@@ -68,7 +78,7 @@ process.on("message", async (m) => {
         payloadEncoding:"", payload: Buffer.from(JSON.stringify(m.raw))}));
       reply(m.id, true);
     } else if (m.op === "inspect") {
-      reply(m.id, {sent: fake.sent, calls: fake.calls.map(({signal, ...c}) => c),
+      reply(m.id, {...(cfg.lan ? {securityEvents, lan: hub.lanStatus()} : {}), sent: fake.sent, calls: fake.calls.map(({signal, ...c}) => c),
         peers: ws.peers.length, livePeers: ws.peers.filter(p => !p.closed).length,
         acks: ws.peers.flatMap(p => p.received.map(decodeFrame)).filter(f => header(f,"biz_rt") !== undefined).length});
     } else if (m.op === "resource") {
@@ -81,10 +91,12 @@ process.on("message", async (m) => {
     } else throw new Error("unknown fixture op");
   } catch (e) { process.send?.({id: m.id, error: String(e)}); }
 });
-process.send?.({ready: true, port: hub.httpPort, caps: hub.info.caps});
+process.send?.({ready: true, port: hub.httpPort, caps: hub.info.caps, lanPort: cfg.lan?.port});
 `;
 
 interface Inspection {
+  securityEvents?: SecurityEvent[];
+  lan?: { state: string; port?: number };
   sent: Array<{ messageId: string; kind: string; body: Record<string, unknown> }>;
   calls: Array<{ method: string; path: string; json?: any; form?: any }>;
   peers: number;
@@ -145,7 +157,7 @@ function newHome() {
   homes.add(home);
   return home;
 }
-async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean } = {}) {
+async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean; lanSecurity?: boolean } = {}) {
   const home = options.home ?? newHome();
   const cwd = join(home, "project");
   mkdirSync(cwd, { recursive: true });
@@ -164,6 +176,9 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
   const cfg = config({
     home,
     ...(launcher ? { launcher } : {}),
+    ...(options.lanSecurity
+      ? { lan: { port: await freeTcpPort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] } }
+      : {}),
     ...(options.enabled === false
       ? {}
       : {
@@ -171,6 +186,7 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
             allowGroups: true,
             groupRootTopics: true,
             notify: "bound",
+            ...(options.lanSecurity ? { securityAlerts: true } : {}),
             spawnScope: "known",
             debounceMs: 0,
             staleMessageS: 300,
@@ -186,7 +202,7 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
             ratePerMinute: 20,
             maxLifetimeMinutes: 10,
             registerTimeoutS: 10,
-            lan: "off",
+            lan: options.lanSecurity ? "known" : "off",
             restore: false,
             history: false,
           },
@@ -248,7 +264,7 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
     });
   }
   const ready = await bounded(
-    new Promise<{ port: number; caps: string[] }>((res, rej) => {
+    new Promise<{ port: number; caps: string[]; lanPort?: number }>((res, rej) => {
       child.on("message", (m: any) => {
         if (m.ready) res(m);
       });
@@ -345,6 +361,147 @@ async function boot(options: { home?: string; enabled?: boolean; spawn?: boolean
 // describe-level timeout includes child startup/shutdown and slow CI scheduling; every inner wait
 // also has a deadline. No silent skip for missing tsx/dev deps or real hub startup errors.
 describe("F10 Feishu bot — real hub child assembly", () => {
+  it("LAN-P5: real child + SQLite + Feishu: each completed method inserts once, emits once, and a LAN spawn alerts once", async () => {
+    const h = await boot({ lanSecurity: true, spawn: true });
+    const a = await h.agent();
+    expect(h.ready.caps).toEqual(expect.arrayContaining(["lan.2fa.v1", "lan.sessions.v1"]));
+    await until(h.inspect, (s) => s.lan?.state === "on", "LAN listener ready");
+    const port = h.ready.lanPort!;
+    let rid = 0;
+    const admin = async (type: "lan_req" | "tfa_req", op: Record<string, unknown>) => {
+      const id = `lan-p5-${++rid}`;
+      a.c.send({ t: type, rid: id, ...op });
+      return a.c.waitFrame((f) => f.t === (type === "tfa_req" ? "tfa_res" : "lan_res") && f.rid === id);
+    };
+    const info = await admin("lan_req", { op: "info" });
+    const credentials = info.info as { username: string; initialPassword: string };
+    const loginBody = { username: credentials.username, password: credentials.initialPassword };
+    const cookieOf = (r: Awaited<ReturnType<typeof lanPostJson>>) => r.headers["set-cookie"]![0]!.split(";")[0]!;
+    const post = (ip: string, path: string, body: unknown, cookie?: string) =>
+      lanPostJson(port, path, body, cookie === undefined ? {} : { Cookie: cookie }, ip);
+    const get = (ip: string, path: string, cookie: string) =>
+      lanRequest(port, { path, localAddress: ip, headers: { Cookie: cookie, "X-PWH": "1" } });
+    const assertSuccess = async (
+      ip: string,
+      method: string,
+      result: Awaited<ReturnType<typeof post>>,
+      count: number,
+      newIp: boolean,
+    ) => {
+      expect(result.status).toBe(200);
+      const cookie = cookieOf(result);
+      const sessions = await get(ip, "/api/lan/sessions", cookie);
+      expect(sessions.status).toBe(200);
+      const rows = JSON.parse(sessions.body).sessions;
+      expect(rows).toHaveLength(count);
+      expect(rows.filter((s: { current: boolean }) => s.current)).toMatchObject([{ method }]);
+      const state = await until(
+        h.inspect,
+        (s) => (s.securityEvents ?? []).filter((e) => e.type === "login-success").length === count,
+        `login event ${method}`,
+      );
+      expect((state.securityEvents ?? []).filter((e) => e.type === "login-success").at(-1)).toMatchObject({
+        ip,
+        method,
+        newIp,
+      });
+      return cookie;
+    };
+    // Same-IP password success is still an event, but deliberately NOT a high-risk Feishu alert.
+    await assertSuccess("127.0.0.2", "password", await post("127.0.0.2", "/api/login", loginBody), 1, true);
+    await assertSuccess("127.0.0.2", "password", await post("127.0.0.2", "/api/login", loginBody), 2, false);
+    const begin = await admin("tfa_req", { op: "totp_begin" });
+    expect(begin.ok).toBe(true);
+    const b32 = (begin.data as { secretB32: string }).secretB32;
+    let bits = "";
+    for (const ch of b32) bits += "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(ch).toString(2).padStart(5, "0");
+    const secret = Uint8Array.from(bits.match(/.{8}/g) ?? [], (b) => parseInt(b, 2));
+    const crypto = {
+      hmacSha1: (key: Uint8Array, msg: Uint8Array) => createHmac("sha1", key).update(msg).digest(),
+      timingSafeEqual,
+    };
+    const step = Math.floor(Date.now() / 30000);
+    const confirm = (await admin("tfa_req", {
+      op: "totp_confirm",
+      code: totpCode(secret, step, crypto),
+    })) as unknown as TfaResFrame;
+    if (!confirm.ok || confirm.data.kind !== "totp_confirm") throw Error(JSON.stringify(confirm));
+    const recovery = confirm.data.recoveryCodes[0]!;
+    const status = await admin("tfa_req", { op: "status" });
+    expect(status).toMatchObject({ ok: true, data: { knownIps: 0, state: "enrolled" } }); // Q15
+    const t = await post("127.0.0.3", "/api/login", loginBody);
+    expect(t.status).toBe(401);
+    expect(JSON.parse(t.body)).toMatchObject({ error: "E_2FA" });
+    await assertSuccess(
+      "127.0.0.3",
+      "totp",
+      await post(
+        "127.0.0.3",
+        "/api/login/2fa",
+        { method: "totp", code: totpCode(secret, step + 1, crypto) },
+        cookieOf(t),
+      ),
+      3,
+      true,
+    );
+    const r = await post("127.0.0.4", "/api/login", loginBody);
+    expect(r.status).toBe(401);
+    await assertSuccess(
+      "127.0.0.4",
+      "recovery",
+      await post("127.0.0.4", "/api/login/2fa", { method: "recovery", code: recovery }, cookieOf(r)),
+      4,
+      true,
+    );
+    // Establish real tenant evidence before the real approval port issues callback nonces.
+    await h.send("/list");
+    await h.sent("One · sessio");
+    expect(await admin("tfa_req", { op: "feishu", on: true })).toMatchObject({ ok: true });
+    const f = await post("127.0.0.5", "/api/login", loginBody);
+    expect(f.status).toBe(401);
+    expect(JSON.parse(f.body)).toMatchObject({
+      error: "E_2FA",
+      feishu: "sent",
+      methods: expect.arrayContaining(["feishu"]),
+    });
+    const disk = await until(
+      async () => h.disk(),
+      (s) => Object.values(s.nonces).some((n: any) => n.action === "login-approve"),
+      "live approval nonce",
+    );
+    const n: any = Object.values(disk.nonces).find((n: any) => n.action === "login-approve");
+    const waiting = get("127.0.0.5", "/api/login/2fa/wait", cookieOf(f));
+    await h.rpc("send", { raw: callback(n.nonce, { id: "lan-p5-approve", chatId: n.chatId, messageId: n.messageId }) });
+    const finalCookie = await assertSuccess("127.0.0.5", "feishu", await waiting, 5, true);
+    const spawnBody = { id: "lan-p5-spawn-0001", cwd: h.cwd, confirm: true, expectCwd: h.cwd };
+    const spawned = await post("127.0.0.5", "/api/headless", spawnBody, finalCookie);
+    expect(spawned.status, spawned.body).toBe(202);
+    expect((await post("127.0.0.5", "/api/headless", spawnBody, finalCookie)).status).toBe(202);
+    const state = await until(
+      h.inspect,
+      (s) => (s.securityEvents ?? []).filter((e) => e.type === "lan-spawn").length === 1,
+      "one spawn event",
+    );
+    expect((state.securityEvents ?? []).filter((e) => e.type === "lan-spawn")).toMatchObject([
+      { mode: "new", ip: "127.0.0.5" },
+    ]);
+    for (const [ip, method] of [
+      ["127.0.0.2", "密码"],
+      ["127.0.0.3", "TOTP"],
+      ["127.0.0.4", "恢复码"],
+      ["127.0.0.5", "飞书审批"],
+    ] as const) {
+      const notice = await h.sent(`新 IP 登录：${ip}`);
+      const notices = notice.sent.filter((m) => String(m.body.content).includes(`新 IP 登录：${ip}`));
+      expect(notices).toHaveLength(1);
+      expect(String(notices[0]!.body.content)).toContain(`方式 ${method}`);
+    }
+    const notice = await h.sent("检测到局域网会话");
+    expect(notice.sent.filter((m) => String(m.body.content).includes("检测到局域网会话"))).toHaveLength(1);
+    expect(readFileSync(h.paths.hubJson, "utf8")).not.toContain(b32);
+    expect(readFileSync(h.paths.logFile, "utf8")).not.toContain(b32);
+  }, 60000);
+
   it("FB1/FB2: /list → numeric /use → labelled token round trip and Typing cleanup", async () => {
     const h = await boot(),
       a = await h.agent();

@@ -344,6 +344,7 @@ skipIfNoSqlite(
       expect(ack["caps"]).toEqual([
         "ctl.v1",
         "lan.v1",
+        "lan.2fa.v1",
         ...P2_HUB_CAPS,
         ...UPLOAD_HUB_CAPS,
         ...DIALOG_BG_HUB_CAPS,
@@ -352,6 +353,7 @@ skipIfNoSqlite(
         ...QUOTA_POOLS_HUB_CAPS,
         ...TODO_ARCHIVE_HUB_CAPS,
         VERSION_HUB_CAP,
+        "lan.sessions.v1",
       ]);
 
       c.send({ t: "lan_req", rid: "r1", op: "info" });

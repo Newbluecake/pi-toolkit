@@ -61,6 +61,7 @@ import {
   PROXY_LAN_HUB_CAP,
   PROXY_FRAME_HUB_CAP,
   FSB_HUB_CAP,
+  LAN_SESSIONS_HUB_CAP,
 } from "../protocol/version.js";
 import type { HubUiBuildWire } from "../protocol/version-info.js";
 import { createVersionInfoService } from "./version-info.js";
@@ -416,6 +417,7 @@ export async function startHub(
       // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
       // always constructed, so the cap and the route can never disagree.
       VERSION_HUB_CAP,
+      ...(config.lan === undefined ? [] : [LAN_SESSIONS_HUB_CAP]),
       ...(config.spawn === undefined
         ? []
         : [
@@ -622,8 +624,8 @@ export async function startHub(
     const admin = createAdminHandler({
       log,
       hasLan: () => config.lan !== undefined,
-      // Routing lands now; cap remains staged until G and final production gate pass.
-      advertiseTfa: false,
+      // D/E/F/G gates passed together: expose local setup only with configured LAN.
+      advertiseTfa: config.lan !== undefined,
       emit: (e) => security?.emit(e),
       repair2fa: () => repairLan2fa({ dbFile: paths.dbFile, log }),
       feishuOwner: () => bot?.snapshot().owner !== undefined,
@@ -867,9 +869,8 @@ export async function startHub(
       lanDeps.onLoginCore = (core) => {
         lanLoginCore = core;
       };
-      // Rollout gate: no factor challenge until E/F/G + advertised UI capability land together.
-      // Not configurable through settings/env, including for an already-enrolled database.
-      lanDeps.secondFactorEnabled = false;
+      // D/E/F/G are wired and verified. Internal invariant, never configurable through settings/env.
+      lanDeps.secondFactorEnabled = true;
       const dbRestartStore = lanDeps.store as Partial<LanStore>;
       if (typeof dbRestartStore.onRestartNeeded === "function") {
         unsubscribeDbRestart = dbRestartStore.onRestartNeeded(requestDbSelfRestart);

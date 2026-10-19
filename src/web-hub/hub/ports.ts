@@ -113,12 +113,12 @@ export interface RequestContext {
 }
 
 export interface LanFrontendDeps {
-  /** Shared hub-owned allowlist; omitted only by legacy test assemblies. */
+  /** Shared hub-owned allowlist, injected by startHub after assembly; required by the HTTP frontend. */
   clientAllow?: ClientAllowGuard;
   /** Open-time history repair notice; never inferred from a missing account. */
   loginIpsRebuiltAt?: number;
   security?: SecurityEventBus;
-  /** Internal rollout gate, NOT a setting. Production stays false until E/F/G and caps land. */
+  /** Internal rollout gate, NOT a setting. Production enables it together with LAN capabilities. */
   secondFactorEnabled?: boolean;
   approval?: LoginApprovalPort;
   /** Core registration for the late-bound Feishu decision sink. Cleared on dispose. */

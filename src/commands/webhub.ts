@@ -242,7 +242,11 @@ function makeTwofaDeps(ctx: ExtensionCommandContext, deps: WebHubCommandDeps): T
     if (expiry !== undefined) clearTimeout(expiry);
     ctx.ui.setWidget(key, lines);
     expiry = setTimeout(() => {
-      ctx.ui.setWidget(key, undefined);
+      try {
+        ctx.ui.setWidget(key, undefined);
+      } catch {
+        /* session/UI already disposed */
+      }
     }, 5 * 60_000);
     expiry.unref();
   };
