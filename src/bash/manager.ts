@@ -292,10 +292,15 @@ export interface BashJobManager {
   /**
    * §2.5/§3.9: `signal` (when given) is checked before every I/O call and
    * after every `await` (the linearization point is `signal.aborted` going
-   * true) — aborting never leaves a mutated record, never rearms a timer,
-   * never sends a notification; it simply makes `recover()` return sooner
-   * with `partial: true`. Disposing the manager has the same effect on any
-   * `recover()` call already in flight against it.
+   * true) — aborting never leaves a mutated record, never rearms a job
+   * deadline timer, never starts a new scan; it simply makes `recover()`
+   * return sooner with `partial: true`. One deliberate exception (2026-10-19):
+   * the single liveness/notification poll MAY be (re)armed at the end of a
+   * partial pass on a live manager — records already folded are this
+   * manager's responsibility and no later pass will re-verify them. A
+   * superseded stack is disposed, and `dispose()` clears/no-ops that poll, so
+   * the supersede-safety invariant is unchanged. Disposing the manager has
+   * the same effect on any `recover()` call already in flight against it.
    */
   recover(signal?: AbortSignal): Promise<RecoverSummary>;
   create(init: CreateJobInit): Promise<CreatedJob>;
@@ -1871,9 +1876,18 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       .map((entry) => entry.record)
       .filter((record) => shouldNotifyJob(record))
       .map((record) => record.jobId);
-    // §2.5 step 4: a cancelled scan rearms nothing — the poller (and any
-    // notice it would deliver) belongs to a later, uncancelled pass.
-    if (!partial) ensurePolling();
+    // §2.5 step 4 revision (2026-10-19 live bug): the poll is armed even after
+    // a PARTIAL scan. A cancelled scan folds nothing further, but the records
+    // already folded (adopted / foreign / terminal-awaiting-notice) belong to
+    // this manager now, and there is no "later, uncancelled pass" — recover()
+    // runs once per stack build. Without the poll nobody would ever re-verify
+    // those child pids again: a job whose process exits while unmanaged stays
+    // "running" in memory (and in `bash_job list` / the fleet widget) forever.
+    // The abort-safety invariant a SUPERSEDED stack relies on is preserved
+    // through `dispose()` (which clears the poll timer and makes
+    // `ensurePolling` a no-op), not through withholding the poll from a live
+    // manager whose recovery merely ran out of budget.
+    ensurePolling();
     return {
       adopted,
       exitedUnknown,

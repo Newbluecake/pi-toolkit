@@ -1076,10 +1076,20 @@ describe("bash job manager: recover (§3.6)", () => {
     expect(h.manager.get("b_P0B00002")?.status).toBe("running");
     // Record #3 was never reached: no memory entry, nothing queued for it.
     expect(h.manager.get("b_P0C00003")).toBeUndefined();
-    // No further store writes after the abort point, and nothing rearmed.
+    // No further store writes after the abort point (the linearization pin).
     const afterAbort = writes;
     await settle();
     expect(writes).toBe(afterAbort);
+    // 2026-10-19 revision: the liveness poll IS armed on a live manager even
+    // after a partial pass (there is no later scan — recover() runs once per
+    // stack build), and it reconciles the stranded `running` record once its
+    // child pid is verifiably gone (disk write #2 settled in flight).
+    expect(h.clock.pendingTimers).toBe(1);
+    h.clock.advance(2_000);
+    await waitFor(() => h.manager.get("b_P0B00002")?.status === "exited_unknown", "poll reconciles stranded record");
+    // Superseded-stack inertness is preserved through dispose(), not through
+    // withholding the poll from a live manager.
+    h.manager.dispose();
     expect(h.clock.pendingTimers).toBe(0);
   });
 
@@ -1111,8 +1121,19 @@ describe("bash job manager: recover (§3.6)", () => {
     const afterAbort = writes;
     await settle();
     expect(writes).toBe(afterAbort);
-    expect(h.clock.pendingTimers).toBe(0);
     expect(h.notified).toEqual([]);
+    // 2026-10-19 revision: the poll is armed on a live manager even after a
+    // partial pass, and reconciles the stranded record once its child pid is
+    // verifiably gone — with the normal notify path (the disk-side
+    // backgroundedAt fold makes it notification-eligible again).
+    expect(h.clock.pendingTimers).toBe(1);
+    h.port.ownership.set(9304, "dead");
+    h.clock.advance(2_000);
+    await waitFor(() => h.manager.get("b_P0D00004")?.status === "exited_unknown", "poll reconciles stranded adoption");
+    await waitFor(() => h.notified.length === 1, "notify after poll reconciliation");
+    expect(h.notified[0]?.jobId).toBe("b_P0D00004");
+    h.manager.dispose();
+    expect(h.clock.pendingTimers).toBe(0);
   });
 
   it("recover() kills a crash-recovered subagent job with a 500ms grace (reaper-orphans §7.4)", async () => {
@@ -1155,6 +1176,73 @@ describe("bash job manager: recover (§3.6)", () => {
     await settle();
     expect(h.port.killCalls).toEqual([]);
     expect(h.manager.get("b_P0F00006")?.status).toBe("running");
+  });
+});
+
+/**
+ * 2026-10-19 live bug: a backgrounded job (`sleep 1260 && echo …`) whose
+ * process exited while unmanaged stayed "running" in `bash_job list` for
+ * hours after an in-process /reload (same store, same host pid) until a
+ * manual `bash_job kill` reconciled it. Two guards: the base reconcilation
+ * itself, and the poll staying armed after a partial (budget-aborted)
+ * recover — the disarmed poll was what left the folded `running` record
+ * with no child-pid re-verification at all.
+ */
+describe("bash job manager: reload reconciliation (2026-10-19 regression)", () => {
+  it("a job whose process exited while unmanaged is reconciled terminal by the next stack (same store, same host pid)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 1260", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    const pid = h.port.last().pid;
+    // The /reload handoff is lost: exported (owner cleared) but never
+    // adopted, so the old manager's finalization early-returns without
+    // settling anything.
+    const handoffs = h.manager.exportLocalJobs();
+    expect(handoffs.map((handoff) => handoff.jobId)).toEqual([job.jobId]);
+    // The process exits while unmanaged — nobody settles the record.
+    h.port.ownership.set(pid, "dead");
+    h.port.last().exit({ exitCode: 0 });
+    await settle();
+    expect((await h.store.load(job.jobId))?.status).toBe("running");
+    h.manager.dispose();
+    // The next stack on the same store with the same host pid re-verifies the
+    // child pid and reconciles the record as exited_unknown.
+    const next = h.rebuild();
+    const summary = await next.recover();
+    expect(summary.exitedUnknown).toEqual([job.jobId]);
+    expect(next.get(job.jobId)?.status).toBe("exited_unknown");
+    expect((await h.store.load(job.jobId))?.status).toBe("exited_unknown");
+    // …through the normal single-channel notify path (I-b).
+    h.clock.advance(2_000);
+    await waitFor(() => h.notified.some((record) => record.jobId === job.jobId), "completion notice after recovery");
+  });
+
+  it("a partial (budget-aborted) recover still arms the liveness poll, reconciling a record whose process exits afterwards", async () => {
+    const h = await harness();
+    // Same-hostPid `running` record — the /reload case: recover() adopts it.
+    await seed(h.store, "b_RE10AD01", { status: "running", pid: 9501, spawnedAt: 600, hostPid: HOST_PID });
+    h.port.ownership.set(9501, "alive");
+    const controller = new AbortController();
+    const realUpdate = h.store.update.bind(h.store);
+    h.store.update = (jobId: string, mutate: (record: JobRecord) => JobRecord | undefined) => {
+      // The recovery deadline fires while the adoption patch is in flight.
+      controller.abort();
+      return realUpdate(jobId, mutate);
+    };
+    const summary = await h.manager.recover(controller.signal);
+    expect(summary.partial).toBe(true);
+    expect(h.manager.get("b_RE10AD01")?.status).toBe("running");
+    // The process exits later, while nobody is explicitly watching; the poll
+    // (armed despite the partial pass) re-verifies the child pid and settles.
+    h.port.ownership.set(9501, "dead");
+    h.clock.advance(2_000);
+    await waitFor(
+      () => h.manager.get("b_RE10AD01")?.status === "exited_unknown",
+      "poll reconciles adopted record after partial recover",
+    );
+    expect((await h.store.load("b_RE10AD01"))?.status).toBe("exited_unknown");
+    // …and the completion notice goes out through the normal channel.
+    await waitFor(() => h.notified.some((record) => record.jobId === "b_RE10AD01"), "notify after poll reconciliation");
   });
 });
 
