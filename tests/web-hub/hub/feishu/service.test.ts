@@ -59,6 +59,17 @@ describe("F8 in-process service composition", () => {
     await eventually(() => expect(r.service.snapshot().outbox.ok).toBeGreaterThan(1));
     expect(r.request).toHaveBeenCalledTimes(1);
   });
+  it("a local prompt without a Feishu dialog card is not pushed (unanswerable from Feishu); compaction failure still is", async () => {
+    const r = await rig();
+    await r.bind();
+    r.event({ type: "ui_prompt_start", kind: "select", title: "some other extension prompt" });
+    r.event({ type: "ui_prompt_start", kind: "custom" });
+    // Queued after the prompts on the same work queue: once its notice is out, any prompt notice
+    // would already have been sent.
+    r.event({ type: "session_compact_failed", willRetry: false });
+    await eventually(() => expect(sentContent(r)).toContain("failed: 请到 web/终端查看"));
+    expect(sentContent(r)).not.toContain("waiting:");
+  });
   it("group /use and final reply remain thread-bound, never chat-send", async () => {
     const r = await rig();
     const options = { chatType: "group" as const, threadId: "thread-1", mentions: true };

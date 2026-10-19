@@ -1400,16 +1400,16 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
               );
           }
         }
-        if (
-          event.e.type === "ui_prompt_start" ||
-          (event.e.type === "session_compact_failed" && event.e["willRetry"] !== true)
-        ) {
+        // A local prompt that has no Feishu dialog card cannot be answered from Feishu, so it is
+        // not pushed at all (user ruling 2026-10-19: "ask_user 如果不能在飞书上直接选择，就不用推送消息了").
+        // Only a non-retrying compaction failure still notifies.
+        if (event.e.type === "session_compact_failed" && event.e["willRetry"] !== true) {
           const sid = deps.sessions.views().find((v) => v.agentKey === event.agentKey && v.live)?.sessionId;
-          if (sid && !event.e["dialogId"])
+          if (sid)
             work.run(() =>
               notify.session({
                 sessionId: sid,
-                kind: event.e.type === "ui_prompt_start" ? "waiting" : "failed",
+                kind: "failed",
                 text: "请到 web/终端查看",
                 feishuInitiated: false,
               }),

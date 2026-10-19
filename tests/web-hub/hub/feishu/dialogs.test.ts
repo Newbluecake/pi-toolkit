@@ -83,6 +83,19 @@ describe("F8 ask_user bridge", () => {
       ]),
     ).toBe(false);
   });
+  it("a dialog that cannot be answered from Feishu (> 8 questions) sends no card and no notice", async () => {
+    const r = await rig();
+    const sentBefore = r.sendCard.mock.calls.length;
+    const nine: DialogWire = {
+      ...dialog(),
+      dialogId: "dialog-9",
+      questions: Array.from({ length: 9 }, (_, i) => ({ question: `Q${i}`, options: [{ label: "A" }] })),
+    };
+    await r.dialogs.reconcile("agent-2", "epoch", [nine], []);
+    expect(r.sendCard.mock.calls.length).toBe(sentBefore);
+    expect(r.notice).not.toHaveBeenCalled();
+    expect(r.state.dialogCards.list().some((c) => c.dialogId === "dialog-9")).toBe(false);
+  });
   it("form submits valid multi-question answers through the existing dialog_answer command", async () => {
     const r = await rig(true);
     await r.dialogs.callback(r.nonce("submit"), r.identity, "cb1", { form_value: { q0: ["0", "1"], q1: "skip" } });

@@ -13,7 +13,7 @@ User (final):
 - **D1** remote control + topic binding: p2p keeps a CURRENT-session pointer over every pi session the hub sees
   (`/list`, `/use <n>`, `/new <dir>`, `/cur`); every reply is session-labelled; in groups one topic binds one session; @-bot only.
 - **D2** one final reply per run + "Typing" reaction while running; no streaming cards.
-- **D3** v1: ask_user card buttons (third race channel), files both directions, proactive done/failed/waiting notices. **No `/stop`.**
+- **D3** v1: ask_user card buttons (third race channel), files both directions, proactive done/failed notices (waiting = answerable ask cards only, ruling 2026-10-19). **No `/stop`.**
 - **D4** QR device-flow registration (`PersonalAgent`) → app_id/secret + owner open_id (default sole allow-listed user);
   hand-written long-connection client, **no runtime dependency**.
 - **Q1** keepHubAlive while the bot is configured = **yes**.
@@ -353,7 +353,8 @@ Scope `feishuBot.notify`: `bound` (default: sessions bound in any chat) | `off`.
   background-idle evidence**: registry status fresh (≤10 s), `status.bashJobs` present and none running, all fleet rows terminal;
   missing/stale evidence ⇒ treated as busy ⇒ suppressed (not deferred). ≥60 s apart per session.
 - **failed**: assistant `stopReason:error` or `session_compact_failed ∧ !willRetry`; ≤1/5 min/session.
-- **waiting**: ask cards (§6.3); unattributed native `ui_prompt_start` ⇒ text notice ≤1/5 min/session.
+- **waiting**: ask cards (§6.3) only. A prompt Feishu cannot answer (no card: unattributed native `ui_prompt_start`, > 8
+  questions, card store refused) pushes nothing (user ruling 2026-10-19).
 - Global ≤20 notices/min.
   **Coexistence with `src/feishu-notify` (Q4):** its triggers — result card (success/error at `agent_settled`), `waiting` (a tool
   waiting > `waitNotifyTimeoutSec`, default 120 s), long-task heartbeat (`heartbeatIntervalSec`), subagent summary, idle reminder,

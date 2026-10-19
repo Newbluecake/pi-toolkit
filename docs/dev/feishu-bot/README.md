@@ -60,18 +60,18 @@
 
 以下键在**顶层 `feishuBot`**，不是 `webHub.feishuBot`。默认值来自 `src/config/settings.ts` 的 `DEFAULT_FEISHU_BOT_SETTINGS`。
 
-| 键                              | 默认值    | 含义                                                                                                 |
-| ------------------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
-| `feishuBot.enabled`             | `false`   | 总开关；还需 `webHub.enabled:true` 与 `webHub.control !== false`。                                   |
-| `feishuBot.allowGroups`         | `true`    | 是否接收群内 @ 请求。                                                                                |
-| `feishuBot.groupRootTopics`     | `false`   | 普通群 @ 时开未绑定话题；随后显式 `/use` 或 `/new`。                                                 |
-| `feishuBot.notify`              | `"bound"` | `bound` / `off`；对已绑定会话发原生 done/failed/waiting 提醒，不等于关闭请求最终回复。               |
-| `feishuBot.spawnScope`          | `"known"` | `known` / `roots`；known 拒绝未知目录。roots 允许 spawn roots 内未知目录，经真实路径确认卡片后创建。 |
-| `feishuBot.debounceMs`          | `1500`    | 合并相同路由与身份上下文的连续请求；0–10000 **毫秒**。JSON-only，不在 TUI 设置编辑器展示。           |
-| `feishuBot.staleMessageS`       | `300`     | 拒绝过旧请求，30–3600 **秒**；重复事件仍走去重。                                                     |
-| `feishuBot.files.outbound`      | `"auto"`  | `auto` / `buttons` / `off`，见上。                                                                   |
-| `feishuBot.files.inbound`       | `true`    | 接收图片/文件附件。                                                                                  |
-| `feishuBot.files.maxInboundMiB` | `30`      | 配置可解析 1–100 MiB，但实际还被文件适配器/UploadStore 限制为 **最多 30 MiB**；调大不能绕过。        |
+| 键                              | 默认值    | 含义                                                                                                                     |
+| ------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `feishuBot.enabled`             | `false`   | 总开关；还需 `webHub.enabled:true` 与 `webHub.control !== false`。                                                       |
+| `feishuBot.allowGroups`         | `true`    | 是否接收群内 @ 请求。                                                                                                    |
+| `feishuBot.groupRootTopics`     | `false`   | 普通群 @ 时开未绑定话题；随后显式 `/use` 或 `/new`。                                                                     |
+| `feishuBot.notify`              | `"bound"` | `bound` / `off`；对已绑定会话发原生 done/failed 提醒（等待输入只推可在飞书直接作答的问题卡片），不等于关闭请求最终回复。 |
+| `feishuBot.spawnScope`          | `"known"` | `known` / `roots`；known 拒绝未知目录。roots 允许 spawn roots 内未知目录，经真实路径确认卡片后创建。                     |
+| `feishuBot.debounceMs`          | `1500`    | 合并相同路由与身份上下文的连续请求；0–10000 **毫秒**。JSON-only，不在 TUI 设置编辑器展示。                               |
+| `feishuBot.staleMessageS`       | `300`     | 拒绝过旧请求，30–3600 **秒**；重复事件仍走去重。                                                                         |
+| `feishuBot.files.outbound`      | `"auto"`  | `auto` / `buttons` / `off`，见上。                                                                                       |
+| `feishuBot.files.inbound`       | `true`    | 接收图片/文件附件。                                                                                                      |
+| `feishuBot.files.maxInboundMiB` | `30`      | 配置可解析 1–100 MiB，但实际还被文件适配器/UploadStore 限制为 **最多 30 MiB**；调大不能绕过。                            |
 
 已配置（包括 auth_failed/degraded）的机器人使 hub 在没有 agent 时也保持存活；这不是另一个设置项。`/webhub stop` 仍可明确停止整个 hub，`/webhub feishu reset` 删除凭据后不再保活。
 
@@ -101,7 +101,7 @@
 - `/new` 首条请求必须等实际会话坐标、原子绑定后才送；启动失败/超时会说明。重启不重复 fork、不自动发送存下的首条请求。托管会话自身是否恢复由 `webHub.spawn.restore` 控制，与机器人“重派请求”是两回事。
 - 原生 WebSocket 在 1 MiB 检查前已分配整帧，且没有公开 `terminate()`。逻辑停止/非 ACK 保证有界，物理卡死 socket 可留诊断 zombie；达到上限暂停拨号并报 `close-timeout`，并非无限新建连接。
 - 出站 uuid 的约 1 小时平台去重窗未实测；未知发送效果超过保守 50 分钟停止重试。重启可能丢失仅在内存中的已发消息/话题坐标；部分投递/卡片状态可能只能在 web 核实。Markdown 会中和标签和危险链接，极长代码片段的最后分段可能不完美；长输出附件失败会明确截断，不应当作完整结果。
-- 原生 `done` 提醒要求新鲜、完整的 fleet **和** bash 空闲证据；缺失/截断/仍忙则**抑制而非延后**。failed/waiting 不用该空闲门；来自飞书的请求不另发重复的原生完成提醒。被动 feishuNotify 可独立发同类通知。
+- 原生 `done` 提醒要求新鲜、完整的 fleet **和** bash 空闲证据；缺失/截断/仍忙则**抑制而非延后**。failed 不用该空闲门；在飞书无法直接作答的提问不推送；来自飞书的请求不另发重复的原生完成提醒。被动 feishuNotify 可独立发同类通知。
 
 主要限额：allow-list 32、绑定 256、未终结请求 256、去重记录 16384、状态 4 MiB、outbox 512 部分、开放卡片 64；满时拒绝新工作或降级，不静默挤掉安全状态。卡片每部分 ≤20000 UTF-8 JSON 字节、最多 4 部分，超长结果优先 `.md` 文件；终结请求元数据保留 24 小时。单发送者指令 10/3 秒、全局 60/分钟、回调 20/分钟，另共享 HTTP 的 per-agent 限流。附件单文件处理限时 30 秒、暂存总额 100 MiB。
 

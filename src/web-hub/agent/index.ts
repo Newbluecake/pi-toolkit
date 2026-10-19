@@ -448,8 +448,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       // Late-bound to the dialog bridge created further down (`dialogBridge`): a ui_prompt_start
       // for a prompt that has an open remote dialog record carries that record's `dialogId`.
       // Without it the hub sees an unattributed prompt — the web UI shows an extra "blocked on
-      // dialog" banner and the Feishu bot sends a redundant "waiting: 请到 web/终端查看" notice on
-      // top of the dialog card (the C0 slot had been left as an identity no-op).
+      // dialog" banner, and the Feishu bot cannot tie the prompt to its dialog card (the C0 slot had
+      // been left as an identity no-op).
       attributePrompt: (e) => attributePromptRef.current(e),
     },
   );

@@ -244,6 +244,9 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
         .list()
         .filter((b) => b.sessionId === sessionId && b.offline === undefined))
         for (const dialog of open.slice(0, 64)) {
+          // Not answerable from Feishu (refresh() renders > 8 questions as a web-only pointer) ⇒
+          // send nothing (user ruling 2026-10-19).
+          if (dialog.questions.length > 8) continue;
           const id = `fd${feishuKey(`${agentKey}:${epoch}:${dialog.dialogId}:${binding.key}`)}`;
           if (deps.state.dialogCards.get(id) || sending.has(id)) continue;
           const target = deps.target(binding);
@@ -258,10 +261,9 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
             messageId: "pending",
             shortCode: `#${randomBytes(3).toString("hex")}`,
           });
-          if (!card.ok) {
-            await deps.notice(binding, `请到 web 作答：${deps.link(agentKey)}`);
-            continue;
-          }
+          // No card could be recorded (cap / budget / invalid / unavailable) ⇒ the dialog cannot be
+          // answered from Feishu either; push nothing.
+          if (!card.ok) continue;
           sending.add(id);
           try {
             if (!(await deps.state.commit()) || disposed) continue;
