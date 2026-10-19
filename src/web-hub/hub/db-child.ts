@@ -14,8 +14,12 @@
  * dead code path at all ("只在 PI_WEBHUB_DB_TEST=1 时编译进脚本").
  */
 import {
-  CHECKPOINT_PASSIVE_INTERVAL_MS,
   QUERY_PRAGMAS,
+  SESSION_META_SQL,
+  LOGIN_IPS_SQL,
+  TWOFA_SQL,
+  LAN_SECURITY_COLUMNS,
+  LAN_SECURITY_FKS,
   SCHEMA_SQL_V1,
   SCHEMA_V1_COLUMNS,
   SCHEMA_V1_FOREIGN_KEYS,
@@ -23,6 +27,7 @@ import {
   SCHEMA_V1_OBJECTS,
   USER_VERSION,
 } from "./db.js";
+import { totpCode, verifyTotpCandidates } from "./totp.js";
 
 export function dbTestModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env["PI_WEBHUB_DB_TEST"] === "1";
@@ -73,8 +78,287 @@ function randomInitialPassword() {
   return groups.join('-');
 }
 function schemaObjectNames(db) {
-  const rows = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'").all();
+  const rows = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index','view') AND name NOT LIKE 'sqlite_%'").all();
   return new Set(rows.map((r) => r.name));
+}
+`;
+
+// Embedded in each child process, never in the hub's main-thread runtime.
+const SECURITY_PRELUDE = `
+const securityColumns = ${JSON.stringify(LAN_SECURITY_COLUMNS)};
+const securityFks = ${JSON.stringify(LAN_SECURITY_FKS)};
+function dropNamedTable(db, table) {
+  const row = db.prepare("SELECT type FROM sqlite_master WHERE name=? AND type IN ('table','view')").get(table);
+  if (row) db.exec('DROP ' + (row.type === 'view' ? 'VIEW ' : 'TABLE ') + table);
+}
+function tableMatches(db, table) {
+  const specs = securityColumns[table];
+  const cols = db.prepare('PRAGMA table_info(' + table + ')').all();
+  if (cols.length !== specs.length) return false;
+  for (const [name, type, notnull, pk] of specs) {
+    const c = cols.find(c => c.name === name);
+    if (!c || c.type.toUpperCase() !== type || c.notnull !== notnull || c.pk !== pk) return false;
+  }
+  const fks = db.prepare('PRAGMA foreign_key_list(' + table + ')').all();
+  const expected = securityFks[table];
+  if (fks.length !== expected.length || !expected.every(([from, target, to, onDelete]) =>
+    fks.some(fk => fk.from === from && fk.table === target && fk.to === to && fk.on_delete === onDelete && fk.seq === 0))) return false;
+  return db.prepare('PRAGMA table_list').all().some(t => t.name === table && t.type === 'table' && t.strict === 1);
+}
+function tx(db, fn) {
+  db.exec('BEGIN IMMEDIATE');
+  try { const result = fn(); db.exec('COMMIT'); return result; }
+  catch (err) { try { db.exec('ROLLBACK'); } catch {} throw err; }
+}
+function metaGet(db, key) {
+  return db.prepare('SELECT value FROM meta WHERE key=?').get(key)?.value;
+}
+function metaSet(db, key, value) {
+  db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value);
+}
+function enrolledIds(db) {
+  try {
+    const ids = JSON.parse(metaGet(db, 'twofa_users'));
+    if (!Array.isArray(ids) || !ids.every(id => Number.isSafeInteger(id) && id > 0) || new Set(ids).size !== ids.length) throw 0;
+    return ids;
+  } catch { throw new Error('2fa-missing-row'); }
+}
+function hasFactors(row) { return !!row && (row.totp_secret !== null || row.feishu === 1); }
+function factorRowValid(row) {
+  return !!row && Number.isSafeInteger(row.factor_gen) && row.factor_gen > 0 &&
+    (row.feishu === 0 || row.feishu === 1) &&
+    (row.totp_secret === null || (row.totp_secret.length === 20 && Number.isSafeInteger(row.totp_last_step) && row.totp_last_step >= 0)) &&
+    (!hasFactors(row) || (row.recovery_salt !== null && row.recovery_salt.length === 16));
+}
+function factorsConsistent(db) {
+  const ids = enrolledIds(db);
+  for (const id of ids) {
+    const row = db.prepare('SELECT * FROM twofa WHERE user_id=?').get(id);
+    if (!factorRowValid(row) || !hasFactors(row) || !db.prepare('SELECT id FROM users WHERE id=?').get(id)) return false;
+  }
+  for (const row of db.prepare('SELECT * FROM twofa').all()) {
+    if (!factorRowValid(row) || hasFactors(row) !== ids.includes(row.user_id)) return false;
+  }
+  return true;
+}
+function syncEnrolledIds(db) {
+  metaSet(db, 'twofa_users', JSON.stringify(db.prepare('SELECT user_id FROM twofa WHERE totp_secret IS NOT NULL OR feishu=1 ORDER BY user_id').all().map(r => r.user_id)));
+}
+`;
+
+const SECURITY_QUERY = `
+const totpCode = ${totpCode.toString()};
+const verifyTotpCandidates = ${verifyTotpCandidates.toString()};
+const totpCrypto = {
+  hmacSha1: (key, message) => crypto.createHmac('sha1', key).update(message).digest(),
+  timingSafeEqual: (a, b) => crypto.timingSafeEqual(a, b),
+};
+// In-process pending secrets: bounded, timer-free, forgotten on child restart.
+const pendingTotp = new Map();
+function securityVersion() { return db.prepare('PRAGMA user_version').get().user_version; }
+function ensureSecurityTables() {
+  const version = securityVersion();
+  if (version === 1) {
+    if (schemaObjectNames(db).has('twofa') || schemaObjectNames(db).has('recovery_codes')) throw new Error('2fa-at-v1');
+    db.exec(${JSON.stringify(TWOFA_SQL)});
+    metaSet(db, 'twofa_users', '[]');
+    db.exec('PRAGMA user_version=2');
+  } else if (version !== 2) throw new Error('2fa-schema');
+}
+function factorState(userId) {
+  if (securityVersion() === 1) return {state:'none', totp:false, feishu:false, recoveryLeft:0, factorGen:0};
+  const row = db.prepare('SELECT * FROM twofa WHERE user_id=?').get(userId);
+  const listed = enrolledIds(db).includes(userId);
+  const inconsistent = row ? (!factorRowValid(row) || listed !== hasFactors(row)) : listed;
+  return { state: inconsistent ? 'inconsistent' : hasFactors(row) ? 'enrolled' : 'none',
+    totp: !!row?.totp_secret, feishu: row?.feishu === 1,
+    recoveryLeft: row ? db.prepare('SELECT count(*) AS n FROM recovery_codes WHERE user_id=? AND used_at IS NULL').get(userId).n : 0,
+    factorGen: row?.factor_gen ?? 0 };
+}
+function assertConsistent(userId) {
+  if (factorState(userId).state === 'inconsistent') throw new Error('2fa-missing-row');
+  if (!stmtGetUserById.get(userId)) throw new Error('unknown user');
+}
+function newFactorRow(userId, now) {
+  db.prepare('INSERT OR IGNORE INTO twofa(user_id,totp_secret,totp_last_step,feishu,recovery_salt,factor_gen,enrolled_at,updated_at) VALUES(?,NULL,NULL,0,NULL,0,?,?)').run(userId, now, now);
+}
+function clearTrust() {
+  db.exec('DELETE FROM login_ips');
+  metaSet(db, 'login_ips_seeded', '1');
+}
+function recoverySet(userId) {
+  const salt = crypto.randomBytes(16);
+  db.prepare('DELETE FROM recovery_codes WHERE user_id=?').run(userId);
+  db.prepare('UPDATE twofa SET recovery_salt=? WHERE user_id=?').run(salt, userId);
+  const codes = new Set();
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  while (codes.size < 10) codes.add(Array.from(crypto.randomBytes(12), b => alphabet[b & 31]).join(''));
+  for (const code of codes) {
+    const hash = crypto.createHash('sha256').update(salt).update(code).digest();
+    db.prepare('INSERT INTO recovery_codes(user_id,code_hash,used_at) VALUES(?,?,NULL)').run(userId, hash);
+  }
+  return Array.from(codes);
+}
+function base32(bytes) {
+  let bits = 0, value = 0, out = '';
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  for (const b of bytes) {
+    value = (value << 8) | b; bits += 8;
+    while (bits >= 5) { bits -= 5; out += alphabet[(value >>> bits) & 31]; }
+  }
+  if (bits) out += alphabet[(value << (5 - bits)) & 31];
+  return out;
+}
+function hashWire(bytes) { return Buffer.from(bytes).toString('base64url'); }
+// Bound the JSON-encoded UA, not just JS characters (32 rows share a 64 KiB IPC frame).
+function safeUa(value) {
+  if (value === null || value === undefined) return null;
+  let out = '', bytes = 0;
+  for (const char of String(value).slice(0,512)) {
+    bytes += Buffer.byteLength(JSON.stringify(char)) - 2;
+    if (bytes > 512) break;
+    out += char;
+  }
+  return out;
+}
+function trimUserSessions(userId) {
+  const rows = db.prepare('SELECT sid_hash FROM sessions WHERE user_id=? ORDER BY last_seen_at DESC, created_at DESC, rowid DESC LIMIT -1 OFFSET 32').all(userId);
+  for (const row of rows) stmtDeleteSession.run(row.sid_hash);
+  return rows.map(row => hashWire(row.sid_hash));
+}
+function insertSession(args, checked) {
+  return tx(db, () => {
+    let inserted;
+    if (checked) {
+      if (!stmtGetUserById.get(args.userId)) return {ok:false,reason:'stale'};
+      assertConsistent(args.userId);
+      const join = securityVersion() === 2 ? 'LEFT JOIN twofa t ON t.user_id=u.id' : '';
+      const gen = securityVersion() === 2 ? 'COALESCE(t.factor_gen,0)' : '0';
+      inserted = db.prepare('INSERT INTO sessions(sid_hash,user_id,epoch,bound_origin,created_at,last_seen_at,expires_at,absolute_expires_at,created_ip) SELECT ?,u.id,u.epoch,?,?,?,?,?,? FROM users u ' + join + ' WHERE u.id=? AND u.epoch=? AND ' + gen + '=?')
+        .run(unb64(args.sidHash), args.boundOrigin, args.now, args.now, Math.min(args.now + args.idleMs, args.now + 7*86400000), args.now + 7*86400000, args.createdIp, args.userId, args.expectedEpoch, args.expectedFactorGen).changes;
+    } else {
+      inserted = stmtInsertSession.run(unb64(args.sidHash), args.userId, args.epoch, args.boundOrigin, args.now, args.now, Math.min(args.now + args.idleMs, args.now + 7*86400000), args.now + 7*86400000, args.createdIp).changes;
+    }
+    if (!inserted) return {ok:false, reason:'stale'};
+    db.prepare('INSERT INTO session_meta(sid_hash,user_agent,last_ip) VALUES(?,?,?)').run(unb64(args.sidHash), safeUa(args.ua), args.createdIp);
+    return {ok:true, evicted:trimUserSessions(args.userId)};
+  });
+}
+function handleSecurity(op, args) {
+  switch (op) {
+    case 'createSessionChecked': return insertSession(args, true);
+    case 'listSessions': {
+      return db.prepare('SELECT s.*, m.user_agent, m.last_ip FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN session_meta m ON m.sid_hash=s.sid_hash WHERE s.user_id=? AND s.epoch=u.epoch AND s.expires_at>? AND s.absolute_expires_at>? AND s.last_seen_at>? ORDER BY s.last_seen_at DESC, s.rowid DESC LIMIT 32')
+        .all(args.userId, args.now, args.now, args.now - args.idleMs).map(r => ({sidHash:hashWire(r.sid_hash), userId:r.user_id, epoch:r.epoch, boundOrigin:r.bound_origin, createdAt:r.created_at, lastSeenAt:r.last_seen_at, expiresAt:r.expires_at, absoluteExpiresAt:r.absolute_expires_at, createdIp:r.created_ip,
+          ...(r.last_ip === null ? {} : {lastIp:r.last_ip}), ...(r.user_agent === null ? {} : {ua:safeUa(r.user_agent)})}));
+    }
+    case 'deleteSessionsExcept': return tx(db, () => {
+      const rows = db.prepare('SELECT sid_hash FROM sessions WHERE user_id=? AND sid_hash<>? LIMIT 65').all(args.userId, unb64(args.keepSidHash));
+      const deleted = rows.slice(0,64);
+      for (const row of deleted) stmtDeleteSession.run(row.sid_hash);
+      return {deleted:deleted.map(r => hashWire(r.sid_hash)), more:rows.length > 64};
+    });
+    case 'isKnownIp': return !!db.prepare('SELECT 1 FROM login_ips WHERE ip=? AND last_at>?').get(args.ip, args.now - args.windowMs);
+    case 'knownIpCount': return db.prepare('SELECT count(*) AS n FROM login_ips WHERE last_at>?').get(args.now - args.windowMs).n;
+    case 'noteLoginIp': return tx(db, () => {
+      const wasKnown = !!db.prepare('SELECT 1 FROM login_ips WHERE ip=? AND last_at>?').get(args.ip, args.now - 30*86400000);
+      db.prepare('INSERT INTO login_ips(ip,first_at,last_at) VALUES(?,?,?) ON CONFLICT(ip) DO UPDATE SET last_at=excluded.last_at').run(args.ip, args.now, args.now);
+      db.exec('DELETE FROM login_ips WHERE ip IN (SELECT ip FROM login_ips ORDER BY last_at DESC, rowid DESC LIMIT -1 OFFSET 256)');
+      return {wasKnown};
+    });
+    case 'get2faState': return factorState(args.userId);
+    case 'beginTotp': {
+      assertConsistent(args.userId);
+      const state = factorState(args.userId);
+      if (state.totp && !args.replace) throw new Error('E_2FA_ENROLLED');
+      for (const [id,p] of pendingTotp) if (p.expiresAt <= args.now) pendingTotp.delete(id);
+      pendingTotp.delete(args.userId);
+      if (pendingTotp.size >= 64) pendingTotp.delete(pendingTotp.keys().next().value);
+      const secret = crypto.randomBytes(20), secretB32 = base32(secret);
+      pendingTotp.set(args.userId, {secret, gen:state.factorGen, expiresAt:args.now + 300000});
+      const label = encodeURIComponent('pi-webhub:' + stmtGetUserById.get(args.userId).username);
+      return {secretB32, otpauthUri:'otpauth://totp/' + label + '?secret=' + secretB32 + '&issuer=pi-webhub&algorithm=SHA1&digits=6&period=30'};
+    }
+    case 'commitTotp': {
+      const p = pendingTotp.get(args.userId);
+      if (!p || p.expiresAt <= args.now) { pendingTotp.delete(args.userId); return {ok:false,reason:'none'}; }
+      assertConsistent(args.userId);
+      const state = factorState(args.userId);
+      if (p.gen !== args.expectedGen || state.factorGen !== args.expectedGen) return {ok:false,reason:'stale'};
+      const step = verifyTotpCandidates(p.secret, args.code, args.now, totpCrypto);
+      if (step === undefined) return {ok:false,reason:'bad'};
+      const result = tx(db, () => {
+        ensureSecurityTables(); newFactorRow(args.userId, args.now);
+        const changed = db.prepare('UPDATE twofa SET totp_secret=?,totp_last_step=?,factor_gen=factor_gen+1,updated_at=? WHERE user_id=? AND factor_gen=?').run(p.secret, step, args.now, args.userId, args.expectedGen).changes;
+        if (!changed) throw new Error('factor CAS failed');
+        const count = db.prepare('SELECT count(*) AS n FROM recovery_codes WHERE user_id=?').get(args.userId).n;
+        const recoveryCodes = count === 0 ? recoverySet(args.userId) : [];
+        if (state.state === 'none') clearTrust();
+        syncEnrolledIds(db);
+        return {ok:true, recoveryCodes};
+      });
+      pendingTotp.delete(args.userId);
+      return result;
+    }
+    case 'verifyTotp': {
+      assertConsistent(args.userId);
+      const state = factorState(args.userId);
+      if (state.factorGen !== args.expectedGen) return {ok:false,reason:'stale'};
+      if (!state.totp) return {ok:false,reason:'none'};
+      const row = db.prepare('SELECT * FROM twofa WHERE user_id=?').get(args.userId);
+      const step = verifyTotpCandidates(row.totp_secret, args.code, args.now, totpCrypto);
+      if (step === undefined) return {ok:false,reason:'bad'};
+      const changed = db.prepare('UPDATE twofa SET totp_last_step=? WHERE user_id=? AND factor_gen=? AND totp_last_step<?').run(step, args.userId, args.expectedGen, step).changes;
+      return changed ? {ok:true} : {ok:false,reason:'replay'};
+    }
+    case 'consumeRecovery': return tx(db, () => {
+      assertConsistent(args.userId);
+      const state = factorState(args.userId);
+      if (state.factorGen !== args.expectedGen) return {ok:false,reason:'stale'};
+      if (state.state !== 'enrolled') return {ok:false,reason:'none'};
+      const row = db.prepare('SELECT recovery_salt FROM twofa WHERE user_id=?').get(args.userId);
+      const hash = crypto.createHash('sha256').update(row.recovery_salt).update(args.code).digest();
+      const code = db.prepare('SELECT used_at FROM recovery_codes WHERE user_id=? AND code_hash=?').get(args.userId, hash);
+      if (!code) return {ok:false,reason:'bad'};
+      const changed = db.prepare('UPDATE recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL AND EXISTS(SELECT 1 FROM twofa WHERE user_id=? AND factor_gen=?)').run(args.now,args.userId,hash,args.userId,args.expectedGen).changes;
+      return changed ? {ok:true,recoveryLeft:factorState(args.userId).recoveryLeft} : {ok:false,reason:'replay'};
+    });
+    case 'setFeishu2fa': return tx(db, () => {
+      assertConsistent(args.userId);
+      const state = factorState(args.userId);
+      ensureSecurityTables(); newFactorRow(args.userId, args.now);
+      db.prepare('UPDATE twofa SET feishu=?,factor_gen=factor_gen+1,updated_at=? WHERE user_id=?').run(args.on ? 1 : 0, args.now, args.userId);
+      let recoveryCodes;
+      if (args.on && state.state === 'none') { recoveryCodes = recoverySet(args.userId); clearTrust(); }
+      if (!args.on && !state.totp) {
+        db.prepare('DELETE FROM recovery_codes WHERE user_id=?').run(args.userId);
+        db.prepare('UPDATE twofa SET recovery_salt=NULL WHERE user_id=?').run(args.userId);
+      }
+      syncEnrolledIds(db); pendingTotp.delete(args.userId);
+      return recoveryCodes ? {recoveryCodes} : {};
+    });
+    case 'regenRecovery': return tx(db, () => {
+      assertConsistent(args.userId);
+      if (factorState(args.userId).state !== 'enrolled') throw new Error('E_2FA_NONE');
+      const recoveryCodes = recoverySet(args.userId);
+      db.prepare('UPDATE twofa SET factor_gen=factor_gen+1,updated_at=? WHERE user_id=?').run(args.now,args.userId);
+      pendingTotp.delete(args.userId);
+      return {recoveryCodes};
+    });
+    case 'reset2fa': return tx(db, () => {
+      assertConsistent(args.userId); ensureSecurityTables(); newFactorRow(args.userId, args.now);
+      db.prepare('DELETE FROM recovery_codes WHERE user_id=?').run(args.userId);
+      db.prepare('UPDATE twofa SET totp_secret=NULL,totp_last_step=NULL,feishu=0,recovery_salt=NULL,factor_gen=factor_gen+1,updated_at=? WHERE user_id=?').run(args.now,args.userId);
+      syncEnrolledIds(db); pendingTotp.delete(args.userId);
+      return null;
+    });
+    case 'forgetLoginIps': return tx(db, () => {
+      clearTrust();
+      if (securityVersion() === 2) db.exec('UPDATE twofa SET factor_gen=factor_gen+1 WHERE totp_secret IS NOT NULL OR feishu=1');
+      pendingTotp.clear(); return null;
+    });
+    default: throw new Error('unknown op: ' + op);
+  }
 }
 `;
 
@@ -107,6 +391,7 @@ export function buildQueryScript(opts: { test?: boolean } = {}): string {
     : "";
 
   return `${COMMON_PRELUDE}
+${SECURITY_PRELUDE}
 if (!DatabaseSync) {
   process.stderr.write('DBG sqlite-unavailable ' + String(__sqliteErr && __sqliteErr.message) + '\\n');
   process.exit(1);
@@ -122,8 +407,8 @@ ${pragmaExec}
 const stmtGetUser = db.prepare('SELECT * FROM users WHERE username = ?');
 const stmtGetUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const stmtInsertSession = db.prepare('INSERT INTO sessions (sid_hash, user_id, epoch, bound_origin, created_at, last_seen_at, expires_at, absolute_expires_at, created_ip) VALUES (?,?,?,?,?,?,?,?,?)');
-const stmtTouchSelect = db.prepare('SELECT user_id, epoch, bound_origin, expires_at, absolute_expires_at, last_seen_at FROM sessions WHERE sid_hash = ? AND expires_at > ? AND absolute_expires_at > ?');
-const stmtTouchUpdate = db.prepare('UPDATE sessions SET last_seen_at=?, expires_at=? WHERE sid_hash=? AND last_seen_at < ?');
+const stmtTouchSelect = db.prepare('SELECT s.user_id, s.epoch, s.bound_origin, s.expires_at, s.absolute_expires_at, s.last_seen_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.sid_hash = ? AND s.epoch=u.epoch AND s.expires_at > ? AND s.absolute_expires_at > ? AND s.last_seen_at > ?');
+const stmtTouchUpdate = db.prepare('UPDATE sessions SET last_seen_at=?, expires_at=? WHERE sid_hash=? AND last_seen_at <= ?');
 const stmtDeleteSession = db.prepare('DELETE FROM sessions WHERE sid_hash=?');
 const stmtDeleteAllSessions = db.prepare('DELETE FROM sessions WHERE user_id=?');
 const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=?, initial_login_ip=? WHERE username=? AND initial_login_at IS NULL');
@@ -132,6 +417,7 @@ const stmtInsertUser = db.prepare('INSERT INTO users (username, kdf, n, r, p, sa
 const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users LIMIT 1');
 const stmtPurge = db.prepare('DELETE FROM sessions WHERE sid_hash IN (SELECT sid_hash FROM sessions WHERE expires_at<=? OR absolute_expires_at<=? LIMIT 256)');
 
+${SECURITY_QUERY}
 function handle(op, args) {
 ${testHooks}
   switch (op) {
@@ -152,19 +438,19 @@ ${testHooks}
       }
       return out;
     }
-    case 'createSession': {
-      stmtInsertSession.run(unb64(args.sidHash), args.userId, args.epoch, args.boundOrigin, args.now, args.now, args.now + 12 * 3600000, args.now + 7 * 24 * 3600000, args.createdIp);
-      return null;
-    }
+    case 'createSession': { insertSession({idleMs:12*3600000,...args}, false); return null; }
     case 'touchSession': {
-      const row = stmtTouchSelect.get(unb64(args.sidHash), args.now, args.now);
+      const row = stmtTouchSelect.get(unb64(args.sidHash), args.now, args.now, args.now - (args.idleMs ?? 12*3600000));
       if (!row) return undefined;
       let expiresAt = row.expires_at;
       if (args.now - row.last_seen_at >= 60000) {
-        const newExpires = Math.min(args.now + 12 * 3600000, row.absolute_expires_at);
+        const newExpires = Math.min(args.now + (args.idleMs ?? 12*3600000), row.absolute_expires_at);
         const changes = stmtTouchUpdate.run(args.now, newExpires, unb64(args.sidHash), args.now - 60000).changes;
         ${debugWriteLine}
-        if (changes > 0) expiresAt = newExpires;
+        if (changes > 0) {
+          expiresAt = newExpires;
+          if (args.ip !== undefined) db.prepare('INSERT INTO session_meta(sid_hash,last_ip) VALUES(?,?) ON CONFLICT(sid_hash) DO UPDATE SET last_ip=excluded.last_ip').run(unb64(args.sidHash), args.ip);
+        }
       }
       return { userId: row.user_id, epoch: row.epoch, boundOrigin: row.bound_origin, expiresAt, absoluteExpiresAt: row.absolute_expires_at };
     }
@@ -219,7 +505,7 @@ ${crashAfterCommit}
       return stmtPurge.run(args.now, args.now).changes;
     }
     default:
-      throw new Error('unknown op: ' + op);
+      return handleSecurity(op, args);
   }
 }
 
@@ -260,6 +546,7 @@ export function buildMaintScript(opts: { initialUsername?: string } = {}): strin
   const initialUsername = JSON.stringify(opts.initialUsername ?? "admin");
   const pragmaBusy = `db.exec('PRAGMA busy_timeout=' + Math.max(0, Number(process.env.PI_WEBHUB_DB_DEADLINE_MS || '0') - 500) + ';');`;
   return `${COMMON_PRELUDE}
+${SECURITY_PRELUDE}
 function reply(obj) {
   process.stdout.write(JSON.stringify(obj) + '\\n');
 }
@@ -287,7 +574,8 @@ function run() {
   }
   try {
     ${pragmaBusy}
-    if (op === 'open-check-migrate') {
+    db.exec('PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON');
+    if (op === 'open-check-migrate' || op === 'repair-2fa') {
       let version;
       try {
         version = db.prepare('PRAGMA user_version').get().user_version;
@@ -316,7 +604,7 @@ function run() {
           try { db.exec('ROLLBACK'); } catch {}
           throw err;
         }
-      } else if (version === ${USER_VERSION}) {
+      } else if (version === ${USER_VERSION} || version === 2) {
         const objects = schemaObjectNames(db);
         const expected = ${JSON.stringify(SCHEMA_V1_OBJECTS)};
         for (const name of expected) {
@@ -376,13 +664,56 @@ function run() {
         reply({ ok: false, code: 'db-invalid', detail: 'unsupported user_version=' + version });
         return;
       }
+      // Security tables never get automatically rebuilt. Explicit repair is the ONLY exception.
+      const objects = schemaObjectNames(db);
+      if (op === 'repair-2fa') {
+        tx(db, () => {
+          dropNamedTable(db, 'recovery_codes'); dropNamedTable(db, 'twofa');
+          db.exec(${JSON.stringify(TWOFA_SQL)});
+          metaSet(db, 'twofa_users', '[]');
+          db.exec('PRAGMA user_version=2');
+        });
+      } else {
+        if (version === 1 && (objects.has('twofa') || objects.has('recovery_codes') || metaGet(db, 'twofa_users') !== undefined)) {
+          reply({ok:false,code:'db-invalid',detail:'2fa-at-v1'}); return;
+        }
+        if (version === 2) {
+          if (!tableMatches(db, 'twofa') || !tableMatches(db, 'recovery_codes')) {
+            reply({ok:false,code:'db-invalid',detail:'2fa-schema'}); return;
+          }
+          if (!factorsConsistent(db)) {
+            reply({ok:false,code:'db-invalid',detail:'2fa-missing-row'}); return;
+          }
+        }
+      }
+      let loginIpsRebuilt = false;
+      tx(db, () => {
+        if (!tableMatches(db, 'session_meta')) {
+          dropNamedTable(db, 'session_meta');
+          db.exec(${JSON.stringify(SESSION_META_SQL)});
+        }
+        const seeded = metaGet(db, 'login_ips_seeded') !== undefined;
+        if (!tableMatches(db, 'login_ips')) {
+          loginIpsRebuilt = objects.has('login_ips') || seeded;
+          dropNamedTable(db, 'login_ips');
+          db.exec(${JSON.stringify(LOGIN_IPS_SQL)});
+          // A damaged trust table is rebuilt EMPTY, never reseeded from surviving sessions.
+          if (loginIpsRebuilt) metaSet(db, 'login_ips_seeded', '1');
+        }
+        if (metaGet(db, 'login_ips_seeded') === undefined) {
+          db.exec('INSERT OR IGNORE INTO login_ips(ip,first_at,last_at) SELECT created_ip,min(created_at),max(last_seen_at) FROM sessions GROUP BY created_ip ORDER BY max(last_seen_at) DESC LIMIT 256');
+          metaSet(db, 'login_ips_seeded', '1');
+        }
+        db.exec('DELETE FROM login_ips WHERE ip IN (SELECT ip FROM login_ips ORDER BY last_at DESC, rowid DESC LIMIT -1 OFFSET 256)');
+        db.exec('DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY user_id ORDER BY last_seen_at DESC,created_at DESC,rowid DESC) AS n FROM sessions) WHERE n>32)');
+      });
       try {
         db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
       } catch (err) {
-        reply({ ok: true, warning: 'checkpoint-truncate-failed: ' + String(err && err.message) });
+        reply({ ok: true, loginIpsRebuilt, warning: 'checkpoint-truncate-failed: ' + String(err && err.message) });
         return;
       }
-      reply({ ok: true });
+      reply({ ok: true, loginIpsRebuilt });
       return;
     }
     if (op === 'checkpoint-passive') {

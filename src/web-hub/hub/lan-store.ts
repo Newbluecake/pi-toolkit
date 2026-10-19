@@ -45,7 +45,14 @@ import { createDbClient, type DbClient, type DbClientDeps } from "./db-client.js
 import type { HubLog, LanSessionRecord, LanStorePort, LanUserRecord, LanUserSummary, PortOptions } from "./ports.js";
 import { hashSid as sharedHashSid } from "./sid-hash.js";
 
-import { unimplementedLanSecurityStore } from "./lan-security-stubs.js";
+import {
+  TOTP_CODE_RE,
+  RECOVERY_CODE_RE,
+  LAN_SESSION_IDLE_MIN,
+  LAN_SESSION_IDLE_MAX,
+  LAN_SESSION_IDLE_MINUTES,
+} from "../protocol/lan-2fa.js";
+import { auditLan2fa } from "./audit.js";
 
 const execFileP = promisify(execFile);
 
@@ -61,7 +68,11 @@ export interface LanStore extends LanStorePort {
    * number of session rows removed. */
   revokeAllSessions(opts?: PortOptions): Promise<number>;
   /** §4.2 reserved-channel `touchSession` for the SSE tick — see file header. */
-  touchSessionReserved(sidHash: string, now: number, opts?: PortOptions): Promise<LanSessionRecord | undefined>;
+  touchSessionReserved(
+    sidHash: string,
+    now: number,
+    opts?: PortOptions & { ip?: string },
+  ): Promise<LanSessionRecord | undefined>;
   /** Fires once when the underlying breaker opens after repeated failures. */
   onUnavailable(cb: (reason: "db-unavailable") => void): () => void;
   /** Fires once after the breaker cooldown; the hub owns the restart decision. */
@@ -73,7 +84,7 @@ export interface LanStore extends LanStorePort {
 
 export interface CreateLanStoreDeps {
   dbFile: string;
-  /** P0 declaration only; B consumes this when implementing idle enforcement. */
+  /** Idle expiry policy (clamped to 5 minutes–7 days; default 12 hours). */
   idleMs?: number;
   log: HubLog;
   now?: () => number;
@@ -99,7 +110,8 @@ export interface CreateLanStoreDeps {
   >;
 }
 
-export type CreateLanStoreResult = { ok: true; store: LanStore } | { ok: false; reason: LanOffReason; detail?: string };
+export type CreateLanStoreResult =
+  { ok: true; store: LanStore; loginIpsRebuilt: boolean } | { ok: false; reason: LanOffReason; detail?: string };
 
 /**
  * §4.1 "前置条件（按顺序）": file check → maintenance open-check-migrate →
@@ -110,6 +122,9 @@ export type CreateLanStoreResult = { ok: true; store: LanStore } | { ok: false; 
 export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLanStoreResult> {
   const log = deps.log;
   const now = deps.now ?? Date.now;
+  const idleMs = Number.isFinite(deps.idleMs)
+    ? Math.min(LAN_SESSION_IDLE_MAX * 60_000, Math.max(LAN_SESSION_IDLE_MIN * 60_000, Math.trunc(deps.idleMs!)))
+    : LAN_SESSION_IDLE_MINUTES * 60_000;
 
   const fileCheck = await checkDbFiles(deps.dbFile, { log });
   if (!fileCheck.ok) return { ok: false, reason: fileCheck.reason, detail: fileCheck.detail };
@@ -117,6 +132,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   const maintDeadline = deps.maintOpenDeadlineMs ?? MAINT_DEADLINE_MS["open-check-migrate"];
   const maintResult = await runMaint(deps.dbFile, "open-check-migrate", maintDeadline, resolveInitialUsername(log));
   if (!maintResult.ok) return maintResult;
+  if (maintResult.loginIpsRebuilt) log.warn("web-hub lan-store: login_ips rebuilt empty");
 
   const dbClient = createDbClient({
     dbFile: deps.dbFile,
@@ -147,7 +163,60 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   }
 
   const store: LanStore = {
-    ...unimplementedLanSecurityStore(),
+    async createSessionChecked(input, opts) {
+      const sid = randomBytes(32).toString("base64url");
+      const result = await dbClient.call<{ ok: true; evicted: string[] } | { ok: false; reason: "stale" }>(
+        "createSessionChecked",
+        { ...input, ua: input.ua?.slice(0, 512), sidHash: sharedHashSid(sid), idleMs },
+        opts,
+      );
+      return result.ok ? { ...result, sid } : result;
+    },
+    async listSessions(userId, at, opts) {
+      return await dbClient.call("listSessions", { userId, now: at, idleMs }, opts);
+    },
+    async deleteSessionsExcept(userId, keepSidHash, opts) {
+      return await dbClient.call("deleteSessionsExcept", { userId, keepSidHash }, opts);
+    },
+    async noteLoginIp(ip, at, opts) {
+      return await dbClient.call("noteLoginIp", { ip, now: at }, opts);
+    },
+    async isKnownIp(ip, at, windowMs, opts) {
+      return await dbClient.call("isKnownIp", { ip, now: at, windowMs }, opts);
+    },
+    async knownIpCount(at, windowMs, opts) {
+      return await dbClient.call("knownIpCount", { now: at, windowMs }, opts);
+    },
+    async get2faState(userId, opts) {
+      return await dbClient.call("get2faState", { userId }, opts);
+    },
+    async verifyTotp(input, opts) {
+      assertFactorCode(input.code, false);
+      return await dbClient.call("verifyTotp", { ...input }, opts);
+    },
+    async consumeRecovery(input, opts) {
+      assertFactorCode(input.code, true);
+      return await dbClient.call("consumeRecovery", { ...input }, opts);
+    },
+    async beginTotp(input, opts) {
+      return await dbClient.call("beginTotp", { ...input }, opts);
+    },
+    async commitTotp(input, opts) {
+      assertFactorCode(input.code, false);
+      return await dbClient.call("commitTotp", { ...input }, opts);
+    },
+    async setFeishu2fa(input, opts) {
+      return await dbClient.call("setFeishu2fa", { ...input }, opts);
+    },
+    async regenRecovery(userId, at, opts) {
+      return await dbClient.call("regenRecovery", { userId, now: at }, opts);
+    },
+    async reset2fa(userId, at, opts) {
+      await dbClient.call("reset2fa", { userId, now: at }, opts);
+    },
+    async forgetLoginIps(opts) {
+      await dbClient.call("forgetLoginIps", {}, opts);
+    },
     async getUser(username, opts) {
       const raw = await dbClient.call<RawUser | undefined>("getUser", { username }, opts);
       return raw === undefined || raw === null ? undefined : decodeUser(raw);
@@ -177,6 +246,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
           boundOrigin: input.boundOrigin,
           createdIp: input.createdIp,
           now: input.now,
+          idleMs,
         },
         opts,
       );
@@ -189,7 +259,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
       // other op's dedupKey); the 9th distinct rider on the same key gets E_RATE.
       const raw = await dbClient.call<RawSession | undefined>(
         "touchSession",
-        { sidHash, now: now2 },
+        { sidHash, now: now2, idleMs, ...(opts?.ip === undefined ? {} : { ip: opts.ip }) },
         { ...opts, dedupKey: `touchSession:${sidHash}` },
       );
       return decodeSession(raw);
@@ -198,7 +268,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     async touchSessionReserved(sidHash, now2, opts) {
       const raw = await dbClient.call<RawSession | undefined>(
         "touchSession",
-        { sidHash, now: now2 },
+        { sidHash, now: now2, idleMs, ...(opts?.ip === undefined ? {} : { ip: opts.ip }) },
         { ...opts, reserved: true, dedupKey: `touchSession:${sidHash}` },
       );
       return decodeSession(raw);
@@ -252,7 +322,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     close,
   };
 
-  return { ok: true, store };
+  return { ok: true, store, loginIpsRebuilt: maintResult.loginIpsRebuilt === true };
 }
 
 // ---------------------------------------------------------------------------
@@ -289,10 +359,11 @@ function resolveInitialUsername(log: HubLog): string {
 
 async function runMaint(
   dbFile: string,
-  op: "open-check-migrate" | "checkpoint-passive" | "checkpoint-truncate",
+  op: "open-check-migrate" | "checkpoint-passive" | "checkpoint-truncate" | "repair-2fa",
   deadlineMs: number,
   initialUsername: string = FALLBACK_INITIAL_USERNAME,
-): Promise<{ ok: true } | { ok: false; reason: LanOffReason; detail?: string }> {
+  signal?: AbortSignal,
+): Promise<{ ok: true; loginIpsRebuilt?: boolean } | { ok: false; reason: LanOffReason; detail?: string }> {
   const script = buildMaintScript({ initialUsername });
   try {
     const { stdout } = await execFileP(process.execPath, ["--disable-warning=ExperimentalWarning", "-e", script], {
@@ -303,19 +374,24 @@ async function runMaint(
         PI_WEBHUB_DB_DEADLINE_MS: String(deadlineMs),
       },
       timeout: deadlineMs,
+      ...(signal === undefined ? {} : { signal }),
       killSignal: "SIGKILL",
       maxBuffer: 1024 * 1024,
     });
     const line = stdout.trim().split("\n").pop() ?? "";
     const parsed =
-      line.length > 0 ? (JSON.parse(line) as { ok: boolean; code?: string; detail?: string }) : { ok: true };
-    if (parsed.ok) return { ok: true };
+      line.length > 0
+        ? (JSON.parse(line) as { ok: boolean; code?: string; detail?: string; loginIpsRebuilt?: boolean })
+        : { ok: false, code: "db-invalid", detail: "maintenance returned no result" };
+    if (parsed.ok === true)
+      return { ok: true, ...(parsed.loginIpsRebuilt === undefined ? {} : { loginIpsRebuilt: parsed.loginIpsRebuilt }) };
     return parsed.detail === undefined
       ? { ok: false, reason: mapMaintCode(parsed.code) }
       : { ok: false, reason: mapMaintCode(parsed.code), detail: parsed.detail };
   } catch (err) {
     const e = err as { killed?: boolean; signal?: string; code?: number; message?: string };
-    if (e.killed === true) return { ok: false, reason: "db-timeout", detail: `${op} exceeded ${deadlineMs}ms` };
+    if (signal?.aborted || e.killed === true)
+      return { ok: false, reason: "db-timeout", detail: `${op} exceeded ${deadlineMs}ms` };
     return { ok: false, reason: "db-invalid", detail: e.message ?? String(err) };
   }
 }
@@ -400,13 +476,29 @@ function sha256Base64Url(sid: string): string {
 
 export type { DbClient };
 
-/** LAN security P0 B↔F maintenance seam. Must work with NO resident store (LAN off).
- * B implements bounded file-check + repair-2fa maintenance, preserving v2 and auditing only op/ok. */
+/** B↔F offline maintenance seam: bounded file-check + explicit destructive 2FA repair.
+ * Works without a resident store, preserves v2, and audits only op/ok. */
 export type RepairLan2faResult = { ok: true } | { ok: false; reason: LanOffReason; detail?: string };
-export async function repairLan2fa(_deps: {
+export async function repairLan2fa(deps: {
   dbFile: string;
   log: HubLog;
   signal?: AbortSignal;
 }): Promise<RepairLan2faResult> {
-  throw new Error("LAN security P0: 2FA repair not implemented");
+  if (deps.signal?.aborted) {
+    auditLan2fa(deps.log, { phase: "admin", op: "repair", ok: false });
+    return { ok: false, reason: "db-timeout" };
+  }
+  const files = await checkDbFiles(deps.dbFile, { log: deps.log });
+  const result = files.ok
+    ? await runMaint(deps.dbFile, "repair-2fa", MAINT_DEADLINE_MS["repair-2fa"], FALLBACK_INITIAL_USERNAME, deps.signal)
+    : files;
+  auditLan2fa(deps.log, { phase: "admin", op: "repair", ok: result.ok });
+  return result;
+}
+
+/** Malformed input is rejected before IPC admission (and before consuming a verifier budget). */
+function assertFactorCode(code: string, recovery: boolean): void {
+  if (!(recovery ? RECOVERY_CODE_RE : TOTP_CODE_RE).test(code)) {
+    throw Object.assign(new Error("Malformed factor code"), { code: "E_BAD_REQUEST" });
+  }
 }

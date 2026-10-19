@@ -129,6 +129,61 @@ export const SCHEMA_V1_FOREIGN_KEYS: Readonly<
   sessions: [{ from: "user_id", table: "users", to: "id", onDelete: "CASCADE" }],
 };
 
+/** LAN security side tables are disposable; trust history rebuilds fail closed. */
+export const SESSION_META_SQL = `CREATE TABLE session_meta (
+  sid_hash BLOB PRIMARY KEY REFERENCES sessions(sid_hash) ON DELETE CASCADE,
+  user_agent TEXT, last_ip TEXT) STRICT`;
+export const LOGIN_IPS_SQL = `CREATE TABLE login_ips (
+  ip TEXT PRIMARY KEY, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL) STRICT`;
+
+/** Created only by an explicit factor mutation; never auto-repaired at open. */
+export const TWOFA_SQL = `
+CREATE TABLE twofa (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  totp_secret BLOB, totp_last_step INTEGER, feishu INTEGER NOT NULL,
+  recovery_salt BLOB, factor_gen INTEGER NOT NULL,
+  enrolled_at INTEGER NOT NULL, updated_at INTEGER NOT NULL) STRICT;
+CREATE TABLE recovery_codes (
+  user_id INTEGER NOT NULL REFERENCES twofa(user_id) ON DELETE CASCADE,
+  code_hash BLOB NOT NULL, used_at INTEGER,
+  PRIMARY KEY(user_id, code_hash)) STRICT;
+`;
+
+/** Exact name/type/nullability/PK-ordinal checks for security and auxiliary tables. */
+export const LAN_SECURITY_COLUMNS = {
+  session_meta: [
+    ["sid_hash", "BLOB", 1, 1],
+    ["user_agent", "TEXT", 0, 0],
+    ["last_ip", "TEXT", 0, 0],
+  ],
+  login_ips: [
+    ["ip", "TEXT", 1, 1],
+    ["first_at", "INTEGER", 1, 0],
+    ["last_at", "INTEGER", 1, 0],
+  ],
+  twofa: [
+    ["user_id", "INTEGER", 0, 1],
+    ["totp_secret", "BLOB", 0, 0],
+    ["totp_last_step", "INTEGER", 0, 0],
+    ["feishu", "INTEGER", 1, 0],
+    ["recovery_salt", "BLOB", 0, 0],
+    ["factor_gen", "INTEGER", 1, 0],
+    ["enrolled_at", "INTEGER", 1, 0],
+    ["updated_at", "INTEGER", 1, 0],
+  ],
+  recovery_codes: [
+    ["user_id", "INTEGER", 1, 1],
+    ["code_hash", "BLOB", 1, 2],
+    ["used_at", "INTEGER", 0, 0],
+  ],
+} as const;
+export const LAN_SECURITY_FKS = {
+  session_meta: [["sid_hash", "sessions", "sid_hash", "CASCADE"]],
+  login_ips: [],
+  twofa: [["user_id", "users", "id", "CASCADE"]],
+  recovery_codes: [["user_id", "twofa", "user_id", "CASCADE"]],
+} as const;
+
 // ---------------------------------------------------------------------------
 // §4.1 PRAGMA policy
 // ---------------------------------------------------------------------------
@@ -164,16 +219,33 @@ export const QUERY_OPS = [
   "setPassword",
   "markInitialLogin",
   "purgeExpired",
+  "revokeAllSessions",
+  "createSessionChecked",
+  "listSessions",
+  "deleteSessionsExcept",
+  "noteLoginIp",
+  "isKnownIp",
+  "knownIpCount",
+  "get2faState",
+  "verifyTotp",
+  "consumeRecovery",
+  "beginTotp",
+  "commitTotp",
+  "setFeishu2fa",
+  "regenRecovery",
+  "reset2fa",
+  "forgetLoginIps",
 ] as const;
 export type QueryOp = (typeof QUERY_OPS)[number];
 
-export const MAINT_OPS = ["open-check-migrate", "checkpoint-passive", "checkpoint-truncate"] as const;
+export const MAINT_OPS = ["open-check-migrate", "checkpoint-passive", "checkpoint-truncate", "repair-2fa"] as const;
 export type MaintOp = (typeof MAINT_OPS)[number];
 
 /** Default per-op deadlines (plan §4.2). Query ops share one 2s deadline enforced by
  * `db-client.ts`, not per-op here; these are the maintenance one-shot deadlines. */
 export const MAINT_DEADLINE_MS: Record<MaintOp, number> = {
   "open-check-migrate": 5_000,
+  "repair-2fa": 5_000,
   "checkpoint-passive": 3_000,
   "checkpoint-truncate": 3_000,
 };
@@ -193,6 +265,22 @@ function defaultDbFsDeps(): DbFsDeps {
   return { lstat, chmod, getuid: () => process.getuid?.() ?? 0 };
 }
 
+/** A stuck local filesystem must not hang LAN open/repair in the hub process. */
+async function boundedFileCheck<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("db file check exceeded 1000ms")), 1_000);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function checkOneFile(
   path: string,
   maxBytes: number | undefined,
@@ -201,7 +289,7 @@ async function checkOneFile(
 ): Promise<DbFileIssue> {
   let st;
   try {
-    st = await fs.lstat(path);
+    st = await boundedFileCheck(fs.lstat(path));
   } catch (err) {
     const code = (err as { code?: string } | undefined)?.code;
     if (code === "ENOENT") return { ok: true }; // not created yet — fine, the maint op creates it
@@ -220,7 +308,7 @@ async function checkOneFile(
   const mode = st.mode & 0o777;
   if (mode > DB_FILE_MODE) {
     try {
-      await fs.chmod(path, DB_FILE_MODE);
+      await boundedFileCheck(fs.chmod(path, DB_FILE_MODE));
       log.warn("web-hub db: widened file mode repaired", { path, mode: mode.toString(8) });
     } catch (err) {
       return { ok: false, reason: "db-invalid", detail: `${path}: chmod repair failed: ${String(err)}` };
