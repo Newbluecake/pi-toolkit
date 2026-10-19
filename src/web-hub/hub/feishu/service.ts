@@ -45,6 +45,7 @@ import { createFeishuOutbox, type OutboxTarget, type OutboxMessage, type Settled
 import { renderReply, renderNotice, neutralizeMarkdown } from "./render.js";
 import { createFeishuRuns, type FeishuRunEvent, type FeishuRunResult } from "./runs.js";
 import { createFeishuDialogs } from "./dialogs.js";
+import { createFeishuSessionCard } from "./session-card.js";
 import { createFeishuFiles, feishuFileCandidates, type FeishuFilesDeps } from "./files.js";
 import { createFeishuNotify, type FeishuIdleEvidence } from "./notify.js";
 import { bounded, createFeishuWork, feishuKey, messageText, object } from "./runtime.js";
@@ -84,17 +85,25 @@ export interface FeishuBotServiceDeps {
   /** Authenticated web session link (no token/query credentials). */
   link?(agentKey: string): string;
   onStatus?(status: FsbInfoData): void;
-  log?(event: { event: string; reason?: string; code?: string | number }): void;
+  log?(event: {
+    event: string;
+    reason?: string;
+    code?: string | number;
+    eventType?: string;
+    messageType?: string;
+  }): void;
   // Testable platform seams; none changes destination admission.
   clock?: FeishuClock;
   fs?: FeishuFs;
   fetch?: FeishuFetch;
   webSocket?: (url: string) => FeishuSocket;
   api?: FeishuApi;
+  /** session-card boot adoption budget before the connector starts anyway (default 3000 ms) */
+  cardAdoptionBudgetMs?: number;
 }
 const NEW_SESSION = "feishu:new";
 const HELP_TEXT = [
-  "/list — 列出可用会话",
+  "/list — 列出可用会话（卡片可直接点击切换）",
   "/use <n|sid-prefix|name> — 绑定/切换会话",
   "/cur — 查看当前绑定会话",
   "/new <dir> [first message] — 创建并绑定新会话",
@@ -104,6 +113,13 @@ const HELP_TEXT = [
   "群聊中请先 @ 机器人，再输入命令。",
 ].join("\n");
 const mask = (id: string) => (id.length > 10 ? `${id.slice(0, 5)}…${id.slice(-4)}` : "ou_…");
+/** Owner pages for real decode failures: at most one per decode code per 10 min (user ruling 2026-10-19). */
+const UNDECODABLE_OWNER_NOTICE_GAP_MS = 600_000;
+/** Benign noisy audit classes (unsubscribed event types, stale redeliveries) log a bounded sample only. */
+const AUDIT_SAMPLE_GAP_MS = 600_000;
+function undecodableOwnerReason(code: string | undefined): string {
+  return `undecodable:${typeof code === "string" && /^[a-z0-9-]{1,48}$/.test(code) ? code : "unknown"}`;
+}
 const simpleCard = (text: string, buttons: Array<{ label: string; n: string }> = []) =>
   JSON.stringify({
     schema: "2.0",
@@ -132,6 +148,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
   let adminBusy = false,
     lifecycle = 0;
   let connectorView: FeishuConnectorView | undefined;
+  // Bounded-sample timestamps for noisy inbound audit classes; service-lifetime, not per-runtime.
+  const auditSampled = new Map<string, number>();
   // Snapshot counters cover the whole service lifetime (including reset/replacement), not one runtime.
   const retired = {
     received: 0,
@@ -155,14 +173,26 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         if (running) {
           runtime?.connector.resume();
           runtime?.outbox.resume();
+          runtime?.sessionCard.onPersistRecovered(); // G3: compensate degraded cards (in-tail, once each)
         }
       }
       publish();
     },
   });
-  function log(event: string, reason?: string, code?: string | number) {
+  function log(
+    event: string,
+    reason?: string,
+    code?: string | number,
+    diag?: { eventType?: string; messageType?: string },
+  ) {
     try {
-      deps.log?.({ event, ...(reason ? { reason } : {}), ...(code !== undefined ? { code } : {}) });
+      deps.log?.({
+        event,
+        ...(reason ? { reason } : {}),
+        ...(code !== undefined ? { code } : {}),
+        ...(diag?.eventType ? { eventType: diag.eventType } : {}),
+        ...(diag?.messageType ? { messageType: diag.messageType } : {}),
+      });
     } catch {
       /* diagnostic only */
     }
@@ -225,16 +255,22 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       /* local diagnostic cannot affect ACK */
     }
   }
-  function health(reason: string) {
-    log("health", reason);
+  function health(reason: string, detail?: { eventType?: string; code?: string; messageType?: string }) {
+    log("health", reason, detail?.code, {
+      ...(detail?.eventType ? { eventType: detail.eventType } : {}),
+      ...(detail?.messageType ? { messageType: detail.messageType } : {}),
+    });
     if (reason === "persist-failed") {
       degraded.add(reason);
       runtime?.connector.pause();
     }
     if (reason === "undecodable-events") {
       degraded.add(reason);
+      // Real decode failures page the owner debounced per decode code (≤1/10 min, restart-safe
+      // via the outbox key window); unsupported-event/stale never reach this path.
+      const noticeReason = undecodableOwnerReason(detail?.code);
       const current = runtime;
-      current?.work.run(() => current.notify.owner(reason));
+      current?.work.run(() => current.notify.owner(noticeReason, { gapMs: UNDECODABLE_OWNER_NOTICE_GAP_MS }));
     }
     publish();
   }
@@ -566,6 +602,22 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       patch,
       notice: bindingNotice,
     });
+    const sessionCard = createFeishuSessionCard({
+      state,
+      sessions,
+      installation,
+      authorize: (identity) => admission.authorize(identity),
+      cardsDenied: () => caps.cards === "denied",
+      sendCard,
+      patchCard: (p) => api.patchCard(p),
+      notice,
+      capability,
+      clock,
+      onError: () => {
+        if (active) health("background-failed");
+      },
+      log,
+    });
     const router = createFeishuRouter({
       state,
       sessions,
@@ -585,7 +637,12 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       allowGroups: deps.config.allowGroups,
       staleMessageS: deps.config.staleMessageS,
       now: clock.now,
-      onHealth: (e) => health(e.reason),
+      onHealth: (e) =>
+        health(e.reason, {
+          ...(e.eventType ? { eventType: e.eventType } : {}),
+          ...(e.code ? { code: e.code } : {}),
+          ...(e.messageType ? { messageType: e.messageType } : {}),
+        }),
       prepare: async (message, identity) => {
         // Text answers are effects too: defer until inbound has committed dedup, just like cards.
         const bindingKey = feishuBindingKey(message.chatType, message.chatId, message.threadId);
@@ -617,9 +674,28 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         };
       },
       emit: (intent) => {
+        // G1: session-pick is enqueued synchronously by the per-card controller — a saturated
+        // generic work pool can never silently drop a redeemed button click.
+        if (intent.type === "action" && intent.record.action === "session-pick") {
+          capability("cardCallback", true);
+          sessionCard.pick(intent.record, intent.identity, intent.eventId);
+          return;
+        }
         work.run(() => inboundIntent(intent));
       },
-      audit: (audit) => log("inbound", audit.reason),
+      audit: (audit) => {
+        // Noisy benign classes (unsubscribed event types, stale redeliveries) log a bounded sample;
+        // their authoritative counts live in the connector's dropped{} status counters.
+        if (audit.reason === "unsupported-event" || audit.reason === "stale") {
+          const lastLogged = auditSampled.get(audit.reason);
+          if (lastLogged !== undefined && clock.now() - lastLogged < AUDIT_SAMPLE_GAP_MS) return;
+          auditSampled.set(audit.reason, clock.now());
+        }
+        log("inbound", audit.reason, undefined, {
+          ...(audit.eventType !== "unknown" ? { eventType: audit.eventType } : {}),
+          ...(audit.messageType ? { messageType: audit.messageType } : {}),
+        });
+      },
     });
     const connector = createFeishuConnector({
       credentials: credentials.current()!,
@@ -634,10 +710,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         publish();
         return result;
       },
-      onUndecodable: () => {
+      onUndecodable: (code) => {
         if (!active) return;
         degraded.add("undecodable-events");
-        work.run(() => notify.owner("undecodable-events"));
+        work.run(() => notify.owner(undecodableOwnerReason(code), { gapMs: UNDECODABLE_OWNER_NOTICE_GAP_MS }));
       },
       onStatus: (view) => {
         if (!active) return;
@@ -944,11 +1020,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           `route-${m.eventId}`,
         );
       else if (intent.type === "list")
-        await notice(
-          target,
-          intent.rows.map((r, i) => `${i + 1}. ${r.label} [${r.state}/${r.mode}]`).join("\n") || "没有可用会话",
-          m.chatId,
-        );
+        await sessionCard.sendList({ message: m, generation: intent.generation, rows: intent.rows, target });
       else if (intent.type === "current") {
         const binding = intent.binding;
         if (!binding?.sessionId) {
@@ -1179,13 +1251,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     }
     async function inboundIntent(intent: FeishuInboundIntent) {
       if (!active) return;
-      if (intent.type === "notice")
-        await notice(
-          targetFor({ chatType: intent.chatType, threadId: intent.threadId, triggerMessageId: intent.messageId }),
-          intent.code,
-          intent.chatId,
-        );
-      else if (intent.type === "approval-request") {
+      if (intent.type === "approval-request") {
         const sent = await sendCard(
           `fp${feishuKey(`${intent.installGen}:${intent.senderOpenId}`)}`,
           { scope: "p2p", via: "send", receiveIdType: "open_id", receiveId: intent.ownerOpenId },
@@ -1370,6 +1436,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       requests,
       files,
       notify,
+      sessionCard,
       get authFailed() {
         return authFailed;
       },
@@ -1411,6 +1478,17 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         work.run(() => requests.recover());
         work.run(bindFresh);
         maintain();
+        // G2: card inventory/slots are adopted from persisted anchors BEFORE any event arrives — but
+        // bounded: a stuck inventory (slow commit/PATCH) must never keep the bot from connecting. On
+        // timeout the connector starts anyway and adoption finishes in the background; clicks on a
+        // not-yet-adopted card are rebuilt lazily from its anchor (`pick` → `adoptLazy`).
+        const adoption = sessionCard.start().catch(() => {});
+        try {
+          await bounded(adoption, deps.cardAdoptionBudgetMs ?? 3_000, clock);
+        } catch {
+          log("session-card", "adoption-timeout");
+        }
+        if (!active) return;
         connector.start();
       },
       async stop() {
@@ -1423,6 +1501,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         router.dispose();
         requests.dispose();
         dialogs.dispose();
+        sessionCard.dispose();
         sessions.clear();
         runs.dispose();
         files.dispose();
@@ -1630,6 +1709,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         state.nonces.purgeOperator(frame.openId);
         await state.commit();
       }
+      runtime?.sessionCard.revokeOperator(frame.openId); // G4: silent, cancels timers/aborts IO
       publish();
       return ok({ changed, count: state.allowList.size });
     } catch {

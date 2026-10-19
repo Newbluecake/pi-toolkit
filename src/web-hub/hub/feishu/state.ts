@@ -873,8 +873,16 @@ export interface FeishuState {
     readonly size: number;
   };
   readonly nonces: {
-    issue(input: NewNonceInput, ttlMs?: number): Admit<FeishuNonce>;
+    /**
+     * `opts.maxTotal` (session-card sub-quota): refuse `cap` once the table holds ≥ min(maxTotal, cap)
+     * entries, so the caller can never starve the other card kinds out of the shared table.
+     */
+    issue(input: NewNonceInput, ttlMs?: number, opts?: { maxTotal?: number }): Admit<FeishuNonce>;
     get(nonce: string): FeishuNonce | undefined;
+    /** Read-only enumeration (clones), guarded by `live()`; the table cap bounds the result. */
+    list(match?: (rec: FeishuNonce) => boolean): FeishuNonce[];
+    /** Remove the entries selected by the caller's module-scoped predicate; returns how many. */
+    purge(match: (rec: FeishuNonce) => boolean): number;
     /** One-shot: operator/chat/message/tenant/gen must all match; a mismatch does NOT consume (no DoS on the legit holder). */
     redeem(ctx: {
       nonce: string;
@@ -1741,7 +1749,7 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
     },
 
     nonces: {
-      issue(input, ttlMs) {
+      issue(input, ttlMs, opts) {
         if (!live()) return { ok: false, refused: "unavailable" };
         const now = clock.now();
         const ttl = Math.max(1, Math.min(FEISHU_CAPS.nonceTtlMs, ttlMs ?? FEISHU_CAPS.nonceTtlMs));
@@ -1749,9 +1757,10 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
         const rec = parseNonce(nonce, { ...input, nonce, createdAt: now, expiresAt: now + ttl });
         if (rec === undefined) return { ok: false, refused: "invalid" };
         if (nonces.map.has(nonce)) return { ok: false, refused: "exists" };
-        if (nonces.size >= nonces.cap) {
+        const cap = opts?.maxTotal !== undefined ? Math.max(0, Math.min(opts.maxTotal, nonces.cap)) : nonces.cap;
+        if (nonces.size >= cap) {
           if (sweepExpired() > 0) touch();
-          if (nonces.size >= nonces.cap) return { ok: false, refused: "cap" };
+          if (nonces.size >= cap) return { ok: false, refused: "cap" };
         }
         if (overBudget(nonces.delta(nonce, rec))) return { ok: false, refused: "budget" };
         nonces.set(nonce, rec);
@@ -1761,6 +1770,19 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
       get: (nonce) => {
         const n = nonces.get(nonce);
         return n === undefined ? undefined : clone(n);
+      },
+      list: (match) => {
+        if (!live()) return [];
+        const out: FeishuNonce[] = [];
+        for (const n of nonces.values()) if (match === undefined || match(n)) out.push(clone(n));
+        return out;
+      },
+      purge(match) {
+        if (!live()) return 0;
+        let n = 0;
+        for (const [k, r] of [...nonces.entries()]) if (match(r) && nonces.delete(k)) n++;
+        if (n > 0) touch();
+        return n;
       },
       redeem(ctx) {
         if (!live()) return { ok: false, reason: "unavailable" };

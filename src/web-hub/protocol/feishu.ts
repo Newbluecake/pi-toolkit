@@ -367,6 +367,19 @@ export const FEISHU_CAPS = {
   /** §R2-f ask_user answer drafts 32 / 30 min */
   askDrafts: 32,
   askDraftTtlMs: 30 * 60_000,
+  /** session-card (`/list` switch card, session-card-plan §1): buttons per card */
+  listCardMaxButtons: 8,
+  /** session-card: rows rendered as text lines on the card body */
+  listCardMaxRows: 40,
+  /** session-card: button label cap in code points (sid6/state are never truncated) */
+  listButtonLabelMax: 36,
+  /** session-card: open-card slots, global / per operator (anchor-record backed) */
+  listCardsOpenGlobal: 16,
+  listCardsOpenPerOperator: 4,
+  /** session-card: nonce sub-quota reserve — session-card issues with maxTotal = nonces − this */
+  noncesReservedForOthers: 128,
+  /** session-card: physical PATCH IO pool size (zombie work occupies a slot until real settle) */
+  listCardPatchIoMax: 8,
 } as const;
 
 /** §R2-c: durable `received` payload body cap (longer inbound text is staged as a `.txt` upload attachment). */

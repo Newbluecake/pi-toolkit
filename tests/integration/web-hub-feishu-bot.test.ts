@@ -489,6 +489,213 @@ describe("F10 Feishu bot — real hub child assembly", () => {
     expect(a.c.frames.filter((f: any) => f.t === "cmd" && f.cmd.op === "dialog_answer")).toHaveLength(1);
   }, 30_000);
 
+  // ---- session-switch card (session-card-plan r3) ----
+  const cardNonces = (s: any, action: string) =>
+    Object.values(s.nonces as Record<string, any>).filter((n) => n.action === action);
+  const pickNonceFor = async (h: any, sid: string) => {
+    const s = await until(
+      async () => h.disk(),
+      (d: any) =>
+        cardNonces(d, "session-pick").some((n: any) => {
+          try {
+            return JSON.parse(n.target).s === sid;
+          } catch {
+            return false;
+          }
+        }),
+      `button nonce ${sid}`,
+    );
+    return cardNonces(s, "session-pick").find((n: any) => JSON.parse(n.target).s === sid);
+  };
+  const clickCard = async (h: any, sid: string, id: string, sender?: string) => {
+    const n = await pickNonceFor(h, sid);
+    await h.rpc("send", {
+      raw: callback(n.nonce, { id, chatId: n.chatId, messageId: n.messageId, ...(sender ? { sender } : {}) }),
+    });
+    return n;
+  };
+
+  it("SW1: /list sends a reusable button card; A→B→A clicks switch the binding each time", async () => {
+    const h = await boot(),
+      a = await h.agent("session-one", "One"),
+      b = await h.agent("session-two", "Two");
+    expect(a.ack.caps).toContain(FSB_HUB_CAP);
+    await h.send("/list");
+    const first = await until(
+      async () => h.disk(),
+      (s: any) => cardNonces(s, "session-card").length === 1 && cardNonces(s, "session-pick").length === 2,
+      "anchor + two button nonces durable",
+    );
+    const anchor = cardNonces(first, "session-card")[0];
+    expect(JSON.parse(anchor.target)).toMatchObject({ k: "p2p:chat" }); // anchor never rendered, carries the key
+    const aNonce = (await pickNonceFor(h, "session-one")).nonce;
+    await clickCard(h, "session-one", "sw1-a");
+    await h.sent("已绑定");
+    await until(
+      async () => h.disk(),
+      (s: any) => s.bindings["p2p:chat"]?.sessionId === "session-one",
+      "bound one",
+    );
+    await clickCard(h, "session-two", "sw1-b"); // successful click keeps the card open
+    await until(
+      async () => h.disk(),
+      (s: any) => s.bindings["p2p:chat"]?.sessionId === "session-two",
+      "bound two",
+    );
+    const reissued = await until(
+      async () => h.disk(),
+      (s: any) =>
+        cardNonces(s, "session-pick").length === 2 && // exactly one re-issue per consumed button
+        cardNonces(s, "session-pick").every((n: any) => n.nonce !== aNonce),
+      "consumed nonce re-issued exactly once",
+    );
+    expect(cardNonces(reissued, "session-pick").map((n: any) => n.nonce)).not.toContain(aNonce);
+    expect(anchor.expiresAt).toBe(cardNonces(reissued, "session-pick")[0].expiresAt); // absolute expiry shared
+    await clickCard(h, "session-one", "sw1-a2"); // and the card is reusable for the way back
+    await until(
+      async () => h.disk(),
+      (s: any) => s.bindings["p2p:chat"]?.sessionId === "session-one",
+      "bound one again",
+    );
+    expect(b.c.frames.filter((f: any) => f.t === "cmd")).toEqual([]); // clicks never dispatch work
+  }, 30_000);
+
+  it("SW2: an authorized click on an offline target closes the card; a stranger's click changes nothing", async () => {
+    const h = await boot(),
+      a = await h.agent("session-one", "One"),
+      b = await h.agent("session-two", "Two");
+    await h.send("/list");
+    await pickNonceFor(h, "session-two");
+    const cookie = await login(h.ready.port, h.paths.tokenFile);
+    b.c.send({ t: "bye", reason: "quit" });
+    b.c.sock.destroy();
+    // poll FRESH SSE snapshots (a new connection replays the current agents list): session-two not live
+    await until(
+      async () => {
+        const sse = await openSse(h.ready.port, { cookie });
+        try {
+          const frame = await sse.waitFor((e) => e.event === "agents");
+          const data: unknown = frame.data;
+          const cards = Array.isArray(data) ? data : ((data as { agents?: unknown[] }).agents ?? []);
+          return cards.some((c: any) => c?.session?.sessionId === "session-two" && c?.state === "live");
+        } finally {
+          sse.close();
+        }
+      },
+      (stillLive) => !stillLive,
+      "session-two offline",
+    );
+    const before = (await h.inspect()).sent.length;
+    await clickCard(h, "session-two", "sw2-off");
+    await h.sent("已关闭"); // the failure gate closes the whole card
+    await until(
+      async () => h.disk(),
+      (s: any) => cardNonces(s, "session-card").length === 0 && cardNonces(s, "session-pick").length === 0,
+      "card nonces purged",
+    );
+    expect(h.disk().bindings["p2p:chat"]).toBeUndefined();
+    // a non-operator click (no nonce consume possible) triggers neither gate nor binding
+    await h.send("/list");
+    const strangerNonce = await pickNonceFor(h, "session-one");
+    const acksBefore = (await h.inspect()).acks;
+    await h.rpc("send", {
+      raw: callback(strangerNonce.nonce, {
+        id: "sw2-stranger",
+        sender: "ou_stranger",
+        chatId: strangerNonce.chatId,
+        messageId: strangerNonce.messageId,
+      }),
+    });
+    await until(h.inspect, (s) => s.acks > acksBefore, "stranger callback ACKed");
+    const after = (await h.inspect()).sent.slice(before).map((m) => String(m.body.content));
+    expect(after.filter((c) => c.includes("已关闭"))).toHaveLength(1); // only the gate's own close notice
+    expect(h.disk().bindings["p2p:chat"]).toBeUndefined();
+    expect(a.c.frames.filter((f: any) => f.t === "cmd")).toEqual([]);
+  }, 30_000);
+
+  it("SW3: two rapid /list supersede — every old nonce is purged, only the newest card is live", async () => {
+    const h = await boot();
+    await h.agent("session-one", "One");
+    await h.send("/list");
+    const first = await pickNonceFor(h, "session-one");
+    await h.send("/list");
+    const latest = await until(
+      async () => h.disk(),
+      (s: any) => {
+        const picks = cardNonces(s, "session-pick");
+        return picks.length === 1 && picks[0].nonce !== first.nonce && cardNonces(s, "session-card").length === 1;
+      },
+      "superseded: single anchor + fresh button nonce",
+    );
+    // the stale nonce is unknown now — clicking it is a silent no-op
+    await h.rpc("send", {
+      raw: callback(first.nonce, { id: "sw3-stale", chatId: first.chatId, messageId: first.messageId }),
+    });
+    await until(h.inspect, (s) => s.acks >= 3, "stale click ACKed");
+    expect(h.disk().bindings["p2p:chat"]).toBeUndefined();
+    const live = cardNonces(latest, "session-pick")[0];
+    await h.rpc("send", {
+      raw: callback(live.nonce, { id: "sw3-live", chatId: live.chatId, messageId: live.messageId }),
+    });
+    await until(
+      async () => h.disk(),
+      (s: any) => s.bindings["p2p:chat"]?.sessionId === "session-one",
+      "new card works",
+    );
+  }, 30_000);
+
+  it("SW4: after a hub restart an old card still switches (single-button card too); group topics stay independent", async () => {
+    const h = await boot();
+    await h.agent("session-one", "One"); // exactly one online session ⇒ single-button card
+    await h.send("/list");
+    const nonce = await pickNonceFor(h, "session-one");
+    await until(
+      async () => h.disk(),
+      (s: any) => cardNonces(s, "session-card").length === 1,
+      "anchor durable before crash",
+    );
+    await h.crash();
+    const r = await boot({ home: h.home });
+    await r.agent("session-one", "One");
+    // boot adoption rebuilt the controller BEFORE the connector started: the old card accepts clicks
+    await r.rpc("send", {
+      raw: callback(nonce.nonce, { id: "sw4-old", chatId: nonce.chatId, messageId: nonce.messageId }),
+    });
+    await until(
+      async () => r.disk(),
+      (s: any) => s.bindings["p2p:chat"]?.sessionId === "session-one",
+      "old card binds",
+    );
+    await r.sent("已绑定");
+    // group topics are independent cards/bindings, and an unbound topic binds on first click
+    const topic = (threadId: string) => ({ chatType: "group" as const, threadId, mentions: true });
+    // explicit message id: the rebooted harness counter restarts and would hit the persisted dedup table
+    await r.send("/list", topic("thread-a"), "sw4-topic-list");
+    const topicNonce = await until(
+      async () => r.disk(),
+      (s: any) =>
+        cardNonces(s, "session-pick").some((n: any) => {
+          try {
+            return JSON.parse(n.target).k === "grp:chat:thread-a";
+          } catch {
+            return false;
+          }
+        }),
+      "topic card nonce",
+    ).then((s: any) => cardNonces(s, "session-pick").find((n: any) => JSON.parse(n.target).k === "grp:chat:thread-a"));
+    await r.rpc("send", {
+      raw: callback(topicNonce.nonce, { id: "sw4-topic", chatId: topicNonce.chatId, messageId: topicNonce.messageId }),
+    });
+    await until(
+      async () => r.disk(),
+      (s: any) =>
+        s.bindings["grp:chat:thread-a"]?.sessionId === "session-one" &&
+        s.bindings["grp:chat:thread-a"]?.threadId === "thread-a",
+      "topic bound on first click",
+    );
+    expect(r.disk().bindings["p2p:chat"].sessionId).toBe("session-one"); // p2p binding untouched
+  }, 40_000);
+
   it("FB5/FB6: inbound image bytes reach shared uploads; attributed cwd image auto-sends, file button re-admits", async () => {
     const h = await boot(),
       a = await h.agent();
@@ -599,6 +806,39 @@ describe("F10 Feishu bot — real hub child assembly", () => {
     expect(b.c.frames.filter((v: any) => v.t === "cmd" && !v.queryOnly)).toEqual([]);
     expect(restarted.disk().requests[f.id].state).toBe("unattributed");
     expect((await restarted.inspect()).sent.some((m) => String(m.body.content).includes("once only"))).toBe(false);
+  }, 40_000);
+
+  it("FB11: post-restart redelivery noise — stale/unsupported never page the owner, decode failures debounce", async () => {
+    const h = await boot();
+    await h.agent();
+    await h.crash();
+    const r = await boot({ home: h.home });
+    await r.agent();
+    // Feishu redelivers downtime traffic: a stale owner message, an event type we never
+    // subscribed to, and two copies of a malformed subscribed (real decode failure) event.
+    await r.rpc("send", { raw: messageEnvelope("stale-1", "old", { createdAt: String(Date.now() - 301_000) }) });
+    const unknown: any = messageEnvelope("unknown-1", "ignored", { createdAt: String(Date.now()) });
+    unknown.header.event_type = "im.chat.disbanded_v1";
+    unknown.event = { chat_id: "oc_chat" };
+    await r.rpc("send", { raw: unknown });
+    const bad = (id: string) => ({
+      schema: "2.0",
+      header: { event_id: id, event_type: "im.message.receive_v1", app_id: "cli_test", tenant_key: "tenant" },
+      event: {},
+    });
+    await r.rpc("send", { raw: bad("bad-1") });
+    await r.rpc("send", { raw: bad("bad-2") });
+    await until(r.inspect, (s) => s.acks >= 4, "all noise ACKed");
+    await until(
+      r.inspect,
+      (s) => s.sent.some((m) => String(m.body.content).includes("undecodable:message-invalid")),
+      "owner page for the real decode failure",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const contents = (await r.inspect()).sent.map((m) => String(m.body.content));
+    // Exactly one owner page (the second bad copy is debounced); stale/unsupported never page.
+    expect(contents.filter((c) => c.includes("飞书机器人状态"))).toHaveLength(1);
+    expect(contents.some((c) => c.includes("stale"))).toBe(false);
   }, 40_000);
 
   it("FB9: /new known directory forks real fake-pi, binds live session once; duplicate never forks twice", async () => {

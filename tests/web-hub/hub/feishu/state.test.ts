@@ -1264,6 +1264,90 @@ describe("nonces (§4.3)", () => {
   });
 });
 
+describe("nonces list/purge/maxTotal (session-card ports)", () => {
+  const anchorBase = {
+    installGen: 7,
+    tenantKey: "tk1",
+    operatorOpenId: OWNER,
+    chatId: "oc_1",
+    messageId: "om_card",
+    action: "session-card",
+    target: JSON.stringify({ c: "flX", k: "p2p:oc_1" }),
+  };
+
+  it("list clones and filters; purge removes only predicate matches and persists the removal", async () => {
+    const { s, clock } = await mk();
+    const a = s.nonces.issue(anchorBase);
+    const b = s.nonces.issue({
+      ...anchorBase,
+      action: "session-pick",
+      target: JSON.stringify({ c: "flX", k: "p2p:oc_1", s: "session-1" }),
+    });
+    const c = s.nonces.issue({ ...anchorBase, action: "dialog", messageId: "om_other" });
+    expect(a.ok && b.ok && c.ok).toBe(true);
+    const anchors = s.nonces.list((n) => n.action === "session-card");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]!.nonce).toBe(a.ok ? a.value.nonce : "");
+    anchors[0]!.target = "mutated"; // clones: mutating the result never touches the store
+    expect(s.nonces.get(a.ok ? a.value.nonce : "")?.target).toBe(anchorBase.target);
+    expect(s.nonces.list()).toHaveLength(3); // no match ⇒ everything
+    const removed = s.nonces.purge((n) => n.messageId === "om_card" && n.action !== "dialog");
+    expect(removed).toBe(2);
+    expect(s.nonces.size).toBe(1);
+    expect(s.nonces.get(c.ok ? c.value.nonce : "")).toBeDefined(); // foreign nonce untouched
+    expect(await durable({ s, clock })).toBe(true);
+    const again = await mk({ clock });
+    expect(again.s.nonces.size).toBe(1); // the purge is durable
+    expect(again.s.nonces.list((n) => n.action === "session-card")).toHaveLength(0);
+  });
+
+  it("issue({maxTotal}) refuses at the sub-quota while the shared reserve stays usable", async () => {
+    const { s } = await mk();
+    const budget = FEISHU_CAPS.nonces - FEISHU_CAPS.noncesReservedForOthers; // 384
+    let ok = 0;
+    for (let i = 0; i < FEISHU_CAPS.nonces + 8; i++) {
+      const n = s.nonces.issue({ ...anchorBase, target: `t${i}` }, undefined, { maxTotal: budget });
+      if (n.ok) ok++;
+    }
+    expect(ok).toBe(budget); // refused exactly at 384
+    expect(s.nonces.issue({ ...anchorBase, target: "over" }, undefined, { maxTotal: budget })).toEqual({
+      ok: false,
+      refused: "cap",
+    });
+    // other modules (no maxTotal) still issue into the reserved tail
+    expect(s.nonces.issue({ ...anchorBase, target: "foreign" }).ok).toBe(true);
+    expect(s.nonces.size).toBe(budget + 1);
+  });
+
+  it("anchor + button records survive a reload (boot inventory round trip)", async () => {
+    const { s, clock } = await mk();
+    const anchor = s.nonces.issue(anchorBase, 60_000, { maxTotal: 384 });
+    const button = s.nonces.issue(
+      { ...anchorBase, action: "session-pick", target: JSON.stringify({ c: "flX", k: "p2p:oc_1", s: "session-1" }) },
+      60_000,
+      { maxTotal: 384 },
+    );
+    expect(anchor.ok && button.ok).toBe(true);
+    expect(await durable({ s, clock })).toBe(true);
+    const again = await mk({ clock });
+    const anchors = again.s.nonces.list((n) => n.action === "session-card" && n.messageId === "om_card");
+    expect(anchors).toHaveLength(1);
+    expect(JSON.parse(anchors[0]!.target)).toEqual({ c: "flX", k: "p2p:oc_1" });
+    expect(anchors[0]!.expiresAt).toBe(anchor.ok ? anchor.value.expiresAt : 0);
+    clock.advance(61_000); // expired anchors are swept, never adopted
+    expect(
+      again.s.nonces.redeem({
+        nonce: anchors[0]!.nonce,
+        operatorOpenId: OWNER,
+        chatId: "oc_1",
+        messageId: "om_card",
+        tenantKey: "tk1",
+        installGen: 7,
+      }),
+    ).toEqual({ ok: false, reason: "expired" });
+  });
+});
+
 describe("approvals / bindings / dialogs / outbox / undecodable", () => {
   it("approvals: allowed removes, ignored keeps the 24 h gate, attach binds the card", async () => {
     const { s } = await mk();

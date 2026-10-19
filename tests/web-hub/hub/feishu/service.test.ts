@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { f8Rig, eventually, sentContent } from "../../../fixtures/feishu/f8.js";
 import { messageEnvelope, callbackEnvelope, OWNER, NOW } from "../../../fixtures/feishu/f6.js";
+import { createFakeFeishu } from "../../../fixtures/feishu/fake-http.js";
 import { realFeishuFs } from "../../../../src/web-hub/hub/feishu/credentials.js";
 import type { CmdFrame, CmdResultFrame } from "../../../../src/web-hub/protocol/messages.js";
 import { createFsAdmitter, denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
@@ -150,9 +151,42 @@ describe("F8 in-process service composition", () => {
       event: {},
     });
     await eventually(() => expect(r.ackCount()).toBe(1));
-    await eventually(() => expect(sentContent(r)).toContain("undecodable-events"));
+    await eventually(() => expect(sentContent(r)).toContain("undecodable:message-invalid"));
     expect(r.service.snapshot().degraded).toContain("undecodable-events");
     expect(r.fake.sent[0]!.body["receive_id"]).toBe(OWNER);
+  });
+  it("owner decode-failure notices debounce per code; unsupported/stale never page the owner", async () => {
+    const r = await rig();
+    const bad = (id: string) => ({
+      schema: "2.0",
+      header: { event_id: id, event_type: "im.message.receive_v1", app_id: "cli_test", tenant_key: "tenant" },
+      event: {},
+    });
+    r.send(bad("bad-1"));
+    await eventually(() => expect(sentContent(r)).toContain("undecodable:message-invalid"));
+    // Same decode code again: no second page.
+    r.send(bad("bad-2"));
+    await eventually(() => expect(r.ackCount()).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(sentContent(r).match(/飞书机器人状态/g)).toHaveLength(1);
+    // A different decode code is a separate debounce bucket.
+    const contentBad: any = messageEnvelope("bad-3", "hi");
+    contentBad.event.message.content = "{";
+    r.send(contentBad);
+    await eventually(() => expect(sentContent(r)).toContain("undecodable:content-invalid"));
+    // Unsubscribed event type and a stale redelivery: ACKed + counted, never paged.
+    const unknown: any = messageEnvelope("unknown-1");
+    unknown.header.event_type = "im.chat.disbanded_v1";
+    unknown.event = { chat_id: "chat" };
+    r.send(unknown);
+    r.send(messageEnvelope("stale-1", "old", { createdAt: String(NOW - 301_000) }));
+    await eventually(() => expect(r.ackCount()).toBe(5));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(sentContent(r).match(/飞书机器人状态/g)).toHaveLength(2);
+    expect(sentContent(r)).not.toContain("stale");
+    const dropped = r.service.snapshot().counters.dropped;
+    expect(dropped["unsupported"]).toBe(1);
+    expect(dropped["stale"]).toBe(1);
   });
   it("persistence failure pauses further inbound processing; healed writer resumes", async () => {
     let fail = false;
@@ -478,5 +512,111 @@ describe("F8 registration lifecycle", () => {
     expect(replacement.ws.peak()).toBe(1);
     await eventually(() => expect(sentContent(r)).toContain("configured"));
     expect(JSON.stringify(replacement.service.snapshot())).not.toContain(r.fake.appSecret);
+  });
+});
+
+describe("F8 /list session-switch card (session-card-plan r3)", () => {
+  const diskNonces = async (r: Awaited<ReturnType<typeof rig>>, action: string) =>
+    Object.values((await r.disk())["nonces"] as Record<string, any>).filter((n) => n.action === action);
+
+  it("/list sends a button card; a click binds end-to-end, re-issues one nonce, sets cardCallback ok", async () => {
+    const r = await rig();
+    r.views.push({
+      sessionId: "session-2",
+      agentKey: "agent-2",
+      cwd: r.stateDir,
+      name: "Two",
+      mode: "tui",
+      live: true,
+      state: "idle",
+    });
+    r.send(messageEnvelope("list-1", "/list"));
+    await eventually(async () => {
+      expect(await diskNonces(r, "session-card")).toHaveLength(1); // the anchor
+      expect(await diskNonces(r, "session-pick")).toHaveLength(2); // one per online session
+    });
+    const anchor = (await diskNonces(r, "session-card"))[0];
+    expect(JSON.parse(anchor.target)).toMatchObject({ k: "p2p:chat" });
+    expect(r.fake.sent.some((s) => s.body["msg_type"] === "interactive")).toBe(true);
+    expect(r.fake.callsTo("PATCH", /\/open-apis\/im\/v1\/messages\//).length).toBeGreaterThan(0);
+    const pick = (await diskNonces(r, "session-pick")).find((n) => JSON.parse(n.target).s === "session-2")!;
+    const sentBefore = r.fake.sent.length;
+    r.send(callbackEnvelope(pick.nonce, { id: "pick-1", chatId: pick.chatId, messageId: pick.messageId }));
+    await eventually(() => expect(sentContent(r)).toContain("已绑定"));
+    await eventually(async () => expect((await r.disk())["bindings"]["p2p:chat"].sessionId).toBe("session-2"));
+    expect(r.service.snapshot().caps.cardCallback).toBe("ok");
+    // the card stays open: exactly one fresh nonce for the consumed button, anchor untouched
+    await eventually(async () => {
+      const picks = await diskNonces(r, "session-pick");
+      expect(picks).toHaveLength(2);
+      expect(picks.map((n) => n.nonce)).not.toContain(pick.nonce);
+    });
+    expect(await diskNonces(r, "session-card")).toHaveLength(1);
+    expect((await r.disk())["nonces"][anchor.nonce]).toBeDefined();
+    // the success receipt replies to the card message (relaunch-style target)
+    const receipt = r.fake.sent.slice(sentBefore).find((s) => String(s.body["content"]).includes("已绑定"));
+    expect(receipt).toBeDefined();
+    // a second click on the re-issued nonce switches back — the card is reusable
+    const back = (await diskNonces(r, "session-pick")).find((n) => JSON.parse(n.target).s === "session-1")!;
+    r.send(callbackEnvelope(back.nonce, { id: "pick-2", chatId: back.chatId, messageId: back.messageId }));
+    await eventually(async () => expect((await r.disk())["bindings"]["p2p:chat"].sessionId).toBe("session-1"));
+    expect(r.request).not.toHaveBeenCalled(); // clicks never dispatch work
+  });
+
+  it("capability-denied cards degrade /list to today's plain text list", async () => {
+    const r = await rig();
+    r.fake.on("PATCH", /\/open-apis\/im\/v1\/messages\//, () => ({
+      json: { code: 230027, msg: "card scope denied" },
+    }));
+    r.send(messageEnvelope("list-1", "/list"));
+    await eventually(() => expect(r.service.snapshot().caps.cards).toBe("denied"));
+    const cards = () => r.fake.sent.filter((s) => s.body["msg_type"] === "interactive").length;
+    const before = cards();
+    r.send(messageEnvelope("list-2", "/list"));
+    await eventually(() => expect(sentContent(r).replaceAll("\u200b", "")).toContain("1. One · sessio [idle/tui]"));
+    expect(cards()).toBe(before); // no new card after the denial
+    expect(r.request).not.toHaveBeenCalled();
+  });
+
+  it("G2: restart adopts the open card before the connector starts; the old card still switches", async () => {
+    const r = await rig();
+    r.send(messageEnvelope("list-1", "/list"));
+    await eventually(async () => expect(await diskNonces(r, "session-pick")).toHaveLength(1));
+    const pick = (await diskNonces(r, "session-pick"))[0]!;
+    await r.service.dispose(); // keep stateDir — anchors stay on disk
+    const restarted = await f8Rig({ stateDir: r.stateDir });
+    cleanups.push(() => restarted.service.dispose());
+    await restarted.ready(); // sessionCard.start() ran before connector.start()
+    restarted.send(
+      callbackEnvelope(pick.nonce, { id: "pick-restart", chatId: pick.chatId, messageId: pick.messageId }),
+    );
+    await eventually(() => expect(sentContent(restarted)).toContain("已绑定"));
+    expect((await restarted.disk())["bindings"]["p2p:chat"].sessionId).toBe("session-1");
+  });
+  it("G2 bound: a stuck card adoption never blocks the connector (timeout path logged, bot keeps serving)", async () => {
+    const r = await rig();
+    r.send(messageEnvelope("list-1", "/list"));
+    await eventually(async () => expect(await diskNonces(r, "session-pick")).toHaveLength(1));
+    const pick = (await diskNonces(r, "session-pick"))[0]!;
+    await r.service.dispose();
+    // simulate "button redeemed just before the crash": adoption will want to re-issue + refresh-PATCH
+    const file = join(r.stateDir, "feishu-bot", "state.json");
+    const doc = JSON.parse(await readFile(file, "utf8"));
+    for (const [k, n] of Object.entries<any>(doc.nonces)) if (n.action === "session-pick") delete doc.nonces[k];
+    await writeFile(file, JSON.stringify(doc), { mode: 0o600 });
+    // the refresh PATCH hangs forever ⇒ start() would never finish
+    const hung = createFakeFeishu({ appId: "cli_test" });
+    hung.on("PATCH", /\/open-apis\/im\/v1\/messages\//, () => new Promise(() => {}));
+    const restarted = await f8Rig({ stateDir: r.stateDir, fetch: hung.fetch, cardAdoptionBudgetMs: 300 });
+    cleanups.push(() => restarted.service.dispose());
+    const started = Date.now();
+    await restarted.ready(); // connector came up although adoption is still parked on the PATCH
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(restarted.logs).toContainEqual({ event: "session-card", reason: "adoption-timeout" });
+    expect(restarted.ws.sockets.length).toBeGreaterThan(0);
+    // the bot keeps serving while adoption is parked: a fresh /list is answered (via the hung-PATCH fake)
+    restarted.send(messageEnvelope("list-2", "/list"));
+    await eventually(() => expect(hung.sent.length).toBeGreaterThan(0));
+    void pick;
   });
 });
