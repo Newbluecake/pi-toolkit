@@ -122,8 +122,12 @@ export function feishuPostText(content: Record<string, unknown>): string | undef
   ];
   const boundedText = (v: unknown): v is string =>
     typeof v === "string" && Buffer.byteLength(v) <= FEISHU_POST_LIMITS.textBytes;
-  for (const key of ordered) {
-    const locale = rec(content[key]);
+  // Flat shape (no locale wrapper, seen from the desktop client): {"title":…,"content":[[tag…]]}.
+  // Only when `content` really is the paragraph array — a malformed flat value falls through to the
+  // locale scan (which skips it), so a broken flat post with no locale keys still drops invalid.
+  const candidates: unknown[] = Array.isArray(content["content"]) ? [content] : ordered.map((k) => content[k]);
+  for (const candidate of candidates) {
+    const locale = rec(candidate);
     if (locale === undefined) continue;
     const title = locale["title"],
       paragraphs = locale["content"];

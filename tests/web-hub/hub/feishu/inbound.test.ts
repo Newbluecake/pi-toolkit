@@ -591,6 +591,23 @@ describe("F6 post rich-text decode", () => {
     if (msg.kind !== "message") throw new Error("expected message");
     expect(msg.message.text).toBe("hello post");
   });
+  it("accepts the flat post shape (desktop client: no locale wrapper)", () => {
+    const e = postEnvelope("post-flat", {
+      title: "悄悄话：我今天吃了一个包子。 任务：告诉我你看到了什么",
+      content: [
+        [{ tag: "text", text: "正文第一行" }],
+        [{ tag: "media", file_key: "file_v2_flat", image_key: "img_cover" }],
+      ],
+    });
+    const msg = decodeFeishuEvent(e, "cli_test");
+    expect(msg).toMatchObject({ kind: "message", message: { messageType: "post" } });
+    if (msg.kind !== "message") throw new Error("expected message");
+    expect(msg.message.text).toBe("悄悄话：我今天吃了一个包子。 任务：告诉我你看到了什么\n\n正文第一行");
+  });
+  it("still drops a post whose flat content is malformed (not an array) as content-invalid", () => {
+    const e = postEnvelope("post-flat-bad", { title: "t", content: "broken" });
+    expect(decodeFeishuEvent(e, "cli_test")).toMatchObject({ kind: "drop", reason: "content-invalid" });
+  });
   it.each([
     ["no-locale", {}],
     ["locale-not-object", { zh_cn: "broken" }],
