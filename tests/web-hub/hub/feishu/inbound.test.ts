@@ -61,6 +61,40 @@ describe("F6 envelope validation", () => {
     expect(await r.inbound.handle(e)).toEqual({ ack: true, reason: "unsupported-event" });
     expect(r.request).not.toHaveBeenCalled();
   });
+  it("unsupported events are count/log only: no undecodable evidence, no health signal, raw type audited", async () => {
+    const r = await f6Rig();
+    const e: any = messageEnvelope();
+    e.header.event_type = "im.chat.disbanded_v1";
+    e.event = { chat_id: "chat" };
+    expect(await r.inbound.handle(e)).toEqual({ ack: true, reason: "unsupported-event" });
+    expect(r.state.undecodable.snapshot().count).toBe(0);
+    expect(r.health).toHaveLength(0);
+    expect(r.audits).toContainEqual(
+      expect.objectContaining({ reason: "unsupported-event", eventType: "im.chat.disbanded_v1" }),
+    );
+  });
+  it("stale redeliveries are ACKed, audited with type fields and never emit a chat notice", async () => {
+    const r = await f6Rig();
+    const stale = messageEnvelope("stale-p2p", "old", { createdAt: String(NOW - 300_001) });
+    expect(await r.inbound.handle(stale)).toEqual({ ack: true, reason: "stale" });
+    expect(r.inboundIntents).toHaveLength(0);
+    expect(r.state.dedup.size).toBe(0);
+    expect(r.request).not.toHaveBeenCalled();
+    expect(r.health).toHaveLength(0);
+    expect(r.audits).toContainEqual(
+      expect.objectContaining({ reason: "stale", eventType: "im.message.receive_v1", messageType: "text" }),
+    );
+  });
+  it("app/tenant evidence mismatches are notifiable decode failures, recorded content-free", async () => {
+    const r = await f6Rig();
+    const e: any = messageEnvelope("forged");
+    e.header.app_id = "cli_other";
+    expect(await r.inbound.handle(e)).toEqual({ ack: true, reason: "app-mismatch" });
+    expect(r.state.undecodable.snapshot().count).toBe(1);
+    expect(r.health).toContainEqual(
+      expect.objectContaining({ degraded: true, reason: "undecodable-events", code: "app-mismatch" }),
+    );
+  });
 });
 describe("F6 identity, dedup and ACK barrier", () => {
   it("ACKs only after singleton payload and both dedup keys are durable", async () => {
@@ -389,6 +423,7 @@ describe("F6 identity, dedup and ACK barrier", () => {
       reason: "undecodable-events",
       eventType: "im.message.receive_v1",
       code: "message-invalid",
+      messageType: "text",
     });
     expect(JSON.stringify([r.audits, r.health, r.state.undecodable.snapshot()])).not.toContain("DO-NOT-LOG");
     expect(r.state.dedup.size).toBe(0);

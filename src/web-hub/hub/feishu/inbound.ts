@@ -39,7 +39,6 @@ export interface FeishuCallback {
   createdAt: number | undefined;
 }
 export type FeishuInboundIntent =
-  | { type: "notice"; chatId: string; chatType: "p2p" | "group"; messageId: string; threadId?: string; code: string }
   | {
       type: "approval-request";
       ownerOpenId: string;
@@ -80,12 +79,14 @@ export interface FeishuInboundDeps {
     reason: "undecodable-events" | "pending-expired" | "pending-full" | "persist-failed" | "background-failed";
     eventType?: string;
     code?: string;
+    messageType?: string;
   }): void;
   audit?(record: {
     eventType: string;
     senderHash?: string;
     chatType?: string;
     messageId?: string;
+    messageType?: string;
     reason: string;
   }): void;
 }
@@ -161,19 +162,46 @@ export function feishuPostText(content: Record<string, unknown>): string | undef
 export type FeishuDecodedEvent =
   | { kind: "message"; message: FeishuMessage }
   | { kind: "callback"; callback: FeishuCallback }
-  | { kind: "drop"; reason: string; eventType: string };
+  | {
+      kind: "drop";
+      reason: string;
+      /** Allowlist-mapped type for the PERSISTED undecodable ring (unsubscribed types stay "unknown"). */
+      eventType: string;
+      /** Sanitized printable-ASCII header event_type (≤80 chars) for logs/diagnostics, never persisted. */
+      diagType: string;
+      /** Sanitized message_type (≤40 chars) when the envelope carried one; never content values. */
+      messageType?: string;
+    };
+/**
+ * Drop reasons that may page the owner (debounced per reason by F8). `unsupported-event`
+ * (a type we never subscribed to) and `stale` (expected redelivery after a restart) are
+ * deliberately absent: they are counted/logged only.
+ */
+export const FEISHU_UNDECODABLE_NOTIFY_REASONS: readonly string[] = [
+  "envelope-invalid",
+  "message-invalid",
+  "content-invalid",
+  "mentions-invalid",
+  "callback-invalid",
+  "app-mismatch",
+  "tenant-invalid",
+  "tenant-mismatch",
+];
 /** Never trusts user_id (probe: null), action.target, or an origin supplied in the payload. */
 export function decodeFeishuEvent(raw: unknown, appId: string): FeishuDecodedEvent {
   const root = rec(raw),
     header = rec(root?.["header"]),
     event = rec(root?.["event"]);
   const type = typeof header?.["event_type"] === "string" ? header["event_type"].slice(0, 80) : "unknown";
-  const drop = (reason: string): FeishuDecodedEvent => ({
+  const diagType = /^[\x21-\x7e]{1,80}$/.test(type) ? type : "unknown";
+  const drop = (reason: string, messageType?: string): FeishuDecodedEvent => ({
     kind: "drop",
     reason,
     eventType: ["im.message.receive_v1", "card.action.trigger", "im.chat.member.bot.added_v1"].includes(type)
       ? type
       : "unknown",
+    diagType,
+    ...(messageType !== undefined ? { messageType } : {}),
   });
   if (root?.["schema"] !== "2.0" || !header || !event || !eventId(header["event_id"])) return drop("envelope-invalid");
   if (header["app_id"] !== appId) return drop("app-mismatch");
@@ -188,6 +216,9 @@ export function decodeFeishuEvent(raw: unknown, appId: string): FeishuDecodedEve
     const sender = rec(event["sender"]),
       senderId = rec(sender?.["sender_id"]),
       message = rec(event["message"]);
+    const rawMessageType = message?.["message_type"];
+    const messageType = str(rawMessageType, 40) ? rawMessageType : undefined;
+    const dropMessage = (reason: string): FeishuDecodedEvent => drop(reason, messageType);
     const openId = senderId?.["open_id"];
     if (
       typeof openId !== "string" ||
@@ -199,25 +230,27 @@ export function decodeFeishuEvent(raw: unknown, appId: string): FeishuDecodedEve
       (message["chat_type"] !== "p2p" && message["chat_type"] !== "group") ||
       !str(message["message_type"])
     )
-      return drop("message-invalid");
-    if (message["thread_id"] !== undefined && !str(message["thread_id"])) return drop("message-invalid");
+      return dropMessage("message-invalid");
+    if (message["thread_id"] !== undefined && !str(message["thread_id"])) return dropMessage("message-invalid");
     let content = rec(message["content"]);
     if (typeof message["content"] === "string") {
       try {
         content = rec(JSON.parse(message["content"]));
       } catch {
-        return drop("content-invalid");
+        return dropMessage("content-invalid");
       }
     }
-    if (!content) return drop("content-invalid");
-    if (message["message_type"] === "text" && typeof content["text"] !== "string") return drop("content-invalid");
+    if (!content) return dropMessage("content-invalid");
+    if (message["message_type"] === "text" && typeof content["text"] !== "string")
+      return dropMessage("content-invalid");
     const mentions: FeishuMessage["mentions"] = [];
     if (message["mentions"] !== undefined) {
-      if (!Array.isArray(message["mentions"]) || message["mentions"].length > 256) return drop("mentions-invalid");
+      if (!Array.isArray(message["mentions"]) || message["mentions"].length > 256)
+        return dropMessage("mentions-invalid");
       for (const value of message["mentions"]) {
         const m = rec(value),
           id = rec(m?.["id"]);
-        if (!str(m?.["key"])) return drop("mentions-invalid");
+        if (!str(m?.["key"])) return dropMessage("mentions-invalid");
         mentions.push({
           key: m["key"],
           ...(typeof id?.["open_id"] === "string" ? { openId: id["open_id"] } : {}),
@@ -228,7 +261,7 @@ export function decodeFeishuEvent(raw: unknown, appId: string): FeishuDecodedEve
     let text: string;
     if (message["message_type"] === "post") {
       const extracted = feishuPostText(content);
-      if (extracted === undefined) return drop("content-invalid");
+      if (extracted === undefined) return dropMessage("content-invalid");
       text = extracted;
     } else text = typeof content["text"] === "string" ? content["text"] : "";
     for (const m of mentions) text = text.split(m.key).join("");
@@ -331,9 +364,16 @@ export function createFeishuInbound(deps: FeishuInboundDeps) {
     reason: "undecodable-events" | "pending-expired" | "pending-full" | "persist-failed" | "background-failed",
     eventType?: string,
     code?: string,
+    messageType?: string,
   ): void {
     try {
-      deps.onHealth?.({ degraded: true, reason, ...(eventType ? { eventType } : {}), ...(code ? { code } : {}) });
+      deps.onHealth?.({
+        degraded: true,
+        reason,
+        ...(eventType ? { eventType } : {}),
+        ...(code ? { code } : {}),
+        ...(messageType ? { messageType } : {}),
+      });
     } catch {
       /* Diagnostics must not block ACK or cleanup. */
     }
@@ -360,10 +400,12 @@ export function createFeishuInbound(deps: FeishuInboundDeps) {
     eventType: string,
     reason: string,
     m?: { senderOpenId: string; messageId: string; chatType?: string },
+    messageType?: string,
   ): void {
     deps.audit?.({
       eventType,
       reason,
+      ...(messageType ? { messageType } : {}),
       ...(m
         ? {
             senderHash: createHash("sha256").update(m.senderOpenId).digest("hex").slice(0, 8),
@@ -380,15 +422,13 @@ export function createFeishuInbound(deps: FeishuInboundDeps) {
       return { ack: false, reason: "unavailable" };
     const decoded = decodeFeishuEvent(raw, install.appId);
     if (decoded.kind === "drop") {
-      if (
-        ["envelope-invalid", "message-invalid", "content-invalid", "mentions-invalid", "callback-invalid"].includes(
-          decoded.reason,
-        )
-      ) {
+      // unsupported-event / stale are expected noise (unsubscribed types, post-restart redelivery):
+      // they never record undecodable evidence and never page the owner — F8 counts/logs them.
+      if (FEISHU_UNDECODABLE_NOTIFY_REASONS.includes(decoded.reason)) {
         state.undecodable.record({ reason: `${decoded.eventType}:${decoded.reason}`.slice(0, 64) });
-        health("undecodable-events", decoded.eventType, decoded.reason);
+        health("undecodable-events", decoded.diagType, decoded.reason, decoded.messageType);
       }
-      audit(decoded.eventType, decoded.reason);
+      audit(decoded.diagType, decoded.reason, undefined, decoded.messageType);
       return { ack: await state.commit(), reason: decoded.reason };
     }
     const m = decoded.kind === "message" ? decoded.message : decoded.callback;
@@ -441,28 +481,8 @@ export function createFeishuInbound(deps: FeishuInboundDeps) {
     let reason = "received";
     let durableDedup = false;
     if (m.createdAt === undefined || deps.now() - m.createdAt > deps.staleMessageS * 1_000) {
+      // Stale after downtime/redelivery is expected: ACK, count and audit-log only — never a chat notice.
       reason = "stale";
-      // Unknown identities and invalid envelopes are never replied to.
-      if (
-        decoded.kind === "message" &&
-        decoded.message.senderType === "user" &&
-        (decoded.message.chatType === "p2p" ||
-          (deps.allowGroups &&
-            decoded.message.mentions.some(
-              (x) =>
-                (install.botOpenId !== undefined && x.openId === install.botOpenId) ||
-                (install.botUnionId !== undefined && x.unionId === install.botUnionId),
-            ))) &&
-        state.allowList.has(m.senderOpenId)
-      )
-        intents.push({
-          type: "notice",
-          chatId: m.chatId,
-          chatType: decoded.message.chatType,
-          messageId: m.messageId,
-          ...(decoded.message.threadId ? { threadId: decoded.message.threadId } : {}),
-          code: "stale",
-        });
     } else if (decoded.kind === "message") {
       const msg = decoded.message;
       const mentioned = msg.mentions.some(
@@ -543,7 +563,6 @@ export function createFeishuInbound(deps: FeishuInboundDeps) {
         }
       }
     }
-    if (intents.some((intent) => intent.type === "notice")) durableDedup = true;
     // prepare may have staged files; authorization is rechecked before any deferred effects.
     if (deps.installation()?.gen !== install.gen || !deps.installation()?.active)
       return { ack: false, reason: "installation-changed" };
@@ -575,7 +594,7 @@ export function createFeishuInbound(deps: FeishuInboundDeps) {
     }
     firePending(keys as string[]);
     if (!durableDedup) drops.remember(dropKey);
-    audit(type, reason, m);
+    audit(type, reason, m, decoded.kind === "message" ? decoded.message.messageType : undefined);
     return { ack: true, reason };
   }
   return {

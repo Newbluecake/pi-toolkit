@@ -94,4 +94,34 @@ describe("F8 notification evidence", () => {
     await notify.owner("new");
     expect(send).toHaveBeenCalledTimes(20);
   });
+  it("owner notices accept a per-call gap: debounced per reason, stable window key", async () => {
+    const r = await f6Rig(),
+      send = vi.fn(async () => {});
+    const notify = createFeishuNotify({
+      state: r.state,
+      now: r.clock.now,
+      owner: () => "ou_owner",
+      enabled: false,
+      label: () => "label",
+      target: () => undefined,
+      send,
+    });
+    await notify.owner("undecodable:content-invalid", { gapMs: 600_000 });
+    await notify.owner("undecodable:content-invalid", { gapMs: 600_000 });
+    // A different decode code is a different debounce bucket.
+    await notify.owner("undecodable:message-invalid", { gapMs: 600_000 });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[0]![0].key).toBe(`owner-undecodable:content-invalid-${Math.floor(NOW / 600_000)}`);
+    expect(send.mock.calls[1]![0].key).toBe(`owner-undecodable:message-invalid-${Math.floor(NOW / 600_000)}`);
+    // After the gap the same reason pages again, under the next window's key.
+    r.clock.advance(600_000);
+    await notify.owner("undecodable:content-invalid", { gapMs: 600_000 });
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[2]![0].key).toBe(`owner-undecodable:content-invalid-${Math.floor(NOW / 600_000) + 1}`);
+    // Default gap stays hourly for legacy callers.
+    await notify.owner("auth_failed");
+    r.clock.advance(599_000);
+    await notify.owner("auth_failed");
+    expect(send).toHaveBeenCalledTimes(4);
+  });
 });

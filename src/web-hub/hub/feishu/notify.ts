@@ -54,17 +54,24 @@ export function createFeishuNotify(deps: FeishuNotifyDeps) {
     return true;
   }
   return {
-    async owner(reason: string) {
+    /**
+     * Owner health notice. Debounced per reason: `opts.gapMs` (default 1 h) gates both the in-memory
+     * reserve and the stable outbox key window (`owner-<reason>-<floor(now/gap)>`), so the outbox's
+     * persisted dedup also suppresses repeat notices across a hub restart inside the same window.
+     */
+    async owner(reason: string, opts?: { gapMs?: number }) {
+      const gapMs =
+        opts?.gapMs !== undefined && Number.isFinite(opts.gapMs) && opts.gapMs > 0 ? Math.floor(opts.gapMs) : 3_600_000;
       const owner = deps.owner();
       // Caller supplies static enumerated reasons only, never API/server error messages.
-      if (!owner || !/^[a-z0-9:._-]{1,80}$/.test(reason) || !reserve(`owner:${reason}`, 3_600_000)) return;
+      if (!owner || !/^[a-z0-9:._-]{1,80}$/.test(reason) || !reserve(`owner:${reason}`, gapMs)) return;
       await deps.send({
         target: { scope: "p2p", via: "send", receiveIdType: "open_id", receiveId: owner },
         message: renderNotice({
           label: "bot",
           text: `飞书机器人状态：${reason}。请在终端运行 /webhub feishu status 查看。`,
         }),
-        key: `owner-${reason}-${Math.floor(deps.now() / 3_600_000)}`,
+        key: `owner-${reason}-${Math.floor(deps.now() / gapMs)}`,
       });
     },
     async session(input: {

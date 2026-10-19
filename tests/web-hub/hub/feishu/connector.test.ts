@@ -731,7 +731,9 @@ describe("durable ACK, arrival-socket fencing and F1 reassembly", () => {
     await eventually(() => acks(s).length === 1);
     expect(acks(s)).toHaveLength(1);
     expect(f6.state.requests.list()).toHaveLength(0);
-    expect(f6.inboundIntents).toContainEqual(expect.objectContaining({ code: "stale" }));
+    // Stale redeliveries are counted/audited only — never a chat notice (post-restart noise).
+    expect(f6.inboundIntents).toHaveLength(0);
+    expect(r.connector.snapshot().counters["stale"]).toBe(1);
     expect(f6.request).not.toHaveBeenCalled();
   });
   it("out-of-order fragments reassemble before UTF8 decoding and ACK only the completing arrival", async () => {
@@ -929,7 +931,7 @@ describe("malformed table and durable undecodable policy", () => {
     ["payload-json", { payload: Uint8Array.of(0xff, 0xfe) }],
     ["payload-json", { payload: Buffer.from("{") }],
     ["envelope-invalid", { payload: Buffer.from('{"schema":"3.0"}') }],
-  ] as const)("%s records durable diagnostic before ACK then degraded + hourly notice", async (why, fields) => {
+  ] as const)("%s records durable diagnostic before ACK then degraded + code-tagged handoff", async (why, fields) => {
     const gate = deferred<boolean>();
     const r = await rig();
     vi.mocked(r.state.commit).mockReturnValue(gate.promise);
@@ -945,13 +947,15 @@ describe("malformed table and durable undecodable policy", () => {
     expect(acks(s)).toHaveLength(1);
     expect(r.connector.snapshot()).toMatchObject({ status: "degraded", reason: "undecodable-events" });
     expect(r.onUndecodable).toHaveBeenCalledTimes(1);
+    expect(r.onUndecodable).toHaveBeenLastCalledWith(why);
     expect(r.handleEvent).not.toHaveBeenCalled();
     s.message(encodeFrame(f));
     await settle();
     expect(acks(s)).toHaveLength(2);
-    expect(r.onUndecodable).toHaveBeenCalledTimes(1);
+    // Every ACKed undecodable hands off with its code; per-code debounce lives in F8's notify layer.
+    expect(r.onUndecodable).toHaveBeenCalledTimes(2);
   });
-  it("a lost socket does not consume the redelivery's hourly undecodable notice", async () => {
+  it("a lost socket never hands off the redelivery's undecodable notice", async () => {
     const gate = deferred<boolean>();
     const r = await rig();
     vi.mocked(r.state.commit).mockReturnValue(gate.promise);
@@ -964,11 +968,21 @@ describe("malformed table and durable undecodable policy", () => {
     await settle();
     expect(acks(old)).toHaveLength(0);
     expect(r.onUndecodable).not.toHaveBeenCalled();
-    expect(r.state.undecodable.markNotice).not.toHaveBeenCalled();
     fresh.message(encodeFrame(f));
     await settle();
     expect(acks(fresh)).toHaveLength(1);
     expect(r.onUndecodable).toHaveBeenCalledTimes(1);
+    expect(r.onUndecodable).toHaveBeenLastCalledWith("payload-encoding");
+  });
+  it("unsupported-event drops are ACKed and counted, never an undecodable handoff", async () => {
+    const r = await rig({ handleEvent: async () => ({ ack: true, reason: "unsupported-event" }) });
+    const s = await r.start();
+    s.message(encodeFrame(eventFrame()));
+    await settle();
+    expect(acks(s)).toHaveLength(1);
+    expect(r.connector.snapshot().counters["unsupported"]).toBe(1);
+    expect(r.onUndecodable).not.toHaveBeenCalled();
+    expect(r.state.undecodable.record).not.toHaveBeenCalled();
   });
   it("never ACKs an undecodable record that failed/hung fsync; pauses at 1.5s", async () => {
     const r = await rig();

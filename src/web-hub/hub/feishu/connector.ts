@@ -74,7 +74,8 @@ export interface FeishuConnectorDeps {
   webSocket?: (url: string) => FeishuSocket;
   /** Synchronous nonthrowing ownership transfers; F8 owns any async follow-up. No raw payload/URL/error exposed. */
   onStatus?(view: FeishuConnectorView): void;
-  onUndecodable?(): void;
+  /** Fires once per ACKed undecodable payload with its bounded decode code; F8 debounces owner notices per code. */
+  onUndecodable?(code: string): void;
 }
 export interface FeishuConnector {
   /** Idempotent; during stop, queue one restart after handover. Dispose cancels it. */
@@ -392,12 +393,11 @@ export function createFeishuConnector(deps: FeishuConnectorDeps): FeishuConnecto
       count("pong-config-invalid");
     }
   }
-  async function undecodable(why: string): Promise<FeishuInboundResult & { notify?: true }> {
+  async function undecodable(why: string): Promise<FeishuInboundResult & { code?: string }> {
     deps.state.undecodable.record({ reason: why });
-    const notify = deps.state.undecodable.noticeDue();
     const committed = await bounded(() => deps.state.commit(), FEISHU_ACK.commitDeadlineMs);
     if (committed.kind !== "ok" || !committed.value) return { ack: false, reason: "persist-failed" };
-    return { ack: true, reason: "undecodable-events", ...(notify ? { notify: true } : {}) };
+    return { ack: true, reason: "undecodable-events", code: why };
   }
   async function receive(
     c: Connection,
@@ -406,8 +406,8 @@ export function createFeishuConnector(deps: FeishuConnectorDeps): FeishuConnecto
     started: number,
     release: () => void,
   ): Promise<void> {
-    const result = await bounded<FeishuInboundResult & { notify?: true }>((signal) => {
-      const work = (async (): Promise<FeishuInboundResult & { notify?: true }> => {
+    const result = await bounded<FeishuInboundResult & { code?: string }>((signal) => {
+      const work = (async (): Promise<FeishuInboundResult & { code?: string }> => {
         if (frame.payloadEncoding) return undecodable("payload-encoding");
         let raw: unknown;
         try {
@@ -440,19 +440,17 @@ export function createFeishuConnector(deps: FeishuConnectorDeps): FeishuConnecto
     if (!paused && live(c) && send(c, ackFrame(frame, clock.now() - started))) count("acked");
     else count("ack-socket-gone");
     if (result.value.reason === "duplicate") count("duplicate");
+    // Benign drop classes are counters/status only — they must never page the owner.
+    if (result.value.reason === "unsupported-event") count("unsupported");
+    else if (result.value.reason === "stale") count("stale");
     if (result.value.reason === "undecodable-events" && running) {
       degradedUndecodable = true;
       openStatus();
-      // Ownership transfer AFTER ACK; F8 owns network I/O and the durable notice queue.
-      if (result.value.notify && deps.state.undecodable.noticeDue()) {
-        // Reserve only when handing off the notice, not on the old connection:
-        // a lost arrival socket must not suppress the redelivery's owner notice.
-        deps.state.undecodable.markNotice();
-        try {
-          deps.onUndecodable?.();
-        } catch {
-          count("observer-failed");
-        }
+      // Ownership transfer AFTER ACK; F8 owns network I/O and the debounced owner notice.
+      try {
+        deps.onUndecodable?.(result.value.code ?? "unknown");
+      } catch {
+        count("observer-failed");
       }
     }
   }
