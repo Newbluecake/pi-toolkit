@@ -537,6 +537,10 @@ dropped (#20).
 13. A `paired-empirical` `renewsOnRead: true` is sufficient for the later keepalive doc to lengthen the interval (not only the `documented` basis); keepalive's existing miss/write breakers remain the safety net.
 14. The single boundary renewal read right after the first valid TTL miss is accepted as the one declared exception to ruling 2 (stated in the plan and the confirm text; at most 1 request).
 
+### User rulings on measured results (2026-10-19)
+
+15. **Marginal (short-TTL) routes are decided by economics inside P5, not now**: with cr-anthropic measured at hit@3 min / miss@6 min (≈Anthropic's 5-minute ephemeral tier), P5 must estimate keepalive cost vs cache-discount savings per route from the learned TTL and automatically SKIP routes where keeping warm is not worth it (with an explanation in status/notice), instead of a global keep/drop switch today. Today's keepalive behaviour is unchanged until P5.
+
 ## Implementation / launch gates from the r4 review (pass-with-changes)
 
 - G-a: boundary tests use the frozen `P_bound−1 / P_bound / P_bound+1` directly, plus a real ~19.2k baseline fixture (don't assume "+6k injection ⇒ over the bound").
