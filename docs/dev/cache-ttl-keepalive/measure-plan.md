@@ -93,12 +93,13 @@ verdict ⇒ `onPayload` throws ⇒ no fetch ⇒ `not-sent{capability}` + `measur
 content; Completions `messages[].content` (string or `{type:"text"}` parts) — and must equal exactly
 `{expectedSystem, expectedUser}` plus only these stock pi-ai 1.2 constructions:
 
-| Construction (real builder)                                                                                                   | Accepted when                                  |
-| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| OAuth identity: one extra leading Anthropic system text block (≤ 200 chars)                                                   | auth is an OAuth token                         |
-| Managed effort: `thinking:{type:"adaptive",…}`, `output_config.effort`, trailing `{role:"system", content:[], output_config}` | `model.compat.supportsMidConvoEffort === true` |
-| Responses system role `developer` or `system`, `input_text` parts                                                             | always (role from `model.reasoning`/compat)    |
-| Completions role `developer` or `system`, text parts with compat `cache_control`                                              | always                                         |
+| Construction (real builder)                                                                                                                                                                                                             | Accepted when                                                                                                                                                     |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OAuth identity: one extra leading Anthropic system text block (≤ 200 chars)                                                                                                                                                             | auth is an OAuth token                                                                                                                                            |
+| Managed effort: `thinking:{type:"adaptive",display:"summarized",block_binding:{prefix_mismatch_behavior:"drop_block"}}`, top-level `output_config:{effort:"high"}`, trailing `{role:"system",content:[],output_config:{effort:"high"}}` | `model.compat.supportsMidConvoEffort === true` (takes precedence over forceAdaptiveThinking)                                                                      |
+| Force-adaptive: `thinking:{type:"adaptive",display:"summarized"}`, `output_config:{effort:<mapped-low>}`, no block_binding/budget or trailing effort message                                                                            | reasoning-capable model with `compat.forceAdaptiveThinking === true` and NOT managed effort; measurement uses stock `streamSimple({reasoning:"low",maxTokens:1})` |
+| Responses system role `developer` or `system`, `input_text` parts                                                                                                                                                                       | always (role from `model.reasoning`/compat)                                                                                                                       |
+| Completions role `developer` or `system`, text parts with compat `cache_control`                                                                                                                                                        | always                                                                                                                                                            |
 
 Anything else — extra text, non-text parts (image/file/audio), extra messages, `instructions` from sampling params,
 a Responses `prompt` template — ⇒ `extra-input`. Total input text ≤ expected + 256 chars.
@@ -112,8 +113,8 @@ a Responses `prompt` template — ⇒ `extra-input`. Total input text ≤ expect
   `conflicting-output-caps`); Responses `max_output_tokens` (absent — `supportsMaxOutputTokens:false` or ChatGPT
   sign-in — ⇒ `no-output-cap`; a `max_tokens`/`max_completion_tokens` key on Responses ⇒ `conflicting-output-caps`).
 - billing tier: `service_tier` absent, `auto` or `default` (Anthropic also `standard_only`); else `billing-tier`.
-- anthropic: `thinking` absent, `{type:"disabled"}`, or the managed-effort adaptive form above (never
-  `type:"enabled"`/budget); no `mcp_servers`, `container`; ephemeral `cache_control` on the last user block.
+- anthropic: `thinking` absent, `{type:"disabled"}`, or exactly the applicable managed-effort / force-adaptive stock form above (never
+  `type:"enabled"`/budget or `between_tools`; force-adaptive does not raise max_tokens); no `mcp_servers`, `container`; ephemeral `cache_control` on the last user block.
 - responses: `store === false`; no `previous_response_id`, `conversation`, `background`, `prompt`;
   `prompt_cache_key === clamp(sessionId)`.
 - completions: `stream_options.include_usage === true` (else `no-stream-usage`); no thinking-budget field,

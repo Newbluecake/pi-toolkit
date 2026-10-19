@@ -172,7 +172,7 @@ function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExp
     return refuse("billing-tier");
   if (hasAny(p, ["mcp_servers", "container"])) return refuse("server-tools");
   if (hasAny(p, ["instructions", "prompt", "input"])) return refuse("extra-input");
-  if (!validThinking(p, expect.managedEffort)) return refuse("thinking");
+  if (!validThinking(p, expect)) return refuse("thinking");
 
   const system = textParts(p.system);
   if (!system) return refuse(p.system === undefined ? "missing-synthetic-content" : "extra-input");
@@ -202,7 +202,8 @@ function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExp
       !Array.isArray(effort.content) ||
       effort.content.length !== 0 ||
       !onlyKeys(effort, ["role", "content", "output_config"]) ||
-      !validEffort(effort.output_config)
+      !validEffort(effort.output_config) ||
+      effort.output_config.effort !== "high"
     )
       return refuse("extra-input");
   } else if (messages.length !== 1) return refuse("extra-input");
@@ -230,25 +231,35 @@ function validateAnthropicPayload(p: Record<string, unknown>, expect: PayloadExp
   return { ok: true, effectiveTier: long ? "ephemeral-1h" : "ephemeral" };
 }
 
-function validThinking(p: Record<string, unknown>, managed: boolean): boolean {
+function validThinking(p: Record<string, unknown>, expect: PayloadExpectation): boolean {
   const thinking = p.thinking;
-  if (!managed)
+  if (expect.managedEffort)
     return (
-      !hasAny(p, ["output_config"]) &&
-      (thinking === undefined || (isRecord(thinking) && thinking.type === "disabled" && onlyKeys(thinking, ["type"])))
+      isRecord(thinking) &&
+      thinking.type === "adaptive" &&
+      thinking.display === "summarized" &&
+      onlyKeys(thinking, ["type", "display", "block_binding"]) &&
+      isRecord(thinking.block_binding) &&
+      thinking.block_binding.prefix_mismatch_behavior === "drop_block" &&
+      onlyKeys(thinking.block_binding, ["prefix_mismatch_behavior"]) &&
+      validEffort(p.output_config) &&
+      p.output_config.effort === "high"
+    );
+  if (expect.adaptiveEffort !== undefined)
+    return (
+      isRecord(thinking) &&
+      thinking.type === "adaptive" &&
+      thinking.display === "summarized" &&
+      onlyKeys(thinking, ["type", "display"]) &&
+      validEffort(p.output_config) &&
+      p.output_config.effort === expect.adaptiveEffort
     );
   return (
-    isRecord(thinking) &&
-    thinking.type === "adaptive" &&
-    ["summarized", "omitted"].includes(thinking.display as string) &&
-    onlyKeys(thinking, ["type", "display", "block_binding"]) &&
-    isRecord(thinking.block_binding) &&
-    thinking.block_binding.prefix_mismatch_behavior === "drop_block" &&
-    onlyKeys(thinking.block_binding, ["prefix_mismatch_behavior"]) &&
-    validEffort(p.output_config)
+    !hasAny(p, ["output_config"]) &&
+    (thinking === undefined || (isRecord(thinking) && thinking.type === "disabled" && onlyKeys(thinking, ["type"])))
   );
 }
-function validEffort(value: unknown): boolean {
+function validEffort(value: unknown): value is Record<string, unknown> {
   return (
     isRecord(value) &&
     onlyKeys(value, ["effort"]) &&

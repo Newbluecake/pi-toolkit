@@ -491,6 +491,18 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
             ? (model.thinkingLevelMap?.[reasoningLevel] ?? reasoningLevel)
             : undefined;
         const lowReasoning = typeof mappedEffort === "string" ? mappedEffort : undefined;
+        const compat = model.compat as
+          | { thinkingTokenBudgetField?: string; supportsMidConvoEffort?: boolean; forceAdaptiveThinking?: boolean }
+          | undefined;
+        // Anthropic's stock forceAdaptiveThinking path needs a non-empty reasoning option;
+        // otherwise a reasoning model gets thinking:{type:'disabled'}, rejected by some relays.
+        // Managed effort takes precedence in pi and keeps its existing, independent construction.
+        const forceAdaptive =
+          api === "anthropic-messages" &&
+          model.reasoning &&
+          compat?.forceAdaptiveThinking === true &&
+          compat.supportsMidConvoEffort !== true;
+        const adaptiveEffort = forceAdaptive ? (model.thinkingLevelMap?.low ?? "low") : undefined;
         const send: MeasureSendFn = (request) =>
           (deps.transport ?? sendPipelinePing)({
             registry: ctx.modelRegistry,
@@ -513,14 +525,12 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
                       ...request.build,
                       maxTokens: frozen.outputCap,
                       cacheRetention: frozen.requestedRetention,
-                      ...(lowReasoning ? { reasoning: "low" as const } : {}),
+                      ...(lowReasoning || forceAdaptive ? { reasoning: "low" as const } : {}),
                     },
                   }
                 : {}),
             },
           });
-        const compat = model.compat as
-          { thinkingTokenBudgetField?: string; supportsMidConvoEffort?: boolean } | undefined;
         let checkedTier: import("./measure-types.js").EffectiveTier | undefined;
         const refreshTerminalStatus = () => {
           // Physical IO can settle AFTER done/claim release; owns(token) is then false.
@@ -553,6 +563,7 @@ export function wireMeasureCommand(pi: ExtensionAPI, deps: MeasureCommandDeps = 
               ...expect,
               ...(compat?.thinkingTokenBudgetField ? { forbiddenKeys: [compat.thinkingTokenBudgetField] } : {}),
               ...(lowReasoning ? { reasoningEffort: lowReasoning } : {}),
+              ...(adaptiveEffort ? { adaptiveEffort } : {}),
             });
             if (!verdict.ok) return verdict;
             if (

@@ -97,6 +97,44 @@ describe("Anthropic build-mode payload validator", () => {
         expect(p.max_tokens).toBe(1); // Never silently raise the measurement cap for adaptive thinking.
       }
   });
+  it("force-adaptive accepts only the exact stock adaptive + mapped effort form (no managed-message shape)", () => {
+    const expected = { ...expectation, adaptiveEffort: "low" };
+    const p = { ...payload(), thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "low" } };
+    // Do not infer adaptive permission from the params themselves.
+    refused(p, "thinking");
+    expect(validate(p, expected)).toEqual({ ok: true, effectiveTier: "ephemeral" });
+    for (const patch of [
+      { thinking: undefined },
+      { thinking: { type: "disabled" } },
+      { thinking: { type: "enabled", budget_tokens: 1024 } },
+      { thinking: { type: "adaptive", display: "omitted" } },
+      { thinking: { ...p.thinking, budget_tokens: 0 } },
+      { output_config: { effort: "high" } },
+      { output_config: { effort: "low", extra: true } },
+    ])
+      refused({ ...p, ...patch }, "thinking", expected);
+    refused(
+      {
+        ...p,
+        messages: [...(p.messages as unknown[]), { role: "system", content: [], output_config: { effort: "low" } }],
+      },
+      "extra-input",
+      expected,
+    );
+  });
+  it("managed-effort requires the fixed top-level high effort and high trailing message", async () => {
+    const p = await realBuild(false, true, false);
+    const expect = { ...expectation, managedEffort: true };
+    refused({ ...p, output_config: { effort: "low" } }, "thinking", expect);
+    refused(
+      {
+        ...p,
+        messages: [(p.messages as unknown[])[0], { role: "system", content: [], output_config: { effort: "low" } }],
+      },
+      "extra-input",
+      expect,
+    );
+  });
   it.each([0, -1, 1.5, "1", null, NaN, 2, 4096])("requires an exact positive integer output cap (%j)", (cap) => {
     refused({ ...payload(), max_tokens: cap }, "bad-output-cap");
   });

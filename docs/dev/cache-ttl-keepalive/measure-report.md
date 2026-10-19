@@ -431,3 +431,30 @@ Follow-up verification:
 ```
 
 Prettier check on all round-2 changed code/test files and this report passes; `git diff --check` exits 0. Follow-up output: `/tmp/measure-round2-followup.log`.
+
+### Fix: live round 3
+
+Investigated the installed pi-ai 1.2 Anthropic provider instead of inferring thinking mode from the relay's HTTP400 wording:
+
+- `dist/api/anthropic-messages.js:747–758`: streamSimple with no `reasoning` calls stream with `thinkingEnabled:false`. On a reasoning-capable plain/force-adaptive model, buildParams at lines 1005–1006 then emits **`thinking:{type:"disabled"}`**, unless thinkingLevelMap.off is null. The previous measurement was not inheriting a session reasoning budget; its own omitted reasoning option explains the rejected disabled construction. A real ModelRegistry fixture captures and asserts this exact default before any HTTP.
+- Lines 760–767: for `compat.forceAdaptiveThinking:true`, supplying stock SimpleStreamOptions `reasoning:"low"` enables thinking and maps low through thinkingLevelMap (`mapThinkingLevelToEffort`, lines 730–744), WITHOUT the legacy thinking-budget maxTokens adjustment at lines 770–777. BuildParams lines 985–993 emits **`thinking:{type:"adaptive",display:"summarized"}`** plus **`output_config:{effort:<mapped-low>}`**, no budget/block_binding or trailing system effort message. Measurement now uses this supported option only when the model is reasoning-capable, force-adaptive and not managed effort; max_tokens remains exactly 1. No payload fields are hacked or replaced. A model declared reasoning:false does not take buildParams' reasoning branch even if forceAdaptiveThinking is set; it stays plain/omitted rather than inventing unsupported capabilities.
+- Lines 974–982 and 919–921: `supportsMidConvoEffort:true` takes precedence and still emits **adaptive + summarized + block_binding.drop_block**, fixed top-level effort **high**, and the stock empty trailing system effort message (high when the measurement doesn't request an effort). The managed path remains independent and unchanged, including when both compat flags are set. Plain reasoning models still use disabled; plain non-reasoning models still omit thinking.
+
+Changes: `src/cache-ttl/measure-command.ts` binds low only to the applicable force-adaptive build, `measure-types.ts` adds an optional mapped `adaptiveEffort` validator expectation, `measure-payload.ts` separately enforces the exact managed and force-adaptive stock shapes/efforts/message counts (rejecting enabled/budget/disabled/between_tools/wrong-shape overrides for an adaptive request), and `pipeline-ping-types.ts` documents the existing low build option's Anthropic use. `docs/dev/cache-ttl-keepalive/measure-plan.md` §3.3 now lists both exact constructions and precedence. No wire cap, C1/C2 allowance, keepalive behaviour, runner lifecycle or unrelated quota/index work was changed.
+
+Tests: `tests/conformance/measure-build.test.ts` adds real-builder/real-SDK cases for the old disabled default, force-adaptive (including strict-tools compat), mapped low→medium, managed effort, both flags with managed precedence, plain reasoning/non-reasoning, exact-byte control replay, and actual wrong-mode provider injection refusing with zero base fetches/zero stub POSTs. `tests/cache-ttl/measure-payload.test.ts` adds exact shape/effort/budget/message refusal cases. The local HTTP relay fixture explicitly rejects non-adaptive thinking for force-adaptive models; it succeeds only through pi's supported adaptive path. No actual provider was contacted; user/main-session approval is still required for rerunning cr-anthropic/claude-sonnet-5-5. No commit created.
+
+Verification:
+
+- `timeout 280 npm run typecheck` — exit 0.
+- `timeout 280 npm run build` — exit 0.
+- `timeout 600 npx vitest run tests/cache-ttl tests/conformance/measure-build.test.ts tests/integration/cache-ttl-measure.test.ts` — exit 0:
+
+```text
+ Test Files  37 passed (37)
+      Tests  1179 passed (1179)
+   Start at  11:23:04
+   Duration  3.93s (transform 2.19s, setup 825ms, collect 8.90s, tests 6.03s, environment 7ms, prepare 2.09s)
+```
+
+Prettier check on the six changed TypeScript/test files and the plan/report passes; `git diff --check` exits 0. Log: `/tmp/measure-round3-target.log`.

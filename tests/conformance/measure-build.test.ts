@@ -60,6 +60,8 @@ async function environment(
   options: {
     oauth?: boolean;
     managed?: boolean;
+    reasoning?: boolean;
+    thinkingLevelMap?: Record<string, string | null>;
     sampling?: Record<string, unknown>;
     compat?: Record<string, unknown>;
     total?: number;
@@ -113,7 +115,8 @@ async function environment(
               name: "measure",
               api: "anthropic-messages",
               input: ["text"],
-              reasoning: false,
+              reasoning: options.reasoning ?? false,
+              ...(options.thinkingLevelMap ? { thinkingLevelMap: options.thinkingLevelMap } : {}),
               contextWindow: 200000,
               maxTokens: 4096,
               cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
@@ -187,7 +190,7 @@ async function environment(
     }
     expect(stop(), text()).toBe(true);
   }
-  return { root, stub, clock, claim, store, port, ctx, deps, fire, results, text, done, drive };
+  return { root, stub, clock, claim, store, port, ctx, deps, fire, results, text, done, drive, registry, model };
 }
 
 // No live endpoint is called; G-c still needs explicit user-approved acceptance on the actual relay.
@@ -401,5 +404,144 @@ describe("measure P4 real Anthropic build conformance", () => {
     await other.port.handle("measure --yes", other.ctx);
     await other.drive();
     expect(other.text()).toContain("failed(bound-exceeded)");
+  });
+});
+
+describe("live round 3 — exact stock Anthropic adaptive modes", () => {
+  it("real pi default on forceAdaptiveThinking emits disabled (not session budget thinking)", async () => {
+    const h = await environment({ reasoning: true, compat: { forceAdaptiveThinking: true } });
+    const fetchImpl = vi.fn<typeof fetch>();
+    let built: Record<string, unknown> | undefined;
+    await h.registry
+      .streamSimple(
+        h.model,
+        { systemPrompt: "fixture", messages: [{ role: "user", content: "OK", timestamp: 0 }] },
+        {
+          maxTokens: 1,
+          fetch: fetchImpl,
+          onPayload: (params) => {
+            built = structuredClone(params) as Record<string, unknown>;
+            throw new Error("fixture captured before HTTP");
+          },
+        },
+      )
+      .result();
+    expect(built!.thinking).toEqual({ type: "disabled" });
+    expect(built!.max_tokens).toBe(1);
+    expect(built).not.toHaveProperty("output_config");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(h.stub.requests).toHaveLength(0);
+  });
+  it.each([
+    {
+      name: "force-adaptive",
+      reasoning: true,
+      compat: { forceAdaptiveThinking: true, supportsStrictTools: true },
+      managed: false,
+      effort: "low",
+    },
+    {
+      name: "force-adaptive mapped low",
+      reasoning: true,
+      compat: { forceAdaptiveThinking: true },
+      managed: false,
+      effort: "medium",
+      thinkingLevelMap: { low: "medium" },
+    },
+    { name: "managed-effort", reasoning: true, compat: {}, managed: true, effort: "high" },
+    {
+      name: "both flags (managed precedence)",
+      reasoning: true,
+      compat: { forceAdaptiveThinking: true },
+      managed: true,
+      effort: "high",
+    },
+    { name: "plain reasoning", reasoning: true, compat: {}, managed: false },
+    { name: "plain non-reasoning", reasoning: false, compat: {}, managed: false },
+  ])(
+    "$name: real command/registry/SDK keeps cap 1 and validates stock thinking, then replays exact bytes",
+    async ({ name, reasoning, compat, managed, effort, thinkingLevelMap }) => {
+      const h = await environment({
+        reasoning,
+        managed,
+        compat,
+        ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+        // A relay that rejects disabled/budget thinking on force-adaptive models; the test
+        // succeeds only if the real pi builder took its supported adaptive path.
+        respond: (request) =>
+          name.startsWith("force-adaptive") && (request.json.thinking as { type?: string })?.type !== "adaptive"
+            ? { kind: "error", status: 400, message: "requires adaptive thinking; omit disabled/budget mode" }
+            : undefined,
+      });
+      await h.port.handle("measure --yes", h.ctx);
+      await until(
+        () => h.claim.current()?.nextKind === "control" && h.claim.physicalPending === 0,
+        "six safe writes built",
+      );
+      const wire = h.stub.requests[5]!.json;
+      expect(wire.max_tokens).toBe(1);
+      if (managed) {
+        expect(wire.thinking).toEqual({
+          type: "adaptive",
+          display: "summarized",
+          block_binding: { prefix_mismatch_behavior: "drop_block" },
+        });
+        expect(wire.output_config).toEqual({ effort: "high" });
+        expect(wire.messages).toHaveLength(2);
+        expect((wire.messages as unknown[])[1]).toEqual({
+          role: "system",
+          content: [],
+          output_config: { effort: "high" },
+        });
+      } else if (effort) {
+        expect(wire.thinking).toEqual({ type: "adaptive", display: "summarized" });
+        expect(wire.output_config).toEqual({ effort });
+        expect(wire.messages).toHaveLength(1);
+        expect(wire.thinking).not.toHaveProperty("budget_tokens");
+        expect(wire.thinking).not.toHaveProperty("block_binding");
+      } else {
+        if (reasoning) expect(wire.thinking).toEqual({ type: "disabled" });
+        else expect(wire).not.toHaveProperty("thinking");
+        expect(wire).not.toHaveProperty("output_config");
+        expect(wire.messages).toHaveLength(1);
+      }
+      h.clock.advance(30000);
+      await until(() => h.stub.requests.length === 7 && h.claim.physicalPending === 0, "control replay finished");
+      expect(h.stub.requests[6]!.body).toBe(h.stub.requests[5]!.body);
+      expect(h.text()).not.toContain("failed(payload:");
+    },
+  );
+  it.each([
+    { mode: "force-adaptive", managed: false, thinking: { type: "enabled", budget_tokens: 1024 } },
+    { mode: "force-adaptive", managed: false, thinking: { type: "disabled" } },
+    { mode: "force-adaptive", managed: false, thinking: { type: "between_tools" } },
+    {
+      mode: "force-adaptive",
+      managed: false,
+      thinking: { type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "drop_block" } },
+    },
+    { mode: "managed", managed: true, thinking: { type: "adaptive", display: "summarized" } },
+  ])("$mode rejects actual wrong-mode injection $thinking before POST", async ({ managed, thinking }) => {
+    const h = await environment({ reasoning: true, managed, compat: { forceAdaptiveThinking: true } });
+    const original = h.registry.streamSimple.bind(h.registry);
+    vi.spyOn(h.registry, "streamSimple").mockImplementation((selected, context, options) =>
+      original(selected, context, {
+        ...options,
+        onPayload: (params, model) => {
+          (params as Record<string, unknown>).thinking = thinking;
+          return options!.onPayload!(params, model);
+        },
+      }),
+    );
+    await h.port.handle("measure --yes", h.ctx);
+    await h.drive();
+    expect(h.text()).toContain("failed(payload:thinking)");
+    expect(h.stub.requests).toHaveLength(0);
+    expect(h.results[0]!.outcome).toMatchObject({
+      kind: "not-sent",
+      reason: "capability",
+      diag: { baseFetchCalls: 0 },
+      measured: { rejection: "thinking" },
+    });
   });
 });

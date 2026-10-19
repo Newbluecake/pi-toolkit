@@ -244,6 +244,8 @@ export interface PayloadExpectation {
   oauth: boolean;
   /** `model.compat.supportsMidConvoEffort === true` ⇒ the managed-effort construction is accepted. */
   managedEffort: boolean;
+  /** Anthropic forceAdaptiveThinking build requested low reasoning; exact stock mapped output_config.effort. */
+  adaptiveEffort?: string;
   /** Responses: `clamp(sessionId)` the built `prompt_cache_key` must equal. */
   promptCacheKey?: string;
   /**
