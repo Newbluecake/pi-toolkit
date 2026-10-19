@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { readFileSync } from "node:fs";
@@ -346,7 +347,17 @@ async function startPasswordHub(): Promise<PasswordHarness> {
   const cfg = { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
   const fe = createHttpFrontend({
     ...deps,
-    lan: { cfg, store, kdf, limiter, admission, hosts, scope, onStatus: () => {} },
+    lan: {
+      clientAllow: createClientAllowGuard({}),
+      cfg,
+      store,
+      kdf,
+      limiter,
+      admission,
+      hosts,
+      scope,
+      onStatus: () => {},
+    },
   });
   const status = await fe.lan!.start();
   const port = status.state === "on" ? status.port : 0;

@@ -1,3 +1,4 @@
+import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 /**
  * web-hub HTML preview plan v2 §8 T-I1 — the `/pv` libuv-starvation child (P3).
  *
@@ -186,6 +187,7 @@ async function main(): Promise<void> {
     });
   });
   (deps as FrontendDeps).lan = {
+    clientAllow: createClientAllowGuard({}),
     cfg: { port: lanPort, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
     store: lanStore,
     kdf: createKdf(),
