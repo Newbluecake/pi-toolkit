@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-19
+
+### Added
+
+- **web-hub**: preview intranet links in an in-page proxy dialog (LP3) (`a83b4d01`)
+- **web-hub**: let proxied apps be framed by the hub and reuse proxy sessions on re-open (LP1) (`475ab02f`)
+- **web-hub**: count hub-made folders inside the roots as known on plaintext LAN (P2) (`bb0fda52`)
+- **web-hub**: recognize scheme-less IP:port and port-less http intranet links (LP0+LP2) (`b7f7f909`)
+- **web-hub**: acknowledge new folders in the spawn picker and explain directory refusals (P3) (`0500afd5`)
+- **web-hub**: created-dirs store and known-dir source for hub-made folders (P1) (`7c76b7e6`)
+- **date**: show the injected [date] marker in the TUI and the web UI (`d390e684`)
+- **quota**: drop the HUD `droid no-key` segment — no key is the normal state (`41c089b1`)
+
+### Fixed
+
+- **web-hub**: drop the note line under the [date] divider (`0ce4be03`)
+- **web-hub**: reload the proxy preview in place instead of opening a new proxy session (`24d62f0a`)
+- **web-hub**: right-align the cost on removable session cards (`0ff2b8a5`)
+- **web-hub**: fence /webhub restart so another pi session can't respawn the hub with stale settings (`80393938`)
+
+### Documentation
+
+- **web-hub**: link preview browser acceptance checklist + framing fixtures (LP4) (`b522f16c`)
+- **web-hub**: link preview plan r2 (in-page proxy dialog, wider link recognition) + review (`2934fad5`)
+- **web-hub**: LAN security plan r2 (allowlist, alerts, sessions, 2FA) + review (`723fcd63`)
+- **web-hub**: created-dirs plan r2 + review + mkdir diagnosis (`a676f6f7`)
+- **dev-flow**: restore cr-response as gpt-6.1-sol's backup channel (`42bedf51`)
+
+Stats: 8 feat, 4 fix, 5 docs
+
 ## [0.6.1] - 2026-10-19
 
 ### Added
@@ -768,7 +798,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.4...v0.5.5
