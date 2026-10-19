@@ -38,3 +38,9 @@ Each package's own wiring request: `docs/dev/web-hub/lan-security-wiring-<PKG>.m
 - `proxy/service.ts:68,137`: make `clientAllow` required whenever `lan` is configured (drop the `| undefined` + inactive fallback); same for the `http.ts:~3025` `lan.clientAllow ?? createClientAllowGuard(...)` fallback.
 - Delete the dead legacy `runLanLogin` (+ its `store.createSession` call) in `lan-auth.ts` and its test-only callers, or document why it stays.
 - G (login UI) ships its styles as `src/web-hub/ui/src/styles/login-2fa.css` (no `<style>` blocks in .vue — source-scan gate): import it from `App.vue` next to `login.css`; mounting rules for `cancelSecondFactor()` live in `docs/dev/web-hub/lan-security-wiring-G.md`.
+
+## D (sessions) verify follow-ups (r_HJ65FA67, conditional pass, 2026-10-20)
+
+- User ruling 2026-10-20: ADD the 「验证方式」 row (approved 1B layout). Integrator adds a nullable `method` (`"password" | "totp" | "feishu" | "recovery"`) to B's session row (additive migration; legacy rows ⇒ `"password"`), C's `complete()` writes the method that satisfied login, `LanSessionWire` gains optional `method`, D's card renders one `<dt>/<dd>` pair (zh/en). Contract + migration tests.
+- D card: disable the revoke buttons while a revoke is in flight (separate `revoking` flag), so a double click cannot fire a second POST.
+- I's integration test must cover the real revoke consumers (proxy HTTP + WS sessions, HTML caps), not only stand-in subscribers.
