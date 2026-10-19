@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-19
+
+### Added
+
+- **feishu-bot**: mark the bound session on the /list card; fix the fused hint line (`e6fee78c`)
+- **feishu-bot**: one-tap session switching via a reusable card on /list (`089d65de`)
+- **web-hub**: show each subagent's context usage in the fleet panel (`f0e539eb`)
+- **quota**: don't warn about a missing droid API key when the droid CLI is logged in (`1ee55872`)
+- **cache-ttl**: /cache-ttl measure — measure the current route's prompt-cache TTL (`286f130e`)
+- **cache-ttl**: OpenAI Responses/Completions support for cache TTL measurement (measure P2) (`b48cb477`)
+- **web-hub**: show start and end time on agent and bash job rows (`694829d2`)
+- **cache-ttl**: pure core for /cache-ttl measure (measure P3) (`91994bee`)
+- **cache-ttl**: measurement mode for the keepalive pipeline transport (measure P1) (`92230b08`)
+- **feishu-bot**: end-to-end integration test, user guide and real-tenant acceptance checklist (F10) (`4a7d4ea1`)
+- **feishu-bot**: wire the bot service into the web hub (FA) (`b0b6e588`)
+- **feishu-bot**: bot service assembly — runs, dialogs, files, owner notices (F8) (`f6d528da`)
+- **cache-ttl**: stop keepalive after 1 hour when only a UI prompt is pending (`829ab4a3`)
+- **feishu-bot**: single-connection long-connection connector with receive-before-ACK (F3) (`0649e688`)
+- **cache-ttl**: derive the keepalive ping cap per window from model prices (`8bfebd06`)
+- **date**: re-inject the current time after 1 hour idle instead of 3 (`35346cc9`)
+
+### Fixed
+
+- **feishu-bot**: accept the flat post shape (no locale wrapper) (`f114b6c8`)
+- **feishu-bot**: stop paging the owner for stale or unsubscribed Feishu events (`73f9869e`)
+- **bash**: re-arm the liveness poll when job recovery is cut short (`ba8c6388`)
+- **web-hub**: don't let the bash row's date line squeeze the command column (`fc67923f`)
+- **feishu-bot**: keep the text of rich (post) messages and label inbound file types (`cabee9af`)
+- **cache-ttl**: build adaptive thinking for force-adaptive Anthropic models in measurement (`f995c26d`)
+- **web-hub**: render the Feishu setup QR as a persistent widget component (`a373e988`)
+- **web-hub**: show the Feishu setup QR as one scrollable message when it can't fit the widget (`7378cb6d`)
+- **commands**: multi-token argument completions replace the whole prefix (`95d89bcd`)
+- **cache-ttl**: request low reasoning in measurement, refresh the status footer after IO settles (`73ecbee2`)
+- **cache-ttl**: don't stop TTL measurement on reasoning-token output (`b002b2d8`)
+- **cache-ttl**: capture keepalive payload per request and replay via pi's provider pipeline (`fe54feb6`)
+- **web-hub**: align tool name and command text on one baseline in tool cards (`d21606bc`)
+- **quota**: don't warn at L1 while usage is under pace; show readings in the droid pool list (`850f59fd`)
+- **cache-ttl**: count the 1-hour UI-prompt keepalive budget only while the prompt is the sole reason (`0748621c`)
+- **feishu-bot**: start no state write after dispose; tests wait for the writer instead of retrying cleanup (`ce64c19c`)
+
+### Documentation
+
+- **cache-ttl**: ruling 15 — P5 decides marginal short-TTL routes by economics (`85e990b7`)
+- **feishu-bot**: note the flat post shape in the message format section (`279edcc8`)
+- **dev-flow**: prefer kimi k3-256k over k3 when the task fits (half the price) (`b61541f8`)
+- **cache-ttl**: plan for /cache-ttl measure (route cache TTL + read-renewal measurement) (`457120ea`)
+- **cache-ttl**: plans for keepalive capture via pi's provider pipeline and (paused) other-protocol keepalive (`ef8b1ba8`)
+- **cache-ttl**: live probe of cache lifetime and keepalive pings on Responses/Completions routes (`cbbc3dbf`)
+- **feishu-bot**: record V7 probe — un-ACKed events are redelivered to a new connection, two connections split events (`a22ca8a8`)
+- add Web UI (desktop, dark, mobile) and TUI screenshots to the README (`ce512bc7`)
+- **cache-ttl**: revise the dynamic keepalive cap plan after two review rounds (`41e3b88c`)
+
+### Tests
+
+- **feishu-bot**: update the frozen caps test for the session-card caps (`50964fef`)
+- **quota**: expect usage readings in the droid pool list of the spawn-gate message (`06cc6a69`)
+- **cache-ttl**: pin pi provider-hook facts for keepalive replay (`2ac160a8`)
+- **session-nav**: pin that Alt+Up reaches app.message.dequeue through the session-nav and deferred-reload editor chain (`7c082740`)
+- **feishu-bot**: retry temp-dir cleanup while a disposed state finishes its last write (`893164ea`)
+- make the suite pass on CI (UTC, no droid, clean HOME) and de-flake timing tests (`88e8e838`)
+
+Stats: 16 feat, 16 fix, 9 docs, 6 test
+
 ## [0.6.0] - 2026-10-18
 
 ### Added
@@ -705,7 +768,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.3...v0.5.4
