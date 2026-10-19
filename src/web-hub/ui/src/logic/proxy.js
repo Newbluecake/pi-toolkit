@@ -5,9 +5,9 @@
  *
  * - `proxyScopeOf(caps, transport, mode?)` — `null` (no cap / no transport method ⇒ the UI is
  *   byte-identical to a hub without the feature) or `{ lan }`.
- * - `findProxyUrlRefs(text)` / `isProxyableHref(href)` — recognition of `http://` URLs whose
- *   host is a loopback / private / cgnat / ULA IP literal or `localhost`, with a port and an
- *   optional path. Hostnames are never auto-recognised (the hub fences them through DNS).
+ * - `findProxyUrlRefs(text)` / `normalizeProxyHref(href)` / `isProxyableHref(href)` — HTTP
+ *   endpoints on loopback / private / cgnat / ULA IP literals or `localhost` (link-preview §5).
+ *   Scheme-less needs a port; port-less HTTP gets :80. Hostnames are never auto-recognised.
  *   Segments always concatenate back to the exact input.
  * - `parseProxyOpen/List/Stop` — the contract gates for the three hub responses.
  * - `proxyErrorKey(err)` — i18n key of the user-facing copy for an error outcome.
@@ -22,7 +22,7 @@ import {
   PROXY_TARGET_CLASSES,
   PROXY_UNAVAILABLE_EXTRA_REASONS,
 } from "@protocol/proxy.ts";
-import { PROXY_HUB_CAP, PROXY_LAN_HUB_CAP } from "@protocol/version.ts";
+import { PROXY_FRAME_HUB_CAP, PROXY_HUB_CAP, PROXY_LAN_HUB_CAP } from "@protocol/version.ts";
 import { PROXY_COOKIE_CONFLICT, PROXY_DENY_REASON_SET } from "./contract.js";
 
 /** Response body caps (the hub's bodies are far smaller; these bound a hostile/broken peer). */
@@ -48,32 +48,89 @@ export function proxyScopeOf(caps, transport, mode) {
   return hasLan ? { lan: true } : null;
 }
 
+/**
+ * link-preview §4.1: framing is additive to an already-admitted proxy scope. No scope stays
+ * inert; old hubs keep the new-tab flow. Return the SAME scope (no mutation or widening).
+ * @param {unknown} caps @param {{ lan: boolean } | null | undefined} scope
+ * @returns {{ lan: boolean } | null}
+ */
+export function proxyFrameScopeOf(caps, scope) {
+  return scope != null && Array.isArray(caps) && caps.includes(PROXY_FRAME_HUB_CAP) ? scope : null;
+}
+
 // ---------------------------------------------------------------------------
-// URL recognition
+// URL recognition (link-preview plan §5)
 // ---------------------------------------------------------------------------
 
 const OCTET = String.raw`(?:0|[1-9]\d{0,2})`;
-const HOST = String.raw`(?:[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|${OCTET}(?:\.${OCTET}){3}|\[[0-9A-Fa-f:]{2,39}\])`;
-const URL_SOURCE = String.raw`[Hh][Tt][Tt][Pp]://(${HOST}):([1-9]\d{0,4})([/?#][^\s<>"'\x60]*)?`;
-/** Trailing sentence punctuation is never part of the URL. */
-const TRAIL_RE = /[.,;:!?)\]}>*]+$/;
+const IPV4 = String.raw`${OCTET}(?:\.${OCTET}){3}`;
+// Bracketed candidates are deliberately broad: validation consumes an invalid IPv6 candidate
+// as a whole, rather than re-matching a local IPv4 substring inside it.
+const HOST = String.raw`(?:[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|${IPV4}|\[[^\]\s<>"'\x60]*\])`;
+const URL_SOURCE = String.raw`([Hh][Tt][Tt][Pp]://)?(${HOST})(?::(\d+))?([/?#][^\s<>"'\x60]*)?`;
+/** Trailing ASCII/CJK sentence punctuation is never part of the ref. */
+const TRAIL_RE = /[.,;:!?)\]}>*。，；：！？）」』】》、]+$/;
+const SENTENCE_START_RE = /^[.,;:!?)\]}>*。，；：！？）」』】》、]/;
+const NON_HTTP_PORTS = new Set([21, 22, 23, 25, 53, 110, 143, 443, 445, 993, 995, 3306, 5432, 6379, 11211, 27017]);
+
+/** Strict dotted quad, including no leading zeros. @param {string} text @returns {number[] | null} */
+function parseIPv4(text) {
+  if (!new RegExp(`^${IPV4}$`).test(text)) return null;
+  const octets = text.split(".").map(Number);
+  return octets.every((n) => n <= 255) ? octets : null;
+}
 
 /**
- * Allowed-class test for a host token (no DNS: IP literals + `localhost` only).
+ * Full RFC 4291 textual syntax (not an address-class test). At most one ::, exactly eight
+ * words without compression or at least one omitted word with it. A trailing strict dotted
+ * quad counts as two words. No brackets, zones, whitespace or non-hex words.
+ * @param {string} text @returns {Uint8Array | null}
+ */
+export function parseIPv6(text) {
+  if (typeof text !== "string" || text === "" || text.length > 45 || /[^0-9a-f:.]/i.test(text)) return null;
+  let hex = text;
+  if (hex.includes(".")) {
+    const colon = hex.lastIndexOf(":");
+    if (colon < 0) return null;
+    const octets = parseIPv4(hex.slice(colon + 1));
+    if (octets === null) return null;
+    const [a, b, c, d] = /** @type {[number, number, number, number]} */ (octets);
+    hex = `${hex.slice(0, colon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = hex.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] === "" ? [] : /** @type {string} */ (halves[0]).split(":");
+  const right = halves.length === 1 || halves[1] === "" ? [] : /** @type {string} */ (halves[1]).split(":");
+  if (![...left, ...right].every((word) => /^[0-9a-f]{1,4}$/i.test(word))) return null;
+  const count = left.length + right.length;
+  if (halves.length === 1 ? count !== 8 : count > 7) return null;
+  const words = [...left, ...Array(8 - count).fill("0"), ...right];
+  const bytes = new Uint8Array(16);
+  words.forEach((word, i) => {
+    const n = Number.parseInt(word, 16);
+    bytes[i * 2] = n >>> 8;
+    bytes[i * 2 + 1] = n & 255;
+  });
+  return bytes;
+}
+
+/**
+ * Allowed-class test (no DNS): IP literals + localhost only. IPv4-mapped IPv6 is deliberately
+ * NOT recognized, even when the hub would allow it. Classify canonical bytes, not spelling.
  * @param {string} host @returns {boolean}
  */
 function hostProxyable(host) {
   if (host.toLowerCase() === "localhost") return true;
   if (host.startsWith("[")) {
-    const v6 = host.slice(1, -1).toLowerCase();
-    if (v6 === "::1") return true;
-    // ULA fc00::/7 — first hextet fc.. / fd.. (`fd00:ec2::/32` is the AWS metadata range, denied).
-    if (!/^f[cd][0-9a-f]{2}(?::[0-9a-f]{0,4}){1,7}$/.test(v6) || v6.includes(":::")) return false;
-    return !v6.startsWith("fd00:ec2:");
+    const b = parseIPv6(host.slice(1, -1));
+    if (b === null) return false;
+    if (b.slice(0, 15).every((n) => n === 0) && b[15] === 1) return true;
+    if (/** @type {number} */ (b[0] & 0xfe) !== 0xfc) return false;
+    return !(b[0] === 0xfd && b[1] === 0 && b[2] === 0x0e && b[3] === 0xc2);
   }
-  const o = host.split(".").map(Number);
-  if (o.length !== 4 || o.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
-  const [a, b] = /** @type {[number, number]} */ (o);
+  const octets = parseIPv4(host);
+  if (octets === null) return false;
+  const [a, b] = /** @type {[number, number]} */ (octets);
   if (a === 127 || a === 10) return true;
   if (a === 172) return b >= 16 && b <= 31;
   if (a === 192) return b === 168;
@@ -81,19 +138,13 @@ function hostProxyable(host) {
   return false;
 }
 
-/** @param {string} host @param {string} port */
-function endpointProxyable(host, port) {
-  const n = Number(port);
-  return n >= 1 && n <= 65535 && hostProxyable(host);
-}
-
 /**
  * @typedef {{ kind: "text", text: string } | { kind: "ref", text: string, href: string }} ProxySegment
  */
 
 /**
- * Split `text` into plain / proxy-URL segments (concatenation === input). Returns a single text
- * segment (or `[]` for "") when nothing matches.
+ * Split into plain / proxy refs (concatenation === input). `text` is always raw; `href` always
+ * has a scheme and port. A rejected candidate consumes its match — no inner retry/degrade.
  * @param {string} text @returns {ProxySegment[]}
  */
 export function findProxyUrlRefs(text) {
@@ -105,16 +156,30 @@ export function findProxyUrlRefs(text) {
   for (let m = re.exec(text); m !== null; m = re.exec(text)) {
     const start = m.index;
     const prev = start === 0 ? "" : /** @type {string} */ (text[start - 1]);
-    if (prev !== "" && /[A-Za-z0-9_/.:@-]/.test(prev)) continue; // mid-token (`foohttp://…`, `//http://…`)
-    const host = /** @type {string} */ (m[1]);
-    const port = /** @type {string} */ (m[2]);
-    if (!endpointProxyable(host, port)) continue;
-    const rawTail = m[3] ?? "";
+    if (prev !== "" && /[A-Za-z0-9_/.:@\\-]/.test(prev)) continue;
+    const scheme = m[1] ?? "";
+    const host = /** @type {string} */ (m[2]);
+    const port = m[3];
+    const rawTail = m[4] ?? "";
+    const authorityEnd = start + m[0].length - rawTail.length;
+    const suffix = text.slice(authorityEnd);
+    if (port === undefined) {
+      // F2 only: a failed F1 must never degrade to port-less HTTP, even ': ok'.
+      if (scheme === "" || suffix.startsWith(":")) continue;
+    } else {
+      if (!/^[1-9]\d{0,4}$/.test(port) || Number(port) > 65535) continue;
+      if (scheme === "" && (Number(port) < 10 || NON_HTTP_PORTS.has(Number(port)))) continue;
+    }
+    if (suffix !== "" && !/^[\s/?#]/.test(suffix)) {
+      if (!SENTENCE_START_RE.test(suffix) || /^[.:][A-Za-z0-9_]/.test(suffix)) continue;
+    }
+    if (!hostProxyable(host)) continue;
     const tail = rawTail.replace(TRAIL_RE, "");
-    const href = `${m[0].slice(0, m[0].length - rawTail.length)}${tail}`;
+    const raw = m[0].slice(0, m[0].length - rawTail.length) + tail;
+    const href = `${scheme || "http://"}${host}:${port ?? "80"}${tail}`;
     if (start > last) out.push({ kind: "text", text: text.slice(last, start) });
-    out.push({ kind: "ref", text: href, href });
-    last = start + href.length;
+    out.push({ kind: "ref", text: raw, href });
+    last = start + raw.length;
     re.lastIndex = last;
   }
   if (out.length === 0) return [{ kind: "text", text }];
@@ -123,13 +188,19 @@ export function findProxyUrlRefs(text) {
 }
 
 /**
- * `true` iff the WHOLE string is one recognizable proxy URL.
- * @param {unknown} href @returns {boolean}
+ * The single whole-ref normalization gate (link-preview §4.2/§5). Preserve the existing
+ * isProxyableHref input/length limits; do not trim or swallow surrounding sentence punctuation.
+ * @param {unknown} href @returns {string | null}
  */
-export function isProxyableHref(href) {
-  if (typeof href !== "string" || href === "" || href.length > 2048) return false;
+export function normalizeProxyHref(href) {
+  if (typeof href !== "string" || href === "" || href.length > 2048) return null;
   const segs = findProxyUrlRefs(href);
-  return segs.length === 1 && segs[0]?.kind === "ref";
+  return segs.length === 1 && segs[0]?.kind === "ref" ? segs[0].href : null;
+}
+
+/** `true` iff the WHOLE string is one proxy ref. @param {unknown} href @returns {boolean} */
+export function isProxyableHref(href) {
+  return normalizeProxyHref(href) !== null;
 }
 
 // ---------------------------------------------------------------------------

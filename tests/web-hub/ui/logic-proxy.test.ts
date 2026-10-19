@@ -3,16 +3,21 @@
  * web-hub-proxy plan v2 §8 (X2): T-U1 (URL recognition corpus), T-U5 (transport contract +
  * `API.*`), the scope truth table, the contract gates, and the copy of every deny reason.
  */
+import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import {
   findProxyUrlRefs,
   isProxyableHref,
   isSafeEnterUrl,
+  normalizeProxyHref,
+  parseIPv6,
   parseProxyList,
   parseProxyOpen,
   parseProxyStop,
   proxyErrorKey,
   proxyFetch,
+  proxyFrameScopeOf,
   proxyScopeOf,
 } from "../../../src/web-hub/ui/src/logic/proxy.js";
 import { API, PROXY_CAPS, PROXY_DENY_REASON_SET } from "../../../src/web-hub/ui/src/logic/contract.js";
@@ -26,6 +31,9 @@ import {
   PROXY_LIMIT_REASONS,
   PROXY_UNAVAILABLE_EXTRA_REASONS,
 } from "../../../src/web-hub/protocol/proxy.js";
+
+import { PROXY_FRAME_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import { parseProxyTarget } from "../../../src/web-hub/hub/proxy/target.js";
 
 const refsOf = (t: string) =>
   findProxyUrlRefs(t)
@@ -56,7 +64,6 @@ describe("T-U1 findProxyUrlRefs / isProxyableHref corpus", () => {
     "http://8.8.8.8:80/",
     "http://example.com:80/",
     "https://127.0.0.1:3000/",
-    "http://127.0.0.1/", // no port
     "http://127.0.0.1:0/",
     "http://127.0.0.1:70000/",
     "http://127.0.0.1:03000/", // leading zero
@@ -77,7 +84,6 @@ describe("T-U1 findProxyUrlRefs / isProxyableHref corpus", () => {
     "//http://127.0.0.1:3000/",
     "foo/http://127.0.0.1:3000/",
     "0.0.0.0:3000",
-    "127.0.0.1:3000", // bare host:port is not auto-linkified
   ])("does not recognize %j", (text) => {
     expect(refsOf(text)).toEqual([]);
   });
@@ -107,6 +113,169 @@ describe("T-U1 findProxyUrlRefs / isProxyableHref corpus", () => {
     expect(isProxyableHref("http://127.0.0.1:3000/x.")).toBe(false);
     expect(isProxyableHref(undefined)).toBe(false);
     expect(isProxyableHref("http://127.0.0.1:1/" + "a".repeat(3000))).toBe(false);
+  });
+});
+
+interface CorpusRef {
+  text: string;
+  href: string;
+}
+const corpus = JSON.parse(readFileSync(new URL("../../fixtures/proxy-link-corpus.json", import.meta.url), "utf8")) as {
+  positive: Array<{ text: string; refs: CorpusRef[] }>;
+  negative: string[];
+  invalidIPv6: string[];
+};
+
+function assertHubAgreement(text: string): number {
+  const segments = findProxyUrlRefs(text);
+  expect(segments.map((s) => s.text).join(""), text).toBe(text);
+  let count = 0;
+  for (const segment of segments) {
+    if (segment.kind !== "ref") continue;
+    expect(parseProxyTarget(segment.href), `${text} → ${segment.href}`).toMatchObject({ ok: true });
+    expect(normalizeProxyHref(segment.text), segment.text).toBe(segment.href);
+    expect(normalizeProxyHref(segment.href), segment.href).toBe(segment.href);
+    count++;
+  }
+  return count;
+}
+
+describe("link-preview LP2 — grammar corpus (§5, r1 #3/#4)", () => {
+  it.each(corpus.positive)("recognizes and normalizes $text", ({ text, refs }) => {
+    const actual = findProxyUrlRefs(text).filter((s) => s.kind === "ref");
+    expect(actual).toEqual(refs.map((ref) => ({ kind: "ref", ...ref })));
+    expect(normalizeProxyHref(text)).toBe(refs.length === 1 && refs[0]!.text === text ? refs[0]!.href : null);
+    assertHubAgreement(text);
+  });
+
+  it.each(corpus.negative)("does not recognize %j (no inner re-match)", (text) => {
+    expect(refsOf(text)).toEqual([]);
+    expect(normalizeProxyHref(text)).toBeNull();
+    assertHubAgreement(text);
+  });
+
+  it("preserves the two explicit compatibility flips with normalized hrefs", () => {
+    expect(normalizeProxyHref("127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
+    expect(normalizeProxyHref("http://127.0.0.1/")).toBe("http://127.0.0.1:80/");
+    expect(findProxyUrlRefs("127.0.0.1:3000")).toEqual([
+      { kind: "ref", text: "127.0.0.1:3000", href: "http://127.0.0.1:3000" },
+    ]);
+  });
+
+  it("whole-string normalization and isProxyableHref agree (including bad types and length cap)", () => {
+    const inputs: unknown[] = [
+      undefined,
+      null,
+      1,
+      {},
+      [],
+      "",
+      " ",
+      ...corpus.negative,
+      ...corpus.positive.map((row) => row.text),
+      "http://localhost:1/" + "a".repeat(2048),
+    ];
+    for (const input of inputs) expect(isProxyableHref(input), String(input)).toBe(normalizeProxyHref(input) !== null);
+    const max = "http://localhost:1/".padEnd(2048, "a");
+    expect(normalizeProxyHref(max)).toBe(max);
+    expect(normalizeProxyHref(max + "a")).toBeNull();
+  });
+
+  it("all forbidden left-boundary characters block recognition; whitespace/punctuation allow it", () => {
+    for (const prev of "aZ09_/.:@\\\\-") {
+      for (const endpoint of ["127.0.0.1:3000", "http://127.0.0.1", "[fd12::1]:3000", "localhost:3000"]) {
+        expect(refsOf(prev + endpoint), prev + endpoint).toEqual([]);
+      }
+    }
+    for (const prev of [" ", "\n", "\t", "(", "=", "中"]) {
+      expect(refsOf(prev + "127.0.0.1:3000")).toEqual(["127.0.0.1:3000"]);
+    }
+  });
+
+  it("a rejected candidate consumes its match; a separate later candidate still works", () => {
+    const text = "http://127.0.0.1:0/path/10.0.0.1:3000 then localhost:5173";
+    expect(refsOf(text)).toEqual(["localhost:5173"]);
+    assertHubAgreement(text);
+  });
+
+  it("tails stop at every specified delimiter without losing raw text", () => {
+    for (const delimiter of [" ", "\n", "<", ">", '"', "'", "`"]) {
+      const text = `localhost:3000/a${delimiter}next`;
+      expect(refsOf(text)).toEqual(["localhost:3000/a"]);
+      assertHubAgreement(text);
+    }
+  });
+
+  it("2,000 seeded ASCII/CJK/digit/colon/bracket strings preserve concat and real hub agreement", () => {
+    let seed = 0x1a2b3c4d;
+    const next = (n: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % n;
+    };
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:[] .,/?!@_-\\\\<>\"'`访问链接。！";
+    const endpoints = [...corpus.positive.flatMap((row) => row.refs.map((ref) => ref.text)), ...corpus.negative];
+    let refs = 0;
+    for (let i = 0; i < 2000; i++) {
+      const noise = () => Array.from({ length: next(80) }, () => alphabet[next(alphabet.length)]!).join("");
+      // Half pure noise; half grammar-biased noise so agreement is not vacuously true.
+      const text = i % 2 === 0 ? noise() : `${noise()} ${endpoints[next(endpoints.length)]!} ${noise()}`;
+      refs += assertHubAgreement(text);
+    }
+    expect(refs).toBeGreaterThan(100);
+  });
+});
+
+describe("parseIPv6 — RFC 4291 bytes, independent of the UI address-class fence", () => {
+  it.each([
+    ["::", "00000000000000000000000000000000"],
+    ["::1", "00000000000000000000000000000001"],
+    ["0:0:0:0:0:0:0:1", "00000000000000000000000000000001"],
+    ["FD12:3456::1", "fd123456000000000000000000000001"],
+    ["fd12:1:2:3:4:5:6:7", "fd120001000200030004000500060007"],
+    ["1:2:3:4:5:6:7::", "00010002000300040005000600070000"],
+    ["fd00::1.2.3.4", "fd000000000000000000000001020304"],
+    ["1:2:3:4:5:6:1.2.3.4", "00010002000300040005000601020304"],
+    ["::ffff:127.0.0.1", "00000000000000000000ffff7f000001"],
+    ["2001:db8::1", "20010db8000000000000000000000001"],
+  ])("%s → %s", (text, hex) => {
+    const bytes = parseIPv6(text);
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(Buffer.from(bytes!).toString("hex")).toBe(hex);
+    expect(isIP(text)).toBe(6);
+  });
+
+  it.each(["", ":", ":1", "1:", "1.2.3.4", "[::1]", "::1\n", " ::1", ...corpus.invalidIPv6])(
+    "rejects invalid textual syntax %j",
+    (text) => {
+      expect(parseIPv6(text)).toBeNull();
+      // node:net accepts scoped addresses; this protocol explicitly forbids zones.
+      if (!text.includes("%")) expect(isIP(text)).not.toBe(6);
+    },
+  );
+
+  it.each(corpus.invalidIPv6)("invalid %s is rejected by UI AND real hub", (text) => {
+    for (const ref of [`[${text}]:80`, `http://[${text}]:80`]) {
+      expect(normalizeProxyHref(ref)).toBeNull();
+      expect(findProxyUrlRefs(ref).filter((s) => s.kind === "ref")).toEqual([]);
+      expect(parseProxyTarget(ref).ok).toBe(false);
+    }
+  });
+});
+
+describe("proxyFrameScopeOf — three compatibility tiers (§4.1)", () => {
+  it("frame cap alone never resurrects an absent proxy scope", () => {
+    expect(proxyFrameScopeOf([PROXY_FRAME_HUB_CAP], null)).toBeNull();
+    expect(proxyFrameScopeOf([PROXY_FRAME_HUB_CAP], undefined)).toBeNull();
+  });
+  it("a proxy scope without the frame cap keeps the legacy new-tab tier", () => {
+    expect(proxyFrameScopeOf(["proxy.v1"], { lan: false })).toBeNull();
+    expect(proxyFrameScopeOf(undefined, { lan: false })).toBeNull();
+    expect(proxyFrameScopeOf(PROXY_FRAME_HUB_CAP, { lan: false })).toBeNull();
+  });
+  it.each([false, true])("frame cap + existing scope (LAN %s) enables framing, preserving scope identity", (lan) => {
+    const scope = { lan };
+    expect(proxyFrameScopeOf([PROXY_FRAME_HUB_CAP], scope)).toBe(scope);
+    expect(scope).toEqual({ lan });
   });
 });
 

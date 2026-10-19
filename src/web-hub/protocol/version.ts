@@ -302,6 +302,10 @@ export const PREVIEW_HTML_HUB_CAP = "preview.html.v1";
  * ⇒ no PROTO bump (same §2.3 rule as every cap above).
  */
 export const PROXY_HUB_CAP = "proxy.v1";
+/** link-preview plan §0 D1 / §4.1 (LP0): in-page proxy framing, declared iff PROXY_HUB_CAP
+ * is (config.proxy exists), on both hub cap surfaces. Without it the UI keeps the new-tab flow.
+ * Additive capability only — no new frames or SSE events, so no PROTO bump. */
+export const PROXY_FRAME_HUB_CAP = "proxy.frame.v1";
 export const PROXY_LAN_HUB_CAP = "proxy.lan.v1";
 
 /**

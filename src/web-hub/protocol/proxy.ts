@@ -75,6 +75,31 @@ export function buildProxyEnterUrl(origin: string, code: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// in-page framing (link-preview plan §2.2 / §2.5, LP0)
+// ---------------------------------------------------------------------------
+
+/** §2.5 / D5: cross-origin app permissions; never allow-top-navigation* or credentialless.
+ * Popups can escape: this only protects the hub page, NOT a sandbox for malicious apps. */
+export const PROXY_FRAME_SANDBOX =
+  "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads";
+/** §2.5: the iframe's Permissions Policy allow attribute. */
+export const PROXY_FRAME_ALLOW = "clipboard-write; fullscreen";
+/** §2.2: the listener's existing strict CSP without frame-ancestors. Append that directive per
+ * request; without a validated Host the listener must retain frame-ancestors 'none' + XFO DENY. */
+export const PROXY_STRICT_CSP_BASE =
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'";
+
+/** §2.2: sources for proxy-generated pages only, from a VALIDATED canonical hostname (IPv6
+ * stays bracketed) and the actual bound hub/LAN ports. Never pass raw Host header bytes. */
+export function proxyFrameAncestors(hostname: string, hubPort: number, lanPort?: number): string {
+  return `'self' ${proxyOriginOf(hostname, hubPort)}${lanPort === undefined ? "" : ` ${proxyOriginOf(hostname, lanPort)}`}`;
+}
+
+/** §2.2: per-request framing policy after Host validation; absence keeps strict listener headers.
+ * This must never be applied to upstream responses (their XFO/CSP pass through untouched). */
+export type ProxyReplyPolicy = { frameAncestors: string };
+
+// ---------------------------------------------------------------------------
 // port range + instance limits (§0 Q3/Q4, §3.3, §3.4, §5)
 // ---------------------------------------------------------------------------
 

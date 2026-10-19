@@ -5,6 +5,7 @@
  * exercises runtime wiring (no listener, no route); a number changing here is a plan change.
  */
 import { readFileSync } from "node:fs";
+import type { ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -25,6 +26,7 @@ import {
 } from "../../../src/config/setting-specs.js";
 import type { HubConfig, ProxyRoutes, ProxyService } from "../../../src/web-hub/hub/ports.js";
 import { COOKIE_CONFLICT_REASON } from "../../../src/web-hub/hub/auth-identity.js";
+import { sendProxyResponse } from "../../../src/web-hub/hub/proxy/listener.js";
 import {
   PROXY_ACTIVE_GLOBAL,
   PROXY_ACTIVE_PER_INSTANCE,
@@ -57,6 +59,9 @@ import {
   PROXY_ERROR_CODES,
   PROXY_EXPIRED_PAGE_EN,
   PROXY_EXPIRED_PAGE_ZH,
+  PROXY_FRAME_ALLOW,
+  PROXY_FRAME_SANDBOX,
+  PROXY_STRICT_CSP_BASE,
   PROXY_HEAD_TIMEOUT_MS,
   PROXY_INSTANCE_ID_RE,
   PROXY_INSTANCE_IDLE_MS,
@@ -116,11 +121,13 @@ import {
   formatProxyPortRange,
   parseProxyPortRange,
   proxyCookieName,
+  proxyFrameAncestors,
   proxyOriginOf,
   proxyRangeContainsPort,
   type ProxyDenyReason,
+  type ProxyReplyPolicy,
 } from "../../../src/web-hub/protocol/proxy.js";
-import { PROXY_HUB_CAP, PROXY_LAN_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import { PROXY_FRAME_HUB_CAP, PROXY_HUB_CAP, PROXY_LAN_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import * as web from "../../../src/web-hub/ui/src/logic/contract.js";
 
 const KiB = 1024;
@@ -510,10 +517,52 @@ describe("protocol/proxy — portRange grammar (plan §5)", () => {
   });
 });
 
-describe("hub caps (plan §5)", () => {
-  it("names the two caps", () => {
+describe("hub caps (plan §5 / link-preview §0 D1)", () => {
+  it("names the proxy caps and the additive framing cap", () => {
     expect(PROXY_HUB_CAP).toBe("proxy.v1");
     expect(PROXY_LAN_HUB_CAP).toBe("proxy.lan.v1");
+    expect(PROXY_FRAME_HUB_CAP).toBe("proxy.frame.v1");
+  });
+});
+
+describe("link-preview LP0 — frozen framing surface (§2.2/§2.5)", () => {
+  it("pins the iframe permissions without top navigation or credentialless", () => {
+    expect(PROXY_FRAME_SANDBOX).toBe(
+      "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads",
+    );
+    expect(PROXY_FRAME_SANDBOX.split(" ").some((token) => token.startsWith("allow-top-navigation"))).toBe(false);
+    expect(PROXY_FRAME_SANDBOX).not.toContain("credentialless");
+    expect(PROXY_FRAME_ALLOW).toBe("clipboard-write; fullscreen");
+  });
+
+  it.each([
+    ["127.0.0.1", 7788, undefined, "'self' http://127.0.0.1:7788"],
+    ["localhost", 7788, 7789, "'self' http://localhost:7788 http://localhost:7789"],
+    ["192.168.1.2", 7788, 8080, "'self' http://192.168.1.2:7788 http://192.168.1.2:8080"],
+    ["[::1]", 7788, undefined, "'self' http://[::1]:7788"],
+  ] as const)("ancestors for %s:%i (LAN %s)", (host, hubPort, lanPort, want) => {
+    const policy: ProxyReplyPolicy = { frameAncestors: proxyFrameAncestors(host, hubPort, lanPort) };
+    expect(policy.frameAncestors).toBe(want);
+  });
+
+  it("base plus frame-ancestors 'none' equals the listener's current strict CSP byte-for-byte", () => {
+    // STRICT_HEADERS is private in listener.ts: pin its literal AND capture the real response.
+    const strict =
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
+    expect(`${PROXY_STRICT_CSP_BASE}; frame-ancestors 'none'`).toBe(strict);
+    expect(PROXY_STRICT_CSP_BASE).not.toContain("frame-ancestors");
+    let headers: Record<string, unknown> = {};
+    const res = {
+      destroyed: false,
+      headersSent: false,
+      writeHead(_status: number, value: Record<string, unknown>) {
+        headers = value;
+      },
+      end() {},
+    } as unknown as ServerResponse;
+    sendProxyResponse(res, 421);
+    expect(headers["Content-Security-Policy"]).toBe(strict);
+    expect(headers["X-Frame-Options"]).toBe("DENY");
   });
 });
 
