@@ -218,6 +218,8 @@ export async function createProxyService(deps: ProxyServiceDeps): Promise<ProxyS
         if (closing || creation.abandoned) throw new Error("proxy closing");
         const listener = createProxyListener({
           port,
+          hubPort: deps.hubPort,
+          ...(deps.lanPort === undefined ? {} : { lanPort: deps.lanPort }),
           lan: deps.lan,
           lanHostSnapshot: deps.lanHostSnapshot,
           instanceId: id,

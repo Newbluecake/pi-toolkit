@@ -56,7 +56,9 @@ export type ProxyCredentialFailure =
     };
 export type ProxyMintCodeResult = { ok: true; code: string; rec: ProxyCode } | ProxyCredentialFailure;
 export type ProxyExchangeResult =
-  { ok: true; sid: string; rec: ProxySession; nextPath: string } | ProxyCredentialFailure;
+  | { ok: true; reused: false; sid: string; rec: ProxySession; nextPath: string }
+  | { ok: true; reused: true; rec: ProxySession; nextPath: string }
+  | ProxyCredentialFailure;
 export interface ProxySessionStoreDeps {
   now(): number;
   randomBytes?: (n: number) => Uint8Array;
@@ -72,7 +74,7 @@ export interface ProxySessionStore {
     input: { instanceId: string; origin: string; nextPath: string },
   ): ProxyMintCodeResult;
   /** A known code is deleted BEFORE all remaining checks, even a failing exchange. */
-  exchange(code: string, instanceId: string, origin: string): ProxyExchangeResult;
+  exchange(code: string, instanceId: string, origin: string, opts?: { reuse?: ProxySession }): ProxyExchangeResult;
   lookup(sid: string, instanceId: string, origin: string, opts?: { touch?: boolean }): ProxySession | undefined;
   isLive(rec: ProxySession): boolean;
   /** HTTP start: every request. WS data: at most once/60s. Response bytes: NEVER call this. */
@@ -209,7 +211,7 @@ export function createProxySessionStore(deps: ProxySessionStoreDeps): ProxySessi
       codes.set(codeHash, rec);
       return { ok: true, code, rec };
     },
-    exchange(code, instanceId, origin) {
+    exchange(code, instanceId, origin, opts) {
       if (!PROXY_SECRET_RE.test(code)) return invalid();
       const hash = digest(code);
       const c = [...codes.values()].find((rec) => sameHash(hash, rec.codeHash));
@@ -221,6 +223,20 @@ export function createProxySessionStore(deps: ProxySessionStoreDeps): ProxySessi
       const now = deps.now();
       if (revoked || now >= Math.min(c.expAt, c.hardAt) || c.instanceId !== instanceId || c.origin !== origin)
         return invalid();
+      const reuse = opts?.reuse;
+      if (
+        reuse !== undefined &&
+        isLive(reuse) &&
+        reuse.instanceId === instanceId &&
+        reuse.origin === origin &&
+        reuse.listener === c.listener &&
+        reuse.principal === c.principal &&
+        reuse.sidTag === c.sidTag &&
+        reuse.userId === c.userId
+      ) {
+        touch(reuse, "http");
+        return { ok: true, reused: true, rec: reuse, nextPath: c.nextPath };
+      }
       if (
         sessions.size >= PROXY_SESSIONS_GLOBAL ||
         [...sessions.values()].filter((s) => s.instanceId === instanceId).length >= PROXY_SESSIONS_PER_INSTANCE
@@ -240,7 +256,7 @@ export function createProxySessionStore(deps: ProxySessionStoreDeps): ProxySessi
         sockets: new Set(),
       };
       sessions.set(sidHash, rec);
-      return { ok: true, sid, rec, nextPath: c.nextPath };
+      return { ok: true, reused: false, sid, rec, nextPath: c.nextPath };
     },
     lookup(sid, instanceId, origin, opts) {
       if (!PROXY_SECRET_RE.test(sid)) return undefined;

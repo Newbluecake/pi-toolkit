@@ -178,6 +178,12 @@ import { buildUiCandidates } from "./ui-root.js";
 
 export const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
+/** Link-preview §2.4: only proxy-on widens what the hub may embed, never who may embed the hub. */
+export function hubCsp(range?: readonly [number, number]): string {
+  if (range === undefined) return CSP;
+  const sources = Array.from({ length: range[1] - range[0] + 1 }, (_, i) => `http://*:${range[0] + i}`);
+  return CSP.replace("frame-ancestors 'none'", `frame-src 'self' ${sources.join(" ")}; frame-ancestors 'none'`);
+}
 export const MAX_BODY_BYTES = 64 * 1024;
 export const LAN_LOGIN_BODY_BYTES = 4 * 1024;
 export const HISTORY_PAGE_MAX = 400;
@@ -360,8 +366,8 @@ function requestFailedFields(req: IncomingMessage, err: unknown): { url: string 
   return { url, error: String(err) };
 }
 
-function setSecurityHeaders(res: ServerResponse): void {
-  res.setHeader("Content-Security-Policy", CSP);
+function setSecurityHeaders(res: ServerResponse, csp = CSP): void {
+  res.setHeader("Content-Security-Policy", csp);
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
@@ -574,6 +580,7 @@ export function buildContext(
 
 /** §2.3's transport seam for the LAN listener; §6.3's `ConnGuard` is now frozen in `hub/ports.ts` (review fix #9). */
 export interface LanTransportCtx {
+  csp?: string;
   handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext, lease: ConnLease): Promise<void>;
   log: HubLog;
   connGuard: ConnGuard;
@@ -628,7 +635,7 @@ export function createLanTransport(ctx: LanTransportCtx): LanTransport {
             const cls = classifyHostToken(hostPart);
             if (cls.ok && cls.kind === "ipv4") ctx.onIPv4HostReject?.(hostPart);
           }
-          setSecurityHeaders(res);
+          setSecurityHeaders(res, ctx.csp);
           sendError(res, result.reject, result.code, result.detail);
           return;
         }
@@ -1047,6 +1054,7 @@ function createRouteSet(
 // ---------------------------------------------------------------------------
 
 export interface LanRuntime {
+  csp: string;
   lan: LanFrontendDeps;
   /** web-hub-proxy plan §4.2 (XA): the frontend-wide auth revocation bus (same instance as the
    * loopback listener's) — every LAN revoke site `emit`s here instead of calling the preview
@@ -1498,7 +1506,7 @@ async function handleLanRequestInner(
   ctx: RequestContext,
   lease: ConnLease,
 ): Promise<void> {
-  setSecurityHeaders(res);
+  setSecurityHeaders(res, rt.csp);
   const url = req.url ?? "/";
   const qi = url.indexOf("?");
   const path = qi < 0 ? url : url.slice(0, qi);
@@ -2784,6 +2792,7 @@ export type FrontendIdentityDeps = FrontendDeps & { multiCandidateAuth?: boolean
 
 export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFrontend => {
   const { config, registry, bus, history, log, now } = deps;
+  const csp = hubCsp(config.proxy?.portRange);
   const auth = createAuth({ tokenFile: deps.paths.tokenFile, log });
   // web-hub-proxy plan §4.1/§4.2 (XA): the auth revocation bus + the multi-candidate cookie switch.
   // The HTML preview subscribes UNCONDITIONALLY (independent of any proxy setting); every former
@@ -2938,6 +2947,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     // an operator fixing the db), folded into `LanStatus.warnings` by every subsequent rebuild.
     let kdfInvalidWarning = false;
     const rt: LanRuntime = {
+      csp,
       lan,
       routes: lanRoutes,
       lanSse,
@@ -3022,6 +3032,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     }
 
     const transport = createLanTransport({
+      csp,
       log,
       connGuard,
       onIPv4HostReject: () => recompute(false),
@@ -3541,7 +3552,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    setSecurityHeaders(res);
+    setSecurityHeaders(res, csp);
     if (!allowedHost(req.headers.host)) throw new HttpError(421, "E_HOST");
     const url = req.url ?? "/";
     const qi = url.indexOf("?");

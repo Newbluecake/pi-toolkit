@@ -3,6 +3,7 @@ import { Agent, request, type IncomingMessage, type ServerResponse } from "node:
 import type { Socket } from "node:net";
 import { Transform, pipeline } from "node:stream";
 import {
+  type ProxyReplyPolicy,
   PROXY_ACTIVE_GLOBAL,
   PROXY_ACTIVE_PER_INSTANCE,
   PROXY_AGENT_OPTIONS,
@@ -28,8 +29,13 @@ export interface ProxyTraffic {
   bytesDown: number;
   ws: number;
 }
-export type ProxyReply = (res: ServerResponse, status: number, headers?: Record<string, string>) => void;
-export interface ProxyRequestGate {
+export type ProxyReply = (
+  res: ServerResponse,
+  status: number,
+  headers?: Record<string, string>,
+  policy?: ProxyReplyPolicy,
+) => void;
+export interface ProxyRequestGate extends ProxyReplyPolicy {
   origin: string;
   browserHost: string;
   session: ProxySession;
@@ -138,7 +144,7 @@ export function createProxyForwarder(deps: ProxyForwardDeps): ProxyForwarder {
     agent,
     handle(req, res, gate) {
       if (closing) {
-        deps.reply(res, STATUS.busy);
+        deps.reply(res, STATUS.busy, undefined, { frameAncestors: gate.frameAncestors });
         return;
       }
       let ended = false;
@@ -217,7 +223,9 @@ export function createProxyForwarder(deps: ProxyForwardDeps): ProxyForwarder {
       hardCancel = timer.after(Math.max(1, gate.session.hardAt - deps.now()), () => revoker.destroy());
       const fail = (status: number) => {
         if (!res.headersSent && !res.destroyed)
-          deps.reply(res, status, status === STATUS.busy ? { "Retry-After": String(PROXY_RETRY_AFTER_S) } : undefined);
+          deps.reply(res, status, status === STATUS.busy ? { "Retry-After": String(PROXY_RETRY_AFTER_S) } : undefined, {
+            frameAncestors: gate.frameAncestors,
+          });
         else res.destroy();
         cancel();
       };

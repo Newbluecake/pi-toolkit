@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createServer, request, type IncomingMessage } from "node:http";
+import { createServer, request, type IncomingMessage, type IncomingHttpHeaders } from "node:http";
 import type { Socket } from "node:net";
 import { once } from "node:events";
 import { createProxyAdmission, createProxyForwarder } from "../../../../src/web-hub/hub/proxy/forward.js";
@@ -9,6 +9,7 @@ import {
   PROXY_REQUEST_BODY_MAX_BYTES,
   PROXY_STREAM_HWM_BYTES,
   PROXY_SOCKET_TIMEOUT_MS,
+  PROXY_STRICT_CSP_BASE,
 } from "../../../../src/web-hub/protocol/proxy.js";
 import { engine, identity, listen, waitFor } from "./engine-helpers.js";
 import { manualClock } from "./helpers.js";
@@ -86,6 +87,14 @@ describe("T-H4 HTTP budgets", () => {
     expect((text.match(/HTTP\/1.1 200/g) ?? []).length).toBe(32);
     expect((text.match(/HTTP\/1.1 503/g) ?? []).length).toBe(268);
     expect((text.match(/Retry-After: 1/gi) ?? []).length).toBe(268);
+    const refusals = text.split("HTTP/1.1 ").filter((part) => part.startsWith("503"));
+    for (const part of refusals) {
+      const head = part.split("\r\n\r\n")[0]!;
+      expect(head).toContain(
+        `Content-Security-Policy: ${PROXY_STRICT_CSP_BASE}; frame-ancestors 'self' http://127.0.0.1:1\r\n`,
+      );
+      expect(head.toLowerCase()).not.toContain("x-frame-options");
+    }
     socket.destroy();
   });
   it("queued abort removes the waiter, in-flight abort cancels upstream without a later hidden dial", async () => {
@@ -144,13 +153,23 @@ describe("T-H4 HTTP budgets", () => {
     const unused = env.range[1] + 1;
     const no = await env.open(`127.0.0.1:${unused}`);
     const auth = await env.enter(no);
-    expect((await env.http(no.origin, { headers: { Cookie: auth.cookie } })).status).toBe(502);
+    const refused = await env.http(no.origin, { headers: { Cookie: auth.cookie } });
+    expect(refused.status).toBe(502);
+    expect(refused.headers["content-security-policy"]).toBe(
+      `${PROXY_STRICT_CSP_BASE}; frame-ancestors 'self' http://127.0.0.1:1`,
+    );
+    expect(refused.headers["x-frame-options"]).toBeUndefined();
     const slow = await env.open();
     const { cookie } = await env.enter(slow);
     const response = env.http(slow.origin + "/slow-head", { headers: { Cookie: cookie } });
     await waitFor(() => env.up.held === 1);
     clock.advance(PROXY_HEAD_TIMEOUT_MS);
-    expect((await response).status).toBe(504);
+    const timeout = await response;
+    expect(timeout.status).toBe(504);
+    expect(timeout.headers["content-security-policy"]).toBe(
+      `${PROXY_STRICT_CSP_BASE}; frame-ancestors 'self' http://127.0.0.1:1`,
+    );
+    expect(timeout.headers["x-frame-options"]).toBeUndefined();
     await waitFor(() => env.up.held === 0);
   });
   it("streams a huge response without buffering it whole, and stops a paused-reader stream on disconnect", async () => {
@@ -174,7 +193,7 @@ describe("T-H4 HTTP budgets", () => {
     const opened = await env.open();
     const { cookie } = await env.enter(opened);
     const u = new URL(opened.origin);
-    const result = new Promise<number>((resolve, reject) => {
+    const result = new Promise<{ status: number; headers: IncomingHttpHeaders }>((resolve, reject) => {
       const req = request(
         {
           host: "127.0.0.1",
@@ -186,7 +205,7 @@ describe("T-H4 HTTP budgets", () => {
         },
         (res) => {
           res.resume();
-          res.on("end", () => resolve(res.statusCode!));
+          res.on("end", () => resolve({ status: res.statusCode!, headers: res.headers }));
         },
       );
       req.on("socket", (s) => {
@@ -209,7 +228,12 @@ describe("T-H4 HTTP budgets", () => {
       };
       pump();
     });
-    expect(await result).toBe(413);
+    const tooLarge = await result;
+    expect(tooLarge.status).toBe(413);
+    expect(tooLarge.headers["content-security-policy"]).toBe(
+      `${PROXY_STRICT_CSP_BASE}; frame-ancestors 'self' http://127.0.0.1:1`,
+    );
+    expect(tooLarge.headers["x-frame-options"]).toBeUndefined();
     expect(env.up.requests[0]!.bytes).toBeLessThanOrEqual(PROXY_REQUEST_BODY_MAX_BYTES);
     await waitFor(() => env.up.sockets.size === 0);
   }, 15000);
@@ -323,7 +347,7 @@ describe("T-H4 HTTP budgets", () => {
       sessionTraffic: () => traffic,
       admission,
       traffic,
-      reply: sendProxyResponse,
+      reply: (res, status, headers, policy) => sendProxyResponse(res, status, headers, undefined, policy),
       now: Date.now,
     });
     let incoming: IncomingMessage | undefined;
@@ -332,6 +356,7 @@ describe("T-H4 HTTP budgets", () => {
       forward.handle(req, res, {
         origin: "http://local",
         browserHost: "local",
+        frameAncestors: "'self' http://local:7878",
         session: exchanged.rec,
         traffic: { reqs: 0, bytesUp: 0, bytesDown: 0, ws: 0 },
       });
@@ -373,6 +398,14 @@ describe("T-H4 HTTP budgets", () => {
       expect(upstreamSockets.every((s) => s!.destroyed)).toBe(true);
       expect(admission.stats()).toEqual({ active: 0, queued: 0 });
       expect(Object.values(forward.agent.sockets).flat()).toHaveLength(0);
+      // A forwarder closed before handle() must still use this request gate's policy.
+      forward.close();
+      const closed = await env.http(`http://127.0.0.1:${(server.address() as { port: number }).port}`);
+      expect(closed.status).toBe(503);
+      expect(closed.headers["content-security-policy"]).toBe(
+        `${PROXY_STRICT_CSP_BASE}; frame-ancestors 'self' http://local:7878`,
+      );
+      expect(closed.headers["x-frame-options"]).toBeUndefined();
     } finally {
       client?.destroy();
       forward.close();
@@ -382,4 +415,23 @@ describe("T-H4 HTTP budgets", () => {
       await closed;
     }
   }, 5000);
+});
+
+it("LP1 upstream framing headers pass through verbatim, never replaced by the request's policy", async () => {
+  env = await engine({ hubPort: 7878, lanPort: 7879 });
+  const framing = { "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" };
+  env.up.server.on("request", (req, res) => {
+    if (req.url === "/framing") {
+      res.setHeader("X-Frame-Options", framing["x-frame-options"]);
+      res.setHeader("Content-Security-Policy", framing["content-security-policy"]);
+    }
+  });
+  const opened = await env.open();
+  const { cookie } = await env.enter(opened);
+  const response = await env.http(opened.origin + "/framing", { headers: { Cookie: cookie } });
+  expect(response.status).toBe(200);
+  expect({
+    "x-frame-options": response.headers["x-frame-options"],
+    "content-security-policy": response.headers["content-security-policy"],
+  }).toEqual(framing);
 });

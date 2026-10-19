@@ -6,6 +6,9 @@ import { createConnGuard } from "../conn-guard.js";
 import { canonicalHostKey } from "../../protocol/lan.js";
 import { clearingSetCookies, resolveCookieIdentitySync, PROXY_GATE_COOKIE_MAX } from "../auth-identity.js";
 import {
+  PROXY_STRICT_CSP_BASE,
+  proxyFrameAncestors,
+  type ProxyReplyPolicy,
   PROXY_STREAM_HWM_BYTES,
   PROXY_SERVER_OPTIONS,
   PROXY_MAX_REQUESTS_PER_SOCKET,
@@ -42,18 +45,31 @@ export function sendProxyResponse(
   status: number,
   headers: Record<string, string | string[]> = {},
   body?: string,
+  policy?: ProxyReplyPolicy,
 ): void {
   if (res.destroyed || res.headersSent) {
     res.destroy();
     return;
   }
-  res.writeHead(status, { ...STRICT_HEADERS, "Content-Type": "text/plain; charset=utf-8", ...headers });
+  const { "X-Frame-Options": _xfo, ...frameHeaders } = STRICT_HEADERS;
+  res.writeHead(status, {
+    ...(policy === undefined
+      ? STRICT_HEADERS
+      : {
+          ...frameHeaders,
+          "Content-Security-Policy": `${PROXY_STRICT_CSP_BASE}; frame-ancestors ${policy.frameAncestors}`,
+        }),
+    "Content-Type": "text/plain; charset=utf-8",
+    ...headers,
+  });
   res.end(
     body ?? (status === STATUS.gateFailed || status === STATUS.enterFailed ? expiredPage() : "Proxy request refused\n"),
   );
 }
 export interface ProxyListenerDeps extends Omit<ProxyForwardDeps, "reply"> {
   port: number;
+  hubPort: number;
+  lanPort?: number;
   lan: boolean;
   lanHostSnapshot(): HostSnapshot | undefined;
   budget: ProxyWsBudget;
@@ -78,7 +94,10 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
   const enterRates = new Map<string, { at: number; used: number }>();
   let closing = false;
   let closed: Promise<void> | undefined;
-  const forward = createProxyForwarder({ ...deps, reply: sendProxyResponse });
+  const forward = createProxyForwarder({
+    ...deps,
+    reply: (res, status, headers, policy) => sendProxyResponse(res, status, headers, undefined, policy),
+  });
   const rejectSocket = (
     socket: Socket,
     status: number,
@@ -181,15 +200,20 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
       sendProxyResponse(res, STATUS.hostMismatch);
       return;
     }
+    const policy: ProxyReplyPolicy = {
+      frameAncestors: proxyFrameAncestors(origin.slice(7, origin.lastIndexOf(":")), deps.hubPort, deps.lanPort),
+    };
+    const reply = (status: number, headers?: Record<string, string | string[]>, body?: string) =>
+      sendProxyResponse(res, status, headers, body, policy);
     const invalid = targetStatus(req);
     if (invalid !== undefined) {
-      sendProxyResponse(res, invalid);
+      reply(invalid);
       return;
     }
     const url = new URL(req.url!, origin);
     if (url.pathname.startsWith(PROXY_RESERVED_PREFIX)) {
       if (req.method !== "GET" || url.pathname !== PROXY_ENTER_PATH) {
-        sendProxyResponse(res, STATUS.reservedNotFound);
+        reply(STATUS.reservedNotFound);
         return;
       }
       const peer = req.socket.remoteAddress ?? "";
@@ -198,26 +222,33 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
       let rate = enterRates.get(peer);
       if (rate === undefined) {
         if (enterRates.size >= PROXY_CONN_GUARD.maxConnections) {
-          sendProxyResponse(res, STATUS.rateLimited);
+          reply(STATUS.rateLimited);
           return;
         }
         rate = { at: now, used: 0 };
         enterRates.set(peer, rate);
       }
       if (rate.used >= PROXY_ENTER_RATE_PER_MIN) {
-        sendProxyResponse(res, STATUS.rateLimited);
+        reply(STATUS.rateLimited);
         return;
       }
       rate.used++;
-      const result = deps.sessions.exchange(url.searchParams.get(PROXY_ENTER_QUERY) ?? "", deps.instanceId, origin);
+      const prior = gate(req, origin);
+      const result = deps.sessions.exchange(
+        url.searchParams.get(PROXY_ENTER_QUERY) ?? "",
+        deps.instanceId,
+        origin,
+        prior.kind === "one" ? { reuse: prior.rec } : undefined,
+      );
       if (!result.ok) {
         rate.used += PROXY_ENTER_BAD_CODE_WEIGHT - 1;
-        if ("kind" in result) sendProxyResponse(res, STATUS.enterFailed);
-        else sendProxyResponse(res, result.status, {}, JSON.stringify({ error: result.error, reason: result.reason }));
+        if ("kind" in result) reply(STATUS.enterFailed);
+        else reply(result.status, {}, JSON.stringify({ error: result.error, reason: result.reason }));
         return;
       }
       deps.onRequest();
       const access = {
+        ...policy,
         origin,
         browserHost: req.headers.host!,
         session: result.rec,
@@ -227,12 +258,13 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
         res.destroy();
         return;
       }
-      sendProxyResponse(
-        res,
+      reply(
         303,
         {
           Location: result.nextPath,
-          "Set-Cookie": `${proxyCookieName(deps.port)}=${result.sid}; HttpOnly; SameSite=Lax; Path=/`,
+          ...(result.reused
+            ? {}
+            : { "Set-Cookie": `${proxyCookieName(deps.port)}=${result.sid}; HttpOnly; SameSite=Lax; Path=/` }),
         },
         "",
       );
@@ -240,8 +272,7 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
     }
     const resolved = gate(req, origin);
     if (resolved.kind === "conflict") {
-      sendProxyResponse(
-        res,
+      reply(
         STATUS.gateFailed,
         conflictHeaders(req),
         JSON.stringify({ error: "E_AUTH", reason: PROXY_COOKIE_CONFLICT_REASON }),
@@ -249,7 +280,7 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
       return;
     }
     if (resolved.kind !== "one") {
-      sendProxyResponse(res, STATUS.gateFailed);
+      reply(STATUS.gateFailed);
       return;
     }
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method ?? "")) {
@@ -257,11 +288,12 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
         (req.headers.origin !== undefined && req.headers.origin !== origin) ||
         ["same-site", "cross-site"].includes(String(req.headers["sec-fetch-site"]))
       ) {
-        sendProxyResponse(res, STATUS.originForbidden);
+        reply(STATUS.originForbidden);
         return;
       }
     }
     const access = {
+      ...policy,
       origin,
       browserHost: req.headers.host!,
       session: resolved.rec,
@@ -325,6 +357,7 @@ export function createProxyListener(deps: ProxyListenerDeps): ProxyListener {
       return;
     }
     const access = {
+      frameAncestors: proxyFrameAncestors(origin.slice(7, origin.lastIndexOf(":")), deps.hubPort, deps.lanPort),
       origin,
       browserHost: req.headers.host!,
       session: resolved.rec,

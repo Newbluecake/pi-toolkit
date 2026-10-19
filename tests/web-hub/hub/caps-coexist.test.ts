@@ -23,6 +23,7 @@ import {
   PREVIEW_HTML_HUB_CAP,
   PROXY_HUB_CAP,
   PROXY_LAN_HUB_CAP,
+  PROXY_FRAME_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import { config, connectClient, hello, tmpDirs, waitFor } from "./helpers.js";
@@ -155,7 +156,7 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     expect(browserCaps).toContain(PRIVACY_HUB_CAP);
   });
 
-  it("config.proxy: proxy.v1 joins BOTH surfaces (set-equal, tail after the load cap); proxy.lan.v1 ONLY with config.lan (Q2); both absent when proxy is off", async () => {
+  it("config.proxy: proxy.v1 joins BOTH surfaces (set-equal, tail after the load cap); proxy.lan.v1 ONLY with config.lan (Q2); all absent when proxy is off", async () => {
     const lanCfg = { port: 17879, extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
     const caps = async (over: Parameters<typeof config>[0]): Promise<{ browser: string[]; agent: string[] }> => {
       const home = tmp.make("wh-coexist-proxy-");
@@ -196,22 +197,26 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     const off = await caps({});
     expect(off.browser).not.toContain(PROXY_HUB_CAP);
     expect(off.browser).not.toContain(PROXY_LAN_HUB_CAP);
+    expect(off.browser).not.toContain(PROXY_FRAME_HUB_CAP);
+    expect(off.agent).not.toContain(PROXY_FRAME_HUB_CAP);
     const loopbackOnly = await caps({ proxy });
     expect(loopbackOnly.browser).toEqual(loopbackOnly.agent); // 两面同源
     expect(loopbackOnly.browser).toContain(PROXY_HUB_CAP);
     expect(loopbackOnly.browser).not.toContain(PROXY_LAN_HUB_CAP);
     // proxy-off baseline is a strict prefix of the proxy-on set: nothing else moved
-    expect(loopbackOnly.browser.filter((c) => c !== PROXY_HUB_CAP)).toEqual(off.browser);
-    expect(loopbackOnly.browser.at(-1)).toBe(PROXY_HUB_CAP);
+    expect(loopbackOnly.browser.filter((c) => c !== PROXY_HUB_CAP && c !== PROXY_FRAME_HUB_CAP)).toEqual(off.browser);
+    expect(loopbackOnly.browser.slice(-2)).toEqual([PROXY_HUB_CAP, PROXY_FRAME_HUB_CAP]);
     const withLan = await caps({ proxy, lan: lanCfg });
     expect(withLan.browser).toEqual(withLan.agent);
     expect(withLan.browser).toContain(PROXY_HUB_CAP);
     expect(withLan.browser).toContain(PROXY_LAN_HUB_CAP);
-    expect(withLan.browser.indexOf(PROXY_LAN_HUB_CAP)).toBe(withLan.browser.indexOf(PROXY_HUB_CAP) + 1);
+    expect(withLan.browser.slice(-3)).toEqual([PROXY_HUB_CAP, PROXY_LAN_HUB_CAP, PROXY_FRAME_HUB_CAP]);
     // LAN without proxy: no proxy cap at all (the feature is its own gate)
     const lanOnly = await caps({ lan: lanCfg });
     expect(lanOnly.browser).not.toContain(PROXY_HUB_CAP);
     expect(lanOnly.browser).not.toContain(PROXY_LAN_HUB_CAP);
+    expect(lanOnly.browser).not.toContain(PROXY_FRAME_HUB_CAP);
+    expect(lanOnly.agent).not.toContain(PROXY_FRAME_HUB_CAP);
   });
 
   it("config.avatar: avatar.v1 joins BOTH surfaces and stays set-equal", async () => {

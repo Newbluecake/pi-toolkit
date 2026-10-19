@@ -1,10 +1,14 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { engine, identity, waitFor } from "./engine-helpers.js";
+import * as sessionStores from "../../../../src/web-hub/hub/proxy/sessions.js";
+import { CSP } from "../../../../src/web-hub/hub/http.js";
+import { PROXY_STRICT_CSP_BASE, PROXY_TOMBSTONE_RING } from "../../../../src/web-hub/protocol/proxy.js";
 import type { HostSnapshot } from "../../../../src/web-hub/hub/ports.js";
 
 let env: Awaited<ReturnType<typeof engine>>;
 afterEach(async () => {
   await env?.close();
+  vi.restoreAllMocks();
 });
 describe("T-H1/H2/H5/H6 isolated listener", () => {
   it("open → enter → safe 303 + Lax browser-session cookie → filtered echo; code is one-time", async () => {
@@ -184,5 +188,174 @@ describe("T-H1/H2/H5/H6 isolated listener", () => {
     expect(await pending).toBe("closed");
     await waitFor(() => env.up.held === 0);
     expect((await env.http(opened.origin, { headers: { Cookie: cookie } })).status).toBe(401);
+  });
+});
+
+describe("LP1 enter reuse and per-request framing policy", () => {
+  it("20 re-opens/reloads/new-tab redeems reuse one live session and never cut its existing WS", async () => {
+    const storeSpy = vi.spyOn(sessionStores, "createProxySessionStore"); // call-through: real engine/store
+    let now = Date.now();
+    env = await engine({ now: () => now });
+    const opened = await env.open();
+    const { cookie } = await env.enter(opened);
+    const store = storeSpy.mock.results[0]!.value as sessionStores.ProxySessionStore;
+    const rec = store.lookup(cookie.split("=")[1]!, opened.instanceId, opened.origin, { touch: false })!;
+    const hardAt = rec.hardAt;
+    const ws = await env.ws(opened, cookie);
+    expect(ws.text()).toContain("101 Switching Protocols");
+    for (let i = 0; i < 20; i++) {
+      // Preserve the existing 20/min enter bucket: the 21st request is in a fresh window.
+      now += i === 19 ? 60_000 : 1000;
+      const fresh = await env.open();
+      const res = await env.http(fresh.enterUrl, { headers: { Cookie: cookie } });
+      expect(res.status).toBe(303);
+      expect(res.headers["set-cookie"]).toBeUndefined();
+      expect(res.headers.location).toBe("/");
+      expect(store.counts()).toEqual({ codes: 0, sessions: 1 });
+      expect(rec.lastUsedAt).toBe(now);
+      expect(rec.hardAt).toBe(hardAt);
+      expect(ws.socket.destroyed).toBe(false);
+    }
+    expect((await env.http(opened.origin + "/echo", { headers: { Cookie: cookie } })).status).toBe(200);
+    const frame = Buffer.from([0x81, 4, 1, 2, 3, 4]);
+    ws.socket.write(frame);
+    await waitFor(() => Buffer.concat(ws.chunks).includes(frame));
+    expect(env.up.upgraded.size).toBe(1);
+  });
+
+  it("none/conflict cookies and a different login all create a fresh session + Set-Cookie", async () => {
+    const storeSpy = vi.spyOn(sessionStores, "createProxySessionStore");
+    env = await engine();
+    const opened = await env.open();
+    const a = await env.enter(opened); // none
+    const b = await env.enter(await env.open()); // none, same identity but no cookie
+    const store = storeSpy.mock.results[0]!.value as sessionStores.ProxySessionStore;
+    expect(store.counts().sessions).toBe(2);
+    const conflict = await env.http((await env.open()).enterUrl, { headers: { Cookie: `${a.cookie}; ${b.cookie}` } });
+    expect(conflict.status).toBe(303);
+    expect(conflict.headers["set-cookie"]).toHaveLength(1);
+    const replacement = conflict.headers["set-cookie"]![0]!.split(";")[0]!;
+    expect([a.cookie, b.cookie]).not.toContain(replacement);
+    const changedLogin = await env.http((await env.open(undefined, identity(2))).enterUrl, {
+      headers: { Cookie: a.cookie },
+    });
+    expect(changedLogin.status).toBe(303);
+    expect(changedLogin.headers["set-cookie"]).toHaveLength(1);
+    expect(changedLogin.headers["set-cookie"]![0]).not.toContain(a.cookie);
+    expect(store.counts()).toEqual({ codes: 0, sessions: 4 });
+  });
+
+  it.each([false, true])(
+    "valid canonical Host policies on 303/400/401/403/404/405/410/429/503, LAN=%s",
+    async (lan) => {
+      const storeSpy = vi.spyOn(sessionStores, "createProxySessionStore");
+      let now = Date.now();
+      env = await engine({
+        hubPort: 7878,
+        ...(lan ? { lanPort: 7879 } : {}),
+        lan,
+        now: () => now,
+        lanHostSnapshot: () => ({
+          gen: 1,
+          hostKeys: new Set(["dev.local:7879"]),
+          externalOrigins: new Set(),
+          trustProxyFrom: new Set(),
+          omitted: [],
+          computedAt: now,
+        }),
+      });
+      const host = lan ? "dev.local" : "localhost";
+      const opened = await env.open(undefined, identity(), host);
+      // Raw mixed case is canonicalized before constructing the policy; Forwarded is never trusted.
+      const entered = await env.http(opened.enterUrl, {
+        headers: { Host: new URL(opened.origin).host.toUpperCase(), Forwarded: "host=evil.com" },
+      });
+      const cookie = entered.headers["set-cookie"]![0]!.split(";")[0]!;
+      const second = await env.enter(await env.open(undefined, identity(), host));
+      const responses: Array<[number, Awaited<ReturnType<typeof env.http>>]> = [
+        [303, entered],
+        [400, await env.http(opened.origin, { path: "http://evil/" })],
+        [401, await env.http(opened.origin)],
+        [401, await env.http(opened.origin, { headers: { Cookie: `${cookie}; ${second.cookie}` } })],
+        [403, await env.http(opened.origin, { method: "POST", headers: { Cookie: cookie, Origin: "http://evil" } })],
+        [404, await env.http(opened.origin + "/__pwh_proxy__/x")],
+        [405, await env.http(opened.origin, { method: "TRACE" })],
+        [410, await env.http(opened.enterUrl, { headers: { Cookie: cookie } })],
+      ];
+      for (let i = 0; i < 8; i++) await env.http(opened.enterUrl);
+      responses.push([429, await env.http(opened.enterUrl)]);
+      // A tombstone gap is a post-Host enter 503, still frameable (unlike closing 503).
+      now += 60_000;
+      const gapCode = await env.open(undefined, identity(), host);
+      const store = storeSpy.mock.results[0]!.value as sessionStores.ProxySessionStore;
+      for (let i = 0; i <= PROXY_TOMBSTONE_RING; i++)
+        store.revoke({ sel: { sidTag: `unrelated-${i}` }, reason: "logout" });
+      responses.push([503, await env.http(gapCode.enterUrl)]);
+      for (const [status, response] of responses) {
+        expect(response.status).toBe(status);
+        expect(response.headers["content-security-policy"]).toBe(
+          `${PROXY_STRICT_CSP_BASE}; frame-ancestors 'self' http://${host}:7878${lan ? ` http://${host}:7879` : ""}`,
+        );
+        expect(response.headers["x-frame-options"]).toBeUndefined();
+        expect(response.headers["x-content-type-options"]).toBe("nosniff");
+        expect(response.headers["referrer-policy"]).toBe("no-referrer");
+        expect(response.headers["cache-control"]).toBe("no-store");
+      }
+      expect(env.up.connections).toBe(0);
+    },
+  );
+
+  it("17 distinct non-reusing redeems still yield a frameable 429 sessions (no cap increase)", async () => {
+    env = await engine({ hubPort: 7878 });
+    let firstCookie = "";
+    let opened = await env.open();
+    for (let i = 0; i < 16; i++) {
+      const { cookie } = await env.enter(opened);
+      firstCookie ||= cookie;
+      opened = await env.open();
+    }
+    const res = await env.http(opened.enterUrl);
+    expect(res.status).toBe(429);
+    expect(JSON.parse(res.body)).toEqual({ error: "E_RATE", reason: "sessions" });
+    expect(res.headers["content-security-policy"]).toBe(
+      `${PROXY_STRICT_CSP_BASE}; frame-ancestors 'self' http://127.0.0.1:7878`,
+    );
+    expect(res.headers["x-frame-options"]).toBeUndefined();
+    expect((await env.http(opened.origin, { headers: { Cookie: firstCookie } })).status).toBe(200);
+  });
+
+  it("invalid Host 421, closing 503 and WS rejects keep exact strict headers", async () => {
+    env = await engine({ hubPort: 7878, lanPort: 7879 });
+    const opened = await env.open();
+    const { cookie } = await env.enter(opened);
+    const badHost = await env.http(opened.origin, { headers: { Host: "evil:7900" } });
+    expect(badHost.status).toBe(421);
+    expect(badHost.headers["content-security-policy"]).toBe(CSP);
+    expect(badHost.headers["x-frame-options"]).toBe("DENY");
+    for (const [cred, options, status] of [
+      ["", {}, 401],
+      [cookie, { origin: "http://evil" }, 403],
+      [cookie, { upgrade: "h2c" }, 400],
+      [cookie, { path: "/__pwh_proxy__/x" }, 404],
+    ] as const) {
+      const ws = await env.ws(opened, cred, options);
+      expect(ws.text()).toContain(`HTTP/1.1 ${status}`);
+      expect(ws.text()).toContain(`Content-Security-Policy: ${CSP}\r\n`);
+      expect(ws.text()).toContain("X-Frame-Options: DENY\r\n");
+    }
+    // The real close fence destroys connections immediately; invoke its actual request handler
+    // after disposal to cover a request already parsed/queued when close began.
+    await env.service.dispose();
+    const res = { destroyed: false, headersSent: false, writeHead: vi.fn(), end: vi.fn() };
+    env.servers[0]!.emit("request", { headers: { host: new URL(opened.origin).host } }, res);
+    expect(res.writeHead).toHaveBeenCalledWith(503, {
+      "Content-Security-Policy": CSP,
+      "X-Frame-Options": "DENY",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "Cache-Control": "no-store",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    expect(res.end).toHaveBeenCalledWith("Proxy request refused\n");
   });
 });

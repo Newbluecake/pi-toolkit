@@ -53,7 +53,7 @@ function code(r: ProxyMintCodeResult) {
   return r;
 }
 function session(r: ProxyExchangeResult) {
-  if (!r.ok) throw new Error(`exchange failed ${JSON.stringify(r)}`);
+  if (!r.ok || r.reused) throw new Error(`expected a new session: ${JSON.stringify(r)}`);
   return r;
 }
 function live(f: ReturnType<typeof fixture>, instance = "instance-1", id = f.id) {
@@ -349,5 +349,129 @@ describe("T-F4 XA revocation selectors and tombstone gap", () => {
     expect(f.store.lookup(s.sid, "instance-1", f.origin)).toBeUndefined();
     expect(f.store.exchange(c.code, "instance-1", f.origin)).toEqual(invalid);
     off();
+  });
+});
+
+describe("LP1 reuse at enter (link-preview §3)", () => {
+  it("20 sequential fresh-code exchanges reuse one session, touch HTTP activity and preserve hardAt/sockets", () => {
+    const f = fixture();
+    const first = live(f);
+    const hardAt = first.rec.hardAt;
+    const socket = { destroy: vi.fn() };
+    f.store.attach(first.rec, socket);
+    for (let i = 0; i < 20; i++) {
+      f.clock.advance(1000);
+      const c = code(f.mint());
+      const r = f.store.exchange(c.code, "instance-1", f.origin, { reuse: first.rec });
+      expect(r).toEqual({ ok: true, reused: true, rec: first.rec, nextPath: "/app?x=1" });
+      expect(r).not.toHaveProperty("sid");
+      expect(first.rec.lastUsedAt).toBe(f.clock.now());
+      expect(first.rec.hardAt).toBe(hardAt);
+      expect(f.store.exchange(c.code, "instance-1", f.origin, { reuse: first.rec })).toEqual(invalid);
+      expect(f.store.counts()).toEqual({ codes: 0, sessions: 1 });
+    }
+    expect(first.rec.sockets.has(socket)).toBe(true);
+    expect(socket.destroy).not.toHaveBeenCalled();
+    expect(f.onEnd).not.toHaveBeenCalled();
+    expect(f.random).toHaveBeenCalledTimes(22); // 21 codes + ONE sid, no hidden replacement
+  });
+
+  it.each<Partial<AuthIdentity>>([
+    { sidTag: "different-login" },
+    { principal: "different-principal" },
+    { listener: "loopback" },
+    { userId: 2 },
+  ])("identity mismatch %j creates a new session, never replaces the old one", (change) => {
+    const f = fixture();
+    const first = live(f);
+    const c = code(f.mint("instance-1", { ...f.id, ...change }));
+    const r = session(f.store.exchange(c.code, "instance-1", f.origin, { reuse: first.rec }));
+    expect(r.reused).toBe(false);
+    expect(r.sid).not.toBe(first.sid);
+    expect(r.rec).not.toBe(first.rec);
+    expect(f.store.isLive(first.rec)).toBe(true);
+    expect(f.store.counts()).toEqual({ codes: 0, sessions: 2 });
+  });
+
+  it("a code without userId cannot reuse a session with userId", () => {
+    const f = fixture();
+    const first = live(f);
+    const { userId: _userId, ...id } = f.id;
+    const c = code(f.mint("instance-1", id));
+    const r = session(f.store.exchange(c.code, "instance-1", f.origin, { reuse: first.rec }));
+    expect(r.reused).toBe(false);
+    expect(r.rec).not.toBe(first.rec);
+    expect(f.store.counts().sessions).toBe(2);
+  });
+
+  it.each(["dead", "idle", "hard", "foreign-instance", "foreign-origin", "foreign-store"])(
+    "%s candidate cannot be reused, but a fresh valid code still creates a session",
+    (kind) => {
+      const f = fixture();
+      const first = live(f);
+      let reuse = first.rec;
+      let origin = f.origin;
+      if (kind === "dead") f.store.revoke({ sel: { sidTag: f.id.sidTag }, reason: "logout" });
+      if (kind === "idle") f.clock.advance(PROXY_SESSION_IDLE_MS);
+      if (kind === "hard") f.clock.advance(PROXY_SESSION_HARD_MS);
+      if (kind === "foreign-instance") reuse = live(f, "other-instance").rec;
+      if (kind === "foreign-origin") origin = "http://hub.local:7902";
+      if (kind === "foreign-store") reuse = live(fixture()).rec;
+      const c = code(f.store.mintCode(f.store.currentSeq(), f.id, { instanceId: "instance-1", origin, nextPath: "/" }));
+      const r = session(f.store.exchange(c.code, "instance-1", origin, { reuse }));
+      expect(r.reused).toBe(false);
+      expect(r.rec).not.toBe(reuse);
+      expect(r.rec.origin).toBe(origin);
+      expect(f.store.isLive(r.rec)).toBe(true);
+    },
+  );
+
+  it.each(["expired", "revoked", "gap", "wrong-instance", "wrong-origin"])(
+    "%s code still fails with a valid reusable session; it is consumed, never touched",
+    (kind) => {
+      const f = fixture();
+      const first = live(f);
+      // A different identity lets the code be revoked while the reuse candidate stays live.
+      const c = code(f.mint("instance-1", kind === "revoked" ? { ...f.id, sidTag: "revoke-code" } : f.id));
+      if (kind === "expired") f.clock.advance(PROXY_CODE_TTL_MS);
+      if (kind === "revoked") f.store.revoke({ sel: { sidTag: "revoke-code" }, reason: "logout" });
+      if (kind === "gap")
+        for (let i = 0; i <= PROXY_TOMBSTONE_RING; i++)
+          f.store.revoke({ sel: { sidTag: `other-${i}` }, reason: "logout" });
+      const before = first.rec.lastUsedAt;
+      const r = f.store.exchange(
+        c.code,
+        kind === "wrong-instance" ? "wrong" : "instance-1",
+        kind === "wrong-origin" ? "http://wrong:7901" : f.origin,
+        { reuse: first.rec },
+      );
+      expect(r).toEqual(
+        kind === "gap"
+          ? { ok: false, status: 503, error: "E_PROXY_UNAVAILABLE", reason: "revocation-gap", retryable: true }
+          : invalid,
+      );
+      expect(first.rec.lastUsedAt).toBe(before);
+      expect(f.store.isLive(first.rec)).toBe(true);
+      expect(f.store.exchange(c.code, "instance-1", f.origin, { reuse: first.rec })).toEqual(invalid);
+    },
+  );
+
+  it("reuse bypasses a FULL session cap, while the 17th distinct redemption still returns 429", () => {
+    const f = fixture();
+    const all = Array.from({ length: 16 }, () => live(f));
+    const c = code(f.mint());
+    expect(f.store.exchange(c.code, "instance-1", f.origin, { reuse: all[0]!.rec })).toMatchObject({
+      ok: true,
+      reused: true,
+    });
+    const fresh = code(f.mint());
+    expect(f.store.exchange(fresh.code, "instance-1", f.origin)).toEqual({
+      ok: false,
+      status: 429,
+      error: "E_RATE",
+      reason: "sessions",
+    });
+    expect(f.store.counts()).toEqual({ codes: 0, sessions: 16 });
+    for (const s of all) expect(f.store.isLive(s.rec)).toBe(true);
   });
 });

@@ -11,7 +11,12 @@ vi.mock("node:crypto", async (importOriginal) => {
 });
 
 import { timingSafeEqual } from "node:crypto";
-import { createHttpFrontend, CSP } from "../../../src/web-hub/hub/http.js";
+import { createHttpFrontend, CSP, hubCsp } from "../../../src/web-hub/hub/http.js";
+import { createScope } from "../../../src/web-hub/hub/lifecycle.js";
+import { createHostsPort } from "../../../src/web-hub/hub/net-hosts.js";
+import { createKdfAdmission } from "../../../src/web-hub/hub/kdf-admission.js";
+import { createLoginLimiter } from "../../../src/web-hub/hub/ratelimit.js";
+import { fakeKdf, fakeLanStore } from "../contract/fakes.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { fakeDeps, login, makeAgent, makeTmp, openSse, postJson, rawRequest, type FakeDeps } from "./helpers.js";
 
@@ -326,3 +331,77 @@ describe("token file and bind address", () => {
 function tokenOf(d: FakeDeps): string {
   return readFileSync(d.paths.tokenFile, "utf8").trim();
 }
+
+describe("LP1 hub frame-src (link-preview §2.4)", () => {
+  it("proxy off is byte-identical CSP; the exact inclusive range is inserted before frame-ancestors", () => {
+    expect(hubCsp()).toBe(CSP);
+    expect(hubCsp([7900, 7900])).toBe(
+      CSP.replace("frame-ancestors 'none'", "frame-src 'self' http://*:7900; frame-ancestors 'none'"),
+    );
+    const sources = Array.from({ length: 256 }, (_, i) => `http://*:${7900 + i}`).join(" ");
+    expect(hubCsp([7900, 8155])).toBe(
+      CSP.replace("frame-ancestors 'none'", `frame-src 'self' ${sources}; frame-ancestors 'none'`),
+    );
+  });
+
+  it.each([false, true])(
+    "proxy=%s: loopback, LAN and transport-level 421 all get the same CSP, hub still cannot be framed",
+    async (proxy) => {
+      // Real frontend/listeners, fake store/KDF only: no sqlite child or password work needed.
+      const probe = createNetServer();
+      await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+      const lanPort = (probe.address() as { port: number }).port;
+      await new Promise<void>((resolve) => probe.close(() => resolve()));
+      const scope = createScope({ log: deps.log, now: deps.now });
+      const limiter = createLoginLimiter({ now: deps.now });
+      const config = {
+        ...deps.config,
+        ...(proxy ? { proxy: { portRange: [7900, 7902] as [number, number], maxProxies: 8 } } : {}),
+      };
+      try {
+        port = await start({
+          ...deps,
+          config,
+          lan: {
+            cfg: { port: lanPort, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
+            store: fakeLanStore(),
+            kdf: fakeKdf(),
+            limiter,
+            admission: createKdfAdmission({ now: deps.now, isTightened: limiter.isTightened }),
+            hosts: createHostsPort(),
+            scope,
+            onStatus: () => {},
+          },
+        });
+        const status = await fe!.lan!.start();
+        expect(status.state).toBe("on");
+        if (status.state !== "on") throw new Error(`LAN failed: ${JSON.stringify(status)}`);
+        const expected = proxy
+          ? CSP.replace(
+              "frame-ancestors 'none'",
+              "frame-src 'self' http://*:7900 http://*:7901 http://*:7902; frame-ancestors 'none'",
+            )
+          : CSP;
+        const responses = [
+          await rawRequest(port, { path: "/healthz" }),
+          await rawRequest(port, { path: "/api/events" }),
+          await rawRequest(status.port, { path: "/healthz" }),
+          await rawRequest(status.port, { path: "/api/events" }),
+          await rawRequest(status.port, { path: "/", headers: { Host: "evil:1" } }),
+        ];
+        expect(responses.map((r) => r.status)).toEqual([200, 401, 200, 401, 421]);
+        for (const r of responses) {
+          expect(r.headers["content-security-policy"]).toBe(expected);
+          expect(r.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+          expect(r.headers["x-frame-options"]).toBe("DENY");
+        }
+        // The snapshot is computed once at frontend construction, not from mutable config per request.
+        config.proxy = { portRange: [8000, 8001], maxProxies: 8 };
+        expect((await rawRequest(port, { path: "/healthz" })).headers["content-security-policy"]).toBe(expected);
+      } finally {
+        await fe?.close();
+        await scope.dispose();
+      }
+    },
+  );
+});

@@ -59,6 +59,7 @@ import {
   VERSION_HUB_CAP,
   PROXY_HUB_CAP,
   PROXY_LAN_HUB_CAP,
+  PROXY_FRAME_HUB_CAP,
   FSB_HUB_CAP,
 } from "../protocol/version.js";
 import type { HubUiBuildWire } from "../protocol/version-info.js";
@@ -473,6 +474,8 @@ export async function startHub(
       // `privacy.v1`: it never follows whether the LAN listener actually came up). Both cap
       // surfaces share this one array. Tail-appended: proxy off ⇒ caps byte-identical.
       ...(config.proxy === undefined ? [] : [PROXY_HUB_CAP, ...(config.lan === undefined ? [] : [PROXY_LAN_HUB_CAP])]),
+      // Link-preview D1: additive, after the existing proxy caps on both surfaces.
+      ...(config.proxy === undefined ? [] : [PROXY_FRAME_HUB_CAP]),
       ...(config.feishuBot === undefined ? [] : [FSB_HUB_CAP]),
     ];
 
