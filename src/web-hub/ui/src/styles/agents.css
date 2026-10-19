@@ -531,7 +531,10 @@
   position: relative;
 }
 
-.removable > .agent-card {
+/* Only the rows the bottom-right button can reach give up the room: the first row (title, chips,
+ * cost) sits above it, so it keeps the full width and the cost stays right-aligned with plain
+ * cards (2026-10-19 user report: the cost of a removable card sat ~48px left of the others). */
+.removable > .agent-card > :not(.agent-row1) {
   padding-right: calc(60px * var(--fs-scale, 1));
 }
 
