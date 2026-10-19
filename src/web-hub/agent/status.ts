@@ -253,6 +253,15 @@ export function projectFleet(
     if (r.toolTrail !== undefined) row.toolTrail = r.toolTrail;
     if (r.streamLine !== undefined) row.streamLine = r.streamLine;
     if (byId.get(r.runId)?.diag.consultOf !== undefined) row.consult = true;
+    // Per-run context usage: rides the same open slot style as `thinking`/`cacheMark`.
+    // The view-model row already carries diag.contextUsage (fleet-panel `toRow`); null
+    // tokens/percent (pi reported no usage yet) drop the field, never the row. The value
+    // only changes on a fresh sample (message_end/compaction_end/context_switch), so it
+    // flips the fingerprint only on real changes — no per-second churn.
+    const ctxUsage = r.contextUsage;
+    if (ctxUsage !== undefined && ctxUsage.tokens !== null && ctxUsage.percent !== null) {
+      row.ctx = { tokens: ctxUsage.tokens, contextWindow: ctxUsage.contextWindow, percent: ctxUsage.percent };
+    }
     // cache-thread plan §5.3 (U): consult cache mark rides the same open slot
     // style as `thinking` — absent ⇔ no facts; the fingerprint (which keeps
     // these fields) flips only on real changes.

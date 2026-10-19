@@ -25,7 +25,7 @@ import type { FleetRowWire } from "@protocol/messages.js";
 import type { FleetTreeProps } from "../../contracts.js";
 import type { FleetTreeNode } from "../../types.js";
 import "../../styles/fleet.css";
-import { formatDuration, formatUsd, clip } from "../../format.js";
+import { formatDuration, formatUsd, formatKTokens, clip } from "../../format.js";
 import { fleetRowVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
@@ -154,7 +154,9 @@ function cacheMarkOf(row: FleetRowWire): string {
   return typeof m === "string" && m !== "" ? m : "";
 }
 function modelBlockOf(row: FleetRowWire): boolean {
-  return modelShortOf(row) !== "" || thinkingTokenOf(row) !== "";
+  // ctx is rendered inside the model block, so a model-less run with a context sample
+  // still gets the block (the token then stands alone after the separator).
+  return modelShortOf(row) !== "" || thinkingTokenOf(row) !== "" || ctxOf(row) !== null;
 }
 /** Start/end token (`startedAt`/`endedAt` are append-only wire fields; absent ⇒ null ⇒ no token). */
 function timeRangeOf(row: FleetRowWire): TimeRangeLabel | null {
@@ -162,6 +164,18 @@ function timeRangeOf(row: FleetRowWire): TimeRangeLabel | null {
 }
 function costLabelOf(row: FleetRowWire): string {
   return typeof row.costUsd === "number" ? formatUsd(row.costUsd) : "—";
+}
+/** Per-run context-usage token at the END of the model block (`model·thinking · 42%`;
+ *  the full `168k/400k tokens` pair goes to the token's tooltip, same style as the main
+ *  footer). Absent wire field (no sample yet / old agent) ⇒ null ⇒ renders nothing.
+ *  English compact tokens only (UI text split); the percent is shown without decimals. */
+function ctxOf(row: FleetRowWire): { pct: string; title: string } | null {
+  const c = row.ctx;
+  if (c === undefined) return null;
+  return {
+    pct: `${Math.round(c.percent)}%`,
+    title: `${formatKTokens(c.tokens)}/${formatKTokens(c.contextWindow)} tokens`,
+  };
 }
 function highlightOf(row: FleetRowWire): "warn" | "crit" | undefined {
   return row.highlight === "warn" || row.highlight === "crit" ? row.highlight : undefined;
@@ -229,6 +243,9 @@ function isOrphan(row: FleetRowWire): boolean {
             <span v-if="thinkingTokenOf(rowOf(node))" class="model-thinking" translate="no">{{
               thinkingTokenOf(rowOf(node))
             }}</span>
+            <span v-if="ctxOf(rowOf(node)) !== null" class="run-ctx" translate="no" :title="ctxOf(rowOf(node))!.title">
+              · {{ ctxOf(rowOf(node))!.pct }}</span
+            >
           </span>
           <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
           <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>
@@ -301,6 +318,9 @@ function isOrphan(row: FleetRowWire): boolean {
           <span v-if="thinkingTokenOf(rowOf(node))" class="model-thinking" translate="no">{{
             thinkingTokenOf(rowOf(node))
           }}</span>
+          <span v-if="ctxOf(rowOf(node)) !== null" class="run-ctx" translate="no" :title="ctxOf(rowOf(node))!.title">
+            · {{ ctxOf(rowOf(node))!.pct }}</span
+          >
         </span>
         <span class="run-time">{{ formatDuration(displayElapsedMs(rowOf(node))) }}</span>
         <span class="run-cost">{{ costLabelOf(rowOf(node)) }}</span>

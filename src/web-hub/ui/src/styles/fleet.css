@@ -371,6 +371,19 @@ details[open] > summary.run .chev {
   font-family: var(--font-mono);
 }
 
+/* Per-run context % token, glued after `model·thinking` (`model·high · 42%`): same
+ * `flex: none` never-truncated posture as the thinking token, same muted tone; the full
+ * `168k/400k tokens` pair rides the token's `title`. Rendered only when the wire row
+ * carries `ctx` (see FleetTree.vue `ctxOf`). No dedicated narrow-tier drop: real drawers
+ * render at 360–559px where a <360px rule would never fire (pinned by fleet-tree.test.ts),
+ * and the shrink ladder (provider → model id) yields long before the ~5ch token can
+ * overflow the row. */
+.run-model .run-ctx {
+  flex: none;
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
 .run-time {
   grid-area: time;
   min-width: 44px;

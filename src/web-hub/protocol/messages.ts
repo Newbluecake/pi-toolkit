@@ -599,6 +599,13 @@ export interface FleetRowWire {
    *  display-only `diag.consultOf`. Absent ⇔ not a consult run or an old agent (UI falls back to
    *  the generic phase-only line-2 slot). */
   consult?: true;
+  /** Per-run context-window usage (append-only optional field — no proto bump), the same
+   *  shape as `StatusInfo.contextUsage` above: the run's latest `diag.contextUsage` sample
+   *  (sampled on message_end/compaction_end/context_switch; terminal rows keep the last
+   *  pre-terminal sample). Absent ⇔ no sample yet (early in a run) / null tokens/percent /
+   *  old agent — the UI then renders nothing. Rendered as `· NN%` appended to the elapsed
+   *  token with the full `tokens/contextWindow` pair in the tooltip. */
+  ctx?: { tokens: number; contextWindow: number; percent: number };
   /** cache-thread plan §5.3 (U): the consult run's warm/cold compact marker
    *  (`t#2 warm·hit 96%`), precomputed agent-side from diag.consultCache /
    *  diag.consultThread. Append-only optional field — no proto bump; absent ⇔
@@ -1486,6 +1493,9 @@ const FleetRowSchema = Type.Object({
   toolTrail: Type.Optional(Type.String()),
   streamLine: Type.Optional(Type.String()),
   consult: Type.Optional(Type.Literal(true)),
+  // Per-run context usage: same lenient optional-object posture as the other append-only
+  // display fields — never the reason a fleet frame fails to decode.
+  ctx: Type.Optional(Type.Object({ tokens: Type.Number(), contextWindow: Type.Number(), percent: Type.Number() })),
   // cache-thread plan §5.3 (U): append-only optional display fields. Same
   // lenient posture as `thinking` — never the reason a fleet frame fails to
   // decode; the agent-side projection drops empty/oversized values instead.

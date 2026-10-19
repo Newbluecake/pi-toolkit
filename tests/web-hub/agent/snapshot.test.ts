@@ -266,6 +266,31 @@ describe("projectFleet / fleetFingerprint / readStatus", () => {
     );
   });
 
+  it("projects diag.contextUsage onto the wire as `ctx`; absent/null stays absent; flips the fingerprint only on a new sample", () => {
+    const withCtx = snap({
+      diag: diag({ ...snap().diag, contextUsage: { tokens: 168_000, contextWindow: 400_000, percent: 42 } }),
+    });
+    expect(projectFleet([withCtx], 5_000)[0]!.ctx).toEqual({ tokens: 168_000, contextWindow: 400_000, percent: 42 });
+    // no sample yet (early run) ⇒ the key itself is absent (byte-equal to the pre-feature shape)
+    expect("ctx" in projectFleet([snap()], 5_000)[0]!).toBe(false);
+    // null tokens/percent (pi reported no usable usage yet) ⇒ field dropped, the row still projects
+    const nullTokens = snap({
+      diag: diag({ ...snap().diag, contextUsage: { tokens: null, contextWindow: 400_000, percent: 42 } }),
+    });
+    expect("ctx" in projectFleet([nullTokens], 5_000)[0]!).toBe(false);
+    const nullPercent = snap({
+      diag: diag({ ...snap().diag, contextUsage: { tokens: 168_000, contextWindow: 400_000, percent: null } }),
+    });
+    expect("ctx" in projectFleet([nullPercent], 5_000)[0]!).toBe(false);
+    // stable across ticks with the same sample; flips only when a NEW sample lands
+    const a = fleetFingerprint(projectFleet([withCtx], 5_000));
+    expect(fleetFingerprint(projectFleet([withCtx], 65_000))).toBe(a);
+    const newer = snap({
+      diag: diag({ ...snap().diag, contextUsage: { tokens: 200_000, contextWindow: 400_000, percent: 50 } }),
+    });
+    expect(fleetFingerprint(projectFleet([newer], 5_000))).not.toBe(a);
+  });
+
   it("per-second jitter (elapsed/phase ages, live tool duration, thinking frame) does not change the fingerprint", () => {
     const thinking = snap({ phase: "model_turn", diag: { ...snap().diag, phase: "model_turn" } });
     const a = fleetFingerprint(projectFleet([snap(), thinking], 5_000));

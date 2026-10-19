@@ -582,3 +582,61 @@ describe("FleetTree start/end time token (2026-10-18 user pick C)", () => {
     expect(css).toMatch(/\. \. \. meta meta"/);
   });
 });
+
+describe("FleetTree context usage token (wire `ctx`, tail of the model block)", () => {
+  const mountRows = (rows: FleetRowWire[]) => mount(FleetTree, { props: { nodes: buildFleetTree(rows), now: 0 } });
+
+  it("renders `· NN%` (no decimals) after model·thinking, full pair in the tooltip; elapsed keeps just the duration", () => {
+    const w = mountRows([
+      row({
+        runId: "r-ctx",
+        model: "cr-anthropic/claude-sonnet-5",
+        thinking: "high",
+        elapsedMs: 338_000,
+        ctx: { tokens: 168_000, contextWindow: 400_000, percent: 42.4 },
+      }),
+    ]);
+    const model = w.get(".run-model");
+    const ctx = model.get(".run-ctx");
+    expect(ctx.text()).toContain("42%");
+    expect(ctx.text()).not.toContain("42.4");
+    expect(ctx.attributes("title")).toBe("168k/400k tokens");
+    expect(ctx.attributes("translate")).toBe("no");
+    // order: model id → thinking token → ctx token, all inside the model block
+    expect(model.text()).toMatch(/sonnet-5·high\s*·\s*42%/);
+    // the elapsed cell is untouched — no percent appended there
+    expect(w.get(".run-time").text()).toBe("5m38s");
+  });
+
+  it("absent wire field ⇒ no token (early run / old agent); the model block still renders", () => {
+    const w = mountRows([row({ runId: "r-plain", model: "p/m", elapsedMs: 12_000 })]);
+    expect(w.find(".run-ctx").exists()).toBe(false);
+    expect(w.get(".run-model").text()).toContain("m");
+    expect(w.get(".run-time").text()).toBe("12s");
+  });
+
+  it("renders on summary rows (rows with children) too; child without ctx renders nothing", () => {
+    const w = mountRows([
+      row({ runId: "p", model: "p/m", ctx: { tokens: 32_000, contextWindow: 400_000, percent: 8 } }),
+      row({ runId: "c", parentRunId: "p", model: "p/m2" }),
+    ]);
+    expect(w.findAll(".run-ctx")).toHaveLength(1);
+    const summaryCtx = w.get("summary.run .run-model .run-ctx");
+    expect(summaryCtx.text()).toContain("8%");
+    expect(summaryCtx.attributes("title")).toBe("32k/400k tokens");
+  });
+
+  it("a ctx-only row (no model/thinking) still gets the model block so the token is visible", () => {
+    const w = mountRows([row({ runId: "r-only", ctx: { tokens: 1_000, contextWindow: 200_000, percent: 1 } })]);
+    expect(w.get(".run-model .run-ctx").text()).toContain("1%");
+  });
+
+  it("CSS: the token is flex:none inside the model block; no new narrow tier (drawers render at 360–559px, a <360px drop would never fire — pinned)", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/fleet.css"),
+      "utf8",
+    );
+    expect(css).toMatch(/\.run-model \.run-ctx\s*\{[^}]*flex:\s*none;/s);
+    expect(css).not.toMatch(/@container\s*\(max-width:\s*359px\)/);
+  });
+});
