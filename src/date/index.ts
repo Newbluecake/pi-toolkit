@@ -31,6 +31,9 @@
  * 子会话收不到 `session_start`（见 src/child/wire.ts 的事实注记），故
  * before_agent_start/turn_end 首次触发时也会懒播种一次。
  *
+ * 可见性（用户拍板 2026-10-19）：两条通道都 `display: true`（TUI 用 `renderer.ts` 的单行
+ * 暗色标记渲染，web 端 `TxDate` 居中虚线分隔条）；发给模型的 `content` 与此前逐字节一致。
+ *
  * 主会话 + 子 agent 会话都注入（pre-guard 注册，参照 web_search/todo/memory），
  * 因此**没有** print/json 模式门。所有可变状态都在 wireDate 闭包内（每次
  * activate() 重建，无模块级状态）；无计时器，纯事件驱动。
@@ -46,6 +49,7 @@ import {
   idleReinjectDue,
   type DateTimeSource,
 } from "./core.js";
+import { renderDateMessage } from "./renderer.js";
 
 export interface DateWireOpts {
   /** `date.enabled`；false ⇒ 零注册零行为（调用方也可直接不调用）。 */
@@ -96,6 +100,10 @@ export function wireDate(pi: ExtensionAPI, opts: DateWireOpts): void {
   if (!opts.enabled) return; // date.enabled=false ⇒ 零注册零行为
   const source: DateTimeSource = createDateTimeSource({ timeZone: opts.timeZone });
   const now = opts.now ?? (() => Date.now());
+  // 紧凑 TUI 渲染器（探测式注册：缺 API 的宿主退回 pi 默认的 custom message 渲染）。
+  if (typeof pi.registerMessageRenderer === "function") {
+    pi.registerMessageRenderer(DATE_CUSTOM_TYPE, renderDateMessage);
+  }
   // 去重状态（activate() 闭包内）：首轮是否仍待注入 + 最后注入的日期键/时刻。
   let firstTurnPending = true;
   let seeded = false;
@@ -143,7 +151,7 @@ export function wireDate(pi: ExtensionAPI, opts: DateWireOpts): void {
       message: {
         customType: DATE_CUSTOM_TYPE,
         content: crossDay ? crossDayContent(source.marker(at)) : firstTurnContent(source.marker(at)),
-        display: false,
+        display: true,
         details: { date: key, kind: crossDay ? "cross-day" : idleDue ? "idle" : "first", at },
       },
     };
@@ -165,7 +173,7 @@ export function wireDate(pi: ExtensionAPI, opts: DateWireOpts): void {
         {
           customType: DATE_CUSTOM_TYPE,
           content: crossDayContent(source.marker(at)),
-          display: false,
+          display: true,
           details: { date: key, kind: "cross-day", at },
         },
         { triggerTurn: false },

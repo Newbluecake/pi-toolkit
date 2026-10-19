@@ -287,6 +287,55 @@ describe("state.reduce", () => {
     expect(A(s).items.filter((i) => i.message?.role === "custom")).toHaveLength(2);
   });
 
+  it("date-marker: subagent:date entries show even when persisted display:false; other display:false customs stay hidden", () => {
+    const dateEntry = (id: string, display: boolean | undefined) => ({
+      id,
+      parentId: null,
+      type: "custom_message",
+      timestamp: "t",
+      customType: "subagent:date",
+      content: "[date] 2026-10-19 Mon 14:12 (Asia/Shanghai)",
+      ...(display === undefined ? {} : { display }),
+    });
+    const s = loaded({
+      entries: [
+        userEntry("e1", 1000),
+        dateEntry("d1", false),
+        dateEntry("d2", true),
+        {
+          id: "h",
+          parentId: null,
+          type: "custom_message",
+          timestamp: "t",
+          customType: "x",
+          content: "no",
+          display: false,
+        },
+      ],
+    });
+    expect(A(s).items.map((i) => i.entryId)).toEqual(["e1", "d1", "d2"]);
+    // live path: message_end with role custom
+    const live = (display: boolean, customType: string) => ({
+      role: "custom",
+      customType,
+      content: "[date] 2026-10-19 Mon 14:12 (Asia/Shanghai)",
+      display,
+    });
+    const s2 = run(
+      [
+        ev(10, { type: "message_end", message: live(false, "subagent:date") }),
+        ev(11, { type: "message_end", message: live(false, "subagent:other") }),
+        ev(12, { type: "message_end", message: live(true, "subagent:other") }),
+      ],
+      loaded(),
+    );
+    expect(
+      A(s2)
+        .items.filter((i) => i.message?.role === "custom")
+        .map((i) => i.message.customType),
+    ).toEqual(["subagent:date", "subagent:other"]);
+  });
+
   it("ev before history is ignored (hub replays buffered ev after history)", () => {
     const s = run([
       { event: "hello", data: { clientId: "c1" } },

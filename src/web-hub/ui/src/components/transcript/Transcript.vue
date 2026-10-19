@@ -49,6 +49,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import ToolCard from "./ToolCard.vue";
 import TxAssistant from "./TxAssistant.vue";
 import TxCustom from "./TxCustom.vue";
+import TxDate from "./TxDate.vue";
 import TxDivider from "./TxDivider.vue";
 import TxHiddenGap from "./TxHiddenGap.vue";
 import TxUser from "./TxUser.vue";
@@ -564,6 +565,11 @@ function saveScrollMemory(): void {
         >
           <ToolCard :view="entry.view" />
         </div>
+        <TxDate
+          v-else-if="entry.type === 'date'"
+          :marker="entry.marker"
+          :data-anchor-ids="anchorAttr(view.start + i)"
+        />
         <TxCustom
           v-else-if="entry.type === 'custom'"
           :custom-type="entry.customType"

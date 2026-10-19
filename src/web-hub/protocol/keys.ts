@@ -39,6 +39,21 @@ export function customKey(customType: string, payload: unknown): string {
  */
 export const WEB_TOOL_TIMING_ENTRY_TYPE = "subagent:web-tool-timing";
 
+/** `subagent:date` (src/date/core.ts DATE_CUSTOM_TYPE; protocol stays pi/src-free): the only
+ *  custom_message type whose `details` subset rides the wire (date-marker plan). */
+export const WEB_DATE_ENTRY_TYPE = "subagent:date";
+
+/** Bounded, sanitized `{date, kind, at}` subset of a date entry's details (≤3 short fields). */
+function dateDetails(raw: unknown): WireEntry["details"] | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: NonNullable<WireEntry["details"]> = {};
+  if (typeof r.date === "string" && r.date.length <= 16) out.date = r.date;
+  if (typeof r.kind === "string" && r.kind.length <= 16) out.kind = r.kind;
+  if (typeof r.at === "number" && Number.isFinite(r.at)) out.at = r.at;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Wire-side cap for one projected `timing` map (write side caps at the same number). */
 export const TOOL_TIMING_WIRE_PAIRS = 256;
 
@@ -150,6 +165,10 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
         content: truncateDeep(r.content, flag),
       };
       if (typeof r.display === "boolean") entry.display = r.display;
+      if (r.customType === WEB_DATE_ENTRY_TYPE) {
+        const details = dateDetails(r.details);
+        if (details !== undefined) entry.details = details;
+      }
       return finish(entry, flag);
     }
     case "custom": {

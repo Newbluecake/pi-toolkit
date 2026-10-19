@@ -95,6 +95,41 @@ export function crossDayContent(marker: string): string {
   return `${marker} — ${CROSS_DAY_NOTE}，${TIME_AS_OF_NOTE}`;
 }
 
+/** 注入类型（`details.kind`）：首轮 / 跨日 / 同日闲置重注入。 */
+export type DateInjectionKind = "first" | "cross-day" | "idle";
+
+export interface ParsedDateMarker {
+  readonly date: string;
+  readonly weekday: string;
+  readonly time: string;
+  readonly zone: string;
+}
+
+const MARKER_RE = /^\[date\] (\d{4}-\d{2}-\d{2}) ([A-Za-z]{3}) (\d{2}:\d{2}) \(([^)]+)\)/;
+
+/** 解析注入内容开头的 `[date] YYYY-MM-DD Ddd HH:MM (TZ)` 标记（TUI 渲染器用；解析失败 ⇒ undefined）。 */
+export function parseDateMarker(content: string): ParsedDateMarker | undefined {
+  const m = MARKER_RE.exec(content);
+  if (!m) return undefined;
+  const [, date, weekday, time, zone] = m;
+  if (date === undefined || weekday === undefined || time === undefined || zone === undefined) return undefined;
+  return { date, weekday, time, zone };
+}
+
+/** TUI 紧凑标记的后缀（English tokens only）：首轮 `session start`、跨日 `new day`、闲置 `idle`。 */
+export function dateKindSuffix(kind: unknown): string {
+  switch (kind) {
+    case "first":
+      return "session start";
+    case "cross-day":
+      return "new day";
+    case "idle":
+      return "idle";
+    default:
+      return "";
+  }
+}
+
 export function createDateTimeSource(opts: DateTimeSourceOpts = {}): DateTimeSource {
   const zone: TimeZoneLabel = (() => {
     if (typeof opts.timeZone === "string" && opts.timeZone !== "") {

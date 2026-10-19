@@ -65,6 +65,10 @@ export interface WireEntry {
    *  `{[toolCallId]: durationMs}` map here (the entry otherwise stays a display:false tombstone —
    *  never a transcript row). Absent on every other entry shape; ≤ TOOL_TIMING_WIRE_PAIRS pairs. */
   timing?: Record<string, number>;
+  /** `subagent:date` custom_message only: the bounded `{date, kind, at}` subset of `details`
+   *  (kind ∈ first|cross-day|idle) so the web divider can label the injection. Absent on every
+   *  other entry shape; old entries without details degrade to a content-only parse. */
+  details?: { date?: string; kind?: string; at?: number };
   display?: boolean;
   truncated?: boolean;
   provider?: string; // model_change

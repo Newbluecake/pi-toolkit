@@ -242,6 +242,29 @@ describe("projectSessionEntry over the fixture", () => {
     });
   });
 
+  it("date-marker: subagent:date custom_message carries only the sanitized {date, kind, at} details; others never do", () => {
+    const base = {
+      id: "d1",
+      parentId: null,
+      type: "custom_message",
+      timestamp: "2026-10-19T06:12:00.000Z",
+      content: "[date] 2026-10-19 Mon 14:12 (Asia/Shanghai)",
+      display: false,
+    };
+    const e = projectSessionEntry({
+      ...base,
+      customType: "subagent:date",
+      details: { date: "2026-10-19", kind: "idle", at: 1_792_000_000_000, secret: "x", junk: { a: 1 } },
+    })!;
+    expect(e.details).toEqual({ date: "2026-10-19", kind: "idle", at: 1_792_000_000_000 });
+    expect(e.display).toBe(false);
+    expect(projectSessionEntry({ ...base, customType: "subagent:date" })!.details).toBeUndefined();
+    expect(projectSessionEntry({ ...base, customType: "subagent:date", details: "str" })!.details).toBeUndefined();
+    expect(
+      projectSessionEntry({ ...base, customType: "probe:custom", details: { kind: "idle" } })!.details,
+    ).toBeUndefined();
+  });
+
   it("projects the three messages with their timestamps intact", () => {
     expect(projected[5]!.message).toMatchObject({ role: "user", timestamp: 1790342521100 });
     expect(projected[6]!.message).toMatchObject({

@@ -1176,6 +1176,13 @@ function applySession(a, session) {
 // ---------------------------------------------------------------------------
 
 /**
+ * `[date]` injections (src/date) used to be emitted `display:false`; they are user-visible now,
+ * and old persisted entries still carry `display:false` — the date divider shows them anyway
+ * (date-marker plan). Every other `display:false` custom stays hidden.
+ */
+const DATE_CUSTOM_TYPE = "subagent:date";
+
+/**
  * @param {any} entry
  * @returns {Omit<Item, "id"> | undefined}
  */
@@ -1187,7 +1194,7 @@ function entryItem(entry) {
       if (!entry.message || typeof entry.message !== "object") return undefined;
       return { ...base, kind: "message", message: entry.message, key: messageKey(entry.message) };
     case "custom_message":
-      if (entry.display === false) return undefined;
+      if (entry.display === false && entry.customType !== DATE_CUSTOM_TYPE) return undefined;
       return { ...base, kind: "custom", entry };
     case "compaction":
       return { ...base, kind: "compaction", entry };
@@ -1367,7 +1374,7 @@ function messageItem(m, keys, id, seq) {
     if (keys.has(key)) return undefined;
     keys.add(key);
   }
-  if (m.role === "custom" && m.display === false) return undefined;
+  if (m.role === "custom" && m.display === false && m.customType !== DATE_CUSTOM_TYPE) return undefined;
   /** @type {Item} */
   const it = { id, kind: "message", message: m, truncated: m.truncated === true };
   if (key !== undefined) it.key = key;

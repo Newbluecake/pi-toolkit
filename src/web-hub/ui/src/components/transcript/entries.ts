@@ -14,6 +14,7 @@ import { safeJson, toolView } from "@logic/tools.js";
 import { resultText, messageKey } from "@logic/state.js";
 import type { Item, ToolView } from "../../types.js";
 import type { TranscriptSource } from "../../contracts.js";
+import { DATE_CUSTOM_TYPE, parseDateMarker, type DateMarker } from "../../logic/dateMarker.js";
 import { indexTools, type ToolIndex } from "./tool-index.js";
 
 export type AssistantBlockView =
@@ -41,6 +42,11 @@ export type TxEntry =
       readonly customType: string;
       readonly text: string;
       readonly truncated: boolean;
+    }
+  | {
+      readonly type: "date";
+      readonly key: string;
+      readonly marker: DateMarker;
     }
   | {
       readonly type: "user";
@@ -131,6 +137,10 @@ function itemEntry(it: Item, idx: ToolIndex): TxEntry | undefined {
       const content = it.entry?.content;
       const text = typeof content === "string" ? content : resultText({ content }) || safeJson(content, true);
       const customType = it.entry?.customType;
+      if (customType === DATE_CUSTOM_TYPE) {
+        const marker = parseDateMarker(text, it.entry?.details);
+        if (marker) return { type: "date", key: it.id, marker };
+      }
       return {
         type: "custom",
         key: it.id,
@@ -163,8 +173,12 @@ function itemEntry(it: Item, idx: ToolIndex): TxEntry | undefined {
       return { type: "toolOrphan", key: it.id, view: toolView(undefined, m, undefined, idx.durations) as ToolView };
     }
     case "custom": {
-      if (m.display === false) return undefined;
       const customType = m.customType;
+      if (m.display === false && customType !== DATE_CUSTOM_TYPE) return undefined;
+      if (customType === DATE_CUSTOM_TYPE) {
+        const marker = parseDateMarker(messageText(m), m.details);
+        if (marker) return { type: "date", key: it.id, marker };
+      }
       return {
         type: "custom",
         key: it.id,

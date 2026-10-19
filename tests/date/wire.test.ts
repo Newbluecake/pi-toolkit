@@ -79,7 +79,7 @@ describe("date wire", () => {
     expect(first.message).toEqual({
       customType: DATE_CUSTOM_TYPE,
       content: MARKER_DAY1,
-      display: false,
+      display: true,
       details: { date: "2026-10-15", kind: "first", at: T_DAY1 },
     });
     // 同日且 <1h 的第二轮：不重复注入。
@@ -103,7 +103,7 @@ describe("date wire", () => {
       message: {
         customType: DATE_CUSTOM_TYPE,
         content: `${MARKER_DAY2} — 当前日期已变更，时间为注入时刻`,
-        display: false,
+        display: true,
         details: { date: "2026-10-16", kind: "cross-day", at: T_DAY2 },
       },
       options: { triggerTurn: false },
@@ -353,5 +353,20 @@ describe("date wire", () => {
     t = T_DAY2 + 30 * 60 * 1000 + DATE_REINJECT_IDLE_MS;
     const idle = fire(pi, "before_agent_start", ctx()) as { message: { details: { kind: string } } };
     expect(idle.message.details.kind).toBe("idle");
+  });
+
+  it("idle re-injection is visible too (display:true, details.kind idle, content stays the bare marker)", () => {
+    const pi = mockPi();
+    let t = T_DAY1;
+    wireDate(pi.pi, { enabled: true, now: () => t, timeZone: TZ });
+    fire(pi, "before_agent_start", ctx());
+    t = T_DAY1_IDLE;
+    const idle = fire(pi, "before_agent_start", ctx()) as { message: SentCall["message"] };
+    expect(idle.message).toEqual({
+      customType: DATE_CUSTOM_TYPE,
+      content: MARKER_DAY1_IDLE,
+      display: true,
+      details: { date: "2026-10-15", kind: "idle", at: T_DAY1_IDLE },
+    });
   });
 });

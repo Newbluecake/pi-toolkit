@@ -71,6 +71,40 @@
   background: var(--c-border);
 }
 
+/* [date] injection (TxDate.vue, layout A): centered dashed divider + muted note. */
+.tx-date {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.tx-date-line {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: var(--sp-3);
+}
+
+.tx-date-line::before,
+.tx-date-line::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed var(--c-border);
+}
+
+.tx-date-text {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.tx-date-note {
+  opacity: 0.8;
+  text-align: center;
+}
+
 details.tx-divider-wrap > summary {
   list-style: none;
   cursor: pointer;
