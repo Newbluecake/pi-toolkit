@@ -1088,6 +1088,8 @@ export interface LanRuntime {
   crossSiteGate?: boolean;
   routes: RouteSet;
   lanSse: SseHub;
+  /** Weak keys avoid retaining disconnected SSE clients; holds only the resolved IP. */
+  sseClientIps?: WeakMap<SseClient, string>;
   ui: UiServer;
   now: () => number;
   version: () => string;
@@ -1244,10 +1246,14 @@ async function serveVersionInfo(
   }
 }
 
-function sharedTouchSession(rt: LanRuntime, sidHash: string): Promise<LanSessionRecord | undefined> | "busy" {
+function sharedTouchSession(
+  rt: LanRuntime,
+  sidHash: string,
+  ip: string,
+): Promise<LanSessionRecord | undefined> | "busy" {
   let entry = rt.sidInflight.get(sidHash);
   if (entry === undefined) {
-    const promise = rt.lan.store.touchSession(sidHash, rt.now()).finally(() => {
+    const promise = rt.lan.store.touchSession(sidHash, rt.now(), { ip }).finally(() => {
       rt.sidInflight.delete(sidHash);
     });
     entry = { promise, waiters: 1 };
@@ -1276,9 +1282,13 @@ function touchForExpiryRecheck(
   store: LanFrontendDeps["store"],
   sidHash: string,
   now: number,
+  ip?: string,
 ): Promise<LanSessionRecord | undefined> {
+  const opts = ip === undefined ? {} : { ip };
   const reserved = (store as { touchSessionReserved?: LanFrontendDeps["store"]["touchSession"] }).touchSessionReserved;
-  return typeof reserved === "function" ? reserved.call(store, sidHash, now) : store.touchSession(sidHash, now);
+  return typeof reserved === "function"
+    ? reserved.call(store, sidHash, now, opts)
+    : store.touchSession(sidHash, now, opts);
 }
 
 /** §4.2 "SSE 到期复核" (LC review fix, lan-plan.md §15.9 #3): a 55s tick, independent of `sse.ts`'s
@@ -1314,7 +1324,7 @@ export async function recheckLanSseExpiry(rt: LanRuntime): Promise<void> {
     const auth = client.auth;
     let rec: LanSessionRecord | undefined;
     try {
-      rec = await touchForExpiryRecheck(rt.lan.store, auth.sidHash, rt.now());
+      rec = await touchForExpiryRecheck(rt.lan.store, auth.sidHash, rt.now(), rt.sseClientIps?.get(client));
     } catch (err) {
       rt.log.error("web-hub lan http: sse expiry recheck touchSession failed, keeping connection", {
         error: String(err),
@@ -1455,7 +1465,7 @@ async function requireLanSession(
             throw new LanAuthFailure(429, "E_RATE");
           }
         }
-        const touched = sharedTouchSession(rt, sidHash);
+        const touched = sharedTouchSession(rt, sidHash, ctx.clientIp);
         if (touched === "busy") throw new LanAuthFailure(429, "E_RATE");
         let rec: LanSessionRecord | undefined;
         try {
@@ -2083,6 +2093,7 @@ async function handleLanRequestInner(
       });
       // §4.2 review fix (LC #1): a db-independent hard ceiling — cleared on the connection's own
       // `close` (natural disconnect, logout/passwd revoke, or the 55s tick's own "expired" revoke).
+      rt.sseClientIps?.set(client, ctx.clientIp);
       scheduleAbsoluteExpiry(rt, client, session.absoluteExpiresAt);
       res.once("close", () => clearAbsoluteExpiry(rt, client.id));
       return;
@@ -2979,6 +2990,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       lan,
       routes: lanRoutes,
       lanSse,
+      sseClientIps: new WeakMap(),
       ui,
       now,
       version: () => deps.info().version,
@@ -3041,7 +3053,13 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     const inFlightStartAborts = new Set<AbortController>();
 
     function withAllowlist(s: LanStatus): LanStatus {
-      return s.state === "on" && clientAllow.active ? { ...s, allowClients: clientAllow.snapshot() } : s;
+      return s.state === "on"
+        ? {
+            ...s,
+            ...(clientAllow.active ? { allowClients: clientAllow.snapshot() } : {}),
+            ...(lan.loginIpsRebuiltAt === undefined ? {} : { loginIpsRebuiltAt: lan.loginIpsRebuiltAt }),
+          }
+        : s;
     }
 
     function extraWarnings(): string[] {

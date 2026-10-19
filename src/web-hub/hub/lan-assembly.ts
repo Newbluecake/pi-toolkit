@@ -49,7 +49,12 @@ export class LanAssemblyOffError extends Error {
 
 export const defaultLanAssembly: LanAssembly = {
   async build({ cfg, paths, log, now, scope, onStatus }): Promise<LanFrontendDeps> {
-    const result = await createLanStore({ dbFile: paths.dbFile, log, now });
+    const result = await createLanStore({
+      dbFile: paths.dbFile,
+      log,
+      now,
+      ...(cfg.sessionIdleMs === undefined ? {} : { idleMs: cfg.sessionIdleMs }),
+    });
     if (!result.ok) {
       throw new LanAssemblyOffError(result.reason, result.detail);
     }
@@ -70,6 +75,7 @@ export const defaultLanAssembly: LanAssembly = {
     const admission = createKdfAdmission({ now, isTightened: () => limiter.isTightened() });
 
     return {
+      ...(result.loginIpsRebuilt ? { loginIpsRebuiltAt: now() } : {}),
       cfg,
       store,
       kdf: createKdf(),

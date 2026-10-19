@@ -1159,6 +1159,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (settings.lan.allowClientsDenyAll === true) lan.allowClients = [];
       else if (settings.lan.allowClients !== undefined && settings.lan.allowClients.length > 0)
         lan.allowClients = settings.lan.allowClients;
+      if (settings.lan.sessionIdleMinutes !== undefined) lan.sessionIdleMs = settings.lan.sessionIdleMinutes * 60_000;
       config.lan = lan;
     }
     // web-hub-spawn §SP2: only an explicitly enabled spawn block reaches the hub — `undefined`

@@ -124,6 +124,37 @@ describe("wireWebHub — LAN spawn config (plan §11 LE row: lan off ⇒ P1 深�
   });
 });
 
+describe("LAN-I security settings forwarding", () => {
+  it.each([
+    [{ allowClients: ["192.0.2.0/24"] }, { allowClients: ["192.0.2.0/24"] }],
+    [{ allowClients: [], allowClientsDenyAll: true }, { allowClients: [] }],
+    [{ allowClients: [] }, {}],
+    [{ sessionIdleMinutes: 5 }, { sessionIdleMs: 300000 }],
+  ])("forwards only effective consumer settings: %j", async (extra, expected) => {
+    const spawnImpl = vi.fn(() => ({ on: () => undefined, unref: () => undefined }) as never);
+    const settings: WebHubSettings = {
+      ...SETTINGS,
+      autoStart: true,
+      nodeLoader: fakeNodeLoader(),
+      lan: { enabled: true, port: 7879, extraHosts: [], trustProxyFrom: [], externalOrigins: [], ...extra },
+    };
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ settings, netConnect: enoentConnect(), spawnImpl }));
+    fire("session_start", { type: "session_start", reason: "startup" }, fakeCtx({ mode: "tui" }).ctx);
+    await flush();
+    await flush();
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    const env = (spawnImpl.mock.calls[0] as unknown as [string, string[], { env: Record<string, string> }])[2].env;
+    expect(JSON.parse(env.PI_WEBHUB_CONFIG).lan).toEqual({
+      port: 7879,
+      extraHosts: [],
+      trustProxyFrom: [],
+      externalOrigins: [],
+      ...expected,
+    });
+  });
+});
+
 describe("wireWebHub — control.lan.statusLines() (plan §9.3, reads hub.json directly)", () => {
   it("settings on, hub.json has no lan key ⇒ 未生效 mismatch line with the hub pid", () => {
     writeFileSync(pathsIn(tmp.dir).hubJson, JSON.stringify({ pid: 4321, port: 7878 }));

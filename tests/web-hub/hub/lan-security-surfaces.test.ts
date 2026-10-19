@@ -87,12 +87,15 @@ describe("P0 security event and audit surfaces", () => {
     auditLan2fa(log, { phase: "admin", op: "repair", ok: true, ip: "must-not-log", ...secrets });
     expect(log.info).toHaveBeenLastCalledWith("lan-2fa", { audit: "lan-2fa", op: "repair", ok: true });
   });
-  it("production additions throw explicitly, not success/fake state", async () => {
+  it("unused compatibility stubs still refuse; B repair is async and honours cancellation", async () => {
     const stubs = unimplementedLanSecurityStore();
     expect(Object.keys(stubs)).toHaveLength(15);
     for (const fn of Object.values(stubs)) expect(() => fn()).toThrow("not implemented");
-    await expect(
-      repairLan2fa({ dbFile: "/not-opened", log: { info: () => {}, warn: () => {}, error: () => {} } }),
-    ).rejects.toThrow("repair not implemented");
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    await expect(repairLan2fa({ dbFile: "/not-opened", log, signal: AbortSignal.abort() })).resolves.toEqual({
+      ok: false,
+      reason: "db-timeout",
+    });
+    expect(log.info).toHaveBeenCalledWith("lan-2fa", { audit: "lan-2fa", op: "repair", ok: false });
   });
 });

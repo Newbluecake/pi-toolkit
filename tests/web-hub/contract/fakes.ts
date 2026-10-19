@@ -259,7 +259,7 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       factors.set(input.userId, f);
       pending.delete(input.userId);
       if (first) ips.clear();
-      return { ok: true, recoveryCodes: recovery(f) };
+      return { ok: true, recoveryCodes: f.codes.size === 0 ? recovery(f) : [] };
     },
     async verifyTotp(input) {
       const f = factors.get(input.userId);

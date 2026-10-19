@@ -11,9 +11,9 @@ Each package's own wiring request: `docs/dev/web-hub/lan-security-wiring-<PKG>.m
 
 ## From B (verified conditional pass)
 
-- Update the stale P0 assertion `tests/web-hub/hub/lan-security-surfaces.test.ts:92-96` (repairLan2fa no longer throws).
-- Fake store parity: `tests/web-hub/contract/fakes.ts` `commitTotp` must return `recoveryCodes: []` when a set exists (addendum #4).
-- Optional hardening: repair when the DB file is missing; self-eviction edge in the 32-session trim.
+- **Closed (LAN-I/B):** Updated the stale P0 assertion `tests/web-hub/hub/lan-security-surfaces.test.ts:92-96` (repairLan2fa no longer throws).
+- **Closed (LAN-I/B):** Fake store parity: `tests/web-hub/contract/fakes.ts` `commitTotp` returns `recoveryCodes: []` when a set exists (addendum #4), including an exhausted set; shared fake + real SQLite contract suite added.
+- **Deferred (optional, outside wiring):** repair when the DB file is missing; self-eviction edge in the 32-session trim. No change to B's verified implementation in this phase.
 
 ## From C (conditional pass, rework in progress)
 
