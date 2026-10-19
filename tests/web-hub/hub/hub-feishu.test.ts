@@ -51,6 +51,7 @@ const botConfig = normalizeFeishuBotHubConfig({ ...FEISHU_BOT_DEFAULTS, debounce
 async function rig(
   opts: {
     enabled?: boolean;
+    lan?: boolean;
     credentials?: boolean;
     spawn?: boolean;
     frontend?: FrontendFactory;
@@ -106,6 +107,7 @@ async function rig(
     config({
       home,
       idleExitMinutes: 1,
+      ...(opts.lan ? { lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } } : {}),
       ...(opts.enabled === false ? {} : { feishuBot: botConfig }),
       ...(opts.spawn
         ? {
@@ -185,6 +187,21 @@ async function rig(
 }
 
 describe("FA real hub composition + fake Feishu transports", () => {
+  it("LAN assembly shares one security bus and wires the live Feishu approval decision sink", async () => {
+    const r = await rig({ lan: true, credentials: true });
+    const lan = r.frontendDeps.lan!;
+    expect(lan.security).toBe(r.botDeps.security);
+    expect(lan.security).toBeDefined();
+    expect(lan.approval).toBe(r.service.approval);
+    const decision = vi.fn();
+    lan.onLoginCore!({ onApprovalDecision: decision } as never);
+    r.botDeps.onApprovalDecision!("challenge", true, 7);
+    expect(decision).toHaveBeenCalledWith("challenge", true, 7);
+    lan.onLoginCore!(undefined);
+    r.botDeps.onApprovalDecision!("late", true, 7);
+    expect(decision).toHaveBeenCalledTimes(1);
+  });
+
   it("off: no service, caps, bot disk, transports or admin bus traffic; limiter remains available to HTTP", async () => {
     const wrap = vi.fn((s: FeishuBotService) => s);
     const r = await rig({ enabled: false, wrap });

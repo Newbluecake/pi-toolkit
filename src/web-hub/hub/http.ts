@@ -1751,6 +1751,7 @@ async function handleLanRequestInner(
   if (rt.proxy !== undefined && isProxyApiPath(path)) {
     const proxyIo: ProxyRouteIo = {
       listener: "lan",
+      ip: ctx.clientIp,
       expectedOrigin: ctx.externalOrigin,
       browserHost: proxyBrowserHost(ctx.hostKey),
       viaTrustedProxy: ctx.viaTrustedProxy,
@@ -3129,7 +3130,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       limiter: lan.limiter,
       admission: lan.admission,
       secondFactorEnabled: lan.secondFactorEnabled === true,
-      approval: { request: async () => "unavailable", close() {} },
+      approval: lan.approval ?? { request: async () => "unavailable", close() {} },
       security: lan.security ?? createSecurityEventBus(log),
       authRevoke,
       revokeSse: (hash) => {
@@ -3154,10 +3155,12 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     });
     lan.scope.defer(() => rt.sessions?.dispose());
     rt.loginCore = loginCore;
+    lan.onLoginCore?.(loginCore);
     const offLoginRevoke = authRevoke.subscribe((ev) => loginCore.onRevoke(ev));
     lan.scope.defer(() => {
       offLoginRevoke();
       loginCore.dispose();
+      lan.onLoginCore?.(undefined);
     });
     const connGuard = createConnGuard();
     let handle: LanListenerHandle | undefined;
@@ -3296,6 +3299,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         inFlightStartAborts.clear();
         offLoginRevoke();
         loginCore.dispose();
+        lan.onLoginCore?.(undefined);
         rt.sessions?.dispose();
         unsubscribeLanBus();
         lanSse.closeAll();

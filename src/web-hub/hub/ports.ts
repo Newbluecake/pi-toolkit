@@ -120,6 +120,9 @@ export interface LanFrontendDeps {
   security?: SecurityEventBus;
   /** Internal rollout gate, NOT a setting. Production stays false until E/F/G and caps land. */
   secondFactorEnabled?: boolean;
+  approval?: LoginApprovalPort;
+  /** Core registration for the late-bound Feishu decision sink. Cleared on dispose. */
+  onLoginCore?(core: LanLoginCore | undefined): void;
   cfg: HubLanConfig;
   store: LanStorePort; // §4
   kdf: KdfPort; // §5.1

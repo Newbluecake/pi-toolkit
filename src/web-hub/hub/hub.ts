@@ -523,6 +523,8 @@ export async function startHub(
     let worktreeDiffRoutes: ReturnType<typeof createWorktreeDiffRoutes> | undefined = undefined;
     let worktreeGraphRoutes: ReturnType<typeof createWorktreeGraphRoutes> | undefined = undefined;
     let lanDeps: LanFrontendDeps | undefined = undefined;
+    let lanLoginCore: import("./ports.js").LanLoginCore | undefined;
+    const security = config.lan === undefined ? undefined : createSecurityEventBus(log);
     // web-hub-version plan §3.7: assigned just before the frontend is built; close() may run
     // earlier (admin close during startup), hence `?.` there.
     let versionService: ReturnType<typeof createVersionInfoService> | undefined = undefined;
@@ -532,7 +534,9 @@ export async function startHub(
     let proxyService: ProxyService | undefined = undefined;
     let unsubscribeProxyRevoke: () => void = () => {};
     const proxyRoutes =
-      config.proxy === undefined ? undefined : createProxyRoutes({ service: () => proxyService, log, now });
+      config.proxy === undefined
+        ? undefined
+        : createProxyRoutes({ service: () => proxyService, log, now, ...(security === undefined ? {} : { security }) });
     let agentServer: ReturnType<typeof createAgentServer> | undefined = undefined;
     let fe: HttpFrontend = {
       listen: async () => ({ port: 0 }),
@@ -798,7 +802,6 @@ export async function startHub(
     // `LanAssemblyOffError` is `defaultLanAssembly`'s (LD's own file) way of saying exactly that;
     // any other rejection (a real bug, an injected test double's `E_NOT_IMPLEMENTED:LD`, …) still
     // propagates to this function's own outer `catch` below and fails `startHub` as before.
-    const security = config.lan === undefined ? undefined : createSecurityEventBus(log);
     const clientAllow =
       config.lan === undefined
         ? undefined
@@ -856,6 +859,9 @@ export async function startHub(
     if (lanDeps !== undefined) {
       if (clientAllow !== undefined) lanDeps.clientAllow = clientAllow;
       if (security !== undefined) lanDeps.security = security;
+      lanDeps.onLoginCore = (core) => {
+        lanLoginCore = core;
+      };
       // Rollout gate: no factor challenge until E/F/G + advertised UI capability land together.
       // Not configurable through settings/env, including for an already-enrolled database.
       lanDeps.secondFactorEnabled = false;
@@ -1177,6 +1183,7 @@ export async function startHub(
         ...(deps.childUmask === undefined ? {} : { dirMode: 0o777 & ~deps.childUmask }),
       });
       spawnRoutes = createSpawnRoutes({
+        ...(security === undefined ? {} : { security }),
         supervisor: spawnSup,
         dirs: spawnDirs,
         firstPrompt: firstPromptFwd,
@@ -1365,6 +1372,8 @@ export async function startHub(
       const evidence = new Map<string, { statusAt?: number; fleetAt?: number; fleet?: FeishuIdleEvidence["fleet"] }>();
       const { wrapService: _wrapService, ...platformSeams } = deps.feishuSeams ?? {};
       const botDeps: FeishuBotServiceDeps = {
+        ...(security === undefined ? {} : { security }),
+        onApprovalDecision: (id, allowed, gen) => lanLoginCore?.onApprovalDecision(id, allowed, gen),
         stateDir: paths.stateDir,
         config: config.feishuBot,
         limit: cmdLimit,
@@ -1469,6 +1478,7 @@ export async function startHub(
       };
       const created = createFeishuBotService(botDeps);
       bot = deps.feishuSeams?.wrapService?.(created, botDeps) ?? created;
+      if (lanDeps !== undefined) lanDeps.approval = bot.approval;
       await startupStep(bot.start());
       startup.signal.throwIfAborted();
     }

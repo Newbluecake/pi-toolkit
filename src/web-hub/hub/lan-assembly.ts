@@ -48,7 +48,7 @@ export class LanAssemblyOffError extends Error {
 }
 
 export const defaultLanAssembly: LanAssembly = {
-  async build({ cfg, paths, log, now, scope, onStatus }): Promise<LanFrontendDeps> {
+  async build({ cfg, paths, log, now, scope, onStatus, security }): Promise<LanFrontendDeps> {
     const result = await createLanStore({
       dbFile: paths.dbFile,
       log,
@@ -71,7 +71,10 @@ export const defaultLanAssembly: LanAssembly = {
     });
     scope.defer(() => store.close());
 
-    const limiter = createLoginLimiter({ now });
+    const limiter = createLoginLimiter({
+      now,
+      ...(security === undefined ? {} : { onEvent: (e) => security.emit(e) }),
+    });
     const admission = createKdfAdmission({ now, isTightened: () => limiter.isTightened() });
 
     return {
