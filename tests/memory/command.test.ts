@@ -206,6 +206,25 @@ describe("/mem getArgumentCompletions", () => {
     expect(cmd.getArgumentCompletions("import ")!.map((i) => i.value)).toEqual(["import --force"]);
   });
 
+  test("second-level values carry the full argument text, labels stay the completed tail", () => {
+    // pi-tui's applyCompletion replaces the ENTIRE argument prefix with value, so applying
+    // a second-level completion must reproduce `/mem <value>` byte-for-byte (pi /mcp style:
+    // { value: "login github", label: "github" }).
+    const fx = fixture();
+    const cmd = createMemCommand({ paths: fx.paths });
+    const [dryRun] = cmd.getArgumentCompletions("tidy --d")!;
+    expect(dryRun!.value).toBe("tidy --dry-run");
+    expect(dryRun!.label).toBe("--dry-run");
+    expect(`/mem ${dryRun!.value}`).toBe("/mem tidy --dry-run");
+    const [batchStatus] = cmd.getArgumentCompletions("tidy --batch --s")!;
+    expect(batchStatus!.value).toBe("tidy --batch --status");
+    expect(batchStatus!.label).toBe("--batch --status");
+    expect(`/mem ${batchStatus!.value}`).toBe("/mem tidy --batch --status");
+    const [trash] = cmd.getArgumentCompletions("restore ")!;
+    expect(trash!.label).toBe("--trash");
+    expect(`/mem ${trash!.value}`).toBe("/mem restore --trash");
+  });
+
   test("unknown prefix returns empty and never throws", () => {
     const fx = fixture();
     const cmd = createMemCommand({ paths: fx.paths });

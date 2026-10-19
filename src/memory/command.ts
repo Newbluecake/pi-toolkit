@@ -115,9 +115,14 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
                 ? second.filter((item) => item.value === "restore --trash")
                 : second;
           const typed = a.trim();
-          return visible
-            .filter((item) => item.value.startsWith(typed) || item.value.slice(head.length + 1).startsWith(partial))
-            .map((item) => ({ ...item, label: item.value }));
+          return (
+            visible
+              .filter((item) => item.value.startsWith(typed) || item.value.slice(head.length + 1).startsWith(partial))
+              // `value` carries the full argument text (pi-tui's applyCompletion replaces the
+              // whole argument prefix with it); `label` stays the completed tail only, like
+              // pi's own /mcp ({ value: "login github", label: "github" }).
+              .map((item) => ({ ...item, label: item.value.slice(head.length + 1) }))
+          );
         }
         return MEM_SUBCOMMANDS.filter((item) => item.value.startsWith(partial)).map((item) => ({
           value: item.value,

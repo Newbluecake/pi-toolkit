@@ -345,6 +345,9 @@ describe("getArgumentCompletions", () => {
   it("filters by prefix", () => {
     const items = cmd().getArgumentCompletions!(" un")!;
     expect(items!.map((i) => i.value)).toEqual(["unlock"]);
+    // Single-token first argument: applying it yields `/webhub unlock` byte-for-byte
+    // (applyCompletion replaces the whole argument prefix with value).
+    expect(`/webhub ${items![0]!.value}`).toBe("/webhub unlock");
   });
 
   it("returns an empty array for an unknown prefix and never throws", () => {

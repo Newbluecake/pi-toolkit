@@ -638,6 +638,13 @@ describe("/agent settings subcommand", () => {
       Array<{ value: string; label: string; description: string }> | undefined;
     expect(items?.map((i) => i.label)).toEqual(["budget.idleS"]);
     expect(items?.[0]?.description).toBe("default 240");
+    // applyCompletion replaces the whole argument prefix with value: the value must carry
+    // the already-typed tokens so applying it yields the full `/agent settings set …` text.
+    expect(items?.[0]?.value).toBe("settings set budget.idleS");
+    expect(`/agent ${items?.[0]?.value}`).toBe("/agent settings set budget.idleS");
+    const budgetScoped = cmd.getArgumentCompletions?.("budget reset maxE", 0) as
+      Array<{ value: string; label: string }> | undefined;
+    expect(budgetScoped?.map((i) => i.value)).toEqual(["budget reset maxExtensions"]);
   });
 });
 

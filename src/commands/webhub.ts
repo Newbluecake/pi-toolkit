@@ -656,30 +656,32 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
         const tokens = trimmed.trimEnd().split(/\s+/);
         const cursorOpen = /\s$/.test(trimmed);
         if (tokens[0] === "feishu" && (tokens.length > 1 || cursorOpen)) {
+          // pi-tui's applyCompletion replaces the ENTIRE argument prefix with `value`,
+          // so every completion past the first token must carry the already-typed tokens
+          // (same shape as pi's own /mcp: { value: "login github", label: "github" }).
+          // Op values end with a trailing space so Enter submits `/webhub feishu <op>`
+          // instead of re-opening the menu, and `setup` chains into the --replace offer.
+          const ops = (typed: string) =>
+            FEISHU_OPS.filter((op) => op.startsWith(typed)).map((op) => ({
+              value: `feishu ${op} `,
+              label: op,
+              description: FEISHU_OP_DESCRIPTIONS[op] ?? "",
+            }));
+          const replace = [
+            {
+              value: "feishu setup --replace",
+              label: "--replace",
+              description: FEISHU_OP_DESCRIPTIONS["setup --replace"] ?? "",
+            },
+          ];
           if (!cursorOpen) {
             // completing a partially-typed token
-            if (tokens.length === 2)
-              return FEISHU_OPS.filter((op) => op.startsWith(tokens[1] ?? "")).map((op) => ({
-                value: op,
-                label: op,
-                description: FEISHU_OP_DESCRIPTIONS[op] ?? "",
-              }));
-            if (tokens.length === 3 && tokens[1] === "setup" && "--replace".startsWith(tokens[2] ?? ""))
-              return [
-                {
-                  value: "--replace",
-                  label: "--replace",
-                  description: FEISHU_OP_DESCRIPTIONS["setup --replace"] ?? "",
-                },
-              ];
+            if (tokens.length === 2) return ops(tokens[1] ?? "");
+            if (tokens.length === 3 && tokens[1] === "setup" && "--replace".startsWith(tokens[2] ?? "")) return replace;
             return [];
           }
-          if (tokens.length === 1)
-            return FEISHU_OPS.map((op) => ({ value: op, label: op, description: FEISHU_OP_DESCRIPTIONS[op] ?? "" }));
-          if (tokens.length === 2 && tokens[1] === "setup")
-            return [
-              { value: "--replace", label: "--replace", description: FEISHU_OP_DESCRIPTIONS["setup --replace"] ?? "" },
-            ];
+          if (tokens.length === 1) return ops("");
+          if (tokens.length === 2 && tokens[1] === "setup") return replace;
           return [];
         }
         const prefix = argumentPrefix.trim();

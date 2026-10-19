@@ -387,21 +387,47 @@ describe("completions", () => {
     expect(feishu.description).toContain("仅 TUI");
   });
 
-  it("completes the feishu op vocabulary and setup's --replace", () => {
+  it("completes the feishu op vocabulary and setup's --replace with full-argument values", () => {
+    // pi-tui's applyCompletion replaces the ENTIRE argument prefix with completion.value,
+    // so every value past the first token must carry the already-typed tokens.
     expect(cmd().getArgumentCompletions!("feishu")!.map((i) => i.value)).toEqual(["feishu"]);
     expect(
       cmd().getArgumentCompletions!("feishu ")!
         .map((i) => i.value)
         .sort(),
-    ).toEqual(["allow", "cancel", "deny", "repair", "reset", "setup", "status"].sort());
+    ).toEqual(["allow", "cancel", "deny", "repair", "reset", "setup", "status"].map((op) => `feishu ${op} `).sort());
     expect(
       cmd().getArgumentCompletions!("feishu s")!
         .map((i) => i.value)
         .sort(),
-    ).toEqual(["setup", "status"]);
-    expect(cmd().getArgumentCompletions!("feishu setup ")!.map((i) => i.value)).toEqual(["--replace"]);
-    expect(cmd().getArgumentCompletions!("feishu setup --")!.map((i) => i.value)).toEqual(["--replace"]);
+    ).toEqual(["feishu setup ", "feishu status "]);
+    expect(cmd().getArgumentCompletions!("feishu setup ")!.map((i) => i.value)).toEqual(["feishu setup --replace"]);
+    expect(cmd().getArgumentCompletions!("feishu setup --")!.map((i) => i.value)).toEqual(["feishu setup --replace"]);
     expect(cmd().getArgumentCompletions!("feishu allow ou_")!).toEqual([]);
+  });
+
+  it("applying a completion reproduces the full editor text (applyCompletion replace semantics)", () => {
+    // Simulates pi-tui applyCompletion for command arguments: newArgs = completion.value,
+    // the editor line becomes `/webhub ${value}` (the handler trims, so a trailing space
+    // on an op value never reaches the handler).
+    const apply = (value: string) => `/webhub ${value}`;
+
+    // The user's repro: typing `/webhub feishu setup` and pressing Enter must submit
+    // exactly `/webhub feishu setup` (a bare `setup` value used to turn it into `/webhub setup`).
+    const repro = cmd().getArgumentCompletions!("feishu setup")!;
+    expect(repro.map((i) => i.label)).toEqual(["setup"]);
+    expect(repro[0]!.value).toBe("feishu setup ");
+    expect(apply(repro[0]!.value).trimEnd()).toBe("/webhub feishu setup");
+
+    // The trailing space opens the next position: after choosing `setup`, the menu offers --replace.
+    const next = cmd().getArgumentCompletions!("feishu setup ")!;
+    expect(next).toEqual([{ value: "feishu setup --replace", label: "--replace", description: expect.any(String) }]);
+    expect(apply(next[0]!.value)).toBe("/webhub feishu setup --replace");
+
+    // Open-cursor chain: `/webhub feishu ` → picking `status` yields `/webhub feishu status `,
+    // whose trimmed form submits as `/webhub feishu status`.
+    const open = cmd().getArgumentCompletions!("feishu ")!.find((i) => i.label === "status")!;
+    expect(apply(open.value).trimEnd()).toBe("/webhub feishu status");
   });
 
   it("never throws on odd input", () => {
