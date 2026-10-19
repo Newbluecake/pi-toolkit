@@ -173,6 +173,9 @@ const dotList = computed(() => {
   const d = versionInfo.match.value.dot;
   return d === null ? [] : [d];
 });
+/* Phone (≤480px): no gear mirror dot — user ruling 2026-10-20 (it crowded the bar's right edge);
+ * version details stay reachable from the settings view. */
+const gearDotList = computed(() => (phone.value ? [] : dotList.value));
 
 /* web-hub-proxy plan v2 §8 (X2): ONE entry 「打开本机端口」, visible iff the hub advertises the proxy
  * cap AND the transport implements it (`useProxyOpen().scope`). Same 0/1-item `v-for` trick as
@@ -363,7 +366,7 @@ onUnmounted(() => {
         @click="onToggle"
       >
         <AppIcon name="gear" />
-        <span v-for="lv in dotList" :key="'gdot'" class="version-dot version-dot-gear" :data-level="lv"></span>
+        <span v-for="lv in gearDotList" :key="'gdot'" class="version-dot version-dot-gear" :data-level="lv"></span>
       </button>
       <SettingsOverlay
         v-if="open"
