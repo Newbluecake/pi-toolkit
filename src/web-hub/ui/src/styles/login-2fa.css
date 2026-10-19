@@ -1,0 +1,131 @@
+/* LAN security r2 §5.9 (package G): `LoginSecondFactor.vue`'s variant-B layout (approved
+ * preview `~/pwh-preview/lan-security.html` §2B), rebuilt on tokens.css + login.css's
+ * `.login-card`/`.form`/`.field`/`.form-error` and primitives.css's `.btn`/`.input`/`.spin`.
+ * Every class owned by this file is `tfa-*`-prefixed so the unscoped globals never leak onto
+ * other components. Imported by the integrator (I) in App.vue next to `login.css`
+ * (docs/dev/web-hub/lan-security-wiring-G.md §1). */
+.tfa-card {
+  gap: var(--sp-5);
+}
+
+.tfa-head {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-2);
+  text-align: center;
+}
+
+.tfa-head-icon {
+  display: inline-flex;
+  color: var(--c-primary);
+}
+
+.tfa-head-icon .icon {
+  width: 28px;
+  height: 28px;
+}
+
+.tfa-head-icon--danger {
+  color: var(--c-danger);
+}
+
+.tfa-head h2 {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+}
+
+.tfa-head p {
+  max-width: 34ch;
+  color: var(--c-text-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+
+.tfa-code-input {
+  text-align: center;
+  letter-spacing: 0.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.tfa-code-input--recovery {
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.tfa-hint {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.tfa-wait {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) 0;
+  text-align: center;
+}
+
+.tfa-wait-icon {
+  width: 28px;
+  height: 28px;
+  color: var(--c-primary);
+}
+
+.tfa-wait p {
+  max-width: 32ch;
+  color: var(--c-text-2);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+
+.tfa-wait .tfa-countdown {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.tfa-alt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--c-border);
+}
+
+.tfa-alt-title {
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.tfa-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+}
+
+.tfa-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 32px;
+  border: 0;
+  background: none;
+  padding: 2px;
+  color: var(--c-primary);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.tfa-link-btn:hover:not(:disabled) {
+  color: var(--c-primary-hover);
+}
+
+.tfa-link-btn:disabled {
+  color: var(--c-text-3);
+  cursor: default;
+  text-decoration: none;
+}

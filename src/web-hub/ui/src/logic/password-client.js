@@ -36,6 +36,20 @@
  *   `postApi` calls to the write endpoints (16s budget, §3.3) — NO relogin dance: a
  *   password-mode 401 means the cookie session is gone and is surfaced as `E_AUTH` (the
  *   `transport/password.ts` wrapper maps it to `onConn("auth")` via REST_AUTH_PATHS).
+ * - LAN security r2 §5.6/§5.9 (package G): second-factor login. `login()` additionally
+ *   returns `{ok:false, kind:"second-factor", challenge}` when the hub answers the
+ *   password with a 401 `E_2FA` challenge (`Lan2faChallenge`, frozen in
+ *   `@protocol/lan-2fa.ts`); `submitSecondFactor`/`waitApproval`/`cancelSecondFactor`
+ *   drive `/api/login/2fa{,/wait,/cancel}`. The wait loop long-polls serially (one
+ *   request in flight, 30s per-poll timeout > the server's 15s hold + 8s reserve), treats
+ *   ANY poll timeout/failure as "retry" until `challenge.expiresAt`, never polls faster
+ *   than `WAIT_MIN_POLL_MS` (a pathology floor — a conformant server paces the loop by
+ *   holding each poll), and backs off 1s→2s→4s…≤8s after consecutive TRANSPORT errors
+ *   (reset by any HTTP response). `waitApproval` is idempotent per challenge (a duplicate
+ *   call with the SAME challenge object rides the in-flight loop instead of registering a
+ *   second server-side waiter, which would 409 `E_2FA_BUSY`); a `submitSecondFactor`
+ *   success aborts the loop (settles `cancelled`, which callers ignore) so a stale `/wait`
+ *   answer can never bounce a completed login back to the password form.
  */
 import {
   API,
@@ -82,6 +96,14 @@ import { LOAD_TOP_BODY_MAX_BYTES, LOAD_TOP_CLIENT_TIMEOUT_MS, parseLoadTopWire }
 import { parseVersionInfoWire, VERSION_LIMITS } from "@protocol/version-info.ts";
 import { AVATAR_DELETE_PATH, AVATAR_PATH } from "@protocol/avatar.ts";
 import { validateAvatarPng } from "@protocol/avatar-png.ts";
+import {
+  LAN_2FA_CANCEL_PATH,
+  LAN_2FA_LIMITS,
+  LAN_2FA_PATH,
+  LAN_2FA_WAIT_PATH,
+  TOTP_CODE_RE,
+  normalizeRecoveryCode,
+} from "@protocol/lan-2fa.ts";
 
 export const REQUEST_TIMEOUT_MS = 10_000;
 export const CMD_REQUEST_TIMEOUT_MS = 16_000; // control-plan §3.3 browser write budget
@@ -106,6 +128,17 @@ export const THROTTLE_RETRY_DEFAULT_MS = 30_000;
 // `error` alone. `GET /api/session` disambiguates before deciding what to show.
 export const CLOSE_PROBE_MAX = 5;
 export const CLOSE_PROBE_BACKOFF_MS = 2_000;
+// LAN security r2 §5.6 (package G): `/2fa` submit budget above the server's 12s factor
+// deadline; the wait loop's per-poll timeout sits above the server's 15s hold + 8s
+// completion reserve (23s) so a healthy poll always ends with a real answer, and any
+// timeout means "retry". `WAIT_MIN_POLL_MS` is the pathology floor between poll starts —
+// with a conformant server the hold itself paces the loop and this never engages.
+export const SECOND_FACTOR_TIMEOUT_MS = 16_000;
+export const WAIT_POLL_TIMEOUT_MS = LAN_2FA_LIMITS.pollTimeoutMs;
+export const WAIT_MIN_POLL_MS = 1_000;
+// Bounded backoff after consecutive TRANSPORT errors in the wait loop (verifier rework #4):
+// 1s→2s→4s→… capped here, reset by any HTTP response. Never below WAIT_MIN_POLL_MS.
+export const WAIT_ERROR_BACKOFF_MAX_MS = 8_000;
 const ES_CLOSED = 2;
 
 /**
@@ -126,6 +159,32 @@ const ES_CLOSED = 2;
  *   onLoginRetry?: (kind: "rate" | "busy") => void,
  * }} PasswordClientDeps
  */
+
+/**
+ * @typedef {{ error: "E_2FA", methods: ("totp" | "recovery" | "feishu")[], feishu: "sent" | "unavailable", expiresAt: number }}
+ *   Lan2faChallengeWire — the frozen `Lan2faChallenge` of `@protocol/lan-2fa.ts`, re-declared
+ *   structurally so this .js module stays runtime-free of TypeScript type imports.
+ */
+
+const FACTOR_METHODS = new Set(["totp", "recovery", "feishu"]);
+
+/**
+ * Defensive narrowing of a 401 body into the frozen `Lan2faChallengeSchema` shape
+ * (`@protocol/lan-2fa.ts`). Anything off-contract ⇒ `null` (the caller falls back to the
+ * plain "invalid password" branch, byte-identical to pre-2FA behavior).
+ * @param {unknown} body @returns {Lan2faChallengeWire | null}
+ */
+function narrowChallenge(body) {
+  if (body === null || typeof body !== "object") return null;
+  const b = body;
+  if (b.error !== "E_2FA") return null;
+  if (!Array.isArray(b.methods) || b.methods.length < 1 || b.methods.length > 3) return null;
+  if (!b.methods.every((m) => typeof m === "string" && FACTOR_METHODS.has(m))) return null;
+  if (new Set(b.methods).size !== b.methods.length) return null;
+  if (b.feishu !== "sent" && b.feishu !== "unavailable") return null;
+  if (typeof b.expiresAt !== "number" || !Number.isFinite(b.expiresAt) || b.expiresAt < 0) return null;
+  return { error: "E_2FA", methods: [...b.methods], feishu: b.feishu, expiresAt: b.expiresAt };
+}
 
 /** `#t=` present among the hash params (never parsed further — only used to decide whether to clear it). @param {unknown} hash */
 function hashHasToken(hash) {
@@ -168,6 +227,26 @@ export function createPasswordClient(deps) {
 
   /** @param {number} ms */
   const sleep = (ms) => new Promise((resolve) => timer(resolve, ms));
+
+  /** `sleep` that also resolves early when `signal` aborts (the wait loop's pacing sleeps
+   *  must not outlive a `cancelSecondFactor()`/submit-success abort). A settled timer
+   *  removes its listener so a never-aborted session leaks nothing.
+   *  @param {number} ms @param {any} [signal] */
+  function sleepAbortable(ms, signal) {
+    if (signal === undefined || signal === null || typeof signal.addEventListener !== "function") return sleep(ms);
+    if (signal.aborted === true) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = timer(() => {
+        if (typeof signal.removeEventListener === "function") signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        deps.clearTimeout(t);
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
 
   /**
    * Fetch with a deadline. The optional `signal` (web-hub-upload plan U4b: chunk
@@ -257,7 +336,13 @@ export function createPasswordClient(deps) {
       body = undefined;
     }
     if (r.ok) return { kind: "ok", body: body && typeof body === "object" ? body : {} };
-    if (r.status === 401) return { kind: "invalid" };
+    if (r.status === 401) {
+      // LAN security r2 §5.6: a correct password from a new IP answers 401 `E_2FA` with the
+      // challenge payload — distinct from an invalid password (same status, no/unknown body).
+      const challenge = narrowChallenge(body);
+      if (challenge !== null) return { kind: "challenge", challenge };
+      return { kind: "invalid" };
+    }
     if (r.status === 421) return { kind: "not-allowed" };
     if (r.status === 429) {
       if (body && body.saturated === true) return { kind: "saturated", retryAfterMs: retryAfterMs(r, 60_000) };
@@ -273,6 +358,7 @@ export function createPasswordClient(deps) {
    * @param {string} username @param {string} password
    * @returns {Promise<
    *   | { ok: true, initialPassword: boolean }
+   *   | { ok: false, kind: "second-factor", challenge: Lan2faChallengeWire }
    *   | { ok: false, kind: "invalid" | "not-allowed" | "network" | "busy-exhausted" }
    *   | { ok: false, kind: "saturated" | "throttled", retryAfterS: number }
    *   | { ok: false, kind: "unknown", status: number }
@@ -290,6 +376,8 @@ export function createPasswordClient(deps) {
           return { ok: true, initialPassword: res.body.initialPassword === true };
         case "invalid":
           return { ok: false, kind: "invalid" };
+        case "challenge":
+          return { ok: false, kind: "second-factor", challenge: res.challenge };
         case "not-allowed":
           return { ok: false, kind: "not-allowed" };
         case "network":
@@ -2093,6 +2181,237 @@ export function createPasswordClient(deps) {
       proxyPost(API.proxyStop, { instanceId }, parseProxyStop, PROXY_OPEN_BODY_MAX_BYTES, opts?.signal),
   };
 
+  // -------------------------------------------------------------------------
+  // LAN security r2 §5.6/§5.9 (package G): second-factor endpoints. All three live under
+  // `/api/login*` behind the `pwh_lan2fa` challenge cookie (HttpOnly, Path=/api/login — the
+  // browser attaches it automatically; this client never sees the token). The fetch wrapper's
+  // `isRestAuthEndpoint` deliberately does NOT cover these paths: a 401 here is a challenge
+  // answer (`E_2FA_CODE`), never a lost session, so `onConn("auth")` must NOT fire.
+  // -------------------------------------------------------------------------
+
+  /**
+   * `POST /api/login/2fa`. Codes are validated LOCALLY first (§5.3: malformed input is a 400
+   * with no attempt consumed — answered here without any request at all): TOTP must match
+   * `TOTP_CODE_RE`; recovery codes go through `normalizeRecoveryCode` (case/separators/
+   * Crockford aliases) before hitting the wire. Outcomes:
+   * - 200 ⇒ the hub set `pwh_lan` and cleared the challenge cookie; the stream opens here.
+   * - `{error:"E_2FA_CODE", attemptsLeft}` — wrong code, challenge still alive.
+   * - `{error:"E_2FA_METHOD_LOCKED", retryAfterMs}` — per-method sliding window full (§5.5).
+   * - `{error:"E_2FA_EXPIRED"|"E_2FA_USED"|…}` — challenge dead ⇒ the caller restarts login.
+   * - `{error:"E_LOCKED", retryAfterMs}` — shared per-IP login lockout (429).
+   * - `{error:"network"}` — fetch failure/deadline; the challenge MAY still be alive.
+   * @param {{ method: "totp" | "recovery", code: string }} input
+   * @returns {Promise<
+   *   | { ok: true, initialPassword: boolean }
+   *   | { ok: false, error: string, attemptsLeft?: number, retryAfterMs?: number }
+   * >}
+   */
+  async function submitSecondFactor(input) {
+    if (closed) return { ok: false, error: "network" };
+    /** @type {"totp" | "recovery"} */
+    let method;
+    /** @type {string} */
+    let code;
+    if (input !== null && typeof input === "object" && input.method === "totp") {
+      method = "totp";
+      code = typeof input.code === "string" ? input.code.trim() : "";
+      if (!TOTP_CODE_RE.test(code)) return { ok: false, error: "E_BAD_REQUEST" };
+    } else if (input !== null && typeof input === "object" && input.method === "recovery") {
+      method = "recovery";
+      const normalized = typeof input.code === "string" ? normalizeRecoveryCode(input.code) : undefined;
+      if (normalized === undefined) return { ok: false, error: "E_BAD_REQUEST" };
+      code = normalized;
+    } else {
+      return { ok: false, error: "E_BAD_REQUEST" };
+    }
+    /** @type {any} */
+    let r;
+    try {
+      r = await postApi(LAN_2FA_PATH, { method, code }, SECOND_FACTOR_TIMEOUT_MS);
+    } catch {
+      return { ok: false, error: "network" };
+    }
+    /** @type {any} */
+    let body;
+    try {
+      body = await r.json();
+    } catch {
+      body = undefined;
+    }
+    const b = body !== null && typeof body === "object" ? body : {};
+    if (r.ok && b.ok === true) {
+      // A successful submit ends the challenge: abort any in-flight `/wait` loop FIRST so a
+      // stale late answer (denied/expired/approved) can never settle afterwards and bounce
+      // the completed login back to the password form. The aborted loop settles
+      // `{state:"cancelled"}`, which callers ignore; its post-fetch abort check discards a
+      // response that raced in just before the abort.
+      abortWaitSession();
+      backoff = BACKOFF_MIN_MS;
+      openStream();
+      return { ok: true, initialPassword: b.initialPassword === true };
+    }
+    /** @type {any} */
+    const out = {
+      ok: false,
+      error: typeof b.error === "string" ? b.error : r.status === 401 ? "E_2FA_CODE" : `HTTP ${r.status}`,
+    };
+    if (Number.isInteger(b.attemptsLeft) && b.attemptsLeft >= 0) out.attemptsLeft = b.attemptsLeft;
+    const headerRetry = retryAfterMs(r, NaN);
+    if (Number.isFinite(headerRetry)) out.retryAfterMs = headerRetry;
+    else if (typeof b.retryAfterMs === "number" && Number.isFinite(b.retryAfterMs) && b.retryAfterMs >= 0)
+      out.retryAfterMs = b.retryAfterMs;
+    return out;
+  }
+
+  /**
+   * In-flight wait loop, or null. The challenge OBJECT identity (`key`) identifies the
+   * challenge: a second `waitApproval` call with the SAME challenge object rides the
+   * existing loop (the hub allows ONE waiter per challenge — a literal second request
+   * would 409 `E_2FA_BUSY`); any other challenge supersedes (the old loop is aborted
+   * first). Identity is deliberately NOT `expiresAt`: two distinct challenges can share
+   * an expiry and must never share a loop (verifier rework #5).
+   * @type {{ key: object | undefined, expiresAt: number, promise: Promise<any>, abort(): void } | null}
+   */
+  let waitSession = null;
+
+  function abortWaitSession() {
+    const s = waitSession;
+    if (s !== null) {
+      waitSession = null;
+      s.abort();
+    }
+  }
+
+  /**
+   * `GET /api/login/2fa/wait` long-poll loop (§5.6/§5.9). Serial polls, one in flight: each
+   * request gets the 30s per-poll timeout (server hold 15s + 8s reserve = 23s < 30s), and ANY
+   * failure — timeout included — is retried until `challenge.expiresAt`, never faster than
+   * `WAIT_MIN_POLL_MS` between poll starts (the conformant server's own hold paces the loop).
+   * Terminal outcomes: approved (200 + `pwh_lan`; the stream opens here), `denied`, `expired`
+   * (also for `E_2FA_EXPIRED`/`E_2FA_USED`/a locally observed `expiresAt` pass — all mean
+   * "restart login"), `cancelled` (local abort via `cancelSecondFactor`/`close()`/a
+   * `submitSecondFactor` success — the challenge is over either way), or
+   * `{state:"error"}` for the rest (e.g. a conflicting second waiter `E_2FA_BUSY`).
+   * @param {Lan2faChallengeWire} challenge
+   * @returns {Promise<
+   *   | { ok: true, initialPassword: boolean }
+   *   | { ok: false, state: "denied" | "expired" | "cancelled" }
+   *   | { ok: false, state: "error", error: string }
+   * >}
+   */
+  function waitApproval(challenge) {
+    const key = challenge !== null && typeof challenge === "object" ? challenge : undefined;
+    const expiresAt =
+      challenge !== null && typeof challenge === "object" && typeof challenge.expiresAt === "number"
+        ? challenge.expiresAt
+        : deps.now();
+    if (waitSession !== null && key !== undefined && waitSession.key === key) return waitSession.promise;
+    abortWaitSession();
+    const AC = deps.AbortController ?? (typeof AbortController === "function" ? AbortController : undefined);
+    const ac = AC ? new AC() : undefined;
+    const session = {
+      key,
+      expiresAt,
+      promise: /** @type {Promise<any>} */ (Promise.resolve()),
+      abort() {
+        ac?.abort();
+      },
+    };
+    session.promise = waitLoop(expiresAt, ac !== undefined ? ac.signal : undefined, session);
+    waitSession = session;
+    return session.promise;
+  }
+
+  /** @param {number} expiresAt @param {any} signal @param {{ expiresAt: number }} session */
+  async function waitLoop(expiresAt, signal, session) {
+    let errorStreak = 0; // consecutive TRANSPORT errors; any HTTP response resets it (§5.6)
+    try {
+      for (;;) {
+        if (closed || signal?.aborted === true) return { ok: false, state: "cancelled" };
+        const started = deps.now();
+        if (started >= expiresAt) return { ok: false, state: "expired" };
+        /** @type {any} */
+        let r;
+        /** @type {unknown} */
+        let fetchErr;
+        try {
+          r = await request(
+            LAN_2FA_WAIT_PATH,
+            { method: "GET", headers: { "X-PWH": "1" } },
+            WAIT_POLL_TIMEOUT_MS,
+            signal,
+          );
+        } catch (e) {
+          fetchErr = e;
+        }
+        if (closed || signal?.aborted === true) return { ok: false, state: "cancelled" };
+        if (fetchErr !== undefined) {
+          errorStreak += 1;
+          // §5.6: any poll timeout/failure ⇒ retry, never a tight loop; consecutive
+          // transport errors back off 1s→2s→4s→…≤8s (abort-aware sleep).
+          await pacePoll(
+            started,
+            signal,
+            Math.min(WAIT_MIN_POLL_MS * 2 ** (errorStreak - 1), WAIT_ERROR_BACKOFF_MAX_MS),
+          );
+          continue;
+        }
+        errorStreak = 0; // a response — any response — proves the transport is alive
+        /** @type {any} */
+        let body;
+        try {
+          body = await r.json();
+        } catch {
+          body = undefined;
+        }
+        const b = body !== null && typeof body === "object" ? body : {};
+        if (r.ok && b.ok === true) {
+          backoff = BACKOFF_MIN_MS;
+          openStream();
+          return { ok: true, initialPassword: b.initialPassword === true };
+        }
+        if (b.state === "pending") {
+          await pacePoll(started, signal);
+          continue;
+        }
+        if (b.state === "denied") return { ok: false, state: "denied" };
+        if (b.state === "expired") return { ok: false, state: "expired" };
+        const error = typeof b.error === "string" ? b.error : `HTTP ${r.status}`;
+        if (error === "E_2FA_EXPIRED" || error === "E_2FA_USED") return { ok: false, state: "expired" };
+        if (error === "E_2FA_BUSY") return { ok: false, state: "error", error };
+        // E_DB / E_RATE / unparseable / unexpected status: transient until the challenge expires.
+        await pacePoll(started, signal);
+      }
+    } finally {
+      if (waitSession === session) waitSession = null;
+    }
+  }
+
+  /** Pathology floor between poll starts (see WAIT_MIN_POLL_MS) plus an optional bounded
+   *  transport-error backoff; the sleep is abort-aware so a cancelled session never lingers
+   *  in a backoff nap. @param {number} started @param {any} [signal] @param {number} [extraMs] */
+  async function pacePoll(started, signal, extraMs = 0) {
+    const elapsed = deps.now() - started;
+    const wait = Math.max(WAIT_MIN_POLL_MS - elapsed, extraMs);
+    if (wait > 0) await sleepAbortable(wait, signal);
+  }
+
+  /**
+   * `POST /api/login/2fa/cancel` — best-effort; also aborts any in-flight wait loop (its
+   * promise settles `{state:"cancelled"}`). The caller returns to the password form
+   * regardless of the outcome.
+   * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+   */
+  async function cancelSecondFactor() {
+    abortWaitSession();
+    try {
+      const r = await postApi(LAN_2FA_CANCEL_PATH, {}, REQUEST_TIMEOUT_MS);
+      return r.ok ? { ok: true } : { ok: false, error: await errorOf(r) };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "E_NETWORK" };
+    }
+  }
+
   return {
     /** Clear a stray `#t=` (never read/sent in password mode), fetch session info, then open the stream. */
     async start() {
@@ -2103,8 +2422,15 @@ export function createPasswordClient(deps) {
       void fetchSessionInfo();
       if (!closed) openStream();
     },
-    login,
+    // Type-erased at this boundary: the honest union (incl. `{kind:"second-factor"}`) is on the
+    // `login` function's own JSDoc, but `transport/types.ts`'s frozen `LoginResult` (I-owned,
+    // not in package G's allowlist) has no second-factor variant yet — I widens it when mounting
+    // (docs/dev/web-hub/lan-security-wiring-G.md §1). Runtime behavior is unaffected.
+    login: /** @type {any} */ (login),
     logout,
+    submitSecondFactor,
+    waitApproval,
+    cancelSecondFactor,
     subscribe,
     unsubscribe,
     page,
@@ -2126,6 +2452,7 @@ export function createPasswordClient(deps) {
     proxy,
     close() {
       closed = true;
+      abortWaitSession();
       closeStream();
     },
     /** Test/diagnostic hooks. */
