@@ -110,3 +110,7 @@ I alone owns `hub/{http,hub,main,lan-assembly,agent-server,ports,audit}.ts`, `pr
    `emit(e: SecurityEvent): void` dependency; I wires it to the `security-events` bus.
 7. New settings are parsed but not forwarded until I wires them — no release may ship between P0 and I's wiring.
 8. B replaces the throwing production-store stubs with async implementations (the stubs throw synchronously today).
+9. **Amends item 3 (C verification, 2026-10-20)** — C may (and should) call the optional `limiter.isFresh?.(ip) ?? true` for
+   `admission.acquire`'s fresh flag, preserving the existing fair scheduling of the login KDF queue; it must still work when
+   `isFresh` is absent. An `inconsistent` 2FA state answering 503 even for known IPs is accepted (fail-closed; factorGen is needed
+   for the CAS).
