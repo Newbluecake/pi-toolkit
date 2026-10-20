@@ -562,6 +562,7 @@ describe("命名分离 (「隐私标记」 vs 「立即锁定」)", () => {
     expect(headBtn.attributes("aria-label")).toBe("Mark this session as private");
     expect(headBtn.attributes("title")).toBe("Mark private");
     expect(headBtn.get(".head-btn-label").text()).toBe("Private"); // unmarked ⇒ 「隐私」 label
+    expect(headBtn.classes()).not.toContain("is-marked"); // unmarked ⇒ neutral tint
     // mark it → broadcast → now viewing a marked session ⇒ the SAME button becomes 「立即锁定」
     await headBtn.trigger("click");
     await flushPromises();
@@ -572,6 +573,7 @@ describe("命名分离 (「隐私标记」 vs 「立即锁定」)", () => {
     const headBtn2 = m.wrapper.find(".privacy-head-btn");
     expect(headBtn2.attributes("aria-label")).toBe("Relock this session's view immediately");
     expect(headBtn2.attributes("title")).toBe("Lock now");
+    expect(headBtn2.classes()).toContain("is-marked"); // marked ⇒ primary tint at rest
   });
 });
 

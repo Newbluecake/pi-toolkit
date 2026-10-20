@@ -202,6 +202,26 @@
   color: var(--c-text-2);
 }
 
+/* 2026-10-20 「三个按钮加点颜色区分」 (user picked the restrained variant): colour carries meaning,
+ * not decoration — 清空 (starts a fresh session, drops the current view) tints danger ONLY on
+ * hover/focus; a privacy-MARKED session keeps the primary tint at rest so its state is readable at a
+ * glance (unmarked stays neutral); 恢复 keeps the neutral hover above. Applies to both tiers. */
+.detail-titlebar .detail-clear-btn:hover:not(:disabled),
+.detail-titlebar .detail-clear-btn:focus-visible {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.detail-titlebar .privacy-head-btn.is-marked {
+  color: var(--c-primary);
+}
+
+.detail-titlebar .privacy-head-btn.is-marked:hover:not(:disabled),
+.detail-titlebar .privacy-head-btn.is-marked:focus-visible {
+  background: var(--c-primary-soft);
+  color: var(--c-primary-hover);
+}
+
 /* the stop button keeps its danger hover tint (spawn.css) in the labeled tier */
 .detail-titlebar .spawn-stop-btn:hover:not(:disabled),
 .detail-titlebar .spawn-stop-btn:focus-visible {

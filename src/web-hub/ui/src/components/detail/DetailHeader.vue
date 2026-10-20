@@ -380,6 +380,7 @@ function onToggleHeadInfo(): void {
       <button
         v-if="privacyButton"
         class="btn btn-ghost privacy-head-btn"
+        :class="{ 'is-marked': privacyMarked }"
         type="button"
         :title="privacyMarked ? t('privacy.lockNow') : t('privacy.mark')"
         :aria-label="privacyMarked ? t('privacy.lockNowAria') : t('privacy.markAria')"
