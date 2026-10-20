@@ -35,6 +35,10 @@ const THREADED = [
   // Timeout-policy (agent-explicit-timeout-extend plan §2.2/C10): must reach the
   // runner so the `enqueued` dispatch can mirror it into diag.timeoutPolicy.
   "timeoutPolicy",
+  // fabric-cross-session plan §4.1 (S0): spawn-service-internal switch for the acceptance markers
+  // (promptDispatchedAt / inputAcceptedAt / promptOutcome). Runner-only: the runner/reducer read it (W2); it never
+  // reaches a child session or a model. Absent unless an inbox reservation was bound to the resume.
+  "trackInput",
 ] as const;
 
 /**
@@ -73,6 +77,10 @@ const NOT_THREADED = [
   // readonlyDomain (tool set / policy / provenance / customTools narrowing); the runner never
   // sees this field verbatim — it only ever executes the toolScope the adapter already built.
   "toolDomain",
+  // fabric-cross-session plan §4.1 (S0): programmatic wake provenance. Mirrored write-once into diag.wakeOrigin by
+  // spawn/runner code (without trigger.claimToken); NEVER threaded verbatim — a child must not see (or forge) it,
+  // and the claimToken is a mailbox-internal secret.
+  "wakeOrigin",
 ] as const;
 
 type ClassifiedKeys = (typeof THREADED)[number] | (typeof NOT_THREADED)[number];

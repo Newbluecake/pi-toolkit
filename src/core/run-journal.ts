@@ -86,7 +86,42 @@ const JOURNAL_DIAG_FIELDS = [
   "consultThread",
   "consults",
   "external",
+  // fabric-cross-session plan v3 §4.1 (S0): wake facts are run facts and ride every persistence surface; absent ⇒ not
+  // copied (so a wake-off run's journal bytes never change). `wakeOrigin` is re-stripped of its claimToken in projectDiag.
+  "wakeOrigin",
+  "wakeLevel",
+  "wakeExclusion",
+  "inputAcceptedAt",
+  "promptOutcome",
 ] as const satisfies readonly (keyof RunDiagnostics)[];
+
+/**
+ * plan v3 §4.1: `diag.wakeOrigin.trigger.claimToken` is a mailbox-internal secret (a memory-only field of the claimed
+ * record) and must never reach a persisted entry. Returns the SAME object when there is nothing to strip.
+ */
+export function persistableWakeOrigin<T extends NonNullable<RunDiagnostics["wakeOrigin"]>>(origin: T): T {
+  if (origin.trigger === undefined || !("claimToken" in origin.trigger)) return origin;
+  const { claimToken: _claimToken, ...trigger } = origin.trigger;
+  return { ...origin, trigger };
+}
+
+/**
+ * The persistence form of a snapshot (terminal `subagent:run` entry): identical to the input — same reference —
+ * unless `diag.wakeOrigin` (or the outcome's copy of it) still carries a `claimToken`, in which case only that token is
+ * dropped. Wake-off runs never have a wakeOrigin ⇒ byte-identical, no clone.
+ */
+export function withoutWakeSecrets(snapshot: RunSnapshot): RunSnapshot {
+  const dirty = (d: RunDiagnostics | undefined): boolean =>
+    d?.wakeOrigin?.trigger !== undefined && "claimToken" in d.wakeOrigin.trigger;
+  if (!dirty(snapshot.diag) && !dirty(snapshot.outcome?.diag)) return snapshot;
+  const clean = (d: RunDiagnostics): RunDiagnostics =>
+    d.wakeOrigin === undefined ? d : { ...d, wakeOrigin: persistableWakeOrigin(d.wakeOrigin) };
+  return {
+    ...snapshot,
+    diag: clean(snapshot.diag),
+    ...(snapshot.outcome === undefined ? {} : { outcome: { ...snapshot.outcome, diag: clean(snapshot.outcome.diag) } }),
+  };
+}
 
 function projectDiag(diag: RunDiagnostics): RunDiagnostics {
   const out: Record<string, unknown> = {};
@@ -103,6 +138,7 @@ function projectDiag(diag: RunDiagnostics): RunDiagnostics {
   // `EXPERTS_REFS_CAP` refs, independent of whatever `state-machine.ts`'s
   // `enqueued` branch already enforced on the live diag.
   if (diag.experts !== undefined) out["experts"] = { ...diag.experts, refs: capExpertRefs(diag.experts.refs) };
+  if (diag.wakeOrigin !== undefined) out["wakeOrigin"] = persistableWakeOrigin(diag.wakeOrigin);
   out["escalation"] = [];
   out["degraded"] = [];
   out["unkillable"] = [];

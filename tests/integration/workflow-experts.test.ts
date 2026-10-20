@@ -294,7 +294,7 @@ describe("workflow-experts §6 D#27: fork admission vs. abort race (real SpawnSe
       budgetOverride: { totalMs: 10_000 },
     });
     expect(raced).toEqual({
-      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false, reason: "config" },
     });
     await abort1P;
     await drain(clock, 5);

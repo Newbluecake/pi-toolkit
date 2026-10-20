@@ -287,7 +287,9 @@ describe("CC4/WC12c: an already-expired deadlineAt occupies zero resources at ea
     const { svc, pool } = buildFullStack(clock, driver);
 
     const result = await svc.spawn({ type: "worker", prompt: "x", deadlineAt: -1 });
-    expect(result).toEqual({ error: { kind: "config", message: "deadlineAt already expired", retryable: false } });
+    expect(result).toEqual({
+      error: { kind: "config", message: "deadlineAt already expired", retryable: false, reason: "config" },
+    });
     expect(createCalled).toBe(false);
     expect(pool.stats.inUse).toBe(0);
   });

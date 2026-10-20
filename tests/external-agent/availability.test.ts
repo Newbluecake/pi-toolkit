@@ -179,7 +179,7 @@ describe("droid availability: real offline run → prompt → admission", () => 
         { type: "worker", prompt: "resume", resumeFrom: "r_PREVIOUS1" },
       ]) {
         expect(await a.service.spawn(request)).toEqual({
-          error: { kind: "config", retryable: false, message: reason },
+          error: { kind: "config", retryable: false, message: reason, reason: "external_unavailable" },
         });
       }
       expect(a.run).not.toHaveBeenCalled();

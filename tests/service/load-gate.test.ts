@@ -47,7 +47,7 @@ describe("SpawnService load admission", () => {
       label: "builder",
       loadPolicy: "reject",
     });
-    expect(result).toEqual({ error: { kind: "config", message: "load gate: crit", retryable: true } });
+    expect(result).toEqual({ error: { kind: "config", message: "load gate: crit", retryable: true, reason: "load" } });
     expect(run).not.toHaveBeenCalled();
     expect(service.snapshots()).toHaveLength(0);
   });
@@ -64,7 +64,7 @@ describe("SpawnService load admission", () => {
       parentRunId: parent.runId,
       loadPolicy: "reject",
     });
-    expect(child).toEqual({ error: { kind: "config", message: "nested load gate", retryable: true } });
+    expect(child).toEqual({ error: { kind: "config", message: "nested load gate", retryable: true, reason: "load" } });
     expect(nested).toHaveBeenCalledWith({ nested: true });
 
     const workflow = await service.spawn({ type: "worker", prompt: "workflow" });

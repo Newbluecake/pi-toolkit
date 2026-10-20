@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import type { CustomEntry } from "@earendil-works/pi-coding-agent";
 import type { SnapshotStore, OutboxRecord } from "../core/store.js";
 import { TERMINAL_STATUSES } from "../core/status.js";
-import { interruptedFromJournal } from "../core/run-journal.js";
+import { interruptedFromJournal, withoutWakeSecrets } from "../core/run-journal.js";
 import type { RunId, RunSnapshot, Generation, WorktreeDisposition } from "../core/types.js";
 import type { LateWorktreeDisposition } from "./worktree-disposition-sink.js";
 
@@ -34,7 +34,7 @@ export function wrapWithRunLog(
     put(snapshot: RunSnapshot) {
       base.put(snapshot);
       try {
-        pi.appendEntry(RUN_CUSTOM_TYPE, snapshot);
+        pi.appendEntry(RUN_CUSTOM_TYPE, withoutWakeSecrets(snapshot));
       } catch {
         // Best-effort: verifyLanded() is the actual detection mechanism for
         // G5a degradation, not this try/catch (appendEntry itself has no ack
@@ -52,7 +52,7 @@ export function wrapWithRunLog(
     },
     journal(snapshot: RunSnapshot) {
       try {
-        pi.appendEntry(RUN_CUSTOM_TYPE, snapshot);
+        pi.appendEntry(RUN_CUSTOM_TYPE, withoutWakeSecrets(snapshot));
       } catch {
         // J7: best-effort. A stale appendEntry after /reload's invalidate()
         // is the expected failure here; the run itself is unaffected.

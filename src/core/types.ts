@@ -4,7 +4,7 @@ export type AgentTypeName = string;
 export type Generation = number;
 export type TimerId = string;
 
-import type { CanMessage } from "./message.js";
+import type { CanMessage, WakeExclusion, WakeOrigin } from "./message.js";
 import type { ConsultCallFact, ConsultSummary } from "./consult-summary.js";
 import type { DispatchMeta } from "./dispatch-meta.js";
 import type { SchemaPresetId } from "./verdict-schema.js";
@@ -47,11 +47,31 @@ export type ErrorKind =
 
 /** X10: opaque JSON Schema object (subset validated by core/json-schema.ts). */
 export type JsonSchema = Record<string, unknown>;
+/**
+ * fabric-cross-session plan v3 §4.1/§4.6: typed cause of a spawn ADMISSION rejection (spawn-service `{ error }`
+ * returns). Purely an additive annotation — `kind`/`message`/`retryable` are unchanged and no existing caller reads
+ * it; W3/W5 map it for revive (park vs refuse vs retry). Never written to a run entry (admission errors create none).
+ * `stack_closed` has no producer in spawn-service itself: it is reserved for the late-bound stack wiring (W5).
+ */
+export type AdmissionReason =
+  | "pool_full"
+  | "load"
+  | "quota"
+  | "resume_locked"
+  | "session_closing"
+  | "target_running"
+  | "stack_closed"
+  | "unknown_type"
+  | "external_unavailable"
+  | "inbox_persist_failed"
+  | "config";
 export interface ErrorInfo {
   kind: ErrorKind;
   message: string;
   stack?: string;
   retryable: boolean;
+  /** Admission rejections only (see {@link AdmissionReason}). */
+  reason?: AdmissionReason;
 }
 
 export interface DeadlineBudget {
@@ -438,6 +458,19 @@ export interface SpawnRequest {
    */
   timeoutPolicy?: TimeoutPolicy;
   budgetOverride?: Partial<DeadlineBudget>;
+  /**
+   * fabric-cross-session plan §4.1: provenance of a wake revive. Only programs write it (WakeService, W5); it is
+   * deliberately NOT threaded into the child (request-threading `NOT_THREADED`) and is mirrored write-once into
+   * `diag.wakeOrigin` (without `trigger.claimToken`) by later packages.
+   */
+  wakeOrigin?: WakeOrigin;
+  /**
+   * fabric-cross-session plan §4.1/§3.5: spawn-service-internal marker (set only when an inbox reservation was bound
+   * to this resume). It switches on the runner/reducer acceptance markers (`promptDispatchedAt`,
+   * `inputAcceptedAt`, `promptOutcome`) — threaded to the runner (`THREADED`), never settable by a model-facing
+   * tool. Absent ⇒ every persisted byte is exactly what it was before wake existed.
+   */
+  trackInput?: true;
   slotless?: boolean;
   parentRunId?: RunId;
   /** Caller will synchronously acknowledge the terminal outcome. */
@@ -781,6 +814,8 @@ export interface ContextUsageInfo {
   percent: number | null;
 }
 export type DriverEvent =
+  /** plan §4.7: pi emitted `message_end{role:"user"}` — the prompt (or resume input) is now in the session. Reducer branch lands in W2. */
+  | { t: "input_accepted" }
   | { t: "turn_start" }
   | { t: "turn_end"; toolResults: number }
   | {
@@ -1172,7 +1207,18 @@ export interface RunDiagnostics {
   createdAt: Millis;
   enqueuedAt?: Millis;
   startedAt?: Millis;
+  /** Write-once `phase_entered{prompt_dispatch}` marker (plan §3.5) — written only for `trackInput` runs (W2). */
   promptDispatchedAt?: Millis;
+  /** Wake provenance (plan §4.1): write-once, persisted WITHOUT `trigger.claimToken`. Absent unless a wake revive made this run. */
+  wakeOrigin?: WakeOrigin;
+  /** Effective causal level (plan §3.3 L1): monotonic max, final value carried by the terminal entry. Absent while wake is off. */
+  wakeLevel?: number;
+  /** Wake-ability verdict written once at admission (wakeOn only); a missing field on an old entry means `legacy_unknown` at revive. */
+  wakeExclusion?: WakeExclusion | "none";
+  /** First user-message `message_end` of a `trackInput` run (plan §3.5): the linearization point of "input accepted". Write-once. */
+  inputAcceptedAt?: Millis;
+  /** Proof that pi refused the prompt before accepting it (`trackInput` runs only); write-once. */
+  promptOutcome?: "rejected_pre_accept";
   settledAt?: Millis;
   phase: RunPhase;
   phaseEnteredAt: Millis;
@@ -1472,6 +1518,8 @@ export interface DeliveryPayload {
   label?: string;
   /** bash-timeout-grace plan §3.7/§3.8 (P0b, frozen): mirrors RunDiagnostics.exitFacts at the moment `finish()` built this payload; same value as outcome.diag.exitFacts / persist_snapshot.snapshot.outcome.diag.exitFacts (P15b). */
   exitFacts?: RunExitFacts;
+  /** fabric-cross-session plan §3.7: a wake-revived run's completion notice is quiet (never triggers a turn / mints an ask_user-interrupting token). Absent otherwise. */
+  quiet?: true;
 }
 export interface RunSnapshot {
   runId: RunId;
@@ -1534,7 +1582,14 @@ export type RunInput =
       source: ExtendSource;
       reason?: string;
     }
-  | { kind: "effect_failed"; at: Millis; effect: RunEffect["kind"]; error: ErrorInfo; timer?: TimerId };
+  | { kind: "effect_failed"; at: Millis; effect: RunEffect["kind"]; error: ErrorInfo; timer?: TimerId }
+  /**
+   * fabric-cross-session plan §4.7 — diag-only inputs (no effect, every non-terminal phase accepts, terminal ignores).
+   * Declared by S0 as the shared contract; the reducer branches land in W1 (`wake_level`) and W2 (the other two).
+   */
+  | { kind: "wake_level"; at: Millis; level: number }
+  | { kind: "input_accepted"; at: Millis }
+  | { kind: "prompt_rejected"; at: Millis };
 export interface StampedInput {
   readonly generation: number;
   readonly input: RunInput;

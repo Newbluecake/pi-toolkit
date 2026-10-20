@@ -138,6 +138,7 @@ describe("SpawnService: consult fork admission (T-7)", () => {
         kind: "config",
         message: 'nested delegation is not permitted: parent\'s agent type may only spawn [], not "expert"',
         retryable: false,
+        reason: "config",
       },
     });
   });
@@ -159,7 +160,12 @@ describe("SpawnService: consult fork admission (T-7)", () => {
       resumeFrom: other.runId,
     });
     expect(both).toEqual({
-      error: { kind: "config", message: "forkSessionFrom and resumeFrom are mutually exclusive", retryable: false },
+      error: {
+        kind: "config",
+        message: "forkSessionFrom and resumeFrom are mutually exclusive",
+        retryable: false,
+        reason: "config",
+      },
     });
   });
 
@@ -180,6 +186,7 @@ describe("SpawnService: consult fork admission (T-7)", () => {
         kind: "config",
         message: "fork session file missing: /definitely/not/there.jsonl",
         retryable: false,
+        reason: "config",
       },
     });
   });
@@ -228,6 +235,7 @@ describe("SpawnService: consult fork admission (T-7)", () => {
         kind: "config",
         message: "nested delegation depth 2 exceeds the configured maximum (1)",
         retryable: false,
+        reason: "config",
       },
     });
   });
@@ -254,6 +262,7 @@ describe("SpawnService: consult fork admission (T-7)", () => {
         kind: "config",
         message: 'nested delegation is not permitted: parent\'s agent type may only spawn [], not "expert"',
         retryable: false,
+        reason: "config",
       },
     });
     const childWorker = await svc.spawn({ type: "worker", prompt: "child", parentRunId: consult.runId });
@@ -423,7 +432,7 @@ describe("SpawnService: fork admission vs. abort/stopping race (D19, test 27, N3
       forkSessionFrom: forkFile(),
     });
     expect(raced).toEqual({
-      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false, reason: "config" },
     });
 
     await abortP;
@@ -452,7 +461,7 @@ describe("SpawnService: fork admission vs. abort/stopping race (D19, test 27, N3
       forkSessionFrom: forkFile(),
     });
     expect(raced).toEqual({
-      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false, reason: "config" },
     });
 
     await stopP;
@@ -475,7 +484,7 @@ describe("SpawnService: fork admission vs. abort/stopping race (D19, test 27, N3
       forkSessionFrom: forkFile(),
     });
     expect(raced).toEqual({
-      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false, reason: "config" },
     });
   });
 
@@ -496,7 +505,7 @@ describe("SpawnService: fork admission vs. abort/stopping race (D19, test 27, N3
       forkSessionFrom: forkFile(),
     });
     expect(afterFinish).toEqual({
-      error: { kind: "config", message: "parent run is stopping or gone", retryable: false },
+      error: { kind: "config", message: "parent run is stopping or gone", retryable: false, reason: "config" },
     });
 
     // abort() on an already-finished run is a true no-op (never reaches the

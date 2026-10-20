@@ -303,8 +303,12 @@ describe("X2 resume lock lifecycle: CC4 CP1 must not leak the resume lock", () =
     // If CP1 ran after resumeLocks.add() (or was skipped on the resume path),
     // the second call would instead fail with "already has a resume in
     // progress" — proving the first rejected attempt leaked its lock.
-    expect(one).toEqual({ error: { kind: "config", message: "deadlineAt already expired", retryable: false } });
-    expect(two).toEqual({ error: { kind: "config", message: "deadlineAt already expired", retryable: false } });
+    expect(one).toEqual({
+      error: { kind: "config", message: "deadlineAt already expired", retryable: false, reason: "config" },
+    });
+    expect(two).toEqual({
+      error: { kind: "config", message: "deadlineAt already expired", retryable: false, reason: "config" },
+    });
 
     // A real (non-expired) resume of the same target must still succeed afterwards.
     const real = await service.spawn({ type: "worker", prompt: "again", resumeFrom: "cp1" });
@@ -346,6 +350,7 @@ describe("X2 resume: same-process live-session-file guard (run-persistence plan 
         kind: "config",
         message: `run ${first.runId}'s session is still being closed by the previous session stack; retry in a few seconds`,
         retryable: false,
+        reason: "session_closing",
       },
     });
     expect(labels).toEqual(["closing"]); // no label registered for the refused request

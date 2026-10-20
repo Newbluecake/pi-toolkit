@@ -12,6 +12,26 @@ export interface EngineOptions<
   onDegraded?: (key: string, reason: string) => void;
 }
 
+/**
+ * fabric-cross-session plan v3 §3.5 / §4.1 (D-W11): the persist-before-memory, CAS-guarded siblings of
+ * `transition`/`annotate`. Contract shared by all three strict ops:
+ *  - `frozen` ⇒ refuse; unknown key / state mismatch / claimToken mismatch / edge not allowed ⇒ `conflict`;
+ *  - the store write happens FIRST; if it throws the in-memory record is untouched (`persist_failed`) and the
+ *    store's own cache is expected to roll back (createPiOutboxStore does) — `onDegraded` is NOT called, the caller
+ *    owns the failure;
+ *  - memory-only fields are never persisted, and the persisted form of a record held in a memory-only state
+ *    (`claimed`) is its normalized `pending` form (the store only ever holds the persisted state);
+ *  - a record sitting in a memory-only state must be addressed with its `claimToken` (a missing/wrong token ⇒ `conflict`).
+ */
+export type StrictFailure = "conflict" | "frozen" | "persist_failed";
+/** What `reserveStrict` binds a record to (structurally `FabricRecord["reserved"]`). */
+export interface ReservationMark {
+  rsv: string;
+  runId: string;
+  at: number;
+}
+export type StrictExpect<S extends string> = { state: S | readonly S[]; claimToken?: string };
+
 export interface DeliveryEngine<R, S extends string> {
   put(record: R): boolean;
   get(key: string): R | undefined;
@@ -25,6 +45,36 @@ export interface DeliveryEngine<R, S extends string> {
   ): R | undefined;
   claim(key: string, token: string): R | undefined;
   annotate(key: string, patch: Partial<R>): boolean;
+  /**
+   * CAS + persist-first `transition`. `expect.claimToken` is required when the current state is memory-only. A patch
+   * key explicitly set to `undefined` clears that field (memory and persisted form). Leaving a memory-only state also
+   * drops every memory-only field from the in-memory record (the stale `claimToken` never lingers).
+   */
+  transitionStrict(
+    key: string,
+    expect: StrictExpect<S>,
+    to: S,
+    patch?: Partial<R>,
+  ): { ok: true; record: R } | { ok: false; reason: StrictFailure };
+  /** CAS + persist-first `annotate` (same state kept, `claimed` stays `claimed` in memory, persisted as `pending`+patch). */
+  annotateStrict(
+    key: string,
+    expect: StrictExpect<S>,
+    patch: Partial<R>,
+  ): { ok: true } | { ok: false; reason: StrictFailure };
+  /**
+   * Claim-aware reservation (plan §3.5). `expect` is `{state:"pending"}` or `{state:"claimed", claimToken}`.
+   * `conflict` also covers an already-`reserved`/`quarantined` record. `expired` uses the same comparison as the
+   * mailbox TTL (F0): `now >= createdAt + ttlMs`. Success persists `pending + reserved` first, then moves memory to
+   * `pending` (a claimed trigger's ownership passes from the mailbox to the reservation) and drops the claimToken.
+   */
+  reserveStrict(
+    key: string,
+    expect: { state: "pending" } | { state: "claimed"; claimToken: string },
+    reserved: ReservationMark,
+    now: number,
+    ttlMs: number,
+  ): { ok: true } | { ok: false; reason: StrictFailure | "expired" };
   freeze(): void;
   fold(list: readonly R[]): Map<string, R>;
   readonly stats: Record<S, number>;
@@ -69,6 +119,30 @@ export function createDeliveryEngine<
     const result: Record<string, unknown> = { ...(patch as object) };
     delete result.state;
     return result as Partial<R>;
+  };
+
+  const withoutMemoryOnlyKeys = (record: R): R => {
+    const result: Record<string, unknown> = { ...(record as object) };
+    for (const field of options.memoryOnlyFields) delete result[String(field)];
+    return result as R;
+  };
+  /** Drops keys explicitly set to `undefined` (a cleared field must be absent, not present-and-undefined). */
+  const withoutUndefined = (record: R): R => {
+    const result: Record<string, unknown> = { ...(record as object) };
+    for (const [name, value] of Object.entries(result)) if (value === undefined) delete result[name];
+    return result as R;
+  };
+  /** CAS lookup shared by the strict ops: the live record iff its state (and claimToken, for a memory-only state) match. */
+  const casTarget = (key: string, expect: StrictExpect<S>): R | undefined => {
+    const current = records.get(key);
+    if (current === undefined) return undefined;
+    const states: readonly S[] = Array.isArray(expect.state) ? (expect.state as readonly S[]) : [expect.state as S];
+    if (!states.includes(current.state)) return undefined;
+    if (options.memoryOnly.has(current.state)) {
+      const held = (current as unknown as { claimToken?: string }).claimToken;
+      if (expect.claimToken === undefined || held !== expect.claimToken) return undefined;
+    }
+    return current;
   };
 
   const recordDegraded = (key: string, error: unknown): void => {
@@ -151,6 +225,64 @@ export function createDeliveryEngine<
         recordDegraded(key, error);
       }
       return true;
+    },
+    transitionStrict(key, expect, to, patch = {}) {
+      if (frozen) return { ok: false, reason: "frozen" };
+      const current = casTarget(key, expect);
+      if (current === undefined) return { ok: false, reason: "conflict" };
+      if (options.memoryOnly.has(to) || !(options.allowed[current.state] ?? []).includes(to))
+        return { ok: false, reason: "conflict" };
+      const updatedAt = options.now();
+      try {
+        options.store.update(key, withoutMemoryOnly({ ...patch, state: to, updatedAt } as Partial<R>));
+      } catch {
+        return { ok: false, reason: "persist_failed" };
+      }
+      const next = withoutUndefined({
+        ...(options.memoryOnly.has(current.state) ? withoutMemoryOnlyKeys(current) : current),
+        ...patch,
+        state: to,
+        updatedAt,
+      } as R);
+      records.set(key, next);
+      return { ok: true, record: copy(next) };
+    },
+    annotateStrict(key, expect, patch) {
+      if (frozen) return { ok: false, reason: "frozen" };
+      const current = casTarget(key, expect);
+      if (current === undefined) return { ok: false, reason: "conflict" };
+      const updatedAt = options.now();
+      try {
+        options.store.update(key, withoutMemoryOnly(withoutState({ ...patch, updatedAt } as Partial<R>)));
+      } catch {
+        return { ok: false, reason: "persist_failed" };
+      }
+      const next = withoutUndefined({ ...current, ...withoutState(patch), state: current.state, updatedAt } as R);
+      records.set(key, next);
+      return { ok: true };
+    },
+    reserveStrict(key, expect, reserved, now, ttlMs) {
+      if (frozen) return { ok: false, reason: "frozen" };
+      const current = casTarget(key, expect as unknown as StrictExpect<S>);
+      if (current === undefined) return { ok: false, reason: "conflict" };
+      const flags = current as unknown as { reserved?: unknown; quarantined?: unknown; createdAt?: unknown };
+      if (flags.reserved !== undefined || flags.quarantined !== undefined) return { ok: false, reason: "conflict" };
+      if (typeof flags.createdAt === "number" && now >= flags.createdAt + ttlMs)
+        return { ok: false, reason: "expired" };
+      const updatedAt = options.now();
+      try {
+        options.store.update(key, withoutMemoryOnly(withoutState({ reserved, updatedAt } as unknown as Partial<R>)));
+      } catch {
+        return { ok: false, reason: "persist_failed" };
+      }
+      const next = {
+        ...(options.memoryOnly.has(current.state) ? withoutMemoryOnlyKeys(current) : current),
+        reserved,
+        state: "pending" as S,
+        updatedAt,
+      } as R;
+      records.set(key, next);
+      return { ok: true };
     },
     freeze() {
       frozen = true;

@@ -57,7 +57,7 @@ it("real stack late-binds quota 401/success to the same external prompt/admissio
       isolation: "worktree",
       modelOverride: { provider: "droid", id: "gpt-6-luna" },
     }),
-  ).toEqual({ error: { kind: "config", retryable: false, message: reason } });
+  ).toEqual({ error: { kind: "config", retryable: false, message: reason, reason: "external_unavailable" } });
   expect(h.stack.spawn.snapshots()).toEqual(before);
   // A later successful billing response recovers even though provider admission is blocked.
   status = 200;

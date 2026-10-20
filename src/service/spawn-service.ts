@@ -145,6 +145,12 @@ export interface SpawnService {
   /** Resolve a model-facing resume handle to an owned, existing session file. */
   resolveResume(handle: string): ResolveResumeResult;
   /**
+   * fabric-cross-session plan v3 §3.4a: the run that currently owns a resume of `sessionFile` (admitted by ANY resume
+   * entry — Agent, @mention, revive, RPC, /task — and not yet terminal), or `undefined`. Pure registry read: no I/O, no
+   * side effect. Accepts the persisted session-file path only (what `diag.sessionFile` / `resolveResume` yield).
+   */
+  successorOf(sessionFile: string): RunId | undefined;
+  /**
    * CC1 (workflow design §8.2 / §3.7 OS1–OS4): the only owner-stop entry
    * point for a caller whose own id is never a tracked run (e.g. a future
    * workflow orchestrator's `WorkflowId` — it has no session/RunState, so
@@ -280,7 +286,11 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   // for new fork admission the instant abort() is called.
   const stopping = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
-  const resumeLocks = new Set<string>();
+  // fabric-cross-session plan v3 §3.4a (S0): the resume mutex is now an OWNER registry — resume key (target run id AND
+  // session file) → the run that holds it. Mutual exclusion is unchanged (a held key rejects `resume_locked`, released
+  // at the same points as before: terminal / `start()` failure); the owner id is what `successorOf` exposes so
+  // mailbox/WakeService (W3/W4) can tell "target finished but a successor run is already on its session".
+  const resumeOwners = new Map<string, RunId>();
   // Fix 3 (admitted-run-visibility plan): a per-run AbortController wired into
   // start()'s RunnerSpec.signal (merged with any caller-supplied req.signal via
   // AbortSignal.any) solely so abort() has a cooperative-cancel lever that still
@@ -583,7 +593,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // deleting only req.resumeFrom leaks the targetId lock forever once
       // resumeFrom has been rewritten to the session file (P1: repeat-resume
       // of the same session was permanently rejected).
-      for (const key of resumeLockKeys) resumeLocks.delete(key);
+      for (const key of resumeLockKeys) if (resumeOwners.get(key) === runId) resumeOwners.delete(key);
     }
   };
   /**
@@ -603,15 +613,15 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     async spawn(req) {
       // CC4/CP1 (workflow design §4.4.1 F2, CP1-a/b/c): must be the first
       // statement in spawn() — strictly before ANY mutable state write
-      // (resumeLocks/labels/nesting/parentOf/childrenOf/running below). A
-      // rejected resume request must never write a resumeLocks entry that
+      // (resumeOwners/labels/nesting/parentOf/childrenOf/running below). A
+      // rejected resume request must never write a resumeOwners entry that
       // only `start()`'s `finally` would ever clean up (that path never runs
       // for a request rejected here), which would otherwise permanently lock
       // out the resume target (same failure class as the already-fixed
       // "leaks the targetId lock forever" bug in this file). Zero side
       // effects: no runId, no index writes, no H2, no worktree, no slot.
       if (req.deadlineAt !== undefined && req.deadlineAt <= now())
-        return { error: { kind: "config", message: "deadlineAt already expired", retryable: false } };
+        return { error: { kind: "config", message: "deadlineAt already expired", retryable: false, reason: "config" } };
       // P0-r (todo #22 optimize-plan §7.0 point 4): toolDomain:"readonly" never
       // combines with isolation / forkSessionFrom / resumeFrom — tidy never
       // needs any of them, and combining them would be a latent misuse
@@ -627,6 +637,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             kind: "config",
             message: 'toolDomain:"readonly" cannot be combined with isolation, forkSessionFrom, or resumeFrom',
             retryable: false,
+            reason: "config",
           },
         };
       }
@@ -652,6 +663,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
                 (runningLabels.length ? ` (${runningLabels.join(", ")})` : "") +
                 ". Wait for one to finish and dispatch again, or raise concurrencyLimit (/agent settings).",
               retryable: true,
+              reason: "pool_full",
             },
           };
         }
@@ -671,7 +683,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         // instead of burning turns on trial-and-error guesses.
         const known = deps.types.list().map((t) => t.name);
         const hint = known.length ? `Valid types: ${known.join(", ")}` : "No agent types are registered.";
-        return { error: { kind: "config", message: `unknown agent type: ${req.type}. ${hint}`, retryable: false } };
+        return {
+          error: {
+            kind: "config",
+            message: `unknown agent type: ${req.type}. ${hint}`,
+            retryable: false,
+            reason: "unknown_type",
+          },
+        };
       }
       // Model-hint admission check (fuzzy frontmatter `model:` / Agent tool
       // `model` param). Strict provider/id pairs are existence-checked right
@@ -694,6 +713,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
                   `unknown model hint: "${modelHint}" — pass a strict provider/id, or a bare id/substring of an available model ` +
                   `(pi /model lists what's available).${suffix ? ` ${suffix}` : ""}`,
                 retryable: false,
+                reason: "config",
               },
             };
           }
@@ -720,7 +740,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           if (resumeTargetExternal) {
             if (deps.external === undefined) {
               return {
-                error: { kind: "config", message: msgResumeDisabled(resume.runId), retryable: false },
+                error: { kind: "config", message: msgResumeDisabled(resume.runId), retryable: false, reason: "config" },
               };
             }
             // ② resume target is external: inherit the target's droid model
@@ -731,7 +751,12 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               if (targetModel !== undefined) admittedModel = targetModel;
             } else if (deps.external.owns(req.modelOverride.provider) !== true) {
               return {
-                error: { kind: "config", message: msgResumeCrossRuntime(resume.runId, "droid"), retryable: false },
+                error: {
+                  kind: "config",
+                  message: msgResumeCrossRuntime(resume.runId, "droid"),
+                  retryable: false,
+                  reason: "config",
+                },
               };
             }
           }
@@ -745,11 +770,11 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // quota gate fails open).
       if (admittedExternal && deps.external !== undefined && admittedModel !== undefined) {
         if (req.toolDomain === "readonly") {
-          return { error: { kind: "config", message: MSG_READONLY_DOMAIN, retryable: false } };
+          return { error: { kind: "config", message: MSG_READONLY_DOMAIN, retryable: false, reason: "config" } };
         }
         const unavailable = deps.external.unavailableReason(admittedModel.provider);
         if (unavailable !== undefined) {
-          return { error: { kind: "config", message: unavailable, retryable: false } };
+          return { error: { kind: "config", message: unavailable, retryable: false, reason: "external_unavailable" } };
         }
         // 2026-10-16 用户拍板：非空 externalAgents.droid.models 是新 spawn 的白名单——
         // droid 模型 id 不在名单内 ⇒ 拒绝（与 unknown-model 同一零副作用准入位；名单判定
@@ -759,27 +784,37 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         if (!(resumeTargetExternal && req.modelOverride === undefined)) {
           const rejection = deps.external.modelAllowlistRejection?.(admittedModel);
           if (rejection !== undefined) {
-            return { error: { kind: "config", message: rejection, retryable: false } };
+            return { error: { kind: "config", message: rejection, retryable: false, reason: "config" } };
           }
         }
         if (deps.external.exists(admittedModel) === false) {
           return {
-            error: { kind: "config", message: deps.external.unknownModelMessage(admittedModel), retryable: false },
+            error: {
+              kind: "config",
+              message: deps.external.unknownModelMessage(admittedModel),
+              retryable: false,
+              reason: "config",
+            },
           };
         }
         if (req.consultExperts !== undefined && req.consultExperts.length > 0) {
-          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false } };
+          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false, reason: "config" } };
         }
         if (req.forkSessionFrom !== undefined) {
-          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false } };
+          return { error: { kind: "config", message: MSG_EXPERTS_UNSUPPORTED, retryable: false, reason: "config" } };
         }
         if (resumeTargetRunId !== undefined && !resumeTargetExternal) {
           return {
-            error: { kind: "config", message: msgResumeCrossRuntime(resumeTargetRunId, "pi"), retryable: false },
+            error: {
+              kind: "config",
+              message: msgResumeCrossRuntime(resumeTargetRunId, "pi"),
+              retryable: false,
+              reason: "config",
+            },
           };
         }
         if (resumeTargetExternal && req.isolation !== undefined) {
-          return { error: { kind: "config", message: MSG_RESUME_ISOLATION, retryable: false } };
+          return { error: { kind: "config", message: MSG_RESUME_ISOLATION, retryable: false, reason: "config" } };
         }
       }
       // Strict provider/id admission check (a renamed provider such as
@@ -800,23 +835,25 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               ...(deps.quotaAnnotate ? { annotate: deps.quotaAnnotate } : {}),
             }),
             retryable: false,
+            reason: "config",
           },
         };
       }
       // 额度闸门（quota-plan §6）：admittedModel 定型之后、任何可变状态写入
-      // （resumeLocks/labels/nesting/…）之前——与 CC4/unknown-type/model-hint
+      // （resumeOwners/labels/nesting/…）之前——与 CC4/unknown-type/model-hint
       // 同一「零副作用准入区」。只读同步缓存，绝不发网络请求；越线 ⇒ 快速
       // 失败并直接给替代模型，不烧一个注定 429 的 run。
       if (admittedModel && deps.quotaGate) {
         const gate = deps.quotaGate(admittedModel);
-        if (gate) return { error: { kind: "config", message: gate.message, retryable: false } };
+        if (gate) return { error: { kind: "config", message: gate.message, retryable: false, reason: "quota" } };
       }
       // sysload §6.2: Agent (top-level and nested) is the only producer that
       // carries loadPolicy. Keep this in the zero-side-effect admission zone,
       // after quota and before nesting/run/label/worktree state is touched.
       if (req.loadPolicy === "reject" && deps.loadGate) {
         const gate = deps.loadGate({ nested: req.parentRunId !== undefined && nesting.has(req.parentRunId) });
-        if (gate !== undefined) return { error: { kind: "config", message: gate.message, retryable: true } };
+        if (gate !== undefined)
+          return { error: { kind: "config", message: gate.message, retryable: true, reason: "load" } };
       }
       // X3: nesting depth + canSpawn whitelist. Authoritative for real
       // nested chains produced by the injected nested Agent tool, whose
@@ -845,6 +882,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
                 kind: "config",
                 message: `nested delegation is not permitted: parent's agent type may only spawn [${(parent.canSpawn ?? []).join(", ")}], not "${req.type}"`,
                 retryable: false,
+                reason: "config",
               },
             };
           depth = parent.depth + 1;
@@ -854,6 +892,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
                 kind: "config",
                 message: `nested delegation depth ${depth} exceeds the configured maximum (${maxNestedDepth})`,
                 retryable: false,
+                reason: "config",
               },
             };
         }
@@ -897,6 +936,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             kind: "config",
             message: `cannot derive a unique label from "${base}": all 999 numbered variants are taken — pass a different label/description`,
             retryable: false,
+            reason: "config",
           },
         };
       const labelAction: "register" | "repoint" = repoint ? "repoint" : "register";
@@ -904,7 +944,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // consult (plan §4.4): fork admission branch. Validated here — after
       // label planning, before the resume branch — and deliberately takes no
       // locks: a fork copy is private to this one run (concurrent consults of
-      // the same expert each hold their own copy), so resumeLocks has nothing
+      // the same expert each hold their own copy), so resumeOwners has nothing
       // to mutex. statSync (not existsSync+statSync) keeps the check a single
       // race-free syscall.
       if (req.forkSessionFrom) {
@@ -920,6 +960,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               kind: "config",
               message: "parent run is stopping or gone",
               retryable: false,
+              reason: "config",
             },
           };
         }
@@ -929,6 +970,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               kind: "config",
               message: "forkSessionFrom and resumeFrom are mutually exclusive",
               retryable: false,
+              reason: "config",
             },
           };
         try {
@@ -940,6 +982,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               kind: "config",
               message: `fork session file missing: ${req.forkSessionFrom}`,
               retryable: false,
+              reason: "config",
             },
           };
         }
@@ -953,7 +996,12 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         if (!target.ok) {
           const resume = resolveResume(req.resumeFrom);
           return {
-            error: { kind: "config", message: resume.ok ? target.error : resume.error, retryable: false },
+            error: {
+              kind: "config",
+              message: resume.ok ? target.error : resume.error,
+              retryable: false,
+              reason: "config",
+            },
           };
         }
         const targetId = target.runId;
@@ -963,10 +1011,11 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               kind: "config",
               message: `run ${targetId} is still running; use steer_subagent instead`,
               retryable: false,
+              reason: "target_running",
             },
           };
         const resume = resolveResume(req.resumeFrom);
-        if (!resume.ok) return { error: { kind: "config", message: resume.error, retryable: false } };
+        if (!resume.ok) return { error: { kind: "config", message: resume.error, retryable: false, reason: "config" } };
         // run-persistence plan D8: a same-process stack rebuild (/reload whose
         // shutdown drain timed out) can leave the previous stack's run still
         // closing — and writing — this very session file. Refuse (never wait)
@@ -977,14 +1026,20 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               kind: "config",
               message: `run ${targetId}'s session is still being closed by the previous session stack; retry in a few seconds`,
               retryable: false,
+              reason: "session_closing",
             },
           };
-        if (resumeLocks.has(targetId) || resumeLocks.has(resume.sessionFile))
+        if (resumeOwners.has(targetId) || resumeOwners.has(resume.sessionFile))
           return {
-            error: { kind: "config", message: `run ${targetId} already has a resume in progress`, retryable: false },
+            error: {
+              kind: "config",
+              message: `run ${targetId} already has a resume in progress`,
+              retryable: false,
+              reason: "resume_locked",
+            },
           };
-        resumeLocks.add(targetId);
-        resumeLocks.add(resume.sessionFile);
+        resumeOwners.set(targetId, runId);
+        resumeOwners.set(resume.sessionFile, runId);
         resumeTimeoutPolicy = resume.timeoutPolicy;
         resumeDispatchMeta = resume.dispatchMeta;
         resolvedReq = {
@@ -1077,6 +1132,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       }
       void start(resolvedReq, runId, config, budget, lockKeys, depth, admittedModel);
       return { runId, label: effective, slots, ...(queued ? { queued } : {}) };
+    },
+    successorOf(sessionFile) {
+      return resumeOwners.get(sessionFile);
     },
     async spawnAndWait(req) {
       const started = await service.spawn({ ...req, expectAck: true });

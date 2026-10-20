@@ -518,7 +518,8 @@ function buildFabric(
     store,
     allowed,
     memoryOnly: new Set(["claimed"]),
-    memoryOnlyFields: ["claimToken"],
+    // `quarantined` (fabric-cross-session plan §4.1): contract-only in S0 — set in memory by W3's rollback-failure path, never persisted.
+    memoryOnlyFields: ["claimToken", "quarantined"],
     now: () => systemClock.now(),
     onDegraded: (key, reason) => console.warn(`[pi-subagent] fabric persistence degraded for ${key}: ${reason}`),
   });

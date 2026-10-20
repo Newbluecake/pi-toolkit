@@ -77,6 +77,12 @@ export interface ResolvedSpawnRequest extends SessionSpec {
    */
   timeoutPolicy?: TimeoutPolicy;
   /**
+   * fabric-cross-session plan §4.1 (S0, type-only): threaded verbatim from `SpawnRequest.trackInput` (request-threading
+   * `THREADED`, Gate C). Spawn-service sets it only when an inbox reservation was bound to this resume; W2 makes the
+   * runner/reducer write the acceptance markers under this flag and nowhere else.
+   */
+  trackInput?: true;
+  /**
    * consult (plan §4.3/§4.4): threaded verbatim from
    * `SpawnRequest.forkSessionFrom`. The runner uses it for two things:
    * ① session_create opens this file through `driver.resume` instead of

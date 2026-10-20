@@ -946,7 +946,30 @@ export interface FabricSettings {
   progressChannel: "context" | "display";
   rootMinIntervalMs: number;
   rootInboxCap: number;
+  /** Sender-controlled wake / revive of finished sub-agents (fabric-cross-session plan v3 §4.8); phase-1 (in-tree) leaves only. */
+  wake: FabricWakeSettings;
 }
+/**
+ * `fabric.wake.*` (plan v3 §4.8, Q2): only effective while `fabric.enabled` is also on; read once at stack build
+ * (non-live). `rootRunMaxS` and `crossSession.*` belong to phase 2 and are intentionally NOT parsed here.
+ */
+export interface FabricWakeSettings {
+  /** Default on (Q2) — gated behind `fabric.enabled`, which defaults off, so a default install is unchanged. */
+  enabled: boolean;
+  /** Causal wake-chain ceiling (Q9): a wake with `level+1 > maxLevel` degrades to deliver-only. */
+  maxLevel: number;
+  /** Per sender run: how many `wake:true` sends may be effective. */
+  perRunQuota: number;
+  /** Fixed budget (seconds) of a revived run; parse-time clamped to 60..3600. */
+  resumeBudgetS: number;
+  resumesPerHour: number;
+  resumesPerTargetPerHour: number;
+  /** Max parked messages per finished target. */
+  parkCapPerTarget: number;
+}
+/** Parse-time bounds for `fabric.wake.resumeBudgetS` (plan §4.8). */
+export const FABRIC_WAKE_RESUME_BUDGET_MIN_S = 60;
+export const FABRIC_WAKE_RESUME_BUDGET_MAX_S = 3600;
 /** 动态阈值默认值（§11.2）：mode 默认 on（用户拍板 D1）；maxQualityPercent/rediscoveryUsd 均未校准。 */
 export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
   mode: "on",
@@ -1100,6 +1123,15 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     progressChannel: "display",
     rootMinIntervalMs: 10_000,
     rootInboxCap: 12,
+    wake: {
+      enabled: true,
+      maxLevel: 2,
+      perRunQuota: 3,
+      resumeBudgetS: 600,
+      resumesPerHour: 6,
+      resumesPerTargetPerHour: 2,
+      parkCapPerTarget: 8,
+    },
   },
   cacheTtl: {
     mode: "auto",
@@ -1579,7 +1611,7 @@ export function parseGoalSettings(input: unknown): GoalSettings {
 
 function parseFabricSettings(input: unknown): FabricSettings {
   const defaults = DEFAULT_SETTINGS.fabric;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults, wake: { ...defaults.wake } };
   const value = input as Record<string, unknown>;
   const count = (key: keyof FabricSettings): number => {
     const raw = value[key];
@@ -1600,6 +1632,31 @@ function parseFabricSettings(input: unknown): FabricSettings {
         : defaults.progressChannel,
     rootMinIntervalMs: count("rootMinIntervalMs") === 0 ? 0 : Math.max(1_000, count("rootMinIntervalMs")),
     rootInboxCap: count("rootInboxCap"),
+    wake: parseFabricWakeSettings(value.wake),
+  };
+}
+
+/** `fabric.wake.*` (plan v3 §4.8): field-by-field tolerant, never throws; unknown keys (incl. phase-2 ones) are ignored. */
+function parseFabricWakeSettings(input: unknown): FabricWakeSettings {
+  const defaults = DEFAULT_SETTINGS.fabric.wake;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const count = (key: Exclude<keyof FabricWakeSettings, "enabled" | "resumeBudgetS">): number => {
+    const raw = value[key];
+    return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : defaults[key];
+  };
+  const budgetRaw = value.resumeBudgetS;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    maxLevel: count("maxLevel"),
+    perRunQuota: count("perRunQuota"),
+    resumeBudgetS:
+      typeof budgetRaw === "number" && Number.isFinite(budgetRaw)
+        ? Math.min(FABRIC_WAKE_RESUME_BUDGET_MAX_S, Math.max(FABRIC_WAKE_RESUME_BUDGET_MIN_S, Math.floor(budgetRaw)))
+        : defaults.resumeBudgetS,
+    resumesPerHour: count("resumesPerHour"),
+    resumesPerTargetPerHour: count("resumesPerTargetPerHour"),
+    parkCapPerTarget: count("parkCapPerTarget"),
   };
 }
 

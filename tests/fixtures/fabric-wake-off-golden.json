@@ -1,0 +1,319 @@
+{
+  "note": "wake-off golden captured from dev before S0 (fabric-cross-session plan v3 §3.9). Never regenerate to fix a diff.",
+  "successful": {
+    "entries": [
+      {
+        "type": "custom",
+        "customType": "subagent:run",
+        "data": {
+          "runId": "<runId>",
+          "generation": 1,
+          "status": "starting",
+          "phase": "session_create",
+          "deadlines": {
+            "enqueuedAt": 1000000,
+            "deadlineAt": 1050000,
+            "queueDeadlineAt": 1000200,
+            "hardDeadlineAt": 11850000
+          },
+          "diag": {
+            "createdAt": 1000000,
+            "enqueuedAt": 1000000,
+            "startedAt": 1000001,
+            "phase": "session_create",
+            "phaseEnteredAt": 1000001,
+            "lastEventType": "session_created",
+            "pendingTools": 0,
+            "turns": 0,
+            "label": "golden-a",
+            "agentType": "worker",
+            "taskPrompt": "do it",
+            "timeoutPolicy": "extendable",
+            "orphaned": false,
+            "generation": 1,
+            "deadlineAt": 1050000,
+            "hardDeadlineAt": 11850000,
+            "staleInputs": 0,
+            "sessionFile": "/tmp/fabric-wake-off-golden.jsonl",
+            "escalation": [],
+            "degraded": [],
+            "unkillable": []
+          },
+          "updatedAt": 1000002,
+          "journal": {
+            "kind": "session_created"
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "subagent:run",
+        "data": {
+          "runId": "<runId>",
+          "generation": 1,
+          "status": "completed",
+          "phase": "settled",
+          "deadlines": {
+            "enqueuedAt": 1000000,
+            "deadlineAt": 1050000,
+            "queueDeadlineAt": 1000200,
+            "hardDeadlineAt": 11850000
+          },
+          "diag": {
+            "createdAt": 1000000,
+            "phase": "settled",
+            "phaseEnteredAt": 1000041,
+            "pendingTools": 0,
+            "turns": 0,
+            "escalation": [],
+            "orphaned": false,
+            "generation": 1,
+            "degraded": [],
+            "staleInputs": 0,
+            "unkillable": [],
+            "enqueuedAt": 1000000,
+            "deadlineAt": 1050000,
+            "hardDeadlineAt": 11850000,
+            "label": "golden-a",
+            "agentType": "worker",
+            "taskPrompt": "do it",
+            "timeoutPolicy": "extendable",
+            "startedAt": 1000001,
+            "lastEventType": "message_end",
+            "sessionFile": "/tmp/fabric-wake-off-golden.jsonl",
+            "lastEventAt": 1000002,
+            "lastTurnStartAt": 1000002,
+            "usage": {
+              "input": 3,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "costUsd": 0.01
+            },
+            "text": "done",
+            "textFinal": true,
+            "settledAt": 1000041
+          },
+          "outcome": {
+            "runId": "<runId>",
+            "status": "completed",
+            "text": "done",
+            "usage": {
+              "input": 3,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "costUsd": 0.01
+            },
+            "turns": 0,
+            "durationMs": 41,
+            "diag": {
+              "createdAt": 1000000,
+              "phase": "settled",
+              "phaseEnteredAt": 1000041,
+              "pendingTools": 0,
+              "turns": 0,
+              "escalation": [],
+              "orphaned": false,
+              "generation": 1,
+              "degraded": [],
+              "staleInputs": 0,
+              "unkillable": [],
+              "enqueuedAt": 1000000,
+              "deadlineAt": 1050000,
+              "hardDeadlineAt": 11850000,
+              "label": "golden-a",
+              "agentType": "worker",
+              "taskPrompt": "do it",
+              "timeoutPolicy": "extendable",
+              "startedAt": 1000001,
+              "lastEventType": "message_end",
+              "sessionFile": "/tmp/fabric-wake-off-golden.jsonl",
+              "lastEventAt": 1000002,
+              "lastTurnStartAt": 1000002,
+              "usage": {
+                "input": 3,
+                "output": 4,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "costUsd": 0.01
+              },
+              "text": "done",
+              "textFinal": true,
+              "settledAt": 1000041
+            }
+          },
+          "updatedAt": 1000041
+        }
+      }
+    ],
+    "deliveries": [
+      {
+        "key": "<runId>:1",
+        "runId": "<runId>",
+        "generation": 1,
+        "status": "completed",
+        "textPreview": "done",
+        "label": "golden-a",
+        "diag": {
+          "phase": "settled",
+          "status": "completed",
+          "pendingTools": 0,
+          "staleInputs": 0,
+          "degraded": 0
+        },
+        "createdAt": 1000041,
+        "reconcileRound": 0
+      }
+    ]
+  },
+  "admissionRejected": {
+    "error": {
+      "kind": "config",
+      "message": "unknown agent type: nope. Valid types: worker",
+      "retryable": false
+    },
+    "entries": [],
+    "deliveries": [],
+    "snapshots": [],
+    "runnerCalls": 0
+  },
+  "startupFailed": {
+    "entries": [
+      {
+        "type": "custom",
+        "customType": "subagent:run",
+        "data": {
+          "runId": "<runId>",
+          "generation": 1,
+          "status": "failed",
+          "phase": "settled",
+          "deadlines": {
+            "enqueuedAt": 1000000,
+            "deadlineAt": 1050000,
+            "queueDeadlineAt": 1000200,
+            "hardDeadlineAt": 11850000
+          },
+          "diag": {
+            "createdAt": 1000000,
+            "phase": "settled",
+            "phaseEnteredAt": 1000002,
+            "pendingTools": 0,
+            "turns": 0,
+            "escalation": [],
+            "orphaned": false,
+            "generation": 1,
+            "degraded": [],
+            "staleInputs": 0,
+            "unkillable": [],
+            "enqueuedAt": 1000000,
+            "deadlineAt": 1050000,
+            "hardDeadlineAt": 11850000,
+            "label": "golden-c",
+            "agentType": "worker",
+            "taskPrompt": "do it",
+            "timeoutPolicy": "extendable",
+            "startedAt": 1000001,
+            "lastEventType": "internal",
+            "error": {
+              "kind": "internal",
+              "message": "boom: session start failed",
+              "retryable": false
+            },
+            "settledAt": 1000002
+          },
+          "outcome": {
+            "runId": "<runId>",
+            "status": "failed",
+            "turns": 0,
+            "durationMs": 2,
+            "error": {
+              "kind": "internal",
+              "message": "boom: session start failed",
+              "retryable": false
+            },
+            "diag": {
+              "createdAt": 1000000,
+              "phase": "settled",
+              "phaseEnteredAt": 1000002,
+              "pendingTools": 0,
+              "turns": 0,
+              "escalation": [],
+              "orphaned": false,
+              "generation": 1,
+              "degraded": [],
+              "staleInputs": 0,
+              "unkillable": [],
+              "enqueuedAt": 1000000,
+              "deadlineAt": 1050000,
+              "hardDeadlineAt": 11850000,
+              "label": "golden-c",
+              "agentType": "worker",
+              "taskPrompt": "do it",
+              "timeoutPolicy": "extendable",
+              "startedAt": 1000001,
+              "lastEventType": "internal",
+              "error": {
+                "kind": "internal",
+                "message": "boom: session start failed",
+                "retryable": false
+              },
+              "settledAt": 1000002
+            }
+          },
+          "updatedAt": 1000002
+        }
+      }
+    ],
+    "deliveries": [
+      {
+        "key": "<runId>:1",
+        "runId": "<runId>",
+        "generation": 1,
+        "status": "failed",
+        "textPreview": "",
+        "label": "golden-c",
+        "failReason": "boom: session start failed",
+        "diag": {
+          "phase": "settled",
+          "status": "failed",
+          "pendingTools": 0,
+          "staleInputs": 0,
+          "degraded": 0
+        },
+        "createdAt": 1000002,
+        "reconcileRound": 0
+      }
+    ]
+  },
+  "messageAgentSchema": {
+    "type": "object",
+    "required": ["to", "kind", "text"],
+    "properties": {
+      "to": {
+        "description": "Target run id, \"root\" for the root session, or @label for a registered top-level agent (requires can_message: mention)",
+        "type": "string"
+      },
+      "kind": {
+        "anyOf": [
+          {
+            "const": "progress",
+            "type": "string"
+          },
+          {
+            "const": "finding",
+            "type": "string"
+          },
+          {
+            "const": "directive",
+            "type": "string"
+          }
+        ]
+      },
+      "text": {
+        "description": "Message body",
+        "type": "string"
+      }
+    }
+  }
+}

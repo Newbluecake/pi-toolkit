@@ -107,6 +107,31 @@ describe("threadThroughRequestFields", () => {
     expect(req.prompt).toBe("host-generated consult question");
   });
 
+  it("fabric-cross-session §4.1 (S0): wakeOrigin is NOT_THREADED (a child never sees the claimToken); trackInput is THREADED to the runner", () => {
+    const req: SpawnRequest = {
+      type: "worker",
+      prompt: "revived",
+      wakeOrigin: {
+        by: "r_WAKER001",
+        key: "r_WAKER001:r_TARGET01:1:1" as never,
+        level: 1,
+        via: "fabric",
+        trigger: { key: "r_WAKER001:r_TARGET01:1:1" as never, claimToken: "mailbox:secret-claim-token" },
+      },
+      trackInput: true,
+    };
+    const out = threadThroughRequestFields(req);
+    expect(out).toEqual({ trackInput: true });
+    expect(out).not.toHaveProperty("wakeOrigin");
+    expect(JSON.stringify(out)).not.toContain("secret-claim-token");
+    // Gate C: the THREADED field exists under the same name on the runner's request type
+    const resolved: Pick<ResolvedSpawnRequest, "trackInput"> = { trackInput: out.trackInput };
+    expect(resolved.trackInput).toBe(true);
+    // absent / undefined ⇒ nothing threaded (wake-off requests are untouched)
+    expect(threadThroughRequestFields({ type: "worker", prompt: "x" })).toEqual({});
+    expect(threadThroughRequestFields({ type: "worker", prompt: "x", trackInput: undefined })).toEqual({});
+  });
+
   it("P0-r (todo #22 optimize-plan §7.0 point 5): toolDomain is consumed by the runtime adapter, never threaded verbatim", () => {
     const req: SpawnRequest = { type: "Plan", prompt: "tidy", toolDomain: "readonly" };
     const out = threadThroughRequestFields(req);

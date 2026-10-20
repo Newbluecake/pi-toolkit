@@ -89,6 +89,7 @@ describe("SpawnService: X3 nested delegation depth + canSpawn whitelist", () => 
         kind: "config",
         message: "nested delegation depth 3 exceeds the configured maximum (2)",
         retryable: false,
+        reason: "config",
       },
     });
   });
@@ -114,6 +115,7 @@ describe("SpawnService: X3 nested delegation depth + canSpawn whitelist", () => 
         kind: "config",
         message: 'nested delegation is not permitted: parent\'s agent type may only spawn [worker], not "other"',
         retryable: false,
+        reason: "config",
       },
     });
   });

@@ -1244,6 +1244,7 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     stopChildrenOf: (parentId, cause) => requireStack(holder).spawn.stopChildrenOf(parentId, cause),
     resolveRun: (handle) => requireStack(holder).spawn.resolveRun(handle),
     resolveResume: (handle) => requireStack(holder).spawn.resolveResume(handle),
+    successorOf: (sessionFile) => requireStack(holder).spawn.successorOf(sessionFile),
     setConcurrencyLimit: (n) => requireStack(holder).spawn.setConcurrencyLimit(n),
     slots: () => requireStack(holder).spawn.slots(),
     runningIds: () => requireStack(holder).spawn.runningIds(),

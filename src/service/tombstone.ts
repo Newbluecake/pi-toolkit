@@ -1,3 +1,4 @@
+import type { WakeExclusion } from "../core/message.js";
 import type { RunId, RunSnapshot, TimeoutPolicy } from "../core/types.js";
 
 export interface Tombstone {
@@ -19,6 +20,13 @@ export interface Tombstone {
    * 内部 pi run 同样受益（原本 tombstone-only 的 resume 目标会失去默认模型）。旧条目缺席。
    */
   readonly model?: { provider: string; id: string };
+  /**
+   * fabric-cross-session plan v3 §4.1 (S0): the run's final effective causal level / admission wake-ability verdict,
+   * kept so a revive of a TTL-evicted run still gets `max(origin+1, prevFinal)` and a real exclusion verdict instead of
+   * `legacy_unknown`. Absent whenever the run never had them (wake off, old runs) — never copied as `undefined`.
+   */
+  readonly wakeLevel?: number;
+  readonly wakeExclusion?: WakeExclusion | "none";
 }
 
 /** In-memory terminal handle index. Entries are intentionally bounded by TTL. */
@@ -44,6 +52,8 @@ export class TombstoneStore {
       ...(snapshot.diag.timeoutPolicy === undefined ? {} : { timeoutPolicy: snapshot.diag.timeoutPolicy }),
       // external-agent §15 跟踪项 2（P5）：同款「缺就不拷」。
       ...(snapshot.diag.model === undefined ? {} : { model: snapshot.diag.model }),
+      ...(snapshot.diag.wakeLevel === undefined ? {} : { wakeLevel: snapshot.diag.wakeLevel }),
+      ...(snapshot.diag.wakeExclusion === undefined ? {} : { wakeExclusion: snapshot.diag.wakeExclusion }),
     });
   }
   has(runId: RunId): boolean {

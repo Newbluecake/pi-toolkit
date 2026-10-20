@@ -827,6 +827,32 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description: "Minimum root context interval; 0 = unlimited, backpressure only",
   }),
   "fabric.rootInboxCap": count("fabric.rootInboxCap", 0, "Maximum pending root context messages"),
+  // fabric-cross-session plan v3 §4.8 (phase 1, in-tree): only effective while fabric.enabled; read at stack build.
+  "fabric.wake.enabled": bool(
+    "fabric.wake.enabled",
+    "Let message_agent wake or revive finished sub-agents (needs fabric.enabled)",
+  ),
+  "fabric.wake.maxLevel": count(
+    "fabric.wake.maxLevel",
+    0,
+    "Max causal wake chain depth; deeper wakes degrade to deliver-only",
+  ),
+  "fabric.wake.perRunQuota": count("fabric.wake.perRunQuota", 0, "Effective wake:true sends per sender run"),
+  "fabric.wake.resumeBudgetS": {
+    kind: "number",
+    path: "fabric.wake.resumeBudgetS",
+    min: 60,
+    max: 3600,
+    integer: true,
+    description: "Fixed time budget (seconds) of a revived run",
+  },
+  "fabric.wake.resumesPerHour": count("fabric.wake.resumesPerHour", 0, "Max revives per hour (all targets)"),
+  "fabric.wake.resumesPerTargetPerHour": count(
+    "fabric.wake.resumesPerTargetPerHour",
+    0,
+    "Max revives per hour for one target",
+  ),
+  "fabric.wake.parkCapPerTarget": count("fabric.wake.parkCapPerTarget", 0, "Max parked messages per finished target"),
   // /goal（goal-plan v4 条件 9）：goal.* 进白名单 + 设置编辑器可见。
   "goal.enabled": bool("goal.enabled", "Enable the /goal objective-driven loop"),
   "goal.maxTurns": count("goal.maxTurns", 1, "Default max continuation iterations per goal"),

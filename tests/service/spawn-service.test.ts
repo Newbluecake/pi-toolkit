@@ -508,6 +508,7 @@ describe("SpawnService", () => {
         kind: "config",
         message: "unknown agent type: missing. No agent types are registered.",
         retryable: false,
+        reason: "unknown_type",
       },
     });
     expect(called).toBe(false);
@@ -705,7 +706,7 @@ describe("SpawnService: CC4 CP1 (deadlineAt admission check)", () => {
     );
     const result = await svc.spawn({ type: "worker", prompt: "x", deadlineAt: -1 });
     expect(result).toEqual({
-      error: { kind: "config", message: "deadlineAt already expired", retryable: false },
+      error: { kind: "config", message: "deadlineAt already expired", retryable: false, reason: "config" },
     });
     expect(called).toBe(false);
   });
@@ -851,7 +852,9 @@ describe("SpawnService: quota gate (quota-plan §6)", () => {
       modelOverride: { provider: "zai-coding-cn", id: "glm-5.3" },
     });
     expect(called).toBe(false);
-    expect(result).toEqual({ error: { kind: "config", message: blockedGate.message, retryable: false } });
+    expect(result).toEqual({
+      error: { kind: "config", message: blockedGate.message, retryable: false, reason: "quota" },
+    });
     // Zero mutable-state writes: no snapshot, no label, nothing registered.
     expect(service.snapshots()).toEqual([]);
     expect(service.getLabel?.("x")).toBeUndefined();
