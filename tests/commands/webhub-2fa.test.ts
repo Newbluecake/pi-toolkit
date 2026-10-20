@@ -465,7 +465,12 @@ describe("LAN-F actual command secret display", () => {
       await command.handler("2fa recovery", ctx);
       expect(request).toHaveBeenCalledTimes(1);
       expect(setWidget).toHaveBeenCalledTimes(1);
-      expect(setWidget.mock.calls[0]![1]).toEqual([expect.stringContaining("仅显示一次"), ...RECOVERY_CODES]);
+      // Uncapped component factory (pi truncates ARRAY widgets at 10 lines — the enroll QR got cut off).
+      const factory = setWidget.mock.calls[0]![1] as () => { render(width: number): string[] };
+      expect(typeof factory).toBe("function");
+      const rendered = factory().render(120).join("\n");
+      expect(rendered).toContain("仅显示一次");
+      for (const code of RECOVERY_CODES) expect(rendered).toContain(code);
       expect(notes.join(" ")).not.toContain(RECOVERY_CODES[0]);
       await vi.advanceTimersByTimeAsync(300000);
       expect(setWidget).toHaveBeenLastCalledWith(setWidget.mock.calls[0]![0], undefined);

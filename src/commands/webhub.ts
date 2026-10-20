@@ -240,7 +240,14 @@ function makeTwofaDeps(ctx: ExtensionCommandContext, deps: WebHubCommandDeps): T
   const showSecrets = (lines: string[]): void => {
     if (ctx.mode !== "tui" || isWebInvocation(ctx)) return;
     if (expiry !== undefined) clearTimeout(expiry);
-    ctx.ui.setWidget(key, lines);
+    // Component factory, not the string array: pi caps array widgets at 10 lines
+    // (PI_WIDGET_MAX_LINES), which truncated the TOTP enrollment QR (2026-10-20 field report).
+    const snapshot = [...lines];
+    try {
+      ctx.ui.setWidget(key, () => qrWidgetComponent(snapshot));
+    } catch {
+      ctx.ui.setWidget(key, snapshot);
+    }
     expiry = setTimeout(() => {
       try {
         ctx.ui.setWidget(key, undefined);
