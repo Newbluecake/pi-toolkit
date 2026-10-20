@@ -1,6 +1,6 @@
 /**
  * Typed thin wrappers over exactly the Feishu calls the bot plan needs (§2.1 bootstrap, §3 send/reply/
- * patch/reactions/uploads/download/botInfo). No business logic: no retries beyond the one mandatory
+ * patch/recall/reactions/uploads/download/botInfo). No business logic: no retries beyond the one mandatory
  * token-invalid retry, no chunking, no routing, no persistence. Request shapes are the ones verified live by
  * the F-probe (`scripts/dev/feishu-probe/steps.ts`, `docs/dev/feishu-bot/probe-results.md`).
  *
@@ -76,6 +76,10 @@ export interface PatchCardParams extends CallOptions {
   messageId: string;
   /** The serialized card JSON (keep `config.update_multi:true` for multi-viewer cards, V5). */
   card: string;
+}
+
+export interface DeleteMessageParams extends CallOptions {
+  messageId: string;
 }
 
 export interface ReactionParams extends CallOptions {
@@ -164,6 +168,8 @@ export interface FeishuApi {
   reply(params: ReplyParams): Promise<FeishuResult<SentMessage>>;
   /** `PATCH /im/v1/messages/:id` — card update. */
   patchCard(params: PatchCardParams): Promise<FeishuResult<void>>;
+  /** `DELETE /im/v1/messages/:id` — recall the bot's own message. */
+  deleteMessage(params: DeleteMessageParams): Promise<FeishuResult<void>>;
   /** `POST /im/v1/messages/:id/reactions` ⇒ reaction id. */
   addReaction(params: ReactionParams): Promise<FeishuResult<{ reactionId: string }>>;
   /** `DELETE /im/v1/messages/:id/reactions/:reactionId`. */
@@ -421,6 +427,21 @@ export function createFeishuApi(deps: FeishuApiDeps): FeishuApi {
         }),
       );
       return r.ok ? sentFrom(r.data) : r;
+    },
+
+    async deleteMessage(p) {
+      if (!validId(p.messageId)) return bad("messageId");
+      return voidOk(
+        await authed(p, (bearer) =>
+          http.json({
+            op: "delete-message",
+            method: "DELETE",
+            path: `/open-apis/im/v1/messages/${encodeURIComponent(p.messageId)}`,
+            token: bearer,
+            ...common(p),
+          }),
+        ),
+      );
     },
 
     async patchCard(p) {

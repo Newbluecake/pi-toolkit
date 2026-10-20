@@ -398,6 +398,56 @@ describe("patchCard", () => {
   });
 });
 
+describe("deleteMessage", () => {
+  const path = "/open-apis/im/v1/messages/om_9";
+  it("recalls the bot message with DELETE, bearer and no body, including a single token refresh", async () => {
+    const { fake, api } = rig();
+    await api.botInfo();
+    fake.expireTokens();
+    expect(await api.deleteMessage({ messageId: "om_9" })).toEqual({ ok: true, data: undefined });
+    const calls = fake.callsTo("DELETE", path);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ method: "DELETE", path, json: undefined, redirect: "error" });
+    expect(calls[1]!.headers["authorization"]).toMatch(/^Bearer t-fake2/);
+    expect(fake.tokensIssued()).toBe(2);
+  });
+  it.each(["", "..", "om/escape", "x".repeat(257)])(
+    "invalid message id %s never touches the network",
+    async (messageId) => {
+      const { fake, api } = rig();
+      expect(fail(await api.deleteMessage({ messageId }))).toMatchObject({
+        reason: "bad-request:messageId",
+        effect: "none",
+      });
+      expect(fake.calls).toHaveLength(0);
+    },
+  );
+  it.each([230027, 230099])("permission/age rejection %i is mapped and not retried", async (code) => {
+    const { fake, api } = rig();
+    fake.script("DELETE", path, { status: 400, json: { code, msg: `denied ${fake.appSecret}` } });
+    const result = fail(await api.deleteMessage({ messageId: "om_9" }));
+    expect(result).toMatchObject({ kind: "api", code, effect: "none", retryable: false });
+    expect(JSON.stringify(result)).not.toContain(fake.appSecret);
+    expect(fake.callsTo("DELETE", path)).toHaveLength(1);
+  });
+  it("network and deadline failures surface without retries or sensitive event fields", async () => {
+    const events: FeishuHttpEvent[] = [];
+    const { fake, api, clock } = rig({ events });
+    fake.script("DELETE", path, { networkError: true }, { hang: true });
+    expect(fail(await api.deleteMessage({ messageId: "om_9" }))).toMatchObject({
+      reason: "unreachable",
+      effect: "unknown",
+    });
+    const pending = api.deleteMessage({ messageId: "om_9", timeoutMs: 100 });
+    await settle(4);
+    clock.advance(100);
+    expect(fail(await pending)).toMatchObject({ reason: "timeout", effect: "unknown" });
+    expect(fake.callsTo("DELETE", path)).toHaveLength(2);
+    expect(events.filter((e) => e.op === "delete-message")).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toMatch(/om_9|Bearer|t-fake|secret/);
+  });
+});
+
 describe("reactions", () => {
   it("add sends {reaction_type:{emoji_type}} and returns reaction_id; delete targets it", async () => {
     const { fake, api } = rig();

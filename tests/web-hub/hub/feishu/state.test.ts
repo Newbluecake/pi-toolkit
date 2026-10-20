@@ -1412,6 +1412,77 @@ describe("approvals / bindings / dialogs / outbox / undecodable", () => {
     expect(s.dialogCards.size).toBe(0);
   });
 
+  it("dialog recall fields are additive, validated and preserved across restart", async () => {
+    const r = await mk();
+    const card = {
+      id: "recall",
+      agentKey: "a",
+      dialogId: "d",
+      epoch: 1,
+      bindingKey: "p2p:c",
+      chatId: "c",
+      messageId: "pending",
+      shortCode: "#123456",
+    };
+    expect(r.s.dialogCards.add(card).ok).toBe(true);
+    expect(r.s.dialogCards.add({ ...card, id: "legacy" }).ok).toBe(true);
+    expect(r.s.dialogCards.update(card.id, { status: "answered", answerCmdId: "fc-own", recall: "pending" })).toBe(
+      true,
+    );
+    expect(r.s.dialogCards.update(card.id, { recall: "bogus" as never })).toBe(false);
+    expect(r.s.dialogCards.update(card.id, { answerCmdId: "" })).toBe(false);
+    expect(await durable(r)).toBe(true);
+    const next = await mk({ clock: r.clock });
+    expect(next.s.phase()).toBe("ok");
+    expect(next.s.dialogCards.get(card.id)).toMatchObject({
+      status: "answered",
+      answerCmdId: "fc-own",
+      recall: "pending",
+      messageId: "pending",
+    });
+    expect(next.s.dialogCards.get("legacy")).not.toHaveProperty("recall");
+    expect(next.s.dialogCards.get("legacy")).not.toHaveProperty("answerCmdId");
+    expect(next.s.dialogCards.update(card.id, { recall: "attempted", messageId: "om_delivered" })).toBe(true);
+    expect(await durable(next)).toBe(true);
+    const last = await mk({ clock: r.clock });
+    expect(last.s.dialogCards.get(card.id)).toMatchObject({
+      recall: "attempted",
+      messageId: "om_delivered",
+      answerCmdId: "fc-own",
+    });
+  });
+
+  it("dialog answer cmdId sets are bounded, validated and persisted additively", async () => {
+    const r = await mk();
+    const card = {
+      id: "own-cmds",
+      agentKey: "a",
+      dialogId: "d",
+      epoch: 1,
+      bindingKey: "p2p:c",
+      chatId: "c",
+      messageId: "om",
+      shortCode: "#123456",
+    };
+    expect(r.s.dialogCards.add(card).ok).toBe(true);
+    expect(r.s.dialogCards.update(card.id, { answerCmdId: "legacy", answerCmdIds: ["legacy", "retry"] })).toBe(true);
+    for (const invalid of [
+      [""],
+      ["x", "x"],
+      [123],
+      Array.from({ length: 9 }, (_, i) => `cmd-${i}`),
+      Array.from({ length: 8 }, (_, i) => `new-${i}`),
+    ])
+      expect(r.s.dialogCards.update(card.id, { answerCmdIds: invalid as never })).toBe(false);
+    expect(await durable(r)).toBe(true);
+    const next = await mk({ clock: r.clock });
+    expect(next.s.phase()).toBe("ok");
+    expect(next.s.dialogCards.get(card.id)).toMatchObject({ answerCmdId: "legacy", answerCmdIds: ["legacy", "retry"] });
+    const clone = next.s.dialogCards.get(card.id)!;
+    clone.answerCmdIds!.push("mutated");
+    expect(next.s.dialogCards.get(card.id)?.answerCmdIds).toEqual(["legacy", "retry"]);
+  });
+
   it("outbox: sent/failed drop the content, same sendId refused, oversize content refused, settled parts expire", async () => {
     const { s, clock } = await mk();
     expect(s.outbox.add(partInput(1)).ok).toBe(true);

@@ -682,6 +682,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       link,
       sendCard,
       patch,
+      deleteMessage: (messageId) => api.deleteMessage({ messageId }),
       notice: bindingNotice,
     });
     const sessionCard = createFeishuSessionCard({

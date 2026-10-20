@@ -621,8 +621,20 @@ describe("F10 Feishu bot — real hub child assembly", () => {
       epoch: "dialog-epoch",
       answers: [{ selected: ["Yes"], other: null }],
     });
+    // Real agents publish closure BEFORE the command ACK; all remote answers use by:"web".
+    publish([], [{ dialogId: "d1", by: "web", cmdId: f.id, outcome: "answered", at: Date.now() }]);
     a.c.send({ t: "cmd_result", rid: f.rid, id: f.id, ok: true, data: { op: "dialog_answer" } });
-    publish([], [{ dialogId: "d1", by: "web", outcome: "answered", at: Date.now() }]);
+    await until(
+      h.inspect,
+      (s) =>
+        s.calls.some(
+          (c) =>
+            c.method === "PATCH" &&
+            c.path.endsWith(`/${nonce.messageId}`) &&
+            JSON.stringify(c.json).includes("已通过飞书作答"),
+        ),
+      "Feishu answer kept",
+    );
     await h.rpc("send", { raw: cb });
     publish([dialog("d2")]);
     const second = await nonceFor("d2");
@@ -639,6 +651,25 @@ describe("F10 Feishu bot — real hub child assembly", () => {
       (s) => Object.values(s.dialogCards).some((c: any) => c.dialogId === "d2" && c.status === "answered"),
       "closed race",
     );
+    const recalled = await until(
+      h.inspect,
+      (s) => s.calls.some((c) => c.method === "DELETE" && c.path === `/open-apis/im/v1/messages/${loser.messageId}`),
+      "web answer recalled",
+    );
+    expect(
+      recalled.calls.filter((c) => c.method === "DELETE" && c.path === `/open-apis/im/v1/messages/${loser.messageId}`),
+    ).toHaveLength(1);
+    expect(
+      recalled.calls.some((c) => c.method === "DELETE" && c.path === `/open-apis/im/v1/messages/${nonce.messageId}`),
+    ).toBe(false);
+    expect(
+      recalled.calls.some(
+        (c) =>
+          c.method === "PATCH" &&
+          c.path.endsWith(`/${loser.messageId}`) &&
+          /via|已在其他端作答/.test(JSON.stringify(c.json)),
+      ),
+    ).toBe(false);
     await h.rpc("send", {
       raw: callback(loser.nonce, { id: "late-card", chatId: loser.chatId, messageId: loser.messageId }),
     });

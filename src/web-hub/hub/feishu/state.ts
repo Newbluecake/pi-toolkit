@@ -213,6 +213,7 @@ export interface BindingInput {
   offline?: string | null;
 }
 
+export const FEISHU_DIALOG_ANSWER_CMD_IDS_MAX = 8;
 export const DIALOG_CARD_STATUSES = ["open", "answered", "closed", "expired", "unknown"] as const;
 export type DialogCardStatus = (typeof DIALOG_CARD_STATUSES)[number];
 export interface FeishuDialogCard {
@@ -227,6 +228,12 @@ export interface FeishuDialogCard {
   /** short code `#k3` */
   shortCode: string;
   status: DialogCardStatus;
+  /** Legacy single-id records remain readable; new dispatches seed answerCmdIds from this value. */
+  answerCmdId?: string;
+  /** Persisted before dispatch, never evicted: any of these ≤8 cmdIds proves THIS card won. */
+  answerCmdIds?: string[];
+  /** Intent may precede delivery; attempted is committed BEFORE DELETE (never replay an uncertain recall). */
+  recall?: "pending" | "attempted";
   createdAt: number;
   expiresAt: number;
 }
@@ -499,6 +506,9 @@ const DIALOG_KEYS = [
   "messageId",
   "shortCode",
   "status",
+  "answerCmdId",
+  "answerCmdIds",
+  "recall",
   "createdAt",
   "expiresAt",
 ] as const;
@@ -507,6 +517,23 @@ function parseDialogCard(key: string, raw: unknown): FeishuDialogCard | undefine
   if (!isText(raw["agentKey"], ID_MAX) || !isText(raw["dialogId"], ID_MAX) || !isNat(raw["epoch"])) return undefined;
   if (!isText(raw["bindingKey"], BINDING_KEY_MAX) || !isText(raw["chatId"], ID_MAX)) return undefined;
   if (!isText(raw["messageId"], ID_MAX) || !isText(raw["shortCode"], 16)) return undefined;
+  if (raw["answerCmdId"] !== undefined && !isText(raw["answerCmdId"], ID_MAX)) return undefined;
+  const answerCmdIds = raw["answerCmdIds"];
+  if (
+    answerCmdIds !== undefined &&
+    (!Array.isArray(answerCmdIds) ||
+      answerCmdIds.length > FEISHU_DIALOG_ANSWER_CMD_IDS_MAX ||
+      !answerCmdIds.every((id) => isText(id, ID_MAX)) ||
+      new Set(answerCmdIds).size !== answerCmdIds.length)
+  )
+    return undefined;
+  if (
+    Array.isArray(answerCmdIds) &&
+    new Set([...answerCmdIds, ...(typeof raw["answerCmdId"] === "string" ? [raw["answerCmdId"]] : [])]).size >
+      FEISHU_DIALOG_ANSWER_CMD_IDS_MAX
+  )
+    return undefined;
+  if (raw["recall"] !== undefined && raw["recall"] !== "pending" && raw["recall"] !== "attempted") return undefined;
   const status = raw["status"];
   if (typeof status !== "string" || !(DIALOG_CARD_STATUSES as readonly string[]).includes(status)) return undefined;
   if (!isNat(raw["createdAt"]) || !isNat(raw["expiresAt"])) return undefined;
@@ -520,6 +547,9 @@ function parseDialogCard(key: string, raw: unknown): FeishuDialogCard | undefine
     messageId: raw["messageId"],
     shortCode: raw["shortCode"],
     status: status as DialogCardStatus,
+    ...(typeof raw["answerCmdId"] === "string" ? { answerCmdId: raw["answerCmdId"] } : {}),
+    ...(Array.isArray(answerCmdIds) ? { answerCmdIds: [...answerCmdIds] as string[] } : {}),
+    ...(raw["recall"] === "pending" || raw["recall"] === "attempted" ? { recall: raw["recall"] } : {}),
     createdAt: raw["createdAt"],
     expiresAt: raw["expiresAt"],
   };
@@ -868,7 +898,16 @@ export interface FeishuState {
     add(input: NewDialogCardInput): Admit<FeishuDialogCard>;
     get(id: string): FeishuDialogCard | undefined;
     list(): FeishuDialogCard[];
-    update(id: string, patch: { status?: DialogCardStatus; messageId?: string }): boolean;
+    update(
+      id: string,
+      patch: {
+        status?: DialogCardStatus;
+        messageId?: string;
+        answerCmdId?: string;
+        answerCmdIds?: string[];
+        recall?: "pending" | "attempted";
+      },
+    ): boolean;
     remove(id: string): boolean;
     readonly size: number;
   };
@@ -1732,6 +1771,9 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
           ...cur,
           ...(patch.status !== undefined ? { status: patch.status } : {}),
           ...(patch.messageId !== undefined ? { messageId: patch.messageId } : {}),
+          ...(patch.answerCmdId !== undefined ? { answerCmdId: patch.answerCmdId } : {}),
+          ...(patch.answerCmdIds !== undefined ? { answerCmdIds: patch.answerCmdIds } : {}),
+          ...(patch.recall !== undefined ? { recall: patch.recall } : {}),
         });
         if (next === undefined) return false;
         dialogs.set(id, next);

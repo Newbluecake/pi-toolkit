@@ -12,7 +12,7 @@
  * - bearer-checked `/open-apis/im/**` and `/open-apis/bot/**`: stale/unknown token ⇒ HTTP 400 + `99991663`;
  * - `POST …/messages` / `…/reply` — `uuid`-idempotent (the same uuid returns the SAME message id and does not
  *   add a sent message; `reply_in_thread:true` returns a `thread_id`, V8);
- * - `PATCH …/messages/:id`, reactions add/delete, `POST …/images` / `…/files` (multipart), `GET …/resources/:key`,
+ * - `PATCH/DELETE …/messages/:id`, reactions add/delete, `POST …/images` / `…/files` (multipart), `GET …/resources/:key`,
  *   `GET /open-apis/bot/v3/info` (top-level `bot`).
  *
  * Extension points for later packages (F3/F4/F7/F8): `on()` registers a route handler (first registered wins,
@@ -210,7 +210,7 @@ export function createFakeFeishu(opts: FakeFeishuOptions = {}): FakeFeishu {
     let m = /^\/open-apis\/im\/v1\/messages\/([^/]+)\/reply$/.exec(path);
     if (method === "POST" && m) return deliver(call, body, "reply", decodeURIComponent(m[1]!));
     m = /^\/open-apis\/im\/v1\/messages\/([^/]+)$/.exec(path);
-    if (method === "PATCH" && m) return ok({});
+    if ((method === "PATCH" || method === "DELETE") && m) return ok({});
     m = /^\/open-apis\/im\/v1\/messages\/([^/]+)\/reactions$/.exec(path);
     if (method === "POST" && m) return ok({ reaction_id: `rx_fake_${++idSeq}`, reaction_type: body["reaction_type"] });
     m = /^\/open-apis\/im\/v1\/messages\/([^/]+)\/reactions\/([^/]+)$/.exec(path);

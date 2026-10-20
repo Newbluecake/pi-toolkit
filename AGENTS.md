@@ -420,6 +420,8 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   **Feishu bot (feishu-bot plan v2 + §R2/rulings, F0–F10)**: `hub/feishu/*` under
   `src/web-hub/` owns the zero-dependency native-fetch/WebSocket pbbp2 long connection, durable
   receive-before-ACK, requests/bindings/dialogs/files/outbox and owner-only-by-default admission.
+  Ask-user cards settled elsewhere are recalled once (durable attempt claim; failure ⇒ neutral Chinese
+  PATCH); an answer from that Feishu card keeps 「已通过飞书作答」 (`by:"web"` + matching `cmdId`).
   Top-level `feishuBot.enabled` requires `webHub.enabled` + control; non-live (`/reload` then
   `/webhub restart`). `HubConfig.feishuBot` key absent ⇒ byte-identical legacy hub: no bot
   service/network/disk/idle count or `fsb.v1` (shared cap fold on both surfaces). One app ↔ one

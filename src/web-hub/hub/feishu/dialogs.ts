@@ -2,14 +2,15 @@
 import { randomBytes } from "node:crypto";
 import { FEISHU_CAPS } from "../../protocol/feishu.js";
 import type { DialogWire, DialogClosedWire, DialogAnswerWire } from "../../protocol/messages.js";
+import { FEISHU_DIALOG_ANSWER_CMD_IDS_MAX } from "./state.js";
 import type { FeishuState, FeishuDialogCard, FeishuBinding, FeishuNonce } from "./state.js";
 import type { FeishuAdmission, FeishuIdentityContext, FeishuInstallation } from "./admission.js";
 import type { FeishuMessage } from "./inbound.js";
 import { feishuBindingKey } from "./sessions.js";
-import { feishuKey, object } from "./runtime.js";
+import { bounded, feishuKey, object } from "./runtime.js";
 import { neutralizeMarkdown } from "./render.js";
 import type { OutboxTarget } from "./outbox.js";
-import { systemFeishuClock, type FeishuClock } from "./http.js";
+import { systemFeishuClock, type FeishuClock, type FeishuResult } from "./http.js";
 
 export interface FeishuDialogsDeps {
   state: FeishuState;
@@ -27,6 +28,7 @@ export interface FeishuDialogsDeps {
     lane: string,
   ): Promise<{ messageId: string; chatId: string } | undefined>;
   patch(messageId: string, card: string): Promise<unknown>;
+  deleteMessage(messageId: string): Promise<FeishuResult<void>>;
   notice(binding: FeishuBinding, text: string): Promise<unknown>;
 }
 export const feishuDialogEpoch = (epoch: string): number =>
@@ -64,10 +66,11 @@ const closedCard = (text: string) =>
   });
 export function createFeishuDialogs(deps: FeishuDialogsDeps) {
   const clock = deps.clock ?? systemFeishuClock;
-  const live = new Map<string, { epoch: string; open: DialogWire[] }>();
+  const live = new Map<string, { epoch: string; open: DialogWire[]; closed: DialogClosedWire[] }>();
   const drafts = new Map<string, { at: number; answers: DialogAnswerWire[] }>();
   const timers = new Map<string, unknown>();
   const sending = new Set<string>();
+  const answering = new Set<string>();
   let disposed = false;
   function current(card: FeishuDialogCard) {
     const source = live.get(card.agentKey);
@@ -75,13 +78,90 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
       ? { epoch: source.epoch, dialog: source.open.find((d) => d.dialogId === card.dialogId) }
       : undefined;
   }
-  async function close(card: FeishuDialogCard, status: "answered" | "closed" | "expired" | "unknown", text: string) {
-    deps.state.dialogCards.update(card.id, { status });
+  const ownAnswerCmdIds = (card: FeishuDialogCard) => [
+    ...new Set([...(card.answerCmdIds ?? []), ...(card.answerCmdId ? [card.answerCmdId] : [])]),
+  ];
+  const terminal = (card: FeishuDialogCard) => card.status !== "open" && card.status !== "unknown";
+  const elsewhereText = (card: FeishuDialogCard) =>
+    card.status === "answered" ? "已在其他端作答" : card.status === "expired" ? "对话已过期" : "已取消";
+  async function patchClosed(card: FeishuDialogCard, text: string) {
+    if (!disposed && card.messageId !== "pending")
+      await bounded(deps.patch(card.messageId, closedCard(text)), 8_000, clock).catch(() => {});
+  }
+  async function recall(card: FeishuDialogCard) {
+    // Claim synchronously, then durably, before the API call. Reconcile/delivery may overlap; a
+    // restart after this commit must NOT repeat a DELETE whose effect could already have landed.
+    const latest = deps.state.dialogCards.get(card.id);
+    if (disposed || latest?.recall !== "pending" || latest.messageId === "pending") return;
+    deps.state.dialogCards.update(card.id, { recall: "attempted" });
     if (!(await deps.state.commit()) || disposed) return;
-    if (card.messageId !== "pending") await deps.patch(card.messageId, closedCard(text));
+    try {
+      const result = await bounded(deps.deleteMessage(latest.messageId), 8_000, clock);
+      if (result.ok) return;
+    } catch {
+      // A permission/age/API/transport/deadline failure gets one neutral PATCH, never a retry loop.
+    }
+    await patchClosed(latest, elsewhereText(latest));
+  }
+  async function close(
+    card: FeishuDialogCard,
+    status: "answered" | "closed" | "expired" | "unknown",
+    text: string,
+    elsewhere = false,
+  ) {
+    const latest = deps.state.dialogCards.get(card.id);
+    if (disposed || !latest || terminal(latest)) return;
+    deps.state.dialogCards.update(card.id, { status, ...(elsewhere ? { recall: "pending" } : {}) });
+    if (!(await deps.state.commit()) || disposed) return;
+    const updated = deps.state.dialogCards.get(card.id)!;
+    if (elsewhere) await recall(updated);
+    else await patchClosed(updated, text);
+  }
+  async function reconcileCard(card: FeishuDialogCard) {
+    if (card.recall === "pending") return recall(card);
+    if (terminal(card)) return;
+    const source = live.get(card.agentKey);
+    if (!source) return; // A disconnect is not evidence that the dialog settled elsewhere.
+    const done = source.closed.find((d) => d.dialogId === card.dialogId);
+    if (done) {
+      // The wire has no by:"feishu": the agent encodes ALL remote answers as by:"web".
+      const mine = done.by === "web" && !!done.cmdId && ownAnswerCmdIds(card).includes(done.cmdId);
+      // Older peers may omit cmdId. Let our in-flight result decide before treating it as foreign.
+      if (done.by === "web" && !done.cmdId && answering.has(card.id)) return;
+      await close(
+        card,
+        done.outcome === "answered" ? "answered" : "closed",
+        done.outcome === "answered" ? "已通过飞书作答" : "已取消",
+        !mine,
+      );
+    } else if (
+      card.epoch !== feishuDialogEpoch(source.epoch) ||
+      !source.open.some((d) => d.dialogId === card.dialogId)
+    ) {
+      if (!answering.has(card.id)) await close(card, "expired", "对话已过期", true);
+    } else if (card.messageId !== "pending") {
+      if (card.status === "unknown") deps.state.dialogCards.update(card.id, { status: "open" });
+      await refresh(deps.state.dialogCards.get(card.id)!);
+    }
+  }
+  async function delivered(id: string, messageId: string | undefined) {
+    const card = deps.state.dialogCards.get(id);
+    if (!card || disposed) return;
+    if (!messageId) {
+      await close(card, "unknown", `状态未知 — 在 web 查看：${deps.link(card.agentKey)}`);
+      return;
+    }
+    // A repeated outbox delivery must not patch a successfully recalled card or re-delete it.
+    if (card.messageId === messageId && terminal(card) && card.recall !== "pending") return;
+    deps.state.dialogCards.update(id, { messageId });
+    if (!(await deps.state.commit()) || disposed) return;
+    const updated = deps.state.dialogCards.get(id)!;
+    if (updated.recall) await recall(updated);
+    else if (terminal(updated)) await patchClosed(updated, updated.status === "answered" ? "已通过飞书作答" : "已取消");
+    else await reconcileCard(updated);
   }
   async function refresh(card: FeishuDialogCard, error?: string) {
-    if (disposed || card.messageId === "pending") return;
+    if (disposed || card.messageId === "pending" || terminal(deps.state.dialogCards.get(card.id) ?? card)) return;
     const binding = deps.state.bindings.get(card.bindingKey),
       source = current(card),
       install = deps.installation(),
@@ -175,7 +255,7 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
         tag: "column_set",
         columns: buttons.map((button) => ({ tag: "column", width: "weighted", weight: 1, elements: [button] })),
       });
-    if (!(await deps.state.commit()) || disposed) return;
+    if (!(await deps.state.commit()) || disposed || terminal(deps.state.dialogCards.get(card.id) ?? card)) return;
     const cardJson = JSON.stringify({ schema: "2.0", config: { update_multi: true }, body: { elements } });
     await deps.patch(
       card.messageId,
@@ -192,52 +272,72 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
     const source = current(card),
       binding = deps.state.bindings.get(card.bindingKey);
     if (!source?.dialog || !binding?.sessionId || card.status !== "open" || (cancel && !source.dialog.allowCancel)) {
-      await close(card, "closed", "对话已关闭 / E_DIALOG_CLOSED");
+      // Local availability/permission checks do not prove settlement. Keep reconciliation live
+      // so only a later authoritative closure/list/expiry can trigger recall.
+      await close(card, "unknown", "状态未知 — 在 web 查看");
       return;
     }
     if (!cancel && !validateFeishuAnswers(source.dialog, answers)) {
       await refresh(card, "答案无效，请重新作答");
       return;
     }
-    const result = await deps.admission.dispatch({
-      ...identity,
-      id,
-      sessionId: binding.sessionId,
-      bindingKey: binding.key,
-      bindingRev: binding.rev,
-      expectedAgentKey: card.agentKey,
-      cmd: cancel
-        ? { op: "dialog_cancel", dialogId: card.dialogId, epoch: source.epoch }
-        : { op: "dialog_answer", dialogId: card.dialogId, epoch: source.epoch, answers },
-    });
-    if (result.ok && result.result.ok) {
-      drafts.delete(`${card.id}:${identity.senderOpenId}`);
-      await close(card, cancel ? "closed" : "answered", cancel ? "已取消" : "已通过飞书作答");
-    } else if (result.ok && !result.result.ok && result.result.code === "E_BAD_ANSWER")
-      await refresh(card, "答案无效，请重新作答");
-    else if (result.ok && !result.result.ok && result.result.code === "E_DIALOG_CLOSED")
-      await close(card, "closed", "对话已由 TUI/web 关闭");
-    else await refresh(card, "提交未确认，请到 web 查看状态");
+    if (answering.has(card.id)) return;
+    answering.add(card.id);
+    try {
+      const ownIds = ownAnswerCmdIds(deps.state.dialogCards.get(card.id) ?? card);
+      if (!ownIds.includes(id)) {
+        // Do not evict an uncertain dispatch's proof: it may still land after many retry clicks.
+        if (ownIds.length >= FEISHU_DIALOG_ANSWER_CMD_IDS_MAX) {
+          await refresh(card, "提交次数已达上限，请到 web 查看状态");
+          return;
+        }
+        ownIds.push(id);
+      }
+      if (!deps.state.dialogCards.update(card.id, { answerCmdIds: ownIds })) return;
+      if (!(await deps.state.commit()) || disposed) return;
+      const result = await deps.admission.dispatch({
+        ...identity,
+        id,
+        sessionId: binding.sessionId,
+        bindingKey: binding.key,
+        bindingRev: binding.rev,
+        expectedAgentKey: card.agentKey,
+        cmd: cancel
+          ? { op: "dialog_cancel", dialogId: card.dialogId, epoch: source.epoch }
+          : { op: "dialog_answer", dialogId: card.dialogId, epoch: source.epoch, answers },
+      });
+      if (result.ok && result.result.ok) {
+        drafts.delete(`${card.id}:${identity.senderOpenId}`);
+        await close(card, cancel ? "closed" : "answered", cancel ? "已取消" : "已通过飞书作答");
+      } else if (result.ok && !result.result.ok && result.result.code === "E_BAD_ANSWER")
+        await refresh(card, "答案无效，请重新作答");
+      else if (result.ok && !result.result.ok && result.result.code === "E_DIALOG_CLOSED")
+        await close(card, "closed", "已取消", true);
+      else await refresh(card, "提交未确认，请到 web 查看状态");
+    } finally {
+      answering.delete(card.id);
+      const latest = deps.state.dialogCards.get(card.id);
+      const liveSource = live.get(card.agentKey);
+      if (
+        !disposed &&
+        latest &&
+        !terminal(latest) &&
+        liveSource &&
+        (liveSource.closed.some((d) => d.dialogId === card.dialogId) ||
+          latest.epoch !== feishuDialogEpoch(liveSource.epoch) ||
+          !liveSource.open.some((d) => d.dialogId === card.dialogId))
+      )
+        await reconcileCard(latest);
+    }
   }
   return {
     async reconcile(agentKey: string, epoch: string, open: DialogWire[], closed: DialogClosedWire[]) {
       if (disposed || (!live.has(agentKey) && live.size >= 512)) return;
       clock.clearTimeout(timers.get(agentKey));
       timers.delete(agentKey);
-      live.set(agentKey, { epoch, open: open.slice(0, 64) });
-      for (const card of deps.state.dialogCards
-        .list()
-        .filter((c) => c.agentKey === agentKey && (c.status === "open" || c.status === "unknown"))) {
-        const done = closed.find((d) => d.dialogId === card.dialogId);
-        if (done)
-          await close(card, done.outcome === "answered" ? "answered" : "closed", `${done.outcome} via ${done.by}`);
-        else if (card.epoch !== feishuDialogEpoch(epoch) || !open.some((d) => d.dialogId === card.dialogId))
-          await close(card, "expired", "对话已过期");
-        else if (card.messageId !== "pending") {
-          if (card.status === "unknown") deps.state.dialogCards.update(card.id, { status: "open" });
-          await refresh(deps.state.dialogCards.get(card.id)!);
-        }
-      }
+      live.set(agentKey, { epoch, open: open.slice(0, 64), closed: closed.slice(-64) });
+      for (const card of deps.state.dialogCards.list().filter((c) => c.agentKey === agentKey))
+        await reconcileCard(card);
       const sessionId = deps.session(agentKey);
       if (!sessionId) return;
       for (const binding of deps.state.bindings
@@ -275,26 +375,13 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
               ),
               binding.chatId,
             );
-            if (!sent || disposed) {
-              await close(card.value, "unknown", "状态未知 — 在 web 查看");
-              continue;
-            }
-            deps.state.dialogCards.update(id, { messageId: sent.messageId });
-            await deps.state.commit();
-            await refresh(deps.state.dialogCards.get(id)!);
+            await delivered(id, sent?.messageId);
           } finally {
             sending.delete(id);
           }
         }
     },
-    async delivered(id: string, messageId: string | undefined) {
-      const card = deps.state.dialogCards.get(id);
-      if (!card || disposed) return;
-      if (messageId) {
-        deps.state.dialogCards.update(id, { messageId });
-        if (await deps.state.commit()) await refresh(deps.state.dialogCards.get(id)!);
-      } else await close(card, "unknown", `状态未知 — 在 web 查看：${deps.link(card.agentKey)}`);
-    },
+    delivered,
     disconnected(agentKey: string) {
       live.delete(agentKey);
       if (timers.has(agentKey) || timers.size >= 512) return;
@@ -410,8 +497,9 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
     },
     async sweep() {
       for (const card of deps.state.dialogCards.list())
-        if (card.status === "open" && card.expiresAt - clock.now() <= 60_000)
-          await close(card, "expired", "卡片已过期 — 在 web 查看");
+        if (card.recall === "pending") await recall(card);
+        else if (card.status === "open" && card.expiresAt - clock.now() <= 60_000)
+          await close(card, "expired", "对话已过期", true);
     },
     dispose() {
       disposed = true;
@@ -420,6 +508,7 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
       live.clear();
       drafts.clear();
       sending.clear();
+      answering.clear();
     },
   };
 }
