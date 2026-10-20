@@ -2,6 +2,7 @@ import type { Clock, TimerHandle } from "../core/clock.js";
 import type { FabricRecord, MessageChannel, NodeRef } from "../core/message.js";
 import { effectiveChannel } from "../core/message.js";
 import { newRunId } from "../core/ids.js";
+import type { Millis } from "../core/types.js";
 import type { DeliveryEngine } from "../delivery/engine.js";
 import type { FabricRouter } from "./router.js";
 import type { FabricThrottle } from "./throttle.js";
@@ -15,6 +16,17 @@ export interface FabricPorts {
   sendRootContext(record: FabricRecord): Promise<Verdict>;
   sendRootDisplay(record: FabricRecord): Promise<Verdict>;
 }
+/**
+ * The single TTL predicate shared by expiry and scheduling (fabric-cross-session
+ * plan §8 F0): a record whose deadline has been REACHED counts as expired.
+ * Expiry and the wake scheduler must agree at the exact boundary — if expiry
+ * used `>` while the scheduler armed for `createdAt + ttlMs` and re-armed only
+ * when that instant was strictly in the future, a record checked at exactly the
+ * deadline would be neither expired nor rescheduled and could stay pending
+ * forever with no further traffic.
+ */
+const ttlExpired = (createdAt: Millis, ttlMs: number, now: Millis): boolean => now >= createdAt + ttlMs;
+
 export interface MailboxOptions {
   engine: DeliveryEngine<FabricRecord, FabricRecord["state"]>;
   router: FabricRouter;
@@ -50,7 +62,7 @@ export class FabricMailbox {
         .sort((a, b) => a.createdAt - b.createdAt || a.seq - b.seq);
       for (const record of candidates) {
         const now = this.options.clock.now();
-        if (now - record.createdAt > record.ttlMs) {
+        if (ttlExpired(record.createdAt, record.ttlMs, now)) {
           if (record.kind === "finding" || record.kind === "directive")
             this.options.router.issueDeadLetter(record, "ttl_expired");
           else this.options.engine.transition(record.key, "pending", "abandoned", { terminalReason: "ttl_expired" });
@@ -201,10 +213,10 @@ export class FabricMailbox {
       if (targetState === "pending_start") {
         // A pending_start target has no clock-based delivery opportunity. Its
         // only non-TTL wake source is the running snapshot hint.
-        if (ttlAt > now) due = Math.min(due, ttlAt);
+        if (!ttlExpired(record.createdAt, record.ttlMs, now)) due = Math.min(due, ttlAt);
         continue;
       }
-      if (ttlAt > now) due = Math.min(due, ttlAt);
+      if (!ttlExpired(record.createdAt, record.ttlMs, now)) due = Math.min(due, ttlAt);
       const eligibleAt = this.options.throttle.eligibleAt(record);
       if (eligibleAt > now) due = Math.min(due, eligibleAt);
     }

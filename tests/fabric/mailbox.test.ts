@@ -253,4 +253,126 @@ describe("fabric mailbox", () => {
     await Promise.resolve();
     expect(engine.get(rec().key)?.state).toBe("claimed");
   });
+
+  // fabric-cross-session plan §8 F0: expiry and the wake scheduler share one
+  // `now >= createdAt + ttlMs` predicate, so a record checked at exactly its
+  // deadline expires via the timer even with no further traffic.
+  it("expires a finding at exactly its TTL deadline with no delivery traffic", () => {
+    const target = "r_TARGET01" as FabricRecord["to"];
+    let sends = 0;
+    const { mailbox, engine, clock } = setup(async () => {
+      sends++;
+      return { ok: true };
+    }, target);
+    mailbox.pump();
+    expect(sends).toBe(0);
+    expect(clock.pendingTimers).toBe(1); // armed for createdAt + ttlMs
+    clock.advance(1000); // the timer fires at exactly the deadline
+    expect(engine.get(rec("finding", target).key)).toMatchObject({
+      state: "abandoned",
+      terminalReason: "ttl_expired",
+    });
+    expect(sends).toBe(0); // expired without ever attempting a delivery
+  });
+
+  it("keeps a record pending one millisecond before its deadline and re-arms the timer", () => {
+    const target = "r_TARGET01" as FabricRecord["to"];
+    const { mailbox, engine, clock } = setup(async () => ({ ok: true }), target);
+    mailbox.pump();
+    clock.advance(999);
+    expect(engine.get(rec("finding", target).key)?.state).toBe("pending");
+    expect(clock.pendingTimers).toBe(1); // still rescheduled for the deadline
+    clock.advance(1);
+    expect(engine.get(rec("finding", target).key)).toMatchObject({
+      state: "abandoned",
+      terminalReason: "ttl_expired",
+    });
+  });
+
+  it("expires multiple records that share the same deadline", () => {
+    const target = "r_TARGET01" as FabricRecord["to"];
+    const { mailbox, engine, clock } = setup(async () => ({ ok: true }), target);
+    engine.put({ ...rec("finding", target), key: `r_ABCDEFGH:${target}:1:2` as FabricRecord["key"], seq: 2 });
+    engine.put({ ...rec("finding", target), key: `r_ABCDEFGH:${target}:1:3` as FabricRecord["key"], seq: 3 });
+    mailbox.pump();
+    clock.advance(1000);
+    expect(engine.select((r) => r.to === target && r.state === "abandoned")).toHaveLength(3);
+    expect(engine.select((r) => r.to === target && r.state === "pending")).toHaveLength(0);
+  });
+
+  it("expires already-expired records on hydrate and keeps dead-letter suppression rules", () => {
+    const target = "r_TARGET01" as FabricRecord["to"];
+    // Rebuild a stack over a store whose pending records predate the clock: a
+    // finding from a since-settled sender and a progress record, both expired.
+    const clock = new FakeClock(2000);
+    const store = new MemoryOutboxStore<FabricRecord>();
+    const finding = { ...rec("finding", target), createdAt: 0, updatedAt: 0 };
+    const progress = {
+      ...rec("progress", target),
+      key: `r_ABCDEFGH:${target}:1:2` as FabricRecord["key"],
+      seq: 2,
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    store.put(finding);
+    store.put(progress);
+    const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
+      store,
+      allowed: {
+        pending: ["claimed", "consumed", "dropped", "abandoned"],
+        claimed: ["pending", "delivered", "consumed", "dropped"],
+        delivered: [],
+        consumed: [],
+        dropped: [],
+        abandoned: [],
+      },
+      memoryOnly: new Set(["claimed"]),
+      memoryOnlyFields: ["claimToken"],
+      now: () => clock.now(),
+    });
+    const tree = new FabricTree();
+    tree.append("root", "r_ABCDEFGH");
+    tree.append("root", target);
+    tree.tombstone("r_ABCDEFGH", 0, 1000); // the finding's sender is already gone
+    const throttle = new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 20 });
+    const router = new FabricRouter(
+      engine,
+      tree,
+      throttle,
+      {
+        maxPerRun: 5,
+        findingQuota: 5,
+        directiveQuota: 5,
+        deadLetterQuota: 5,
+        maxChars: 100,
+        progressTtlMs: 1000,
+        reconcileTtlMs: 1000,
+        rootInboxCap: 5,
+      },
+      clock.now.bind(clock),
+    );
+    router.hydrate(engine.select(() => true));
+    const mailbox = new FabricMailbox({
+      engine,
+      router,
+      throttle,
+      clock,
+      ports: {
+        inject: async () => ({ ok: true }),
+        sendRootContext: async () => ({ ok: true }),
+        sendRootDisplay: async () => ({ ok: true }),
+      },
+      fabricSteerTimeoutMs: 10,
+      maxAttempts: 3,
+    });
+    mailbox.pump();
+    expect(engine.get(finding.key)).toMatchObject({
+      state: "abandoned",
+      terminalReason: "ttl_expired",
+      deadLetter: { reason: "ttl_expired", status: "suppressed_sender_gone" },
+    });
+    expect(engine.get(progress.key)).toMatchObject({ state: "abandoned", terminalReason: "ttl_expired" });
+    expect(engine.get(progress.key)?.deadLetter).toBeUndefined();
+    expect(engine.select((r) => r.kind === "dead_letter")).toHaveLength(0);
+  });
 });
