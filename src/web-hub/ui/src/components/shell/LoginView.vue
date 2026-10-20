@@ -147,9 +147,10 @@ function onSubmit(): void {
         <button class="btn btn-primary btn-lg" type="submit" :disabled="busy">{{ t("login.submit") }}</button>
       </form>
 
-      <div class="login-foot">
-        <span class="chip login-mode-chip"><AppIcon name="eye" class="icon-sm" />{{ t("common.readonly") }}</span>
-      </div>
+      <!-- 2026-10-20: the 「只读」 chip that lived here dated from the read-only P1 hub and no longer
+           said anything true (control is on). The empty foot stays: on phones its margin-top:auto
+           balances the form's, keeping the form optically centered. -->
+      <div class="login-foot" aria-hidden="true"></div>
     </div>
   </main>
 </template>

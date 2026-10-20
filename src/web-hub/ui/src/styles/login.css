@@ -173,15 +173,6 @@
   padding-top: var(--sp-1);
 }
 
-.login-foot .login-mode-chip {
-  gap: var(--sp-1);
-  color: var(--c-text-3);
-}
-
-.login-foot .login-mode-chip .icon {
-  color: var(--c-text-3);
-}
-
 /* Narrow / touch viewports: no floating card — the sign-in sheet fills the whole viewport
  * (field report: "登录框扩充到整个页面"). Two triggers, either one: a ≤640px viewport,
  * or a coarse primary pointer (a phone whose browser requests the DESKTOP site still reports
