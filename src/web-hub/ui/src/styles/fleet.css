@@ -132,10 +132,14 @@
   --run-num-w: 4.75em;
   display: grid;
   grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) minmax(var(--run-num-w), auto);
+  /* 2026-10-20 「名称和模型名重叠」(user pick D): the model block left line 1 — right-aligned there it
+   * overflowed its own track leftwards onto the name whenever its min-content (provider +
+   * `·high · 24%`) exceeded the track. It now opens line 3, left-aligned under the activity,
+   * beside the start/end token; the name gets the whole line-1 width. */
   grid-template-areas:
-    "icon badge name model time"
+    "icon badge name name time"
     ". activity activity activity cost"
-    ". . . meta meta";
+    ". model model meta meta";
   align-items: center;
   column-gap: var(--sp-2);
   row-gap: 1px;
@@ -329,10 +333,13 @@ details[open] > summary.run .chev {
 
 .run-model {
   grid-area: model;
-  justify-self: end;
+  /* stretch + overflow:hidden: the block is sized BY its track and its parts shrink inside it —
+   * structurally it can never paint outside its cell again (provider shrinks first, see below). */
+  justify-self: stretch;
   display: flex;
   align-items: center;
   min-width: 0;
+  overflow: hidden;
   color: var(--c-text-3);
   font-size: var(--fs-xs);
   white-space: nowrap;

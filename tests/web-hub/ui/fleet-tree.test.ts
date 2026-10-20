@@ -579,7 +579,18 @@ describe("FleetTree start/end time token (2026-10-18 user pick C)", () => {
     expect(css).toMatch(
       /@container \(max-width: 479px\)[\s\S]*?\. \. meta meta"[\s\S]*?\.run-meta\s*\{[^}]*justify-self:\s*start;/,
     );
-    expect(css).toMatch(/\. \. \. meta meta"/);
+    expect(css).toMatch(/\. model model meta meta"/);
+  });
+
+  it("CSS (2026-10-20 overlap fix, layout D): model leaves line 1 and can never paint outside its cell", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/fleet.css"),
+      "utf8",
+    );
+    expect(css).toMatch(
+      /"icon badge name name time"\s*"\. activity activity activity cost"\s*"\. model model meta meta"/,
+    );
+    expect(css).toMatch(/\.run-model \{[^}]*grid-area:\s*model;[^}]*justify-self:\s*stretch;[^}]*overflow:\s*hidden;/s);
   });
 });
 
