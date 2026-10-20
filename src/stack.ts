@@ -502,6 +502,7 @@ function buildFabric(
   readBack: boolean,
   runnerRef: { current?: Runner },
   query: () => QueryService | undefined,
+  spawn: () => Pick<SpawnService, "successorOf"> | undefined,
 ) {
   const store = readBack
     ? createPiOutboxStore<FabricRecord>(
@@ -613,11 +614,12 @@ function buildFabric(
   );
   router.hydrate([...engine.select(() => true)]);
   const ports: FabricPorts = {
-    inject: async (record) => {
+    inject: async (record, opts) => {
       const steer = runnerRef.current?.steer;
       if (!steer) throw new Error("fabric runner unavailable");
       const formatted = formatMessage(record, tree.relation(record.from, record.to, systemClock.now()));
-      await steer(record.to as string, formatted.text);
+      // W4: a redirect steers the resumed successor of the finished run the message was addressed to.
+      await steer(opts?.target ?? (record.to as string), formatted.text);
       return { ok: true };
     },
     sendRootContext: async (record) => {
@@ -651,6 +653,7 @@ function buildFabric(
     ? createWakeService({
         engine,
         query,
+        spawn,
         level,
         durability,
         isLiveSessionFile,
@@ -1840,7 +1843,16 @@ export function buildSessionStack(
   const mentionNotes = createMentionNotes({ diagOf: (runId) => query.get(runId)?.diag });
   const mentionRef = { current: mention };
   const fabric = settings.fabric.enabled
-    ? buildFabric(pi, ctx, settings, prefetchedEntries, readBack, runnerRef, () => query)
+    ? buildFabric(
+        pi,
+        ctx,
+        settings,
+        prefetchedEntries,
+        readBack,
+        runnerRef,
+        () => query,
+        () => spawnRef.current,
+      )
     : undefined;
   if (fabric) previousFabricMailbox = fabric.mailbox;
   const sendFormatted = (items: readonly DeliveryPayload[]) => {
@@ -2360,7 +2372,9 @@ export function buildSessionStack(
         fabric.wake?.onSnapshot(snapshot);
         if (snapshot.status === "running") {
           fabric.tree.markRunning(snapshot.runId);
-          fabric.mailbox.pump(snapshot.runId);
+          // W4: waiters of this run's session chain (messages addressed to its finished predecessors) now redirect-steer.
+          if (fabric.wake) fabric.mailbox.drainSession(snapshot.diag.sessionFile, snapshot.runId);
+          else fabric.mailbox.pump(snapshot.runId);
         }
         if (["completed", "failed", "timed_out", "aborted"].includes(snapshot.status))
           fabric.mailbox.onRunSettled(snapshot.runId);

@@ -262,23 +262,38 @@ export class FabricRouter {
   }
   /** W3: race/downgrade fallback. An already parked record is immutable; progress never parks. */
   park(record: FabricRecord, reason: NonNullable<FabricRecord["parked"]>["reason"]): boolean {
+    return this.tryPark(record, reason) === "parked";
+  }
+  /**
+   * Like `park` but tells an unavailable park (stack-memory / progress / cap — legacy dead-letter handling) apart from
+   * a transient persist failure (the caller must leave the record pending, not dead-letter it).
+   */
+  tryPark(
+    record: FabricRecord,
+    reason: NonNullable<FabricRecord["parked"]>["reason"],
+  ): "parked" | "unavailable" | "persist_failed" {
     if (
       !this.config.inbox ||
       this.config.inbox.durability === "stack-memory" ||
       (record.kind !== "finding" && record.kind !== "directive")
     )
-      return false;
-    if (record.parked) return true;
+      return "unavailable";
+    if (record.parked) return "parked";
     if (
       this.engine.select(
         (r) => r.to === record.to && r.parked !== undefined && (r.state === "pending" || r.state === "claimed"),
       ).length >= this.config.inbox.parkCapPerTarget
     )
-      return false;
+      return "unavailable";
     const parked = { at: this.now(), reason };
     if (record.state === "claimed")
-      return this.engine.transition(record.key, "claimed", "pending", { parked }) !== undefined;
-    return this.engine.annotateStrict(record.key, { state: "pending" }, { parked }).ok;
+      return this.engine.transition(record.key, "claimed", "pending", { parked }) !== undefined
+        ? "parked"
+        : "unavailable";
+    const result = this.engine.annotateStrict(record.key, { state: "pending" }, { parked });
+    if (result.ok) return "parked";
+    // frozen / CAS conflict: the record is no longer ours to park; only a persist failure is worth another try.
+    return result.reason === "persist_failed" ? "persist_failed" : "unavailable";
   }
   /** Effective `wake:true` sends to the root made by `from` so far (expensive class; for status/tests). */
   wakeUsed(from: NodeRef): number {

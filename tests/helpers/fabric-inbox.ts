@@ -74,7 +74,9 @@ export function inboxRig(
     entries?: Entry[];
     durability?: InboxDurability;
     live?: (file: string) => boolean;
-    inject?: (r: FabricRecord) => Promise<Verdict>;
+    inject?: (r: FabricRecord, o?: { target: string }) => Promise<Verdict>;
+    /** W4: `resumeOwners` (sessionFile/run id → successor run id); absent ⇒ no successor routing. */
+    owners?: Map<string, string>;
     failUpdate?: (key: string, n: number) => boolean;
   } = {},
 ) {
@@ -135,6 +137,7 @@ export function inboxRig(
   const wake = createWakeService({
     engine,
     query: () => ({ get: (id) => snapshots.get(id) }),
+    ...(opts.owners ? { spawn: () => ({ successorOf: (f: string) => opts.owners!.get(f) }) } : {}),
     level,
     durability,
     isLiveSessionFile: opts.live ?? (() => false),

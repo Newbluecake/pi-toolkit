@@ -2,18 +2,25 @@ import type { Clock, TimerHandle } from "../core/clock.js";
 import type { FabricRecord, MessageChannel, NodeRef } from "../core/message.js";
 import { effectiveChannel } from "../core/message.js";
 import { newRunId } from "../core/ids.js";
-import type { Millis } from "../core/types.js";
+import type { Millis, RunId } from "../core/types.js";
 import type { DeliveryEngine } from "../delivery/engine.js";
 import type { FabricRouter } from "./router.js";
 import type { FabricThrottle } from "./throttle.js";
 import type { WakeService } from "./wake.js";
 
+/**
+ * What a failed send is KNOWN to have done to the target (fabric-cross-session plan §3.4c). `none`: the steer's promise
+ * was rejected, nothing landed. `unknown`: the bounded wait timed out — the steer may still land afterwards. Legacy
+ * judgement never reads it; only a redirect steer (finished run → its successor) does.
+ */
+export type VerdictEffect = "none" | "unknown";
 export type Verdict =
   | { ok: true }
-  | { ok: false; retryable: true; reason: string }
-  | { ok: false; retryable: false; reason: "target_gone" | "policy" };
+  | { ok: false; retryable: true; reason: string; effect?: VerdictEffect }
+  | { ok: false; retryable: false; reason: "target_gone" | "policy"; effect?: VerdictEffect };
 export interface FabricPorts {
-  inject(record: FabricRecord): Promise<Verdict>;
+  /** `opts.target` (W4 redirect): steer this run instead of `record.to` (the resumed successor of a finished run). */
+  inject(record: FabricRecord, opts?: { target: RunId }): Promise<Verdict>;
   sendRootContext(record: FabricRecord): Promise<Verdict>;
   sendRootDisplay(record: FabricRecord): Promise<Verdict>;
 }
@@ -27,6 +34,8 @@ export interface FabricPorts {
  * forever with no further traffic.
  */
 const ttlExpired = (createdAt: Millis, ttlMs: number, now: Millis): boolean => now >= createdAt + ttlMs;
+
+const PARK_RETRY_MS = 1_000;
 
 export interface MailboxOptions {
   engine: DeliveryEngine<FabricRecord, FabricRecord["state"]>;
@@ -43,7 +52,7 @@ export interface MailboxOptions {
    * causal level can propagate. Absent (wake off) ⇒ nothing changes. Must not throw; failures are swallowed here.
    */
   level?: { onDelivered(record: FabricRecord, channel: MessageChannel): void };
-  inbox?: Pick<WakeService, "sweep" | "nextSweepAt" | "dispose">;
+  inbox?: Pick<WakeService, "sweep" | "nextSweepAt" | "dispose" | "successor" | "steerHeld" | "auditUnverified">;
   onDegraded?: (error: unknown) => void;
 }
 
@@ -53,8 +62,46 @@ export class FabricMailbox {
   private readonly raceTimers = new Set<TimerHandle>();
   private readonly inFlight = new Map<NodeRef, string>();
   private readonly settled = new Set<NodeRef>();
+  /** W4: in-memory successor-wait markers (key → the starting successor). Never persisted, never a delivery attempt. */
+  private readonly waitingFor = new Map<string, { runId: RunId; sessionFile: string | undefined }>();
+  /** Records whose park could not be persisted: retried at this time (bounded by their TTL). */
+  private readonly parkRetryAt = new Map<string, number>();
   private frozen = false;
   constructor(private readonly options: MailboxOptions) {}
+
+  get waitingCount(): number {
+    return this.waitingFor.size;
+  }
+
+  /**
+   * W4: a successor of `sessionFile` (or `successor` itself) changed state — it reached running, or ended. Clears the
+   * successor-wait markers of that session chain, then re-evaluates EVERYTHING pending: records of the chain whose
+   * successor now runs are redirect-steered one verdict at a time (`inFlight` per target ⇒ bounded microtask steps),
+   * the rest follow normal handling. Reserved/quarantined records are never touched (W3 owns them).
+   */
+  drainSession(sessionFile?: string, successor?: RunId): void {
+    if (this.frozen) return;
+    for (const [key, mark] of this.waitingFor)
+      if (
+        (successor !== undefined && mark.runId === successor) ||
+        (sessionFile !== undefined && mark.sessionFile === sessionFile)
+      )
+        this.waitingFor.delete(key);
+    this.pump();
+  }
+
+  /** The successor this finished-target record may be coalesced into (finding/directive with an explicit wake only). */
+  private successorRoute(
+    record: FabricRecord,
+  ): { runId: RunId; sessionFile: string | undefined; running: boolean } | undefined {
+    if (!this.options.inbox || record.wake === undefined || record.kind === "progress") return undefined;
+    if (this.options.router.targetState(record.to) !== "gone") return undefined;
+    const successor = this.options.inbox.successor(record.to);
+    if (!successor) return undefined;
+    const state = this.options.router.targetState(successor.runId);
+    if (state === "gone") return undefined;
+    return { ...successor, running: state === "running" };
+  }
 
   pump(hint?: NodeRef): void {
     if (this.frozen) return;
@@ -71,18 +118,44 @@ export class FabricMailbox {
       for (const record of candidates) {
         const now = this.options.clock.now();
         // Reservation ownership outranks TTL. Only the disposition sweep may terminate it.
-        if (this.options.inbox && (record.reserved || record.quarantined)) continue;
+        if (this.options.inbox && (record.reserved || record.quarantined || this.options.inbox.steerHeld(record.key)))
+          continue;
         if (ttlExpired(record.createdAt, record.ttlMs, now)) {
+          this.waitingFor.delete(record.key);
           if (record.kind === "finding" || record.kind === "directive")
             this.options.router.issueDeadLetter(record, "ttl_expired");
           else this.options.engine.transition(record.key, "pending", "abandoned", { terminalReason: "ttl_expired" });
           continue;
         }
+        // W4: a finished target whose session chain has a live/starting successor. Starting ⇒ wait (marker, no attempt,
+        // TTL stays the only other wake source); running ⇒ redirect steer into the successor (even for a parked record).
+        const route = this.successorRoute(record);
+        if (route && !route.running) {
+          this.waitingFor.set(record.key, { runId: route.runId, sessionFile: route.sessionFile });
+          continue;
+        }
+        this.waitingFor.delete(record.key);
+        if (route) {
+          if (this.inFlight.has(target) || now < this.options.throttle.eligibleAt(record)) continue;
+          const token = `${this.mailboxInstanceId}:${record.attempts}`;
+          const claimed = this.options.engine.claim(record.key, token);
+          if (claimed === undefined) continue;
+          this.inFlight.set(target, record.key);
+          this.dispatch(claimed, token, route.runId);
+          break;
+        }
         // Parked records are carried only by a later resume admission, never steered by this pump.
         if (this.options.inbox && record.parked) continue;
         const targetState = this.options.router.targetState(record.to);
         if (targetState === "gone") {
-          if (this.options.inbox && record.wake === false && this.options.router.park(record, "wake_false")) continue;
+          if (this.options.inbox && record.wake === false) {
+            const parked = this.options.router.tryPark(record, "wake_false");
+            // A transient persist failure must not dead-letter a message that could have been parked: stay pending
+            // (TTL bounds the wait; the next pump retries the park).
+            if (parked === "persist_failed") this.parkRetryAt.set(record.key, now + PARK_RETRY_MS);
+            else this.parkRetryAt.delete(record.key);
+            if (parked === "parked" || parked === "persist_failed") continue;
+          }
           if (record.kind === "finding" || record.kind === "directive") gone.push(record);
           else this.options.engine.transition(record.key, "pending", "dropped", { terminalReason: "target_gone" });
           continue;
@@ -110,7 +183,15 @@ export class FabricMailbox {
   onRunSettled(from: NodeRef): void {
     this.settled.add(from);
     this.options.router.onRunSettled(from);
-    this.pump(from);
+    // W4: a successor that ended releases its waiters (tombstoned above ⇒ normal handling decides their fate).
+    let released = false;
+    for (const [key, mark] of this.waitingFor)
+      if (mark.runId === from) {
+        this.waitingFor.delete(key);
+        released = true;
+      }
+    if (released) this.pump();
+    else this.pump(from);
   }
 
   dispose(): void {
@@ -123,6 +204,8 @@ export class FabricMailbox {
     for (const timer of this.raceTimers) this.options.clock.clearTimer(timer);
     this.raceTimers.clear();
     this.inFlight.clear();
+    this.waitingFor.clear();
+    this.parkRetryAt.clear();
     this.options.router.freeze();
   }
 
@@ -133,11 +216,34 @@ export class FabricMailbox {
     return this.raceTimers.size;
   }
 
-  private dispatch(record: FabricRecord, token: string): void {
-    void this.boundedSend(record).then((verdict) => this.verdict(record.key, record.to, token, verdict));
+  private dispatch(record: FabricRecord, token: string, redirect?: RunId): void {
+    if (redirect !== undefined) {
+      // Redirect steer (plan §3.4c): the attempt is made durable BEFORE the send. A steer that times out may still
+      // land; with this mark a retry (or a reload) can never duplicate it.
+      const marked = this.options.engine.annotateStrict(
+        record.key,
+        { state: "claimed", claimToken: token },
+        { steerAttempt: { runId: redirect, at: this.options.clock.now() } },
+      );
+      if (!marked.ok) {
+        // Nothing was sent: an ordinary retryable verdict (attempts + backoff), never an unmarked steer.
+        void Promise.resolve().then(() =>
+          this.verdict(record.key, record.to, token, {
+            ok: false,
+            retryable: true,
+            reason: "steer_attempt_unpersisted",
+            effect: "none",
+          }),
+        );
+        return;
+      }
+    }
+    void this.boundedSend(record, redirect).then((verdict) =>
+      this.verdict(record.key, record.to, token, verdict, redirect),
+    );
   }
 
-  private boundedSend(record: FabricRecord): Promise<Verdict> {
+  private boundedSend(record: FabricRecord, redirect?: RunId): Promise<Verdict> {
     return new Promise((resolve) => {
       let done = false;
       let sender: Promise<Verdict>;
@@ -152,7 +258,9 @@ export class FabricMailbox {
               ) === "context"
               ? this.options.ports.sendRootContext(record)
               : this.options.ports.sendRootDisplay(record)
-            : this.options.ports.inject(record);
+            : redirect !== undefined
+              ? this.options.ports.inject(record, { target: redirect })
+              : this.options.ports.inject(record);
       } catch (error) {
         sender = Promise.reject(error);
       }
@@ -167,14 +275,14 @@ export class FabricMailbox {
         resolve(verdict);
       };
       timer = this.options.clock.setTimer(Math.max(0, this.options.fabricSteerTimeoutMs), () =>
-        finish({ ok: false, retryable: true, reason: "steer_timeout" }),
+        finish({ ok: false, retryable: true, reason: "steer_timeout", effect: "unknown" }),
       );
       this.raceTimers.add(timer);
       Promise.resolve(sender).then(finish, (error) => finish(this.toVerdict(error)));
     });
   }
 
-  private verdict(key: string, target: NodeRef, token: string, verdict: Verdict): void {
+  private verdict(key: string, target: NodeRef, token: string, verdict: Verdict, redirect?: RunId): void {
     if (this.frozen) return;
     const record = this.options.engine.get(key);
     const owned = record?.state === "claimed" && record.claimToken === token;
@@ -188,6 +296,31 @@ export class FabricMailbox {
       return;
     }
     const attempts = record.attempts + 1;
+    if (redirect !== undefined && !verdict.ok) {
+      if ((verdict.effect ?? "unknown") === "unknown") {
+        // The steer may still land (or already did): consume with an audit and never retry (NQ2, at most once).
+        const patch = { attempts, terminalReason: "steer_unverified" };
+        const strict = this.options.engine.transitionStrict(
+          key,
+          { state: "claimed", claimToken: token },
+          "consumed",
+          patch,
+        );
+        // A failed persist leaves disk as `pending + steerAttempt`, which a reload consumes with the same audit.
+        if (strict.ok || this.options.engine.transition(key, "claimed", "consumed", patch))
+          this.options.inbox?.auditUnverified("steer_unverified", record, redirect);
+        if (this.inFlight.get(target) === key) this.inFlight.delete(target);
+        this.pump(target);
+        return;
+      }
+      // Rejected before anything landed ⇒ the durable attempt mark is withdrawn and the record returns to ordinary
+      // handling (bounded by attempts). If the withdrawal cannot be persisted a reload would consume it unverified —
+      // the safe, at-most-once direction.
+      this.options.engine.annotateStrict(key, { state: "claimed", claimToken: token }, {
+        steerAttempt: undefined,
+      } as unknown as Partial<FabricRecord>);
+      verdict = { ok: false, retryable: true, reason: verdict.reason };
+    }
     if (verdict.ok) {
       const delivered = this.options.engine.transition(key, "claimed", "delivered", {
         attempts,
@@ -197,7 +330,8 @@ export class FabricMailbox {
         this.options.throttle.noteDelivered(delivered, delivered.deliveredAt ?? this.options.clock.now());
         try {
           this.options.level?.onDelivered(
-            delivered,
+            // a redirect propagates the level into the successor session that actually received the text
+            redirect !== undefined ? { ...delivered, to: redirect } : delivered,
             effectiveChannel(
               delivered.kind,
               this.options.progressChannel ?? "display",
@@ -241,9 +375,20 @@ export class FabricMailbox {
     this.wake = undefined;
     const now = this.options.clock.now();
     let due = this.options.inbox?.nextSweepAt(now) ?? Number.POSITIVE_INFINITY;
+    for (const key of this.waitingFor.keys())
+      if (this.options.engine.get(key)?.state !== "pending") this.waitingFor.delete(key);
+    for (const [key, at] of this.parkRetryAt) {
+      if (this.options.engine.get(key)?.state === "pending") due = Math.min(due, Math.max(at, now));
+      else this.parkRetryAt.delete(key);
+    }
     for (const record of this.options.engine.select((r) => r.state === "pending")) {
-      if (this.options.inbox && (record.reserved || record.quarantined)) continue;
-      if (this.options.inbox && record.parked) {
+      if (this.options.inbox && (record.reserved || record.quarantined || this.options.inbox.steerHeld(record.key)))
+        continue;
+      // W4: a record waiting for a starting successor only has its TTL as a clock wake source (the successor's running
+      // snapshot drains it); a parked record has the same unless its successor already runs (then it redirects, and a
+      // throttled redirect needs its eligibility timer like any other delivery).
+      const route = this.successorRoute(record);
+      if (route ? !route.running : this.options.inbox && record.parked) {
         if (!ttlExpired(record.createdAt, record.ttlMs, now)) due = Math.min(due, record.createdAt + record.ttlMs);
         continue;
       }
@@ -271,9 +416,11 @@ export class FabricMailbox {
 
   private toVerdict(error: unknown): Verdict {
     const message = error instanceof Error ? error.message : String(error);
-    if (/no active session/i.test(message)) return { ok: false, retryable: false, reason: "target_gone" };
-    if (/policy/i.test(message)) return { ok: false, retryable: false, reason: "policy" };
-    return { ok: false, retryable: true, reason: message };
+    // A rejected promise means the steer itself was refused: nothing landed (effect "none").
+    if (/no active session/i.test(message))
+      return { ok: false, retryable: false, reason: "target_gone", effect: "none" };
+    if (/policy/i.test(message)) return { ok: false, retryable: false, reason: "policy", effect: "none" };
+    return { ok: false, retryable: true, reason: message, effect: "none" };
   }
 }
 export const createFabricMailbox = (options: MailboxOptions): FabricMailbox => new FabricMailbox(options);

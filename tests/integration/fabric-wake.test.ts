@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import type { DriverEvent } from "../../src/core/types.js";
-import type { FabricRecord } from "../../src/core/message.js";
+import { makeMessageKey, type FabricRecord } from "../../src/core/message.js";
 import { PiSessionDriver, type PiSessionHandle, type SessionHandle } from "../../src/runtime/session-driver.js";
 import { buildSessionStack, type Stack } from "../../src/stack.js";
 import { createAgentTool } from "../../src/tools/agent-tool.js";
@@ -105,10 +105,13 @@ function setup(wake = true) {
       .at(-1)!;
   return { sm, file, pi, ctx, r, build, latest };
 }
-function stubDriver() {
+function stubDriver(opts: { gated?: boolean } = {}) {
   let event: ((e: DriverEvent) => void) | undefined;
   let text: string | undefined;
   let release: (() => void) | undefined;
+  let open!: () => void;
+  const gate = opts.gated ? new Promise<void>((r) => (open = r)) : Promise.resolve();
+  const steered: string[] = [];
   const handle: SessionHandle = {
     sessionId: "w3-child",
     sessionFile,
@@ -120,7 +123,9 @@ function stubDriver() {
         release = r;
       });
     },
-    steer: async () => undefined,
+    steer: async (t: string) => {
+      steered.push(t);
+    },
     requestAbort: async () => undefined,
     dispose: () => ({ returned: true, killed: 0, unkillable: [] }),
     killableHandles: new Set(),
@@ -129,7 +134,10 @@ function stubDriver() {
     getLastAssistantText: () => "done",
     getUsage: () => undefined,
   };
-  vi.spyOn(PiSessionDriver.prototype, "resume").mockImplementation(async () => handle as PiSessionHandle);
+  vi.spyOn(PiSessionDriver.prototype, "resume").mockImplementation(async () => {
+    await gate;
+    return handle as PiSessionHandle;
+  });
   vi.spyOn(PiSessionDriver.prototype, "bind").mockImplementation(async (_h, cb) => {
     event = cb;
   });
@@ -137,6 +145,8 @@ function stubDriver() {
     get text() {
       return text;
     },
+    steered,
+    open: () => open(),
     finish: () => release?.(),
   };
 }
@@ -239,5 +249,49 @@ describe("W3 real stack assembly", () => {
     expect(h.latest()).not.toHaveProperty("reserved");
     driver.finish();
     await until(() => stack.query.get(a.runId)?.status === "completed");
+  });
+  it("W4: a message that arrives while a manual resume is still starting waits, then is redirect-steered into the successor", async () => {
+    const h = setup();
+    const driver = stubDriver({ gated: true });
+    // a second, NON-parked wake:true message to the finished run (e.g. sent during the resume's startup)
+    const late = inboxRecord({
+      key: makeMessageKey("r_SENDER01", target, 1, 2),
+      seq: 2,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      ttlMs: 120_000,
+      wake: true,
+      payload: { text: "arrived during startup" },
+    });
+    delete (late as { parked?: unknown }).parked;
+    h.sm.appendCustomEntry("subagent:fabric", late);
+    const stack = h.build();
+    const started = await stack.spawn.spawn({ type: "worker", prompt: "manual resume", resumeFrom: target });
+    if (!("runId" in started)) throw new Error(started.error.message);
+    stack.fabric!.pump();
+    const latestOf = (key: string) =>
+      h.sm
+        .getEntries()
+        .filter((e) => e.type === "custom" && e.customType === "subagent:fabric")
+        .map((e) => (e as { data: FabricRecord }).data)
+        .filter((x) => x.key === key)
+        .at(-1);
+    // starting successor: the late message is NOT dead-lettered, not steered, not attempted
+    expect(latestOf(late.key)).toMatchObject({ state: "pending" });
+    expect(latestOf(late.key)).not.toHaveProperty("steerAttempt");
+    expect(driver.steered).toEqual([]);
+    driver.open();
+    await until(() => driver.steered.length > 0);
+    expect(driver.steered[0]).toContain("arrived during startup");
+    expect(driver.steered).toHaveLength(1);
+    await until(() => latestOf(late.key)?.state === "delivered");
+    expect(latestOf(late.key)).toMatchObject({ attempts: 1, steerAttempt: { runId: started.runId } });
+    // the admitted parked message rode the prompt instead (never also steered)
+    expect(driver.text).toContain("carry this parked finding");
+    expect(driver.text).not.toContain("arrived during startup");
+    expect(h.latest()).toMatchObject({ state: "consumed", terminalReason: "resume_injected" });
+    driver.finish();
+    await until(() => stack.query.get(started.runId)?.status === "completed");
+    await flush();
   });
 });
