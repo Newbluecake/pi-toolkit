@@ -121,6 +121,9 @@ export function createWorkflowChildSpawner(
         // verbatim \u2014 `SpawnRequest.budgetOverride` is `Partial<DeadlineBudget>`,
         // a strict superset of `{ totalMs?, queueWaitMs? }`.
         ...(req.budgetOverride !== undefined ? { budgetOverride: req.budgetOverride } : {}),
+        // fabric-cross-session plan §4.5 (W5): the script's `agent()` call owns this run's result — a message must
+        // never revive it (admission-only marker, ignored with wake off).
+        callerOwned: true as const,
         // D-W3 (§5.4 / D4 front-condition 4): workflow children *do* go
         // through the core `SlotPool` like any other run — `slotless` is
         // deliberately left unset (defaults to `false`) rather than forced

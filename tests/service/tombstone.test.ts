@@ -82,3 +82,42 @@ describe("TombstoneStore.register (§2.7 timeoutPolicy copy)", () => {
     expect(live.list().map((t) => t.timeoutPolicy)).toEqual(["extendable"]);
   });
 });
+
+describe("TombstoneStore.register (W5 wake facts)", () => {
+  const withDiag = (patch: Partial<RunSnapshot["diag"]>): RunSnapshot => {
+    const s = snapshot();
+    Object.assign(s.diag, patch);
+    return s;
+  };
+  it("a wake-on run keeps the verdict AND what a revive of an evicted run must verify", () => {
+    const store = new TombstoneStore();
+    store.register(
+      withDiag({
+        wakeExclusion: "none",
+        wakeLevel: 1,
+        agentType: "worker",
+        stopCause: "user_stop",
+        worktree: { state: "kept", path: "/wt", branch: "b" },
+      }),
+    );
+    expect(store.get("r_TOMB0001")).toMatchObject({
+      wakeExclusion: "none",
+      wakeLevel: 1,
+      agentType: "worker",
+      userStopped: true,
+      worktree: { state: "kept", path: "/wt" },
+    });
+    expect(store.get("r_TOMB0001")!.worktree).not.toHaveProperty("branch");
+  });
+  it("wake-off runs get none of the new keys (byte-identical tombstone)", () => {
+    const store = new TombstoneStore();
+    store.register(withDiag({ agentType: "worker", stopCause: "user_stop" }));
+    const tomb = store.get("r_TOMB0001")!;
+    for (const k of ["wakeExclusion", "agentType", "userStopped", "worktree"]) expect(tomb).not.toHaveProperty(k);
+  });
+  it("a non-user stop is not marked userStopped", () => {
+    const store = new TombstoneStore();
+    store.register(withDiag({ wakeExclusion: "none", stopCause: "timeout" }));
+    expect(store.get("r_TOMB0001")).not.toHaveProperty("userStopped");
+  });
+});

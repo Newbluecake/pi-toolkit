@@ -27,6 +27,13 @@ export interface Tombstone {
    */
   readonly wakeLevel?: number;
   readonly wakeExclusion?: WakeExclusion | "none";
+  /**
+   * W5: the rest of what a revive of a snapshot-less (evicted) run must verify — its agent type, a user stop (Q6) and its
+   * worktree. Copied only together with `wakeExclusion` (i.e. for wake-on runs), so wake-off tombstones are unchanged.
+   */
+  readonly agentType?: string;
+  readonly userStopped?: true;
+  readonly worktree?: { readonly state: string; readonly path?: string };
 }
 
 /** In-memory terminal handle index. Entries are intentionally bounded by TTL. */
@@ -53,7 +60,21 @@ export class TombstoneStore {
       // external-agent §15 跟踪项 2（P5）：同款「缺就不拷」。
       ...(snapshot.diag.model === undefined ? {} : { model: snapshot.diag.model }),
       ...(snapshot.diag.wakeLevel === undefined ? {} : { wakeLevel: snapshot.diag.wakeLevel }),
-      ...(snapshot.diag.wakeExclusion === undefined ? {} : { wakeExclusion: snapshot.diag.wakeExclusion }),
+      ...(snapshot.diag.wakeExclusion === undefined
+        ? {}
+        : {
+            wakeExclusion: snapshot.diag.wakeExclusion,
+            ...(snapshot.diag.agentType === undefined ? {} : { agentType: snapshot.diag.agentType }),
+            ...(snapshot.diag.stopCause === "user_stop" ? { userStopped: true as const } : {}),
+            ...(snapshot.diag.worktree === undefined
+              ? {}
+              : {
+                  worktree: {
+                    state: snapshot.diag.worktree.state,
+                    ...(snapshot.diag.worktree.path === undefined ? {} : { path: snapshot.diag.worktree.path }),
+                  },
+                }),
+          }),
     });
   }
   has(runId: RunId): boolean {

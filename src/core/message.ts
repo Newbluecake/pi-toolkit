@@ -87,6 +87,8 @@ export interface FabricRecord extends MessageEnvelope {
     reason: "ttl_expired" | "target_gone" | "attempts_exhausted" | "wake_refused";
     status: "issued" | "suppressed_quota" | "suppressed_sender_gone";
     key?: MessageKey;
+    /** W5: why a `wake_refused` (a {@link WakeExclusion} or an admission cause); never message text. */
+    detail?: string;
   };
   terminalReason?: string;
   storageKey?: string;

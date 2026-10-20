@@ -834,6 +834,10 @@ export function reduce(
           : { experts: { ...input.meta.experts, refs: capExpertRefs(input.meta.experts.refs) } }),
         ...(input.meta?.dispatchMeta === undefined ? {} : { dispatchMeta: input.meta.dispatchMeta }),
         ...(input.meta?.schemaPreset === undefined ? {} : { schemaPreset: input.meta.schemaPreset }),
+        // fabric-cross-session plan §4.1/§4.5 (W5): write-once wake provenance / wake-ability verdict. Absent unless the
+        // wake inbox is wired, so a wake-off run's diag is byte-identical.
+        ...(input.meta?.wakeOrigin === undefined ? {} : { wakeOrigin: input.meta.wakeOrigin }),
+        ...(input.meta?.wakeExclusion === undefined ? {} : { wakeExclusion: input.meta.wakeExclusion }),
         ...(input.meta?.consultOf === undefined ? {} : { consultOf: input.meta.consultOf }),
         // §5.3 / R2-4: consult run's own write-once facts; ordinary runs stay byte-identical.
         // Project prediction explicitly: even an untyped producer cannot seed the driver-owned first slot.

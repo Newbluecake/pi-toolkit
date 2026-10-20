@@ -30,7 +30,7 @@ import type { Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
 import { writeLateWorktreeDisposition } from "../adapters/worktree-disposition-sink.js";
 import { TASK_PROMPT_CAP } from "../core/state-machine.js";
-import { journalSnapshotFromState } from "../core/run-journal.js";
+import { journalSnapshotFromState, persistableWakeOrigin } from "../core/run-journal.js";
 import { isTerminalStatus } from "../core/status.js";
 import type { ExternalAgentsPort } from "../external-agent/types.js";
 import { extractStructuredJson } from "../external-agent/schema-extract.js";
@@ -1228,6 +1228,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
               : {}),
             ...(spec.request.dispatchMeta === undefined ? {} : { dispatchMeta: spec.request.dispatchMeta }),
             ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
+            // fabric-cross-session plan §4.1/§4.5 (W5): write-once wake provenance (claimToken stripped) and the
+            // admission verdict. Both are absent unless the wake inbox is wired ⇒ wake-off diag bytes unchanged.
+            ...(spec.request.wakeOrigin === undefined
+              ? {}
+              : { wakeOrigin: persistableWakeOrigin(spec.request.wakeOrigin) }),
+            ...(spec.request.wakeExclusion === undefined ? {} : { wakeExclusion: spec.request.wakeExclusion }),
             // X1 (agent tree): `⎇ wt` on the row while the run is in flight;
             // keyed off the request's declared intent. H2 failure paths
             // (disabled/uncreatable worktree) never fold displayMeta, so a

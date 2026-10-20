@@ -5,6 +5,8 @@ import { newRunId, isRunId } from "../core/ids.js";
 import { isLiveSessionFile } from "../core/live-session-files.js";
 import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
 import { toErrorInfo } from "../core/errors.js";
+import type { WakeExclusion } from "../core/message.js";
+import { persistableWakeOrigin } from "../core/run-journal.js";
 import { formatSlots, slotsInfo, type SlotsInfo } from "../core/format.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import { formatModelCandidates, formatUnknownModelError, type ModelCandidate } from "../config/model-hint.js";
@@ -1182,6 +1184,29 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         resolvedReq = { ...resolvedReq, wakeLevel: level };
       } else if (resolvedReq.wakeLevel !== undefined) {
         const { wakeLevel: _untrusted, ...rest } = resolvedReq;
+        resolvedReq = rest;
+      }
+      // fabric-cross-session plan §4.5 (W5): the wake-ability verdict is decided HERE, once, from this request's own shape
+      // (never trusted from a caller; absent with wake off ⇒ no new diag bytes). Priority: the first cause that applies.
+      if (deps.inbox) {
+        const wakeExclusion: WakeExclusion | "none" =
+          req.forkSessionFrom !== undefined
+            ? "consult_fork"
+            : req.toolDomain === "readonly"
+              ? "readonly_domain"
+              : req.suppressDelivery === true || req.expectAck === true || req.callerOwned === true
+                ? "caller_owned"
+                : admittedExternal
+                  ? "external_agent"
+                  : "none";
+        resolvedReq = { ...resolvedReq, wakeExclusion };
+        // Provenance rides the display meta; the mailbox claim token is a secret that must not outlive admission.
+        if (req.wakeOrigin !== undefined)
+          resolvedReq = { ...resolvedReq, wakeOrigin: persistableWakeOrigin(req.wakeOrigin) };
+      } else {
+        const { wakeExclusion: _e, wakeOrigin: _o, ...rest } = resolvedReq;
+        void _e;
+        void _o;
         resolvedReq = rest;
       }
       if (req.expectAck) claimedRunIds.add(runId);

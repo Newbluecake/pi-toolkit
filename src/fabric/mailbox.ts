@@ -6,7 +6,7 @@ import type { Millis, RunId } from "../core/types.js";
 import type { DeliveryEngine } from "../delivery/engine.js";
 import type { FabricRouter } from "./router.js";
 import type { FabricThrottle } from "./throttle.js";
-import type { WakeService } from "./wake.js";
+import type { ReviveVerdict, WakeService } from "./wake.js";
 
 /**
  * What a failed send is KNOWN to have done to the target (fabric-cross-session plan §3.4c). `none`: the steer's promise
@@ -23,6 +23,12 @@ export interface FabricPorts {
   inject(record: FabricRecord, opts?: { target: RunId }): Promise<Verdict>;
   sendRootContext(record: FabricRecord): Promise<Verdict>;
   sendRootDisplay(record: FabricRecord): Promise<Verdict>;
+  /**
+   * W5: revive a finished target for a `wake:true` finding/directive. Absent (wake off) ⇒ legacy `target_gone` handling.
+   * The returned promise's synchronous part has already decided reservation ownership (`claimToken` is the mailbox
+   * claim the trigger rides on) — see {@link WakeService.revive}.
+   */
+  revive?(record: FabricRecord, claimToken: string): Promise<ReviveVerdict>;
 }
 /**
  * The single TTL predicate shared by expiry and scheduling (fabric-cross-session
@@ -156,6 +162,21 @@ export class FabricMailbox {
             else this.parkRetryAt.delete(record.key);
             if (parked === "parked" || parked === "persist_failed") continue;
           }
+          // W5: an explicit wake:true to a finished run is revived (single entry: WakeService), never dead-lettered.
+          if (
+            this.options.inbox &&
+            this.options.ports.revive &&
+            record.wake === true &&
+            (record.kind === "finding" || record.kind === "directive")
+          ) {
+            if (this.inFlight.has(target) || now < this.options.throttle.eligibleAt(record)) continue;
+            const token = `${this.mailboxInstanceId}:${record.attempts}`;
+            const claimed = this.options.engine.claim(record.key, token);
+            if (claimed === undefined) continue;
+            this.inFlight.set(target, record.key);
+            this.dispatchRevive(claimed, token);
+            break;
+          }
           if (record.kind === "finding" || record.kind === "directive") gone.push(record);
           else this.options.engine.transition(record.key, "pending", "dropped", { terminalReason: "target_gone" });
           continue;
@@ -241,6 +262,100 @@ export class FabricMailbox {
     void this.boundedSend(record, redirect).then((verdict) =>
       this.verdict(record.key, record.to, token, verdict, redirect),
     );
+  }
+
+  /**
+   * W5: hand a claimed `wake:true` record to WakeService.revive. Bounded like a steer (`fabricSteerTimeoutMs`): the
+   * admission part of a revive is synchronous, so the timer only guards a pathological hang — a timeout is a bounded
+   * retry (and a verdict arriving afterwards is dropped here).
+   */
+  private dispatchRevive(record: FabricRecord, token: string): void {
+    let done = false;
+    let timer: TimerHandle | undefined;
+    const finish = (outcome: ReviveVerdict): void => {
+      if (done) return;
+      done = true;
+      if (timer) {
+        this.options.clock.clearTimer(timer);
+        this.raceTimers.delete(timer);
+      }
+      this.reviveVerdict(record.key, record.to, token, outcome);
+    };
+    timer = this.options.clock.setTimer(Math.max(0, this.options.fabricSteerTimeoutMs), () =>
+      finish({ retry: "revive_timeout" }),
+    );
+    this.raceTimers.add(timer);
+    try {
+      Promise.resolve(this.options.ports.revive!(record, token)).then(finish, (error) =>
+        finish({ retry: error instanceof Error ? error.message : String(error) }),
+      );
+    } catch (error) {
+      finish({ retry: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /**
+   * W5 admission-reason → mailbox mapping (plan §4.6): spawned ⇒ the trigger was reserved by the resume (ownership left
+   * this mailbox); temporary refusal ⇒ park; permanent ⇒ `wake_refused` dead letter with the cause; persist failure ⇒
+   * retryable (attempts + backoff, ends in `attempts_exhausted`); stack closed ⇒ keep pending. Never an unbounded queue:
+   * a park that cannot be recorded (cap / stack-memory) falls back to the bounded retry or the dead letter.
+   */
+  private reviveVerdict(key: string, target: NodeRef, token: string, outcome: ReviveVerdict): void {
+    if (this.frozen) return;
+    const record = this.options.engine.get(key);
+    const owned = record?.state === "claimed" && record.claimToken === token;
+    const release = (): void => {
+      if (this.inFlight.get(target) === key) this.inFlight.delete(target);
+    };
+    if ("ok" in outcome && owned) {
+      // Defensive: a run was admitted but the claim never moved to its reservation — the message is not inside that
+      // run, so it must stay deliverable rather than be reported as sent.
+      return this.verdict(key, target, token, { ok: false, retryable: true, reason: "revive_unbound", effect: "none" });
+    }
+    if (!owned) {
+      // ok: reservation took ownership; otherwise someone else already terminated/moved the record.
+      release();
+      this.pump(target);
+      return;
+    }
+    const attempts = record.attempts + 1;
+    if ("hold" in outcome) {
+      // The stack is closing: keep the record pending, charge nothing, and do not re-pump (no spin).
+      this.options.engine.transition(key, "claimed", "pending", {});
+      release();
+      return;
+    }
+    if ("retry" in outcome)
+      return this.verdict(key, target, token, { ok: false, retryable: true, reason: outcome.retry, effect: "none" });
+    if ("refuse" in outcome) {
+      this.options.router.issueDeadLetter({ ...record, attempts }, "wake_refused", outcome.refuse);
+      release();
+      this.pump(target);
+      return;
+    }
+    if ("park" in outcome) {
+      const parked = this.options.router.tryPark(record, outcome.park);
+      if (parked === "parked") {
+        this.options.router.noteParked(record, outcome.park);
+        release();
+        this.pump(target);
+        return;
+      }
+      // Could not park (cap / stack-memory / persist failure). A hop or rate limit will not heal by retrying ⇒ refuse;
+      // the temporary causes retry within the normal attempts bound.
+      if (parked === "unavailable" && (outcome.park === "level_limit" || outcome.park === "rate_limited")) {
+        this.options.router.issueDeadLetter({ ...record, attempts }, "wake_refused", outcome.park);
+        release();
+        this.pump(target);
+        return;
+      }
+      return this.verdict(key, target, token, {
+        ok: false,
+        retryable: true,
+        reason: `park_${parked}:${outcome.park}`,
+        effect: "none",
+      });
+    }
   }
 
   private boundedSend(record: FabricRecord, redirect?: RunId): Promise<Verdict> {

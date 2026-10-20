@@ -87,6 +87,11 @@ const NOT_THREADED = [
   // fabric-cross-session plan §3.3 L4: consumed by spawn admission only (seeds wakeLevel = max(hop+1, prevFinal)); the
   // runner/child never sees it.
   "wakeHopLevel",
+  // fabric-cross-session plan §4.5 (W5): admission-computed wake-ability verdict; reaches diag.wakeExclusion through the
+  // adapter's display meta (like dispatchMeta), never as a runner/child field.
+  "wakeExclusion",
+  // W5: program-owned-result marker (workflow children). Consumed by spawn admission only.
+  "callerOwned",
 ] as const;
 
 type ClassifiedKeys = (typeof THREADED)[number] | (typeof NOT_THREADED)[number];

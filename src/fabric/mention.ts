@@ -64,8 +64,10 @@ export function createMentionChannel(deps: MentionChannelDeps) {
       } else if (!snapshot || !terminal.has(snapshot.status)) {
         return { ok: false, status: "target_not_ready", label, runId: target.runId };
       }
-      // W3: explicit deliver-only to a finished @label uses the durable mailbox, never spawn.
-      if (wake === false) {
+      // W3/W5: an explicit wake to a finished @label goes through the durable mailbox, never a direct spawn: `false` parks
+      // it, `true` is revived by WakeService (single revive entry; hop/rate/exclusion gates apply). Omitted wake keeps the
+      // legacy direct resume below. Without causal levels (wake off) neither explicit form exists.
+      if (wake === false || (wake === true && deps.level !== undefined)) {
         if (!deps.level)
           return { ok: false, status: "target_not_ready", label, runId: target.runId, reason: "wake_false_finished" };
         const generation = deps.generation();
@@ -77,7 +79,7 @@ export function createMentionChannel(deps: MentionChannelDeps) {
           generation,
           canMessage: deps.canMessage,
           route: { kind: "mention", label, target: target.runId },
-          wake: false,
+          wake,
         });
       }
       const result = await deps.spawn.spawn({

@@ -10,6 +10,7 @@ import {
   type MessageKind,
   type NodeRef,
   type WakeDowngrade,
+  type WakeExclusion,
 } from "../core/message.js";
 import type { FabricTree, TreeTargetState } from "./tree.js";
 import type { FabricThrottle } from "./throttle.js";
@@ -42,7 +43,15 @@ export interface WakePolicy {
   hopAllowed(level: number): boolean;
   /** Effective `wake:true` sends allowed per sender run (`fabric.wake.perRunQuota`). */
   perRunQuota: number;
+  /**
+   * W5: synchronous admission-time gate for a `wake:true` finding/directive to a FINISHED non-root target (the revive
+   * path). `refuse` ⇒ the message is not admitted at all (`not_wakeable`); `downgrade` ⇒ it is admitted deliver-only
+   * (parked) with the reason reported. `rootWakes` is the sender's effective wake:true sends to the root so far — they
+   * share the one per-run expensive-class quota with revives. Absent ⇒ no revive gate (wake off).
+   */
+  reviveGate?(input: { from: NodeRef; to: NodeRef; level: number; rootWakes: number }): ReviveGate;
 }
+export type ReviveGate = { ok: true } | { refuse: WakeExclusion } | { downgrade: WakeDowngrade };
 export interface AdmissionInput {
   to: NodeRef;
   kind: MessageKind;
@@ -68,6 +77,8 @@ export type AdmissionResult =
       inboxDurability?: "session-memory";
     }
   | { ok: false; status: "invalid_wake"; reason: "progress_never_wakes" }
+  /** W5: a `wake:true` to a finished run that can never be revived (decided synchronously; nothing was queued). */
+  | { ok: false; status: "not_wakeable"; reason: WakeExclusion }
   | {
       ok: false;
       status: "quota_exhausted";
@@ -137,7 +148,7 @@ export class FabricRouter {
     if (
       mention &&
       this.tree.targetState(input.to, this.now()) === "gone" &&
-      !(this.config.inbox && input.wake === false)
+      !(this.config.inbox && input.wake !== undefined)
     )
       throw new Error("mention target is gone");
     // canMessage describes the target relationship as seen by the sender.
@@ -163,6 +174,19 @@ export class FabricRouter {
     // plan §3.1: progress never wakes — an explicit wake:true is a caller error, answered before any seq/quota is spent.
     if (wakePolicy && input.wake === true && input.kind === "progress")
       return { ok: false, status: "invalid_wake", reason: "progress_never_wakes" };
+    // W5: wake:true to a finished (non-root) run is the revive path. Decide what is knowable synchronously BEFORE any seq
+    // or quota is spent: a target that can never be revived is refused outright; a hop/rate limit deliver-only parks.
+    let reviveDowngrade: WakeDowngrade | undefined;
+    if (wakePolicy?.reviveGate && input.wake === true && input.to !== "root" && this.targetState(input.to) === "gone") {
+      const gate = wakePolicy.reviveGate({
+        from,
+        to: input.to,
+        level: wakePolicy.levelOf(from),
+        rootWakes: this.wakeSent.get(from) ?? 0,
+      });
+      if ("refuse" in gate) return { ok: false, status: "not_wakeable", reason: gate.refuse };
+      if ("downgrade" in gate) reviveDowngrade = gate.downgrade;
+    }
     const seq = this.nextSeq(from, input.to);
     const key = makeMessageKey(from, input.to, input.generation, seq);
     const used = this.getUsed(from, input.kind);
@@ -185,7 +209,10 @@ export class FabricRouter {
     const senderLevel = wakePolicy ? wakePolicy.levelOf(from) : undefined;
     let wake = wakePolicy ? input.wake : undefined;
     let wakeDowngraded: WakeDowngrade | undefined;
-    if (wakePolicy && wake === true && input.to === "root" && senderLevel !== undefined) {
+    if (reviveDowngrade !== undefined) {
+      wakeDowngraded = reviveDowngrade;
+      wake = false;
+    } else if (wakePolicy && wake === true && input.to === "root" && senderLevel !== undefined) {
       if (!wakePolicy.hopAllowed(senderLevel)) wakeDowngraded = "level_limit";
       else if ((this.wakeSent.get(from) ?? 0) >= wakePolicy.perRunQuota) wakeDowngraded = "rate_limited";
       if (wakeDowngraded !== undefined) wake = false;
@@ -223,7 +250,9 @@ export class FabricRouter {
         : {}),
       ...(senderLevel !== undefined && from !== "system" ? { level: senderLevel } : {}),
       ...(wake !== undefined ? { wake } : {}),
-      ...(!rejection && canPark ? { parked: { at: this.now(), reason: "wake_false" as const } } : {}),
+      ...(!rejection && canPark
+        ? { parked: { at: this.now(), reason: wakeDowngraded ?? ("wake_false" as const) } }
+        : {}),
       ...(from !== "system"
         ? {
             via: {
@@ -322,10 +351,18 @@ export class FabricRouter {
     this.tree.tombstone(from, this.now(), this.config.reconcileTtlMs);
     this.onChanged();
   }
-  issueDeadLetter(orig: FabricRecord, reason: NonNullable<FabricRecord["deadLetter"]>["reason"]): void {
-    this.issueDeadLetters([orig], reason);
+  issueDeadLetter(
+    orig: FabricRecord,
+    reason: NonNullable<FabricRecord["deadLetter"]>["reason"],
+    detail?: string,
+  ): void {
+    this.issueDeadLetters([orig], reason, detail);
   }
-  issueDeadLetters(origs: readonly FabricRecord[], reason: NonNullable<FabricRecord["deadLetter"]>["reason"]): void {
+  issueDeadLetters(
+    origs: readonly FabricRecord[],
+    reason: NonNullable<FabricRecord["deadLetter"]>["reason"],
+    detail?: string,
+  ): void {
     if (this.frozen || origs.length === 0) return;
     const fresh: FabricRecord[] = [];
     for (const o of origs) {
@@ -334,8 +371,12 @@ export class FabricRouter {
         this.engine.transition(o.key, ["pending", "claimed"], terminalFor(reason), {
           terminalReason: reason,
           attempts: o.attempts,
-          deadLetter:
-            prior.status === "issued" ? { reason, status: "issued", key: prior.key } : { reason, status: prior.status },
+          deadLetter: {
+            ...(prior.status === "issued"
+              ? { reason, status: "issued" as const, key: prior.key }
+              : { reason, status: prior.status }),
+            ...(detail === undefined ? {} : { detail }),
+          },
         });
       else fresh.push(o);
     }
@@ -380,11 +421,52 @@ export class FabricRouter {
       this.engine.transition(o.key, ["pending", "claimed"], terminalFor(reason), {
         terminalReason: reason,
         attempts: o.attempts,
-        deadLetter:
-          outcome.status === "issued"
-            ? { reason, status: "issued", key: outcome.key }
-            : { reason, status: outcome.status },
+        deadLetter: {
+          ...(outcome.status === "issued"
+            ? { reason, status: "issued" as const, key: outcome.key }
+            : { reason, status: outcome.status }),
+          ...(detail === undefined ? {} : { detail }),
+        },
       });
+    this.onChanged();
+  }
+  /**
+   * W5: tell the sender its `wake:true` message could not be revived right now and was PARKED instead (it rides the
+   * target's next resume until its TTL). A system → sender `result`; bounded by the sender's dead-letter quota (the
+   * same per-sender "system notice" budget), silent when the sender is gone or over quota. To the root it is
+   * deliver-only (`wake:false`), so a receipt can never start a turn by itself.
+   */
+  noteParked(record: FabricRecord, reason: WakeDowngrade): void {
+    if (this.frozen || record.from === "system") return;
+    if (this.targetState(record.from) === "gone") return;
+    if ((this.deadLetterUsed.get(record.from) ?? 0) >= this.config.deadLetterQuota) return;
+    const key = makeMessageKey("system", record.from, 0, this.nextSeq("system", record.from));
+    const receipt: FabricRecord = {
+      key,
+      from: "system",
+      to: record.from,
+      kind: "result",
+      seq: this.currentSeq("system", record.from),
+      generation: 0 as never,
+      payload: {
+        text:
+          `wake:true message ${record.key} to ${record.to} was parked (${reason}): the target is finished and could not ` +
+          `be resumed now. It stays queued and is handed to the target if it is resumed before it expires.`,
+      },
+      ref: { keys: [record.key], omittedCount: 0 },
+      ttlMs: this.config.reconcileTtlMs,
+      createdAt: this.now(),
+      updatedAt: this.now(),
+      state: "pending",
+      attempts: 0,
+      ...(record.from === "root" && this.config.wakePolicy ? { wake: false } : {}),
+    };
+    try {
+      this.engine.put(receipt);
+    } catch {
+      return;
+    }
+    this.deadLetterUsed.set(record.from, (this.deadLetterUsed.get(record.from) ?? 0) + 1);
     this.onChanged();
   }
   freeze(): void {

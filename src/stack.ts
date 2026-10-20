@@ -149,6 +149,7 @@ import { createQueryService, type QueryService } from "./service/query-service.j
 import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
+import { TombstoneStore, type Tombstone } from "./service/tombstone.js";
 import { registerDispositionSink, releaseDispositionSink } from "./adapters/worktree-disposition-sink.js";
 import {
   isPidAlive,
@@ -502,7 +503,11 @@ function buildFabric(
   readBack: boolean,
   runnerRef: { current?: Runner },
   query: () => QueryService | undefined,
-  spawn: () => Pick<SpawnService, "successorOf"> | undefined,
+  spawn: () => Pick<SpawnService, "successorOf" | "spawn"> | undefined,
+  wakeFacts: {
+    tombstone: (runId: RunId) => Tombstone | undefined;
+    agentTypeExists: (name: string) => boolean;
+  },
 ) {
   const store = readBack
     ? createPiOutboxStore<FabricRecord>(
@@ -604,6 +609,9 @@ function buildFabric(
               levelOf: (node) => level.levelOf(node),
               hopAllowed: (l) => level.hopAllowed(l),
               perRunQuota: settings.fabric.wake.perRunQuota,
+              // W5: finished-target wake:true is decided here, synchronously, before anything is queued.
+              reviveGate: (input: { from: NodeRef; to: NodeRef; level: number; rootWakes: number }) =>
+                wake ? wake.admitCheck(input) : ({ ok: true } as const),
             },
             inbox: { durability, parkCapPerTarget: settings.fabric.wake.parkCapPerTarget },
           }
@@ -636,6 +644,8 @@ function buildFabric(
       else pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
       return { ok: true };
     },
+    // W5: only with wake on (`level` is built iff wakeOn) — off ⇒ no revive port, legacy target_gone handling.
+    ...(level ? { revive: (record: FabricRecord, claimToken: string) => wake!.revive(record, claimToken) } : {}),
     sendRootDisplay: async (record) => {
       // The entry renderer displays only state === "delivered" records (one
       // chat line per message despite the append-per-transition outbox). In
@@ -654,6 +664,9 @@ function buildFabric(
         engine,
         query,
         spawn,
+        tombstone: wakeFacts.tombstone,
+        agentTypeExists: wakeFacts.agentTypeExists,
+        settings: () => settings.fabric.wake,
         level,
         durability,
         isLiveSessionFile,
@@ -1828,6 +1841,9 @@ export function buildSessionStack(
     console.warn("[pi-subagent] outbox list failed; runId uniqueness degrades to process-local (M17)");
   }
   const spawnRef: { current?: SpawnService } = {};
+  // fabric-cross-session plan §4.5 (W5): the tombstone index is shared with the wake service, which reads a run's
+  // `wakeExclusion`/`wakeLevel` from it once the snapshot is gone. Same default TTL/clock as SpawnService's own.
+  const tombstones = new TombstoneStore();
   // quota-plan §4.1 / integration-map §7：spawn 闸门（下方 createSpawnService）
   // 需要 quota，而 quota 按计划构造在 keepalive 之后——晚绑定 ref
   // 解决「A 需要还没构造出来的 B」（runnerRef/widgetRef 同款）。
@@ -1852,6 +1868,10 @@ export function buildSessionStack(
         runnerRef,
         () => query,
         () => spawnRef.current,
+        {
+          tombstone: (runId) => tombstones.get(runId),
+          agentTypeExists: (name) => types.get(name) !== undefined,
+        },
       )
     : undefined;
   if (fabric) previousFabricMailbox = fabric.mailbox;
@@ -2238,6 +2258,7 @@ export function buildSessionStack(
   const spawn = createSpawnService({
     types,
     pool,
+    tombstones,
     runner,
     // external-agent plan §5.1/§5.5（P4b/P5）：端口存在时注入 external 准入门 + agentDir
     //（结构性外部会话判定用）；缺席 ⇒ 既有行为（droid/x 走原 unknown-model 文案）。

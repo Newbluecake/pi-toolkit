@@ -484,6 +484,17 @@ export interface SpawnRequest {
    * seeds `wakeLevel = max(wakeHopLevel + 1, prevFinal)`. Only programs write it; never threaded into a child.
    */
   wakeHopLevel?: number;
+  /**
+   * fabric-cross-session plan §4.5 (W5): the admission-time wake-ability verdict. Computed by spawn admission ONLY
+   * when the wake inbox is wired (a caller-supplied value is stripped), then mirrored write-once into
+   * `diag.wakeExclusion` through the adapter's display meta. Never threaded to the runner or a child.
+   */
+  wakeExclusion?: WakeExclusion | "none";
+  /**
+   * W5: set by programs that own this run's result (workflow children, which hand the outcome to an `agent()` call):
+   * such a run is never revivable by a message (`wakeExclusion: "caller_owned"`). Consumed by admission only.
+   */
+  callerOwned?: true;
   slotless?: boolean;
   parentRunId?: RunId;
   /** Caller will synchronously acknowledge the terminal outcome. */
@@ -700,6 +711,10 @@ export interface RunDisplayMeta {
    * (old entries may lack it).
    */
   schemaPreset?: SchemaPresetId;
+  /** fabric-cross-session plan §4.1 (W5): wake provenance (without `trigger.claimToken`), folded write-once by `enqueued`. */
+  wakeOrigin?: WakeOrigin;
+  /** fabric-cross-session plan §4.5 (W5): admission-time wake-ability verdict, folded write-once by `enqueued`. */
+  wakeExclusion?: WakeExclusion | "none";
 }
 
 /**

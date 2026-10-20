@@ -186,11 +186,34 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
     expect(h.spawn).not.toHaveBeenCalled();
   });
 
-  it("a legacy / wake:true @label resume of a finished run is never blocked but carries the sender's level as a hop", async () => {
+  it("a legacy @label resume of a finished run is never blocked but carries the sender's level as a hop", async () => {
     const h = withLevel("completed", (n) => (n === from ? 2 : 0));
     await expect(h.channel.send("builder", "finding", "x")).resolves.toMatchObject({ ok: true, status: "resumed" });
-    await h.channel.send("builder", "finding", "x", true);
-    for (const call of h.spawn.mock.calls) expect(call[0]).toMatchObject({ resumeFrom: target, wakeHopLevel: 2 });
+    expect(h.spawn).toHaveBeenCalledTimes(1);
+    expect(h.spawn.mock.calls[0]![0]).toMatchObject({ resumeFrom: target, wakeHopLevel: 2 });
+  });
+
+  it("W5: an explicit wake:true to a finished @label goes through the mailbox (WakeService revive), never a direct spawn", async () => {
+    const h = withLevel("completed", (n) => (n === from ? 2 : 0));
+    await expect(h.channel.send("builder", "finding", "x", true)).resolves.toMatchObject({
+      ok: true,
+      status: "accepted",
+    });
+    expect(h.admit).toHaveBeenCalledWith(
+      from,
+      expect.objectContaining({ to: target, wake: true, route: { kind: "mention", label: "builder", target } }),
+    );
+    expect(h.spawn).not.toHaveBeenCalled();
+  });
+
+  it("W5: a not_wakeable admission result is passed back to the sender verbatim", async () => {
+    const h = withLevel("completed", () => 0);
+    h.admit.mockReturnValueOnce({ ok: false, status: "not_wakeable", reason: "legacy_unknown" } as never);
+    await expect(h.channel.send("builder", "finding", "x", true)).resolves.toEqual({
+      ok: false,
+      status: "not_wakeable",
+      reason: "legacy_unknown",
+    });
   });
 
   it("wake off (no level dep): the resume spawn request has no wakeHopLevel key — byte-identical", async () => {
