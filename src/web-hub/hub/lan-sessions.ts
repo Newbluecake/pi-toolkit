@@ -199,6 +199,16 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
     if (self) io.clearCookie(res);
   }
 
+  /** No extra response-path wait: fallback gets its own 2s logical/IPC budget. */
+  function untrustUncertain(auth: LanSessionsAuth, rows: LanSessionListRecord[], keepIp: string): void {
+    const ips = [...new Set(rows.flatMap((r) => [r.createdIp, ...(r.lastIp === undefined ? [] : [r.lastIp])]))];
+    void raceDeadline(deps.store.untrustLoginIps(auth.userId, ips, keepIp, { signal: ipcSignal(2000) }), 2000).catch(
+      () => {
+        deps.log.warn("web-hub lan-sessions: uncertain revoke trust cleanup failed");
+      },
+    );
+  }
+
   async function revokeOne(
     res: ServerResponse,
     io: LanSessionsIo,
@@ -223,23 +233,39 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
       return io.sendJson(res, 404, { error: "E_NOT_FOUND" });
     }
     const self = target.sidHash === auth.sidHash;
+    const shared = target.createdIp === io.ip || target.lastIp === io.ip;
     // Logout order (plan §3.2): emit → delete → emit → SSE revoke.
     emitRevoke(target.sidHash);
+    let sharedIpKept: boolean;
     try {
-      await call(deps.store.deleteSession(target.sidHash, { signal: ipcSignal(deadline.remaining()) }), deadline);
+      const result = await call(
+        deps.store.revokeSession(auth.userId, target.sidHash, io.ip, { signal: ipcSignal(deadline.remaining()) }),
+        deadline,
+      );
+      sharedIpKept = result.sharedIpKept;
     } catch (err) {
       deleteUncertain(res, io, [target.sidHash], self);
+      untrustUncertain(auth, [target], io.ip);
       if (isDeadlineFailure(err, deadline)) {
-        audit({ op: "revoke", ip: io.ip, user: auth.user, ok: false, code: "E_DEADLINE", n: 1, self });
+        audit({
+          op: "revoke",
+          ip: io.ip,
+          user: auth.user,
+          ok: false,
+          code: "E_DEADLINE",
+          n: 1,
+          self,
+          sharedIpKept: shared,
+        });
         return io.sendJson(res, 503, { error: "E_DEADLINE", effect: "unknown" });
       }
-      audit({ op: "revoke", ip: io.ip, user: auth.user, ok: false, code: "E_DB", n: 1, self });
+      audit({ op: "revoke", ip: io.ip, user: auth.user, ok: false, code: "E_DB", n: 1, self, sharedIpKept: shared });
       return io.sendJson(res, 503, { error: "E_DB" });
     }
     emitRevoke(target.sidHash);
     deps.revokeSse(target.sidHash);
     if (self) io.clearCookie(res);
-    audit({ op: "revoke", ip: io.ip, user: auth.user, ok: true, n: 1, complete: true, self });
+    audit({ op: "revoke", ip: io.ip, user: auth.user, ok: true, n: 1, complete: true, self, sharedIpKept });
     const body: LanSessionRevokeResponse = { ok: true, revoked: 1, complete: true };
     io.sendJson(res, 200, body);
   }
@@ -263,10 +289,13 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
     }
     const preListed = rows.filter((r) => r.sidHash !== auth.sidHash).map((r) => r.sidHash);
     for (const h of preListed) emitRevoke(h);
-    let result: { deleted: string[]; more: boolean };
+    let result: { deleted: string[]; more: boolean; sharedIpKept?: boolean };
     try {
       result = await call(
-        deps.store.deleteSessionsExcept(auth.userId, auth.sidHash, { signal: ipcSignal(deadline.remaining()) }),
+        deps.store.deleteSessionsExcept(auth.userId, auth.sidHash, {
+          signal: ipcSignal(deadline.remaining()),
+          keepIp: io.ip,
+        }),
         deadline,
       );
     } catch (err) {
@@ -274,11 +303,32 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
       // unknown. A session created concurrently is NOT in preListed and cannot be named here —
       // the honest `effect:"unknown"` covers it.
       deleteUncertain(res, io, preListed, false);
+      untrustUncertain(
+        auth,
+        rows.filter((r) => r.sidHash !== auth.sidHash),
+        io.ip,
+      );
       if (isDeadlineFailure(err, deadline)) {
-        audit({ op: "others", ip: io.ip, user: auth.user, ok: false, code: "E_DEADLINE", n: preListed.length });
+        audit({
+          op: "others",
+          ip: io.ip,
+          user: auth.user,
+          ok: false,
+          code: "E_DEADLINE",
+          n: preListed.length,
+          sharedIpKept: rows.some((r) => r.sidHash !== auth.sidHash && (r.createdIp === io.ip || r.lastIp === io.ip)),
+        });
         return io.sendJson(res, 503, { error: "E_DEADLINE", effect: "unknown" });
       }
-      audit({ op: "others", ip: io.ip, user: auth.user, ok: false, code: "E_DB", n: preListed.length });
+      audit({
+        op: "others",
+        ip: io.ip,
+        user: auth.user,
+        ok: false,
+        code: "E_DB",
+        n: preListed.length,
+        sharedIpKept: rows.some((r) => r.sidHash !== auth.sidHash && (r.createdIp === io.ip || r.lastIp === io.ip)),
+      });
       return io.sendJson(res, 503, { error: "E_DB" });
     }
     // Concurrent-login honesty: `deleted` is the authoritative list — a login that landed
@@ -288,7 +338,15 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
       deps.revokeSse(h);
     }
     const complete = !result.more;
-    audit({ op: "others", ip: io.ip, user: auth.user, ok: true, n: result.deleted.length, complete });
+    audit({
+      op: "others",
+      ip: io.ip,
+      user: auth.user,
+      ok: true,
+      n: result.deleted.length,
+      complete,
+      sharedIpKept: result.sharedIpKept === true,
+    });
     const body: LanSessionRevokeResponse = { ok: true, revoked: result.deleted.length, complete };
     io.sendJson(res, 200, body);
   }

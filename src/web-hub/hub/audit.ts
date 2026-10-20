@@ -700,6 +700,8 @@ export interface ClientDenyAuditRecord {
 }
 export const CLIENT_DENY_AUDIT_KEYS = ["listener", "ip", "via", "reason", "suppressed"] as const;
 export interface LanSessionAuditRecord {
+  /** A kicked session shared the revoker's current IP; its trust was deliberately kept. */
+  sharedIpKept?: boolean;
   op: "list" | "revoke" | "others";
   ip: string;
   user?: string;
@@ -709,7 +711,17 @@ export interface LanSessionAuditRecord {
   complete?: boolean;
   self?: boolean;
 }
-export const LAN_SESSION_AUDIT_KEYS = ["op", "ip", "user", "ok", "code", "n", "complete", "self"] as const;
+export const LAN_SESSION_AUDIT_KEYS = [
+  "op",
+  "ip",
+  "user",
+  "ok",
+  "code",
+  "n",
+  "complete",
+  "self",
+  "sharedIpKept",
+] as const;
 export interface Lan2faAuditRecord {
   phase: "gate" | "challenge" | "verify" | "complete" | "dead" | "admin";
   method?: "password" | "totp" | "recovery" | "feishu";

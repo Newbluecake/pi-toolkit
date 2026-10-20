@@ -177,7 +177,7 @@ export function formatLanOnLines(
   }
   if (status.loginIpsRebuiltAt !== undefined) {
     lines.push(
-      `提示：登录 IP 历史（login_ips）已损坏并重建为空（${formatLocalMinute(status.loginIpsRebuiltAt)}），所有 IP 暂按新 IP 处理，已启用 2FA 的账号下次登录都需要第二因素。`,
+      `提示：登录 IP 历史（login_ips）已迁移或重建（${formatLocalMinute(status.loginIpsRebuiltAt)}）；信任记录按账号独立，缺失记录的 IP 按新 IP 处理，已启用 2FA 的账号登录时需要第二因素。`,
     );
   }
   lines.push(...tfaRepairLines(tfa));

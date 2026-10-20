@@ -1,3 +1,6 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { createLanSessionsRoutes } from "../../../src/web-hub/hub/lan-sessions.js";
+import { publicSessionId } from "../../../src/web-hub/hub/sid-hash.js";
 import { scryptSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLanLoginCore } from "../../../src/web-hub/hub/lan-login.js";
@@ -191,10 +194,82 @@ describe("LAN login completion and post-finish effects", () => {
     expect(h.fail).toHaveBeenCalledTimes(2);
     expect(h.events).toEqual([]);
   });
+  it("unenrolled B succeeds from X but enrolled A still needs E_2FA from X", async () => {
+    const h = setup();
+    await h.enroll();
+    h.store.seedUser({ ...h.user, id: 2, username: "other" });
+    const result = await h.core.passwordLogin(context(), { username: "other", password: "correct" }, UA, io().value);
+    expect(result.status).toBe(200);
+    await result.after?.();
+    expect(await h.store.isKnownIp(2, context().clientIp, h.now(), 30 * 86400000)).toBe(true);
+    expect(await h.store.isKnownIp(1, context().clientIp, h.now(), 30 * 86400000)).toBe(false);
+    await h.challenge();
+  });
+
+  it.each(["single", "others"] as const)(
+    "%s session-route kick makes the victim pass 2FA again but preserves the revoker IP",
+    async (mode) => {
+      const h = setup();
+      await h.enroll();
+      const keepIp = "10.8.0.1",
+        kickedIp = "10.8.0.3";
+      await h.store.noteLoginIp(1, keepIp, h.now());
+      await h.store.noteLoginIp(1, kickedIp, h.now());
+      for (const ip of [keepIp, kickedIp]) {
+        const result = await h.password(context(ip));
+        expect(result.status).toBe(200);
+        await result.after?.();
+      }
+      const sessions = await h.store.listSessions(1, h.now());
+      const current = sessions.find((s) => s.createdIp === keepIp)!,
+        victim = sessions.find((s) => s.createdIp === kickedIp)!;
+      const sent: Array<{ status: number; body: unknown }> = [];
+      const routes = createLanSessionsRoutes({
+        store: h.store,
+        idleMs: 720 * 60000,
+        now: h.now,
+        log: h.log,
+        authRevoke: h.authRevoke,
+        revokeSse: h.revokeSse,
+      });
+      const res = { headersSent: false, writableEnded: false, destroy: vi.fn() } as unknown as ServerResponse;
+      await routes.handle({} as IncomingMessage, res, "POST", "/api/lan/sessions/revoke", {
+        listener: "lan",
+        ip: keepIp,
+        xPwhOk: () => true,
+        csrfOkLan: () => true,
+        requireLanSession: async () => ({ userId: 1, sidHash: current.sidHash, user: "owner" }),
+        readJson: async () => (mode === "single" ? { id: publicSessionId(victim.sidHash) } : { others: true }),
+        sendJson: (_res, status, body) => {
+          sent.push({ status, body });
+        },
+        clearCookie: () => {},
+      });
+      expect(sent).toEqual([{ status: 200, body: { ok: true, revoked: 1, complete: true } }]);
+      await h.challenge(context(kickedIp));
+      const survivor = await h.password(context(keepIp));
+      expect(survivor.status).toBe(200);
+      await survivor.after?.();
+      routes.dispose();
+    },
+  );
+  it("a delayed post-finish history hook cannot restore kicked-device trust", async () => {
+    const h = setup();
+    await h.enroll();
+    await h.store.noteLoginIp(1, context().clientIp, h.now());
+    const reply = await h.password();
+    expect(reply.status).toBe(200);
+    const [session] = await h.store.listSessions(1, h.now());
+    expect(session).toBeDefined();
+    await h.store.revokeSession(1, session!.sidHash, "other-revoker-ip");
+    await reply.after?.();
+    expect(await h.store.isKnownIp(1, context().clientIp, h.now(), 30 * 86400000)).toBe(false);
+    await h.challenge();
+  });
   it("known-IP password still uses checked insertion and its after hook is single-use", async () => {
     const h = setup({}, true);
     await h.enroll();
-    await h.store.noteLoginIp(context().clientIp, h.now());
+    await h.store.noteLoginIp(1, context().clientIp, h.now());
     const insert = vi.spyOn(h.store, "createSessionChecked"),
       legacy = vi.spyOn(h.store, "createSession"),
       history = vi.spyOn(h.store, "noteLoginIp");
@@ -223,10 +298,10 @@ describe("LAN login completion and post-finish effects", () => {
     vi.spyOn(h.store, "noteLoginIp").mockRejectedValue(new Error("E_DB"));
     const result = await h.password();
     expect(result.status).toBe(200);
-    expect(await h.store.isKnownIp(context().clientIp, h.now(), 30 * 86400000)).toBe(false);
+    expect(await h.store.isKnownIp(1, context().clientIp, h.now(), 30 * 86400000)).toBe(false);
     await result.after!();
     await result.after!();
-    expect(await h.store.isKnownIp(context().clientIp, h.now(), 30 * 86400000)).toBe(false);
+    expect(await h.store.isKnownIp(1, context().clientIp, h.now(), 30 * 86400000)).toBe(false);
     expect(h.log.error).toHaveBeenCalledWith("web-hub lan login: noteLoginIp failed");
     expect(h.events.filter((e) => e.type === "login-success")).toHaveLength(1);
     expect(h.events[0]).toMatchObject({ newIp: true });
@@ -267,7 +342,7 @@ describe("LAN login completion and post-finish effects", () => {
   it.each([undefined, false, true])("trusted proxy requires xffUsable === true (value %s)", async (xffUsable) => {
     const h = setup();
     await h.enroll();
-    await h.store.noteLoginIp(context().clientIp, h.now());
+    await h.store.noteLoginIp(1, context().clientIp, h.now());
     const ctx = context(undefined, { viaTrustedProxy: true, ...(xffUsable === undefined ? {} : { xffUsable }) });
     const result = await h.password(ctx);
     expect(result.status).toBe(xffUsable === true ? 200 : 401);
@@ -300,7 +375,7 @@ describe("challenge binding, races and completion", () => {
     expect(result.headers?.["Set-Cookie"]).toContain("HttpOnly; SameSite=Strict; Path=/api/login; Max-Age=300");
     expect(h.store.sessionsBySidHash.size).toBe(0);
     expect(h.succeed).not.toHaveBeenCalled();
-    expect(await h.store.isKnownIp(context().clientIp, h.now(), 30 * 86400000)).toBe(false);
+    expect(await h.store.isKnownIp(1, context().clientIp, h.now(), 30 * 86400000)).toBe(false);
     const verify = vi.spyOn(h.store, "verifyTotp"),
       recovery = vi.spyOn(h.store, "consumeRecovery");
     for (const code of ["", "12345", "1234567", "秘密"]) {
@@ -1039,11 +1114,11 @@ describe("post-success history timeout ruling", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     await after;
     expect(h.log.error).toHaveBeenCalledWith("web-hub lan login: noteLoginIp failed");
-    expect(await h.store.isKnownIp(context().clientIp, h.now(), 30 * 86400000)).toBe(false);
+    expect(await h.store.isKnownIp(1, context().clientIp, h.now(), 30 * 86400000)).toBe(false);
     expect(h.events.filter((e) => e.type === "login-success")).toHaveLength(1);
     note.resolve();
     await flush();
-    expect(await h.store.isKnownIp(context().clientIp, h.now(), 30 * 86400000)).toBe(true);
+    expect(await h.store.isKnownIp(1, context().clientIp, h.now(), 30 * 86400000)).toBe(true);
     await result.after!();
     expect(h.events.filter((e) => e.type === "login-success")).toHaveLength(1);
   });
@@ -1182,7 +1257,7 @@ describe("verification rework regressions", () => {
     const codes = await h.store.regenRecovery(1, h.now());
     const { token } = await h.challenge();
     const known = context("192.168.1.20");
-    await h.store.noteLoginIp(known.clientIp, h.now());
+    await h.store.noteLoginIp(1, known.clientIp, h.now());
     for (let n = 0; n < 64; n++) expect((await h.password(known)).status).toBe(200);
     const insert = vi.spyOn(h.store, "createSessionChecked");
     const result = await h.core.submitFactor(

@@ -518,7 +518,7 @@ skipIfNoSqlite("LAN-F real socket + SQLite enrollment (Q15 joint gate)", () => {
     const user = (await store.initialInfo())!;
     const row = (await store.getUser(user.username))!;
     const at = Date.now();
-    await store.noteLoginIp("192.0.2.8", at);
+    await store.noteLoginIp(1, "192.0.2.8", at);
     const session = await store.createSessionChecked({
       userId: row.id,
       expectedEpoch: row.epoch,
@@ -546,7 +546,7 @@ skipIfNoSqlite("LAN-F real socket + SQLite enrollment (Q15 joint gate)", () => {
     const confirm = await call("confirm", { op: "totp_confirm", code });
     expect(confirm).toMatchObject({ ok: true, data: { kind: "totp_confirm", recoveryCodes: expect.any(Array) } });
     expect((confirm.data as { recoveryCodes: string[] }).recoveryCodes).toHaveLength(10);
-    expect(await store.knownIpCount(Date.now(), NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.knownIpCount(1, Date.now(), NEW_IP_WINDOW_MS)).toBe(0);
     expect(await store.listSessions(row.id, Date.now())).toHaveLength(1);
     expect(await call("status", { op: "status" })).toMatchObject({
       ok: true,

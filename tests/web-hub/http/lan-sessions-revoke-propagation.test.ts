@@ -137,10 +137,10 @@ describe("lan-sessions revoke propagation", () => {
     const cur = await addSession(r.store, 999_000, IP);
     const victim = await addSession(r.store, 999_000, "192.168.32.15");
     r.setCurrent(cur);
-    const origDelete = r.store.deleteSession.bind(r.store);
-    vi.spyOn(r.store, "deleteSession").mockImplementation(async (sidHash, opts) => {
+    const origDelete = r.store.revokeSession.bind(r.store);
+    vi.spyOn(r.store, "revokeSession").mockImplementation(async (userId, sidHash, keepIp, opts) => {
       r.order.push(`delete:${sidHash.slice(0, 8)}`);
-      return origDelete(sidHash, opts);
+      return origDelete(userId, sidHash, keepIp, opts);
     });
     await r.call("POST", LAN_SESSIONS_REVOKE_PATH, { id: publicSessionId(victim) });
     expect(r.status()).toBe(200);

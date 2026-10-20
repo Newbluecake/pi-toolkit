@@ -65,7 +65,7 @@ export interface FakeLanStoreOptions {
 export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
   const users = new Map<string, LanUserRecord>();
   const sessions = new Map<string, LanSessionListRecord>();
-  const ips = new Map<string, { firstAt: number; lastAt: number }>();
+  const ipsByUser = new Map<number, Map<string, { firstAt: number; lastAt: number }>>();
   interface Factor {
     gen: number;
     totpSecret?: string;
@@ -129,6 +129,11 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
     return undefined;
   }
 
+  function untrustIps(userId: number, ips: string[], keepIp: string): boolean {
+    if (ips.length > 128) throw new Error("E_BAD_REQUEST");
+    for (const ip of ips) if (ip !== keepIp) ipsByUser.get(userId)?.delete(ip);
+    return ips.includes(keepIp);
+  }
   const store: FakeLanStore = {
     usersByUsername: users,
     sessionsBySidHash: sessions,
@@ -144,6 +149,35 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       for (const cb of unavailableListeners) cb("db-unavailable");
     },
 
+    async listUsers(now) {
+      const rows = [...users.values()].sort((a, b) => a.id - b.id);
+      if (rows.length > 256) throw new Error("E_LIMIT: too many LAN accounts");
+      return rows.map((u, i) => ({
+        username: u.username,
+        primary: i === 0,
+        twofa: enrolled(factors.get(u.id)),
+        liveSessions: [...sessions.values()].filter(
+          (s) =>
+            s.userId === u.id &&
+            s.epoch === u.epoch &&
+            s.expiresAt > now &&
+            s.absoluteExpiresAt > now &&
+            s.lastSeenAt > now - idleMs,
+        ).length,
+      }));
+    },
+    async deleteUser(username) {
+      const user = users.get(username);
+      if (!user) return { ok: false, reason: "not-found" };
+      if (users.size <= 1) return { ok: false, reason: "last-user" };
+      if (user.id === Math.min(...[...users.values()].map((u) => u.id))) return { ok: false, reason: "primary" };
+      users.delete(username);
+      for (const [hash, s] of sessions) if (s.userId === user.id) sessions.delete(hash);
+      factors.delete(user.id);
+      pending.delete(user.id);
+      ipsByUser.delete(user.id);
+      return { ok: true, userId: user.id };
+    },
     async getUser(username) {
       return users.get(username);
     },
@@ -155,15 +189,14 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
     },
 
     async initialInfo() {
-      for (const u of users.values()) {
-        if (u.initialPassword === undefined) continue;
+      for (const u of [...users.values()].sort((a, b) => a.id - b.id)) {
         const initialLogin =
           u.initialLoginIp !== undefined && u.initialLoginAt !== undefined
             ? { ip: u.initialLoginIp, at: u.initialLoginAt }
             : undefined;
         return {
           username: u.username,
-          initialPassword: u.initialPassword,
+          ...(u.initialPassword === undefined ? {} : { initialPassword: u.initialPassword }),
           ...(initialLogin === undefined ? {} : { initialLogin }),
         };
       }
@@ -202,31 +235,48 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
         )
         .map((s) => ({ ...s }));
     },
-    async deleteSessionsExcept(userId, keepSidHash) {
+    async deleteSessionsExcept(userId, keepSidHash, opts) {
       const hashes = [...sessions]
         .filter(([hash, s]) => s.userId === userId && hash !== keepSidHash)
         .map(([hash]) => hash);
       const deleted = hashes.slice(0, 64);
+      const ips = deleted.flatMap((hash) => {
+        const s = sessions.get(hash)!;
+        return [s.createdIp, ...(s.lastIp === undefined ? [] : [s.lastIp])];
+      });
+      const sharedIpKept = opts?.keepIp === undefined ? undefined : untrustIps(userId, ips, opts.keepIp);
       for (const hash of deleted) sessions.delete(hash);
-      return { deleted, more: hashes.length > 64 };
+      return { deleted, more: hashes.length > 64, ...(sharedIpKept === undefined ? {} : { sharedIpKept }) };
     },
-    async noteLoginIp(ip, now) {
+    async noteLoginIp(userId, ip, now, opts) {
+      const session = opts?.sidHash === undefined ? undefined : sessions.get(opts.sidHash);
+      if (
+        opts?.sidHash !== undefined &&
+        (!session || session.userId !== userId || session.epoch !== userById(userId)?.epoch)
+      )
+        return { wasKnown: false };
+      if (!userById(userId)) throw new Error("unknown user");
+      const ips = ipsByUser.get(userId) ?? new Map<string, { firstAt: number; lastAt: number }>();
+      ipsByUser.set(userId, ips);
       const old = ips.get(ip);
       const wasKnown = old !== undefined && old.lastAt > now - NEW_IP_WINDOW_MS;
       ips.delete(ip);
       ips.set(ip, { firstAt: old?.firstAt ?? now, lastAt: now });
-      if (ips.size > 256) ips.delete(ips.keys().next().value!);
+      if (ips.size > 256) {
+        const oldest = [...ips].sort((a, b) => a[1].lastAt - b[1].lastAt)[0]!;
+        ips.delete(oldest[0]);
+      }
       return { wasKnown };
     },
-    async isKnownIp(ip, now, windowMs) {
-      const row = ips.get(ip);
+    async isKnownIp(userId, ip, now, windowMs) {
+      const row = ipsByUser.get(userId)?.get(ip);
       return row !== undefined && row.lastAt > now - windowMs;
     },
-    async knownIpCount(now, windowMs) {
-      return [...ips.values()].filter((v) => v.lastAt > now - windowMs).length;
+    async knownIpCount(userId, now, windowMs) {
+      return [...(ipsByUser.get(userId)?.values() ?? [])].filter((v) => v.lastAt > now - windowMs).length;
     },
     async forgetLoginIps() {
-      ips.clear();
+      ipsByUser.clear();
       for (const factor of factors.values()) factor.gen++;
     },
     async get2faState(userId): Promise<Lan2faState> {
@@ -260,7 +310,7 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       f.gen++;
       factors.set(input.userId, f);
       pending.delete(input.userId);
-      if (first) ips.clear();
+      if (first) ipsByUser.delete(input.userId);
       return { ok: true, recoveryCodes: f.codes.size === 0 ? recovery(f) : [] };
     },
     async verifyTotp(input) {
@@ -292,7 +342,7 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       if (!enrolled(f)) f.codes.clear();
       factors.set(input.userId, f);
       if (first) {
-        ips.clear();
+        ipsByUser.delete(input.userId);
         return { recoveryCodes: recovery(f) };
       }
       return {};
@@ -339,6 +389,16 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       sessions.delete(sidHash);
     },
 
+    async revokeSession(userId, sidHash, keepIp) {
+      const s = sessions.get(sidHash);
+      if (!s || s.userId !== userId) return { sharedIpKept: false };
+      const sharedIpKept = untrustIps(userId, [s.createdIp, ...(s.lastIp === undefined ? [] : [s.lastIp])], keepIp);
+      sessions.delete(sidHash);
+      return { sharedIpKept };
+    },
+    async untrustLoginIps(userId, ips, keepIp) {
+      untrustIps(userId, ips, keepIp);
+    },
     async deleteAllSessions(userId) {
       for (const [sidHash, s] of sessions) if (s.userId === userId) sessions.delete(sidHash);
     },
@@ -402,12 +462,16 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
   return store;
 }
 const securityFakeOps: readonly (keyof LanStorePort)[] = [
+  "listUsers",
+  "deleteUser",
   "getUser",
   "getUserSummary",
   "initialInfo",
   "createSession",
   "touchSession",
   "deleteSession",
+  "revokeSession",
+  "untrustLoginIps",
   "deleteAllSessions",
   "setPassword",
   "markInitialLogin",

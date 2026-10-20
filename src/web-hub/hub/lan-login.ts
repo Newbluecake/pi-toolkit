@@ -398,6 +398,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
       const detach = setTimeout(detachFinish, 8_000);
       detach.unref();
       finishing.add(disposeFinish);
+      const historySidHash = hashSid(sid);
       let afterCalled = false;
       return {
         status: 200,
@@ -413,7 +414,9 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
           if (cleaned) return;
           const afterIo: LoginIo = { ua, signal: new AbortController().signal, responseOpen: () => true };
           try {
-            await step(afterIo, 8_000, (opts) => deps.store.noteLoginIp(ctx.clientIp, deps.now(), opts));
+            await step(afterIo, 8_000, (opts) =>
+              deps.store.noteLoginIp(user.id, ctx.clientIp, deps.now(), { ...opts, sidHash: historySidHash }),
+            );
           } catch {
             deps.log.error("web-hub lan login: noteLoginIp failed");
           }
@@ -636,7 +639,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
         const deadline = createReqDeadline(deps.now, L.postKdfMs);
         if (run.revoked || disposed) return error(401, "E_AUTH");
         const known = await step(io, deadline.remaining() - L.completionReserveMs, (opts) =>
-          deps.store.isKnownIp(ctx.clientIp, deps.now(), NEW_IP_WINDOW_MS, opts),
+          deps.store.isKnownIp(user.id, ctx.clientIp, deps.now(), NEW_IP_WINDOW_MS, opts),
         );
         const knownAtGate = known && (!ctx.viaTrustedProxy || ctx.xffUsable === true);
         const factor = await step(io, deadline.remaining() - L.completionReserveMs, (opts) =>

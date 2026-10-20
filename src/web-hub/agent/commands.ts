@@ -258,7 +258,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     // LAN security: never let a browser smuggle local auth administration through prompt.
     // pi 1.2 sendUserMessage defaults expandPromptTemplates:false; keep this explicit boundary
     // even if a future pi changes that default (command op remains independently TUI-gated).
-    if (/^\s*\/webhub\s+(?:2fa|passwd)(?:\s|$)/.test(cmd.text)) {
+    if (/^\s*\/webhub\s+(?:2fa|passwd|user)(?:\s|$)/.test(cmd.text)) {
       return settleAndReply(
         frame,
         errResult("E_COMMAND_DENIED", false, "none", "LAN authentication administration is local-TUI-only"),

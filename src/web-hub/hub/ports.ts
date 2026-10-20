@@ -324,7 +324,14 @@ export interface LanUserSummary {
   initialPasswordInUse: boolean;
 }
 
+export type DeleteLanUserResult =
+  { ok: true; userId: number } | { ok: false; reason: "not-found" | "primary" | "last-user" };
+
 export interface LanStorePort extends LanSecurityStorePort {
+  /** Local admin only. Bounded projection (at most 256 accounts; overflow refuses). */
+  listUsers(now: number, opts?: PortOptions): Promise<import("../protocol/messages.js").LanAccountSummary[]>;
+  /** Refusal checks and CASCADE deletion share one transaction. */
+  deleteUser(username: string, opts?: PortOptions): Promise<DeleteLanUserResult>;
   getUser(username: string, opts?: PortOptions): Promise<LanUserRecord | undefined>;
   /**
    * 审查修复 #5（v2）: backs `GET /api/session` (§7) — the endpoint only has a
@@ -356,6 +363,15 @@ export interface LanStorePort extends LanSecurityStorePort {
     opts?: PortOptions & { ip?: string },
   ): Promise<LanSessionRecord | undefined>;
   deleteSession(sidHash: string, opts?: PortOptions): Promise<void>;
+  /** Explicit kick, unlike logout: atomically untrust the target's created/last IP except keepIp. */
+  revokeSession(
+    userId: number,
+    sidHash: string,
+    keepIp: string,
+    opts?: PortOptions,
+  ): Promise<{ sharedIpKept: boolean }>;
+  /** Bounded best-effort fallback for a dispatched revoke with uncertain effect. */
+  untrustLoginIps(userId: number, ips: string[], keepIp: string, opts?: PortOptions): Promise<void>;
   deleteAllSessions(userId: number, opts?: PortOptions): Promise<void>;
   setPassword(
     input: { username: string; kdf: "scrypt"; n: number; r: number; p: number; salt: Uint8Array; hash: Uint8Array },
@@ -1211,11 +1227,17 @@ export interface LanSecurityStorePort {
   deleteSessionsExcept(
     userId: number,
     keepSidHash: string,
-    opts?: PortOptions,
-  ): Promise<{ deleted: string[]; more: boolean }>;
-  noteLoginIp(ip: string, now: number, opts?: PortOptions): Promise<{ wasKnown: boolean }>;
-  isKnownIp(ip: string, now: number, windowMs: number, opts?: PortOptions): Promise<boolean>;
-  knownIpCount(now: number, windowMs: number, opts?: PortOptions): Promise<number>;
+    opts?: PortOptions & { keepIp?: string },
+  ): Promise<{ deleted: string[]; more: boolean; sharedIpKept?: boolean }>;
+  /** Login completion pins this write to its session so a delayed hook cannot restore kicked trust. */
+  noteLoginIp(
+    userId: number,
+    ip: string,
+    now: number,
+    opts?: PortOptions & { sidHash?: string },
+  ): Promise<{ wasKnown: boolean }>;
+  isKnownIp(userId: number, ip: string, now: number, windowMs: number, opts?: PortOptions): Promise<boolean>;
+  knownIpCount(userId: number, now: number, windowMs: number, opts?: PortOptions): Promise<number>;
   get2faState(userId: number, opts?: PortOptions): Promise<Lan2faState>;
   verifyTotp(
     input: { userId: number; code: string; expectedGen: number; now: number },

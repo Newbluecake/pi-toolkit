@@ -135,8 +135,8 @@ describe("admin tfa_req ops (§5.8)", () => {
     const h = harness({}, { totpStep: totpStepOk });
     seedAdmin(h.store);
     await enrollTotp(h);
-    await h.store.noteLoginIp("192.168.32.38", NOW);
-    await h.store.noteLoginIp("192.168.32.39", NOW - 31 * 24 * 3_600_000); // outside the window
+    await h.store.noteLoginIp(1, "192.168.32.38", NOW);
+    await h.store.noteLoginIp(1, "192.168.32.39", NOW - 31 * 24 * 3_600_000); // outside the window
     const res = await h.call({ op: "status" });
     expectValid(res);
     if (!res.ok || res.data.kind !== "status") throw new Error("bad status");
@@ -275,12 +275,12 @@ describe("admin tfa_req ops (§5.8)", () => {
     const h = harness({}, { totpStep: totpStepOk });
     seedAdmin(h.store);
     await enrollTotp(h);
-    await h.store.noteLoginIp("192.168.32.38", NOW);
+    await h.store.noteLoginIp(1, "192.168.32.38", NOW);
 
     const forgot = await h.call({ op: "forget_ips" });
     expectValid(forgot);
     expect(forgot).toMatchObject({ ok: true, data: { kind: "ok" } });
-    expect(await h.store.isKnownIp("192.168.32.38", NOW, 30 * 24 * 3_600_000)).toBe(false);
+    expect(await h.store.isKnownIp(1, "192.168.32.38", NOW, 30 * 24 * 3_600_000)).toBe(false);
     expect(h.emitted.at(-1)).toEqual({ type: "2fa-changed", op: "forget_ips" });
 
     const reset = await h.call({ op: "reset", confirm: true });

@@ -233,8 +233,8 @@ export type LanStatus =
       warnings: string[];
       /** LAN security §2.4. Absent until the guard is wired. */
       allowClients?: ClientAllowSnapshot;
-      /** LAN security §3.1/§6: set (epoch ms) when the store found `login_ips` unusable and rebuilt it empty
-       *  at open (every IP is new again). Absent otherwise / until wired. */
+      /** LAN security §3.1/§6: set (epoch ms) when the store migrated legacy global `login_ips` or rebuilt
+       *  an unusable trust table at open (missing records are new IPs). Absent otherwise / until wired. */
       loginIpsRebuiltAt?: number;
     }
   | { state: "off"; reason: LanOffReason; detail?: string };

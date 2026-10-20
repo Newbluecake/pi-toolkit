@@ -990,7 +990,9 @@ export type AgentFrame =
 export type LanReqFrame =
   | { t: "lan_req"; rid: string; op: "info" }
   | { t: "lan_req"; rid: string; op: "passwd"; username: string; password: string }
-  | { t: "lan_req"; rid: string; op: "unlock" };
+  | { t: "lan_req"; rid: string; op: "unlock" }
+  | { t: "lan_req"; rid: string; op: "users" }
+  | { t: "lan_req"; rid: string; op: "user_delete"; username: string };
 
 export type HubCtlFrame =
   | { t: "hub_ctl"; rid: string; op: "shutdown"; reason: "restart" | "stop" }
@@ -1014,8 +1016,16 @@ export interface LanInfoPayload {
   lan: LanStatus;
 }
 
+/** Public local-admin projection: never contains password hashes, factors or session ids. */
+export interface LanAccountSummary {
+  username: string;
+  primary: boolean;
+  twofa: boolean;
+  liveSessions: number;
+}
+
 export type LanResFrame =
-  | { t: "lan_res"; rid: string; ok: true; info?: LanInfoPayload }
+  | { t: "lan_res"; rid: string; ok: true; info?: LanInfoPayload; users?: LanAccountSummary[] }
   | { t: "lan_res"; rid: string; ok: false; code: string; message: string };
 
 // hub→agent
@@ -1668,7 +1678,21 @@ const LanReqUnlockSchema = Type.Object(
   { t: Type.Literal("lan_req"), rid: Type.String(), op: Type.Literal("unlock") },
   { additionalProperties: false },
 );
-const LanReqSchema = Type.Union([LanReqInfoSchema, LanReqPasswdSchema, LanReqUnlockSchema]);
+const LanReqUsersSchema = Type.Object(
+  { t: Type.Literal("lan_req"), rid: Type.String(), op: Type.Literal("users") },
+  { additionalProperties: false },
+);
+const LanReqUserDeleteSchema = Type.Object(
+  { t: Type.Literal("lan_req"), rid: Type.String(), op: Type.Literal("user_delete"), username: Type.String() },
+  { additionalProperties: false },
+);
+const LanReqSchema = Type.Union([
+  LanReqInfoSchema,
+  LanReqPasswdSchema,
+  LanReqUnlockSchema,
+  LanReqUsersSchema,
+  LanReqUserDeleteSchema,
+]);
 
 const HubCtlSchema = Type.Union([
   Type.Object(
@@ -2042,6 +2066,20 @@ const LanResOkSchema = Type.Object(
     rid: Type.String(),
     ok: Type.Literal(true),
     info: Type.Optional(LanInfoPayloadSchema),
+    users: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            username: Type.String(),
+            primary: Type.Boolean(),
+            twofa: Type.Boolean(),
+            liveSessions: Type.Integer({ minimum: 0 }),
+          },
+          { additionalProperties: false },
+        ),
+        { maxItems: 256 },
+      ),
+    ),
   },
   { additionalProperties: false },
 );

@@ -1615,6 +1615,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     if (x === undefined || x.mode !== "tui" || !x.hasUI || c === undefined) return { ok: false, reason: "no-cap" };
     return runPasswdPrompt({
       hasCap: (cap) => c.caps.includes(cap),
+      confirmCreate: (message) => x.ui.confirm("新建局域网账号", message),
       promptUsername: async () => {
         try {
           return await x.ui.input("用户名");

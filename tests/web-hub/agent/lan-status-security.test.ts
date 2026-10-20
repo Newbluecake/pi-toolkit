@@ -114,7 +114,7 @@ describe("login_ips rebuilt notice", () => {
     const lines = formatLanOnLines(on({ loginIpsRebuiltAt: at }));
     const notice = lines.find((l) => l.includes("login_ips"))!;
     expect(notice).toContain("2026-10-19 08:03");
-    expect(notice).toMatch(/重建为空/);
+    expect(notice).toMatch(/已迁移或重建/);
   });
 });
 

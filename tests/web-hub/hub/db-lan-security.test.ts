@@ -187,19 +187,19 @@ suite("LAN security open/check/migrate and explicit repair", () => {
 
   it.each(["missing", "malformed"])("rebuilds %s login_ips EMPTY, reports it and retains seed marker", async (kind) => {
     await session();
-    await store.noteLoginIp("192.0.2.5", now);
+    await store.noteLoginIp(1, "192.0.2.5", now);
     await store.close();
     sql((db) => {
       db.exec("DROP TABLE login_ips");
       if (kind === "malformed") db.exec("CREATE TABLE login_ips(ip TEXT PRIMARY KEY, last_at TEXT)");
     });
     expect((await open()).loginIpsRebuilt).toBe(true);
-    expect(await store.knownIpCount(now, NEW_IP_WINDOW_MS)).toBe(0);
-    expect(await store.isKnownIp("192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.knownIpCount(1, now, NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.isKnownIp(1, "192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(false);
     expect(sql((db) => db.prepare("SELECT value FROM meta WHERE key='login_ips_seeded'").get()?.value)).toBe("1");
     await store.close();
     expect((await open()).loginIpsRebuilt).toBe(false);
-    expect(await store.knownIpCount(now, NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.knownIpCount(1, now, NEW_IP_WINDOW_MS)).toBe(0);
   });
 
   it("seeds legacy sessions EXACTLY once; forget-ips and later rebuild never re-import old trust", async () => {
@@ -207,15 +207,15 @@ suite("LAN security open/check/migrate and explicit repair", () => {
     await store.close();
     sql((db) => db.exec("DROP TABLE login_ips; DELETE FROM meta WHERE key='login_ips_seeded'"));
     expect((await open()).loginIpsRebuilt).toBe(false);
-    expect(await store.isKnownIp("192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(true);
+    expect(await store.isKnownIp(1, "192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(true);
     await store.forgetLoginIps();
     await store.close();
     await open();
-    expect(await store.isKnownIp("192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(false);
     await store.close();
     sql((db) => db.exec("DROP TABLE login_ips"));
     expect((await open()).loginIpsRebuilt).toBe(true);
-    expect(await store.isKnownIp("192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(false);
   });
 
   it("does not seed from sessions when a malformed unseeded history table is rebuilt", async () => {
@@ -225,16 +225,16 @@ suite("LAN security open/check/migrate and explicit repair", () => {
       db.exec("DELETE FROM meta WHERE key='login_ips_seeded'; DROP TABLE login_ips; CREATE TABLE login_ips(ip TEXT)"),
     );
     expect((await open()).loginIpsRebuilt).toBe(true);
-    expect(await store.knownIpCount(now, NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.knownIpCount(1, now, NEW_IP_WINDOW_MS)).toBe(0);
   });
 
   it("first enrollment keeps the seed marker, so rebuilding trust afterwards stays empty", async () => {
     await session();
-    await store.noteLoginIp("192.0.2.5", now);
+    await store.noteLoginIp(1, "192.0.2.5", now);
     await enroll();
     sql((db) => db.exec("DROP TABLE login_ips"));
     expect((await open()).loginIpsRebuilt).toBe(true);
-    expect(await store.knownIpCount(now, NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.knownIpCount(1, now, NEW_IP_WINDOW_MS)).toBe(0);
     expect(await store.listSessions(1, now)).toHaveLength(1);
   });
 
@@ -275,7 +275,7 @@ suite("LAN security open/check/migrate and explicit repair", () => {
   });
 
   it("failed enrollment rolls back tables, version, metadata AND history together", async () => {
-    await store.noteLoginIp("192.0.2.5", now);
+    await store.noteLoginIp(1, "192.0.2.5", now);
     sql((db) =>
       db.exec(
         "CREATE TRIGGER abort_enroll BEFORE UPDATE ON meta WHEN NEW.key='twofa_users' BEGIN SELECT RAISE(ABORT,'test enrollment rollback'); END",
@@ -284,7 +284,7 @@ suite("LAN security open/check/migrate and explicit repair", () => {
     await expect(store.setFeishu2fa({ userId: 1, on: true, now })).rejects.toThrow("test enrollment rollback");
     expect(sql((db) => db.prepare("PRAGMA user_version").get()?.user_version)).toBe(1);
     expect(sql((db) => db.prepare("SELECT name FROM sqlite_master WHERE name='twofa'").get())).toBeUndefined();
-    expect(await store.isKnownIp("192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(true);
+    expect(await store.isKnownIp(1, "192.0.2.5", now, NEW_IP_WINDOW_MS)).toBe(true);
   });
 
   it("refuses security views at v1 and explicitly repairs them without treating them as no enrollment", async () => {
@@ -305,7 +305,7 @@ suite("LAN security open/check/migrate and explicit repair", () => {
       ),
     );
     expect((await open()).loginIpsRebuilt).toBe(true);
-    expect(await store.knownIpCount(now, NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.knownIpCount(1, now, NEW_IP_WINDOW_MS)).toBe(0);
     expect(await store.listSessions(1, now)).toHaveLength(1);
   });
 
@@ -318,6 +318,101 @@ suite("LAN security open/check/migrate and explicit repair", () => {
       { table: "twofa", from: "user_id", to: "user_id", on_delete: "CASCADE" },
     ]);
     expect(LOGIN_IPS_SQL).toContain("STRICT");
+  });
+  it("migrates exact old global trust from sessions per account with a 30d window, never copies global-only IPs", async () => {
+    const recent = Date.now();
+    await store.setPassword({
+      username: "other",
+      kdf: "scrypt",
+      n: 32768,
+      r: 8,
+      p: 1,
+      salt: new Uint8Array(16),
+      hash: new Uint8Array(32),
+    });
+    const other = (await store.getUser("other"))!;
+    await store.close();
+    sql((db) => {
+      db.exec(
+        "PRAGMA foreign_keys=ON; DROP TABLE login_ips; CREATE TABLE login_ips(ip TEXT PRIMARY KEY, first_at INTEGER NOT NULL,last_at INTEGER NOT NULL) STRICT; INSERT INTO login_ips VALUES('global-only',1,1)",
+      );
+      const insert = db.prepare(
+        "INSERT INTO sessions(sid_hash,user_id,epoch,bound_origin,created_at,last_seen_at,expires_at,absolute_expires_at,created_ip) VALUES(?,?,1,'http://lan',?,?,?,?,?)",
+      );
+      insert.run(Buffer.alloc(32, 1), 1, recent - 100, recent, recent + 100000, recent + 100000, "a-only");
+      insert.run(Buffer.alloc(32, 2), other.id, recent - 100, recent, recent + 100000, recent + 100000, "b-only");
+      insert.run(
+        Buffer.alloc(32, 3),
+        1,
+        recent - 31 * 86400000,
+        recent - 31 * 86400000,
+        recent + 100000,
+        recent + 100000,
+        "stale",
+      );
+      // Exercise per-user migration cap before legacy session trimming.
+      for (let i = 0; i < 257; i++) {
+        const hash = Buffer.alloc(32);
+        hash.writeUInt32BE(i + 100, 0);
+        insert.run(hash, other.id, recent, recent + i + 1, recent + 100000, recent + 100000, `ip-${i}`);
+      }
+    });
+    expect((await open()).loginIpsRebuilt).toBe(true);
+    expect(await store.isKnownIp(1, "a-only", recent, NEW_IP_WINDOW_MS)).toBe(true);
+    expect(await store.isKnownIp(other.id, "a-only", recent, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "b-only", recent, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "global-only", recent, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "stale", recent, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.knownIpCount(1, recent, NEW_IP_WINDOW_MS)).toBe(1);
+    expect(await store.knownIpCount(other.id, recent, NEW_IP_WINDOW_MS)).toBe(256);
+    expect(sql((db) => db.prepare("PRAGMA foreign_key_list(login_ips)").all())).toMatchObject([
+      { from: "user_id", table: "users", to: "id", on_delete: "CASCADE" },
+    ]);
+    await store.close();
+    expect((await open()).loginIpsRebuilt).toBe(false);
+  });
+
+  it("deleteUser enforces all CASCADE FKs and updates security metadata so reopen stays valid", async () => {
+    await store.setPassword({
+      username: "extra",
+      kdf: "scrypt",
+      n: 32768,
+      r: 8,
+      p: 1,
+      salt: new Uint8Array(16),
+      hash: new Uint8Array(32),
+    });
+    const extra = (await store.getUser("extra"))!;
+    const factors = await store.setFeishu2fa({ userId: extra.id, on: true, now });
+    expect(factors.recoveryCodes).toHaveLength(10);
+    const made = await store.createSessionChecked({
+      userId: extra.id,
+      expectedEpoch: extra.epoch,
+      expectedFactorGen: 1,
+      boundOrigin: "http://lan",
+      createdIp: "extra-ip",
+      ua: "extra-browser",
+      now,
+    });
+    if (!made.ok) throw Error("fixture insertion");
+    await store.noteLoginIp(extra.id, "extra-ip", now);
+    const sidHash = Buffer.from(hashSid(made.sid), "base64url");
+    expect(sql((db) => db.prepare("SELECT count(*) AS n FROM session_meta WHERE sid_hash=?").get(sidHash)?.n)).toBe(1);
+    expect(await store.deleteUser("extra")).toEqual({ ok: true, userId: extra.id });
+    sql((db) => {
+      db.exec("PRAGMA foreign_keys=ON");
+      expect(db.prepare("PRAGMA foreign_keys").get()?.foreign_keys).toBe(1);
+      expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      for (const table of ["sessions", "twofa", "recovery_codes", "login_ips"])
+        expect(db.prepare(`SELECT count(*) AS n FROM ${table} WHERE user_id=?`).get(extra.id)?.n, table).toBe(0);
+      expect(db.prepare("SELECT count(*) AS n FROM session_meta WHERE sid_hash=?").get(sidHash)?.n).toBe(0);
+      expect(db.prepare("SELECT value FROM meta WHERE key='twofa_users'").get()?.value).toBe("[]");
+      expect(db.prepare("SELECT count(*) AS n FROM users").get()?.n).toBe(1);
+    });
+    await store.close();
+    await open();
+    expect(await store.getUser("extra")).toBeUndefined();
+    expect(await store.get2faState(1)).toMatchObject({ state: "none" });
   });
 });
 

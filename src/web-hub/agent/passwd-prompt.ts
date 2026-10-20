@@ -103,6 +103,7 @@ export interface PasswdPromptDeps {
   promptUsername: () => Promise<string | undefined>;
   /** Masked prompt (wraps `ctx.ui.custom` around `MaskedInputComponent`). */
   promptPassword: (title: string) => Promise<string | undefined>;
+  confirmCreate: (message: string) => Promise<boolean>;
   request: (frame: LanReqFrame, cap: string) => Promise<LanResFrame>;
 }
 
@@ -124,6 +125,16 @@ export async function runPasswdPrompt(deps: PasswdPromptDeps): Promise<PasswdOut
   if (p1.length < MIN_LAN_PASSWORD_LENGTH || p1.length > MAX_LAN_PASSWORD_LENGTH) {
     return { ok: false, reason: "invalid-length" };
   }
+  const accounts = await deps.request({ t: "lan_req", rid: randomUUID(), op: "users" }, "lan.v1");
+  if (!accounts.ok) return { ok: false, reason: "rejected", code: accounts.code, message: accounts.message };
+  if (accounts.users === undefined)
+    return { ok: false, reason: "rejected", code: "E_UNSUPPORTED", message: "hub 版本过旧，请 /webhub restart" };
+  if (
+    accounts.users.length > 0 &&
+    !accounts.users.some((u) => u.username === username) &&
+    !(await deps.confirmCreate(`将新建第二个局域网账号 ${username}（会话与 2FA 按账号独立），确认？`))
+  )
+    return { ok: false, reason: "cancelled" };
   const frame: LanReqFrame = { t: "lan_req", rid: randomUUID(), op: "passwd", username, password: p1 };
   const res = await deps.request(frame, "lan.v1");
   if (res.ok) return { ok: true };

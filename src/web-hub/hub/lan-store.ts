@@ -132,7 +132,7 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
   const maintDeadline = deps.maintOpenDeadlineMs ?? MAINT_DEADLINE_MS["open-check-migrate"];
   const maintResult = await runMaint(deps.dbFile, "open-check-migrate", maintDeadline, resolveInitialUsername(log));
   if (!maintResult.ok) return maintResult;
-  if (maintResult.loginIpsRebuilt) log.warn("web-hub lan-store: login_ips rebuilt empty");
+  if (maintResult.loginIpsRebuilt) log.warn("web-hub lan-store: login_ips migrated or rebuilt");
 
   const dbClient = createDbClient({
     dbFile: deps.dbFile,
@@ -176,16 +176,16 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
       return await dbClient.call("listSessions", { userId, now: at, idleMs }, opts);
     },
     async deleteSessionsExcept(userId, keepSidHash, opts) {
-      return await dbClient.call("deleteSessionsExcept", { userId, keepSidHash }, opts);
+      return await dbClient.call("deleteSessionsExcept", { userId, keepSidHash, keepIp: opts?.keepIp }, opts);
     },
-    async noteLoginIp(ip, at, opts) {
-      return await dbClient.call("noteLoginIp", { ip, now: at }, opts);
+    async noteLoginIp(userId, ip, at, opts) {
+      return await dbClient.call("noteLoginIp", { userId, ip, now: at, sidHash: opts?.sidHash }, opts);
     },
-    async isKnownIp(ip, at, windowMs, opts) {
-      return await dbClient.call("isKnownIp", { ip, now: at, windowMs }, opts);
+    async isKnownIp(userId, ip, at, windowMs, opts) {
+      return await dbClient.call("isKnownIp", { userId, ip, now: at, windowMs }, opts);
     },
-    async knownIpCount(at, windowMs, opts) {
-      return await dbClient.call("knownIpCount", { now: at, windowMs }, opts);
+    async knownIpCount(userId, at, windowMs, opts) {
+      return await dbClient.call("knownIpCount", { userId, now: at, windowMs }, opts);
     },
     async get2faState(userId, opts) {
       return await dbClient.call("get2faState", { userId }, opts);
@@ -216,6 +216,12 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     },
     async forgetLoginIps(opts) {
       await dbClient.call("forgetLoginIps", {}, opts);
+    },
+    async listUsers(at, opts) {
+      return await dbClient.call("listUsers", { now: at, idleMs }, opts);
+    },
+    async deleteUser(username, opts) {
+      return await dbClient.call("deleteUser", { username }, opts);
     },
     async getUser(username, opts) {
       const raw = await dbClient.call<RawUser | undefined>("getUser", { username }, opts);
@@ -278,6 +284,12 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
       await dbClient.call("deleteSession", { sidHash }, opts);
     },
 
+    async revokeSession(userId, sidHash, keepIp, opts) {
+      return await dbClient.call("revokeSession", { userId, sidHash, keepIp }, opts);
+    },
+    async untrustLoginIps(userId, ips, keepIp, opts) {
+      await dbClient.call("untrustLoginIps", { userId, ips, keepIp }, opts);
+    },
     async deleteAllSessions(userId, opts) {
       await dbClient.call("deleteAllSessions", { userId }, opts);
     },

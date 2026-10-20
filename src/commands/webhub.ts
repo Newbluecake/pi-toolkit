@@ -64,6 +64,7 @@ import {
 } from "../web-hub/agent/feishu-admin.js";
 import { currentConnection, newAdminRid } from "../web-hub/agent/connection.js";
 import { fetchTfaStatus, runTwofaCommand, type TwofaCommandDeps } from "../web-hub/agent/twofa-cmd.js";
+import { runUsersCommand, type LanUsersPort } from "../web-hub/agent/users-cmd.js";
 import { isWebInvocation } from "../web-hub/agent/command-capture.js";
 import { FEISHU_OPEN_ID_RE } from "../web-hub/protocol/feishu.js";
 import { loadFeishuBotWarnings, type FeishuBotWarning } from "../config/settings.js";
@@ -103,6 +104,7 @@ export interface WebHubCommandDeps {
    */
   feishuPort?: () => FeishuAdminPort | undefined;
   /** Per-invocation test port; production resolves the current cap-gated socket. */
+  usersPort?: () => LanUsersPort | undefined;
   twofaPort?: () => Pick<TwofaCommandDeps, "hasCap" | "request"> | undefined;
   /** F9: `feishuBot.*` parse warnings for `/webhub feishu status` (default `loadFeishuBotWarnings`). */
   feishuSettingsWarnings?: () => FeishuBotWarning[];
@@ -112,7 +114,8 @@ export interface WebHubCommandDeps {
   feishuSleep?: (ms: number) => Promise<void>;
 }
 
-const USAGE = "用法：/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>|2fa <op>]";
+const USAGE =
+  "用法：/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>|2fa <op>|user list|user delete <username>]";
 
 const FEISHU_USAGE =
   "用法：/webhub feishu <setup [--replace] | status | cancel | allow <open_id> | deny <open_id> | repair | reset>（仅 TUI）";
@@ -754,12 +757,14 @@ const SUBCOMMANDS = new Set([
   "token",
   "feishu",
   "2fa",
+  "user",
 ]);
 
 /** 子命令集合的唯一来源是上面的 SUBCOMMANDS（补全从这里派生，避免漂移）。 */
 const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
   status: "查看 web-hub 状态（默认）",
   open: "打开浏览器 UI",
+  user: "局域网账号：list / delete <username>（仅 TUI）",
   passwd: "设置局域网访问密码（仅 TUI）",
   "2fa": "局域网二次验证：status/enroll/feishu/recovery/reset/forget-ips/repair（除 status 外仅 TUI）",
   unlock: "清空登录限流",
@@ -813,6 +818,13 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
           if (tokens.length === 2 && tokens[1] === "setup") return replace;
           return [];
         }
+        if (tokens[0] === "user" && (tokens.length > 1 || cursorOpen)) {
+          if (tokens.length > 2 || (tokens.length === 2 && cursorOpen)) return [];
+          const prefix = cursorOpen ? "" : (tokens[1] ?? "");
+          return ["list", "delete"]
+            .filter((op) => op.startsWith(prefix))
+            .map((op) => ({ value: `user ${op} `, label: op, description: SUBCOMMAND_DESCRIPTIONS.user! }));
+        }
         const prefix = argumentPrefix.trim();
         return [...SUBCOMMANDS]
           .filter((value) => value.startsWith(prefix))
@@ -862,6 +874,27 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
             notify(ctx, "二次验证操作失败；请检查 hub 连接后重试。", "error");
           }
           return;
+        case "user": {
+          try {
+            const conn = currentConnection();
+            const port =
+              deps.usersPort?.() ??
+              (conn === undefined
+                ? undefined
+                : {
+                    hasCap: (cap: string) => conn.caps.includes(cap),
+                    request: async (frame: import("../web-hub/protocol/messages.js").LanReqFrame, cap: string) => {
+                      const res = await conn.request(frame, cap);
+                      if (res.t !== "lan_res") throw new Error("unexpected admin frame");
+                      return res;
+                    },
+                  });
+            await runUsersCommand(tokens.slice(1), ctx, port);
+          } catch {
+            notify(ctx, "账号操作未确认完成；请检查 hub 连接并用 /webhub user list 核实后再重试。", "error");
+          }
+          return;
+        }
         case "passwd":
           await runPasswd(ctx, control);
           return;

@@ -59,6 +59,24 @@ describe("LAN-I login core HTTP integration", () => {
     }
   });
 
+  it("self-logout keeps known-IP trust and permits the enrolled user's next password login", async () => {
+    const h = await startLan();
+    try {
+      seedLanUser(h.store, credentials);
+      await h.store.setFeishu2fa({ userId: 1, on: true, now: h.clock.now() });
+      await h.store.noteLoginIp(1, "127.0.0.1", h.clock.now());
+      const login = await lanPostJson(h.port, "/api/login", credentials);
+      expect(login.status).toBe(200);
+      const cookie = login.headers["set-cookie"]![0]!.split(";")[0]!;
+      const logout = await lanPostJson(h.port, "/api/logout", {}, { Cookie: cookie });
+      expect(logout.status).toBe(200);
+      expect(await h.store.isKnownIp(1, "127.0.0.1", h.clock.now(), 30 * 86400000)).toBe(true);
+      expect(h.store.sessionsBySidHash.size).toBe(0);
+      expect((await lanPostJson(h.port, "/api/login", credentials)).status).toBe(200);
+    } finally {
+      await h.cleanup();
+    }
+  });
   it("recovery success reaches the same checked completion and emits login-success plus recovery-used once", async () => {
     const events: SecurityEvent[] = [];
     const security = createSecurityEventBus(captureLog());
@@ -98,7 +116,7 @@ describe("LAN-I login core HTTP integration", () => {
     try {
       seedLanUser(h.store, credentials);
       await h.store.setFeishu2fa({ userId: 1, on: true, now: h.clock.now() });
-      expect(await h.store.isKnownIp("127.0.0.1", h.clock.now(), 30 * 86400000)).toBe(false);
+      expect(await h.store.isKnownIp(1, "127.0.0.1", h.clock.now(), 30 * 86400000)).toBe(false);
       const r = await lanPostJson(h.port, "/api/login", credentials);
       expect(r.status).toBe(200);
       expect(JSON.parse(r.body)).toEqual({ ok: true, initialPassword: false });

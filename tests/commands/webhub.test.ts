@@ -167,7 +167,7 @@ describe("/webhub command", () => {
     const notes = await run("bogus", { control: control() });
     expect(notes[0]!.level).toBe("warning");
     expect(notes[0]!.message).toContain(
-      "/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>|2fa <op>]",
+      "/webhub [status|open|passwd|unlock|restart|stop|start|token rotate|feishu <op>|2fa <op>|user list|user delete <username>]",
     );
   });
 });
@@ -339,6 +339,7 @@ describe("getArgumentCompletions", () => {
       "stop",
       "token",
       "unlock",
+      "user",
     ]);
     expect(items!.every((i) => typeof i.description === "string" && i.description.length > 0)).toBe(true);
   });

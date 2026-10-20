@@ -446,12 +446,18 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   inert guard without LAN; a missing configured guard is never a fallback). `hub/lan-login.ts` owns the sole checked
   session completion (`complete()` — the only `createSessionChecked` caller), with epoch/factor-generation CAS and
   bounded cancellation/late-insert cleanup for password/TOTP/recovery/Feishu approval. Enrolled accounts require a
-  second factor from a new IP (30 d history; unusable trusted-proxy XFF stays new); pending challenges are never
+  second factor from a new IP (30 d history **per account**, capped at 256 IPs/user; unusable trusted-proxy XFF stays
+  new); first enrollment clears only that account's trust. Kicking sessions (single / others) atomically clears that
+  user's trust for the kicked sessions' created/last IPs, EXCEPT the revoker's current IP (shared-IP retention is audited);
+  uncertain revokes attempt bounded best-effort trust cleanup, while self-logout keeps trust. Pending challenges are never
   sessions. `hub/lan-sessions.ts` lists/revokes ≤32 LAN sessions with one 10 s revoke deadline and the shared
   auth-revoke fan-out to proxy HTTP+WS, HTML caps and SSE; nullable `session_meta.method` migrates additively (legacy
   reads as password) and the settings card is cap+password gated, disabling all actions during a revoke.
-  `/webhub 2fa` is trusted-local TUI-only (masked setup, bounded secret widgets, independent of web command policy;
-  web prompt-op auth-admin text is refused too); admin repair preserves B's actual db-invalid detail. Feishu approval
+  `/webhub user list|delete <username>` is trusted-local TUI-only too: list shows primary/2FA/live sessions, delete needs
+  an explicit TUI confirmation, refuses primary/last-user, CASCADE-deletes account data and revokes that user's live
+  cookie/SSE/proxy/HTML sessions. `/webhub passwd` confirms before creating an extra independent account.
+  `/webhub 2fa` still targets only the primary (lowest-id) account and is trusted-local TUI-only (masked setup, bounded
+  secret widgets, independent of web command policy; web prompt-op auth-admin text, including `/webhub user`, is refused too); admin repair preserves B's actual db-invalid detail. Feishu approval
   uses the live owner, sibling nonces/gen/tenant binding and a stable runtime delegate; security alerts share
   notify's budget and are settings-gated. `lan.2fa.v1` / `lan.sessions.v1` are advertised on both surfaces iff
   `config.lan` is configured (not the assembled store state — the 2fa cap is needed for repair while the store is

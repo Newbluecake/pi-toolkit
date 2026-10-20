@@ -563,3 +563,70 @@ session closed both partials directly (no third review round):
   dispatched-then-deadline with a never-settling child (§5.6).
 - r1 #8 (partially → closed): per-user per-method limit is a sliding window of ≤10 attempts / 15 min (bounded timestamp ring),
   not a refilling token bucket; acceptance includes exhaust → advance <15 min → refused, then past the window → one allowed (§5.5).
+
+## 14. Account isolation and kicked-device trust — user rulings (2026-10-20)
+
+Field context: the hub had primary `bluecake` (id 1, enrolled) and an accidentally created `admin` (id 2, not enrolled).
+Sessions and factors were already account-specific, but the global `login_ips(ip PK, …)` let an unenrolled account make an
+IP trusted for an enrolled account. The phone at `10.8.0.3` also re-entered with password alone seconds after being kicked,
+because its IP trust survived the session deletion. These rulings supersede the global-trust wording in §3/§5/§7 above.
+
+### 14.1 Trust belongs to an account
+
+- `login_ips(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ip TEXT NOT NULL,
+first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, PRIMARY KEY(user_id, ip)) STRICT`.
+- `isKnownIp`, `noteLoginIp`, `knownIpCount` all take `userId`; the 30-day window and 256-row cap apply **per user**.
+  Login gating and the sole post-success writer use the authenticated user's id. Status counts the primary account only.
+- First TOTP / Feishu-only enrollment (Q15) clears only that user's history. `forgetLoginIps` / `/webhub 2fa forget-ips`
+  deliberately retain their old meaning: clear trust for **all** users, preserving the seed marker and bumping factor generations.
+- In the existing maintenance transaction, structural checks distinguish the exact old STRICT global table from damage.
+  Only that old shape is dropped and re-seeded from sessions grouped by `(user_id, created_ip)`, using sessions seen in the
+  last 30 days; global-only IPs are discarded. Every user's newest 256 groups survive. This is the single intentional
+  exception to the old seed-marker rule. A missing/malformed table still rebuilds **empty**, never re-importing trust.
+  `loginIpsRebuiltAt` remains the startup migration/rebuild notice timestamp; its prose now accurately covers both cases.
+  No schema version bump: 2FA security-table validation and explicit repair remain unchanged.
+
+### 14.2 Local-TUI account management and accidental-account prevention
+
+- `/webhub user list` sends trusted-socket `lan_req {op:"users"}` and shows username, primary marker, 2FA on/off and live
+  session count. The bounded projection refuses more than 256 accounts rather than silently truncating. It includes no
+  password material, factors or session identifiers.
+- `/webhub user delete <username>` requires `ctx.ui.confirm`, then sends `lan_req {op:"user_delete", username}`. In one DB
+  transaction it refuses the last remaining account and the primary (lowest id, same deterministic row as `initialInfo`),
+  deletes `users`, CASCADE-deletes sessions/session_meta/twofa/recovery_codes/login_ips with `foreign_keys=ON`, and refreshes
+  `twofa_users` metadata. After commit, the existing `lan.revoke({userId})` fan-out kills SSE, proxy/HTML capabilities and
+  pending logins; the deleted session rows invalidate cookies. Each op has one secret-free admin audit outcome.
+- Both commands refuse non-TUI and captured web invocations before any request/confirmation, independent of command-policy
+  overrides; web `prompt` text beginning `/webhub user` is refused as well. No new web endpoint.
+- `/webhub passwd` validates the entered password, then lists accounts over the same bounded socket before sending passwd.
+  If the typed username is absent and another account exists, explicit TUI confirmation is required:
+  「将新建第二个局域网账号 <name>（会话与 2FA 按账号独立），确认？」. Declining sends no passwd. An old hub without account
+  listing fails closed and asks for restart. 2FA admin operations still target the primary account only; no username selector.
+
+### 14.3 Kicking a device requires its second factor next time
+
+- The sessions routes' single revoke and revoke-others remove the **same user's** `login_ips` for every deleted session's
+  `created_ip` and `session_meta.last_ip`. A single kick uses `revokeSession`; revoke-others extends `deleteSessionsExcept`
+  with `keepIp`. Trust removal and session deletion share a DB transaction, including concurrent logins caught by the bulk op.
+- Always exclude the revoker's **current request client IP**. If a kicked device shares that IP, retain trust and audit
+  `sharedIpKept:true`. Other accounts' trust is untouched. This exception is deliberate: IP history cannot distinguish devices
+  sharing one IP, and the device doing the kicking must not lose trust.
+- A failed/uncertain dispatched revoke still emits the existing fail-closed revocations and attempts `untrustLoginIps` using
+  the bounded pre-listed created/last IPs (at most 64 distinct IPs from 32 sessions). This fallback adds no response-path wait:
+  its own IPC signal/logical race is 2 s, timers unref'd, failure logged without secret data. The authoritative bulk transaction
+  handles up to 64 deleted sessions / 128 IPs; uncertainty still cannot name a never-observed concurrent session.
+- The post-success history hook pins `noteLoginIp` to its session hash; a delayed hook whose session was kicked/deleted
+  cannot re-establish trust. The child checks this in the history-write transaction (no check/write gap).
+- Account deletion clears its trust by CASCADE. `/api/logout` deliberately stays on `deleteSession` and **does not** untrust.
+  Enrollment is still required for E_2FA: an unenrolled account remains password-only.
+
+### 14.4 Regression evidence
+
+- Shared fake + real-SQLite contracts cover per-user trust/window/cap, first TOTP/Feishu enrollment isolation, primary/last
+  refusals, account lists/deletion, kick created/last IP clearing, shared-IP preservation and logout trust retention.
+- Real SQLite maintenance tests cover exact global-shape migration (30-day window and per-user cap), all deletion cascades,
+  `foreign_key_check`, `twofa_users`, and a successful reopen after deleting an enrolled extra account.
+- Login-core tests prove B's password login cannot trust X for enrolled A, and both single/bulk session-route kicks make the
+  victim's next login return `E_2FA` while the revoker's IP still passes. HTTP regression proves self-logout retains trust.
+- Command tests cover explicit confirm/decline, captured-web refusal and completion; prompt-op tests cover auth-admin text;
+  route tests pin shared-IP audit and bounded uncertain cleanup, including a dispatched-never-settling delete.

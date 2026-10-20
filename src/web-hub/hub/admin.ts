@@ -230,7 +230,7 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     const g = await requireLanUser(rid, "status");
     if (!g.ok) return g.res;
     const st = await g.store.get2faState(g.user.id);
-    const knownIps = await g.store.knownIpCount(now(), NEW_IP_WINDOW_MS);
+    const knownIps = await g.store.knownIpCount(g.user.id, now(), NEW_IP_WINDOW_MS);
     auditTfa("status", true);
     return {
       t: "tfa_res",
@@ -460,6 +460,30 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     return { t: "lan_res", rid, ok: true };
   }
 
+  async function handleUsers(rid: string, meta: AdminMeta): Promise<LanResFrame> {
+    const store = deps.store();
+    if (!deps.hasLan() || store === undefined) return noLan(rid, "users", meta);
+    const users = await store.listUsers(now());
+    audit("users", { ok: true }, meta);
+    return { t: "lan_res", rid, ok: true, users };
+  }
+
+  async function handleUserDelete(rid: string, username: string, meta: AdminMeta): Promise<LanResFrame> {
+    const store = deps.store();
+    if (!deps.hasLan() || store === undefined) return noLan(rid, "user_delete", meta);
+    const result = await store.deleteUser(username);
+    if (!result.ok) {
+      const code = { "not-found": "E_NO_USER", primary: "E_PRIMARY_USER", "last-user": "E_LAST_USER" }[result.reason];
+      audit("user_delete", { ok: false, code }, meta);
+      return { t: "lan_res", rid, ok: false, code, message: `cannot delete LAN account: ${result.reason}` };
+    }
+    // Same fan-out as passwd: cookies lose their DB row; SSE/proxy/HTML and pending
+    // login challenges receive the existing userId revocation AFTER commit.
+    deps.lan()?.revoke({ userId: result.userId });
+    audit("user_delete", { ok: true, username }, meta);
+    return { t: "lan_res", rid, ok: true };
+  }
+
   async function handleUnlock(rid: string, meta: AdminMeta): Promise<LanResFrame> {
     const limiter = deps.limiter();
     if (!deps.hasLan() || limiter === undefined) return noLan(rid, "unlock", meta);
@@ -485,6 +509,10 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
             return await handlePasswd(frame.rid, frame.username, frame.password, meta);
           case "unlock":
             return await handleUnlock(frame.rid, meta);
+          case "users":
+            return await handleUsers(frame.rid, meta);
+          case "user_delete":
+            return await handleUserDelete(frame.rid, frame.username, meta);
         }
       } catch (err) {
         deps.log.error("web-hub admin: lan_req handler threw", sanitizedErrorFields(err));

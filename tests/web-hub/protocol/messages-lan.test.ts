@@ -167,3 +167,23 @@ describe("hello_ack.caps? (plan §8.1, §11 v8 revision ⑤)", () => {
     expect(decodeHubFrame(frame)).toEqual(frame);
   });
 });
+
+describe("LAN local account admin frames", () => {
+  it("round-trips users/delete and rejects missing selectors or secret fields in summaries", () => {
+    for (const frame of [
+      { t: "lan_req", rid: "r", op: "users" },
+      { t: "lan_req", rid: "d", op: "user_delete", username: "admin" },
+    ])
+      expect(decodeAgentFrame(JSON.parse(JSON.stringify(frame)))).toEqual(frame);
+    expect(decodeAgentFrame({ t: "lan_req", rid: "d", op: "user_delete" })).toBeUndefined();
+    expect(decodeAgentFrame({ t: "lan_req", rid: "l", op: "users", username: "admin" })).toBeUndefined();
+    const frame = {
+      t: "lan_res",
+      rid: "r",
+      ok: true,
+      users: [{ username: "bluecake", primary: true, twofa: true, liveSessions: 2 }],
+    };
+    expect(decodeHubFrame(JSON.parse(JSON.stringify(frame)))).toEqual(frame);
+    expect(decodeHubFrame({ ...frame, users: [{ ...frame.users[0], hash: "secret" }] })).toBeUndefined();
+  });
+});

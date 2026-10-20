@@ -175,20 +175,20 @@ suite("LAN security real store", () => {
   });
 
   it("stores at most 256 IPs, expires trust at exactly 30d, and preserves first_at", async () => {
-    expect(await store.noteLoginIp("192.0.2.1", at)).toEqual({ wasKnown: false });
-    expect(await store.noteLoginIp("192.0.2.1", at + 1)).toEqual({ wasKnown: true });
-    expect(await store.isKnownIp("192.0.2.1", at + NEW_IP_WINDOW_MS, NEW_IP_WINDOW_MS)).toBe(true);
-    expect(await store.isKnownIp("192.0.2.1", at + NEW_IP_WINDOW_MS + 1, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.noteLoginIp(1, "192.0.2.1", at)).toEqual({ wasKnown: false });
+    expect(await store.noteLoginIp(1, "192.0.2.1", at + 1)).toEqual({ wasKnown: true });
+    expect(await store.isKnownIp(1, "192.0.2.1", at + NEW_IP_WINDOW_MS, NEW_IP_WINDOW_MS)).toBe(true);
+    expect(await store.isKnownIp(1, "192.0.2.1", at + NEW_IP_WINDOW_MS + 1, NEW_IP_WINDOW_MS)).toBe(false);
     expect(sql((db) => db.prepare("SELECT first_at FROM login_ips WHERE ip='192.0.2.1'").get()?.first_at)).toBe(at);
-    for (let i = 0; i < 257; i++) await store.noteLoginIp(`198.51.100.${i}`, at + 2 + i);
-    expect(await store.knownIpCount(at + 300, NEW_IP_WINDOW_MS)).toBe(256);
-    expect(await store.isKnownIp("192.0.2.1", at + 300, NEW_IP_WINDOW_MS)).toBe(false);
-    expect(await store.isKnownIp("198.51.100.0", at + 300, NEW_IP_WINDOW_MS)).toBe(false);
-    expect(await store.isKnownIp("198.51.100.256", at + 300, NEW_IP_WINDOW_MS)).toBe(true);
+    for (let i = 0; i < 257; i++) await store.noteLoginIp(1, `198.51.100.${i}`, at + 2 + i);
+    expect(await store.knownIpCount(1, at + 300, NEW_IP_WINDOW_MS)).toBe(256);
+    expect(await store.isKnownIp(1, "192.0.2.1", at + 300, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "198.51.100.0", at + 300, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "198.51.100.256", at + 300, NEW_IP_WINDOW_MS)).toBe(true);
   });
 
   it("enrollment is atomic, changes schema to v2, clears history but not sessions, and keeps secrets in the child", async () => {
-    await store.noteLoginIp("192.0.2.1", at);
+    await store.noteLoginIp(1, "192.0.2.1", at);
     const session = await store.createSessionChecked(input());
     expect(session.ok).toBe(true);
     const pending = await store.beginTotp({ userId: 1, now: at });
@@ -206,7 +206,7 @@ suite("LAN security real store", () => {
     const result = await store.commitTotp({ userId: 1, now: at, expectedGen: 0, code: codeFor(pending.secretB32, at) });
     expect(result.ok).toBe(true);
     expect(sql((db) => db.prepare("PRAGMA user_version").get()?.user_version)).toBe(2);
-    expect(await store.knownIpCount(at, NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.knownIpCount(1, at, NEW_IP_WINDOW_MS)).toBe(0);
     expect(await store.listSessions(1, at)).toHaveLength(1);
     const state = await store.get2faState(1);
     expect(Object.keys(state).sort()).toEqual(["factorGen", "feishu", "recoveryLeft", "state", "totp"]);

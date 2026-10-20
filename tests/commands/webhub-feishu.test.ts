@@ -435,6 +435,7 @@ describe("completions", () => {
       "stop",
       "token",
       "unlock",
+      "user",
     ]);
     const feishu = items.find((i) => i.value === "feishu")!;
     expect(feishu.description).toContain("仅 TUI");

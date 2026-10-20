@@ -66,15 +66,15 @@ describe("P0 fake LAN security store (not production crypto)", () => {
   });
   it("note history is bounded, time-windowed and cleared by first enrollment", async () => {
     const { store, user } = await fixture();
-    expect(await store.noteLoginIp("a", 0)).toEqual({ wasKnown: false });
-    expect(await store.noteLoginIp("a", 1)).toEqual({ wasKnown: true });
-    expect(await store.isKnownIp("a", NEW_IP_WINDOW_MS + 1, NEW_IP_WINDOW_MS)).toBe(false);
-    for (let i = 0; i < 257; i++) await store.noteLoginIp(`ip${i}`, i + 2);
-    expect(await store.knownIpCount(300, NEW_IP_WINDOW_MS)).toBe(256);
-    expect(await store.isKnownIp("ip0", 300, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.noteLoginIp(1, "a", 0)).toEqual({ wasKnown: false });
+    expect(await store.noteLoginIp(1, "a", 1)).toEqual({ wasKnown: true });
+    expect(await store.isKnownIp(1, "a", NEW_IP_WINDOW_MS + 1, NEW_IP_WINDOW_MS)).toBe(false);
+    for (let i = 0; i < 257; i++) await store.noteLoginIp(1, `ip${i}`, i + 2);
+    expect(await store.knownIpCount(1, 300, NEW_IP_WINDOW_MS)).toBe(256);
+    expect(await store.isKnownIp(1, "ip0", 300, NEW_IP_WINDOW_MS)).toBe(false);
     const enrolled = await store.setFeishu2fa({ userId: user.id, on: true, now: 300 });
     expect(enrolled.recoveryCodes).toHaveLength(10);
-    expect(await store.knownIpCount(300, NEW_IP_WINDOW_MS)).toBe(0);
+    expect(await store.knownIpCount(1, 300, NEW_IP_WINDOW_MS)).toBe(0);
     expect(await store.get2faState(user.id)).toEqual({
       state: "enrolled",
       totp: false,
@@ -82,9 +82,9 @@ describe("P0 fake LAN security store (not production crypto)", () => {
       recoveryLeft: 10,
       factorGen: 1,
     });
-    await store.noteLoginIp("new", 301);
+    await store.noteLoginIp(1, "new", 301);
     await store.forgetLoginIps();
-    expect(await store.isKnownIp("new", 302, NEW_IP_WINDOW_MS)).toBe(false);
+    expect(await store.isKnownIp(1, "new", 302, NEW_IP_WINDOW_MS)).toBe(false);
     expect(await store.get2faState(user.id)).toMatchObject({ state: "enrolled", factorGen: 2 });
   });
   it("recovery is single-use, stale gen refuses, regeneration invalidates the set", async () => {

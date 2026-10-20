@@ -5,7 +5,7 @@ import {
   runPasswdPrompt,
   type PasswdPromptDeps,
 } from "../../../src/web-hub/agent/passwd-prompt.js";
-import type { LanResFrame } from "../../../src/web-hub/protocol/messages.js";
+import type { LanReqFrame, LanResFrame } from "../../../src/web-hub/protocol/messages.js";
 
 // ---------------------------------------------------------------- MaskedInputComponent
 
@@ -107,7 +107,13 @@ function deps(over: Partial<PasswdPromptDeps> = {}): PasswdPromptDeps {
     hasCap: () => true,
     promptUsername: async () => "alice",
     promptPassword: async () => "hunter2-hunter2",
-    request: async (): Promise<LanResFrame> => ({ t: "lan_res", rid: "x", ok: true }),
+    confirmCreate: async () => true,
+    request: async (frame): Promise<LanResFrame> => ({
+      t: "lan_res",
+      rid: "x",
+      ok: true,
+      ...(frame.op === "users" ? { users: [] } : {}),
+    }),
     ...over,
   };
 }
@@ -190,8 +196,49 @@ describe("runPasswdPrompt (plan §9.3 passwd flow)", () => {
     expect(outcome).toEqual({ ok: false, reason: "rejected", code: "E_AUTH", message: "nope" });
   });
 
+  it.each([false, true])("new second account requires confirmation before passwd: %s", async (confirmed) => {
+    const confirmCreate = vi.fn(async () => confirmed);
+    const request = vi.fn(async (frame: LanReqFrame): Promise<LanResFrame> => ({
+      t: "lan_res",
+      rid: frame.rid,
+      ok: true,
+      ...(frame.op === "users"
+        ? { users: [{ username: "bluecake", primary: true, twofa: true, liveSessions: 1 }] }
+        : {}),
+    }));
+    expect(await runPasswdPrompt(deps({ request, confirmCreate }))).toEqual(
+      confirmed ? { ok: true } : { ok: false, reason: "cancelled" },
+    );
+    expect(confirmCreate).toHaveBeenCalledWith("将新建第二个局域网账号 alice（会话与 2FA 按账号独立），确认？");
+    expect(request.mock.calls.map(([f]) => f.op)).toEqual(confirmed ? ["users", "passwd"] : ["users"]);
+  });
+  it.each([{ users: [] }, { users: [{ username: "alice", primary: true, twofa: true, liveSessions: 1 }] }])(
+    "first or existing account never prompts for account creation",
+    async ({ users }) => {
+      const confirmCreate = vi.fn();
+      const request = vi.fn(async (frame: LanReqFrame): Promise<LanResFrame> => ({
+        t: "lan_res",
+        rid: frame.rid,
+        ok: true,
+        ...(frame.op === "users" ? { users } : {}),
+      }));
+      expect(await runPasswdPrompt(deps({ request, confirmCreate }))).toEqual({ ok: true });
+      expect(confirmCreate).not.toHaveBeenCalled();
+      expect(request.mock.calls.map(([f]) => f.op)).toEqual(["users", "passwd"]);
+    },
+  );
+  it("old hub without users response fails closed, never writes passwd", async () => {
+    const request = vi.fn(async (): Promise<LanResFrame> => ({ t: "lan_res", rid: "x", ok: true }));
+    expect(await runPasswdPrompt(deps({ request }))).toMatchObject({
+      ok: false,
+      reason: "rejected",
+      code: "E_UNSUPPORTED",
+    });
+    expect(request.mock.calls).toHaveLength(1);
+  });
   it("success path: sends passwd with trimmed username and the entered password, no cap check bypass", async () => {
     const request = vi.fn(async (frame: { op: string; username: string; password: string }): Promise<LanResFrame> => {
+      if (frame.op === "users") return { t: "lan_res", rid: "x", ok: true, users: [] };
       expect(frame.op).toBe("passwd");
       expect(frame.username).toBe("alice");
       expect(frame.password).toBe("hunter2-hunter2");
@@ -199,7 +246,7 @@ describe("runPasswdPrompt (plan §9.3 passwd flow)", () => {
     });
     const outcome = await runPasswdPrompt(deps({ promptUsername: async () => "  alice  ", request }));
     expect(outcome).toEqual({ ok: true });
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 });
 

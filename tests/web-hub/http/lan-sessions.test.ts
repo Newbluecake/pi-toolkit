@@ -411,9 +411,20 @@ describe("lan-sessions routes", () => {
     );
     const cur = await addSession(h.store, h.nowRef.t, { ip: IP });
     const other = await addSession(h.store, h.nowRef.t, { ip: "192.168.32.15" });
+    await h.store.noteLoginIp(1, IP, h.nowRef.t);
+    await h.store.noteLoginIp(1, "192.168.32.15", h.nowRef.t);
+    const cleanup = vi.spyOn(h.store, "untrustLoginIps");
     h.auth.sidHash = cur.sidHash;
     await h.call("POST", LAN_SESSIONS_REVOKE_PATH, { body: { others: true } });
     expect(lastSent(h)).toMatchObject({ status: 503, body: { error: "E_DEADLINE", effect: "unknown" } });
+    expect(cleanup).toHaveBeenCalledWith(
+      1,
+      ["192.168.32.15"],
+      IP,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(await h.store.isKnownIp(1, "192.168.32.15", h.nowRef.t, 30 * 86400000)).toBe(false);
+    expect(await h.store.isKnownIp(1, IP, h.nowRef.t, 30 * 86400000)).toBe(true);
     // pre-listed hashes were emitted before dispatch AND again on the uncertain path
     const emitted = h.revokeEvents.map((e) => (e.sel as { sidTag: string }).sidTag);
     expect(emitted.filter((x) => x === other.sidHash)).toHaveLength(2);
@@ -428,7 +439,7 @@ describe("lan-sessions routes", () => {
     const h = harness(
       {
         beforeOp: async (op) => {
-          if (op === "deleteSession") await hang;
+          if (op === "revokeSession") await hang;
         },
       },
       { fastClock: true },
@@ -466,4 +477,47 @@ describe("lan-sessions routes", () => {
     await expect(h.routes.handle({} as IncomingMessage, res, "GET", LAN_SESSIONS_PATH, io)).resolves.toBe(true);
     expect(lastSent(h)).toMatchObject({ status: 500, body: { error: "E_INTERNAL" } });
   });
+  it("shared-IP kick keeps that IP trusted and says so in the audit", async () => {
+    const h = harness();
+    const current = await addSession(h.store, h.nowRef.t);
+    const victim = await addSession(h.store, h.nowRef.t);
+    h.auth.sidHash = current.sidHash;
+    await h.store.noteLoginIp(1, IP, h.nowRef.t);
+    await h.call("POST", LAN_SESSIONS_REVOKE_PATH, { body: { id: publicSessionId(victim.sidHash) } });
+    expect(lastSent(h).status).toBe(200);
+    expect(await h.store.isKnownIp(1, IP, h.nowRef.t, 30 * 86400000)).toBe(true);
+    expect(auditLines(h).at(-1)).toMatchObject({ op: "revoke", sharedIpKept: true });
+  });
+
+  it.each(["single", "others"] as const)(
+    "%s uncertain DB failure still attempts trust cleanup without untrusting the revoker",
+    async (mode) => {
+      const h = harness({
+        beforeOp: async (op) => {
+          if (op === (mode === "single" ? "revokeSession" : "deleteSessionsExcept")) throw Error("uncertain failure");
+        },
+      });
+      const current = await addSession(h.store, h.nowRef.t);
+      const victim = await addSession(h.store, h.nowRef.t, { ip: "created-ip" });
+      await h.store.touchSession(victim.sidHash, h.nowRef.t + 60000, { ip: "last-ip" });
+      for (const ip of [IP, "created-ip", "last-ip"]) await h.store.noteLoginIp(1, ip, h.nowRef.t);
+      const cleanup = vi.spyOn(h.store, "untrustLoginIps");
+      h.auth.sidHash = current.sidHash;
+      await h.call("POST", LAN_SESSIONS_REVOKE_PATH, {
+        body: mode === "single" ? { id: publicSessionId(victim.sidHash) } : { others: true },
+      });
+      expect(lastSent(h)).toMatchObject({ status: 503, body: { error: "E_DB" } });
+      expect(cleanup).toHaveBeenCalledWith(
+        1,
+        expect.arrayContaining(["created-ip", "last-ip"]),
+        IP,
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      await vi.waitFor(async () =>
+        expect(await h.store.isKnownIp(1, "created-ip", h.nowRef.t, 30 * 86400000)).toBe(false),
+      );
+      expect(await h.store.isKnownIp(1, "last-ip", h.nowRef.t, 30 * 86400000)).toBe(false);
+      expect(await h.store.isKnownIp(1, IP, h.nowRef.t, 30 * 86400000)).toBe(true);
+    },
+  );
 });

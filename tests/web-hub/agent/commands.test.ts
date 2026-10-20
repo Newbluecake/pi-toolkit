@@ -101,18 +101,22 @@ describe("createCommandHandler — control disabled", () => {
 });
 
 describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
-  it.each(["/webhub 2fa enroll", "/webhub 2fa recovery", "/webhub 2fa reset --confirm", "/webhub passwd"])(
-    "prompt op cannot smuggle TUI auth administration: %s",
-    (text) => {
-      const h = makeHarness();
-      const send = vi.spyOn(h.deps.pi, "sendUserMessage");
-      h.handler.handle(frame("auth-admin", { op: "prompt", text, deliver: "steer" }));
-      expect(h.sent).toMatchObject([{ ok: false, code: "E_COMMAND_DENIED", effect: "none" }]);
-      expect(send).not.toHaveBeenCalled();
-      expect(h.originEntry.appendOrigin).not.toHaveBeenCalled();
-      h.handler.dispose();
-    },
-  );
+  it.each([
+    "/webhub 2fa enroll",
+    "/webhub 2fa recovery",
+    "/webhub 2fa reset --confirm",
+    "/webhub passwd",
+    "/webhub user list",
+    "/webhub user delete admin",
+  ])("prompt op cannot smuggle TUI auth administration: %s", (text) => {
+    const h = makeHarness();
+    const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+    h.handler.handle(frame("auth-admin", { op: "prompt", text, deliver: "steer" }));
+    expect(h.sent).toMatchObject([{ ok: false, code: "E_COMMAND_DENIED", effect: "none" }]);
+    expect(send).not.toHaveBeenCalled();
+    expect(h.originEntry.appendOrigin).not.toHaveBeenCalled();
+    h.handler.dispose();
+  });
 
   it("routes a registered running mention before topic-switch/hold and settles exactly once", async () => {
     const registry = createMentionRegistry();

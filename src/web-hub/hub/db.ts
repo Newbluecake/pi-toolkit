@@ -134,7 +134,9 @@ export const SESSION_META_SQL = `CREATE TABLE session_meta (
   sid_hash BLOB PRIMARY KEY REFERENCES sessions(sid_hash) ON DELETE CASCADE,
   user_agent TEXT, last_ip TEXT, method TEXT) STRICT`;
 export const LOGIN_IPS_SQL = `CREATE TABLE login_ips (
-  ip TEXT PRIMARY KEY, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL) STRICT`;
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ip TEXT NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL,
+  PRIMARY KEY(user_id, ip)) STRICT`;
 
 /** Created only by an explicit factor mutation; never auto-repaired at open. */
 export const TWOFA_SQL = `
@@ -158,7 +160,8 @@ export const LAN_SECURITY_COLUMNS = {
     ["method", "TEXT", 0, 0],
   ],
   login_ips: [
-    ["ip", "TEXT", 1, 1],
+    ["user_id", "INTEGER", 1, 1],
+    ["ip", "TEXT", 1, 2],
     ["first_at", "INTEGER", 1, 0],
     ["last_at", "INTEGER", 1, 0],
   ],
@@ -180,7 +183,7 @@ export const LAN_SECURITY_COLUMNS = {
 } as const;
 export const LAN_SECURITY_FKS = {
   session_meta: [["sid_hash", "sessions", "sid_hash", "CASCADE"]],
-  login_ips: [],
+  login_ips: [["user_id", "users", "id", "CASCADE"]],
   twofa: [["user_id", "users", "id", "CASCADE"]],
   recovery_codes: [["user_id", "twofa", "user_id", "CASCADE"]],
 } as const;
@@ -213,9 +216,13 @@ export const QUERY_OPS = [
   "getUser",
   "getUserSummary",
   "initialInfo",
+  "listUsers",
+  "deleteUser",
   "createSession",
   "touchSession",
   "deleteSession",
+  "revokeSession",
+  "untrustLoginIps",
   "deleteAllSessions",
   "setPassword",
   "markInitialLogin",

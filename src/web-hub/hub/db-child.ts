@@ -91,7 +91,7 @@ function dropNamedTable(db, table) {
   const row = db.prepare("SELECT type FROM sqlite_master WHERE name=? AND type IN ('table','view')").get(table);
   if (row) db.exec('DROP ' + (row.type === 'view' ? 'VIEW ' : 'TABLE ') + table);
 }
-function tableMatches(db, table, specs = securityColumns[table]) {
+function tableMatches(db, table, specs = securityColumns[table], expected = securityFks[table]) {
   const cols = db.prepare('PRAGMA table_info(' + table + ')').all();
   if (cols.length !== specs.length) return false;
   for (const [name, type, notnull, pk] of specs) {
@@ -99,7 +99,6 @@ function tableMatches(db, table, specs = securityColumns[table]) {
     if (!c || c.type.toUpperCase() !== type || c.notnull !== notnull || c.pk !== pk) return false;
   }
   const fks = db.prepare('PRAGMA foreign_key_list(' + table + ')').all();
-  const expected = securityFks[table];
   if (fks.length !== expected.length || !expected.every(([from, target, to, onDelete]) =>
     fks.some(fk => fk.from === from && fk.table === target && fk.to === to && fk.on_delete === onDelete && fk.seq === 0))) return false;
   return db.prepare('PRAGMA table_list').all().some(t => t.name === table && t.type === 'table' && t.strict === 1);
@@ -182,8 +181,9 @@ function assertConsistent(userId) {
 function newFactorRow(userId, now) {
   db.prepare('INSERT OR IGNORE INTO twofa(user_id,totp_secret,totp_last_step,feishu,recovery_salt,factor_gen,enrolled_at,updated_at) VALUES(?,NULL,NULL,0,NULL,0,?,?)').run(userId, now, now);
 }
-function clearTrust() {
-  db.exec('DELETE FROM login_ips');
+function clearTrust(userId) {
+  if (userId === undefined) db.exec('DELETE FROM login_ips');
+  else db.prepare('DELETE FROM login_ips WHERE user_id=?').run(userId);
   metaSet(db, 'login_ips_seeded', '1');
 }
 function recoverySet(userId) {
@@ -244,6 +244,16 @@ function insertSession(args, checked) {
     return {ok:true, evicted:trimUserSessions(args.userId)};
   });
 }
+function untrustIps(userId, ips, keepIp) {
+  if (!Array.isArray(ips) || ips.length > 128 || typeof keepIp !== 'string') throw new Error('E_BAD_REQUEST');
+  let sharedIpKept = false;
+  for (const ip of new Set(ips)) {
+    if (ip == null) continue;
+    if (ip === keepIp) { sharedIpKept = true; continue; }
+    db.prepare('DELETE FROM login_ips WHERE user_id=? AND ip=?').run(userId, ip);
+  }
+  return sharedIpKept;
+}
 function handleSecurity(op, args) {
   switch (op) {
     case 'createSessionChecked': return insertSession(args, true);
@@ -252,18 +262,29 @@ function handleSecurity(op, args) {
         .all(args.userId, args.now, args.now, args.now - args.idleMs).map(r => ({sidHash:hashWire(r.sid_hash), userId:r.user_id, epoch:r.epoch, boundOrigin:r.bound_origin, createdAt:r.created_at, lastSeenAt:r.last_seen_at, expiresAt:r.expires_at, absoluteExpiresAt:r.absolute_expires_at, createdIp:r.created_ip, method:r.method || 'password',
           ...(r.last_ip === null ? {} : {lastIp:r.last_ip}), ...(r.user_agent === null ? {} : {ua:safeUa(r.user_agent)})}));
     }
-    case 'deleteSessionsExcept': return tx(db, () => {
-      const rows = db.prepare('SELECT sid_hash FROM sessions WHERE user_id=? AND sid_hash<>? LIMIT 65').all(args.userId, unb64(args.keepSidHash));
-      const deleted = rows.slice(0,64);
-      for (const row of deleted) stmtDeleteSession.run(row.sid_hash);
-      return {deleted:deleted.map(r => hashWire(r.sid_hash)), more:rows.length > 64};
+    case 'revokeSession': return tx(db, () => {
+      const row = db.prepare('SELECT s.created_ip,m.last_ip FROM sessions s LEFT JOIN session_meta m ON m.sid_hash=s.sid_hash WHERE s.user_id=? AND s.sid_hash=?').get(args.userId,unb64(args.sidHash));
+      const sharedIpKept = row ? untrustIps(args.userId, [row.created_ip,row.last_ip], args.keepIp) : false;
+      if (row) stmtDeleteSession.run(unb64(args.sidHash));
+      return {sharedIpKept};
     });
-    case 'isKnownIp': return !!db.prepare('SELECT 1 FROM login_ips WHERE ip=? AND last_at>?').get(args.ip, args.now - args.windowMs);
-    case 'knownIpCount': return db.prepare('SELECT count(*) AS n FROM login_ips WHERE last_at>?').get(args.now - args.windowMs).n;
+    case 'untrustLoginIps': return tx(db, () => {untrustIps(args.userId,args.ips,args.keepIp); return null;});
+    case 'deleteSessionsExcept': return tx(db, () => {
+      const rows = db.prepare('SELECT s.sid_hash,s.created_ip,m.last_ip FROM sessions s LEFT JOIN session_meta m ON m.sid_hash=s.sid_hash WHERE s.user_id=? AND s.sid_hash<>? LIMIT 65').all(args.userId, unb64(args.keepSidHash));
+      const deleted = rows.slice(0,64);
+      const sharedIpKept = args.keepIp === undefined ? undefined : untrustIps(args.userId, deleted.flatMap(r => [r.created_ip,r.last_ip]), args.keepIp);
+      for (const row of deleted) stmtDeleteSession.run(row.sid_hash);
+      return {deleted:deleted.map(r => hashWire(r.sid_hash)), more:rows.length > 64, ...(sharedIpKept === undefined ? {} : {sharedIpKept})};
+    });
+    case 'isKnownIp': return !!db.prepare('SELECT 1 FROM login_ips WHERE user_id=? AND ip=? AND last_at>?').get(args.userId, args.ip, args.now - args.windowMs);
+    case 'knownIpCount': return db.prepare('SELECT count(*) AS n FROM login_ips WHERE user_id=? AND last_at>?').get(args.userId, args.now - args.windowMs).n;
     case 'noteLoginIp': return tx(db, () => {
-      const wasKnown = !!db.prepare('SELECT 1 FROM login_ips WHERE ip=? AND last_at>?').get(args.ip, args.now - 30*86400000);
-      db.prepare('INSERT INTO login_ips(ip,first_at,last_at) VALUES(?,?,?) ON CONFLICT(ip) DO UPDATE SET last_at=excluded.last_at').run(args.ip, args.now, args.now);
-      db.exec('DELETE FROM login_ips WHERE ip IN (SELECT ip FROM login_ips ORDER BY last_at DESC, rowid DESC LIMIT -1 OFFSET 256)');
+      // Response-finish hooks may land after a kick. A deleted/stale session cannot
+      // restore the IP trust removed by the revoke transaction.
+      if (args.sidHash !== undefined && !db.prepare('SELECT 1 FROM sessions s JOIN users u ON s.user_id=u.id AND s.epoch=u.epoch WHERE s.sid_hash=? AND s.user_id=?').get(unb64(args.sidHash),args.userId)) return {wasKnown:false};
+      const wasKnown = !!db.prepare('SELECT 1 FROM login_ips WHERE user_id=? AND ip=? AND last_at>?').get(args.userId, args.ip, args.now - 30*86400000);
+      db.prepare('INSERT INTO login_ips(user_id,ip,first_at,last_at) VALUES(?,?,?,?) ON CONFLICT(user_id,ip) DO UPDATE SET last_at=excluded.last_at').run(args.userId, args.ip, args.now, args.now);
+      db.prepare('DELETE FROM login_ips WHERE user_id=? AND ip IN (SELECT ip FROM login_ips WHERE user_id=? ORDER BY last_at DESC, rowid DESC LIMIT -1 OFFSET 256)').run(args.userId, args.userId);
       return {wasKnown};
     });
     case 'get2faState': return factorState(args.userId);
@@ -293,7 +314,7 @@ function handleSecurity(op, args) {
         if (!changed) throw new Error('factor CAS failed');
         const count = db.prepare('SELECT count(*) AS n FROM recovery_codes WHERE user_id=?').get(args.userId).n;
         const recoveryCodes = count === 0 ? recoverySet(args.userId) : [];
-        if (state.state === 'none') clearTrust();
+        if (state.state === 'none') clearTrust(args.userId);
         syncEnrolledIds(db);
         return {ok:true, recoveryCodes};
       });
@@ -329,7 +350,7 @@ function handleSecurity(op, args) {
       ensureSecurityTables(); newFactorRow(args.userId, args.now);
       db.prepare('UPDATE twofa SET feishu=?,factor_gen=factor_gen+1,updated_at=? WHERE user_id=?').run(args.on ? 1 : 0, args.now, args.userId);
       let recoveryCodes;
-      if (args.on && state.state === 'none') { recoveryCodes = recoverySet(args.userId); clearTrust(); }
+      if (args.on && state.state === 'none') { recoveryCodes = recoverySet(args.userId); clearTrust(args.userId); }
       if (!args.on && !state.totp) {
         db.prepare('DELETE FROM recovery_codes WHERE user_id=?').run(args.userId);
         db.prepare('UPDATE twofa SET recovery_salt=NULL WHERE user_id=?').run(args.userId);
@@ -414,13 +435,30 @@ const stmtDeleteAllSessions = db.prepare('DELETE FROM sessions WHERE user_id=?')
 const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=?, initial_login_ip=? WHERE username=? AND initial_login_at IS NULL');
 const stmtUpdateUser = db.prepare('UPDATE users SET kdf=?, n=?, r=?, p=?, salt=?, hash=?, epoch=epoch+1, initial_password=NULL, initial_created_at=NULL, updated_at=? WHERE username=?');
 const stmtInsertUser = db.prepare('INSERT INTO users (username, kdf, n, r, p, salt, hash, epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)');
-const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users LIMIT 1');
+const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users ORDER BY id LIMIT 1');
 const stmtPurge = db.prepare('DELETE FROM sessions WHERE sid_hash IN (SELECT sid_hash FROM sessions WHERE expires_at<=? OR absolute_expires_at<=? LIMIT 256)');
 
 ${SECURITY_QUERY}
 function handle(op, args) {
 ${testHooks}
   switch (op) {
+    case 'listUsers': {
+      const users = db.prepare('SELECT id,username,epoch FROM users ORDER BY id LIMIT 257').all();
+      if (users.length > 256) throw new Error('E_LIMIT: too many LAN accounts');
+      return users.map((u, i) => ({username:u.username, primary:i===0,
+        twofa:factorState(u.id).state !== 'none',
+        liveSessions:db.prepare('SELECT count(*) AS n FROM sessions WHERE user_id=? AND epoch=? AND expires_at>? AND absolute_expires_at>? AND last_seen_at>?').get(u.id,u.epoch,args.now,args.now,args.now-args.idleMs).n}));
+    }
+    case 'deleteUser': return tx(db, () => {
+      const user = stmtGetUser.get(args.username);
+      if (!user) return {ok:false,reason:'not-found'};
+      if (db.prepare('SELECT count(*) AS n FROM users').get().n <= 1) return {ok:false,reason:'last-user'};
+      if (user.id === db.prepare('SELECT id FROM users ORDER BY id LIMIT 1').get().id) return {ok:false,reason:'primary'};
+      db.prepare('DELETE FROM users WHERE id=?').run(user.id);
+      if (securityVersion() === 2) syncEnrolledIds(db);
+      pendingTotp.delete(user.id);
+      return {ok:true,userId:user.id};
+    });
     case 'getUser':
       return userRow(stmtGetUser.get(args.username));
     case 'getUserSummary': {
@@ -698,6 +736,11 @@ function run() {
           db.exec(${JSON.stringify(SESSION_META_SQL)});
         }
         const seeded = metaGet(db, 'login_ips_seeded') !== undefined;
+        // Only the exact former GLOBAL shape is migrated from sessions. Damaged tables
+        // still rebuild empty; the seed marker prevents old trust from resurrecting.
+        const globalTrust = tableMatches(db, 'login_ips', [
+          ['ip','TEXT',1,1], ['first_at','INTEGER',1,0], ['last_at','INTEGER',1,0]
+        ], []);
         if (!tableMatches(db, 'login_ips')) {
           loginIpsRebuilt = objects.has('login_ips') || seeded;
           dropNamedTable(db, 'login_ips');
@@ -705,11 +748,11 @@ function run() {
           // A damaged trust table is rebuilt EMPTY, never reseeded from surviving sessions.
           if (loginIpsRebuilt) metaSet(db, 'login_ips_seeded', '1');
         }
-        if (metaGet(db, 'login_ips_seeded') === undefined) {
-          db.exec('INSERT OR IGNORE INTO login_ips(ip,first_at,last_at) SELECT created_ip,min(created_at),max(last_seen_at) FROM sessions GROUP BY created_ip ORDER BY max(last_seen_at) DESC LIMIT 256');
+        if (globalTrust || metaGet(db, 'login_ips_seeded') === undefined) {
+          db.prepare('INSERT OR IGNORE INTO login_ips(user_id,ip,first_at,last_at) SELECT user_id,created_ip,min(created_at),max(last_seen_at) FROM sessions WHERE last_seen_at>? GROUP BY user_id,created_ip').run(Date.now() - 30*86400000);
           metaSet(db, 'login_ips_seeded', '1');
         }
-        db.exec('DELETE FROM login_ips WHERE ip IN (SELECT ip FROM login_ips ORDER BY last_at DESC, rowid DESC LIMIT -1 OFFSET 256)');
+        db.exec('DELETE FROM login_ips WHERE rowid IN (SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY user_id ORDER BY last_at DESC,rowid DESC) AS n FROM login_ips) WHERE n>256)');
         db.exec('DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY user_id ORDER BY last_seen_at DESC,created_at DESC,rowid DESC) AS n FROM sessions) WHERE n>32)');
       });
       try {

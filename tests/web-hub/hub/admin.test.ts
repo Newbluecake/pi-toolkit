@@ -296,4 +296,69 @@ it("existing colon-named LAN users can still rotate their password; no forced re
   );
   expect(res).toMatchObject({ ok: true });
   expect((await store.getUser("feishu:1:ou_x"))?.id).toBe(2);
+  describe("lan_req users / user_delete", () => {
+    it("lists, refuses primary/last, cascades through store and invokes the existing user revoke fan-out after commit", async () => {
+      const store = fakeLanStore();
+      seedAdmin(store);
+      const revokes: Array<{ sidHash: string } | { userId: number }> = [];
+      const facade = fakeLanFacade({ state: "starting" }, revokes);
+      const revoke = facade.revoke;
+      facade.revoke = (target) => {
+        // Real commit must precede fan-out.
+        expect(store.usersByUsername.has("extra")).toBe(false);
+        return revoke(target);
+      };
+      const { deps, log } = baseDeps({ store: () => store, lan: () => facade });
+      const admin = createAdminHandler(deps),
+        meta = { agentKey: "a1" };
+      const del = (username: string) =>
+        admin.handleLanReq({ t: "lan_req", rid: "d", op: "user_delete", username }, meta);
+      expect(await del("admin")).toMatchObject({ ok: false, code: "E_LAST_USER" });
+      await store.setPassword({
+        username: "extra",
+        kdf: "scrypt",
+        n: 32768,
+        r: 8,
+        p: 1,
+        salt: new Uint8Array(16),
+        hash: new Uint8Array(32),
+      });
+      const extra = (await store.getUser("extra"))!;
+      await store.setFeishu2fa({ userId: extra.id, on: true, now: 1000 });
+      await store.createSessionChecked({
+        userId: extra.id,
+        expectedEpoch: extra.epoch,
+        expectedFactorGen: 1,
+        boundOrigin: "http://lan",
+        createdIp: "192.0.2.2",
+        now: Date.now(),
+      });
+      expect(await admin.handleLanReq({ t: "lan_req", rid: "l", op: "users" }, meta)).toMatchObject({
+        ok: true,
+        users: [
+          { username: "admin", primary: true, twofa: false, liveSessions: 0 },
+          { username: "extra", primary: false, twofa: true, liveSessions: 1 },
+        ],
+      });
+      expect(await del("admin")).toMatchObject({ ok: false, code: "E_PRIMARY_USER" });
+      expect(revokes).toEqual([]);
+      expect(await del("extra")).toMatchObject({ ok: true });
+      expect(revokes).toEqual([{ userId: extra.id }]);
+      expect(await store.listSessions(extra.id, Date.now())).toEqual([]);
+      expect(await del("extra")).toMatchObject({ ok: false, code: "E_NO_USER" });
+      expect(log.lines.filter((l) => (l.data as Record<string, unknown>)?.op === "user_delete")).toHaveLength(4);
+      expect(JSON.stringify(log.lines)).not.toContain("abc-def-ghi");
+    });
+    it("refuses users/delete when LAN is unavailable", async () => {
+      const { deps } = baseDeps();
+      const admin = createAdminHandler(deps);
+      expect(await admin.handleLanReq({ t: "lan_req", rid: "l", op: "users" }, { agentKey: "a" })).toMatchObject({
+        ok: false,
+        code: "E_NO_LAN",
+      });
+      expect(
+        await admin.handleLanReq({ t: "lan_req", rid: "d", op: "user_delete", username: "x" }, { agentKey: "a" }),
+      ).toMatchObject({ ok: false, code: "E_NO_LAN" });
+    });
+  });
 });

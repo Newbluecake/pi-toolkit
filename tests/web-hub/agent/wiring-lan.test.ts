@@ -298,6 +298,12 @@ describe("wireWebHub — changePasswordInteractive() (plan §9.3 passwd; TUI-onl
     hub.send(hub.conns[0]!, ackFrame("a1-key", 4242, ["lan.v1"]));
     await waitUntil(() => control.status().state === "live", 3_000, "live");
     const p = control.lan.changePasswordInteractive();
+    await waitUntil(() => hub!.all().some((f) => f.t === "lan_req" && f.op === "users"), 3000, "users req");
+    const usersReq = hub.all().find((f) => f.t === "lan_req" && f.op === "users") as Extract<
+      AgentFrame,
+      { t: "lan_req" }
+    >;
+    hub.send(hub.conns[0]!, { t: "lan_res", rid: usersReq.rid, ok: true, users: [] });
     await waitUntil(() => hub!.all().some((f) => f.t === "lan_req" && f.op === "passwd"), 3_000, "passwd req");
     const req = hub.all().find((f) => f.t === "lan_req" && f.op === "passwd") as Extract<
       AgentFrame,
