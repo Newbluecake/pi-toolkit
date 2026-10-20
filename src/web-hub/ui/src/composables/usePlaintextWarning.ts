@@ -4,16 +4,19 @@
  * body, AttachmentTray, WorktreeDiffDialog, PreviewHost, SpawnConfirm, HistoryForkConfirm,
  * LoginView) whenever the page is served as LAN password auth over plain `http:`. The user is
  * the sole LAN user behind password auth and has explicitly accepted the plaintext risk
- * (AGENTS.md web-hub U1 rulings), so this preference — `pwh_hide_plaintext_warn`, a pure
- * browser-local preference in the `pwh_theme` / `pwh_deliver` / `pwh_keepalive` family, NOT a
- * pi-process setting — hides those warnings per browser.
+ * (AGENTS.md web-hub U1 rulings), and 2026-10-20 ruled the warnings should be OFF BY DEFAULT —
+ * this preference (`pwh_hide_plaintext_warn`, a pure browser-local preference in the
+ * `pwh_theme` / `pwh_deliver` / `pwh_keepalive` family, NOT a pi-process setting) hides them
+ * per browser unless the user explicitly opts back IN via the settings toggle (which writes
+ * `"0"` for show / `"1"` for hide).
  *
  * Discipline (mirrors `useDeliverDefault.ts` / `@logic/sessionKeepAlive.ts`):
  * - the storage global is INJECTED by the caller (components pass `shell/themeStorage.ts`'s
  *   `browserLocalStorage()`), so this file never names the storage identifier and stays clean
  *   under `source-scan.test.ts`'s localStorage rule;
- * - anything but the exact token `"1"` — absent, `"0"`, junk — fails open to SHOWING the
- *   warnings, byte-identical to the pre-feature behavior when the pref is missing;
+ * - anything but the exact token `"0"` — absent, `"1"`, junk — keeps the warnings HIDDEN
+ *   (the 2026-10-20 default); only an explicit `"0"` (the settings toggle's 显示警告) shows
+ *   them, and a throwing/unavailable storage fails to hidden as well;
  * - hiding warnings changes NOTHING about security behavior (auth, LAN gating, preview/diff
  *   admission): it is warning-text visibility only.
  *
@@ -47,24 +50,25 @@ export interface PlaintextWarnWindow {
   removeEventListener(type: "storage", listener: (ev: PlaintextStorageEvent) => void): void;
 }
 
-/** Only the exact token `"1"` hides; absent/`"0"`/junk keeps the warnings visible. */
+/** Only the exact token `"0"` (the settings toggle's explicit 显示警告) shows the warnings;
+ *  absent/`"1"`/junk keeps them hidden — the 2026-10-20 default. */
 export function parsePlaintextHidden(raw: string | null): boolean {
-  return raw === "1";
+  return raw !== "0";
 }
 
-/** Read the preference; a throwing/unavailable storage fails open to "show the warnings". */
+/** Read the preference; a throwing/unavailable storage fails to hidden (same default). */
 export function loadPlaintextHidden(storage: PlaintextWarnStorage): boolean {
   let raw: string | null = null;
   try {
     raw = storage.getItem(PLAINTEXT_WARN_STORAGE_KEY);
   } catch {
-    return false;
+    return true;
   }
   return parsePlaintextHidden(raw);
 }
 
-/** Persist the preference (the settings card writes `"1"`/`"0"`). Write failures are ignored —
- * the in-memory preference still applies for this load (same fail-open shape as useDeliverDefault). */
+/** Persist the preference (the settings card writes `"1"` = hide / `"0"` = show). Write
+ *  failures are ignored — the in-memory preference still applies for this load. */
 export function setPlaintextHiddenPref(storage: PlaintextWarnStorage, hidden: boolean): void {
   try {
     storage.setItem(PLAINTEXT_WARN_STORAGE_KEY, hidden ? "1" : "0");
@@ -74,7 +78,7 @@ export function setPlaintextHiddenPref(storage: PlaintextWarnStorage, hidden: bo
 }
 
 // --- shared reactive source (see the header: module scope is deliberate) ----------------------
-const hidden = ref(false);
+const hidden = ref(true);
 let listenerWin: PlaintextWarnWindow | null = null;
 let listenerStorage: PlaintextWarnStorage | null = null;
 
@@ -125,10 +129,10 @@ export function usePlaintextWarning(opts: {
   };
 }
 
-/** Test hook: drop the shared source back to "shown" and detach the cross-tab listener
- * (module state is shared across tests in one worker — same shape as `resetLangForTests`). */
+/** Test hook: drop the shared source back to the default (hidden) and detach the cross-tab
+ *  listener (module state is shared across tests in one worker — same shape as `resetLangForTests`). */
 export function resetPlaintextWarningForTests(): void {
-  hidden.value = false;
+  hidden.value = true;
   if (listenerWin !== null) {
     listenerWin.removeEventListener("storage", onStorageEvent);
     listenerWin = null;

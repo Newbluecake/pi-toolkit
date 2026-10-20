@@ -16,7 +16,7 @@
   sessionHistory.ts`); every string renders through interpolation ⇒ textContent, never HTML.
   The bottom re-renders the SAME W1–W7 best-effort small print the dialog shows
   (`history.bestEffortNote`), plus the LAN plaintext warning when `plaintext` (hideable via the
-  explicit `pwh_hide_plaintext_warn` browser opt-out, like every plaintext warning).
+  `pwh_hide_plaintext_warn` browser pref, hidden by default like every plaintext warning).
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
@@ -43,7 +43,7 @@ const props = defineProps<{
 const emit = defineEmits<{ confirm: []; cancel: [] }>();
 const { t } = useI18n();
 
-// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the warning line.
+// `pwh_hide_plaintext_warn` (browser pref, hidden by default) gates the warning line.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
 const showPlainWarning = computed(() => warn.warnVisible(props.plaintext));
 

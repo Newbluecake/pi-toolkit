@@ -2,9 +2,10 @@
   Text phase of the preview overlay (web-hub-preview plan v3 §4.6, package PV5; dir-plan
   v3.1 §4.1/§4.3, PM package): the body in a monospace `<pre>` (whitespace preserved,
   soft-wrapped by CSS), a truncated badge + note when the server clipped the body at
-  `PREVIEW_TEXT_MAX_BYTES` (`X-PWH-Preview-Truncated`), and a copy button that copies
-  exactly the DISPLAYED part (§4.6: "复制按钮复制的是已显示的部分" — `CopyButton`'s `value`
-  is the shown source, never the path).
+  `PREVIEW_TEXT_MAX_BYTES` (`X-PWH-Preview-Truncated`), and the copy value — exactly the
+  DISPLAYED part (§4.6: "复制按钮复制的是已显示的部分", never the path) — published to the
+  header via `update:copyValue` (2026-10-20: the copy button moved from this toolbar to
+  PreviewHost's header, next to download; this component stays the sole source of the value).
 
   Markdown rendering (B1–B7, PM package): a `.md`/`.markdown` path defaults to RENDERED —
   `@logic/markdown.js`'s whitelist parser → the transcript's own `MdBlock` renderer (the
@@ -56,7 +57,6 @@ import {
   PREVIEW_MD_NODE_MAX,
 } from "@logic/preview.js";
 import { createMarkdownSegmenter, createSourceSegmenter } from "@logic/previewStream.js";
-import CopyButton from "../detail/CopyButton.vue";
 import MdBlock from "../transcript/MdBlock.vue";
 import type { MdNode } from "../transcript/markdown-types.js";
 import HighlightedCode from "../shared/HighlightedCode.vue";
@@ -91,6 +91,9 @@ const emit = defineEmits<{
   (e: "load-more"): void;
   (e: "reopen"): void;
   (e: "retry-stream"): void;
+  /** 2026-10-20: the copy button lives in PreviewHost's header now — this is the channel the
+   *  header's CopyButton reads. Emitted on mount and on every change; `null` on unmount. */
+  (e: "update:copyValue", value: string | null): void;
 }>();
 const { t } = useI18n();
 const highlightLang = computed(() => resolveFileLang(props.filename ?? ""));
@@ -273,6 +276,17 @@ watch(() => [props.stream?.chunks.length ?? 0, props.stream?.state, effectiveMod
 const copyValue = computed(() =>
   isStream.value ? srcSegs.value.map((x) => x.text + x.sep).join("") : shownSource.value,
 );
+// Publish to the header (PreviewHost): immediate so the button appears with the dialog,
+// re-emitted as chunks arrive / ANSI carries flush; `null` on unmount clears the header.
+watch(copyValue, (v) => emit("update:copyValue", v), { immediate: true });
+onBeforeUnmount(() => emit("update:copyValue", null));
+
+/** The actions bar is hidden when it would be EMPTY (2026-10-20: the copy button moved to
+ *  the header — a non-md/non-html one-shot file, or a stream in its terminal `done` state,
+ *  has nothing left to show here). */
+const hasActions = computed(
+  () => isMd.value || htmlOn.value || (props.stream !== undefined && props.stream.state !== "done"),
+);
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "";
@@ -433,7 +447,7 @@ watch(streamState, (st) => {
         tabindex="0"
       ><HighlightedCode :text="shownSource" :lang="highlightLang" /></pre>
     </template>
-    <div class="preview-text-actions">
+    <div v-if="hasActions" class="preview-text-actions">
       <div
         v-if="stream && statusText !== ''"
         class="preview-stream-status"
@@ -488,7 +502,6 @@ watch(streamState, (st) => {
           {{ t("preview.viewSource") }}
         </button>
       </div>
-      <CopyButton :value="copyValue" :label="t('common.copy')" />
     </div>
   </div>
 </template>

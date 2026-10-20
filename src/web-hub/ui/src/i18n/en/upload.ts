@@ -47,8 +47,8 @@ const upload = {
   gateBlocked: "Attachments cannot be sent in the current state",
 
   // --- plaintext warning (§4.2 — permanent while the tray is non-empty, NOT dismissible in
-  // the page; hideable ONLY via the explicit `pwh_hide_plaintext_warn` browser opt-out,
-  // 2026-10 user ruling) ---
+  // the page; hidden by default via the `pwh_hide_plaintext_warn` browser pref since
+  // 2026-10-20 — the settings toggle re-shows it) ---
   plaintextWarning: "Plain HTTP: attachment contents cross this network unencrypted and can be intercepted or altered.",
 
   // --- upload.err.* (§4.2 error mapping; the Attachment.error code indexes here) ---

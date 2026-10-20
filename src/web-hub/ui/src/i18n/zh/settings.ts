@@ -36,8 +36,8 @@ const settings = {
   // 开关也无从谈起。隐藏只影响警告文案的可见性——传输仍是未加密的（提示语即此意）。
   plainWarnSection: "明文 HTTP 警告",
   plainWarnHint: "隐藏警告不会改变传输方式——本网段流量仍以未加密形式传输、可被他人读取。",
-  plainWarnShow: "显示警告（默认）",
-  plainWarnHide: "隐藏警告",
+  plainWarnShow: "显示警告",
+  plainWarnHide: "隐藏警告（默认）",
   // 2026-10-18 PWA 「安装为应用」卡片——beforeinstallprompt 捕获
   // （composables/useInstallPrompt.ts）与纯推导（logic/pwaInstall.ts）决定渲染哪一行：
   // 已安装状态 / 安装按钮 / 分平台指引。chrome://flags 的 URL 与 Enabled 两种语言都是

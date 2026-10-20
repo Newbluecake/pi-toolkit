@@ -32,8 +32,8 @@ onUnmounted(() => {
   if (factorVisible.value) emit("factorCancel");
 });
 
-// `pwh_hide_plaintext_warn` (explicit browser opt-out, set from the authenticated settings
-// panel — localStorage survives the sign-out) gates the plaintext-HTTP sign-in banner.
+// `pwh_hide_plaintext_warn` (browser pref, hidden by default since 2026-10-20; set from the
+// authenticated settings panel — localStorage survives the sign-out) gates the plaintext-HTTP sign-in banner.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
 const showPlainNotice = computed(() => warn.warnVisible(props.plaintext));
 

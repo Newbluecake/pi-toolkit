@@ -57,6 +57,7 @@ afterEach(() => {
   // Tests that leave a phase open never unmount their wrapper, leaking a scroll-lock hold
   // into the shared ref count (useScrollLock.ts) — reset it before touching overflow.
   resetBodyScrollLock();
+  window.localStorage.removeItem("pwh_hide_plaintext_warn");
   document.body.style.overflow = "";
   document.body.innerHTML = "";
 });
@@ -179,6 +180,7 @@ describe("PreviewHost.vue — phases", () => {
 
   it("plaintext ctx: the §5.2 standing warning renders; hidden otherwise", async () => {
     const plain = makeHandle();
+    window.localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: hidden by default; opt in to show
     mountHost({ handle: plain.handle, plaintext: true });
     plain.view.value = { phase: "loading", path: "/p/a.ts" };
     await tick();
@@ -251,10 +253,12 @@ describe("PreviewHost.vue — focus + scroll lock (§4.6)", () => {
     mountHost({ handle, plaintext: false });
     await tick();
     const p = panel()!;
-    // DOM order of focusables: header close button → pre[tabindex=0] → copy button.
-    const first = document.querySelector(".preview-close") as HTMLElement;
-    const mid = document.querySelector(".preview-text-body") as HTMLElement;
-    const last = document.querySelector(".preview-text-actions button") as HTMLElement;
+    // DOM order of focusables (2026-10-20: the copy button moved into the header, before
+    // download/close): header copy button → header close button → pre[tabindex=0].
+    const first = document.querySelector(".preview-copy button") as HTMLElement;
+    const mid = document.querySelector(".preview-close") as HTMLElement;
+    const last = document.querySelector(".preview-text-body") as HTMLElement;
+    expect(first).not.toBeNull(); // the header copy button IS present for a text phase
     // last focusable → Tab wraps to the first
     last.focus();
     const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
@@ -717,6 +721,100 @@ describe("PreviewHost.vue — directory browsing keeps the panel height stable",
     view.value = { phase: "loading", path: "/p/x.ts" } as unknown as PreviewView;
     await tick();
     expect(panel()!.classList.contains("is-hold-tall")).toBe(false); // a fresh open starts compact
+    view.value = { phase: "closed" };
+    await tick();
+  });
+});
+
+describe("PreviewHost.vue — header 复制 button (2026-10-20: copy moved next to download)", () => {
+  it("text phase: header order is copy → download → close; the copy value is exactly the shown text", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { handle, view } = makeHandle();
+    const { hub } = hubWithFetch(async () => ({ ok: true, kind: "text", size: 4, truncated: false, text: "body" }));
+    mountWithHub({ handle, plaintext: false }, hub);
+    view.value = { phase: "text", path: "/p/a.txt", text: "shown part only", truncated: true, size: 262144 };
+    await tick();
+
+    // CopyButton's root is a <span> — assert the order over the header's direct children
+    // (icon / title / path / copy span / download button / close button).
+    const kids = Array.from(document.querySelector(".preview-header")!.children).map((el) => el.className);
+    const idx = (cls: string) => kids.findIndex((c) => c.includes(cls));
+    expect(idx("preview-copy")).toBeGreaterThanOrEqual(0);
+    expect(idx("preview-download")).toBeGreaterThanOrEqual(0);
+    expect(idx("preview-close")).toBeGreaterThanOrEqual(0);
+    expect(idx("preview-copy")).toBeLessThan(idx("preview-download"));
+    expect(idx("preview-download")).toBeLessThan(idx("preview-close"));
+
+    // the header button carries tooltip + aria-label and the CopyButton feedback markup
+    const copyBtn = document.querySelector<HTMLButtonElement>(".preview-copy button")!;
+    expect(copyBtn.getAttribute("aria-label")).toBe("Copy");
+    expect(copyBtn.getAttribute("title")).toBe("Copy");
+    copyBtn.click();
+    await tick();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("shown part only"); // exactly the DISPLAYED text
+    view.value = { phase: "closed" };
+    await tick();
+  });
+
+  it("copy value keeps the chunked/ANSI semantics: ANSI-stripped, truncated prepared source (same as before the move)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { handle, view } = makeHandle();
+    mountHost({ handle, plaintext: false });
+    view.value = {
+      phase: "text",
+      path: "/p/x.log",
+      text: "\u001b[36m==>\u001b[0m hi\n",
+      truncated: false,
+      size: 12,
+    };
+    await tick();
+    (document.querySelector(".preview-copy button") as HTMLElement).click();
+    await tick();
+    expect(writeText).toHaveBeenCalledWith("==> hi\n"); // ANSI-stripped, trailing newline kept
+    view.value = { phase: "closed" };
+    await tick();
+  });
+
+  it("markdown rendered mode: the header copy still copies the SOURCE text", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { handle, view } = makeHandle();
+    mountHost({ handle, plaintext: false });
+    view.value = { phase: "text", path: "/p/README.md", text: "# Hi\n\nbody", truncated: false, size: 10 };
+    await tick();
+    expect(document.querySelector(".preview-md")).not.toBeNull(); // rendered mode
+    (document.querySelector(".preview-copy button") as HTMLElement).click();
+    await tick();
+    expect(writeText).toHaveBeenCalledWith("# Hi\n\nbody");
+    view.value = { phase: "closed" };
+    await tick();
+  });
+
+  it("image / loading phases have no copy value ⇒ no header copy button; a text → image switch drops it", async () => {
+    const { handle, view } = makeHandle();
+    mountHost({ handle, plaintext: false });
+    view.value = { phase: "text", path: "/p/a.txt", text: "body", truncated: false, size: 4 };
+    await tick();
+    expect(document.querySelector(".preview-copy")).not.toBeNull();
+    view.value = {
+      phase: "image",
+      path: "/p/a.png",
+      dataUrl: "data:image/png;base64,AAAA",
+      mime: "image/png",
+      dims: { w: 4, h: 2 },
+      size: 2048,
+    };
+    await tick();
+    expect(document.querySelector(".preview-copy")).toBeNull();
+    view.value = { phase: "loading", path: "/p/b.ts" };
+    await tick();
+    expect(document.querySelector(".preview-copy")).toBeNull();
     view.value = { phase: "closed" };
     await tick();
   });

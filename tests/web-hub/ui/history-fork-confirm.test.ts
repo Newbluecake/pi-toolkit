@@ -13,6 +13,7 @@ import type { ForkReason, ProofGap } from "../../../src/web-hub/protocol/session
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   for (const w of mounted.splice(0)) w.unmount();
+  localStorage.removeItem("pwh_hide_plaintext_warn");
   document.body.innerHTML = "";
 });
 
@@ -86,6 +87,7 @@ describe("HistoryForkConfirm: chrome", () => {
   });
 
   it("plaintext adds the LAN warning; absent without it", () => {
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: hidden by default; opt in to show
     expect(text({ reason: "manual", plaintext: true })).toContain("Plain HTTP");
     expect(text({ reason: "manual" })).not.toContain("Plain HTTP");
   });

@@ -10,7 +10,7 @@
   split/unified segmented control — `v-if`-removed (never CSS-hidden) in the ≤767px viewport so
   it can never enter the Tab cycle (#11; the mobile view is forced unified, §4.4) — refresh,
   CopyButton (`W/path`) and close. password+http shows the plaintext-transport note (hideable
-  via the explicit `pwh_hide_plaintext_warn` browser opt-out, like every plaintext warning).
+  via the `pwh_hide_plaintext_warn` browser pref, hidden by default like every plaintext warning).
 
   Body, six states: loading / binary / empty / error (code+reason mapped via `wtdErrorKey` —
   incl. the 415 symlink case — plus the §4.5 不可查看 terminal state) / patch (DiffRows).
@@ -47,7 +47,7 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 
-// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the plaintext-transport note.
+// `pwh_hide_plaintext_warn` (browser pref, hidden by default) gates the plaintext-transport note.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
 const showPlainWarning = computed(() => warn.warnVisible(props.plaintext));
 

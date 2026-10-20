@@ -166,6 +166,13 @@ code.md-code.path-ref {
   flex: none;
 }
 
+/* 2026-10-20: the header's copy button (value published by PreviewText via `update:copyValue`)
+ * — CopyButton's root span; keeps the ghost icon button out of the title/path flex shrinkage. */
+.preview-copy {
+  display: inline-flex;
+  flex: none;
+}
+
 .preview-download-error {
   margin: 0;
   padding: var(--sp-2) var(--sp-3);

@@ -7,15 +7,12 @@ import PreviewText from "../../../src/web-hub/ui/src/components/preview/PreviewT
 
 /**
  * `PreviewText.vue` (web-hub-preview plan v3 §4.6, package PV5; dir-plan v3.1 §4.1/§4.3 PM):
- * monospace `<pre>` body, the truncated badge + note, a copy button that copies exactly the
- * DISPLAYED part — plus the markdown features: default rendered view (transcript's MdBlock),
- * rendered⇄source toggle (`aria-pressed`), truncated-md last-half-line drop, and the AST-node
- * budget's forced-source degradation.
+ * monospace `<pre>` body, the truncated badge + note, the copy VALUE (exactly the DISPLAYED
+ * part — published to PreviewHost's header via `update:copyValue` since 2026-10-20, when the
+ * copy button moved out of this toolbar) — plus the markdown features: default rendered view
+ * (transcript's MdBlock), rendered⇄source toggle (`aria-pressed`), truncated-md
+ * last-half-line drop, and the AST-node budget's forced-source degradation.
  */
-
-const flush = async (n = 10): Promise<void> => {
-  for (let i = 0; i < n; i++) await Promise.resolve();
-};
 
 describe("PreviewText.vue", () => {
   it("renders the text in a <pre> (verbatim, whitespace preserved)", () => {
@@ -37,27 +34,22 @@ describe("PreviewText.vue", () => {
     expect(note.text()).toContain("first 256.0 KiB of 2.3 MiB");
   });
 
-  it("the copy button copies the displayed text (never the path)", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
-    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+  it("publishes the copy value (the displayed text, never the path) via update:copyValue", async () => {
     const wrapper = mount(PreviewText, { props: { text: "shown part only", truncated: true } });
-    await wrapper.get("button").trigger("click");
-    await flush();
-    expect(writeText).toHaveBeenCalledTimes(1);
-    expect(writeText).toHaveBeenCalledWith("shown part only");
+    expect(wrapper.emitted("update:copyValue")).toEqual([["shown part only"]]);
+    // no copy button in this toolbar anymore (2026-10-20 — the header owns it); the bar itself
+    // is hidden when empty (a plain non-md file has no other actions)
+    expect(wrapper.find(".preview-text-actions").exists()).toBe(false);
+    wrapper.unmount();
+    expect(wrapper.emitted("update:copyValue")!.at(-1)).toEqual([null]);
   });
 
   it("L1: ANSI escapes are stripped from the display AND the copy value (terminal logs)", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
-    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
     const text = "\u001b[36m==>\u001b[0m 正在安装…\n\u001b[1;32mOK\u001b[0m\n";
     const wrapper = mount(PreviewText, { props: { text, truncated: false, filename: "x.log", path: "/tmp/x.log" } });
     expect(wrapper.get("pre.preview-text-body").text()).toBe("==> 正在安装…\nOK"); // DOM text() trims the trailing newline
-    await wrapper.get(".preview-text-actions button").trigger("click");
-    await flush();
-    expect(writeText).toHaveBeenCalledWith("==> 正在安装…\nOK\n"); // copy keeps it
+    expect(wrapper.emitted("update:copyValue")).toEqual([["==> 正在安装…\nOK\n"]]); // copy keeps the trailing newline
+    wrapper.unmount();
   });
 });
 
@@ -116,7 +108,8 @@ describe("PreviewText.vue — markdown (dir-plan §4.1, PM package)", () => {
       expect(wrapper.find(".preview-toggle").exists()).toBe(false);
       expect(wrapper.find(".preview-md").exists()).toBe(false);
       expect(wrapper.get("pre.preview-text-body").text()).toBe(text);
-      expect(wrapper.findAll("button")).toHaveLength(1); // just the copy button
+      expect(wrapper.findAll("button")).toHaveLength(0); // 2026-10-20: the copy button moved to the header
+      expect(wrapper.find(".preview-text-actions").exists()).toBe(false); // …and an empty bar is hidden
     }
   });
 
@@ -130,7 +123,7 @@ describe("PreviewText.vue — markdown (dir-plan §4.1, PM package)", () => {
     expect(wrapper.find(".preview-toggle").exists()).toBe(false);
     expect(wrapper.find(".preview-html").exists()).toBe(false);
     expect(wrapper.get("pre.preview-text-body").text()).toBe("<p>plain</p>");
-    expect(wrapper.findAll("button")).toHaveLength(1); // just the copy button
+    expect(wrapper.findAll("button")).toHaveLength(0); // 2026-10-20: the copy button moved to the header
   });
 
   it("a truncated md drops its incomplete final line and shows the render-specific note", async () => {
@@ -155,17 +148,16 @@ describe("PreviewText.vue — markdown (dir-plan §4.1, PM package)", () => {
   });
 
   it("copy always takes the DISPLAYED part's source (truncated md ⇒ prepared text)", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
-    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
     const wrapper = mount(PreviewText, {
       props: { text: "shown\nhalf", truncated: true, filename: "a.md", path: "/p/a.md" },
     });
-    // copy button is the last button in the actions row (after the two toggle buttons)
-    const copyBtn = wrapper.findAll("button").at(-1)!;
-    await copyBtn.trigger("click");
-    await flush();
-    expect(writeText).toHaveBeenCalledWith("shown");
+    // rendered mode by default — the published copy value is the prepared source either way
+    expect(wrapper.emitted("update:copyValue")).toEqual([["shown"]]);
+    // switching to source keeps the SAME copy value (the toolbar keeps only the toggle now)
+    await toggle(wrapper, 1).trigger("click");
+    expect(wrapper.emitted("update:copyValue")!.at(-1)).toEqual(["shown"]);
+    expect(wrapper.findAll(".preview-text-actions button")).toHaveLength(2); // just the toggle pair
+    wrapper.unmount();
   });
 
   it("mode survives a same-path content change (retry keeps the selection, B4)", async () => {
@@ -284,9 +276,6 @@ describe("PreviewText.vue — chunked stream mode", () => {
 
   it("done flushes the pending tail; status text disappears; observer disconnects; copy = consumed source", async () => {
     vi.stubGlobal("IntersectionObserver", FakeIO);
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
-    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
     const stream = mkStream({ chunks: ["a\n\nb\nc"] });
     const w = mountStream(stream);
     expect(w.find(".preview-stream-status").exists()).toBe(true);
@@ -295,17 +284,15 @@ describe("PreviewText.vue — chunked stream mode", () => {
     await w.vm.$nextTick();
     expect(w.find(".preview-stream-status").exists()).toBe(false);
     expect(liveIO()).toBeUndefined();
-    await w.get(".preview-text-actions button:last-of-type").trigger("click");
-    await flush();
-    expect(writeText).toHaveBeenCalledWith("a\n\nb\nc\nd\n");
+    // the published copy value is the consumed source (header button reads this, 2026-10-20)
+    expect(w.emitted("update:copyValue")!.at(-1)).toEqual(["a\n\nb\nc\nd\n"]);
+    // a terminal (done) non-md stream leaves the actions bar EMPTY ⇒ it is hidden
+    expect(w.find(".preview-text-actions").exists()).toBe(false);
     w.unmount();
   });
 
   it("L1: an escape sequence split across chunk boundaries leaves no residue (display + copy)", async () => {
     vi.stubGlobal("IntersectionObserver", FakeIO);
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
-    Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
     // chunk 1 ends INSIDE `\u001b[36m`; chunk 2 completes it — the cut may also split a CJK char
     const stream = mkStream({ chunks: ["\u001b[36m==>\u001b[0m line one\nline two \u001b[3"] });
     const w = mountStream(stream);
@@ -315,9 +302,7 @@ describe("PreviewText.vue — chunked stream mode", () => {
     stream.state = "done";
     await w.vm.$nextTick();
     expect(w.findAll(".preview-seg").map((e) => e.text())).toEqual(["==> line one", "line two 彩色 tail"]);
-    await w.get(".preview-text-actions button:last-of-type").trigger("click");
-    await flush();
-    expect(writeText).toHaveBeenCalledWith("==> line one\nline two 彩色 tail\n");
+    expect(w.emitted("update:copyValue")!.at(-1)).toEqual(["==> line one\nline two 彩色 tail\n"]);
     w.unmount();
   });
 

@@ -4,7 +4,7 @@
   never HTML — the same string is echoed back as `expectCwd` by `useNewSession.confirm()`),
   the reason (`unknown-dir` / `lan`), and — on plaintext LAN (`plaintext` prop, mirrors
   AttachmentTray's warning rule) — the unencrypted-traffic warning (hideable via the explicit
-  `pwh_hide_plaintext_warn` browser opt-out, like every plaintext warning). Pure presentation:
+  `pwh_hide_plaintext_warn` browser pref, hidden by default like every plaintext warning). Pure presentation:
   the confirm/cancel semantics live in `useNewSession` (SP11), this component only forwards clicks.
 -->
 <script setup lang="ts">
@@ -27,7 +27,7 @@ const props = defineProps<{
 const emit = defineEmits<{ confirm: []; cancel: [] }>();
 const { t } = useI18n();
 
-// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the warning line.
+// `pwh_hide_plaintext_warn` (browser pref, hidden by default) gates the warning line.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
 const showPlainWarning = computed(() => warn.warnVisible(props.plaintext));
 

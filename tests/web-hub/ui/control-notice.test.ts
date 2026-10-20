@@ -44,12 +44,14 @@ describe("ControlNotice.vue (§7.6)", () => {
 
   it("variant selection: token ⇒ local; password+plaintext ⇒ plainHttp; password+https ⇒ https", () => {
     expect(mountNotice({ mode: "token" }).find(".notice-body").text()).toContain("this computer's");
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: hidden by default; opt in to show
     expect(mountNotice({ mode: "password", plaintext: true }).find(".notice-body").text()).toContain("plain HTTP");
     expect(mountNotice({ mode: "password", plaintext: false }).find(".notice-body").text()).toContain("host machine");
   });
 
   it("props win over the injected env; env fills in when props are absent", () => {
     const env = fakeEnv({ authMode: "password", plaintext: true });
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: hidden by default; opt in to show
     expect(mountNotice({}, env).find(".notice-body").text()).toContain("plain HTTP");
     expect(mountNotice({ plaintext: false }, env).find(".notice-body").text()).toContain("host machine");
   });
@@ -109,7 +111,8 @@ describe("ControlNotice.vue (§7.6)", () => {
     localStorage.removeItem("pwh_hide_plaintext_warn");
   });
 
-  it("plainHttp dismissal only persists in sessionStorage, not localStorage", async () => {
+  it("plainHttp dismissal only persists in sessionStorage, not localStorage (warnings shown ⇒ session-only)", async () => {
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: hidden by default; opt in to show (session-only dismissal)
     const w1 = mountNotice({ mode: "password", plaintext: true });
     await w1.find(".notice-dismiss").trigger("click");
     expect(sessionStorage.getItem("webhub.controlNotice.dismissed.plainHttp")).toBe("1");

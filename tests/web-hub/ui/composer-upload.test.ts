@@ -49,6 +49,7 @@ const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   vi.unstubAllGlobals();
   for (const w of mounted.splice(0)) w.unmount();
+  localStorage.removeItem("pwh_hide_plaintext_warn");
 });
 
 function readyAttachment(over: Partial<Attachment> = {}): Attachment {
@@ -538,6 +539,7 @@ describe("AttachmentTray (§4.2)", () => {
   });
 
   it("plaintext ⇒ 托盘非空时常驻警告且无关闭按钮；非 plaintext 无警告", async () => {
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: warnings are hidden by default; opt in to show
     const plain = mountComposer({ tray: [readyAttachment()], plaintext: true });
     const warning = plain.w.find(".tray-plain-warning");
     expect(warning.exists()).toBe(true);

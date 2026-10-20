@@ -130,6 +130,7 @@ const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   // every open dialog holds a ref-counted body scroll lock — unmount everything and reset
   for (const w of mounted.splice(0)) w.unmount();
+  localStorage.removeItem("pwh_hide_plaintext_warn");
   document.body.style.overflow = "";
   document.body.innerHTML = "";
 });
@@ -227,6 +228,7 @@ describe("DirPicker.vue (SP12)", () => {
 
   it("409 E_CONFIRM_REQUIRED ⇒ the SpawnConfirm view shows resolvedCwd and the LAN warning; confirm resends with confirm+expectCwd", async () => {
     let confirmed = false;
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: warnings hidden by default; opt in to show
     const h = harness({
       start: async (req) => {
         if (req.confirm === true) {
@@ -248,6 +250,7 @@ describe("DirPicker.vue (SP12)", () => {
 
     expect(q(".spawn-confirm-cwd").textContent).toBe("/real/path");
     expect(q(".spawn-confirm").textContent).toContain("not in the known list");
+    // 2026-10-20: warnings are hidden by default — this test opted in via the pref "0"
     expect(q(".spawn-plain-warning").textContent).toContain("Plain HTTP");
 
     await click(q(".spawn-confirm .btn-primary"));

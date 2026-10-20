@@ -11,7 +11,7 @@ const control = {
   noticePlainHttp:
     "Control is on. This page can send messages to your agents and stop them. Over plain HTTP, anyone who can see this network's traffic can hijack your session and run arbitrary commands as you.",
   // The plainHttp body minus its plaintext sentence — used ONLY when the browser pref
-  // `pwh_hide_plaintext_warn` (explicit user opt-out, 2026-10) hides plaintext warnings: the
+  // `pwh_hide_plaintext_warn` (browser pref, hidden by default since 2026-10-20) hides plaintext warnings: the
   // control-risk remainder stays visible.
   noticePlainHttpMasked: "Control is on. This page can send messages to your agents and stop them.",
   noticeLocal: "Control is on. Messages you send run with this computer's full permissions.",

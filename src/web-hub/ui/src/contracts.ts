@@ -145,6 +145,9 @@ export interface SessionInfoProps {
 export interface CopyButtonProps {
   readonly value: string;
   readonly label: string;
+  /** Optional tooltip (`title`) on the button — absent keeps the pre-2026-10-20 DOM
+   *  (aria-label only), so existing usages stay byte-identical. */
+  readonly title?: string | undefined;
 }
 
 export interface ContextMeterProps {

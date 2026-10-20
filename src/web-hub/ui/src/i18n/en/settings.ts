@@ -43,8 +43,8 @@ const settings = {
   plainWarnSection: "Plaintext HTTP warnings",
   plainWarnHint:
     "Hiding the warnings changes nothing about the transport — traffic on this network stays unencrypted and readable by others.",
-  plainWarnShow: "Show warnings (default)",
-  plainWarnHide: "Hide warnings",
+  plainWarnShow: "Show warnings",
+  plainWarnHide: "Hide warnings (default)",
   // 2026-10-18 PWA 「Install as app」 card — the beforeinstallprompt capture
   // (composables/useInstallPrompt.ts) + pure derive (logic/pwaInstall.ts) drive which row
   // renders: installed status / install button / per-platform guidance. The chrome://flags

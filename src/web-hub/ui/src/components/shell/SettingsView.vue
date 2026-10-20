@@ -114,8 +114,9 @@ function setKeepAlive(v: number): void {
   setKeepAlivePref(keepAliveStorage, v);
 }
 
-// 2026-10 明文警告开关（用户显式选择「http 警告支持通过设置关闭」）：`pwh_hide_plaintext_warn`
-// 浏览器级偏好（与 pwh_keepalive 同族），控制全部 7 处明文 HTTP 警告的可见性。卡片仅在
+// 2026-10 明文警告开关（用户显式选择「http 警告支持通过设置关闭」；2026-10-20 起默认隐藏，
+// 开关语义为「显示明文 HTTP 警告」）：`pwh_hide_plaintext_warn` 浏览器级偏好（与 pwh_keepalive
+// 同族），控制全部 7 处明文 HTTP 警告的可见性。卡片仅在
 // 确实以明文提供的页面渲染——判定复用警告组件自己的谓词 CONTROL_ENV.plaintext（App 提供：
 // 密码模式 ∧ http:）；https / 回环 token 页面根本没有明文警告，开关无从谈起。只影响警告文案
 // 可见性，不改变任何安全行为。

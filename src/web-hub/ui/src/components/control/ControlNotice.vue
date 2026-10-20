@@ -8,8 +8,8 @@
   traffic can hijack the session — only remembers the dismissal for the current browser
   session (`sessionStorage`, same key prefix): a NEW session re-shows it, which is the one
   piece of the old "never closable" contract this build deliberately keeps as a last-resort
-  reminder for the most dangerous access mode. 2026-10 explicit user opt-out: the browser pref
-  `pwh_hide_plaintext_warn` (`composables/usePlaintextWarning.ts` — the sole LAN user accepts
+  reminder for the most dangerous access mode. 2026-10 browser pref `pwh_hide_plaintext_warn`
+  (`composables/usePlaintextWarning.ts` — hidden by default since 2026-10-20; the sole LAN user accepts
   the plaintext risk) drops ONLY the plaintext sentence from the plainHttp body
   (`control.noticePlainHttpMasked` keeps the control-risk remainder); the notice itself — title,
   expand, dismissal, risk-scaled storage memory — keeps rendering.
@@ -48,7 +48,7 @@ const variant = computed<"plainHttp" | "https" | "local">(() => {
   return "local";
 });
 
-// The explicit browser opt-out (`pwh_hide_plaintext_warn`): when the pref hides plaintext
+// The browser pref (`pwh_hide_plaintext_warn`, hidden by default): while the pref hides plaintext
 // warnings, the plainHttp body swaps to the masked copy — the control-risk remainder ("this
 // page can send messages to your agents and stop them") stays visible.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
@@ -80,8 +80,8 @@ function dismissKey(v: string): string {
 
 /** `plainHttp` is the one variant that only remembers the dismissal for this browser session
  * (anyone sniffing plaintext HTTP traffic is the highest-risk scenario this notice covers) —
- * UNLESS the user explicitly opted out of plaintext warnings (`pwh_hide_plaintext_warn`,
- * 2026-10-09 「我不想经常看到这个提示」): then it remembers the dismissal like the others. */
+ * UNLESS plaintext warnings are hidden (`pwh_hide_plaintext_warn` — the default since
+ * 2026-10-20; 2026-10-09 「我不想经常看到这个提示」): then it remembers the dismissal like the others. */
 function storageFor(v: string): Storage | null {
   try {
     return v === "plainHttp" && !warn.hidden.value ? window.sessionStorage : window.localStorage;

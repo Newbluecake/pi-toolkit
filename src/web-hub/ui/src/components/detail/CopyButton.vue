@@ -71,7 +71,7 @@ onScopeDispose(() => {
 
 <template>
   <span>
-    <button class="btn btn-ghost btn-icon" type="button" :aria-label="label" @click="onClick">
+    <button class="btn btn-ghost btn-icon" type="button" :aria-label="label" :title="title" @click="onClick">
       <AppIcon v-if="feedback === 'idle'" name="copy" />
       <AppIcon v-else name="check" />
     </button>

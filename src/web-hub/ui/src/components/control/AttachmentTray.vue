@@ -16,8 +16,8 @@
   - §4.2 plaintext warning: when `plaintext` (LAN password mode over http:), a permanent,
     NON-dismissible warning line sits at the tray bottom (distinct from ControlNotice's
     dismissible banner — this component has no close button for it). Hideable ONLY via the
-    explicit browser-wide opt-out `pwh_hide_plaintext_warn` (`composables/usePlaintextWarning.ts`,
-    2026-10 user ruling: the sole LAN user accepts the plaintext risk) — never dismissible
+    browser-wide pref `pwh_hide_plaintext_warn` (`composables/usePlaintextWarning.ts`, hidden by
+    default since 2026-10-20; the sole LAN user accepts the plaintext risk) — never dismissible
     in-page.
 
   Thumbnails (2026-10 attachment-preview feature, revising the earlier U5 ruling that
@@ -69,7 +69,7 @@ function onPreview(item: Attachment): void {
   attachPreview.openPreview(item);
 }
 
-// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the §4.2 warning line.
+// `pwh_hide_plaintext_warn` (browser pref, hidden by default) gates the §4.2 warning line.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
 const showPlainWarning = computed(() => warn.warnVisible(props.plaintext));
 

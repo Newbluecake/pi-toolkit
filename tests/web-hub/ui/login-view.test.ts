@@ -59,8 +59,10 @@ describe("LoginView.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
   it("shows the plaintext-HTTP notice only when plaintext is true", () => {
     const off = mount(LoginView, { props: baseProps() });
     expect(off.text()).not.toContain("Plain HTTP");
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: hidden by default; opt in to show
     const on = mount(LoginView, { props: { ...baseProps(), plaintext: true } });
     expect(on.text()).toContain("Plain HTTP");
+    localStorage.removeItem("pwh_hide_plaintext_warn");
   });
 
   it("shows the initial-password hint only when initialPasswordHint is true", () => {

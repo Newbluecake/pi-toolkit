@@ -228,9 +228,11 @@ describe("WorktreeDiffDialog — header + view switching (§4.3)", () => {
   });
 
   it("password+http renders the plaintext warning; default hides it", () => {
+    localStorage.setItem("pwh_hide_plaintext_warn", "0"); // 2026-10-20: hidden by default; opt in to show
     const shown = mountDialog({ plaintext: true });
     expect(document.querySelector(".wtd-plaintext")!.textContent).toContain("Plain-text connection");
     shown.wrapper.unmount(); // teleported content leaves the body with the unmount
+    localStorage.removeItem("pwh_hide_plaintext_warn");
     mountDialog();
     expect(document.querySelector(".wtd-plaintext")).toBeNull(); // token/TLS default: absent
   });

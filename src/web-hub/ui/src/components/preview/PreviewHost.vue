@@ -3,8 +3,8 @@
   P3): Teleports to `<body>` and renders `usePreview`'s state machine (`PREVIEW_CTX` — provided
   by PV6's App wiring; absent ⇒ nothing renders): loading / image / text / dir / unsupported /
   tooLarge / error, with the header's basename + full path + close button and the §5.2
-  plaintext-transport standing warning (hideable via the explicit `pwh_hide_plaintext_warn`
-  browser opt-out, like every plaintext warning).
+  plaintext-transport standing warning (hidden by default via the `pwh_hide_plaintext_warn`
+  browser pref since 2026-10-20, like every plaintext warning).
 
   Interaction contract (§4.6):
   - scrim click closes (`@click.self` — clicks INSIDE the panel never reach it);
@@ -46,7 +46,7 @@ const ctx = inject(PREVIEW_CTX, null);
 const hub = inject(HUB_CTX, null);
 const { t } = useI18n();
 
-// `pwh_hide_plaintext_warn` (explicit browser opt-out) gates the §5.2 standing warning.
+// `pwh_hide_plaintext_warn` (browser pref, hidden by default) gates the §5.2 standing warning.
 const warn = usePlaintextWarning({ storage: browserLocalStorage() });
 const showPlainWarning = computed(() => warn.warnVisible(ctx?.plaintext === true));
 
@@ -202,6 +202,16 @@ function close(): void {
 const dlBusy = ref(false);
 const dlFailed = ref(false);
 
+/** 复制 (2026-10-20 用户裁定): the copy button moved from PreviewText's toolbar into the
+ *  header, sitting right before 下载 with the same ghost-icon weight. PreviewText stays the
+ *  SOLE source of the value (ANSI-stripped shown source / consumed stream segments — the
+ *  chunked preview.chunk.v1 semantics unchanged) and publishes it via `update:copyValue`;
+ *  `null` (image/dir/error/loading phases, or a closed dialog) ⇒ no button. */
+const copyValue = ref<string | null>(null);
+function onCopyValue(v: string | null): void {
+  copyValue.value = v;
+}
+
 /** Only file phases (text/image — markdown IS the text phase) offer download; dir and every
  *  failure phase don't. The button also requires the preview transport (a component-level
  *  fake without HUB_CTX never renders a dead button). Reset the failure line on every
@@ -223,6 +233,7 @@ watch(
   () => ("path" in view.value ? `${view.value.phase}:${view.value.path}` : view.value.phase),
   () => {
     dlFailed.value = false;
+    copyValue.value = null; // stale copy text from the previous view never survives a switch
   },
 );
 
@@ -457,6 +468,17 @@ function onKeydown(ev: KeyboardEvent): void {
           <span class="preview-path" :title="path" translate="no"
             ><bdi dir="ltr">{{ path }}</bdi></span
           >
+          <!-- 复制 (2026-10-20): text phase only — the value arrives from PreviewText's
+               `update:copyValue` channel; sits immediately before 下载 (header order:
+               copy → download → close). Same ghost-icon weight + copied feedback via
+               CopyButton. -->
+          <CopyButton
+            v-if="view.phase === 'text' && copyValue !== null"
+            class="preview-copy"
+            :value="copyValue"
+            :label="t('common.copy')"
+            :title="t('common.copy')"
+          />
           <!-- preview-download: files only (text/image); the dir phase never shows it. Native
                button ⇒ keyboard-reachable inside the panel's Tab cycle; spinner while busy. -->
           <button
@@ -513,6 +535,7 @@ function onKeydown(ev: KeyboardEvent): void {
             @load-more="nav?.loadMore?.()"
             @reopen="nav?.reopen?.()"
             @retry-stream="nav?.loadMore?.()"
+            @update:copy-value="onCopyValue"
           />
           <!-- A3/P3: the listing — rendered only with the navigation face (a frozen fake can
                never produce a dir phase; the guard keeps the branch total anyway).
