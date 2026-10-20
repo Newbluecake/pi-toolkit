@@ -41,13 +41,8 @@ const previewBase = inject(PREVIEW_BASE_DIR, null);
 /** External http(s) image — never fetched, chip links out (user ruling). */
 // Protocol-relative `//host/x` is external too (verifier nit) — never fetched, chip link.
 const external = computed(() => /^(?:https?:)?\/\//i.test(props.src));
-const externalHost = computed(() => {
-  try {
-    return new URL(props.src, "https://x.invalid").host;
-  } catch {
-    return "";
-  }
-});
+// Host via regex (no URL base literal: check:web forbids external URLs in the bundle).
+const externalHost = computed(() => /^(?:https?:)?\/\/([^/?#\s]+)/i.exec(props.src)?.[1] ?? "");
 
 /** Relative/absolute src ⇒ the resolved preview request path (same resolution as pathlink). */
 const resolved = computed(() => {
