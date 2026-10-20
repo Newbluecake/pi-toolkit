@@ -15,14 +15,21 @@ const validInput = {
 describe("ask_user schema compatibility", () => {
   it("accepts the documented input shape and preserves cardinality keywords", () => {
     expect(Value.Check(InputSchema, validInput)).toBe(true);
-    expect(InputSchema.properties.questions.minItems).toBe(1);
+    // questions is optional at the schema level since r4 (dismissParked); the 1-4 cardinality
+    // for actual asks is enforced in execute() with a model-actionable error.
     expect(InputSchema.properties.questions.maxItems).toBe(4);
     expect(InputSchema.properties.questions.items.properties.options.minItems).toBe(2);
     expect(InputSchema.properties.questions.items.properties.options.maxItems).toBe(4);
   });
 
-  it("rejects missing questions and too few options", () => {
-    expect(Value.Check(InputSchema, {})).toBe(false);
+  it("r4: dismissParked is accepted alone and questions may be omitted", () => {
+    expect(Value.Check(InputSchema, { dismissParked: true })).toBe(true);
+    expect(Value.Check(InputSchema, {})).toBe(true); // schema-valid; execute() rejects without dismissParked
+    expect(Value.Check(InputSchema, { ...validInput, dismissParked: true })).toBe(true); // schema-valid; execute() rejects the combo
+    expect(Value.Check(InputSchema, { dismissParked: "yes" })).toBe(false);
+  });
+
+  it("rejects too few options", () => {
     expect(
       Value.Check(InputSchema, {
         questions: [{ question: "Which option?", options: [{ label: "A" }] }],

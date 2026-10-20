@@ -12,6 +12,8 @@ If you recommend an option, prefix its label with "(Recommended)" and list it fi
 
 The user can skip any question instead of answering it. A skipped question comes back in answers as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment for that question and do NOT immediately re-ask it.
 
+If a previous ask_user call was paused by a background-completion interrupt and the background result already settles the question(s), call {"dismissParked":true} (no questions) once to clear the parked entries instead of re-asking. dismissParked cannot be combined with questions.
+
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
 
@@ -30,6 +32,7 @@ const EXPECTED_GUIDELINES = [
   "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
   "Do NOT include an 'Other' option yourself — it is always available automatically.",
   "The user may skip any question; a skipped answer has skipped:true and means 'you decide' — do not immediately re-ask it.",
+  "If a background completion already settles question(s) parked by an earlier interrupt, call ask_user({dismissParked:true}) once to clear them instead of re-asking.",
 ];
 
 function registeredTool(): any {
@@ -63,7 +66,7 @@ describe("registered prompt quality", () => {
     expect(question.properties.header.description).toContain(`<=${HEADER_MAX_CHARS} chars`);
     expect(question.properties.options.minItems).toBe(2);
     expect(question.properties.options.maxItems).toBe(4);
-    expect(tool.parameters.properties.questions.minItems).toBe(1);
+    expect(tool.parameters.properties.questions.minItems).toBeUndefined(); // optional since r4 (dismissParked)
     expect(tool.parameters.properties.questions.maxItems).toBe(4);
   });
 });

@@ -21,6 +21,7 @@ import {
   InterruptCoordinator,
   INTERRUPTED_RENDER_TEXT,
   deferredResultText,
+  dismissedParkedText,
   interruptedResultText,
   normalizeInterruptSettings,
   parkedNotifyText,
@@ -32,6 +33,7 @@ import { normalizeQuestions } from "./normalize.js";
 import {
   PARKED_CUSTOM_TYPE,
   PARKED_REMINDER_CUSTOM_TYPE,
+  PARKED_REMINDER_WINDOW_MS,
   type ParkedRegistry,
   createParkedRegistry,
   questionFingerprint,
@@ -476,6 +478,8 @@ If you recommend an option, prefix its label with "(Recommended)" and list it fi
 
 The user can skip any question instead of answering it. A skipped question comes back in answers as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment for that question and do NOT immediately re-ask it.
 
+If a previous ask_user call was paused by a background-completion interrupt and the background result already settles the question(s), call {"dismissParked":true} (no questions) once to clear the parked entries instead of re-asking. dismissParked cannot be combined with questions.
+
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
 
@@ -553,6 +557,9 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
     pi.on("session_compact", (_event, ctx) => {
       restoreFromBranch(ctx);
       if (!settingsOf().enabled) return;
+      // r3: the reminder only lists entries parked within the last PARKED_REMINDER_WINDOW_MS
+      // (2h); older ones are pruned here so the status-bar count matches what is retained.
+      if (parked.prune(clock.now(), PARKED_REMINDER_WINDOW_MS)) persist();
       const items = parked.items();
       if (items.length === 0) return;
       // §6.4: bring the parked questions back into the compacted context WITHOUT triggering
@@ -572,11 +579,18 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
     pi.on("agent_settled", (_event, ctx) => {
       if (!settingsOf().enabled || runSeq === 0) return;
       const pending = parked.items().filter((item) => item.runSeq === runSeq);
-      if (pending.length === 0) return;
       // §4.4: one Chinese notify listing the still-parked questions; never triggers a turn.
       // Exactly-once per parked question: the flag clears as soon as the notify went out.
-      parked.markNotified(pending.map((item) => item.fp));
-      if (typeof ctx.ui?.notify === "function") ctx.ui.notify(parkedNotifyText(pending), "info");
+      if (pending.length > 0) {
+        parked.markNotified(
+          pending.map((item) => item.fp),
+          runSeq,
+        );
+        if (typeof ctx.ui?.notify === "function") ctx.ui.notify(parkedNotifyText(pending), "info");
+      }
+      // r2 move-on retire: entries notified in an EARLIER run that this full run did not
+      // re-ask — the model saw the notify and decided. Persist so the retirement survives.
+      if (parked.retireMoveOn(runSeq)) persist();
     });
   }
 
@@ -595,6 +609,7 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
       "Do NOT include an 'Other' option yourself — it is always available automatically.",
       "The user may skip any question; a skipped answer has skipped:true and means 'you decide' — do not immediately re-ask it.",
+      "If a background completion already settles question(s) parked by an earlier interrupt, call ask_user({dismissParked:true}) once to clear them instead of re-asking.",
     ],
     parameters: InputSchema,
 
@@ -605,7 +620,31 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       _onUpdate: AgentToolUpdateCallback<AskUserDetails> | undefined,
       ctx: ExtensionContext,
     ): Promise<ExecuteResult> {
-      const normalized = normalizeQuestions(params.questions as InputQuestion[]);
+      // r4 dismissParked: clear every parked entry and return immediately, without any UI.
+      // The combo dismissParked:true + questions is rejected with a clear error (user ruling:
+      // not "dismiss + ask"). Checked before mode/normalize so it works in every mode.
+      const dismiss = params.dismissParked === true;
+      const rawQuestions = (params.questions ?? []) as InputQuestion[];
+      if (dismiss && rawQuestions.length > 0)
+        throw new Error(
+          'Error: dismissParked: true cannot be combined with questions. To clear parked questions, call ask_user({"dismissParked":true}) alone; to ask, omit dismissParked.',
+        );
+      if (dismiss) {
+        const cleared = bgWired ? parked.clear() : 0;
+        if (cleared > 0) persist();
+        return {
+          content: [{ type: "text", text: dismissedParkedText(cleared) }],
+          details: { questions: [], answers: {}, cancelled: false, dismissed: cleared } satisfies Result & {
+            dismissed: number;
+          },
+        };
+      }
+      if (rawQuestions.length === 0)
+        throw new Error(
+          'Error: questions is required (1-4 items). To clear parked questions without asking, call ask_user({"dismissParked":true}).',
+        );
+
+      const normalized = normalizeQuestions(rawQuestions);
       const validationError = validateInput(normalized.questions);
       if (validationError) throw new Error(`Error: ${validationError}`);
       const questions = normalized.questions as Question[];
@@ -671,8 +710,16 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
 
       switch (outcome.kind) {
         case "answered": {
-          // §5.2.1 budget reset: answered questions leave the parked registry.
-          if (bg !== undefined && parked.resolve(fps)) persist();
+          if (bg !== undefined) {
+            // §5.2.1 budget reset: answered questions leave the parked registry. r1
+            // answer-sweep: the SAME decision re-asked with different wording is also
+            // settled — drop parked entries matching by normalized header or question-text
+            // similarity (skipped answers count as answered: the outcome is still
+            // "answered").
+            const resolved = parked.resolve(fps);
+            const swept = parked.sweepAnswered(questions);
+            if (resolved || swept) persist();
+          }
           const result = outcome.result;
           const content: ExecuteResult["content"] = [
             {
@@ -760,6 +807,8 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       }
       const details = result.details;
       if (details?.interrupted !== undefined) return new Text(theme.fg("warning", INTERRUPTED_RENDER_TEXT), 0, 0);
+      if (details?.dismissed !== undefined)
+        return new Text(theme.fg("success", `✓ dismissed ${details.dismissed} parked`), 0, 0);
       if (!details || details.cancelled) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
 
       const box = new Box(0, 0);

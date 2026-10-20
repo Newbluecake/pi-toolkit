@@ -549,3 +549,36 @@ P1 首个提交先冻结 §3.1 端口、§5.1 `InteractionOutcome`、§6.2 `Inte
 6. #3 discriminated outcome、#5 发送适配层 + 兼容假设 + conformance，按评审建议实现。
 
 剩余开放问题：无。
+
+## 12. 修订（2026-10-20）：stale parked 清理（r1–r4，用户拍板）
+
+背景：被后台打断暂挂的提问只有「原样重问并作答」（精确 fingerprint 匹配）才会清除；
+换措辞重问 / 被方案直接解决的 parked 条目会活满 24h TTL，并在每次 session_compact
+（含 switch_context）被整体重新注入。本次修订四条（实现见 `src/ask-user/parked.ts` /
+`interrupt.ts` / `index.ts` / `types.ts`，测试 `tests/ask-user/parked.test.ts` 等）：
+
+1. **r1 answer-sweep**：任何一次 ask_user 被**作答**（skipped 也算作答；cancelled /
+   interrupted / deferred 不算）时，除精确 fp 外，额外清除与本次某个被作答问题
+   **规范化 header 相等**（trim + 小写 + 空白折叠）**或问题文本相似度 ≥ 0.6** 的 parked
+   条目。相似度为确定性的规范化（小写 + 空白折叠）字符 bigram Dice 系数，阈值常量为
+   `SWEEP_SIMILARITY_THRESHOLD = 0.6`（`parked.ts`），两侧均有单测。
+2. **r2 move-on retire**：parked 条目的 settle notify 已发出（`markNotified(fps,
+atRunSeq)` 记录 `notifiedRunSeq`）后，模型又完成了 ≥1 个完整 agent run
+   （`agent_start → agent_settled` 且 `runSeq > notifiedRunSeq`）仍未重问它 ⇒ 视为
+   「模型已看到并决定不问」，退役之，并经既有 appendEntry 快照持久化。重问
+   （`noteReask`）与新一轮打断/顺延会重置 `notifiedRunSeq`（move-on 时钟重新开始）。
+   **恢复语义**：快照恢复时 `runSeq` 归零（旧语义）且 `notifiedRunSeq` 一律置 0 ——
+   即恢复来的条目视同「已通知过」，恢复后第一个完整 run 结束时若未被重问即退役
+   （`sanitizeParkedEntries` 注释处已写明）。
+3. **r3 compact 提醒窗口**：`session_compact` 提醒只列出最近 **2h**
+   （`PARKED_REMINDER_WINDOW_MS`，`parked.ts`）内 parked 的条目；更老的条目在 compact
+   时被 prune 并持久化，使状态栏计数与实际保留一致。24h 硬 TTL 不变。
+4. **r4 dismissParked**：`ask_user` 新增可选参数 `dismissParked`（boolean）。
+   `questions` 上移到 schema 可选（向后兼容：既有调用不受影响；真实提问的 1-4 基数改由
+   execute() 以可执行的错误文案把关）。`dismissParked:true` 且未带 questions ⇒ 清空全部
+   parked 条目、立即返回、不弹任何 UI；**与 questions 同传 ⇒ 明确报错拒绝**（不是
+   「先清再问」）。RPC/web remote 路径不受影响。`interruptedResultText` 与
+   `parkedReminderText` 已改为指引模型在后台结果已解决问题时调用
+   `ask_user({"dismissParked":true})`；DESCRIPTION / promptGuidelines 同步更新。
+
+不变式保持：未接 background 端口（`bgWired` false）时无任何行为变化。

@@ -35,7 +35,9 @@ describe("schema contract", () => {
       },
     } as never);
     const schema = registered.parameters;
-    expect(schema.properties.questions.minItems).toBe(1);
+    // questions is optional since r4 (dismissParked); the 1-4 cardinality for actual asks is
+    // enforced in execute() with a model-actionable error.
+    expect(schema.properties.questions.minItems).toBeUndefined();
     expect(schema.properties.questions.maxItems).toBe(4);
     const question = schema.properties.questions.items;
     expect(question.properties.options.minItems).toBe(2);

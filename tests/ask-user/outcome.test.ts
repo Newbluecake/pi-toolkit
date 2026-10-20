@@ -201,7 +201,7 @@ describe("§6.2 result text (verbatim) and details", () => {
       3,
     );
     expect(text).toBe(
-      "ask_user was interrupted before the user answered: 3 background tasks (2 subagent, 1 bash) finished in the background and the completion notice(s) arrive right after this result. The question(s) are NOT answered — do not assume an answer and do not answer on the user's behalf. First handle the notice(s); if the decision is still needed, call ask_user again with the same questions (the user's partial input is restored). If the background result already settles the question, proceed and say so explicitly. [interrupt 2/3]",
+      "ask_user was interrupted before the user answered: 3 background tasks (2 subagent, 1 bash) finished in the background and the completion notice(s) arrive right after this result. The question(s) are NOT answered — do not assume an answer and do not answer on the user's behalf. First handle the notice(s); if the decision is still needed, call ask_user again with the same questions (the user's partial input is restored). If the background result already settles the question(s), call ask_user({\"dismissParked\":true}) to clear the parked question(s), then proceed and say so explicitly. [interrupt 2/3]",
     );
     expect(text).toContain("NOT answered");
     expect(text).toContain("do not answer on the user's behalf");

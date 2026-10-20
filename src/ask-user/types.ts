@@ -62,28 +62,35 @@ export const QuestionSchema = Type.Object({
 const InputOptionElementSchema = Type.Union([OptionSchema, Type.String()]);
 
 export const InputSchema = Type.Object({
-  questions: Type.Array(
-    Type.Object({
-      ...QuestionSchema.properties,
-      options: Type.Array(InputOptionElementSchema, {
-        minItems: 2,
+  questions: Type.Optional(
+    Type.Array(
+      Type.Object({
+        ...QuestionSchema.properties,
+        options: Type.Array(InputOptionElementSchema, {
+          minItems: 2,
+          maxItems: 4,
+          description:
+            "2-4 mutually exclusive options. Each must be a {label, description} OBJECT, never a bare string; do NOT include an 'Other' option - it is added automatically.",
+        }),
+      }),
+      {
         maxItems: 4,
         description:
-          "2-4 mutually exclusive options. Each must be a {label, description} OBJECT, never a bare string; do NOT include an 'Other' option - it is added automatically.",
-      }),
-    }),
-    {
-      minItems: 1,
-      maxItems: 4,
+          "1-4 questions, each a single decision. Batch only related decisions that the user should resolve together; otherwise ask the most important one alone. Omit ONLY when dismissParked is true.",
+      },
+    ),
+  ),
+  dismissParked: Type.Optional(
+    Type.Boolean({
       description:
-        "1-4 questions, each a single decision. Batch only related decisions that the user should resolve together; otherwise ask the most important one alone.",
-    },
+        "Set true (with questions omitted) to dismiss ALL questions parked by background-completion interrupts — use when a background result already settled them. Returns immediately without showing any UI. Cannot be combined with questions.",
+    }),
   ),
 });
 
 export type Option = Static<typeof OptionSchema>;
 export type Question = Static<typeof QuestionSchema>;
-export type InputQuestion = Static<typeof InputSchema>["questions"][number];
+export type InputQuestion = NonNullable<Static<typeof InputSchema>["questions"]>[number];
 
 export const AnswerValueSchema = Type.Object({
   selected: Type.Array(Type.String()),
@@ -115,7 +122,7 @@ export interface InterruptInfo {
   draftSaved: boolean;
 }
 
-export type AskUserDetails = Result & { interrupted?: InterruptInfo };
+export type AskUserDetails = Result & { interrupted?: InterruptInfo; dismissed?: number };
 
 /** JSON-safe per-question component state for draft restore (§4, §6.3). `optionCount` is the
  *  fingerprint's runtime double-check: a restored draft whose option count no longer matches

@@ -329,7 +329,8 @@ export function interruptedResultText(completions: CompletionSummary[], attempt:
     `and the completion notice(s) arrive right after this result. The question(s) are NOT answered — do not ` +
     `assume an answer and do not answer on the user's behalf. First handle the notice(s); if the decision is ` +
     `still needed, call ask_user again with the same questions (the user's partial input is restored). If the ` +
-    `background result already settles the question, proceed and say so explicitly. [interrupt ${attempt}/${limit}]`
+    `background result already settles the question(s), call ask_user({"dismissParked":true}) to clear the ` +
+    `parked question(s), then proceed and say so explicitly. [interrupt ${attempt}/${limit}]`
   );
 }
 
@@ -382,6 +383,16 @@ export function parkedReminderText(items: readonly { header?: string | undefined
     `[ask_user] ${items.length} question(s) were paused by background completion(s) and are still unanswered:\n` +
     `${lines.join("\n")}\n` +
     `If the decision is still needed, call ask_user again with the same questions (the user's partial input ` +
-    `is restored); if a background result already settled a question, proceed without asking and say so.`
+    `is restored); if a background result already settled a question, proceed without asking and say so. ` +
+    `When every parked question is already settled, call ask_user({"dismissParked":true}) once to clear them.`
+  );
+}
+
+/** r4 dismissParked tool result text (model-facing; no UI is shown). */
+export function dismissedParkedText(cleared: number): string {
+  if (cleared === 0) return "No parked questions to dismiss. Nothing was pending — continue with the task.";
+  return (
+    `Dismissed ${cleared} parked question(s). Treat them as settled by the background result(s) — do NOT ` +
+    `re-ask them; they will no longer surface in reminders or the status bar.`
   );
 }
