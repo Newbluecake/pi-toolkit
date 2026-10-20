@@ -95,6 +95,7 @@ metadata:
 | **任务验收**                | glm-5.3（订阅；开发用了 GLM 的包禁派）→ kimi-k3      | deepseek-flash → sonnet                | `verifier`；异源；**禁任何 GPT 系**；kimi 订阅将尽（≥80%）优先 deepseek-flash；打回后复验优先 resume 原 verifier |
 
 - droid 线（`droid/<model>`）只用于探索/前端/开发；评审、验收、方案、consult 专家一律不用 droid。
+- **droid 线可用性**：只有系统提示的 Available models 里出现「External agent models (droid)」一节时才派 droid；该节缺失（未启用 / 未登录 / 凭据失效 / 二进制缺失）就跳过 droid 线直接走下一级。派 droid 秒挂（如 `No access token`）同理：本轮不再派 droid，回退下一级，并提醒用户登录 droid。
 - gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）。开发用了 GLM（含 droid 底层 GLM）的包，验收不派 GLM。
 - 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier / general / Explore），调用时传 `subagent_type` 并按本表传 `model`。
 

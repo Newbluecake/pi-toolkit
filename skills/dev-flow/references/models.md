@@ -73,6 +73,9 @@ Factory 订阅额度不用也作废。[quota] 行显示 droid 池有余量（未
 - **评审 / 验收 / 方案 / consult 专家一律不用 droid**（只读无法保证、不能挂专家、不能跑 tidy）；验收仍用 pi 模型（异源，禁 GPT 系照旧）。
 - 经 `Agent({model:"droid/<id>"})` 派发；它以完整权限运行（读用户全局 skills/MCP），破坏性任务建议 worktree 隔离；
   resume 钉原目录（worktree 被清后不可 resume）；额度受 Factory standard/core 两池闸门约束（触线会被拒绝派发）。
+- **可用性（2026-10-20）**：droid 不可用（未启用、未登录/凭据失效 `No access token`、Factory 401/402/403、二进制缺失）时，
+  pi-toolkit 不会在 Available models 里列出 droid 模型，派发也会被立即拒绝——**列表里没有 droid 一节就整条跳过 droid 线**，
+  直接走下一级（sonnet / gpt-6.1-sol / kimi）。派发后秒挂同理：本会话不再重试 droid，提醒用户 `droid` 登录后 `/reload`。
 - 详见 `docs/dev/external-agent/README.md`。
 
 ## 失败处置：传输故障 vs 安全策略拒绝
@@ -97,6 +100,7 @@ Factory 订阅额度不用也作废。[quota] 行显示 droid 池有余量（未
 | 2026-10-10 | sonnet-5-5 升首选；教训：不因列表缺失而换模型                            |
 | 2026-10-14 | 验收禁 GPT 系；安全拒绝与传输错误分开处理                                |
 | 2026-10-15 | gpt-6.1-sol 仅 copilot 渠道；移除 cr-response/zhipu-pool；droid 进路由表 |
+| 2026-10-20 | droid 线以 Available models 是否列出为准；不可用（未登录等）整条跳过     |
 | 2026-10-16 | L1 加异源 verifier；验证模型订阅将尽优先 deepseek-v4-pro（见 SKILL.md）  |
 | 2026-10-18 | 验收次选 deepseek-v4-pro → deepseek-flash（用户要求）                    |
 | 2026-10-19 | cr-response 恢复：gpt-6.1-sol 备线 `cr-response/gpt-6.1-sol`             |
