@@ -215,8 +215,7 @@ describe("DetailDock.vue — orchestration (§7.4/§7.7)", () => {
     await flush();
     await w.vm.$nextTick();
     expect(w.find(".command-confirm").exists()).toBe(true);
-    await w.find(".command-confirm-run").trigger("click"); // arm
-    await w.find(".command-confirm-run").trigger("click"); // confirm
+    await w.find(".command-confirm-run").trigger("click"); // one click = confirm (2026-10-20 redesign)
     await flush();
     const runs = calls.filter((c) => c.method === "runCommand");
     expect(runs).toHaveLength(2);

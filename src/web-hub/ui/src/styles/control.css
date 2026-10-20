@@ -15,15 +15,13 @@
 }
 
 .btn-danger,
-.stop-btn.armed,
-.command-confirm-run.armed {
+.stop-btn.armed {
   background: var(--c-danger);
   color: #fff;
 }
 
 .btn-danger:hover,
-.stop-btn.armed:hover,
-.command-confirm-run.armed:hover {
+.stop-btn.armed:hover {
   background: var(--c-danger);
   filter: brightness(0.92);
 }
@@ -1026,31 +1024,98 @@
   font-size: var(--fs-xs);
 }
 
-/* --- command confirm (§7.7) --- */
+/* --- command confirm (§7.7; 2026-10-20 redesign per user ruling + mock cmd-confirm.png:
+ * one-click 执行, icon tile + code-chip title + one muted i18n description line, amber left
+ * accent — danger red for session-replacing commands; buttons wrap right-aligned on phones) --- */
 
 .command-confirm {
+  /* Warm cream card per the approved mock: token-derived (never a raw hex) so the dark theme
+   * mixes against its own dark warning/danger softs and stays readable. The icon tile rides
+   * the unmixed soft token, one step warmer than the card. */
+  --cc-bg: color-mix(in srgb, var(--c-warning-soft) 62%, var(--c-surface));
+  --cc-border: var(--c-warning-border);
+  --cc-accent: var(--c-warning);
+  --cc-tile-bg: var(--c-warning-soft);
+  --cc-tile-fg: var(--c-warning-text);
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
-  border: 1px solid var(--c-warning-border);
+  gap: var(--sp-1) var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--cc-border);
+  border-left: 3px solid var(--cc-accent);
   border-radius: var(--r-md);
-  background: var(--c-warning-soft);
-  color: var(--c-warning-text);
+  background: var(--cc-bg);
+  color: var(--c-text);
   font-size: var(--fs-sm);
 }
 
-.command-confirm-text {
+.command-confirm.danger {
+  --cc-bg: color-mix(in srgb, var(--c-danger-soft) 62%, var(--c-surface));
+  --cc-border: var(--c-danger-border);
+  --cc-accent: var(--c-danger);
+  --cc-tile-bg: var(--c-danger-soft);
+  --cc-tile-fg: var(--c-danger);
+}
+
+.command-confirm-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  background: var(--cc-tile-bg);
+  color: var(--cc-tile-fg);
+}
+
+.command-confirm-body {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
-.command-confirm-hint {
+.command-confirm-title {
+  font-weight: 600;
+}
+
+.command-confirm-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-1);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+}
+
+.command-confirm-desc {
   font-size: var(--fs-xs);
   color: var(--c-text-3);
+}
+
+.command-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+@media (max-width: 767px) {
+  .command-confirm-actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+
+  /* 描述在手机上最多两行（完整文本在 title 提示里）。 */
+  .command-confirm-desc {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
 }
 
 /* --- command result (v2.1 §4.9) --- */
