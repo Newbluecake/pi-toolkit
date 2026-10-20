@@ -1643,6 +1643,115 @@ describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
   });
 });
 
+/**
+ * 2026-10-20 rename-pencil placement rework (user screenshot report: the bottom-right pencil
+ * covered the fleet 「N 个运行中」 text): the pencil now sits at the END OF THE TITLE TEXT
+ * (`.agent-session`), vertically centred, via CSS anchor positioning with a right-end-of-
+ * title-row fallback. CSS-behaviour assertions read `agents.css` as text (same pattern as
+ * the 搜索框放大镜 block above); DOM-structure assertions mount the list.
+ */
+describe("agents.css — rename pencil placement at the title line (2026-10-20 rework)", () => {
+  const css = readFileSync(
+    resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/agents.css"),
+    "utf8",
+  );
+  /** Extracts the body of the `@supports (anchor-name…)` block (no nested-brace parser —
+   *  the block's own inner rules are matched individually off its raw substring). */
+  const supportsBlock = (() => {
+    const start = css.indexOf("@supports (anchor-name: --x) and (anchor-scope: --x)");
+    return start === -1 ? "" : css.slice(start, css.indexOf(".rename-btn {", start));
+  })();
+  const rule = (selector: string): string => {
+    const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`).exec(css);
+    return m?.[0] ?? "";
+  };
+
+  it("anchor positioning is the primary technique, scoped per card so same-named anchors never collide", () => {
+    expect(supportsBlock).not.toBe("");
+    // anchor-scope on the <li> — without it every card's --rename-anchor collides and all
+    // pencils would snap to the LAST card's title.
+    expect(supportsBlock).toMatch(/\.agent-item\.renamable\s*\{[^}]*anchor-scope:\s*--rename-anchor/);
+    expect(supportsBlock).toMatch(/\.agent-session\s*\{[^}]*anchor-name:\s*--rename-anchor/);
+    // pencil: left edge at the title text's right edge, vertically centred on that line.
+    expect(supportsBlock).toMatch(/position-anchor:\s*--rename-anchor/);
+    expect(supportsBlock).toMatch(/top:\s*anchor\(center\)/);
+    expect(supportsBlock).toMatch(/left:\s*calc\(anchor\(right\) \+ 4px\)/);
+    // no -100% translate any more: the editing form must never leave the card
+    expect(css).not.toMatch(/translate\(-100%/);
+  });
+
+  it("the title shrink-wraps its text and reserves the pencil's width (max-width)", () => {
+    const session = rule(".agent-item.renamable > .agent-card > .agent-session");
+    expect(session).toMatch(/justify-self:\s*start/); // anchor(right) = TEXT end, not the stretched grid box
+    expect(session).toMatch(/max-width:\s*calc\(100% - var\(--rename-hit\) - 8px\)/);
+    // `.removable`'s 60px right reservation must not push the anchor box past the text end.
+    expect(session).toMatch(/padding-right:\s*0/);
+  });
+
+  it("hit area: 24px reservation default, 44px on coarse pointers (primitives' .btn floor)", () => {
+    expect(rule(".agent-item.renamable")).toMatch(/--rename-hit:\s*24px/);
+    // primitives.css floors every `.btn` at 44×44 on coarse pointers — the reservation must
+    // cover the real rendered size, not the 24px ideal.
+    expect(css).toMatch(
+      /@media \(pointer: coarse\)\s*\{\s*\.agent-item\.renamable\s*\{\s*(?:\/\*[\s\S]*?\*\/\s*)*--rename-hit:\s*44px;\s*--remove-col:\s*48px;\s*\}\s*\}/,
+    );
+    expect(rule("\n.rename-btn")).toMatch(/width:\s*var\(--rename-hit, 24px\)/);
+    expect(rule("\n.rename-btn")).toMatch(/height:\s*var\(--rename-hit, 24px\)/);
+  });
+
+  it("editing form spans the card content box on the title row (always inside the card)", () => {
+    const edit = rule(".agent-item.renamable > .rename-wrap.is-editing");
+    expect(edit).toMatch(/left:\s*15px/);
+    expect(edit).toMatch(/right:\s*13px/);
+    expect(rule(".agent-item.renamable.removable > .rename-wrap.is-editing")).toMatch(
+      /right:\s*calc\(13px \+ var\(--remove-col\)\)/,
+    );
+    expect(rule(".agent-item .rename-wrap.is-editing .rename-input")).toMatch(/flex:\s*1/);
+    expect(rule(".agent-item .rename-wrap.is-editing .rename-input")).toMatch(/max-width:\s*none/);
+  });
+
+  it("removable: title reservation and fallback pin both leave the delete button's column free", () => {
+    expect(rule(".agent-item.renamable.removable > .agent-card > .agent-session")).toMatch(
+      /max-width:\s*calc\(100% - var\(--rename-hit\) - 8px - var\(--remove-col\)\)/,
+    );
+    expect(rule(".agent-item.removable .rename-wrap")).toMatch(/var\(--remove-col/);
+    expect(rule(".agent-item.renamable")).toMatch(/--remove-col:\s*44px/);
+  });
+
+  it("pencil box is as tall as the title line (+5px): never touches the next row", () => {
+    expect(rule(".agent-item.renamable")).toMatch(/--rename-h:\s*calc\(20px \* var\(--fs-scale, 1\) \+ 5px\)/);
+    const btn = rule(".agent-item .rename-btn");
+    expect(btn).toMatch(/min-height:\s*0/);
+    expect(btn).toMatch(/height:\s*var\(--rename-h\)/);
+  });
+
+  it("fallback re-derives its offset when a 24px privacy-lock button makes row1 taller (:has)", () => {
+    expect(rule(".agent-item:has(.privacy-lock-btn) .rename-wrap")).toMatch(
+      /max\(21\.7px \* var\(--fs-scale, 1\), 24px\)/,
+    );
+  });
+
+  it("fallback (no anchor support): absolute at the title row's right end, NOT the bottom corner", () => {
+    const wrap = rule(".agent-item .rename-wrap");
+    expect(wrap).toMatch(/position:\s*absolute/);
+    expect(wrap).toMatch(/top:\s*calc\(/); // title-line centre geometry, not `bottom: 8px`
+    expect(wrap).not.toMatch(/bottom:/);
+    expect(wrap).toMatch(/transform:\s*translateY\(-50%\)/);
+    // the bottom-corner removable shift and the touch last-row reservation are both gone
+    expect(css).not.toMatch(/var\(--sp-2\) \+ 44px/);
+    expect(css).not.toMatch(/\.renamable:not\(\.removable\) > \.agent-card > :last-child/);
+  });
+
+  it("visibility contract unchanged: hover/focus-revealed on hover-capable pointers, always on touch", () => {
+    expect(css).toMatch(
+      /@media \(hover: hover\)[^{]*\{\s*\.agent-item \.rename-wrap:not\(\.is-editing\) \.rename-btn\s*\{\s*opacity:\s*0/,
+    );
+    expect(css).toMatch(/\.agent-item:hover \.rename-wrap \.rename-btn/);
+    expect(css).toMatch(/\.agent-item:focus-within \.rename-wrap \.rename-btn/);
+    expect(css).toMatch(/@media \(hover: none\)[^{]*\{\s*\.rename-btn\s*\{\s*opacity:\s*1/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // spawn-relaunch (「离线/过期会话点击直接重新拉起」): stale rows whose card is bound to a
 // TERMINAL managed spawn record turn the whole card into the relaunch action.

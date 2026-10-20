@@ -716,30 +716,149 @@
 }
 
 /* ---------------------------------------------------------------- rename entry (web-hub-
- * rename plan): `RenameButton.vue` rendered as a sibling of `AgentCard` (same "a button can't
- * nest inside AgentCard's `<a>`" rule as `.remove-wrap` above).
- * 2026-10-09 「左侧多出来一部分空白区域」: no room is reserved any more (the old 60px left
- * padding on every renamable card squeezed titles and left a blank column). The pencil
- * overlays the card's bottom-right corner — the context-bar row rarely reaches it — and on
- * hover-capable pointers stays invisible until the card is hovered/focused. A card that is
- * also removable puts it just left of the delete button. */
+ * rename plan; 2026-10-20 placement rework, user screenshot report): `RenameButton.vue`
+ * rendered as a sibling of `AgentCard` (same "a button can't nest inside AgentCard's `<a>`"
+ * rule as `.remove-wrap` above). The pencil now sits AT THE END OF THE TITLE TEXT
+ * (`.agent-session`), vertically centred on that line — the old bottom-right corner spot
+ * covered the meta/fleet row (「N 个运行中」).
+ * Primary technique: CSS anchor positioning — the title span carries `anchor-name`, scoped
+ * per card by `anchor-scope` on the `<li>` (without the scope, every card's same-named
+ * anchor collides and ALL pencils would snap to the LAST card's title — hence the @supports
+ * gate is on BOTH features, not `anchor-name` alone). The title itself is capped
+ * (`max-width` below) so a long title truncates and the pencil always fits on the line.
+ * `--rename-hit` is the title's reservation for the button box: 24px on precise pointers,
+ * 44px on coarse ones (primitives.css floors every `.btn` there — the reservation must cover
+ * the REAL size). The pencil shares its line only with the (already shortened) title, so the
+ * larger hit area never overlaps a neighbour. */
+.agent-item.renamable {
+  --rename-hit: 24px;
+  /* Pencil box height = the title line (20px·scale) + 5px: the 3px grid gaps above and below
+   * keep the hit box inside its own row (never touching row1 / the meta row). */
+  --rename-h: calc(20px * var(--fs-scale, 1) + 5px);
+  /* Horizontal column the bottom-right delete button owns (40px box + 8px inset − the card's
+   * 13px border+padding, + gap); a `.removable` card keeps the pencil out of it. */
+  --remove-col: 44px;
+}
+
+@media (pointer: coarse) {
+  .agent-item.renamable {
+    /* primitives.css floors every `.btn` at 44×44 on coarse pointers (min-width/min-height
+     * win over the 32px below) — reserve for the REAL rendered size so the truncated title
+     * never runs under the button. */
+    --rename-hit: 44px;
+    --remove-col: 48px;
+  }
+}
+
+/* The title row shrink-wraps its text (`justify-self: start`) and stops short of the
+ * pencil, so the anchored pencil lands right after the last visible character (or the
+ * ellipsis). `.removable`'s 60px right reservation would otherwise push the anchor BOX (and
+ * with it the pencil) 60px past the text end — drop it on THIS row only: the pencil's own
+ * reservation replaces it, and the bottom-right buttons never reach the title line. */
+.agent-item.renamable > .agent-card > .agent-session {
+  justify-self: start;
+  max-width: calc(100% - var(--rename-hit) - 8px);
+  padding-right: 0;
+}
+
+/* `.removable`: the delete button sits in the bottom-right corner and, being taller than the
+ * meta row, reaches up to the title line — the title (hence the pencil right after it) stops
+ * short of that column, so pencil and delete button never overlap. */
+.agent-item.renamable.removable > .agent-card > .agent-session {
+  max-width: calc(100% - var(--rename-hit) - 8px - var(--remove-col));
+}
+
+/* Fallback (no anchor positioning — Firefox/Safari): pin the pencil at the right end of
+ * the title row, centred on it. The top offset walks the card's geometry down to the
+ * `.agent-session` line centre (measured in Chromium): the card's 2px margin-top collapses
+ * with the `<li>` (no border/padding), so the fixed part is card border 1px + padding-top
+ * 10px + grid gap 3px = 14px; row1's height is the title's line box (fs-md 14px · lh-body
+ * 1.55 = 21.7px·scale — it always beats the 20px·scale chip) and the session line's half is
+ * fs-sm 13px · 1.55 / 2 ≈ 10.1px·scale. `translateY(-50%)` then
+ * centres the button box — and the taller editing form — on the line regardless of its own
+ * height. Approximation, not exact, when a 24px privacy-lock button is in row1 at small
+ * font scales — acceptable for a fallback. The old touch-only last-row `padding-right`
+ * reservation is gone: the pencil no longer sits at the bottom corner, and the title's
+ * `max-width` above already reserves its room. */
 .agent-item .rename-wrap {
   position: absolute;
-  right: var(--sp-2);
-  bottom: 8px;
+  right: calc(var(--sp-3) - 6px);
+  top: calc(14px + 31.8px * var(--fs-scale, 1));
+  transform: translateY(-50%);
   z-index: 2;
 }
 
 .agent-item.removable .rename-wrap {
-  right: calc(var(--sp-2) + 44px);
+  right: calc(var(--sp-3) - 6px + var(--remove-col, 44px));
 }
 
-/* Touch (no hover ⇒ the pencil is always visible): keep the card's LAST row (meta / fleet /
- * badge — whichever ends the card) clear of it. Only that row gives up the room, so titles
- * keep their full width; `.removable` cards already reserve the right edge card-wide. */
-@media (hover: none) {
-  .renamable:not(.removable) > .agent-card > :last-child {
-    padding-right: calc(52px * var(--fs-scale, 1));
+/* A 24px privacy-lock button in row1 (fixed px) can make row1 taller than the title's line box
+ * — `:has()` is supported everywhere the fallback is used; re-derive the same geometry. */
+.agent-item:has(.privacy-lock-btn) .rename-wrap {
+  top: calc(14px + max(21.7px * var(--fs-scale, 1), 24px) + 10.1px * var(--fs-scale, 1));
+}
+
+@supports (anchor-name: --x) and (anchor-scope: --x) {
+  .agent-item.renamable {
+    anchor-scope: --rename-anchor;
+  }
+
+  .agent-item.renamable > .agent-card > .agent-session {
+    anchor-name: --rename-anchor;
+  }
+
+  .agent-item.renamable > .rename-wrap {
+    position-anchor: --rename-anchor;
+    top: anchor(center);
+    right: auto;
+    left: calc(anchor(right) + 4px);
+  }
+}
+
+/* Editing (both modes): the form spans the card's content box on the title row (left = card
+ * border+padding 15px, right = 13px; a `.removable` card also stops short of the delete
+ * column), so it is always fully inside the card whatever the title length. */
+.agent-item.renamable > .rename-wrap.is-editing {
+  left: 15px;
+  right: 13px;
+}
+
+.agent-item.renamable.removable > .rename-wrap.is-editing {
+  right: calc(13px + var(--remove-col));
+}
+
+.agent-item .rename-wrap.is-editing .rename-form {
+  width: 100%;
+}
+
+.agent-item .rename-wrap.is-editing .rename-input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+
+/* In the list the box is as tall as the title line (+5px), not `.btn`'s 32/44px floor — the
+ * extra width on coarse pointers (44px) keeps the touch target generous. */
+.agent-item .rename-btn {
+  position: relative;
+  min-height: 0;
+  height: var(--rename-h);
+}
+
+/* Coarse pointers: the visible box stays title-line tall, but a transparent pseudo element
+ * extends the touch target to 44px high (≥32px requirement). The card's only other control
+ * is row1's privacy-lock button (handled below), so it never steals another control's tap. */
+@media (pointer: coarse) {
+  .agent-item .rename-wrap:not(.is-editing) .rename-btn::after {
+    content: "";
+    position: absolute;
+    inset: calc((var(--rename-h) - 44px) / 2) 0;
+  }
+
+  /* Row1 carries the privacy-lock button: grow downward only so the two never overlap. */
+  .agent-item:has(.privacy-lock-btn) .rename-wrap:not(.is-editing) .rename-btn::after {
+    inset: 0 0 calc(var(--rename-h) - 44px);
   }
 }
 
@@ -748,8 +867,13 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  /* 2026-10-20 placement rework: smaller pencil (24px wide) living at the end of the
+   * title text. Effective box: 24×32 on fine pointers (`.btn`'s 32px min-height), 44×44 on
+   * coarse (primitives.css's `.btn` floor) — `--rename-hit` on `.renamable` mirrors that so
+   * the title's max-width reservation always covers the real button. The 24px var fallback
+   * only matters outside `.agent-item` (never rendered there). */
+  width: var(--rename-hit, 24px);
+  height: var(--rename-hit, 24px);
   padding: 0;
   border-radius: var(--r-pill);
   color: var(--c-text-3);
@@ -779,13 +903,6 @@
 @media (hover: none) {
   .rename-btn {
     opacity: 1;
-  }
-}
-
-@media (pointer: coarse) {
-  .rename-btn {
-    width: 44px;
-    height: 44px;
   }
 }
 
