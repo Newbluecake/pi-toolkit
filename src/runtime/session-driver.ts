@@ -985,6 +985,11 @@ export class PiSessionDriver implements SessionDriver {
     session.subscribe((event: unknown) => {
       const mapped = mapEvent(event);
       if (!mapped) return;
+      // W2: map one pi user message_end into ADDITIONAL acceptance evidence. Keep mapEvent's
+      // existing message_end (usage / context sampling) intact. History is not replayed by subscribe;
+      // the first user message is the dispatched prompt, before any queued steer (C-P1).
+      if (mapped.t === "message_end" && (event as { message?: { role?: unknown } }).message?.role === "user")
+        onEvent({ t: "input_accepted" });
       onEvent(mapped);
       // The probe subscribed before bind, so it has already paired the first
       // provider request with this assistant's usage. No cumulative/ping usage.

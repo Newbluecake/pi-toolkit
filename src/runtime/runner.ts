@@ -748,7 +748,7 @@ export class RuntimeRunner implements Runner {
   async run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome> {
     const gen = (this.generation.get(req.runId) ?? 0) + 1;
     this.generation.set(req.runId, gen);
-    let state = createInitialState(req.runId, gen, this.d.clock.now(), req.parentRunId);
+    let state = createInitialState(req.runId, gen, this.d.clock.now(), req.parentRunId, req.trackInput);
     this.states.set(req.runId, state);
     const cancel = createCancelHandle(req.runId, gen, req.signal, (reason) => {
       // M4: "timeout" 来自 fireDeadline（watchdog 超时），必须原样保留，
@@ -938,6 +938,12 @@ export class RuntimeRunner implements Runner {
       const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);
       const bound = await this.guard(
         this.d.driver.bind(handle, (e) => {
+          // Keep the extra evidence event completely out of the legacy session-event path:
+          // even lastEventAt / first-event timers must stay byte-identical when tracking is off.
+          if (e.t === "input_accepted") {
+            if (req.trackInput) dispatch({ kind: "input_accepted", at: this.d.clock.now() });
+            return;
+          }
           dispatch({ kind: "session_event", at: this.d.clock.now(), event: e });
           // child-context-switch plan P0 (§2.3.1 point 3): fold the diagnostic
           // into the state machine FIRST (above), then latch locally — the
@@ -1097,7 +1103,16 @@ export class RuntimeRunner implements Runner {
       // fail and the run would still die at the old instant. queue/create/bind
       // guards above stay one-shot: those phases never grace nor extend (D-14).
       const prompted = await this.guardUntil(
-        handle.prompt(req.prompt),
+        req.trackInput
+          ? (() => {
+              // pi returns a rejected Promise; also preserve the evidence for a driver that throws synchronously.
+              try {
+                return handle.prompt(req.prompt);
+              } catch (error) {
+                return Promise.reject(error);
+              }
+            })()
+          : handle.prompt(req.prompt),
         () => effectiveDeadlineAt(state.deadlines),
         cancel,
         "prompt",
@@ -1108,6 +1123,10 @@ export class RuntimeRunner implements Runner {
           this.fireDeadline(req.runId, gen, { kind: "deadline_fired", at: this.d.clock.now(), timer, reason: "total" });
         },
       );
+      // Only pi has the pre-run rejection contract locked by C-P2. External adapters (including
+      // droid) do not promise an acceptance event: missing evidence stays ambiguous, never retry-safe.
+      if (!prompted.ok && prompted.reason === "error" && req.trackInput && req.external === undefined)
+        dispatch({ kind: "prompt_rejected", at: this.d.clock.now() });
       const finalText = prompted.ok ? handle.getLastAssistantText() : undefined;
       // pi resolves prompt() even when the final turn errored (stopReason
       // "error" surfaces only on the message). Without this, a provider

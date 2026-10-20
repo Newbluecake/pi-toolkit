@@ -690,3 +690,28 @@ describe("PiSessionHandle fleet-drawer read port (§4.1): getLeafId / getBranchE
     expect(calls).toBe(1);
   });
 });
+
+// W2 adds evidence without replacing the existing message_end mapping or its usage/context samples.
+describe("PiSessionDriver input acceptance mapping", () => {
+  it("only user message_end emits extra input_accepted, before the unchanged message_end", async () => {
+    let send: (event: unknown) => void = () => undefined;
+    const events: unknown[] = [];
+    const session = {
+      subscribe: (cb: (event: unknown) => void) => {
+        send = cb;
+      },
+    };
+    await new PiSessionDriver().bind({ session } as never, (event) => events.push(event));
+    for (const role of ["assistant", "toolResult", "custom", undefined])
+      send({ type: "message_end", message: { role } });
+    expect(events).toEqual(Array.from({ length: 4 }, () => ({ t: "message_end" })));
+    events.length = 0;
+    send({ type: "message_start", message: { role: "user" } });
+    expect(events).toEqual([]);
+    send({ type: "message_end", message: { role: "user", usage: { input: 3, output: 1 } } });
+    expect(events).toEqual([
+      { t: "input_accepted" },
+      { t: "message_end", usage: { input: 3, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0 } },
+    ]);
+  });
+});

@@ -240,6 +240,9 @@ export const INPUT_KINDS: readonly RunInput["kind"][] = [
   "reap_finished",
   "deadline_extended",
   "effect_failed",
+  "wake_level",
+  "input_accepted",
+  "prompt_rejected",
 ];
 // D-15: terminal status judgement lives in core/status.ts (single copy).
 const terminal = isTerminalStatus;
@@ -274,7 +277,13 @@ function makeDiag(at: number, generation: number): RunDiagnostics {
     unkillable: [],
   };
 }
-export function createInitialState(runId: string, generation = 1, at = 0, parentRunId?: string): RunState {
+export function createInitialState(
+  runId: string,
+  generation = 1,
+  at = 0,
+  parentRunId?: string,
+  trackInput?: true,
+): RunState {
   return {
     runId,
     generation,
@@ -287,6 +296,7 @@ export function createInitialState(runId: string, generation = 1, at = 0, parent
     effectSeq: 0,
     persistRetryCount: 0,
     ...(parentRunId === undefined ? {} : { parentRunId }),
+    ...(trackInput === true ? { trackInput } : {}),
   };
 }
 function envelope(state: RunState, seq: number, effect: RunEffect): EffectEnvelope {
@@ -742,6 +752,22 @@ export function reduce(
     if (state.diag.wakeLevel !== undefined && state.diag.wakeLevel >= level) return { state, effects: [] };
     return { state: { ...state, diag: { ...state.diag, wakeLevel: level } }, effects: [] };
   }
+  // W2: input evidence is write-once and diag-only in every non-terminal phase. It must not
+  // refresh liveness, arm timers, or force a journal: a journal alone never proves non-delivery (NQ2).
+  if (input.kind === "input_accepted" || input.kind === "prompt_rejected") {
+    if (!state.trackInput || terminal(state.status)) return { state, effects: [] };
+    if (input.kind === "input_accepted") {
+      if (state.diag.inputAcceptedAt !== undefined) return { state, effects: [] };
+      return { state: { ...state, diag: { ...state.diag, inputAcceptedAt: input.at } }, effects: [] };
+    }
+    if (
+      state.diag.inputAcceptedAt !== undefined ||
+      state.diag.lastTurnStartAt !== undefined ||
+      state.diag.promptOutcome !== undefined
+    )
+      return { state, effects: [] };
+    return { state: { ...state, diag: { ...state.diag, promptOutcome: "rejected_pre_accept" } }, effects: [] };
+  }
   if (terminal(state.status)) return terminalUpdate(state, input);
   if (input.kind === "enqueued") {
     if (state.diag.enqueuedAt !== undefined) return illegal(state, input);
@@ -829,6 +855,10 @@ export function reduce(
     // "reap" while still non-terminal (running), with no way out.
     if (!RUN_PHASES.includes(input.phase) || input.phase === "settled" || input.phase === "reap")
       return illegal(state, input);
+    // This synchronous dispatch precedes handle.prompt(): absence on a physically terminal run
+    // proves the prompt was never handed over. Presence proves only an attempt, NOT acceptance.
+    if (input.phase === "prompt_dispatch" && state.trackInput && state.diag.promptDispatchedAt === undefined)
+      state = { ...state, diag: { ...state.diag, promptDispatchedAt: input.at } };
     if (state.phase === input.phase)
       return {
         state: { ...state, diag: { ...state.diag, phase: input.phase, phaseEnteredAt: input.at } },

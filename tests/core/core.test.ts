@@ -32,6 +32,8 @@ const budget = { ...DEFAULT_BUDGET, totalMs: 100, queueWaitMs: 20, totalGraceMs:
 
 /** Simple fixed-shape input builder used by the hand-written (non-matrix) tests below. */
 function input(kind: RunInput["kind"], at = 0): RunInput {
+  if (kind === "wake_level") return { kind, at, level: 2 };
+  if (kind === "input_accepted" || kind === "prompt_rejected") return { kind, at };
   if (kind === "enqueued") return { kind, at, budget };
   if (kind === "slot_denied") return { kind, at, reason: "queue_timeout" };
   if (kind === "phase_entered") return { kind, at, phase: "queue_wait" };
@@ -588,7 +590,7 @@ describe("N6-1: reap/settled can never be entered via phase_entered", () => {
 /* ------------------------------------------------------------------------- *
  * Executable transition matrix for §4.4.1 of /tmp/subagent-tool-architecture.md.
  *
- * Every one of the 12 phases x 14 inputs = 168 keys below is a hand-derived,
+ * Every one of the 12 phases x 17 inputs = 204 keys below is a hand-derived,
  * independent expectation: either a full (status, phase, ordered effect kinds)
  * transition, an "illegal" (state must not move, no effects), or a "diag" cell
  * with a bespoke check function describing exactly which diagnostic fields
@@ -736,6 +738,11 @@ function timerFor(phase: RunPhase): TimerId {
 function buildInput(phase: RunPhase, kind: RunInput["kind"]): RunInput {
   const at = 0;
   switch (kind) {
+    case "wake_level":
+      return { kind, at, level: 2 };
+    case "input_accepted":
+    case "prompt_rejected":
+      return { kind, at };
     case "enqueued":
       return { kind, at, budget };
     case "slot_acquired":
@@ -829,6 +836,17 @@ function fixture(phase: RunPhase): RunState {
   throw new Error(`unhandled phase ${phase}`);
 }
 
+// W1's diag-only input now joins INPUT_KINDS, so the full matrix and seeded generators cover it too.
+const diagWakeLevel: Cell = {
+  kind: "diag",
+  check: (before, after, effects) => {
+    expect(effects).toEqual([]);
+    expect(after).toEqual(
+      isTerminalStatus(before.status) ? before : { ...before, diag: { ...before.diag, wakeLevel: 2 } },
+    );
+  },
+};
+
 const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
   queue_wait: {
     enqueued: illegalCell,
@@ -868,6 +886,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     reap_finished: illegalCell,
     deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   resolve_config: {
     enqueued: illegalCell,
@@ -913,6 +934,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     reap_finished: illegalCell,
     deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   session_create: {
     enqueued: illegalCell,
@@ -962,6 +986,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     reap_finished: illegalCell,
     deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   extension_bind: {
     enqueued: illegalCell,
@@ -1008,6 +1035,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     reap_finished: illegalCell,
     deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   prompt_dispatch: {
     enqueued: illegalCell,
@@ -1053,6 +1083,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
       "notify_deadline",
     ]),
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   model_turn: {
     enqueued: illegalCell,
@@ -1098,6 +1131,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
       "notify_deadline",
     ]),
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   tool_exec: {
     enqueued: illegalCell,
@@ -1143,6 +1179,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
       "notify_deadline",
     ]),
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   retry_backoff: {
     enqueued: illegalCell,
@@ -1188,6 +1227,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
       "notify_deadline",
     ]),
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   compaction: {
     enqueued: illegalCell,
@@ -1231,6 +1273,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
       "notify_deadline",
     ]),
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   abort_grace: {
     enqueued: illegalCell,
@@ -1264,6 +1309,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     reap_finished: diagReapFinished,
     deadline_extended: illegalCell, // stopping (extendability → "stopping")
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   reap: {
     enqueued: illegalCell,
@@ -1280,6 +1328,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     reap_finished: diagReapFinished,
     deadline_extended: illegalCell, // terminalUpdate does not list it → illegal
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
   settled: {
     enqueued: illegalCell,
@@ -1296,6 +1347,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     reap_finished: diagReapFinished,
     deadline_extended: illegalCell, // terminalUpdate does not list it → illegal
     effect_failed: diagEffectFailed,
+    wake_level: diagWakeLevel,
+    input_accepted: diagTerminalNoop, // fixture has tracking off: exact no-op in every phase
+    prompt_rejected: diagTerminalNoop,
   },
 };
 
@@ -1352,16 +1406,16 @@ describe("external agent usage marking (plan §2.5, review #10)", () => {
 });
 
 describe("executable transition matrix (§4.4.1)", () => {
-  it("has an explicit oracle for all 12 phases x 14 inputs = 168 keys", () => {
+  it("has an explicit oracle for all 12 phases x 17 inputs = 204 keys", () => {
     expect(RUN_PHASES).toHaveLength(12);
-    expect(INPUT_KINDS).toHaveLength(14);
-    expect(FLAT_MATRIX).toHaveLength(168);
-    for (const phase of RUN_PHASES) expect(Object.keys(MATRIX[phase])).toHaveLength(14);
+    expect(INPUT_KINDS).toHaveLength(17);
+    expect(FLAT_MATRIX).toHaveLength(204);
+    for (const phase of RUN_PHASES) expect(Object.keys(MATRIX[phase])).toHaveLength(17);
   });
 
   // consult cache/thread §5.3: an additional session_event row, not a new
   // RunInput kind. Exercise every phase with/without prediction and every
-  // terminal status; the base 168-cell lifecycle matrix stays unchanged.
+  // terminal status; the base 204-cell lifecycle matrix has no additional cell for this event.
   it.each(RUN_PHASES)("consult_cache_first/%s: write-once diag-only or explicit no-op", (phase) => {
     for (const predicted of [false, true]) {
       const original = fixture(phase);
@@ -1964,6 +2018,11 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
     const pick = <T>(arr: readonly T[]): T => arr[Math.floor(next() * arr.length)] as T;
     const kind = pick(INPUT_KINDS);
     switch (kind) {
+      case "wake_level":
+        return { kind, at, level: Math.floor(next() * 5) };
+      case "input_accepted":
+      case "prompt_rejected":
+        return { kind, at };
       case "enqueued":
         return { kind, at, budget };
       case "slot_acquired":
@@ -2658,7 +2717,7 @@ describe("thinking stream (thinking_delta → diag.thinkingText)", () => {
 
 /* ------------------------------------------------------------------------- *
  * timeout-notify: grace window & deadline extension (arch §3.5/§3.6, plan §3.11 A⑧).
- * The matrix above keeps grace off (totalGraceMs: 0) so its 168 cells stay
+ * The matrix above keeps grace off (totalGraceMs: 0) so its 204 cells stay
  * bit-stable; everything below is driven by an explicit grace-enabled budget:
  * enqueued at 0 ⇒ deadlineAt = 1000, hardDeadlineAt = 2000, grace window 500.
  * ------------------------------------------------------------------------- */
@@ -3789,7 +3848,7 @@ describe("P15a/P15b: final_leaf session_event isolation (fleet-drawer plan §4.1
 /* ------------------------------------------------------------------------- *
  * run-persistence plan D1/D2 (docs/dev/subagent-run-persistence/plan.md):
  * session_created emits a single best_effort `journal_snapshot` the first time
- * a sessionFile becomes known. The 168-cell matrix above is intentionally
+ * a sessionFile becomes known. The 204-cell matrix above is intentionally
  * unchanged — its buildInput never carries a sessionFile, so those cells keep
  * `effects=[]`; the cases below exercise the file-carrying sub-case.
  * ------------------------------------------------------------------------- */

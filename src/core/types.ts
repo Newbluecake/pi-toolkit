@@ -1635,6 +1635,8 @@ export interface EffectEnvelope {
   readonly criticality: "critical" | "best_effort";
 }
 export interface RunState {
+  /** Runner-only input evidence opt-in (fabric wake); omitted when wake is off. Never journaled. */
+  readonly trackInput?: true;
   readonly runId: RunId;
   readonly generation: number;
   readonly status: RunStatus;
