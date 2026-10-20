@@ -64,10 +64,22 @@ export function createMentionChannel(deps: MentionChannelDeps) {
       } else if (!snapshot || !terminal.has(snapshot.status)) {
         return { ok: false, status: "target_not_ready", label, runId: target.runId };
       }
-      // plan §3.1: wake:false is deliver-only — it NEVER resumes a finished run. (Parking it for the next resume is W3;
-      // until then a finished @label simply is not deliverable.)
-      if (wake === false)
-        return { ok: false, status: "target_not_ready", label, runId: target.runId, reason: "wake_false_finished" };
+      // W3: explicit deliver-only to a finished @label uses the durable mailbox, never spawn.
+      if (wake === false) {
+        if (!deps.level)
+          return { ok: false, status: "target_not_ready", label, runId: target.runId, reason: "wake_false_finished" };
+        const generation = deps.generation();
+        if (generation === undefined) throw new Error(`message_agent: cannot determine generation for ${deps.from}`);
+        return deps.router.admit(deps.from, {
+          to: target.runId,
+          kind,
+          text,
+          generation,
+          canMessage: deps.canMessage,
+          route: { kind: "mention", label, target: target.runId },
+          wake: false,
+        });
+      }
       const result = await deps.spawn.spawn({
         type: target.type,
         label,

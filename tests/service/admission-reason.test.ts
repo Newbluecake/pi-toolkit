@@ -456,7 +456,8 @@ describe("AdmissionReason on every spawn() admission rejection (plan v3 §4.6)",
     const body = src.slice(src.indexOf("async spawn(req) {"), src.indexOf("successorOf(sessionFile) {"));
     const retryable = (body.match(/retryable: (true|false)/g) ?? []).length;
     const reasons = (body.match(/reason: "/g) ?? []).length;
-    expect(retryable).toBe(29);
+    // W3 adds the persist-first inbox reservation rejection before any label/tree write.
+    expect(retryable).toBe(30);
     expect(reasons).toBe(retryable);
   });
 

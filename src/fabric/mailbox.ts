@@ -6,6 +6,7 @@ import type { Millis } from "../core/types.js";
 import type { DeliveryEngine } from "../delivery/engine.js";
 import type { FabricRouter } from "./router.js";
 import type { FabricThrottle } from "./throttle.js";
+import type { WakeService } from "./wake.js";
 
 export type Verdict =
   | { ok: true }
@@ -42,6 +43,7 @@ export interface MailboxOptions {
    * causal level can propagate. Absent (wake off) ⇒ nothing changes. Must not throw; failures are swallowed here.
    */
   level?: { onDelivered(record: FabricRecord, channel: MessageChannel): void };
+  inbox?: Pick<WakeService, "sweep" | "nextSweepAt" | "dispose">;
   onDegraded?: (error: unknown) => void;
 }
 
@@ -56,6 +58,7 @@ export class FabricMailbox {
 
   pump(hint?: NodeRef): void {
     if (this.frozen) return;
+    this.options.inbox?.sweep(this.options.clock.now(), 32);
     const targets =
       hint === undefined
         ? [...new Set(this.options.engine.select((r) => r.state === "pending").map((r) => r.to))]
@@ -67,14 +70,19 @@ export class FabricMailbox {
         .sort((a, b) => a.createdAt - b.createdAt || a.seq - b.seq);
       for (const record of candidates) {
         const now = this.options.clock.now();
+        // Reservation ownership outranks TTL. Only the disposition sweep may terminate it.
+        if (this.options.inbox && (record.reserved || record.quarantined)) continue;
         if (ttlExpired(record.createdAt, record.ttlMs, now)) {
           if (record.kind === "finding" || record.kind === "directive")
             this.options.router.issueDeadLetter(record, "ttl_expired");
           else this.options.engine.transition(record.key, "pending", "abandoned", { terminalReason: "ttl_expired" });
           continue;
         }
+        // Parked records are carried only by a later resume admission, never steered by this pump.
+        if (this.options.inbox && record.parked) continue;
         const targetState = this.options.router.targetState(record.to);
         if (targetState === "gone") {
+          if (this.options.inbox && record.wake === false && this.options.router.park(record, "wake_false")) continue;
           if (record.kind === "finding" || record.kind === "directive") gone.push(record);
           else this.options.engine.transition(record.key, "pending", "dropped", { terminalReason: "target_gone" });
           continue;
@@ -108,6 +116,7 @@ export class FabricMailbox {
   dispose(): void {
     if (this.frozen) return;
     this.frozen = true;
+    this.options.inbox?.dispose();
     this.options.engine.freeze();
     if (this.wake) this.options.clock.clearTimer(this.wake);
     this.wake = undefined;
@@ -125,7 +134,7 @@ export class FabricMailbox {
   }
 
   private dispatch(record: FabricRecord, token: string): void {
-    void this.boundedSend(record).then((verdict) => this.verdict(record.key, token, verdict));
+    void this.boundedSend(record).then((verdict) => this.verdict(record.key, record.to, token, verdict));
   }
 
   private boundedSend(record: FabricRecord): Promise<Verdict> {
@@ -165,11 +174,19 @@ export class FabricMailbox {
     });
   }
 
-  private verdict(key: string, token: string, verdict: Verdict): void {
+  private verdict(key: string, target: NodeRef, token: string, verdict: Verdict): void {
     if (this.frozen) return;
     const record = this.options.engine.get(key);
-    if (!record || record.state !== "claimed" || record.claimToken !== token) return;
-    const target = record.to;
+    const owned = record?.state === "claimed" && record.claimToken === token;
+    if (!owned) {
+      // A synchronous resume admission may already have normalized the claim to pending+reserved.
+      // Never clear a different record's in-flight slot (nor spin on the reserved one).
+      if (this.inFlight.get(target) === key) {
+        this.inFlight.delete(target);
+        this.pump(target);
+      }
+      return;
+    }
     const attempts = record.attempts + 1;
     if (verdict.ok) {
       const delivered = this.options.engine.transition(key, "claimed", "delivered", {
@@ -214,7 +231,7 @@ export class FabricMailbox {
       console.warn(`[pi-subagent] fabric policy rejection for ${key}: ${verdict.reason}`);
       this.options.engine.transition(key, "claimed", "dropped", { attempts, terminalReason: "policy" });
     }
-    this.inFlight.delete(target);
+    if (this.inFlight.get(target) === key) this.inFlight.delete(target);
     this.pump(target);
   }
 
@@ -223,8 +240,13 @@ export class FabricMailbox {
     if (this.wake) this.options.clock.clearTimer(this.wake);
     this.wake = undefined;
     const now = this.options.clock.now();
-    let due = Number.POSITIVE_INFINITY;
+    let due = this.options.inbox?.nextSweepAt(now) ?? Number.POSITIVE_INFINITY;
     for (const record of this.options.engine.select((r) => r.state === "pending")) {
+      if (this.options.inbox && (record.reserved || record.quarantined)) continue;
+      if (this.options.inbox && record.parked) {
+        if (!ttlExpired(record.createdAt, record.ttlMs, now)) due = Math.min(due, record.createdAt + record.ttlMs);
+        continue;
+      }
       const targetState = this.options.router.targetState(record.to);
       // A target with an in-flight send cannot make progress from a timer;
       // its verdict is the wake source for the next record on that target.

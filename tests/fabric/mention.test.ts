@@ -173,15 +173,16 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
     expect(inputs[1]).not.toHaveProperty("wake");
   });
 
-  it("wake:false never resumes a finished @label (deliver-only has no park until W3)", async () => {
+  it("wake:false parks through the router and never resumes a finished @label (W3)", async () => {
     const h = withLevel("completed", () => 1);
-    await expect(h.channel.send("builder", "finding", "x", false)).resolves.toEqual({
-      ok: false,
-      status: "target_not_ready",
-      label: "builder",
-      runId: target,
-      reason: "wake_false_finished",
+    await expect(h.channel.send("builder", "finding", "x", false)).resolves.toMatchObject({
+      ok: true,
+      status: "accepted",
     });
+    expect(h.admit).toHaveBeenCalledWith(
+      from,
+      expect.objectContaining({ to: target, wake: false, route: { kind: "mention", label: "builder", target } }),
+    );
     expect(h.spawn).not.toHaveBeenCalled();
   });
 

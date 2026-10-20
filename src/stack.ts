@@ -61,6 +61,8 @@ import { detectPiCapabilities } from "./adapters/pi-compat.js";
 import { createDeliveryEngine } from "./delivery/engine.js";
 import { createFabricMailbox, type FabricPorts } from "./fabric/mailbox.js";
 import { createCausalLevel, readRootLevel, WAKE_LEVEL_CUSTOM_TYPE, type CausalLevel } from "./fabric/wake-level.js";
+import { createWakeService, inboxDurability } from "./fabric/wake.js";
+import { isLiveSessionFile } from "./core/live-session-files.js";
 import { RESUME_TEXT } from "./tools/compact-tool.js";
 import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
@@ -499,6 +501,7 @@ function buildFabric(
   prefetched: ReadonlyArray<{ type: string; customType?: string; data?: unknown }>,
   readBack: boolean,
   runnerRef: { current?: Runner },
+  query: () => QueryService | undefined,
 ) {
   const store = readBack
     ? createPiOutboxStore<FabricRecord>(
@@ -528,6 +531,7 @@ function buildFabric(
   // (buildFabric itself only runs with fabric on). Off ⇒ no CausalLevel, no router wake policy, no mailbox level hook,
   // no `subagent:wake-level` entry, no wake schema — every path below stays byte-identical to before.
   const wakeOn = settings.fabric.wake.enabled;
+  const durability = wakeOn ? inboxDurability(readBack, ctx.sessionManager) : "stack-memory";
   // L6: the root level is restored from THIS session branch (never `getEntries()` — a fork must not resurrect a sibling's
   // value) and persisted only when the session can hold entries at all (`readBack`).
   let rootLevel0 = 0;
@@ -600,6 +604,7 @@ function buildFabric(
               hopAllowed: (l) => level.hopAllowed(l),
               perRunQuota: settings.fabric.wake.perRunQuota,
             },
+            inbox: { durability, parkCapPerTarget: settings.fabric.wake.parkCapPerTarget },
           }
         : {}),
     },
@@ -642,6 +647,20 @@ function buildFabric(
       return { ok: true };
     },
   };
+  const wake = level
+    ? createWakeService({
+        engine,
+        query,
+        level,
+        durability,
+        isLiveSessionFile,
+        entries: prefetched,
+        runEntries: () => ctx.sessionManager.getBranch(),
+        clock: systemClock,
+        reapMs: settings.budget.reapMs,
+        onChanged: () => mailbox.pump(),
+      })
+    : undefined;
   const mailbox = createFabricMailbox({
     engine,
     router,
@@ -653,8 +672,9 @@ function buildFabric(
     canRenderEntries: capabilities.canRenderEntries,
     maxAttempts: settings.deliveryAttempts,
     ...(level ? { level } : {}),
+    ...(wake ? { inbox: wake } : {}),
   });
-  return { engine, tree, router, mailbox, ...(level ? { level } : {}) };
+  return { engine, tree, router, mailbox, ...(level ? { level } : {}), ...(wake ? { wake } : {}) };
 }
 
 export function currentSessionId(ctx: ExtensionContext): string {
@@ -1820,7 +1840,7 @@ export function buildSessionStack(
   const mentionNotes = createMentionNotes({ diagOf: (runId) => query.get(runId)?.diag });
   const mentionRef = { current: mention };
   const fabric = settings.fabric.enabled
-    ? buildFabric(pi, ctx, settings, prefetchedEntries, readBack, runnerRef)
+    ? buildFabric(pi, ctx, settings, prefetchedEntries, readBack, runnerRef, () => query)
     : undefined;
   if (fabric) previousFabricMailbox = fabric.mailbox;
   const sendFormatted = (items: readonly DeliveryPayload[]) => {
@@ -2168,6 +2188,7 @@ export function buildSessionStack(
     // consult cache-thread plan (Q1 ruling (d)): take-once enqueue metadata (prediction + thread position).
     consultDisplayMeta: (forkSessionFrom) => consultRef.current?.takeDisplayMeta(forkSessionFrom),
     onReaped: (runId, forkSessionFrom, sessionId, info) => {
+      fabric?.wake?.onReaped(runId);
       consultRef.current?.onReaped(runId, forkSessionFrom, info);
       // bash-timeout-grace plan §3.2 (P5): defensive fan-out — `sealAndKill`
       // is idempotent, so this is a no-op for the (normal) case where
@@ -2273,6 +2294,7 @@ export function buildSessionStack(
     onLabel: (label, target, info) =>
       info.resumed ? mentionRef.current?.reassign(label, target) : mentionRef.current?.register(label, target),
     ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),
+    ...(fabric?.wake ? { inbox: fabric.wake } : {}),
     // fabric-cross-session plan §3.3 L4 (W1): spawn admission reads causal levels only with wake on.
     ...(fabric?.level
       ? {
@@ -2335,6 +2357,7 @@ export function buildSessionStack(
       }
       usageRef.current?.poke(); // M-E: start/refresh the 1Hz cost broadcast
       if (fabric) {
+        fabric.wake?.onSnapshot(snapshot);
         if (snapshot.status === "running") {
           fabric.tree.markRunning(snapshot.runId);
           fabric.mailbox.pump(snapshot.runId);
@@ -2449,6 +2472,8 @@ export function buildSessionStack(
     // fabric-cross-session plan §3.3 seam B (W1): steer_subagent / web steer / @mention propagate their origin level.
     ...(fabric?.level ? { onSteered: (runId, originLevel) => fabric.level!.onSteered(runId, originLevel) } : {}),
   });
+  // W3: hydrate/reconcile before any mailbox pump; query is now a live registry, not a raw journal.
+  fabric?.wake?.reconcile();
   // consult (plan §6 D-14/D-16): wired now that both `spawn` and `query`
   // exist — consultRef.current is filled synchronously before this
   // buildSessionStack call returns, so every dispatch/consult path above

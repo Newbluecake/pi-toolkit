@@ -33,6 +33,7 @@ import {
 } from "./resolve-target.js";
 import type { ExternalAgentsPort } from "../external-agent/types.js";
 import { isExternalSessionPath } from "../external-agent/paths.js";
+import type { InboxPort } from "../fabric/wake.js";
 import {
   MSG_EXPERTS_UNSUPPORTED,
   MSG_READONLY_DOMAIN,
@@ -204,6 +205,8 @@ export interface SpawnServiceDeps {
    * (live runner state, `?? 0`), `root` the main session's level.
    */
   causal?: { levelOfRun(runId: RunId): number; root(): number };
+  /** Trusted W3 reservation hook; wired ONLY with fabric wake on. No file I/O. */
+  inbox?: InboxPort;
   /** Narrow admission hook for the fabric tree; called after a child edge is recorded. */
   onSpawnEdge?: (parentRunId: RunId, childRunId: RunId) => void;
   onLifecycle?: LifecycleSink;
@@ -543,6 +546,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     if (req.isolation === "worktree" && worktreeWait.size < WORKTREE_WAIT_CAPACITY) {
       worktreeWait.set(runId, { reapMs: budget.reapMs });
     }
+    let observedSnapshot = false;
     try {
       const spec: RunnerSpec = {
         runId,
@@ -558,12 +562,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const outcome = await deps.runner.run(spec, {
         ...(deps.onLifecycle ? { onLifecycle: deps.onLifecycle } : {}),
         onSnapshot: (s) => {
+          observedSnapshot = true;
           records.set(runId, s);
           deps.onSnapshot?.(s);
         },
       });
       finish(outcome);
     } catch (error) {
+      if (!observedSnapshot) deps.inbox?.onRunGone(runId);
       const failed: RunOutcome = {
         runId,
         status: "failed",
@@ -581,6 +587,8 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           degraded: [],
           staleInputs: 0,
           unkillable: [],
+          // Preserve any dispatch/acceptance evidence if a runner throws after publishing snapshots.
+          ...(deps.inbox && observedSnapshot ? records.get(runId)?.diag : {}),
           ...(req.label !== undefined ? { label: req.label } : {}),
         },
         error: toErrorInfo(error),
@@ -1072,6 +1080,36 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         fixedDeadline: resolvedPolicy === "fixed",
         extensionsEnabled: deps.extensionsEnabled ?? true,
       });
+      // W3: never trust a caller's trackInput. Only a successfully bound reservation may enable W2.
+      if (resolvedReq.trackInput !== undefined) {
+        const { trackInput: _untrusted, ...rest } = resolvedReq;
+        resolvedReq = rest;
+      }
+      if (deps.inbox && lockKeys.length > 0 && resolvedReq.resumeFrom) {
+        const trigger = req.wakeOrigin?.trigger;
+        const inbox = deps.inbox.onResumeAdmitted({
+          runId,
+          sessionFile: resolvedReq.resumeFrom,
+          ...(trigger ? { trigger: { ...trigger, sender: req.wakeOrigin!.by } } : {}),
+        });
+        if (inbox.persistFailed) {
+          for (const key of lockKeys) if (resumeOwners.get(key) === runId) resumeOwners.delete(key);
+          return {
+            error: {
+              kind: "config",
+              message: "fabric inbox reservation could not be persisted",
+              retryable: true,
+              reason: "inbox_persist_failed",
+            },
+          };
+        }
+        if (inbox.trackInput && inbox.block)
+          resolvedReq = {
+            ...resolvedReq,
+            prompt: `${req.prompt}\n\n${inbox.block}`,
+            trackInput: true,
+          };
+      }
       const parent = req.parentRunId ?? "root";
       const target = { runId, type: req.type, parent };
       labels.set(effective, target);

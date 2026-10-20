@@ -13,6 +13,7 @@ import {
 } from "../core/message.js";
 import type { FabricTree, TreeTargetState } from "./tree.js";
 import type { FabricThrottle } from "./throttle.js";
+import type { InboxDurability } from "./wake.js";
 
 export interface FabricRouterConfig {
   maxPerRun: number;
@@ -30,6 +31,8 @@ export interface FabricRouterConfig {
    * router never reads `AdmissionInput.wake`, never stamps `level`/`wake`, and behaves byte-identically to before.
    */
   wakePolicy?: WakePolicy;
+  /** W3: absent with wake off. stack-memory cannot promise a parked inbox. */
+  inbox?: { durability: InboxDurability; parkCapPerTarget: number };
 }
 /** Host-owned causal-level reader + the expensive-class budget for `wake:true` (plan §3.1 "separate quota class"). */
 export interface WakePolicy {
@@ -61,6 +64,8 @@ export type AdmissionResult =
       wake?: boolean;
       /** Why an explicit `wake:true` to the root was delivered deliver-only instead (plan §3.1 / L5). */
       wakeDowngraded?: WakeDowngrade;
+      parkUnavailable?: "stack_memory";
+      inboxDurability?: "session-memory";
     }
   | { ok: false; status: "invalid_wake"; reason: "progress_never_wakes" }
   | {
@@ -129,7 +134,12 @@ export class FabricRouter {
     const mention = input.route?.kind === "mention" ? input.route : undefined;
     if (mention && mention.target !== input.to) throw new Error("mention route target mismatch");
     if (mention && !this.tree.isRootChild(input.to)) throw new Error("mention target is not a root child");
-    if (mention && this.tree.targetState(input.to, this.now()) === "gone") throw new Error("mention target is gone");
+    if (
+      mention &&
+      this.tree.targetState(input.to, this.now()) === "gone" &&
+      !(this.config.inbox && input.wake === false)
+    )
+      throw new Error("mention target is gone");
     // canMessage describes the target relationship as seen by the sender.
     // Only configurable progress/finding messages use that inverse relation;
     // result/directive keep their protocol-defined direction checks.
@@ -180,6 +190,21 @@ export class FabricRouter {
       else if ((this.wakeSent.get(from) ?? 0) >= wakePolicy.perRunQuota) wakeDowngraded = "rate_limited";
       if (wakeDowngraded !== undefined) wake = false;
     }
+    const parkRequested =
+      this.config.inbox !== undefined &&
+      wake === false &&
+      input.to !== "root" &&
+      this.targetState(input.to) === "gone" &&
+      (input.kind === "finding" || input.kind === "directive");
+    const canPark = parkRequested && this.config.inbox!.durability !== "stack-memory";
+    if (
+      !rejection &&
+      canPark &&
+      this.engine.select(
+        (r) => r.to === input.to && r.parked !== undefined && (r.state === "pending" || r.state === "claimed"),
+      ).length >= this.config.inbox!.parkCapPerTarget
+    )
+      rejection = { ok: false, status: "target_backpressure", key, seq, retryAfterMs: 0 };
     const record: FabricRecord = {
       key,
       from,
@@ -198,6 +223,7 @@ export class FabricRouter {
         : {}),
       ...(senderLevel !== undefined && from !== "system" ? { level: senderLevel } : {}),
       ...(wake !== undefined ? { wake } : {}),
+      ...(!rejection && canPark ? { parked: { at: this.now(), reason: "wake_false" as const } } : {}),
       ...(from !== "system"
         ? {
             via: {
@@ -227,8 +253,32 @@ export class FabricRouter {
         seq,
         ...(wakePolicy && input.wake !== undefined ? { wake: wake === true } : {}),
         ...(wakeDowngraded === undefined ? {} : { wakeDowngraded }),
+        ...(parkRequested && !canPark ? { parkUnavailable: "stack_memory" as const } : {}),
+        ...(canPark && this.config.inbox!.durability === "session-memory"
+          ? { inboxDurability: "session-memory" as const }
+          : {}),
       }
     );
+  }
+  /** W3: race/downgrade fallback. An already parked record is immutable; progress never parks. */
+  park(record: FabricRecord, reason: NonNullable<FabricRecord["parked"]>["reason"]): boolean {
+    if (
+      !this.config.inbox ||
+      this.config.inbox.durability === "stack-memory" ||
+      (record.kind !== "finding" && record.kind !== "directive")
+    )
+      return false;
+    if (record.parked) return true;
+    if (
+      this.engine.select(
+        (r) => r.to === record.to && r.parked !== undefined && (r.state === "pending" || r.state === "claimed"),
+      ).length >= this.config.inbox.parkCapPerTarget
+    )
+      return false;
+    const parked = { at: this.now(), reason };
+    if (record.state === "claimed")
+      return this.engine.transition(record.key, "claimed", "pending", { parked }) !== undefined;
+    return this.engine.annotateStrict(record.key, { state: "pending" }, { parked }).ok;
   }
   /** Effective `wake:true` sends to the root made by `from` so far (expensive class; for status/tests). */
   wakeUsed(from: NodeRef): number {
