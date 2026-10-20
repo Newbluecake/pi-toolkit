@@ -203,4 +203,18 @@ describe("terminal failure notification deduplication", () => {
     expect(sendMessage.mock.calls[0]![0].content).toContain("pre-finalize snapshot");
     expect(sendMessage.mock.calls[0]![0].content).toContain('get_subagent_result "r_failur"');
   });
+
+  it("W6: a wake-revived run's terminal failure is sent QUIETLY (triggerTurn:false, details.quiet); others are unchanged", async () => {
+    const quiet = await buildHarness();
+    quiet.notify(outcome(), { quiet: true });
+    expect(quiet.sendMessage).toHaveBeenCalledOnce();
+    expect(quiet.sendMessage.mock.calls[0]![1]).toEqual({ triggerTurn: false });
+    expect(quiet.sendMessage.mock.calls[0]![0].details.quiet).toBe(true);
+
+    harness.records.clear();
+    const loud = await buildHarness();
+    loud.notify(outcome());
+    expect(loud.sendMessage.mock.calls[0]![1]).toEqual({ triggerTurn: true });
+    expect(loud.sendMessage.mock.calls[0]![0].details).not.toHaveProperty("quiet");
+  });
 });

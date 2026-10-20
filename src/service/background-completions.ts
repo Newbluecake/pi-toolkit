@@ -76,7 +76,7 @@ export interface BackgroundCompletionDiag {
 export interface BackgroundCompletionHub extends AskUserBackgroundPort {
   createSender(send: SendMessageFn): SendCompletion;
   /** Forwarded from the `message_start` event (index.ts, holder-routed). */
-  noteMessageStart(message: { role?: string; customType?: string; content?: unknown }): void;
+  noteMessageStart(message: { role?: string; customType?: string; content?: unknown; details?: unknown }): void;
   /** Forwarded from the `agent_end` event. */
   noteAgentEnd(): void;
   /** Forwarded from the `agent_settled` event. */
@@ -279,6 +279,9 @@ export function createBackgroundCompletionHub(deps: {
       if (message.role !== "custom") return;
       const customType = message.customType;
       if (customType === undefined || !TRACKED_CUSTOM_TYPES.has(customType)) return;
+      // fabric-cross-session plan §3.7 (W6): a QUIET completion (wake-revived run) never minted a token — its
+      // message_start must neither confirm another notice's pending token nor count as `unmatched`.
+      if ((message.details as { quiet?: unknown } | undefined)?.quiet === true) return;
       const hash = hashContent(message.content);
       const pending = pendingTokens().filter((t) => t.customType === customType);
       // §3.4: oldest pending with same customType AND hash …

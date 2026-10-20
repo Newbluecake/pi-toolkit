@@ -588,3 +588,35 @@ describe("service/runtime-adapter: thinking level resolution (SpawnRequest.think
     expect(captured.spec && "thinkingLevel" in captured.spec).toBe(false);
   });
 });
+
+describe("service/runtime-adapter: W6 quiet config-failure notice (fabric-cross-session plan §3.7)", () => {
+  const worker: AgentTypeConfig = { name: "worker", description: "x", systemPrompt: "", promptMode: "append" };
+  async function failedConfigPayload(request: Partial<RunnerSpec["request"]>): Promise<DeliveryPayload> {
+    const clock = new FakeClock();
+    const enqueued: DeliveryPayload[] = [];
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, {
+      driver,
+      notifier: { ...notifier, enqueue: (p: DeliveryPayload) => enqueued.push(p) },
+    });
+    // deadlineAt already in the past ⇒ settleConfigFailure before any session exists (the H2/config failure shape)
+    const outcome = await runner.run(spec(worker, { deadlineAt: -1, ...request }));
+    expect(outcome.status).toBe("failed");
+    expect(enqueued).toHaveLength(1);
+    return enqueued[0]!;
+  }
+  it("a wake-revived run's config failure notice is quiet", async () => {
+    const payload = await failedConfigPayload({
+      wakeOrigin: { by: "root", key: "root:r_TARGET01:1:1" as never, level: 0, via: "fabric" },
+    });
+    expect(payload.quiet).toBe(true);
+  });
+  it("an ordinary run's config failure notice carries no quiet key (legacy bytes)", async () => {
+    const payload = await failedConfigPayload({});
+    expect(payload).not.toHaveProperty("quiet");
+  });
+});

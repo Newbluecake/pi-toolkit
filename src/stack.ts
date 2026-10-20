@@ -182,6 +182,7 @@ import { createWorkflowNoticeSink, redeliverPendingWorkflowNotices } from "./ada
 import {
   createBackgroundCompletionHub,
   type BackgroundCompletionHub,
+  type SendCompletion,
   type SendMessageFn,
 } from "./service/background-completions.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
@@ -668,6 +669,7 @@ function buildFabric(
         agentTypeExists: wakeFacts.agentTypeExists,
         settings: () => settings.fabric.wake,
         level,
+        router,
         durability,
         isLiveSessionFile,
         entries: prefetched,
@@ -1509,7 +1511,9 @@ export function createNotificationReceiptHook(holder: {
  * above. Lives here so integration tests exercise the real forwarding path.
  */
 export function createBackgroundCompletionEventHook(holder: { current?: Stack }): {
-  onMessageStart: (event: { message: { role?: string; customType?: string; content?: unknown } }) => void;
+  onMessageStart: (event: {
+    message: { role?: string; customType?: string; content?: unknown; details?: unknown };
+  }) => void;
   onAgentEnd: () => void;
   onAgentSettled: () => void;
 } {
@@ -1875,7 +1879,21 @@ export function buildSessionStack(
       )
     : undefined;
   if (fabric) previousFabricMailbox = fabric.mailbox;
-  const sendFormatted = (items: readonly DeliveryPayload[]) => {
+  const sendFormatted = (items: readonly DeliveryPayload[]): void => {
+    // fabric-cross-session plan §3.7 (W6): a wake-revived run's completion is QUIET — it reaches the owner's context
+    // without a turn and without the background-completion hub (no token, no broadcast ⇒ an active ask_user dialog,
+    // TUI or RPC/web, is never interrupted or deferred). A mixed digest splits into two sends. Quiet goes first: if
+    // it throws nothing has been sent yet (the notifier retries the whole batch cleanly); if the normal half throws
+    // afterwards the retry can only repeat a silent notice, never lose a loud one.
+    if (items.some((item) => item.quiet === true) && items.some((item) => item.quiet !== true)) {
+      sendFormatted(items.filter((item) => item.quiet === true));
+      sendFormatted(items.filter((item) => item.quiet !== true));
+      return;
+    }
+    const quiet = items.length > 0 && items[0]!.quiet === true;
+    const send: SendCompletion = quiet
+      ? (_kind, message) => pi.sendMessage(message, { triggerTurn: false })
+      : sendCompletion;
     const stats = Object.fromEntries(
       items.flatMap((item) => {
         const outcome = store.get(item.runId)?.outcome;
@@ -1901,7 +1919,7 @@ export function buildSessionStack(
       // ask-user-async §3.3 (P2): the REAL single-run completion send point —
       // coalescer/ackHold/caller-ack suppression all happen before this, so
       // the interrupt inherits every existing suppression rule for free.
-      sendCompletion(
+      send(
         "subagent",
         {
           customType: "subagent:notification",
@@ -1915,7 +1933,7 @@ export function buildSessionStack(
     }
     // Digest details are discriminated by kind. Consumers must inspect kind first and read items.
     const first = items[0]!;
-    sendCompletion(
+    send(
       "subagent",
       {
         customType: "subagent:notification",
@@ -2344,7 +2362,7 @@ export function buildSessionStack(
         // Best effort only.
       }
     },
-    notifyTerminalFailure: (outcome) => {
+    notifyTerminalFailure: (outcome, opts) => {
       const payload = {
         key: deliveryKey(outcome.runId, outcome.diag.generation),
         runId: outcome.runId,
@@ -2364,6 +2382,8 @@ export function buildSessionStack(
         },
         createdAt: outcome.diag.createdAt,
         reconcileRound: 0,
+        // W6: a wake-revived run that fails before any snapshot is still reported quietly (plan §3.7).
+        ...(opts?.quiet ? { quiet: true as const } : {}),
       } satisfies DeliveryPayload;
       let existing: ReturnType<Notifier["peek"]>;
       try {

@@ -587,6 +587,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     error: ErrorInfo,
     label?: string,
     suppressDelivery = false,
+    quiet = false,
   ): RunOutcome => {
     const now = deps.clock.now();
     const outcome = failedConfigOutcome(runId, error, now, label);
@@ -625,6 +626,8 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           },
           createdAt: outcome.diag.createdAt,
           reconcileRound: 0,
+          // W6: a wake-revived run's startup/config failure is as quiet as its success (plan §3.7).
+          ...(quiet ? { quiet: true as const } : {}),
         });
       } catch (err) {
         console.warn(
@@ -694,6 +697,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             },
             spec.request.label,
             spec.request.suppressDelivery,
+            spec.request.wakeOrigin !== undefined,
           );
         // Per-spawn thinkingOverride (Agent tool `thinking` param) wins over
         // the agent type's configured thinkingLevel; neither set => leave the
@@ -992,7 +996,13 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           if (!resolved.ok) {
             h2Controller.abort();
             abandonReason = resolved.timedOut ? "startup_timeout" : "h2_failed";
-            return settleConfigFailure(spec.runId, resolved.error, spec.request.label, spec.request.suppressDelivery);
+            return settleConfigFailure(
+              spec.runId,
+              resolved.error,
+              spec.request.label,
+              spec.request.suppressDelivery,
+              spec.request.wakeOrigin !== undefined,
+            );
           }
           sessionSpec = resolved.value;
           // D10: write the cwd cell exactly once, now that H2 has finished

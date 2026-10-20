@@ -58,7 +58,10 @@ export interface MailboxOptions {
    * causal level can propagate. Absent (wake off) ⇒ nothing changes. Must not throw; failures are swallowed here.
    */
   level?: { onDelivered(record: FabricRecord, channel: MessageChannel): void };
-  inbox?: Pick<WakeService, "sweep" | "nextSweepAt" | "dispose" | "successor" | "steerHeld" | "auditUnverified">;
+  inbox?: Pick<
+    WakeService,
+    "sweep" | "nextSweepAt" | "dispose" | "successor" | "steerHeld" | "auditUnverified" | "subscribe"
+  >;
   onDegraded?: (error: unknown) => void;
 }
 
@@ -456,6 +459,17 @@ export class FabricMailbox {
           );
         } catch {
           /* causal propagation is advisory: a failure here must never disturb delivery bookkeeping */
+        }
+        // W6 (plan §3.4d): a `wake:true` sender whose message was coalesced into a revived/resumed run wants that run's
+        // result too — subscribe it (insert-then-sync-check inside WakeService, so a successor that already ended is
+        // delivered immediately). Over the cap ⇒ the still-running sender is told via a receipt.
+        if (redirect !== undefined && delivered.wake === true) {
+          try {
+            if (this.options.inbox?.subscribe(redirect, delivered.from) === "cap")
+              this.options.router.noteSubscriptionUnavailable(delivered, "subscriber_cap");
+          } catch {
+            /* result delivery is advisory: never disturb delivery bookkeeping */
+          }
         }
       }
     } else if (

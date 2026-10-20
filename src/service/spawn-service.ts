@@ -213,7 +213,7 @@ export interface SpawnServiceDeps {
   onSpawnEdge?: (parentRunId: RunId, childRunId: RunId) => void;
   onLifecycle?: LifecycleSink;
   onOutcomeAcked?: (outcome: RunOutcome) => void;
-  notifyTerminalFailure?: (outcome: RunOutcome) => void;
+  notifyTerminalFailure?: (outcome: RunOutcome, opts?: { quiet?: true }) => void;
   /** X6 bridge: fired when a label is first registered (mention registry feed). */
   onLabel?: (label: string, target: SpawnLabelTarget, info: { resumed: boolean }) => void;
   tombstones?: TombstoneStore;
@@ -603,7 +603,8 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // the outcome through spawnAndWait/waitOutcome). Session_create
       // failures never reach here (the runner's own catch folds them into
       // prompt_settled). T-8 locks this.
-      if (req.parentRunId === undefined && !req.suppressDelivery) deps.notifyTerminalFailure?.(failed);
+      if (req.parentRunId === undefined && !req.suppressDelivery)
+        deps.notifyTerminalFailure?.(failed, req.wakeOrigin === undefined ? undefined : { quiet: true });
     } finally {
       // Release every key acquired at spawn time (targetId AND sessionFile) —
       // deleting only req.resumeFrom leaks the targetId lock forever once

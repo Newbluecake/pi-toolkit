@@ -1,5 +1,5 @@
 /**
- * W2 peer-upgrade gates C-P1/C-P2 (fabric-cross-session plan v3 §8/R10).
+ * W2 peer-upgrade gates C-P1/C-P2, W6 gate C-P3 (fabric-cross-session plan v3 §8/R10).
  * Real pi AgentSession + SessionManager.open + PiSessionDriver + RuntimeRunner.
  * Only the provider is scripted, using the existing boundary harness: no network,
  * API keys or opt-in required. These tests assert events AND the resulting evidence.
@@ -15,6 +15,7 @@ import { RuntimeRunner, BasicEffectInterpreter } from "../../src/runtime/runner.
 import { PiSessionDriver, PiSessionHandle, type SessionDriver } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { assistantTextMsg, disposeHarnessDirs, withSession } from "./agent-session-harness.js";
 
 afterEach(disposeHarnessDirs);
@@ -137,3 +138,124 @@ describe("fabric wake input markers — real pi contracts", () => {
     });
   });
 });
+
+/**
+ * C-P3 (W6, plan §3.7/§8): a QUIET completion notice — `sendMessage({customType:"subagent:notification",…},
+ * {triggerTurn:false})`, which is exactly `session.sendCustomMessage` — never starts a turn and never steers, whether the
+ * session is idle or streaming. This is the pi fact the whole quiet path (stack.ts `sendFormatted`, no hub token, no
+ * ask_user interrupt) rests on; the `triggerTurn:true` controls prove the harness WOULD see a turn/steer.
+ */
+describe("C-P3: quiet completion notice does not start a turn (real pi)", () => {
+  const quiet = (content: string) =>
+    ({
+      customType: "subagent:notification",
+      content,
+      display: true,
+      details: { quiet: true },
+    }) as const;
+  const noticeEntries = (session: { sessionManager: { getBranch(): unknown[] } }, content: string) =>
+    session.sessionManager
+      .getBranch()
+      .filter((e) => (e as { type?: string; content?: unknown }).type === "custom_message")
+      .filter((e) => JSON.stringify((e as { content?: unknown }).content) === JSON.stringify(content));
+  const tick = () => new Promise((r) => setTimeout(r, 25));
+
+  it("idle: triggerTurn:false appends the notice with no turn and no provider call; triggerTurn:true (control) starts a run", async () => {
+    await withSession({ scripted, tools: [] }, async ({ session, modelRuntime }) => {
+      const events: string[] = [];
+      session.subscribe((e) => events.push((e as { type: string }).type));
+      await session.prompt("first");
+      expect(modelRuntime.callCount()).toBe(1);
+      const before = events.filter((t) => t === "agent_start").length;
+
+      await session.sendCustomMessage(quiet("quiet-idle"), { triggerTurn: false });
+      await tick();
+      expect(modelRuntime.callCount()).toBe(1);
+      expect(session.isStreaming).toBe(false);
+      expect(events.filter((t) => t === "agent_start").length).toBe(before);
+      expect(noticeEntries(session, "quiet-idle")).toHaveLength(1); // persisted in the session branch
+
+      // control: the very same message WITH triggerTurn starts a new run
+      await session.sendCustomMessage(quiet("loud-idle"), { triggerTurn: true });
+      await vi_waitFor(() => modelRuntime.callCount() === 2);
+    });
+  });
+
+  it("streaming: triggerTurn:false is NOT steered (no queued message, no extra turn); triggerTurn:true (control) is", async () => {
+    // a provider that holds the response open ⇒ the session is genuinely streaming
+    await withSession({ scripted, tools: [] }, async ({ session, modelRuntime }) => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const requests: unknown[][] = [];
+      const base = modelRuntime.streamSimple;
+      (modelRuntime as { streamSimple: unknown }).streamSimple = (m: unknown, context: { messages?: unknown[] }) => {
+        requests.push(context.messages ?? []);
+        if (requests.length > 1) return base(m, context);
+        const stream = createAssistantMessageEventStream();
+        void gate.then(() =>
+          stream.push({
+            type: "done",
+            reason: "stop",
+            message: assistantTextMsg(m as Parameters<typeof assistantTextMsg>[0], "answer") as never,
+          }),
+        );
+        return stream;
+      };
+      const events: string[] = [];
+      session.subscribe((e) => events.push((e as { type: string }).type));
+      const run = session.prompt("long run");
+      await vi_waitFor(() => session.isStreaming && requests.length === 1);
+
+      await session.sendCustomMessage(quiet("quiet-stream"), { triggerTurn: false });
+      expect(session.agent.hasQueuedMessages()).toBe(false); // not a steer
+      await tick();
+      expect(requests).toHaveLength(1); // no extra provider request while streaming
+
+      release();
+      await run;
+      await tick();
+      // no extra turn once the run ended either: still exactly the one request, one agent run
+      expect(requests).toHaveLength(1);
+      expect(events.filter((t) => t === "agent_start")).toHaveLength(1);
+      expect(session.isStreaming).toBe(false);
+      // …and the notice is not lost: it reached the persisted session branch exactly once
+      expect(noticeEntries(session, "quiet-stream")).toHaveLength(1);
+    });
+  });
+
+  it("streaming control: the same notice with triggerTurn:true IS queued as a steer (what the interrupt path relies on)", async () => {
+    await withSession({ scripted, tools: [] }, async ({ session, modelRuntime }) => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let started = 0;
+      const base = modelRuntime.streamSimple;
+      (modelRuntime as { streamSimple: unknown }).streamSimple = (m: unknown, context: { messages?: unknown[] }) => {
+        started += 1;
+        if (started > 1) return base(m, context);
+        const stream = createAssistantMessageEventStream();
+        void gate.then(() =>
+          stream.push({
+            type: "done",
+            reason: "stop",
+            message: assistantTextMsg(m as Parameters<typeof assistantTextMsg>[0], "answer") as never,
+          }),
+        );
+        return stream;
+      };
+      const run = session.prompt("long run");
+      await vi_waitFor(() => session.isStreaming && started === 1);
+      await session.sendCustomMessage(quiet("loud-stream"), { triggerTurn: true });
+      expect(session.agent.hasQueuedMessages()).toBe(true);
+      release();
+      await run;
+    });
+  });
+});
+
+async function vi_waitFor(check: () => boolean, ms = 3000): Promise<void> {
+  for (let i = 0; i < ms / 5; i++) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  expect(check()).toBe(true);
+}

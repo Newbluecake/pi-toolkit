@@ -58,6 +58,8 @@ export function reviveRig(
     parkCap?: number;
     maxAttempts?: number;
     maxLevel?: number;
+    /** W6: replace the recording inject port (e.g. to finish the successor mid-steer). */
+    inject?: (record: FabricRecord, opts?: { target: string }) => Promise<Verdict>;
   } = {},
 ) {
   const clock = new FakeClock();
@@ -72,10 +74,11 @@ export function reviveRig(
   const snaps = new Map<string, RunSnapshot>();
   for (const s of opts.snapshots ?? [revivable()]) snaps.set(s.runId, s);
   const settings: FabricWakeSettings = { ...DEFAULT_SETTINGS.fabric.wake, ...opts.wake };
+  const raised: { runId: string; level: number }[] = [];
   const level = createCausalLevel({
     maxLevel: opts.maxLevel ?? settings.maxLevel,
     runLevel: (id) => snaps.get(id)?.diag.wakeLevel,
-    raiseRun() {},
+    raiseRun: (runId, lvl) => raised.push({ runId, level: lvl }),
     initialRoot: 0,
     persistRoot() {},
   });
@@ -113,6 +116,8 @@ export function reviveRig(
     tombstone: (id) => opts.tombstones?.find((t) => t.runId === id),
     agentTypeExists: opts.types ?? (() => true),
     settings: () => settings,
+    // W6: late-bound (the router is built after the service, like in stack.ts)
+    router: { admitSystemResult: (...a) => router.admitSystemResult(...a) },
     pathExists: opts.pathExists ?? (() => true),
     level,
     durability,
@@ -148,9 +153,9 @@ export function reviveRig(
     () => mailbox.pump(),
   );
   const injected: FabricRecord[] = [];
-  const inject = async (r: FabricRecord): Promise<Verdict> => {
+  const inject = async (r: FabricRecord, o?: { target: string }): Promise<Verdict> => {
     injected.push(r);
-    return { ok: true };
+    return opts.inject ? opts.inject(r, o) : { ok: true };
   };
   const mailbox = createFabricMailbox({
     engine,
@@ -165,6 +170,7 @@ export function reviveRig(
     },
     fabricSteerTimeoutMs: 10,
     maxAttempts: opts.maxAttempts ?? 3,
+    level,
     inbox: wake,
   });
   const send = (over: { wake?: boolean; text?: string; kind?: "finding" | "directive"; from?: string } = {}) =>
@@ -199,7 +205,14 @@ export function reviveRig(
     return record;
   };
   const rec = (key: string) => engine.get(key as never)!;
+  /** W6: a running run in the tree (a waker / a successor). */
+  const addRunning = (runId: string): void => {
+    tree.append("root", runId);
+    tree.markRunning(runId);
+  };
   return {
+    raised,
+    addRunning,
     clock,
     engine,
     snaps,

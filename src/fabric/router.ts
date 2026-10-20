@@ -1,4 +1,5 @@
 import type { DeliveryEngine } from "../delivery/engine.js";
+import type { RunId } from "../core/types.js";
 import {
   authorize,
   effectiveChannel,
@@ -460,6 +461,86 @@ export class FabricRouter {
       state: "pending",
       attempts: 0,
       ...(record.from === "root" && this.config.wakePolicy ? { wake: false } : {}),
+    };
+    try {
+      this.engine.put(receipt);
+    } catch {
+      return;
+    }
+    this.deadLetterUsed.set(record.from, (this.deadLetterUsed.get(record.from) ?? 0) + 1);
+    this.onChanged();
+  }
+  /**
+   * W6 (plan §3.7/§4.1): a system → run `result` carrying `route:{kind:"wake_result"}` — the completion summary of a
+   * revived run, handed to a waker that is still running. The route goes through `authorize()` (it pins the record to
+   * `result` from `system`); it never rides a relation/`can_message` rule. Admitted only while the waker is `running`
+   * (a finished/starting waker is never woken, queued for or revived — plan: "跳过"); the record is deliver-only (a steer
+   * into a running run) and stamped with the SUCCESSOR's effective level, which delivery propagates to the waker
+   * (seam C, `CausalLevel.onDelivered`). Costs no quota: it is bounded by the 8-subscriber cap and the once-only guard.
+   */
+  admitSystemResult(
+    to: RunId,
+    text: string,
+    route: { kind: "wake_result"; runId: RunId },
+    level: number,
+  ): { ok: true; key: MessageKey } | { ok: false; reason: "frozen" | "waker_not_running" | "unauthorized" } {
+    if (this.frozen) return { ok: false, reason: "frozen" };
+    if (this.targetState(to) !== "running") return { ok: false, reason: "waker_not_running" };
+    if (!authorize({ kind: "result", relation: this.tree.relation("system", to, this.now()), from: "system", route }))
+      return { ok: false, reason: "unauthorized" };
+    const key = makeMessageKey("system", to, 0, this.nextSeq("system", to));
+    const record: FabricRecord = {
+      key,
+      from: "system",
+      to,
+      kind: "result",
+      seq: this.currentSeq("system", to),
+      generation: 0 as never,
+      payload: { text: truncate(text, this.config.maxChars) },
+      route,
+      ttlMs: this.config.reconcileTtlMs,
+      createdAt: this.now(),
+      updatedAt: this.now(),
+      state: "pending",
+      attempts: 0,
+      level: Math.max(0, Math.floor(Number.isFinite(level) ? level : 0)),
+    };
+    try {
+      this.engine.put(record);
+    } catch {
+      return { ok: false, reason: "frozen" };
+    }
+    this.onChanged();
+    return { ok: true, key };
+  }
+  /**
+   * W6: the sender of a `wake:true` message that was coalesced into a revived run could not be subscribed to its result
+   * (the run already has 8 subscribers). A system → sender `result` receipt (`subscriptionUnavailable: <reason>`),
+   * charged to the same per-sender system-notice quota as dead letters; silent when the sender is gone or over quota.
+   */
+  noteSubscriptionUnavailable(record: FabricRecord, reason: "subscriber_cap"): void {
+    if (this.frozen || record.from === "system" || record.from === "root") return;
+    if (this.targetState(record.from) === "gone") return;
+    if ((this.deadLetterUsed.get(record.from) ?? 0) >= this.config.deadLetterQuota) return;
+    const key = makeMessageKey("system", record.from, 0, this.nextSeq("system", record.from));
+    const receipt: FabricRecord = {
+      key,
+      from: "system",
+      to: record.from,
+      kind: "result",
+      seq: this.currentSeq("system", record.from),
+      generation: 0 as never,
+      payload: {
+        text:
+          `subscriptionUnavailable: ${reason} — your wake:true message ${record.key} to ${record.to} was delivered to its ` +
+          `resumed run, but that run already has the maximum number of result subscribers, so you will not receive its result summary.`,
+      },
+      ref: { keys: [record.key], omittedCount: 0 },
+      ttlMs: this.config.reconcileTtlMs,
+      createdAt: this.now(),
+      updatedAt: this.now(),
+      state: "pending",
+      attempts: 0,
     };
     try {
       this.engine.put(receipt);

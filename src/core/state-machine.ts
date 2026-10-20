@@ -444,6 +444,9 @@ function finish(
         // so a delivered notice can render the same exit-time bash job facts
         // without re-reading the snapshot (P15b: all four copies same value).
         ...(d.exitFacts === undefined ? {} : { exitFacts: d.exitFacts }),
+        // fabric-cross-session plan §3.7 (W6): a wake-revived run reports to its owner QUIETLY. `wakeOrigin` exists only
+        // with wake on (spawn admission strips it otherwise) ⇒ wake-off payload bytes are unchanged.
+        ...(d.wakeOrigin === undefined ? {} : { quiet: true as const }),
         diag: {
           phase: "settled",
           status,
