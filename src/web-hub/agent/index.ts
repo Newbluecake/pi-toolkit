@@ -224,7 +224,11 @@ export interface QueryControlPort {
   ):
     | { status: string; diag?: ConsultTranscriptDiagnostics & { sessionFile?: string; finalLeafId?: string } }
     | undefined;
-  steer(runId: string, text: string): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }>;
+  steer(
+    runId: string,
+    text: string,
+    origin?: { level: number },
+  ): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }>;
   stop(runId: string, cause: "user_stop"): Promise<StopResult>;
   /** fleet-drawer §4.4 (F2): live-run branch peek for transcript snapshots — a structural
    * passthrough of `QueryService.branchOf` (undefined for unknown/terminal/handle-less runs). */
@@ -339,6 +343,13 @@ export interface WebHubControl {
   readonly capture?: CommandCapturePort;
   internalExec(args: string, ctx: unknown): Promise<{ ok: true } | { ok: false; code: "E_UNSUPPORTED" }>;
   askUserRemote(): AskUserRemotePort | undefined;
+  /**
+   * fabric-cross-session plan §3.3 L7 (W1): attribution port for the causal-level reset. An `extension`-sourced `input`
+   * event is a HUMAN prompt iff it is a prompt the web hub itself dispatched on a browser user's behalf — answered by a
+   * pure, synchronous text lookup in the command ledger (the entry is registered BEFORE `sendUserMessage`). Anything the
+   * ledger does not vouch for (topic-switch re-injection, goal loop, `/agent reload fire`, other extensions) is `undefined`.
+   */
+  attributeInput(text: string): "web_prompt" | undefined;
   readonly admin: AdminCommands;
   status(): WebHubStatusView;
   /** http://127.0.0.1:<port>/#t=<token>; port from hello_ack (live) or hub.json (pid alive); else a hint. */
@@ -1750,6 +1761,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       return { ok: false, code: "E_UNSUPPORTED" };
     },
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
+    attributeInput: (text) =>
+      safe(
+        () =>
+          commandLedger.hasPromptText(text, { sessionId: ctx?.sessionManager.getSessionId() ?? "" })
+            ? ("web_prompt" as const)
+            : undefined,
+        undefined,
+      ),
     admin,
     status: () => conn?.status() ?? { state: "off", attached: false },
     url: () => hubUrl(paths, conn),

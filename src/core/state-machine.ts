@@ -732,6 +732,16 @@ export function reduce(
   // effect_failed is a recovery protocol, including after settlement. It must
   // run before the terminal read-only update so terminal effects can recover.
   if (input.kind === "effect_failed") return handleEffectFailed(state, input);
+  // fabric-cross-session plan §3.3 L1 / §4.7: the effective causal level is a pure diag fact — monotonic max, accepted in
+  // every NON-terminal phase, ignored once terminal (the terminal entry carries the final value), never an effect, and it
+  // touches neither liveness (`lastEventAt`) nor the phase clocks. A non-finite / negative level is ruled illegal.
+  if (input.kind === "wake_level") {
+    if (terminal(state.status)) return { state, effects: [] };
+    if (!Number.isFinite(input.level) || input.level < 0) return illegal(state, input);
+    const level = Math.floor(input.level);
+    if (state.diag.wakeLevel !== undefined && state.diag.wakeLevel >= level) return { state, effects: [] };
+    return { state: { ...state, diag: { ...state.diag, wakeLevel: level } }, effects: [] };
+  }
   if (terminal(state.status)) return terminalUpdate(state, input);
   if (input.kind === "enqueued") {
     if (state.diag.enqueuedAt !== undefined) return illegal(state, input);

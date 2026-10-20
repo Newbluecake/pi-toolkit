@@ -55,6 +55,24 @@ describe("X6 @handle mention", () => {
     expect(steers).toEqual([["run-1", "inspect the failure"]]);
   });
 
+  it("a human @mention steer carries origin level 0 (fabric wake seam B: never raises the target)", async () => {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-1", type: "worker" });
+    const origins: unknown[] = [];
+    await routeMention("@builder go", {
+      registry,
+      query: {
+        get: () => snapshot("run-1", "running"),
+        steer: async (_id, _text, origin) => {
+          origins.push(origin);
+          return { ok: true as const };
+        },
+      },
+      spawn: { spawn: async () => ({ runId: "unexpected" }) },
+    });
+    expect(origins).toEqual([{ level: 0 }]);
+  });
+
   it("resumes a known terminal agent with its registered type", async () => {
     const registry = createMentionRegistry();
     registry.register("builder", { runId: "run-1", type: "worker" });

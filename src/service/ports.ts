@@ -85,6 +85,11 @@ export interface Runner {
     model: { provider: string; id: string },
     opts?: { thinking?: string },
   ): Promise<SetModelOutcome>;
+  /**
+   * fabric-cross-session plan §3.3 L1: raise a live run's effective causal level (monotonic, diag-only). Optional so
+   * existing Runner fakes/tests stay valid; absent ⇒ levels cannot be propagated into runs.
+   */
+  noteWakeLevel?(runId: RunId, level: number): void;
   /** M4: EventWatchdog tick 读取运行态（子阶段超时接线后不再是空壳）。 */
   getRunState?(runId: RunId, generation?: number): RunState | undefined;
   /** M4: EventWatchdog 的超时入口——折进状态机并解除 prompt guard 的阻塞。 */

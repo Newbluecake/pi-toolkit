@@ -68,7 +68,8 @@ export async function routeMention(text: string, deps: MentionRouteDeps): Promis
   const message = deps.fabricEnabled?.() ? frameUserMentionReply(parsed.label, parsed.message) : parsed.message;
   const snapshot = deps.query.get(target.runId);
   if (snapshot?.status === "running") {
-    const result = await deps.query.steer(target.runId, message);
+    // fabric-cross-session plan §3.3 seam B: a human @mention carries level 0 (never raises the target).
+    const result = await deps.query.steer(target.runId, message, { level: 0 });
     if (result.ok) {
       // Pending note: baseline = the target's lastEventAt AFTER the steer landed.
       // The note self-clears at the next turn_start past it (agent picked the

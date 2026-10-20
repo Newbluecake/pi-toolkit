@@ -131,6 +131,14 @@ export interface CommandLedger {
    * byte-identical with). Ambiguous (≥2 candidates) or no match ⇒ `undefined` — the caller's
    * contract is to dequeue NOTHING and attribute NOTHING in that case, never guess. */
   findQueuedByText(text: string, scope: { sessionId: string; owner?: string }): LedgerEntry | undefined;
+  /**
+   * fabric-cross-session plan §3.3 L7 (W1): pure read — is there ANY prompt entry of this session whose retained text is
+   * `text` and whose prompt track is still live (`dispatched`/`observed`/`queued`/`unconfirmed`)? The state set is
+   * deliberately the whole text-retaining family, not just `dispatched`, so the answer does not depend on whether the
+   * hub's own `input` observer already advanced the entry before the caller looked (handler order is unspecified).
+   * Never mutates, never matches a different session's entry; no ambiguity rejection (a yes/no attribution).
+   */
+  hasPromptText(text: string, scope: { sessionId: string }): boolean;
   query(id: string): LedgerQuerySnapshot | undefined;
   frame(sessionId: string, epoch: string, now: number, opts?: { filterHeld?: boolean }): CtlFrame;
   countRunning(op?: CmdOp): number;
@@ -296,6 +304,14 @@ export function createCommandLedger(): CommandLedger {
         match = e;
       }
       return ambiguous ? undefined : match;
+    },
+    hasPromptText(text, scope) {
+      for (const e of bag.entries.values()) {
+        if (e.text !== text || e.promptState === undefined || !TEXT_RETAINING_STATES.has(e.promptState)) continue;
+        if (e.sessionId !== undefined && e.sessionId !== scope.sessionId) continue;
+        return true;
+      }
+      return false;
     },
     findQueuedByText(text, scope) {
       let match: LedgerEntry | undefined;

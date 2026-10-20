@@ -33,6 +33,7 @@ import {
   type Stack,
 } from "./stack.js";
 import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
+import { createWakeInputHook } from "./fabric/wake-input.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { worktreeRoot } from "./extensions/worktree-orphans.js";
@@ -853,6 +854,17 @@ export default function activate(rawPi: ExtensionAPI): void {
     // X6b: surface the user's raw @ message in the fleet widget under the target run
     noteMention: (runId, message, pendingSince) => holder.current?.mentionNotes.set(runId, message, pendingSince),
   });
+  const wakeAttributeRef: { current?: (text: string) => "web_prompt" | undefined } = {};
+  // fabric-cross-session plan §3.3 L7 (W1): proven human input resets the root causal level. Registered once per
+  // activate() (post-guard: main session only) BEFORE the mention / topic-switch input handlers so a `handled` answer
+  // from them can't hide a human input; the handler's first check is the live `holder.current?.wake` (wake off ⇒ inert).
+  pi.on(
+    "input",
+    createWakeInputHook({
+      level: () => holder.current?.wake?.level,
+      attributeInput: () => wakeAttributeRef.current,
+    }),
+  );
   installMentionInput(pi, mentionRouteDeps);
 
   pi.on("session_start", async (_event, ctx) => {
@@ -1052,6 +1064,8 @@ export default function activate(rawPi: ExtensionAPI): void {
   // network and zero disk (asserted by tests/integration/web-hub-disabled).
   if (settings.webHub.enabled) {
     const webHubRef: { current?: WebHubControl } = {};
+    // fabric wake §3.3 L7: late-bind the web ledger's attribution port into the (earlier-registered) input hook.
+    wakeAttributeRef.current = (text) => webHubRef.current?.attributeInput(text);
     // web-hub-proxy (X1c): raw-block parse warnings for `/webhub status`, captured once at activate
     // (non-live, like `lanSettingsWarnings` below) and only when the proxy is enabled at all.
     const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
@@ -1263,7 +1277,7 @@ function forwardQuery(holder: { current?: Stack }): QueryService {
     list: (filter) => requireStack(holder).query.list(filter),
     wait: (runId, opts) => requireStack(holder).query.wait(runId, opts),
     waitAll: (opts) => requireStack(holder).query.waitAll(opts),
-    steer: (runId, text) => requireStack(holder).query.steer(runId, text),
+    steer: (runId, text, origin) => requireStack(holder).query.steer(runId, text, origin),
     setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts),
     stop: (runId, cause) => requireStack(holder).query.stop(runId, cause),
     extendTimeout: (runId, extendMs, opts) => requireStack(holder).query.extendTimeout(runId, extendMs, opts),

@@ -133,6 +133,37 @@ describe("createCommandLedger — prompt sub-state track (§4.3)", () => {
     expect(match?.id).toBe("id1");
   });
 
+  describe("hasPromptText (fabric wake §3.3 L7 attribution; pure read)", () => {
+    function withPrompt(state: "dispatched" | "observed" | "queued" | "unconfirmed" | "consumed", session = "sess-1") {
+      const ledger = createCommandLedger();
+      ledger.begin("id1", "prompt", { op: "prompt", text: "hello" }, 1000, { text: "hello", sessionId: session });
+      ledger.updatePrompt("id1", { promptState: state }, 1000);
+      return ledger;
+    }
+    it.each(["dispatched", "observed", "queued", "unconfirmed"] as const)(
+      "true while the prompt track is live (%s) — independent of the hub's own input observer having run first",
+      (state) => {
+        expect(withPrompt(state).hasPromptText("hello", { sessionId: "sess-1" })).toBe(true);
+      },
+    );
+    it("false for a finished prompt (text dropped), another text, or another session; never mutates", () => {
+      expect(withPrompt("consumed").hasPromptText("hello", { sessionId: "sess-1" })).toBe(false);
+      const ledger = withPrompt("dispatched");
+      expect(ledger.hasPromptText("goodbye", { sessionId: "sess-1" })).toBe(false);
+      expect(ledger.hasPromptText("hello", { sessionId: "other" })).toBe(false);
+      expect(ledger.get("id1")?.promptState).toBe("dispatched");
+    });
+    it("is a yes/no attribution: two live prompts with the same text are still a web prompt (no ambiguity rejection)", () => {
+      const ledger = withPrompt("dispatched");
+      ledger.begin("id2", "prompt", { op: "prompt", text: "hello", deliver: "steer" }, 1001, {
+        text: "hello",
+        sessionId: "sess-1",
+      });
+      ledger.updatePrompt("id2", { promptState: "dispatched" }, 1001);
+      expect(ledger.hasPromptText("hello", { sessionId: "sess-1" })).toBe(true);
+    });
+  });
+
   it("v4.3 Y4: two scoped candidates with the same text are AMBIGUOUS — never picks the earliest", () => {
     const ledger = createCommandLedger();
     ledger.begin("id1", "prompt", { op: "prompt", text: "same" }, 1000, { text: "same", sessionId: "sess-1" });

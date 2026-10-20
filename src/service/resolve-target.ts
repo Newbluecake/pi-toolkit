@@ -45,6 +45,11 @@ export type ResolveResumeResult =
        * analytics fields). Absent for old entries lacking the field.
        */
       readonly dispatchMeta?: DispatchMeta;
+      /**
+       * fabric-cross-session plan §3.3 L4: the resumed run's FINAL effective causal level (`prevFinal`) —
+       * terminal snapshot first, then the tombstone (which S0 extended with it). Absent for runs that never had one.
+       */
+      readonly wakeLevel?: number;
     }
   | { readonly ok: false; readonly error: string; readonly candidates: readonly ResumeCandidate[] };
 
@@ -210,12 +215,14 @@ export function resolveResumeTarget(handle: string, deps: ResolveTargetDeps): Re
   // consult A/B 计划（§5 P1b，D3 推荐）：dispatchMeta 的继承源只取终态快照的
   // diag（tombstone 不扩展 —— 它是 TTL 兜底视图，不带分析字段）。
   const dispatchMeta = snapshotWithSessionFile(deps, runId)?.diag.dispatchMeta;
+  const wakeLevel = snapshotWithSessionFile(deps, runId)?.diag.wakeLevel ?? deps.tombstones.get(runId)?.wakeLevel;
   return {
     ok: true,
     runId,
     sessionFile,
     ...(timeoutPolicy === undefined ? {} : { timeoutPolicy }),
     ...(dispatchMeta === undefined ? {} : { dispatchMeta }),
+    ...(wakeLevel === undefined ? {} : { wakeLevel }),
   };
 }
 function statIsFile(path: string): boolean {

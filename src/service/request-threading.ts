@@ -39,6 +39,9 @@ const THREADED = [
   // (promptDispatchedAt / inputAcceptedAt / promptOutcome). Runner-only: the runner/reducer read it (W2); it never
   // reaches a child session or a model. Absent unless an inbox reservation was bound to the resume.
   "trackInput",
+  // fabric-cross-session plan §3.3 L4: the run's initial effective causal level (computed by spawn admission, never trusted
+  // from a caller); the runner seeds diag.wakeLevel from it via the reducer's `wake_level` input.
+  "wakeLevel",
 ] as const;
 
 /**
@@ -81,6 +84,9 @@ const NOT_THREADED = [
   // spawn/runner code (without trigger.claimToken); NEVER threaded verbatim — a child must not see (or forge) it,
   // and the claimToken is a mailbox-internal secret.
   "wakeOrigin",
+  // fabric-cross-session plan §3.3 L4: consumed by spawn admission only (seeds wakeLevel = max(hop+1, prevFinal)); the
+  // runner/child never sees it.
+  "wakeHopLevel",
 ] as const;
 
 type ClassifiedKeys = (typeof THREADED)[number] | (typeof NOT_THREADED)[number];

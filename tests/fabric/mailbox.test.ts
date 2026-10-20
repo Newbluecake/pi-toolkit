@@ -22,7 +22,14 @@ const rec = (kind: FabricRecord["kind"] = "finding", to: FabricRecord["to"] = "r
   attempts: 0,
   updatedAt: 0,
 });
-function setup(inject: (r: FabricRecord) => Promise<Verdict>, target: FabricRecord["to"] = "root") {
+function setup(
+  inject: (r: FabricRecord) => Promise<Verdict>,
+  target: FabricRecord["to"] = "root",
+  wake?: {
+    level: { onDelivered(record: FabricRecord, channel: "context" | "display"): void };
+    seed?: Partial<FabricRecord>;
+  },
+) {
   const clock = new FakeClock();
   const store = new MemoryOutboxStore<FabricRecord>();
   const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
@@ -39,7 +46,7 @@ function setup(inject: (r: FabricRecord) => Promise<Verdict>, target: FabricReco
     memoryOnlyFields: ["claimToken"],
     now: () => clock.now(),
   });
-  engine.put(rec("finding", target));
+  engine.put({ ...rec("finding", target), ...(wake?.seed ?? {}) });
   const tree = new FabricTree();
   tree.append("root", "r_ABCDEFGH");
   if (target !== "root") tree.append("root", target);
@@ -68,6 +75,7 @@ function setup(inject: (r: FabricRecord) => Promise<Verdict>, target: FabricReco
     ports: { inject, sendRootContext: inject, sendRootDisplay: inject },
     fabricSteerTimeoutMs: 10,
     maxAttempts: 3,
+    ...(wake ? { level: wake.level } : {}),
   });
   return { clock, store, engine, mailbox, tree };
 }
@@ -374,5 +382,50 @@ describe("fabric mailbox", () => {
     expect(engine.get(progress.key)).toMatchObject({ state: "abandoned", terminalReason: "ttl_expired" });
     expect(engine.get(progress.key)?.deadLetter).toBeUndefined();
     expect(engine.select((r) => r.kind === "dead_letter")).toHaveLength(0);
+  });
+});
+
+describe("fabric mailbox — causal level seam A (plan §3.3, W1)", () => {
+  it("calls level.onDelivered exactly once, with the DELIVERED record and its effective channel, only on success", async () => {
+    const calls: Array<[FabricRecord, string]> = [];
+    const level = { onDelivered: (r: FabricRecord, c: string) => void calls.push([r, c]) };
+    const { mailbox, engine } = setup(async () => ({ ok: true }), "root", {
+      level: level as never,
+      seed: { level: 1, wake: false },
+    });
+    mailbox.pump();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.get(rec().key)?.state).toBe("delivered");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toMatchObject({ state: "delivered", level: 1, wake: false });
+    expect(calls[0]![1]).toBe("context");
+  });
+
+  it("a failed / retried send never propagates a level", async () => {
+    const calls: unknown[] = [];
+    const { mailbox, engine } = setup(async () => ({ ok: false, retryable: true, reason: "boom" }), "root", {
+      level: { onDelivered: (r) => void calls.push(r) },
+      seed: { level: 1 },
+    });
+    mailbox.pump();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.get(rec().key)?.state).toBe("pending");
+    expect(calls).toEqual([]);
+  });
+
+  it("a throwing level hook never disturbs delivery bookkeeping", async () => {
+    const { mailbox, engine } = setup(async () => ({ ok: true }), "root", {
+      level: {
+        onDelivered: () => {
+          throw new Error("level exploded");
+        },
+      },
+    });
+    mailbox.pump();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.get(rec().key)?.state).toBe("delivered");
   });
 });

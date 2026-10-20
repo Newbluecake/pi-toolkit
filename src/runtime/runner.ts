@@ -83,6 +83,11 @@ export interface ResolvedSpawnRequest extends SessionSpec {
    */
   trackInput?: true;
   /**
+   * fabric-cross-session plan §3.3 L4: threaded verbatim from `SpawnRequest.wakeLevel` (Gate C). The runner seeds
+   * `diag.wakeLevel` from it right after the `enqueued` dispatch (reducer input `wake_level`). Absent ⇒ wake off.
+   */
+  wakeLevel?: number;
+  /**
    * consult (plan §4.3/§4.4): threaded verbatim from
    * `SpawnRequest.forkSessionFrom`. The runner uses it for two things:
    * ① session_create opens this file through `driver.resume` instead of
@@ -408,6 +413,15 @@ export class RuntimeRunner implements Runner {
   dispatchExternal(runId: string, generation: number, input: RunInput): void {
     const entry = this.dispatchers.get(runId);
     if (entry && entry.gen === generation) entry.fn(input);
+  }
+  /**
+   * fabric-cross-session plan §3.3 L1: raise a live run's effective causal level (monotonic max, diag-only reducer
+   * input). Silently ignored for an unknown / finished run (the reducer ignores it after terminal).
+   */
+  noteWakeLevel(runId: string, level: number): void {
+    const state = this.states.get(runId);
+    if (!state) return;
+    this.dispatchExternal(runId, state.generation, { kind: "wake_level", at: this.d.clock.now(), level });
   }
   /** Read-only snapshot of a run's internal RunState, for watchdog tick() / diagnostics. */
   getRunState(runId: string, generation?: number): RunState | undefined {
@@ -800,6 +814,8 @@ export class RuntimeRunner implements Runner {
         ...(req.timeoutPolicy === undefined ? {} : { timeoutPolicy: req.timeoutPolicy }),
         ...(req.displayMeta === undefined ? {} : { meta: req.displayMeta }),
       });
+      // fabric-cross-session plan §3.3 L4: seed the run's initial effective causal level (diag-only input; wake off ⇒ absent).
+      if (req.wakeLevel !== undefined) dispatch({ kind: "wake_level", at: this.d.clock.now(), level: req.wakeLevel });
       // CC4/CP3: an already-expired deadlineAt cap settles the run as
       // failed(config) directly inside the `enqueued` reducer branch, before
       // any timer is armed. Must be checked here — before pool.acquire — or

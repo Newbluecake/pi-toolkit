@@ -144,3 +144,57 @@ describe("fabric mention channel", () => {
     expect(h.spawn).toHaveBeenCalled();
   });
 });
+
+describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
+  function withLevel(status: RunSnapshot["status"], levelOf?: (n: string) => number) {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: target, type: "worker", parent: "root" });
+    const admit = vi.fn(() => ({ ok: true as const, status: "accepted" as const, key: "k", seq: 1 }));
+    const spawn = vi.fn(async () => ({ runId: "r_NEW00001" as const }));
+    const channel = createMentionChannel({
+      router: { admit, targetState: () => "running" },
+      registry,
+      query: { get: () => snapshot(status) },
+      spawn: { spawn },
+      from,
+      generation: () => 3,
+      canMessage: ["mention"],
+      ...(levelOf ? { level: { levelOf } } : {}),
+    });
+    return { channel, admit, spawn };
+  }
+
+  it("a running target gets the explicit wake on the router input (and none when omitted)", async () => {
+    const h = withLevel("running");
+    await h.channel.send("builder", "finding", "x", false);
+    await h.channel.send("builder", "finding", "x");
+    const inputs = h.admit.mock.calls.map((c) => (c as unknown as [string, Record<string, unknown>])[1]);
+    expect(inputs[0]).toMatchObject({ wake: false });
+    expect(inputs[1]).not.toHaveProperty("wake");
+  });
+
+  it("wake:false never resumes a finished @label (deliver-only has no park until W3)", async () => {
+    const h = withLevel("completed", () => 1);
+    await expect(h.channel.send("builder", "finding", "x", false)).resolves.toEqual({
+      ok: false,
+      status: "target_not_ready",
+      label: "builder",
+      runId: target,
+      reason: "wake_false_finished",
+    });
+    expect(h.spawn).not.toHaveBeenCalled();
+  });
+
+  it("a legacy / wake:true @label resume of a finished run is never blocked but carries the sender's level as a hop", async () => {
+    const h = withLevel("completed", (n) => (n === from ? 2 : 0));
+    await expect(h.channel.send("builder", "finding", "x")).resolves.toMatchObject({ ok: true, status: "resumed" });
+    await h.channel.send("builder", "finding", "x", true);
+    for (const call of h.spawn.mock.calls) expect(call[0]).toMatchObject({ resumeFrom: target, wakeHopLevel: 2 });
+  });
+
+  it("wake off (no level dep): the resume spawn request has no wakeHopLevel key — byte-identical", async () => {
+    const h = withLevel("completed");
+    await h.channel.send("builder", "finding", "x");
+    expect(h.spawn.mock.calls[0]?.[0]).not.toHaveProperty("wakeHopLevel");
+  });
+});

@@ -132,6 +132,17 @@ describe("threadThroughRequestFields", () => {
     expect(threadThroughRequestFields({ type: "worker", prompt: "x", trackInput: undefined })).toEqual({});
   });
 
+  it("fabric-cross-session §3.3 L4 (W1): wakeLevel is THREADED to the runner; wakeHopLevel is admission-only", () => {
+    const req: SpawnRequest = { type: "worker", prompt: "x", wakeLevel: 2, wakeHopLevel: 1 };
+    const out = threadThroughRequestFields(req);
+    expect(out).toEqual({ wakeLevel: 2 });
+    expect(out).not.toHaveProperty("wakeHopLevel");
+    // Gate C: the THREADED field exists under the same name on the runner's request type
+    const resolved: Pick<ResolvedSpawnRequest, "wakeLevel"> = { wakeLevel: out.wakeLevel };
+    expect(resolved.wakeLevel).toBe(2);
+    expect(threadThroughRequestFields({ type: "worker", prompt: "x", wakeLevel: undefined })).toEqual({});
+  });
+
   it("P0-r (todo #22 optimize-plan §7.0 point 5): toolDomain is consumed by the runtime adapter, never threaded verbatim", () => {
     const req: SpawnRequest = { type: "Plan", prompt: "tidy", toolDomain: "readonly" };
     const out = threadThroughRequestFields(req);

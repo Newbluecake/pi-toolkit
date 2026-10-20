@@ -611,7 +611,8 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     });
     let stepPromise: ReturnType<QueryControlPort["steer"]>;
     try {
-      stepPromise = query.steer(cmd.runId, cmd.text);
+      // fabric-cross-session plan §3.3 seam B: a web steer is a human act — level 0, never raises the target.
+      stepPromise = query.steer(cmd.runId, cmd.text, { level: 0 });
     } catch {
       pendingSteerByRun.delete(cmd.runId);
       timer.cancel();

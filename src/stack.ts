@@ -60,11 +60,12 @@ import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE } from "./adapters/pi-outbox-st
 import { detectPiCapabilities } from "./adapters/pi-compat.js";
 import { createDeliveryEngine } from "./delivery/engine.js";
 import { createFabricMailbox, type FabricPorts } from "./fabric/mailbox.js";
+import { createCausalLevel, readRootLevel, WAKE_LEVEL_CUSTOM_TYPE, type CausalLevel } from "./fabric/wake-level.js";
 import { RESUME_TEXT } from "./tools/compact-tool.js";
 import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
 import { createFabricTree } from "./fabric/tree.js";
-import { formatMessage, type FabricRecord } from "./core/message.js";
+import { formatMessage, type FabricRecord, type NodeRef } from "./core/message.js";
 import { wrapWithRunLog, seedRunStoreFromEntries, WORKTREE_DISPOSITION_CUSTOM_TYPE } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
 import {
@@ -523,6 +524,32 @@ function buildFabric(
     now: () => systemClock.now(),
     onDegraded: (key, reason) => console.warn(`[pi-subagent] fabric persistence degraded for ${key}: ${reason}`),
   });
+  // fabric-cross-session plan §3.9 (W1): wakeOn is decided ONCE per stack build from `fabric.enabled ∧ fabric.wake.enabled`
+  // (buildFabric itself only runs with fabric on). Off ⇒ no CausalLevel, no router wake policy, no mailbox level hook,
+  // no `subagent:wake-level` entry, no wake schema — every path below stays byte-identical to before.
+  const wakeOn = settings.fabric.wake.enabled;
+  // L6: the root level is restored from THIS session branch (never `getEntries()` — a fork must not resurrect a sibling's
+  // value) and persisted only when the session can hold entries at all (`readBack`).
+  let rootLevel0 = 0;
+  if (wakeOn && readBack) {
+    try {
+      rootLevel0 = readRootLevel(ctx.sessionManager.getBranch());
+    } catch {
+      rootLevel0 = 0;
+    }
+  }
+  const level: CausalLevel | undefined = wakeOn
+    ? createCausalLevel({
+        maxLevel: settings.fabric.wake.maxLevel,
+        initialRoot: rootLevel0,
+        runLevel: (runId) => runnerRef.current?.getRunState?.(runId)?.diag.wakeLevel,
+        raiseRun: (runId, to) => runnerRef.current?.noteWakeLevel?.(runId, to),
+        persistRoot: (value) => {
+          if (!readBack) return;
+          pi.appendEntry(WAKE_LEVEL_CUSTOM_TYPE, { v: 1, level: value, at: systemClock.now() });
+        },
+      })
+    : undefined;
   const tree = createFabricTree();
   // run-persistence plan D6 (fabric row): fold the run log per runId first —
   // terminal entries win, otherwise the latest non-terminal (journal) entry —
@@ -566,6 +593,15 @@ function buildFabric(
       ...settings.fabric,
       reconcileTtlMs: settings.reconcileTtlMs,
       canRenderEntries: capabilities.canRenderEntries,
+      ...(level
+        ? {
+            wakePolicy: {
+              levelOf: (node) => level.levelOf(node),
+              hopAllowed: (l) => level.hopAllowed(l),
+              perRunQuota: settings.fabric.wake.perRunQuota,
+            },
+          }
+        : {}),
     },
     () => systemClock.now(),
     () => mailbox.pump(),
@@ -580,15 +616,17 @@ function buildFabric(
       return { ok: true };
     },
     sendRootContext: async (record) => {
-      pi.sendMessage(
-        {
-          customType: "subagent:fabric",
-          content: formatMessage(record, "child").text,
-          display: false,
-          details: record,
-        },
-        { deliverAs: "steer", triggerTurn: true },
-      );
+      const message = {
+        customType: "subagent:fabric",
+        content: formatMessage(record, "child").text,
+        display: false,
+        details: record,
+      };
+      // plan §3.1 root matrix: an explicit wake:false (or a wake:true downgraded at admission, stored as false) is
+      // deliver-only — the very same `triggerTurn:false` sendMessage shape stack.ts already uses elsewhere; omitted and
+      // effective wake:true keep today's steer + triggerTurn:true call, argument for argument.
+      if (record.wake === false) pi.sendMessage(message, { triggerTurn: false });
+      else pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
       return { ok: true };
     },
     sendRootDisplay: async (record) => {
@@ -614,8 +652,9 @@ function buildFabric(
     progressChannel: settings.fabric.progressChannel,
     canRenderEntries: capabilities.canRenderEntries,
     maxAttempts: settings.deliveryAttempts,
+    ...(level ? { level } : {}),
   });
-  return { engine, tree, router, mailbox };
+  return { engine, tree, router, mailbox, ...(level ? { level } : {}) };
 }
 
 export function currentSessionId(ctx: ExtensionContext): string {
@@ -984,6 +1023,11 @@ export interface Stack {
    */
   bashJobRecovery?: { dispose(): void };
   fabric?: { dispose(): void; pump(): void };
+  /**
+   * fabric-cross-session plan §3.9 (W1): causal-level controller; present iff `fabric.enabled ∧ fabric.wake.enabled`.
+   * index.ts's `input` hook reads it (`holder.current?.wake`) to reset the root level on proven human input.
+   */
+  wake?: { level: CausalLevel };
   /** 提示词缓存保活调度器（plan.md §2）；settings.cacheTtl.keepalive=false 时缺席。 */
   keepalive?: CacheKeepaliveService;
   /** 额度感知派单（docs/dev/quota/quota-plan.md）：同步缓存判定面。settings.quota.enabled=false 时缺席（R11）。 */
@@ -2094,6 +2138,7 @@ export function buildSessionStack(
       ? {
           fabric: {
             router: fabric.router,
+            ...(fabric.level ? { wake: { levelOf: (node: NodeRef) => fabric.level!.levelOf(node) } } : {}),
             mention: { registry: mention, query: () => query, spawn: () => spawnRef.current },
           },
         }
@@ -2228,6 +2273,15 @@ export function buildSessionStack(
     onLabel: (label, target, info) =>
       info.resumed ? mentionRef.current?.reassign(label, target) : mentionRef.current?.register(label, target),
     ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),
+    // fabric-cross-session plan §3.3 L4 (W1): spawn admission reads causal levels only with wake on.
+    ...(fabric?.level
+      ? {
+          causal: {
+            levelOfRun: (runId: RunId) => fabric.level!.levelOf(runId),
+            root: () => fabric.level!.root,
+          },
+        }
+      : {}),
     onOutcomeAcked: (outcome) => {
       try {
         notifier.ack(outcome.runId, outcome.diag.generation, { extensionOwner: "spawnAndWait" });
@@ -2392,6 +2446,8 @@ export function buildSessionStack(
     runner,
     clock: systemClock,
     defaultWaitMs: settings.budget.totalMs + settings.budget.abortGraceMs + 30_000,
+    // fabric-cross-session plan §3.3 seam B (W1): steer_subagent / web steer / @mention propagate their origin level.
+    ...(fabric?.level ? { onSteered: (runId, originLevel) => fabric.level!.onSteered(runId, originLevel) } : {}),
   });
   // consult (plan §6 D-14/D-16): wired now that both `spawn` and `query`
   // exist — consultRef.current is filled synchronously before this
@@ -2911,5 +2967,6 @@ export function buildSessionStack(
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),
     ...(externalPort !== undefined ? { external: externalPort.port } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
+    ...(fabric?.level ? { wake: { level: fabric.level } } : {}),
   };
 }

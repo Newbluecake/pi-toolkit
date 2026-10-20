@@ -1533,6 +1533,64 @@ describe("executable transition matrix (§4.4.1)", () => {
     expect(result.state.diag.external).toEqual({ provider: "droid", autonomy: "high" });
   });
 
+  // fabric-cross-session plan §3.3 L1 / §4.7 (W1): `wake_level` is a diag-only input — monotonic max, accepted in EVERY
+  // non-terminal phase, ignored (state identity) once terminal, never an effect, never touches liveness or the phase
+  // clocks. AGENTS.md: the matrix is updated in lockstep with every new RunInput kind.
+  it.each(RUN_PHASES)(
+    "wake_level/%s: monotonic diag-only; terminal ignores; zero effects; liveness untouched",
+    (phase) => {
+      const before = fixture(phase);
+      const wake = (level: number, at = 77): RunInput => ({ kind: "wake_level", at, level });
+      const up = reduce(before, { generation: before.generation, input: wake(2) }, budget);
+      expect(up.effects, phase).toEqual([]);
+      expect(up.state.status, phase).toBe(before.status);
+      expect(up.state.phase, phase).toBe(before.phase);
+      if (isTerminalStatus(before.status)) {
+        expect(up.state, phase).toBe(before); // identity: the terminal entry already carries the final value
+        return;
+      }
+      expect(up.state.diag.wakeLevel, phase).toBe(2);
+      expect(up.state.diag.lastEventAt, phase).toBe(before.diag.lastEventAt);
+      expect(up.state.diag.lastEventType, phase).toBe(before.diag.lastEventType);
+      expect(up.state.diag.phaseEnteredAt, phase).toBe(before.diag.phaseEnteredAt);
+      expect(up.state.diag.staleInputs, phase).toBe(before.diag.staleInputs);
+      expect(up.state.diag.lastWarn, phase).toBe(before.diag.lastWarn);
+      expect(up.state.deadlines, phase).toEqual(before.deadlines);
+      // monotonic max: a lower / equal level is a no-op (state identity), a higher one raises
+      expect(reduce(up.state, { generation: 1, input: wake(1) }, budget).state, phase).toBe(up.state);
+      expect(reduce(up.state, { generation: 1, input: wake(2) }, budget).state, phase).toBe(up.state);
+      expect(reduce(up.state, { generation: 1, input: wake(3) }, budget).state.diag.wakeLevel, phase).toBe(3);
+      // 0 is a legal seed (spawn writes the level even when it is 0) and is distinguishable from "absent"
+      expect(reduce(before, { generation: 1, input: wake(0) }, budget).state.diag.wakeLevel, phase).toBe(0);
+    },
+  );
+
+  it("wake_level: degenerate levels (NaN / ±Infinity / negative) are illegal, never stored; a stale generation only bumps staleInputs", () => {
+    const before = fixture("model_turn");
+    for (const level of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1]) {
+      const r = reduce(before, { generation: 1, input: { kind: "wake_level", at: 5, level } }, budget);
+      expect(r.effects).toEqual([]);
+      expect(r.state.diag.wakeLevel).toBeUndefined();
+      expect(r.state.diag.lastWarn).toBe("illegal:wake_level");
+    }
+    const stale = reduce(before, { generation: 9, input: { kind: "wake_level", at: 5, level: 2 } }, budget);
+    expect(stale.state.diag.wakeLevel).toBeUndefined();
+    expect(stale.state.diag.staleInputs).toBe(before.diag.staleInputs + 1);
+  });
+
+  it("wake_level survives into the terminal entry: the final effective value rides the outcome diag", () => {
+    let s = fixture("model_turn");
+    s = reduce(s, { generation: 1, input: { kind: "wake_level", at: 7, level: 2 } }, budget).state;
+    const settled = reduce(s, { generation: 1, input: { kind: "prompt_settled", at: 8 } }, budget).state;
+    expect(isTerminalStatus(settled.status)).toBe(true);
+    expect(settled.diag.wakeLevel).toBe(2);
+    expect(settled.outcome?.diag.wakeLevel).toBe(2);
+    // …and a late raise after the terminal entry was sealed is ignored (the sealed value is final)
+    const late = reduce(settled, { generation: 1, input: { kind: "wake_level", at: 9, level: 5 } }, budget).state;
+    expect(late.diag.wakeLevel).toBe(2);
+    expect(late.outcome?.diag.wakeLevel).toBe(2);
+  });
+
   it.each(FLAT_MATRIX.map((c) => [`${c.phase}/${c.kind}`, c] as const))(
     "enforces %s",
     (_label, { phase, kind, cell }) => {
@@ -1662,6 +1720,8 @@ describe("P1-P14 property invariants", () => {
         level: (["L0", "L1", "L2", "L3"] as const)[Math.floor(next() * 4)],
         ok: next() < 0.8,
       };
+    // fabric-cross-session plan §3.3 L1 (W1): seeded property sync for the diag-only `wake_level` input.
+    if (next() < 0.15) return { kind: "wake_level", at, level: Math.floor(next() * 4) };
     return { kind: "phase_entered", at, phase: state.phase };
   }
   const terminalStatuses = ["completed", "failed", "timed_out", "aborted"];
@@ -1681,6 +1741,7 @@ describe("P1-P14 property invariants", () => {
     ["P13 deadline_extended never touches phase clocks or frozen deadlines", 13],
     ["P14 entering grace emits no cancel_signal", 14],
     ["P16 deadlines stay finite and timeoutPolicy stays constant under degenerate extensions", 16],
+    ["P17 wakeLevel is monotone, frozen once terminal, and wake_level never emits effects", 17],
   ])("%s, 1000 random sequences", (name, property) => {
     for (let seed = 1; seed <= 1000; seed++) {
       const next = random(seed + property * 10000);
@@ -1779,6 +1840,17 @@ describe("P1-P14 property invariants", () => {
           if (deadlineAt !== undefined) expect(Number.isFinite(deadlineAt)).toBe(true);
           if (hardDeadlineAt !== undefined) expect(Number.isFinite(hardDeadlineAt)).toBe(true);
           expect(result.state.diag.timeoutPolicy).toBe(initialPolicy);
+        }
+        if (property === 17) {
+          const before = state.diag.wakeLevel;
+          const after = result.state.diag.wakeLevel;
+          if (before !== undefined) expect(after).toBeGreaterThanOrEqual(before); // monotone, never un-set
+          if (terminalStatuses.includes(state.status)) expect(after).toBe(before); // frozen once terminal
+          if (event.kind === "wake_level") {
+            expect(result.effects).toEqual([]);
+            expect(result.state.status).toBe(state.status);
+            expect(result.state.phase).toBe(state.phase);
+          }
         }
         state = result.state;
       }

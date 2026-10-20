@@ -29,9 +29,15 @@ export interface QueryService {
     opts?: { waitMs?: number; signal?: AbortSignal },
   ): Promise<{ ok: true; outcome: RunOutcome } | { ok: false; reason: "wait_timeout" | "aborted" | "unknown_run" }>;
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
+  /**
+   * `origin` (fabric-cross-session plan §3.3 seam B): who is steering, as a causal level. Omitted ⇒ the caller is the
+   * autonomous root model (the `steer_subagent` tool) and the target is raised to the ROOT's current level; a human
+   * origin (web steer op, TUI @mention) passes `{ level: 0 }`, which never raises anything.
+   */
   steer(
     runId: RunId,
     text: string,
+    origin?: { level: number },
   ): Promise<{ ok: true } | { ok: false; reason: "not_running" | "steer_timeout" | "steer_rejected"; detail?: string }>;
   /**
    * fleet-drawer plan §4.1: read-only peek at a running run's current
@@ -68,6 +74,11 @@ export interface QueryServiceDeps {
   runner: Runner;
   clock?: Clock;
   defaultWaitMs?: number;
+  /**
+   * fabric-cross-session plan §3.3 seam B (W1): called after a steer was ACCEPTED by a running run. `originLevel` is the
+   * caller-supplied origin level or `undefined` (= the root's level, resolved by the wiring). Absent ⇒ wake off.
+   */
+  onSteered?: (runId: RunId, originLevel: number | undefined) => void;
 }
 const terminal = (status: RunStatus) =>
   status === "completed" || status === "failed" || status === "timed_out" || status === "aborted";
@@ -143,11 +154,16 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
       results.forEach((r, i) => (r.ok ? settled.push(r.outcome) : pending.push(ids[i]!)));
       return { settled, pending };
     },
-    async steer(id, text) {
+    async steer(id, text, origin) {
       const snapshot = deps.registry.get(id);
       if (!snapshot || snapshot.status !== "running" || !deps.runner.steer) return { ok: false, reason: "not_running" };
       try {
         await deps.runner.steer(id, text);
+        try {
+          deps.onSteered?.(id, origin?.level);
+        } catch {
+          /* level propagation is advisory: never turn an accepted steer into a failure */
+        }
         return { ok: true };
       } catch (error) {
         return { ok: false, reason: "steer_rejected", detail: error instanceof Error ? error.message : String(error) };

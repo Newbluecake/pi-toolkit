@@ -9,6 +9,7 @@ import {
   type MessageKey,
   type MessageKind,
   type NodeRef,
+  type WakeDowngrade,
 } from "../core/message.js";
 import type { FabricTree, TreeTargetState } from "./tree.js";
 import type { FabricThrottle } from "./throttle.js";
@@ -24,6 +25,20 @@ export interface FabricRouterConfig {
   progressChannel?: MessageChannel;
   canRenderEntries?: boolean;
   rootInboxCap: number;
+  /**
+   * fabric-cross-session plan §3.1/§3.3 (W1): present only when `fabric.enabled ∧ fabric.wake.enabled`. Absent ⇒ the
+   * router never reads `AdmissionInput.wake`, never stamps `level`/`wake`, and behaves byte-identically to before.
+   */
+  wakePolicy?: WakePolicy;
+}
+/** Host-owned causal-level reader + the expensive-class budget for `wake:true` (plan §3.1 "separate quota class"). */
+export interface WakePolicy {
+  /** L2: the sender's current effective level (run ⇒ diag value ?? 0; root ⇒ root level). */
+  levelOf(node: NodeRef): number;
+  /** L5: `level + 1 ≤ maxLevel`. */
+  hopAllowed(level: number): boolean;
+  /** Effective `wake:true` sends allowed per sender run (`fabric.wake.perRunQuota`). */
+  perRunQuota: number;
 }
 export interface AdmissionInput {
   to: NodeRef;
@@ -32,9 +47,22 @@ export interface AdmissionInput {
   generation: number;
   canMessage?: readonly ("parent" | "child" | "ancestor" | "descendant" | "sibling" | "self" | "mention")[];
   route?: MentionRoute;
+  /** Sender-chosen wake intent (plan §3.1); ignored unless `config.wakePolicy` is present. */
+  wake?: boolean;
 }
 export type AdmissionResult =
-  | { ok: true; status: "accepted"; key: MessageKey; seq: number; superseded?: MessageKey }
+  | {
+      ok: true;
+      status: "accepted";
+      key: MessageKey;
+      seq: number;
+      superseded?: MessageKey;
+      /** Effective wake of an explicit `wake` request (after a downgrade); absent when the sender omitted it. */
+      wake?: boolean;
+      /** Why an explicit `wake:true` to the root was delivered deliver-only instead (plan §3.1 / L5). */
+      wakeDowngraded?: WakeDowngrade;
+    }
+  | { ok: false; status: "invalid_wake"; reason: "progress_never_wakes" }
   | {
       ok: false;
       status: "quota_exhausted";
@@ -61,6 +89,8 @@ export class FabricRouter {
   private readonly dlRefs = new Map<MessageKey, DeadLetterOutcome>();
   private readonly dlPlaceholders = new Set<MessageKey>();
   private seq = new Map<string, number>();
+  /** Effective `wake:true` sends to the root per sender (the root-matrix expensive class; plan §3.1). */
+  private readonly wakeSent = new Map<NodeRef, number>();
   private frozen = false;
   constructor(
     private readonly engine: DeliveryEngine<FabricRecord, FabricRecord["state"]>,
@@ -76,6 +106,9 @@ export class FabricRouter {
       this.seq.set(this.link(r.from, r.to), Math.max(this.seq.get(this.link(r.from, r.to)) ?? 0, r.seq));
       if (r.rejected === undefined && (r.kind === "progress" || r.kind === "finding" || r.kind === "directive"))
         this.count(r.from, r.kind);
+      // plan §3.1: an effective wake:true to the root (records to the root store the post-downgrade value)
+      if (r.rejected === undefined && r.to === "root" && r.wake === true)
+        this.wakeSent.set(r.from, (this.wakeSent.get(r.from) ?? 0) + 1);
       if (r.kind === "dead_letter" && r.to !== "system" && r.ref) {
         for (const key of r.ref.keys) this.dlRefs.set(key, { status: "issued", key: r.key });
         this.deadLetterUsed.set(r.to, (this.deadLetterUsed.get(r.to) ?? 0) + 1);
@@ -116,6 +149,10 @@ export class FabricRouter {
         ? { kind: input.kind, relation, from }
         : { kind: input.kind, relation, from, canMessage: input.canMessage };
     if (!authorize(authorization)) throw new Error("message not authorized");
+    const wakePolicy = this.config.wakePolicy;
+    // plan §3.1: progress never wakes — an explicit wake:true is a caller error, answered before any seq/quota is spent.
+    if (wakePolicy && input.wake === true && input.kind === "progress")
+      return { ok: false, status: "invalid_wake", reason: "progress_never_wakes" };
     const seq = this.nextSeq(from, input.to);
     const key = makeMessageKey(from, input.to, input.generation, seq);
     const used = this.getUsed(from, input.kind);
@@ -131,6 +168,18 @@ export class FabricRouter {
     );
     if (!rejection && input.to === "root" && channel === "context" && this.rootInbox() >= this.config.rootInboxCap)
       rejection = { ok: false, status: "target_backpressure", key, seq, retryAfterMs: 0 };
+    // plan §3.1 root matrix + §3.3 L2/L5: the host stamps the sender's level; an explicit wake:true to the ROOT is the
+    // expensive class — it must pass the level gate and the per-run quota, otherwise it is delivered deliver-only
+    // (downgraded, never rejected). Any other target keeps the sender's intent verbatim (a running target is steered
+    // either way; a finished one is W3–W5's business).
+    const senderLevel = wakePolicy ? wakePolicy.levelOf(from) : undefined;
+    let wake = wakePolicy ? input.wake : undefined;
+    let wakeDowngraded: WakeDowngrade | undefined;
+    if (wakePolicy && wake === true && input.to === "root" && senderLevel !== undefined) {
+      if (!wakePolicy.hopAllowed(senderLevel)) wakeDowngraded = "level_limit";
+      else if ((this.wakeSent.get(from) ?? 0) >= wakePolicy.perRunQuota) wakeDowngraded = "rate_limited";
+      if (wakeDowngraded !== undefined) wake = false;
+    }
     const record: FabricRecord = {
       key,
       from,
@@ -147,6 +196,8 @@ export class FabricRouter {
       ...(rejection
         ? { rejected: { reason: rejection.status === "quota_exhausted" ? "quota_exhausted" : "target_backpressure" } }
         : {}),
+      ...(senderLevel !== undefined && from !== "system" ? { level: senderLevel } : {}),
+      ...(wake !== undefined ? { wake } : {}),
       ...(from !== "system"
         ? {
             via: {
@@ -166,8 +217,22 @@ export class FabricRouter {
     this.engine.put(record);
     if (!rejection && (input.kind === "progress" || input.kind === "finding" || input.kind === "directive"))
       this.count(from, input.kind);
+    if (!rejection && wake === true && input.to === "root") this.wakeSent.set(from, (this.wakeSent.get(from) ?? 0) + 1);
     this.onChanged();
-    return rejection ?? { ok: true, status: "accepted", key, seq };
+    return (
+      rejection ?? {
+        ok: true,
+        status: "accepted",
+        key,
+        seq,
+        ...(wakePolicy && input.wake !== undefined ? { wake: wake === true } : {}),
+        ...(wakeDowngraded === undefined ? {} : { wakeDowngraded }),
+      }
+    );
+  }
+  /** Effective `wake:true` sends to the root made by `from` so far (expensive class; for status/tests). */
+  wakeUsed(from: NodeRef): number {
+    return this.wakeSent.get(from) ?? 0;
   }
 
   rootInbox(): number {

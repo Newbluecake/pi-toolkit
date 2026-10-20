@@ -198,6 +198,12 @@ export interface SpawnServiceDeps {
   now?: () => number;
   budget?: Partial<DeadlineBudget>;
   onSnapshot?: (snapshot: RunSnapshot) => void;
+  /**
+   * fabric-cross-session plan §3.3 L4 (W1): causal-level reader, present only when `fabric.enabled ∧ fabric.wake.enabled`
+   * (absent ⇒ no run ever gets `wakeLevel`, byte-identical to before). `levelOfRun` is a run's current effective level
+   * (live runner state, `?? 0`), `root` the main session's level.
+   */
+  causal?: { levelOfRun(runId: RunId): number; root(): number };
   /** Narrow admission hook for the fabric tree; called after a child edge is recorded. */
   onSpawnEdge?: (parentRunId: RunId, childRunId: RunId) => void;
   onLifecycle?: LifecycleSink;
@@ -910,6 +916,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // read tombstones for this field). `schemaPreset`/`experts` are NOT
       // inherited — they are per-dispatch fields.
       let resumeDispatchMeta: SpawnRequest["dispatchMeta"] = undefined;
+      let resumePrevWakeLevel: number | undefined = undefined;
       const runId = newRunId(
         (id) => records.has(id) || running.has(id) || tombstones.has(id) || deps.runIdTaken?.(id) === true,
       );
@@ -1042,6 +1049,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         resumeOwners.set(resume.sessionFile, runId);
         resumeTimeoutPolicy = resume.timeoutPolicy;
         resumeDispatchMeta = resume.dispatchMeta;
+        resumePrevWakeLevel = resume.wakeLevel;
         resolvedReq = {
           ...req,
           resumeFrom: resume.sessionFile,
@@ -1119,6 +1127,25 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         ...(config.canSpawn && !req.forkSessionFrom ? { canSpawn: config.canSpawn } : {}),
       });
       resolvedReq = { ...resolvedReq, timeoutPolicy: resolvedPolicy };
+      // fabric-cross-session plan §3.3 L4 (W1): initial effective causal level, written BEFORE `void start` below.
+      //  · a wake revive (`wakeOrigin`) or a legacy @mention resume (`wakeHopLevel`) is itself a hop by a node at level
+      //    h ⇒ max(h+1, prevFinal), where prevFinal = the resumed run's final level (it carries its past influence);
+      //  · every other spawn (Agent tool incl. `Agent({resume})`, RPC, /task, workflow) is a new human epoch ⇒ the
+      //    SPAWNER's level (parent run if nested, else root) and never prevFinal — so a root just reset by human input
+      //    spawns at 0. A caller-supplied `wakeLevel` is never trusted: wake off ⇒ the field is stripped.
+      if (deps.causal) {
+        const hop = req.wakeOrigin?.level ?? req.wakeHopLevel;
+        const level =
+          hop !== undefined
+            ? Math.max(hop + 1, resumePrevWakeLevel ?? 0)
+            : req.parentRunId
+              ? deps.causal.levelOfRun(req.parentRunId)
+              : deps.causal.root();
+        resolvedReq = { ...resolvedReq, wakeLevel: level };
+      } else if (resolvedReq.wakeLevel !== undefined) {
+        const { wakeLevel: _untrusted, ...rest } = resolvedReq;
+        resolvedReq = rest;
+      }
       if (req.expectAck) claimedRunIds.add(runId);
       if (req.parentRunId) {
         parentOf.set(runId, req.parentRunId);

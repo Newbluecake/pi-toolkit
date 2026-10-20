@@ -37,6 +37,11 @@ export interface MailboxOptions {
   progressChannel?: MessageChannel;
   canRenderEntries?: boolean;
   maxAttempts: number;
+  /**
+   * fabric-cross-session plan §3.3 seam A (W1): called once per successful delivery (`claimed → delivered`) so the
+   * causal level can propagate. Absent (wake off) ⇒ nothing changes. Must not throw; failures are swallowed here.
+   */
+  level?: { onDelivered(record: FabricRecord, channel: MessageChannel): void };
   onDegraded?: (error: unknown) => void;
 }
 
@@ -171,7 +176,22 @@ export class FabricMailbox {
         attempts,
         deliveredAt: this.options.clock.now(),
       });
-      if (delivered) this.options.throttle.noteDelivered(delivered, delivered.deliveredAt ?? this.options.clock.now());
+      if (delivered) {
+        this.options.throttle.noteDelivered(delivered, delivered.deliveredAt ?? this.options.clock.now());
+        try {
+          this.options.level?.onDelivered(
+            delivered,
+            effectiveChannel(
+              delivered.kind,
+              this.options.progressChannel ?? "display",
+              this.options.canRenderEntries ?? true,
+              delivered.to,
+            ),
+          );
+        } catch {
+          /* causal propagation is advisory: a failure here must never disturb delivery bookkeeping */
+        }
+      }
     } else if (
       verdict.retryable &&
       attempts < this.options.maxAttempts &&

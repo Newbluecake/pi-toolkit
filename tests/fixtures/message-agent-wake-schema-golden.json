@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "required": ["to", "kind", "text"],
+  "properties": {
+    "to": {
+      "description": "Target run id, \"root\" for the root session, or @label for a registered top-level agent (requires can_message: mention)",
+      "type": "string"
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "const": "progress",
+          "type": "string"
+        },
+        {
+          "const": "finding",
+          "type": "string"
+        },
+        {
+          "const": "directive",
+          "type": "string"
+        }
+      ]
+    },
+    "text": {
+      "description": "Message body",
+      "type": "string"
+    },
+    "wake": {
+      "description": "Omit for the default behaviour. false = deliver only: the message is never allowed to start a turn or resume a finished agent. true = wake the recipient (EXPENSIVE: starts a model turn; limited per sender and by a chain-depth ceiling — over the limit it is silently downgraded to deliver-only and the result says so). A running agent is always just steered. progress messages never wake (wake:true is rejected for them).",
+      "type": "boolean"
+    }
+  }
+}

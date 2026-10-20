@@ -211,3 +211,17 @@ describe("tools/steer-tool: terminal-target error keeps the resume hint", () => 
     await expect(tool.execute("t1", { run_id: "r9", text: "hi" })).rejects.toThrow("run r9 is not currently running");
   });
 });
+
+describe("tools/steer-tool: causal origin (fabric wake §3.3 seam B, W1)", () => {
+  it("the root steer_subagent tool passes NO origin — the wiring resolves it to the ROOT's current level", async () => {
+    const calls: unknown[][] = [];
+    const tool = createSteerTool({
+      query: query(async (...args: Parameters<QueryService["steer"]>) => {
+        calls.push(args as unknown[]);
+        return { ok: true as const };
+      }),
+    });
+    await tool.execute("t1", { run_id: "r9", text: "hi" });
+    expect(calls).toEqual([["r9", "hi"]]); // no third argument at all
+  });
+});

@@ -144,7 +144,8 @@ describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(steer).toHaveBeenCalledWith("run-old", expect.stringContaining("用户消息：\nplease rebase"));
+    // fabric wake seam B: a web @mention is a human act ⇒ origin level 0
+    expect(steer).toHaveBeenCalledWith("run-old", expect.stringContaining("用户消息：\nplease rebase"), { level: 0 });
     expect(send).not.toHaveBeenCalled();
     expect(gate).not.toHaveBeenCalled();
     expect(canHold).not.toHaveBeenCalled();
@@ -510,6 +511,14 @@ describe("createCommandHandler — steer_subagent (D15, happy/error paths; timeo
     const h = makeHarness({ query: fakeQuery() });
     h.handler.handle(frame("c1", { op: "steer_subagent", runId: "r1", text: "x".repeat(17 * 1024) }));
     expect(h.sent[0]).toMatchObject({ ok: false, code: "E_BAD_REQUEST" });
+  });
+
+  it("passes a HUMAN origin (level 0) to the query port — a web steer never raises the target's causal level", async () => {
+    const steer = vi.fn(() => Promise.resolve({ ok: true as const }));
+    const h = makeHarness({ query: fakeQuery({ steer }) });
+    h.handler.handle(frame("c1", { op: "steer_subagent", runId: "r1", text: "go" }));
+    await Promise.resolve();
+    expect(steer).toHaveBeenCalledWith("r1", "go", { level: 0 });
   });
 
   it("successful steer ⇒ ok{} and notifies", async () => {

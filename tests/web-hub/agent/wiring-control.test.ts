@@ -183,6 +183,24 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
     await waitUntil(() => hub!.all().some((f) => f.t === "ctl" && f.items.some((i) => i.cmdId === "cmd0000000000001")));
   });
 
+  it("attributeInput (fabric wake §3.3 L7): vouches ONLY for text the ledger knows as a live web prompt of this session", async () => {
+    const { control, fire } = await connectFullCaps();
+    const { ctx } = fakeCtx({ mode: "tui" });
+    hub!.send(
+      hub!.conns[0]!,
+      cmdFrame("cmd0000000000001", { op: "prompt", text: "from the browser", deliver: "steer" }),
+    );
+    await new Promise((r) => setTimeout(r, 40));
+    await waitUntil(() => control.attributeInput("from the browser") === "web_prompt");
+    // the web prompt itself is attributable…
+    // …and stays attributable after the hub's own input observer advanced the entry (handler order is unspecified)
+    fire("input", { type: "input", text: "from the browser", source: "extension" }, ctx);
+    expect(control.attributeInput("from the browser")).toBe("web_prompt");
+    // extension text the ledger never dispatched (topic-switch re-injection, goal loop, /agent reload fire) is not
+    expect(control.attributeInput("/agent reload fire")).toBeUndefined();
+    expect(control.attributeInput("topic switch reinjection")).toBeUndefined();
+  });
+
   it("control:false ⇒ E_UNSUPPORTED even if a cmd frame somehow arrives (defense in depth)", async () => {
     hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { autoAck: false });
     const { pi, fire } = fakePi();

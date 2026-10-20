@@ -471,6 +471,19 @@ export interface SpawnRequest {
    * tool. Absent ⇒ every persisted byte is exactly what it was before wake existed.
    */
   trackInput?: true;
+  /**
+   * fabric-cross-session plan §3.3 L4: the run's INITIAL effective causal level. Spawn-service-internal — it is
+   * (re)computed from scratch at admission whenever causal levels are wired (`wakeOn`), so a caller-supplied value
+   * is never trusted; threaded to the runner, which seeds `diag.wakeLevel` through the reducer's `wake_level` input.
+   * Absent ⇒ wake is off ⇒ every persisted byte is exactly what it was before wake existed.
+   */
+  wakeLevel?: number;
+  /**
+   * fabric-cross-session plan §3.3 L4: programmatic marker for a resume that is itself a causal hop by a node at
+   * this level (the legacy `@label` mention resume — which is never blocked but still propagates). Spawn-service
+   * seeds `wakeLevel = max(wakeHopLevel + 1, prevFinal)`. Only programs write it; never threaded into a child.
+   */
+  wakeHopLevel?: number;
   slotless?: boolean;
   parentRunId?: RunId;
   /** Caller will synchronously acknowledge the terminal outcome. */

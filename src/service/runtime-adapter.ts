@@ -66,6 +66,7 @@ import {
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import { createSetModelTool } from "../tools/set-model-tool.js";
+import type { NodeRef } from "../core/message.js";
 import type { FabricRouter } from "../fabric/router.js";
 import { createMentionChannel } from "../fabric/mention.js";
 import type { MentionRegistry } from "../mention/registry.js";
@@ -133,6 +134,12 @@ export interface RuntimeAdapterDeps {
   /** Optional fabric surface; absent means no message_agent injection. */
   fabric?: {
     router: FabricRouter;
+    /**
+     * fabric-cross-session plan §3.9 (W1): `fabric.enabled ∧ fabric.wake.enabled`, decided once per stack build. Present ⇒
+     * message_agent is built with the wake-enabled schema (frozen for the activation) and `@label` resumes carry the
+     * sender's causal level; absent ⇒ the legacy tool, byte-identical.
+     */
+    wake?: { levelOf(node: NodeRef): number };
     mention?: {
       registry: MentionRegistry;
       query: () => QueryService | undefined;
@@ -758,9 +765,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                       from: spec.runId,
                       generation: () => runtime.getRunState(spec.runId)?.generation,
                       ...(spec.type.canMessage === undefined ? {} : { canMessage: spec.type.canMessage }),
+                      ...(deps.fabric.wake ? { level: deps.fabric.wake } : {}),
                     }),
                   }
                 : {}),
+              ...(deps.fabric.wake ? { wakeOn: true } : {}),
               from: spec.runId,
               // Why: read the LIVE generation from RuntimeRunner's in-memory
               // state, not deps.store — persist_snapshot is terminal-only, so
@@ -881,6 +890,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 from: spec.runId,
                 generation: () => runtime.getRunState(spec.runId)?.generation,
                 ...(spec.type.canMessage === undefined ? {} : { canMessage: spec.type.canMessage }),
+                ...(deps.fabric.wake ? { wakeOn: true } : {}),
               }),
             );
           }
@@ -1384,6 +1394,10 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     // runner/reducer is the single source of truth for extendability.
     extendDeadline(runId, extendMs, opts) {
       return runtime.extendDeadline(runId, extendMs, opts);
+    },
+    // fabric-cross-session plan §3.3 L1: synchronous passthrough (the runner/reducer own the monotonic-max semantics).
+    noteWakeLevel(runId, level) {
+      runtime.noteWakeLevel(runId, level);
     },
     // M4: EventWatchdog 接线——stack.ts 通过这两个可选方法把 watchdog 的
     // getState/dispatch 晚绑定到真实的 run 状态机上。
