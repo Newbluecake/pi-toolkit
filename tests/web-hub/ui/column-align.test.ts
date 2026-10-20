@@ -54,19 +54,48 @@ describe("ask_user floating window (2026-10-20 user ruling 「非模态浮窗」
     expect(agentDetail).not.toContain("<AskUserForm"); // stacked INSIDE AskUserFloat now
   });
 
-  it("the desktop window floats above the composer: min(440px, 90vw), max 70vh, anchored bottom-right", () => {
-    expect(rule(askFloat, ".ask-anchor")).toMatch(/height:\s*0/); // in-flow anchor, no measuring
+  it("the desktop window floats above the composer: min(360px, 90vw), max 70vh, anchored bottom-right", () => {
+    expect(rule(askFloat, ".ask-anchor")).toMatch(/height:\s*0/); // in-flow marker, no measuring
     const desktop = /@media \(min-width: 768px\)\s*\{\s*\.ask-float\s*\{[^}]*\}/.exec(askFloat)?.[0] ?? "";
     expect(desktop).not.toBe("");
-    expect(desktop).toMatch(/width:\s*min\(440px,\s*90vw\)/);
+    expect(desktop).toMatch(/width:\s*min\(360px,\s*90vw\)/); // compact ruling 2026-10-20
     expect(desktop).toMatch(/max-height:\s*70vh/);
     expect(desktop).toMatch(/bottom:\s*var\(--sp-2\)/);
     expect(desktop).toMatch(/right:\s*max\(var\(--col-gutter\)/);
-    expect(rule(askFloat, ".ask-float")).toMatch(/position:\s*absolute/);
+  });
+
+  it("position: fixed + z-index tier 45 — above the drawers (40), below every modal-ish layer (50+)", () => {
+    // Verifier round 3 (2026-10-20): explicit app-wide tiers, canonical table in ask-float.css.
+    // The float may be dragged across the agents tree / fleet drawer, so it stacks ABOVE the
+    // drawers (30/40) but BELOW the modal-ish sheets/panels (picker scrim, spawn scrim,
+    // settings panel, ctx-ring panels — all 50) and the real modals (preview 60).
+    expect(rule(askFloat, ".ask-float")).toMatch(/position:\s*fixed/);
+    expect(rule(askFloat, ".ask-float")).toMatch(/z-index:\s*45\b/);
+    const drawer = read("styles/drawer.css");
+    expect(drawer).toMatch(/z-index:\s*30\b/); // overlay tier we sit above
+    expect(drawer).toMatch(/z-index:\s*40\b/); // fullscreen tier we sit above
+    expect(rule(read("styles/models.css"), ".picker-scrim")).toMatch(/z-index:\s*50\b/); // above us
+    expect(rule(read("styles/models.css"), ".model-panel--fixed")).toMatch(/z-index:\s*55\b/); // above us
+    expect(rule(read("styles/spawn.css"), ".spawn-scrim")).toMatch(/z-index:\s*50\b/); // above us
+    expect(rule(read("styles/shell.css"), ".settings-panel")).toMatch(/z-index:\s*50\b/); // above us
+    expect(rule(read("styles/control.css"), ".ctx-ring-panel")).toMatch(/z-index:\s*50\b/); // above us
+    expect(rule(read("styles/preview.css"), ".preview-overlay")).toMatch(/z-index:\s*60\b/); // modal tier
+  });
+
+  it("band split: the phone sheet is in-flow anchored (absolute, tier 20) — never viewport-fixed", () => {
+    // Verifier round 3: on <768px the sheet must sit ABOVE the composer (anchored to the
+    // in-flow .ask-anchor so a growing dock pushes it up) and BELOW the fullscreen drawer
+    // (40). Desktop keeps the fixed/viewport behaviour asserted above.
+    const phone = /@media \(max-width: 767px\) \{([\s\S]*?)\n\}/.exec(askFloat)?.[0] ?? "";
+    expect(phone).not.toBe("");
+    expect(phone).toMatch(/\.ask-anchor\s*\{[^}]*position:\s*relative/);
+    expect(phone).toMatch(/\.ask-anchor\s*\{[^}]*z-index:\s*20\b/); // below the drawer tiers (30/40)
+    expect(phone).toMatch(/\.ask-float\s*\{[^}]*position:\s*absolute/);
   });
 
   it("the phone sheet spans the composer gutter and caps at 60vh", () => {
-    const phone = /@media \(max-width: 767px\)\s*\{\s*\.ask-float\s*\{[^}]*\}/.exec(askFloat)?.[0] ?? "";
+    const phoneBlock = /@media \(max-width: 767px\) \{([\s\S]*?)\n\}/.exec(askFloat)?.[1] ?? "";
+    const phone = /\.ask-float\s*\{[^}]*\}/.exec(phoneBlock)?.[0] ?? "";
     expect(phone).not.toBe("");
     expect(phone).toMatch(/left:\s*max\(var\(--col-gutter\)/);
     expect(phone).toMatch(/right:\s*max\(var\(--col-gutter\)/);

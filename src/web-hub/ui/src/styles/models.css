@@ -371,12 +371,13 @@
   color: var(--c-warning-text);
 }
 
-/* Bottom sheet shell (`PickerSheet.vue`, Teleport'd to <body>). z-index 40 = popover layer,
- * above the drawer scrim (30), below the preview overlay (60) — preview.css's contract. */
+/* Bottom sheet shell (`PickerSheet.vue`, Teleport'd to <body>). z-index 50 = the modal-ish
+ * sheet/panel tier: above the ask-float window (45), below the preview overlay (60) —
+ * ask-float.css owns the canonical stacking table. */
 .picker-scrim {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: 50;
   display: flex;
   align-items: flex-end;
   background: rgb(19 32 38 / 0.45);
@@ -477,13 +478,13 @@
 /* Desktop panel: Teleport'd to <body> + FIXED against the trigger's viewport rect — the
  * trigger sits inside the settings panel's scroll container, which would clip the switcher's
  * in-flow absolute popover. SettingsModelPicker sets inline top/left/bottom/max-height; the
- * same shell (border/shadow/head/list) comes from `.model-panel` above. z-index 45: above the
- * settings panel (40), below the preview overlay (60). */
+ * same shell (border/shadow/head/list) comes from `.model-panel` above. z-index 55: above the
+ * settings panel (50), below the preview overlay (60) — ask-float.css owns the tier table. */
 .model-panel--fixed {
   position: fixed;
   left: auto;
   bottom: auto;
-  z-index: 45;
+  z-index: 55;
   width: min(560px, calc(100vw - 2 * var(--sp-4)));
   max-height: min(70vh, 480px);
 }

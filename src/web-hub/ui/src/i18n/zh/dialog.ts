@@ -47,6 +47,12 @@ const dialog = {
   floatCollapse: "收起",
   floatPendingBar: "{n} 个问题待回答",
   floatNewQuestion: "Agent 提出了一个新问题",
+  // 小巧版浮窗(用户裁定 2026-10-20;mock ~/pwh-preview/askcompact/ask-compact.png)
+  floatTerminalHint: "终端也可答",
+  recommendedTag: "推荐",
+  otherReveal: "✎ 其它回答…",
+  contextExpand: "展开",
+  contextCollapse: "收起",
 } satisfies Messages<typeof en>;
 
 export default dialog;

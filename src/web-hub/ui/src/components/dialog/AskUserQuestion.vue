@@ -8,7 +8,7 @@
   isn't an emit — the frozen contract has none).
 -->
 <script setup lang="ts">
-import { computed, inject } from "vue";
+import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
 import type { AskUserQuestionWire } from "@protocol/messages.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { AskUserQuestionProps } from "../../contracts.js";
@@ -23,6 +23,20 @@ const multi = computed(() => question.value.multiSelect === true);
 const showOther = computed(() => question.value.allowOther !== false);
 const options = computed(() => (Array.isArray(question.value.options) ? question.value.options : []));
 
+/**
+ * Compact ruling (mock ~/pwh-preview/askcompact/ask-compact.png): a `(Recommended) ` prefix
+ * is stripped from the VISIBLE label and rendered as a small 「推荐」 tag instead. The answer
+ * value is untouched — inputs, selections and the submitted payload all keep the ORIGINAL
+ * label string (the prefix is presentation-only).
+ */
+const RECOMMENDED_PREFIX = /^\(Recommended\)\s+/i;
+const optionViews = computed(() =>
+  options.value.map((opt) => {
+    const m = RECOMMENDED_PREFIX.exec(opt.label);
+    return { opt, text: m === null ? opt.label : opt.label.slice(m[0].length), recommended: m !== null };
+  }),
+);
+
 const index = computed(() => (form ? form.questions.indexOf(props.question) : -1));
 
 // Local fallback when mounted without a form context (isolated tests).
@@ -34,6 +48,45 @@ const selection = computed<AskSelection>(() => {
 });
 
 const inputName = computed(() => `ask-q-${index.value}`);
+
+// --- compact: long context collapses to 2 lines behind an 「展开/收起」 toggle ------------
+const contextEl = ref<HTMLElement | null>(null);
+const contextOpen = ref(false);
+const contextLong = ref(false);
+
+function measureContext(): void {
+  const el = contextEl.value;
+  if (el === null) return;
+  // Measured while the 2-line clamp applies: overflowing text has scrollHeight > clientHeight.
+  contextLong.value = el.scrollHeight > el.clientHeight + 1;
+}
+
+onMounted(() => {
+  void nextTick(measureContext);
+});
+watch(
+  () => question.value.context,
+  () => {
+    contextOpen.value = false;
+    void nextTick(measureContext);
+  },
+);
+
+// --- compact: the Other free-text input hides behind a 「✎ 其它回答…」 link ----------------
+const otherInputEl = ref<HTMLInputElement | null>(null);
+// A restored non-empty draft keeps the input open; typing (any source) opens it too.
+const otherOpen = ref((selection.value.other ?? "") !== "");
+watch(
+  () => selection.value.other,
+  (val) => {
+    if ((val ?? "") !== "") otherOpen.value = true;
+  },
+);
+
+function revealOther(): void {
+  otherOpen.value = true;
+  void nextTick(() => otherInputEl.value?.focus());
+}
 
 function setSelected(next: string[]): void {
   const i = index.value;
@@ -106,48 +159,71 @@ function onOtherInput(ev: Event): void {
     :disabled="form?.suspended.value === true"
   >
     <legend class="ask-question-text">{{ question.question }}</legend>
-    <p v-if="question.context" class="ask-context">{{ question.context }}</p>
+    <p v-if="question.context" ref="contextEl" class="ask-context" :class="{ 'ask-context--clamped': !contextOpen }">
+      {{ question.context }}
+    </p>
+    <button
+      v-if="question.context && contextLong"
+      type="button"
+      class="ask-context-toggle"
+      data-context-toggle
+      :aria-expanded="contextOpen"
+      @click="contextOpen = !contextOpen"
+    >
+      {{ contextOpen ? t("dialog.contextCollapse") : t("dialog.contextExpand") }}
+    </button>
     <div class="ask-options">
-      <label v-for="opt in options" :key="opt.label" class="ask-option">
+      <label v-for="view in optionViews" :key="view.opt.label" class="ask-option">
         <input
           v-if="multi"
           type="checkbox"
           :name="inputName"
-          :value="opt.label"
-          :checked="isChecked(opt.label)"
-          @change="onToggle(opt.label, $event)"
+          :value="view.opt.label"
+          :checked="isChecked(view.opt.label)"
+          @change="onToggle(view.opt.label, $event)"
         />
         <input
           v-else
           type="radio"
           :name="inputName"
-          :value="opt.label"
-          :checked="isChecked(opt.label)"
-          @change="onRadio(opt.label)"
+          :value="view.opt.label"
+          :checked="isChecked(view.opt.label)"
+          @change="onRadio(view.opt.label)"
         />
         <span class="ask-option-text">
-          <span class="ask-option-label">{{ opt.label }}</span>
-          <span v-if="opt.description" class="ask-option-desc">{{ opt.description }}</span>
-        </span>
-      </label>
-      <label v-if="showOther" class="ask-option ask-other">
-        <span class="ask-option-text">
-          <span class="ask-option-label">{{ t("dialog.other") }}</span>
-          <input
-            class="ask-other-input"
-            type="text"
-            data-other
-            :aria-label="t('dialog.otherAria')"
-            :placeholder="t('dialog.otherPlaceholder')"
-            :value="selection.other ?? ''"
-            :disabled="form?.suspended.value === true"
-            maxlength="4096"
-            @input="onOtherInput"
-          />
+          <span class="ask-option-label">
+            {{ view.text }}<span v-if="view.recommended" class="ask-reco-tag">{{ t("dialog.recommendedTag") }}</span>
+          </span>
+          <span v-if="view.opt.description" class="ask-option-desc" :title="view.opt.description">
+            {{ view.opt.description }}
+          </span>
         </span>
       </label>
     </div>
+    <input
+      v-if="showOther && otherOpen"
+      ref="otherInputEl"
+      class="ask-other-input"
+      type="text"
+      data-other
+      :aria-label="t('dialog.otherAria')"
+      :placeholder="t('dialog.otherPlaceholder')"
+      :value="selection.other ?? ''"
+      :disabled="form?.suspended.value === true"
+      maxlength="4096"
+      @input="onOtherInput"
+    />
     <div class="ask-skip-row">
+      <button
+        v-if="showOther && !otherOpen"
+        type="button"
+        class="ask-other-link"
+        data-other-link
+        :disabled="form?.suspended.value === true"
+        @click="revealOther"
+      >
+        {{ t("dialog.otherReveal") }}
+      </button>
       <button
         type="button"
         class="btn btn-ghost ask-skip"

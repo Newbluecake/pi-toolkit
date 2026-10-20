@@ -484,12 +484,13 @@
 }
 
 /* Armed queue note (K12: queued messages survive an abort) floats ABOVE the ring — same
- * upward orientation as the details panel, the composer hugs the screen's bottom edge. */
+ * upward orientation as the details panel, the composer hugs the screen's bottom edge.
+ * z-index 50 = modal-ish panel tier (above the ask-float window's 45; tiers: ask-float.css). */
 .ctx-ring-stop-note {
   position: absolute;
   bottom: calc(100% + var(--sp-1));
   right: 0;
-  z-index: 40;
+  z-index: 50;
   max-width: 240px;
   padding: var(--sp-1) var(--sp-2);
   background: var(--c-surface);
@@ -501,12 +502,13 @@
 }
 
 /* Details panel — opens UPWARD (the composer hugs the screen's bottom edge; same orientation
- * as the retired DeliverSwitch menu). */
+ * as the retired DeliverSwitch menu). z-index 50 = modal-ish panel tier (above ask-float's
+ * 45; the canonical stacking table lives in ask-float.css). */
 .ctx-ring-panel {
   position: absolute;
   bottom: calc(100% + var(--sp-2));
   right: 0;
-  z-index: 40;
+  z-index: 50;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);

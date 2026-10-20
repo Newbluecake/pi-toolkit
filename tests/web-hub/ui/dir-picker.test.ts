@@ -401,12 +401,12 @@ describe("DirPicker.vue — modal dialog shell (2026-10 Teleport redesign)", () 
     expect(document.activeElement).toBe(submit); // wrapped back to the last
   });
 
-  it("spawn.css pins the dialog shell: fixed scrim z-40, top-anchored panel (anti-jitter 2026-10-13), ≤640px bottom sheet, recent grid, browse panel", () => {
+  it("spawn.css pins the dialog shell: fixed scrim z-50 (modal-ish tier), top-anchored panel (anti-jitter 2026-10-13), ≤640px bottom sheet, recent grid, browse panel", () => {
     const css = readFileSync(join(import.meta.dirname, "../../../src/web-hub/ui/src/styles/spawn.css"), "utf8");
     const scrim = css.match(/\.spawn-scrim \{([\s\S]*?)\n\}/);
     expect(scrim).not.toBeNull();
     expect(scrim![1]).toContain("position: fixed");
-    expect(scrim![1]).toContain("z-index: 40");
+    expect(scrim![1]).toContain("z-index: 50");
     expect(scrim![1]).toContain("env(safe-area-inset-bottom)");
     // 顶锚定（用户报告「输路径时顶部抖动」）：居中会在内容高度变化时推顶边
     expect(scrim![1]).toContain("align-items: flex-start");

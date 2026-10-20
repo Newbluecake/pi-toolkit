@@ -78,13 +78,14 @@
 
 /* ---------------------------------------------------------------- DirPicker (modal dialog)
  * Teleport'd to <body> (DirPicker.vue owns the focus trap / scroll lock / focus return, the
- * PickerSheet contract). `.spawn-scrim` sits on z-index 40 — the popover layer, above the
- * drawer scrim (30), below the preview overlay (60); preview.css's contract. Desktop: a
- * centered min(760px) dialog with internal scroll; ≤640px: a bottom sheet like PickerSheet. */
+ * PickerSheet contract). `.spawn-scrim` sits on z-index 50 — the modal-ish sheet/panel tier,
+ * above the ask-float window (45), below the preview overlay (60); ask-float.css owns the
+ * canonical stacking table. Desktop: a centered min(760px) dialog with internal scroll;
+ * ≤640px: a bottom sheet like PickerSheet. */
 .spawn-scrim {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: 50;
   display: flex;
   /* 顶锚定（2026-10-13 用户报告「输路径时弹窗顶部抖动」）：垂直居中时任何内容高度变化
    * （提示行出现/消失、目录列表行数增减）都会同时推动顶边与底边。顶锚定后内容只向下生长，

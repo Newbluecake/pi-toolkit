@@ -1,22 +1,29 @@
 /**
- * Non-modal floating ask_user window — position state, drag math and persistence (user ruling
- * 2026-10-20; approved mock `~/pwh-preview/askfloat/ask-float.png`). A strict mirror of
- * `useSidebarWidth.ts`'s precedent: storage access is injected (never the `localStorage`
- * identifier, so this file stays clean under `source-scan.test.ts`'s storage-identifier
- * rule), a stored value that is unparseable or outside static sanity bounds fails open to the
- * default anchor (`null` → no inline override → ask-float.css's `right`/`bottom` anchor wins),
- * and drag-preview never hammers storage — persistence happens on release / keyboard nudge
- * only. No rAF anywhere (banned repo-wide; renderGate.ts owns scheduling): pointermove writes
- * the ref directly, Vue batches the render.
+ * Non-modal floating ask_user window — position state, drag math and persistence (user rulings
+ * 2026-10-20; approved mocks `~/pwh-preview/askfloat/ask-float.png` +
+ * `~/pwh-preview/askcompact/ask-compact.png`). A strict mirror of `useSidebarWidth.ts`'s
+ * precedent: storage access is injected (never the `localStorage` identifier, so this file
+ * stays clean under `source-scan.test.ts`'s storage-identifier rule), a stored value that is
+ * unparseable or outside static sanity bounds fails open to the default anchor (`null` → no
+ * inline override → ask-float.css's `right`/`bottom` fallback wins), and drag-preview never
+ * hammers storage — persistence happens on release / keyboard nudge only. No rAF anywhere
+ * (banned repo-wide; renderGate.ts owns scheduling): pointermove writes the ref directly, Vue
+ * batches the render.
  *
- * Geometry contract: the component's root is a height-0 `.ask-anchor` element placed in flow
- * IMMEDIATELY above the dock (folded notes render between them are fine — the anchor is the
- * float's containing block, so the default `bottom: 8px` anchor always sits just above the
- * composer without any measuring, and a growing dock simply pushes the anchor up). The pane
- * the window clamps to is the anchor's `parentElement` (`.detail-main` in AgentDetail). All
- * stored/inline positions are px offsets from the anchor's top-left — `y` is normally
- * NEGATIVE (the window floats ABOVE the zero-height anchor), so validation must accept
- * negative values; the pane clamp on apply/drag/resize is what actually bounds it.
+ * Geometry contract (viewport ruling 2026-10-20): the window is `position: fixed`, so every
+ * coordinate here is a VIEWPORT px offset — the user may drag it anywhere below the top bar,
+ * across the agents tree / fleet drawer. The clamp box is the whole app viewport inset by
+ * ASK_FLOAT_MARGIN, minus the top bar's bottom edge (the component measures `header.topbar`;
+ * `window.innerWidth/innerHeight` bound the rest). The height-0 `.ask-anchor` element in flow
+ * above the dock is now only the DEFAULT-POSITION marker: with no stored/dragged position the
+ * window sits just above the composer, hugging the viewport's right edge
+ * (`x = innerWidth − width − ASK_FLOAT_GUTTER`, `y = anchor.top − gap − height`), re-resolved
+ * on every resize / dock-size change, so the default TRACKS the right edge and the composer.
+ *
+ * Persistence is VERSIONED (`{v:2,x,y}` — verifier round 3): values from the pre-fixed
+ * (pane-relative, unversioned) build are DROPPED, not clamped — a negative pane-relative `y`
+ * has no meaningful viewport interpretation, so the window simply opens at the default. The
+ * phone sheet (<768px) never persists: it is an in-flow absolute sheet above the composer.
  */
 import { onScopeDispose, ref, type Ref } from "vue";
 
@@ -24,7 +31,15 @@ export const ASK_FLOAT_POS_STORAGE_KEY = "pwh_askfloat_pos";
 export const ASK_FLOAT_KEYBOARD_STEP = 16;
 /** |dx|+|dy| beyond this during a drag makes the trailing click a drag-end, not an expand. */
 export const ASK_FLOAT_CLICK_SUPPRESS_PX = 4;
-/** Static sanity bounds for the persisted position (the pane clamp is the real bound). */
+/** Viewport inset around the clamp box (drag may go edge-to-edge except this margin). */
+export const ASK_FLOAT_MARGIN = 8;
+/** Vertical gap between the default-anchored window and the composer/dock top edge. */
+export const ASK_FLOAT_GAP = 8;
+/** Horizontal gap between the default-anchored window and the viewport's right edge. */
+export const ASK_FLOAT_GUTTER = 8;
+/** Storage schema version — anything without `v:2` (legacy pane-relative values) is dropped. */
+export const ASK_FLOAT_POS_VERSION = 2;
+/** Static sanity bounds for the persisted position (the viewport clamp is the real bound). */
 const POS_ABS_LIMIT = 100_000;
 
 export interface AskFloatPos {
@@ -72,16 +87,19 @@ export interface AskFloatPointerEvent {
 }
 
 export interface AskFloatResizeWindow {
+  readonly innerWidth: number;
+  readonly innerHeight: number;
   addEventListener(type: "resize", listener: () => void): void;
   removeEventListener(type: "resize", listener: () => void): void;
 }
 
 /**
  * Read the persisted window position; `null` = default bottom-right anchor. Unparseable
- * JSON, non-numeric/non-finite members, or values beyond the static sanity bounds are
- * ignored — the pane clamp re-applies at mount/drag/resize time, so a position stored on a
- * large monitor still lands inside a small pane. `y` may legitimately be negative (see the
- * file header), so only the absolute magnitude is bounded.
+ * JSON, non-numeric/non-finite members, values beyond the static sanity bounds — and ANY
+ * unversioned/foreign-version value (notably the pre-fixed pane-relative `{x,y}` schema,
+ * whose negative `y` has no viewport meaning) — are ignored: the window opens at the default
+ * instead of being clamped into a corner. The viewport clamp re-applies at mount/drag/resize
+ * time, so a position stored on a large monitor still lands inside a small window.
  */
 export function loadAskFloatPos(storage: AskFloatStorage): AskFloatPos | null {
   let raw: string | null = null;
@@ -99,14 +117,15 @@ export function loadAskFloatPos(storage: AskFloatStorage): AskFloatPos | null {
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
-  const { x, y } = parsed as Record<string, unknown>;
+  const { v, x, y } = parsed as Record<string, unknown>;
+  if (v !== ASK_FLOAT_POS_VERSION) return null; // legacy/other schema ⇒ default position
   if (typeof x !== "number" || typeof y !== "number") return null;
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   if (Math.abs(x) > POS_ABS_LIMIT || Math.abs(y) > POS_ABS_LIMIT) return null;
   return { x, y };
 }
 
-/** Clamp into the pane box (degenerate/inverted boxes collapse onto the min edge) and round. */
+/** Clamp into the viewport box (degenerate/inverted boxes collapse onto the min edge) and round. */
 export function clampAskFloatPos(pos: AskFloatPos, box: AskFloatClampBox): AskFloatPos {
   const maxX = Math.max(box.minX, box.maxX);
   const maxY = Math.max(box.minY, box.maxY);
@@ -120,16 +139,20 @@ export interface UseAskFloatOptions {
   storage: AskFloatStorage;
   /** ≥768px desktop band — drag/clamp/persist only apply there (the phone sheet never moves). */
   desktop: Ref<boolean>;
-  /** The height-0 `.ask-anchor` element; its parent is the pane the window clamps to. */
+  /** The height-0 `.ask-anchor` marker above the dock (default-position reference only). */
   anchor: Ref<unknown>;
   /** The `.ask-float` window element (measured for its live width/height). */
   float: Ref<unknown>;
   win: AskFloatResizeWindow;
+  /** Bottom edge of the app chrome (top bar) in viewport px; 0 when it cannot be measured. */
+  topOffset(): number;
 }
 
 export interface UseAskFloatHandle {
-  /** Explicit px offset from the anchor, or `null` for the CSS default anchor. */
+  /** Explicit viewport px offset, or `null` while the default anchor applies. */
   readonly pos: Ref<AskFloatPos | null>;
+  /** Resolved default position (above the composer, right-aligned) once layout is measurable. */
+  readonly defaultPos: Readonly<Ref<AskFloatPos | null>>;
   readonly dragging: Readonly<Ref<boolean>>;
   onBarPointerDown(ev: AskFloatPointerEvent): void;
   /** Returns true once when the click ending a real drag should be ignored (click-to-expand). */
@@ -140,7 +163,7 @@ export interface UseAskFloatHandle {
   cancelDrag(): void;
   /** Keyboard nudge (arrow keys on the title bar); clamps and persists immediately. */
   nudge(dx: number, dy: number): void;
-  /** Re-clamp a set position to the current pane (mount, expand, content resize, band flip). */
+  /** Re-clamp a set position / re-resolve the default (mount, expand, resize, band flip). */
   clampNow(): void;
   dispose(): void;
 }
@@ -171,11 +194,11 @@ function isInteractiveChild(bar: AskFloatElement, target: unknown): boolean {
 
 export function useAskFloat(opts: UseAskFloatOptions): UseAskFloatHandle {
   const pos = ref<AskFloatPos | null>(loadAskFloatPos(opts.storage)) as Ref<AskFloatPos | null>;
+  const defaultPos = ref<AskFloatPos | null>(null);
   const dragging = ref(false);
 
   interface Geo {
     ar: AskFloatRect;
-    pr: AskFloatRect;
     fr: AskFloatRect;
   }
 
@@ -183,21 +206,20 @@ export function useAskFloat(opts: UseAskFloatOptions): UseAskFloatHandle {
     const anchor = asFloatElement(opts.anchor.value);
     const float = asFloatElement(opts.float.value);
     if (anchor === null || float === null) return null;
-    const pane = anchor.parentElement;
-    if (pane === null) return null;
     return {
       ar: anchor.getBoundingClientRect(),
-      pr: pane.getBoundingClientRect(),
       fr: float.getBoundingClientRect(),
     };
   }
 
-  function clampBox(g: Geo): AskFloatClampBox {
+  /** The clamp box: the whole app viewport below the top bar, inset by ASK_FLOAT_MARGIN — the
+   * window may be dragged across the agents tree / fleet drawer, never under the top bar. */
+  function clampBox(fr: AskFloatRect): AskFloatClampBox {
     return {
-      minX: g.pr.left - g.ar.left,
-      maxX: g.pr.right - g.ar.left - g.fr.width,
-      minY: g.pr.top - g.ar.top,
-      maxY: g.pr.bottom - g.ar.top - g.fr.height,
+      minX: ASK_FLOAT_MARGIN,
+      maxX: opts.win.innerWidth - fr.width - ASK_FLOAT_MARGIN,
+      minY: opts.topOffset() + ASK_FLOAT_MARGIN,
+      maxY: opts.win.innerHeight - fr.height - ASK_FLOAT_MARGIN,
     };
   }
 
@@ -206,23 +228,36 @@ export function useAskFloat(opts: UseAskFloatOptions): UseAskFloatHandle {
     if (pos.value !== null) return pos.value;
     const g = measure();
     if (g === null) return { x: 0, y: 0 };
-    return { x: g.fr.left - g.ar.left, y: g.fr.top - g.ar.top };
+    return { x: g.fr.left, y: g.fr.top };
   }
 
   function persist(): void {
     if (pos.value === null) return;
     try {
-      opts.storage.setItem(ASK_FLOAT_POS_STORAGE_KEY, JSON.stringify(pos.value));
+      opts.storage.setItem(ASK_FLOAT_POS_STORAGE_KEY, JSON.stringify({ v: ASK_FLOAT_POS_VERSION, ...pos.value }));
     } catch {
       /* storage disabled — the in-memory position still applies for this load */
     }
   }
 
   function clampNow(): void {
-    if (!opts.desktop.value || pos.value === null) return;
+    if (!opts.desktop.value) return;
     const g = measure();
     if (g === null) return;
-    pos.value = clampAskFloatPos(pos.value, clampBox(g));
+    if (pos.value !== null) {
+      pos.value = clampAskFloatPos(pos.value, clampBox(g.fr));
+      return;
+    }
+    // No override: resolve the DEFAULT position in viewport coordinates — hugging the RIGHT
+    // EDGE (x tracks resizes: innerWidth − width − gutter) and sitting just above the composer
+    // (anchor top − gap − height; the component's ResizeObserver re-runs this when the dock
+    // grows). Zero rects (pre-layout / happy-dom) mean "not measurable yet" — keep the CSS
+    // fallback rather than materializing a bogus position.
+    if (g.fr.width === 0 && g.fr.height === 0) return;
+    defaultPos.value = clampAskFloatPos(
+      { x: opts.win.innerWidth - g.fr.width - ASK_FLOAT_GUTTER, y: g.ar.top - ASK_FLOAT_GAP - g.fr.height },
+      clampBox(g.fr),
+    );
   }
 
   // --- drag lifecycle (listeners live on the captured bar, never on window) ---------------
@@ -240,7 +275,7 @@ export function useAskFloat(opts: UseAskFloatOptions): UseAskFloatHandle {
     if (Math.abs(dx) + Math.abs(dy) > ASK_FLOAT_CLICK_SUPPRESS_PX) movedFar = true;
     const g = measure();
     if (g === null) return;
-    pos.value = clampAskFloatPos({ x: baseX + dx, y: baseY + dy }, clampBox(g));
+    pos.value = clampAskFloatPos({ x: baseX + dx, y: baseY + dy }, clampBox(g.fr));
   };
 
   function endDrag(): void {
@@ -308,7 +343,7 @@ export function useAskFloat(opts: UseAskFloatOptions): UseAskFloatHandle {
     const g = measure();
     if (g === null) return;
     const cur = currentPos();
-    pos.value = clampAskFloatPos({ x: cur.x + dx, y: cur.y + dy }, clampBox(g));
+    pos.value = clampAskFloatPos({ x: cur.x + dx, y: cur.y + dy }, clampBox(g.fr));
     persist();
   }
 
@@ -321,5 +356,16 @@ export function useAskFloat(opts: UseAskFloatOptions): UseAskFloatHandle {
   }
   onScopeDispose(dispose, true); // failSilently: safe to call outside a component scope (unit tests)
 
-  return { pos, dragging, onBarPointerDown, consumeDragClick, resetDragClick, cancelDrag, nudge, clampNow, dispose };
+  return {
+    pos,
+    defaultPos,
+    dragging,
+    onBarPointerDown,
+    consumeDragClick,
+    resetDragClick,
+    cancelDrag,
+    nudge,
+    clampNow,
+    dispose,
+  };
 }

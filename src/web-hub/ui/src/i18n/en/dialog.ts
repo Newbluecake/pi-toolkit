@@ -47,6 +47,12 @@ const dialog = {
   floatCollapse: "Collapse",
   floatPendingBar: "{n} question(s) waiting for an answer",
   floatNewQuestion: "The agent asked a new question",
+  // compact window (user ruling 2026-10-20; mock ~/pwh-preview/askcompact/ask-compact.png)
+  floatTerminalHint: "Also in terminal",
+  recommendedTag: "Recommended",
+  otherReveal: "✎ Other answer…",
+  contextExpand: "Expand",
+  contextCollapse: "Collapse",
 } satisfies Record<string, string>;
 
 export default dialog;

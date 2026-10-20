@@ -334,7 +334,7 @@
   position: absolute;
   top: calc(100% + 10px);
   right: 0;
-  z-index: 40; /* popover layer — same tier as `control/PickerSheet.vue`'s `.picker-scrim` */
+  z-index: 50; /* modal-ish panel tier — above the ask-float window (45); tiers: ask-float.css */
   display: flex;
   flex-direction: column;
   /* default-model plan F1 (A1): widened from 400px so theme+font sit side by side and the

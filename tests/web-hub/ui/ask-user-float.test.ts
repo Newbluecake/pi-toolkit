@@ -16,11 +16,16 @@ import {
  * mock ~/pwh-preview/askfloat/ask-float.png): the NON-MODAL floating ask_user window.
  *
  * Covered here: desktop floating render (role=dialog, aria-modal=false, stacked forms, i/n
- * counter), drag updates + pane clamp + localStorage persistence (release/nudge only),
- * minimize/expand (button, bar click, Esc — which NEVER cancels), keyboard nudge, resize
- * clamp, the phone bottom sheet's collapse/expand bar, auto-expand + pulse + sr-only
- * announcement when a new dialog arrives while minimized, and the storage validation /
- * clamp pure functions.
+ * counter), drag updates + VIEWPORT clamp (2026-10-20 ruling: the whole app viewport below
+ * the top bar — the window may be dragged across the agents tree / fleet drawer) +
+ * localStorage persistence (release/nudge only), the default-position resolution (above the
+ * composer), legacy pane-relative position migration by re-clamping, minimize/expand (button,
+ * bar click, Esc — which NEVER cancels), keyboard nudge, resize clamp, the phone bottom
+ * sheet's collapse/expand bar, auto-expand + pulse + sr-only announcement when a new dialog
+ * arrives while minimized, and the storage validation / clamp pure functions.
+ *
+ * Geometry in these tests: happy-dom's window is 1024×768 and no `header.topbar` exists, so
+ * the clamp box is minX=8 / minY=8 / maxX=1024−w−8 / maxY=768−h−8 (ASK_FLOAT_MARGIN=8).
  */
 
 const mounted: Array<ReturnType<typeof mount>> = [];
@@ -151,24 +156,66 @@ describe("AskUserFloat.vue — desktop floating window (≥768px)", () => {
     expect(w.emitted("cancel")).toBeUndefined();
   });
 
-  it("drag: pointermove updates the position, clamps to the pane, persists on release only", async () => {
+  it("drag: pointermove updates the position, clamps to the VIEWPORT, persists on release only", async () => {
     const w = mountFloat({ dialogs: TWO, epoch: "e1" });
-    // pane 1000×800, dock top at y=700, window 440×250 default-anchored bottom-right.
+    // window 440×250 floating at (552,442): viewport clamp maxX = 1024−440−8 = 576, maxY = 768−250−8 = 510.
     stubRects(w, { left: 0, top: 0, width: 1000, height: 800 }, 700, { left: 552, top: 442, width: 440, height: 250 });
     const bar = w.find(".ask-float-bar");
 
     await bar.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 600, clientY: 460 });
-    await bar.trigger("pointermove", { clientX: 650, clientY: 480 }); // +50/+20 → x clamps at 560
+    await bar.trigger("pointermove", { clientX: 650, clientY: 480 }); // +50/+20 → x clamps at 576
     const style = w.find(".ask-float").attributes("style") ?? "";
-    expect(style).toContain("left: 560px");
-    expect(style).toContain("top: -238px");
+    expect(style).toContain("left: 576px");
+    expect(style).toContain("top: 462px");
     expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBeNull(); // no persist mid-drag
 
-    await bar.trigger("pointermove", { clientX: 650, clientY: 1200 }); // dy huge → y clamps at -150
-    expect(w.find(".ask-float").attributes("style") ?? "").toContain("top: -150px");
+    await bar.trigger("pointermove", { clientX: 650, clientY: 1200 }); // dy huge → y clamps at 510
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("top: 510px");
 
     await bar.trigger("pointerup", { pointerId: 1 });
-    expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBe(JSON.stringify({ x: 560, y: -150 }));
+    expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBe(JSON.stringify({ v: 2, x: 576, y: 510 }));
+  });
+
+  it("the window drags BEYOND the detail pane's right edge (agents tree / fleet drawer area)", async () => {
+    const w = mountFloat({ dialogs: TWO, epoch: "e1" });
+    // The detail pane is only 500px wide; the viewport is 1024px. The pre-ruling pane clamp
+    // would cap x at 500−440 = 60 — the viewport clamp allows up to 1024−440−8 = 576.
+    stubRects(w, { left: 0, top: 0, width: 500, height: 800 }, 700, { left: 40, top: 442, width: 440, height: 250 });
+    const bar = w.find(".ask-float-bar");
+    await bar.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 100, clientY: 460 });
+    await bar.trigger("pointermove", { clientX: 560, clientY: 460 }); // dx=460 → x=500, past the pane
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("left: 500px");
+    await bar.trigger("pointerup", { pointerId: 1 });
+    expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBe(JSON.stringify({ v: 2, x: 500, y: 442 }));
+  });
+
+  it("the clamp box starts BELOW the top bar (header.topbar bottom + margin)", async () => {
+    const topbar = document.createElement("header");
+    topbar.className = "topbar";
+    document.body.appendChild(topbar);
+    hosts.push(topbar);
+    topbar.getBoundingClientRect = () => fakeRect({ left: 0, top: 0, width: 1024, height: 48 });
+
+    const w = mountFloat({ dialogs: TWO, epoch: "e1" });
+    stubRects(w, { left: 0, top: 0, width: 1000, height: 800 }, 700, { left: 552, top: 442, width: 440, height: 250 });
+    const bar = w.find(".ask-float-bar");
+    await bar.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 600, clientY: 460 });
+    await bar.trigger("pointermove", { clientX: 600, clientY: -500 }); // dy=−960 → y clamps at 48+8=56
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("top: 56px");
+    await bar.trigger("pointerup", { pointerId: 1 });
+  });
+
+  it("no stored position ⇒ the default hugs the viewport's right edge above the composer (never persisted)", async () => {
+    const w = mountFloat({ dialogs: TWO, epoch: "e1" });
+    // dock top at y=700, window 440×250 ⇒ default = {x: 1024−440−8, y: 700−8−250} = {576, 442}
+    // — x tracks the RIGHT EDGE (innerWidth − width − gutter), not the laid-out rect.
+    stubRects(w, { left: 0, top: 0, width: 1000, height: 800 }, 700, { left: 552, top: 442, width: 440, height: 250 });
+    await nextTick();
+    await nextTick(); // onMounted → nextTick clampNow resolves defaultPos
+    const style = w.find(".ask-float").attributes("style") ?? "";
+    expect(style).toContain("left: 576px");
+    expect(style).toContain("top: 442px");
+    expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBeNull(); // defaults never persist
   });
 
   it("a drag's trailing click does NOT expand a minimized bar (click suppression)", async () => {
@@ -190,32 +237,45 @@ describe("AskUserFloat.vue — desktop floating window (≥768px)", () => {
     await bar.trigger("keydown", { key: "ArrowLeft" }); // 552 → 536
     expect(w.find(".ask-float").attributes("style") ?? "").toContain(`left: ${552 - ASK_FLOAT_KEYBOARD_STEP}px`);
     expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBe(
-      JSON.stringify({ x: 552 - ASK_FLOAT_KEYBOARD_STEP, y: -258 }),
+      JSON.stringify({ v: 2, x: 552 - ASK_FLOAT_KEYBOARD_STEP, y: 442 }),
     );
-    await bar.trigger("keydown", { key: "ArrowUp" }); // -258 → -274
+    await bar.trigger("keydown", { key: "ArrowUp" }); // 442 → 426
     expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBe(
-      JSON.stringify({ x: 552 - ASK_FLOAT_KEYBOARD_STEP, y: -274 }),
+      JSON.stringify({ v: 2, x: 552 - ASK_FLOAT_KEYBOARD_STEP, y: 426 }),
     );
   });
 
-  it("a persisted position is restored (clamped) and re-clamped on window resize", async () => {
-    window.localStorage.setItem(ASK_FLOAT_POS_STORAGE_KEY, JSON.stringify({ x: 900, y: -100 }));
+  it("a persisted v2 position is restored (clamped to the viewport) and re-clamped on window resize", async () => {
+    window.localStorage.setItem(ASK_FLOAT_POS_STORAGE_KEY, JSON.stringify({ v: 2, x: 900, y: 400 }));
     const w = mountFloat({ dialogs: TWO, epoch: "e1" });
     stubRects(w, { left: 0, top: 0, width: 1000, height: 800 }, 700, { left: 552, top: 442, width: 440, height: 250 });
     await nextTick();
-    await nextTick(); // onMounted → nextTick clamp: maxX = 1000-440 = 560, maxY = 800-700-250 = -150
+    await nextTick(); // onMounted → nextTick clamp: maxX = 1024−440−8 = 576, y 400 fits (maxY 510)
     const style = w.find(".ask-float").attributes("style") ?? "";
-    expect(style).toContain("left: 560px");
-    expect(style).toContain("top: -150px");
+    expect(style).toContain("left: 576px");
+    expect(style).toContain("top: 400px");
 
-    // Pane shrinks mid-session → resize re-clamps.
-    const paneEl = w.element.parentElement as HTMLElement;
-    paneEl.getBoundingClientRect = () => fakeRect({ left: 0, top: 0, width: 800, height: 600 });
+    // The window's content grows mid-session → resize re-clamps (maxY = 768−600−8 = 160).
+    const floatEl = w.find(".ask-float").element as HTMLElement;
+    floatEl.getBoundingClientRect = () => fakeRect({ left: 576, top: 400, width: 440, height: 600 });
     window.dispatchEvent(new Event("resize"));
     await nextTick();
     const shrunk = w.find(".ask-float").attributes("style") ?? "";
-    expect(shrunk).toContain("left: 360px"); // 800-440
-    expect(shrunk).toContain("top: -350px"); // 600-700-250
+    expect(shrunk).toContain("left: 576px");
+    expect(shrunk).toContain("top: 160px");
+  });
+
+  it("a legacy UNVERSIONED (pane-relative) stored position is DROPPED — the window opens at the default", async () => {
+    // Verifier round 3: no clamping legacy negative-y values into the top-left corner.
+    window.localStorage.setItem(ASK_FLOAT_POS_STORAGE_KEY, JSON.stringify({ x: 900, y: -100 }));
+    const w = mountFloat({ dialogs: TWO, epoch: "e1" });
+    // anchor top 700, float 440×250 ⇒ default = {x: 1024−440−8, y: 700−8−250} = {576, 442}.
+    stubRects(w, { left: 0, top: 0, width: 1000, height: 800 }, 700, { left: 552, top: 442, width: 440, height: 250 });
+    await nextTick();
+    await nextTick();
+    const style = w.find(".ask-float").attributes("style") ?? "";
+    expect(style).toContain("left: 576px");
+    expect(style).toContain("top: 442px");
   });
 
   it("auto-expands once with a pulse + sr-only announcement when a new dialog arrives while minimized", async () => {
@@ -255,8 +315,9 @@ describe("AskUserFloat.vue — desktop floating window (≥768px)", () => {
     // Real-mouse sequence: pointerdown lands ON the button — no capture, no drag…
     await btn.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 700, clientY: 460 });
     expect(w.find(".ask-float--drag").exists()).toBe(false);
+    const before = w.find(".ask-float").attributes("style") ?? "";
     await w.find(".ask-float-bar").trigger("pointermove", { clientX: 760, clientY: 500 });
-    expect(w.find(".ask-float").attributes("style") ?? "").not.toContain("left:"); // …no drag state
+    expect(w.find(".ask-float").attributes("style") ?? "").toBe(before); // …no drag state
     // …so Chromium's click reaches the button and minimize actually runs.
     await btn.trigger("click");
     expect(w.find(".ask-float--min").exists()).toBe(true);
@@ -270,7 +331,7 @@ describe("AskUserFloat.vue — desktop floating window (≥768px)", () => {
     await bar.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 600, clientY: 460 });
     expect(w.find(".ask-float--drag").exists()).toBe(true); // the bar itself stays a drag handle
     await bar.trigger("pointermove", { clientX: 650, clientY: 460 });
-    expect(w.find(".ask-float").attributes("style") ?? "").toContain("left: 560px"); // clamped
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("left: 576px"); // clamped
     await bar.trigger("pointerup", { pointerId: 1 });
   });
 
@@ -280,14 +341,14 @@ describe("AskUserFloat.vue — desktop floating window (≥768px)", () => {
     const bar = w.find(".ask-float-bar");
     await bar.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 600, clientY: 460 });
     expect(w.find(".ask-float--drag").exists()).toBe(true);
-    await bar.trigger("pointermove", { clientX: 650, clientY: 480 }); // +50/+20 → x clamps at 560
-    expect(w.find(".ask-float").attributes("style") ?? "").toContain("left: 560px");
+    await bar.trigger("pointermove", { clientX: 650, clientY: 480 }); // +50/+20 → x clamps at 576
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("left: 576px");
     await bar.trigger("lostpointercapture", { pointerId: 1 });
     expect(w.find(".ask-float--drag").exists()).toBe(false); // drag ended
     await bar.trigger("pointermove", { clientX: 800, clientY: 600 }); // dead — no listeners left
-    expect(w.find(".ask-float").attributes("style") ?? "").toContain("left: 560px"); // unchanged
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("left: 576px"); // unchanged
     // capture loss still persisted the last position, exactly like a pointerup would
-    expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBe(JSON.stringify({ x: 560, y: -238 }));
+    expect(window.localStorage.getItem(ASK_FLOAT_POS_STORAGE_KEY)).toBe(JSON.stringify({ v: 2, x: 576, y: 462 }));
   });
 
   it("minimizing MID-DRAG swaps the bar and cancels the drag — nothing gets stuck", async () => {
@@ -296,16 +357,17 @@ describe("AskUserFloat.vue — desktop floating window (≥768px)", () => {
     const bar = w.find(".ask-float-bar");
     await bar.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 600, clientY: 460 });
     expect(w.find(".ask-float--drag").exists()).toBe(true);
+    const before = w.find(".ask-float").attributes("style") ?? "";
     await bar.trigger("keydown", { key: "Escape" }); // minimize while the pointer is still down
     await nextTick();
     expect(w.find(".ask-float--min").exists()).toBe(true);
     expect(w.find(".ask-float--drag").exists()).toBe(false); // drag cancelled by the swap
     await bar.trigger("pointermove", { clientX: 900, clientY: 700 }); // old bar: listeners gone
-    expect(w.find(".ask-float").attributes("style") ?? "").not.toContain("left:");
+    expect(w.find(".ask-float").attributes("style") ?? "").toBe(before);
   });
 
   it("re-clamps on EXPAND after the window's content height changed", async () => {
-    window.localStorage.setItem(ASK_FLOAT_POS_STORAGE_KEY, JSON.stringify({ x: 100, y: -150 }));
+    window.localStorage.setItem(ASK_FLOAT_POS_STORAGE_KEY, JSON.stringify({ v: 2, x: 100, y: 500 }));
     const w = mountFloat({ dialogs: TWO, epoch: "e1" });
     const { floatEl } = stubRects(w, { left: 0, top: 0, width: 1000, height: 800 }, 700, {
       left: 552,
@@ -315,16 +377,16 @@ describe("AskUserFloat.vue — desktop floating window (≥768px)", () => {
     });
     await nextTick();
     await nextTick();
-    expect(w.find(".ask-float").attributes("style") ?? "").toContain("top: -150px"); // fits: maxY=-150
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("top: 500px"); // fits: maxY=510
 
-    // Content grows (longer option list): with the OLD clamp the window would hang 200px
-    // below the composer (new maxY = 800-700-600 = -500).
+    // Content grows (longer option list): without the re-clamp the window would hang 340px
+    // below the viewport's bottom margin (new maxY = 768−600−8 = 160).
     floatEl.getBoundingClientRect = () => fakeRect({ left: 552, top: 442, width: 440, height: 600 });
     await w.find(".ask-float-btn").trigger("click"); // minimize…
     await w.find("button.ask-float-bar").trigger("click"); // …expand again → re-clamp
     await nextTick();
     await nextTick();
-    expect(w.find(".ask-float").attributes("style") ?? "").toContain("top: -500px");
+    expect(w.find(".ask-float").attributes("style") ?? "").toContain("top: 160px");
   });
 
   it("keydown resets the drag-click suppression — first keyboard activation after a drag works", async () => {
@@ -383,9 +445,17 @@ describe("useAskFloat — storage validation + clamp math", () => {
     setItem: () => {},
   });
 
-  it("loadAskFloatPos: valid positions load (negative y is legitimate — above the anchor)", () => {
-    expect(loadAskFloatPos(fakeStorage('{"x":560,"y":-238}'))).toEqual({ x: 560, y: -238 });
-    expect(loadAskFloatPos(fakeStorage('{"x":0,"y":0}'))).toEqual({ x: 0, y: 0 });
+  it("loadAskFloatPos: valid v2 positions load (negative y still loads — the mount clamp bounds it)", () => {
+    expect(loadAskFloatPos(fakeStorage('{"v":2,"x":560,"y":-238}'))).toEqual({ x: 560, y: -238 });
+    expect(loadAskFloatPos(fakeStorage('{"v":2,"x":0,"y":0}'))).toEqual({ x: 0, y: 0 });
+  });
+
+  it("loadAskFloatPos: legacy UNVERSIONED (pane-relative) and foreign-version values are dropped", () => {
+    // Verifier round 3: the pre-fixed build's {x,y} schema has no viewport meaning — the
+    // window opens at the default instead of being clamped into a corner.
+    expect(loadAskFloatPos(fakeStorage('{"x":560,"y":-238}'))).toBeNull();
+    expect(loadAskFloatPos(fakeStorage('{"v":1,"x":560,"y":10}'))).toBeNull();
+    expect(loadAskFloatPos(fakeStorage('{"v":"2","x":560,"y":10}'))).toBeNull();
   });
 
   it("loadAskFloatPos: unparseable / wrong-shape / non-finite / absurd values are ignored", () => {
@@ -395,12 +465,12 @@ describe("useAskFloat — storage validation + clamp math", () => {
       "null",
       "[]",
       '"120"',
-      '{"x":"560","y":0}',
-      '{"x":560}',
-      '{"x":null,"y":0}',
-      `{"x":${Number.POSITIVE_INFINITY},"y":0}`,
-      '{"x":100001,"y":0}',
-      '{"x":0,"y":-100001}',
+      '{"v":2,"x":"560","y":0}',
+      '{"v":2,"x":560}',
+      '{"v":2,"x":null,"y":0}',
+      `{"v":2,"x":${Number.POSITIVE_INFINITY},"y":0}`,
+      '{"v":2,"x":100001,"y":0}',
+      '{"v":2,"x":0,"y":-100001}',
     ]) {
       expect(loadAskFloatPos(fakeStorage(bad)), bad).toBeNull();
     }

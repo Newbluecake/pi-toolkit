@@ -1,24 +1,39 @@
 /*
- * pi web-hub — non-modal floating ask_user window (user ruling 2026-10-20; approved mock
- * `~/pwh-preview/askfloat/ask-float.png`). Geometry contract lives in `useAskFloat.ts`;
- * per-dialog form chrome (tabs/options/actions) stays in dialog.css — this file owns ONLY
- * the window/sheet shell: anchor, title bar, body scrollport, minimize/collapse and the
- * new-question pulse.
+ * pi web-hub — non-modal floating ask_user window (user rulings 2026-10-20; approved mocks
+ * `~/pwh-preview/askfloat/ask-float.png` + `~/pwh-preview/askcompact/ask-compact.png`).
+ * Geometry contract lives in `useAskFloat.ts`; per-dialog form chrome (tabs/options/actions)
+ * stays in dialog.css — this file owns ONLY the window/sheet shell: anchor, title bar, body
+ * scrollport, minimize/collapse and the new-question pulse.
+ *
+ * ══ APP-WIDE STACKING TIERS (the single canonical table — verifier round 3, 2026-10-20) ══
+ *   5   transient FABs (fleet button)
+ *  20   in-flow chrome above the transcript (dock, phone `.ask-anchor`, mid-band composer)
+ *  30   drawer scrims/overlay + anchored popover cards (history/load/quota/version/model
+ *       notes, spawn dir list, mid-band scrim)
+ *  40   drawers (fleet fullscreen, mid-band agents drawer) + nsmenu dropdown
+ *  45   THIS WINDOW (`.ask-float`) — above the agents tree/fleet drawer, below every modal
+ *  50   modal-ish sheets/panels: picker scrim, spawn scrim, settings panel, ctx-ring panels,
+ *       back-to-top button
+ *  55   `.model-panel--fixed` (must top the settings panel it opens from)
+ *  60   real modals: preview overlay, diff dialog, proxy preview
+ *  70   above-modals: privacy unmark, proxy dialog, upload lightbox
+ * When you add a layer, pick a tier here and update this table — do not invent local values.
  */
 
-/* The float's positioning context: a height-0 in-flow marker mounted by AgentDetail right
- * above the folded notes / DetailDock. Because it sits IN FLOW, its top edge is always the
- * dock's top edge — the window's default `bottom: 8px` therefore lands just above the
- * composer with zero measuring, and a growing dock (queue rows) pushes the anchor (and the
- * default-anchored window) up with it. */
+/* The DEFAULT-POSITION marker: a height-0 in-flow element mounted by AgentDetail right above
+ * the folded notes / DetailDock. On DESKTOP the window is `position: fixed` (viewport ruling
+ * 2026-10-20 — it may be dragged across the agents tree / fleet drawer), so the anchor is not
+ * the containing block there; useAskFloat.ts only reads its top edge to resolve the default
+ * "just above the composer" position. On PHONE the anchor regains `position: relative` (see
+ * the ≤767px block): the sheet is in-flow-anchored above the composer again and stacks below
+ * the fullscreen drawer. */
 .ask-anchor {
-  position: relative;
   height: 0;
-  z-index: 20; /* below the fleet drawer overlay (30) and its scrim, above the transcript */
 }
 
 .ask-float {
-  position: absolute;
+  position: fixed;
+  z-index: 45; /* tier 45 — above the drawers (40), below the modal-ish sheets/panels (50+); see the table above */
   display: flex;
   flex-direction: column;
   border: 1px solid var(--c-border-strong);
@@ -26,6 +41,9 @@
   background: var(--c-warning-soft);
   box-shadow: var(--shadow-2);
   overflow: hidden;
+  /* Compact ruling (mock ~/pwh-preview/askcompact/ask-compact.png): the whole window runs one
+   * notch tighter — 13px base, narrower paddings (scoped overrides below). */
+  font-size: 13px;
 }
 
 /* --- desktop (≥768px): floating window, default bottom-right just above the composer ------ */
@@ -33,7 +51,7 @@
   .ask-float {
     right: max(var(--col-gutter), env(safe-area-inset-right));
     bottom: var(--sp-2);
-    width: min(440px, 90vw);
+    width: min(360px, 90vw);
     max-height: 70vh;
   }
 
@@ -51,8 +69,18 @@
 }
 
 /* --- phone (<768px): bottom sheet above the composer (not draggable) ---------------------- */
+/* Verifier round 3: the sheet must NOT be viewport-fixed — it anchors to the in-flow
+ * `.ask-anchor` (a growing dock pushes it up, it never covers the composer) and stays BELOW
+ * the fullscreen drawer (40) at tier 20, exactly like the pre-viewport-ruling build. */
 @media (max-width: 767px) {
+  .ask-anchor {
+    position: relative;
+    z-index: 20; /* the sheet's stacking context: above the transcript/dock, below drawers (30/40) */
+  }
+
   .ask-float {
+    position: absolute;
+    z-index: auto; /* stacks inside the anchor's context (20), never above the fullscreen drawer */
     left: max(var(--col-gutter), env(safe-area-inset-left));
     right: max(var(--col-gutter), env(safe-area-inset-right));
     bottom: var(--sp-2);
@@ -66,10 +94,10 @@
   align-items: center;
   gap: var(--sp-2);
   flex: none;
-  min-height: 40px;
-  padding: 0 var(--sp-2) 0 var(--sp-3);
+  min-height: 34px;
+  padding: 0 6px 0 10px;
   border-bottom: 1px solid var(--c-border);
-  font-size: var(--fs-sm);
+  font-size: 13px;
   font-weight: var(--fw-medium);
   color: var(--c-text);
 }
@@ -119,6 +147,16 @@
   flex: 1;
 }
 
+/* The 「也可以在终端作答——先答者生效」 hint, shrunk to a muted title-bar token (compact
+ * ruling); the full sentence is the tooltip. */
+.ask-float-term {
+  flex: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  white-space: nowrap;
+}
+
 .ask-float-hint {
   margin-left: auto;
   color: var(--c-text-3);
@@ -165,13 +203,13 @@
 
 @media (min-width: 768px) {
   .ask-float-body {
-    max-height: calc(70vh - 41px); /* bar (40px) + its border (1px) */
+    max-height: calc(70vh - 35px); /* bar (34px) + its border (1px) */
   }
 }
 
 @media (max-width: 767px) {
   .ask-float-body {
-    max-height: calc(60vh - 41px);
+    max-height: calc(60vh - 35px);
   }
 }
 
@@ -182,6 +220,113 @@
 .ask-float-body .ask-user-form {
   max-height: none;
   overflow-y: visible;
+}
+
+/* --- compact form overrides (scoped to the float — both bands; dialog.css keeps the ------
+ * --- standalone rules byte-identical for the overscroll guard) --------------------------- */
+.ask-float .ask-user-form {
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+/* The dual-hint sentence moved into the title bar as 「终端也可答」 — hide the body copy. */
+.ask-float .ask-dual-hint {
+  display: none;
+}
+
+.ask-float .ask-tabs button {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.ask-float .ask-question-text,
+.ask-float .ask-option-label {
+  font-size: 13px;
+}
+
+.ask-float .ask-context,
+.ask-float .ask-option-desc {
+  font-size: 12px;
+}
+
+/* Long context collapses to 2 lines with an 「展开/收起」 toggle; option descriptions clamp
+ * to 2 lines as well (the full text rides the `title` attribute). */
+.ask-context--clamped,
+.ask-float .ask-option-desc {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.ask-context-toggle {
+  align-self: flex-start;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--c-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ask-context-toggle:hover {
+  text-decoration: underline;
+}
+
+.ask-float .ask-option {
+  min-height: 0;
+  padding: 4px 6px;
+}
+
+/* The 「推荐」 tag replacing the visible `(Recommended) ` prefix (the answer value is still
+ * the ORIGINAL label string — the prefix is display-only). */
+.ask-reco-tag {
+  display: inline-block;
+  margin-left: var(--sp-1);
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  background: var(--c-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: var(--fw-regular);
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+/* The 「✎ 其它回答…」 reveal link — sits on the skip row, quieter than an option. */
+.ask-other-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--c-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ask-other-link:hover {
+  text-decoration: underline;
+}
+
+.ask-float .ask-other-input {
+  min-height: 32px;
+}
+
+.ask-float .ask-skip {
+  min-height: 28px;
+}
+
+.ask-float .ask-actions {
+  gap: var(--sp-2);
+  padding-top: 6px;
+}
+
+.ask-float .ask-actions .btn {
+  min-height: 32px;
+  min-width: 0;
+  padding: 4px 12px;
+  font-size: 12.5px;
 }
 
 .ask-float-item + .ask-float-item {

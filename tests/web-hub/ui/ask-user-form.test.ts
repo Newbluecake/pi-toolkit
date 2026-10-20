@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { mount } from "@vue/test-utils";
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AskUserForm from "../../../src/web-hub/ui/src/components/dialog/AskUserForm.vue";
 import {
@@ -111,14 +111,16 @@ function mountForm(dialog: unknown, opts: { suspended?: boolean; env?: ControlEn
 }
 
 describe("AskUserForm.vue — structure (§7.4)", () => {
-  it("single question renders directly (no tabs), with context, options + descriptions, Other", () => {
+  it("single question renders directly (no tabs), with context, options + descriptions, Other link", () => {
     const w = mountForm(SINGLE);
     expect(w.find("[data-question-tab]").exists()).toBe(false);
     expect(w.text()).toContain("Which implementation plan");
     expect(w.find(".ask-context").text()).toContain("Plan A rewrites");
-    expect(w.findAll(".ask-option")).toHaveLength(3); // 2 options + Other
+    expect(w.findAll(".ask-option")).toHaveLength(2); // 2 options (Other collapsed behind a link)
     expect(w.text()).toContain("Cleaner result, larger diff");
-    expect(w.find("[data-other]").exists()).toBe(true);
+    // compact ruling: the Other input hides behind a 「✎ Other answer…」 reveal link
+    expect(w.find("[data-other]").exists()).toBe(false);
+    expect(w.find("[data-other-link]").exists()).toBe(true);
     expect(w.text()).toContain("first answer wins");
   });
 
@@ -141,13 +143,15 @@ describe("AskUserForm.vue — structure (§7.4)", () => {
   });
 
   it("Other renders by default (allowOther absent) and only an explicit allowOther:false hides it", () => {
-    // SINGLE carries no allowOther — the automatic Other row must still render.
-    expect(mountForm(SINGLE).find("[data-other]").exists()).toBe(true);
+    // SINGLE carries no allowOther — the automatic Other reveal link must still render.
+    expect(mountForm(SINGLE).find("[data-other-link]").exists()).toBe(true);
     const noOther = {
       ...SINGLE,
       questions: [{ ...SINGLE.questions[0]!, allowOther: false }],
     };
-    expect(mountForm(noOther).find("[data-other]").exists()).toBe(false);
+    const w = mountForm(noOther);
+    expect(w.find("[data-other-link]").exists()).toBe(false);
+    expect(w.find("[data-other]").exists()).toBe(false);
   });
 });
 
@@ -177,6 +181,7 @@ describe("AskUserForm.vue — submit gating + payload (§7.4)", () => {
 
   it("Other text alone completes a question", async () => {
     const w = mountForm(SINGLE);
+    await w.find("[data-other-link]").trigger("click"); // reveal the collapsed input first
     await w.find(".ask-other-input").setValue("  plan C, actually ");
     expect(w.find("[data-submit]").attributes("disabled")).toBeUndefined();
     await w.find("[data-submit]").trigger("click");
@@ -261,6 +266,82 @@ describe("AskUserForm.vue — multiSelect ticks all survive to submit (field rep
       expect(w.emitted("answer")).toEqual([[[{ selected: MULTI_RECOMMENDED_LABELS, other: null }]]]);
     },
   );
+});
+
+describe("AskUserForm.vue — compact window rulings (mock ~/pwh-preview/askcompact/ask-compact.png)", () => {
+  it("a `(Recommended) ` prefix renders as a 「Recommended」 tag; the answer keeps the ORIGINAL label", async () => {
+    const w = mountForm(MULTI_RECOMMENDED);
+    const labels = w.findAll(".ask-option-label");
+    expect(labels).toHaveLength(3);
+    for (const label of labels) {
+      expect(label.text()).not.toContain("(Recommended)"); // prefix stripped from the VISIBLE label
+    }
+    expect(w.findAll(".ask-reco-tag")).toHaveLength(3); // …rendered as the small tag instead
+    expect(w.findAll(".ask-reco-tag")[0]!.text()).toBe("Recommended");
+    // …while the submitted payload still carries the original label strings (covered above,
+    // asserted here once more as the explicit value-vs-display contract).
+    await w.findAll("input[type='checkbox']")[0]!.setValue(true);
+    await w.find("[data-submit]").trigger("click");
+    expect(w.emitted("answer")).toEqual([[[{ selected: [MULTI_RECOMMENDED_LABELS[0]!], other: null }]]]);
+  });
+
+  it("option descriptions clamp via CSS and carry the full text in the title attribute", () => {
+    const w = mountForm(SINGLE);
+    const desc = w.find(".ask-option-desc");
+    expect(desc.exists()).toBe(true);
+    expect(desc.attributes("title")).toBe("Cleaner result, larger diff");
+  });
+
+  it("the Other input reveals on the 「✎ Other answer…」 link and receives focus", async () => {
+    const w = mountForm(SINGLE, { attachTo: document.body });
+    expect(w.find("[data-other]").exists()).toBe(false);
+    const link = w.find("[data-other-link]");
+    expect(link.text()).toContain("Other answer");
+    await link.trigger("click");
+    const input = w.find("[data-other]");
+    expect(input.exists()).toBe(true);
+    expect(w.find("[data-other-link]").exists()).toBe(false); // the link folds away once open
+    expect(document.activeElement).toBe(input.element); // focused for immediate typing
+  });
+
+  it("a restored non-empty Other draft keeps the input open (no link click needed)", async () => {
+    const env = fakeEnv();
+    env.dialogDrafts.set(dialogDraftKey("agent-a", "epoch-1", "ask:tc-single-1"), [
+      { selected: [], other: "my custom plan" },
+    ]);
+    const w = mountForm(SINGLE, { env });
+    expect(w.find("[data-other-link]").exists()).toBe(false);
+    const input = w.find("[data-other]");
+    expect(input.exists()).toBe(true);
+    expect((input.element as HTMLInputElement).value).toBe("my custom plan");
+  });
+
+  it("long context collapses to 2 lines with an 「Expand/Collapse」 toggle", async () => {
+    // happy-dom never lays out — stub the overflow signal the component measures
+    // (scrollHeight > clientHeight while the 2-line clamp applies).
+    const scrollDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const clientDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 60 });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 24 });
+    try {
+      const w = mountForm(SINGLE);
+      await nextTick();
+      await nextTick(); // onMounted → nextTick(measureContext)
+      const context = w.find(".ask-context");
+      expect(context.classes()).toContain("ask-context--clamped");
+      const toggle = w.find("[data-context-toggle]");
+      expect(toggle.exists()).toBe(true);
+      expect(toggle.text()).toBe("Expand");
+      expect(toggle.attributes("aria-expanded")).toBe("false");
+      await toggle.trigger("click");
+      expect(context.classes()).not.toContain("ask-context--clamped");
+      expect(toggle.text()).toBe("Collapse");
+      expect(toggle.attributes("aria-expanded")).toBe("true");
+    } finally {
+      if (scrollDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollDesc);
+      if (clientDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientDesc);
+    }
+  });
 });
 
 describe("AskUserForm.vue — drafts (§3.5) + suspended (v2.1)", () => {
@@ -416,6 +497,7 @@ describe("AskUserForm.vue — auto-advance on single-select (2026-10 mobile UX)"
     const w = mountForm(MULTI);
     await w.findAll("[data-question-tab]")[2]!.trigger("click");
     expect(activeIndex(w)).toBe(2);
+    await w.findAll(".ask-question")[2]!.find("[data-other-link]").trigger("click");
     await w.findAll(".ask-question")[2]!.find("[data-other]").setValue("custom answer");
     expect(activeIndex(w)).toBe(2);
   });
@@ -482,6 +564,7 @@ describe("AskUserForm.vue — per-question skip (「我可以不回答这个问�
   it("typing an Other answer after a skip retracts it", async () => {
     const w = mountForm(SINGLE);
     await w.find("[data-skip]").trigger("click");
+    await w.find("[data-other-link]").trigger("click"); // reveal the collapsed input first
     await w.find(".ask-other-input").setValue("plan C, actually");
     expect(w.find("[data-skip]").attributes("aria-pressed")).toBe("false");
     await w.find("[data-submit]").trigger("click");
