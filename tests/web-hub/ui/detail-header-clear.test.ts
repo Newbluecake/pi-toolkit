@@ -127,7 +127,7 @@ describe("DetailHeader.vue — web /clear quick button", () => {
     const css = readFileSync("src/web-hub/ui/src/styles/detail.css", "utf8");
     expect(css).toMatch(/\.detail-titlebar\s*\{[^}]*container:\s*detail-titlebar \/ inline-size/);
     expect(css).toMatch(
-      /@container detail-titlebar \(max-width: 559px\)\s*\{\s*\.head-btn-label\s*\{\s*display: none;/,
+      /@container detail-titlebar \(max-width: 599px\)\s*\{\s*\.head-btn-label\s*\{\s*display: none;/,
     );
     expect(MESSAGES.zh.resume.openLabel).toBe("恢复");
     expect(MESSAGES.zh.privacy.markLabel).toBe("隐私");

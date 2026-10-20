@@ -181,7 +181,7 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
     expect(terminal.find(".spawn-stop-btn").exists()).toBe(false);
   });
 
-  it("managed live record ⇒ idle button is icon-only with title + aria-label, two-step arm, ✓ confirms and calls stop(spawnId)", async () => {
+  it("managed live record ⇒ idle button is icon + label with title + aria-label, two-step arm, ✓ confirms and calls stop(spawnId)", async () => {
     const stopped: string[] = [];
     const hub = hubWithSpawn({
       spawns: { items: [spawnRec()], active: 1, max: 4 },
@@ -198,7 +198,9 @@ describe("DetailHeader.vue — managed session stop (SP12)", () => {
     // icon-only idle: the SVG carries no text, the affordance is title + aria-label
     expect(btn.attributes("aria-label")).toBe("Stop this web-started session");
     expect(btn.attributes("title")).toBe("Stop session");
-    expect(btn.text()).toBe("");
+    // 2026-10-20: the idle button carries a visible (aria-hidden) label like 清空/恢复/隐私
+    expect(btn.text()).toBe("Stop");
+    expect(btn.get(".head-btn-label").attributes("aria-hidden")).toBe("true");
     await btn.trigger("click"); // arm
     const armed = wrapper.get(".spawn-stop-armed");
     expect(armed.attributes("role")).toBe("group");

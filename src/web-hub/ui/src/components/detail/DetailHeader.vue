@@ -410,6 +410,7 @@ function onToggleHeadInfo(): void {
           @keydown="onStopKeydown"
         >
           <AppIcon name="stop" class="icon" />
+          <span class="head-btn-label" aria-hidden="true">{{ t("spawn.stopSessionLabel") }}</span>
         </button>
         <span
           v-else-if="stopStopping"

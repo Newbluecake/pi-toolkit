@@ -147,6 +147,7 @@ const spawn = {
 
   // --- DetailHeader (managed session; 2026-10 variant-A stop redesign) ---
   stopSession: "Stop session",
+  stopSessionLabel: "Stop",
   stopSessionConfirm: "Stop this session?",
   stopSessionAria: "Stop this web-started session",
   stopSessionGroupAria: "Confirm stopping this session",

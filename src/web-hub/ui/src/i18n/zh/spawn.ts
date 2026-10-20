@@ -126,6 +126,7 @@ const spawn = {
   badgeWebTitle: "由网页启动 — 受此 hub 管理",
 
   stopSession: "停止会话",
+  stopSessionLabel: "停止",
   stopSessionConfirm: "确认停止",
   stopSessionAria: "停止这个由网页启动的会话",
   stopSessionGroupAria: "确认停止会话",
