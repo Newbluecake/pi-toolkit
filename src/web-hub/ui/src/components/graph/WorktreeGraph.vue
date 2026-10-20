@@ -379,6 +379,7 @@ onBeforeUnmount(() => {
                       :key="chip.text"
                       class="gg-ref"
                       :class="[`k-${chip.kind}`, { 'is-sym': chip.sym === true }]"
+                      :title="chip.text"
                       translate="no"
                       >{{ chip.text }}</span
                     >

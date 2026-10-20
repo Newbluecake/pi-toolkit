@@ -188,7 +188,10 @@ tr.is-merge .gg-sub {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 22ch;
+  /* 2026-10-20 「分支名称被挡住」: wide enough for real branch names (`HEAD → custom-rc.22.p…`
+   * was cut at 22ch); the subject text simply ellipsizes after the chips instead. */
+  max-width: 48ch;
+  flex: none;
 }
 
 /* chip colors: per-kind tokens (all three theme blocks in tokens.css; contrast-tested) */
@@ -362,7 +365,7 @@ tr.is-merge .gg-sub {
   }
 
   .gg-ref {
-    max-width: 16ch;
+    max-width: 24ch;
   }
 }
 
