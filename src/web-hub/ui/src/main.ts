@@ -9,9 +9,13 @@ import { detectLang } from "./composables/useI18n.js";
 // opens — the capture listener must be on the window BEFORE mount for the settings card to
 // ever see the event (useInstallPrompt.ts holds it; preventDefault keeps the mini-infobar down).
 import { wireInstallPromptCapture } from "./composables/useInstallPrompt.js";
+// 2026-10-20: a tab older than the hub's current UI build can no longer load its lazy chunks —
+// latch that into a 「界面已更新，请刷新」 notice (useStaleUi.ts).
+import { wireStaleUiCapture } from "./composables/useStaleUi.js";
 import "./styles/tokens.css";
 
 wireInstallPromptCapture(window);
+wireStaleUiCapture(window);
 
 // 2026-10-05 field report: the static `lang="en"` made mobile Edge/Chrome offer its translation
 // bar on every visit (the UI is actually Chinese for zh users). Point `lang` at the detected UI

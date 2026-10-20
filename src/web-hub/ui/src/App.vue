@@ -66,6 +66,7 @@ import { usePasswordAuth } from "./composables/usePasswordAuth.js";
 import { usePreview } from "./composables/usePreview.js";
 import { useProxyPreview } from "./composables/useProxyPreview.js";
 import { useTheme } from "./composables/useTheme.js";
+import { staleUi } from "./composables/useStaleUi.js";
 import { createTokenTransport } from "./transport/token.js";
 import type { HubTransport, TransportHooks } from "./transport/types.js";
 import type { ConnState, Notice } from "./types.js";
@@ -309,17 +310,31 @@ const showDashboard = computed(() => {
 const showShell = computed(() => showDashboard.value && !showBootFailure.value);
 
 const globalNotices = computed<readonly Notice[]>(() => {
-  if (authMode !== "password" || passwordAuth?.initialPasswordHint.value !== true) return [];
-  return [
-    {
+  const out: Notice[] = [];
+  // 2026-10-20: a lazy chunk failed to load ⇒ this tab predates the hub's current UI build.
+  if (staleUi.value)
+    out.push({
+      id: "ui-stale",
+      tone: "warn",
+      title: t("notices.uiStaleTitle"),
+      body: t("notices.uiStaleBody"),
+      action: { label: t("notices.reload") },
+      persistent: true,
+    });
+  if (authMode === "password" && passwordAuth?.initialPasswordHint.value === true)
+    out.push({
       id: "initial-password",
       tone: "warn",
       title: t("notices.initialPasswordLead"),
       body: t("notices.initialPasswordMore"),
       persistent: true,
-    },
-  ];
+    });
+  return out;
 });
+
+function onGlobalNoticeAction(id: string): void {
+  if (id === "ui-stale") window.location.reload();
+}
 
 let lastAnnouncedConn: ConnState | undefined;
 function announceConn(next: ConnState): void {
@@ -371,7 +386,7 @@ onUnmounted(() => {
       <div class="app-notices">
         <HubStateBanner />
         <ControlNotice v-if="controlOn" />
-        <NoticeStack :notices="globalNotices" @action="() => {}" />
+        <NoticeStack :notices="globalNotices" @action="onGlobalNoticeAction" />
       </div>
       <DashboardView :hub="hub!" :route="route!" />
     </div>

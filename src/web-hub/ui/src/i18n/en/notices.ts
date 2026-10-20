@@ -9,6 +9,9 @@ const notices = {
   retryNow: "Retry Now",
   signIn: "Sign In",
   reload: "Reload",
+  uiStaleTitle: "The UI was updated — reload the page.",
+  uiStaleBody:
+    "The hub switched to a newer UI build after this page was opened, so some parts (e.g. Open local port, previews) can no longer load. Reload to continue.",
   initialPasswordLead: "Change the initial password soon.",
   initialPasswordRun: "Run",
   initialPasswordHost: "on the host.",

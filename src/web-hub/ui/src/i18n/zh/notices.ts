@@ -9,6 +9,8 @@ const notices = {
   retryNow: "立即重试",
   signIn: "登录",
   reload: "刷新",
+  uiStaleTitle: "界面已更新，请刷新页面。",
+  uiStaleBody: "这个页面打开后 hub 换了新版本界面，部分功能（如打开本机端口、预览）已无法加载。刷新后即可正常使用。",
   initialPasswordLead: "请尽快修改初始密码。",
   initialPasswordRun: "请在主机上运行",
   initialPasswordHost: "。",
