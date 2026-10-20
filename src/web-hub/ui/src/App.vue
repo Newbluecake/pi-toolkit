@@ -28,6 +28,9 @@ import "./styles/states.css";
 // #32 C5 (control-plan.md v2.1 §7.4/§7.6): control-plane + ask_user dialog styles.
 import "./styles/control.css";
 import "./styles/dialog.css";
+// 2026-10-20 user ruling: the ask_user form is a NON-MODAL floating window (mock
+// ~/pwh-preview/askfloat/ask-float.png) — its shell styles live in their own file.
+import "./styles/ask-float.css";
 // PV6 (web-hub-preview plan v3 §4.6): path-ref segments + the preview overlay.
 import "./styles/preview.css";
 // web-hub-privacy plan v2.1 (P2): the session privacy lock (lock screen / unmark dialog /

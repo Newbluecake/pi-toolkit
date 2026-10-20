@@ -38,6 +38,15 @@ const dialog = {
   closedGeneric: "对话框已关闭",
   // multi-question tabs: an answered tab's ✓ mark is decorative; screen readers get this suffix
   answeredMark: "已回答",
+  // non-modal floating window (user ruling 2026-10-20)
+  floatTitleOne: "需要你回答",
+  floatTitleMany: "需要你回答 · {n} 个问题",
+  floatMinimize: "最小化回答面板(Esc)",
+  floatExpand: "展开回答面板",
+  floatExpandShort: "展开",
+  floatCollapse: "收起",
+  floatPendingBar: "{n} 个问题待回答",
+  floatNewQuestion: "Agent 提出了一个新问题",
 } satisfies Messages<typeof en>;
 
 export default dialog;

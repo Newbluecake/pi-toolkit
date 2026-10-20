@@ -1,0 +1,206 @@
+/*
+ * pi web-hub — non-modal floating ask_user window (user ruling 2026-10-20; approved mock
+ * `~/pwh-preview/askfloat/ask-float.png`). Geometry contract lives in `useAskFloat.ts`;
+ * per-dialog form chrome (tabs/options/actions) stays in dialog.css — this file owns ONLY
+ * the window/sheet shell: anchor, title bar, body scrollport, minimize/collapse and the
+ * new-question pulse.
+ */
+
+/* The float's positioning context: a height-0 in-flow marker mounted by AgentDetail right
+ * above the folded notes / DetailDock. Because it sits IN FLOW, its top edge is always the
+ * dock's top edge — the window's default `bottom: 8px` therefore lands just above the
+ * composer with zero measuring, and a growing dock (queue rows) pushes the anchor (and the
+ * default-anchored window) up with it. */
+.ask-anchor {
+  position: relative;
+  height: 0;
+  z-index: 20; /* below the fleet drawer overlay (30) and its scrim, above the transcript */
+}
+
+.ask-float {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  background: var(--c-warning-soft);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+
+/* --- desktop (≥768px): floating window, default bottom-right just above the composer ------ */
+@media (min-width: 768px) {
+  .ask-float {
+    right: max(var(--col-gutter), env(safe-area-inset-right));
+    bottom: var(--sp-2);
+    width: min(440px, 90vw);
+    max-height: 70vh;
+  }
+
+  .ask-float-bar {
+    cursor: grab;
+    /* Drag ergonomics without preventDefault (the bar must keep pointer-focus for the arrow
+     * keys / Esc): no text selection mid-drag, no touch scrolling off the handle. */
+    user-select: none;
+    touch-action: none;
+  }
+
+  .ask-float--drag .ask-float-bar {
+    cursor: grabbing;
+  }
+}
+
+/* --- phone (<768px): bottom sheet above the composer (not draggable) ---------------------- */
+@media (max-width: 767px) {
+  .ask-float {
+    left: max(var(--col-gutter), env(safe-area-inset-left));
+    right: max(var(--col-gutter), env(safe-area-inset-right));
+    bottom: var(--sp-2);
+    max-height: 60vh;
+  }
+}
+
+/* --- title bar (the drag handle) ----------------------------------------------------------- */
+.ask-float-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  min-height: 40px;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+/* The minimized bar is a <button> — reset its chrome to the bar's (its padding/border/font
+ * come from `.ask-float-bar` above; these only neutralize the UA button styles). */
+.ask-float-bar--button {
+  width: 100%;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ask-float--min .ask-float-bar {
+  border-bottom: 0;
+}
+
+.ask-float-bar:focus-visible,
+.ask-float-btn:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+.ask-float-grip {
+  flex: none;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+  letter-spacing: 1px;
+}
+
+.ask-float-q {
+  flex: none;
+}
+
+.ask-float-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ask-float-spacer {
+  flex: 1;
+}
+
+.ask-float-hint {
+  margin-left: auto;
+  color: var(--c-text-3);
+  font-weight: var(--fw-regular);
+}
+
+.ask-float-bar--button .ask-float-chev {
+  flex: none;
+  color: var(--c-text-3);
+}
+
+/* Desktop minimized shows the arrow at the right edge too. */
+.ask-float-bar--button .ask-float-title {
+  flex: 1;
+}
+
+.ask-float-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.ask-float-btn:hover {
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+
+/* --- body: the stacked dialog forms -------------------------------------------------------- */
+.ask-float-body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+@media (min-width: 768px) {
+  .ask-float-body {
+    max-height: calc(70vh - 41px); /* bar (40px) + its border (1px) */
+  }
+}
+
+@media (max-width: 767px) {
+  .ask-float-body {
+    max-height: calc(60vh - 41px);
+  }
+}
+
+/* The float body is the single scrollport — inside it the form's own viewport-height cap /
+ * inner scrollbar would double up, so it uncaps here (dialog.css keeps the standalone rule
+ * byte-identical; overscroll-guard.test.ts pins it). The form's sticky `.ask-tabs` /
+ * `.ask-actions` then stick against the BODY's scrollport, which is the visible one. */
+.ask-float-body .ask-user-form {
+  max-height: none;
+  overflow-y: visible;
+}
+
+.ask-float-item + .ask-float-item {
+  border-top: 1px solid var(--c-border-strong);
+}
+
+/* --- new-question pulse (attention after the auto-expand) ---------------------------------- */
+@keyframes ask-float-pulse {
+  0%,
+  100% {
+    box-shadow: var(--shadow-2);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px var(--c-focus),
+      var(--shadow-2);
+  }
+}
+
+.ask-float--pulse {
+  animation: ask-float-pulse 0.9s ease-in-out 2;
+}

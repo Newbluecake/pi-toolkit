@@ -38,6 +38,15 @@ const dialog = {
   closedGeneric: "Dialog closed",
   // multi-question tabs: an answered tab's ✓ mark is decorative; screen readers get this suffix
   answeredMark: "answered",
+  // non-modal floating window (user ruling 2026-10-20; mock ~/pwh-preview/askfloat/ask-float.png)
+  floatTitleOne: "Answer needed",
+  floatTitleMany: "Answer needed · {n} questions",
+  floatMinimize: "Minimize the answer panel (Esc)",
+  floatExpand: "Expand the answer panel",
+  floatExpandShort: "Expand",
+  floatCollapse: "Collapse",
+  floatPendingBar: "{n} question(s) waiting for an answer",
+  floatNewQuestion: "The agent asked a new question",
 } satisfies Record<string, string>;
 
 export default dialog;

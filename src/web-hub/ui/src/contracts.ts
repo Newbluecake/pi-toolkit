@@ -226,6 +226,19 @@ export interface AskUserFormEmits {
 export interface AskUserQuestionProps {
   readonly question: unknown;
 }
+/** Non-modal floating ask_user window (user ruling 2026-10-20): one window stacking every open
+ * dialog's `AskUserForm`, draggable/minimizable on desktop, a collapsible bottom sheet on phones. */
+export interface AskUserFloatProps {
+  readonly dialogs: readonly unknown[];
+  readonly epoch: string;
+  readonly suspended?: boolean;
+  /** dialogIds whose form was rendered before a terminal reload (§3.5 epoch note). */
+  readonly staleIds?: readonly string[];
+}
+export interface AskUserFloatEmits {
+  answer: [dialogId: string, answers: unknown];
+  cancel: [dialogId: string];
+}
 export interface DetailDockProps {
   readonly following: boolean;
   readonly newCount: number;

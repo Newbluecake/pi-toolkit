@@ -66,17 +66,10 @@
  * side (and lost its own padding). Bordered children shrink by the gutter instead, so their
  * border lines up with the composer's left edge and the send button's right edge.
  *
- * 2026-10-09 「ask user 宽度和输入框+发送按钮的整体宽度保持一致」: the ask_user form rides the
- * SAME box. It is NOT a dock child — AgentDetail mounts `.ask-user-slot` above DetailDock, so
- * the `> *` rule above never reaches it — and the structural selector here reproduces the
- * geometry instead (`.ask-user-slot` mirrors the dock's `--sb-w` right padding in dialog.css so
- * both centre on the transcript line; the gutter calc below then does the rest). If the form
- * is ever moved INSIDE the dock, drop this selector and add it to the dock-child list above.
- * `margin-inline: auto` is redundant for the dock children (the `> *` rule already sets it)
- * and does the centring for the slot-mounted form. */
+ * The ask_user form rode this same box from 2026-10-09 until 2026-10-20, when the user ruling
+ * turned it into a non-modal floating window — its geometry now lives in ask-float.css. */
 .dock.dock-ctl > .command-result,
-.dock.dock-ctl > .command-confirm,
-.detail-main > .ask-user-slot > .ask-user-form {
+.dock.dock-ctl > .command-confirm {
   width: calc(
     100% - max(var(--col-gutter), env(safe-area-inset-left)) - max(var(--col-gutter), env(safe-area-inset-right))
   );

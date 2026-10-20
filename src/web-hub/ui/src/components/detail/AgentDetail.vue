@@ -10,7 +10,8 @@
     `DetailDock`/`Composer`/`AskUserForm`. The frozen `AgentDetailProps` has no hub field, and
     the frozen `DetailDockEmits` has no send/stop/retry/discard — inject is the only channel
     that touches neither frozen surface.
-  - ask_user: every `agent.dialogs.open` entry renders an `AskUserForm` (keyed
+  - ask_user: every `agent.dialogs.open` entry renders an `AskUserForm` inside ONE non-modal
+    `AskUserFloat` window (user ruling 2026-10-20 — was an in-flow stack before), each keyed
     `dialogId:epoch` — an epoch flip remounts with a fresh, empty draft plus a one-line
     epochChanged hint, §3.5); a dialog that leaves `open` folds into a one-line note resolved
     from `dialogs.closed[].by/outcome` (§7.4's 409 folding). `suspended` tracks the hub's
@@ -50,7 +51,7 @@ import {
   type ControlView,
   type DetailMetricsView,
 } from "../control/controlContext.js";
-import AskUserForm from "../dialog/AskUserForm.vue";
+import AskUserFloat from "../dialog/AskUserFloat.vue";
 import { buildAgentNotices } from "./agentNotices.js";
 import { statusOf } from "./agentViews.js";
 import { bashJobsOf } from "./bashJobsView.js";
@@ -580,21 +581,21 @@ function onCloseDrawer(): void {
           @toggle-drawer="onToggleDrawer"
         />
 
-        <!-- ask_user dialogs anchor just above the dock/Composer (user-requested 2026-10-05:
-             was pinned to the top banner slot, which forced mobile users to scroll up to answer) -->
-        <template v-if="controlEnabled">
-          <section v-for="d in openDialogs" :key="`${d.dialogId}:${dialogsEpoch}`" class="ask-user-slot">
-            <p v-if="epochStaleIds.includes(d.dialogId)" class="ask-epoch-note" role="status">
-              {{ t("dialog.epochChanged") }}
-            </p>
-            <AskUserForm
-              :dialog="d"
-              :suspended="hubSuspended"
-              @answer="onDialogAnswer(d.dialogId, $event)"
-              @cancel="onDialogCancel(d.dialogId)"
-            />
-          </section>
-        </template>
+        <!-- ask_user dialogs: ONE non-modal floating window (user ruling 2026-10-20, mock
+             ~/pwh-preview/askfloat/ask-float.png) stacking every open dialog's form — the old
+             in-flow `.ask-user-slot` stack covered the transcript bottom. The float's root is
+             a height-0 anchor in flow right here, so its default position always sits just
+             above the dock/composer without measuring. History: it was pinned to the top
+             banner slot before 2026-10-05, then docked above the composer until this change. -->
+        <AskUserFloat
+          v-if="controlEnabled && openDialogs.length > 0"
+          :dialogs="openDialogs"
+          :epoch="dialogsEpoch"
+          :suspended="hubSuspended"
+          :stale-ids="epochStaleIds"
+          @answer="onDialogAnswer"
+          @cancel="onDialogCancel"
+        />
         <p v-for="id in visibleFolded" :key="`folded-${id}`" class="ask-folded" role="status">{{ foldedNote(id) }}</p>
 
         <DetailDock

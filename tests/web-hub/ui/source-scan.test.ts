@@ -113,6 +113,7 @@ describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
         `${UI_DIR}/src/components/control/CommandConfirm.vue`,
         `${UI_DIR}/src/components/control/CommandResult.vue`,
         `${UI_DIR}/src/components/dialog/AskUserForm.vue`,
+        `${UI_DIR}/src/components/dialog/AskUserFloat.vue`,
         `${UI_DIR}/src/components/dialog/AskUserQuestion.vue`,
         // fleet-drawer F6(§8.3 canary):抽屉时代的组件必须留在扫描范围内(FleetPanel/
         // FleetNode 已随浮层机制删除)。

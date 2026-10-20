@@ -38,41 +38,46 @@ describe("transcript ↔ control dock column alignment", () => {
   });
 });
 
-describe("ask_user card rides the composer column (2026-10-09 「ask user 宽度和输入框+发送按钮的整体宽度保持一致」)", () => {
-  const control = read("styles/control.css");
+describe("ask_user floating window (2026-10-20 user ruling 「非模态浮窗」, mock ~/pwh-preview/askfloat/ask-float.png)", () => {
+  const askFloat = read("styles/ask-float.css");
   const dialog = read("styles/dialog.css");
   const agentDetail = read("components/detail/AgentDetail.vue");
 
-  it("the form shares ONE geometry rule with the dock's bordered children (control.css, single source)", () => {
-    // One rule covers command-result, command-confirm AND the slot-mounted ask_user form —
-    // extending the existing selector list, not re-declaring the calc anywhere else.
-    const shared =
-      /\.dock\.dock-ctl > \.command-result,\s*\.dock\.dock-ctl > \.command-confirm,\s*\.detail-main > \.ask-user-slot > \.ask-user-form\s*\{[^}]*\}/.exec(
-        control,
-      )?.[0] ?? "";
-    expect(shared).not.toBe("");
-    expect(shared).toMatch(
-      /width:\s*calc\(\s*100% - max\(var\(--col-gutter\), env\(safe-area-inset-left\)\) - max\(var\(--col-gutter\), env\(safe-area-inset-right\)\)\s*\)/,
-    );
-    expect(shared).toMatch(/max-width:\s*calc\(var\(--transcript-max\) - 2 \* var\(--col-gutter\)\)/);
-    // the form is NOT a dock child, so the centring must live in the shared rule itself
-    expect(shared).toMatch(/margin-inline:\s*auto/);
+  it("AgentDetail mounts ONE AskUserFloat (not per-dialog in-flow slots) just above the dock", () => {
+    // The float's root is a height-0 in-flow anchor right before the folded notes /
+    // DetailDock, so its default bottom edge always lands just above the composer.
+    const floatIdx = agentDetail.indexOf("<AskUserFloat");
+    const dockIdx = agentDetail.indexOf("<DetailDock");
+    expect(floatIdx).toBeGreaterThan(-1);
+    expect(dockIdx).toBeGreaterThan(floatIdx);
+    expect(agentDetail).not.toContain('class="ask-user-slot"');
+    expect(agentDetail).not.toContain("<AskUserForm"); // stacked INSIDE AskUserFloat now
   });
 
-  it("the slot (above the dock, outside `.dock-ctl`) mirrors the dock's `--sb-w` compensation", () => {
-    // AgentDetail mounts the slot BEFORE DetailDock as a `.detail-main` sibling — that is why
-    // the box is reproduced (slot padding + shared rule) instead of inherited from `> *`.
-    const slotIdx = agentDetail.indexOf('class="ask-user-slot"');
-    const dockIdx = agentDetail.indexOf("<DetailDock");
-    expect(slotIdx).toBeGreaterThan(-1);
-    expect(dockIdx).toBeGreaterThan(slotIdx);
-    expect(rule(dialog, ".ask-user-slot")).toMatch(/padding-right:\s*var\(--sb-w, 0px\)/);
+  it("the desktop window floats above the composer: min(440px, 90vw), max 70vh, anchored bottom-right", () => {
+    expect(rule(askFloat, ".ask-anchor")).toMatch(/height:\s*0/); // in-flow anchor, no measuring
+    const desktop = /@media \(min-width: 768px\)\s*\{\s*\.ask-float\s*\{[^}]*\}/.exec(askFloat)?.[0] ?? "";
+    expect(desktop).not.toBe("");
+    expect(desktop).toMatch(/width:\s*min\(440px,\s*90vw\)/);
+    expect(desktop).toMatch(/max-height:\s*70vh/);
+    expect(desktop).toMatch(/bottom:\s*var\(--sp-2\)/);
+    expect(desktop).toMatch(/right:\s*max\(var\(--col-gutter\)/);
+    expect(rule(askFloat, ".ask-float")).toMatch(/position:\s*absolute/);
+  });
+
+  it("the phone sheet spans the composer gutter and caps at 60vh", () => {
+    const phone = /@media \(max-width: 767px\)\s*\{\s*\.ask-float\s*\{[^}]*\}/.exec(askFloat)?.[0] ?? "";
+    expect(phone).not.toBe("");
+    expect(phone).toMatch(/left:\s*max\(var\(--col-gutter\)/);
+    expect(phone).toMatch(/right:\s*max\(var\(--col-gutter\)/);
+    expect(phone).toMatch(/max-height:\s*60vh/);
   });
 
   it("dialog.css never declares the form's width — no second geometry source can drift", () => {
     const formRule = rule(dialog, ".ask-user-form");
-    expect(formRule).toMatch(/overflow-y:\s*auto/); // still the form's own scrollport
+    expect(formRule).toMatch(/overflow-y:\s*auto/); // still the form's own scrollport standalone
     expect(formRule).not.toMatch(/(^|\s)(width|max-width):/);
+    expect(rule(dialog, ".ask-user-slot")).toBe(""); // legacy in-flow slot rule removed with the float
   });
 
   it("2026-10-09: on desktop the attach button stays in the expanded chips row while typing (no jump)", () => {

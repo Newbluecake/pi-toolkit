@@ -4,20 +4,11 @@
  * pane, plus its folded/epoch notes.
  */
 
-.ask-user-slot {
-  border-top: 1px solid var(--c-border);
-  /* 2026-10-09 「ask user 宽度和输入框+发送按钮的整体宽度保持一致」: this slot sits ABOVE
-   * the dock (outside `.dock-ctl`), so the dock's scrollbar-gutter compensation is mirrored
-   * here — the form below then centres on the same line as the composer row. The card's own
-   * horizontal box (width / max-width / margin-inline) is NOT declared here: it is SHARED
-   * with the dock's bordered children in control.css (`.detail-main > .ask-user-slot >
-   * .ask-user-form`) — one source, no local duplicates. The border-top above and the epoch
-   * note below stay full-bleed (same as `.ask-folded`). */
-  padding-right: var(--sb-w, 0px);
-}
-
-/* Width geometry lives in control.css (shared with the dock's bordered children — see
- * `.ask-user-slot` above); this rule owns only the form's own chrome. */
+/* The form's width/max-height geometry is owned by its host: inside the non-modal floating
+ * window (user ruling 2026-10-20) `.ask-float-body` in ask-float.css uncaps the form so the
+ * body is the single scrollport; this rule owns only the form's own chrome. The legacy
+ * in-flow `.ask-user-slot` wrapper (and its control.css shared width rule) was removed in the
+ * same change. */
 .ask-user-form {
   display: flex;
   flex-direction: column;
