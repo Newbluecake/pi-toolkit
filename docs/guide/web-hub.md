@@ -12,15 +12,17 @@
 
 ## `/webhub` 命令
 
-| 命令                     | 作用                                                        |
-| ------------------------ | ----------------------------------------------------------- |
-| `/webhub`（`status`）    | hub 状态、监听地址、UI 构建状态、LAN / 隐私锁摘要           |
-| `/webhub open`           | 打开浏览器                                                  |
-| `/webhub restart`        | 重启 hub（改了非 live 设置后用）                            |
-| `/webhub stop` / `start` | 停止 / 启动；`stop` 之后不会被自动拉起，直到 `start` 或重启 |
-| `/webhub token rotate`   | 轮换访问 token                                              |
-| `/webhub passwd`         | 设置 LAN 登录密码                                           |
-| `/webhub unlock`         | 解除 LAN 登录锁定                                           |
+| 命令                     | 作用                                                                                                                                                |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/webhub`（`status`）    | hub 状态、监听地址、UI 构建状态、LAN / 隐私锁摘要                                                                                                   |
+| `/webhub open`           | 打开浏览器                                                                                                                                          |
+| `/webhub restart`        | 重启 hub（改了非 live 设置后用）                                                                                                                    |
+| `/webhub stop` / `start` | 停止 / 启动；`stop` 之后不会被自动拉起，直到 `start` 或重启                                                                                         |
+| `/webhub token rotate`   | 轮换访问 token                                                                                                                                      |
+| `/webhub passwd`         | 设置 LAN 登录密码                                                                                                                                   |
+| `/webhub unlock`         | 解除 LAN 登录锁定                                                                                                                                   |
+| `/webhub 2fa <op>`       | LAN 二次验证（仅本地 TUI）：`status` / `enroll [--replace]` / `feishu on\|off` / `recovery` / `reset --confirm` / `forget-ips` / `repair --confirm` |
+| `/webhub user <op>`      | LAN 账号（仅本地 TUI）：`list` / `delete <用户名>`                                                                                                  |
 
 ## 查看（P1，只读）
 
@@ -83,6 +85,16 @@
 - `webHub.lan.extraHosts`：额外允许的 Host；`trustProxyFrom` / `externalOrigins`：前置可信反向代理做 HTTPS 终止时使用（均为逗号分隔字符串）。
 - 登录会话存 SQLite，运行在可被 SIGKILL 的子进程里；用 `/webhub passwd` 设置密码、`/webhub unlock` 解锁。
 - **安装到手机 / 桌面**：见下文[「安装到手机 / 桌面（PWA）」](#安装到手机--桌面pwa)。
+
+### 局域网安全
+
+- **客户端 IP 白名单**（`webHub.lan.allowClients`，逗号分隔的 IP / CIDR，如 `192.168.32.0/24,10.8.0.3`）：留空 = 不限制；全部写错 = 全部拒绝。在局域网监听和每个代理端口上生效，被拒的连接在发出任何字节前断开。经可信反向代理时按 `X-Forwarded-For` 判断。
+- **二次验证（2FA）**：在本地 TUI 执行 `/webhub 2fa enroll`，用验证器 App 扫码、输入 6 位码确认，同时得到一组一次性恢复码（`/webhub 2fa recovery` 重新生成）；`/webhub 2fa feishu on` 另开飞书审批（需要飞书机器人）。绑定后，**从新 IP 登录**（该账号 30 天内没登录过的 IP）输完密码还要过一道验证：验证器 6 位码、飞书审批卡片或恢复码三选一；已知 IP 只需密码。首次绑定会清空该账号的已知 IP，每台设备都要验证一次。
+- **已知 IP 按账号记**：一个账号的登录不会让另一个账号在同一 IP 上免验证。**被踢下线的设备**（在「登录会话」里被下线）其 IP 会从该账号的已知列表移除，下次登录必须重新二次验证；自己退出登录不影响。`/webhub 2fa forget-ips` 清空所有已知 IP。
+- **登录会话管理**：设置页「登录会话」卡片列出本账号的所有已登录设备（浏览器 / 系统、IP、登录时间、最近活跃、验证方式），可单个下线或「下线其他所有设备」；下线即时生效，连同 SSE、代理会话与 HTML 预览链接一起失效。会话闲置超时 `webHub.lan.sessionIdleMinutes`（默认 720）。
+- **账号**：会话列表与 2FA 都按账号独立。`/webhub user list` 查看账号，`/webhub user delete <用户名>` 删除多余账号（主账号与最后一个账号不可删，删除会立即下线其全部会话）；`/webhub passwd` 输入一个新用户名时会先确认是否新建第二个账号。
+- **飞书安全告警**（顶层 `feishuBot.securityAlerts`，默认 `true`，需飞书机器人）：新 IP 登录、白名单拒绝、会话被下线、改密码 / 2FA 变更等事件推送到飞书。
+- 2FA 与账号相关的子命令一律只在本地 TUI 执行，网页 / LAN 触发的调用一律拒绝（与 `webCommandPolicy` 无关）。改动非 live：`/reload` 后 `/webhub restart`。
 
 ## 安装到手机 / 桌面（PWA）
 
