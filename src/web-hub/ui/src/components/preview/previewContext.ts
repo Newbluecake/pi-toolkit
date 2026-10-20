@@ -13,6 +13,7 @@
  *   text (no ref scan), and a settled message re-scans once when the flag flips back.
  */
 import type { InjectionKey, Ref } from "vue";
+import type { MdImageLoader } from "../../composables/useMdImageLoader.js";
 import type { PreviewHandle } from "../../types.js";
 
 export interface PreviewContext {
@@ -35,3 +36,11 @@ export const PATH_REFERENCES_SUSPENDED: InjectionKey<Readonly<Ref<boolean>>> = S
  * (`scope.cwd`) — the same base relative path chips use in transcript messages.
  */
 export const PREVIEW_BASE_DIR: InjectionKey<Readonly<Ref<string | null>>> = Symbol("web-hub-preview-base-dir");
+
+/**
+ * md-preview-html plan: the per-document markdown inline-image loader (`PreviewText` creates
+ * one per mount and provides it; `MdImage` consumes it). Absent ⇒ `MdImage` renders its
+ * placeholder without ever fetching (the transcript never provides one and never sees
+ * `image` nodes — the parser only emits them in preview mode).
+ */
+export const MD_IMAGE_LOADER: InjectionKey<MdImageLoader> = Symbol("web-hub-md-image-loader");

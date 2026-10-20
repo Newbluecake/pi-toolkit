@@ -40,6 +40,7 @@ type BlockView =
     }
   | { readonly kind: "paragraph"; readonly children: readonly Inline[] }
   | { readonly kind: "quote"; readonly children: readonly MdNode[] }
+  | { readonly kind: "htmlBlock"; readonly align: TableAlign; readonly children: readonly Inline[] }
   | {
       readonly kind: "table";
       readonly align: readonly TableAlign[];
@@ -60,6 +61,8 @@ const blocks = computed<BlockView[]>(() =>
           : { kind: "listUl", items: n.items, checked: n.checked };
       case "quote":
         return { kind: "quote", children: n.children };
+      case "html_block":
+        return { kind: "htmlBlock", align: n.align, children: n.children };
       case "table":
         return { kind: "table", align: n.align, header: n.header, rows: n.rows };
       default:
@@ -70,6 +73,17 @@ const blocks = computed<BlockView[]>(() =>
 
 function alignClass(align: TableAlign | undefined): string | undefined {
   return align === "center" ? "md-tc" : align === "right" ? "md-tr" : undefined;
+}
+
+/** md-preview-html plan: `<p/<div align>` wrapper classes (preview mode nodes only). */
+function hblockClass(align: TableAlign): string | undefined {
+  return align === "center"
+    ? "md-hblock-center"
+    : align === "right"
+      ? "md-hblock-right"
+      : align === "left"
+        ? "md-hblock-left"
+        : undefined;
 }
 
 function taskChecked(b: BlockView, j: number): boolean | null {
@@ -110,6 +124,9 @@ function taskChecked(b: BlockView, j: number): boolean | null {
       </li>
     </ol>
     <blockquote v-else-if="b.kind === 'quote'" class="md-quote"><MdBlock :nodes="b.children" /></blockquote>
+    <div v-else-if="b.kind === 'htmlBlock'" class="md-hblock" :class="hblockClass(b.align)">
+      <MdInline :nodes="b.children" />
+    </div>
     <div v-else-if="b.kind === 'table'" class="md-table-wrap" tabindex="0">
       <table class="md-table">
         <thead>

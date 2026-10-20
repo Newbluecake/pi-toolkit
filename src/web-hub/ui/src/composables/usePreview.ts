@@ -185,6 +185,16 @@ function readDataUrl(create: () => FileReaderLike, blob: Blob): Promise<string> 
   });
 }
 
+/**
+ * md-preview-html plan: the same Blob → `data:<mime>;base64,` conversion the image phase uses,
+ * exported for the markdown inline-image fetcher (`useMdImageLoader.ts`) so both paths share
+ * the one FileReader discipline (D1/HP8 — never `createObjectURL`). The caller still verifies
+ * the `data:` prefix itself.
+ */
+export function readPreviewDataUrl(blob: Blob, create: () => FileReaderLike = defaultFileReader): Promise<string> {
+  return readDataUrl(create, blob);
+}
+
 export function usePreview(opts: UsePreviewOptions): PreviewHandle {
   const view = ref<PreviewViewDir>({ phase: "closed" }) as Ref<PreviewViewDir>;
 

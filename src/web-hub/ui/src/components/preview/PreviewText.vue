@@ -61,7 +61,8 @@ import MdBlock from "../transcript/MdBlock.vue";
 import type { MdNode } from "../transcript/markdown-types.js";
 import HighlightedCode from "../shared/HighlightedCode.vue";
 import { HUB_CTX } from "../control/controlContext.js";
-import { PREVIEW_BASE_DIR, PREVIEW_CTX } from "./previewContext.js";
+import { MD_IMAGE_LOADER, PREVIEW_BASE_DIR, PREVIEW_CTX } from "./previewContext.js";
+import { createMdImageFetcher, createMdImageLoader } from "../../composables/useMdImageLoader.js";
 import { dirOfPreviewPath } from "@logic/mdLinkPath.js";
 import type { PreviewTextStream } from "../../types.js";
 
@@ -106,6 +107,31 @@ provide(
   computed(() => dirOfPreviewPath(props.path ?? "")),
 );
 const hub = inject(HUB_CTX, null);
+// md-preview-html plan: the per-document inline-image loader. One per PreviewText mount (the
+// Host remounts per path ⇒ file switch = fresh budget), shared by the stream segments; every
+// bound (24 images / 2 in flight / 32 MiB decoded) is document-wide. The fetcher rides the
+// SAME preview transport + maxPixels budget as an image preview; dispose() (unmount — incl.
+// the rendered→source mode switch, which unmounts the MdBlock subtree) aborts in-flight.
+const mdCoarse = (): boolean => {
+  try {
+    return (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches
+    );
+  } catch {
+    return false;
+  }
+};
+const mdImageLoader = createMdImageLoader({
+  fetchImage: createMdImageFetcher({
+    transport: () => hub?.preview,
+    scope: () => previewCtx?.handle.scope.value ?? null,
+    coarse: mdCoarse,
+  }),
+});
+provide(MD_IMAGE_LOADER, mdImageLoader);
+onBeforeUnmount(() => mdImageLoader.dispose());
 const isHtml = computed(() => isHtmlPath(props.path ?? props.filename ?? ""));
 const scope = computed(() => previewCtx?.handle.scope.value ?? null);
 const htmlOn = computed(() => isHtml.value && scope.value?.html === true && hub?.preview?.htmlCap !== undefined);
@@ -161,7 +187,9 @@ const shownSource = computed(() => {
 /** B4: per-open mode (the Host's `:key="view.path"` resets it on every new file). */
 const mode = ref<"rendered" | "source">("rendered");
 const mdNodes = computed<readonly MdNode[] | null>(() =>
-  isMd.value && props.stream === undefined ? (parseMarkdown(shownSource.value) as readonly MdNode[]) : null,
+  isMd.value && props.stream === undefined
+    ? (parseMarkdown(shownSource.value, { preview: true }) as readonly MdNode[])
+    : null,
 );
 /** B7: over the AST budget ⇒ forced source mode (rendered button disabled + note). */
 const mdTooComplexRaw = computed(() => mdNodes.value !== null && countMdNodes(mdNodes.value) > PREVIEW_MD_NODE_MAX);
@@ -219,7 +247,7 @@ function syncSource(): void {
 function syncMd(): void {
   const s = props.stream;
   if (s === undefined || !isMd.value || effectiveMode.value !== "rendered") return;
-  mdSegmenter ??= createMarkdownSegmenter();
+  mdSegmenter ??= createMarkdownSegmenter({ preview: true });
   mdStripper ??= createAnsiStripper();
   const add: MdSegment[] = [];
   const chunks = s.chunks;

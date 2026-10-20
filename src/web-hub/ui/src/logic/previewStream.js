@@ -148,10 +148,14 @@ export function createSourceSegmenter(opts) {
 /**
  * §4.3.3. Budgets are injectable for tests: `pendingMax` (force-cut threshold, chars),
  * `nodeMax` (per-segment AST budget, default `PREVIEW_MD_NODE_MAX` via countMdNodes),
- * `totalNodeMax` (sticky global rendered-node budget, §4.3.2/D8).
- * @param {{ pendingMax?: number, nodeMax?: number, totalNodeMax?: number }} [opts]
+ * `totalNodeMax` (sticky global rendered-node budget, §4.3.2/D8). `preview: true` (md-preview-html
+ * plan) parses segments with `parseMarkdown`'s safe-HTML subset + image nodes and mirrors the
+ * same option through `scanMarkdownTail` — the §4.3.1 segment≡whole invariant then holds for
+ * the preview tree too.
+ * @param {{ pendingMax?: number, nodeMax?: number, totalNodeMax?: number, preview?: boolean }} [opts]
  */
 export function createMarkdownSegmenter(opts) {
+  const preview = opts !== undefined && opts.preview === true;
   const pendingMax =
     opts !== undefined && typeof opts.pendingMax === "number" && opts.pendingMax > 0
       ? opts.pendingMax
@@ -178,7 +182,7 @@ export function createMarkdownSegmenter(opts) {
     if (stickySource) {
       return { id: nextId++, kind: "src", reason: "total-budget", text, ...f };
     }
-    const nodes = /** @type {unknown[]} */ (parseMarkdown(text));
+    const nodes = /** @type {unknown[]} */ (preview ? parseMarkdown(text, { preview: true }) : parseMarkdown(text));
     const n = countMdNodes(nodes, nodeMax + 1);
     if (n > nodeMax) {
       return { id: nextId++, kind: "src", reason: "node-budget", text, ...f };
@@ -204,7 +208,7 @@ export function createMarkdownSegmenter(opts) {
         raw = raw.slice(0, -1);
       }
       pending += raw.replace(/\r\n?/g, "\n");
-      const scan = scanMarkdownTail(pending);
+      const scan = preview ? scanMarkdownTail(pending, { preview: true }) : scanMarkdownTail(pending);
       if (scan.cut > 0) {
         const text = pending.slice(0, scan.cut);
         pending = pending.slice(scan.cut);
@@ -258,7 +262,7 @@ export function createMarkdownSegmenter(opts) {
         pending = "";
         return [emit(text, { final: true })];
       }
-      const scan = scanMarkdownTail(pending);
+      const scan = preview ? scanMarkdownTail(pending, { preview: true }) : scanMarkdownTail(pending);
       const text = scan.lineEnd > 0 ? pending.slice(0, scan.lineEnd) : pending;
       pending = "";
       return [emit(text, { tailIncomplete: true, final: true })];

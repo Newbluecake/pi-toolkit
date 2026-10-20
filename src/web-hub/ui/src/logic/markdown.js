@@ -11,25 +11,41 @@
  * `MarkdownView.vue`/`MdBlock.vue`/`MdInline.vue` (§3.10) instead, so those two functions —
  * and this file's only reason to depend on `dom.js` — are deleted here (P5b, §3.1's
  * disposition table: "保留 isSafeHref/parseMarkdown；toDom/renderMarkdown P5b 删").
+ * preview-mode extensions (md-preview-html plan, user ruling 2026-10-20): `parseMarkdown(text,
+ * { preview: true })` additionally recognizes standard images (`![alt](src "title")` ⇒ an
+ * `image` inline node) and a SAFE HTML SUBSET — block wrappers `<p align>`/`<div align>`
+ * (align ∈ left|center|right ⇒ an `html_block` node), inline `<img src alt width height>`
+ * (integer-px / `N%` dimensions clamped to sane bounds), `<br>`, `<sub>`, `<sup>`,
+ * `<b>`/`<strong>` (⇒ `strong`), `<i>`/`<em>` (⇒ `em`), `<code>` (⇒ `code`) and `<a href>`
+ * (http(s) ⇒ `link`, path ⇒ `pathlink`, anything else ⇒ literal). No other tag/attribute ever
+ * parses — it stays literal text exactly as without the option (the transcript renderer never
+ * passes the option and its output is byte-identical, pinned by the differential fixtures).
  */
 
 /**
  * @typedef {"" | "left" | "center" | "right"} TableAlign
+ * @typedef {{ n: number, unit: "px" | "%" }} MdImageSize
  * @typedef {{ type: "text", text: string } | { type: "code", text: string }
  *   | { type: "strong", children: Inline[] } | { type: "em", children: Inline[] }
  *   | { type: "del", children: Inline[] }
  *   | { type: "link", href: string, children: Inline[] }
  *   | { type: "pathlink", target: string, children: Inline[], raw: string }
- *   | { type: "textlink", children: Inline[], raw: string }} Inline
+ *   | { type: "textlink", children: Inline[], raw: string }
+ *   | { type: "image", src: string, alt: string, title?: string, width?: MdImageSize, height?: MdImageSize }
+ *   | { type: "br" }
+ *   | { type: "sub", children: Inline[] } | { type: "sup", children: Inline[] }} Inline
  * @typedef {{ type: "code_block", lang: string, text: string }
  *   | { type: "paragraph", children: Inline[] }
  *   | { type: "heading", level: number, children: Inline[] }
  *   | { type: "list", ordered: boolean, items: Inline[][], checked?: (boolean | null)[] }
  *   | { type: "quote", children: MdNode[] }
+ *   | { type: "html_block", align: TableAlign, children: Inline[] }
  *   | { type: "table", align: TableAlign[], header: Inline[][], rows: Inline[][][] }} MdNode
  *
  * `list.checked` is present only when at least one item carried a task marker; it is parallel
- * to `items` (`null` = plain item, `true`/`false` = task item, checked or not).
+ * to `items` (`null` = plain item, `true`/`false` = task item, checked or not). The
+ * `image`/`br`/`sub`/`sup` inline nodes and the `html_block` block node are only ever produced
+ * in preview mode (`{ preview: true }`).
  */
 
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
@@ -47,6 +63,40 @@ const AUTOLINK_TRAIL = ".,;:!?'\"*_~";
 const SAFE_HREF_RE = /^https?:\/\/[^\s]+$/i;
 const MAX_DEPTH = 6;
 const MAX_QUOTE_DEPTH = 10;
+
+/* --- preview-mode safe-HTML subset (md-preview-html plan) — all bounded, whitelist-only --- */
+/** `![alt](src "title")` — the LINK_RE shape with a leading `!`. */
+const IMAGE_RE = /^!\[([^\[\]\n]{0,1000})\]\(\s*([^()\s]{1,2048})(?:\s+"([^"\n]{0,200})")?\s*\)/;
+/** One opening tag: name + a well-formed attribute list (no `>` inside quoted values) + `/`?. */
+const HTML_TAG_OPEN_RE =
+  /^<([a-zA-Z][a-zA-Z0-9]{0,15})((?:\s+[\w-]+(?:\s*=\s*(?:"[^"\n]{0,2048}"|'[^'\n]{0,2048}'|[^\s>"'\n]{1,2048}))?)*)\s*(\/?)>/;
+/** `<p …>`/`<div …>` alone on a line (multi-line block form). */
+const HTML_BLOCK_OPEN_RE = /^ {0,3}<(p|div)((?:\s+[\w-]+(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s>"']+))?)*)\s*>\s*$/i;
+/** `<p …>inner</p>` on ONE line. */
+const HTML_BLOCK_LINE_RE =
+  /^ {0,3}<(p|div)((?:\s+[\w-]+(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s>"']+))?)*)\s*>(.{0,2000}?)<\/\1>\s*$/i;
+const HTML_BLOCK_CLOSE_RE = /^ {0,3}<\/(p|div)>\s*$/i;
+/** A multi-line block wrapper may span at most this many lines (README's blocks are 4–6). */
+const HTML_BLOCK_MAX_LINES = 100;
+/** Search window for a paired tag's `</tag>` (keeps every `<` attempt O(1)). */
+const HTML_PAIR_MAX_CHARS = 4096;
+/** `src`/`alt`/`width`/`height` only — anything else (style/class/onXxx/srcset) ⇒ literal. */
+const IMG_ATTRS = new Set(["src", "alt", "width", "height"]);
+const IMG_DIM_RE = /^(\d{1,7})(%)?$/;
+/** Sane bounds: percent dims clamp into 1–100, px dims into 1–2000. */
+const IMG_DIM_MAX_PX = 2000;
+const HTML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
+/** Paired inline tags → the node they map to (`a` handled separately). */
+const PAIRED_HTML_TAGS = new Map([
+  ["sub", "sub"],
+  ["sup", "sup"],
+  ["b", "strong"],
+  ["strong", "strong"],
+  ["i", "em"],
+  ["em", "em"],
+  ["code", "code"],
+  ["a", "a"],
+]);
 
 const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})\s*$/;
 
@@ -100,21 +150,24 @@ export function isSafeHref(href) {
 
 /**
  * @param {unknown} text
+ * @param {{ preview?: boolean }} [opts] `preview: true` enables the safe-HTML subset +
+ *   `![alt](src)` image nodes (file-preview rendering only; default output is unchanged).
  * @returns {MdNode[]}
  */
-export function parseMarkdown(text) {
+export function parseMarkdown(text, opts) {
+  const preview = opts !== undefined && opts !== null && opts.preview === true;
   const src = typeof text === "string" ? text.replace(/\r\n?/g, "\n") : "";
-  return parseBlocks(src.split("\n"), 0);
+  return parseBlocks(src.split("\n"), 0, preview);
 }
 
 /**
  * Block-level pass over one quote nesting level. Single forward scan, O(total chars) per
  * level — every construct below is recognized by per-line anchored regexes or bounded char
  * scans, so streaming re-parses stay cheap.
- * @param {string[]} lines @param {number} qdepth
+ * @param {string[]} lines @param {number} qdepth @param {boolean} preview
  * @returns {MdNode[]}
  */
-function parseBlocks(lines, qdepth) {
+function parseBlocks(lines, qdepth, preview) {
   /** @type {MdNode[]} */
   const out = [];
   /** @type {string[]} */
@@ -123,13 +176,17 @@ function parseBlocks(lines, qdepth) {
   let list = null;
 
   const flushPara = () => {
-    if (para.length > 0) out.push({ type: "paragraph", children: parseInline(para.join("\n"), 0) });
+    if (para.length > 0) out.push({ type: "paragraph", children: parseInline(para.join("\n"), 0, false, preview) });
     para = [];
   };
   const flushList = () => {
     if (list) {
       /** @type {MdNode} */
-      const node = { type: "list", ordered: list.ordered, items: list.items.map((t) => parseInline(t, 0)) };
+      const node = {
+        type: "list",
+        ordered: list.ordered,
+        items: list.items.map((t) => parseInline(t, 0, false, preview)),
+      };
       if (list.checked.some((c) => c !== null)) node.checked = list.checked;
       out.push(node);
     }
@@ -161,17 +218,31 @@ function parseBlocks(lines, qdepth) {
     if (heading) {
       flushPara();
       flushList();
-      out.push({ type: "heading", level: heading[1]?.length ?? 1, children: parseInline(heading[2] ?? "", 0) });
+      out.push({
+        type: "heading",
+        level: heading[1]?.length ?? 1,
+        children: parseInline(heading[2] ?? "", 0, false, preview),
+      });
       continue;
     }
     if (qdepth < MAX_QUOTE_DEPTH && QUOTE_RE.test(line)) {
       flushPara();
       flushList();
-      i = collectQuote(lines, i, out, qdepth);
+      i = collectQuote(lines, i, out, qdepth, preview);
       continue;
     }
+    if (preview) {
+      const hb = matchHtmlBlock(lines, i, preview);
+      if (hb !== null) {
+        flushPara();
+        flushList();
+        out.push(hb.node);
+        i = hb.end;
+        continue;
+      }
+    }
     if (line.includes("|") && i + 1 < lines.length) {
-      const table = tryParseTable(lines, i);
+      const table = tryParseTable(lines, i, preview);
       if (table) {
         flushPara();
         flushList();
@@ -219,9 +290,10 @@ function parseBlocks(lines, qdepth) {
  * paragraph — never across a blank line, a fence, or a line that itself starts a new block).
  * The stripped inner lines recurse through `parseBlocks`, so quotes nest lists/code/tables.
  * @param {string[]} lines @param {number} start @param {MdNode[]} out @param {number} qdepth
+ * @param {boolean} preview
  * @returns {number} index of the last consumed line
  */
-function collectQuote(lines, start, out, qdepth) {
+function collectQuote(lines, start, out, qdepth, preview) {
   /** @type {string[]} */
   const inner = [];
   let inFence = false;
@@ -264,7 +336,7 @@ function collectQuote(lines, start, out, qdepth) {
         !stripped.includes("|");
     }
   }
-  out.push({ type: "quote", children: parseBlocks(inner, qdepth + 1) });
+  out.push({ type: "quote", children: parseBlocks(inner, qdepth + 1, preview) });
   return j - 1;
 }
 
@@ -274,10 +346,10 @@ function collectQuote(lines, start, out, qdepth) {
  * header/delimiter column mismatch is NOT a table — the caller falls through and both lines
  * degrade to ordinary paragraph text. Ragged data rows follow GFM: extra cells are truncated,
  * missing cells padded empty. A data row without any pipe (or a blank line) ends the table.
- * @param {string[]} lines @param {number} start
+ * @param {string[]} lines @param {number} start @param {boolean} preview
  * @returns {{ node: MdNode, end: number } | null}
  */
-function tryParseTable(lines, start) {
+function tryParseTable(lines, start, preview) {
   const headCells = splitRow(/** @type {string} */ (lines[start]));
   if (!headCells || headCells.length === 0) return null;
   const delimCells = splitRow(/** @type {string} */ (lines[start + 1]));
@@ -292,7 +364,7 @@ function tryParseTable(lines, start) {
     align.push(left && right ? "center" : right ? "right" : left ? "left" : "");
   }
   const cols = align.length;
-  const header = headCells.map((c) => parseInline(c.trim(), 0));
+  const header = headCells.map((c) => parseInline(c.trim(), 0, false, preview));
   /** @type {Inline[][][]} */
   const rows = [];
   let j = start + 2;
@@ -303,7 +375,7 @@ function tryParseTable(lines, start) {
     if (!cells || cells.length === 0) break;
     const norm = cells.slice(0, cols);
     while (norm.length < cols) norm.push("");
-    rows.push(norm.map((c) => parseInline(c.trim(), 0)));
+    rows.push(norm.map((c) => parseInline(c.trim(), 0, false, preview)));
   }
   return { node: { type: "table", align, header, rows }, end: j - 1 };
 }
@@ -351,6 +423,196 @@ function isDelimRow(line) {
   return !!cells && cells.length > 0 && cells.every((c) => DELIM_CELL_RE.test(c.trim()));
 }
 
+/* -------------------------------------------------------------------------
+ * Preview-mode safe-HTML subset helpers (md-preview-html plan). Everything below is
+ * whitelist-only and bounded: a non-matching / malformed / over-long construct returns
+ * `null` and the caller emits the source as literal text — exactly the no-option behavior.
+ * ---------------------------------------------------------------------- */
+
+/** @param {string} s */
+function decodeHtmlEntities(s) {
+  return s.replace(/&(amp|lt|gt|quot|#39);/g, (m, name) => HTML_ENTITIES[name] ?? m);
+}
+
+/**
+ * Attribute-list string (already shape-checked by the tag regexes) → name → value map, or
+ * `null` on a duplicate attribute name or an unparseable rest. Names compare lowercase.
+ * @param {string} raw
+ * @returns {Map<string, string> | null}
+ */
+function parseHtmlAttrs(raw) {
+  /** @type {Map<string, string>} */
+  const attrs = new Map();
+  let i = 0;
+  while (i < raw.length) {
+    const ws = /^\s+/.exec(raw.slice(i));
+    if (ws) {
+      i += ws[0].length;
+      continue;
+    }
+    const m = /^([\w-]+)(?:\s*=\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s>"'\n]+)))?/.exec(raw.slice(i));
+    if (!m) return null;
+    const name = (m[1] ?? "").toLowerCase();
+    if (attrs.has(name)) return null;
+    attrs.set(name, m[2] ?? m[3] ?? m[4] ?? "");
+    i += m[0].length;
+  }
+  return attrs;
+}
+
+/**
+ * One width/height attribute value: integer px or `N%`, clamped into sane bounds
+ * (px 1–2000, % 1–100). Anything else ⇒ `undefined` (the dimension is dropped, the image
+ * itself still renders).
+ * @param {string} raw
+ * @returns {MdImageSize | undefined}
+ */
+function imgDimOf(raw) {
+  const m = IMG_DIM_RE.exec(raw);
+  if (!m) return undefined;
+  const n = Number.parseInt(m[1] ?? "", 10);
+  if (!Number.isFinite(n)) return undefined;
+  if (m[2] === "%") return { n: Math.min(100, Math.max(1, n)), unit: "%" };
+  return { n: Math.min(IMG_DIM_MAX_PX, Math.max(1, n)), unit: "px" };
+}
+
+/**
+ * Whitelisted `<img>` attributes → an `image` node, or `null` (⇒ literal) on any
+ * non-whitelisted attribute (style/class/onXxx/srcset/…) or a missing `src`.
+ * @param {Map<string, string>} attrs
+ * @returns {Inline | null}
+ */
+function imageNodeFromAttrs(attrs) {
+  for (const name of attrs.keys()) if (!IMG_ATTRS.has(name)) return null;
+  const src = attrs.get("src");
+  if (src === undefined) return null;
+  /** @type {Inline} */
+  const node = { type: "image", src: decodeHtmlEntities(src), alt: decodeHtmlEntities(attrs.get("alt") ?? "") };
+  const w = attrs.get("width");
+  if (w !== undefined) {
+    const dim = imgDimOf(w);
+    if (dim !== undefined) node.width = dim;
+  }
+  const h = attrs.get("height");
+  if (h !== undefined) {
+    const dim = imgDimOf(h);
+    if (dim !== undefined) node.height = dim;
+  }
+  return node;
+}
+
+/**
+ * A block wrapper's attribute list → its alignment, or `null` when anything but an optional
+ * single `align="left|center|right"` is present (⇒ the whole construct stays literal).
+ * @param {string} attrsRaw
+ * @returns {TableAlign | null}
+ */
+function htmlBlockAlign(attrsRaw) {
+  const attrs = parseHtmlAttrs(attrsRaw);
+  if (attrs === null) return null;
+  if (attrs.size === 0) return "";
+  if (attrs.size !== 1 || !attrs.has("align")) return null;
+  const v = (attrs.get("align") ?? "").toLowerCase();
+  return v === "left" || v === "center" || v === "right" ? v : null;
+}
+
+/**
+ * Closing-tag line index for the block wrapper opened at `lines[start]`, or -1 when the
+ * block does not close within `HTML_BLOCK_MAX_LINES` (the parser then treats every line as
+ * literal paragraph text — the scan mirrors this exactly).
+ * @param {string[]} lines @param {number} start @param {string} tag (lowercase)
+ */
+function findHtmlBlockClose(lines, start, tag) {
+  const bound = Math.min(lines.length, start + 1 + HTML_BLOCK_MAX_LINES);
+  for (let j = start + 1; j < bound; j++) {
+    const close = HTML_BLOCK_CLOSE_RE.exec(/** @type {string} */ (lines[j]));
+    if (close && (close[1] ?? "").toLowerCase() === tag) return j;
+  }
+  return -1;
+}
+
+/**
+ * Preview-mode block wrapper at `lines[start]`: the single-line form
+ * `<p align="center">inner</p>` and the README's multi-line form (opening tag line, inner
+ * lines, closing tag line). Inner content is INLINE-parsed only (no nested blocks). Returns
+ * null when nothing recognized — the caller falls through to ordinary paragraph handling.
+ * @param {string[]} lines @param {number} start @param {boolean} preview
+ * @returns {{ node: MdNode, end: number } | null}
+ */
+function matchHtmlBlock(lines, start, preview) {
+  const line = /** @type {string} */ (lines[start]);
+  const single = HTML_BLOCK_LINE_RE.exec(line);
+  if (single) {
+    const align = htmlBlockAlign(single[2] ?? "");
+    if (align === null) return null;
+    return {
+      node: { type: "html_block", align, children: parseInline(single[3] ?? "", 0, false, preview) },
+      end: start,
+    };
+  }
+  const open = HTML_BLOCK_OPEN_RE.exec(line);
+  if (!open) return null;
+  const align = htmlBlockAlign(open[2] ?? "");
+  if (align === null) return null;
+  const tag = (open[1] ?? "").toLowerCase();
+  const closeIdx = findHtmlBlockClose(lines, start, tag);
+  if (closeIdx === -1) return null;
+  const inner = lines.slice(start + 1, closeIdx).join("\n");
+  return { node: { type: "html_block", align, children: parseInline(inner, 0, false, preview) }, end: closeIdx };
+}
+
+/**
+ * Preview-mode inline HTML at `src[i]` (a `<`): whitelisted paired tags (`sub`/`sup`/`b`/
+ * `strong`/`i`/`em`/`code`/`a`) with NO attributes (`a` gets exactly one `href`), the void
+ * `<br>` and the attribute-whitelisted `<img>`. A paired tag needs its `</tag>` within
+ * `HTML_PAIR_MAX_CHARS`; non-empty inner only. Anything else ⇒ `null` (literal text).
+ * @param {string} src @param {number} i @param {number} depth @param {boolean} inLink
+ * @param {boolean} preview
+ * @returns {{ node: Inline, length: number } | null}
+ */
+function matchHtmlInline(src, i, depth, inLink, preview) {
+  const open = HTML_TAG_OPEN_RE.exec(src.slice(i, i + 2300));
+  if (!open) return null;
+  const tag = (open[1] ?? "").toLowerCase();
+  const attrsRaw = open[2] ?? "";
+  const full = open[0];
+  if (tag === "br") {
+    if (attrsRaw.trim() !== "") return null;
+    return { node: { type: "br" }, length: full.length };
+  }
+  if (tag === "img") {
+    const attrs = parseHtmlAttrs(attrsRaw);
+    if (attrs === null) return null;
+    const node = imageNodeFromAttrs(attrs);
+    return node === null ? null : { node, length: full.length };
+  }
+  const kind = PAIRED_HTML_TAGS.get(tag);
+  if (kind === undefined) return null;
+  const attrs = parseHtmlAttrs(attrsRaw);
+  if (attrs === null) return null;
+  if (kind === "a" ? attrs.size !== 1 || !attrs.has("href") : attrs.size > 0) return null;
+  const from = i + full.length;
+  const closeAt = src
+    .slice(from, from + HTML_PAIR_MAX_CHARS)
+    .toLowerCase()
+    .indexOf(`</${tag}>`);
+  if (closeAt <= 0) return null; // unclosed or empty inner ⇒ literal
+  const inner = src.slice(from, from + closeAt);
+  const length = full.length + closeAt + tag.length + 3;
+  if (kind === "code") return { node: { type: "code", text: inner }, length };
+  if (kind === "a") {
+    const href = decodeHtmlEntities(attrs.get("href") ?? "");
+    const children = parseInline(inner, depth + 1, true, preview);
+    if (isSafeHref(href)) return { node: { type: "link", href, children }, length };
+    if (isPathLinkTarget(href)) {
+      return { node: { type: "pathlink", target: href, children, raw: src.slice(i, i + length) }, length };
+    }
+    return null; // any other scheme ⇒ the whole tag stays literal text
+  }
+  const children = parseInline(inner, depth + 1, inLink, preview);
+  return { node: { type: kind, children }, length };
+}
+
 /**
  * Bare-URL candidate at `src[i]` (caller guarantees a word start) → trimmed URL or "".
  * @param {string} src @param {number} i
@@ -386,9 +648,10 @@ function matchAutolink(src, i) {
  * @param {string} src
  * @param {number} depth
  * @param {boolean} [inLink] inside an explicit link's text — never autolink there
+ * @param {boolean} [preview] preview-mode extensions (safe-HTML subset + images)
  * @returns {Inline[]}
  */
-function parseInline(src, depth, inLink = false) {
+function parseInline(src, depth, inLink = false, preview = false) {
   /** @type {Inline[]} */
   const out = [];
   let buf = "";
@@ -448,7 +711,7 @@ function parseInline(src, depth, inLink = false) {
         const end = findClose(src, i + 2, "~~", noClose);
         if (end > i + 2) {
           flush();
-          out.push({ type: "del", children: parseInline(src.slice(i + 2, end), depth + 1, inLink) });
+          out.push({ type: "del", children: parseInline(src.slice(i + 2, end), depth + 1, inLink, preview) });
           i = end + 2;
           continue;
         }
@@ -467,7 +730,7 @@ function parseInline(src, depth, inLink = false) {
         const end = findClose(src, i + mark.length, mark, noClose);
         if (end > i + mark.length) {
           flush();
-          const children = parseInline(src.slice(i + mark.length, end), depth + 1, inLink);
+          const children = parseInline(src.slice(i + mark.length, end), depth + 1, inLink, preview);
           out.push(dbl ? { type: "strong", children } : { type: "em", children });
           i = end + mark.length;
           continue;
@@ -483,19 +746,40 @@ function parseInline(src, depth, inLink = false) {
         flush();
         const href = m[2] ?? "";
         if (isSafeHref(href) && depth < MAX_DEPTH) {
-          out.push({ type: "link", href, children: parseInline(m[1] ?? "", depth + 1, true) });
+          out.push({ type: "link", href, children: parseInline(m[1] ?? "", depth + 1, true, preview) });
         } else if (depth < MAX_DEPTH) {
           // Non-http(s) target: never a native <a>, never the raw `[..](..)` syntax. A relative /
           // absolute-path target ⇒ `pathlink` (the UI resolves it + opens the preview); any other
           // scheme / pure `#frag` / `?query` / `//host` ⇒ `textlink` (children only). `raw` is the
           // source slice (kept for the frozen-reference differential comparison; never rendered).
-          const children = parseInline(m[1] ?? "", depth + 1, true);
+          const children = parseInline(m[1] ?? "", depth + 1, true, preview);
           if (isPathLinkTarget(href)) out.push({ type: "pathlink", target: href, children, raw: m[0] });
           else out.push({ type: "textlink", children, raw: m[0] });
         } else {
           out.push({ type: "text", text: m[0] }); // depth cap ⇒ literal text
         }
         i += m[0].length;
+        continue;
+      }
+    }
+    if (preview && c === "!" && src[i + 1] === "[" && depth < MAX_DEPTH) {
+      const m = IMAGE_RE.exec(src.slice(i, i + 3300));
+      if (m) {
+        flush();
+        /** @type {Inline} */
+        const node = { type: "image", src: m[2] ?? "", alt: m[1] ?? "" };
+        if (m[3] !== undefined) node.title = m[3];
+        out.push(node);
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (preview && c === "<" && depth < MAX_DEPTH) {
+      const hit = matchHtmlInline(src, i, depth, inLink, preview);
+      if (hit !== null) {
+        flush();
+        out.push(hit.node);
+        i += hit.length;
         continue;
       }
     }
@@ -576,15 +860,19 @@ function lineStartsOf(lines) {
  * state, so they cannot affect where a cut is safe). Only complete lines are scanned: the
  * lookahead a table needs (`i+1`) never sees the incomplete trailing line, and a closing
  * fence on the incomplete line is likewise invisible — both only ever SHRINK the reported
- * cut, never produce a wrong one (the conservative direction).
- * @param {string} text
+ * cut, never produce a wrong one (the conservative direction). With `opts.preview` the
+ * preview-mode html block wrappers (`<p align>…</p>`) are mirrored too: a recognized block is
+ * consumed through its closing line so the scan never cuts inside one (an unclosed opener is
+ * literal to the parser within `HTML_BLOCK_MAX_LINES`, so it needs no mirroring).
+ * @param {string} text @param {{ preview?: boolean }} [opts]
  * @returns {{ cut: number, lineEnd: number, openFence: string | null }}
  *   cut       start of the line AFTER the last top-level blank line (-1 = no safe cut);
  *   lineEnd   one past the last "\n" (0 when there is no complete line at all);
  *   openFence  when the complete lines end INSIDE an unclosed fence, its opening line (for
  *              the forced cut's close/reopen, §4.3.3)
  */
-export function scanMarkdownTail(text) {
+export function scanMarkdownTail(text, opts) {
+  const preview = opts !== undefined && opts !== null && opts.preview === true;
   const nl = text.lastIndexOf("\n");
   if (nl < 0) return { cut: -1, lineEnd: 0, openFence: null };
   const lines = text.slice(0, nl).split("\n"); // complete lines only
@@ -604,16 +892,27 @@ export function scanMarkdownTail(text) {
       continue;
     }
     if (HEADING_RE.test(line)) continue;
+    if (preview) {
+      // mirror matchHtmlBlock's multi-line consumption so a cut never lands inside a wrapper
+      const open = HTML_BLOCK_OPEN_RE.exec(line);
+      if (open && htmlBlockAlign(open[2] ?? "") !== null) {
+        const closeIdx = findHtmlBlockClose(lines, i, (open[1] ?? "").toLowerCase());
+        if (closeIdx !== -1) {
+          i = closeIdx;
+          continue;
+        }
+      }
+    }
     if (QUOTE_RE.test(line)) {
       // A quote swallows its `>`-prefixed blank lines and lazy continuations — mirror the
       // same consumption (the collected nodes are discarded; only the end index matters).
-      i = collectQuote(lines, i, [], 0);
+      i = collectQuote(lines, i, [], 0, preview);
       continue;
     }
     if (line.includes("|") && i + 1 < lines.length) {
       // A table data row may itself LOOK like an opening fence (e.g. "```a|b") — mirror the
       // table's consumption so such a line is never treated as one.
-      const t = tryParseTable(lines, i);
+      const t = tryParseTable(lines, i, preview);
       if (t) {
         i = t.end;
         continue;

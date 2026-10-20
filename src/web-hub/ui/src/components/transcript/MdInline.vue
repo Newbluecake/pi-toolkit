@@ -26,6 +26,7 @@ import { isProxyableHref, normalizeProxyHref } from "@logic/proxy.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useProxyOpen } from "../../composables/useProxyOpen.js";
 import PathText from "../preview/PathText.vue";
+import MdImage from "../preview/MdImage.vue";
 import { PATH_REFERENCES_SUSPENDED, PREVIEW_BASE_DIR, PREVIEW_CTX } from "../preview/previewContext.js";
 import { PROXY_PREVIEW_CTX } from "../proxy/proxyPreviewContext.js";
 import type { Inline } from "./markdown-types.js";
@@ -138,6 +139,19 @@ function onLinkClick(ev: MouseEvent, href: string): void {
       <MdInline v-else :nodes="n.children" :no-refs="true" />
     </template>
     <MdInline v-else-if="n.type === 'textlink'" :nodes="n.children" :no-refs="true" />
+    <!-- md-preview-html plan: preview-mode-only nodes (the transcript parser never emits
+         them). `image` delegates to MdImage (preview-API load / external chip / placeholder). -->
+    <MdImage
+      v-else-if="n.type === 'image'"
+      :src="n.src"
+      :alt="n.alt"
+      :title="n.title"
+      :width="n.width"
+      :height="n.height"
+    />
+    <br v-else-if="n.type === 'br'" />
+    <sub v-else-if="n.type === 'sub'" class="md-sub"><MdInline :nodes="n.children" :no-refs="noRefs" /></sub>
+    <sup v-else-if="n.type === 'sup'" class="md-sup"><MdInline :nodes="n.children" :no-refs="noRefs" /></sup>
   </template>
   <span v-for="x in noteList" :key="'proxy-note'" class="proxy-ref-note" role="status"
     ><template v-if="x.key !== null"

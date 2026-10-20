@@ -911,3 +911,78 @@ button.preview-dir-row:focus-visible {
     height: calc(100dvh - var(--preview-header-h, 96px));
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * md-preview-html plan (2026-10-20): the preview-mode markdown HTML subset — aligned
+ * `<p>/<div>` wrappers, inline images loaded through the preview API (data: URLs only),
+ * muted `<sub>/<sup>` captions, and the placeholder / external-link chips. Rendered only
+ * inside the preview dialog (the transcript parser never emits these nodes).
+ * ------------------------------------------------------------------------ */
+
+.md-hblock-center {
+  text-align: center;
+}
+
+.md-hblock-right {
+  text-align: right;
+}
+
+.md-hblock-left {
+  text-align: left;
+}
+
+.md-hblock {
+  margin: var(--sp-2) 0;
+}
+
+.md-img {
+  max-width: 100%;
+  border-radius: var(--r-xs);
+  vertical-align: middle;
+}
+
+/* loaded images open the normal image preview on click */
+.md-img-open {
+  cursor: zoom-in;
+}
+
+.md-img-open:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.md-sub,
+.md-sup {
+  color: var(--c-text-3);
+  font-size: 0.85em;
+}
+
+/* placeholder / external chip: failed, denied, oversize, unresolved, or external image */
+.md-img-chip {
+  display: inline-block;
+  margin: 1px 2px;
+  padding: 1px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-xs);
+  background: var(--c-surface-2);
+  color: var(--c-text-3);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.md-img-ext {
+  text-decoration: none;
+}
+
+.md-img-ext:hover {
+  border-color: var(--c-border-strong);
+  color: var(--c-text-2);
+}
+
+.md-img-loading {
+  opacity: 0.75;
+}
+
+.md-img-why {
+  opacity: 0.8;
+}
