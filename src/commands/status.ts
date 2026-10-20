@@ -109,6 +109,8 @@ export interface StatusCommandDeps {
    * 缺席 / 返回 undefined ⇒ 不渲染（旧输出字节不变）。
    */
   quota?: () => { readonly droidKeyMissing: boolean } | undefined;
+  /** Omitted when external agents are disabled; live unified prompt/admission availability. */
+  external?: () => { readonly droidUnavailableReason: string | undefined } | undefined;
 }
 
 /**
@@ -634,6 +636,13 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.childSwitch) lines.push(renderChildSwitchLine(deps.childSwitch()));
   const load = deps.load?.();
   if (load !== undefined) lines.push(`Load: ${load.level}${load.gating ? " · gated" : " · open"}`);
+  const external = deps.external?.();
+  if (external !== undefined)
+    lines.push(
+      external.droidUnavailableReason === undefined
+        ? "droid: available"
+        : `droid: unavailable (${external.droidUnavailableReason})`,
+    );
   // quota droid 凭据缺失披露（2026-10-19 拍板）：池读数缺失期间不编造数字，闸门面
   // 对 droid 池保持 fail-open（spawn 不拦截）；droid CLI 自身（OAuth）不受影响。
   const quota = deps.quota?.();

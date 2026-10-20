@@ -6,8 +6,8 @@
 import type { ErrorInfo } from "../../core/types.js";
 import { MSG_USAGE_EXHAUSTED, msgAuthFailure, msgUnexpectedCancel } from "../messages.js";
 
-/** 鉴权/订阅错误识别（plan §4.5：`/\b40[123]\b/` 或 `"status":40[123]`）。402 永远 auth + 不可重试。 */
-export const DROID_AUTH_ERROR_RE = /\b40[123]\b|"status"\s*:\s*40[123]/;
+import { DROID_AUTH_ERROR_RE } from "./auth.js";
+export { DROID_AUTH_ERROR_RE } from "./auth.js";
 /** 429 ⇒ retryable（§4.5「其它 error」行）。 */
 export const DROID_RATE_LIMIT_RE = /\b429\b/;
 

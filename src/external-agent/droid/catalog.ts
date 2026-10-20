@@ -21,6 +21,7 @@ import {
   DROID_METHODS,
 } from "./protocol.js";
 import { buildInitParams } from "./settings.js";
+import { observeDroidAuthFailure } from "./auth.js";
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 
@@ -117,6 +118,15 @@ export function createDroidCatalog(deps: ExternalFrameworkDeps, settings: () => 
       clock: deps.clock,
     });
     child.onStdout((chunk) => rpc.feed(chunk));
+    // CLI login failures may exit before speaking RPC; fail the pending probe immediately.
+    let probeDone = false;
+    void child.exited.then(
+      () => {
+        if (probeDone) return;
+        rpc.failAll(new ClassifiedError({ kind: "internal", retryable: false, message: child.stderrTail() }));
+      },
+      () => {},
+    );
     const deadline = deps.clock.setTimer(DROID_CATALOG_PROBE_TIMEOUT_MS, () => {
       try {
         rpc.failAll(
@@ -151,7 +161,12 @@ export function createDroidCatalog(deps: ExternalFrameworkDeps, settings: () => 
           models,
           ...(drift === undefined ? {} : { drift }),
         };
+        if (disposed) return;
         memory = catalog;
+        if (models.length > 0 && (drift === undefined || s.protocolCheck !== "strict"))
+          // initialize_session supplies metadata without making a model request. It can succeed
+          // when the first turn still fails auth; only recover the catalog-source failure.
+          deps.observeAvailability?.({ source: "catalog", ok: true });
         try {
           deps.catalogStore.write(catalog);
         } catch {
@@ -162,9 +177,11 @@ export function createDroidCatalog(deps: ExternalFrameworkDeps, settings: () => 
         } catch {
           /* best-effort */
         }
-      } catch {
-        /* 失败静默：保留旧缓存 */
+      } catch (e) {
+        // No warning or raw error persistence; retain the old catalog but suppress its advertisement.
+        if (!disposed) observeDroidAuthFailure(deps, e instanceof Error ? e.message : String(e), "catalog");
       } finally {
+        probeDone = true;
         deps.clock.clearTimer(deadline);
         child.terminate("graceful");
         inFlight = false;

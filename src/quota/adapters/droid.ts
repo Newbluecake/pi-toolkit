@@ -11,8 +11,8 @@
  *   await 之前同步赋值**（评审核查项 1）：service 在同一 refresh pass 里串行调用
  *   两个适配器，第二个必须能同步看到第一个的在途 promise。
  * - 时间只用 `deps.now()`，零计时器。
- * - 认证问题（401/402/403，K3 实测 402 是「旧 key」现场）：不产快照（闸门放行，
- *   D3 不拦 spawn）+ 按状态码 warnOnce（文案不含 key）+ `lastProblem` 供
+ * - 认证问题（401/402/403，K3 实测 402 是「旧 key」现场）：不产快照 + 可选健康端口
+ *   通知（2026-10-20：provider 统一不可用闸门）+ 按状态码 warnOnce（文案不含 key）+ `lastProblem` 供
  *   HUD `droid auth <code>`；解析成功 ⇒ 清除。
  * - 解析（K4 语义归一化）：`active = resetAt !== undefined && resetAt > now`；
  *   未激活窗口记 0%、不带 resetAt；`usedPercent` 非有限数 ⇒ 跳过该窗口；一个池
@@ -140,7 +140,8 @@ export interface DroidAdapterPair {
 /** 401/403 与 402 的告警文案（§3；文案永不出现 key 本体，测试断言不含 key 子串）。 */
 function authProblemText(status: number): string {
   const tail =
-    "droid quota tracking is paused (spawns are not blocked). droid runs started from this pi process inherit the " +
+    "droid quota tracking is paused; droid is unavailable until successful health evidence, /reload or auth TTL expiry. " +
+    "droid runs started from this pi process inherit the " +
     "same key; if you rotated it, restart pi from a shell that has the new key (~/.factory/env.sh is only sourced " +
     "by new shells).";
   if (status === 402) {
@@ -160,6 +161,8 @@ export function createDroidAdapters(o: {
   isActive: () => boolean;
   warn?: ((m: string) => void) | undefined;
   coalesceMs?: number | undefined;
+  /** Live health evidence, once per actual request (undefined = parsed success), not warnOnce-deduped. */
+  onAvailability?: ((problem: QuotaProblem | undefined) => void) | undefined;
 }): DroidAdapterPair {
   const coalesceMs = o.coalesceMs ?? DROID_COALESCE_MS;
   // pair 闭包状态（每 stack 一份；无模块级状态）：
@@ -176,9 +179,18 @@ export function createDroidAdapters(o: {
     }
   };
 
+  const noteAvailability = (value: QuotaProblem | undefined): void => {
+    try {
+      o.onAvailability?.(value);
+    } catch {
+      /* Health observers must not break quota's never-throw contract. */
+    }
+  };
+
   const noteHttpError = (status: number | undefined): void => {
     if (status !== 401 && status !== 402 && status !== 403) return;
     problem = { family: "droid", status };
+    noteAvailability(problem);
     if (warnedStatuses.has(status)) return;
     warnedStatuses.add(status);
     safeWarn(authProblemText(status));
@@ -197,7 +209,10 @@ export function createDroidAdapters(o: {
         onHttpError: noteHttpError,
       });
       const parsed = parseFactoryLimits(raw, deps.now());
-      if (parsed !== undefined) problem = undefined; // 解析成功 ⇒ 清掉 problem
+      if (parsed !== undefined) {
+        problem = undefined; // 解析成功 ⇒ 清掉 problem，并恢复 provider 可用性。
+        noteAvailability(undefined);
+      }
       return parsed;
     } catch {
       return undefined; // fetchJson 契约永不抛；此 catch 兜注入桩异常——绝不抛

@@ -5,7 +5,7 @@
  *
  * 本文件是 P2/P3 实现的唯一消费者（pi-free 侧的胶水）：spawnChild/createRpc/openTranscript
  * 等冻结工厂全部来自 `./`（P2）与 `./droid/`（P3），provider 名冲突 / 二进制缺失 /
- * strict 目录漂移三类「整体不可用」在这里判定（§5.1 准入拒绝文案来源）。
+ * strict 目录漂移与运行时鉴权「整体不可用」在这里统一判定（§5.1 准入拒绝文案来源）。
  */
 import { statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -14,11 +14,13 @@ import type { ExternalContextBlock, ExternalPricing, ExternalRunSpec } from "../
 import type { ExternalAgentsSettings } from "../config/settings.js";
 import { createCatalogStore } from "./catalog-store.js";
 import { createDroidProvider } from "./droid/provider.js";
+import { droidAuthFailureDetail } from "./droid/auth.js";
 import { unknownDroidModelMessage } from "./droid/catalog.js";
 import { createJsonRpcClient } from "./jsonrpc.js";
 import {
   capabilitiesText,
   msgBinaryNotFound,
+  msgDroidAuthUnavailable,
   msgDroidModelNotAllowed,
   msgProviderNameCollision,
   msgProtocolDrift,
@@ -29,6 +31,8 @@ import { spawnManagedChild } from "./process.js";
 import { createRedactor } from "./redact.js";
 import type {
   ExternalAdvertisedModel,
+  ExternalAvailabilitySignal,
+  ExternalAvailabilitySource,
   ExternalAgentProvider,
   ExternalAgentsPort,
   ExternalFrameworkDeps,
@@ -40,6 +44,8 @@ import { createUsageLedger } from "./usage-ledger.js";
 
 /** 定价 memo TTL（§2.9 `pricingFor`：60s）。 */
 const PRICING_MEMO_MS = 60_000;
+/** Read-time expiry: no timer, persistence or /reload-surviving module state. */
+export const DROID_AUTH_UNAVAILABLE_TTL_MS = 30 * 60_000;
 
 /** 与 process.ts 的 binaryResolvable 同口径的有界同步探测（ENOENT ⇒ 整体不可用）。 */
 function binaryResolvable(binary: string, cwd: string): boolean {
@@ -72,6 +78,24 @@ export function createExternalAgentsPort(o: {
   const settings = o.settings;
   if (!settings.droid.enabled) return undefined;
 
+  let disposed = false;
+  // Bounded to three evidence sources; insertion order selects the latest failure even when
+  // wall-clock timestamps tie. A successful billing request cannot repair CLI OAuth credentials.
+  const authUnavailable = new Map<ExternalAvailabilitySource, { at: number; reason: string }>();
+  const observeAvailability = (signal: ExternalAvailabilitySignal): void => {
+    if (disposed) return; // Late completions from a disposed stack cannot affect its successor.
+    if ("ok" in signal) {
+      if (signal.source === "run")
+        authUnavailable.clear(); // Actual model access proves end-to-end health.
+      else authUnavailable.delete(signal.source); // Catalog init is NOT proof of model/login access.
+    } else {
+      // Keep a fixed classification only; even a miswired caller cannot put raw secrets in status/admission.
+      const detail = droidAuthFailureDetail(signal.authError) ?? "authentication failed";
+      authUnavailable.delete(signal.source);
+      authUnavailable.set(signal.source, { at: o.clock.now(), reason: msgDroidAuthUnavailable(detail) });
+    }
+  };
+
   const deps: ExternalFrameworkDeps = {
     spawnChild: spawnManagedChild,
     createRpc: createJsonRpcClient,
@@ -83,6 +107,7 @@ export function createExternalAgentsPort(o: {
     agentDir: o.agentDir,
     redact: createRedactor(process.env),
     warnOnce: o.warnOnce,
+    observeAvailability,
   };
   const droid = createDroidProvider(deps, () => settings.droid);
   const providers: ReadonlyMap<string, ExternalAgentProvider> = new Map([["droid", droid]]);
@@ -128,6 +153,7 @@ export function createExternalAgentsPort(o: {
 
   /** 目录展示列表（§5.3 / §15：tokenMultiplier 折进 note；advertiseMax 截断由调用方做）。 */
   const advertised = (): readonly ExternalAdvertisedModel[] => {
+    if (unavailableReason("droid") !== undefined) return [];
     const catalog = droid.catalog.snapshot();
     const byId = new Map((catalog?.models ?? []).map((m) => [m.id, m]));
     const one = (id: string): ExternalAdvertisedModel => {
@@ -152,6 +178,22 @@ export function createExternalAgentsPort(o: {
       .map((m) => one(m.id));
   };
 
+  // One decision path for prompt advertisement, admission (including resume), and diagnostics.
+  const unavailableReason = (provider: string): string | undefined => {
+    if (provider !== "droid") return undefined;
+    if (fixedReason !== undefined) return fixedReason;
+    const catalog = droid.catalog.snapshot();
+    if (catalog?.drift !== undefined && settings.droid.protocolCheck === "strict")
+      return msgProtocolDrift(catalog.drift.actual, catalog.drift.expected, catalog.agentVersion);
+    let reason: string | undefined;
+    const now = o.clock.now();
+    for (const [source, failure] of authUnavailable) {
+      if (now - failure.at >= DROID_AUTH_UNAVAILABLE_TTL_MS) authUnavailable.delete(source);
+      else reason = failure.reason;
+    }
+    return reason;
+  };
+
   const port: ExternalAgentsPort = {
     owns(provider) {
       return provider === "droid";
@@ -170,13 +212,9 @@ export function createExternalAgentsPort(o: {
       if (allowed.length === 0 || allowed.includes(ref.id)) return undefined;
       return msgDroidModelNotAllowed(ref.id, allowed);
     },
-    unavailableReason(provider) {
-      if (provider !== "droid") return undefined;
-      if (fixedReason !== undefined) return fixedReason;
-      const drift = droid.catalog.snapshot()?.drift;
-      if (drift !== undefined && settings.droid.protocolCheck === "strict")
-        return msgProtocolDrift(drift.actual, drift.expected, droid.catalog.snapshot()?.agentVersion);
-      return undefined;
+    unavailableReason,
+    observeAvailability(provider, signal) {
+      if (provider === "droid") observeAvailability(signal);
     },
     unknownModelMessage(ref) {
       return unknownDroidModelMessage(ref.id, droid.catalog.snapshot(), settings.droid.models);
@@ -226,6 +264,8 @@ export function createExternalAgentsPort(o: {
     },
     pricingFor,
     dispose() {
+      disposed = true;
+      authUnavailable.clear();
       droid.dispose();
       pricingMemo.clear();
     },

@@ -22,6 +22,7 @@ import type {
   TranscriptWriter,
 } from "../types.js";
 import { createDroidCatalog, unknownDroidModelMessage, type DroidCatalog } from "./catalog.js";
+import { observeDroidAuthFailure } from "./auth.js";
 import { createDroidEnvelope } from "./envelope.js";
 import {
   DROID_CHILD_ENV,
@@ -176,6 +177,10 @@ export function createDroidProvider(
                 : undefined;
             if (notif !== null && typeof notif === "object") {
               const n = notif as Record<string, unknown>;
+              if (n.type === "error" && typeof n.message === "string") {
+                const auth = observeDroidAuthFailure(deps, n.message);
+                if (auth !== undefined) setupFailure ??= new ClassifiedError(auth);
+              }
               if (n.type === "settings_updated") {
                 const echo = extractSettingsEcho(n.settings);
                 if (isFullSettingsEcho(echo)) {
@@ -248,7 +253,11 @@ export function createDroidProvider(
     );
     const failSpawned = (e: unknown): never => {
       child.terminate("now");
-      throw asClassified(e, deps.redact);
+      const text = e instanceof Error ? e.message : String(e);
+      const auth = observeDroidAuthFailure(deps, text);
+      if (auth !== undefined) throw new ClassifiedError(auth);
+      const error = asClassified(e, deps.redact);
+      throw new ClassifiedError({ ...error.info, message: deps.redact(error.info.message) });
     };
 
     // ── init → observeInit → update → 生效值比对 ──

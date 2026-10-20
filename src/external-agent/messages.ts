@@ -1,6 +1,6 @@
 /**
  * 外部 agent 对外文案（external-agent plan §2.11，P1 冻结面）。
- * 全部英文；这是模型/用户可见文案的唯一来源——后续包只 import，不得内联复制。
+ * 除 provider 不可用指引外使用英文；这是模型/用户可见文案的唯一来源——后续包只 import，不得内联复制。
  */
 
 export const MSG_READONLY_DOMAIN: string =
@@ -61,9 +61,19 @@ export function msgProtocolDrift(actual: string, expected: string, agentVersion?
 export function msgAuthFailure(detail: string): string {
   return (
     `droid authentication/subscription failure (${detail}). This is not a model error — do not retry. ` +
-    "Check FACTORY_API_KEY in pi's environment (~/.factory/env.sh is only sourced by new shells; restart pi " +
-    "after updating it)."
+    "Check FACTORY_API_KEY in pi's environment, the Factory payment/subscription plan (HTTP 402), and " +
+    "organization/model access permissions (HTTP 403). ~/.factory/env.sh is only sourced by new shells; restart pi " +
+    "after updating its environment credentials."
   );
+}
+
+/** Provider-wide, expiring auth-unavailable reason (detail is a fixed auth classification). */
+export function msgDroidAuthUnavailable(detail: string): string {
+  if (detail === "Factory HTTP 402")
+    return `droid 付款或订阅计划不可用：${detail}，请检查 Factory 账单、订阅计划与组织，修复后 /reload`;
+  if (detail === "Factory HTTP 403")
+    return `droid 访问被拒绝：${detail}，请检查凭据、组织/模型访问权限及订阅计划，修复后 /reload`;
+  return `droid 未登录或凭据失效：${detail}，请运行 \`droid\` 登录后 /reload`;
 }
 
 export const MSG_USAGE_EXHAUSTED: string =

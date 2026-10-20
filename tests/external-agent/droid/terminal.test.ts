@@ -46,6 +46,15 @@ describe("droid/terminal（plan §4.5 终态表逐行）", () => {
     }
   });
 
+  it.each(["No access token ***", "Not authenticated", "API key is invalid", "Access token expired"])(
+    "%s is an auth failure even without an HTTP status",
+    (message) => {
+      expect(
+        classifyTurnEnd({ reason: "completed", abortRequested: false, errors: [message], permissionApprovals: 0 }),
+      ).toMatchObject({ kind: "auth", retryable: false });
+    },
+  );
+
   it("model_usage_exhausted（无可分类 error）⇒ auth 不可重试 MSG_USAGE_EXHAUSTED", () => {
     const info = classifyTurnEnd({
       reason: "model_usage_exhausted",

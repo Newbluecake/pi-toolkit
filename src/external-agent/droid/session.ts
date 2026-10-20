@@ -48,6 +48,7 @@ import {
 } from "./protocol.js";
 import { droidNativeSessionPaths, factoryHomeDir, readNativeCumulativeUsage } from "./reconcile.js";
 import { classifyTurnEnd } from "./terminal.js";
+import { droidAuthFailureDetail, observeDroidAuthFailure } from "./auth.js";
 
 /** provider/session 两阶段共享的 RPC 回调槽（client 创建后回调不可换 ⇒ 用可变 ref 换手）。 */
 export interface DroidRpcHandlers {
@@ -186,9 +187,24 @@ export function createDroidSession(init: DroidSessionInit): ExternalSessionHandl
       turnErrorInfo = classifyTurnEnd({
         reason: completion.reason,
         abortRequested,
-        errors: mapper.errors().map((e) => deps.redact(e)),
+        errors: mapper.errors().map((e) => {
+          // Generic redaction can turn "Access token expired" into "Access token ***".
+          // Preserve a fixed auth classification BEFORE redaction, but redact BEFORE terminal's cap.
+          const detail = droidAuthFailureDetail(e);
+          const redacted = deps.redact(e);
+          return detail === undefined ? redacted : `${detail}: ${redacted}`;
+        }),
         permissionApprovals,
       });
+      if (
+        pendingTurn !== undefined &&
+        completion.reason === "completed" &&
+        turnErrorInfo === undefined &&
+        !abortRequested &&
+        !disposed &&
+        fatalError === undefined
+      )
+        deps.observeAvailability?.({ source: "run", ok: true });
       clearAllAcks();
       settlePendingTurn();
     },
@@ -212,6 +228,8 @@ export function createDroidSession(init: DroidSessionInit): ExternalSessionHandl
 
   const fatal = (err: ClassifiedError): void => {
     if (fatalError !== undefined) return;
+    const auth = observeDroidAuthFailure(deps, err.message);
+    err = new ClassifiedError(auth ?? { ...err.info, message: deps.redact(err.message) });
     fatalError = err;
     clearAllAcks();
     reconcileIfTurnOpen();
@@ -238,6 +256,7 @@ export function createDroidSession(init: DroidSessionInit): ExternalSessionHandl
     // §4.3 回执：permission_resolved 清对应计时器（mapper 不处理该类型）。
     if (notif !== null && typeof notif === "object") {
       const n = notif as Record<string, unknown>;
+      if (n.type === "error" && typeof n.message === "string") observeDroidAuthFailure(deps, n.message);
       if (n.type === "permission_resolved") {
         const rid = str(n.requestId);
         if (rid !== undefined) clearAck(rid);
@@ -320,12 +339,10 @@ export function createDroidSession(init: DroidSessionInit): ExternalSessionHandl
         pending.resolve();
         return;
       }
+      const message = `droid exited unexpectedly (code ${exit.code} / signal ${exit.signal}); stderr: ${child.stderrTail()}`;
+      const auth = observeDroidAuthFailure(deps, message);
       pending.reject(
-        new ClassifiedError({
-          kind: "internal",
-          retryable: false,
-          message: `droid exited unexpectedly (code ${exit.code} / signal ${exit.signal}); stderr: ${child.stderrTail()}`,
-        }),
+        new ClassifiedError(auth ?? { kind: "internal", retryable: false, message: deps.redact(message) }),
       );
     },
     () => {},
@@ -412,7 +429,7 @@ export function createDroidSession(init: DroidSessionInit): ExternalSessionHandl
           // add_user_message 写不出去/超时 ⇒ 致命收口（§4.5 协议致命行同款）。
           const info = classifiedInfo(e) ?? {
             kind: "internal" as const,
-            message: deps.redact(e instanceof Error ? e.message : String(e)),
+            message: e instanceof Error ? e.message : String(e),
             retryable: false,
           };
           fatal(new ClassifiedError(info));

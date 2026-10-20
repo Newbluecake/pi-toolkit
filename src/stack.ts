@@ -123,7 +123,13 @@ import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "./service/cache-keepalive.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
 import { readBackKeepaliveSessionState } from "./cache-ttl/keepalive-state.js";
-import { createQuotaStack, type QuotaHintState, type QuotaService, type QuotaStack } from "./quota/index.js";
+import {
+  createQuotaStack,
+  type QuotaHintState,
+  type QuotaProblem,
+  type QuotaService,
+  type QuotaStack,
+} from "./quota/index.js";
 import { readQuotaStatusTheme } from "./quota/render.js";
 import { evaluateQuotaGate, parseSubscriptionProviders, quotaAnnotation, toLadderLevel } from "./quota/gate.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
@@ -2507,7 +2513,22 @@ export function buildSessionStack(
         statePath: join(getAgentDir(), "quota-state.json"),
         // quota-plan r2 §4 接线清单 1（P5）：droid 池输入——外部端口存在时供给
         //（getter 晚绑定）；缺席 ⇒ 不构造 droid 适配器（零网络/零凭据/零告警，D11）。
-        ...(droidPoolPort !== undefined ? { droid: { pools: (): QuotaPoolPort => droidPoolPort } } : {}),
+        ...(droidPoolPort !== undefined
+          ? {
+              droid: {
+                pools: (): QuotaPoolPort => droidPoolPort,
+                // Late-bound billing evidence only: keep polling while unavailable, but a successful
+                // billing response must never clear CLI run/catalog authentication failures.
+                onAvailability: (problem: QuotaProblem | undefined) =>
+                  externalPort?.port.observeAvailability?.(
+                    "droid",
+                    problem === undefined
+                      ? { source: "quota", ok: true }
+                      : { source: "quota", authError: `Factory HTTP ${problem.status}` },
+                  ),
+              },
+            }
+          : {}),
         ...(settings.quota.hud
           ? {
               setStatus: (text: string | undefined) => safeSetQuotaStatus(ctx, text),

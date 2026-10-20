@@ -60,6 +60,20 @@ function deps(runs: RunSnapshot[]) {
   };
 }
 
+describe("external provider availability status", () => {
+  it("shows the live droid reason; absent/disabled port preserves legacy output", () => {
+    const d = deps([]) as never;
+    const baseline = renderStatus(d);
+    expect(renderStatus({ ...deps([]), external: () => undefined } as never)).toBe(baseline);
+    expect(
+      renderStatus({ ...deps([]), external: () => ({ droidUnavailableReason: "No access token" }) } as never),
+    ).toContain("droid: unavailable (No access token)");
+    expect(renderStatus({ ...deps([]), external: () => ({ droidUnavailableReason: undefined }) } as never)).toContain(
+      "droid: available",
+    );
+  });
+});
+
 describe("fabric mentionable labels status", () => {
   it("renders label and lifecycle state when mention discovery is wired", () => {
     const d = deps([snapshot()]) as Record<string, unknown>;

@@ -256,6 +256,32 @@ describe("createDroidAdapters", () => {
     expect(pair.core.lastProblem?.()).toBeUndefined();
   });
 
+  it("health evidence is independent of warnOnce; only a parsed success clears it; observers cannot break fetch", async () => {
+    const observed = vi.fn();
+    const pair = createDroidAdapters({ isActive: () => true, onAvailability: observed, coalesceMs: 0 });
+    const denied: AdapterDeps["fetchJson"] = async (_url, init) => {
+      init.onHttpError?.(401);
+      return undefined;
+    };
+    await pair.standard.fetchQuota(deps({ fetchJson: denied }));
+    await pair.core.fetchQuota(deps({ fetchJson: denied }));
+    expect(observed.mock.calls).toEqual([[{ family: "droid", status: 401 }], [{ family: "droid", status: 401 }]]);
+    await pair.standard.fetchQuota(deps({ fetchJson: async () => ({ limits: {} }) }));
+    expect(observed).toHaveBeenCalledTimes(2); // malformed/failed requests never recover auth
+    const payload = loadFixture("factory-limits-zero.json");
+    expect(await pair.standard.fetchQuota(deps({ fetchJson: async () => payload }))).toBeDefined();
+    expect(observed.mock.calls[2]).toEqual([undefined]);
+    const throwing = createDroidAdapters({
+      isActive: () => true,
+      onAvailability: () => {
+        throw new Error("observer");
+      },
+    });
+    expect(await throwing.standard.fetchQuota(deps({ fetchJson: async () => payload }))).toMatchObject({
+      provider: "droid-standard",
+    });
+  });
+
   it("lastProblem is shared by the pair and visible on the core adapter too", async () => {
     const pair = createDroidAdapters({ isActive: () => true });
     const fetchJson: AdapterDeps["fetchJson"] = async (_url, init) => {

@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClassifiedError, classifiedInfo } from "../../../src/core/errors.js";
 import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../../src/config/settings.js";
 import { createDroidProvider } from "../../../src/external-agent/droid/provider.js";
@@ -37,6 +37,34 @@ function setup(over: { settings?: typeof SETTINGS; agentDir?: string } = {}) {
   const provider = createDroidProvider(f.deps, () => over.settings ?? SETTINGS);
   return { f, provider, agentDir };
 }
+
+describe("droid/provider startup auth evidence", () => {
+  it.each(["rpc", "notification"])("%s auth error trips availability before a prompt can be sent", async (source) => {
+    const cwd = mkTmp("droid-auth-startup-");
+    const { f, provider } = setup();
+    const observed = vi.fn();
+    f.deps.observeAvailability = observed;
+    f.rpcHandler = (method, params) => {
+      if (method === DROID_METHODS.initializeSession) {
+        if (source === "rpc") return new Error("JSON-RPC: No access token SECRET");
+        f.rpcs[0]!.notifyDroid({ type: "error", message: "No access token SECRET" });
+      }
+      return standardRpcHandler(f.rpcs[0]!)(method, params);
+    };
+    let failure: unknown;
+    try {
+      await provider.create(makeSpec({ cwd }));
+    } catch (e) {
+      failure = e;
+    }
+    expect(classifiedInfo(failure)).toMatchObject({ kind: "auth", retryable: false });
+    expect(classifiedInfo(failure)?.message).not.toContain("SECRET");
+    expect(observed).toHaveBeenCalledWith({ source: "run", authError: "No access token" });
+    expect(f.rpcs[0]!.requests.map((r) => r.method)).not.toContain(DROID_METHODS.addUserMessage);
+    expect(f.children[0]!.terminated).toContain("now");
+    expect(f.clock.pendingTimers).toBe(0);
+  });
+});
 
 describe("droid/provider create 快乐路径（acceptance ⑤⑪）", () => {
   it("spawn argv/cwd/extraEnv/ownerWatchdog + init/update 参数 + transcript 头行 + observeInit", async () => {

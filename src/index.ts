@@ -770,6 +770,10 @@ export default function activate(rawPi: ExtensionAPI): void {
         if (q === undefined) return undefined;
         return { droidKeyMissing: q.droidCredentialMissing() };
       },
+      external: () => {
+        const port = holder.current?.external;
+        return port === undefined ? undefined : { droidUnavailableReason: port.unavailableReason("droid") };
+      },
       // compact-hint 动态阈值（§10.3，P1-11）：经 holder 读当前会话（/reload 后自然指向新 stack）。
       // facts() 只读快照 compactHint 的 force/reserve 配置；窗口由命令时点的 ctx.getContextUsage 给。
       dynamic: {

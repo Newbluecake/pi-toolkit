@@ -91,6 +91,12 @@ export interface PlanRunInput {
   cwd: string; // H2 之后的 cwd（resume 时仅用于诊断，provider 以头行为准）
   persist: boolean;
 }
+/** Evidence domains are independent: billing API credentials do not prove CLI OAuth health. */
+export type ExternalAvailabilitySource = "run" | "catalog" | "quota";
+export type ExternalAvailabilitySignal = { source: ExternalAvailabilitySource } & (
+  { ok: true } | { authError: string }
+);
+
 export interface ExternalAgentsPort {
   owns(provider: string): boolean;
   /** true 已知 / false 确定未知 / undefined 目录不可用（fail-open，交给 init+update 校验）。 */
@@ -100,8 +106,10 @@ export interface ExternalAgentsPort {
    *  内 / 非本 provider）。名单判定不依赖目录（目录不可用同样执行）；resume 继承的模型由
    *  调用方（spawn 准入）豁免，不问本方法。可选方法：旧桩/旧实现缺省 ⇒ 无白名单。 */
   modelAllowlistRejection?(ref: { provider: string; id: string }): string | undefined;
-  /** 漂移（strict）/ 二进制缺失 / provider 名冲突 等整体不可用原因；有值即准入拒绝。 */
+  /** 漂移（strict）/ 二进制缺失 / provider 名冲突 / 有 TTL 的鉴权失败等整体不可用原因；有值即准入拒绝。 */
   unavailableReason(provider: string): string | undefined;
+  /** Late-bound quota/runtime health signal; absent on legacy ports/test doubles. */
+  observeAvailability?(provider: string, signal: ExternalAvailabilitySignal): void;
   unknownModelMessage(ref: { provider: string; id: string }): string;
   advertised(): readonly ExternalAdvertisedModel[];
   ownerOfSessionFile(path: string): string | undefined;
@@ -272,4 +280,6 @@ export interface ExternalFrameworkDeps {
   agentDir: string;
   redact(text: string): string;
   warnOnce(key: string, message: string): void;
+  /** Provider runtime/catalog evidence, owned by the assembling port (no module state). */
+  observeAvailability?: (signal: ExternalAvailabilitySignal) => void;
 }

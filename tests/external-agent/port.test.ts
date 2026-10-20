@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_EXTERNAL_AGENTS_SETTINGS, type ExternalAgentsSettings } from "../../src/config/settings.js";
-import { createExternalAgentsPort } from "../../src/external-agent/port.js";
+import { createExternalAgentsPort, DROID_AUTH_UNAVAILABLE_TTL_MS } from "../../src/external-agent/port.js";
 import { catalogCachePath } from "../../src/external-agent/paths.js";
 import { msgBinaryNotFound, msgProviderNameCollision, msgProtocolDrift } from "../../src/external-agent/messages.js";
 import type { ExternalCatalog } from "../../src/external-agent/types.js";
@@ -68,7 +68,7 @@ function seedCatalog(catalog: ExternalCatalog = CATALOG): void {
 }
 
 const settings = (over: Partial<ExternalAgentsSettings["droid"]> = {}): ExternalAgentsSettings => ({
-  droid: { ...DEFAULT_EXTERNAL_AGENTS_SETTINGS.droid, enabled: true, ...over },
+  droid: { ...DEFAULT_EXTERNAL_AGENTS_SETTINGS.droid, enabled: true, binary: process.execPath, ...over },
 });
 
 function makePort(
@@ -82,7 +82,7 @@ function makePort(
   const r = createExternalAgentsPort({
     settings: s,
     agentDir: dir,
-    clock: new FakeClock(1_000),
+    clock: o.clock ?? new FakeClock(1_000),
     registry,
     piProviders,
     warnOnce,
@@ -295,6 +295,113 @@ describe("createExternalAgentsPort", () => {
         reason: "override_unpriced",
       });
     });
+  });
+
+  it("auth TTL expires without timers, retrips on new evidence, success clears; /reload starts fresh", () => {
+    seedCatalog();
+    const clock = new FakeClock(1_000);
+    const { r } = makePort({ clock });
+    const port = r!.port;
+    port.observeAvailability!("other", { source: "run", authError: "HTTP 401" });
+    expect(port.unavailableReason("droid")).toBeUndefined();
+    port.observeAvailability!("droid", { source: "run", authError: "No access token LEAK-ME" });
+    expect(port.unavailableReason("droid")).toContain("No access token");
+    expect(port.unavailableReason("droid")).not.toContain("LEAK-ME");
+    expect(port.advertised()).toEqual([]);
+    expect(port.unavailableReason("other")).toBeUndefined();
+    expect(makePort().r!.port.unavailableReason("droid")).toBeUndefined();
+    clock.advance(DROID_AUTH_UNAVAILABLE_TTL_MS - 1);
+    expect(port.advertised()).toEqual([]);
+    clock.advance(1);
+    expect(port.unavailableReason("droid")).toBeUndefined();
+    expect(port.advertised()).toHaveLength(3);
+    port.observeAvailability!("droid", { source: "run", authError: "Factory HTTP 403" });
+    expect(port.unavailableReason("droid")).toContain("403");
+    port.observeAvailability!("droid", { source: "run", ok: true });
+    expect(port.unavailableReason("droid")).toBeUndefined();
+    expect(port.advertised()).toHaveLength(3);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it.each([
+    ["run", "quota", false],
+    ["catalog", "quota", false],
+    ["run", "catalog", false],
+    ["quota", "catalog", false],
+    ["catalog", "catalog", true],
+    ["quota", "quota", true],
+    ["run", "run", true],
+    ["catalog", "run", true],
+    ["quota", "run", true],
+  ] as const)("%s failure + %s success ⇒ cleared=%s", (failureSource, successSource, cleared) => {
+    seedCatalog();
+    const port = makePort().r!.port;
+    port.observeAvailability!("droid", { source: failureSource, authError: "HTTP 401" });
+    const reason = port.unavailableReason("droid");
+    expect(reason).toContain("HTTP 401");
+    port.observeAvailability!("droid", { source: successSource, ok: true });
+    expect(port.unavailableReason("droid")).toBe(cleared ? undefined : reason);
+    expect(port.advertised().length).toBe(cleared ? 3 : 0);
+  });
+
+  it("any active source blocks; reason is latest observation (even at equal timestamps); clearing one reveals the other", () => {
+    seedCatalog();
+    const port = makePort().r!.port;
+    port.observeAvailability!("droid", { source: "run", authError: "No access token" });
+    const runReason = port.unavailableReason("droid");
+    port.observeAvailability!("droid", { source: "quota", authError: "HTTP 402" });
+    expect(port.unavailableReason("droid")).toContain("HTTP 402");
+    port.observeAvailability!("droid", { source: "run", authError: "HTTP 403" });
+    const newerRunReason = port.unavailableReason("droid");
+    expect(newerRunReason).toContain("HTTP 403");
+    port.observeAvailability!("droid", { source: "quota", ok: true });
+    expect(port.unavailableReason("droid")).toBe(newerRunReason);
+    port.observeAvailability!("droid", { source: "catalog", authError: "No access token" });
+    expect(port.unavailableReason("droid")).toBe(runReason);
+    port.observeAvailability!("droid", { source: "catalog", ok: true });
+    expect(port.unavailableReason("droid")).toBe(newerRunReason);
+    port.observeAvailability!("droid", { source: "quota", authError: "HTTP 401" });
+    port.observeAvailability!("droid", { source: "catalog", authError: "No access token" });
+    port.observeAvailability!("droid", { source: "run", ok: true });
+    expect(port.unavailableReason("droid")).toBeUndefined();
+    expect(port.advertised()).toHaveLength(3);
+  });
+
+  it("each source expires on its own TTL, without clearing a newer failure from another source", () => {
+    seedCatalog();
+    const clock = new FakeClock(1_000);
+    const port = makePort({ clock }).r!.port;
+    port.observeAvailability!("droid", { source: "quota", authError: "HTTP 402" });
+    clock.advance(DROID_AUTH_UNAVAILABLE_TTL_MS / 2);
+    port.observeAvailability!("droid", { source: "run", authError: "No access token" });
+    clock.advance(DROID_AUTH_UNAVAILABLE_TTL_MS / 2);
+    expect(port.unavailableReason("droid")).toContain("No access token");
+    port.observeAvailability!("droid", { source: "quota", ok: true });
+    expect(port.advertised()).toEqual([]);
+    clock.advance(DROID_AUTH_UNAVAILABLE_TTL_MS / 2 - 1);
+    expect(port.advertised()).toEqual([]);
+    clock.advance(1);
+    expect(port.unavailableReason("droid")).toBeUndefined();
+    expect(port.advertised()).toHaveLength(3);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it("auth success/TTL never clear binary-missing/collision/strict-drift unavailability", () => {
+    seedCatalog();
+    const clock = new FakeClock(0);
+    const missing = makePort({ clock }, settings({ binary: "/nonexistent/droid-bin-xyz" })).r!.port;
+    const collision = makePort({ clock, piProviders: () => ["droid"] }).r!.port;
+    seedCatalog({ ...CATALOG, drift: { actual: "9.9.9", expected: "1.264.0" } });
+    const strict = makePort({ clock }).r!.port;
+    for (const port of [missing, collision, strict]) {
+      const reason = port.unavailableReason("droid");
+      expect(reason).toBeDefined();
+      port.observeAvailability!("droid", { source: "run", authError: "HTTP 401" });
+      port.observeAvailability!("droid", { source: "run", ok: true });
+      clock.advance(DROID_AUTH_UNAVAILABLE_TTL_MS);
+      expect(port.unavailableReason("droid")).toBe(reason);
+      expect(port.advertised()).toEqual([]);
+    }
   });
 
   it("dispose 委托 provider（幂等）", () => {

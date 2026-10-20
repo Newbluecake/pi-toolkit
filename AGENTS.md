@@ -749,6 +749,12 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   Billing: droid usage × the underlying model's pi price (`pricing.ts`; family/consensus matches are `approx`; no match ⇒
   `unpriced` "all"/"partial", never inferred from costUsd≈0). The model catalog is probed lazily (an empty session is
   written under `~/.factory/sessions/<probe-cwd slug>/`). Quota: droid's two Factory pools gate spawn (see `src/quota/`).
+  Provider availability (2026-10-20): port-local auth evidence from runs/probes or quota HTTP 401/402/403 hides droid
+  from the available-models section (stable hub tail update) and fast-rejects new/nested/workflow spawns AND resumes;
+  `/agent status` exposes the most recent active reason. Failures are source-scoped (run/catalog/quota), each with
+  a 30min read-time TTL: quota success clears quota only; catalog success clears catalog only (metadata init can
+  succeed without usable login/model access); a successful droid turn clears all three. Any active failure blocks.
+  `/reload` re-evaluates, no persistence/timers. Missing binary/collision/strict drift remain blocked.
   Protocol drift is guarded by a strict/warn check plus `tests/conformance/droid-protocol.test.ts` (real droid, opt-in
   `PI_TOOLKIT_DROID_CONFORMANCE=1`; run it manually before any pi/droid upgrade).
 - `src/quota/` — quota-aware dispatch: provider adapters + TTL cache, laddered turn_end warnings, and a spawn fast-fail gate
@@ -764,7 +770,8 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   is exhausted — `verdictsForModel` returns `["droid-core","droid-standard"]` keys so a core model is blocked only when BOTH pools are
   at the block level; standard models never fall back; unknown pool ⇒ both must be exhausted), notices/listings say 「额度尽，回落
   Standard 计费」 (pool state `"fallback"`) instead of 告急/已拦 while standard has room, extra-usage blocks unless
-  `quota.droidAllowExtraUsage`, 401/402/403 only warn (HUD `droid auth <code>`); web rows need cap `quota.pools.v1`. Suspicious-reading
+  `quota.droidAllowExtraUsage`; 401/402/403 now also signal the external-provider availability gate (2026-10-20,
+  supersedes quota-plan D3's warn-only rule; HUD unchanged); web rows need cap `quota.pools.v1`. Suspicious-reading
   detection survives restarts: `baseline.ts` persists each provider's last ACCEPTED reading into the same `quota-state.json`
   (`baselines` key; both stores read-modify-write so neither flush clobbers the other's group) and seeds `classifyDrop` after a
   restart — display/verdicts still need a fresh accepted snapshot; an all-zero reading against a non-elapsed >0 baseline is never

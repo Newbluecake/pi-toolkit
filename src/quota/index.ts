@@ -64,7 +64,13 @@ export interface QuotaStackInput {
    * 启用时由 stack.ts 供给。缺席 ⇒ 不构造 droid 适配器：零网络、零凭据读取、零告警
    * （D11），kimi/zai 输出字节不变。
    */
-  readonly droid?: { readonly pools: () => QuotaPoolPort | undefined } | undefined;
+  readonly droid?:
+    | {
+        readonly pools: () => QuotaPoolPort | undefined;
+        /** Late-bound external-provider health port; missing preserves standalone quota behavior. */
+        readonly onAvailability?: ((problem: QuotaProblem | undefined) => void) | undefined;
+      }
+    | undefined;
 }
 
 /** `settings.quota.providers` 白名单解析结果：`droid` token 展开成两个池的开关位。 */
@@ -117,6 +123,7 @@ export function createQuotaStack(input: QuotaStackInput): QuotaStack | undefined
       const droidInput = input.droid;
       droidPair = createDroidAdapters({
         isActive: () => droidInput.pools() !== undefined,
+        onAvailability: (problem) => droidInput.onAvailability?.(problem),
         ...(warn === undefined ? {} : { warn }),
       });
       droidPools = droidInput.pools;

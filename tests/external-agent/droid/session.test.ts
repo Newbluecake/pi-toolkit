@@ -407,6 +407,26 @@ describe("droid/session steer/abort/dispose/killable（acceptance ⑩）", () =>
 });
 
 describe("droid/session context_usage 与错误脱敏", () => {
+  it("first-turn RPC auth rejection signals availability and remains auth/redacted in the run error", async () => {
+    const f = makeFakeDeps();
+    const observed = vi.fn();
+    f.deps.observeAvailability = observed;
+    const { handle, rpc, child } = makeSession(f);
+    rpc.handler = (method) => (method === DROID_METHODS.addUserMessage ? new Error("No access token SECRET") : {});
+    let failure: unknown;
+    try {
+      await handle.prompt("hello");
+    } catch (e) {
+      failure = e;
+    }
+    expect(classifiedInfo(failure)).toMatchObject({ kind: "auth", retryable: false });
+    expect(classifiedInfo(failure)?.message).not.toContain("SECRET");
+    expect(observed.mock.calls).toEqual([[{ source: "run", authError: "No access token" }]]);
+    expect(child.terminated).toContain("now");
+    expect(handle.getTurnErrorInfo?.()).toMatchObject({ kind: "auth" });
+    expect(f.clock.pendingTimers).toBe(0);
+  });
+
   it("assistant 消息后节流轮询 get_context_stats ⇒ context_usage；连败 3 次停用", async () => {
     const f = makeFakeDeps();
     const events: DriverEvent[] = [];
@@ -441,13 +461,30 @@ describe("droid/session context_usage 与错误脱敏", () => {
     expect(after - before).toBe(3); // 3 连败后停用
   });
 
+  it("auth classification survives redaction obscuring token-expired wording", async () => {
+    const f = makeFakeDeps();
+    f.deps.redact = (text) => text.replace(/token\s+\S+/gi, "token ***");
+    const observed = vi.fn();
+    f.deps.observeAvailability = observed;
+    const { handle, rpc } = makeSession(f);
+    const pending = handle.prompt("hello");
+    rpc.notifyDroid({ type: "error", message: "Access token expired" });
+    completeTurn(rpc);
+    await pending;
+    expect(handle.getTurnErrorInfo?.()).toMatchObject({ kind: "auth", retryable: false });
+    expect(observed.mock.calls).toEqual([
+      [{ source: "run", authError: expect.stringContaining("authentication failed") }],
+    ]);
+    expect(handle.getTurnErrorInfo?.()?.message).toContain("token ***");
+  });
+
   it("error 通知脱敏后进入 getTurnErrorInfo（acceptance ④：不含凭据值）", async () => {
     const f = makeFakeDeps();
     const { handle, rpc } = makeSession(f);
     handle.attach(() => {});
     const p = handle.prompt("hi");
     rpc.notifyDroid({ type: "droid_working_state_changed", newState: "streaming_assistant_message" });
-    rpc.notifyDroid({ type: "error", message: "402 subscription SECRET expired" });
+    rpc.notifyDroid({ type: "error", message: "HTTP 402 subscription SECRET expired" });
     rpc.notifyDroid({
       type: "agent_turn_completed",
       reason: "model_usage_exhausted",
