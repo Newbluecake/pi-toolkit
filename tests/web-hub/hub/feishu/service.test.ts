@@ -129,6 +129,74 @@ describe("F8 in-process service composition", () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(r.request.mock.calls.filter(([f]) => f.cmd.op === "dialog_answer")).toHaveLength(1);
   });
+  it("failed interactive PATCH returns its typed error, logs safe code/msg, and patches a text-answerable card", async () => {
+    const r = await rig({ link: () => "https://phone.example.com/#/agent/agent-1" });
+    await r.bind();
+    r.fake.script("PATCH", /messages/, {
+      json: {
+        code: 230099,
+        msg: "Failed to create card content, ext=ErrCode: 11310; ErrMsg: max_length exceed the default maximum 1000; ErrorValue: private question and secret",
+      },
+    });
+    r.emit({
+      type: "dialogs",
+      agentKey: "agent-1",
+      epoch: "epoch",
+      open: [
+        {
+          dialogId: "fallback",
+          source: "ask_user",
+          toolCallId: "tool",
+          allowCancel: true,
+          openedAt: NOW,
+          questions: [{ question: "今天运动情况？", options: [{ label: "已达标（1小时）" }, { label: "今天休息" }] }],
+        },
+      ],
+      closed: [],
+    });
+    await eventually(() => expect(r.fake.callsTo("PATCH", /messages/)).toHaveLength(2));
+    const card = JSON.parse((r.fake.callsTo("PATCH", /messages/)[1]!.json as { content: string }).content);
+    expect(card.body.elements).toEqual([
+      { tag: "markdown", content: expect.stringContaining("1. 今天运动情况？\n1. 已达标（1小时）\n2. 今天休息") },
+    ]);
+    expect(card.body.elements[0].content).toContain("文字回答");
+    expect(card.body.elements[0].content).toContain("https://phone.example.com/#/agent/agent-1");
+    expect(r.logs).toContainEqual({
+      event: "card-patch-failed",
+      reason: "api-code-230099",
+      code: 230099,
+      msg: "ErrCode: 11310; max_length exceed the default maximum 1000",
+    });
+    expect(r.logs).toContainEqual({ event: "dialog-text-fallback", reason: "api" });
+    expect(JSON.stringify(r.logs)).not.toMatch(/private question|secret|今天运动/);
+    r.send(messageEnvelope("fallback-text", "2"));
+    await eventually(() => expect(r.request.mock.calls.some(([f]) => f.cmd.op === "dialog_answer")).toBe(true));
+    expect(r.request.mock.calls.find(([f]) => f.cmd.op === "dialog_answer")![0].cmd).toMatchObject({
+      answers: [{ selected: ["今天休息"], other: null }],
+    });
+  });
+  it("invalid deep links keep the honest F8 web-page fallback, including on dialog cards", async () => {
+    const r = await rig({ link: () => "http://" });
+    await r.bind();
+    r.emit({
+      type: "dialogs",
+      agentKey: "agent-1",
+      epoch: "epoch",
+      open: [
+        {
+          dialogId: "bad-link",
+          source: "ask_user",
+          toolCallId: "tool",
+          allowCancel: false,
+          openedAt: NOW,
+          questions: [{ question: "Which?", options: [{ label: "A" }] }],
+        },
+      ],
+      closed: [],
+    });
+    await eventually(() => expect(r.fake.callsTo("PATCH", /messages/)).toHaveLength(1));
+    expect(JSON.stringify(r.fake.callsTo("PATCH", /messages/)[0]!.json)).toContain("web 会话页面");
+  });
   it("owner-only approval nonce allows stranger without ever dispatching their dropped prompt", async () => {
     const r = await rig();
     await r.bind();

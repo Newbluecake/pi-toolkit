@@ -148,6 +148,7 @@ import type {
   ProxyService,
   HubEvent,
 } from "./ports.js";
+import { createFeishuLinks } from "./feishu/link.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
@@ -598,6 +599,14 @@ export async function startHub(
       runFileReader.dispose();
     });
     let httpPort = 0;
+    const feishuLinks =
+      config.feishuBot === undefined
+        ? undefined
+        : createFeishuLinks({
+            loopbackPort: () => httpPort,
+            ...(config.lan === undefined ? {} : { lan: config.lan }),
+            snapshot: () => (fe as HttpFrontendExt).lanHostSnapshot?.(),
+          });
     // One restart entry point for both admin `/webhub restart` and the DB
     // breaker. Keeping this as one function is important: self-restart must
     // publish the same superseded frame and stop banner semantics as admin.
@@ -866,6 +875,7 @@ export async function startHub(
     if (lanDeps !== undefined) {
       if (clientAllow !== undefined) lanDeps.clientAllow = clientAllow;
       if (security !== undefined) lanDeps.security = security;
+      if (feishuLinks) lanDeps.onAuthenticated = feishuLinks.authenticated;
       lanDeps.onLoginCore = (core) => {
         lanLoginCore = core;
       };
@@ -1476,9 +1486,9 @@ export async function startHub(
             bash: { complete: (bash.omitted ?? 0) === 0 && bash.total === bash.rows.length, running: bash.running },
           };
         },
-        // Startup recovery may render a notice before listen() binds. Empty selects F8's
-        // honest "web 会话页面" fallback instead of persisting an unusable port-0 URL.
-        link: (key) => (httpPort === 0 ? "" : `http://127.0.0.1:${httpPort}/#/agent/${encodeURIComponent(key)}`),
+        // Every Feishu surface shares phone-facing origin selection. Before listen(), absent
+        // external/LAN evidence returns empty for F8's honest "web 会话页面" fallback.
+        link: (key) => feishuLinks!.link(key),
         log: (event) => log.info("web-hub feishu:", event),
         ...platformSeams,
       };

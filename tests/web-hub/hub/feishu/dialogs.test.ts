@@ -22,8 +22,9 @@ const dialog = (multi = false): DialogWire => ({
 async function rig(multi = false, start = true) {
   const r = await f6Rig(),
     patches: string[] = [];
-  const patch = vi.fn(async (_messageId: string, card: string) => {
+  const patch = vi.fn<FeishuDialogsDeps["patch"]>(async (_messageId: string, card: string) => {
     patches.push(card);
+    return { ok: true, data: undefined };
   });
   const notice = vi.fn(async (_binding: unknown, _text: string) => {});
   const sendCard = vi.fn<FeishuDialogsDeps["sendCard"]>(async () => ({ messageId: "card", chatId: "chat" }));
@@ -31,7 +32,9 @@ async function rig(multi = false, start = true) {
     ok: true,
     data: undefined,
   }));
+  const log = vi.fn();
   const deps: FeishuDialogsDeps = {
+    log,
     state: r.state,
     admission: r.admission,
     installation: r.install,
@@ -56,9 +59,184 @@ async function rig(multi = false, start = true) {
     if (!n) throw new Error(`missing ${op}`);
     return n;
   }
-  return { ...r, dialogs, open, record, patch, patches, notice, sendCard, deleteMessage, nonce, deps };
+  return { ...r, dialogs, open, record, patch, patches, notice, sendCard, deleteMessage, nonce, deps, log };
 }
 describe("F8 ask_user bridge", () => {
+  it("refresh accepts schema-2.0 form fields with realistic long Chinese labels and keeps original answers", async () => {
+    const r = await rig(false, false);
+    const label = "已达标（1小时），包含快走、力量训练和拉伸，今天精神不错 🧭".repeat(4);
+    r.open.questions = [
+      {
+        question: "今天（周二）的运动情况？习惯跟踪用。",
+        options: [
+          { label, description: "完整说明保留在文字卡片" },
+          { label: "动了但不到1小时" },
+          { label: "还没动，待会去" },
+          { label: "今天休息" },
+        ],
+      },
+    ];
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    const json = r.patches.at(-1)!;
+    const card = JSON.parse(json);
+    expect(card).toMatchObject({ schema: "2.0", config: { update_multi: true } });
+    const form = card.body.elements.find((e: any) => e.tag === "form");
+    expect(form.elements.find((e: any) => e.tag === "input").max_length).toBe(1000);
+    expect(form.elements.find((e: any) => e.name === "submit")).toMatchObject({ form_action_type: "submit" });
+    expect(form.elements.find((e: any) => e.name === "submit")).not.toHaveProperty("action_type");
+    expect(Array.from(form.elements[0].options[0].text.content)).toHaveLength(80);
+    expect(card.body.elements[0].content).toContain(label);
+    expect(Buffer.byteLength(json)).toBeLessThanOrEqual(20_000);
+    expect(card.body.elements.filter((e: any) => e.tag === "column_set").every((e: any) => e.columns.length <= 3)).toBe(
+      true,
+    );
+    await r.dialogs.callback(r.nonce("option"), r.identity, "long-option", {});
+    expect(r.request.mock.calls[0]![0].cmd).toMatchObject({ answers: [{ selected: [label], other: null }] });
+    r.dialogs.dispose();
+  });
+  it.each([false, true])(
+    "non-capability PATCH failure preserves questions/options in a non-interactive card (multi=%s)",
+    async (multi) => {
+      const r = await rig(multi, false);
+      r.patch.mockResolvedValueOnce({
+        ok: false,
+        kind: "api",
+        reason: "api-code-230099",
+        code: 230099,
+        retryable: false,
+        effect: "none",
+      });
+      await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+      expect(r.patch).toHaveBeenCalledTimes(2);
+      const fallback = JSON.parse(r.patch.mock.calls[1]![1]);
+      expect(fallback.body.elements).toHaveLength(1);
+      expect(fallback.body.elements[0]).toMatchObject({
+        tag: "markdown",
+        content: expect.stringContaining("1. Choose\n1. A\n2. B"),
+      });
+      expect(fallback.body.elements[0].content).toContain("文字回答");
+      expect(fallback.body.elements[0].content).toContain("http://localhost/#/session");
+      if (multi) expect(fallback.body.elements[0].content).toContain("2. Second\n1. C");
+      else {
+        expect(await r.dialogs.text(normalizedMessage("fallback-answer", "2"), r.identity)).toBe(true);
+        expect(r.request.mock.calls[0]![0].cmd).toMatchObject({ answers: [{ selected: ["B"], other: null }] });
+      }
+      expect(r.log).toHaveBeenCalledWith({ event: "dialog-text-fallback", reason: "api" });
+      r.dialogs.dispose();
+    },
+  );
+  it("the initial send already contains the questions and numbered options, never just a placeholder", async () => {
+    const r = await rig();
+    const sent = JSON.parse(r.sendCard.mock.calls[0]![2]);
+    expect(sent.body.elements[0].content).toContain("1. Choose\n1. A\n2. B");
+    expect(sent.body.elements[0].content).toContain("文字回答");
+    r.dialogs.dispose();
+  });
+  it("capability errors do not attempt a second PATCH", async () => {
+    const r = await rig(false, false);
+    r.patch.mockResolvedValue({
+      ok: false,
+      kind: "api",
+      reason: "denied",
+      capabilityDenied: true,
+      retryable: false,
+      effect: "none",
+    });
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    expect(r.patch).toHaveBeenCalledTimes(1);
+    expect(r.log.mock.calls.flat()).not.toContainEqual(expect.objectContaining({ event: "dialog-text-fallback" }));
+    r.dialogs.dispose();
+  });
+  it("a thrown PATCH gets one bounded fallback and a body-free diagnostic", async () => {
+    const r = await rig(false, false);
+    r.patch.mockRejectedValueOnce(new Error("private body and token"));
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    expect(r.patch).toHaveBeenCalledTimes(2);
+    expect(r.log).toHaveBeenCalledWith({ event: "dialog-patch-failed", reason: "patch-unconfirmed" });
+    expect(JSON.stringify(r.log.mock.calls)).not.toContain("private");
+    r.dialogs.dispose();
+  });
+  it("a physically stuck interactive PATCH is bounded at 8s and gets one text fallback", async () => {
+    const r = await rig(false, false);
+    r.patch.mockImplementationOnce(() => new Promise(() => {}));
+    const refreshing = r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    await eventually(() => expect(r.patch).toHaveBeenCalledTimes(1));
+    r.clock.advance(8_000);
+    await refreshing;
+    expect(r.patch).toHaveBeenCalledTimes(2);
+    expect(r.patch.mock.calls[1]![1]).toContain("文字回答");
+    r.dialogs.dispose();
+  });
+  it("a failed interactive PATCH never reopens a card that settled while the call was in flight", async () => {
+    const r = await rig(false, false);
+    let finish!: (v: FeishuResult<void>) => void;
+    r.patch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const refreshing = r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    await eventually(() => expect(r.patch).toHaveBeenCalledTimes(1));
+    await r.dialogs.reconcile(
+      "agent-1",
+      "epoch",
+      [],
+      [{ dialogId: "dialog", by: "tui", outcome: "answered", at: NOW }],
+    );
+    finish({ ok: false, kind: "api", reason: "api-code-230099", retryable: false, effect: "none" });
+    await refreshing;
+    expect(r.patch).toHaveBeenCalledTimes(1);
+    expect(r.deleteMessage).toHaveBeenCalledTimes(1);
+    expect(r.state.dialogCards.list()[0]!.status).toBe("answered");
+    r.dialogs.dispose();
+  });
+  it.each([
+    "binding-missing",
+    "binding-session-mismatch",
+    "installation-inactive",
+    "tenant-missing",
+    "operator-missing",
+    "operator-denied",
+    "commit-failed",
+  ])("refresh gate %s logs only a bounded, body-free reason", async (reason) => {
+    const r = await rig(false, false);
+    if (reason === "binding-missing") vi.spyOn(r.state.bindings, "get").mockReturnValue(undefined);
+    if (reason === "binding-session-mismatch")
+      r.sendCard.mockImplementationOnce(async () => {
+        r.deps.session = () => "different-session";
+        return { messageId: "card", chatId: "chat" };
+      });
+    if (reason === "installation-inactive") r.deps.installation = () => undefined;
+    if (reason === "tenant-missing") vi.spyOn(r.state.tenant, "get").mockReturnValue(undefined);
+    if (reason === "operator-missing") r.deps.operator = () => undefined;
+    if (reason === "operator-denied") r.deps.operator = () => "ou_denied";
+    if (reason === "commit-failed") {
+      const commit = r.state.commit.bind(r.state);
+      let calls = 0;
+      vi.spyOn(r.state, "commit").mockImplementation(() => (++calls <= 2 ? commit() : Promise.resolve(false)));
+    }
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    expect(r.patch).not.toHaveBeenCalled();
+    expect(r.log.mock.calls.filter(([e]) => e.reason === reason)).toEqual([
+      [{ event: "dialog-refresh-skipped", reason }],
+    ]);
+    expect(JSON.stringify(r.log.mock.calls)).not.toMatch(/Choose|ou_denied|session-1/);
+    r.dialogs.dispose();
+  });
+  it.each(["count", "bytes"])("large %s stays inside the 20KB card limit with a text fallback", async (kind) => {
+    const r = await rig(false, false);
+    r.open.questions[0]!.options = Array.from({ length: kind === "count" ? 100 : 8 }, (_, i) => ({
+      label: `${i}: ${"很长的标签".repeat(kind === "count" ? 1 : 2000)}`,
+    }));
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    const json = r.patch.mock.calls.at(-1)![1];
+    expect(Buffer.byteLength(json)).toBeLessThanOrEqual(20_000);
+    expect(JSON.parse(json).body.elements).toHaveLength(1);
+    expect(json).toContain("文字回答");
+    r.dialogs.dispose();
+  });
   it("validates multi-select/Other/skip byte caps locally", () => {
     const d = dialog(true);
     expect(

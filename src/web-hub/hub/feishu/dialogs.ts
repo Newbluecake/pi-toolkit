@@ -9,6 +9,7 @@ import type { FeishuMessage } from "./inbound.js";
 import { feishuBindingKey } from "./sessions.js";
 import { bounded, feishuKey, object } from "./runtime.js";
 import { neutralizeMarkdown } from "./render.js";
+import { createFeishuDiagnostics, type FeishuDiagnostic } from "./diagnostics.js";
 import type { OutboxTarget } from "./outbox.js";
 import { systemFeishuClock, type FeishuClock, type FeishuResult } from "./http.js";
 
@@ -27,7 +28,8 @@ export interface FeishuDialogsDeps {
     card: string,
     lane: string,
   ): Promise<{ messageId: string; chatId: string } | undefined>;
-  patch(messageId: string, card: string): Promise<unknown>;
+  patch(messageId: string, card: string): Promise<FeishuResult<void>>;
+  log?(event: FeishuDiagnostic): void;
   deleteMessage(messageId: string): Promise<FeishuResult<void>>;
   notice(binding: FeishuBinding, text: string): Promise<unknown>;
 }
@@ -66,6 +68,28 @@ const closedCard = (text: string) =>
   });
 export function createFeishuDialogs(deps: FeishuDialogsDeps) {
   const clock = deps.clock ?? systemFeishuClock;
+  const diagnose = createFeishuDiagnostics(deps.log, clock.now);
+  const skip = (reason: string) => diagnose({ event: "dialog-refresh-skipped", reason });
+  function answerCard(card: FeishuDialogCard, dialog: DialogWire): string {
+    const hint =
+      dialog.questions.length === 1
+        ? `文字回答：${card.shortCode} 1 / ${card.shortCode} 1,3 / ${card.shortCode} text`
+        : "文字回答仅支持单问题；多问题请到 web 作答";
+    const tail = `\n${hint}\n或到 web：${deps.link(card.agentKey)}`;
+    // Preserve full questions/options normally; shrink individual fields only for the JSON byte cap.
+    for (const limit of [4_096, 512, 128, 32]) {
+      const clip = (s: string) => (Array.from(s).length > limit ? Array.from(s).slice(0, limit).join("") + "…" : s);
+      const text = `${card.shortCode} 等待作答\n${dialog.questions
+        .map(
+          (q, i) =>
+            `${i + 1}. ${clip(q.question)}\n${q.options.map((o, n) => `${n + 1}. ${clip(o.label)}${o.description ? ` — ${clip(o.description)}` : ""}`).join("\n")}`,
+        )
+        .join("\n\n")}${tail}`;
+      const json = closedCard(text);
+      if (Buffer.byteLength(json) <= 20_000) return json;
+    }
+    return closedCard(`${card.shortCode} 问题/选项过多，请到 web 查看完整内容。${tail}`);
+  }
   const live = new Map<string, { epoch: string; open: DialogWire[]; closed: DialogClosedWire[] }>();
   const drafts = new Map<string, { at: number; answers: DialogAnswerWire[] }>();
   const timers = new Map<string, unknown>();
@@ -84,9 +108,9 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
   const terminal = (card: FeishuDialogCard) => card.status !== "open" && card.status !== "unknown";
   const elsewhereText = (card: FeishuDialogCard) =>
     card.status === "answered" ? "已在其他端作答" : card.status === "expired" ? "对话已过期" : "已取消";
-  async function patchClosed(card: FeishuDialogCard, text: string) {
+  async function patchClosed(card: FeishuDialogCard, text: string, json = closedCard(text)) {
     if (!disposed && card.messageId !== "pending")
-      await bounded(deps.patch(card.messageId, closedCard(text)), 8_000, clock).catch(() => {});
+      await bounded(deps.patch(card.messageId, json), 8_000, clock).catch(() => {});
   }
   async function recall(card: FeishuDialogCard) {
     // Claim synchronously, then durably, before the API call. Reconcile/delivery may overlap; a
@@ -161,24 +185,27 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
     else await reconcileCard(updated);
   }
   async function refresh(card: FeishuDialogCard, error?: string) {
-    if (disposed || card.messageId === "pending" || terminal(deps.state.dialogCards.get(card.id) ?? card)) return;
+    if (disposed) return skip("disposed");
+    if (card.messageId === "pending") return skip("message-pending");
+    if (terminal(deps.state.dialogCards.get(card.id) ?? card)) return skip("terminal");
     const binding = deps.state.bindings.get(card.bindingKey),
       source = current(card),
       install = deps.installation(),
       tenantKey = deps.state.tenant.get();
     const operator = binding && deps.operator(binding);
-    if (
-      !binding ||
-      !source?.dialog ||
-      !install?.active ||
-      !tenantKey ||
-      !operator ||
-      !deps.state.allowList.has(operator)
-    )
-      return;
+    if (!binding) return skip("binding-missing");
+    if (binding.sessionId !== deps.session(card.agentKey)) return skip("binding-session-mismatch");
+    if (!source) return skip(live.has(card.agentKey) ? "epoch-mismatch" : "source-missing");
+    if (!source.dialog) return skip("dialog-missing");
+    if (!install?.active) return skip("installation-inactive");
+    if (!tenantKey) return skip("tenant-missing");
+    if (!operator) return skip("operator-missing");
+    if (!deps.state.allowList.has(operator)) return skip("operator-denied");
     const dialog = source.dialog;
-    if (dialog.questions.length > 8) {
-      await deps.patch(card.messageId, closedCard(`请到 web 作答：${deps.link(card.agentKey)}`));
+    const fallback = () => patchClosed(card, "", answerCard(card, dialog));
+    if (dialog.questions.length > 8 || dialog.questions.some((q) => q.options.length > 99)) {
+      skip("interactive-limits");
+      await fallback();
       return;
     }
     const issue = (action: object) =>
@@ -201,13 +228,17 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
       },
     ];
     const buttons: object[] = [];
-    if (dialog.questions.length === 1 && !dialog.questions[0]!.multiSelect) {
+    if (
+      dialog.questions.length === 1 &&
+      !dialog.questions[0]!.multiSelect &&
+      dialog.questions[0]!.options.length <= 8
+    ) {
       for (const [i, option] of dialog.questions[0]!.options.entries()) {
         const nonce = issue({ op: "option", option: i });
         if (nonce.ok)
           buttons.push({
             tag: "button",
-            text: { tag: "plain_text", content: option.label },
+            text: { tag: "plain_text", content: Array.from(option.label).slice(0, 40).join("") },
             behaviors: [{ type: "callback", value: { n: nonce.value.nonce } }],
           });
       }
@@ -220,7 +251,10 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
           tag: q.multiSelect ? "multi_select_static" : "select_static",
           name: `q${i}`,
           options: [
-            ...q.options.map((o, n) => ({ text: { tag: "plain_text", content: o.label }, value: String(n) })),
+            ...q.options.map((o, n) => ({
+              text: { tag: "plain_text", content: Array.from(o.label).slice(0, 80).join("") },
+              value: String(n),
+            })),
             { text: { tag: "plain_text", content: "跳过" }, value: "skip" },
           ],
         });
@@ -229,13 +263,15 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
             tag: "input",
             name: `o${i}`,
             placeholder: { tag: "plain_text", content: "其他（可选）" },
-            max_length: 4_096,
+            // Schema 2.0 input limit, verified against the tenant (230099 / 11310 above 1000).
+            max_length: 1_000,
           });
       }
       formElements.push({
         tag: "button",
         name: "submit",
-        action_type: "form_submit",
+        // action_type:"form_submit" is the legacy schema; v2 otherwise rejects the whole card (300123).
+        form_action_type: "submit",
         text: { tag: "plain_text", content: "提交" },
         behaviors: [{ type: "callback", value: { n: submit.value.nonce } }],
       });
@@ -250,17 +286,32 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
           behaviors: [{ type: "callback", value: { n: n.value.nonce } }],
         });
     }
-    if (buttons.length)
+    for (let i = 0; i < buttons.length; i += 3)
       elements.push({
         tag: "column_set",
-        columns: buttons.map((button) => ({ tag: "column", width: "weighted", weight: 1, elements: [button] })),
+        columns: buttons
+          .slice(i, i + 3)
+          .map((button) => ({ tag: "column", width: "weighted", weight: 1, elements: [button] })),
       });
-    if (!(await deps.state.commit()) || disposed || terminal(deps.state.dialogCards.get(card.id) ?? card)) return;
+    if (!(await deps.state.commit())) return skip("commit-failed");
+    if (disposed || terminal(deps.state.dialogCards.get(card.id) ?? card)) return skip("settled-during-commit");
     const cardJson = JSON.stringify({ schema: "2.0", config: { update_multi: true }, body: { elements } });
-    await deps.patch(
-      card.messageId,
-      Buffer.byteLength(cardJson) <= 20_000 ? cardJson : closedCard(`请到 web 作答：${deps.link(card.agentKey)}`),
-    );
+    if (Buffer.byteLength(cardJson) > 20_000) {
+      skip("interactive-bytes");
+      await fallback();
+      return;
+    }
+    let result: FeishuResult<void>;
+    try {
+      result = await bounded(deps.patch(card.messageId, cardJson), 8_000, clock);
+    } catch {
+      result = { ok: false, kind: "timeout", reason: "patch-unconfirmed", retryable: false, effect: "unknown" };
+      diagnose({ event: "dialog-patch-failed", reason: "patch-unconfirmed" });
+    }
+    if (!result.ok && !result.capabilityDenied && !disposed && !terminal(deps.state.dialogCards.get(card.id) ?? card)) {
+      diagnose({ event: "dialog-text-fallback", reason: result.kind });
+      await fallback();
+    }
   }
   async function answer(
     card: FeishuDialogCard,
@@ -339,7 +390,7 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
       for (const card of deps.state.dialogCards.list().filter((c) => c.agentKey === agentKey))
         await reconcileCard(card);
       const sessionId = deps.session(agentKey);
-      if (!sessionId) return;
+      if (!sessionId) return skip("session-missing");
       for (const binding of deps.state.bindings
         .list()
         .filter((b) => b.sessionId === sessionId && b.offline === undefined))
@@ -367,14 +418,7 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
           sending.add(id);
           try {
             if (!(await deps.state.commit()) || disposed) continue;
-            const sent = await deps.sendCard(
-              id,
-              target,
-              closedCard(
-                `${card.value.shortCode} 等待作答（${dialog.questions.length === 1 ? "可用文字回答" : "请在卡片中作答"}）\n${deps.link(agentKey)}`,
-              ),
-              binding.chatId,
-            );
+            const sent = await deps.sendCard(id, target, answerCard(card.value, dialog), binding.chatId);
             await delivered(id, sent?.messageId);
           } finally {
             sending.delete(id);

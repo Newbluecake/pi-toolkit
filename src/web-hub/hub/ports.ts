@@ -113,6 +113,8 @@ export interface RequestContext {
 }
 
 export interface LanFrontendDeps {
+  /** Optional body-free observation AFTER LAN cookie/session authentication succeeds. */
+  onAuthenticated?(ctx: RequestContext): void;
   /** Shared hub-owned allowlist, injected by startHub after assembly; required by the HTTP frontend. */
   clientAllow?: ClientAllowGuard;
   /** Open-time history repair notice; never inferred from a missing account. */

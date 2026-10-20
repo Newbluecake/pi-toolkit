@@ -1518,6 +1518,12 @@ async function requireLanSession(
     return fail(401, "E_AUTH");
   }
   const { rec, sidHash } = resolution.rec;
+  // Feishu phone links remember only an already-admitted, successfully authenticated Host.
+  try {
+    rt.lan.onAuthenticated?.(ctx);
+  } catch {
+    /* observation must never affect auth */
+  }
   lease.enterAuthed();
   const lan: LanSessionResult = {
     userId: rec.userId,

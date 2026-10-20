@@ -318,6 +318,32 @@ bound topic. Outbox (`outbox.ts`): persisted parts `{sendId=uuid(reqId:part), st
 - **Validation error** (`E_BAD_ANSWER`, local check) ⇒ PATCH the card with fresh nonces (tokens are one-shot). Card JSON
   `config.update_multi:true` (V5). No ask timeout; cards expire with the record (24 h).
 
+### 6.3.1 PATCH recovery and phone links (2026-10-20 field fix)
+
+- Schema 2.0 forms use `button.form_action_type:"submit"`, **not** the legacy `action_type:"form_submit"`;
+  `input.max_length` is at most **1000 characters** (the answer protocol still accepts Other up to 4096 UTF-8 bytes).
+  Two real tenant probe cards reproduced `230099` / inner `11310` for 4096, then `230099` / inner `300123` for the legacy
+  submit field. Correcting both accepted the card, including long Chinese/emoji labels; both probes were deleted.
+- Initial delivery already includes questions, numbered options/descriptions, short code, text-answer hint and web link.
+  Non-capability interactive PATCH failure makes ONE bounded text-card PATCH with that same content; it does **not** close
+  the live dialog record (single-question text answers must still work). Multi-question text answers remain unsupported
+  (R2-g); the fallback says so and points to web. Settled/disposed cards never initiate this fallback.
+- Display labels are bounded by Unicode code points (button 40 / selector 80), while callbacks still map indices to the
+  original full labels. Quick buttons are limited to eight options, three columns per row; selectors admit at most 99
+  options plus Skip. Larger controls/serialized JSON >20000 bytes use the text card. Oversized text fields shrink in
+  stages; content too large even then explicitly points to the complete web questions, never claims to contain them all.
+- `web-hub feishu:` events `dialog-refresh-skipped`, `card-patch-failed`, `dialog-text-fallback` explain gates/PATCH failures.
+  Samples are keyed by static event/reason, once/minute, at most 20/minute, with 64 retained keys. No ids, bodies, questions,
+  URLs or secrets. PATCH logs include numeric API code and a safe `msg`: known validation messages/inner ErrCode are kept;
+  unknown platform prose/`ErrorValue` is omitted because it can reflect card content.
+- All Feishu deep links use one selector: valid `lan.externalOrigins[0]` → most recently cookie-authenticated direct-LAN
+  Host (revalidated against the LIVE allow-list, memory only) → first non-loopback allowed LAN Host → loopback listener.
+  The host snapshot carries the actual LAN listener port. Public/failed-auth/Host-rejected requests cannot update it.
+  Invalid injected links retain `web 会话页面`; before a listener binds, absent other evidence yields the same fallback.
+  This is link selection only: no authentication or host-admission rules are widened.
+
+Evidence, implementation coordinates and gate output: [ask-card-fix-report.md](ask-card-fix-report.md).
+
 ## 7. Files
 
 ### 7.1 Inbound (`files.ts`, R1 #15)

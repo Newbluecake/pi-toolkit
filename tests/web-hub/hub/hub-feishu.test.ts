@@ -8,7 +8,7 @@ import {
   type StartHubDeps,
   installProcessHandlers,
 } from "../../../src/web-hub/hub/hub.js";
-import type { FrontendDeps, FrontendFactory } from "../../../src/web-hub/hub/ports.js";
+import type { FrontendDeps, FrontendFactory, HostSnapshot, HubLanConfig } from "../../../src/web-hub/hub/ports.js";
 import type { FeishuBotService, FeishuBotServiceDeps } from "../../../src/web-hub/hub/feishu/service.js";
 import { createCredentialStore } from "../../../src/web-hub/hub/feishu/credentials.js";
 import { systemFeishuClock } from "../../../src/web-hub/hub/feishu/http.js";
@@ -52,6 +52,8 @@ async function rig(
   opts: {
     enabled?: boolean;
     lan?: boolean;
+    lanConfig?: HubLanConfig;
+    hostSnapshot?: () => HostSnapshot;
     credentials?: boolean;
     spawn?: boolean;
     frontend?: FrontendFactory;
@@ -90,6 +92,7 @@ async function rig(
     ((deps) => {
       frontendDeps = deps;
       return {
+        ...(opts.hostSnapshot ? { lanHostSnapshot: opts.hostSnapshot } : {}),
         listen: async () => ({ port: 43210 }),
         close: async () => {
           order.push("http.close");
@@ -107,7 +110,11 @@ async function rig(
     config({
       home,
       idleExitMinutes: 1,
-      ...(opts.lan ? { lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } } : {}),
+      ...(opts.lanConfig
+        ? { lan: opts.lanConfig }
+        : opts.lan
+          ? { lan: { port: 0, extraHosts: [], trustProxyFrom: [], externalOrigins: [] } }
+          : {}),
       ...(opts.enabled === false ? {} : { feishuBot: botConfig }),
       ...(opts.spawn
         ? {
@@ -202,6 +209,43 @@ describe("FA real hub composition + fake Feishu transports", () => {
     expect(decision).toHaveBeenCalledTimes(1);
   });
 
+  it("all bot deep links share the live LAN-host selection and authenticated-host observation", async () => {
+    const snapshot: HostSnapshot = {
+      gen: 1,
+      computedAt: NOW,
+      omitted: [],
+      hostKeys: new Set(["127.0.0.1:8787", "192.168.32.10:8787", "10.8.0.1:8787"]),
+      externalOrigins: new Set(),
+      trustProxyFrom: new Set(),
+    };
+    const r = await rig({
+      lanConfig: { port: 8787, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },
+      hostSnapshot: () => snapshot,
+    });
+    expect(r.botDeps.link!("key")).toBe("http://192.168.32.10:8787/#/agent/key");
+    r.frontendDeps.lan!.onAuthenticated!({
+      kind: "lan",
+      peerIp: "10.8.0.3",
+      clientIp: "10.8.0.3",
+      viaTrustedProxy: false,
+      scheme: "http",
+      hostKey: "10.8.0.1:8787",
+      externalOrigin: "http://10.8.0.1:8787",
+      snapshot,
+    });
+    expect(r.botDeps.link!("key")).toBe("http://10.8.0.1:8787/#/agent/key");
+  });
+  it("trusted reverse-proxy external origin wins for bot notices and dialog links", async () => {
+    const r = await rig({
+      lanConfig: {
+        port: 8787,
+        extraHosts: [],
+        trustProxyFrom: ["127.0.0.1"],
+        externalOrigins: ["https://phone.example.com"],
+      },
+    });
+    expect(r.botDeps.link!("key")).toBe("https://phone.example.com/#/agent/key");
+  });
   it("off: no service, caps, bot disk, transports or admin bus traffic; limiter remains available to HTTP", async () => {
     const wrap = vi.fn((s: FeishuBotService) => s);
     const r = await rig({ enabled: false, wrap });

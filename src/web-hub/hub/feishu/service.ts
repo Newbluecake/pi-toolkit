@@ -45,6 +45,8 @@ import { createFeishuOutbox, type OutboxTarget, type OutboxMessage, type Settled
 import { renderReply, renderNotice, neutralizeMarkdown } from "./render.js";
 import { createFeishuRuns, type FeishuRunEvent, type FeishuRunResult } from "./runs.js";
 import { createFeishuDialogs } from "./dialogs.js";
+import { createFeishuDiagnostics, feishuPatchMessage } from "./diagnostics.js";
+import { safeFeishuLink } from "./link.js";
 import { createFeishuSessionCard } from "./session-card.js";
 import { createFeishuFiles, feishuFileCandidates, type FeishuFilesDeps } from "./files.js";
 import { createFeishuNotify, type FeishuIdleEvidence } from "./notify.js";
@@ -103,6 +105,7 @@ export interface FeishuBotServiceDeps {
     code?: string | number;
     eventType?: string;
     messageType?: string;
+    msg?: string;
   }): void;
   // Testable platform seams; none changes destination admission.
   clock?: FeishuClock;
@@ -388,10 +391,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     };
     const sessions = createFeishuSessions({ ...deps.sessions, bindings: state.bindings.list }, clock.now);
     const label = (sid: string) => sessions.rows().find((r) => r.sessionId === sid)?.label ?? sid.slice(0, 6);
-    const link = (agentKey: string) => {
-      const value = deps.link?.(agentKey);
-      return value && /^https?:\/\//.test(value) && !/[\p{Cc}]/u.test(value) ? value : "web 会话页面";
-    };
+    const link = (agentKey: string) => safeFeishuLink(deps.link?.(agentKey));
+    const diagnose = createFeishuDiagnostics(deps.log, clock.now);
     const targetFor = (r: {
       chatType: "p2p" | "group";
       threadId?: string | undefined;
@@ -541,11 +542,25 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       }
       return promise;
     }
-    async function patch(messageId: string, card: string) {
-      if (!active) return;
-      const result = await bounded(api.patchCard({ messageId, card }), 8_000, clock);
+    async function patch(messageId: string, card: string): Promise<FeishuResult<void>> {
+      if (!active) return { ok: false, kind: "aborted", reason: "inactive", retryable: false, effect: "none" };
+      let result: FeishuResult<void>;
+      try {
+        result = await bounded(api.patchCard({ messageId, card }), 8_000, clock);
+      } catch {
+        result = { ok: false, kind: "timeout", reason: "patch-unconfirmed", retryable: false, effect: "unknown" };
+      }
       if (result.ok) capability("cards", true);
-      else if (result.capabilityDenied) capability("cards", false);
+      else {
+        diagnose({
+          event: "card-patch-failed",
+          reason: result.reason,
+          ...(result.code === undefined ? {} : { code: result.code }),
+          msg: feishuPatchMessage(result.msg),
+        });
+        if (result.capabilityDenied) capability("cards", false);
+      }
+      return result;
     }
     const admission = createFeishuAdmission({
       state,
@@ -684,6 +699,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       patch,
       deleteMessage: (messageId) => api.deleteMessage({ messageId }),
       notice: bindingNotice,
+      log: diagnose,
     });
     const sessionCard = createFeishuSessionCard({
       state,

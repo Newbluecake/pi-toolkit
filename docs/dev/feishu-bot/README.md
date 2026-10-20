@@ -50,7 +50,8 @@
 
 ### `ask_user`、图片与文件
 
-- 当前绑定会话出现 `ask_user` 时，机器人会发交互卡片。单问题可点选或按卡片短码发文字（如 `Q… 1`）；只有一个开放问题时可直接回答。多问题只支持卡片表单，卡片不可用时到 web 作答。
+- 当前绑定会话出现 `ask_user` 时，机器人会发交互卡片。单问题可点选或按卡片短码发文字（如 `#a1b2c3 1`）；只有一个开放问题时可直接回答。初始卡片就列出题目和编号选项，交互更新失败时保留/更新为可文字作答的卡片，不再只剩“等待作答”占位。多问题只支持卡片表单，卡片不可用时仍列出问题并引导到 web；飞书表单“其他”输入最多 1000 字符。
+- 飞书内的会话链接优先使用 `webHub.lan.externalOrigins[0]`，否则使用最近成功登录态请求访问的 LAN Host（仅内存、白名单复核），再退到第一个非回环 LAN Host；无可用 LAN 地址或未开启时退到 loopback。手机链接仍不对时，先从手机成功访问一次 LAN 页面，或正确配置反向代理 origin；未能生成有效链接时显示“web 会话页面”。源码更新后须 `/reload` → `/webhub restart` 才会替换旧 daemon。
 - TUI、web、飞书竞争同一 dialog，先成功者生效；迟到的卡片点击不会再次回答或自动重试。**2026-10-20 更新：**在其他端作答、取消或后台关闭，以及权威列表中已消失/过期的问题卡片，机器人会尝试撤回；撤回失败（如权限、超时、超过平台可撤回时限）只回退更新为“已在其他端作答”“已取消”或“对话已过期”，不反复重试。通过本张飞书卡片作答的消息保留“已通过飞书作答”。发送途中结算的卡片在消息 ID 返回后立即撤回；召回尝试先落盘，重启不重复执行（崩溃发生在落盘与实际撤回之间时可能留下原卡片）。重新连接时等待 agent 的权威 dialog 列表；30 秒未取得则显示“状态未知 — 在 web 查看”，不冒充已回答或撤回。
 - 入站图片/文件先下载到私有暂存区，再提交到共享 UploadStore，附本机路径进入请求。文件名会清理，长于 16 KiB 的文本转 `.txt` 附件，不静默截断。
 - 默认 `files.outbound:"auto"`：仅**私聊、可证明归属的结果、会话 canonical cwd 子树内、识别为图片且 ≤10 MiB**，每次最多自动发 3 张。其他可读候选文件给“发送”按钮（最多 5 个），点击时重新检查；群聊从不自动发图。`buttons` 关闭自动发送但保留按钮，`off` 连同 `/file` 一起关闭出站。
@@ -109,22 +110,23 @@
 
 先看 `/webhub status`（hub、spawn、版本）和 `/webhub feishu status`（机器人）。再看 hub 日志（默认 `~/.pi/agent/web-hub/hub.log`，实际位置以 `/webhub status` 为准）中的 `web-hub feishu:` 与脱敏拒绝代码；不要把凭据或消息正文贴到 issue。
 
-| 状态/现象                                              | 检查与处理                                                                                                |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `off` / 缺少 `fsb.v1` / “当前 hub 尚不支持”            | 核对顶层 enabled、webHub control；`/reload` → `/webhub restart`；确认运行的是新版 hub，不是旧 daemon。    |
-| `unconfigured` / `setup`                               | 执行 setup 或完成扫码；过期重开；取消用 cancel。仅 `/webhub feishu` 不带子命令会显示用法，不会开始注册。  |
-| `connecting` / 重连增加                                | 检查网络、代理、防火墙、飞书服务；不要同时开探针/第二个 hub。                                             |
-| `auth_failed`                                          | 凭据被撤销或错误（如 1000040345 / 10014）；确认应用后 `setup --replace`。自动重试至少间隔 10 分钟。       |
-| `conn_limit`                                           | 同应用连接冲突，先停另一端；自动重试约 5 分钟。没有这个报错也不能排除双连接分流。                         |
-| `degraded(credentials-unsafe)`                         | 检查文件 owner、0600/目录0700、是否软链/非普通文件；不自动覆盖。确认来源后安全修复权限或 reset 重新注册。 |
-| `degraded(state-corrupt)`                              | 先留存私有备份；连接器不会启动。TUI repair 会重建状态，或确认 reset；不手改 JSON 绕过校验。               |
-| `degraded(persist-failed)`                             | 检查磁盘、目录权限、I/O；持久化恢复后自动恢复接收，失败时不会抢先 ACK。                                   |
-| `degraded(ws-unavailable/close-timeout)`               | 检查 Node 原生 WebSocket、目标安全校验/网络；卡死连接需停止 hub 后重启。                                  |
-| `degraded(undecodable-events)`                         | 平台事件格式/编码变化；看 dropped 计数和脱敏日志，保留版本信息上报。                                      |
-| `capability-denied:cards/reactions/files/cardCallback` | 核对应用权限/事件订阅与租户策略；`caps` 的 `?` 是未证明而非禁止，`✗` 是拒绝。后续成功观察可清除对应降级。 |
-| `/use` ambiguous/offline、回复“无法确认归属”           | `/list` + 更长 sid 明确选择；到 web 看实际运行，不凭同正文自行重派。                                      |
-| `/new` 拒绝                                            | 查 spawn 开关、Linux probe、known/roots、真实路径确认与进程限额；known 下未知目录是设计拒绝。             |
-| 已绑定但没提醒/没自动发图                              | 查 notify、完整后台空闲证据、是否飞书发起、图片 canonical cwd/私聊/大小条件；不满足自动条件可有按钮。     |
+| 状态/现象                                              | 检查与处理                                                                                                                                                                                                                                    |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `off` / 缺少 `fsb.v1` / “当前 hub 尚不支持”            | 核对顶层 enabled、webHub control；`/reload` → `/webhub restart`；确认运行的是新版 hub，不是旧 daemon。                                                                                                                                        |
+| `unconfigured` / `setup`                               | 执行 setup 或完成扫码；过期重开；取消用 cancel。仅 `/webhub feishu` 不带子命令会显示用法，不会开始注册。                                                                                                                                      |
+| `connecting` / 重连增加                                | 检查网络、代理、防火墙、飞书服务；不要同时开探针/第二个 hub。                                                                                                                                                                                 |
+| `auth_failed`                                          | 凭据被撤销或错误（如 1000040345 / 10014）；确认应用后 `setup --replace`。自动重试至少间隔 10 分钟。                                                                                                                                           |
+| `conn_limit`                                           | 同应用连接冲突，先停另一端；自动重试约 5 分钟。没有这个报错也不能排除双连接分流。                                                                                                                                                             |
+| `degraded(credentials-unsafe)`                         | 检查文件 owner、0600/目录0700、是否软链/非普通文件；不自动覆盖。确认来源后安全修复权限或 reset 重新注册。                                                                                                                                     |
+| `degraded(state-corrupt)`                              | 先留存私有备份；连接器不会启动。TUI repair 会重建状态，或确认 reset；不手改 JSON 绕过校验。                                                                                                                                                   |
+| `degraded(persist-failed)`                             | 检查磁盘、目录权限、I/O；持久化恢复后自动恢复接收，失败时不会抢先 ACK。                                                                                                                                                                       |
+| `degraded(ws-unavailable/close-timeout)`               | 检查 Node 原生 WebSocket、目标安全校验/网络；卡死连接需停止 hub 后重启。                                                                                                                                                                      |
+| `degraded(undecodable-events)`                         | 平台事件格式/编码变化；看 dropped 计数和脱敏日志，保留版本信息上报。                                                                                                                                                                          |
+| `capability-denied:cards/reactions/files/cardCallback` | 核对应用权限/事件订阅与租户策略；`caps` 的 `?` 是未证明而非禁止，`✗` 是拒绝。后续成功观察可清除对应降级。                                                                                                                                     |
+| 问题卡停在文字卡、没有按钮/表单                        | 看 `dialog-refresh-skipped` 的静态 gate reason、`card-patch-failed` 的 API code/安全 msg，以及 `dialog-text-fallback`。单问题仍可用 `#短码 编号`；多问题到 web。相同原因每分钟最多记录一次（总计最多 20 条/分钟），不记录题目或原始平台回显。 |
+| `/use` ambiguous/offline、回复“无法确认归属”           | `/list` + 更长 sid 明确选择；到 web 看实际运行，不凭同正文自行重派。                                                                                                                                                                          |
+| `/new` 拒绝                                            | 查 spawn 开关、Linux probe、known/roots、真实路径确认与进程限额；known 下未知目录是设计拒绝。                                                                                                                                                 |
+| 已绑定但没提醒/没自动发图                              | 查 notify、完整后台空闲证据、是否飞书发起、图片 canonical cwd/私聊/大小条件；不满足自动条件可有按钮。                                                                                                                                         |
 
 ## 可选：飞书自定义机器人菜单
 
