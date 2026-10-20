@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-20
+
+### Added
+
+- **web-hub**: show ask_user questions in a movable floating window (`4698a169`)
+- **web-hub**: render images and layout HTML in Markdown file previews (`1d9e9bd0`)
+- **web-hub**: keep LAN trusted IPs per account and require 2FA again after a kick (`48879e90`)
+- **web-hub**: activate verified LAN second factors and device capabilities (LAN-I) (`377f8879`)
+- **web-hub**: wire capability-gated two-factor login and cancellation (LAN-G) (`e6dba500`)
+- **web-hub**: guide new-IP logins through authenticator or Feishu verification (LAN-G) (`171ed016`)
+- **web-hub**: wire trusted local two-factor setup and socket controls (LAN-F) (`c0509c70`)
+- **web-hub**: enroll and recover LAN second factors from the local terminal (LAN-F) (`7fc2f9b7`)
+- **web-hub**: wire Feishu security alerts and LAN approval decisions (LAN-E) (`45b40ee7`)
+- **web-hub**: alert on LAN security events and approve logins in Feishu (LAN-E) (`1fdb0c34`)
+- **web-hub**: wire LAN device sessions and verification methods (LAN-D) (`920042e7`)
+- **web-hub**: manage LAN login sessions and revoke devices (LAN-D) (`70a97446`)
+- **web-hub**: wire checked LAN login and staged factor rollout (LAN-I) (`e8700935`)
+- **web-hub**: unify LAN login completion and factor verification (LAN-C) (`bb208b11`)
+- **web-hub**: wire LAN idle policy and secure store contracts (LAN-I) (`e8cb7332`)
+- **web-hub**: persist secure LAN sessions and two-factor state (LAN-B) (`da825dd9`)
+- **web-hub**: wire shared LAN client guards and allowlist status (LAN-I) (`14e5f29c`)
+- **web-hub**: guard LAN and proxy clients with IP allowlists (LAN-A) (`f76fa713`)
+- **web-hub**: LAN security frozen surfaces (P0, not wired) (`b5d2a7fd`)
+
+### Fixed
+
+- **web-hub**: parse external image hosts without a URL base literal (`c4d4b4fd`)
+- **web-hub**: show the whole TOTP enrollment QR in /webhub 2fa enroll (`1e25e132`)
+- **cache-ttl**: prove keepalive pings on lines that report cache usage only at stream end (`ec42b677`)
+- **web-hub**: pull the proxy entry next to the settings gear and pad the gear off the edge on phones (`54e513db`)
+- **web-hub**: drop the version dot next to the settings gear on phones (`b16333d1`)
+- **cache-ttl**: make the keepalive no-usage breaker per line and lift it without cooldown (`87dfd7d3`)
+- **web-hub**: don't push Feishu messages for prompts that can't be answered in Feishu (`8216c533`)
+- **web-hub**: attribute ask_user prompts to their dialog so Feishu stops sending duplicate waiting notices (`99e3ab39`)
+
+### Documentation
+
+- document LAN security, 2FA and account commands in the README and web-hub guide (`7b6699eb`)
+- describe LAN security in AGENTS.md (`efb7caaa`)
+- **web-hub**: record LAN security phase-2 integration and final gates (LAN-I) (`638f091b`)
+- **web-hub**: record LAN-D verify follow-ups and the session method ruling (`df26bbbf`)
+- **web-hub**: record LAN phase-1 verify follow-ups for the integrator (`e945416b`)
+- **web-hub**: LAN security integration follow-ups (`e42cf6ee`)
+- **web-hub**: LAN security P0 surface addendum (package rulings) (`b382a345`)
+
+### Tests
+
+- **web-hub**: include two-factor setup in command completion contract (LAN-F) (`b8545237`)
+- **web-hub**: supply explicit LAN guards in integration fixtures (LAN-D) (`186787f6`)
+
+Stats: 19 feat, 8 fix, 7 docs, 2 test
+
 ## [0.6.2] - 2026-10-19
 
 ### Added
@@ -798,7 +850,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.5.5...v0.6.0
