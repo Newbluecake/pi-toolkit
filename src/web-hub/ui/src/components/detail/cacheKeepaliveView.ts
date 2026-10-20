@@ -141,6 +141,8 @@ export interface KeepaliveLastPingView {
   readonly kind: string;
   readonly status: number | undefined;
   readonly transient: boolean | undefined;
+  /** Line-scoped breaker kind (`proven-write`/`no-usage`): shown as a per-line chip, never 「永久」. */
+  readonly line: boolean;
   readonly attempts: number | undefined;
 }
 
@@ -155,6 +157,7 @@ export function lastPingView(wire: CacheKeepaliveWire): KeepaliveLastPingView | 
     kind: lp.kind,
     status: num(rec["status"]),
     transient: typeof rec["transient"] === "boolean" ? rec["transient"] : undefined,
+    line: rec["line"] === true,
     attempts: num(rec["attempts"]),
   };
 }

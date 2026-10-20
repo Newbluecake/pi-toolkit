@@ -17,6 +17,7 @@ import {
   createInitialWindowState,
   evaluateTick,
   isSuccessfulRealRequest,
+  lineKeyOf,
   inspectPayload,
   invalidate,
   onPingStarted,
@@ -681,11 +682,22 @@ describe("I-K8 — epoch mismatch is a silent, total no-op", () => {
 // ---------------------------------------------------------------------------
 
 describe("I-K7 — session-level breaker (proven-hit only)", () => {
-  it("a single proven-write disables the session immediately", () => {
+  it("a single proven-write trips the LINE breaker immediately and never disables the session (2026-10-20)", () => {
     const window = armedWindow({ windowEpoch: 1 });
     const result = onUnproven(window, baseSession(), 1, "proven-write", 100);
     expect(result.session.provenWrites).toBe(1);
-    expect(result.session.disabled).toEqual({ reason: "proven-write", at: 100 });
+    expect(result.session.disabled).toBeUndefined();
+    expect(result.session.nonTransientConsecutiveUnproven).toBe(0);
+    expect(result.session.nonTransientUnprovenTotal).toBe(0);
+    const key = lineKeyOf(fingerprint())!.key;
+    expect(result.session.provenWriteStates[key]).toMatchObject({
+      open: true,
+      trips: 1,
+      openedAt: 100,
+      resetEligibleAt: 100,
+    });
+    expect(result.session.lineStates).toEqual({});
+    expect(result.session.noUsageStates).toEqual({});
   });
 
   it(`${UNPROVEN_STREAK_LIMIT} consecutive no-usage results open the LINE breaker, never session.disabled (2026-10-20)`, () => {
@@ -827,8 +839,8 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     expect(recovered.consecutiveUnproven).toBe(0);
   });
 
-  it("does not recover from an errored/aborted real request, proven-write, or a permanent mixed case", () => {
-    const permanent = baseSession({ disabled: { reason: "proven-write", at: 5 }, provenWrites: 1 });
+  it("does not recover from an errored/aborted real request or a permanent session disable; a proven-write LINE breaker needs the same-line success", () => {
+    const permanent = baseSession({ disabled: { reason: "no-cache-value", at: 5 } });
     expect(onSuccessfulRealRequest(permanent, true)).toBe(permanent);
 
     let session = baseSession();
@@ -838,9 +850,22 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
       session = result.session;
       window = { ...result.window, windowEpoch: 1 };
     }
-    const mixed = onUnproven(window, session, 1, "proven-write", 3).session;
-    expect(mixed.disabled).toEqual({ reason: "proven-write", at: 3 });
-    expect(onSuccessfulRealRequest(mixed, true)).toBe(mixed);
+    // fresh armed window: the line key comes from the window's capture (a stopped window has none).
+    const mixed = onUnproven(armedWindow({ windowEpoch: 1 }), session, 1, "proven-write", 3).session;
+    // proven-write is line-level now: the earlier transient disable is untouched, the line breaker is added.
+    expect(mixed.disabled).toMatchObject({ reason: "malformed", transient: true });
+    const line = lineKeyOf(fingerprint())!;
+    expect(mixed.provenWriteStates[line.key]?.open).toBe(true);
+    // a success WITHOUT line attribution recovers the transient pause but leaves the line breaker
+    const noLine = onSuccessfulRealRequest(mixed, true);
+    expect(noLine.disabled).toBeUndefined();
+    expect(noLine.provenWriteStates[line.key]?.open).toBe(true);
+    // a failed real request never lifts anything
+    expect(onSuccessfulRealRequest(mixed, false, { line, now: 9 })).toBe(mixed);
+    // the same-line success lifts it (no cooldown, no cache-usage requirement)
+    const lifted = onSuccessfulRealRequest(mixed, true, { line, now: 4 });
+    expect(lifted.provenWriteStates).toEqual({});
+    expect(lifted.disabled).toBeUndefined();
   });
 
   it("recognizes only a usage-bearing, non-error assistant message as a successful real request", () => {
@@ -871,8 +896,12 @@ describe("I-K7 — session-level breaker (proven-hit only)", () => {
     // #29 r2 migration: a legacy transient pause is lifted on read-back (and idempotently so).
     expect(transient?.disabled).toBeUndefined();
     expect(transient?.transientUnprovenTotal).toBe(0);
-    const permanent = readBackKeepaliveSessionState([snapshot({ reason: "proven-write", at: 11 })]);
-    expect(permanent?.disabled).toEqual({ reason: "proven-write", at: 11 });
+    // 2026-10-20: a legacy permanent proven-write disable migrates to a wildcard line breaker.
+    const legacy = readBackKeepaliveSessionState([snapshot({ reason: "proven-write", at: 11 })]);
+    expect(legacy?.disabled).toBeUndefined();
+    expect(legacy?.provenWriteStates["*"]).toMatchObject({ open: true, openedAt: 11, trips: 1 });
+    const permanent = readBackKeepaliveSessionState([snapshot({ reason: "no-cache-value", at: 11 })]);
+    expect(permanent?.disabled).toEqual({ reason: "no-cache-value", at: 11 });
   });
 
   it("preserves a valid httpStatus through snapshot read-back and drops invalid ones", () => {
@@ -1653,7 +1682,7 @@ describe("r7 §3.4 — ruling-6 residual note, activation-disabled report, never
     const on = renderKeepaliveReportLines(report({ enabled: true }));
     expect(on).toContain(KEEPALIVE_EXTENSION_HEADER_NOTE);
     expect(KEEPALIVE_EXTENSION_HEADER_NOTE).toBe(
-      "note: headers added by other extensions are not replayed — if they steer routing/cache, pings may write to another backend; keepalive stops for this session once a current-epoch proven-write is observed",
+      "note: headers added by other extensions are not replayed — if they steer routing/cache, pings may write to another backend; keepalive stops on this line (not the whole session) once a current-epoch proven-write is observed, and resumes after the next successful real request on it",
     );
     // wording must NOT claim the unknown cost is bounded to one ping
     expect(KEEPALIVE_EXTENSION_HEADER_NOTE).not.toMatch(/one ping|at most one|single ping/i);

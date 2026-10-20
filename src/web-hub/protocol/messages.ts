@@ -492,6 +492,8 @@ export interface CacheKeepaliveLastPingWire {
   kind: string;
   status?: number;
   transient?: boolean;
+  /** 2026-10-20: a line-scoped breaker kind (`proven-write` / `no-usage`) — neither session-permanent nor a transient retry. Append-only. */
+  line?: boolean;
   attempts?: number;
 }
 /** cache-keepalive-web plan §2/D11: `StatusInfo.cacheKeepalive` body. Deliberately has no `armed`. */
@@ -1441,6 +1443,7 @@ export const CacheKeepaliveWireSchema = Type.Object(
           kind: CKStr(),
           status: Type.Optional(Type.Number()),
           transient: Type.Optional(Type.Boolean()),
+          line: Type.Optional(Type.Boolean()),
           attempts: Type.Optional(Type.Number()),
         },
         { additionalProperties: true },

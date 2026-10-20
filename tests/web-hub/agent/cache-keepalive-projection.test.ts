@@ -188,9 +188,37 @@ describe("lastPing / disabled / window / session mapping", () => {
     expect(n.lastPing).toMatchObject({ kind: "network", transient: true });
     expect("status" in n.lastPing!).toBe(false);
   });
-  it("/reload: falls back to session.lastUnproven (kind, at, transient only)", () => {
+  it("/reload: falls back to session.lastUnproven (kind, at, transient, line only)", () => {
     const w = proj(input(report({}, { lastUnproven: { kind: "proven-write", at: 77 } })))!;
-    expect(w.lastPing).toEqual({ at: 77, kind: "proven-write", transient: false });
+    // line-scoped kind (2026-10-20): flagged `line` so the UI never labels it 「永久」/permanent
+    expect(w.lastPing).toEqual({ at: 77, kind: "proven-write", transient: false, line: true });
+  });
+  it("line-scoped kinds (proven-write / no-usage) carry `line`; http / network / proven-hit do not; schema-valid", () => {
+    for (const kind of ["proven-write", "no-usage"]) {
+      const w = proj(input(report({ lastPingDiagnostics: diag({ outcomeKind: kind }) })))!;
+      expect(w.lastPing).toMatchObject({ kind, transient: false, line: true });
+      expect(Value.Check(CacheKeepaliveWireSchema, w)).toBe(true);
+    }
+    for (const kind of ["http", "network", "proven-hit"]) {
+      const w = proj(input(report({ lastPingDiagnostics: diag({ outcomeKind: kind }) })))!;
+      expect("line" in w.lastPing!).toBe(false);
+    }
+  });
+  it("an open proven-write line breaker alone makes the slot present: `ping off:proven-write` (line-off), no `disabled`, no 永久 rows (reuses the no-usage rendering)", () => {
+    const key = "Lpw";
+    const r = report(
+      { currentLineKey: key },
+      { provenWriteStates: { [key]: line({ open: true, label: "cr-anthropic/claude-opus-5-5@cloudrouter" }) } },
+    );
+    const w = proj(input(r))!;
+    expect(w).toBeDefined();
+    expect(w.ping).toEqual({ text: "ping off:proven-write", state: "line-off" });
+    expect(w.disabled).toBeUndefined();
+    expect(w.lines).toEqual([]);
+    expect(Value.Check(CacheKeepaliveWireSchema, w)).toBe(true);
+    // another line is current ⇒ the marker is not shown for it
+    const other = proj(input({ ...r, currentLineKey: "Lother" }))!;
+    expect(other.ping?.text ?? "").not.toContain("proven-write");
   });
   it("disabled mapping: reason truncated to 64B, transient only when true", () => {
     const w = proj(

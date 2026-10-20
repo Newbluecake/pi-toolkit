@@ -442,6 +442,52 @@ describe("child keepalive ledger (T-K9): unpriced model never pings", () => {
   });
 });
 
+describe("child keepalive wiring — proven-write is a line breaker lifted by a successful real response (2026-10-20)", () => {
+  it("a paid ping write trips the line without disabling the run; a later successful message_end on the same route lifts it", async () => {
+    const fetchImpl = vi.fn(async () =>
+      fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 0, cache_creation_input_tokens: 186_000 })]),
+    );
+    const ctx = fakeCtx("child-proven-write");
+    const { pi, emit, appended } = fakePi();
+    vi.stubGlobal("fetch", fetchImpl);
+    vi.useFakeTimers();
+    try {
+      expect(wireChildKeepalive(pi, settingsWith())).toBeDefined();
+      await emit("before_provider_request", { payload: ephemeralPayload() }, ctx);
+      await emit("turn_end", {}, ctx);
+      await emit("tool_execution_start", {}, ctx);
+      await vi.advanceTimersByTimeAsync(245_000);
+      await flush();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const audits = () => appended.map((e) => e.data as Record<string, unknown>);
+      expect(audits().find((d) => d.kind === "unproven")).toMatchObject({
+        unprovenKind: "proven-write",
+        disabled: false,
+        lineOpen: true,
+      });
+      expect(audits().some((d) => d.kind === "line-reset")).toBe(false);
+
+      // an errored response never lifts it; a successful one on the same route does
+      const msg = (stopReason: string) => ({
+        message: {
+          role: "assistant",
+          provider: "anthropic",
+          model: "claude-x",
+          stopReason,
+          usage: { input: 100, cacheRead: 0, cacheWrite: 0 },
+        },
+      });
+      await emit("message_end", msg("error"), ctx);
+      expect(audits().some((d) => d.kind === "line-reset")).toBe(false);
+      await emit("message_end", msg("stop"), ctx);
+      expect(audits().some((d) => d.kind === "line-reset")).toBe(true);
+    } finally {
+      getChildKeepaliveDisposeRegistry().disposeSession("child-proven-write");
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("legacy zero and tier usage in child wiring", () => {
   it("old zero still registers; same-response full input crosses multiple tiers", async () => {
     const cfg = parseCacheTtlSettings({ keepalive: true, keepaliveMaxPings: 0 });

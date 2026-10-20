@@ -437,7 +437,9 @@ describe("/cache-ttl status — ruling-6 residual note (extension-added headers 
   it("is shown whenever keepalive is enabled, with the observed-only wording (no one-ping bound claimed)", async () => {
     const text = await statusText(true);
     expect(text).toContain(KEEPALIVE_EXTENSION_HEADER_NOTE);
-    expect(text).toContain("keepalive stops for this session once a current-epoch proven-write is observed");
+    expect(text).toContain(
+      "keepalive stops on this line (not the whole session) once a current-epoch proven-write is observed",
+    );
     expect(text).not.toMatch(/at most one|only one ping|bounded to one/i);
   });
 

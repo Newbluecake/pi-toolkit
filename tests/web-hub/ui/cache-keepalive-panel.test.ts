@@ -160,6 +160,21 @@ describe("CacheKeepalivePanel.vue — expanded kv (§4.2 items 1–6)", () => {
     expect(kv).not.toContain("attempts");
   });
 
+  it("line-scoped lastPing (proven-write / no-usage) shows the per-line tag, never `permanent` (2026-10-20)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    for (const kind of ["proven-write", "no-usage"]) {
+      const w = await openPanel(wire({ lastPing: { at: NOW - 60_000, kind, transient: false, line: true } }));
+      const kv = w.find(".ck-kv").text();
+      expect(kv).toContain(kind);
+      expect(kv).toContain("per-line");
+      expect(kv).not.toContain("permanent");
+      expect(w.find('.ck-chip[data-kind="line"]').exists()).toBe(true);
+      expect(w.find('.ck-chip[data-kind="permanent"]').exists()).toBe(false);
+      w.unmount();
+    }
+  });
+
   it("permanent tag shows when transient === false; lastPing absent ⇒ placeholder", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);

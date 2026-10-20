@@ -310,12 +310,17 @@ describe("A3 real keepalive service pipeline", () => {
     await env.session.prompt("next window");
     env.service().noteUiPromptStart(env.session.sessionId, env.service().instanceId);
     env.clock.advance(240_000);
-    await until(() => env.service().report().session.disabled?.reason === "proven-write", "real write trips breaker");
+    await until(
+      () => Object.values(env.service().report().session.provenWriteStates).some((r) => r.open),
+      "real write trips the line breaker",
+    );
+    expect(env.service().report().session.disabled).toBeUndefined(); // line-level, never session-permanent (2026-10-20)
     const persisted = readBackKeepaliveSessionState(env.session.sessionManager.getBranch());
-    expect(persisted?.disabled?.reason).toBe("proven-write");
+    expect(persisted?.disabled).toBeUndefined();
+    expect(Object.values(persisted!.provenWriteStates).some((r) => r.open)).toBe(true);
     await env.reload();
     expect(env.service().report().activationDisabled).toBeUndefined();
-    expect(env.service().report().session.disabled).toEqual(persisted!.disabled);
+    expect(env.service().report().session.provenWriteStates).toEqual(persisted!.provenWriteStates);
   });
 
   it("pipeline auth failure is not-sent/refunded, never a transport-unsupported latch", async () => {

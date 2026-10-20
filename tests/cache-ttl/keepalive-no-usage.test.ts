@@ -150,12 +150,11 @@ describe("no-usage is a line-level breaker", () => {
     expect(other.decision).not.toMatchObject({ kind: "skip", reason: "session-disabled" });
   });
 
-  it("proven-write stays a permanent session-level disable that no success lifts", () => {
+  it("proven-write is NOT a session-level disable (2026-10-20: own line map, see keepalive-proven-write.test.ts); it never lands in noUsageStates", () => {
     const w = onUnproven(win(), createInitialSessionTotals(), 1, "proven-write", 1 as never).session;
-    expect(w.disabled?.reason).toBe("proven-write");
+    expect(w.disabled).toBeUndefined();
     expect(w.noUsageStates).toEqual({});
-    const after = onSuccessfulRealRequest(w, true, { line: lineKey(), now: 999 as never, cacheUsage: true });
-    expect(after.disabled?.reason).toBe("proven-write");
+    expect(w.provenWriteStates[lineKey().key]?.open).toBe(true);
   });
 });
 
@@ -242,10 +241,11 @@ describe("no-usage persistence / migration / reset", () => {
     ).toEqual({});
   });
 
-  it("does not migrate proven-write; sanitizes dirty noUsageStates without throwing", () => {
+  it("a legacy proven-write disable migrates to the proven-write map, not noUsageStates; sanitizes dirty noUsageStates without throwing", () => {
     const pw = readBackKeepaliveSessionState([entry({ disabled: { reason: "proven-write", at: 1 } })])!;
-    expect(pw.disabled?.reason).toBe("proven-write");
+    expect(pw.disabled).toBeUndefined();
     expect(pw.noUsageStates).toEqual({});
+    expect(pw.provenWriteStates[LINE_KEY_WILDCARD]?.open).toBe(true);
     for (const bad of [[], "x", 7, { "bad key": { label: "x", updatedAt: 1 } }]) {
       expect(readBackKeepaliveSessionState([entry({ noUsageStates: bad })])!.noUsageStates).toEqual({});
     }

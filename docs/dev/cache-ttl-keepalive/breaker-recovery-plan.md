@@ -569,3 +569,14 @@ line armed: 2 closed record(s) with history                                     
   `/cache-ttl status` 增行 `line off: <label> · no-usage · per-line, lifts on the next real response that reports cache usage (no cooldown)`。
 - **已披露残余**：(1) no-usage 的 200 响应可能已计费（与 4xx 不同），线路化后每条线路最多再花 2–3 个 ping 才熔断，且每次带用量的真实成功后会重新计数——这是用户明确接受的取舍；
   (2) web-hub 的 `lineRows` 线路列表暂不展示 no-usage 行（线路 wire 无 reason 字段，append-only 契约未改），仅通过状态段 `ping off:no-usage` 可见。
+
+## 用户拍板 2026-10-20（二）：proven-write 线路化、无冷却（推翻「proven-write 仍永久会话级」）
+
+现场：cr-anthropic/claude-opus-5-5（cloudrouter）连续 19 次 hit，距上次真实请求 4 分钟的一次 ping 缓存已失效（read 0 / write 186k）⇒ 整个会话被永久停用保活。用户裁决：`proven-write` 不得再会话永久；与 no-usage 同构（见上一节），但**首次即熔断**、恢复条件更宽。
+
+- **线路级、首次即开**：`SessionTotals.provenWriteStates`（`Record<lineKey, LineState>`，独立于 `lineStates`/`noUsageStates`，同线路三类熔断互不污染计数/恢复条件；「reason」由所在 map 体现，未给 `LineState` 加字段）。线路键 `lineKeyOf`（不可得 ⇒ 通配 `"*"`）；`onUnproven("proven-write")` 立即写 `open:true, trips:1, resetEligibleAt=now`（无阈值——每多一次 ping 都会再付一次整段写入）。**不再**写 `session.disabled` / `nonTransient*`，别的线路照常 ping；`evaluateTick` 新增终局 skip `line-proven-write`（#3.7）。`provenWrites` 保留为单调统计量，**不再参与** `permanent` / `isPermanentThresholdMet` 判定（否则旧快照的非零值会让之后任何非线路类失败变成永久）。
+- **恢复（无冷却）**：`onSuccessfulRealRequest` 中任意一次成功真实请求只要线路一致（或熔断在通配）就立即删除记录——**不要求带缓存用量**（真实请求本身重建缓存；这是与 no-usage 的有意区别）。失败请求/无 options 不恢复（返回原引用）。切到别的线路 ⇒ 该线路无记录 ⇒ 恢复 ping；切回 ⇒ 仍熔断，直到那里一次成功真实请求。服务层沿用 `line-reset` 审计 + `syncExactTimer()+arm()` 重新武装。纯函数 `clearProvenWriteLine` 单独导出。
+- **子会话**：子会话服务不开 `recoverTransientFailures`（其余熔断仍不恢复，行为不变）；`noteRequestSettled` 在非恢复分支里**仅**对 proven-write 调 `clearProvenWriteLine`，`child.ts` 的 `message_end/turn_end` 现传 `isSuccessfulRealRequest`/`realRequestReportedCacheUsage`（此前恒传 false）。副作用（已知、接受）：子会话里「成功但无缓存用量」的真实响应现在也会清除 late-usage 学习的 pending，与主会话一致。
+- **迁移**：旧快照 `disabled{reason:"proven-write"}` 读回时迁移为通配 proven-write 熔断（`trips=1`，清零 `nonTransient*`），下一次成功真实请求即解除；幂等（新代码永不再写该 reason）。`/cache-ttl keepalive reset` 同时清空 `provenWriteStates`（计入 `openLines`，并置 `economicCleared`；`economicCleared` 现按「有开着的 proven-write 熔断或旧式 session 级 proven-write」判定，不再看单调的 `provenWrites`）；reset 文案改为「该线路下一次真实请求成功或切换模型后恢复」。
+- **展示**：当前线路（或通配）proven-write 打开 ⇒ `ping off:proven-write`（`line-off`，优先级 http > proven-write > no-usage，无 `·retry`/`·tN`）；`/cache-ttl status` 增行 `line off: <label> · proven-write · per-line, lifts on the next successful real request on this line or a model switch (no cooldown)`；header note 改为「stops on this line … resumes after the next successful real request on it」。web 面板：`lastPing.line:true`（proven-write/no-usage，append-only 可选字段，schema `additionalProperties` 本就开放）⇒ chip 「线路级 / per-line」，不再显示「永久」；`lines[]` 行列表不展示 proven-write（与 no-usage 同，沿用上一节披露残余 (2)，仅通过 `ping off:proven-write` 状态段可见）；投影的静默判定加入 `provenWriteStates`。
+- **已披露残余**：(1) 仍会付一次整段写入才熔断（首次即开已是最小代价）；(2) 熔断期间同线路不再 ping，窗口过期后缓存自然冷，下一次真实请求照常付写入——与不保活等价；(3) 同线路若真实请求持续失败则一直不恢复（需一次成功响应）。

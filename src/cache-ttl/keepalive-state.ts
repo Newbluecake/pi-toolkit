@@ -226,7 +226,11 @@ export interface SessionTotals {
   consecutiveUnproven: number;
   /** Legacy aggregate total, retained for status/readback compatibility. */
   unprovenTotal: number;
-  /** Monotonic — a single proven write disables the session forever. */
+  /**
+   * Monotonic count of `proven-write` pings (stats / `/cache-ttl status` only). Since the 2026-10-20 ruling a
+   * proven write trips the LINE breaker `provenWriteStates`, not the session — this counter no longer disables
+   * anything (a legacy snapshot's non-zero value is harmless).
+   */
   provenWrites: number;
   /** Transient-only breaker counters; the real-request recovery path clears these. */
   transientConsecutiveUnproven: number;
@@ -282,6 +286,18 @@ export interface SessionTotals {
    * Old snapshots lack it and read back as `{}` (a legacy `disabled{no-usage}` migrates into the wildcard).
    */
   noUsageStates: Readonly<Record<string, LineState>>;
+  /**
+   * Line-level `proven-write` breaker (2026-10-20 ruling, breaker-recovery-plan.md "proven-write per-line, no
+   * cooldown", supersedes the permanent session-level disable): a ping that found the cache gone and paid a
+   * full cache write trips the SAME line key IMMEDIATELY (first occurrence, no streak/total thresholds —
+   * every further ping would pay again). Kept apart from `lineStates`/`noUsageStates` so the three reasons
+   * never share counters or lift conditions; the map itself is the "reason". Never feeds `provenWrites`-
+   * driven session disables / `nonTransient*` / `disabled`. Cleared immediately (no cooldown) by ANY
+   * successful real request on the same line (a real request re-establishes the cache — unlike no-usage there
+   * is no cache-usage requirement). Old snapshots lack it and read back as `{}` (a legacy
+   * `disabled{proven-write}` migrates into the wildcard).
+   */
+  provenWriteStates: Readonly<Record<string, LineState>>;
 }
 
 /** Reserved key: a legacy / unresolvable-line http breaker; any successful real request resets it, no cooldown. */
@@ -352,11 +368,17 @@ export function isNoUsageOpen(session: SessionTotals, key: string): boolean {
   return session.noUsageStates[key]?.open === true || session.noUsageStates[LINE_KEY_WILDCARD]?.open === true;
 }
 
-/** Open breakers of both kinds (http lines + no-usage lines). */
+/** Is the line's (or the wildcard's) proven-write breaker open? */
+export function isProvenWriteOpen(session: SessionTotals, key: string): boolean {
+  return session.provenWriteStates[key]?.open === true || session.provenWriteStates[LINE_KEY_WILDCARD]?.open === true;
+}
+
+/** Open breakers of every line-level kind (http + no-usage + proven-write). */
 export function countOpenLines(session: SessionTotals): number {
   let n = 0;
   for (const rec of Object.values(session.lineStates)) if (rec.open) n += 1;
   for (const rec of Object.values(session.noUsageStates)) if (rec.open) n += 1;
+  for (const rec of Object.values(session.provenWriteStates)) if (rec.open) n += 1;
   return n;
 }
 
@@ -391,6 +413,7 @@ export function createInitialSessionTotals(): SessionTotals {
     discardedPings: 0,
     lineStates: {},
     noUsageStates: {},
+    provenWriteStates: {},
   };
 }
 
@@ -524,6 +547,7 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
       }
       if ("lineStates" in snapshot) next.lineStates = sanitizeLineStates(snapshot.lineStates);
       if ("noUsageStates" in snapshot) next.noUsageStates = sanitizeLineStates(snapshot.noUsageStates);
+      if ("provenWriteStates" in snapshot) next.provenWriteStates = sanitizeLineStates(snapshot.provenWriteStates);
       lastLacksLineStates = !("lineStates" in snapshot);
       if ("lastUnproven" in snapshot) {
         const last = record(snapshot.lastUnproven);
@@ -589,6 +613,30 @@ export function readBackKeepaliveSessionState(branch: readonly unknown[]): Sessi
         noUsageStates: { ...restored.noUsageStates, [LINE_KEY_WILDCARD]: rec },
       };
     }
+    // 2026-10-20 migration (idempotent): a legacy permanent session-level `disabled{proven-write}` becomes a
+    // wildcard proven-write line breaker that the next successful real request clears. The new code never
+    // writes `disabled.reason === "proven-write"`, so every such record is legacy by construction. The
+    // monotonic `provenWrites` counter is stats only now and is left as persisted.
+    if (restored !== undefined && restored.disabled?.reason === "proven-write") {
+      const d = restored.disabled;
+      const rec: LineState = {
+        label: "unknown line (legacy)",
+        consecutive: 0,
+        total: 0,
+        open: true,
+        openedAt: d.at,
+        trips: 1,
+        resetEligibleAt: d.at,
+        updatedAt: d.at,
+      };
+      restored = {
+        ...restored,
+        disabled: undefined,
+        nonTransientConsecutiveUnproven: 0,
+        nonTransientUnprovenTotal: 0,
+        provenWriteStates: { ...restored.provenWriteStates, [LINE_KEY_WILDCARD]: rec },
+      };
+    }
     // #29 r2 migration (idempotent): a legacy `disabled{transient:true}` pause is lifted on read-back.
     if (restored?.disabled?.transient === true) {
       restored = {
@@ -637,6 +685,7 @@ export type TickSkipReason =
   | "session-disabled"
   | "line-disabled"
   | "line-no-usage"
+  | "line-proven-write"
   | "no-capture"
   | "mode"
   | "not-anthropic"
@@ -822,6 +871,14 @@ export function evaluateTick(input: EvaluateTickInput): TickResult {
       line !== undefined ? isNoUsageOpen(session, line.key) : session.noUsageStates[LINE_KEY_WILDCARD]?.open === true
     ) {
       return skip("line-no-usage", true);
+    }
+    // #3.7 — line-level proven-write breaker (same line key; lifts on ANY same-line real success).
+    if (
+      line !== undefined
+        ? isProvenWriteOpen(session, line.key)
+        : session.provenWriteStates[LINE_KEY_WILDCARD]?.open === true
+    ) {
+      return skip("line-proven-write", true);
     }
   }
   // #4 — G2. child-ka-core: `allowHeadless` additionally allows "print" (a child
@@ -1223,8 +1280,8 @@ export function isTransientUnproven(kind: UnprovenKind, httpStatus?: number): bo
 }
 
 function isPermanentThresholdMet(session: SessionTotals): boolean {
+  // `provenWrites` is deliberately absent: a proven write is line-level now (2026-10-20), never session-permanent.
   return (
-    session.provenWrites >= 1 ||
     session.nonTransientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT ||
     session.nonTransientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT
   );
@@ -1289,8 +1346,31 @@ export function onSuccessfulRealRequest(
       }
       if (nuChanged !== undefined) next = { ...next, noUsageStates: nuChanged };
     }
+    next = clearProvenWriteLine(next, options.line);
   }
   return next;
+}
+
+/**
+ * proven-write breaker recovery (2026-10-20 ruling, NO cooldown): ANY successful real request on the same
+ * line (or the wildcard breaker, for any success) clears it — a real request re-establishes the cache the
+ * ping found gone, so unlike `no-usage` the response need not report cache usage. Pure; returns the same
+ * reference when nothing changes. Exported so the child keepalive service (which does not run the full
+ * transient-recovery path) can apply exactly this.
+ */
+export function clearProvenWriteLine(session: SessionTotals, line: LineRef | undefined): SessionTotals {
+  const pw = session.provenWriteStates;
+  let changed: Record<string, LineState> | undefined;
+  if (pw[LINE_KEY_WILDCARD]?.open === true) {
+    changed = { ...pw };
+    delete changed[LINE_KEY_WILDCARD];
+  }
+  const key = line?.key;
+  if (key !== undefined && pw[key]?.open === true) {
+    changed = changed ?? { ...pw };
+    delete changed[key];
+  }
+  return changed !== undefined ? { ...session, provenWriteStates: changed } : session;
 }
 
 /** Did this successful real response itself report cache usage (cache read > 0 or cache write > 0)? */
@@ -1322,11 +1402,13 @@ export function resetAllBreakers(session: SessionTotals): { session: SessionTota
       provenWrites: 0,
       lineStates: {},
       noUsageStates: {},
+      provenWriteStates: {},
     },
     summary: {
       sessionDisabled: session.disabled?.reason,
       openLines: countOpenLines(session),
-      economicCleared: session.provenWrites > 0,
+      economicCleared:
+        session.disabled?.reason === "proven-write" || Object.values(session.provenWriteStates).some((rec) => rec.open),
     },
   };
 }
@@ -1421,6 +1503,39 @@ export function onUnproven(
     lastStopReason: kind,
   };
   const transient = isTransientUnproven(kind, httpStatus);
+  if (kind === "proven-write") {
+    // Line-level path (2026-10-20 ruling): the ping paid a full cache write, so trip THIS line at once (no
+    // streak/total thresholds — another ping would pay again). Never session-level: touches neither
+    // session.disabled nor session.nonTransient*, so other lines keep pinging; a same-line real success lifts it.
+    const key = lineRef?.key ?? LINE_KEY_WILDCARD;
+    const label = lineRef?.label ?? "unknown line";
+    const prev = session.provenWriteStates[key];
+    const rec: LineState =
+      prev?.open === true
+        ? { ...prev, updatedAt: now }
+        : {
+            label,
+            consecutive: 1,
+            total: 1,
+            open: true,
+            openedAt: now,
+            trips: 1,
+            resetEligibleAt: now,
+            updatedAt: now,
+          };
+    return {
+      applied: true,
+      window: newWindow,
+      session: {
+        ...session,
+        unprovenTotal: session.unprovenTotal + 1,
+        consecutiveUnproven: session.consecutiveUnproven + 1,
+        provenWrites: session.provenWrites + 1,
+        lastUnproven: { kind, at: now },
+        provenWriteStates: capLineStates({ ...session.provenWriteStates, [key]: rec }),
+      },
+    };
+  }
   if (kind === "no-usage") {
     // Line-level path (2026-10-20 ruling): same per-line thresholds as an HTTP rejection, but no
     // backoff and never session-level — touches neither session.nonTransient* nor session.disabled.
@@ -1506,7 +1621,7 @@ export function onUnproven(
   const httpStatusField = kind === "http" ? sanitizeHttpStatus(httpStatus) : undefined;
   const unprovenTotal = session.unprovenTotal + 1;
   const consecutiveUnproven = session.consecutiveUnproven + 1;
-  const provenWrites = kind === "proven-write" ? session.provenWrites + 1 : session.provenWrites;
+  const provenWrites = session.provenWrites; // proven-write returned above (line-level); never counted here.
   // #29 r2: server-never-processed transients (network / 408/429/5xx) were already retried until
   // the cache window ran out; they never pause the session (the next window retries afresh) and
   // do not feed the transient breaker. Only possibly-billed transients (accepted-then-lost /
@@ -1524,9 +1639,7 @@ export function onUnproven(
     ? session.nonTransientUnprovenTotal
     : session.nonTransientUnprovenTotal + 1;
   const permanent =
-    provenWrites >= 1 ||
-    nonTransientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT ||
-    nonTransientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT;
+    nonTransientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT || nonTransientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT;
   const transientTrip =
     transientConsecutiveUnproven >= UNPROVEN_STREAK_LIMIT || transientUnprovenTotal >= UNPROVEN_TOTAL_LIMIT;
   const statusExtra = httpStatusField !== undefined ? { httpStatus: httpStatusField } : {};
@@ -1939,6 +2052,11 @@ export function pingSegmentParts(report: KeepaliveReport | undefined): PingSegme
       if (rec.trips >= 2) parts.tail = `·t${rec.trips}`;
       return parts;
     }
+    // Current line's proven-write breaker (no cooldown ⇒ no retry/tail suffix; lifts on ANY same-line real success).
+    const pw = report.currentLineKey !== undefined ? session.provenWriteStates[report.currentLineKey] : undefined;
+    if (pw?.open === true || session.provenWriteStates[LINE_KEY_WILDCARD]?.open === true) {
+      return { text: "ping off:proven-write", state: "line-off" };
+    }
     // Current line's no-usage breaker (no cooldown ⇒ no retry/tail suffix; lifts on a real response with cache usage).
     const nu = report.currentLineKey !== undefined ? session.noUsageStates[report.currentLineKey] : undefined;
     if (nu?.open === true || session.noUsageStates[LINE_KEY_WILDCARD]?.open === true) {
@@ -2042,7 +2160,7 @@ export function isKeepaliveWindowEnded(window: WindowState): boolean {
  * replayed. The wording deliberately claims no bound on the unknown cost.
  */
 export const KEEPALIVE_EXTENSION_HEADER_NOTE =
-  "note: headers added by other extensions are not replayed — if they steer routing/cache, pings may write to another backend; keepalive stops for this session once a current-epoch proven-write is observed";
+  "note: headers added by other extensions are not replayed — if they steer routing/cache, pings may write to another backend; keepalive stops on this line (not the whole session) once a current-epoch proven-write is observed, and resumes after the next successful real request on it";
 
 /** Multi-line `/cache-ttl status` body (plan.md §9.4's required field list). */
 export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
@@ -2098,6 +2216,12 @@ export function renderKeepaliveReportLines(report: KeepaliveReport): string[] {
         : "";
     lines.push(
       `line off: ${rec.label} · http${rec.status !== undefined ? ` ${rec.status}` : ""} · trips ${rec.trips}${eligible}`,
+    );
+  }
+  for (const rec of Object.values(session.provenWriteStates)) {
+    if (!rec.open) continue;
+    lines.push(
+      `line off: ${rec.label} · proven-write · per-line, lifts on the next successful real request on this line or a model switch (no cooldown)`,
     );
   }
   for (const rec of Object.values(session.noUsageStates)) {

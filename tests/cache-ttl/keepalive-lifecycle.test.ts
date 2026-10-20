@@ -285,7 +285,7 @@ describe("cache-keepalive service — I-K8 window-epoch guard (preemption + late
 });
 
 describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
-  it("disables the session forever after a proven-write, and a later real request does not revive it", async () => {
+  it("a proven-write trips the LINE breaker (never session.disabled); pings stop until a same-line real success lifts it (2026-10-20)", async () => {
     const fetchImpl = vi.fn(async () =>
       fakeOkResponse([messageStartChunk({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200 })]),
     ) as unknown as typeof fetch;
@@ -294,14 +294,25 @@ describe("cache-keepalive service — I-K7 proven-hit-only breaker", () => {
     service.noteRequestSettled("s1", service.instanceId);
     clock.advance(240_000);
     await flush();
-    expect(service.report().session.disabled?.reason).toBe("proven-write");
+    expect(service.report().session.disabled).toBeUndefined();
+    expect(Object.values(service.report().session.provenWriteStates).filter((r) => r.open)).toHaveLength(1);
 
+    // a new capture + a settle WITHOUT success never lifts it; the open line stops pinging
     service.noteRequest(capture({}, service.instanceId, 40_000));
     service.noteRequestSettled("s1", service.instanceId);
-    expect(service.report().session.disabled).toBeDefined(); // real request never resets it (I-K7)
+    expect(Object.values(service.report().session.provenWriteStates).filter((r) => r.open)).toHaveLength(1);
     clock.advance(500_000);
     await flush();
-    expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1); // never pings again
+    expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1); // no further (paid) ping
+    expect(service.report().lastSkip).toBe("line-proven-write");
+
+    // the next SUCCESSFUL real request on the same line lifts it at once (no cooldown, no cache-usage needed)
+    service.noteRequest(capture({}, service.instanceId, 600_000));
+    service.noteRequestSettled("s1", service.instanceId, true, { provider: "anthropic", modelId: "claude-x" }, 30_000);
+    expect(service.report().session.provenWriteStates).toEqual({});
+    clock.advance(240_000);
+    await flush();
+    expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2); // pings resume
   });
 
   it("opens the no-usage LINE breaker (not session.disabled) after two consecutive unproven results, closed by an intervening real request", async () => {
@@ -604,7 +615,8 @@ describe("cache-keepalive service — audit diagnostics (root-cause fix follow-u
     expect(data.unprovenKind).toBe("proven-write");
     expect(data.cacheCreationInputTokens).toBe(777);
     expect(data.cacheReadInputTokens).toBe(0);
-    expect(data.disabled).toBe(true); // a single proven-write disables the session (I-K7)
+    expect(data.disabled).toBe(false); // line-level now (2026-10-20): the session is NOT disabled
+    expect(data.lineOpen).toBe(true);
   });
 
   it("never leaks credentials into the audit trail: audit entries carry header SOURCE only, no auth material at all", async () => {

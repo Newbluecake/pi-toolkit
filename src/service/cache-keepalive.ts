@@ -39,6 +39,7 @@ import {
   onRealRequest,
   onRequestSettled,
   onSuccessfulRealRequest,
+  clearProvenWriteLine,
   countOpenLines,
   lineKeyOf,
   resetAllBreakers,
@@ -1499,7 +1500,11 @@ class CacheKeepaliveServiceImpl implements CacheKeepaliveService {
           now: this.clock.now(),
           cacheUsage: cacheUsage === true,
         })
-      : this.session;
+      : // Child keepalive (no full transient recovery): ONLY the proven-write line breaker lifts on a same-line
+        // real success (2026-10-20 ruling) — byte-compatible otherwise.
+        successful
+        ? clearProvenWriteLine(this.session, line)
+        : this.session;
     if (nextSession !== this.session) {
       const lineReset = countOpenLines(nextSession) < countOpenLines(this.session);
       this.session = nextSession;

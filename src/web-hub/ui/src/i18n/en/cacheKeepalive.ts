@@ -24,6 +24,7 @@ const cacheKeepalive = {
   lastPingAgo: "{age} ago",
   transientTag: "transient",
   permanentTag: "permanent",
+  lineTag: "per-line",
   rowWindow: "Window",
   rowSession: "This session",
   rowCacheRead: "cache read",

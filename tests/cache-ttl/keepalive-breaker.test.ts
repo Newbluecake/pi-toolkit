@@ -99,10 +99,11 @@ describe("line breaker state machine", () => {
     expect(s.nonTransientUnprovenTotal).toBe(0);
   });
 
-  it("proven-write keeps the permanent session path (no-usage is line-level: see the no-usage describe)", () => {
+  it("proven-write is line-level too (own map, see keepalive-proven-write.test.ts): never session.disabled, HTTP map untouched", () => {
     const w = onUnproven(win(), createInitialSessionTotals(), 1, "proven-write", 1 as never).session;
-    expect(w.disabled?.reason).toBe("proven-write");
+    expect(w.disabled).toBeUndefined();
     expect(Object.keys(w.lineStates)).toEqual([]);
+    expect(Object.values(w.provenWriteStates).filter((r) => r.open)).toHaveLength(1);
   });
 
   it("unresolvable line falls to the wildcard; any success deletes it", () => {
@@ -223,11 +224,14 @@ describe("line breaker state machine", () => {
     expect(s.lineStates[lineKey({ ctxModelId: `m${MAX_LINE_STATES - 1}` }).key]).toBeDefined();
   });
 
-  it("property: provenWrites sessions never get disabled cleared by a success; open ⇒ openedAt+resetEligibleAt", () => {
+  it("property: a permanent session disable is never cleared by a success; open ⇒ openedAt+resetEligibleAt", () => {
     let seed = 7;
     const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
     for (let run = 0; run < 50; run += 1) {
-      let s = onUnproven(win(), createInitialSessionTotals(), 1, "proven-write", 0 as never).session;
+      let s: SessionTotals = {
+        ...createInitialSessionTotals(),
+        disabled: { reason: "no-cache-value", at: 0 as never },
+      };
       let now = 1;
       for (let i = 0; i < 30; i += 1) {
         now += Math.floor(rnd() * 40 * MIN);
@@ -236,7 +240,7 @@ describe("line breaker state machine", () => {
         if (r < 0.4) s = reject(s, now, rnd() < 0.5 ? 403 : 401, f);
         else if (r < 0.8) s = onSuccessfulRealRequest(s, true, { line: lineKey(f), now: now as never });
         else s = onSuccessfulRealRequest(s, true);
-        expect(s.disabled?.reason).toBe("proven-write");
+        expect(s.disabled?.reason).toBe("no-cache-value");
         for (const rec of Object.values(s.lineStates)) {
           if (rec.open) {
             expect(rec.openedAt).toBeDefined();
@@ -258,7 +262,16 @@ describe("line breaker state machine", () => {
       loadBearingPings: 3,
     };
     const { session, summary } = resetAllBreakers(s);
+    // legacy session-level proven-write disable still counts as an economic clear
     expect(summary).toEqual({ sessionDisabled: "proven-write", openLines: 1, economicCleared: true });
+    // a line-level proven-write breaker counts as an open line AND an economic clear
+    const lineLevel = resetAllBreakers(
+      onUnproven(win(), reject(reject(createInitialSessionTotals(), 1), 2), 1, "proven-write", 3 as never).session,
+    );
+    expect(lineLevel.summary).toEqual({ sessionDisabled: undefined, openLines: 2, economicCleared: true });
+    expect(lineLevel.session.provenWriteStates).toEqual({});
+    // no economic breaker open ⇒ not economicCleared even though the monotonic counter stays > 0 after an auto-lift
+    expect(resetAllBreakers({ ...createInitialSessionTotals(), provenWrites: 3 }).summary.economicCleared).toBe(false);
     expect(session).toMatchObject({
       disabled: undefined,
       provenWrites: 0,
@@ -382,9 +395,13 @@ describe("persistence / migration", () => {
     const lifted = readBackKeepaliveSessionState([entry({ disabled: { reason: "http", at: 1, transient: true } })])!;
     expect(lifted.disabled).toBeUndefined();
     expect(lifted.lineStates).toEqual({});
+    // a legacy permanent proven-write disable is migrated (2026-10-20) — to the proven-write wildcard line breaker
+    const pw = readBackKeepaliveSessionState([entry({ disabled: { reason: "proven-write", at: 1 } })])!;
+    expect(pw.disabled).toBeUndefined();
+    expect(pw.provenWriteStates[LINE_KEY_WILDCARD]).toMatchObject({ open: true, trips: 1 });
     expect(
-      readBackKeepaliveSessionState([entry({ disabled: { reason: "proven-write", at: 1 } })])!.disabled?.reason,
-    ).toBe("proven-write");
+      readBackKeepaliveSessionState([entry({ disabled: { reason: "no-cache-value", at: 1 } })])!.disabled?.reason,
+    ).toBe("no-cache-value");
     const migrated = readBackKeepaliveSessionState([entry({ disabled: { reason: "http", at: 3 } })])!;
     const again = readBackKeepaliveSessionState([
       entry({ ...migrated, disabled: migrated.disabled ?? null, lastUnproven: null }),

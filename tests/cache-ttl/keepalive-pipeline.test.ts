@@ -186,12 +186,14 @@ describe("activation-only disable — capability probe at construction", () => {
   });
 
   it("/reload forgets activationDisabled but reads back real breakers (a fresh service on the same branch)", async () => {
-    // Service A: a real proven-write trips the permanent breaker; it persists via audit snapshots.
+    // Service A: a real proven-write trips the line breaker (2026-10-20); it persists via audit snapshots.
     const first = harness({ sendPipelinePing: scripted(provenWrite).send, persistSessionState: true });
     openWindow(first);
     first.clock.advance(240_000);
     await flush();
-    expect(first.service.report().session.disabled?.reason).toBe("proven-write");
+    expect(first.service.report().session.disabled).toBeUndefined();
+    const tripped = first.service.report().session.provenWriteStates;
+    expect(Object.values(tripped).filter((r) => r.open)).toHaveLength(1);
     // Service B (same branch, facade MISSING): activation-disabled AND still carries the breaker.
     const branch = (first.appendEntry.mock.calls as Array<[string, unknown]>).map(([customType, data]) => ({
       type: "custom",
@@ -200,18 +202,19 @@ describe("activation-only disable — capability probe at construction", () => {
     }));
     expect(branch.every((e) => e.customType === KEEPALIVE_AUDIT_CUSTOM_TYPE)).toBe(true);
     const restored = readBackKeepaliveSessionState(branch);
-    expect(restored?.disabled?.reason).toBe("proven-write");
+    expect(restored?.disabled).toBeUndefined();
+    expect(restored?.provenWriteStates).toEqual(tripped);
     const missing = harness(
       { restoredState: restored, persistSessionState: true },
       { modelRegistry: { find: vi.fn() } },
       { probeFacade: false },
     );
     expect(missing.service.report().activationDisabled).toBeDefined();
-    expect(missing.service.report().session.disabled?.reason).toBe("proven-write");
+    expect(missing.service.report().session.provenWriteStates).toEqual(tripped);
     // Service C (after /reload with a working facade): the activation-only disable is GONE, the breaker stays.
     const reloaded = harness({ restoredState: restored, persistSessionState: true });
     expect(reloaded.service.report().activationDisabled).toBeUndefined();
-    expect(reloaded.service.report().session.disabled?.reason).toBe("proven-write");
+    expect(reloaded.service.report().session.provenWriteStates).toEqual(tripped);
   });
 });
 

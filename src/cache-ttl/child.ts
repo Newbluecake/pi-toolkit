@@ -19,7 +19,12 @@ import { getChildKeepaliveLedger } from "./ping-ledger.js";
 import { getChildKeepaliveDisposeRegistry } from "./child-registry.js";
 import { getChildBashRegistry } from "../bash/child-registry.js";
 import { createCacheKeepaliveService, type CacheKeepaliveService } from "../service/cache-keepalive.js";
-import { realRequestInputTokens, type InvalidateReason } from "./keepalive-state.js";
+import {
+  isSuccessfulRealRequest,
+  realRequestInputTokens,
+  realRequestReportedCacheUsage,
+  type InvalidateReason,
+} from "./keepalive-state.js";
 import { prefixFromLedger, readLatestAssistantUsage } from "./usage-ledger.js";
 
 export interface ChildKeepaliveHandle {
@@ -154,9 +159,12 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
     svc.noteRequestSettled(
       safeSessionId(ctx),
       svc.instanceId,
-      false,
+      // 2026-10-20: a successful real response lifts the child's proven-write LINE breaker (no other
+      // breaker recovers in a child — see `noteRequestSettled`'s non-recovery branch).
+      isSuccessfulRealRequest(event.message),
       settledRouteOf(event.message),
       realRequestInputTokens(event.message),
+      realRequestReportedCacheUsage(event.message),
     );
     // O1/O3 evidence observation, same as the main session's message_end hook
     // (cache-ttl.ts): fold this message's usage into the shared evidence store and forward a
@@ -176,9 +184,12 @@ export function wireChildKeepalive(pi: ExtensionAPI, settings: AgentSettings): C
     svc?.noteRequestSettled(
       safeSessionId(ctx),
       svc.instanceId,
-      false,
+      // 2026-10-20: a successful real response lifts the child's proven-write LINE breaker (no other
+      // breaker recovers in a child — see `noteRequestSettled`'s non-recovery branch).
+      isSuccessfulRealRequest(event.message),
       settledRouteOf(event.message),
       realRequestInputTokens(event.message),
+      realRequestReportedCacheUsage(event.message),
     );
   });
   pi.on("agent_end", (_event, ctx) => {

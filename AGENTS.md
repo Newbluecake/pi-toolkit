@@ -204,13 +204,20 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   408/429/500/502/503/504/529; r2 2026-10-14). Never-processed transients (network / retryable HTTP) no longer
   pause the session — the next window retries afresh (legacy `disabled{transient:true}` snapshots are lifted on
   read-back); only possibly-billed transients (accepted-then-lost / malformed) still use the streak/total
-  limits, cleared by a successful real response. Proven writes remain a permanent session-level disable;
-  `/reload` restores the branch's breaker state. `no-usage` (200 without cache usage) is line-level too
+  limits, cleared by a successful real response. `/reload` restores the branch's breaker state. `no-usage` (200 without cache usage) is line-level too
   (`session.noUsageStates`, same line key and per-line streak/total thresholds, never `session.disabled`; user
   ruling 2026-10-20): it lifts with NO cooldown on a same-line real success whose response reported cache usage
   (read>0 or write>0 — a success without usage leaves it tripped), another line keeps pinging, a model switch
   resumes, switching back stays tripped until such a success; HUD `ping off:no-usage`; a legacy persisted
   `disabled{no-usage}` migrates to a wildcard no-usage breaker.
+  `proven-write` (the ping found the cache gone and paid a full write; user ruling 2026-10-20, supersedes the old
+  session-permanent disable) is line-level as well (`session.provenWriteStates`, same line key, own map so reasons
+  never share counters): it trips on the FIRST occurrence (no thresholds), never sets `session.disabled`, and lifts
+  with NO cooldown on ANY successful real request on that line (no cache-usage requirement — a real request re-
+  establishes the cache; unlike no-usage), another line keeps pinging, a model switch resumes, switching back stays
+  tripped until such a success; HUD `ping off:proven-write`; a legacy persisted `disabled{proven-write}` migrates to a
+  wildcard proven-write breaker; child keepalive lifts it the same way (only this breaker recovers in a child). The
+  web panel marks line-scoped last pings (`lastPing.line`, proven-write/no-usage) 「线路级」, never 「永久」.
   Non-transient HTTP rejections (4xx, zero-billing) are line-level (`session.lineStates`, key =
   provider+baseUrl+model): a same-line successful real request resets them (backoff 30m×2^(n-2) on repeat,
   cap 24h; legacy session-level http disables migrate to a wildcard breaker), and `/cache-ttl keepalive reset`

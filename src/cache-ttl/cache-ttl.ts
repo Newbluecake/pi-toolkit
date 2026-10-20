@@ -686,7 +686,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
             let text = `keepalive reset: cleared ${parts.join(" · ")} · resumes on next real request`;
             if (r.economicCleared) {
               text +=
-                "\n注意：已手动清除经济类熔断（proven-write）。若该线路 ping 仍会触发缓存写入，下一次写入会再次永久停用保活。";
+                "\n注意：已手动清除经济类熔断（proven-write）。若该线路 ping 仍会触发缓存写入，下一次写入会再次熔断该线路保活（该线路下一次真实请求成功或切换模型后恢复）。";
             }
             ctx.ui.notify(text, "info");
           }

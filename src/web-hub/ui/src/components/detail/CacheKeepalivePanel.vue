@@ -218,9 +218,15 @@ function lineChips(row: KeepaliveLineRow): string[] {
             <span
               v-if="lastPing.kind !== 'proven-hit'"
               class="ck-chip"
-              :data-kind="lastPing.transient === false ? 'permanent' : 'transient'"
+              :data-kind="lastPing.line ? 'line' : lastPing.transient === false ? 'permanent' : 'transient'"
             >
-              {{ lastPing.transient === false ? t("cacheKeepalive.permanentTag") : t("cacheKeepalive.transientTag") }}
+              {{
+                lastPing.line
+                  ? t("cacheKeepalive.lineTag")
+                  : lastPing.transient === false
+                    ? t("cacheKeepalive.permanentTag")
+                    : t("cacheKeepalive.transientTag")
+              }}
             </span>
             <span v-if="lastPingAttempts" class="ck-token" translate="no">{{ lastPingAttempts }}</span>
             <span v-if="lastPingAge" class="ck-age">{{ lastPingAge }}</span>

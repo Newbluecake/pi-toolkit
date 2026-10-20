@@ -38,6 +38,9 @@ const clip = (s: string, max: number): string => truncateText(s, max).text;
 const httpCode = (n: unknown): number | undefined =>
   typeof n === "number" && Number.isInteger(n) && n >= 100 && n <= 599 ? n : undefined;
 
+/** Kinds whose breaker is LINE-scoped and lifts on a real request / model switch (never session-permanent). */
+const isLineScopedKind = (kind: string): boolean => kind === "proven-write" || kind === "no-usage";
+
 interface Row {
   key: string;
   rec: LineState;
@@ -89,6 +92,7 @@ export function projectCacheKeepalive(
     snapshot.segments.length === 0 &&
     Object.keys(s.lineStates).length === 0 &&
     Object.keys(s.noUsageStates).length === 0 &&
+    Object.keys(s.provenWriteStates).length === 0 &&
     s.disabled === undefined &&
     s.lastUnproven === undefined &&
     report.lastPingDiagnostics === undefined &&
@@ -137,12 +141,18 @@ export function projectCacheKeepalive(
     const status = kind === "http" ? httpCode(diag.httpStatus) : undefined;
     if (status !== undefined) lp.status = status;
     if (kind !== "proven-hit") lp.transient = isTransientUnproven(kind as UnprovenKind, status);
+    if (isLineScopedKind(kind)) lp.line = true;
     if (typeof diag.attempts === "number" && Number.isFinite(diag.attempts))
       lp.attempts = Math.min(999, Math.max(1, Math.trunc(diag.attempts)));
     wire.lastPing = lp;
   } else if (s.lastUnproven !== undefined) {
     const kind = clip(s.lastUnproven.kind, KIND_MAX_BYTES);
-    wire.lastPing = { at: s.lastUnproven.at, kind, transient: isTransientUnproven(kind as UnprovenKind) };
+    wire.lastPing = {
+      at: s.lastUnproven.at,
+      kind,
+      transient: isTransientUnproven(kind as UnprovenKind),
+      ...(isLineScopedKind(kind) ? { line: true } : {}),
+    };
   }
 
   if (s.disabled !== undefined) {

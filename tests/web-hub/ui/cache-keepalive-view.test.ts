@@ -236,6 +236,10 @@ describe("lastPingView / lastPingAgeText / formatting helpers", () => {
       status: undefined,
       transient: undefined,
     });
+    expect(lastPingView(wire())?.line).toBe(false);
+    expect(
+      lastPingView(wire({ lastPing: { at: NOW, kind: "proven-write", transient: false, line: true } }))?.line,
+    ).toBe(true);
     expect(lastPingView(wire({ lastPing: undefined }))).toBeUndefined();
     expect(lastPingView(wire({ lastPing: { kind: "http" } as never }))).toBeUndefined(); // no at
     expect(lastPingView(wire({ lastPing: { at: "x", kind: "http" } as never }))).toBeUndefined();

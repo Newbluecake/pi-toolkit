@@ -22,6 +22,7 @@ const cacheKeepalive = {
   lastPingAgo: "{age} 前",
   transientTag: "瞬态",
   permanentTag: "永久",
+  lineTag: "线路级",
   rowWindow: "窗口",
   rowSession: "本会话累计",
   rowCacheRead: "缓存读取",
