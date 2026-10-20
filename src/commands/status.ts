@@ -27,6 +27,7 @@ import { describeJobStatus } from "../tools/bash-job-tool.js";
 import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 import { countActiveRuns } from "../reload/defer.js";
+import { formatWakeStatusLine, type WakeStatusView } from "../fabric/wake.js";
 import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
 import { effectiveThresholdPercentWithTokens, windowScaledForcePercent } from "../compact-hint/threshold.js";
 import { resolveEffectiveHint } from "../compact-hint/dynamic/threshold.js";
@@ -109,6 +110,11 @@ export interface StatusCommandDeps {
    * 缺席 / 返回 undefined ⇒ 不渲染（旧输出字节不变）。
    */
   quota?: () => { readonly droidKeyMissing: boolean } | undefined;
+  /**
+   * fabric wake (plan §7, gate G): live wake view; absent / `undefined` when `fabric.enabled ∧ fabric.wake.enabled` is
+   * false ⇒ no line, so the output is byte-identical to the pre-wake build.
+   */
+  wake?: () => WakeStatusView | undefined;
   /** Omitted when external agents are disabled; live unified prompt/admission availability. */
   external?: () => { readonly droidUnavailableReason: string | undefined } | undefined;
 }
@@ -634,6 +640,8 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.worktreeOrphans) lines.push(...renderWorktreeOrphansSection(deps.worktreeOrphans));
   if (deps.dynamic) lines.push(...renderDynamicThresholdSection(deps.dynamic, contextWindow));
   if (deps.childSwitch) lines.push(renderChildSwitchLine(deps.childSwitch()));
+  const wake = deps.wake?.();
+  if (wake !== undefined) lines.push(formatWakeStatusLine(wake));
   const load = deps.load?.();
   if (load !== undefined) lines.push(`Load: ${load.level}${load.gating ? " · gated" : " · open"}`);
   const external = deps.external?.();

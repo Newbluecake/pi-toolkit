@@ -61,7 +61,7 @@ import { detectPiCapabilities } from "./adapters/pi-compat.js";
 import { createDeliveryEngine } from "./delivery/engine.js";
 import { createFabricMailbox, type FabricPorts } from "./fabric/mailbox.js";
 import { createCausalLevel, readRootLevel, WAKE_LEVEL_CUSTOM_TYPE, type CausalLevel } from "./fabric/wake-level.js";
-import { createWakeService, inboxDurability } from "./fabric/wake.js";
+import { createWakeService, inboxDurability, type WakeStatusView } from "./fabric/wake.js";
 import { isLiveSessionFile } from "./core/live-session-files.js";
 import { RESUME_TEXT } from "./tools/compact-tool.js";
 import { createFabricRouter } from "./fabric/router.js";
@@ -1065,7 +1065,13 @@ export interface Stack {
    * fabric-cross-session plan §3.9 (W1): causal-level controller; present iff `fabric.enabled ∧ fabric.wake.enabled`.
    * index.ts's `input` hook reads it (`holder.current?.wake`) to reset the root level on proven human input.
    */
-  wake?: { level: CausalLevel };
+  wake?: {
+    level: CausalLevel;
+    /** G (plan §7): read-only `/agent status` view — counters from `WakeService.stats()` plus level/durability facts. */
+    status(): WakeStatusView;
+    /** G (plan §7): messages carried into resume run `runId` (committed or reserved); drives `get_subagent_result` text. */
+    inboxCount(runId: string): number;
+  };
   /** 提示词缓存保活调度器（plan.md §2）；settings.cacheTtl.keepalive=false 时缺席。 */
   keepalive?: CacheKeepaliveService;
   /** 额度感知派单（docs/dev/quota/quota-plan.md）：同步缓存判定面。settings.quota.enabled=false 时缺席（R11）。 */
@@ -3047,6 +3053,20 @@ export function buildSessionStack(
     ...(quota ? { quota: quota.service, quotaHint: quota.hintState } : {}),
     ...(externalPort !== undefined ? { external: externalPort.port } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
-    ...(fabric?.level ? { wake: { level: fabric.level } } : {}),
+    ...(fabric?.level && fabric.wake
+      ? {
+          wake: {
+            level: fabric.level,
+            status: (): WakeStatusView => ({
+              maxLevel: fabric.level!.maxLevel,
+              rootLevel: fabric.level!.root,
+              resumesPerHour: settings.fabric.wake.resumesPerHour,
+              durability: fabric.wake!.durability,
+              ...fabric.wake!.stats(),
+            }),
+            inboxCount: (runId: string) => fabric.wake!.inboxCount(runId),
+          },
+        }
+      : {}),
   };
 }

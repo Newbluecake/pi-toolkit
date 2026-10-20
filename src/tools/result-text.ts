@@ -1,4 +1,5 @@
 import { formatDuration } from "../core/format.js";
+import { runRefText } from "./run-ref.js";
 import type {
   CompactionFailureRecord,
   ContextSwitchDiag,
@@ -220,4 +221,24 @@ export function formatExternal(meta: ExternalRunMeta | undefined): string | unde
   }
   if (meta.credits !== undefined) parts.push(`${formatExternalCredits(meta.credits)} credits`);
   return parts.join(" · ");
+}
+
+/**
+ * fabric wake (plan §7, gate G): provenance line of a resume run. `origin` is `diag.wakeOrigin` (set only for a
+ * wake revive), `carried` the inbox messages that rode the resume (committed or reserved; for a wake revive the trigger
+ * itself is one of them and is not counted again). `undefined` for every run that was neither woken nor carried
+ * messages ⇒ the result text stays byte-identical.
+ */
+export function formatWakeProvenance(
+  origin: { by: string; level: number } | undefined,
+  byLabel: string | undefined,
+  carried: number | undefined,
+): string | undefined {
+  const extra = Math.max(0, Math.floor(carried ?? 0) - (origin ? 1 : 0));
+  const plural = (n: number) => `${n} inbox message${n === 1 ? "" : "s"}`;
+  if (origin) {
+    const who = origin.by === "root" || origin.by === "system" ? origin.by : runRefText(origin.by, byLabel);
+    return `Woken by ${who} (level ${origin.level})${extra > 0 ? ` · +${plural(extra)}` : ""}`;
+  }
+  return extra > 0 ? `Resumed with +${plural(extra)}` : undefined;
 }

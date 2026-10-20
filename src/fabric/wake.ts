@@ -132,13 +132,59 @@ const SUBSCRIBER_RETAIN_MS = 10 * 60_000;
 /** Cap on the successor's text carried in a wake_result summary (the router additionally truncates to `maxChars`). */
 const RESULT_SUMMARY_CHARS = 4_000;
 
+/**
+ * G (plan §7): everything `/agent status` shows about wake. Assembled in `stack.ts` from `WakeService.stats()` plus the
+ * live level/settings facts; absent entirely when wake is off (the status output is then byte-identical).
+ */
+export interface WakeStatusView {
+  maxLevel: number;
+  rootLevel: number;
+  resumesPerHour: number;
+  durability: InboxDurability;
+  resumesLastHour: number;
+  parked: number;
+  reserved: number;
+  quarantined: number;
+  unverified: number;
+  wakeResults: number;
+  wakeResultsSkipped: number;
+  deadLetters: Readonly<Record<string, number>>;
+}
+
 /** `subscribe()` outcome: `skipped` = nothing registered (root is covered by the owner notice; or system/self). */
 export type SubscribeResult = "ok" | "cap" | "skipped";
 interface SubscriberEntry {
   wakers: Set<NodeRef>;
   /** Take-once settlement guard: a waker is added here BEFORE its summary is sent, so no path can send twice. */
   done: Set<NodeRef>;
-  cleanup?: TimerHandle;
+  cleanup?: TimerHandle | undefined;
+  /** G: bounded liveness watch for a not-yet-settled entry (an evicted/unknown successor must not linger until dispose). */
+  watch?: TimerHandle | undefined;
+}
+
+/**
+ * G (plan §7) `/agent status` wake line — compact English tokens only:
+ * `wake on · lvl≤2 · root L1 · resumes 2/6h · parked 3 · reserved 0 · unverified 1 · quarantined 0 · durability disk ·
+ * results 1 (skipped 0) · dead ttl_expired=1,target_gone=2`. The `dead` token is omitted when there are none.
+ */
+export function formatWakeStatusLine(v: WakeStatusView): string {
+  const dead = Object.entries(v.deadLetters)
+    .filter(([, n]) => n > 0)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([reason, n]) => `${reason}=${n}`);
+  return [
+    "wake on",
+    `lvl≤${v.maxLevel}`,
+    `root L${v.rootLevel}`,
+    `resumes ${v.resumesLastHour}/${v.resumesPerHour}h`,
+    `parked ${v.parked}`,
+    `reserved ${v.reserved}`,
+    `unverified ${v.unverified}`,
+    `quarantined ${v.quarantined}`,
+    `durability ${v.durability}`,
+    `results ${v.wakeResults} (skipped ${v.wakeResultsSkipped})`,
+    ...(dead.length ? [`dead ${dead.join(",")}`] : []),
+  ].join(" · ");
 }
 
 /**
@@ -561,18 +607,45 @@ export class WakeService implements InboxPort {
    */
   subscribe(successor: RunId, waker: NodeRef): SubscribeResult {
     if (this.frozen || waker === "root" || waker === "system" || waker === successor) return "skipped";
-    let entry = this.subscribers.get(successor);
+    // The cap is checked BEFORE an entry is created, so a refused subscriber never leaves an empty shell behind.
+    const existing = this.subscribers.get(successor);
+    if (existing && !existing.wakers.has(waker) && existing.wakers.size >= MAX_SUBSCRIBERS_PER_RUN) return "cap";
+    let entry = existing;
     if (!entry) {
       entry = { wakers: new Set(), done: new Set() };
       this.subscribers.set(successor, entry);
+      this.watchEntry(successor, entry);
     }
-    if (!entry.wakers.has(waker)) {
-      if (entry.wakers.size >= MAX_SUBSCRIBERS_PER_RUN) return "cap";
-      entry.wakers.add(waker);
-    }
+    entry.wakers.add(waker);
     const snap = this.deps.query()?.get(successor) ?? this.replayed.get(successor);
     if (snap && terminal(snap)) this.settleSubscribers(snap);
     return "ok";
+  }
+
+  /**
+   * G: every new entry is watched by one unref'd timer per SUBSCRIBER_RETAIN_MS. A successor that is still live is
+   * re-watched (its own deadlines bound that); one that is neither live nor replayed (evicted/unknown) can never settle,
+   * so the entry is dropped with an audit line (no body). A terminal one settles now (defensive; onSnapshot normally did).
+   */
+  private watchEntry(successor: RunId, entry: SubscriberEntry): void {
+    entry.watch = this.deps.clock.setTimer(SUBSCRIBER_RETAIN_MS, () => {
+      entry.watch = undefined;
+      if (this.frozen || this.subscribers.get(successor) !== entry) return;
+      const live = this.deps.query()?.get(successor);
+      const snap = live ?? this.replayed.get(successor);
+      if (snap && terminal(snap)) {
+        this.settleSubscribers(snap);
+        return;
+      }
+      // Only a LIVE non-terminal run can still finish (its deadlines bound that); a replayed non-terminal journal
+      // belongs to a dead stack and never will.
+      if (live) {
+        this.watchEntry(successor, entry);
+        return;
+      }
+      console.warn(`[pi-subagent] fabric inbox subscribers dropped (successor_unknown) run=${successor}`);
+      this.dropSubscribers(successor);
+    });
   }
 
   /** Subscribers still waiting for a result (not yet delivered/skipped). */
@@ -584,6 +657,10 @@ export class WakeService implements InboxPort {
   private settleSubscribers(s: RunSnapshot): void {
     const entry = this.subscribers.get(s.runId);
     if (!entry) return;
+    if (entry.watch) {
+      this.deps.clock.clearTimer(entry.watch);
+      entry.watch = undefined;
+    }
     for (const waker of entry.wakers) {
       if (entry.done.has(waker)) continue; // duplicate terminal snapshots / re-entrant sync check
       entry.done.add(waker); // BEFORE the send: take-once
@@ -618,6 +695,7 @@ export class WakeService implements InboxPort {
     const entry = this.subscribers.get(runId);
     if (!entry) return;
     if (entry.cleanup) this.deps.clock.clearTimer(entry.cleanup);
+    if (entry.watch) this.deps.clock.clearTimer(entry.watch);
     this.subscribers.delete(runId);
   }
 
@@ -629,8 +707,15 @@ export class WakeService implements InboxPort {
     unverified: number;
     wakeResults: number;
     wakeResultsSkipped: number;
+    /** Dead letters (original records) by reason; reasons never seen are absent. */
+    deadLetters: Record<string, number>;
   } {
     const records = this.deps.engine.select((r) => r.state === "pending");
+    const deadLetters: Record<string, number> = {};
+    for (const r of this.deps.engine.select((r) => r.deadLetter !== undefined)) {
+      const reason = r.deadLetter!.reason;
+      deadLetters[reason] = (deadLetters[reason] ?? 0) + 1;
+    }
     const since = this.deps.clock.now() - HOUR_MS;
     return {
       resumesLastHour: this.reviveRuns().filter((s) => s.diag.createdAt >= since).length,
@@ -640,12 +725,26 @@ export class WakeService implements InboxPort {
       unverified: this.unverified,
       wakeResults: this.resultsSent,
       wakeResultsSkipped: this.subscribersSkipped,
+      deadLetters,
     };
+  }
+
+  /**
+   * Messages that rode (or are reserved into) resume run `runId`: committed `revivedAs` + live reservations. Read-only
+   * and derived from the outbox, so it survives a reload; the trigger of a wake revive is one of them.
+   */
+  inboxCount(runId: RunId): number {
+    return this.deps.engine.select(
+      (r) => r.revivedAs === runId || (r.state === "pending" && r.reserved?.runId === runId),
+    ).length;
   }
 
   dispose(): void {
     this.frozen = true;
-    for (const e of this.subscribers.values()) if (e.cleanup) this.deps.clock.clearTimer(e.cleanup);
+    for (const e of this.subscribers.values()) {
+      if (e.cleanup) this.deps.clock.clearTimer(e.cleanup);
+      if (e.watch) this.deps.clock.clearTimer(e.watch);
+    }
     this.subscribers.clear();
     for (const d of this.deferred.values()) this.deps.clock.clearTimer(d.timer);
     this.deferred.clear();

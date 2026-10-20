@@ -23,6 +23,7 @@ import {
   formatCompactionFailureNote,
   formatChildExtensionMissing,
   formatExternal,
+  formatWakeProvenance,
   truncateResultText,
 } from "./result-text.js";
 import type { ExternalRunMeta, RunExitFacts } from "../core/types.js";
@@ -122,7 +123,20 @@ export function createResultTool(deps: {
   markdownTheme?: () => MarkdownTheme | undefined;
   /** Background SubagentWorkflow reads (absent: workflow ids are not accepted). */
   workflows?: WorkflowQueryPort;
+  /** fabric wake (plan §7): inbox messages carried into a resume run. Absent ⇒ no "+N inbox messages" part. */
+  wake?: { inboxCount(runId: string): number };
 }): ToolDefinition<typeof ResultToolParams> {
+  /** Provenance line of a woken / inbox-carrying resume run; `undefined` (byte-identical text) for every other run. */
+  const wakeLine = (runId: string, diag: { wakeOrigin?: { by: string; level: number } | undefined }) => {
+    let carried: number | undefined;
+    try {
+      carried = deps.wake?.inboxCount(runId);
+    } catch {
+      carried = undefined;
+    }
+    const by = diag.wakeOrigin?.by;
+    return formatWakeProvenance(diag.wakeOrigin, by === undefined ? undefined : labelOfRun(deps.query, by), carried);
+  };
   const pollGuard = createPollGuard(deps.pollGuard);
   const waitStreak = createTimeoutStreak(deps.timeoutStreak);
   // pi usage accounting dedupe: a background run's spend is attached to the
@@ -388,9 +402,10 @@ export function createResultTool(deps: {
         if (!snapshot) throw new Error(`unknown run_id: ${params.run_id}`);
         const maxChars = deps.resultMaxChars?.() ?? 0;
         const text = snapshot.outcome
-          ? formatOutcome(snapshot.outcome, maxChars)
+          ? formatOutcome(snapshot.outcome, maxChars, wakeLine(runId, snapshot.diag))
           : [
               `${labelOfSnapshot(snapshot) === undefined ? `Run ${runId}` : runRefText(runId, snapshot.diag.label)} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
+              ...[wakeLine(runId, snapshot.diag)].filter((line): line is string => line !== undefined),
               ...buildProgressLines(snapshot, Date.now()),
             ].join("\n");
         if (snapshot.outcome) {
@@ -466,7 +481,12 @@ export function createResultTool(deps: {
       tryAck(runId, waited.outcome.diag.generation, waited.outcome);
       const maxChars = deps.resultMaxChars?.() ?? 0;
       return {
-        content: [{ type: "text" as const, text: formatOutcome(waited.outcome, maxChars) }],
+        content: [
+          {
+            type: "text" as const,
+            text: formatOutcome(waited.outcome, maxChars, wakeLine(runId, waited.outcome.diag)),
+          },
+        ],
         ...usageOnce(runId, waited.outcome.usage),
         details: {
           runId,
@@ -541,6 +561,7 @@ function formatOutcome(
     };
   },
   maxChars = 0,
+  wakeText?: string,
 ): string {
   // durationMs is a first-class RunOutcome field, so the trailer always
   // carries it — unlike the completion notification (which shows `21s` once
@@ -576,6 +597,7 @@ function formatOutcome(
   // without the fields (the common case ⇒ byte-identical result text).
   const consultCacheText = formatConsultCacheLine(outcome.diag);
   const exitSuffix = [
+    wakeText,
     externalText,
     exitFactsText,
     contextSwitchesText,

@@ -223,6 +223,16 @@ describe("W5 end-to-end: a finished run is revived by a wake:true message", () =
     // the persisted run entry carries provenance without the claim token
     const entries = h.sm.getEntries().filter((e) => e.type === "custom" && e.customType === "subagent:run");
     expect(JSON.stringify(entries)).not.toContain("claimToken");
+    // gate G (plan §7): the real stack's status view + inbox count (trigger is the one carried message)
+    expect(stack.wake!.inboxCount(run.runId)).toBe(1);
+    expect(stack.wake!.status()).toMatchObject({
+      maxLevel: 2,
+      resumesPerHour: 6,
+      resumesLastHour: 1,
+      parked: 0,
+      reserved: 0,
+      durability: "session-memory",
+    });
     driver.finish();
     await until(() => stack.query.get(run.runId)?.status === "completed");
     // result delivered to the owner (root) through the normal completion notice
@@ -316,6 +326,9 @@ describe("W5 refusals and parks (real admission)", () => {
     expect(driver.text).toContain("please look again");
     await until(() => h.latestOf(WAKE_KEY(1)).state === "consumed");
     expect(h.latestOf(WAKE_KEY(1)).terminalReason).toBe("resume_injected");
+    // gate G: a human resume that carried the parked message reports it (no wakeOrigin ⇒ not "Woken by")
+    expect(stack.wake!.inboxCount(human.runId)).toBe(1);
+    expect(stack.query.get(human.runId)!.diag.wakeOrigin).toBeUndefined();
     driver.finish();
     await until(() => stack.query.get(human.runId)?.status === "completed");
   });
@@ -326,6 +339,7 @@ describe("W5 off state", () => {
     const h = setup({ wake: false });
     const driver = stubDriver();
     const stack = h.build();
+    expect(stack.wake).toBeUndefined(); // gate G: no status view / inbox port when wake is off
     stack.fabric!.pump();
     await until(() => h.latestOf(WAKE_KEY(1)).state === "dropped");
     expect(h.latestOf(WAKE_KEY(1))).toMatchObject({ terminalReason: "target_gone" });

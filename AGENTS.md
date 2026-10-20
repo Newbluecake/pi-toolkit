@@ -264,6 +264,43 @@ self-check a/b/c)`; sticky per process, re-probed only on pi restart (any pre-`v
   mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
   `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
   frontmatter (default: parent only).
+  **Wake phase 1 (in-tree only; `docs/dev/fabric-cross-session/plan.md` v3, packages S0/F0/W1–W6/G, reports
+  `W2..W6-report.md`, `G-report.md`)**: `fabric.wake.{enabled,maxLevel,perRunQuota,resumeBudgetS,resumesPerHour,
+resumesPerTargetPerHour,parkCapPerTarget}` (`enabled` default true but only effective while `fabric.enabled` — default
+  off — is on; read once at stack build, non-live). With wake on, `message_agent` gains an optional `wake` boolean
+  (schema frozen per activation; wake off ⇒ the pre-wake schema instance, pinned by `tests/fixtures/fabric-wake-off-golden.json`
+  — never regenerate it — and C-P4): omitted = legacy byte-for-byte, `false` = deliver-only (to a finished run: **park**,
+  pending until TTL or until a resume carries it; needs inbox durability `disk`/`session-memory`, `stack-memory` ⇒ legacy
+  `target_gone` + `parkUnavailable`), `true` = wake (expensive; progress ⇒ `invalid_wake`). Wake to root is exactly the legacy
+  steer+`triggerTurn` call (no new unmanaged root run path in phase 1). **Causal level** (`wake-level.ts`): `diag.wakeLevel`
+  (reducer input `wake_level`, monotonic, persisted with the terminal entry; root level in `subagent:wake-level`); only
+  proven human input resets root (`wake-input.ts`'s `input` hook; runs never reset); an effective wake hop needs
+  `level+1 ≤ maxLevel` else it silently downgrades to deliver-only (`level_limit`). **Successor coalescing**
+  (`SpawnService.resumeOwners`/`successorOf`, mailbox `waitingFor`/`drainSession`): a message for a finished run whose
+  session chain already has a successor waits for it (pending_start) or is redirect-steered into it (durable
+  `steerAttempt`; a steer timeout/restart ⇒ audited consume, never a retry). **Revive** (`WakeService.revive`, the single
+  exit): root-direct resume with the pinned model/thinking, fixed `resumeBudgetS` budget, `poolFullPolicy/loadPolicy:"reject"`
+  (pool/load/quota/closing/lock ⇒ park, config-class ⇒ `wake_refused` dead letter); exclusions recorded at admission
+  (`wakeExclusion`: consult fork, readonly domain, caller-owned incl. workflow children, external/droid) + worktree gone /
+  unknown type / user-stopped (Q6) / legacy entry without a verdict (fail closed). Reservation ownership is claim-aware
+  (`engine.reserveStrict`, persist-first; a failed rollback ⇒ quarantine); **at-most-once rule** (NQ2): the linearization
+  point is `diag.inputAcceptedAt` (driver `input_accepted`, `trackInput` runs only) — only a REAL terminal entry proves
+  non-delivery (release), every ambiguous case is an audited consume (`resume_unverified`/`steer_unverified`/
+  `reservation_expired`/`reservation_quarantined`, never message text). **Quiet completions**: a revived run's
+  `DeliveryPayload.quiet` makes `stack.ts`'s `sendFormatted` use `sendMessage({triggerTurn:false})` directly (no hub token,
+  no `ask_user` interrupt, hub ignores quiet `message_start`; mixed digests split, quiet first). **`wake_result`**: the
+  trigger sender (registered synchronously inside admission) and coalesced `wake:true` senders get ONE system summary
+  when the successor ends (cap 8 per successor ⇒ `subscriptionUnavailable` receipt; a finished waker is skipped with an
+  audit line, never woken; root is covered by the owner notice; entries are watched by one unref'd 10-min timer and an
+  evicted/unknown successor's entry is dropped). Visibility: `/agent status` adds one `wake on · lvl≤N · root L· ·
+resumes a/b h · parked · reserved · unverified · quarantined · durability · results · dead <reason>=n` line (absent when
+  wake is off), `get_subagent_result` adds `Woken by <ref> (level n) · +N inbox messages` / `Resumed with +N inbox messages`.
+  Accepted limitation: after a real `/reload` the old stack's `onReaped` closure is dead, so a reservation whose run
+  was still closing is re-judged by the NEW stack's 60 s fresh-`getBranch()` fallback (bounded, never unbounded
+  waiting). Cross-session wake (C1, RootWakeController, mutation fence) is phase 2 — plan §12 is an archive that must be
+  re-reviewed first. Gates: `tests/integration/fabric-wake*.test.ts`, conformance C-P1…C-P5
+  (`tests/conformance/fabric-wake.test.ts`; run before any pi peer bump together with consult-preserve), state-machine
+  matrix/property in `tests/core/`.
 - `src/consult/` — in-turn expert consultation (`consult` tool). A subagent dispatched with an
   `experts` whitelist (`Agent({ experts })`, resolved to verified runIds at dispatch) gets the
   `consult` tool and can synchronously ask an already-finished expert run: the expert's persisted

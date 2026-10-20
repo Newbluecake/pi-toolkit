@@ -504,6 +504,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       resultMaxChars: () => settings.resultMaxChars,
       markdownTheme: resolveMarkdownTheme,
       workflows: forwardWorkflowQuery(holder),
+      wake: { inboxCount: (runId) => holder.current?.wake?.inboxCount(runId) ?? 0 },
     }),
   );
   pi.registerTool(
@@ -758,6 +759,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       // at the same default root the worktree extension itself uses.
       worktreeOrphans: () =>
         holder.current?.worktreeOrphans() ?? { root: worktreeRoot(), count: 0, capped: false, entries: [] },
+      wake: () => holder.current?.wake?.status(),
       load: () => {
         const port = holder.current?.load?.port();
         if (!port) return undefined;

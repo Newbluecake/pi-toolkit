@@ -186,8 +186,9 @@ describe("W4 drain into a running successor", () => {
     expect(h.engine.select((r) => r.state === "delivered")).toHaveLength(40);
     expect(h.mailbox.inFlightCount).toBe(0);
     expect(h.mailbox.pendingRaceTimers).toBe(0);
-    // the loop is event-driven: nothing is left armed once everything is delivered
-    expect(h.clock.pendingTimers).toBe(0);
+    // the drain loop is event-driven: the only timer left is the ONE unref'd subscriber watch (gate G) the live
+    // successor's single coalesced waker holds until it ends — never one per drained record
+    expect(h.clock.pendingTimers).toBe(1);
   });
 
   it("two senders during a manual resume startup: the admitted inbox is reserved, later arrivals are redirected", async () => {
