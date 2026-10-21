@@ -97,6 +97,7 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "path", "extension").policy).toBe("allow");
     expect(resolve("mem", "doctor", "extension").policy).toBe("allow");
     expect(resolve("mem", "import", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "init", "extension").policy).toBe("confirm"); // one-shot write, like import
     expect(resolve("mem", "tidy", "extension").policy).toBe("confirm");
     expect(resolve("mem", "restore --trash", "extension").policy).toBe("confirm");
     expect(resolve("mem", "tidy --batch --dry-run", "extension").policy).toBe("allow");

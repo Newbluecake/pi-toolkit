@@ -132,7 +132,7 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     // Anything else is a bare runId/prefix (`/agent r_xxx`) — a read-only detail view.
     return { policy: "allow" };
   },
-  // /mem [list] · path · doctor → read-only. import/tidy/restore write files or (tidy/restore)
+  // /mem [list] · path · doctor → read-only. init/import/tidy/restore write files or (tidy/restore)
   // are multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
   mem(tokens) {
     const sub = tokens[0];

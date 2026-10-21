@@ -292,12 +292,27 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     emit(host, "session_start", { type: "session_start", reason: "new" }, second.ctx);
     expect(second.notifications).toHaveLength(1);
     expect(second.notifications[0]!.message).toContain("no core.md");
+    expect(second.notifications[0]!.message).toContain("run /mem init"); // init can fix this D01 state
     const third = context("s3");
     emit(host, "session_start", { type: "session_start", reason: "new" }, third.ctx);
     expect(third.notifications).toHaveLength(0);
     const child = fakePi();
     wireMemory(child.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: true, sections: child.hub });
     expect(child.handlers.get("session_start")).toHaveLength(2); // hub + freeze reset, no reminder
+  });
+
+  test("startup reminder points at /mem init only when init can fix the D01 state", () => {
+    const host = fakePi();
+    wireMemory(host.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: false, sections: host.hub });
+    // archived core.md: init would refuse ⇒ the reminder keeps the plain doctor pointer
+    seedMemoryFile("core.md", "---\nstatus: archived\n---\n# Core\n");
+    seedMemoryFile("topic.md", "# Topic\n");
+    const { ctx, notifications } = fakeUiCtx(cwd);
+    (ctx as any).sessionManager = { getSessionId: () => "arch" };
+    emit(host, "session_start", { type: "session_start", reason: "new" }, ctx);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]!.message).toContain("no core.md");
+    expect(notifications[0]!.message).not.toContain("/mem init");
   });
 
   test("startup reminder survives /new activation but resets on /reload; changed fingerprint reminds again", () => {
