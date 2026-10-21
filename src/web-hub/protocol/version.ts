@@ -321,6 +321,22 @@ export const PROXY_LAN_HUB_CAP = "proxy.lan.v1";
  */
 export const FSB_HUB_CAP = "fsb.v1";
 
+/**
+ * web-hub-slash-args plan §4.1 (P0 frozen surface): the cap advertising the `/` command
+ * argument hint/completion channel — `CommandInfoWire.args` (§3.1) + the `complete_req` /
+ * `complete_reply` frame pair (§4.1) + `POST /api/command/complete` (§4.2). r1 评审 #2
+ * (2026-10-21) explicitly REMOVED the plan's PROTO 1.2→1.3 bump: new optional frames are
+ * cap-gated, exactly the fsb_req/lan_req/tfa_req precedent (只加帧不改), so PROTO stays 1.2
+ * and the PROTO assertion tests stay untouched. The hub advertises CMD_ARGS_HUB_CAPS on BOTH
+ * cap surfaces (HubInfo.caps / hello_ack.caps) only when `HubConfig.cmdArgs` exists (P2 folds
+ * it into extraHubCaps); an agent advertises CMD_ARGS_AGENT_CAPS when `webHub.commandComplete`
+ * ≠ "off" and answers complete_req only while the live link's hello_ack carries the cap. In
+ * P0 the constants alone are INERT — nothing folds them into any caps array yet.
+ */
+export const CMD_ARGS_HUB_CAP = "cmd.args.v1";
+export const CMD_ARGS_HUB_CAPS = [CMD_ARGS_HUB_CAP] as const;
+export const CMD_ARGS_AGENT_CAPS = [CMD_ARGS_HUB_CAP] as const;
+
 /** LAN security P0: declared ONLY. I advertises these on both cap surfaces after wiring.
  * Optional new frames are cap-gated, so PROTO stays unchanged (same as fsb_req/res). */
 export const LAN_2FA_HUB_CAP = "lan.2fa.v1";

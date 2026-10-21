@@ -1326,6 +1326,9 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     // next queue drain so the browser can recall/re-edit them; default ON (user ruling Q1),
     // `false` ⇒ byte-identical rollback (W1/W2).
     steerRecall: true,
+    // web-hub-slash-args plan §5 (§11 D1 拍板): / 命令参数提示与补全，默认 all（含第三方命令，
+    // 经 TUI autocomplete provider）；non-live（/reload 后 /webhub restart）。
+    commandComplete: "all",
     uploads: "on",
     preview: "on",
     avatar: true,
@@ -2369,6 +2372,8 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     // web-hub-steer-recall plan §4.2: boolean only, anything else falls back to the default
     // `true` (arch §11 Q1) — never throws.
     steerRecall: typeof record.steerRecall === "boolean" ? record.steerRecall : (defaults.steerRecall ?? true),
+    // web-hub-slash-args plan §5 (P0): tri-valued, any other value falls back to "all" (§11 D1 拍板).
+    commandComplete: parseCommandCompleteSetting(record.commandComplete, defaults.commandComplete),
     uploads: parseUploadsSetting(record.uploads, defaults.uploads),
     preview: parsePreviewSetting(record.preview, defaults.preview),
     avatar: typeof record.avatar === "boolean" ? record.avatar : (defaults.avatar ?? true),
@@ -2404,6 +2409,18 @@ function parseSubagentTranscriptSetting(
   fallback: "all" | "loopback" | "off" | undefined,
 ): "all" | "loopback" | "off" {
   if (raw === "all" || raw === "loopback" || raw === "off") return raw;
+  return fallback ?? "all";
+}
+
+/** web-hub-slash-args plan §5 (P0): `webHub.commandComplete` is tri-valued like
+ * `webHub.subagentTranscript`; any other value falls back to the default "all" (§11 D1
+ * 拍板 — includes third-party commands via the TUI provider). Non-live like the rest of
+ * webHub.*: change → /reload then /webhub restart. */
+function parseCommandCompleteSetting(
+  raw: unknown,
+  fallback: "all" | "toolkit" | "off" | undefined,
+): "all" | "toolkit" | "off" {
+  if (raw === "all" || raw === "toolkit" || raw === "off") return raw;
   return fallback ?? "all";
 }
 

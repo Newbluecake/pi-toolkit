@@ -201,6 +201,18 @@ export interface WebHubSettings {
    *  cap, no `status.held` — byte-identical to the pre-feature agent (W1/W2). Non-live like the
    *  rest of webHub.* (captured at activate; change → /reload). */
   steerRecall?: boolean;
+  /** web-hub-slash-args plan §5 (P0 type-only addition, sysload-plan §10 precedent — the type
+   *  lives here because config/settings.ts's `parseWebHubSettings`/`DEFAULT_SETTINGS.webHub`,
+   *  both exclusively P0's, need somewhere to put the parsed value; P1 owns the wiring):
+   *  `/` command argument hint/completion availability. `"all"` (default, §11 D1 拍板) =
+   *  toolkit completions (S-own) + third-party commands via the TUI autocomplete provider
+   *  (S-tui, TUI main session only — RPC/print degrade to static hints); `"toolkit"` = S-own
+   *  only; `"off"` ⇒ no cap, no `args` field, no TUI wrapper registration, no hub route.
+   *  Non-live (change → /reload then /webhub restart). r1 #4 accepted residual, stated
+   *  honestly in the settings description: a third-party completer that hangs SYNCHRONOUSLY
+   *  stalls the whole session process — timeouts / in-flight caps cannot prevent it;
+   *  downgrade to "toolkit"/"off" if that happens. */
+  commandComplete?: "all" | "toolkit" | "off";
   /** 未设置或 `enabled:false` ⇒ `HubConfig.lan` 不被构造，`PI_WEBHUB_CONFIG` 与 P1 深相等（§11 LE 行）。 */
   lan?: WebHubLanSettings;
   /** web-hub-spawn §SP2: headless spawn 策略；未设置或 `enabled:false` ⇒ `HubConfig.spawn` 不被构造，

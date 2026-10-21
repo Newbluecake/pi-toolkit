@@ -40,6 +40,23 @@ import {
   xsFrameBytesOk,
 } from "./xs.js";
 export type { XsAckFrame, XsDeliverFrame, XsMemberFrame, XsReqFrame, XsResFrame, XsStatusWire } from "./xs.js";
+// web-hub-slash-args plan §4.1 (P0): argument-completion frames + the CommandInfo.args
+// sub-schema live in protocol/command-args.ts; only folded in here (run-transcript precedent).
+import {
+  type CommandInfoArgs,
+  CommandInfoArgsSchema,
+  type CompleteReplyFrame,
+  CompleteReplySchema,
+  type CompleteReqFrame,
+  CompleteReqSchema,
+} from "./command-args.js";
+export type {
+  CommandInfoArgs,
+  CmdArgsReplyCode,
+  CompleteItemWire,
+  CompleteReplyFrame,
+  CompleteReqFrame,
+} from "./command-args.js";
 import { type TfaReqFrame, TfaReqSchema, type TfaResFrame, TfaResSchema } from "./lan-2fa.js";
 export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
 
@@ -954,6 +971,11 @@ export interface CommandInfoWire {
   policy: "allow" | "confirm" | "deny";
   policyBusy?: "allow" | "confirm" | "deny";
   output?: "captured" | "terminal";
+  /** web-hub-slash-args plan §3.1: static argument usage hint + dynamic-completion
+   *  availability. Append-only; the agent emits it ONLY while the live link's hello_ack.caps
+   *  ∋ "cmd.args.v1" (an un-upgraded hub's closed CommandInfoSchema would silently drop the
+   *  whole commands frame otherwise, §7 matrix) — absent ⇒ pre-feature byte-identical wire. */
+  args?: CommandInfoArgs;
 }
 export interface CommandsFrame {
   t: "commands";
@@ -999,6 +1021,9 @@ export type AgentFrame =
   | DialogsFrame
   | CtlFrame
   | CommandsFrame
+  // web-hub-slash-args plan §4.1 (P0): dynamic argument-completion reply (cap-gated, no
+  // PROTO bump per r1 评审 #2 — same 只加帧不改 rule as fsb/tfa; nothing routes it until P1).
+  | CompleteReplyFrame
   // web-hub-fleet-drawer plan §3.1 (F0): run-transcript frames — schema bodies and the
   // authoritative interfaces live in protocol/run-transcript.ts; only folded in here.
   | RunTxReplyFrame
@@ -1079,6 +1104,9 @@ export type HubFrame =
   | RunWatchFrame
   | CmdFrame
   | SupersededFrame
+  // web-hub-slash-args plan §4.1 (P0): dynamic argument-completion request (cap-gated, no
+  // PROTO bump per r1 评审 #2; nothing routes it until P2).
+  | CompleteReqFrame
   | { t: "ping"; ts: number }
   | { t: "pong"; ts: number }
   | LanResFrame
@@ -2063,6 +2091,8 @@ const CommandInfoSchema = Type.Object(
     policy: Type.Union([Type.Literal("allow"), Type.Literal("confirm"), Type.Literal("deny")]),
     policyBusy: Type.Optional(Type.Union([Type.Literal("allow"), Type.Literal("confirm"), Type.Literal("deny")])),
     output: Type.Optional(Type.Union([Type.Literal("captured"), Type.Literal("terminal")])),
+    // web-hub-slash-args plan §3.1 (P0): append-only, cap-gated on the hub side ("cmd.args.v1").
+    args: Type.Optional(CommandInfoArgsSchema),
   },
   { additionalProperties: false },
 );
@@ -2152,6 +2182,8 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   dialogs: DialogsSchema,
   ctl: CtlSchema,
   commands: CommandsSchema,
+  // web-hub-slash-args plan §4.1 (P0): schema from protocol/command-args.ts
+  complete_reply: CompleteReplySchema,
   // fleet-drawer §3.1 (F0): schemas imported from protocol/run-transcript.ts
   run_tx_reply: RunTxReplySchema,
   run_ev: RunEvSchema,
@@ -2168,6 +2200,8 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   // fleet-drawer §3.1 (F0): schemas imported from protocol/run-transcript.ts
   run_tx_req: RunTxReqSchema,
   run_watch: RunWatchSchema,
+  // web-hub-slash-args plan §4.1 (P0): schema from protocol/command-args.ts
+  complete_req: CompleteReqSchema,
   cmd: CmdSchema,
   superseded: SupersededSchema,
   ping: PingSchema,

@@ -15,6 +15,7 @@ import type {
   WireMessage,
 } from "./messages.js";
 import { WTDIFF_FILE_PATH, WTDIFF_FILES_PATH } from "./worktree-diff.js";
+import type { CompleteItemWire } from "./command-args.js";
 
 export const SSE_EVENTS = [
   "hello",
@@ -271,3 +272,37 @@ export const WTDIFF_ENDPOINTS = [
  * `X-PWH: 1` CSRF-hygiene header as `GET /api/preview`/the worktree-diff endpoints.
  */
 export const LOAD_TOP_PATH = "/api/load/top";
+
+// ---------------------------------------------------------------------------
+// web-hub-slash-args plan §4.2/§9 (P0 frozen surface — the browser-facing HTTP face of the
+// `/` command argument-completion channel). The agent↔hub frames + budget block live in
+// `protocol/command-args.ts`; the PATH lives HERE because `ui/src/logic/contract.js` imports
+// this module (command-args.ts carries runtime typebox schemas, which must not reach the
+// browser bundle — same bundler-line rule as run-transcript.ts). NO new API_ERRORS entries:
+// the route reuses existing codes — 400 E_BAD_REQUEST (bad name/prefix), 404 E_UNSUPPORTED
+// (agent offline / missing cmd.args.v1 cap / route not constructed), 429 E_RATE (+Retry-After),
+// 503 E_BUSY (hub in-flight cap), and the agent's reply codes (E_UNKNOWN_COMMAND /
+// E_COMMAND_DENIED / E_RATE / E_DEADLINE, already in the list) pass through the 200-or-error
+// envelope below. `Cache-Control: no-store`; never enters the /api/cmd idempotency ledger.
+// ---------------------------------------------------------------------------
+
+/** `POST /api/command/complete` path (§4.2): JSON body + `X-PWH: 1` + strictCsrf (same
+ *  discipline as `/api/cmd`; POST keeps the prefix out of URLs / reverse-proxy logs). Same
+ *  authorize() as `/api/cmd` — LAN and loopback same-width while the feature is on. */
+export const COMMAND_COMPLETE_PATH = "/api/command/complete";
+
+/** Request body (§4.2): `name` reuses the command-name grammar, `prefix` ≤1 KiB without
+ *  \r\n / control chars (hub validates; `CompleteReqSchema` re-checks shape defensively). */
+export interface CommandCompleteRequest {
+  agentKey: string;
+  name: string;
+  prefix: string;
+}
+
+/** 200 body: items already trimmed by the agent (§4.3 #6); the hub re-trims defensively
+ *  (≤50 items / ≤16 KiB). `source` mirrors the reply frame's. */
+export interface CommandCompleteResult {
+  items: CompleteItemWire[];
+  truncated?: true;
+  source: "own" | "tui";
+}

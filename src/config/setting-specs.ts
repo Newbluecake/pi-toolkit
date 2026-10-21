@@ -310,6 +310,13 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["all", "loopback", "off"],
     "web-hub: subagent transcript in the fleet drawer (all = loopback+LAN, loopback = loopback only, off = disabled)",
   ),
+  // web-hub-slash-args plan §5 (P0): non-live; change requires /reload then /webhub restart.
+  // r1 #4: the description states the sync-hang residual honestly (default stays "all", §11 D1 拍板).
+  "webHub.commandComplete": choice(
+    "webHub.commandComplete",
+    ["all", "toolkit", "off"],
+    "web-hub: / command argument hints + completion in the browser (all = toolkit + third-party commands via the TUI provider, toolkit = toolkit commands only, off = disabled; a third-party completer that hangs synchronously can stall the session — downgrade to toolkit/off if that happens; change: /reload then /webhub restart)",
+  ),
   // quota-web plan §2/D8: StatusInfo.quota availability — non-live like the rest of webHub.*
   // (change → /reload).
   "webHub.quota": bool("webHub.quota", "web-hub: subscription-quota pill/card in the top bar (default on)"),

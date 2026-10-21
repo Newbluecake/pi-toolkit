@@ -25,6 +25,7 @@
 import {
   AGENT_REMOVE_PATH,
   API_ERRORS as PROTOCOL_API_ERRORS,
+  COMMAND_COMPLETE_PATH,
   LOAD_TOP_PATH,
   SSE_EVENTS as PROTOCOL_SSE_EVENTS,
 } from "@protocol/http-contract.ts";
@@ -65,6 +66,9 @@ export const API = Object.freeze({
   unsubscribe: "/api/unsubscribe",
   history: "/api/history",
   cmd: "/api/cmd",
+  // web-hub-slash-args plan §4.2 (P0): dynamic /-command argument completion — same path
+  // constant as `protocol/http-contract.ts` (imported above, anti-drift rule as API.preview).
+  commandComplete: COMMAND_COMPLETE_PATH,
   dialog: "/api/dialog",
   uploadBegin: UPLOAD_BEGIN_PATH,
   uploadChunk: UPLOAD_CHUNK_PATH,

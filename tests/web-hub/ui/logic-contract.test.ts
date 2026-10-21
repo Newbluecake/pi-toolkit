@@ -59,6 +59,15 @@ describe("web/contract.js mirrors protocol/http-contract.ts", () => {
     expect(web.API.preview).toBe("/api/preview");
   });
 
+  // web-hub-slash-args plan §4.2 (P0): the argument-completion endpoint — imported from
+  // protocol/http-contract.ts (same anti-drift rule as API.preview; the frames/budget block
+  // live in protocol/command-args.ts, which must never reach the browser bundle).
+  it("API.commandComplete is the protocol module's frozen COMMAND_COMPLETE_PATH", async () => {
+    const proto = await import("../../../src/web-hub/protocol/http-contract.ts");
+    expect(web.API.commandComplete).toBe(proto.COMMAND_COMPLETE_PATH);
+    expect(web.API.commandComplete).toBe("/api/command/complete");
+  });
+
   // @文件补全 (file-mention): hand-written literal (the hub constant lives in the hub-side
   // `hub/file-search.ts`, which must never reach the browser bundle) — pinned against BOTH the
   // hub constant and the route table, same situation as the headless literals below.
