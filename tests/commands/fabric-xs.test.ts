@@ -1,0 +1,425 @@
+import { describe, expect, it } from "vitest";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { FakeClock } from "../../src/core/clock.js";
+import { createSessionFence } from "../../src/fabric/xs/fence.js";
+import {
+  readXsMembershipEntry,
+  XsEpochCounter,
+  XsMembership,
+  type XsMembershipEntryData,
+} from "../../src/fabric/xs/membership.js";
+import { createFabricXsCommand, type FabricXsCommandDeps, type XsBlockResolve } from "../../src/commands/fabric-xs.js";
+
+/**
+ * fabric phase-2 X4 (phase2-plan §5.3 + §11.2 X4 行 + r3 主会话裁定): the `/fabric` command.
+ * Anchors: the WEB HARD GATE (a web invocation cannot join/leave/receive/block/unblock/fence
+ * reset even under `webCommandPolicy.fabric:"allow"` — the gate never consults policy; status
+ * and blocks stay readable), allowFrom full-session-id semantics, block's unique resolution
+ * (ambiguous ⇒ candidates, never blocks; offline ⇒ full sessionId only), OFFLINE blocks /
+ * unblock (local list only), and fork non-inheritance (P10: a mismatched sessionId entry
+ * restores as not-joined).
+ */
+
+const SESSION = "sess-cmd-0123456789abcd";
+
+interface CtxLog {
+  notes: { message: string; level: string }[];
+}
+
+function makeCtx(web = false, mode: "tui" | "rpc" = "tui"): { ctx: ExtensionCommandContext; log: CtxLog } {
+  const log: CtxLog = { notes: [] };
+  const ctx = {
+    mode,
+    ui: { notify: (message: string, level: string) => log.notes.push({ message, level }) },
+    ...(web ? { webInvocation: true } : {}),
+  } as unknown as ExtensionCommandContext;
+  return { ctx, log };
+}
+
+interface CommandHarness {
+  run(args: string, opts?: { web?: boolean; mode?: "tui" | "rpc" }): Promise<CtxLog>;
+  membership: XsMembership;
+  persisted: XsMembershipEntryData[];
+  fence: ReturnType<typeof createSessionFence>;
+  resolveCalls: string[];
+  setResolve(impl: ((q: string) => Promise<XsBlockResolve>) | undefined): void;
+  clock: FakeClock;
+}
+
+function makeCommand(over: Partial<FabricXsCommandDeps> = {}): CommandHarness {
+  const clock = new FakeClock(1_000);
+  const persisted: XsMembershipEntryData[] = [];
+  const membership = new XsMembership({ sessionId: SESSION, clock, persist: (d) => persisted.push(d) });
+  membership.attach();
+  const fence = createSessionFence({ clock });
+  const resolveCalls: string[] = [];
+  let resolveImpl: ((q: string) => Promise<XsBlockResolve>) | undefined;
+  const deps: FabricXsCommandDeps = {
+    enabled: () => true,
+    sessionId: () => SESSION,
+    membership: () => membership,
+    fence: () => fence,
+    statusView: () => ({ capability: "verified", lines: ["in: recv 0/30h · wakes 0/12h · inbox 0/12"] }),
+    now: () => clock.now(),
+    ...(over.resolve !== undefined ? { resolve: over.resolve } : {}),
+    ...over,
+  };
+  const command = createFabricXsCommand(deps);
+  return {
+    async run(args, opts = {}) {
+      const { ctx, log } = makeCtx(opts.web ?? false, opts.mode ?? "tui");
+      // @ts-expect-error — the factory returns Omit<RegisteredCommand, name|sourceInfo>; handler is there
+      await command.handler(args, ctx);
+      return log;
+    },
+    membership,
+    persisted,
+    fence,
+    resolveCalls,
+    setResolve(impl) {
+      resolveImpl = impl;
+      (deps as { resolve?: unknown }).resolve =
+        impl === undefined
+          ? undefined
+          : (q: string) => {
+              resolveCalls.push(q);
+              return impl(q);
+            };
+    },
+    clock,
+  };
+}
+
+describe("/fabric: web hard gate (§5.3/#9/XI13)", () => {
+  it.each(["join", "leave", "receive wake", "block ab12", "unblock 1", "fence reset"])(
+    "web invocation cannot run `%s` — fixed refusal, no policy consulted",
+    async (args) => {
+      const h = makeCommand();
+      const log = await h.run(args, { web: true });
+      expect(log.notes).toEqual([{ message: "跨会话成员资格只能在本地终端修改", level: "warning" }]);
+      // nothing changed — the first web mutation attempt never even reached the membership
+      expect(h.membership.joined).toBe(false);
+      expect(h.persisted).toEqual([]);
+    },
+  );
+
+  it("webCommandPolicy.fabric:'allow' cannot open the gate — the command receives no policy at all", async () => {
+    // The gate is `isWebInvocation(ctx)` FIRST, before any other branch; the deps surface has
+    // no policy input, so an "allow" policy is structurally unrepresentable here (X2's table
+    // and prompt-op refusals are the outer, weaker layers).
+    const h = makeCommand();
+    const log = await h.run("join", { web: true });
+    expect(log.notes[0]!.message).toBe("跨会话成员资格只能在本地终端修改");
+    expect(h.membership.joined).toBe(false);
+  });
+
+  it("web can still READ: status and blocks pass the gate", async () => {
+    const h = makeCommand();
+    const status = await h.run("status", { web: true });
+    expect(status.notes[0]!.message).toContain("not joined");
+    const blocks = await h.run("blocks", { web: true });
+    expect(blocks.notes[0]!.message).toContain("屏蔽列表为空");
+  });
+
+  it("local TUI and local RPC (no webInvocation) can mutate", async () => {
+    for (const mode of ["tui", "rpc"] as const) {
+      const h = makeCommand();
+      const log = await h.run("join", { mode });
+      expect(log.notes[0]!.message).toContain("已加入");
+      expect(h.membership.joined).toBe(true);
+    }
+  });
+});
+
+describe("/fabric: membership commands", () => {
+  it("join bumps epoch and persists; double join is a no-op without another bump", async () => {
+    const h = makeCommand();
+    await h.run("join");
+    const e1 = h.membership.epoch;
+    await h.run("join");
+    expect(h.membership.epoch).toBe(e1);
+    await h.run("leave");
+    expect(h.membership.epoch).toBe(e1 + 1);
+    expect(h.persisted.at(-1)!.joined).toBe(false);
+  });
+
+  it("receive changes policy WITHOUT an epoch bump (§8.1)", async () => {
+    const h = makeCommand();
+    await h.run("join");
+    const e = h.membership.epoch;
+    await h.run("receive deliver");
+    expect(h.membership.receive).toBe("deliver");
+    expect(h.membership.epoch).toBe(e);
+    expect(h.persisted.at(-1)!.receive).toBe("deliver");
+    const bad = await h.run("receive loud");
+    expect(bad.notes[0]!.level).toBe("warning");
+  });
+
+  it("status shows joined state, receive, the FULL own sessionId, fence and capability", async () => {
+    const h = makeCommand();
+    await h.run("join");
+    const log = await h.run("status");
+    const text = log.notes[0]!.message;
+    expect(text).toContain("joined");
+    expect(text).toContain(`sid: ${SESSION}`);
+    expect(text).toContain("host cap: verified");
+    expect(text).toContain("fence:");
+  });
+
+  it("fence reset clears a stuck window (local only — web is gated above)", async () => {
+    const h = makeCommand();
+    h.fence.onEvent({ type: "session_before_tree" });
+    h.clock.advance(31_000);
+    h.clock.advance(0); // stuck timer fires during advance
+    expect(h.fence.status().stuck).toEqual(["tree"]);
+    await h.run("fence reset");
+    expect(h.fence.status().open).toEqual([]);
+    const usage = await h.run("fence clear");
+    expect(usage.notes[0]!.level).toBe("warning");
+  });
+});
+
+describe("/fabric: allowFrom full-session-id semantics (#14)", () => {
+  it("empty allowFrom ⇒ any sender; a list ⇒ only listed FULL ids; all-invalid ⇒ deny-all", () => {
+    const clock = new FakeClock(0);
+    const open = new XsMembership({ sessionId: SESSION, clock, persist: () => {} });
+    expect(open.senderAllowed("sess-anyone-1234")).toBe(true);
+
+    const listed = new XsMembership({
+      sessionId: SESSION,
+      allowFrom: ["sess-friend-0001", "sess-friend-0002"],
+      clock,
+      persist: () => {},
+    });
+    expect(listed.senderAllowed("sess-friend-0001")).toBe(true);
+    expect(listed.senderAllowed("sess-friend-000")).toBe(false); // prefix is NOT a full id
+    expect(listed.senderAllowed("sess-other-9999")).toBe(false);
+
+    const denyAll = new XsMembership({
+      sessionId: SESSION,
+      allowFrom: [],
+      allowFromDenyAll: true,
+      clock,
+      persist: () => {},
+    });
+    expect(denyAll.senderAllowed("sess-friend-0001")).toBe(false); // fail closed
+  });
+
+  it("blocked senders are refused regardless of allowFrom", () => {
+    const clock = new FakeClock(0);
+    const m = new XsMembership({
+      sessionId: SESSION,
+      allowFrom: ["sess-friend-0001"],
+      clock,
+      persist: () => {},
+    });
+    m.block("sess-friend-0001", "buddy");
+    expect(m.senderAllowed("sess-friend-0001")).toBe(false);
+  });
+
+  it("status renders the deny-all marker (all-invalid config)", async () => {
+    const clock = new FakeClock(0);
+    const membership = new XsMembership({
+      sessionId: SESSION,
+      allowFrom: [],
+      allowFromDenyAll: true,
+      clock,
+      persist: () => {},
+    });
+    membership.attach();
+    const h = makeCommandWithMembership(membership, clock);
+    const log = await h.run("status");
+    expect(log.notes[0]!.message).toContain("deny-all");
+  });
+});
+
+function makeCommandWithMembership(membership: XsMembership, clock: FakeClock) {
+  const fence = createSessionFence({ clock });
+  const command = createFabricXsCommand({
+    enabled: () => true,
+    sessionId: () => SESSION,
+    membership: () => membership,
+    fence: () => fence,
+    statusView: () => ({ capability: "unknown", lines: [] }),
+    now: () => clock.now(),
+  });
+  return {
+    async run(args: string, opts: { web?: boolean } = {}) {
+      const { ctx, log } = makeCtx(opts.web ?? false);
+      // @ts-expect-error — handler exists on the factory product
+      await command.handler(args, ctx);
+      return log;
+    },
+  };
+}
+
+describe("/fabric block: unique resolution (§5.3/#14)", () => {
+  it("hub resolves uniquely ⇒ blocked with a name snapshot", async () => {
+    const h = makeCommand();
+    h.setResolve(async (q) =>
+      q === "buddy" ? { ok: true, sessionId: "sess-target-0001", name: "buddy" } : { ok: false, kind: "no_target" },
+    );
+    const log = await h.run("block buddy");
+    expect(log.notes[0]!.message).toContain("sess-target-0001");
+    expect(h.membership.blockedSnapshot()).toEqual([
+      { sessionId: "sess-target-0001", nameSnapshot: "buddy", at: h.clock.now() },
+    ]);
+    expect(h.persisted.at(-1)!.blocked).toHaveLength(1);
+  });
+
+  it("ambiguous resolve ⇒ candidates listed, NOTHING blocked", async () => {
+    const h = makeCommand();
+    h.setResolve(async () => ({
+      ok: false,
+      kind: "ambiguous",
+      candidates: [
+        { ref: "ab12cd34ef56", name: "buddy1" },
+        { ref: "ab99cd88ef77", name: "buddy2" },
+      ],
+    }));
+    const log = await h.run("block buddy");
+    expect(log.notes[0]!.level).toBe("warning");
+    expect(log.notes[0]!.message).toContain("ab12cd34ef56");
+    expect(h.membership.blockedSnapshot()).toEqual([]);
+  });
+
+  it("target offline ⇒ only a FULL sessionId is accepted; names/refs are refused", async () => {
+    const h = makeCommand();
+    h.setResolve(async () => ({ ok: false, kind: "no_target" }));
+    const refused = await h.run("block buddy");
+    expect(refused.notes[0]!.message).toContain("完整 sessionId");
+    expect(h.membership.blockedSnapshot()).toEqual([]);
+    const ok = await h.run("block sess-offline-0001");
+    expect(ok.notes[0]!.message).toContain("sess-offline-0001");
+    expect(h.membership.blockedSnapshot()).toHaveLength(1);
+  });
+
+  it("no resolve port wired (hub off) ⇒ offline full-id rule directly", async () => {
+    const h = makeCommand();
+    const ok = await h.run("block sess-offline-0002");
+    expect(ok.notes[0]!.message).toContain("sess-offline-0002");
+  });
+
+  it("duplicate and cap refusals", async () => {
+    const h = makeCommand();
+    h.setResolve(async (q) => ({ ok: true, sessionId: q }));
+    await h.run("block sess-a-000000000001");
+    const dup = await h.run("block sess-a-000000000001");
+    expect(dup.notes[0]!.message).toContain("已在屏蔽列表");
+  });
+});
+
+describe("/fabric blocks & unblock: OFFLINE (§5.3/#14)", () => {
+  async function withEntries() {
+    const h = makeCommand();
+    await h.run("block sess-alpha-0001"); // offline full-id path
+    await h.run("block sess-beta-0002");
+    await h.run("block sess-gamma-0003");
+    return h;
+  }
+
+  it("blocks lists index + full id + name snapshot + age — never touches the hub", async () => {
+    const h = await withEntries();
+    h.setResolve(async () => {
+      throw new Error("hub must not be called");
+    });
+    const log = await h.run("blocks");
+    const text = log.notes[0]!.message;
+    expect(text).toContain("1. sess-alpha-0001");
+    expect(text).toContain("3/64");
+    expect(h.resolveCalls).toEqual([]);
+  });
+
+  it("unblock by 1-based index / full id / unique prefix ≥8 / name snapshot — all offline", async () => {
+    const h = await withEntries();
+    h.setResolve(async () => {
+      throw new Error("hub must not be called");
+    });
+    await h.run("unblock 2");
+    expect(h.membership.blockedSnapshot().map((b) => b.sessionId)).toEqual(["sess-alpha-0001", "sess-gamma-0003"]);
+    await h.run("unblock sess-gamma-0003");
+    expect(h.membership.blockedSnapshot().map((b) => b.sessionId)).toEqual(["sess-alpha-0001"]);
+
+    const g = await withEntries();
+    await g.run("unblock sess-beta"); // 8-char prefix, unique
+    expect(g.membership.blockedSnapshot().map((b) => b.sessionId)).toEqual(["sess-alpha-0001", "sess-gamma-0003"]);
+
+    const k = await withEntries();
+    await k.run("block sess-named-0004"); // then patch a name via a second membership op
+    await k.run("unblock 4");
+    expect(k.membership.blockedSnapshot()).toHaveLength(3);
+  });
+
+  it("unblock ambiguity lists candidates and blocks nothing; unknown selector is not_found", async () => {
+    const h = await withEntries();
+    const before = h.membership.blockedSnapshot().length;
+    const amb = await h.run("unblock sess-"); // 4 chars < 8 ⇒ no prefix match; not a name ⇒ not_found
+    expect(amb.notes[0]!.message).toContain("未找到");
+    expect(h.membership.blockedSnapshot()).toHaveLength(before);
+  });
+
+  it("short prefix (<8) never matches as a prefix", async () => {
+    const h = await withEntries();
+    const log = await h.run("unblock sess-al"); // 7 chars — below the ≥8 threshold
+    expect(log.notes[0]!.message).toContain("未找到");
+  });
+});
+
+describe("membership entry persistence & fork (D2/P10)", () => {
+  it("restore round-trips join/receive/blocked through the session entry", () => {
+    const clock = new FakeClock(1_000);
+    const m = new XsMembership({ sessionId: SESSION, clock, persist: () => {} });
+    m.attach();
+    m.join();
+    m.setReceive("deliver");
+    m.block("sess-blocked-0001", "old-friend");
+    const entry = m.toEntryData();
+    const branch = [{ type: "custom", customType: "subagent:xs-membership", data: entry }];
+    expect(readXsMembershipEntry(branch)).toEqual(entry);
+
+    const restored = new XsMembership({ sessionId: SESSION, clock, persist: () => {} });
+    restored.attach();
+    restored.restore(readXsMembershipEntry(branch));
+    expect(restored.joined).toBe(true);
+    expect(restored.receive).toBe("deliver");
+    expect(restored.blockedSnapshot()).toEqual([
+      { sessionId: "sess-blocked-0001", nameSnapshot: "old-friend", at: 1_000 },
+    ]);
+  });
+
+  it("fork does NOT inherit: an entry recorded for a different sessionId restores as not joined", () => {
+    const clock = new FakeClock(1_000);
+    const original = new XsMembership({ sessionId: SESSION, clock, persist: () => {} });
+    original.attach();
+    original.join();
+    original.block("sess-blocked-0001");
+    const entry = original.toEntryData();
+
+    // the fork copies the session FILE ⇒ the branch carries the parent's entry, but the fork's
+    // live sessionId differs ⇒ ignored (P10), including its blocklist.
+    const fork = new XsMembership({ sessionId: "sess-fork-999888777666", clock, persist: () => {} });
+    fork.attach();
+    fork.restore(entry);
+    expect(fork.joined).toBe(false);
+    expect(fork.blockedSnapshot()).toEqual([]);
+  });
+
+  it("malformed newest entry ⇒ no restorable state (tolerant read-back)", () => {
+    const branch = [{ type: "custom", customType: "subagent:xs-membership", data: { v: 99 } }];
+    expect(readXsMembershipEntry(branch)).toBeUndefined();
+    expect(readXsMembershipEntry([])).toBeUndefined();
+  });
+
+  it("epoch is process-level: one counter shared across stack rebuilds, bumped on attach/join/leave", () => {
+    const counter = new XsEpochCounter();
+    const clock = new FakeClock(0);
+    const a = new XsMembership({ sessionId: SESSION, clock, epoch: counter, persist: () => {} });
+    a.attach();
+    const b = new XsMembership({ sessionId: SESSION, clock, epoch: counter, persist: () => {} });
+    b.attach(); // stack rebuild
+    b.join();
+    b.leave();
+    expect(counter.value).toBe(4); // attach, attach, join, leave
+    expect(b.epoch).toBe(4);
+  });
+});
