@@ -1,5 +1,5 @@
 /** P4 — real pi ModelRegistry + real Anthropic SDK + local HTTP stub, over the production command/runner. */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,24 @@ import type { PipelinePingResult, SendPipelinePing } from "../../src/cache-ttl/p
 import { AnthropicStub, type AnthropicStubOptions, type StubRequest } from "./fixtures/anthropic-stub.js";
 
 const cleanups: Array<() => void | Promise<void>> = [];
+
+/**
+ * pi-ai ≥1.3 (anthropic-messages buildParams `thinkingDisabled` branch) builds
+ * `thinking:{type:"disabled"}` for a supportsMidConvoEffort reasoning model when the
+ * request runs with thinking off (streamSimple without `reasoning`); pi ≤1.2 built the
+ * adaptive + output_config + trailing-effort-message shape for the same call. Both are
+ * stock — the exact expectation below follows the INSTALLED pi-ai, never a version
+ * branch in product code (I14 is about src/; this file pins the installed dependency).
+ */
+const PI_AI_VERSION = (
+  JSON.parse(
+    readFileSync(new URL("../../node_modules/@earendil-works/pi-ai/package.json", import.meta.url), "utf8"),
+  ) as { version: string }
+).version;
+const MANAGED_THINKING_OFF_DISABLED = (() => {
+  const [major, minor] = PI_AI_VERSION.split(".").map((n) => Number.parseInt(n, 10));
+  return (major ?? 0) > 1 || ((major ?? 0) === 1 && (minor ?? 0) >= 3);
+})();
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   vi.unstubAllEnvs();
@@ -480,7 +498,12 @@ describe("live round 3 — exact stock Anthropic adaptive modes", () => {
       );
       const wire = h.stub.requests[5]!.json;
       expect(wire.max_tokens).toBe(1);
-      if (managed) {
+      if (managed && MANAGED_THINKING_OFF_DISABLED) {
+        // pi ≥1.3 stock thinking-off build: no effort markers anywhere (see top of file).
+        expect(wire.thinking).toEqual({ type: "disabled" });
+        expect(wire).not.toHaveProperty("output_config");
+        expect(wire.messages).toHaveLength(1);
+      } else if (managed) {
         expect(wire.thinking).toEqual({
           type: "adaptive",
           display: "summarized",

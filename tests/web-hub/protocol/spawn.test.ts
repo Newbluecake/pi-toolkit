@@ -310,7 +310,7 @@ describe("同源常量 pins (plan §SP1 验收)", () => {
     };
     const range = pkg.peerDependencies["@earendil-works/pi-coding-agent"];
     expect(range).toBe(`>=${SUPPORTED_PI_RANGE.min} <${SUPPORTED_PI_RANGE.maxExclusive}`);
-    expect(SUPPORTED_PI_RANGE).toEqual({ min: "1.0.0", maxExclusive: "1.3.0" });
+    expect(SUPPORTED_PI_RANGE).toEqual({ min: "1.0.0", maxExclusive: "1.4.0" });
   });
 });
 

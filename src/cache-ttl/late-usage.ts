@@ -1,10 +1,16 @@
 /**
  * "Late-usage" lines (docs/dev/cache-ttl-keepalive/plan.md, 2026-10-20 section).
  *
- * Some Anthropic-messages relays (measured: kimi-coding/k3 at `https://api.kimi.com/coding`) report
- * prompt-cache stats ONLY in the stream's final `message_delta.usage`; `message_start.usage` almost
- * always shows `cache_read_input_tokens:0, cache_creation_input_tokens:0, input_tokens:<full>`. A
- * ping that cancels at `message_start` therefore classifies every hit as `no-usage`.
+ * Some Anthropic-messages relays (measured: kimi-coding/k3 at `https://api.kimi.com/coding`, back
+ * when pi's stock kimi-coding provider used the Anthropic messages API) report prompt-cache stats
+ * ONLY in the stream's final `message_delta.usage`; `message_start.usage` almost always shows
+ * `cache_read_input_tokens:0, cache_creation_input_tokens:0, input_tokens:<full>`. A ping that
+ * cancels at `message_start` therefore classifies every hit as `no-usage`.
+ *
+ * pi 1.3 moved stock kimi-coding to OpenAI Chat Completions (`https://api.kimi.com/coding/v1`),
+ * which is not keepalive-eligible at all (`api !== "anthropic-messages"`), so the api.kimi.com
+ * seed below now only matches user models.json overrides that still declare an anthropic-messages
+ * model against that host — kept for those, harmless otherwise.
  *
  * For such lines the ping (a) replays the captured payload byte-for-byte except `max_tokens`,
  * clamped to {@link LATE_USAGE_PING_MAX_TOKENS} (thinking is NEVER touched — it is part of the

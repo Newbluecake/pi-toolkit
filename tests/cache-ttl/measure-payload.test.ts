@@ -226,6 +226,32 @@ describe("Anthropic build-mode payload validator", () => {
       e,
     );
   });
+  it("managed effort also accepts the pi ≥1.3 stock thinking-off shape and refuses mixtures", () => {
+    // pi-ai ≥1.3 buildParams replaces the whole adaptive construction with
+    // thinking:{type:"disabled"} (no output_config, no trailing effort message) when a
+    // supportsMidConvoEffort reasoning model runs with thinking off. Pin the validator's
+    // acceptance of exactly that shape — and only that shape — independently of the
+    // installed pi-ai version.
+    const e = { ...expectation, managedEffort: true };
+    const p = { ...payload(), thinking: { type: "disabled" } };
+    expect(validate(p, e)).toEqual({ ok: true, effectiveTier: "ephemeral" });
+    refused({ ...p, output_config: { effort: "high" } }, "thinking", e);
+    refused({ ...p, output_config: { effort: "low" } }, "thinking", e);
+    refused({ ...p, thinking: { type: "disabled", budget_tokens: 1 } }, "thinking", e);
+    refused(
+      { ...p, thinking: { type: "disabled", block_binding: { prefix_mismatch_behavior: "drop_block" } } },
+      "thinking",
+      e,
+    );
+    refused(
+      {
+        ...p,
+        messages: [...(p.messages as unknown[]), { role: "system", content: [], output_config: { effort: "high" } }],
+      },
+      "extra-input",
+      e,
+    );
+  });
   it("requires the last user cache marker; distinguishes unsupported long and effective TTL", () => {
     for (const control of [undefined, { type: "permanent" }, { type: "ephemeral", ttl: "24h" }]) {
       refused(
