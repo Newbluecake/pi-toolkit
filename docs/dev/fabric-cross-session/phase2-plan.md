@@ -544,3 +544,12 @@ hub 侧 `registry.request` 带截止时间；agent 侧 `connection.request` 带�
 | P8  | 新增限额默认值                                      | **按 §5.2 表**（出站 10/min、60/h、wake 6/h；入站 30/h、wake 12/h；每对 30s、wake 2/h；在途 4；全 hub 60/min）                  | 更紧：入站 wake 6/h、每对 wake 1/h                                                                                  |
 | P9  | 协议版本                                            | **只加 cap `xs.v1`，不升 PROTO**                                                                                                | 升 minor 到 1.3（与 fleet F0 的先例一致，但 `protoCompatible` 只比较 major，实际没有作用）                          |
 | P10 | fork / 复制会话是否继承成员资格                     | **不继承**（读回时校验 sessionId）                                                                                              | 继承                                                                                                                |
+
+---
+
+## §13 拍板结果（用户，2026-10-21）
+
+- P1 加入控制：**两层人控**（`fabric.crossSession.enabled` + 会话级 `/fabric join|leave` / `autoJoin`），默认不加入，agent 无权加入或退出。
+- P2 加入后默认接收模式：**wake**（可唤醒，受 RootWakeController 900s 与限额约束）。
+- P6 发现范围：**hub 上所有已加入会话**（同目录过滤作为可选参数）。
+- P3、P4、P5、P7、P8、P9、P10：**全部按推荐**。
