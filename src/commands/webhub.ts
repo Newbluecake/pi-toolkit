@@ -311,6 +311,9 @@ async function runStatus(ctx: ExtensionCommandContext, control: WebHubControl, d
   // web-hub-proxy plan v2 §5 (X1c): port-proxy lines (silent when off; `proxy: on …` ⇒ info).
   const proxyLines = control.proxy?.statusLines() ?? [];
   notifyAll(ctx, proxyLines, proxyLines[0]?.startsWith("proxy: on") ? "info" : "warning");
+  // web-hub-slash-args plan §5 (P4): `/`-command argument-completion line (mode + live hub cap).
+  const cmdArgsLines = control.cmdArgs?.statusLines() ?? [];
+  notifyAll(ctx, cmdArgsLines, control.cmdArgs?.levelOf(cmdArgsLines[0]) ?? "info");
 }
 
 async function runOpen(ctx: ExtensionCommandContext, control: WebHubControl, deps: WebHubCommandDeps): Promise<void> {

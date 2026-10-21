@@ -83,6 +83,7 @@ import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
 import { formatPrivacyStatusLines } from "./privacy-status.js";
 import { formatProxyStatusLines, type ProxyHubStatus } from "./proxy-status.js";
+import { cmdArgsStatusLevel, formatCmdArgsStatusLines } from "./cmd-args-status.js";
 import { packageUiDistDir } from "../protocol/paths.js";
 import type { UiStatus } from "../hub/ui-root.js";
 import type { PrivacyHubStatus } from "../protocol/privacy.js";
@@ -431,6 +432,13 @@ export interface WebHubControl {
     hubPort(): XsHubPort;
     resolveBlock(query: string): Promise<XsBlockResolve>;
     hubInfo(): Promise<XsHubLimitsWire | undefined>;
+  };
+  /** web-hub-slash-args plan §5 (P4): `/`-command argument-completion status line (agent-side
+   * mode + live hub cap). Optional for the same double-compatibility reason as `proxy`. */
+  cmdArgs?: {
+    statusLines(): string[];
+    /** `commands/webhub.ts`'s notify level for the first line (the module owns the rule). */
+    levelOf(line: string | undefined): "info" | "warning";
   };
 }
 
@@ -1997,6 +2005,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           },
         }
       : {}),
+    // web-hub-slash-args plan §5 (P4): the cmd-args status line reads the LIVE link's caps —
+    // "n/a" while disconnected, so the reader can tell "old hub" from "hub not running".
+    cmdArgs: {
+      statusLines: () =>
+        formatCmdArgsStatusLines({
+          mode: cmdCompleteMode,
+          hubCaps: conn !== undefined && conn.status().state === "live" ? conn.caps : undefined,
+        }),
+      levelOf: cmdArgsStatusLevel,
+    },
   };
 }
 

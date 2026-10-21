@@ -747,6 +747,24 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   `src/index.ts`'s `promptGateRef.current = …` — the sole D2 flip point) that `commands.ts`'s
   `handlePrompt` consults synchronously, idle-only, before its native dispatch; claiming replies
   immediately (no dispatch) and hands ownership to `release.current()`/`release.elsewhere()`.
+- **Slash-arg completion** (`docs/dev/web-hub-slash-args/plan.md`): the Composer's `/name␠`
+  argument hints + dynamic completion. Cap `cmd.args.v1` gates everything (`CommandInfoWire.args`,
+  the `complete_req`/`complete_reply` frame pair, `POST /api/command/complete`); PROTO is NOT
+  bumped (r1 评审 #2 — new optional frames only, the fsb/lan/tfa 先例). `webHub.commandComplete`
+  `"all"|"toolkit"|"off"` (default `all`, NON-live: `/reload` + `/webhub restart`; off ⇒ no
+  service, no TUI wrapper, no cap, `HubConfig.cmdArgs` key absent ⇒ hub builds no route and the
+  agent's slot-flush strips `args` for cap-less hubs). Sources: S-own (toolkit commands —
+  `wrapCommandApi` records each raw `getArgumentCompletions`; new toolkit completers must be
+  reviewed pure functions) and S-tui (`mode:"tui"` + `all` only — a transparent
+  `addAutocompleteProvider` passthrough capturing pi's base provider for third-party/builtin
+  commands; RPC/print never gets it). Deny commands never complete and deny ITEMS are dropped
+  per-item (the execution path's own tables); budgets: agent 1.5s hard timeout + in-flight ≤2
+  (a SYNCHRONOUS third-party hang blocks the process — accepted residual, r1 #4), hub 4s route
+  deadline / in-flight ≤8 global ≤3 per principal / independent limiter, browser disconnect ⇒
+  slot released + audit `aborted` (r1 #6). Enter applies a candidate ONLY after explicit ↑↓
+  navigation (D2 拍板). `/webhub status` prints `cmd-args: <mode> · hub-cap on|off|n/a`
+  (`agent/cmd-args-status.ts`). Conformance: `tests/conformance/slash-args.test.ts` (real pi
+  rpc child + real InteractiveMode) before any pi peer bump.
 - `src/topic-switch/` — new-request relevance judge → suggest a clean new session
   (`docs/dev/topic-switch/{requirements,arch,plan}.md`). Post-guard, main-session only, settings-
   gated (`topicSwitch.enabled`, default on). The judge model chain is a configurable LIST
