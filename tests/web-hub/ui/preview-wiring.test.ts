@@ -321,3 +321,90 @@ describe("PV6 wiring — App.vue navigate regression (plan v3 §2.3 / v3-1)", ()
     wrapper.unmount();
   });
 });
+
+// ---------------------------------------------------------------------------
+// preview-windows W2 (plan r2 §10.2 回归): the App-level windows-manager wiring.
+// ---------------------------------------------------------------------------
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { flushPromises } from "@vue/test-utils";
+import { asWindowsHandle } from "../../../src/web-hub/ui/src/composables/usePreviewWindows.js";
+import { usePreviewWindows } from "../../../src/web-hub/ui/src/composables/usePreviewWindows.js";
+import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
+import DashboardView from "../../../src/web-hub/ui/src/components/shell/DashboardView.vue";
+import type { Route as RouteType } from "../../../src/web-hub/ui/src/types.js";
+import type { PreviewDirOutcome, PreviewTransport } from "../../../src/web-hub/ui/src/transport/types.js";
+
+describe("preview-windows wiring — App uses the windows manager (W2)", () => {
+  it("App.vue wires usePreviewWindows (not the single-window usePreview)", () => {
+    const src = readFileSync(resolve(process.cwd(), "src/web-hub/ui/src/App.vue"), "utf8");
+    expect(src).toMatch(/usePreviewWindows\(\{/);
+    expect(src).not.toMatch(/const preview = usePreview\(\{/);
+  });
+
+  it("real route: detail → list closes every open window (the manager's scope watcher, §4.4)", async () => {
+    // reducer-driven hub state — DashboardView's route watch dispatches the REAL "route"
+    // event, so `selected` flips to null exactly as in production.
+    type Msg = { event: string; data?: unknown };
+    const run = (msgs: Msg[], s = initialState()) => msgs.reduce((acc, m) => reduce(acc, m), s);
+    let state = ref(
+      run([
+        { event: "hello", data: { clientId: "c1" } },
+        { event: "hub", data: { caps: ["preview.v1", "preview.dir.v1"] } },
+        {
+          event: "agents",
+          data: [
+            {
+              agentKey: "A",
+              kind: "tui",
+              pid: 1,
+              cwd: "/p",
+              state: "live",
+              pluginVersion: "1.0.0",
+              outdated: false,
+              prompts: [],
+              session: { sessionId: "s1", cwd: "/p" },
+            },
+          ],
+        },
+        { event: "route", data: { agentKey: "A" } },
+      ]),
+    );
+    const waits: Array<{ resolve: (o: PreviewDirOutcome) => void }> = [];
+    const transport: PreviewTransport = {
+      fetch: () => new Promise<PreviewDirOutcome>((resolve) => waits.push({ resolve })),
+    };
+    const hub = {
+      state,
+      dispatch: (msg: Msg) => {
+        state.value = run([msg], state.value);
+      },
+    };
+    const handle = usePreviewWindows({
+      preview: transport,
+      mode: "token",
+      state: state as never,
+      coarse: ref(false),
+    });
+    const wrapper = mount(DashboardView, {
+      props: { hub, route: { name: "agent", key: "A" } as RouteType },
+      global: { provide: { [PREVIEW_CTX as symbol]: { handle, plaintext: false } satisfies PreviewContext } },
+    });
+    await flushPromises();
+    // two windows over the live selected session
+    handle.open({ path: "/p/a.txt" });
+    await flushPromises();
+    waits.shift()!.resolve({ ok: true, kind: "text", size: 1, truncated: false, text: "a" });
+    handle.open({ path: "/p/b.txt" });
+    await flushPromises();
+    waits.shift()!.resolve({ ok: true, kind: "text", size: 1, truncated: false, text: "b" });
+    await flushPromises();
+    const face = asWindowsHandle(handle)!;
+    expect(face.windows.value).toHaveLength(2);
+    // back to the list — selected goes null ⇒ the scope watcher closes EVERY window
+    await wrapper.setProps({ route: { name: "list" } as RouteType });
+    await flushPromises();
+    expect(face.windows.value).toHaveLength(0);
+    wrapper.unmount();
+  });
+});

@@ -89,6 +89,18 @@ const preview = {
   dirTreeLimitEntries: "Tree row budget reached ({n}) — collapse some folders first.",
   // 2026-10 interaction: dir row single-click expands inline, double-click drills down
   dirRowHint: "click to expand/collapse, double-click or Ctrl+Enter to open",
+  // preview-windows (W2, plan r2 §9): the multi-window modeless preview copy — window
+  // title aria-label, the cap notice, the phone stack badge's screen-reader label, the
+  // title-bar keyboard hint and the window menu.
+  windowLabel: "File preview: {name}",
+  windowLimit: "Window limit ({n}) reached — opened in this window",
+  windowStackLabel: "Window {i} of {n}",
+  windowMoveHint:
+    "Drag the title bar to move; arrows move, Shift+arrows resize; Ctrl+` switches between chat and windows",
+  windowMenu: "Window actions",
+  windowCloseAll: "Close all ({n})",
+  windowResetGeom: "Reset position and size",
+  windowSwitchTo: "Switch to window",
   // preview-download (file download button in the dialog header — files only, never dirs)
   download: "Download",
   downloadFailed: "Download failed — retry.",

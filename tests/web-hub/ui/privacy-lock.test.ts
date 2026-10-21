@@ -22,6 +22,7 @@ import DashboardView from "../../../src/web-hub/ui/src/components/shell/Dashboar
 import SettingsView from "../../../src/web-hub/ui/src/components/shell/SettingsView.vue";
 import { CONTROL_ENV, HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
+import { fakeWindowHandle, fakeWindowsFace } from "./helpers/preview-windows-fake.js";
 import type { HubHandle, HubState, Route } from "../../../src/web-hub/ui/src/types.js";
 import type { PrivacyOutcome, PrivacyTransport } from "../../../src/web-hub/ui/src/transport/types.js";
 
@@ -108,6 +109,9 @@ function mountDashboard(opts: {
   state: LogicState;
   mode?: "token" | "password";
   privacy?: FakePrivacy;
+  /** preview-windows W2 (plan r2 §10.2 回归): an explicit PREVIEW_CTX handle (e.g. a fake
+   *  windows face) overrides the built-in single close spy. */
+  previewHandle?: PreviewContext["handle"];
 }): Mounted {
   const state = ref(opts.state) as Ref<LogicState>;
   const privacy = opts.privacy ?? fakePrivacy();
@@ -117,17 +121,20 @@ function mountDashboard(opts: {
     privacy,
   };
   const previewClose = vi.fn<() => void>();
-  const previewCtx: PreviewContext = {
-    plaintext: false,
-    handle: {
-      view: ref({ phase: "closed" }),
-      scope: ref(null),
-      open: () => {},
-      close: previewClose,
-      retry: () => {},
-      dispose: () => {},
-    } as unknown as PreviewContext["handle"],
-  };
+  const previewCtx: PreviewContext =
+    opts.previewHandle !== undefined
+      ? { plaintext: false, handle: opts.previewHandle }
+      : {
+          plaintext: false,
+          handle: {
+            view: ref({ phase: "closed" }),
+            scope: ref(null),
+            open: () => {},
+            close: previewClose,
+            retry: () => {},
+            dispose: () => {},
+          } as unknown as PreviewContext["handle"],
+        };
   const routeRef = ref(opts.route) as Ref<Route>;
   const wrapper = mount(DashboardView, {
     props: { hub, route: opts.route },
@@ -436,6 +443,28 @@ describe("回锁四路 (four relock paths)", () => {
     await btn.trigger("click");
     await flushPromises();
     expect(m.previewClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("preview-windows W2 回归: 回锁 closes EVERY open window (closeAll over the windows face)", async () => {
+    stubMatchMedia(false);
+    const a = fakeWindowHandle(1, { phase: "text", path: "/p/a.txt", text: "a", truncated: false, size: 1 });
+    const b = fakeWindowHandle(2, { phase: "text", path: "/p/b.txt", text: "b", truncated: false, size: 1 });
+    const face = fakeWindowsFace([a, b]);
+    const m = mountDashboard({
+      route: { name: "agent", key: "agent-a" },
+      state: hubState({ cap: true, frame: true, locked: [SID_A] }),
+      mode: "password",
+      previewHandle: face,
+    });
+    await flushPromises();
+    await unlockViaPassword(m); // unlocked viewing — the head button now instantly relocks
+    expect(face.windowsRef.value).toHaveLength(2);
+    await m.wrapper.find(".privacy-head-btn").trigger("click");
+    await flushPromises();
+    expect(face.closeAllSpy).toHaveBeenCalledTimes(1); // root close() = closeAll (§4.3)
+    expect(face.windowsRef.value).toHaveLength(0);
+    expect(a.closeSpy).toHaveBeenCalledTimes(1);
+    expect(b.closeSpy).toHaveBeenCalledTimes(1);
   });
 
   it("another tab marking the VIEWED session locks it instantly and closes the preview (标记瞬间)", async () => {

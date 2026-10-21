@@ -993,3 +993,297 @@ button.preview-dir-row:focus-visible {
 .md-img-why {
   opacity: 0.8;
 }
+
+/* ================================================================ preview-windows (W2, plan r2 §7.5)
+ * Only NEW classes ride here — the `.preview-overlay`/`.preview-panel` base semantics (the
+ * modal tier-60 overlay AttachmentImagePreview still reuses) are untouched. Every rule is
+ * scoped under `.is-windows`/`.preview-window`, so the modal-era DOM stays byte-identical. */
+
+/* The windows root: a positioning context ONLY. Desktop (≥768) is MODELESS — tier 25 (the
+ * ask-float.css canonical table): above composer/dock/conversation (20), below drawers (30),
+ * popovers (40), ask-float (45) and every modal (50+). No scrim, no pointer interception,
+ * no body-scroll lock (§5.1). The phone band (<768) keeps the base z60 fullscreen stack
+ * WITH the scroll lock (§6) — it just drops the flex centering. */
+.preview-overlay.is-windows {
+  display: block;
+  padding: 0;
+  background: transparent;
+}
+
+.preview-overlay.is-windows.is-modeless {
+  z-index: 25; /* registered in styles/ask-float.css's canonical tier table */
+  pointer-events: none;
+}
+
+.preview-overlay.is-windows.is-modeless .preview-window {
+  pointer-events: auto;
+}
+
+/* One window: positioned by left/top ONLY (never transform — a transform would mint a new
+ * containing block for fixed descendants, R2) through CSS variables the host sets via
+ * Vue's OBJECT :style binding (runtime CSSOM, CSP-safe; z-order rides --pw-z so activation
+ * NEVER reorders the DOM — an iframe is never remounted, R1). */
+.preview-window.is-floating {
+  position: absolute;
+  left: var(--pw-x);
+  top: var(--pw-y);
+  width: var(--pw-w);
+  height: var(--pw-h);
+  z-index: var(--pw-z);
+}
+
+/* The panel fills its window in BOTH bands (the phone section is inset:0). */
+.preview-overlay.is-windows .preview-window > .preview-panel {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+
+/* The floating header is the drag handle; `.preview-path[data-no-drag]` keeps text
+ * selection inside it (r1's R6 fix — the path span stays selectable). */
+.preview-window.is-floating .preview-header {
+  cursor: move;
+  touch-action: none; /* §7.4: tablets — the title bar owns its gestures */
+  user-select: none;
+}
+
+.preview-window.is-floating .preview-header .preview-path {
+  user-select: text;
+  cursor: text;
+}
+
+.preview-window.is-floating .preview-header:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+
+/* Inactive windows recede (demo §"窗口视觉"). */
+.preview-overlay.is-windows .preview-window:not(.is-active) > .preview-panel {
+  box-shadow: var(--shadow-2);
+}
+
+.preview-overlay.is-windows .preview-window:not(.is-active) .preview-header {
+  filter: saturate(0.6) opacity(0.75);
+}
+
+/* The eight resize hot zones (desktop only — the host renders them under `v-if="desktop"`;
+ * §7.5: coarse pointers widen them to 12px). aria-hidden — §5.5's keyboard equivalents own
+ * accessibility. */
+.pw-rz {
+  position: absolute;
+  z-index: 5;
+  touch-action: none;
+}
+
+.pw-rz[data-dir="n"] {
+  top: -3px;
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.pw-rz[data-dir="s"] {
+  bottom: -3px;
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.pw-rz[data-dir="e"] {
+  right: -3px;
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.pw-rz[data-dir="w"] {
+  left: -3px;
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.pw-rz[data-dir="ne"] {
+  top: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
+  cursor: nesw-resize;
+}
+
+.pw-rz[data-dir="nw"] {
+  top: -3px;
+  left: -3px;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+}
+
+.pw-rz[data-dir="se"] {
+  bottom: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+}
+
+.pw-rz[data-dir="sw"] {
+  bottom: -3px;
+  left: -3px;
+  width: 12px;
+  height: 12px;
+  cursor: nesw-resize;
+}
+
+@media (pointer: coarse) {
+  .pw-rz[data-dir="n"],
+  .pw-rz[data-dir="s"] {
+    left: 20px;
+    right: 20px;
+    height: 12px;
+  }
+
+  .pw-rz[data-dir="e"],
+  .pw-rz[data-dir="w"] {
+    top: 20px;
+    bottom: 20px;
+    width: 12px;
+  }
+
+  .pw-rz[data-dir="ne"],
+  .pw-rz[data-dir="nw"],
+  .pw-rz[data-dir="se"],
+  .pw-rz[data-dir="sw"] {
+    width: 20px;
+    height: 20px;
+  }
+}
+
+/* §7.4 step 3: while a drag is in flight the page stops selecting text and the windows'
+ * iframes stop eating pointer events. */
+body.pwh-pw-dragging {
+  user-select: none;
+}
+
+body.pwh-pw-dragging .preview-window iframe {
+  pointer-events: none;
+}
+
+/* §3.4: the window-cap notice line (manager-owned text/timeout; the DOM only displays it). */
+.preview-window-limit {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: 0.86rem;
+  color: var(--c-warning-text);
+  background: var(--c-warning-soft);
+  border-bottom: 1px solid var(--c-warning-border);
+}
+
+/* §6.1: the phone stack badge — compact English token, per the UI language split. */
+.pw-count {
+  flex: none;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-1);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
+/* §5.5: the「⋯」window menu — anchored inside the header, absolutely positioned INSIDE the
+ * window (the panel clips at its own edge by design). */
+.pw-menu-anchor {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+
+.pw-menu-dots {
+  font-size: 1.05rem;
+  line-height: 1;
+  letter-spacing: 1px;
+}
+
+.pw-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 30; /* inside the window's own stacking context — above the body, below nothing */
+  min-width: 220px;
+  max-width: min(340px, 90vw);
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-1);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-3);
+}
+
+.pw-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.pw-menu-item:hover,
+.pw-menu-item:focus-visible {
+  background: var(--c-primary-soft);
+  outline: none;
+}
+
+.pw-menu-item[aria-current="true"] {
+  background: var(--c-primary-soft);
+  font-weight: 600;
+}
+
+.pw-menu-sep {
+  height: 1px;
+  margin: var(--sp-1) 0;
+  background: var(--c-border);
+}
+
+.pw-menu-name {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pw-menu-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  direction: rtl; /* front-ellipsis, like .preview-path */
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: var(--c-text-3);
+}
+
+/* §6.1 phone: every window is a fullscreen layer inside the root stack (the base
+ * `.preview-overlay` z60 + scroll lock stay); non-top windows carry `inert` from the host. */
+@media (max-width: 767px) {
+  .preview-overlay.is-windows .preview-window {
+    position: absolute;
+    inset: 0;
+    z-index: var(--pw-z);
+  }
+}

@@ -63,7 +63,7 @@ import { useI18n } from "./composables/useI18n.js";
 import { useMedia } from "./composables/useMedia.js";
 import { useMotionPref } from "./composables/useMotionPref.js";
 import { usePasswordAuth } from "./composables/usePasswordAuth.js";
-import { usePreview } from "./composables/usePreview.js";
+import { usePreviewWindows } from "./composables/usePreviewWindows.js";
 import { useProxyPreview } from "./composables/useProxyPreview.js";
 import { useTheme } from "./composables/useTheme.js";
 import { staleUi } from "./composables/useStaleUi.js";
@@ -194,11 +194,12 @@ if (authMode !== "unknown") {
     noticeExpanded: ref(false),
   } satisfies ControlEnv);
 
-  // PV6 (web-hub-preview plan v3 §3.2/§4.6, D7): the App-level preview state machine. Scope
-  // derivation lives in `usePreview` (`previewScopeOf` — no transport/cap/session ⇒ `null`,
-  // and every `PathText` in the tree renders its DOM-equivalent plain text). `PREVIEW_CTX`
-  // also feeds `PreviewHost` (mounted below) and carries the §5.2 plaintext-LAN warning flag.
-  const preview = usePreview({
+  // PV6 → preview-windows W2 (plan r2 §9): the App-level WINDOW MANAGER (`usePreviewWindows`,
+  // W1) replaces the single-window `usePreview`. Same opts, same frozen `PreviewHandle` face —
+  // `PREVIEW_CTX` consumers (PathText/MdInline/MdImage via `open`, PreviewHost via
+  // `asWindowsHandle`, the privacy relock via `close()`) are unchanged; a conversation click
+  // now APPENDS a modeless window (desktop) instead of restarting a modal visit.
+  const preview = usePreviewWindows({
     preview: hub.preview,
     mode: authMode,
     state: hub.state,

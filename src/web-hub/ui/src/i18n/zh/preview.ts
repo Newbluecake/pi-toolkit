@@ -92,6 +92,16 @@ const preview = {
   dirTreeLimitEntries: "已达到树行数预算（{n} 行）——请先收起部分文件夹。",
   // 2026-10 交互调整：目录行单击内联展开，双击进入
   dirRowHint: "单击展开/折叠，双击进入",
+  // preview-windows（W2，plan r2 §9）：多窗口非模态预览的文案。窗口标题 aria-label、上限提示、
+  // 手机叠层徽标读屏文案、标题栏键盘提示、窗口菜单。
+  windowLabel: "文件预览：{name}",
+  windowLimit: "已达 {n} 个窗口上限，已在当前窗口打开",
+  windowStackLabel: "第 {i} 个窗口，共 {n} 个",
+  windowMoveHint: "拖动标题栏移动；方向键移动，Shift+方向键调整大小；Ctrl+` 在对话与窗口间切换",
+  windowMenu: "窗口操作",
+  windowCloseAll: "全部关闭（{n}）",
+  windowResetGeom: "重置位置和大小",
+  windowSwitchTo: "切换到窗口",
   // preview-download（对话框头部的文件下载按钮 —— 仅文件，目录没有）
   download: "下载",
   downloadFailed: "下载失败 — 请重试。",
