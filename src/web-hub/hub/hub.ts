@@ -154,6 +154,8 @@ import { createFeishuLinks } from "./feishu/link.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
+import { createXsRelay } from "./xs/router.js";
+import { XS_HUB_CAP } from "../protocol/xs.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
 import type { AuthRevokeEvent } from "./auth-revoke.js";
@@ -485,6 +487,9 @@ export async function startHub(
       // Link-preview D1: additive, after the existing proxy caps on both surfaces.
       ...(config.proxy === undefined ? [] : [PROXY_FRAME_HUB_CAP]),
       ...(config.feishuBot === undefined ? [] : [FSB_HUB_CAP]),
+      // fabric phase-2 X1: `xs.v1` iff `config.crossSession` (tail-appended, same two-surface rule;
+      // absent ⇒ caps byte-identical).
+      ...(config.crossSession === undefined ? [] : [XS_HUB_CAP]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;
@@ -772,6 +777,13 @@ export async function startHub(
       // replacement DB is created here.
       requestAdminShutdown("restart");
     }
+    // fabric phase-2 X1: the cross-session relay exists iff `config.crossSession` (key absence IS
+    // off — no router, no observer, no frame handling). Disposed on both teardown paths.
+    const xsRelay =
+      config.crossSession === undefined
+        ? undefined
+        : createXsRelay({ registry, config: { home: config.home, crossSession: config.crossSession }, log, now });
+    if (xsRelay !== undefined) cleanup.push(async () => xsRelay.dispose());
     agentServer = createAgentServer(owner.server, {
       registry,
       config,
@@ -780,6 +792,7 @@ export async function startHub(
       httpPort: () => httpPort,
       admin,
       extraHubCaps,
+      ...(xsRelay === undefined ? {} : { xs: xsRelay.router }),
       ...(config.feishuBot === undefined
         ? {}
         : {
@@ -2139,6 +2152,7 @@ export async function startHub(
         // and held watches), then the reader (fails in-flight scans as `busy`).
         runTx.dispose();
         runFileReader.dispose();
+        xsRelay?.dispose();
         if (agentServer !== undefined) await bounded(agentServer.close());
         await bounded(rootScope.dispose());
         await bounded(owner.release());

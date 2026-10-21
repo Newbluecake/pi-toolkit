@@ -535,3 +535,42 @@ it.each([undefined, "all", "toolkit"] as const)(
     expect(fe.deps[0]?.commandComplete !== undefined).toBe(cmdArgs !== undefined);
   },
 );
+
+describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features", () => {
+  it.each([0, 1, 2, 3, 4, 5, 6, 7])(
+    "optional feature mask %i: both cap surfaces differ ONLY by xs.v1 (tail-appended, set-equal)",
+    async (mask) => {
+      const { XS_HUB_CAP } = await import("../../../src/web-hub/protocol/xs.js");
+      const optional = {
+        ...(mask & 1 ? { avatar: true as const } : {}),
+        ...(mask & 2 ? { privacy: true as const } : {}),
+        ...(mask & 4 ? { proxy: { portRange: [30020, 30030] as [number, number], maxProxies: 1 } } : {}),
+      };
+      const surfaces: Array<{ browser: string[]; agent: string[] }> = [];
+      for (const enabled of [false, true]) {
+        const result = await startHub(
+          config({
+            home: tmp.make("wh-xs-caps-"),
+            ...optional,
+            ...(enabled ? { crossSession: { limits: { hubSendsPerMin: 60 } } } : {}),
+          }),
+          fakeFrontend().factory,
+        );
+        if ("exists" in result) throw new Error("hub unavailable");
+        hubs.push(result);
+        const client = await connectClient(result.paths.socketPath);
+        client.send(hello());
+        const ack = await client.waitFrame((f) => f.t === "hello_ack");
+        client.sock.destroy();
+        const agent = [...(ack["caps"] as string[])];
+        expect(agent).toEqual(result.info.caps); // two surfaces, same source
+        expect(agent.includes(XS_HUB_CAP)).toBe(enabled);
+        if (enabled) expect(agent[agent.length - 1]).toBe(XS_HUB_CAP); // tail-appended
+        surfaces.push({ browser: [...result.info.caps], agent });
+      }
+      // off ⇒ byte-identical to the baseline; on = baseline + xs.v1 and nothing else moved
+      expect(surfaces[1]!.agent.filter((c) => c !== XS_HUB_CAP)).toEqual(surfaces[0]!.agent);
+      expect(surfaces[1]!.browser.filter((c) => c !== XS_HUB_CAP)).toEqual(surfaces[0]!.browser);
+    },
+  );
+});

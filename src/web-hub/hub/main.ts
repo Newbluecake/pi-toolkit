@@ -28,6 +28,7 @@ import { checkLanPortConflict, parseHubLanConfig } from "./lan-config.js";
 import { parseHubSpawnConfig } from "./spawn/config.js";
 import { normalizeHubLoadConfig } from "./load.js";
 import { normalizeHubProxyConfig } from "./proxy/config.js";
+import { normalizeHubCrossSessionConfig } from "./xs/limits.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
 
@@ -188,6 +189,21 @@ async function main(): Promise<void> {
         /* ignored */
       }
     } else config = { ...config, feishuBot };
+  }
+  // fabric phase-2 §4.6 (X1): config.crossSession is one feature gate and frozen at start — a
+  // malformed value drops the WHOLE key (xs off: no relay, frame handling or cap); the hub keeps
+  // running. Key absence leaves everything byte-identical.
+  if (config.crossSession !== undefined) {
+    const crossSession = normalizeHubCrossSessionConfig(config.crossSession);
+    if (crossSession === undefined) {
+      const { crossSession: _drop, ...rest } = config;
+      config = rest;
+      try {
+        process.stderr.write("web-hub main: dropping malformed config.crossSession\n");
+      } catch {
+        /* ignored */
+      }
+    } else config = { ...config, crossSession };
   }
   startDeps.childUmask = inheritedUmask;
 

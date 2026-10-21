@@ -50,6 +50,7 @@ import type {
   LoadWire,
 } from "../protocol/messages.js";
 import type { FeishuBotHubConfig } from "../protocol/feishu.js";
+import type { HubCrossSessionConfig } from "./xs/limits.js";
 import type { CommandCompleteRoutes } from "./command-complete.js";
 import type { CmdLimit } from "./cmd-limit.js";
 import type { HubPaths } from "../protocol/paths.js";
@@ -471,6 +472,12 @@ export interface HubConfig {
   proxy?: HubProxyConfig;
   /** Feishu bot: absence is off; credentials never cross this config boundary. */
   feishuBot?: FeishuBotHubConfig;
+  /** fabric phase-2 §4.6 (X1): the cross-session relay's hub-global limits, present ONLY when
+   * `xsOn` on the launching pi (X2's `buildHubConfig` omits the key otherwise — key absence IS off:
+   * no relay, no frame handling, no `xs.v1` cap, byte-identical hub). Frozen at hub start;
+   * `hub/main.ts` re-validates via `normalizeHubCrossSessionConfig` and drops the whole key on a
+   * malformed value. */
+  crossSession?: HubCrossSessionConfig;
 }
 
 /**

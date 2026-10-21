@@ -778,3 +778,71 @@ export function auditCommandComplete(log: HubLog, record: CommandCompleteAuditRe
   }
   log.info("command-complete", out);
 }
+
+// ---------------------------------------------------------------------------
+// fabric phase-2 X1 (phase2-plan §8.5): the cross-session relay audit channel
+// ---------------------------------------------------------------------------
+
+/**
+ * One line per xs relay decision. Whitelist ONLY: the message body — and any hash of it — can
+ * never reach `hub.log` (XI6); the record carries lengths, codes and session-id PREFIXES (8
+ * chars). `reason`/`code` come partly from the receiving peer, so they are accepted only in
+ * strict token shape (a free-form string from a remote could smuggle text) and dropped otherwise.
+ */
+export interface XsAuditRecord {
+  op: "list" | "resolve" | "send" | "info";
+  xid?: string;
+  fromSession?: string;
+  toSession?: string;
+  textLen?: number;
+  wake?: boolean;
+  outcome?: "ok" | "applied" | "none" | "unknown" | "error";
+  reason?: string;
+  code?: string;
+  ms?: number;
+}
+
+export const XS_AUDIT_KEYS = [
+  "op",
+  "xid",
+  "fromSession",
+  "toSession",
+  "textLen",
+  "wake",
+  "outcome",
+  "reason",
+  "code",
+  "ms",
+] as const;
+
+const XS_TOKEN_RE = /^[A-Za-z0-9_:.{}-]{1,64}$/;
+
+export function auditXs(log: { info(msg: string, data?: object): void }, record: XsAuditRecord): void {
+  const out: Record<string, unknown> = { audit: "xs" };
+  const raw = record as unknown as Record<string, unknown>;
+  for (const key of XS_AUDIT_KEYS) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (key === "fromSession" || key === "toSession") {
+      if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value.slice(0, 8);
+      continue;
+    }
+    if (key === "xid" || key === "reason" || key === "code") {
+      if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value;
+      continue;
+    }
+    if (key === "textLen" || key === "ms") {
+      if (typeof value === "number" && Number.isFinite(value)) out[key] = Math.max(0, Math.trunc(value));
+      continue;
+    }
+    if (key === "wake") {
+      if (typeof value === "boolean") out[key] = value;
+      continue;
+    }
+    if (key === "op" || key === "outcome") {
+      if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value;
+      continue;
+    }
+  }
+  log.info("xs", out);
+}
