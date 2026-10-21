@@ -52,6 +52,7 @@ async function waitUntil(pred: () => boolean, timeoutMs = 4_000, stepMs = 10): P
   }
 }
 import { lanPostJson, lanRequest, seedLanUser, type RawResponse } from "./lan-helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 
 const AGENT = "a4242-nonce12";
 const SESSION = "sess123";
@@ -83,19 +84,6 @@ interface LanPreviewHarness {
 let dir: string;
 let store: UploadStore | undefined;
 let logLines: LogLine[];
-
-async function freePort(): Promise<number> {
-  const { createServer } = await import("node:net");
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 async function startHarness(
   opts: {

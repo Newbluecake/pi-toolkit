@@ -25,6 +25,7 @@ import { testHubPaths } from "../helpers/paths.js";
 import { captureLog, login, makeAgent, postJson, rawRequest, type LogLine } from "./helpers.js";
 import { lanPostJson, lanRequest, seedLanUser, type RawResponse } from "./lan-helpers.js";
 import { AGENT, SESSION, copyPvSite } from "./pv-kit.js";
+import { freePort } from "../../helpers/free-port.js";
 
 export interface Lan {
   fe: HttpFrontend & {
@@ -55,18 +56,6 @@ const lans: Lan[] = [];
 export async function cleanupLans(): Promise<void> {
   vi.restoreAllMocks();
   for (const l of lans.splice(0)) await l.cleanup();
-}
-
-async function freePort(): Promise<number> {
-  const { createServer } = await import("node:net");
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const a = srv.address();
-      srv.close(() => resolve(a !== null && typeof a === "object" ? a.port : 0));
-    });
-  });
 }
 
 export async function startLanPv(

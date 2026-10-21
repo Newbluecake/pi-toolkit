@@ -33,7 +33,6 @@ import { spawnSync } from "node:child_process";
 import { scrypt, scryptSync } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { open as fspOpen } from "node:fs/promises";
-import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
@@ -53,6 +52,7 @@ import { createUploadStore } from "../../../src/web-hub/hub/uploads.js";
 import { fakeLanStore } from "../../web-hub/contract/fakes.js";
 import { lanPostJson } from "../../web-hub/http/lan-helpers.js";
 import { fakeDeps, login, makeAgent, postJson, rawRequest, type RawResponse } from "../../web-hub/http/helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 import { PV_CAP_RE, PREVIEW_HTML_CAP_PATH } from "../../../src/web-hub/protocol/preview-html.js";
 
 const O_NONBLOCK = fsConstants.O_NONBLOCK ?? 0o4000;
@@ -178,14 +178,7 @@ async function main(): Promise<void> {
     updatedAt: now(),
   });
   const limiter = createLoginLimiter({ now });
-  const lanPort = await new Promise<number>((resolve, reject) => {
-    const srv: Server = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const a = srv.address();
-      srv.close(() => resolve(a !== null && typeof a === "object" ? a.port : 0));
-    });
-  });
+  const lanPort = await freePort();
   (deps as FrontendDeps).lan = {
     clientAllow: createClientAllowGuard({}),
     cfg: { port: lanPort, extraHosts: [], trustProxyFrom: [], externalOrigins: [] },

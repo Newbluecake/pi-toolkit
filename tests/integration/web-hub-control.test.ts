@@ -16,7 +16,6 @@
 // because a fake `QueryControlPort` cannot be injected through the top-level assembly (it is
 // hard-wired to the real per-session `SpawnService`).
 
-import { createServer as createNetServer } from "node:net";
 import { networkInterfaces } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -46,6 +45,7 @@ import { login, openSse, postJson, rawRequest, JSON_HEADERS, type SseConn } from
 import { lanPostJson } from "../web-hub/http/lan-helpers.js";
 import { mockTui, stubTheme } from "../ask-user/fixtures.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
+import { freePort } from "../helpers/free-port.js";
 
 const HOST_KEY = Symbol.for("pi-subagent:host");
 const NO_NODE_SQLITE = !(await hasNodeSqlite());
@@ -395,21 +395,6 @@ async function waitLanOn(env: Env): Promise<void> {
       { cause: err },
     );
   }
-}
-
-/** LAN's host allow-list is canonicalized against `HubLanConfig.port` (the CONFIGURED port), not
- * whatever the OS actually hands back for `port:0` — so a LAN scenario needs a pre-reserved real
- * port (same reason `tests/integration/web-hub-lan.test.ts` never uses `port:0` for `lan`). */
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.once("error", reject);
-    srv.listen(0, "0.0.0.0", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 function cmdHeaders(e: Env, over: Record<string, string> = {}): Record<string, string> {

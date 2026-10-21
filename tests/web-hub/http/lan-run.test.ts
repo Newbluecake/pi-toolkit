@@ -11,7 +11,6 @@ import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js
  * real registry + real F3b service + fake agent conn).
  */
 import { mkdtempSync, rmSync } from "node:fs";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -31,6 +30,7 @@ import { testHubPaths } from "../helpers/paths.js";
 import { fakeConn, hello, memLog, type FakeConn, type Hello } from "../hub/helpers.js";
 import { captureLog } from "./helpers.js";
 import { LAN_JSON_HEADERS, lanPostJson, lanRequest, openSse, seedLanUser } from "./lan-helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 
 const RUN = "r_ABCDEFGH";
 const TAP = "tapAAAAAAAAAAAA";
@@ -74,18 +74,6 @@ const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const c of closers.splice(0)) await c();
 });
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 async function startLanRun(opts: { caps?: string[] } = {}): Promise<LanRunHub> {
   const dir = mkdtempSync(join(tmpdir(), "pwh-lanrun-"));

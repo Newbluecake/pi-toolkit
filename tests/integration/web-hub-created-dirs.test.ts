@@ -22,7 +22,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { createServer as createNetServer } from "node:http";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
@@ -36,6 +35,7 @@ import { config as hubConfig, connectClient, hello, type TestClient } from "../w
 import { lanPostJson } from "../web-hub/http/lan-helpers.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
+import { freePort } from "../helpers/free-port.js";
 
 const IS_LINUX = process.platform === "linux";
 const NO_NODE_SQLITE = !(await hasNodeSqlite());
@@ -51,18 +51,6 @@ function fakeLauncher(root: string): readonly [string, string] {
   const entry = join(pkgDir, "pi.mjs");
   copyFileSync(FAKE_PI, entry);
   return [process.execPath, entry];
-}
-
-function freePort(): Promise<number> {
-  return new Promise((res, rej) => {
-    const srv = createNetServer();
-    srv.once("error", rej);
-    srv.listen(0, "0.0.0.0", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => res(port));
-    });
-  });
 }
 
 function pidAlive(pid: number | undefined): boolean {

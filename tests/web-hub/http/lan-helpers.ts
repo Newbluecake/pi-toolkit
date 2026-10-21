@@ -8,7 +8,6 @@
  */
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { scryptSync } from "node:crypto";
-import { createServer as createNetServer } from "node:net";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +29,7 @@ import type { AgentRemoveFrontendPort } from "../../../src/web-hub/hub/agent-rem
 import type { RegistryView } from "../../../src/web-hub/hub/ports.js";
 import { PROTO } from "../../../src/web-hub/protocol/version.js";
 import { captureLog, type LogLine } from "./helpers.js";
+import { freePort } from "../../helpers/free-port.js";
 import { testHubPaths } from "../helpers/paths.js";
 
 export interface FakeClock {
@@ -61,18 +61,6 @@ export interface LanHarness {
   /** web-hub-privacy P1: the real privacy store when `opts.privacy === true` (else undefined). */
   privacyStore?: PrivacyStore;
   cleanup(): Promise<void>;
-}
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 export async function startLan(

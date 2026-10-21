@@ -29,7 +29,6 @@
  */
 
 import { execFile as execFileCallback, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createServer } from "node:net";
 import { existsSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -48,6 +47,7 @@ import { openSse, type SseConn } from "../web-hub/http/helpers.js";
 import { hashSid } from "../../src/web-hub/hub/sid-hash.js";
 import { config as hubConfig, waitFor } from "../web-hub/hub/helpers.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
+import { freePort } from "../helpers/free-port.js";
 import { seedLanUser } from "../web-hub/http/lan-helpers.js";
 
 interface RestartableStore extends FakeLanStore {
@@ -96,18 +96,6 @@ function assemblyFor(store: RestartableStore): LanAssembly {
 
 function lanConfig(port: number): NonNullable<HubConfig["lan"]> {
   return { port, extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
-}
-
-async function freePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address !== null && typeof address === "object" ? address.port : 0;
-      server.close((error) => (error === undefined ? resolve(port) : reject(error)));
-    });
-  });
 }
 
 async function startLanHub(home: string, port: number, store: RestartableStore): Promise<RunningHub> {

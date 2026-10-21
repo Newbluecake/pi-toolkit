@@ -37,7 +37,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
-import { createServer as createNetServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -62,6 +61,9 @@ import { config as hubConfig, connectClient, hello, type TestClient } from "../w
 import { login, openSse, postJson, rawRequest, type SseConn } from "../web-hub/http/helpers.js";
 import { lanPostJson, lanRequest } from "../web-hub/http/lan-helpers.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
+// A pre-allocated fixed port — the LAN host allow-list keys carry the CONFIG port, so an
+// ephemeral `port: 0` would 421 every dial (the snapshot is computed before listen()).
+import { freePort } from "../helpers/free-port.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
 import { writeRestoreVetoSync } from "../../src/web-hub/agent/admin-cmds.js";
 
@@ -182,20 +184,6 @@ function cleanupHome(sandbox: { home: string; restore: () => void } | undefined)
   } else {
     console.log(`[KEEP_SANDBOX] home kept: ${sandbox.home}`);
   }
-}
-
-/** A pre-allocated fixed port — the LAN host allow-list keys carry the CONFIG port, so an
- * ephemeral `port: 0` would 421 every dial (the snapshot is computed before listen()). */
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createNetServer();
-    srv.once("error", reject);
-    srv.listen(0, "0.0.0.0", () => {
-      const addr = srv.address();
-      const port = addr !== null && typeof addr === "object" ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
 }
 
 // ---------------------------------------------------------------------------
