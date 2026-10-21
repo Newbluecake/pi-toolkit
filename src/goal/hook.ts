@@ -72,6 +72,14 @@ export interface GoalHookDeps {
 export interface GoalLoopHook {
   onAgentEnd(event: AgentEndEvent): void;
   onAgentSettled(event: AgentSettledEvent, ctx: ExtensionContext): void;
+  /**
+   * T1 read-only port (phase2-plan §7.2): true while the /goal loop owns this session — an
+   * `active` goal (continuations are still being injected between evaluations) or an evaluation
+   * in flight. The fabric session-change fence reads this at CHECK time (XW wires it as the
+   * `goal` port, the one window that only downgrades a wake via `wakeOnly`, never rejects);
+   * MUST stay side-effect-free and never throw.
+   */
+  goalBusy(): boolean;
 }
 
 interface Verdict {
@@ -347,6 +355,15 @@ export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: Go
   };
 
   return {
+    goalBusy(): boolean {
+      // T1 read-only: an active goal keeps injecting continuations even between evaluations;
+      // evalInFlight additionally covers the paused-tail window where a verifier/continuation
+      // may still land. A paused/stopped goal does not own the session.
+      if (evalInFlight) return true;
+      const record = holder.current?.goal?.record;
+      return record !== undefined && record.state === "active";
+    },
+
     /**
      * agent_end：① 记录末条 assistant stopReason（agent_settled 无消息载荷，
      * abort 检测只能在这里取数，v4 条件 1）；② 累加本轮 usage 到 goal 总账

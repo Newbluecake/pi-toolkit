@@ -1219,3 +1219,43 @@ describe("wireTopicSwitch: judge model chain with runtime failover", () => {
     expect(notified[0]).toContain("judge: answered x/two · fails x/one×1");
   });
 });
+
+describe("wireTopicSwitch: T1 read-only fenceActive() (phase2-plan §7.2)", () => {
+  it("false when idle; true while a hold is pending (judging AND releasing); false once resolved", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const wiring = wireTopicSwitch(pi as never, makeDeps({}, clock));
+    expect(wiring.fenceActive()).toBe(false);
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, makeCtx());
+    expect(wiring.fenceActive()).toBe(true); // judging phase — a hold is pending
+    await flush(); // no judge model ⇒ no-model verdict, hold moves to releasing
+    expect(wiring.fenceActive()).toBe(true); // still pending — the release queue is draining
+    clock.advance(2_000); // release-queue barrier
+    await flush();
+    expect(wiring.fenceActive()).toBe(false);
+    // read-only: repeated calls change nothing
+    expect(wiring.fenceActive()).toBe(false);
+    expect(wiring.fenceActive()).toBe(false);
+  });
+
+  it("true while a B1 mid-switch marker is live in the process-global transfer store", () => {
+    const pi = new FakePi();
+    const wiring = wireTopicSwitch(pi as never, makeDeps());
+    expect(wiring.fenceActive()).toBe(false); // also lazily creates the transfer store
+    const store = (globalThis as Record<symbol, unknown>)[TRANSFER_KEY] as {
+      inFlight: Set<string>;
+    };
+    store.inFlight.add("hold-1");
+    expect(wiring.fenceActive()).toBe(true);
+    store.inFlight.delete("hold-1");
+    expect(wiring.fenceActive()).toBe(false);
+  });
+
+  it("false after this activation's session_shutdown even if a hold reference lingers", () => {
+    const pi = new FakePi();
+    const wiring = wireTopicSwitch(pi as never, makeDeps());
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, makeCtx());
+    pi.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, makeCtx());
+    expect(wiring.fenceActive()).toBe(false);
+  });
+});

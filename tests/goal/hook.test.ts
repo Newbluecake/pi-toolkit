@@ -464,3 +464,33 @@ describe("goal loop verifier evaluation (D1-D4, v4 condition 10)", () => {
     expect(h.sent).toHaveLength(0);
   });
 });
+
+describe("goal hook: T1 read-only goalBusy() (phase2-plan §7.2)", () => {
+  it("false without a goal; true while the record is active; false when paused/stopped", () => {
+    const h = harness({ record: null });
+    expect(h.hook.goalBusy()).toBe(false);
+    const active = harness({ record: { state: "active" } });
+    expect(active.hook.goalBusy()).toBe(true);
+    const paused = harness({ record: { state: "paused" } });
+    expect(paused.hook.goalBusy()).toBe(false);
+    const stopped = harness({ record: { state: "stopped" } });
+    expect(stopped.hook.goalBusy()).toBe(false);
+  });
+
+  it("true while an evaluation is in flight even if the record flips to paused mid-eval", async () => {
+    const evalRecord = { untilCmd: undefined, untilText: "构建通过且文档更新" };
+    let resolveSpawn: (outcome: RunOutcome) => void = () => undefined;
+    const h = harness({
+      record: { ...evalRecord },
+      spawnAndWait: () => new Promise<RunOutcome>((resolve) => (resolveSpawn = resolve)),
+    });
+    h.hook.onAgentSettled(h.settled, h.ctx());
+    await flush();
+    expect(h.hook.goalBusy()).toBe(true); // evalInFlight
+    h.record!.state = "paused";
+    expect(h.hook.goalBusy()).toBe(true); // still resolving — the loop owns the session
+    resolveSpawn(makeOutcome());
+    await flush();
+    expect(h.hook.goalBusy()).toBe(false);
+  });
+});
