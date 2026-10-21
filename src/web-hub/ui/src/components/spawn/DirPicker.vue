@@ -539,6 +539,7 @@ const ERR_KEYS: Record<string, string> = {
   limit: "spawn.errLimit",
   rate: "spawn.errRate",
   launcher: "spawn.errLauncher",
+  "launcher-changed": "spawn.errLauncherChanged",
   deadline: "spawn.errDeadline",
   network: "spawn.errNetwork",
   spawn: "spawn.errSpawn",

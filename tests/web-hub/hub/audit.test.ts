@@ -402,6 +402,8 @@ describe("auditSpawn (web-hub-spawn plan §SP9, arch §6.6)", () => {
       "restore",
       "restoreFailure",
       "attempt",
+      "reason",
+      "detail",
     ]);
     // web-hub-spawn-restore §10.6: session coordinates are never audit columns
     expect(SPAWN_AUDIT_KEYS).not.toContain("sessionId");

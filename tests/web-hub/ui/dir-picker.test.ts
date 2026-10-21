@@ -208,6 +208,29 @@ describe("DirPicker.vue (SP12)", () => {
     expect(qa(".spawn-recent-btn")[0]!.classList.contains("is-current")).toBe(false);
   });
 
+  it.each([
+    ["changed", undefined, "/webhub restart"],
+    ["launcher", "changed", "/webhub restart"],
+    ["launcher", "missing", "try again later"],
+    ["persist", undefined, "try again later"],
+  ] as const)("launcher reason=%s detail=%s renders actionable copy", async (reason, detail, text) => {
+    const h = harness({
+      start: async () => ({
+        ok: false,
+        error: "E_LAUNCHER",
+        reason,
+        ...(detail === undefined ? {} : { detail }),
+        retryable: true,
+      }),
+    });
+    mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    await click(q(".spawn-picker-actions .btn-primary"));
+    expect(q(".spawn-picker-error").textContent).toContain(text);
+    expect(q<HTMLInputElement>("#spawn-cwd").value).toBe("/home/u/proj");
+    expect(h.starts).toHaveLength(1);
+  });
+
   it("submits {cwd} through the orchestrator exactly once per click (no first-prompt field — removed per user 拍板)", async () => {
     let call = 0;
     const h = harness({

@@ -146,6 +146,9 @@ export interface SpawnAuditRecord {
    *  PD3 rides it with `"session-swapped"` / `"session-unexpected"` instead of growing
    *  `SpawnEndReason`/`SpawnHint`'s persisted vocabulary. */
   code?: string | null;
+  /** Fixed launcher refusal codes only — never paths or exception text. */
+  reason?: string;
+  detail?: string;
   endReason?: SpawnEndReason;
   exitCode?: number | null;
   signal?: string | null;

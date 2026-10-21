@@ -295,6 +295,8 @@ export const SPAWN_AUDIT_KEYS = [
   "restore",
   "restoreFailure",
   "attempt",
+  "reason",
+  "detail",
 ] as const;
 
 /** `log.info("spawn", { audit: "spawn", ...pick(record, SPAWN_AUDIT_KEYS) })` (arch §6.6). */

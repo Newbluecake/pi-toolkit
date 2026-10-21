@@ -962,11 +962,15 @@ describe.each([
     );
     expect(await h.transport.spawn!.start(startBody)).toMatchObject({ ok: false, error: "E_LIMIT", retryable: false });
     const h2 = make(async (url) =>
-      url === "/api/headless" ? resp(503, { error: "E_LAUNCHER", retryAfterS: 30 }) : resp(200),
+      url === "/api/headless"
+        ? resp(503, { error: "E_LAUNCHER", reason: "launcher", detail: "changed", retryAfterS: 30 })
+        : resp(200),
     );
     expect(await h2.transport.spawn!.start(startBody)).toMatchObject({
       ok: false,
       error: "E_LAUNCHER",
+      reason: "launcher",
+      detail: "changed",
       retryable: true,
       retryAfterS: 30,
     });

@@ -218,7 +218,7 @@ export function newSessionActions({ hubCaps, listResult, selected } = {}) {
  * Literals hand-copied for the same typebox-free reason (pinned by logic-spawn tests against
  * the protocol union).
  * @param {any} outcome
- * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "deadline" | "network" | "gone" | "model" | "session" | undefined}
+ * @returns {"confirm" | "dir" | "denied" | "limit" | "rate" | "launcher" | "launcher-changed" | "deadline" | "network" | "gone" | "model" | "session" | undefined}
  */
 const SESSION_REJECT_REASONS = new Set([
   "session-ref",
@@ -255,7 +255,7 @@ export function classifySpawnError(outcome) {
     case "E_RATE":
       return "rate";
     case "E_LAUNCHER":
-      return "launcher";
+      return outcome.reason === "changed" || outcome.detail === "changed" ? "launcher-changed" : "launcher";
     case "E_DEADLINE":
       return "deadline";
     default:

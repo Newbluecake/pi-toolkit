@@ -235,6 +235,27 @@ describe("POST /api/headless — gates before the body", () => {
   });
 });
 
+describe("launcher policy diagnostics", () => {
+  it.each(["changed", "missing", "not-file", "unverifiable", "incompatible", "closed"])(
+    "gate 3 preserves %s in the response and the single reject audit",
+    async (detail) => {
+      kit.supervisor.setPolicy({
+        ...kit.supervisor.policy("loopback", "loopback"),
+        allowed: false,
+        reason: "launcher",
+        detail,
+      });
+      const res = await spawnPost(BODY);
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toEqual({ error: "E_LAUNCHER", reason: "launcher", detail });
+      const rejects = kit.log.lines.filter((l) => l.data?.phase === "reject");
+      expect(rejects).toHaveLength(1);
+      expect(rejects[0]?.data).toMatchObject({ endpoint: "spawn", code: "E_LAUNCHER", reason: "launcher", detail });
+      expect(kit.supervisor.startCalls).toHaveLength(0);
+    },
+  );
+});
+
 describe("POST /api/headless — body caps", () => {
   it("declared body above SPAWN_BODY_MAX (52 KiB) ⇒ 413 and the connection closes", async () => {
     const res = await rawRequest(port, {
@@ -463,6 +484,10 @@ describe("POST /api/headless — rate + supervisor results", () => {
       reason,
       ...(retryAfterS === undefined ? {} : { retryAfterS }),
     });
+    expect(kit.log.lines.filter((l) => l.data?.phase === "reject").map((l) => l.data)).toEqual([
+      expect.objectContaining({ endpoint: "spawn", code: "E_LAUNCHER", reason }),
+    ]);
+    expect(kit.log.lines.find((l) => l.data?.phase === "reject")?.data).not.toHaveProperty("detail");
     if (retryAfterS !== undefined) expect(res.headers["retry-after"]).toBe(String(retryAfterS));
     else expect(res.headers["retry-after"]).toBeUndefined();
   });
@@ -763,6 +788,11 @@ describe("POST /api/headless/prefs (plan §3 ④)", () => {
     const res = await prefsPost({ defaultModel: "p1/new" });
     expect(res.status).toBe(503);
     expect(JSON.parse(res.body)).toEqual({ error: "E_LAUNCHER", reason: "persist" });
+    expect(kit.log.lines.find((l) => l.data?.phase === "reject")?.data).toMatchObject({
+      endpoint: "prefs",
+      code: "E_LAUNCHER",
+      reason: "persist",
+    });
     expect(kit.prefs.get()).toBe("p1/old"); // value NOT flipped
     const list = await headlessGet("/api/headless");
     expect(JSON.parse(list.body).prefs).toEqual({ defaultModel: "p1/old" });

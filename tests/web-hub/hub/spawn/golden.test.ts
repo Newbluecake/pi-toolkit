@@ -25,6 +25,6 @@ describe("F5 pre-extraction HTTP/audit golden", () => {
     );
     expect(result.error, result.stderr).toBeUndefined();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toMatch(/156 passed/);
+    expect(result.stdout).toMatch(/162 passed/);
   }, 160_000);
 });
