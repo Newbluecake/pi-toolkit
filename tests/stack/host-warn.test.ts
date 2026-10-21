@@ -9,7 +9,7 @@ describe("hostWarn (TUI-safe warning sink)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const notify = vi.fn();
     hostWarn({ hasUI: true, ui: { notify } } as unknown as ExtensionContext, "droid auth 401");
-    expect(notify).toHaveBeenCalledWith("[pi-subagent] droid auth 401", "warning");
+    expect(notify).toHaveBeenCalledWith("droid auth 401", "warning"); // UI copy carries no [pi-subagent] tag
     expect(warn).not.toHaveBeenCalled();
   });
 

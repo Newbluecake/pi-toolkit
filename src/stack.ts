@@ -1549,18 +1549,21 @@ function safeSetQuotaStatus(ctx: ExtensionContext, text: string | undefined): vo
  * adapter's "invalid FACTORY_API_KEY" warning), so with a UI the message goes
  * through `ctx.ui.notify`; print/json/child sessions (no UI) keep stderr.
  * Never throws: a stale ctx falls back to console.warn.
+ *
+ * The `[pi-subagent]` tag is a stderr-only source marker (raw stderr mixes output from many
+ * sources); a TUI notify is already attributed by pi's own `Warning:` chrome and every message
+ * routed here names its subsystem (`[quota] …`, `bash job …`, droid …), so the UI copy drops it.
  */
 export function hostWarn(ctx: ExtensionContext, message: string): void {
-  const text = `[pi-subagent] ${message}`;
   try {
     if (ctx.hasUI && ctx.ui && typeof ctx.ui.notify === "function") {
-      ctx.ui.notify(text, "warning");
+      ctx.ui.notify(message, "warning");
       return;
     }
   } catch {
     // stale ctx / ui not ready — fall through to stderr
   }
-  console.warn(text);
+  console.warn(`[pi-subagent] ${message}`);
 }
 
 function rankLoadLevel(level: string): number {
