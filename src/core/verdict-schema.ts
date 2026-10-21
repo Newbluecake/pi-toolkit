@@ -22,6 +22,7 @@ export const VERDICT_SCHEMA_V1: JsonSchema = {
   required: ["verdict", "blockers", "findings", "report"],
   properties: {
     verdict: {
+      type: "string",
       enum: ["pass", "conditional_pass", "reject"],
       description: "pass = accepted · conditional_pass = accepted with listed follow-ups · reject = sent back",
     },
@@ -34,7 +35,7 @@ export const VERDICT_SCHEMA_V1: JsonSchema = {
         additionalProperties: false,
         required: ["severity", "summary"],
         properties: {
-          severity: { enum: ["blocker", "major", "minor", "nit"] },
+          severity: { type: "string", enum: ["blocker", "major", "minor", "nit"] },
           summary: { type: "string", minLength: 1, maxLength: 300 },
           location: { type: "string", maxLength: 200 },
         },
