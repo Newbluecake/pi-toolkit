@@ -84,7 +84,7 @@ function fakeState(clock: FakeClock) {
           ...input,
           nonce,
           createdAt: clock.now(),
-          expiresAt: clock.now() + (ttlMs ?? FEISHU_CAPS.nonceTtlMs),
+          expiresAt: opts?.expiresAt ?? clock.now() + (ttlMs ?? FEISHU_CAPS.nonceTtlMs),
         };
         nonces.set(nonce, rec);
         return { ok: true as const, value: { ...rec } };
@@ -369,7 +369,7 @@ describe("session-card T1: A→B→A reuse", () => {
     expect(r.state.bindings.get("p2p:chat")?.sessionId).toBe("session-b");
     // at rest: exactly one active nonce per button, ≤8 buttons + 1 anchor total
     expect(r.state.nonces.size).toBe(3);
-    expect(r.pickNonce("session-b").expiresAt).toBe(expiresAt); // re-issues use expiresAt−now, never extended
+    expect(r.pickNonce("session-b").expiresAt).toBe(expiresAt); // re-issues pin the card's absolute expiresAt, never extended
     expect(r.notices.map((n) => n.text).filter((t) => t.includes("已绑定"))).toHaveLength(3);
     // no-op click on the currently bound session still gets a receipt (未变化) and a fresh nonce
     const b2 = r.pickNonce("session-b").nonce;

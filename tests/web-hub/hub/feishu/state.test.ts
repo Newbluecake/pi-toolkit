@@ -1319,6 +1319,20 @@ describe("nonces list/purge/maxTotal (session-card ports)", () => {
     expect(s.nonces.size).toBe(budget + 1);
   });
 
+  it("issue({expiresAt}) pins the absolute expiry to issue()'s own clock read (no ms drift), capped and future-only", async () => {
+    const { s, clock } = await mk();
+    const deadline = clock.now() + 60_000;
+    clock.advance(7); // a caller that computed `deadline - now` here and the store read now again would drift
+    const pinned = s.nonces.issue(anchorBase, undefined, { maxTotal: 384, expiresAt: deadline });
+    expect(pinned.ok && pinned.value.expiresAt).toBe(deadline);
+    const capped = s.nonces.issue({ ...anchorBase, target: "cap" }, undefined, {
+      expiresAt: clock.now() + FEISHU_CAPS.nonceTtlMs * 10,
+    });
+    expect(capped.ok && capped.value.expiresAt).toBe(clock.now() + FEISHU_CAPS.nonceTtlMs);
+    const past = s.nonces.issue({ ...anchorBase, target: "past" }, undefined, { expiresAt: clock.now() - 5 });
+    expect(past.ok && past.value.expiresAt).toBe(clock.now() + 1);
+  });
+
   it("anchor + button records survive a reload (boot inventory round trip)", async () => {
     const { s, clock } = await mk();
     const anchor = s.nonces.issue(anchorBase, 60_000, { maxTotal: 384 });

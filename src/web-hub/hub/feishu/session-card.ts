@@ -324,8 +324,9 @@ export function createFeishuSessionCard(deps: SessionCardDeps) {
         action,
         target: JSON.stringify(target),
       },
-      Math.max(1, ctl.expiresAt - clock.now()), // absolute expiry: re-issues never extend it
-      { maxTotal: NONCE_BUDGET },
+      undefined,
+      // absolute expiry, pinned inside issue()'s own clock read: re-issues never extend it, not even by 1 ms
+      { maxTotal: NONCE_BUDGET, expiresAt: ctl.expiresAt },
     );
     return issued.ok ? issued.value : undefined;
   }

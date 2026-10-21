@@ -915,8 +915,12 @@ export interface FeishuState {
     /**
      * `opts.maxTotal` (session-card sub-quota): refuse `cap` once the table holds ≥ min(maxTotal, cap)
      * entries, so the caller can never starve the other card kinds out of the shared table.
+     * `opts.expiresAt` (absolute, wins over `ttlMs`): pin the record's expiry to a caller-owned
+     * deadline read against the SAME clock sample as `createdAt` — deriving a ttl from a separate
+     * `clock.now()` drifts by the milliseconds between the two reads. Still capped at
+     * `nonceTtlMs` and kept strictly in the future.
      */
-    issue(input: NewNonceInput, ttlMs?: number, opts?: { maxTotal?: number }): Admit<FeishuNonce>;
+    issue(input: NewNonceInput, ttlMs?: number, opts?: { maxTotal?: number; expiresAt?: number }): Admit<FeishuNonce>;
     get(nonce: string): FeishuNonce | undefined;
     /** Read-only enumeration (clones), guarded by `live()`; the table cap bounds the result. */
     list(match?: (rec: FeishuNonce) => boolean): FeishuNonce[];
@@ -1794,7 +1798,13 @@ export function createFeishuState(deps: FeishuStateDeps): FeishuState {
       issue(input, ttlMs, opts) {
         if (!live()) return { ok: false, refused: "unavailable" };
         const now = clock.now();
-        const ttl = Math.max(1, Math.min(FEISHU_CAPS.nonceTtlMs, ttlMs ?? FEISHU_CAPS.nonceTtlMs));
+        const ttl = Math.max(
+          1,
+          Math.min(
+            FEISHU_CAPS.nonceTtlMs,
+            opts?.expiresAt !== undefined ? opts.expiresAt - now : (ttlMs ?? FEISHU_CAPS.nonceTtlMs),
+          ),
+        );
         const nonce = Buffer.from(random(FEISHU_IDENTITY.nonceBytes)).toString("base64url");
         const rec = parseNonce(nonce, { ...input, nonce, createdAt: now, expiresAt: now + ttl });
         if (rec === undefined) return { ok: false, refused: "invalid" };
