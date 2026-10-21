@@ -41,6 +41,9 @@ const agents = {
   renameSaveAria: "保存名称",
   renameCancelAria: "取消重命名",
   renameFailed: "重命名失败：{reason}",
+  // title-auto plan: 清空输入并保存 = 把标题交回自动生成（同 /title auto）
+  renameAutoHint: "留空 = 自动生成标题",
+  titleAutoFailed: "恢复自动标题失败：{reason}",
 } satisfies Messages<typeof en>;
 
 export default agents;

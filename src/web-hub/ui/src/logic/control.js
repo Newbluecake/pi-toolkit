@@ -855,6 +855,33 @@ export function sanitizeRenameInput(draft, current) {
   return trimmed === "" || trimmed === current ? null : trimmed;
 }
 
+/**
+ * title-auto plan (user ruling 2026-10-21): the full rename-save decision, upgrading
+ * `sanitizeRenameInput`'s "empty ⇒ local cancel" rule for agents that advertise the `/title`
+ * command (a96c189a). Clearing the field and saving now means "hand the title back to
+ * auto-generation" — the same as `/title auto`:
+ *
+ *  - empty draft + a CURRENT non-empty name + `titleAuto` (the agent card's `commands` slot
+ *    lists `title`, i.e. the agent runs a build with the /title command) ⇒ `{kind:"auto"}` —
+ *    the caller sends `runCommand(agentKey, "title", "auto", { confirm: true })` (the user's
+ *    explicit clear-and-save IS the confirmation; the sidebar has no dock confirm bar, so the
+ *    policy's `confirm` round-trip is satisfied by the protocol's existing confirm flag);
+ *  - empty draft otherwise (no current name, or an old agent without /title) ⇒ `null` — the
+ *    legacy local cancel, no wire call;
+ *  - unchanged (after trim) ⇒ `null` — pointless round trip;
+ *  - anything else ⇒ `{kind:"rename", name}` — the legacy `/name` call.
+ *
+ * @param {unknown} draft @param {string} current @param {boolean} [titleAuto]
+ * @returns {{ kind: "rename", name: string } | { kind: "auto" } | null}
+ */
+export function renameAction(draft, current, titleAuto = false) {
+  const trimmed = (typeof draft === "string" ? draft : "").trim().slice(0, RENAME_MAX_CHARS);
+  if (trimmed === "") {
+    return titleAuto === true && current !== "" ? { kind: "auto" } : null;
+  }
+  return trimmed === current ? null : { kind: "rename", name: trimmed };
+}
+
 /** §7.7 transcript web badge: a user message counts as web-sent when a ctl ledger entry in a
  * post-dispatch state (`started`/`consumed`) sits within [at, at+120s] of its timestamp.
  * 2026-10-09 (「web 标志给丢了」): a prompt sent while the agent was busy is queued and only

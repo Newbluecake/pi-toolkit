@@ -42,6 +42,9 @@ const agents = {
   renameSaveAria: "Save name",
   renameCancelAria: "Cancel rename",
   renameFailed: "Rename failed: {reason}",
+  // --- title-auto plan: clearing the input and saving hands the title back to auto-generation
+  renameAutoHint: "Leave empty = auto-generate title",
+  titleAutoFailed: "Could not restore automatic title: {reason}",
 } satisfies Record<string, string>;
 
 export default agents;

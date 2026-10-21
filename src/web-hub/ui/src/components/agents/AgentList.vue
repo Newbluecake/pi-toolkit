@@ -37,7 +37,8 @@
   `renameEnabled()` gate (hub `cmd.v1` AND agent card `control` AND agent live AND not mid-
   restore AND the agent's `commands` slot present) plus the current raw session name off the
   injected hub state (the frozen `AgentCardView.sessionLabel` is a localized placeholder-or-name
-  string, not usable as an edit prefill).
+  string, not usable as an edit prefill) plus the title-auto capability (title-auto plan: the
+  `commands` slot lists `title` ⇒ clearing the input and saving sends `/title auto`).
 -->
 <script setup lang="ts">
 import { computed, inject, nextTick, ref, watch } from "vue";
@@ -318,7 +319,7 @@ const spawnRows = computed(() =>
 interface AgentRow {
   readonly card: AgentCardView;
   readonly target: ReturnType<typeof removalTargetForAgent>;
-  readonly rename: { readonly enabled: boolean; readonly name: string };
+  readonly rename: { readonly enabled: boolean; readonly name: string; readonly titleAuto: boolean };
   /** spawn-relaunch: the terminal managed record this offline card may re-fork
    *  (`relaunchableFor` — undefined ⇒ the row keeps the plain click=select behavior). */
   readonly relaunch: { readonly spawnId: string } | undefined;
@@ -328,7 +329,7 @@ interface AgentRow {
  *  `commandsEnabled` (duplicated, not imported — that file is outside this package's exclusive
  *  `components/agents/**` scope), evaluated against the raw `AgentState` this list already
  *  injects for `removalTargetForAgent`/`managedFor`. */
-function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string } {
+function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string; titleAuto: boolean } {
   const agent = hub?.state.value.agents.get(c.key) as
     | {
         down?: unknown;
@@ -346,8 +347,14 @@ function renameInfoFor(c: AgentCardView): { enabled: boolean; name: string } {
     restoring: restoringKeys(hub?.state.value.spawns ?? null).has(c.key),
     hasCommandsSlot: Array.isArray(agent?.commands),
   });
+  // title-auto plan: clear-to-auto semantics are only offered when the agent advertises the
+  // /title command (a96c189a) in its `commands` slot — an old agent keeps empty ⇒ local cancel.
+  const cmds = agent?.commands;
+  const titleAuto =
+    Array.isArray(cmds) &&
+    cmds.some((cmd) => cmd !== null && typeof cmd === "object" && (cmd as { name?: unknown }).name === "title");
   const rawName = agent?.session?.name;
-  return { enabled, name: typeof rawName === "string" ? rawName : "" };
+  return { enabled, titleAuto, name: typeof rawName === "string" ? rawName : "" };
 }
 
 function toRow(c: AgentCardView): AgentRow {
@@ -554,7 +561,12 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         :class="{ removable: !!row.target, renamable: row.rename.enabled }"
       >
         <AgentCard :card="row.card" :selected="row.card.key === selectedKey" />
-        <RenameButton v-if="row.rename.enabled" :agent-key="row.card.key" :name="row.rename.name" />
+        <RenameButton
+          v-if="row.rename.enabled"
+          :agent-key="row.card.key"
+          :name="row.rename.name"
+          :title-auto="row.rename.titleAuto"
+        />
         <RemoveButton
           v-if="row.target"
           :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"
@@ -591,7 +603,12 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         <p v-if="relaunchErr !== null && relaunchErr.key === row.card.key" class="relaunch-note" role="alert">
           {{ relaunchErr.text }}
         </p>
-        <RenameButton v-if="row.rename.enabled" :agent-key="row.card.key" :name="row.rename.name" />
+        <RenameButton
+          v-if="row.rename.enabled"
+          :agent-key="row.card.key"
+          :name="row.rename.name"
+          :title-auto="row.rename.titleAuto"
+        />
         <RemoveButton
           v-if="row.target"
           :target="row.target.kind === 'managed' ? { spawnId: row.target.spawnId } : { agentKey: row.card.key }"

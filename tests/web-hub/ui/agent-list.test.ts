@@ -1607,6 +1607,74 @@ describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
     expect(wrapper.find(".rename-input").exists()).toBe(false);
   });
 
+  it("title-auto: empty input + current name + /title in the commands slot ⇒ runCommand('title','auto',{confirm:true})", async () => {
+    let captured: [string, string, string, unknown] | undefined;
+    const control = fakeControlHandle({
+      runCommand: async (agentKey, name, args, opts) => {
+        captured = [agentKey, name, args, opts];
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent(
+      { commands: [{ name: "title", kind: "extension", policy: "confirm" }] },
+      { control },
+    );
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("   ");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(captured).toEqual(["a1", "title", "auto", { confirm: true }]);
+    expect(wrapper.find(".rename-input").exists()).toBe(false); // closed on success
+  });
+
+  it("title-auto: empty input with NO current name stays a local cancel even with /title advertised", async () => {
+    let called = 0;
+    const control = fakeControlHandle({
+      runCommand: async () => {
+        called += 1;
+        return { ok: true };
+      },
+    });
+    const { wrapper } = mountWithAgent(
+      { session: {}, commands: [{ name: "title", kind: "extension", policy: "confirm" }] },
+      { control },
+    );
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Enter" }); // draft stays ""
+    expect(called).toBe(0);
+    expect(wrapper.find(".rename-input").exists()).toBe(false);
+  });
+
+  it("title-auto: the clear-to-auto placeholder hint only appears when /title is advertised", async () => {
+    const withTitle = mountWithAgent(
+      { commands: [{ name: "title", kind: "extension", policy: "confirm" }] },
+      { control: fakeControlHandle() },
+    );
+    await withTitle.wrapper.get(".rename-btn").trigger("click");
+    expect(withTitle.wrapper.get<HTMLInputElement>(".rename-input").element.placeholder).toBe(
+      "Leave empty = auto-generate title",
+    );
+    const withoutTitle = mountWithAgent({}, { control: fakeControlHandle() });
+    await withoutTitle.wrapper.get(".rename-btn").trigger("click");
+    expect(withoutTitle.wrapper.get<HTMLInputElement>(".rename-input").element.placeholder).toBe("");
+  });
+
+  it("title-auto: a failed /title auto shows the auto error and keeps the editor open for retry", async () => {
+    const control = fakeControlHandle({
+      runCommand: async () => ({ ok: false, error: "E_COMMAND_DENIED", message: "denied by policy" }),
+    });
+    const { wrapper } = mountWithAgent(
+      { commands: [{ name: "title", kind: "extension", policy: "confirm" }] },
+      { control },
+    );
+    await wrapper.get(".rename-btn").trigger("click");
+    await wrapper.get(".rename-input").setValue("");
+    await wrapper.get(".rename-input").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(wrapper.get(".rename-note").text()).toBe("Could not restore automatic title: denied by policy");
+    expect(wrapper.find(".rename-input").exists()).toBe(true); // stays open for retry
+  });
+
   it("a failed rename shows an inline error and keeps the editor open for retry", async () => {
     const control = fakeControlHandle({
       runCommand: async () => ({ ok: false, error: "E_COMMAND_DENIED", message: "denied by policy" }),
