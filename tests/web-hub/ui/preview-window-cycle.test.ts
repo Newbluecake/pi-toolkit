@@ -12,12 +12,25 @@
  *
  * The face here is a minimal fake; the pure ring math is covered by
  * `logic-preview-window-cycle.test.ts`.
+ *
+ * The LAST describe is the W4 INTEGRATION pass: the REAL `PreviewHost` (which wires the
+ * composable itself since W4 — plus the §8.2 ledger provide) over the REAL `usePreviewWindows`
+ * manager, so the two §5.3/§5.4 contracts are exercised against production DOM, not the
+ * mimic above.
  */
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, nextTick, ref, shallowRef, watch, type PropType } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
+import PreviewHost from "../../../src/web-hub/ui/src/components/preview/PreviewHost.vue";
+import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
 import { usePreviewWindowCycle } from "../../../src/web-hub/ui/src/composables/usePreviewWindowCycle.js";
-import type { PreviewWindowsFace, PreviewWindow } from "../../../src/web-hub/ui/src/composables/usePreviewWindows.js";
+import {
+  usePreviewWindows,
+  type PreviewWindowsFace,
+  type PreviewWindow,
+} from "../../../src/web-hub/ui/src/composables/usePreviewWindows.js";
+import type { HubState } from "../../../src/web-hub/ui/src/types.js";
+import type { PreviewDirOutcome, PreviewTransport } from "../../../src/web-hub/ui/src/transport/types.js";
 
 /** A minimal §4.3 windows face: focusWindow reorders + emits focusRequest; `drop` mimics
  *  the manager's closeWindow (removes from windows/order) for the stale-ring test. */
@@ -281,5 +294,161 @@ describe("usePreviewWindowCycle — Ctrl+` MRU ring (§5.6)", () => {
     press(); // frozen step says "2" ⇒ rejected ⇒ fresh ring [page,3,1] from focus-at 3 ⇒ → 1
     await settle();
     expect(focusedWindow()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W4 INTEGRATION — the REAL PreviewHost (wires the cycle itself) × the REAL manager
+// ---------------------------------------------------------------------------
+/**
+ * PreviewHost wires `usePreviewWindowCycle` itself (W4; plan §5.6 + the W3 report's
+ * wire-in list) — this describe mounts the production host over the production
+ * `usePreviewWindows` manager with a scripted transport, so the ring runs against the REAL
+ * DOM (`.preview-window` > `.preview-panel[aria-labelledby="pw-title-<id>"]`), the REAL
+ * focusRequest landing, and the REAL §5.4 `pageFocus` bookkeeping (host-side plain
+ * variable, crossed as a getter).
+ */
+function rigHost() {
+  const agents = new Map<string, unknown>([
+    [
+      "A",
+      {
+        key: "A",
+        card: { session: { sessionId: "s1", sessionFile: "/p/s.jsonl", cwd: "/p" } },
+        session: { sessionId: "s1", sessionFile: "/p/s.jsonl", cwd: "/p" },
+      },
+    ],
+  ]);
+  const state = ref({
+    clientId: "c1",
+    hub: { caps: ["preview.v1", "preview.dir.v1"] },
+    conn: "open",
+    selected: "A",
+    agents,
+    order: ["A"],
+  } as unknown as HubState);
+  const waits: Array<{ resolve: (o: PreviewDirOutcome) => void }> = [];
+  const transport: PreviewTransport = {
+    fetch: () => new Promise<PreviewDirOutcome>((resolve) => waits.push({ resolve })),
+  };
+  const handle = usePreviewWindows({ preview: transport, mode: "token", state, coarse: ref(false) });
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const wrapper = mount(PreviewHost, {
+    attachTo: host,
+    global: { provide: { [PREVIEW_CTX as symbol]: { handle, plaintext: false } satisfies PreviewContext } },
+  });
+  mounted.push(wrapper);
+  const text = (body: string): void => {
+    waits.shift()?.resolve({ ok: true, kind: "text", size: body.length, truncated: false, text: body });
+  };
+  /** Open n text windows (the conversation-side entry) and settle their loads. */
+  const openTexts = async (...paths: string[]): Promise<void> => {
+    for (const p of paths) {
+      handle.open({ path: p });
+      await settle(4);
+      text("x");
+      await settle(4);
+    }
+  };
+  const closeAll = async (): Promise<void> => {
+    handle.close();
+    await settle(4);
+  };
+  return { handle, wrapper, openTexts, closeAll };
+}
+
+/** A stand-in for the composer the real App has — the cycle's page-side fallback target. */
+function composerTextarea(): HTMLTextAreaElement {
+  const el = document.createElement("textarea");
+  const box = document.querySelector(".composer") ?? document.createElement("div");
+  box.classList.add("composer");
+  box.appendChild(el);
+  document.body.appendChild(box);
+  return el;
+}
+
+describe("integration — real PreviewHost × real usePreviewWindows (W4 wiring)", () => {
+  it("§5.3/§7.2 DOM contract: every .preview-window's panel is labelled pw-title-<id>", async () => {
+    const r = rigHost();
+    await r.openTexts("/p/a.txt", "/p/b.txt");
+    const secs = [...document.querySelectorAll<HTMLElement>(".preview-window")];
+    expect(secs).toHaveLength(2);
+    for (const sec of secs) {
+      const id = sec.getAttribute("data-pw-id")!;
+      const panel = sec.querySelector<HTMLElement>(".preview-panel");
+      expect(panel).not.toBeNull();
+      expect(panel!.getAttribute("aria-labelledby")).toBe(`pw-title-${id}`);
+      expect(sec.querySelector(`#pw-title-${id}`)).not.toBeNull();
+    }
+    await r.closeAll();
+  });
+
+  it("Ctrl+` walks conversation → active → older → oldest → back to the conversation (pageFocus getter)", async () => {
+    const r = rigHost();
+    const textarea = composerTextarea();
+    await r.openTexts("/p/a.txt", "/p/b.txt", "/p/c.txt");
+    // focus starts on the conversation side — the host records it as §5.4 pageFocus
+    textarea.focus();
+    expect(press()).toBe(false); // acting ⇒ preventDefault
+    await settle();
+    expect(focusedWindow()).toBe(3); // the ACTIVE window (creation/activation order tail)
+    expect(press()).toBe(false);
+    await settle();
+    expect(focusedWindow()).toBe(2); // the FROZEN ring walks to the older window
+    expect(press()).toBe(false);
+    await settle();
+    expect(focusedWindow()).toBe(1); // …the oldest…
+    expect(press()).toBe(false);
+    await settle();
+    expect(focusedWindow()).toBeNull(); // …and wraps to the page
+    expect(document.activeElement).toBe(textarea); // via the HOST's pageFocus, not the fallback
+    await r.closeAll();
+  });
+
+  it("from a window (the natural post-open state) the ring continues; the page lands on the composer fallback", async () => {
+    const r = rigHost();
+    const textarea = composerTextarea();
+    await r.openTexts("/p/a.txt", "/p/b.txt"); // focus lands on window 2 (focusRequest)
+    expect(focusedWindow()).toBe(2);
+    press();
+    await settle();
+    expect(focusedWindow()).toBe(1); // fresh ring [page,2,1] at 2 ⇒ forward → 1
+    press();
+    await settle();
+    expect(focusedWindow()).toBeNull(); // → page: pageFocus was never set (no outside focus yet)
+    expect(document.activeElement).toBe(textarea); // ⇒ the .composer textarea fallback
+    await r.closeAll();
+  });
+
+  it("Ctrl+Shift+` reverses: the conversation jumps to the OLDEST window", async () => {
+    const r = rigHost();
+    const textarea = composerTextarea();
+    await r.openTexts("/p/a.txt", "/p/b.txt", "/p/c.txt");
+    textarea.focus();
+    expect(press(true)).toBe(false);
+    await settle();
+    expect(focusedWindow()).toBe(1); // ring [page,3,2,1] at page ⇒ backward → 1
+    await r.closeAll();
+  });
+
+  it("guards hold in production wiring: no windows / an open [aria-modal=true] ⇒ the key passes through", async () => {
+    const r = rigHost();
+    const textarea = composerTextarea();
+    textarea.focus();
+    expect(press()).toBe(true); // zero windows ⇒ not the cycle's key
+    await r.openTexts("/p/a.txt");
+    textarea.focus();
+    const modal = document.createElement("div");
+    modal.setAttribute("aria-modal", "true"); // any real modal (settings, pickers, phone stack)
+    document.body.appendChild(modal);
+    expect(press()).toBe(true); // guarded — focus untouched
+    await settle();
+    expect(focusedWindow()).toBeNull();
+    modal.remove();
+    expect(press()).toBe(false); // the modal is gone ⇒ the production cycle acts again
+    await settle();
+    expect(focusedWindow()).toBe(1);
+    await r.closeAll();
   });
 });

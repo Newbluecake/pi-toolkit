@@ -236,6 +236,113 @@ describe("preview windows — desktop (real manager)", () => {
     await tick();
   });
 
+  it("§8.2 wiring (W3×W4): the HOST-provided ledger flags an evicted HTML window; 重新加载 clears it", async () => {
+    // Self-contained rig: the shared rig's htmlCap answer is a STATIC url, but §8.2's token
+    // IS the cap URL — unique per mint — so this test mints fresh tokens per call.
+    let mintSeq = 0;
+    const agents = new Map<string, unknown>([
+      [
+        "A",
+        {
+          key: "A",
+          card: { session: { sessionId: "s1", sessionFile: "/p/s.jsonl", cwd: "/p" } },
+          session: { sessionId: "s1", sessionFile: "/p/s.jsonl", cwd: "/p" },
+        },
+      ],
+    ]);
+    const state = ref({
+      clientId: "c1",
+      hub: { caps: ["preview.v1", "preview.dir.v1", "preview.html.v1"] },
+      conn: "open",
+      selected: "A",
+      agents,
+      order: ["A"],
+    } as unknown as HubState);
+    const waits: Array<{ resolve: (o: PreviewDirOutcome) => void }> = [];
+    const pend = (): Promise<PreviewDirOutcome> => new Promise<PreviewDirOutcome>((resolve) => waits.push({ resolve }));
+    const transport: PreviewTransport = { fetch: () => pend() };
+    const cap = (): string => {
+      const c = `c${String(++mintSeq).padStart(2, "0")}${"a".repeat(40)}`;
+      return c;
+    };
+    const hubFake = {
+      state,
+      preview: {
+        fetch: () => pend(),
+        htmlCap: () =>
+          Promise.resolve({
+            ok: true as const,
+            url: `/pv/${cap()}/index.html`,
+            openUrl: `/pvw/x`,
+            idleMs: 900_000,
+            hardRemainingMs: 3_600_000,
+          }),
+      },
+      dispatch: () => {},
+    };
+    const handle = usePreviewWindows({ preview: transport, mode: "token", state, coarse: ref(false) });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    mount(PreviewHost, {
+      attachTo: host,
+      global: {
+        provide: {
+          [PREVIEW_CTX as symbol]: { handle, plaintext: false } satisfies PreviewContext,
+          [HUB_CTX as symbol]: hubFake,
+        },
+      },
+    });
+    const text = (body: string): void => {
+      waits.shift()?.resolve({ ok: true, kind: "text", size: body.length, truncated: false, text: body });
+    };
+    const reloadOf = (i: number): HTMLElement =>
+      sections()[i]!.querySelector<HTMLElement>(".preview-html-bar button.preview-html-reload")!;
+    const evictedNoteOf = (i: number): Element | null =>
+      sections()[i]!.querySelector(".preview-html-note[role='status']");
+
+    // window A (mint #1) and window B (mint #2) — both render the sandboxed iframe
+    handle.open({ path: "/p/a.html" });
+    await tick();
+    text("<p>A</p>");
+    handle.open({ path: "/p/b.html" });
+    await tick();
+    text("<p>B</p>");
+    await vi.waitFor(
+      () => {
+        if (sections().length !== 2) throw new Error("windows not open yet");
+        for (const s of sections())
+          if (s.querySelector("iframe.preview-html-frame") === null) throw new Error("no frame");
+      },
+      { timeout: 4000 },
+    );
+    expect(reloadOf(0)).not.toBeNull(); // §8.2-3: the reload button is STANDING in every window
+    expect(evictedNoteOf(0)).toBeNull(); // nothing evicted yet
+    const frameA1 = sections()[0]!.querySelector("iframe.preview-html-frame")!;
+
+    // 8 more mints in B (its 重新加载 re-mints a FRESH token every time) — mints #3..#10.
+    // The hub-side per-principal FIFO holds 8; at mint #9 the OLDEST (A's token) is evicted.
+    for (let i = 0; i < 8; i++) {
+      reloadOf(1).click();
+      await tick();
+      await tick();
+    }
+    expect(mintSeq).toBe(10); // 2 opens + 8 reloads — no click was dropped (busy-guard)
+    await vi.waitFor(() => expect(evictedNoteOf(0)).not.toBeNull(), { timeout: 2000 });
+    expect(evictedNoteOf(0)!.textContent).toContain("8"); // 「…8 per login…」 per-plan copy
+    expect(evictedNoteOf(1)).toBeNull(); // B's CURRENT cap is the newest mint — still live
+
+    // A's standing 重新加载 re-mints a FRESH token ⇒ not evicted ⇒ the notice clears
+    // (and the iframe element is replaced — frameKey bumps for the new cap url).
+    reloadOf(0).click();
+    await tick();
+    await tick();
+    expect(mintSeq).toBe(11);
+    await vi.waitFor(() => expect(evictedNoteOf(0)).toBeNull(), { timeout: 2000 });
+    expect(sections()[0]!.querySelector("iframe.preview-html-frame")).not.toBe(frameA1);
+    handle.close();
+    await tick();
+  });
+
   it("§7.4: drag — 3px threshold, no drag off a button, body class lifecycle", async () => {
     const r = rig();
     r.handle.open({ path: "/p/a.txt" });

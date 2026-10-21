@@ -20,14 +20,15 @@
   `asWindowsHandle(ctx.handle) === null` ⇒ NOTHING renders (评审 #14: the legacy single-window
   face is deleted; component fakes come from `tests/.../helpers/preview-windows-fake.ts`).
 
-  W3 wire-in points (deliberately NOT here yet — do not fill in W2):
-  1. `usePreviewWindowCycle(...)` — the Ctrl+` conversation⇄window ring (§5.6);
-  2. `provide(PREVIEW_HTML_LEDGER, ...)` — the §8.2 html capability ledger.
+  W3 wire-in (live, see the "W3 wire-in" section below): `usePreviewWindowCycle(...)` — the
+  Ctrl+` conversation⇄window ring (§5.6) — and `provide(PREVIEW_HTML_LEDGER, …)` — the §8.2
+  tab-local html-cap FIFO ledger every window's PreviewHtml shares.
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onUnmounted, provide, ref, watch } from "vue";
 import type { PreviewResizeDir } from "@logic/previewWindowGeom.js";
 import { asWindowsHandle } from "../../composables/usePreviewWindows.js";
+import { usePreviewWindowCycle } from "../../composables/usePreviewWindowCycle.js";
 import { usePreviewWindowLayout } from "../../composables/usePreviewWindowLayout.js";
 import { useMedia } from "../../composables/useMedia.js";
 import { acquireBodyScrollLock } from "../../composables/useScrollLock.js";
@@ -35,6 +36,7 @@ import { usePlaintextWarning } from "../../composables/usePlaintextWarning.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
 import PreviewWindow from "./PreviewWindow.vue";
 import { PREVIEW_CTX } from "./previewContext.js";
+import { createPreviewHtmlLedger, PREVIEW_HTML_LEDGER } from "./previewHtmlLedger.js";
 
 const ctx = inject(PREVIEW_CTX, null);
 
@@ -170,6 +172,23 @@ watch(
   },
   { flush: "post" },
 );
+
+// --- W3 wire-in (§8.2 + §5.6): the html-cap ledger + the conversation⇄window switcher -------------
+
+// §8.2: ONE tab-local ledger for EVERY window's PreviewHtml (the hub's per-principal 8-cap
+// FIFO simulation — drives the 「可能已被挤掉」 role=status notice and the standing 重新加载
+// as its deterministic recovery entry). PreviewHtml injects it optionally; a mount that never
+// receives it keeps byte-identical pre-W3 behavior.
+provide(PREVIEW_HTML_LEDGER, createPreviewHtmlLedger());
+
+// §5.6: Ctrl+` / Ctrl+Shift+` (拍板 3). The face object is stable for this host's lifetime —
+// `ctx.handle` is captured once at mount (App's single `usePreviewWindows` handle) — so the
+// composable is armed exactly once, guards included. `pageFocus` here is a plain variable
+// (NOT a ref), so the §5.4 page restore target crosses as a GETTER, read per landing.
+const cycleFace = face.value;
+if (cycleFace !== null) {
+  usePreviewWindowCycle({ face: cycleFace, pageFocus: () => pageFocus });
+}
 
 // --- phone fullscreen stack (§6): scroll lock + top-window focus + the Tab trap --------------
 
