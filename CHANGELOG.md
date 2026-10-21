@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-21
+
+### Added
+
+- **fabric**: show wake activity in /agent status and subagent results (`1997fff7`)
+- **fabric**: revived subagents finish quietly and report back to their wakers (`f6cc67a0`)
+- **ask-user**: retire stale parked questions automatically (`b780982b`)
+- **web-hub**: put preview copy next to download; hide plaintext-HTTP warnings by default (`26907869`)
+- **fabric**: wake finished subagents when a message asks for it (`fc1c9e1c`)
+- **fabric**: hand messages to a resuming subagent once it is running (`f58dd34f`)
+- **fabric**: keep deliver-only messages for finished subagents until they resume (`2af6fea7`)
+- **runtime**: record whether a resumed subagent actually received its prompt (`a4996cde`)
+- **fabric**: let message_agent senders choose whether to wake the main session (`84d5c5c1`)
+- **web-hub**: label the session stop button 「停止」 like its neighbours (`a37e8df1`)
+- **web-hub**: put the session rename pencil right after the title (`a9ae427f`)
+- **web-hub**: compact, freely draggable ask_user window (`b7d36925`)
+- **external-agent**: hide droid models while the droid provider is unavailable (`c69307d1`)
+- **web-hub**: confirm web slash commands with one click in a cleaner bar (`56271b89`)
+- **web-hub**: recall Feishu ask_user cards once the question is answered elsewhere (`a35ed029`)
+
+### Fixed
+
+- **web-hub**: keep re-issued Feishu session-card buttons on the card's exact expiry (`0965e49e`)
+- **web-hub**: drop the stale 「只读」 badge from the sign-in page (`1c103171`)
+- **web-hub**: stop model names overlapping run names in the agents tree (`f9e9756d`)
+- **web-hub**: make Feishu ask_user cards interactive and links phone-reachable (`e01d992e`)
+- **web-hub**: ask to reload when an old tab can no longer load UI parts (`5aa44405`)
+- **fabric**: expire subagent messages exactly at their TTL deadline (`9977e400`)
+- **web-hub**: show full branch names in the worktree graph (`c1983049`)
+- **cache-ttl**: stop keepalive per line after a proven cache write and resume on the next real request (`1bbc5968`)
+
+### Changed
+
+- **fabric**: add shared contracts for sender-controlled wake (`b08067b6`)
+
+### Documentation
+
+- **fabric**: plan sender-controlled wake and waking finished subagents (`4ec8afbb`)
+- **dev-flow**: route to droid only when the models list advertises it (`201f6606`)
+
+### Chores
+
+- **web-hub**: give the detail header buttons meaningful colour (`d4b9f8f6`)
+
+Stats: 15 feat, 8 fix, 1 refactor/perf, 2 docs, 1 chore
+
 ## [0.6.3] - 2026-10-20
 
 ### Added
@@ -850,7 +896,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.0...v0.6.1
