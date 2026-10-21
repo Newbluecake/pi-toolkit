@@ -25,13 +25,27 @@ export interface WakeInputEvent {
   source: "interactive" | "rpc" | "extension";
 }
 
+/** Shared with RootWakeController; pure attribution, no level mutation. Attribution failures are not human proof. */
+export function classifyHumanInput(
+  event: WakeInputEvent,
+  attributeInput?: (text: string) => "web_prompt" | undefined,
+): boolean {
+  if (event.source === "interactive" || event.source === "rpc") return true;
+  try {
+    return event.source === "extension" && attributeInput?.(event.text) === "web_prompt";
+  } catch {
+    return false;
+  }
+}
+
 export function createWakeInputHook(deps: WakeInputDeps): (event: WakeInputEvent) => { action: "continue" } {
   return (event) => {
     try {
       const level = deps.level();
       if (level === undefined) return { action: "continue" };
-      if (event.source === "interactive" || event.source === "rpc") level.resetRoot();
-      else if (event.source === "extension" && deps.attributeInput()?.(event.text) === "web_prompt") level.resetRoot();
+      // Preserve the old lazy port read: interactive/rpc input never consults web attribution.
+      if (classifyHumanInput(event, event.source === "extension" ? deps.attributeInput() : undefined))
+        level.resetRoot();
     } catch {
       /* attribution is advisory: a failure here must never disturb input handling */
     }

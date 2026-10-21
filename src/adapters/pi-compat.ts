@@ -261,12 +261,29 @@ function isWithinTestedRange(version: string): boolean {
  * importing 1.2-only type names, or touching `.messageType` on the 1.1 interface, would not compile
  * against the 1.0/1.1 peer floor. This is a shape probe, not a version gate (I14).
  */
-export type BeforeAgentStartTrigger = { kind: "user"; prompt: string } | { kind: "custom" } | { kind: "unknown" };
+export type BeforeAgentStartTrigger =
+  { kind: "user"; prompt: string } | { kind: "custom"; customType?: string; details?: unknown } | { kind: "unknown" };
+
+/** Phase-2 R1: evidence from an ALREADY occurring event, never a version gate or a probe run. */
+export function readTriggerShape(event: unknown): "union" | "legacy" | "unknown" {
+  if (event === null || typeof event !== "object") return "unknown";
+  const e = event as { messageType?: unknown; prompt?: unknown };
+  if (e.messageType === "user" || e.messageType === "custom") return "union";
+  return e.messageType === undefined && typeof e.prompt === "string" ? "legacy" : "unknown";
+}
 
 export function readBeforeAgentStartTrigger(event: unknown): BeforeAgentStartTrigger {
   if (event === null || typeof event !== "object") return { kind: "unknown" };
-  const e = event as { messageType?: unknown; prompt?: unknown };
-  if (e.messageType === "custom") return { kind: "custom" };
+  const e = event as { messageType?: unknown; prompt?: unknown; message?: unknown };
+  if (e.messageType === "custom") {
+    const trigger: Extract<BeforeAgentStartTrigger, { kind: "custom" }> = { kind: "custom" };
+    if (e.message !== null && typeof e.message === "object") {
+      const message = e.message as { customType?: unknown; details?: unknown };
+      if (typeof message.customType === "string") trigger.customType = message.customType;
+      if (message.details !== undefined) trigger.details = message.details;
+    }
+    return trigger;
+  }
   // Unknown future kinds are treated as "not a user prompt" (fail-safe for user-only handlers).
   if (e.messageType !== undefined && e.messageType !== "user") return { kind: "unknown" };
   return typeof e.prompt === "string" ? { kind: "user", prompt: e.prompt } : { kind: "unknown" };
