@@ -104,6 +104,24 @@ function fakeModelRuntime(model: ReturnType<typeof fakeModel>, scripted: Scripte
   };
 }
 
+/**
+ * Scripted-message timestamps must be STRICTLY later than any real-clock stamp pi could have
+ * put on an entry created before the message is built — above all the compaction entry a
+ * successful recovery compaction appends, which in program order always precedes the retried
+ * request's `streamSimple` call (and thus this build). pi's `_checkCompaction`
+ * (agent-session.js) silently skips any assistant message whose timestamp is `<=` the latest
+ * compaction entry's (`assistantIsFromBeforeCompaction`), and with both stamps read from the
+ * same real clock a same-millisecond tie (reproduced ~10% of runs locally by stamping the
+ * message 1ms EARLIER; the tie itself needs no injected delay — it is why T-F1 flaked in CI)
+ * makes pi drop the exhausted overflow-recovery branch entirely: no `compaction_end` with
+ * `errorMessage`, hence no `compaction_failed`, an empty `diag.compactionFailures`, and a raw
+ * provider-text `error.message` with no runner annotation. `+ 1` makes the tie impossible: the
+ * compaction entry's stamp is taken before this build, so it is `<= Date.now() < Date.now()+1`.
+ */
+function msgTimestamp(): number {
+  return Date.now() + 1;
+}
+
 function assistantTextMsg(model: ReturnType<typeof fakeModel>, text: string) {
   return {
     role: "assistant" as const,
@@ -113,7 +131,7 @@ function assistantTextMsg(model: ReturnType<typeof fakeModel>, text: string) {
     model: model.id,
     usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
     stopReason: "stop" as const,
-    timestamp: Date.now(),
+    timestamp: msgTimestamp(),
   };
 }
 function assistantToolCallMsg(model: ReturnType<typeof fakeModel>, toolCallId: string, name: string, args: unknown) {
@@ -125,7 +143,7 @@ function assistantToolCallMsg(model: ReturnType<typeof fakeModel>, toolCallId: s
     model: model.id,
     usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
     stopReason: "toolUse" as const,
-    timestamp: Date.now(),
+    timestamp: msgTimestamp(),
   };
 }
 function assistantErrorMsg(model: ReturnType<typeof fakeModel>, errorMessage: string) {
@@ -138,7 +156,7 @@ function assistantErrorMsg(model: ReturnType<typeof fakeModel>, errorMessage: st
     usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 },
     stopReason: "error" as const,
     errorMessage,
-    timestamp: Date.now(),
+    timestamp: msgTimestamp(),
   };
 }
 
