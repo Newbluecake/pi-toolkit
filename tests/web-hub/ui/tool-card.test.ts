@@ -429,3 +429,20 @@ describe("ToolCard.vue — subagent run label header", () => {
     expect(bare.get(".tool-args").text()).not.toContain("run_id: r_ABC)");
   });
 });
+
+// web-hub-mermaid plan §10.2 (P2): fence routing inside a markdown-rendered tool result.
+describe("ToolCard.vue — mermaid fence in MD_RESULT_TOOLS results (web-hub-mermaid plan §6.2)", () => {
+  it("a ```mermaid fence in the rendered result becomes .codeblock.mmd; ```ts stays CodeBlock", () => {
+    const result = "```mermaid\nflowchart TD\n  A-->B\n```\n\n```ts\nconst answer = 42;\n```";
+    const wrapper = mount(ToolCard, {
+      props: {
+        view: view({ toolCallId: "mmd1", toolName: "get_subagent_result", state: "done", result }),
+      },
+    });
+    const blocks = wrapper.findAll(".tool-md .codeblock");
+    expect(blocks.length).toBe(2);
+    expect(blocks[0]!.classes()).toContain("mmd");
+    expect(blocks[1]!.classes()).not.toContain("mmd");
+    expect(blocks[1]!.find("pre").text()).toBe("const answer = 42;");
+  });
+});

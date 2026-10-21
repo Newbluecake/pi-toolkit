@@ -54,6 +54,22 @@ const transcript = {
   "tool.viewRendered": "渲染",
   "tool.viewSource": "源码",
   "tool.viewToggleLabel": "Markdown 显示方式",
+  // web-hub-mermaid 方案 §6.2（P2）：MermaidBlock 外观文案。错误行按 reason 在组件里选文案
+  // （parse/render/timeout/output-invalid 共用 mermaidError + runtime 的 ≤160 字符 message；
+  // unsupported 且 message 含 KaTeX 时选 mermaidMath）。
+  mermaidShowSource: "源码",
+  mermaidShowDiagram: "图",
+  mermaidRendering: "渲染中…",
+  mermaidError: "渲染失败：{message}",
+  mermaidTooLarge: "图表过大，已显示源码",
+  mermaidUnsupported: "暂不支持此图内容（图类型或配置），已显示源码",
+  mermaidMath: "图中含数学公式（未支持），已显示源码",
+  mermaidLoadFailed: "渲染引擎不可用，已显示源码",
+  mermaidBusy: "渲染队列已满，已显示源码",
+  mermaidAlt: "Mermaid {type} 图",
+  mermaidFitWidth: "适应宽度",
+  mermaidActualSize: "原尺寸",
+  mermaidCopySelectFailed: "复制失败，请手动选择",
 } satisfies Messages<typeof en>;
 
 export default transcript;

@@ -145,3 +145,21 @@ describe("MarkdownView.vue — whitelist extension (table/quote/del/task list)",
     expect(lis.map((li) => li.text())).toEqual(["☐todo", "☑done", "plain"]);
   });
 });
+
+// web-hub-mermaid plan §10.2 (P2): fence routing through MdBlock. A ```mermaid fence renders
+// MermaidBlock's .codeblock.mmd; every other fence stays a plain CodeBlock (zero difference).
+// Class-level assertions only — the render request is visibility-gated and never matters here
+// (without a mock the P2 runtime stub resolves fail-closed; the source <pre> shows either way).
+describe("MarkdownView.vue — mermaid fence routing (web-hub-mermaid plan §6.2)", () => {
+  it("```mermaid renders a .codeblock.mmd block; ```js stays a plain .codeblock", () => {
+    const wrapper = mount(MarkdownView, {
+      props: { text: "```mermaid\nflowchart TD\n  A-->B\n```\n\n```js\nlet x = 1\n```" },
+    });
+    const blocks = wrapper.findAll(".codeblock");
+    expect(blocks.length).toBe(2);
+    expect(blocks[0]!.classes()).toContain("mmd");
+    expect(blocks[0]!.find("pre").text()).toContain("flowchart TD");
+    expect(blocks[1]!.classes()).not.toContain("mmd");
+    expect(blocks[1]!.find("pre").text()).toContain("let x = 1");
+  });
+});
