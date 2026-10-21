@@ -106,6 +106,18 @@ import {
 import { canSendWithAttachments, classifyPaste, uploadAvailability } from "@logic/upload.js";
 import { decoratePalette, resumeAvailable } from "@logic/resume.js";
 import { buildFileSearchUrl, parseFileSearchResults } from "@logic/file-mention.js";
+import {
+  ARG_CLIENT_TIMEOUT_MS,
+  ARG_DEBOUNCE_MS,
+  ARG_RATE_PAUSE_FLOOR_MS,
+  applyArgItem as applyArgText,
+  argCacheGet,
+  argCacheKey,
+  argCacheSet,
+  argKeyAction,
+  argZone,
+  parseCompleteResponse,
+} from "@logic/cmdArgs.js";
 import { API } from "@logic/contract.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { ComposerEmits, ComposerProps } from "../../contracts.js";
@@ -115,6 +127,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import { addAttachments } from "./attachmentAdd.js";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
+import CommandArgPalette from "./CommandArgPalette.vue";
 import ContextRing from "./ContextRing.vue";
 import ModelSwitcher from "./ModelSwitcher.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
@@ -407,7 +420,10 @@ const paletteSuppressed = ref(false);
 /** The name a completion is currently writing — lets the name watcher distinguish "changed
  * because Tab/click just completed it" (keep suppressed) from "the user edited it" (reopen). */
 let completingName: string | null = null;
-const paletteVisible = computed(() => paletteOpen.value && !paletteSuppressed.value);
+// web-hub-slash-args §6.1: while the ARG zone is active the name panel is hidden — this
+// also fixes "the name palette lingers after hand-typing `/record␠`" (§6.1), but ONLY when
+// the cap signal is present (`argActive` is constantly false without it ⇒ byte-identical).
+const paletteVisible = computed(() => paletteOpen.value && !paletteSuppressed.value && !argActive.value);
 /** The row aria-activedescendant / Tab act on — clamped so a shrinking list can never leave the
  * highlight pointing past the end (mirror of the mention panel's clamp). */
 const paletteActiveIndex = computed(() =>
@@ -415,6 +431,15 @@ const paletteActiveIndex = computed(() =>
 );
 const paletteActiveRowId = computed(() =>
   paletteVisible.value && paletteRows.value.length > 0 ? `${paletteId}-opt-${paletteActiveIndex.value}` : undefined,
+);
+
+/** The textarea's combobox aria follows whichever panel is up — the name palette OR the arg
+ * palette (mutually exclusive by construction; cap missing ⇒ argVisible false ⇒ the exact
+ * pre-feature bindings, byte-identical). */
+const comboOpen = computed(() => paletteVisible.value || argVisible.value);
+const comboControls = computed(() => (paletteVisible.value ? paletteId : argVisible.value ? argPaletteId : undefined));
+const comboActiveDesc = computed(() =>
+  paletteVisible.value ? paletteActiveRowId.value : argVisible.value ? argActiveRowId.value : undefined,
 );
 
 // Query change ⇒ fresh highlight (resets to the best match) + reopen (a completion's OWN name
@@ -474,26 +499,357 @@ function paletteKeydown(ev: KeyboardEvent): boolean {
   return false;
 }
 
+/** Shared completion tail (§6.4): grow + refocus the textarea with the caret pinned to the
+ * end — `completeCommand`, the arg-palette apply and the injected-draft recall all land the
+ * same way, so the three paths can never diverge. */
+function focusEnd(): void {
+  grow();
+  const el = textareaEl.value;
+  if (el) {
+    el.focus();
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
+    caret.value = end;
+  }
+}
+
 /** Tab/click completion: `/name ` (trailing space — args come next), palette hidden, caret at
  * the end, focus back in the textarea. The one insert path both the keyboard and pointer pick
- * funnel through, so they can never diverge. */
+ * funnel through, so they can never diverge. With the arg-completion cap present, the text
+ * now sits in the ARG zone and the zone watcher below fires the first discovery query. */
 function completeCommand(name: string): void {
   completingName = name; // the name watcher keeps the palette suppressed across this change
   text.value = `/${name} `;
+  caret.value = text.value.length; // sync: the zone watcher must see the final state in ONE flush
   paletteSuppressed.value = true; // also covers completing to the SAME name (watcher won't fire)
   paletteActive.value = 0;
   persistDraft();
   void nextTick(() => {
     completingName = null; // stale guard: a later MANUAL re-type of the same name must reopen
-    grow();
-    const el = textareaEl.value;
-    if (el) {
-      el.focus();
-      const end = el.value.length;
-      el.setSelectionRange(end, end);
-      caret.value = end;
-    }
+    focusEnd();
   });
+}
+
+// ---------------------------------------------------------------------------
+// `/name␠` argument completion (web-hub-slash-args plan §6 — P3)
+// ---------------------------------------------------------------------------
+// While the caret sits at the end of `/name <prefix>` (`argZone`) and the agent advertised the
+// feature (any `commands`-slot row carrying `args` — the positive cap signal; absent ⇒ this
+// whole layer is inert and every behaviour above stays byte-identical, §7), the NAME palette
+// is hidden and the ARG panel takes over: a static usage header (zero requests) + dynamic
+// completion rows from `POST /api/command/complete` (fake-fetch-tested; the hub route itself
+// is P2). Requests: IMMEDIATE on zone entry / after an apply (first ask doubles as discovery),
+// 150ms-debounced afterwards, one AbortController + seq guard per query (stale replies
+// dropped), 3s client timeout. Never queried: static-only rows (`args.complete` ≠ true), a
+// latched E_UNSUPPORTED/E_COMMAND_DENIED name, an E_RATE pause window (cache fallback still
+// shows exact-prefix hits during it — r1 #9), no agentKey, a down agent, sendAsText/
+// commandsEnabled=false (both already close commandMode). The result cache is backstep-only
+// instant display, never a local filter.
+
+interface ArgZoneInfo {
+  readonly name: string;
+  readonly argStart: number;
+  readonly prefix: string;
+}
+interface ArgItem {
+  readonly value: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly policy?: "confirm";
+}
+
+/** §6.1 `capPresent`: any decorated row is the positive signal (the agent only emits `args`
+ * while the live link carries `cmd.args.v1`); missing ⇒ `argActive` constantly false. */
+const argCapPresent = computed(() => commands.value.some((row) => row.args !== undefined));
+const argZoneState = computed<ArgZoneInfo | undefined>(() => argZone(text.value, caret.value));
+const argRow = computed(() => {
+  const z = argZoneState.value;
+  if (z === undefined) return undefined;
+  return commands.value.find((row) => row.name === z.name);
+});
+const argActive = computed(() => {
+  if (!argCapPresent.value || argZoneState.value === undefined) return false;
+  if (argRow.value === undefined || !commandMode.value) return false;
+  return commandPolicyFor([...commands.value], argZoneState.value.name, busy.value) !== "deny";
+});
+/** Static header text: `row.args.usage`, falling back to the row description (§6.2). */
+const argHeaderText = computed(() => {
+  const row = argRow.value;
+  if (row === undefined) return undefined;
+  const args = row.args;
+  if (args !== null && typeof args === "object") {
+    const usage = (args as { usage?: unknown }).usage;
+    if (typeof usage === "string" && usage !== "") return usage;
+  }
+  const desc = row.description;
+  return typeof desc === "string" && desc !== "" ? desc : undefined;
+});
+/** Dynamic channel availability (`args.complete === true`): without it the panel still shows
+ * the static usage header + the empty hint, but never a request. */
+const argCompleteOn = computed(() => {
+  const args = argRow.value?.args;
+  return args !== null && typeof args === "object" && (args as { complete?: unknown }).complete === true;
+});
+
+const argItems = ref<readonly ArgItem[]>([]);
+const argLoading = ref(false);
+/** Last query failed / rate-paused with no cache: silent degrade to the header line only. */
+const argError = ref(false);
+/** Esc latch — any subsequent input resets it (same discipline as `mentionDismissed`). */
+const argDismissed = ref(false);
+/** §11 D2: armed ONLY by an explicit ↑↓/Shift+Tab navigation; any non-navigation input
+ * resets it (r1 #5). While unset, Enter keeps the normal send/execute semantics. */
+const argNavigated = ref(false);
+const argActiveIdx = ref(0);
+const argActiveIdxClamped = computed(() =>
+  argItems.value.length === 0 ? 0 : Math.min(argActiveIdx.value, argItems.value.length - 1),
+);
+const argVisible = computed(
+  () =>
+    argActive.value &&
+    !argDismissed.value &&
+    (argHeaderText.value !== undefined || argItems.value.length > 0 || argLoading.value),
+);
+const argPaletteId = useId();
+const argActiveRowId = computed(() =>
+  argVisible.value && argItems.value.length > 0 ? `${argPaletteId}-opt-${argActiveIdxClamped.value}` : undefined,
+);
+// A wire refresh can shrink the list under a stationary highlight — clamp in place (same
+// ruling as the name palette / mention panel).
+watch(argItems, (rows) => {
+  if (argActiveIdx.value > rows.length - 1) argActiveIdx.value = Math.max(0, rows.length - 1);
+});
+watch(argActiveIdxClamped, () => {
+  if (!argVisible.value) return;
+  const id = argActiveRowId.value;
+  if (id === undefined) return;
+  void nextTick(() => {
+    const el = document.getElementById(id);
+    if (el !== null && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "nearest" });
+  });
+});
+
+let argSeq = 0;
+let argTimer: ReturnType<typeof setTimeout> | undefined;
+let argCtl: AbortController | undefined;
+/** Set by an apply: the zone watcher consumes it and fires the next-level query at 0ms
+ * (multi-level completions like `keepalive ` → `keepalive on`, §6.4). */
+let argForceImmediate = false;
+const argCache = new Map<string, { items: ArgItem[]; at: number }>();
+/** Session latch (E_UNSUPPORTED / E_COMMAND_DENIED / 404): this agentKey+name never queried
+ * again in this session (§6.2). */
+const argNoQuery = new Set<string>();
+let argRatePauseUntil = 0;
+
+function argAgentKey(): string | null {
+  return view?.agentKey ?? ctx?.agentKey ?? null;
+}
+
+function stopArgQuery(): void {
+  if (argTimer !== undefined) {
+    clearTimeout(argTimer);
+    argTimer = undefined;
+  }
+  argSeq += 1; // any in-flight/stale response is dropped by the seq guard
+  argCtl?.abort();
+  argCtl = undefined;
+  argLoading.value = false;
+}
+
+function resetArgZone(): void {
+  stopArgQuery();
+  argItems.value = [];
+  argError.value = false;
+  argDismissed.value = false;
+  argNavigated.value = false;
+  argActiveIdx.value = 0;
+}
+
+/** Backstep-only instant display: an exact-prefix cache hit replaces the rows immediately
+ * while the fresh query is pending; a miss keeps the previous batch visible (§6.2 loading). */
+function flashArgCache(name: string, prefix: string): boolean {
+  const key0 = argAgentKey();
+  if (key0 === null) return false;
+  const hit = argCacheGet(argCache, argCacheKey(key0, name, prefix), Date.now());
+  if (hit === undefined) return false;
+  argItems.value = hit;
+  argError.value = false;
+  return true;
+}
+
+function scheduleArgQuery(zone: ArgZoneInfo, delayMs: number): void {
+  stopArgQuery();
+  // §6.1 gating: no dynamic query unless the zone is actually active (cap present, known row,
+  // policy ≠ deny — deny commands never leak completions, §4.6) or the row is static-only
+  // (`args.complete` ≠ true: the panel keeps the usage header, requests stay at zero).
+  if (!argActive.value || !argCompleteOn.value) {
+    argItems.value = [];
+    argError.value = false;
+    return;
+  }
+  const agentKey = argAgentKey();
+  if (agentKey === null) return;
+  if (view !== null && view.agent.value.down) return; // offline agent: never queried (§6.3)
+  if (typeof fetch !== "function") return;
+  if (argNoQuery.has(`${agentKey}|${zone.name}`)) return;
+  if (Date.now() < argRatePauseUntil) {
+    // r1 #9: the cache fallback keeps working through an E_RATE pause; without a hit the
+    // panel degrades silently to the header line.
+    if (!flashArgCache(zone.name, zone.prefix)) {
+      argItems.value = [];
+      argError.value = true;
+    }
+    return;
+  }
+  flashArgCache(zone.name, zone.prefix);
+  const seq = argSeq;
+  argTimer = setTimeout(() => {
+    argTimer = undefined;
+    void doArgQuery(zone, seq, agentKey);
+  }, delayMs);
+}
+
+/** `{error: code}` envelope (any status) → the code; bare 429/404 → their codes; any other
+ * non-ok status → a generic marker. `undefined` = the success envelope. */
+function argErrorCode(r: Response, body: unknown): string | undefined {
+  if (body !== null && typeof body === "object") {
+    const err = (body as { error?: unknown }).error;
+    if (typeof err === "string" && err !== "") return err;
+  }
+  if (r.status === 429) return "E_RATE";
+  if (r.status === 404) return "E_UNSUPPORTED";
+  if (!r.ok) return "E_HTTP";
+  return undefined;
+}
+
+function handleArgError(zone: ArgZoneInfo, agentKey: string, code: string, retryAfter: string | null): void {
+  if (code === "E_UNSUPPORTED" || code === "E_COMMAND_DENIED" || code === "E_UNKNOWN_COMMAND") {
+    argNoQuery.add(`${agentKey}|${zone.name}`); // this agentKey+name: never queried again this session
+    argItems.value = [];
+    argError.value = true;
+    return;
+  }
+  if (code === "E_RATE") {
+    const ra = Number.parseInt(retryAfter ?? "", 10);
+    const pauseMs =
+      Number.isFinite(ra) && ra > 0 ? Math.max(ra * 1_000, ARG_RATE_PAUSE_FLOOR_MS) : ARG_RATE_PAUSE_FLOOR_MS;
+    argRatePauseUntil = Date.now() + pauseMs;
+    if (!flashArgCache(zone.name, zone.prefix)) {
+      argItems.value = [];
+      argError.value = true;
+    }
+    return;
+  }
+  argItems.value = [];
+  argError.value = true; // E_BUSY/E_DEADLINE/E_BAD_REQUEST/E_HTTP — silent degrade to the header
+}
+
+async function doArgQuery(zone: ArgZoneInfo, seq: number, agentKey: string): Promise<void> {
+  argLoading.value = true;
+  argError.value = false;
+  const ctl = new AbortController();
+  argCtl = ctl;
+  const timeout = setTimeout(() => ctl.abort(), ARG_CLIENT_TIMEOUT_MS);
+  try {
+    const r = await fetch(API.commandComplete, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "X-PWH": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ agentKey, name: zone.name, prefix: zone.prefix }),
+      signal: ctl.signal,
+    });
+    if (seq !== argSeq) return;
+    let body: unknown = undefined;
+    try {
+      body = await r.json();
+    } catch {
+      /* non-JSON error bodies fall through to the status/code mapping */
+    }
+    if (seq !== argSeq) return;
+    const code = argErrorCode(r, body);
+    if (code !== undefined) {
+      handleArgError(zone, agentKey, code, r.headers.get("Retry-After"));
+      return;
+    }
+    const parsed = parseCompleteResponse(body);
+    if (parsed === undefined) {
+      argItems.value = [];
+      argError.value = true;
+      return;
+    }
+    argItems.value = parsed.items;
+    argCacheSet(argCache, argCacheKey(agentKey, zone.name, zone.prefix), parsed.items, Date.now());
+  } catch {
+    if (seq !== argSeq) return; // aborted by a newer query — its own round takes over
+    argItems.value = [];
+    argError.value = true; // network / 3s client timeout — silent degrade to the header
+  } finally {
+    clearTimeout(timeout);
+    if (argCtl === ctl) argCtl = undefined;
+    if (seq === argSeq) argLoading.value = false;
+  }
+}
+
+// Zone transitions: close ⇒ reset; fresh zone (entry / name change) ⇒ immediate discovery
+// query; plain prefix edit ⇒ 150ms debounce + cache flash + highlight back to the top. An
+// apply forces the immediate cadence for the next observation (consumed here).
+watch(argZoneState, (zone, prev) => {
+  if (zone === undefined) {
+    resetArgZone();
+    return;
+  }
+  const fresh = prev === undefined || prev.name !== zone.name;
+  if (fresh) {
+    argItems.value = []; // stale rows from another command never leak across a fresh zone
+    argError.value = false;
+    argActiveIdx.value = 0;
+    argNavigated.value = false;
+  } else if (argActiveIdx.value !== 0) {
+    argActiveIdx.value = 0;
+  }
+  const immediate = fresh || argForceImmediate;
+  argForceImmediate = false;
+  scheduleArgQuery(zone, immediate ? 0 : ARG_DEBOUNCE_MS);
+});
+
+/** Arg-panel apply: `value` REPLACES the whole prefix (pi semantics), the zone STAYS open,
+ * `argNavigated` resets (D2) and the next-level query fires immediately (§6.4). */
+function applyArgPick(item: ArgItem): void {
+  const zone = argZoneState.value;
+  if (zone === undefined) return;
+  argNavigated.value = false;
+  argActiveIdx.value = 0;
+  argForceImmediate = true;
+  text.value = applyArgText(zone.name, item);
+  caret.value = text.value.length; // sync: one zone-watcher flush, immediate next-level query
+  persistDraft();
+  void nextTick(focusEnd);
+}
+
+/** Arg key layer, called from `onKeydown` while the panel is visible. Returns true when the
+ * event was consumed (never reaches `composerKeyAction`). Focus NEVER leaves the textarea:
+ * Tab is consumed even with zero rows (no focus escape); Enter applies ONLY after an explicit
+ * ↑↓ navigation armed `argNavigated` (§11 D2) AND a highlighted row exists — otherwise it
+ * falls through and keeps the normal send/execute key. IME keys are never taken. */
+function argKeydown(ev: KeyboardEvent): boolean {
+  if (!argVisible.value) return false;
+  const action = argKeyAction(ev, { navigated: argNavigated.value });
+  if (action === null) return false;
+  if (action === "close") {
+    argDismissed.value = true;
+    return true;
+  }
+  if (action === "down" || action === "up") {
+    if (argItems.value.length > 0) argNavigated.value = true; // only real navigation arms Enter
+    argActiveIdx.value = moveMentionActive(argActiveIdx.value, action === "down" ? 1 : -1, argItems.value.length);
+    return true;
+  }
+  const row = argItems.value[argActiveIdxClamped.value];
+  if (row !== undefined) {
+    applyArgPick(row);
+    return true;
+  }
+  return ev.key === "Tab"; // Tab still consumed with zero rows (focus trap); Enter falls through
 }
 
 /** §7.6 placeholders: idle announces "starts a new turn" (D4). Busy follows the STORED
@@ -545,6 +901,7 @@ function showHint(msg: string): void {
 onUnmounted(() => {
   if (hintTimer !== undefined) clearTimeout(hintTimer);
   resetFileZone();
+  stopArgQuery();
   document.removeEventListener("pointerdown", onDocPointerDown, true);
 });
 
@@ -649,6 +1006,8 @@ function persistDraft(): void {
 function onInput(): void {
   syncCaret();
   mentionDismissed.value = false; // any edit re-arms the completion after Esc/outside-click
+  argDismissed.value = false; // same latch discipline for the arg panel (§6.4)
+  argNavigated.value = false; // r1 #5: any non-navigation input disarms Enter-apply (D2)
   persistDraft();
   void nextTick(grow);
 }
@@ -684,6 +1043,10 @@ function doSend(mode: "steer" | "followUp"): void {
 function onKeydown(ev: KeyboardEvent): void {
   if (composing.value) return; // inside an IME session: no key ever sends
   if (paletteKeydown(ev)) {
+    ev.preventDefault();
+    return;
+  }
+  if (argKeydown(ev)) {
     ev.preventDefault();
     return;
   }
@@ -765,6 +1128,22 @@ watch(
       @pick="completeCommand"
       @hover="paletteActive = $event"
     />
+    <!-- `/name␠` argument palette (web-hub-slash-args §6.2, P3): the ARG half of the command
+         combobox — static usage header + dynamic completion rows, mounted only while the arg
+         zone is active, not Esc-dismissed and has something to show. Mutually exclusive with
+         the name palette above (argActive hides it) and with the @mention panel (commandMode). -->
+    <CommandArgPalette
+      v-if="argVisible && argZoneState"
+      :name="argZoneState.name"
+      :usage="argHeaderText"
+      :items="argItems"
+      :active="argActiveIdxClamped"
+      :loading="argLoading"
+      :error="argError"
+      :listbox-id="argPaletteId"
+      @pick="applyArgPick"
+      @hover="argActiveIdx = $event"
+    />
     <!-- @mention completion (task #11 + file-mention): rendered before the input row so it
          opens UPWARD from the bottom-pinned composer. TWO zones — the session's running
          sub-agents, then files under the session cwd (relative path shown; pick inserts
@@ -842,12 +1221,12 @@ watch(
           :aria-label="placeholder"
           rows="1"
           enterkeyhint="send"
-          :role="paletteVisible ? 'combobox' : undefined"
-          :aria-multiline="paletteVisible ? 'true' : undefined"
-          :aria-expanded="paletteVisible ? 'true' : undefined"
-          :aria-controls="paletteVisible ? paletteId : undefined"
-          :aria-autocomplete="paletteVisible ? 'list' : undefined"
-          :aria-activedescendant="paletteActiveRowId"
+          :role="comboOpen ? 'combobox' : undefined"
+          :aria-multiline="comboOpen ? 'true' : undefined"
+          :aria-expanded="comboOpen ? 'true' : undefined"
+          :aria-controls="comboControls"
+          :aria-autocomplete="comboOpen ? 'list' : undefined"
+          :aria-activedescendant="comboActiveDesc"
           @input="onInput"
           @keydown="onKeydown"
           @keyup="syncCaret"
