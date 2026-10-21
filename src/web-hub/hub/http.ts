@@ -2408,7 +2408,17 @@ function parseDialogBody(body: unknown): ParseOutcome {
       if (typeof otherRaw === "string" && !byteLenOk(otherRaw, OTHER_TEXT_MAX_BYTES)) {
         return { error: "E_BAD_REQUEST", message: "other too large" };
       }
-      answers.push({ selected: selectedRaw as string[], other: typeof otherRaw === "string" ? otherRaw : null });
+      // Per-question skip (DialogAnswerWire.skipped, d18bdcdc): must survive the rebuild — the
+      // agent's validator (agent/dialogs.ts) owns the skip/answer exclusivity rule.
+      const skippedRaw = field(a, "skipped");
+      if (skippedRaw !== undefined && typeof skippedRaw !== "boolean") {
+        return { error: "E_BAD_REQUEST", message: "bad answer" };
+      }
+      answers.push({
+        selected: selectedRaw as string[],
+        other: typeof otherRaw === "string" ? otherRaw : null,
+        ...(skippedRaw === true ? { skipped: true } : {}),
+      });
     }
     return {
       agentKey,

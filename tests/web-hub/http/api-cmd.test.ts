@@ -206,6 +206,57 @@ describe("POST /api/cmd — loopback gate order (plan §6.3)", () => {
     expect(router.calls[0]!.cmd).toMatchObject({ op: "dialog_answer", dialogId: "ask:1", epoch: "e1" });
   });
 
+  it("dialog answer forwards per-question skipped:true (and omits it otherwise)", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    const res = await postJson(
+      port,
+      "/api/dialog",
+      {
+        agentKey: "a1",
+        id: "s".repeat(16),
+        dialogId: "ask:1",
+        epoch: "e1",
+        action: "answer",
+        answers: [
+          { selected: [], other: null, skipped: true },
+          { selected: ["x"], other: null, skipped: false },
+        ],
+      },
+      cmdHeaders(),
+    );
+    expect(res.status).toBe(200);
+    expect(router.calls[0]!.cmd).toEqual({
+      op: "dialog_answer",
+      dialogId: "ask:1",
+      epoch: "e1",
+      answers: [
+        { selected: [], other: null, skipped: true },
+        { selected: ["x"], other: null },
+      ],
+    });
+  });
+
+  it("dialog answer with a non-boolean skipped ⇒ 400 bad answer", async () => {
+    const router = fakeRouter(okReply);
+    deps.commands = router;
+    const res = await postJson(
+      port,
+      "/api/dialog",
+      {
+        agentKey: "a1",
+        id: "t".repeat(16),
+        dialogId: "ask:1",
+        epoch: "e1",
+        action: "answer",
+        answers: [{ selected: [], other: null, skipped: "yes" }],
+      },
+      cmdHeaders(),
+    );
+    expect(res.status).toBe(400);
+    expect(router.calls).toHaveLength(0);
+  });
+
   it("dialog cancel maps to dialog_cancel", async () => {
     const router = fakeRouter(okReply);
     deps.commands = router;
