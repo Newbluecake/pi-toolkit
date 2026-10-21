@@ -34,6 +34,15 @@ import {
 } from "./stack.js";
 import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
 import { createWakeInputHook } from "./fabric/wake-input.js";
+import { observeRootWakeTrigger } from "./fabric/root-wake.js";
+import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
+import { getXsHostCapability } from "./fabric/xs/host-cap.js";
+import { xsOn } from "./fabric/xs/switch.js";
+import { createXsSender, detectXsToolCollisions } from "./fabric/xs/sender.js";
+import { createListSessionsTool, ListSessionsParams } from "./tools/list-sessions-tool.js";
+import { createMessageSessionTool, MessageSessionParams } from "./tools/message-session-tool.js";
+import { createFabricXsCommand } from "./commands/fabric-xs.js";
+import type { XsHubLimitsWire } from "./web-hub/protocol/xs.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { worktreeRoot } from "./extensions/worktree-orphans.js";
@@ -249,6 +258,148 @@ export default function activate(rawPi: ExtensionAPI): void {
   // later reload into the inert branch).
   const settings = loadSettingsFromFile();
   const holder: { current?: Stack } = {};
+  const xsEnabled = xsOn({
+    fabric: settings.fabric,
+    webHub: { enabled: settings.webHub.enabled, control: settings.webHub.control !== false },
+  }); // frozen per activate: tools/caps/stack all share this gate
+  const webHubRef: { current?: WebHubControl } = {};
+  const xsFencePorts: { topicSwitch?: () => boolean; goal?: () => boolean } = {};
+  const xsLedger = getXsWakeLedger();
+  const xsCapability = getXsHostCapability();
+  let xsAttached = false;
+  let xsSessionId: string | undefined;
+  let xsCollisions: string[] = [];
+  let xsHubLimits: XsHubLimitsWire | undefined;
+  // B1 stays installed even after an xs-off reload: old queued marked triggers still need
+  // authorization. Never return the library TriggerResult as a pi hook result.
+  pi.on("before_agent_start", (event, ctx) => {
+    const xs = xsAttached ? holder.current?.xs : undefined;
+    if (xs?.controller) xs.beforeAgentStart(event);
+    else if (xsAttached && holder.current?.rootWakeRecovery) {
+      xs?.beforeAgentStart(event);
+      holder.current.rootWakeRecovery.beforeAgentStart(event);
+    } else {
+      xs?.beforeAgentStart(event);
+      // No owner yet (including the pre-stack window): never authorize an unsupervised
+      // delayed action. Preserve the record as a tombstone until execution/teardown proof.
+      for (const record of xsLedger.entries()) {
+        if (record.sessionId === ctx.sessionManager.getSessionId() && record.state === "live")
+          xsLedger.tombstone(record.token);
+      }
+      observeRootWakeTrigger(event, {
+        sessionId: ctx.sessionManager.getSessionId(),
+        abort: () => ctx.abort(),
+        ledger: xsLedger,
+        capability: xsCapability,
+        ...(holder.current?.wake ? { level: holder.current.wake.level } : {}),
+        audit: (event) => console.warn(`[pi-subagent] fabric xs ${event}`),
+      });
+    }
+  });
+  if (xsEnabled) {
+    // Registered ahead of other async mutation hooks: the window closes BEFORE their awaits.
+    pi.on("session_before_compact", () => {
+      holder.current?.xs?.fence.onEvent({ type: "session_before_compact" });
+    });
+    pi.on("session_compact", () => {
+      holder.current?.xs?.fence.onEvent({ type: "session_compact" });
+    });
+    pi.on("session_compact_failed", () => {
+      holder.current?.xs?.fence.onEvent({ type: "session_compact_failed" });
+    });
+    pi.on("session_before_tree", () => {
+      holder.current?.xs?.fence.onEvent({ type: "session_before_tree" });
+    });
+    pi.on("session_tree", () => {
+      holder.current?.xs?.fence.onEvent({ type: "session_tree" });
+    });
+    pi.on("session_before_switch", () => {
+      holder.current?.xs?.fence.onEvent({ type: "session_before_switch" });
+    });
+    pi.on("session_before_fork", () => {
+      holder.current?.xs?.fence.onEvent({ type: "session_before_fork" });
+    });
+  }
+  pi.on("agent_settled", () => {
+    holder.current?.xs?.settled();
+    holder.current?.rootWakeRecovery?.settled();
+  });
+  // Same synchronous phase as session destruction, not the later (awaiting) fleet drain.
+  // Fpi10: replacement first aborts the outgoing AgentSession; reload does NOT, so preserve
+  // its authorizations/leases for explicit recovery. No time-based ledger cleanup.
+  pi.on("session_shutdown", (event, ctx) => {
+    xsAttached = false;
+    holder.current?.xs?.fence.onEvent({ type: "session_shutdown" });
+    holder.current?.xs?.dispose();
+    holder.current?.rootWakeRecovery?.dispose();
+    if (event.reason !== "reload") xsLedger.teardown(xsSessionId ?? ctx.sessionManager.getSessionId());
+  });
+  if (xsEnabled) {
+    const sender = createXsSender({
+      port: {
+        list: (args) => webHubRef.current?.xs?.hubPort().list(args) ?? Promise.resolve({ kind: "off" }),
+        resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
+        send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
+      },
+      origin: {
+        current: () => {
+          const xs = xsAttached ? holder.current?.xs : undefined;
+          return xs ? { sessionId: xs.sessionId(), epoch: xs.membership.epoch } : undefined;
+        },
+      },
+      maxChars: settings.fabric.maxChars,
+      wakeOn: settings.fabric.wake.enabled,
+      ...(settings.fabric.wake.enabled
+        ? {
+            level: {
+              levelOfRoot: () => holder.current?.wake?.level.root ?? 0,
+              hopAllowed: (level: number) => holder.current?.wake?.level.hopAllowed(level) ?? false,
+            },
+          }
+        : {}),
+    });
+    pi.registerTool(createListSessionsTool({ sender }));
+    pi.registerTool(createMessageSessionTool({ sender }));
+    const command = createFabricXsCommand({
+      enabled: () => xsEnabled,
+      sessionId: () => holder.current?.xs?.sessionId() ?? "",
+      membership: () => holder.current?.xs?.membership,
+      fence: () => holder.current?.xs?.fence,
+      resolve: (query) => webHubRef.current?.xs?.resolveBlock(query) ?? Promise.resolve({ ok: false, kind: "offline" }),
+      statusView: () => {
+        const xs = holder.current?.xs;
+        const quota = xs?.receiver.wakeQuota();
+        return {
+          capability: xsCapability.state,
+          lines: [
+            ...(quota
+              ? [`in ${quota.recvUsed}/${quota.recvCap} h · wakes ${quota.wakesUsed}/${quota.wakesCap} h`]
+              : []),
+            ...(xs
+              ? [
+                  `controller ${xs.controller?.state ?? "off"} · inbox ${xs.inbox.occupied}/${xs.inbox.cap}`,
+                  `counts ${JSON.stringify(xs.receiver.countersSnapshot())}`,
+                  `audit ${JSON.stringify(xs.audit)}`,
+                ]
+              : []),
+            ...(xsHubLimits
+              ? [
+                  `hub sends ${xsHubLimits.hubSendsPerMin}/min · local ${settings.fabric.crossSession.limits.hubSendsPerMin}/min${xsHubLimits.hubSendsPerMin !== settings.fabric.crossSession.limits.hubSendsPerMin ? " · differs" : ""}`,
+                ]
+              : ["hub limits unavailable"]),
+            ...(xsCollisions.length ? [`tool collisions: ${xsCollisions.join(", ")}`] : []),
+          ],
+        };
+      },
+    });
+    pi.registerCommand("fabric", {
+      ...command,
+      handler: async (args, ctx) => {
+        if (args.trim() === "" || args.trim() === "status") xsHubLimits = await webHubRef.current?.xs?.hubInfo();
+        await command.handler(args, ctx);
+      },
+    });
+  }
   // todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session
   // stack, same late-bound `holder.current` pattern as `forwardSpawn` below.
   // Only reached for the main session — structurally guaranteed by the
@@ -717,6 +868,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
     persist: (record) => persistGoalRecord(pi, record),
   });
+  xsFencePorts.goal = () => goalHook.goalBusy();
   pi.on("agent_end", goalHook.onAgentEnd);
   pi.on("agent_settled", goalHook.onAgentSettled);
   pi.registerCommand(
@@ -874,9 +1026,14 @@ export default function activate(rawPi: ExtensionAPI): void {
       attributeInput: () => wakeAttributeRef.current,
     }),
   );
+  pi.on("input", (event) => {
+    (holder.current?.xs?.controller ?? holder.current?.rootWakeRecovery)?.input(event, wakeAttributeRef.current);
+    return { action: "continue" };
+  });
   installMentionInput(pi, mentionRouteDeps);
 
   pi.on("session_start", async (_event, ctx) => {
+    xsAttached = false;
     notifyCapabilityCtx.current = ctx;
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
     // Defensive: if pi ever fires session_start without a paired shutdown,
@@ -885,6 +1042,11 @@ export default function activate(rawPi: ExtensionAPI): void {
       // ask-user-async §3.3 (P2): stop the old hub's broadcast FIRST so a
       // completion flushed by the teardown below can never reach the new
       // session's ask_user (idempotent; shutdown is the other path).
+      holder.current.xs?.dispose();
+      holder.current.rootWakeRecovery?.dispose();
+      // Defensive replacement without shutdown: a NEW identity proves the old session ended.
+      // Same-session reload is deliberately not proof.
+      if (xsSessionId && xsSessionId !== ctx.sessionManager.getSessionId()) xsLedger.teardown(xsSessionId);
       holder.current.backgroundCompletions.dispose();
       holder.current.fleetWidget?.dispose();
       holder.current.keepalive?.dispose();
@@ -911,8 +1073,41 @@ export default function activate(rawPi: ExtensionAPI): void {
       // holder 晚绑定——wireMemory 在 activate() 早期已返回，这里只传 getter；是否
       // 真正注入由 buildSessionStack 按 externalAgents.droid.{enabled,injectMemory} 判定。
       memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
+      xsEnabled
+        ? {
+            ports: {
+              webExec: () => webHubRef.current?.webExecBusy?.() === true,
+              topicSwitch: () => xsFencePorts.topicSwitch?.(),
+              goal: () => xsFencePorts.goal?.(),
+            },
+            memberChanged: () => webHubRef.current?.xs?.publishMember(),
+          }
+        : undefined,
     );
     holder.current = stack;
+    xsAttached = true;
+    xsSessionId = ctx.sessionManager.getSessionId();
+    if (xsEnabled) {
+      // The toolkit's own two declarations are not collisions. Keep foreign declarations and
+      // duplicates (when the host exposes them); C-X7 tests host-specific name arbitration.
+      try {
+        const own = new Map<string, unknown>([
+          ["list_sessions", ListSessionsParams],
+          ["message_session", MessageSessionParams],
+        ]);
+        xsCollisions = detectXsToolCollisions(
+          pi
+            .getAllTools()
+            .filter(
+              (tool) => !own.has(tool.name) || JSON.stringify(tool.parameters) !== JSON.stringify(own.get(tool.name)),
+            )
+            .map((tool) => tool.name),
+        );
+        if (xsCollisions.length) console.warn(`[pi-subagent] fabric xs tool collisions: ${xsCollisions.join(", ")}`);
+      } catch {
+        /* older host / unbound runtime: diagnostic only */
+      }
+    }
     if (ctx.hasUI && typeof ctx.ui.addAutocompleteProvider === "function") {
       ctx.ui.addAutocompleteProvider((current) =>
         createMentionAutocompleteProvider(current, {
@@ -1074,7 +1269,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   // disabled ⇒ wireWebHub is never called, /webhub never registered, zero
   // network and zero disk (asserted by tests/integration/web-hub-disabled).
   if (settings.webHub.enabled) {
-    const webHubRef: { current?: WebHubControl } = {};
     // fabric wake §3.3 L7: late-bind the web ledger's attribution port into the (earlier-registered) input hook.
     wakeAttributeRef.current = (text) => webHubRef.current?.attributeInput(text);
     // web-hub-proxy (X1c): raw-block parse warnings for `/webhub status`, captured once at activate
@@ -1082,6 +1276,15 @@ export default function activate(rawPi: ExtensionAPI): void {
     const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
     webHubRef.current = wireWebHub(pi, {
       settings: settings.webHub,
+      ...(xsEnabled
+        ? {
+            xs: {
+              stack: () => (xsAttached ? holder.current?.xs : undefined),
+              memberLimits: () => settings.fabric.crossSession.limits,
+              hubSendsPerMin: () => settings.fabric.crossSession.limits.hubSendsPerMin,
+            },
+          }
+        : {}),
       feishuBot: settings.feishuBot,
       proxyWarnings: () => proxyWarnings,
       fleet: () => holder.current?.query.list() ?? [],
@@ -1190,6 +1393,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       },
       remote: () => askUserRemoteRef.current?.(),
     });
+    xsFencePorts.topicSwitch = () => topicSwitch.fenceActive();
     promptGateRef.current = topicSwitch.webGate; // D2 flip point
   }
 }

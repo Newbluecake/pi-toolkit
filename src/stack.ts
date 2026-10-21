@@ -67,6 +67,14 @@ import { RESUME_TEXT } from "./tools/compact-tool.js";
 import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
 import { createFabricTree } from "./fabric/tree.js";
+import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
+import { RootWakeController, type RootWakeAudit } from "./fabric/root-wake.js";
+import { createSessionFence, type FencePorts, type SessionFence } from "./fabric/xs/fence.js";
+import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "./fabric/xs/membership.js";
+import { XsInbox } from "./fabric/xs/inbox.js";
+import { XsReceiver } from "./fabric/xs/receiver.js";
+import { xsOn } from "./fabric/xs/switch.js";
+import type { XsStackPort } from "./web-hub/agent/xs.js";
 import { formatMessage, type FabricRecord, type NodeRef } from "./core/message.js";
 import { wrapWithRunLog, seedRunStoreFromEntries, WORKTREE_DISPOSITION_CUSTOM_TYPE } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
@@ -194,6 +202,9 @@ import type { WorkflowDeadlineNotice } from "./workflow/deadline.js";
  *  leaving this undefined — that path is covered by session_shutdown disposing
  *  Stack.fleetWidget instead (see the Stack interface note). */
 let previousFleetWidget: FleetWidgetController | undefined;
+/** Same-module defensive rebuild; fresh-module reload is disposed by index.ts. */
+let previousXs: StackXs | undefined;
+let previousRootWakeRecovery: RootWakeController | undefined;
 /** M-E: the previous session's usage broadcaster — same rebuild-dispose pattern as the fleet widget. */
 let previousUsageBroadcaster: UsageBroadcaster | undefined;
 let previousCoalescer: Coalescer | undefined;
@@ -1061,6 +1072,10 @@ export interface Stack {
    */
   bashJobRecovery?: { dispose(): void };
   fabric?: { dispose(): void; pump(): void };
+  /** Phase-2: absent (not merely inert) while xs is off. */
+  xs?: StackXs;
+  /** Settings-off reload: supervise old authorizations without exposing/admitting xs. */
+  rootWakeRecovery?: RootWakeController;
   /**
    * fabric-cross-session plan §3.9 (W1): causal-level controller; present iff `fabric.enabled ∧ fabric.wake.enabled`.
    * index.ts's `input` hook reads it (`holder.current?.wake`) to reset the root level on proven human input.
@@ -1590,6 +1605,162 @@ export interface StackExternalInput {
   memoryBlock?: (cwd: string) => string | undefined;
 }
 
+/** Late-bound main-session ports; neither the web bridge nor goal/topic-switch owns a stack. */
+export interface StackXsInput {
+  ports?: FencePorts;
+  memberChanged?: () => void;
+}
+
+export interface StackXs extends XsStackPort {
+  membership: XsMembership;
+  fence: SessionFence;
+  inbox: XsInbox;
+  receiver: XsReceiver;
+  controller?: RootWakeController;
+  audit: Partial<Record<RootWakeAudit, number>>;
+  beforeAgentStart(event: unknown): void;
+  settled(): void;
+  dispose(): void;
+}
+
+/** XW: all pi-facing adaptation stays here; the receiver/controller/fence remain pi-free. */
+function buildStackXs(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  settings: AgentSettings,
+  reason: GoalSessionStartReason,
+  level: CausalLevel | undefined,
+  input: StackXsInput,
+): StackXs {
+  const sessionId = ctx.sessionManager.getSessionId();
+  const config = settings.fabric.crossSession;
+  let disposed = false;
+  const membership = new XsMembership({
+    sessionId,
+    defaultReceive: config.receive,
+    allowFrom: config.allowFrom,
+    allowFromDenyAll: config.allowFromDenyAll,
+    persist: (data) => {
+      if (disposed || ctx.sessionManager.getSessionId() !== sessionId) return;
+      try {
+        pi.appendEntry(XS_MEMBERSHIP_CUSTOM_TYPE, data);
+      } catch {
+        /* memory sessions still work */
+      }
+      try {
+        input.memberChanged?.();
+      } catch {
+        /* offline bridge: next attach republishes */
+      }
+    },
+  });
+  membership.attach();
+  const restored = readXsMembershipEntry(ctx.sessionManager.getBranch());
+  membership.restore(restored);
+  // Explicit persisted leave wins over autoJoin; fork/copy never inherits the parent's opt-in.
+  if (config.autoJoin && reason !== "fork" && restored === undefined) membership.join();
+  const fence = createSessionFence({ ...(input.ports ? { ports: input.ports } : {}) });
+  fence.onEvent({ type: "session_start" });
+  const inbox = new XsInbox(config.limits.inboxCap);
+  const host = {
+    isIdle: () => ctx.isIdle(),
+    hasPendingMessages: () => ctx.hasPendingMessages(),
+    sendMessage: (message: Parameters<ExtensionAPI["sendMessage"]>[0], options: { triggerTurn: boolean }) =>
+      pi.sendMessage(message, options),
+    getLeafEntry: () => ctx.sessionManager.getLeafEntry() ?? undefined,
+    abort: () => ctx.abort(),
+    hasXid: (xid: string) =>
+      ctx.sessionManager
+        .getBranch()
+        .some(
+          (entry) =>
+            entry.type === "custom_message" &&
+            entry.customType === "subagent:xs" &&
+            (entry.details as { xid?: unknown } | undefined)?.xid === xid,
+        ),
+  };
+  const receiver = new XsReceiver({
+    sessionId,
+    membership,
+    fence,
+    inbox,
+    host,
+    recvPerHour: config.limits.recvPerHour,
+    wakesInPerHour: config.limits.wakesInPerHour,
+    ...(level ? { level } : {}),
+  });
+  const audit: Partial<Record<RootWakeAudit, number>> = {};
+  const controller = settings.fabric.wake.enabled
+    ? new RootWakeController({
+        sessionId,
+        rootRunMaxS: settings.fabric.wake.rootRunMaxS,
+        wakeEnabled: true,
+        receive: () => membership.receive,
+        host,
+        guard: () => {
+          if (disposed || ctx.sessionManager.getSessionId() !== sessionId) return "session_changed";
+          const verdict = fence.check();
+          return !verdict.ok && !verdict.wakeOnly ? verdict.reason : undefined;
+        },
+        goalRunning: () => {
+          const verdict = fence.check();
+          return !verdict.ok && verdict.wakeOnly === true;
+        },
+        inboundWakeAvailable: () => receiver.wakeAvailable(),
+        chargeInboundWake: () => receiver.chargeWake(),
+        ...(level ? { level } : {}),
+        audit: (event) => {
+          audit[event] = (audit[event] ?? 0) + 1;
+        },
+      })
+    : undefined;
+  if (controller) {
+    receiver.setController(controller);
+    controller.recover(); // the caller has already disposed the old owner
+  }
+  const releaseTrigger = () => {
+    if (!controller?.busy) inbox.releaseTrigger();
+  };
+  return {
+    sessionId: () => sessionId,
+    member: () => ({ epoch: membership.epoch, joined: membership.joined, receive: membership.receive }),
+    status: () => ({
+      joined: membership.joined,
+      receive: membership.receive,
+      blocked: membership.blockedSnapshot().length,
+    }),
+    deliver: (frame) => {
+      if (disposed) return { effect: "none", reason: "session_changed", woke: false };
+      // Also reconcile idle-poll/deferred-deadline transitions before the next capacity check.
+      releaseTrigger();
+      return receiver.deliver(frame);
+    },
+    membership,
+    fence,
+    inbox,
+    receiver,
+    audit,
+    ...(controller ? { controller } : {}),
+    beforeAgentStart: (event) => {
+      inbox.onRunStart();
+      controller?.beforeAgentStart(event);
+      releaseTrigger();
+    },
+    settled: () => {
+      controller?.settled();
+      inbox.onRunSettled();
+      releaseTrigger();
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      controller?.dispose();
+      fence.dispose();
+      inbox.clear();
+    },
+  };
+}
+
 export function buildSessionStack(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -1600,10 +1771,15 @@ export function buildSessionStack(
   sessionReason: GoalSessionStartReason = "reload",
   loadHintState?: LoadHintState,
   externalInput?: StackExternalInput,
+  xsInput: StackXsInput = {},
 ): Stack {
   // ask-user-async plan §3.3 (P2): FIRST disposal of the rebuild — the old
   // hub must stop broadcasting before the old coalescer/bash manager below
   // flush their final completion notices during their own dispose.
+  previousXs?.dispose();
+  previousXs = undefined;
+  previousRootWakeRecovery?.dispose();
+  previousRootWakeRecovery = undefined;
   previousBackgroundCompletions?.dispose();
   previousBackgroundCompletions = undefined;
   // X7b: session rebuild — dispose the previous session's fleet widget
@@ -3016,7 +3192,43 @@ export function buildSessionStack(
         now: () => systemClock.now(),
       }),
   };
+  const xs = xsOn({
+    fabric: settings.fabric,
+    webHub: { enabled: settings.webHub.enabled, control: settings.webHub.control !== false },
+  })
+    ? buildStackXs(pi, ctx, settings, sessionReason, fabric?.level, xsInput)
+    : undefined;
+  // Disabling xs/wake does not erase already-dispatched ownership (XI2/B1). Never admit a
+  // new wake here: revoke unexecuted tokens; retain watchdog/abort/hand-over for real runs.
+  const ledger = getXsWakeLedger();
+  const pendingRootWakes = ledger.entries().filter((r) => r.sessionId === ctx.sessionManager.getSessionId());
+  let rootWakeRecovery: RootWakeController | undefined;
+  if (!xs?.controller && pendingRootWakes.length > 0) {
+    for (const record of pendingRootWakes) {
+      if (!record.started && !record.executionPending) ledger.tombstone(record.token);
+    }
+    rootWakeRecovery = new RootWakeController({
+      sessionId: ctx.sessionManager.getSessionId(),
+      rootRunMaxS: settings.fabric.wake.rootRunMaxS,
+      wakeEnabled: false,
+      receive: () => "off",
+      ledger,
+      host: {
+        isIdle: () => ctx.isIdle(),
+        hasPendingMessages: () => ctx.hasPendingMessages(),
+        sendMessage: (message, options) => pi.sendMessage(message, options),
+        abort: () => ctx.abort(),
+      },
+      ...(fabric?.level ? { level: fabric.level } : {}),
+      audit: (event) => console.warn(`[pi-subagent] fabric xs ${event}`),
+    });
+    rootWakeRecovery.recover();
+  }
+  previousRootWakeRecovery = rootWakeRecovery;
+  previousXs = xs;
   return {
+    ...(xs ? { xs } : {}),
+    ...(rootWakeRecovery ? { rootWakeRecovery } : {}),
     compactHint,
     ...(dynamic ? { dynamic } : {}),
     ...(load ? { load } : {}),
