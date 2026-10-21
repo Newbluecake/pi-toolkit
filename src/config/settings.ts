@@ -948,10 +948,14 @@ export interface FabricSettings {
   rootInboxCap: number;
   /** Sender-controlled wake / revive of finished sub-agents (fabric-cross-session plan v3 §4.8); phase-1 (in-tree) leaves only. */
   wake: FabricWakeSettings;
+  /** fabric phase-2 (phase2-plan §4.1): cross-session root↔root messaging; `xsOn` additionally
+   * requires `fabric.enabled` ∧ `webHub.enabled` ∧ `webHub.control !== false` (frozen at activate). */
+  crossSession: FabricCrossSessionSettings;
 }
 /**
  * `fabric.wake.*` (plan v3 §4.8, Q2): only effective while `fabric.enabled` is also on; read once at stack build
- * (non-live). `rootRunMaxS` and `crossSession.*` belong to phase 2 and are intentionally NOT parsed here.
+ * (non-live). `rootRunMaxS` (phase2 §4.1) bounds ONLY the cross-session RootWakeController — the phase-1
+ * tree-internal wake path never goes through the Controller (ruling P7) and is unaffected by the key.
  */
 export interface FabricWakeSettings {
   /** Default on (Q2) — gated behind `fabric.enabled`, which defaults off, so a default install is unchanged. */
@@ -966,10 +970,77 @@ export interface FabricWakeSettings {
   resumesPerTargetPerHour: number;
   /** Max parked messages per finished target. */
   parkCapPerTarget: number;
+  /** Cross-session Controller watchdog, measured from DISPATCH (phase2 §4.1/§6.2); parse-time
+   * clamped to 60..3600, `0` = Controller off ⇒ cross-session `wake:true` degrades to deliver-only. */
+  rootRunMaxS: number;
 }
 /** Parse-time bounds for `fabric.wake.resumeBudgetS` (plan §4.8). */
 export const FABRIC_WAKE_RESUME_BUDGET_MIN_S = 60;
 export const FABRIC_WAKE_RESUME_BUDGET_MAX_S = 3600;
+/** Parse-time bounds for `fabric.wake.rootRunMaxS` (phase2 §4.1: 60..3600, 0 = off). */
+export const FABRIC_WAKE_ROOT_RUN_MIN_S = 60;
+export const FABRIC_WAKE_ROOT_RUN_MAX_S = 3600;
+
+/** `fabric.crossSession.receive` (phase2 §4.1, P2: joined sessions default to `wake`). */
+export type FabricXsReceiveMode = "off" | "deliver" | "wake";
+
+/** `fabric.crossSession.limits.*` (phase2 §5.2, P8 defaults; every leaf parse-time clamped to its bounds). */
+export interface FabricCrossSessionLimitsSettings {
+  /** Per-session outbound sends per minute (sender + hub). */
+  sendsOutPerMin: number;
+  /** Per-session outbound sends per hour (sender + hub). */
+  sendsOutPerHour: number;
+  /** Per-session outbound wakes per hour (sender + hub); 0 = deliver-only. */
+  wakesOutPerHour: number;
+  /** Per-session inbound messages per hour (receiver only). */
+  recvPerHour: number;
+  /** Per-session inbound wakes per hour (receiver only); 0 = deliver-only. */
+  wakesInPerHour: number;
+  /** Cross-session inbox cap — independent of the tree-internal `rootInboxCap` (review #7). */
+  inboxCap: number;
+  /** Minimum interval between one session pair (sender + hub). */
+  pairMinIntervalMs: number;
+  /** Wakes per hour between one session pair (sender + hub). */
+  pairWakesPerHour: number;
+  /** Concurrent in-flight sends per session (sender + hub). */
+  inFlightPerSession: number;
+  /** Global hub-side sends per minute (HubConfig, frozen at hub start). */
+  hubSendsPerMin: number;
+  /** list + resolve calls per minute (sender + hub). */
+  listPerMin: number;
+}
+
+/**
+ * `fabric.crossSession.*` (phase2 §4.1): non-live, field-by-field tolerant, never throws.
+ * `allowFrom` keeps only FULL session ids (pi `assertValidSessionId`'s rule); invalid entries are
+ * dropped with one console.warn, and a non-empty-but-all-invalid list sets `allowFromDenyAll`
+ * (review #14: fail closed — reject every sender, mirroring `webHub.lan.allowClients`).
+ */
+export interface FabricCrossSessionSettings {
+  enabled: boolean;
+  /** P1: sessions never join implicitly; `true` joins every new main session at startup. */
+  autoJoin: boolean;
+  /** P2: joined sessions default to wake (overridable per session via `/fabric receive`). */
+  receive: FabricXsReceiveMode;
+  /** Empty + `allowFromDenyAll === false` ⇒ any joined session may send here. */
+  allowFrom: string[];
+  /** #14 fail-closed marker: the configured allowFrom was non-empty but every entry was invalid. */
+  allowFromDenyAll: boolean;
+  limits: FabricCrossSessionLimitsSettings;
+}
+
+/**
+ * Full session-id shape, mirroring pi 1.3's `assertValidSessionId` regex
+ * (`node_modules/…/dist/core/session-manager.js`): non-empty, only `[A-Za-z0-9._-]`, must start
+ * and end with an alphanumeric. Kept as a local literal — `src/config/settings.ts` has a frozen
+ * value-import closure (`tests/web-hub/boundary.test.ts` SYSLOAD_FILE_CLOSURE) and gains nothing.
+ */
+export const FABRIC_XS_SESSION_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+/** Validate one `allowFrom` entry (review #14): full session ids only. */
+export function isValidXsSessionId(id: string): boolean {
+  return FABRIC_XS_SESSION_ID_RE.test(id);
+}
 /** 动态阈值默认值（§11.2）：mode 默认 on（用户拍板 D1）；maxQualityPercent/rediscoveryUsd 均未校准。 */
 export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
   mode: "on",
@@ -1131,6 +1202,30 @@ export const DEFAULT_SETTINGS: AgentSettings = {
       resumesPerHour: 6,
       resumesPerTargetPerHour: 2,
       parkCapPerTarget: 8,
+      rootRunMaxS: 900,
+    },
+    // fabric phase-2 (phase2-plan §4.1/§5.2, rulings P1/P2/P8 + review #7): OFF by default —
+    // `crossSession` exists in every parsed FabricSettings, but `xsOn` stays false until the
+    // operator enables fabric + crossSession + webHub.
+    crossSession: {
+      enabled: false,
+      autoJoin: false,
+      receive: "wake",
+      allowFrom: [],
+      allowFromDenyAll: false,
+      limits: {
+        sendsOutPerMin: 10,
+        sendsOutPerHour: 60,
+        wakesOutPerHour: 6,
+        recvPerHour: 30,
+        wakesInPerHour: 12,
+        inboxCap: 12,
+        pairMinIntervalMs: 30_000,
+        pairWakesPerHour: 2,
+        inFlightPerSession: 4,
+        hubSendsPerMin: 60,
+        listPerMin: 6,
+      },
     },
   },
   cacheTtl: {
@@ -1611,7 +1706,8 @@ export function parseGoalSettings(input: unknown): GoalSettings {
 
 function parseFabricSettings(input: unknown): FabricSettings {
   const defaults = DEFAULT_SETTINGS.fabric;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults, wake: { ...defaults.wake } };
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    return { ...defaults, wake: { ...defaults.wake }, crossSession: cloneFabricCrossSession(defaults.crossSession) };
   const value = input as Record<string, unknown>;
   const count = (key: keyof FabricSettings): number => {
     const raw = value[key];
@@ -1633,19 +1729,26 @@ function parseFabricSettings(input: unknown): FabricSettings {
     rootMinIntervalMs: count("rootMinIntervalMs") === 0 ? 0 : Math.max(1_000, count("rootMinIntervalMs")),
     rootInboxCap: count("rootInboxCap"),
     wake: parseFabricWakeSettings(value.wake),
+    crossSession: parseFabricCrossSessionSettings(value.crossSession),
   };
 }
 
-/** `fabric.wake.*` (plan v3 §4.8): field-by-field tolerant, never throws; unknown keys (incl. phase-2 ones) are ignored. */
+/** Deep-enough clone so a parsed result never aliases `DEFAULT_SETTINGS.fabric.crossSession`. */
+function cloneFabricCrossSession(cs: FabricCrossSessionSettings): FabricCrossSessionSettings {
+  return { ...cs, allowFrom: [...cs.allowFrom], limits: { ...cs.limits } };
+}
+
+/** `fabric.wake.*` (plan v3 §4.8 + phase2 §4.1): field-by-field tolerant, never throws; unknown keys are ignored. */
 function parseFabricWakeSettings(input: unknown): FabricWakeSettings {
   const defaults = DEFAULT_SETTINGS.fabric.wake;
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const value = input as Record<string, unknown>;
-  const count = (key: Exclude<keyof FabricWakeSettings, "enabled" | "resumeBudgetS">): number => {
+  const count = (key: Exclude<keyof FabricWakeSettings, "enabled" | "resumeBudgetS" | "rootRunMaxS">): number => {
     const raw = value[key];
     return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : defaults[key];
   };
   const budgetRaw = value.resumeBudgetS;
+  const rootRunRaw = value.rootRunMaxS;
   return {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
     maxLevel: count("maxLevel"),
@@ -1657,6 +1760,73 @@ function parseFabricWakeSettings(input: unknown): FabricWakeSettings {
     resumesPerHour: count("resumesPerHour"),
     resumesPerTargetPerHour: count("resumesPerTargetPerHour"),
     parkCapPerTarget: count("parkCapPerTarget"),
+    // 0 = Controller off (phase2 §4.5 truth-table row); a positive finite value clamps to 60..3600;
+    // anything else (wrong type, NaN, negative) falls back to the default.
+    rootRunMaxS:
+      rootRunRaw === 0
+        ? 0
+        : typeof rootRunRaw === "number" && Number.isFinite(rootRunRaw) && rootRunRaw > 0
+          ? Math.min(FABRIC_WAKE_ROOT_RUN_MAX_S, Math.max(FABRIC_WAKE_ROOT_RUN_MIN_S, Math.floor(rootRunRaw)))
+          : defaults.rootRunMaxS,
+  };
+}
+
+/**
+ * `fabric.crossSession.*` (phase2 §4.1): field-by-field tolerant, never throws. Limits clamp to
+ * their §5.2 bounds (config-accident containment, same posture as every other clamped leaf);
+ * `allowFrom` entries must be FULL session ids (#14) — invalid ones are dropped with one warn,
+ * and a non-empty list with zero valid entries marks `allowFromDenyAll` (deny everything).
+ */
+export function parseFabricCrossSessionSettings(input: unknown): FabricCrossSessionSettings {
+  const defaults = DEFAULT_SETTINGS.fabric.crossSession;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return cloneFabricCrossSession(defaults);
+  const value = input as Record<string, unknown>;
+  // min/max per §5.2; 0 is a legal value exactly where the table says so (wakesOutPerHour,
+  // wakesInPerHour, pairWakesPerHour — "0 = deliver-only").
+  const clamp = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw !== "number" || !Number.isFinite(raw) ? fallback : Math.min(max, Math.max(min, Math.floor(raw)));
+  const rawAllow = value.allowFrom;
+  const entries = Array.isArray(rawAllow) ? rawAllow : [];
+  const valid: string[] = [];
+  let invalid = 0;
+  for (const entry of entries) {
+    if (typeof entry === "string" && isValidXsSessionId(entry)) valid.push(entry);
+    else invalid += 1;
+  }
+  if (invalid > 0) {
+    console.warn(
+      `[pi-subagent] fabric.crossSession.allowFrom: dropped ${invalid} invalid ${invalid === 1 ? "entry" : "entries"} (full session ids only)`,
+    );
+  }
+  const receive: FabricXsReceiveMode =
+    value.receive === "off" || value.receive === "deliver" || value.receive === "wake"
+      ? value.receive
+      : defaults.receive;
+  const limitsRaw =
+    value.limits && typeof value.limits === "object" && !Array.isArray(value.limits)
+      ? (value.limits as Record<string, unknown>)
+      : {};
+  const limit = (key: keyof FabricCrossSessionLimitsSettings, min: number, max: number): number =>
+    clamp(limitsRaw[key], defaults.limits[key], min, max);
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    autoJoin: typeof value.autoJoin === "boolean" ? value.autoJoin : defaults.autoJoin,
+    receive,
+    allowFrom: valid,
+    allowFromDenyAll: !Array.isArray(rawAllow) ? false : entries.length > 0 && valid.length === 0,
+    limits: {
+      sendsOutPerMin: limit("sendsOutPerMin", 1, 60),
+      sendsOutPerHour: limit("sendsOutPerHour", 1, 600),
+      wakesOutPerHour: limit("wakesOutPerHour", 0, 60),
+      recvPerHour: limit("recvPerHour", 1, 600),
+      wakesInPerHour: limit("wakesInPerHour", 0, 60),
+      inboxCap: limit("inboxCap", 1, 64),
+      pairMinIntervalMs: limit("pairMinIntervalMs", 5_000, 600_000),
+      pairWakesPerHour: limit("pairWakesPerHour", 0, 20),
+      inFlightPerSession: limit("inFlightPerSession", 1, 16),
+      hubSendsPerMin: limit("hubSendsPerMin", 1, 600),
+      listPerMin: limit("listPerMin", 1, 60),
+    },
   };
 }
 

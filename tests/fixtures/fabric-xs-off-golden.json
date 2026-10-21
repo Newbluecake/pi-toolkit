@@ -1,0 +1,122 @@
+{
+  "note": "xs-off golden captured from dev before XS0 (fabric-cross-session phase2-plan §2.8 H3). Never regenerate to fix a diff.",
+  "mainSessionTools": [
+    "web_search",
+    "TaskCreate",
+    "TaskList",
+    "TaskGet",
+    "TaskUpdate",
+    "TaskDelete",
+    "memory",
+    "ask_user",
+    "Agent",
+    "get_subagent_result",
+    "list_subagents",
+    "steer_subagent",
+    "set_model",
+    "abort_subagent",
+    "extend_subagent_timeout",
+    "switch_context",
+    "set_compact_threshold",
+    "bash",
+    "bash_job",
+    "SubagentWorkflow"
+  ],
+  "reservedToolNames": [
+    "Agent",
+    "get_subagent_result",
+    "steer_subagent",
+    "StructuredOutput",
+    "message_agent",
+    "set_model",
+    "extend_subagent_timeout",
+    "consult",
+    "bash_job",
+    "list_subagents",
+    "switch_context"
+  ],
+  "messageAgentSchema": {
+    "type": "object",
+    "required": ["to", "kind", "text"],
+    "properties": {
+      "to": {
+        "description": "Target run id, \"root\" for the root session, or @label for a registered top-level agent (requires can_message: mention)",
+        "type": "string"
+      },
+      "kind": {
+        "anyOf": [
+          {
+            "const": "progress",
+            "type": "string"
+          },
+          {
+            "const": "finding",
+            "type": "string"
+          },
+          {
+            "const": "directive",
+            "type": "string"
+          }
+        ]
+      },
+      "text": {
+        "description": "Message body",
+        "type": "string"
+      }
+    }
+  },
+  "wiring": {
+    "hello": {
+      "t": "hello",
+      "proto": {
+        "major": 1,
+        "minor": 2
+      },
+      "pluginVersion": "0.0.0-golden",
+      "buildId": "golden-build",
+      "agentId": "<agentId>",
+      "epoch": "<uuid>",
+      "kind": "tui",
+      "launcher": ["<node>", "/nonexistent/pi"],
+      "cwd": "<tmp>",
+      "caps": [
+        "ev.v1",
+        "fleet.v1",
+        "snapshot.v1",
+        "branch.v1",
+        "runtx.v1",
+        "runtx.lan.v1",
+        "cmd.v1",
+        "dialog.v1",
+        "command.v1",
+        "upload.v1",
+        "upload.lan.v1",
+        "hold.v1"
+      ]
+    },
+    "slotSequence": ["session", "status", "fleet", "dialogs", "ctl", "commands", "status", "ctl"],
+    "statusFrame": {
+      "t": "status",
+      "leafId": "e1",
+      "busy": false,
+      "pending": false,
+      "contextUsage": {
+        "tokens": 1000,
+        "contextWindow": 200000,
+        "percent": 0.5
+      },
+      "costUsd": 0,
+      "features": ["resume.v1"]
+    },
+    "hubConfig": {
+      "v": 1,
+      "home": "<tmp>",
+      "port": 0,
+      "idleExitMinutes": 10,
+      "pluginVersion": "0.0.0-golden",
+      "buildId": "golden-build",
+      "launcher": ["<node>", "/nonexistent/pi"],
+      "preview": "on"
+    }
+  }
+}

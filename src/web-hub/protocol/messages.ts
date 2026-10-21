@@ -27,6 +27,19 @@ import {
 import type { LanStatus } from "./lan.js";
 // feishu-bot plan §9 (F0): `fsb_req`/`fsb_res` schemas + types live in protocol/feishu.ts; only folded in here.
 import { type FsbReqFrame, FsbReqSchema, type FsbResFrame, FsbResSchema } from "./feishu.js";
+import {
+  XS_AGENT_FRAME_SCHEMAS,
+  XS_HUB_FRAME_SCHEMAS,
+  XsStatusSchema,
+  type XsAckFrame,
+  type XsDeliverFrame,
+  type XsMemberFrame,
+  type XsReqFrame,
+  type XsResFrame,
+  type XsStatusWire,
+  xsFrameBytesOk,
+} from "./xs.js";
+export type { XsAckFrame, XsDeliverFrame, XsMemberFrame, XsReqFrame, XsResFrame, XsStatusWire } from "./xs.js";
 import { type TfaReqFrame, TfaReqSchema, type TfaResFrame, TfaResSchema } from "./lan-2fa.js";
 export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
 
@@ -575,6 +588,10 @@ export interface StatusInfo {
    *  feature on this agent. Bounded ≤32 entries × ≤64 chars; a strictly optional field, so an
    *  old hub's open StatusInfoSchema forwards it verbatim and an old UI ignores it (F9). */
   features?: string[];
+  /** fabric phase-2 XS0 (§4.4, P3): display-only cross-session membership projection. Absent ⇔
+   *  xs off / not joined — byte-equal to the pre-feature shape. The hub's list/send authorization
+   *  NEVER reads this (#4): authoritative membership is the `xs_member` slot frame. */
+  xs?: XsStatusWire;
 }
 
 export interface FleetRowWire {
@@ -991,7 +1008,13 @@ export type AgentFrame =
   | LanReqFrame
   | HubCtlFrame
   | FsbReqFrame
-  | TfaReqFrame;
+  | TfaReqFrame
+  // fabric phase-2 XS0 (phase2-plan §8.1/§8.2): cross-session frames. Decoding is wired from
+  // day one (inert — nothing routes them until X1/X2); every xs_* frame additionally passes
+  // the stricter XS_MAX_FRAME_BYTES byte cap in decodeWith.
+  | XsMemberFrame
+  | XsReqFrame
+  | XsAckFrame;
 
 // ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
 
@@ -1061,7 +1084,9 @@ export type HubFrame =
   | LanResFrame
   | HubCtlAckFrame
   | FsbResFrame
-  | TfaResFrame;
+  | TfaResFrame
+  | XsResFrame
+  | XsDeliverFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -1499,6 +1524,7 @@ const StatusInfoSchema = Type.Object({
       maxItems: STATUS_FEATURES_MAX_ITEMS,
     }),
   ),
+  xs: Type.Optional(XsStatusSchema),
 });
 
 const FleetRowSchema = Type.Object({
@@ -2131,6 +2157,7 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   run_ev: RunEvSchema,
   run_gap: RunGapSchema,
   run_end: RunEndSchema,
+  ...XS_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2149,6 +2176,7 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   hub_ctl_ack: HubCtlAckSchema,
   fsb_res: FsbResSchema,
   tfa_res: TfaResSchema,
+  ...XS_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2170,6 +2198,9 @@ function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): o
   if (!withinFrameBudget(raw)) return undefined;
   const t = (raw as Record<string, unknown>)["t"];
   if (typeof t !== "string") return undefined;
+  // fabric phase-2 (protocol/xs.ts §8.2): xs_* frames carry a STRICTER 16 KiB byte cap than the
+  // global ndjson budget — an oversize xs frame is invalid exactly like an unknown one.
+  if (t.startsWith("xs_") && !xsFrameBytesOk(raw)) return undefined;
   const schema = schemas[t];
   if (schema === undefined) return undefined; // unknown t + RESERVED_FRAME_TYPES
   return Value.Check(schema, raw) ? (raw as object) : undefined;
