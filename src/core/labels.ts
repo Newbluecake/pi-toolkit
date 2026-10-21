@@ -29,3 +29,20 @@ export function deriveUniqueLabel(base: string, isTaken: (label: string) => bool
 export function firstNonEmptyLine(value: string): string | undefined {
   return value.split(/\r?\n/).find((line) => sanitizeLabelBase(line) !== undefined);
 }
+
+/** Display-title maximum length, measured in Unicode code points. */
+export const MAX_DISPLAY_TITLE_LENGTH = 120;
+
+/**
+ * Capture a human description as a display-only title: the first non-empty
+ * line with control characters stripped, outer whitespace trimmed (inner
+ * whitespace preserved — unlike the label, nothing is dasherized), capped at
+ * MAX_DISPLAY_TITLE_LENGTH code points. Undefined when nothing usable remains.
+ */
+export function captureDisplayTitle(raw: string): string | undefined {
+  const line = firstNonEmptyLine(raw);
+  if (line === undefined) return undefined;
+  const cleaned = line.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+  const codePoints = [...cleaned].slice(0, MAX_DISPLAY_TITLE_LENGTH).join("");
+  return codePoints.length > 0 ? codePoints : undefined;
+}

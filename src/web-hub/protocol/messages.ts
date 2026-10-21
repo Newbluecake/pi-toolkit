@@ -580,6 +580,12 @@ export interface StatusInfo {
 export interface FleetRowWire {
   runId: string;
   label?: string;
+  /** Display-only raw title (append-only optional field — no proto bump): the Agent
+   *  tool's un-sanitized `description` (whitespace preserved, ≤120 code points),
+   *  present only when it differs from `label`. The UI renders it as the row's main
+   *  title with the label as small secondary text; absent ⇔ title === label or an
+   *  old agent, and the UI falls back to the label. */
+  title?: string;
   type?: string;
   model?: string;
   /** M-B2 (thinking-level visibility): the run's effective thinking level

@@ -8,6 +8,7 @@ import { normalizeSchemaInput } from "../core/json-schema.js";
 import { parseDispatchMeta } from "../core/dispatch-meta.js";
 import { renderStructuredForHost, resolveSchemaPreset, type SchemaPresetId } from "../core/verdict-schema.js";
 import { formatSlots, type SlotsInfo } from "../core/format.js";
+import { captureDisplayTitle } from "../core/labels.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
@@ -485,10 +486,15 @@ function prepareSpawn(
     text: line,
   }));
   const nested = deps.allowedTypes !== undefined ? deps : undefined;
+  // Display-only title: the raw description (whitespace preserved), so the
+  // web fleet tree can show "implement /title auto+status" instead of the
+  // sanitized label. Spawn admission drops it when it matches the label.
+  const displayTitle = captureDisplayTitle(params.description);
   const baseRequest: SpawnRequest = {
     type: params.subagent_type,
     prompt: params.prompt,
     label: params.description,
+    ...(displayTitle !== undefined ? { title: displayTitle } : {}),
     ...(modelOverride ? { modelOverride } : {}),
     // Non-pair values are fuzzy hints ("sonnet", "kimi-k3") — resolved
     // against pi's available models at spawn admission; unresolvable

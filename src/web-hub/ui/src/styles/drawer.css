@@ -130,6 +130,19 @@
   font-weight: var(--fw-semibold);
 }
 
+/* Secondary `@label` token when a raw display title took over the name slot
+ * (mirrors fleet.css `.run-name .run-label`). */
+.run-head-name .run-head-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-3);
+}
+
 .run-head-status {
   flex: none;
   color: var(--c-text-3);

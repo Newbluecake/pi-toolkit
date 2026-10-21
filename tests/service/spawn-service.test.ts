@@ -987,3 +987,129 @@ describe("SpawnService.markWorktreeDisposition (X1)", () => {
     expect(snapshots).toHaveLength(count);
   });
 });
+
+describe("SpawnService display title (SpawnRequest.title → diag.title)", () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("keeps a title that differs from the effective label (provisional row + runner request)", async () => {
+    let seen: Partial<SpawnRequest> | undefined;
+    const runner: Runner = {
+      run: (spec) => {
+        seen = spec.request;
+        return new Promise<RunOutcome>(() => undefined); // provisional row stays put
+      },
+    };
+    const service = createSpawnService(deps(runner));
+    const started = await service.spawn({
+      type: "worker",
+      prompt: "do it",
+      label: "implement /title auto+status",
+      title: "implement /title auto+status",
+    });
+    if ("error" in started) throw new Error(started.error.message);
+    await tick();
+    const snap = service.snapshots().find((s) => s.runId === started.runId);
+    expect(snap?.diag.label).toBe("implement-/title-auto+status");
+    expect(snap?.diag.title).toBe("implement /title auto+status");
+    expect(seen?.label).toBe("implement-/title-auto+status");
+    expect(seen?.title).toBe("implement /title auto+status");
+  });
+
+  it("clamps an over-long title from any spawn source to MAX_DISPLAY_TITLE_LENGTH", async () => {
+    let seen: Partial<SpawnRequest> | undefined;
+    const runner: Runner = {
+      run: (spec) => {
+        seen = spec.request;
+        return new Promise<RunOutcome>(() => undefined);
+      },
+    };
+    const service = createSpawnService(deps(runner));
+    const long = "x ".repeat(150); // 300 code points, bypassing the Agent tool's own capture
+    const started = await service.spawn({ type: "worker", prompt: "do it", label: "long", title: long });
+    if ("error" in started) throw new Error(started.error.message);
+    await tick();
+    expect([...(seen?.title ?? "")].length).toBeLessThanOrEqual(120);
+    expect(seen?.title?.startsWith("x x")).toBe(true);
+  });
+
+  it("omits the title when it equals the effective label", async () => {
+    let seen: Partial<SpawnRequest> | undefined;
+    const runner: Runner = {
+      run: (spec) => {
+        seen = spec.request;
+        return new Promise<RunOutcome>(() => undefined);
+      },
+    };
+    const service = createSpawnService(deps(runner));
+    const started = await service.spawn({ type: "worker", prompt: "do it", label: "builder", title: "builder" });
+    if ("error" in started) throw new Error(started.error.message);
+    await tick();
+    const snap = service.snapshots().find((s) => s.runId === started.runId);
+    expect(snap?.diag.label).toBe("builder");
+    expect(snap?.diag.title).toBeUndefined();
+    expect(seen?.title).toBeUndefined();
+  });
+
+  it("keeps the title when a collision suffix made the label differ", async () => {
+    const runner: Runner = { run: () => new Promise<RunOutcome>(() => undefined) };
+    const service = createSpawnService(deps(runner));
+    const first = await service.spawn({ type: "worker", prompt: "one", label: "builder" });
+    if ("error" in first) throw new Error(first.error.message);
+    const second = await service.spawn({ type: "worker", prompt: "two", label: "builder", title: "builder" });
+    if ("error" in second) throw new Error(second.error.message);
+    await tick();
+    const snap = service.snapshots().find((s) => s.runId === second.runId);
+    expect(snap?.diag.label).toBe("builder-2");
+    // "builder" ≠ "builder-2" ⇒ the title is kept (it names the original intent).
+    expect(snap?.diag.title).toBe("builder");
+  });
+
+  it("resume inherits the title from the terminal snapshot; an explicit request title wins", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-title-"));
+    const file1 = join(dir, "sess1.jsonl");
+    const file2 = join(dir, "sess2.jsonl");
+    writeFileSync(file1, "");
+    writeFileSync(file2, "");
+    const seed = (runId: string, sessionFile: string): RunSnapshot => ({
+      runId,
+      generation: 1,
+      status: "completed",
+      phase: "settled",
+      deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+      diag: { ...outcome.diag, sessionFile, label: "implement-x", title: "implement x feature" },
+      outcome: { ...outcome, runId },
+      updatedAt: 1,
+    });
+    const seen: Array<Partial<SpawnRequest> | undefined> = [];
+    const runner: Runner = {
+      run: (spec) => {
+        seen.push(spec.request);
+        return new Promise<RunOutcome>(() => undefined); // never settles: provisional rows stay put
+      },
+      abort: async () => ({ ok: false, escalatedTo: "L4" }),
+    };
+    const seeded = [seed("r_TITLE01", file1), seed("r_TITLE02", file2)];
+    const service = createSpawnService({ ...deps(runner), durableRecords: () => seeded });
+
+    // ① no title on the request ⇒ inherited from the seeded terminal diag,
+    // visible on both the runner-bound request and the provisional row.
+    const resumed = await service.spawn({ type: "worker", prompt: "rework", resumeFrom: "r_TITLE01" });
+    if ("error" in resumed) throw new Error(resumed.error.message);
+    await tick();
+    expect(seen[0]?.title).toBe("implement x feature");
+    expect(service.snapshots().find((s) => s.runId === resumed.runId)?.diag.title).toBe("implement x feature");
+
+    // ② explicit title on the request ⇒ wins over the inherited value.
+    const overridden = await service.spawn({
+      type: "worker",
+      prompt: "rework 2",
+      label: "polish the feature",
+      title: "polish the feature",
+      resumeFrom: "r_TITLE02",
+    });
+    if ("error" in overridden) throw new Error(overridden.error.message);
+    await tick();
+    expect(seen.at(-1)?.title).toBe("polish the feature");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

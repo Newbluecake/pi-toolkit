@@ -27,12 +27,14 @@ function runningState(meta?: Extract<RunInput, { kind: "enqueued" }>["meta"]): R
 }
 
 describe("M-A: display meta at enqueue", () => {
-  it("folds model/label/agentType into diag exactly once", () => {
+  it("folds model/label/agentType/title into diag exactly once", () => {
     const s = runningState({
       model: { provider: "copilot-completion", id: "kimi-k3" },
       label: "重构用户模块",
+      title: "重构 用户 模块",
       agentType: "architect",
     });
+    expect(s.diag.title).toBe("重构 用户 模块"); // raw display title: inner whitespace kept, never dasherized
     expect(s.diag.model).toEqual({ provider: "copilot-completion", id: "kimi-k3" });
     expect(s.diag.label).toBe("重构用户模块");
     expect(s.diag.agentType).toBe("architect");
@@ -43,6 +45,7 @@ describe("M-A: display meta at enqueue", () => {
     expect(s.diag.model).toBeUndefined();
     expect(s.diag.label).toBeUndefined();
     expect(s.diag.agentType).toBeUndefined();
+    expect("title" in s.diag).toBe(false);
   });
 
   it("caps meta.experts.refs at EXPERTS_REFS_CAP when the dispatcher handed in more (review §8 ⚠️ item)", () => {

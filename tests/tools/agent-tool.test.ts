@@ -101,6 +101,42 @@ describe("tools/agent-tool: top-level Agent is background-only", () => {
     expect(text).toContain('[subagent label: "d" · run_id: child-1 · status: running]');
   });
 
+  it("carries the raw description as the display-only title (whitespace preserved; label left for admission to sanitize)", async () => {
+    const port = fakePort();
+    await createAgentTool({ spawn: port }).execute(
+      "tc",
+      { description: "implement /title auto+status", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    // The label stays the raw description (spawn admission sanitizes it as before);
+    // the title rides alongside, already captured.
+    expect(port.seen?.label).toBe("implement /title auto+status");
+    expect(port.seen?.title).toBe("implement /title auto+status");
+  });
+
+  it("title capture keeps only the first non-empty line and caps at 120 code points", async () => {
+    const port = fakePort();
+    await createAgentTool({ spawn: port }).execute(
+      "tc",
+      { description: "\n first  line \n second line", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen?.title).toBe("first  line");
+    const port2 = fakePort();
+    await createAgentTool({ spawn: port2 }).execute(
+      "tc",
+      { description: "x".repeat(130), prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port2.seen?.title).toBe("x".repeat(120));
+  });
+
   it("still runs in the background when a legacy run_in_background: false is passed", async () => {
     const port = fakePort();
     const legacyArgs = { description: "d", prompt: "p", subagent_type: "worker", run_in_background: false };

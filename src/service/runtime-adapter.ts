@@ -1211,6 +1211,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           displayMeta: {
             ...(spec.model === undefined ? {} : { model: spec.model }),
             ...(spec.request.label === undefined ? {} : { label: spec.request.label }),
+            ...(spec.request.title === undefined ? {} : { title: spec.request.title }),
             // consult §16.5 (acceptance follow-up): display-only — the main-session
             // sentinel type is folded to "main" here so every diag-driven renderer
             // shows the reserved id; spawn/admission keep comparing the raw

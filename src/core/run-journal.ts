@@ -59,6 +59,7 @@ const JOURNAL_DIAG_FIELDS = [
   "thinkingLevel",
   "consultIdentityPrediction",
   "label",
+  "title",
   "agentType",
   "taskPrompt",
   "worktree",

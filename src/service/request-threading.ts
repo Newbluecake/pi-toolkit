@@ -53,6 +53,7 @@ const NOT_THREADED = [
   "type", // resolved to RunnerSpec.type (AgentTypeConfig) before this layer
   "prompt", // assembled by buildPrompt(spec), not passed through raw
   "label", // display/handle only, never reaches the execution layer
+  "title", // display-only raw title — folded into RunDisplayMeta by the runtime adapter (like label), never threaded verbatim
   "cwd", // folded into sessionSpec.cwd (and may be rewritten by H2/X1 worktree)
   "modelOverride", // already merged into RunnerSpec.model -> sessionSpec.model
   "modelHintOverride", // resolved to a {provider,id} pair at spawn admission, then merged like modelOverride
