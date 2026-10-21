@@ -1096,3 +1096,36 @@ describe("usePreview: chunked stream (chunked-plan §4.2)", () => {
     h.handle.dispose();
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// web-hub-preview-windows plan r2 §4.4/§10.1 (W1) — tree fetches & session changes.
+// The two NEW cases only; everything above runs byte-identical to the pre-split composable.
+// ---------------------------------------------------------------------------------------
+describe("usePreview: preview-tree session-change routing (preview-windows §4.4)", () => {
+  it("tree 收到 E_SESSION_CHANGED ⇒ close (the visit dies with the session)", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/src", dir: true });
+    h.waits[0]!.resolve(DIR_OK(["sub/"]));
+    await flush();
+    h.nav.tree.toggle("/p/src/sub");
+    h.waits[1]!.resolve({ ok: false, status: 409, error: "E_SESSION_CHANGED" });
+    await flush();
+    expect(h.nav.view.value).toEqual({ phase: "closed" });
+    expect(h.nav.tree.nodes.size).toBe(0); // close() cleared the visit
+  });
+
+  it("迟到的 tree 错误被丢弃：a superseded visit's E_SESSION_CHANGED never closes the new one", async () => {
+    const h = makeHarness();
+    h.nav.open({ path: "/p/src", dir: true });
+    h.waits[0]!.resolve(DIR_OK(["sub/"]));
+    await flush();
+    h.nav.tree.toggle("/p/src/sub"); // parked under visit 1 (calls[1])
+    h.nav.open({ path: "/p/other", dir: true }); // fresh visit ⇒ visitEpoch++, tree cleared
+    expect(h.calls[1]!.opts.signal.aborted).toBe(true);
+    h.waits[1]!.resolve({ ok: false, status: 409, error: "E_SESSION_CHANGED" }); // late
+    h.waits[2]!.resolve(TEXT_OK);
+    await flush();
+    expect(h.nav.view.value).toMatchObject({ phase: "text", path: "/p/other" }); // untouched
+    expect(h.nav.tree.nodes.size).toBe(0);
+  });
+});
