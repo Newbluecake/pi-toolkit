@@ -423,3 +423,23 @@ describe("PreviewText.vue — chunked stream mode", () => {
     expect(w.find(".preview-stream-status").exists()).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// web-hub-mermaid plan §10.2 (P2): fence routing inside the rendered .md view
+// ---------------------------------------------------------------------------------------
+describe("PreviewText.vue — mermaid fence routing (web-hub-mermaid plan §6.2)", () => {
+  it("a ```mermaid fence in the rendered view becomes a .codeblock.mmd; ```js stays plain", () => {
+    const wrapper = mount(PreviewText, {
+      props: {
+        text: "```mermaid\nflowchart TD\n  A-->B\n```\n\n```js\nlet x = 1\n```",
+        truncated: false,
+        filename: "doc.md",
+        path: "/p/doc.md",
+      },
+    });
+    const blocks = wrapper.findAll(".preview-md .codeblock");
+    expect(blocks.length).toBe(2);
+    expect(blocks[0]!.classes()).toContain("mmd"); // MermaidBlock (visibility-gated; class-level only)
+    expect(blocks[1]!.classes()).not.toContain("mmd");
+  });
+});

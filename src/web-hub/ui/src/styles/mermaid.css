@@ -1,0 +1,58 @@
+/*
+ * MermaidBlock display styles (web-hub-mermaid plan §6.1/§6.3, P2). Imported by
+ * `components/transcript/MermaidBlock.vue`; `vite.config.ts`'s `cssCodeSplit:false` folds it
+ * into the single app CSS file. Only `.mmd-*` additions live here — the outer `.codeblock`,
+ * `.codeblock-head`, `.codeblock-status` and `.codeblock pre` chrome is
+ * `styles/transcript.css`'s (shared byte-for-byte with `CodeBlock.vue`).
+ */
+
+/* Header actions row: 「源码 ⇄ 图」 / 「原尺寸 ⇄ 适应宽度」 / copy. The head keeps its
+   `justify-content: space-between`; the spacer pins the actions + status to the right edge
+   when a status line is absent. */
+.codeblock.mmd .mmd-spacer {
+  flex: 1;
+}
+
+.codeblock.mmd .mmd-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* Diagram view: white-ish surface so both themes read the rendered SVG; the img keeps its
+   intrinsic aspect via width/height attrs + `max-width:100%; height:auto` (plan §6.3). */
+.mmd-figure {
+  padding: var(--sp-3);
+  background: var(--c-surface);
+  display: flex;
+  justify-content: center;
+}
+
+.mmd-figure img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* 「原尺寸」 mode: intrinsic width, horizontal pan. tabindex is bound by the component when
+   this mode is on (keyboard-reachable scroll region, same axe rule as `.codeblock pre`). */
+.mmd-figure.actual {
+  justify-content: flex-start;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.mmd-figure.actual img {
+  max-width: none;
+}
+
+/* Error line under the source view (plan §6.3: settled error state renders source + one
+   `.mmd-error` row, reason-mapped i18n text). */
+.mmd-error {
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--c-danger-border);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}

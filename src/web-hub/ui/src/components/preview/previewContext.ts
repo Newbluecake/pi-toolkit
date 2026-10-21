@@ -11,6 +11,10 @@
  * - `PATH_REFERENCES_SUSPENDED` — §4.6 流式抑制: `TxAssistant` provides
  *   `computed(() => props.assistant.streaming)`; while it is true `PathText` renders plain
  *   text (no ref scan), and a settled message re-scans once when the flag flips back.
+ *   web-hub-mermaid plan §6.2 (P2): `MermaidBlock.vue` ALSO reads this flag as its "message
+ *   still streaming" signal — while true it renders a plain `CodeBlock` (byte-identical
+ *   streaming DOM, no render request); the flip back to false is what starts diagram
+ *   rendering. Absent ⇒ not streaming (a settled transcript never provides it).
  */
 import type { InjectionKey, Ref } from "vue";
 import type { MdImageLoader } from "../../composables/useMdImageLoader.js";

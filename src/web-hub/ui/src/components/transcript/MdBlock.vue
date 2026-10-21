@@ -4,10 +4,13 @@
   GFM tables, blockquotes and task list items). Headings visually downgrade to h3–h6
   (ui-design.md §12's "降级为 h3-h6 视觉" — a markdown `#` heading inside a chat message must
   never outrank the page's own `h1`/`h2` landmarks, §3.12). Fenced code blocks hand off to
-  `CodeBlock.vue` (its own copy-button chrome); every other node type renders through plain
-  text interpolation. `blocks` normalizes the AST into one flat, non-generic shape up front so
-  the template itself never needs a TS type assertion (Vue template expressions support `as`,
-  but keeping the cast out of the template is simpler to read and to type-check).
+  `CodeBlock.vue` (its own copy-button chrome) — except ```mermaid fences, which route to
+  `MermaidBlock.vue` (web-hub-mermaid plan §6.2, P2; while the message streams that component
+  renders a plain CodeBlock, so streaming DOM is unchanged); every other node type renders
+  through plain text interpolation. `blocks` normalizes the AST into one flat, non-generic
+  shape up front so the template itself never needs a TS type assertion (Vue template
+  expressions support `as`, but keeping the cast out of the template is simpler to read and
+  to type-check).
   Tables render inside a horizontally scrollable wrapper (`tabindex="0"` so the scroll region
   is keyboard-reachable, same axe rule as `CodeBlock.vue`'s `<pre>`); blockquotes recurse into
   this same component (Vue resolves the self-reference by filename); task items render as a
@@ -16,8 +19,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Inline, MdNode, TableAlign } from "./markdown-types.js";
+import { isMermaidFence } from "@logic/mermaid.js";
 import CodeBlock from "./CodeBlock.vue";
 import MdInline from "./MdInline.vue";
+import MermaidBlock from "./MermaidBlock.vue";
 
 const props = defineProps<{ readonly nodes: readonly MdNode[] }>();
 
@@ -27,6 +32,7 @@ function headingTag(level: number): string {
 
 type BlockView =
   | { readonly kind: "code"; readonly lang: string; readonly text: string }
+  | { readonly kind: "mermaid"; readonly lang: string; readonly text: string }
   | { readonly kind: "heading"; readonly tag: string; readonly children: readonly Inline[] }
   | {
       readonly kind: "listUl";
@@ -52,7 +58,11 @@ const blocks = computed<BlockView[]>(() =>
   props.nodes.map((n): BlockView => {
     switch (n.type) {
       case "code_block":
-        return { kind: "code", lang: n.lang, text: n.text };
+        // web-hub-mermaid plan §6.2 (P2): a mermaid fence routes to MermaidBlock (which keeps the
+        // streaming DOM a plain CodeBlock); every other fence stays CodeBlock, zero difference.
+        return isMermaidFence(n.lang)
+          ? { kind: "mermaid", lang: n.lang, text: n.text }
+          : { kind: "code", lang: n.lang, text: n.text };
       case "heading":
         return { kind: "heading", tag: headingTag(n.level), children: n.children };
       case "list":
@@ -98,6 +108,7 @@ function taskChecked(b: BlockView, j: number): boolean | null {
 <template>
   <template v-for="(b, i) in blocks" :key="i">
     <CodeBlock v-if="b.kind === 'code'" :lang="b.lang" :text="b.text" />
+    <MermaidBlock v-else-if="b.kind === 'mermaid'" :lang="b.lang" :text="b.text" />
     <component v-else-if="b.kind === 'heading'" :is="b.tag" class="md-h"><MdInline :nodes="b.children" /></component>
     <ul v-else-if="b.kind === 'listUl'" class="md-list">
       <li v-for="(item, j) in b.items" :key="j" :class="{ 'md-task': taskChecked(b, j) !== null }">
