@@ -271,3 +271,17 @@ createCommandComplete({
 - D1：`webHub.commandComplete` 默认 **`"all"`**（含第三方命令，经 S-tui）。
 - D2：仅当用户已用 ↑↓ 显式选过候选时 Enter 应用候选，否则 Enter 仍是发送/执行。
 - D3–D6：**全部按推荐**（RPC 托管会话第三方补全接受降级并另提上游需求；新帧对 + 独立路由、PROTO 1.2→1.3；从 description 提取 `[..]/<..>` 作 usage；TUI 与 web 不互斥）。
+
+## r1 评审处置（glm，有条件通过，2026-10-21；全文 `review-r1.md`）——优先于正文
+
+- **#1 Major（commands slot 首发时序）采纳三件套**：① commands 帧构建不依赖 caps；② slot flush 前按**当前** hub caps 剥离 `args`（slot 存帧 + 可选 transform）；③ hello_ack / caps 变化（含重连、hub 降级）时 republish。补测试：hello_ack 晚于首发 ⇒ 最终帧带 args；无 cap 的 hub flush 帧不含 args。
+- **#2 Major（PROTO bump）采纳：不 bump**。新帧对 + cap `cmd.args.v1` 门控即可（遵循 version.ts 现行「只加帧不改」惯例，fsb/lan/tfa 先例）。**这修订了 §11 D4 的推荐项**（用户按推荐选了「新帧对 + 独立路由」——帧对与独立路由保留，仅撤回 1.2→1.3 bump）。PROTO 断言测试不动。
+- #3 usage 上限放宽到 200 字符，末尾空白处回退截断加 `…`，手写表单测断言不超限，UI ellipsis + title 全文。
+- #4 风险段单列「第三方补全函数**同步**死循环会挂死整个会话进程，超时/在途/限流均无效」，并在设置描述如实标注（默认仍 `all`，用户已拍板）。
+- #5 任何非导航键输入即复位 `argNavigated`（同 `argDismissed`），补 composer 测试。
+- #6 res-close：释放在途计数，审计 `code:"aborted"`，可提前 settle pending。
+- #7 #8 #9 文字修正照建议。
+
+### 与 fabric 二期的文件冲突与顺序（主会话裁定）
+
+本方案 P0（`protocol/*`）与 fabric XS0 同改 `protocol/messages.ts`；P1（`agent/connection.ts`、`agent/index.ts`、`src/index.ts`）与 fabric X2/XW、P2（`hub/{registry,agent-server,hub,main,audit}.ts`）与 fabric X1 重叠。顺序：**fabric XS0 合入 → 本方案 P0 → (P1 ∥ P2 ∥ P3) 合入 → fabric X1/X2**；fabric R1/T1/X3 文件不重叠，可与本方案 P1–P3 并行。
