@@ -14,6 +14,7 @@ import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
+import { UI_MAX_FILES } from "../../../src/web-hub/protocol/ui-manifest.js";
 import { acceptsGzip, createUiServer, uiRelPath, type UiServer } from "../../../src/web-hub/hub/static.js";
 import type { UiCandidatePlan } from "../../../src/web-hub/hub/ui-root.js";
 import { fakeDeps, makeTmp, rawRequest } from "./helpers.js";
@@ -104,6 +105,26 @@ describe("createUiServer: unbuilt (no valid candidate)", () => {
       });
       const status = ui.status();
       expect(status.state).toBe("unbuilt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a manifest over UI_MAX_FILES (same-version redeploy against an OLD daemon's smaller cap) serves the 200 placeholder; loopback sees the too-large reason (web-hub-mermaid plan §7.5)", async () => {
+    const { root, cleanup } = rootDir();
+    try {
+      const files: FixtureFile[] = [
+        { path: "index.html", content: DEFAULT_INDEX },
+        ...Array.from({ length: UI_MAX_FILES }, (_, i) => ({ path: `assets/f${i}-aaaaaaaa.js`, content: "x" })),
+      ];
+      writeValidRoot(root, { files });
+      const ui = createUiServer({ candidates: onlyCandidate(root), hubVersion: HUB_VERSION, log: noopLog() });
+      const body = await bodyOf(async (res) => ui.serve("/", res, { authMode: "token" }));
+      expect(ui.status().state).toBe("unbuilt");
+      expect(body).toContain("too-large");
+      // password/LAN mode never shows the rejection reason
+      const pw = await bodyOf(async (res) => ui.serve("/", res, { authMode: "password" }));
+      expect(pw).not.toContain("too-large");
     } finally {
       cleanup();
     }

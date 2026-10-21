@@ -44,6 +44,8 @@ its headless error there and is therefore not registered in child sessions at al
 ```sh
 npm install          # dev setup (Node >= 22, enforced by engines + CI)
 npm run build        # tsc -p tsconfig.build.json → dist/
+npm run build:web    # web-hub UI (vite) → dist/web-hub-ui/ — toolchain needs Node ≥22.12 (mermaid's engines; CI has a 22.12.0 job)
+npm run check:web    # UI bundle gates (CSP/size/provenance/licences) · npm run probe:mermaid = real-browser mermaid gate (Chromium+Firefox, not in CI)
 npm test             # vitest run — 17,000+ tests; must stay green
 npm run typecheck    # tsc --noEmit (strict; see tsconfig flags)
 npm run format       # prettier --write .
