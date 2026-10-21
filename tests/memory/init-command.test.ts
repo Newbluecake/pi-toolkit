@@ -83,8 +83,9 @@ describe("runMemInit", () => {
     expect(meta.topic).toBe("core");
     expect(meta.description).toContain("每轮");
     expect(meta.updated).toBeDefined();
-    // user command ⇒ user-authored: no `source:` stamp (tool writes carry `source: agent`)
-    expect(meta.source).toBeUndefined();
+    // 2026-10-21 ruling: the skeleton is a template meant to stay rewritable
+    // by tidy/agent ⇒ stamped `source: agent`; deleting the line locks it.
+    expect(meta.source).toBe("agent");
     expect(content).toContain("# 核心规则（每轮）");
     // created with the tool's private-file mode
     expect(statSync(file).mode & 0o777).toBe(0o600);

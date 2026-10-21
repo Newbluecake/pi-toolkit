@@ -9,13 +9,19 @@
  * lock-serialized mutation, and `writeTempRegular` + `createExclusive` for
  * the atomic no-clobber create. Reads never take the lock (lock.ts).
  *
- * Provenance decision: the skeleton carries NO `source:` field. Agent tool
- * writes stamp `source: agent`; everything else is user-authored
+ * Provenance decision (2026-10-21 user ruling, supersedes the original
+ * "user-authored, no source field" decision): the skeleton carries
+ * `source: agent`. It is a TEMPLATE meant to be filled in — by the user
+ * directly or by `/mem tidy` / the memory tool on the user's behalf — so it
+ * must not start life as suggestion-only/hand-written
  * (`frontmatterSource(content) !== "agent"` in `tool-v2.ts`'s
- * `isHandWritten`). `/mem init` is an explicit USER command, so the file is
- * user-authored: the memory tool can still edit its body (with the usual
- * "user-authored" warning) but cannot overwrite/delete it wholesale or
- * touch its frontmatter — the skeleton the user filled in is protected.
+ * `isHandWritten` would block tidy's Apply and every frontmatter touch).
+ * A user who wants to LOCK the file deletes the `source: agent` line: it
+ * then reads as hand-written (tidy suggestion-only, tool body edits carry
+ * the user-authored warning, frontmatter untouchable). Doctor-clean is
+ * preserved: `source` has no validation constraints (meta.ts), no D-rule
+ * keys on it, and the tiered renderer already fences agent-source
+ * primaries (tiered.ts's buildCore/wholePiece agentSourceFence).
  *
  * Refusal wording deliberately mirrors D01's own fix text (doctor.ts), so
  * the command and the doctor always point at the same remedy.
@@ -60,9 +66,11 @@ export interface MemInitDeps {
 
 /** Small skeleton — frontmatter mirrors what a healthy primary core carries
  *  (pin + description + topic + status + updated all keep D01/D06/D07/D08
- *  silent); the body stays well under the default 1600B core budget so the
- *  freshly created file itself triggers no doctor finding. `updated` is
- *  stamped by the caller (test-injectable clock). */
+ *  silent); `source: agent` marks it agent-managed so tidy/tool can keep
+ *  rewriting it (see the header's provenance decision — deleting the line
+ *  locks it as user-authored). The body stays well under the default 1600B
+ *  core budget so the freshly created file itself triggers no doctor
+ *  finding. `updated` is stamped by the caller (test-injectable clock). */
 export function coreSkeleton(nowIso: string): string {
   return `---
 pin: true
@@ -70,6 +78,7 @@ description: 每轮必需的项目规则与用户偏好
 topic: core
 status: active
 updated: ${nowIso}
+source: agent
 ---
 
 # 核心规则（每轮）
@@ -166,6 +175,7 @@ export async function handleMemInitCommand(ctx: ExtensionCommandContext, deps: M
       const lines = [
         `已创建 core.md 骨架：${outcome.path}`,
         "编辑它，把每轮必须遵守的规则填进去；话题细节另建文件并在此留指针。",
+        "骨架标记为 source: agent（tidy / agent 可继续代为改写）；想锁定为用户文件就删掉 frontmatter 里的那一行。",
       ];
       if (outcome.topicFiles > 0) {
         lines.push(

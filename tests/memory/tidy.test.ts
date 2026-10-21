@@ -21,6 +21,7 @@ import { parseMemoryMeta } from "../../src/memory/meta.js";
 import { renderTidyDiff } from "../../src/memory/tidy/diff.js";
 import { planFrontmatterBackfill } from "../../src/memory/tidy/frontmatter.js";
 import { applyTidy } from "../../src/memory/tidy/apply.js";
+import { applyRestore } from "../../src/memory/tidy/restore.js";
 import type { TidyProposal } from "../../src/memory/contracts.js";
 
 let fx: MaterializedFixture | undefined;
@@ -979,6 +980,104 @@ describe("/mem tidy command (§7.3, §10 K group)", () => {
     expect(readFileSync(join(fx.memDir, "manual.md"), "utf8")).toContain("human wrote this");
   });
 
+  it("menu order is fixed (2026-10-21 ruling): unaccountedLines > 0 still offers Apply FIRST, the warning rides the title", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(
+      fx.memDir,
+      "a.md",
+      "---\nsource: agent\n---\n\n# a\nkeep this line\ndrop this line\n",
+      "2026-09-01T00:00:00.000Z",
+    );
+    const fp = makeFakePort();
+    const proposal = {
+      // "drop this line" vanishes without a dropped[] entry ⇒ unaccounted
+      files: [{ name: "a.md", action: "rewrite", content: "# a\nkeep this line\n", reason: "trim" }],
+      dropped: [],
+    };
+    fp.settle(makeOutcome({ status: "completed", structuredResult: proposal }));
+    const { ui, selectCalls } = makeUi({ confirm: [true], select: ["Skip"] });
+    const ctx = makeCtx(fx.cwd, ui);
+    await handleMemTidyCommand("tidy", "", ctx, baseDeps(fp, { paths: fx.paths }));
+    // fixed order — never reordered to Skip-first by unaccountedLines
+    expect(selectCalls[0]?.options).toEqual(["Apply", "Edit then apply", "View diff", "Skip", "Abort all"]);
+    expect(selectCalls[0]?.title).toContain("1 lines unaccounted");
+    expect(readFileSync(join(fx.memDir, "a.md"), "utf8")).toContain("drop this line"); // skipped ⇒ untouched
+  });
+
+  it("hand-written menu (2026-10-21 ruling): View diff first, Take over & apply offered, title says why Apply is missing", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(fx.memDir, "manual.md", "# manual\nhuman wrote this\n", "2026-09-01T00:00:00.000Z");
+    const fp = makeFakePort();
+    const proposal = {
+      files: [
+        { name: "manual.md", action: "rewrite", content: "# manual\nmodel wants to change this\n", reason: "cleanup" },
+      ],
+      dropped: [],
+    };
+    fp.settle(makeOutcome({ status: "completed", structuredResult: proposal }));
+    const { ui, selectCalls } = makeUi({ confirm: [true], select: ["Skip"] });
+    const ctx = makeCtx(fx.cwd, ui);
+    await handleMemTidyCommand("tidy", "", ctx, baseDeps(fp, { paths: fx.paths }));
+    expect(selectCalls[0]?.options).toEqual(["View diff", "Take over & apply", "Skip", "Abort all"]);
+    expect(selectCalls[0]?.options).not.toContain("Apply");
+    expect(selectCalls[0]?.title).toContain("hand-written — suggestion only");
+    expect(selectCalls[0]?.title).toContain("Take over & apply");
+    expect(readFileSync(join(fx.memDir, "manual.md"), "utf8")).toContain("human wrote this");
+  });
+
+  it("Take over & apply (confirmed): writes via the normal txn, stamps source: agent, and /mem restore undoes it", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(fx.memDir, "manual.md", "# manual\nhuman wrote this\n", "2026-09-01T00:00:00.000Z");
+    const fp = makeFakePort();
+    const proposal = {
+      files: [{ name: "manual.md", action: "rewrite", content: "# manual\ntaken over by tidy\n", reason: "cleanup" }],
+      dropped: [],
+    };
+    fp.settle(makeOutcome({ status: "completed", structuredResult: proposal }));
+    // confirm queue: [0] pre-spawn summary, [1] the takeover second confirmation
+    const { ui, confirmCalls, notifications } = makeUi({ confirm: [true, true], select: ["Take over & apply"] });
+    const ctx = makeCtx(fx.cwd, ui);
+    await handleMemTidyCommand("tidy", "", ctx, baseDeps(fp, { paths: fx.paths }));
+    expect(confirmCalls).toHaveLength(2);
+    expect(confirmCalls[1]?.message).toContain("source: agent");
+    expect(confirmCalls[1]?.message).toContain("/mem restore");
+    const landed = readFileSync(join(fx.memDir, "manual.md"), "utf8");
+    expect(landed).toContain("taken over by tidy");
+    expect(parseMemoryMeta(landed, "manual").meta.source).toBe("agent");
+    expect(notifications.at(-1)?.message).toContain("applied 1");
+    // the journaled txn left a backup manifest holding the pre-takeover bytes
+    const backupIds = readdirSync(join(fx.memDir, ".backup"));
+    expect(backupIds).toHaveLength(1);
+    expect(readFileSync(join(fx.memDir, ".backup", backupIds[0]!, "manual.md"), "utf8")).toContain("human wrote this");
+    // and the standard restore path really puts the hand-written original back
+    const restored = await applyRestore(fx.cwd, backupIds[0]!, new Map([["manual.md", "restore"]]), fx.paths);
+    expect(restored.restored).toContain("manual.md");
+    const after = readFileSync(join(fx.memDir, "manual.md"), "utf8");
+    expect(after).toContain("human wrote this");
+    expect(parseMemoryMeta(after, "manual").meta.source).toBeUndefined(); // hand-written again
+  });
+
+  it("Take over & apply (declined at the second confirmation): no write, the same menu comes back", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(fx.memDir, "manual.md", "# manual\nhuman wrote this\n", "2026-09-01T00:00:00.000Z");
+    const fp = makeFakePort();
+    const proposal = {
+      files: [{ name: "manual.md", action: "rewrite", content: "# manual\ntaken over\n", reason: "cleanup" }],
+      dropped: [],
+    };
+    fp.settle(makeOutcome({ status: "completed", structuredResult: proposal }));
+    const { ui, selectCalls, notifications } = makeUi({
+      confirm: [true, false],
+      select: ["Take over & apply", "Skip"],
+    });
+    const ctx = makeCtx(fx.cwd, ui);
+    await handleMemTidyCommand("tidy", "", ctx, baseDeps(fp, { paths: fx.paths }));
+    expect(selectCalls).toHaveLength(2); // declined ⇒ menu again, then Skip
+    expect(readFileSync(join(fx.memDir, "manual.md"), "utf8")).toContain("human wrote this");
+    expect(readdirSync(fx.memDir)).not.toContain(".backup");
+    expect(notifications.at(-1)?.message).toContain("applied 0, skipped 1");
+  });
+
   it("K11: spawn failure ⇒ zero writes", async () => {
     fx = materializeFixture("current-5");
     const fp = makeFakePort();
@@ -1167,9 +1266,41 @@ describe("/mem tidy --frontmatter (§7.4, K12)", () => {
     const ctx = makeCtx(fx.cwd, ui);
     await handleMemTidyCommand("tidy", "--frontmatter", ctx, baseDeps(fp, { paths: fx.paths }));
     expect(selectCalls[0]?.title).toContain("suggestion only");
+    expect(selectCalls[0]?.options).toEqual(["View diff", "Take over & apply", "Skip"]);
     expect(selectCalls[0]?.options).not.toContain("Apply");
     const raw = readFileSync(join(fx.memDir, "manual.md"), "utf8");
     expect(raw).not.toContain("topic:"); // never applied
+  });
+
+  it("hand-written file: Take over & apply (confirmed) backfills and stamps source: agent; declined writes nothing", async () => {
+    fx = materializeEmptyFixture();
+    writeMemAt(fx.memDir, "manual.md", "# Manual notes\nbody\n", "2026-09-01T00:00:00.000Z");
+    const fp = makeFakePort();
+    const { ui, confirmCalls } = makeUi({ confirm: [true], select: ["Take over & apply"] });
+    const ctx = makeCtx(fx.cwd, ui);
+    await handleMemTidyCommand("tidy", "--frontmatter", ctx, baseDeps(fp, { paths: fx.paths }));
+    expect(confirmCalls).toHaveLength(1); // only the takeover confirmation (no spawn in --frontmatter)
+    const raw = readFileSync(join(fx.memDir, "manual.md"), "utf8");
+    const { meta } = parseMemoryMeta(raw, "manual");
+    expect(meta.source).toBe("agent");
+    expect(meta.topic).toBe("manual"); // backfilled
+    expect(raw).toContain("body");
+
+    // declined: a fresh run over a hand-written file again writes nothing
+    writeMemAt(fx.memDir, "other.md", "# Other\nmore\n", "2026-09-01T00:00:00.000Z");
+    const fp2 = makeFakePort();
+    const { ui: ui2, selectCalls: selectCalls2 } = makeUi({
+      confirm: [false],
+      select: ["Take over & apply", "Skip"],
+    });
+    await handleMemTidyCommand(
+      "tidy",
+      "--frontmatter other.md",
+      makeCtx(fx.cwd, ui2),
+      baseDeps(fp2, { paths: fx.paths }),
+    );
+    expect(selectCalls2).toHaveLength(2); // declined ⇒ menu again, then Skip
+    expect(readFileSync(join(fx.memDir, "other.md"), "utf8")).not.toContain("topic:");
   });
 });
 

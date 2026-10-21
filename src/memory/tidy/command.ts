@@ -242,11 +242,27 @@ function buildFileTitle(
 }
 
 function buildOptions(flag: TidyFileFlag | undefined, handWritten: boolean): string[] {
-  if (handWritten) return ["View diff", "Skip", "Abort all"]; // §7.3 step5 / 用户决策 5: suggestion only, no commit path at all
+  // 2026-10-21 user rulings: when Apply is allowed it is ALWAYS the first
+  // option — unaccountedLines no longer reorders the menu (the ⚠ note in
+  // the title carries that warning; ctx.ui.select has no initial-index
+  // option, so a fixed order is the only lever). Hand-written files never
+  // get Apply; their only commit path is the guarded "Take over & apply"
+  // (second confirmation, then the normal txn apply stamps source: agent).
+  if (handWritten) return ["View diff", "Take over & apply", "Skip", "Abort all"];
   if (flag && !flag.canApply) return ["Edit then apply", "View diff", "Skip", "Abort all"]; // over budget / bad frontmatter: still fixable
-  if (flag && flag.unaccountedLines > 0) return ["Skip", "Apply", "Edit then apply", "View diff", "Abort all"];
   return ["Apply", "Edit then apply", "View diff", "Skip", "Abort all"];
 }
+
+/** Second-confirmation text for "Take over & apply" (tidy + --frontmatter
+ *  share it): the file becomes agent-managed, the write goes through the
+ *  normal journaled txn (backup manifest ⇒ /mem restore can undo it). */
+const TAKEOVER_CONFIRM_TITLE = (name: string): string => `tidy takeover — ${name}`;
+const TAKEOVER_CONFIRM_MESSAGE = (name: string, action?: string): string =>
+  (action === "delete"
+    ? `${name} is hand-written (no source: agent). Taking over DELETES it as proposed. `
+    : `${name} is hand-written (no source: agent). Taking over applies the proposed ${action ?? "rewrite"}` +
+      " and stamps source: agent — from then on it is agent-managed: /mem tidy and the memory tool may rewrite it without asking. ") +
+  "The current content is backed up first, so /mem restore can undo this. Continue?";
 
 async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tctx: TidyCtx): Promise<void> {
   const { cwd, port, settings, paths, runDoctorFn, now, onAfterWrite } = tctx;
@@ -432,6 +448,9 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
   const overCostCap = priced && outcome.usage !== undefined && outcome.usage.costUsd > settings.tidy.maxCostUsd;
   const targets = working.filter((f) => f.action !== "keep");
   const decisions = new Map<string, "apply" | "skip">();
+  /** Per-file takeover grants (2026-10-21 ruling): names of hand-written
+   *  files whose "Take over & apply" second confirmation the user accepted. */
+  const takeover = new Set<string>();
   let abortedAll = false;
 
   for (let i = 0; i < targets.length; i++) {
@@ -461,6 +480,26 @@ async function handleTidyCommand(args: string, ctx: ExtensionCommandContext, tct
         flag = vres.fileFlags.get(f.name);
         if (flag && !flag.canApply) {
           // still not applyable — say why, then re-show the menu (title carries the note too)
+          ctx.ui.notify(`tidy: ${f.name} still can't be applied — ${flag.note ?? "validation failed"}`, "warning");
+          continue;
+        }
+        decisions.set(f.name, "apply");
+        break;
+      }
+      if (choice === "Take over & apply") {
+        // Hand-written only (buildOptions): explicit second confirmation,
+        // then an explicit per-file takeover grant in the validation
+        // context lifts the hand-written guard for THIS file. Every other
+        // guard (frontmatter validity, byte caps, CAS on disk) still
+        // applies, and the commit goes through the same applyTidy txn path
+        // as a normal Apply — which also stamps source: agent.
+        const yes = await ctx.ui.confirm(TAKEOVER_CONFIRM_TITLE(f.name), TAKEOVER_CONFIRM_MESSAGE(f.name, f.action));
+        if (!yes) continue;
+        takeover.add(f.name);
+        vres = validateTidyProposal(workingProposal(), { ...validateCtx, takeover });
+        adoptNormalized(vres);
+        flag = vres.fileFlags.get(f.name);
+        if (flag && !flag.canApply) {
           ctx.ui.notify(`tidy: ${f.name} still can't be applied — ${flag.note ?? "validation failed"}`, "warning");
           continue;
         }
@@ -555,13 +594,26 @@ async function runFrontmatterMode(
     const orig = byName.get(f.name);
     const patch = proposals.find((p) => p.name === f.name)?.patch ?? {};
     if (orig?.handWritten) {
-      const choice = await ctx.ui.select(`frontmatter · ${f.name} · suggestion only (hand-written)`, [
-        "View diff",
-        "Skip",
-      ]);
-      if (choice === "View diff")
-        await ctx.ui.editor(`frontmatter diff — ${f.name}`, renderTidyDiff(orig.body, f.content ?? ""));
-      decisions.set(f.name, "skip");
+      // Same takeover rule as the tidy loop (2026-10-21 ruling): View diff
+      // returns to the menu; the only commit path is the guarded takeover.
+      for (;;) {
+        const choice = await ctx.ui.select(
+          `frontmatter · ${f.name} · hand-written — suggestion only (Take over & apply to rewrite)`,
+          ["View diff", "Take over & apply", "Skip"],
+        );
+        if (choice === "View diff") {
+          await ctx.ui.editor(`frontmatter diff — ${f.name}`, renderTidyDiff(orig.body, f.content ?? ""));
+          continue;
+        }
+        if (choice === "Take over & apply") {
+          const yes = await ctx.ui.confirm(TAKEOVER_CONFIRM_TITLE(f.name), TAKEOVER_CONFIRM_MESSAGE(f.name));
+          if (!yes) continue;
+          decisions.set(f.name, "apply");
+          break;
+        }
+        decisions.set(f.name, "skip");
+        break;
+      }
       continue;
     }
     let applied = false;
