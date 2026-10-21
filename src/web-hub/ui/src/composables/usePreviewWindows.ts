@@ -177,7 +177,16 @@ export function usePreviewWindows(opts: UsePreviewOptions): PreviewHandle {
     windows.value = windows.value.filter((w) => w.id !== id);
     order.value = order.value.filter((x) => x !== id);
     history.dropWindow(id);
-    if (limitNotice.value !== null && windows.value.length < PREVIEW_WINDOW_MAX) limitNotice.value = null;
+    if (limitNotice.value !== null && windows.value.length < PREVIEW_WINDOW_MAX) {
+      limitNotice.value = null;
+      // disarm the 8 s TTL timer too: closing the noticed window (or any window at the cap)
+      // removes the notice, and the timer must not dangle until the TTL (closeAll already
+      // did this — rework nit #3).
+      if (noticeTimer !== null) {
+        clearTimeout(noticeTimer);
+        noticeTimer = null;
+      }
+    }
   }
 
   function closeAll(): void {

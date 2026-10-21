@@ -130,6 +130,26 @@ describe("logic/previewWindowGeom: resizeRect (§7.3 per-axis rules)", () => {
     expect(resizeRect(off(), "w", -2000, 0, VP)).toEqual({ x: -264, y: 400, w: 360, h: 300 });
     expect(resizeRect(off(), "w", 2000, 0, VP)).toEqual({ x: -264, y: 400, w: 360, h: 300 });
   });
+
+  it("min-edge drag with the OPPOSITE edge past the usable box: s.end−A keeps it fixed (P6)", () => {
+    // rework #1 (kami #1): right edge 1300 is 28px past the box — dragging the LEFT edge out
+    // must stop at s.end − AW = 36 so the width never exceeds AW; without the term the
+    // trailing P3 size clamp shoved the right edge 1300→1272 by non-P4 means.
+    const off: PreviewRect = { x: 700, y: 200, w: 600, h: 300 };
+    const r = resizeRect(off, "w", -1000, 0, VP);
+    expect(r).toEqual({ x: 36, y: 200, w: 1264, h: 300 });
+    expect(r.x + r.w).toBe(1300); // the opposite (right) edge is byte-fixed
+    assertP1toP4(r, VP);
+    // vertical twin: bottom edge 820 is past vh−EDGE = 792
+    const offY: PreviewRect = { x: 200, y: 500, w: 600, h: 320 };
+    const r2 = resizeRect(offY, "n", 0, -1000, VP);
+    expect(r2).toEqual({ x: 200, y: 36, w: 600, h: 784 });
+    expect(r2.y + r2.h).toBe(820);
+    assertP1toP4(r2, VP);
+    // a modest drag still respects the floor: the left edge cannot pass 36 even at dx = −10
+    const r3 = resizeRect(off, "w", -10, 0, VP);
+    expect(r3.x + r3.w).toBe(1300);
+  });
 });
 
 describe("logic/previewWindowGeom: cascadeRect (§7.3)", () => {
@@ -217,37 +237,40 @@ describe("logic/previewWindowGeom: property run (fixed seed, 1000×)", () => {
       const dir = pick(dirs);
       const dx = Math.floor((rng() - 0.5) * 1600);
       const dy = Math.floor((rng() - 0.5) * 1200);
-      // replicate the per-axis rules exactly (the spec) …
-      const b = {
-        mw: Math.min(MIN_W, Math.max(0, vp.vw - 2 * EDGE)),
-        mh: Math.min(MIN_H, Math.max(0, vp.vh - vp.top - 2 * EDGE)),
-      };
-      let px = r.x;
-      let py = r.y;
-      let pw = r.w;
-      let ph = r.h;
-      if (dir.includes("e")) pw = Math.max(Math.min(r.x + r.w + dx, vp.vw - EDGE), r.x + b.mw) - r.x;
-      if (dir.includes("w")) {
-        const left = Math.min(Math.max(r.x + dx, EDGE), r.x + r.w - b.mw);
-        pw = r.x + r.w - left;
-        px = left;
-      }
-      if (dir.includes("s")) ph = Math.max(Math.min(r.y + r.h + dy, vp.vh - EDGE), r.y + b.mh) - r.y;
-      if (dir.includes("n")) {
-        const top = Math.min(Math.max(r.y + dy, vp.top + EDGE), r.y + r.h - b.mh);
-        ph = r.y + r.h - top;
-        py = top;
-      }
-      const perAxis = { x: px, y: py, w: pw, h: ph };
+      const start = r;
       const final = resizeRect(r, dir, dx, dy, vp);
-      // … then the final x/y may differ from the per-axis values ONLY when clampRect's P4
-      // translation (evaluated with the size-clamped w/h) had to move that axis.
-      const fw = Math.min(Math.max(perAxis.w, b.mw), Math.max(0, vp.vw - 2 * EDGE));
-      const fh = Math.min(Math.max(perAxis.h, b.mh), Math.max(0, vp.vh - vp.top - 2 * EDGE));
-      const p4MovedX = perAxis.x < TITLE_KEEP_X - fw || perAxis.x > vp.vw - TITLE_KEEP_X;
-      const p4MovedY = perAxis.y < vp.top || perAxis.y > vp.vh - TITLE_H;
-      if (!p4MovedX) expect(final.x, `iter ${i} dir ${dir}`).toBe(perAxis.x);
-      if (!p4MovedY) expect(final.y, `iter ${i} dir ${dir}`).toBe(perAxis.y);
+      assertP1toP4(final, vp);
+      // P4's min(max(…)) moves an axis only by landing EXACTLY on one of its bounds, so a
+      // final coordinate STRICTLY inside the P4 window proves P4 never moved that axis — a
+      // detector built from the output + the constraint table alone, with NO replica of the
+      // implementation under test (rework #2: the old per-axis reference was circular).
+      const p4QuietX = final.x > TITLE_KEEP_X - final.w && final.x < vp.vw - TITLE_KEEP_X;
+      const p4QuietY = final.y > vp.top && final.y < vp.vh - TITLE_H;
+      if (p4QuietX) {
+        // the dragged edge may move; the OPPOSITE edge must stay byte-fixed on that axis
+        if (dir.includes("w")) {
+          expect(final.x + final.w, `iter ${i} dir ${dir}: right edge moved w/o P4`).toBe(start.x + start.w);
+        }
+        if (dir.includes("e")) {
+          expect(final.x, `iter ${i} dir ${dir}: left edge moved w/o P4`).toBe(start.x);
+        }
+        if (!dir.includes("w") && !dir.includes("e")) {
+          expect(final.x, `iter ${i} dir ${dir}: x moved w/o P4`).toBe(start.x);
+          expect(final.x + final.w, `iter ${i} dir ${dir}: w changed w/o P4`).toBe(start.x + start.w);
+        }
+      }
+      if (p4QuietY) {
+        if (dir.includes("n")) {
+          expect(final.y + final.h, `iter ${i} dir ${dir}: bottom edge moved w/o P4`).toBe(start.y + start.h);
+        }
+        if (dir.includes("s")) {
+          expect(final.y, `iter ${i} dir ${dir}: top edge moved w/o P4`).toBe(start.y);
+        }
+        if (!dir.includes("n") && !dir.includes("s")) {
+          expect(final.y, `iter ${i} dir ${dir}: y moved w/o P4`).toBe(start.y);
+          expect(final.y + final.h, `iter ${i} dir ${dir}: h changed w/o P4`).toBe(start.y + start.h);
+        }
+      }
       r = final;
       if (rng() < 0.2) {
         vp = vpOf(400 + Math.floor(rng() * 1521), 400 + Math.floor(rng() * 801), Math.floor(rng() * 121));

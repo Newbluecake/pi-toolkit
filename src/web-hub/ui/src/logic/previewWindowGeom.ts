@@ -113,13 +113,17 @@ export function moveRect(start: PreviewRect, dx: number, dy: number, vp: Preview
  * Per-axis resize (§7.3's normative rules), then the final `clampRect`.
  *
  * Dragging a MAX edge (right/bottom): the desired edge is `s.end + d`; `lo = s.start +
- * min-size` (P2), `hi = vpEnd − EDGE` (P5) — the desired edge clamps into `[lo, hi]`. Dragging
- * a MIN edge (left/top): the desired edge is `s.start + d`; `hi = s.end − min-size` (P2),
- * `lo = vpStart + EDGE` (P5). When P5 and P2 conflict (the interval would be empty — a
- * viewport narrower/shorter than the minimum) P2 wins: the window keeps its minimum size and
- * the dragged edge may cross the viewport margin. The opposite edge stays fixed throughout;
- * the trailing clampRect is the only step allowed to move it (a mostly-offscreen window
- * resizing back into view).
+ * min-size` (P2), `hi = vpEnd − EDGE` (P5) — the desired edge clamps into `[lo, hi]`. (The
+ * plan's `min(vpEnd−EDGE, s.start+A)` P3 term is enforced equivalently by the trailing
+ * `clampRect`: it shrinks the width while keeping `x`, so only the DRAGGED edge moves.)
+ * Dragging a MIN edge (left/top): the desired edge is `s.start + d`; `hi = s.end − min-size`
+ * (P2), `lo = min(hi, max(vpStart + EDGE, s.end − A))` (P5 + P3 — the dragged edge may not
+ * move so far out that the width would exceed `A`; without this term the trailing P3 size
+ * clamp would shove the OPPOSITE edge back inbounds by non-P4 means, violating P6). When P5
+ * and P2 conflict (the interval would be empty — a viewport narrower/shorter than the
+ * minimum) P2 wins: the window keeps its minimum size and the dragged edge may cross the
+ * viewport margin. The opposite edge stays fixed throughout; the trailing `clampRect` is
+ * the only step allowed to move it (a mostly-offscreen window resizing back into view).
  */
 export function resizeRect(
   start: PreviewRect,
@@ -139,9 +143,12 @@ export function resizeRect(
     w = right - start.x;
   }
   if (dir.includes("w")) {
-    const hi = start.x + start.w - b.mw;
-    const left = Math.min(Math.max(start.x + dx, EDGE), hi);
-    w = start.x + start.w - left;
+    const end = start.x + start.w;
+    const hi = end - b.mw;
+    // P5's wall AND P3's `s.end − AW` floor — see the doc comment above (P6 rework #1).
+    const lo = Math.min(hi, Math.max(EDGE, end - b.aw));
+    const left = Math.min(Math.max(start.x + dx, lo), hi);
+    w = end - left;
     x = left;
   }
   if (dir.includes("s")) {
@@ -150,9 +157,12 @@ export function resizeRect(
     h = bottom - start.y;
   }
   if (dir.includes("n")) {
-    const hi = start.y + start.h - b.mh;
-    const top = Math.min(Math.max(start.y + dy, vp.top + EDGE), hi);
-    h = start.y + start.h - top;
+    const end = start.y + start.h;
+    const hi = end - b.mh;
+    // P5's wall AND P3's `s.end − AH` floor — the vertical twin of the `w` branch.
+    const lo = Math.min(hi, Math.max(vp.top + EDGE, end - b.ah));
+    const top = Math.min(Math.max(start.y + dy, lo), hi);
+    h = end - top;
     y = top;
   }
   return clampRect({ x, y, w, h }, vp);
