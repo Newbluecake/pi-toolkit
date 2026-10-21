@@ -791,3 +791,8 @@ r2 对已拍板项的落实说明：P3 的 `StatusInfo.xs` 保留但降为纯展
 - P2 加入后默认接收模式：**wake**（可唤醒，受 RootWakeController 900s 与限额约束）。
 - P6 发现范围：**hub 上所有已加入会话**（同目录过滤作为可选参数）。
 - P3、P4、P5、P7、P8、P9、P10：**全部按推荐**。
+
+## §14 拍板结果（用户，2026-10-21）
+
+- N1：主机能力 `unknown` 时跨会话 `wake:true` **只投递**（`wakeDowngraded:"host_unverified"`），首次人类/web 输入观察到形状后才允许唤醒。
+- N2：接收方流式中**照常投递**，返回 `effect:"unknown", reason:"queued"`，工具说明勿重发。

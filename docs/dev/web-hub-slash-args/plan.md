@@ -265,3 +265,9 @@ createCommandComplete({
 - **D4 传输形态**：新帧对 + 独立路由，PROTO 1.2→1.3 (Recommended) / 复用 `cmd` 通道新增 `CmdOp:"complete"`（免 bump，但污染 ledger/ctl/CmdOp 各处 switch 并占用 16 在途账本）。
 - **D5 usage 启发式**：从第三方 description 里提取 `[..]/<..>` 形态作为 usage 提示 (Recommended，低危害、可误判时无提示) / 仅用手写表+builtin 表。
 - **D6 TUI 与 web 同时输入时**：不做互斥（补全只读）(Recommended) / 若 TUI 正在 `ui.custom` 弹窗则暂停 S-tui（需额外探测，复杂度高，不建议）。
+
+## §11 拍板结果（用户，2026-10-21）
+
+- D1：`webHub.commandComplete` 默认 **`"all"`**（含第三方命令，经 S-tui）。
+- D2：仅当用户已用 ↑↓ 显式选过候选时 Enter 应用候选，否则 Enter 仍是发送/执行。
+- D3–D6：**全部按推荐**（RPC 托管会话第三方补全接受降级并另提上游需求；新帧对 + 独立路由、PROTO 1.2→1.3；从 description 提取 `[..]/<..>` 作 usage；TUI 与 web 不互斥）。
