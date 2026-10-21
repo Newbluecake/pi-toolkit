@@ -92,7 +92,7 @@ const preview = {
   // preview-windows (W2, plan r2 §9): the multi-window modeless preview copy — window
   // title aria-label, the cap notice, the phone stack badge's screen-reader label, the
   // title-bar keyboard hint and the window menu.
-  windowLabel: "File preview: {name}",
+  windowLabel: "File preview: ",
   windowLimit: "Window limit ({n}) reached — opened in this window",
   windowStackLabel: "Window {i} of {n}",
   windowMoveHint:
@@ -100,7 +100,6 @@ const preview = {
   windowMenu: "Window actions",
   windowCloseAll: "Close all ({n})",
   windowResetGeom: "Reset position and size",
-  windowSwitchTo: "Switch to window",
   // preview-download (file download button in the dialog header — files only, never dirs)
   download: "Download",
   downloadFailed: "Download failed — retry.",

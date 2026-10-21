@@ -117,7 +117,10 @@ describe("PreviewWindow.vue — phases (fake face)", () => {
     expect(p.getAttribute("role")).toBe("dialog");
     expect(p.getAttribute("aria-modal")).toBe("false"); // desktop: NON-modal (§5.3)
     expect(p.getAttribute("aria-labelledby")).toBe("pw-title-1");
-    expect(document.getElementById("pw-title-1")!.textContent).toBe("a.ts");
+    expect(p.getAttribute("aria-label")).toBeNull(); // §5.3: labelledby ONLY — no competing label
+    const title = document.getElementById("pw-title-1")!;
+    expect(title.textContent).toContain("a.ts"); // the basename stays the visible title
+    expect(title.querySelector(".sr-only")).not.toBeNull(); // sr-only 「文件预览：」prefix (§5.3)
     expect(p.getAttribute("aria-describedby")).toBe("pw-hint-1");
     expect(document.querySelector(".preview-path")!.textContent).toBe("/p/src/a.ts");
     expect(document.querySelector(".preview-loading")!.getAttribute("role")).toBe("status");

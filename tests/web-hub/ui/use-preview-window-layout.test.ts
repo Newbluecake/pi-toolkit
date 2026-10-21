@@ -249,6 +249,19 @@ describe("usePreviewWindowLayout — gesture controller (§7.4, 评审 #8)", () 
     expect(Number.parseFloat(sized["--pw-w"]!)).toBeLessThanOrEqual(380 - 16);
   });
 
+  it("keyResize: negative deltas shrink the SE edge — the handle never flips to NW", () => {
+    const r = makeRig();
+    r.layout.ensureRect(1, null);
+    const before = r.layout.varsOf(1);
+    r.layout.keyResize(1, -16, -16);
+    const after = r.layout.varsOf(1);
+    // only the right/bottom edges moved: x/y stay, w/h each lose 16
+    expect(after["--pw-x"]).toBe(before["--pw-x"]);
+    expect(after["--pw-y"]).toBe(before["--pw-y"]);
+    expect(Number.parseFloat(after["--pw-w"]!)).toBeCloseTo(Number.parseFloat(before["--pw-w"]!) - 16, 1);
+    expect(Number.parseFloat(after["--pw-h"]!)).toBeCloseTo(Number.parseFloat(before["--pw-h"]!) - 16, 1);
+  });
+
   it("resetRect recenters to the default placement; dispose ends any gesture", () => {
     const r = makeRig({ captureThrows: true });
     r.layout.ensureRect(1, null);

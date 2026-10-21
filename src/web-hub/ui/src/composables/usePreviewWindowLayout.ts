@@ -156,10 +156,12 @@ export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
     if (r !== undefined) r.value = moveRect(r.value, dx, dy, vp());
   }
 
-  /** §5.5 keyboard equivalents: Shift+arrows resize the right/bottom edge by 16px, clamped. */
+  /** §5.5 keyboard equivalents: Shift+arrows resize the right/bottom edge by 16px, clamped.
+   *  The handle is UNCONDITIONALLY "se" — a negative delta shrinks the same right/bottom
+   *  edge (Shift+← pulls the right edge LEFT); it never flips to the NW handle. */
   function keyResize(id: number, dx: number, dy: number): void {
     const r = rects.get(id);
-    if (r !== undefined) r.value = resizeRect(r.value, dx < 0 || dy < 0 ? "nw" : "se", dx, dy, vp());
+    if (r !== undefined) r.value = resizeRect(r.value, "se", dx, dy, vp());
   }
 
   // --- gesture lifecycle --------------------------------------------------------------------

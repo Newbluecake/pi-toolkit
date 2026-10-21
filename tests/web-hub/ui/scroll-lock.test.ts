@@ -6,6 +6,7 @@ import PickerSheet from "../../../src/web-hub/ui/src/components/control/PickerSh
 import PreviewHost from "../../../src/web-hub/ui/src/components/preview/PreviewHost.vue";
 import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
 import { acquireBodyScrollLock, resetBodyScrollLock } from "../../../src/web-hub/ui/src/composables/useScrollLock.js";
+import type { PreviewView } from "../../../src/web-hub/ui/src/types.js";
 import { fakeWindowHandle, fakeWindowsFace } from "./helpers/preview-windows-fake.js";
 
 /**

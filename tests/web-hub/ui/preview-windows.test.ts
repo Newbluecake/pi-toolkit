@@ -282,7 +282,9 @@ describe("preview windows — desktop (real manager)", () => {
     expect(header.getAttribute("tabindex")).toBe("0");
     header.focus();
     const x0 = cssVar(sec, "--pw-x");
+    const y0 = cssVar(sec, "--pw-y");
     const w0 = cssVar(sec, "--pw-w");
+    const h0 = cssVar(sec, "--pw-h");
     header.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
     await tick();
     expect(cssVar(sec, "--pw-x")).toBeCloseTo(x0 - 16, 0);
@@ -291,6 +293,20 @@ describe("preview windows — desktop (real manager)", () => {
     );
     await tick();
     expect(cssVar(sec, "--pw-w")).toBeCloseTo(w0 + 16, 0);
+    // negative deltas shrink the SAME right/bottom edge (verify:W2 rework — the handle is
+    // unconditionally "se", so Shift+← pulls the right edge LEFT; x never moves)
+    header.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowLeft", shiftKey: true, bubbles: true, cancelable: true }),
+    );
+    await tick();
+    expect(cssVar(sec, "--pw-w")).toBeCloseTo(w0, 0);
+    expect(cssVar(sec, "--pw-x")).toBeCloseTo(x0 - 16, 0); // x moved only via the earlier plain ←
+    header.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowUp", shiftKey: true, bubbles: true, cancelable: true }),
+    );
+    await tick();
+    expect(cssVar(sec, "--pw-h")).toBeCloseTo(h0 - 16, 0);
+    expect(cssVar(sec, "--pw-y")).toBeCloseTo(y0, 0);
     // clamped: a huge left move keeps the title bar reachable (P4)
     for (let i = 0; i < 200; i++)
       header.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));

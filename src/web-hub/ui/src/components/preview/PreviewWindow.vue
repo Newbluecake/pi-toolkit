@@ -250,7 +250,6 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
     :aria-modal="ariaModal"
     :aria-labelledby="titleId"
     :aria-describedby="hintId"
-    :aria-label="t('preview.windowLabel', { name: basename })"
     tabindex="-1"
   >
     <header
@@ -286,7 +285,13 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
         </button>
       </nav>
       <AppIcon :name="isDirPhase ? 'folder' : 'file'" class="icon-sm preview-header-icon" />
-      <span :id="titleId" class="preview-title" translate="no">{{ basename }}</span>
+      <!-- §5.3: the panel's accessible name comes from THIS element (aria-labelledby — no
+           competing aria-label on the panel). The sr-only prefix makes the label read
+           「文件预览：a.md」 while the visible title stays just the basename. -->
+      <span :id="titleId" class="preview-title" translate="no"
+        ><span class="sr-only">{{ t("preview.windowLabel") }}</span
+        >{{ basename }}</span
+      >
       <!-- §6.1: the phone stack badge (compact English token; the screen-reader label carries
            the localized sentence). -->
       <span
