@@ -136,6 +136,13 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("pi-hud-refresh", "", "extension").policy).toBe("allow");
   });
 
+  it("/title: no-args/status allow (read-only report), auto confirms (session write)", () => {
+    expect(resolve("title", "", "extension").policy).toBe("allow");
+    expect(resolve("title", "status", "extension").policy).toBe("allow");
+    expect(resolve("title", "auto", "extension").policy).toBe("confirm");
+    expect(resolve("title", "anything-else", "extension").policy).toBe("confirm");
+  });
+
   it("/clear always confirms (session-nav alias for /new)", () => {
     expect(resolve("clear", "", "extension").policy).toBe("confirm");
   });

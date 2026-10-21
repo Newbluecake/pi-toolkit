@@ -191,6 +191,13 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   "pi-hud-refresh"() {
     return { policy: "allow" };
   },
+  // /title [status] → read-only report. `auto` appends a title-ownership record (session write)
+  // and arms a forced refresh → same confirm class as other session mutations (mirrors /name's
+  // allow-with-args on the builtin bridge, but this one goes through the extension table).
+  title(tokens) {
+    const sub = tokens[0];
+    return { policy: sub === undefined || sub === "status" ? "allow" : "confirm" };
+  },
   // /clear is session-nav's alias for /new (same confirm as the builtin row).
   clear() {
     return { policy: "confirm" };

@@ -1034,18 +1034,20 @@ export default function activate(rawPi: ExtensionAPI): void {
   // Session navigation: main-session TUI only (custom editor, session picker).
   // Post-guard like the HUD; self-gates the editor install on ctx.mode.
   if (settings.sessionNav.enabled) wireSessionNav(pi);
-  // 会话标题模型生成 v2（任务 #12 + 随任务动态刷新）：post-guard = 仅主会话（TUI+RPC+json；子会话
-  // print 模式在 HOST_KEY 早退，结构上不可达）；wireTitle 再自查 isChildSession 作双保险。
-  // 失败静默、在途互斥、过期结果隔离、所有权判定均由模块不变量保证。
-  if (settings.title.enabled)
-    wireTitle(pi, {
-      isChildSession,
-      model: settings.title.model,
-      refreshEveryInputs: settings.title.refreshEveryInputs,
-      refreshAfterMinutes: settings.title.refreshAfterMinutes,
-      refreshWindowMinutes: settings.title.refreshWindowMinutes,
-      maxRefreshes: settings.title.maxRefreshes,
-    });
+  // 会话标题模型生成 v2（任务 #12 + 随任务动态刷新）+ /title 命令：post-guard = 仅主会话
+  // （TUI+RPC+json；子会话 print 模式在 HOST_KEY 早退，结构上不可达）；wireTitle 再自查
+  // isChildSession 作双保险。title.enabled=false 时不接任何事件钩子（与旧行为逐字节一致），
+  // 但 /title 命令始终注册（auto 如实拒绝、status 标注已禁用）。失败静默、在途互斥、过期
+  // 结果隔离、所有权判定均由模块不变量保证。
+  wireTitle(pi, {
+    isChildSession,
+    enabled: settings.title.enabled,
+    model: settings.title.model,
+    refreshEveryInputs: settings.title.refreshEveryInputs,
+    refreshAfterMinutes: settings.title.refreshAfterMinutes,
+    refreshWindowMinutes: settings.title.refreshWindowMinutes,
+    maxRefreshes: settings.title.maxRefreshes,
+  });
   // Deferred /reload: main-session only (post-guard). MUST be wired after
   // wireSessionNav — pi dispatches session_start handlers in registration
   // order, and this one's editor install reads getEditorComponent() to wrap
