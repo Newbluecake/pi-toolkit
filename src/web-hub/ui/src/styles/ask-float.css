@@ -8,6 +8,9 @@
  * ══ APP-WIDE STACKING TIERS (the single canonical table — verifier round 3, 2026-10-20) ══
  *   5   transient FABs (fleet button)
  *  20   in-flow chrome above the transcript (dock, phone `.ask-anchor`, mid-band composer)
+ *  25   desktop preview windows (`.preview-overlay.is-windows.is-modeless`, preview-windows
+ *       plan §5.1 — non-modal, pointer-transparent root; each window is a dialog at z25,
+ *       BELOW every user-invoked temporary layer and modal, ABOVE the conversation)
  *  30   drawer scrims/overlay + anchored popover cards (history/load/quota/version/model
  *       notes, spawn dir list, mid-band scrim)
  *  40   drawers (fleet fullscreen, mid-band agents drawer) + nsmenu dropdown
@@ -15,7 +18,8 @@
  *  50   modal-ish sheets/panels: picker scrim, spawn scrim, settings panel, ctx-ring panels,
  *       back-to-top button
  *  55   `.model-panel--fixed` (must top the settings panel it opens from)
- *  60   real modals: preview overlay, diff dialog, proxy preview
+ *  60   real modals: preview overlay (AttachmentImagePreview + the phone full-screen window
+ *       stack), diff dialog, proxy preview
  *  70   above-modals: privacy unmark, proxy dialog, upload lightbox
  * When you add a layer, pick a tier here and update this table — do not invent local values.
  */

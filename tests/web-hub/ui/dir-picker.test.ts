@@ -500,6 +500,19 @@ describe("DirPicker.vue — document-level keydown (a11y fix)", () => {
     expect(wrapper.emitted("close")).toHaveLength(1);
   });
 
+  it("a MODELESS preview-window root (preview-windows §5.2 W3) never blocks the picker, even mounted later", async () => {
+    const h = harness({ start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }) });
+    const wrapper = mountPicker(h, { prefillCwd: "/home/u/proj" });
+    await flushPromises();
+    // the desktop window stack's root — `:not(.is-modeless)` keeps it OUT of the topmost
+    // decision, so Escape still belongs to the topmost MODAL overlay: this picker.
+    const overlay = document.createElement("div");
+    overlay.className = "preview-overlay is-windows is-modeless";
+    document.body.appendChild(overlay);
+    await keydown(document.body, { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+  });
+
   it("Tab on document.body (focus fell out) wraps focus back into the dialog", async () => {
     const h = harness({ start: async () => ({ ok: false, error: "E_UNSUPPORTED", retryable: false }) });
     mountPicker(h, { prefillCwd: "/home/u/proj" });

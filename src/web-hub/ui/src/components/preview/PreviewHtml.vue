@@ -27,6 +27,14 @@
   `@load` hides the spinner; > 10 s without it ⇒ 「仍在加载…」. A standing note explains the
   sandbox boundary. Deliberately NO `window` `message` listener exists in this component
   (T-U1 pins it): the framed page is untrusted and nothing it postMessages is ever read.
+
+  Eviction ledger (preview-windows plan §8.2, W3): the hub's per-login 8-cap FIFO can evict
+  THIS cap silently (other windows' mints in the same tab — or other tabs). When the host
+  provides `PREVIEW_HTML_LEDGER` (PreviewHost's provide), every successful mint is recorded
+  and a later mint that displaces THIS token flips a `role="status"` 「可能已被挤掉」 notice;
+  absent ⇒ byte-identical pre-W3 behavior. The 「重新加载」 button in the toolbar is STANDING
+  (§8.2-3): re-minting mints a fresh token, which clears the notice. `maybeStale` keeps only
+  its hint text; the `expired` banner keeps its own button.
 -->
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
@@ -34,6 +42,7 @@ import { PV_SANDBOX } from "@protocol/preview-html.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { HUB_CTX } from "../control/controlContext.js";
+import { PREVIEW_HTML_LEDGER } from "./previewHtmlLedger.js";
 
 const props = defineProps<{
   readonly agentKey: string;
@@ -46,6 +55,7 @@ const emit = defineEmits<{
 }>();
 
 const hub = inject(HUB_CTX, null);
+const ledger = inject(PREVIEW_HTML_LEDGER, null);
 const { t } = useI18n();
 
 type Cap = {
@@ -75,6 +85,13 @@ const frameTitle = computed(() => {
   const p = props.path;
   const slash = p.lastIndexOf("/");
   return slash >= 0 && slash < p.length - 1 ? p.slice(slash + 1) : p;
+});
+
+/** §8.2: the tab-local FIFO simulation flags this cap's token as displaced. Reactive via the
+ *  wrapper's version ref — a later mint elsewhere flips this without any local timer. */
+const evictedHint = computed(() => {
+  const c = cap.value;
+  return ledger !== null && c !== null && ledger.isEvicted(c.url);
 });
 
 /** §5: mint errors the UI should offer a retry for (the same table as the dialog's error phase). */
@@ -146,6 +163,7 @@ async function mint(): Promise<void> {
     if (mySeq !== seq) return; // a later mint/reload superseded this answer
     if (out.ok) {
       cap.value = { url: out.url, openUrl: out.openUrl, idleMs: out.idleMs, hardRemainingMs: out.hardRemainingMs };
+      ledger?.minted(out.url); // the cap URL is the token — unique per mint
       frameKey.value++; // force a FRESH iframe element for the new cap's url
       phase.value = "ready";
       armTtl(cap.value);
@@ -180,6 +198,7 @@ onMounted(() => void mint());
 onBeforeUnmount(() => {
   seq++; // invalidate any in-flight mint's state writes
   controller?.abort();
+  if (cap.value !== null) ledger?.unmounted(cap.value.url); // §8.2: slot still occupies
   clearTtlTimers();
   clearSlowTimer();
 });
@@ -195,16 +214,12 @@ onBeforeUnmount(() => {
         <span v-if="maybeStale && !expired" class="preview-html-stale" role="status">{{
           t("preview.htmlMaybeStale")
         }}</span>
-        <button
-          v-if="maybeStale && !expired"
-          type="button"
-          class="preview-toggle-btn preview-html-reload"
-          :disabled="busy"
-          @click="mint"
-        >
+        <!-- §8.2-3: STANDING reload — the eviction notice's deterministic recovery entry. -->
+        <button type="button" class="preview-toggle-btn preview-html-reload" :disabled="busy" @click="mint">
           {{ t("preview.htmlReload") }}
         </button>
       </div>
+      <p v-if="evictedHint" class="preview-html-note" role="status">{{ t("preview.htmlMaybeEvicted") }}</p>
       <p v-if="expired" class="preview-html-expired" role="alert">
         <span>{{ t("preview.htmlExpired") }}</span>
         <button type="button" class="preview-toggle-btn preview-html-reload" :disabled="busy" @click="mint">

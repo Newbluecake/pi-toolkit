@@ -111,6 +111,9 @@ const preview = {
   htmlMaybeStale: "The preview may have expired — refresh if the page fails to load.",
   htmlExpired: "The link has expired — reload to keep viewing.",
   htmlReload: "Reload",
+  // preview-windows plan §8.2 (W3): tab-local FIFO eviction notice for the HTML cap.
+  htmlMaybeEvicted:
+    'This page\'s access token may have been displaced by a newer HTML preview (8 per login). If links or resources fail to load, click "Reload".',
   htmlLoadingSlow: "Still loading…",
   htmlNote: "Page scripts run sandboxed: external network and files in this directory are reachable; the hub is not.",
   htmlMintFailed: "Rendered preview unavailable ({code}) — showing source instead.",

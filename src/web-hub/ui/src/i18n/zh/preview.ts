@@ -113,6 +113,9 @@ const preview = {
   htmlMaybeStale: "预览可能已过期 — 页面若加载失败，可刷新。",
   htmlExpired: "链接已过期，刷新以继续加载。",
   htmlReload: "重新加载",
+  // preview-windows plan §8.2 (W3): tab-local FIFO eviction notice for the HTML cap.
+  htmlMaybeEvicted:
+    "这个页面的访问凭据可能已被后来打开的 HTML 预览挤掉（同一登录最多保留 8 个）。页面里的链接或资源加载失败时，点「重新加载」。",
   htmlLoadingSlow: "仍在加载…",
   htmlNote: "页面脚本在沙箱中运行，可访问外网与本目录文件，无法访问 hub。",
   htmlMintFailed: "无法建立渲染预览（{code}）——已切换为源码显示。",
