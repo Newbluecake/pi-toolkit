@@ -211,3 +211,50 @@ describe("wireWebHub ⇒ activate() assembly wiring (todo #32 P0 fix #2)", () =>
     expect(handler).toHaveBeenCalledWith("hello", ctx); // and (still, C0 fast path) runs plainly
   });
 });
+
+describe("wrapCommandApi — argCompleters capture (web-hub-slash-args §4.4, P1)", () => {
+  it("records the RAW getArgumentCompletions at registerCommand time, by name", () => {
+    const api = fakeApi();
+    const completer = (prefix: string) => [{ value: prefix, label: prefix }];
+    const owned = new Set<string>();
+    const completers = new Map<string, unknown>();
+    const wrapped = wrapCommandApi(api, () => undefined, owned, completers as Map<string, never>);
+    wrapped.registerCommand("mem", {
+      description: "d",
+      getArgumentCompletions: completer,
+      handler: async () => undefined,
+    });
+    expect(completers.get("mem")).toBe(completer); // the exact function object, never a wrapper
+    expect(owned.has("mem")).toBe(true); // ownedNames behavior unchanged (§4.4)
+  });
+
+  it("commands without getArgumentCompletions are not recorded (no placeholder entries)", () => {
+    const api = fakeApi();
+    const completers = new Map<string, unknown>();
+    const wrapped = wrapCommandApi(api, () => undefined, undefined, completers as Map<string, never>);
+    wrapped.registerCommand("plain", { description: "d", handler: async () => undefined });
+    expect(completers.size).toBe(0);
+  });
+
+  it("no argCompleters handed in ⇒ registration is still byte-identical (optional param)", () => {
+    const api = fakeApi();
+    const wrapped = wrapCommandApi(api, () => undefined);
+    const r = wrapped.registerCommand("plain", {
+      description: "d",
+      getArgumentCompletions: () => null,
+      handler: async () => undefined,
+    });
+    expect(r).toBe("registered:plain");
+  });
+
+  it("a later same-name registration overwrites the earlier completer (last registration wins)", () => {
+    const api = fakeApi();
+    const first = () => null;
+    const second = () => [{ value: "x", label: "x" }];
+    const completers = new Map<string, unknown>();
+    const wrapped = wrapCommandApi(api, () => undefined, undefined, completers as Map<string, never>);
+    wrapped.registerCommand("cmd", { handler: async () => undefined, getArgumentCompletions: first });
+    wrapped.registerCommand("cmd", { handler: async () => undefined, getArgumentCompletions: second });
+    expect(completers.get("cmd")).toBe(second);
+  });
+});

@@ -88,6 +88,7 @@ import { agentTypesSection, availableModelsSection } from "./sysprompt/core-sect
 import { wireHud } from "./hud/index.js";
 import wireAskUser from "./ask-user/index.js";
 import { wrapCommandApi, type CommandCapturePort } from "./web-hub/agent/command-capture.js";
+import type { ArgCompleter } from "./web-hub/agent/command-complete.js";
 import wireFeishuNotify from "./feishu-notify/index.js";
 import { wireSessionNav } from "./session-nav/index.js";
 import { wireTitle } from "./title/index.js";
@@ -127,7 +128,13 @@ export default function activate(rawPi: ExtensionAPI): void {
   // below by the same object reference, so `owns()`/`settleArm()` see every name registered so far
   // with no backfill step (see `command-capture.ts`'s doc comment above `createCommandCaptureEngine`).
   const ownedCommandNames = new Set<string>();
-  const pi = wrapCommandApi(rawPi, () => commandCaptureRef.current, ownedCommandNames);
+  // web-hub-slash-args plan §4.4 (P1): same by-reference pattern as `ownedCommandNames` above —
+  // every toolkit command's RAW `getArgumentCompletions`, recorded by `wrapCommandApi`'s
+  // registerCommand proxy at real registration time (long before web-hub wiring runs) and
+  // read by the S-own completion source (`agent/command-complete.ts`) through the wireWebHub
+  // deps. Created once per activate; NEVER module-scope (the /reload invariant).
+  const argCompleters = new Map<string, ArgCompleter>();
+  const pi = wrapCommandApi(rawPi, () => commandCaptureRef.current, ownedCommandNames, argCompleters);
   // Merged plugins (plugin-merge) that must stay available in EVERY session,
   // child subagent sessions included — they register BEFORE the HOST_KEY
   // guard below. Settings here come from the read-only loader: the full
@@ -1092,6 +1099,9 @@ export default function activate(rawPi: ExtensionAPI): void {
         }),
       askUserEnabled: () => settings.askUser.enabled,
       ownedCommandNames,
+      // web-hub-slash-args plan §4.4 (P1): S-own completion source (see the creation site
+      // near `ownedCommandNames` above).
+      argCompleters,
       // todo-web plan §3.3 (T3): live todo closure for StatusInfo.todo (both gates
       // already implicit — this block only runs with webHub.enabled, and todoWiring
       // only exists with todo.enabled).

@@ -16,8 +16,10 @@ import {
   TIMING,
   type AgentFrame,
   type CmdFrame,
+  type CommandsFrame,
   type SessionInfo,
 } from "../../../src/web-hub/protocol/messages.js";
+import { stripCommandArgs } from "../../../src/web-hub/agent/slash.js";
 import { SUPERSEDE_YIELD_MS } from "../../../src/web-hub/hub/supersede.js";
 import { writeStopMarkerSync } from "../../../src/web-hub/protocol/stop-marker.js";
 import { MAX_FRAME_BYTES } from "../../../src/web-hub/protocol/ndjson.js";
@@ -889,5 +891,161 @@ describe("run frame routing (fleet-drawer §4.3, F2)", () => {
     sock().hub({ t: "run_tx_req", rid: "r1", runId: "r_ABCDEFGH", limit: 200, maxBytes: 1024 });
     sock().hub({ t: "run_watch", runId: "r_ABCDEFGH", on: false });
     expect(conn.status().state).toBe("live");
+  });
+});
+
+describe("complete_req routing + commands-slot flush (web-hub-slash-args §4.1/§4.3, P1; r1 评审 #1)", () => {
+  const COMPLETE_REQ = {
+    t: "complete_req",
+    rid: "cr-1",
+    name: "webhub",
+    prefix: "pa",
+    deadlineMs: 2000,
+    origin: { listener: "loopback" },
+  } as const;
+
+  it("a complete_req reaches binding.onCompleteReq while live", () => {
+    const { conn, sock } = liveFake();
+    const got: unknown[] = [];
+    conn.attach(
+      {
+        onSnapshotReq: () => undefined,
+        onBranchReq: () => undefined,
+        onStateChange: () => undefined,
+        onCompleteReq: (frame) => got.push(frame),
+      },
+      SESSION,
+    );
+    sock().hub(COMPLETE_REQ);
+    expect(got).toEqual([COMPLETE_REQ]);
+  });
+
+  it("a complete_req on a non-live link is dropped silently; a binding without the hook ignores it (no crash, no reply)", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(
+      { onSnapshotReq: () => undefined, onBranchReq: () => undefined, onStateChange: () => undefined },
+      SESSION,
+    );
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    s.hub(ackFrame());
+    // live, but no onCompleteReq hook:
+    expect(() => s.hub(COMPLETE_REQ)).not.toThrow();
+    expect(s.frames().some((f) => f.t === "complete_reply")).toBe(false);
+    // dead socket after teardown: nothing reaches a binding that HAS the hook
+    const got: unknown[] = [];
+    conn.attach(
+      {
+        onSnapshotReq: () => undefined,
+        onBranchReq: () => undefined,
+        onStateChange: () => undefined,
+        onCompleteReq: (frame) => got.push(frame),
+      },
+      SESSION,
+    );
+    s.fail("EPIPE");
+    expect(conn.status().state).toBe("backoff");
+    s.hub(COMPLETE_REQ);
+    expect(got).toEqual([]);
+  });
+
+  /** The stored `commands` frame always carries `args` (r1 #1 ①); the flush transform (②)
+   *  decides per CURRENT hello_ack.caps. */
+  const commandsFrameWithArgs = (): CommandsFrame => ({
+    t: "commands",
+    epoch: "e1",
+    items: [
+      { name: "agent", kind: "extension", policy: "allow", args: { usage: "status | costs", complete: true } },
+      { name: "quit", kind: "builtin", policy: "deny" },
+    ],
+  });
+  const stripFlush = (frame: AgentFrame, hubCaps: readonly string[]): AgentFrame =>
+    hubCaps.includes("cmd.args.v1") ? frame : stripCommandArgs(frame as CommandsFrame);
+
+  it("r1 #1 mandated A: hello_ack arrives AFTER the first publish — the flushed frame KEEPS args when the hub carries cmd.args.v1", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(
+      { onSnapshotReq: () => undefined, onBranchReq: () => undefined, onStateChange: () => undefined },
+      SESSION,
+    );
+    // pre-hello_ack publish (connectWith's synchronous publishCommands): stored, not written
+    conn.setSlot("commands", commandsFrameWithArgs(), stripFlush);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    expect(s.frames().some((f) => f.t === "commands")).toBe(false);
+    s.hub(ackFrame("k-late", 4242, ["command.v1", "cmd.args.v1"]));
+    const replayed = s.frames().find((f) => f.t === "commands") as CommandsFrame;
+    expect(replayed).toBeDefined();
+    expect(replayed.items[0]).toMatchObject({ args: { usage: "status | costs", complete: true } });
+  });
+
+  it("r1 #1 mandated B: a hub WITHOUT the cap gets a flushed frame with NO args (closed-schema frame drop prevented)", () => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(
+      { onSnapshotReq: () => undefined, onBranchReq: () => undefined, onStateChange: () => undefined },
+      SESSION,
+    );
+    conn.setSlot("commands", commandsFrameWithArgs(), stripFlush);
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    s.hub(ackFrame("k-old", 4242, ["command.v1"]));
+    const replayed = s.frames().find((f) => f.t === "commands") as CommandsFrame;
+    expect(replayed.items.every((i) => i.args === undefined)).toBe(true);
+    expect(replayed.items[0]).toMatchObject({ name: "agent", kind: "extension", policy: "allow" });
+  });
+
+  it("r1 #1 ③: hello_ack fires onHubCaps with the fresh caps (republish signal), on every (re)connect", () => {
+    vi.useFakeTimers();
+    const seen: string[][] = [];
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(
+      {
+        onSnapshotReq: () => undefined,
+        onBranchReq: () => undefined,
+        onStateChange: () => undefined,
+        onHubCaps: (caps) => seen.push([...caps]),
+      },
+      SESSION,
+    );
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    s.hub(ackFrame("k1", 4242, ["command.v1", "cmd.args.v1"]));
+    expect(seen).toEqual([["command.v1", "cmd.args.v1"]]);
+    // downgrade reconnect: hub lost the cap — binding still hears the NEW caps
+    s.fail("EPIPE");
+    vi.advanceTimersByTime(1_000); // backoff (500ms ± 0 with random 0.5)
+    const s2 = n.sockets[1]!;
+    s2.emit("connect");
+    s2.hub(ackFrame("k2", 4242, ["command.v1"]));
+    expect(seen).toEqual([["command.v1", "cmd.args.v1"], ["command.v1"]]);
+  });
+
+  it("a live setSlot re-publish strips per the CURRENT caps (hub downgrade after reconnect)", () => {
+    vi.useFakeTimers();
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    conn.attach(
+      { onSnapshotReq: () => undefined, onBranchReq: () => undefined, onStateChange: () => undefined },
+      SESSION,
+    );
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    s.hub(ackFrame("k1", 4242, ["command.v1", "cmd.args.v1"]));
+    // live publish under the cap ⇒ args survive
+    conn.setSlot("commands", commandsFrameWithArgs(), stripFlush);
+    let written = s.frames().filter((f) => f.t === "commands") as CommandsFrame[];
+    expect(written.at(-1)!.items[0]!.args).toBeDefined();
+    // downgrade reconnect ⇒ same stored slot flushes WITHOUT args
+    s.fail("EPIPE");
+    vi.advanceTimersByTime(1_000); // backoff
+    const s2 = n.sockets[1]!;
+    s2.emit("connect");
+    s2.hub(ackFrame("k2", 4242, ["command.v1"]));
+    written = s2.frames().filter((f) => f.t === "commands") as CommandsFrame[];
+    expect(written.at(-1)!.items.every((i) => i.args === undefined)).toBe(true);
   });
 });

@@ -4,6 +4,7 @@ import type {
   ExtensionUIContext,
   RegisteredCommand,
 } from "@earendil-works/pi-coding-agent";
+import type { ArgCompleter } from "./command-complete.js";
 import type { CmdOrigin, CommandOutputEntry, CommandOutputWire } from "../protocol/messages.js";
 
 export interface CaptureInvocation {
@@ -54,8 +55,10 @@ const FALLBACK_TTL_MS = 5_000;
  * windows never grow unbounded; FIFO-evicted, oldest first. */
 const MAX_RETAINED_WINDOWS = 64;
 
-/** Strip ANSI CSI/OSC sequences, then any other C0 control byte except `\n`/`\t` (§4.9 point 8). */
-function sanitizeText(raw: string): string {
+/** Strip ANSI CSI/OSC sequences, then any other C0 control byte except `\n`/`\t` (§4.9 point 8).
+ * web-hub-slash-args plan §4.3 #6 (P1): also the shared sanitizer for completion items and
+ * usage lines — exported for `command-complete.ts`/`command-usage.ts`. */
+export function sanitizeText(raw: string): string {
   const noOsc = raw.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
   const noCsi = noOsc.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
   const noOtherEsc = noCsi.replace(/\x1b[@-Z\\-_]/g, "");
@@ -436,17 +439,19 @@ async function runCaptured(
  * degrades to a plain `Reflect.apply`/`Reflect.get` passthrough with `this`
  * bound to `target` \u2014 byte-identical behavior to the unwrapped `pi`.
  *
- * C12: when a capture *is* wired and `take(name, args)` actually claims this invocation (§4.9
- * point 3 — the web dispatcher armed it first), the real handler runs with a captured `ctx` (§4.9
- * point 4/5) instead of the original one, and `finish` is called once its Promise settles. Every
- * other case (`getCapture()` undefined, or `take()` returns undefined because this specific
- * invocation was never claimed — e.g. a human typing the same command on the terminal) is the
- * exact original passthrough, unchanged.
+ * web-hub-slash-args plan §4.4 (P1): the optional 4th parameter is the same
+ * by-reference `Map<string, ArgCompleter>` `src/index.ts` creates once per
+ * `activate()` and hands to the web-hub wiring (the `ownedNames` pattern,
+ * verbatim). The proxy records each command's RAW `getArgumentCompletions`
+ * function at real registration time — never a wrapped handler — so S-own
+ * completion calls the exact function pi itself would call. No such field ⇒ no
+ * entry; `ownedNames` behavior is untouched by this parameter.
  */
 export function wrapCommandApi<T extends ExtensionAPI>(
   pi: T,
   getCapture: () => CommandCapturePort | undefined,
   ownedNames?: Set<string>,
+  argCompleters?: Map<string, ArgCompleter>,
 ): T {
   return new Proxy(pi, {
     get(target, property) {
@@ -464,6 +469,11 @@ export function wrapCommandApi<T extends ExtensionAPI>(
         command: Omit<RegisteredCommand, "name" | "sourceInfo">,
       ): unknown {
         ownedNames?.add(name);
+        // §4.4: capture the RAW completer (typed loosely — pi's exact signature lives in
+        // command-complete.ts's ArgCompleter; the structural shapes agree).
+        if (typeof command.getArgumentCompletions === "function") {
+          argCompleters?.set(name, command.getArgumentCompletions as ArgCompleter);
+        }
         const handler = command.handler;
         if (typeof handler !== "function") return Reflect.apply(register, target, [name, command]);
         const wrapped = {

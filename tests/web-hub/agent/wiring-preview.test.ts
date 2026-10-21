@@ -66,7 +66,9 @@ async function hubConfigFor(settings: WebHubSettings): Promise<Record<string, un
   return JSON.parse(env.PI_WEBHUB_CONFIG) as Record<string, unknown>;
 }
 
-/** The byte-exact pre-preview hub config for this fixture (what the off case must deep-equal). */
+/** The byte-exact pre-preview hub config for this fixture (what the off case must deep-equal).
+ *  web-hub-slash-args §5 (P1): the baseline legitimately carries `cmdArgs:"all"` now —
+ *  `webHub.commandComplete` defaults to "all" and control/webCommands are on in this fixture. */
 function baselineConfig(): Record<string, unknown> {
   return {
     v: 1,
@@ -76,10 +78,11 @@ function baselineConfig(): Record<string, unknown> {
     pluginVersion: "1.2.3",
     buildId: "1.2.3@test",
     launcher: [process.execPath, "/nonexistent/pi"],
+    cmdArgs: "all",
   };
 }
 
-const BASELINE_KEYS = ["buildId", "home", "idleExitMinutes", "launcher", "pluginVersion", "port", "v"];
+const BASELINE_KEYS = ["buildId", "cmdArgs", "home", "idleExitMinutes", "launcher", "pluginVersion", "port", "v"];
 
 describe("wireWebHub — preview config (plan PV1: default on ⇒ exactly one extra key; off ⇒ pre-preview deep-equal)", () => {
   it('default settings (no preview key) ⇒ PI_WEBHUB_CONFIG deep-equals baseline + exactly one extra key preview:"on"', async () => {

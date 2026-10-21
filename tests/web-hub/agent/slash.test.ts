@@ -7,8 +7,10 @@ import {
   classifyCommand,
   listSlashCommands,
   parseSlashCommand,
+  stripCommandArgs,
   type CommandsPort,
 } from "../../../src/web-hub/agent/slash.js";
+import type { CommandsFrame } from "../../../src/web-hub/protocol/messages.js";
 
 describe("parseSlashCommand / buildSlashText", () => {
   it("splits name and args, defaulting args to empty string", () => {
@@ -108,5 +110,71 @@ describe("listSlashCommands — commands slot (§3.2 CommandsFrame, ≤400 items
     const items = listSlashCommands(undefined);
     expect(items.every((i) => i.kind === "builtin")).toBe(true);
     expect(items.length).toBe(28);
+  });
+});
+
+describe("listSlashCommands — args hints (web-hub-slash-args §3.1/§3.2, P1; r1 #1 ① caps-independent build)", () => {
+  const HINTS = {
+    usage: (name: string) => (name === "agent" ? "status [runId] | costs" : undefined),
+    complete: (name: string, kind: string) => name === "agent" || (name === "third" && kind === "extension"),
+  };
+
+  it("no opts.args ⇒ every item is byte-identical to the pre-feature shape (no args key at all)", () => {
+    const items = listSlashCommands(port([{ name: "agent", source: "extension", description: "d" }]));
+    expect(items.some((i) => "args" in i)).toBe(false);
+  });
+
+  it("opts.args threads usage + complete onto matching items only", () => {
+    const items = listSlashCommands(
+      port([
+        { name: "agent", source: "extension", description: "d" },
+        { name: "quiet", source: "extension", description: "d" },
+      ]),
+      { args: HINTS },
+    );
+    expect(items.find((i) => i.name === "agent")?.args).toEqual({ usage: "status [runId] | costs", complete: true });
+    expect(items.find((i) => i.name === "quiet")?.args).toBeUndefined();
+    expect(items.find((i) => i.name === "compact")?.args).toBeUndefined(); // builtin: no hints
+  });
+
+  it("a hint port that yields neither field emits no args object (never `{}`)", () => {
+    const items = listSlashCommands(port([{ name: "quiet", source: "extension" }]), {
+      args: { usage: () => undefined, complete: () => false },
+    });
+    expect(items.find((i) => i.name === "quiet")).not.toHaveProperty("args");
+  });
+});
+
+describe("stripCommandArgs (r1 #1 ② — flush-time args stripping per CURRENT hub caps)", () => {
+  const frame = (): CommandsFrame => ({
+    t: "commands",
+    epoch: "e",
+    items: [
+      { name: "agent", kind: "extension", policy: "allow", args: { usage: "status", complete: true } },
+      { name: "quit", kind: "builtin", policy: "deny" },
+      { name: "third", kind: "extension", policy: "confirm", args: { complete: true } },
+    ],
+  });
+
+  it("removes args from every item, keeps all other fields intact", () => {
+    const out = stripCommandArgs(frame());
+    expect(out.items.map((i) => i.args)).toEqual([undefined, undefined, undefined]);
+    expect(out.items[0]).toEqual({ name: "agent", kind: "extension", policy: "allow" });
+    expect(out.items[2]).toEqual({ name: "third", kind: "extension", policy: "confirm" });
+  });
+
+  it("returns the SAME frame object when nothing carries args (no wasted copies)", () => {
+    const clean: CommandsFrame = {
+      t: "commands",
+      epoch: "e",
+      items: [{ name: "quit", kind: "builtin", policy: "deny" }],
+    };
+    expect(stripCommandArgs(clean)).toBe(clean);
+  });
+
+  it("never mutates the input frame (the stored slot stays args-carrying for the next flush)", () => {
+    const input = frame();
+    stripCommandArgs(input);
+    expect(input.items[0]?.args).toEqual({ usage: "status", complete: true });
   });
 });

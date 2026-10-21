@@ -89,6 +89,7 @@
         "cmd.v1",
         "dialog.v1",
         "command.v1",
+        "cmd.args.v1",
         "upload.v1",
         "upload.lan.v1",
         "hold.v1"

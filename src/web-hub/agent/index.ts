@@ -39,10 +39,12 @@ import {
   FORWARDED_EVENTS,
   RESUME_FEATURE_V1,
   type AgentKind,
+  type CommandsFrame,
   type LanInfoPayload,
   type LanReqFrame,
   type SessionInfo,
 } from "../protocol/messages.js";
+import type { CompleteReqFrame } from "../protocol/command-args.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
 import { pidAlive } from "../protocol/pid.js";
 import {
@@ -58,6 +60,8 @@ import {
   HOLD_CAP,
   QUOTA_POOLS_HUB_CAP,
   TODO_ARCHIVE_HUB_CAP,
+  CMD_ARGS_AGENT_CAPS,
+  CMD_ARGS_HUB_CAP,
 } from "../protocol/version.js";
 import type { LanStatus } from "../protocol/lan.js";
 import {
@@ -109,7 +113,14 @@ import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
 import { createExecGate, createResumeExec } from "./resume-exec.js";
 import { createResumeList, defaultResumeCore } from "./resume-list.js";
-import { classifyCommand, listSlashCommands } from "./slash.js";
+import { classifyCommand, listSlashCommands, stripCommandArgs, type CommandArgsHints } from "./slash.js";
+import {
+  createCommandComplete,
+  type ArgCompleter,
+  type AutocompleteProviderLike,
+  type CommandCompleteService,
+} from "./command-complete.js";
+import { resolveCommandUsage } from "./command-usage.js";
 import { modelsFingerprint, projectModels } from "./models.js";
 import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js";
 import { createDialogBridge } from "./dialogs.js";
@@ -269,6 +280,12 @@ export interface WebHubDeps {
    * writes real toolkit command names into, handed straight through to `createCommandCapture` so
    * `owns()`/`settleArm()` answer from true registration state, not from `arm()` history. */
   ownedCommandNames?: Set<string>;
+  /** web-hub-slash-args plan §4.4 (P1): the same-by-reference `Map<string, ArgCompleter>`
+   *  `wrapCommandApi`'s registerCommand proxy fills with each toolkit command's RAW
+   *  `getArgumentCompletions` at real registration time (the `ownedCommandNames` pattern,
+   *  verbatim). Unset ⇒ the S-own completion source is empty (third-party S-tui still works
+   *  in `"all"` mode). */
+  argCompleters?: Map<string, ArgCompleter>;
   /** todo-web plan §3.3 (T3): live main-session todo state for the `StatusInfo.todo`
    *  projection. Unset (todo.enabled=false ⇒ `wireTodo` never ran) ⇒ the field is never
    *  set — the status frame stays byte-equal to the pre-feature shape. */
@@ -631,6 +648,48 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // §4.9 echo and the commands slot's `output` badge) — the return value used to build a second,
   // disconnected one (todo #32 C11 wiring).
   const commandCapture = createCommandCapture(deps.ownedCommandNames);
+  // web-hub-slash-args plan §4.3/§4.5 (P1): the /name␠ argument-completion engine + the S-tui
+  // provider slot. Mode "off" builds nothing (no service, no TUI wrapper, no cap) — byte-
+  // identical to the pre-feature agent. The TUI wrapper is registered once per activation,
+  // only in `mode === "tui"` sessions with setting "all"; the factory pi replays on every
+  // wrapper registration just overwrites the ref (idempotent) and returns `current`
+  // UNCHANGED (transparent — never alter the host's autocomplete behavior).
+  const cmdCompleteMode = settings.commandComplete ?? "all";
+  const cmdCompleteOn = cmdCompleteMode !== "off";
+  const EMPTY_COMPLETERS: ReadonlyMap<string, ArgCompleter> = new Map();
+  const tuiProviderRef: { current: AutocompleteProviderLike | undefined } = { current: undefined };
+  let tuiReady = false;
+  let tuiWrapperRegistered = false;
+  const commandComplete: CommandCompleteService | undefined = cmdCompleteOn
+    ? createCommandComplete({
+        commands: pi,
+        own: () => deps.argCompleters ?? EMPTY_COMPLETERS,
+        tui: () => tuiProviderRef.current,
+        ...(deps.settings.webCommandPolicy !== undefined ? { overrides: deps.settings.webCommandPolicy } : {}),
+        mode: cmdCompleteMode === "all" ? "all" : "toolkit",
+        now,
+      })
+    : undefined;
+  /** §4.5: passthrough factory — store `current`, announce readiness once, return it as-is. */
+  const tuiAutocompleteFactory = (current: AutocompleteProviderLike): AutocompleteProviderLike => {
+    tuiProviderRef.current = current;
+    if (!tuiReady) {
+      tuiReady = true;
+      publishCommands(); // §3.1: S-tui readiness re-advertises `complete` (frame content is
+      // caps-independent, r1 ① — this is a fresh republish, not a rebuild)
+    }
+    return current;
+  };
+  const registerTuiAutocomplete = (x: { mode: string; ui?: { addAutocompleteProvider?(f: unknown): void } }): void => {
+    if (!cmdCompleteOn || cmdCompleteMode !== "all" || tuiWrapperRegistered) return;
+    try {
+      if (x.mode !== "tui") return; // rpc/print stubs are no-ops — never register there
+      x.ui?.addAutocompleteProvider?.(tuiAutocompleteFactory);
+      tuiWrapperRegistered = true;
+    } catch {
+      /* a stale ctx must never take the session down */
+    }
+  };
   // Late-bound: the bridge is constructed before the command handler (which it needs for the
   // §4.6/D22 async-completion channel), so sendLate goes through this ref. Before the handler
   // exists (or after a settle raced ahead) the late frame is simply dropped — bounded, and the
@@ -1005,18 +1064,39 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     : undefined;
 
   /** §3.2 commands slot: the web's slash palette (policy + §4.9 output badge), refreshed on
-   * (re)connect and `resources_discover` (extensions loaded mid-session change the list). */
+   * (re)connect, `resources_discover` (extensions loaded mid-session change the list), hello_ack
+   * (r1 #1 ③: fresh hub caps ⇒ republish) and S-tui readiness (§4.5). r1 #1 ①/②: the frame is
+   * ALWAYS built with `args` (never caps-dependent); the slot carries a flush transform that
+   * strips `args` per the CURRENT hub caps at every write, so an un-upgraded or downgraded hub
+   * still gets a decodable frame (its closed schema would drop the whole `commands` frame). */
   const publishCommands = (): void => {
     const c = conn;
     if (c === undefined) return;
-    c.setSlot("commands", {
-      t: "commands",
-      epoch: MODULE_INSTANCE,
-      items: listSlashCommands(pi, {
-        ...(deps.settings.webCommandPolicy !== undefined ? { overrides: deps.settings.webCommandPolicy } : {}),
-        output: (name) => (commandCapture.owns?.(name) === true ? "captured" : undefined),
-      }),
-    });
+    const argsHints: CommandArgsHints | undefined = cmdCompleteOn
+      ? {
+          usage: (name, kind, description) => resolveCommandUsage(name, kind, description),
+          // §3.1 + r1 #9: optimistic for ANY extension command in "all" mode (S-tui probe-only;
+          // empty results are normal, incl. RPC sessions where S-tui never arrives); "toolkit"
+          // mode stays literal — only commands with a captured S-own completer.
+          complete: (name, kind) =>
+            kind === "extension" && (cmdCompleteMode === "all" || (deps.argCompleters ?? EMPTY_COMPLETERS).has(name)),
+        }
+      : undefined;
+    c.setSlot(
+      "commands",
+      {
+        t: "commands",
+        epoch: MODULE_INSTANCE,
+        items: listSlashCommands(pi, {
+          ...(deps.settings.webCommandPolicy !== undefined ? { overrides: deps.settings.webCommandPolicy } : {}),
+          output: (name) => (commandCapture.owns?.(name) === true ? "captured" : undefined),
+          ...(argsHints !== undefined ? { args: argsHints } : {}),
+        }),
+      },
+      cmdCompleteOn
+        ? (frame, hubCaps) => (hubCaps.includes(CMD_ARGS_HUB_CAP) ? frame : stripCommandArgs(frame as CommandsFrame))
+        : undefined,
+    );
   };
   const remoteAskUserEnabled = (): boolean =>
     settings.control !== false && settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
@@ -1112,6 +1192,28 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     onRunWatch: (frame) => {
       if (attached) runTx.onWatch(frame.runId, frame.on);
     },
+    // web-hub-slash-args plan §4.3 (P1): completion requests arrive only over a live link
+    // from a cap-carrying hub. Answer asynchronously and always send exactly one reply —
+    // the service never throws/hangs; a wiring bug still degrades to a refusal reply so the
+    // hub's registry entry settles instead of waiting out its own deadline. Deliberately NOT
+    // gated on `attached`: completion is read-only and works through the detach grace window.
+    ...(commandComplete !== undefined
+      ? {
+          onCompleteReq: (frame: CompleteReqFrame): void => {
+            void commandComplete
+              .answer(frame)
+              .then((reply) => {
+                conn?.send(reply);
+              })
+              .catch(() => {
+                conn?.send({ t: "complete_reply", rid: frame.rid, ok: false, code: "E_BAD_REQUEST", retryable: false });
+              });
+          },
+        }
+      : {}),
+    // r1 评审 #1 ③ (P1): fresh hub caps (hello_ack) — republish the caps-sensitive commands
+    // slot for THIS hub (late caps, reconnects, downgrades).
+    ...(cmdCompleteOn ? { onHubCaps: () => publishCommands() } : {}),
     onStateChange: (v) => {
       runTx.onLink(v.state === "live"); // §3.3 #3: link-up retries gaps / pending ends
       if (attached) setStatusLine(statusLineText(v, readStatusTheme(ctx), { held: holdDriver?.heldCount() ?? 0 }));
@@ -1213,6 +1315,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // anything else); "off" is the key's ABSENCE, the same wire-level off pattern as spawn/lan.
     const preview = settings.preview ?? PREVIEW_DEFAULT_MODE;
     if (preview !== "off") config.preview = preview;
+    // web-hub-slash-args plan §5 (P1, P2 contract): `webHub.commandComplete` → `HubConfig.cmdArgs`
+    // ("off", control off, or webCommands off ⇒ key ABSENT, same wire-level off pattern as
+    // preview; the hub re-validates and owns the route/cap folding).
+    const cmdComplete = settings.commandComplete ?? "all";
+    if (settings.control !== false && settings.webCommands !== false && cmdComplete !== "off") {
+      config.cmdArgs = cmdComplete;
+    }
     // web-hub-avatar plan v2.1 §2.6: feature-off is key absence, and a read/write
     // avatar is disabled together with the web control plane.
     if (settings.avatar === true && settings.control !== false) config.avatar = true;
@@ -1256,6 +1365,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const remoteAskUser = settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
     if (remoteAskUser) caps.push("dialog.v1");
     if (settings.webCommands !== false) caps.push("command.v1");
+    // web-hub-slash-args plan §4.1 (P1): the completion cap rides the agent surface while the
+    // feature is on AND the web command plane itself is (the hub route requires cmd.v1 +
+    // command.v1 + cmd.args.v1 — advertising it under webCommands:false would be a lie).
+    if (settings.webCommands !== false && cmdCompleteOn) caps.push(...CMD_ARGS_AGENT_CAPS);
     // web-hub-upload plan §5.1: "on" (default) ⇒ both upload caps, "loopback" ⇒ upload.v1 only,
     // "off" ⇒ neither.
     const uploads = settings.uploads ?? "on";
@@ -1324,6 +1437,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const gen = generation;
     ctx = c;
     attached = true;
+    // web-hub-slash-args plan §4.5 (P1): register the passthrough autocomplete wrapper on the
+    // first TUI session of this activation (no-op in rpc/print and while the setting is off /
+    // "toolkit"). pi replays the factory whenever ANY extension adds a wrapper — the closure
+    // just keeps the newest `current`.
+    registerTuiAutocomplete(c);
     sessionReason = reasonOf(event);
     lastLeaf = undefined;
     lastFleetFp = undefined;
@@ -1369,6 +1487,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     attached = false;
     generation += 1;
     stopTick();
+    // web-hub-slash-args plan §4.5 (P1): drop the captured S-tui provider (the wrappers list
+    // itself is pi-owned; `tuiWrapperRegistered` stays — a same-activation /new re-runs
+    // session_start and pi keeps the wrapper registered, feeding us a fresh `current`).
+    // The completion service itself is ACTIVATION-scoped (read-only, no session state) and is
+    // deliberately NOT disposed here: in-flight answers settling inside the detach grace
+    // window give the hub its reply instead of a deadline.
+    tuiProviderRef.current = undefined;
+    tuiReady = false;
     wtSampler.stop(); // worktree-web plan §4.4: abort any in-flight scan, no leaked process/thread.
     bashSampler.stop(); // bash-jobs-panel plan §3.7: discard in-flight results by generation.
     // web-hub-steer-recall §4.7 step 7 (A6): BEFORE `commandHandler.onSessionBoundary()` — every
