@@ -38,7 +38,12 @@ export interface Registry extends RegistryView {
   onClose(agentKey: string, hadBye: boolean): void;
   tick(now: number): void; // stale/reap + pid 存活探测
   readonly bus: HubBus;
-  request<R extends AgentFrame>(agentKey: string, frame: HubFrame & { rid: string }, deadlineMs: number): Promise<R>; // P2 cmd 复用
+  request<R extends AgentFrame>(
+    agentKey: string,
+    frame: HubFrame & { rid: string },
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<R>; // relative wait; optional caller cancellation
   /**
    * Addition to the plan signature: lets hub-internal producers (history's
    * `append` / compaction `gap`) publish on the same bus the frontend reads.
@@ -132,6 +137,7 @@ interface Rec {
 }
 
 interface Pending {
+  requestType: HubFrame["t"];
   agentKey: string;
   resolve(frame: AgentFrame): void;
   reject(err: Error): void;
@@ -483,13 +489,19 @@ export function createRegistry(deps: {
         case "gap":
           publish({ type: "gap", agentKey, fromSeq: frame.fromSeq });
           return;
-        // fleet-drawer plan §5.3 (F3b): run-transcript agent→hub frames. `run_tx_reply` settles
-        // its pending `registry.request()` by rid (same dance as snapshot_reply above); the three
-        // stream frames are stateless here — republished on the bus for the run-transcript
-        // service's §3.3 state table (ports.ts: these HubEvents are never SSE-broadcast).
+        // Completion replies are ephemeral: rid + agent + request kind, never the bus/ledger.
+        case "complete_reply": {
+          const p = pending.get(frame.rid);
+          if (p === undefined || p.agentKey !== agentKey || p.requestType !== "complete_req") return;
+          pending.delete(frame.rid);
+          clearTimeout(p.timer);
+          p.resolve(frame);
+          return;
+        }
+        // fleet-drawer: reply settles its request; stream frames below republish on the bus.
         case "run_tx_reply": {
           const p = pending.get(frame.rid);
-          if (p === undefined || p.agentKey !== agentKey) return;
+          if (p === undefined || p.agentKey !== agentKey || p.requestType === "complete_req") return;
           pending.delete(frame.rid);
           clearTimeout(p.timer);
           p.resolve(frame);
@@ -524,7 +536,7 @@ export function createRegistry(deps: {
         case "snapshot_reply":
         case "branch_reply": {
           const p = pending.get(frame.rid);
-          if (p === undefined || p.agentKey !== agentKey) return;
+          if (p === undefined || p.agentKey !== agentKey || p.requestType === "complete_req") return;
           pending.delete(frame.rid);
           clearTimeout(p.timer);
           if (frame.t === "snapshot_reply") {
@@ -546,7 +558,7 @@ export function createRegistry(deps: {
         // only the handler (LRU/audit bookkeeping, keyed by `id` alone) observes it.
         case "cmd_result": {
           const p = pending.get(frame.rid);
-          if (p !== undefined && p.agentKey === agentKey) {
+          if (p !== undefined && p.agentKey === agentKey && p.requestType !== "complete_req") {
             pending.delete(frame.rid);
             clearTimeout(p.timer);
             p.resolve(frame);
@@ -636,7 +648,12 @@ export function createRegistry(deps: {
       deps.onTick?.();
     },
 
-    request<R extends AgentFrame>(agentKey: string, frame: HubFrame & { rid: string }, deadlineMs: number) {
+    request<R extends AgentFrame>(
+      agentKey: string,
+      frame: HubFrame & { rid: string },
+      deadlineMs: number,
+      signal?: AbortSignal,
+    ) {
       return new Promise<R>((resolve, reject) => {
         const r = records.get(agentKey);
         const conn = r?.conn;
@@ -644,23 +661,49 @@ export function createRegistry(deps: {
           reject(new HubError("E_AGENT_GONE"));
           return;
         }
+        if (signal?.aborted) {
+          reject(new HubError("E_DEADLINE"));
+          return;
+        }
         // The registry owns rid allocation (monotonic string); the caller's rid is replaced.
         const rid = `r${++ridCounter}`;
         const timer = setTimeout(
           () => {
-            if (pending.delete(rid)) reject(new HubError("E_DEADLINE"));
+            if (pending.delete(rid)) fail(new HubError("E_DEADLINE"));
           },
           Math.max(0, deadlineMs),
         );
         timer.unref();
-        pending.set(rid, { agentKey, resolve: (f) => resolve(f as R), reject, timer });
+        const cleanup = (): void => {
+          signal?.removeEventListener("abort", onAbort);
+        };
+        const fail = (err: Error): void => {
+          cleanup();
+          reject(err);
+        };
+        const onAbort = (): void => {
+          if (!pending.delete(rid)) return;
+          clearTimeout(timer);
+          fail(new HubError("E_DEADLINE"));
+        };
+        pending.set(rid, {
+          requestType: frame.t,
+          agentKey,
+          resolve: (f) => {
+            cleanup();
+            resolve(f as R);
+          },
+          reject: fail,
+          timer,
+        });
+        signal?.addEventListener("abort", onAbort, { once: true });
         try {
           const out: HubFrame = Object.assign({}, frame, { rid });
           conn.send(out);
         } catch (err) {
           pending.delete(rid);
           clearTimeout(timer);
-          reject(new HubError("E_AGENT_GONE", String(err)));
+          fail(new HubError("E_AGENT_GONE", String(err)));
         }
       });
     },

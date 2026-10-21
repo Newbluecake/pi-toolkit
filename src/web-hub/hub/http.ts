@@ -91,6 +91,8 @@ import { createAuthRevokeBus, type AuthRevokeBus } from "./auth-revoke.js";
 import { auditControl, auditUpload, type UploadHttpMetrics } from "./audit.js";
 import { createCmdLimit, type CmdLimit } from "./cmd-limit.js";
 import { createConnGuard } from "./conn-guard.js";
+import { COMMAND_COMPLETE_PATH } from "../protocol/http-contract.js";
+import type { CommandCompleteRoutes } from "./command-complete.js";
 import { createFileSearchRoutes, FILE_SEARCH_AUTH_RESERVE_MS, FILE_SEARCH_PATH } from "./file-search.js";
 import type { AgentRemoveFrontendPort, AgentRemoveIo } from "./agent-remove.js";
 import { formatLanCookie, hashSid, LAN_SESSION_COOKIE } from "./lan-auth.js";
@@ -1150,6 +1152,7 @@ export interface LanRuntime {
   /** @文件补全 (file-mention): the file-search route frontend, same instance as the loopback
    * listener's; same §4.7 gate as preview above (`mode === "on"` only, else original 404). */
   fileSearch?: FileSearchRoutes | undefined;
+  commandComplete?: CommandCompleteRoutes | undefined;
   /** worktree-diff plan §1.6 (D3): the worktree-diff route frontend, same instance as the
    * loopback listener's; same §4.7-style LAN gate as preview/file-search above (`mode === "on"`
    * only — `mode:"loopback"` keeps the LAN 404 byte-identical to not-enabled, D6). */
@@ -1938,6 +1941,24 @@ async function handleLanRequestInner(
     });
   }
 
+  if (rt.commandComplete !== undefined && method === "POST" && path === COMMAND_COMPLETE_PATH) {
+    return rt.commandComplete.handle(req, res, {
+      listener: "lan",
+      ip: ctx.clientIp,
+      expectedOrigin: ctx.externalOrigin,
+      strictCsrfOk: () => strictCsrfOk(req, ctx.externalOrigin),
+      authorize: async (deadline) => {
+        const authDeadlineMs = deriveBudget(deadline.remaining(), LAN_AUTH_CAP_MS, 2_000);
+        const failure: { code?: string } = {};
+        const session = await requireLanSession(rt, req, res, ctx, false, lease, authDeadlineMs, failure);
+        if (session === undefined) return { handled: true, code: failure.code ?? "E_AUTH" };
+        return { ip: ctx.clientIp, user: `u${session.userId}` };
+      },
+      readJson,
+      sendJson,
+    });
+  }
+
   // worktree-diff plan §1.6/§2.2 (D3): the two worktree-diff GETs — dispatched right after the
   // file-search branch, same insertion-point class and the same LAN gate (`mode === "on"`;
   // `mode:"loopback"` falls through to the original 404 below, byte-identical to not-enabled).
@@ -2457,7 +2478,7 @@ function limitCategoryFor(cmd: CmdArgs, queryOnly: boolean): LimitCategory {
  * `csrfOkLan` already required it) and, when a browser sends `Sec-Fetch-Site` at all, it must say
  * `same-origin` (K16 spike finding: a LAN plaintext direct-IP request carries `Origin` but *no*
  * `Sec-Fetch-Site` at all — that combination must still pass). */
-function strictCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
+export function strictCsrfOk(req: IncomingMessage, expectedOrigin: string): boolean {
   const ct = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
   if (ct !== "application/json") return false;
   if (req.headers["x-pwh"] !== "1") return false;
@@ -3127,6 +3148,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       /** @文件补全 (file-mention): same instance as the loopback listener's (or undefined when
        * preview/file-search is not enabled — the LAN face then keeps its original 404). */
       fileSearch: fileSearchRoutes,
+      commandComplete: deps.commandComplete,
       /** worktree-diff plan §1.6 (D3): same instance as the loopback listener's (or undefined
        * when preview is off / /proc is unavailable — the LAN 404 stays byte-identical). */
       worktreeDiff: deps.worktreeDiff,
@@ -3568,6 +3590,21 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
           if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
           return { ip: normalizePeerIp(req.socket.remoteAddress) };
         },
+        sendJson,
+      });
+    }
+    if (deps.commandComplete !== undefined && method === "POST" && path === COMMAND_COMPLETE_PATH) {
+      const expectedOrigin = canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? "");
+      return deps.commandComplete.handle(req, res, {
+        listener: "loopback",
+        ip: normalizePeerIp(req.socket.remoteAddress),
+        expectedOrigin,
+        strictCsrfOk: () => strictCsrfOk(req, expectedOrigin),
+        authorize: async () => {
+          if (authorizeLoopback(req, res) === undefined) return { handled: true, code: "E_AUTH" };
+          return { ip: normalizePeerIp(req.socket.remoteAddress) };
+        },
+        readJson,
         sendJson,
       });
     }

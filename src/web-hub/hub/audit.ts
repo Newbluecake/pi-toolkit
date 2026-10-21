@@ -9,6 +9,7 @@
  */
 /** UploadStats is imported type-only: `uploads.ts` never imports this module (the store's audit
  * seam is the `deps.audit` callback), so there is no cycle. */
+import type { HubLog } from "./ports.js";
 import type { UploadStats } from "./uploads.js";
 import type { SpawnAuditRecord } from "./spawn/supervisor.js";
 import type { WtDiffFileKind, WtDiffStatus } from "../protocol/worktree-diff.js";
@@ -758,4 +759,22 @@ export function auditLanSession(log: { info(msg: string, data?: object): void },
 export function auditLan2fa(log: { info(msg: string, data?: object): void }, record: Lan2faAuditRecord): void {
   if (record.phase === "admin") auditLanSecurity(log, "lan-2fa", record, ["op", "ok"]);
   else auditLanSecurity(log, "lan-2fa", record, LAN_2FA_AUDIT_KEYS);
+}
+
+/** Slash-args: text-free whitelist, deliberately excludes identity, prefix and item text. */
+export interface CommandCompleteAuditRecord {
+  listener: "loopback" | "lan";
+  name?: string;
+  plen?: number;
+  hits?: number;
+  ms?: number;
+  code?: string;
+  source?: "own" | "tui";
+}
+export function auditCommandComplete(log: HubLog, record: CommandCompleteAuditRecord): void {
+  const out: Record<string, unknown> = {};
+  for (const key of ["listener", "name", "plen", "hits", "ms", "code", "source"] as const) {
+    if (record[key] !== undefined) out[key] = record[key];
+  }
+  log.info("command-complete", out);
 }

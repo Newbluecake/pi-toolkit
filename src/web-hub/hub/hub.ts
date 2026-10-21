@@ -33,6 +33,7 @@ import {
 } from "../protocol/paths.js";
 import {
   PROTO,
+  CMD_ARGS_HUB_CAPS,
   P2_HUB_CAPS,
   UPLOAD_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
@@ -70,6 +71,7 @@ import { createAgentServer } from "./agent-server.js";
 import { createAgentRemoveService } from "./agent-remove.js";
 import { auditSpawn, auditUpload, createUploadHttpMetrics, uploadStatsFields } from "./audit.js";
 import { createCmdLimit } from "./cmd-limit.js";
+import { createCommandCompleteRoutes } from "./command-complete.js";
 import { createCommandRouter } from "./commands.js";
 import { createSupersede, SUPERSEDE_YIELD_MS, type SupersedeController } from "./supersede.js";
 import { createHistoryService } from "./history.js";
@@ -415,6 +417,7 @@ export async function startHub(
     // `createPreviewRoutes({ html })` attachment further down, so they can never disagree.
     const htmlEnabled = config.preview !== undefined && previewProcFdAvailable();
     const extraHubCaps: readonly string[] = [
+      ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit" ? CMD_ARGS_HUB_CAPS : []),
       // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
       // always constructed, so the cap and the route can never disagree.
       VERSION_HUB_CAP,
@@ -1579,6 +1582,9 @@ export async function startHub(
       // stub. `registry` (constructed above) is the same instance the agent socket layer feeds.
       commands: commandRouter,
       cmdLimit,
+      ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit"
+        ? { commandComplete: createCommandCompleteRoutes({ registry, log, now }) }
+        : {}),
       uploadMetrics,
       agentRemove: agentRemoveService,
       ...(avatarRoutes === undefined ? {} : { avatar: avatarRoutes }),

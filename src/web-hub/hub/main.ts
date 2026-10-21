@@ -118,6 +118,11 @@ async function main(): Promise<void> {
     }
   }
 
+  // Slash-args: unknown/off values omit the gate, never advertise an unusable cap.
+  if (config.cmdArgs !== undefined && config.cmdArgs !== "all" && config.cmdArgs !== "toolkit") {
+    const { cmdArgs: _drop, ...rest } = config;
+    config = rest;
+  }
   // web-hub-avatar plan v2.1 §2.6: feature-off is represented by an absent
   // key. Fail soft on hand-edited/old launcher config, preserving startup.
   if (config.avatar !== undefined && config.avatar !== true) {

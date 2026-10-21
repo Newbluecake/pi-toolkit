@@ -515,3 +515,23 @@ describe("FA optional bot cap coexists with avatar/privacy/proxy", () => {
     },
   );
 });
+
+it.each([undefined, "all", "toolkit"] as const)(
+  "cmdArgs=%s gates both cap surfaces and route assembly",
+  async (cmdArgs) => {
+    const home = tmp.make("wh-cmd-args-");
+    const fe = fakeFrontend();
+    const r = await startHub(config({ home, ...(cmdArgs === undefined ? {} : { cmdArgs }) }), fe.factory, {
+      uid: process.getuid?.() ?? 0,
+    });
+    if ("exists" in r) throw new Error("unexpected exists");
+    hubs.push(r);
+    const c = await connectClient(r.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack");
+    c.sock.destroy();
+    expect(r.info.caps).toEqual(ack["caps"]);
+    expect(r.info.caps.includes("cmd.args.v1")).toBe(cmdArgs !== undefined);
+    expect(fe.deps[0]?.commandComplete !== undefined).toBe(cmdArgs !== undefined);
+  },
+);
