@@ -101,6 +101,28 @@ describe("wireWebHub — preview config (plan PV1: default on ⇒ exactly one ex
     expect("preview" in config).toBe(false);
   });
 
+  // web-hub-slash-args §5 (P1↔P2 contract): "off" / control off / webCommands off ⇒ cmdArgs key ABSENT.
+  it.each([
+    ["commandComplete off", { commandComplete: "off" as const }],
+    ["control off", { control: false }],
+    ["webCommands off", { webCommands: false }],
+  ])("%s ⇒ PI_WEBHUB_CONFIG has no cmdArgs key", async (_label, extra) => {
+    const settings: WebHubSettings = { ...SETTINGS, autoStart: true, nodeLoader: fakeNodeLoader(), ...extra };
+    const config = await hubConfigFor(settings);
+    expect("cmdArgs" in config).toBe(false);
+  });
+
+  it('settings.commandComplete: "toolkit" ⇒ config.cmdArgs === "toolkit"', async () => {
+    const settings: WebHubSettings = {
+      ...SETTINGS,
+      autoStart: true,
+      nodeLoader: fakeNodeLoader(),
+      commandComplete: "toolkit",
+    };
+    const config = await hubConfigFor(settings);
+    expect(config.cmdArgs).toBe("toolkit");
+  });
+
   it('settings.preview: "loopback" ⇒ config.preview === "loopback"', async () => {
     const settings: WebHubSettings = {
       ...SETTINGS,

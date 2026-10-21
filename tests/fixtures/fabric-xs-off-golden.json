@@ -95,7 +95,7 @@
         "hold.v1"
       ]
     },
-    "slotSequence": ["session", "status", "fleet", "dialogs", "ctl", "commands", "status", "ctl"],
+    "slotSequence": ["session", "status", "fleet", "dialogs", "ctl", "commands", "status", "ctl", "commands"],
     "statusFrame": {
       "t": "status",
       "leafId": "e1",
@@ -117,7 +117,8 @@
       "pluginVersion": "0.0.0-golden",
       "buildId": "golden-build",
       "launcher": ["<node>", "/nonexistent/pi"],
-      "preview": "on"
+      "preview": "on",
+      "cmdArgs": "all"
     }
   }
 }
