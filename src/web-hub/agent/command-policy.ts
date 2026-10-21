@@ -214,6 +214,15 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     const sub = tokens[0] ?? "status";
     return { policy: sub === "status" ? "allow" : "deny" };
   },
+  // fabric phase-2 §5.3/#9/XI13 (X2): the cross-session command's READ-ONLY surfaces only —
+  // `status` (also the bare form) and the offline `blocks` listing. Every membership/policy/
+  // blocklist/fence mutation is denied here already, and X4's handler ADDITIONALLY hard-refuses
+  // web invocations before reading any policy — `webCommandPolicy.fabric:"allow"` cannot open
+  // these (the table is only the first layer + the UI hint, exactly like /webhub's admin rows).
+  fabric(tokens) {
+    const sub = tokens[0] ?? "status";
+    return { policy: sub === "status" || sub === "blocks" ? "allow" : "deny" };
+  },
 };
 
 function tokenize(args: string): string[] {

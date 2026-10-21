@@ -50,6 +50,8 @@ import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import type { HubPaths } from "../protocol/paths.js";
 import type { RunTxReqFrame, RunWatchFrame } from "../protocol/run-transcript.js";
 import type { CompleteReqFrame } from "../protocol/command-args.js";
+import type { XsDeliverFrame, XsReqFrame, XsResFrame } from "../protocol/xs.js";
+import { XS_HUB_CAP, XS_SLOT_KIND, xsReqDeadlineMs } from "../protocol/xs.js";
 import { P1_CAPS, PROTO, SLOT_REQUIRED_CAP, compareVersions, protoCompatible } from "../protocol/version.js";
 import { readStopMarkerSync } from "../protocol/stop-marker.js";
 import type { WebHubSettings, WebHubStatusView } from "./index.js";
@@ -109,6 +111,11 @@ export interface BindingPort {
    *  never hangs` — `command-complete.ts`); a binding without it silently ignores the
    *  frame and the hub's own request deadline settles its registry entry. */
   onCompleteReq?(frame: CompleteReqFrame): void;
+  /** fabric phase-2 X2 (§8.2): hub→agent cross-session delivery. The handler MUST answer
+   *  EXACTLY ONE `xs_ack{rid, xid, …}` — synchronously, even on exception (`agent/xs.ts`'
+   *  bridge owns that contract; without it the hub's 5s registry deadline settles unknown).
+   *  Live-link-only, like every other hub→agent request. */
+  onXsDeliver?(frame: XsDeliverFrame): void;
   /** web-hub-slash-args plan r1 评审 #1 ③ (P1): fired once per `hello_ack` after the slot
    *  replay, with the hub's freshly-advertised caps — the wiring republishes cap-sensitive
    *  slots (`commands`), covering late caps, reconnects and hub downgrades. */
@@ -154,19 +161,29 @@ export interface HubConnection {
   request(frame: TfaReqFrame, requiredCap: string): Promise<TfaResFrame>;
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
+  /** fabric phase-2 X2 (§8.2): the `xs_req` overload — deadline comes from the per-op table
+   *  (`list|resolve|info` 3s, `send` 8s = hub admission + 5s deliver + headroom), NOT the
+   *  generic 3s admin timeout. Same cap precheck / reject-pending-on-teardown contract. */
+  request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
   /** Capabilities from the current live link's `hello_ack.caps` (empty until live, or if the hub omitted it). */
   readonly caps: readonly string[];
 }
 
-export type SlotKind = "session" | "status" | "fleet" | "prompts" | "dialogs" | "ctl" | "commands";
+export type SlotKind = "session" | "xs" | "status" | "fleet" | "prompts" | "dialogs" | "ctl" | "commands";
 /** web-hub-slash-args plan r1 评审 #1 ② (P1): optional per-slot flush transform — applied to
  *  the STORED frame with the CURRENT hub caps right before every write (both the immediate
  *  live write in `setSlot` and the `hello_ack` replay), so a cap-sensitive frame (the
  *  `commands` slot's append-only `args`) is what the CURRENT hub can decode, never what the
  *  hub that was connected at build time could. */
 export type SlotFlush = (frame: AgentFrame, hubCaps: readonly string[]) => AgentFrame;
-const SLOT_ORDER: readonly SlotKind[] = ["session", "status", "fleet", "prompts", "dialogs", "ctl", "commands"];
+// fabric phase-2 §8.1: `xs` sits right after `session` — on every hello_ack replay the hub
+// sees the binding (session) before the membership claim, so a stale member record is
+// invalidated (session id change) before the new `xs_member` revives it.
+const SLOT_ORDER: readonly SlotKind[] = ["session", "xs", "status", "fleet", "prompts", "dialogs", "ctl", "commands"];
 function slotCap(kind: SlotKind): string | undefined {
+  // XS0 left protocol/version.ts's SLOT_REQUIRED_CAP untouched; the xs slot's hub-side
+  // requirement lives here (X2's domain) — without the cap the frame is never written.
+  if (kind === XS_SLOT_KIND) return XS_HUB_CAP;
   return (SLOT_REQUIRED_CAP as Record<string, string | undefined>)[kind];
 }
 
@@ -278,7 +295,7 @@ class Connection implements HubConnection {
   private readonly pending = new Map<
     string,
     {
-      resolve: (f: LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame) => void;
+      resolve: (f: LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame | XsResFrame) => void;
       reject: (err: Error) => void;
       timer: NodeJS.Timeout;
     }
@@ -426,17 +443,20 @@ class Connection implements HubConnection {
   request(frame: TfaReqFrame, requiredCap: string): Promise<TfaResFrame>;
   request(frame: FsbReqFrame, requiredCap: string): Promise<FsbResFrame>;
   request(frame: LanReqFrame | HubCtlFrame, requiredCap: string): Promise<LanResFrame | HubCtlAckFrame>;
+  request(frame: XsReqFrame, requiredCap: "xs.v1"): Promise<XsResFrame>;
   request(
-    frame: LanReqFrame | HubCtlFrame | FsbReqFrame | TfaReqFrame,
+    frame: LanReqFrame | HubCtlFrame | FsbReqFrame | TfaReqFrame | XsReqFrame,
     requiredCap: string,
-  ): Promise<LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame> {
+  ): Promise<LanResFrame | HubCtlAckFrame | FsbResFrame | TfaResFrame | XsResFrame> {
     return new Promise((resolve, reject) => {
       if (this.link !== "live" || !this.helloCaps.includes(requiredCap)) {
         reject(new Error(`E_NO_CAP: ${requiredCap}`));
         return;
       }
       const rid = frame.rid;
-      const timer = unrefTimer(frame.t === "fsb_req" ? 12_000 : ADMIN_REQUEST_TIMEOUT_MS, () => {
+      const deadlineMs =
+        frame.t === "fsb_req" ? 12_000 : frame.t === "xs_req" ? xsReqDeadlineMs(frame.op) : ADMIN_REQUEST_TIMEOUT_MS;
+      const timer = unrefTimer(deadlineMs, () => {
         this.pending.delete(rid);
         reject(new Error("E_TIMEOUT: admin request timed out"));
       });
@@ -640,6 +660,7 @@ class Connection implements HubConnection {
       case "tfa_res":
       case "fsb_res":
       case "lan_res":
+      case "xs_res":
       case "hub_ctl_ack": {
         const p = this.pending.get(frame.rid);
         if (p !== undefined) {
@@ -686,6 +707,12 @@ class Connection implements HubConnection {
         return;
       case "complete_req":
         if (this.link === "live") this.callBinding((b) => b.onCompleteReq?.(frame));
+        return;
+      case "xs_deliver":
+        // fabric phase-2 §8.2: live-link-only; no xs surface ⇒ no binding hook ⇒ the hub's own
+        // 5s registry deadline settles the pending as unknown (an agent that never advertised
+        // xs.v1 is not an effective member and never receives one of these anyway).
+        if (this.link === "live") this.callBinding((b) => b.onXsDeliver?.(frame));
         return;
       case "run_watch":
         if (this.link === "live") this.callBinding((b) => b.onRunWatch?.(frame));

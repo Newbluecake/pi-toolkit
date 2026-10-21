@@ -72,6 +72,10 @@ import {
   type BindingPort,
   type HubConnection,
 } from "./connection.js";
+import { createXsAgentBridge, type XsAgentPort } from "./xs.js";
+import type { XsHubPort } from "../../fabric/xs/sender.js";
+import type { XsBlockResolve } from "../../commands/fabric-xs.js";
+import type { XsHubLimitsWire } from "../protocol/xs.js";
 import type { ConsultTranscriptDiagnostics } from "./consult-transcript.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
 import { createEventTap } from "./event-tap.js";
@@ -322,6 +326,12 @@ export interface WebHubDeps {
    *  assigns the ref. Unset (topic-switch off, or not wired yet) ⇒ `commands.ts` never calls
    *  `tryClaim` at all — byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** fabric phase-2 X2 (§11.1): the cross-session agent port. UNSET (xs off — the only state
+   *  before XW threads it) ⇒ no `xs.v1` cap, no `xs_member` slot, no `HubConfig.crossSession`,
+   *  no `StatusInfo.xs`, no deliver/ack path: the agent stays byte-identical to the pre-xs
+   *  shape (pinned by `tests/integration/fabric-xs-off-golden.test.ts`). Presence IS `xsOn`
+   *  (XW computes XS0's switch at activate and only threads the port when it holds). */
+  xs?: XsAgentPort;
   hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -408,6 +418,19 @@ export interface WebHubControl {
    * `WebHubControl` doubles keep compiling; `/webhub status` prints nothing when absent. */
   proxy?: {
     statusLines(): string[];
+  };
+  /** fabric phase-2 T1 §7.2 (`web_exec` fence input, X2): `resumeExec.switchInFlight() ∨
+   *  execGate.held()` — the read-only getter XW feeds the session-change fence. Optional so
+   *  pre-feature `WebHubControl` doubles keep compiling; absent ⇔ not switching. */
+  webExecBusy?(): boolean;
+  /** fabric phase-2 X2 (§11.1): the cross-session surface for XW — the member-slot republish
+   *  (join/leave/receive changes), X3's sender `XsHubPort`, X4's `/fabric block` resolve port
+   *  and the `/fabric status` hub-limits info port. Present iff `deps.xs` was threaded. */
+  xs?: {
+    publishMember(): void;
+    hubPort(): XsHubPort;
+    resolveBlock(query: string): Promise<XsBlockResolve>;
+    hubInfo(): Promise<XsHubLimitsWire | undefined>;
   };
 }
 
@@ -828,6 +851,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       resumeFeatures,
     );
     lastLeaf = s.leafId;
+    // fabric phase-2 X2 (§4.4, P3): the display-only xs projection — absent while deps.xs is
+    // unset or there is no live stack, so the status frame stays byte-equal to the pre-feature
+    // shape (StatusInfoSchema is open: an old hub forwards the field verbatim, an old UI ignores it).
+    if (xsBridge !== undefined) {
+      const xsView = xsBridge.statusProjection();
+      if (xsView !== undefined) s.xs = xsView;
+    }
     c.setSlot("status", { t: "status", ...s });
   };
 
@@ -1121,7 +1151,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     hubCaps: () => conn?.caps ?? [],
   });
   attributePromptRef.current = dialogBridge.attributePrompt;
+  // fabric phase-2 X2: the xs bridge exists iff deps.xs was threaded (xsOn) — every surface it
+  // adds is conditional on it, so xs-off stays byte-identical. `conn` is late-bound through a
+  // getter (the closure variable swaps on every connectWith/handover).
+  const xsBridge = deps.xs !== undefined ? createXsAgentBridge({ port: deps.xs, conn: () => conn }) : undefined;
   const binding: BindingPort = {
+    ...(xsBridge !== undefined ? { onXsDeliver: (frame) => xsBridge.onDeliver(frame) } : {}),
     onCmd: (frame) => {
       // dialog_answer/dialog_cancel are routed straight to the dialog bridge (C2's `dialogs.ts`) —
       // never through `commandHandler`, which would otherwise have to special-case them right back
@@ -1212,8 +1247,18 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         }
       : {}),
     // r1 评审 #1 ③ (P1): fresh hub caps (hello_ack) — republish the caps-sensitive commands
-    // slot for THIS hub (late caps, reconnects, downgrades).
-    ...(cmdCompleteOn ? { onHubCaps: () => publishCommands() } : {}),
+    // slot for THIS hub (late caps, reconnects, downgrades). fabric phase-2 X2 rides the same
+    // hook to republish the xs_member slot from FRESH membership state — a membership change
+    // that landed while disconnected would otherwise have its STALE stored slot replayed by the
+    // hello_ack slot machinery (X1-report §6 note 6: only a NEW xs_member revives a member).
+    ...(cmdCompleteOn || xsBridge !== undefined
+      ? {
+          onHubCaps: () => {
+            if (cmdCompleteOn) publishCommands();
+            xsBridge?.publishMember();
+          },
+        }
+      : {}),
     onStateChange: (v) => {
       runTx.onLink(v.state === "live"); // §3.3 #3: link-up retries gaps / pending ends
       if (attached) setStatusLine(statusLineText(v, readStatusTheme(ctx), { held: holdDriver?.heldCount() ?? 0 }));
@@ -1336,6 +1381,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       const portRange = parseProxyPortRange(settings.proxy.portRange);
       if (portRange !== undefined) config.proxy = { portRange, maxProxies: settings.proxy.maxProxies };
     }
+    // fabric phase-2 X2 (§4.6 global row): the crossSession key — key-absence-is-off, exactly
+    // like every gated HubConfig feature; X1's `main.ts` re-validates and drops the whole key
+    // on a malformed value (⇒ hub xs off). Only written when the xs bridge exists (xsOn).
+    if (xsBridge !== undefined) config.crossSession = xsBridge.hubCrossSessionConfig();
     const bot = deps.feishuBot;
     if (settings.enabled && settings.control !== false && bot?.enabled === true) {
       config.feishuBot = {
@@ -1380,6 +1429,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `recall` forwards (S4). Unreachable while control is false (early return above), which is
     // exactly holdWired's own truth table row.
     if (holdWired(settings)) caps.push(...HOLD_AGENT_CAPS);
+    // fabric phase-2 X2 (§8.6): the agent-side xs cap, tail-appended to mirror X1's hub-side
+    // `extraHubCaps` tail append. xsOn ⇒ control is on (the switch requires it), so the early
+    // `!control` return above has already passed when we get here.
+    if (xsBridge !== undefined) caps.push(...xsBridge.caps());
     return caps;
   };
 
@@ -1407,6 +1460,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     conn = c;
     connGen += 1;
     emitSession("attach");
+    // fabric phase-2 §8.1 (X2): the member slot lands right after the session slot — same
+    // ordering as the hello_ack SLOT_ORDER replay (session → xs), so the hub never sees a
+    // membership claim for a session id it has not been told about yet.
+    xsBridge?.publishMember();
     // The dialogs slot exists (D14-gated, only actually sent once the hub advertises dialog.v1) so
     // C2 only replaces `dialogBridge.frame()`'s content, not this call.
     c.setSlot("dialogs", dialogBridge.frame());
@@ -1926,6 +1983,20 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     proxy: {
       statusLines: proxyStatusLines,
     },
+    // fabric phase-2 T1 §7.2 (X2): the `web_exec` fence input — resume switch in flight ∨ the
+    // shared exec claim held (`/new` or a resume ticket). Read-only, never throws (both
+    // underlying getters are plain boolean reads).
+    webExecBusy: () => safe(() => resumeExec.switchInFlight() || execGate.held(), false),
+    ...(xsBridge !== undefined
+      ? {
+          xs: {
+            publishMember: () => xsBridge.publishMember(),
+            hubPort: () => xsBridge.hubPort(),
+            resolveBlock: (query: string) => xsBridge.resolveBlock(query),
+            hubInfo: () => xsBridge.hubInfo(),
+          },
+        }
+      : {}),
   };
 }
 

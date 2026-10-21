@@ -264,6 +264,17 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         errResult("E_COMMAND_DENIED", false, "none", "LAN authentication administration is local-TUI-only"),
       );
     }
+    // fabric phase-2 §5.3/#9/XI13 (X2): membership/policy mutations are local-TUI/local-RPC
+    // only — X4's `/fabric` handler hard-refuses web invocations whatever the policy says; this
+    // prompt-op guard is the same defense-in-depth as the /webhub row above (a browser must not
+    // reach the mutation even as free prompt text, whatever `expandPromptTemplates` does).
+    // `status`/`blocks` stay promptable (read-only).
+    if (/^\s*\/fabric\s+(?:join|leave|receive|block|unblock|fence)(?:\s|$)/.test(cmd.text)) {
+      return settleAndReply(
+        frame,
+        errResult("E_COMMAND_DENIED", false, "none", "Cross-session membership changes are local-TUI-only"),
+      );
+    }
     if (deps.compactionState.manualCompacting) {
       return settleAndReply(frame, errResult("E_BUSY_COMPACTING", true, "none"));
     }
