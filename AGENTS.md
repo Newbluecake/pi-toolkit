@@ -303,6 +303,33 @@ resumes a/b h · parked · reserved · unverified · quarantined · durability �
   re-reviewed first. Gates: `tests/integration/fabric-wake*.test.ts`, conformance C-P1…C-P5
   (`tests/conformance/fabric-wake.test.ts`; run before any pi peer bump together with consult-preserve), state-machine
   matrix/property in `tests/core/`.
+  **Cross-session phase 2** (`docs/dev/fabric-cross-session/phase2-plan.md`, §13/§14 + r3 rulings):
+  main sessions only, settings frozen at activate; `fabric.enabled` + `fabric.crossSession.enabled` +
+  `webHub.enabled` + `webHub.control !== false` gate tools `list_sessions` / `message_session`, `/fabric`,
+  `xs.v1`, member slots and `StatusInfo.xs` (off ⇒ byte-identical; no reserved-name change). Two human
+  opt-ins: settings enabled, then local `/fabric join|leave` or `fabric.crossSession.autoJoin` (default
+  false); agents cannot change membership, receive policy, blocks or fences. Web/LAN/Feishu mutations
+  are hard-denied regardless of `webCommandPolicy.fabric`; status/blocks stay read-only. Joined
+  receive defaults to `wake` (`fabric.crossSession.receive`, `allowFrom`); fork/copy never inherits
+  membership, even with autoJoin. `message_session` omits wake = deliver-only; `wake:true` alone may
+  start a turn through `RootWakeController` (no steer), gated by `fabric.wake.enabled`, causal level,
+  capability, goal and quotas. Unknown host capability downgrades to deliver-only until real runtime
+  shape evidence; root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
+  pre-start compaction. Token authorization and dedup survive /reload; marked unauthorized/expired
+  triggers abort before their first provider request (B1); human handover only after proven own-run
+  start. Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress; goal
+  only downgrades wake. A 30s stuck warning never opens a fence; input/run-start is NOT completion
+  evidence (r3 M1); local `/fabric fence reset` is the manual escape. M2 effects: before-send
+  cancellation/origin change = `none`; after-send no verdict = `unknown`, received remote evidence
+  stays intact. Busy recipient = `unknown/queued` (may be queued, never blindly resend). Defaults
+  under `fabric.crossSession.limits`: out 10/min + 60/h, out wakes 6/h, in 30/h + wakes 12/h,
+  pair interval 30s + wakes 2/h, in-flight 4/session, hub 60/min, inbox 12; hub owns outbound quota.
+  `/agent status` reads the live xs stack (outbound usage unavailable ⇒ `out n/a/60h`, never fake 0);
+  AgentCard's cap-gated `xs wake|deliver|off` badge is display-only, never authorization.
+  `details` (token/xid/source) never enters provider payload; enabled tools/system stay stable.
+  Peer-upgrade gates: `tests/conformance/fabric-xs.test.ts` C-X1/X1b/X2/X3/X4/X5/X6/X7 with real pi
+  and a local Anthropic stub, alongside fabric-wake C-P1–C-P5 and consult-preserve C1–C7; C-X7 records
+  duplicate-tool arbitration without relying on a winner. Both off goldens must remain unchanged.
 - `src/consult/` — in-turn expert consultation (`consult` tool). A subagent dispatched with an
   `experts` whitelist (`Agent({ experts })`, resolved to verified runIds at dispatch) gets the
   `consult` tool and can synchronously ask an already-finished expert run: the expert's persisted

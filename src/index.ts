@@ -6,7 +6,12 @@ import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type { RunSnapshot, SpawnRequest, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
-import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
+import {
+  assertCompatible,
+  detectPiCapabilities,
+  probeReadBackEntries,
+  readBeforeAgentStartTrigger,
+} from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
@@ -266,6 +271,13 @@ export default function activate(rawPi: ExtensionAPI): void {
   const xsFencePorts: { topicSwitch?: () => boolean; goal?: () => boolean } = {};
   const xsLedger = getXsWakeLedger();
   const xsCapability = getXsHostCapability();
+  const xsSessionOf = (ctx: { sessionManager?: { getSessionId(): string } }): string | undefined => {
+    try {
+      return ctx.sessionManager?.getSessionId();
+    } catch {
+      return undefined;
+    }
+  };
   let xsAttached = false;
   let xsSessionId: string | undefined;
   let xsCollisions: string[] = [];
@@ -273,6 +285,13 @@ export default function activate(rawPi: ExtensionAPI): void {
   // B1 stays installed even after an xs-off reload: old queued marked triggers still need
   // authorization. Never return the library TriggerResult as a pi hook result.
   pi.on("before_agent_start", (event, ctx) => {
+    const trigger = readBeforeAgentStartTrigger(event);
+    const marked =
+      trigger.kind === "custom" &&
+      trigger.customType === "subagent:xs" &&
+      (trigger.details as { xsWake?: unknown } | undefined)?.xsWake === true;
+    // Off means zero new context reads, except B1's mandatory orphan/old-authorization guard.
+    if (!xsEnabled && xsLedger.size === 0 && !marked) return;
     const xs = xsAttached ? holder.current?.xs : undefined;
     if (xs?.controller) xs.beforeAgentStart(event);
     else if (xsAttached && holder.current?.rootWakeRecovery) {
@@ -282,12 +301,13 @@ export default function activate(rawPi: ExtensionAPI): void {
       xs?.beforeAgentStart(event);
       // No owner yet (including the pre-stack window): never authorize an unsupervised
       // delayed action. Preserve the record as a tombstone until execution/teardown proof.
+      const sessionId = xsSessionOf(ctx);
       for (const record of xsLedger.entries()) {
-        if (record.sessionId === ctx.sessionManager.getSessionId() && record.state === "live")
+        if (sessionId !== undefined && record.sessionId === sessionId && record.state === "live")
           xsLedger.tombstone(record.token);
       }
       observeRootWakeTrigger(event, {
-        sessionId: ctx.sessionManager.getSessionId(),
+        sessionId: sessionId ?? "",
         abort: () => ctx.abort(),
         ledger: xsLedger,
         capability: xsCapability,
@@ -332,74 +352,11 @@ export default function activate(rawPi: ExtensionAPI): void {
     holder.current?.xs?.fence.onEvent({ type: "session_shutdown" });
     holder.current?.xs?.dispose();
     holder.current?.rootWakeRecovery?.dispose();
-    if (event.reason !== "reload") xsLedger.teardown(xsSessionId ?? ctx.sessionManager.getSessionId());
+    if (event.reason !== "reload") {
+      const sessionId = xsSessionId ?? (xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined);
+      if (sessionId !== undefined) xsLedger.teardown(sessionId);
+    }
   });
-  if (xsEnabled) {
-    const sender = createXsSender({
-      port: {
-        list: (args) => webHubRef.current?.xs?.hubPort().list(args) ?? Promise.resolve({ kind: "off" }),
-        resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
-        send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
-      },
-      origin: {
-        current: () => {
-          const xs = xsAttached ? holder.current?.xs : undefined;
-          return xs ? { sessionId: xs.sessionId(), epoch: xs.membership.epoch } : undefined;
-        },
-      },
-      maxChars: settings.fabric.maxChars,
-      wakeOn: settings.fabric.wake.enabled,
-      ...(settings.fabric.wake.enabled
-        ? {
-            level: {
-              levelOfRoot: () => holder.current?.wake?.level.root ?? 0,
-              hopAllowed: (level: number) => holder.current?.wake?.level.hopAllowed(level) ?? false,
-            },
-          }
-        : {}),
-    });
-    pi.registerTool(createListSessionsTool({ sender }));
-    pi.registerTool(createMessageSessionTool({ sender }));
-    const command = createFabricXsCommand({
-      enabled: () => xsEnabled,
-      sessionId: () => holder.current?.xs?.sessionId() ?? "",
-      membership: () => holder.current?.xs?.membership,
-      fence: () => holder.current?.xs?.fence,
-      resolve: (query) => webHubRef.current?.xs?.resolveBlock(query) ?? Promise.resolve({ ok: false, kind: "offline" }),
-      statusView: () => {
-        const xs = holder.current?.xs;
-        const quota = xs?.receiver.wakeQuota();
-        return {
-          capability: xsCapability.state,
-          lines: [
-            ...(quota
-              ? [`in ${quota.recvUsed}/${quota.recvCap} h · wakes ${quota.wakesUsed}/${quota.wakesCap} h`]
-              : []),
-            ...(xs
-              ? [
-                  `controller ${xs.controller?.state ?? "off"} · inbox ${xs.inbox.occupied}/${xs.inbox.cap}`,
-                  `counts ${JSON.stringify(xs.receiver.countersSnapshot())}`,
-                  `audit ${JSON.stringify(xs.audit)}`,
-                ]
-              : []),
-            ...(xsHubLimits
-              ? [
-                  `hub sends ${xsHubLimits.hubSendsPerMin}/min · local ${settings.fabric.crossSession.limits.hubSendsPerMin}/min${xsHubLimits.hubSendsPerMin !== settings.fabric.crossSession.limits.hubSendsPerMin ? " · differs" : ""}`,
-                ]
-              : ["hub limits unavailable"]),
-            ...(xsCollisions.length ? [`tool collisions: ${xsCollisions.join(", ")}`] : []),
-          ],
-        };
-      },
-    });
-    pi.registerCommand("fabric", {
-      ...command,
-      handler: async (args, ctx) => {
-        if (args.trim() === "" || args.trim() === "status") xsHubLimits = await webHubRef.current?.xs?.hubInfo();
-        await command.handler(args, ctx);
-      },
-    });
-  }
   // todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session
   // stack, same late-bound `holder.current` pattern as `forwardSpawn` below.
   // Only reached for the main session — structurally guaranteed by the
@@ -602,6 +559,73 @@ export default function activate(rawPi: ExtensionAPI): void {
       },
     });
     return;
+  }
+
+  if (xsEnabled) {
+    const sender = createXsSender({
+      port: {
+        list: (args) => webHubRef.current?.xs?.hubPort().list(args) ?? Promise.resolve({ kind: "off" }),
+        resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
+        send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
+      },
+      origin: {
+        current: () => {
+          const xs = xsAttached ? holder.current?.xs : undefined;
+          return xs ? { sessionId: xs.sessionId(), epoch: xs.membership.epoch } : undefined;
+        },
+      },
+      maxChars: settings.fabric.maxChars,
+      wakeOn: settings.fabric.wake.enabled,
+      ...(settings.fabric.wake.enabled
+        ? {
+            level: {
+              levelOfRoot: () => holder.current?.wake?.level.root ?? 0,
+              hopAllowed: (level: number) => holder.current?.wake?.level.hopAllowed(level) ?? false,
+            },
+          }
+        : {}),
+    });
+    pi.registerTool(createListSessionsTool({ sender }));
+    pi.registerTool(createMessageSessionTool({ sender }));
+    const command = createFabricXsCommand({
+      enabled: () => xsEnabled,
+      sessionId: () => holder.current?.xs?.sessionId() ?? "",
+      membership: () => holder.current?.xs?.membership,
+      fence: () => holder.current?.xs?.fence,
+      resolve: (query) => webHubRef.current?.xs?.resolveBlock(query) ?? Promise.resolve({ ok: false, kind: "offline" }),
+      statusView: () => {
+        const xs = holder.current?.xs;
+        const quota = xs?.receiver.wakeQuota();
+        return {
+          capability: xsCapability.state,
+          lines: [
+            ...(quota
+              ? [`in ${quota.recvUsed}/${quota.recvCap} h · wakes ${quota.wakesUsed}/${quota.wakesCap} h`]
+              : []),
+            ...(xs
+              ? [
+                  `controller ${xs.controller?.state ?? "off"} · inbox ${xs.inbox.occupied}/${xs.inbox.cap}`,
+                  `counts ${JSON.stringify(xs.receiver.countersSnapshot())}`,
+                  `audit ${JSON.stringify(xs.audit)}`,
+                ]
+              : []),
+            ...(xsHubLimits
+              ? [
+                  `hub sends ${xsHubLimits.hubSendsPerMin}/min · local ${settings.fabric.crossSession.limits.hubSendsPerMin}/min${xsHubLimits.hubSendsPerMin !== settings.fabric.crossSession.limits.hubSendsPerMin ? " · differs" : ""}`,
+                ]
+              : ["hub limits unavailable"]),
+            ...(xsCollisions.length ? [`tool collisions: ${xsCollisions.join(", ")}`] : []),
+          ],
+        };
+      },
+    });
+    pi.registerCommand("fabric", {
+      ...command,
+      handler: async (args, ctx) => {
+        if (args.trim() === "" || args.trim() === "status") xsHubLimits = await webHubRef.current?.xs?.hubInfo();
+        await command.handler(args, ctx);
+      },
+    });
   }
 
   if (caps.canRenderEntries) {
@@ -919,6 +943,12 @@ export default function activate(rawPi: ExtensionAPI): void {
       worktreeOrphans: () =>
         holder.current?.worktreeOrphans() ?? { root: worktreeRoot(), count: 0, capped: false, entries: [] },
       wake: () => holder.current?.wake?.status(),
+      xs: () => {
+        const stack = holder.current?.xs;
+        return stack
+          ? { stack, capability: xsCapability.state, outCap: settings.fabric.crossSession.limits.sendsOutPerHour }
+          : undefined;
+      },
       load: () => {
         const port = holder.current?.load?.port();
         if (!port) return undefined;
@@ -1034,6 +1064,7 @@ export default function activate(rawPi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     xsAttached = false;
+    const nextXsSessionId = xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined;
     notifyCapabilityCtx.current = ctx;
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
     // Defensive: if pi ever fires session_start without a paired shutdown,
@@ -1046,7 +1077,8 @@ export default function activate(rawPi: ExtensionAPI): void {
       holder.current.rootWakeRecovery?.dispose();
       // Defensive replacement without shutdown: a NEW identity proves the old session ended.
       // Same-session reload is deliberately not proof.
-      if (xsSessionId && xsSessionId !== ctx.sessionManager.getSessionId()) xsLedger.teardown(xsSessionId);
+      if (xsSessionId && nextXsSessionId !== undefined && xsSessionId !== nextXsSessionId)
+        xsLedger.teardown(xsSessionId);
       holder.current.backgroundCompletions.dispose();
       holder.current.fleetWidget?.dispose();
       holder.current.keepalive?.dispose();
@@ -1085,8 +1117,8 @@ export default function activate(rawPi: ExtensionAPI): void {
         : undefined,
     );
     holder.current = stack;
-    xsAttached = true;
-    xsSessionId = ctx.sessionManager.getSessionId();
+    xsSessionId = nextXsSessionId;
+    xsAttached = xsSessionId !== undefined && (stack.xs !== undefined || stack.rootWakeRecovery !== undefined);
     if (xsEnabled) {
       // The toolkit's own two declarations are not collisions. Keep foreign declarations and
       // duplicates (when the host exposes them); C-X7 tests host-specific name arbitration.

@@ -11,6 +11,7 @@ describe("XW real hub child × two activate-built stacks × real sockets", () =>
     h = new XsHarness();
     const { a, b, aid, bid } = await joinedPair(h);
     expect((await list(a)).rows).toEqual([expect.objectContaining({ ref: bid.slice(0, 12), receive: "wake" })]);
+    expect(await a.rpc("cmd", { name: "agent", args: "status" })).toContain("xs joined · recv wake · cap unknown");
     expect(await send(a, bid, "deliver-only")).toMatchObject({ effect: "applied" });
     // Different direction avoids pairMinInterval; a fresh host is still unverified (N1).
     expect(await send(b, aid, "N1", true)).toMatchObject({ effect: "applied", wakeDowngraded: "host_unverified" });
@@ -27,6 +28,7 @@ describe("XW real hub child × two activate-built stacks × real sockets", () =>
     let state = await b.rpc("inspect");
     expect(state.messages.at(-1)).toMatchObject({ triggerTurn: true, details: { xsWake: true } });
     expect(state.capability).toBe("verified");
+    expect(await b.rpc("cmd", { name: "agent", args: "status" })).toContain("cap verified");
     expect(state.owned).toBe(true);
     await b.rpc("settle");
     expect((await b.rpc("inspect")).ledger).toHaveLength(0);
@@ -203,4 +205,41 @@ it("old-cap peers stay invisible and an old-cap hub returns off without sending"
     "old hub reconnect",
   );
   expect(await send(a, bid, "no xs hub", true)).toMatchObject({ effect: "none", status: "off" });
+}, 25_000);
+
+it("autoJoin publishes the joined member AFTER webhub session_start's session slot; fork never auto-joins", async () => {
+  h = new XsHarness();
+  const hub = await h.boot("hub");
+  const a = await h.boot("agent", "auto", undefined, true, true);
+  const b = await h.boot("agent", "viewer");
+  await b.rpc("cmd", { args: "join" });
+  const aid = (await a.rpc("inspect")).sessionId;
+  await until(
+    () => list(b),
+    (l) => l.rows?.some((r: any) => aid.startsWith(r.ref)),
+    "auto joined",
+  );
+  const frames = (await hub.rpc("inspect")).slotFrames.filter((f: any) => f.sessionId === aid);
+  const memberIndex = frames.findIndex((f: any) => f.t === "xs_member" && f.joined);
+  expect(memberIndex).toBeGreaterThan(0);
+  expect(frames.slice(0, memberIndex).some((f: any) => f.t === "session")).toBe(true);
+  const fork = await a.rpc("replace", { reason: "fork" });
+  expect(fork.sessionId).not.toBe(aid);
+  expect(await a.rpc("cmd")).toContain("not joined");
+  await until(
+    () => list(b),
+    (l) => l.rows?.length === 0,
+    "fork hidden",
+  );
+}, 30_000);
+
+it("web /new exec claim fences actual socket ingress before its command trampoline runs", async () => {
+  h = new XsHarness();
+  const { hub, a, b, bid } = await joinedPair(h);
+  expect(await hub.rpc("webNew", { sessionId: bid })).toMatchObject({ ok: true });
+  expect(await send(a, bid, "during actual web exec claim")).toMatchObject({
+    effect: "none",
+    reason: "fenced:web_exec",
+  });
+  expect((await b.rpc("inspect")).messages).toHaveLength(0);
 }, 25_000);

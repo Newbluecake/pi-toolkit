@@ -28,6 +28,7 @@ import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 import { countActiveRuns } from "../reload/defer.js";
 import { formatWakeStatusLine, type WakeStatusView } from "../fabric/wake.js";
+import type { StackXs } from "../stack.js";
 import type { DynamicStatusView } from "../compact-hint/dynamic/wire.js";
 import { effectiveThresholdPercentWithTokens, windowScaledForcePercent } from "../compact-hint/threshold.js";
 import { resolveEffectiveHint } from "../compact-hint/dynamic/threshold.js";
@@ -115,6 +116,8 @@ export interface StatusCommandDeps {
    * false ⇒ no line, so the output is byte-identical to the pre-wake build.
    */
   wake?: () => WakeStatusView | undefined;
+  /** Phase-2: read the current stack, never a cached status/member slot. Absent = byte-identical off. */
+  xs?: () => { stack: StackXs; capability: string; outCap: number } | undefined;
   /** Omitted when external agents are disabled; live unified prompt/admission availability. */
   external?: () => { readonly droidUnavailableReason: string | undefined } | undefined;
 }
@@ -642,6 +645,21 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
   if (deps.childSwitch) lines.push(renderChildSwitchLine(deps.childSwitch()));
   const wake = deps.wake?.();
   if (wake !== undefined) lines.push(formatWakeStatusLine(wake));
+  const xs = deps.xs?.();
+  if (xs !== undefined) {
+    const { stack, capability, outCap } = xs;
+    const quota = stack.receiver.wakeQuota();
+    const fence = stack.fence.status();
+    const state = stack.controller?.state;
+    // The hub owns outbound quota; its info reply exposes limits, NOT usage. Never invent 0.
+    lines.push(
+      `xs ${stack.membership.joined ? "joined" : "left"} · recv ${stack.membership.receive} · cap ${capability}` +
+        ` · in ${quota.recvUsed}/${quota.recvCap}h · out n/a/${outCap}h · wakes ${quota.wakesUsed}/${quota.wakesCap}h` +
+        ` · fenced ${stack.receiver.countersSnapshot().fenced} · stuck ${fence.stuck.length}` +
+        ` · unbound ${state === "starting" || state === "deferred" ? 1 : 0}` +
+        ` · lateAbort ${stack.audit.wake_late_aborted ?? 0} · abortStuck ${stack.audit.abortStuck ?? 0}`,
+    );
+  }
   const load = deps.load?.();
   if (load !== undefined) lines.push(`Load: ${load.level}${load.gating ? " · gated" : " · open"}`);
   const external = deps.external?.();

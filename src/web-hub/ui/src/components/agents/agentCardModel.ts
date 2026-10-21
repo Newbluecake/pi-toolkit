@@ -130,3 +130,12 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"]): AgentCar
     outdated: card["outdated"] === true,
   };
 }
+
+/** Read-only xs badge. Hub cap is required; absent/malformed membership status is inert. */
+export function xsBadgeOf(agent: AgentState | undefined, hubCaps: unknown): string | undefined {
+  if (!Array.isArray(hubCaps) || !hubCaps.includes("xs.v1") || !agent) return undefined;
+  const xs = record(record(agent.status)["xs"]);
+  if (xs["joined"] !== true) return undefined;
+  const receive = xs["receive"];
+  return receive === "wake" || receive === "deliver" || receive === "off" ? `xs ${receive}` : undefined;
+}

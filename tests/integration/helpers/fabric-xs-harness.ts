@@ -35,7 +35,13 @@ export class XsHarness {
   readonly home = mkdtempSync(join(tmpdir(), "xw-"));
   readonly peers: Peer[] = [];
   private seq = 0;
-  async boot(role: "hub" | "agent", name: string = role, sessionFile?: string, xsEnabled = true): Promise<Peer> {
+  async boot(
+    role: "hub" | "agent",
+    name: string = role,
+    sessionFile?: string,
+    xsEnabled = true,
+    autoJoin = false,
+  ): Promise<Peer> {
     const cwd = join(this.home, "project");
     mkdirSync(cwd, { recursive: true });
     const child = spawn(
@@ -50,6 +56,7 @@ export class XsHarness {
           XDG_RUNTIME_DIR: "",
           PI_CODING_AGENT_DIR: join(this.home, `agent-${name}-${++this.seq}`),
           XW_NAME: name,
+          XW_AUTO_JOIN: autoJoin ? "1" : "0",
           XW_XS_OFF: xsEnabled ? "0" : "1",
           ...(sessionFile ? { XW_SESSION_FILE: sessionFile } : {}),
         },

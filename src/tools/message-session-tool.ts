@@ -58,8 +58,9 @@ export function createMessageSessionTool(deps: MessageSessionToolDeps): ToolDefi
       "message may have entered the recipient's queue — it usually becomes visible at the recipient's next turn " +
       "boundary; do NOT blindly resend.",
     parameters: MessageSessionParams,
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal) {
       const outcome: XsSendOutcome = await deps.sender.message({
+        ...(signal !== undefined ? { signal } : {}),
         to: params.to,
         text: params.text,
         ...(params.wake !== undefined ? { wake: params.wake } : {}),

@@ -18,6 +18,7 @@ const reply = (id: number, value: unknown) => process.send?.({ id, value });
 let handle: (m: any) => Promise<unknown>;
 if (process.argv[2] === "hub") {
   let registry!: Registry;
+  const slotFrames: Array<{ key: string; t: string; sessionId?: string; joined?: boolean }> = [];
   const deliveries: Array<{ key: string; frame: XsDeliverFrame }> = [];
   let hold: "before" | "after" | undefined;
   let release: (() => void) | undefined;
@@ -34,6 +35,17 @@ if (process.argv[2] === "hub") {
     },
     (deps) => {
       registry = deps.registry as Registry;
+      const onFrame = registry.onFrame.bind(registry);
+      registry.onFrame = (key, frame) => {
+        if (frame.t === "session" || frame.t === "xs_member")
+          slotFrames.push({
+            key,
+            t: frame.t,
+            sessionId: frame.sessionId,
+            ...(frame.t === "xs_member" ? { joined: frame.joined } : {}),
+          });
+        return onFrame(key, frame);
+      };
       request = registry.request.bind(registry);
       registry.request = (async (key: string, frame: any, ms: number, signal?: AbortSignal) => {
         if (frame.t !== "xs_deliver") return request(key, frame, ms, signal);
@@ -62,7 +74,7 @@ if (process.argv[2] === "hub") {
   );
   if ("exists" in hub) throw new Error("hub unexpectedly already exists");
   handle = async (m) => {
-    if (m.op === "inspect") return { deliveries, agents: registry.list() };
+    if (m.op === "inspect") return { deliveries, slotFrames, agents: registry.list() };
     if (m.op === "hold") {
       hold = m.mode;
       barrier = new Promise<void>((r) => {
@@ -79,6 +91,21 @@ if (process.argv[2] === "hub") {
       const old = deliveries[m.index ?? 0]!;
       const key = registry.list().find((a) => a.session?.sessionId === old.frame.to.sessionId)!.agentKey;
       return request(key, { ...old.frame, rid: `replay-${Date.now()}` }, 5_000);
+    }
+    if (m.op === "webNew") {
+      const agent = registry.list().find((a) => a.session?.sessionId === m.sessionId)!;
+      return request(
+        agent.agentKey,
+        {
+          t: "cmd",
+          rid: `new-${Date.now()}`,
+          id: `web-new-${Date.now()}`,
+          deadlineMs: 4000,
+          origin: { listener: "loopback", ip: "127.0.0.1", reqId: "xs-web-exec" },
+          cmd: { op: "command", name: "new", args: "", confirm: true },
+        },
+        5000,
+      );
     }
     if (m.op === "stop") {
       await hub.close("test");
@@ -128,7 +155,7 @@ if (process.argv[2] === "hub") {
       wake: { enabled: true, maxLevel: 5, rootRunMaxS: 60 },
       crossSession: {
         enabled: process.env.XW_XS_OFF !== "1",
-        autoJoin: false,
+        autoJoin: process.env.XW_AUTO_JOIN === "1",
         limits: { listPerMin: 60, pairMinIntervalMs: 5000, pairWakesPerHour: 20, wakesOutPerHour: 60 },
       },
     },

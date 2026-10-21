@@ -60,8 +60,9 @@ export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefiniti
       "List other explicitly-joined main sessions on this machine's web hub (fabric cross-session). Each row carries a " +
       "short ref, optional name, cwd, receive policy and busy state. Address them with message_session using the ref.",
     parameters: ListSessionsParams,
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal) {
       const outcome: XsListOutcome = await deps.sender.list({
+        ...(signal !== undefined ? { signal } : {}),
         ...(params.query !== undefined ? { query: params.query } : {}),
         ...(params.scope !== undefined ? { scope: params.scope } : {}),
       });

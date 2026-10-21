@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
 import { ListSessionsParams } from "../../src/tools/list-sessions-tool.js";
@@ -12,7 +12,7 @@ afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:host")];
   home?.restore();
 });
-function setup(fabric = true, xs = true, webHub = true, control = true, wake = true) {
+function setup(fabric = true, xs = true, webHub = true, control = true, wake = true, compatible = true) {
   home = sandboxHome();
   const dir = join(home.home, ".pi/agent");
   mkdirSync(dir, { recursive: true });
@@ -36,6 +36,7 @@ function setup(fabric = true, xs = true, webHub = true, control = true, wake = t
   );
   const tools = new Map<string, any>(),
     commands: string[] = [];
+  const handlers = new Map<string, Function[]>();
   const pi = {
     registerTool: (t: any) => {
       tools.set(t.name, t);
@@ -44,15 +45,15 @@ function setup(fabric = true, xs = true, webHub = true, control = true, wake = t
       commands.push(n);
     },
     registerEntryRenderer() {},
-    on() {},
+    on: (event: string, fn: Function) => handlers.set(event, [...(handlers.get(event) ?? []), fn]),
     sendMessage() {},
-    appendEntry() {},
+    ...(compatible ? { appendEntry() {} } : {}),
     getCommands: () => [],
     events: { on: () => () => {}, emit() {} },
     exec: async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
   } as unknown as ExtensionAPI;
   activate(pi);
-  return { tools, commands, file };
+  return { tools, commands, file, handlers };
 }
 describe("XW activate-frozen main-session surface", () => {
   it.each([
@@ -75,4 +76,45 @@ describe("XW activate-frozen main-session surface", () => {
     writeFileSync(s.file, JSON.stringify({ fabric: { enabled: false }, webHub: { enabled: false } }));
     expect(JSON.stringify([...s.tools].map(([name, t]) => [name, t.parameters]))).toBe(before);
   });
+});
+
+it("compat failure registers no xs tools/command but retains B1 orphan abort before the first request", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const s = setup(true, true, true, true, true, false);
+    expect([...s.tools.keys()]).not.toContain("message_session");
+    expect([...s.tools.keys()]).not.toContain("list_sessions");
+    expect(s.commands).not.toContain("fabric");
+    expect(s.tools.get("Agent").label).toContain("unavailable");
+    const abort = vi.fn();
+    for (const h of s.handlers.get("before_agent_start") ?? [])
+      await h(
+        {
+          messageType: "custom",
+          message: { customType: "subagent:xs", details: { xsWake: true, wakeToken: "orphan" } },
+        },
+        { sessionManager: { getSessionId: () => "disabled-host" }, abort },
+      );
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("wake_orphan_aborted"));
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+it("xs-off minimal host does not read sessionManager in B1/shutdown hooks", async () => {
+  const s = setup(true, false, true, true, true, false);
+  const read = vi.fn(() => {
+    throw new Error("minimal host has no session manager");
+  });
+  const ctx = {
+    get sessionManager() {
+      return read();
+    },
+  };
+  for (const h of s.handlers.get("before_agent_start") ?? [])
+    await h({ messageType: "user", prompt: "hello", systemPrompt: "host" }, ctx);
+  // Only the early XW shutdown hook; later general host cleanup has its own contract.
+  await s.handlers.get("session_shutdown")?.[0]?.({ reason: "quit" }, ctx);
+  expect(read).not.toHaveBeenCalled();
 });
