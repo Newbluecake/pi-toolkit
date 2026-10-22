@@ -50,6 +50,8 @@ if (process.argv[2] === "hub") {
             crossSession: {
               limits: { hubSendsPerMin: 600 },
               ...(process.env.XW_HUB_REPLY_OFF === "1" ? { reply: false } : {}),
+              // channel-plan §3.1 (CHW): hub-global broadcast params (absent ⇒ hub defaults 16/4).
+              ...(process.env.XW_HUB_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_HUB_CHANNELS_JSON) } : {}),
             },
           }),
     },
@@ -197,13 +199,19 @@ if (process.argv[2] === "hub") {
       enabled: true,
       minIntervalMs: 0,
       rootMinIntervalMs: 0,
-      wake: { enabled: true, maxLevel: 5, rootRunMaxS: 60 },
+      wake: {
+        enabled: true,
+        maxLevel: process.env.XW_WAKE_MAX_LEVEL ? Number(process.env.XW_WAKE_MAX_LEVEL) : 5,
+        rootRunMaxS: 60,
+      },
       crossSession: {
         enabled: process.env.XW_XS_OFF !== "1",
         autoJoin: process.env.XW_AUTO_JOIN === "1",
         ...(process.env.XW_REPLY_OFF === "1" ? { reply: { enabled: false } } : {}),
         ...(process.env.XW_RECEIVE ? { receive: process.env.XW_RECEIVE } : {}),
         ...(process.env.XW_REPLY_JSON ? { reply: JSON.parse(process.env.XW_REPLY_JSON) } : {}),
+        // channel-plan §6.4 (CHW): `fabric.crossSession.channels` overrides.
+        ...(process.env.XW_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_CHANNELS_JSON) } : {}),
         limits: { listPerMin: 60, pairMinIntervalMs: 5000, pairWakesPerHour: 20, wakesOutPerHour: 60 },
       },
     },
@@ -452,6 +460,11 @@ if (process.argv[2] === "hub") {
     }
     if (m.op === "clearReplyLedger") {
       delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:xs-reply-ledger")];
+      return true;
+    }
+    if (m.op === "settingsChannels") {
+      (config.fabric.crossSession as Record<string, unknown>).channels = m.channels;
+      writeFileSync(join(agentDir, "pi-subagent.json"), JSON.stringify(config));
       return true;
     }
     if (m.op === "settingsOff") {

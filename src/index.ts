@@ -46,8 +46,12 @@ import { display as unreadDisplay, XS_INBOX_STATUS_KEY } from "./fabric/xs/unrea
 import { xsOn } from "./fabric/xs/switch.js";
 import { getXsReplyLedger } from "./fabric/xs/reply-ledger.js";
 import { createXsSender, detectXsToolCollisions, type XsSender } from "./fabric/xs/sender.js";
-import { createListSessionsTool, ListSessionsParams } from "./tools/list-sessions-tool.js";
-import { createMessageSessionTool, MessageSessionParams } from "./tools/message-session-tool.js";
+import { createListSessionsTool, listSessionsParamsFor } from "./tools/list-sessions-tool.js";
+import { createMessageChannelTool, MessageChannelParams } from "./tools/message-channel-tool.js";
+import type { XsChannelView } from "./fabric/xs/types-channel.js";
+import { currentConnection } from "./web-hub/agent/connection.js";
+import { XS_CHANNEL_HUB_CAP } from "./web-hub/protocol/xs.js";
+import { createMessageSessionTool, messageSessionParamsFor } from "./tools/message-session-tool.js";
 import { createFabricXsCommand } from "./commands/fabric-xs.js";
 import type { XsHubLimitsWire } from "./web-hub/protocol/xs.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
@@ -282,6 +286,9 @@ export default function activate(rawPi: ExtensionAPI): void {
   const webHubRef: { current?: WebHubControl } = {};
   const xsFencePorts: { topicSwitch?: () => boolean; goal?: () => boolean } = {};
   const replyEnabled = xsEnabled && settings.fabric.crossSession.reply.enabled; // frozen per activate
+  // Channel-plan §3.1/§6 (CHW): frozen per activate (non-live). Off ⇒ old-agent shape: no
+  // `xs.channel.v1` cap, no `message_channel`, the legacy `list_sessions` instance, named channels suspended.
+  const channelsOn = xsEnabled && settings.fabric.crossSession.channels.enabled;
   const xsLedger = getXsWakeLedger();
   const xsCapability = getXsHostCapability();
   const xsSessionOf = (ctx: { sessionManager?: { getSessionId(): string } }): string | undefined => {
@@ -609,6 +616,16 @@ export default function activate(rawPi: ExtensionAPI): void {
 
   // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
   let xsSender: XsSender | undefined;
+  // Channel-plan §2.3 (CHW): live probe — local channels on ∧ live link ∧ the hub declared xs.channel.v1.
+  const xsHubChannelCap = (): boolean => webHubRef.current?.xs?.hubPort().hubChannelCap?.() === true;
+  // Channel-plan §2.3/§10 (CHW): the sender's channel view delegates to the CURRENT stack's membership
+  // (rebuilt per session_start); no attached stack ⇒ empty sets / not joined (fail closed).
+  const xsChannelView: XsChannelView = {
+    pref: () => (xsAttached ? (holder.current?.xs?.membership.pref() ?? []) : []),
+    effective: () => (xsAttached ? (holder.current?.xs?.membership.effective() ?? []) : []),
+    link: (hubCap) => (xsAttached ? (holder.current?.xs?.membership.link(hubCap) ?? []) : []),
+    linkJoined: (hubCap) => (xsAttached ? holder.current?.xs?.membership.linkJoined(hubCap) === true : false),
+  };
   if (xsEnabled) {
     const sender = createXsSender({
       port: {
@@ -616,6 +633,16 @@ export default function activate(rawPi: ExtensionAPI): void {
         resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
         send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
         ...(replyEnabled ? { replyCapable: () => webHubRef.current?.xs?.hubPort().replyCapable?.() === true } : {}),
+        // Channel-plan §5.5/§4.1 (CHW): the channel ops ride the same late-bound bridge; absent bridge ⇒ off.
+        ...(channelsOn
+          ? {
+              hubChannelCap: xsHubChannelCap,
+              broadcast: (args) =>
+                webHubRef.current?.xs?.hubPort().broadcast?.(args) ?? Promise.resolve({ kind: "off" as const }),
+              channels: (args) =>
+                webHubRef.current?.xs?.hubPort().channels?.(args) ?? Promise.resolve({ kind: "off" as const }),
+            }
+          : {}),
       },
       origin: {
         current: () => {
@@ -639,6 +666,7 @@ export default function activate(rawPi: ExtensionAPI): void {
             },
           }
         : {}),
+      ...(channelsOn ? { channels: xsChannelView } : {}),
       wakeOn: settings.fabric.wake.enabled,
       ...(settings.fabric.wake.enabled
         ? {
@@ -650,19 +678,56 @@ export default function activate(rawPi: ExtensionAPI): void {
         : {}),
     });
     xsSender = sender;
-    pi.registerTool(createListSessionsTool({ sender }));
+    pi.registerTool(createListSessionsTool({ sender, channels: channelsOn }));
     pi.registerTool(createMessageSessionTool({ sender, reply: replyEnabled }));
+    // Channel-plan §6.1 (CHW): main session only (this whole block is post-guard), xsOn ∧ channels.enabled.
+    if (channelsOn) pi.registerTool(createMessageChannelTool({ sender }));
     const command = createFabricXsCommand({
       enabled: () => xsEnabled,
       sessionId: () => holder.current?.xs?.sessionId() ?? "",
       membership: () => holder.current?.xs?.membership,
       fence: () => holder.current?.xs?.fence,
-      resolve: (query) => webHubRef.current?.xs?.resolveBlock(query) ?? Promise.resolve({ ok: false, kind: "offline" }),
+      // Channel-plan §2.3 (CHW): not joined on THIS link ⇒ no resolve frame; the command falls back to
+      // its offline full-id rule (an old hub would otherwise resolve for a non-member, C4).
+      resolve: (query) =>
+        channelsOn && !xsChannelView.linkJoined(xsHubChannelCap())
+          ? Promise.resolve({ ok: false, kind: "offline" })
+          : (webHubRef.current?.xs?.resolveBlock(query) ?? Promise.resolve({ ok: false, kind: "offline" })),
       replies: () => {
         const reply = holder.current?.xs?.reply;
         return reply ? { ledger: reply.ledger, maxPending: reply.maxPending } : undefined;
       },
       onPolicyChange: () => holder.current?.xs?.reply?.flush(),
+      // Channel-plan §6.3 (CHW): the hub listing (also the completion cache's refresh source — the
+      // command itself refreshes after status/channels/join/leave; the completer never does I/O).
+      ...(channelsOn
+        ? {
+            channels: async () => {
+              const out = await sender.channels();
+              return out.status === "ok"
+                ? { ok: true as const, channels: out.channels ?? [] }
+                : { ok: false as const, reason: out.reason ?? out.status };
+            },
+            broadcast: () => ({
+              outPerHour: settings.fabric.crossSession.channels.broadcast.outPerHour,
+              wakeOutPerHour: settings.fabric.crossSession.channels.broadcast.wakeOutPerHour,
+              wakeMaxRecipients: settings.fabric.crossSession.channels.broadcast.wakeMaxRecipients,
+            }),
+          }
+        : {}),
+      hubChannelCap: () => {
+        // `undefined` ⇔ no live hub link (n/a); otherwise whether THIS hub declared xs.channel.v1.
+        const conn = webHubRef.current?.xs !== undefined ? currentConnection() : undefined;
+        return conn !== undefined && conn.status().state === "live"
+          ? conn.caps.includes(XS_CHANNEL_HUB_CAP)
+          : undefined;
+      },
+      directoryChannels: () => {
+        const directory = xsAttached ? holder.current?.xs?.directory : undefined;
+        return directory ? directory.rows().flatMap((row) => row.channels ?? []) : [];
+      },
+      autoJoinInvalid: () =>
+        settings.fabric.crossSession.autoJoin && settings.fabric.crossSession.channels.autoJoinInvalid,
       statusView: () => {
         const xs = holder.current?.xs;
         const quota = xs?.receiver.wakeQuota();
@@ -1137,8 +1202,11 @@ export default function activate(rawPi: ExtensionAPI): void {
   const mentionSessions: MentionSessionPort | undefined = xsSender
     ? createMentionSessionPort({
         ...sessionParseDeps(),
+        // Channel-plan §2.3 (CHW): the LINK set — a named-channel-only session on an old hub passes `@` through.
         joined: () =>
-          xsAttached && holder.current?.xs?.membership.joined === true && webHubRef.current?.xs !== undefined,
+          xsAttached &&
+          holder.current?.xs?.membership.linkJoined(channelsOn && xsHubChannelCap()) === true &&
+          webHubRef.current?.xs !== undefined,
         send: async (target, message, options) => {
           const out = await xsSender!.message({
             to: target,
@@ -1236,6 +1304,7 @@ export default function activate(rawPi: ExtensionAPI): void {
             },
             memberChanged: () => webHubRef.current?.xs?.publishMember(),
             unreadChanged: refreshXsInbox,
+            ...(channelsOn ? { hubChannelCap: xsHubChannelCap } : {}),
             listRows: async (origin) => {
               const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
               return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
@@ -1256,9 +1325,11 @@ export default function activate(rawPi: ExtensionAPI): void {
       // The toolkit's own two declarations are not collisions. Keep foreign declarations and
       // duplicates (when the host exposes them); C-X7 tests host-specific name arbitration.
       try {
+        // Channel-plan §6 (CHW): compare against the instances THIS activation registered.
         const own = new Map<string, unknown>([
-          ["list_sessions", ListSessionsParams],
-          ["message_session", MessageSessionParams],
+          ["list_sessions", listSessionsParamsFor(channelsOn)],
+          ["message_session", messageSessionParamsFor(replyEnabled)],
+          ...(channelsOn ? ([["message_channel", MessageChannelParams]] as const) : []),
         ]);
         xsCollisions = detectXsToolCollisions(
           pi
@@ -1267,6 +1338,7 @@ export default function activate(rawPi: ExtensionAPI): void {
               (tool) => !own.has(tool.name) || JSON.stringify(tool.parameters) !== JSON.stringify(own.get(tool.name)),
             )
             .map((tool) => tool.name),
+          { channels: channelsOn },
         );
         if (xsCollisions.length) console.warn(`[pi-subagent] fabric xs tool collisions: ${xsCollisions.join(", ")}`);
       } catch {
@@ -1289,6 +1361,7 @@ export default function activate(rawPi: ExtensionAPI): void {
                     cwdLabel: row.cwdLabel,
                     receive: row.receive,
                     busy: row.busy,
+                    ...(row.channels !== undefined && row.channels.length > 0 ? { channels: row.channels } : {}),
                   }));
                 },
                 sessionBareName: (name: string) => sessionCompletionBare(sessionParseDeps(), name),
@@ -1462,10 +1535,26 @@ export default function activate(rawPi: ExtensionAPI): void {
         ? {
             xs: {
               stack: () => (xsAttached ? holder.current?.xs : undefined),
-              memberLimits: () => settings.fabric.crossSession.limits,
+              // Channel-plan §3.2/§6.4 (CHW): the three broadcast keys ride along only when channels are on;
+              // the bridge writes them only into a named-channel frame (default-only frames stay byte-identical).
+              memberLimits: () =>
+                channelsOn
+                  ? {
+                      ...settings.fabric.crossSession.limits,
+                      broadcastsOutPerHour: settings.fabric.crossSession.channels.broadcast.outPerHour,
+                      broadcastMinIntervalMs: settings.fabric.crossSession.channels.broadcast.minIntervalS * 1000,
+                      broadcastWakesOutPerHour: settings.fabric.crossSession.channels.broadcast.wakeOutPerHour,
+                    }
+                  : settings.fabric.crossSession.limits,
               hubSendsPerMin: () => settings.fabric.crossSession.limits.hubSendsPerMin,
               // Reply-plan §5.1: frozen per activate (non-live, §8.1); unset ⇒ pre-reply byte shape.
               replyEnabled: () => replyEnabled,
+              // Channel-plan §3.1 (CHW): agent cap `xs.channel.v1` + hub-global broadcast params.
+              channelsEnabled: () => channelsOn,
+              channelsHubConfig: () => ({
+                maxRecipients: settings.fabric.crossSession.channels.broadcast.maxRecipients,
+                wakeMaxRecipients: settings.fabric.crossSession.channels.broadcast.wakeMaxRecipients,
+              }),
             },
           }
         : {}),

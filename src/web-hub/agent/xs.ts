@@ -34,6 +34,8 @@ import { channelsFieldToWrite, linkJoined as channelLinkJoined, XS_DEFAULT_CHANN
 import type { XsChannelView } from "../../fabric/xs/types-channel.js";
 import type {
   XsHubPort,
+  XsPortBroadcastArgs,
+  XsPortChannelsArgs,
   XsPortListArgs,
   XsPortReply,
   XsPortResolveArgs,
@@ -310,6 +312,24 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
     query: args.query,
   });
+  // channel-plan §5.5/§4.1 (CHW): the two channel ops; roundTrip refuses them (nothing sent) unless the
+  // live hub declared xs.channel.v1. `wake`/`level` follow the send rules (sender pre-checked them).
+  const reqOfBroadcast = (args: XsPortBroadcastArgs): XsReqFrame => ({
+    t: "xs_req",
+    rid: newAdminRid(),
+    op: "broadcast",
+    origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
+    channel: args.channel,
+    text: args.text,
+    ...(args.wake === true ? { wake: true } : {}),
+    ...(args.level !== undefined ? { level: args.level } : {}),
+  });
+  const reqOfChannels = (args: XsPortChannelsArgs): XsReqFrame => ({
+    t: "xs_req",
+    rid: newAdminRid(),
+    op: "channels",
+    origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
+  });
   const reqOfSend = (args: XsPortSendArgs): XsReqFrame => ({
     t: "xs_req",
     rid: newAdminRid(),
@@ -478,6 +498,10 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         send: (args) => roundTrip(reqOfSend(args)),
         replyCapable: () => replyEnabled() && deps.conn()?.status().state === "live" && hubHasReply(),
         channelCapable: () => channelsEnabled() && deps.conn()?.status().state === "live" && hubHasChannel(),
+        // channel-plan §5.5 (CHW): CH4's sender reads the same probe under the name `hubChannelCap`.
+        hubChannelCap: () => channelsEnabled() && deps.conn()?.status().state === "live" && hubHasChannel(),
+        broadcast: (args) => roundTrip(reqOfBroadcast(args)),
+        channels: (args) => roundTrip(reqOfChannels(args)),
       };
     },
 

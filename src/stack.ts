@@ -78,6 +78,7 @@ import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
 import { RootWakeController, type RootWakeAudit } from "./fabric/root-wake.js";
 import { createSessionFence, type FencePorts, type SessionFence } from "./fabric/xs/fence.js";
 import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "./fabric/xs/membership.js";
+import { channelsFieldToWrite, isDefaultOnly, XS_DEFAULT_CHANNEL } from "./fabric/xs/channel.js";
 import { XsInbox } from "./fabric/xs/inbox.js";
 import { createXsDirectoryCache, type XsDirectoryCache, type XsDirectoryRow } from "./fabric/xs/directory.js";
 import { XsReceiver } from "./fabric/xs/receiver.js";
@@ -1634,6 +1635,10 @@ export interface StackXsInput {
   listRows?: (origin: { sessionId: string; epoch: number }) => Promise<readonly XsDirectoryRow[] | undefined>;
   /** Channel-plan §12 (IBW): the unread inbox count may have changed (tap write / turn event). Display only. */
   unreadChanged?: () => void;
+  /** Channel-plan §2.3 (CHW): does the LIVE hub link declare `xs.channel.v1` (and local channels are on)?
+   *  Late-bound (the bridge may be offline / absent). Absent or throwing ⇒ no cap (fail closed: a
+   *  named-channel-only session reads as not joined on this link; default-only is unaffected). */
+  hubChannelCap?: () => boolean;
 }
 
 export interface StackXs extends XsStackPort {
@@ -1692,6 +1697,8 @@ function buildStackXs(
     allowFrom: config.allowFrom,
     allowFromDenyAll: config.allowFromDenyAll,
     replyEnabled: config.reply.enabled,
+    // Channel-plan §2.3 (CHW): channels off ⇒ named channels suspended (never folded into default).
+    channelsEnabled: config.channels.enabled,
     persist: (data) => {
       if (disposed || ctx.sessionManager.getSessionId() !== sessionId) return;
       try {
@@ -1710,7 +1717,25 @@ function buildStackXs(
   const restored = readXsMembershipEntry(ctx.sessionManager.getBranch());
   membership.restore(restored);
   // Explicit persisted leave wins over autoJoin; fork/copy never inherits the parent's opt-in.
-  if (config.autoJoin && reason !== "fork" && restored === undefined) membership.join();
+  // Channel-plan §2.4 (CHW): the boolean `autoJoin` stays the master switch; it joins
+  // `channels.autoJoin` (default ["default"] ⇒ the legacy join). All entries invalid ⇒ join nothing
+  // (`/fabric status` says so). Channels off ⇒ only `#default` may be auto-joined (named entries are
+  // never folded into default; with no default entry nothing is joined).
+  if (config.autoJoin && reason !== "fork" && restored === undefined && !config.channels.autoJoinInvalid) {
+    const names = config.channels.enabled
+      ? config.channels.autoJoin
+      : config.channels.autoJoin.filter((name) => name === XS_DEFAULT_CHANNEL);
+    if (names.length > 0) membership.join(names);
+  }
+  // Channel-plan §2.3: the link-effective view (receiver stage 3, sender gate, directory, reply
+  // receivability) needs the live hub cap; read late, never throws.
+  const hubChannelCap = (): boolean => {
+    try {
+      return input.hubChannelCap?.() === true;
+    } catch {
+      return false;
+    }
+  };
   const fence = createSessionFence({ ...(input.ports ? { ports: input.ports } : {}) });
   fence.onEvent({ type: "session_start" });
   const inbox = new XsInbox(config.limits.inboxCap);
@@ -1790,6 +1815,7 @@ function buildStackXs(
     host,
     recvPerHour: config.limits.recvPerHour,
     wakesInPerHour: config.limits.wakesInPerHour,
+    hubChannelCap,
     ...(level ? { level } : {}),
   });
   const audit: Partial<Record<RootWakeAudit, number>> = {};
@@ -1874,7 +1900,8 @@ function buildStackXs(
       gate,
       flush,
       receivable: (target) => {
-        if (!membership.joined) return "not_joined";
+        // Channel-plan §2.3: receiver stage 3 judges against the LINK set — mirror it here.
+        if (!membership.linkJoined(hubChannelCap())) return "not_joined";
         if (membership.receive === "off") return "receive_off";
         return membership.senderAllowed(target) ? "ok" : "blocked";
       },
@@ -1931,11 +1958,22 @@ function buildStackXs(
   }
   // Reply-plan §9.2 (MW): the identity key changes on epoch bump (attach/join/leave) and on `/new`
   // (a new stack ⇒ a new cache), so any such change clears it; not joined ⇒ no view ⇒ no rows.
+  // Channel-plan §2.3/§4.3 (CHW): gated by the LINK set; the link channels fold into the identity so a
+  // local channel change (or a hub-cap flip) clears the cache. Default-only ⇒ no `channels` key ⇒ the
+  // pre-channel identity key, byte for byte.
+  const directoryView = (): { key: string; channels?: readonly string[] } | undefined => {
+    if (disposed) return undefined;
+    const cap = hubChannelCap();
+    if (!membership.linkJoined(cap)) return undefined;
+    const key = `${sessionId}#${membership.epoch}`;
+    const link = membership.link(cap);
+    return isDefaultOnly(link) ? { key } : { key, channels: link };
+  };
   const directory = createXsDirectoryCache({
     source: {
-      view: () => (!disposed && membership.joined ? { key: `${sessionId}#${membership.epoch}` } : undefined),
+      view: directoryView,
       fetch: async () => {
-        if (disposed || !membership.joined || !input.listRows) return undefined;
+        if (disposed || !membership.linkJoined(hubChannelCap()) || !input.listRows) return undefined;
         return input.listRows({ sessionId, epoch: membership.epoch });
       },
     },
@@ -1945,11 +1983,18 @@ function buildStackXs(
     sessionId: () => sessionId,
     directory,
     member: () => ({ epoch: membership.epoch, joined: membership.joined, receive: membership.receive }),
-    status: () => ({
-      joined: membership.joined,
-      receive: membership.receive,
-      blocked: membership.blockedSnapshot().length,
-    }),
+    // Channel-plan §3.2 (CHW): `channels` only when the effective set is not default-only (the
+    // per-write slotFlush trims it — and sets `joined ← linkJoined` — for a hub without the cap).
+    status: () => {
+      const channels = config.channels.enabled ? channelsFieldToWrite(membership.effective(), true) : undefined;
+      return {
+        joined: membership.joined,
+        receive: membership.receive,
+        blocked: membership.blockedSnapshot().length,
+        ...(channels !== undefined ? { channels } : {}),
+      };
+    },
+    channelView: () => membership,
     deliver: (frame) => {
       if (disposed) return { effect: "none", reason: "session_changed", woke: false };
       // Also reconcile idle-poll/deferred-deadline transitions before the next capacity check.
