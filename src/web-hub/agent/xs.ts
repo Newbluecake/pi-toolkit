@@ -30,6 +30,8 @@
  */
 import { effectiveReceive, isValidXsSessionId } from "../../config/settings.js";
 import type { XsAckVerdict } from "../../fabric/xs/dedup.js";
+import { channelsFieldToWrite, linkJoined as channelLinkJoined, XS_DEFAULT_CHANNEL } from "../../fabric/xs/channel.js";
+import type { XsChannelView } from "../../fabric/xs/types-channel.js";
 import type {
   XsHubPort,
   XsPortListArgs,
@@ -38,7 +40,15 @@ import type {
   XsPortSendArgs,
 } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
-import { XS_AGENT_CAPS, XS_HUB_CAP, XS_REPLY_AGENT_CAP, XS_REPLY_HUB_CAP, XS_SLOT_KIND } from "../protocol/xs.js";
+import {
+  XS_AGENT_CAPS,
+  XS_CHANNEL_AGENT_CAP,
+  XS_CHANNEL_HUB_CAP,
+  XS_HUB_CAP,
+  XS_REPLY_AGENT_CAP,
+  XS_REPLY_HUB_CAP,
+  XS_SLOT_KIND,
+} from "../protocol/xs.js";
 import type {
   XsDeliverFrame,
   XsHubLimitsWire,
@@ -55,6 +65,8 @@ export interface XsReplyHubPort extends XsHubPort {
   send(args: XsPortSendArgs): Promise<XsPortReply>;
   /** True iff local reply is enabled AND the live hub link declared `xs.reply.v1`. */
   replyCapable(): boolean;
+  /** True iff local channels are enabled AND the live hub link declared `xs.channel.v1`. */
+  channelCapable?(): boolean;
 }
 
 // --------------------------------------------------------------------- ports (XW threads these)
@@ -75,6 +87,9 @@ export interface XsStackPort {
   /** channel-plan §12 (IBP): unread inbox events of the stack's CURRENT session (IB1 `count`).
    *  Optional: absent ⇒ `StatusInfo.xsInbox` is never written. */
   unread?(): number;
+  /** channel-plan §2.3 (CH2): the live channel view (CH3's membership). Optional: absent ⇒ the
+   *  member/status frames stay byte-identical to the pre-channel shape (effective = joined ? [default] : []). */
+  channelView?(): XsChannelView;
 }
 
 /** What `wireWebHub` threads as `deps.xs` — presence IS `xsOn` (XW computes the switch at
@@ -90,6 +105,12 @@ export interface XsAgentPort {
   /** Reply-plan §5.1: `fabric.crossSession.reply.enabled` — unset ⇒ false (agent byte-identical
    *  to the pre-reply shape; the agent never advertises `xs.reply.v1`). */
   replyEnabled?(): boolean;
+  /** Channel-plan §3.1: `fabric.crossSession.channels.enabled` — unset ⇒ false (no `xs.channel.v1`
+   *  cap, no channel keys anywhere; byte-identical to the pre-channel agent). */
+  channelsEnabled?(): boolean;
+  /** Channel-plan §3.1: hub-global broadcast params for `HubConfig.crossSession.channels`; only
+   *  consulted while `channelsEnabled()`. Absent ⇒ the key is not written (hub defaults, never "off"). */
+  channelsHubConfig?(): { maxRecipients: number; wakeMaxRecipients: number } | undefined;
 }
 
 export interface XsAgentBridgeDeps {
@@ -106,7 +127,10 @@ export interface XsAgentBridge {
   caps(): readonly string[];
   /** The `HubConfig.crossSession` value for `buildHubConfig` (never `undefined` — the port's
    *  `hubSendsPerMin` is clamped to its schema bounds before use). */
-  hubCrossSessionConfig(): { limits: { hubSendsPerMin: number } };
+  hubCrossSessionConfig(): {
+    limits: { hubSendsPerMin: number };
+    channels?: { maxRecipients: number; wakeMaxRecipients: number };
+  };
   /** Connection `BindingPort.onXsDeliver` — answers EXACTLY ONE `xs_ack`, never throws. */
   onDeliver(frame: XsDeliverFrame): void;
   /** (Re)publish the `xs_member` slot for the CURRENT stack (attach, join/leave/receive
@@ -146,6 +170,9 @@ const MEMBER_LIMIT_BOUNDS = {
   pairWakesPerHour: [0, 20],
   inFlightPerSession: [1, 16],
   listPerMin: [1, 60],
+  broadcastsOutPerHour: [0, 60],
+  broadcastMinIntervalMs: [10_000, 3_600_000],
+  broadcastWakesOutPerHour: [0, 2],
 } as const;
 
 function clampInt(v: number, lo: number, hi: number): number {
@@ -154,7 +181,19 @@ function clampInt(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
-function clampMemberLimits(l: XsMemberLimitsWire): XsMemberLimitsWire {
+/** `withBroadcast` ⇔ the member frame carries named channels (§3.2: the three broadcast keys are
+ *  never written for default-only). */
+function clampMemberLimits(l: XsMemberLimitsWire, withBroadcast: boolean): XsMemberLimitsWire {
+  const bc: Partial<XsMemberLimitsWire> = {};
+  if (withBroadcast) {
+    const B = MEMBER_LIMIT_BOUNDS;
+    if (l.broadcastsOutPerHour !== undefined)
+      bc.broadcastsOutPerHour = clampInt(l.broadcastsOutPerHour, ...B.broadcastsOutPerHour);
+    if (l.broadcastMinIntervalMs !== undefined)
+      bc.broadcastMinIntervalMs = clampInt(l.broadcastMinIntervalMs, ...B.broadcastMinIntervalMs);
+    if (l.broadcastWakesOutPerHour !== undefined)
+      bc.broadcastWakesOutPerHour = clampInt(l.broadcastWakesOutPerHour, ...B.broadcastWakesOutPerHour);
+  }
   return {
     sendsOutPerMin: clampInt(l.sendsOutPerMin, ...MEMBER_LIMIT_BOUNDS.sendsOutPerMin),
     sendsOutPerHour: clampInt(l.sendsOutPerHour, ...MEMBER_LIMIT_BOUNDS.sendsOutPerHour),
@@ -163,7 +202,27 @@ function clampMemberLimits(l: XsMemberLimitsWire): XsMemberLimitsWire {
     pairWakesPerHour: clampInt(l.pairWakesPerHour, ...MEMBER_LIMIT_BOUNDS.pairWakesPerHour),
     inFlightPerSession: clampInt(l.inFlightPerSession, ...MEMBER_LIMIT_BOUNDS.inFlightPerSession),
     listPerMin: clampInt(l.listPerMin, ...MEMBER_LIMIT_BOUNDS.listPerMin),
+    ...bc,
   };
+}
+
+/** The effective channel set a stored member/status frame stands for (§3.2: `channels` absent ≡
+ *  `joined ? [default] : []`). */
+function frameChannels(channels: readonly string[] | undefined, joined: boolean): string[] {
+  return channels !== undefined ? [...channels] : joined ? [XS_DEFAULT_CHANNEL] : [];
+}
+
+function hasBroadcastKeys(l: XsMemberLimitsWire): boolean {
+  return (
+    l.broadcastsOutPerHour !== undefined ||
+    l.broadcastMinIntervalMs !== undefined ||
+    l.broadcastWakesOutPerHour !== undefined
+  );
+}
+
+function stripBroadcastKeys(l: XsMemberLimitsWire): XsMemberLimitsWire {
+  const { broadcastsOutPerHour: _a, broadcastMinIntervalMs: _b, broadcastWakesOutPerHour: _c, ...rest } = l;
+  return rest;
 }
 
 // --------------------------------------------------------------------- the bridge
@@ -181,6 +240,14 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       return false;
     }
   };
+  const channelsEnabled = (): boolean => {
+    try {
+      return deps.port.channelsEnabled?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  const hubHasChannel = (): boolean => deps.conn()?.caps.includes(XS_CHANNEL_HUB_CAP) === true;
   const hubHasReply = (): boolean => deps.conn()?.caps.includes(XS_REPLY_HUB_CAP) === true;
 
   const learnRef = (ref: string, sessionId: string): void => {
@@ -197,6 +264,11 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   const roundTrip = async (frame: XsReqFrame): Promise<XsPortReply> => {
     const conn = deps.conn();
     if (conn === undefined) return { kind: "link_lost" };
+    // channel-plan §3.3: channel-only ops / fields go ONLY to a hub that declared xs.channel.v1 —
+    // an old hub's strict decoder would drop the whole frame. Nothing is sent.
+    if ((["broadcast", "channels"].includes(frame.op as string) || frame.channel !== undefined) && !hubHasChannel()) {
+      return conn.status().state === "live" ? { kind: "off" } : { kind: "link_lost" };
+    }
     try {
       const res: XsResFrame = await conn.request(frame, XS_HUB_CAP);
       return { kind: "res", res };
@@ -226,6 +298,10 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
     ...(args.query !== undefined ? { query: args.query } : {}),
     ...(args.scope !== undefined ? { scope: args.scope } : {}),
+    // channel-plan §3.3: optional list filter (CH4 adds it to the port args); roundTrip guards the hub cap
+    ...(typeof (args as { channel?: unknown }).channel === "string"
+      ? { channel: (args as { channel: string }).channel }
+      : {}),
   });
   const reqOfResolve = (args: XsPortResolveArgs): XsReqFrame => ({
     t: "xs_req",
@@ -250,15 +326,31 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
 
   const slotFlush: SlotFlush = (frame, hubCaps) => {
     const usable = replyEnabled() && hubCaps.includes(XS_REPLY_HUB_CAP);
+    const hubCap = hubCaps.includes(XS_CHANNEL_HUB_CAP);
     if (frame.t === "xs_member") {
-      const m = frame as XsMemberFrame;
-      if (m.receive !== "replies" || usable) return frame;
-      return { ...m, receive: effectiveReceive(m.receive, false) } as XsMemberFrame;
+      let m = frame as XsMemberFrame;
+      if (m.receive === "replies" && !usable)
+        m = { ...m, receive: effectiveReceive(m.receive, false) } as XsMemberFrame;
+      if (!hubCap && (m.channels !== undefined || hasBroadcastKeys(m.limits) || m.joined)) {
+        // §3.2 old hub: drop channels + the broadcast keys, `joined ← linkJoined` (a session only
+        // in named channels is NOT joined on this hub; default-only frames pass through unchanged).
+        const { channels, limits, ...rest } = m;
+        const joined = channelLinkJoined(frameChannels(channels, m.joined), true, false);
+        const out: XsMemberFrame = { ...rest, joined, limits: stripBroadcastKeys(limits) };
+        return out;
+      }
+      return m;
     }
     if (frame.t === "status") {
       const xs = (frame as { xs?: XsStatusWire }).xs;
-      if (xs === undefined || xs.receive !== "replies" || usable) return frame;
-      return { ...frame, xs: { ...xs, receive: effectiveReceive(xs.receive, false) } } as typeof frame;
+      if (xs === undefined) return frame;
+      let nx: XsStatusWire = xs;
+      if (nx.receive === "replies" && !usable) nx = { ...nx, receive: effectiveReceive(nx.receive, false) };
+      if (!hubCap && nx.channels !== undefined) {
+        const { channels, ...rest } = nx;
+        nx = { ...rest, joined: channelLinkJoined(frameChannels(channels, nx.joined), true, false) };
+      }
+      return nx === xs ? frame : ({ ...frame, xs: nx } as typeof frame);
     }
     return frame;
   };
@@ -266,9 +358,31 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   return {
     slotFlush,
 
-    caps: () => (replyEnabled() ? [...XS_AGENT_CAPS, XS_REPLY_AGENT_CAP] : XS_AGENT_CAPS),
+    caps: () => {
+      const reply = replyEnabled();
+      const ch = channelsEnabled();
+      if (!reply && !ch) return XS_AGENT_CAPS;
+      return [...XS_AGENT_CAPS, ...(reply ? [XS_REPLY_AGENT_CAP] : []), ...(ch ? [XS_CHANNEL_AGENT_CAP] : [])];
+    },
 
-    hubCrossSessionConfig: () => ({ limits: { hubSendsPerMin: clampInt(deps.port.hubSendsPerMin(), 1, 600) } }),
+    hubCrossSessionConfig: () => {
+      const base = { limits: { hubSendsPerMin: clampInt(deps.port.hubSendsPerMin(), 1, 600) } };
+      if (!channelsEnabled()) return base;
+      let c: { maxRecipients: number; wakeMaxRecipients: number } | undefined;
+      try {
+        c = deps.port.channelsHubConfig?.();
+      } catch {
+        c = undefined;
+      }
+      if (c === undefined) return base;
+      return {
+        ...base,
+        channels: {
+          maxRecipients: clampInt(c.maxRecipients, 1, 32),
+          wakeMaxRecipients: clampInt(c.wakeMaxRecipients, 0, 4),
+        },
+      };
+    },
 
     onDeliver(frame) {
       // Learn the one full-id mapping the wire ever shows us (used by resolveBlock below).
@@ -303,13 +417,25 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       const stack = deps.port.stack();
       if (conn === undefined || stack === undefined) return;
       const m = stack.member();
+      // §3.2: the STORED frame carries the effective set whenever it is not default-only (the
+      // per-write flush trims it for an old hub); default-only/empty ⇒ no `channels`, no broadcast keys.
+      let eff: readonly string[] | undefined;
+      if (channelsEnabled()) {
+        try {
+          eff = stack.channelView?.().effective();
+        } catch {
+          eff = undefined;
+        }
+      }
+      const channels = eff !== undefined ? channelsFieldToWrite(eff, true) : undefined;
       const frame: XsMemberFrame = {
         t: "xs_member",
         sessionId: stack.sessionId(),
         epoch: m.epoch,
-        joined: m.joined,
+        joined: channels !== undefined ? true : m.joined,
         receive: m.receive,
-        limits: clampMemberLimits(deps.port.memberLimits()),
+        limits: clampMemberLimits(deps.port.memberLimits(), channels !== undefined),
+        ...(channels !== undefined ? { channels } : {}),
       };
       conn.setSlot(XS_SLOT_KIND, frame, slotFlush);
     },
@@ -351,6 +477,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         resolve: (args) => roundTrip(reqOfResolve(args)),
         send: (args) => roundTrip(reqOfSend(args)),
         replyCapable: () => replyEnabled() && deps.conn()?.status().state === "live" && hubHasReply(),
+        channelCapable: () => channelsEnabled() && deps.conn()?.status().state === "live" && hubHasChannel(),
       };
     },
 
