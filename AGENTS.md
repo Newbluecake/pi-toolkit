@@ -371,6 +371,48 @@ resumes a/b h · parked · reserved · unverified · quarantined · durability �
   its token, reply/token details never reach the provider payload, quiet replies don't start runs, replies mode refuses
   unsolicited — run with C-X1…C-X7 before any pi peer bump). All THREE off goldens
   (`fabric-xs-off`, `fabric-wake-off`, `fabric-xs-reply-off`) must never be regenerated.
+  **Channels + broadcast + unread inbox (channel-plan r3, `docs/dev/fabric-cross-session/channel-plan.md`; packages
+  CH0–CH6/CHU/CHU-b/IB1/IBP/IBU/IBW/CHW, reports `*-report.md`, real-device checklist `channel-acceptance.md`)**: a channel is a
+  communication SCOPE, not a credential (names are not secrets; pair with allowFrom/block). Membership is human-only
+  (`/fabric join [#a #b]` incremental, ≤4 names, lowercase ASCII, `#default` = legacy; local TUI/RPC/web per
+  `webCommandPolicy.fabric`, Feishu hard-refused; agents have no join path). Discovery and addressing
+  (`list_sessions`, `message_session`, `@session`, `/fabric block` resolution) cover only sessions sharing ≥1 channel (union);
+  hub enforces it at list/resolve/send/broadcast with the **unique-holder (AMBIGUOUS) check BEFORE visibility filtering**, and the
+  receiver re-checks at stage 3 against the hub-stamped `via`/`bc` (the linearization point of a local leave). Pure
+  `effectiveChannels`/`linkChannels` (`src/fabric/xs/channel.ts`, `membership.ts`): gates read `link(hubCap)`/`linkJoined(hubCap)`, so
+  on an OLD hub (no `xs.channel.v1`) a named-channel-only session fails closed (`/webhub restart`). Wire is additive (cap
+  `xs.channel.v1` on both surfaces, optional fields `channels`/`via`/`bc`, NO PROTO bump); **default-only ⇒ frames, membership
+  entry and status projection byte-identical** (compat proof `tests/integration/fabric-xs-channel-compat.test.ts`, three-way anchored on
+  the golden; the three off goldens + `tests/fixtures/legacy-xs-v071/` never regenerated). Settings (non-live, frozen at
+  activate/stack build): `fabric.crossSession.channels.{enabled (default true),autoJoin (default ["default"], boolean
+`crossSession.autoJoin` stays the master switch),broadcast.{outPerHour,minIntervalS,wakeOutPerHour (hard ≤2),maxRecipients
+(hub-global, ≤32),wakeMaxRecipients (hard ≤4)}}`. `channels.enabled=false` ≡ old agent: no cap, no `message_channel`, legacy
+  `list_sessions` instance, and saved named channels are **suspended** (kept in the entry, never collapsed into default; `/fabric status`
+  shows `suspended #a (channels.enabled=false)`). Broadcast = `message_channel{channel,text,wake?}` (main session only,
+  registered post-guard iff xs ∧ channels): hub-side fan-out (`src/web-hub/hub/xs/broadcast.ts`), whole-batch admission by head count
+  (`limits.admitBroadcast`: recipients ≤`maxRecipients`, hourly 6, min interval 60s, N charged against send quotas), `#default`
+  cannot broadcast, no expectReply, sender never loops back, deliver-only by default. `wake:true` needs sender level 0 ∧
+  hopAllowed ∧ N≤4 ∧ broadcast-wake ≤2/h ∧ outbound-wake quota; the first failing condition downgrades the whole broadcast to
+  deliver-only (`wakeDowngraded`), each receiver still applies its own receive mode/maxLevel/fence/quotas; broadcast wake
+  reservations and send counts are **NEVER refunded** (also P2P `unknown` no longer refunds) — a woken run is level ≥1 and cannot
+  broadcast-wake again. At most one dispatch per (broadcast, recipient); `unknown`/partial ⇒ never blindly resend. Receivers see the
+  first-line header `channel="#x" kind="broadcast"` + a host note (`formatXsMessage`; no `bc` ⇒ byte-identical); `details.bc`/`via`/token/xid
+  never enter the provider payload (**C-X9**). **Unread inbox** (`src/fabric/xs/unread.ts`, `Symbol.for("pi-subagent:xs-unread")`, ≤32 session
+  buckets FIFO): an event counter, NOT a correctness invariant — the two host write exits in `stack.ts` (receiver/Controller host + NoticeGate quiet
+  write) call `tap.written(id)` after a successful `sendMessage` (broadcasts, replies, notices count; tree `message_agent` does not); `turn_start`
+  stamps a monotone seq and `turn_end` (fallback `agent_end`) clears entries written before that turn started — better to clear early than never
+  (128-id FIFO + two-bucket overflow keeps liveness; display `99+`). Survives `/reload`, resets on pi restart, forks start at 0. Surfaces: TUI status
+  key `pi-subagent:xs-inbox` (`inbox N`), `StatusInfo.xsInbox{unread}` (open field, no cap; UI gates on `xs.v1`), `/fabric status` `inbox unread N`.
+  Visibility: `/fabric status|channels` (channels line, `hub-cap on|off|n/a`, broadcast limits, `usage n/a` — the hub has no usage port) and
+  `/agent status` adds ONE line `xs channels #default #team (2/4)[ · suspended …][ · inbox N]`, emitted only when it carries news (named
+  channel, suspended names or unread>0) so default-only/off output stays byte-identical. Gates: `tests/fabric/xs-{channel,channel-ch3,
+sender-channel,directory-channel,unread}*.test.ts`, `tests/web-hub/hub/xs-{channel-hub,broadcast,broadcast.property,router-v071-diff}.test.ts`,
+  `tests/integration/fabric-xs-channel*.test.ts` (real hub child × 2–5 real stacks, serial boot — agents share HOME and UUIDv7 refs collide
+  within ~16 ms) + `fabric-xs-inbox.test.ts`, conformance **C-X9** (broadcast metadata hygiene + header format, real pi) and **C-X10** (pi ordering
+  facts for unread) in `tests/conformance/fabric-xs.test.ts` — run with C-X1…C-X8 before any pi peer bump. Accepted residuals: channel names
+  are not secrets; unread can clear early (context_edit/compaction/provider error/`/tree`/abort, IR1–IR4) or undercount (restart/fork, IR5/IR6);
+  bare-name completion uniqueness rests on a ≤10 min cache (hub resolves explicit refs authoritatively); `level===0` relies on an honest
+  sender (same-uid trust; receivers still enforce maxLevel); broadcast wake budgets are consumed conservatively.
 - `src/consult/` — in-turn expert consultation (`consult` tool). A subagent dispatched with an
   `experts` whitelist (`Agent({ experts })`, resolved to verified runIds at dispatch) gets the
   `consult` tool and can synchronously ask an already-finished expert run: the expert's persisted
@@ -782,6 +824,14 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   (route change / idle timeout / manual / tab hidden), and an old hub without `privacy.v1` leaves the UI
   byte-identical. `/webhub status` renders the on/off + degraded + loopback-difference lines off
   `hub.json.privacy` (`agent/privacy-status.ts`). Design: `docs/dev/web-hub-privacy/plan.md`.
+  **Channels in the web UI (channel-plan §7, CHU/CHU-b)**: all gated on hub caps ∋ `xs.channel.v1` (absent ⇒ UI byte-identical). AgentCard shows a
+  channel chip only when the effective set ≠ `[default]` (`status.xs.channels`; missing ∧ joined ⇒ `[default]`); `AgentList.vue` shows a sidebar
+  channel-filter chip row only when a named channel exists (selection is component memory, not persisted); the `@` panel (`control/sessionMention.ts`)
+  lists only same-channel sessions (UI hint, hub is authoritative); broadcasts render in the transcript as `#team · 广播`
+  (`logic/xsMessage.ts` parses ONLY the first line, `TxCustom.vue`); the detail header has a 「频道」 button opening `detail/ChannelsDialog.vue`
+  (channels aggregated client-side from the sessions' pushed `status.xs.channels` — no new endpoint; ticking sends `/fabric join|leave #x` through the
+  existing web command op under `webCommandPolicy.fabric`, no optimistic update, Feishu still refused, ≤4/reserved names disabled client-side); unread
+  badge (`StatusInfo.xsInbox`) on AgentCard and `DetailHeader.vue`. Design: `docs/dev/fabric-cross-session/channel-plan.md` §7/§12.6.
   **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
   the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
   planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product

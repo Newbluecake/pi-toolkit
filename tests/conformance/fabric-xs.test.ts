@@ -821,6 +821,96 @@ describe("fabric phase-2 real pi contracts", () => {
   });
 
   /**
+   * C-X9 (channel-plan §9.3): a REAL receiver + real Controller over real pi, driven with hub-stamped
+   * `bc`/`via` broadcast frames. `details.bc`/`via`/token/xid never reach the provider payload; the
+   * model-visible text carries the broadcast header on the first line; a quiet broadcast starts no run.
+   */
+  it("C-X9: broadcast metadata (bc/via/token/xid/details) stays out of the provider payload; header format is correct", async () => {
+    const h = await host();
+    await prime(h);
+    const sessionId = h.manager.getSessionId();
+    const membership = new XsMembership({
+      sessionId,
+      persist: (data) => h.pi.appendEntry(XS_MEMBERSHIP_CUSTOM_TYPE, data),
+      replyEnabled: true,
+      channelsEnabled: true,
+    });
+    membership.attach();
+    expect(membership.join(["team"])).toMatchObject({ ok: true });
+    membership.setReceive("wake");
+    const r = new XsReceiver({
+      sessionId,
+      membership,
+      fence: h.fence,
+      inbox: new XsInbox(8),
+      controller: h.controller,
+      recvPerHour: 100,
+      wakesInPerHour: 100,
+      hubChannelCap: () => true,
+      host: {
+        isIdle: () => h.session.isIdle,
+        hasPendingMessages: () => h.session.pendingMessageCount > 0,
+        sendMessage: (m, o) => h.pi.sendMessage(m, o),
+        getLeafEntry: () => h.manager.getLeafEntry() ?? undefined,
+      },
+    });
+    let n = 0;
+    const input = (over: Record<string, unknown> = {}) => ({
+      xid: `cx9-xid-${++n}`,
+      to: { sessionId, epoch: membership.epoch },
+      from: { sessionId: "SECRET-BC-SENDER", ref: "bcsender0001", cwdLabel: "/tmp", agentId: "bc-agent" },
+      text: "BC-BODY",
+      wake: false,
+      expiresAt: Date.now() + 5000,
+      via: ["team"],
+      bc: { channel: "team" },
+      ...over,
+    });
+
+    // ① quiet (deliver-only) broadcast while idle: no run, visible to the NEXT human prompt only.
+    const before = h.stub.requests.length;
+    const settled0 = h.settled.length;
+    expect(r.deliver(input({ text: "QUIET-BC-BODY" }) as never)).toMatchObject({ woke: false });
+    await sleep(100);
+    expect(h.stub.requests.length).toBe(before);
+    expect(h.settled.length).toBe(settled0);
+    await h.session.prompt("next human after quiet broadcast");
+    const quiet = h.stub.requests.at(-1)!.body;
+    expect(quiet).toContain("QUIET-BC-BODY");
+
+    // ② a waking broadcast starts a Controller run that binds its token; the trigger carries details.bc.
+    const v = r.deliver(input({ text: "WAKE-BC-BODY", wake: true, level: 0 }) as never);
+    expect(v).toMatchObject({ woke: true });
+    const token = h.controller.activeToken!;
+    expect(token).toBeTruthy();
+    await until(() => h.settled.length === settled0 + 2, "waking broadcast run settled");
+    expect(h.triggers.at(-1)).toMatchObject({
+      messageType: "custom",
+      message: { details: { xsWake: true, wakeToken: token, bc: { channel: "team" } } },
+    });
+
+    // ③ header format: first line of the model-visible text; the host note follows; no hub metadata.
+    const bcRequests = h.stub.requests.slice(before);
+    const bodies = bcRequests.map((x) => x.body).join("\n");
+    const header = /\[fabric xs from=[^\]]*channel=\\"#team\\" kind=\\"broadcast\\"\]/;
+    expect(bodies).toMatch(header);
+    expect(bodies).toContain("WAKE-BC-BODY");
+    expect(bodies).toContain(
+      "这是频道广播；若需回应请用 message_session 发给 from.ref，不要用 message_channel 回应全频道。",
+    );
+
+    // ④ provider payload hygiene across ALL requests.
+    const all = h.stub.requests.map((x) => x.body).join("\n");
+    for (const secret of [token, "wakeToken", "xsWake", "cx9-xid-1", "cx9-xid-2", "SECRET-BC-SENDER", '"bc"', '"via"'])
+      expect(all.includes(secret) ? secret : "").toBe("");
+    for (const x of h.stub.requests) {
+      expect(x.json.system).toEqual(h.stub.requests[0]!.json.system);
+      expect(x.json.tools).toEqual(h.stub.requests[0]!.json.tools);
+    }
+    expect(h.errors).toEqual([]);
+  }, 30_000);
+
+  /**
    * C-X10 (channel-plan §12.7): ONLY pi's ordering facts that the unread counter relies on. The real
    * IB1 core is driven from a real pi extension's turn events; the writes are real `pi.sendMessage`s.
    */

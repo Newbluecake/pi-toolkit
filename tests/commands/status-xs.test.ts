@@ -76,4 +76,25 @@ describe("/agent status xs live stack view", () => {
     expect(seen).toEqual(["S1"]);
     expect(out.split("\n")).toHaveLength(renderStatus(deps()).split("\n").length + 2);
   });
+
+  it("channels line: absent for default-only, present for named/suspended/unread", () => {
+    const mk = (eff: string[], susp: string[], unread?: number) =>
+      ({
+        membership: { joined: true, receive: "wake", receivePref: "wake", effective: () => eff, suspended: () => susp },
+        receiver: {
+          wakeQuota: () => ({ recvUsed: 0, recvCap: 30, wakesUsed: 0, wakesCap: 12 }),
+          countersSnapshot: () => ({ fenced: 0 }),
+        },
+        fence: { status: () => ({ stuck: [] }) },
+        audit: {},
+        ...(unread === undefined ? {} : { unread: () => unread }),
+      }) as unknown as StackXs;
+    const render = (s: StackXs) =>
+      renderStatus({ ...deps(), xs: () => ({ stack: s, capability: "verified", outCap: 60 }) });
+    expect(render(mk(["default"], []))).not.toContain("xs channels");
+    expect(render(mk(["default", "team"], []))).toContain("xs channels #default #team (2/4)");
+    expect(render(mk([], ["team"]))).toContain("xs channels - (0/4) · suspended #team");
+    expect(render(mk(["default"], [], 3))).toContain("xs channels #default (1/4) · inbox 3");
+    expect(render(mk(["default"], [], 150))).toContain("inbox 99+");
+  });
 });
