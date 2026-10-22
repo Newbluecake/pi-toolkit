@@ -16,6 +16,8 @@ export interface XsDisplayView {
   kind: XsDisplayKind;
   /** name when known, else ref. */
   from: string;
+  /** Alias-plan §6: hub-verified alias (header field / `details.from.alias`); the display prefers it over `from`. */
+  alias?: string;
   cwdLabel?: string;
   requestId?: string;
   /** Channel-plan §5.3: broadcast channel (canonical, no `#`) — present iff `kind === "broadcast"`. */
@@ -23,7 +25,10 @@ export interface XsDisplayView {
   body: string;
 }
 
-const HEADER_RE = /^\[fabric xs (reply )?from=(\{.*?\})(?: cwd=("(?:[^"\\]|\\.)*"))?[ \]]/;
+const HEADER_RE =
+  /^\[fabric xs (reply )?from=(\{.*?\})(?: alias=(?:"(?:[^"\\]|\\.)*"))?(?: cwd=("(?:[^"\\]|\\.)*"))?[ \]]/;
+/** Alias-plan §6: independent ` alias="…"` field on the FIRST line, parsed on its own (the `from` JSON may be cut at 64 chars). */
+const ALIAS_HEADER_RE = /^\[fabric xs [^\n]*? alias=("(?:[^"\\]|\\.)*")/;
 /** Channel-plan §5.3: the broadcast marker on the header's FIRST line (`formatXsMessage`). */
 const BC_HEADER_RE = /^[^\n]* channel="#([a-z0-9][a-z0-9_-]{0,31})" kind="broadcast"\]/;
 const FENCE_RE = /<<<fab-([^>\s]+)>>>\n([\s\S]*?)\n<<<fab-\1-end>>>\s*$/;
@@ -59,6 +64,7 @@ export function buildXsView(content: string, details: unknown): XsDisplayView {
   const dFrom = d["from"] !== null && typeof d["from"] === "object" ? (d["from"] as Record<string, unknown>) : {};
   const from = str(dFrom["name"]) ?? str(dFrom["ref"]) ?? str(hFrom?.name) ?? str(hFrom?.ref) ?? "unknown";
   const cwdLabel = str(dFrom["cwdLabel"]) ?? str(tryJson(h?.[3]));
+  const alias = str(dFrom["alias"]) ?? str(tryJson(ALIAS_HEADER_RE.exec(content)?.[1]));
   const requestId = str(d["inReplyTo"]) ?? (h?.[1] !== undefined ? /request="([^"]+)"/.exec(content)?.[1] : undefined);
   const isReply = requestId !== undefined || h?.[1] !== undefined;
   const late = d["late"] === true || (isReply && /state=late\]/.test(content));
@@ -79,6 +85,7 @@ export function buildXsView(content: string, details: unknown): XsDisplayView {
   return {
     kind,
     from,
+    ...(alias === undefined ? {} : { alias }),
     ...(cwdLabel === undefined ? {} : { cwdLabel }),
     ...(requestId === undefined ? {} : { requestId }),
     ...(channel === undefined ? {} : { channel }),
@@ -93,7 +100,12 @@ export function xsHeaderLine(v: XsDisplayView): string {
       : v.kind === "broadcast"
         ? `#${v.channel ?? "?"} broadcast`
         : v.kind;
-  return ["xs ←", v.from, ...(v.cwdLabel === undefined ? [] : [`· ${v.cwdLabel}`]), `· ${tail}`].join(" ");
+  return [
+    "xs ←",
+    v.alias === undefined ? v.from : `@${v.alias}`,
+    ...(v.cwdLabel === undefined ? [] : [`· ${v.cwdLabel}`]),
+    `· ${tail}`,
+  ].join(" ");
 }
 
 export const renderXsMessage: MessageRenderer<unknown> = (message, options, theme) => {

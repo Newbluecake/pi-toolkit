@@ -89,6 +89,8 @@ export interface XsAliasStorePort {
 export interface XsAliasCacheEntry {
   alias?: string;
   lostAt?: number;
+  /** AL4: why the alias was lost (for `/fabric status`'s `alias - (lost: taken)`); optional, display only. */
+  lostReason?: "taken" | "expired";
 }
 
 /** Outcome of a bounded (5s) alias op over the xs bridge (`op:"alias"`). */

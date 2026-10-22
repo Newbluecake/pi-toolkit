@@ -132,6 +132,7 @@ const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
   "block",
   "unblock",
   "fence",
+  "alias", // alias-plan §3.5/§7 (AL4): get/set/clear/take preview+exec; baseline allow, governed by `webCommandPolicy.fabric`
 ]);
 
 const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {

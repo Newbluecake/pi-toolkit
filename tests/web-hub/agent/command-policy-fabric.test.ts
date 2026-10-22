@@ -29,7 +29,7 @@ describe("command policy: /fabric (2026-10-22 ruling)", () => {
   });
 
   it("every known membership/policy/blocklist/fence mutation is baseline allow (web may execute)", () => {
-    for (const sub of ["join", "leave", "receive", "block", "unblock", "fence"]) {
+    for (const sub of ["join", "leave", "receive", "block", "unblock", "fence", "alias"]) {
       expect(policy("fabric", sub)).toBe("allow");
       expect(policy("fabric", `${sub} arg`)).toBe("allow");
     }
@@ -40,6 +40,8 @@ describe("command policy: /fabric (2026-10-22 ruling)", () => {
     expect(policy("fabric", "join", { fabric: "deny" })).toBe("deny");
     expect(policy("fabric", "status", { fabric: "deny" })).toBe("deny");
     expect(policy("fabric", "fence reset", { fabric: "confirm" })).toBe("confirm");
+    expect(policy("fabric", "alias 前端 --take", { fabric: "confirm" })).toBe("confirm");
+    expect(policy("fabric", "alias 前端", { fabric: "deny" })).toBe("deny");
     expect(policy("fabric", "blocks", { fabric: "confirm" })).toBe("confirm");
     expect(policy("fabric", "replies", { fabric: "deny" })).toBe("deny");
     expect(policy("fabric", "replies", { fabric: "confirm" })).toBe("confirm");

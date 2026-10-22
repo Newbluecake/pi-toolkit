@@ -67,7 +67,7 @@ function makeHandler(): {
   return { handler, sent, sendUserMessage: vi.spyOn(pi, "sendUserMessage") };
 }
 
-const DENIED_RE = /^\/fabric\s+(?:join|leave|receive|block|unblock|fence)(?:\s|$)/;
+const DENIED_RE = /^\/fabric\s+(?:join|leave|receive|block|unblock|fence|alias)(?:\s|$)/;
 
 describe("prompt op: /fabric mutation text refusal (2026-10-22 ruling)", () => {
   it.each([
@@ -79,6 +79,11 @@ describe("prompt op: /fabric mutation text refusal (2026-10-22 ruling)", () => {
     "/fabric block someone",
     "/fabric unblock 1",
     "/fabric fence reset",
+    "/fabric alias 前端",
+    "/fabric alias --clear",
+    "/fabric alias 前端 --take",
+    "/fabric alias",
+    "/fabric aliases", // not a match — different word
     "  /fabric join  ",
     "/fabric join\n",
     "please run /fabric leave now", // not a match — free text mentioning the command
@@ -120,6 +125,22 @@ describe("prompt op: /fabric mutation text refusal (2026-10-22 ruling)", () => {
     delete (globalThis as Record<symbol, unknown>)[LEDGER_KEY];
     const h = makeHandler();
     h.handler.handle(frame("/fabric join", FEISHU_ORIGIN));
+    expect(h.sent).toMatchObject([
+      {
+        ok: false,
+        code: "E_COMMAND_DENIED",
+        effect: "none",
+        message: "飞书入口不能修改跨会话加入状态，请在终端或 web 执行",
+      },
+    ]);
+    expect(h.sendUserMessage).not.toHaveBeenCalled();
+    h.handler.dispose();
+  });
+
+  it("feishu-origin `/fabric alias …` prompt text gets the 飞书 refusal too", () => {
+    delete (globalThis as Record<symbol, unknown>)[LEDGER_KEY];
+    const h = makeHandler();
+    h.handler.handle(frame("/fabric alias 前端 --take", FEISHU_ORIGIN));
     expect(h.sent).toMatchObject([
       {
         ok: false,

@@ -274,7 +274,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     // and is the LAST choke point Feishu frames can reach (hub F6 admission forwards Feishu only
     // as prompt/dialog ops) — Feishu origins get the dedicated refusal text. `status`/`blocks`
     // stay promptable (read-only).
-    if (/^\s*\/fabric\s+(?:join|leave|receive|block|unblock|fence)(?:\s|$)/.test(cmd.text)) {
+    if (/^\s*\/fabric\s+(?:(?:join|leave|receive|block|unblock|fence)(?:\s|$)|alias(?:\s|$))/.test(cmd.text)) {
       return settleAndReply(
         frame,
         errResult(
