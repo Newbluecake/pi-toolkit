@@ -100,6 +100,9 @@ const preview = {
   windowMenu: "Window actions",
   windowCloseAll: "Close all ({n})",
   windowResetGeom: "Reset position and size",
+  // 2026-10-22 L1: desktop maximize/restore (header button + dblclick + window menu)
+  windowMaximize: "Maximize window",
+  windowRestore: "Restore window size",
   // preview-download (file download button in the dialog header — files only, never dirs)
   download: "Download",
   downloadFailed: "Download failed — retry.",

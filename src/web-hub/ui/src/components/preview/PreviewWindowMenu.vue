@@ -31,11 +31,16 @@ const props = defineProps<{
   readonly items: readonly PreviewWindowMenuItem[];
   /** The 「重置位置和大小」 item renders on desktop only (§5.5). */
   readonly showReset: boolean;
+  /** The 「最大化/恢复」 item (2026-10-22 L1) — desktop only, like `showReset`. */
+  readonly showMaximize: boolean;
+  /** This window's current maximize state — flips the item's label 最大化 ⇄ 恢复. */
+  readonly maximized: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "close-all"): void;
   (e: "reset"): void;
+  (e: "toggle-maximize"): void;
   (e: "select", id: number): void;
 }>();
 
@@ -142,6 +147,17 @@ defineExpose({ closeMenu });
       </button>
       <button v-if="showReset" class="pw-menu-item" type="button" role="menuitem" @click="run(() => emit('reset'))">
         {{ t("preview.windowResetGeom") }}
+      </button>
+      <!-- 2026-10-22 L1 拍板: the maximize/restore entry — desktop only; the LABEL carries the
+           current state (「恢复窗口大小」 while maximized), mirroring the header button. -->
+      <button
+        v-if="showMaximize"
+        class="pw-menu-item"
+        type="button"
+        role="menuitem"
+        @click="run(() => emit('toggle-maximize'))"
+      >
+        {{ maximized ? t("preview.windowRestore") : t("preview.windowMaximize") }}
       </button>
       <div v-if="items.length > 0" class="pw-menu-sep" role="separator" aria-hidden="true"></div>
       <button

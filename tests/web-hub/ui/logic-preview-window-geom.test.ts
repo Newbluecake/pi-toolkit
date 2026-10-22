@@ -5,6 +5,7 @@ import {
   clampRect,
   defaultRect,
   EDGE,
+  maximizedRect,
   MIN_H,
   MIN_W,
   moveRect,
@@ -278,5 +279,25 @@ describe("logic/previewWindowGeom: property run (fixed seed, 1000×)", () => {
         assertP1toP4(r, vp);
       }
     }
+  });
+});
+
+describe("previewWindowGeom — maximizedRect (2026-10-22 L1 桌面最大化/恢复)", () => {
+  it("fills the usable box: EDGE inset from the sides and from the topbar's bottom edge", () => {
+    const vp = vpOf(1280, 800, 40);
+    const r = maximizedRect(vp);
+    expect(r).toEqual({ x: EDGE, y: 40 + EDGE, w: 1280 - 2 * EDGE, h: 800 - 40 - 2 * EDGE });
+    // by construction it satisfies every clamp constraint (it IS the P3 ceiling box)
+    assertP1toP4(r, vp);
+    expect(clampRect(r, vp)).toEqual(r); // idempotent through the clamp
+  });
+
+  it("degrades on a tiny viewport instead of contradicting P2/P3 (top-heavy viewports)", () => {
+    const vp = vpOf(300, 200, 190); // usable height degenerates
+    const r = maximizedRect(vp);
+    expect(r).toEqual({ x: EDGE, y: 190 + EDGE, w: 284, h: 0 });
+    const clamped = clampRect(r, vp);
+    expect(clamped.w).toBeGreaterThanOrEqual(Math.min(MIN_W, 300 - 2 * EDGE));
+    expect(clamped.h).toBeGreaterThanOrEqual(Math.min(MIN_H, 200 - 190 - 2 * EDGE));
   });
 });

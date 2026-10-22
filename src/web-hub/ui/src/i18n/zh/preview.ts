@@ -102,6 +102,9 @@ const preview = {
   windowMenu: "窗口操作",
   windowCloseAll: "全部关闭（{n}）",
   windowResetGeom: "重置位置和大小",
+  // 2026-10-22 L1：桌面端最大化/恢复（标题栏按钮 + 双击标题栏 + 窗口菜单）
+  windowMaximize: "最大化窗口",
+  windowRestore: "恢复窗口大小",
   // preview-download（对话框头部的文件下载按钮 —— 仅文件，目录没有）
   download: "下载",
   downloadFailed: "下载失败 — 请重试。",

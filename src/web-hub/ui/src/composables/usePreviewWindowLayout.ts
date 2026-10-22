@@ -18,6 +18,12 @@
  * - viewport `resize` re-clamps every rect synchronously (`reclampAll`) while any rect exists.
  * - cross-breakpoint: rects are KEPT in both directions (§6.3); flipping to desktop re-clamps.
  *
+ * Maximize/restore (2026-10-22 L1 拍板): per-window `maxStates` (flag + frozen restore rect).
+ * While maximized the DISPLAYED box is computed (`maximizedRect`, follows every viewport
+ * change through `viewportTick`), drag/resize gestures and their keyboard equivalents are
+ * refused, and the stored rect stays the untouched restore candidate; restore clamps it
+ * into the CURRENT viewport. `resetRect` cancels a maximize; `dropRect` forgets the state.
+ *
  * CSP: rect values reach the DOM only as CSS variables through Vue `:style` OBJECT bindings
  * (`varsOf`) — no static style attributes, no rAF, no transform (R2).
  */
@@ -25,6 +31,7 @@ import { onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   clampRect,
   defaultRect,
+  maximizedRect,
   moveRect,
   resizeRect,
   cascadeRect,
@@ -100,6 +107,17 @@ export type PreviewWindowLayout = ReturnType<typeof usePreviewWindowLayout>;
 
 export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
   const rects = new Map<number, Ref<PreviewRect>>();
+  /** 2026-10-22 L1 最大化/恢复: per-window maximize bookkeeping — the entry is created
+   *  TOGETHER with the rect (always present, `flag` starting false) so template reads of
+   *  `isMaximized` track the `flag` ref FROM THE FIRST RENDER (a lazily-created ref would
+   *  be invisible to an effect that never read it — the classic reactive short-circuit).
+   *  While maximized the stored `rects` value is the FROZEN restore rectangle (never
+   *  clamped while maximized — restore clamps it). */
+  const maxStates = new Map<number, { readonly flag: Ref<boolean>; restore: PreviewRect | null }>();
+  /** Reactive epoch bumped on every viewport change (resize / band flip): `varsOf` reads it
+   *  so a MAXIMIZED window's computed rect (which reads the non-reactive `win.innerWidth/
+   *  innerHeight`) still re-renders when the viewport moves under it. */
+  const viewportTick = ref(0);
   let gesture: Gesture | null = null;
   let resizeHooked = false;
   let disposed = false;
@@ -116,32 +134,43 @@ export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
   function ensureRect(id: number, anchorId: number | null): void {
     if (rects.has(id)) return;
     const base = anchorId !== null ? (rects.get(anchorId)?.value ?? defaultRect(vp())) : defaultRect(vp());
-    const occupied = [...rects.values()].map((r) => r.value);
+    // occupied = EFFECTIVE rects (a maximized window occupies its maximized box, §7.3 slots)
+    const occupied = [...rects.keys()].map((wid) => effectiveRectOf(wid));
     rects.set(id, ref(cascadeRect(base, vp(), occupied)));
+    maxStates.set(id, { flag: ref(false), restore: null });
     hookResize();
   }
 
   function dropRect(id: number): void {
     if (gesture !== null && gesture.winId === id) endGesture();
     rects.delete(id);
+    maxStates.delete(id); // a closed window's maximize state never leaks into a reuse
     if (rects.size === 0) unhookResize();
   }
 
-  /** The 「重置位置和大小」 menu item: default size, centered (§5.5). */
+  /** The 「重置位置和大小」 menu item: default size, centered (§5.5) — and it CANCELS a
+   *  maximize (拍板 2: 重置布局 ⇒ 取消最大化). */
   function resetRect(id: number): void {
+    clearMaximized(id);
     const r = rects.get(id);
     if (r !== undefined) r.value = defaultRect(vp());
   }
 
-  /** §6.3 phone→desktop: re-clamp every stored rect into the (possibly new) viewport. */
+  /** §6.3 phone→desktop: re-clamp every stored rect into the (possibly new) viewport. A
+   *  MAXIMIZED window's stored rect is its frozen restore rectangle and is deliberately
+   *  LEFT ALONE here (the maximized box itself is recomputed live from the new viewport);
+   *  the clamping happens once, at restore time. */
   function reclampAll(): void {
-    for (const r of rects.values()) r.value = clampRect(r.value, vp());
+    viewportTick.value++; // maximized windows: recompute their box for the new viewport
+    for (const [id, r] of rects) if (!maxStates.get(id)?.flag.value) r.value = clampRect(r.value, vp());
   }
 
   /** The `:style` payload for one desktop window — CSS variables ONLY (`left/top/width/height`
-   *  and z ride `var(--pw-*)` in preview.css; the object form keeps this CSP-safe, §7.1). */
+   *  and z ride `var(--pw-*)` in preview.css; the object form keeps this CSP-safe, §7.1).
+   *  MAXIMIZED: the box is COMPUTED (`maximizedRect`), never the stored rect. */
   function varsOf(id: number): Record<string, string> {
-    const r = rects.get(id)?.value ?? defaultRect(vp());
+    void viewportTick.value; // tracked read — viewport changes re-render maximized windows
+    const r = effectiveRectOf(id);
     return {
       "--pw-x": `${r.x}px`,
       "--pw-y": `${r.y}px`,
@@ -150,8 +179,49 @@ export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
     };
   }
 
-  /** §5.5 keyboard equivalents: arrows move 16px, clamped. */
+  /** The rect a window currently SHOWS: the maximize box while maximized, the stored rect
+   *  otherwise. Reading the flag ref here makes every template read reactive. */
+  function effectiveRectOf(id: number): PreviewRect {
+    const m = maxStates.get(id);
+    if (m !== undefined && m.flag.value) return maximizedRect(vp());
+    return rects.get(id)?.value ?? defaultRect(vp());
+  }
+
+  // --- maximize / restore (2026-10-22 L1) -----------------------------------------------------
+
+  /** Reactive read for templates (`:aria-pressed`, icon flip, hot-zone suppression). */
+  function isMaximized(id: number): boolean {
+    return maxStates.get(id)?.flag.value === true;
+  }
+
+  function clearMaximized(id: number): void {
+    const m = maxStates.get(id);
+    if (m === undefined) return;
+    m.flag.value = false;
+    m.restore = null;
+  }
+
+  /** 拍板 1: maximize fills the page (a few px margin); restore returns to the exact
+   *  pre-maximize rect CLAMPED into the CURRENT viewport (the viewport may have moved). */
+  function toggleMaximize(id: number): void {
+    const r = rects.get(id);
+    const m = maxStates.get(id);
+    if (r === undefined || m === undefined) return;
+    if (m.flag.value) {
+      const restore = m.restore;
+      m.flag.value = false;
+      m.restore = null;
+      if (restore !== null) r.value = clampRect(restore, vp());
+    } else {
+      m.restore = r.value; // captured BEFORE the flip — the rect itself stays untouched
+      m.flag.value = true;
+    }
+  }
+
+  /** §5.5 keyboard equivalents: arrows move 16px, clamped. No-op while maximized (the
+   *  keyboard form of the drag/resize disable, 拍板 1). */
   function keyMove(id: number, dx: number, dy: number): void {
+    if (isMaximized(id)) return;
     const r = rects.get(id);
     if (r !== undefined) r.value = moveRect(r.value, dx, dy, vp());
   }
@@ -160,6 +230,7 @@ export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
    *  The handle is UNCONDITIONALLY "se" — a negative delta shrinks the same right/bottom
    *  edge (Shift+← pulls the right edge LEFT); it never flips to the NW handle. */
   function keyResize(id: number, dx: number, dy: number): void {
+    if (isMaximized(id)) return;
     const r = rects.get(id);
     if (r !== undefined) r.value = resizeRect(r.value, "se", dx, dy, vp());
   }
@@ -177,6 +248,7 @@ export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
     if (!opts.desktop.value) return false; // no drag/resize off the desktop band
     if (ev.button !== 0) return false;
     if (isInteractiveTarget(ev.target)) return false;
+    if (isMaximized(id)) return false; // 拍板 1: maximized ⇒ no drag, no resize handles
     const startRect = rects.get(id)?.value;
     if (startRect === undefined) return false;
     let mode: Gesture["mode"] = "capture";
@@ -320,6 +392,8 @@ export function usePreviewWindowLayout(opts: UsePreviewWindowLayoutOptions) {
     varsOf,
     keyMove,
     keyResize,
+    toggleMaximize,
+    isMaximized,
     beginGesture,
     endGesture,
     isInteractiveTarget,

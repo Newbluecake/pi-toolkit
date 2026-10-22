@@ -313,7 +313,11 @@ onUnmounted(() => {
         v-for="(w, i) in windows"
         :key="w.id"
         class="preview-window"
-        :class="{ 'is-floating': desktop, 'is-active': w.id === activeId }"
+        :class="{
+          'is-floating': desktop,
+          'is-active': w.id === activeId,
+          'is-maximized': desktop && layout.isMaximized(w.id),
+        }"
         :data-pw-id="w.id"
         :style="desktop ? geomVars(w.id) : { '--pw-z': zOf(w.id) }"
         :inert="!desktop && w.id !== activeId"
@@ -336,7 +340,9 @@ onUnmounted(() => {
           @reset="layout.resetRect($event)"
           @select="face?.focusWindow($event, { moveFocus: true })"
         />
-        <template v-if="desktop"
+        <!-- Maximized (2026-10-22 L1): the hot zones are dropped from the DOM entirely — no
+             dead hit areas; `beginGesture` refuses them belt-and-braces on top. -->
+        <template v-if="desktop && !layout.isMaximized(w.id)"
           ><div
             v-for="d in RZ_DIRS"
             :key="d"

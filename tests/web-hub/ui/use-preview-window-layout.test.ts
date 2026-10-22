@@ -279,3 +279,94 @@ describe("usePreviewWindowLayout — gesture controller (§7.4, 评审 #8)", () 
     expect(r.doc.bodyClasses.has(PW_DRAGGING_CLASS)).toBe(false);
   });
 });
+
+describe("usePreviewWindowLayout — maximize/restore (2026-10-22 L1 拍板 1)", () => {
+  /** Parse varsOf back into numbers for exact comparisons. */
+  const rectVars = (l: ReturnType<typeof usePreviewWindowLayout>, id: number) => {
+    const v = l.varsOf(id);
+    return {
+      x: Number.parseFloat(v["--pw-x"]!),
+      y: Number.parseFloat(v["--pw-y"]!),
+      w: Number.parseFloat(v["--pw-w"]!),
+      h: Number.parseFloat(v["--pw-h"]!),
+    };
+  };
+
+  it("toggleMaximize fills the usable box (topOffset respected); restore returns the EXACT prior rect", () => {
+    const r = makeRig();
+    r.layout.ensureRect(1, null);
+    const before = r.layout.varsOf(1);
+    expect(r.layout.isMaximized(1)).toBe(false);
+    r.layout.toggleMaximize(1);
+    expect(r.layout.isMaximized(1)).toBe(true);
+    // rig: innerWidth 1280, innerHeight 900, topOffset 40 → EDGE inset all around
+    expect(rectVars(r.layout, 1)).toEqual({ x: 8, y: 40 + 8, w: 1280 - 16, h: 900 - 40 - 16 });
+    r.layout.toggleMaximize(1);
+    expect(r.layout.isMaximized(1)).toBe(false);
+    expect(r.layout.varsOf(1)).toEqual(before); // byte-identical vars — exact restore
+  });
+
+  it("maximized: drag, keyMove and keyResize never touch the rect", () => {
+    const r = makeRig({ captureThrows: true });
+    r.layout.ensureRect(1, null);
+    r.layout.toggleMaximize(1);
+    const maxed = r.layout.varsOf(1);
+    // a header drag: beginGesture refuses (maximized) — no listeners, so moves do nothing
+    r.begin(1);
+    r.doc.dispatch("pointermove", { pointerId: 7, clientX: 500, clientY: 600 });
+    expect(r.doc.bodyClasses.has(PW_DRAGGING_CLASS)).toBe(false);
+    expect(r.layout.varsOf(1)).toEqual(maxed);
+    // keyboard equivalents are no-ops too
+    r.layout.keyMove(1, 200, 200);
+    r.layout.keyResize(1, 200, 200);
+    expect(r.layout.varsOf(1)).toEqual(maxed);
+    // after restore the stored rect is still the pre-maximize one (never clobbered)
+    r.layout.toggleMaximize(1);
+    const restored = rectVars(r.layout, 1);
+    expect(restored.w).toBeLessThan(1280 - 16); // the default 960, not the maximized box
+  });
+
+  it("maximized: the box FOLLOWS a viewport resize; restore clamps into the CURRENT viewport", () => {
+    const r = makeRig();
+    r.layout.ensureRect(1, null);
+    r.layout.toggleMaximize(1);
+    r.win.innerWidth = 600;
+    r.win.innerHeight = 500;
+    r.win.dispatch("resize");
+    expect(rectVars(r.layout, 1)).toEqual({ x: 8, y: 48, w: 584, h: 444 });
+    // restore: the frozen pre-maximize rect (960 wide, placed for 1280×900) is CLAMPED in
+    r.layout.toggleMaximize(1);
+    const restored = rectVars(r.layout, 1);
+    expect(restored.w).toBe(584); // 960 clamped down to AW
+    expect(restored.h).toBe(444); // 765 clamped down to AH
+    expect(restored.x).toBeLessThanOrEqual(600 - 96); // P4 held through the clamp
+  });
+
+  it("resetRect cancels a maximize; dropRect forgets the state entirely", () => {
+    const r = makeRig();
+    r.layout.ensureRect(1, null);
+    r.layout.toggleMaximize(1);
+    expect(r.layout.isMaximized(1)).toBe(true);
+    r.layout.resetRect(1);
+    expect(r.layout.isMaximized(1)).toBe(false); // 拍板 2: 重置布局 ⇒ 取消最大化
+    const reset = rectVars(r.layout, 1);
+    // centered default: symmetric margins inside the usable box
+    expect(Math.abs(reset.x - (1280 - (reset.x + reset.w)))).toBeLessThanOrEqual(1);
+    r.layout.toggleMaximize(1);
+    r.layout.dropRect(1);
+    expect(r.layout.isMaximized(1)).toBe(false);
+    r.layout.ensureRect(1, null); // fresh rect — a reused id never inherits the state
+    expect(r.layout.isMaximized(1)).toBe(false);
+    expect(rectVars(r.layout, 1).w).toBeLessThan(1280 - 16);
+  });
+
+  it("a maximized window contributes its MAXIMIZED box to the cascade's occupied list", () => {
+    const r = makeRig();
+    r.layout.ensureRect(1, null);
+    r.layout.toggleMaximize(1);
+    r.layout.ensureRect(2, 1);
+    const rect2 = rectVars(r.layout, 2);
+    // window 2 must not sit in the maximized window's top-left slot (8, 48)
+    expect(Math.abs(rect2.x - 8) >= 16 || Math.abs(rect2.y - 48) >= 16).toBe(true);
+  });
+});

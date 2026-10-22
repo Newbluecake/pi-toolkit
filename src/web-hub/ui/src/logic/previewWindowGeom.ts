@@ -175,6 +175,17 @@ function fullyInBox(r: PreviewRect, vp: PreviewViewportBox): boolean {
 }
 
 /**
+ * The MAXIMIZE target rect (2026-10-22 L1 桌面最大化/恢复): the whole usable box — `EDGE`
+ * inset from the left/right/bottom and from the topbar's bottom edge (`top`), i.e. the
+ * window fills the page with a few px of margin on every side. Always inside every clamp
+ * constraint by construction (it IS the P3 ceiling box), so it needs no trailing clamp.
+ */
+export function maximizedRect(vp: PreviewViewportBox): PreviewRect {
+  const b = boxOf(vp);
+  return { x: EDGE, y: vp.top + EDGE, w: b.aw, h: b.ah };
+}
+
+/**
  * The new-window placement (§7.3): size from `clampRect(base)`, then the first candidate
  * position that is fully inside the usable box AND whose top-left corner is separated from
  * every occupied window's top-left by `|dx| ≥ CASCADE_MIN_SEP || |dy| ≥ CASCADE_MIN_SEP`.

@@ -221,7 +221,23 @@ const limitLine = computed(() => {
 
 const KEY_STEP_PX = 16;
 
-/** §7.4: the header drag — `layout.beginGesture` gates button/desktop/threshold itself. */
+/** 2026-10-22 L1: the per-window maximize flag (reactive read — icon/aria/menu follow it). */
+const maxed = computed(() => props.layout.isMaximized(props.win.id));
+
+function toggleMaximize(): void {
+  props.layout.toggleMaximize(props.win.id);
+}
+
+/** 拍板: 双击标题栏切换最大化/恢复 — but never off an interactive control (buttons, the
+ *  menu, the selectable path span: `data-no-drag` is part of the same selector), so a
+ *  double-click on a button never moves the window chrome. */
+function onHeaderDblclick(ev: MouseEvent): void {
+  if (!props.desktop) return;
+  if (props.layout.isInteractiveTarget(ev.target)) return;
+  toggleMaximize();
+}
+
+/** §7.4: the header drag — `layout.beginGesture` gates button/desktop/threshold/maximized itself. */
 function onHeaderPointerdown(ev: PointerEvent): void {
   if (!props.desktop) return;
   const el = ev.currentTarget;
@@ -230,6 +246,7 @@ function onHeaderPointerdown(ev: PointerEvent): void {
 
 function onHeaderKeydown(ev: KeyboardEvent): void {
   if (!props.desktop || ev.target !== ev.currentTarget) return;
+  if (maxed.value) return; // maximized: arrows are not eaten and never touch the rect
   const dx = ev.key === "ArrowLeft" ? -KEY_STEP_PX : ev.key === "ArrowRight" ? KEY_STEP_PX : 0;
   const dy = ev.key === "ArrowUp" ? -KEY_STEP_PX : ev.key === "ArrowDown" ? KEY_STEP_PX : 0;
   if (dx === 0 && dy === 0) return;
@@ -257,6 +274,7 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
       :tabindex="desktop ? 0 : undefined"
       :title="desktop ? t('preview.windowMoveHint') : undefined"
       @pointerdown="onHeaderPointerdown"
+      @dblclick="onHeaderDblclick"
       @keydown="onHeaderKeydown"
     >
       <nav class="preview-nav" :aria-label="t('preview.dirNavLabel')">
@@ -329,10 +347,27 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
         class="pw-menu-slot"
         :items="menuItems"
         :show-reset="desktop"
+        :show-maximize="desktop"
+        :maximized="maxed"
         @close-all="emit('close-all')"
         @reset="emit('reset', win.id)"
+        @toggle-maximize="toggleMaximize()"
         @select="emit('select', $event)"
       />
+      <!-- 2026-10-22 L1 拍板: 最大化/恢复 — desktop-only toggle button; icon + aria follow the
+           state (aria-pressed), Enter/Space come free as a plain button. -->
+      <button
+        v-if="desktop"
+        class="btn btn-ghost btn-icon pw-max-btn"
+        type="button"
+        :aria-label="maxed ? t('preview.windowRestore') : t('preview.windowMaximize')"
+        :title="maxed ? t('preview.windowRestore') : t('preview.windowMaximize')"
+        :aria-pressed="maxed ? 'true' : 'false'"
+        data-no-drag
+        @click="toggleMaximize()"
+      >
+        <AppIcon :name="maxed ? 'restore' : 'maximize'" />
+      </button>
       <button
         class="btn btn-ghost btn-icon preview-close"
         type="button"

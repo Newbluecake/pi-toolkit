@@ -1163,6 +1163,17 @@ button.preview-dir-row:focus-visible {
   }
 }
 
+/* 2026-10-22 L1 拍板: a MAXIMIZED window fills the usable box (EDGE margin around the
+ * viewport). The host drops the hot zones from the DOM while maximized — this rule is the
+ * belt-and-braces half — and the title bar stops advertising drag (no move while maximized). */
+.preview-window.is-maximized .pw-rz {
+  display: none;
+}
+
+.preview-window.is-maximized .preview-header {
+  cursor: default;
+}
+
 /* §7.4 step 3: while a drag is in flight the page stops selecting text and the windows'
  * iframes stop eating pointer events. */
 body.pwh-pw-dragging {
