@@ -135,24 +135,49 @@ const AUDIT_SAMPLE_GAP_MS = 600_000;
 function undecodableOwnerReason(code: string | undefined): string {
   return `undecodable:${typeof code === "string" && /^[a-z0-9-]{1,48}$/.test(code) ? code : "unknown"}`;
 }
-const simpleCard = (text: string, buttons: Array<{ label: string; n: string }> = []) =>
+type SimpleCardButton = {
+  label: string;
+  n: string;
+  /** Card JSON 2.0 button style (e.g. `primary_filled` / `danger_filled`). */
+  type?: string;
+};
+const cardButton = (b: SimpleCardButton) => ({
+  tag: "button",
+  text: { tag: "plain_text", content: b.label },
+  ...(b.type !== undefined ? { type: b.type, width: "fill" } : {}),
+  behaviors: [{ type: "callback", value: { n: b.n } }],
+});
+/** Untyped buttons stack vertically (legacy shape, byte-identical); as soon as any button carries
+ *  a style, the row renders side by side in a widely spaced `column_set` so opposing actions
+ *  (approve/deny) are visually separated instead of two identical grey bars. */
+const simpleCard = (text: string, buttons: SimpleCardButton[] = []) =>
   JSON.stringify({
     schema: "2.0",
     config: { update_multi: true },
     body: {
       elements: [
         { tag: "markdown", content: neutralizeMarkdown(text) },
-        ...buttons.map((b) => ({
-          tag: "button",
-          text: { tag: "plain_text", content: b.label },
-          behaviors: [{ type: "callback", value: { n: b.n } }],
-        })),
+        ...(buttons.some((b) => b.type !== undefined)
+          ? [
+              {
+                tag: "column_set",
+                horizontal_spacing: "large",
+                columns: buttons.map((b) => ({
+                  tag: "column",
+                  width: "weighted",
+                  weight: 1,
+                  elements: [cardButton(b)],
+                })),
+              },
+            ]
+          : buttons.map(cardButton)),
       ],
     },
   });
 
 /** §5.7 login-approval card: user/IP/device + approve/deny buttons, then a status line. */
-function loginApprovalCard(
+/** Exported for the button-layout test only. */
+export function loginApprovalCard(
   info: { user: string; ip: string; device: string },
   state: "pending" | "approved" | "denied" | "expired",
   nonces?: { approve: string; deny: string },
@@ -165,8 +190,10 @@ function loginApprovalCard(
   const buttons =
     nonces !== undefined
       ? [
-          { label: "批准", n: nonces.approve },
-          { label: "拒绝", n: nonces.deny },
+          // Opposing actions get opposing styles + glyphs, deny first (left) so the blue
+          // approve is never where a hurried thumb lands by default.
+          { label: "⛔ 拒绝", n: nonces.deny, type: "danger_filled" },
+          { label: "✅ 批准登录", n: nonces.approve, type: "primary_filled" },
         ]
       : [];
   return simpleCard(text, buttons);
