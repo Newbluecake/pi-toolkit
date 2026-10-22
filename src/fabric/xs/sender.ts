@@ -1,4 +1,5 @@
 import { XS_MAX_FRAME_BYTES, xsFrameBytesOk } from "../../web-hub/protocol/xs.js";
+import type { XsReplyIssueInput, XsReplyIssueResult } from "./reply-ledger.js";
 import type {
   XsEffect,
   XsResolveCandidateWire,
@@ -83,6 +84,11 @@ export interface XsPortSendArgs {
   wake?: true;
   /** Sender's root causal level — carried iff the sender's own wake is enabled (§6.6). */
   level?: number;
+  /** Reply-plan §4.2 (RX4): the correlation the sender asks the hub to stamp onto the delivery.
+   *  Only ever set after `replyCapable()` — the agent adapter additionally gates on hub caps. */
+  expect?: { requestId: string; timeoutMs: number };
+  /** Reply-plan §4.2 (RX4): answer a request; `to` is then the verified FULL sessionId. */
+  replyTo?: string;
 }
 
 /** X3's whole view of the hub connection. X2's adapter builds the `xs_req` frame (adding `t`,
@@ -92,6 +98,9 @@ export interface XsHubPort {
   list(args: XsPortListArgs): Promise<XsPortReply>;
   resolve(args: XsPortResolveArgs): Promise<XsPortReply>;
   send(args: XsPortSendArgs): Promise<XsPortReply>;
+  /** Reply-plan §4.2 (RX4): true iff local reply is enabled AND the live hub declared
+   *  `xs.reply.v1` (RX3's `hubPort().replyCapable()`). Absent ⇒ not capable (fail closed). */
+  replyCapable?(): boolean;
 }
 
 // ----------------------------------------------------------------- results (§4.3 tool triple + statuses)
@@ -110,6 +119,12 @@ export type XsSendStatus =
   | "off" // E_XS_OFF — this hub lacks/lost the xs.v1 cap
   | "too_large" // sender-side 16 KiB frame pre-check (§5.2)
   | "bad_frame" // hub rejected the frame shape (E_XS_BAD_FRAME)
+  | "bad_args" // reply-plan RR6: expectReply and replyTo together — rejected locally
+  | "reply_unsupported" // reply-plan §4.2: no reply cap (local/hub/target) or no full sessionId — nothing sent
+  | "reply_unreceivable" // expectReply but this session could not receive the reply (receive_off|blocked|not_joined)
+  | "reply_quota" // ledger per-session/per-target quota
+  | "reply_ledger_full" // process ledger slots exhausted
+  | "reply_target_mismatch" // replyTo's request came from a different session than `to`
   | "error"; // E_XS_INTERNAL / transport / unmapped codes
 
 export interface XsSendOutcome {
@@ -122,6 +137,12 @@ export interface XsSendOutcome {
   candidates?: XsResolveCandidateWire[];
   /** True when the sender truncated the body to `fabric.maxChars` before sending. */
   truncated?: boolean;
+  /** expectReply result (reply-plan §4.2): present iff a ticket was issued. */
+  reply?: { requestId: string; dueAt: string; state: "pending" | "send_failed" };
+  /** replyTo result: `accepted` ⇔ the recipient confirmed delivery (effect applied). */
+  replyTo?: { requestId: string; accepted: boolean };
+  /** Sub-reason for `reply_unreceivable` (`receive_off|blocked|not_joined`). */
+  unreceivable?: "receive_off" | "blocked" | "not_joined";
   /** Derived (XS0-report §3: `xs_res` carries no `woke`): a wake was requested, not downgraded,
    *  and the hub's evidence is `applied` — i.e. a run provably started (Fpi2). */
   woke?: boolean;
@@ -180,6 +201,7 @@ function sendFrameBytesOk(
   text: string,
   wake: boolean,
   level: number | undefined,
+  reply?: { expect?: boolean; replyTo?: boolean },
 ): boolean {
   return xsFrameBytesOk({
     t: "xs_req",
@@ -190,7 +212,10 @@ function sendFrameBytesOk(
     text,
     ...(wake ? { wake } : {}),
     ...(level !== undefined ? { level } : {}),
-  });
+    // worst-case reply fields (reply-plan §5.2 16 KiB budget)
+    ...(reply?.expect ? { expect: { requestId: "q" + "0".repeat(18), timeoutMs: 86_400_000 } } : {}),
+    ...(reply?.replyTo ? { replyTo: "q" + "0".repeat(18) } : {}),
+  } as Parameters<typeof xsFrameBytesOk>[0]);
 }
 
 // ----------------------------------------------------------------- hub reply mapping (§8.2/§8.3, r3 M2)
@@ -206,6 +231,7 @@ const PROVABLE_NONE_CODES = new Set([
   "E_XS_AMBIGUOUS",
   "E_XS_STALE_ORIGIN",
   "E_XS_TOO_LARGE",
+  "E_XS_REPLY_UNSUPPORTED", // reply-plan §5.2: refused before any reservation
 ]);
 
 function statusForCode(code: string | undefined): XsSendStatus {
@@ -224,6 +250,8 @@ function statusForCode(code: string | undefined): XsSendStatus {
       return "too_large";
     case "E_XS_BAD_FRAME":
       return "bad_frame";
+    case "E_XS_REPLY_UNSUPPORTED":
+      return "reply_unsupported";
     default:
       return "error";
   }
@@ -253,6 +281,30 @@ export function detectXsToolCollisions(existing: readonly string[] | undefined):
 
 // ----------------------------------------------------------------- sender
 
+/** Reply-plan §4.2 (RX4): everything the reply branches need, injected by RXW. Absent ⇒ both
+ *  `expectReply` and `replyTo` answer `reply_unsupported` (nothing issued, nothing sent). */
+export interface XsSenderReplyDeps {
+  /** The process ledger (`getXsReplyLedger()`); only `issue` + `recordSend` are used here. */
+  ledger: {
+    issue(input: XsReplyIssueInput): XsReplyIssueResult;
+    recordSend(requestId: string, effect: "applied" | "none" | "unknown"): void;
+  };
+  /** `fabric.crossSession.reply.*` leaves (already clamped by the settings parser). */
+  defaultTimeoutS: number;
+  maxTimeoutS: number;
+  lateGraceS: number;
+  maxPending: number;
+  maxPendingPerTarget: number;
+  /** §4.2 step 2 receivability precheck against THIS stack: joined ∧ effective receive ≠ off ∧
+   *  `senderAllowed(target)`. `ok` ⇒ a reply could be accepted; anything else refuses. */
+  receivable(targetSessionId: string): "ok" | "receive_off" | "blocked" | "not_joined";
+  /** §4.2 replyTo step 3: look up the inbound message that carried `requestId` (newest first,
+   *  ≤2000 entries). `undefined` ⇒ not found (A decides — never blocks). */
+  inbound(requestId: string): { fromSessionId: string } | undefined;
+  /** Clock seam (ms); defaults to Date.now. */
+  now?: () => number;
+}
+
 export interface XsSenderDeps {
   port: XsHubPort;
   origin: XsSenderOriginPort;
@@ -263,11 +315,29 @@ export interface XsSenderDeps {
   /** Causal-level view; wired iff wake is on. Absent ⇒ `wake:true` degrades
    *  (`sender_wake_disabled`) and no `level` rides the frame (§6.6). */
   level?: XsSenderLevelPort;
+  /** Reply-plan §4.2 (RX4); wired iff `reply.enabled`. */
+  reply?: XsSenderReplyDeps;
+}
+
+export interface XsSenderMessageArgs {
+  to: string;
+  text: string;
+  wake?: boolean;
+  signal?: AbortSignal;
+  /** Reply-plan §4.1: ask the recipient for ONE reply (`timeoutS` default = settings default). */
+  expectReply?: { timeoutS?: number };
+  /** Reply-plan §4.1: answer a request (`q` + 18 hex from the header's reply_to). */
+  replyTo?: string;
+  /** Who initiated: `model` (default; reply wakes the requester) or `human` (@session — quiet
+   *  reply, R4). Never reachable from a tool parameter. */
+  origin?: "model" | "human";
+  /** `0` for human-origin sends (causal level of human input, §9). */
+  levelOverride?: 0;
 }
 
 export interface XsSender {
   list(args: { query?: string; scope?: "hub" | "cwd"; signal?: AbortSignal }): Promise<XsListOutcome>;
-  message(args: { to: string; text: string; wake?: boolean; signal?: AbortSignal }): Promise<XsSendOutcome>;
+  message(args: XsSenderMessageArgs): Promise<XsSendOutcome>;
 }
 
 export function createXsSender(deps: XsSenderDeps): XsSender {
@@ -305,12 +375,24 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
 
     async message(args) {
       const to = (typeof args.to === "string" ? args.to : "").trim();
+      if (args.expectReply !== undefined && args.replyTo !== undefined) {
+        // reply-plan RR6: local refusal, nothing issued, nothing sent
+        return { status: "bad_args", effect: "none", reason: "expect_and_reply_to" };
+      }
       if (xsTargetFormallyRejected(to)) {
         return { status: "bad_target", effect: "none", reason: "bad_target" };
       }
       const snapshot = deps.origin.current();
       if (!snapshot || !guardOk(snapshot, args.signal)) {
         return { status: "origin_changed", effect: "none", reason: "origin_changed" };
+      }
+      const replyDeps = deps.reply;
+      const replyCapable = (): boolean => replyDeps !== undefined && deps.port.replyCapable?.() === true;
+      const replyToId = args.replyTo;
+      const expectReq = args.expectReply;
+      // reply-plan §4.2 replyTo step 1: capability first (before any round trip)
+      if (replyToId !== undefined && !replyCapable()) {
+        return { status: "reply_unsupported", effect: "none", reason: "reply_unsupported" };
       }
 
       // ---- resolve round trip (fail fast; consumes no send quota) ----
@@ -320,7 +402,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       if (!guardOk(snapshot, args.signal)) {
         return { status: "origin_changed", effect: "none", reason: "origin_changed" };
       }
-      let resolvedTarget: { ref: string; name?: string } | undefined;
+      let resolvedTarget: { ref: string; name?: string; sessionId?: string } | undefined;
       if (resolveReply.kind === "off") return { status: "off", effect: "none", code: "E_XS_OFF" };
       if (resolveReply.kind !== "res") {
         // Nothing was sent yet ⇒ provably `none`; the model may retry the whole call later.
@@ -345,58 +427,156 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
         return { status: "ambiguous", effect: "none", candidates: rres.candidates, reason: "ambiguous" };
       }
       resolvedTarget = rres.target;
+      /** The wire `to` never exposes the full sessionId to the model (reply-plan §4.2 返回值). */
+      const publicTarget = (
+        t: { ref: string; name?: string; sessionId?: string } | undefined,
+      ): { ref: string; name?: string } | undefined =>
+        t === undefined ? undefined : { ref: t.ref, ...(t.name !== undefined ? { name: t.name } : {}) };
+
+      // ---- reply branches: pin the address to the verified FULL sessionId (review #3) ----
+      let sendTo = to;
+      let expectWire: { requestId: string; timeoutMs: number } | undefined;
+      let issuedRequestId: string | undefined;
+      let issuedDueAt: number | undefined;
+      const isHuman = args.origin === "human";
+      if (replyToId !== undefined || expectReq !== undefined) {
+        // expectReply: capability check happens here, after resolve (plan step order)
+        if (!replyCapable() || replyDeps === undefined) {
+          return { status: "reply_unsupported", effect: "none", reason: "reply_unsupported" };
+        }
+        const fullId = resolvedTarget?.sessionId;
+        if (fullId === undefined || fullId.length === 0) {
+          return { status: "reply_unsupported", effect: "none", reason: "no_session_id" };
+        }
+        sendTo = fullId;
+        if (replyToId !== undefined) {
+          const found = replyDeps.inbound(replyToId);
+          if (found !== undefined && found.fromSessionId !== fullId) {
+            return { status: "reply_target_mismatch", effect: "none", reason: "reply_target_mismatch" };
+          }
+        } else {
+          const rcv = replyDeps.receivable(fullId);
+          if (rcv !== "ok") {
+            return { status: "reply_unreceivable", effect: "none", reason: "reply_unreceivable", unreceivable: rcv };
+          }
+        }
+      }
 
       // ---- sender-side pre-checks (§4.5/§6.6/§5.2) — all local, no await ----
+      // replyTo carries neither wake nor level (reply-plan §4.2): the requester decides wake.
       let wake: true | undefined;
       let localDowngrade: XsWakeDowngraded | undefined;
-      const wantWake = args.wake === true;
+      const wantWake = replyToId === undefined && args.wake === true;
       const wakeUsable = deps.wakeOn === true && deps.level !== undefined;
+      const levelBase =
+        args.levelOverride !== undefined ? args.levelOverride : wakeUsable ? deps.level!.levelOfRoot() : undefined;
       if (wantWake) {
         if (!wakeUsable) localDowngrade = "sender_wake_disabled";
-        else if (!deps.level!.hopAllowed(deps.level!.levelOfRoot())) localDowngrade = "level_limit";
+        else if (!deps.level!.hopAllowed(levelBase ?? 0)) localDowngrade = "level_limit";
         else wake = true;
       }
-      const level = wakeUsable ? deps.level!.levelOfRoot() : undefined; // §6.6: carried iff sender wake on
+      // §6.6: carried iff sender wake on; never on a reply
+      const level = replyToId !== undefined ? undefined : wakeUsable ? levelBase : undefined;
 
       const text = truncate(args.text ?? "", maxChars);
       const truncated = text !== args.text;
-      if (!sendFrameBytesOk(snapshot, to, text, wake === true, level)) {
+      if (
+        !sendFrameBytesOk(snapshot, sendTo, text, wake === true, level, {
+          expect: expectReq !== undefined,
+          replyTo: replyToId !== undefined,
+        })
+      ) {
         return { status: "too_large", effect: "none", reason: "too_large", ...(truncated ? { truncated: true } : {}) };
       }
 
+      // ---- expectReply: issue BEFORE send, same synchronous block as the guard above ----
+      if (expectReq !== undefined && replyDeps !== undefined) {
+        const timeoutS = Math.min(
+          replyDeps.maxTimeoutS,
+          Math.max(60, Math.floor(expectReq.timeoutS ?? replyDeps.defaultTimeoutS)),
+        );
+        const issued = replyDeps.ledger.issue({
+          requesterSessionId: snapshot.sessionId,
+          replierSessionId: sendTo,
+          replierRef: resolvedTarget?.ref ?? sendTo,
+          ...(resolvedTarget?.name !== undefined ? { replierName: resolvedTarget.name } : {}),
+          origin: isHuman ? "human" : "model",
+          wakeOnReply: !isHuman,
+          requesterLevel: isHuman ? 0 : wakeUsable ? deps.level!.levelOfRoot() : 0,
+          timeoutMs: timeoutS * 1000,
+          lateGraceMs: replyDeps.lateGraceS * 1000,
+          maxPending: replyDeps.maxPending,
+          maxPendingPerTarget: replyDeps.maxPendingPerTarget,
+        });
+        if (!issued.ok) {
+          return {
+            status: issued.code,
+            effect: "none",
+            reason: issued.code === "reply_quota" && issued.perTarget === true ? "per_target" : issued.code,
+          };
+        }
+        issuedRequestId = issued.ticket.requestId;
+        issuedDueAt = issued.ticket.dueAt;
+        expectWire = { requestId: issued.ticket.requestId, timeoutMs: timeoutS * 1000 };
+      }
+      const settleTicket = (effect: XsEffect): { state: "pending" | "send_failed" } | undefined => {
+        if (issuedRequestId === undefined) return undefined;
+        replyDeps?.ledger.recordSend(issuedRequestId, effect);
+        return { state: effect === "none" ? "send_failed" : "pending" };
+      };
+      const withReply = (o: XsSendOutcome): XsSendOutcome => {
+        // ticket settle first (exactly once), then decorate
+        const t = settleTicket(o.effect);
+        if (t !== undefined && issuedRequestId !== undefined && issuedDueAt !== undefined) {
+          o.reply = { requestId: issuedRequestId, dueAt: new Date(issuedDueAt).toISOString(), state: t.state };
+        }
+        if (replyToId !== undefined) {
+          o.replyTo = { requestId: replyToId, accepted: o.status === "sent" && o.effect === "applied" };
+        }
+        return o;
+      };
+
       // ---- exactly one send; no resend path (§3, NQ3) ----
-      const sendReply = await deps.port.send({
-        origin: snapshot,
-        to,
-        text,
-        ...(wake !== undefined ? { wake } : {}),
-        ...(level !== undefined ? { level } : {}),
-      });
+      let sendReply: XsPortReply;
+      try {
+        sendReply = await deps.port.send({
+          origin: snapshot,
+          to: sendTo,
+          text,
+          ...(wake !== undefined ? { wake } : {}),
+          ...(level !== undefined ? { level } : {}),
+          ...(expectWire !== undefined ? { expect: expectWire } : {}),
+          ...(replyToId !== undefined ? { replyTo: replyToId } : {}),
+        });
+      } catch {
+        // a port that throws cannot prove non-delivery ⇒ unknown (never none), ticket stays pending
+        return withReply({ status: "unanswered", effect: "unknown", reason: "link_lost" });
+      }
 
       // ---- r3 M2 post-send guard: origin changed AFTER the send ----
       const stillCurrent = guardOk(snapshot, args.signal);
       if (!stillCurrent && (sendReply.kind === "deadline" || sendReply.kind === "link_lost")) {
         // No verdict arrived; the message may have taken effect ⇒ unknown, NEVER none.
-        return { status: "unanswered", effect: "unknown", reason: "origin_changed_after_send" };
+        return withReply({ status: "unanswered", effect: "unknown", reason: "origin_changed_after_send" });
       }
       // Any received verdict (ok or provable rejection) survives the identity change; `off`
       // proves nothing was sent. Map below, then return as-is.
 
-      if (sendReply.kind === "off") return { status: "off", effect: "none", code: "E_XS_OFF" };
+      if (sendReply.kind === "off") return withReply({ status: "off", effect: "none", code: "E_XS_OFF" });
       if (sendReply.kind === "deadline") {
-        return { status: "unanswered", effect: "unknown", reason: "client_deadline" };
+        return withReply({ status: "unanswered", effect: "unknown", reason: "client_deadline" });
       }
       if (sendReply.kind === "link_lost") {
-        return { status: "unanswered", effect: "unknown", reason: "link_lost" };
+        return withReply({ status: "unanswered", effect: "unknown", reason: "link_lost" });
       }
       const res = sendReply.res;
-      const target = res.target ?? resolvedTarget;
+      const target = publicTarget(res.target ?? resolvedTarget);
       if (res.ok) {
         const effect: XsEffect = res.effect ?? "unknown"; // XI11: no evidence field ⇒ unknown
         const wakeDowngraded = res.wakeDowngraded ?? localDowngrade;
         const woke = wantWake && wakeDowngraded === undefined && effect === "applied";
         const reason = resReason(res);
-        return {
+        return withReply({
           status: "sent",
           effect,
           ...(reason !== undefined ? { reason } : {}),
@@ -404,11 +584,11 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
           ...(wakeDowngraded !== undefined ? { wakeDowngraded } : {}),
           ...(truncated ? { truncated: true } : {}),
           ...(woke ? { woke: true } : {}),
-        };
+        });
       }
       const status = statusForCode(res.code);
       const provablyNone = res.code !== undefined && PROVABLE_NONE_CODES.has(res.code);
-      return {
+      return withReply({
         status,
         effect: provablyNone ? "none" : "unknown",
         ...(res.code !== undefined ? { code: res.code } : {}),
@@ -416,7 +596,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
         ...(target !== undefined ? { to: target } : {}),
         ...(status === "ambiguous" && res.candidates ? { candidates: res.candidates } : {}),
         ...(truncated ? { truncated: true } : {}),
-      };
+      });
     },
   };
 }

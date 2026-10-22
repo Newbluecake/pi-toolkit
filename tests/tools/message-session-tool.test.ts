@@ -164,3 +164,145 @@ describe("tools/list_sessions", () => {
     );
   });
 });
+
+// ====================================================================== reply-plan §4.1/§4.2 (RX4)
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  messageSessionParamsFor,
+  MessageSessionParamsLegacy,
+  MessageSessionParamsReply,
+  XS_REPLY_TO_REJECTED_HINT,
+  XS_REPLY_TO_UNKNOWN_HINT,
+} from "../../src/tools/message-session-tool.js";
+
+describe("tools/message_session — reply instances (RX4)", () => {
+  const golden = JSON.parse(
+    readFileSync(join(__dirname, "..", "fixtures", "fabric-xs-reply-off-golden.json"), "utf8"),
+  ) as { tools: { message_session: { description: string; parameters: unknown } } };
+
+  it("instance selection: reply off ⇒ the legacy instance, reply on ⇒ the reply instance", () => {
+    expect(messageSessionParamsFor(false)).toBe(MessageSessionParamsLegacy);
+    expect(messageSessionParamsFor(true)).toBe(MessageSessionParamsReply);
+    const off = createMessageSessionTool({ sender: fakeSender().sender });
+    const off2 = createMessageSessionTool({ sender: fakeSender().sender, reply: false });
+    const on = createMessageSessionTool({ sender: fakeSender().sender, reply: true });
+    expect(off.parameters).toBe(MessageSessionParamsLegacy);
+    expect(off2.parameters).toBe(MessageSessionParamsLegacy);
+    expect(on.parameters).toBe(MessageSessionParamsReply);
+  });
+
+  it("reply OFF: description + schema equal the checked-in reply-off golden byte for byte", () => {
+    const tool = createMessageSessionTool({ sender: fakeSender().sender });
+    expect(JSON.parse(JSON.stringify(tool.parameters))).toEqual(golden.tools.message_session.parameters);
+    expect(tool.description).toBe(golden.tools.message_session.description);
+    expect(Object.keys((tool.parameters as { properties: object }).properties)).toEqual(["to", "text", "wake"]);
+  });
+
+  it("reply ON: the schema is the legacy properties plus exactly expectReply/replyTo", () => {
+    const on = createMessageSessionTool({ sender: fakeSender().sender, reply: true });
+    const props = (on.parameters as unknown as { properties: Record<string, unknown> }).properties;
+    expect(Object.keys(props)).toEqual(["to", "text", "wake", "expectReply", "replyTo"]);
+    const legacyProps = (golden.tools.message_session.parameters as { properties: Record<string, unknown> }).properties;
+    for (const k of Object.keys(legacyProps)) expect(JSON.parse(JSON.stringify(props[k]))).toEqual(legacyProps[k]);
+    const replyTo = JSON.parse(JSON.stringify(props.replyTo)) as { pattern: string };
+    expect(replyTo.pattern).toBe("^q[0-9a-f]{18}$");
+    const expectReply = JSON.parse(JSON.stringify(props.expectReply)) as {
+      additionalProperties: boolean;
+      properties: { timeoutS: { minimum: number; maximum: number } };
+    };
+    expect(expectReply.additionalProperties).toBe(false);
+    expect(expectReply.properties.timeoutS).toMatchObject({ minimum: 60, maximum: 86_400 });
+    expect(on.description).not.toBe(golden.tools.message_session.description);
+  });
+
+  it("reply ON forwards expectReply / replyTo to the sender; reply OFF never does", async () => {
+    const q = "q" + "0".repeat(18);
+    const on = fakeSender();
+    await createMessageSessionTool({ sender: on.sender, reply: true }).execute("c", {
+      to: "abcdefgh1234",
+      text: "t",
+      expectReply: { timeoutS: 90 },
+    });
+    expect(on.message).toHaveBeenCalledWith({ to: "abcdefgh1234", text: "t", expectReply: { timeoutS: 90 } });
+    const on2 = fakeSender();
+    await createMessageSessionTool({ sender: on2.sender, reply: true }).execute("c", {
+      to: "abcdefgh1234",
+      text: "t",
+      replyTo: q,
+    });
+    expect(on2.message).toHaveBeenCalledWith({ to: "abcdefgh1234", text: "t", replyTo: q });
+    const off = fakeSender();
+    await createMessageSessionTool({ sender: off.sender }).execute("c", {
+      to: "abcdefgh1234",
+      text: "t",
+      expectReply: {},
+      replyTo: q,
+    } as never);
+    expect(off.message).toHaveBeenCalledWith({ to: "abcdefgh1234", text: "t" });
+  });
+
+  it("expectReply success text names the request id and due time; the outcome carries reply{requestId,dueAt,state}", async () => {
+    const h = fakeSender();
+    h.message.mockResolvedValueOnce({
+      status: "sent",
+      effect: "applied",
+      reply: { requestId: "q" + "1".repeat(18), dueAt: "2026-10-22T09:00:00.000Z", state: "pending" },
+    });
+    const r = await createMessageSessionTool({ sender: h.sender, reply: true }).execute("c", {
+      to: "abcdefgh1234",
+      text: "t",
+      expectReply: {},
+    });
+    const text = (r.content[0] as { text: string }).text;
+    expect(text).toContain("已登记期待回复 q" + "1".repeat(18));
+    expect(text).toContain("2026-10-22T09:00:00.000Z");
+    expect(text).toContain("无需轮询");
+    expect(r.details).toMatchObject({ reply: { state: "pending" } });
+  });
+
+  it("replyTo unknown ⇒ the idempotent-resend hint (not the legacy 'do not resend' one)", async () => {
+    const h = fakeSender();
+    h.message.mockResolvedValueOnce({
+      status: "unanswered",
+      effect: "unknown",
+      reason: "client_deadline",
+      replyTo: { requestId: "q" + "2".repeat(18), accepted: false },
+    });
+    const r = await createMessageSessionTool({ sender: h.sender, reply: true }).execute("c", {
+      to: "abcdefgh1234",
+      text: "t",
+      replyTo: "q" + "2".repeat(18),
+    });
+    const text = (r.content[0] as { text: string }).text;
+    expect(text).toContain(XS_REPLY_TO_UNKNOWN_HINT);
+    expect(text).not.toContain(XS_UNKNOWN_HINT);
+  });
+
+  it("replyTo none{rejected} ⇒ the 'do not resend' rejected hint", async () => {
+    const h = fakeSender();
+    h.message.mockResolvedValueOnce({
+      status: "sent",
+      effect: "none",
+      reason: "rejected",
+      replyTo: { requestId: "q" + "3".repeat(18), accepted: false },
+    });
+    const r = await createMessageSessionTool({ sender: h.sender, reply: true }).execute("c", {
+      to: "abcdefgh1234",
+      text: "t",
+      replyTo: "q" + "3".repeat(18),
+    });
+    expect((r.content[0] as { text: string }).text).toContain(XS_REPLY_TO_REJECTED_HINT);
+  });
+
+  it("a plain unknown send keeps the legacy hint on the reply instance too", async () => {
+    const h = fakeSender();
+    h.message.mockResolvedValueOnce({ status: "unanswered", effect: "unknown", reason: "link_lost" });
+    const r = await createMessageSessionTool({ sender: h.sender, reply: true }).execute("c", {
+      to: "abcdefgh1234",
+      text: "t",
+    });
+    expect((r.content[0] as { text: string }).text).toContain(XS_UNKNOWN_HINT);
+  });
+});
