@@ -1,3 +1,4 @@
+import { formatTokens } from "../hud/format.js";
 import type {
   ContextUsageInfo,
   Millis,
@@ -265,7 +266,7 @@ export function formatContextUsage(u: ContextUsageInfo): string {
 
 /** X9 usage, 4-decimal cost (same convention as /agent status: subagent runs are sub-cent). */
 export function formatUsage(u: UsageDelta): string {
-  return `in:${u.input} out:${u.output} $${u.costUsd.toFixed(4)}`;
+  return `in:${formatTokens(u.input)} out:${formatTokens(u.output)} $${u.costUsd.toFixed(4)}`;
 }
 
 /** Max rendered branch-name length (the `pi-agent-<runId>` prefix alone is 9). */
