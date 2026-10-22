@@ -1,4 +1,5 @@
 import { Type, type TSchema } from "@sinclair/typebox";
+import { XS_ALIAS_MAX_BYTES } from "./xs-alias.js";
 
 /**
  * fabric phase-2 XS0 (phase2-plan §4.2/§8.1/§8.2): the FROZEN cross-session frame contract —
@@ -48,6 +49,14 @@ export const XS_CHANNEL_HUB_CAP = "xs.channel.v1";
 /** Channel-plan §3.1 (CH0): agent-side channel cap, appended to `hello.caps` iff
  *  `xsOn ∧ fabric.crossSession.channels.enabled`. `XS_AGENT_CAPS` itself stays frozen (off goldens). */
 export const XS_CHANNEL_AGENT_CAP = "xs.channel.v1";
+/** Alias-plan §3.6 (AL0b, cap only — never a PROTO bump): hub-side alias cap. Advertised on BOTH hub cap
+ *  surfaces iff `HubConfig.crossSession` exists AND the binding table loaded `ready` (a `degraded` store never
+ *  advertises it); fixed for the whole run (`aliasAdvertised`). A missing `HubConfig.crossSession.alias` means
+ *  default params, never "off". */
+export const XS_ALIAS_HUB_CAP = "xs.alias.v1";
+/** Alias-plan §3.6 (AL0b): agent-side alias cap, appended to `hello.caps` iff `xsOn ∧ fabric.crossSession.alias.enabled`.
+ *  `XS_AGENT_CAPS` itself stays frozen (off goldens). */
+export const XS_ALIAS_AGENT_CAP = "xs.alias.v1";
 /** The slot kind the `xs_member` frame rides (X2 appends it to SLOT_ORDER right after "session"). */
 export const XS_SLOT_KIND = "xs" as const;
 
@@ -72,6 +81,8 @@ export const XS_REQ_DEADLINE_MS = {
   // channel-plan §3.3 (CH0): hub fan-out ≈ admission <1s + 5s deliver + headroom; channels is a read.
   broadcast: 8_000,
   channels: 3_000,
+  // alias-plan §3.3 (AL0b): hub-side transaction budget is 4s (queue wait included); client deadline 5s.
+  alias: 5_000,
 } as const;
 
 /** Per-frame hard byte cap for every `xs_*` frame (§5.2): the hub REJECTS oversize sends with
@@ -90,7 +101,31 @@ export type XsReqOp = "list" | "resolve" | "send" | "info";
 /** Channel-plan §3.3: the two new ops (CH1 widened `XsReqFrame.op` to `XsAnyReqOp`). Sent only to
  *  a hub advertising `xs.channel.v1`. */
 export type XsChannelReqOp = "broadcast" | "channels";
-export type XsAnyReqOp = XsReqOp | XsChannelReqOp;
+/** Alias-plan §3.4 (AL0b): the `alias` op (get/set/clear/take). Sent only to a hub advertising `xs.alias.v1`
+ *  by an agent that declared it. */
+export type XsAliasReqOp = "alias";
+export type XsAnyReqOp = XsReqOp | XsChannelReqOp | XsAliasReqOp;
+
+// ----------------------------------------------------------------- aliases (alias-plan §3.4/§3.5, AL0b)
+
+/** `xs_res.alias` for get / set / clear success (§3.4). `lost` is the one-shot "no longer yours" notice (Q3). */
+export interface XsAliasStateWire {
+  alias?: string;
+  state: "held" | "none";
+  lost?: { alias: string; reason: "taken" | "expired"; at: number };
+}
+/** `xs_res.alias` for a take preview (§3.5): `cwdLabel` is untrusted plain text (≤120 chars), never ref/name/channels. */
+export interface XsAliasTakePreviewWire {
+  take: { cwdLabel: string; offlineForS: number; token: string; expiresAt: number };
+}
+export type XsAliasResWire = XsAliasStateWire | XsAliasTakePreviewWire;
+/** `xs_req.take` value for the preview step. Any other value must match `XS_ALIAS_TAKE_TOKEN_RE`. */
+export const XS_ALIAS_TAKE_PREVIEW = "preview";
+/** Alias error sub-reasons (code brace suffix, e.g. `E_XS_ALIAS_TAKEN{confusable}`). */
+export type XsAliasTakenDetail = "taken" | "confusable";
+export type XsAliasTakeDetail = "online" | "recent" | "stale" | "not_held";
+export type XsAliasBusyDetail = "queue" | "io" | "tokens";
+/** `E_XS_NO_TARGET` is the only code for an unreachable/unknown/changed target on an `aliasUsable` send (§5.2); no new wire field. */
 
 // ----------------------------------------------------------------- channels (channel-plan §2.1/§3/§5, CH0)
 
@@ -160,6 +195,15 @@ export type XsErrorCode =
   | "E_XS_TOO_LARGE" // frame exceeds XS_MAX_FRAME_BYTES
   | "E_XS_REPLY_UNSUPPORTED" // reply-plan §5.2: the peer (hub or target) lacks `xs.reply.v1` — refused before any reservation; a PROVABLE-none code (RX4 maps it)
   | "E_XS_FANOUT_TOO_LARGE" // channel-plan §5.2 step 3: broadcast recipient set above `maxRecipients` — a PROVABLE-none code
+  // alias-plan §3.4/§5.1 (AL0b). Detail rides the brace suffix (`E_XS_ALIAS_TAKEN{confusable}`); all are PROVABLE-none
+  // except E_XS_ALIAS_UNKNOWN (rename in flight — may have taken effect).
+  | "E_XS_ALIAS_INVALID" // {invalid|too_long|id_like|reserved} (`XsAliasRejectReason`)
+  | "E_XS_ALIAS_TAKEN" // {taken|confusable} — never echoes an existing alias
+  | "E_XS_ALIAS_TAKE" // {online|recent|stale|not_held}
+  | "E_XS_ALIAS_FULL" // binding table at 256 records (new records only)
+  | "E_XS_ALIAS_BUSY" // {queue|io|tokens}
+  | "E_XS_ALIAS_UNKNOWN" // rename in flight past 1s: the write may have been committed
+  | "E_XS_ALIAS_UNAVAILABLE" // store degraded: alias-shaped name refused for an alias-capable requester, no name fallback (§5.1)
   | "E_XS_INTERNAL"; // handler exception (X1's catch-all; logs carry no body)
 
 // ----------------------------------------------------------------- effect / reason / downgrade enums
@@ -366,6 +410,7 @@ export const XsReqSchema = Type.Object(
       Type.Literal("info"),
       Type.Literal("broadcast"), // channel-plan §3.3 (CH0): only sent to a hub advertising `xs.channel.v1`
       Type.Literal("channels"),
+      Type.Literal("alias"), // alias-plan §3.4 (AL0b): only sent to a hub advertising `xs.alias.v1`
     ]),
     origin: OriginSchema,
     query: Type.Optional(Type.String({ maxLength: 128 })),
@@ -377,6 +422,11 @@ export const XsReqSchema = Type.Object(
     expect: Type.Optional(ReplyExpectSchema),
     channel: Type.Optional(ChannelNameSchema), // channel-plan §3.3: required for broadcast, optional list filter
     replyTo: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), // an XS_REPLY_REQUEST_ID_RE-shaped id; the router validates the exact shape (see ReplyExpectSchema)
+    // alias-plan §3.4 (AL0b): `op:"alias"` only. Permissive on purpose (the hub normalizes / answers E_XS_ALIAS_INVALID
+    // instead of a silent schema drop). Neither `alias` nor `clear` ⇒ get.
+    alias: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    clear: Type.Optional(Type.Literal(true)),
+    take: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), // "preview" | XS_ALIAS_TAKE_TOKEN_RE token; the router validates
   },
   { additionalProperties: false },
 );
@@ -398,6 +448,12 @@ export interface XsReqFrame {
   replyTo?: string;
   /** Channel-plan §3.3: `broadcast` target channel (required there) / optional `list` filter. */
   channel?: string;
+  /** Alias-plan §3.4: `op:"alias"` set target (raw user input; the hub normalizes). */
+  alias?: string;
+  /** Alias-plan §3.4: `op:"alias"` clear. */
+  clear?: true;
+  /** Alias-plan §3.5: `op:"alias"` take — `"preview"` or the token returned by the preview. */
+  take?: string;
 }
 
 /** One `xs_res{rows}` row (§4.3 list projection — no agentKey, pid, tools or model). */
@@ -411,6 +467,8 @@ export interface XsSessionRowWire {
   lastActiveAgoS: number;
   /** Channel-plan §3.2: shared channels with the requester — ABSENT when the shared set is exactly [default]. */
   channels?: string[];
+  /** Alias-plan §5.3: the row's canonical alias — written only to an `aliasUsable` requester, ABSENT otherwise. */
+  alias?: string;
 }
 
 /** One `xs_res{candidates}` entry (ref + optional name only — anti-enumeration, §5.1). */
@@ -419,6 +477,8 @@ export interface XsResolveCandidateWire {
   name?: string;
   /** Channel-plan §3.2: same write rule as `XsSessionRowWire.channels`. */
   channels?: string[];
+  /** Alias-plan §6: same write rule as `XsSessionRowWire.alias`. */
+  alias?: string;
 }
 
 /** §4.6: `xs_req{op:"info"}` reply body — the hub's frozen-at-start effective global limits. */
@@ -453,6 +513,8 @@ export const XsResSchema = Type.Object(
     channels: Type.Optional(
       Type.Array(Type.Object({}, { additionalProperties: true }), { maxItems: XS_CHANNEL_RESULT_MAX_ROWS }),
     ),
+    // alias-plan §3.4 (AL0b): `op:"alias"` reply body (`XsAliasResWire`), written only to a requester that declared `xs.alias.v1`.
+    alias: Type.Optional(Type.Object({}, { additionalProperties: true })),
   },
   { additionalProperties: false },
 );
@@ -469,12 +531,14 @@ export interface XsResFrame {
   /** Reply-plan §5.2 (RX0): the target's FULL sessionId, backfilled on the resolve AND send
    *  reply paths iff the requester AND the target are both reply-capable (RX2); absent otherwise
    *  (old peers keep the loose two-field shape — `target` is an open object on the wire). */
-  target?: { ref: string; name?: string; sessionId?: string };
+  target?: { ref: string; name?: string; sessionId?: string; alias?: string };
   hubLimits?: XsHubLimitsWire;
   /** Channel-plan §3.3: broadcast aggregate / per-recipient rows / `op:"channels"` listing. */
   fanout?: XsFanoutWire;
   results?: XsBroadcastRowWire[];
   channels?: XsChannelInfoWire[];
+  /** Alias-plan §3.4: `op:"alias"` reply body. */
+  alias?: XsAliasResWire;
 }
 
 /**
@@ -499,6 +563,9 @@ export const XsDeliverSchema = Type.Object(
         name: Type.Optional(Type.String({ maxLength: 120 })),
         cwdLabel: Type.String({ maxLength: 120 }),
         agentId: Type.String({ maxLength: 128 }),
+        // alias-plan §6 (AL0b): hub-verified alias, an INDEPENDENT field (never part of the truncated `from` meta);
+        // written by the hub (send, reply, broadcast) only when the TARGET is `aliasUsable`. ≤48 UTF-8 bytes ⇒ ≤48 chars.
+        alias: Type.Optional(Type.String({ minLength: 1, maxLength: XS_ALIAS_MAX_BYTES })),
       },
       { additionalProperties: false },
     ),
@@ -520,7 +587,7 @@ export interface XsDeliverFrame {
   rid: string;
   xid: string;
   to: { sessionId: string; epoch: number };
-  from: { sessionId: string; ref: string; name?: string; cwdLabel: string; agentId: string };
+  from: { sessionId: string; ref: string; name?: string; cwdLabel: string; agentId: string; alias?: string };
   text: string;
   wake: boolean;
   level?: number;
@@ -585,6 +652,7 @@ export const XsStatusSchema = Type.Object(
     receive: ReceiveSchema,
     blocked: Type.Integer({ minimum: 0, maximum: 64 }),
     channels: Type.Optional(Type.Array(ChannelNameSchema, { maxItems: XS_MAX_CHANNELS })), // channel-plan §3.2: never written for default-only
+    alias: Type.Optional(Type.String({ minLength: 1, maxLength: XS_ALIAS_MAX_BYTES })), // alias-plan §7.2: held alias only; cap-gated
   },
   { additionalProperties: false },
 );
@@ -594,4 +662,6 @@ export interface XsStatusWire {
   blocked: number;
   /** Channel-plan §3.2: effective channels; ABSENT when default-only / hub lacks the cap. */
   channels?: string[];
+  /** Alias-plan §7.2: the held alias (display only); ABSENT when none / alias off / hub lacks the cap. */
+  alias?: string;
 }

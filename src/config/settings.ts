@@ -1062,6 +1062,27 @@ export interface FabricXsChannelSettings {
   broadcast: FabricXsBroadcastSettings;
 }
 
+/** Parse-time bounds for `fabric.crossSession.alias.*` (alias-plan §3.6). `takeMinOfflineMin`'s floor IS NQ1
+ *  (take needs the holder offline ≥10 min — it can never be tuned down to 0). */
+export const FABRIC_XS_ALIAS_OFFLINE_LEASE_H_MIN = 1;
+export const FABRIC_XS_ALIAS_OFFLINE_LEASE_H_MAX = 720;
+export const FABRIC_XS_ALIAS_COOL_MIN_MIN = 1;
+export const FABRIC_XS_ALIAS_COOL_MIN_MAX = 1_440;
+export const FABRIC_XS_ALIAS_TAKE_MIN_OFFLINE_MIN_MIN = 10;
+export const FABRIC_XS_ALIAS_TAKE_MIN_OFFLINE_MIN_MAX = 1_440;
+
+/** `fabric.crossSession.alias.*` (alias-plan §3.6, non-live). */
+export interface FabricXsAliasSettings {
+  /** Q9: default true. false ≡ an old agent: no cap, no alias resolution, `/fabric alias` refused locally. */
+  enabled: boolean;
+  /** Q2: hours an offline holder keeps its alias (default 168 = 7 d). Rides `HubConfig.crossSession.alias`. */
+  offlineLeaseH: number;
+  /** Q4: minutes a cleared/renamed alias stays reserved for its former holder (default 10). */
+  coolMin: number;
+  /** NQ1: minutes a holder must be offline before `--take` (default 10, floor 10). */
+  takeMinOfflineMin: number;
+}
+
 /** `fabric.crossSession.limits.*` (phase2 §5.2, P8 defaults; every leaf parse-time clamped to its bounds). */
 export interface FabricCrossSessionLimitsSettings {
   /** Per-session outbound sends per minute (sender + hub). */
@@ -1111,6 +1132,8 @@ export interface FabricCrossSessionSettings {
   reply: FabricXsReplySettings;
   /** Channel-plan §6.4 (CH0): channels + broadcast settings (present in every parsed block). */
   channels: FabricXsChannelSettings;
+  /** Alias-plan §3.6 (AL0b): session alias settings (present in every parsed block). */
+  alias: FabricXsAliasSettings;
 }
 
 /**
@@ -1333,6 +1356,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
           wakeMaxRecipients: 4,
         },
       },
+      // alias-plan §3.6 (AL0b): Q9 on by default, Q2 7 d lease, Q4 10 min cooling, NQ1 10 min take floor.
+      alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10 },
     },
   },
   cacheTtl: {
@@ -1851,6 +1876,35 @@ function cloneFabricCrossSession(cs: FabricCrossSessionSettings): FabricCrossSes
     limits: { ...cs.limits },
     reply: { ...cs.reply },
     channels: { ...cs.channels, autoJoin: [...cs.channels.autoJoin], broadcast: { ...cs.channels.broadcast } },
+    alias: { ...cs.alias },
+  };
+}
+
+/**
+ * `fabric.crossSession.alias.*` (alias-plan §3.6, AL0b): field-by-field tolerant, never throws; every numeric
+ * leaf clamps into its bounds (`takeMinOfflineMin` can never go below the NQ1 floor of 10).
+ */
+export function parseFabricXsAliasSettings(input: unknown): FabricXsAliasSettings {
+  const defaults = DEFAULT_SETTINGS.fabric.crossSession.alias;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const clamp = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw !== "number" || !Number.isFinite(raw) ? fallback : Math.min(max, Math.max(min, Math.floor(raw)));
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    offlineLeaseH: clamp(
+      value.offlineLeaseH,
+      defaults.offlineLeaseH,
+      FABRIC_XS_ALIAS_OFFLINE_LEASE_H_MIN,
+      FABRIC_XS_ALIAS_OFFLINE_LEASE_H_MAX,
+    ),
+    coolMin: clamp(value.coolMin, defaults.coolMin, FABRIC_XS_ALIAS_COOL_MIN_MIN, FABRIC_XS_ALIAS_COOL_MIN_MAX),
+    takeMinOfflineMin: clamp(
+      value.takeMinOfflineMin,
+      defaults.takeMinOfflineMin,
+      FABRIC_XS_ALIAS_TAKE_MIN_OFFLINE_MIN_MIN,
+      FABRIC_XS_ALIAS_TAKE_MIN_OFFLINE_MIN_MAX,
+    ),
   };
 }
 
@@ -2067,6 +2121,7 @@ export function parseFabricCrossSessionSettings(input: unknown): FabricCrossSess
     },
     reply,
     channels: parseFabricXsChannelSettings(value.channels),
+    alias: parseFabricXsAliasSettings(value.alias),
   };
 }
 

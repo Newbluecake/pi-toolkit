@@ -795,7 +795,7 @@ export function auditCommandComplete(log: HubLog, record: CommandCompleteAuditRe
 export interface XsAuditRecord {
   /** Fixed association kind only — never the request id or message body. */
   reply?: "expect" | "reply";
-  op: "list" | "resolve" | "send" | "info" | "broadcast" | "channels";
+  op: "list" | "resolve" | "send" | "info" | "broadcast" | "channels" | "alias";
   /** Channel-plan §5.2 step 8: a per-recipient `op:"send"` line that belongs to a broadcast. */
   bcast?: boolean;
   /** Channel-plan §5.2 step 8: the broadcast line's recipient count N (never names or refs). */
