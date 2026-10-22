@@ -22,7 +22,13 @@
  * pi-free (boundary: node:* + relative hub/protocol imports only). No timers, no I/O.
  */
 import type { AgentId, AgentKind, XsMemberFrame } from "../../protocol/messages.js";
-import { XS_HUB_CAP, XsMemberLimitsSchema, type XsMemberLimitsWire, type XsReceiveWire } from "../../protocol/xs.js";
+import {
+  XS_HUB_CAP,
+  XS_REPLY_AGENT_CAP,
+  XsMemberLimitsSchema,
+  type XsMemberLimitsWire,
+  type XsReceiveWire,
+} from "../../protocol/xs.js";
 
 /** What the registry exposes about one record (no AgentView widening — see `Registry.xsView`). */
 export interface XsRecordView {
@@ -66,6 +72,8 @@ export interface XsMemberRecord {
 /** A member that passed every validity condition at the moment of the read. */
 export interface XsEffectiveMember extends XsMemberRecord {
   agentKey: string;
+  /** Peer capability, further gated by the hub reply setting in the router. */
+  replyCapable: boolean;
   name: string | undefined;
   cwd: string;
   kind: AgentKind;
@@ -165,6 +173,7 @@ export function createXsMembers(deps: {
     return {
       ...m,
       agentKey,
+      replyCapable: v.caps.includes(XS_REPLY_AGENT_CAP),
       name: v.sessionName,
       cwd: v.cwd,
       kind: v.kind,

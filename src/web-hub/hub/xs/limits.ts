@@ -9,6 +9,8 @@
  * Admission RESERVES (one atomic commit after every check passed; a rejected admission consumes
  * nothing):
  *   sendsOutPerMin/Hour +1 · inFlight +1 · pair interval stamp · hubSendsPerMin +1
+ *   Replies skip the pair-interval CHECK (not the send/in-flight/hub counters), force wake off,
+ *   and otherwise use the identical reservation/settlement path.
  *   and, iff the request asked for a wake and BOTH wakesOutPerHour and pairWakesPerHour have room,
  *   one wake in each window; otherwise the wake is dropped here (`outbound_wake_rate` /
  *   `pair_wake_rate`) and the message continues as deliver-only.
@@ -60,7 +62,13 @@ export interface XsLimitsSnapshot {
 export interface XsLimits {
   /** list/resolve budget (`listPerMin`, combined). */
   admitList(agentKey: string, limits: Pick<XsMemberLimitsWire, "listPerMin">): boolean;
-  admitSend(args: { agentKey: string; pairKey: string; limits: XsMemberLimitsWire; wantWake: boolean }): XsAdmit;
+  admitSend(args: {
+    agentKey: string;
+    pairKey: string;
+    limits: XsMemberLimitsWire;
+    wantWake: boolean;
+    isReply?: boolean;
+  }): XsAdmit;
   /** Idempotent: a ticket settles at most once. */
   settle(ticket: XsTicket, input: XsSettleInput): void;
   snapshot(): XsLimitsSnapshot;
@@ -132,7 +140,7 @@ export function createXsLimits(deps: { now: () => number; hubSendsPerMin: number
       return true;
     },
 
-    admitSend({ agentKey, pairKey, limits, wantWake }) {
+    admitSend({ agentKey, pairKey, limits, wantWake, isReply = false }) {
       const now = deps.now();
       sweep(now);
       const s = sender(agentKey);
@@ -144,7 +152,7 @@ export function createXsLimits(deps: { now: () => number; hubSendsPerMin: number
       if (pair !== undefined) prune(pair.wakes, now, HOUR_MS);
 
       if (s.inFlight >= limits.inFlightPerSession) return { ok: false, reason: "rate_in_flight" };
-      if (pair !== undefined && now - pair.lastAt < limits.pairMinIntervalMs) {
+      if (!isReply && pair !== undefined && now - pair.lastAt < limits.pairMinIntervalMs) {
         return { ok: false, reason: "rate_pair_interval" };
       }
       if (s.min.length >= limits.sendsOutPerMin) return { ok: false, reason: "rate_sends_min" };
@@ -154,7 +162,7 @@ export function createXsLimits(deps: { now: () => number; hubSendsPerMin: number
       // Every refusal check passed ⇒ commit the reservation atomically.
       let wake = false;
       let wakeDowngraded: "outbound_wake_rate" | "pair_wake_rate" | undefined;
-      if (wantWake) {
+      if (wantWake && !isReply) {
         if (s.wakes.length >= limits.wakesOutPerHour) wakeDowngraded = "outbound_wake_rate";
         else if ((pair?.wakes.length ?? 0) >= limits.pairWakesPerHour) wakeDowngraded = "pair_wake_rate";
         else wake = true;
@@ -204,12 +212,15 @@ export const XS_HUB_SENDS_PER_MIN_BOUNDS = { min: 1, max: 600 } as const;
 
 export interface HubCrossSessionConfig {
   limits: { hubSendsPerMin: number };
+  /** Absent = on; false preserves the pre-reply cap/frame shapes. */
+  reply?: boolean;
 }
 
 /**
  * `hub/main.ts` re-validation: anything but `{ limits: { hubSendsPerMin: integer 1..600 } }`
- * (extra keys ignored, never trusted) yields `undefined` ⇒ the caller DROPS the whole key ⇒ xs off
- * (no relay, no cap, no frame handling). Never throws.
+ * yields `undefined` ⇒ the caller DROPS the whole key ⇒ xs off (no relay, no cap, no frame
+ * handling). Optional `reply` is retained only as a boolean (malformed ⇒ false); absent stays
+ * absent, meaning on. All other extra keys are ignored. Never throws.
  */
 export function normalizeHubCrossSessionConfig(raw: unknown): HubCrossSessionConfig | undefined {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -218,5 +229,7 @@ export function normalizeHubCrossSessionConfig(raw: unknown): HubCrossSessionCon
   const v = (limits as Record<string, unknown>)["hubSendsPerMin"];
   if (typeof v !== "number" || !Number.isInteger(v)) return undefined;
   if (v < XS_HUB_SENDS_PER_MIN_BOUNDS.min || v > XS_HUB_SENDS_PER_MIN_BOUNDS.max) return undefined;
-  return { limits: { hubSendsPerMin: v } };
+  const reply = (raw as Record<string, unknown>)["reply"];
+  // Fail closed for a malformed reply knob, without disabling the legacy relay.
+  return { limits: { hubSendsPerMin: v }, ...(reply === undefined ? {} : { reply: reply === true }) };
 }

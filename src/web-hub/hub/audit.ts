@@ -790,6 +790,8 @@ export function auditCommandComplete(log: HubLog, record: CommandCompleteAuditRe
  * strict token shape (a free-form string from a remote could smuggle text) and dropped otherwise.
  */
 export interface XsAuditRecord {
+  /** Fixed association kind only — never the request id or message body. */
+  reply?: "expect" | "reply";
   op: "list" | "resolve" | "send" | "info";
   xid?: string;
   fromSession?: string;
@@ -804,6 +806,7 @@ export interface XsAuditRecord {
 
 export const XS_AUDIT_KEYS = [
   "op",
+  "reply",
   "xid",
   "fromSession",
   "toSession",
@@ -823,6 +826,10 @@ export function auditXs(log: { info(msg: string, data?: object): void }, record:
   for (const key of XS_AUDIT_KEYS) {
     const value = raw[key];
     if (value === undefined) continue;
+    if (key === "reply") {
+      if (value === "expect" || value === "reply") out[key] = value;
+      continue;
+    }
     if (key === "fromSession" || key === "toSession") {
       if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value.slice(0, 8);
       continue;

@@ -31,6 +31,7 @@ import {
   XS_LIST_MAX_ROWS,
   XS_RESOLVE_MAX_CANDIDATES,
   XS_RESOLVE_PREFIX_MIN,
+  XS_REPLY_REQUEST_ID_RE,
   xsFrameBytesOk,
   type XsAckFrame,
   type XsDeliverFrame,
@@ -40,10 +41,10 @@ import {
   type XsSessionRowWire,
   type XsWakeDowngraded,
 } from "../../protocol/xs.js";
-import { auditXs } from "../audit.js";
+import { auditXs, type XsAuditRecord } from "../audit.js";
 import type { HubLog } from "../ports.js";
 import type { Registry } from "../registry.js";
-import { createXsLimits, type XsLimits } from "./limits.js";
+import { createXsLimits, type XsLimits, type HubCrossSessionConfig } from "./limits.js";
 import { createXsMembers, type XsEffectiveMember, type XsMembers } from "./members.js";
 
 const REF_LEN = 12;
@@ -74,6 +75,7 @@ export interface XsRouterDeps {
   /** For the `~` cwd label. */
   home: string;
   hubSendsPerMin: number;
+  replyEnabled?: boolean;
 }
 
 function abbreviateHome(path: string, home: string): string {
@@ -126,19 +128,21 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     ...(m.name !== undefined ? { name: m.name.slice(0, NAME_MAX) } : {}),
   });
 
-  function resolveTarget(query: string, selfKey: string, selfSessionId: string): Resolved {
+  function resolveTarget(query: string, selfKey: string, selfSessionId: string, exact = false): Resolved {
     const q = query.trim();
-    if (reservedAddress(q)) return { kind: "bad" };
+    if (!exact && reservedAddress(q)) return { kind: "bad" };
     const pool = members
       .effectiveAll()
       .filter((m) => m.joined && m.agentKey !== selfKey && m.sessionId !== selfSessionId);
     const lower = q.toLowerCase();
-    const tiers: Array<(m: XsEffectiveMember) => boolean> = [
-      (m) => m.sessionId === q,
-      (m) => q.length >= XS_RESOLVE_PREFIX_MIN && m.sessionId.startsWith(q),
-      (m) => m.name !== undefined && m.name === q,
-      (m) => m.name !== undefined && m.name.toLowerCase() === lower,
-    ];
+    const tiers: Array<(m: XsEffectiveMember) => boolean> = exact
+      ? [(m) => m.sessionId === query]
+      : [
+          (m) => m.sessionId === q,
+          (m) => q.length >= XS_RESOLVE_PREFIX_MIN && m.sessionId.startsWith(q),
+          (m) => m.name !== undefined && m.name === q,
+          (m) => m.name !== undefined && m.name.toLowerCase() === lower,
+        ];
     for (const tier of tiers) {
       const hits = pool.filter(tier);
       if (hits.length === 0) continue;
@@ -156,11 +160,29 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       if (group.length > 1) return { kind: "dup", candidates: [candOf(group[0]!)] }; // XR5
       return { kind: "one", member: group[0]! };
     }
+    // Never route a reply-shaped send through a name/prefix. Diagnostic-only distinction:
+    // a departed full id is NO_TARGET; a known alias/ref or invalid id shape is BAD_FRAME.
+    if (
+      exact &&
+      (query !== q ||
+        !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(query) ||
+        pool.some(
+          (m) =>
+            m.name?.toLowerCase() === q.toLowerCase() ||
+            (q.length >= XS_RESOLVE_PREFIX_MIN && m.sessionId.startsWith(q)),
+        ))
+    ) {
+      return { kind: "bad" };
+    }
     return { kind: "none" };
   }
 
   function dispatch(agentKey: string, frame: XsReqFrame, reply: (res: XsResFrame) => void, started: number): void {
     const textLen = typeof frame.text === "string" ? Buffer.byteLength(frame.text, "utf8") : 0;
+    const replyKind = frame.expect !== undefined ? "expect" : frame.replyTo !== undefined ? "reply" : undefined;
+    const audit = (record: XsAuditRecord): void => {
+      auditXs(log, { ...record, ...(replyKind === undefined ? {} : { reply: replyKind }) });
+    };
     const res = (body: Omit<XsResFrame, "t" | "rid">): void => {
       try {
         reply({ t: "xs_res", rid: frame.rid, ...body });
@@ -174,7 +196,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       from?: string,
     ): void => {
       res({ ok: false, code, effect: "none", ...extra });
-      auditXs(log, {
+      audit({
         op: frame.op,
         code,
         textLen,
@@ -195,12 +217,37 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return;
     }
 
+    const hasReplyFields = frame.expect !== undefined || frame.replyTo !== undefined;
+    const isReply = frame.replyTo !== undefined;
+    if (
+      hasReplyFields &&
+      (frame.op !== "send" ||
+        (frame.expect !== undefined && isReply) ||
+        (isReply && !XS_REPLY_REQUEST_ID_RE.test(frame.replyTo!)) ||
+        (frame.expect !== undefined &&
+          (!XS_REPLY_REQUEST_ID_RE.test(frame.expect.requestId) ||
+            !Number.isInteger(frame.expect.timeoutMs) ||
+            frame.expect.timeoutMs < 60_000 ||
+            frame.expect.timeoutMs > 86_400_000)))
+    ) {
+      refuse("E_XS_BAD_FRAME", {}, self.sessionId);
+      return;
+    }
+    if (hasReplyFields && (deps.replyEnabled === false || !self.replyCapable)) {
+      refuse("E_XS_REPLY_UNSUPPORTED", {}, self.sessionId);
+      return;
+    }
+    const targetOf = (m: XsEffectiveMember): NonNullable<XsResFrame["target"]> => ({
+      ...candOf(m),
+      ...(deps.replyEnabled !== false && self.replyCapable && m.replyCapable ? { sessionId: m.sessionId } : {}),
+    });
+
     if (frame.op === "info") {
       res({
         ok: true,
         hubLimits: { hubSendsPerMin: deps.hubSendsPerMin, expiresMs: XS_EXPIRES_MS, deliverMs: XS_HUB_DELIVER_MS },
       });
-      auditXs(log, { op: "info", fromSession: self.sessionId, outcome: "ok" });
+      audit({ op: "info", fromSession: self.sessionId, outcome: "ok" });
       return;
     }
 
@@ -213,7 +260,14 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         const q = (frame.query ?? "").trim().toLowerCase();
         const rows: XsSessionRowWire[] = members
           .effectiveAll()
-          .filter((m) => m.joined && m.receive !== "off" && m.agentKey !== agentKey && m.sessionId !== self.sessionId)
+          .filter(
+            (m) =>
+              m.joined &&
+              m.receive !== "off" &&
+              m.receive !== "replies" &&
+              m.agentKey !== agentKey &&
+              m.sessionId !== self.sessionId,
+          )
           .filter((m) => frame.scope !== "cwd" || cwdRelated(self.cwd, m.cwd))
           .filter(
             (m) =>
@@ -233,7 +287,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
             lastActiveAgoS: Math.max(0, Math.floor((now() - m.activityAt) / 1000)),
           }));
         res({ ok: true, rows });
-        auditXs(log, { op: "list", fromSession: self.sessionId, outcome: "ok", ms: now() - started });
+        audit({ op: "list", fromSession: self.sessionId, outcome: "ok", ms: now() - started });
         return;
       }
       const r = resolveTarget(frame.query ?? frame.to ?? "", agentKey, self.sessionId);
@@ -249,11 +303,11 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
           return;
         case "many":
           res({ ok: true, candidates: r.candidates });
-          auditXs(log, { op: "resolve", fromSession: self.sessionId, outcome: "ok", reason: "ambiguous" });
+          audit({ op: "resolve", fromSession: self.sessionId, outcome: "ok", reason: "ambiguous" });
           return;
         case "one":
-          res({ ok: true, target: candOf(r.member) });
-          auditXs(log, {
+          res({ ok: true, target: targetOf(r.member) });
+          audit({
             op: "resolve",
             fromSession: self.sessionId,
             toSession: r.member.sessionId,
@@ -269,18 +323,22 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return;
     }
     // ② exactly one effective joined holder of the target sessionId
-    const r = resolveTarget(frame.to, agentKey, self.sessionId);
-    if (r.kind === "bad") return refuse("E_XS_BAD_TARGET", {}, self.sessionId);
+    const r = resolveTarget(frame.to, agentKey, self.sessionId, hasReplyFields);
+    if (r.kind === "bad") return refuse(hasReplyFields ? "E_XS_BAD_FRAME" : "E_XS_BAD_TARGET", {}, self.sessionId);
     if (r.kind === "none") return refuse("E_XS_NO_TARGET", {}, self.sessionId);
     if (r.kind === "dup" || r.kind === "many") {
       return refuse("E_XS_AMBIGUOUS", { candidates: r.candidates }, self.sessionId);
     }
     const target = r.member;
-    const targetWire = candOf(target);
+    const targetWire = targetOf(target);
+    if (hasReplyFields && !target.replyCapable) {
+      refuse("E_XS_REPLY_UNSUPPORTED", { target: targetWire }, self.sessionId);
+      return;
+    }
     // ③ receiver `off` early reject (an optimisation — the receiver re-judges everything)
-    if (target.receive === "off") {
+    if (target.receive === "off" || (target.receive === "replies" && !isReply)) {
       res({ ok: true, effect: "none", reason: "rejected", target: targetWire });
-      auditXs(log, {
+      audit({
         op: "send",
         fromSession: self.sessionId,
         toSession: target.sessionId,
@@ -308,11 +366,17 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         agentId: agentKey.slice(0, 128),
       },
       text: frame.text!,
-      wake,
-      ...(frame.level !== undefined ? { level: frame.level } : {}),
+      wake: isReply ? false : wake,
+      ...(!isReply && frame.level !== undefined ? { level: frame.level } : {}),
+      ...(frame.expect !== undefined
+        ? { reply: { requestId: frame.expect.requestId, dueAt: now() + frame.expect.timeoutMs } }
+        : {}),
+      ...(isReply ? { inReplyTo: frame.replyTo! } : {}),
       expiresAt: now() + XS_EXPIRES_MS,
     });
-    if (!xsFrameBytesOk(build(true, "r".repeat(16)))) {
+    const worst = build(true, "r".repeat(16));
+    if (worst.reply !== undefined) worst.reply.dueAt = Number.MAX_SAFE_INTEGER;
+    if (!xsFrameBytesOk(worst)) {
       refuse("E_XS_TOO_LARGE", { target: targetWire }, self.sessionId);
       return;
     }
@@ -321,11 +385,12 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       agentKey,
       pairKey: `${self.sessionId}>${target.sessionId}`,
       limits: self.limits,
-      wantWake: frame.wake === true,
+      wantWake: !isReply && frame.wake === true,
+      ...(isReply ? { isReply: true } : {}),
     });
     if (!admit.ok) {
       res({ ok: true, effect: "none", reason: admit.reason, target: targetWire });
-      auditXs(log, {
+      audit({
         op: "send",
         fromSession: self.sessionId,
         toSession: target.sessionId,
@@ -351,7 +416,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         ...(wakeDowngraded !== undefined ? { wakeDowngraded: wakeDowngraded as XsWakeDowngraded } : {}),
         target: targetWire,
       });
-      auditXs(log, {
+      audit({
         op: "send",
         xid,
         fromSession: self.sessionId,
@@ -459,7 +524,7 @@ export interface XsRelay {
  *  when `config.crossSession` exists (key absence IS off). */
 export function createXsRelay(deps: {
   registry: Registry;
-  config: { home: string; crossSession: { limits: { hubSendsPerMin: number } } };
+  config: { home: string; crossSession: HubCrossSessionConfig };
   log: HubLog;
   now: () => number;
 }): XsRelay {
@@ -479,6 +544,7 @@ export function createXsRelay(deps: {
     now: deps.now,
     home: deps.config.home,
     hubSendsPerMin,
+    replyEnabled: deps.config.crossSession.reply !== false,
   });
   deps.registry.setXsObserver(members.observer);
   const r = router;

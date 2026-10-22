@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { XsAckFrame, XsDeliverFrame, XsReqFrame, XsResFrame } from "../../../src/web-hub/protocol/xs.js";
+import { auditXs, type XsAuditRecord } from "../../../src/web-hub/hub/audit.js";
+import { createXsRouter } from "../../../src/web-hub/hub/xs/router.js";
 import { memberFrame, rig, type Rig } from "./xs-fixtures.js";
 
 beforeEach(() => {
@@ -528,5 +530,233 @@ describe("xs router: oversize xs_req", () => {
     r.relay.router.rejectTooLarge(a.key, { t: "xs_req", rid: 5 }, (x) => out.push(x));
     r.relay.router.rejectTooLarge(a.key, { t: "xs_req", rid: "x".repeat(65) }, (x) => out.push(x));
     expect(out).toEqual([{ t: "xs_res", rid: "big1", ok: false, code: "E_XS_TOO_LARGE", effect: "none" }]);
+  });
+});
+
+// RX2: the old fixture deliberately advertises only xs.v1; opt in per peer here.
+const REPLY_CAPS = ["ev.v1", "xs.v1", "xs.reply.v1"];
+const REQUEST_ID = "q0123456789abcdef01";
+const EXPECT = { requestId: REQUEST_ID, timeoutMs: 60_000 };
+const B_ID = "sess-BBBBBBBBBBBB-long";
+function replyPair(senderCap = true, targetCap = true, replyEnabled = true) {
+  const r = rig();
+  if (!replyEnabled) {
+    r.relay.router = createXsRouter({
+      registry: r.registry,
+      members: r.relay.members,
+      limits: r.relay.limits,
+      log: r.log,
+      now: () => r.clock.t,
+      home: "/home/u",
+      hubSendsPerMin: 60,
+      replyEnabled,
+    });
+  }
+  const a = r.agent({ pid: 1, sessionId: "sess-A", caps: senderCap ? REPLY_CAPS : ["xs.v1"] });
+  const b = r.agent({ pid: 2, sessionId: B_ID, name: "beta", caps: targetCap ? REPLY_CAPS : ["xs.v1"] });
+  return { r, a, b };
+}
+
+describe("xs router: reply association (RX2)", () => {
+  it.each([
+    [false, false, false],
+    [false, false, true],
+    [false, true, false],
+    [false, true, true],
+    [true, false, false],
+    [true, false, true],
+    [true, true, false],
+    [true, true, true],
+  ])(
+    "hub=%s sender=%s target=%s: resolve AND ordinary send backfill only with all caps",
+    async (hub, sender, target) => {
+      const { r, a, b } = replyPair(sender, target, hub);
+      const resolved = call(r, a.key, req({ op: "resolve", query: "beta" }))[0]!;
+      const out = call(r, a.key, req({ op: "send", to: "beta", text: "ordinary" }));
+      const d = lastDeliver(b.conn);
+      expect(d).not.toHaveProperty("reply");
+      expect(d).not.toHaveProperty("inReplyTo");
+      await ack(r, b.key, d);
+      const expected = {
+        ref: B_ID.slice(0, 12),
+        name: "beta",
+        ...(hub && sender && target ? { sessionId: B_ID } : {}),
+      };
+      expect(resolved.target).toEqual(expected);
+      expect(out[0]?.target).toEqual(expected);
+    },
+  );
+
+  it.each(["expect", "replyTo"] as const)("%s requires an exact full sessionId, never a name/ref/prefix", (field) => {
+    const { r, a, b } = replyPair();
+    const extra = field === "expect" ? { expect: EXPECT } : { replyTo: REQUEST_ID };
+    for (const to of ["beta", B_ID.slice(0, 12), B_ID.slice(0, 8), ` ${B_ID}`, "bad/id"]) {
+      expect(call(r, a.key, req({ op: "send", to, text: "x", ...extra }))[0]).toMatchObject({
+        code: "E_XS_BAD_FRAME",
+        effect: "none",
+      });
+    }
+    expect(b.conn.sent).toEqual([]);
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(0);
+    r.registry.onClose(b.key, false);
+    expect(call(r, a.key, req({ op: "send", to: B_ID, text: "x", ...extra }))[0]).toMatchObject({
+      code: "E_XS_NO_TARGET",
+    });
+  });
+
+  it.each(["expect", "replyTo"] as const)("%s still refuses duplicate effective holders", (field) => {
+    const { r, a, b } = replyPair();
+    const c = r.agent({ pid: 3, sessionId: B_ID, caps: REPLY_CAPS });
+    const extra = field === "expect" ? { expect: EXPECT } : { replyTo: REQUEST_ID };
+    expect(call(r, a.key, req({ op: "send", to: B_ID, text: "x", ...extra }))[0]).toMatchObject({
+      code: "E_XS_AMBIGUOUS",
+    });
+    expect(b.conn.sent).toEqual([]);
+    expect(c.conn.sent).toEqual([]);
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(0);
+  });
+
+  it.each([
+    [false, true, true],
+    [true, false, true],
+    [true, true, false],
+  ])("hub=%s sender=%s target=%s: reply fields fail unsupported before reservation", (hub, sender, target) => {
+    const { r, a, b } = replyPair(sender, target, hub);
+    for (const extra of [{ expect: EXPECT }, { replyTo: REQUEST_ID }]) {
+      expect(call(r, a.key, req({ op: "send", to: B_ID, text: "x", ...extra }))[0]).toMatchObject({
+        code: "E_XS_REPLY_UNSUPPORTED",
+        effect: "none",
+      });
+    }
+    expect(b.conn.sent).toEqual([]);
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(0);
+  });
+
+  it("validates op, exclusivity, requestId and timeout (inclusive 60s..24h) before reservation", async () => {
+    const { r, a, b } = replyPair();
+    const invalid: Partial<XsReqFrame>[] = [
+      { op: "resolve", query: "beta", expect: EXPECT },
+      { expect: EXPECT, replyTo: REQUEST_ID },
+      { replyTo: "not-a-request" },
+      { expect: { ...EXPECT, requestId: "wrong" } },
+      ...[59_999, 86_400_001, 60_000.5, Number.NaN, Infinity].map((timeoutMs) => ({
+        expect: { ...EXPECT, timeoutMs },
+      })),
+    ];
+    for (const over of invalid) {
+      expect(call(r, a.key, req({ op: "send", to: B_ID, text: "x", ...over }))[0]).toMatchObject({
+        code: "E_XS_BAD_FRAME",
+      });
+    }
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(0);
+    for (const timeoutMs of [60_000, 86_400_000]) {
+      const out = call(
+        r,
+        a.key,
+        req({ op: "send", to: B_ID, text: "request", expect: { ...EXPECT, timeoutMs }, wake: true, level: 2 }),
+      );
+      const d = lastDeliver(b.conn);
+      expect(d.reply).toEqual({ requestId: REQUEST_ID, dueAt: r.clock.t + timeoutMs });
+      expect(d).toMatchObject({ wake: true, level: 2 });
+      expect(d).not.toHaveProperty("inReplyTo");
+      await ack(r, b.key, d);
+      expect(out[0]?.effect).toBe("applied");
+      expect(r.log.lines.some((line) => (line.data as { reply?: string })?.reply === "expect")).toBe(true);
+      expect(JSON.stringify(r.log.lines)).not.toContain(REQUEST_ID);
+      r.clock.t += 5_000;
+    }
+  });
+
+  it("replies mode hides list rows but remains resolvable; rejects unsolicited sends and expect without reserving", () => {
+    const { r, a, b } = replyPair();
+    r.registry.onFrame(b.key, memberFrame({ sessionId: B_ID, receive: "replies" }));
+    expect(call(r, a.key, req({ op: "list" }))[0]?.rows).toEqual([]);
+    expect(call(r, a.key, req({ op: "resolve", query: "beta" }))[0]?.target?.sessionId).toBe(B_ID);
+    for (const extra of [{}, { expect: EXPECT }]) {
+      expect(call(r, a.key, req({ op: "send", to: B_ID, text: "x", ...extra }))[0]).toMatchObject({
+        effect: "none",
+        reason: "rejected",
+      });
+    }
+    expect(b.conn.sent).toEqual([]);
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(0);
+  });
+
+  it("replies pass replies mode, force wake=false and omit level even on a forged wake; pair interval is bypassed", async () => {
+    const { r, a, b } = replyPair();
+    r.registry.onFrame(b.key, memberFrame({ sessionId: B_ID, receive: "replies" }));
+    for (let i = 0; i < 2; i++) {
+      const out = call(
+        r,
+        a.key,
+        req({ op: "send", to: B_ID, text: "answer", replyTo: REQUEST_ID, wake: true, level: 31 }),
+      );
+      const d = lastDeliver(b.conn);
+      expect(d).toMatchObject({ wake: false, inReplyTo: REQUEST_ID });
+      expect(d).not.toHaveProperty("level");
+      expect(d).not.toHaveProperty("reply");
+      await ack(r, b.key, d, { reason: "reply_late" });
+      expect(out[0]).toMatchObject({ effect: "applied", reason: "reply_late", target: { sessionId: B_ID } });
+    }
+    expect(b.conn.sent.filter((f) => (f as { t?: string }).t === "xs_deliver")).toHaveLength(2);
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(2);
+    expect(JSON.stringify(r.log.lines)).not.toContain("answer");
+    expect(r.log.lines.some((line) => (line.data as { reply?: string })?.reply === "reply")).toBe(true);
+  });
+
+  it("off still rejects replies without reserving; target sessionId gate also applies to early rejects", () => {
+    const { r, a, b } = replyPair();
+    r.registry.onFrame(b.key, memberFrame({ sessionId: B_ID, receive: "off" }));
+    expect(call(r, a.key, req({ op: "send", to: B_ID, text: "x", replyTo: REQUEST_ID }))[0]).toMatchObject({
+      effect: "none",
+      reason: "rejected",
+      target: { sessionId: B_ID },
+    });
+    expect(b.conn.sent).toEqual([]);
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(0);
+  });
+
+  it("reply stamp counts towards the worst-case 16 KiB delivery budget", async () => {
+    const { r, a, b } = replyPair();
+    call(r, a.key, req({ op: "send", to: B_ID, text: "probe" }));
+    const d = lastDeliver(b.conn);
+    await ack(r, b.key, d);
+    r.clock.t += 5_000;
+    b.conn.sent.length = 0;
+    // Fill the actual legacy worst-shape envelope exactly: adding reply must overflow.
+    const envelope = JSON.stringify({ ...d, rid: "r".repeat(16), text: "", wake: true });
+    const text = "x".repeat(16_384 - envelope.length);
+    expect(call(r, a.key, req({ op: "send", to: B_ID, text, expect: EXPECT }))[0]).toMatchObject({
+      code: "E_XS_TOO_LARGE",
+    });
+    expect(b.conn.sent).toEqual([]);
+    expect(r.relay.limits.snapshot().hubLastMin).toBe(1);
+    const ordinary = call(r, a.key, req({ op: "send", to: B_ID, text }));
+    expect(lastDeliver(b.conn).text).toBe(text);
+    await ack(r, b.key, lastDeliver(b.conn));
+    expect(ordinary[0]?.effect).toBe("applied");
+  });
+});
+
+describe("RX2: reply audit whitelist", () => {
+  it("accepts only the fixed association enum and never logs body/requestId or forged metadata", () => {
+    const r = rig();
+    for (const reply of ["expect", "reply", "secret-body", REQUEST_ID]) {
+      auditXs(r.log, {
+        op: "send",
+        textLen: 17,
+        reply,
+        text: "secret-body",
+        requestId: REQUEST_ID,
+      } as unknown as XsAuditRecord);
+    }
+    expect(r.log.lines.map((line) => line.data)).toEqual([
+      { audit: "xs", op: "send", reply: "expect", textLen: 17 },
+      { audit: "xs", op: "send", reply: "reply", textLen: 17 },
+      { audit: "xs", op: "send", textLen: 17 },
+      { audit: "xs", op: "send", textLen: 17 },
+    ]);
+    expect(JSON.stringify(r.log.lines)).not.toContain(REQUEST_ID);
+    expect(JSON.stringify(r.log.lines)).not.toContain("secret-body");
   });
 });

@@ -155,7 +155,7 @@ import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
 import { createXsRelay } from "./xs/router.js";
-import { XS_HUB_CAP } from "../protocol/xs.js";
+import { XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
 import type { AuthRevokeEvent } from "./auth-revoke.js";
@@ -488,8 +488,10 @@ export async function startHub(
       ...(config.proxy === undefined ? [] : [PROXY_FRAME_HUB_CAP]),
       ...(config.feishuBot === undefined ? [] : [FSB_HUB_CAP]),
       // fabric phase-2 X1: `xs.v1` iff `config.crossSession` (tail-appended, same two-surface rule;
-      // absent ⇒ caps byte-identical).
-      ...(config.crossSession === undefined ? [] : [XS_HUB_CAP]),
+      // absent ⇒ caps byte-identical). Reply cap shares the same gate plus reply !== false.
+      ...(config.crossSession === undefined
+        ? []
+        : [XS_HUB_CAP, ...(config.crossSession.reply === false ? [] : [XS_REPLY_HUB_CAP])]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;

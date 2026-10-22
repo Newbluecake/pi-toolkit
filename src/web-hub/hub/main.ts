@@ -194,6 +194,7 @@ async function main(): Promise<void> {
   // malformed value drops the WHOLE key (xs off: no relay, frame handling or cap); the hub keeps
   // running. Key absence leaves everything byte-identical.
   if (config.crossSession !== undefined) {
+    // Re-check reply too: absent defaults on; malformed values fail closed to reply:false.
     const crossSession = normalizeHubCrossSessionConfig(config.crossSession);
     if (crossSession === undefined) {
       const { crossSession: _drop, ...rest } = config;

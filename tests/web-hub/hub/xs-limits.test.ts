@@ -14,13 +14,20 @@ function mk(hubSendsPerMin = 60) {
 }
 const send = (
   l: ReturnType<typeof mk>["limits"],
-  over: { agentKey?: string; pairKey?: string; wantWake?: boolean; lim?: Partial<typeof LIMITS> } = {},
+  over: {
+    agentKey?: string;
+    pairKey?: string;
+    wantWake?: boolean;
+    isReply?: boolean;
+    lim?: Partial<typeof LIMITS>;
+  } = {},
 ): XsAdmit =>
   l.admitSend({
     agentKey: over.agentKey ?? "a1",
     pairKey: over.pairKey ?? "A>B",
     limits: { ...LIMITS, ...over.lim },
     wantWake: over.wantWake ?? false,
+    ...(over.isReply === undefined ? {} : { isReply: over.isReply }),
   });
 const ok = (a: XsAdmit): Extract<XsAdmit, { ok: true }> => {
   if (!a.ok) throw new Error(`expected admit, got ${a.reason}`);
@@ -247,5 +254,45 @@ describe("HubConfig.crossSession normalisation (main.ts re-check, §4.6)", () =>
     expect(normalizeHubCrossSessionConfig({ limits: { hubSendsPerMin: 5, evil: 1 }, x: 2 })).toEqual({
       limits: { hubSendsPerMin: 5 },
     });
+  });
+});
+
+describe("xs reply limits (RX2)", () => {
+  it("replies bypass the pair interval, never reserve wake, and still count as sends", () => {
+    const { limits } = mk();
+    const first = ok(send(limits, { wantWake: true }));
+    limits.settle(first.ticket, { acked: true, woke: true });
+    expect(send(limits)).toMatchObject({ ok: false, reason: "rate_pair_interval" });
+    const reply = ok(send(limits, { isReply: true, wantWake: true }));
+    expect(reply).toMatchObject({ wake: false, ticket: { wakeReserved: false } });
+    expect(reply.wakeDowngraded).toBeUndefined();
+    expect(limits.snapshot().hubLastMin).toBe(2);
+  });
+
+  it.each([
+    ["rate_in_flight", { inFlightPerSession: 1 }],
+    ["rate_sends_min", { sendsOutPerMin: 1 }],
+    ["rate_sends_hour", { sendsOutPerHour: 1 }],
+  ])("replies do not bypass %s", (reason, lim) => {
+    const { limits } = mk();
+    ok(send(limits, { isReply: true, lim }));
+    expect(send(limits, { isReply: true, lim })).toEqual({ ok: false, reason });
+    expect(limits.snapshot().hubLastMin).toBe(1);
+  });
+
+  it("replies do not bypass the hub cap", () => {
+    const { limits } = mk(1);
+    ok(send(limits, { isReply: true }));
+    expect(send(limits, { isReply: true })).toEqual({ ok: false, reason: "rate_hub" });
+  });
+
+  it("reply config absent stays absent; booleans survive main's recheck, malformed values disable reply only", () => {
+    const base = { limits: { hubSendsPerMin: 60 } };
+    expect(normalizeHubCrossSessionConfig(base)).toEqual(base);
+    for (const reply of [true, false])
+      expect(normalizeHubCrossSessionConfig({ ...base, reply })).toEqual({ ...base, reply });
+    for (const reply of [null, 0, "false", {}, []]) {
+      expect(normalizeHubCrossSessionConfig({ ...base, reply })).toEqual({ ...base, reply: false });
+    }
   });
 });

@@ -8,7 +8,6 @@ import {
   HOLD_HUB_CAPS,
   P2_HUB_CAPS,
   PREVIEW_ABS_HUB_CAP,
-  PREVIEW_HUB_CAP,
   RUNTX_HUB_CAPS,
   QUOTA_POOLS_HUB_CAPS,
   TODO_ARCHIVE_HUB_CAPS,
@@ -552,7 +551,7 @@ describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features",
           config({
             home: tmp.make("wh-xs-caps-"),
             ...optional,
-            ...(enabled ? { crossSession: { limits: { hubSendsPerMin: 60 } } } : {}),
+            ...(enabled ? { crossSession: { limits: { hubSendsPerMin: 60 }, reply: false } } : {}),
           }),
           fakeFrontend().factory,
         );
@@ -565,6 +564,7 @@ describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features",
         const agent = [...(ack["caps"] as string[])];
         expect(agent).toEqual(result.info.caps); // two surfaces, same source
         expect(agent.includes(XS_HUB_CAP)).toBe(enabled);
+        expect(agent).not.toContain("xs.reply.v1");
         if (enabled) expect(agent[agent.length - 1]).toBe(XS_HUB_CAP); // tail-appended
         surfaces.push({ browser: [...result.info.caps], agent });
       }
@@ -573,4 +573,29 @@ describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features",
       expect(surfaces[1]!.browser.filter((c) => c !== XS_HUB_CAP)).toEqual(surfaces[0]!.browser);
     },
   );
+});
+
+describe("RX2: reply capability on both hub surfaces", () => {
+  it.each([undefined, false, true] as const)("crossSession.reply=%s: absence defaults on", async (reply) => {
+    const { XS_HUB_CAP, XS_REPLY_HUB_CAP } = await import("../../../src/web-hub/protocol/xs.js");
+    const result = await startHub(
+      config({
+        home: tmp.make("wh-xs-reply-caps-"),
+        crossSession: { limits: { hubSendsPerMin: 60 }, ...(reply === undefined ? {} : { reply }) },
+      }),
+      fakeFrontend().factory,
+    );
+    if ("exists" in result) throw new Error("hub unavailable");
+    hubs.push(result);
+    const client = await connectClient(result.paths.socketPath);
+    client.send(hello());
+    const ack = await client.waitFrame((f) => f.t === "hello_ack");
+    client.sock.destroy();
+    expect(ack["caps"]).toEqual(result.info.caps);
+    expect(result.info.caps.includes(XS_HUB_CAP)).toBe(true);
+    expect(result.info.caps.includes(XS_REPLY_HUB_CAP)).toBe(reply !== false);
+    expect(result.info.caps.slice(reply === false ? -1 : -2)).toEqual(
+      reply === false ? [XS_HUB_CAP] : [XS_HUB_CAP, XS_REPLY_HUB_CAP],
+    );
+  });
 });
