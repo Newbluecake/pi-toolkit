@@ -167,10 +167,21 @@ describe("xs limits: settlement matrix (§4.6 step 2)", () => {
     expect(wakeRoom(m)).toBe(false);
   });
 
-  it("ack woke:false ⇒ the wake reservation is refunded (a new wake fits again)", () => {
+  it("ack woke:false with a known effect ⇒ the wake reservation is refunded (a new wake fits again)", () => {
+    for (const effect of ["applied", "none"] as const) {
+      const m = prep(true);
+      m.limits.settle(m.ticket, { acked: true, woke: false, effect });
+      expect(wakeRoom(m)).toBe(true);
+    }
+  });
+
+  it("channel-plan NQ2: ack woke:false with effect unknown (or no effect) refunds NOTHING", () => {
     const m = prep(true);
-    m.limits.settle(m.ticket, { acked: true, woke: false });
-    expect(wakeRoom(m)).toBe(true);
+    m.limits.settle(m.ticket, { acked: true, woke: false, effect: "unknown" });
+    expect(wakeRoom(m)).toBe(false);
+    const m2 = prep(true);
+    m2.limits.settle(m2.ticket, { acked: true, woke: false });
+    expect(wakeRoom(m2)).toBe(false);
   });
 
   it("ack woke:false does not refund the SEND count", () => {

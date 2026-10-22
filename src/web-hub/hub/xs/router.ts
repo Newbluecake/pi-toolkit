@@ -14,6 +14,16 @@
  *              `from`/`xid`/`expiresAt`/`to.epoch` — from the HUB's records only, never the frame ⑥
  *              `registry.request(xs_deliver)` ⑦ settle on `xs_ack` or the hub deadline
  *
+ * Channel-plan §4.1 (CH1): every list/resolve/send/broadcast is SAME-CHANNEL enforced — a peer is
+ * visible iff it shares ≥1 channel with the requester (a not-joined requester sees nobody). The
+ * unique-holder judgement (XR5) runs on the FULL effective-joined table before visibility is
+ * applied (M3): a sessionId with two holders anywhere is ambiguous even if only one is visible;
+ * the candidates expose only the visible holder. Channel fields (`rows/candidates[].channels`,
+ * `xs_deliver.via`) follow the §3.2 write rules: never written for a shared set of exactly
+ * `[default]` or towards a peer without `xs.channel.v1` — default-only traffic is byte-identical to
+ * v0.7.1 (`tests/web-hub/hub/xs-router-v071-diff.test.ts`). `channels` lists the hub's channels
+ * (names + session counts, Q7); `broadcast` lives in `./broadcast.ts`.
+ *
  * r3 M2 (hub side): once ⑥ was issued, NO outcome may be reported as `none` unless the receiver
  * itself said so — deadline / disconnect / hub teardown / ack mismatch / handler exception are all
  * `unknown`. Provable `none` only comes from steps ①–④ (before anything left the hub) or from the
@@ -35,6 +45,8 @@ import {
   xsFrameBytesOk,
   type XsAckFrame,
   type XsDeliverFrame,
+  XS_CHANNEL_RESULT_MAX_ROWS,
+  type XsChannelInfoWire,
   type XsReqFrame,
   type XsResFrame,
   type XsResolveCandidateWire,
@@ -44,13 +56,31 @@ import {
 import { auditXs, type XsAuditRecord } from "../audit.js";
 import type { HubLog } from "../ports.js";
 import type { Registry } from "../registry.js";
-import { createXsLimits, type XsLimits, type HubCrossSessionConfig } from "./limits.js";
-import { createXsMembers, type XsEffectiveMember, type XsMembers } from "./members.js";
+import { runXsBroadcast } from "./broadcast.js";
+import {
+  createXsLimits,
+  hubChannelsParams,
+  type XsLimits,
+  type HubCrossSessionConfig,
+  type HubXsChannelsConfig,
+} from "./limits.js";
+import {
+  abbreviateHome,
+  createXsMembers,
+  hubChannelSet,
+  hubIntersect,
+  hubNormalizeChannel,
+  hubSharedField,
+  XS_HUB_DEFAULT_CHANNEL,
+  XS_NAME_MAX,
+  XS_REF_LEN,
+  xsToken,
+  type XsEffectiveMember,
+  type XsMembers,
+} from "./members.js";
 
-const REF_LEN = 12;
-const NAME_MAX = 120;
-/** Strict token shape for anything echoed from a peer (a free-form string could carry text). */
-const TOKEN_RE = /^[A-Za-z0-9_:.{}-]{1,64}$/;
+const REF_LEN = XS_REF_LEN;
+const NAME_MAX = XS_NAME_MAX;
 const RESERVED_EXACT = new Set(["root", "system", "main"]);
 const RESERVED_PREFIXES = ["r_", "@", "wf_"] as const;
 
@@ -76,12 +106,8 @@ export interface XsRouterDeps {
   home: string;
   hubSendsPerMin: number;
   replyEnabled?: boolean;
-}
-
-function abbreviateHome(path: string, home: string): string {
-  if (home.length === 0) return path;
-  if (path === home) return "~";
-  return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+  /** Channel-plan §3.1: hub-global broadcast params; absent ⇒ defaults (never "off"). */
+  channels?: HubXsChannelsConfig;
 }
 
 function trimSlash(p: string): string {
@@ -98,15 +124,19 @@ function cwdRelated(a: string, b: string): boolean {
   return y.startsWith(xs) || x.startsWith(ys);
 }
 
+/** `channelSet` order (default first, then code-unit order). */
+function cmpChannel(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a === XS_HUB_DEFAULT_CHANNEL) return -1;
+  if (b === XS_HUB_DEFAULT_CHANNEL) return 1;
+  return a < b ? -1 : 1;
+}
+
 function reservedAddress(to: string): boolean {
   const t = to.trim();
   if (t.length === 0 || t.length > 128) return true;
   if (RESERVED_EXACT.has(t)) return true;
   return RESERVED_PREFIXES.some((p) => t.startsWith(p));
-}
-
-function token(v: unknown): string | undefined {
-  return typeof v === "string" && TOKEN_RE.test(v) ? v : undefined;
 }
 
 type Resolved =
@@ -127,13 +157,25 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     ref: refOf(m.sessionId),
     ...(m.name !== undefined ? { name: m.name.slice(0, NAME_MAX) } : {}),
   });
+  /** §3.2: the shared-channel field towards a REQUESTER (`rows/candidates[].channels`). */
+  const sharedFor = (self: XsEffectiveMember, m: XsEffectiveMember): string[] | undefined =>
+    hubSharedField(hubIntersect(self.channels, m.channels), self.channelCapable);
+  const visibleTo = (self: XsEffectiveMember, m: XsEffectiveMember): boolean =>
+    m.channels.some((c) => self.channels.includes(c));
 
-  function resolveTarget(query: string, selfKey: string, selfSessionId: string, exact = false): Resolved {
+  function resolveTarget(query: string, self: XsEffectiveMember, selfKey: string, exact = false): Resolved {
+    const selfSessionId = self.sessionId;
     const q = query.trim();
     if (!exact && reservedAddress(q)) return { kind: "bad" };
-    const pool = members
-      .effectiveAll()
-      .filter((m) => m.joined && m.agentKey !== selfKey && m.sessionId !== selfSessionId);
+    // M3: holders(sid) is judged on EVERY effective joined member (no channel/receive/cap filter);
+    // visibility only shrinks the pool the tiers search in.
+    const joinedAll = members.effectiveAll().filter((m) => m.joined);
+    const holders = (sid: string): number => joinedAll.reduce((n, m) => (m.sessionId === sid ? n + 1 : n), 0);
+    const candFor = (m: XsEffectiveMember): XsResolveCandidateWire => {
+      const ch = sharedFor(self, m);
+      return { ...candOf(m), ...(ch === undefined ? {} : { channels: ch }) };
+    };
+    const pool = joinedAll.filter((m) => m.agentKey !== selfKey && m.sessionId !== selfSessionId && visibleTo(self, m));
     const lower = q.toLowerCase();
     const tiers: Array<(m: XsEffectiveMember) => boolean> = exact
       ? [(m) => m.sessionId === query]
@@ -154,10 +196,12 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       }
       if (bySession.size > 1) {
         const firsts = [...bySession.values()].map((g) => g[0]!).sort((a, b) => b.activityAt - a.activityAt);
-        return { kind: "many", candidates: firsts.slice(0, XS_RESOLVE_MAX_CANDIDATES).map(candOf) };
+        return { kind: "many", candidates: firsts.slice(0, XS_RESOLVE_MAX_CANDIDATES).map(candFor) };
       }
       const group = [...bySession.values()][0]!;
-      if (group.length > 1) return { kind: "dup", candidates: [candOf(group[0]!)] }; // XR5
+      // XR5 + M3: two holders ANYWHERE on the table ⇒ ambiguous; only the visible holder is exposed.
+      if (group.length > 1 || holders(group[0]!.sessionId) > 1)
+        return { kind: "dup", candidates: [candFor(group[0]!)] };
       return { kind: "one", member: group[0]! };
     }
     // Never route a reply-shaped send through a name/prefix. Diagnostic-only distinction:
@@ -211,9 +255,18 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       self === undefined ||
       frame.origin.sessionId !== self.sessionId ||
       frame.origin.epoch !== self.epoch ||
-      (frame.op === "send" && !self.joined)
+      ((frame.op === "send" || frame.op === "broadcast") && !self.joined)
     ) {
       refuse("E_XS_STALE_ORIGIN");
+      return;
+    }
+    // Channel-plan §3.3: the channel ops/field exist only for a channel-capable requester, and
+    // `channel` is meaningful only on list (filter) / broadcast (target).
+    if (
+      ((frame.op === "broadcast" || frame.op === "channels") && !self.channelCapable) ||
+      (frame.channel !== undefined && frame.op !== "list" && frame.op !== "broadcast")
+    ) {
+      refuse("E_XS_BAD_FRAME", {}, self.sessionId);
       return;
     }
 
@@ -251,9 +304,55 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return;
     }
 
-    if (frame.op === "list" || frame.op === "resolve") {
+    if (frame.op === "broadcast") {
+      runXsBroadcast(
+        {
+          registry,
+          members,
+          limits,
+          log,
+          now,
+          home: deps.home,
+          channels: hubChannelsParams(deps.channels),
+          signal: ac.signal,
+        },
+        { agentKey, self, frame, started, textLen, res, refuse },
+      );
+      return;
+    }
+
+    if (frame.op === "list" || frame.op === "resolve" || frame.op === "channels") {
+      // `channel` filter validity is judged BEFORE the budget (a malformed request is free).
+      let listChannel: string | undefined;
+      if (frame.op === "list" && frame.channel !== undefined) {
+        const c = hubNormalizeChannel(frame.channel);
+        if (c === null || !self.channels.includes(c)) {
+          refuse("E_XS_BAD_TARGET", { reason: "channel" }, self.sessionId);
+          return;
+        }
+        listChannel = c;
+      }
       if (!limits.admitList(agentKey, self.limits)) {
         refuse("E_XS_RATE_LIMITED", {}, self.sessionId);
+        return;
+      }
+      if (frame.op === "channels") {
+        // Q7: every effective joined member's channel names + logical-session counts.
+        const sessionsBy = new Map<string, Set<string>>();
+        for (const m of members.effectiveAll()) {
+          if (!m.joined) continue;
+          for (const c of m.channels) {
+            let set = sessionsBy.get(c);
+            if (set === undefined) sessionsBy.set(c, (set = new Set()));
+            set.add(m.sessionId);
+          }
+        }
+        const channels: XsChannelInfoWire[] = hubChannelSet(sessionsBy.keys())
+          .map((name) => ({ name, members: sessionsBy.get(name)!.size, joined: self.channels.includes(name) }))
+          .sort((a, b) => Number(b.joined) - Number(a.joined) || b.members - a.members || cmpChannel(a.name, b.name))
+          .slice(0, XS_CHANNEL_RESULT_MAX_ROWS);
+        res({ ok: true, channels });
+        audit({ op: "channels", fromSession: self.sessionId, outcome: "ok", ms: now() - started });
         return;
       }
       if (frame.op === "list") {
@@ -266,7 +365,9 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
               m.receive !== "off" &&
               m.receive !== "replies" &&
               m.agentKey !== agentKey &&
-              m.sessionId !== self.sessionId,
+              m.sessionId !== self.sessionId &&
+              visibleTo(self, m) &&
+              (listChannel === undefined || m.channels.includes(listChannel)),
           )
           .filter((m) => frame.scope !== "cwd" || cwdRelated(self.cwd, m.cwd))
           .filter(
@@ -285,12 +386,13 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
             receive: m.receive === "wake" ? ("wake" as const) : ("deliver" as const),
             busy: m.busy,
             lastActiveAgoS: Math.max(0, Math.floor((now() - m.activityAt) / 1000)),
+            ...((ch) => (ch === undefined ? {} : { channels: ch }))(sharedFor(self, m)),
           }));
         res({ ok: true, rows });
         audit({ op: "list", fromSession: self.sessionId, outcome: "ok", ms: now() - started });
         return;
       }
-      const r = resolveTarget(frame.query ?? frame.to ?? "", agentKey, self.sessionId);
+      const r = resolveTarget(frame.query ?? frame.to ?? "", self, agentKey);
       switch (r.kind) {
         case "bad":
           refuse("E_XS_BAD_TARGET", {}, self.sessionId);
@@ -323,7 +425,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return;
     }
     // ② exactly one effective joined holder of the target sessionId
-    const r = resolveTarget(frame.to, agentKey, self.sessionId, hasReplyFields);
+    const r = resolveTarget(frame.to, self, agentKey, hasReplyFields);
     if (r.kind === "bad") return refuse(hasReplyFields ? "E_XS_BAD_FRAME" : "E_XS_BAD_TARGET", {}, self.sessionId);
     if (r.kind === "none") return refuse("E_XS_NO_TARGET", {}, self.sessionId);
     if (r.kind === "dup" || r.kind === "many") {
@@ -353,6 +455,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     // silently (no ack ⇒ a 5 s unknown) — refuse up front, before any reservation.
     const xid = `x${randomBytes(9).toString("hex")}`;
     const fromName = self.name?.slice(0, NAME_MAX);
+    const via = hubSharedField(hubIntersect(self.channels, target.channels), target.channelCapable);
     const build = (wake: boolean, rid: string): XsDeliverFrame => ({
       t: "xs_deliver",
       rid,
@@ -373,7 +476,9 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         : {}),
       ...(isReply ? { inReplyTo: frame.replyTo! } : {}),
       expiresAt: now() + XS_EXPIRES_MS,
+      ...(via === undefined ? {} : { via }),
     });
+    // §3.2: `via` = the shared set, written only towards a channel-capable target and never for [default].
     const worst = build(true, "r".repeat(16));
     if (worst.reply !== undefined) worst.reply.dueAt = Number.MAX_SAFE_INTEGER;
     if (!xsFrameBytesOk(worst)) {
@@ -448,11 +553,11 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
             settleOut("unknown", "ack_mismatch", admit.wakeDowngraded);
             return;
           }
-          limits.settle(ticket, { acked: true, woke: ack.woke });
+          limits.settle(ticket, { acked: true, woke: ack.woke, effect: ack.effect });
           settleOut(
             ack.effect,
-            token(ack.reason) ?? (ack.reason === undefined ? undefined : "unverified"),
-            token(ack.wakeDowngraded) ?? admit.wakeDowngraded,
+            xsToken(ack.reason) ?? (ack.reason === undefined ? undefined : "unverified"),
+            xsToken(ack.wakeDowngraded) ?? admit.wakeDowngraded,
           );
         },
         (err: unknown) => {
@@ -545,6 +650,7 @@ export function createXsRelay(deps: {
     home: deps.config.home,
     hubSendsPerMin,
     replyEnabled: deps.config.crossSession.reply !== false,
+    ...(deps.config.crossSession.channels === undefined ? {} : { channels: deps.config.crossSession.channels }),
   });
   deps.registry.setXsObserver(members.observer);
   const r = router;

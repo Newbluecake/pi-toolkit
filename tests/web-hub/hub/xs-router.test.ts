@@ -65,7 +65,7 @@ describe("xs router: origin bind (§8.1)", () => {
     }
   });
 
-  it("send additionally requires member.joined; list/resolve/info work for a not-joined member", () => {
+  it("send additionally requires member.joined; a not-joined member's list/resolve see nobody (channel-plan §4.1)", () => {
     const r = rig();
     const a = r.agent({ pid: 1, sessionId: "sess-A", joined: false });
     r.agent({ pid: 2, sessionId: "sess-B", name: "beta" });
@@ -73,8 +73,12 @@ describe("xs router: origin bind (§8.1)", () => {
       code: "E_XS_STALE_ORIGIN",
     });
     expect(call(r, a.key, req({ op: "info" }))[0]?.ok).toBe(true);
-    expect(call(r, a.key, req({ op: "list" }))[0]?.ok).toBe(true);
-    expect(call(r, a.key, req({ op: "resolve", query: "beta" }))[0]?.ok).toBe(true);
+    // v0.7.1 answered every joined member here; visibility now needs a shared channel (C4 closed).
+    expect(call(r, a.key, req({ op: "list" }))[0]).toMatchObject({ ok: true, rows: [] });
+    expect(call(r, a.key, req({ op: "resolve", query: "beta" }))[0]).toMatchObject({
+      ok: false,
+      code: "E_XS_NO_TARGET",
+    });
   });
 
   it("an epoch bump (leave/join) invalidates the old epoch immediately; the new epoch works", () => {
@@ -461,15 +465,28 @@ describe("xs router: send (§8.3)", () => {
     expect(y.conn.sent).toEqual([]);
   });
 
-  it("send settles limits on the ack: woke:false refunds only the wake reservation", async () => {
+  it("send settles limits on the ack: applied+woke:false refunds only the wake reservation", async () => {
     const r = rig();
     const a = r.agent({ pid: 1, sessionId: "sess-A", limits: { wakesOutPerHour: 1, pairWakesPerHour: 20 } });
     const b = r.agent({ pid: 2, sessionId: "sess-B", name: "beta" });
     call(r, a.key, req({ op: "send", to: "beta", text: "1", wake: true }));
-    await ack(r, b.key, lastDeliver(b.conn), { effect: "unknown", reason: "queued", woke: false });
+    await ack(r, b.key, lastDeliver(b.conn), { effect: "applied", wakeDowngraded: "busy", woke: false });
     r.clock.t += 5_000;
     call(r, a.key, req({ op: "send", to: "beta", text: "2", wake: true }));
     expect(lastDeliver(b.conn).wake).toBe(true); // refunded ⇒ a wake slot was available again
+  });
+
+  it("channel-plan NQ2: an UNKNOWN ack with woke:false never refunds the wake reservation", async () => {
+    const r = rig();
+    const a = r.agent({ pid: 1, sessionId: "sess-A", limits: { wakesOutPerHour: 1, pairWakesPerHour: 20 } });
+    const b = r.agent({ pid: 2, sessionId: "sess-B", name: "beta" });
+    call(r, a.key, req({ op: "send", to: "beta", text: "1", wake: true }));
+    await ack(r, b.key, lastDeliver(b.conn), { effect: "unknown", reason: "accept_unverified", woke: false });
+    r.clock.t += 5_000;
+    const out = call(r, a.key, req({ op: "send", to: "beta", text: "2", wake: true }));
+    expect(lastDeliver(b.conn).wake).toBe(false); // still spent ⇒ deliver-only
+    await ack(r, b.key, lastDeliver(b.conn));
+    expect(out[0]).toMatchObject({ ok: true, effect: "applied", wakeDowngraded: "outbound_wake_rate" });
   });
 
   it("an exception inside the handler answers E_XS_INTERNAL (unknown) and logs only code/op/textLen", () => {

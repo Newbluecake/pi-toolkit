@@ -537,9 +537,9 @@ it.each([undefined, "all", "toolkit"] as const)(
 
 describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features", () => {
   it.each([0, 1, 2, 3, 4, 5, 6, 7])(
-    "optional feature mask %i: both cap surfaces differ ONLY by xs.v1 (tail-appended, set-equal)",
+    "optional feature mask %i: both cap surfaces differ ONLY by xs.v1 + xs.channel.v1 (tail-appended, set-equal)",
     async (mask) => {
-      const { XS_HUB_CAP } = await import("../../../src/web-hub/protocol/xs.js");
+      const { XS_HUB_CAP, XS_CHANNEL_HUB_CAP } = await import("../../../src/web-hub/protocol/xs.js");
       const optional = {
         ...(mask & 1 ? { avatar: true as const } : {}),
         ...(mask & 2 ? { privacy: true as const } : {}),
@@ -565,19 +565,21 @@ describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features",
         expect(agent).toEqual(result.info.caps); // two surfaces, same source
         expect(agent.includes(XS_HUB_CAP)).toBe(enabled);
         expect(agent).not.toContain("xs.reply.v1");
-        if (enabled) expect(agent[agent.length - 1]).toBe(XS_HUB_CAP); // tail-appended
+        expect(agent.includes(XS_CHANNEL_HUB_CAP)).toBe(enabled); // channel-plan §3.1: no hub off key
+        if (enabled) expect(agent.slice(-2)).toEqual([XS_HUB_CAP, XS_CHANNEL_HUB_CAP]); // tail-appended
         surfaces.push({ browser: [...result.info.caps], agent });
       }
-      // off ⇒ byte-identical to the baseline; on = baseline + xs.v1 and nothing else moved
-      expect(surfaces[1]!.agent.filter((c) => c !== XS_HUB_CAP)).toEqual(surfaces[0]!.agent);
-      expect(surfaces[1]!.browser.filter((c) => c !== XS_HUB_CAP)).toEqual(surfaces[0]!.browser);
+      // off ⇒ byte-identical to the baseline; on = baseline + xs.v1 + xs.channel.v1, nothing else moved
+      const xsCaps = new Set([XS_HUB_CAP, XS_CHANNEL_HUB_CAP]);
+      expect(surfaces[1]!.agent.filter((c) => !xsCaps.has(c))).toEqual(surfaces[0]!.agent);
+      expect(surfaces[1]!.browser.filter((c) => !xsCaps.has(c))).toEqual(surfaces[0]!.browser);
     },
   );
 });
 
 describe("RX2: reply capability on both hub surfaces", () => {
   it.each([undefined, false, true] as const)("crossSession.reply=%s: absence defaults on", async (reply) => {
-    const { XS_HUB_CAP, XS_REPLY_HUB_CAP } = await import("../../../src/web-hub/protocol/xs.js");
+    const { XS_HUB_CAP, XS_REPLY_HUB_CAP, XS_CHANNEL_HUB_CAP } = await import("../../../src/web-hub/protocol/xs.js");
     const result = await startHub(
       config({
         home: tmp.make("wh-xs-reply-caps-"),
@@ -594,8 +596,8 @@ describe("RX2: reply capability on both hub surfaces", () => {
     expect(ack["caps"]).toEqual(result.info.caps);
     expect(result.info.caps.includes(XS_HUB_CAP)).toBe(true);
     expect(result.info.caps.includes(XS_REPLY_HUB_CAP)).toBe(reply !== false);
-    expect(result.info.caps.slice(reply === false ? -1 : -2)).toEqual(
-      reply === false ? [XS_HUB_CAP] : [XS_HUB_CAP, XS_REPLY_HUB_CAP],
+    expect(result.info.caps.slice(reply === false ? -2 : -3)).toEqual(
+      reply === false ? [XS_HUB_CAP, XS_CHANNEL_HUB_CAP] : [XS_HUB_CAP, XS_REPLY_HUB_CAP, XS_CHANNEL_HUB_CAP],
     );
   });
 });

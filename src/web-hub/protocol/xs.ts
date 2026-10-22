@@ -87,10 +87,8 @@ export const XS_RESOLVE_MAX_CANDIDATES = 5;
 
 /** `xs_req` op set (§8.2). */
 export type XsReqOp = "list" | "resolve" | "send" | "info";
-/** Channel-plan §3.3 (CH0): the two new ops. `XsReqFrame.op` deliberately stays the legacy four-op
- *  union (CH0 may not touch the hub router/audit types); CH1 widens `XsReqFrame.op` to `XsAnyReqOp`
- *  and deletes `XsChannelReqFrame`. Until then a decoded broadcast/channels frame is typed by
- *  `XsChannelReqFrame`. */
+/** Channel-plan §3.3: the two new ops (CH1 widened `XsReqFrame.op` to `XsAnyReqOp`). Sent only to
+ *  a hub advertising `xs.channel.v1`. */
 export type XsChannelReqOp = "broadcast" | "channels";
 export type XsAnyReqOp = XsReqOp | XsChannelReqOp;
 
@@ -385,7 +383,7 @@ export const XsReqSchema = Type.Object(
 export interface XsReqFrame {
   t: "xs_req";
   rid: string;
-  op: XsReqOp;
+  op: XsAnyReqOp;
   origin: { sessionId: string; epoch: number };
   query?: string;
   scope?: "hub" | "cwd";
@@ -400,11 +398,6 @@ export interface XsReqFrame {
   replyTo?: string;
   /** Channel-plan §3.3: `broadcast` target channel (required there) / optional `list` filter. */
   channel?: string;
-}
-
-/** Channel-plan §3.3: the shape of an `xs_req` carrying one of the new ops (same envelope as `XsReqFrame`). */
-export interface XsChannelReqFrame extends Omit<XsReqFrame, "op"> {
-  op: XsChannelReqOp;
 }
 
 /** One `xs_res{rows}` row (§4.3 list projection — no agentKey, pid, tools or model). */

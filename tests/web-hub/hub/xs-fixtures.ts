@@ -48,20 +48,34 @@ export interface Rig {
     cwd?: string;
     epoch?: number;
     joined?: boolean;
-    receive?: "off" | "deliver" | "wake";
+    receive?: "off" | "deliver" | "wake" | "replies";
     caps?: string[];
     limits?: Partial<XsMemberLimitsWire>;
     skipMember?: boolean;
+    /** Channel-plan: the `xs_member.channels` key (absent ⇒ not written). */
+    channels?: string[];
   }): { key: string; conn: FakeConn };
 }
 
-export function rig(hubSendsPerMin = 60): Rig {
+/** Channel-plan: caps of a channel-capable (new) agent. */
+export const CHANNEL_CAPS = ["ev.v1", "xs.v1", "xs.reply.v1", "xs.channel.v1"];
+/** Broadcast keys a new agent with named channels declares (§6.4 defaults). */
+export const BCAST_LIMITS: Partial<XsMemberLimitsWire> = {
+  broadcastsOutPerHour: 6,
+  broadcastMinIntervalMs: 60_000,
+  broadcastWakesOutPerHour: 2,
+};
+
+export function rig(hubSendsPerMin = 60, channels?: { maxRecipients: number; wakeMaxRecipients: number }): Rig {
   const clock = { t: 1_000_000 };
   const log = memLog();
   const registry = createRegistry({ now: () => clock.t, log, pidAlive: () => true });
   const relay = createXsRelay({
     registry,
-    config: { home: "/home/u", crossSession: { limits: { hubSendsPerMin } } },
+    config: {
+      home: "/home/u",
+      crossSession: { limits: { hubSendsPerMin }, ...(channels === undefined ? {} : { channels }) },
+    },
     log,
     now: () => clock.t,
   });
@@ -97,6 +111,7 @@ export function rig(hubSendsPerMin = 60): Rig {
             joined: o.joined ?? true,
             receive: o.receive ?? "wake",
             limits: { ...LIMITS, ...o.limits },
+            ...(o.channels === undefined ? {} : { channels: o.channels }),
           }),
         );
       }

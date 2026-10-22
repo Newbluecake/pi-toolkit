@@ -680,6 +680,9 @@ export const PRIVACY_AUDIT_KEYS = [
   "ok",
   "code",
   "ms",
+  // channel-plan §5.2 (CH1): tail-appended so pre-channel lines keep their key order.
+  "bcast",
+  "recipients",
 ] as const;
 
 /** `log.info("privacy", { audit: "privacy", ...pick(record, PRIVACY_AUDIT_KEYS) })`. */
@@ -792,7 +795,11 @@ export function auditCommandComplete(log: HubLog, record: CommandCompleteAuditRe
 export interface XsAuditRecord {
   /** Fixed association kind only — never the request id or message body. */
   reply?: "expect" | "reply";
-  op: "list" | "resolve" | "send" | "info";
+  op: "list" | "resolve" | "send" | "info" | "broadcast" | "channels";
+  /** Channel-plan §5.2 step 8: a per-recipient `op:"send"` line that belongs to a broadcast. */
+  bcast?: boolean;
+  /** Channel-plan §5.2 step 8: the broadcast line's recipient count N (never names or refs). */
+  recipients?: number;
   xid?: string;
   fromSession?: string;
   toSession?: string;
@@ -816,6 +823,9 @@ export const XS_AUDIT_KEYS = [
   "reason",
   "code",
   "ms",
+  // channel-plan §5.2 (CH1): tail-appended so pre-channel lines keep their key order.
+  "bcast",
+  "recipients",
 ] as const;
 
 const XS_TOKEN_RE = /^[A-Za-z0-9_:.{}-]{1,64}$/;
@@ -838,11 +848,11 @@ export function auditXs(log: { info(msg: string, data?: object): void }, record:
       if (typeof value === "string" && XS_TOKEN_RE.test(value)) out[key] = value;
       continue;
     }
-    if (key === "textLen" || key === "ms") {
+    if (key === "textLen" || key === "ms" || key === "recipients") {
       if (typeof value === "number" && Number.isFinite(value)) out[key] = Math.max(0, Math.trunc(value));
       continue;
     }
-    if (key === "wake") {
+    if (key === "wake" || key === "bcast") {
       if (typeof value === "boolean") out[key] = value;
       continue;
     }

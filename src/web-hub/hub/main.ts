@@ -195,6 +195,7 @@ async function main(): Promise<void> {
   // running. Key absence leaves everything byte-identical.
   if (config.crossSession !== undefined) {
     // Re-check reply too: absent defaults on; malformed values fail closed to reply:false.
+    // Channel-plan §3.1: a malformed `channels` sub-key is dropped alone (hub defaults 16/4 apply).
     const crossSession = normalizeHubCrossSessionConfig(config.crossSession);
     if (crossSession === undefined) {
       const { crossSession: _drop, ...rest } = config;
