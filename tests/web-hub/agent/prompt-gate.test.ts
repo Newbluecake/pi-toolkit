@@ -347,6 +347,47 @@ describe("createCommandHandler — WebPromptRelease.elsewhere() (plan P4: freeze
     expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed" });
   });
 
+  it("bug repro: elsewhere() after the session moved on ⇒ the NEW session's ctl slot projects `consumed` (no forever 'sent · unconfirmed' row)", () => {
+    // Real sequence (topic-switch "开新会话"): web prompt claimed under sess-1 (ledger observed/idle,
+    // HTTP reply observed ⇒ the browser row shows "sent · unconfirmed"), `/topic-switch __go`
+    // runs `ctx.newSession` — the bound session is now sess-2 — and only then wire.ts's
+    // `onSwitchEntered` calls `release.elsewhere()`. The ctl slot is published for the CURRENT
+    // session; the browser clears its row only on a ctl `consumed` for this cmdId.
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    expect(h.deps.ledger.frame("sess-1", "ep", 1000).items).toContainEqual(
+      expect.objectContaining({ cmdId: "c1", state: "observed" }),
+    );
+    h.ctxState.sessionId = "sess-2"; // newSession resolved before onSwitchEntered
+    release.current!.elsewhere();
+    const ctl = h.deps.ledger.frame("sess-2", "ep", 1000);
+    expect(ctl.items).toContainEqual(expect.objectContaining({ cmdId: "c1", state: "consumed" }));
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed", sessionId: "sess-2" });
+  });
+
+  it("elsewhere() while the current session id is unreadable ⇒ entry becomes session-agnostic (still projected)", () => {
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    h.deps.getSessionId = () => {
+      throw new Error("stale ctx");
+    };
+    release.current!.elsewhere();
+    expect(h.deps.ledger.get("c1")?.sessionId).toBeUndefined();
+    expect(h.deps.ledger.frame("any-session", "ep", 1000).items).toContainEqual(
+      expect.objectContaining({ cmdId: "c1", state: "consumed" }),
+    );
+  });
+
+  it("elsewhere() within the claim-time session ⇒ session binding untouched", () => {
+    const { gate, release } = fakeGate(true);
+    const h = makeHarness({ promptGate: () => gate });
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    release.current!.elsewhere();
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "consumed", sessionId: "sess-1" });
+  });
+
   it("current() first, then elsewhere() ⇒ elsewhere() is a no-op (dispatch already happened, stays dispatched)", () => {
     const { gate, release } = fakeGate(true);
     const h = makeHarness({ promptGate: () => gate });

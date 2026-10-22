@@ -601,6 +601,48 @@ describe("wireTopicSwitch: /topic-switch __go PONR command paths", () => {
     expect(handoffs).toHaveLength(1);
   });
 
+  it("web-claimed hold: release.elsewhere() fires exactly once, only AFTER newSession (incl. withSession) resolved — the bound session is already the new one", async () => {
+    // Pins the ordering the web-hub side relies on (commands.ts `elsewhere()` re-homes the ledger
+    // entry to the session bound AT CALL TIME, so the browser's queue row gets its terminal ctl
+    // `consumed`): elsewhere() must never run while the old session is still bound.
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const w = wireTopicSwitch(pi as never, makeDeps({}, clock));
+    const ctx = hoppingCtx();
+    pi.ctx = ctx;
+    let bound = "s1";
+    const elsewhereSeenSession: string[] = [];
+    let currentCalls = 0;
+    const release = {
+      current: () => {
+        currentCalls += 1;
+        return "dispatched" as const;
+      },
+      elsewhere: () => {
+        elsewhereSeenSession.push(bound);
+      },
+    };
+    expect(w.webGate.tryClaim({ cmdId: "c-web", text: EXPENSIVE_TEXT }, ctx, release)).toBe(true);
+    for (let i = 0; i < 8; i += 1) await flush();
+    const hop = pi.sent.find(
+      (x) => typeof x.content === "string" && (x.content as string).startsWith("/topic-switch __go "),
+    );
+    expect(hop).toBeDefined();
+    const nonce = (hop!.content as string).slice("/topic-switch __go ".length);
+    const commandCtx = {
+      ...ctx,
+      newSession: async (opts: { withSession?: (rctx: unknown) => Promise<void> }) => {
+        pi.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, ctx);
+        bound = "new-session";
+        await opts.withSession?.({ sendUserMessage: async () => {}, ui: { notify: () => {} } });
+        return { cancelled: false };
+      },
+    };
+    await pi.commands.get("topic-switch")!.handler("__go " + nonce, commandCtx as never);
+    expect(elsewhereSeenSession).toEqual(["new-session"]);
+    expect(currentCalls).toBe(0);
+  });
+
   it("{cancelled:true} before any withSession call rolls back to the current session (switch-cancelled)", async () => {
     const pi = new FakePi();
     const clock = new FakeClock();

@@ -526,6 +526,19 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         if (settled) return;
         settled = true;
         deps.ledger.updatePrompt(cmdId, { promptState: "consumed" }, deps.now());
+        // topic-switch calls `elsewhere()` only AFTER `ctx.newSession` resolved (wire.ts
+        // `onSwitchEntered`), i.e. the bound session is already the NEW one. The entry was created
+        // under the claim-time session and `frame()` projects only the current session's entries,
+        // so without re-homing it the `consumed` terminal state never reaches the browser and its
+        // optimistic row stays "sent · unconfirmed" forever. Same session (or an unreadable one
+        // that equals it) ⇒ nothing to move; an unreadable/empty current id ⇒ session-agnostic.
+        let current = "";
+        try {
+          current = deps.getSessionId();
+        } catch {
+          current = "";
+        }
+        if (current !== sessionId) deps.ledger.rebindSession(cmdId, current === "" ? undefined : current, deps.now());
         deps.onChanged();
       },
     };
