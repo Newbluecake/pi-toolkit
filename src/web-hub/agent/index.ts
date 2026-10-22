@@ -429,6 +429,8 @@ export interface WebHubControl {
    *  and the `/fabric status` hub-limits info port. Present iff `deps.xs` was threaded. */
   xs?: {
     publishMember(): void;
+    /** channel-plan §12 (IBP): the unread count changed ⇒ republish status (IBW calls this). */
+    notifyUnreadChanged(): void;
     hubPort(): XsHubPort;
     resolveBlock(query: string): Promise<XsBlockResolve>;
     hubInfo(): Promise<XsHubLimitsWire | undefined>;
@@ -865,6 +867,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     if (xsBridge !== undefined) {
       const xsView = xsBridge.statusProjection();
       if (xsView !== undefined) s.xs = xsView;
+      const inbox = xsBridge.inboxProjection();
+      if (inbox !== undefined) s.xsInbox = inbox;
     }
     c.setSlot("status", { t: "status", ...s }, xsBridge?.slotFlush);
   };
@@ -1162,7 +1166,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // fabric phase-2 X2: the xs bridge exists iff deps.xs was threaded (xsOn) — every surface it
   // adds is conditional on it, so xs-off stays byte-identical. `conn` is late-bound through a
   // getter (the closure variable swaps on every connectWith/handover).
-  const xsBridge = deps.xs !== undefined ? createXsAgentBridge({ port: deps.xs, conn: () => conn }) : undefined;
+  const xsBridge =
+    deps.xs !== undefined
+      ? createXsAgentBridge({ port: deps.xs, conn: () => conn, publishStatus: () => publishStatus() })
+      : undefined;
   const binding: BindingPort = {
     ...(xsBridge !== undefined ? { onXsDeliver: (frame) => xsBridge.onDeliver(frame) } : {}),
     onCmd: (frame) => {
@@ -2004,6 +2011,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       ? {
           xs: {
             publishMember: () => xsBridge.publishMember(),
+            notifyUnreadChanged: () => xsBridge.notifyUnreadChanged(),
             hubPort: () => xsBridge.hubPort(),
             resolveBlock: (query: string) => xsBridge.resolveBlock(query),
             hubInfo: () => xsBridge.hubInfo(),

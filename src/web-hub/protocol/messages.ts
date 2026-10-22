@@ -610,6 +610,10 @@ export interface StatusInfo {
    *  xs off / not joined — byte-equal to the pre-feature shape. The hub's list/send authorization
    *  NEVER reads this (#4): authoritative membership is the `xs_member` slot frame. */
   xs?: XsStatusWire;
+  /** channel-plan §12.6 (IBP): unread cross-session inbox count of THIS session. Present only
+   *  while n>0 (1..9999, saturated); absent ⇒ byte-equal to the pre-feature shape. Open top-level
+   *  field like `todo`/`worktrees` — no cap, no PROTO bump; the UI gates on `xs.v1` ∧ presence. */
+  xsInbox?: { unread: number };
 }
 
 export interface FleetRowWire {
@@ -1572,6 +1576,8 @@ const StatusInfoSchema = Type.Object({
     }),
   ),
   xs: Type.Optional(XsStatusSchema),
+  // channel-plan §12.6 (IBP): open top-level slot, only written while unread > 0.
+  xsInbox: Type.Optional(Type.Object({ unread: Type.Integer({ minimum: 1, maximum: 9999 }) })),
 });
 
 const FleetRowSchema = Type.Object({

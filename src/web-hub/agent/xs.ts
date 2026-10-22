@@ -72,6 +72,9 @@ export interface XsStackPort {
   deliver(frame: XsDeliverFrame): XsAckVerdict;
   /** `StatusInfo.xs` projection body (display only, §4.4). */
   status(): XsStatusWire;
+  /** channel-plan §12 (IBP): unread inbox events of the stack's CURRENT session (IB1 `count`).
+   *  Optional: absent ⇒ `StatusInfo.xsInbox` is never written. */
+  unread?(): number;
 }
 
 /** What `wireWebHub` threads as `deps.xs` — presence IS `xsOn` (XW computes the switch at
@@ -93,6 +96,9 @@ export interface XsAgentBridgeDeps {
   port: XsAgentPort;
   /** Late-bound connection accessor (agent/index.ts's `conn` closure variable). */
   conn(): HubConnection | undefined;
+  /** Republishes the status slot (agent/index.ts's `publishStatus`); driven by
+   *  `notifyUnreadChanged()` so IBW only has to say "the count changed". */
+  publishStatus?(): void;
 }
 
 export interface XsAgentBridge {
@@ -109,6 +115,11 @@ export interface XsAgentBridge {
   publishMember(): void;
   /** `StatusInfo.xs` body, or undefined while there is no stack (field stays absent). */
   statusProjection(): XsStatusWire | undefined;
+  /** `StatusInfo.xsInbox` body (§12.6): `{unread}` only while the stack port reports n>0
+   *  (floored, saturated at 9999); undefined otherwise — the key must stay absent. */
+  inboxProjection(): { unread: number } | undefined;
+  /** IBW hook: call whenever the unread count may have changed; republishes status. Never throws. */
+  notifyUnreadChanged(): void;
   /** X3's `XsHubPort` (list/resolve/send; one `xs_req` per call, no retry path) + reply probe. */
   hubPort(): XsReplyHubPort;
   /** Reply-plan §5.2/§r2#9: per-write slot transform for the `xs` and `status` slots — the stored
@@ -310,6 +321,27 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         return stack.status();
       } catch {
         return undefined;
+      }
+    },
+
+    inboxProjection() {
+      const stack = deps.port.stack();
+      if (stack?.unread === undefined) return undefined;
+      try {
+        const n = stack.unread();
+        if (!Number.isFinite(n)) return undefined;
+        const u = Math.min(9999, Math.trunc(n));
+        return u >= 1 ? { unread: u } : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
+    notifyUnreadChanged() {
+      try {
+        deps.publishStatus?.();
+      } catch {
+        /* display hint only */
       }
     },
 
