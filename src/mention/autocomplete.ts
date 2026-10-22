@@ -17,6 +17,9 @@ export interface MentionSessionAutocompleteEntry {
   readonly cwdLabel: string;
   readonly receive: string;
   readonly busy: boolean;
+  /** Channel-plan §4.3: shared channels (canonical names, no `#`); absent/empty ⇒ default-only
+   *  (description byte-identical to the pre-channel format). */
+  readonly channels?: readonly string[];
 }
 
 export interface MentionAutocompleteSource {
@@ -122,10 +125,14 @@ export function createMentionAutocompleteProvider(
         }
         const value = bare && entry.name !== undefined ? `@${entry.name}` : `@session:${entry.ref}`;
         if (!value.slice(1).startsWith(token.prefix)) return [];
+        const chs =
+          entry.channels !== undefined && entry.channels.length > 0
+            ? `${entry.channels.map((c) => `#${c}`).join(",")} · `
+            : "";
         const item: AutocompleteItem = {
           value,
           label: value,
-          description: `session · ${entry.cwdLabel} · ${entry.receive} · ${entry.busy ? "busy" : "idle"}`,
+          description: `session · ${chs}${entry.cwdLabel} · ${entry.receive} · ${entry.busy ? "busy" : "idle"}`,
         };
         ownItems.add(item);
         return [item];

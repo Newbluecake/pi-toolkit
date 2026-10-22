@@ -69,6 +69,22 @@ describe("§9.5 session completions", () => {
     expect(result?.items[1]?.description).toBe("session · ~/pi · wake · idle");
   });
 
+  it("channel-plan §4.3: shared channels render as #a,#b; absent/empty stays byte-identical", async () => {
+    const provider = createMentionAutocompleteProvider(fakeBase([]), {
+      entries: () => [],
+      sessions: () => [
+        session("ab12cd34", "x1", { channels: ["a", "b"] }),
+        session("ef9911aa", "x2", { channels: [] }),
+        session("11112222", "x3"),
+      ],
+      sessionBareName: () => true,
+    });
+    const result = await provider.getSuggestions(["@"], 0, 1, options());
+    expect(result?.items[0]?.description).toBe("session · #a,#b · ~/pi · wake · idle");
+    expect(result?.items[1]?.description).toBe("session · ~/pi · wake · idle");
+    expect(result?.items[2]?.description).toBe("session · ~/pi · wake · idle");
+  });
+
   it("insert value: bare @name only when sessionBareName approves; conflicts force @session:<ref>", async () => {
     const provider = createMentionAutocompleteProvider(fakeBase([]), {
       entries: () => [],
