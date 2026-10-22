@@ -23,6 +23,7 @@
  */
 import type { AgentId, AgentKind, XsMemberFrame } from "../../protocol/messages.js";
 import {
+  XS_ALIAS_AGENT_CAP,
   XS_CHANNEL_AGENT_CAP,
   XS_CHANNEL_NAME_RE,
   XS_HUB_CAP,
@@ -82,6 +83,9 @@ export interface XsEffectiveMember extends XsMemberRecord {
   replyCapable: boolean;
   /** Channel-plan §2.5: `caps ∋ xs.channel.v1` — only such a peer is ever sent a channel field. */
   channelCapable: boolean;
+  /** Alias-plan §3.6 (AL2): `caps ∋ xs.alias.v1` (agent side). The router further requires the hub to
+   *  have advertised the cap (`aliasUsable`); this flag alone never enables any alias semantics. */
+  aliasCapable: boolean;
   name: string | undefined;
   cwd: string;
   kind: AgentKind;
@@ -98,6 +102,9 @@ export interface XsMembers {
   effectiveAll(): XsEffectiveMember[];
   /** Test/diagnostic: number of stored (not necessarily effective) records. */
   size(): number;
+  /** Alias-plan §3.1 (AL2): the STORED record's sessionId behind an agentKey (effective or not) —
+   *  lets the presence feed learn which sid an invalidation/session switch just took offline. */
+  sessionOf(agentKey: string): string | undefined;
 }
 
 // ----------------------------------------------------------------- shared stamping helpers (router + broadcast)
@@ -290,6 +297,7 @@ export function createXsMembers(deps: {
       agentKey,
       replyCapable: v.caps.includes(XS_REPLY_AGENT_CAP),
       channelCapable: v.caps.includes(XS_CHANNEL_AGENT_CAP),
+      aliasCapable: v.caps.includes(XS_ALIAS_AGENT_CAP),
       name: v.sessionName,
       cwd: v.cwd,
       kind: v.kind,
@@ -310,5 +318,6 @@ export function createXsMembers(deps: {
       return out;
     },
     size: () => table.size,
+    sessionOf: (agentKey) => table.get(agentKey)?.sessionId,
   };
 }

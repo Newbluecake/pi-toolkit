@@ -154,8 +154,8 @@ import { createFeishuLinks } from "./feishu/link.js";
 import type { FsDeps } from "../protocol/paths.js";
 import { parseCmdline } from "../protocol/proc-identity.js";
 import { createRegistry } from "./registry.js";
-import { createXsRelay } from "./xs/router.js";
-import { XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
+import { createXsAliasBinding, createXsRelay, hubXsAliasParamsOf, type XsAliasBinding } from "./xs/router.js";
+import { XS_ALIAS_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../protocol/xs.js";
 import { acquireSingleton, startFence } from "./singleton.js";
 import type { Auth } from "./auth.js";
 import type { AuthRevokeEvent } from "./auth-revoke.js";
@@ -418,6 +418,22 @@ export async function startHub(
     // web-hub-html-preview plan v2 §4: ONE value read by the cap declaration below AND the
     // `createPreviewRoutes({ html })` attachment further down, so they can never disagree.
     const htmlEnabled = config.preview !== undefined && previewProcFdAvailable();
+    // Alias-plan AL2 (§3.3/§3.6, key-absent convention): the binding table exists iff
+    // `config.crossSession.alias` exists (absent ⇒ no table, no file IO, no cap — byte-identical).
+    // It is LOADED here, before the cap array (`xs.alias.v1` iff the load came back `ready`, fixed for
+    // the run) and long before `createAgentServer` lets any xs request in. `degraded` never touches
+    // the file and only logs; recovery is a human fixing/moving the file + `/webhub restart`.
+    const xsAliasParams = hubXsAliasParamsOf(config.crossSession);
+    let xsAlias: XsAliasBinding | undefined;
+    if (xsAliasParams !== undefined) {
+      const binding = createXsAliasBinding({ stateDir: paths.stateDir, params: xsAliasParams, log, now });
+      xsAlias = binding;
+      cleanup.push(async () => binding.store.close());
+      const loaded = await startupStep(binding.store.load());
+      if (loaded.state === "degraded") {
+        log.warn("xs alias store degraded", { reason: loaded.reason, path: binding.store.status().path });
+      }
+    }
     const extraHubCaps: readonly string[] = [
       ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit" ? CMD_ARGS_HUB_CAPS : []),
       // web-hub-version plan §3.7: unconditional (no settings gate, D3) — the service below is
@@ -493,7 +509,13 @@ export async function startHub(
       // capability with NO hub-level off key (`crossSession.channels` only carries params).
       ...(config.crossSession === undefined
         ? []
-        : [XS_HUB_CAP, ...(config.crossSession.reply === false ? [] : [XS_REPLY_HUB_CAP]), XS_CHANNEL_HUB_CAP]),
+        : [
+            XS_HUB_CAP,
+            ...(config.crossSession.reply === false ? [] : [XS_REPLY_HUB_CAP]),
+            XS_CHANNEL_HUB_CAP,
+            // Alias-plan §3.6 (AL2): tail-appended, only for a table that loaded `ready`.
+            ...(xsAlias?.store.advertised === true ? [XS_ALIAS_HUB_CAP] : []),
+          ]),
     ];
 
     let supersede: SupersedeController | undefined = undefined;
@@ -786,7 +808,13 @@ export async function startHub(
     const xsRelay =
       config.crossSession === undefined
         ? undefined
-        : createXsRelay({ registry, config: { home: config.home, crossSession: config.crossSession }, log, now });
+        : createXsRelay({
+            registry,
+            config: { home: config.home, crossSession: config.crossSession },
+            log,
+            now,
+            ...(xsAlias === undefined ? {} : { aliases: xsAlias }),
+          });
     if (xsRelay !== undefined) cleanup.push(async () => xsRelay.dispose());
     agentServer = createAgentServer(owner.server, {
       registry,

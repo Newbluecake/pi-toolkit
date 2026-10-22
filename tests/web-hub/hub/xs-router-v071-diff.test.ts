@@ -1,7 +1,9 @@
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRegistry, type Registry } from "../../../src/web-hub/hub/registry.js";
-import { createXsRelay as createCurrentRelay } from "../../../src/web-hub/hub/xs/router.js";
+import { createXsAliasBinding, createXsRelay as createCurrentRelay } from "../../../src/web-hub/hub/xs/router.js";
+import { XS_ALIAS_DEFAULT_PARAMS, XS_ALIAS_FILE, type XsAliasFs } from "../../../src/web-hub/hub/xs/aliases.js";
+import { aliasSkeleton } from "../../../src/web-hub/protocol/xs-alias.js";
 import type { AgentFrame, HubFrame } from "../../../src/web-hub/protocol/messages.js";
 import type { XsMemberLimitsWire } from "../../../src/web-hub/protocol/xs.js";
 // The FROZEN v0.7.1 hub-side sources (tests/fixtures/legacy-xs-v071, never modified). Only their
@@ -103,7 +105,7 @@ function legacyAccepts(frame: { t: string }, table: Readonly<Record<string, unkn
   return schema !== undefined && Value.Check(schema as never, frame);
 }
 
-function build(factory: RelayFactory, legacy: boolean): Side {
+function build(factory: RelayFactory, legacy: boolean, capsOf?: (m: MemberSpec) => string[]): Side {
   const clock = { t: FIXED_NOW };
   const log = memLog();
   const registry = createRegistry({ now: () => clock.t, log, pidAlive: () => true });
@@ -127,7 +129,11 @@ function build(factory: RelayFactory, legacy: boolean): Side {
       }
     };
     const { agentKey } = registry.register(
-      hello({ agentId: { pid: m.pid, nonce: `nonce${String(m.pid).padStart(15, "0")}` }, caps: m.caps, cwd: m.cwd }),
+      hello({
+        agentId: { pid: m.pid, nonce: `nonce${String(m.pid).padStart(15, "0")}` },
+        caps: capsOf?.(m) ?? m.caps,
+        cwd: m.cwd,
+      }),
       conn,
     );
     registry.onFrame(agentKey, {
@@ -363,5 +369,87 @@ describe("§9.4-3 hub differential: v0.7.1 router vs current router (default-onl
       )!.frame!.wake;
     expect(secondWake(outs["unknown"]!.legacy)).toBe(true); // v0.7.1: refunded
     expect(secondWake(outs["unknown"]!.current)).toBe(false); // NQ2: still spent
+  });
+});
+
+describe("AL2 (alias-plan §9 AL2 / NQ3): no-cap requesters × alias-holding members stay v0.7.1-equal", () => {
+  /** Members C / E / G1 / I declare `xs.alias.v1` and hold aliases that COLLIDE with other members'
+   *  names ("delta" is D's name, "beta" B's, "phi" F's, "alpha" A's). The requesters A/B/D/H have
+   *  no alias cap ⇒ legacy four tiers, legacy rows/candidates/targets, legacy deliveries. */
+  const ALIAS_HOLDERS: Record<string, string> = { C: "beta", E: "delta", G1: "phi", I: "alpha" };
+  const capsOf = (m: MemberSpec): string[] => (m.id in ALIAS_HOLDERS ? [...m.caps, "xs.alias.v1"] : m.caps);
+
+  function memFs(seed: Uint8Array): XsAliasFs {
+    const files = new Map<string, Uint8Array>([[`/state/${XS_ALIAS_FILE}`, seed]]);
+    return {
+      read: async (path, max) => {
+        const b = files.get(path);
+        if (b === undefined) return { kind: "missing" };
+        return b.length > max ? { kind: "toolarge" } : { kind: "bytes", bytes: b };
+      },
+      writeTemp: async (path, bytes) => void files.set(path, bytes),
+      rename: async (from, to) => {
+        files.set(to, files.get(from)!);
+        files.delete(from);
+      },
+      unlink: async (path) => void files.delete(path),
+      syncDir: async () => {},
+    };
+  }
+  async function aliasFactory(): Promise<RelayFactory> {
+    const records = Object.entries(ALIAS_HOLDERS)
+      .map(([id, alias], i) => ({
+        alias,
+        skeleton: aliasSkeleton(alias),
+        sessionId: sid(id),
+        state: "held",
+        rev: i + 1,
+        cwdLabel: "~",
+      }))
+      .sort((a, b) => (a.alias < b.alias ? -1 : 1));
+    const seed = new TextEncoder().encode(
+      JSON.stringify({ version: 1, skeletonVersion: 1, seq: records.length, records, tombstones: [] }),
+    );
+    const binding = createXsAliasBinding({
+      stateDir: "/state",
+      params: { ...XS_ALIAS_DEFAULT_PARAMS },
+      now: () => FIXED_NOW,
+      fs: memFs(seed),
+    });
+    const loaded = await binding.store.load();
+    expect(loaded.state).toBe("ready");
+    expect(binding.store.advertised).toBe(true);
+    return (deps) => createCurrentRelay({ ...deps, aliases: binding }) as unknown as ReturnType<RelayFactory>;
+  }
+
+  it.each(["A", "B", "D", "H"])("requester %s (no alias cap): byte-equal to the frozen v0.7.1 router", async (me) => {
+    rid = 0;
+    const legacy = build(createLegacyRelay as unknown as RelayFactory, true, capsOf);
+    const legacyOut = await run(legacy, scriptFor(me), LEGACY_AGENT_SCHEMAS);
+    rid = 0;
+    const current = build(await aliasFactory(), false, capsOf);
+    const currentOut = await run(current, scriptFor(me));
+    legacy.dispose();
+    current.dispose();
+    expect(currentOut).toBe(legacyOut);
+    expect(currentOut).not.toContain('"alias"');
+    expect(legacyOut).toContain('"xs_deliver"');
+  });
+
+  it("control: an alias-capable requester on the same table DOES diverge (the alias tier is live)", async () => {
+    const aliasCaps = (m: MemberSpec): string[] => (m.id === "A" ? [...m.caps, "xs.alias.v1"] : capsOf(m));
+    const script: Step[] = [{ req: "A", frame: { op: "resolve", query: "delta" } }];
+    rid = 0;
+    const legacy = build(createLegacyRelay as unknown as RelayFactory, true, aliasCaps);
+    const l = await run(legacy, script, LEGACY_AGENT_SCHEMAS);
+    rid = 0;
+    const current = build(await aliasFactory(), false, aliasCaps);
+    const c = await run(current, script);
+    legacy.dispose();
+    current.dispose();
+    expect(l).toContain(sid("D").slice(0, 12));
+    // E holds "delta" but its receive is off — still the alias tier decides (E is in the visible pool)
+    expect(c).toContain('"alias":"delta"');
+    expect(c).not.toBe(l);
   });
 });

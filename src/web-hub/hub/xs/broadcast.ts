@@ -68,6 +68,10 @@ export interface XsBroadcastDeps {
   channels: HubXsChannelsConfig;
   /** The router's dispose signal — in-flight rows settle as unknown. */
   signal: AbortSignal;
+  /** Alias-plan §6 (AL2): the sender's hub-verified alias to stamp as `from.alias` towards ONE
+   *  recipient — `undefined` unless that recipient is `aliasUsable` and the sender holds an alias.
+   *  Absent ⇒ never stamped (byte-identical pre-alias frames). */
+  fromAliasFor?: (recipient: XsEffectiveMember) => string | undefined;
 }
 
 export interface XsBroadcastRequest {
@@ -168,12 +172,13 @@ export function runXsBroadcast(deps: XsBroadcastDeps, req: XsBroadcastRequest): 
   };
   const build = (m: XsEffectiveMember, xid: string, wake: boolean, rid: string): XsDeliverFrame => {
     const via = hubSharedField(hubIntersect(self.channels, m.channels), m.channelCapable);
+    const fromAlias = deps.fromAliasFor?.(m);
     return {
       t: "xs_deliver",
       rid,
       xid,
       to: { sessionId: m.sessionId, epoch: m.epoch },
-      from: stampFrom,
+      from: fromAlias === undefined ? stampFrom : { ...stampFrom, alias: fromAlias },
       text: frame.text!,
       wake,
       ...(frame.level !== undefined ? { level: frame.level } : {}),

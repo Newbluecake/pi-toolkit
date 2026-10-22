@@ -29,6 +29,7 @@ import { parseHubSpawnConfig } from "./spawn/config.js";
 import { normalizeHubLoadConfig } from "./load.js";
 import { normalizeHubProxyConfig } from "./proxy/config.js";
 import { normalizeHubCrossSessionConfig } from "./xs/limits.js";
+import { mergeHubXsAliasConfig } from "./xs/router.js";
 import { createHubLog } from "./log.js";
 import type { HubConfig } from "./ports.js";
 
@@ -205,7 +206,20 @@ async function main(): Promise<void> {
       } catch {
         /* ignored */
       }
-    } else config = { ...config, crossSession };
+    } else {
+      // Alias-plan AL2 (key-absent convention): the normalizer above drops unknown keys, so the
+      // nested `alias` sub-key is re-validated from the RAW value and merged back. Absent ⇒ alias off
+      // (byte-identical config); malformed ⇒ dropped alone + logged (alias off, xs unaffected).
+      const { merged, aliasDropped } = mergeHubXsAliasConfig(config.crossSession, crossSession);
+      if (aliasDropped) {
+        try {
+          process.stderr.write("web-hub main: dropping malformed config.crossSession.alias\n");
+        } catch {
+          /* ignored */
+        }
+      }
+      config = { ...config, crossSession: merged };
+    }
   }
   startDeps.childUmask = inheritedUmask;
 

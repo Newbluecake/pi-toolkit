@@ -24,6 +24,18 @@
  * v0.7.1 (`tests/web-hub/hub/xs-router-v071-diff.test.ts`). `channels` lists the hub's channels
  * (names + session counts, Q7); `broadcast` lives in `./broadcast.ts`.
  *
+ * Alias-plan r4 (AL2, §3.6/§5/§6): when the hub was handed a LOADED alias binding table
+ * (`deps.aliases`, built only when `HubConfig.crossSession.alias` exists — key absence IS off) and the
+ * table loaded `ready` (`advertised`, fixed for the run), a requester declaring `xs.alias.v1` is
+ * `aliasUsable`: its resolve gets an alias tier after the sid prefix tier (hit ⇒ that tier only, an
+ * unreachable alias is NO_TARGET — NQ2), its list rows/candidates/targets carry `alias`, rows with an
+ * alias sort first (Q11), the target always carries the full `sessionId`, and its plain send is
+ * EXACT-only on that full sessionId (§R3 M1 — no prefix/alias/name fallback, every miss is
+ * NO_TARGET). A `degraded` table (not advertised) only guards alias-capable requesters: an
+ * alias-shaped name ⇒ `E_XS_ALIAS_UNAVAILABLE`, never the name tiers. `xs_deliver.from.alias` is
+ * stamped per RECIPIENT (`aliasUsable(recipient)`). A requester without the cap gets the exact
+ * pre-alias behaviour and bytes in every table state (NQ3, `xs-router-v071-diff.test.ts`).
+ *
  * r3 M2 (hub side): once ⑥ was issued, NO outcome may be reported as `none` unless the receiver
  * itself said so — deadline / disconnect / hub teardown / ack mismatch / handler exception are all
  * `unknown`. Provable `none` only comes from steps ①–④ (before anything left the hub) or from the
@@ -42,6 +54,7 @@ import {
   XS_RESOLVE_MAX_CANDIDATES,
   XS_RESOLVE_PREFIX_MIN,
   XS_REPLY_REQUEST_ID_RE,
+  XS_ALIAS_TAKE_PREVIEW,
   xsFrameBytesOk,
   type XsAckFrame,
   type XsDeliverFrame,
@@ -53,9 +66,23 @@ import {
   type XsSessionRowWire,
   type XsWakeDowngraded,
 } from "../../protocol/xs.js";
+import { XS_ALIAS_TAKE_TOKEN_RE } from "../../protocol/xs-alias.js";
 import { auditXs, type XsAuditRecord } from "../audit.js";
 import type { HubLog } from "../ports.js";
 import type { Registry } from "../registry.js";
+import {
+  createXsAliasStore,
+  isAliasShaped,
+  xsAliasFailureWire,
+  XS_ALIAS_DEFAULT_PARAMS,
+  type XsAliasFs,
+  type XsAliasHubParams,
+  type XsAliasRequester,
+  type XsAliasStore,
+  type XsAliasTimer,
+  type XsAliasWriteFailure,
+  type XsAliasWriteResult,
+} from "./aliases.js";
 import { runXsBroadcast } from "./broadcast.js";
 import {
   createXsLimits,
@@ -77,6 +104,7 @@ import {
   xsToken,
   type XsEffectiveMember,
   type XsMembers,
+  type XsRegistryObserver,
 } from "./members.js";
 
 const REF_LEN = XS_REF_LEN;
@@ -108,6 +136,9 @@ export interface XsRouterDeps {
   replyEnabled?: boolean;
   /** Channel-plan §3.1: hub-global broadcast params; absent ⇒ defaults (never "off"). */
   channels?: HubXsChannelsConfig;
+  /** Alias-plan §3.6 (AL2): the LOADED binding table; absent ⇒ alias off (pre-alias bytes for
+   *  everyone, no guard — ≡ an old hub). */
+  aliases?: XsAliasStore;
 }
 
 function trimSlash(p: string): string {
@@ -141,6 +172,7 @@ function reservedAddress(to: string): boolean {
 
 type Resolved =
   | { kind: "one"; member: XsEffectiveMember }
+  | { kind: "unavailable" }
   | { kind: "many"; candidates: XsResolveCandidateWire[] }
   | { kind: "dup"; candidates: XsResolveCandidateWire[] }
   | { kind: "none" }
@@ -153,8 +185,20 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
   let lateAckCount = 0;
 
   const refOf = (sessionId: string): string => sessionId.slice(0, REF_LEN);
-  const candOf = (m: XsEffectiveMember): XsResolveCandidateWire => ({
+  const aliasStore = deps.aliases;
+  /** §3.6: `aliasUsable(m) = aliasAdvertised ∧ m.aliasCapable` (ready/wedged/disabled alike). */
+  const aliasUsable = (m: XsEffectiveMember): boolean =>
+    aliasStore !== undefined && aliasStore.advertised && m.aliasCapable;
+  /** §5.1 degraded guard: a table exists but is not trusted (never advertised) ∧ the requester is
+   *  alias-capable. A hub without a table (key absent) never guards. */
+  const aliasGuarded = (m: XsEffectiveMember): boolean =>
+    aliasStore !== undefined && !aliasStore.advertised && m.aliasCapable;
+  /** `m`'s held alias as shown to `self` (only an `aliasUsable` requester ever sees one). */
+  const aliasShownTo = (self: XsEffectiveMember, m: XsEffectiveMember): string | undefined =>
+    aliasUsable(self) ? aliasStore!.heldBy(m.sessionId) : undefined;
+  const candOf = (m: XsEffectiveMember, alias?: string): XsResolveCandidateWire => ({
     ref: refOf(m.sessionId),
+    ...(alias !== undefined ? { alias } : {}),
     ...(m.name !== undefined ? { name: m.name.slice(0, NAME_MAX) } : {}),
   });
   /** §3.2: the shared-channel field towards a REQUESTER (`rows/candidates[].channels`). */
@@ -163,7 +207,18 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
   const visibleTo = (self: XsEffectiveMember, m: XsEffectiveMember): boolean =>
     m.channels.some((c) => self.channels.includes(c));
 
-  function resolveTarget(query: string, self: XsEffectiveMember, selfKey: string, exact = false): Resolved {
+  /**
+   * `mode`: `tiers` — the resolve ladder; `exactReply` — a reply-shaped send (full sessionId, with
+   * the legacy BAD_FRAME diagnostics); `exactAlias` — an `aliasUsable` plain send (§R3 M1: the same
+   * exact tier, every miss is NO_TARGET).
+   */
+  function resolveTarget(
+    query: string,
+    self: XsEffectiveMember,
+    selfKey: string,
+    mode: "tiers" | "exactReply" | "exactAlias" = "tiers",
+  ): Resolved {
+    const exact = mode !== "tiers";
     const selfSessionId = self.sessionId;
     const q = query.trim();
     if (!exact && reservedAddress(q)) return { kind: "bad" };
@@ -173,20 +228,38 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     const holders = (sid: string): number => joinedAll.reduce((n, m) => (m.sessionId === sid ? n + 1 : n), 0);
     const candFor = (m: XsEffectiveMember): XsResolveCandidateWire => {
       const ch = sharedFor(self, m);
-      return { ...candOf(m), ...(ch === undefined ? {} : { channels: ch }) };
+      return { ...candOf(m, aliasShownTo(self, m)), ...(ch === undefined ? {} : { channels: ch }) };
     };
     const pool = joinedAll.filter((m) => m.agentKey !== selfKey && m.sessionId !== selfSessionId && visibleTo(self, m));
     const lower = q.toLowerCase();
-    const tiers: Array<(m: XsEffectiveMember) => boolean> = exact
+    // §5.1: the alias tier ("alias") / the degraded guard ("guard") sit between prefix and name.
+    const aliasTier: Array<"alias" | "guard"> = aliasUsable(self) ? ["alias"] : aliasGuarded(self) ? ["guard"] : [];
+    const tiers: Array<((m: XsEffectiveMember) => boolean) | "alias" | "guard"> = exact
       ? [(m) => m.sessionId === query]
       : [
           (m) => m.sessionId === q,
           (m) => q.length >= XS_RESOLVE_PREFIX_MIN && m.sessionId.startsWith(q),
+          ...aliasTier,
           (m) => m.name !== undefined && m.name === q,
           (m) => m.name !== undefined && m.name.toLowerCase() === lower,
         ];
     for (const tier of tiers) {
-      const hits = pool.filter(tier);
+      let hits: XsEffectiveMember[];
+      if (tier === "guard") {
+        if (isAliasShaped(q)) return { kind: "unavailable" }; // no name fallback (§5.1)
+        continue;
+      } else if (tier === "alias") {
+        const hit = aliasStore!.resolveQuery(q);
+        if (hit.kind === "miss") continue;
+        // A record exists (held or live cooling) ⇒ THIS tier decides (NQ2): only a held alias whose
+        // holder is in the visible pool is a hit; everything else is NO_TARGET, never the name tiers.
+        if (hit.record.state !== "held") return { kind: "none" };
+        const holder = hit.record.sessionId;
+        hits = pool.filter((m) => m.sessionId === holder);
+        if (hits.length === 0) return { kind: "none" };
+      } else {
+        hits = pool.filter(tier);
+      }
       if (hits.length === 0) continue;
       const bySession = new Map<string, XsEffectiveMember[]>();
       for (const m of hits) {
@@ -207,7 +280,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     // Never route a reply-shaped send through a name/prefix. Diagnostic-only distinction:
     // a departed full id is NO_TARGET; a known alias/ref or invalid id shape is BAD_FRAME.
     if (
-      exact &&
+      mode === "exactReply" &&
       (query !== q ||
         !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(query) ||
         pool.some(
@@ -219,6 +292,89 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return { kind: "bad" };
     }
     return { kind: "none" };
+  }
+
+  /**
+   * §3.3/§3.4/§3.5 `op:"alias"` (the requester is origin-bound and `aliasUsable`). Sub-op from the
+   * frame: neither `alias` nor `clear` ⇒ get; `clear:true` ⇒ clear; `alias` ⇒ set; `alias` + `take:
+   * "preview"` ⇒ take preview; `alias` + `take:<token>` ⇒ take. get and preview count against
+   * `listPerMin`; writes are bounded by the store's own queue/budget. Audit lines carry the sub-op
+   * and the code only — never the alias text, the token or the cwd label.
+   */
+  function handleAlias(
+    agentKey: string,
+    self: XsEffectiveMember,
+    frame: XsReqFrame,
+    started: number,
+    res: (body: Omit<XsResFrame, "t" | "rid">) => void,
+    audit: (record: XsAuditRecord) => void,
+  ): void {
+    const store = aliasStore!;
+    const from = self.sessionId;
+    const take = frame.take;
+    const sub: "get" | "set" | "clear" | "preview" | "take" =
+      take !== undefined
+        ? take === XS_ALIAS_TAKE_PREVIEW
+          ? "preview"
+          : "take"
+        : frame.clear !== undefined
+          ? "clear"
+          : frame.alias !== undefined
+            ? "set"
+            : "get";
+    const malformed =
+      (frame.clear !== undefined && (frame.clear !== true || frame.alias !== undefined || take !== undefined)) ||
+      ((sub === "preview" || sub === "take") && frame.alias === undefined) ||
+      (sub === "take" && !XS_ALIAS_TAKE_TOKEN_RE.test(take!));
+    const fail = (code: string, effect: "none" | "unknown"): void => {
+      res({ ok: false, code, effect });
+      audit({
+        op: "alias",
+        fromSession: from,
+        outcome: effect === "unknown" ? "unknown" : "error",
+        reason: sub,
+        code,
+        ms: now() - started,
+      });
+    };
+    if (malformed) return fail("E_XS_BAD_FRAME", "none");
+    const okLine = (): void =>
+      audit({ op: "alias", fromSession: from, outcome: "ok", reason: sub, ms: now() - started });
+    const failure = (f: XsAliasWriteFailure): void => {
+      const w = xsAliasFailureWire(f);
+      fail(w.code, w.effect);
+    };
+    const requester: XsAliasRequester = { sessionId: self.sessionId, epoch: self.epoch, agentKey };
+    if (sub === "get" || sub === "preview") {
+      if (!limits.admitList(agentKey, self.limits)) return fail("E_XS_RATE_LIMITED", "none");
+      if (sub === "get") {
+        res({ ok: true, alias: store.get(requester) });
+        return okLine();
+      }
+      const p = store.takePreview(requester, frame.alias!);
+      if (!p.ok) return failure(p.failure);
+      res({ ok: true, alias: p.res });
+      return okLine();
+    }
+    // cwdLabel: the requester's own `~` label (only ever shown in a later take preview).
+    const cwdLabel = abbreviateHome(self.cwd, deps.home);
+    const pending: Promise<XsAliasWriteResult> =
+      sub === "set"
+        ? store.set(requester, frame.alias!, cwdLabel)
+        : sub === "clear"
+          ? store.clear(requester)
+          : store.take(requester, frame.alias!, take!, cwdLabel);
+    pending
+      .then((out) => {
+        if (!out.ok) return failure(out.failure);
+        res({ ok: true, alias: out.res });
+        okLine();
+      })
+      .catch(() => {
+        // The store never rejects by contract; a write may have been attempted ⇒ unknown.
+        res({ ok: false, code: "E_XS_INTERNAL", effect: "unknown" });
+        log.warn("xs handler failed", { code: "E_XS_INTERNAL", op: "alias" });
+      });
   }
 
   function dispatch(agentKey: string, frame: XsReqFrame, reply: (res: XsResFrame) => void, started: number): void {
@@ -291,9 +447,23 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return;
     }
     const targetOf = (m: XsEffectiveMember): NonNullable<XsResFrame["target"]> => ({
-      ...candOf(m),
-      ...(deps.replyEnabled !== false && self.replyCapable && m.replyCapable ? { sessionId: m.sessionId } : {}),
+      ...candOf(m, aliasShownTo(self, m)),
+      // §5.2: an `aliasUsable` requester always gets the full sessionId (it pins the send on it).
+      ...((deps.replyEnabled !== false && self.replyCapable && m.replyCapable) || aliasUsable(self)
+        ? { sessionId: m.sessionId }
+        : {}),
     });
+
+    if (frame.op === "alias") {
+      // §3.3/§3.6: the op exists only for an `aliasUsable` requester (a hub without a ready table
+      // answers exactly what the pre-alias hub answered for an unknown-shaped send: BAD_FRAME).
+      if (!aliasUsable(self)) {
+        refuse("E_XS_BAD_FRAME", {}, self.sessionId);
+        return;
+      }
+      handleAlias(agentKey, self, frame, started, res, audit);
+      return;
+    }
 
     if (frame.op === "info") {
       res({
@@ -315,6 +485,13 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
           home: deps.home,
           channels: hubChannelsParams(deps.channels),
           signal: ac.signal,
+          // §6: `from.alias` per recipient — only towards an `aliasUsable` one.
+          ...(aliasStore === undefined
+            ? {}
+            : {
+                fromAliasFor: (m: XsEffectiveMember) =>
+                  aliasUsable(m) ? aliasStore.heldBy(self.sessionId) : undefined,
+              }),
         },
         { agentKey, self, frame, started, textLen, res, refuse },
       );
@@ -356,7 +533,13 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         return;
       }
       if (frame.op === "list") {
-        const q = (frame.query ?? "").trim().toLowerCase();
+        const rawQ = (frame.query ?? "").trim();
+        const q = rawQ.toLowerCase();
+        const withAlias = aliasUsable(self);
+        // §5.3: alias prefix match on the NFKC + ASCII-lower-cased query (the canonical form's rules).
+        const aq = withAlias ? rawQ.normalize("NFKC").replace(/[A-Z]/g, (c) => c.toLowerCase()) : "";
+        const aliasRow = (m: XsEffectiveMember): string | undefined =>
+          withAlias ? aliasStore!.heldBy(m.sessionId) : undefined;
         const rows: XsSessionRowWire[] = members
           .effectiveAll()
           .filter(
@@ -370,16 +553,24 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
               (listChannel === undefined || m.channels.includes(listChannel)),
           )
           .filter((m) => frame.scope !== "cwd" || cwdRelated(self.cwd, m.cwd))
+          .map((m) => ({ m, alias: aliasRow(m) }))
           .filter(
-            (m) =>
+            ({ m, alias }) =>
               q === "" ||
               (m.name !== undefined && m.name.toLowerCase().startsWith(q)) ||
-              (q.length >= XS_RESOLVE_PREFIX_MIN && m.sessionId.toLowerCase().startsWith(q)),
+              (q.length >= XS_RESOLVE_PREFIX_MIN && m.sessionId.toLowerCase().startsWith(q)) ||
+              (alias !== undefined && aq !== "" && alias.startsWith(aq)),
           )
-          .sort((a, b) => b.activityAt - a.activityAt)
+          // Q11: an aliasUsable requester sees rows with an alias first (each group by activity).
+          .sort(
+            (a, b) =>
+              (withAlias ? Number(b.alias !== undefined) - Number(a.alias !== undefined) : 0) ||
+              b.m.activityAt - a.m.activityAt,
+          )
           .slice(0, XS_LIST_MAX_ROWS)
-          .map((m) => ({
+          .map(({ m, alias }) => ({
             ref: refOf(m.sessionId),
+            ...(alias !== undefined ? { alias } : {}),
             ...(m.name !== undefined ? { name: m.name.slice(0, NAME_MAX) } : {}),
             cwdLabel: abbreviateHome(m.cwd, deps.home).slice(0, NAME_MAX),
             kind: m.kind,
@@ -396,6 +587,9 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       switch (r.kind) {
         case "bad":
           refuse("E_XS_BAD_TARGET", {}, self.sessionId);
+          return;
+        case "unavailable":
+          refuse("E_XS_ALIAS_UNAVAILABLE", {}, self.sessionId);
           return;
         case "none":
           refuse("E_XS_NO_TARGET", {}, self.sessionId);
@@ -425,9 +619,16 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       return;
     }
     // ② exactly one effective joined holder of the target sessionId
-    const r = resolveTarget(frame.to, self, agentKey, hasReplyFields);
+    // §R3 M1: an aliasUsable plain send is exact-only on the full sessionId resolve returned.
+    const r = resolveTarget(
+      frame.to,
+      self,
+      agentKey,
+      hasReplyFields ? "exactReply" : aliasUsable(self) ? "exactAlias" : "tiers",
+    );
     if (r.kind === "bad") return refuse(hasReplyFields ? "E_XS_BAD_FRAME" : "E_XS_BAD_TARGET", {}, self.sessionId);
     if (r.kind === "none") return refuse("E_XS_NO_TARGET", {}, self.sessionId);
+    if (r.kind === "unavailable") return refuse("E_XS_ALIAS_UNAVAILABLE", {}, self.sessionId);
     if (r.kind === "dup" || r.kind === "many") {
       return refuse("E_XS_AMBIGUOUS", { candidates: r.candidates }, self.sessionId);
     }
@@ -456,6 +657,8 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     const xid = `x${randomBytes(9).toString("hex")}`;
     const fromName = self.name?.slice(0, NAME_MAX);
     const via = hubSharedField(hubIntersect(self.channels, target.channels), target.channelCapable);
+    // §6: the sender's hub-verified alias, stamped only towards an aliasUsable recipient.
+    const fromAlias = aliasUsable(target) ? aliasStore!.heldBy(self.sessionId) : undefined;
     const build = (wake: boolean, rid: string): XsDeliverFrame => ({
       t: "xs_deliver",
       rid,
@@ -467,6 +670,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         ...(fromName !== undefined ? { name: fromName } : {}),
         cwdLabel: abbreviateHome(self.cwd, deps.home).slice(0, NAME_MAX),
         agentId: agentKey.slice(0, 128),
+        ...(fromAlias !== undefined ? { alias: fromAlias } : {}),
       },
       text: frame.text!,
       wake: isReply ? false : wake,
@@ -616,22 +820,158 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
   };
 }
 
+// ----------------------------------------------------------------- alias assembly (alias-plan §3.6, AL2)
+
+/** `HubConfig.crossSession` as the hub reads it: the agent nests `alias` (AL3) — `limits.ts`'s
+ *  normalizer drops unknown keys, so `hub/main.ts` re-validates and merges it back. */
+export type HubCrossSessionConfigWithAlias = HubCrossSessionConfig & { alias?: XsAliasHubParams };
+
+/** Acceptance bounds of `crossSession.alias` (mirror of `config/settings.ts` FABRIC_XS_ALIAS_*). */
+export const XS_HUB_ALIAS_BOUNDS = {
+  offlineLeaseH: { min: 1, max: 720 },
+  coolMin: { min: 1, max: 1_440 },
+  takeMinOfflineMin: { min: 10, max: 1_440 }, // floor = NQ1
+} as const;
+
+/**
+ * `crossSession.alias` re-validation (key-absent convention, AL2 deviation from §3.6's wording):
+ * `undefined` ⇒ alias OFF (no table, no file IO, no cap — the hub stays byte-identical); a
+ * non-object or any present leaf that is not an integer within `XS_HUB_ALIAS_BOUNDS` ⇒ `undefined`
+ * too (the caller drops the key and logs — fails closed to old-hub behaviour); missing leaves take
+ * the defaults (168 / 10 / 10). Never throws.
+ */
+export function normalizeHubXsAliasConfig(raw: unknown): XsAliasHubParams | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: XsAliasHubParams = { ...XS_ALIAS_DEFAULT_PARAMS };
+  for (const key of ["offlineLeaseH", "coolMin", "takeMinOfflineMin"] as const) {
+    const v = r[key];
+    if (v === undefined) continue;
+    const { min, max } = XS_HUB_ALIAS_BOUNDS[key];
+    if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) return undefined;
+    out[key] = v;
+  }
+  return out;
+}
+
+/** `hub/main.ts`'s merge step: `normalized` is `normalizeHubCrossSessionConfig(raw)` (which drops
+ *  `alias`); the alias sub-key is re-validated from `raw` and merged back. Raw alias absent ⇒
+ *  `merged === normalized` (same object — byte-identical config); malformed ⇒ dropped alone. */
+export function mergeHubXsAliasConfig(
+  raw: unknown,
+  normalized: HubCrossSessionConfig,
+): { merged: HubCrossSessionConfigWithAlias; aliasDropped: boolean } {
+  const rawAlias =
+    raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as { alias?: unknown }).alias : undefined;
+  if (rawAlias === undefined) return { merged: normalized, aliasDropped: false };
+  const alias = normalizeHubXsAliasConfig(rawAlias);
+  return alias === undefined
+    ? { merged: normalized, aliasDropped: true }
+    : { merged: { ...normalized, alias }, aliasDropped: false };
+}
+
+/** The validated alias params carried by a (possibly un-normalized) `crossSession`, else undefined. */
+export function hubXsAliasParamsOf(crossSession: HubCrossSessionConfig | undefined): XsAliasHubParams | undefined {
+  if (crossSession === undefined) return undefined;
+  return normalizeHubXsAliasConfig((crossSession as { alias?: unknown }).alias);
+}
+
+/** The binding table + its late-bound presence/liveness ports (members are built by the relay). */
+export interface XsAliasBinding {
+  readonly store: XsAliasStore;
+  /** Called once by {@link createXsRelay}. Before it, nobody is online and no requester is live. */
+  attach(members: XsMembers): void;
+}
+
+/** Built by `hub.ts` BEFORE the cap array (load must decide `xs.alias.v1`), and loaded there. */
+export function createXsAliasBinding(deps: {
+  stateDir: string;
+  params: XsAliasHubParams;
+  log?: { warn(msg: string, data?: object): void };
+  now?: () => number;
+  fs?: XsAliasFs;
+  timer?: XsAliasTimer;
+  randomHex?: (bytes: number) => string;
+}): XsAliasBinding {
+  let members: XsMembers | undefined;
+  const store = createXsAliasStore({
+    stateDir: deps.stateDir,
+    params: deps.params,
+    isOnline: (sid) => members?.effectiveAll().some((m) => m.sessionId === sid) ?? false,
+    isRequesterLive: (r) => {
+      if (members === undefined || r.agentKey === undefined) return false;
+      const e = members.effective(r.agentKey);
+      return e !== undefined && e.sessionId === r.sessionId && e.epoch === r.epoch && e.aliasCapable;
+    },
+    ...(deps.log === undefined ? {} : { log: deps.log }),
+    ...(deps.now === undefined ? {} : { now: deps.now }),
+    ...(deps.fs === undefined ? {} : { fs: deps.fs }),
+    ...(deps.timer === undefined ? {} : { timer: deps.timer }),
+    ...(deps.randomHex === undefined ? {} : { randomHex: deps.randomHex }),
+  });
+  return {
+    store,
+    attach(m) {
+      members = m;
+    },
+  };
+}
+
+/** §3.1: the presence feed — after the member table applied an event, re-evaluate every sid it may
+ *  have taken on/offline (`touchPresence` never writes; it only stamps `offlineSince`). */
+function withPresenceFeed(members: XsMembers, store: XsAliasStore): XsRegistryObserver {
+  const base = members.observer;
+  const touch = (sid: string | undefined): void => {
+    if (sid === undefined) return;
+    try {
+      store.touchPresence(sid);
+    } catch {
+      /* presence is a hint; reads re-judge it anyway */
+    }
+  };
+  return {
+    onMember(agentKey, frame) {
+      const prev = members.sessionOf(agentKey);
+      base.onMember(agentKey, frame);
+      if (prev !== frame.sessionId) touch(prev);
+      touch(frame.sessionId);
+    },
+    onSession(agentKey, sessionId) {
+      const prev = members.sessionOf(agentKey);
+      base.onSession(agentKey, sessionId);
+      touch(prev);
+    },
+    onInvalidate(agentKey, reason) {
+      const prev = members.sessionOf(agentKey);
+      base.onInvalidate(agentKey, reason);
+      touch(prev);
+    },
+    onActivity: (agentKey) => base.onActivity(agentKey),
+    onLateAck: (agentKey) => base.onLateAck(agentKey),
+  };
+}
+
 // ----------------------------------------------------------------- assembly (hub.ts only calls this)
 
 export interface XsRelay {
   router: XsRouter;
   members: XsMembers;
   limits: XsLimits;
+  /** Alias-plan AL2: the loaded binding table, iff one was handed in. */
+  aliases?: XsAliasStore;
   dispose(): void;
 }
 
 /** Builds members + limits + router and installs the registry observer. Called by `hub.ts` only
- *  when `config.crossSession` exists (key absence IS off). */
+ *  when `config.crossSession` exists (key absence IS off). `aliases` (alias-plan AL2): an already
+ *  LOADED binding (`createXsAliasBinding` + `await store.load()`); absent ⇒ alias off. The relay
+ *  takes ownership — `dispose()` closes the store. */
 export function createXsRelay(deps: {
   registry: Registry;
   config: { home: string; crossSession: HubCrossSessionConfig };
   log: HubLog;
   now: () => number;
+  aliases?: XsAliasBinding;
 }): XsRelay {
   const hubSendsPerMin = deps.config.crossSession.limits.hubSendsPerMin;
   let router: XsRouter | undefined;
@@ -641,6 +981,8 @@ export function createXsRelay(deps: {
     onLateAck: (key) => router?.onLateAck(key),
   });
   const limits = createXsLimits({ now: deps.now, hubSendsPerMin });
+  const aliasStore = deps.aliases?.store;
+  deps.aliases?.attach(members);
   router = createXsRouter({
     registry: deps.registry,
     members,
@@ -651,16 +993,19 @@ export function createXsRelay(deps: {
     hubSendsPerMin,
     replyEnabled: deps.config.crossSession.reply !== false,
     ...(deps.config.crossSession.channels === undefined ? {} : { channels: deps.config.crossSession.channels }),
+    ...(aliasStore === undefined ? {} : { aliases: aliasStore }),
   });
-  deps.registry.setXsObserver(members.observer);
+  deps.registry.setXsObserver(aliasStore === undefined ? members.observer : withPresenceFeed(members, aliasStore));
   const r = router;
   return {
     router: r,
     members,
     limits,
+    ...(aliasStore === undefined ? {} : { aliases: aliasStore }),
     dispose() {
       r.dispose();
       deps.registry.setXsObserver(undefined);
+      aliasStore?.close();
     },
   };
 }
