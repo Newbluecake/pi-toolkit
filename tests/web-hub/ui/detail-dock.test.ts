@@ -398,3 +398,109 @@ describe("DetailDock.vue — model/thinking chips inside the composer input (202
     expect(calls.some((c) => c.method === "discard" && c.args[1] === "n2")).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// fix (2026-10-22) — the async command's one-shot queryOnly must render the captured output.
+// A queryOnly answer WRAPS the command result ({op:"query", state, result:{ok,data:{…}}});
+// the old code read captured/output off the wrapper (both undefined ⇒ captured:false ⇒ the
+// "此命令的输出只在终端显示。" note), and a failed query degraded a KNOWN-captured toolkit
+// command to captured:false too. The agent-side fix (completion:"async" + cmd_late upgrade)
+// feeds this path; these tests pin the dock half of the contract.
+// ---------------------------------------------------------------------------
+describe("DetailDock.vue — async command finishes via pendingCtl + queryOnly (fix 2026-10-22)", () => {
+  const FABRIC = [{ name: "fabric", kind: "extension", policy: "allow", output: "captured" }];
+
+  /** Mounts the dock with a mutable agent state the test drives like the reducer would. */
+  function mountAsync(
+    runOutcome: CmdOutcome,
+    queryOutcome: CmdOutcome,
+  ): { wrapper: ReturnType<typeof mount>; agent: { value: AgentState }; calls: Call[] } {
+    const { control, calls } = fakeControl((method) => (method === "runCommand" ? runOutcome : queryOutcome));
+    const { view, agent } = fakeView(control, { commands: FABRIC, commandsEnabled: true });
+    const wrapper = mount(DetailDock, {
+      props: { following: true, newCount: 0 },
+      global: {
+        provide: {
+          [CONTROL_VIEW as symbol]: view,
+          [CONTROL_CTX as symbol]: { agentKey: "agent-a", control, enabled: true },
+        },
+      },
+    });
+    mounted.push(wrapper);
+    return { wrapper, agent, calls };
+  }
+
+  async function submitAsync(w: ReturnType<typeof mount>): Promise<void> {
+    await w.find(".composer textarea").setValue("/fabric status");
+    await w.find(".composer textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    await w.vm.$nextTick();
+  }
+
+  async function driveItemLifecycle(agent: { value: AgentState }): Promise<void> {
+    const settle = () => new Promise((r) => setTimeout(r, 0));
+    // The optimistic item lands (reducer: ctl_send + result⇒running) …
+    agent.value = {
+      ...agent.value,
+      pendingCtl: [{ id: "cmd-1", kind: "command", name: "fabric", state: "running", at: 1 }],
+    };
+    await settle();
+    // … then cmd_late's queryOnly removes it (reducer: late ok → querying → query_result ok ⇒ gone).
+    agent.value = { ...agent.value, pendingCtl: [] };
+    await settle();
+    await flush();
+  }
+
+  it("renders the queryOnly result's captured output (unwrapped from result.data), never the terminal-only note", async () => {
+    const run = { ok: true, data: { op: "command", kind: "extension", completion: "async", captured: true } };
+    const query = {
+      ok: true,
+      data: {
+        op: "query",
+        state: "ok",
+        late: true,
+        result: {
+          ok: true,
+          data: {
+            op: "command",
+            kind: "extension",
+            completion: "sync",
+            captured: true,
+            output: { entries: [{ kind: "notify", text: "fabric status ok", level: "info" }] },
+          },
+        },
+      },
+    };
+    const { wrapper, agent, calls } = mountAsync(run as CmdOutcome, query as CmdOutcome);
+    await submitAsync(wrapper);
+    await driveItemLifecycle(agent);
+    expect(calls.some((c) => c.method === "query" && c.args[1] === "cmd-1")).toBe(true);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".command-result").exists()).toBe(true);
+    const text = wrapper.find(".command-result").text();
+    expect(text).toContain("fabric status ok");
+    expect(wrapper.find(".command-terminal-only").exists()).toBe(false);
+  });
+
+  it("a failed query keeps the KNOWN captured:true (content-less done card), not the terminal-only note", async () => {
+    const run = { ok: true, data: { op: "command", kind: "extension", completion: "async", captured: true } };
+    const query = { ok: false, error: "E_UNKNOWN_ID", retryable: false, effect: "none" };
+    const { wrapper, agent } = mountAsync(run as CmdOutcome, query as CmdOutcome);
+    await submitAsync(wrapper);
+    await driveItemLifecycle(agent);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".command-result").exists()).toBe(true);
+    expect(wrapper.find(".command-terminal-only").exists()).toBe(false); // toolkit ⇒ never terminal-only
+    expect(wrapper.find(".command-result").find(".output-notify").exists()).toBe(false); // nothing to show, though
+  });
+
+  it("a third-party command (captured:false) whose query fails KEEPS the terminal-only note", async () => {
+    const run = { ok: true, data: { op: "command", kind: "extension", completion: "unknown", captured: false } };
+    const query = { ok: false, error: "E_UNKNOWN_ID", retryable: false, effect: "none" };
+    const { wrapper, agent } = mountAsync(run as CmdOutcome, query as CmdOutcome);
+    await submitAsync(wrapper);
+    await driveItemLifecycle(agent);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".command-terminal-only").exists()).toBe(true);
+  });
+});

@@ -477,6 +477,57 @@ describe("createCommandHandler — command (delegates to BuiltinBridge, §4.6 ou
     expect(h.sent[0]).toMatchObject({ ok: false, code: "E_UNSUPPORTED" });
     expect(h.originEntry.notify).not.toHaveBeenCalled();
   });
+
+  // fix (2026-10-22): the async-late channel — an extension command answering completion:async
+  // (capture window still open) replies WITHOUT settling the ledger, so the ctl-slot republish
+  // keeps the browser's pendingCtl item alive until handleBridgeLate upgrades it with the output.
+  it("completion:async extension command ⇒ reply-only (ledger stays running); handleBridgeLate settles it late with cmd_late", () => {
+    const h = makeHarness();
+    const f = frame("c1", { op: "command", name: "fabric", args: "status" });
+    (h.builtinBridge.execute as ReturnType<typeof vi.fn>).mockReturnValue({
+      ok: true,
+      data: { op: "command", kind: "extension", completion: "async", captured: true },
+    });
+    h.handler.handle(f);
+    // The HTTP reply went out unchanged …
+    expect(h.sent[0]).toMatchObject({
+      t: "cmd_result",
+      id: "c1",
+      ok: true,
+      data: { completion: "async", captured: true },
+    });
+    // … but the entry is still running (no ok-settle that would terminate the UI item early).
+    expect(h.deps.ledger.get("c1")).toMatchObject({ state: "running" });
+    expect(h.onChanged).not.toHaveBeenCalled();
+
+    const lateBody = {
+      ok: true,
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        output: { entries: [{ kind: "notify", text: "fabric status ok", level: "info" }] },
+      },
+    } as const;
+    h.handler.handleBridgeLate(f, lateBody);
+    expect(h.deps.ledger.get("c1")).toMatchObject({ state: "ok", late: true });
+    expect(h.deps.ledger.query("c1")?.result).toEqual(lateBody);
+    expect(h.sent[1]).toMatchObject({ t: "cmd_late", id: "c1", op: "command", ok: true });
+    expect(h.onChanged).toHaveBeenCalled();
+  });
+
+  it("completion:async BUILTIN commands keep the legacy immediate settle (their cmd_late is an upgrade, not the primary settle)", () => {
+    const h = makeHarness();
+    (h.builtinBridge.execute as ReturnType<typeof vi.fn>).mockReturnValue({
+      ok: true,
+      data: { op: "command", kind: "builtin", completion: "async" },
+    });
+    h.handler.handle(frame("c1", { op: "command", name: "compact", args: "" }));
+    expect(h.sent[0]).toMatchObject({ ok: true, data: { completion: "async" } });
+    expect(h.deps.ledger.get("c1")).toMatchObject({ state: "ok" }); // settled now, like before
+    expect(h.onChanged).toHaveBeenCalled();
+  });
 });
 
 describe("createCommandHandler — steer_subagent (D15, happy/error paths; timeout covered in steer-late.test.ts)", () => {

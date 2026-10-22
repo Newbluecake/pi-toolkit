@@ -1567,6 +1567,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // returned; the NEXT activation's `onSessionStart`/`adopt` is the defensive backstop).
     holdDriver?.onSessionShutdown(reasonOf(event));
     commandHandler.onSessionBoundary();
+    // fix (2026-10-22): close every capture window and fire its pending finish listener
+    // ("timeout", settle-anyway) — an async web command still awaiting its handler Promise gets
+    // its late settle NOW (whatever output was collected) instead of dangling until the window's
+    // own CAPTURE_MAX_MS expiry fires inside a torn-down session.
+    safe(() => commandCapture.dispose(), undefined);
     // web-resume plan §2.5 (session boundary) + §2.4 (fence): revoke still-ARMED pick tickets
     // (our own switch is already past `armed`, so a reason:"resume" shutdown is a no-op for the
     // ticket) and abort in-flight list builds — a build finishing under the old epoch is

@@ -780,8 +780,28 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       );
       return;
     }
-    settleCommandResult(frame, result as CmdResultBody, quiet);
-    notifyCommandSuccess(frame, cmd, result as CmdResultBody, quiet);
+    // fix (2026-10-22): an extension command whose capture window was still open at bridge-return
+    // time answers `completion:"async"` and settles ONLY through the late channel (capture finish
+    // → sendLate → handleBridgeLate): reply now but keep the ledger entry `running`, so the
+    // ctl-slot republish does not terminate the browser's pendingCtl item before `cmd_late`
+    // arrives — the existing async path (cmd_late → lateQuery → queryOnly) needs the item alive
+    // to fetch the output. Every such command carries a bounded settle-anyway (the capture
+    // window's CAPTURE_MAX_MS expiry fires the same late channel), so the entry cannot hang.
+    // Builtins (`/compact`, `/model`) keep their legacy immediate settle — their cmd_late is an
+    // upgrade, not the primary settle, and ModelSwitcher's ctl-slot convergence relies on it.
+    const body = result as CmdResultBody;
+    const asyncExtension =
+      body.ok === true &&
+      body.data.op === "command" &&
+      body.data.kind === "extension" &&
+      body.data.completion === "async";
+    if (asyncExtension) {
+      replyOnly(frame, body);
+      notifyCommandSuccess(frame, cmd, body, quiet);
+      return;
+    }
+    settleCommandResult(frame, body, quiet);
+    notifyCommandSuccess(frame, cmd, body, quiet);
   }
 
   /** §2.4: settle (stripping `data.sessions` for the quiet `__list` read) + reply in full. */

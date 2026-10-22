@@ -21,6 +21,18 @@ export interface CommandCapturePort {
   settleArm?(): void;
   finish?(cmdId: string): void;
   owns?(name: string): boolean;
+  /** Web-command async-late channel (fix 2026-10-22): true while `cmdId`'s capture window is
+   *  open — the invocation was claimed and its handler Promise has neither settled nor hit the
+   *  CAPTURE_MAX_MS window expiry. Optional: a port without it keeps the bridge's legacy
+   *  `completion:"unknown"` answer for a still-running handler (no async promise made). */
+  isActive?(cmdId: string): boolean;
+  /** One-shot listener for that window's finish — handler Promise settle (`"settled"`) or the
+   *  CAPTURE_MAX_MS window expiry (`"timeout"`, settle-anyway semantics). Fires at most once,
+   *  never rethrows into the engine. Optional: absent ⇒ the bridge never reports `async`. */
+  onFinish?(cmdId: string, listener: (reason: "settled" | "timeout") => void): void;
+  /** cmdId-scoped output read (the `output()` variant that keeps working after the window
+   *  closed / left the active stack — used by the async-late channel's finish listener). */
+  outputFor?(cmdId: string): CommandOutputWire | undefined;
   collect?(entry: {
     kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
     text: string;
@@ -124,6 +136,12 @@ export interface CommandCaptureEngine extends CommandCapturePort {
   /** cmdId-scoped variants used internally by {@link wrapCommandApi}. */
   collectFor(cmdId: string, entry: CommandOutputEntry): void;
   outputFor(cmdId: string): CommandOutputWire | undefined;
+  isActive(cmdId: string): boolean;
+  onFinish(cmdId: string, listener: (reason: "settled" | "timeout") => void): void;
+  /** Close every window and fire every pending finish listener with `"timeout"` (settle-anyway)
+   *  — the session-boundary cleanup so a listener can never outlive the stack by more than the
+   *  CAPTURE_MAX_MS self-expiry it already has. At most once per listener by construction. */
+  dispose(): void;
 }
 
 /**
@@ -154,11 +172,29 @@ export function createCommandCaptureEngine(
   const windows = new Map<string, Window>();
   const retainedOrder: string[] = [];
   const activeStack: string[] = [];
+  /** cmdId -> the still-pending one-shot finish listener (async-late channel). Every entry is
+   *  guaranteed to fire: `finish()` on handler settle, the window's CAPTURE_MAX_MS timer on
+   *  expiry, or `dispose()` on a session boundary — whichever comes first, exactly once. */
+  const finishListeners = new Map<string, (reason: "settled" | "timeout") => void>();
+
+  function fireFinish(cmdId: string, reason: "settled" | "timeout"): void {
+    const listener = finishListeners.get(cmdId);
+    if (listener === undefined) return;
+    finishListeners.delete(cmdId);
+    try {
+      listener(reason);
+    } catch {
+      /* a broken listener must never break the capture engine */
+    }
+  }
 
   function openWindow(cmdId: string): void {
     const timer = setTimeout(() => {
       const win = windows.get(cmdId);
       if (win !== undefined) win.closed = true;
+      // Settle-anyway: the CAPTURE_MAX_MS expiry is also a finish — a registered async-late
+      // listener must not wait for a handler Promise that may never settle.
+      fireFinish(cmdId, "timeout");
     }, CAPTURE_MAX_MS);
     timer.unref?.();
     windows.set(cmdId, {
@@ -222,6 +258,7 @@ export function createCommandCaptureEngine(
     }
     const idx = activeStack.lastIndexOf(cmdId);
     if (idx !== -1) activeStack.splice(idx, 1);
+    fireFinish(cmdId, "settled");
   }
 
   function owns(name: string): boolean {
@@ -270,6 +307,15 @@ export function createCommandCaptureEngine(
     return out;
   }
 
+  function isActive(cmdId: string): boolean {
+    const win = windows.get(cmdId);
+    return win !== undefined && !win.closed;
+  }
+
+  function onFinish(cmdId: string, listener: (reason: "settled" | "timeout") => void): void {
+    finishListeners.set(cmdId, listener);
+  }
+
   return {
     arm,
     take,
@@ -279,6 +325,25 @@ export function createCommandCaptureEngine(
     registerOwned,
     collectFor,
     outputFor,
+    isActive,
+    onFinish,
+    dispose() {
+      // Close every window first (timers cleared, no further collection), then fire the
+      // listeners — they still read their (now-closed) window's collected output before the
+      // maps go away, so a boundary settle carries whatever was captured so far.
+      for (const win of windows.values()) {
+        win.closed = true;
+        if (win.timer !== undefined) clearTimeout(win.timer);
+      }
+      for (const cmdId of [...finishListeners.keys()]) fireFinish(cmdId, "timeout");
+      windows.clear();
+      retainedOrder.length = 0;
+      activeStack.length = 0;
+      finishListeners.clear();
+      for (const queued of queue) clearTimeout(queued.timer);
+      queue.length = 0;
+      syncSlot = undefined;
+    },
     collect(entry) {
       const cmdId = activeStack[activeStack.length - 1];
       if (cmdId === undefined) return;
@@ -294,8 +359,10 @@ export function createCommandCaptureEngine(
 /** Production factory (`src/web-hub/agent/index.ts`'s call site). `ownedNames` is the same
  * `Set<string>` object `wrapCommandApi` writes into at real `registerCommand` time — `src/index.ts`
  * creates it once and passes it to both sides (see the doc comment above
- * {@link createCommandCaptureEngine}). */
-export function createCommandCapture(ownedNames?: Set<string>): CommandCapturePort {
+ * {@link createCommandCaptureEngine}). Returns the full engine (the async-late channel needs
+ * `isActive`/`onFinish`/`outputFor`, the session-boundary cleanup needs `dispose`) — assignable
+ * wherever the narrower {@link CommandCapturePort} is expected. */
+export function createCommandCapture(ownedNames?: Set<string>): CommandCaptureEngine {
   return createCommandCaptureEngine(ownedNames !== undefined ? { ownedNames } : {});
 }
 
