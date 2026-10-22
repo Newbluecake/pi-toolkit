@@ -43,6 +43,7 @@ import { observeRootWakeTrigger } from "./fabric/root-wake.js";
 import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
 import { getXsHostCapability } from "./fabric/xs/host-cap.js";
 import { xsOn } from "./fabric/xs/switch.js";
+import { getXsReplyLedger } from "./fabric/xs/reply-ledger.js";
 import { createXsSender, detectXsToolCollisions } from "./fabric/xs/sender.js";
 import { createListSessionsTool, ListSessionsParams } from "./tools/list-sessions-tool.js";
 import { createMessageSessionTool, MessageSessionParams } from "./tools/message-session-tool.js";
@@ -269,6 +270,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   }); // frozen per activate: tools/caps/stack all share this gate
   const webHubRef: { current?: WebHubControl } = {};
   const xsFencePorts: { topicSwitch?: () => boolean; goal?: () => boolean } = {};
+  const replyEnabled = xsEnabled && settings.fabric.crossSession.reply.enabled; // frozen per activate
   const xsLedger = getXsWakeLedger();
   const xsCapability = getXsHostCapability();
   const xsSessionOf = (ctx: { sessionManager?: { getSessionId(): string } }): string | undefined => {
@@ -323,15 +325,18 @@ export default function activate(rawPi: ExtensionAPI): void {
     });
     pi.on("session_compact", () => {
       holder.current?.xs?.fence.onEvent({ type: "session_compact" });
+      holder.current?.xs?.reply?.flush(); // §7.2: fence close evidence ⇒ retry owed notices
     });
     pi.on("session_compact_failed", () => {
       holder.current?.xs?.fence.onEvent({ type: "session_compact_failed" });
+      holder.current?.xs?.reply?.flush(); // §7.2: fence close evidence ⇒ retry owed notices
     });
     pi.on("session_before_tree", () => {
       holder.current?.xs?.fence.onEvent({ type: "session_before_tree" });
     });
     pi.on("session_tree", () => {
       holder.current?.xs?.fence.onEvent({ type: "session_tree" });
+      holder.current?.xs?.reply?.flush(); // §7.2: fence close evidence ⇒ retry owed notices
     });
     pi.on("session_before_switch", () => {
       holder.current?.xs?.fence.onEvent({ type: "session_before_switch" });
@@ -567,6 +572,7 @@ export default function activate(rawPi: ExtensionAPI): void {
         list: (args) => webHubRef.current?.xs?.hubPort().list(args) ?? Promise.resolve({ kind: "off" }),
         resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
         send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
+        ...(replyEnabled ? { replyCapable: () => webHubRef.current?.xs?.hubPort().replyCapable?.() === true } : {}),
       },
       origin: {
         current: () => {
@@ -575,6 +581,21 @@ export default function activate(rawPi: ExtensionAPI): void {
         },
       },
       maxChars: settings.fabric.maxChars,
+      ...(replyEnabled
+        ? {
+            reply: {
+              ledger: getXsReplyLedger(),
+              defaultTimeoutS: settings.fabric.crossSession.reply.defaultTimeoutS,
+              maxTimeoutS: settings.fabric.crossSession.reply.maxTimeoutS,
+              lateGraceS: settings.fabric.crossSession.reply.lateGraceS,
+              maxPending: settings.fabric.crossSession.reply.maxPending,
+              maxPendingPerTarget: settings.fabric.crossSession.reply.maxPendingPerTarget,
+              receivable: (target: string) =>
+                (xsAttached ? holder.current?.xs?.reply?.receivable(target) : undefined) ?? "not_joined",
+              inbound: (requestId: string) => (xsAttached ? holder.current?.xs?.reply?.inbound(requestId) : undefined),
+            },
+          }
+        : {}),
       wakeOn: settings.fabric.wake.enabled,
       ...(settings.fabric.wake.enabled
         ? {
@@ -586,13 +607,18 @@ export default function activate(rawPi: ExtensionAPI): void {
         : {}),
     });
     pi.registerTool(createListSessionsTool({ sender }));
-    pi.registerTool(createMessageSessionTool({ sender }));
+    pi.registerTool(createMessageSessionTool({ sender, reply: replyEnabled }));
     const command = createFabricXsCommand({
       enabled: () => xsEnabled,
       sessionId: () => holder.current?.xs?.sessionId() ?? "",
       membership: () => holder.current?.xs?.membership,
       fence: () => holder.current?.xs?.fence,
       resolve: (query) => webHubRef.current?.xs?.resolveBlock(query) ?? Promise.resolve({ ok: false, kind: "offline" }),
+      replies: () => {
+        const reply = holder.current?.xs?.reply;
+        return reply ? { ledger: reply.ledger, maxPending: reply.maxPending } : undefined;
+      },
+      onPolicyChange: () => holder.current?.xs?.reply?.flush(),
       statusView: () => {
         const xs = holder.current?.xs;
         const quota = xs?.receiver.wakeQuota();
@@ -1314,6 +1340,8 @@ export default function activate(rawPi: ExtensionAPI): void {
               stack: () => (xsAttached ? holder.current?.xs : undefined),
               memberLimits: () => settings.fabric.crossSession.limits,
               hubSendsPerMin: () => settings.fabric.crossSession.limits.hubSendsPerMin,
+              // Reply-plan §5.1: frozen per activate (non-live, §8.1); unset ⇒ pre-reply byte shape.
+              replyEnabled: () => replyEnabled,
             },
           }
         : {}),

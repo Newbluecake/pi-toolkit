@@ -50,16 +50,9 @@ import type {
 } from "../protocol/xs.js";
 import { newAdminRid, type HubConnection, type SlotFlush } from "./connection.js";
 
-/** Reply-plan §5.2 (RX3): the reply-aware send args — `expect`/`replyTo` are written onto the
- *  wire ONLY when the hub advertised `xs.reply.v1` (RX4 widens `XsPortSendArgs` itself; the
- *  structural superset here keeps this package inside its file domain). */
-export interface XsPortSendReplyArgs extends XsPortSendArgs {
-  expect?: { requestId: string; timeoutMs: number };
-  replyTo?: string;
-}
 /** `XsHubPort` + the reply capability probe the sender consults before issuing `expectReply`. */
 export interface XsReplyHubPort extends XsHubPort {
-  send(args: XsPortSendReplyArgs): Promise<XsPortReply>;
+  send(args: XsPortSendArgs): Promise<XsPortReply>;
   /** True iff local reply is enabled AND the live hub link declared `xs.reply.v1`. */
   replyCapable(): boolean;
 }
@@ -230,7 +223,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
     query: args.query,
   });
-  const reqOfSend = (args: XsPortSendReplyArgs): XsReqFrame => ({
+  const reqOfSend = (args: XsPortSendArgs): XsReqFrame => ({
     t: "xs_req",
     rid: newAdminRid(),
     op: "send",

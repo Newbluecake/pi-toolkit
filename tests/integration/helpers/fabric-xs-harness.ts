@@ -41,6 +41,7 @@ export class XsHarness {
     sessionFile?: string,
     xsEnabled = true,
     autoJoin = false,
+    extraEnv: Record<string, string> = {},
   ): Promise<Peer> {
     const cwd = join(this.home, "project");
     mkdirSync(cwd, { recursive: true });
@@ -58,6 +59,7 @@ export class XsHarness {
           XW_NAME: name,
           XW_AUTO_JOIN: autoJoin ? "1" : "0",
           XW_XS_OFF: xsEnabled ? "0" : "1",
+          ...extraEnv,
           ...(sessionFile ? { XW_SESSION_FILE: sessionFile } : {}),
         },
       },

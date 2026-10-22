@@ -74,6 +74,17 @@ import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "
 import { XsInbox } from "./fabric/xs/inbox.js";
 import { XsReceiver } from "./fabric/xs/receiver.js";
 import { xsOn } from "./fabric/xs/switch.js";
+import {
+  XS_REPLY_ENTRY_TYPE,
+  XsReplyDueScheduler,
+  createXsReplyInboxPort,
+  getXsReplyLedger,
+  parseXsReplyEntry,
+  planReplyRestartInvalidation,
+  type XsReplyEntryRecord,
+  type XsReplyLedger,
+} from "./fabric/xs/reply-ledger.js";
+import { XsReplyNoticeGate, buildInvalidationNoticeContent } from "./fabric/xs/reply-notice.js";
 import type { XsStackPort } from "./web-hub/agent/xs.js";
 import { formatMessage, type FabricRecord, type NodeRef } from "./core/message.js";
 import { wrapWithRunLog, seedRunStoreFromEntries, WORKTREE_DISPOSITION_CUSTOM_TYPE } from "./adapters/pi-run-log.js";
@@ -1617,11 +1628,29 @@ export interface StackXs extends XsStackPort {
   inbox: XsInbox;
   receiver: XsReceiver;
   controller?: RootWakeController;
+  /** Reply-plan RXW: present iff `fabric.crossSession.reply.enabled` (frozen at stack build). */
+  reply?: StackXsReply;
   audit: Partial<Record<RootWakeAudit, number>>;
   beforeAgentStart(event: unknown): void;
   settled(): void;
   dispose(): void;
 }
+
+/** Reply-plan RXW: the requester/receiver-side reply wiring one stack owns. */
+export interface StackXsReply {
+  ledger: XsReplyLedger;
+  replyInbox: XsInbox;
+  maxPending: number;
+  /** Sender `receivable` precheck (§4.2): joined ∧ effective receive ≠ off ∧ senderAllowed. */
+  receivable(targetSessionId: string): "ok" | "receive_off" | "blocked" | "not_joined";
+  /** Sender `inbound` lookup (§4.2): newest-first `getBranch()` scan, ≤2000 entries. */
+  inbound(requestId: string): { fromSessionId: string } | undefined;
+  /** §7.2 event-driven NoticeGate flush point (never throws). */
+  flush(): void;
+  gate: XsReplyNoticeGate;
+}
+
+const XS_REPLY_INBOUND_SCAN_CAP = 2000;
 
 /** XW: all pi-facing adaptation stays here; the receiver/controller/fence remain pi-free. */
 function buildStackXs(
@@ -1640,6 +1669,7 @@ function buildStackXs(
     defaultReceive: config.receive,
     allowFrom: config.allowFrom,
     allowFromDenyAll: config.allowFromDenyAll,
+    replyEnabled: config.reply.enabled,
     persist: (data) => {
       if (disposed || ctx.sessionManager.getSessionId() !== sessionId) return;
       try {
@@ -1683,11 +1713,36 @@ function buildStackXs(
             (entry.details as { xid?: unknown } | undefined)?.xid === xid,
         ),
   };
+  const replyEnabled = config.reply.enabled;
+  const replyLedger = replyEnabled ? getXsReplyLedger() : undefined;
+  const replyInbox = replyEnabled ? new XsInbox(config.reply.maxPending) : undefined;
+  const replyScheduler: { current?: XsReplyDueScheduler } = {};
+  if (replyLedger && replyInbox) {
+    // Best-effort entry sinks (§3.3): failures only cost the post-restart invalidation notice.
+    const append = (entry: unknown) => {
+      if (disposed || ctx.sessionManager.getSessionId() !== sessionId) return;
+      try {
+        pi.appendEntry(XS_REPLY_ENTRY_TYPE, entry);
+      } catch {
+        /* receivability is unaffected */
+      }
+    };
+    replyLedger.bindSession({
+      sessionId,
+      inbox: createXsReplyInboxPort(replyInbox),
+      appendIssue: (entry) => {
+        append(entry);
+        replyScheduler.current?.refresh(); // a new pending ticket may be the earliest due
+      },
+      appendSettle: append,
+    });
+  }
   const receiver = new XsReceiver({
     sessionId,
     membership,
     fence,
     inbox,
+    ...(replyLedger ? { replyLedger } : {}),
     host,
     recvPerHour: config.limits.recvPerHour,
     wakesInPerHour: config.limits.wakesInPerHour,
@@ -1723,8 +1778,107 @@ function buildStackXs(
     controller.recover(); // the caller has already disposed the old owner
   }
   const releaseTrigger = () => {
-    if (!controller?.busy) inbox.releaseTrigger();
+    if (!controller?.busy) {
+      inbox.releaseTrigger();
+      replyInbox?.releaseTrigger();
+    }
   };
+  let reply: StackXsReply | undefined;
+  if (replyLedger && replyInbox) {
+    // RX1 nit (wakeOnly gen): a goal-only (`wakeOnly`) verdict carries no gen, so the gate's quiet
+    // path would verify with gen=0 and always fail. Remember the generation at begin and map 0 to it.
+    let wakeOnlyGen: number | undefined;
+    const gateFence = {
+      beginDispatch: () => {
+        const verdict = fence.beginDispatch();
+        wakeOnlyGen = !verdict.ok && verdict.wakeOnly === true ? fence.generation() : undefined;
+        return verdict;
+      },
+      verifyDispatch: (gen: number) => fence.verifyDispatch(gen === 0 && wakeOnlyGen !== undefined ? wakeOnlyGen : gen),
+    };
+    const gate = new XsReplyNoticeGate({
+      ledger: replyLedger,
+      sessionId,
+      getSessionId: () => ctx.sessionManager.getSessionId(),
+      disposed: () => disposed,
+      joined: () => membership.joined,
+      receive: () => membership.receive,
+      fence: gateFence,
+      ...(controller ? { controller } : {}),
+      host: { sendMessage: (write) => pi.sendMessage(write, { triggerTurn: false }) },
+    });
+    const flush = () => {
+      if (disposed) return;
+      try {
+        gate.flush();
+      } catch {
+        /* a notice must never break the host event that triggered the flush */
+      }
+    };
+    const scheduler = new XsReplyDueScheduler({ ledger: replyLedger, sessionId, onDue: flush });
+    replyScheduler.current = scheduler;
+    reply = {
+      ledger: replyLedger,
+      replyInbox,
+      maxPending: config.reply.maxPending,
+      gate,
+      flush,
+      receivable: (target) => {
+        if (!membership.joined) return "not_joined";
+        if (membership.receive === "off") return "receive_off";
+        return membership.senderAllowed(target) ? "ok" : "blocked";
+      },
+      inbound: (requestId) => {
+        const branch = ctx.sessionManager.getBranch() as unknown as ReadonlyArray<Record<string, unknown>>;
+        let scanned = 0;
+        for (let i = branch.length - 1; i >= 0 && scanned < XS_REPLY_INBOUND_SCAN_CAP; i--, scanned++) {
+          const entry = branch[i]!;
+          if (entry.type !== "custom_message" || entry.customType !== "subagent:xs") continue;
+          const details = entry.details as
+            { reply?: { requestId?: unknown }; from?: { sessionId?: unknown } } | undefined;
+          if (details?.reply?.requestId !== requestId) continue;
+          const from = details.from?.sessionId;
+          return typeof from === "string" ? { fromSessionId: from } : undefined;
+        }
+        return undefined;
+      },
+    };
+    // ---- restore (§3.3/§3.4/§7.2): runs once per stack build, never throws.
+    try {
+      replyLedger.sweep();
+      if (replyLedger.markRestartScanned(sessionId)) {
+        const records: XsReplyEntryRecord[] = [];
+        for (const raw of ctx.sessionManager.getBranch() as unknown as ReadonlyArray<Record<string, unknown>>) {
+          if (raw.type !== "custom" || raw.customType !== XS_REPLY_ENTRY_TYPE) continue;
+          const record = parseXsReplyEntry(raw.data, sessionId);
+          if (record) records.push(record);
+        }
+        const plan = planReplyRestartInvalidation(records, replyLedger, Date.now());
+        let settle = plan.invalid.length === 0;
+        if (!settle) {
+          const result = gate.emitQuiet(
+            buildInvalidationNoticeContent(plan.invalid, plan.more),
+            plan.invalid.map((item) => item.requestId),
+          );
+          settle = result.written !== false; // not admitted ⇒ no settle ⇒ a later restart retries
+        }
+        if (settle)
+          for (const entry of plan.settles) {
+            try {
+              pi.appendEntry(XS_REPLY_ENTRY_TYPE, entry);
+            } catch {
+              /* best-effort */
+            }
+          }
+      }
+      gate.flush();
+      const dropped = replyLedger.droppedNoticeCount(sessionId);
+      if (dropped > 0 && gate.emitDroppedSummary(dropped).written !== false) replyLedger.takeDroppedNotices(sessionId);
+      scheduler.refresh();
+    } catch {
+      /* restore is best-effort; the ledger stays authoritative */
+    }
+  }
   return {
     sessionId: () => sessionId,
     member: () => ({ epoch: membership.epoch, joined: membership.joined, receive: membership.receive }),
@@ -1745,22 +1899,31 @@ function buildStackXs(
     receiver,
     audit,
     ...(controller ? { controller } : {}),
+    ...(reply ? { reply } : {}),
     beforeAgentStart: (event) => {
       inbox.onRunStart();
+      replyInbox?.onRunStart();
       controller?.beforeAgentStart(event);
       releaseTrigger();
+      reply?.flush();
     },
     settled: () => {
       controller?.settled();
       inbox.onRunSettled();
+      replyInbox?.onRunSettled();
       releaseTrigger();
+      reply?.flush();
     },
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      replyScheduler.current?.dispose();
+      reply?.gate.dispose();
+      replyLedger?.unbindSession(sessionId);
       controller?.dispose();
       fence.dispose();
       inbox.clear();
+      replyInbox?.clear();
     },
   };
 }

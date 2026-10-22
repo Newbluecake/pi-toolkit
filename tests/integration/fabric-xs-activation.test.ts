@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
 import { ListSessionsParams } from "../../src/tools/list-sessions-tool.js";
-import { MessageSessionParams } from "../../src/tools/message-session-tool.js";
+import { MessageSessionParams, messageSessionParamsFor } from "../../src/tools/message-session-tool.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
 
 let home: ReturnType<typeof sandboxHome>;
@@ -70,12 +70,54 @@ describe("XW activate-frozen main-session surface", () => {
   it.each([false, true])("wake=%s never changes either schema; settings edits do not re-register tools", (wake) => {
     const s = setup(true, true, true, true, wake);
     expect(s.commands).toContain("fabric");
-    expect(s.tools.get("message_session").parameters).toBe(MessageSessionParams);
+    // reply.enabled defaults on (RXW): the frozen instance is the reply schema, still wake-independent.
+    expect(s.tools.get("message_session").parameters).toBe(messageSessionParamsFor(true));
+    expect(s.tools.get("message_session").parameters).not.toBe(MessageSessionParams);
     expect(s.tools.get("list_sessions").parameters).toBe(ListSessionsParams);
     const before = JSON.stringify([...s.tools].map(([name, t]) => [name, t.parameters]));
     writeFileSync(s.file, JSON.stringify({ fabric: { enabled: false }, webHub: { enabled: false } }));
     expect(JSON.stringify([...s.tools].map(([name, t]) => [name, t.parameters]))).toBe(before);
   });
+});
+
+it("reply.enabled=false freezes the legacy (byte-identical) message_session schema", () => {
+  const s = setup(true, true, true, true, true);
+  expect(s.tools.get("message_session").parameters).not.toBe(MessageSessionParams); // default is reply-on
+  delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:host")];
+  home.restore();
+  home = sandboxHome();
+  const dir = join(home.home, ".pi/agent");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "pi-subagent.json"),
+    JSON.stringify({
+      fabric: { enabled: true, crossSession: { enabled: true, reply: { enabled: false } } },
+      webHub: { enabled: true, control: true, autoStart: false },
+      memory: { enabled: false },
+      date: { enabled: false },
+      todo: { enabled: false },
+      webSearch: { enabled: false },
+      topicSwitch: { enabled: false },
+      hud: { enabled: false },
+      title: { enabled: false },
+      cacheTtl: { keepalive: false },
+      quota: { enabled: false },
+      askUser: { enabled: false },
+    }),
+  );
+  const tools = new Map<string, any>();
+  activate({
+    registerTool: (t: any) => tools.set(t.name, t),
+    registerCommand() {},
+    registerEntryRenderer() {},
+    on() {},
+    sendMessage() {},
+    appendEntry() {},
+    getCommands: () => [],
+    events: { on: () => () => {}, emit() {} },
+    exec: async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
+  } as unknown as ExtensionAPI);
+  expect(tools.get("message_session").parameters).toBe(MessageSessionParams);
 });
 
 it("compat failure registers no xs tools/command but retains B1 orphan abort before the first request", async () => {

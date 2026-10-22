@@ -7,6 +7,8 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import activate from "../../../src/index.js";
 import { getXsWakeLedger } from "../../../src/fabric/xs/wake-ledger.js";
 import { getXsHostCapability } from "../../../src/fabric/xs/host-cap.js";
+import { getXsEpochCounter } from "../../../src/fabric/xs/membership.js";
+import { getXsReplyLedger } from "../../../src/fabric/xs/reply-ledger.js";
 import { makeMessageKey } from "../../../src/core/message.js";
 import { readRootLevel } from "../../../src/fabric/wake-level.js";
 import { currentConnection } from "../../../src/web-hub/agent/connection.js";
@@ -31,7 +33,14 @@ if (process.argv[2] === "hub") {
       idleExitMinutes: 10,
       pluginVersion: "0.7.0",
       buildId: "xw-test",
-      ...(process.env.XW_XS_OFF === "1" ? {} : { crossSession: { limits: { hubSendsPerMin: 600 } } }),
+      ...(process.env.XW_XS_OFF === "1"
+        ? {}
+        : {
+            crossSession: {
+              limits: { hubSendsPerMin: 600 },
+              ...(process.env.XW_HUB_REPLY_OFF === "1" ? { reply: false } : {}),
+            },
+          }),
     },
     (deps) => {
       registry = deps.registry as Registry;
@@ -91,6 +100,14 @@ if (process.argv[2] === "hub") {
       const old = deliveries[m.index ?? 0]!;
       const key = registry.list().find((a) => a.session?.sessionId === old.frame.to.sessionId)!.agentKey;
       return request(key, { ...old.frame, rid: `replay-${Date.now()}` }, 5_000);
+    }
+    if (m.op === "inject") {
+      // Bypass the hub's early checks: hand a (modified) recorded deliver frame straight to an agent.
+      const old = deliveries[m.index ?? 0]!;
+      const to = m.to ?? old.frame.to;
+      const key = registry.list().find((a) => a.session?.sessionId === to.sessionId)!.agentKey;
+      const frame = { ...old.frame, ...(m.patch ?? {}), to, rid: `inject-${Date.now()}`, xid: m.xid };
+      return request(key, frame, 5_000);
     }
     if (m.op === "webNew") {
       const agent = registry.list().find((a) => a.session?.sessionId === m.sessionId)!;
@@ -156,6 +173,9 @@ if (process.argv[2] === "hub") {
       crossSession: {
         enabled: process.env.XW_XS_OFF !== "1",
         autoJoin: process.env.XW_AUTO_JOIN === "1",
+        ...(process.env.XW_REPLY_OFF === "1" ? { reply: { enabled: false } } : {}),
+        ...(process.env.XW_RECEIVE ? { receive: process.env.XW_RECEIVE } : {}),
+        ...(process.env.XW_REPLY_JSON ? { reply: JSON.parse(process.env.XW_REPLY_JSON) } : {}),
         limits: { listPerMin: 60, pairMinIntervalMs: 5000, pairWakesPerHour: 20, wakesOutPerHour: 60 },
       },
     },
@@ -178,6 +198,11 @@ if (process.argv[2] === "hub") {
   let handlers = new Map<string, Function[]>();
   const tools = new Map<string, any>(),
     commands = new Map<string, any>();
+  // Wall-clock skew (reply tests): ledger/gate/receiver all read Date.now, timers stay real.
+  const realNow = Date.now;
+  let skew = 0;
+  Date.now = () => realNow() + skew;
+  const replyNotices: any[] = [];
   const messages: any[] = [],
     queued: any[] = [],
     notifications: string[] = [];
@@ -221,6 +246,7 @@ if (process.argv[2] === "hub") {
     setActiveTools() {},
     getSessionName: () => process.env.XW_NAME,
     sendMessage(m: any, options: any) {
+      if (m.customType === "subagent:xs-reply") replyNotices.push({ ...m, triggerTurn: options?.triggerTurn === true });
       if (m.customType === "subagent:xs") messages.push({ ...m, triggerTurn: options?.triggerTurn === true });
       if (idle || options?.triggerTurn) append(m);
       else queued.push(m);
@@ -357,6 +383,14 @@ if (process.argv[2] === "hub") {
       }
       return getXsWakeLedger().size;
     }
+    if (m.op === "skew") {
+      skew += m.ms;
+      return skew;
+    }
+    if (m.op === "clearReplyLedger") {
+      delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:xs-reply-ledger")];
+      return true;
+    }
     if (m.op === "settingsOff") {
       if (m.wakeOnly) config.fabric.wake.enabled = false;
       else config.fabric.crossSession.enabled = false;
@@ -378,6 +412,14 @@ if (process.argv[2] === "hub") {
         aborts,
         members: sm.getBranch().filter((e) => e.type === "custom" && e.customType === "subagent:xs-membership"),
         notifications,
+        epoch: getXsEpochCounter().value,
+        dropped: getXsReplyLedger().droppedNoticeCount(sm.getSessionId()),
+        replyTickets: getXsReplyLedger().entries(),
+        replyNotices,
+        replyEntries: sm
+          .getBranch()
+          .filter((e) => e.type === "custom" && e.customType === "subagent:xs-reply")
+          .map((e: any) => e.data),
         busListeners: bus.eventNames().reduce((n, k) => n + bus.listenerCount(k), 0),
       };
     if (m.op === "stop") {
