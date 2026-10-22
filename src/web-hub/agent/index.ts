@@ -1271,6 +1271,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           onHubCaps: () => {
             if (cmdCompleteOn) publishCommands();
             xsBridge?.publishMember();
+            // alias-plan §4/R2: every hello_ack (attach, reconnect, hub restart) reconciles the alias cache with
+            // the hub AFTER publishMember — a bounded read-only get, applied only if still the same link + session.
+            xsBridge?.onHubCapsAlias();
           },
         }
       : {}),

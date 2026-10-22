@@ -42,8 +42,17 @@ import type {
   XsPortSendArgs,
 } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
+import type {
+  XsAliasBridgePort,
+  XsAliasBridgeResult,
+  XsAliasCacheEntry,
+  XsAliasCachePort,
+} from "../../fabric/xs/types-alias.js";
 import {
   XS_AGENT_CAPS,
+  XS_ALIAS_AGENT_CAP,
+  XS_ALIAS_HUB_CAP,
+  XS_ALIAS_TAKE_PREVIEW,
   XS_CHANNEL_AGENT_CAP,
   XS_CHANNEL_HUB_CAP,
   XS_HUB_CAP,
@@ -52,6 +61,7 @@ import {
   XS_SLOT_KIND,
 } from "../protocol/xs.js";
 import type {
+  XsAliasStateWire,
   XsDeliverFrame,
   XsHubLimitsWire,
   XsMemberFrame,
@@ -113,6 +123,15 @@ export interface XsAgentPort {
   /** Channel-plan §3.1: hub-global broadcast params for `HubConfig.crossSession.channels`; only
    *  consulted while `channelsEnabled()`. Absent ⇒ the key is not written (hub defaults, never "off"). */
   channelsHubConfig?(): { maxRecipients: number; wakeMaxRecipients: number } | undefined;
+  /** Alias-plan §3.6 (AL3): `fabric.crossSession.alias.enabled` — unset ⇒ false (no `xs.alias.v1` cap, no
+   *  alias frames/fields anywhere; byte-identical to the pre-alias agent). Non-live: ALW freezes it at activate. */
+  aliasEnabled?(): boolean;
+  /** Alias-plan §3.6: hub-global alias params for `HubConfig.crossSession.alias`; only consulted while
+   *  `aliasEnabled()`. Absent ⇒ the key is not written (hub defaults, never "off"). */
+  aliasHubConfig?(): { offlineLeaseH: number; coolMin: number; takeMinOfflineMin: number } | undefined;
+  /** Alias-plan §4 (Q3): display-only one-shot notice text (the bridge already de-duplicated it process-wide
+   *  by `(sessionId, lost.at)`). ALW wires it to `ctx.ui.notify`. Never throws into the bridge. */
+  notifyAliasLost?(text: string): void;
 }
 
 export interface XsAgentBridgeDeps {
@@ -132,6 +151,7 @@ export interface XsAgentBridge {
   hubCrossSessionConfig(): {
     limits: { hubSendsPerMin: number };
     channels?: { maxRecipients: number; wakeMaxRecipients: number };
+    alias?: { offlineLeaseH: number; coolMin: number; takeMinOfflineMin: number };
   };
   /** Connection `BindingPort.onXsDeliver` — answers EXACTLY ONE `xs_ack`, never throws. */
   onDeliver(frame: XsDeliverFrame): void;
@@ -158,6 +178,14 @@ export interface XsAgentBridge {
   /** X4's `/fabric status` hub-limits port: `xs_req{op:"info"}` (§4.6 — the hub's frozen
    *  effective globals); undefined when there is no stack or the hub did not answer. */
   hubInfo(): Promise<XsHubLimitsWire | undefined>;
+  /** Alias-plan §4/§5 (AL3): the `op:"alias"` bridge (bounded 5s; zero frames unless alias on ∧ hub declared
+   *  `xs.alias.v1`). Always the same object; `supported` is read live. */
+  aliasBridge(): XsAliasBridgePort;
+  /** Alias-plan §4: the agent-side alias cache (per bridge = per activate, keyed by sessionId, ≤8 FIFO,
+   *  never persisted). Always the same object. */
+  aliasCache(): XsAliasCachePort;
+  /** `onHubCaps` hook (every hello_ack): reconcile the cache against the hub. Fire-and-forget, never throws. */
+  onHubCapsAlias(): void;
 }
 
 // ------------------------------------------------------------- member-limit clamping (defensive)
@@ -233,6 +261,39 @@ function stripBroadcastKeys(l: XsMemberLimitsWire): XsMemberLimitsWire {
  *  appears — hub resolve deliberately never returns one, X1 anti-enumeration). Bounded FIFO. */
 const REF_MAP_CAP = 64;
 
+/** Alias-plan §4: cache bound and the process-wide "you lost your alias" notice de-dup set. */
+const ALIAS_CACHE_CAP = 8;
+const ALIAS_LOST_SEEN_CAP = 64;
+const ALIAS_LOST_KEY = Symbol.for("pi-subagent:xs-alias-lost");
+
+function aliasLostSeen(): Set<string> {
+  const g = globalThis as unknown as Record<symbol, Set<string> | undefined>;
+  let set = g[ALIAS_LOST_KEY];
+  if (set === undefined) {
+    set = new Set<string>();
+    g[ALIAS_LOST_KEY] = set;
+  }
+  return set;
+}
+
+/** True the FIRST time `(sessionId, at)` is seen in this process (FIFO-bounded, keys only). */
+function markAliasLost(sessionId: string, at: number): boolean {
+  const seen = aliasLostSeen();
+  const key = `${sessionId}:${at}`;
+  if (seen.has(key)) return false;
+  if (seen.size >= ALIAS_LOST_SEEN_CAP) {
+    const first = seen.values().next().value;
+    if (first !== undefined) seen.delete(first);
+  }
+  seen.add(key);
+  return true;
+}
+
+function aliasLostText(lost: { alias: string; reason: "taken" | "expired" }): string {
+  const why = lost.reason === "taken" ? "已被其他会话抢占" : "离线超过保留期后被他人认领";
+  return `别名「${lost.alias}」${why}，可以用 /fabric alias 重新设置`;
+}
+
 export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   const refMap = new Map<string, string>();
   const replyEnabled = (): boolean => {
@@ -251,6 +312,16 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   };
   const hubHasChannel = (): boolean => deps.conn()?.caps.includes(XS_CHANNEL_HUB_CAP) === true;
   const hubHasReply = (): boolean => deps.conn()?.caps.includes(XS_REPLY_HUB_CAP) === true;
+  const aliasEnabled = (): boolean => {
+    try {
+      return deps.port.aliasEnabled?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  const hubHasAlias = (): boolean => deps.conn()?.caps.includes(XS_ALIAS_HUB_CAP) === true;
+  /** alias on ∧ the live hub declared the cap (symmetric with the hub's `aliasUsable`). */
+  const aliasUsable = (): boolean => aliasEnabled() && deps.conn()?.status().state === "live" && hubHasAlias();
 
   const learnRef = (ref: string, sessionId: string): void => {
     if (ref === "" || sessionId === "") return;
@@ -269,6 +340,11 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     // channel-plan §3.3: channel-only ops / fields go ONLY to a hub that declared xs.channel.v1 —
     // an old hub's strict decoder would drop the whole frame. Nothing is sent.
     if ((["broadcast", "channels"].includes(frame.op as string) || frame.channel !== undefined) && !hubHasChannel()) {
+      return conn.status().state === "live" ? { kind: "off" } : { kind: "link_lost" };
+    }
+    // alias-plan §3.6: the alias op goes ONLY to a hub that declared xs.alias.v1 AND only while local alias is
+    // on (an old hub's strict decoder would drop the whole frame). Nothing is sent otherwise.
+    if (frame.op === "alias" && !(aliasEnabled() && hubHasAlias())) {
       return conn.status().state === "live" ? { kind: "off" } : { kind: "link_lost" };
     }
     try {
@@ -365,6 +441,11 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       const xs = (frame as { xs?: XsStatusWire }).xs;
       if (xs === undefined) return frame;
       let nx: XsStatusWire = xs;
+      // alias-plan §7.2: the alias field only rides toward a hub that declared xs.alias.v1 (replay-safe).
+      if (nx.alias !== undefined && !hubCaps.includes(XS_ALIAS_HUB_CAP)) {
+        const { alias: _alias, ...noAlias } = nx;
+        nx = noAlias;
+      }
       if (nx.receive === "replies" && !usable) nx = { ...nx, receive: effectiveReceive(nx.receive, false) };
       if (!hubCap && nx.channels !== undefined) {
         const { channels, ...rest } = nx;
@@ -375,33 +456,162 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     return frame;
   };
 
+  // ------------------------------------------------------------ alias cache + bridge (alias-plan §4, AL3)
+
+  /** sessionId → entry; ≤8 FIFO; per bridge (= per activate, so a /reload starts empty). */
+  const aliasCache = new Map<string, XsAliasCacheEntry>();
+  const aliasEntry = (sessionId: string): XsAliasCacheEntry | undefined => aliasCache.get(sessionId);
+
+  const applyAliasState = (sessionId: string, state: XsAliasStateWire): void => {
+    const next: XsAliasCacheEntry = {};
+    if (state.state === "held" && state.alias !== undefined) next.alias = state.alias;
+    if (state.lost !== undefined) next.lostAt = state.lost.at;
+    const prev = aliasCache.get(sessionId);
+    if (prev === undefined && aliasCache.size >= ALIAS_CACHE_CAP) {
+      const first = aliasCache.keys().next().value;
+      if (first !== undefined) aliasCache.delete(first);
+    }
+    aliasCache.set(sessionId, next);
+    if (state.lost !== undefined && markAliasLost(sessionId, state.lost.at)) {
+      try {
+        deps.port.notifyAliasLost?.(aliasLostText(state.lost));
+      } catch {
+        /* display-only */
+      }
+    }
+    if (prev?.alias !== next.alias) {
+      try {
+        deps.publishStatus?.();
+      } catch {
+        /* display hint only */
+      }
+    }
+  };
+
+  const isStateWire = (r: unknown): r is XsAliasStateWire =>
+    typeof r === "object" &&
+    r !== null &&
+    ((r as { state?: unknown }).state === "held" || (r as { state?: unknown }).state === "none");
+
+  /** One bounded alias op. The response is applied to the cache iff it is still for the connection
+   *  generation (same `HubConnection`, same hello_ack caps array) and the sessionId it was issued for;
+   *  otherwise it is returned to the caller but never applied (§4 应用规则). Arrival order = apply order. */
+  const aliasOp = async (
+    fields: { alias?: string; clear?: true; take?: string },
+    kind: "read" | "write",
+  ): Promise<XsAliasBridgeResult> => {
+    const conn = deps.conn();
+    const origin = originOf();
+    if (conn === undefined || origin === undefined) return { ok: false, code: "E_XS_OFF", reason: "no_session" };
+    if (!aliasEnabled()) return { ok: false, code: "E_XS_OFF", reason: "alias" };
+    const capsRef = conn.caps;
+    const reply = await roundTrip({ t: "xs_req", rid: newAdminRid(), op: "alias", origin, ...fields });
+    if (reply.kind === "off") return { ok: false, code: "E_XS_OFF", reason: "hub" };
+    if (reply.kind !== "res") {
+      // A write whose frame may have reached the hub is effect-unknown (rename may have committed).
+      if (kind === "write")
+        return {
+          ok: false,
+          code: "E_XS_ALIAS_UNKNOWN",
+          reason: reply.kind === "deadline" ? "client_deadline" : "link_lost",
+        };
+      return { ok: false, code: reply.kind === "deadline" ? "E_XS_DEADLINE" : "E_XS_LINK_LOST" };
+    }
+    const res = reply.res;
+    if (!res.ok)
+      return {
+        ok: false,
+        code: res.code ?? "E_XS_BAD_FRAME",
+        ...(res.reason !== undefined ? { reason: res.reason } : {}),
+      };
+    if (res.alias === undefined) return { ok: false, code: "E_XS_BAD_FRAME", reason: "no_alias_body" };
+    const fresh = deps.conn() === conn && conn.caps === capsRef && deps.port.stack()?.sessionId() === origin.sessionId;
+    if (fresh && isStateWire(res.alias)) applyAliasState(origin.sessionId, res.alias);
+    return { ok: true, res: res.alias };
+  };
+
+  const aliasBridge: XsAliasBridgePort = {
+    get supported() {
+      return aliasUsable();
+    },
+    get: () => aliasOp({}, "read"),
+    set: (rawAlias) => aliasOp({ alias: rawAlias }, "write"),
+    clear: () => aliasOp({ clear: true }, "write"),
+    takePreview: (rawAlias) => aliasOp({ alias: rawAlias, take: XS_ALIAS_TAKE_PREVIEW }, "read"),
+    take: (rawAlias, token) => aliasOp({ alias: rawAlias, take: token }, "write"),
+  };
+
+  const aliasCachePort: XsAliasCachePort = {
+    current() {
+      const sid = deps.port.stack()?.sessionId();
+      if (sid === undefined) return undefined;
+      const e = aliasCache.get(sid);
+      return e === undefined ? undefined : { ...e };
+    },
+    async reconcile() {
+      try {
+        if (!aliasUsable()) return;
+        await aliasOp({}, "read"); // applies itself iff still current; failure waits for the next trigger
+      } catch {
+        /* never throws */
+      }
+    },
+    get usable() {
+      return aliasUsable();
+    },
+  };
+
   return {
     slotFlush,
 
     caps: () => {
       const reply = replyEnabled();
       const ch = channelsEnabled();
-      if (!reply && !ch) return XS_AGENT_CAPS;
-      return [...XS_AGENT_CAPS, ...(reply ? [XS_REPLY_AGENT_CAP] : []), ...(ch ? [XS_CHANNEL_AGENT_CAP] : [])];
+      const al = aliasEnabled();
+      if (!reply && !ch && !al) return XS_AGENT_CAPS;
+      return [
+        ...XS_AGENT_CAPS,
+        ...(reply ? [XS_REPLY_AGENT_CAP] : []),
+        ...(ch ? [XS_CHANNEL_AGENT_CAP] : []),
+        ...(al ? [XS_ALIAS_AGENT_CAP] : []),
+      ];
     },
 
     hubCrossSessionConfig: () => {
-      const base = { limits: { hubSendsPerMin: clampInt(deps.port.hubSendsPerMin(), 1, 600) } };
-      if (!channelsEnabled()) return base;
-      let c: { maxRecipients: number; wakeMaxRecipients: number } | undefined;
-      try {
-        c = deps.port.channelsHubConfig?.();
-      } catch {
-        c = undefined;
-      }
-      if (c === undefined) return base;
-      return {
-        ...base,
-        channels: {
-          maxRecipients: clampInt(c.maxRecipients, 1, 32),
-          wakeMaxRecipients: clampInt(c.wakeMaxRecipients, 0, 4),
-        },
+      const base: ReturnType<XsAgentBridge["hubCrossSessionConfig"]> = {
+        limits: { hubSendsPerMin: clampInt(deps.port.hubSendsPerMin(), 1, 600) },
       };
+      if (channelsEnabled()) {
+        let c: { maxRecipients: number; wakeMaxRecipients: number } | undefined;
+        try {
+          c = deps.port.channelsHubConfig?.();
+        } catch {
+          c = undefined;
+        }
+        if (c !== undefined) {
+          base.channels = {
+            maxRecipients: clampInt(c.maxRecipients, 1, 32),
+            wakeMaxRecipients: clampInt(c.wakeMaxRecipients, 0, 4),
+          };
+        }
+      }
+      if (aliasEnabled()) {
+        let a: { offlineLeaseH: number; coolMin: number; takeMinOfflineMin: number } | undefined;
+        try {
+          a = deps.port.aliasHubConfig?.();
+        } catch {
+          a = undefined;
+        }
+        if (a !== undefined) {
+          // Same bounds as the settings parser (FABRIC_XS_ALIAS_*); hub/main.ts re-validates and drops the sub-key on any bad leaf.
+          base.alias = {
+            offlineLeaseH: clampInt(a.offlineLeaseH, 1, 720),
+            coolMin: clampInt(a.coolMin, 1, 1_440),
+            takeMinOfflineMin: clampInt(a.takeMinOfflineMin, 10, 1_440),
+          };
+        }
+      }
+      return base;
     },
 
     onDeliver(frame) {
@@ -464,7 +674,10 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       const stack = deps.port.stack();
       if (stack === undefined) return undefined;
       try {
-        return stack.status();
+        const st = stack.status();
+        // alias-plan §7.2: held alias from the local cache, only while alias is usable (cap-gated, display only).
+        const held = aliasUsable() ? aliasEntry(stack.sessionId())?.alias : undefined;
+        return held !== undefined ? { ...st, alias: held } : st;
       } catch {
         return undefined;
       }
@@ -553,6 +766,12 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       //    but harmless, visible in /fabric blocks and unblockable, the same tolerance class
       //    as X4's own offline long-name rule (X4-report deviation 3).
       return { ok: true, sessionId: ref, ...(name !== undefined ? { name } : {}) };
+    },
+
+    aliasBridge: () => aliasBridge,
+    aliasCache: () => aliasCachePort,
+    onHubCapsAlias() {
+      void aliasCachePort.reconcile();
     },
 
     async hubInfo() {
