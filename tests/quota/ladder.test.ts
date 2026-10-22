@@ -57,6 +57,13 @@ describe("windowLevel", () => {
     expect(v).toMatchObject({ level: 2, reason: "forecast-before-reset" });
     expect(v.resetAt).toBe(resetAt);
     expect(v.etaMs).toBe(HOUR);
+    // 3b 只抬预警级别，显示级别保持按百分比（62% < l2 ⇒ L1 或 L0）
+    expect(v.displayLevel).toBe(1);
+  });
+
+  it("rule 3a (ETA < l3EtaMs) counts into displayLevel", () => {
+    const v = windowLevel(win(62), { now: NOW, etaMs: 20 * 60_000, thresholds: DEFAULT_THRESHOLDS });
+    expect(v).toMatchObject({ level: 3, displayLevel: 3 });
   });
 
   it("raises 62% to L3 when ETA < 30min even with resetAt unknown", () => {

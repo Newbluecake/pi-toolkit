@@ -36,6 +36,8 @@ export interface WindowVerdict {
   readonly usedPct: number;
   readonly level: LadderLevel;
   readonly reason: LadderReason;
+  /** 展示级别（web 胶囊 / HUD 着色）：与 `level` 相同，但不计规则 3b（forecast-before-reset 抬升）。缺省 ⇒ 同 level。预警/闸门仍只看 `level`。 */
+  readonly displayLevel?: LadderLevel | undefined;
   readonly resetAt?: Millis | undefined;
   /** 预测耗尽还需多久；无预测时 undefined。 */
   readonly etaMs?: Millis | undefined;
@@ -45,6 +47,8 @@ export interface ProviderVerdict {
   readonly provider: QuotaProviderId;
   /** 全部窗口的**最高**严重级 —— Kimi 周耗尽陷阱的唯一正解。 */
   readonly level: LadderLevel;
+  /** 展示级别：各窗口 displayLevel 取最高 ∪ 降位地板；仅用于着色，不驱动预警/闸门。缺省 ⇒ 同 level。 */
+  readonly displayLevel?: LadderLevel | undefined;
   readonly windows: readonly WindowVerdict[];
   /** 持久化的「已降位」标记仍在有效期内。 */
   readonly demoted: boolean;
@@ -124,6 +128,7 @@ export function windowLevel(
       scope: window.scope,
       usedPct: pct,
       level: 0,
+      displayLevel: 0,
       reason: "reset-elapsed",
       resetAt: window.resetAt,
     };
@@ -135,6 +140,7 @@ export function windowLevel(
       scope: window.scope,
       usedPct: pct,
       level: 3,
+      displayLevel: 3,
       reason: "exhausted",
       ...(window.resetAt === undefined ? {} : { resetAt: window.resetAt }),
       ...(etaMs === undefined ? {} : { etaMs }),
@@ -158,10 +164,12 @@ export function windowLevel(
   // 3) 速率预测（「提前」的关键，可以把 60% 抬到 L2）。反向不降级：90% 且马上
   //    重置的窗口仍按 90% 报 —— 降级会让它在重置前 1 分钟被判 L0，随后被真实
   //    429 打脸（plan §5.2 显式锁死）。
+  let displayLevel: LadderLevel = level;
   if (etaMs !== undefined && etaMs >= 0) {
     if (etaMs < thresholds.l3EtaMs && level < 3) {
-      // 3a) ETA 短于硬线 ⇒ L3（无论重置多远）
+      // 3a) ETA 短于硬线 ⇒ L3（无论重置多远）；显示级别同样计入
       level = 3;
+      displayLevel = 3;
       reason = "forecast-eta";
     } else if (
       thresholds.forecastBeforeReset !== false &&
@@ -180,6 +188,7 @@ export function windowLevel(
     scope: window.scope,
     usedPct: pct,
     level,
+    displayLevel,
     reason,
     ...(window.resetAt === undefined ? {} : { resetAt: window.resetAt }),
     ...(etaMs === undefined ? {} : { etaMs }),
@@ -225,9 +234,16 @@ export function providerVerdict(
   let level: LadderLevel = 0;
   for (const w of windows) if (w.level > level) level = w.level;
   if (input.demoted && level < 2) level = 2;
+  let displayLevel: LadderLevel = 0;
+  for (const w of windows) {
+    const d = w.displayLevel ?? w.level;
+    if (d > displayLevel) displayLevel = d;
+  }
+  if (input.demoted && displayLevel < 2) displayLevel = 2;
   return {
     provider: snapshot.provider,
     level,
+    displayLevel,
     windows,
     demoted: input.demoted,
     ...(input.demoted && input.demotedUntil !== undefined ? { demotedUntil: input.demotedUntil } : {}),
