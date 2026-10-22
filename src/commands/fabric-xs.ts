@@ -44,6 +44,13 @@ const USAGE = [
 
 const SUBS = ["replies", "status", "blocks", "join", "leave", "receive", "block", "unblock", "fence"] as const;
 
+const RECEIVE_MODES = [
+  { mode: "off", description: "拒收所有消息" },
+  { mode: "deliver", description: "只送达，不唤醒" },
+  { mode: "wake", description: "送达并可被唤醒（默认）" },
+  { mode: "replies", description: "只收本会话所发请求的回复，拒收其他" },
+] as const;
+
 /** `/fabric block`'s hub resolve outcome (X2 wires the port; `resolve` absent ⇒ offline mode). */
 export type XsBlockResolve =
   | { ok: true; sessionId: string; name?: string }
@@ -101,17 +108,37 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
       "fabric 跨会话通信：/fabric status 查看成员状态；join/leave/receive 管理加入；block/blocks/unblock 管理屏蔽；fence reset 清除 stuck 栅栏（飞书入口不可修改成员）。",
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
-        const prefix = argumentPrefix.trim();
-        const matches = SUBS.filter((s) => s.startsWith(prefix));
-        if (matches.length > 0) {
-          return matches.map((s) => ({ value: s, label: s }));
+        const raw = argumentPrefix.trimStart();
+        const m = /^(\S*)(\s+)?(.*)$/s.exec(raw);
+        const first = m?.[1] ?? "";
+        if (m === null || m[2] === undefined) {
+          // First token not finished yet → complete the subcommand.
+          return SUBS.filter((s) => s.startsWith(first)).map((s) => ({ value: s, label: s }));
         }
-        const tokens = argumentPrefix.trimStart().split(/\s+/);
-        if (tokens[0] === "receive" && tokens.length <= 2) {
-          const p = tokens[1] ?? "";
-          return ["off", "deliver", "wake", "replies"]
-            .filter((m) => m.startsWith(p))
-            .map((m) => ({ value: `receive ${m}`, label: m }));
+        const rest = m[3] ?? "";
+        if (/\s/.test(rest)) return [];
+        if (first === "receive") {
+          const replyOn = deps.membership()?.replyEnabled ?? true;
+          return RECEIVE_MODES.filter((r) => r.mode.startsWith(rest)).map((r) => ({
+            value: `receive ${r.mode}`,
+            label: r.mode,
+            description: r.mode === "replies" && !replyOn ? `${r.description}（需开启回复功能）` : r.description,
+          }));
+        }
+        if (first === "fence") {
+          return "reset".startsWith(rest)
+            ? [{ value: "fence reset", label: "reset", description: "清除 stuck 栅栏窗口" }]
+            : [];
+        }
+        if (first === "unblock") {
+          const entries = deps.membership()?.blockedSnapshot() ?? [];
+          return entries
+            .filter((e) => e.sessionId.startsWith(rest) || (e.nameSnapshot ?? "").startsWith(rest))
+            .map((e) => ({
+              value: `unblock ${e.sessionId}`,
+              label: e.nameSnapshot ?? e.sessionId.slice(0, 8),
+              description: e.sessionId,
+            }));
         }
         return [];
       } catch {

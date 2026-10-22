@@ -554,7 +554,47 @@ describe("RX5 membership receivePref and replies command", () => {
       fence: () => h.fence,
       statusView: () => ({ capability: "verified", lines: [] }),
     });
-    expect(command.getArgumentCompletions?.("receive r")).toEqual([{ value: "receive replies", label: "replies" }]);
+    expect(command.getArgumentCompletions?.("receive r")).toMatchObject([
+      { value: "receive replies", label: "replies" },
+    ]);
     expect(command.getArgumentCompletions?.("rep")).toEqual([{ value: "replies", label: "replies" }]);
+  });
+
+  it("argument completions: trailing space, filter, descriptions, fence, unblock, bad input", () => {
+    const h = makeCommand();
+    const c = createFabricXsCommand({
+      enabled: () => true,
+      sessionId: () => SESSION,
+      membership: () => h.membership,
+      fence: () => h.fence,
+      statusView: () => ({ capability: "verified", lines: [] }),
+    });
+    const f = (s: string) => c.getArgumentCompletions?.(s) as { value: string; label: string; description?: string }[];
+    expect(f("receive").map((x) => x.value)).toEqual(["receive"]);
+    const modes = f("receive ");
+    expect(modes.map((x) => x.value)).toEqual(["receive off", "receive deliver", "receive wake", "receive replies"]);
+    expect(modes.every((x) => (x.description ?? "").length > 0)).toBe(true);
+    expect(modes.find((x) => x.label === "wake")?.description).toBe("送达并可被唤醒（默认）");
+    expect(f("receive d").map((x) => x.label)).toEqual(["deliver"]);
+    expect(f("receive x")).toEqual([]);
+    expect(f("fence ").map((x) => x.value)).toEqual(["fence reset"]);
+    expect(f("fence z")).toEqual([]);
+    expect(f("unblock ")).toEqual([]);
+    h.membership.block("abcdefgh-0123456789", "bob");
+    expect(f("unblock ").map((x) => x.value)).toEqual(["unblock abcdefgh-0123456789"]);
+    expect(f("unblock bo")[0]?.label).toBe("bob");
+    expect(f("unblock zz")).toEqual([]);
+    expect(f("")).toHaveLength(9);
+    expect(f("join extra stuff")).toEqual([]);
+    const off = createFabricXsCommand({
+      enabled: () => true,
+      sessionId: () => SESSION,
+      membership: () => {
+        throw new Error("boom");
+      },
+      fence: () => h.fence,
+      statusView: () => ({ capability: "verified", lines: [] }),
+    });
+    expect(off.getArgumentCompletions?.("receive ")).toEqual([]);
   });
 });
