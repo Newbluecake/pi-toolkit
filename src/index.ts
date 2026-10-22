@@ -42,6 +42,7 @@ import { createWakeInputHook } from "./fabric/wake-input.js";
 import { observeRootWakeTrigger } from "./fabric/root-wake.js";
 import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
 import { getXsHostCapability } from "./fabric/xs/host-cap.js";
+import { display as unreadDisplay, XS_INBOX_STATUS_KEY } from "./fabric/xs/unread.js";
 import { xsOn } from "./fabric/xs/switch.js";
 import { getXsReplyLedger } from "./fabric/xs/reply-ledger.js";
 import { createXsSender, detectXsToolCollisions, type XsSender } from "./fabric/xs/sender.js";
@@ -291,6 +292,29 @@ export default function activate(rawPi: ExtensionAPI): void {
     }
   };
   let xsAttached = false;
+  // Channel-plan §12.6 (IBW): TUI inbox badge + web status republish. The ctx is the latest session_start's.
+  const xsInboxCtx: { current?: { ui?: { setStatus?: (key: string, text: string | undefined) => void } } } = {};
+  let xsInboxShown: string | undefined;
+  let xsInboxPublished = -1; // last count handed to the web publisher (-1 ⇒ force)
+  const refreshXsInbox = () => {
+    const n = holder.current?.xs?.unread?.() ?? 0;
+    const text = n > 0 ? `inbox ${unreadDisplay(n)}` : undefined;
+    if (text !== xsInboxShown) {
+      xsInboxShown = text;
+      try {
+        xsInboxCtx.current?.ui?.setStatus?.(XS_INBOX_STATUS_KEY, text);
+      } catch {
+        /* stale ctx after a session switch: the next session_start re-renders */
+      }
+    }
+    if (n === xsInboxPublished) return; // turn events fire often; only a changed count republishes
+    xsInboxPublished = n;
+    try {
+      webHubRef.current?.xs?.notifyUnreadChanged();
+    } catch {
+      /* display hint only */
+    }
+  };
   let xsSessionId: string | undefined;
   let xsCollisions: string[] = [];
   let xsHubLimits: XsHubLimitsWire | undefined;
@@ -328,6 +352,13 @@ export default function activate(rawPi: ExtensionAPI): void {
       });
     }
   });
+  if (xsEnabled) {
+    // Channel-plan §12.3 (IBW): unread inbox clearing rides the extension turn events (message_end is
+    // unusable: pi runs extension handlers BEFORE persisting). Forwarders only; counting lives in unread.ts.
+    pi.on("turn_start", () => holder.current?.xs?.unreadTurnStart());
+    pi.on("turn_end", () => holder.current?.xs?.unreadTurnEnd());
+    pi.on("agent_end", () => holder.current?.xs?.unreadAgentEnd()); // fallback when turn_end never fired
+  }
   if (xsEnabled) {
     // Registered ahead of other async mutation hooks: the window closes BEFORE their awaits.
     pi.on("session_before_compact", () => {
@@ -643,6 +674,7 @@ export default function activate(rawPi: ExtensionAPI): void {
               : []),
             ...(xs
               ? [
+                  `inbox unread ${xs.unread?.() ?? 0}`,
                   `controller ${xs.controller?.state ?? "off"} · inbox ${xs.inbox.occupied}/${xs.inbox.cap}`,
                   `counts ${JSON.stringify(xs.receiver.countersSnapshot())}`,
                   `audit ${JSON.stringify(xs.audit)}`,
@@ -1203,6 +1235,7 @@ export default function activate(rawPi: ExtensionAPI): void {
               goal: () => xsFencePorts.goal?.(),
             },
             memberChanged: () => webHubRef.current?.xs?.publishMember(),
+            unreadChanged: refreshXsInbox,
             listRows: async (origin) => {
               const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
               return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
@@ -1212,6 +1245,12 @@ export default function activate(rawPi: ExtensionAPI): void {
     );
     holder.current = stack;
     xsSessionId = nextXsSessionId;
+    if (xsEnabled) {
+      xsInboxCtx.current = ctx;
+      xsInboxPublished = -1;
+      xsInboxShown = "\u0000"; // new session/reload: force one re-render of the (possibly retained) count
+      refreshXsInbox();
+    }
     xsAttached = xsSessionId !== undefined && (stack.xs !== undefined || stack.rootWakeRecovery !== undefined);
     if (xsEnabled) {
       // The toolkit's own two declarations are not collisions. Keep foreign declarations and

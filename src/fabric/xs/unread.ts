@@ -12,6 +12,9 @@
 
 export const XS_UNREAD_KEY = Symbol.for("pi-subagent:xs-unread");
 
+/** `ctx.ui.setStatus` key of the TUI badge (generic extension-status line in the HUD footer). */
+export const XS_INBOX_STATUS_KEY = "pi-subagent:xs-inbox";
+
 /** Max sessions tracked at once (FIFO by least-recently touched). */
 export const MAX_UNREAD_SESSIONS = 32;
 /** Max distinct ids tracked per session; beyond it the oldest spill into overflow. */

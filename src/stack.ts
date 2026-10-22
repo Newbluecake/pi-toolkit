@@ -1,4 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  agentEnd as unreadAgentEnd,
+  count as unreadCount,
+  createUnreadTap,
+  turnEnd as unreadTurnEnd,
+  turnStart as unreadTurnStart,
+} from "./fabric/xs/unread.js";
 import { formatSize, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { resolveReserveTokens } from "./compact-hint/pi-settings.js";
 import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "./config/settings.js";
@@ -1625,6 +1632,8 @@ export interface StackXsInput {
    *  given identity; `undefined` on any failure (the cache keeps its old rows). Late-bound: the
    *  web-hub agent bridge may not exist yet / may be offline. */
   listRows?: (origin: { sessionId: string; epoch: number }) => Promise<readonly XsDirectoryRow[] | undefined>;
+  /** Channel-plan §12 (IBW): the unread inbox count may have changed (tap write / turn event). Display only. */
+  unreadChanged?: () => void;
 }
 
 export interface StackXs extends XsStackPort {
@@ -1640,6 +1649,10 @@ export interface StackXs extends XsStackPort {
   audit: Partial<Record<RootWakeAudit, number>>;
   beforeAgentStart(event: unknown): void;
   settled(): void;
+  /** Channel-plan §12.3 (IBW): extension turn events, forwarded by `src/index.ts`. Never throw. */
+  unreadTurnStart(): void;
+  unreadTurnEnd(): void;
+  unreadAgentEnd(): void;
   dispose(): void;
 }
 
@@ -1701,13 +1714,35 @@ function buildStackXs(
   const fence = createSessionFence({ ...(input.ports ? { ports: input.ports } : {}) });
   fence.onEvent({ type: "session_start" });
   const inbox = new XsInbox(config.limits.inboxCap);
+  // Channel-plan §12.2 (IBW): the only two host write exits (this `host`, shared by receiver + Controller —
+  // NoticeGate wakes go through the Controller — and NoticeGate's own quiet host below) feed one tap.
+  // Observation only: a synchronous sendMessage throw propagates untouched and counts nothing.
+  const unreadTap = createUnreadTap(() => sessionId);
+  const unreadChanged = () => {
+    try {
+      input.unreadChanged?.();
+    } catch {
+      /* display hint only */
+    }
+  };
+  const tapWritten = (message: unknown) => {
+    try {
+      const xid = (message as { details?: { xid?: unknown } } | undefined)?.details?.xid;
+      unreadTap.written(typeof xid === "string" ? xid : undefined);
+    } catch {
+      /* observation only */
+    }
+    unreadChanged();
+  };
   const host = {
     // Minimal host ctx doubles (and any host lacking these) read as idle / nothing pending,
     // the same convention as `isStreaming` below — recovery must never throw at stack build.
     isIdle: () => (typeof ctx.isIdle === "function" ? ctx.isIdle() : true),
     hasPendingMessages: () => (typeof ctx.hasPendingMessages === "function" ? ctx.hasPendingMessages() : false),
-    sendMessage: (message: Parameters<ExtensionAPI["sendMessage"]>[0], options: { triggerTurn: boolean }) =>
-      pi.sendMessage(message, options),
+    sendMessage: (message: Parameters<ExtensionAPI["sendMessage"]>[0], options: { triggerTurn: boolean }) => {
+      pi.sendMessage(message, options);
+      tapWritten(message);
+    },
     getLeafEntry: () => ctx.sessionManager.getLeafEntry() ?? undefined,
     abort: () => {
       if (typeof ctx.abort === "function") ctx.abort();
@@ -1814,7 +1849,12 @@ function buildStackXs(
       receive: () => membership.receive,
       fence: gateFence,
       ...(controller ? { controller } : {}),
-      host: { sendMessage: (write) => pi.sendMessage(write, { triggerTurn: false }) },
+      host: {
+        sendMessage: (write) => {
+          pi.sendMessage(write, { triggerTurn: false });
+          tapWritten(write);
+        },
+      },
     });
     const flush = () => {
       if (disposed) return;
@@ -1921,6 +1961,31 @@ function buildStackXs(
     inbox,
     receiver,
     audit,
+    unread: () => unreadCount(sessionId),
+    unreadTurnStart: () => {
+      try {
+        unreadTurnStart(sessionId);
+      } catch {
+        /* display hint only */
+      }
+      unreadChanged();
+    },
+    unreadTurnEnd: () => {
+      try {
+        unreadTurnEnd(sessionId);
+      } catch {
+        /* display hint only */
+      }
+      unreadChanged();
+    },
+    unreadAgentEnd: () => {
+      try {
+        unreadAgentEnd(sessionId);
+      } catch {
+        /* display hint only */
+      }
+      unreadChanged();
+    },
     ...(controller ? { controller } : {}),
     ...(reply ? { reply } : {}),
     beforeAgentStart: (event) => {

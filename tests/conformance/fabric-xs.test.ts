@@ -28,6 +28,7 @@ import { XsReplyLedger, createXsReplyInboxPort } from "../../src/fabric/xs/reply
 import { XsInbox } from "../../src/fabric/xs/inbox.js";
 import { createListSessionsTool } from "../../src/tools/list-sessions-tool.js";
 import { createMessageSessionTool } from "../../src/tools/message-session-tool.js";
+import * as unread from "../../src/fabric/xs/unread.js";
 import { createXsSender } from "../../src/fabric/xs/sender.js";
 import { createBackgroundCompletionHub } from "../../src/service/background-completions.js";
 import wireAskUser from "../../src/ask-user/index.js";
@@ -817,5 +818,152 @@ describe("fabric phase-2 real pi contracts", () => {
         errors: h.errors,
       }),
     );
+  });
+
+  /**
+   * C-X10 (channel-plan §12.7): ONLY pi's ordering facts that the unread counter relies on. The real
+   * IB1 core is driven from a real pi extension's turn events; the writes are real `pi.sendMessage`s.
+   */
+  describe("C-X10: unread-inbox ordering facts", () => {
+    interface TurnLog {
+      kind: "start" | "end";
+      count: number;
+      entryResolved?: boolean;
+      role?: string;
+    }
+    function unreadProbe() {
+      const log: TurnLog[] = [];
+      const agentEnds: number[] = [];
+      let sid = "";
+      const tap = unread.createUnreadTap(() => sid);
+      const probe = {
+        log,
+        agentEnds,
+        count: () => unread.count(sid),
+        write: (api: ExtensionAPI, id: string) => {
+          api.sendMessage(
+            { customType: "subagent:xs", content: `quiet ${id}`, display: true, details: { xid: id } },
+            { triggerTurn: false },
+          );
+          tap.written(id);
+        },
+        extension: (api: ExtensionAPI) => {
+          api.on("session_start", (_e, ctx) => {
+            sid = ctx.sessionManager.getSessionId();
+          });
+          api.on("turn_start", () => {
+            unread.turnStart(sid);
+            log.push({ kind: "start", count: unread.count(sid) });
+          });
+          api.on("turn_end", (event, ctx) => {
+            const entry = ctx.sessionManager.getEntry(event.messageEntryId);
+            unread.turnEnd(sid);
+            log.push({
+              kind: "end",
+              count: unread.count(sid),
+              entryResolved: entry !== undefined,
+              ...(entry?.type === "message" ? { role: entry.message.role } : {}),
+            });
+          });
+          api.on("agent_end", () => {
+            unread.agentEnd(sid);
+            agentEnds.push(unread.count(sid));
+          });
+        },
+      };
+      return probe;
+    }
+    const ends = (p: ReturnType<typeof unreadProbe>) => p.log.filter((l) => l.kind === "end");
+
+    it("1+2: turn_end sees the persisted assistant; a write before the first turn clears at the first turn_end", async () => {
+      unread.resetUnreadForTests();
+      const p = unreadProbe();
+      const h = await host({ extensions: [p.extension] });
+      p.write(h.pi, "idle-1");
+      expect(p.count()).toBe(1);
+      await h.session.prompt("first human turn");
+      expect(p.log[0]?.kind).toBe("start");
+      const end = ends(p)[0]!;
+      expect(end.entryResolved).toBe(true);
+      expect(end.role).toBe("assistant");
+      expect(end.count).toBe(0);
+      expect(p.agentEnds.at(-1)).toBe(0);
+    });
+
+    it("3: a write during an async before_agent_start is cleared by that run's first turn_end", async () => {
+      unread.resetUnreadForTests();
+      const p = unreadProbe();
+      const h = await host({
+        extensions: [
+          p.extension,
+          (api) =>
+            api.on("before_agent_start", async () => {
+              await sleep(20);
+              p.write(api, "during-bas");
+            }),
+        ],
+      });
+      await h.session.prompt("go");
+      expect(ends(p)[0]?.count).toBe(0);
+    });
+
+    it("4: a write during turn k survives turn k's turn_end and clears at turn k+1's", async () => {
+      unread.resetUnreadForTests();
+      const p = unreadProbe();
+      const gate = deferred();
+      const stub = await AnthropicStub.start({
+        reply: async (_r, i) => {
+          if (i === 0) await gate.promise;
+          return { kind: "text", text: `a${i}` };
+        },
+      });
+      const h = await host({ stub, extensions: [p.extension] });
+      const run = h.session.prompt("turn k");
+      await until(() => stub.requests.length === 1, "request in flight");
+      p.write(h.pi, "busy-1");
+      expect(p.count()).toBe(1);
+      gate.resolve();
+      await run;
+      expect(ends(p)[0]?.count).toBe(1);
+      await h.session.prompt("turn k+1");
+      expect(ends(p)[1]?.count).toBe(0);
+    });
+
+    it("5: an error turn still fires turn_end (and clears what the turn started after)", async () => {
+      unread.resetUnreadForTests();
+      const p = unreadProbe();
+      const stub = await AnthropicStub.start({
+        respond: () => ({ kind: "error", status: 400, message: "boom" }),
+      });
+      const h = await host({ stub, extensions: [p.extension] });
+      p.write(h.pi, "before-error");
+      await h.session.prompt("will fail").catch(() => undefined);
+      await sleep(50);
+      expect(ends(p)).toHaveLength(1);
+      expect(ends(p)[0]?.count).toBe(0);
+    });
+
+    it("6: session.reload() mid-stream keeps the count; a later completed turn clears it", async () => {
+      unread.resetUnreadForTests();
+      const p = unreadProbe();
+      const gate = deferred();
+      const stub = await AnthropicStub.start({
+        reply: async (_r, i) => {
+          if (i === 0) await gate.promise;
+          return { kind: "text", text: `a${i}` };
+        },
+      });
+      const h = await host({ stub, extensions: [p.extension] });
+      const run = h.session.prompt("stream");
+      await until(() => stub.requests.length === 1, "request in flight");
+      p.write(h.pi, "pre-reload");
+      await h.session.reload();
+      expect(p.count()).toBe(1);
+      gate.resolve();
+      await run.catch(() => undefined);
+      await h.session.prompt("after reload").catch(() => undefined);
+      await sleep(50);
+      expect(p.count()).toBe(0);
+    });
   });
 });

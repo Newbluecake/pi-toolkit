@@ -28,6 +28,8 @@ let handle: (m: any) => Promise<unknown>;
 if (process.argv[2] === "hub") {
   let registry!: Registry;
   const slotFrames: Array<{ key: string; t: string; sessionId?: string; joined?: boolean }> = [];
+  // channel-plan §12 (IBW): every agent status frame's `xsInbox` (undefined ⇒ key absent).
+  const statusInbox: Array<{ key: string; xsInbox: unknown }> = [];
   const deliveries: Array<{ key: string; frame: XsDeliverFrame }> = [];
   let hold: "before" | "after" | undefined;
   let release: (() => void) | undefined;
@@ -62,6 +64,7 @@ if (process.argv[2] === "hub") {
             sessionId: frame.sessionId,
             ...(frame.t === "xs_member" ? { joined: frame.joined } : {}),
           });
+        if (frame.t === "status") statusInbox.push({ key, xsInbox: (frame as any).xsInbox });
         return onFrame(key, frame);
       };
       request = registry.request.bind(registry);
@@ -92,7 +95,7 @@ if (process.argv[2] === "hub") {
   );
   if ("exists" in hub) throw new Error("hub unexpectedly already exists");
   handle = async (m) => {
-    if (m.op === "inspect") return { deliveries, slotFrames, agents: registry.list() };
+    if (m.op === "inspect") return { deliveries, slotFrames, statusInbox, agents: registry.list() };
     if (m.op === "hold") {
       hold = m.mode;
       barrier = new Promise<void>((r) => {
@@ -230,6 +233,7 @@ if (process.argv[2] === "hub") {
   let skew = 0;
   Date.now = () => realNow() + skew;
   const replyNotices: any[] = [];
+  const statuses: Array<{ key: string; text: string | undefined }> = [];
   // MW: @mention surface — user messages that fell through to the native path, mention notices,
   // and the autocomplete provider factories registered through ctx.ui (XW_UI=1).
   const userMessages: string[] = [];
@@ -256,7 +260,7 @@ if (process.argv[2] === "hub") {
     getContextUsage: () => undefined,
     ui: {
       notify: (text: string) => notifications.push(text),
-      setStatus() {},
+      setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }),
       setWidget() {},
       addAutocompleteProvider: (factory: Function) => autocompleteFactories.push(factory),
     },
@@ -478,6 +482,7 @@ if (process.argv[2] === "hub") {
         dropped: getXsReplyLedger().droppedNoticeCount(sm.getSessionId()),
         replyTickets: getXsReplyLedger().entries(),
         replyNotices,
+        statuses,
         replyEntries: sm
           .getBranch()
           .filter((e) => e.type === "custom" && e.customType === "subagent:xs-reply")
