@@ -341,7 +341,7 @@ describe("fabric xs sender — wake/level pre-checks (§4.5/§6.6)", () => {
 });
 
 describe("fabric xs sender — list", () => {
-  it("passes query/scope with the origin snapshot and returns rows; post-reply identity change keeps them", async () => {
+  it("passes query/scope with the origin snapshot and returns rows; post-reply identity change drops them (M8)", async () => {
     const h = makeHarness();
     let flip = false;
     const sender = createXsSender({
@@ -362,8 +362,10 @@ describe("fabric xs sender — list", () => {
       origin: { current: () => (flip ? undefined : { sessionId: "s", epoch: 0 }) },
     });
     const out = await sender.list({ query: "front", scope: "cwd" });
-    expect(out.status).toBe("ok");
-    expect(out.rows).toHaveLength(1);
+    // channel-plan §4.5/M8 (supersedes the old read-only exception): origin changed during the
+    // round trip ⇒ origin_changed and the rows are NOT returned.
+    expect(out.status).toBe("origin_changed");
+    expect(out.rows).toBeUndefined();
   });
 
   it("off / error map without an effect column", async () => {

@@ -15,7 +15,9 @@ import type { XsSessionRowWire } from "../web-hub/protocol/xs.js";
  * §5.1). `scope:"cwd"` only NARROWS the listing — sends are never scope-limited (P6).
  */
 
-export const ListSessionsParams = Type.Object({
+/** Frozen LEGACY instance (channels off / xs off). Byte-identical to the pre-channel schema — the
+ *  golden `tests/fixtures/fabric-xs-*-off-golden.json` pins it; never edit. */
+export const ListSessionsParamsLegacy = Type.Object({
   query: Type.Optional(
     Type.String({
       maxLength: 128,
@@ -30,7 +32,29 @@ export const ListSessionsParams = Type.Object({
     }),
   ),
 });
-export type ListSessionsParams = Static<typeof ListSessionsParams>;
+/** Back-compat name for the legacy instance (src/index.ts + tests import it). */
+export const ListSessionsParams = ListSessionsParamsLegacy;
+
+/** Channel-plan §6.2: the second frozen instance (channels on) — legacy properties verbatim plus `channel?`. */
+export const ListSessionsParamsChannel = Type.Object({
+  ...ListSessionsParamsLegacy.properties,
+  channel: Type.Optional(
+    Type.String({
+      maxLength: 33,
+      description:
+        "Optional: only sessions that share this channel with you (e.g. #team). Omit to list every session you share " +
+        "at least one channel with.",
+    }),
+  ),
+});
+export type ListSessionsParams = Static<typeof ListSessionsParamsChannel>;
+
+/** The ONE instance-selection rule: `channels.enabled` (frozen at activate) ⇒ channel instance, else legacy. */
+export function listSessionsParamsFor(
+  channelsEnabled: boolean,
+): typeof ListSessionsParamsLegacy | typeof ListSessionsParamsChannel {
+  return channelsEnabled ? ListSessionsParamsChannel : ListSessionsParamsLegacy;
+}
 
 /** Row rendering: compact English tokens only (AGENTS.md UI-language split). */
 export function formatXsSessionRows(rows: readonly XsSessionRowWire[]): string[] {
@@ -43,6 +67,10 @@ export function formatXsSessionRows(rows: readonly XsSessionRowWire[]): string[]
       `receive=${r.receive}`,
       r.busy ? "busy" : "idle",
       `lastActive=${r.lastActiveAgoS}s ago`,
+      // Channel-plan §3.2/§6.2: the hub only writes `channels` when the shared set is not exactly [default].
+      ...(r.channels !== undefined && r.channels.length > 0
+        ? [`channels=${r.channels.map((c) => `#${c}`).join(",")}`]
+        : []),
     ];
     return `- ${parts.join(" · ")}`;
   });
@@ -50,21 +78,34 @@ export function formatXsSessionRows(rows: readonly XsSessionRowWire[]): string[]
 
 export interface ListSessionsToolDeps {
   sender: XsSender;
+  /** `fabric.crossSession.channels.enabled` frozen at activate: selects the schema instance. Omitted/false ⇒ legacy, byte-identical. */
+  channels?: boolean;
 }
 
-export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefinition<typeof ListSessionsParams> {
+const LEGACY_DESCRIPTION =
+  "List other explicitly-joined main sessions on this machine's web hub (fabric cross-session). Each row carries a " +
+  "short ref, optional name, cwd, receive policy and busy state. Address them with message_session using the ref.";
+
+const CHANNEL_DESCRIPTION =
+  LEGACY_DESCRIPTION +
+  " You only see sessions that share at least one channel with you; rows outside #default show channels=#a,#b.";
+
+export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefinition<typeof ListSessionsParamsLegacy> {
+  const channelsOn = deps.channels === true;
   return {
     name: "list_sessions",
     label: "list_sessions",
-    description:
-      "List other explicitly-joined main sessions on this machine's web hub (fabric cross-session). Each row carries a " +
-      "short ref, optional name, cwd, receive policy and busy state. Address them with message_session using the ref.",
-    parameters: ListSessionsParams,
-    async execute(_toolCallId, params, signal) {
+    description: channelsOn ? CHANNEL_DESCRIPTION : LEGACY_DESCRIPTION,
+    parameters: (channelsOn ? ListSessionsParamsChannel : ListSessionsParamsLegacy) as typeof ListSessionsParamsLegacy,
+    async execute(_toolCallId, rawParams, signal) {
+      const params = rawParams as ListSessionsParams;
+      // legacy instance: `channel` can never legitimately arrive and is never forwarded
+      const channel = channelsOn ? params.channel : undefined;
       const outcome: XsListOutcome = await deps.sender.list({
         ...(signal !== undefined ? { signal } : {}),
         ...(params.query !== undefined ? { query: params.query } : {}),
         ...(params.scope !== undefined ? { scope: params.scope } : {}),
+        ...(channel !== undefined ? { channel } : {}),
       });
       const text =
         outcome.status !== "ok"

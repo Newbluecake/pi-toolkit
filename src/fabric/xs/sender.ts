@@ -1,6 +1,9 @@
 import { XS_MAX_FRAME_BYTES, xsFrameBytesOk } from "../../web-hub/protocol/xs.js";
+import { checkChannelName, normalizeChannel, XS_DEFAULT_CHANNEL } from "./channel.js";
 import type { XsReplyIssueInput, XsReplyIssueResult } from "./reply-ledger.js";
+import type { XsBroadcastOutcome, XsChannelView, XsSenderBroadcastArgs } from "./types-channel.js";
 import type {
+  XsChannelInfoWire,
   XsEffect,
   XsResolveCandidateWire,
   XsResFrame,
@@ -71,6 +74,19 @@ export interface XsPortListArgs {
   origin: XsOriginSnapshot;
   query?: string;
   scope?: "hub" | "cwd";
+  /** Channel-plan §3.3: optional list filter; only set after the local channel gate passed. */
+  channel?: string;
+}
+/** Channel-plan §5.5: one `xs_req{op:"broadcast"}`. `wake`/`level` follow the send rules. */
+export interface XsPortBroadcastArgs {
+  origin: XsOriginSnapshot;
+  channel: string;
+  text: string;
+  wake?: true;
+  level?: number;
+}
+export interface XsPortChannelsArgs {
+  origin: XsOriginSnapshot;
 }
 export interface XsPortResolveArgs {
   origin: XsOriginSnapshot;
@@ -101,6 +117,14 @@ export interface XsHubPort {
   /** Reply-plan §4.2 (RX4): true iff local reply is enabled AND the live hub declared
    *  `xs.reply.v1` (RX3's `hubPort().replyCapable()`). Absent ⇒ not capable (fail closed). */
   replyCapable?(): boolean;
+  /** Channel-plan §5.5/§3.4: true iff the LIVE hub declared `xs.channel.v1` (and the local agent
+   *  declared it too). Absent ⇒ no cap (fail closed: broadcast/channels unsupported, channel
+   *  gates behave as on an old hub). */
+  hubChannelCap?(): boolean;
+  /** Channel-plan §5.5: absent ⇒ `channel_unsupported`. */
+  broadcast?(args: XsPortBroadcastArgs): Promise<XsPortReply>;
+  /** Channel-plan §4.1 `op:"channels"`; absent ⇒ unsupported. */
+  channels?(args: XsPortChannelsArgs): Promise<XsPortReply>;
 }
 
 // ----------------------------------------------------------------- results (§4.3 tool triple + statuses)
@@ -125,6 +149,7 @@ export type XsSendStatus =
   | "reply_quota" // ledger per-session/per-target quota
   | "reply_ledger_full" // process ledger slots exhausted
   | "reply_target_mismatch" // replyTo's request came from a different session than `to`
+  | "not_joined" // channel plan §2.3/§4: local linkJoined gate — nothing sent
   | "error"; // E_XS_INTERNAL / transport / unmapped codes
 
 export interface XsSendOutcome {
@@ -164,8 +189,16 @@ export type XsSenderReason =
   | (string & {});
 
 export interface XsListOutcome {
-  status: "ok" | "origin_changed" | "off" | "error";
+  status: "ok" | "origin_changed" | "off" | "error" | "not_joined" | "bad_channel" | "channel_unsupported";
   rows?: XsSessionRowWire[];
+  code?: string;
+  reason?: string;
+}
+
+/** Channel-plan §4.1 `op:"channels"` result (Q7: names + member counts only). */
+export interface XsChannelsOutcome {
+  status: "ok" | "origin_changed" | "off" | "error" | "not_joined" | "channel_unsupported";
+  channels?: XsChannelInfoWire[];
   code?: string;
   reason?: string;
 }
@@ -266,6 +299,9 @@ function resReason(res: XsResFrame): XsSenderReason | undefined {
 
 /** The two main-session tool names this package owns (registered only by XW, only when `xsOn`). */
 export const XS_MAIN_TOOL_NAMES = ["list_sessions", "message_session"] as const;
+/** Channel-plan §6.1: the third main-session tool, registered by CHW only when `xsOn ∧ channels.enabled`.
+ *  Kept separate from `XS_MAIN_TOOL_NAMES` so the channels-off collision set is unchanged. */
+export const XS_CHANNEL_TOOL_NAME = "message_channel";
 
 /**
  * §4.3/#12: detect another source already registering a same-named tool at `session_start`.
@@ -273,10 +309,15 @@ export const XS_MAIN_TOOL_NAMES = ["list_sessions", "message_session"] as const;
  * caller warns once and surfaces `tool collision: <name>` in `/fabric status`; pi's own
  * duplicate-name arbitration is recorded by conformance C-X7, not relied on here.
  */
-export function detectXsToolCollisions(existing: readonly string[] | undefined): string[] {
+export function detectXsToolCollisions(
+  existing: readonly string[] | undefined,
+  opts?: { channels?: boolean },
+): string[] {
   if (!existing) return [];
   const have = new Set(existing);
-  return XS_MAIN_TOOL_NAMES.filter((n) => have.has(n));
+  const names: readonly string[] =
+    opts?.channels === true ? [...XS_MAIN_TOOL_NAMES, XS_CHANNEL_TOOL_NAME] : XS_MAIN_TOOL_NAMES;
+  return names.filter((n) => have.has(n));
 }
 
 // ----------------------------------------------------------------- sender
@@ -317,6 +358,9 @@ export interface XsSenderDeps {
   level?: XsSenderLevelPort;
   /** Reply-plan §4.2 (RX4); wired iff `reply.enabled`. */
   reply?: XsSenderReplyDeps;
+  /** Channel-plan §2.3/§4/§5.5 (CH4): the local channel view, wired iff `channels.enabled`.
+   *  Absent ⇒ every channel gate is skipped and behavior is the pre-channel sender, byte for byte. */
+  channels?: XsChannelView;
 }
 
 export interface XsSenderMessageArgs {
@@ -336,9 +380,44 @@ export interface XsSenderMessageArgs {
 }
 
 export interface XsSender {
-  list(args: { query?: string; scope?: "hub" | "cwd"; signal?: AbortSignal }): Promise<XsListOutcome>;
+  list(args: {
+    query?: string;
+    scope?: "hub" | "cwd";
+    /** Channel-plan §6.2: optional channel filter (gated locally; ignored-as-unsupported without a view). */
+    channel?: string;
+    signal?: AbortSignal;
+  }): Promise<XsListOutcome>;
   message(args: XsSenderMessageArgs): Promise<XsSendOutcome>;
+  /** Channel-plan §5.5. Absent on pre-channel fakes; the real sender always provides it. */
+  broadcast(args: XsSenderBroadcastArgs): Promise<XsBroadcastOutcome>;
+  /** Channel-plan §4.1 `op:"channels"`. */
+  channels(args?: { signal?: AbortSignal }): Promise<XsChannelsOutcome>;
 }
+
+/** Worst-case broadcast `xs_req` for the byte pre-check (§5.5). */
+function broadcastFrameBytesOk(origin: XsOriginSnapshot, channel: string, text: string, wake: boolean): boolean {
+  return xsFrameBytesOk({
+    t: "xs_req",
+    rid: "r".repeat(64),
+    op: "broadcast",
+    origin: { sessionId: origin.sessionId.padEnd(128, "s"), epoch: Number.MAX_SAFE_INTEGER },
+    channel,
+    text,
+    ...(wake ? { wake } : {}),
+    level: 31,
+  } as unknown as Parameters<typeof xsFrameBytesOk>[0]);
+}
+
+/** Broadcast `ok:false` codes that PROVE nothing was fanned out (admission precedes any delivery). */
+const BROADCAST_NONE_CODES = new Set([
+  "E_XS_OFF",
+  "E_XS_BAD_FRAME",
+  "E_XS_BAD_TARGET",
+  "E_XS_STALE_ORIGIN",
+  "E_XS_TOO_LARGE",
+  "E_XS_FANOUT_TOO_LARGE",
+  "E_XS_NO_TARGET",
+]);
 
 export function createXsSender(deps: XsSenderDeps): XsSender {
   const maxChars =
@@ -357,12 +436,30 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       const snapshot = deps.origin.current();
       if (!snapshot || args.signal?.aborted) return { status: "origin_changed", reason: "origin_changed" };
       const query = args.query !== undefined ? args.query.slice(0, 128) : undefined; // XsReqSchema.query cap
+      // Channel-plan §2.3/§6.2 local gate (only with a wired view): not joined on THIS link ⇒ nothing sent.
+      let channel: string | undefined;
+      if (deps.channels) {
+        const hubCap = deps.port.hubChannelCap?.() === true;
+        if (!deps.channels.linkJoined(hubCap)) return { status: "not_joined", reason: "not_joined" };
+        if (args.channel !== undefined) {
+          if (!hubCap) return { status: "channel_unsupported", reason: "channel_unsupported" };
+          const c = normalizeChannel(args.channel);
+          if (c === null || !deps.channels.link(true).includes(c))
+            return { status: "bad_channel", reason: "bad_channel" };
+          channel = c;
+        }
+      } else if (args.channel !== undefined) {
+        return { status: "channel_unsupported", reason: "channel_unsupported" };
+      }
       const reply = await deps.port.list({
         origin: snapshot,
         ...(query !== undefined ? { query } : {}),
         ...(args.scope !== undefined ? { scope: args.scope } : {}),
+        ...(channel !== undefined ? { channel } : {}),
       });
-      // Read-only: a post-reply identity change does not invalidate the rows — return them.
+      // Channel-plan §4.5/M8: re-check (sessionId, epoch) after the await — a changed origin means the
+      // rows were computed for another channel set; never return them (also for default-only).
+      if (!guardOk(snapshot, args.signal)) return { status: "origin_changed", reason: "origin_changed" };
       if (reply.kind === "off") return { status: "off" };
       if (reply.kind !== "res") {
         return { status: "error", reason: reply.kind === "deadline" ? "client_deadline" : "link_lost" };
@@ -385,6 +482,10 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       const snapshot = deps.origin.current();
       if (!snapshot || !guardOk(snapshot, args.signal)) {
         return { status: "origin_changed", effect: "none", reason: "origin_changed" };
+      }
+      if (deps.channels && !deps.channels.linkJoined(deps.port.hubChannelCap?.() === true)) {
+        // Channel-plan §2.3: a session with no channel on this link is not joined on the hub — nothing sent.
+        return { status: "not_joined", effect: "none", reason: "not_joined" };
       }
       const replyDeps = deps.reply;
       const replyCapable = (): boolean => replyDeps !== undefined && deps.port.replyCapable?.() === true;
@@ -597,6 +698,145 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
         ...(status === "ambiguous" && res.candidates ? { candidates: res.candidates } : {}),
         ...(truncated ? { truncated: true } : {}),
       });
+    },
+
+    async broadcast(args) {
+      // CH0 contract: name syntax AND reserved names (root/system/pi-*…) are refused up front.
+      const checked = checkChannelName(args.channel);
+      const shown = checked.ok
+        ? checked.name
+        : (normalizeChannel(args.channel) ?? (typeof args.channel === "string" ? args.channel.slice(0, 64) : ""));
+      const none = (status: XsBroadcastOutcome["status"], reason: string, extra?: Partial<XsBroadcastOutcome>) =>
+        ({ status, effect: "none", reason, channel: shown, ...extra }) as XsBroadcastOutcome;
+      if (!checked.ok) return none("bad_channel", checked.reason === "reserved" ? "reserved" : "bad_channel");
+      const channel = checked.name;
+      // Q2 (product limit): checked before membership so the answer never depends on local state.
+      if (channel === XS_DEFAULT_CHANNEL) return none("default_channel", "default_channel");
+      const view = deps.channels;
+      const hubCap = deps.port.hubChannelCap?.() === true;
+      if (view === undefined || !hubCap || deps.port.broadcast === undefined) {
+        return none("channel_unsupported", "channel_unsupported");
+      }
+      if (!view.linkJoined(true)) return none("not_joined", "not_joined");
+      if (!view.link(true).includes(channel)) return none("bad_channel", "channel_not_joined");
+      const snapshot = deps.origin.current();
+      if (!snapshot || !guardOk(snapshot, args.signal)) return none("origin_changed", "origin_changed");
+
+      // wake: same口径 as message() PLUS level 0 (§5.5); degrade locally, never send a doomed wake.
+      let wake: true | undefined;
+      let localDowngrade: XsWakeDowngraded | undefined;
+      const wakeUsable = deps.wakeOn === true && deps.level !== undefined;
+      const rootLevel = wakeUsable ? deps.level!.levelOfRoot() : undefined;
+      if (args.wake === true) {
+        if (!wakeUsable) localDowngrade = "sender_wake_disabled";
+        else if (!deps.level!.hopAllowed(rootLevel ?? 0) || rootLevel !== 0) localDowngrade = "level_limit";
+        else wake = true;
+      }
+      const level = wakeUsable ? rootLevel : undefined;
+
+      const text = truncate(args.text ?? "", maxChars);
+      const truncated = text !== args.text;
+      const trunc = truncated ? { truncated: true } : {};
+      if (!broadcastFrameBytesOk(snapshot, channel, text, wake === true)) return none("too_large", "too_large", trunc);
+
+      let reply: XsPortReply;
+      try {
+        reply = await deps.port.broadcast({
+          origin: snapshot,
+          channel,
+          text,
+          ...(wake !== undefined ? { wake } : {}),
+          ...(level !== undefined ? { level } : {}),
+        });
+      } catch {
+        return { status: "unanswered", effect: "unknown", reason: "link_lost", channel, ...trunc };
+      }
+      const stillCurrent = guardOk(snapshot, args.signal);
+      if (!stillCurrent && (reply.kind === "deadline" || reply.kind === "link_lost")) {
+        return { status: "unanswered", effect: "unknown", reason: "origin_changed_after_send", channel, ...trunc };
+      }
+      if (reply.kind === "off") return none("off", "off", { code: "E_XS_OFF", ...trunc });
+      if (reply.kind === "deadline") {
+        return { status: "unanswered", effect: "unknown", reason: "client_deadline", channel, ...trunc };
+      }
+      if (reply.kind === "link_lost") {
+        return { status: "unanswered", effect: "unknown", reason: "link_lost", channel, ...trunc };
+      }
+      const res = reply.res;
+      if (res.ok) {
+        const reason = resReason(res);
+        const wakeDowngraded = res.wakeDowngraded ?? localDowngrade;
+        return {
+          status: "sent",
+          effect: res.effect ?? "unknown", // XI11: no evidence field ⇒ unknown
+          ...(reason !== undefined ? { reason } : {}),
+          channel,
+          ...(res.fanout !== undefined ? { fanout: res.fanout } : {}),
+          ...(res.results !== undefined ? { results: res.results } : {}),
+          ...(wakeDowngraded !== undefined ? { wakeDowngraded } : {}),
+          ...trunc,
+        };
+      }
+      const provablyNone = res.code !== undefined && BROADCAST_NONE_CODES.has(res.code);
+      let status: XsBroadcastOutcome["status"];
+      switch (res.code) {
+        case "E_XS_OFF":
+          status = "off";
+          break;
+        case "E_XS_BAD_FRAME":
+          status = "bad_frame";
+          break;
+        case "E_XS_STALE_ORIGIN":
+          status = "stale_origin";
+          break;
+        case "E_XS_TOO_LARGE":
+          status = "too_large";
+          break;
+        case "E_XS_FANOUT_TOO_LARGE":
+          status = "fanout_too_large";
+          break;
+        case "E_XS_BAD_TARGET":
+        case "E_XS_NO_TARGET":
+          status = res.reason === "default" ? "default_channel" : "bad_channel";
+          break;
+        default:
+          status = "error";
+      }
+      return {
+        status,
+        effect: provablyNone ? "none" : "unknown",
+        ...(res.reason !== undefined || !provablyNone ? { reason: res.reason ?? "unverified" } : {}),
+        ...(res.code !== undefined ? { code: res.code } : {}),
+        channel,
+        ...trunc,
+      };
+    },
+
+    async channels(args) {
+      const view = deps.channels;
+      const hubCap = deps.port.hubChannelCap?.() === true;
+      if (view === undefined || !hubCap || deps.port.channels === undefined) {
+        return { status: "channel_unsupported", reason: "channel_unsupported" };
+      }
+      if (!view.linkJoined(true)) return { status: "not_joined", reason: "not_joined" };
+      const snapshot = deps.origin.current();
+      if (!snapshot || args?.signal?.aborted) return { status: "origin_changed", reason: "origin_changed" };
+      let reply: XsPortReply;
+      try {
+        reply = await deps.port.channels({ origin: snapshot });
+      } catch {
+        return { status: "error", reason: "link_lost" };
+      }
+      // M8: never return a listing computed for another origin.
+      if (!guardOk(snapshot, args?.signal)) return { status: "origin_changed", reason: "origin_changed" };
+      if (reply.kind === "off") return { status: "off" };
+      if (reply.kind !== "res") {
+        return { status: "error", reason: reply.kind === "deadline" ? "client_deadline" : "link_lost" };
+      }
+      if (!reply.res.ok) {
+        return reply.res.code !== undefined ? { status: "error", code: reply.res.code } : { status: "error" };
+      }
+      return { status: "ok", channels: reply.res.channels ?? [] };
     },
   };
 }
