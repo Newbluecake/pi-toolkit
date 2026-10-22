@@ -70,7 +70,13 @@ const basename = computed(() => {
   return slash >= 0 && slash < p.length - 1 ? p.slice(slash + 1) : p;
 });
 const isDirPhase = computed(() => view.value.phase === "dir");
-const backDisabled = computed(() => handle.stackDepth.value === 0);
+/** Phone band: with no in-window history the back arrow closes the window (same path as ×). */
+const backCloses = computed(() => !props.desktop && handle.stackDepth.value === 0);
+const backDisabled = computed(() => props.desktop && handle.stackDepth.value === 0);
+function onBack(): void {
+  if (backCloses.value) emit("close", props.win.id);
+  else handle.back();
+}
 const upDisabled = computed(() => parentPreviewPath(path.value) === null);
 const titleId = computed(() => `pw-title-${props.win.id}`);
 const hintId = computed(() => `pw-hint-${props.win.id}`);
@@ -282,10 +288,10 @@ const ariaModal = computed(() => (props.desktop || !props.isTop ? "false" : "tru
           class="btn btn-ghost btn-icon preview-nav-btn"
           type="button"
           :disabled="backDisabled"
-          :aria-label="t('preview.dirBack')"
-          :title="t('preview.dirBack')"
+          :aria-label="backCloses ? t('preview.close') : t('preview.dirBack')"
+          :title="backCloses ? t('preview.close') : t('preview.dirBack')"
           data-no-drag
-          @click="handle.back()"
+          @click="onBack"
         >
           <AppIcon name="chev-left" />
         </button>

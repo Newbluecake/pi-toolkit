@@ -53,6 +53,7 @@ function stubMedia(desktop: boolean): { flip(next: boolean): void } {
 function rig(desktop: boolean): {
   handle: ReturnType<typeof usePreviewWindows>;
   resolveText(path: string, body: string): void;
+  resolveDir(entries: Array<{ name: string; type: "dir" | "file"; size?: number; mtimeMs: number }>): void;
 } {
   const state = ref({
     clientId: "c1",
@@ -89,6 +90,22 @@ function rig(desktop: boolean): {
     handle,
     resolveText(path: string, body: string): void {
       waits.shift()?.resolve({ ok: true, kind: "text", size: body.length, truncated: false, text: body });
+    },
+    resolveDir(entries): void {
+      waits.shift()?.resolve({
+        ok: true,
+        kind: "dir",
+        listing: {
+          entries,
+          total: entries.length,
+          scanned: entries.length,
+          complete: true,
+          truncated: false,
+          limits: { scan: false, entries: false, bytes: false },
+          vanished: 0,
+          dropped: 0,
+        },
+      } as unknown as PreviewDirOutcome);
     },
   };
 }
@@ -261,5 +278,58 @@ describe("preview windows — phone band (<768px, real manager)", () => {
     r.handle.close();
     await nextTick();
     await nextTick();
+  });
+
+  it("back button (phone): empty history ⇒ enabled, labelled close, and closes the top window", async () => {
+    stubMedia(false);
+    const r = rig(false);
+    await openTwo(r);
+    const topBack = panels()[1]!.querySelector<HTMLButtonElement>(".preview-nav-btn")!;
+    expect(topBack.disabled).toBe(false);
+    expect(topBack.getAttribute("aria-label")).toBe(
+      panels()[1]!.querySelector(".preview-close")!.getAttribute("aria-label"),
+    );
+    topBack.click();
+    await nextTick();
+    await nextTick();
+    expect(panels()).toHaveLength(1); // only the top closed
+    expect(panels()[0]!.querySelector(".preview-close")).not.toBeNull();
+  });
+
+  it("back button (phone): non-empty history ⇒ in-window back, window stays open", async () => {
+    stubMedia(false);
+    const r = rig(false);
+    r.handle.open({ path: "/p/src", dir: true });
+    await nextTick();
+    await nextTick();
+    r.resolveDir([{ name: "sub", type: "dir", mtimeMs: 1 }]);
+    await nextTick();
+    await nextTick();
+    const row = document.querySelector<HTMLElement>(".preview-dir-list button.preview-dir-row")!;
+    row.click();
+    row.click();
+    await nextTick();
+    r.resolveDir([{ name: "x.ts", type: "file", size: 1, mtimeMs: 1 }]);
+    await nextTick();
+    await nextTick();
+    const back = document.querySelector<HTMLButtonElement>(".preview-nav-btn")!;
+    expect(back.disabled).toBe(false);
+    back.click();
+    await nextTick();
+    await nextTick();
+    expect(panels()).toHaveLength(1);
+    expect(document.querySelector(".preview-dir-list")!.textContent).toContain("sub");
+  });
+
+  it("back button (desktop): empty history ⇒ still disabled", async () => {
+    stubMedia(true);
+    const r = rig(true);
+    r.handle.open({ path: "/p/a.txt" });
+    await nextTick();
+    await nextTick();
+    r.resolveText("/p/a.txt", "aaa");
+    await nextTick();
+    await nextTick();
+    expect(document.querySelector<HTMLButtonElement>(".preview-nav-btn")!.disabled).toBe(true);
   });
 });
