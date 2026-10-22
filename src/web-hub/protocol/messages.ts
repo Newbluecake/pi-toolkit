@@ -33,6 +33,7 @@ import {
   XsStatusSchema,
   type XsAckFrame,
   type XsDeliverFrame,
+  type XsEffect,
   type XsMemberFrame,
   type XsReqFrame,
   type XsResFrame,
@@ -852,9 +853,15 @@ export const STATUS_FEATURES_MAX_CHARS = 64;
  *  projection drops anything longer instead of failing the fleet frame. */
 export const FLEET_CACHE_MARK_MAX = 64;
 /** Result of agent-side @mention routing. This is additive to the prompt result so older
- * hubs/UIs continue to accept and ignore it. */
+ * hubs/UIs continue to accept and ignore it.
+ * Reply-plan §9.3 (RX0 freezes the wire; the M package wires it): the `"session"` variant is
+ * the independent @-session branch — a cross-session mention routed through the fabric sender
+ * (`effect` = the send's delivery effect; `requestId` present iff an `expectReply` was
+ * registered). It deliberately shares no field with the runId branch. */
 export type MentionResultData =
-  { action: "steer" | "resume"; label: string; runId: string } | { action: "error"; label: string; error: string };
+  | { action: "steer" | "resume"; label: string; runId: string }
+  | { action: "session"; label: string; effect: XsEffect; requestId?: string }
+  | { action: "error"; label: string; error: string };
 /** web-hub-steer-recall plan §2.3 S2 / §5.8: the typed result of a `recall` op. `text` is the
  *  FULL recalled message body (≤ RECALL_TEXT_MAX_BYTES, hub-validated) — the only channel that
  *  ever returns the untruncated text. `too_late` never distinguishes WHY (already handed to pi /

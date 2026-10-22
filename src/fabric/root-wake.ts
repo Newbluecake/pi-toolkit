@@ -131,7 +131,7 @@ export interface RootWakeDeps {
   sessionId: string;
   rootRunMaxS: number;
   wakeEnabled: boolean;
-  receive: () => "off" | "deliver" | "wake";
+  receive: () => "off" | "deliver" | "wake" | "replies";
   host: {
     isIdle(): boolean;
     hasPendingMessages(): boolean;

@@ -7,6 +7,10 @@ import {
   XS_HUB_DELIVER_MS,
   XS_LIST_MAX_ROWS,
   XS_MAX_FRAME_BYTES,
+  XS_REPLY_AGENT_CAP,
+  XS_REPLY_HUB_CAP,
+  XS_REPLY_LATE_REASON,
+  XS_REPLY_REQUEST_ID_RE,
   XS_REQ_DEADLINE_MS,
   XS_RESOLVE_MAX_CANDIDATES,
   XS_RESOLVE_PREFIX_MIN,
@@ -196,5 +200,100 @@ describe("xs frame decoding (XS0 §8.2)", () => {
     expect(decodeHubFrame({ ...deliver, t: "xs_push" })).toBeUndefined();
     expect(decodeAgentFrame("xs_req")).toBeUndefined();
     expect(decodeHubFrame(null)).toBeUndefined();
+  });
+});
+
+/** A plan-§3.1-shaped request id: `"q" + 18 hex` — not a secret, binding is elsewhere (§3.2). */
+const QID = "q0123456789abcdef01";
+
+describe("xs reply contract (reply-plan §5, RX0)", () => {
+  it("xs_req carries the optional expect/replyTo and the pre-reply shapes still decode", () => {
+    const withExpect: XsReqFrame = { ...req, to: SID2, expect: { requestId: QID, timeoutMs: 1_800_000 } };
+    expect(decodeAgentFrame(withExpect)).toEqual(withExpect);
+    const withReplyTo: XsReqFrame = { ...req, wake: undefined, level: undefined, replyTo: QID };
+    expect(decodeAgentFrame(withReplyTo)).toEqual(withReplyTo);
+    // the pre-reply constants (no new fields) decode byte-for-byte — the off goldens depend on it
+    expect(decodeAgentFrame(req)).toEqual(req);
+    expect(decodeAgentFrame(member)).toEqual(member);
+    expect(decodeHubFrame(deliver)).toEqual(deliver);
+    expect(decodeHubFrame(res)).toEqual(res);
+    expect(decodeAgentFrame(ack)).toEqual(ack);
+  });
+
+  it("structural garbage in the new fields is rejected — additionalProperties never relaxed", () => {
+    expect(decodeAgentFrame({ ...req, expect: { requestId: QID, timeoutMs: 1_800_000, extra: 1 } })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, expect: { requestId: QID } })).toBeUndefined(); // missing timeoutMs
+    expect(decodeAgentFrame({ ...req, expect: { requestId: "", timeoutMs: 1 } })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, expect: { requestId: QID, timeoutMs: "soon" } })).toBeUndefined();
+    // timeoutMs 0 rides the wire (policy range is the ROUTER's E_XS_BAD_FRAME, never a schema drop)
+    expect(decodeAgentFrame({ ...req, expect: { requestId: QID, timeoutMs: 0 } })).toMatchObject({
+      expect: { requestId: QID, timeoutMs: 0 },
+    });
+    expect(decodeAgentFrame({ ...req, expect: { requestId: QID, timeoutMs: -1 } })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, replyTo: 42 })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, replyTo: "" })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, replyTo: QID, unknownKey: true })).toBeUndefined(); // strict shape
+    expect(decodeHubFrame({ ...deliver, reply: { requestId: QID, dueAt: 1, extra: true } })).toBeUndefined();
+    expect(decodeHubFrame({ ...deliver, reply: { requestId: QID, dueAt: -1 } })).toBeUndefined();
+    expect(decodeHubFrame({ ...deliver, reply: { requestId: QID } })).toBeUndefined(); // missing dueAt
+    expect(decodeHubFrame({ ...deliver, inReplyTo: "" })).toBeUndefined();
+    expect(decodeHubFrame({ ...deliver, inReplyTo: 7 })).toBeUndefined();
+  });
+
+  it("xs_deliver carries the optional reply stamp / inReplyTo; from.run stays rejected", () => {
+    const withReply: XsDeliverFrame = {
+      ...deliver,
+      reply: { requestId: QID, dueAt: 1_769_001_800_000 },
+    };
+    expect(decodeHubFrame(withReply)).toEqual(withReply);
+    const withInReplyTo: XsDeliverFrame = { ...deliver, inReplyTo: QID };
+    expect(decodeHubFrame(withInReplyTo)).toEqual(withInReplyTo);
+    expect(decodeHubFrame({ ...deliver, reply: { requestId: QID, dueAt: 0 } })).toMatchObject({
+      reply: { requestId: QID, dueAt: 0 },
+    });
+    // the frozen phase-3 field is still rejected alongside the new optional fields
+    expect(decodeHubFrame({ ...deliver, from: { ...deliver.from, run: "r_ABCDEFGH" } })).toBeUndefined();
+  });
+
+  it("xs_res.target may carry the optional sessionId backfill (open object, §5.2)", () => {
+    const withSid: XsResFrame = { ...res, target: { ref: "01993f4e-6c9", sessionId: SID2 } };
+    expect(decodeHubFrame(withSid)).toEqual(withSid);
+    expect(decodeHubFrame({ ...res, target: { ref: "01993f4e-6c9" } })).toMatchObject({
+      target: { ref: "01993f4e-6c9" },
+    });
+  });
+
+  it("xs_member / xs_ack carry the replies vocabulary (XS_REPLY_LATE_REASON rides verbatim)", () => {
+    expect(decodeAgentFrame({ ...member, receive: "replies" })).toMatchObject({ receive: "replies" });
+    expect(decodeAgentFrame({ ...member, receive: "sometimes" })).toBeUndefined(); // still strict
+    expect(decodeAgentFrame({ ...ack, effect: "applied", reason: XS_REPLY_LATE_REASON, woke: false })).toMatchObject({
+      effect: "applied",
+      reason: "reply_late",
+    });
+  });
+
+  it("constants freeze the reply contract values", () => {
+    expect(XS_REPLY_HUB_CAP).toBe("xs.reply.v1");
+    expect(XS_REPLY_AGENT_CAP).toBe("xs.reply.v1");
+    expect(XS_REPLY_LATE_REASON).toBe("reply_late");
+    expect(XS_REPLY_REQUEST_ID_RE.test(QID)).toBe(true);
+    expect(XS_REPLY_REQUEST_ID_RE.test("q0123456789abcdef0")).toBe(false); // 17 hex
+    expect(XS_REPLY_REQUEST_ID_RE.test("q0123456789abcdef012")).toBe(false); // 19 hex
+    expect(XS_REPLY_REQUEST_ID_RE.test("Q0123456789abcdef01")).toBe(false);
+    expect(XS_REPLY_REQUEST_ID_RE.test("q0123456789ABCDEF01")).toBe(false); // lowercase hex only
+    expect(XS_REPLY_REQUEST_ID_RE.test("r_ABCDEFGH")).toBe(false);
+  });
+
+  it("a reply-carrying worst-ish xs_req still fits the 16 KiB byte cap", () => {
+    const worst: XsReqFrame = {
+      ...req,
+      to: "s".repeat(128),
+      text: undefined,
+      expect: { requestId: QID, timeoutMs: 86_400_000 },
+      replyTo: QID,
+    };
+    expect(decodeAgentFrame(worst)).toEqual(worst);
+    expect(JSON.stringify(worst).length).toBeLessThan(XS_MAX_FRAME_BYTES);
+    expect(xsFrameBytesOk(worst)).toBe(true);
   });
 });

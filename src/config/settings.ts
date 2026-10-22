@@ -981,8 +981,50 @@ export const FABRIC_WAKE_RESUME_BUDGET_MAX_S = 3600;
 export const FABRIC_WAKE_ROOT_RUN_MIN_S = 60;
 export const FABRIC_WAKE_ROOT_RUN_MAX_S = 3600;
 
-/** `fabric.crossSession.receive` (phase2 §4.1, P2: joined sessions default to `wake`). */
-export type FabricXsReceiveMode = "off" | "deliver" | "wake";
+/** `fabric.crossSession.receive` (phase2 §4.1, P2: joined sessions default to `wake`).
+ *  Reply-plan §8.1/R1 (RX0): `"replies"` = accept ONLY replies bound to this session's own
+ *  pending requests. This union is the PREFERENCE — every consumer reads the EFFECTIVE value
+ *  from `effectiveReceive` (`replies` unavailable ⇒ `off`; it NEVER falls back to `wake`). */
+export type FabricXsReceiveMode = "off" | "deliver" | "wake" | "replies";
+
+/**
+ * `effectiveReceive` (reply-plan §8.1, RX0 — the ONE downgrade rule, a pure function):
+ * `replies` with the reply feature unavailable ⇒ `off`. Never `wake`, never any other value —
+ * fail closed, same direction as the membership-entry `receivePref` persistence.
+ */
+export function effectiveReceive(pref: FabricXsReceiveMode, replyEnabled: boolean): FabricXsReceiveMode {
+  return pref === "replies" && !replyEnabled ? "off" : pref;
+}
+
+/** Parse-time bounds for `fabric.crossSession.reply.*` (reply-plan §8.1). */
+export const FABRIC_XS_REPLY_MIN_TIMEOUT_S = 60;
+export const FABRIC_XS_REPLY_MAX_TIMEOUT_S = 86_400;
+export const FABRIC_XS_REPLY_MAX_PENDING_MIN = 1;
+export const FABRIC_XS_REPLY_MAX_PENDING_MAX = 32;
+export const FABRIC_XS_REPLY_MAX_PENDING_PER_TARGET_MIN = 1;
+export const FABRIC_XS_REPLY_MAX_PENDING_PER_TARGET_MAX = 8;
+export const FABRIC_XS_REPLY_LATE_GRACE_MIN_S = 0;
+export const FABRIC_XS_REPLY_LATE_GRACE_MAX_S = 3_600;
+
+/**
+ * `fabric.crossSession.reply.*` (reply-plan §8.1/§3.4, RX0): request-reply association tuning.
+ * Field-by-field tolerant, never throws; every numeric leaf parse-time clamped to its bounds.
+ * Non-live (read once at stack build, like the rest of `fabric.crossSession.*`).
+ */
+export interface FabricXsReplySettings {
+  /** Default on — the feature rides the four xs switches (`xsOn`) on top of this leaf. */
+  enabled: boolean;
+  /** Default `expectReply.timeoutS` when the caller passes no timeout (seconds). */
+  defaultTimeoutS: number;
+  /** Ceiling for an explicit `expectReply.timeoutS` (seconds). */
+  maxTimeoutS: number;
+  /** Per-session cap: receivable-or-consuming tickets + replyInbox occupancy (§3.4). */
+  maxPending: number;
+  /** Per-target cap: receivable-or-consuming tickets issued towards one session (§3.4). */
+  maxPendingPerTarget: number;
+  /** Late-grace window after the timeout within which a reply is still delivered (§7.3). */
+  lateGraceS: number;
+}
 
 /** `fabric.crossSession.limits.*` (phase2 §5.2, P8 defaults; every leaf parse-time clamped to its bounds). */
 export interface FabricCrossSessionLimitsSettings {
@@ -1027,6 +1069,10 @@ export interface FabricCrossSessionSettings {
   /** #14 fail-closed marker: the configured allowFrom was non-empty but every entry was invalid. */
   allowFromDenyAll: boolean;
   limits: FabricCrossSessionLimitsSettings;
+  /** Reply-plan §8.1 (RX0): request-reply association settings (present in every parsed
+   *  block — `receive:"replies"` availability is judged against `reply.enabled` only through
+   *  `effectiveReceive`, never by rewriting the stored preference). */
+  reply: FabricXsReplySettings;
 }
 
 /**
@@ -1225,6 +1271,16 @@ export const DEFAULT_SETTINGS: AgentSettings = {
         inFlightPerSession: 4,
         hubSendsPerMin: 60,
         listPerMin: 6,
+      },
+      // reply-plan §8.1 (RX0): defaults — feature on, 30min default timeout, 24h ceiling,
+      // 8 pending / 3 per target, 10min late grace.
+      reply: {
+        enabled: true,
+        defaultTimeoutS: 1_800,
+        maxTimeoutS: 86_400,
+        maxPending: 8,
+        maxPendingPerTarget: 3,
+        lateGraceS: 600,
       },
     },
   },
@@ -1738,7 +1794,53 @@ function parseFabricSettings(input: unknown): FabricSettings {
 
 /** Deep-enough clone so a parsed result never aliases `DEFAULT_SETTINGS.fabric.crossSession`. */
 function cloneFabricCrossSession(cs: FabricCrossSessionSettings): FabricCrossSessionSettings {
-  return { ...cs, allowFrom: [...cs.allowFrom], limits: { ...cs.limits } };
+  return { ...cs, allowFrom: [...cs.allowFrom], limits: { ...cs.limits }, reply: { ...cs.reply } };
+}
+
+/**
+ * `fabric.crossSession.reply.*` (reply-plan §8.1, RX0): field-by-field tolerant, never throws;
+ * every numeric leaf clamps to its bounds (config-accident containment, same posture as the
+ * limits block). A non-object block falls back to the defaults.
+ */
+function parseFabricXsReplySettings(input: unknown): FabricXsReplySettings {
+  const defaults = DEFAULT_SETTINGS.fabric.crossSession.reply;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const clamp = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw !== "number" || !Number.isFinite(raw) ? fallback : Math.min(max, Math.max(min, Math.floor(raw)));
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    defaultTimeoutS: clamp(
+      value.defaultTimeoutS,
+      defaults.defaultTimeoutS,
+      FABRIC_XS_REPLY_MIN_TIMEOUT_S,
+      FABRIC_XS_REPLY_MAX_TIMEOUT_S,
+    ),
+    maxTimeoutS: clamp(
+      value.maxTimeoutS,
+      defaults.maxTimeoutS,
+      FABRIC_XS_REPLY_MIN_TIMEOUT_S,
+      FABRIC_XS_REPLY_MAX_TIMEOUT_S,
+    ),
+    maxPending: clamp(
+      value.maxPending,
+      defaults.maxPending,
+      FABRIC_XS_REPLY_MAX_PENDING_MIN,
+      FABRIC_XS_REPLY_MAX_PENDING_MAX,
+    ),
+    maxPendingPerTarget: clamp(
+      value.maxPendingPerTarget,
+      defaults.maxPendingPerTarget,
+      FABRIC_XS_REPLY_MAX_PENDING_PER_TARGET_MIN,
+      FABRIC_XS_REPLY_MAX_PENDING_PER_TARGET_MAX,
+    ),
+    lateGraceS: clamp(
+      value.lateGraceS,
+      defaults.lateGraceS,
+      FABRIC_XS_REPLY_LATE_GRACE_MIN_S,
+      FABRIC_XS_REPLY_LATE_GRACE_MAX_S,
+    ),
+  };
 }
 
 /** `fabric.wake.*` (plan v3 §4.8 + phase2 §4.1): field-by-field tolerant, never throws; unknown keys are ignored. */
@@ -1801,10 +1903,19 @@ export function parseFabricCrossSessionSettings(input: unknown): FabricCrossSess
       `[pi-subagent] fabric.crossSession.allowFrom: dropped ${invalid} invalid ${invalid === 1 ? "entry" : "entries"} (full session ids only)`,
     );
   }
+  const reply = parseFabricXsReplySettings(value.reply);
+  // reply-plan §8.1 (review #4): `receive:"replies"` is ALWAYS accepted as the stored
+  // preference — with the reply feature off its EFFECTIVE value is `off` (effectiveReceive,
+  // never a fall-back to the default `wake`). One warn at parse time so the operator sees why.
   const receive: FabricXsReceiveMode =
-    value.receive === "off" || value.receive === "deliver" || value.receive === "wake"
+    value.receive === "off" || value.receive === "deliver" || value.receive === "wake" || value.receive === "replies"
       ? value.receive
       : defaults.receive;
+  if (receive === "replies" && !reply.enabled) {
+    console.warn(
+      '[pi-subagent] fabric.crossSession.receive is "replies" but fabric.crossSession.reply.enabled is false — effective receive is off (not wake)',
+    );
+  }
   const limitsRaw =
     value.limits && typeof value.limits === "object" && !Array.isArray(value.limits)
       ? (value.limits as Record<string, unknown>)
@@ -1830,6 +1941,7 @@ export function parseFabricCrossSessionSettings(input: unknown): FabricCrossSess
       hubSendsPerMin: limit("hubSendsPerMin", 1, 600),
       listPerMin: limit("listPerMin", 1, 60),
     },
+    reply,
   };
 }
 

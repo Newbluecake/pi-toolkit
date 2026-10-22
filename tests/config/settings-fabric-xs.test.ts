@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_SETTINGS,
+  effectiveReceive,
   isValidXsSessionId,
   loadSettings,
   parseFabricCrossSessionSettings,
@@ -11,7 +12,7 @@ const defaults = DEFAULT_SETTINGS.fabric.crossSession;
 const xs = (block: unknown) => loadSettings({ fabric: { crossSession: block } }).fabric.crossSession;
 
 describe("fabric.crossSession settings (phase2 §4.1)", () => {
-  it("pins the defaults (Q2/P1/P2/P8 + review #7: independent inboxCap)", () => {
+  it("pins the defaults (Q2/P1/P2/P8 + review #7: independent inboxCap + reply-plan §8.1 reply block)", () => {
     expect(defaults).toEqual({
       enabled: false,
       autoJoin: false,
@@ -30,6 +31,14 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
         inFlightPerSession: 4,
         hubSendsPerMin: 60,
         listPerMin: 6,
+      },
+      reply: {
+        enabled: true,
+        defaultTimeoutS: 1_800,
+        maxTimeoutS: 86_400,
+        maxPending: 8,
+        maxPendingPerTarget: 3,
+        lateGraceS: 600,
       },
     });
   });
@@ -191,5 +200,98 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
     expect(fabric.wake.rootRunMaxS).toBe(0);
     expect(fabric.crossSession.enabled).toBe(true);
     expect(fabric.crossSession.receive).toBe("wake");
+  });
+});
+
+describe("fabric.crossSession.reply + replies (reply-plan §8.1, RX0)", () => {
+  it('receive accepts "replies" as the stored preference; wrong types still fall back to wake', () => {
+    expect(xs({ receive: "replies" }).receive).toBe("replies");
+    // non-object blocks still clone the reply defaults without aliasing
+    const parsed = parseFabricCrossSessionSettings(null);
+    expect(parsed.reply).toEqual(defaults.reply);
+    expect(parsed.reply).not.toBe(defaults.reply);
+  });
+
+  it("parses reply values, ignores unknown keys, and falls back per field on wrong types", () => {
+    const parsed = xs({
+      reply: {
+        enabled: false,
+        defaultTimeoutS: 600,
+        maxTimeoutS: 43_200,
+        maxPending: 16,
+        maxPendingPerTarget: 5,
+        lateGraceS: 120,
+        unknownKey: 1, // tolerated, never parsed
+      },
+    });
+    expect(parsed.reply).toEqual({
+      enabled: false,
+      defaultTimeoutS: 600,
+      maxTimeoutS: 43_200,
+      maxPending: 16,
+      maxPendingPerTarget: 5,
+      lateGraceS: 120,
+    });
+    const garbage = xs({
+      reply: { enabled: "yes", defaultTimeoutS: "600", maxTimeoutS: Number.NaN, maxPending: null, lateGraceS: [] },
+    });
+    expect(garbage.reply).toEqual(defaults.reply);
+    for (const block of [undefined, null, 0, "no", true, [], [1]]) {
+      expect(xs({ reply: block }).reply).toEqual(defaults.reply);
+    }
+  });
+
+  it("clamps every reply leaf to its §8.1 bounds", () => {
+    const parsed = xs({
+      reply: {
+        defaultTimeoutS: 1, // -> 60
+        maxTimeoutS: 1_000_000, // -> 86400
+        maxPending: 99, // -> 32
+        maxPendingPerTarget: 99, // -> 8
+        lateGraceS: 9_999, // -> 3600
+      },
+    });
+    expect(parsed.reply).toEqual({
+      ...defaults.reply,
+      defaultTimeoutS: 60,
+      maxTimeoutS: 86_400,
+      maxPending: 32,
+      maxPendingPerTarget: 8,
+      lateGraceS: 3_600,
+    });
+    // 0 is legal exactly for lateGraceS (no late grace); timeouts clamp up to their 60s floor
+    const zero = xs({ reply: { lateGraceS: 0, defaultTimeoutS: 0, maxTimeoutS: 0 } });
+    expect(zero.reply.lateGraceS).toBe(0);
+    expect(zero.reply.defaultTimeoutS).toBe(60);
+    expect(zero.reply.maxTimeoutS).toBe(60);
+  });
+
+  it('receive:"replies" with reply disabled warns exactly once and NEVER falls back to wake', () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const parsed = xs({ receive: "replies", reply: { enabled: false } });
+    // the stored preference stays "replies" — the EFFECTIVE value is off (never wake)
+    expect(parsed.receive).toBe("replies");
+    expect(effectiveReceive(parsed.receive, parsed.reply.enabled)).toBe("off");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toContain("fabric.crossSession.receive");
+    warn.mockRestore();
+    // no warn while the feature is on, and none for the three legacy values with it off
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(xs({ receive: "replies" }).receive).toBe("replies");
+    for (const receive of ["off", "deliver", "wake"] as const) {
+      expect(xs({ receive, reply: { enabled: false } }).receive).toBe(receive);
+    }
+    expect(quiet).not.toHaveBeenCalled();
+    quiet.mockRestore();
+  });
+
+  it("effectiveReceive is the single downgrade rule (replies unavailable ⇒ off)", () => {
+    for (const pref of ["off", "deliver", "wake", "replies"] as const) {
+      expect(effectiveReceive(pref, true)).toBe(pref);
+    }
+    expect(effectiveReceive("replies", false)).toBe("off");
+    expect(effectiveReceive("off", false)).toBe("off");
+    expect(effectiveReceive("deliver", false)).toBe("deliver");
+    expect(effectiveReceive("wake", false)).toBe("wake");
   });
 });
