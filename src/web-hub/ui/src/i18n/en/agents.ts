@@ -55,6 +55,8 @@ const agents = {
   channelAll: "All",
   channelsOpenTitle: "Manage cross-session channels",
   channelsOpenLabel: "Channels",
+  // alias-plan r4 §7.2 (ALU): the detail header's `@alias` button tooltip
+  xsAliasManage: "Alias @{alias} — manage channels & alias",
   "xs.off": "Cross-session: joined — currently rejecting all messages",
 } satisfies Record<string, string>;
 

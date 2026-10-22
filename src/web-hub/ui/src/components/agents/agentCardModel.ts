@@ -7,6 +7,7 @@
  * priority order), re-expressed against the frozen `AgentState`/`AgentCardView` shapes and the
  * shared `common.status.*` i18n vocabulary instead of hard-coded English badge text.
  */
+import { normalizeAlias } from "@protocol/xs-alias.js";
 import { agentVisualState } from "../../composables/visual-state.js";
 import type { I18nHandle } from "../../composables/useI18n.js";
 import { formatUsd } from "../../format.js";
@@ -202,6 +203,128 @@ export function xsChannelChipOf(agent: AgentState | undefined, hubCaps: unknown)
   const set = xsChannelsOf(agent, hubCaps);
   if (set === undefined) return undefined;
   return set.length === 1 && set[0] === XS_DEFAULT_CHANNEL ? undefined : set;
+}
+
+// ---------------------------------------------------------------------------
+// alias-plan r4 (ALU): session alias display + suggestion model. Cap-gated on
+// `xs.alias.v1` (mirrors `XS_ALIAS_HUB_CAP` in protocol/xs.ts — the UI bundle keeps a local
+// constant, same precedent as XS_CHANNEL_CAP above); no cap or no `status.xs.alias` field ⇒
+// every helper is inert and the UI renders byte-identical to the pre-alias shape.
+// ---------------------------------------------------------------------------
+
+export const XS_ALIAS_CAP = "xs.alias.v1";
+
+/** Q8: the card chip shows at most the first 8 grapheme clusters (title carries the full text). */
+export const XS_ALIAS_CARD_GRAPHEMES = 8;
+
+/** The session's held alias (`status.xs.alias`, written only while held). undefined = no cap /
+ *  no field / malformed — the caller renders nothing. Length-capped defensively: the wire caps
+ *  it at 48 bytes, a longer string here is not an alias the hub would have stamped. */
+export function xsAliasOf(agent: AgentState | undefined, hubCaps: unknown): string | undefined {
+  if (!Array.isArray(hubCaps) || !hubCaps.includes(XS_ALIAS_CAP) || !agent) return undefined;
+  const raw = record(record(agent.status)["xs"])["alias"];
+  return typeof raw === "string" && raw !== "" && raw.length <= 128 ? raw : undefined;
+}
+
+/** First `max` grapheme clusters of `s` (Intl.Segmenter; code-point fallback). */
+export function truncateGraphemes(s: string, max: number): { readonly text: string; readonly truncated: boolean } {
+  const Seg = (
+    globalThis as {
+      Intl?: {
+        Segmenter?: new (
+          l?: string,
+          o?: { granularity: "grapheme" },
+        ) => { segment(x: string): Iterable<{ segment: string }> };
+      };
+    }
+  ).Intl?.Segmenter;
+  if (typeof Seg !== "function") {
+    const cps = Array.from(s);
+    return { text: cps.slice(0, max).join(""), truncated: cps.length > max };
+  }
+  let text = "";
+  let n = 0;
+  let truncated = false;
+  for (const part of new Seg(undefined, { granularity: "grapheme" }).segment(s)) {
+    if (n >= max) {
+      truncated = true;
+      break;
+    }
+    text += part.segment;
+    n++;
+  }
+  return { text, truncated };
+}
+
+/** Card chip text: `@` + the first 8 grapheme clusters, `…` when clipped (Q8). */
+export function aliasChipText(alias: string): string {
+  const t = truncateGraphemes(alias, XS_ALIAS_CARD_GRAPHEMES);
+  return `@${t.text}${t.truncated ? "\u2026" : ""}`;
+}
+
+export interface AliasSuggestion {
+  readonly alias: string;
+  /** Another online session currently reports this alias (hint only — the hub decides). */
+  readonly taken: boolean;
+}
+
+/** One maximal run of characters an alias may contain (mirrors the xs-alias whitelist:
+ *  ASCII word chars + `-`, Han, kana, ー, precomposed Hangul syllables). */
+const ALIAS_RUN_RE = /[A-Za-z0-9_\-\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u{30FC}\u{AC00}-\u{D7A3}]+/u;
+/** CJK run inside a cwd segment (for the 「cwd 里的中文段」 suggestion). */
+const CJK_RUN_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+/u;
+
+function candidateOf(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const n = normalizeAlias(raw);
+  return n.ok ? n.alias : undefined; // too_long/invalid ⇒ dropped, never truncated mid-word
+}
+
+/** §7.1 suggestion chips: cwd basename → first alias-char run of the session name → first CJK
+ *  run of the last cwd segment that has one. Deduped, the current alias skipped, at most 3;
+ *  `taken` marks aliases another session currently reports (greyed but still clickable — the
+ *  hub is the authority, and a `taken` reply is what opens the take path). */
+export function aliasSuggestions(
+  self: AgentState | undefined,
+  agents: ReadonlyMap<string, AgentState> | undefined,
+  hubCaps: unknown,
+): readonly AliasSuggestion[] {
+  if (self === undefined || !Array.isArray(hubCaps) || !hubCaps.includes(XS_ALIAS_CAP)) return [];
+  const current = xsAliasOf(self, hubCaps);
+  const raw: Array<string | undefined> = [];
+  const cwd = cwdOf(self);
+  const segments = cwd.split("/").filter((s) => s !== "");
+  raw.push(segments[segments.length - 1]);
+  const name = record(self.session)["name"];
+  if (typeof name === "string") raw.push(ALIAS_RUN_RE.exec(name)?.[0]);
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const seg = segments[i];
+    if (seg === undefined) continue;
+    const m = CJK_RUN_RE.exec(seg);
+    if (m !== null) {
+      raw.push(m[0]);
+      break;
+    }
+  }
+  const out: AliasSuggestion[] = [];
+  const seen = new Set<string>();
+  for (const r of raw) {
+    const alias = candidateOf(r);
+    if (alias === undefined || alias === current || seen.has(alias)) continue;
+    seen.add(alias);
+    let taken = false;
+    if (agents !== undefined) {
+      for (const other of agents.values()) {
+        if (other !== self && xsAliasOf(other, hubCaps) === alias) {
+          taken = true;
+          break;
+        }
+      }
+    }
+    out.push({ alias, taken });
+    if (out.length >= 3) break;
+  }
+  return out;
 }
 
 /** Read-only xs badge. Hub cap is required; absent/malformed membership status is inert.

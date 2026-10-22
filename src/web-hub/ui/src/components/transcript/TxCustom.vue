@@ -50,6 +50,13 @@ const chipText = computed(() => (namespaced.value ? (KIND_ALIASES[kind.value] ??
  *  body (header/fence stripped — the hub only forwards `content`, so it is parsed from there).
  *  Unparseable content falls through to the generic card. */
 const xs = computed(() => (props.customType === XS_CUSTOM_TYPE ? parseXsMessage(props.text) : undefined));
+/** alias-plan r4 §7.2 (ALU): a hub-verified alias takes over the who position (`@前端`); the
+ *  self-reported name/ref moves to the title. No alias ⇒ byte-identical legacy rendering. */
+const xsWho = computed(() => {
+  const v = xs.value;
+  if (v === undefined) return "";
+  return v.fromAlias !== undefined ? `@${v.fromAlias}` : v.from;
+});
 const xsChip = computed(() => {
   const v = xs.value;
   if (v === undefined) return "";
@@ -66,7 +73,9 @@ const xsChip = computed(() => {
     <span class="avatar avatar-notice"><AppIcon name="bot" class="icon" /></span>
     <div class="msg-main">
       <div class="msg-head">
-        <span class="who" translate="no">xs ← {{ xs.from }}</span>
+        <span class="who" translate="no" :title="xs.fromAlias !== undefined ? xs.from : undefined"
+          >xs ← {{ xsWho }}</span
+        >
         <span v-if="xs.cwdLabel" class="kind-chip" translate="no">{{ xs.cwdLabel }}</span>
         <span class="kind-chip" translate="no" :title="customType">{{ xsChip }}</span>
       </div>

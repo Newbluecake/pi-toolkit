@@ -57,7 +57,7 @@ import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
-import { XS_CHANNEL_CAP, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
+import { XS_CHANNEL_CAP, xsAliasOf, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -266,6 +266,14 @@ const channelsUsable = computed(() => {
   return clearUsable.value && typeof xs === "object" && xs !== null;
 });
 
+// alias-plan r4 §7.2 (ALU): the held alias renders as a small `@alias` right after the title;
+// clicking it opens the same (lazily loaded) 「频道与别名」 dialog. Drawn only when the hub
+// pushed `status.xs.alias` under the xs.alias.v1 cap — otherwise zero trace.
+const headerAlias = computed(() => xsAliasOf(props.agent, hub?.state.value.hub?.["caps"]));
+function onAliasOpen(): void {
+  if (channelsUsable.value) channelsOpen.value = true;
+}
+
 async function onClear(): Promise<void> {
   const view = controlView;
   const c = view?.control ?? null;
@@ -362,6 +370,22 @@ function onToggleHeadInfo(): void {
           <span class="detail-title-text">{{ title }}</span>
         </button>
       </h2>
+      <!-- alias-plan r4 §7.2 (ALU): `@alias` next to the title opens the channels & alias
+           dialog (a plain non-interactive chip when the dialog's control gate is not met). -->
+      <button
+        v-if="headerAlias !== undefined && channelsUsable"
+        class="chip detail-alias-btn"
+        type="button"
+        translate="no"
+        :title="t('agents.xsAliasManage', { alias: headerAlias })"
+        :aria-label="t('agents.xsAliasManage', { alias: headerAlias })"
+        @click="onAliasOpen"
+      >
+        @{{ headerAlias }}
+      </button>
+      <span v-else-if="headerAlias !== undefined" class="chip chip-xs-alias" translate="no" :title="`@${headerAlias}`"
+        >@{{ headerAlias }}</span
+      >
       <StatusPill :state="visual" :label="statusLabel" />
       <!-- Web /clear quick button (2026-10): new session in the same pi process via builtin
            /new with confirm baked in — no confirmation dialog anywhere in this flow. Rendered

@@ -53,6 +53,8 @@ const agents = {
   channelAll: "全部",
   channelsOpenTitle: "管理跨会话频道",
   channelsOpenLabel: "频道",
+  // alias-plan r4 §7.2 (ALU)：详情头部 `@别名` 按钮的提示
+  xsAliasManage: "别名 @{alias}——管理频道与别名",
   "xs.off": "跨会话：已加入，但当前拒收所有消息",
 } satisfies Messages<typeof en>;
 

@@ -353,6 +353,12 @@ watch(panelRows, (rows) => {
   if (mentionActive.value > rows.length - 1) mentionActive.value = Math.max(0, rows.length - 1);
 });
 
+/** alias-plan r4 §7.2: `@alias · name` when the session holds an alias (display only). */
+function sessionRowLabel(row: SessionMentionTarget): string {
+  if (row.alias !== undefined) return row.name !== "" ? `@${row.alias} · ${row.name}` : `@${row.alias}`;
+  return row.name !== "" ? row.name : row.ref;
+}
+
 function pickPanelRow(row: PanelRow): void {
   const applied = applyMentionPick(
     text.value,
@@ -1204,7 +1210,9 @@ watch(
         @click="pickPanelRow({ kind: 'session', ref: row.ref })"
         @mousemove="mentionActive = i + mentionRows.length"
       >
-        <span class="mention-label" translate="no">{{ row.name !== "" ? row.name : row.ref }}</span>
+        <!-- alias-plan r4 §7.2 (ALU): with a hub-verified alias the candidate shows
+             `@alias · name`; the INSERTED value stays `session:<ref>` (pickPanelRow above). -->
+        <span class="mention-label" translate="no">{{ sessionRowLabel(row) }}</span>
         <span class="mention-session-meta" translate="no">{{ row.cwd }}</span>
         <span class="chip chip-muted mention-status" translate="no">xs {{ row.receive }}</span>
       </button>

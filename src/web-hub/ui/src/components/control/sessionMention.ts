@@ -9,7 +9,7 @@
  */
 import type { I18nHandle } from "../../composables/useI18n.js";
 import type { AgentState } from "../../types.js";
-import { toAgentCardView, xsBadgeOf, xsChannelsOf, type XsReceive } from "../agents/agentCardModel.js";
+import { toAgentCardView, xsAliasOf, xsBadgeOf, xsChannelsOf, type XsReceive } from "../agents/agentCardModel.js";
 
 /** Mirrors hub/xs/router.ts `REF_LEN` (the hub is not importable from the UI bundle). */
 export const SESSION_REF_LEN = 12;
@@ -23,6 +23,9 @@ export interface SessionMentionTarget {
   readonly cwd: string;
   readonly cwdFull: string;
   readonly receive: XsReceive;
+  /** alias-plan r4 §7.2 (ALU): hub-verified alias for DISPLAY/filtering only — the inserted
+   *  value stays `session:<ref>` (R1-12: the browser cannot do the label/file checks). */
+  readonly alias?: string;
 }
 
 function sessionIdOf(agent: AgentState | undefined): string {
@@ -58,6 +61,7 @@ export function sessionMentionTargets(
     if (view.visualState === "offline" || view.visualState === "stale") continue;
     seen.add(sid);
     const rawName = (agent.session as { name?: unknown } | undefined)?.name;
+    const alias = xsAliasOf(agent, hubCaps);
     out.push({
       key,
       ref: sid.slice(0, SESSION_REF_LEN),
@@ -65,21 +69,24 @@ export function sessionMentionTargets(
       cwd: view.shortCwd,
       cwdFull: view.cwdFull ?? "",
       receive,
+      ...(alias === undefined ? {} : { alias }),
     });
   }
   return out;
 }
 
-/** Case-insensitive prefix match on name / ref / cwd basename; an explicit `session:` lead is ignored. */
+/** Case-insensitive prefix match on name / alias / ref / cwd basename; an explicit
+ *  `session:` lead is ignored. The alias participates in FILTERING only (§7.2). */
 export function filterSessionTargets(
   targets: readonly SessionMentionTarget[],
   query: string,
 ): readonly SessionMentionTarget[] {
   let q = query.toLowerCase();
   if (q.startsWith("session:")) q = q.slice("session:".length);
+  if (q.startsWith("@")) q = q.slice(1); // typing `@前端` filters by alias too
   if (q === "") return targets;
   return targets.filter((s) => {
     const base = s.cwdFull.replace(/\/+$/, "").split("/").pop() ?? "";
-    return [s.name, s.ref, base].some((f) => f !== "" && f.toLowerCase().startsWith(q));
+    return [s.name, s.alias ?? "", s.ref, base].some((f) => f !== "" && f.toLowerCase().startsWith(q));
   });
 }

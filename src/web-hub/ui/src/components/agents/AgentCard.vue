@@ -5,7 +5,15 @@
   back/forward, middle-click-open-in-new-tab and Tab-order all work for free (ui-design §6.2).
 -->
 <script setup lang="ts">
-import { xsBadgeOf, xsChannelChipOf, xsUnreadLabel, xsUnreadOf, type XsReceive } from "./agentCardModel.js";
+import {
+  aliasChipText,
+  xsAliasOf,
+  xsBadgeOf,
+  xsChannelChipOf,
+  xsUnreadLabel,
+  xsUnreadOf,
+  type XsReceive,
+} from "./agentCardModel.js";
 import type { IconName } from "../../icons/names.js";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { observeResize } from "../../composables/useSharedResize.js";
@@ -34,6 +42,9 @@ const xsUnread = computed(() =>
 const xsChannels = computed(() =>
   xsChannelChipOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]),
 );
+// alias-plan r4 §7.2 (ALU): the `@alias` chip sits between the xs badge and the channel chip
+// (chip order kind → 状态类 → xs 徽标 → @别名 → #频道 → 未读角标); cap xs.alias.v1 only.
+const xsAlias = computed(() => xsAliasOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]));
 const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
   return Array.isArray(dialogs?.open) && dialogs.open.length > 0;
@@ -165,6 +176,9 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
               <AppIcon :name="XS_ICON[xsBadge]" />
             </span>
+            <span v-if="xsAlias" class="chip chip-xs-alias" translate="no" :title="`@${xsAlias}`">{{
+              aliasChipText(xsAlias)
+            }}</span>
             <span
               v-if="xsChannels"
               class="chip chip-xs-channels"
