@@ -44,6 +44,7 @@ import type {
   CmdResultBody,
   CmdResultFrame,
 } from "../protocol/messages.js";
+import { isFeishuCmdOrigin } from "../protocol/messages.js";
 
 export interface Timer {
   cancel(): void;
@@ -264,15 +265,25 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         errResult("E_COMMAND_DENIED", false, "none", "LAN authentication administration is local-TUI-only"),
       );
     }
-    // fabric phase-2 §5.3/#9/XI13 (X2): membership/policy mutations are local-TUI/local-RPC
-    // only — X4's `/fabric` handler hard-refuses web invocations whatever the policy says; this
-    // prompt-op guard is the same defense-in-depth as the /webhub row above (a browser must not
-    // reach the mutation even as free prompt text, whatever `expandPromptTemplates` does).
-    // `status`/`blocks` stay promptable (read-only).
+    // fabric (2026-10-22 user ruling, superseding phase-2 §5.3/#9/XI13): web may now execute the
+    // membership/policy mutations through the POLICY-GATED command op (`webCommandPolicy.fabric`,
+    // default allow) — but prompt text still never executes them. This guard keeps the same
+    // defense-in-depth as the /webhub row above (a prompt must not reach the mutation even as
+    // free slash-shaped text, whatever a future pi does with `expandPromptTemplates` defaults),
+    // and is the LAST choke point Feishu frames can reach (hub F6 admission forwards Feishu only
+    // as prompt/dialog ops) — Feishu origins get the dedicated refusal text. `status`/`blocks`
+    // stay promptable (read-only).
     if (/^\s*\/fabric\s+(?:join|leave|receive|block|unblock|fence)(?:\s|$)/.test(cmd.text)) {
       return settleAndReply(
         frame,
-        errResult("E_COMMAND_DENIED", false, "none", "Cross-session membership changes are local-TUI-only"),
+        errResult(
+          "E_COMMAND_DENIED",
+          false,
+          "none",
+          isFeishuCmdOrigin(frame.origin)
+            ? "飞书入口不能修改跨会话加入状态，请在终端或 web 执行"
+            : "Send /fabric as a command (op:command) — webCommandPolicy.fabric applies",
+        ),
       );
     }
     if (deps.compactionState.manualCompacting) {

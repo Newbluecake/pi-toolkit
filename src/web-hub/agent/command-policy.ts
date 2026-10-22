@@ -119,6 +119,19 @@ export function parameterizedBuiltinPolicy(
  */
 type SubPolicyFn = (tokens: readonly string[]) => PolicyDecision;
 
+/** `/fabric`'s known subcommand set (2026-10-22 ruling: all baseline-allow). Kept in sync with
+ * `src/commands/fabric-xs.ts`'s SUBS. */
+const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
+  "status",
+  "blocks",
+  "join",
+  "leave",
+  "receive",
+  "block",
+  "unblock",
+  "fence",
+]);
+
 const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   // /agent [status|<runId>] · costs · fleet → read-only text. settings/budget with no further
   // args falls back to the text listing (allow, §4.9's C12 text-fallback row); with a
@@ -214,14 +227,17 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     const sub = tokens[0] ?? "status";
     return { policy: sub === "status" ? "allow" : "deny" };
   },
-  // fabric phase-2 §5.3/#9/XI13 (X2): the cross-session command's READ-ONLY surfaces only —
-  // `status` (also the bare form) and the offline `blocks` listing. Every membership/policy/
-  // blocklist/fence mutation is denied here already, and X4's handler ADDITIONALLY hard-refuses
-  // web invocations before reading any policy — `webCommandPolicy.fabric:"allow"` cannot open
-  // these (the table is only the first layer + the UI hint, exactly like /webhub's admin rows).
+  // fabric (2026-10-22 user ruling, superseding phase-2 §5.3/#9/XI13's deny-by-default): every
+  // KNOWN subcommand — including the membership/policy/blocklist/fence mutations — is baseline
+  // `allow`, and the web surface is governed by `webCommandPolicy.fabric` (default allow, settable
+  // to confirm/deny; the override wins outright in `resolveCommandPolicy`, for every subcommand at
+  // once). Unknown subcommands stay `deny` (they can only be typos — the real ones render usage
+  // text anyway). The Feishu source never reaches this table: hub F6 admission forwards only
+  // prompt/dialog ops for Feishu, and X4's handler additionally hard-refuses Feishu-marked
+  // invocations regardless of policy.
   fabric(tokens) {
     const sub = tokens[0] ?? "status";
-    return { policy: sub === "status" || sub === "blocks" ? "allow" : "deny" };
+    return { policy: FABRIC_KNOWN_SUBS.has(sub) ? "allow" : "deny" };
   },
 };
 

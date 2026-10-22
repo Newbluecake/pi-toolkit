@@ -11,10 +11,12 @@ import {
 import { createFabricXsCommand, type FabricXsCommandDeps, type XsBlockResolve } from "../../src/commands/fabric-xs.js";
 
 /**
- * fabric phase-2 X4 (phase2-plan §5.3 + §11.2 X4 行 + r3 主会话裁定): the `/fabric` command.
- * Anchors: the WEB HARD GATE (a web invocation cannot join/leave/receive/block/unblock/fence
- * reset even under `webCommandPolicy.fabric:"allow"` — the gate never consults policy; status
- * and blocks stay readable), allowFrom full-session-id semantics, block's unique resolution
+ * fabric phase-2 X4 (phase2-plan §5.3 + §11.2 X4 行 + r3 主会话裁定, superseded for web by the
+ * 2026-10-22 user ruling): the `/fabric` command. Anchors: the FEISHU-ONLY HARD GATE (a
+ * Feishu-marked invocation cannot join/leave/receive/block/unblock/fence reset even under any
+ * policy — the gate never consults policy; web invocations — which are governed by
+ * `webCommandPolicy.fabric` at the command-op policy layer, default allow — local TUI and local
+ * RPC can all mutate), allowFrom full-session-id semantics, block's unique resolution
  * (ambiguous ⇒ candidates, never blocks; offline ⇒ full sessionId only), OFFLINE blocks /
  * unblock (local list only), and fork non-inheritance (P10: a mismatched sessionId entry
  * restores as not-joined).
@@ -26,18 +28,23 @@ interface CtxLog {
   notes: { message: string; level: string }[];
 }
 
-function makeCtx(web = false, mode: "tui" | "rpc" = "tui"): { ctx: ExtensionCommandContext; log: CtxLog } {
+function makeCtx(
+  web = false,
+  mode: "tui" | "rpc" = "tui",
+  feishu = false,
+): { ctx: ExtensionCommandContext; log: CtxLog } {
   const log: CtxLog = { notes: [] };
   const ctx = {
     mode,
     ui: { notify: (message: string, level: string) => log.notes.push({ message, level }) },
     ...(web ? { webInvocation: true } : {}),
+    ...(feishu ? { feishuInvocation: true } : {}),
   } as unknown as ExtensionCommandContext;
   return { ctx, log };
 }
 
 interface CommandHarness {
-  run(args: string, opts?: { web?: boolean; mode?: "tui" | "rpc" }): Promise<CtxLog>;
+  run(args: string, opts?: { web?: boolean; feishu?: boolean; mode?: "tui" | "rpc" }): Promise<CtxLog>;
   membership: XsMembership;
   persisted: XsMembershipEntryData[];
   fence: ReturnType<typeof createSessionFence>;
@@ -67,7 +74,7 @@ function makeCommand(over: Partial<FabricXsCommandDeps> = {}): CommandHarness {
   const command = createFabricXsCommand(deps);
   return {
     async run(args, opts = {}) {
-      const { ctx, log } = makeCtx(opts.web ?? false, opts.mode ?? "tui");
+      const { ctx, log } = makeCtx(opts.web ?? false, opts.mode ?? "tui", opts.feishu ?? false);
       // @ts-expect-error — the factory returns Omit<RegisteredCommand, name|sourceInfo>; handler is there
       await command.handler(args, ctx);
       return log;
@@ -90,27 +97,45 @@ function makeCommand(over: Partial<FabricXsCommandDeps> = {}): CommandHarness {
   };
 }
 
-describe("/fabric: web hard gate (§5.3/#9/XI13)", () => {
+describe("/fabric: feishu hard gate (2026-10-22 ruling; web is policy-gated, not gated here)", () => {
   it.each(["join", "leave", "receive wake", "block ab12", "unblock 1", "fence reset"])(
-    "web invocation cannot run `%s` — fixed refusal, no policy consulted",
+    "feishu-marked invocation cannot run `%s` — fixed refusal, no policy consulted",
     async (args) => {
       const h = makeCommand();
-      const log = await h.run(args, { web: true });
-      expect(log.notes).toEqual([{ message: "跨会话成员资格只能在本地终端修改", level: "warning" }]);
-      // nothing changed — the first web mutation attempt never even reached the membership
+      const log = await h.run(args, { web: true, feishu: true });
+      expect(log.notes).toEqual([{ message: "飞书入口不能修改跨会话加入状态，请在终端或 web 执行", level: "warning" }]);
+      // nothing changed — the feishu mutation attempt never even reached the membership
       expect(h.membership.joined).toBe(false);
       expect(h.persisted).toEqual([]);
     },
   );
 
-  it("webCommandPolicy.fabric:'allow' cannot open the gate — the command receives no policy at all", async () => {
-    // The gate is `isWebInvocation(ctx)` FIRST, before any other branch; the deps surface has
-    // no policy input, so an "allow" policy is structurally unrepresentable here (X2's table
-    // and prompt-op refusals are the outer, weaker layers).
+  it("feishu gate is FIRST, before the enabled/membership checks and before usage — even offline", async () => {
+    // deps.enabled() false + no membership would otherwise answer first; the gate wins.
+    const clock = new FakeClock(1_000);
+    const dead: FabricXsCommandDeps = {
+      enabled: () => false,
+      sessionId: () => SESSION,
+      membership: () => undefined,
+      fence: () => undefined,
+      statusView: () => ({ capability: "unknown", lines: [] }),
+      now: () => clock.now(),
+    };
+    const command = createFabricXsCommand(dead);
+    const { ctx, log } = makeCtx(true, "tui", true);
+    // @ts-expect-error — handler exists on the factory product
+    await command.handler("join", ctx);
+    expect(log.notes).toEqual([{ message: "飞书入口不能修改跨会话加入状态，请在终端或 web 执行", level: "warning" }]);
+  });
+
+  it("web invocation CAN now mutate — the web surface is webCommandPolicy.fabric's job, not this handler's", async () => {
     const h = makeCommand();
     const log = await h.run("join", { web: true });
-    expect(log.notes[0]!.message).toBe("跨会话成员资格只能在本地终端修改");
-    expect(h.membership.joined).toBe(false);
+    expect(log.notes[0]!.message).toContain("已加入");
+    expect(h.membership.joined).toBe(true);
+    for (const args of ["leave", "receive wake", "unblock 1", "fence reset"]) {
+      await h.run(args, { web: true });
+    }
   });
 
   it("web can still READ: status and blocks pass the gate", async () => {

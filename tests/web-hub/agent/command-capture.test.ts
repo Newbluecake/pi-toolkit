@@ -11,7 +11,12 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import { wrapCommandApi, type CommandCapturePort } from "../../../src/web-hub/agent/command-capture.js";
+import {
+  isFeishuInvocation,
+  isWebInvocation,
+  wrapCommandApi,
+  type CommandCapturePort,
+} from "../../../src/web-hub/agent/command-capture.js";
 import { wireWebHub } from "../../../src/web-hub/agent/index.js";
 import { SETTINGS } from "./helpers.js";
 
@@ -256,5 +261,88 @@ describe("wrapCommandApi — argCompleters capture (web-hub-slash-args §4.4, P1
     wrapped.registerCommand("cmd", { handler: async () => undefined, getArgumentCompletions: first });
     wrapped.registerCommand("cmd", { handler: async () => undefined, getArgumentCompletions: second });
     expect(completers.get("cmd")).toBe(second);
+  });
+});
+
+describe("wrapCommandApi — captured ctx source markers (2026-10-22 fabric ruling)", () => {
+  it("a web-origin armed invocation yields webInvocation:true and NO feishuInvocation", async () => {
+    const seen: unknown[] = [];
+    const capture: CommandCapturePort = {
+      arm: () => undefined,
+      take: (name) =>
+        name === "mycmd"
+          ? {
+              cmdId: "c1",
+              reqId: "r1",
+              origin: { listener: "lan", ip: "192.168.1.23", user: "alice", reqId: "r1" },
+              name,
+              args: "a1",
+              deadlineAt: 0,
+            }
+          : undefined,
+      finish: vi.fn(),
+    };
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async (...a: unknown[]) => {
+      seen.push(a[1]);
+      return "ok";
+    });
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    await registeredCommand.handler("a1", ctx);
+    const capturedCtx = seen[0] as { webInvocation?: unknown; feishuInvocation?: unknown };
+    expect(isWebInvocation(capturedCtx as ExtensionCommandContext)).toBe(true);
+    expect(isFeishuInvocation(capturedCtx as ExtensionCommandContext)).toBe(false);
+    expect("feishuInvocation" in capturedCtx).toBe(false);
+  });
+
+  it('a feishu-origin armed invocation (hub F6 marker ip:"feishu") additionally yields feishuInvocation:true', async () => {
+    const seen: unknown[] = [];
+    const capture: CommandCapturePort = {
+      arm: () => undefined,
+      take: (name) =>
+        name === "mycmd"
+          ? {
+              cmdId: "c2",
+              reqId: "r2",
+              origin: { listener: "lan", ip: "feishu", user: "feishu:ou_1", reqId: "r2" },
+              name,
+              args: "a1",
+              deadlineAt: 0,
+            }
+          : undefined,
+      finish: vi.fn(),
+    };
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async (...a: unknown[]) => {
+      seen.push(a[1]);
+      return "ok";
+    });
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    await registeredCommand.handler("a1", ctx);
+    const capturedCtx = seen[0] as { webInvocation?: unknown; feishuInvocation?: unknown };
+    expect(isWebInvocation(capturedCtx as ExtensionCommandContext)).toBe(true);
+    expect(isFeishuInvocation(capturedCtx as ExtensionCommandContext)).toBe(true);
+  });
+
+  it("a non-captured invocation keeps the handler's own ctx untouched (no markers synthesized)", async () => {
+    const seen: unknown[] = [];
+    const capture: CommandCapturePort = { arm: () => undefined, take: () => undefined, finish: vi.fn() };
+    const raw = fakeApi();
+    const pi = wrapCommandApi(raw, () => capture);
+    const handler = vi.fn(async (...a: unknown[]) => {
+      seen.push(a[1]);
+      return "plain";
+    });
+    pi.registerCommand("mycmd", { handler } as unknown as Omit<RegisteredCommand, "name" | "sourceInfo">);
+    const registeredCommand = raw.calls[0]!.args[1] as { handler: (a: string, c: ExtensionCommandContext) => unknown };
+    const localCtx = { mode: "tui" } as unknown as ExtensionCommandContext;
+    await registeredCommand.handler("a1", localCtx);
+    expect(seen[0]).toBe(localCtx);
+    expect(isWebInvocation(seen[0] as ExtensionCommandContext)).toBe(false);
+    expect(isFeishuInvocation(seen[0] as ExtensionCommandContext)).toBe(false);
   });
 });

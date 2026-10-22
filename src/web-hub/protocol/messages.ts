@@ -752,6 +752,18 @@ export interface CmdOrigin {
   user?: string;
   reqId: string;
 }
+
+/** 2026-10-22 fabric ruling: Feishu-source identification for command/prompt gating. The ONLY
+ *  constructor of Feishu-marked origins is the hub side's F6 admission
+ *  (`src/web-hub/hub/commands.ts` `createFeishuCommandOrigin`) — a synthetic, hub-internal
+ *  attribution value (`ip:"feishu"`, `user:"feishu:<openId>"`) that never comes from a socket:
+ *  web/LAN HTTP origins always carry the caller's real remote address as `ip`, so a browser
+ *  cannot forge the marker. The agent socket is trusted (only the hub connects to it), which
+ *  makes `origin.ip === "feishu"` a reliable agent-side Feishu predicate. Pure predicate — no
+ *  frozen protocol type changes. */
+export function isFeishuCmdOrigin(origin: CmdOrigin): boolean {
+  return origin.ip === "feishu";
+}
 export interface CmdExpect {
   sessionId?: string;
 }

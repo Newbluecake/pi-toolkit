@@ -308,8 +308,16 @@ resumes a/b h · parked · reserved · unverified · quarantined · durability �
   `webHub.enabled` + `webHub.control !== false` gate tools `list_sessions` / `message_session`, `/fabric`,
   `xs.v1`, member slots and `StatusInfo.xs` (off ⇒ byte-identical; no reserved-name change). Two human
   opt-ins: settings enabled, then local `/fabric join|leave` or `fabric.crossSession.autoJoin` (default
-  false); agents cannot change membership, receive policy, blocks or fences. Web/LAN/Feishu mutations
-  are hard-denied regardless of `webCommandPolicy.fabric`; status/blocks stay read-only. Joined
+  false); agents cannot change membership, receive policy, blocks or fences. Mutation subcommands
+  (join/leave/receive/block/unblock/fence reset) are web-executable (2026-10-22 ruling, supersedes
+  phase2 §5.3/#9/XI13): governed by `webCommandPolicy.fabric` (default allow; settable to
+  confirm/deny — overrides the whole name) at the command-op policy layer, with unknown
+  subcommands denied; the Feishu source is still hard-refused (hub F6 admission forwards Feishu
+  only as prompt/dialog ops — the prompt-op `/fabric <mutation>` text guard answers with the
+  dedicated 「飞书入口」 refusal — and the `/fabric` handler hard-refuses Feishu-marked captured
+  invocations via `isFeishuInvocation`, derived from the hub-internal `ip:"feishu"` origin
+  marker); web prompt text carrying `/fabric <mutation>` is likewise refused (defense-in-depth
+  so prompt text can never bypass the policy gate). status/blocks stay read-only. Joined
   receive defaults to `wake` (`fabric.crossSession.receive`, `allowFrom`); fork/copy never inherits
   membership, even with autoJoin. `message_session` omits wake = deliver-only; `wake:true` alone may
   start a turn through `RootWakeController` (no steer), gated by `fabric.wake.enabled`, causal level,

@@ -1,9 +1,12 @@
 /**
- * fabric phase-2 X2 (phase2-plan §5.3/#9/XI13): the `fabric` row of the web command-policy
- * table — `status`/`blocks` (and the bare status form) are allow; every membership/policy/
- * blocklist/fence mutation is deny. This is only the FIRST layer (UI hint + classification):
- * X4's handler hard-refuses web invocations regardless, and a user override cannot open the
- * denied rows (the override check runs before this table and is not consulted by the handler).
+ * fabric row of the web command-policy table (2026-10-22 user ruling, superseding phase-2
+ * §5.3/#9/XI13's deny-by-default): every KNOWN subcommand — including the membership/policy/
+ * blocklist/fence mutations — is baseline `allow`; the web surface is governed by
+ * `webCommandPolicy.fabric` (default allow, settable to confirm/deny; the override wins outright
+ * for the whole name). Unknown subcommands stay deny. The Feishu source never reaches this table
+ * (hub F6 admission forwards only prompt/dialog ops for Feishu; X4's handler hard-refuses
+ * Feishu-marked invocations regardless of policy; the prompt-op text guard refuses Feishu
+ * slash-shaped prompt text).
  */
 import { describe, expect, it } from "vitest";
 import { resolveCommandPolicy } from "../../../src/web-hub/agent/command-policy.js";
@@ -13,7 +16,7 @@ function policy(name: string, args: string, overrides?: Record<string, "allow" |
     .policy;
 }
 
-describe("command policy: /fabric (§5.3/#9/XI13, X2)", () => {
+describe("command policy: /fabric (2026-10-22 ruling)", () => {
   it("read-only subcommands are allow", () => {
     expect(policy("fabric", "status")).toBe("allow");
     expect(policy("fabric", "blocks")).toBe("allow");
@@ -24,23 +27,25 @@ describe("command policy: /fabric (§5.3/#9/XI13, X2)", () => {
     expect(policy("fabric", "   ")).toBe("allow");
   });
 
-  it("every membership/policy/blocklist/fence mutation is deny", () => {
+  it("every known membership/policy/blocklist/fence mutation is baseline allow (web may execute)", () => {
     for (const sub of ["join", "leave", "receive", "block", "unblock", "fence"]) {
-      expect(policy("fabric", sub)).toBe("deny");
-      expect(policy("fabric", `${sub} arg`)).toBe("deny");
+      expect(policy("fabric", sub)).toBe("allow");
+      expect(policy("fabric", `${sub} arg`)).toBe("allow");
     }
+    expect(policy("fabric", "fence reset")).toBe("allow");
   });
 
-  it("a webCommandPolicy.fabric user override cannot open the mutations (UI layer only)", () => {
-    // §5.3: the handler's isWebInvocation gate never reads the policy; the table's deny here is
-    // the first layer. An override flips THIS layer's answer (it wins outright for any name) —
-    // pinned here so the residual is explicit: the hard gate lives in X4's handler, not here.
-    expect(policy("fabric", "join", { fabric: "allow" })).toBe("allow");
+  it("webCommandPolicy.fabric overrides the whole name — deny/confirm gate every subcommand", () => {
+    expect(policy("fabric", "join", { fabric: "deny" })).toBe("deny");
     expect(policy("fabric", "status", { fabric: "deny" })).toBe("deny");
+    expect(policy("fabric", "fence reset", { fabric: "confirm" })).toBe("confirm");
+    expect(policy("fabric", "blocks", { fabric: "confirm" })).toBe("confirm");
+    // and an explicit allow keeps the (default-allow) baseline explicit
+    expect(policy("fabric", "join", { fabric: "allow" })).toBe("allow");
   });
 
-  it("fence reset stays denied (mutation), status untouched by unknown-sub default", () => {
-    expect(policy("fabric", "fence reset")).toBe("deny");
+  it("unknown subcommands stay deny (typo surface — the real ones render usage text anyway)", () => {
     expect(policy("fabric", "whatever-else")).toBe("deny");
+    expect(policy("fabric", "joinx")).toBe("deny");
   });
 });

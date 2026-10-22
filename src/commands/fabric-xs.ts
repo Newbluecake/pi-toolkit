@@ -1,19 +1,22 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import { isWebInvocation } from "../web-hub/agent/command-capture.js";
+import { isFeishuInvocation } from "../web-hub/agent/command-capture.js";
 import { isValidXsSessionId } from "../config/settings.js";
 import type { SessionFence } from "../fabric/xs/fence.js";
 import type { XsMembership, XsBlockEntry } from "../fabric/xs/membership.js";
 
 /**
- * fabric phase-2 X4 (phase2-plan §5.3/§10.3, review #9/XI13): the `/fabric` command — the ONLY
- * human surface for session-level cross-session membership. Two hard rules:
+ * fabric phase-2 X4 (phase2-plan §5.3/§10.3, review #9/XI13 — superseded for web by the
+ * 2026-10-22 user ruling, see the appended section of phase2-plan.md): the `/fabric` command —
+ * the ONLY human surface for session-level cross-session membership. Rules:
  *
- *  1. **Web hard gate, FIRST line of the handler** (§5.3): `isWebInvocation(ctx)` refuses every
- *     member/policy mutation (join/leave/receive/block/unblock/fence reset) with the fixed text
- *     「跨会话成员资格只能在本地终端修改」. It deliberately does NOT read `webCommandPolicy`
- *     — `fabric:"allow"` cannot open it (the policy table + prompt-op text refusal, both X2's,
- *     are only the first layer). `status`/`blocks` stay readable from the web. Local RPC
- *     clients (not hub-forwarded) carry no `webInvocation` ⇒ allowed.
+ *  1. **Feishu-only hard gate, FIRST line of the handler** (2026-10-22 ruling): web (loopback
+ *     browser + LAN-logged-in web) may now execute every subcommand — gated by
+ *     `webCommandPolicy.fabric` (default allow) at the command-op policy layer, NOT here. The
+ *     only hard refusal left is the Feishu source (`isFeishuInvocation`): a Feishu-marked
+ *     invocation cannot join/leave/receive/block/unblock/fence reset. Local TUI, local RPC and
+ *     web invocations all pass; the Feishu marker is derived from the trusted hub-internal
+ *     origin (admission never forwards Feishu `command` frames today — this is the
+ *     defense-in-depth layer that survives any future widening).
  *  2. **Offline surfaces** (§5.3/#14): `/fabric blocks` and `/fabric unblock` resolve against
  *     the LOCAL persisted blocklist only — never the hub. `/fabric block` resolves via the hub
  *     when available (uniquely, else candidates and no block) and accepts a full sessionId
@@ -23,10 +26,10 @@ import type { XsMembership, XsBlockEntry } from "../fabric/xs/membership.js";
  * resolve/statusView. The module owns only command parsing + rendering + the gate.
  */
 
-/** Mutating subcommands the web hard gate refuses (§5.3 table's 「拒绝」 rows). */
-const WEB_REFUSED_SUBS = new Set(["join", "leave", "receive", "block", "unblock", "fence"]);
+/** Mutating subcommands the Feishu hard gate refuses (§5.3 table's mutation rows). */
+const FEISHU_REFUSED_SUBS = new Set(["join", "leave", "receive", "block", "unblock", "fence"]);
 /** Fixed refusal text — identical for every refused row, independent of any policy. */
-const WEB_REFUSAL = "跨会话成员资格只能在本地终端修改";
+const FEISHU_REFUSAL = "飞书入口不能修改跨会话加入状态，请在终端或 web 执行";
 
 const USAGE = [
   "/fabric status — 成员状态、接收策略、完整 sessionId、限额与栅栏",
@@ -90,7 +93,7 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
   const now = deps.now ?? (() => Date.now());
   return {
     description:
-      "fabric 跨会话通信：/fabric status 查看成员状态；join/leave/receive 管理加入；block/blocks/unblock 管理屏蔽；fence reset 清除 stuck 栅栏（成员变更仅限本地终端）。",
+      "fabric 跨会话通信：/fabric status 查看成员状态；join/leave/receive 管理加入；block/blocks/unblock 管理屏蔽；fence reset 清除 stuck 栅栏（飞书入口不可修改成员）。",
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const prefix = argumentPrefix.trim();
@@ -114,10 +117,12 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
       const tokens = args.trim() === "" ? [] : args.trim().split(/\s+/);
       const sub = tokens[0] ?? "status";
 
-      // §5.3/#9/XI13 — the FIRST thing the handler does: web/LAN/Feishu sources can never
-      // mutate membership, receive policy, the blocklist or the fence, whatever the policy says.
-      if (WEB_REFUSED_SUBS.has(sub) && isWebInvocation(ctx)) {
-        notify(ctx, WEB_REFUSAL, "warning");
+      // 2026-10-22 user ruling (supersedes §5.3/#9/XI13's web hard gate): web/LAN invocations
+      // may mutate — the web surface is governed by `webCommandPolicy.fabric` at the command-op
+      // policy layer. The ONE hard refusal left is the Feishu source: it can never mutate
+      // membership, receive policy, the blocklist or the fence, whatever the policy says.
+      if (FEISHU_REFUSED_SUBS.has(sub) && isFeishuInvocation(ctx)) {
+        notify(ctx, FEISHU_REFUSAL, "warning");
         return;
       }
 

@@ -326,6 +326,8 @@ r1.1 → r2 的其他修订：①按拍板 P6，`discoverScope` 设置键删除�
 
 ### 5.3 加入控制（P1 已拍板：两层人控，agent 无权加入或退出）
 
+> **2026-10-22 更新**：本节「web 来源」列与下方「web 来源硬门禁」条目已被文末「2026-10-22 用户拍板」一节部分推翻 —— 修改类子命令对 web 开放（`webCommandPolicy.fabric` 门控，默认 allow），仅飞书来源仍硬拒。以文末一节为准。
+
 | 层           | 谁  | 机制                                                                                                                   | 默认    | live？                                                                                                   |
 | ------------ | --- | ---------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------- |
 | ① 能力开关   | 人  | `fabric.crossSession.enabled`（及 fabric、webHub、control 前置）                                                       | `false` | non-live（`/reload` + `/webhub restart`）                                                                |
@@ -813,3 +815,24 @@ r2 对已拍板项的落实说明：P3 的 `StatusInfo.xs` 保留但降为纯展
 | S3                    | 采纳                                     | unknown/queued 的工具说明改为「可能已进入对方队列，通常在对方下一个 turn 边界可见；不要重发」，不断言「只有崩溃才会丢」。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 **范围外、不再要求**：无。
+
+---
+
+## 2026-10-22 用户拍板：`/fabric` 修改类子命令对 web 开放（推翻 §5.3/#9/XI13 的「web/LAN/飞书一律硬拒」）
+
+用户拍板（2026-10-22）：**`/fabric` 的修改类子命令（join/leave/receive/block/unblock/fence reset）允许从 web 执行**（本机浏览器与局域网登录后的 web）；**飞书入口仍然拒绝**。web 执行受 `webCommandPolicy.fabric` 控制，**默认 allow**（用户可设 confirm/deny）。`status`/`blocks` 维持现状（allow）。
+
+本节优先于正文 §5.3 的 web 硬门禁行、§10.3 的 #9/XI13 表述与 X2/X4 报告中的对应记录（报告为历史完成记录，不回写）。落实口径：
+
+- **策略表（`src/web-hub/agent/command-policy.ts`）**：`fabric` 全部**已知**子命令（status/blocks/join/leave/receive/block/unblock/fence）基线 `allow`，`webCommandPolicy.fabric` 沿用现有 override 机制整名覆盖（`deny`/`confirm` 对每个子命令生效）；**未知子命令维持 deny**（typo 面）。
+- **执行点（`src/commands/fabric-xs.ts` handler 第一行）**：删除对 web 的 `isWebInvocation` 硬拒，改为**只对飞书来源硬拒**（固定文案「飞书入口不能修改跨会话加入状态，请在终端或 web 执行」，不读策略）。本地 TUI、本地 RPC、web 来源均放行。
+- **飞书来源识别**（不改任何冻结协议类型）：hub 侧 F6 admission 是飞书 cmd 帧 origin 的唯一构造者（`src/web-hub/hub/commands.ts` `createFeishuCommandOrigin` —— hub 内部合成值 `ip:"feishu"`、`user:"feishu:<openId>"`，非 socket 派生，浏览器无法伪造；agent socket 仅 hub 可连，可信）。agent 侧以 `isFeishuCmdOrigin(origin)`（`src/web-hub/protocol/messages.ts`，纯谓词）判定。
+- **飞书可达面的两层拒绝**：
+  1. hub F6 admission 本就只放行飞书的 `prompt`(followUp)/`dialog_answer`/`dialog_cancel` —— 飞书**永远到不了** command op；
+  2. `src/web-hub/agent/commands.ts` prompt op 的 `/fabric <mutation>` 文本拒绝保留并对飞书 origin 使用专属文案 —— 这是飞书帧能到达的最后一道关口；
+  3. 执行点 handler 对飞书标记的捕获调用（`command-capture.ts` 的 captured ctx 在 origin 为飞书标记时合成 `feishuInvocation:true`，`isFeishuInvocation` 读取）硬拒 —— 今天不可达的纵深防御，防 admission 未来放宽。
+- **prompt 文本拒绝对 web 也保留**（defense-in-depth，照 `/webhub 2fa|passwd|user` 先例）：prompt 路径 `expandPromptTemplates:false`，斜杠文本本就不会执行命令（只会发给模型），拒绝是为了防 pi 未来改默认值绕过 `webCommandPolicy.fabric`；web 的正规执行面是 policy 门控的 command op（浏览器输入框的斜杠文本本就走 command op）。
+- **web 回显**：join/leave/receive/unblock/fence reset 为同步 handler（capture sync 路径直接回显）；`block` 走 hub resolve 的 await → 2026-10-22 的 async-late 通道（0a129f2a）回显。
+- **模型仍无法执行**：斜杠命令不是工具，`/fabric` 不会出现在任何子会话的工具面（XW 只在主会话 post-guard 注册命令）；模型唯一能做的是提示人类去终端/web 执行。
+
+测试锚点更新：`tests/commands/fabric-xs.test.ts`（web 可改、飞书标记拒、本地 TUI/RPC 可改）、`tests/web-hub/agent/command-policy-fabric.test.ts`（已知子命令基线 allow + override deny/confirm + 未知 deny）、`tests/web-hub/agent/builtin-bridge.test.ts`（fabric join 默认放行派发、deny/confirm override、sync 回显）、`tests/web-hub/agent/commands-prompt-fabric.test.ts`（web prompt 文本拒 + 飞书专属文案 + status/blocks 可 prompt）、`tests/web-hub/agent/command-capture.test.ts`（`feishuInvocation` 标记仅来自飞书 origin）。

@@ -300,4 +300,33 @@ describe("web command async-late channel — pi-toolkit command that awaits befo
     // Legacy shape: the ledger entry settles ok right away (no running-window promise made).
     expect(e2e.ledger.get("cmd-5")).toMatchObject({ state: "ok" });
   });
+
+  it("(2026-10-22 fabric ruling) a SYNC mutation handler — join/leave/receive/unblock/fence-reset shaped — echoes its output in the immediate reply (completion:sync)", async () => {
+    // `/fabric join` etc. have no await before their notify, so the K20 sync path applies: the
+    // handler's synchronous prefix runs inside sendUserMessage's call stack and the output is
+    // already collected when the bridge returns — the web UI renders it from the first reply,
+    // no cmd_late needed.
+    const e2e = makeE2E({
+      handler: async (args, c) => {
+        c.ui.notify(`已加入（epoch 1）。 (${args})`, "info");
+      },
+    });
+    e2e.handler.handle(frame("cmd-6", "fabric", "join"));
+    expect(e2e.sent).toHaveLength(1);
+    expect(e2e.sent[0]).toMatchObject({
+      t: "cmd_result",
+      id: "cmd-6",
+      ok: true,
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        output: { entries: [{ kind: "notify", text: "已加入（epoch 1）。 (join)", level: "info" }] },
+      },
+    });
+    expect(e2e.ledger.get("cmd-6")).toMatchObject({ state: "ok" });
+    await flushMicrotasks();
+    expect(e2e.sent).toHaveLength(1); // nothing late — the sync reply was the whole settle
+  });
 });

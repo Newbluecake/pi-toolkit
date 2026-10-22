@@ -5,7 +5,12 @@ import type {
   RegisteredCommand,
 } from "@earendil-works/pi-coding-agent";
 import type { ArgCompleter } from "./command-complete.js";
-import type { CmdOrigin, CommandOutputEntry, CommandOutputWire } from "../protocol/messages.js";
+import {
+  isFeishuCmdOrigin,
+  type CmdOrigin,
+  type CommandOutputEntry,
+  type CommandOutputWire,
+} from "../protocol/messages.js";
 
 export interface CaptureInvocation {
   cmdId: string;
@@ -453,15 +458,23 @@ function createCapturedUi(ui: ExtensionUIContext, capture: InternalCapture, cmdI
 
 /** §4.9 point 4: `ctxProxy` — same delegate-everything-except-`ui` shape as `wrapCommandApi`'s own
  * outer proxy, plus a synthetic `webInvocation: true` (what `isWebInvocation` reads) so command
- * code (`canOpenSettingsEditor`, `/tasklist`, …) can special-case a web-claimed invocation. */
+ * code (`canOpenSettingsEditor`, `/tasklist`, …) can special-case a web-claimed invocation.
+ * 2026-10-22 fabric ruling: when the claimed invocation's origin is the hub-internal Feishu
+ * marker (`isFeishuCmdOrigin`), the proxy additionally carries a synthetic `feishuInvocation:
+ * true` (what `isFeishuInvocation` reads) so command code can keep refusing Feishu-sourced
+ * mutations while allowing web ones. The marker is derived ONLY from the trusted, hub-constructed
+ * origin — never from anything a browser controls. */
 function createCapturedCtx(
   ctx: ExtensionCommandContext,
   capture: InternalCapture,
   cmdId: string,
+  origin?: CmdOrigin,
 ): ExtensionCommandContext {
+  const feishu = origin !== undefined && isFeishuCmdOrigin(origin);
   return new Proxy(ctx, {
     get(target, property) {
       if (property === "webInvocation") return true;
+      if (property === "feishuInvocation" && feishu) return true;
       if (property === "ui")
         return createCapturedUi(Reflect.get(target, "ui", target) as ExtensionUIContext, capture, cmdId);
       const value = Reflect.get(target, property, target);
@@ -550,7 +563,7 @@ export function wrapCommandApi<T extends ExtensionAPI>(
             if (capture === undefined) return Reflect.apply(handler, this, [args, ctx]);
             const invocation = capture.take(name, args);
             if (invocation === undefined) return Reflect.apply(handler, this, [args, ctx]);
-            const ctxProxy = createCapturedCtx(ctx, capture, invocation.cmdId);
+            const ctxProxy = createCapturedCtx(ctx, capture, invocation.cmdId, invocation.origin);
             return runCaptured(handler, this, args, ctxProxy, capture, invocation.cmdId);
           },
         } as Omit<RegisteredCommand, "name" | "sourceInfo">;
@@ -562,4 +575,12 @@ export function wrapCommandApi<T extends ExtensionAPI>(
 
 export function isWebInvocation(ctx: ExtensionCommandContext): boolean {
   return Boolean((ctx as unknown as { webInvocation?: unknown }).webInvocation);
+}
+
+/** 2026-10-22 fabric ruling: true only for a web-claimed invocation whose capture origin was the
+ *  hub-internal Feishu marker (see `createCapturedCtx`). Today the Feishu admission layer never
+ *  forwards `command`-op frames at all, so this is unreachable defense-in-depth for `/fabric`'s
+ *  Feishu refusal — it exists so the refusal survives any future widening of that admission. */
+export function isFeishuInvocation(ctx: ExtensionCommandContext): boolean {
+  return Boolean((ctx as unknown as { feishuInvocation?: unknown }).feishuInvocation);
 }
