@@ -43,7 +43,7 @@ import { useTicker } from "../../composables/useTicker.js";
 import type { UseHubHandle } from "../../composables/useHub.js";
 import type { DashboardViewProps } from "../../contracts.js";
 import { restoringKeys } from "../../logic/spawn.js";
-import { toAgentCardView } from "../agents/agentCardModel.js";
+import { homeFromAgents, toAgentCardView } from "../agents/agentCardModel.js";
 import AgentList from "../agents/AgentList.vue";
 import AgentDetail from "../detail/AgentDetail.vue";
 import { CONTROL_ENV } from "../control/controlContext.js";
@@ -143,9 +143,10 @@ const filter = ref("");
 const cards = computed(() => {
   const state = props.hub.state.value;
   const out = [];
+  const home = homeFromAgents(state.agents.values());
   for (const key of state.order) {
     const agent = state.agents.get(key);
-    if (agent) out.push(toAgentCardView(agent, t));
+    if (agent) out.push(toAgentCardView(agent, t, home));
   }
   return out;
 });

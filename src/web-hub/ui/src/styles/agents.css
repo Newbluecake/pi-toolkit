@@ -268,14 +268,20 @@
 
 .agent-row1 {
   display: flex;
+  flex-wrap: wrap; /* badges wrap onto a second line instead of squeezing the cwd */
+  row-gap: var(--sp-1);
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
 }
 
 .agent-title {
-  /* keep a few characters of the cwd visible next to the chips + cost (2026-10-10 overflow bug) */
-  min-width: min(6ch, 100%);
+  /* Full `~/…` path; when it alone exceeds the row, elide from the FRONT (keep the project name):
+     rtl on the box moves the ellipsis to the left, the inner <bdi> keeps `~` `/` in ltr order. */
+  min-width: 0;
+  max-width: 100%;
+  direction: rtl;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -950,4 +956,28 @@
     min-height: 44px;
     height: 44px;
   }
+}
+
+.chip-xs {
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 4px;
+}
+
+.chip-xs .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.chip-xs[data-xs="wake"] {
+  color: var(--c-primary);
+}
+
+.chip-xs[data-xs="replies"] {
+  color: var(--c-text-2);
+}
+
+.chip-xs[data-xs="off"] {
+  color: var(--c-text-3);
+  opacity: 0.6;
 }

@@ -782,7 +782,10 @@ export type RunVisualState =
 export interface AgentCardView {
   readonly key: string;
   readonly kind: "tui" | "rpc";
+  /** `~`-abbreviated full cwd (absolute when the home dir is unknown). */
   readonly shortCwd: string;
+  /** Raw absolute cwd, for the hover title. */
+  readonly cwdFull?: string;
   /** Session name, else the first 8 chars of `sessionId`, else `"(no session name)"`. */
   readonly sessionLabel: string;
   /** Model id without the provider prefix; `""` when unknown. */

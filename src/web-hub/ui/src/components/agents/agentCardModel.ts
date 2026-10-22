@@ -17,11 +17,43 @@ function record(v: unknown): Record<string, unknown> {
   return v !== null && typeof v === "object" ? (v as Record<string, unknown>) : {};
 }
 
-/** Last one or two non-empty path segments of a cwd, mirrors `@logic/render/agents.js`'s `shortCwd`. */
-export function shortCwd(cwd: string): string {
-  const parts = cwd.split("/").filter((p) => p !== "");
-  if (parts.length === 0) return "/";
-  return parts.slice(-2).join("/");
+/**
+ * Home directory of the hub machine, recovered from a worktree row that carries both the raw
+ * `path` and its home-abbreviated `label` (`~/x` ⇒ path ends with `/x`). No protocol field
+ * carries the home dir, so this is best-effort: `undefined` ⇒ callers show the absolute path.
+ */
+export function homeFromAgent(agent: AgentState): string | undefined {
+  const rows = record(record(agent.status)["worktrees"])["rows"];
+  if (!Array.isArray(rows)) return undefined;
+  for (const raw of rows) {
+    const row = record(raw);
+    const label = row["label"];
+    const path = row["path"];
+    if (typeof label !== "string" || typeof path !== "string" || !label.startsWith("~")) continue;
+    const rest = label.slice(1);
+    if (rest === "") return path === "" ? undefined : path;
+    if (rest.startsWith("/") && path.length > rest.length && path.endsWith(rest)) return path.slice(0, -rest.length);
+  }
+  return undefined;
+}
+
+/** First home dir any agent can prove (all agents of one hub share a machine). */
+export function homeFromAgents(agents: Iterable<AgentState>): string | undefined {
+  for (const a of agents) {
+    const h = homeFromAgent(a);
+    if (h !== undefined) return h;
+  }
+  return undefined;
+}
+
+/** Full cwd with a leading `~` when it lives under `home`; absolute path otherwise. */
+export function shortCwd(cwd: string, home?: string): string {
+  if (cwd === "") return "/";
+  if (home !== undefined && home !== "") {
+    if (cwd === home) return "~";
+    if (cwd.startsWith(`${home}/`)) return `~${cwd.slice(home.length)}`;
+  }
+  return cwd;
 }
 
 function cwdOf(agent: AgentState): string {
@@ -109,13 +141,14 @@ function costTitleOf(agent: AgentState, t: I18nHandle["t"]): { costTitle: string
   return title === undefined ? undefined : { costTitle: title };
 }
 
-export function toAgentCardView(agent: AgentState, t: I18nHandle["t"]): AgentCardView {
+export function toAgentCardView(agent: AgentState, t: I18nHandle["t"], home?: string): AgentCardView {
   const card = record(agent.card);
   const visual = agentVisualState(agent);
   return {
     key: agent.key,
     kind: card["kind"] === "rpc" ? "rpc" : "tui",
-    shortCwd: shortCwd(cwdOf(agent)),
+    shortCwd: shortCwd(cwdOf(agent), home ?? homeFromAgent(agent)),
+    cwdFull: cwdOf(agent),
     sessionLabel: sessionLabel(agent, t),
     modelShort: modelShortOf(agent),
     contextPercent: contextPercentOf(agent),
@@ -131,11 +164,15 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"]): AgentCar
   };
 }
 
+export type XsReceive = "wake" | "deliver" | "replies" | "off";
+
 /** Read-only xs badge. Hub cap is required; absent/malformed membership status is inert. */
-export function xsBadgeOf(agent: AgentState | undefined, hubCaps: unknown): string | undefined {
+export function xsBadgeOf(agent: AgentState | undefined, hubCaps: unknown): XsReceive | undefined {
   if (!Array.isArray(hubCaps) || !hubCaps.includes("xs.v1") || !agent) return undefined;
   const xs = record(record(agent.status)["xs"]);
   if (xs["joined"] !== true) return undefined;
   const receive = xs["receive"];
-  return receive === "wake" || receive === "deliver" || receive === "off" ? `xs ${receive}` : undefined;
+  return receive === "wake" || receive === "deliver" || receive === "replies" || receive === "off"
+    ? receive
+    : undefined;
 }

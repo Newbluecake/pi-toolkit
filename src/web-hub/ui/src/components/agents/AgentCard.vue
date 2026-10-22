@@ -5,7 +5,8 @@
   back/forward, middle-click-open-in-new-tab and Tab-order all work for free (ui-design §6.2).
 -->
 <script setup lang="ts">
-import { xsBadgeOf } from "./agentCardModel.js";
+import { xsBadgeOf, type XsReceive } from "./agentCardModel.js";
+import type { IconName } from "../../icons/names.js";
 import { computed, inject } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
@@ -23,6 +24,7 @@ const { t } = i18n;
 // showing `waiting`). The frozen `AgentCardView` has no dialogs field, so the card looks its
 // own agent up in the App.vue-provided `HUB_CTX` state (no provider ⇒ no badge).
 const hub = inject(HUB_CTX, null);
+const XS_ICON: Record<XsReceive, IconName> = { wake: "radio", deliver: "inbox", replies: "swap", off: "ban" };
 const xsBadge = computed(() => xsBadgeOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]));
 const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
@@ -91,7 +93,9 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
   >
     <span class="agent-row1">
       <span class="dot" :class="dotClass"></span>
-      <span class="agent-title" translate="no">{{ card.shortCwd }}</span>
+      <span class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
+        ><bdi>{{ card.shortCwd }}</bdi></span
+      >
       <span class="chip" translate="no">{{ kindLabel }}</span>
       <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
         {{ t("agents.stopped") }}
@@ -108,7 +112,16 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       <span v-if="managed?.removing" class="chip chip-removing" translate="no">
         {{ t("agents.removing") }}
       </span>
-      <span v-else-if="xsBadge" class="chip chip-xs" translate="no">{{ xsBadge }}</span>
+      <span
+        v-else-if="xsBadge"
+        class="chip chip-xs"
+        role="img"
+        :data-xs="xsBadge"
+        :title="t(`agents.xs.${xsBadge}`)"
+        :aria-label="t(`agents.xs.${xsBadge}`)"
+      >
+        <AppIcon :name="XS_ICON[xsBadge]" />
+      </span>
       <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
            `data-marked`). The click never navigates the card's <a>. -->
       <button

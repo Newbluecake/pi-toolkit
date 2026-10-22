@@ -44,6 +44,10 @@ const agents = {
   // title-auto plan: 清空输入并保存 = 把标题交回自动生成（同 /title auto）
   renameAutoHint: "留空 = 自动生成标题",
   titleAutoFailed: "恢复自动标题失败：{reason}",
+  "xs.wake": "跨会话：已加入，其他会话的消息可唤醒本会话",
+  "xs.deliver": "跨会话：已加入，其他会话的消息只送达、不唤醒本会话",
+  "xs.replies": "跨会话：已加入，只接收本会话所发请求的回复，拒收其他消息",
+  "xs.off": "跨会话：已加入，但当前拒收所有消息",
 } satisfies Messages<typeof en>;
 
 export default agents;
