@@ -50,6 +50,11 @@ const agents = {
   "xs.replies":
     "Cross-session: joined — only replies to requests this session sent are accepted; other messages are rejected",
   xsUnread: "{n} unread cross-session message(s) (cleared automatically once the model handles them)",
+  xsChannels: "Channels: {list}",
+  channelFilterAria: "Channel filter",
+  channelAll: "All",
+  channelsOpenTitle: "Manage cross-session channels",
+  channelsOpenLabel: "Channels",
   "xs.off": "Cross-session: joined — currently rejecting all messages",
 } satisfies Record<string, string>;
 

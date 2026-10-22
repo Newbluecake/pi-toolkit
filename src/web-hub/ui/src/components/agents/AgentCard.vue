@@ -5,7 +5,7 @@
   back/forward, middle-click-open-in-new-tab and Tab-order all work for free (ui-design §6.2).
 -->
 <script setup lang="ts">
-import { xsBadgeOf, xsUnreadLabel, xsUnreadOf, type XsReceive } from "./agentCardModel.js";
+import { xsBadgeOf, xsChannelChipOf, xsUnreadLabel, xsUnreadOf, type XsReceive } from "./agentCardModel.js";
 import type { IconName } from "../../icons/names.js";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { observeResize } from "../../composables/useSharedResize.js";
@@ -29,6 +29,10 @@ const XS_ICON: Record<XsReceive, IconName> = { wake: "radio", deliver: "inbox", 
 const xsBadge = computed(() => xsBadgeOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]));
 const xsUnread = computed(() =>
   xsUnreadOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]),
+);
+// channel-plan §7 (CHU): chip only for a channel set ≠ [default] and only with hub cap xs.channel.v1.
+const xsChannels = computed(() =>
+  xsChannelChipOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]),
 );
 const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
@@ -161,6 +165,13 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
               <AppIcon :name="XS_ICON[xsBadge]" />
             </span>
+            <span
+              v-if="xsChannels"
+              class="chip chip-xs-channels"
+              translate="no"
+              :title="t('agents.xsChannels', { list: xsChannels.map((c) => '#' + c).join(' ') })"
+              >{{ xsChannels.map((c) => "#" + c).join(" ") }}</span
+            >
             <span
               v-if="xsUnread !== undefined"
               class="chip chip-xs-unread"

@@ -9,7 +9,7 @@
  */
 import type { I18nHandle } from "../../composables/useI18n.js";
 import type { AgentState } from "../../types.js";
-import { toAgentCardView, xsBadgeOf, type XsReceive } from "../agents/agentCardModel.js";
+import { toAgentCardView, xsBadgeOf, xsChannelsOf, type XsReceive } from "../agents/agentCardModel.js";
 
 /** Mirrors hub/xs/router.ts `REF_LEN` (the hub is not importable from the UI bundle). */
 export const SESSION_REF_LEN = 12;
@@ -39,6 +39,9 @@ export function sessionMentionTargets(
   const self = selfKey === null ? undefined : agents.get(selfKey);
   if (xsBadgeOf(self, hubCaps) === undefined) return [];
   const selfSessionId = sessionIdOf(self);
+  // channel-plan §7: with hub cap `xs.channel.v1` only sessions sharing a channel are offered
+  // (a UI hint — the hub's list/send authorization is authoritative). No cap ⇒ undefined ⇒ no filter.
+  const selfChannels = xsChannelsOf(self, hubCaps);
   const out: SessionMentionTarget[] = [];
   const seen = new Set<string>();
   for (const [key, agent] of agents) {
@@ -47,6 +50,10 @@ export function sessionMentionTargets(
     if (receive === undefined) continue;
     const sid = sessionIdOf(agent);
     if (sid === "" || sid === selfSessionId || seen.has(sid)) continue;
+    if (selfChannels !== undefined) {
+      const theirs = xsChannelsOf(agent, hubCaps);
+      if (theirs === undefined || !theirs.some((c) => selfChannels.includes(c))) continue;
+    }
     const view = toAgentCardView(agent, t);
     if (view.visualState === "offline" || view.visualState === "stale") continue;
     seen.add(sid);

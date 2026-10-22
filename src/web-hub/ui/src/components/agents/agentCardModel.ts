@@ -179,11 +179,38 @@ export function xsUnreadLabel(n: number): string {
 
 export type XsReceive = "wake" | "deliver" | "replies" | "off";
 
-/** Read-only xs badge. Hub cap is required; absent/malformed membership status is inert. */
+/** Channel-plan §2.1/§3.1: hub/agent cap and default channel (UI mirror constants, same
+ *  precedent as `SESSION_REF_LEN` — the protocol module is not importable from the UI bundle). */
+export const XS_CHANNEL_CAP = "xs.channel.v1";
+export const XS_DEFAULT_CHANNEL = "default";
+
+/** Effective channel set of an agent (§3.2: `status.xs.channels`, absent ∧ joined ⇒ `[default]`).
+ *  Requires hub caps ∋ `xs.channel.v1`; undefined = no cap / not a member / malformed. */
+export function xsChannelsOf(agent: AgentState | undefined, hubCaps: unknown): readonly string[] | undefined {
+  if (!Array.isArray(hubCaps) || !hubCaps.includes(XS_CHANNEL_CAP) || !agent) return undefined;
+  const xs = record(record(agent.status)["xs"]);
+  const raw = xs["channels"];
+  if (Array.isArray(raw)) {
+    const names = raw.filter((c): c is string => typeof c === "string" && c !== "");
+    if (names.length > 0) return names;
+  }
+  return xs["joined"] === true ? [XS_DEFAULT_CHANNEL] : undefined;
+}
+
+/** Channels worth a chip: only a set that differs from `[default]` renders (§7). */
+export function xsChannelChipOf(agent: AgentState | undefined, hubCaps: unknown): readonly string[] | undefined {
+  const set = xsChannelsOf(agent, hubCaps);
+  if (set === undefined) return undefined;
+  return set.length === 1 && set[0] === XS_DEFAULT_CHANNEL ? undefined : set;
+}
+
+/** Read-only xs badge. Hub cap is required; absent/malformed membership status is inert.
+ *  A session that only sits in named channels reports `joined:false` (§3.2) — with the channel
+ *  cap and a non-empty `channels` it still counts as a member. */
 export function xsBadgeOf(agent: AgentState | undefined, hubCaps: unknown): XsReceive | undefined {
   if (!Array.isArray(hubCaps) || !hubCaps.includes("xs.v1") || !agent) return undefined;
   const xs = record(record(agent.status)["xs"]);
-  if (xs["joined"] !== true) return undefined;
+  if (xs["joined"] !== true && xsChannelsOf(agent, hubCaps) === undefined) return undefined;
   const receive = xs["receive"];
   return receive === "wake" || receive === "deliver" || receive === "replies" || receive === "off"
     ? receive

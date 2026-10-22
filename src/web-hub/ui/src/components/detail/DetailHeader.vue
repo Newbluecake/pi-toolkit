@@ -57,7 +57,7 @@ import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
-import { xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
+import { XS_CHANNEL_CAP, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -252,6 +252,20 @@ const clearError = ref<string | null>(null);
 const resumeHost = inject(RESUME_DIALOG, null);
 const resumeUsable = computed(() => clearUsable.value && resumeAvailable(status.value));
 
+// ---------------------------------------------------------------------------
+// channel-plan §7 (CHU): 「频道」 button → lazy ChannelsDialog. Needs hub cap xs.channel.v1, the
+// session's `status.xs` slot (xs usable on that session) and the same control gate as 「清空」
+// (the dialog drives `/fabric join|leave` through the command channel).
+// ---------------------------------------------------------------------------
+const ChannelsDialog = defineAsyncComponent(() => import("./ChannelsDialog.vue"));
+const channelsOpen = ref(false);
+const channelsUsable = computed(() => {
+  const caps = hub?.state.value.hub?.["caps"];
+  if (!Array.isArray(caps) || !caps.includes(XS_CHANNEL_CAP)) return false;
+  const xs = (status.value as { xs?: unknown } | undefined)?.xs;
+  return clearUsable.value && typeof xs === "object" && xs !== null;
+});
+
 async function onClear(): Promise<void> {
   const view = controlView;
   const c = view?.control ?? null;
@@ -367,6 +381,19 @@ function onToggleHeadInfo(): void {
       </button>
       <!-- web-resume §2.6 D7 (P3): 「恢复」 opens the resume picker — clear-button gating +
            resume.v1; never busy-gated (D4: busy ⇒ list browsable, rows not switchable). -->
+      <button
+        v-if="channelsUsable"
+        class="detail-channels-btn"
+        type="button"
+        :title="t('agents.channelsOpenTitle')"
+        :aria-label="t('agents.channelsOpenTitle')"
+        aria-haspopup="dialog"
+        @click="channelsOpen = true"
+      >
+        <AppIcon name="radio" class="icon" />
+        <span class="head-btn-label" aria-hidden="true">{{ t("agents.channelsOpenLabel") }}</span>
+      </button>
+      <ChannelsDialog v-if="channelsOpen" @close="channelsOpen = false" />
       <button
         v-if="resumeUsable"
         class="detail-resume-btn"

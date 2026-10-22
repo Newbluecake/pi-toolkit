@@ -302,3 +302,112 @@
   color: var(--c-text-3);
   font-size: var(--fs-2xs);
 }
+
+/* --- ChannelsDialog (channel-plan §7, CHU) — reuses PickerSheet chrome + the resume sheet cap --- */
+
+.picker-scrim.channels-scrim {
+  align-items: center;
+  justify-content: center;
+}
+
+@media (min-width: 641px) {
+  .picker-scrim.channels-scrim .picker-sheet {
+    width: min(440px, calc(100vw - 32px));
+    max-height: min(70vh, 520px);
+    border: 1px solid var(--c-border);
+    border-radius: 12px;
+    box-shadow: 0 12px 36px rgb(19 32 38 / 0.22);
+  }
+}
+
+.channels-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-height: 100%;
+  padding-bottom: 12px;
+  overflow-y: auto;
+}
+
+.channels-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 0;
+}
+
+.channels-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.channels-list {
+  margin: 0;
+  padding: 0 12px;
+  list-style: none;
+}
+
+.channels-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 36px;
+  cursor: pointer;
+}
+
+.channels-name {
+  font-weight: var(--fw-semibold);
+  overflow-wrap: anywhere;
+}
+
+.channels-count {
+  margin-inline-start: auto;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.channels-note,
+.channels-hint,
+.channels-empty,
+.channels-status {
+  margin: 0;
+  padding: 0 12px;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
+
+.channels-note {
+  padding: 0 0 4px 28px;
+}
+
+.channels-status[data-kind="err"] {
+  color: var(--c-danger, #c0392b);
+}
+
+.channels-new {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 12px 0;
+}
+
+.channels-new-label {
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+}
+
+.channels-new-row {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.channels-new-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.channels-new .channels-hint {
+  padding: 0;
+}

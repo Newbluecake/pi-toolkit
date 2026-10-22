@@ -1062,6 +1062,14 @@
   height: 12px;
 }
 
+.chip-xs-channels {
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+}
+
 .chip-xs-unread {
   display: inline-flex;
   align-items: center;
@@ -1087,4 +1095,30 @@
 .chip-xs[data-xs="off"] {
   color: var(--c-text-3);
   opacity: 0.6;
+}
+
+/* channel-plan §7 (CHU): sidebar channel filter chips + card chip pressed state */
+.channel-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 0 2px;
+}
+
+.channel-filter .chip {
+  cursor: pointer;
+  background: transparent;
+  font: inherit;
+  font-size: var(--fs-xs);
+}
+
+.channel-filter .chip[aria-pressed="true"] {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+
+.channel-filter .chip:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 1px;
 }
