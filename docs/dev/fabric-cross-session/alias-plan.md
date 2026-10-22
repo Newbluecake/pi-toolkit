@@ -301,7 +301,7 @@ token 只证明「这个请求方对这一确切状态做过预览」，不能�
 
 ### 3.6 新旧互通
 
-- **hub cap**：`HubConfig.crossSession` 存在**且**加载结果为 `ready` 时，本次运行声明 `xs.alias.v1`（记作 `aliasAdvertised`，整个运行期不变）。可选参数 `HubConfig.crossSession.alias?: {offlineLeaseH, coolMin, takeMinOfflineMin}`；缺失 ⇒ 默认值 168/10/10，**缺失永远不表示关闭**；`takeMinOfflineMin` 的范围是 10–1440（下限即 NQ1，不能调到 0）。`hub/main.ts` 复核时，有任何非法值就丢弃整个子键。
+- **hub cap**（AL6 修订，按 AL2 实现）：`HubConfig.crossSession.alias` 键**缺失 ⇒ 关闭**（不建表、不读写文件、不声明 cap，hub 字节不变）；键存在（agent 只在 `alias.enabled=true` 时才写）且加载结果为 `ready` 时，本次运行声明 `xs.alias.v1`（记作 `aliasAdvertised`，整个运行期不变）；非法值 ⇒ 丢弃该键并记日志（等同缺失）；加载 `degraded` ⇒ 不声明 cap，并经 `hub.json.alias{degraded,reason,path}` 供 `/webhub status` 渲染（ready/关闭时该键缺席）。子键 `alias: {offlineLeaseH, coolMin, takeMinOfflineMin}` 的叶子缺失 ⇒ 默认值 168/10/10；`takeMinOfflineMin` 的范围是 10–1440（下限即 NQ1，不能调到 0）。`hub/main.ts` 复核时，有任何非法值就丢弃整个子键。
 - **agent cap**：`xsOn ∧ alias.enabled`。
 - **`aliasUsable(self) = aliasAdvertised ∧ self.aliasCapable`**（与 agent 侧「本端 alias on ∧ hub 声明了 cap」完全对称）：别名层、按别名排序、`target.sessionId`/`target.alias`、`rows/candidates.alias`、**send 只做精确解析**（§5.2）全部按它门控；`ready`/`wedged`/`disabled` 下都成立，差别只在写（矩阵见 §3.3）。`from.alias` 按收件方的 `aliasUsable` 写出。
 
@@ -501,18 +501,21 @@ AL0a（r3 获批后即可） → [CH6 合入] → AL0b → { AL1 → AL2 } ∥ A
 
 ## 11. 残留（接受的近似）
 
-| #   | 残留                                                                                                                                                                                                                                                 |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R1  | 绑定文件被**人为删除或移走**（包括处理损坏时人手动移走）⇒ 按全新处理，所有别名消失，`aliasUsable` 的请求方用这些词时回落到名字层（可能找到同名会话）。损坏或不可读时 hub 从不自动移走文件，每次启动都是 degraded，**不**回落；加载超时只影响本次运行 |
-| R2  | 显示名恰好等于一个不可达的别名 ⇒ `aliasUsable` 的请求方只能用 ref 或它自己的别名找到它                                                                                                                                                               |
-| R3  | 别名超过 20 个时，list 截断可能漏掉一部分；`@别名` 未命中就放行，并触发刷新                                                                                                                                                                          |
-| R4  | 骨架表不包含 CJK↔CJK 形近字（如 `カ/力`）                                                                                                                                                                                                            |
-| R5  | 冷却期只能缓解「list 快照过期」导致的误投，不能消除                                                                                                                                                                                                  |
-| R6  | `lost` 提示在每个进程内只出现一次；pi 重启后，只要墓碑还在，会再提示一次                                                                                                                                                                             |
-| R7  | 抢占预览向发起方透露持有会话的 cwd 和离线时长（Q5 已接受）                                                                                                                                                                                           |
-| R8  | hub 每次重启都给离线持有者重置一次 7 天保留期（偏向持有者；在场状态不落盘的代价）                                                                                                                                                                    |
-| R9  | `E_XS_ALIAS_UNKNOWN`（rename 在途）期间，同一 hub 上所有别名写入都 busy，直到 rename 结束或 hub 重启；读与寻址不受影响                                                                                                                               |
-| R10 | 绑定文件损坏后，别名功能在人手动修复前一直不可用（每次启动都是 degraded）；用别名形状的名字寻址会得到 UNAVAILABLE，需要改用 ref                                                                                                                      |
+| #   | 残留                                                                                                                                                                                                                                                                                  |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | 绑定文件被**人为删除或移走**（包括处理损坏时人手动移走）⇒ 按全新处理，所有别名消失，`aliasUsable` 的请求方用这些词时回落到名字层（可能找到同名会话）。损坏或不可读时 hub 从不自动移走文件，每次启动都是 degraded，**不**回落；加载超时只影响本次运行                                  |
+| R2  | 显示名恰好等于一个不可达的别名 ⇒ `aliasUsable` 的请求方只能用 ref 或它自己的别名找到它                                                                                                                                                                                                |
+| R3  | 别名超过 20 个时，list 截断可能漏掉一部分；`@别名` 未命中就放行，并触发刷新                                                                                                                                                                                                           |
+| R4  | 骨架表不包含 CJK↔CJK 形近字（如 `カ/力`）                                                                                                                                                                                                                                             |
+| R5  | 冷却期只能缓解「list 快照过期」导致的误投，不能消除                                                                                                                                                                                                                                   |
+| R6  | `lost` 提示在每个进程内只出现一次；pi 重启后，只要墓碑还在，会再提示一次                                                                                                                                                                                                              |
+| R7  | 抢占预览向发起方透露持有会话的 cwd 和离线时长（Q5 已接受）                                                                                                                                                                                                                            |
+| R8  | hub 每次重启都给离线持有者重置一次 7 天保留期（偏向持有者；在场状态不落盘的代价）                                                                                                                                                                                                     |
+| R9  | `E_XS_ALIAS_UNKNOWN`（rename 在途）期间，同一 hub 上所有别名写入都 busy，直到 rename 结束或 hub 重启；读与寻址不受影响                                                                                                                                                                |
+| R10 | 绑定文件损坏后，别名功能在人手动修复前一直不可用（每次启动都是 degraded）；用别名形状的名字寻址会得到 UNAVAILABLE，需要改用 ref                                                                                                                                                       |
+| R11 | hub 由 `alias.enabled=false` 的会话拉起时（不写 `crossSession.alias` 键），本次 hub 运行期内无人可用别名（全部回落旧行为），直到某个 alias-enabled 的会话执行 `/webhub restart`                                                                                                       |
+| R12 | 保留地址（如 `root`）作为 `to`：`aliasUsable` 请求方的 send 得到 `NO_TARGET`（§5.2「找不到一律 NO_TARGET」），不再是 `BAD_TARGET`；agent 本地本来也会先拒绝                                                                                                                           |
+| R13 | 工具实例按**本端** `alias.enabled` 在 activate 时冻结（不看 hub cap，避免晚到/重连/换 hub 改写描述、破坏 provider 缓存前缀）：alias on 的会话连上旧 hub（或 degraded hub）时，工具描述仍是别名版，但寻址运行期退回旧行为（sender 不 pin、mention 走旧分支、`/fabric alias` 本地拒绝） |
 
 ---
 

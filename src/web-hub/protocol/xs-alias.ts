@@ -233,3 +233,11 @@ export function parseTakeConfirm(output: string): { readonly alias: string; read
   if (!n.ok || n.alias !== alias) return undefined;
   return { alias, token };
 }
+
+/** `hub.json`'s `alias` field (alias-plan §3.3, AL6): written ONLY when the binding store booted `degraded`
+ *  (ready/off ⇒ key absent, hub.json byte-identical). Lives in protocol/ because the agent side reads it. */
+export interface XsAliasHubStatus {
+  readonly degraded: true;
+  readonly reason: string;
+  readonly path: string;
+}

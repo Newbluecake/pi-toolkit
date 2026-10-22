@@ -35,6 +35,10 @@ if (process.argv[2] === "hub") {
   let release: (() => void) | undefined;
   let barrier: Promise<void> = Promise.resolve();
   let request!: Registry["request"];
+  // alias-plan AL6: the hub clock is injected through `StartHubDeps.now` (no production hook) so the
+  // 10-minute take threshold can be crossed without sleeping. Only moves forward, only via the `skew` op.
+  let hubSkew = 0;
+  const lates = new Map<string, unknown>(); // cmd_late frames by cmdId (web command output arrives here)
   const hub = await startHub(
     {
       home: process.env.HOME!,
@@ -52,6 +56,8 @@ if (process.argv[2] === "hub") {
               ...(process.env.XW_HUB_REPLY_OFF === "1" ? { reply: false } : {}),
               // channel-plan §3.1 (CHW): hub-global broadcast params (absent ⇒ hub defaults 16/4).
               ...(process.env.XW_HUB_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_HUB_CHANNELS_JSON) } : {}),
+              // alias-plan AL6: `crossSession.alias` present ⇒ binding table on (key absent ⇒ legacy hub).
+              ...(process.env.XW_HUB_ALIAS_JSON ? { alias: JSON.parse(process.env.XW_HUB_ALIAS_JSON) } : {}),
             },
           }),
     },
@@ -66,6 +72,7 @@ if (process.argv[2] === "hub") {
             sessionId: frame.sessionId,
             ...(frame.t === "xs_member" ? { joined: frame.joined } : {}),
           });
+        if (frame.t === "cmd_late") lates.set((frame as any).id, frame);
         if (frame.t === "status") statusInbox.push({ key, xsInbox: (frame as any).xsInbox });
         return onFrame(key, frame);
       };
@@ -94,6 +101,7 @@ if (process.argv[2] === "hub") {
         },
       };
     },
+    { now: () => Date.now() + hubSkew },
   );
   if ("exists" in hub) throw new Error("hub unexpectedly already exists");
   handle = async (m) => {
@@ -137,6 +145,35 @@ if (process.argv[2] === "hub") {
         },
         5000,
       );
+    }
+    if (m.op === "skew") {
+      hubSkew += m.ms;
+      return hubSkew;
+    }
+    if (m.op === "webCmd") {
+      // alias-plan AL6: a web-origin `command` op (captured extension command) addressed to one agent, exactly
+      // the shape the browser's useTrackedCommand sends. A captured command settles through the late channel:
+      // like the UI we wait for the `cmd_late` frame of this cmdId and return `{first, final}` — the immediate
+      // cmd_result and the late frame carrying the captured output (undefined when nothing was captured).
+      const agent = registry.list().find((a) => a.session?.sessionId === m.sessionId)!;
+      const id = m.cmdId ?? `web-cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const mk = (extra: object) => ({
+        t: "cmd",
+        rid: `wc-${Date.now()}-${Math.random()}`,
+        id,
+        deadlineMs: 4000,
+        origin: { listener: "loopback", ip: "127.0.0.1", reqId: "xs-web-cmd" },
+        cmd: { op: "command", name: m.name ?? "fabric", args: m.args ?? "", ...(m.confirm ? { confirm: true } : {}) },
+        ...extra,
+      });
+      const first: any = await request(agent.agentKey, mk({}) as any, 5000);
+      let final: any;
+      if (first.ok === true && first.data?.captured === true) {
+        const end = Date.now() + 4000;
+        while (Date.now() < end && !lates.has(id)) await new Promise((r) => setTimeout(r, 30));
+        final = lates.get(id);
+      }
+      return { first, final };
     }
     if (m.op === "webPrompt") {
       // MW: a web composer prompt (op:prompt) addressed to one agent — exercises the web mention path.
@@ -186,6 +223,7 @@ if (process.argv[2] === "hub") {
       enabled: true,
       autoStart: false,
       control: true,
+      ...(process.env.XW_WEB_POLICY_JSON ? { webCommandPolicy: JSON.parse(process.env.XW_WEB_POLICY_JSON) } : {}),
       uploads: "off",
       preview: "off",
       avatar: false,
@@ -212,6 +250,8 @@ if (process.argv[2] === "hub") {
         ...(process.env.XW_REPLY_JSON ? { reply: JSON.parse(process.env.XW_REPLY_JSON) } : {}),
         // channel-plan §6.4 (CHW): `fabric.crossSession.channels` overrides.
         ...(process.env.XW_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_CHANNELS_JSON) } : {}),
+        // alias-plan AL6: `fabric.crossSession.alias` overrides (e.g. {"enabled":false} = a pre-alias agent).
+        ...(process.env.XW_ALIAS_JSON ? { alias: JSON.parse(process.env.XW_ALIAS_JSON) } : {}),
         limits: { listPerMin: 60, pairMinIntervalMs: 5000, pairWakesPerHour: 20, wakesOutPerHour: 60 },
       },
     },
@@ -291,7 +331,7 @@ if (process.argv[2] === "hub") {
     registerMessageRenderer() {},
     appendEntry: (kind: string, data: unknown) => sm.appendCustomEntry(kind, data),
     getAllTools: () => [...tools.values()],
-    getCommands: () => [...commands].map(([name, c]) => ({ name, description: c.description })),
+    getCommands: () => [...commands].map(([name, c]) => ({ name, description: c.description, source: "extension" })),
     getActiveTools: () => [...tools.keys()],
     setActiveTools() {},
     getSessionName: () => process.env.XW_NAME,
@@ -310,6 +350,11 @@ if (process.argv[2] === "hub") {
     },
     sendUserMessage(text: string) {
       userMessages.push(text);
+      // alias-plan AL6 (opt-in XW_RUN_SLASH=1): like pi, a slash command sent as a user message runs its (capture-wrapped) handler
+      // inside this call stack — this is how a web `command` op reaches an extension command.
+      const slash = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(text);
+      const handler = slash === null || process.env.XW_RUN_SLASH !== "1" ? undefined : commands.get(slash[1]!)?.handler;
+      if (handler !== undefined) void Promise.resolve(handler(slash![2] ?? "", ctx)).catch(() => {});
     },
     exec: async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
     events: {

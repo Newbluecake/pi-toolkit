@@ -95,6 +95,7 @@ import { createSpawnPrefs } from "./spawn/prefs.js";
 import { createPreviewRoutes } from "./preview/routes.js";
 import { createAvatarRoutes } from "./avatar/routes.js";
 import { createAvatarStore } from "./avatar/store.js";
+import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
 import { createPrivacyRoutes } from "./privacy/routes.js";
 import { createPrivacyStore, type PrivacyStore } from "./privacy/store.js";
 import { verifyPassword } from "./lan-auth.js";
@@ -425,13 +426,16 @@ export async function startHub(
     // the file and only logs; recovery is a human fixing/moving the file + `/webhub restart`.
     const xsAliasParams = hubXsAliasParamsOf(config.crossSession);
     let xsAlias: XsAliasBinding | undefined;
+    let xsAliasDegraded: { reason: string; path: string } | undefined;
     if (xsAliasParams !== undefined) {
       const binding = createXsAliasBinding({ stateDir: paths.stateDir, params: xsAliasParams, log, now });
       xsAlias = binding;
       cleanup.push(async () => binding.store.close());
       const loaded = await startupStep(binding.store.load());
       if (loaded.state === "degraded") {
-        log.warn("xs alias store degraded", { reason: loaded.reason, path: binding.store.status().path });
+        const path = binding.store.status().path;
+        log.warn("xs alias store degraded", { reason: loaded.reason, path });
+        xsAliasDegraded = { reason: String(loaded.reason), path };
       }
     }
     const extraHubCaps: readonly string[] = [
@@ -1968,6 +1972,8 @@ export async function startHub(
     };
     let lastProxyPortsStore = proxyStatusOf()?.portsStore;
     const initialProxy = proxyStatusOf();
+    const initialAlias: XsAliasHubStatus | undefined =
+      xsAliasDegraded === undefined ? undefined : { degraded: true, ...xsAliasDegraded };
     const identity = await startupStep(identityFields());
     // No await separates this gate from hub.json and the running log publication.
     if (closing !== undefined) return await closedResult();
@@ -1986,6 +1992,7 @@ export async function startHub(
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),
       ...(initialProxy === undefined ? {} : { proxy: initialProxy }),
+      ...(initialAlias === undefined ? {} : { alias: initialAlias }),
       ui: initialUi,
     }); // ⑦
 

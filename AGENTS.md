@@ -413,6 +413,42 @@ sender-channel,directory-channel,unread}*.test.ts`, `tests/web-hub/hub/xs-{chann
   are not secrets; unread can clear early (context_edit/compaction/provider error/`/tree`/abort, IR1–IR4) or undercount (restart/fork, IR5/IR6);
   bare-name completion uniqueness rests on a ≤10 min cache (hub resolves explicit refs authoritatively); `level===0` relies on an honest
   sender (same-uid trust; receivers still enforce maxLevel); broadcast wake budgets are consumed conservatively.
+  **Session aliases (alias-plan r4, `docs/dev/fabric-cross-session/alias-plan.md`; packages AL0a/AL0b/AL1/AL2/AL3/AL4/AL5a/AL5b/ALU/ALW/AL6,
+  reports `AL*-report.md`, real-device checklist `alias-acceptance.md`)**: a human-assigned, hub-unique short name per session (≤16 grapheme
+  clusters/≤48 bytes; ASCII alnum/`_`/`-`, CJK, kana, hangul; `src/web-hub/protocol/xs-alias.ts` `normalizeAlias` folds full-width/`@`, rejects
+  invisible/Jamo-filler/id-like/reserved words, skeleton blocks look-alikes — CJK↔CJK pairs like `カ/力` are accepted residue). Settings
+  `fabric.crossSession.alias.{enabled (default true),offlineLeaseH (168),coolMin (10),takeMinOfflineMin (10, floor 10)}`, non-live (activate/
+  stack build + hub start). Cap `xs.alias.v1` on both surfaces = `xsOn ∧ alias.enabled` (agent) / hub `crossSession.alias` key present ∧ store
+  `ready` (hub); **key absent ⇒ off ⇒ hub byte-identical** (agent writes the key only when alias.enabled, so whoever spawns the hub decides for the
+  run — residual R11). Only humans set/clear/take: `/fabric alias [<名>|--clear|<名> --take[=<token>]]` (local TUI/RPC/web per
+  `webCommandPolicy.fabric`; Feishu hard-refused at handler line 1 + prompt-text guard; no tool, no agent path; child sessions have no `/fabric`).
+  Take = preview (token bound to requester/alias/holder/rev/offlineSince, 5 min, ≤32 in hub memory, **every outcome consumes it**, preview counts
+  toward `listPerMin`) → confirm (TUI `ctx.ui.confirm`; web/RPC echo ends with the fixed `XS_ALIAS_TAKE_CONFIRM_RE` line that `useTrackedCommand`
+  parses from THAT command's captured output only) → execute with token; only a holder offline ≥10 min can be taken, an online/<10 min holder is
+  refused. **Hub single writer** (`hub/xs/aliases.ts`, `<stateDir>/xs-aliases.json`, 0600, ≤256 records/64 KiB): intents on disk, presence in
+  memory (restart restarts the 7-day lease, R8), shared step G (a grant demotes the grantee's other aliases to 10-min cooling — cooling is
+  reclaimable only by its owner), tombstones feed the one-shot `lost{taken|expired}` notice on reattach, rename-stall ⇒ `wedged` (writes busy,
+  reads keep the old table, >60 s ⇒ `disabled`), load three-state `ready|degraded` — **degraded never touches/moves the file**, declares no cap,
+  and guards alias-shaped names (UNAVAILABLE, never falls back to a same-named session; R10) until a human fixes/moves the file +
+  `/webhub restart`; the hub logs it AND writes `hub.json.alias{degraded,reason,path}` (key absent when healthy) which `/webhub status` renders as
+  `alias store degraded (…) · <path>` (`agent/alias-status.ts`). **Addressing**: for an `aliasUsable` requester (`aliasAdvertised ∧ aliasCapable`)
+  the alias layer is consulted FIRST and a hit is final — an unreachable alias (offline, not joined, other channel, self, cooling) answers
+  NO_TARGET and never falls through to names; a full sessionId / ref is exact-only (no prefix, no name) and `send` pins the full sessionId
+  (kills the same-ref/UUIDv7 and name-equals-sid spoofs); reserved addresses such as `root` ⇒ NO_TARGET (R12); without the cap every frame,
+  resolution and ordering is byte-identical to the channel build (pinned by the v0.7.1 router diff). Model-visible surface: tool descriptions gain
+  an alias sentence, rows/candidates/target carry `alias`, incoming headers carry an INDEPENDENT ` alias="…"` field after `from=` (hub-verified;
+  `from` is self-reported). **Tool instances freeze on the LOCAL `alias.enabled`** (never the hub cap — a late/changed cap must not rewrite
+  descriptions and break the prompt-cache prefix); cost: alias-on session on an old/degraded hub keeps the alias-flavoured description while
+  addressing falls back to legacy (R13). `/fabric status` adds `alias @x held · lease 7d · cool 10m | alias - (lost: taken) | alias n/a
+(hub-cap off|alias.enabled=false)`. `@alias`/`@session:` mention (`mention/session.ts`, directory cache holds aliases; miss ⇒ one throttled refresh).
+  Gates: `tests/web-hub/protocol/xs-alias.test.ts`, `tests/web-hub/hub/{xs-alias*,hub-xs-alias,xs-router-v071-diff}.test.ts` (+AL1 property),
+  `tests/fabric/xs-alias*.test.ts`, `tests/integration/fabric-xs-alias-wiring.test.ts` (real activate × fake hub socket) and
+  `tests/integration/fabric-xs-alias.test.ts` (real hub child × 3 real stacks; hub clock injected via `StartHubDeps.now` through the fixture's
+  `skew` op — no production hook; covers set/send/@/channel scope/take chain/corrupt-file restart/web `webCommandPolicy.fabric=confirm`/mixed fleet),
+  conformance **C-X11** (alias tool schema stable, alias only as independent header field, details/token out of the payload; run with C-X1…C-X10
+  before any pi peer bump). The three off goldens and `tests/fixtures/legacy-xs-v071/` are never regenerated. Accepted residuals: R1–R13 in plan §11
+  (hand-deleted file ⇒ fresh table, display name equal to an unreachable alias, >20 aliases truncate list, cooling only mitigates stale-list mis-sends,
+  `lost` notice once per process, preview discloses holder cwd/offline time).
 - `src/consult/` — in-turn expert consultation (`consult` tool). A subagent dispatched with an
   `experts` whitelist (`Agent({ experts })`, resolved to verified runIds at dispatch) gets the
   `consult` tool and can synchronously ask an already-finished expert run: the expert's persisted
@@ -832,6 +868,15 @@ resume:active-elsewhere` unless `confirm`) re-runs synchronously at the executio
   (channels aggregated client-side from the sessions' pushed `status.xs.channels` — no new endpoint; ticking sends `/fabric join|leave #x` through the
   existing web command op under `webCommandPolicy.fabric`, no optimistic update, Feishu still refused, ≤4/reserved names disabled client-side); unread
   badge (`StatusInfo.xsInbox`) on AgentCard and `DetailHeader.vue`. Design: `docs/dev/fabric-cross-session/channel-plan.md` §7/§12.6.
+  **Aliases in the web UI (alias-plan §7, ALU)**: gated on hub caps ∋ `xs.alias.v1` AND the session's `status.xs.alias` (absent ⇒ UI byte-identical,
+  DetailDock untouched). `composables/useTrackedCommand.ts` is the only path that runs web alias commands: own cmdId per command, `E_CONFIRM_REQUIRED`
+  ⇒ generic confirm (`CommandConfirm.vue`) then a NEW cmdId with `confirm:true`, async completion ⇒ watches that cmdId's `pendingCtl` entry then one
+  `queryOnly` and unwraps `data.output`, 15 s timeout/dialog close/session switch drop late results (never undoes the command). `ChannelsDialog.vue`
+  (titled 「频道与别名」) has an alias area: live `normalizeAlias` pre-validation, ≤3 suggestion chips (others' taken ones greyed from pushed
+  `status.xs.alias`), save/clear/take (take: preview → token parsed from that one output → confirm dialog with countdown → execute), no optimistic
+  update. AgentCard chip order `kind → state → xs badge → @alias → #channels → unread` (alias cut at 8 grapheme clusters, title = full);
+  DetailHeader shows `@alias` opening the dialog; the `@` panel matches/shows alias but still inserts `session:<ref>`; `logic/xsMessage.ts` reads
+  ` alias="…"` from the first line independently of field order. Design: `docs/dev/fabric-cross-session/alias-plan.md` §7.
   **Session switching (web-hub-session-switch plan, E1+D2)**: the browser UI keeps the last K sessions subscribed on
   the hub (main-subscription LRU keep-alive; browser pref `pwh_keepalive`, default 3, `1` = legacy single-slot, pure
   planner `ui/src/logic/sessionKeepAlive.ts`; `useHub`'s library default stays 1 — only App.vue lifts it to the product

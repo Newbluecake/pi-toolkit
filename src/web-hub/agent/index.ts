@@ -83,6 +83,8 @@ import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
 import { formatPrivacyStatusLines } from "./privacy-status.js";
+import { formatAliasStatusLines } from "./alias-status.js";
+import type { XsAliasHubStatus } from "../protocol/xs-alias.js";
 import { formatProxyStatusLines, type ProxyHubStatus } from "./proxy-status.js";
 import { cmdArgsStatusLevel, formatCmdArgsStatusLines } from "./cmd-args-status.js";
 import { packageUiDistDir } from "../protocol/paths.js";
@@ -419,6 +421,10 @@ export interface WebHubControl {
   /** web-hub-proxy plan v2 §5 (X1c): port-proxy status lines. Optional so pre-feature
    * `WebHubControl` doubles keep compiling; `/webhub status` prints nothing when absent. */
   proxy?: {
+    statusLines(): string[];
+  };
+  /** alias-plan §3.3 (AL6): alias-store degraded line, off `hub.json.alias`. Optional like `proxy`. */
+  alias?: {
     statusLines(): string[];
   };
   /** fabric phase-2 T1 §7.2 (`web_exec` fence input, X2): `resumeExec.switchInFlight() ∨
@@ -1717,6 +1723,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     ui?: UiStatus;
     privacy?: PrivacyHubStatus;
     proxy?: ProxyHubStatus;
+    alias?: XsAliasHubStatus;
   }
 
   const readHubJsonRecord = (): HubJsonSnapshot | undefined => {
@@ -1736,6 +1743,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (isStructurallyPrivacyStatus(parsed.privacy)) rec.privacy = parsed.privacy;
       // proxy (plan v2 §5 X1c): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyProxyStatus(parsed.proxy)) rec.proxy = parsed.proxy;
+      // alias (plan §3.3 AL6): structural-only — malformed ⇒ absent.
+      const al = parsed.alias as Record<string, unknown> | null | undefined;
+      if (
+        al !== null &&
+        typeof al === "object" &&
+        al.degraded === true &&
+        typeof al.reason === "string" &&
+        typeof al.path === "string"
+      )
+        rec.alias = { degraded: true, reason: al.reason, path: al.path };
       return rec;
     } catch {
       return undefined;
@@ -1820,6 +1837,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       allowlistActive: rec?.lan?.state === "on" && rec.lan.allowClients !== undefined,
     });
   };
+
+  const aliasStatusLines = (): string[] => formatAliasStatusLines(readHubJsonRecord()?.alias);
 
   const sendLanReq = async (op: "info" | "unlock"): Promise<LanAdminResult<LanInfoPayload | undefined>> => {
     const c = conn;
@@ -2013,6 +2032,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     proxy: {
       statusLines: proxyStatusLines,
+    },
+    alias: {
+      statusLines: aliasStatusLines,
     },
     // fabric phase-2 T1 §7.2 (X2): the `web_exec` fence input — resume switch in flight ∨ the
     // shared exec claim held (`/new` or a resume ticket). Read-only, never throws (both

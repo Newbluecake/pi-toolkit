@@ -65,6 +65,8 @@ async function host(
     extensions?: Array<(pi: ExtensionAPI) => void>;
     ui?: unknown;
     autoCompact?: boolean;
+    /** C-X11: register the alias-description instances (`alias:true`, activate-frozen in production). */
+    aliasTools?: boolean;
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "fabric-xs-conformance-"));
@@ -152,8 +154,8 @@ async function host(
             send: async () => ({ kind: "off" }),
           },
         });
-        api.registerTool(createListSessionsTool({ sender }));
-        api.registerTool(createMessageSessionTool({ sender }));
+        api.registerTool(createListSessionsTool({ sender, ...(options.aliasTools ? { alias: true } : {}) }));
+        api.registerTool(createMessageSessionTool({ sender, ...(options.aliasTools ? { alias: true } : {}) }));
       },
       ...(options.extensions ?? []),
     ],
@@ -907,6 +909,92 @@ describe("fabric phase-2 real pi contracts", () => {
       expect(x.json.system).toEqual(h.stub.requests[0]!.json.system);
       expect(x.json.tools).toEqual(h.stub.requests[0]!.json.tools);
     }
+    expect(h.errors).toEqual([]);
+  }, 30_000);
+
+  /**
+   * C-X11 (alias-plan §9): real pi + local Anthropic stub. The alias-flavoured tool instances (description
+   * suffix only; same parameter schema) are byte-stable across requests; a hub-stamped `from.alias` reaches the
+   * model ONLY as the independent ` alias="…"` header field (never inside `from=` and never as JSON metadata);
+   * details / token / xid / the full sessionId never enter the provider payload.
+   */
+  it("C-X11: alias tool schema is stable across requests; alias rides only as an independent header field; details/token stay out of the provider payload", async () => {
+    const h = await host({ aliasTools: true });
+    await prime(h);
+    const sessionId = h.manager.getSessionId();
+    const membership = new XsMembership({
+      sessionId,
+      persist: (data) => h.pi.appendEntry(XS_MEMBERSHIP_CUSTOM_TYPE, data),
+      replyEnabled: true,
+    });
+    membership.attach();
+    membership.join();
+    membership.setReceive("wake");
+    const r = new XsReceiver({
+      sessionId,
+      membership,
+      fence: h.fence,
+      inbox: new XsInbox(8),
+      controller: h.controller,
+      recvPerHour: 100,
+      wakesInPerHour: 100,
+      host: {
+        isIdle: () => h.session.isIdle,
+        hasPendingMessages: () => h.session.pendingMessageCount > 0,
+        sendMessage: (m, o) => h.pi.sendMessage(m, o),
+        getLeafEntry: () => h.manager.getLeafEntry() ?? undefined,
+      },
+    });
+    let n = 0;
+    const input = (over: Record<string, unknown> = {}) => ({
+      xid: `cx11-xid-${++n}`,
+      to: { sessionId, epoch: membership.epoch },
+      from: {
+        sessionId: "SECRET-ALIAS-SENDER-SESSION",
+        ref: "aliassender1",
+        name: "peer-name",
+        cwdLabel: "/tmp",
+        agentId: "alias-agent",
+        alias: "前端",
+      },
+      text: "ALIAS-BODY",
+      wake: false,
+      expiresAt: Date.now() + 5000,
+      ...over,
+    });
+    // ① a quiet message from an alias-holding sender, then a waking one (both reach later requests).
+    const settled0 = h.settled.length;
+    expect(r.deliver(input({ text: "QUIET-ALIAS-BODY" }) as never)).toMatchObject({ woke: false });
+    await h.session.prompt("next human after alias message");
+    expect(r.deliver(input({ text: "WAKE-ALIAS-BODY", wake: true, level: 0 }) as never)).toMatchObject({ woke: true });
+    const token = h.controller.activeToken!;
+    await until(() => h.settled.length === settled0 + 2, "alias wake run settled");
+
+    // ② the alias is an INDEPENDENT header field: after from=…, JSON-encoded, never inside the from object.
+    const bodies = h.stub.requests.map((x) => x.body).join("\n");
+    expect(bodies).toContain("ALIAS-BODY");
+    const header = /\[fabric xs from=([^\]]*?) alias=\\"前端\\" cwd=/;
+    const m = header.exec(bodies);
+    expect(m).not.toBeNull();
+    expect(m![1]).not.toContain("前端"); // the self-reported part of `from` never carries the hub alias
+    expect(bodies).toContain("alias 由 hub 核验唯一，name 由对方自报");
+    // the first line of the model-visible text is where the web regex reads it; one occurrence per message.
+    expect(bodies.match(/alias=\\"前端\\"/g)!.length).toBeGreaterThanOrEqual(2);
+
+    // ③ tool declarations: alias descriptions present and byte-identical in EVERY request (cache prefix).
+    const tools0 = h.stub.requests[0]!.json.tools as Array<{ name: string; description: string }>;
+    const byName = (t: Array<{ name: string; description: string }>, name: string) => t.find((x) => x.name === name)!;
+    expect(byName(tools0, "message_session").description).toContain("short word");
+    expect(byName(tools0, "list_sessions").description).toContain("hub-unique short name");
+    for (const x of h.stub.requests) {
+      expect(x.json.tools).toEqual(h.stub.requests[0]!.json.tools);
+      expect(x.json.system).toEqual(h.stub.requests[0]!.json.system);
+    }
+
+    // ④ hygiene: no details/token/xid/full sessionId anywhere in any provider payload.
+    const all = h.stub.requests.map((x) => x.body).join("\n");
+    for (const secret of [token, "wakeToken", "xsWake", "cx11-xid-1", "cx11-xid-2", "SECRET-ALIAS-SENDER-SESSION"])
+      expect(all.includes(secret) ? secret : "").toBe("");
     expect(h.errors).toEqual([]);
   }, 30_000);
 
