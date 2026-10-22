@@ -82,10 +82,12 @@ describe("F8 ask_user bridge", () => {
     expect(card).toMatchObject({ schema: "2.0", config: { update_multi: true } });
     const form = card.body.elements.find((e: any) => e.tag === "form");
     expect(form.elements.find((e: any) => e.tag === "input").max_length).toBe(1000);
+    expect(form.elements.find((e: any) => e.name === "submit")).toMatchObject({ type: "primary_filled" });
     expect(form.elements.find((e: any) => e.name === "submit")).toMatchObject({ form_action_type: "submit" });
     expect(form.elements.find((e: any) => e.name === "submit")).not.toHaveProperty("action_type");
-    expect(Array.from(form.elements[0].options[0].text.content)).toHaveLength(80);
-    expect(card.body.elements[0].content).toContain(label);
+    expect(Array.from(card.body.elements.find((e: any) => e.tag === "button").text.content)).toHaveLength(40);
+    expect(card.body.elements[0].content).toContain("**今天（周二）的运动情况？习惯跟踪用。**");
+    expect(JSON.stringify(card.body.elements)).toContain(label);
     expect(Buffer.byteLength(json)).toBeLessThanOrEqual(20_000);
     expect(card.body.elements.filter((e: any) => e.tag === "column_set").every((e: any) => e.columns.length <= 3)).toBe(
       true,
@@ -112,11 +114,12 @@ describe("F8 ask_user bridge", () => {
       expect(fallback.body.elements).toHaveLength(1);
       expect(fallback.body.elements[0]).toMatchObject({
         tag: "markdown",
-        content: expect.stringContaining("1. Choose\n1. A\n2. B"),
+        content: expect.stringContaining("**Choose**\n- **1** **A**\n- **2** **B**"),
       });
+      expect(fallback.body.elements[0].content).not.toMatch(/^\d+\. /m);
       expect(fallback.body.elements[0].content).toContain("文字回答");
       expect(fallback.body.elements[0].content).toContain("http://localhost/#/session");
-      if (multi) expect(fallback.body.elements[0].content).toContain("2. Second\n1. C");
+      if (multi) expect(fallback.body.elements[0].content).toContain("**Second**\n- **1** **C**");
       else {
         expect(await r.dialogs.text(normalizedMessage("fallback-answer", "2"), r.identity)).toBe(true);
         expect(r.request.mock.calls[0]![0].cmd).toMatchObject({ answers: [{ selected: ["B"], other: null }] });
@@ -128,7 +131,8 @@ describe("F8 ask_user bridge", () => {
   it("the initial send already contains the questions and numbered options, never just a placeholder", async () => {
     const r = await rig();
     const sent = JSON.parse(r.sendCard.mock.calls[0]![2]);
-    expect(sent.body.elements[0].content).toContain("1. Choose\n1. A\n2. B");
+    expect(sent.body.elements[0].content).toContain("**Choose**\n- **1** **A**\n- **2** **B**");
+    expect(sent.header).toMatchObject({ template: "blue", title: { content: "需要你决定" } });
     expect(sent.body.elements[0].content).toContain("文字回答");
     r.dialogs.dispose();
   });
@@ -236,6 +240,120 @@ describe("F8 ask_user bridge", () => {
     expect(JSON.parse(json).body.elements).toHaveLength(1);
     expect(json).toContain("文字回答");
     r.dialogs.dispose();
+  });
+  const rich = (): DialogWire => ({
+    ...dialog(),
+    questions: [
+      {
+        header: "默认广播",
+        question: "默认频道上允许广播吗？",
+        context: "方案推荐：保持现状",
+        options: [
+          { label: "(Recommended) 不能广播", description: "与现在完全一样" },
+          { label: "允许广播", description: "等于全 hub 广播" },
+        ],
+      },
+      {
+        question: "生效范围？",
+        multiSelect: true,
+        options: [{ label: "TUI" }, { label: "Web", description: "浏览器" }],
+      },
+      { question: "补充？", allowOther: false, options: [{ label: "是" }, { label: "（Recommended）否" }] },
+    ],
+  });
+  it("multi-question card: header, per-question blocks, no ordered lists, preselected recommendation, nonces", async () => {
+    const r = await rig(false, false);
+    r.open.questions = rich().questions;
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    const card = JSON.parse(r.patches.at(-1)!);
+    expect(card.header).toMatchObject({
+      template: "blue",
+      title: { content: "需要你决定 · 3 个问题" },
+      subtitle: { content: expect.stringMatching(/#[a-f0-9]{6}$/) },
+    });
+    const form = card.body.elements.find((e: any) => e.tag === "form");
+    const tags = form.elements.map((e: any) => e.tag);
+    expect(tags).toEqual([
+      ...["markdown", "markdown", "select_static", "input", "hr"],
+      ...["markdown", "markdown", "multi_select_static", "input", "hr"],
+      ...["markdown", "markdown", "select_static", "column_set"],
+    ]);
+    const md = form.elements.filter((e: any) => e.tag === "markdown").map((e: any) => e.content);
+    expect(md[0]).toContain("**问题 1/3 · 默认广播**");
+    expect(md[0]).toContain("单选");
+    expect(md[0]).toContain("方案推荐：保持现状");
+    expect(md[1]).toContain(
+      "- **不能广播**　<text_tag color='green'>推荐</text_tag>\n  <font color='grey'>与现在完全一样</font>",
+    );
+    expect(md[1]).not.toContain("Recommended");
+    expect(md[2]).toContain("多选");
+    for (const m of [...md, ...card.body.elements.filter((e: any) => e.tag === "markdown").map((e: any) => e.content)])
+      expect(m).not.toMatch(/^\d+\. /m);
+    const [s0, m1, s2] = form.elements.filter((e: any) => /select/.test(e.tag));
+    expect(s0.initial_option).toBe("0");
+    expect(s0.options[0].text.content).toBe("不能广播（推荐）");
+    expect(s0.options.at(-1).value).toBe("skip");
+    expect(m1).not.toHaveProperty("initial_option");
+    expect(s2.initial_option).toBe("1");
+    expect(form.elements.filter((e: any) => e.tag === "input")).toHaveLength(2); // q2 allowOther:false
+    const row = form.elements.at(-1);
+    expect(row.columns.map((c: any) => c.elements[0].name)).toEqual(["submit", "cancel"]);
+    expect(row.columns[0].elements[0]).toMatchObject({ form_action_type: "submit", type: "primary_filled" });
+    expect(card.body.elements.at(-1).content).toContain("多题请在卡片中作答");
+    expect(card.body.elements.at(-1).content).toContain("http://localhost/#/session");
+    // Answer semantics follow the ORIGINAL labels, not the display text.
+    await r.dialogs.callback(r.nonce("submit"), r.identity, "rich", {
+      form_value: { q0: "0", q1: ["1"], q2: "1", o0: "", o1: "" },
+    });
+    expect(r.request.mock.calls[0]![0].cmd).toMatchObject({
+      answers: [
+        { selected: ["(Recommended) 不能广播"], other: null },
+        { selected: ["Web"], other: null },
+        { selected: ["（Recommended）否"], other: null },
+      ],
+    });
+    r.dialogs.dispose();
+  });
+  it("single-select question with <=8 options: option buttons, hover tips, other-answer form and cancel", async () => {
+    const r = await rig(false, false);
+    r.open.questions = [{ ...rich().questions[0]!, header: undefined }];
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    const card = JSON.parse(r.patches.at(-1)!);
+    expect(card.header.title.content).toBe("需要你决定");
+    const els = card.body.elements;
+    expect(els[0].content).toBe("**默认频道上允许广播吗？**\n<font color='grey'>方案推荐：保持现状</font>");
+    const buttons = els.filter((e: any) => e.tag === "button");
+    expect(buttons.map((b: any) => b.type)).toEqual(["primary_filled", "default", "text"]);
+    expect(buttons[0].text.content).toBe("不能广播（推荐）");
+    expect(buttons[0].hover_tips.content).toBe("与现在完全一样");
+    expect(buttons[2].text.content).toBe("取消");
+    expect(JSON.stringify(els)).toContain("- **允许广播**：<font color='grey'>等于全 hub 广播</font>");
+    const form = els.find((e: any) => e.tag === "form");
+    expect(form.elements.map((e: any) => e.tag)).toEqual(["input", "button"]);
+    expect(form.elements[1]).toMatchObject({ form_action_type: "submit" });
+    expect(els.at(-1).content).toContain("也可回复");
+    expect(els.some((e: any) => e.tag === "markdown" && /^\d+\. /m.test(e.content))).toBe(false);
+    await r.dialogs.callback(r.nonce("option"), r.identity, "o", {});
+    expect(r.request.mock.calls[0]![0].cmd).toMatchObject({
+      answers: [{ selected: ["(Recommended) 不能广播"], other: null }],
+    });
+    r.dialogs.dispose();
+  });
+  it("single question without allowOther/cancel has no other form and no cancel button", async () => {
+    const r = await rig(false, false);
+    r.open.allowCancel = false;
+    r.open.questions = [{ question: "Q", allowOther: false, options: [{ label: "A" }] }];
+    await r.dialogs.reconcile("agent-1", "epoch", [r.open], []);
+    const els = JSON.parse(r.patches.at(-1)!).body.elements;
+    expect(els.some((e: any) => e.tag === "form")).toBe(false);
+    expect(els.filter((e: any) => e.tag === "button")).toHaveLength(1);
+    r.dialogs.dispose();
+  });
+  it("a retry error is shown at the top of the card, below the header", async () => {
+    const r = await rig(false);
+    await r.dialogs.callback(r.nonce("submit"), r.identity, "bad", { form_value: {} });
+    const els = JSON.parse(r.patches.at(-1)!).body.elements;
+    expect(els[0].content).toContain("答案无效");
   });
   it("validates multi-select/Other/skip byte caps locally", () => {
     const d = dialog(true);

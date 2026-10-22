@@ -60,6 +60,58 @@ export function validateFeishuAnswers(dialog: DialogWire, answers: DialogAnswerW
     })
   );
 }
+const grey = (s: string) => `<font color='grey'>${s}</font>`;
+const clipChars = (s: string, n: number) => (Array.from(s).length > n ? Array.from(s).slice(0, n).join("") + "…" : s);
+const oneLine = (s: string) => s.replace(/\s*\n+\s*/g, " ");
+const RECOMMENDED_PREFIX = /^\s*[(（]\s*recommended\s*[)）]\s*/i;
+/** Display-only: strips a leading "(Recommended)" marker. Answers always use the original label/index. */
+function displayOption(o: { label: string; description?: string }) {
+  const rec = RECOMMENDED_PREFIX.test(o.label);
+  const text = rec ? o.label.replace(RECOMMENDED_PREFIX, "") : o.label;
+  return { rec, text: text === "" ? o.label : text, description: o.description };
+}
+const plain = (content: string) => ({ tag: "plain_text", content });
+const optionText = (o: ReturnType<typeof displayOption>, max: number) =>
+  o.rec
+    ? `${Array.from(o.text)
+        .slice(0, max - 4)
+        .join("")}（推荐）`
+    : Array.from(o.text).slice(0, max).join("");
+const dialogHeader = (card: FeishuDialogCard, dialog: DialogWire, label?: string) => ({
+  template: "blue",
+  title: plain(dialog.questions.length > 1 ? `需要你决定 · ${dialog.questions.length} 个问题` : "需要你决定"),
+  subtitle: plain(
+    Array.from(`${label ? `${label} · ` : ""}${card.shortCode}`)
+      .slice(0, 80)
+      .join(""),
+  ),
+});
+const textHint = (card: FeishuDialogCard, dialog: DialogWire) =>
+  dialog.questions.length === 1
+    ? `也可回复 ${card.shortCode} 1 / ${card.shortCode} 1,3 / ${card.shortCode} 你的回答`
+    : "多题请在卡片中作答";
+function questionHead(q: DialogWire["questions"][number], i: number, n: number, limit = Infinity): string {
+  const clip = (s: string) => (limit === Infinity ? s : clipChars(s, limit));
+  const kind = q.multiSelect ? "多选" : "单选";
+  const title = n > 1 ? `问题 ${i + 1}/${n}` : "";
+  const head = q.header ? neutralizeMarkdown(clip(oneLine(q.header))) : "";
+  const lead = [title, head].filter(Boolean).join(" · ");
+  return (
+    `${lead ? `**${lead}**　` : ""}${grey(kind)}\n**${neutralizeMarkdown(clip(q.question))}**` +
+    (q.context ? `\n${grey(neutralizeMarkdown(clip(oneLine(q.context))))}` : "")
+  );
+}
+function optionList(q: DialogWire["questions"][number], limit = Infinity, numbered = false): string {
+  const clip = (s: string) => (limit === Infinity ? s : clipChars(s, limit));
+  return q.options
+    .map((raw, n) => {
+      const o = displayOption(raw);
+      return `- ${numbered ? `**${n + 1}** ` : ""}**${neutralizeMarkdown(clip(o.text))}**${o.rec ? "　<text_tag color='green'>推荐</text_tag>" : ""}${o.description ? `\n  ${grey(neutralizeMarkdown(clip(oneLine(o.description))))}` : ""}`;
+    })
+    .join("\n");
+}
+const cardOf = (header: object | undefined, elements: object[]) =>
+  JSON.stringify({ schema: "2.0", config: { update_multi: true }, ...(header ? { header } : {}), body: { elements } });
 const closedCard = (text: string) =>
   JSON.stringify({
     schema: "2.0",
@@ -71,24 +123,17 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
   const diagnose = createFeishuDiagnostics(deps.log, clock.now);
   const skip = (reason: string) => diagnose({ event: "dialog-refresh-skipped", reason });
   function answerCard(card: FeishuDialogCard, dialog: DialogWire): string {
-    const hint =
-      dialog.questions.length === 1
-        ? `文字回答：${card.shortCode} 1 / ${card.shortCode} 1,3 / ${card.shortCode} text`
-        : "文字回答仅支持单问题；多问题请到 web 作答";
-    const tail = `\n${hint}\n或到 web：${deps.link(card.agentKey)}`;
+    const tail = `\n${grey(`${dialog.questions.length === 1 ? `文字回答：${card.shortCode} 1 / ${card.shortCode} 1,3 / ${card.shortCode} text` : "文字回答仅支持单问题；多问题请到 web 作答"}`)}\n或到 web：${deps.link(card.agentKey)}`;
+    const header = dialogHeader(card, dialog, deps.state.bindings.get(card.bindingKey)?.label);
     // Preserve full questions/options normally; shrink individual fields only for the JSON byte cap.
     for (const limit of [4_096, 512, 128, 32]) {
-      const clip = (s: string) => (Array.from(s).length > limit ? Array.from(s).slice(0, limit).join("") + "…" : s);
-      const text = `${card.shortCode} 等待作答\n${dialog.questions
-        .map(
-          (q, i) =>
-            `${i + 1}. ${clip(q.question)}\n${q.options.map((o, n) => `${n + 1}. ${clip(o.label)}${o.description ? ` — ${clip(o.description)}` : ""}`).join("\n")}`,
-        )
-        .join("\n\n")}${tail}`;
-      const json = closedCard(text);
+      const blocks = dialog.questions.map(
+        (q, i) => `${questionHead(q, i, dialog.questions.length, limit)}\n${optionList(q, limit, true)}`,
+      );
+      const json = cardOf(header, [{ tag: "markdown", content: `${blocks.join("\n\n")}${tail}` }]);
       if (Buffer.byteLength(json) <= 20_000) return json;
     }
-    return closedCard(`${card.shortCode} 问题/选项过多，请到 web 查看完整内容。${tail}`);
+    return cardOf(header, [{ tag: "markdown", content: `问题/选项过多，请到 web 查看完整内容。${tail}` }]);
   }
   const live = new Map<string, { epoch: string; open: DialogWire[]; closed: DialogClosedWire[] }>();
   const drafts = new Map<string, { at: number; answers: DialogAnswerWire[] }>();
@@ -221,81 +266,143 @@ export function createFeishuDialogs(deps: FeishuDialogsDeps) {
         },
         Math.max(1, card.expiresAt - clock.now()),
       );
-    const elements: object[] = [
-      {
+    const n = dialog.questions.length;
+    const elements: object[] = [];
+    if (error) elements.push({ tag: "markdown", content: `<font color='red'>${neutralizeMarkdown(error)}</font>` });
+    const callback = (nonce: string) => [{ type: "callback", value: { n: nonce } }];
+    const cancelNonce = dialog.allowCancel ? issue({ op: "cancel" }) : undefined;
+    const q0 = dialog.questions[0]!;
+    const otherInput = (i: number, text: string) => ({
+      tag: "input",
+      name: `o${i}`,
+      width: "fill",
+      placeholder: plain(text),
+      // Schema 2.0 input limit, verified against the tenant (230099 / 11310 above 1000).
+      max_length: 1_000,
+    });
+    if (n === 1 && !q0.multiSelect && q0.options.length <= 8) {
+      elements.push({
         tag: "markdown",
-        content: `${card.shortCode} ${error ? neutralizeMarkdown(error) + "\n" : ""}${dialog.questions.map((q, i) => `${i + 1}. ${neutralizeMarkdown(q.question)}\n${q.options.map((o, n) => `${n + 1}. ${neutralizeMarkdown(o.label)}`).join("\n")}`).join("\n\n")}\n${dialog.questions.length === 1 ? `文字回答：${card.shortCode} 1 / ${card.shortCode} 1,3 / ${card.shortCode} text` : "多问题表单请在卡片中作答"}\n或到 web：${deps.link(card.agentKey)}`,
-      },
-    ];
-    const buttons: object[] = [];
-    if (
-      dialog.questions.length === 1 &&
-      !dialog.questions[0]!.multiSelect &&
-      dialog.questions[0]!.options.length <= 8
-    ) {
-      for (const [i, option] of dialog.questions[0]!.options.entries()) {
+        content:
+          `**${neutralizeMarkdown(q0.question)}**` +
+          (q0.context ? `\n${grey(neutralizeMarkdown(oneLine(q0.context)))}` : ""),
+      });
+      for (const [i, raw] of q0.options.entries()) {
+        const o = displayOption(raw);
         const nonce = issue({ op: "option", option: i });
         if (nonce.ok)
-          buttons.push({
+          elements.push({
             tag: "button",
-            text: { tag: "plain_text", content: Array.from(option.label).slice(0, 40).join("") },
-            behaviors: [{ type: "callback", value: { n: nonce.value.nonce } }],
+            width: "fill",
+            type: o.rec ? "primary_filled" : "default",
+            text: plain(optionText(o, 40)),
+            ...(o.description ? { hover_tips: plain(clipChars(o.description, 200)) } : {}),
+            behaviors: callback(nonce.value.nonce),
           });
       }
-    }
-    const submit = issue({ op: "submit" });
-    if (submit.ok) {
-      const formElements: object[] = [];
-      for (const [i, q] of dialog.questions.entries()) {
-        formElements.push({
-          tag: q.multiSelect ? "multi_select_static" : "select_static",
-          name: `q${i}`,
-          options: [
-            ...q.options.map((o, n) => ({
-              text: { tag: "plain_text", content: Array.from(o.label).slice(0, 80).join("") },
-              value: String(n),
-            })),
-            { text: { tag: "plain_text", content: "跳过" }, value: "skip" },
+      // Options with a description, or whose label the 40-char button text clipped, are listed in full.
+      const described = q0.options
+        .map((raw) => displayOption(raw))
+        .filter((o) => o.description || Array.from(o.text).length > (o.rec ? 36 : 40))
+        .map(
+          (o) =>
+            `- **${neutralizeMarkdown(o.text)}**${o.description ? `：${grey(neutralizeMarkdown(oneLine(o.description)))}` : ""}`,
+        );
+      if (described.length) elements.push({ tag: "markdown", content: described.join("\n") });
+      const submit = q0.allowOther !== false ? issue({ op: "submit" }) : undefined;
+      if (submit?.ok)
+        elements.push({
+          tag: "form",
+          name: "answers",
+          elements: [
+            otherInput(0, "或填写其他答案"),
+            {
+              tag: "button",
+              name: "submit",
+              type: "primary_filled",
+              width: "fill",
+              form_action_type: "submit",
+              text: plain("提交"),
+              behaviors: callback(submit.value.nonce),
+            },
           ],
         });
-        if (q.allowOther !== false)
-          formElements.push({
-            tag: "input",
-            name: `o${i}`,
-            placeholder: { tag: "plain_text", content: "其他（可选）" },
-            // Schema 2.0 input limit, verified against the tenant (230099 / 11310 above 1000).
-            max_length: 1_000,
-          });
-      }
-      formElements.push({
-        tag: "button",
-        name: "submit",
-        // action_type:"form_submit" is the legacy schema; v2 otherwise rejects the whole card (300123).
-        form_action_type: "submit",
-        text: { tag: "plain_text", content: "提交" },
-        behaviors: [{ type: "callback", value: { n: submit.value.nonce } }],
-      });
-      elements.push({ tag: "form", name: "answers", elements: formElements });
-    }
-    if (dialog.allowCancel) {
-      const n = issue({ op: "cancel" });
-      if (n.ok)
-        buttons.push({
+      if (cancelNonce?.ok)
+        elements.push({
           tag: "button",
-          text: { tag: "plain_text", content: "取消" },
-          behaviors: [{ type: "callback", value: { n: n.value.nonce } }],
+          width: "fill",
+          type: "text",
+          text: plain("取消"),
+          behaviors: callback(cancelNonce.value.nonce),
         });
+    } else {
+      const submit = issue({ op: "submit" });
+      if (submit.ok) {
+        const form: object[] = [];
+        for (const [i, q] of dialog.questions.entries()) {
+          if (i > 0) form.push({ tag: "hr" });
+          form.push({ tag: "markdown", content: questionHead(q, i, n) });
+          form.push({ tag: "markdown", content: optionList(q) });
+          const options = q.options.map((raw) => displayOption(raw));
+          const rec = q.multiSelect ? -1 : options.findIndex((o) => o.rec);
+          form.push({
+            tag: q.multiSelect ? "multi_select_static" : "select_static",
+            name: `q${i}`,
+            placeholder: plain(q.multiSelect ? `问题 ${i + 1}：可多选` : `问题 ${i + 1}：选择一项`),
+            width: "fill",
+            ...(rec >= 0 ? { initial_option: String(rec) } : {}),
+            options: [
+              ...options.map((o, k) => ({ text: plain(optionText(o, 80)), value: String(k) })),
+              { text: plain("跳过"), value: "skip" },
+            ],
+          });
+          if (q.allowOther !== false) form.push(otherInput(i, `问题 ${i + 1}：或填写其他答案（可选）`));
+        }
+        const column = (button: object) => ({
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [button],
+        });
+        form.push({
+          tag: "column_set",
+          horizontal_spacing: "8px",
+          columns: [
+            column({
+              tag: "button",
+              name: "submit",
+              type: "primary_filled",
+              width: "fill",
+              // action_type:"form_submit" is the legacy schema; v2 otherwise rejects the whole card (300123).
+              form_action_type: "submit",
+              text: plain("提交"),
+              behaviors: callback(submit.value.nonce),
+            }),
+            ...(cancelNonce?.ok
+              ? [
+                  column({
+                    tag: "button",
+                    name: "cancel",
+                    type: "default",
+                    width: "fill",
+                    text: plain("取消"),
+                    behaviors: callback(cancelNonce.value.nonce),
+                  }),
+                ]
+              : []),
+          ],
+        });
+        elements.push({ tag: "form", name: "answers", elements: form });
+      }
     }
-    for (let i = 0; i < buttons.length; i += 3)
-      elements.push({
-        tag: "column_set",
-        columns: buttons
-          .slice(i, i + 3)
-          .map((button) => ({ tag: "column", width: "weighted", weight: 1, elements: [button] })),
-      });
+    elements.push({
+      tag: "markdown",
+      text_size: "notation",
+      content: grey(`${textHint(card, dialog)} · [在 web 中打开](${deps.link(card.agentKey)})`),
+    });
     if (!(await deps.state.commit())) return skip("commit-failed");
     if (disposed || terminal(deps.state.dialogCards.get(card.id) ?? card)) return skip("settled-during-commit");
-    const cardJson = JSON.stringify({ schema: "2.0", config: { update_multi: true }, body: { elements } });
+    const cardJson = cardOf(dialogHeader(card, dialog, binding.label), elements);
     if (Buffer.byteLength(cardJson) > 20_000) {
       skip("interactive-bytes");
       await fallback();
