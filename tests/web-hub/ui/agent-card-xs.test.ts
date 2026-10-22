@@ -79,4 +79,14 @@ describe("AgentCard xs read-only badge", () => {
     for (const xs of [undefined, null, {}, { joined: false, receive: "wake" }, { joined: true, receive: "oops" }])
       expect(xsBadgeOf(agent(xs), ["xs.v1"])).toBeUndefined();
   });
+  it("row1 layout: cost + lock live in the fixed right column, outside the wrapping main group", () => {
+    const out = html(agent({ joined: true, receive: "wake" }), ["xs.v1"]);
+    const doc = new DOMParser().parseFromString(out, "text/html");
+    const row = doc.querySelector(".agent-row1")!;
+    expect([...row.children].map((c) => c.className.split(" ")[0])).toEqual(["dot", "agent-main", "agent-end"]);
+    expect(row.querySelector(".agent-main .agent-title")).not.toBeNull();
+    expect(row.querySelector(".agent-main .chip-xs")).not.toBeNull();
+    expect(row.querySelector(".agent-end .agent-cost")).not.toBeNull();
+    expect(row.querySelector(".agent-main .agent-cost")).toBeNull();
+  });
 });

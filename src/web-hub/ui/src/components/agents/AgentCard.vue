@@ -93,49 +93,53 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
   >
     <span class="agent-row1">
       <span class="dot" :class="dotClass"></span>
-      <span class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
-        ><bdi>{{ card.shortCwd }}</bdi></span
-      >
-      <span class="chip" translate="no">{{ kindLabel }}</span>
-      <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
-        {{ t("agents.stopped") }}
+      <span class="agent-main">
+        <span class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
+          ><bdi>{{ card.shortCwd }}</bdi></span
+        >
+        <span class="chip" translate="no">{{ kindLabel }}</span>
+        <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
+          {{ t("agents.stopped") }}
+        </span>
+        <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
+          {{ t("spawn.badgeWeb") }}
+        </span>
+        <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
+          {{ t("spawn.badgeRestoring") }}
+        </span>
+        <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
+          {{ t("spawn.badgeRestored") }}
+        </span>
+        <span v-if="managed?.removing" class="chip chip-removing" translate="no">
+          {{ t("agents.removing") }}
+        </span>
+        <span
+          v-else-if="xsBadge"
+          class="chip chip-xs"
+          role="img"
+          :data-xs="xsBadge"
+          :title="t(`agents.xs.${xsBadge}`)"
+          :aria-label="t(`agents.xs.${xsBadge}`)"
+        >
+          <AppIcon :name="XS_ICON[xsBadge]" />
+        </span>
       </span>
-      <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
-        {{ t("spawn.badgeWeb") }}
-      </span>
-      <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
-        {{ t("spawn.badgeRestoring") }}
-      </span>
-      <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
-        {{ t("spawn.badgeRestored") }}
-      </span>
-      <span v-if="managed?.removing" class="chip chip-removing" translate="no">
-        {{ t("agents.removing") }}
-      </span>
-      <span
-        v-else-if="xsBadge"
-        class="chip chip-xs"
-        role="img"
-        :data-xs="xsBadge"
-        :title="t(`agents.xs.${xsBadge}`)"
-        :aria-label="t(`agents.xs.${xsBadge}`)"
-      >
-        <AppIcon :name="XS_ICON[xsBadge]" />
-      </span>
-      <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
+      <span class="agent-end">
+        <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
            `data-marked`). The click never navigates the card's <a>. -->
-      <button
-        v-if="privacyAffordance"
-        type="button"
-        class="privacy-lock-btn"
-        :data-marked="privacyMarked ? 'true' : 'false'"
-        :aria-label="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.markAria')"
-        :title="privacyMarked ? `${t('privacy.badgeMarked')} — ${t('privacy.unmarkTitle')}` : t('privacy.mark')"
-        @click.prevent.stop="onPrivacyClick"
-      >
-        <AppIcon :name="privacyMarked ? 'lock' : 'unlock'" class="icon-sm" />
-      </button>
-      <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
+        <button
+          v-if="privacyAffordance"
+          type="button"
+          class="privacy-lock-btn"
+          :data-marked="privacyMarked ? 'true' : 'false'"
+          :aria-label="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.markAria')"
+          :title="privacyMarked ? `${t('privacy.badgeMarked')} — ${t('privacy.unmarkTitle')}` : t('privacy.mark')"
+          @click.prevent.stop="onPrivacyClick"
+        >
+          <AppIcon :name="privacyMarked ? 'lock' : 'unlock'" class="icon-sm" />
+        </button>
+        <span class="agent-cost num" :title="card.costTitle">{{ card.costLabel }}</span>
+      </span>
     </span>
     <span v-if="privacyError" class="privacy-card-error" role="alert">
       {{ t(privacyError.key, { code: privacyError.code }) }}

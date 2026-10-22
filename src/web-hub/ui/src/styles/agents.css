@@ -266,13 +266,34 @@
   color: var(--c-text-3);
 }
 
+/* Three columns: [dot] [title + chips, wraps INSIDE its column] [lock + cost, fixed top-right].
+   The cost can therefore never drop onto its own line (2026-10-22 layout bug). */
 .agent-row1 {
-  display: flex;
-  flex-wrap: wrap; /* badges wrap onto a second line instead of squeezing the cwd */
-  row-gap: var(--sp-1);
-  align-items: center;
-  gap: var(--sp-2);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--sp-2);
   min-width: 0;
+}
+
+.agent-row1 > .dot {
+  margin-top: 0.45em; /* align with the first text line */
+}
+
+.agent-main {
+  display: flex;
+  flex-wrap: wrap; /* badges wrap under the path, inside the middle column only */
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+}
+
+.agent-end {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+  white-space: nowrap;
 }
 
 .agent-title {
@@ -289,7 +310,6 @@
 }
 
 .agent-cost {
-  margin-left: auto;
   flex: none;
   color: var(--c-text-2);
   font-size: var(--fs-xs);

@@ -576,6 +576,15 @@ code.md-code.path-ref {
   flex-direction: column;
   gap: var(--sp-2);
   min-height: 100%;
+  flex: 1 0 auto; /* fill the (flex-column) body — see `.preview-body:has(> .preview-dir)` */
+}
+
+/* The dir phase's body is a flex column so `.preview-dir` fills it by flex (definite in both the
+ * floating window and the phone fullscreen panel) instead of relying on `min-height: 100%`
+ * resolving against an auto-height parent. Content taller than the body still scrolls here. */
+.preview-body:has(> .preview-dir) {
+  display: flex;
+  flex-direction: column;
 }
 
 /* Path bar (tilde-expansion addendum, part B): a text input + Go button, pre-filled with the
@@ -708,7 +717,8 @@ button.preview-dir-row:focus-visible {
 
 /* §2.8/A1: static, count-free footnote — denylist hits are neither listed nor counted. */
 .preview-dir-footnote {
-  margin: 0;
+  margin: auto 0 0; /* short/empty listing ⇒ pinned to the bottom-left; long ⇒ follows the list */
+  text-align: left;
   color: var(--c-text-3);
   font-size: var(--fs-xs);
 }
