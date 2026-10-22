@@ -115,7 +115,7 @@ export function observeRootWakeTrigger(event: unknown, deps: RootWakeTriggerDeps
 export interface RootWakeMessage {
   customType: typeof XS_WAKE_CUSTOM_TYPE;
   content: string;
-  display: false;
+  display: true;
   details: {
     xsWake: true;
     xid: string;
@@ -302,7 +302,7 @@ export class RootWakeController {
         {
           customType: XS_WAKE_CUSTOM_TYPE,
           content: request.content,
-          display: false,
+          display: true,
           details: {
             xsWake: true,
             xid: request.xid,

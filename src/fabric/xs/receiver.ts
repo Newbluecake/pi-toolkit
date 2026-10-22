@@ -53,7 +53,13 @@ export interface XsDeliverHostMessage {
   customType: typeof XS_RECEIVE_CUSTOM_TYPE;
   content: string;
   display: boolean;
-  details: { xid: string; from: unknown; reply?: { requestId: string; dueAt: number }; inReplyTo?: string };
+  details: {
+    xid: string;
+    from: unknown;
+    reply?: { requestId: string; dueAt: number };
+    inReplyTo?: string;
+    late?: true;
+  };
 }
 
 /** The XW-bound host surface. Same object can serve the Controller's host deps. */
@@ -434,12 +440,13 @@ export class XsReceiver {
         {
           customType: XS_RECEIVE_CUSTOM_TYPE,
           content: content(false),
-          display: ticket?.origin === "human",
+          display: true, // RX7 D-display: every received xs message is user-visible
           details: {
             xid: input.xid,
             from: input.from,
             ...(input.reply === undefined ? {} : { reply: input.reply }),
             ...(ticket === undefined ? {} : { inReplyTo: ticket.requestId }),
+            ...(late ? { late: true as const } : {}),
           },
         },
         { triggerTurn: false },

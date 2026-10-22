@@ -93,6 +93,7 @@ import { isTerminalJobStatus, type JobRecord } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
+import { renderXsMessage } from "./fabric/xs/render.js";
 import { renderTaskStartedMessage, TASK_STARTED_CUSTOM_TYPE, createTaskCommand } from "./commands/task.js";
 import { createGoalCommand } from "./goal/command.js";
 import { createGoalLoopHook } from "./goal/hook.js";
@@ -1064,6 +1065,8 @@ export default function activate(rawPi: ExtensionAPI): void {
   );
   if (typeof pi.registerMessageRenderer === "function") {
     pi.registerMessageRenderer(TASK_STARTED_CUSTOM_TYPE, renderTaskStartedMessage);
+    // RX7 D-display: clean TUI form for received cross-session messages (wake/deliver/reply).
+    pi.registerMessageRenderer("subagent:xs", renderXsMessage);
   }
 
   // X6: @handle mentions. Registered once; resolves through the current

@@ -22,7 +22,7 @@ const sessionNotices = (state: any) =>
 const errorNotices = (state: any) => state.mentionNotices.filter((n: any) => n.customType === "subagent:mention-error");
 
 describe("MW @session mention wiring (real hub × real stacks)", () => {
-  it("TUI explicit form: B gets a reply_to wake at level 0; B's reply is display-only on A (no model turn)", async () => {
+  it("TUI explicit form: B gets a reply_to wake at level 0; B's reply wakes A when A receives in wake mode (RX7 R4 revision)", async () => {
     h = new XsHarness();
     const { hub, a, b, aid, bid } = await joinedPair(h);
     await a.rpc("prime");
@@ -53,13 +53,43 @@ describe("MW @session mention wiring (real hub × real stacks)", () => {
     const state = await a.rpc("inspect");
     const shown = state.messages.at(-1);
     expect(shown.content).toContain("forty-two");
-    expect(shown).toMatchObject({ triggerTurn: false, display: true, details: { inReplyTo: q } });
-    expect(state.turns).toBe(turnsBefore); // R4: shown to the user, A's model is not woken
+    // RX7 R4 revision (reply-plan §10.2): a human-origin reply is a solicited reply — A (wake) is woken, at level 0.
+    expect(shown).toMatchObject({ triggerTurn: true, display: true, details: { inReplyTo: q } });
+    expect(state.turns).toBe(turnsBefore + 1);
     expect(state.replyTickets.find((t: any) => t.requestId === q)).toMatchObject({
       origin: "human",
-      wakeOnReply: false,
+      wakeOnReply: true,
       state: "replied",
     });
+  }, 40_000);
+
+  it("RX7 R4: a human-origin reply to a deliver-mode A is shown (display:true) but never wakes A", async () => {
+    h = new XsHarness();
+    const hub = await h.boot("hub");
+    const [a, b] = await Promise.all([
+      h.boot("agent", "alpha", undefined, true, false, { XW_RECEIVE: "deliver" }),
+      h.boot("agent", "beta"),
+    ]);
+    await Promise.all([a.rpc("cmd", { args: "join" }), b.rpc("cmd", { args: "join" })]);
+    const aid: string = (await a.rpc("inspect")).sessionId;
+    const bid: string = (await b.rpc("inspect")).sessionId;
+    await until(
+      () => list(a),
+      (l) => l.rows?.some((r: any) => bid.startsWith(r.ref)),
+      "membership publish",
+    );
+    void hub;
+    await a.rpc("prime");
+    await b.rpc("prime");
+    const turnsBefore = (await a.rpc("inspect")).turns;
+    expect(wasHandled(await mention(a, `@session:${bid.slice(0, 8)} please answer`))).toBe(true);
+    const q: string = (await b.rpc("inspect")).messages.at(-1).content.match(/reply_to="(q[^"]+)"/)[1];
+    await b.rpc("settle");
+    expect(await answer(b, aid, "quiet-answer", q)).toMatchObject({ effect: "applied" });
+    const state = await a.rpc("inspect");
+    expect(state.messages.at(-1)).toMatchObject({ triggerTurn: false, display: true, details: { inReplyTo: q } });
+    expect(state.messages.at(-1).content).toContain("quiet-answer");
+    expect(state.turns).toBe(turnsBefore);
   }, 40_000);
 
   it("web composer path: `@session:<ref> msg` is routed (never reaches the native prompt) with the same semantics", async () => {
@@ -85,9 +115,9 @@ describe("MW @session mention wiring (real hub × real stacks)", () => {
     await b.rpc("settle");
     await answer(b, aid, "web answer", q);
     const state = await a.rpc("inspect");
-    expect(state.messages.at(-1)).toMatchObject({ triggerTurn: false, display: true });
+    expect(state.messages.at(-1)).toMatchObject({ triggerTurn: true, display: true }); // RX7 R4: A (wake) is woken
     expect(state.messages.at(-1).content).toContain("web answer");
-    expect(state.turns).toBe(turnsBefore);
+    expect(state.turns).toBe(turnsBefore + 1);
   }, 40_000);
 
   it("bare `@name msg`: a unique cache hit routes (cache warmed by completion); completion inserts the bare name", async () => {

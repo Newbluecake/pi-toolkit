@@ -534,7 +534,7 @@ describe("sender reply — expectReply branch (§4.2)", () => {
     expect(h.calls.send[0]!.wake).toBe(true);
     const t = h.ledger.classify(h.calls.send[0]!.expect!.requestId, B_ID, A_ID, h.now.t);
     if (t.kind !== "reply") throw new Error("expected reply");
-    expect(t.ticket).toMatchObject({ origin: "human", wakeOnReply: false, requesterLevel: 0 });
+    expect(t.ticket).toMatchObject({ origin: "human", wakeOnReply: true, requesterLevel: 0 });
   });
 
   it("reply_unsupported: port not capable ⇒ no ticket, no send frame", async () => {

@@ -501,7 +501,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
           replierRef: resolvedTarget?.ref ?? sendTo,
           ...(resolvedTarget?.name !== undefined ? { replierName: resolvedTarget.name } : {}),
           origin: isHuman ? "human" : "model",
-          wakeOnReply: !isHuman,
+          wakeOnReply: true, // RX7 (reply-plan §10.2): human origin no longer means display-only
           requesterLevel: isHuman ? 0 : wakeUsable ? deps.level!.levelOfRoot() : 0,
           timeoutMs: timeoutS * 1000,
           lateGraceMs: replyDeps.lateGraceS * 1000,

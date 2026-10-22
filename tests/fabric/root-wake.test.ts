@@ -110,7 +110,7 @@ describe("RootWakeController §6.2 full lifecycle table", () => {
     expect(h.messages[0]).toEqual({
       customType: "subagent:xs",
       content: "fenced content",
-      display: false,
+      display: true,
       details: { xsWake: true, wakeToken: "token-1", xid: "xid", from: { sessionId: "sender" }, level: 1 },
     });
     expect(h.level.root).toBe(2);

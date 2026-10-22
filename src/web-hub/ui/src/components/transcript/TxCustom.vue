@@ -14,6 +14,7 @@
 import { computed } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import { XS_CUSTOM_TYPE, parseXsMessage } from "../../logic/xsMessage.js";
 import MarkdownView from "./MarkdownView.vue";
 
 const props = defineProps<{ readonly customType: string; readonly text: string; readonly truncated: boolean }>();
@@ -44,10 +45,35 @@ const namespaced = computed(() => props.customType.startsWith(NAMESPACE));
 const kind = computed(() => (namespaced.value ? props.customType.slice(NAMESPACE.length) : props.customType));
 const isSubagentNotice = computed(() => namespaced.value && SUBAGENT_KINDS.has(kind.value));
 const chipText = computed(() => (namespaced.value ? (KIND_ALIASES[kind.value] ?? kind.value) : props.customType));
+
+/** RX7 D-display: a received cross-session message shows `xs ← <from> · <cwd> · <kind>` + the bare
+ *  body (header/fence stripped — the hub only forwards `content`, so it is parsed from there).
+ *  Unparseable content falls through to the generic card. */
+const xs = computed(() => (props.customType === XS_CUSTOM_TYPE ? parseXsMessage(props.text) : undefined));
+const xsChip = computed(() => {
+  const v = xs.value;
+  if (v === undefined) return "";
+  if (v.kind === "reply" || v.kind === "late-reply") {
+    return `${v.kind === "late-reply" ? "late reply" : "reply"} to ${v.requestId ?? "?"}`;
+  }
+  return v.kind;
+});
 </script>
 
 <template>
-  <article class="msg-custom tx-item">
+  <article v-if="xs" class="msg-custom msg-xs tx-item" data-xs-kind="xs">
+    <span class="avatar avatar-notice"><AppIcon name="bot" class="icon" /></span>
+    <div class="msg-main">
+      <div class="msg-head">
+        <span class="who" translate="no">xs ← {{ xs.from }}</span>
+        <span v-if="xs.cwdLabel" class="kind-chip" translate="no">{{ xs.cwdLabel }}</span>
+        <span class="kind-chip" translate="no" :title="customType">{{ xsChip }}</span>
+      </div>
+      <MarkdownView :text="xs.body" />
+      <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>
+    </div>
+  </article>
+  <article v-else class="msg-custom tx-item">
     <span class="avatar avatar-notice"><AppIcon :name="isSubagentNotice ? 'bot' : 'info'" class="icon" /></span>
     <div class="msg-main">
       <div class="msg-head">
