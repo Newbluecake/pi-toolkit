@@ -16,7 +16,14 @@ describe("layout CSS invariants (no real layout engine in vitest; real render ch
     expect(row).toContain("display: grid");
     expect(row).toMatch(/grid-template-columns:\s*auto minmax\(0, 1fr\) auto/);
     expect(row).not.toContain("flex-wrap");
-    expect(rule(agents, ".agent-main")).toContain("flex-wrap: wrap");
+    // badges never wrap on row 1: AgentCard moves the whole group onto the session-name line
+    expect(rule(agents, ".agent-main")).not.toContain("flex-wrap");
+    expect(rule(agents, ".agent-chips")).toContain("flex: none");
+    // session name wins: the badge group wraps as one unit; the name ellipsizes only past the full line
+    expect(rule(agents, ".agent-line2")).toContain("flex-wrap: wrap");
+    const name = rule(agents, ".agent-line2 > .agent-session");
+    expect(name).toContain("max-width: 100%");
+    expect(name).toContain("min-width: 0");
     expect(rule(agents, ".agent-end")).toContain("white-space: nowrap");
     expect(rule(agents, ".agent-cost")).not.toContain("margin-left");
   });

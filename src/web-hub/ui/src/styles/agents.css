@@ -282,10 +282,46 @@
 
 .agent-main {
   display: flex;
-  flex-wrap: wrap; /* badges wrap under the path, inside the middle column only */
   align-items: center;
-  gap: var(--sp-1) var(--sp-2);
+  column-gap: var(--sp-2);
   min-width: 0;
+}
+
+/* The badge group never wraps or shrinks: AgentCard.vue moves it WHOLE onto the session-name
+ * line (Teleport) when path + badges do not fit on row 1, so it never owns a line by itself. */
+.agent-chips {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: var(--sp-2);
+}
+
+.agent-line2 {
+  display: flex;
+  flex-wrap: wrap; /* the badge group (one unit) drops to the next line instead of squeezing the name */
+  align-items: center;
+  column-gap: 6px;
+  padding-left: 16px; /* indent shared by the name and a wrapped badge line */
+  min-width: 0;
+}
+
+/* The session name wins: it keeps its full width and is ellipsized ONLY when it alone exceeds
+ * the line (max-width), never to make room for the badges. */
+.agent-line2 > .agent-session {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding-left: 0;
+}
+
+.agent-below {
+  display: contents;
+}
+
+/* Badges after the name (same line when they fit, else a line of their own): the rename pencil
+ * sits right after the name's last character, so a renamable card reserves its box here. */
+.agent-item.renamable .agent-line2[data-below="true"] > .agent-session {
+  margin-right: calc(var(--rename-hit) + 8px);
 }
 
 .agent-end {
@@ -781,7 +817,7 @@
  * ellipsis). `.removable`'s 60px right reservation would otherwise push the anchor BOX (and
  * with it the pencil) 60px past the text end — drop it on THIS row only: the pencil's own
  * reservation replaces it, and the bottom-right buttons never reach the title line. */
-.agent-item.renamable > .agent-card > .agent-session {
+.agent-item.renamable > .agent-card .agent-session {
   justify-self: start;
   max-width: calc(100% - var(--rename-hit) - 8px);
   padding-right: 0;
@@ -790,7 +826,7 @@
 /* `.removable`: the delete button sits in the bottom-right corner and, being taller than the
  * meta row, reaches up to the title line — the title (hence the pencil right after it) stops
  * short of that column, so pencil and delete button never overlap. */
-.agent-item.renamable.removable > .agent-card > .agent-session {
+.agent-item.renamable.removable > .agent-card .agent-session {
   max-width: calc(100% - var(--rename-hit) - 8px - var(--remove-col));
 }
 
@@ -829,7 +865,7 @@
     anchor-scope: --rename-anchor;
   }
 
-  .agent-item.renamable > .agent-card > .agent-session {
+  .agent-item.renamable > .agent-card .agent-session {
     anchor-name: --rename-anchor;
   }
 

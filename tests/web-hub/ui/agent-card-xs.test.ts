@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import { describe, expect, it } from "vitest";
 import AgentCard from "../../../src/web-hub/ui/src/components/agents/AgentCard.vue";
 import {
@@ -88,5 +88,42 @@ describe("AgentCard xs read-only badge", () => {
     expect(row.querySelector(".agent-main .chip-xs")).not.toBeNull();
     expect(row.querySelector(".agent-end .agent-cost")).not.toBeNull();
     expect(row.querySelector(".agent-main .agent-cost")).toBeNull();
+  });
+  it("badges: stay in .agent-main when row 1 fits; teleport (same node) to .agent-line2 when it overflows", async () => {
+    const dims = { scrollWidth: 100, offsetWidth: 60, clientWidth: 300 };
+    const orig = Object.getOwnPropertyDescriptors(HTMLElement.prototype);
+    for (const k of Object.keys(dims) as (keyof typeof dims)[])
+      Object.defineProperty(HTMLElement.prototype, k, { configurable: true, get: () => dims[k] });
+    try {
+      const a = agent({ joined: true, receive: "wake" });
+      const hub = {
+        state: ref({ agents: new Map([["a", a]]), hub: { caps: ["xs.v1"] } } as unknown as HubState),
+        dispatch() {},
+      } as HubHandle;
+      const w = mount(AgentCard, {
+        props: { card, selected: false },
+        attachTo: document.body,
+        global: { provide: { [HUB_CTX as symbol]: hub } },
+      });
+      await nextTick();
+      expect(w.findAll(".agent-chips")).toHaveLength(1);
+      expect(w.find(".agent-main .agent-chips").exists()).toBe(true);
+      dims.scrollWidth = 280; // 280 + gap + 60 > 300 ⇒ overflow
+      await w.setProps({ card: { ...card, shortCwd: "~/very/long/path" } });
+      await nextTick();
+      await nextTick();
+      expect(document.querySelectorAll(".agent-chips")).toHaveLength(1); // single DOM node, never duplicated
+      expect(w.find(".agent-line2 .agent-chips").exists()).toBe(true);
+      expect(w.find(".agent-line2").attributes("data-below")).toBe("true");
+      expect(w.find(".agent-main .agent-chips").exists()).toBe(false);
+      expect(w.find(".agent-session").attributes("title")).toBe(card.sessionLabel); // full name on hover
+      w.unmount();
+    } finally {
+      for (const k of Object.keys(dims)) {
+        const d = orig[k];
+        if (d) Object.defineProperty(HTMLElement.prototype, k, d);
+        else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[k];
+      }
+    }
   });
 });

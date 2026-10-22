@@ -1749,7 +1749,7 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
   });
 
   it("the title shrink-wraps its text and reserves the pencil's width (max-width)", () => {
-    const session = rule(".agent-item.renamable > .agent-card > .agent-session");
+    const session = rule(".agent-item.renamable > .agent-card .agent-session");
     expect(session).toMatch(/justify-self:\s*start/); // anchor(right) = TEXT end, not the stretched grid box
     expect(session).toMatch(/max-width:\s*calc\(100% - var\(--rename-hit\) - 8px\)/);
     // `.removable`'s 60px right reservation must not push the anchor box past the text end.
@@ -1779,7 +1779,7 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
   });
 
   it("removable: title reservation and fallback pin both leave the delete button's column free", () => {
-    expect(rule(".agent-item.renamable.removable > .agent-card > .agent-session")).toMatch(
+    expect(rule(".agent-item.renamable.removable > .agent-card .agent-session")).toMatch(
       /max-width:\s*calc\(100% - var\(--rename-hit\) - 8px - var\(--remove-col\)\)/,
     );
     expect(rule(".agent-item.removable .rename-wrap")).toMatch(/var\(--remove-col/);

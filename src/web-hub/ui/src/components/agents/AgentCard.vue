@@ -7,7 +7,8 @@
 <script setup lang="ts">
 import { xsBadgeOf, type XsReceive } from "./agentCardModel.js";
 import type { IconName } from "../../icons/names.js";
-import { computed, inject } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { observeResize } from "../../composables/useSharedResize.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { formatPercent } from "../../format.js";
@@ -81,6 +82,38 @@ const dotClass = computed(() => {
   }
 });
 
+// Badge placement: the chips group stays after the path while path + chips fit on row 1;
+// otherwise it moves (Teleport — still ONE DOM node, one aria tree) to the session-name line.
+// Measurements are placement-independent (title's natural width, the chips' intrinsic width,
+// the 1fr column's width), so moving the group can never feed back into the decision.
+const mainEl = ref<HTMLElement | null>(null);
+const titleEl = ref<HTMLElement | null>(null);
+const chipsEl = ref<HTMLElement | null>(null);
+const belowEl = ref<HTMLElement | null>(null);
+const chipsBelow = ref(false);
+
+function measure(): void {
+  const main = mainEl.value;
+  const title = titleEl.value;
+  const chips = chipsEl.value;
+  if (!main || !title || !chips) return;
+  const gap = Number.parseFloat(getComputedStyle(main).columnGap) || 0;
+  chipsBelow.value = title.scrollWidth + gap + chips.offsetWidth > main.clientWidth;
+}
+
+const stops: Array<() => void> = [];
+onMounted(() => {
+  measure();
+  for (const el of [mainEl.value, chipsEl.value]) if (el) stops.push(observeResize(el, measure));
+});
+onBeforeUnmount(() => {
+  for (const stop of stops.splice(0)) stop();
+});
+watch(
+  () => props.card.shortCwd,
+  () => void nextTick(measure),
+);
+
 const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
 </script>
 
@@ -93,36 +126,40 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
   >
     <span class="agent-row1">
       <span class="dot" :class="dotClass"></span>
-      <span class="agent-main">
-        <span class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
+      <span ref="mainEl" class="agent-main">
+        <span ref="titleEl" class="agent-title" translate="no" :title="card.cwdFull || card.shortCwd"
           ><bdi>{{ card.shortCwd }}</bdi></span
         >
-        <span class="chip" translate="no">{{ kindLabel }}</span>
-        <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
-          {{ t("agents.stopped") }}
-        </span>
-        <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
-          {{ t("spawn.badgeWeb") }}
-        </span>
-        <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
-          {{ t("spawn.badgeRestoring") }}
-        </span>
-        <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
-          {{ t("spawn.badgeRestored") }}
-        </span>
-        <span v-if="managed?.removing" class="chip chip-removing" translate="no">
-          {{ t("agents.removing") }}
-        </span>
-        <span
-          v-else-if="xsBadge"
-          class="chip chip-xs"
-          role="img"
-          :data-xs="xsBadge"
-          :title="t(`agents.xs.${xsBadge}`)"
-          :aria-label="t(`agents.xs.${xsBadge}`)"
-        >
-          <AppIcon :name="XS_ICON[xsBadge]" />
-        </span>
+        <Teleport :to="belowEl ?? 'body'" :disabled="!chipsBelow || !belowEl">
+          <span ref="chipsEl" class="agent-chips">
+            <span class="chip" translate="no">{{ kindLabel }}</span>
+            <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
+              {{ t("agents.stopped") }}
+            </span>
+            <span v-if="managed" class="chip chip-web" translate="no" :title="t('spawn.badgeWebTitle')">
+              {{ t("spawn.badgeWeb") }}
+            </span>
+            <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">
+              {{ t("spawn.badgeRestoring") }}
+            </span>
+            <span v-else-if="restored" class="chip chip-restored" translate="no" :title="t('spawn.badgeRestoredTitle')">
+              {{ t("spawn.badgeRestored") }}
+            </span>
+            <span v-if="managed?.removing" class="chip chip-removing" translate="no">
+              {{ t("agents.removing") }}
+            </span>
+            <span
+              v-else-if="xsBadge"
+              class="chip chip-xs"
+              role="img"
+              :data-xs="xsBadge"
+              :title="t(`agents.xs.${xsBadge}`)"
+              :aria-label="t(`agents.xs.${xsBadge}`)"
+            >
+              <AppIcon :name="XS_ICON[xsBadge]" />
+            </span>
+          </span>
+        </Teleport>
       </span>
       <span class="agent-end">
         <!-- web-hub-privacy P2: 锁定态常显 / 未锁定悬停显示 (privacy.css keys the reveal off
@@ -145,9 +182,17 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
       {{ t(privacyError.key, { code: privacyError.code }) }}
     </span>
 
-    <span class="agent-session" :class="{ mono: card.sessionLabel === t('agents.noSessionName') }" translate="no">{{
-      card.sessionLabel
-    }}</span>
+    <span class="agent-line2" :data-below="chipsBelow ? 'true' : 'false'">
+      <span
+        class="agent-session"
+        :class="{ mono: card.sessionLabel === t('agents.noSessionName') }"
+        translate="no"
+        :title="card.sessionLabel"
+        >{{ card.sessionLabel }}</span
+      >
+      <!-- the chips group is teleported here (same single DOM node) when row 1 cannot hold it -->
+      <span ref="belowEl" class="agent-below"></span>
+    </span>
 
     <span
       v-if="
