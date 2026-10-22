@@ -164,6 +164,19 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"], home?: st
   };
 }
 
+/** Unread cross-session inbox count (§12.6): hub cap `xs.v1` ∧ `status.xsInbox.unread` ≥ 1.
+ *  Returns the integer count, or undefined (absent/malformed ⇒ nothing renders). */
+export function xsUnreadOf(agent: AgentState | undefined, hubCaps: unknown): number | undefined {
+  if (!Array.isArray(hubCaps) || !hubCaps.includes("xs.v1") || !agent) return undefined;
+  const n = record(record(agent.status)["xsInbox"])["unread"];
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 ? n : undefined;
+}
+
+/** Compact badge text: counts above 99 saturate to `99+`. */
+export function xsUnreadLabel(n: number): string {
+  return n > 99 ? "99+" : String(n);
+}
+
 export type XsReceive = "wake" | "deliver" | "replies" | "off";
 
 /** Read-only xs badge. Hub cap is required; absent/malformed membership status is inert. */

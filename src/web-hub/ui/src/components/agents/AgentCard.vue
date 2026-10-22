@@ -5,7 +5,7 @@
   back/forward, middle-click-open-in-new-tab and Tab-order all work for free (ui-design §6.2).
 -->
 <script setup lang="ts">
-import { xsBadgeOf, type XsReceive } from "./agentCardModel.js";
+import { xsBadgeOf, xsUnreadLabel, xsUnreadOf, type XsReceive } from "./agentCardModel.js";
 import type { IconName } from "../../icons/names.js";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { observeResize } from "../../composables/useSharedResize.js";
@@ -27,6 +27,9 @@ const { t } = i18n;
 const hub = inject(HUB_CTX, null);
 const XS_ICON: Record<XsReceive, IconName> = { wake: "radio", deliver: "inbox", replies: "swap", off: "ban" };
 const xsBadge = computed(() => xsBadgeOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]));
+const xsUnread = computed(() =>
+  xsUnreadOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]),
+);
 const needsAnswer = computed(() => {
   const dialogs = hub?.state.value.agents.get(props.card.key)?.dialogs;
   return Array.isArray(dialogs?.open) && dialogs.open.length > 0;
@@ -157,6 +160,16 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
               :aria-label="t(`agents.xs.${xsBadge}`)"
             >
               <AppIcon :name="XS_ICON[xsBadge]" />
+            </span>
+            <span
+              v-if="xsUnread !== undefined"
+              class="chip chip-xs-unread"
+              role="img"
+              translate="no"
+              :title="t('agents.xsUnread', { n: xsUnread })"
+              :aria-label="t('agents.xsUnread', { n: xsUnread })"
+            >
+              <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
             </span>
           </span>
         </Teleport>

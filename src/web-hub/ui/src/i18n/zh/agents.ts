@@ -47,6 +47,7 @@ const agents = {
   "xs.wake": "跨会话：已加入，其他会话的消息可唤醒本会话",
   "xs.deliver": "跨会话：已加入，其他会话的消息只送达、不唤醒本会话",
   "xs.replies": "跨会话：已加入，只接收本会话所发请求的回复，拒收其他消息",
+  xsUnread: "{n} 条跨会话来信未读（模型处理后自动清零）",
   "xs.off": "跨会话：已加入，但当前拒收所有消息",
 } satisfies Messages<typeof en>;
 

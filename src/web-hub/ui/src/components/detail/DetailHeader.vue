@@ -57,6 +57,7 @@ import TodoPanel from "./TodoPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
+import { xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -131,6 +132,8 @@ function onPrivacyClick(): void {
 // body `useNewSession` already put back into the draft surfaces as a one-time dismissible note.
 // ---------------------------------------------------------------------------
 const hub = inject(HUB_CTX, null);
+// channel-plan §12.6 (IBU): unread cross-session inbox badge; absent field / no xs.v1 ⇒ nothing.
+const xsUnread = computed(() => xsUnreadOf(props.agent, hub?.state.value.hub?.["caps"]));
 const managed = computed(() => managedFor(hub?.state.value.spawns ?? null, props.agent.key));
 // spawn-restore plan §9.1 (F20): the OLD agent of a restore in flight — `restoring` badge here,
 // the composer itself goes read-only through AgentDetail's readonlyReason.
@@ -391,6 +394,15 @@ function onToggleHeadInfo(): void {
           privacyMarked ? t("privacy.lockLabel") : t("privacy.markLabel")
         }}</span>
       </button>
+      <span
+        v-if="xsUnread !== undefined"
+        class="chip chip-xs-unread"
+        role="img"
+        translate="no"
+        :title="t('agents.xsUnread', { n: xsUnread })"
+        :aria-label="t('agents.xsUnread', { n: xsUnread })"
+        ><AppIcon name="inbox" class="icon" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span></span
+      >
       <span v-if="restoring" class="chip chip-restoring" translate="no" :title="t('spawn.badgeRestoringTitle')">{{
         t("spawn.badgeRestoring")
       }}</span>

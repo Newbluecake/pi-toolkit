@@ -1062,6 +1062,20 @@
   height: 12px;
 }
 
+.chip-xs-unread {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-inline: 5px;
+  color: var(--c-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip-xs-unread .icon {
+  width: 12px;
+  height: 12px;
+}
+
 .chip-xs[data-xs="wake"] {
   color: var(--c-primary);
 }
