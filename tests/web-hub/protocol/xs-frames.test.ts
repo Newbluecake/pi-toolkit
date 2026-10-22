@@ -186,7 +186,14 @@ describe("xs frame decoding (XS0 §8.2)", () => {
     expect(XS_AGENT_CAPS).toEqual(["xs.v1"]);
     expect(XS_EXPIRES_MS).toBe(5_000);
     expect(XS_HUB_DELIVER_MS).toBe(5_000);
-    expect(XS_REQ_DEADLINE_MS).toEqual({ list: 3_000, resolve: 3_000, info: 3_000, send: 8_000 });
+    expect(XS_REQ_DEADLINE_MS).toEqual({
+      list: 3_000,
+      resolve: 3_000,
+      info: 3_000,
+      send: 8_000,
+      broadcast: 8_000, // channel-plan §3.3 (CH0) — additive
+      channels: 3_000,
+    });
     expect(xsReqDeadlineMs("send")).toBe(8_000);
     expect(xsReqDeadlineMs("list")).toBe(3_000);
     expect(XS_MAX_FRAME_BYTES).toBe(16 * 1024);

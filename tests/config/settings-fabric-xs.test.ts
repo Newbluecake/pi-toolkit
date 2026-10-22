@@ -40,6 +40,13 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
         maxPendingPerTarget: 3,
         lateGraceS: 600,
       },
+      // channel-plan §6.4 (CH0)
+      channels: {
+        enabled: true,
+        autoJoin: ["default"],
+        autoJoinInvalid: false,
+        broadcast: { outPerHour: 6, minIntervalS: 60, wakeOutPerHour: 2, maxRecipients: 16, wakeMaxRecipients: 4 },
+      },
     });
   });
 

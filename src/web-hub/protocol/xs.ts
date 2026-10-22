@@ -41,6 +41,13 @@ export const XS_REPLY_HUB_CAP = "xs.reply.v1";
 /** Reply-plan §5.1 (RX0): agent-side reply cap, appended after `xs.v1` in `hello.caps` iff
  *  `xsOn ∧ fabric.crossSession.reply.enabled` (RX3's bridge threads it). */
 export const XS_REPLY_AGENT_CAP = "xs.reply.v1";
+/** Channel-plan §3.1 (CH0, cap only — never a PROTO bump): hub-side channel cap, advertised on BOTH
+ *  hub cap surfaces iff `HubConfig.crossSession` exists (there is NO hub-level off key — a missing
+ *  `HubConfig.crossSession.channels` means default params, never "off"). */
+export const XS_CHANNEL_HUB_CAP = "xs.channel.v1";
+/** Channel-plan §3.1 (CH0): agent-side channel cap, appended to `hello.caps` iff
+ *  `xsOn ∧ fabric.crossSession.channels.enabled`. `XS_AGENT_CAPS` itself stays frozen (off goldens). */
+export const XS_CHANNEL_AGENT_CAP = "xs.channel.v1";
 /** The slot kind the `xs_member` frame rides (X2 appends it to SLOT_ORDER right after "session"). */
 export const XS_SLOT_KIND = "xs" as const;
 
@@ -57,7 +64,15 @@ export const XS_HUB_DELIVER_MS = 5_000;
  * beats the client deadline; the client deadline only fires on a dead/wedged hub and yields
  * `unknown{client_deadline}`.
  */
-export const XS_REQ_DEADLINE_MS = { list: 3_000, resolve: 3_000, info: 3_000, send: 8_000 } as const;
+export const XS_REQ_DEADLINE_MS = {
+  list: 3_000,
+  resolve: 3_000,
+  info: 3_000,
+  send: 8_000,
+  // channel-plan §3.3 (CH0): hub fan-out ≈ admission <1s + 5s deliver + headroom; channels is a read.
+  broadcast: 8_000,
+  channels: 3_000,
+} as const;
 
 /** Per-frame hard byte cap for every `xs_*` frame (§5.2): the hub REJECTS oversize sends with
  *  `E_XS_TOO_LARGE` — no truncation (the sender owns `fabric.maxChars` truncation). */
@@ -72,9 +87,55 @@ export const XS_RESOLVE_MAX_CANDIDATES = 5;
 
 /** `xs_req` op set (§8.2). */
 export type XsReqOp = "list" | "resolve" | "send" | "info";
+/** Channel-plan §3.3 (CH0): the two new ops. `XsReqFrame.op` deliberately stays the legacy four-op
+ *  union (CH0 may not touch the hub router/audit types); CH1 widens `XsReqFrame.op` to `XsAnyReqOp`
+ *  and deletes `XsChannelReqFrame`. Until then a decoded broadcast/channels frame is typed by
+ *  `XsChannelReqFrame`. */
+export type XsChannelReqOp = "broadcast" | "channels";
+export type XsAnyReqOp = XsReqOp | XsChannelReqOp;
+
+// ----------------------------------------------------------------- channels (channel-plan §2.1/§3/§5, CH0)
+
+/** Channel-plan §2.1: canonical channel name (no `#`, lower-case ASCII). Shared by hub and agent. */
+export const XS_CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+/** Channel-plan Q8: a session joins at most this many channels (wire constant, `xs_member.channels` maxItems). */
+export const XS_MAX_CHANNELS = 4;
+/** `xs_res.results` / `xs_res.channels` row cap (§3.3). */
+export const XS_CHANNEL_RESULT_MAX_ROWS = 32;
+/** Channel-plan Q5 HARD ceilings (settings may only tighten): broadcast wakes per hour, and the
+ *  largest recipient set a broadcast may wake. */
+export const XS_BROADCAST_WAKES_PER_HOUR_HARD_MAX = 2;
+export const XS_BROADCAST_WAKE_RECIPIENTS_HARD_MAX = 4;
+/** Hub-global broadcast params (channel-plan §6.4 / §3.1 defaults when `HubConfig...channels` is absent). */
+export const XS_BROADCAST_MAX_RECIPIENTS_DEFAULT = 16;
+export const XS_BROADCAST_WAKE_MAX_RECIPIENTS_DEFAULT = 4;
+
+/** `xs_res.fanout` — per-broadcast aggregate; `applied + none + unknown = total` (§5.2). */
+export interface XsFanoutWire {
+  total: number;
+  applied: number;
+  none: number;
+  unknown: number;
+  woke: number;
+}
+/** One `xs_res.results[]` row of a broadcast (§3.3, ≤32). */
+export interface XsBroadcastRowWire {
+  ref: string;
+  name?: string;
+  effect: XsEffect;
+  reason?: string;
+  wakeDowngraded?: XsWakeDowngraded;
+  woke: boolean;
+}
+/** One `xs_res.channels[]` row of `op:"channels"` (§4.1, Q7: names + member counts only). */
+export interface XsChannelInfoWire {
+  name: string;
+  members: number;
+  joined: boolean;
+}
 
 /** Deadline lookup for `connection.request()` (X2 wires this into its deadline table). */
-export function xsReqDeadlineMs(op: XsReqOp): number {
+export function xsReqDeadlineMs(op: XsAnyReqOp): number {
   return XS_REQ_DEADLINE_MS[op];
 }
 
@@ -100,6 +161,7 @@ export type XsErrorCode =
   | "E_XS_STALE_ORIGIN" // origin{sessionId,epoch} does not match the socket's current member (§8.1)
   | "E_XS_TOO_LARGE" // frame exceeds XS_MAX_FRAME_BYTES
   | "E_XS_REPLY_UNSUPPORTED" // reply-plan §5.2: the peer (hub or target) lacks `xs.reply.v1` — refused before any reservation; a PROVABLE-none code (RX4 maps it)
+  | "E_XS_FANOUT_TOO_LARGE" // channel-plan §5.2 step 3: broadcast recipient set above `maxRecipients` — a PROVABLE-none code
   | "E_XS_INTERNAL"; // handler exception (X1's catch-all; logs carry no body)
 
 // ----------------------------------------------------------------- effect / reason / downgrade enums
@@ -124,7 +186,11 @@ export type XsNoneReason =
   | "inbox_full" // cross-session inbox at inboxCap (§8.4.6)
   | "host_rejected" // pi.sendMessage threw synchronously — proof of no effect (§6.3)
   | "origin_changed" // sender guard failed BEFORE the send frame left (§8.1)
-  | "receiver_error"; // receiver pipeline threw BEFORE dispatch (M2 — post-dispatch is unknown)
+  | "receiver_error" // receiver pipeline threw BEFORE dispatch (M2 — post-dispatch is unknown)
+  // channel-plan §5.2 (CH0): broadcast-only reasons
+  | "no_recipients" // the channel has no eligible recipient (S = ∅)
+  | "ambiguous" // a recipient sessionId has >1 holders — not delivered, counted in N
+  | "channel_not_joined"; // sender is not a member of the channel;
 
 /**
  * `effect:"unknown"` reasons — the message may have taken effect; the tool text must tell the
@@ -156,6 +222,8 @@ export type XsWakeDowngraded =
   | "outbound_wake_rate" // sender wakesOutPerHour exhausted (hub reservation)
   | "pair_wake_rate" // pairWakesPerHour exhausted (hub reservation)
   | "sender_wake_disabled" // SENDER's fabric.wake.enabled false (local downgrade, §4.5)
+  | "broadcast_wake_fanout" // channel-plan §5.2 step 5.2: N above wakeMaxRecipients (hard ≤4)
+  | "broadcast_wake_rate" // channel-plan §5.2 step 5.3: broadcastWakesOutPerHour exhausted (hard ≤2)
   | "ledger_full"; // wake ledger at capacity — refuse new wakes, never evict (r3 B1)
 
 // ----------------------------------------------------------------- reply association (reply-plan §5, RX0)
@@ -194,6 +262,14 @@ export const XsMemberLimitsSchema = Type.Object(
     pairWakesPerHour: Type.Integer({ minimum: 0, maximum: 20 }),
     inFlightPerSession: Type.Integer({ minimum: 1, maximum: 16 }),
     listPerMin: Type.Integer({ minimum: 1, maximum: 60 }),
+    // channel-plan §3.3 (CH0): optional broadcast keys, written only for a member with named
+    // channels on a channel-capable hub (§3.2). Missing ⇒ the hub clamps to the LOWER bound
+    // (0 = cannot broadcast). Wakes are hard-capped at 2/hour (Q5).
+    broadcastsOutPerHour: Type.Optional(Type.Integer({ minimum: 0, maximum: 60 })),
+    broadcastMinIntervalMs: Type.Optional(Type.Integer({ minimum: 10_000, maximum: 3_600_000 })),
+    broadcastWakesOutPerHour: Type.Optional(
+      Type.Integer({ minimum: 0, maximum: XS_BROADCAST_WAKES_PER_HOUR_HARD_MAX }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -205,6 +281,9 @@ export interface XsMemberLimitsWire {
   pairWakesPerHour: number;
   inFlightPerSession: number;
   listPerMin: number;
+  broadcastsOutPerHour?: number;
+  broadcastMinIntervalMs?: number;
+  broadcastWakesOutPerHour?: number;
 }
 
 const SessionIdSchema = Type.String({ minLength: 1, maxLength: 128 });
@@ -216,6 +295,10 @@ const ReceiveSchema = Type.Union([
   Type.Literal("wake"),
   Type.Literal("replies"), // reply-plan §5.2/§6.1 (RX0); RX3's slot flush downgrades for old hubs
 ]);
+/** Channel names on the wire are deliberately permissive (length only): the hub normalizes
+ *  (`xs_member`) or answers `E_XS_BAD_TARGET`/`E_XS_BAD_FRAME` (`xs_req`) instead of a silent
+ *  schema drop. `XS_CHANNEL_NAME_RE` is the canonical form. */
+const ChannelNameSchema = Type.String({ minLength: 1, maxLength: 40 });
 const EffectSchema = Type.Union([Type.Literal("applied"), Type.Literal("none"), Type.Literal("unknown")]);
 const ReasonSchema = Type.String({ minLength: 1, maxLength: 64 });
 const WakeDowngradedSchema = Type.String({ minLength: 1, maxLength: 48 });
@@ -251,6 +334,7 @@ export const XsMemberSchema = Type.Object(
     joined: Type.Boolean(),
     receive: ReceiveSchema,
     limits: XsMemberLimitsSchema,
+    channels: Type.Optional(Type.Array(ChannelNameSchema, { maxItems: XS_MAX_CHANNELS })), // channel-plan §3.2: absent ≡ `joined ? ["default"] : []`; never written for default-only
   },
   { additionalProperties: false },
 );
@@ -261,6 +345,8 @@ export interface XsMemberFrame {
   joined: boolean;
   receive: XsReceiveWire;
   limits: XsMemberLimitsWire;
+  /** Channel-plan §3.2/§3.3: effective channels; ABSENT when default-only or the hub lacks `xs.channel.v1`. */
+  channels?: string[];
 }
 
 /** §8.2: agent→hub request. `origin` is re-validated by the hub against the socket's CURRENT
@@ -275,7 +361,14 @@ export const XsReqSchema = Type.Object(
   {
     t: Type.Literal("xs_req"),
     rid: IdSchema,
-    op: Type.Union([Type.Literal("list"), Type.Literal("resolve"), Type.Literal("send"), Type.Literal("info")]),
+    op: Type.Union([
+      Type.Literal("list"),
+      Type.Literal("resolve"),
+      Type.Literal("send"),
+      Type.Literal("info"),
+      Type.Literal("broadcast"), // channel-plan §3.3 (CH0): only sent to a hub advertising `xs.channel.v1`
+      Type.Literal("channels"),
+    ]),
     origin: OriginSchema,
     query: Type.Optional(Type.String({ maxLength: 128 })),
     scope: Type.Optional(Type.Union([Type.Literal("hub"), Type.Literal("cwd")])),
@@ -284,6 +377,7 @@ export const XsReqSchema = Type.Object(
     wake: Type.Optional(Type.Boolean()),
     level: Type.Optional(Type.Integer({ minimum: 0, maximum: 31 })),
     expect: Type.Optional(ReplyExpectSchema),
+    channel: Type.Optional(ChannelNameSchema), // channel-plan §3.3: required for broadcast, optional list filter
     replyTo: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), // an XS_REPLY_REQUEST_ID_RE-shaped id; the router validates the exact shape (see ReplyExpectSchema)
   },
   { additionalProperties: false },
@@ -304,6 +398,13 @@ export interface XsReqFrame {
   expect?: { requestId: string; timeoutMs: number };
   /** Reply-plan §4.2/§5.2: present only on reply sends — never carries `wake`/`level`. */
   replyTo?: string;
+  /** Channel-plan §3.3: `broadcast` target channel (required there) / optional `list` filter. */
+  channel?: string;
+}
+
+/** Channel-plan §3.3: the shape of an `xs_req` carrying one of the new ops (same envelope as `XsReqFrame`). */
+export interface XsChannelReqFrame extends Omit<XsReqFrame, "op"> {
+  op: XsChannelReqOp;
 }
 
 /** One `xs_res{rows}` row (§4.3 list projection — no agentKey, pid, tools or model). */
@@ -315,12 +416,16 @@ export interface XsSessionRowWire {
   receive: "deliver" | "wake";
   busy: boolean;
   lastActiveAgoS: number;
+  /** Channel-plan §3.2: shared channels with the requester — ABSENT when the shared set is exactly [default]. */
+  channels?: string[];
 }
 
 /** One `xs_res{candidates}` entry (ref + optional name only — anti-enumeration, §5.1). */
 export interface XsResolveCandidateWire {
   ref: string;
   name?: string;
+  /** Channel-plan §3.2: same write rule as `XsSessionRowWire.channels`. */
+  channels?: string[];
 }
 
 /** §4.6: `xs_req{op:"info"}` reply body — the hub's frozen-at-start effective global limits. */
@@ -346,6 +451,15 @@ export const XsResSchema = Type.Object(
     ),
     target: Type.Optional(Type.Object({}, { additionalProperties: true })),
     hubLimits: Type.Optional(Type.Object({}, { additionalProperties: true })),
+    // channel-plan §3.3 (CH0): broadcast / channels replies, written only to a requester that
+    // declared `xs.channel.v1`. Open-object rows so a future field never silently drops the frame.
+    fanout: Type.Optional(Type.Object({}, { additionalProperties: true })),
+    results: Type.Optional(
+      Type.Array(Type.Object({}, { additionalProperties: true }), { maxItems: XS_CHANNEL_RESULT_MAX_ROWS }),
+    ),
+    channels: Type.Optional(
+      Type.Array(Type.Object({}, { additionalProperties: true }), { maxItems: XS_CHANNEL_RESULT_MAX_ROWS }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -364,6 +478,10 @@ export interface XsResFrame {
    *  (old peers keep the loose two-field shape — `target` is an open object on the wire). */
   target?: { ref: string; name?: string; sessionId?: string };
   hubLimits?: XsHubLimitsWire;
+  /** Channel-plan §3.3: broadcast aggregate / per-recipient rows / `op:"channels"` listing. */
+  fanout?: XsFanoutWire;
+  results?: XsBroadcastRowWire[];
+  channels?: XsChannelInfoWire[];
 }
 
 /**
@@ -397,6 +515,10 @@ export const XsDeliverSchema = Type.Object(
     expiresAt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
     reply: Type.Optional(ReplyStampSchema),
     inReplyTo: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+    // channel-plan §3.2/§3.3 (CH0): written by the hub only when the TARGET declared
+    // `xs.channel.v1`; `via` only when the shared set is not exactly [default].
+    via: Type.Optional(Type.Array(ChannelNameSchema, { maxItems: XS_MAX_CHANNELS })),
+    bc: Type.Optional(Type.Object({ channel: ChannelNameSchema }, { additionalProperties: false })),
   },
   { additionalProperties: false },
 );
@@ -416,6 +538,10 @@ export interface XsDeliverFrame {
   /** Reply-plan §4.2/§5.2: this delivery IS the (one) reply to that requestId — `wake` is the
    *  requester's `wakeOnReply` decision, not the replier's. */
   inReplyTo?: string;
+  /** Channel-plan §3.2: shared channels between sender and target; ABSENT ≡ `["default"]`. */
+  via?: string[];
+  /** Channel-plan §3.3: this delivery is a channel broadcast on `bc.channel` (never `default`, Q2). */
+  bc?: { channel: string };
 }
 
 /** §8.2: agent→hub settlement of one `xs_deliver` — the receiver pipeline answers EXACTLY ONE
@@ -465,6 +591,7 @@ export const XsStatusSchema = Type.Object(
     joined: Type.Boolean(),
     receive: ReceiveSchema,
     blocked: Type.Integer({ minimum: 0, maximum: 64 }),
+    channels: Type.Optional(Type.Array(ChannelNameSchema, { maxItems: XS_MAX_CHANNELS })), // channel-plan §3.2: never written for default-only
   },
   { additionalProperties: false },
 );
@@ -472,4 +599,6 @@ export interface XsStatusWire {
   joined: boolean;
   receive: XsReceiveWire;
   blocked: number;
+  /** Channel-plan §3.2: effective channels; ABSENT when default-only / hub lacks the cap. */
+  channels?: string[];
 }

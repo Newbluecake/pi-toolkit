@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget, ExternalPriceRates, Millis } from "../core/types.js";
+import { XS_DEFAULT_CHANNEL, XS_MAX_CHANNELS, checkChannelName, channelSet } from "../fabric/xs/channel.js";
 import { dedupeLinkPaths } from "../extensions/worktree-link-paths.js";
 import type { WorktreeSettings } from "../extensions/worktree-settings.js";
 import { MAX_SAFE_KEEPALIVE_INTERVAL_MS } from "../cache-ttl/keepalive-state.js";
@@ -1026,6 +1027,41 @@ export interface FabricXsReplySettings {
   lateGraceS: number;
 }
 
+/** Parse-time bounds for `fabric.crossSession.channels.broadcast.*` (channel-plan §6.4). The two
+ *  wake leaves' maxima are HARD ceilings (Q5): settings can only tighten them. */
+export const FABRIC_XS_BROADCAST_OUT_PER_HOUR_MAX = 60;
+export const FABRIC_XS_BROADCAST_MIN_INTERVAL_MIN_S = 10;
+export const FABRIC_XS_BROADCAST_MIN_INTERVAL_MAX_S = 3_600;
+export const FABRIC_XS_BROADCAST_WAKE_OUT_PER_HOUR_MAX = 2;
+export const FABRIC_XS_BROADCAST_MAX_RECIPIENTS_MIN = 2;
+export const FABRIC_XS_BROADCAST_MAX_RECIPIENTS_MAX = 32;
+export const FABRIC_XS_BROADCAST_WAKE_MAX_RECIPIENTS_MAX = 4;
+
+/** `fabric.crossSession.channels.broadcast.*` (channel-plan §6.4). */
+export interface FabricXsBroadcastSettings {
+  /** Per-session broadcasts per hour (rides `xs_member.limits`); 0 = broadcasting forbidden. */
+  outPerHour: number;
+  /** Minimum seconds between two broadcasts of one session. */
+  minIntervalS: number;
+  /** Broadcast wakes per hour per session — HARD max 2 (Q5). */
+  wakeOutPerHour: number;
+  /** Hub-global recipient ceiling (rides `HubConfig`). */
+  maxRecipients: number;
+  /** Hub-global wake recipient ceiling — HARD max 4 (Q5). */
+  wakeMaxRecipients: number;
+}
+
+/** `fabric.crossSession.channels.*` (channel-plan §6.4, non-live). */
+export interface FabricXsChannelSettings {
+  /** Q6: default true. false ≡ an old agent: no cap, no channel tools, named channels suspended. */
+  enabled: boolean;
+  /** Canonical, de-duplicated, ≤4 names that `autoJoin` joins (default `["default"]`). */
+  autoJoin: string[];
+  /** §2.4: the configured `autoJoin` was a non-empty array whose entries were ALL invalid ⇒ join nothing and say so in status. */
+  autoJoinInvalid: boolean;
+  broadcast: FabricXsBroadcastSettings;
+}
+
 /** `fabric.crossSession.limits.*` (phase2 §5.2, P8 defaults; every leaf parse-time clamped to its bounds). */
 export interface FabricCrossSessionLimitsSettings {
   /** Per-session outbound sends per minute (sender + hub). */
@@ -1073,6 +1109,8 @@ export interface FabricCrossSessionSettings {
    *  block — `receive:"replies"` availability is judged against `reply.enabled` only through
    *  `effectiveReceive`, never by rewriting the stored preference). */
   reply: FabricXsReplySettings;
+  /** Channel-plan §6.4 (CH0): channels + broadcast settings (present in every parsed block). */
+  channels: FabricXsChannelSettings;
 }
 
 /**
@@ -1281,6 +1319,19 @@ export const DEFAULT_SETTINGS: AgentSettings = {
         maxPending: 8,
         maxPendingPerTarget: 3,
         lateGraceS: 600,
+      },
+      // channel-plan §6.4 (CH0): Q6 channels on by default; broadcast wake ceilings are the Q5 hard maxima.
+      channels: {
+        enabled: true,
+        autoJoin: [XS_DEFAULT_CHANNEL],
+        autoJoinInvalid: false,
+        broadcast: {
+          outPerHour: 6,
+          minIntervalS: 60,
+          wakeOutPerHour: 2,
+          maxRecipients: 16,
+          wakeMaxRecipients: 4,
+        },
       },
     },
   },
@@ -1794,7 +1845,80 @@ function parseFabricSettings(input: unknown): FabricSettings {
 
 /** Deep-enough clone so a parsed result never aliases `DEFAULT_SETTINGS.fabric.crossSession`. */
 function cloneFabricCrossSession(cs: FabricCrossSessionSettings): FabricCrossSessionSettings {
-  return { ...cs, allowFrom: [...cs.allowFrom], limits: { ...cs.limits }, reply: { ...cs.reply } };
+  return {
+    ...cs,
+    allowFrom: [...cs.allowFrom],
+    limits: { ...cs.limits },
+    reply: { ...cs.reply },
+    channels: { ...cs.channels, autoJoin: [...cs.channels.autoJoin], broadcast: { ...cs.channels.broadcast } },
+  };
+}
+
+/**
+ * `fabric.crossSession.channels.*` (channel-plan §6.4, CH0): field-by-field tolerant, never throws;
+ * every numeric leaf clamps into its bounds (the two wake leaves can only be tightened, Q5).
+ * `autoJoin` entries go through `checkChannelName` (reserved/invalid dropped, de-duplicated, capped at
+ * 4); a non-empty array with zero valid entries sets `autoJoinInvalid` and joins nothing.
+ */
+export function parseFabricXsChannelSettings(input: unknown): FabricXsChannelSettings {
+  const defaults = DEFAULT_SETTINGS.fabric.crossSession.channels;
+  const clone = (): FabricXsChannelSettings => ({
+    ...defaults,
+    autoJoin: [...defaults.autoJoin],
+    broadcast: { ...defaults.broadcast },
+  });
+  if (!input || typeof input !== "object" || Array.isArray(input)) return clone();
+  const value = input as Record<string, unknown>;
+  const clamp = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw !== "number" || !Number.isFinite(raw) ? fallback : Math.min(max, Math.max(min, Math.floor(raw)));
+  let autoJoin = [...defaults.autoJoin];
+  let autoJoinInvalid = false;
+  if (Array.isArray(value.autoJoin)) {
+    const names: string[] = [];
+    for (const entry of value.autoJoin) {
+      const checked = checkChannelName(entry);
+      if (checked.ok) names.push(checked.name);
+    }
+    autoJoin = channelSet(names).slice(0, XS_MAX_CHANNELS);
+    autoJoinInvalid = value.autoJoin.length > 0 && autoJoin.length === 0;
+    if (autoJoinInvalid) {
+      console.warn(
+        "[pi-subagent] fabric.crossSession.channels.autoJoin: every entry is invalid or reserved — autoJoin joins nothing",
+      );
+    }
+  }
+  const b =
+    value.broadcast && typeof value.broadcast === "object" && !Array.isArray(value.broadcast)
+      ? (value.broadcast as Record<string, unknown>)
+      : {};
+  const d = defaults.broadcast;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    autoJoin,
+    autoJoinInvalid,
+    broadcast: {
+      outPerHour: clamp(b.outPerHour, d.outPerHour, 0, FABRIC_XS_BROADCAST_OUT_PER_HOUR_MAX),
+      minIntervalS: clamp(
+        b.minIntervalS,
+        d.minIntervalS,
+        FABRIC_XS_BROADCAST_MIN_INTERVAL_MIN_S,
+        FABRIC_XS_BROADCAST_MIN_INTERVAL_MAX_S,
+      ),
+      wakeOutPerHour: clamp(b.wakeOutPerHour, d.wakeOutPerHour, 0, FABRIC_XS_BROADCAST_WAKE_OUT_PER_HOUR_MAX),
+      maxRecipients: clamp(
+        b.maxRecipients,
+        d.maxRecipients,
+        FABRIC_XS_BROADCAST_MAX_RECIPIENTS_MIN,
+        FABRIC_XS_BROADCAST_MAX_RECIPIENTS_MAX,
+      ),
+      wakeMaxRecipients: clamp(
+        b.wakeMaxRecipients,
+        d.wakeMaxRecipients,
+        1,
+        FABRIC_XS_BROADCAST_WAKE_MAX_RECIPIENTS_MAX,
+      ),
+    },
+  };
 }
 
 /**
@@ -1942,6 +2066,7 @@ export function parseFabricCrossSessionSettings(input: unknown): FabricCrossSess
       listPerMin: limit("listPerMin", 1, 60),
     },
     reply,
+    channels: parseFabricXsChannelSettings(value.channels),
   };
 }
 
