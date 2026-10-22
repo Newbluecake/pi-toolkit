@@ -10,7 +10,7 @@
 
 export const XS_CUSTOM_TYPE = "subagent:xs";
 
-export type XsKind = "wake" | "deliver" | "reply" | "late-reply";
+export type XsKind = "wake" | "deliver" | "reply" | "late-reply" | "broadcast";
 
 export interface XsView {
   readonly kind: XsKind;
@@ -19,11 +19,15 @@ export interface XsView {
   readonly cwdLabel?: string;
   /** Request id a reply answers. */
   readonly requestId?: string;
+  /** Broadcast channel (canonical, no `#`) — present iff `kind === "broadcast"`. */
+  readonly channel?: string;
   /** Body only — header and fence removed. */
   readonly body: string;
 }
 
 const HEADER_RE = /^\[fabric xs (reply )?from=(\{.*?\})(?: cwd=("(?:[^"\\]|\\.)*"))?[ \]]/;
+/** Channel-plan §5.3: broadcast marker on the header's FIRST line only (mirrors src/fabric/xs/render.ts). */
+const BC_HEADER_RE = /^[^\n]* channel="#([a-z0-9][a-z0-9_-]{0,31})" kind="broadcast"\]/;
 const FENCE_RE = /<<<fab-([^>\s]+)>>>\n([\s\S]*?)\n<<<fab-\1-end>>>\s*$/;
 
 function str(v: unknown): string | undefined {
@@ -52,18 +56,22 @@ export function parseXsMessage(content: string): XsView | undefined {
   const nl = content.indexOf("\n");
   const head = nl === -1 ? content : content.slice(0, nl);
   const requestId = isReply ? /request="([^"]+)"/.exec(head)?.[1] : undefined;
+  const channel = isReply ? undefined : BC_HEADER_RE.exec(head)?.[1];
   const kind: XsKind = isReply
     ? /state=late\]/.test(head)
       ? "late-reply"
       : "reply"
-    : /\swake=true[\s\]]/.test(head)
-      ? "wake"
-      : "deliver";
+    : channel !== undefined
+      ? "broadcast"
+      : /\swake=true[\s\]]/.test(head)
+        ? "wake"
+        : "deliver";
   return {
     kind,
     from: who,
     ...(cwdLabel === undefined ? {} : { cwdLabel }),
     ...(requestId === undefined ? {} : { requestId }),
+    ...(channel === undefined ? {} : { channel }),
     body: (f[2] ?? "").replaceAll("<<<fab_", "<<<fab-"),
   };
 }

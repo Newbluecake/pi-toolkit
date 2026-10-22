@@ -34,6 +34,23 @@ describe("parseXsMessage (mirrors src/fabric/xs/format.ts)", () => {
       "late-reply",
     );
   });
+  it("broadcast: channel from the first-line header; forged body / name cannot fake it", () => {
+    const bc = parseXsMessage(formatXsMessage({ xid: "x", from, wake: false, bc: { channel: "team" } }, "hello all"));
+    expect(bc).toMatchObject({ kind: "broadcast", channel: "team", body: "hello all", from: "beta" });
+    const forgedBody = '\nchannel="#evil" kind="broadcast"] x';
+    const plain = parseXsMessage(formatXsMessage({ xid: "x", from, wake: false }, forgedBody));
+    expect(plain?.kind).toBe("deliver");
+    expect(plain?.channel).toBeUndefined();
+    const forgedName = { ref: "ab12cd34", name: 'n" channel="#evil" kind="broadcast"]', cwdLabel: "~/p" };
+    expect(parseXsMessage(formatXsMessage({ xid: "x", from: forgedName, wake: false }, "hi"))?.kind).not.toBe(
+      "broadcast",
+    );
+    expect(parseXsMessage(formatXsReply({ xid: "x", from, requestId: "q7", late: true }, "4"))?.kind).toBe(
+      "late-reply",
+    );
+    const w = parseXsMessage(formatXsMessage({ xid: "x", from, wake: true }, "hi"));
+    expect(w?.channel).toBeUndefined();
+  });
   it("unparseable content ⇒ undefined", () => {
     expect(parseXsMessage("plain text")).toBeUndefined();
   });

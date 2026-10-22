@@ -56,6 +56,7 @@ const xsChip = computed(() => {
   if (v.kind === "reply" || v.kind === "late-reply") {
     return `${v.kind === "late-reply" ? "late reply" : "reply"} to ${v.requestId ?? "?"}`;
   }
+  if (v.kind === "broadcast") return `#${v.channel ?? "?"} · 广播`;
   return v.kind;
 });
 </script>
