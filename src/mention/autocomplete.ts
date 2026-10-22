@@ -20,6 +20,8 @@ export interface MentionSessionAutocompleteEntry {
   /** Channel-plan §4.3: shared channels (canonical names, no `#`); absent/empty ⇒ default-only
    *  (description byte-identical to the pre-channel format). */
   readonly channels?: readonly string[];
+  /** Alias-plan §5.4/§6 (AL5b): the row's canonical alias; absent ⇒ pre-alias behavior/description. */
+  readonly alias?: string;
 }
 
 export interface MentionAutocompleteSource {
@@ -34,6 +36,9 @@ export interface MentionAutocompleteSource {
    *  the entry inserts `@<name>`; otherwise the entry inserts the explicit `@session:<ref>`.
    *  Absent ⇒ never bare (fail-safe to the unambiguous explicit form). */
   sessionBareName?(name: string): boolean;
+  /** Alias-plan §5.4: true iff the canonical `alias` may be inserted as `@<alias>` (label/file/unique
+   *  checks, cache-only). Absent ⇒ alias entries insert the explicit `@session:<ref>`. */
+  sessionBareAlias?(alias: string): boolean;
 }
 
 export interface AtToken {
@@ -116,15 +121,27 @@ export function createMentionAutocompleteProvider(
       }
       const sessionItems = sessionEntries.flatMap((entry) => {
         let bare = false;
-        if (entry.name !== undefined) {
+        let aliasValue: string | undefined;
+        if (entry.alias !== undefined) {
+          try {
+            if (source.sessionBareAlias?.(entry.alias) === true) aliasValue = `@${entry.alias}`;
+          } catch {
+            aliasValue = undefined;
+          }
+        }
+        if (aliasValue === undefined && entry.name !== undefined) {
           try {
             bare = source.sessionBareName?.(entry.name) ?? false;
           } catch {
             bare = false;
           }
         }
-        const value = bare && entry.name !== undefined ? `@${entry.name}` : `@session:${entry.ref}`;
-        if (!value.slice(1).startsWith(token.prefix)) return [];
+        const value = aliasValue ?? (bare && entry.name !== undefined ? `@${entry.name}` : `@session:${entry.ref}`);
+        // prefix match on the inserted value, or (alias entries) on the alias as typed (NFKC + ASCII lowercase)
+        const typed = token.prefix.normalize("NFKC").replace(/[A-Z]/g, (c) => c.toLowerCase());
+        const aliasHit = entry.alias !== undefined && typed.length > 0 && entry.alias.startsWith(typed);
+        if (!value.slice(1).startsWith(token.prefix) && !aliasHit) return [];
+        const al = entry.alias !== undefined ? `@${entry.alias} · ` : "";
         const chs =
           entry.channels !== undefined && entry.channels.length > 0
             ? `${entry.channels.map((c) => `#${c}`).join(",")} · `
@@ -132,7 +149,7 @@ export function createMentionAutocompleteProvider(
         const item: AutocompleteItem = {
           value,
           label: value,
-          description: `session · ${chs}${entry.cwdLabel} · ${entry.receive} · ${entry.busy ? "busy" : "idle"}`,
+          description: `session · ${al}${chs}${entry.cwdLabel} · ${entry.receive} · ${entry.busy ? "busy" : "idle"}`,
         };
         ownItems.add(item);
         return [item];

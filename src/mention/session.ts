@@ -2,6 +2,7 @@ import { lstatSync } from "node:fs";
 import { resolve } from "node:path";
 import type { XsDirectoryRow } from "../fabric/xs/directory.js";
 import type { XsEffect } from "../web-hub/protocol/xs.js";
+import { normalizeAlias } from "../web-hub/protocol/xs-alias.js";
 
 /**
  * fabric reply-plan §9 (package M): @mention addressing a cross-session — the syntax/parser
@@ -51,6 +52,11 @@ export interface SessionMentionParseDeps {
   /** §9.1 ④: the directory cache's unique exact name/ref lookup (already freshness-gated:
    *  stale/empty ⇒ `undefined` ⇒ the bare form passes through, RR8). */
   lookupExact(name: string): XsDirectoryRow | undefined;
+  /** Alias-plan §5.4 (AL5b): LIVE alias-mode fact (local alias.enabled ∧ hub cap). Absent/false ⇒
+   *  steps 1–3 and the legacy bare branch behave byte-for-byte as before. */
+  aliasMode?(): boolean;
+  /** Alias-plan §5.4 step 4: unique cached row for a CANONICAL alias (cache-only, no network). */
+  lookupAlias?(alias: string): XsDirectoryRow | undefined;
 }
 
 export interface ParsedSessionMention {
@@ -62,6 +68,29 @@ export interface ParsedSessionMention {
   readonly message: string;
   /** Display label: the explicit operand / the bare name as typed. */
   readonly label: string;
+  /** Alias mode only: how the bare form was matched. `alias` ⇒ `target` is the canonical alias. */
+  readonly via?: "alias" | "name";
+}
+
+function safeAliasMode(deps: SessionMentionParseDeps): boolean {
+  try {
+    return deps.aliasMode?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Alias-plan §5.4 step 4's canonical alias for a bare token, or undefined (not a usable alias). */
+function mentionAlias(token: string): string | undefined {
+  const n = normalizeAlias(token, { stripAt: false });
+  return n.ok ? n.alias : undefined;
+}
+
+/** Static ②③ conditions for a candidate name (label / same-name file) — true ⇒ release to pi. */
+function releasedByLabelOrFile(deps: SessionMentionParseDeps, name: string): boolean {
+  if (deps.isLabel(name)) return true;
+  // a CJK/full-width token is never path-shaped, but a real same-name file still wins
+  return bareNameFileConflict(deps.cwd(), name);
 }
 
 /**
@@ -80,6 +109,23 @@ export function parseSessionMention(text: string, deps: SessionMentionParseDeps)
   if (!bare) return undefined;
   const name = bare[1] ?? "";
   const message = bare[2] ?? "";
+  if (safeAliasMode(deps)) {
+    // alias-plan §5.4: label wins, a same-name file releases, then normalized alias, then the legacy branch.
+    const alias = mentionAlias(name);
+    if (alias !== undefined) {
+      if (releasedByLabelOrFile(deps, name) || (alias !== name && releasedByLabelOrFile(deps, alias))) {
+        return undefined;
+      }
+      if (deps.lookupAlias?.(alias) !== undefined) {
+        return { form: "bare", target: alias, message, label: name, via: "alias" };
+      }
+    }
+    if (!BARE_SESSION_NAME_RE.test(name)) return undefined;
+    if (releasedByLabelOrFile(deps, name)) return undefined;
+    if (deps.lookupExact(name) === undefined) return undefined;
+    // the hub resolves authoritatively (exact-only on the full sessionId after resolve) — hand it the token
+    return { form: "bare", target: name, message, label: name, via: "name" };
+  }
   if (!BARE_SESSION_NAME_RE.test(name)) return undefined; // ① path shapes excluded
   if (deps.isLabel(name)) return undefined; // ② a subagent label never addresses a session
   if (bareNameFileConflict(deps.cwd(), name)) return undefined; // ③ real files win
@@ -154,6 +200,8 @@ export function createMentionSessionPort(deps: MentionSessionPortDeps): MentionS
           isLabel: deps.isLabel,
           cwd: () => deps.cwd(),
           lookupExact: deps.lookupExact,
+          ...(deps.aliasMode ? { aliasMode: deps.aliasMode } : {}),
+          ...(deps.lookupAlias ? { lookupAlias: deps.lookupAlias } : {}),
         });
       } catch {
         return undefined;
@@ -244,6 +292,20 @@ export function sessionCompletionBare(deps: SessionMentionParseDeps, name: strin
 }
 
 // ----------------------------------------------------------------- routing (§9.3)
+
+/**
+ * Alias-plan §5.4 completion rule (AL5b): an ALIAS entry may insert `@<alias>` iff alias mode is
+ * on, the alias normalizes to itself, no subagent label / same-name file conflicts, and the
+ * cache holds exactly one row for it (cache-only). Otherwise the caller falls back to
+ * `@session:<ref>`.
+ */
+export function sessionCompletionAlias(deps: SessionMentionParseDeps, alias: string): boolean {
+  if (!safeAliasMode(deps)) return false;
+  const n = normalizeAlias(alias, { stripAt: false });
+  if (!n.ok || n.alias !== alias) return false;
+  if (releasedByLabelOrFile(deps, alias)) return false;
+  return deps.lookupAlias?.(alias) !== undefined;
+}
 
 /** The session branch of `MentionRouteResult` — an INDEPENDENT branch (never reuses runId). */
 export type SessionMentionRouteResult =

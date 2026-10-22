@@ -66,6 +66,13 @@ export interface XsDirectoryCache {
    * restricted them to the visible channel union.
    */
   lookupExact(name: string): XsDirectoryRow | undefined;
+  /**
+   * Alias-plan §5.4 step 4 (AL5b): the UNIQUE fresh row whose canonical `alias` equals `alias`
+   * (caller normalizes first). Aliases are hub-globally unique, so a hit is EXEMPT from the
+   * 20-row truncation rule (unlike `lookupExact`). `undefined` on 0 / 2+ hits, staleness, not
+   * joined. The result only decides WHETHER to intercept — the send resolves authoritatively.
+   */
+  lookupAlias(alias: string): XsDirectoryRow | undefined;
   /** Single-flight bounded refresh; never throws; no-op when not joined. */
   refresh(reason: string): Promise<void>;
   /** Install fresh rows directly (marks data fresh; arms the refresh-interval gate). */
@@ -174,6 +181,13 @@ export function createXsDirectoryCache(deps: XsDirectoryDeps): XsDirectoryCache 
       if (key === undefined || !fresh()) return undefined;
       if (rows.length >= XS_LIST_MAX_ROWS) return undefined; // §4.3 truncated ⇒ uniqueness unprovable
       const hits = rows.filter((row) => row.name === name || row.ref === name);
+      return hits.length === 1 ? hits[0] : undefined;
+    },
+    lookupAlias(alias) {
+      if (disposed || alias.length === 0) return undefined;
+      const key = syncView();
+      if (key === undefined || !fresh()) return undefined;
+      const hits = rows.filter((row) => row.alias === alias);
       return hits.length === 1 ? hits[0] : undefined;
     },
     refresh(_reason: string) {
