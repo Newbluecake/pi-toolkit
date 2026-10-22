@@ -318,6 +318,12 @@
   display: contents;
 }
 
+/* Badges sit at the RIGHT edge of the name line (same edge as row 1's cost); when the name
+ * leaves no room they wrap, as one unit, onto a line of their own — still right-aligned. */
+.agent-line2 .agent-chips {
+  margin-left: auto;
+}
+
 /* Badges after the name (same line when they fit, else a line of their own): the rename pencil
  * sits right after the name's last character, so a renamable card reserves its box here. */
 .agent-item.renamable .agent-line2[data-below="true"] > .agent-session {
@@ -597,6 +603,37 @@
  * cost) sits above it, so it keeps the full width and the cost stays right-aligned with plain
  * cards (2026-10-19 user report: the cost of a removable card sat ~48px left of the others). */
 .removable > .agent-card > :not(.agent-row1) {
+  padding-right: calc(60px * var(--fs-scale, 1));
+}
+
+/* Delete button geometry (AgentList context): a 40×40 circle (44 coarse) absolutely placed
+ * `bottom: 8px; right: 8px` of the `<li>`, i.e. it reaches `--remove-reach` above the card's
+ * bottom edge — normally beside the model/context row (row 3) but ALSO into the lower part of
+ * the session-name line (measured: line spans 33→53px above the bottom, button 8→48px).
+ * Badges on that line are right-aligned to row 1's cost edge, so instead of making them yield
+ * horizontally, the line is lifted clear of the button's top edge (margin-bottom), and the
+ * 60px side reservation only stays where nothing can lift it: no row 3 (line is the last row),
+ * or badges still on row 1 (the name itself must not run under the button). */
+.agent-item.removable {
+  --remove-reach: 48px;
+}
+
+@media (pointer: coarse) {
+  .agent-item.removable {
+    --remove-reach: 52px;
+  }
+}
+
+.removable > .agent-card > .agent-line2[data-below="true"] {
+  padding-right: 0;
+}
+
+.removable > .agent-card > .agent-line2[data-below="true"]:not(:last-child) {
+  /* card padding+border 11px + meta row ≈19px·scale + grid gap 3px sit below this line; +2px slack */
+  margin-bottom: max(0px, calc(var(--remove-reach) + 2px - 14px - 19px * var(--fs-scale, 1)));
+}
+
+.removable > .agent-card > .agent-line2[data-below="true"]:last-child {
   padding-right: calc(60px * var(--fs-scale, 1));
 }
 
