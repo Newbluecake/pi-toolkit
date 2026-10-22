@@ -8,6 +8,8 @@ import type { XsInboxMode } from "./inbox.js";
 import type { XsInbox } from "./inbox.js";
 import type { XsMembership } from "./membership.js";
 import { getXsDedup, type XsAckVerdict, type XsDedup } from "./dedup.js";
+import { shares, viaOrDefault } from "./channel.js";
+import type { XsBroadcastMark } from "./types-channel.js";
 import type { XsWakeDowngraded } from "../../web-hub/protocol/xs.js";
 
 /**
@@ -20,7 +22,12 @@ import type { XsWakeDowngraded } from "../../web-hub/protocol/xs.js";
  * Ordered stages (§8.4):
  *   1. `expiresAt` not past ⇒ else `none{expired}`
  *   2. dedup — replay hit ⇒ replay; table full ⇒ `none{dedup_full}` (never evict)
- *   3. membership — joined ∧ receive≠off ∧ allowFrom ∧ not blocked ⇒ else `none{rejected}`
+ *   3. membership — joined ∧ receive≠off ∧ allowFrom ∧ not blocked ⇒ else `none{rejected}`;
+ *      channel-plan §4.4 (CH3): the SAME gate re-checks the hub-stamped channel scope —
+ *      `chs = bc ? [bc.channel] : (via ?? [default])` must share a channel with the local
+ *      `linkChannels`. This is the linearization point of a local leave (§4.5): a leave before
+ *      stage 3 ⇒ `none{rejected}` (no reply credential is reserved, Q4); after dispatch the
+ *      effect stands (no rollback).
  *   3b. reply ledger classification: invalid credentials / unsolicited in replies mode reject.
  *   4. `to.sessionId`/`to.epoch` match the current stack ⇒ else `none{session_changed}`
  *   5. fence `check()` — a rejecting window ⇒ `none{fenced:<name>}`; `wakeOnly` (goal) only
@@ -59,6 +66,8 @@ export interface XsDeliverHostMessage {
     reply?: { requestId: string; dueAt: number };
     inReplyTo?: string;
     late?: true;
+    /** Channel-plan §5.3: present iff this delivery is a channel broadcast. Never in `content`'s provider projection beyond the header line. */
+    bc?: XsBroadcastMark;
   };
 }
 
@@ -83,6 +92,10 @@ export interface XsDeliverInput {
   /** Sender's root causal level; absent ⇒ sender wake off ⇒ never tracked (§6.6). */
   level?: number;
   expiresAt: number;
+  /** Channel-plan §3.3: hub-stamped shared channels; ABSENT ≡ `["default"]` (§3.4). */
+  via?: readonly string[];
+  /** Channel-plan §3.3: hub-stamped broadcast marker (never `default`, Q2). */
+  bc?: XsBroadcastMark;
 }
 
 export interface XsReceiverDeps {
@@ -105,6 +118,13 @@ export interface XsReceiverDeps {
   /** The stack's CausalLevel; present iff receiver wake is on (§6.6 last row). */
   level?: CausalLevel;
   host: XsDeliverHost;
+  /**
+   * Channel-plan §2.3/§4.4: does the CURRENT hub link advertise `xs.channel.v1`? Feeds
+   * `membership.link(hubCap)` at stage 3. Absent / throwing ⇒ false (fail closed: only
+   * `#default` can be on the link) — except that a frame carrying a hub-stamped `via`/`bc` is
+   * itself evidence of a channel-capable hub (only such a hub ever writes those keys).
+   */
+  hubChannelCap?: () => boolean;
   dedup?: XsDedup;
   clock?: Clock;
   warn?: (message: string) => void;
@@ -283,8 +303,9 @@ export class XsReceiver {
     }
 
     // ---- stage 3: membership + policy (§8.4.3) — uniform none{rejected} (no policy leak) ----
+    // Channel-plan §4.4: scope re-check against the hub-stamped `via`/`bc` (same gate as block).
     if (
-      !this.deps.membership.joined ||
+      !this.channelScopeOk(input) ||
       this.deps.membership.receive === "off" ||
       !this.deps.membership.senderAllowed(input.from.sessionId)
     ) {
@@ -311,7 +332,13 @@ export class XsReceiver {
     const content = (wake: boolean): string =>
       ticket === undefined
         ? formatXsMessage(
-            { xid: input.xid, from: input.from, wake, ...(input.reply === undefined ? {} : { reply: input.reply }) },
+            {
+              xid: input.xid,
+              from: input.from,
+              wake,
+              ...(input.reply === undefined ? {} : { reply: input.reply }),
+              ...(input.bc === undefined ? {} : { bc: { channel: input.bc.channel } }),
+            },
             input.text,
           )
         : formatXsReply({ xid: input.xid, from: input.from, requestId: ticket.requestId, late }, input.text);
@@ -387,6 +414,7 @@ export class XsReceiver {
           ...(input.reply === undefined ? {} : { reply: input.reply }),
           ...(ticket === undefined ? {} : { inReplyTo: ticket.requestId }),
           ...(input.level === undefined ? {} : { level: input.level }),
+          ...(input.bc === undefined ? {} : { bc: { channel: input.bc.channel } }),
         };
         setDispatched(true); // r3 M2 boundary: from here an exception may follow a host send
         const result = this.controller.dispatch(request);
@@ -447,6 +475,7 @@ export class XsReceiver {
             ...(input.reply === undefined ? {} : { reply: input.reply }),
             ...(ticket === undefined ? {} : { inReplyTo: ticket.requestId }),
             ...(late ? { late: true as const } : {}),
+            ...(input.bc === undefined ? {} : { bc: { channel: input.bc.channel } }),
           },
         },
         { triggerTurn: false },
@@ -491,6 +520,27 @@ export class XsReceiver {
     this.counters.unverified++;
     accept("appended"); // conservative hold (may be in the tree)
     return finish({ effect: "unknown", reason: "accept_unverified", woke: false, ...downgradeField });
+  }
+
+  /**
+   * Channel-plan §4.4: `intersect(chs, linkChannels) ≠ ∅` where `chs = bc ? [bc.channel] :
+   * (via ?? [default])`. Default-only sessions on any hub reduce to the pre-channel
+   * `joined` check (link = [default], chs = [default]). Never throws (stage-3 failures are a
+   * uniform `none{rejected}`; an unreadable cap port reads as "no cap").
+   */
+  private channelScopeOk(input: XsDeliverInput): boolean {
+    let hubCap = input.via !== undefined || input.bc !== undefined;
+    if (!hubCap && this.deps.hubChannelCap !== undefined) {
+      try {
+        hubCap = this.deps.hubChannelCap() === true;
+      } catch {
+        hubCap = false;
+      }
+    }
+    const link = this.deps.membership.link(hubCap);
+    if (link.length === 0) return false;
+    const chs = input.bc !== undefined ? [input.bc.channel] : viaOrDefault(input.via);
+    return shares(chs, link);
   }
 
   private safeIsIdle(): boolean {

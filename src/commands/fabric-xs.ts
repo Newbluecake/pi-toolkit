@@ -3,7 +3,8 @@ import { isFeishuInvocation } from "../web-hub/agent/command-capture.js";
 import { isValidXsSessionId } from "../config/settings.js";
 import type { XsReplyLedger } from "../fabric/xs/reply-ledger.js";
 import type { SessionFence } from "../fabric/xs/fence.js";
-import type { XsMembership, XsBlockEntry } from "../fabric/xs/membership.js";
+import type { XsMembership, XsBlockEntry, XsJoinResult, XsLeaveResult } from "../fabric/xs/membership.js";
+import { XS_DEFAULT_CHANNEL, XS_MAX_CHANNELS, channelSet, displayChannel } from "../fabric/xs/channel.js";
 
 /**
  * fabric phase-2 X4 (phase2-plan §5.3/§10.3, review #9/XI13 — superseded for web by the
@@ -25,6 +26,14 @@ import type { XsMembership, XsBlockEntry } from "../fabric/xs/membership.js";
  *
  * Assembly (XW): registers the command (main session, post-guard), wires membership/fence/
  * resolve/statusView. The module owns only command parsing + rendering + the gate.
+ *
+ * Channel-plan §2.2/§6.3 (CH3): `join #a #b` / `leave #a` are incremental channel edits (echo the
+ * resulting set; warn when still in `#default` alongside named channels); `channels` lists the
+ * local pref/effective/suspended sets plus the hub's channel names + member counts (Q7,
+ * `op:"channels"`); `status` gains a `channels …` line. Argument completion reads ONLY a local
+ * cache (m5 — S-own completers are pure): local pref ∪ directory rows' channels ∪ the last
+ * `channels` result, refreshed by `/fabric channels`, `/fabric status` and a successful
+ * join/leave (non-blocking). Feishu stays hard-refused for join/leave; agents have no path.
  */
 
 /** Mutating subcommands the Feishu hard gate refuses (§5.3 table's mutation rows). */
@@ -34,7 +43,9 @@ const FEISHU_REFUSAL = "飞书入口不能修改跨会话加入状态，请在�
 
 const USAGE = [
   "/fabric status — 成员状态、接收策略、完整 sessionId、限额与栅栏",
-  "/fabric join · /fabric leave — 加入 / 退出（epoch +1）",
+  "/fabric join · /fabric leave — 加入 / 退出默认频道 #default（epoch +1）",
+  "/fabric join #a #b · /fabric leave #a — 增量加入 / 离开命名频道（最多 4 个；leave #default 才与默认频道隔离）",
+  "/fabric channels — 本地频道集合与 hub 上的频道名和人数",
   "/fabric receive off|deliver|wake|replies — 会话级接收策略覆盖",
   "/fabric replies — 回复凭证、状态与截止时间",
   "/fabric block <ref|name|sessionId> — 唯一解析后屏蔽（上限 64）",
@@ -42,7 +53,22 @@ const USAGE = [
   "/fabric fence reset — 清除 stuck 栅栏窗口（仅本地）",
 ].join("\n");
 
-const SUBS = ["replies", "status", "blocks", "join", "leave", "receive", "block", "unblock", "fence"] as const;
+const SUBS = [
+  "replies",
+  "status",
+  "channels",
+  "blocks",
+  "join",
+  "leave",
+  "receive",
+  "block",
+  "unblock",
+  "fence",
+] as const;
+
+/** §2.2 echo: the resulting set mixes `#default` with named channels ⇒ remind how to isolate. */
+const DEFAULT_MIX_HINT = "仍在 #default（与所有默认频道会话互通）；如需隔离：/fabric leave #default";
+const CHANNELS_DISABLED = "频道功能未启用（fabric.crossSession.channels.enabled=false）";
 
 const RECEIVE_MODES = [
   { mode: "off", description: "拒收所有消息" },
@@ -55,6 +81,17 @@ const RECEIVE_MODES = [
 export type XsBlockResolve =
   | { ok: true; sessionId: string; name?: string }
   | { ok: false; kind: "no_target" | "ambiguous" | "offline" | "error"; candidates?: { ref: string; name?: string }[] };
+
+/** Channel-plan §6.3: one `op:"channels"` listing (Q7: names + member counts only). */
+export type FabricXsChannelsListing =
+  { ok: true; channels: readonly { name: string; members: number; joined: boolean }[] } | { ok: false; reason: string };
+
+/** Channel-plan §6.3: effective broadcast settings shown by `/fabric status` (no usage — hub has no usage port). */
+export interface FabricXsBroadcastView {
+  outPerHour: number;
+  wakeOutPerHour: number;
+  wakeMaxRecipients: number;
+}
 
 export interface FabricXsStatusView {
   /** Host capability state (`unknown|observed|verified|absent`). */
@@ -75,6 +112,16 @@ export interface FabricXsCommandDeps {
   replies?(): { ledger: XsReplyLedger; maxPending: number } | undefined;
   /** RXW connects to NoticeGate.flush after a human opens an admission gate. */
   onPolicyChange?(): void;
+  /** Channel-plan §6.3 (CHW wires the sender's `channels()`): one hub `op:"channels"` round trip. */
+  channels?(): Promise<FabricXsChannelsListing>;
+  /** Channel-plan §2.3: does the current hub link advertise `xs.channel.v1`? `undefined` ⇒ unknown/offline (`n/a`). */
+  hubChannelCap?(): boolean | undefined;
+  /** Channel-plan §6.3 (m5): channel names seen in the directory cache rows — synchronous, cache-only. */
+  directoryChannels?(): readonly string[];
+  /** Channel-plan §6.3: effective broadcast config (absent ⇒ no broadcast line). */
+  broadcast?(): FabricXsBroadcastView | undefined;
+  /** Channel-plan §2.4: `channels.autoJoin` was configured but every entry was invalid. */
+  autoJoinInvalid?(): boolean;
 }
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -101,8 +148,56 @@ function renderBlocks(entries: readonly XsBlockEntry[], now: () => number): stri
   return [`屏蔽列表（${entries.length}/64，离线）：`, ...rows].join("\n");
 }
 
+function channelList(names: readonly string[]): string {
+  return names.length === 0 ? "-" : names.map(displayChannel).join(" ");
+}
+
+function safe<T>(read: (() => T) | undefined): T | undefined {
+  if (read === undefined) return undefined;
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+
+/** §2.2 refusal text shared by join/leave (whole-call refusals, nothing changed). */
+function refusalText(result: Exclude<XsJoinResult | XsLeaveResult, { ok: true }>): string | undefined {
+  switch (result.reason) {
+    case "channels_disabled":
+      return CHANNELS_DISABLED;
+    case "invalid":
+      return `频道名非法：${result.names.join(" ")}（小写 ASCII 字母/数字/_/-，最长 32，可带 #）；未做任何修改。`;
+    case "reserved":
+      return `频道名为保留名：${result.names.join(" ")}；未做任何修改。`;
+    case "too_many":
+      return `合并后超过 ${result.max} 个频道；未做任何修改。`;
+    default:
+      return undefined;
+  }
+}
+
 export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   const now = deps.now ?? (() => Date.now());
+  /** m5: the last hub `op:"channels"` names — the ONLY network-derived completion source, refreshed by commands only. */
+  let hubChannelNames: readonly string[] = [];
+  const fetchChannels = async (): Promise<FabricXsChannelsListing | undefined> => {
+    if (deps.channels === undefined) return undefined;
+    let listing: FabricXsChannelsListing;
+    try {
+      listing = await deps.channels();
+    } catch {
+      listing = { ok: false, reason: "error" };
+    }
+    if (listing.ok) hubChannelNames = channelSet(listing.channels.map((c) => c.name));
+    return listing;
+  };
+  /** Non-blocking refresh (status / join / leave): never awaited, never throws. */
+  const refreshChannels = (): void => {
+    void fetchChannels().catch(() => undefined);
+  };
+  const channelCandidates = (membership: XsMembership | undefined): string[] =>
+    channelSet([...(membership?.pref() ?? []), ...(safe(deps.directoryChannels) ?? []), ...hubChannelNames]);
   return {
     description:
       "fabric 跨会话通信：/fabric status 查看成员状态；join/leave/receive 管理加入；block/blocks/unblock 管理屏蔽；fence reset 清除 stuck 栅栏（飞书入口不可修改成员）。",
@@ -116,6 +211,24 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
           return SUBS.filter((s) => s.startsWith(first)).map((s) => ({ value: s, label: s }));
         }
         const rest = m[3] ?? "";
+        if (first === "join" || first === "leave") {
+          // §6.3 (m5): pure — local pref ∪ directory rows ∪ the cached hub listing; no I/O.
+          const parts = rest.split(/\s+/);
+          const last = parts.pop() ?? "";
+          const typed = parts.filter((p) => p !== "");
+          const membership = deps.membership();
+          const pref = new Set(membership?.pref() ?? []);
+          const pool = first === "join" ? channelCandidates(membership).filter((c) => !pref.has(c)) : [...pref];
+          const needle = last.startsWith("#") ? last.slice(1) : last;
+          const already = new Set(typed.map((t) => (t.startsWith("#") ? t.slice(1) : t).toLowerCase()));
+          return pool
+            .filter((c) => c.startsWith(needle.toLowerCase()) && !already.has(c))
+            .map((c) => ({
+              value: [first, ...typed, displayChannel(c)].join(" "),
+              label: displayChannel(c),
+              ...(first === "leave" && c === XS_DEFAULT_CHANNEL ? { description: "离开后不再与默认频道会话互通" } : {}),
+            }));
+        }
         if (/\s/.test(rest)) return [];
         if (first === "receive") {
           const replyOn = deps.membership()?.replyEnabled ?? true;
@@ -194,8 +307,10 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
               fenceStatus.oldestOpenMs !== undefined ? ` · oldest ${ago(fenceStatus.oldestOpenMs)}` : ""
             }`,
             `host cap: ${view.capability}`,
+            ...channelStatusLines(membership, deps),
             ...view.lines,
           ];
+          refreshChannels();
           const replies = deps.replies?.();
           if (replies !== undefined) {
             const s = replies.ledger.stats(deps.sessionId(), now());
@@ -229,15 +344,53 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
         case "blocks":
           notify(ctx, renderBlocks(membership.blockedSnapshot(), now));
           return;
+        case "channels": {
+          const listing = await fetchChannels();
+          notify(ctx, renderChannels(membership, deps, listing));
+          return;
+        }
         case "join": {
-          const result = membership.join();
+          const args = tokens.slice(1);
+          const result = membership.join(args);
+          if (!result.ok) {
+            const refusal = refusalText(result);
+            notify(
+              ctx,
+              refusal ?? `已经加入（already joined）。${currentSetText(membership)}`,
+              refusal ? "warning" : "info",
+            );
+            return;
+          }
           deps.onPolicyChange?.();
-          notify(ctx, result.ok ? `已加入（epoch ${result.epoch}）。` : "已经加入（already joined）。");
+          refreshChannels();
+          notify(
+            ctx,
+            [`已加入（epoch ${result.epoch}）。${currentSetText(membership)}`, ...mixHint(membership)].join("\n"),
+          );
           return;
         }
         case "leave": {
-          const result = membership.leave();
-          notify(ctx, result.ok ? `已退出（epoch ${result.epoch}）；屏蔽列表保留。` : "尚未加入（not joined）。");
+          const args = tokens.slice(1);
+          const result = membership.leave(args);
+          if (!result.ok) {
+            const refusal = refusalText(result);
+            notify(
+              ctx,
+              refusal ??
+                (args.length === 0
+                  ? "尚未加入（not joined）。"
+                  : `不在这些频道中（not joined）。${currentSetText(membership)}`),
+              refusal ? "warning" : "info",
+            );
+            return;
+          }
+          refreshChannels();
+          notify(
+            ctx,
+            args.length === 0
+              ? `已退出（epoch ${result.epoch}）；屏蔽列表保留。`
+              : [`已离开（epoch ${result.epoch}）。${currentSetText(membership)}`, ...mixHint(membership)].join("\n"),
+          );
           return;
         }
         case "receive": {
@@ -274,6 +427,80 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
       }
     },
   };
+}
+
+/** §2.2 echo: the resulting effective set (+ suspended names when channels are disabled). */
+function currentSetText(membership: XsMembership): string {
+  const eff = membership.effective();
+  const suspended = membership.suspended();
+  return `当前频道：${eff.length === 0 ? "（未加入任何频道）" : channelList(eff)}${
+    suspended.length > 0 ? ` · 挂起 ${channelList(suspended)}（channels.enabled=false）` : ""
+  }`;
+}
+
+function mixHint(membership: XsMembership): string[] {
+  const eff = membership.effective();
+  return eff.includes(XS_DEFAULT_CHANNEL) && eff.length > 1 ? [DEFAULT_MIX_HINT] : [];
+}
+
+/**
+ * §6.3 status line(s) (English tokens): `channels #default #team (2/4) · hub-cap on · suspended -`,
+ * plus the hub-cap-off link note (§3.4), the autoJoin-invalid note (§2.4) and the effective
+ * broadcast config (`usage n/a` — the hub has no usage port, 评审 #16).
+ */
+function channelStatusLines(membership: XsMembership, deps: FabricXsCommandDeps): string[] {
+  const eff = membership.effective();
+  const suspended = membership.suspended();
+  const hubCap = safe(deps.hubChannelCap);
+  let line = `channels ${channelList(eff)} (${eff.length}/${XS_MAX_CHANNELS}) · hub-cap ${
+    hubCap === undefined ? "n/a" : hubCap ? "on" : "off"
+  } · suspended ${channelList(suspended)}${suspended.length > 0 ? " (channels.enabled=false)" : ""}`;
+  if (hubCap === false && eff.some((c) => c !== XS_DEFAULT_CHANNEL)) {
+    const link = membership.link(false);
+    line +=
+      link.length === 0
+        ? " · link - (hub-cap off: not joined on this hub; /webhub restart)"
+        : ` · link ${channelList(link)} (hub-cap off: named channels inactive; /webhub restart)`;
+  }
+  const lines = [line];
+  if (safe(deps.autoJoinInvalid) === true)
+    lines.push("autoJoin: every configured channel is invalid — nothing auto-joined");
+  const broadcast = membership.channelsEnabled ? safe(deps.broadcast) : undefined;
+  if (broadcast !== undefined) {
+    lines.push(
+      `broadcast ≤${broadcast.outPerHour}/h · wake ≤${broadcast.wakeOutPerHour}/h ≤${broadcast.wakeMaxRecipients} rcpt · usage n/a`,
+    );
+  }
+  return lines;
+}
+
+/** §6.3 `/fabric channels`: local pref/effective/suspended + the hub listing (Q7). */
+function renderChannels(
+  membership: XsMembership,
+  deps: FabricXsCommandDeps,
+  listing: FabricXsChannelsListing | undefined,
+): string {
+  const lines = [
+    `local: pref ${channelList(membership.pref())} · effective ${channelList(membership.effective())} · suspended ${channelList(membership.suspended())}${
+      membership.suspended().length > 0 ? " (channels.enabled=false)" : ""
+    }`,
+    ...channelStatusLines(membership, deps).slice(0, 1),
+  ];
+  if (listing === undefined) {
+    lines.push("hub: n/a (频道列表不可用：未连接 hub 或频道功能未启用)");
+  } else if (!listing.ok) {
+    lines.push(`hub: unavailable (${listing.reason})`);
+  } else if (listing.channels.length === 0) {
+    lines.push("hub: no channels");
+  } else {
+    lines.push(`hub channels (${listing.channels.length}):`);
+    for (const c of listing.channels) {
+      lines.push(
+        `  ${displayChannel(c.name)} · ${c.members} member${c.members === 1 ? "" : "s"}${c.joined ? " · joined" : ""}`,
+      );
+    }
+  }
+  return lines.join("\n");
 }
 
 async function runBlock(

@@ -830,3 +830,18 @@ it("RX5 NoticeGate directly accepts the real Controller port and returns request
   gate.dispose();
   h.controller.dispose();
 });
+
+describe("channel-plan §5.3 (CH3): RootWakeRequest.bc is threaded into details only", () => {
+  it("bc rides details.bc; content is untouched; no bc ⇒ details carry no bc key", () => {
+    const h = harness();
+    expect(h.controller.dispatch({ ...request(0), bc: { channel: "team" } })).toMatchObject({ dispatched: true });
+    const message = h.messages[0]!;
+    expect(message.details.bc).toEqual({ channel: "team" });
+    expect(message.content).toBe("fenced content");
+    expect(JSON.stringify(message.content)).not.toContain("token-");
+    const plain = harness();
+    plain.dispatch(0);
+    expect("bc" in plain.messages[0]!.details).toBe(false);
+    expect(Object.keys(plain.messages[0]!.details)).toEqual(["xsWake", "xid", "from", "wakeToken", "level"]);
+  });
+});

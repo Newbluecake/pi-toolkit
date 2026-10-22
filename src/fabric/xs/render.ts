@@ -10,7 +10,7 @@ import { Text } from "@earendil-works/pi-tui";
  * `src/web-hub/ui/src/logic/xsMessage.ts`).
  */
 
-export type XsDisplayKind = "wake" | "deliver" | "reply" | "late-reply";
+export type XsDisplayKind = "wake" | "deliver" | "reply" | "late-reply" | "broadcast";
 
 export interface XsDisplayView {
   kind: XsDisplayKind;
@@ -18,14 +18,22 @@ export interface XsDisplayView {
   from: string;
   cwdLabel?: string;
   requestId?: string;
+  /** Channel-plan §5.3: broadcast channel (canonical, no `#`) — present iff `kind === "broadcast"`. */
+  channel?: string;
   body: string;
 }
 
 const HEADER_RE = /^\[fabric xs (reply )?from=(\{.*?\})(?: cwd=("(?:[^"\\]|\\.)*"))?[ \]]/;
+/** Channel-plan §5.3: the broadcast marker on the header's FIRST line (`formatXsMessage`). */
+const BC_HEADER_RE = /^[^\n]* channel="#([a-z0-9][a-z0-9_-]{0,31})" kind="broadcast"\]/;
 const FENCE_RE = /<<<fab-([^>\s]+)>>>\n([\s\S]*?)\n<<<fab-\1-end>>>\s*$/;
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
+}
+
+function channelName(v: unknown): string | undefined {
+  return typeof v === "string" && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(v) ? v : undefined;
 }
 
 function tryJson(s: string | undefined): unknown {
@@ -54,12 +62,26 @@ export function buildXsView(content: string, details: unknown): XsDisplayView {
   const requestId = str(d["inReplyTo"]) ?? (h?.[1] !== undefined ? /request="([^"]+)"/.exec(content)?.[1] : undefined);
   const isReply = requestId !== undefined || h?.[1] !== undefined;
   const late = d["late"] === true || (isReply && /state=late\]/.test(content));
-  const kind: XsDisplayKind = isReply ? (late ? "late-reply" : "reply") : d["xsWake"] === true ? "wake" : "deliver";
+  // Channel-plan §5.3: `details.bc` wins; the header's first line is the fallback (replies never broadcast).
+  const dBc = d["bc"] !== null && typeof d["bc"] === "object" ? (d["bc"] as Record<string, unknown>) : undefined;
+  const channel = isReply
+    ? undefined
+    : (channelName(dBc?.["channel"]) ?? (h !== null ? BC_HEADER_RE.exec(content)?.[1] : undefined));
+  const kind: XsDisplayKind = isReply
+    ? late
+      ? "late-reply"
+      : "reply"
+    : channel !== undefined
+      ? "broadcast"
+      : d["xsWake"] === true
+        ? "wake"
+        : "deliver";
   return {
     kind,
     from,
     ...(cwdLabel === undefined ? {} : { cwdLabel }),
     ...(requestId === undefined ? {} : { requestId }),
+    ...(channel === undefined ? {} : { channel }),
     body: extractXsBody(content),
   };
 }
@@ -68,7 +90,9 @@ export function xsHeaderLine(v: XsDisplayView): string {
   const tail =
     v.kind === "reply" || v.kind === "late-reply"
       ? `${v.kind === "late-reply" ? "late reply" : "reply"} to ${v.requestId ?? "?"}`
-      : v.kind;
+      : v.kind === "broadcast"
+        ? `#${v.channel ?? "?"} broadcast`
+        : v.kind;
   return ["xs ←", v.from, ...(v.cwdLabel === undefined ? [] : [`· ${v.cwdLabel}`]), `· ${tail}`].join(" ");
 }
 

@@ -48,6 +48,16 @@ describe("command policy: /fabric (2026-10-22 ruling)", () => {
     expect(policy("fabric", "join", { fabric: "allow" })).toBe("allow");
   });
 
+  it("channel-plan §6.3 (CH3): `channels` is a known read-only sub (allow) under the whole-name override; join/leave with #channel args stay allow", () => {
+    expect(policy("fabric", "channels")).toBe("allow");
+    expect(policy("fabric", "channels", { fabric: "deny" })).toBe("deny");
+    expect(policy("fabric", "channels", { fabric: "confirm" })).toBe("confirm");
+    expect(policy("fabric", "join #a #b")).toBe("allow");
+    expect(policy("fabric", "leave #default")).toBe("allow");
+    expect(policy("fabric", "join #a", { fabric: "deny" })).toBe("deny");
+    expect(policy("fabric", "channelsx")).toBe("deny");
+  });
+
   it("unknown subcommands stay deny (typo surface — the real ones render usage text anyway)", () => {
     expect(policy("fabric", "whatever-else")).toBe("deny");
     expect(policy("fabric", "joinx")).toBe("deny");

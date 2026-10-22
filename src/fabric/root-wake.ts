@@ -7,6 +7,7 @@ import { classifyHumanInput, type WakeInputEvent } from "./wake-input.js";
 import type { CausalLevel } from "./wake-level.js";
 import { getXsHostCapability, type XsHostCapability } from "./xs/host-cap.js";
 import { getXsWakeLedger, type XsWakeLedger, type XsWakeRecord } from "./xs/wake-ledger.js";
+import type { XsBroadcastMark } from "./xs/types-channel.js";
 
 export const XS_WAKE_CUSTOM_TYPE = "subagent:xs";
 export const ROOT_WAKE_IDLE_POLL_MS = 2_000;
@@ -124,6 +125,8 @@ export interface RootWakeMessage {
     level?: number;
     reply?: { requestId: string; dueAt: number };
     inReplyTo?: string;
+    /** Channel-plan §5.3 (评审 #14): broadcast marker — details only, never the provider payload (C-X9). */
+    bc?: XsBroadcastMark;
   };
 }
 
@@ -137,6 +140,8 @@ export interface RootWakeRequest {
   content: string;
   expiresAt: number;
   level?: number;
+  /** Channel-plan §5.3: threaded verbatim into `details.bc` (absent ⇒ details byte-identical). */
+  bc?: XsBroadcastMark;
 }
 
 export interface RootWakeDeps {
@@ -311,6 +316,7 @@ export class RootWakeController {
             ...(request.reply === undefined ? {} : { reply: request.reply }),
             ...(request.inReplyTo === undefined ? {} : { inReplyTo: request.inReplyTo }),
             ...(dispatchLevel === undefined ? {} : { level: dispatchLevel }),
+            ...(request.bc === undefined ? {} : { bc: { channel: request.bc.channel } }),
           },
         },
         { triggerTurn: true },

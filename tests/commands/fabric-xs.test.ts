@@ -584,7 +584,7 @@ describe("RX5 membership receivePref and replies command", () => {
     expect(f("unblock ").map((x) => x.value)).toEqual(["unblock abcdefgh-0123456789"]);
     expect(f("unblock bo")[0]?.label).toBe("bob");
     expect(f("unblock zz")).toEqual([]);
-    expect(f("")).toHaveLength(9);
+    expect(f("")).toHaveLength(10);
     expect(f("join extra stuff")).toEqual([]);
     const off = createFabricXsCommand({
       enabled: () => true,
