@@ -72,6 +72,7 @@ import { RootWakeController, type RootWakeAudit } from "./fabric/root-wake.js";
 import { createSessionFence, type FencePorts, type SessionFence } from "./fabric/xs/fence.js";
 import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "./fabric/xs/membership.js";
 import { XsInbox } from "./fabric/xs/inbox.js";
+import { createXsDirectoryCache, type XsDirectoryCache, type XsDirectoryRow } from "./fabric/xs/directory.js";
 import { XsReceiver } from "./fabric/xs/receiver.js";
 import { xsOn } from "./fabric/xs/switch.js";
 import {
@@ -1620,6 +1621,10 @@ export interface StackExternalInput {
 export interface StackXsInput {
   ports?: FencePorts;
   memberChanged?: () => void;
+  /** Reply-plan §9.2 (MW): the directory cache's data source — one hub `list` round trip for the
+   *  given identity; `undefined` on any failure (the cache keeps its old rows). Late-bound: the
+   *  web-hub agent bridge may not exist yet / may be offline. */
+  listRows?: (origin: { sessionId: string; epoch: number }) => Promise<readonly XsDirectoryRow[] | undefined>;
 }
 
 export interface StackXs extends XsStackPort {
@@ -1630,6 +1635,8 @@ export interface StackXs extends XsStackPort {
   controller?: RootWakeController;
   /** Reply-plan RXW: present iff `fabric.crossSession.reply.enabled` (frozen at stack build). */
   reply?: StackXsReply;
+  /** Reply-plan §9.2 (MW): @mention session directory cache (closure-owned per stack). */
+  directory: XsDirectoryCache;
   audit: Partial<Record<RootWakeAudit, number>>;
   beforeAgentStart(event: unknown): void;
   settled(): void;
@@ -1879,8 +1886,21 @@ function buildStackXs(
       /* restore is best-effort; the ledger stays authoritative */
     }
   }
+  // Reply-plan §9.2 (MW): the identity key changes on epoch bump (attach/join/leave) and on `/new`
+  // (a new stack ⇒ a new cache), so any such change clears it; not joined ⇒ no view ⇒ no rows.
+  const directory = createXsDirectoryCache({
+    source: {
+      view: () => (!disposed && membership.joined ? { key: `${sessionId}#${membership.epoch}` } : undefined),
+      fetch: async () => {
+        if (disposed || !membership.joined || !input.listRows) return undefined;
+        return input.listRows({ sessionId, epoch: membership.epoch });
+      },
+    },
+    now: () => Date.now(),
+  });
   return {
     sessionId: () => sessionId,
+    directory,
     member: () => ({ epoch: membership.epoch, joined: membership.joined, receive: membership.receive }),
     status: () => ({
       joined: membership.joined,
@@ -1917,6 +1937,7 @@ function buildStackXs(
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      directory.dispose();
       replyScheduler.current?.dispose();
       reply?.gate.dispose();
       replyLedger?.unbindSession(sessionId);

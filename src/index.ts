@@ -44,12 +44,21 @@ import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
 import { getXsHostCapability } from "./fabric/xs/host-cap.js";
 import { xsOn } from "./fabric/xs/switch.js";
 import { getXsReplyLedger } from "./fabric/xs/reply-ledger.js";
-import { createXsSender, detectXsToolCollisions } from "./fabric/xs/sender.js";
+import { createXsSender, detectXsToolCollisions, type XsSender } from "./fabric/xs/sender.js";
 import { createListSessionsTool, ListSessionsParams } from "./tools/list-sessions-tool.js";
 import { createMessageSessionTool, MessageSessionParams } from "./tools/message-session-tool.js";
 import { createFabricXsCommand } from "./commands/fabric-xs.js";
 import type { XsHubLimitsWire } from "./web-hub/protocol/xs.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
+import {
+  SESSION_MENTION_ERROR_SOURCE,
+  SESSION_MENTION_SENT_CUSTOM_TYPE,
+  createMentionSessionPort,
+  sessionCompletionBare,
+  type MentionSessionPort,
+  type MentionSessionSendOutcome,
+  type SessionMentionNotice,
+} from "./mention/session.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { worktreeRoot } from "./extensions/worktree-orphans.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
@@ -566,6 +575,8 @@ export default function activate(rawPi: ExtensionAPI): void {
     return;
   }
 
+  // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
+  let xsSender: XsSender | undefined;
   if (xsEnabled) {
     const sender = createXsSender({
       port: {
@@ -606,6 +617,7 @@ export default function activate(rawPi: ExtensionAPI): void {
           }
         : {}),
     });
+    xsSender = sender;
     pi.registerTool(createListSessionsTool({ sender }));
     pi.registerTool(createMessageSessionTool({ sender, reply: replyEnabled }));
     const command = createFabricXsCommand({
@@ -1057,7 +1069,56 @@ export default function activate(rawPi: ExtensionAPI): void {
   // X6: @handle mentions. Registered once; resolves through the current
   // session's stack like the tools above. Conservative by contract: unknown
   // labels and @file/paths fall through to pi untouched.
+  // Reply-plan §9.1 static facts shared by routing and completion (all LIVE reads).
+  const sessionParseDeps = () => ({
+    isLabel: (name: string) => holder.current?.mention.resolve(name) !== undefined,
+    cwd: () => notifyCapabilityCtx.current?.cwd ?? process.cwd(),
+    lookupExact: (name: string) => {
+      const directory = xsAttached ? holder.current?.xs?.directory : undefined;
+      const row = directory?.lookupExact(name);
+      // A miss on a shape-valid bare name warms the (throttled, single-flight) cache so the NEXT
+      // attempt can match; this attempt still passes through to pi (RR8).
+      if (row === undefined) void directory?.refresh("lookup");
+      return row;
+    },
+  });
+  // Reply-plan §9.4/§9.6: human-origin @session notices are display-only (never triggerTurn).
+  const sessionNoticeMessage = (notice: SessionMentionNotice) =>
+    notice.kind === "error"
+      ? {
+          customType: "subagent:mention-error",
+          content: notice.message,
+          display: true,
+          details: { source: SESSION_MENTION_ERROR_SOURCE },
+        }
+      : {
+          customType: SESSION_MENTION_SENT_CUSTOM_TYPE,
+          content: notice.message,
+          display: true,
+          details: { source: SESSION_MENTION_ERROR_SOURCE },
+        };
+  // Reply-plan §9.3: present iff xs is on. `joined` is a LIVE read (join/leave/connect are
+  // call-time facts, §9.3/§9.7) — xs off / not joined / left ⇒ parse() undefined ⇒ `@` passes through.
+  const mentionSessions: MentionSessionPort | undefined = xsSender
+    ? createMentionSessionPort({
+        ...sessionParseDeps(),
+        joined: () =>
+          xsAttached && holder.current?.xs?.membership.joined === true && webHubRef.current?.xs !== undefined,
+        send: async (target, message, options) => {
+          const out = await xsSender!.message({
+            to: target,
+            text: message,
+            wake: true,
+            ...(options?.expectReply === false ? {} : { expectReply: {} }),
+            origin: "human",
+            levelOverride: 0,
+          });
+          return mapMentionSendOutcome(out, settings.fabric.crossSession.reply.maxPending);
+        },
+      })
+    : undefined;
   const mentionRouteDeps = createMentionRouteDeps({
+    ...(mentionSessions ? { sessions: mentionSessions } : {}),
     registry: {
       register: () => false, // registrations flow from spawn labels inside the stack
       resolve: (label) => holder.current?.mention.resolve(label),
@@ -1139,6 +1200,10 @@ export default function activate(rawPi: ExtensionAPI): void {
               goal: () => xsFencePorts.goal?.(),
             },
             memberChanged: () => webHubRef.current?.xs?.publishMember(),
+            listRows: async (origin) => {
+              const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
+              return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
+            },
           }
         : undefined,
     );
@@ -1170,6 +1235,23 @@ export default function activate(rawPi: ExtensionAPI): void {
       ctx.ui.addAutocompleteProvider((current) =>
         createMentionAutocompleteProvider(current, {
           entries: () => mentionAutocompleteEntries(holder),
+          ...(mentionSessions
+            ? {
+                sessions: () => {
+                  const directory = xsAttached ? holder.current?.xs?.directory : undefined;
+                  if (!directory) return [];
+                  void directory.refresh("complete"); // never awaited (§9.5)
+                  return directory.rows().map((row) => ({
+                    ref: row.ref,
+                    ...(row.name !== undefined ? { name: row.name } : {}),
+                    cwdLabel: row.cwdLabel,
+                    receive: row.receive,
+                    busy: row.busy,
+                  }));
+                },
+                sessionBareName: (name: string) => sessionCompletionBare(sessionParseDeps(), name),
+              }
+            : {}),
         }),
       );
     }
@@ -1359,6 +1441,7 @@ export default function activate(rawPi: ExtensionAPI): void {
               display: true,
               details: { source: "mention" },
             }),
+          notifySession: (notice) => pi.sendMessage(sessionNoticeMessage(notice)),
         }),
       askUserEnabled: () => settings.askUser.enabled,
       ownedCommandNames,
@@ -1497,6 +1580,38 @@ export function mentionAutocompleteEntries(holder: { current?: Stack }): readonl
       } satisfies MentionAutocompleteEntry,
     ];
   });
+}
+
+/** Reply-plan §9.3/§9.6 (MW): project the fabric sender's outcome onto the mention layer's port
+ *  shape. Anything the notices do not name (stale/changed origin, unreceivable, bad args, …) is an
+ *  `error` carrying the sender's reason, with the sender's own effect (none ⇒ safe to retry). */
+function mapMentionSendOutcome(
+  out: Awaited<ReturnType<XsSender["message"]>>,
+  maxPending: number,
+): MentionSessionSendOutcome {
+  const base = { effect: out.effect, ...(out.to !== undefined ? { to: out.to } : {}) };
+  switch (out.status) {
+    case "sent": {
+      const dueAt = out.reply ? Date.parse(out.reply.dueAt) : Number.NaN;
+      return {
+        status: "sent",
+        ...base,
+        ...(out.reason !== undefined ? { reason: out.reason } : {}),
+        ...(out.reply ? { requestId: out.reply.requestId } : {}),
+        ...(Number.isFinite(dueAt) ? { replyDueAt: dueAt } : {}),
+      };
+    }
+    case "no_target":
+    case "ambiguous":
+    case "reply_unsupported":
+      return { status: out.status, ...base, ...(out.reason !== undefined ? { reason: out.reason } : {}) };
+    case "reply_quota":
+      return { status: "reply_quota", ...base, pendingReplies: maxPending };
+    case "reply_unreceivable":
+      return { status: "error", ...base, reason: `reply_unreceivable:${out.unreceivable ?? "unknown"}` };
+    default:
+      return { status: "error", ...base, reason: out.reason ?? out.code ?? out.status };
+  }
 }
 
 function requireStack(holder: { current?: Stack }): Stack {

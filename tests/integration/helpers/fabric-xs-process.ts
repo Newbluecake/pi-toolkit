@@ -124,6 +124,22 @@ if (process.argv[2] === "hub") {
         5000,
       );
     }
+    if (m.op === "webPrompt") {
+      // MW: a web composer prompt (op:prompt) addressed to one agent — exercises the web mention path.
+      const agent = registry.list().find((a) => a.session?.sessionId === m.sessionId)!;
+      return request(
+        agent.agentKey,
+        {
+          t: "cmd",
+          rid: `wp-${Date.now()}`,
+          id: `web-prompt-${Date.now()}`,
+          deadlineMs: 4000,
+          origin: { listener: "loopback", ip: "127.0.0.1", reqId: "xs-web-prompt" },
+          cmd: { op: "prompt", text: m.text, deliver: "steer" },
+        },
+        5000,
+      );
+    }
     if (m.op === "stop") {
       await hub.close("test");
       process.disconnect();
@@ -186,6 +202,8 @@ if (process.argv[2] === "hub") {
   const newSession = () => {
     const session = SessionManager.create(process.cwd(), sessionDir);
     session.appendMessage({ role: "user", content: "fixture startup", timestamp: Date.now() });
+    // MW: published session name (bare `@name` needs a row `name`); opt-in so older suites stay unnamed.
+    if (process.env.XW_SESSION_NAME === "1") session.appendSessionInfo(process.env.XW_NAME!);
     return session;
   };
   let sm = process.env.XW_SESSION_FILE ? SessionManager.open(process.env.XW_SESSION_FILE, sessionDir) : newSession();
@@ -203,13 +221,19 @@ if (process.argv[2] === "hub") {
   let skew = 0;
   Date.now = () => realNow() + skew;
   const replyNotices: any[] = [];
+  // MW: @mention surface — user messages that fell through to the native path, mention notices,
+  // and the autocomplete provider factories registered through ctx.ui (XW_UI=1).
+  const userMessages: string[] = [];
+  const mentionNotices: any[] = [];
+  let turns = 0; // sendMessage calls that asked for a model turn
+  const autocompleteFactories: Function[] = [];
   const messages: any[] = [],
     queued: any[] = [],
     notifications: string[] = [];
   const ctx: any = {
     cwd: process.cwd(),
     mode: "rpc",
-    hasUI: false,
+    hasUI: process.env.XW_UI === "1",
     get sessionManager() {
       return sm;
     },
@@ -221,7 +245,12 @@ if (process.argv[2] === "hub") {
     },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
     getContextUsage: () => undefined,
-    ui: { notify: (text: string) => notifications.push(text), setStatus() {}, setWidget() {} },
+    ui: {
+      notify: (text: string) => notifications.push(text),
+      setStatus() {},
+      setWidget() {},
+      addAutocompleteProvider: (factory: Function) => autocompleteFactories.push(factory),
+    },
   };
   async function fire(type: string, extra: object = {}) {
     for (const h of [...(handlers.get(type) ?? [])]) await h({ type, ...extra }, ctx);
@@ -247,7 +276,10 @@ if (process.argv[2] === "hub") {
     getSessionName: () => process.env.XW_NAME,
     sendMessage(m: any, options: any) {
       if (m.customType === "subagent:xs-reply") replyNotices.push({ ...m, triggerTurn: options?.triggerTurn === true });
+      if (m.customType === "subagent:mention-session" || m.customType === "subagent:mention-error")
+        mentionNotices.push({ ...m, triggerTurn: options?.triggerTurn === true });
       if (m.customType === "subagent:xs") messages.push({ ...m, triggerTurn: options?.triggerTurn === true });
+      if (options?.triggerTurn) turns++;
       if (idle || options?.triggerTurn) append(m);
       else queued.push(m);
       if (options?.triggerTurn && !deferred) {
@@ -255,7 +287,9 @@ if (process.argv[2] === "hub") {
         void fire("before_agent_start", { messageType: "custom", message: m, systemPrompt: "host" });
       }
     },
-    sendUserMessage() {},
+    sendUserMessage(text: string) {
+      userMessages.push(text);
+    },
     exec: async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
     events: {
       on(name: string, fn: any) {
@@ -299,6 +333,22 @@ if (process.argv[2] === "hub") {
     if (m.op === "input") {
       await fire("input", { source: m.source ?? "rpc", text: "human" });
       return true;
+    }
+    if (m.op === "mention") {
+      // TUI input path: run every `input` handler in order, stop at the first `handled`.
+      const results: any[] = [];
+      for (const h of [...(handlers.get("input") ?? [])]) {
+        const r = await h({ type: "input", source: "interactive", text: m.text }, ctx);
+        results.push(r ?? null);
+        if (r?.action === "handled") break;
+      }
+      return results;
+    }
+    if (m.op === "complete") {
+      // Autocomplete: stack every registered factory over an empty base provider.
+      let provider: any = { getSuggestions: async () => null, applyCompletion: () => ({}) };
+      for (const factory of autocompleteFactories) provider = factory(provider);
+      return provider.getSuggestions([m.text], 0, m.text.length, { signal: new AbortController().signal });
     }
     if (m.op === "holdResolve") {
       holdResolve = true;
@@ -412,6 +462,9 @@ if (process.argv[2] === "hub") {
         aborts,
         members: sm.getBranch().filter((e) => e.type === "custom" && e.customType === "subagent:xs-membership"),
         notifications,
+        userMessages,
+        mentionNotices,
+        turns,
         epoch: getXsEpochCounter().value,
         dropped: getXsReplyLedger().droppedNoticeCount(sm.getSessionId()),
         replyTickets: getXsReplyLedger().entries(),
