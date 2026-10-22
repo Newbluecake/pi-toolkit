@@ -1663,12 +1663,16 @@ function buildStackXs(
   fence.onEvent({ type: "session_start" });
   const inbox = new XsInbox(config.limits.inboxCap);
   const host = {
-    isIdle: () => ctx.isIdle(),
-    hasPendingMessages: () => ctx.hasPendingMessages(),
+    // Minimal host ctx doubles (and any host lacking these) read as idle / nothing pending,
+    // the same convention as `isStreaming` below — recovery must never throw at stack build.
+    isIdle: () => (typeof ctx.isIdle === "function" ? ctx.isIdle() : true),
+    hasPendingMessages: () => (typeof ctx.hasPendingMessages === "function" ? ctx.hasPendingMessages() : false),
     sendMessage: (message: Parameters<ExtensionAPI["sendMessage"]>[0], options: { triggerTurn: boolean }) =>
       pi.sendMessage(message, options),
     getLeafEntry: () => ctx.sessionManager.getLeafEntry() ?? undefined,
-    abort: () => ctx.abort(),
+    abort: () => {
+      if (typeof ctx.abort === "function") ctx.abort();
+    },
     hasXid: (xid: string) =>
       ctx.sessionManager
         .getBranch()
@@ -3214,10 +3218,12 @@ export function buildSessionStack(
       receive: () => "off",
       ledger,
       host: {
-        isIdle: () => ctx.isIdle(),
-        hasPendingMessages: () => ctx.hasPendingMessages(),
+        isIdle: () => (typeof ctx.isIdle === "function" ? ctx.isIdle() : true),
+        hasPendingMessages: () => (typeof ctx.hasPendingMessages === "function" ? ctx.hasPendingMessages() : false),
         sendMessage: (message, options) => pi.sendMessage(message, options),
-        abort: () => ctx.abort(),
+        abort: () => {
+          if (typeof ctx.abort === "function") ctx.abort();
+        },
       },
       ...(fabric?.level ? { level: fabric.level } : {}),
       audit: (event) => console.warn(`[pi-subagent] fabric xs ${event}`),
