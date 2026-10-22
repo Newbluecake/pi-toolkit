@@ -338,6 +338,39 @@ resumes a/b h · parked · reserved · unverified · quarantined · durability �
   Peer-upgrade gates: `tests/conformance/fabric-xs.test.ts` C-X1/X1b/X2/X3/X4/X5/X6/X7 with real pi
   and a local Anthropic stub, alongside fabric-wake C-P1–C-P5 and consult-preserve C1–C7; C-X7 records
   duplicate-tool arbitration without relying on a winner. Both off goldens must remain unchanged.
+  **Request-reply (reply-plan r2, `docs/dev/fabric-cross-session/reply-plan.md`; packages RX0–RX6/RXW/M/MW, reports
+  `*-report.md`)**: `message_session` gains `expectReply:{timeoutS}` (A asks) and `replyTo:<requestId>` (B answers,
+  `to` = full sessionId); both ride the `xs.reply.v1` cap (only added when BOTH ends advertise it — no PROTO bump; hub
+  `REPLY_UNSUPPORTED` early-rejects without reserving) and require `fabric.crossSession.reply.enabled`
+  (default true; schema/off paths pinned by `tests/fixtures/fabric-xs-reply-off-golden.json` — with xs on ∧ reply off every
+  surface is byte-identical). `receive` accepts `"replies"` (only a valid, solicited reply is accepted; unsolicited
+  traffic is refused by hub and receiver) via the pure `effectiveReceive(pref, replyEnabled)`: reply unavailable ⇒ **off,
+  never wake** (fail closed); membership persists `{receive:"off", receivePref:"replies"}` so an older plugin reads off.
+  **Credential = the issuing process's in-memory ledger only** (`src/fabric/xs/reply-ledger.ts`,
+  `Symbol.for("pi-subagent:xs-reply-ledger")`, 64 slots, never evicts a live entry, sweep is process-wide/lazy): disk
+  (`subagent:xs-reply` entries) exists solely to emit a post-restart "invalidated" notice — `/tree` rollback, tombstone
+  eviction and pi restart can only REFUSE a reply (unknown id ⇒ rejected), never resurrect one. Consumption is
+  reserve → commit/release around the host dispatch: reserve flips the ticket to `consuming` BEFORE any re-entrant
+  call; only a provably-ineffective dispatch releases, everything else commits a tombstone ⇒ per requestId at most one
+  possibly-effective dispatch (`tests/fabric/xs-reply-receiver.property.test.ts` drives the real receiver + ledger).
+  Replies use an independent `replyInbox` (quota: receivable+consuming tickets + inbox occupancy ≤ `maxPending`), skip
+  recv rate/inbox caps, and a solicited wake returns the root to `requesterLevel` (no +1, R3). Timeout/late handling:
+  `timed_out` stays receivable until `lateUntil` (late reply = deliver-only); the timeout/invalidation/away-summary
+  notices go through **NoticeGate** (`reply-notice.ts`: disposed/session/joined/receive/fence admission, owed kept and
+  retried on event-driven flush points + 30 s fallback, dropped at `lateUntil` and counted; a delivered notice is never
+  re-owed). **@session mention** (`src/mention/session.ts`, `fabric/xs/directory.ts`): `@session:<ref|name>` explicit form and
+  a bare `@name` (R6 priority: subagent/real file path win; path-shaped never; a bare-name cache miss triggers one throttled
+  directory refresh); not joined / xs off ⇒ passes through untouched; a human-origin reply wakes per receive mode and
+  cross-session messages are user-visible (RX7 — do not hard-code the old R4 "display only"). Settings
+  `fabric.crossSession.reply.{enabled,defaultTimeoutS,maxTimeoutS,maxPending,maxPendingPerTarget,lateGraceS}` (frozen at
+  stack build; `timeoutS` above the max is clamped). Visibility: `/agent status` adds
+  `xs replies p<pending>/<max> i<inbox> to<timedOut> late<n> rej<n> owed<n> drop<n> · ledger n/64` (absent when reply is
+  off), `/fabric status`/`/fabric replies` show the same counters/rows and `(pref replies)` when the effective receive differs.
+  Gates: `tests/integration/fabric-xs-reply*.test.ts` (real hub child × real stacks, §12.2 #1–#9) +
+  `fabric-xs-mention.test.ts`, conformance **C-X8** (`tests/conformance/fabric-xs.test.ts`, real pi: solicited run binds
+  its token, reply/token details never reach the provider payload, quiet replies don't start runs, replies mode refuses
+  unsolicited — run with C-X1…C-X7 before any pi peer bump). All THREE off goldens
+  (`fabric-xs-off`, `fabric-wake-off`, `fabric-xs-reply-off`) must never be regenerated.
 - `src/consult/` — in-turn expert consultation (`consult` tool). A subagent dispatched with an
   `experts` whitelist (`Agent({ experts })`, resolved to verified runIds at dispatch) gets the
   `consult` tool and can synchronously ask an already-finished expert run: the expert's persisted

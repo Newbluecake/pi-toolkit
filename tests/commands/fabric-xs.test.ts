@@ -192,6 +192,20 @@ describe("/fabric: membership commands", () => {
     expect(text).toContain("fence:");
   });
 
+  it("status shows the preference only when reply is disabled and the effective receive differs", async () => {
+    const m = new XsMembership({ sessionId: SESSION, persist: () => {}, replyEnabled: false });
+    m.attach();
+    m.join();
+    m.setReceive("replies");
+    const h = makeCommand({ membership: () => m });
+    expect((await h.run("status")).notes[0]!.message).toContain("recv off (pref replies) · epoch");
+    const plain = makeCommand();
+    await plain.run("join");
+    const text = (await plain.run("status")).notes[0]!.message;
+    expect(text).toContain("recv wake · epoch");
+    expect(text).not.toContain("pref");
+  });
+
   it("fence reset clears a stuck window (local only — web is gated above)", async () => {
     const h = makeCommand();
     h.fence.onEvent({ type: "session_before_tree" });

@@ -451,6 +451,29 @@ describe("xs reply ledger — replyInbox pre-occupy protocol (§6.3/§6.4)", () 
   });
 });
 
+describe("xs reply ledger — delivered timeout notice is never re-owed (RX1 nit)", () => {
+  it("clearOwed then reserve→release on a timed_out ticket does not owe the notice again", () => {
+    const clock = new FakeClock();
+    const ledger = mkLedger(clock);
+    ledger.bindSession({ sessionId: "A", inbox: createXsReplyInboxPort(new XsInbox(8)) });
+    const ticket = issueTicket(ledger);
+    clock.advance(TIMEOUT_MS + 1);
+    ledger.sweep();
+    expect(ledger.owedNotices("A")).toHaveLength(1);
+    ledger.clearOwed([ticket.requestId]); // the notice was delivered
+    expect(ledger.reserve(ticket.requestId, "x1")).toEqual({ ok: true });
+    ledger.release(ticket.requestId);
+    expect(ledger.get(ticket.requestId)).toMatchObject({ state: "timed_out" });
+    expect(ledger.owedNotices("A")).toHaveLength(0);
+    // …and a release past lateUntil drops silently (no dropped-notice count for a delivered notice)
+    ledger.reserve(ticket.requestId, "x2");
+    clock.advance(LATE_GRACE_MS + 1);
+    ledger.release(ticket.requestId);
+    expect(ledger.get(ticket.requestId)).toBeUndefined();
+    expect(ledger.droppedNoticeCount("A")).toBe(0);
+  });
+});
+
 describe("xs reply ledger — session entries (§3.3)", () => {
   it("parseXsReplyEntry: tolerant, fork-filtered, shape-checked", () => {
     const good: XsReplyIssueEntry = {

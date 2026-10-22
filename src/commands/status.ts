@@ -652,14 +652,25 @@ export function renderStatus(deps: StatusCommandDeps, contextWindow?: number): s
     const quota = stack.receiver.wakeQuota();
     const fence = stack.fence.status();
     const state = stack.controller?.state;
+    const pref =
+      stack.membership.receivePref !== stack.membership.receive ? ` (pref ${stack.membership.receivePref})` : "";
     // The hub owns outbound quota; its info reply exposes limits, NOT usage. Never invent 0.
     lines.push(
-      `xs ${stack.membership.joined ? "joined" : "left"} · recv ${stack.membership.receive} · cap ${capability}` +
+      `xs ${stack.membership.joined ? "joined" : "left"} · recv ${stack.membership.receive}${pref} · cap ${capability}` +
         ` · in ${quota.recvUsed}/${quota.recvCap}h · out n/a/${outCap}h · wakes ${quota.wakesUsed}/${quota.wakesCap}h` +
         ` · fenced ${stack.receiver.countersSnapshot().fenced} · stuck ${fence.stuck.length}` +
         ` · unbound ${state === "starting" || state === "deferred" ? 1 : 0}` +
         ` · lateAbort ${stack.audit.wake_late_aborted ?? 0} · abortStuck ${stack.audit.abortStuck ?? 0}`,
     );
+    // Reply association (reply-plan §8.3, RX6): absent entirely when reply is off ⇒ byte-identical.
+    const reply = stack.reply;
+    if (reply !== undefined) {
+      const s = reply.ledger.stats(reply.sessionId);
+      lines.push(
+        `xs replies p${s.pending}/${reply.maxPending} i${s.inbox} to${s.timedOut} late${s.late} rej${s.rejected}` +
+          ` owed${s.owed} drop${s.dropped} · ledger ${s.ledger.size}/${s.ledger.capacity}`,
+      );
+    }
   }
   const load = deps.load?.();
   if (load !== undefined) lines.push(`Load: ${load.level}${load.gating ? " · gated" : " · open"}`);

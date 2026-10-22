@@ -268,7 +268,9 @@ export class XsReplyNoticeGate {
   private finishWrite(gen: number, requestIds: readonly string[]): void {
     let unverified = false;
     try {
-      unverified = !this.ports.fence.verifyDispatch(gen).ok;
+      const verify = this.ports.fence.verifyDispatch(gen);
+      // A wakeOnly verdict (goal) never invalidates an already-written quiet notice (receiver.ts parity).
+      unverified = !verify.ok && !verify.wakeOnly;
     } catch {
       unverified = true;
     }

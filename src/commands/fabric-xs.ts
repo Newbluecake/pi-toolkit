@@ -157,7 +157,9 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
           const allow = membership.allowFromView();
           const fenceStatus = fence.status();
           const lines = [
-            `xs: ${membership.joined ? "joined" : "not joined"} · recv ${membership.receive} · epoch ${membership.epoch}`,
+            `xs: ${membership.joined ? "joined" : "not joined"} · recv ${membership.receive}${
+              membership.receivePref !== membership.receive ? ` (pref ${membership.receivePref})` : ""
+            } · epoch ${membership.epoch}`,
             `sid: ${deps.sessionId()}（其他会话把它写入 fabric.crossSession.allowFrom 可限制来源）`,
             `allowFrom: ${allow.denyAll ? "deny-all（配置全部非法，拒收一切）" : allow.list.length === 0 ? "any joined session" : `${allow.list.length} 个会话`}`,
             `blocked: ${membership.blockedSnapshot().length}`,

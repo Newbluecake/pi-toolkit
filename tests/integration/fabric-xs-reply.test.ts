@@ -38,8 +38,11 @@ describe("RXW reply association (real hub × real stacks)", () => {
     const { a, b, aid, bid } = await joinedPair(h);
     await a.rpc("prime");
     await b.rpc("prime");
+    const levelBefore = (await a.rpc("inspect")).level;
     const out = await ask(a, bid, "need an answer", { wake: true });
     expect(out).toMatchObject({ effect: "applied", reply: { state: "pending" } });
+    expect(out.reply.requestId).toBeTruthy();
+    const ticket = (await a.rpc("inspect")).replyTickets.find((t: any) => t.requestId === out.reply.requestId);
     const q: string = out.reply.requestId;
     const request = (await b.rpc("inspect")).messages.at(-1);
     expect(request.content).toContain(q);
@@ -51,6 +54,10 @@ describe("RXW reply association (real hub × real stacks)", () => {
     expect(state.messages.at(-1)).toMatchObject({ triggerTurn: true, details: { xsWake: true, inReplyTo: q } });
     expect(state.messages.at(-1).content).toContain("the answer is 42");
     expect(state.replyTickets.find((t: any) => t.requestId === q)?.state).toBe("replied");
+    // §12.2-1 / R3: the solicited wake returns A to requesterLevel — no +1 hop.
+    expect(ticket?.requesterLevel).toBe(levelBefore);
+    expect(state.level).toBe(levelBefore);
+    expect(state.replyTickets.find((t: any) => t.requestId === q)?.requesterLevel).toBe(levelBefore);
   }, 35_000);
 
   it("#2 timeout, quiet path: two due tickets of one session merge into ONE notice and clear owed", async () => {

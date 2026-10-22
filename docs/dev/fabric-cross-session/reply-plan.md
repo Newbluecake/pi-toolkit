@@ -582,3 +582,31 @@ human 来源：`wakeOnReply:false`；回复与超时通知都是 `display:true` 
 | 11     | Minor   | 已修                         | 未 join 时所有形式都放行，删除「需要先 join」的报错；off 测试覆盖三种状态                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | §9.3、§9.6、§9.7                                    |
 | 12     | Minor   | 已修                         | 裸形式增加路径形状排除和真实文件优先（同步 stat）；补全遇到冲突必定插入显式 ref；缓存新鲜度依赖列为 RR8                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | §9.1、§9.5、RR8                                     |
 | 13     | Minor   | 已修                         | `command-policy.ts` 及其测试归 RX5；directory 的构建全部移到 MW，RXW 不碰                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | §8.3、§9.2、§11                                     |
+
+### 10.2 用户修订（2026-10-22 晚）
+
+- **R4 修订（推翻原「只展示、不唤醒 A」）**：人发起的 @会话 请求，其回复到达 A 时按 A 的有效接收模式处理——`wake`/`replies` ⇒ 作为 solicited 回复唤醒 A 的模型（回到请求时 level，即 0；仍受 RootWakeController 全部前置条件、入站唤醒配额、栅栏、goal 约束）；`deliver` ⇒ 只投递不唤醒（R2 不变）。ticket 的 `origin:"human"` 不再意味着 `wakeOnReply:false`。
+- **D-display（新增）**：收到的跨会话消息（主动消息、回复、超时/失效通知）在 TUI 与 web UI 中对用户可见（`display:true`），并提供干净的渲染（来源会话名/ref、cwd、是否回复/关联请求、正文），不把不可信围栏原文直接甩给用户；provider 看到的 content 不变（仍带不可信头与围栏，C-X5 约束不变：token/xid/details 不进 provider payload）。
+
+---
+
+## 实施回填（RX6 终局，2026-10-22）
+
+实现与本方案 r2 一致，下列为落地时的偏离/追加/残留（均已在对应包报告中说明）：
+
+1. **RX0 越域**：为让 `ReplyDescriptor` 等新字段通过类型检查，RX0 改了 `src/fabric/root-wake.ts:134` 一处（仅类型，无行为变化）。
+2. **MW 方案外追加**：裸名 `@name` 在目录缓存 `lookupExact` 未命中（且形状合法）时额外触发一次节流刷新（web composer 没有补全，裸名否则永远冷启动）。
+3. **MW 偏离 §9.3 字面（更安全）**：已 join 但 hub 连接断开时，显式 `@session:` 会被拦截并报「未送达」（effect none），而不是原样放行给模型；未 join / xs 关闭仍原样放行。
+4. **Symbol key**：账本实际为 `Symbol.for("pi-subagent:xs-reply-ledger")`（照抄 wake-ledger 先例），不是 §3.3 写的 `…xs-reply-tickets`；纯内部 key，非线上契约。
+5. **timeoutS**：超过 `reply.maxTimeoutS` 时截断到上限（`dueAt` 如实），不拒绝（RX4）。
+6. **`canIssue`** 未作为独立 API，合并进 `issue()` 的返回码（`reply_quota{perTarget?}` / `reply_ledger_full`）。
+7. **RX6 收尾**：`/agent status` 追加 `xs replies p…/i… to… late… rej… owed… drop…` 行（需要 `StackXsReply.sessionId`，stack.ts 一个字段）；receive 有效值与偏好不同时显示 `(pref replies)`；RX1 nit 修复——票据记录 `noticeSent`，release 不再重欠已送达的超时通知（也不再重复计入 dropped）；wakeOnly(goal) 的 quiet 通知 `verifyDispatch` 非 ok 不再计 `noticeUnverified`；新增 `xs-reply-receiver.property.test.ts` 与 conformance C-X8；集成 #1 补 level = requesterLevel 断言。
+8. **后续修订**：§10.2（R4 推翻 + D-display）由 RX7 实现，不在本回填范围。
+
+残留项（接受）：
+
+- RR1–RR12 同 §13（尤其 RR3 重启不保留凭证、RR8 裸名语义取决于缓存新鲜度、RR11 往返上界 12/h）。
+- 切回会话时「away 汇总」若被 NoticeGate 拒绝，不会 `takeDroppedNotices`（计数保留，下次 restore 再试）。
+- `/reload` 后旧 stack 的 reservation 若仍在 closing，由新 stack 的 fresh `getBranch()` 兜底判定（有界）。
+- 集成测试靠 `Date.now` skew 推进时间，hub 帧 `expiresAt` 由 hub 实时戳，#5 用 inject 绕过帧过期。
+- web UI 端（AgentCard 的 `xs replies` 标记、可见性渲染）由并行前端包负责，不在本包。

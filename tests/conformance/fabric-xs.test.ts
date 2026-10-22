@@ -24,6 +24,7 @@ import { XsHostCapability } from "../../src/fabric/xs/host-cap.js";
 import { createSessionFence } from "../../src/fabric/xs/fence.js";
 import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "../../src/fabric/xs/membership.js";
 import { XsReceiver } from "../../src/fabric/xs/receiver.js";
+import { XsReplyLedger, createXsReplyInboxPort } from "../../src/fabric/xs/reply-ledger.js";
 import { XsInbox } from "../../src/fabric/xs/inbox.js";
 import { createListSessionsTool } from "../../src/tools/list-sessions-tool.js";
 import { createMessageSessionTool } from "../../src/tools/message-session-tool.js";
@@ -269,6 +270,64 @@ async function prepareCompaction(h: Env) {
   await h.session.prompt("second turn with enough history for compaction");
   // Real pi's context estimator reads the last REAL response usage. All stub traffic stays local.
   h.settings.setCompactionEnabled(true);
+}
+
+/** C-X8: a real receiver + REAL reply ledger over the host's real Controller / pi session. */
+function replyStack(h: Env, receive: "wake" | "replies" = "wake") {
+  const sessionId = h.manager.getSessionId();
+  const membership = new XsMembership({
+    sessionId,
+    persist: (data) => h.pi.appendEntry(XS_MEMBERSHIP_CUSTOM_TYPE, data),
+    replyEnabled: true,
+  });
+  membership.attach();
+  membership.join();
+  membership.setReceive(receive);
+  const ledger = new XsReplyLedger();
+  ledger.bindSession({ sessionId, inbox: createXsReplyInboxPort(new XsInbox(4)) });
+  const r = new XsReceiver({
+    sessionId,
+    membership,
+    fence: h.fence,
+    inbox: new XsInbox(8),
+    replyLedger: ledger,
+    controller: h.controller,
+    recvPerHour: 100,
+    wakesInPerHour: 100,
+    host: {
+      isIdle: () => h.session.isIdle,
+      hasPendingMessages: () => h.session.pendingMessageCount > 0,
+      sendMessage: (m, o) => h.pi.sendMessage(m, o),
+      getLeafEntry: () => h.manager.getLeafEntry() ?? undefined,
+    },
+  });
+  let n = 0;
+  const input = (over: Record<string, unknown> = {}) => ({
+    xid: `cx8-${sessionId}-${++n}`,
+    to: { sessionId, epoch: membership.epoch },
+    from: { sessionId: "replier-session", ref: "replier0001", cwdLabel: "/tmp", agentId: "replier-agent" },
+    text: "reply body",
+    wake: false,
+    expiresAt: Date.now() + 5000,
+    ...over,
+  });
+  const issue = (human: boolean) => {
+    const res = ledger.issue({
+      requesterSessionId: sessionId,
+      replierSessionId: "replier-session",
+      replierRef: "replier0001",
+      origin: human ? "human" : "model",
+      wakeOnReply: !human,
+      requesterLevel: 1,
+      timeoutMs: 600_000,
+      lateGraceMs: 600_000,
+      maxPending: 4,
+      maxPendingPerTarget: 4,
+    });
+    if (!res.ok) throw new Error("issue failed");
+    return res.ticket.requestId;
+  };
+  return { r, input, issue, ledger };
 }
 
 describe("fabric phase-2 real pi contracts", () => {
@@ -623,6 +682,84 @@ describe("fabric phase-2 real pi contracts", () => {
     );
     expect(bodies).toContain("public body only");
   });
+
+  it("C-X8: reply association on real pi — solicited run binds its token; reply/token details stay out of the provider payload; quiet replies stay quiet; replies mode refuses unsolicited", async () => {
+    const h = await host();
+    await prime(h);
+    const { r, input, issue } = replyStack(h);
+
+    // ① a solicited (model-origin) reply starts a Controller run that binds its token.
+    const q1 = issue(false);
+    const before1 = h.stub.requests.length;
+    const v1 = r.deliver(input({ inReplyTo: q1, text: "WAKE-REPLY-BODY" }) as never);
+    expect(v1).toMatchObject({ woke: true });
+    expect(h.ctx.isIdle()).toBe(false);
+    const token = h.controller.activeToken!;
+    expect(token).toBeTruthy();
+    await until(() => h.settled.length === 2, "solicited run settled");
+    expect(h.stub.requests.length).toBe(before1 + 1);
+    expect(h.triggers.at(-1)).toMatchObject({
+      messageType: "custom",
+      message: { details: { xsWake: true, wakeToken: token, inReplyTo: q1 } },
+    });
+
+    // ③ a human-origin reply is quiet: no run while idle, visible to the NEXT human prompt only.
+    const q2 = issue(true);
+    const before2 = h.stub.requests.length;
+    const settled2 = h.settled.length;
+    expect(r.deliver(input({ inReplyTo: q2, text: "QUIET-REPLY-BODY" }) as never)).toMatchObject({ woke: false });
+    await sleep(100);
+    expect(h.stub.requests.length).toBe(before2);
+    expect(h.settled.length).toBe(settled2);
+    await h.session.prompt("next human after quiet reply");
+    const quietBody = h.stub.requests.at(-1)!.body;
+    expect(quietBody).toContain("QUIET-REPLY-BODY");
+
+    // B-side header rendering: an expectReply request carries reply_to into the model context.
+    const dueAt = 987654321012;
+    expect(
+      r.deliver(
+        input({
+          xid: "cx8-request",
+          text: "REQUEST-BODY",
+          reply: { requestId: "qabcabcabcabcabcabc", dueAt },
+        }) as never,
+      ),
+    ).toMatchObject({ effect: expect.stringMatching(/applied|unknown/) });
+    await h.session.prompt("after request");
+
+    // ② provider payload hygiene across ALL requests so far.
+    const bodies = h.stub.requests.map((x) => x.body).join("\n");
+    for (const secret of [token, "wakeToken", "xsWake", "inReplyTo", String(dueAt), "cx8-request", "replier-session"])
+      expect(bodies).not.toContain(secret);
+    expect(bodies).toContain("WAKE-REPLY-BODY");
+    expect(bodies).toContain("reply_to");
+    expect(bodies).toContain("qabcabcabcabcabcabc"); // the header intentionally shows the id to the model
+    for (const x of h.stub.requests) {
+      expect(x.json.system).toEqual(h.stub.requests[0]!.json.system);
+      expect(x.json.tools).toEqual(h.stub.requests[0]!.json.tools);
+    }
+
+    // replies mode: unsolicited traffic never reaches the model; a valid reply still does.
+    const h2 = await host();
+    await prime(h2);
+    const s2 = replyStack(h2, "replies");
+    const n2 = h2.stub.requests.length;
+    expect(s2.r.deliver(s2.input({ text: "UNSOLICITED-BODY", wake: true }) as never)).toMatchObject({
+      effect: "none",
+      reason: "rejected",
+    });
+    expect(h2.stub.requests.length).toBe(n2);
+    expect(h2.session.pendingMessageCount).toBe(0);
+    const q3 = s2.issue(true);
+    expect(s2.r.deliver(s2.input({ inReplyTo: q3, text: "VALID-IN-REPLIES" }) as never).effect).not.toBe("none");
+    await h2.session.prompt("after valid reply");
+    const b2 = h2.stub.requests.map((x) => x.body).join("\n");
+    expect(b2).not.toContain("UNSOLICITED-BODY");
+    expect(b2).toContain("VALID-IN-REPLIES");
+    expect(h.errors).toEqual([]);
+    expect(h2.errors).toEqual([]);
+  }, 30_000);
 
   it("C-X6: phase-1 C-P1–C-P5 and consult-preserve C1–C7 remain green", async () => {
     const result = await promisify(execFile)(

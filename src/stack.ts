@@ -1648,6 +1648,8 @@ export interface StackXsReply {
   ledger: XsReplyLedger;
   replyInbox: XsInbox;
   maxPending: number;
+  /** The owning session (ledger stats key) — read by `/agent status` (RX6). */
+  sessionId: string;
   /** Sender `receivable` precheck (§4.2): joined ∧ effective receive ≠ off ∧ senderAllowed. */
   receivable(targetSessionId: string): "ok" | "receive_off" | "blocked" | "not_joined";
   /** Sender `inbound` lookup (§4.2): newest-first `getBranch()` scan, ≤2000 entries. */
@@ -1828,6 +1830,7 @@ function buildStackXs(
       ledger: replyLedger,
       replyInbox,
       maxPending: config.reply.maxPending,
+      sessionId,
       gate,
       flush,
       receivable: (target) => {

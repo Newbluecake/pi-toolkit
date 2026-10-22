@@ -17,7 +17,7 @@ describe("/agent status xs live stack view", () => {
   });
   it("renders English compact tokens, honest unavailable outbound usage, and live counters", () => {
     const stack = {
-      membership: { joined: true, receive: "wake" },
+      membership: { joined: true, receive: "wake", receivePref: "wake" },
       receiver: {
         wakeQuota: () => ({ recvUsed: 3, recvCap: 30, wakesUsed: 1, wakesCap: 12 }),
         countersSnapshot: () => ({ fenced: 1 }),
@@ -36,5 +36,44 @@ describe("/agent status xs live stack view", () => {
     expect(renderStatus(d)).toContain("lateAbort 2 · abortStuck 1");
     Object.assign(stack.controller!, { state: "deferred" });
     expect(renderStatus(d)).toContain("unbound 1");
+  });
+
+  it("reply on: adds a compact English replies line from the live ledger; pref shown only when it differs", () => {
+    const stats = {
+      pending: 2,
+      inbox: 1,
+      timedOut: 1,
+      late: 3,
+      rejected: 4,
+      owed: 5,
+      dropped: 6,
+      ledger: { size: 7, capacity: 64 },
+    };
+    const seen: string[] = [];
+    const stack = {
+      membership: { joined: true, receive: "off", receivePref: "replies" },
+      receiver: {
+        wakeQuota: () => ({ recvUsed: 0, recvCap: 30, wakesUsed: 0, wakesCap: 12 }),
+        countersSnapshot: () => ({ fenced: 0 }),
+      },
+      fence: { status: () => ({ stuck: [] }) },
+      audit: {},
+      reply: {
+        sessionId: "S1",
+        maxPending: 8,
+        ledger: {
+          stats: (sid: string) => {
+            seen.push(sid);
+            return stats;
+          },
+        },
+      },
+    } as unknown as StackXs;
+    const d = { ...deps(), xs: () => ({ stack, capability: "verified", outCap: 60 }) };
+    const out = renderStatus(d);
+    expect(out).toContain("recv off (pref replies) · cap verified");
+    expect(out).toContain("xs replies p2/8 i1 to1 late3 rej4 owed5 drop6 · ledger 7/64");
+    expect(seen).toEqual(["S1"]);
+    expect(out.split("\n")).toHaveLength(renderStatus(deps()).split("\n").length + 2);
   });
 });

@@ -93,6 +93,8 @@ export interface XsReplyTicket {
   consumedBy?: string;
   /** The timeout notice has not passed NoticeGate admission yet (§7.2). */
   noticeOwed?: "timeout";
+  /** The timeout notice already passed NoticeGate (clearOwed) — a later release must not re-owe it. */
+  noticeSent?: boolean;
 }
 
 export interface XsReplyIssueInput {
@@ -607,10 +609,12 @@ export class XsReplyLedger {
     if (xid !== undefined) this.sessions.get(ticket.requesterSessionId)?.inbox?.unoccupy(xid);
     if (prior === "timed_out" || now >= ticket.dueAt) {
       // The request HAS timed out by now — it owes a timeout notice unless one was sent.
-      ticket.noticeOwed ??= "timeout";
+      if (ticket.noticeSent !== true) ticket.noticeOwed ??= "timeout";
       if (now >= ticket.lateUntil) {
         // …and the grace window is gone: the owed notice can never be delivered (§3.4).
-        this.bumpSessionCounter(this.droppedNotices, ticket.requesterSessionId, XS_REPLY_DROPPED_SESSIONS_CAP);
+        if (ticket.noticeSent !== true) {
+          this.bumpSessionCounter(this.droppedNotices, ticket.requesterSessionId, XS_REPLY_DROPPED_SESSIONS_CAP);
+        }
         this.tickets.delete(requestId);
         return;
       }
@@ -639,6 +643,7 @@ export class XsReplyLedger {
       const ticket = this.tickets.get(requestId);
       if (ticket?.noticeOwed === "timeout") {
         delete ticket.noticeOwed;
+        ticket.noticeSent = true;
         cleared += 1;
       }
     }

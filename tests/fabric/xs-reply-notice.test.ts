@@ -40,6 +40,8 @@ interface Harness {
     receive: "off" | "deliver" | "wake" | "replies";
     fence: FenceDispatchVerdict;
     verifyOk: boolean;
+    /** When verifyOk is false, report the failure as a wakeOnly (goal) verdict. */
+    verifyWakeOnly: boolean;
     wakeThrows: boolean;
     hostThrows: boolean;
   };
@@ -58,6 +60,7 @@ function harness(overrides: Partial<Harness["state"]> = {}): Harness {
     receive: "wake",
     fence: { ok: true, gen: 7 },
     verifyOk: true,
+    verifyWakeOnly: false,
     wakeThrows: false,
     hostThrows: false,
     ...overrides,
@@ -72,7 +75,12 @@ function harness(overrides: Partial<Harness["state"]> = {}): Harness {
     receive: () => state.receive,
     fence: {
       beginDispatch: () => state.fence,
-      verifyDispatch: (gen: number) => (state.verifyOk ? { ok: true, gen } : { ok: false, reason: "gen_changed" }),
+      verifyDispatch: (gen: number): FenceDispatchVerdict =>
+        state.verifyOk
+          ? { ok: true, gen }
+          : state.verifyWakeOnly
+            ? { ok: false, reason: "fenced:goal", wakeOnly: true }
+            : { ok: false, reason: "gen_changed" },
     },
     controller: {
       dispatch: (request: XsReplyNoticeWakeRequest): XsReplyNoticeWakeResult => {
@@ -166,6 +174,23 @@ describe("xs reply NoticeGate — §7.2 admission matrix", () => {
     expect(h.wakeRequests).toHaveLength(0);
     expect(h.writes).toHaveLength(1);
     expect(h.ledger.owedNotices("A")).toHaveLength(0);
+  });
+
+  it("wakeOnly (goal) quiet write is NOT counted noticeUnverified; a real gen_changed still is", () => {
+    const goal = harness({
+      fence: { ok: false, reason: "fenced:goal", wakeOnly: true },
+      verifyOk: false,
+      verifyWakeOnly: true,
+    });
+    oweTicket(goal);
+    expect(goal.gate.flush()).toMatchObject({ written: "quiet" });
+    expect(goal.gate.status().noticeUnverified).toBe(0);
+    expect(goal.ledger.owedNotices("A")).toHaveLength(0);
+
+    const moved = harness({ verifyOk: false });
+    oweTicket(moved, false);
+    expect(moved.gate.flush()).toMatchObject({ written: "quiet" });
+    expect(moved.gate.status().noticeUnverified).toBe(1);
   });
 });
 
