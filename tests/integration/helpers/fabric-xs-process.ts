@@ -1,8 +1,9 @@
 /** XW process fixture: real activate/buildSessionStack + SessionManager and X2 sockets.
  * Only the pi host/provider is fake; no live credentials or provider requests are used. */
 import { EventEmitter } from "node:events";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import activate from "../../../src/index.js";
 import { getXsWakeLedger } from "../../../src/fabric/xs/wake-ledger.js";
@@ -15,6 +16,12 @@ import { currentConnection } from "../../../src/web-hub/agent/connection.js";
 import { startHub } from "../../../src/web-hub/hub/hub.js";
 import type { Registry } from "../../../src/web-hub/hub/registry.js";
 import type { XsDeliverFrame } from "../../../src/web-hub/protocol/xs.js";
+
+const PACKAGE_VERSION = (
+  JSON.parse(readFileSync(fileURLToPath(new URL("../../../package.json", import.meta.url)), "utf8")) as {
+    version: string;
+  }
+).version;
 
 const reply = (id: number, value: unknown) => process.send?.({ id, value });
 let handle: (m: any) => Promise<unknown>;
@@ -31,7 +38,9 @@ if (process.argv[2] === "hub") {
       home: process.env.HOME!,
       port: 0,
       idleExitMinutes: 10,
-      pluginVersion: "0.7.0",
+      // Must equal the agent's own package version, or the hub supersedes the agent and the
+      // socket never goes live — never hard-code it (a release bump broke every xs suite).
+      pluginVersion: PACKAGE_VERSION,
       buildId: "xw-test",
       ...(process.env.XW_XS_OFF === "1"
         ? {}
