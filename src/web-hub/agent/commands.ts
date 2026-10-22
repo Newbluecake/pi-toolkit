@@ -541,6 +541,32 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         if (current !== sessionId) deps.ledger.rebindSession(cmdId, current === "" ? undefined : current, deps.now());
         deps.onChanged();
       },
+      handedOff(kind) {
+        // todo #8: called from topic-switch's `persistPending` (session_shutdown before the user
+        // decided). The request now belongs to topic-switch's recovery, which re-delivers through
+        // the plain content path — never through this release — so without settling here the
+        // entry would stay `observed` and the browser row "sent · unconfirmed" until TTL.
+        if (settled) return;
+        settled = true;
+        const now = deps.now();
+        if (kind === "reload") {
+          // Same session comes back and recovery auto-redelivers the SAME text (extension-source
+          // `input`, then the user `message_start`). Re-arm the entry exactly like a dispatch so the
+          // NEXT module instance's observation chain attributes it (dispatched → observed →
+          // consumed ⇒ the row clears) — the owner is dropped because the pre-reload owner never
+          // matches a new instance's scoped lookup. No timer is armed: this instance is going away
+          // and its publish path must not write into the next instance's slots.
+          deps.ledger.updatePrompt(cmdId, { promptState: "dispatched", text }, now);
+          deps.ledger.clearOwner(cmdId, now);
+        } else {
+          // new/resume/fork/quit: recovery at most puts the text back into the terminal editor —
+          // exactly what `dropped` already tells the browser ("returned to the terminal editor or
+          // discarded"). Unbound from any session: the next session's ctl slot must still carry it.
+          deps.ledger.updatePrompt(cmdId, { promptState: "dropped", reason: "session" }, now);
+          deps.ledger.rebindSession(cmdId, undefined, now);
+        }
+        deps.onChanged();
+      },
     };
   }
 
@@ -992,6 +1018,11 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       for (const item of cleared) {
         if (item.cmdId === undefined) continue;
         deps.ledger.updatePrompt(item.cmdId, { promptState: "dropped", reason: "session" }, deps.now());
+        // todo #8 (residual #2): this runs at session_shutdown, so the publish below still goes
+        // out under the OLD session — but if the link is down right then, the stored slot is
+        // overwritten by the next session's projection (which filters by session id) before any
+        // reconnect replays it. Unbinding the terminal entry keeps it in every later projection.
+        deps.ledger.rebindSession(item.cmdId, undefined, deps.now());
         changed = true;
       }
       if (changed) deps.onChanged();

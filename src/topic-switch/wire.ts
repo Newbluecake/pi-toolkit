@@ -429,6 +429,18 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
     }
     const fromSessionId = safe(() => ctxRef.current?.sessionManager.getSessionId()) ?? "";
     setTransfer({ holdId: hold.id, payload: hold.payload, fromSessionId, reason, state: "pending", at });
+    // todo #8: a web-claimed hold is now owned by recovery, never by its WebPromptRelease (the
+    // recovery re-delivers through the content path) — settle the release as handed off so the
+    // browser's row reaches a terminal state instead of "sent · unconfirmed" until TTL. Only a
+    // `reload` comes back into the same session with an automatic re-delivery (planRecovery rule
+    // 1); every other reason at most refills the terminal editor.
+    if (hold.webRelease !== undefined) {
+      try {
+        hold.webRelease.handedOff?.(reason === "reload" ? "reload" : "session");
+      } catch {
+        /* best-effort: never let the web side break shutdown persistence */
+      }
+    }
   }
 
   function persistCooldown(hold: HoldRuntime): void {

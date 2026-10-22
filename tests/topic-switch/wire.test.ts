@@ -366,6 +366,76 @@ describe("wireTopicSwitch: webGate.tryClaim", () => {
     expect(currentCalls).toBe(1);
   });
 
+  for (const [reason, kind] of [
+    ["reload", "reload"],
+    ["new", "session"],
+    ["resume", "session"],
+    ["fork", "session"],
+    ["quit", "session"],
+  ] as const) {
+    it(`todo #8: session_shutdown(${reason}) while judging ⇒ persist-pending AND release.handedOff("${kind}") exactly once (never current/elsewhere)`, async () => {
+      const pi = new FakePi();
+      const clock = new FakeClock();
+      const ctx = makeCtx({
+        modelRegistry: { find: () => ({ provider: "anthropic", id: "claude" }), complete: () => new Promise(() => {}) },
+      });
+      pi.ctx = ctx;
+      const wiring = wireTopicSwitch(pi as never, makeDeps({}, clock));
+      const calls: string[] = [];
+      const release = {
+        current: () => {
+          calls.push("current");
+          return "dispatched" as const;
+        },
+        elsewhere: () => calls.push("elsewhere"),
+        handedOff: (k: "reload" | "session") => calls.push(`handedOff:${k}`),
+      };
+      expect(wiring.webGate.tryClaim({ cmdId: "c1", text: EXPENSIVE_TEXT }, ctx, release)).toBe(true);
+      await flush(); // judging, judge pending forever
+      pi.emit("session_shutdown", { type: "session_shutdown", reason }, ctx);
+      clock.advance(60_000);
+      await flush();
+      expect(calls).toEqual([`handedOff:${kind}`]);
+      const pending = pi.entries.filter(
+        (e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "pending",
+      );
+      expect(pending).toHaveLength(1);
+    });
+  }
+
+  it("todo #8: a pre-#8 release without handedOff still persists cleanly (optional method)", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const ctx = makeCtx({
+      modelRegistry: { find: () => ({ provider: "anthropic", id: "claude" }), complete: () => new Promise(() => {}) },
+    });
+    pi.ctx = ctx;
+    const wiring = wireTopicSwitch(pi as never, makeDeps({}, clock));
+    const release = { current: () => "dispatched" as const, elsewhere: () => {} };
+    expect(wiring.webGate.tryClaim({ cmdId: "c1", text: EXPENSIVE_TEXT }, ctx, release)).toBe(true);
+    await flush();
+    pi.emit("session_shutdown", { type: "session_shutdown", reason: "reload" }, ctx);
+    expect(
+      pi.entries.filter((e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "pending"),
+    ).toHaveLength(1);
+  });
+
+  it("todo #8: an input-origin hold (no web release) is unaffected — persist-pending only", async () => {
+    const pi = new FakePi();
+    const clock = new FakeClock();
+    const ctx = makeCtx({
+      modelRegistry: { find: () => ({ provider: "anthropic", id: "claude" }), complete: () => new Promise(() => {}) },
+    });
+    pi.ctx = ctx;
+    wireTopicSwitch(pi as never, makeDeps({}, clock));
+    pi.emit("input", { type: "input", text: EXPENSIVE_TEXT, source: "interactive" }, ctx);
+    await flush();
+    pi.emit("session_shutdown", { type: "session_shutdown", reason: "new" }, ctx);
+    expect(
+      pi.entries.filter((e) => e.customType === ENTRY_TYPE && (e.data as { kind?: string }).kind === "pending"),
+    ).toHaveLength(1);
+  });
+
   it("a cheap web prompt is NOT claimed (gate fails, native path runs)", () => {
     const pi = new FakePi();
     const wiring = wireTopicSwitch(pi as never, makeDeps());

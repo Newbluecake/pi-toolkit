@@ -119,6 +119,11 @@ export interface CommandLedger {
    * forever. `undefined` drops the binding (session-agnostic, same back-compat rule `frame()`
    * already applies to entries that never carried a session id). Unknown id ⇒ no-op. */
   rebindSession(id: string, sessionId: string | undefined, now: number): void;
+  /** todo #8 (topic-switch hand-off across `/reload`): forget the creating module instance so the
+   * NEXT instance's owner-scoped `findDispatchedByText` can attribute a re-delivery to this entry
+   * (an entry without `owner` matches every owner — the same rule pre-owner entries follow).
+   * Unknown id ⇒ no-op. */
+  clearOwner(id: string, now: number): void;
   /** v4.3 Y4/Y7.3 (verifier r_BHFA552J P2): scope is OPTIONAL and selects between two genuinely
    * different matching strategies, not just a stricter filter on the same one — passing `scope`
    * must be BYTE-IDENTICAL to the pre-steer-recall behavior for every caller that still omits it
@@ -291,6 +296,12 @@ export function createCommandLedger(): CommandLedger {
       if (e === undefined) return;
       if (sessionId === undefined) delete e.sessionId;
       else e.sessionId = sessionId;
+      e.updatedAt = now;
+    },
+    clearOwner(id, now) {
+      const e = bag.entries.get(id);
+      if (e === undefined) return;
+      delete e.owner;
       e.updatedAt = now;
     },
     findDispatchedByText(text, scope) {

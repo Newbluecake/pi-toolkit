@@ -291,6 +291,20 @@ describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
     expect(h.sent).toHaveLength(1);
   });
 
+  it("onSessionBoundary: a queued web item ends dropped{session} AND unbound, so the next session's ctl slot still carries it (todo #8 residual #2)", () => {
+    const h = makeHarness();
+    h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
+    h.handler.onInputEvent({ text: "hi", source: "extension", streamingBehavior: "steer" });
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "queued" });
+    h.handler.onSessionBoundary(); // session_shutdown — the link may be down right now
+    h.ctxState.sessionId = "sess-2";
+    h.handler.onSessionBoundary(); // session_start of the replacement session: nothing left to clear
+    expect(h.deps.ledger.get("c1")).toMatchObject({ promptState: "dropped", reason: "session" });
+    expect(h.deps.ledger.frame("sess-2", "ep", 1000).items).toContainEqual(
+      expect.objectContaining({ cmdId: "c1", state: "dropped", reason: "session" }),
+    );
+  });
+
   it("unobserved after 3s ⇒ ok{delivery:'unobserved'} (D5: never a hard failure)", () => {
     const h = makeHarness();
     h.handler.handle(frame("c1", { op: "prompt", text: "hi", deliver: "steer" }));
