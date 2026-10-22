@@ -101,7 +101,18 @@ export interface MessageSessionToolDeps {
   /** `fabric.crossSession.reply.enabled` frozen at activate: selects the schema instance and the
    *  description. Omitted/false ⇒ the legacy tool, byte-identical to pre-reply. */
   reply?: boolean;
+  /** `alias.enabled` ∧ hub cap frozen at activate (alias-plan §6): selects the alias description (schema
+   *  identical to the same reply-mode instance; `to` already accepts any ≤128-char string). Omitted/false ⇒ byte-identical. */
+  alias?: boolean;
 }
+
+const ALIAS_TO_SUFFIX =
+  ' When the user refers to a session by a short word (e.g. "给前端发消息"), pass that word verbatim as `to`: aliases are ' +
+  "unique on this hub and matched before names. If the result is no_target or ambiguous, call list_sessions and ask " +
+  "the user — never guess or pick the closest one.";
+
+/** alias-plan §6 prose for `E_XS_ALIAS_UNAVAILABLE` (advice block ⇒ Chinese). */
+export const XS_ALIAS_UNAVAILABLE_HINT = "hub 别名服务暂不可用，请用 list_sessions 给出的 ref";
 
 const LEGACY_DESCRIPTION =
   "Send a message to another joined main session on this machine's web hub (fabric cross-session; the recipient " +
@@ -126,7 +137,7 @@ export function createMessageSessionTool(
   return {
     name: "message_session",
     label: "message_session",
-    description: replyOn ? REPLY_DESCRIPTION : LEGACY_DESCRIPTION,
+    description: (replyOn ? REPLY_DESCRIPTION : LEGACY_DESCRIPTION) + (deps.alias === true ? ALIAS_TO_SUFFIX : ""),
     parameters: (replyOn ? MessageSessionParamsReply : MessageSessionParamsLegacy) as typeof MessageSessionParamsLegacy,
     async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as MessageSessionParams;
@@ -150,6 +161,7 @@ export function createMessageSessionTool(
           else if (outcome.effect === "none" && outcome.reason === "rejected") hint += `\n${XS_REPLY_TO_REJECTED_HINT}`;
         } else if (outcome.effect === "unknown") hint += `\n${XS_UNKNOWN_HINT}`;
       } else if (outcome.effect === "unknown") hint = `\n${XS_UNKNOWN_HINT}`;
+      if (deps.alias === true && outcome.status === "alias_unavailable") hint += `\n${XS_ALIAS_UNAVAILABLE_HINT}`;
       return { content: [{ type: "text", text: JSON.stringify(outcome) + hint }], details: outcome };
     },
   };

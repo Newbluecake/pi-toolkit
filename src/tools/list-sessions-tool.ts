@@ -61,6 +61,8 @@ export function formatXsSessionRows(rows: readonly XsSessionRowWire[]): string[]
   return rows.map((r) => {
     const parts = [
       r.ref,
+      // alias-plan §5.3: hub-verified, only written for aliasUsable requesters ⇒ legacy rows unchanged
+      ...(r.alias !== undefined ? [`alias=${JSON.stringify(r.alias)}`] : []),
       ...(r.name !== undefined ? [`name=${JSON.stringify(r.name)}`] : []),
       `cwd=${r.cwdLabel}`,
       `kind=${r.kind}`,
@@ -80,6 +82,10 @@ export interface ListSessionsToolDeps {
   sender: XsSender;
   /** `fabric.crossSession.channels.enabled` frozen at activate: selects the schema instance. Omitted/false ⇒ legacy, byte-identical. */
   channels?: boolean;
+  /** `fabric.crossSession.alias.enabled` ∧ hub cap, frozen at activate (alias-plan §6): selects the alias
+   *  description. The parameter schema is identical to the non-alias instance of the same channel mode
+   *  (aliases are matched through the existing `query`), so only the description differs. Omitted/false ⇒ byte-identical. */
+  alias?: boolean;
 }
 
 const LEGACY_DESCRIPTION =
@@ -90,12 +96,14 @@ const CHANNEL_DESCRIPTION =
   LEGACY_DESCRIPTION +
   " You only see sessions that share at least one channel with you; rows outside #default show channels=#a,#b.";
 
+const ALIAS_SUFFIX = " alias is a human-assigned, hub-unique short name; prefer it when the user names a session.";
+
 export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefinition<typeof ListSessionsParamsLegacy> {
   const channelsOn = deps.channels === true;
   return {
     name: "list_sessions",
     label: "list_sessions",
-    description: channelsOn ? CHANNEL_DESCRIPTION : LEGACY_DESCRIPTION,
+    description: (channelsOn ? CHANNEL_DESCRIPTION : LEGACY_DESCRIPTION) + (deps.alias === true ? ALIAS_SUFFIX : ""),
     parameters: (channelsOn ? ListSessionsParamsChannel : ListSessionsParamsLegacy) as typeof ListSessionsParamsLegacy,
     async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ListSessionsParams;

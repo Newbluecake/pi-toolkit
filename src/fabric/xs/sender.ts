@@ -121,6 +121,10 @@ export interface XsHubPort {
    *  declared it too). Absent ⇒ no cap (fail closed: broadcast/channels unsupported, channel
    *  gates behave as on an old hub). */
   hubChannelCap?(): boolean;
+  /** Alias-plan §5.2 (AL5a): true iff local `alias.enabled` ∧ the LIVE hub declared `xs.alias.v1`
+   *  (ALW wires it from the same state as the agent's hello cap). Absent/false ⇒ the pre-alias
+   *  sender, byte for byte: send keeps the raw `to`. */
+  aliasUsable?(): boolean;
   /** Channel-plan §5.5: absent ⇒ `channel_unsupported`. */
   broadcast?(args: XsPortBroadcastArgs): Promise<XsPortReply>;
   /** Channel-plan §4.1 `op:"channels"`; absent ⇒ unsupported. */
@@ -150,6 +154,7 @@ export type XsSendStatus =
   | "reply_ledger_full" // process ledger slots exhausted
   | "reply_target_mismatch" // replyTo's request came from a different session than `to`
   | "not_joined" // channel plan §2.3/§4: local linkJoined gate — nothing sent
+  | "alias_unavailable" // alias-plan §5.1: hub alias service degraded and the address looked like an alias — nothing sent
   | "error"; // E_XS_INTERNAL / transport / unmapped codes
 
 export interface XsSendOutcome {
@@ -157,7 +162,7 @@ export interface XsSendOutcome {
   effect: XsEffect;
   reason?: string;
   code?: string;
-  to?: { ref: string; name?: string };
+  to?: { ref: string; name?: string; alias?: string };
   wakeDowngraded?: XsWakeDowngraded;
   candidates?: XsResolveCandidateWire[];
   /** True when the sender truncated the body to `fabric.maxChars` before sending. */
@@ -265,6 +270,7 @@ const PROVABLE_NONE_CODES = new Set([
   "E_XS_STALE_ORIGIN",
   "E_XS_TOO_LARGE",
   "E_XS_REPLY_UNSUPPORTED", // reply-plan §5.2: refused before any reservation
+  "E_XS_ALIAS_UNAVAILABLE", // alias-plan §5.1: degraded-store guard answers at resolve/send admission
 ]);
 
 function statusForCode(code: string | undefined): XsSendStatus {
@@ -285,6 +291,8 @@ function statusForCode(code: string | undefined): XsSendStatus {
       return "bad_frame";
     case "E_XS_REPLY_UNSUPPORTED":
       return "reply_unsupported";
+    case "E_XS_ALIAS_UNAVAILABLE":
+      return "alias_unavailable";
     default:
       return "error";
   }
@@ -503,7 +511,7 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       if (!guardOk(snapshot, args.signal)) {
         return { status: "origin_changed", effect: "none", reason: "origin_changed" };
       }
-      let resolvedTarget: { ref: string; name?: string; sessionId?: string } | undefined;
+      let resolvedTarget: { ref: string; name?: string; sessionId?: string; alias?: string } | undefined;
       if (resolveReply.kind === "off") return { status: "off", effect: "none", code: "E_XS_OFF" };
       if (resolveReply.kind !== "res") {
         // Nothing was sent yet ⇒ provably `none`; the model may retry the whole call later.
@@ -530,12 +538,30 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       resolvedTarget = rres.target;
       /** The wire `to` never exposes the full sessionId to the model (reply-plan §4.2 返回值). */
       const publicTarget = (
-        t: { ref: string; name?: string; sessionId?: string } | undefined,
-      ): { ref: string; name?: string } | undefined =>
-        t === undefined ? undefined : { ref: t.ref, ...(t.name !== undefined ? { name: t.name } : {}) };
+        t: { ref: string; name?: string; sessionId?: string; alias?: string } | undefined,
+      ): { ref: string; name?: string; alias?: string } | undefined =>
+        t === undefined
+          ? undefined
+          : {
+              ref: t.ref,
+              ...(t.name !== undefined ? { name: t.name } : {}),
+              // alias-plan §6: the hub only writes it for aliasUsable requesters ⇒ legacy output unchanged
+              ...(t.alias !== undefined ? { alias: t.alias } : {}),
+            };
 
       // ---- reply branches: pin the address to the verified FULL sessionId (review #3) ----
       let sendTo = to;
+      // alias-plan §5.2: with aliases usable, pin the send to the FULL sessionId the resolve just
+      // confirmed (same mechanism as the reply branch; the hub then only does an exact lookup, so a
+      // retargeted alias / same-ref UUIDv7 / name-equals-id session can never receive it).
+      const aliasMode = deps.port.aliasUsable?.() === true;
+      if (aliasMode) {
+        const pinned = resolvedTarget?.sessionId;
+        if (pinned === undefined || pinned.length === 0) {
+          return { status: "error", effect: "none", reason: "no_session_id" };
+        }
+        sendTo = pinned;
+      }
       let expectWire: { requestId: string; timeoutMs: number } | undefined;
       let issuedRequestId: string | undefined;
       let issuedDueAt: number | undefined;
@@ -689,11 +715,15 @@ export function createXsSender(deps: XsSenderDeps): XsSender {
       }
       const status = statusForCode(res.code);
       const provablyNone = res.code !== undefined && PROVABLE_NONE_CODES.has(res.code);
+      // alias-plan §5.2: the pinned sessionId is gone/unreachable between resolve and send ⇒ target changed
+      const changedReason =
+        aliasMode && res.code === "E_XS_NO_TARGET" && res.reason === undefined ? "changed" : undefined;
+      const failReason = res.reason ?? changedReason;
       return withReply({
         status,
         effect: provablyNone ? "none" : "unknown",
         ...(res.code !== undefined ? { code: res.code } : {}),
-        ...(res.reason !== undefined || !provablyNone ? { reason: res.reason ?? "unverified" } : {}),
+        ...(failReason !== undefined || !provablyNone ? { reason: failReason ?? "unverified" } : {}),
         ...(target !== undefined ? { to: target } : {}),
         ...(status === "ambiguous" && res.candidates ? { candidates: res.candidates } : {}),
         ...(truncated ? { truncated: true } : {}),
