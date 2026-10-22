@@ -4,6 +4,14 @@ import type { SpawnRequest } from "../core/types.js";
 import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
 import type { MentionRegistry, MentionTarget } from "./registry.js";
+import {
+  routeSessionMention,
+  SESSION_MENTION_ERROR_SOURCE,
+  SESSION_MENTION_SENT_CUSTOM_TYPE,
+  type MentionSessionPort,
+  type SessionMentionNotice,
+  type SessionMentionRouteResult,
+} from "./session.js";
 
 export interface ParsedMention {
   readonly label: string;
@@ -34,6 +42,14 @@ export interface MentionRouteDeps {
   /** Optional sink recording the user's RAW @ message per target run, so the fleet widget can show it under the run. */
   noteMention?: (runId: string, message: string, pendingSince?: Millis) => void;
   reportError?: (message: string) => void;
+  /** fabric reply-plan §9.3 (package M): the @session mention port. Absent ⇔ the xs surface is
+   *  off (never assembled) — every @ input then keeps its legacy byte-identical behavior (§9.7).
+   *  A present port still returns `undefined` from `parse` while not joined / after `leave`. */
+  sessions?: MentionSessionPort;
+  /** fabric reply-plan §9.6: user-facing notices for the @session branch (errors ride the shared
+   *  `subagent:mention-error` channel with `details.source:"mention-session"`; the sent
+   *  confirmation rides `subagent:mention-session`). Absent ⇒ notices are dropped. */
+  notifySession?: (notice: SessionMentionNotice) => void;
 }
 
 /** Build the one mention-routing dependency shape shared by TUI and web input paths. */
@@ -44,6 +60,7 @@ export function createMentionRouteDeps(deps: MentionRouteDeps): MentionRouteDeps
 export type MentionRouteResult =
   | { handled: false }
   | { handled: true; action: "steer" | "resume"; runId: string }
+  | SessionMentionRouteResult
   | { handled: true; action: "error"; error: string };
 
 /**
@@ -62,7 +79,12 @@ export function frameUserMentionReply(label: string, message: string): string {
 
 export async function routeMention(text: string, deps: MentionRouteDeps): Promise<MentionRouteResult> {
   const parsed = parseMention(text, deps.registry);
-  if (!parsed) return { handled: false };
+  if (!parsed) {
+    // fabric reply-plan §9.1/§9.3: subagent labels take priority (parseMention above is
+    // untouched); only its misses reach the @session branch. An absent port, a not-joined
+    // session or a non-match returns {handled:false} and the input reaches pi untouched.
+    return routeSessionMention(text, { sessions: deps.sessions, notifySession: deps.notifySession });
+  }
   const target = deps.registry.resolve(parsed.label);
   if (!target) return { handled: false };
   const message = deps.fabricEnabled?.() ? frameUserMentionReply(parsed.label, parsed.message) : parsed.message;
@@ -108,7 +130,7 @@ export async function routeMention(text: string, deps: MentionRouteDeps): Promis
 /** Install the direct-mode input interceptor. The host remains responsible for calling this. */
 export function installMentionInput(
   pi: Pick<ExtensionAPI, "on" | "sendMessage">,
-  deps: Omit<MentionRouteDeps, "reportError">,
+  deps: Omit<MentionRouteDeps, "reportError" | "notifySession">,
 ): void {
   pi.on("input", async (event: InputEvent): Promise<InputEventResult> => {
     const result = await routeMention(event.text, {
@@ -120,6 +142,25 @@ export function installMentionInput(
           display: true,
           details: { source: "mention" },
         });
+      },
+      // fabric reply-plan §9.4/§9.6: human-origin @session results are display-only — the
+      // notices never wake the requester's model, they only render to the user.
+      notifySession: (notice) => {
+        pi.sendMessage(
+          notice.kind === "error"
+            ? {
+                customType: "subagent:mention-error",
+                content: notice.message,
+                display: true,
+                details: { source: SESSION_MENTION_ERROR_SOURCE },
+              }
+            : {
+                customType: SESSION_MENTION_SENT_CUSTOM_TYPE,
+                content: notice.message,
+                display: true,
+                details: { source: SESSION_MENTION_ERROR_SOURCE },
+              },
+        );
       },
     });
     return result.handled ? { action: "handled" } : { action: "continue" };

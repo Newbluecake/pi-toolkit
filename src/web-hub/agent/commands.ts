@@ -32,6 +32,7 @@ import type { HoldItem } from "./hold.js";
 import type { DispatchOutcome, HoldDriver } from "./hold-driver.js";
 import type { PromptGatePort, WebPromptRelease } from "./prompt-gate.js";
 import { parseMention, routeMention, type MentionRouteDeps } from "../../mention/mention.js";
+import { safeParseSessionMention } from "../../mention/session.js";
 import type { MentionResultData } from "../protocol/messages.js";
 import type {
   CmdArgs,
@@ -305,7 +306,13 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     if (mentionDeps !== undefined) {
       const parsed = parseMention(cmd.text, mentionDeps.registry);
-      if (parsed !== undefined) {
+      // fabric reply-plan §9.3: the web input path's SYNC mention determination gains the
+      // @session branch. safeParseSessionMention is `undefined` unless the port is assembled ∧
+      // live-joined, so the three off states (xs off / not joined / left) keep this whole block
+      // byte-identical to the legacy prompt path for every @ shape, `@session:` included (§9.7).
+      const sessionParsed = parsed === undefined ? safeParseSessionMention(mentionDeps.sessions, cmd.text) : undefined;
+      if (parsed !== undefined || sessionParsed !== undefined) {
+        const label = parsed?.label ?? sessionParsed?.label ?? "";
         // Do not make the native prompt path async: only a confirmed mention starts the
         // promise, preserving existing synchronous send/observation behavior for all other text.
         void routeMention(cmd.text, mentionDeps)
@@ -313,8 +320,15 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
             if (!routed.handled) return;
             const mention: MentionResultData =
               routed.action === "error"
-                ? { action: "error", label: parsed.label, error: routed.error }
-                : { action: routed.action, label: parsed.label, runId: routed.runId };
+                ? { action: "error", label, error: routed.error }
+                : routed.action === "session"
+                  ? {
+                      action: "session",
+                      label,
+                      effect: routed.effect,
+                      ...(routed.requestId !== undefined ? { requestId: routed.requestId } : {}),
+                    }
+                  : { action: routed.action, label, runId: routed.runId };
             deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
             settleAndReply(frame, {
               ok: true,
@@ -323,7 +337,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
           })
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error);
-            mentionDeps?.reportError?.(`cannot route @${parsed.label}: ${message}`);
+            mentionDeps?.reportError?.(`cannot route @${label}: ${message}`);
             deps.ledger.updatePrompt(frame.id, { promptState: "observed", behavior: cmd.deliver }, deps.now());
             settleAndReply(frame, {
               ok: true,
@@ -331,7 +345,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
                 op: "prompt",
                 delivery: "observed",
                 behavior: cmd.deliver,
-                mention: { action: "error", label: parsed.label, error: message },
+                mention: { action: "error", label, error: message },
               },
             });
           });
