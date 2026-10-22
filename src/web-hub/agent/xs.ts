@@ -28,7 +28,7 @@
  * No timers of its own (requests ride connection's unref'd deadline timers); never throws into
  * the connection machinery.
  */
-import { isValidXsSessionId } from "../../config/settings.js";
+import { effectiveReceive, isValidXsSessionId } from "../../config/settings.js";
 import type { XsAckVerdict } from "../../fabric/xs/dedup.js";
 import type {
   XsHubPort,
@@ -38,7 +38,7 @@ import type {
   XsPortSendArgs,
 } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
-import { XS_AGENT_CAPS, XS_HUB_CAP, XS_SLOT_KIND } from "../protocol/xs.js";
+import { XS_AGENT_CAPS, XS_HUB_CAP, XS_REPLY_AGENT_CAP, XS_REPLY_HUB_CAP, XS_SLOT_KIND } from "../protocol/xs.js";
 import type {
   XsDeliverFrame,
   XsHubLimitsWire,
@@ -48,7 +48,21 @@ import type {
   XsResFrame,
   XsStatusWire,
 } from "../protocol/xs.js";
-import { newAdminRid, type HubConnection } from "./connection.js";
+import { newAdminRid, type HubConnection, type SlotFlush } from "./connection.js";
+
+/** Reply-plan §5.2 (RX3): the reply-aware send args — `expect`/`replyTo` are written onto the
+ *  wire ONLY when the hub advertised `xs.reply.v1` (RX4 widens `XsPortSendArgs` itself; the
+ *  structural superset here keeps this package inside its file domain). */
+export interface XsPortSendReplyArgs extends XsPortSendArgs {
+  expect?: { requestId: string; timeoutMs: number };
+  replyTo?: string;
+}
+/** `XsHubPort` + the reply capability probe the sender consults before issuing `expectReply`. */
+export interface XsReplyHubPort extends XsHubPort {
+  send(args: XsPortSendReplyArgs): Promise<XsPortReply>;
+  /** True iff local reply is enabled AND the live hub link declared `xs.reply.v1`. */
+  replyCapable(): boolean;
+}
 
 // --------------------------------------------------------------------- ports (XW threads these)
 
@@ -77,6 +91,9 @@ export interface XsAgentPort {
   memberLimits(): XsMemberLimitsWire;
   /** Hub-global `hubSendsPerMin` (1..600) for `HubConfig.crossSession` (§4.6 全局 row). */
   hubSendsPerMin(): number;
+  /** Reply-plan §5.1: `fabric.crossSession.reply.enabled` — unset ⇒ false (agent byte-identical
+   *  to the pre-reply shape; the agent never advertises `xs.reply.v1`). */
+  replyEnabled?(): boolean;
 }
 
 export interface XsAgentBridgeDeps {
@@ -99,8 +116,12 @@ export interface XsAgentBridge {
   publishMember(): void;
   /** `StatusInfo.xs` body, or undefined while there is no stack (field stays absent). */
   statusProjection(): XsStatusWire | undefined;
-  /** X3's `XsHubPort` (list/resolve/send; one `xs_req` per call, no retry path). */
-  hubPort(): XsHubPort;
+  /** X3's `XsHubPort` (list/resolve/send; one `xs_req` per call, no retry path) + reply probe. */
+  hubPort(): XsReplyHubPort;
+  /** Reply-plan §5.2/§r2#9: per-write slot transform for the `xs` and `status` slots — the stored
+   *  frame stays raw; every write (live + hello_ack replay) downgrades `receive:"replies"` to
+   *  `"off"` unless local reply is enabled AND the CURRENT hub declared `xs.reply.v1`. */
+  slotFlush: SlotFlush;
   /** X4's `/fabric block` resolve port: hub `xs_req{op:"resolve"}` round trip mapped onto
    *  `XsBlockResolve` (see the class doc for the full-id derivation rules). */
   resolveBlock(query: string): Promise<XsBlockResolve>;
@@ -149,6 +170,14 @@ const REF_MAP_CAP = 64;
 
 export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
   const refMap = new Map<string, string>();
+  const replyEnabled = (): boolean => {
+    try {
+      return deps.port.replyEnabled?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  const hubHasReply = (): boolean => deps.conn()?.caps.includes(XS_REPLY_HUB_CAP) === true;
 
   const learnRef = (ref: string, sessionId: string): void => {
     if (ref === "" || sessionId === "") return;
@@ -201,7 +230,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     origin: { sessionId: args.origin.sessionId, epoch: args.origin.epoch },
     query: args.query,
   });
-  const reqOfSend = (args: XsPortSendArgs): XsReqFrame => ({
+  const reqOfSend = (args: XsPortSendReplyArgs): XsReqFrame => ({
     t: "xs_req",
     rid: newAdminRid(),
     op: "send",
@@ -210,10 +239,30 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
     text: args.text,
     ...(args.wake === true ? { wake: true } : {}),
     ...(args.level !== undefined ? { level: args.level } : {}),
+    // reply-plan §5.2: new fields only toward a hub that declared xs.reply.v1 (strict decoders drop whole frames)
+    ...(args.expect !== undefined && hubHasReply() ? { expect: args.expect } : {}),
+    ...(args.replyTo !== undefined && hubHasReply() ? { replyTo: args.replyTo } : {}),
   });
 
+  const slotFlush: SlotFlush = (frame, hubCaps) => {
+    const usable = replyEnabled() && hubCaps.includes(XS_REPLY_HUB_CAP);
+    if (frame.t === "xs_member") {
+      const m = frame as XsMemberFrame;
+      if (m.receive !== "replies" || usable) return frame;
+      return { ...m, receive: effectiveReceive(m.receive, false) } as XsMemberFrame;
+    }
+    if (frame.t === "status") {
+      const xs = (frame as { xs?: XsStatusWire }).xs;
+      if (xs === undefined || xs.receive !== "replies" || usable) return frame;
+      return { ...frame, xs: { ...xs, receive: effectiveReceive(xs.receive, false) } } as typeof frame;
+    }
+    return frame;
+  };
+
   return {
-    caps: () => XS_AGENT_CAPS,
+    slotFlush,
+
+    caps: () => (replyEnabled() ? [...XS_AGENT_CAPS, XS_REPLY_AGENT_CAP] : XS_AGENT_CAPS),
 
     hubCrossSessionConfig: () => ({ limits: { hubSendsPerMin: clampInt(deps.port.hubSendsPerMin(), 1, 600) } }),
 
@@ -258,7 +307,7 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         receive: m.receive,
         limits: clampMemberLimits(deps.port.memberLimits()),
       };
-      conn.setSlot(XS_SLOT_KIND, frame);
+      conn.setSlot(XS_SLOT_KIND, frame, slotFlush);
     },
 
     statusProjection() {
@@ -271,11 +320,12 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
       }
     },
 
-    hubPort(): XsHubPort {
+    hubPort(): XsReplyHubPort {
       return {
         list: (args) => roundTrip(reqOfList(args)),
         resolve: (args) => roundTrip(reqOfResolve(args)),
         send: (args) => roundTrip(reqOfSend(args)),
+        replyCapable: () => replyEnabled() && deps.conn()?.status().state === "live" && hubHasReply(),
       };
     },
 

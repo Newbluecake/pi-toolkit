@@ -866,7 +866,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       const xsView = xsBridge.statusProjection();
       if (xsView !== undefined) s.xs = xsView;
     }
-    c.setSlot("status", { t: "status", ...s });
+    c.setSlot("status", { t: "status", ...s }, xsBridge?.slotFlush);
   };
 
   const projectCurrentModels = (x: ExtensionContext) =>

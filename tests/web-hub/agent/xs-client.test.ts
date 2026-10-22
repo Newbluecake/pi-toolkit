@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { acquireConnection, type AcquireOptions, type HubConnection } from "../../../src/web-hub/agent/connection.js";
 import { createXsAgentBridge, type XsAgentPort, type XsStackPort } from "../../../src/web-hub/agent/xs.js";
 import type { XsAckVerdict } from "../../../src/fabric/xs/dedup.js";
-import { XS_HUB_CAP, XS_REQ_DEADLINE_MS } from "../../../src/web-hub/protocol/xs.js";
+import { XS_HUB_CAP, XS_REPLY_HUB_CAP, XS_REQ_DEADLINE_MS } from "../../../src/web-hub/protocol/xs.js";
 import type { XsDeliverFrame, XsMemberLimitsWire } from "../../../src/web-hub/protocol/xs.js";
 import { ackFrame, fakeNet, pathsIn, resetGlobals, SETTINGS, tmpDir, type FakeSocket } from "./helpers.js";
 
@@ -354,3 +354,76 @@ function baseState(): StackState {
 function emptyPortRest(): Pick<XsAgentPort, "memberLimits" | "hubSendsPerMin"> {
   return { memberLimits: () => ({ ...LIMITS }), hubSendsPerMin: () => 60 };
 }
+
+describe("reply-aware hub port (reply-plan §5.2, RX3)", () => {
+  const origin = { sessionId: "s", epoch: 1 };
+  const expectArg = { requestId: "q0123456789abcdef01", timeoutMs: 120_000 };
+  const replyPort = (enabled: boolean): XsAgentPort => ({
+    ...fakePort({ ...baseState() }),
+    replyEnabled: () => enabled,
+  });
+  const sendReqs = (sock: FakeSocket) =>
+    sock.frames().filter((f) => f.t === "xs_req") as Array<Record<string, unknown>>;
+
+  it("hub declares xs.reply.v1 ⇒ expect/replyTo are written; replyCapable() true", async () => {
+    const { conn, sock } = liveFake([XS_HUB_CAP, XS_REPLY_HUB_CAP]);
+    const bridge = createXsAgentBridge({ port: replyPort(true), conn: () => conn });
+    const hp = bridge.hubPort();
+    expect(hp.replyCapable()).toBe(true);
+    void hp.send({ origin, to: "sess-bbbbbbbbbbbb", text: "q", expect: expectArg });
+    void hp.send({ origin, to: "sess-bbbbbbbbbbbb", text: "a", replyTo: "q0123456789abcdef01" });
+    await vi.advanceTimersByTimeAsync(0);
+    const reqs = sendReqs(sock);
+    expect(reqs[0]!.expect).toEqual(expectArg);
+    expect(reqs[0]!.replyTo).toBeUndefined();
+    expect(reqs[1]!.replyTo).toBe("q0123456789abcdef01");
+    expect(reqs[1]!.expect).toBeUndefined();
+  });
+
+  it("hub WITHOUT xs.reply.v1 ⇒ fields stripped from the wire, replyCapable() false", async () => {
+    const { conn, sock } = liveFake([XS_HUB_CAP]);
+    const bridge = createXsAgentBridge({ port: replyPort(true), conn: () => conn });
+    const hp = bridge.hubPort();
+    expect(hp.replyCapable()).toBe(false);
+    void hp.send({ origin, to: "t", text: "q", expect: expectArg, replyTo: "q0123456789abcdef01" });
+    await vi.advanceTimersByTimeAsync(0);
+    const req = sendReqs(sock)[0]!;
+    expect("expect" in req).toBe(false);
+    expect("replyTo" in req).toBe(false);
+  });
+
+  it("local reply disabled ⇒ replyCapable() false even on a cap-carrying hub; no link ⇒ false", () => {
+    const { conn } = liveFake([XS_HUB_CAP, XS_REPLY_HUB_CAP]);
+    expect(
+      createXsAgentBridge({ port: replyPort(false), conn: () => conn })
+        .hubPort()
+        .replyCapable(),
+    ).toBe(false);
+    expect(
+      createXsAgentBridge({ port: replyPort(true), conn: () => undefined })
+        .hubPort()
+        .replyCapable(),
+    ).toBe(false);
+  });
+
+  it("caps(): xs.reply.v1 appended only while reply is enabled", () => {
+    const { conn } = liveFake([XS_HUB_CAP]);
+    expect(createXsAgentBridge({ port: replyPort(true), conn: () => conn }).caps()).toEqual(["xs.v1", "xs.reply.v1"]);
+    expect(createXsAgentBridge({ port: replyPort(false), conn: () => conn }).caps()).toEqual(["xs.v1"]);
+    expect(createXsAgentBridge({ port: fakePort({ ...baseState() }), conn: () => conn }).caps()).toEqual(["xs.v1"]);
+  });
+
+  it("xs_deliver reply/inReplyTo reach the stack untouched, still exactly one ack", () => {
+    const { conn, sock } = liveFake([XS_HUB_CAP, XS_REPLY_HUB_CAP]);
+    const state = { ...baseState() };
+    const bridge = createXsAgentBridge({ port: { ...fakePort(state), replyEnabled: () => true }, conn: () => conn });
+    const f: XsDeliverFrame = {
+      ...deliverFrame("d9", "x9"),
+      reply: { requestId: "q0123456789abcdef01", dueAt: 123 },
+      inReplyTo: "q0123456789abcdef02",
+    };
+    bridge.onDeliver(f);
+    expect(state.delivered[0]).toEqual(f);
+    expect(sock.frames().filter((x) => x.t === "xs_ack")).toHaveLength(1);
+  });
+});

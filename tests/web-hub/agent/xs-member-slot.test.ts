@@ -11,7 +11,7 @@ import {
   type HubConnection,
 } from "../../../src/web-hub/agent/connection.js";
 import { createXsAgentBridge, type XsAgentPort, type XsStackPort } from "../../../src/web-hub/agent/xs.js";
-import { XS_HUB_CAP } from "../../../src/web-hub/protocol/xs.js";
+import { XS_HUB_CAP, XS_REPLY_HUB_CAP } from "../../../src/web-hub/protocol/xs.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { XsMemberLimitsWire } from "../../../src/web-hub/protocol/xs.js";
 import { ackFrame, fakeNet, pathsIn, resetGlobals, SETTINGS, tmpDir, type FakeSocket } from "./helpers.js";
@@ -238,5 +238,59 @@ describe("xs_member slot (§8.1)", () => {
     expect(createXsAgentBridge({ port: wildPort, conn: () => undefined }).hubCrossSessionConfig()).toEqual({
       limits: { hubSendsPerMin: 600 },
     });
+  });
+});
+
+describe("slot flush downgrade (reply-plan §5.2 / r2 #9)", () => {
+  const stackWith = (receive: "replies" | "wake") => {
+    const stack: XsStackPort = {
+      sessionId: () => "sess-aaaaaaaaaaaa",
+      member: () => ({ epoch: 3, joined: true, receive }),
+      deliver: () => ({ effect: "none", reason: "rejected", woke: false }),
+      status: () => ({ joined: true, receive, blocked: 0 }),
+    };
+    return stack;
+  };
+  const mk = (receive: "replies" | "wake", replyEnabled: boolean | undefined, caps: string[]) => {
+    const n = fakeNet();
+    const conn = acquireConnection(opts({ netConnect: n.netConnect }));
+    const s = n.sockets[0]!;
+    s.emit("connect");
+    s.hub(ackFrame("k", 4242, caps));
+    const stack = stackWith(receive);
+    const port: XsAgentPort = {
+      stack: () => stack,
+      memberLimits: () => ({ ...LIMITS }),
+      hubSendsPerMin: () => 60,
+      ...(replyEnabled !== undefined ? { replyEnabled: () => replyEnabled } : {}),
+    };
+    const bridge = createXsAgentBridge({ port, conn: () => conn });
+    conn.attach(BINDING, SESSION as never);
+    bridge.publishMember();
+    conn.setSlot(
+      "status",
+      { t: "status", leafId: null, busy: false, pending: false, xs: stack.status() },
+      bridge.slotFlush,
+    );
+    return { s };
+  };
+  const recv = (s: FakeSocket) => ({
+    member: (s.frames().find((f) => f.t === "xs_member") as { receive: string }).receive,
+    status: (s.frames().find((f) => f.t === "status") as unknown as { xs: { receive: string } }).xs.receive,
+  });
+
+  const withCap = [...XS_CAPS, XS_REPLY_HUB_CAP];
+  it.each([
+    ["reply on + hub cap", true, withCap, "replies"],
+    ["old hub", true, XS_CAPS, "off"],
+    ["local reply off", false, withCap, "off"],
+    ["replyEnabled unset", undefined, withCap, "off"],
+  ] as const)("truth table: %s ⇒ %s", (_n, enabled, caps, want) => {
+    expect(recv(mk("replies", enabled, [...caps]).s)).toEqual({ member: want, status: want });
+  });
+
+  it("non-replies receive is passed through byte-identically (same frame object semantics)", () => {
+    const { s } = mk("wake", undefined, XS_CAPS);
+    expect(recv(s)).toEqual({ member: "wake", status: "wake" });
   });
 });
