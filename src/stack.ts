@@ -1639,6 +1639,10 @@ export interface StackXsInput {
    *  Late-bound (the bridge may be offline / absent). Absent or throwing ⇒ no cap (fail closed: a
    *  named-channel-only session reads as not joined on this link; default-only is unaffected). */
   hubChannelCap?: () => boolean;
+  /** Alias-plan §3.6/§6 (ALW): local `alias.enabled` ∧ the LIVE hub declared `xs.alias.v1`. Absent or throwing ⇒
+   *  not usable: a hub-stamped `from.alias` is dropped before the receiver formats the header, so an alias-off
+   *  agent's model-visible content stays byte-identical even facing a non-conforming hub. */
+  aliasUsable?: () => boolean;
 }
 
 export interface StackXs extends XsStackPort {
@@ -1732,6 +1736,15 @@ function buildStackXs(
   const hubChannelCap = (): boolean => {
     try {
       return input.hubChannelCap?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  // Alias-plan §6 (ALW): `from.alias` is written by the hub only for an `aliasUsable` recipient; mirror the gate
+  // locally (read live, fail closed) so the header's ` alias="…"` field can only appear in alias mode.
+  const aliasUsable = (): boolean => {
+    try {
+      return input.aliasUsable?.() === true;
     } catch {
       return false;
     }
@@ -1999,6 +2012,10 @@ function buildStackXs(
       if (disposed) return { effect: "none", reason: "session_changed", woke: false };
       // Also reconcile idle-poll/deferred-deadline transitions before the next capacity check.
       releaseTrigger();
+      if (frame.from.alias !== undefined && !aliasUsable()) {
+        const { alias: _dropped, ...from } = frame.from;
+        return receiver.deliver({ ...frame, from });
+      }
       return receiver.deliver(frame);
     },
     membership,

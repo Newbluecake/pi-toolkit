@@ -75,6 +75,7 @@ import {
 import { createXsAgentBridge, type XsAgentPort } from "./xs.js";
 import type { XsHubPort } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
+import type { XsAliasBridgePort, XsAliasCachePort } from "../../fabric/xs/types-alias.js";
 import type { XsHubLimitsWire } from "../protocol/xs.js";
 import type { ConsultTranscriptDiagnostics } from "./consult-transcript.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
@@ -434,6 +435,9 @@ export interface WebHubControl {
     hubPort(): XsHubPort;
     resolveBlock(query: string): Promise<XsBlockResolve>;
     hubInfo(): Promise<XsHubLimitsWire | undefined>;
+    /** alias-plan §4/§7 (ALW): AL3's `op:"alias"` bridge and per-activate alias cache for `/fabric alias`. */
+    aliasBridge(): XsAliasBridgePort;
+    aliasCache(): XsAliasCachePort;
   };
   /** web-hub-slash-args plan §5 (P4): `/`-command argument-completion status line (agent-side
    * mode + live hub cap). Optional for the same double-compatibility reason as `proxy`. */
@@ -1482,6 +1486,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // ordering as the hello_ack SLOT_ORDER replay (session → xs), so the hub never sees a
     // membership claim for a session id it has not been told about yet.
     xsBridge?.publishMember();
+    // alias-plan §4 (ALW): stack attach (every session_start, incl. /new・/resume・/fork on a reused link) reconciles
+    // the alias cache AFTER the member slot — fire-and-forget, zero frames unless alias on ∧ the live hub has the cap
+    // (a not-yet-live link is covered by the hello_ack `onHubCaps` reconcile).
+    xsBridge?.onHubCapsAlias();
     // The dialogs slot exists (D14-gated, only actually sent once the hub advertises dialog.v1) so
     // C2 only replaces `dialogBridge.frame()`'s content, not this call.
     c.setSlot("dialogs", dialogBridge.frame());
@@ -2018,6 +2026,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             hubPort: () => xsBridge.hubPort(),
             resolveBlock: (query: string) => xsBridge.resolveBlock(query),
             hubInfo: () => xsBridge.hubInfo(),
+            aliasBridge: () => xsBridge.aliasBridge(),
+            aliasCache: () => xsBridge.aliasCache(),
           },
         }
       : {}),

@@ -84,7 +84,8 @@ export interface XsDeliverHost {
 export interface XsDeliverInput {
   xid: string;
   to: { sessionId: string; epoch: number };
-  from: { sessionId: string; ref: string; name?: string; cwdLabel: string; agentId: string };
+  /** `alias` (alias-plan §6): hub-stamped only for an `aliasUsable` recipient; rides into the header verbatim. */
+  from: { sessionId: string; ref: string; name?: string; cwdLabel: string; agentId: string; alias?: string };
   text: string;
   wake: boolean;
   reply?: { requestId: string; dueAt: number };

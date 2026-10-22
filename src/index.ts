@@ -53,6 +53,7 @@ import { currentConnection } from "./web-hub/agent/connection.js";
 import { XS_CHANNEL_HUB_CAP } from "./web-hub/protocol/xs.js";
 import { createMessageSessionTool, messageSessionParamsFor } from "./tools/message-session-tool.js";
 import { createFabricXsCommand } from "./commands/fabric-xs.js";
+import { aliasSuggestions } from "./fabric/xs/alias-suggest.js";
 import type { XsHubLimitsWire } from "./web-hub/protocol/xs.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import {
@@ -60,6 +61,7 @@ import {
   SESSION_MENTION_SENT_CUSTOM_TYPE,
   createMentionSessionPort,
   sessionCompletionBare,
+  sessionCompletionAlias,
   type MentionSessionPort,
   type MentionSessionSendOutcome,
   type SessionMentionNotice,
@@ -289,6 +291,10 @@ export default function activate(rawPi: ExtensionAPI): void {
   // Channel-plan §3.1/§6 (CHW): frozen per activate (non-live). Off ⇒ old-agent shape: no
   // `xs.channel.v1` cap, no `message_channel`, the legacy `list_sessions` instance, named channels suspended.
   const channelsOn = xsEnabled && settings.fabric.crossSession.channels.enabled;
+  // Alias-plan §3.6/§6 (ALW): frozen per activate (non-live). Picks the alias tool descriptions, the agent cap
+  // `xs.alias.v1` and the hub config key. Deliberately NOT the hub cap: a late/missing hub cap must never swap a
+  // registered tool's description (provider cache prefix) — without it the runtime falls back to legacy addressing.
+  const aliasOn = xsEnabled && settings.fabric.crossSession.alias.enabled;
   const xsLedger = getXsWakeLedger();
   const xsCapability = getXsHostCapability();
   const xsSessionOf = (ctx: { sessionManager?: { getSessionId(): string } }): string | undefined => {
@@ -618,6 +624,8 @@ export default function activate(rawPi: ExtensionAPI): void {
   let xsSender: XsSender | undefined;
   // Channel-plan §2.3 (CHW): live probe — local channels on ∧ live link ∧ the hub declared xs.channel.v1.
   const xsHubChannelCap = (): boolean => webHubRef.current?.xs?.hubPort().hubChannelCap?.() === true;
+  // Alias-plan §3.6 (ALW): live probe — local alias on ∧ live link ∧ the hub declared xs.alias.v1 (AL3's state).
+  const xsAliasUsable = (): boolean => aliasOn && webHubRef.current?.xs?.hubPort().aliasUsable?.() === true;
   // Channel-plan §2.3/§10 (CHW): the sender's channel view delegates to the CURRENT stack's membership
   // (rebuilt per session_start); no attached stack ⇒ empty sets / not joined (fail closed).
   const xsChannelView: XsChannelView = {
@@ -633,6 +641,8 @@ export default function activate(rawPi: ExtensionAPI): void {
         resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
         send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
         ...(replyEnabled ? { replyCapable: () => webHubRef.current?.xs?.hubPort().replyCapable?.() === true } : {}),
+        // Alias-plan §5.2 (ALW): alias mode ⇒ send pins the resolved full sessionId; off ⇒ key absent (legacy sender).
+        ...(aliasOn ? { aliasUsable: xsAliasUsable } : {}),
         // Channel-plan §5.5/§4.1 (CHW): the channel ops ride the same late-bound bridge; absent bridge ⇒ off.
         ...(channelsOn
           ? {
@@ -678,8 +688,9 @@ export default function activate(rawPi: ExtensionAPI): void {
         : {}),
     });
     xsSender = sender;
-    pi.registerTool(createListSessionsTool({ sender, channels: channelsOn }));
-    pi.registerTool(createMessageSessionTool({ sender, reply: replyEnabled }));
+    // Alias-plan §6 (ALW): instances/descriptions frozen at activate by the LOCAL alias setting (see `aliasOn`).
+    pi.registerTool(createListSessionsTool({ sender, channels: channelsOn, ...(aliasOn ? { alias: true } : {}) }));
+    pi.registerTool(createMessageSessionTool({ sender, reply: replyEnabled, ...(aliasOn ? { alias: true } : {}) }));
     // Channel-plan §6.1 (CHW): main session only (this whole block is post-guard), xsOn ∧ channels.enabled.
     if (channelsOn) pi.registerTool(createMessageChannelTool({ sender }));
     const command = createFabricXsCommand({
@@ -698,6 +709,28 @@ export default function activate(rawPi: ExtensionAPI): void {
         return reply ? { ledger: reply.ledger, maxPending: reply.maxPending } : undefined;
       },
       onPolicyChange: () => holder.current?.xs?.reply?.flush(),
+      // Alias-plan §7 (ALW, AL4 port): always wired while xs is on — `localEnabled:false` still renders the
+      // `alias n/a (alias.enabled=false)` status line; bridge/cache are AL3's (absent web-hub wiring ⇒ local refusal).
+      alias: () => {
+        const xs = aliasOn ? webHubRef.current?.xs : undefined;
+        return {
+          localEnabled: aliasOn,
+          ...(xs ? { bridge: xs.aliasBridge(), cache: xs.aliasCache() } : {}),
+          leaseDays: Math.round((settings.fabric.crossSession.alias.offlineLeaseH / 24) * 10) / 10,
+          coolMin: settings.fabric.crossSession.alias.coolMin,
+          suggestions: () =>
+            aliasSuggestions({
+              cwd: notifyCapabilityCtx.current?.cwd,
+              sessionName: (() => {
+                try {
+                  return notifyCapabilityCtx.current?.sessionManager.getSessionName();
+                } catch {
+                  return undefined;
+                }
+              })(),
+            }),
+        };
+      },
       // Channel-plan §6.3 (CHW): the hub listing (also the completion cache's refresh source — the
       // command itself refreshes after status/channels/join/leave; the completer never does I/O).
       ...(channelsOn
@@ -1181,6 +1214,21 @@ export default function activate(rawPi: ExtensionAPI): void {
       if (row === undefined) void directory?.refresh("lookup");
       return row;
     },
+    // Alias-plan §5.4 (ALW, AL5b): LIVE alias mode + the directory's unique alias lookup. Absent while alias is off
+    // ⇒ the parse path is byte-identical to the pre-alias one.
+    ...(aliasOn
+      ? {
+          aliasMode: xsAliasUsable,
+          lookupAlias: (alias: string) => {
+            const directory = xsAttached ? holder.current?.xs?.directory : undefined;
+            const row = directory?.lookupAlias(alias);
+            // §5.4 step 6: a miss on an alias-shaped token (only reached after normalizeAlias ∧ label/file checks)
+            // warms the throttled single-flight cache; this attempt still falls through.
+            if (row === undefined) void directory?.refresh("mention");
+            return row;
+          },
+        }
+      : {}),
   });
   // Reply-plan §9.4/§9.6: human-origin @session notices are display-only (never triggerTurn).
   const sessionNoticeMessage = (notice: SessionMentionNotice) =>
@@ -1305,6 +1353,7 @@ export default function activate(rawPi: ExtensionAPI): void {
             memberChanged: () => webHubRef.current?.xs?.publishMember(),
             unreadChanged: refreshXsInbox,
             ...(channelsOn ? { hubChannelCap: xsHubChannelCap } : {}),
+            ...(aliasOn ? { aliasUsable: xsAliasUsable } : {}),
             listRows: async (origin) => {
               const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
               return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
@@ -1362,9 +1411,13 @@ export default function activate(rawPi: ExtensionAPI): void {
                     receive: row.receive,
                     busy: row.busy,
                     ...(row.channels !== undefined && row.channels.length > 0 ? { channels: row.channels } : {}),
+                    ...(aliasOn && row.alias !== undefined ? { alias: row.alias } : {}),
                   }));
                 },
                 sessionBareName: (name: string) => sessionCompletionBare(sessionParseDeps(), name),
+                ...(aliasOn
+                  ? { sessionBareAlias: (alias: string) => sessionCompletionAlias(sessionParseDeps(), alias) }
+                  : {}),
               }
             : {}),
         }),
@@ -1555,6 +1608,27 @@ export default function activate(rawPi: ExtensionAPI): void {
                 maxRecipients: settings.fabric.crossSession.channels.broadcast.maxRecipients,
                 wakeMaxRecipients: settings.fabric.crossSession.channels.broadcast.wakeMaxRecipients,
               }),
+              // Alias-plan §3.6/§4 (ALW): agent cap `xs.alias.v1` + `HubConfig.crossSession.alias` (AL2 deviation 1:
+              // alias off ⇒ the key is never written ⇒ the spawned hub builds no table). Keys absent while off.
+              ...(aliasOn
+                ? {
+                    aliasEnabled: () => true,
+                    aliasHubConfig: () => ({
+                      offlineLeaseH: settings.fabric.crossSession.alias.offlineLeaseH,
+                      coolMin: settings.fabric.crossSession.alias.coolMin,
+                      takeMinOfflineMin: settings.fabric.crossSession.alias.takeMinOfflineMin,
+                    }),
+                    // Q3: display-only one-shot notice (the bridge de-duplicates by (sessionId, lost.at)).
+                    notifyAliasLost: (text: string) => {
+                      try {
+                        const ctx = notifyCapabilityCtx.current;
+                        if (ctx?.hasUI && typeof ctx.ui?.notify === "function") ctx.ui.notify(text, "info");
+                      } catch {
+                        /* display hint only */
+                      }
+                    },
+                  }
+                : {}),
             },
           }
         : {}),

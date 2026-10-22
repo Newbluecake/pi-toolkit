@@ -8,6 +8,7 @@ import { formatXsMessage } from "../../src/fabric/xs/format.js";
 import { XS_MEMBERSHIP_CUSTOM_TYPE } from "../../src/fabric/xs/membership.js";
 import { P2_HUB_CAPS, VERSION_HUB_CAP } from "../../src/web-hub/protocol/version.js";
 import {
+  XS_ALIAS_AGENT_CAP,
   XS_CHANNEL_AGENT_CAP,
   XS_CHANNEL_HUB_CAP,
   XS_HUB_CAP,
@@ -54,12 +55,16 @@ vi.mock("../../src/web-hub/agent/index.js", async (importOriginal) => {
 // eslint-disable-next-line import/first -- must load after the mock above
 const { default: activate } = await import("../../src/index.js");
 
-type Config = { channels: boolean; reply: boolean };
-const CONFIGS: Record<"c1" | "c2" | "c3" | "c4", Config> = {
+// Alias-plan §3.6 (ALW): `alias.enabled` defaults to true, so the four channel anchors pin it OFF (≡ the pre-alias
+// agent the golden was captured from); ⑤ = ③ + alias on proves alias adds ONLY its declared exceptions while the
+// hub lacks `xs.alias.v1` (cap tail + HubConfig.crossSession.alias; zero alias frames, identical slots/status/entry).
+type Config = { channels: boolean; reply: boolean; alias?: boolean };
+const CONFIGS: Record<"c1" | "c2" | "c3" | "c4" | "c5", Config> = {
   c1: { channels: true, reply: true },
   c2: { channels: false, reply: true },
   c3: { channels: true, reply: false },
   c4: { channels: false, reply: false },
+  c5: { channels: true, reply: false, alias: true },
 };
 
 interface Capture {
@@ -187,6 +192,7 @@ async function capture(config: Config): Promise<Capture> {
           autoJoin: true,
           reply: { enabled: config.reply },
           channels: { enabled: config.channels },
+          alias: { enabled: config.alias === true },
           limits: {
             sendsOutPerMin: 10,
             sendsOutPerHour: 60,
@@ -318,9 +324,14 @@ async function capture(config: Config): Promise<Capture> {
   }) as Capture;
 }
 
-/** The declared exceptions removed: exactly one occurrence of each cap (asserted), the hub channels key. */
-function withoutExceptions(c: Capture, opts: { channelCap: boolean }): Record<string, unknown> {
+/** The declared exceptions removed: exactly one occurrence of each cap (asserted), the hub channels/alias keys. */
+function withoutExceptions(c: Capture, opts: { channelCap: boolean; aliasCap?: boolean }): Record<string, unknown> {
   const caps = [...((c.hello.caps as string[]) ?? [])];
+  if (opts.aliasCap === true) {
+    expect(caps.filter((x) => x === XS_ALIAS_AGENT_CAP)).toHaveLength(1);
+    expect(caps[caps.length - 1]).toBe(XS_ALIAS_AGENT_CAP); // tail-appended after the channel cap
+    caps.splice(caps.indexOf(XS_ALIAS_AGENT_CAP), 1);
+  } else expect(caps).not.toContain(XS_ALIAS_AGENT_CAP);
   if (opts.channelCap) {
     expect(caps.filter((x) => x === XS_CHANNEL_AGENT_CAP)).toHaveLength(1);
     caps.splice(caps.indexOf(XS_CHANNEL_AGENT_CAP), 1);
@@ -330,6 +341,10 @@ function withoutExceptions(c: Capture, opts: { channelCap: boolean }): Record<st
     expect(crossSession.channels).toEqual({ maxRecipients: 16, wakeMaxRecipients: 4 });
     delete crossSession.channels;
   } else expect(crossSession.channels).toBeUndefined();
+  if (opts.aliasCap === true) {
+    expect(crossSession.alias).toEqual({ offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10 });
+    delete crossSession.alias;
+  } else expect(crossSession.alias).toBeUndefined(); // AL2 deviation 1: alias off ⇒ the key is never written
   return {
     hello: { ...c.hello, caps },
     slotSequence: c.slotSequence,
@@ -349,7 +364,7 @@ describe("channel-plan §9.4-2 (CHW): agent-side compat anchor — real activate
       for (const f of cleanup.splice(0).reverse()) f();
       vi.useRealTimers();
     }
-    const { c1, c2, c3, c4 } = caps as Record<"c1" | "c2" | "c3" | "c4", Capture>;
+    const { c1, c2, c3, c4, c5 } = caps as Record<"c1" | "c2" | "c3" | "c4" | "c5", Capture>;
     const golden = GOLDEN.wiring;
 
     // ③④ anchored to v0.7.1 through the golden.
@@ -388,5 +403,11 @@ describe("channel-plan §9.4-2 (CHW): agent-side compat anchor — real activate
     // StatusInfo.xsInbox: captured before any inbound message ⇒ absent everywhere.
     for (const c of [c1, c2, c3, c4]) expect("xsInbox" in c.statusFrame).toBe(false);
     expect(XS_CHANNEL_HUB_CAP).toBe(XS_CHANNEL_AGENT_CAP);
+
+    // ⑤ alias on × a hub WITHOUT xs.alias.v1: ≡ ③ up to the alias exceptions — no `op:"alias"` frame, no
+    // `StatusInfo.xs.alias`, same slot sequence / member frame / entry / format samples / tool names.
+    expect(JSON.stringify(withoutExceptions(c5, { channelCap: true, aliasCap: true }))).toBe(JSON.stringify(c3x));
+    expect(c5.slotSequence).not.toContain("xs_req");
+    expect(JSON.stringify(c5.tools)).toBe(JSON.stringify(c3.tools));
   }, 60_000);
 });

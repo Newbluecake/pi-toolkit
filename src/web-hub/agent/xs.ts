@@ -713,6 +713,8 @@ export function createXsAgentBridge(deps: XsAgentBridgeDeps): XsAgentBridge {
         channelCapable: () => channelsEnabled() && deps.conn()?.status().state === "live" && hubHasChannel(),
         // channel-plan §5.5 (CHW): CH4's sender reads the same probe under the name `hubChannelCap`.
         hubChannelCap: () => channelsEnabled() && deps.conn()?.status().state === "live" && hubHasChannel(),
+        // alias-plan §5.2 (ALW): the sender's exact-only switch — the same probe as the agent hello cap ∧ hub cap.
+        aliasUsable: () => aliasUsable(),
         broadcast: (args) => roundTrip(reqOfBroadcast(args)),
         channels: (args) => roundTrip(reqOfChannels(args)),
       };
