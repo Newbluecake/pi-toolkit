@@ -8,7 +8,7 @@
   isn't an emit — the frozen contract has none).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { AskUserQuestionWire } from "@protocol/messages.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { AskUserQuestionProps } from "../../contracts.js";
@@ -50,19 +50,41 @@ const selection = computed<AskSelection>(() => {
 const inputName = computed(() => `ask-q-${index.value}`);
 
 // --- compact: long context collapses to 2 lines behind an 「展开/收起」 toggle ------------
+// The toggle also un-clamps the option descriptions (one switch for "show me everything").
+// Multi-question forms keep inactive tabs mounted under `v-show` (display:none), where every
+// box measures 0×0 — so a one-shot onMounted measurement missed every non-first tab and the
+// toggle never appeared there. A ResizeObserver on the fieldset re-measures whenever the
+// question becomes visible or reflows.
+const rootEl = ref<HTMLElement | null>(null);
 const contextEl = ref<HTMLElement | null>(null);
 const contextOpen = ref(false);
 const contextLong = ref(false);
 
-function measureContext(): void {
-  const el = contextEl.value;
-  if (el === null) return;
-  // Measured while the 2-line clamp applies: overflowing text has scrollHeight > clientHeight.
-  contextLong.value = el.scrollHeight > el.clientHeight + 1;
+function overflows(el: Element): boolean {
+  return el.scrollHeight > el.clientHeight + 1;
 }
 
+function measureContext(): void {
+  // Measured only while the 2-line clamps apply; once expanded the toggle must stay reachable.
+  if (contextOpen.value) return;
+  const ctx = contextEl.value;
+  const descs = rootEl.value?.querySelectorAll(".ask-option-desc") ?? [];
+  let long = ctx !== null && overflows(ctx);
+  for (const d of descs) if (overflows(d)) long = true;
+  contextLong.value = long;
+}
+
+let resizeObserver: ResizeObserver | undefined;
 onMounted(() => {
   void nextTick(measureContext);
+  if (typeof ResizeObserver === "function" && rootEl.value !== null) {
+    resizeObserver = new ResizeObserver(() => measureContext());
+    resizeObserver.observe(rootEl.value);
+  }
+});
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = undefined;
 });
 watch(
   () => question.value.context,
@@ -154,8 +176,9 @@ function onOtherInput(ev: Event): void {
 
 <template>
   <fieldset
+    ref="rootEl"
     class="ask-question"
-    :class="{ 'ask-skipped': selection.skipped === true }"
+    :class="{ 'ask-skipped': selection.skipped === true, 'ask-question--expanded': contextOpen }"
     :disabled="form?.suspended.value === true"
   >
     <legend class="ask-question-text">{{ question.question }}</legend>
@@ -163,7 +186,7 @@ function onOtherInput(ev: Event): void {
       {{ question.context }}
     </p>
     <button
-      v-if="question.context && contextLong"
+      v-if="contextLong"
       type="button"
       class="ask-context-toggle"
       data-context-toggle

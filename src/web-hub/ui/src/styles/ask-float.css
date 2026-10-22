@@ -275,6 +275,13 @@
   cursor: pointer;
 }
 
+/* 「展开」 un-clamps the option descriptions too (one switch shows the whole question). */
+.ask-float .ask-question--expanded .ask-option-desc {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+
 .ask-context-toggle:hover {
   text-decoration: underline;
 }
