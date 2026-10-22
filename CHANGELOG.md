@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-22
+
+### Added
+
+- **web-hub**: offer joined sessions in the composer @ panel (`8631d8b3`)
+- **fabric**: show cross-session messages to the user and let @session replies wake (`cce43117`)
+- **fabric**: surface cross-session reply state and finish the reply rollout (`0939b5a9`)
+- **mention**: wire @session mentions into the TUI and web input paths (`31b94936`)
+- **fabric**: wire cross-session request-reply into the session stack (`5a2874e8`)
+- **ui**: show fleet widget usage token counts with adaptive k/M units (`2eeb0308`)
+- **web-hub**: show full session paths and an icon xs badge on agent cards (`acda22e7`)
+- **tools**: show usage token counts with adaptive k/M units (`e873b788`)
+- **fabric**: receive correlated cross-session replies and add receive=replies (`3ed8c087`)
+- **fabric**: let message_session request and send correlated replies (`d34f38a9`)
+- **mention**: resolve @session mentions to cross-session targets (`c1db8367`)
+- **fabric**: add the cross-session reply ticket ledger and notice gate (`b3ecbfe8`)
+- **web-hub**: route cross-session replies on the hub (`25bc75c8`)
+- **web-hub**: carry cross-session reply fields over the agent link (`e85c86ce`)
+- **fabric**: add cross-session reply contract and reply-off golden (`bd2fbd07`)
+- **fabric**: allow /fabric mutation subcommands from web (webCommandPolicy.fabric, default allow); keep Feishu refused (`e74e8e9e`)
+- **web-hub**: desktop preview-window maximize/restore (`7d929aea`)
+- **fabric**: complete cross-session observability and conformance gates (`2c582093`)
+- **fabric**: wire phase-2 cross-session stacks and lifecycle (`a515874d`)
+- **fabric**: phase-2 X2 agent-side cross-session connection (`a5ade62e`)
+- **web-hub**: agent-side / command argument completion (P1) (`d45b8960`)
+- **fabric**: phase-2 X1 hub cross-session relay (`85718b28`)
+- **fabric**: phase-2 X4 receiver pipeline and join control (`0bc902fe`)
+- **web-hub**: /-command argument completion UI (slash-args P3) (`6d84f721`)
+- **web-hub**: add cap-gated command argument completion route (`bff2cd1c`)
+- **fabric**: phase-2 T1 session-change fence (`988f68a8`)
+- **fabric**: phase-2 X3 cross-session sender and main-session tools (`4ee49bcb`)
+- **fabric**: add supervised cross-session root wake controller (`3c09aad0`)
+- **web-hub**: freeze / command argument-completion protocol (P0) (`4ff28a23`)
+- **web-hub**: preview-windows W4 — wire W3 into PreviewHost, integration tests, real-device checklist (`b07a03c6`)
+- **fabric**: phase-2 XS0 cross-session contracts (`4f0dcfb3`)
+- **web-hub**: preview-windows W3 cross-cutting integration (`f2edde4b`)
+- **web-hub**: preview window components and modeless shell (W2) (`9912f62f`)
+- **web-hub**: mermaid rendering engine with pre-render defences (`a0d9502b`)
+- **web-hub**: preview window manager and geometry (W1) (`cbc60647`)
+- **web-hub**: mermaid diagram block components and wiring (P2) (`854a60a3`)
+- **web-hub**: show a subagent's original task description in the agent tree (`95957124`)
+- **web-hub**: clear the session name to hand the title back to auto-generation (`fe413bf1`)
+- **compat**: support pi 1.3 (`1dab59a4`)
+- **title**: add /title auto and /title status (`a96c189a`)
+- **memory**: add /mem init to create a project core.md skeleton (`4c59cbe9`)
+
+### Fixed
+
+- **web-hub**: close the phone preview from the back button when there is no history (`c765148a`)
+- **web-hub**: settle web prompts held by topic-switch across session shutdown (`12b059cb`)
+- **web-hub**: right-align wrapped agent card badges with the cost (`fe01ecee`)
+- **fabric**: complete /fabric receive modes after a trailing space (`0c9e6f46`)
+- **web-hub**: move overflowing agent card badges after the session name (`9a23d0ac`)
+- **web-hub**: keep the agent card cost top-right and pin the preview footnote (`c23d4793`)
+- **web-hub**: clear the pending web prompt after topic-switch opens a new session (`171abbb4`)
+- **fabric**: xs host adapters tolerate a ctx without isIdle/hasPendingMessages/abort (`8f25b265`)
+- **web-hub**: show async toolkit command output in the web UI (`0a129f2a`)
+- **web-hub**: ask_user long context on non-first tabs is expandable again (`67abdb2b`)
+- **feishu-bot**: make login-approval approve/deny buttons visually distinct (`8f572271`)
+- **web-hub**: preview windows verify:W2 rework — SE-only key resize, single title aria, drop dead i18n key (`b48c7bae`)
+- **web-hub**: preview window resize keeps the opposite edge fixed (W1 rework) (`a0907a84`)
+- **web-hub**: forward per-question skip through /api/dialog (`e3d33494`)
+- **web-hub**: tell the user to restart the hub when the pi launcher changed (`f4de187d`)
+- **consult-ab**: give verdict/v1 enum nodes an explicit string type (`28aaab04`)
+- **memory**: let /mem tidy fill the /mem init skeleton and keep its menu predictable (`dc630abe`)
+- **ui**: drop the [pi-subagent] tag from TUI warning notices (`8fe579d4`)
+
+### Documentation
+
+- **fabric**: plan cross-session request-reply correlation and @session mentions (`b1be07c9`)
+- **web-hub**: slash-completion plan review and dispositions (`b441a1df`)
+- **fabric**: phase-2 review round 2 and main-session rulings (r3) (`dd8f181f`)
+- record rulings for fabric phase 2 (N1/N2) and slash-command completion (D1-D6) (`0e279e6d`)
+- **fabric**: phase-2 plan r2 addressing review round 1 (`29796578`)
+- **web-hub**: plan for slash-command argument hints and completion (`a84830fd`)
+- **fabric**: phase-2 plan review round 1 (`37189c27`)
+- **fabric**: record phase-2 rulings for cross-session joining and discovery (`fdd734cd`)
+- **fabric**: phase-2 plan for root-to-root cross-session wake (`240aacd4`)
+- **web-hub**: plans for mermaid rendering and multi-window previews (`ea62d9dc`)
+
+### Tests
+
+- **fabric**: derive the xs harness hub version from package.json (`8a3cbaf7`)
+- **web-hub**: slash-args P4 integration, conformance, status line, docs (`91b0ead2`)
+- **web-hub**: slash-args P1 golden cmdArgs/commands republish + cmdArgs-absent pins (`86b2e5a4`)
+- **web-hub**: probe:mermaid real-browser gate (Chromium + Firefox) (`b18557bd`)
+- **web-hub**: reserve proxy test port ranges through the shared allocator (`870ca05b`)
+- make the T-F1 overflow and startup-cancel late-result tests deterministic (`91ef6a2c`)
+- allocate test ports below the ephemeral range to stop EADDRINUSE flakes (`349f52ce`)
+
+### Chores
+
+- **web-hub**: provenance-bound mermaid chunks, licence gate and EPL notices (`95101924`)
+
+Stats: 41 feat, 18 fix, 10 docs, 7 test, 1 chore
+
 ## [0.7.0] - 2026-10-21
 
 ### Added
@@ -896,7 +992,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.1...v0.6.2
