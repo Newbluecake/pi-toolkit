@@ -8,6 +8,7 @@ import {
   XsMembership,
   type XsMembershipEntryData,
 } from "../../src/fabric/xs/membership.js";
+import { XsReplyLedger } from "../../src/fabric/xs/reply-ledger.js";
 import { createFabricXsCommand, type FabricXsCommandDeps, type XsBlockResolve } from "../../src/commands/fabric-xs.js";
 
 /**
@@ -446,5 +447,100 @@ describe("membership entry persistence & fork (D2/P10)", () => {
     b.leave();
     expect(counter.value).toBe(4); // attach, attach, join, leave
     expect(b.epoch).toBe(4);
+  });
+});
+
+describe("RX5 membership receivePref and replies command", () => {
+  it("persists replies as off + receivePref, restores preference with reply off fail-closed", () => {
+    const m = new XsMembership({ sessionId: SESSION, persist: () => {} });
+    m.join();
+    m.setReceive("replies");
+    expect(m.receive).toBe("replies");
+    const entry = m.toEntryData();
+    expect(entry).toMatchObject({ receive: "off", receivePref: "replies" });
+    // The previous reader uses only receive and ignores extra keys; it therefore sees off.
+    expect(entry.receive).toBe("off");
+    const read = readXsMembershipEntry([{ type: "custom", customType: "subagent:xs-membership", data: entry }]);
+    for (const replyEnabled of [true, false]) {
+      const restored = new XsMembership({ sessionId: SESSION, replyEnabled, persist: () => {} });
+      restored.restore(read);
+      expect(restored.receivePref).toBe("replies");
+      expect(restored.receive).toBe(replyEnabled ? "replies" : "off");
+      expect(restored.toEntryData()).toEqual(entry);
+    }
+  });
+
+  it("legacy receive entries stay byte-compatible; invalid receivePref does not widen", () => {
+    const m = new XsMembership({ sessionId: SESSION, replyEnabled: false, persist: () => {} });
+    const entry = m.toEntryData();
+    expect(entry).not.toHaveProperty("receivePref");
+    const read = readXsMembershipEntry([
+      { type: "custom", customType: "subagent:xs-membership", data: { ...entry, receive: "off", receivePref: "wake" } },
+    ]);
+    expect(read?.receive).toBe("off");
+    expect(read).not.toHaveProperty("receivePref");
+    const d = new XsMembership({
+      sessionId: SESSION,
+      defaultReceive: "replies",
+      replyEnabled: false,
+      persist: () => {},
+    });
+    d.join();
+    expect(d.receive).toBe("off");
+    expect(d.receivePref).toBe("replies");
+  });
+
+  it("receive replies changes preference without bumping epoch, remains Feishu-hard-refused", async () => {
+    const h = makeCommand();
+    await h.run("join");
+    const epoch = h.membership.epoch;
+    await h.run("receive replies", { web: true });
+    expect(h.membership.receive).toBe("replies");
+    expect(h.membership.epoch).toBe(epoch);
+    expect(h.persisted.at(-1)).toMatchObject({ receive: "off", receivePref: "replies" });
+    await h.run("receive off");
+    const log = await h.run("receive replies", { feishu: true });
+    expect(log.notes[0]?.message).toContain("飞书入口");
+    expect(h.membership.receive).toBe("off");
+  });
+
+  it("reply-disabled receive replies refuses instead of widening to wake", async () => {
+    const membership = new XsMembership({ sessionId: SESSION, replyEnabled: false, persist: () => {} });
+    const h = makeCommand({ membership: () => membership });
+    const log = await h.run("receive replies");
+    expect(log.notes[0]?.message).toContain("reply.enabled=false");
+    expect(membership.receive).toBe("wake");
+  });
+
+  it("replies view and status render ledger rows/counters; completion includes replies", async () => {
+    const clock = new FakeClock(1000);
+    const ledger = new XsReplyLedger({ clock });
+    const issued = ledger.issue({
+      requesterSessionId: SESSION,
+      replierSessionId: "target",
+      replierRef: "target-ref",
+      origin: "model",
+      wakeOnReply: true,
+      requesterLevel: 0,
+      timeoutMs: 60_000,
+      lateGraceMs: 600_000,
+      maxPending: 8,
+      maxPendingPerTarget: 3,
+    });
+    if (!issued.ok) throw new Error("issue failed");
+    const h = makeCommand({ replies: () => ({ ledger, maxPending: 8 }) });
+    const rows = (await h.run("replies", { web: true })).notes[0]?.message;
+    expect(rows).toContain(issued.ticket.requestId);
+    expect(rows).toContain("target-ref · 60s · pending · owed no");
+    expect((await h.run("status")).notes[0]?.message).toContain("replies pending 1/8 · inbox 0");
+    const command = createFabricXsCommand({
+      enabled: () => true,
+      sessionId: () => SESSION,
+      membership: () => h.membership,
+      fence: () => h.fence,
+      statusView: () => ({ capability: "verified", lines: [] }),
+    });
+    expect(command.getArgumentCompletions?.("receive r")).toEqual([{ value: "receive replies", label: "replies" }]);
+    expect(command.getArgumentCompletions?.("rep")).toEqual([{ value: "replies", label: "replies" }]);
   });
 });

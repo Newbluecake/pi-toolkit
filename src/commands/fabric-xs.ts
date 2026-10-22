@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { isFeishuInvocation } from "../web-hub/agent/command-capture.js";
 import { isValidXsSessionId } from "../config/settings.js";
+import type { XsReplyLedger } from "../fabric/xs/reply-ledger.js";
 import type { SessionFence } from "../fabric/xs/fence.js";
 import type { XsMembership, XsBlockEntry } from "../fabric/xs/membership.js";
 
@@ -34,13 +35,14 @@ const FEISHU_REFUSAL = "飞书入口不能修改跨会话加入状态，请在�
 const USAGE = [
   "/fabric status — 成员状态、接收策略、完整 sessionId、限额与栅栏",
   "/fabric join · /fabric leave — 加入 / 退出（epoch +1）",
-  "/fabric receive off|deliver|wake — 会话级接收策略覆盖",
+  "/fabric receive off|deliver|wake|replies — 会话级接收策略覆盖",
+  "/fabric replies — 回复凭证、状态与截止时间",
   "/fabric block <ref|name|sessionId> — 唯一解析后屏蔽（上限 64）",
   "/fabric blocks · /fabric unblock <序号|完整id|前缀≥8|名字> — 离线查看 / 解除",
   "/fabric fence reset — 清除 stuck 栅栏窗口（仅本地）",
 ].join("\n");
 
-const SUBS = ["status", "blocks", "join", "leave", "receive", "block", "unblock", "fence"] as const;
+const SUBS = ["replies", "status", "blocks", "join", "leave", "receive", "block", "unblock", "fence"] as const;
 
 /** `/fabric block`'s hub resolve outcome (X2 wires the port; `resolve` absent ⇒ offline mode). */
 export type XsBlockResolve =
@@ -63,6 +65,9 @@ export interface FabricXsCommandDeps {
   resolve?(query: string): Promise<XsBlockResolve>;
   statusView(): FabricXsStatusView;
   now?: () => number;
+  replies?(): { ledger: XsReplyLedger; maxPending: number } | undefined;
+  /** RXW connects to NoticeGate.flush after a human opens an admission gate. */
+  onPolicyChange?(): void;
 }
 
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -104,7 +109,7 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
         const tokens = argumentPrefix.trimStart().split(/\s+/);
         if (tokens[0] === "receive" && tokens.length <= 2) {
           const p = tokens[1] ?? "";
-          return ["off", "deliver", "wake"]
+          return ["off", "deliver", "wake", "replies"]
             .filter((m) => m.startsWith(p))
             .map((m) => ({ value: `receive ${m}`, label: m }));
         }
@@ -162,7 +167,34 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
             `host cap: ${view.capability}`,
             ...view.lines,
           ];
+          const replies = deps.replies?.();
+          if (replies !== undefined) {
+            const s = replies.ledger.stats(deps.sessionId(), now());
+            lines.push(
+              `replies pending ${s.pending}/${replies.maxPending} · inbox ${s.inbox} · timedOut ${s.timedOut} · late ${s.late} · rejected ${s.rejected} · owed ${s.owed} · dropped ${s.dropped} · ledger ${s.ledger.size}/${s.ledger.capacity}`,
+            );
+          }
           notify(ctx, lines.join("\n"));
+          return;
+        }
+        case "replies": {
+          const replies = deps.replies?.();
+          if (!membership.replyEnabled || replies === undefined) {
+            notify(ctx, "回复功能未启用（fabric.crossSession.reply.enabled=false）", "warning");
+            return;
+          }
+          const rows = replies.ledger.repliesView(deps.sessionId(), now());
+          notify(
+            ctx,
+            rows.length === 0
+              ? "replies: empty"
+              : rows
+                  .map(
+                    (r) =>
+                      `${r.requestId} · ${r.replierRef} · ${r.remainingS}s · ${r.state} · owed ${r.owed ? "yes" : "no"}`,
+                  )
+                  .join("\n"),
+          );
           return;
         }
         case "blocks":
@@ -170,6 +202,7 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
           return;
         case "join": {
           const result = membership.join();
+          deps.onPolicyChange?.();
           notify(ctx, result.ok ? `已加入（epoch ${result.epoch}）。` : "已经加入（already joined）。");
           return;
         }
@@ -180,11 +213,16 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
         }
         case "receive": {
           const mode = tokens[1];
-          if (mode !== "off" && mode !== "deliver" && mode !== "wake") {
-            notify(ctx, "用法：/fabric receive off|deliver|wake", "warning");
+          if (mode !== "off" && mode !== "deliver" && mode !== "wake" && mode !== "replies") {
+            notify(ctx, "用法：/fabric receive off|deliver|wake|replies", "warning");
+            return;
+          }
+          if (mode === "replies" && !membership.replyEnabled) {
+            notify(ctx, "回复功能未启用（fabric.crossSession.reply.enabled=false）", "warning");
             return;
           }
           const result = membership.setReceive(mode);
+          deps.onPolicyChange?.();
           notify(ctx, `接收策略：${mode}${result.changed ? "" : "（未变化）"}。`);
           return;
         }
@@ -200,6 +238,7 @@ export function createFabricXsCommand(deps: FabricXsCommandDeps): Omit<Registere
             return;
           }
           fence.reset();
+          deps.onPolicyChange?.();
           notify(ctx, "栅栏窗口已清除（仅本地；stuck 计时重置）。");
           return;
         }

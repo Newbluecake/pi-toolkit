@@ -49,7 +49,7 @@ function commitLevel(ledger: XsWakeLedger, record: XsWakeRecord, level?: LevelPo
   // No stack/level port yet: leave the hop uncommitted for recovery, not silently lost.
   // Commit the bit FIRST: reentrant hooks / stack recovery must never re-raise after a human reset.
   ledger.update(record.token, { levelCommitted: true });
-  if (record.level !== undefined) level?.raise("root", record.level + 1);
+  if (record.level !== undefined) level?.raise("root", record.level + (record.levelMode === "return" ? 0 : 1));
 }
 
 export interface RootWakeTriggerDeps {
@@ -116,10 +116,22 @@ export interface RootWakeMessage {
   customType: typeof XS_WAKE_CUSTOM_TYPE;
   content: string;
   display: false;
-  details: { xsWake: true; xid: string; from: unknown; wakeToken: string; level?: number };
+  details: {
+    xsWake: true;
+    xid: string;
+    from: unknown;
+    wakeToken: string;
+    level?: number;
+    reply?: { requestId: string; dueAt: number };
+    inReplyTo?: string;
+  };
 }
 
 export interface RootWakeRequest {
+  reply?: { requestId: string; dueAt: number };
+  inReplyTo?: string;
+  solicited?: true;
+  returnLevel?: number;
   xid: string;
   from: unknown;
   content: string;
@@ -252,7 +264,8 @@ export class RootWakeController {
     if (this.budgetMs === undefined) return downgrade("controller_disabled");
     const unsupported = this.capability.wakeDowngraded;
     if (unsupported !== undefined) return downgrade(unsupported);
-    if (this.deps.receive() !== "wake") return downgrade("receiver_policy");
+    if (this.deps.receive() !== "wake" && !(this.deps.receive() === "replies" && request.solicited))
+      return downgrade("receiver_policy");
     if (
       this.busy ||
       this.ledger.hasOwner(this.deps.sessionId) ||
@@ -261,9 +274,10 @@ export class RootWakeController {
     )
       return downgrade("busy");
     if (this.deps.goalRunning?.()) return downgrade("goal");
-    if (!this.deps.level?.hopAllowed(request.level ?? 0) && this.deps.level !== undefined)
+    if (!request.solicited && !this.deps.level?.hopAllowed(request.level ?? 0) && this.deps.level !== undefined)
       return downgrade("level_limit");
     if (this.deps.inboundWakeAvailable?.() === false) return downgrade("inbound_wake_rate");
+    const dispatchLevel = request.solicited ? request.returnLevel : request.level;
     const token = this.deps.newToken?.() ?? newRunId((id) => this.ledger.get(id) !== undefined);
     const now = this.clock.now();
     if (
@@ -273,7 +287,8 @@ export class RootWakeController {
         xid: request.xid,
         dispatchedAt: now,
         deadlineAt: now + this.budgetMs,
-        ...(request.level === undefined ? {} : { level: request.level }),
+        ...(dispatchLevel === undefined ? {} : { level: dispatchLevel }),
+        ...(request.solicited ? { levelMode: "return" as const } : {}),
       })
     )
       return downgrade("ledger_full");
@@ -293,7 +308,9 @@ export class RootWakeController {
             xid: request.xid,
             from: request.from,
             wakeToken: token,
-            ...(request.level === undefined ? {} : { level: request.level }),
+            ...(request.reply === undefined ? {} : { reply: request.reply }),
+            ...(request.inReplyTo === undefined ? {} : { inReplyTo: request.inReplyTo }),
+            ...(dispatchLevel === undefined ? {} : { level: dispatchLevel }),
           },
         },
         { triggerTurn: true },
@@ -312,7 +329,7 @@ export class RootWakeController {
       return { dispatched: true, effect: "applied", woke: true, token };
     }
     // S1: queued trigger carries the sender's level, but no autonomous hop yet.
-    if (request.level !== undefined && !record?.levelCommitted) this.deps.level?.raise("root", request.level);
+    if (dispatchLevel !== undefined && !record?.levelCommitted) this.deps.level?.raise("root", dispatchLevel);
     this.deps.chargeInboundWake?.();
     return { dispatched: true, effect: "unknown", reason: "start_deferred", woke: true, token };
   }

@@ -2,7 +2,9 @@ import { systemClock, type Clock } from "../../core/clock.js";
 import type { CausalLevel } from "../wake-level.js";
 import type { RootWakeController } from "../root-wake.js";
 import type { SessionFence } from "./fence.js";
-import { formatXsMessage } from "./format.js";
+import { formatXsMessage, formatXsReply } from "./format.js";
+import type { XsReplyLedger, XsReplyTicket } from "./reply-ledger.js";
+import type { XsInboxMode } from "./inbox.js";
 import type { XsInbox } from "./inbox.js";
 import type { XsMembership } from "./membership.js";
 import { getXsDedup, type XsAckVerdict, type XsDedup } from "./dedup.js";
@@ -19,11 +21,13 @@ import type { XsWakeDowngraded } from "../../web-hub/protocol/xs.js";
  *   1. `expiresAt` not past ⇒ else `none{expired}`
  *   2. dedup — replay hit ⇒ replay; table full ⇒ `none{dedup_full}` (never evict)
  *   3. membership — joined ∧ receive≠off ∧ allowFrom ∧ not blocked ⇒ else `none{rejected}`
+ *   3b. reply ledger classification: invalid credentials / unsolicited in replies mode reject.
  *   4. `to.sessionId`/`to.epoch` match the current stack ⇒ else `none{session_changed}`
  *   5. fence `check()` — a rejecting window ⇒ `none{fenced:<name>}`; `wakeOnly` (goal) only
  *      downgrades a wake, delivery proceeds
  *   6. inbound `recvPerHour` (⇒ `none{inbound_rate}`, charged on passage) and `inboxCap`
- *      (⇒ `none{inbox_full}`)
+ *      (⇒ `none{inbox_full}`). Valid replies bypass both and reserve an independent replyInbox
+ *      slot through the ledger before any host/Controller call; finish/catch commit or release it.
  *   7+8. §4.5 decision: Controller dispatch or deliver-only, then the §6.3 evidence ⇒ ack;
  *      level per §6.6; inbox accounting.
  *
@@ -48,8 +52,8 @@ export const XS_RECEIVE_CUSTOM_TYPE = "subagent:xs";
 export interface XsDeliverHostMessage {
   customType: typeof XS_RECEIVE_CUSTOM_TYPE;
   content: string;
-  display: false;
-  details: { xid: string; from: unknown };
+  display: boolean;
+  details: { xid: string; from: unknown; reply?: { requestId: string; dueAt: number }; inReplyTo?: string };
 }
 
 /** The XW-bound host surface. Same object can serve the Controller's host deps. */
@@ -68,6 +72,8 @@ export interface XsDeliverInput {
   from: { sessionId: string; ref: string; name?: string; cwdLabel: string; agentId: string };
   text: string;
   wake: boolean;
+  reply?: { requestId: string; dueAt: number };
+  inReplyTo?: string;
   /** Sender's root causal level; absent ⇒ sender wake off ⇒ never tracked (§6.6). */
   level?: number;
   expiresAt: number;
@@ -78,6 +84,8 @@ export interface XsReceiverDeps {
   membership: XsMembership;
   fence: SessionFence;
   inbox: XsInbox;
+  /** RXW binds this ledger to the independent replyInbox via createXsReplyInboxPort. */
+  replyLedger?: XsReplyLedger;
   /** `fabric.crossSession.limits.recvPerHour`. */
   recvPerHour: number;
   /** `fabric.crossSession.limits.wakesInPerHour`. */
@@ -87,7 +95,7 @@ export interface XsReceiverDeps {
    * hands it here, or calls `setController` right after). Absent ⇒ `wake:true` degrades
    * `wake_disabled` (§4.5) and no level tracking.
    */
-  controller?: RootWakeController;
+  controller?: Pick<RootWakeController, "dispatch">;
   /** The stack's CausalLevel; present iff receiver wake is on (§6.6 last row). */
   level?: CausalLevel;
   host: XsDeliverHost;
@@ -170,7 +178,7 @@ export class XsReceiver {
   private readonly recvWindow: HourlyWindow;
   private readonly wakeWindow: HourlyWindow;
   private readonly counters: XsReceiverCounters = { ...ZERO_COUNTERS };
-  private controller: RootWakeController | undefined;
+  private controller: Pick<RootWakeController, "dispatch"> | undefined;
 
   constructor(private readonly deps: XsReceiverDeps) {
     this.clock = deps.clock ?? systemClock;
@@ -181,7 +189,7 @@ export class XsReceiver {
   }
 
   /** XW late binding: the stack builds the Controller with this receiver's wake-quota ports. */
-  setController(controller: RootWakeController | undefined): void {
+  setController(controller: Pick<RootWakeController, "dispatch"> | undefined): void {
     this.controller = controller;
   }
 
@@ -212,9 +220,10 @@ export class XsReceiver {
    * `xs_deliver` case and answers exactly one ack with the returned verdict.
    */
   deliver(input: XsDeliverInput): XsAckVerdict {
+    const transaction: { requestId?: string; mode: XsInboxMode } = { mode: "appended" };
     let dispatched = false; // r3 M2 boundary — flips just before the host/Controller send
     try {
-      return this.pipeline(input, () => (dispatched = true));
+      return this.pipeline(input, (value) => (dispatched = value), transaction);
     } catch (error) {
       this.counters.receiverError++;
       this.warnError("receiver_error", error);
@@ -223,13 +232,28 @@ export class XsReceiver {
         reason: "receiver_error",
         woke: false,
       };
+      this.settleReply(transaction, verdict.effect !== "none");
       this.dedup.settle(input.xid, verdict);
       return verdict;
     }
   }
 
-  private pipeline(input: XsDeliverInput, markDispatched: () => void): XsAckVerdict {
+  /** Per-call transaction (never shared across synchronous reentry); only provable none releases. */
+  private settleReply(transaction: { requestId?: string; mode: XsInboxMode }, commit: boolean): void {
+    const requestId = transaction.requestId;
+    if (requestId === undefined) return;
+    delete transaction.requestId;
+    if (commit) this.deps.replyLedger!.commit(requestId, transaction.mode);
+    else this.deps.replyLedger!.release(requestId);
+  }
+
+  private pipeline(
+    input: XsDeliverInput,
+    setDispatched: (value: boolean) => void,
+    transaction: { requestId?: string; mode: XsInboxMode },
+  ): XsAckVerdict {
     const finish = (verdict: XsAckVerdict): XsAckVerdict => {
+      this.settleReply(transaction, verdict.effect !== "none");
       this.dedup.settle(input.xid, verdict);
       return verdict;
     };
@@ -262,6 +286,34 @@ export class XsReceiver {
       return finish({ effect: "none", reason: "rejected", woke: false });
     }
 
+    // Stage 3b: an unknown, consumed or wrong-sender credential NEVER becomes unsolicited.
+    const classified = this.deps.replyLedger?.classify(
+      input.inReplyTo,
+      input.from.sessionId,
+      this.deps.sessionId,
+      now,
+    ) ?? { kind: input.inReplyTo === undefined ? "unsolicited" : "invalid" };
+    const ticket: XsReplyTicket | undefined = "ticket" in classified ? classified.ticket : undefined;
+    const late = classified.kind === "late";
+    if (
+      classified.kind === "invalid" ||
+      (classified.kind === "unsolicited" && this.deps.membership.receive === "replies")
+    ) {
+      this.counters.rejected++;
+      return finish({ effect: "none", reason: "rejected", woke: false });
+    }
+    const content = (wake: boolean): string =>
+      ticket === undefined
+        ? formatXsMessage(
+            { xid: input.xid, from: input.from, wake, ...(input.reply === undefined ? {} : { reply: input.reply }) },
+            input.text,
+          )
+        : formatXsReply({ xid: input.xid, from: input.from, requestId: ticket.requestId, late }, input.text);
+    const accept = (mode: XsInboxMode): void => {
+      transaction.mode = mode;
+      if (ticket === undefined) this.deps.inbox.accept(input.xid, mode);
+    };
+
     // ---- stage 4: target identity (§8.4.4) ----
     if (input.to.sessionId !== this.deps.sessionId || input.to.epoch !== this.deps.membership.epoch) {
       this.counters.sessionChanged++;
@@ -278,21 +330,35 @@ export class XsReceiver {
     if (!fenceCheck.ok && fenceCheck.wakeOnly) wakeDowngrade = "goal";
 
     // ---- stage 6: inbound rate + inbox (§8.4.6) — rate charged on passage ----
-    if (!this.recvWindow.available()) {
-      this.counters.inboundRate++;
-      return finish({ effect: "none", reason: "inbound_rate", woke: false });
-    }
-    this.recvWindow.charge();
-    if (this.deps.inbox.isFull()) {
-      this.counters.inboxFull++;
-      return finish({ effect: "none", reason: "inbox_full", woke: false });
+    if (ticket === undefined) {
+      if (!this.recvWindow.available()) {
+        this.counters.inboundRate++;
+        return finish({ effect: "none", reason: "inbound_rate", woke: false });
+      }
+      this.recvWindow.charge();
+      if (this.deps.inbox.isFull()) {
+        this.counters.inboxFull++;
+        return finish({ effect: "none", reason: "inbox_full", woke: false });
+      }
+    } else {
+      const reserved = this.deps.replyLedger!.reserve(ticket.requestId, input.xid);
+      if (!reserved.ok)
+        return finish({
+          effect: "none",
+          reason: reserved.reason === "inbox_full" ? "inbox_full" : "rejected",
+          woke: false,
+        });
+      transaction.requestId = ticket.requestId;
     }
 
     // ---- stages 7+8: dispatch + evidence (§4.5 / §6.3 / §6.6) ----
-    const wantWake = input.wake === true;
+    const wantWake = ticket === undefined ? input.wake === true : !late && ticket.wakeOnReply;
+    if (ticket !== undefined && wantWake && this.deps.membership.receive === "deliver")
+      wakeDowngrade = "receiver_policy";
     const carry = (): void => {
       // §6.6 deliver-only / downgraded rows: raise(root, L_s) — carry without counting.
-      if (input.level !== undefined && this.deps.level !== undefined) this.deps.level.raise("root", input.level);
+      const carryLevel = ticket?.requesterLevel ?? input.level;
+      if (carryLevel !== undefined && this.deps.level !== undefined) this.deps.level.raise("root", carryLevel);
     };
 
     if (wantWake && wakeDowngrade === undefined && this.controller !== undefined) {
@@ -305,17 +371,22 @@ export class XsReceiver {
         }
         wakeDowngrade = "goal"; // goal active at the dispatch point ⇒ wake-only downgrade
       } else {
-        markDispatched(); // r3 M2 boundary: from here an exception is post-dispatch
-        const result = this.controller.dispatch({
+        transaction.mode = "trigger";
+        const request = {
           xid: input.xid,
           from: input.from,
-          content: formatXsMessage({ xid: input.xid, from: input.from, wake: true }, input.text),
+          content: content(true),
+          ...(ticket === undefined ? {} : { solicited: true as const, returnLevel: ticket.requesterLevel }),
           expiresAt: input.expiresAt,
+          ...(input.reply === undefined ? {} : { reply: input.reply }),
+          ...(ticket === undefined ? {} : { inReplyTo: ticket.requestId }),
           ...(input.level === undefined ? {} : { level: input.level }),
-        });
+        };
+        setDispatched(true); // r3 M2 boundary: from here an exception may follow a host send
+        const result = this.controller.dispatch(request);
         if (result.dispatched) {
           this.counters.wakeDispatched++;
-          this.deps.inbox.accept(input.xid, "trigger");
+          accept("trigger");
           // T1 §7.4 post-dispatch re-verify: gen moved / fence re-opened ⇒ applied 不可记.
           // A wakeOnly verify (goal) never invalidates an already-dispatched delivery.
           const verify = this.deps.fence.verifyDispatch(guard.gen);
@@ -330,6 +401,9 @@ export class XsReceiver {
           this.counters.unverified++;
           return finish({ effect: "unknown", reason: "start_deferred", woke: true });
         }
+        // A non-dispatch verdict proves the Controller had no effect. Quiet fallback has
+        // not called its host yet: a subsequent guard/carry exception must release the ticket.
+        setDispatched(false);
         if ("effect" in result && result.effect === "none") {
           return finish({ effect: "none", reason: result.reason, woke: false });
         }
@@ -344,6 +418,7 @@ export class XsReceiver {
     carry(); // §6.6: every path reaching here is a deliver-only (plain or downgraded wake) ⇒ carry L_s
 
     // ---- deliver-only (§6.3 rows 2–5) ----
+    transaction.mode = "appended";
     const idleBefore = this.safeIsIdle(); // Fpi7/Fpi8: streaming classifies BEFORE the send
     const guard = this.deps.fence.beginDispatch();
     if (!guard.ok && !guard.wakeOnly) {
@@ -353,14 +428,19 @@ export class XsReceiver {
     // A wakeOnly guard (goal) has no gen snapshot — fall back to the raw generation counter;
     // goal deactivating mid-block cannot invalidate the write (only gen/fence rejections can).
     const dispatchGen = guard.ok ? guard.gen : this.deps.fence.generation();
-    markDispatched(); // r3 M2 boundary
+    setDispatched(true); // r3 M2 boundary
     try {
       this.deps.host.sendMessage(
         {
           customType: XS_RECEIVE_CUSTOM_TYPE,
-          content: formatXsMessage({ xid: input.xid, from: input.from, wake: false }, input.text),
-          display: false,
-          details: { xid: input.xid, from: input.from },
+          content: content(false),
+          display: ticket?.origin === "human",
+          details: {
+            xid: input.xid,
+            from: input.from,
+            ...(input.reply === undefined ? {} : { reply: input.reply }),
+            ...(ticket === undefined ? {} : { inReplyTo: ticket.requestId }),
+          },
         },
         { triggerTurn: false },
       );
@@ -372,7 +452,7 @@ export class XsReceiver {
     if (!verify.ok && !verify.wakeOnly) {
       // T1: the write landed in a session whose identity moved — evidence unusable (M2: post-dispatch).
       this.counters.unverified++;
-      this.deps.inbox.accept(input.xid, "appended"); // may be in context — hold a slot (conservative)
+      accept("appended"); // may be in context — hold a slot (conservative)
       return finish({ effect: "unknown", reason: "accept_unverified", woke: false });
     }
     // A requested wake that degraded rides EVERY deliver-only verdict (`xs_ack.wakeDowngraded`, XS0).
@@ -380,7 +460,7 @@ export class XsReceiver {
     if (!idleBefore) {
       // N2/Fpi7: streaming — pi keeps the message in its in-memory queue; not provably applied.
       this.counters.queued++;
-      this.deps.inbox.accept(input.xid, "queued");
+      accept("queued");
       return finish({ effect: "unknown", reason: "queued", woke: false, ...downgradeField });
     }
     const leaf = this.safeLeaf();
@@ -391,12 +471,18 @@ export class XsReceiver {
       this.leafHasXid(leaf.details, input.xid)
     ) {
       this.counters.applied++;
-      this.deps.inbox.accept(input.xid, "appended");
-      return finish({ effect: "applied", woke: false, ...downgradeField });
+      accept("appended");
+      // Evidence reasons (queued/unverified/error) take precedence over the late classification.
+      return finish({
+        effect: "applied",
+        woke: false,
+        ...downgradeField,
+        ...(late ? { reason: "reply_late" as const } : {}),
+      });
     }
     // §6.3 row 3: idle but the leaf is not this message — host swallowed the async error etc.
     this.counters.unverified++;
-    this.deps.inbox.accept(input.xid, "appended"); // conservative hold (may be in the tree)
+    accept("appended"); // conservative hold (may be in the tree)
     return finish({ effect: "unknown", reason: "accept_unverified", woke: false, ...downgradeField });
   }
 

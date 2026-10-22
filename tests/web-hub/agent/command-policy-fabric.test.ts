@@ -20,6 +20,7 @@ describe("command policy: /fabric (2026-10-22 ruling)", () => {
   it("read-only subcommands are allow", () => {
     expect(policy("fabric", "status")).toBe("allow");
     expect(policy("fabric", "blocks")).toBe("allow");
+    expect(policy("fabric", "replies")).toBe("allow");
   });
 
   it("bare /fabric renders status ⇒ allow", () => {
@@ -40,6 +41,9 @@ describe("command policy: /fabric (2026-10-22 ruling)", () => {
     expect(policy("fabric", "status", { fabric: "deny" })).toBe("deny");
     expect(policy("fabric", "fence reset", { fabric: "confirm" })).toBe("confirm");
     expect(policy("fabric", "blocks", { fabric: "confirm" })).toBe("confirm");
+    expect(policy("fabric", "replies", { fabric: "deny" })).toBe("deny");
+    expect(policy("fabric", "replies", { fabric: "confirm" })).toBe("confirm");
+    expect(policy("fabric", "replies", { fabric: "allow" })).toBe("allow");
     // and an explicit allow keeps the (default-allow) baseline explicit
     expect(policy("fabric", "join", { fabric: "allow" })).toBe("allow");
   });

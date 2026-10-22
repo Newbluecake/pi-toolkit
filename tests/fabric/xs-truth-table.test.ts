@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { createCausalLevel, type CausalLevel } from "../../src/fabric/wake-level.js";
 import { RootWakeController } from "../../src/fabric/root-wake.js";
 import { createSessionFence } from "../../src/fabric/xs/fence.js";
 import { XsHostCapability } from "../../src/fabric/xs/host-cap.js";
 import { XsWakeLedger } from "../../src/fabric/xs/wake-ledger.js";
+import { XsReplyLedger, createXsReplyInboxPort } from "../../src/fabric/xs/reply-ledger.js";
 import { XsDedup } from "../../src/fabric/xs/dedup.js";
 import { XsInbox } from "../../src/fabric/xs/inbox.js";
 import { XsMembership } from "../../src/fabric/xs/membership.js";
@@ -26,10 +27,11 @@ const SESSION = "sess-truth-0123456789";
 const SENDER = "sess-sender-9876543210";
 
 interface StackOptions {
+  replies?: boolean;
   wakeEnabled?: boolean; // receiver's fabric.wake.enabled (default true)
   rootRunMaxS?: number; // default 900
   maxLevel?: number; // default 2
-  receive?: "off" | "deliver" | "wake"; // session receive (default wake)
+  receive?: "off" | "deliver" | "wake" | "replies"; // session receive (default wake)
   capability?: "unknown" | "observed" | "absent";
   hostIdle?: boolean; // default true
   hostFlipsOnTrigger?: boolean; // Fpi2 simulation (default true)
@@ -39,6 +41,10 @@ interface StackOptions {
 
 interface Stack {
   receiver: XsReceiver;
+  setIdle(idle: boolean): void;
+  ledger: XsReplyLedger;
+  replyInbox: XsInbox;
+  fence: ReturnType<typeof createSessionFence>;
   controller: RootWakeController | undefined;
   membership: XsMembership;
   level: CausalLevel;
@@ -80,6 +86,9 @@ function buildStack(options: StackOptions = {}): Stack {
   });
   const inbox = new XsInbox(12, clock);
   const dedup = new XsDedup(256, clock);
+  const replyInbox = new XsInbox(8, clock);
+  const ledger = new XsReplyLedger({ clock });
+  ledger.bindSession({ sessionId: SESSION, inbox: createXsReplyInboxPort(replyInbox) });
   const persistLog: number[] = [];
   const level = createCausalLevel({
     maxLevel: options.maxLevel ?? 2,
@@ -94,6 +103,7 @@ function buildStack(options: StackOptions = {}): Stack {
     membership,
     fence,
     inbox,
+    ...(options.replies ? { replyLedger: ledger } : {}),
     recvPerHour: 30,
     wakesInPerHour: 12,
     host: hostCtl,
@@ -147,7 +157,21 @@ function buildStack(options: StackOptions = {}): Stack {
       ...over,
     };
   }
-  return { receiver, controller, membership, level, clock, sent, input };
+  return {
+    receiver,
+    controller,
+    membership,
+    level,
+    clock,
+    sent,
+    input,
+    ledger,
+    replyInbox,
+    fence,
+    setIdle: (value) => {
+      idle = value;
+    },
+  };
 }
 
 describe("xs truth table §4.5 (row by row)", () => {
@@ -318,4 +342,212 @@ describe("xs truth table §4.5 (row by row)", () => {
       if (s.sent.length > 0) expect(s.sent[0]!.triggerTurn).toBe(false);
     }
   });
+});
+
+// reply-plan §6.6 (the reference to §6.4 in the RX5 brief): append-only new rows.
+interface ReplyTruthRow {
+  name: string;
+  receive: "off" | "deliver" | "wake" | "replies";
+  human?: boolean;
+  late?: boolean;
+  unsolicited?: boolean;
+  invalid?: "unknown" | "consuming";
+  options?: StackOptions;
+  setup?: (s: Stack) => void;
+  expected: { effect: "none" | "applied" | "unknown"; woke: boolean; reason?: string; wakeDowngraded?: string };
+  state?: "pending" | "replied" | "late_replied" | "consuming";
+}
+const replyRows: ReplyTruthRow[] = [
+  {
+    name: "unsolicited × replies ⇒ rejected",
+    receive: "replies",
+    unsolicited: true,
+    expected: { effect: "none", reason: "rejected", woke: false },
+    state: "pending",
+  },
+  {
+    name: "valid reply × off ⇒ rejected, no reserve",
+    receive: "off",
+    expected: { effect: "none", reason: "rejected", woke: false },
+    state: "pending",
+  },
+  {
+    name: "unknown/restarted credential ⇒ rejected",
+    receive: "wake",
+    invalid: "unknown",
+    expected: { effect: "none", reason: "rejected", woke: false },
+    state: "pending",
+  },
+  {
+    name: "consuming credential ⇒ rejected",
+    receive: "wake",
+    invalid: "consuming",
+    expected: { effect: "none", reason: "rejected", woke: false },
+    state: "consuming",
+  },
+  ...(["replies", "wake"] as const).map((receive): ReplyTruthRow => ({
+    name: `valid reply × ${receive} ⇒ solicited return, no hop`,
+    receive,
+    options: { maxLevel: 0 },
+    expected: { effect: "applied", woke: true },
+    state: "replied",
+  })),
+  ...(
+    [
+      ["busy", { hostIdle: false }, "busy"],
+      ["host", { capability: "unknown" }, "host_unverified"],
+      ["goal", { goalFence: true }, "goal"],
+      ["quota", { wakeQuotaSpent: 12 }, "inbound_wake_rate"],
+    ] as const
+  ).map(([name, options, reason]): ReplyTruthRow => ({
+    name: `reply downgrade ${name} ⇒ quiet commit`,
+    receive: "replies",
+    options,
+    expected: {
+      effect: name === "busy" ? "unknown" : "applied",
+      ...(name === "busy" ? { reason: "queued" } : {}),
+      woke: false,
+      wakeDowngraded: reason,
+    },
+    state: "replied",
+  })),
+  {
+    name: "reply ledger_full ⇒ quiet commit",
+    receive: "wake",
+    setup: (s) => {
+      s.receiver.setController({ dispatch: () => ({ dispatched: false, wakeDowngraded: "ledger_full" }) });
+    },
+    expected: { effect: "applied", woke: false, wakeDowngraded: "ledger_full" },
+    state: "replied",
+  },
+  {
+    name: "Controller none ⇒ release",
+    receive: "replies",
+    setup: (s) => {
+      s.receiver.setController({
+        dispatch: () => ({ dispatched: false, effect: "none", reason: "session_changed", woke: false }),
+      });
+    },
+    expected: { effect: "none", woke: false, reason: "session_changed" },
+    state: "pending",
+  },
+  {
+    name: "downgrade then guard2 fenced ⇒ release",
+    receive: "replies",
+    setup: (s) => {
+      s.receiver.setController({
+        dispatch: () => {
+          s.fence.onEvent({ type: "session_before_compact" });
+          return { dispatched: false, wakeDowngraded: "busy" };
+        },
+      });
+    },
+    expected: { effect: "none", woke: false, reason: "fenced:compaction" },
+    state: "pending",
+  },
+  {
+    name: "reply × deliver cannot wake (R2)",
+    receive: "deliver",
+    expected: { effect: "applied", woke: false, wakeDowngraded: "receiver_policy" },
+    state: "replied",
+  },
+  {
+    name: "wakeOnReply false ⇒ quiet commit",
+    receive: "replies",
+    human: true,
+    expected: { effect: "applied", woke: false },
+    state: "replied",
+  },
+  {
+    name: "timed_out inside grace ⇒ reply_late, no wake",
+    receive: "replies",
+    late: true,
+    expected: { effect: "applied", reason: "reply_late", woke: false },
+    state: "late_replied",
+  },
+  {
+    name: "stage5 fenced ⇒ no reserve",
+    receive: "wake",
+    setup: (s) => s.fence.onEvent({ type: "session_before_compact" }),
+    expected: { effect: "none", reason: "fenced:compaction", woke: false },
+    state: "pending",
+  },
+  {
+    name: "valid reply × wake off ⇒ wake_disabled quiet commit",
+    receive: "wake",
+    options: { wakeEnabled: false },
+    expected: { effect: "applied", woke: false, wakeDowngraded: "wake_disabled" },
+    state: "replied",
+  },
+];
+
+describe("RX5 reply truth table §6.6 — original rows above unchanged", () => {
+  it.each(replyRows)("$name", (row) => {
+    const s = buildStack({ replies: true, receive: row.receive, capability: "observed", ...row.options });
+    const issued = s.ledger.issue({
+      requesterSessionId: SESSION,
+      replierSessionId: SENDER,
+      replierRef: "target",
+      origin: row.human ? "human" : "model",
+      wakeOnReply: !row.human,
+      requesterLevel: 2,
+      timeoutMs: 60_000,
+      lateGraceMs: 600_000,
+      maxPending: 8,
+      maxPendingPerTarget: 3,
+    });
+    if (!issued.ok) throw new Error("issue failed");
+    const id = issued.ticket.requestId;
+    if (row.late) s.clock.advance(60_000);
+    if (row.invalid === "consuming") s.ledger.reserve(id, "already-consuming");
+    row.setup?.(s);
+    const reserve = vi.spyOn(s.ledger, "reserve");
+    const verdict = s.receiver.deliver(
+      s.input({ ...(row.unsolicited ? {} : { inReplyTo: row.invalid === "unknown" ? "q-restarted" : id }) }),
+    );
+    expect(verdict).toEqual(row.expected);
+    expect(s.ledger.get(id)?.state).toBe(row.state);
+    if (row.expected.woke) {
+      expect(s.level.root).toBe(2);
+      expect(s.replyInbox.snapshot()[0]?.mode).toBe("trigger");
+    }
+    if (row.state === "pending" || row.state === "consuming") expect(s.replyInbox.occupied).toBe(0);
+    if (row.name.startsWith("stage5") || row.receive === "off") expect(reserve).not.toHaveBeenCalled();
+    if (row.human) expect(s.sent[0]?.details).toMatchObject({ inReplyTo: id });
+    s.controller?.dispose();
+    s.fence.dispose();
+  });
+});
+
+it("RX5 repeated replies with wire wake:false use shared inbound wake cap, never hop past requesterLevel", () => {
+  const s = buildStack({ replies: true, receive: "replies", capability: "observed", maxLevel: 0 });
+  for (let n = 0; n < 13; n++) {
+    const issued = s.ledger.issue({
+      requesterSessionId: SESSION,
+      replierSessionId: SENDER,
+      replierRef: "peer",
+      origin: "model",
+      wakeOnReply: true,
+      requesterLevel: 2,
+      timeoutMs: 60_000,
+      lateGraceMs: 600_000,
+      maxPending: 8,
+      maxPendingPerTarget: 3,
+    });
+    if (!issued.ok) throw new Error("issue failed");
+    s.setIdle(true);
+    const ack = s.receiver.deliver(s.input({ wake: false, inReplyTo: issued.ticket.requestId }));
+    expect(ack).toEqual(
+      n < 12
+        ? { effect: "applied", woke: true }
+        : { effect: "applied", woke: false, wakeDowngraded: "inbound_wake_rate" },
+    );
+    expect(s.level.root).toBe(2);
+    s.controller!.settled();
+    s.replyInbox.releaseTrigger();
+  }
+  expect(s.sent.filter((m) => m.triggerTurn)).toHaveLength(12);
+  expect(s.replyInbox.occupied).toBe(1); // final quiet reply still awaits a run
+  s.controller!.dispose();
+  s.fence.dispose();
 });

@@ -20,6 +20,7 @@ export interface XsWakeRecord {
   readonly executionPending: boolean;
   readonly handed: boolean;
   readonly level?: number;
+  readonly levelMode?: "hop" | "return";
   readonly levelCommitted: boolean;
   readonly boundAt?: number;
   readonly abortIssuedAt?: number;
@@ -28,6 +29,7 @@ export interface XsWakeRecord {
 export type XsWakeReleaseProof = "host_rejected" | "settled" | "idle_observed" | "aborted" | "teardown";
 export type NewXsWakeRecord = Pick<XsWakeRecord, "token" | "sessionId" | "xid" | "dispatchedAt" | "deadlineAt"> & {
   level?: number;
+  levelMode?: "hop" | "return";
 };
 type MutableFields = Partial<Omit<XsWakeRecord, "token" | "sessionId" | "xid" | "dispatchedAt" | "deadlineAt">>;
 

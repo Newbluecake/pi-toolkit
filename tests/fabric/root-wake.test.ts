@@ -10,6 +10,9 @@ import {
 import { classifyHumanInput } from "../../src/fabric/wake-input.js";
 import { createCausalLevel } from "../../src/fabric/wake-level.js";
 import { XsHostCapability } from "../../src/fabric/xs/host-cap.js";
+import { XsReplyLedger } from "../../src/fabric/xs/reply-ledger.js";
+import { XsReplyNoticeGate } from "../../src/fabric/xs/reply-notice.js";
+import { createSessionFence } from "../../src/fabric/xs/fence.js";
 import { XsWakeLedger } from "../../src/fabric/xs/wake-ledger.js";
 
 const trigger = (token: string, extra: object = {}) => ({
@@ -709,4 +712,121 @@ describe("dispatch guard/downgrade seam (§4.5, X4 handles only-delivery)", () =
     expired.controller.dispose();
     expect(expired.dispatch()).toMatchObject({ effect: "none", reason: "session_changed" });
   });
+});
+
+describe("RX5 solicited return wakes", () => {
+  it("replies permits only solicited wakes; deliver still forbids them (R2)", () => {
+    const h = harness({ overrides: { receive: () => "replies" } });
+    expect(h.dispatch()).toEqual({ dispatched: false, wakeDowngraded: "receiver_policy" });
+    expect(h.controller.dispatch({ ...request(99), solicited: true, returnLevel: 2 })).toMatchObject({
+      dispatched: true,
+    });
+    expect(h.level.root).toBe(2);
+    expect(h.ledger.entries()[0]).toMatchObject({ level: 2, levelMode: "return", levelCommitted: true });
+    const d = harness({ overrides: { receive: () => "deliver" } });
+    expect(d.controller.dispatch({ ...request(), solicited: true, returnLevel: 2 })).toEqual({
+      dispatched: false,
+      wakeDowngraded: "receiver_policy",
+    });
+    expect(d.messages).toHaveLength(0);
+  });
+
+  it("solicited skips hopAllowed and never increments the return level", () => {
+    const h = harness();
+    expect(h.controller.dispatch({ ...request(99), solicited: true, returnLevel: 9 })).toMatchObject({
+      dispatched: true,
+    });
+    expect(h.level.root).toBe(9); // beyond maxLevel=3, and NOT 10
+    expect(h.chargeInboundWake).toHaveBeenCalledOnce();
+    expect(h.messages[0]?.details.level).toBe(9);
+    h.bind();
+    expect(h.level.root).toBe(9);
+  });
+
+  it("deferred return survives reload, commits once at real start, never re-raises after human reset", () => {
+    const h = harness({ deferred: true, overrides: { receive: () => "replies" } });
+    expect(h.controller.dispatch({ ...request(), solicited: true, returnLevel: 2 })).toMatchObject({
+      effect: "unknown",
+    });
+    const token = h.controller.activeToken!;
+    expect(h.ledger.get(token)).toMatchObject({ levelMode: "return", levelCommitted: false });
+    h.level.resetRoot();
+    h.controller.dispose();
+    h.hostState.idle = false;
+    const replacement = new RootWakeController(h.deps);
+    replacement.recover();
+    expect(h.level.root).toBe(0); // recovery of a deferred token is NOT start evidence
+    replacement.beforeAgentStart(trigger(token));
+    expect(h.level.root).toBe(2);
+    expect(h.ledger.get(token)?.levelCommitted).toBe(true);
+    h.level.resetRoot();
+    replacement.beforeAgentStart(trigger(token));
+    expect(h.level.root).toBe(0);
+    replacement.dispose();
+  });
+
+  it("solicited still obeys wake quota, goal and orphan authorization", () => {
+    for (const overrides of [
+      { inboundWakeAvailable: () => false },
+      { goalRunning: () => true },
+      { wakeEnabled: false },
+    ]) {
+      const h = harness({ overrides });
+      const r = h.controller.dispatch({ ...request(), solicited: true, returnLevel: 0 });
+      expect(r.dispatched).toBe(false);
+      expect(h.messages).toHaveLength(0);
+    }
+    const h = harness({ deferred: true });
+    h.controller.dispatch({ ...request(), solicited: true, returnLevel: 0 });
+    const token = h.controller.activeToken!;
+    h.clock.advance(60_000);
+    expect(h.controller.beforeAgentStart(trigger(token)).kind).toBe("aborted");
+    expect(h.abort).toHaveBeenCalledOnce();
+  });
+
+  it("wake request keeps inbound reply stamp out of content and in details", () => {
+    const h = harness();
+    h.controller.dispatch({ ...request(), reply: { requestId: "qabc", dueAt: 4000 } });
+    expect(h.messages[0]?.details.reply).toEqual({ requestId: "qabc", dueAt: 4000 });
+    expect(h.messages[0]?.content).toBe("fenced content");
+  });
+});
+
+it("RX5 NoticeGate directly accepts the real Controller port and returns requester level", () => {
+  const h = harness({ overrides: { receive: () => "replies" } });
+  const ledger = new XsReplyLedger({ clock: h.clock });
+  const issue = ledger.issue({
+    requesterSessionId: "session",
+    replierSessionId: "peer",
+    replierRef: "peer",
+    origin: "model",
+    wakeOnReply: true,
+    requesterLevel: 2,
+    timeoutMs: 60_000,
+    lateGraceMs: 600_000,
+    maxPending: 8,
+    maxPendingPerTarget: 3,
+  });
+  if (!issue.ok) throw new Error("issue failed");
+  const quiet = vi.fn();
+  const gate = new XsReplyNoticeGate({
+    ledger,
+    sessionId: "session",
+    getSessionId: () => "session",
+    disposed: () => false,
+    joined: () => true,
+    receive: () => "replies",
+    fence: createSessionFence({ clock: h.clock }),
+    controller: h.controller,
+    host: { sendMessage: quiet },
+    clock: h.clock,
+  });
+  h.clock.advance(60_000);
+  expect(gate.flush()).toEqual({ written: "wake", requestIds: [issue.ticket.requestId] });
+  expect(h.level.root).toBe(2);
+  expect(h.messages[0]?.details.from).toEqual({ kind: "local", reason: "reply_timeout" });
+  expect(h.chargeInboundWake).toHaveBeenCalledOnce();
+  expect(quiet).not.toHaveBeenCalled();
+  gate.dispose();
+  h.controller.dispose();
 });

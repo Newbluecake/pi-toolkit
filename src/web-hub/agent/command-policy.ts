@@ -122,6 +122,7 @@ type SubPolicyFn = (tokens: readonly string[]) => PolicyDecision;
 /** `/fabric`'s known subcommand set (2026-10-22 ruling: all baseline-allow). Kept in sync with
  * `src/commands/fabric-xs.ts`'s SUBS. */
 const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
+  "replies",
   "status",
   "blocks",
   "join",

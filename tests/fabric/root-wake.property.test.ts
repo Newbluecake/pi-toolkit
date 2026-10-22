@@ -9,7 +9,7 @@ describe("RootWakeController random event invariants", () => {
   it("single owner, occupied states supervised, at-most-once abort, zero abort after handover", () => {
     fc.assert(
       fc.property(
-        fc.array(fc.record({ op: fc.integer({ min: 0, max: 11 }), ms: fc.integer({ min: 0, max: 15000 }) }), {
+        fc.array(fc.record({ op: fc.integer({ min: 0, max: 12 }), ms: fc.integer({ min: 0, max: 15000 }) }), {
           minLength: 30,
           maxLength: 150,
         }),
@@ -58,6 +58,16 @@ describe("RootWakeController random event invariants", () => {
               case 1:
                 deferred = event.op === 1;
                 c.dispatch({ xid: `x-${nextToken}`, from: "sender", content: "fenced", expiresAt: clock.now() + 5000 });
+                break;
+              case 12:
+                c.dispatch({
+                  xid: `reply-${nextToken}`,
+                  from: "sender",
+                  content: "reply",
+                  expiresAt: clock.now() + 5000,
+                  solicited: true,
+                  returnLevel: event.ms % 5,
+                });
                 break;
               case 2:
                 clock.advance(event.ms);

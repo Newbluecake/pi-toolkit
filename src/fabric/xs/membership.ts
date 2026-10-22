@@ -1,5 +1,5 @@
 import { systemClock, type Clock } from "../../core/clock.js";
-import { isValidXsSessionId } from "../../config/settings.js";
+import { effectiveReceive, isValidXsSessionId } from "../../config/settings.js";
 import type { XsReceiveWire } from "../../web-hub/protocol/xs.js";
 
 /**
@@ -39,6 +39,7 @@ export interface XsMembershipEntryData {
   sessionId: string;
   joined: boolean;
   receive: XsReceiveWire;
+  receivePref?: XsReceiveWire;
   blocked: XsBlockEntry[];
   joinedAt?: number;
 }
@@ -100,6 +101,7 @@ export function readXsMembershipEntry(
         sessionId: data.sessionId,
         joined: data.joined,
         receive: data.receive,
+        ...(data.receivePref === "replies" ? { receivePref: data.receivePref } : {}),
         blocked,
         ...(typeof data.joinedAt === "number" ? { joinedAt: data.joinedAt } : {}),
       };
@@ -121,6 +123,7 @@ export interface XsMembershipDeps {
   sessionId: string;
   /** `fabric.crossSession.receive` default (P2: wake); a restored entry overrides it. */
   defaultReceive?: XsReceiveWire;
+  replyEnabled?: boolean;
   /** `fabric.crossSession.allowFrom` (already validated by the settings parser, XS0 #14). */
   allowFrom?: readonly string[];
   /** `fabric.crossSession.allowFromDenyAll` — non-empty-but-all-invalid ⇒ reject every sender. */
@@ -170,7 +173,15 @@ export class XsMembership {
 
   /** Current session-level receive value (what rides `xs_member`; meaningful once joined). */
   get receive(): XsReceiveWire {
+    return effectiveReceive(this.receiveState, this.replyEnabled);
+  }
+
+  get receivePref(): XsReceiveWire {
     return this.receiveState;
+  }
+
+  get replyEnabled(): boolean {
+    return this.deps.replyEnabled ?? true;
   }
 
   /**
@@ -186,7 +197,7 @@ export class XsMembership {
     this.restored = true;
     if (entry.sessionId !== this.deps.sessionId) return; // fork / copied file (P10)
     this.joinedState = entry.joined;
-    this.receiveState = entry.receive;
+    this.receiveState = entry.receivePref ?? entry.receive;
     this.blocked = entry.blocked.filter((b) => isValidXsSessionId(b.sessionId)).slice(0, this.blockCap);
     if (typeof entry.joinedAt === "number") this.joinedAt = entry.joinedAt;
   }
@@ -293,7 +304,8 @@ export class XsMembership {
       v: 1,
       sessionId: this.deps.sessionId,
       joined: this.joinedState,
-      receive: this.receiveState,
+      receive: this.receiveState === "replies" ? "off" : this.receiveState,
+      ...(this.receiveState === "replies" ? { receivePref: "replies" as const } : {}),
       blocked: this.blocked.map((b) => ({ ...b })),
       ...(this.joinedAt !== undefined ? { joinedAt: this.joinedAt } : {}),
     };
