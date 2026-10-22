@@ -105,6 +105,7 @@ import {
 } from "@logic/mention.js";
 import { canSendWithAttachments, classifyPaste, uploadAvailability } from "@logic/upload.js";
 import { decoratePalette, resumeAvailable } from "@logic/resume.js";
+import { filterSessionTargets, sessionMentionTargets, type SessionMentionTarget } from "./sessionMention.js";
 import { buildFileSearchUrl, parseFileSearchResults } from "@logic/file-mention.js";
 import {
   ARG_CLIENT_TIMEOUT_MS,
@@ -218,6 +219,19 @@ const mentionRows = computed<readonly MentionPanelTarget[]>(() =>
   mentionState.value.open ? filterMentionTargets(mentionTargetsForFleet.value, mentionState.value.query) : [],
 );
 
+// Cross-session zone (todo #10): joined peers, after the sub-agents (R6: a label wins).
+const sessionTargets = computed<readonly SessionMentionTarget[]>(() =>
+  sessionMentionTargets(
+    hub?.state.value.agents ?? new Map(),
+    hub?.state.value.hub?.["caps"],
+    view?.agentKey ?? ctx?.agentKey ?? null,
+    t,
+  ),
+);
+const sessionRows = computed<readonly SessionMentionTarget[]>(() =>
+  mentionState.value.open ? filterSessionTargets(sessionTargets.value, mentionState.value.query ?? "") : [],
+);
+
 // --- file zone (debounced search; silent degrade on any failure) -------------------------
 
 interface FilePanelRow {
@@ -232,6 +246,7 @@ type PanelRow =
       readonly runId: string;
       readonly status: "running" | "settled" | "other";
     }
+  | { readonly kind: "session"; readonly ref: string }
   | FilePanelRow;
 
 const FILE_SEARCH_DEBOUNCE_MS = 200;
@@ -315,6 +330,7 @@ watch(
 
 const panelRows = computed<readonly PanelRow[]>(() => [
   ...mentionRows.value.map((r) => ({ kind: "agent" as const, label: r.label, runId: r.runId, status: r.status })),
+  ...sessionRows.value.map((r) => ({ kind: "session" as const, ref: r.ref })),
   ...fileRows.value,
 ]);
 const mentionOpen = computed(
@@ -322,7 +338,7 @@ const mentionOpen = computed(
     mentionState.value.open &&
     !mentionDismissed.value &&
     !commandMode.value &&
-    (mentionTargetsForFleet.value.length > 0 || fileArmed.value),
+    (mentionTargetsForFleet.value.length > 0 || sessionTargets.value.length > 0 || fileArmed.value),
 );
 // Reset the highlight only when the QUERY (or open) changes; a fleet wire refresh (~1Hz)
 // rebuilds the rows array with identical content — resetting on that would yank the user's
@@ -338,7 +354,11 @@ watch(panelRows, (rows) => {
 });
 
 function pickPanelRow(row: PanelRow): void {
-  const applied = applyMentionPick(text.value, caret.value, row.kind === "agent" ? row.label : row.path);
+  const applied = applyMentionPick(
+    text.value,
+    caret.value,
+    row.kind === "agent" ? row.label : row.kind === "session" ? `session:${row.ref}` : row.path,
+  );
   text.value = applied.text;
   persistDraft();
   void nextTick(() => {
@@ -1171,6 +1191,23 @@ watch(
               : t("control.mentionUnavailable")
         }}</span>
       </button>
+      <p v-if="sessionRows.length > 0" class="mention-zone">{{ t("control.sessionZone") }}</p>
+      <button
+        v-for="(row, i) in sessionRows"
+        :key="row.key"
+        type="button"
+        role="option"
+        class="mention-item mention-session"
+        :class="{ active: i + mentionRows.length === mentionActive }"
+        :aria-selected="i + mentionRows.length === mentionActive"
+        :title="row.cwdFull"
+        @click="pickPanelRow({ kind: 'session', ref: row.ref })"
+        @mousemove="mentionActive = i + mentionRows.length"
+      >
+        <span class="mention-label" translate="no">{{ row.name !== "" ? row.name : row.ref }}</span>
+        <span class="mention-session-meta" translate="no">{{ row.cwd }}</span>
+        <span class="chip chip-muted mention-status" translate="no">xs {{ row.receive }}</span>
+      </button>
       <p v-if="fileRows.length > 0" class="mention-zone">{{ t("control.fileZone") }}</p>
       <button
         v-for="(row, i) in fileRows"
@@ -1178,10 +1215,10 @@ watch(
         type="button"
         role="option"
         class="mention-item mention-file"
-        :class="{ active: i + mentionRows.length === mentionActive }"
-        :aria-selected="i + mentionRows.length === mentionActive"
+        :class="{ active: i + mentionRows.length + sessionRows.length === mentionActive }"
+        :aria-selected="i + mentionRows.length + sessionRows.length === mentionActive"
         @click="pickPanelRow({ kind: 'file', path: row.path, rel: row.rel })"
-        @mousemove="mentionActive = i + mentionRows.length"
+        @mousemove="mentionActive = i + mentionRows.length + sessionRows.length"
       >
         <span class="mention-label" translate="no">{{ row.rel }}</span>
       </button>

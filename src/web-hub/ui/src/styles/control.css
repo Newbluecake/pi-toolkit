@@ -1333,3 +1333,13 @@
     gap: var(--sp-2);
   }
 }
+
+.mention-session-meta {
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-3);
+  font-size: var(--fs-xs);
+}
