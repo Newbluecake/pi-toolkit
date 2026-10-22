@@ -1,3 +1,4 @@
+import { formatTokens } from "../hud/format.js";
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot, UsageDelta } from "../core/types.js";
@@ -341,7 +342,7 @@ function formatUsage(u: UsageDelta | undefined): string {
   // line — "all" ⇒ `cost:unpriced`, "partial" ⇒ `cost:$x.xxxx+unpriced`.
   const cost =
     u.unpriced === "all" ? "unpriced" : `$${u.costUsd.toFixed(4)}${u.unpriced === "partial" ? "+unpriced" : ""}`;
-  return ` usage=in:${u.input} out:${u.output} cache_r:${u.cacheRead} cache_w:${u.cacheWrite} cost:${cost}`;
+  return ` usage=in:${formatTokens(u.input)} out:${formatTokens(u.output)} cache_r:${formatTokens(u.cacheRead)} cache_w:${formatTokens(u.cacheWrite)} cost:${cost}`;
 }
 function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | undefined {
   const present = items.filter((u): u is UsageDelta => u !== undefined);
@@ -495,7 +496,7 @@ export function renderCosts(query: QueryService): string {
   const unpricedCount = countedRuns.filter((s) => s.diag.usage?.unpriced !== undefined).length;
   if (total)
     lines.push(
-      `  Total: $${total.costUsd.toFixed(4)} · in:${total.input} out:${total.output} cache_r:${total.cacheRead}` +
+      `  Total: $${total.costUsd.toFixed(4)} · in:${formatTokens(total.input)} out:${formatTokens(total.output)} cache_r:${formatTokens(total.cacheRead)}` +
         (unpricedCount > 0 ? ` (+${unpricedCount} unpriced runs)` : ""),
     );
   const absorbedCount = runs.length - countedRuns.length;

@@ -1,3 +1,4 @@
+import { formatTokens } from "../hud/format.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -577,7 +578,7 @@ function formatOutcome(
       : `$${usage.costUsd.toFixed(4)}${usage.unpriced === "partial" ? "+unpriced" : ""}`
     : undefined;
   const trailer = usage
-    ? `\n\n(duration: ${formatDuration(outcome.durationMs)} · usage: in:${usage.input} out:${usage.output} cache_r:${usage.cacheRead} cache_w:${usage.cacheWrite} cost:${costText})`
+    ? `\n\n(duration: ${formatDuration(outcome.durationMs)} · usage: in:${formatTokens(usage.input)} out:${formatTokens(usage.output)} cache_r:${formatTokens(usage.cacheRead)} cache_w:${formatTokens(usage.cacheWrite)} cost:${costText})`
     : `\n\n(duration: ${formatDuration(outcome.durationMs)})`;
   // bash-timeout-grace plan §3.7/T25 (P5): `diag.exitFacts` is threaded here
   // via the `exit_facts` session_event (§3.8, P0b) → `RunOutcome.diag`

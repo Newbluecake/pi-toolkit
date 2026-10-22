@@ -1,3 +1,4 @@
+import { formatTokens } from "../hud/format.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -503,7 +504,7 @@ export function formatWorkflowResultText(outcome: WorkflowOutcome, usage: UsageD
     `duration: ${formatDuration(outcome.durationMs)}`,
     `children: ${outcome.children.length}`,
     usage
-      ? `usage: in:${usage.input} out:${usage.output} cache_r:${usage.cacheRead} cache_w:${usage.cacheWrite} cost:$${usage.costUsd.toFixed(4)}`
+      ? `usage: in:${formatTokens(usage.input)} out:${formatTokens(usage.output)} cache_r:${formatTokens(usage.cacheRead)} cache_w:${formatTokens(usage.cacheWrite)} cost:$${usage.costUsd.toFixed(4)}`
       : undefined,
   ]
     .filter(Boolean)
