@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-23
+
+### Added
+
+- **fabric**: finish session aliases with status, conformance and docs (`a25b0975`)
+- **fabric**: wire session aliases into the session stack (`e79f1093`)
+- **web-hub**: route cross-session messages by session alias in the hub (`18ac6c09`)
+- **web-hub**: add the hub-owned session alias table (`f4a78187`)
+- **web-hub**: show, set and take session aliases in the web UI (`8d252832`)
+- **fabric**: resolve and complete @alias session mentions (`2079656d`)
+- **fabric**: add /fabric alias commands and show aliases in message headers (`2347b44c`)
+- **web-hub**: bridge session alias requests from the agent to the hub (`7a264775`)
+- **fabric**: address cross-session sends by alias with a pinned session id (`bd8021ed`)
+- **fabric**: add the session alias wire contract and settings (`14699003`)
+- **fabric**: finish the channel rollout with status, conformance and docs (`07df01c1`)
+- **fabric**: wire cross-session channels into the session stack (`296fd5cf`)
+- **web-hub**: add shared session alias name rules (`3e86b9cc`)
+- **fabric**: count unread cross-session mail in the HUD, web status and /fabric status (`b76e4e69`)
+- **web-hub**: enforce channel scope and fan out channel broadcasts in the hub (`62f62d94`)
+- **web-hub**: show channel broadcasts in the web transcript (`019a9dc1`)
+- **web-hub**: add channel chips, a sidebar channel filter and a channel manager (`0a57e956`)
+- **fabric**: add channel membership, receiver checks and /fabric channel commands (`96aca975`)
+- **fabric**: add channel broadcast sending and a channel filter to list_sessions (`70fe3198`)
+- **web-hub**: show a cross-session unread badge on cards and the detail header (`c9d7d030`)
+- **web-hub**: project cross-session channels over the hub link (`017f0f04`)
+- **fabric**: scope @session mentions to shared channels (`4aca048b`)
+- **fabric**: add the cross-session channel contracts (`92ccc0ec`)
+- **web-hub**: project the cross-session unread count into web status (`c82d766b`)
+- **fabric**: add the cross-session inbox unread counter core (`8111bb4c`)
+- **web-hub**: redesign the Feishu ask_user card into per-question blocks (`eab69a78`)
+
+### Fixed
+
+- **ui**: label pi-toolkit messages as toolkit: in the TUI (`b5814fd0`)
+- **web-hub**: give the alias area in the channels dialog proper gutters (`6ae207ec`)
+- **quota**: stop coloring quota displays by the exhaustion forecast (`e92f5f9b`)
+
+### Documentation
+
+- **fabric**: plan human-set session aliases for cross-session addressing (`03ae874e`)
+- **fabric**: add a web channel manager dialog to the channel plan (`a32d1aff`)
+- **fabric**: plan cross-session channels and an inbox unread indicator (`6c3f73c9`)
+
+Stats: 26 feat, 3 fix, 3 docs
+
 ## [0.7.1] - 2026-10-22
 
 ### Added
@@ -992,7 +1037,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.6.2...v0.6.3
