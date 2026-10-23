@@ -84,6 +84,7 @@ import {
   type XsAliasWriteResult,
 } from "./aliases.js";
 import { runXsBroadcast } from "./broadcast.js";
+import { emitQuiet, quietVerdict, type XsQuietObserver } from "./mirror.js";
 import {
   createXsLimits,
   hubChannelsParams,
@@ -139,6 +140,9 @@ export interface XsRouterDeps {
   /** Alias-plan §3.6 (AL2): the LOADED binding table; absent ⇒ alias off (pre-alias bytes for
    *  everyone, no guard — ≡ an old hub). */
   aliases?: XsAliasStore;
+  /** feishu-xs-mirror P2: advisory observer of quiet (not-woken) deliveries; called on a microtask
+   *  AFTER the sender's reply + audit + limits settle. Absent ⇒ behaviour/bytes unchanged. */
+  onQuietDelivered?: XsQuietObserver;
 }
 
 function trimSlash(p: string): string {
@@ -485,6 +489,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
           home: deps.home,
           channels: hubChannelsParams(deps.channels),
           signal: ac.signal,
+          ...(deps.onQuietDelivered === undefined ? {} : { onQuietDelivered: deps.onQuietDelivered }),
           // §6: `from.alias` per recipient — only towards an `aliasUsable` one.
           ...(aliasStore === undefined
             ? {}
@@ -758,11 +763,39 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
             return;
           }
           limits.settle(ticket, { acked: true, woke: ack.woke, effect: ack.effect });
+          const wakeDowngraded = xsToken(ack.wakeDowngraded) ?? admit.wakeDowngraded;
           settleOut(
             ack.effect,
             xsToken(ack.reason) ?? (ack.reason === undefined ? undefined : "unverified"),
-            xsToken(ack.wakeDowngraded) ?? admit.wakeDowngraded,
+            wakeDowngraded,
           );
+          // feishu-xs-mirror P2: strictly after settleOut (res + audit); microtask-deferred.
+          if (deps.onQuietDelivered !== undefined) {
+            const v = quietVerdict(ack);
+            if (v !== undefined) {
+              emitQuiet(
+                deps.onQuietDelivered,
+                [
+                  {
+                    sessionId: target.sessionId,
+                    agentKey: target.agentKey,
+                    xid,
+                    kind: isReply ? "reply" : "message",
+                    from: {
+                      ref: deliver.from.ref,
+                      ...(deliver.from.name !== undefined ? { name: deliver.from.name } : {}),
+                      ...(deliver.from.alias !== undefined ? { alias: deliver.from.alias } : {}),
+                    },
+                    ...(v.late ? { late: true as const } : {}),
+                    ...(v.queued ? { queued: true as const } : {}),
+                    ...(wakeDowngraded !== undefined ? { wakeDowngraded } : {}),
+                    text: frame.text!,
+                  },
+                ],
+                log,
+              );
+            }
+          }
         },
         (err: unknown) => {
           limits.settle(ticket, { acked: false });
@@ -972,6 +1005,8 @@ export function createXsRelay(deps: {
   log: HubLog;
   now: () => number;
   aliases?: XsAliasBinding;
+  /** feishu-xs-mirror P2: forwarded to the router (see {@link XsRouterDeps.onQuietDelivered}). */
+  onQuietDelivered?: XsQuietObserver;
 }): XsRelay {
   const hubSendsPerMin = deps.config.crossSession.limits.hubSendsPerMin;
   let router: XsRouter | undefined;
@@ -994,6 +1029,7 @@ export function createXsRelay(deps: {
     replyEnabled: deps.config.crossSession.reply !== false,
     ...(deps.config.crossSession.channels === undefined ? {} : { channels: deps.config.crossSession.channels }),
     ...(aliasStore === undefined ? {} : { aliases: aliasStore }),
+    ...(deps.onQuietDelivered === undefined ? {} : { onQuietDelivered: deps.onQuietDelivered }),
   });
   deps.registry.setXsObserver(aliasStore === undefined ? members.observer : withPresenceFeed(members, aliasStore));
   const r = router;
