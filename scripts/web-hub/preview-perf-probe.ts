@@ -17,8 +17,12 @@
  *  5. collects: in-page open-to-frame (click timeStamp → 2nd rAF), CDP
  *     `Performance.getMetrics` deltas (「每轮平均每步成本」), CDP `Tracing` single-step peaks
  *     (EventDispatch + UpdateLayoutTree/Layout per input), rAF frame gaps, longtasks;
- *  6. writes machine-readable JSON (default `docs/dev/preview-perf/baseline.json`) and a
- *     human table to stdout.
+ *  6. writes machine-readable JSON and a human table to stdout. The JSON default is the
+ *     UNTRACKED scratch file `node_modules/.cache/pwh-preview-perf/last-run.json` — the
+ *     tracked `docs/dev/preview-perf/baseline.json` (and `baseline.virtual.json` under
+ *     `--virtual`) is only ever written through an explicit `--write-baseline`, so a casual
+ *     measurement run can never dirty the pinned baseline; `--json <path>` redirects
+ *     anywhere else.
  *
  * Baseline mode is the DEFAULT (record-only — the §6.1 gate table applies to the POST-P3
  * virtual renderer, so pre-change numbers are expected to exceed it). `--gate` (wired for
@@ -29,10 +33,10 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { CSP } from "../../src/web-hub/hub/http.js";
@@ -42,7 +46,8 @@ const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const VITE_CONFIG = resolve(REPO_ROOT, "src/web-hub/ui/vite.config.ts");
 const PROBE_OUT_DIR = resolve(REPO_ROOT, "node_modules/.cache/pwh-csp-probe");
 const FIXTURE_DIR = resolve(REPO_ROOT, "tests/fixtures/preview-perf");
-const DEFAULT_JSON_OUT = resolve(REPO_ROOT, "docs/dev/preview-perf/baseline.json");
+const CACHE_JSON_OUT = resolve(REPO_ROOT, "node_modules/.cache/pwh-preview-perf/last-run.json");
+const BASELINE_DIR = resolve(REPO_ROOT, "docs/dev/preview-perf");
 const PORT = 42117;
 
 // --- args ------------------------------------------------------------------------
@@ -58,7 +63,20 @@ const ENGINES = (argValue("--engines") ?? "chromium,firefox,webkit").split(",");
 const ROUNDS = QUICK ? 2 : Number(argValue("--rounds") ?? 7);
 const STREAM_ROUNDS = QUICK ? 1 : Number(argValue("--stream-rounds") ?? 3);
 const FS_SCALES = QUICK ? [1] : (argValue("--fs") ?? "1,3").split(",").map(Number);
-const JSON_OUT = resolve(REPO_ROOT, argValue("--json") ?? DEFAULT_JSON_OUT);
+/** Explicit opt-in to overwrite the TRACKED baseline (P3 follow-up #1): without it the JSON
+ *  goes to the scratch cache — a plain measurement run must not dirty docs/. With `--virtual`
+ *  the baseline target is `baseline.virtual.json`, so both renderer states stay pinned
+ *  side by side. An explicit `--json <path>` overrides the destination either way. */
+const WRITE_BASELINE = process.argv.includes("--write-baseline");
+const JSON_OUT =
+  argValue("--json") !== undefined
+    ? resolve(REPO_ROOT, argValue("--json")!)
+    : WRITE_BASELINE
+      ? resolve(BASELINE_DIR, VIRTUAL ? "baseline.virtual.json" : "baseline.json")
+      : CACHE_JSON_OUT;
+if (argValue("--json") !== undefined && WRITE_BASELINE) {
+  console.warn("⚠ --json overrides --write-baseline: the tracked baseline is NOT written");
+}
 
 // --- corpus verification -----------------------------------------------------------
 interface Manifest {
@@ -561,13 +579,49 @@ async function runEngine(
     // functional: one open per corpus + assertions
     for (const f of OPEN_CORPORA) {
       await openKeep(env, f);
-      const st = await pp<{ windows: number; lines: number; content: boolean }>(env, "openState()");
+      const st = await pp<{ windows: number; lines: number; content: boolean; virtual: boolean; vblocks: number }>(
+        env,
+        "openState()",
+      );
       if (st.windows !== 1 || !st.content) failures.push({ engine: name, id: `open.${f}`, detail: JSON.stringify(st) });
-      if (f === "stack-3609.ts" && st.lines !== 3609) {
-        failures.push({ engine: name, id: "lines.stack-3609", detail: `saw ${st.lines} .pv-line` });
-      }
-      if (f === "longline.js" && st.lines !== 701) {
-        failures.push({ engine: name, id: "lines.longline", detail: `saw ${st.lines} .pv-line (expect 701)` });
+      // lines.* — r0 asserts the FULL DOM (every logical line mounted, one .pv-line each).
+      // --virtual is virtual-aware (P3 follow-up #2): stack-3609/longline exceed the 600-line
+      // threshold, so the body must be `.pv-virtual` and mount only the (viewport + overscan)
+      // window of 32-line blocks — every mounted block is interior at a top-of-file open, so
+      // expected .pv-line count = blocks × 32, strictly below the file's logical line count.
+      const lineChecks: Array<{ id: string; file: string; total: number }> = [
+        { id: "lines.stack-3609", file: "stack-3609.ts", total: 3609 },
+        { id: "lines.longline", file: "longline.js", total: 701 },
+      ];
+      for (const lc of lineChecks) {
+        if (f !== lc.file) continue;
+        if (!VIRTUAL) {
+          if (st.lines !== lc.total) {
+            failures.push({ engine: name, id: lc.id, detail: `saw ${st.lines} .pv-line (expect ${lc.total})` });
+          }
+          continue;
+        }
+        if (!st.virtual) {
+          failures.push({
+            engine: name,
+            id: lc.id,
+            detail: `expected a .pv-virtual body, saw r0 DOM (${st.lines} .pv-line)`,
+          });
+        } else if (st.vblocks < 3 || st.vblocks > 16) {
+          failures.push({
+            engine: name,
+            id: lc.id,
+            detail: `saw ${st.vblocks} mounted blocks (window+overscan should be 3–16 at 1440×900)`,
+          });
+        } else if (st.lines !== st.vblocks * 32) {
+          failures.push({
+            engine: name,
+            id: lc.id,
+            detail: `saw ${st.lines} .pv-line over ${st.vblocks} blocks (expect blocks × 32 = ${st.vblocks * 32})`,
+          });
+        } else if (st.lines >= lc.total) {
+          failures.push({ engine: name, id: lc.id, detail: `all ${lc.total} lines mounted — not virtualized` });
+        }
       }
       if (f === "wide-1200.md") {
         const ok = await pp<boolean>(env, "toSourceView()");
@@ -1117,6 +1171,7 @@ async function main(): Promise<void> {
       fsScales: FS_SCALES,
       virtual: VIRTUAL,
       gate: GATE,
+      writeBaseline: WRITE_BASELINE,
       corpusManifest: manifest,
       lineNumbers: "1 (on)",
       notes: [
@@ -1129,8 +1184,11 @@ async function main(): Promise<void> {
     metrics,
     failures,
   };
+  await mkdir(dirname(JSON_OUT), { recursive: true });
   await writeFile(JSON_OUT, JSON.stringify(out, null, 2) + "\n", "utf8");
-  console.log(`\nJSON → ${JSON_OUT}`);
+  console.log(
+    `\nJSON → ${JSON_OUT}${WRITE_BASELINE ? " (tracked baseline — review the diff before committing)" : " (scratch; pass --write-baseline to update the tracked baseline)"}`,
+  );
 
   if (GATE) {
     console.error("✗ --gate is not implemented yet (P3+: plan §6.1 gate table targets the virtual renderer)");
@@ -1141,7 +1199,9 @@ async function main(): Promise<void> {
     for (const f of failures.slice(0, 40)) console.error(`  - [${f.engine}] ${f.id}: ${f.detail}`);
     process.exit(1);
   }
-  console.log("✓ probe:preview-perf — baseline recorded (record-only; gate lands with P3)");
+  console.log(
+    `✓ probe:preview-perf — run recorded (${WRITE_BASELINE ? "baseline written" : "record-only; --write-baseline to pin"}; gate lands with P3+)`,
+  );
   process.exit(0);
 }
 

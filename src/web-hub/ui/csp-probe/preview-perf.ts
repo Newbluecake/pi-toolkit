@@ -495,11 +495,17 @@ const pp = {
   },
   armOpen,
   collectOpen,
-  openState(): { windows: number; lines: number; content: boolean } {
+  openState(): { windows: number; lines: number; content: boolean; virtual: boolean; vblocks: number } {
+    const active = activeWindowEl();
     return {
       windows: document.querySelectorAll(".preview-window").length,
       lines: document.querySelectorAll(".preview-window .pv-line").length,
-      content: activeWindowEl()?.querySelector(".preview-text-body, .preview-md") !== null,
+      content: active?.querySelector(".preview-text-body, .preview-md") !== null,
+      // assertion helpers for the runner's virtual-aware lines.* checks (P3 follow-up #2):
+      // whether the active body is the VirtualCode container, and how many 32-line blocks
+      // (span.pv-vblock, data-start) it currently has mounted.
+      virtual: active?.querySelector(".preview-text-body.pv-virtual") !== null,
+      vblocks: active?.querySelectorAll(".pv-vblock").length ?? 0,
     };
   },
   closeAll(): void {

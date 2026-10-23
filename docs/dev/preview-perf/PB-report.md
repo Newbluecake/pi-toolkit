@@ -1,8 +1,12 @@
 # PB · 预览性能真实构建探针 + 改动前基线（报告）
 
 - 日期：2026-10-23 · 分支：dev（HEAD 799f9ee4；P0 已在 1e768c70 提交，本基线含 P0）
-- 方案：`plan.md` §6.1（PB 包）· 机器可读数据：`baseline.json`（同目录，schema `preview-perf-baseline/1`）
-- 命令：`npm run probe:preview-perf`（不进 CI，与 `probe:mermaid` 同类人工门）
+- 方案：`plan.md` §6.1（PB 包）· 机器可读数据：`baseline.json`（同目录，schema `preview-perf-baseline/1`；改动前定版，此后仅经 `--write-baseline` 显式更新，`--virtual` 态写 `baseline.virtual.json`）
+- 命令：`npm run probe:preview-perf`（不进 CI，与 `probe:mermaid` 同类人工门）。JSON 输出（P3 跟进 #1，2026-10-23 起）：
+  - 默认 → `node_modules/.cache/pwh-preview-perf/last-run.json`（scratch，不入库）；
+  - `--json <path>` → 指定路径；
+  - `--write-baseline` → 显式覆写被跟踪的 `docs/dev/preview-perf/baseline.json`（配 `--virtual` 写 `baseline.virtual.json`）——普通测量运行不再弄脏定版基线；与 `--json` 同时给出时 `--json` 优先并 WARN；
+  - 其余：`--virtual`（切页面 VirtualCode 开关）、`--quick`（2 轮）/缺省 7 轮、`--skip-build`（复用上次 csp-probe 构建）、`--engines csv`、`--rounds n`、`--fs csv`。
 - 基线口径：**record-only**——§6.1 的门槛表面向 P3 之后的虚拟渲染器，改动前数字本来就应超标；此后每个包（P1/P2/P3/P5）附 before/after 对比，同一探针、同一语料、同一口径。
 
 ## 1. 探针结构
@@ -15,7 +19,9 @@ npm run probe:preview-perf
  ├─ 3. 本机 HTTP 服务：探针产物 + /corpus/* 语料路由，套真实 CSP 头（import hub/http.ts）
  ├─ 4. Playwright 驱动：Chromium（必测）+ Firefox/WebKit（可选，缺失→skip+安装提示）
  │     真实鼠标/滚轮事件；Chromium 额外走 CDP（Tracing）
- └─ 5. 输出 baseline.json + stdout 表（exit 0 通过 / 1 失败 / 2 浏览器不可用）
+ └─ 5. 输出 JSON（默认 scratch `node_modules/.cache/pwh-preview-perf/last-run.json`；仅显式
+       `--write-baseline` 才写定版 baseline.json，`--virtual` 时写 baseline.virtual.json）
+       + stdout 表（exit 0 通过 / 1 失败 / 2 浏览器不可用）
 ```
 
 ### 1.1 页面（`src/web-hub/ui/csp-probe/preview-perf.{html,ts}`）
@@ -143,3 +149,52 @@ npm run probe:preview-perf
 
 - 每包合入前重跑 `npm run probe:preview-perf`，把 before/after 对照表附进各自的 `P*-report.md`。
 - P3 打开 `--virtual`：虚拟用例（600/601 行分界、截断行 (a)–(e)、选区/查找功能断言、`pv-virtual` 块）随包落地；`--gate` 届时实现 §6.1 门槛表。
+
+## 7. P3 后复测（2026-10-23，跟进 #3）
+
+P3（`8ab06bb4`，虚拟渲染接线 + §5.2 首帧即高亮）合入后，用跟进 #1/#2 之后的探针（默认写 scratch JSON、`lines.*` 虚拟感知）在 P3 代码上重跑两组 7 轮：r0（开关关，`PREVIEW_VIRTUAL_KEY=false` 三分支）与 virtual（生产默认）。两组 **failures=0**（exit 0）；WebKit 照旧 skip（launch 即退，缺系统库，提示见 §5.4）；机器可读数据在 `node_modules/.cache/pwh-preview-perf/p3-{r0,virtual}-full.json`（scratch，未入库）。
+
+### 7.1 数字（Chromium headless，fs1 1440×900，7 轮 median / p95，ms）
+
+| 指标                        | 改动前基线（§3） |      r0 复测（P3 后，开关关） |                    virtual（P3 后，开关开） |
+| --------------------------- | ---------------: | ----------------------------: | ------------------------------------------: |
+| `open.warm.stack-3609.ts`   |        148 / 173 |               147.50 / 198.60 |                           **47.80 / 63.70** |
+| `open.warm.hl-600.ts`       |    64.60 / 64.80 |                 81.20 / 98.00 |                        **97.60 / 114.60** ⚠ |
+| `open.warm.hl-601.ts`       |    64.50 / 64.70 |                97.70 / 181.70 |                           **47.90 / 48.10** |
+| `open.warm.uploads-2292.ts` |        113 / 115 |               247.30 / 280.60 |                           **50.30 / 51.20** |
+| `open.warm.longline.js`     |    81.00 / 97.80 |                 96.80 / 97.20 |                           **47.90 / 48.10** |
+| `open.warm.wide-1200.md`    |        181 / 198 |               197.70 / 296.10 |                             197.90 / 219.60 |
+| `open.cold.stack-3609.ts`   |        231 / 247 |               230.50 / 230.80 |                           **97.20 / 97.50** |
+| `gesture.drag`（每步）      |      1.22 / 1.39 |                   1.34 / 1.53 |               **0.35 / 0.50**（longtask 0） |
+| `gesture.resize.e`（每步）  |    21.47 / 22.22 | 21.85 / 23.06（longtask 413） | **0.46 / 0.56**（stepMax 5.53，longtask 0） |
+| `scroll.wheel.perStep`      |      0.00 / 0.00 |                   0.00 / 0.00 |         0.79 / 0.92（longtask 0，含块挂载） |
+| `scroll.farjump`（单次）    |    13.03 / 22.45 |                 12.79 / 16.51 |                            **7.08 / 15.37** |
+
+### 7.2 读数
+
+- **虚拟化兑现了 §3.1 的全部方向性预期**：stack-3609 warm 148→47.8、cold 231→97.2、resize.e 21.5→0.46（413 个 >50ms longtask → 0）、远跳 13→7.1；滚动引入受控的块挂载成本（0.79ms/步、longtask 0），远好于门槛 ≤4ms。`wide-1200.md` 走 md 渲染路径，两态同价（≈198），符合预期。
+- **r0 三分支未被 P3 弄脏**：stack-3609（纯文本大文件）、cold、drag、resize.e、scroll 与基线在噪声内一致——P3 报告 §1.1「r0 分支逐字节不变」在性能面成立。
+- **r0 态的高亮类 warm open 全面上移**：hl-601 64.5→97.7、uploads-2292 113→247.3、hl-600 64.6→81.2——机制即 §5.2：闸门内文件的 `NumberedCode`/`HighlightedCode` 现在传 `immediate`，分词从「首帧后异步」搬进了首帧。r0 态只是对照态（生产默认是虚拟），但见下条——hl-600 在虚拟态同样走这条路径。
+
+### 7.3 hl-600 稳定回归（确认）
+
+hl-600（600 行 ≤ 阈值）在**两种模式下都不过虚拟渲染器**（`chooseSourceRenderer`：`>600` 才虚拟），走的都是 `NumberedCode immediate`——所以回归与开关无关，两种模式都测得到：
+
+| 口径（chromium fs1，7 轮） | median |    p95 | 轮内分布                                                           |
+| -------------------------- | -----: | -----: | ------------------------------------------------------------------ |
+| 改动前基线                 |  64.60 |  64.80 | 64.6…64.7（极稳）                                                  |
+| r0 复测                    |  81.20 |  98.00 | 80.5, 64.7, 81.2, 64.7, 98.0, 97.8, 97.2（双峰：两轮踩回异步路径） |
+| virtual 复测               |  97.60 | 114.60 | 114.6, 97.6, 97.0, 98.0, 97.7, 97.5, 97.4（单峰极稳）              |
+
+P3 验收观察到的 114.3ms 即本分布的 p95 档。14 个实测轮里 12 轮 >80ms、除 r0 双峰两轮（64.7）外全部 >64.8 基线 p95——**稳定回归成立**：§5.2 把 ~30ms 的主线程分词（600 行 / 22.6KB）放进了首帧，median 64.6→81.2（r0）/ 97.6（virtual），距 §6.1 门槛 `hl-600 warm ≤50ms` 更远（基线本就未达，见 §3.1；同 `resize.e.softwrap` 先例「不达标时调阈值，回报用户」）。
+
+**可选改进方向（供主会话决策，本包未动产品代码）**：
+
+1. **首帧前分词设上限**（本任务点名方向）：`immediate` 仅对分词成本可证小的文本生效（如 ≤200 行，或按 3000 行/20k token 闸门等比例收缩到「预估 ≤10ms」）；超限回到 §5.1 路径——纯文本首帧 + 空闲高亮（约 50–150ms 后到达）。效果：hl-600 warm 回到 ~65ms 一线，代价是首帧到高亮之间有一段纯文本闪烁（§5.2 本要消除的正是这个闪烁——回退即权衡）。
+2. **接受回归，调门槛**：hl-600 是闸门内文件的上沿样本（600 行恰好压线）；97.6ms median / 114.6ms p95 仍在「点击后有感知但不卡」区间。把 §6.1 的 `hl-600 warm ≤50ms` 调成与实现一致的值（如 ≤120ms），并把「首帧即高亮」写进该行的取舍说明。
+3. **折中**：`immediate` 保留但把 tokenize 拆成同步预算 + 余量空闲补（首帧只保证前 N 行已高亮）——实现面最重（要改 `useHighlightParts` 的分块分词），不建议在本线内做。
+
+### 7.4 附注
+
+- 本次复测的 runner 即跟进 #1/#2 之后的版本（默认 scratch 输出、`lines.*` 虚拟感知断言：virtual 态断言 `.pv-virtual` 在场、挂载块数 3–16、`.pv-line` 数 = 块数 × 32 且 < 全文行数；r0 态保持 3609/701 全量断言）。
+- `--quick --virtual` 与 `--quick`（r0）各跑一遍，failures 均 = 0；`git status docs/dev/preview-perf/baseline.json` 无改动（本次未用 `--write-baseline`）。
