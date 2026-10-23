@@ -411,3 +411,83 @@
 .channels-new .channels-hint {
   padding: 0;
 }
+
+/* alias-plan §7.1 (ALU): the alias area inside the channels dialog — same 12px gutter as the
+   channel rows/new-channel form so nothing sits flush against the dialog edge. */
+.alias-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.alias-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0 12px;
+}
+
+.alias-current {
+  color: var(--c-text);
+  font-weight: var(--fw-semibold);
+}
+
+.alias-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 12px;
+}
+
+.alias-sugg[data-taken="true"] {
+  opacity: 0.55;
+}
+
+.alias-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: 0 12px;
+}
+
+.alias-actions:empty {
+  display: none;
+}
+
+.alias-section > .command-confirm {
+  margin: 0 12px;
+}
+
+.alias-take-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.alias-take-confirm .alias-actions,
+.alias-take-confirm .channels-hint {
+  padding: 0;
+}
+
+.alias-take-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.alias-take-preview {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
