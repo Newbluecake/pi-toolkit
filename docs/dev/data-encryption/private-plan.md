@@ -324,7 +324,7 @@ shell
    phase=starting  ∧ owner 存活              → starting
    phase=mounting                            → mounting（gocryptfs 字段缺失 = 「尚未登记」，不是「已死」）
    phase∈{launching,setup}                   → launching
-   phase=session   ∧ pi 存活且一致            → session
+   phase=session   ∧ pi 存活且一致 ∧ supervisor 存活 → session   （r3.1 修订，见下）
    phase=finalizing ∧ supervisor 存活         → finalizing
    supervisor 已死 ∧ gocryptfs 存活           → orphan（租约必忙：gocryptfs 持 fd 9）
    gocryptfs 已死 ∧ ns 仍有成员（租约忙或空闲）→ orphan-ns
@@ -332,7 +332,11 @@ shell
    其余                                      → unknown（只报告，阻止挂载）
 ```
 
-- **终止权**（I-P4′）：只有以下进程会被信号：pid+starttime 与记录字段一致的 `supervisor`/`gocryptfs`/`pi`；或 `readlink /proc/<p>/ns/mnt === 记录 ns.mnt` ∧ starttime ≥ `supervisor.start` 的 ns 成员。前提是记录有效、`bootId` 一致、`instanceId` 在锁内复核一致。每个信号前同步复验 starttime 与 ns id，不符即放弃。
+> **r3.1 修订（N4 F1，主会话裁定）**：原表 `phase=session ∧ pi 存活 → session` 排在 orphan / orphan-ns 之前，导致 supervisor 已死而 pi 仍活（P1 被杀；或 P0/P1/gocryptfs 都死、不怕 SIGHUP 的 pi 仍在）时一直判 session，`lock`/`lock --kill` 都 76、无从收尾，「带可证明成员的 orphan-ns」在真实条件下也到不了。修订后 session 还要求 supervisor 存活；supervisor 已死则按下面两行落入 orphan（gocryptfs 活）或 orphan-ns（gocryptfs 死、ns 有成员），由 `lock` / `lock --kill` 走 §3.5 既有外部收尾。终止权不变（I-P4′）：只终止经记录身份可证明的成员（pi 按 pid+starttime 与 ns 校验，后台 job 经 ns + ppid 链证明），无证明者只报告（ns-in-use）。supervisor 存活时仍是 session，不带 `--kill` 的 `lock` 拒绝且不碰 pi。
+>
+> **r3.1 补充（N4 安全复审第 2 轮，主会话裁定）**：① supervisor 判活为三态 alive / dead / unknown。只有 `/proc/<pid>` 确已消失（ENOENT/ESRCH、僵尸），或成功读到 starttime 且与记录不符，才算 dead；其余任何读取错误（EACCES、EIO、EMFILE、无法解析……）都是 unknown，按 alive 处理：判 session，不进入 orphan / orphan-ns，不发任何信号；`lock`（含 `--kill`）报告「无法确认监督进程状态」并退出 76。同一次判活中，若 ns 扫描看到记录的 supervisor（pid+starttime）存活，以扫描为准重新判 alive。外部收尾在 mount.lock 内的线性化点（`__private-terminate`）再证明一次 supervisor 已死，否则不收尾、记录保留（76）。② 外部收尾**没有记录身份回填**：每个信号目标都必须来自 ns 扫描并通过完整成员授权（`memberAuthorized`：bootId 一致 ∧ mnt ns == 记录 ns.mnt ∧ user ns ∈ {ns.user, ns.innerUser} ∧ starttime ≥ supervisor.start ∧ 到记录身份锚点的 ppid 链；pi/supervisor/gocryptfs 本身就是锚点，同样要满足前四项）；发信号前复验 pid+starttime、mnt ns 与 user ns。记录身份 pid+starttime 匹配但不在记录 ns、或未通过分类的进程只报告、不发信号，`lock` 以非零退出并提示人工处理；记录没有 ns 时不终止任何进程。
+
+- **终止权**（I-P4′，r3.1 收紧）：只有通过完整成员授权的 ns 成员会被信号：`readlink /proc/<p>/ns/mnt === 记录 ns.mnt` ∧ user ns ∈ {`ns.user`, `ns.innerUser`} ∧ starttime ≥ `supervisor.start` ∧ ppid 链连到记录身份锚点（pid+starttime 与记录字段一致的 `supervisor`/`gocryptfs`/`pi`，锚点自己也必须满足 ns 条件）。记录身份只能充当锚点，不能绕过 ns 校验单独成为目标。前提是记录有效、`bootId` 一致、`instanceId` 在锁内复核一致、supervisor 已被证明死亡（外部收尾）。每个信号前同步复验 starttime、mnt ns 与 user ns，不符即放弃。
 - **扫描只做诊断，不授予终止权**：`scanCipherHolders`（读同 uid 进程的 `/proc/<pid>/mountinfo` 查 `source==realCipher`）只用于 `status` 与拒绝文案；`unshare --mount` 会把其他库的全局挂载复制进私有 ns，所以「看得到 B 的 cipher」不代表归属。扫描超时或超上限 ⇒ 「不完整」，展示为 `n/a`，绝不当作「空」。
 - 判活单次 ≤2 s（异步 fs + 截止）。
 

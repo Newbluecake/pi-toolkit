@@ -1,475 +1,788 @@
-#!/usr/bin/env bash
-# secure-ns-probe.sh — 「私有挂载命名空间」可行性实测（pi-secure run --private 前置调研）
+#!/bin/sh
+# secure-ns-probe.sh — conformance probe for `pi-secure run --private` (private-plan r3 §6.3).
 #
-# 目标：gocryptfs 明文挂载只对 pi 进程树（含 bash/git/子 agent）可见；外部同用户进程
-#       仍只能看到 <dir>/mnt 下的 0 字节 0400 哨兵。
-# 方案链：外层 `unshare --user --map-root-user --mount --propagation private`（ns-root，
-#       直接 FUSE 挂载，不经 setuid fusermount）→ 内层 `unshare --user --map-user=<uid>
-#       --map-group=<gid>` 回到真实 uid 跑负载。
+# Drives the PRODUCTION launcher (src/secure/bin/pi-secure) against a throw-away vault in a
+# private mktemp dir (temp HOME, TEST-ONLY fake password via script(1), fake pi), plus a few raw
+# unshare/gocryptfs experiments, and prints one line per fact the launcher relies on:
 #
-# 约束：只在 mktemp -d 私有目录建测试保险库（假口令 -passfile）；绝不碰真实保险库与
-#       ~/.pi 配置；任何失败路径都必须清理；不改 src/。
+#     CHECK <NC id> PASS|FAIL|KNOWN <detail>
 #
-# 用法：bash scripts/dev/secure-ns-probe.sh [--fast]
-#   输出打到 stdout（建议 tee 留档）；--fast 跳过 `pi -p --no-session` 真机项。
-#   退出码 0 = 全部阶段执行完毕（单项失败已在输出中记录，结论以输出为准）。
-
+# ids: NC1 NC2 NC2b NC2c NC3 NC4 NC5 NC6 NC7 NC8 NC9 NC10 NC11 NC12 (NC9 is KNOWN by design:
+# same-uid /proc/<pid>/root + setns reach the plaintext). `--fast` skips every online pi item
+# (NC10: real pi) ⇒ zero model requests; the full mode runs real pi only in C5 isolation (temp
+# HOME, minimal env, no credentials ⇒ "No API key"). Other lines: INFO / SKIP / SUMMARY.
+#
+# Never touches real vaults or ~/.pi; every step is time-bounded. Every process the probe starts
+# carries a random PI_TOOLKIT_TEST_RUN token; cleanup signals only provably-own processes (same
+# uid, started after the probe, token in /proc/<pid>/environ, starttime re-verified), merely
+# reports anything else that mentions the temp dir, lazily unmounts what is left under it and
+# removes it (a SELFTEST line proves an unrelated look-alike process survives).
+# Precondition: no concurrent global fuse.gocryptfs mount (run --private refuses then). The
+# conformance test holds the gocryptfs test lock every real-mount suite takes; standalone, the
+# probe checks at start (SKIP all) and before every launcher session (explicit SKIP <id>).
+# Exit: 0 = ran, no FAIL (or SKIP all: prerequisites missing) · 1 = at least one FAIL · 64 = usage.
+# Run before any pi peer / gocryptfs / util-linux / kernel / Node upgrade
+# (tests/conformance/secure-private-ns.test.ts runs it in full mode).
+#
+# The pre-implementation research probe this replaces lives in git history (commit ed33894e);
+# its results are documented in docs/dev/data-encryption/private-ns-probe.md.
 set -u
-set -o pipefail
 
 FAST=0
-[ "${1:-}" = "--fast" ] && FAST=1
-[ "$FAST" = 1 ] && export PI_TIMEOUT_S=1
-
-PU=$(id -u); PG=$(id -g)
-T=$(mktemp -d /tmp/secure-ns-probe.XXXXXX)
-V=$T/vault            # 测试保险库：cipher/ + mnt/{work,state} 哨兵
-R=$T/results          # 结果/中间产物（挂载外，探针可写）
-PW=$T/pw
-mkdir -p "$V/cipher" "$V/mnt" "$R"
-chmod 700 "$V" "$V/cipher" "$V/mnt"
-
-PIDS=()               # 需要收尾的 pid（<2 的一律跳过，防 kill 0 误杀全组）
-PGIDS=()              # 需要收尾的进程组
-LAST_PGID=0
-
-cleanup() {
-  local p
-  for p in ${PIDS[*]:-}; do [ "$p" -ge 2 ] 2>/dev/null && kill -KILL "$p" 2>/dev/null; done
-  for p in ${PGIDS[*]:-}; do [ "$p" -ge 2 ] 2>/dev/null && { kill -TERM -- "-$p" 2>/dev/null; } done
-  sleep 0.4
-  for p in ${PGIDS[*]:-}; do [ "$p" -ge 2 ] 2>/dev/null && kill -KILL -- "-$p" 2>/dev/null; done
-  fusermount3 -uz "$V/mnt" 2>/dev/null
-  fusermount3 -uz "$T/vm" 2>/dev/null
-  sleep 0.3
-  rm -rf "$T" 2>/dev/null || echo "WARN: 无法清理 $T（请手动检查）"
-}
-trap cleanup EXIT INT TERM
-
-sec() { echo; echo "================ [$1] $2 ================"; }
-note() { echo "--- $*"; }
-
-# ───────────────────────── P0 环境与工具 ─────────────────────────
-sec P0 "环境与工具"
-echo "kernel: $(uname -r)  os: $(. /etc/os-release; echo "$PRETTY_NAME")"
-echo "unshare: $(unshare --version | head -1)  nsenter: $(nsenter --version 2>/dev/null | head -1)"
-echo "gocryptfs: $(gocryptfs -version 2>&1 | head -1)"
-echo "/dev/fuse: $(ls -l /dev/fuse 2>&1)"
-echo "unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)"
-echo "yama.ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)"
-echo "/proc 挂载选项（hidepid?）: $(findmnt -no OPTIONS /proc 2>/dev/null)"
-echo "uid=$PU gid=$PG  pi=$(command -v pi || echo MISSING)  node=$(command -v node || echo MISSING) python3=$(command -v python3 || echo MISSING) strace=$(command -v strace || echo MISSING)"
-echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-<unset>}  tmux dir: $(ls -d /tmp/tmux-$PU 2>/dev/null || echo 无)"
-
-# ───────────────────────── P1 嵌套 uid 映射 sanity ─────────────────────────
-sec P1 "嵌套 uid 映射（外层 ns-root → 内层真实 uid）"
-unshare --user --map-root-user --mount --propagation private bash -c '
-  echo "outer id: $(id -u)/$(id -g)  uid_map: $(cat /proc/self/uid_map | tr -s " ")"
-  unshare --user --map-user='"$PU"' --map-group='"$PG"' bash -c "
-    echo \"inner id: \$(id)\"
-    echo \"inner uid_map: \$(cat /proc/self/uid_map | tr -s \" \")  gid_map: \$(cat /proc/self/gid_map | tr -s \" \")\"
-    echo \"inner CapEff: \$(grep CapEff /proc/self/status | cut -d: -f2)\"
-  "
-' 2>&1
-
-# ───────────────────────── P2 测试保险库 init ─────────────────────────
-sec P2 "初始化测试保险库（mktemp 目录 + 假口令）"
-printf 'probe-fake-password-%s\n' "$RANDOM$RANDOM" > "$PW"; chmod 600 "$PW"
-: > "$V/mnt/work";  chmod 0400 "$V/mnt/work"
-: > "$V/mnt/state"; chmod 0400 "$V/mnt/state"
-: > "$V/mount.lock"; chmod 600 "$V/mount.lock"
-gocryptfs -init -q -passfile "$PW" -- "$V/cipher" 2>&1 | sed 's/^/init: /'
-echo "init rc=$?  cipher 文件属主: $(ls -ln "$V/cipher" | tail -n +2 | awk '{print $3":"$4}' | sort -u | tr '\n' ' ')"
-
-sentinel_state() { # 外部视角哨兵状态（$1=标签）
-  echo "[$1] 外部 stat mnt/work = $(stat -c '%F %s字节 %a %u:%g' "$V/mnt/work" 2>&1)"
-  echo "[$1] 外部 stat mnt/state = $(stat -c '%F %s字节 %a %u:%g' "$V/mnt/state" 2>&1)"
-  echo "[$1] 外部 ls mnt = $(ls -A "$V/mnt" 2>&1 | tr '\n' ' ')"
-}
-
-# ───────────────────────── 内层脚本（真实 uid 负载） ─────────────────────────
-cat > "$T/inner.sh" <<'EOF'
-#!/usr/bin/env bash
-# 在内层（映射回真实 uid）执行：身份/挂载可见性/属主 + 负载兼容性
-set -u
-echo "inner id: $(id)"
-echo "inner uid_map: $(cat /proc/self/uid_map | tr -s ' ')  gid_map: $(cat /proc/self/gid_map | tr -s ' ')"
-echo "inner 挂载可见: $(grep " $V/mnt " /proc/self/mountinfo | grep -c fuse.gocryptfs) 条"
-mkdir -p "$V/mnt/work" "$V/mnt/state"; echo "inner mkdir work/state rc=$?"
-REPO="$V/mnt/work/repo"
-mkdir -p "$REPO" && cd "$REPO" || { echo "FATAL cd"; exit 9; }
-SECRET="probe-secret-$(date +%s%N)"
-echo "$SECRET" > secret.txt; echo "$SECRET" > "$R/secret.expected"
-echo "inner 属主视角: secret.txt=$(stat -c '%u:%g %a' secret.txt) .git=$(stat -c '%u:%g' .git)"
-echo "== git =="
-git init -q . 2>&1 | head -2
-git config user.email probe@local; git config user.name probe
-git add -A 2>&1 | head -2; git commit -qm "probe commit" 2>&1 | head -3
-echo "git rev-parse HEAD: $(git rev-parse HEAD 2>&1)"
-git status --porcelain >/dev/null 2>&1; echo "git status rc=$?（0=无 dubious ownership 问题）"
-echo "git 全局配置读取 rc=$(git config --global --list >/dev/null 2>&1; echo $?)"
-echo "== node =="
-node -e 'const fs=require("fs"),os=require("os");fs.writeFileSync(process.env.V+"/mnt/work/node.txt","node-was-here\n");console.log("node 读写:",JSON.stringify(fs.readFileSync(process.env.V+"/mnt/work/node.txt","utf8")),"homedir:",os.homedir(),"tmpdir:",os.tmpdir())' 2>&1
-echo "== ssh =="
-ssh-keygen -q -t ed25519 -N "" -f "$V/mnt/work/id_probe" >/dev/null 2>&1
-echo "ssh-keygen 生成 rc=$? 属主 $(stat -c '%u:%g %a' "$V/mnt/work/id_probe" 2>&1)"
-ssh-keygen -y -f "$V/mnt/work/id_probe" >/dev/null 2>"$R/sshkey.err"; echo "ssh-keygen -y（私钥属主检查）rc=$? err=$(head -c 160 "$R/sshkey.err" | tr '\n' ' ')"
-ssh -G probe.invalid >"$R/sshG.out" 2>"$R/sshG.err"; echo "ssh -G（config 解析+属主检查）rc=$? err=$(head -c 120 "$R/sshG.err" | tr '\n' ' ')"
-if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
-  timeout 3 ssh-add -l >/dev/null 2>&1; echo "ssh-agent socket 可达: rc=$? (0=有钥匙,1=无钥匙)"
-else
-  echo "ssh-agent socket: 不存在或未设置"
-fi
-if [ -d "/tmp/tmux-$PU" ]; then
-  timeout 3 tmux -S "/tmp/tmux-$PU/$(ls "/tmp/tmux-$PU" 2>/dev/null | head -1)" list-sessions >/dev/null 2>&1 \
-    && echo "tmux 外部 unix socket 可达 rc=0" || echo "tmux socket dir 存在但 list-sessions rc=$?（无会话正常）"
-else
-  echo "tmux socket dir: 无"
-fi
-echo "== 子进程同挂载 ns =="
-sleep 120 & SUB=$!; echo "$SUB" > "$R/sub.pid"
-echo "父 ns=$(readlink /proc/self/ns/mnt)  子 ns=$(readlink /proc/$SUB/ns/mnt) 一致=$([ "$(readlink /proc/self/ns/mnt)" = "$(readlink /proc/$SUB/ns/mnt)" ] && echo yes || echo NO)"
-echo "== pi =="
-timeout 30 pi --version >"$R/piver.out" 2>&1; echo "pi --version rc=$? out=$(head -c 200 "$R/piver.out" | tr '\n' ' ')"
-mkdir -p "$V/mnt/work/pi-test" && cd "$V/mnt/work/pi-test"
-timeout "${PI_TIMEOUT_S:-75}" pi -p --no-session "Reply with exactly: OK" >"$R/pi.out" 2>&1; echo "pi -p --no-session rc=$?"
-echo "pi 输出前 300 字节: $(head -c 300 "$R/pi.out" | tr '\n' ' ')"
-echo "=== INNER WORKLOAD DONE ==="
-EOF
-
-# ns-root 直跑负载对照（任务项 1：副作用比较）
-cat > "$T/rootload.sh" <<'EOF'
-#!/usr/bin/env bash
-set -u
-echo "ns-root id: $(id)  whoami: $(whoami)"
-mkdir -p "$V/mnt/work/rootrepo" && cd "$V/mnt/work/rootrepo" || exit 9
-echo x > f.txt
-echo "ns-root 属主视角: f.txt=$(stat -c '%u:%g %a' f.txt)（ns 内用户文件全显示为 0）"
-git init -q . 2>&1 | head -2
-git config user.email r@r; git config user.name r
-git add f.txt >/dev/null 2>&1; git commit -qm rootcommit >/dev/null 2>&1
-git status --porcelain >/dev/null 2>&1; echo "git status rc=$?  rev-parse=$(git rev-parse --short HEAD 2>&1)"
-ssh-keygen -y -f "$V/mnt/work/id_probe" >/dev/null 2>&1; echo "ssh-keygen -y（内层uid建的钥匙）rc=$?"
-[ -w /etc/passwd ] && echo "!! 可写 /etc/passwd" || echo "/etc/passwd 不可写（无真 root，kuid 仍是 $PU）"
-touch "/tmp/nsroot-probe-$$"; echo "/tmp/nsroot-probe-$$" > "$R/rootfile"
-echo "新建 /tmp 文件在 ns 内显示属主: $(stat -c '%u:%g' "/tmp/nsroot-probe-$$")"
-node -e 'console.log("node homedir:",require("os").homedir(),"tmpdir:",require("os").tmpdir())' 2>&1
-echo "=== ROOTLOAD DONE ==="
-EOF
-
-# 内层持有者脚本：为外部可见性测试保持 cwd/fd/挂载引用
-cat > "$T/holder.sh" <<'EOF'
-#!/usr/bin/env bash
-set -u
-cd "$V/mnt/work/repo" || { echo "FATAL: repo 不存在"; exit 9; }
-exec 9<secret.txt
-sleep 300 & echo $! > "$R/sleeper.pid"
-R="$R" setsid python3 - "$V/mnt/work/repo" >"$R/dumper.out" 2>&1 <<'PY' &
-import ctypes, os, sys, time
-repo = sys.argv[1]
-ctypes.CDLL(None).prctl(4, 0)   # PR_SET_DUMPABLE=0（缓解手段验证）
-os.chdir(repo)
-fd = os.open(os.path.join(repo, "secret.txt"), os.O_RDONLY)
-open(os.environ["R"] + "/dumper.fd", "w").write(str(fd))
-time.sleep(300)
-PY
-echo $! > "$R/dumper.pid"
-echo "holder 就绪: sleeper=$(cat "$R/sleeper.pid") dumper=$(cat "$R/dumper.pid")"
-wait
-EOF
-
-# ───────────────────────── 外层监督者（ns 内 ns-root） ─────────────────────────
-cat > "$T/outer.sh" <<'EOF'
-#!/usr/bin/env bash
-# 在 外层 user+mount ns 内执行：直接挂载 gocryptfs（不经 fusermount），派发负载
-set -u
-echo "outer id: $(id)"
-gocryptfs -fg -nonempty -passfile "$T/pw" -- "$V/cipher" "$V/mnt" 2>"$R/gocryptfs.log" &
-GP=$!
-echo "$GP" > "$R/gocryptfs.pid"; echo $$ > "$R/outer.pid"
-readlink /proc/self/ns/mnt > "$R/ns-mnt.id"
-ready=0
-for i in $(seq 1 75); do
-  grep " $V/mnt " /proc/self/mountinfo | grep -q fuse.gocryptfs && { ready=1; break; }
-  kill -0 "$GP" 2>/dev/null || break
-  sleep 0.2
+for a in "$@"; do
+  case "$a" in
+    --fast) FAST=1 ;;
+    -h | --help)
+      sed -n '2,24p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "usage: $0 [--fast]" >&2
+      exit 64
+      ;;
+  esac
 done
-if [ "$ready" != 1 ]; then echo "MOUNT-FAILED"; head -5 "$R/gocryptfs.log"; exit 21; fi
-echo "MOUNT-READY $(grep " $V/mnt " /proc/self/mountinfo)"
-case "${PHASE:-workload}" in
-  workload)
-    unshare --user --map-user="$PU" --map-group="$PG" -- bash "$T/inner.sh" >"$R/inner.out" 2>&1
-    echo "$?" > "$R/inner.rc"
-    [ -s "$R/sub.pid" ] && kill -KILL "$(cat "$R/sub.pid")" 2>/dev/null   # 清掉负载遗留的 cwd 持有者
-    umount "$V/mnt" 2>"$R/umount.err"; echo "$?" > "$R/umount.rc"
-    if grep " $V/mnt " /proc/self/mountinfo | grep -q fuse.gocryptfs; then
-      umount -l "$V/mnt" 2>>"$R/umount.err"; echo "lazy-$?" >> "$R/umount.rc"
-    fi
-    wait "$GP"; echo "$?" > "$R/gocryptfs.exit"
-    ;;
-  rootload)
-    bash "$T/rootload.sh" >"$R/rootload.out" 2>&1
-    echo "$?" > "$R/rootload.rc"
-    umount "$V/mnt" 2>>"$R/umount.err"; echo "$?" > "$R/umount.rc"
-    wait "$GP"; echo "$?" > "$R/gocryptfs.exit"
-    ;;
-  holder)
-    REPO_DIR="$V/mnt/work/repo" unshare --user --map-user="$PU" --map-group="$PG" -- bash "$T/holder.sh" >"$R/holder.out" 2>&1 &
-    echo $! > "$R/holder.pid"
-    for i in $(seq 1 1200); do [ -f "$R/teardown" ] && break; kill -0 "$GP" 2>/dev/null || break; sleep 0.5; done
-    [ -f "$R/teardown" ] && echo "supervisor: 收到 teardown"
-    kill -TERM "$(cat "$R/holder.pid" 2>/dev/null)" 2>/dev/null; sleep 0.5
-    for pf in sleeper.pid dumper.pid; do
-      [ -s "$R/$pf" ] && kill -KILL "$(cat "$R/$pf")" 2>/dev/null
-    done
-    if grep " $V/mnt " /proc/self/mountinfo | grep -q fuse.gocryptfs; then
-      umount "$V/mnt" 2>>"$R/umount.err"; echo "post-$?" >> "$R/umount.rc"
-    fi
-    if grep " $V/mnt " /proc/self/mountinfo | grep -q fuse.gocryptfs; then
-      umount -l "$V/mnt" 2>>"$R/umount.err"; echo "lazy-$?" >> "$R/umount.rc"
-    fi
-    wait "$GP" 2>/dev/null; echo "$?" > "$R/gocryptfs.exit"
-    ;;
-  idle)
-    wait "$GP"; echo "$?" > "$R/gocryptfs.exit"
-    echo "idle supervisor: gocryptfs 已退出（外部 lock 生效路径）"
-    grep " $V/mnt " /proc/self/mountinfo | grep -q fuse.gocryptfs \
-      && { umount "$V/mnt" 2>>"$R/umount.err"; echo "residual-$?" >> "$R/umount.rc"; }
-    ;;
-  killme)
-    sleep 600
-    ;;
-  holdns)
-    unshare --user --map-user="$PU" --map-group="$PG" -- bash -c '
-      cd "$V/mnt/work/repo" || exit 9
-      setsid sleep 600 & echo $! > "$R/daemon.pid"
-      echo "inner: 模拟守护已起 pid=$(cat "$R/daemon.pid")，inner 即将退出"
-    ' >"$R/holdns.out" 2>&1
-    echo "holdns supervisor: 退出（gocryptfs 与模拟守护留在 ns 内）"
-    ;;
-esac
-grep " $V/mnt " /proc/self/mountinfo | grep -q fuse.gocryptfs \
-  && echo still-mounted > "$R/final.state" || echo unmounted > "$R/final.state"
-EOF
 
-run_outer() { # $1=PHASE $2=标签：setsid + 外层 unshare 启动，登记 pgid
-  rm -f "$R"/teardown "$R"/gocryptfs.pid "$R"/outer.pid "$R"/ns-mnt.id "$R"/umount.rc \
-        "$R"/gocryptfs.exit "$R"/final.state "$R"/holder.pid "$R"/sleeper.pid \
-        "$R"/dumper.pid "$R"/dumper.fd "$R"/daemon.pid "$R"/rootfile
-  env T="$T" V="$V" R="$R" PW="$PW" PU="$PU" PG="$PG" PHASE="$1" PI_TIMEOUT_S="${PI_TIMEOUT_S:-75}" \
-    setsid unshare --user --map-root-user --mount --propagation private -- bash "$T/outer.sh" \
-    >"$R/outer-$2.out" 2>&1 &
-  LAST_PGID=$!
-  PGIDS+=("$LAST_PGID"); sleep 0.3
-  echo "outer[$2] pgid=$LAST_PGID gocryptfs.pid=$(cat "$R/gocryptfs.pid" 2>/dev/null || echo ?)"
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+NODE=$(command -v node) || {
+  echo "SKIP all node not found"
+  exit 0
+}
+T=$(mktemp -d "${TMPDIR:-/tmp}/secure-ns-probe.XXXXXX") || exit 1
+chmod 700 "$T"
+
+cat >"$T/probe.mjs" <<'PROBE_EOF'
+import fs from "node:fs";
+import path from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+
+// Ownership token (N4 security review #2): every process this probe starts inherits it (the
+// launcher passes it through — piChildEnv/hubSafeEnv only strip PI_SECURE_*; no product code
+// reads it). Cleanup and every test-side kill signal a process only if it is provably ours: same
+// real uid, started after the probe, token in /proc/<pid>/environ, starttime stable across reads.
+const RUN_VAR = "PI_TOOLKIT_TEST_RUN";
+const TOKEN = randomBytes(16).toString("hex");
+process.env[RUN_VAR] = TOKEN;
+const FAST = process.env.PROBE_FAST === "1";
+const REPO = process.env.PROBE_REPO;
+const T = process.env.PROBE_T;
+const BIN = path.join(REPO, "src/secure/bin/pi-secure");
+const HELPER = path.join(REPO, "src/secure/bin/helper.mjs");
+const PI_PKG = path.join(REPO, "node_modules/@earendil-works/pi-coding-agent");
+const PW = "TESTPASS-fake-not-a-secret";
+const UID = process.getuid();
+const GID = process.getgid();
+const IDS = ["NC1", "NC2", "NC2b", "NC2c", "NC3", "NC4", "NC5", "NC6", "NC7", "NC8", "NC9", "NC10", "NC11", "NC12"];
+
+const one = (s) => String(s).replace(/\s+/g, " ").trim().slice(0, 700);
+const counts = { PASS: 0, FAIL: 0, KNOWN: 0, SKIP: 0 };
+const seen = new Set();
+const skipped = new Set();
+function check(id, st, detail) {
+  if (skipped.has(id)) return;
+  if (st === true) st = "PASS";
+  if (st === false) st = "FAIL";
+  counts[st]++;
+  seen.add(id);
+  console.log(`CHECK ${id} ${st} ${one(detail)}`);
+}
+const info = (s) => console.log(`INFO ${one(s)}`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ───────────── processes: identity-verified bookkeeping ─────────────
+function statFields(pid) {
+  try {
+    const t = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    return t.slice(t.lastIndexOf(")") + 2).split(" ");
+  } catch {
+    return undefined;
+  }
+}
+function procStart(pid) {
+  const f = statFields(pid);
+  return f && f[0] !== "Z" ? Number(f[19]) : undefined;
+}
+const alive = (id) => id && procStart(id.pid) === id.start;
+const RUN_START = procStart(process.pid);
+/** `pid`'s identity iff provably ours (see RUN_VAR). */
+function owned(pid) {
+  const s1 = procStart(pid);
+  if (s1 === undefined || !(s1 >= RUN_START)) return undefined;
+  try {
+    const uid = /^Uid:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${pid}/status`, "utf8"))?.[1];
+    if (Number(uid) !== UID) return undefined;
+    if (!fs.readFileSync(`/proc/${pid}/environ`).toString("latin1").split("\0").includes(`${RUN_VAR}=${TOKEN}`)) return undefined;
+  } catch {
+    return undefined;
+  }
+  return procStart(pid) === s1 ? { pid, start: s1 } : undefined;
+}
+const tracked = [];
+function track(pid) {
+  const start = procStart(pid);
+  if (start !== undefined) tracked.push({ pid, start });
+  return start === undefined ? undefined : { pid, start };
+}
+/** Signal `id` only if it is still that process AND provably ours. */
+function killVerified(id, sig = "SIGKILL") {
+  const o = id && owned(id.pid);
+  if (!o || o.start !== id.start) return false;
+  try {
+    process.kill(id.pid, sig);
+    return true;
+  } catch {
+    return false;
+  }
+}
+const nsOf = (pid) => {
+  try {
+    return fs.readlinkSync(`/proc/${pid}/ns/mnt`);
+  } catch {
+    return undefined;
+  }
+};
+const pids = () => fs.readdirSync("/proc").filter((n) => /^\d+$/.test(n)).map(Number);
+function fdHolders(file) {
+  const out = [];
+  for (const p of pids()) {
+    let fds = [];
+    try {
+      fds = fs.readdirSync(`/proc/${p}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        if (fs.readlinkSync(`/proc/${p}/fd/${fd}`) === file) {
+          out.push(p);
+          break;
+        }
+      } catch {
+        /* raced */
+      }
+    }
+  }
+  return out;
+}
+/** /proc/locks entries for `file`'s inode (the pid column is the ORIGINAL locker, so match by inode). */
+function lockEntries(file) {
+  const ino = fs.statSync(file).ino;
+  return fs
+    .readFileSync("/proc/locks", "utf8")
+    .split("\n")
+    .filter((l) => /\bFLOCK\b/.test(l) && l.split(/\s+/).some((f) => /^[0-9a-f]+:[0-9a-f]+:\d+$/.test(f) && Number(f.split(":")[2]) === ino));
+}
+const leaseFree = (lease) => sh("flock", ["-n", lease, "true"]).status === 0;
+const globalMounted = (mp) => fs.readFileSync("/proc/self/mountinfo", "utf8").split("\n").some((l) => l.split(" ")[4] === mp);
+function mountSource(mountinfo, mp) {
+  for (const l of mountinfo.split("\n")) {
+    const f = l.split(" ");
+    if (f[4] !== mp) continue;
+    const tail = l.slice(l.indexOf(" - ") + 3).split(" ");
+    return { fstype: tail[0], source: tail[1] };
+  }
+  return undefined;
 }
 
-wait_file_value() { # $1=文件 $2=期望内容 $3=超时秒
-  local i n=$(( ${3:-10} * 5 ))
-  for i in $(seq 1 "$n"); do [ -f "$1" ] && [ "$(cat "$1" 2>/dev/null)" = "$2" ] && return 0; sleep 0.2; done
-  return 1
+function sh(cmd, args, opts = {}) {
+  const r = spawnSync(cmd, args, { encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL", ...opts });
+  return { status: r.status, signal: r.signal, out: r.stdout ?? "", err: r.stderr ?? "", text: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
-wait_mounted() { # 等 outer 日志出现 MOUNT-READY（$1=标签）
-  local i
-  for i in $(seq 1 100); do grep -q "MOUNT-READY" "$R/outer-$1.out" 2>/dev/null && return 0; sleep 0.2; done
-  echo "WARN: $1 挂载未就绪"; return 1
-}
-k9()  { [ "${1:-0}" -ge 2 ] 2>/dev/null && kill -KILL "$1" 2>/dev/null; }
-kterm(){ [ "${1:-0}" -ge 2 ] 2>/dev/null && kill -TERM "$1" 2>/dev/null; }
-
-verify_plain() { # $1=标签：普通模式重挂（fusermount 路径）核对完整性
-  rm -rf "$T/vm"; mkdir -p "$T/vm"
-  timeout 15 gocryptfs -passfile "$PW" -- "$V/cipher" "$T/vm" >>"$R/verify.log" 2>&1
-  local rc=$?
-  if [ "$rc" -ne 0 ]; then echo "[$1] 普通模式重挂 FAILED rc=$rc"; return 1; fi
-  echo "[$1] 完整性: secret=$(cat "$T/vm/work/repo/secret.txt" 2>&1) git=$(git -C "$T/vm/work/repo" log --oneline -1 2>&1 | head -1) node=$(cat "$T/vm/work/node.txt" 2>&1)"
-  echo "[$1] 期望 secret=$(cat "$R/secret.expected" 2>/dev/null)"
-  fusermount3 -u "$T/vm" 2>>"$R/verify.log"; echo "[$1] 卸载 verify-mnt rc=$?"
+async function until(pred, ms, what) {
+  const end = Date.now() + ms;
+  for (;;) {
+    try {
+      if (pred()) return;
+    } catch {
+      /* not yet */
+    }
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await sleep(50);
+  }
 }
 
-sibling_try() { # $1=标签 $2=命令（子进程执行＝目标的非祖先旁观者）
-  local out rc
-  out=$(bash -c "$2" 2>&1); rc=$?
-  echo "[sibling] $1 → rc=$rc out=$(printf '%s' "$out" | head -2 | tr '\n' ' ' | head -c 230)"
-}
-ancestor_read() { # $1=标签 $2=路径：主脚本（祖先）在当前 shell 用内建重定向直接 open（不 fork，保持祖先语义）
-  local label=$1 path=$2 _b=""
-  if IFS= read -r -N 60 _b < "$path" 2>"$T/anc.err"; then
-    echo "[ancestor] $label → OPEN-OK 内容: $(printf '%s' "$_b" | tr -d '\0' | head -c 90)"
-  elif [ -s "$T/anc.err" ]; then
-    echo "[ancestor] $label → OPEN-DENIED ($(head -c 130 "$T/anc.err" | tr '\n' ' '))"
-  else
-    echo "[ancestor] $label → OPEN-OK(EOF短读) 内容: $(printf '%s' "$_b" | tr -d '\0' | head -c 90)"
-  fi
-}
-plain_target() { # 基线：初始 ns 中的普通同 uid 进程（无任何命名空间）
-  setsid sleep 300 &
-  PLAINPID=$!
-  PIDS+=("$PLAINPID")
-  sleep 0.3
+// ───────────── fixture: temp HOME, new-layout vaults, fake pi ─────────────
+const H = path.join(T, "home");
+const DATA = path.join(H, ".local/share/pi-toolkit-secure");
+const PF = path.join(T, "pf");
+function makeVault(name) {
+  const dir = path.join(DATA, name);
+  const mnt = path.join(H, "secure", name);
+  fs.mkdirSync(path.join(dir, "cipher"), { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  fs.mkdirSync(mnt, { recursive: true, mode: 0o700 });
+  for (const n of ["work", "state"]) {
+    fs.writeFileSync(path.join(mnt, n), "");
+    fs.chmodSync(path.join(mnt, n), 0o400);
+  }
+  const r = sh("gocryptfs", ["-init", "-q", "-scryptn", "10", "-passfile", PF, "--", path.join(dir, "cipher")]);
+  if (r.status !== 0) throw new Error(`gocryptfs -init ${name}: ${r.text}`);
+  for (const f of ["mount.lock", "mount.lease"]) fs.writeFileSync(path.join(dir, f), "", { mode: 0o600 });
+  return { name, dir, mnt, cipher: path.join(dir, "cipher"), lease: path.join(dir, "mount.lease"), rec: path.join(dir, "private.json") };
 }
 
-# ───────────────── P3/P4/P6 挂载 + 内层负载 + 正常收尾 ─────────────────
-sec P3 "私有挂载（外层 ns-root 直接 FUSE 挂载，不经 fusermount）+ 传播隔离"
-sec P4 "内层真实 uid 负载（git/ssh/node/socket/子进程/pi）"
-sec P6 "生命周期·正常收尾（负载退出 → umount → gocryptfs 退出）"
-run_outer workload runA
-wait_mounted runA
-sentinel_state "runA 挂载期间(外部)"
-grep -q "shared:" "$R/outer-runA.out" && echo "!! mountinfo 出现 shared: 传播泄漏" || echo "mountinfo 无 shared: 传播标记（私有 OK）"
-wait_file_value "$R/final.state" unmounted 200 || echo "runA 未在 200s 内收尾"
-note "outer 输出:"; sed 's/^/  /' "$R/outer-runA.out" | head -8
-note "inner 输出:"; sed 's/^/  /' "$R/inner.out" 2>/dev/null
-echo "inner.rc=$(cat "$R/inner.rc" 2>/dev/null) umount.rc=$(cat "$R/umount.rc" 2>/dev/null) gocryptfs.exit=$(cat "$R/gocryptfs.exit" 2>/dev/null) umount.err=$(head -c 150 "$R/umount.err" 2>/dev/null)"
-sentinel_state "runA 收尾后"
-echo "收尾后 cipher 属主（应全为 $PU）: $(ls -ln "$V/cipher" | tail -n +2 | awk '{print $3":"$4}' | sort -u | tr '\n' ' ')"
-verify_plain runA
+const FAKE_PI = `#!/usr/bin/env node
+import fs from "node:fs"; import { spawnSync } from "node:child_process";
+const E = process.env, C = E.PROBE_CTL;
+const st = fs.readFileSync("/proc/self/status", "utf8");
+const sf = (() => { const t = fs.readFileSync("/proc/self/stat", "utf8"); return t.slice(t.lastIndexOf(")") + 2).split(" "); })();
+const rl = (p) => { try { return fs.readlinkSync(p); } catch { return null; } };
+const flags = (fd) => { try { return /flags:\\s+(\\d+)/.exec(fs.readFileSync("/proc/self/fdinfo/" + fd, "utf8"))[1]; } catch { return null; } };
+const f = { pid: process.pid, uid: process.getuid(), gid: process.getgid(), cap: /CapEff:\\s+(\\S+)/.exec(st)[1],
+  ns: rl("/proc/self/ns/mnt"), fd9: rl("/proc/self/fd/9"), fd9flags: flags(9), pgid: Number(sf[2]), sid: Number(sf[3]), cwd: process.cwd(), kids: {} };
+if (E.PROBE_CANARY) fs.writeFileSync("data.txt", E.PROBE_CANARY);
+if (E.PROBE_NC12) {
+  // NC12: which children see fd 9 (each writes "<link|none> <flags|none>" into C/nc12-<name>)
+  const probe = (name) => "readlink /proc/self/fd/9 >" + C + "/nc12-" + name + " 2>/dev/null || echo none >" + C + "/nc12-" + name + "; awk '/^flags/{print $2}' /proc/self/fdinfo/9 >>" + C + "/nc12-" + name + " 2>/dev/null";
+  const run = (name, opts) => spawnSync("sh", ["-c", probe(name)], { timeout: 5000, ...opts });
+  run("inherit", { stdio: "inherit" });
+  run("detached", { stdio: "inherit", detached: true });
+  run("bashtool", { stdio: ["ignore", "pipe", "pipe"], detached: true });
+  run("slot9", { stdio: ["ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", 9] });
+  spawnSync(process.execPath, ["-e", "require('child_process').spawnSync('sh',['-c',process.argv[1]],{stdio:'inherit',timeout:5000})", probe("nested")], { stdio: "inherit", timeout: 8000 });
+}
+if (E.PROBE_INNER) {
+  const um = spawnSync("umount", [E.PROBE_INNER_MNT], { encoding: "utf8", timeout: 5000 });
+  f.umount = { code: um.status, err: (um.stderr || "").trim() };
+  const ns = spawnSync("nsenter", ["--mount=/proc/" + E.PROBE_HOSTPID + "/ns/mnt", "true"], { encoding: "utf8", timeout: 5000 });
+  f.setns = { code: ns.status, err: (ns.stderr || "").trim() };
+}
+if (E.PROBE_PI_SIGINT_DELAY) process.on("SIGINT", () => { fs.writeFileSync(C + "/sigint", String(Date.now())); setTimeout(() => process.exit(130), Number(E.PROBE_PI_SIGINT_DELAY)); });
+fs.writeFileSync(C + "/facts.json", JSON.stringify(f));
+const done = new Set();
+setInterval(() => {
+  if (fs.existsSync(C + "/exit")) process.exit(Number(fs.readFileSync(C + "/exit", "utf8") || 0));
+  for (let n = 1; n <= 9; n++) {
+    if (done.has(n) || !fs.existsSync(C + "/cmd." + n)) continue;
+    done.add(n);
+    const r = spawnSync("sh", ["-c", fs.readFileSync(C + "/cmd." + n, "utf8")], { encoding: "utf8", timeout: 10000 });
+    fs.writeFileSync(C + "/cmd." + n + ".out", JSON.stringify({ code: r.status, out: r.stdout, err: r.stderr }));
+  }
+}, 100);
+setTimeout(() => process.exit(0), Number(E.PROBE_PI_MAX || 120000));
+`;
 
-# ───────────────── P4b ns-root 直接跑负载（对照） ─────────────────
-sec P4b "对照：直接以 ns-root 跑负载（不经内层 uid 映射）"
-run_outer rootload runR
-wait_file_value "$R/final.state" unmounted 30 || echo "runR 未收尾"
-sed 's/^/  /' "$R/rootload.out" 2>/dev/null
-RF=$(cat "$R/rootfile" 2>/dev/null)
-[ -n "$RF" ] && { echo "ns-root 在 /tmp 新建的文件，外部（真实内核视角）属主: $(stat -c '%u:%g' "$RF" 2>&1)"; rm -f "$RF"; }
-echo "runR: umount.rc=$(cat "$R/umount.rc" 2>/dev/null) gocryptfs.exit=$(cat "$R/gocryptfs.exit" 2>/dev/null)"
+function setup() {
+  fs.mkdirSync(H, { mode: 0o700 });
+  fs.mkdirSync(path.join(T, "tmp"), { mode: 0o700 });
+  fs.writeFileSync(PF, `${PW}\n`, { mode: 0o600 });
+  const pkg = path.join(T, "fakepi");
+  fs.mkdirSync(path.join(pkg, "dist/cli"), { recursive: true });
+  fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", type: "module" }));
+  fs.writeFileSync(path.join(pkg, "dist/cli/args.js"), `export * from ${JSON.stringify("file://" + path.join(PI_PKG, "dist/cli/args.js"))};\n`);
+  fs.writeFileSync(path.join(pkg, "dist/cli.js"), FAKE_PI, { mode: 0o755 });
+  for (const [d, pi] of [
+    ["bin", path.join(pkg, "dist/cli.js")],
+    ["realbin", path.join(PI_PKG, "dist/cli.js")],
+  ]) {
+    fs.mkdirSync(path.join(T, d));
+    fs.symlinkSync(pi, path.join(T, d, "pi"));
+    fs.symlinkSync(process.execPath, path.join(T, d, "node"));
+  }
+  fs.mkdirSync(path.join(H, "secure"), { mode: 0o700 });
+  fs.mkdirSync(DATA, { recursive: true, mode: 0o700 });
+  const v = { acme: makeVault("acme"), other: makeVault("other") };
+  fs.mkdirSync(path.join(H, ".pi/agent"), { recursive: true });
+  fs.writeFileSync(path.join(H, ".pi/agent/pi-subagent.json"), JSON.stringify({ secure: { vaults: { acme: {}, other: {} } } }));
+  return v;
+}
+const baseEnv = (bin = "bin") => ({
+  PATH: `${path.join(T, bin)}:/usr/bin:/bin`,
+  HOME: H,
+  LANG: "C.UTF-8",
+  TERM: "xterm",
+  TMPDIR: path.join(T, "tmp"),
+  [RUN_VAR]: TOKEN,
+});
 
-# ───────────────── P5 外部可见性（挂载活跃期间） ─────────────────
-sec P5 "外部同用户进程可见性（/proc 各通道 + nsenter/setns）［ptrace_scope=1］"
-plain_target
-PL=$PLAINPID
-note "基线对照（目标=初始 ns 普通 sleep pid $PL，无任何命名空间）："
-sibling_try "基线 /proc/<初始ns进程>/root 读文件" "cat /proc/$PL/root/etc/hostname"
-sibling_try "基线 /proc/<初始ns进程>/mem 打开" "dd if=/proc/$PL/mem of=/dev/null bs=1 count=1"
-sibling_try "基线 /proc/<初始ns进程>/maps 读" "head -1 /proc/$PL/maps"
-sibling_try "基线 /proc/<初始ns进程>/fd 列举" "ls /proc/$PL/fd"
-run_outer holder runB
-for i in $(seq 1 100); do grep -q "holder 就绪" "$R/holder.out" 2>/dev/null && break; sleep 0.2; done
-GP=$(cat "$R/gocryptfs.pid" 2>/dev/null || echo 0)
-WP=$(cat "$R/sleeper.pid" 2>/dev/null || echo 0)
-DP=$(cat "$R/dumper.pid" 2>/dev/null || echo 0)
-DFD=$(cat "$R/dumper.fd" 2>/dev/null || echo 0)
-note "holder: $(head -1 "$R/holder.out" 2>/dev/null)  gocryptfs=$GP sleeper=$WP dumper(dumpable=0)=$DP fd=$DFD"
-PIDS+=("$WP" "$DP")
-sentinel_state "runB 挂载期间"
-sibling_try "① 直接读 mnt/work/repo/secret.txt"   "cat '$V/mnt/work/repo/secret.txt'"
-sibling_try "② /proc/<gocryptfs>/root 读明文"      "cat /proc/$GP/root$V/mnt/work/repo/secret.txt"
-sibling_try "③ /proc/<sleeper>/root 读明文"        "cat /proc/$WP/root$V/mnt/work/repo/secret.txt"
-sibling_try "④ /proc/<sleeper>/cwd 读明文"         "cat /proc/$WP/cwd/secret.txt"
-sibling_try "⑤ /proc/<sleeper>/cwd readlink（路径泄露）" "readlink /proc/$WP/cwd"
-sibling_try "⑥ /proc/<dumper>/fd/$DFD 打开"        "cat /proc/$DP/fd/$DFD"
-sibling_try "⑦ /proc/<dumper>/fd/$DFD readlink"    "readlink /proc/$DP/fd/$DFD"
-sibling_try "⑧ /proc/<gocryptfs>/mem 打开(offset0)" "dd if=/proc/$GP/mem of=/dev/null bs=1 count=1"
-MOFF=$(bash -c "grep -m1 ' r-.xp ' /proc/$GP/maps 2>/dev/null | cut -d- -f1" 2>/dev/null || true)
-if [ -n "${MOFF:-}" ]; then
-  MOFFDEC=$((16#$MOFF))
-  sibling_try "⑧b /proc/<gocryptfs>/mem 有效偏移 0x$MOFF" "dd if=/proc/$GP/mem bs=1 skip=$MOFFDEC count=8 2>&1 | od -An -tx1 | head -1"
-fi
-sibling_try "⑨ /proc/<dumpable=0>/root 读明文"     "cat /proc/$DP/root$V/mnt/work/repo/secret.txt"
-sibling_try "⑩ nsenter --user --mount"             "nsenter --target $GP --user --mount true"
-sibling_try "⑪ 读 /proc/<gocryptfs>/mountinfo"     "grep -c fuse.gocryptfs /proc/$GP/mountinfo"
-note "⑫ setns PoC（模拟攻击者：同 uid join userns+mntns 后读明文）:"
-GP="$GP" V="$V" python3 - <<'PY' 2>&1 | sed 's/^/    /'
-import ctypes, os, sys
-libc = ctypes.CDLL(None, use_errno=True)
-GP, V = os.environ["GP"], os.environ["V"]
-def setns(path, nstype):
-    fd = os.open(path, os.O_RDONLY)
-    r = libc.syscall(308, fd, nstype)   # __NR_setns=308 (x86_64)
-    if r != 0:
-        print(f"setns {path} 失败 errno={ctypes.get_errno()}"); sys.exit(1)
-try:
-    setns(f"/proc/{GP}/ns/user", 0x10000000)   # CLONE_NEWUSER
-    setns(f"/proc/{GP}/ns/mnt",  0x00020000)   # CLONE_NEWNS
-    p = f"{V}/mnt/work/repo/secret.txt"
-    print("join 成功，明文可见:", os.path.isfile(p), "内容:", open(p).read().strip()[:40])
-except Exception as e:
-    print("PoC 失败:", e)
-PY
-if command -v strace >/dev/null; then
-  note "⑬ strace 证据（nsenter 的 setns 序列）:"
-  strace -f -e trace=setns,setgroups nsenter --target "$GP" --user --mount true 2>&1 | grep -E "setns|setgroups" | sed 's/^/    /'
-fi
-ancestor_read "祖先读 /proc/<gocryptfs>/root 明文" "/proc/$GP/root$V/mnt/work/repo/secret.txt"
-ancestor_read "祖先读 /proc/<dumpable=0>/root（缓解验证）" "/proc/$DP/root$V/mnt/work/repo/secret.txt"
-echo "/proc/$GP/status（外部视角）: $(grep -E '^(Uid|Gid):' /proc/$GP/status 2>/dev/null | tr '\n' ' ' | tr -s '\t' ' ')"
-echo "gocryptfs ns/mnt=$(readlink /proc/$GP/ns/mnt 2>&1)  主脚本自身=$(readlink /proc/self/ns/mnt)（不同＝ns 隔离生效）"
-: > "$R/teardown"; sleep 2
-k9 "$WP"; k9 "$DP"
-note "runB 收尾: umount.rc=$(cat "$R/umount.rc" 2>/dev/null) gocryptfs.exit=$(cat "$R/gocryptfs.exit" 2>/dev/null) final=$(cat "$R/final.state" 2>/dev/null)"
-sentinel_state "runB 收尾后"
-verify_plain runB
+/** Launcher through script(1); types PW at every prompt. `.send(s)` writes to the pty. */
+function tty(args, env, killAfterMs = 90_000) {
+  const t0 = Date.now();
+  const c = spawn("script", ["-qefc", `${BIN} ${args}`, "/dev/null"], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+  const leader = track(c.pid);
+  let reaped = false;
+  c.on("exit", () => (reaped = true)); // from here on the pid may be recycled: never signal it
+  let text = "";
+  const p = new Promise((res) => {
+    let typed = 0;
+    const on = (b) => {
+      text += b.toString();
+      const prompts = text.split(/Password:|Repeat:/).length - 1;
+      while (typed < prompts) {
+        typed++;
+        try {
+          c.stdin.write(`${PW}\r`);
+        } catch {
+          /* closed */
+        }
+      }
+    };
+    c.stdout.on("data", on);
+    c.stderr.on("data", on);
+    const k = setTimeout(() => {
+      // still that script(1) leader (pid+starttime, pgid == pid)?
+      if (reaped || !leader || procStart(c.pid) !== leader.start || Number(statFields(c.pid)?.[2]) !== c.pid) return;
+      try {
+        process.kill(-c.pid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
+    }, killAfterMs);
+    c.on("close", (code) => {
+      clearTimeout(k);
+      res({ code, text: text.replace(/\r/g, ""), ms: Date.now() - t0 });
+    });
+  });
+  p.send = (s) => c.stdin.write(s);
+  p.text = () => text;
+  return p;
+}
+const plain = (args, env) => sh("sh", ["-c", `exec ${BIN} ${args} </dev/null`], { env, timeout: 40_000 });
+const recordOf = (v) => JSON.parse(fs.readFileSync(v.rec, "utf8"));
+const untilPhase = (v, phase, ms = 30_000) => until(() => recordOf(v).phase === phase, ms, `phase ${phase}`);
+function ctlDir(name) {
+  const d = path.join(T, `ctl-${name}`);
+  fs.mkdirSync(d, { mode: 0o700 });
+  return d;
+}
+const facts = (ctl) => JSON.parse(fs.readFileSync(path.join(ctl, "facts.json"), "utf8"));
+async function insideCmd(ctl, n, cmd) {
+  fs.writeFileSync(path.join(ctl, `cmd.${n}`), cmd);
+  await until(() => fs.existsSync(path.join(ctl, `cmd.${n}.out`)), 15_000, `inside cmd ${n}`);
+  await sleep(50);
+  return JSON.parse(fs.readFileSync(path.join(ctl, `cmd.${n}.out`), "utf8"));
+}
+const endPi = (ctl, code = 0) => fs.writeFileSync(path.join(ctl, "exit"), String(code));
+const membersOf = (ns) => pids().filter((p) => p !== process.pid && nsOf(p) === ns);
+function trackRecord(v) {
+  try {
+    const r = recordOf(v);
+    for (const k of ["owner", "supervisor", "gocryptfs", "pi"]) if (r[k] && alive(r[k])) tracked.push(r[k]);
+  } catch {
+    /* no record */
+  }
+}
 
-# ───────────────── P7 外部 lock（TERM gocryptfs） ─────────────────
-sec P7 "生命周期·外部 pi-secure lock（跨 ns 向 gocryptfs 发 SIGTERM）"
-run_outer idle runC
-GP=$(cat "$R/gocryptfs.pid" 2>/dev/null || echo 0)
-wait_mounted runC; sentinel_state "runC 挂载期间"
-kterm "$GP"; sleep 2
-wait_file_value "$R/final.state" unmounted 20 || echo "runC 未收尾"
-echo "runC: gocryptfs.exit=$(cat "$R/gocryptfs.exit" 2>/dev/null) final=$(cat "$R/final.state" 2>/dev/null)"
-note "outer 输出: $(tail -3 "$R/outer-runC.out" 2>/dev/null | tr '\n' ' ')"
-sentinel_state "runC lock 后"
-verify_plain runC
+// ───────────── cleanup (identity re-verified before every signal) ─────────────
+let cleaned = false;
+function cleanup() {
+  if (cleaned) return;
+  cleaned = true;
+  for (const id of tracked) killVerified(id);
+  // never our own ancestors (the `timeout` wrapper's cmdline also names $T/probe.mjs)
+  const mine = new Set();
+  for (let p = process.pid; p > 1 && !mine.has(p); p = Number(statFields(p)?.[1] ?? 0)) mine.add(p);
+  for (const p of pids()) {
+    if (mine.has(p)) continue;
+    const id = owned(p);
+    if (id) {
+      killVerified(id);
+      continue;
+    }
+    let hit = false;
+    try {
+      hit = fs.readFileSync(`/proc/${p}/cmdline`, "utf8").includes(T + "/");
+    } catch {
+      /* gone */
+    }
+    try {
+      hit ||= fs.readlinkSync(`/proc/${p}/cwd`).startsWith(T + "/");
+    } catch {
+      /* other ns / gone */
+    }
+    if (hit && procStart(p) !== undefined) console.log(`INFO cleanup: pid ${p} mentions ${T} but is not provably ours — not signalled`);
+  }
+  for (const l of fs.readFileSync("/proc/self/mountinfo", "utf8").split("\n")) {
+    const mp = l.split(" ")[4];
+    if (mp && mp.startsWith(T + "/")) sh("fusermount3", ["-uz", mp], { timeout: 5_000 });
+  }
+}
+process.on("SIGTERM", () => {
+  cleanup();
+  process.exit(1);
+});
+process.on("SIGINT", () => {
+  cleanup();
+  process.exit(1);
+});
+setTimeout(() => {
+  console.log("INFO probe hard deadline (360 s) reached — aborting");
+  cleanup();
+  process.exit(1);
+}, 360_000).unref();
 
-# ───────────────── P8 pi-secure 被 SIGKILL（gocryptfs 成孤儿） ─────────────────
-sec P8 "生命周期·监督者被 SIGKILL → gocryptfs 孤儿"
-run_outer killme runD
-GP=$(cat "$R/gocryptfs.pid" 2>/dev/null || echo 0)
-wait_mounted runD; sleep 0.5
-SP=$LAST_PGID
-k9 "$SP"; sleep 1
-echo "监督者(pgid $SP)已 SIGKILL；gocryptfs $GP: $(kill -0 $GP 2>/dev/null && echo 存活 || echo 已死)  ppid=$(awk '{print $4}' /proc/$GP/stat 2>/dev/null)"
-sentinel_state "runD 孤儿期间"
-sibling_try "孤儿期间 /proc/<gocryptfs>/root 读明文" "cat /proc/$GP/root$V/mnt/work/repo/secret.txt"
-echo "外部收尾: kill -TERM $GP"; kterm "$GP"; PIDS+=("$GP"); sleep 2
-sentinel_state "runD TERM 收尾后"
-verify_plain runD
+// ───────────── checks ─────────────
+/**
+ * Precondition: no foreign global fuse.gocryptfs mount while the probe runs (run --private
+ * correctly refuses then). tests/conformance/secure-private-ns.test.ts guarantees it by holding
+ * the gocryptfs test lock that every real-mount suite takes; a standalone run checks it at start
+ * (SKIP all) and again before every launcher session (explicit SKIP, never a misleading FAIL).
+ */
+const foreignMounts = () =>
+  fs
+    .readFileSync("/proc/self/mountinfo", "utf8")
+    .split("\n")
+    .filter((l) => l.includes(" - fuse.gocryptfs ") && !l.split(" ")[4].startsWith(T + "/"))
+    .map((l) => l.split(" ")[4]);
+function guard(ids) {
+  const f = foreignMounts();
+  if (!f.length) return true;
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    skipped.add(id);
+    counts.SKIP++;
+    console.log(`SKIP ${id} a foreign global fuse.gocryptfs mount appeared mid-run (${f.join(", ")}): run --private would correctly refuse — the probe needs the gocryptfs test lock / no concurrent global mounts`);
+  }
+  return false;
+}
+async function step(id, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    check(id, false, `error: ${e && e.message}`);
+  }
+}
 
-# ───────────────── P9 SIGKILL gocryptfs + ns 最后进程退出自动销毁 ─────────────────
-sec P9 "生命周期·gocryptfs SIGKILL → ns 随最后进程退出自动销毁"
-run_outer killme runE
-GP=$(cat "$R/gocryptfs.pid" 2>/dev/null || echo 0)
-wait_mounted runE; sleep 0.3
-k9 "$GP"; PIDS+=("$GP"); sleep 1
-echo "gocryptfs 已 KILL；监督者(pgid $LAST_PGID)状态: $(kill -0 $LAST_PGID 2>/dev/null && echo 存活 || echo 已退出)"
-kterm "$LAST_PGID"; sleep 2
-sentinel_state "runE 全部 ns 进程退出后"
-echo "fuse connections: $(ls /sys/fs/fuse/connections 2>&1 | head -3)"
-verify_plain runE
+async function main() {
+  const miss = ["gocryptfs", "fusermount3", "flock", "script", "unshare", "umount", "nsenter", "timeout"].filter(
+    (b) => sh("sh", ["-c", `command -v ${b}`]).status !== 0,
+  );
+  if (process.platform !== "linux" || miss.length || sh("sh", ["-c", "[ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]"]).status !== 0) {
+    console.log(`SKIP all prerequisites missing: ${process.platform !== "linux" ? "not linux " : ""}${miss.join(" ")} (or /dev/fuse unusable)`);
+    return 0;
+  }
+  if (!fs.existsSync(path.join(PI_PKG, "dist/cli/args.js"))) {
+    console.log("SKIP all repo devDependency @earendil-works/pi-coding-agent missing (npm install)");
+    return 0;
+  }
+  info(`kernel ${sh("uname", ["-r"]).out.trim()} · ${sh("unshare", ["--version"]).out.trim()} · ${sh("gocryptfs", ["-version"]).out.split(";")[0].trim()} · node ${process.version} · pi ${JSON.parse(fs.readFileSync(path.join(PI_PKG, "package.json"), "utf8")).version} · mode ${FAST ? "fast" : "full"}`);
+  const foreign = fs.readFileSync("/proc/self/mountinfo", "utf8").split("\n").filter((l) => l.includes(" - fuse.gocryptfs "));
+  if (foreign.length) {
+    console.log(`SKIP all a global fuse.gocryptfs mount exists (${foreign.length}); run --private refuses then — lock it first`);
+    return 0;
+  }
+  const V = setup();
+  const acme = V.acme;
+  const env = baseEnv();
 
-# ───────────────── P10 守护进程被困 ns（web-hub 模拟） ─────────────────
-sec P10 "web-hub 模拟：ns 内拉起的守护继承挂载与 ns 引用"
-run_outer holdns runF
-for i in $(seq 1 60); do [ -s "$R/daemon.pid" ] && break; sleep 0.3; done
-GP=$(cat "$R/gocryptfs.pid" 2>/dev/null || echo 0)
-DM=$(cat "$R/daemon.pid" 2>/dev/null || echo 0)
-PIDS+=("$DM" "$GP")
-for i in $(seq 1 100); do kill -0 "$LAST_PGID" 2>/dev/null || break; sleep 0.2; done
-echo "监督者已退出；残留: gocryptfs=$GP($(kill -0 $GP 2>/dev/null && echo 存活 || echo 死)) 模拟守护=$DM($(kill -0 $DM 2>/dev/null && echo 存活 || echo 死))"
-echo "模拟守护 ns/mnt=$(readlink /proc/$DM/ns/mnt 2>&1) vs gocryptfs=$(readlink /proc/$GP/ns/mnt 2>&1)（相同＝同 ns，守护持有挂载视图）"
-sentinel_state "runF 守护存活期间"
-ancestor_read "守护继承 ns：祖先读 /proc/<守护>/root 明文" "/proc/$DM/root$V/mnt/work/repo/secret.txt"
-sibling_try  "守护继承 ns：sibling 读 /proc/<守护>/root" "cat /proc/$DM/root$V/mnt/work/repo/secret.txt"
-sibling_try  "守护继承 ns：sibling 经守护 cwd 读"       "cat /proc/$DM/cwd/secret.txt"
-k9 "$DM"; kterm "$GP"; sleep 2
-sentinel_state "runF 清理后"
-verify_plain runF
+  await step("NC1", () => {
+    const help = sh("unshare", ["--help"]).text;
+    const flags = ["--user", "--map-root-user", "--map-user", "--map-group", "--mount", "--propagation"].filter((f) => !help.includes(f));
+    const d = path.join(T, "nc1");
+    fs.mkdirSync(d);
+    const m = sh("unshare", ["--user", "--map-root-user", "--mount", "--propagation", "private", "sh", "-c", 'mount -t tmpfs -o size=4k nc1 "$1" && grep -q " $1 " /proc/self/mountinfo && echo inside-ok', "sh", d]);
+    const leaked = globalMounted(d);
+    check("NC1", !flags.length && m.out.includes("inside-ok") && !leaked, `unshare flags ${flags.length ? "MISSING " + flags.join(",") : "all present"}; userns tmpfs mount ${m.out.includes("inside-ok") ? "ok" : "FAILED " + m.text}; visible outside: ${leaked}`);
+  });
 
-# ───────────────── P11 外部 status 判定 ─────────────────
-sec P11 "status 判定配方（pidfile + /proc 存活 + ns id 比对）"
-run_outer idle runG
-GP=$(cat "$R/gocryptfs.pid" 2>/dev/null || echo 0)
-NSID=$(cat "$R/ns-mnt.id" 2>/dev/null)
-wait_mounted runG
-echo "pidfile: gocryptfs=$GP  ns-mnt.id=$NSID"
-echo "运行中判定: kill -0 → $(kill -0 $GP 2>/dev/null && echo alive || echo dead)；ns id 比对 → $(readlink /proc/$GP/ns/mnt 2>/dev/null) $([ "$(readlink /proc/$GP/ns/mnt 2>/dev/null)" = "$NSID" ] && echo MATCH || echo MISMATCH)"
-echo "外部旁进程读 /proc/<pid>/mountinfo 作为挂载 oracle: $(bash -c "grep -c fuse.gocryptfs /proc/$GP/mountinfo" 2>&1 | head -1)"
-sentinel_state "runG 运行中"
-kterm "$GP"; PIDS+=("$GP"); sleep 1.5
-echo "gocryptfs 退出后: kill -0 → $(kill -0 $GP 2>/dev/null && echo alive || echo dead)（= status 可判 not-running）"
+  await step("NC11", () => {
+    const codes = {};
+    codes.version = sh("gocryptfs", ["-version"]).status;
+    codes.badflag = sh("gocryptfs", ["-definitely-not-a-flag"]).status;
+    const wrong = path.join(T, "wrongpw");
+    fs.writeFileSync(wrong, "wrong-password\n", { mode: 0o600 });
+    const nm = path.join(T, "nc11-mnt");
+    fs.mkdirSync(nm);
+    codes.wrongPassword = sh("gocryptfs", ["-q", "-passfile", wrong, "--", acme.cipher, nm]).status;
+    codes.noCipherdir = sh("gocryptfs", ["-q", "-passfile", PF, "--", path.join(T, "nope"), nm]).status;
+    codes.nonEmptyMnt = sh("gocryptfs", ["-q", "-passfile", PF, "--", acme.cipher, acme.mnt]).status;
+    codes.noMountpoint = sh("gocryptfs", ["-q", "-passfile", PF, "--", acme.cipher, path.join(T, "nope-mnt")]).status;
+    const busy = Number(/export const LEASE_BUSY_CODE = (\d+)/.exec(fs.readFileSync(HELPER, "utf8"))?.[1]);
+    const vals = Object.values(codes);
+    check("NC11", busy === 213 && !vals.includes(busy) && vals.every((c) => c !== null && c < 200), `launcher lease-busy code ${busy}; observed gocryptfs exit codes ${JSON.stringify(codes)} (upstream 1.8 exitcodes are all < 30)`);
+  });
 
-# ───────────────── 汇总 ─────────────────
-sec SUMMARY "关键状态汇总"
-for f in inner.rc umount.rc gocryptfs.exit final.state rootload.rc; do echo "$f: $(cat "$R/$f" 2>/dev/null || echo -)"; done
-echo "探针目录 $T 由 trap 清理。逐项结论见 docs/dev/data-encryption/private-ns-probe.md"
+  await step("NC5", async () => {
+    // (b) Q10's basis: another vault's GLOBAL mount is copied into a fresh mount namespace
+    const o = V.other;
+    const g = sh("gocryptfs", ["-q", "-nonempty", "-passfile", PF, "--", o.cipher, o.mnt]);
+    if (g.status !== 0) throw new Error(`global mount of other: ${g.text}`);
+    let copied;
+    try {
+      const mi = sh("unshare", ["--user", "--map-root-user", "--mount", "--propagation", "private", "cat", "/proc/self/mountinfo"]).out;
+      copied = mountSource(mi, o.mnt);
+    } finally {
+      sh("fusermount3", ["-u", o.mnt]);
+    }
+    NC5b = copied?.source === o.cipher ? `other vault's global mount copied into a new ns (${copied.fstype})` : `NOT copied (${JSON.stringify(copied)})`;
+    NC5bOk = copied?.source === o.cipher;
+  });
+
+  await step("NC6", () => {
+    // raw ns sequence (what finalize does): umount -n with a cwd holder ⇒ EBUSY; without ⇒ ok; -l with holder ⇒ ok
+    const raw = path.join(T, "raw");
+    fs.mkdirSync(path.join(raw, "c"), { recursive: true });
+    fs.mkdirSync(path.join(raw, "m"));
+    sh("gocryptfs", ["-init", "-q", "-scryptn", "10", "-passfile", PF, "--", path.join(raw, "c")]);
+    const script = [
+      'gocryptfs -q -passfile "$1" -- "$2" "$3" || exit 90',
+      '(cd "$3" && exec sleep 20) & H=$!; sleep 0.3',
+      'umount -n "$3" 2>/dev/null; echo "busy=$?"',
+      'kill $H; wait $H 2>/dev/null',
+      'umount -n "$3"; echo "plain=$?"',
+      'gocryptfs -q -passfile "$1" -- "$2" "$3" || exit 91',
+      '(cd "$3" && exec sleep 20) & H=$!; sleep 0.3',
+      'umount -l -n "$3"; echo "lazy=$?"',
+      'grep -q " $3 " /proc/self/mountinfo && echo still-listed || echo detached',
+      'kill $H; wait $H 2>/dev/null',
+      "true",
+    ].join("\n");
+    const r = sh("unshare", ["--user", "--map-root-user", "--mount", "--propagation", "private", "sh", "-c", script, "sh", PF, path.join(raw, "c"), path.join(raw, "m")], { timeout: 30_000 });
+    const busy = /busy=(\d+)/.exec(r.out)?.[1];
+    NC6raw = { ok: busy !== undefined && busy !== "0" && /plain=0/.test(r.out) && /lazy=0/.test(r.out) && /detached/.test(r.out), detail: `raw ns: umount -n with cwd holder exit ${busy} (EBUSY), ${/plain=0/.test(r.out) ? "plain ok" : "plain FAILED"}, ${/lazy=0/.test(r.out) && /detached/.test(r.out) ? "-l ok" : "-l FAILED"}${r.status !== 0 ? " sh exit " + r.status + " " + r.err : ""}` };
+  });
+
+  // ── session A: the production chain, inner facts, outside view, NC12 ──
+  const canary = `nc4-canary-${process.pid}-${Date.now()}`;
+  const ctlA = ctlDir("a");
+  const goA = guard(["NC2", "NC3", "NC4", "NC5", "NC9", "NC12", "NC6"]);
+  const runA = !goA ? undefined : tty("run acme --private -- probe", {
+    ...env,
+    PROBE_CTL: ctlA,
+    PROBE_CANARY: canary,
+    PROBE_NC12: "1",
+    PROBE_INNER: "1",
+    PROBE_INNER_MNT: acme.mnt,
+    PROBE_HOSTPID: String(process.pid),
+  });
+  let recA;
+  if (goA) try {
+    await untilPhase(acme, "session");
+    trackRecord(acme);
+    recA = recordOf(acme);
+    await until(() => fs.existsSync(path.join(ctlA, "facts.json")), 15_000, "fake pi facts");
+  } catch (e) {
+    for (const id of ["NC2", "NC3", "NC4", "NC5", "NC9", "NC12", "NC6"]) check(id, false, `session A did not start: ${e.message}; launcher said: ${runA.text().slice(-400)}`);
+    recA = undefined;
+  }
+  if (recA) {
+    const fA = facts(ctlA);
+    const g = recA.gocryptfs;
+    const gf = statFields(g.pid);
+    NC2a = {
+      ok: alive(g) && nsOf(g.pid) === nsOf(recA.supervisor.pid) && Number(gf[3]) === g.pid && fs.readlinkSync(`/proc/${g.pid}/fd/9`) === acme.lease && /Password:/.test(runA.text()),
+      detail: `TTY password accepted after setsid; phase session (P1 got the notifypid SIGUSR1); gocryptfs ns==P1 ns ${nsOf(g.pid) === nsOf(recA.supervisor.pid)}; sid==pid ${Number(gf[3]) === g.pid}; /proc/<g>/fd/9 ${fs.readlinkSync(`/proc/${g.pid}/fd/9`) === acme.lease ? "= lease" : "≠ lease"}`,
+    };
+    await step("NC3", () => {
+      const ok = fA.uid === UID && fA.gid === GID && fA.cap === "0000000000000000" && fA.umount.code !== 0 && fA.setns.code !== 0;
+      check("NC3", ok, `inner uid ${fA.uid}/gid ${fA.gid} (real ${UID}/${GID}); CapEff ${fA.cap}; umount vault exit ${fA.umount.code} "${fA.umount.err}"; setns back to the host ns exit ${fA.setns.code} "${fA.setns.err}"`);
+    });
+    await step("NC4", () => {
+      const sent = ["work", "state"].map((n) => fs.statSync(path.join(acme.mnt, n))).every((s) => s.isFile() && s.size === 0 && (s.mode & 0o777) === 0o400);
+      const listed = fs.readdirSync(acme.mnt).sort().join(",");
+      const grep = sh("grep", ["-rFal", canary, acme.dir, acme.mnt, H]);
+      const ok = sent && listed === "state,work" && !globalMounted(acme.mnt) && grep.status === 1;
+      check("NC4", ok, `sentinels intact ${sent} (${listed}); global mountinfo entry ${globalMounted(acme.mnt)}; grep -r for the canary outside: ${grep.status === 1 ? "no match" : "MATCH " + grep.out}`);
+    });
+    await step("NC5", () => {
+      const src = mountSource(fs.readFileSync(`/proc/${fA.pid}/mountinfo`, "utf8"), recA.realMnt);
+      const ok = src?.source === recA.realCipher && NC5bOk;
+      check("NC5", ok, `outside read of /proc/<pi>/mountinfo: ${src ? `${src.fstype} source==realCipher ${src.source === recA.realCipher}` : "NO ENTRY"}; ${NC5b}`);
+    });
+    await step("NC9", () => {
+      let viaRoot;
+      try {
+        viaRoot = fs.readFileSync(`/proc/${fA.pid}/root${recA.realMnt}/work/data.txt`, "utf8") === canary ? "plaintext READ" : "read, content differs";
+      } catch (e) {
+        viaRoot = `not readable (${e.code})`;
+      }
+      const ns = sh("nsenter", ["-t", String(recA.supervisor.pid), "-U", "-m", "--preserve-credentials", "cat", `${recA.realMnt}/work/data.txt`]);
+      const viaNs = ns.status === 0 && ns.out === canary ? "plaintext READ" : `failed (${ns.status} ${ns.err.trim()})`;
+      check("NC9", "KNOWN", `same-uid /proc/<pi>/root: ${viaRoot}; setns PoC (nsenter -U -m into the session): ${viaNs} — accepted residual (same uid is not a boundary)`);
+    });
+    await step("NC12", () => {
+      const r = (n) => {
+        try {
+          return fs.readFileSync(path.join(ctlA, `nc12-${n}`), "utf8").trim().split(/\s+/);
+        } catch {
+          return ["missing"];
+        }
+      };
+      const cloexec = (fl) => fl !== null && fl !== undefined && (parseInt(fl, 8) & 0o2000000) !== 0;
+      const none = ["inherit", "detached", "nested", "bashtool"].filter((n) => r(n)[0] !== "none");
+      const s9 = r("slot9");
+      const bashSrc = fs.readFileSync(path.join(REPO, "src/bash/process.ts"), "utf8");
+      const bashStdio = bashSrc.includes('stdio: ["ignore", "pipe", "pipe"]');
+      const ok = fA.fd9 === acme.lease && cloexec(fA.fd9flags) && !none.length && s9[0] === acme.lease && !cloexec(s9[1]) && bashStdio;
+      check("NC12", ok, `pi (Node) inherited fd 9 = lease ${fA.fd9 === acme.lease}, flags ${fA.fd9flags} CLOEXEC ${cloexec(fA.fd9flags)}; children without fd 9: inherit/detached/nested-node/bash-tool-stdio ${none.length ? "LEAK " + none.join(",") : "all"}; explicit slot 9: ${s9.join(" ")} (no CLOEXEC ${!cloexec(s9[1])}); src/bash/process.ts stdio ["ignore","pipe","pipe"] ${bashStdio}`);
+    });
+    endPi(ctlA, 0);
+    const rA = await runA;
+    await step("NC6", async () => {
+      await until(() => !membersOf(recA.ns.mnt).length, 5_000, "ns members gone");
+      const prod = rA.code === 0 && !fs.existsSync(acme.rec) && leaseFree(acme.lease) && !lockEntries(acme.lease).length;
+      NC6prod = `production end: exit ${rA.code}, ns destroyed (0 members), record ${fs.existsSync(acme.rec) ? "LEFT" : "removed"}, lease ${leaseFree(acme.lease) ? "free" : "HELD"}`;
+      check("NC6", Boolean(prod && NC6raw?.ok), `${NC6raw?.detail ?? "raw sequence not run"}; ${NC6prod}; remount: see NC7 (next session)`);
+    });
+  }
+
+  // ── session B: NC7 external TERM to gocryptfs while pi's cwd occupies the mount (also: remount ok) ──
+  if (guard(["NC7"])) await step("NC7", async () => {
+    const ctl = ctlDir("b");
+    const run = tty("run acme --private -- probe", { ...env, PROBE_CTL: ctl, PROBE_CANARY: "nc7" });
+    await untilPhase(acme, "session");
+    trackRecord(acme);
+    const rec = recordOf(acme);
+    await until(() => fs.existsSync(path.join(ctl, "facts.json")), 15_000, "facts");
+    killVerified(rec.gocryptfs, "SIGTERM");
+    await sleep(2_500);
+    const gAlive = alive(rec.gocryptfs);
+    const rd = await insideCmd(ctl, 1, "cat data.txt");
+    const mi = mountSource(fs.readFileSync(`/proc/${rec.pi.pid}/mountinfo`, "utf8"), rec.realMnt);
+    endPi(ctl, 0);
+    const r = await run;
+    await sleep(200);
+    const clean = !fs.existsSync(acme.rec) && leaseFree(acme.lease) && !alive(rec.gocryptfs);
+    check("NC7", clean, `remount after the previous session ok; external TERM with pi's cwd inside: gocryptfs ${gAlive ? "kept running" : "exited"} after 2.5 s; in-ns read ${rd.code === 0 ? "ok" : `failed (${rd.err.trim()})`}; mount entry in ns ${mi ? "present" : "gone"}; session end exit ${r.code}${/收尾未完成|外部收尾/.test(r.text) ? " (outer cleanup)" : ""}; final state ${clean ? "clean" : "NOT clean"}`);
+  });
+
+  // ── session C: NC2 kill part + NC8 orphan ──
+  if (guard(["NC8", "NC2"])) await step("NC8", async () => {
+    const ctl = ctlDir("c");
+    const run = tty("run acme --private -- probe", { ...env, PROBE_CTL: ctl });
+    await untilPhase(acme, "session");
+    trackRecord(acme);
+    const rec = recordOf(acme);
+    for (const k of ["owner", "supervisor", "pi"]) killVerified(rec[k]);
+    await until(() => !alive(rec.owner) && !alive(rec.supervisor) && !alive(rec.pi), 5_000, "P0/P1/pi gone");
+    const chain = pids().filter((p) => {
+      try {
+        return fs.readFileSync(`/proc/${p}/cmdline`, "utf8").includes(acme.lease) && !String(fs.readFileSync(`/proc/${p}/comm`, "utf8")).startsWith("gocryptfs");
+      } catch {
+        return false;
+      }
+    });
+    const holders = fdHolders(acme.lease);
+    const onlyG = holders.includes(rec.gocryptfs.pid) && holders.every((p) => p === rec.gocryptfs.pid || Number(statFields(p)?.[1]) === rec.gocryptfs.pid);
+    const entry = lockEntries(acme.lease).length;
+    const busy = !leaseFree(acme.lease);
+    const setsid = Number(statFields(rec.gocryptfs.pid)?.[3]) === rec.gocryptfs.pid;
+    NC2b_kill = { ok: !chain.length && onlyG && entry > 0 && busy, detail: `after SIGKILL P0+P1(+pi), shell chain alive: ${chain.length}; lease holders ${JSON.stringify(holders)} = gocryptfs${holders.length > 1 ? " + its own children" : ""} ${onlyG}; /proc/locks entry ${entry > 0}; flock -n refused ${busy}` };
+    // kill every process in the recorded ns (by ns id), then the lease must be free and the entry gone
+    for (const p of membersOf(rec.ns.mnt)) killVerified({ pid: p, start: procStart(p) });
+    await until(() => !membersOf(rec.ns.mnt).length, 5_000, "ns emptied");
+    await until(() => leaseFree(acme.lease), 5_000, "lease free");
+    const gone = !lockEntries(acme.lease).length;
+    NC2b_kill.detail += `; after gocryptfs exited: /proc/locks entry ${gone ? "gone" : "STILL THERE"}`;
+    NC2b_kill.ok &&= gone;
+    const l = plain("lock acme", env);
+    check("NC8", alive(rec.gocryptfs) === false && setsid && busy && l.status === 0, `orphan gocryptfs (setsid ${setsid}) held the lease after its supervisor died (${busy}); killing the ns members by ns id destroyed the ns and freed the lease; lock afterwards exit ${l.status} (stale record cleaned)`);
+    await run;
+  });
+  if (NC2a || NC2b_kill) check("NC2", Boolean(NC2a?.ok && NC2b_kill?.ok), `${NC2a?.detail ?? "session A missing"}; ${NC2b_kill?.detail ?? "kill part missing"}`);
+
+  // ── session D: NC2b Ctrl-C on the TTY ──
+  if (guard(["NC2b"])) await step("NC2b", async () => {
+    const ctl = ctlDir("d");
+    // pi handles Ctrl-C itself and leaves 1.5 s later (like a real pi -p): gocryptfs is judged while pi still runs
+    const run = tty("run acme --private -- probe", { ...env, PROBE_CTL: ctl, PROBE_PI_MAX: "60000", PROBE_PI_SIGINT_DELAY: "1500" });
+    await untilPhase(acme, "session");
+    trackRecord(acme);
+    const rec = recordOf(acme);
+    await until(() => fs.existsSync(path.join(ctl, "facts.json")), 15_000, "facts");
+    run.send("\x03");
+    await until(() => fs.existsSync(path.join(ctl, "sigint")), 5_000, "pi saw SIGINT");
+    await sleep(500);
+    const gAfter = alive(rec.gocryptfs);
+    const piAfter = alive(rec.pi);
+    const p1After = alive(rec.supervisor) && alive(rec.owner);
+    const r = await run;
+    await sleep(200);
+    const clean = !fs.existsSync(acme.rec) && leaseFree(acme.lease) && !alive(rec.gocryptfs);
+    check("NC2b", gAfter && p1After && clean, `Ctrl-C: gocryptfs (setsid) ${gAfter ? "unaffected" : "KILLED"}, P0/P1 ${p1After ? "unaffected" : "GONE"}, pi got SIGINT and was ${piAfter ? "still running" : "already gone"} 0.5 s later; launcher exit ${r.code}${/收尾未完成|外部收尾/.test(r.text) ? " via outer cleanup" : " via normal finalize"}; final state ${clean ? "clean" : "NOT clean"} (real-pi Ctrl-C behaviour is pi's own; fake pi used so --fast stays offline)`);
+  });
+
+  // ── NC2c: ordinary mode daemon holds the lease after the shell chain and the mount parent exit ──
+  if (guard(["NC2c"])) await step("NC2c", async () => {
+    const r = await tty("unlock acme", env);
+    if (r.code !== 0) throw new Error(`unlock exit ${r.code}: ${r.text.slice(-300)}`);
+    const daemons = pids().filter((p) => {
+      try {
+        return fs.readFileSync(`/proc/${p}/comm`, "utf8").trim() === "gocryptfs" && fs.readFileSync(`/proc/${p}/cmdline`, "utf8").includes(acme.cipher);
+      } catch {
+        return false;
+      }
+    });
+    daemons.forEach((p) => track(p));
+    const d = daemons[0];
+    const holds = d !== undefined && fdHolders(acme.lease).includes(d);
+    const parent = d !== undefined ? Number(statFields(d)?.[1]) : undefined;
+    const parentIsChain = parent !== undefined && (() => {
+      try {
+        return fs.readFileSync(`/proc/${parent}/cmdline`, "utf8").includes(acme.lease);
+      } catch {
+        return false;
+      }
+    })();
+    const entry = lockEntries(acme.lease).length > 0;
+    const l = plain("lock acme", env);
+    await sleep(200);
+    const gone = !lockEntries(acme.lease).length && leaseFree(acme.lease);
+    check("NC2c", daemons.length === 1 && holds && !parentIsChain && entry && l.status === 0 && gone, `unlock exit 0; daemon pid ${d} (ppid ${parent}, not the shell chain ${!parentIsChain}) holds the lease fd ${holds}; /proc/locks entry ${entry}; lock exit ${l.status}; entry gone + lease free after unmount ${gone}`);
+  });
+
+  // ── NC10: real pi inside the session (C5 isolation) ──
+  if (FAST) {
+    counts.SKIP++;
+    console.log("SKIP NC10 --fast: real-pi items not run (zero model requests)");
+    seen.add("NC10");
+  } else {
+    if (guard(["NC10"])) await step("NC10", async () => {
+      const renv = { ...baseEnv("realbin"), PI_CODING_AGENT_DIR: path.join(T, "agent"), PI_OFFLINE: "1" };
+      fs.mkdirSync(renv.PI_CODING_AGENT_DIR, { mode: 0o700 });
+      const v = await tty("run acme --private --version", renv, 45_000);
+      // the launcher refuses --no-extensions (the guards need the toolkit extension); the temp HOME
+      // has no pi packages installed, so `-p` runs extension-free anyway
+      const p = await tty("run acme --private -p hi", renv, 60_000);
+      const vOk = v.code === 0 && /\d+\.\d+\.\d+/.test(v.text);
+      const pOk = /No API key|No models available/i.test(p.text);
+      const clean = !fs.existsSync(acme.rec) && leaseFree(acme.lease);
+      check("NC10", vOk && pOk && clean, `real pi --version in the session: exit ${v.code} ${vOk ? "ok" : v.text.slice(-200)}; pi -p (temp HOME without packages, minimal env, no credentials): exit ${p.code} ${pOk ? '"No API key" (zero model requests)' : "UNEXPECTED " + p.text.slice(-300)}; finalize clean ${clean}`);
+    });
+  }
+
+  for (const id of IDS) if (!seen.has(id)) check(id, false, "not reached (an earlier step failed)");
+  return counts.FAIL ? 1 : 0;
+}
+
+let NC2a, NC2b_kill, NC5b = "copy check not run", NC5bOk = false, NC6raw, NC6prod;
+let rc = 1;
+try {
+  rc = await main();
+} catch (e) {
+  console.log(`INFO probe error: ${e && e.stack}`);
+  rc = 1;
+} finally {
+  // self-test (review N4 #2): an unrelated process whose argv AND cwd mention $T but which does not
+  // carry the token must survive cleanup
+  let decoy;
+  try {
+    const env = { ...process.env };
+    delete env[RUN_VAR];
+    decoy = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", path.join(T, "decoy-marker")], { cwd: T, env, stdio: "ignore" });
+    await sleep(150);
+  } catch {
+    decoy = undefined;
+  }
+  const decoyId = decoy?.pid !== undefined ? { pid: decoy.pid, start: procStart(decoy.pid) } : undefined;
+  cleanup();
+  if (decoyId?.start !== undefined) {
+    const ok = alive(decoyId);
+    console.log(`SELFTEST cleanup-decoy ${ok ? "PASS" : "FAIL"} unrelated process (argv + cwd in the temp dir, no token) ${ok ? "survived" : "was KILLED by"} cleanup`);
+    if (!ok) rc = 1;
+    if (alive(decoyId)) decoy.kill("SIGKILL"); // our own direct child, identity just re-verified
+  }
+}
+console.log(`SUMMARY pass=${counts.PASS} fail=${counts.FAIL} known=${counts.KNOWN} skip=${counts.SKIP}`);
+process.exit(rc);
+PROBE_EOF
+
+PROBE_FAST=$FAST PROBE_REPO=$REPO PROBE_T=$T timeout -k 5 380 "$NODE" "$T/probe.mjs"
+rc=$?
+# safety net if node itself was killed: lazily unmount anything left under $T, then remove it
+awk -v t="$T/" 'index($5, t) == 1 { print $5 }' /proc/self/mountinfo | while read -r mp; do fusermount3 -uz "$mp" 2>/dev/null; done
+chmod -R u+rwx "$T" 2>/dev/null
+rm -rf "$T" 2>/dev/null || echo "INFO could not remove $T"
+exit $rc

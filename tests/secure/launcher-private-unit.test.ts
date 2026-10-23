@@ -596,9 +596,14 @@ describe("judgePrivateInstance — §3.3 matrix", () => {
     expect(J({ record: ok({ ...NS, phase: "mounting" }), lease: "held", scan: done(1), alive: a })).toBe("mounting");
     expect(J({ record: ok({ ...NS, phase: "launching" }), lease: "held", scan: done(2), alive: a })).toBe("launching");
     expect(J({ record: ok({ ...NS, phase: "setup" }), lease: "held", scan: done(2), alive: a })).toBe("launching");
-    expect(J({ record: ok({ ...NS, phase: "session" }), lease: "held", scan: done(3), alive: { pi: true } })).toBe(
-      "session",
-    );
+    expect(
+      J({
+        record: ok({ ...NS, phase: "session" }),
+        lease: "held",
+        scan: done(3),
+        alive: { pi: true, supervisor: true },
+      }),
+    ).toBe("session");
     expect(J({ record: ok({ ...NS, phase: "finalizing" }), lease: "held", scan: done(1), alive: a })).toBe(
       "finalizing",
     );
@@ -614,6 +619,21 @@ describe("judgePrivateInstance — §3.3 matrix", () => {
     expect(J({ record: ok({ ...NS, phase: "finalizing", inNsDone: true }), lease: "free", scan: done(0) })).toBe(
       "stale",
     );
+  });
+  it("r3.1 (N4 F1): pi alive but supervisor dead is NOT a session — orphan / orphan-ns / ns-in-use", () => {
+    const rec = ok({ ...NS, phase: "session", gocryptfs: { pid: 11, start: 11 } });
+    // P1 killed, pi (+ P0) still running, gocryptfs alive ⇒ orphan (outer cleanup of provable members)
+    expect(J({ record: rec, lease: "held", scan: done(3), alive: { pi: true, owner: true, gocryptfs: true } })).toBe(
+      "orphan",
+    );
+    // P0/P1/gocryptfs dead, a SIGHUP-immune pi + its job remain ⇒ orphan-ns when provable …
+    expect(J({ record: rec, lease: "held", scan: done(2), alive: { pi: true }, verified: 2 })).toBe("orphan-ns");
+    // … ns-in-use (report only) when nothing is provable
+    expect(J({ record: rec, lease: "held", scan: done(2), alive: { pi: true }, verified: 0 })).toBe("ns-in-use");
+    // with the supervisor alive it stays a session (lock without --kill must refuse)
+    expect(
+      J({ record: rec, lease: "held", scan: done(3), alive: { pi: true, supervisor: true, gocryptfs: true } }),
+    ).toBe("session");
   });
   it("record without ns: only lease + owner/supervisor liveness", () => {
     expect(J({ record: ok({ phase: "starting" }), lease: "free", alive: {} })).toBe("stale");
@@ -727,6 +747,155 @@ describe("termination right (I-P4): only recorded / ns-proven identities, re-ver
     const rec = baseRecord({ ns: { mnt: "mnt:[7]", user: "user:[6]" }, supervisor: { pid: 50, start: 1 } });
     const r = await H.terminateInstance(rec, { deadline: Date.now() + 1_000, procRoot: join(root, "nope"), kill });
     expect(r).toMatchObject({ ok: false, killed: [] });
+  });
+});
+
+// ───────────────────────────── review N4-r2: three-state liveness + no backfill ─────────────────────────────
+
+describe("review N4-r2 #1: supervisor liveness is three-state (alive / dead / unknown)", () => {
+  const io = (code: string) => async () => {
+    throw Object.assign(new Error(code), { code });
+  };
+  it("readProcStart never swallows errors; identityState is dead ONLY on proof", async () => {
+    const pr = fakeProc([
+      { pid: 40, start: 500 },
+      { pid: 41, start: 600, state: "Z" },
+    ]);
+    mkdirSync(join(pr, "42", "stat"), { recursive: true }); // EISDIR
+    mkdirSync(join(pr, "43"));
+    writeFileSync(join(pr, "43", "stat"), "garbage");
+    const S = (id: { pid: number; start: number }, o: Record<string, unknown> = {}) =>
+      H.identityState(id, { procRoot: pr, ...o });
+    expect(await S({ pid: 40, start: 500 })).toBe("alive");
+    expect(await S({ pid: 40, start: 499 })).toBe("dead"); // live, different starttime
+    expect(await S({ pid: 44, start: 1 })).toBe("dead"); // ENOENT
+    expect(await S({ pid: 41, start: 600 })).toBe("dead"); // zombie: exited
+    expect(await S({ pid: 42, start: 1 })).toBe("unknown"); // EISDIR
+    expect(await S({ pid: 43, start: 1 })).toBe("unknown"); // unparsable stat
+    for (const code of ["EACCES", "EIO", "EMFILE", "EPERM"])
+      expect(await S({ pid: 40, start: 500 }, { readFile: io(code) }), code).toBe("unknown");
+    expect(await S({ pid: 40, start: 500 }, { readFile: io("ESRCH") })).toBe("dead");
+    expect(await H.readProcStart(40, { procRoot: pr, readFile: io("EIO") })).toEqual({ kind: "error", code: "EIO" });
+    expect(await H.readProcStart(44, { procRoot: pr })).toEqual({ kind: "gone" });
+    expect(await H.identityAlive({ pid: 40, start: 500 }, { procRoot: pr, readFile: io("EIO") })).toBe(false);
+  });
+
+  const sessionFixture = (withSupervisorInProc: boolean) => {
+    const procs = [
+      { pid: 51, ns: "mnt:[7]", start: 120, comm: "gocryptfs" },
+      { pid: 52, ns: "mnt:[7]", start: 130, ppid: 50, user: "user:[8]", comm: "pi" },
+    ];
+    if (withSupervisorInProc) procs.unshift({ pid: 50, ns: "mnt:[7]", start: 100, comm: "node" } as never);
+    const pr = fakeProc(procs);
+    writeFileSync(join(pr, "locks"), "");
+    const rec = baseRecord({
+      phase: "session",
+      ns: { mnt: "mnt:[7]", user: "user:[6]", innerUser: "user:[8]" },
+      supervisor: { pid: 50, start: 100 },
+      gocryptfs: { pid: 51, start: 120 },
+      pi: { pid: 52, start: 130 },
+    });
+    return { pr, record: { kind: "ok", record: rec } };
+  };
+  // the supervisor's /proc/<pid>/stat read fails with EIO; every other read succeeds
+  const supEio = async (p: string, enc: BufferEncoding) => {
+    if (p.endsWith("/50/stat")) throw Object.assign(new Error("EIO"), { code: "EIO" });
+    return (require("node:fs/promises") as typeof import("node:fs/promises")).readFile(p, enc);
+  };
+
+  it("an EIO on the supervisor read ⇒ unknown ⇒ treated as alive: session, never orphan; lock (and --kill) refuse 76", async () => {
+    const { pr, record } = sessionFixture(false); // the scan cannot see P1 either
+    const s = await H.privateInstanceState(v, { procRoot: pr, record, readFile: supEio });
+    expect(s.supervisorState).toBe("unknown");
+    expect(s.alive.supervisor).toBe(true);
+    expect(s.state).toBe("session");
+    for (const opts of [{}, { kill: true }, { lazy: true }]) {
+      const d = H.lockPrivateDecision(v, { ...s, inNs: false }, opts);
+      expect(d.action, JSON.stringify(opts)).toBe("refuse");
+      expect(d.code).toBe(H.EXIT.BUSY);
+      expect(d.text).toMatch(/无法确认监督进程状态/);
+    }
+    // the same view with gocryptfs dead would previously have been orphan-ns; now it stays session
+    const s2 = await H.privateInstanceState(v, {
+      procRoot: pr,
+      record: { kind: "ok", record: { ...record.record, gocryptfs: { pid: 51, start: 999 } } },
+      readFile: supEio,
+    });
+    expect(s2.state).toBe("session");
+  });
+
+  it("a later scan that SEES the recorded P1 alive overrides the failed read ⇒ alive ⇒ session (lock refuses as running)", async () => {
+    const { pr, record } = sessionFixture(true);
+    const s = await H.privateInstanceState(v, { procRoot: pr, record, readFile: supEio });
+    expect(s.supervisorState).toBe("alive");
+    expect(s.state).toBe("session");
+    const d = H.lockPrivateDecision(v, { ...s, inNs: false }, {});
+    expect(d).toMatchObject({ action: "refuse", code: H.EXIT.BUSY });
+    expect(d.text).toMatch(/会话仍在运行/);
+  });
+
+  it("a PROVEN dead supervisor (ENOENT) with pi + gocryptfs alive ⇒ orphan (outer cleanup allowed)", async () => {
+    const { pr, record } = sessionFixture(false);
+    const s = await H.privateInstanceState(v, { procRoot: pr, record });
+    expect(s.supervisorState).toBe("dead");
+    expect(s.state).toBe("orphan");
+    expect(H.lockPrivateDecision(v, { ...s, inNs: false }, {}).action).toBe("outer");
+  });
+});
+
+describe("review N4-r2 #2: outer termination has no recorded-identity backfill", () => {
+  it("signalVerified also checks the user ns when given", () => {
+    const pr = fakeProc([{ pid: 40, ns: "mnt:[7]", user: "user:[99]", start: 500 }]);
+    const sent: Array<[number, string]> = [];
+    const kill = (pid: number, sig: string) => sent.push([pid, sig]);
+    const o = { procRoot: pr, kill, nsMnt: "mnt:[7]" };
+    expect(H.signalVerified({ pid: 40, start: 500 }, "SIGTERM", { ...o, userNs: ["user:[6]", "user:[8]"] })).toBe(
+      false,
+    );
+    expect(sent).toEqual([]);
+    expect(H.signalVerified({ pid: 40, start: 500 }, "SIGTERM", { ...o, userNs: ["user:[99]"] })).toBe(true);
+  });
+
+  it("pi / supervisor / gocryptfs whose pid+start match the record but which are NOT in the recorded ns (or foreign user ns) get ZERO signals", async () => {
+    const pr = fakeProc([
+      // a legitimate anchor keeps the instance an orphan: the logger child of a live gocryptfs
+      { pid: 51, ns: "mnt:[7]", start: 120, comm: "gocryptfs" },
+      { pid: 53, ns: "mnt:[7]", start: 121, ppid: 51, comm: "logger" },
+      // recorded pi: identity matches, but it lives in ANOTHER mount ns
+      { pid: 52, ns: "mnt:[9]", start: 130, ppid: 1, user: "user:[8]", comm: "pi" },
+      // recorded supervisor: identity matches, right mnt ns, but a foreign user ns
+      { pid: 50, ns: "mnt:[7]", start: 100, user: "user:[99]", comm: "node" },
+    ]);
+    const sent: Array<[number, string]> = [];
+    const kill = (pid: number, sig: string) => {
+      sent.push([pid, sig]);
+      rmSync(join(pr, String(pid)), { recursive: true, force: true });
+    };
+    const rec = baseRecord({
+      phase: "session",
+      ns: { mnt: "mnt:[7]", user: "user:[6]", innerUser: "user:[8]" },
+      supervisor: { pid: 50, start: 100 },
+      gocryptfs: { pid: 51, start: 120 },
+      pi: { pid: 52, start: 130 },
+    });
+    const r = await H.terminateInstance(rec, { deadline: Date.now() + 5_000, procRoot: pr, kill });
+    expect(sent.some(([p]) => p === 52 || p === 50)).toBe(false);
+    expect(sent.some(([p]) => p === 51)).toBe(true); // the authorized anchor is still handled
+    expect(r.ok).toBe(false); // unproven identities remain ⇒ never ok ⇒ record kept, lock non-zero
+    const unv = r.unverified.map((u: { pid: number; comm: string }) => `${u.pid}:${u.comm}`).join(" ");
+    expect(unv).toMatch(/52:pi（记录身份未通过命名空间\/成员校验）/);
+    expect(unv).toMatch(/50:/);
+  });
+
+  it("a record without a registered ns ⇒ nothing can be authorized ⇒ zero signals, live identities reported", async () => {
+    const pr = fakeProc([{ pid: 50, ns: "mnt:[7]", start: 100, comm: "node" }]);
+    const kill = () => {
+      throw new Error("must not signal");
+    };
+    const rec = baseRecord({ phase: "mounting", supervisor: { pid: 50, start: 100 } });
+    const r = await H.terminateInstance(rec, { deadline: Date.now() + 1_000, procRoot: pr, kill });
+    expect(r).toMatchObject({ ok: false, killed: [] });
+    expect(r.unverified.map((u: { pid: number }) => u.pid)).toEqual([50]);
   });
 });
 

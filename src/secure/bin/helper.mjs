@@ -1263,6 +1263,23 @@ function testScanDelay() {
   return Number.isFinite(n) && n > 0 ? Math.min(n, 60_000) : 0;
 }
 
+/**
+ * TEST-ONLY seams for the N4 e2e suite (tests/secure/launcher-private.test.ts). Both can only make
+ * a private run SLOWER or make it fail closed through its own budgets — never weaker:
+ *   PI_SECURE_TEST_WORKER_DELAY="<op>:<ms>"  the `__mount-work` worker sleeps before op <op>
+ *     (still inside the worker's own deadline — a long delay just becomes that op's timeout);
+ *   PI_SECURE_TEST_FINALIZE_STALL_MS=<ms>     P1's in-ns finalize stalls first (its 10.5 s hard
+ *     backstop still fires ⇒ exit 75 ⇒ P0's outer cleanup: the §3.4+§3.5 worst path).
+ */
+export function testWorkerDelayMs(op, env = process.env) {
+  const m = /^([a-z-]{1,32}):(\d{1,6})$/.exec(env.PI_SECURE_TEST_WORKER_DELAY ?? "");
+  return m && m[1] === op ? Math.min(Number(m[2]), 60_000) : 0;
+}
+export function testFinalizeStallMs(env = process.env) {
+  const n = Number(env.PI_SECURE_TEST_FINALIZE_STALL_MS ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 60_000) : 0;
+}
+
 /** Arm the hard backstop: exit non-zero with one stderr line, even if an fs call is wedged. */
 export function armHardExit(ms, line, code = EXIT.DEADLINE) {
   const t = setTimeout(() => {
@@ -2304,7 +2321,15 @@ export const LEASE_STDIO = Object.freeze([
 export const NO_LEASE_STDIO = Object.freeze(["ignore", "pipe", "pipe"]);
 
 /** Internal exit codes of the record subcommands (never user-visible). */
-export const REC = Object.freeze({ OK: 0, MISMATCH: 22, MEMBERS: 21, INCOMPLETE: 23, NONE: 24, CORRUPT: 25 });
+export const REC = Object.freeze({
+  OK: 0,
+  MISMATCH: 22,
+  MEMBERS: 21,
+  INCOMPLETE: 23,
+  NONE: 24,
+  CORRUPT: 25,
+  SUPERVISOR: 26, // review N4-r2 #1: the supervisor is not PROVABLY dead ⇒ no outer cleanup
+});
 
 export const PRIVATE_BOUNDARY_SHORT =
   "防路径直读/扫描/备份/其他程序的无意识访问；不防同 uid 定向进程（/proc/<pid>/root、setns）";
@@ -2365,16 +2390,39 @@ export function readProcStartSync(pid, procRoot = "/proc") {
   }
 }
 
-export async function readProcStart(pid, { procRoot = "/proc" } = {}) {
-  const t = await fsp.readFile(path.join(procRoot, String(pid), "stat"), "utf8").catch(() => undefined);
+/**
+ * Review N4-r2 #1: never swallow a read error. → {kind:"live", start} | {kind:"gone"} (ENOENT/ESRCH:
+ * the process is gone; or a zombie: it has exited) | {kind:"error", code} (EACCES, EIO, EMFILE,
+ * unparsable stat, … — says NOTHING about whether the process is alive).
+ */
+export async function readProcStart(pid, { procRoot = "/proc", readFile = fsp.readFile } = {}) {
+  let t;
+  try {
+    t = await readFile(path.join(procRoot, String(pid), "stat"), "utf8");
+  } catch (e) {
+    return GONE_CODES.has(e?.code) ? { kind: "gone" } : { kind: "error", code: String(e?.code ?? "EUNKNOWN") };
+  }
   const st = parseProcStat(t);
-  return st && st.state !== "Z" ? st.start : undefined;
+  if (!st) return { kind: "error", code: "EPARSE" };
+  return st.state === "Z" ? { kind: "gone" } : { kind: "live", start: st.start };
 }
 
-/** pid+starttime still names the same live (non-zombie) process? */
-export async function identityAlive(id, { procRoot = "/proc" } = {}) {
-  if (!id || !Number.isSafeInteger(id.pid) || id.pid < 2) return false;
-  return (await readProcStart(id.pid, { procRoot })) === id.start;
+/**
+ * Three-state identity check (review N4-r2 #1): "dead" ONLY on proof — the pid is gone
+ * (ENOENT/ESRCH / zombie) or a live process there has a different starttime; any other read
+ * failure is "unknown" (callers must treat it as possibly alive). → "alive" | "dead" | "unknown"
+ */
+export async function identityState(id, opts = {}) {
+  if (!id || !Number.isSafeInteger(id.pid) || id.pid < 2 || !Number.isSafeInteger(id.start)) return "unknown";
+  const r = await readProcStart(id.pid, opts);
+  if (r.kind === "gone") return "dead";
+  if (r.kind === "error") return "unknown";
+  return r.start === id.start ? "alive" : "dead";
+}
+
+/** pid+starttime still names the same live (non-zombie) process? (false also when unknown) */
+export async function identityAlive(id, opts = {}) {
+  return (await identityState(id, opts)) === "alive";
 }
 
 export function readBootIdSync() {
@@ -2939,7 +2987,8 @@ export function judgePrivateInstance(f) {
     if (rec.phase === "starting" && a.owner) return { state: "starting" };
     if (rec.phase === "mounting" && a.supervisor) return { state: "mounting" };
     if ((rec.phase === "launching" || rec.phase === "setup") && a.supervisor) return { state: "launching" };
-    if (rec.phase === "session" && a.pi) return { state: "session" };
+    // r3.1 (N4 F1): a session needs its supervisor; a pi outliving P1 is an orphan (outer cleanup)
+    if (rec.phase === "session" && a.pi && a.supervisor) return { state: "session" };
     if (rec.phase === "finalizing" && a.supervisor) return { state: "finalizing" };
     if (!a.supervisor && a.gocryptfs) return { state: "orphan" };
     // Review N1 #2: members whose membership cannot be PROVEN (recycled ns id, broken ppid
@@ -2955,7 +3004,8 @@ export function judgePrivateInstance(f) {
 }
 
 /** Gather facts (all async, each ≤2 s) and judge. Never throws. */
-export async function privateInstanceState(v, { procRoot = "/proc", deadline, record: given } = {}) {
+export async function privateInstanceState(v, { procRoot = "/proc", deadline, record: given, readFile } = {}) {
+  const idOpts = readFile ? { procRoot, readFile } : { procRoot }; // `readFile`: tests inject read faults
   const dl = () => deadline ?? Date.now() + PRIVATE_BUDGET.scanMs;
   const record = given ?? (await readPrivateRecord(v, { deadline: dl() }));
   const rec = record.kind === "ok" ? record.record : undefined;
@@ -2968,14 +3018,22 @@ export async function privateInstanceState(v, { procRoot = "/proc", deadline, re
   const bootId = readBootIdSync();
   let scan;
   const alive = {};
+  let supervisorState;
   if (rec && rec.bootId === bootId) {
-    for (const k of ["owner", "supervisor", "gocryptfs", "pi"])
-      alive[k] = rec[k] ? await identityAlive(rec[k], { procRoot }) : false;
+    for (const k of ["owner", "gocryptfs", "pi"]) alive[k] = rec[k] ? await identityAlive(rec[k], idOpts) : false;
+    // review N4-r2 #1: the supervisor is three-state; "unknown" counts as alive (session, never
+    // orphan/orphan-ns, nothing signalled) and makes lock refuse
+    supervisorState = rec.supervisor ? await identityState(rec.supervisor, idOpts) : "dead";
     if (rec.ns) scan = await scanNsMembers(rec.ns.mnt, { procRoot, deadline: dl(), minStart: rec.supervisor?.start });
+    // a later scan that SEES the recorded P1 alive overrides any earlier negative reading
+    const sup = rec.supervisor;
+    if (sup && scan?.kind === "done" && scan.members.some((m) => m.pid === sup.pid && m.start === sup.start))
+      supervisorState = "alive";
+    alive.supervisor = supervisorState !== "dead";
   }
   const classes = scan?.kind === "done" ? classifyMembers(rec, scan.members, { procRoot, bootId }) : undefined;
   const verdict = judgePrivateInstance({ record, lease, bootId, scan, alive, verified: classes?.verified.length });
-  return { ...verdict, record: rec, recordKind: record.kind, lease, scan, alive, classes };
+  return { ...verdict, record: rec, recordKind: record.kind, lease, scan, alive, classes, supervisorState };
 }
 
 export function describePrivateState(name, s, v) {
@@ -3171,6 +3229,12 @@ export function lockPrivateDecision(v, view, { lazy = false, kill = false } = {}
     return { action: "plain", ...(kill ? { note: "--kill 只用于 --private 实例；按普通 lock 处理" } : {}) };
   if (view.inNs)
     return { action: "refuse", code: EXIT.BUSY, text: `${name}：不能在私有会话内部收尾自己；退出 pi 即自动收尾` };
+  if (view.supervisorState === "unknown")
+    return {
+      action: "refuse",
+      code: EXIT.BUSY,
+      text: `${name}：无法确认监督进程状态（pid ${view.record?.supervisor?.pid}，/proc 读取失败）——未执行任何操作；稍后重试，或 pi-secure status ${name}`,
+    };
   const pi = view.record?.pi ? `pi pid ${view.record.pi.pid}` : "启动中";
   const running = `${name}：会话仍在运行（${pi}）：退出 pi 后自动收尾；--lazy 摘除该命名空间里的挂载路径；--kill 结束会话并收尾`;
   switch (view.state) {
@@ -3511,15 +3575,28 @@ async function cmdPrivateTerminate(name, instanceId, budgetMs) {
     out(JSON.stringify({ ok: true, killed: [], remaining: [] }));
     return REC.OK;
   }
+  // review N4-r2 #1: outer cleanup presupposes a DEAD supervisor — re-proved here, under mount.lock
+  if (rec.supervisor) {
+    const ss = await identityState(rec.supervisor);
+    if (ss !== "dead") {
+      out(JSON.stringify({ ok: false, killed: [], remaining: [], supervisor: ss }));
+      return REC.SUPERVISOR;
+    }
+  }
   const r = await terminateInstance(rec, { deadline: Date.now() + Math.max(500, Number(budgetMs) || 0) });
   out(JSON.stringify(r));
   return r.ok ? REC.OK : REC.MEMBERS;
 }
 
-/** Signal one process iff it still is `who` (pid+start, and ns when given). */
-export function signalVerified(who, sig, { nsMnt, procRoot = "/proc", kill = process.kill.bind(process) } = {}) {
+/** Signal one process iff it still is `who` (pid+start, and mnt ns / user ns ∈ userNs when given). */
+export function signalVerified(
+  who,
+  sig,
+  { nsMnt, userNs, procRoot = "/proc", kill = process.kill.bind(process) } = {},
+) {
   if (readProcStartSync(who.pid, procRoot) !== who.start) return false;
   if (nsMnt !== undefined && readNsLinkSync(who.pid, "mnt", procRoot) !== nsMnt) return false;
+  if (userNs !== undefined && !userNs.includes(readNsLinkSync(who.pid, "user", procRoot))) return false;
   try {
     kill(who.pid, sig);
     return true;
@@ -3539,6 +3616,14 @@ export async function terminateInstance(
   const killed = [];
   let unverifiedSeen = [];
   if (rec.bootId !== bootId) return { ok: true, killed, remaining: [], unverified: [] };
+  if (!nsMnt) {
+    // no registered ns ⇒ no target can pass the member authorization: report live identities only
+    const unv = [];
+    for (const k of ["pi", "supervisor", "gocryptfs"])
+      if (rec[k] && (await identityState(rec[k], { procRoot })) !== "dead")
+        unv.push({ pid: rec[k].pid, comm: `${k}（记录无命名空间，无法证明）` });
+    return { ok: unv.length === 0, killed, remaining: [], unverified: unv };
+  }
   const collect = async () => {
     const set = new Map();
     if (nsMnt) {
@@ -3555,17 +3640,21 @@ export async function terminateInstance(
       for (const m of verified) set.set(m.pid, { pid: m.pid, start: m.start, ppid: m.ppid, comm: m.comm, ns: true });
       unverifiedSeen = unverified.map((m) => ({ pid: m.pid, comm: m.comm }));
     }
-    for (const k of ["pi", "supervisor"]) {
+    // Review N4-r2 #2: no backfill. A recorded identity (pi / supervisor / gocryptfs) that is alive
+    // but did NOT pass the full member authorization above (outside the recorded mnt ns, foreign
+    // user ns, …) is reported, never signalled; the caller keeps the record (non-zero exit).
+    for (const k of ["pi", "supervisor", "gocryptfs"]) {
       const id = rec[k];
-      if (id && !set.has(id.pid) && (await identityAlive(id, { procRoot })))
-        set.set(id.pid, { pid: id.pid, start: id.start, comm: k, ns: false });
+      if (id && !set.has(id.pid) && (await identityState(id, { procRoot })) !== "dead")
+        if (!unverifiedSeen.some((u) => u.pid === id.pid))
+          unverifiedSeen.push({ pid: id.pid, comm: `${k}（记录身份未通过命名空间/成员校验）` });
     }
-    if (gocry && !set.has(gocry.pid) && (await identityAlive(gocry, { procRoot })))
-      set.set(gocry.pid, { pid: gocry.pid, start: gocry.start, comm: "gocryptfs", ns: false });
     return { set };
   };
   const isGocry = (m) => gocry && m.pid === gocry.pid && m.start === gocry.start;
-  const sig = (m, s) => signalVerified(m, s, { nsMnt: m.ns ? nsMnt : undefined, procRoot, kill });
+  const userNs = [rec.ns?.user, rec.ns?.innerUser].filter(Boolean);
+  // every target came from the ns scan + memberAuthorized; re-verify pid+start, mnt ns and user ns
+  const sig = (m, s) => signalVerified(m, s, { nsMnt, userNs, procRoot, kill });
   const waitGone = async (ms, pred) => {
     const end = Math.min(deadline, Date.now() + ms);
     while (Date.now() < end) {
@@ -3817,6 +3906,14 @@ export async function outerPrivateCleanup(v, instanceId, { budgetMs = PRIVATE_BU
   if (t.kind === "exit" && t.code === REC.MISMATCH) {
     lines.push(`${v.name}：记录已属于另一个实例，不动它`);
     return { code: EXIT.OK, lines };
+  }
+  if (t.kind === "exit" && t.code === REC.SUPERVISOR) {
+    lines.push(
+      info.supervisor === "alive"
+        ? `${v.name}：监督进程仍在运行，未执行外部收尾（记录保留）`
+        : `${v.name}：无法确认监督进程状态，未执行外部收尾（记录保留）；稍后重试，或 pi-secure status ${v.name}`,
+    );
+    return { code: EXIT.BUSY, lines };
   }
   const left = deadline - Date.now();
   if (left < 600) {
@@ -4237,6 +4334,8 @@ async function cmdMountWork() {
     return EXIT.FAIL;
   }
   delete process.env.PI_SECURE_WORK_SPEC;
+  const delay = testWorkerDelayMs(spec?.op);
+  if (delay) await sleep(delay);
   try {
     const { vault: v } = must(resolveVault(spec.name));
     const { realMnt } = physicalPaths(v);
@@ -4738,6 +4837,8 @@ async function lazyDetach(v, realMnt, id, S, say) {
 async function finalizeInNs(v, { realMnt, id, S, say, exitCode }) {
   const deadline = Date.now() + PRIVATE_BUDGET.finalizeInNsMs;
   const hard = armHardExit(PRIVATE_BUDGET.finalizeInNsMs + PRIVATE_BUDGET.hardGraceMs, `ns 内收尾未完成（${v.name}）`);
+  const stall = testFinalizeStallMs();
+  if (stall) await sleep(stall); // TEST-ONLY (see testFinalizeStallMs): the hard backstop above still fires
   const pending = [];
   const nsMnt = readNsLinkSync("self", "mnt");
   const myStart = readProcStartSync(process.pid);

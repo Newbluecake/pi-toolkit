@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { acquireGocryptfsTestLock } from "../secure/gocryptfs-test-lock.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 const PROBE = join(REPO_ROOT, "scripts", "dev", "secure-probe.sh");
@@ -83,8 +84,13 @@ describe.skipIf(!HAVE_FUSE_STACK)(
     let out = "";
     let status: number | null = null;
     let leftover: string[] = [];
+    // secure-probe.sh makes GLOBAL gocryptfs mounts: serialize with every other real-mount suite
+    // (run --private refuses while any global fuse.gocryptfs mount exists — N4 verify Blocker)
+    let release: (() => void) | undefined;
+    afterAll(() => release?.());
 
-    beforeAll(() => {
+    beforeAll(async () => {
+      release = await acquireGocryptfsTestLock();
       const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith("secure-probe.")));
       const r = spawnSync("bash", [PROBE], {
         encoding: "utf8",
@@ -94,7 +100,7 @@ describe.skipIf(!HAVE_FUSE_STACK)(
       status = r.status;
       out = `${r.stdout}\n${r.stderr}`;
       leftover = readdirSync(tmpdir()).filter((n) => n.startsWith("secure-probe.") && !before.has(n));
-    }, 180_000);
+    }, 430_000);
 
     const lines = (prefix: string): string[] => out.split("\n").filter((l) => l.includes(` ${prefix} `));
     const group = (prefix: string, minPass: number): void => {
