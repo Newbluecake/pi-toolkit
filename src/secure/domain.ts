@@ -15,8 +15,15 @@
  */
 import { lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
-import { parseSecureConfig, pathWithin, vaultMountState, type SecureConfig, type SecureVault } from "./config.js";
+import { basename, dirname, join, resolve } from "node:path";
+import {
+  parseSecureConfig,
+  pathWithin,
+  vaultMountState,
+  type SecureConfig,
+  type SecureConfigIo,
+  type SecureVault,
+} from "./config.js";
 import { PI_SECURE_ORIG_ENV, PI_SECURE_SESSION, PI_SECURE_VAULT, origEnvSnapshot } from "./env.js";
 
 export const SECURE_DOMAIN_KEY = Symbol.for("pi-subagent:secure-domain");
@@ -26,8 +33,12 @@ export interface SecureVaultRoots {
   readonly vault: SecureVault;
   /** realpath(vault.dir) — or the resolved literal when it does not exist. */
   readonly root: string;
-  /** realpath(vault.link) — or the resolved literal. */
-  readonly linkReal: string;
+  /**
+   * The PHYSICAL mount point (private-plan §L.1): `join(realpath(dirname(mnt)), basename(mnt))` —
+   * never a realpath of the mount point itself (that would traverse/hang on a live or ENOTCONN
+   * mount). Legacy vaults keep the old derivation: `join(root, "mnt")` (§L.3).
+   */
+  readonly mntReal: string;
 }
 
 export type SecureDomain =
@@ -60,7 +71,7 @@ export interface SecureDomainDeps {
   warn?: (message: string) => void;
 }
 
-/** The derived in-vault locations for a secure domain (all under realpath(dir)/mnt/state). */
+/** The derived in-vault locations for a secure domain (all under the physical mount point). */
 export interface SecureStatePaths {
   readonly state: string;
   readonly work: string;
@@ -99,15 +110,17 @@ export function canonicalPath(p: string): string {
 }
 
 export function vaultRoots(vault: SecureVault): SecureVaultRoots {
-  return { vault, root: realpathOr(vault.dir), linkReal: realpathOr(vault.link) };
+  const root = realpathOr(vault.dir);
+  const mntReal =
+    vault.layout === "legacy" ? join(root, "mnt") : join(realpathOr(dirname(vault.mnt)), basename(vault.mnt));
+  return { vault, root, mntReal };
 }
 
 export function statePathsOf(v: SecureVaultRoots): SecureStatePaths {
-  const mnt = join(v.root, "mnt");
-  const state = join(mnt, "state");
+  const state = join(v.mntReal, "state");
   return {
     state,
-    work: join(mnt, "work"),
+    work: join(v.mntReal, "work"),
     sessions: join(state, "sessions", "default"),
     tmp: join(state, "tmp"),
     memory: join(state, "memory"),
@@ -117,24 +130,25 @@ export function statePathsOf(v: SecureVaultRoots): SecureStatePaths {
   };
 }
 
-/** True when a canonical path lies inside the vault's mount (`<root>/mnt/…`). */
+/** True when a canonical path lies inside the vault's physical mount (`<mntReal>/…`). */
 export function inVaultMount(canonical: string, v: SecureVaultRoots): boolean {
-  return pathWithin(canonical, join(v.root, "mnt"));
+  return pathWithin(canonical, v.mntReal);
 }
 
 /**
- * D3 write zone (security review P2 #1): strictly BELOW `<root>/mnt/work` or `<root>/mnt/state`.
- * Neither the two sentinel paths themselves nor any other entry at the `mnt/` root qualify — while
- * unmounted those are plain-text files/dirs on the lower filesystem.
+ * D3 write zone (security review P2 #1): strictly BELOW `<mntReal>/work` or `<mntReal>/state`.
+ * Neither the two sentinel paths themselves nor any other entry at the mount-point root qualify —
+ * while unmounted those are plain-text files on the lower filesystem.
  */
 export function inVaultWriteZone(canonical: string, v: SecureVaultRoots): boolean {
-  const mnt = join(v.root, "mnt");
-  return [join(mnt, "work"), join(mnt, "state")].some((base) => canonical !== base && pathWithin(canonical, base));
+  return [join(v.mntReal, "work"), join(v.mntReal, "state")].some(
+    (base) => canonical !== base && pathWithin(canonical, base),
+  );
 }
 
-/** True when a canonical path lies anywhere inside the vault dir (cipher, mnt, lock…). */
+/** True when a canonical path lies anywhere inside the vault dir OR its mount point (§L.2). */
 export function inVaultDir(canonical: string, v: SecureVaultRoots): boolean {
-  return pathWithin(canonical, v.root);
+  return pathWithin(canonical, v.root) || pathWithin(canonical, v.mntReal);
 }
 
 export type SecureSettingsRead =
@@ -167,10 +181,10 @@ export function readSecureSettingsRaw(path: string): SecureSettingsRead {
 }
 
 /** The settings read folded into a SecureConfig (an unreadable file is an enabled-but-invalid section). */
-export function secureConfigFromRead(read: SecureSettingsRead, home: string): SecureConfig {
+export function secureConfigFromRead(read: SecureSettingsRead, home: string, io?: SecureConfigIo): SecureConfig {
   if (read.kind === "error")
     return { present: true, enabled: true, valid: false, vaults: [], invalid: [], error: read.message };
-  return parseSecureConfig(read.kind === "ok" ? read.value : undefined, home);
+  return parseSecureConfig(read.kind === "ok" ? read.value : undefined, home, io);
 }
 
 /** An enabled `secure` section that could not be used (bad shape, unreadable or corrupt file). */
@@ -186,12 +200,21 @@ export function readProcMountinfo(): string {
   }
 }
 
+/** The real-fs legacy-layout probe (§L.3): true when `<dir>/mnt` is a directory on disk. */
+export function legacyMntDirProbe(mnt: string): boolean {
+  try {
+    return lstatSync(mnt).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Mount verdict + the plugin-side defence that `<state>` is a real directory (not the sentinel). */
 export function judgeVaultMount(
   v: SecureVaultRoots,
   readMountinfo: () => string,
 ): { ok: true } | { ok: false; reason: string } {
-  const mnt = join(v.root, "mnt");
+  const mnt = v.mntReal;
   const st = vaultMountState(readMountinfo(), mnt, join(v.root, "cipher"));
   if (st === "absent") return { ok: false, reason: `保险库 ${v.vault.name} 未挂载` };
   if (st === "foreign") return { ok: false, reason: `保险库 ${v.vault.name} 的挂载点上不是它自己的 gocryptfs 挂载` };
@@ -211,7 +234,7 @@ export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
   const home = deps.home ?? homedir();
   const settingsPath = deps.settingsPath ?? join(home, ".pi", "agent", "pi-subagent.json");
   const readMountinfo = deps.readMountinfo ?? readProcMountinfo;
-  const config = secureConfigFromRead(readSecureSettingsRaw(settingsPath), home);
+  const config = secureConfigFromRead(readSecureSettingsRaw(settingsPath), home, { legacyMntDir: legacyMntDirProbe });
   const usable = config.enabled && config.valid;
   const vaults = usable ? config.vaults.map(vaultRoots) : [];
   const envVault = env[PI_SECURE_VAULT];
@@ -323,8 +346,9 @@ export function assertSessionFileInDomain(sessionFile: string): void {
     return;
   }
   const literal = resolve(sessionFile);
-  const hit = d.vaults.find(
-    (v) => inVaultDir(canonical, v) || pathWithin(literal, v.vault.dir) || pathWithin(literal, v.vault.link),
-  );
+  const hit = d.vaults.find((v) => {
+    if (inVaultDir(canonical, v) || pathWithin(literal, v.vault.dir) || pathWithin(literal, v.vault.mnt)) return true;
+    return v.vault.legacyLink !== undefined && pathWithin(literal, v.vault.legacyLink); // review L0 #3
+  });
   if (hit) throw new Error(`普通会话不能恢复保险库 ${hit.vault.name} 内的会话文件：${sessionFile}`);
 }

@@ -12,6 +12,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -55,7 +56,7 @@ describe.skipIf(!HAVE_FUSE)("pi-secure against real gocryptfs", () => {
   let work = "";
   let state = "";
   let lock = "";
-  let link = "";
+  let lease = "";
   let passfile = "";
 
   const mounted = () =>
@@ -75,9 +76,17 @@ describe.skipIf(!HAVE_FUSE)("pi-secure against real gocryptfs", () => {
   }
 
   /** Under a pty; types the next answer at each new "Password:"/"Repeat:" prompt. */
-  function runTty(cmd: string, answers: string[], timeoutMs = 60_000): Promise<{ code: number | null; text: string }> {
+  function runTty(
+    cmd: string,
+    answers: string[],
+    timeoutMs = 60_000,
+    extraEnv: NodeJS.ProcessEnv = {},
+  ): Promise<{ code: number | null; text: string }> {
     return new Promise((resolve) => {
-      const child = spawn("script", ["-qefc", cmd, "/dev/null"], { env, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn("script", ["-qefc", cmd, "/dev/null"], {
+        env: { ...env, ...extraEnv },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
       let text = "";
       let typed = 0;
       const onData = (b: Buffer) => {
@@ -156,12 +165,13 @@ process.exit(Number(e.FAKE_PI_EXIT ?? 0));
       PI_SECURE_STALE: "must-not-reach-pi",
       PI_CODING_AGENT_SESSION_DIR: "/must/not/reach/pi",
     };
+    // §L.1 layout: metadata under <dir>, mount point ~/secure/acme
     dir = join(home, ".local", "share", "pi-toolkit-secure", "acme");
-    mnt = join(dir, "mnt");
+    mnt = join(home, "secure", "acme");
     work = join(mnt, "work");
     state = join(mnt, "state");
     lock = join(dir, "mount.lock");
-    link = join(home, "secure", "acme");
+    lease = join(dir, "mount.lease");
     passfile = join(root, "pf");
     writeFileSync(passfile, `${FAKE_PW}\n`, { mode: 0o600 });
   });
@@ -190,11 +200,16 @@ process.exit(Number(e.FAKE_PI_EXIT ?? 0));
     expect(plain).toContain("clear");
     expect(plain).toContain("tmux clear-history");
     expect(JSON.parse(readFileSync(join(home, ".pi", "agent", "pi-subagent.json"), "utf8"))).toEqual({
-      secure: { vaults: { acme: { dir, link } } },
+      secure: { vaults: { acme: { dir, mnt } } },
     });
     expect(mounted()).toBe(false);
+    // §L.1: the mount point is a real 0700 dir holding exactly the two sentinels; no entry symlink
     expect(readdirSync(mnt).sort()).toEqual(["state", "work"]);
-    expect(spawnSync("readlink", [link], { encoding: "utf8" }).stdout.trim()).toBe(work);
+    expect(lstatSync(mnt).isSymbolicLink()).toBe(false);
+    expect(spawnSync("cd", [work], { shell: "/bin/sh" }).status).not.toBe(0); // sentinel: cd fails
+    const leaseSt = lstatSync(lease);
+    expect(leaseSt.isFile()).toBe(true);
+    expect(leaseSt.mode & 0o777).toBe(0o600);
     // the master key is never persisted by the launcher
     const grep = spawnSync("grep", ["-rlF", key!, home], { encoding: "utf8" });
     expect(grep.stdout).toBe("");
@@ -219,7 +234,7 @@ process.exit(Number(e.FAKE_PI_EXIT ?? 0));
     expect(again.code, again.err).toBe(0);
     expect(again.out).toContain("已挂载");
     const st = run(["status", "acme"]);
-    expect(st.out).toMatch(/acme: mounted {2}layout ok {2}link ok/);
+    expect(st.out).toMatch(new RegExp(`acme: mounted {2}layout ok {2}mnt ${mnt.replace(/\./g, "\\.")}$`, "m"));
   }, 60_000);
 
   it("run (already mounted): pi is a child with the contract env, -C cwd, --session-dir first; exit code is pi's; finalize unmounts", () => {
@@ -494,6 +509,24 @@ process.exit(Number(e.FAKE_PI_EXIT ?? 0));
     expect(ok.code, ok.err).toBe(0);
     expect(mounted()).toBe(false);
   }, 60_000);
+
+  it("review #2/r2 A3: an injected post-mount identity failure rolls the FRESH mount back (fusermount3 -u)", async () => {
+    expect(mounted()).toBe(false);
+    // gocryptfs really mounts; the post-mount identity check is forced to fail inside __mount;
+    // doMount then throws and unlockVault MUST probe + unmount what this call created.
+    const r = await runTty(`${BIN} unlock acme`, [FAKE_PW], 60_000, { PI_SECURE_TEST_MOUNT_VERIFY_FAIL: "1" });
+    expect(r.code, r.text).toBe(1);
+    expect(r.text).toContain("TEST 注入");
+    expect(r.text).toContain("本次挂载已撤销");
+    expect(mounted()).toBe(false);
+    const st = run(["status", "acme"]);
+    expect(st.out).toMatch(/acme: locked/); // nothing left mounted
+    // the vault is still perfectly usable afterwards
+    const again = await runTty(`${BIN} unlock acme`, [FAKE_PW]);
+    expect(again.code, again.text).toBe(0);
+    expect(mounted()).toBe(true);
+    unmountDirect();
+  }, 90_000);
 
   it("wrong password three times through the real gocryptfs ⇒ exit 77, nothing mounted, lock free", async () => {
     const r = await runTty(`${BIN} unlock acme`, ["wrong-1", "wrong-2", "wrong-3"]);

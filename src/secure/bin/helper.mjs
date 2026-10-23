@@ -1,5 +1,7 @@
 // pi-secure helper — the Node half of the `pi-secure` launcher (docs/dev/data-encryption/plan.md §2,
-// P1). Plain ESM, ZERO dependencies beyond Node ≥22 built-ins; it is run straight from `src/` (git
+// P1 + private-plan §L layout: metadata in `<dir>` (default ~/.local/share/pi-toolkit-secure/<name>/),
+// mount point `~/secure/<name>/` with work/state sentinels; legacy entries are read-only compat).
+// Plain ESM, ZERO dependencies beyond Node ≥22 built-ins; it is run straight from `src/` (git
 // installs have no build step) and never imports the TypeScript plugin. The shared configuration /
 // mount-state rules are re-implemented here on purpose and kept in lockstep with
 // `src/secure/config.ts` by the parity fixture `tests/fixtures/secure-contract-parity.json`.
@@ -69,28 +71,57 @@ export function expandSecurePath(raw, home) {
 export function defaultVaultDir(name, home) {
   return path.join(home, ".local", "share", "pi-toolkit-secure", name);
 }
-export function defaultVaultLink(name, home) {
+export function defaultVaultMnt(name, home) {
   return path.join(home, "secure", name);
 }
 
-export function deriveVault(name, dir, link) {
+/** New layout (private-plan §L.1): the mount point IS `<mnt>` — no entry symlink. */
+export function deriveVault(name, dir, mnt) {
+  const state = path.join(mnt, "state");
+  return {
+    name,
+    dir,
+    mnt,
+    cipher: path.join(dir, "cipher"),
+    work: path.join(mnt, "work"),
+    state,
+    sessionDir: path.join(state, "sessions", "default"),
+    lock: path.join(dir, "mount.lock"),
+    lease: path.join(dir, "mount.lease"),
+  };
+}
+
+/** Pre-L0 layout (§L.3, read-only compat): mount point `<dir>/mnt`, derived exactly as before.
+ *  `legacyLink` keeps the old entry address (review L0 #3) for D4's known-address set. */
+export function deriveLegacyVault(name, dir, legacyLink) {
   const mnt = path.join(dir, "mnt");
   const state = path.join(mnt, "state");
   return {
     name,
     dir,
-    link,
-    cipher: path.join(dir, "cipher"),
     mnt,
+    cipher: path.join(dir, "cipher"),
     work: path.join(mnt, "work"),
     state,
     sessionDir: path.join(state, "sessions", "default"),
     lock: path.join(dir, "mount.lock"),
+    lease: path.join(dir, "mount.lease"),
+    layout: "legacy",
+    legacyLink,
   };
 }
 
+/** Default disk probe for §L.3 legacy recognition: true when `<dir>/mnt` is a directory. */
+export function legacyMntDirProbe(mnt) {
+  try {
+    return fs.lstatSync(mnt).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Parse the WHOLE settings-file object (not just `secure`). Never throws. Same shape as config.ts. */
-export function parseSecureConfig(settings, home) {
+export function parseSecureConfig(settings, home, io) {
   if (!isPlainObject(settings) || !("secure" in settings) || settings.secure === undefined)
     return { present: false, enabled: true, valid: true, vaults: [], invalid: [] };
   const section = settings.secure;
@@ -125,12 +156,25 @@ export function parseSecureConfig(settings, home) {
       invalid.push({ name, reason: "dir" });
       continue;
     }
-    const link = entry.link === undefined ? defaultVaultLink(name, home) : expandSecurePath(entry.link, home);
-    if (link === undefined) {
-      invalid.push({ name, reason: "link" });
+    const oldDefaultLink = defaultVaultMnt(name, home);
+    // Legacy recognition (§L.3): a `link` key always means the pre-L0 layout; an entry without
+    // `mnt` whose `<dir>/mnt` exists as a directory on disk does too. The link VALUE only feeds
+    // D4's known-address set (review L0 #3), never validated as a vault.
+    if (entry.link !== undefined) {
+      vaults.push(deriveLegacyVault(name, dir, expandSecurePath(entry.link, home) ?? oldDefaultLink));
       continue;
     }
-    vaults.push(deriveVault(name, dir, link));
+    const mntExplicit = entry.mnt !== undefined;
+    const mnt = mntExplicit ? expandSecurePath(entry.mnt, home) : defaultVaultMnt(name, home);
+    if (mnt === undefined) {
+      invalid.push({ name, reason: "mnt" });
+      continue;
+    }
+    if (!mntExplicit && (io?.legacyMntDir ?? legacyMntDirProbe)(path.join(dir, "mnt")) === true) {
+      vaults.push(deriveLegacyVault(name, dir, oldDefaultLink));
+      continue;
+    }
+    vaults.push(deriveVault(name, dir, mnt));
   }
   return { present: true, enabled, valid: true, vaults, invalid };
 }
@@ -203,7 +247,11 @@ export function realpathNearest(p) {
   }
 }
 
-/** Real (physical) mnt / cipher paths derived from realpath(dir) — never realpaths through a (stale) mount. */
+/**
+ * Real (physical) mnt / cipher paths (§L.1): `realMnt = join(realpath(dirname(mnt)), basename(mnt))` —
+ * NEVER a realpath of the mount point itself (that would traverse or hang on a live/ENOTCONN
+ * mount). Legacy vaults (§L.3) keep the old derivation `join(realDir, "mnt")`.
+ */
 export function physicalPaths(v, realDir) {
   if (realDir === undefined) {
     try {
@@ -212,7 +260,19 @@ export function physicalPaths(v, realDir) {
       realDir = path.resolve(v.dir);
     }
   }
-  return { realDir, realMnt: path.join(realDir, "mnt"), realCipher: path.join(realDir, "cipher") };
+  if (v.layout === "legacy")
+    return { realDir, realMnt: path.join(realDir, "mnt"), realCipher: path.join(realDir, "cipher") };
+  let parent;
+  try {
+    parent = fs.realpathSync(path.dirname(v.mnt));
+  } catch {
+    parent = path.resolve(path.dirname(v.mnt));
+  }
+  return {
+    realDir,
+    realMnt: path.join(parent, path.basename(v.mnt)),
+    realCipher: path.join(realDir, "cipher"),
+  };
 }
 
 export const PROBE_MAX_MS = 2_000;
@@ -369,7 +429,7 @@ export function assertWritableSettingsFile(file, uid = process.getuid()) {
 }
 
 /** Re-read → merge → write, all inside the settings lock (see withSettingsLock). */
-export function registerVaultUnlocked(name, dir, link, home = homeDir()) {
+export function registerVaultUnlocked(name, dir, mnt, home = homeDir()) {
   const file = settingsFilePath(home);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const st = assertWritableSettingsFile(file);
@@ -382,7 +442,7 @@ export function registerVaultUnlocked(name, dir, link, home = homeDir()) {
   const secure = { ...(root.secure ?? {}) };
   if (secure.vaults !== undefined && !isPlainObject(secure.vaults))
     throw new Error(`拒绝改写设置文件：${file} 的 secure.vaults 不是对象`);
-  secure.vaults = { ...(secure.vaults ?? {}), [name]: { dir, link } };
+  secure.vaults = { ...(secure.vaults ?? {}), [name]: { dir, mnt } };
   const next = { ...root, secure };
   writeFileAtomic(file, JSON.stringify(next, null, 2) + "\n", settingsWriteMode(st));
 }
@@ -394,7 +454,7 @@ export function registerVaultUnlocked(name, dir, link, home = homeDir()) {
  * Protocol for other writers (P2 `persistSettingOverride`): take an exclusive flock(2) on the same
  * file for the whole re-read → merge → rename.
  */
-export function registerVault(name, dir, link, home = homeDir()) {
+export function registerVault(name, dir, mnt, home = homeDir()) {
   const lockFile = settingsLockPath(home);
   fs.mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
   const fd = fs.openSync(lockFile, fsc.O_RDONLY | fsc.O_CREAT | fsc.O_NOFOLLOW | fsc.O_NONBLOCK, 0o600);
@@ -418,7 +478,7 @@ export function registerVault(name, dir, link, home = homeDir()) {
       "__register",
       name,
       dir,
-      link,
+      mnt,
     ],
     {
       encoding: "utf8",
@@ -454,7 +514,7 @@ export function resolveVault(name, { allowUnregistered = false, home = homeDir()
   if (allowUnregistered)
     return {
       kind: "ok",
-      vault: deriveVault(name, defaultVaultDir(name, home), defaultVaultLink(name, home)),
+      vault: deriveVault(name, defaultVaultDir(name, home), defaultVaultMnt(name, home)),
       registered: false,
       enabled: cfg.enabled,
     };
@@ -465,14 +525,120 @@ export function resolveVault(name, { allowUnregistered = false, home = homeDir()
   };
 }
 
-// ───────────────────────────── layout / sentinels (§2.1) ─────────────────────────────
+// ───────────────────────────── layout / sentinels (§L.1) ─────────────────────────────
 
 function ownPrivateDir(st, uid) {
   return st && st.isDirectory() && !st.isSymbolicLink() && st.uid === uid && (st.mode & 0o077) === 0;
 }
 
-/** Problems with the on-disk layout. `mounted` skips the sentinel checks (the mount hides them). */
-export function checkLayout(v, { mounted = false, uid = process.getuid() } = {}) {
+/** Physical address of `p` for the position rules (security review L0 #1): realpath of the nearest
+ *  EXISTING ancestor + the remaining tail. Safe for mount points (never realpaths the mount itself:
+ *  if it exists, its PARENT chain is resolved instead — see physMnt) and for metadata dirs. */
+function physAddress(p) {
+  return realpathNearest(p);
+}
+
+/** Physical mount-point address: resolve the parent chain, keep the last component literal —
+ *  NEVER realpath `<mnt>` itself (a live or ENOTCONN mount would be traversed or hang). */
+function physMnt(mnt) {
+  return path.join(realpathNearest(path.dirname(mnt)), path.basename(mnt));
+}
+
+/** §L.1 position rules shared by checkLayout and createLayout (security review L0 #1):
+ *  BOTH the lexical and the PHYSICAL address of every side are compared — a parent-dir symlink
+ *  (e.g. ~/agent-alias → ~/.pi/agent) must not smuggle a mount point into a forbidden zone.
+ *  Containment is checked in BOTH directions for all {new.mnt, new.dir} × {other.mnt, other.dir}
+ *  pairs (A contains B and B contains A), plus the pi agent dir (also realpath-normalized). */
+export function positionProblems(v, others = [], home = homeDir()) {
+  const problems = [];
+  const mine = {
+    lex: { mnt: path.resolve(v.mnt), dir: path.resolve(v.dir) },
+    phys: { mnt: physMnt(v.mnt), dir: physAddress(v.dir) },
+  };
+  /** True when a ⊆ b or b ⊆ a. */
+  const nested = (a, b) => pathWithin(a, b) || pathWithin(b, a);
+  if (nested(mine.lex.mnt, mine.lex.dir) || nested(mine.phys.mnt, mine.phys.dir))
+    problems.push(`挂载点 ${v.mnt} 与元数据目录 ${v.dir} 不得互相包含`);
+  for (const o of others) {
+    if (o.name === v.name) continue;
+    const theirs = {
+      lex: { mnt: path.resolve(o.mnt), dir: path.resolve(o.dir) },
+      phys: { mnt: physMnt(o.mnt), dir: physAddress(o.dir) },
+    };
+    let hit = false;
+    for (const fam of ["lex", "phys"])
+      for (const a of ["mnt", "dir"])
+        for (const b of ["mnt", "dir"]) if (nested(mine[fam][a], theirs[fam][b])) hit = true;
+    if (hit) problems.push(`挂载点/目录与保险库 ${o.name}（${o.mnt} / ${o.dir}）重叠`);
+  }
+  const agentLex = path.resolve(piAgentDir(home));
+  let agentPhys;
+  try {
+    agentPhys = fs.realpathSync(agentLex);
+  } catch {
+    agentPhys = realpathNearest(agentLex);
+  }
+  if (
+    nested(mine.lex.mnt, agentLex) ||
+    nested(mine.lex.dir, agentLex) ||
+    nested(mine.phys.mnt, agentPhys) ||
+    nested(mine.phys.dir, agentPhys)
+  )
+    problems.push(`挂载点/目录不得位于 pi agent 目录（${agentLex}）内或包含它`);
+  return problems;
+}
+
+/**
+ * §L.1 ancestor rules for `<mnt>` (security review L0 #2 + r2 ruling A1): the WHOLE chain from the
+ * mount point's parent up to AND INCLUDING `/` must be trustworthy — every level (on the physical
+ * path; a symlink level is rejected outright so the lexical chain equals the physical one) must be
+ * a real directory, owned by this uid or root, and NOT writable by group/other. The ONLY exception
+ * to the write rule is a root-owned directory with the sticky bit (like /tmp: only the child's
+ * owner may rename it, so another uid cannot swap our subtree). There is NO unconditional HOME
+ * exemption: $HOME itself (e.g. a group-writable shared home) and every ancestor up to / are
+ * checked like any other level. A violation reports the level and the reason. Legacy vaults skip
+ * this check. `deps.lstat` is a test seam (defaults to fs.lstatSync).
+ */
+export function mntAncestorProblems(v, uid = process.getuid(), deps = {}) {
+  const lstat = deps.lstat ?? ((p) => fs.lstatSync(p));
+  const problems = [];
+  let cur = path.dirname(path.resolve(v.mnt));
+  for (let i = 0; i < 128; i++) {
+    let st = null;
+    try {
+      st = lstat(cur);
+    } catch {
+      problems.push(`${cur} 不存在（挂载点祖先目录须已存在；缺省 ~/secure 由 init 自动创建）`);
+      break;
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      problems.push(`${cur} 须为真实目录（不得是符号链接/文件）`);
+      break;
+    }
+    if (st.uid !== uid && st.uid !== 0) {
+      problems.push(`${cur} 属于其他用户（uid ${st.uid}），不可作为挂载点祖先（须为本用户或 root）`);
+      break;
+    }
+    const sticky = (st.mode & 0o1000) !== 0;
+    if ((st.mode & 0o022) !== 0 && !(st.uid === 0 && sticky)) {
+      problems.push(
+        `${cur} 对组/其他可写${sticky ? "但属主非 root" : "且无 sticky 位"}，其他用户可替换其下的路径，拒绝`,
+      );
+      break;
+    }
+    if (cur === path.dirname(cur)) break; // reached "/"
+    cur = path.dirname(cur);
+  }
+  return problems;
+}
+
+/**
+ * Problems with the on-disk layout. `mounted` skips the sentinel checks (the mount hides them).
+ * New layout: `<dir>` side (cipher/conf/lock/lease) + `<mnt>` side (0700 dir, sentinels when
+ * unmounted, parent rule, position rules). Legacy (§L.3): exactly the old checks — no lease and no
+ * parent/position rules; when a legacy vault is mounted its sentinels are hidden as well.
+ */
+export function checkLayout(v, { mounted = false, uid = process.getuid(), others = [], home = homeDir() } = {}) {
   const problems = [];
   const d = lstatOrNull(v.dir);
   if (!d) return { exists: false, problems: [`${v.dir} 不存在`] };
@@ -483,6 +649,13 @@ export function checkLayout(v, { mounted = false, uid = process.getuid() } = {})
   if (!conf || !conf.isFile()) problems.push(`${v.cipher}/gocryptfs.conf 缺失（init 未完成）`);
   const lock = lstatOrNull(v.lock);
   if (lock && !lock.isFile()) problems.push(`${v.lock} 须为普通文件`);
+  if (v.layout !== "legacy") {
+    const lease = lstatOrNull(v.lease);
+    if (!lease) problems.push(`${v.lease} 缺失（mount.lease 由 init 创建）`);
+    else if (!lease.isFile() || lease.isSymbolicLink() || lease.uid !== uid || (lease.mode & 0o777) !== 0o600)
+      problems.push(`${v.lease} 须为本用户的 0600 普通文件`);
+    problems.push(...positionProblems(v, others, home));
+  }
   if (!mounted) {
     const m = lstatOrNull(v.mnt);
     if (!ownPrivateDir(m, uid)) problems.push(`${v.mnt} 须为本用户的 0700 目录`);
@@ -494,7 +667,10 @@ export function checkLayout(v, { mounted = false, uid = process.getuid() } = {})
         problems.push(`${v.mnt} 不可读：${e && e.code}`);
       }
       const extra = names.filter((n) => n !== "work" && n !== "state");
-      if (extra.length) problems.push(`${v.mnt} 下有多余条目：${extra.slice(0, 10).join(", ")}`);
+      if (extra.length)
+        problems.push(
+          `${v.mnt} 下有多余条目：${extra.slice(0, 10).join(", ")}（可能是锁定期间写进挂载点底层的明文，人工检查）`,
+        );
       for (const n of ["work", "state"]) {
         const s = lstatOrNull(path.join(v.mnt, n));
         if (!s) problems.push(`哨兵 ${v.mnt}/${n} 缺失`);
@@ -503,29 +679,59 @@ export function checkLayout(v, { mounted = false, uid = process.getuid() } = {})
       }
     }
   }
+  if (v.layout !== "legacy") problems.push(...mntAncestorProblems(v, uid));
   return { exists: true, problems };
 }
 
-function linkState(v) {
-  const s = lstatOrNull(v.link);
-  if (!s) return "missing";
-  if (!s.isSymbolicLink()) return "not-a-link";
-  try {
-    return fs.readlinkSync(v.link) === v.work ? "ok" : "other-target";
-  } catch {
-    return "unreadable";
-  }
+/**
+ * Security review L0 #4: recovery hint for an interrupted init — the new layout leaves BOTH the
+ * metadata dir and the mount point behind. Commands only; nothing is auto-deleted, and the mount
+ * point must be confirmed unmounted and sentinel-only before removal (extra entries are listed for
+ * MANUAL inspection — they may be plaintext written under the mount point while locked).
+ */
+export function initCleanupHint(v) {
+  return (
+    `  清理（自行确认后执行）：确认未挂载、${v.mnt} 内只有 work/state 两个哨兵文件且无要保留的数据后，` +
+    `删除元数据目录 ${v.dir} 与挂载点目录 ${v.mnt}，再 pi-secure init ${v.name}`
+  );
 }
 
-/** Create the §2.1 layout for a fresh vault (dir must not exist). Throws on any problem. */
-export function createLayout(v) {
+/** The §L.3 read-only-compat refusal text for legacy-layout vaults. */
+export function legacyRefusal(v) {
+  return (
+    `保险库 ${v.name} 使用旧布局（挂载点 ${v.mnt}）。` +
+    `没有真实数据：pi-secure 登记项与目录删除后重新 init；` +
+    `有真实数据：pi-secure export ${v.name} <文件> 后 pi-secure import <文件> <新名字>（新布局，会话与 sessionDir 自动迁址），确认无误再删除旧库。`
+  );
+}
+
+function requireNewLayout(v) {
+  if (v.layout === "legacy") throw new CliError(EXIT.CONFIG, legacyRefusal(v));
+}
+
+/** Create the §L.1 layout for a fresh vault (dir and mnt must not exist). Throws on any problem. */
+export function createLayout(v, { others = [], home = homeDir() } = {}) {
   if (lstatOrNull(v.dir))
-    throw new Error(`${v.dir} 已存在——保险库已初始化，或上次 init 未完成（确认无用后删除该目录再 init）`);
-  const ls = linkState(v);
-  if (ls !== "missing" && ls !== "ok") throw new Error(`入口路径 ${v.link} 已被占用（${ls}）；换一个 --path`);
+    throw new CliError(EXIT.FAIL, `${v.dir} 已存在——保险库已初始化，或上次 init 未完成（确认无用后删除该目录再 init）`);
+  if (lstatOrNull(v.mnt))
+    throw new CliError(
+      EXIT.CONFIG,
+      `挂载点 ${v.mnt} 已存在——init 不会接管已有目录；确认无用后删除，或用 --path 换一个位置`,
+    );
+  const pos = positionProblems(v, others, home);
+  if (pos.length) throw new CliError(EXIT.CONFIG, `位置检查失败，拒绝 init：\n  - ${pos.join("\n  - ")}`);
+  if (!lstatOrNull(path.dirname(v.mnt))) {
+    if (v.mnt !== defaultVaultMnt(v.name, home))
+      throw new CliError(
+        EXIT.CONFIG,
+        `挂载点父目录 ${path.dirname(v.mnt)} 不存在（仅缺省 ~/secure 会自动创建，其他位置请先自建）`,
+      );
+    fs.mkdirSync(path.dirname(v.mnt), { recursive: true, mode: 0o700 });
+  }
+  const pp = mntAncestorProblems(v, process.getuid());
+  if (pp.length) throw new CliError(EXIT.CONFIG, `挂载点祖先目录检查失败：\n  - ${pp.join("\n  - ")}`);
   fs.mkdirSync(path.dirname(v.dir), { recursive: true, mode: 0o700 });
   fs.mkdirSync(v.dir, { mode: 0o700 });
-  fs.chmodSync(v.dir, 0o700);
   fs.mkdirSync(v.cipher, { mode: 0o700 });
   fs.mkdirSync(v.mnt, { mode: 0o700 });
   for (const n of ["work", "state"]) {
@@ -534,14 +740,7 @@ export function createLayout(v) {
     fs.chmodSync(f, 0o400);
   }
   fs.closeSync(fs.openSync(v.lock, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600));
-}
-
-export function createLink(v) {
-  const ls = linkState(v);
-  if (ls === "ok") return;
-  if (ls !== "missing") throw new Error(`入口路径 ${v.link} 已被占用（${ls}）`);
-  fs.mkdirSync(path.dirname(v.link), { recursive: true, mode: 0o700 });
-  fs.symlinkSync(v.work, v.link);
+  fs.closeSync(fs.openSync(v.lease, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600));
 }
 
 /**
@@ -1228,11 +1427,14 @@ function requireTty(what) {
 }
 
 const USAGE = `用法：
-  pi-secure init <name> [--path <入口链接>] [--fix-settings]
+  pi-secure init <name> [--path <挂载点>] [--fix-settings]
   pi-secure unlock <name>
   pi-secure lock <name> [--lazy]
   pi-secure status [<name>]
   pi-secure run <name> [-C <子目录>] [pi 参数…]
+布局（private-plan §L.1）：元数据在 ~/.local/share/pi-toolkit-secure/<name>/（cipher、mount.lock、mount.lease），
+挂载点是 ~/secure/<name>/（0700 目录；未挂载时 work/state 是两个哨兵文件），项目根 ~/secure/<name>/work。
+--path 指定挂载点位置（绝对路径或 ~/ 开头）。
 说明见 docs/dev/data-encryption/plan.md §2.2（run 之后的参数原样交给 pi 解析；"--" 之后全部是消息）`;
 
 /** Run gocryptfs with the TTY inherited; resolves to its exit code. */
@@ -1261,9 +1463,148 @@ async function waitMountState(v, want, ms) {
   }
 }
 
+/** Linux glibc makedev (enough for the small fuse devices mountinfo reports). */
+export function devFromMajMin(maj, min) {
+  return (min & 0xff) | ((maj & 0xfff) << 8) | ((min & ~0xff) << 12) | Number(BigInt(maj & ~0xfff) << 32n);
+}
+
+export function pinMountPoint(v) {
+  let fd;
+  try {
+    fd = fs.openSync(v.mnt, fsc.O_RDONLY | fsc.O_DIRECTORY | fsc.O_NOFOLLOW);
+  } catch (e) {
+    throw new CliError(
+      EXIT.FAIL,
+      `无法固定挂载点身份（open ${v.mnt}：${(e && e.code) || (e && e.message)}），拒绝挂载`,
+    );
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isDirectory()) throw new Error("not a directory");
+    // The PHYSICAL path now (pre-mount: safe to realpath) and the parent's identity — the r2
+    // ruling's provable pin: post-mount we re-read /proc/self/fd/<fd> (fd links follow RENAMES)
+    // and the parent's dev/ino to prove the mount landed on the very inode we validated.
+    const real = fs.realpathSync(v.mnt);
+    const parent = fs.statSync(path.dirname(v.mnt));
+    return {
+      fd,
+      dev: st.dev,
+      ino: st.ino,
+      path: real,
+      parent: { dev: parent.dev, ino: parent.ino },
+      closed: false,
+    };
+  } catch (e) {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* ignore */
+    }
+    throw new CliError(EXIT.FAIL, `无法固定挂载点身份（fstat ${v.mnt}：${(e && e.message) || e}），拒绝挂载`);
+  }
+}
+
+export function closeMountPointPin(pin) {
+  if (!pin || pin.closed) return;
+  pin.closed = true;
+  try {
+    fs.closeSync(pin.fd);
+  } catch {
+    /* already gone */
+  }
+}
+
+/** The path still resolves to the pinned inode? (rename swaps change (dev,ino)). */
+export function mountPointPinStillValid(v, pin) {
+  let st;
+  try {
+    st = fs.lstatSync(v.mnt);
+  } catch (e) {
+    throw new CliError(
+      EXIT.FAIL,
+      `挂载点 ${v.mnt} 在解锁过程中消失（${(e && e.code) || e}），拒绝继续；请 pi-secure status ${v.name}`,
+    );
+  }
+  if (!st.isDirectory() || st.dev !== pin.dev || st.ino !== pin.ino)
+    throw new CliError(
+      EXIT.FAIL,
+      `挂载点 ${v.mnt} 在解锁过程中被替换（dev/ino 变化），拒绝继续；人工检查后 pi-secure status ${v.name}`,
+    );
+  return true;
+}
+
+/** The maj:min of the LAST mountinfo line at `realMnt` (raw field 3, octal escapes decoded for the path). */
+export function mountinfoDevAt(mountinfo, realMnt) {
+  let majMin;
+  for (const line of mountinfo.split("\n")) {
+    const sepAt = line.indexOf(" - ");
+    if (sepAt < 0) continue;
+    const pre = line.slice(0, sepAt).split(" ");
+    if (pre.length < 5) continue;
+    if (decodeMountinfoField(pre[4]) === realMnt) majMin = pre[2];
+  }
+  return majMin;
+}
+
+export function verifyMountPointIdentity(v, pin, deps = {}) {
+  if (process.env.PI_SECURE_TEST_MOUNT_VERIFY_FAIL === "1")
+    throw new CliError(EXIT.FAIL, `TEST 注入：挂载点身份核验失败（${v.mnt}）`);
+  try {
+    const { realCipher } = physicalPaths(v);
+    const readMountinfo = deps.readMountinfo ?? (() => fs.readFileSync("/proc/self/mountinfo", "utf8"));
+    const stat = deps.stat ?? ((p) => fs.statSync(p));
+    const readlink = deps.readlink ?? ((p) => fs.readlinkSync(p));
+    const mountinfo = readMountinfo();
+    // (a) the pinned inode still sits at the pinned PHYSICAL path — fd links follow renames, so a
+    //     swap during the mount window shows up here; this is what binds the kernel's mount to OUR pin.
+    let fdPath;
+    try {
+      fdPath = readlink(`/proc/self/fd/${pin.fd}`);
+    } catch (e) {
+      throw new CliError(
+        EXIT.FAIL,
+        `挂载点身份核验失败：无法读取 pin fd 的当前路径（${(e && e.message) || e}），拒绝使用`,
+      );
+    }
+    if (fdPath !== pin.path)
+      throw new CliError(
+        EXIT.FAIL,
+        `挂载点在挂载过程中被改名/替换（pin 现指向 ${fdPath}，预期 ${pin.path}），拒绝使用`,
+      );
+    // (b) mountinfo carries OUR gocryptfs mount at exactly that physical path.
+    const line = parseMountinfo(mountinfo).find(
+      (e) => e.mountPoint === pin.path && e.fsType === GOCRYPTFS_FSTYPE && e.source === realCipher,
+    );
+    if (!line)
+      throw new CliError(
+        EXIT.FAIL,
+        `挂载后 mountinfo 里没有 ${pin.path} 的 gocryptfs 条目（source ${realCipher}），请 pi-secure status ${v.name}`,
+      );
+    // (c) the parent directory's identity is unchanged.
+    const parent = stat(path.dirname(v.mnt));
+    if (parent.dev !== pin.parent.dev || parent.ino !== pin.parent.ino)
+      throw new CliError(EXIT.FAIL, `挂载点父目录（${path.dirname(v.mnt)}）身份变化，拒绝使用`);
+    // (+) the path now HOSTS that mount: its device equals the mountinfo line's fuse maj:min.
+    const st = stat(v.mnt);
+    const majMin = mountinfoDevAt(mountinfo, pin.path);
+    if (majMin === undefined || !/^\d+:\d+$/.test(majMin))
+      throw new CliError(EXIT.FAIL, `无法从 mountinfo 解析 ${pin.path} 的设备号，拒绝使用该挂载`);
+    const [maj, min] = majMin.split(":").map(Number);
+    if (st.dev !== devFromMajMin(maj, min))
+      throw new CliError(
+        EXIT.FAIL,
+        `挂载点身份核验失败：${v.mnt} 当前设备 ${st.dev} ≠ mountinfo 的 ${majMin}——路径可能在挂载中被替换，拒绝使用`,
+      );
+    return true;
+  } finally {
+    closeMountPointPin(pin);
+  }
+}
+
 /** Inner half of a mount, executed by the outer launcher UNDER `flock -o mount.lock`. */
 async function cmdInnerMount(name) {
   const { vault: v } = must(resolveVault(name));
+  requireNewLayout(v); // §L.3: legacy vaults never mount again
   let st = await probeMountState(v);
   if (st === "mounted") return INNER_ALREADY;
   if (st === "hung")
@@ -1275,42 +1616,49 @@ async function cmdInnerMount(name) {
     st = await probeMountState(v);
     if (st !== "absent") throw new CliError(EXIT.FAIL, `无法清理失效挂载 ${v.mnt}：fusermount3 -uz ${v.mnt}`);
   }
-  const lay = checkLayout(v, { mounted: false });
+  const lay = checkLayout(v, { mounted: false, others: otherRegisteredVaults(v) });
   if (lay.problems.length)
-    throw new CliError(EXIT.FAIL, `布局校验失败，拒绝挂载：\n  - ${lay.problems.join("\n  - ")}`);
+    throw new CliError(EXIT.CONFIG, `布局校验失败，拒绝挂载：\n  - ${lay.problems.join("\n  - ")}`);
   requireTty("解锁");
-  for (let attempt = 1; attempt <= PASSWORD_TRIES; attempt++) {
-    // Password: typed into gocryptfs directly (stdio inherited); we never see it.
-    const code = await runInherited("gocryptfs", ["-nonempty", "--", v.cipher, v.mnt], {
-      timeoutMs: MOUNT_ATTEMPT_TIMEOUT_MS,
-    });
-    if (code === 0) {
-      const now = await waitMountState(v, "mounted", 3_000);
-      if (now !== "mounted")
-        throw new CliError(EXIT.FAIL, `gocryptfs 返回成功，但 mountinfo 不符（${now}），请 pi-secure status ${name}`);
-      return 0;
-    }
-    if (code === 12) {
-      if (attempt < PASSWORD_TRIES) {
-        err(`口令错误（${attempt}/${PASSWORD_TRIES}）`);
-        await sleep(RETRY_DELAYS_MS[attempt - 1]);
-        continue;
+  const pin = pinMountPoint(v); // security review L0 #2: identity fixed right before mounting
+  try {
+    for (let attempt = 1; attempt <= PASSWORD_TRIES; attempt++) {
+      mountPointPinStillValid(v, pin); // re-checked before EVERY attempt (incl. password retries)
+      // Password: typed into gocryptfs directly (stdio inherited); we never see it.
+      const code = await runInherited("gocryptfs", ["-nonempty", "--", v.cipher, v.mnt], {
+        timeoutMs: MOUNT_ATTEMPT_TIMEOUT_MS,
+      });
+      if (code === 0) {
+        const now = await waitMountState(v, "mounted", 3_000);
+        if (now !== "mounted")
+          throw new CliError(EXIT.FAIL, `gocryptfs 返回成功，但 mountinfo 不符（${now}），请 pi-secure status ${name}`);
+        verifyMountPointIdentity(v, pin); // the path now hosts exactly the matched mount
+        return 0;
       }
-      throw new CliError(EXIT.BAD_PASSWORD, `口令连续错误 ${PASSWORD_TRIES} 次`);
+      if (code === 12) {
+        if (attempt < PASSWORD_TRIES) {
+          err(`口令错误（${attempt}/${PASSWORD_TRIES}）`);
+          await sleep(RETRY_DELAYS_MS[attempt - 1]);
+          continue;
+        }
+        throw new CliError(EXIT.BAD_PASSWORD, `口令连续错误 ${PASSWORD_TRIES} 次`);
+      }
+      const why =
+        code === 10
+          ? "挂载点非空"
+          : code === 19
+            ? "挂载点不可写"
+            : code === 23
+              ? "gocryptfs.conf 无法读取"
+              : code >= 128
+                ? "被中断"
+                : `exit ${code}`;
+      throw new CliError(EXIT.FAIL, `gocryptfs 挂载失败（${why}）`);
     }
-    const why =
-      code === 10
-        ? "挂载点非空"
-        : code === 19
-          ? "挂载点不可写"
-          : code === 23
-            ? "gocryptfs.conf 无法读取"
-            : code >= 128
-              ? "被中断"
-              : `exit ${code}`;
-    throw new CliError(EXIT.FAIL, `gocryptfs 挂载失败（${why}）`);
+    return EXIT.FAIL;
+  } finally {
+    closeMountPointPin(pin);
   }
-  return EXIT.FAIL;
 }
 
 /** Mount (if needed) under `flock -o -w 10 mount.lock`, then ensure dirs. Returns "mounted-now"|"already". */
@@ -1350,17 +1698,14 @@ function printWarnings() {
   for (const w of systemWarnings()) err(`警告：${w}`);
 }
 
-/**
- * Security review #4: mount ownership is decoupled from the error type. If THIS call mounted the
- * vault and anything fails before the caller takes over (post-mount checks, settings sync, ENOSPC,
- * EIO, a programming error…), the bounded finalize runs and the user is told plainly whether the
- * vault may still be mounted and how to recover. Returns {how, realMnt} with the vault confirmed
- * mounted and its private dirs verified.
- */
 async function unlockVault(v, { fix = false } = {}) {
   requirePrereqs();
-  const how = await doMount(v);
+  // `how` stays undefined until doMount settles — a THROW from doMount may still have MOUNTED
+  // (identity verification runs INSIDE the __mount child, after gocryptfs succeeded), so the
+  // catch treats how === undefined exactly like "mounted-now": probe & roll back (r2 ruling A3).
+  let how;
   try {
+    how = await doMount(v);
     const st = await probeMountState(v);
     if (st !== "mounted")
       throw new CliError(EXIT.FAIL, `挂载未生效（mountinfo：${st}），请 pi-secure status ${v.name}`);
@@ -1368,23 +1713,29 @@ async function unlockVault(v, { fix = false } = {}) {
     postMount(v, { fix, realMnt });
     return { how, realMnt };
   } catch (e) {
-    if (how === "mounted-now") await rollbackFreshMount(v, e);
+    if (how !== "already") await rollbackFreshMount(v, e); // a pre-existing mount is left as found
     throw e;
   }
 }
 
-/** Unmount a mount we made ourselves after a failure; always tells the user the outcome. */
+/** Unmount a mount we made ourselves after a failure; always tells the user the outcome.
+ *  r2 A3: probes first (nothing actually mounted ⇒ no rollback noise), unmounts with
+ *  `fusermount3 -u` and retries with `-uz` once when it comes back EBUSY — the mount being undone
+ *  is by definition not one we want to keep waiting for. */
 async function rollbackFreshMount(v, cause) {
   const why = cause instanceof CliError ? cause.message : String((cause && cause.message) || cause);
   if (why) err(why);
   if (cause instanceof CliError) cause.message = "";
   else if (cause && typeof cause === "object") cause.reportedAlready = true;
-  const f = await finalizeBounded(v);
+  const mounted = await probeMountState(v);
+  if (mounted === "absent") return; // nothing this failure left behind
+  let f = await finalizeBounded(v);
+  if (f.code === EXIT.BUSY) f = await finalizeBounded(v, { lazy: true }); // fusermount3 -u ⇒ -uz
   if (f.code === 0) err(`${v.name}：本次挂载已撤销（已卸载）`);
   else {
     for (const l of f.lines) err(l);
     err(
-      `${v.name}：本次挂载未能撤销——保险库可能仍挂载。稍后执行 pi-secure status ${v.name} / pi-secure lock ${v.name}`,
+      `${v.name}：本次挂载未能撤销——保险库可能仍挂载。稍后执行 pi-secure status ${v.name} / pi-secure lock ${v.name}（必要时 fusermount3 -uz ${v.mnt}）`,
     );
   }
 }
@@ -1393,12 +1744,13 @@ async function cmdUnlock(args) {
   const [name, ...rest] = args;
   if (!name || rest.length) throw new CliError(EXIT.USAGE, USAGE);
   const { vault: v } = must(resolveVault(name));
+  requireNewLayout(v); // §L.3
   const { how } = await unlockVault(v);
   printWarnings();
   out(
     how === "already"
-      ? `${name}：已挂载（${v.link} → ${v.work}）`
-      : `${name}：已解锁（${v.link} → ${v.work}）；用完执行 pi-secure lock ${name}`,
+      ? `${name}：已挂载（挂载点 ${v.mnt}，项目根 ${v.work}）`
+      : `${name}：已解锁（挂载点 ${v.mnt}，项目根 ${v.work}）；用完执行 pi-secure lock ${name}`,
   );
   return EXIT.OK;
 }
@@ -1419,12 +1771,12 @@ async function cmdLock(args) {
 
 async function cmdInit(args) {
   let name;
-  let link;
+  let mntArg;
   let fix = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--path") link = args[++i];
-    else if (a.startsWith("--path=")) link = a.slice(7);
+    if (a === "--path") mntArg = args[++i];
+    else if (a.startsWith("--path=")) mntArg = a.slice(7);
     else if (a === "--fix-settings") fix = true;
     else if (!name && !a.startsWith("-")) name = a;
     else throw new CliError(EXIT.USAGE, USAGE);
@@ -1432,41 +1784,46 @@ async function cmdInit(args) {
   if (!name) throw new CliError(EXIT.USAGE, USAGE);
   const home = homeDir();
   if (fix) {
-    if (link !== undefined) throw new CliError(EXIT.USAGE, "--fix-settings 不与 --path 同用");
+    if (mntArg !== undefined) throw new CliError(EXIT.USAGE, "--fix-settings 不与 --path 同用");
     const { vault: v } = must(resolveVault(name));
+    requireNewLayout(v); // §L.3
     await unlockVault(v, { fix: true });
     out(`${name}：sessionDir 已对齐；保险库保持挂载（pi-secure lock ${name} 卸载）`);
     return EXIT.OK;
   }
   const r = must(resolveVault(name, { allowUnregistered: true }));
+  if (r.registered && r.vault.layout === "legacy") {
+    throw new CliError(EXIT.CONFIG, legacyRefusal(r.vault)); // §L.3: re-init over a legacy vault
+  }
   if (lstatOrNull(r.vault.dir)) {
-    const lay = checkLayout(r.vault, { mounted: (await probeMountState(r.vault)) !== "absent" });
+    const lay = checkLayout(r.vault, {
+      mounted: (await probeMountState(r.vault)) !== "absent",
+      others: otherRegisteredVaults(r.vault),
+    });
     throw new CliError(
       EXIT.FAIL,
       lay.problems.length
-        ? `${r.vault.dir} 已存在但布局不完整（上次 init 未完成？）：\n  - ${lay.problems.join("\n  - ")}\n  确认里面没有要保留的数据后删除该目录，再 pi-secure init ${name}`
+        ? `${r.vault.dir} 已存在但布局不完整（上次 init 未完成？）：\n  - ${lay.problems.join("\n  - ")}\n${initCleanupHint(r.vault)}`
         : `保险库 ${name} 已存在（${r.vault.dir}）。修正项目 sessionDir 用：pi-secure init ${name} --fix-settings`,
     );
   }
   let v = r.vault;
-  if (link !== undefined) {
-    const l = expandSecurePath(link, home);
-    if (!l) throw new CliError(EXIT.USAGE, `--path 须为绝对路径或 ~/ 开头：${link}`);
-    v = deriveVault(name, v.dir, l);
+  if (mntArg !== undefined) {
+    // §L.1: --path is the MOUNT POINT location now (used to be the entry symlink).
+    const m = expandSecurePath(mntArg, home);
+    if (!m) throw new CliError(EXIT.USAGE, `--path 须为绝对路径或 ~/ 开头：${mntArg}`);
+    v = deriveVault(name, v.dir, m);
   }
   requirePrereqs();
   requireTty("init");
   if (!tty.isatty(1))
     throw new CliError(EXIT.USAGE, "init 会在终端打印 master key，stdout 必须是终端（不要重定向到文件/管道）");
-  createLayout(v);
+  createLayout(v, { others: otherRegisteredVaults(v) });
   // Registered BEFORE gocryptfs -init so an interrupted init shows up in `status` as incomplete.
   try {
-    registerVault(name, v.dir, v.link, home);
+    registerVault(name, v.dir, v.mnt, home);
   } catch (e) {
-    throw new CliError(
-      EXIT.CONFIG,
-      `${String(e && e.message)}\n  ${v.dir} 已建好但未登记：修复设置文件后删除该目录再 init`,
-    );
+    throw new CliError(EXIT.CONFIG, `${String(e && e.message)}\n  ${v.dir} 已建好但未登记。\n${initCleanupHint(v)}`);
   }
   out(
     `即将创建保险库 ${name}：gocryptfs 会要求输入两次新口令，然后在终端打印 master key（只显示这一次，请抄下离线保存）。`,
@@ -1474,9 +1831,8 @@ async function cmdInit(args) {
   // NOT -q: with -q gocryptfs 1.8 does not print the master key (P0 C1).
   const code = await runInherited("gocryptfs", ["-init", "--", v.cipher]);
   if (code !== 0) {
-    throw new CliError(EXIT.FAIL, `gocryptfs -init 失败（exit ${code}）；${v.dir} 留下的半成品可删除后重新 init`);
+    throw new CliError(EXIT.FAIL, `gocryptfs -init 失败（exit ${code}）\n${initCleanupHint(v)}`);
   }
-  createLink(v);
   out(`首次解锁以建立目录结构（再输入一次口令）：`);
   await unlockVault(v);
   const f = await finalizeBounded(v);
@@ -1484,7 +1840,7 @@ async function cmdInit(args) {
   printWarnings();
   out(
     [
-      `完成：项目放在 ${v.link}/（= ${v.work}），会话落在 ${v.sessionDir}。`,
+      `完成：挂载点 ${v.mnt}，项目放在 ${v.work}，会话落在 ${v.sessionDir}。`,
       `master key 仍留在终端回滚里：现在执行 clear；若在 tmux 中再执行 tmux clear-history（尽力清理，不等于安全擦除）。`,
       `之后：pi-secure run ${name}  或  pi-secure unlock ${name}`,
     ].join("\n"),
@@ -1495,16 +1851,29 @@ async function cmdInit(args) {
 async function describeVault(v, { scan = true } = {}) {
   const lines = [];
   const st = await probeMountState(v);
-  const lay = checkLayout(v, { mounted: st === "mounted" || st === "stale" });
-  const layout = !lay.exists ? "missing" : lay.problems.length ? "incomplete" : "ok";
-  lines.push(`${v.name}: ${st === "absent" ? "locked" : st}  layout ${layout}  link ${linkState(v)}`);
+  const lay = checkLayout(v, {
+    mounted: st === "mounted" || st === "stale",
+    others: otherRegisteredVaults(v),
+  });
+  const layout = !lay.exists ? "missing" : lay.problems.length ? "incomplete" : v.layout === "legacy" ? "legacy" : "ok";
+  lines.push(`${v.name}: ${st === "absent" ? "locked" : st}  layout ${layout}  mnt ${v.mnt}`);
   lines.push(`  dir ${v.dir}`);
-  lines.push(`  link ${v.link} → ${v.work}`);
   for (const p of lay.problems) lines.push(`  ! ${p}`);
-  if (layout !== "ok" && lay.exists)
-    lines.push(`  恢复：确认 ${v.dir} 里没有要保留的数据后删除它，再 pi-secure init ${v.name}`);
+  if (v.layout === "legacy") {
+    lines.push(`  ! 旧布局（挂载点 ${v.mnt}）：仅 status/lock 可用，unlock/run/init --fix-settings 已拒绝`);
+    lines.push(`  ! ${legacyRefusal(v)}`);
+  } else if (layout !== "ok" && lay.exists)
+    lines.push(
+      `  恢复：确认 ${v.dir} 与挂载点 ${v.mnt}（未挂载、只含 work/state 两个哨兵）里没有要保留的数据后一并删除，再 pi-secure init ${v.name}`,
+    );
   if (st === "stale") lines.push(`  ! 失效挂载（守护进程已不在）：pi-secure unlock ${v.name} 会先清理再挂载`);
   return { lines, st, scan: scan && st === "mounted" };
+}
+
+/** Other vaults from the settings file (for §L.1 position rules); empty on any read problem. */
+function otherRegisteredVaults(v) {
+  const { cfg } = loadSecureConfig(homeDir());
+  return cfg.valid ? cfg.vaults.filter((x) => x.name !== v.name) : [];
 }
 
 async function cmdStatus(args) {
@@ -1573,9 +1942,8 @@ export function resolveRunCwd(v, sub, { physical = false, realMnt } = {}) {
   let rel = sub === undefined || sub === "" ? "." : sub;
   if (path.isAbsolute(rel)) {
     const abs = path.resolve(rel);
-    if (!pathWithin(abs, v.work) && !pathWithin(abs, v.link))
-      throw new CliError(EXIT.USAGE, `-C ${sub} 不在保险库 ${v.link} 内`);
-    rel = pathWithin(abs, v.work) ? path.relative(v.work, abs) || "." : path.relative(v.link, abs) || ".";
+    if (!pathWithin(abs, v.work)) throw new CliError(EXIT.USAGE, `-C ${sub} 不在保险库 ${v.mnt}/work 内`);
+    rel = path.relative(v.work, abs) || ".";
   }
   const target = path.resolve(v.work, rel);
   if (!pathWithin(target, v.work)) throw new CliError(EXIT.USAGE, `-C ${sub} 跳出了保险库`);
@@ -1604,6 +1972,7 @@ async function cmdRun(args) {
   }
   const r = must(resolveVault(name));
   const v = r.vault;
+  requireNewLayout(v); // §L.3: legacy vaults never run
   if (!r.enabled)
     throw new CliError(EXIT.CONFIG, "secure.enabled=false：插件守护已关闭，拒绝 run（unlock/lock/status 仍可用）");
   const piBin = findOnPath("pi");

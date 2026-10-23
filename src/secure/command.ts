@@ -90,7 +90,9 @@ export function renderSecureStatus(input: SecureStatusInput): string {
     lines.push(`配置：secure.enabled=${cfg.enabled}${cfg.valid ? "" : `（非法：${cfg.error ?? "?"}）`}`);
     for (const v of domain.vaults) {
       const mount = judgeVaultMount(v, input.readMountinfo ?? readProcMountinfo);
-      lines.push(`  - ${v.vault.name}：${mount.ok ? "mounted" : "not mounted"} · ${v.root} · 入口 ${v.vault.link}`);
+      lines.push(
+        `  - ${v.vault.name}：${mount.ok ? "mounted" : "not mounted"} · ${v.root} · 挂载点 ${v.vault.mnt}${v.vault.layout === "legacy" ? "（旧布局，只读兼容）" : ""}`,
+      );
     }
     for (const bad of cfg.invalid) lines.push(`  - ${bad.name}：invalid (${bad.reason})`);
   }

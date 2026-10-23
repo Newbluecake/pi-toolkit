@@ -53,13 +53,13 @@ export function resolveToolPath(raw: string, cwd: string, home: string = homedir
 
 function vaultOfPath(abs: string, vaults: readonly SecureVaultRoots[]): SecureVaultRoots | undefined {
   const canonical = canonicalPath(abs);
-  return vaults.find(
-    (v) =>
-      inVaultDir(canonical, v) ||
-      pathWithin(abs, v.vault.dir) ||
-      pathWithin(abs, v.vault.link) ||
-      pathWithin(canonical, v.linkReal),
-  );
+  return vaults.find((v) => {
+    if (inVaultDir(canonical, v) || pathWithin(abs, v.vault.dir) || pathWithin(abs, v.vault.mnt)) return true;
+    // Legacy vaults keep the pre-L0 entry symlink address in the known-address set (review L0 #3):
+    // a plain session naming `~/secure/<old>` directly must stay blocked while an old helper's
+    // mount is still live behind it.
+    return v.vault.legacyLink !== undefined && pathWithin(abs, v.vault.legacyLink);
+  });
 }
 
 function escapeRe(s: string): string {
@@ -69,7 +69,9 @@ function escapeRe(s: string): string {
 /** Every textual spelling of a vault a shell command could use (absolute, `~/…`, `$HOME/…`). */
 export function vaultSpellings(v: SecureVaultRoots, home: string = homedir()): string[] {
   const out = new Set<string>();
-  for (const p of [v.root, v.vault.dir, v.vault.link, v.linkReal]) {
+  const paths = [v.root, v.vault.dir, v.vault.mnt, v.mntReal];
+  if (v.vault.legacyLink !== undefined) paths.push(v.vault.legacyLink); // review L0 #3
+  for (const p of paths) {
     out.add(p);
     const rel = relative(home, p);
     if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) {
@@ -98,6 +100,9 @@ export function bashTouchesVault(
 /**
  * The tool_call decision. `locked` (runtime or frozen) blocks everything; secure ⇒ D3 (write/edit
  * must stay inside the vault mount); plain ⇒ D4 (no path tool / bash may touch a vault).
+ *
+ * D3's write zone (§L.2): strictly below the physical `<mntReal>/work` / `<mntReal>/state`; the
+ * sentinel paths themselves and any other entry at the mount-point root are refused.
  */
 export function decideToolCall(
   domain: SecureDomain,

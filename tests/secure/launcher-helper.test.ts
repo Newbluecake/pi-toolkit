@@ -20,6 +20,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -58,7 +59,7 @@ afterAll(() => {
 
 interface ParityFixture {
   home: string;
-  settings: { name: string; input: unknown; expect: unknown }[];
+  settings: { name: string; input: unknown; expect: unknown; probe?: string[] }[];
   mountinfo: { name: string; mountinfo: string; realMnt: string; realCipher: string; expect: string }[];
 }
 const PARITY: ParityFixture = JSON.parse(
@@ -72,7 +73,8 @@ describe("contract parity (shared fixture with src/secure/config.ts)", () => {
   });
   for (const c of PARITY.settings) {
     it(`settings: ${c.name}`, () => {
-      expect(JSON.parse(JSON.stringify(H.parseSecureConfig(c.input, PARITY.home)))).toEqual(c.expect);
+      const io = { legacyMntDir: (mnt: string) => (c.probe ?? []).includes(mnt) };
+      expect(JSON.parse(JSON.stringify(H.parseSecureConfig(c.input, PARITY.home, io)))).toEqual(c.expect);
     });
   }
   for (const c of PARITY.mountinfo) {
@@ -80,18 +82,18 @@ describe("contract parity (shared fixture with src/secure/config.ts)", () => {
       expect(H.vaultMountState(c.mountinfo, c.realMnt, c.realCipher)).toBe(c.expect);
     });
   }
-  it("derived paths follow the agreed layout", () => {
-    const r = H.parseSecureConfig({ secure: { vaults: { acme: {} } } }, "/home/u");
+  it("derived paths follow the §L.1 layout (mnt IS the mount point)", () => {
+    const r = H.parseSecureConfig({ secure: { vaults: { acme: {} } } }, "/home/u", { legacyMntDir: () => false });
     expect(r.vaults[0]).toEqual({
       name: "acme",
       dir: "/home/u/.local/share/pi-toolkit-secure/acme",
-      link: "/home/u/secure/acme",
+      mnt: "/home/u/secure/acme",
       cipher: "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
-      mnt: "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
-      work: "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
-      state: "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
-      sessionDir: "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+      work: "/home/u/secure/acme/work",
+      state: "/home/u/secure/acme/state",
+      sessionDir: "/home/u/secure/acme/state/sessions/default",
       lock: "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+      lease: "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease",
     });
   });
 });
@@ -199,7 +201,7 @@ describe("pi package discovery", () => {
 describe("project sessionDir sync (§2.3)", () => {
   function vault() {
     const root = tmp("ps-sync-");
-    const v = H.deriveVault("acme", join(root, "v"), join(root, "link"));
+    const v = H.deriveVault("acme", join(root, "v"), join(root, "m"));
     mkdirSync(v.work, { recursive: true });
     mkdirSync(v.sessionDir, { recursive: true });
     return v;
@@ -243,9 +245,9 @@ describe("project sessionDir sync (§2.3)", () => {
     mkdirSync(join(v.work, ".pi"));
     writeFileSync(file(v), JSON.stringify({ sessionDir: `${v.sessionDir}/` }));
     expect(H.syncProjectSettings(v).kind).toBe("unchanged");
-    const alias = join(v.dir, "..", "alias");
-    symlinkSync(v.dir, alias);
-    writeFileSync(file(v), JSON.stringify({ sessionDir: join(alias, "mnt", "state", "sessions", "default") }));
+    const alias = join(v.mnt, "..", "alias");
+    symlinkSync(v.mnt, alias);
+    writeFileSync(file(v), JSON.stringify({ sessionDir: join(alias, "state", "sessions", "default") }));
     expect(H.syncProjectSettings(v).kind).toBe("unchanged");
   });
   it("unparsable settings: conflict; --fix-settings backs up and writes a minimal object", () => {
@@ -268,60 +270,360 @@ describe("project sessionDir sync (§2.3)", () => {
   });
 });
 
-describe("layout / sentinels (§2.1)", () => {
-  function fresh() {
+describe("layout / sentinels (§L.1)", () => {
+  /** A scratch "home": dir under <root>/v, mount point at the DEFAULT <root>/secure/<name>. */
+  function fresh(name = "acme") {
     const root = tmp("ps-layout-");
-    const v = H.deriveVault("acme", join(root, "v"), join(root, "secure", "acme"));
-    H.createLayout(v);
+    const v = H.deriveVault(name, join(root, "v"), H.defaultVaultMnt(name, root));
+    H.createLayout(v, { home: root });
     writeFileSync(join(v.cipher, "gocryptfs.conf"), "{}");
+    return { root, v };
+  }
+  it("createLayout builds private dirs + 0-byte 0400 sentinels + lock + lease (no entry symlink)", () => {
+    const { v } = fresh();
+    expect(H.checkLayout(v, { home: join(v.mnt, "..", "..") })).toEqual({ exists: true, problems: [] });
+    expect(readdirSync(v.mnt).sort()).toEqual(["state", "work"]);
+    for (const n of ["work", "state"]) {
+      const st = lstatSync(join(v.mnt, n));
+      expect(st.isFile()).toBe(true);
+      expect(st.size).toBe(0);
+      expect(st.mode & 0o7777).toBe(0o400);
+    }
+    expect(existsSync(v.lock)).toBe(true);
+    const lease = lstatSync(v.lease);
+    expect(lease.isFile()).toBe(true);
+    expect(lease.size).toBe(0);
+    expect(lease.mode & 0o777).toBe(0o600);
+    expect(existsSync(join(v.mnt, "..", "..", "secure"))).toBe(true); // ~/secure was created 0700
+    expect(() => H.createLayout(v, { home: join(v.mnt, "..", "..") })).toThrow(/已存在/);
+  });
+  it("createLayout refuses an existing mount point (78) and a non-default missing parent", () => {
+    const root = tmp("ps-layout2-");
+    const v = H.deriveVault("acme", join(root, "v2"), join(root, "elsewhere", "acme"));
+    try {
+      H.createLayout(v, { home: root });
+      expect.unreachable();
+    } catch (e) {
+      expect((e as { code?: number }).code).toBe(H.EXIT.CONFIG);
+      expect((e as Error).message).toMatch(/挂载点父目录.*不存在/);
+    }
+    const root2 = tmp("ps-layout3-");
+    const v2 = H.deriveVault("acme", join(root2, "v2"), join(root2, "mnt-here"));
+    mkdirSync(join(root2, "mnt-here"), { mode: 0o700 });
+    try {
+      H.createLayout(v2, { home: root2 });
+      expect.unreachable();
+    } catch (e) {
+      expect((e as { code?: number }).code).toBe(H.EXIT.CONFIG);
+      expect((e as Error).message).toMatch(/挂载点.*已存在/);
+    }
+    expect(existsSync(join(root2, "v2"))).toBe(false);
+  });
+  /** Security review L0 #1: both LEXICAL and PHYSICAL addresses, full 2×2 bidirectional matrix. */
+  it("position rules: lexical containment both ways + all four cross-vault directions", () => {
+    const root = tmp("ps-pos-");
+    const home = join(root, "home");
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+    const mk = (name: string, dir: string, mnt: string) => H.deriveVault(name, dir, mnt);
+    expect(H.positionProblems(mk("a", join(root, "a"), join(root, "a", "inside")), [], home)).toHaveLength(1);
+    expect(H.positionProblems(mk("a", join(root, "m", "a"), join(root, "m")), [], home)).toHaveLength(1);
+    const other = mk("b", join(root, "b"), join(root, "bb"));
+    // every {new.mnt,new.dir} × {other.mnt,other.dir} pair, BOTH directions (review #1's two missing pairs included)
+    expect(H.positionProblems(mk("a", join(root, "x"), join(root, "b", "sub")), [other], home).length).toBe(1); // om ⊆ new.mnt
+    expect(H.positionProblems(mk("a", join(root, "x"), join(root, "bb", "sub")), [other], home).length).toBe(1); // od ⊆ new.mnt
+    expect(H.positionProblems(mk("a", join(root, "b", "sub2"), join(root, "y")), [other], home).length).toBe(1); // new.dir ⊆ od
+    expect(H.positionProblems(mk("a", join(root, "bb", "sub2"), join(root, "y")), [other], home).length).toBe(1); // new.dir ⊆ om
+    expect(H.positionProblems(mk("a", join(root, "x"), join(root, "y")), [other], home)).toHaveLength(0);
+    expect(
+      H.positionProblems(mk("a", join(root, "x"), join(home, ".pi", "agent", "deep")), [other], home),
+    ).toHaveLength(1);
+    // a vault overlapping ITSELF via its own name in `others` is ignored
+    const self = mk("a", join(root, "a"), join(root, "aa"));
+    expect(H.positionProblems(self, [self, other], home)).toHaveLength(0);
+  });
+  /** Review r2 B: the exact two directions the pre-review predicate MISSED (strict ancestry, so no
+   *  other containment pair fires) — verified to FAIL under the old six-condition predicate (see
+   *  L0-report §安全复审第 2 轮处置 for the differential run). */
+  it("review #1/r2 B: new.mnt ⊇ other.dir and new.dir ⊇ other.mnt (the two previously-missed directions)", () => {
+    const root = tmp("ps-pos3-");
+    const home = join(root, "home");
+    mkdirSync(home, { recursive: true });
+    // new.mnt (root/b) is a STRICT ANCESTOR of other.dir (root/b/deep)
+    const other = H.deriveVault("b", join(root, "b", "deep"), join(root, "bb"));
+    const v1 = H.deriveVault("a", join(root, "x"), join(root, "b"));
+    expect(H.positionProblems(v1, [other], home)).toHaveLength(1);
+    // new.dir (root/k2) is a STRICT ANCESTOR of other.mnt (root/k2/sub)
+    const other2 = H.deriveVault("b", join(root, "b2"), join(root, "k2", "sub"));
+    const v2 = H.deriveVault("a", join(root, "k2"), join(root, "y"));
+    expect(H.positionProblems(v2, [other2], home)).toHaveLength(1);
+    // sanity: disjoint placements stay clean
+    expect(H.positionProblems(H.deriveVault("a", join(root, "z"), join(root, "z2")), [other, other2], home)).toEqual(
+      [],
+    );
+  });
+
+  it("review #1: a parent-dir SYMLINK cannot smuggle the mount point into a forbidden zone (physical compare)", () => {
+    const root = tmp("ps-pos2-");
+    const home = join(root, "home");
+    mkdirSync(join(home, ".pi", "agent"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(home, ".pi", "agent"), join(home, "agent-alias"));
+    const v = H.deriveVault("a", join(root, "meta-a"), join(home, "agent-alias", "acme"));
+    expect(H.positionProblems(v, [], home)).toHaveLength(1); // lexical looks fine; physical hits the agent dir
+    // the same trick against ANOTHER vault's metadata subtree
+    const home2 = join(root, "home2");
+    const other = H.deriveVault("b", join(home2, "vaults", "b"), join(home2, "secure", "b"));
+    mkdirSync(join(home2, "vaults", "b"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(home2, "vaults", "b"), join(home2, "link-to-b"));
+    const v2 = H.deriveVault("a", join(root, "meta-a2"), join(home2, "link-to-b", "acme"));
+    expect(H.positionProblems(v2, [other], home2)).toHaveLength(1);
+    // and the reverse: our DIR behind a symlink inside another vault's MNT
+    const home3 = join(root, "home3");
+    const other3 = H.deriveVault("b", join(home3, "vaults", "b"), join(home3, "secure", "b"));
+    mkdirSync(join(home3, "secure", "b"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(home3, "secure", "b"), join(home3, "link-to-bmnt"));
+    const v3 = H.deriveVault("a", join(home3, "link-to-bmnt", "meta"), join(home3, "secure", "a"));
+    expect(H.positionProblems(v3, [other3], home3)).toHaveLength(1);
+  });
+  /** Security review L0 #2: the WHOLE ancestor chain of the mount point is validated. */
+  /** Full new-layout skeleton on disk so checkLayout gets past the <dir> side. */
+  function buildSkeleton(dir: string, mnt: string, name = "a") {
+    const v = H.deriveVault(name, dir, mnt);
+    mkdirSync(v.mnt, { recursive: true, mode: 0o700 });
+    for (const n of ["work", "state"]) {
+      writeFileSync(join(v.mnt, n), "");
+      chmodSync(join(v.mnt, n), 0o400);
+    }
+    mkdirSync(v.dir, { recursive: true, mode: 0o700 });
+    mkdirSync(v.cipher, { mode: 0o700 });
+    writeFileSync(join(v.cipher, "gocryptfs.conf"), "{}");
+    writeFileSync(v.lock, "", { mode: 0o600 });
+    writeFileSync(v.lease, "", { mode: 0o600 });
     return v;
   }
-  it("createLayout builds private dirs + 0-byte 0400 sentinels + lock", () => {
-    const v = fresh();
-    expect(H.checkLayout(v)).toEqual({ exists: true, problems: [] });
-    expect(readdirSync(v.mnt).sort()).toEqual(["state", "work"]);
-    expect(existsSync(v.lock)).toBe(true);
-    expect(() => H.createLayout(v)).toThrow(/已存在/);
+  it("review #2: ancestor chain — symlink level or group-writable non-sticky level under HOME ⇒ problem", () => {
+    const root = tmp("ps-anc-");
+    const home = join(root, "home");
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    mkdirSync(join(root, "real-mid"), { mode: 0o700 });
+    symlinkSync(join(root, "real-mid"), join(home, "mid")); // a symlink level below HOME
+    const v = buildSkeleton(join(root, "meta"), join(home, "mid", "acme"));
+    expect(H.checkLayout(v, { home }).problems.join()).toMatch(/须为真实目录/);
+    const home2 = join(root, "home2");
+    mkdirSync(join(home2, "gww"), { recursive: true, mode: 0o770 }); // group-writable, not sticky
+    const v2 = buildSkeleton(join(root, "meta2"), join(home2, "gww", "acme"));
+    expect(H.checkLayout(v2, { home: home2 }).problems.join()).toMatch(/组\/其他可写/);
   });
-  it("missing gocryptfs.conf ⇒ incomplete", () => {
-    const root = tmp("ps-layout-");
-    const v = H.deriveVault("acme", join(root, "v"), join(root, "l"));
-    H.createLayout(v);
-    expect(H.checkLayout(v).problems.join()).toMatch(/gocryptfs\.conf/);
+  it("review #2: a clean chain passes; outside HOME the chain runs to / (sticky /tmp allowed)", () => {
+    const root = tmp("ps-anc2-");
+    const home = join(root, "home"); // HOME nowhere near the mount point ⇒ chain runs up to /
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    const v = buildSkeleton(join(root, "meta"), join(root, "mnt-here", "a"));
+    // /tmp is root-owned, world-writable BUT sticky ⇒ allowed
+    expect(H.checkLayout(v, { home }).problems).toEqual([]);
+    chmodSync(join(root, "mnt-here"), 0o770); // group-writable non-sticky anywhere on the chain
+    expect(H.checkLayout(v, { home }).problems.join()).toMatch(/组\/其他可写/);
+    chmodSync(join(root, "mnt-here"), 0o700);
+    // r2 A1: NO home exemption any more — the in-home chain continues through $HOME up to /
+    // (all levels comply here: home is ours 0700, /tmp is root+sticky, / is root)
+    const root2 = tmp("ps-anc3-");
+    const home2 = join(root2, "home");
+    mkdirSync(join(home2, "secure"), { recursive: true, mode: 0o700 });
+    const v2 = buildSkeleton(join(root2, "meta"), join(home2, "secure", "a"));
+    expect(H.checkLayout(v2, { home: home2 }).problems).toEqual([]);
   });
-  it("an extra entry under mnt/ is refused", () => {
-    const v = fresh();
+  it("review #2: mount-point identity pin — a path swap (or vanish) between checks is detected", () => {
+    const root = tmp("ps-pin-");
+    const v = H.deriveVault("a", join(root, "meta"), join(root, "mnt"));
+    mkdirSync(v.mnt, { mode: 0o700 });
+    const pin = H.pinMountPoint(v);
+    expect(typeof pin.dev).toBe("number");
+    expect(typeof pin.ino).toBe("number");
+    expect(H.mountPointPinStillValid(v, pin)).toBe(true);
+    renameSync(v.mnt, join(root, "moved-away")); // swap: validated dir away, another dir in place
+    mkdirSync(v.mnt, { mode: 0o700 });
+    expect(() => H.mountPointPinStillValid(v, pin)).toThrow(/被替换/);
+    H.closeMountPointPin(pin);
+    const v2 = { ...v, mnt: join(root, "mnt2") };
+    mkdirSync(v2.mnt, { mode: 0o700 });
+    const pin2 = H.pinMountPoint(v2);
+    rmSync(v2.mnt, { recursive: true });
+    expect(() => H.mountPointPinStillValid(v2, pin2)).toThrow(/消失/);
+  });
+  it("review #2/r2: post-mount identity — fd readlink == pin path, mountinfo entry, parent dev/ino, fuse dev", () => {
+    const root = tmp("ps-ver-");
+    const v = H.deriveVault("a", join(root, "meta"), join(root, "mnt"));
+    mkdirSync(v.mnt, { mode: 0o700 });
+    const pin = H.pinMountPoint(v);
+    expect(pin.path).toBe(realpathSync(v.mnt)); // captured pre-mount, physical
+    expect(pin.parent.dev).toBe(statSync(root).dev); // parent identity pinned too
+    const st = statSync(v.mnt);
+    const parentSt = statSync(root);
+    const maj = (st.dev >> 8) & 0xfff; // reverse of glibc makedev for the small devices fuse uses
+    const min = st.dev & 0xff;
+    expect(H.devFromMajMin(maj, min)).toBe(st.dev);
+    const okLine = `40 25 ${maj}:${min} / ${pin.path} rw - fuse.gocryptfs ${join(v.dir, "cipher")} rw`;
+    const statByPath = (p: string) => (p === v.mnt ? st : parentSt);
+    expect(
+      H.verifyMountPointIdentity(v, pin, {
+        readMountinfo: () => okLine + "\n",
+        stat: statByPath,
+        readlink: () => pin.path, // (a) the pinned inode never moved
+      }),
+    ).toBe(true);
+    // (a) violated: the pinned dir was renamed away during the mount window
+    const pin2 = H.pinMountPoint(v);
+    expect(() =>
+      H.verifyMountPointIdentity(v, pin2, {
+        readMountinfo: () => okLine + "\n",
+        stat: statByPath,
+        readlink: () => join(root, "moved-elsewhere"),
+      }),
+    ).toThrow(/被改名\/替换/);
+    // (c) violated: the parent directory itself was swapped
+    const pin3 = H.pinMountPoint(v);
+    const otherParent = { ...parentSt, ino: parentSt.ino === 1 ? 2 : 1 };
+    expect(() =>
+      H.verifyMountPointIdentity(v, pin3, {
+        readMountinfo: () => okLine + "\n",
+        stat: (p: string) => (p === v.mnt ? st : otherParent),
+        readlink: () => pin3.path,
+      }),
+    ).toThrow(/父目录.*身份变化/);
+    // (b)/(+) violated: the path hosts a DIFFERENT device than the mountinfo line
+    const pin4 = H.pinMountPoint(v);
+    const otherSt = { ...st, dev: st.dev === 47 ? 48 : 47 };
+    const badLine = `40 25 0:99 / ${pin.path} rw - fuse.gocryptfs ${join(v.dir, "cipher")} rw`;
+    expect(() =>
+      H.verifyMountPointIdentity(v, pin4, {
+        readMountinfo: () => badLine + "\n",
+        stat: (p: string) => (p === v.mnt ? otherSt : parentSt),
+        readlink: () => pin4.path,
+      }),
+    ).toThrow(/身份核验失败/);
+    // (b) violated: no entry at the pinned path for OUR cipher
+    const pin5 = H.pinMountPoint(v);
+    expect(() =>
+      H.verifyMountPointIdentity(v, pin5, { readMountinfo: () => "", stat: statByPath, readlink: () => pin5.path }),
+    ).toThrow(/没有.*gocryptfs 条目/);
+  });
+  it("review #2/r2 A1: the ancestor chain now runs to / — HOME itself is checked, no exemption", () => {
+    const root = tmp("ps-anc4-");
+    const home = join(root, "home");
+    mkdirSync(join(home, "secure"), { recursive: true, mode: 0o700 });
+    const v = buildSkeleton(join(root, "meta"), join(home, "secure", "a"));
+    expect(H.checkLayout(v, { home }).problems).toEqual([]); // clean home passes
+    chmodSync(home, 0o770); // a group-writable shared HOME ⇒ the chain is untrustworthy
+    const problems = H.checkLayout(v, { home }).problems.join();
+    expect(problems).toContain(home);
+    expect(problems).toMatch(/组\/其他可写/);
+    chmodSync(home, 0o700);
+    expect(H.checkLayout(v, { home }).problems).toEqual([]);
+  });
+  it("review #2/r2 A1: foreign-uid level ⇒ rejected; sticky only excuses ROOT-owned dirs", () => {
+    const root = tmp("ps-anc5-");
+    const dir = join(root, "x", "acme");
+    const v = H.deriveVault("a", join(root, "meta"), dir);
+    const me = process.getuid();
+    const stFor = (uid: number, mode: number) => ({ isDirectory: () => true, isSymbolicLink: () => false, uid, mode });
+    const foreign = me === 12345 ? 54321 : 12345; // a uid that is neither ours nor root
+    const fakeLstat = (uid: number, mode: number) => (p: string) =>
+      p.endsWith("/x") ? stFor(uid, mode) : lstatSync(p);
+    // a level owned by another non-root user
+    expect(H.mntAncestorProblems(v, me, { lstat: fakeLstat(foreign, 0o700) }).join()).toMatch(
+      new RegExp(`属于其他用户（uid ${foreign}）`),
+    );
+    // sticky + world-writable but owned by US (not root) ⇒ still rejected ("sticky 只豁免 root")
+    expect(H.mntAncestorProblems(v, me, { lstat: fakeLstat(me, 0o1777) }).join()).toMatch(/组\/其他可写.*属主非 root/);
+    // sticky + world-writable + root-owned ⇒ the ONLY exception (like /tmp)
+    expect(H.mntAncestorProblems(v, me, { lstat: fakeLstat(0, 0o1777) }).join()).toBe("");
+  });
+  it("missing gocryptfs.conf ⇒ incomplete; missing/wrong lease ⇒ problem (new layout only)", () => {
+    const root = tmp("ps-layout4-");
+    const v = H.deriveVault("acme", join(root, "v"), H.defaultVaultMnt("acme", root));
+    H.createLayout(v, { home: root });
+    expect(H.checkLayout(v, { home: root }).problems.join()).toMatch(/gocryptfs\.conf/);
+    writeFileSync(join(v.cipher, "gocryptfs.conf"), "{}");
+    rmSync(v.lease);
+    expect(H.checkLayout(v, { home: root }).problems.join()).toMatch(/mount\.lease 缺失/);
+    writeFileSync(v.lease, "", { mode: 0o600 });
+    chmodSync(v.lease, 0o644);
+    expect(H.checkLayout(v, { home: root }).problems.join()).toMatch(/mount\.lease 须为本用户的 0600/);
+    chmodSync(v.lease, 0o600);
+    expect(H.checkLayout(v, { home: root }).problems).toEqual([]);
+  });
+  it("an extra entry under <mnt>/ is refused (78 at mount time)", () => {
+    const { root, v } = fresh();
     writeFileSync(join(v.mnt, "extra"), "");
-    expect(H.checkLayout(v).problems.join()).toMatch(/多余条目：extra/);
+    expect(H.checkLayout(v, { home: root }).problems.join()).toMatch(/多余条目：extra/);
   });
   it("a sentinel with content / wrong mode / replaced by a dir is refused", () => {
-    const v = fresh();
+    const { root, v } = fresh();
     chmodSync(join(v.mnt, "work"), 0o600);
     writeFileSync(join(v.mnt, "work"), "x");
-    expect(H.checkLayout(v).problems.join()).toMatch(/哨兵 .*work/);
+    expect(H.checkLayout(v, { home: root }).problems.join()).toMatch(/哨兵 .*work/);
     const v2 = fresh();
-    chmodSync(join(v2.mnt, "state"), 0o600);
-    rmSync(join(v2.mnt, "state"));
-    mkdirSync(join(v2.mnt, "state"));
-    expect(H.checkLayout(v2).problems.join()).toMatch(/哨兵 .*state/);
+    chmodSync(join(v2.v.mnt, "state"), 0o600);
+    rmSync(join(v2.v.mnt, "state"));
+    mkdirSync(join(v2.v.mnt, "state"));
+    expect(H.checkLayout(v2.v, { home: v2.root }).problems.join()).toMatch(/哨兵 .*state/);
   });
   it("group/other-accessible dirs are refused", () => {
-    const v = fresh();
+    const { root, v } = fresh();
     chmodSync(v.dir, 0o750);
-    expect(H.checkLayout(v).problems.join()).toMatch(/0700/);
+    expect(H.checkLayout(v, { home: root }).problems.join()).toMatch(/0700/);
   });
-  it("mounted=true skips the sentinel checks", () => {
-    const v = fresh();
+  it("mounted=true skips the sentinel checks (parent + position rules still apply)", () => {
+    const { root, v } = fresh();
     writeFileSync(join(v.mnt, "extra"), "");
-    expect(H.checkLayout(v, { mounted: true }).problems).toEqual([]);
+    expect(H.checkLayout(v, { mounted: true, home: root }).problems).toEqual([]);
   });
-  it("createLink is idempotent and refuses a foreign entry", () => {
-    const v = fresh();
-    H.createLink(v);
-    H.createLink(v);
-    const v2 = H.deriveVault("b", v.dir, join(v.dir, "..", "occupied"));
-    writeFileSync(v2.link, "");
-    expect(() => H.createLink(v2)).toThrow(/占用/);
+
+  // ── legacy layout (§L.3): read-only compat ──
+  function legacyVault() {
+    const root = tmp("ps-legacy-");
+    const v = H.deriveLegacyVault("old", join(root, "v"));
+    mkdirSync(join(root, "v", "cipher"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(v.cipher, "gocryptfs.conf"), "{}");
+    mkdirSync(v.mnt, { mode: 0o700 });
+    for (const n of ["work", "state"]) {
+      writeFileSync(join(v.mnt, n), "", { mode: 0o400 });
+    }
+    writeFileSync(v.lock, "", { mode: 0o600 });
+    return v;
+  }
+  it("a legacy vault parses from a link key / an on-disk <dir>/mnt; layout stays legacy-clean without a lease", () => {
+    expect(H.parseSecureConfig({ secure: { vaults: { old: { link: "/entry/old" } } } }, "/home/u").vaults[0].mnt).toBe(
+      "/home/u/.local/share/pi-toolkit-secure/old/mnt",
+    );
+    const home = tmp("ps-legacy2-");
+    const dir = join(home, ".local", "share", "pi-toolkit-secure", "old");
+    mkdirSync(join(dir, "mnt"), { recursive: true, mode: 0o700 });
+    const r = H.parseSecureConfig({ secure: { vaults: { old: {} } } }, home); // real fs probe hits <dir>/mnt
+    expect(r.vaults[0].layout).toBe("legacy");
+    const explicit = H.parseSecureConfig({ secure: { vaults: { old: { mnt: join(home, "secure", "old") } } } }, home);
+    expect(explicit.vaults[0].layout).toBeUndefined();
+    expect(explicit.vaults[0].mnt).toBe(join(home, "secure", "old"));
+  });
+  it("legacy vaults: no lease/parent/position problems; refusal text names export→import", () => {
+    const v = legacyVault();
+    expect(H.checkLayout(v)).toEqual({ exists: true, problems: [] });
+    expect(H.legacyRefusal(v)).toMatch(/旧布局（挂载点 .*\/mnt）/);
+    expect(H.legacyRefusal(v)).toMatch(/pi-secure export old <文件>/);
+  });
+  it("physicalPaths NEVER realpaths the mount point itself (legacy: <dir>/mnt)", () => {
+    const root = tmp("ps-phys-");
+    const home = join(root, "home");
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    // mnt exists as a SYMLINK to elsewhere: a realpath through it would escape; we must NOT follow it
+    const v = H.deriveVault("acme", join(root, "v"), join(home, "secure", "acme"));
+    mkdirSync(join(root, "v"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(home, "secure"), { recursive: true, mode: 0o700 });
+    symlinkSync("/etc", join(home, "secure", "acme"));
+    const pp = H.physicalPaths(v);
+    expect(pp.realMnt).toBe(join(realpathSync(join(home, "secure")), "acme"));
+    expect(pp.realMnt).not.toBe("/etc");
+    const lg = H.physicalPaths(H.deriveLegacyVault("old", join(root, "v")));
+    expect(lg.realMnt).toBe(join(realpathSync(join(root, "v")), "mnt"));
   });
 });
 
@@ -578,9 +880,9 @@ describe("run env + -C resolution (§2.2 run, §2.4 env contract)", () => {
   it("-C stays inside work", () => {
     expect(H.resolveRunCwd(v, undefined)).toBe(v.work);
     expect(H.resolveRunCwd(v, "pkg/a")).toBe(`${v.work}/pkg/a`);
-    expect(H.resolveRunCwd(v, `${v.link}/pkg`)).toBe(`${v.work}/pkg`);
     expect(H.resolveRunCwd(v, `${v.work}/pkg`)).toBe(`${v.work}/pkg`);
     expect(() => H.resolveRunCwd(v, "../state")).toThrow(/跳出/);
+    expect(() => H.resolveRunCwd(v, `${v.mnt}/state`)).toThrow(/不在保险库/);
     expect(() => H.resolveRunCwd(v, "/etc")).toThrow(/不在保险库/);
   });
   it("-C physical check rejects a symlink pointing out of work", () => {
@@ -604,13 +906,13 @@ describe("settings registration", () => {
     H.registerVault("acme", "/d/acme", "/l/acme", home);
     expect(JSON.parse(readFileSync(f, "utf8"))).toEqual({
       hud: { enabled: true },
-      secure: { enabled: true, vaults: { old: {}, acme: { dir: "/d/acme", link: "/l/acme" } } },
+      secure: { enabled: true, vaults: { old: {}, acme: { dir: "/d/acme", mnt: "/l/acme" } } },
     });
     expect(readdirSync(join(home, ".pi", "agent")).sort()).toEqual([".pi-subagent.json.lock", "pi-subagent.json"]);
     expect(statSync(f).mode & 0o777).toBe(0o640 & ~0o022);
     const r = H.resolveVault("acme", { home });
     expect(r.kind).toBe("ok");
-    expect(r.vault.sessionDir).toBe("/d/acme/mnt/state/sessions/default");
+    expect(r.vault.sessionDir).toBe("/l/acme/state/sessions/default");
   });
   it("refuses to rewrite an unparsable settings file", () => {
     const home = tmp("ps-reg-");

@@ -52,9 +52,22 @@ describe("domain judgment matrix (plan §2.4 step 1)", () => {
     }
   });
 
-  it("cwd reached through the ~/secure/<name> entry link ⇒ secure", () => {
+  it("cwd at the mount point itself ⇒ secure", () => {
     v = makeFakeVault();
-    expect(judge(v, { cwd: join(v.link, "sub") }).kind).toBe("secure");
+    expect(judge(v, { cwd: v.mnt }).kind).toBe("secure");
+  });
+
+  // ── legacy layout (§L.3): plugin judgment keeps the OLD derivations ──
+  it("legacy vault: cwd reached through the old ~/secure/<name> entry link ⇒ secure when mounted", () => {
+    v = makeFakeVault({ legacy: true });
+    expect(v.link).toBeDefined();
+    expect(judge(v, { cwd: join(v.link!, "sub") }).kind).toBe("secure");
+  });
+  it("legacy vault: mounted at <dir>/mnt ⇒ secure; unmounted ⇒ locked", () => {
+    v = makeFakeVault({ legacy: true });
+    expect(judge(v, { cwd: v.work }).kind).toBe("secure");
+    const d = judge(v, { mountinfo: v.unmounted });
+    expect(d.kind).toBe("locked");
   });
 
   it("cwd inside the vault but not mounted ⇒ locked", () => {
@@ -64,10 +77,14 @@ describe("domain judgment matrix (plan §2.4 step 1)", () => {
     if (d.kind === "locked") expect(d.reason).toContain("未挂载");
   });
 
-  it("a foreign filesystem on the mount point ⇒ locked", () => {
+  it("a foreign filesystem ON THE MOUNT POINT ⇒ locked via the foreign branch (review L0 #5)", () => {
     v = makeFakeVault();
-    const d = judge(v, { mountinfo: mountLine(join(v.dir, "mnt"), "tmpfs", "tmpfs") });
+    const d = judge(v, { mountinfo: mountLine(v.mnt, "tmpfs", "tmpfs") }); // tmpfs AT the real mount point
     expect(d.kind).toBe("locked");
+    if (d.kind === "locked") expect(d.reason).toContain("不是它自己的 gocryptfs 挂载");
+    // …and a truly absent mount point is the distinct 未挂载 branch
+    const absent = judge(v, { mountinfo: v.unmounted });
+    if (absent.kind === "locked") expect(absent.reason).toContain("未挂载");
   });
 
   it("mountinfo says mounted but <state> is still the sentinel file ⇒ locked (plugin-side defence)", () => {
@@ -224,13 +241,18 @@ describe("placement helpers (session-driver / consult / resume)", () => {
     expect(() => assertSessionFileInDomain(join(v.outside, "x.jsonl"))).toThrow(/保险库外/);
   });
 
-  it("plain with vaults ⇒ resume of a vault file is refused (literal and via link)", () => {
+  it("plain with vaults ⇒ resume of a vault file is refused (canonical and literal mount-point spelling)", () => {
     v = makeFakeVault();
     freezeDomain(v, { cwd: v.outside });
     expect(secureChildSessionDir()).toBeUndefined();
     expect(() => assertSessionFileInDomain(join(v!.sessions, "x.jsonl"))).toThrow(/acme/);
-    expect(() => assertSessionFileInDomain(join(v!.link, "x.jsonl"))).toThrow(/acme/);
+    expect(() => assertSessionFileInDomain(join(v!.mnt, "state", "sessions", "x.jsonl"))).toThrow(/acme/);
     expect(() => assertSessionFileInDomain(join(v!.outside, "x.jsonl"))).not.toThrow();
+  });
+  it("plain with a LEGACY vault ⇒ resume via the old entry-link spelling is refused", () => {
+    v = makeFakeVault({ legacy: true });
+    freezeDomain(v, { cwd: v.outside });
+    expect(() => assertSessionFileInDomain(join(v!.link!, "x.jsonl"))).toThrow(/acme/);
   });
 
   it("locked ⇒ child creation and resume both refused", () => {
@@ -243,7 +265,7 @@ describe("placement helpers (session-driver / consult / resume)", () => {
   it("canonicalPath resolves the nearest existing ancestor", () => {
     v = makeFakeVault();
     mkdirSync(join(v.work, "a"), { recursive: true });
-    expect(canonicalPath(join(v.link, "a", "b", "c.txt"))).toBe(join(v.work, "a", "b", "c.txt"));
+    expect(canonicalPath(join(v.mnt, "work", "a", "b", "c.txt"))).toBe(join(v.work, "a", "b", "c.txt"));
   });
 });
 

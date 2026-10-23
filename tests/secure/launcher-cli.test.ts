@@ -253,7 +253,7 @@ describe("prerequisites & configuration errors (§3)", () => {
     expect(existsSync(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"))).toBe(false);
     expect(existsSync(join(c.home, ".pi", "agent", "pi-subagent.json"))).toBe(false);
   });
-  it("status lists an incomplete vault with recovery steps", () => {
+  it("status lists an incomplete vault with recovery steps covering BOTH locations (review L0 #4)", () => {
     const c = ctx();
     register(c, "acme");
     mkdirSync(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"), { recursive: true, mode: 0o700 });
@@ -261,6 +261,8 @@ describe("prerequisites & configuration errors (§3)", () => {
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/acme: locked {2}layout incomplete/);
     expect(r.out).toContain("恢复：");
+    expect(r.out).toContain(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"));
+    expect(r.out).toContain(join(c.home, "secure", "acme")); // the mount point is named too
   });
 });
 
@@ -304,18 +306,22 @@ describe("run: argument audit happens BEFORE any mount or pi start (§2.2.1)", (
 });
 
 describe.skipIf(!HAVE_SCRIPT)("unlock: password retries (D9) with a fake gocryptfs under a pty", () => {
+  /** New §L.1 layout: metadata under <dir>, mount point at ~/secure/acme (registered default). */
   function layout(c: Ctx) {
     const d = join(c.home, ".local", "share", "pi-toolkit-secure", "acme");
+    const mnt = join(c.home, "secure", "acme");
     mkdirSync(join(d, "cipher"), { recursive: true, mode: 0o700 });
     chmodSync(join(c.home, ".local"), 0o700);
     chmodSync(d, 0o700);
-    mkdirSync(join(d, "mnt"), { mode: 0o700 });
+    mkdirSync(join(c.home, "secure"), { mode: 0o700 });
+    mkdirSync(mnt, { mode: 0o700 });
     for (const n of ["work", "state"]) {
-      writeFileSync(join(d, "mnt", n), "");
-      chmodSync(join(d, "mnt", n), 0o400);
+      writeFileSync(join(mnt, n), "");
+      chmodSync(join(mnt, n), 0o400);
     }
     writeFileSync(join(d, "cipher", "gocryptfs.conf"), "{}");
     writeFileSync(join(d, "mount.lock"), "");
+    writeFileSync(join(d, "mount.lease"), "", { mode: 0o600 });
     return d;
   }
   it("3 wrong passwords ⇒ exit 77 after 1s+2s back-off; exactly 3 attempts; lock released", async () => {
@@ -330,16 +336,16 @@ describe.skipIf(!HAVE_SCRIPT)("unlock: password retries (D9) with a fake gocrypt
     expect(r.ms).toBeGreaterThanOrEqual(3_000);
     const calls = readFileSync(c.log, "utf8").trim().split("\n");
     expect(calls).toHaveLength(3);
-    expect(calls[0]).toBe(`gocryptfs -nonempty -- ${d}/cipher ${d}/mnt`);
+    expect(calls[0]).toBe(`gocryptfs -nonempty -- ${d}/cipher ${join(c.home, "secure", "acme")}`);
     expect(spawnSync("flock", ["-n", join(d, "mount.lock"), "true"]).status).toBe(0);
   }, 30_000);
   it("a failed sentinel check refuses to mount (gocryptfs never called)", async () => {
     const c = ctx({ gocryptfsExit: 0 });
     register(c, "acme");
     const d = layout(c);
-    writeFileSync(join(d, "mnt", "stray"), "");
+    writeFileSync(join(c.home, "secure", "acme", "stray"), "");
     const r = await runTty(c, `${BIN} unlock acme`);
-    expect(r.code).toBe(1);
+    expect(r.code).toBe(78); // §L.1: extra entries at the mount point refuse the mount (78)
     expect(r.text).toContain("多余条目：stray");
     expect(existsSync(c.log)).toBe(false);
   }, 30_000);
@@ -369,6 +375,74 @@ describe.skipIf(!HAVE_SCRIPT)("unlock: password retries (D9) with a fake gocrypt
   }, 30_000);
 });
 
+describe("review #4: an interrupted init names BOTH cleanup locations", () => {
+  it.skipIf(!HAVE_SCRIPT)("gocryptfs -init failure: the hint lists the metadata dir and the mount point", async () => {
+    const c = ctx({ gocryptfsExit: 12 });
+    const r = await runTty(c, `${BIN} init acme`, []);
+    expect(r.code, r.text).toBe(1);
+    expect(r.text).toContain("gocryptfs -init 失败");
+    expect(r.text).toContain(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"));
+    expect(r.text).toContain(join(c.home, "secure", "acme"));
+    expect(r.text).toMatch(/删除元数据目录.*挂载点目录/);
+    // the layout WAS created (both locations exist on disk), matching the hint's premise
+    expect(existsSync(join(c.home, ".local", "share", "pi-toolkit-secure", "acme"))).toBe(true);
+    expect(existsSync(join(c.home, "secure", "acme", "work"))).toBe(true);
+  });
+});
+
+describe("legacy-layout vaults: read-only compat (§L.3)", () => {
+  /** A registered pre-L0 vault: entry {dir, link}, mount point <dir>/mnt with sentinels. */
+  function legacy(c: Ctx, name = "old") {
+    const d = join(c.home, ".local", "share", "pi-toolkit-secure", name);
+    mkdirSync(join(d, "cipher"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(d, "cipher", "gocryptfs.conf"), "{}");
+    writeFileSync(join(d, "mount.lock"), "");
+    mkdirSync(join(d, "mnt"), { mode: 0o700 });
+    for (const n of ["work", "state"]) {
+      writeFileSync(join(d, "mnt", n), "");
+      chmodSync(join(d, "mnt", n), 0o400);
+    }
+    mkdirSync(join(c.home, "secure"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(d, "mnt", "work"), join(c.home, "secure", name));
+    register(c, name, { dir: d, link: join(c.home, "secure", name) });
+    return d;
+  }
+  it("status shows legacy-layout and the migration pointer; no lease is required", () => {
+    const c = ctx();
+    legacy(c);
+    const r = run(c, ["status", "old"]);
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toMatch(/old: locked {2}layout legacy {2}mnt .*\/mnt/);
+    expect(r.out).toContain("旧布局");
+    expect(r.out).toContain("pi-secure export old <文件>");
+  });
+  it("unlock / run / init --fix-settings are refused with 78 and the export→import guidance", () => {
+    const c = ctx();
+    legacy(c);
+    for (const args of [
+      ["unlock", "old"],
+      ["run", "old"],
+      ["init", "old", "--fix-settings"],
+    ]) {
+      const r = run(c, args);
+      expect(r.code, `${args}: ${r.err}`).toBe(78);
+      expect(r.err).toContain("使用旧布局");
+      expect(r.err).toContain("pi-secure export old <文件>");
+      expect(r.err).toContain("pi-secure import <文件> <新名字>");
+    }
+    expect(existsSync(c.log)).toBe(false); // gocryptfs never called
+    expect(existsSync(join(c.root, "pi-record.json"))).toBe(false); // pi never started
+  });
+  it("lock still works on a legacy vault (not mounted ⇒ ok, no refusal; mount path shares finalize)", () => {
+    const c = ctx({ gocryptfsExit: 0 });
+    legacy(c);
+    const r = run(c, ["lock", "old"]);
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("未挂载");
+    expect(existsSync(c.log)).toBe(false); // nothing to unmount
+  });
+});
+
 describe("hard backstop (§R4 m1): a wedged finalize still exits non-zero with one stderr line", () => {
   it("exits 75 at budget+0.5s (budget 2s) even when the unmount stage never settles", () => {
     const script = `
@@ -385,9 +459,7 @@ describe("hard backstop (§R4 m1): a wedged finalize still exits non-zero with o
     const ms = Date.now() - t0;
     expect(r.status).toBe(75);
     expect(r.stdout).not.toContain("unreachable");
-    expect(r.stderr.trim().split("\n")).toEqual([
-      `pi-secure: 卸载未完成，保险库 acme 可能仍挂载（/nonexistent/acme/mnt）`,
-    ]);
+    expect(r.stderr.trim().split("\n")).toEqual([`pi-secure: 卸载未完成，保险库 acme 可能仍挂载（/nonexistent/l）`]);
     expect(ms).toBeGreaterThanOrEqual(2_400);
     expect(ms).toBeLessThan(4_500);
   });

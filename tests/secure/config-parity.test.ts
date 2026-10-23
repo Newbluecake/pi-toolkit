@@ -10,7 +10,7 @@ import { hubSafeEnv } from "../../src/secure/env.js";
  */
 interface Fixture {
   home: string;
-  settings: Array<{ name: string; input: unknown; expect: unknown }>;
+  settings: Array<{ name: string; input: unknown; expect: unknown; probe?: string[] }>;
   mountinfo: Array<{ name: string; mountinfo: string; realMnt: string; realCipher: string; expect: string }>;
   hubSafeEnv: Array<{
     name: string;
@@ -32,7 +32,8 @@ describe("secure contract parity — settings `secure` section", () => {
   });
   for (const c of fixture.settings) {
     it(c.name, () => {
-      expect(JSON.parse(JSON.stringify(parseSecureConfig(c.input, fixture.home)))).toEqual(c.expect);
+      const io = { legacyMntDir: (mnt: string) => (c.probe ?? []).includes(mnt) };
+      expect(JSON.parse(JSON.stringify(parseSecureConfig(c.input, fixture.home, io)))).toEqual(c.expect);
     });
   }
 });

@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetSecureDomainForTests, type SecureDomain } from "../../src/secure/domain.js";
@@ -30,9 +30,15 @@ function plain(): { v: FakeVault; d: SecureDomain } {
 }
 
 describe("D3 containWrites (secure: write/edit must stay inside the vault)", () => {
-  it("write/edit inside the vault (relative, absolute, via entry link, new subdirs) pass", () => {
+  it("write/edit inside the vault (relative, absolute, via the mount point, new subdirs) pass", () => {
     const { v, d } = secure();
-    for (const path of ["a.txt", "sub/new/dir/b.ts", join(v.work, "c"), join(v.link, "d"), join(v.state, "tmp", "x")])
+    for (const path of [
+      "a.txt",
+      "sub/new/dir/b.ts",
+      join(v.work, "c"),
+      join(v.mnt, "work", "d"),
+      join(v.state, "tmp", "x"),
+    ])
       for (const tool of ["write", "edit"])
         expect(decideToolCall(d, undefined, tool, { path }, v.work)).toBeUndefined();
   });
@@ -61,7 +67,7 @@ describe("D3 containWrites (secure: write/edit must stay inside the vault)", () 
 
   it("the write zone is strictly below mnt/work or mnt/state: mnt root entries and the sentinel paths are blocked", () => {
     const { v, d } = secure();
-    const mnt = join(v.dir, "mnt");
+    const mnt = v.mnt;
     for (const path of [join(mnt, "new-file"), join(mnt, "work"), join(mnt, "state"), mnt, join(v.dir, "cipher", "x")])
       expect(decideToolCall(d, undefined, "write", { path }, v.work)?.block, path).toBe(true);
     expect(decideToolCall(d, undefined, "write", { path: join(mnt, "work", "ok") }, v.work)).toBeUndefined();
@@ -76,22 +82,43 @@ describe("D3 containWrites (secure: write/edit must stay inside the vault)", () 
 });
 
 describe("D4 foreignAccess (plain: no tool may touch a vault)", () => {
-  it("path tools on the vault dir, mount, entry link or cipher are blocked", () => {
+  it("path tools on the vault dir, mount point or cipher are blocked", () => {
     const { v, d } = plain();
     for (const tool of ["read", "write", "edit", "grep", "find", "ls"])
-      for (const path of [join(v.work, "a"), join(v.link, "a"), join(v.dir, "cipher"), v.dir]) {
+      for (const path of [join(v.work, "a"), join(v.mnt, "a"), join(v.dir, "cipher"), v.dir]) {
         const r = decideToolCall(d, undefined, tool, { path }, v.outside, v.home);
         expect(r?.block, `${tool} ${path}`).toBe(true);
         expect(r?.reason).toContain("pi-secure run acme");
       }
   });
 
-  it("grep/find/ls without a path default to the cwd — inside a vault link ⇒ blocked", () => {
+  it("grep/find/ls without a path default to the cwd — inside a vault mount point ⇒ blocked", () => {
     const { v, d } = plain();
-    expect(decideToolCall(d, undefined, "ls", {}, v.link)?.block).toBe(true);
+    expect(decideToolCall(d, undefined, "ls", {}, v.mnt)?.block).toBe(true);
     expect(decideToolCall(d, undefined, "ls", {}, v.outside)).toBeUndefined();
   });
 
+  it("review #3: a LEGACY vault's entry link stays in the D4 known-address set (bash + path tools)", () => {
+    v = makeFakeVault({ legacy: true });
+    const d = freezeDomain(v, { cwd: v.outside }).domain;
+    const link = v.link!;
+    // the old entry path a plain session's bash command could name — absolute, ~/, $HOME/
+    const rel = link.slice(v.home.length + 1);
+    for (const command of [`cat ${link}/secret.txt`, `ls ~/${rel}`, `cd "$HOME/${rel}" && ls`])
+      expect(decideToolCall(d, undefined, "bash", { command }, v.outside, v.home)?.block, command).toBe(true);
+    // path tools through the link (literal AND canonical spellings)
+    expect(decideToolCall(d, undefined, "read", { path: join(link, "a") }, v.outside, v.home)?.block).toBe(true);
+    expect(decideToolCall(d, undefined, "grep", { path: link }, v.outside, v.home)?.block).toBe(true);
+    // a BROKEN link (vault unmounted, link dangling) is still caught by the literal spelling
+    rmSync(join(v.mnt, "work"), { recursive: true, force: true });
+    expect(decideToolCall(d, undefined, "read", { path: join(link, "a") }, v.outside, v.home)?.block).toBe(true);
+  });
+  it("review #3: new-layout vaults carry no legacy link spelling (no overblocking)", () => {
+    v = makeFakeVault();
+    const d = freezeDomain(v, { cwd: v.outside }).domain;
+    expect(d.vaults[0].vault.legacyLink).toBeUndefined();
+    expect(bashTouchesVault("cat ~/secure/other/x", d.vaults, v.home)).toBeUndefined();
+  });
   it("paths outside every vault pass", () => {
     const { v, d } = plain();
     expect(decideToolCall(d, undefined, "read", { path: join(v.outside, "f") }, v.outside)).toBeUndefined();
@@ -100,7 +127,7 @@ describe("D4 foreignAccess (plain: no tool may touch a vault)", () => {
 
   it("bash mentioning a vault path (absolute, ~/, $HOME/) is blocked best-effort", () => {
     const { v, d } = plain();
-    const rel = v.link.slice(v.home.length + 1);
+    const rel = v.mnt.slice(v.home.length + 1);
     for (const command of [`cat ${v.work}/a`, `ls ~/${rel}`, `cd "$HOME/${rel}" && ls`, `tar c ${v.dir}`])
       expect(decideToolCall(d, undefined, "bash", { command }, v.outside, v.home)?.block, command).toBe(true);
     expect(decideToolCall(d, undefined, "bash", { command: `ls ${v.dir}2` }, v.outside, v.home)).toBeUndefined();
@@ -152,7 +179,7 @@ describe("session_start verification (plan §2.4 step 3)", () => {
     expect(verifySessionFacts(d, { ...base, sessionFile: join(v.sessions, "s.jsonl") })).toContain(
       "pi-secure run acme",
     );
-    expect(verifySessionFacts(d, { ...base, cwd: v.link })).toBeDefined();
+    expect(verifySessionFacts(d, { ...base, cwd: v.mnt })).toBeDefined();
   });
 
   it("frozen locked ⇒ always LOCKED", () => {
@@ -320,11 +347,11 @@ describe("wireSecureGuards (pi-facing assembly)", () => {
     expect(w.lockedReason()).toBeUndefined();
     // `pi-secure lock` from another terminal: mountinfo loses the line, mnt/work + mnt/state become sentinels again
     mountinfo = v.unmounted;
-    rmSync(join(v.dir, "mnt", "work"), { recursive: true, force: true });
-    rmSync(join(v.dir, "mnt", "state"), { recursive: true, force: true });
-    writeFileSync(join(v.dir, "mnt", "work"), "", { mode: 0o400 });
-    writeFileSync(join(v.dir, "mnt", "state"), "", { mode: 0o400 });
-    for (const path of [join(v.dir, "mnt", "new-file"), join(v.dir, "mnt", "work")]) {
+    rmSync(join(v.mnt, "work"), { recursive: true, force: true });
+    rmSync(join(v.mnt, "state"), { recursive: true, force: true });
+    writeFileSync(join(v.mnt, "work"), "", { mode: 0o400 });
+    writeFileSync(join(v.mnt, "state"), "", { mode: 0o400 });
+    for (const path of [join(v.mnt, "new-file"), join(v.mnt, "work")]) {
       const r = (await f.emit("tool_call", { toolName: "write", input: { path } }, c.ctx)) as { block?: boolean };
       expect(r?.block, path).toBe(true);
     }

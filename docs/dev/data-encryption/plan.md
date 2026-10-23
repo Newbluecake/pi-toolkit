@@ -49,13 +49,13 @@ toolkit 提供一键**创建、解锁、卸载** gocryptfs 加密目录的命令
 
 ### 0.5 加密对目录结构的影响（给用户）
 
-1. **项目要搬进保险库**。项目改放在 `~/secure/<name>/`。这是一个符号链接，指向 `<dir>/mnt/work`，`<dir>` 默认是 `~/.local/share/pi-toolkit-secure/<name>`。
+1. **项目要搬进保险库**。项目改放在 `~/secure/<name>/work`。`~/secure/<name>/` 是挂载点目录（0700），`<dir>` 默认是 `~/.local/share/pi-toolkit-secure/<name>`（只放密文与元数据）。
    一个保险库可以放一个或多个项目（`work/` 下的子目录）。
-2. **未挂载时进不去**。卸载后 `~/secure/<name>` 指向一个普通文件，`cd` 和打开都会失败，IDE 里已打开的窗口也会报错。先执行 `pi-secure unlock <name>`，或直接用 `pi-secure run <name>`。
+2. **未挂载时进不去**。卸载后 `~/secure/<name>/` 里只剩 `work`、`state` 两个哨兵文件，`cd ~/secure/<name>/work` 和打开都会失败，IDE 里已打开的窗口也会报错。先执行 `pi-secure unlock <name>`，或直接用 `pi-secure run <name>`。
 3. **项目内的相对路径不变，绝对路径会变**：
    - `src/a.ts`、`../lib` 这类相对引用都照常工作。
    - 旧绝对路径（例如 `~/ai/acme/...`）全部失效。IDE 工作区、shell 脚本、cron、systemd unit、docker-compose 的 bind mount、`.env` 里的绝对路径都要更新。
-   - pi 和 git 看到的是**物理路径** `~/.local/share/pi-toolkit-secure/<name>/mnt/work/...`，会话 header、web-hub 卡片和日志里显示的也是它；只有 shell 的 `$PWD` 仍是 `~/secure/<name>`。
+   - pi 和 git 看到的路径就是 `~/secure/<name>/work/...`（`$HOME` 不经符号链接时它就是物理路径），会话 header、web-hub 卡片和日志里显示的也是它。
 4. **git 仓库要整体放入**（含 `.git`），不能只搬工作区。linked worktree，或 `.git` 指向保险库外的仓库，commit 的对象会写到外面（R9）。远端 push 照常进行，按设计就是明文上传。
 5. **其他进程看不到保险库**。没有 `allow_other` 时，只有你本人（同 uid）能访问挂载：root、docker 守护进程、其他用户的服务都看不到。
    容器 bind mount 保险库目录会失败，需要改为在宿主机上运行，或改用其他方案。
@@ -66,9 +66,9 @@ toolkit 提供一键**创建、解锁、卸载** gocryptfs 加密目录的命令
 7. **迁移已有项目**：
    - ① `pi-secure init acme`。
    - ② `pi-secure unlock acme`。
-   - ③ `rsync -a ~/ai/acme/ ~/secure/acme/`（含 `.git`）。
+   - ③ `rsync -a ~/ai/acme/ ~/secure/acme/work/`（含 `.git`；挂载后 work 是项目根）。
    - ④ `pi-secure run acme --version`（不带 `--` 分隔；`--` 之后的内容按 pi parseArgs 会被当成消息）：每次 `unlock`/`run` 都会幂等补写 `.pi/settings.json` 的 `sessionDir`；项目自带的 `.pi/settings.json` 只合并这一个键，键值不同时会提示。
-   - ⑤ 在保险库内执行 `git status` 和 `git rev-parse --git-common-dir`，确认位于 `~/secure/acme` 内。
+   - ⑤ 在保险库内执行 `git status` 和 `git rev-parse --git-common-dir`，确认位于 `~/secure/acme/work` 内。
    - ⑥ 旧会话（`~/.pi/agent/sessions/--home-…-ai-acme--/`）按需用 `pi-secure run acme --fork <旧会话文件>` 导入，然后删掉旧目录。
    - ⑦ 项目 memory 按 cwd 存放，新路径会得到一份空 memory；需要的话把 `~/.pi/agent/memory/<旧 slug>/` 复制到 `<state>/memory/<新 slug>/`。
    - ⑧ 删除原目录和旧备份（SSD 或 CoW 文件系统上，删除不等于擦除，R17）。
@@ -101,36 +101,41 @@ toolkit 提供一键**创建、解锁、卸载** gocryptfs 加密目录的命令
 
 ## 2. 设计
 
-### 2.1 目录布局（保留 r2 的哨兵法，代价很低）
+### 2.1 目录布局（r4 哨兵法；布局已按 private-plan §L.1 迁移，L0 落地 2026-10-24）
 
 ```
-<dir>  默认 ~/.local/share/pi-toolkit-secure/<name>/   (0700)
+<dir>  默认 ~/.local/share/pi-toolkit-secure/<name>/   (0700)   明文区，只放元数据
  ├─ cipher/                gocryptfs.conf 和密文（0700）
- ├─ mnt/                   挂载点（0700）
- │   ├─ work   ← 未挂载时是 0 字节、0400 的普通文件（哨兵）
- │   └─ state  ← 同上
- └─ mount.lock             只用来串行化 mount/umount（flock -w，有超时）
-挂载后：mnt/work/ = 项目根，mnt/state/ = toolkit 私有区（sessions/default、tmp、bash-jobs、workflows、consult、memory）
-用户入口：~/secure/<name>  →  符号链接到  <dir>/mnt/work   （未挂载时链接**目标是普通文件**，cd 会失败，见 R6）
+ ├─ mount.lock             串行化 mount/umount 状态变迁（flock -w，有超时）
+ └─ mount.lease            挂载租约（L0 建空文件 0600；N1 起每次挂载都持有）
+<mnt>  默认 ~/secure/<name>/   (0700)   挂载点（init --path 可指定）
+ ├─ work   ← 未挂载时是 0 字节、0400 的普通文件（哨兵）；挂载后 = 项目根
+ └─ state  ← 同上；挂载后 = toolkit 私有区（sessions/default、tmp、bash-jobs、workflows、consult、memory）
 ```
 
-- 未挂载时，所有指向 `mnt/work/…` 或 `mnt/state/…` 的写入（包括 pi 的 `mkdirSync(sessionDir)`、`mkdir -p`、write 工具）都会因 ENOTDIR 失败，不依赖权限位，也不存在需要回滚的中间态。
-- 挂载要加 `-nonempty`。挂载前在 `mount.lock` 内确认 `mnt/` 下**恰好**只有这两个哨兵：用 lstat 逐项核对是普通文件、0 字节、0400、属于本 uid。有多余条目或属性不符就拒绝并列出。
-- 哨兵只保护 `work/` 和 `state/` 两个前缀；`mnt/` 下其他文件名不在保护范围内，本方案也不会用到它们。
-- `init` 中途失败时，留下的布局会被 `status` 判为 `incomplete`，并给出恢复步骤（删除 `<dir>` 后重新 `init`）。
+- **没有入口符号链接**（L0 取消）：挂载点就是 `~/secure/<name>` 本身，pi 的物理 cwd 就是 `~/secure/<name>/work`。
+- 未挂载时，所有指向 `<mnt>/work/…` 或 `<mnt>/state/…` 的写入（包括 pi 的 `mkdirSync(sessionDir)`、`mkdir -p`、write 工具）都会因 ENOTDIR 失败，不依赖权限位，也不存在需要回滚的中间态；`cd ~/secure/<name>` 可以进入（看到两个哨兵），`cd ~/secure/<name>/work` 报 ENOTDIR；写进 `~/secure/<name>/` 本身的文件会让下次挂载被拒（多余条目）。
+- 挂载要加 `-nonempty`。挂载前在 `mount.lock` 内确认 `<mnt>/` 下**恰好**只有这两个哨兵：用 lstat 逐项核对是普通文件、0 字节、0400、属于本 uid。有多余条目或属性不符就拒绝（78）并列出。
+- `<mnt>` 位置规则（`checkLayout` 与 `createLayout` 共用，评审 L0 #1 + 复审 r2 A1 修订）：`<mnt>` 须为本用户 0700 目录、不是符号链接；**祖先链**——从 `dirname(<mnt>)` 一路到 `/`（含 `/`）的每一级都须是真实目录（不得是符号链接/文件，符号链接层级直接拒绝，保证词法链＝物理链）、属本 uid 或 root、且不得对组/其他可写；写位规则**唯一例外**是「属主为 root 且带 sticky 位」的目录（如 `/tmp`——sticky 下只有子项属主能改名它）；**没有任何无条件豁免**：`$HOME` 本身（例如组可写的共享 home）与其全部上级都按同一规则核查，违反即拒绝并打印是哪一级、为什么。缺省 `~/secure` 不存在时由 init 以 0700 创建，其他位置不代建。`<mnt>` 与 `<dir>` 的**词法与物理地址**（物理地址＝最近存在祖先的 realpath＋剩余尾段，永不对挂载点本身 realpath）都不得互相包含、不得与任何其他已登记库的 dir/mnt 两两互相包含（A 含 B、B 含 A 全查）、不得进入或包含 pi agent 目录（agent 目录同样做 realpath 规范化）——父目录符号链接（如 `~/agent-alias → ~/.pi/agent`）无法借此把挂载点偷渡进禁区。
+- **挂载点身份固定**（评审 L0 #2 + 复审 r2 A2/A3）：挂载前在 `mount.lock` 内以 `O_DIRECTORY|O_NOFOLLOW` 打开挂载点并 fstat，pin 携带 `(dev,ino)`、**挂载前的物理路径**（realpath，此时安全）与**父目录 `(dev,ino)`**，fd 跨 gocryptfs 生命期持有；每次口令尝试前复检路径仍指向该 inode；挂载成功后**四条全部满足**才放行：(a) `readlink /proc/self/fd/<pin>` 仍等于 pin 的物理路径（fd 链接跟随改名——把内核实际挂载的对象绑定回受检 inode）；(b) mountinfo 存在挂载点 == 该物理路径、fstype `fuse.gocryptfs`、source == 本库 cipher 的条目；(c) 父目录 `(dev,ino)` 未变；(+) `stat(<mnt>).dev` == 该 mountinfo 行的 fuse `maj:min`。任一不满足 ⇒ 失败并**回滚**：`unlockVault` 对 `doMount` 抛出的失败同样先探测再卸载本次新建的挂载（`fusermount3 -u`，EBUSY 再 `-uz` 一次）；`already`（本次调用前已存在的挂载）保持原样不回滚。
+- **残留窗口（如实）**：(i) pre-check 与内核在 gocryptfs 内解析路径之间仍可发生改名，mount.lock 只串行化合作启动器、不阻止文件系统改名；在祖先链全部合规（各级属本 uid 或 root、无组/其他写位、sticky 仅豁免 root 属主）的前提下，其他 uid 无法替换链上任何一级，因此该窗口的利用者只能是本 uid 进程——与 R16（同 uid 对抗不在承诺内）同类；若祖先链前提本身被破坏（如 root 配合），检测能力限于上述 (a)(b)(c)(+)，不保证检出所有错位。(ii) fd 持有引用不等于 gocryptfs 经该 fd 挂载——内核按路径解析挂载，(a) 证明的是「受检 inode 仍在原路径」，在正常时序下把它与实际挂载对象绑定。
+- 物理路径：`realMnt = join(realpath(dirname(mnt)), basename(mnt))`——**永不对挂载点本身做 realpath**（挂载着或 ENOTCONN 时会穿过/卡住）；`realWork = <realMnt>/work`。
+- 哨兵只保护 `work/` 和 `state/` 两个前缀；`<mnt>/` 下其他文件名不在保护范围内，本方案也不会用到它们。
+- `init` 中途失败时会留下**两处**产物（元数据 `<dir>` 与挂载点 `<mnt>` 及其哨兵），失败提示与 `status` 的 `incomplete` 恢复指引都列出两个位置、只给命令不自动删除；清理挂载点前须确认未挂载、其内只有 `work`/`state` 两个哨兵且无要保留的数据，有多余条目时只提示人工核查（评审 L0 #4）。
+- **旧布局条目（pre-L0，§L.3 只读兼容）**：条目含 `link` 键、或不含 `mnt` 且 `<dir>/mnt` 是目录 ⇒ 解析为 `layout:"legacy"`（按旧规则派生路径），并保留 `legacyLink`（条目 `link` 的合法展开值，缺省/非法时回落旧缺省 `~/secure/<名字>`）——它只进 D4 的已知地址集合（`vaultSpellings`/`vaultOfPath`），使普通会话经旧入口的 bash/路径工具访问在旧库仍被旧版 helper 挂着时照样被拦（评审 L0 #3），不参与任何启动器路径逻辑。`status`/`lock`（以及后续包的 `export`）可用；`unlock`/`run`/`init --fix-settings` 拒绝（78）并提示「无数据删掉重建；有数据 export→import」。插件侧旧库 domain 判定保持旧行为（cwd 在旧挂载点下且挂载着 ⇒ secure；未挂载 ⇒ locked）。
 
 ### 2.2 命令面
 
 **启动器 `pi-secure`**（`src/secure/bin/pi-secure`，bash；`src/secure/bin/helper.mjs`，纯 Node、无依赖）。它不劫持 `pi` 这个名字，也不会自动透传成普通的 pi。
 安装方式：`/secure status` 会打印 `ln -s <包路径>/src/secure/bin/pi-secure ~/.local/bin/pi-secure`，由用户自己执行。启动器用 `readlink -f "$0"` 定位 `helper.mjs`。
 
-| 命令                                             | 行为                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `pi-secure init <name> [--path ~/secure/<name>]` | 前置检查（gocryptfs ≥1.8、fusermount3、flock、Linux）→ 建立 §2.1 布局与符号链接 → `gocryptfs -init -- cipher`（终端提示两次口令，并打印 master key，Q1）→ 首次挂载 → 建 `work/`、`state/…`，并写 `work/.pi/settings.json` 的 `sessionDir`（§2.3）→ 卸载 → 提示清屏                                                                                                                                                                                           |
-| `pi-secure unlock <name>`                        | 在 `flock -o -w 10 mount.lock` 下（`-o`：flock 在 exec 子命令前关闭锁 fd，gocryptfs 守护进程不会继承这把锁；P0 验证 unlock 返回后 lock 仍能拿到锁）：已挂载就直接返回；否则做哨兵校验，再 `gocryptfs -nonempty -- cipher mnt`。口令由 gocryptfs 自己从 TTY 读取，toolkit 不经手；exit 12 时最多试 3 次（D9）。之后核对 mountinfo（`fuse.gocryptfs`，source 是 cipher），再幂等补写 `work/.pi/settings.json` 的 `sessionDir`（§2.3）。顺带打印 swap/core 警告 |
-| `pi-secure lock <name> [--lazy]`                 | 执行 §2.5 的「有界收尾」（统一 10 秒预算）：`cd /` → 占用扫描 → 加锁卸载（`--lazy` 时加 `-z`）。若 EBUSY、超时或预算耗尽，打印占用者和建议后返回，不会卡住                                                                                                                                                                                                                                                                                                   |
-| `pi-secure status [<name>]`                      | 挂载状态、布局完整性、gocryptfs 版本、cwd 在挂载内的进程、swap/core 警告、traffic-record 适配情况（D5）                                                                                                                                                                                                                                                                                                                                                      |
-| `pi-secure run <name> [-C <子目录>] [pi 参数…]`  | `unlock` → `cd <work>/<子目录>` → 参数审查（§2.2.1）→ `ulimit -c 0; umask 077` → 设置环境变量 `PI_SECURE_VAULT=<name>`、`PI_SECURE_SESSION=1` → **以子进程方式**运行 `pi --session-dir <state>/sessions/default "$@"` → pi 退出后执行 §2.5 的有界收尾 → 以 pi 的退出码退出                                                                                                                                                                                   |
+| 命令                                            | 行为                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pi-secure init <name> [--path <挂载点>]`       | 前置检查（gocryptfs ≥1.8、fusermount3、flock、Linux）→ 建立 §2.1 布局（哨兵 + `mount.lease`，`--path` 指定挂载点位置，L0 起不再建入口符号链接）→ `gocryptfs -init -- cipher`（终端提示两次口令，并打印 master key，Q1）→ 首次挂载 → 建 `work/`、`state/…`，并写 `work/.pi/settings.json` 的 `sessionDir`（§2.3）→ 卸载 → 提示清屏                                                                                                                            |
+| `pi-secure unlock <name>`                       | 在 `flock -o -w 10 mount.lock` 下（`-o`：flock 在 exec 子命令前关闭锁 fd，gocryptfs 守护进程不会继承这把锁；P0 验证 unlock 返回后 lock 仍能拿到锁）：已挂载就直接返回；否则做哨兵校验，再 `gocryptfs -nonempty -- cipher mnt`。口令由 gocryptfs 自己从 TTY 读取，toolkit 不经手；exit 12 时最多试 3 次（D9）。之后核对 mountinfo（`fuse.gocryptfs`，source 是 cipher），再幂等补写 `work/.pi/settings.json` 的 `sessionDir`（§2.3）。顺带打印 swap/core 警告 |
+| `pi-secure lock <name> [--lazy]`                | 执行 §2.5 的「有界收尾」（统一 10 秒预算）：`cd /` → 占用扫描 → 加锁卸载（`--lazy` 时加 `-z`）。若 EBUSY、超时或预算耗尽，打印占用者和建议后返回，不会卡住                                                                                                                                                                                                                                                                                                   |
+| `pi-secure status [<name>]`                     | 挂载状态、布局完整性、gocryptfs 版本、cwd 在挂载内的进程、swap/core 警告、traffic-record 适配情况（D5）                                                                                                                                                                                                                                                                                                                                                      |
+| `pi-secure run <name> [-C <子目录>] [pi 参数…]` | `unlock` → `cd <work>/<子目录>` → 参数审查（§2.2.1）→ `ulimit -c 0; umask 077` → 设置环境变量 `PI_SECURE_VAULT=<name>`、`PI_SECURE_SESSION=1` → **以子进程方式**运行 `pi --session-dir <state>/sessions/default "$@"` → pi 退出后执行 §2.5 的有界收尾 → 以 pi 的退出码退出                                                                                                                                                                                   |
 
 插件内只有一个只读命令 `/secure status`（web 允许）。另有状态栏标记 `secure` / `secure:locked`（英文 token，遵守 UI 约定）。
 
@@ -151,7 +156,7 @@ toolkit 提供一键**创建、解锁、卸载** gocryptfs 加密目录的命令
 
 ### 2.3 项目级 sessionDir
 
-`init`、`unlock`、`run` 都会**幂等**写入 `<work>/.pi/settings.json`：`{"sessionDir": "<绝对路径>/mnt/state/sessions/default"}`。文件已存在时只合并 `sessionDir` 一个键；已有不同的值时：`run`/`unlock` **拒绝启动**并提示（给出 `pi-secure init <name> --fix-settings` 一键改写为 vault 内路径，改写前备份原文件为 `settings.json.bak-<时间戳>`），避免 rsync 带入的旧 `sessionDir` 让会话写到库外。这样迁移项目时先复制还是先 init 都能收敛到同一结果（复审 r4 m3）。
+`init`、`unlock`、`run` 都会**幂等**写入 `<work>/.pi/settings.json`：`{"sessionDir": "<mnt>/state/sessions/default"}`。文件已存在时只合并 `sessionDir` 一个键；已有不同的值时：`run`/`unlock` **拒绝启动**并提示（给出 `pi-secure init <name> --fix-settings` 一键改写为 vault 内路径，改写前备份原文件为 `settings.json.bak-<时间戳>`），避免 rsync 带入的旧 `sessionDir` 让会话写到库外。这样迁移项目时先复制还是先 init 都能收敛到同一结果（复审 r4 m3）。
 
 效果：保险库挂载后，即使不用 `run`，**在项目根目录**直接执行 `pi`，会话也会写进 vault（pi 在信任判定前就读取这个键）。在子目录启动时这个设置不生效，此时插件会锁住会话，提示用 `pi-secure run <name> -C <子目录>`。
 

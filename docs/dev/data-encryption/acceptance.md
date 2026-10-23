@@ -11,7 +11,7 @@
 - [ ] 准备金丝雀串：`CANARY=$(uuidgen)`（或手抄一个唯一串）。后续所有敏感写入都用它，最后做全盘 grep。
 - [ ] 建议在普通（非加密）目录另开一个 pi 会话作对照组；两边的 `pi --version` 一致。
 
-约定：下文 `<name>` 统一用示例名 `acme`；`<state>` = `~/.local/share/pi-toolkit-secure/acme/mnt/state`；`<dir>` = `~/.local/share/pi-toolkit-secure/acme`。
+约定：下文 `<name>` 统一用示例名 `acme`；`<mnt>` = `~/secure/acme`（挂载点，0700 目录；未挂载时只含 `work`、`state` 两个 0 字节 0400 哨兵文件）；`<state>` = `~/secure/acme/state`；`<dir>` = `~/.local/share/pi-toolkit-secure/acme`（只放 cipher 与元数据）。
 
 ## A. init
 
@@ -19,42 +19,42 @@
       预期：提示输入两次新口令 → gocryptfs 在终端打印一次 master key（64 个十六进制字符，8 组 × 8）→ 首次挂载再提示一次口令 → 自动建目录、写项目 sessionDir → 结束时自动卸载 → 提示执行 `clear` / `tmux clear-history`。
 - [ ] master key 已离线抄写保存（丢失口令且无 master key = 数据不可恢复）。
 - [ ] `pi-secure status acme`。
-      预期：`not mounted`（locked）· layout ok · 入口链接 ok；无 gocryptfs/swap/core/traffic-record 异常告警（swap/core 视本机配置，可能有提示）。
-- [ ] 登记与链接：`grep -n acme ~/.pi/agent/pi-subagent.json` 与 `ls -l ~/secure/acme`。
-      预期：settings 里有 `secure.vaults.acme`；`~/secure/acme` 是指向 `<dir>/mnt/work` 的符号链接，且此时 `cd ~/secure/acme` 失败（未挂载时链接目标是哨兵普通文件）。
+      预期：`not mounted`（locked）· layout ok · mnt 列显示 `~/secure/acme`；无 gocryptfs/swap/core/traffic-record 异常告警（swap/core 视本机配置，可能有提示）。
+- [ ] 登记与挂载点：`grep -n acme ~/.pi/agent/pi-subagent.json` 与 `ls -la ~/secure/acme`。
+      预期：settings 里有 `secure.vaults.acme`（`{"dir":…, "mnt":…}`）；`~/secure/acme` 是 0700 目录而非符号链接，锁定时可 `cd ~/secure/acme`（内含 `work`、`state` 两个哨兵文件），`cd ~/secure/acme/work` 失败（ENOTDIR）。
 - [ ] 反例：非 TTY 下 `echo | pi-secure init acme2`。
       预期：exit 2，提示需要 TTY，不留任何产物（`~/.local/share/pi-toolkit-secure/` 下无 `acme2`）。
 
 ## B. 迁移已有项目
 
 - [ ] `pi-secure unlock acme` → 输入口令。
-      预期：挂载成功；`mountinfo` 含 `fuse.gocryptfs`（`grep gocryptfs /proc/self/mountinfo`）；`<work>/.pi/settings.json` 的 `sessionDir` 指向 `<state>/sessions/default`。
-- [ ] `rsync -a ~/ai/acme/ ~/secure/acme/`（含 `.git`）。
+      预期：挂载成功（挂载点 `~/secure/acme`）；`mountinfo` 含 `fuse.gocryptfs`（`grep gocryptfs /proc/self/mountinfo`）；`<work>/.pi/settings.json` 的 `sessionDir` 指向 `<state>/sessions/default`。
+- [ ] `rsync -a ~/ai/acme/ ~/secure/acme/work/`（含 `.git`）。
 - [ ] `pi-secure run acme --version`（冒烟；注意**不带** `--` 分隔）。
       预期：pi 版本输出后立即退出（`--version` 不写会话文件），结束后自动卸载（若有 shell 停在库内，会列出占用 pid 并不卸载）。
-- [ ] 库内 git 检查：`cd ~/secure/acme && git status && git rev-parse --git-common-dir`。
-      预期：输出路径位于 `~/secure/acme` 内；若是 linked worktree / `.git` 指向库外，加密会话启动时会收到 common-dir 警告（R9）。
+- [ ] 库内 git 检查：`cd ~/secure/acme/work && git status && git rev-parse --git-common-dir`。
+      预期：输出路径位于 `~/secure/acme/work` 内；若是 linked worktree / `.git` 指向库外，加密会话启动时会收到 common-dir 警告（R9）。
 - [ ] （可选）旧会话导入：`pi-secure run acme --fork /abs/旧会话.jsonl`（**绝对路径**）。
       预期：会话复制进 `<state>/sessions/default`；相对路径会按库内 cwd 解析而找不到。
 - [ ] 迁移收尾：确认新路径一切正常后删除原目录与旧备份，更新 IDE / 脚本绝对路径（SSD 上删除≠擦除，见 R17）。
 
 ## C. run 日常
 
-- [ ] `pi-secure run acme`：提示口令 → pi 启动，pi 的 cwd 为物理路径 `<dir>/mnt/work`（`~/secure/acme` 的 realpath）。
+- [ ] `pi-secure run acme`：提示口令 → pi 启动，pi 的 cwd 为 `~/secure/acme/work`。
       预期：状态栏出现 `secure`；`/secure status` 显示 `加密会话：secure（经 PI_SECURE_VAULT 判定）`、项目根/私有区路径、`TMPDIR=<state>/tmp`、已关闭列表（feishu-notify、xs、droid、cron；worktree 隔离会被拒绝）。
 - [ ] pi 退出后 `pi-secure status acme`。
       预期：`not mounted`（自动卸载成功）。
 - [ ] `pi-secure run acme -C sub`（项目子目录）。
       预期：pi 的 cwd 为 `<work>/sub`，正常可用。
-- [ ] 对照（R6/§2.3）：保持挂载，直接 `cd ~/secure/acme && pi`。
+- [ ] 对照（R6/§2.3）：保持挂载，直接 `cd ~/secure/acme/work && pi`。
       预期：项目根直接 `pi` 照常落在 vault 内（sessionDir 生效）；而在**子目录**直接 `pi` 会被 LOCKED（见 E 节现象）。用完 `pi-secure lock acme`。
 
 ## D. 守护点手测（在 `pi-secure run acme` 的会话内）
 
 - [ ] **D3 写库外**：让模型用 write/edit 写 `/tmp/d3-<canary>.txt`。
       预期：工具被 block，提示目标不在保险库写入区；`/tmp` 下无该文件。（注意 TMPDIR 在库内，shell 的 `>` 重定向属 bash 尽力而为范围，见 R8。）
-- [ ] **D3 写入区边界**：write 到 `~/secure/acme/`（= `mnt/work` 哨兵路径本身）与 `<dir>/mnt/` 根层任意新文件。
-      预期：都被 block（只允许严格位于 `mnt/work`、`mnt/state` 之下的路径）。
+- [ ] **D3 写入区边界**：write 到 `~/secure/acme/work`（哨兵路径本身）、`~/secure/acme/` 根层任意新文件与 `<dir>/` 根层任意新文件。
+      预期：都被 block（只允许严格位于 `<mnt>/work`、`<mnt>/state` 之下的路径）。
 - [ ] **D4 普通会话读库**：对照组（库外目录的普通 pi）里 read/grep/find `~/secure/acme/...` 或 `<dir>/cipher/...`。
       预期：路径类工具被 block；bash 命令文本里出现 vault 路径前缀也被 block（尽力而为）。
 - [ ] **D2 worktree**：加密会话内派 `Agent({ isolation: "worktree" })`（或 workflow 的 `isolation:"worktree"`）。
@@ -103,10 +103,10 @@
 - [ ] `pi-secure status acme` 确认 `not mounted` 后执行（预期：**零命中**——`<dir>/cipher` 是密文不会命中；`<…>/mnt` 未挂载时读不进）：
 
   ```sh
-  grep -rFa "$CANARY" ~/.pi /tmp /var/tmp ~/.local/share/pi-toolkit-secure/*/mnt 2>/dev/null
+  grep -rFa "$CANARY" ~/.pi /tmp /var/tmp ~/secure 2>/dev/null
   ```
 
-注：这只是**终态**检查，不能证明运行期间没写过明文。若执行过 F 节（hub）并经 web / 飞书发送过正文或附件，`~/.pi/agent/web-hub/` 下的明文副本命中属**已接受的 R12**——记录命中路径与数量即可，不算 FAIL；同理 R1（crashes.json）、R4（`/debug`）类命中记录为残留证据。
+注：这只是**终态**检查，不能证明运行期间没写过明文。`~/secure` 未挂载时哨兵读不进、`<dir>/cipher` 是密文不会命中。若执行过 F 节（hub）并经 web / 飞书发送过正文或附件，`~/.pi/agent/web-hub/` 下的明文副本命中属**已接受的 R12**——记录命中路径与数量即可，不算 FAIL；同理 R1（crashes.json）、R4（`/debug`）类命中记录为残留证据。
 
 - [ ] （可选，strace 路线）用假数据 vault 与假口令：`strace -f -e trace=%file pi-secure run acme …`，trace 输出到 0700 目录，检查无 vault 外的创建/写入（只记路径不记缓冲，见 plan §6 第 3 条）。
 

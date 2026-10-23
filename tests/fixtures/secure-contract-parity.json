@@ -1,5 +1,5 @@
 {
-  "$comment": "P1↔P2 secure contract parity (data-encryption plan r4). Shared by tests/secure/config-parity.test.ts (src/secure/config.ts, env.ts) and the launcher tests (src/secure/bin/helper.mjs). Never import across; extend cases here only. settings.expect is the full JSON of parseSecureConfig (present/enabled/valid/vaults/invalid[{name,reason}]/error?); vaults and invalid are sorted by name. mountinfo realMnt/realCipher are already realpath'd. hubSafeEnv.expect is the full output env; identity=true additionally requires the same object back.",
+  "$comment": "P1↔P2 secure contract parity (data-encryption plan r4 + private-plan §L layout, revised once by L0 2026-10-24: vault objects carry mnt/lease instead of link; legacy entries (§L.3) parse with layout:\"legacy\" and the OLD derivations — the only sanctioned non-append fixture change; extend cases here only). Shared by tests/secure/config-parity.test.ts (src/secure/config.ts, env.ts) and the launcher tests (src/secure/bin/helper.mjs). Never import across; the two implementations stay separate. settings.expect is the full JSON of parseSecureConfig (present/enabled/valid/vaults/invalid[{name,reason}]/error?); vaults and invalid are sorted by name. settings.probe (optional) lists paths the injected legacy-layout disk probe reports as existing directories (the real default probe lstat's <dir>/mnt). mountinfo realMnt/realCipher are already realpath'd. hubSafeEnv.expect is the full output env; identity=true additionally requires the same object back.",
   "home": "/home/u",
   "settings": [
     {
@@ -131,13 +131,13 @@
           {
             "name": "acme",
             "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
-            "link": "/home/u/secure/acme",
+            "mnt": "/home/u/secure/acme",
             "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
-            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
-            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
-            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
-            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
-            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock"
+            "work": "/home/u/secure/acme/work",
+            "state": "/home/u/secure/acme/state",
+            "sessionDir": "/home/u/secure/acme/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease"
           }
         ],
         "invalid": []
@@ -160,7 +160,7 @@
       }
     },
     {
-      "name": "defaults for dir and link",
+      "name": "defaults for dir and mnt",
       "input": {
         "secure": {
           "vaults": {
@@ -176,13 +176,13 @@
           {
             "name": "acme",
             "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
-            "link": "/home/u/secure/acme",
+            "mnt": "/home/u/secure/acme",
             "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
-            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
-            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
-            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
-            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
-            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock"
+            "work": "/home/u/secure/acme/work",
+            "state": "/home/u/secure/acme/state",
+            "sessionDir": "/home/u/secure/acme/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease"
           }
         ],
         "invalid": []
@@ -195,7 +195,7 @@
           "vaults": {
             "c": {
               "dir": "~/v/c",
-              "link": "/abs/c/"
+              "mnt": "/abs/c/"
             },
             "f": {
               "dir": "/a/../b/f"
@@ -211,24 +211,24 @@
           {
             "name": "c",
             "dir": "/home/u/v/c",
-            "link": "/abs/c",
+            "mnt": "/abs/c",
             "cipher": "/home/u/v/c/cipher",
-            "mnt": "/home/u/v/c/mnt",
-            "work": "/home/u/v/c/mnt/work",
-            "state": "/home/u/v/c/mnt/state",
-            "sessionDir": "/home/u/v/c/mnt/state/sessions/default",
-            "lock": "/home/u/v/c/mount.lock"
+            "work": "/abs/c/work",
+            "state": "/abs/c/state",
+            "sessionDir": "/abs/c/state/sessions/default",
+            "lock": "/home/u/v/c/mount.lock",
+            "lease": "/home/u/v/c/mount.lease"
           },
           {
             "name": "f",
             "dir": "/b/f",
-            "link": "/home/u/secure/f",
+            "mnt": "/home/u/secure/f",
             "cipher": "/b/f/cipher",
-            "mnt": "/b/f/mnt",
-            "work": "/b/f/mnt/work",
-            "state": "/b/f/mnt/state",
-            "sessionDir": "/b/f/mnt/state/sessions/default",
-            "lock": "/b/f/mount.lock"
+            "work": "/home/u/secure/f/work",
+            "state": "/home/u/secure/f/state",
+            "sessionDir": "/home/u/secure/f/state/sessions/default",
+            "lock": "/b/f/mount.lock",
+            "lease": "/b/f/mount.lease"
           }
         ],
         "invalid": []
@@ -261,7 +261,13 @@
             "j": {
               "link": ["/x"]
             },
-            "k": []
+            "k": [],
+            "m": {
+              "mnt": "rel/y"
+            },
+            "n": {
+              "mnt": "~"
+            }
           }
         }
       },
@@ -271,15 +277,41 @@
         "valid": true,
         "vaults": [
           {
+            "name": "d",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/d",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/d/mnt",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/d/cipher",
+            "work": "/home/u/.local/share/pi-toolkit-secure/d/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/d/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/d/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/d/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/d/mount.lease",
+            "layout": "legacy",
+            "legacyLink": "/home/u/secure/d"
+          },
+          {
+            "name": "j",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/j",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/j/mnt",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/j/cipher",
+            "work": "/home/u/.local/share/pi-toolkit-secure/j/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/j/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/j/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/j/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/j/mount.lease",
+            "layout": "legacy",
+            "legacyLink": "/home/u/secure/j"
+          },
+          {
             "name": "zz",
             "dir": "/home/u/.local/share/pi-toolkit-secure/zz",
-            "link": "/home/u/secure/zz",
+            "mnt": "/home/u/secure/zz",
             "cipher": "/home/u/.local/share/pi-toolkit-secure/zz/cipher",
-            "mnt": "/home/u/.local/share/pi-toolkit-secure/zz/mnt",
-            "work": "/home/u/.local/share/pi-toolkit-secure/zz/mnt/work",
-            "state": "/home/u/.local/share/pi-toolkit-secure/zz/mnt/state",
-            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/zz/mnt/state/sessions/default",
-            "lock": "/home/u/.local/share/pi-toolkit-secure/zz/mount.lock"
+            "work": "/home/u/secure/zz/work",
+            "state": "/home/u/secure/zz/state",
+            "sessionDir": "/home/u/secure/zz/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/zz/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/zz/mount.lease"
           }
         ],
         "invalid": [
@@ -290,10 +322,6 @@
           {
             "name": "b",
             "reason": "dir"
-          },
-          {
-            "name": "d",
-            "reason": "link"
           },
           {
             "name": "e",
@@ -312,12 +340,16 @@
             "reason": "dir"
           },
           {
-            "name": "j",
-            "reason": "link"
-          },
-          {
             "name": "k",
             "reason": "entry"
+          },
+          {
+            "name": "m",
+            "reason": "mnt"
+          },
+          {
+            "name": "n",
+            "reason": "mnt"
           },
           {
             "name": "x y",
@@ -348,35 +380,35 @@
           {
             "name": "0a_b-c",
             "dir": "/home/u/.local/share/pi-toolkit-secure/0a_b-c",
-            "link": "/home/u/secure/0a_b-c",
+            "mnt": "/home/u/secure/0a_b-c",
             "cipher": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/cipher",
-            "mnt": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt",
-            "work": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt/work",
-            "state": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt/state",
-            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mnt/state/sessions/default",
-            "lock": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mount.lock"
+            "work": "/home/u/secure/0a_b-c/work",
+            "state": "/home/u/secure/0a_b-c/state",
+            "sessionDir": "/home/u/secure/0a_b-c/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/0a_b-c/mount.lease"
           },
           {
             "name": "9",
             "dir": "/home/u/.local/share/pi-toolkit-secure/9",
-            "link": "/home/u/secure/9",
+            "mnt": "/home/u/secure/9",
             "cipher": "/home/u/.local/share/pi-toolkit-secure/9/cipher",
-            "mnt": "/home/u/.local/share/pi-toolkit-secure/9/mnt",
-            "work": "/home/u/.local/share/pi-toolkit-secure/9/mnt/work",
-            "state": "/home/u/.local/share/pi-toolkit-secure/9/mnt/state",
-            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/9/mnt/state/sessions/default",
-            "lock": "/home/u/.local/share/pi-toolkit-secure/9/mount.lock"
+            "work": "/home/u/secure/9/work",
+            "state": "/home/u/secure/9/state",
+            "sessionDir": "/home/u/secure/9/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/9/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/9/mount.lease"
           },
           {
             "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "dir": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "link": "/home/u/secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "mnt": "/home/u/secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "cipher": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cipher",
-            "mnt": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt",
-            "work": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt/work",
-            "state": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt/state",
-            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mnt/state/sessions/default",
-            "lock": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mount.lock"
+            "work": "/home/u/secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/work",
+            "state": "/home/u/secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/state",
+            "sessionDir": "/home/u/secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/mount.lease"
           }
         ],
         "invalid": [
@@ -416,13 +448,208 @@
           {
             "name": "acme",
             "dir": "/home/u/d",
-            "link": "/home/u/secure/acme",
+            "mnt": "/home/u/secure/acme",
             "cipher": "/home/u/d/cipher",
-            "mnt": "/home/u/d/mnt",
-            "work": "/home/u/d/mnt/work",
-            "state": "/home/u/d/mnt/state",
-            "sessionDir": "/home/u/d/mnt/state/sessions/default",
-            "lock": "/home/u/d/mount.lock"
+            "work": "/home/u/secure/acme/work",
+            "state": "/home/u/secure/acme/state",
+            "sessionDir": "/home/u/secure/acme/state/sessions/default",
+            "lock": "/home/u/d/mount.lock",
+            "lease": "/home/u/d/mount.lease"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "legacy: a link key means the pre-L0 layout, whatever the value",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "link": "/old/acme"
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease",
+            "layout": "legacy",
+            "legacyLink": "/old/acme"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "legacy: link key wins even when mnt is also present",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "mnt": "/new/acme",
+              "link": "/old/acme"
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease",
+            "layout": "legacy",
+            "legacyLink": "/old/acme"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "legacy: no mnt and <dir>/mnt is a directory on disk (probe) ⇒ legacy",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {}
+          }
+        }
+      },
+      "probe": ["/home/u/.local/share/pi-toolkit-secure/acme/mnt"],
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/home/u/.local/share/pi-toolkit-secure/acme/mnt",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/work",
+            "state": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state",
+            "sessionDir": "/home/u/.local/share/pi-toolkit-secure/acme/mnt/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease",
+            "layout": "legacy",
+            "legacyLink": "/home/u/secure/acme"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "explicit mnt wins over an existing <dir>/mnt on disk",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {
+              "mnt": "/m/acme"
+            }
+          }
+        }
+      },
+      "probe": ["/home/u/.local/share/pi-toolkit-secure/acme/mnt"],
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/m/acme",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/m/acme/work",
+            "state": "/m/acme/state",
+            "sessionDir": "/m/acme/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "no mnt, no link, <dir>/mnt absent on disk ⇒ new layout at ~/secure/<name>",
+      "input": {
+        "secure": {
+          "vaults": {
+            "acme": {}
+          }
+        }
+      },
+      "probe": [],
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "acme",
+            "dir": "/home/u/.local/share/pi-toolkit-secure/acme",
+            "mnt": "/home/u/secure/acme",
+            "cipher": "/home/u/.local/share/pi-toolkit-secure/acme/cipher",
+            "work": "/home/u/secure/acme/work",
+            "state": "/home/u/secure/acme/state",
+            "sessionDir": "/home/u/secure/acme/state/sessions/default",
+            "lock": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lock",
+            "lease": "/home/u/.local/share/pi-toolkit-secure/acme/mount.lease"
+          }
+        ],
+        "invalid": []
+      }
+    },
+    {
+      "name": "legacy: dir plus link both explicit",
+      "input": {
+        "secure": {
+          "vaults": {
+            "old": {
+              "dir": "/v/old",
+              "link": "/entry/old"
+            }
+          }
+        }
+      },
+      "expect": {
+        "present": true,
+        "enabled": true,
+        "valid": true,
+        "vaults": [
+          {
+            "name": "old",
+            "dir": "/v/old",
+            "mnt": "/v/old/mnt",
+            "cipher": "/v/old/cipher",
+            "work": "/v/old/mnt/work",
+            "state": "/v/old/mnt/state",
+            "sessionDir": "/v/old/mnt/state/sessions/default",
+            "lock": "/v/old/mount.lock",
+            "lease": "/v/old/mount.lease",
+            "layout": "legacy",
+            "legacyLink": "/entry/old"
           }
         ],
         "invalid": []
